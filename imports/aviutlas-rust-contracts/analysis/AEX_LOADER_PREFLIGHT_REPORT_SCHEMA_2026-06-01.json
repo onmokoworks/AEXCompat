@@ -1,0 +1,158 @@
+{
+  "schema_name": "AEX loader preflight report schema",
+  "schema_version": 1,
+  "artifact": "target/aex-loader-preflight/preflight.local.json",
+  "purpose": "Machine-check the final metadata-only gate before any future native AEX loader slice, optionally carrying fixture-refresh queue hygiene evidence without selecting or approving a fixture.",
+  "required_fields": [
+    "schema_version",
+    "publication_status",
+    "status",
+    "preflight_passed",
+    "native_load_performed",
+    "broker_may_load_plugin",
+    "selected_fixture",
+    "selected_candidate",
+    "selected_loader_entry",
+    "fixture_gate",
+    "loader_gate",
+    "fixture_refresh_audit_summary",
+    "checks",
+    "blocked_reasons",
+    "next_action",
+    "notes"
+  ],
+  "required_values": {
+    "schema_version": 1,
+    "publication_status": "local-only",
+    "native_load_performed": false,
+    "broker_may_load_plugin": false
+  },
+  "allowed_statuses": [
+    "blocked_no_selected_fixture",
+    "blocked_selected_fixture_not_in_gate",
+    "blocked_fixture_not_approved",
+    "blocked_loader_gate_closed",
+    "preflight_passed_no_load"
+  ],
+  "required_check_names": [
+    "fixture_gate_schema_version",
+    "loader_gate_schema_version",
+    "fixture_gate_unique_candidates",
+    "loader_gate_unique_entries",
+    "selected_fixture",
+    "fixture_gate_approval",
+    "loader_gate_single_ready_entry",
+    "selected_fixture_in_loader_gate",
+    "loader_gate_open"
+  ],
+  "conditional_check_names": [
+    "selected_fixture_metadata",
+    "selected_loader_entry",
+    "fixture_gate_refresh_audit_ready_no_load"
+  ],
+  "check_statuses": [
+    "passed",
+    "blocked"
+  ],
+  "fixture_gate_required_fields": [
+    "status",
+    "selected_fixture",
+    "recommended_first_review",
+    "recommendation_status",
+    "approval_approved",
+    "approval_loader_enabled",
+    "approval_real_aex_load_enabled",
+    "approval_render_png_enabled",
+    "approval_describe_enabled_for_real_aex",
+    "candidate_count"
+  ],
+  "loader_gate_required_fields": [
+    "status",
+    "approved",
+    "loader_enabled",
+    "real_aex_load_enabled",
+    "open_candidate_count",
+    "entry_count"
+  ],
+  "fixture_refresh_audit_summary_required_fields": [
+    "provided",
+    "schema_version",
+    "publication_status",
+    "status",
+    "native_load_performed",
+    "render_performed",
+    "fixture_selected",
+    "loader_enabled",
+    "fixture_gate_candidate_count",
+    "wiztree_total_aex_count",
+    "wiztree_canonical_non_generated_count",
+    "wiztree_generated_target_artifact_count",
+    "generated_target_artifacts_excluded",
+    "candidates_present_in_refresh",
+    "input_contains_forbidden_tokens",
+    "blocked_reason_count"
+  ],
+  "fixture_refresh_audit_summary_required_values_when_provided": {
+    "schema_version": 1,
+    "publication_status": "local-only",
+    "status": "fixture_gate_refresh_ready_no_load",
+    "native_load_performed": false,
+    "render_performed": false,
+    "fixture_selected": false,
+    "loader_enabled": false,
+    "fixture_gate_candidate_count": 2,
+    "wiztree_total_aex_count": 119,
+    "wiztree_canonical_non_generated_count": 40,
+    "wiztree_generated_target_artifact_count": 79,
+    "generated_target_artifacts_excluded": true,
+    "candidates_present_in_refresh": true,
+    "input_contains_forbidden_tokens": false,
+    "blocked_reason_count": 0
+  },
+  "selected_candidate_required_fields": [
+    "id",
+    "display_name",
+    "plugin_path",
+    "normalized_plugin_path",
+    "loader_gate_plugin_path",
+    "loader_gate_effect_id",
+    "path_match_status"
+  ],
+  "selected_loader_entry_required_fields": [
+    "effect_id",
+    "plugin_path",
+    "normalized_plugin_path",
+    "path_match_status",
+    "pre_loader_status",
+    "loader_approval_status",
+    "allowlist_operation_status",
+    "handle_inheritance_required",
+    "worker_identity_revalidation_required",
+    "worker_attestation_required",
+    "sandbox_preflight_required",
+    "job_object_required",
+    "entry_ready"
+  ],
+  "no_load_invariants": {
+    "native_load_performed": false,
+    "broker_may_load_plugin": false
+  },
+  "passing_status": "preflight_passed_no_load",
+  "passing_next_action_contains": "separate explicit loader implementation slice",
+  "blocked_next_action_contains": "Select exactly one reviewed fixture",
+  "required_notes": [
+    "Preflight reads JSON metadata only.",
+    "No .aex file is opened, hashed, loaded, executed, described, or rendered.",
+    "A passing preflight is permission to start a separate loader slice, not proof that native loading is implemented."
+  ],
+  "forbidden_serialized_tokens": [
+    "sha256",
+    "base64",
+    "loadlibrary",
+    "libloading",
+    "effectmain",
+    "input_png",
+    "output_png",
+    "rendered_pixels"
+  ]
+}

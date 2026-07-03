@@ -1,0 +1,118 @@
+{
+  "schema_version": 1,
+  "schema_kind": "ae_jsx_transaction_artifact_verify_report_contract",
+  "publication_status": "local-only",
+  "scope": {
+    "tool": "ae_jsx_transaction_artifact_verify",
+    "purpose": "Verify that a generated JSX transaction artifact file matches its generated JSX transaction report before project-edit review or approval.",
+    "reads": [
+      "generated JSX transaction report JSON",
+      "generated JSX artifact bytes"
+    ],
+    "does_not_read": [
+      "AEP/AEPX project payload bytes",
+      "private patch payloads beyond the supplied report metadata"
+    ],
+    "does_not_perform": [
+      "After Effects launch",
+      "JSX execution",
+      "project save",
+      "project write",
+      "source overwrite"
+    ]
+  },
+  "input_contracts": {
+    "generated_jsx_transaction_report": {
+      "schema_version": 1,
+      "status": "generated_jsx",
+      "generated_jsx_path": "required; must match observed artifact path",
+      "generated_jsx_artifact_digest": {
+        "algorithm": "sha256-v1",
+        "digest_hex": "required 64 lowercase hex digits",
+        "artifact_body_bytes": "required positive integer",
+        "generated_jsx_embedded": false
+      },
+      "forbidden_api_scan": {
+        "status": "passed",
+        "matches": []
+      },
+      "artifact_gate": {
+        "generated_jsx_write_performed": true,
+        "generated_jsx_write_mode": "create_new",
+        "output_project_write_performed_by_rust": false,
+        "source_project_overwrite_performed": false
+      },
+      "execution_gate": {
+        "after_effects_status": "not_launched",
+        "project_save_performed": false
+      },
+      "source_metadata": {
+        "project_body_read": false
+      },
+      "binding": {
+        "algorithm": "fnv1a64-v1-noncryptographic",
+        "checksum_hex": "required 16 hex digits",
+        "payloads_embedded": false,
+        "covers_project_or_generated_jsx_or_private_patch_payloads": false,
+        "cryptographic_digest": {
+          "algorithm": "sha256-v1",
+          "digest_hex": "required 64 hex digits",
+          "payloads_embedded": false,
+          "covers_project_or_generated_jsx_or_private_patch_payloads": false
+        }
+      }
+    },
+    "generated_jsx_artifact": {
+      "observed_path": "must equal generated_jsx_transaction_report.generated_jsx_path",
+      "observed_bytes": "must equal generated_jsx_artifact_digest.artifact_body_bytes",
+      "observed_sha256": "must equal generated_jsx_artifact_digest.digest_hex"
+    }
+  },
+  "report": {
+    "schema_version": 1,
+    "report_kind": "ae_jsx_transaction_artifact_verification",
+    "verification_status": "verified | blocked",
+    "artifact_accepted_for_review": "true only when verification_status is verified",
+    "generated_jsx_report_checked": true,
+    "generated_jsx_report_status": "copied from generated report status",
+    "generated_jsx_path_expected": "copied from generated report generated_jsx_path",
+    "generated_jsx_path_observed": "observed artifact path supplied to verifier",
+    "generated_jsx_path_matches_report": "boolean",
+    "generated_jsx_bytes_expected": "copied from generated_jsx_artifact_digest.artifact_body_bytes",
+    "generated_jsx_bytes_observed": "observed artifact byte count",
+    "generated_jsx_bytes_match": "boolean",
+    "generated_jsx_digest": {
+      "current_algorithm": "sha256-v1",
+      "generated_jsx_embedded": false,
+      "expected_hex": "copied from generated_jsx_artifact_digest.digest_hex",
+      "observed_hex": "sha256 over observed generated JSX bytes",
+      "match": "boolean"
+    },
+    "generated_jsx_report_binding": {
+      "algorithm": "copied from generated report jsx_transaction_report_binding.algorithm",
+      "checksum": "copied from generated report jsx_transaction_report_binding.checksum_hex",
+      "digest_algorithm": "copied from generated report jsx_transaction_report_binding.cryptographic_digest.algorithm",
+      "digest_hex": "copied from generated report jsx_transaction_report_binding.cryptographic_digest.digest_hex"
+    },
+    "acceptance_gate": {
+      "generated_jsx_path_matches_report": true,
+      "generated_jsx_bytes_match": true,
+      "generated_jsx_digest_match": true,
+      "forbidden_api_status": "passed",
+      "generated_jsx_write_performed": true,
+      "generated_jsx_write_mode": "create_new",
+      "blocked_reasons_empty": true
+    },
+    "after_effects_launched_by_tool": false,
+    "jsx_executed_by_tool": false,
+    "project_body_read": false,
+    "project_write_performed_by_tool": false,
+    "source_overwrite_performed_by_tool": false,
+    "blocked_reasons": []
+  },
+  "notes": [
+    "This verifier proves only that the local generated JSX artifact matches its transaction report metadata.",
+    "It does not approve or execute JSX.",
+    "Review packets may accept this report as supplemental artifact integrity evidence, not as user approval."
+  ]
+}

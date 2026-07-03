@@ -1,0 +1,168 @@
+{
+  "schema_version": 1,
+  "name": "AE JSX export report schema",
+  "publication_status": "local-only measured contract sidecar",
+  "compatibility_classification": "Measured snapshot-to-JSX export report contract",
+  "measured_from": {
+    "implementation": "aviutl-rs/examples/export_ae_jsx.rs",
+    "input_schema": "analysis/AE_SNAPSHOT_SCHEMA_2026-05-31.md"
+  },
+  "report": {
+    "fields": [
+      "schema_version",
+      "status",
+      "generated_jsx_path",
+      "jsx_bytes",
+      "generated_jsx_artifact_digest",
+      "warnings",
+      "forbidden_api_scan",
+      "artifact_gate",
+      "execution_gate",
+      "privacy_gate"
+    ],
+    "status": {
+      "vocabulary": [
+        "generated_jsx"
+      ],
+      "current_success_value": "generated_jsx"
+    },
+    "generated_jsx_path": {
+      "type": "string_or_null",
+      "null_when_stdout_or_in_memory_only": true
+    },
+    "jsx_bytes": {
+      "type": "integer",
+      "source": "generated JSX byte length only; generated JSX body is not embedded in the report"
+    },
+    "generated_jsx_artifact_digest": {
+      "fields": [
+        "algorithm",
+        "digest_hex",
+        "digest_scope",
+        "generated_jsx_embedded"
+      ],
+      "algorithm": {
+        "type": "string",
+        "current_value": "sha256-v1"
+      },
+      "digest_hex": "64 lowercase hex characters over the generated JSX artifact body; body is not embedded",
+      "digest_scope": "generated JSX artifact body; body is not embedded",
+      "generated_jsx_embedded": {
+        "type": "boolean",
+        "current_value": false
+      }
+    },
+    "warnings": {
+      "type": "array_of_sanitized_strings",
+      "privacy": "diagnostic text only; local path tokens must be redacted or omitted"
+    },
+    "forbidden_api_scan": {
+      "fields": [
+        "status",
+        "matches"
+      ],
+      "status": {
+        "vocabulary": [
+          "passed",
+          "failed"
+        ],
+        "current_success_value": "passed"
+      },
+      "matches": "array of matched forbidden token strings; empty on success"
+    },
+    "artifact_gate": {
+      "fields": [
+        "generated_jsx_write_performed",
+        "generated_jsx_write_mode",
+        "output_project_write_performed_by_rust",
+        "source_project_overwrite_performed"
+      ],
+      "generated_jsx_write_performed": {
+        "type": "boolean",
+        "true_only_after_cli_output_create_new_succeeds": true
+      },
+      "generated_jsx_write_mode": {
+        "type": "string",
+        "vocabulary": [
+          "not_written",
+          "create_new"
+        ],
+        "current_no_file_value": "not_written",
+        "current_file_success_value": "create_new"
+      },
+      "output_project_write_performed_by_rust": {
+        "type": "boolean",
+        "current_value": false
+      },
+      "source_project_overwrite_performed": {
+        "type": "boolean",
+        "current_value": false
+      }
+    },
+    "execution_gate": {
+      "fields": [
+        "application_status",
+        "user_approval_status",
+        "after_effects_status",
+        "project_save_performed"
+      ],
+      "application_status": {
+        "type": "string",
+        "current_value": "not_applied"
+      },
+      "user_approval_status": {
+        "type": "string",
+        "current_value": "required_before_ae_execution"
+      },
+      "after_effects_status": {
+        "type": "string",
+        "current_value": "not_launched"
+      },
+      "project_save_performed": {
+        "type": "boolean",
+        "current_value": false
+      }
+    },
+    "privacy_gate": {
+      "fields": [
+        "snapshot_json_embedded_in_report",
+        "generated_jsx_embedded_in_report",
+        "private_paths_redacted_or_omitted",
+        "private_payloads_embedded_in_report"
+      ],
+      "snapshot_json_embedded_in_report": {
+        "type": "boolean",
+        "current_value": false
+      },
+      "generated_jsx_embedded_in_report": {
+        "type": "boolean",
+        "current_value": false
+      },
+      "private_paths_redacted_or_omitted": {
+        "type": "boolean",
+        "true_when_source_path_hint_or_diagnostic_local_paths_were_sanitized": true
+      },
+      "private_payloads_embedded_in_report": {
+        "type": "boolean",
+        "current_value": false
+      }
+    }
+  },
+  "cli_boundary": {
+    "legacy_positionals_preserved": "export_ae_jsx [snapshot.json] [output.jsx]",
+    "optional_report_flag": "--report report.json",
+    "jsx_output_write_mode": "create_new",
+    "report_output_write_mode": "create_new",
+    "after_effects_launch": false,
+    "jsx_execution": false,
+    "project_write": false,
+    "source_overwrite": false
+  },
+  "notes": [
+    "This sidecar describes export_ae_jsx report artifacts, not AE execution.",
+    "The report may record generated JSX byte length, a generated JSX body digest, and sanitized warnings, but it must not embed the snapshot JSON body or generated JSX body.",
+    "The only Rust-side file writes in this exporter are optional generated JSX and optional report sidecars, both with create-new semantics.",
+    "export_ae_jsx does not write .aep/.aepx projects, overwrite source projects, launch After Effects, or execute JSX.",
+    "Forbidden API scanning must pass before a successful generated_jsx report exists."
+  ]
+}

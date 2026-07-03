@@ -1,0 +1,136 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-06-01T07:10:38Z",
+  "publication_status": "local-only",
+  "scan_mode": "wiztree-read-only-filtered-aex",
+  "target_root": "D:\\Projects\\01_Project",
+  "wiztree_csv_snapshot": "D:\\Projects\\01_Project\\04_Tools\\WizTree MCP\\exports\\D_Projects_01_Project_2026-06-01T07-10-38-314Z.csv",
+  "safety_notes": [
+    "read-only WizTree scan",
+    "metadata-only path, size, and modified-time summary",
+    "no file hashes recorded",
+    "no binary payloads copied",
+    "do not publish without review"
+  ],
+  "total_aex_scan": {
+    "count": 119,
+    "bytes": 64763808,
+    "allocated_bytes": 64839680
+  },
+  "canonical_non_generated_aex": {
+    "count": 40,
+    "bytes": 64745984,
+    "relationship_to_static_inventory": "matches AE_AEX_AEP_STATIC_INVENTORY_2026-05-31 .aex count after excluding AviUtlas target-generated test artifacts"
+  },
+  "generated_target_test_artifacts": {
+    "count": 79,
+    "bytes": 17824,
+    "policy": "exclude from first-loader fixture review; generated target artifacts are validation noise, not local-build AE effect candidates",
+    "name_groups": [
+      {
+        "name": "ClassicTest.aex",
+        "count": 65,
+        "bytes": 2080,
+        "classification": "synthetic worker/loader-gate test artifact"
+      },
+      {
+        "name": "OtherTest.aex",
+        "count": 9,
+        "bytes": 288,
+        "classification": "synthetic mismatch test artifact"
+      },
+      {
+        "name": "SyntheticEffect.aex",
+        "count": 2,
+        "bytes": 10240,
+        "classification": "synthetic static-classifier test artifact"
+      },
+      {
+        "name": "SyntheticNoPipl.aex",
+        "count": 1,
+        "bytes": 5120,
+        "classification": "synthetic static-classifier test artifact"
+      },
+      {
+        "name": "Oversized.aex",
+        "count": 1,
+        "bytes": 64,
+        "classification": "synthetic loader-gate boundary test artifact"
+      },
+      {
+        "name": "UnknownStatus.aex",
+        "count": 1,
+        "bytes": 32,
+        "classification": "synthetic loader-gate boundary test artifact"
+      }
+    ]
+  },
+  "fixture_gate_candidates_verified_present": [
+    {
+      "id": "adaptive-filter-local",
+      "path": "D:\\Projects\\01_Project\\04_Tools\\Ae_Plugins\\AdaptiveFilterRust\\rust\\target\\release\\AdaptiveFilter.aex",
+      "bytes": 207360,
+      "modified": "2026/05/30 22:59:55",
+      "current_review_status": "queued-not-approved"
+    },
+    {
+      "id": "median-pro-local",
+      "path": "D:\\Projects\\01_Project\\04_Tools\\Ae_Plugins\\MedianProRust\\rust\\target\\release\\MedianPro.aex",
+      "bytes": 207360,
+      "modified": "2026/05/30 22:57:58",
+      "current_review_status": "queued-not-approved"
+    }
+  ],
+  "additional_small_local_builds_for_later_review": [
+    {
+      "name": "ONMK_Filters.aex",
+      "path": "D:\\Projects\\01_Project\\04_Tools\\Ae_Plugins\\MedianProRust\\rust\\target\\release\\ONMK_Filters.aex",
+      "bytes": 213504,
+      "modified": "2026/05/30 21:35:44",
+      "review_status": "defer-until-current-first-fixture-reviewed"
+    },
+    {
+      "name": "MinimaxMap.aex",
+      "path": "D:\\Projects\\01_Project\\04_Tools\\Ae_Plugins\\MinimaxMapRust\\rust\\target\\release\\MinimaxMap.aex",
+      "bytes": 220672,
+      "modified": "2026/05/30 21:37:07",
+      "review_status": "defer-until-current-first-fixture-reviewed"
+    },
+    {
+      "name": "RefractionDispersion.aex",
+      "path": "D:\\Projects\\01_Project\\04_Tools\\Ae_Plugins\\RefractionDispersionRust\\rust\\target\\release\\RefractionDispersion.aex",
+      "bytes": 602624,
+      "modified": "2026/05/30 18:07:18",
+      "review_status": "defer-until-current-first-fixture-reviewed"
+    }
+  ],
+  "blocked_first_loader_classes_observed": [
+    {
+      "class": "aegp-like-controller",
+      "count": 5,
+      "examples": [
+        "AeTimelineSyncAEGP.aex",
+        "ExEditRemoteAEGP.aex"
+      ],
+      "reason": "controller/suite lifecycle class is not a first render fixture"
+    },
+    {
+      "class": "heavy-or-specialized",
+      "count": 15,
+      "examples": [
+        "ONMK_OpticalFlare.aex",
+        "ONMK_Starglow.aex",
+        "TuiImage.aex",
+        "DepthONNX.aex",
+        "FlowONNX.aex"
+      ],
+      "reason": "defer until sandbox, timeout, and fixture review evidence are stronger"
+    }
+  ],
+  "recommended_fixture_gate_delta": {
+    "keep_current_two_candidate_gate": true,
+    "do_not_expand_first_loader_queue_from_generated_target_artifacts": true,
+    "do_not_select_fixture_without_manual_approval": true,
+    "next_safe_action": "Run static classifier/readiness only against canonical non-generated inventory or explicitly selected local-build candidates."
+  }
+}

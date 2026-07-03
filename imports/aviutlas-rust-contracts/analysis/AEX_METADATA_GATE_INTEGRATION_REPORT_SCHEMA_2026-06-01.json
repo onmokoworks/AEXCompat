@@ -1,0 +1,180 @@
+{
+  "schema_name": "AEX metadata gate integration report schema",
+  "schema_version": 1,
+  "publication_status": "local-only design artifact",
+  "producer": {
+    "path": "aviutl-rs/examples/aex_metadata_gate_integration.rs",
+    "opens_aex_files": false,
+    "copies_aex_files": false,
+    "hashes_aex_files": false,
+    "loads_aex": false,
+    "describes_real_aex": false,
+    "renders_real_aex": false,
+    "routes_through_ofx": false
+  },
+  "required_fields": [
+    "schema_version",
+    "report_kind",
+    "publication_status",
+    "status",
+    "native_load_performed",
+    "render_performed",
+    "aex_loaded",
+    "worker_started",
+    "broker_load_or_render_allowed",
+    "ofx_route_allowed",
+    "ae_invoked",
+    "private_payload_copied",
+    "fixture_gate_summary",
+    "readiness_summary",
+    "loader_gate_summary",
+    "synthetic_fixture_summary",
+    "identity_smoke_summary",
+    "ofx_contract_summary",
+    "checks",
+    "blocked_reasons",
+    "next_action",
+    "notes"
+  ],
+  "required_values": {
+    "schema_version": 1,
+    "report_kind": "aex_metadata_gate_integration",
+    "publication_status": "local-only"
+  },
+  "allowed_statuses": [
+    "aex_metadata_gate_ready_no_load",
+    "blocked_aex_metadata_gate"
+  ],
+  "ready_required_values": {
+    "status": "aex_metadata_gate_ready_no_load",
+    "native_load_performed": false,
+    "render_performed": false,
+    "aex_loaded": false,
+    "worker_started": false,
+    "broker_load_or_render_allowed": false,
+    "ofx_route_allowed": false,
+    "ae_invoked": false,
+    "private_payload_copied": false
+  },
+  "fixture_gate_summary_required_values": {
+    "provided": true,
+    "schema_version": 1,
+    "status": "review_queue_not_approved",
+    "selected_fixture_present": false,
+    "approval_approved": false,
+    "approval_loader_enabled": false,
+    "approval_real_aex_load_enabled": false,
+    "approval_render_png_enabled": false,
+    "approval_describe_enabled_for_real_aex": false,
+    "candidate_count": 2,
+    "not_approved_candidate_count": 2
+  },
+  "readiness_summary_required_values": {
+    "provided": true,
+    "schema_version": 1,
+    "status": "probe_readiness_planned",
+    "candidate_count": 2,
+    "allowlist_entry_count": 1,
+    "draft_describe_entry_count": 1,
+    "blocked_or_deferred_entry_count": 1
+  },
+  "loader_gate_summary_required_values": {
+    "provided": true,
+    "schema_version": 1,
+    "status": "loader_gate_not_opened",
+    "approved": false,
+    "loader_enabled": false,
+    "real_aex_load_enabled": false,
+    "open_candidate_count": 0,
+    "entry_count": 2,
+    "not_approved_entry_count": 2,
+    "describe_only_entry_count": 2,
+    "deferred_ofx_entry_count": 2
+  },
+  "synthetic_fixture_summary_required_values": {
+    "provided": true,
+    "schema_version": 1,
+    "status": "synthetic_fixture_images_ready_no_load",
+    "pixel_format": "rgba8",
+    "image_count": 3,
+    "native_load_performed": false,
+    "render_performed": false,
+    "aex_loaded": false,
+    "worker_started": false,
+    "broker_invoked": false,
+    "ofx_route_invoked": false,
+    "ae_invoked": false,
+    "private_payload_copied": false
+  },
+  "identity_smoke_summary_required_values": {
+    "provided": true,
+    "schema_version": 1,
+    "status": "fixture_identity_smoke_ready_no_load",
+    "fixture_manifest_status": "synthetic_fixture_images_ready_no_load",
+    "transport_operation": "identity_transport",
+    "image_count": 3,
+    "transport_count": 3,
+    "identity_pixels_checked_count": 3,
+    "native_load_performed": false,
+    "render_performed": false,
+    "aex_loaded": false,
+    "worker_started": false,
+    "broker_invoked": true,
+    "ofx_route_invoked": false,
+    "ae_invoked": false,
+    "private_payload_copied": false,
+    "aex_render_correctness_evidence": false
+  },
+  "ofx_contract_summary_required_values": {
+    "provided": true,
+    "schema_version": 1,
+    "status": "deferred-contract-only",
+    "ofx_host_may_load_aex": false,
+    "ofx_adapter_may_load_aex": false,
+    "broker_may_load_aex": false,
+    "review_approved": false,
+    "may_point_to_broker": false,
+    "may_issue_describe": false,
+    "may_issue_render_png": false
+  },
+  "required_check_names": [
+    "fixture_gate_closed_no_selection",
+    "readiness_metadata_only_describe_planning",
+    "loader_gate_closed_no_load",
+    "synthetic_fixture_manifest_no_load",
+    "identity_smoke_transport_only_no_load",
+    "ofx_facade_deferred_no_bypass"
+  ],
+  "required_notes": [
+    "This report integrates metadata-only AEX gate evidence for parent orchestration.",
+    "It does not open, copy, hash, load, describe, execute, render, or route any .aex file.",
+    "Identity transport over synthetic PNG fixtures is not AEX render correctness evidence.",
+    "OFX remains deferred and cannot bypass the AEX fixture, loader, worker, or sandbox gates."
+  ],
+  "forbidden_serialized_tokens": [
+    "D:\\\\Projects\\\\01_Project\\\\04_Tools",
+    "AdaptiveFilter.aex",
+    "MedianPro.aex",
+    "LoadLibrary",
+    "libloading",
+    "EffectMain",
+    "rendered_pixels",
+    "native_load_result",
+    "base64",
+    "sha256"
+  ],
+  "report_output_boundary": {
+    "required_output_root": "target/aex-metadata-gate-integration",
+    "required_extension": ".json",
+    "create_new_only": true,
+    "path_traversal_allowed": false,
+    "canonical_parent_must_resolve_under_output_root": true
+  },
+  "non_goals": [
+    "not loader approval",
+    "not fixture approval",
+    "not AEX describe evidence",
+    "not AEX render correctness evidence",
+    "not OFX readiness approval"
+  ]
+}

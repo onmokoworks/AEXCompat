@@ -1,0 +1,123 @@
+{
+  "schema_name": "AEPX production lane gate preflight report schema",
+  "schema_version": 1,
+  "publication_status": "local-only gate artifact",
+    "producer": {
+        "path": "aviutl-rs/examples/aepx_production_lane_gate_preflight.rs",
+        "reads_xml_body": false,
+        "reads_binary_aep": false,
+        "accepts_real_aepx_input": false,
+        "writes_aepx": false,
+        "writes_binary_aep": false,
+        "launches_after_effects": false,
+        "invokes_external_processes": false
+    },
+  "required_fields": [
+    "schema_version",
+    "report_kind",
+    "publication_status",
+    "status",
+    "production_apply_enabled",
+    "real_aepx_input_enabled",
+    "production_xml_writer_enabled",
+    "binary_aep_writer_enabled",
+    "source_overwrite_enabled",
+    "after_effects_tool_launch_enabled",
+    "external_process_invocation_in_writer_enabled",
+    "allowed_first_candidate",
+    "evidence_gate",
+    "io_gate",
+    "write_gate",
+    "privacy_gate",
+    "checks",
+    "blocked_reasons",
+    "next_action",
+    "notes"
+  ],
+  "required_values": {
+    "schema_version": 1,
+    "report_kind": "aepx_production_lane_gate_preflight",
+    "publication_status": "local-only"
+  },
+  "allowed_statuses": [
+    "apply_gate_closed_ready",
+    "blocked_gate_drift"
+  ],
+  "ready_required_values": {
+    "status": "apply_gate_closed_ready",
+    "production_apply_enabled": false,
+    "real_aepx_input_enabled": false,
+    "production_xml_writer_enabled": false,
+    "binary_aep_writer_enabled": false,
+    "source_overwrite_enabled": false,
+    "after_effects_tool_launch_enabled": false,
+    "external_process_invocation_in_writer_enabled": false
+  },
+  "allowed_first_candidate_required_values": {
+    "operation_kind": "rename_comp",
+    "selector_kind": "xml_id",
+    "target_count": 1,
+    "expected_old_value_required": true,
+    "replacement_class": "single XML attribute value span",
+    "create_new_output_only": true,
+    "source_overwrite_allowed": false
+  },
+  "evidence_gate_required_values": {
+    "required_green_evidence_count": 10,
+    "fail_closed_status_count": 11,
+    "hard_forbidden_count": 15,
+    "dry_run_evidence_accepted_as_apply_permission": false,
+    "synthetic_proof_accepted_as_ae_compatibility": false,
+    "requires_parent_approval": true,
+    "requires_code_review": true,
+    "requires_targeted_contract_tests": true,
+    "requires_real_aepx_fixture_receipt": true
+  },
+  "io_gate_required_values": {
+    "xml_body_read_performed": false,
+    "xml_body_write_performed": false,
+    "binary_aep_read_performed": false,
+    "binary_aep_write_performed": false,
+    "external_process_invoked": false,
+    "after_effects_invoked": false
+  },
+  "write_gate_required_values": {
+    "output_write_performed": false,
+    "source_overwrite_performed": false,
+    "production_apply_enabled": false,
+    "real_aepx_input_enabled": false,
+    "production_xml_writer_enabled": false,
+    "binary_aep_writer_enabled": false
+  },
+  "privacy_gate_required_values": {
+    "xml_body_embedded": false,
+    "private_patch_payloads_embedded": false,
+    "selector_values_embedded": false,
+    "expected_old_values_embedded": false,
+    "new_values_embedded": false,
+    "sentinel_values_embedded": false,
+    "metadata_only_binding_required": true
+  },
+  "required_notes": [
+    "This preflight reads the local production-lane gate schema only.",
+    "It does not read XML bodies, accept real .aepx input, write AEPX output, launch AE, or invoke external processes.",
+    "A ready report means the apply gate is still closed and well-specified; it is not permission to enable apply.",
+    "Dry-run and synthetic preservation proof evidence remain review inputs only.",
+    "Binary .aep remains no-read/no-write in this AEPX production-lane preflight."
+  ],
+  "report_output_boundary": {
+    "required_output_root": "target/aepx-production-lane-gate-preflight",
+    "required_extension": ".json",
+    "create_new_only": true,
+    "path_traversal_allowed": false,
+    "canonical_parent_must_resolve_under_output_root": true
+  },
+  "non_goals": [
+    "not a production AEPX writer",
+    "not permission to enable aepx_patch_probe apply",
+    "not permission to accept real .aepx input",
+    "not permission to parse or write binary .aep",
+    "not evidence of After Effects round-trip compatibility",
+    "not permission to load AEX or route through OFX"
+  ]
+}

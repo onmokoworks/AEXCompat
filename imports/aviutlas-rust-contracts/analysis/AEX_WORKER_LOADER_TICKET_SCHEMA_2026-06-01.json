@@ -1,0 +1,105 @@
+{
+  "schema_name": "AEX worker loader ticket schema",
+  "schema_version": 1,
+  "artifact": "target/aex-image-probe/**/worker-loader-ticket-*.json",
+  "purpose": "Machine-check the worker-visible no-load ticket that carries selected loader-entry identity to the worker boundary without permitting native AEX loading.",
+  "required_fields": [
+    "schema_version",
+    "ticket_protocol_version",
+    "generated_by",
+    "generated_unix_ms",
+    "max_ticket_age_ms",
+    "publication_status",
+    "status",
+    "native_load_performed",
+    "worker_may_load_plugin",
+    "broker_may_load_plugin",
+    "allowlist_id",
+    "operation",
+    "selected_loader_entry",
+    "required_runtime_evidence",
+    "planned_stages",
+    "denied_surfaces",
+    "notes"
+  ],
+  "required_values": {
+    "schema_version": 1,
+    "ticket_protocol_version": 1,
+    "generated_by": "aex_image_probe",
+    "publication_status": "local-only",
+    "status": "accepted_no_load",
+    "native_load_performed": false,
+    "worker_may_load_plugin": false,
+    "broker_may_load_plugin": false,
+    "operation": "render_png"
+  },
+  "selected_loader_entry_required_fields": [
+    "effect_id",
+    "normalized_plugin_path",
+    "path_match_status",
+    "allowlist_operation_status",
+    "entry_ready"
+  ],
+  "selected_loader_entry_required_values": {
+    "path_match_status": "matched_normalized_path",
+    "allowlist_operation_status": "render_png",
+    "entry_ready": true
+  },
+  "required_runtime_evidence_fields": [
+    "worker_identity_revalidation_required",
+    "worker_attestation_required",
+    "sandbox_preflight_required",
+    "job_object_required",
+    "handle_inheritance_required"
+  ],
+  "required_runtime_evidence_values": {
+    "worker_identity_revalidation_required": "passed",
+    "worker_attestation_required": "passed",
+    "sandbox_preflight_required": "passed",
+    "job_object_required": "assigned-with-kill-on-close",
+    "handle_inheritance_required": "sentinel_not_inherited-with-explicit-handle-list"
+  },
+  "planned_stage_names": [
+    "load",
+    "global_setup",
+    "params_setup",
+    "sequence_setup",
+    "render",
+    "sequence_teardown",
+    "global_teardown"
+  ],
+  "planned_stage_required_fields": [
+    "stage",
+    "status"
+  ],
+  "planned_stage_status": "planned_not_run",
+  "required_denied_surfaces": [
+    "AEGP",
+    "AEIO",
+    "SmartFX-only",
+    "GPU",
+    "custom UI",
+    "audio",
+    "layer checkout",
+    "file/network APIs"
+  ],
+  "forbidden_serialized_tokens": [
+    "sha256",
+    "base64",
+    "loadlibrary",
+    "libloading",
+    "effectmain",
+    "output_png",
+    "input_png",
+    "rendered_pixels"
+  ],
+  "required_notes": [
+    "Worker validated loader ticket metadata only; no native AEX load was performed."
+  ],
+  "promotion_gate": {
+    "worker_may_load_plugin": false,
+    "native_load_performed": false,
+    "ticket_is_not_loader_approval": true,
+    "requires_separate_loader_slice": true
+  }
+}

@@ -1,0 +1,166 @@
+{
+  "schema_version": 1,
+  "name": "AE JSX export manual smoke closeout report schema",
+  "publication_status": "local-only measured contract sidecar",
+  "compatibility_classification": "Measured standalone JSX export manual smoke closeout contract",
+  "measured_from": {
+    "implementation": "aviutl-rs/examples/ae_jsx_export_smoke_closeout.rs",
+    "approval_schema": "analysis/AE_JSX_EXPORT_APPROVAL_RECEIPT_SCHEMA_2026-06-01.json",
+    "manifest_schema": "analysis/AE_JSX_EXPORT_MANIFEST_SCHEMA_2026-06-01.json",
+    "artifact_verification_schema": "analysis/AE_JSX_EXPORT_ARTIFACT_VERIFY_REPORT_SCHEMA_2026-06-01.json"
+  },
+  "scope": {
+    "accepted_manifest_kind": "ae_jsx_export_artifact_manifest",
+    "approval_receipt_kind": "ae_jsx_export_manual_approval_receipt",
+    "closeout_report_kind": "ae_jsx_export_manual_smoke_closeout",
+    "separate_from": "analysis/AE_PROJECT_EDIT_MANUAL_SMOKE_CLOSEOUT_REPORT_SCHEMA_2026-06-01.json",
+    "validator_reads_only_json_artifacts": true,
+    "not_an_ae_oracle": true
+  },
+  "closeout": {
+    "fields": [
+      "schema_version",
+      "report_kind",
+      "template_status",
+      "manual_smoke_status",
+      "approval_receipt_id",
+      "export_manifest_kind",
+      "export_manifest_binding_algorithm",
+      "export_manifest_binding_checksum",
+      "export_manifest_digest_algorithm",
+      "export_manifest_digest_hex",
+      "generated_jsx_path",
+      "generated_jsx_artifact_digest_algorithm",
+      "generated_jsx_artifact_digest_hex",
+      "export_report_path",
+      "after_effects_launched_by_operator",
+      "jsx_executed_by_operator",
+      "project_save_attempted",
+      "saved_output_path",
+      "source_overwrite_observed",
+      "binary_aep_direct_write_observed",
+      "private_payloads_embedded",
+      "automated_oracle",
+      "after_effects_launched_by_tool",
+      "jsx_executed_by_tool",
+      "project_body_read",
+      "project_write_performed_by_tool",
+      "safety_checks"
+    ],
+    "manual_smoke_status": {
+      "vocabulary": [
+        "not_run",
+        "manual_smoke_completed",
+        "manual_smoke_failed",
+        "operator_aborted"
+      ]
+    },
+    "not_run_requirements": {
+      "template_status": "not_run_template",
+      "after_effects_launched_by_operator": false,
+      "jsx_executed_by_operator": false,
+      "project_save_attempted": false,
+      "saved_output_path": null
+    },
+    "completed_requirements": {
+      "template_status": "operator_filled",
+      "approval_receipt_required": true,
+      "approval_status_required": "approved",
+      "after_effects_launched_by_operator": true,
+      "jsx_executed_by_operator": true,
+      "project_save_attempted": "boolean; saved_output_path required only when true"
+    },
+    "always_forbidden": {
+      "source_overwrite_observed": false,
+      "binary_aep_direct_write_observed": false,
+      "private_payloads_embedded": false,
+      "automated_oracle": false,
+      "after_effects_launched_by_tool": false,
+      "jsx_executed_by_tool": false,
+      "project_body_read": false,
+      "project_write_performed_by_tool": false
+    },
+    "metadata_binding_recalculation_required": true
+  },
+  "approval_receipt_prerequisites": {
+    "artifact_verification": {
+      "required_report_kind": "ae_jsx_export_artifact_verification",
+      "required_status": "verified",
+      "approval_receipt_review_flag": "prerequisite_reviews.artifact_verification_report_reviewed",
+      "required_true_fields": [
+        "artifact_accepted_for_manual_approval_review",
+        "generated_jsx_path_matches_manifest",
+        "generated_jsx_bytes_match",
+        "generated_jsx_digest_match",
+        "export_manifest_binding_verified",
+        "report_sidecar_checked",
+        "report_sidecar_consistent"
+      ],
+      "generated_jsx_digest_algorithm": "sha256-v1",
+      "must_match_manifest_fields": [
+        "generated_jsx_digest_expected_hex",
+        "generated_jsx_digest_observed_hex"
+      ],
+      "tool_side_effects_required_false": [
+        "after_effects_launched_by_tool",
+        "jsx_executed_by_tool",
+        "project_write_performed_by_tool"
+      ]
+    }
+  },
+  "validation_report": {
+    "fields": [
+      "schema_version",
+      "report_kind",
+      "validation_status",
+      "closeout_accepted",
+      "manual_smoke_status",
+      "export_manifest_binding_verified",
+      "approval_receipt_checked",
+      "artifact_verification_status",
+      "artifact_verification_report_reviewed",
+      "artifact_verification_generated_jsx_digest_match",
+      "artifact_verification_report_sidecar_consistent",
+      "after_effects_launched_by_tool",
+      "jsx_executed_by_tool",
+      "project_body_read",
+      "project_write_performed_by_tool",
+      "blocked_reasons"
+    ],
+    "report_kind": "ae_jsx_export_manual_smoke_closeout_validation",
+    "validation_status": {
+      "vocabulary": [
+        "accepted",
+        "not_run",
+        "manual_smoke_failed",
+        "operator_aborted",
+        "invalid_closeout"
+      ]
+    },
+    "closeout_accepted": "true only for validation_status=accepted",
+    "tool_side_effects": {
+      "after_effects_launched_by_tool": false,
+      "jsx_executed_by_tool": false,
+      "project_body_read": false,
+      "project_write_performed_by_tool": false
+    }
+  },
+  "cli_boundary": {
+    "draft_command": "ae_jsx_export_smoke_closeout draft manifest.json approval.json closeout-template.json",
+    "validate_command": "ae_jsx_export_smoke_closeout validate manifest.json approval.json closeout.json [report.json]",
+    "template_output_write_mode": "create_new",
+    "report_output_write_mode": "create_new",
+    "after_effects_launch": false,
+    "jsx_execution": false,
+    "project_write": false,
+    "source_overwrite": false
+  },
+  "notes": [
+    "This closeout validator records and validates operator-supplied JSON only.",
+    "It does not launch After Effects, execute JSX, read project payload bytes, or write project files.",
+    "accepted is internal artifact consistency evidence, not an automated AE compatibility or render oracle.",
+    "The approval receipt must carry a reviewed verified artifact preflight report scope before closeout can validate.",
+    "The closeout copies the generated JSX artifact digest so an operator-filled report can identify the reviewed/run JSX body without embedding it.",
+    "The export manifest checksum/digest is recalculated over metadata-only fields and excludes snapshot JSON and generated JSX bodies directly while covering the generated JSX artifact digest fields."
+  ]
+}

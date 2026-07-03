@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<xmp:project xmlns:xmp="urn:aviutlas:synthetic:aepx">
+  <xmp:comp id="comp-a" name="Main"/>
+  <xmp:comp id="comp-b" name="Main"/>
+</xmp:project>

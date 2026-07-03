@@ -1,0 +1,342 @@
+{
+  "schema_version": 1,
+  "name": "AEPX patch report schema",
+  "publication_status": "local-only design artifact",
+  "contract_classification": "Measured metadata/report contract",
+  "producer": {
+    "path": "aviutl-rs/examples/aepx_patch_probe.rs",
+    "current_scope": "metadata-only request validation and report generation",
+    "implementation_writes_aepx": false
+  },
+  "response": {
+    "required_fields": [
+      "schema_version",
+      "status",
+      "aepx_patch_report_binding",
+      "input_aepx",
+      "output_aepx",
+      "metadata",
+      "operations",
+      "preservation",
+      "io_gate",
+      "write_gate",
+      "warnings",
+      "unsupported",
+      "elapsed_ms"
+    ],
+    "schema_version": {
+      "type": "integer",
+      "must_equal": 1
+    },
+    "status": {
+      "vocabulary": [
+        "ok",
+        "dry_run_ok",
+        "invalid_request",
+        "schema_error",
+        "source_not_found",
+        "output_exists",
+        "output_same_as_source",
+        "unsupported_operation",
+        "ambiguous_target",
+        "target_not_found",
+        "expected_value_mismatch",
+        "parse_error",
+        "preservation_failed",
+        "write_failed",
+        "internal_error"
+      ],
+      "current_probe_statuses": [
+        "ok",
+        "dry_run_ok",
+        "invalid_request",
+        "source_not_found",
+        "output_exists",
+        "output_same_as_source",
+        "unsupported_operation",
+        "ambiguous_target"
+      ],
+      "reserved_write_statuses": [
+        "schema_error",
+        "target_not_found",
+        "expected_value_mismatch",
+        "parse_error",
+        "preservation_failed",
+        "write_failed",
+        "internal_error"
+      ]
+    },
+    "aepx_patch_report_binding": {
+      "algorithm": "fnv1a64-v1-noncryptographic",
+      "checksum_hex": "16 lowercase hex digits in current producer",
+      "checksum_scope": "metadata-only AEPX patch report binding; excludes XML body, selectors, expected/new values, and private patch payloads",
+      "fields_are_metadata_only": true,
+      "payloads_embedded": false,
+      "covers_xml_or_private_patch_payloads": false,
+      "excludes_elapsed_ms": true,
+      "cryptographic_digest": {
+        "algorithm": "sha256-v1",
+        "digest_hex": "64 lowercase hex digits in current producer",
+        "digest_scope": "metadata-only AEPX patch report digest; excludes XML body, selectors, expected/new values, and private patch payloads",
+        "payloads_embedded": false,
+        "covers_xml_or_private_patch_payloads": false
+      }
+    },
+    "input_aepx": {
+      "type": "string_or_null",
+      "privacy": "caller path only; no XML body content"
+    },
+    "output_aepx": {
+      "type": "string_or_null",
+      "privacy": "caller path only; may be null outside apply"
+    },
+    "metadata": {
+      "required_fields": [
+        "input_exists",
+        "input_is_file",
+        "observed_file_bytes",
+        "normalized_input_aepx",
+        "normalized_output_aepx",
+        "xml_body_read"
+      ],
+      "input_exists": {
+        "type": "boolean"
+      },
+      "input_is_file": {
+        "type": "boolean"
+      },
+      "observed_file_bytes": {
+        "type": "integer_or_null",
+        "source": "filesystem metadata only"
+      },
+      "normalized_input_aepx": {
+        "type": "string_or_null",
+        "source": "path normalization only"
+      },
+      "normalized_output_aepx": {
+        "type": "string_or_null",
+        "source": "path normalization only"
+      },
+      "xml_body_read": {
+        "type": "boolean",
+        "must_equal_for_current_probe": false
+      }
+    },
+    "operations": {
+      "type": "array",
+      "item_required_fields": [
+        "id",
+        "status",
+        "target_count",
+        "warnings"
+      ],
+      "status": [
+        "planned",
+        "applied",
+        "skipped",
+        "failed",
+        "unsupported"
+      ],
+      "current_probe_success_status": "planned",
+      "target_count": {
+        "type": "integer",
+        "current_probe_value": 0
+      },
+      "privacy": "operation id and status only; selectors, expected_old_value, and new_value are not echoed"
+    },
+    "preservation": {
+      "required_fields": [
+        "unknown_nodes",
+        "unknown_attributes",
+        "xml_declaration",
+        "encoding",
+        "comments",
+        "cdata",
+        "namespace_prefixes",
+        "whitespace"
+      ],
+      "status_by_field": {
+        "unknown_nodes": [
+          "preserved",
+          "rewritten",
+          "not_written",
+          "unknown"
+        ],
+        "unknown_attributes": [
+          "preserved",
+          "rewritten",
+          "not_written",
+          "unknown"
+        ],
+        "xml_declaration": [
+          "preserved",
+          "rewritten",
+          "not_written",
+          "unknown"
+        ],
+        "encoding": [
+          "preserved",
+          "rewritten",
+          "normalized",
+          "not_written",
+          "unknown"
+        ],
+        "comments": [
+          "preserved",
+          "rewritten",
+          "not_written",
+          "unknown"
+        ],
+        "cdata": [
+          "preserved",
+          "rewritten",
+          "not_written",
+          "unknown"
+        ],
+        "namespace_prefixes": [
+          "preserved",
+          "rewritten",
+          "not_written",
+          "unknown"
+        ],
+        "whitespace": [
+          "preserved",
+          "rewritten",
+          "not_written",
+          "unknown"
+        ]
+      },
+      "current_probe_must_equal": "not_written"
+    },
+    "io_gate": {
+      "required_fields": [
+        "xml_body_read_performed",
+        "xml_body_write_performed",
+        "xml_body_embedded_in_report",
+        "private_patch_payloads_embedded_in_report",
+        "external_process_invoked",
+        "after_effects_invoked"
+      ],
+      "xml_body_read_performed": {
+        "type": "boolean",
+        "current_probe_value": false
+      },
+      "xml_body_write_performed": {
+        "type": "boolean",
+        "current_probe_value": false
+      },
+      "xml_body_embedded_in_report": {
+        "type": "boolean",
+        "current_probe_value": false
+      },
+      "private_patch_payloads_embedded_in_report": {
+        "type": "boolean",
+        "current_probe_value": false
+      },
+      "external_process_invoked": {
+        "type": "boolean",
+        "current_probe_value": false
+      },
+      "after_effects_invoked": {
+        "type": "boolean",
+        "current_probe_value": false
+      }
+    },
+    "write_gate": {
+      "required_fields": [
+        "patch_application_status",
+        "xml_writer_status",
+        "user_approval_status",
+        "output_write_performed",
+        "source_overwrite_performed"
+      ],
+      "patch_application_status": {
+        "type": "string",
+        "current_probe_value": "not_applied"
+      },
+      "xml_writer_status": {
+        "type": "string",
+        "current_probe_value": "not_implemented"
+      },
+      "user_approval_status": {
+        "type": "string",
+        "current_probe_value": "required_before_write"
+      },
+      "output_write_performed": {
+        "type": "boolean",
+        "current_probe_value": false
+      },
+      "source_overwrite_performed": {
+        "type": "boolean",
+        "current_probe_value": false
+      }
+    },
+    "warnings": {
+      "type": "array_of_strings",
+      "privacy": "diagnostics only; no XML body content or private patch payloads"
+    },
+    "unsupported": {
+      "type": "array_of_strings",
+      "privacy": "capability diagnostics only"
+    },
+    "elapsed_ms": {
+      "type": "integer"
+    }
+  },
+  "request_apply_boundary": {
+    "top_level_operation_modes": [
+      "inspect_metadata",
+      "noop_validate",
+      "dry_run",
+      "apply"
+    ],
+    "operations_kind_is_edit_operation": true,
+    "apply_requires_output_aepx": true,
+    "apply_output_must_be_absolute_aepx": true,
+    "apply_output_must_not_equal_input_after_normalization": true,
+    "apply_output_must_not_exist": true,
+    "current_apply_new_output_status": "unsupported_operation",
+    "current_apply_writes_aepx": false
+  },
+  "request_output_path_boundary": {
+    "output_aepx_optional_for_non_apply_modes": true,
+    "when_supplied_must_be_absolute_aepx": true,
+    "when_supplied_must_not_equal_input_after_normalization": true,
+    "when_supplied_must_not_exist": true,
+    "same_path_status": "output_same_as_source",
+    "existing_output_status": "output_exists",
+    "current_probe_writes_aepx": false
+  },
+  "metadata_only_invariants": {
+    "ae_launch": false,
+    "jsx_execution": false,
+    "native_oracle": "not_run",
+    "aepx_write": false,
+    "source_overwrite": false,
+    "xml_body_mutation": false,
+    "external_process": false,
+    "report_private_payloads": false,
+    "xml_body_read": false,
+    "xml_body_write": false,
+    "xml_body_report_embedding": false,
+    "private_patch_payload_embedding": false
+  },
+  "review_packet_boundary": {
+    "optional_aepx_dry_run_reports_require_binding": true,
+    "binding_algorithm": "fnv1a64-v1-noncryptographic",
+    "cryptographic_digest_algorithm": "sha256-v1",
+    "accepted_as_apply": false
+  },
+  "notes": [
+    "This sidecar pins the current metadata-only report shape produced by aepx_patch_probe.",
+    "Reports must not embed full XML payloads, selectors, expected_old_value, new_value, or private project content.",
+    "aepx_patch_report_binding binds metadata-only gate/path/status fields and excludes elapsed time, XML bodies, selectors, expected/new values, and private patch payloads.",
+    "inspect_metadata may report ok for an existing input file or source_not_found for a missing input; both remain metadata-only.",
+    "noop_validate and dry_run produce planned operation reports without reading or writing the AEPX body.",
+    "apply validates request boundaries but currently returns unsupported_operation for a new output path and writes no AEPX.",
+    "io_gate is explicit so callers can distinguish metadata-only dry-run reports from any future XML body read/write, report embedding, external process, or AE invocation.",
+    "write_gate is explicit so callers can distinguish planned/validated reports from applied XML writes.",
+    "All preservation fields are not_written for the current probe because no XML body is parsed or emitted.",
+    "Reserved write statuses are vocabulary only until a writer/native oracle path exists."
+  ]
+}

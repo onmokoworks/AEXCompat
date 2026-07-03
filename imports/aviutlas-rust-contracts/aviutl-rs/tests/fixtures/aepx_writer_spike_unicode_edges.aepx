@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- UNICODE_COMMENT_SENTINEL: 日本語コメントは保持される -->
+<xmp:project xmlns:xmp="urn:aviutlas:synthetic:aepx" xmlns:meta="urn:aviutlas:synthetic:meta" meta:UNICODE_ATTR_SENTINEL="かな">
+  <xmp:comp id="comp-unicode" name="メイン" display-name="メイン表示">
+    <xmp:layer id="layer-unicode" name="字幕レイヤー">
+      <xmp:text><![CDATA[UNICODE_CDATA_SENTINEL: こんにちは世界]]></xmp:text>
+    </xmp:layer>
+    <xmp:UNKNOWN_UNICODE_NODE_SENTINEL meta:note="保持値"/>
+  </xmp:comp>
+</xmp:project>

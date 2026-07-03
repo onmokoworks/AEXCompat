@@ -1,0 +1,230 @@
+{
+  "schema_version": 1,
+  "name": "AE JSX export artifact manifest schema",
+  "publication_status": "local-only measured contract sidecar",
+  "compatibility_classification": "Measured snapshot-to-JSX export artifact manifest contract",
+  "measured_from": {
+    "implementation": "aviutl-rs/examples/export_ae_jsx.rs",
+    "report_schema": "analysis/AE_JSX_EXPORT_REPORT_SCHEMA_2026-06-01.json",
+    "input_schema": "analysis/AE_SNAPSHOT_SCHEMA_2026-05-31.md"
+  },
+  "manifest": {
+    "fields": [
+      "schema_version",
+      "manifest_kind",
+      "publication_status",
+      "export_report_schema",
+      "generated_jsx_path",
+      "export_report_path",
+      "jsx_bytes",
+      "generated_jsx_artifact_digest",
+      "warning_count",
+      "forbidden_api_status",
+      "private_paths_redacted_or_omitted",
+      "snapshot_json_embedded",
+      "generated_jsx_embedded",
+      "private_payloads_embedded",
+      "generated_jsx_write_performed",
+      "generated_jsx_write_mode",
+      "after_effects_launch_expected",
+      "jsx_execution_expected",
+      "project_write_expected",
+      "source_overwrite_expected",
+      "human_approval_gate",
+      "binding"
+    ],
+    "manifest_kind": {
+      "type": "string",
+      "current_value": "ae_jsx_export_artifact_manifest"
+    },
+    "publication_status": {
+      "type": "string",
+      "current_value": "local-only"
+    },
+    "export_report_schema": {
+      "type": "string",
+      "current_value": "analysis/AE_JSX_EXPORT_REPORT_SCHEMA_2026-06-01.json"
+    },
+    "path_fields": {
+      "generated_jsx_path": "string_or_null; metadata-only pointer to a create-new artifact when output.jsx was requested",
+      "export_report_path": "string_or_null; metadata-only pointer to the report sidecar when --report was requested"
+    },
+    "summary_fields": {
+      "jsx_bytes": "integer byte length only; generated JSX body is not embedded",
+      "generated_jsx_artifact_digest": {
+        "fields": [
+          "algorithm",
+          "digest_hex",
+          "digest_scope",
+          "generated_jsx_embedded"
+        ],
+        "algorithm": {
+          "type": "string",
+          "current_value": "sha256-v1"
+        },
+        "digest_hex": "64 lowercase hex characters over the generated JSX artifact body; body is not embedded",
+        "digest_scope": "generated JSX artifact body; body is not embedded",
+        "generated_jsx_embedded": {
+          "type": "boolean",
+          "current_value": false
+        }
+      },
+      "warning_count": "integer count only; warning bodies live in the report sidecar",
+      "forbidden_api_status": {
+        "vocabulary": [
+          "passed",
+          "failed"
+        ],
+        "current_success_value": "passed"
+      },
+      "private_paths_redacted_or_omitted": "boolean copied from the report privacy gate"
+    },
+    "payload_privacy": {
+      "snapshot_json_embedded": {
+        "type": "boolean",
+        "current_value": false
+      },
+      "generated_jsx_embedded": {
+        "type": "boolean",
+        "current_value": false
+      },
+      "private_payloads_embedded": {
+        "type": "boolean",
+        "current_value": false
+      }
+    },
+    "artifact_write_gate": {
+      "generated_jsx_write_performed": "boolean copied from the report artifact gate",
+      "generated_jsx_write_mode": {
+        "type": "string",
+        "vocabulary": [
+          "not_written",
+          "create_new"
+        ]
+      }
+    },
+    "execution_expectations": {
+      "after_effects_launch_expected": {
+        "type": "boolean",
+        "current_value": false
+      },
+      "jsx_execution_expected": {
+        "type": "boolean",
+        "current_value": false
+      },
+      "project_write_expected": {
+        "type": "boolean",
+        "current_value": false
+      },
+      "source_overwrite_expected": {
+        "type": "boolean",
+        "current_value": false
+      }
+    },
+    "human_approval_gate": {
+      "fields": [
+        "approval_status",
+        "approval_receipt_required",
+        "required_before_ae_execution",
+        "required_before_jsx_execution",
+        "required_before_project_write",
+        "approval_receipt_id"
+      ],
+      "approval_status": {
+        "type": "string",
+        "current_value": "required_pending"
+      },
+      "approval_receipt_required": {
+        "type": "boolean",
+        "current_value": true
+      },
+      "required_before_ae_execution": {
+        "type": "boolean",
+        "current_value": true
+      },
+      "required_before_jsx_execution": {
+        "type": "boolean",
+        "current_value": true
+      },
+      "required_before_project_write": {
+        "type": "boolean",
+        "current_value": true
+      },
+      "approval_receipt_id": {
+        "type": "string_or_null",
+        "current_value": null
+      }
+    },
+    "binding": {
+      "fields": [
+        "algorithm",
+        "checksum_hex",
+        "checksum_scope",
+        "fields",
+        "payloads_embedded",
+        "covers_snapshot_or_jsx_bodies",
+        "cryptographic_digest"
+      ],
+      "algorithm": {
+        "type": "string",
+        "current_value": "fnv1a64-v1-noncryptographic"
+      },
+      "checksum_hex": "16 lowercase hex characters; non-cryptographic drift sentinel for metadata fields only",
+      "checksum_scope": "metadata-only export binding; excludes snapshot JSON and generated JSX bodies but includes the generated JSX artifact digest fields",
+      "payloads_embedded": {
+        "type": "boolean",
+        "current_value": false
+      },
+      "covers_snapshot_or_jsx_bodies": {
+        "type": "boolean",
+        "current_value": false
+      },
+      "cryptographic_digest": {
+        "fields": [
+          "algorithm",
+          "digest_hex",
+          "digest_scope",
+          "payloads_embedded",
+          "covers_snapshot_or_jsx_bodies"
+        ],
+        "algorithm": {
+          "type": "string",
+          "current_value": "sha256-v1"
+        },
+        "digest_hex": "64 lowercase hex characters; metadata-only digest over the same canonical fields as checksum_hex",
+        "digest_scope": "metadata-only export digest; excludes snapshot JSON and generated JSX bodies but includes the generated JSX artifact digest fields",
+        "payloads_embedded": {
+          "type": "boolean",
+          "current_value": false
+        },
+        "covers_snapshot_or_jsx_bodies": {
+          "type": "boolean",
+          "current_value": false
+        }
+      }
+    }
+  },
+  "cli_boundary": {
+    "legacy_positionals_preserved": "export_ae_jsx [snapshot.json] [output.jsx]",
+    "optional_report_flag": "--report report.json",
+    "optional_manifest_flag": "--manifest manifest.json",
+    "jsx_output_write_mode": "create_new",
+    "report_output_write_mode": "create_new",
+    "manifest_output_write_mode": "create_new",
+    "after_effects_launch": false,
+    "jsx_execution": false,
+    "project_write": false,
+    "source_overwrite": false
+  },
+  "notes": [
+    "This manifest is a metadata-only local sidecar for reviewing generated JSX artifacts before any manual AE run.",
+    "The binding checksum and digest are metadata-only review aids, not public notarization, and do not cover the source snapshot JSON or generated JSX body directly; they do cover the generated JSX artifact digest fields.",
+    "The generated_jsx_artifact_digest records a sha256-v1 digest of the generated JSX body without embedding the body.",
+    "Current review/approval validators recalculate this metadata-only checksum and digest before accepting the manifest as review evidence.",
+    "It must not embed the source snapshot JSON body, generated JSX body, private project payloads, or binary AEP data.",
+    "The manifest records approval as required_pending and requires a receipt before AE launch, JSX execution, or project write.",
+    "The manifest is not an approval receipt and does not permit executing the generated JSX.",
+    "ae_project_edit_approval must reject this manifest kind as a request-pair approval scope; approval remains scoped to ae_project_edit_ir_jsx_request_pair manifests.",
+    "export_ae_jsx still does not write .aep/.aepx projects, overwrite source projects, launch After Effects, or execute JSX."
+  ]
+}

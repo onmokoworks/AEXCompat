@@ -1,0 +1,390 @@
+{
+  "schema_name": "AEX static classifier catalog report schema",
+  "schema_version": 1,
+  "artifact": "aviutl-rs/target/aex-static-classifier/catalog.local.json",
+  "purpose": "Machine-check the default metadata-only AEX classifier catalog emitted without binary, source, loader, worker, render, hash, or payload capture.",
+  "evidence_mode": "default-no-binary-open-static-metadata",
+  "default_options": {
+    "inspect_pe": false,
+    "inspect_adjacent_source": false
+  },
+  "required_fields": [
+    "schema_version",
+    "catalog_id",
+    "publication_status",
+    "status",
+    "generated_by",
+    "input",
+    "notes",
+    "effects"
+  ],
+  "required_values": {
+    "schema_version": 1,
+    "catalog_id": "external-effects-local",
+    "publication_status": "local-only",
+    "status": "metadata-only-static-inference",
+    "generated_by": "aex_static_classifier"
+  },
+  "input_required_fields": [
+    "schema_version",
+    "publication_status",
+    "safety_notes"
+  ],
+  "required_notes": [
+    "Classifications are inferred from inventory path/extension/metadata only.",
+    "No .aex file was opened, hashed, loaded, or executed.",
+    "PE headers, exports, resources, and PiPL fields are not inspected in this slice.",
+    "Records are not render-capable until a reviewed worker/probe path verifies support."
+  ],
+  "effect_required_fields": [
+    "schema_version",
+    "effect_id",
+    "path",
+    "size",
+    "source",
+    "identity",
+    "classification",
+    "params",
+    "frame",
+    "host_surfaces",
+    "execution",
+    "risk",
+    "last_probe",
+    "pe_machine",
+    "exports",
+    "resource_summary",
+    "pipl_resource_status",
+    "pipl_resource_entries",
+    "pipl_content_scan",
+    "pipl_kind",
+    "pipl_name",
+    "pipl_category",
+    "pipl_match_name",
+    "entrypoint",
+    "adjacent_source_tree",
+    "adjacent_license",
+    "fixture_status",
+    "inferred_class",
+    "plugin_class",
+    "status",
+    "confidence",
+    "evidence",
+    "blocked_reasons",
+    "deferred_features",
+    "recommended_next_action",
+    "render_capable",
+    "notes"
+  ],
+  "effect_required_values": {
+    "schema_version": 1,
+    "params": [],
+    "last_probe": null,
+    "pe_machine": null,
+    "exports": [],
+    "resource_summary": "not-inspected",
+    "pipl_resource_status": "not-inspected",
+    "pipl_resource_entries": [],
+    "pipl_content_scan": {
+      "status": "not_requested",
+      "scan_mode": "disabled",
+      "bytes_limit": 0,
+      "bytes_read": 0,
+      "truncated": false,
+      "contents_emitted": false,
+      "matched_fields": [],
+      "unmatched_expected_fields": [],
+      "notes": [
+        "PiPL content scan was not requested.",
+        "No PiPL resource contents were read."
+      ]
+    },
+    "render_capable": false
+  },
+  "pipl_content_scan_required_fields": [
+    "status",
+    "scan_mode",
+    "bytes_limit",
+    "bytes_read",
+    "truncated",
+    "contents_emitted",
+    "matched_fields",
+    "unmatched_expected_fields",
+    "notes"
+  ],
+  "pipl_content_scan_default_values": {
+    "status": "not_requested",
+    "scan_mode": "disabled",
+    "bytes_limit": 0,
+    "bytes_read": 0,
+    "truncated": false,
+    "contents_emitted": false,
+    "matched_fields": [],
+    "unmatched_expected_fields": []
+  },
+  "pipl_content_scan_allowed_statuses": [
+    "not_requested",
+    "no_pipl_resource",
+    "no_expected_fields",
+    "semantic_matches",
+    "partial_semantic_matches",
+    "no_semantic_matches",
+    "present_content_oversize",
+    "present_content_truncated"
+  ],
+  "pipl_content_match_required_fields": [
+    "field",
+    "value",
+    "source"
+  ],
+  "pipl_content_match_allowed_fields": [
+    "pipl_name",
+    "pipl_category",
+    "pipl_match_name",
+    "entrypoint"
+  ],
+  "pipl_content_scan_required_values": {
+    "scan_mode": "bounded-expected-string-match-only",
+    "contents_emitted": false
+  },
+  "pipl_resource_entry_required_fields": [
+    "resource_id",
+    "resource_name",
+    "language_id",
+    "language_name",
+    "data_size",
+    "code_page",
+    "contents_read"
+  ],
+  "pipl_resource_entry_required_values": {
+    "contents_read": false
+  },
+  "allowed_pipl_resource_statuses": [
+    "not-inspected",
+    "absent",
+    "present_type_only",
+    "present_metadata_only",
+    "present_unmapped",
+    "present_truncated"
+  ],
+  "source_required_fields": [
+    "kind",
+    "path",
+    "path_publication",
+    "source_tree",
+    "source_license",
+    "binary_publication",
+    "origin"
+  ],
+  "source_required_values": {
+    "kind": "aex",
+    "path_publication": "local-only",
+    "binary_publication": "blocked-until-review"
+  },
+  "identity_required_fields": [
+    "display_name",
+    "match_name",
+    "category",
+    "vendor",
+    "version",
+    "entrypoint"
+  ],
+  "entrypoint_required_fields": [
+    "name",
+    "source",
+    "verified_from_binary"
+  ],
+  "entrypoint_required_values": {
+    "verified_from_binary": false
+  },
+  "classification_required_fields": [
+    "plugin_class",
+    "confidence",
+    "evidence",
+    "blocked_reasons",
+    "deferred_features"
+  ],
+  "frame_required_fields": [
+    "pixel_formats",
+    "preferred_pixel_format",
+    "alpha",
+    "color_management",
+    "max_width",
+    "max_height",
+    "transport",
+    "time_model"
+  ],
+  "frame_required_values": {
+    "pixel_formats": [
+      "rgba8"
+    ],
+    "preferred_pixel_format": "rgba8",
+    "alpha": "unknown",
+    "color_management": "none-claimed",
+    "max_width": 4096,
+    "max_height": 4096,
+    "transport": [
+      "png-v0"
+    ]
+  },
+  "time_model_required_fields": [
+    "mode",
+    "frame_index",
+    "time_seconds"
+  ],
+  "time_model_required_values": {
+    "mode": "single-frame",
+    "frame_index": 0,
+    "time_seconds": 0.0
+  },
+  "host_surfaces_required_fields": [
+    "aex_worker",
+    "aviutlas_external_effect",
+    "ofx_facade"
+  ],
+  "host_surface_required_fields": [
+    "supported",
+    "status"
+  ],
+  "host_surface_required_values": {
+    "supported": false
+  },
+  "host_surface_allowed_statuses": {
+    "aex_worker": [
+      "contract-only",
+      "blocked"
+    ],
+    "aviutlas_external_effect": [
+      "future"
+    ],
+    "ofx_facade": [
+      "future"
+    ]
+  },
+  "execution_required_fields": [
+    "load_status",
+    "allowlist_status",
+    "worker_required",
+    "broker_may_load_plugin",
+    "selectors",
+    "required_suites",
+    "unsupported"
+  ],
+  "execution_required_values": {
+    "load_status": "not_loaded",
+    "worker_required": true,
+    "broker_may_load_plugin": false,
+    "required_suites": []
+  },
+  "execution_selector_required_fields": [
+    "name",
+    "status",
+    "evidence"
+  ],
+  "risk_required_fields": [
+    "cleanroom",
+    "license",
+    "publication",
+    "notes"
+  ],
+  "risk_required_values": {
+    "cleanroom": "local-only",
+    "publication": "do-not-publish-binary"
+  },
+  "allowed_effect_statuses": [
+    "classified_from_inventory",
+    "classified_from_adjacent_source",
+    "classified_from_pipl_resource",
+    "unknown_needs_resource_scan",
+    "blocked_aegp",
+    "defer_heavy_dependency",
+    "defer_smartfx_only",
+    "candidate_for_contract_probe"
+  ],
+  "status_vocabulary": {
+    "candidate": [
+      "candidate_for_contract_probe",
+      "classified_from_inventory"
+    ],
+    "deferred": [
+      "defer_heavy_dependency",
+      "defer_smartfx_only",
+      "unknown_needs_resource_scan"
+    ],
+    "blocked": [
+      "blocked_aegp"
+    ],
+    "future_read_only_metadata": [
+      "classified_from_adjacent_source",
+      "classified_from_pipl_resource"
+    ]
+  },
+  "required_default_status_coverage": [
+    "candidate_for_contract_probe",
+    "classified_from_inventory",
+    "blocked_aegp",
+    "defer_heavy_dependency",
+    "unknown_needs_resource_scan"
+  ],
+  "allowed_plugin_classes": [
+    "classic-effect-candidate",
+    "aegp",
+    "blocked",
+    "unknown"
+  ],
+  "allowed_confidences": [
+    "inferred",
+    "unverified"
+  ],
+  "allowed_allowlist_statuses": [
+    "required",
+    "denied"
+  ],
+  "allowed_selector_statuses": [
+    "not_run"
+  ],
+  "allowed_risk_licenses": [
+    "candidate-needs-review",
+    "unknown"
+  ],
+  "no_execution_invariants": {
+    "native_aex_load_performed": false,
+    "effect_entrypoint_called": false,
+    "render_performed": false,
+    "pixel_parity_measured": false,
+    "hash_captured": false,
+    "payload_captured": false,
+    "external_process_started": false
+  },
+  "forbidden_fields": [
+    "hash",
+    "sha1",
+    "sha256",
+    "sha512",
+    "md5",
+    "digest",
+    "file_hash",
+    "file_digest",
+    "binary_payload",
+    "base64_payload",
+    "payload_bytes",
+    "payload_hash",
+    "binary_bytes",
+    "rendered_pixels",
+    "pixel_hash",
+    "input_png",
+    "output_png",
+    "worker_exe",
+    "native_load_result"
+  ],
+  "forbidden_serialized_tokens": [
+    "sha256",
+    "base64"
+  ],
+  "notes": [
+    "This sidecar pins the default classifier report only: inspect_pe=false and inspect_adjacent_source=false.",
+    "Optional PE inspection may report PiPL resource id/language/size/codepage metadata, but resource contents must remain unread.",
+    "Optional PiPL content scanning is opt-in, bounded, semantic-only, and must not emit raw bytes, hashes, base64, unknown properties, or SDK layouts.",
+    "Static entrypoint names may appear as metadata, but selectors must stay not_run and verified_from_binary must stay false.",
+    "No native .aex load, EffectMain call, render, pixel parity, hash capture, payload capture, or external worker process is part of this contract."
+  ]
+}

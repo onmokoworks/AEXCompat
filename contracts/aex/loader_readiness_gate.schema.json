@@ -1,0 +1,102 @@
+{
+  "schema_name": "AEX loader readiness final gate schema",
+  "schema_version": 1,
+  "artifact": "target/aex-loader-readiness-gate/loader-readiness-gate.local.json",
+  "purpose": "Machine-check the no-load preflight and provenance chain before any native AEX loader slice while keeping the final gate closed.",
+  "report_output_policy": {
+    "required_extension": ".json",
+    "required_root": "target/aex-loader-readiness-gate",
+    "reject_traversal_components": true,
+    "create_new_only": true,
+    "canonical_parent_must_resolve_under_required_root": true
+  },
+  "required_fields": [
+    "schema_version",
+    "publication_status",
+    "status",
+    "evidence_complete",
+    "final_gate_closed",
+    "native_load_performed",
+    "selectors_executed",
+    "render_performed",
+    "may_load_aex",
+    "preflight_summary",
+    "provenance_summary",
+    "checks",
+    "blocked_reasons",
+    "next_action",
+    "notes"
+  ],
+  "required_values": {
+    "schema_version": 1,
+    "publication_status": "local-only",
+    "final_gate_closed": true,
+    "native_load_performed": false,
+    "selectors_executed": false,
+    "render_performed": false,
+    "may_load_aex": false
+  },
+  "allowed_statuses": [
+    "loader_readiness_evidence_complete_gate_closed",
+    "blocked_loader_readiness_gate"
+  ],
+  "ready_status": "loader_readiness_evidence_complete_gate_closed",
+  "blocked_status": "blocked_loader_readiness_gate",
+  "preflight_summary_required_fields": [
+    "status",
+    "preflight_passed",
+    "native_load_performed",
+    "broker_may_load_plugin",
+    "selected_fixture_present",
+    "selected_loader_entry_present"
+  ],
+  "preflight_summary_required_ready_values": {
+    "preflight_passed": true,
+    "native_load_performed": false,
+    "broker_may_load_plugin": false,
+    "selected_fixture_present": true,
+    "selected_loader_entry_present": true
+  },
+  "provenance_summary_required_fields": [
+    "status",
+    "no_load_chain_ready",
+    "native_load_performed",
+    "selectors_executed",
+    "render_performed",
+    "ofx_route_allowed",
+    "evidence_contains_forbidden_tokens",
+    "fixture_identity_smoke_provided"
+  ],
+  "provenance_summary_required_ready_values": {
+    "status": "no_load_provenance_chain_ready",
+    "no_load_chain_ready": true,
+    "native_load_performed": false,
+    "selectors_executed": false,
+    "render_performed": false,
+    "ofx_route_allowed": false,
+    "evidence_contains_forbidden_tokens": false,
+    "fixture_identity_smoke_provided": true
+  },
+  "required_check_names": [
+    "preflight_passed_no_load",
+    "preflight_selected_fixture_and_entry_present",
+    "provenance_chain_ready_no_load",
+    "provenance_forbidden_token_scan_clean",
+    "fixture_identity_smoke_evidence_present"
+  ],
+  "check_statuses": [
+    "passed",
+    "blocked"
+  ],
+  "required_notes": [
+    "This gate is metadata-only and intentionally keeps native loading closed.",
+    "It is not AEX selector, render, OFX route, or pixel parity evidence."
+  ],
+  "forbidden_source_tokens": [
+    "LoadLibrary",
+    "libloading",
+    "EffectMain",
+    "PF_Cmd_RENDER",
+    "render_png("
+  ]
+}

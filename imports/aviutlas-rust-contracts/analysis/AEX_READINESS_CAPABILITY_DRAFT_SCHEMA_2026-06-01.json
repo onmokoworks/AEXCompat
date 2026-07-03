@@ -1,0 +1,89 @@
+{
+  "schema_version": 1,
+  "name": "AEX readiness capability draft schema",
+  "publication_status": "local-only design artifact",
+  "scope": "aex_probe_readiness capabilities/*.capability.json",
+  "evidence_mode": "static-classifier-metadata-only",
+  "required_fields": [
+    "schema_version",
+    "effect_id",
+    "display_name",
+    "plugin_path",
+    "publication_status",
+    "evidence_mode",
+    "load_status",
+    "broker_may_load_plugin",
+    "current_supported_operations",
+    "params_status",
+    "params",
+    "selectors",
+    "aex_worker",
+    "ofx_facade",
+    "unsupported_or_deferred_surfaces",
+    "notes"
+  ],
+  "required_values": {
+    "schema_version": 1,
+    "publication_status": "local-only",
+    "evidence_mode": "static-classifier-metadata-only",
+    "load_status": "not_loaded",
+    "broker_may_load_plugin": false,
+    "current_supported_operations": [],
+    "params_status": "unknown",
+    "params": []
+  },
+  "selector_names": [
+    "load",
+    "global_setup",
+    "params_setup",
+    "sequence_setup",
+    "render",
+    "sequence_teardown",
+    "global_teardown"
+  ],
+  "selector_status": "not_run",
+  "aex_worker": {
+    "supported": false,
+    "status": "deferred_loader_gate_closed"
+  },
+  "ofx_facade": {
+    "supported": false,
+    "status": "deferred_same_aex_worker_gate"
+  },
+  "required_unsupported_or_deferred_surfaces": [
+    "SmartFX",
+    "GPU",
+    "AEGP suites",
+    "AEIO",
+    "audio",
+    "layer checkout",
+    "custom UI",
+    "arbitrary file or network APIs"
+  ],
+  "forbidden_fields": [
+    "worker_exe",
+    "input_png",
+    "output_png",
+    "render_png",
+    "last_probe",
+    "hash",
+    "sha256",
+    "binary_payload",
+    "base64_payload"
+  ],
+  "forbidden_serialized_tokens": [
+    "sha256",
+    "base64"
+  ],
+  "promotion_gate": {
+    "worker_describe_requires_separate_loader_slice": true,
+    "render_png_requires_separate_loader_slice": true,
+    "loader_gate_must_remain_closed": true
+  },
+  "notes": [
+    "This is a readiness-planner draft shape, not the full neutral external effect capability record.",
+    "The draft is generated from static inventory/classifier metadata only.",
+    "Selectors must be not_run; no parameter descriptors, worker execution, or render pixels are claimed.",
+    "The broker must not read, hash, copy, load, execute, or pass .aex binaries to a worker while emitting this draft."
+  ]
+}

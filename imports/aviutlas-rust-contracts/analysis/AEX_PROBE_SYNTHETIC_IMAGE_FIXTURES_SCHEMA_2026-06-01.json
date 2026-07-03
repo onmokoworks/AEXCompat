@@ -1,0 +1,103 @@
+{
+  "schema_name": "AEX probe synthetic image fixtures",
+  "schema_version": 1,
+  "publication_status": "local-only design artifact",
+  "compatibility_classification": "Synthetic RGBA8 fixture inputs only",
+  "purpose": "Pin the generated AEX image-probe input fixture manifest before any native AEX load, worker render, OFX route, or AE invocation is allowed.",
+  "scope": "aex_probe_fixture_images manifest JSON under aviutl-rs/target/aex-probe-fixtures",
+  "required_fields": [
+    "schema_version",
+    "generated_by",
+    "generated_unix_ms",
+    "publication_status",
+    "status",
+    "output_root",
+    "pixel_format",
+    "width",
+    "height",
+    "image_count",
+    "native_load_performed",
+    "render_performed",
+    "aex_loaded",
+    "worker_started",
+    "broker_invoked",
+    "ofx_route_invoked",
+    "ae_invoked",
+    "private_payload_copied",
+    "images",
+    "checks",
+    "notes"
+  ],
+  "required_values": {
+    "schema_version": 1,
+    "generated_by": "aex_probe_fixture_images",
+    "publication_status": "local-only",
+    "status": "synthetic_fixture_images_ready_no_load",
+    "pixel_format": "rgba8",
+    "native_load_performed": false,
+    "render_performed": false,
+    "aex_loaded": false,
+    "worker_started": false,
+    "broker_invoked": false,
+    "ofx_route_invoked": false,
+    "ae_invoked": false,
+    "private_payload_copied": false,
+    "image_count": 3
+  },
+  "image_required_fields": [
+    "id",
+    "file_name",
+    "relative_path",
+    "width",
+    "height",
+    "pixel_format",
+    "pattern"
+  ],
+  "required_images": [
+    {
+      "id": "gradient",
+      "file_name": "gradient_rgba8.png",
+      "pattern": "xy-gradient-rgba8"
+    },
+    {
+      "id": "checker",
+      "file_name": "checker_rgba8.png",
+      "pattern": "checker-rgba8"
+    },
+    {
+      "id": "solid_alpha",
+      "file_name": "solid_alpha_rgba8.png",
+      "pattern": "solid-alpha-rgba8"
+    }
+  ],
+  "required_check_names": [
+    "output_root_confined",
+    "synthetic_rgba8_only",
+    "no_aex_input",
+    "no_worker_broker_or_host_invocation",
+    "no_private_payload_copy",
+    "create_new_outputs",
+    "all_outputs_preflighted",
+    "rollback_on_late_write_failure",
+    "no_symlink_or_reparse_output_ancestors"
+  ],
+  "forbidden_manifest_tokens": [
+    "sha256",
+    "base64",
+    "binary_payload",
+    "payload_bytes",
+    "copied_asset",
+    "native_load_result",
+    "loadlibrary",
+    "libloading",
+    "effectmain",
+    "rendered_pixels",
+    "input_png",
+    "output_png"
+  ],
+  "required_notes": [
+    "Fixture images are synthetic developer inputs only.",
+    "This manifest is not loader approval and not pixel correctness evidence.",
+    "No AEX file is opened, copied, loaded, described, or rendered."
+  ]
+}

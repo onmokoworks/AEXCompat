@@ -1,0 +1,276 @@
+{
+  "schema_version": 1,
+  "generator": {
+    "name": "AviUtlas",
+    "version": "unreleased",
+    "generated_at": "2026-05-31T00:00:00Z"
+  },
+  "source": {
+    "kind": "synthetic",
+    "path_hint": null,
+    "publication_status": "public-candidate",
+    "cleanroom_notes": [
+      {
+        "status": "observed",
+        "text": "The fixture contains no user media, Adobe preset, AE project, or ExEdit binary payload."
+      },
+      {
+        "status": "inferred",
+        "text": "Generated JSX can create the comp, layers, transforms, and placeholder warnings from this snapshot without parsing .aep or .ffx files."
+      }
+    ]
+  },
+  "project": {
+    "name": "synthetic_minimal_ae_snapshot",
+    "frame_rate": 30.0,
+    "width": 1280,
+    "height": 720,
+    "duration_frames": 90,
+    "audio_sample_rate": 44100
+  },
+  "assets": [
+    {
+      "id": "asset_solid_white",
+      "kind": "solid",
+      "path": null,
+      "missing_policy": "generate",
+      "publication_status": "public-candidate"
+    }
+  ],
+  "comps": [
+    {
+      "id": "comp_main",
+      "name": "Main",
+      "width": 1280,
+      "height": 720,
+      "frame_rate": 30.0,
+      "duration_frames": 90,
+      "background": [0, 0, 0, 0],
+      "layers": [
+        {
+          "id": "layer_text_title",
+          "name": "Title Text",
+          "kind": "text",
+          "source_ref": null,
+          "start_frame": 1,
+          "end_frame": 90,
+          "enabled": true,
+          "blend": {
+            "aviutl_number": 0,
+            "name": "normal",
+            "ae_mode": "normal",
+            "fidelity": "mapped"
+          },
+          "transform": {
+            "position": {
+              "x": 640.0,
+              "y": 260.0,
+              "z": 0.0
+            },
+            "anchor": {
+              "x": 0.0,
+              "y": 0.0,
+              "z": 0.0
+            },
+            "scale": {
+              "x": 100.0,
+              "y": 100.0,
+              "z": 100.0
+            },
+            "rotation": {
+              "x": 0.0,
+              "y": 0.0,
+              "z": 0.0
+            },
+            "opacity": 100.0,
+            "keyframes": [
+              {
+                "property": "transform.opacity",
+                "frames": [
+                  {
+                    "frame": 1,
+                    "value": 0.0,
+                    "interpolation": "linear",
+                    "source": "synthetic"
+                  },
+                  {
+                    "frame": 15,
+                    "value": 100.0,
+                    "interpolation": "linear",
+                    "source": "synthetic"
+                  }
+                ]
+              }
+            ]
+          },
+          "content": {
+            "text": "AviUtlas AE Snapshot",
+            "font": {
+              "family": "MS Gothic",
+              "size": 48.0,
+              "style": "regular"
+            },
+            "fill": [255, 255, 255, 255],
+            "stroke": {
+              "enabled": false,
+              "color": [0, 0, 0, 255],
+              "width": 0.0
+            },
+            "paragraph": {
+              "align": "center"
+            }
+          },
+          "effects": [],
+          "markers": [],
+          "warnings": []
+        },
+        {
+          "id": "layer_shape_box",
+          "name": "Shape Box",
+          "kind": "shape",
+          "source_ref": null,
+          "start_frame": 1,
+          "end_frame": 90,
+          "enabled": true,
+          "blend": {
+            "aviutl_number": 1,
+            "name": "add",
+            "ae_mode": "add",
+            "fidelity": "mapped"
+          },
+          "transform": {
+            "position": {
+              "x": 640.0,
+              "y": 430.0,
+              "z": 0.0
+            },
+            "anchor": {
+              "x": 0.0,
+              "y": 0.0,
+              "z": 0.0
+            },
+            "scale": {
+              "x": 100.0,
+              "y": 100.0,
+              "z": 100.0
+            },
+            "rotation": {
+              "x": 0.0,
+              "y": 0.0,
+              "z": 0.0
+            },
+            "opacity": 80.0,
+            "keyframes": []
+          },
+          "content": {
+            "shape_kind": "rectangle",
+            "size": {
+              "x": 320.0,
+              "y": 96.0
+            },
+            "fill": [40, 160, 255, 180],
+            "stroke": {
+              "enabled": true,
+              "color": [255, 255, 255, 255],
+              "width": 4.0
+            }
+          },
+          "effects": [
+            {
+              "id": "effect_blur_placeholder",
+              "source_name": "ぼかし",
+              "source_kind": "exedit-filter",
+              "target": "layer",
+              "fidelity": "placeholder",
+              "ae_strategy": "placeholder-layer",
+              "params": {
+                "範囲": 8.0,
+                "縦横比": 0.0,
+                "光の強さ": 0.0
+              },
+              "warnings": [
+                "Native oracle reference frame not yet available; AE export must not claim ExEdit render parity."
+              ]
+            }
+          ],
+          "markers": [
+            {
+              "frame": 1,
+              "name": "placeholder-effect",
+              "comment": "ぼかし is represented as metadata only in this synthetic snapshot."
+            }
+          ],
+          "warnings": [
+            "Contains placeholder effect metadata."
+          ]
+        },
+        {
+          "id": "layer_ffx_ref",
+          "name": "Opaque Preset Placeholder",
+          "kind": "placeholder",
+          "source_ref": null,
+          "start_frame": 1,
+          "end_frame": 90,
+          "enabled": false,
+          "blend": {
+            "aviutl_number": 0,
+            "name": "normal",
+            "ae_mode": "normal",
+            "fidelity": "mapped"
+          },
+          "transform": {
+            "position": {
+              "x": 0.0,
+              "y": 0.0,
+              "z": 0.0
+            },
+            "anchor": {
+              "x": 0.0,
+              "y": 0.0,
+              "z": 0.0
+            },
+            "scale": {
+              "x": 100.0,
+              "y": 100.0,
+              "z": 100.0
+            },
+            "rotation": {
+              "x": 0.0,
+              "y": 0.0,
+              "z": 0.0
+            },
+            "opacity": 0.0,
+            "keyframes": []
+          },
+          "content": {},
+          "effects": [
+            {
+              "id": "effect_optional_preset",
+              "source_name": "user preset",
+              "source_kind": "ffx",
+              "target": "layer",
+              "fidelity": "opaque",
+              "ae_strategy": "preset-ref",
+              "preset_ref": {
+                "path": null,
+                "apply_timing": "after-layer-create",
+                "user_supplied": true
+              },
+              "warnings": [
+                "Preset content is opaque; generated JSX may apply it only after explicit user path selection."
+              ]
+            }
+          ],
+          "markers": [],
+          "warnings": [
+            "Disabled placeholder for optional user-supplied .ffx preset."
+          ]
+        }
+      ]
+    }
+  ],
+  "warnings": [
+    "Synthetic fixture only; not a render-parity claim.",
+    "Generated JSX must not parse .aep or .ffx files directly."
+  ]
+}

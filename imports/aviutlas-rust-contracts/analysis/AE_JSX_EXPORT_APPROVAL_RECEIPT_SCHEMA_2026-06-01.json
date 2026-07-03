@@ -1,0 +1,198 @@
+{
+  "schema_version": 1,
+  "name": "AE JSX export manual approval receipt schema",
+  "publication_status": "local-only measured contract sidecar",
+  "compatibility_classification": "Measured standalone JSX export approval receipt contract",
+  "measured_from": {
+    "implementation": "aviutl-rs/examples/ae_jsx_export_approval.rs",
+    "manifest_schema": "analysis/AE_JSX_EXPORT_MANIFEST_SCHEMA_2026-06-01.json",
+    "report_schema": "analysis/AE_JSX_EXPORT_REPORT_SCHEMA_2026-06-01.json",
+    "artifact_verification_schema": "analysis/AE_JSX_EXPORT_ARTIFACT_VERIFY_REPORT_SCHEMA_2026-06-01.json"
+  },
+  "scope": {
+    "accepted_manifest_kind": "ae_jsx_export_artifact_manifest",
+    "rejected_manifest_kind": "ae_project_edit_ir_jsx_request_pair",
+    "separate_from": "analysis/AE_PROJECT_EDIT_APPROVAL_RECEIPT_SCHEMA_2026-06-01.json",
+    "approval_meaning": "operator-only approval to manually review/run the generated JSX artifact outside this tool",
+    "not_a_tool_execution_permission": true
+  },
+  "receipt": {
+    "fields": [
+      "schema_version",
+      "receipt_kind",
+      "approval_receipt_id",
+      "approval_status",
+      "approved_by",
+      "approved_at_utc",
+      "approval_scope",
+      "prerequisite_reviews",
+      "prerequisite_reports",
+      "approval_effect",
+      "safety_acknowledgements",
+      "after_effects_launched_by_tool",
+      "jsx_executed_by_tool",
+      "project_body_read",
+      "project_write_performed_by_tool"
+    ],
+    "receipt_kind": {
+      "type": "string",
+      "current_value": "ae_jsx_export_manual_approval_receipt"
+    },
+    "approval_status": {
+      "type": "string",
+      "required_accepted_value": "approved",
+      "template_value": "draft_unapproved"
+    },
+    "approval_scope": {
+      "must_match_manifest_fields": [
+        "manifest_kind",
+        "binding.algorithm",
+        "binding.checksum_hex",
+        "binding.cryptographic_digest.algorithm",
+        "binding.cryptographic_digest.digest_hex",
+        "generated_jsx_path",
+        "export_report_path",
+        "jsx_bytes",
+        "generated_jsx_artifact_digest.algorithm",
+        "generated_jsx_artifact_digest.digest_hex",
+        "forbidden_api_status",
+        "generated_jsx_write_mode"
+      ],
+      "forbidden_api_status_required": "passed",
+      "generated_jsx_write_mode_required": "create_new",
+      "binding_recalculation_required": true,
+      "binding_recalculation_scope": "metadata-only canonical export manifest fields; excludes snapshot JSON and generated JSX bodies but includes generated_jsx_artifact_digest fields"
+    },
+    "prerequisite_reviews": {
+      "export_manifest_reviewed": true,
+      "export_report_reviewed": true,
+      "generated_jsx_reviewed": true,
+      "artifact_verification_report_reviewed": true,
+      "private_payload_publication_reviewed": true
+    },
+    "prerequisite_reports": {
+      "artifact_verification": {
+        "report_kind": "ae_jsx_export_artifact_verification",
+        "required_status": "verified",
+        "artifact_accepted_for_manual_approval_review": true,
+        "required_true_fields": [
+          "generated_jsx_path_matches_manifest",
+          "generated_jsx_bytes_match",
+          "generated_jsx_digest_match",
+          "export_manifest_binding_verified",
+          "report_sidecar_checked",
+          "report_sidecar_consistent"
+        ],
+        "must_match_manifest_fields": [
+          "generated_jsx_digest_expected_hex",
+          "generated_jsx_digest_observed_hex"
+        ],
+        "generated_jsx_digest_algorithm": "sha256-v1",
+        "tool_side_effects_required_false": [
+          "after_effects_launched_by_tool",
+          "jsx_executed_by_tool",
+          "project_write_performed_by_tool"
+        ],
+        "meaning": "Approval requires a separate verified artifact preflight report proving the local generated JSX body hash and report sidecar match the manifest before an operator can approve manual AE execution."
+      }
+    },
+    "approval_effect": {
+      "allow_manual_after_effects_launch": true,
+      "allow_manual_jsx_execution": true,
+      "allow_tool_after_effects_launch": false,
+      "allow_tool_jsx_execution": false,
+      "allow_tool_project_write": false,
+      "allow_source_overwrite": false,
+      "allow_binary_aep_direct_write": false,
+      "allow_aepx_write_without_preservation_proof": false
+    },
+    "safety_acknowledgements": {
+      "generated_jsx_path_reviewed": true,
+      "export_report_path_reviewed": true,
+      "source_overwrite_forbidden": true,
+      "binary_aep_direct_write_forbidden": true,
+      "private_payload_publication_forbidden": true,
+      "aex_ofx_out_of_scope": true,
+      "aviutl_core_out_of_scope": true
+    },
+    "tool_side_effects": {
+      "after_effects_launched_by_tool": false,
+      "jsx_executed_by_tool": false,
+      "project_body_read": false,
+      "project_write_performed_by_tool": false
+    }
+  },
+  "validation_report": {
+    "fields": [
+      "schema_version",
+      "report_kind",
+      "validation_status",
+      "approval_accepted",
+      "manifest_acceptance_scope",
+      "request_pair_manifest_accepted",
+      "export_artifact_manifest_accepted",
+      "export_manifest_binding_verified",
+      "artifact_verification_report_verified",
+      "artifact_verification_status",
+      "artifact_verification_generated_jsx_digest_match",
+      "artifact_verification_report_sidecar_consistent",
+      "manual_after_effects_launch_approved_for_operator",
+      "manual_jsx_execution_approved_for_operator",
+      "after_effects_launched_by_tool",
+      "jsx_executed_by_tool",
+      "project_body_read",
+      "project_write_performed_by_tool",
+      "blocked_reasons"
+    ],
+    "report_kind": {
+      "type": "string",
+      "current_value": "ae_jsx_export_approval_receipt_validation"
+    },
+    "validation_status": {
+      "vocabulary": [
+        "approved",
+        "invalid_receipt"
+      ]
+    },
+    "manifest_acceptance_scope": {
+      "type": "string",
+      "current_value": "ae_jsx_export_artifact_manifest_only"
+    },
+    "request_pair_manifest_accepted": false,
+    "export_manifest_binding_verified": {
+      "type": "boolean",
+      "accepted_value": true,
+      "meaning": "validator recomputed metadata-only FNV checksum and sha256-v1 digest from manifest fields and matched both supplied values"
+    },
+    "artifact_verification_report_verified": {
+      "type": "boolean",
+      "accepted_value": true,
+      "meaning": "validator checked the supplied ae_jsx_export_artifact_verification report and required verified status, matching generated JSX digest, matching manifest binding, and consistent export report sidecar"
+    },
+    "tool_side_effects": {
+      "after_effects_launched_by_tool": false,
+      "jsx_executed_by_tool": false,
+      "project_body_read": false,
+      "project_write_performed_by_tool": false
+    }
+  },
+  "cli_boundary": {
+    "draft_command": "ae_jsx_export_approval draft manifest.json artifact-verify-report.json receipt-template.json",
+    "validate_command": "ae_jsx_export_approval validate manifest.json artifact-verify-report.json receipt.json [report.json]",
+    "template_output_write_mode": "create_new",
+    "report_output_write_mode": "create_new",
+    "after_effects_launch": false,
+    "jsx_execution": false,
+    "project_write": false,
+    "source_overwrite": false
+  },
+  "notes": [
+    "This receipt is for standalone JSX export artifacts only and must not be accepted by request-pair project edit approval validators.",
+    "The validator recalculates the export manifest metadata-only FNV checksum and sha256-v1 digest before producing draft templates or accepting receipts.",
+    "The validator also requires a verified artifact preflight report that hashes the local generated JSX body and checks the optional export report sidecar before producing draft templates or accepting receipts.",
+    "Approval receipts copy the generated JSX artifact digest so a reviewed body hash can be carried without embedding the JSX body.",
+    "An approved receipt records an operator decision; the validator still does not launch After Effects, execute JSX, read project payload bytes, or write project files.",
+    "The export manifest binding digest is metadata-only review evidence and does not cover the snapshot JSON body or generated JSX body directly; it covers the generated JSX artifact digest fields.",
+    "A real AE run, JSX execution, or project save remains a manual/operator action outside this tool until a separate explicitly approved executor exists."
+  ]
+}

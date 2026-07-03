@@ -1,0 +1,36 @@
+{
+  "schema_version": 1,
+  "publication_status": "local-only test fixture",
+  "allowlist_publication_status": "local-only",
+  "default_max_plugin_bytes": 268435456,
+  "entries": [
+    {
+      "id": "classic-test",
+      "plugin_path": "D:/AviUtlas/local/ClassicTest.aex",
+      "expected_class": "classic-effect",
+      "allowed_operations": [
+        "describe",
+        "render_png"
+      ],
+      "max_width": 128,
+      "max_height": 128,
+      "timeout_ms": 1000,
+      "fixture_status": "local-build-candidate",
+      "publication_status": "local-only",
+      "license_status": "local-only-reviewed",
+      "classifier_status": "candidate_for_contract_probe",
+      "classifier_inferred_class": "classic-effect",
+      "loader_approval_status": "not-approved",
+      "sandbox_profile_status": "missing",
+      "worker_revalidation_status": "missing",
+      "max_plugin_bytes": 268435456
+    }
+  ],
+  "blocked_classes": [
+    "aegp",
+    "aeio",
+    "smartfx-only",
+    "gpu-only",
+    "unknown"
+  ]
+}

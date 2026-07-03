@@ -1,0 +1,187 @@
+{
+  "schema_name": "AEX loader implementation manifest schema",
+  "schema_version": 1,
+  "artifact": "target/aex-loader-implementation/loader-implementation.local.json",
+  "purpose": "Machine-check a no-load review packet before any separate native AEX loader implementation slice, preserving optional fixture-refresh queue hygiene evidence from the loader preflight when supplied.",
+  "required_fields": [
+    "schema_version",
+    "publication_status",
+    "status",
+    "native_load_performed",
+    "broker_may_load_plugin",
+    "loader_may_load_plugin",
+    "ofx_may_route_to_loader",
+    "selected_fixture",
+    "selected_effect_id",
+    "selected_plugin_path",
+    "normalized_plugin_path",
+    "preflight_summary",
+    "capability_summary",
+    "readiness_summary",
+    "implementation_gate",
+    "checks",
+    "blocked_reasons",
+    "next_action",
+    "notes"
+  ],
+  "required_values": {
+    "schema_version": 1,
+    "publication_status": "local-only",
+    "native_load_performed": false,
+    "broker_may_load_plugin": false,
+    "loader_may_load_plugin": false,
+    "ofx_may_route_to_loader": false
+  },
+  "allowed_statuses": [
+    "ready_for_separate_loader_implementation_review_no_load",
+    "blocked_preflight_receipt",
+    "blocked_identity_mismatch",
+    "blocked_fixture_refresh_evidence",
+    "blocked_capability_draft",
+    "blocked_readiness_evidence",
+    "blocked_no_load_invariants"
+  ],
+  "ready_status": "ready_for_separate_loader_implementation_review_no_load",
+  "preflight_summary_required_fields": [
+    "status",
+    "preflight_passed",
+    "selected_candidate_id",
+    "selected_loader_entry_effect_id",
+    "selected_loader_entry_ready",
+    "fixture_refresh_audit_summary"
+  ],
+  "fixture_refresh_audit_summary_required_fields": [
+    "provided",
+    "schema_version",
+    "publication_status",
+    "status",
+    "native_load_performed",
+    "render_performed",
+    "fixture_selected",
+    "loader_enabled",
+    "fixture_gate_candidate_count",
+    "wiztree_total_aex_count",
+    "wiztree_canonical_non_generated_count",
+    "wiztree_generated_target_artifact_count",
+    "generated_target_artifacts_excluded",
+    "candidates_present_in_refresh",
+    "input_contains_forbidden_tokens",
+    "blocked_reason_count"
+  ],
+  "fixture_refresh_audit_summary_ready_values_when_provided": {
+    "schema_version": 1,
+    "publication_status": "local-only",
+    "status": "fixture_gate_refresh_ready_no_load",
+    "native_load_performed": false,
+    "render_performed": false,
+    "fixture_selected": false,
+    "loader_enabled": false,
+    "fixture_gate_candidate_count": 2,
+    "wiztree_total_aex_count": 119,
+    "wiztree_canonical_non_generated_count": 40,
+    "wiztree_generated_target_artifact_count": 79,
+    "generated_target_artifacts_excluded": true,
+    "candidates_present_in_refresh": true,
+    "input_contains_forbidden_tokens": false,
+    "blocked_reason_count": 0
+  },
+  "capability_summary_required_fields": [
+    "matched_capability_count",
+    "effect_id",
+    "plugin_path",
+    "evidence_mode",
+    "load_status",
+    "broker_may_load_plugin",
+    "aex_worker_supported",
+    "ofx_facade_supported",
+    "selector_statuses"
+  ],
+  "readiness_summary_required_fields": [
+    "provided",
+    "matched_entry_count",
+    "status",
+    "effect_id",
+    "plugin_path",
+    "entry_status",
+    "pipl_content_scan_status",
+    "pipl_content_scan_ready",
+    "allowed_operations"
+  ],
+  "implementation_gate_required_fields": [
+    "ready_for_separate_loader_slice_review",
+    "native_loader_calls_allowed",
+    "broker_may_load_aex",
+    "ofx_facade_may_route_to_loader",
+    "requires_explicit_user_approval",
+    "requires_code_review",
+    "requires_local_fixture_only"
+  ],
+  "implementation_gate_required_values": {
+    "native_loader_calls_allowed": false,
+    "broker_may_load_aex": false,
+    "ofx_facade_may_route_to_loader": false,
+    "requires_explicit_user_approval": true,
+    "requires_code_review": true,
+    "requires_local_fixture_only": true
+  },
+  "required_check_names": [
+    "loader_preflight_core_no_load",
+    "selected_fixture_identity",
+    "selected_loader_entry_identity",
+    "selected_loader_entry_path_identity",
+    "selected_loader_entry_ready",
+    "single_matching_capability_draft",
+    "capability_path_identity",
+    "capability_no_load_static_draft",
+    "evidence_anti_contamination"
+  ],
+  "conditional_check_names": [
+    "fixture_gate_refresh_audit_ready_no_load",
+    "readiness_pipl_semantic_gate"
+  ],
+  "check_statuses": [
+    "passed",
+    "blocked"
+  ],
+  "required_ready_capability_values": {
+    "evidence_mode": "static-classifier-metadata-only",
+    "load_status": "not_loaded",
+    "broker_may_load_plugin": false,
+    "aex_worker_supported": false,
+    "ofx_facade_supported": false,
+    "selector_status": "not_run"
+  },
+  "required_ready_readiness_values_when_provided": {
+    "status": "probe_readiness_planned",
+    "entry_status": "draft_allowlisted",
+    "pipl_content_scan_status": "semantic_matches",
+    "pipl_content_scan_ready": true,
+    "allowed_operation": "describe"
+  },
+  "forbidden_field_names": [
+    "worker_exe",
+    "input_png",
+    "output_png",
+    "last_probe",
+    "hash",
+    "sha256",
+    "binary_payload",
+    "base64_payload",
+    "rendered_pixels"
+  ],
+  "forbidden_serialized_tokens": [
+    "sha256",
+    "base64",
+    "loadlibrary",
+    "libloading",
+    "effectmain",
+    "output_png",
+    "input_png",
+    "rendered_pixels"
+  ],
+  "required_notes": [
+    "Manifest reads JSON metadata only.",
+    "No .aex file is opened, hashed, copied, loaded, executed, described, or rendered.",
+    "A ready manifest is permission to review a separate loader implementation slice, not permission to load a plugin."
+  ]
+}

@@ -1,0 +1,108 @@
+{
+  "schema_name": "AEX WizTree AEX refresh schema",
+  "schema_version": 1,
+  "artifact": "analysis/AEX_WIZTREE_AEX_REFRESH_2026-06-01.json",
+  "publication_status": "local-only design artifact",
+  "purpose": "Machine-check the read-only WizTree AEX refresh sidecar so generated target artifacts are not mistaken for first-loader fixture candidates.",
+  "required_fields": [
+    "schema_version",
+    "generated_at",
+    "publication_status",
+    "scan_mode",
+    "target_root",
+    "wiztree_csv_snapshot",
+    "safety_notes",
+    "total_aex_scan",
+    "canonical_non_generated_aex",
+    "generated_target_test_artifacts",
+    "fixture_gate_candidates_verified_present",
+    "additional_small_local_builds_for_later_review",
+    "blocked_first_loader_classes_observed",
+    "recommended_fixture_gate_delta"
+  ],
+  "required_values": {
+    "schema_version": 1,
+    "generated_at": "2026-06-01T07:10:38Z",
+    "publication_status": "local-only",
+    "scan_mode": "wiztree-read-only-filtered-aex",
+    "target_root": "D:\\Projects\\01_Project"
+  },
+  "required_safety_notes": [
+    "read-only WizTree scan",
+    "metadata-only path, size, and modified-time summary",
+    "no file hashes recorded",
+    "no binary payloads copied",
+    "do not publish without review"
+  ],
+  "total_aex_scan_required_values": {
+    "count": 119,
+    "bytes": 64763808,
+    "allocated_bytes": 64839680
+  },
+  "canonical_non_generated_aex_required_values": {
+    "count": 40,
+    "bytes": 64745984
+  },
+  "generated_target_test_artifacts_required_values": {
+    "count": 79,
+    "bytes": 17824
+  },
+  "generated_name_group_required_fields": [
+    "name",
+    "count",
+    "bytes",
+    "classification"
+  ],
+  "required_generated_name_groups": {
+    "ClassicTest.aex": 65,
+    "OtherTest.aex": 9,
+    "SyntheticEffect.aex": 2,
+    "SyntheticNoPipl.aex": 1,
+    "Oversized.aex": 1,
+    "UnknownStatus.aex": 1
+  },
+  "fixture_gate_candidate_required_fields": [
+    "id",
+    "path",
+    "bytes",
+    "modified",
+    "current_review_status"
+  ],
+  "fixture_gate_candidate_required_ids": [
+    "adaptive-filter-local",
+    "median-pro-local"
+  ],
+  "fixture_gate_candidate_required_values": {
+    "current_review_status": "queued-not-approved"
+  },
+  "additional_small_local_build_required_names": [
+    "ONMK_Filters.aex",
+    "MinimaxMap.aex",
+    "RefractionDispersion.aex"
+  ],
+  "blocked_first_loader_class_required_values": {
+    "aegp-like-controller": 5,
+    "heavy-or-specialized": 15
+  },
+  "recommended_fixture_gate_delta_required_values": {
+    "keep_current_two_candidate_gate": true,
+    "do_not_expand_first_loader_queue_from_generated_target_artifacts": true,
+    "do_not_select_fixture_without_manual_approval": true
+  },
+  "forbidden_serialized_tokens": [
+    "sha256",
+    "base64",
+    "binary_payload",
+    "payload_bytes",
+    "copied_asset",
+    "native_load_result",
+    "loadlibrary",
+    "rendered_pixels",
+    "pixel_hash"
+  ],
+  "notes": [
+    "This sidecar is a read-only refresh summary, not an update to the canonical static inventory.",
+    "Generated AviUtlas target artifacts must be excluded from first-loader fixture review.",
+    "Fixture gate candidates remain present but unapproved."
+  ]
+}

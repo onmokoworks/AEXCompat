@@ -1,0 +1,246 @@
+{
+  "schema_version": 1,
+  "name": "AE project edit manual smoke protocol schema",
+  "publication_status": "local-only design artifact",
+  "purpose": "Machine-readable protocol for a human-approved manual AE smoke step using reviewed generated JSX and an explicit output path, without automated AE launch or direct binary .aep writes.",
+  "scope": {
+    "manual_only": true,
+    "copy_project_only": true,
+    "automated_ae_launch": false,
+    "automated_jsx_execution": false,
+    "automated_project_save": false,
+    "project_payload_embedded": false,
+    "real_aep_direct_write": false,
+    "aepx_apply_enabled": false
+  },
+  "required_artifacts": [
+    "ae_project_edit_ir_report",
+    "request_pair_manifest",
+    "downstream_validate_request",
+    "downstream_validate_report",
+    "generated_jsx_request",
+    "generated_jsx_file",
+    "generated_jsx_review",
+    "review_packet_validation_report",
+    "approval_receipt",
+    "manual_smoke_closeout_template"
+  ],
+  "optional_artifacts": [
+    "export_artifact_manifest",
+    "aepx_dry_run_report"
+  ],
+  "artifact_contracts": {
+    "request_pair_manifest": {
+      "manifest_kind": "ae_project_edit_ir_jsx_request_pair",
+      "request_payloads_embedded": false,
+      "project_body_read": false,
+      "binding_algorithm": "fnv1a64-v1-noncryptographic",
+      "binding_payloads_embedded": false,
+      "binding_covers_private_patch_payloads": false,
+      "human_approval_gate_before_receipt": "required_pending"
+    },
+    "downstream_validate_request": {
+      "operation": "validate",
+      "expected_status": "dry_run_ok",
+      "report_binding_algorithm": "fnv1a64-v1-noncryptographic",
+      "report_cryptographic_digest_algorithm": "sha256-v1",
+      "report_binding_payloads_embedded": false,
+      "after_effects_launch_expected": false,
+      "generated_jsx_write_expected": false,
+      "project_write_expected": false
+    },
+    "generated_jsx_request": {
+      "operation": "generate_jsx_transaction",
+      "expected_status": "generated_jsx",
+      "report_binding_algorithm": "fnv1a64-v1-noncryptographic",
+      "report_cryptographic_digest_algorithm": "sha256-v1",
+      "report_binding_payloads_embedded": false,
+      "after_effects_launch_expected": false,
+      "project_write_expected": false
+    },
+    "generated_jsx_review": {
+      "required_before_approval": true,
+      "forbidden_tokens_review_required": true,
+      "private_payload_publication_review_required": true
+    },
+    "review_packet_validation_report": {
+      "report_schema": "analysis/AE_PROJECT_EDIT_REVIEW_PACKET_SCHEMA_2026-06-01.json",
+      "report_kind": "ae_project_edit_review_packet_validation",
+      "required_status": "review_ready",
+      "binding_algorithm": "fnv1a64-v1-noncryptographic",
+      "binding_payloads_embedded": false,
+      "binding_covers_private_patch_payloads": false,
+      "cryptographic_digest_algorithm": "sha256-v1",
+      "cryptographic_digest_payloads_embedded": false,
+      "approval_receipt_required_before_execution": true,
+      "export_artifact_manifest_accepted_as_approval": false,
+      "aepx_dry_run_accepted_as_apply": false,
+      "after_effects_launched_by_tool": false,
+      "jsx_executed_by_tool": false,
+      "project_write_performed_by_tool": false
+    },
+    "aepx_dry_run_report": {
+      "optional_review_evidence": true,
+      "required_status_when_supplied": "dry_run_ok",
+      "accepted_as_apply": false,
+      "binding_algorithm": "fnv1a64-v1-noncryptographic",
+      "binding_payloads_embedded": false,
+      "binding_covers_xml_or_private_patch_payloads": false,
+      "cryptographic_digest_algorithm": "sha256-v1",
+      "cryptographic_digest_payloads_embedded": false,
+      "xml_body_read_performed": false,
+      "xml_body_write_performed": false,
+      "output_write_performed": false,
+      "source_overwrite_performed": false
+    }
+  },
+  "approval_gate": {
+    "approval_receipt_schema": "analysis/AE_PROJECT_EDIT_APPROVAL_RECEIPT_SCHEMA_2026-06-01.json",
+    "review_packet_report_schema": "analysis/AE_PROJECT_EDIT_REVIEW_PACKET_SCHEMA_2026-06-01.json",
+    "review_packet_status_required": "review_ready",
+    "approval_status_required": "approved",
+    "receipt_required_before": [
+      "after_effects_launch",
+      "jsx_execution",
+      "project_save"
+    ],
+    "receipt_must_match": [
+      "ir_id",
+      "source_project_path",
+      "output_project_path",
+      "generated_jsx_path",
+      "request_pair_manifest_digest",
+      "request_pair_manifest_binding_checksum",
+      "review_packet_binding_checksum",
+      "review_packet_digest_hex"
+    ],
+    "rejected_or_revoked_receipt_status": "ae_not_run"
+  },
+  "execution_boundary": {
+    "source_project_use": "operator-reviewed local copy only; original source overwrite is forbidden",
+    "project_save_target": "explicit output_project.path only",
+    "source_overwrite_allowed": false,
+    "binary_aep_direct_write_allowed": false,
+    "aepx_write_without_preservation_proof_allowed": false,
+    "arbitrary_javascript_allowed": false,
+    "generated_jsx_must_be_reviewed": true,
+    "after_effects_launch_by_tool_allowed": false,
+    "jsx_execution_by_tool_allowed": false,
+    "project_save_by_tool_allowed": false
+  },
+  "protocol_phases": [
+    {
+      "phase_id": "prepare_artifacts",
+      "required_status": "no_project_write",
+      "required_checks": [
+        "IR adapter status is planned",
+        "request-pair manifest exists and embeds no request payloads",
+        "validate request has operation=validate",
+        "downstream validate report status is dry_run_ok",
+        "generated JSX has been produced for review only",
+        "review packet validation report status is review_ready"
+      ]
+    },
+    {
+      "phase_id": "approval_gate",
+      "required_status": "approval_required",
+      "required_checks": [
+        "approval receipt exists",
+        "approval_status is approved",
+        "receipt request-pair digest matches the request-pair manifest",
+        "receipt review packet binding checksum matches the review packet validation report",
+        "receipt review packet digest matches the review packet validation report",
+        "receipt paths match the request-pair manifest",
+        "safety acknowledgements are all true"
+      ]
+    },
+    {
+      "phase_id": "manual_execution",
+      "required_status": "operator_only",
+      "required_checks": [
+        "AE launch is performed by the operator, not by the tool",
+        "reviewed JSX is executed manually by the operator",
+        "save target is the explicit output_project.path",
+        "source project path is not overwritten"
+      ]
+    },
+    {
+      "phase_id": "closeout_report",
+      "required_status": "sanitized_report_only",
+      "required_checks": [
+        "report contains no private project payload",
+        "report records whether manual execution was attempted",
+        "report records explicit output path",
+        "report records that no automated oracle was run"
+      ]
+    }
+  ],
+  "result_report": {
+    "closeout_report_schema": "analysis/AE_PROJECT_EDIT_MANUAL_SMOKE_CLOSEOUT_REPORT_SCHEMA_2026-06-01.json",
+    "automated_oracle": false,
+    "allowed_statuses": [
+      "not_run",
+      "manual_smoke_completed",
+      "manual_smoke_failed",
+      "operator_aborted"
+    ],
+    "required_fields": [
+      "schema_version",
+      "manual_smoke_status",
+      "approval_receipt_id",
+      "request_pair_manifest_kind",
+      "source_project_path",
+      "output_project_path",
+      "generated_jsx_path",
+      "after_effects_launched_by_operator",
+      "jsx_executed_by_operator",
+      "project_save_attempted",
+      "source_overwrite_observed",
+      "private_payloads_embedded"
+    ],
+    "must_record": {
+      "after_effects_launched_by_operator": "boolean",
+      "jsx_executed_by_operator": "boolean",
+      "project_save_attempted": "boolean",
+      "saved_output_path": "explicit output_project.path or null",
+      "source_overwrite_observed": false,
+      "private_payloads_embedded": false
+    }
+  },
+  "failure_policy": {
+    "missing_approval_receipt": "ae_not_run",
+    "approval_status_not_approved": "ae_not_run",
+    "review_packet_status_not_ready": "ae_not_run",
+    "downstream_validate_status_not_dry_run_ok": "ae_not_run",
+    "generated_jsx_not_reviewed": "ae_not_run",
+    "output_path_missing_or_not_explicit": "invalid_request",
+    "source_output_same_after_normalization": "output_same_as_source",
+    "output_path_already_exists_before_plan": "output_exists"
+  },
+  "responsibility_split": {
+    "ae_project_edit_ir": "in_scope",
+    "jsx_generation": "in_scope",
+    "manual_ae_smoke_protocol": "in_scope",
+    "binary_aep": "ae_owned_no_direct_write",
+    "aepx_writer": "out_of_scope_until_preservation_proof",
+    "aex_ofx": "out_of_scope",
+    "aviutl_core": "out_of_scope"
+  },
+  "non_goals": [
+    "This protocol does not launch After Effects.",
+    "This protocol does not execute JSX.",
+    "This protocol does not prove project save success without a human closeout report.",
+    "This protocol does not authorize source overwrite.",
+    "This protocol does not authorize direct binary .aep editing.",
+    "This protocol does not cover AEX, OFX, or AviUtl core implementation."
+  ],
+  "notes": [
+    "Manual smoke is copy-project-only and approval-gated.",
+    "The protocol starts only after dry-run validation returns dry_run_ok and generated JSX has been reviewed.",
+    "The review packet validator is JSON-only and produces pre-approval consistency evidence; review_ready is not an approval receipt.",
+    "AEPX dry-run reports may be attached to the review packet as no-write evidence, but they are not permission to apply XML patches.",
+    "An approved receipt permits only a human-operated AE smoke step against explicit reviewed paths.",
+    "The current manifest binding checksum is metadata-only and non-cryptographic. It binds approval and closeout artifacts to the reviewed manifest without hashing private patch payload bodies.",
+    "Reports produced from this protocol must be sanitized and must not embed project XML, binary .aep payloads, layer text corpora, media, .ffx data, or .aex payloads."
+  ]
+}

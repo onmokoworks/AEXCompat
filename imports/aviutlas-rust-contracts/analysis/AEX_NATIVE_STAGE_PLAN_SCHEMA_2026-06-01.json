@@ -1,0 +1,275 @@
+{
+  "schema_name": "AEX native stage plan schema",
+  "schema_version": 1,
+  "artifact": "target/aex-native-stage-plan/native-stage-plan.local.json",
+  "purpose": "Machine-check a no-load PF selector and host-structure plan before any separate native AEX loader implementation slice.",
+  "required_fields": [
+    "schema_version",
+    "publication_status",
+    "status",
+    "native_load_performed",
+    "selectors_executed",
+    "render_performed",
+    "broker_may_load_plugin",
+    "worker_may_load_plugin",
+    "ofx_may_route_to_loader",
+    "selected_effect_id",
+    "normalized_plugin_path",
+    "manifest_summary",
+    "manifest_readiness_summary",
+    "manifest_fixture_refresh_audit_summary",
+    "ticket_summary",
+    "ticket_runtime_evidence_summary",
+    "host_struct_plan",
+    "native_stage_order",
+    "promotion_gate",
+    "checks",
+    "blocked_reasons",
+    "next_action",
+    "notes"
+  ],
+  "required_values": {
+    "schema_version": 1,
+    "publication_status": "local-only",
+    "native_load_performed": false,
+    "selectors_executed": false,
+    "render_performed": false,
+    "broker_may_load_plugin": false,
+    "worker_may_load_plugin": false,
+    "ofx_may_route_to_loader": false
+  },
+  "allowed_statuses": [
+    "planned_native_stage_contract_no_load",
+    "blocked_loader_manifest",
+    "blocked_worker_ticket",
+    "blocked_identity_mismatch",
+    "blocked_no_load_invariants"
+  ],
+  "ready_status": "planned_native_stage_contract_no_load",
+  "manifest_summary_required_fields": [
+    "status",
+    "ready_for_separate_loader_slice_review",
+    "native_loader_calls_allowed",
+    "broker_may_load_aex",
+    "ofx_facade_may_route_to_loader"
+  ],
+  "manifest_readiness_summary_required_fields": [
+    "provided",
+    "matched_entry_count",
+    "status",
+    "entry_status",
+    "pipl_content_scan_status",
+    "pipl_content_scan_ready",
+    "allowed_operations"
+  ],
+  "required_ready_manifest_readiness_values_when_provided": {
+    "status": "probe_readiness_planned",
+    "entry_status": "draft_allowlisted",
+    "pipl_content_scan_status": "semantic_matches",
+    "pipl_content_scan_ready": true,
+    "allowed_operation": "describe"
+  },
+  "manifest_fixture_refresh_audit_summary_required_fields": [
+    "provided",
+    "schema_version",
+    "publication_status",
+    "status",
+    "native_load_performed",
+    "render_performed",
+    "fixture_selected",
+    "loader_enabled",
+    "fixture_gate_candidate_count",
+    "wiztree_total_aex_count",
+    "wiztree_canonical_non_generated_count",
+    "wiztree_generated_target_artifact_count",
+    "generated_target_artifacts_excluded",
+    "candidates_present_in_refresh",
+    "input_contains_forbidden_tokens",
+    "blocked_reason_count"
+  ],
+  "manifest_fixture_refresh_audit_summary_ready_values_when_provided": {
+    "schema_version": 1,
+    "publication_status": "local-only",
+    "status": "fixture_gate_refresh_ready_no_load",
+    "native_load_performed": false,
+    "render_performed": false,
+    "fixture_selected": false,
+    "loader_enabled": false,
+    "fixture_gate_candidate_count": 2,
+    "wiztree_total_aex_count": 119,
+    "wiztree_canonical_non_generated_count": 40,
+    "wiztree_generated_target_artifact_count": 79,
+    "generated_target_artifacts_excluded": true,
+    "candidates_present_in_refresh": true,
+    "input_contains_forbidden_tokens": false,
+    "blocked_reason_count": 0
+  },
+  "cleanroom_boundary_summary_required_fields_when_present": [
+    "schema_name",
+    "schema_version",
+    "publication_status",
+    "compatibility_classification",
+    "source_file_count",
+    "allowed_planning_label_count",
+    "allowed_metadata_label_count",
+    "source_forbidden_substring_count",
+    "required_source_boundary_notes_count",
+    "native_loader_calls_allowed",
+    "adobe_sdk_headers_allowed",
+    "abi_generator_allowed",
+    "third_party_effect_host_crate_allowed",
+    "third_party_pipl_crate_allowed",
+    "reuse_existing_aviutl_dynamic_loader_for_aex_allowed",
+    "pf_names_are_planning_labels_only",
+    "metadata_labels_do_not_define_abi",
+    "worker_os_isolation_ffi_allowed"
+  ],
+  "cleanroom_boundary_summary_required_values_when_present": {
+    "schema_name": "AEX host vocabulary cleanroom boundary",
+    "schema_version": 1,
+    "publication_status": "local-only design artifact",
+    "compatibility_classification": "Cleanroom planning vocabulary guard",
+    "native_loader_calls_allowed": false,
+    "adobe_sdk_headers_allowed": false,
+    "abi_generator_allowed": false,
+    "third_party_effect_host_crate_allowed": false,
+    "third_party_pipl_crate_allowed": false,
+    "reuse_existing_aviutl_dynamic_loader_for_aex_allowed": false,
+    "pf_names_are_planning_labels_only": true,
+    "metadata_labels_do_not_define_abi": true
+  },
+  "conditional_check_names": [
+    "manifest_fixture_refresh_audit_ready_no_load",
+    "host_vocabulary_boundary_no_loader_or_sdk"
+  ],
+  "ticket_summary_required_fields": [
+    "status",
+    "operation",
+    "allowlist_id",
+    "native_load_performed",
+    "worker_may_load_plugin",
+    "planned_stage_count"
+  ],
+  "ticket_runtime_evidence_summary_required_fields": [
+    "worker_identity_revalidation_required",
+    "worker_attestation_required",
+    "sandbox_preflight_required",
+    "job_object_required",
+    "handle_inheritance_required"
+  ],
+  "ticket_runtime_evidence_summary_required_values": {
+    "worker_identity_revalidation_required": "passed",
+    "worker_attestation_required": "passed",
+    "sandbox_preflight_required": "passed",
+    "job_object_required": "assigned-with-kill-on-close",
+    "handle_inheritance_required": "sentinel_not_inherited-with-explicit-handle-list"
+  },
+  "host_struct_plan_required_fields": [
+    "name",
+    "allocation_status",
+    "mutation_status",
+    "purpose"
+  ],
+  "host_struct_names": [
+    "PF_InData",
+    "PF_OutData",
+    "PF_ParamDef[]",
+    "PF_LayerDef source",
+    "PF_LayerDef destination"
+  ],
+  "host_struct_required_values": {
+    "allocation_status": "declared_not_allocated",
+    "mutation_status": "not_mutated"
+  },
+  "native_stage_required_fields": [
+    "name",
+    "coarse_ticket_stage",
+    "pf_selector",
+    "status",
+    "host_structs",
+    "surface_status"
+  ],
+  "native_stage_names": [
+    "load",
+    "global_setup",
+    "params_setup",
+    "sequence_setup",
+    "frame_setup",
+    "render",
+    "frame_setdown",
+    "sequence_setdown",
+    "global_setdown"
+  ],
+  "coarse_ticket_stage_names": [
+    "load",
+    "global_setup",
+    "params_setup",
+    "sequence_setup",
+    "render",
+    "sequence_teardown",
+    "global_teardown"
+  ],
+  "pf_selector_names": [
+    "native_module_load_deferred",
+    "PF_Cmd_GLOBAL_SETUP",
+    "PF_Cmd_PARAMS_SETUP",
+    "PF_Cmd_SEQUENCE_SETUP",
+    "PF_Cmd_FRAME_SETUP",
+    "PF_Cmd_RENDER",
+    "PF_Cmd_FRAME_SETDOWN",
+    "PF_Cmd_SEQUENCE_SETDOWN",
+    "PF_Cmd_GLOBAL_SETDOWN"
+  ],
+  "native_stage_status": "planned_not_run",
+  "promotion_gate_required_values": {
+    "native_loader_calls_allowed": false,
+    "worker_selector_calls_allowed": false,
+    "worker_pixel_buffers_allowed": false,
+    "ofx_facade_may_route_to_loader": false,
+    "requires_separate_loader_slice": true,
+    "requires_explicit_user_approval": true,
+    "requires_code_review": true,
+    "requires_local_fixture_only": true
+  },
+  "required_check_names": [
+    "loader_implementation_manifest_ready_no_load",
+    "manifest_readiness_pipl_gate",
+    "worker_loader_ticket_accepted_no_load",
+    "worker_loader_ticket_runtime_evidence",
+    "manifest_ticket_identity_match",
+    "ticket_planned_stages_not_run",
+    "native_selector_plan_no_load",
+    "evidence_anti_contamination"
+  ],
+  "check_statuses": [
+    "passed",
+    "blocked"
+  ],
+  "forbidden_field_names": [
+    "worker_exe",
+    "input_png",
+    "output_png",
+    "last_probe",
+    "hash",
+    "sha256",
+    "binary_payload",
+    "base64_payload",
+    "rendered_pixels"
+  ],
+  "forbidden_serialized_tokens": [
+    "sha256",
+    "base64",
+    "loadlibrary",
+    "libloading",
+    "effectmain",
+    "output_png",
+    "input_png",
+    "rendered_pixels"
+  ],
+  "required_notes": [
+    "Stage plan reads JSON metadata only.",
+    "No .aex file is opened, hashed, copied, loaded, executed, described, or rendered.",
+    "PF selector names are planning labels only; every selector remains planned_not_run.",
+    "This artifact is not loader approval and does not permit OFX routing."
+  ]
+}

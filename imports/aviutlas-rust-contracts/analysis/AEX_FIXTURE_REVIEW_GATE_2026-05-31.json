@@ -1,0 +1,120 @@
+{
+  "schema_version": 1,
+  "name": "AEX fixture review gate",
+  "publication_status": "local-only design artifact",
+  "status": "review_queue_not_approved",
+  "metadata_mode": "path-and-size-only-no-hash-no-binary-payload",
+  "purpose": "Choose exactly one local-build classic CPU effect candidate for a later, explicitly opened AEX worker loader slice without approving or loading it now.",
+  "selected_fixture": null,
+  "recommended_first_review": "adaptive-filter-local",
+  "recommendation_status": "queue-order-only-not-approval",
+  "approval": {
+    "approved": false,
+    "loader_enabled": false,
+    "real_aex_load_enabled": false,
+    "render_png_enabled": false,
+    "describe_enabled_for_real_aex": false
+  },
+  "single_fixture_policy": {
+    "max_selected_fixtures": 1,
+    "selection_requires_manual_user_approval": true,
+    "selection_requires_local_only_license_review": true,
+    "selection_requires_source_tree_review": true,
+    "selection_requires_binary_redistribution_review": true,
+    "selection_requires_loader_gate_opened_by_separate_slice": true,
+    "no_parallel_first_loader_fixtures": true
+  },
+  "required_runtime_evidence_before_loader": {
+    "allowlist_loader_approval_status": "approved-local-only",
+    "request_loader_approval_status": "approved-local-only",
+    "allowed_operation": "render_png",
+    "worker_identity_revalidation": "passed",
+    "sandbox_preflight": "passed",
+    "worker_attestation": "passed",
+    "job_object": "assigned-with-kill-on-close",
+    "handle_inheritance": "sentinel_not_inherited-with-explicit-handle-list",
+    "ofx_facade": "not-a-loader-and-not-a-bypass"
+  },
+  "candidates": [
+    {
+      "id": "adaptive-filter-local",
+      "display_name": "AdaptiveFilter",
+      "path": "D:\\Projects\\01_Project\\04_Tools\\Ae_Plugins\\AdaptiveFilterRust\\rust\\target\\release\\AdaptiveFilter.aex",
+      "source_tree": "D:\\Projects\\01_Project\\04_Tools\\Ae_Plugins\\AdaptiveFilterRust",
+      "observed_size_bytes": 207360,
+      "fixture_status": "local-build-candidate",
+      "classifier_status": "candidate_for_contract_probe",
+      "plugin_class": "classic-effect-candidate",
+      "legacy_effect_entrypoint_evidence": "CodeWin64X86(EffectMain) observed in adjacent build.rs; EffectMain export observed by optional read-only PE inspection",
+      "optional_static_evidence": {
+        "evidence_status": "observed-read-only-no-load",
+        "pe_machine": "x86_64",
+        "pe_resource_summary": "present; top_level_entries=2; types=PIPL,id:16",
+        "pe_export_entrypoint": "EffectMain",
+        "adjacent_build_rs": "D:\\Projects\\01_Project\\04_Tools\\Ae_Plugins\\AdaptiveFilterRust\\rust\\build.rs",
+        "adjacent_pipl_kind": "AEEffect",
+        "adjacent_pipl_name": "AdaptiveFilter",
+        "adjacent_pipl_category": "Filter",
+        "adjacent_pipl_match_name": "ONMK_AdaptiveFilter",
+        "adjacent_entrypoint": "EffectMain",
+        "smart_render_status": "declared-but-deferred"
+      },
+      "source_license_evidence": "LICENSE file observed; MIT license text noted in AEX_IMAGE_PROBE_LICENSE_NOTES_2026-05-31.md",
+      "review_priority": 1,
+      "review_status": "not-approved",
+      "blocked_reasons": [
+        "manual user approval has not selected this fixture",
+        "compiled .aex binary redistribution policy is not reviewed",
+        "real loader slice is not opened",
+        "native entrypoint has not been called"
+      ]
+    },
+    {
+      "id": "median-pro-local",
+      "display_name": "MedianPro",
+      "path": "D:\\Projects\\01_Project\\04_Tools\\Ae_Plugins\\MedianProRust\\rust\\target\\release\\MedianPro.aex",
+      "source_tree": "D:\\Projects\\01_Project\\04_Tools\\Ae_Plugins\\MedianProRust",
+      "observed_size_bytes": 207360,
+      "fixture_status": "local-build-candidate",
+      "classifier_status": "candidate_for_contract_probe",
+      "plugin_class": "classic-effect-candidate",
+      "legacy_effect_entrypoint_evidence": "CodeWin64X86(EffectMain) observed in adjacent build.rs; EffectMain export observed by optional read-only PE inspection",
+      "optional_static_evidence": {
+        "evidence_status": "observed-read-only-no-load",
+        "pe_machine": "x86_64",
+        "pe_resource_summary": "present; top_level_entries=2; types=PIPL,id:16",
+        "pe_export_entrypoint": "EffectMain",
+        "adjacent_build_rs": "D:\\Projects\\01_Project\\04_Tools\\Ae_Plugins\\MedianProRust\\rust\\build.rs",
+        "adjacent_pipl_kind": "AEEffect",
+        "adjacent_pipl_name": "MedianPro",
+        "adjacent_pipl_category": "Filter",
+        "adjacent_pipl_match_name": "ONMK_MedianPro",
+        "adjacent_entrypoint": "EffectMain",
+        "smart_render_status": "declared-but-deferred"
+      },
+      "source_license_evidence": "LICENSE file observed; MIT license text noted in AEX_IMAGE_PROBE_LICENSE_NOTES_2026-05-31.md",
+      "review_priority": 2,
+      "review_status": "not-approved",
+      "blocked_reasons": [
+        "manual user approval has not selected this fixture",
+        "compiled .aex binary redistribution policy is not reviewed",
+        "real loader slice is not opened",
+        "native entrypoint has not been called"
+      ]
+    }
+  ],
+  "rejected_first_loader_classes": [
+    "aegp",
+    "aeio",
+    "smartfx-only",
+    "gpu-only",
+    "ml-or-onnx-heavy",
+    "unknown"
+  ],
+  "notes": [
+    "This artifact is a review queue, not permission to load .aex.",
+    "The recommendation chooses an order for human review only; it does not approve AdaptiveFilter.",
+    "No hash, binary payload, copied .aex, or private image fixture is embedded.",
+    "AEX dynamic describe/render analysis is still incomplete until a separate loader slice is explicitly opened."
+  ]
+}

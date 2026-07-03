@@ -1,0 +1,156 @@
+{
+  "schema_name": "AEX fixture gate refresh audit schema",
+  "schema_version": 1,
+  "artifact": "target/aex-fixture-gate-refresh-audit/fixture-gate-refresh.local.json",
+  "publication_status": "local-only design artifact",
+  "purpose": "Machine-check that the fixture review gate still matches the read-only WizTree AEX refresh without selecting, approving, loading, describing, or rendering an AEX fixture.",
+  "required_fields": [
+    "schema_version",
+    "publication_status",
+    "status",
+    "native_load_performed",
+    "render_performed",
+    "fixture_selected",
+    "loader_enabled",
+    "fixture_gate_summary",
+    "wiztree_refresh_summary",
+    "candidate_crosscheck",
+    "checks",
+    "blocked_reasons",
+    "next_action",
+    "notes"
+  ],
+  "required_values": {
+    "schema_version": 1,
+    "publication_status": "local-only",
+    "native_load_performed": false,
+    "render_performed": false,
+    "fixture_selected": false,
+    "loader_enabled": false
+  },
+  "allowed_statuses": [
+    "fixture_gate_refresh_ready_no_load",
+    "blocked_fixture_gate_refresh"
+  ],
+  "ready_status": "fixture_gate_refresh_ready_no_load",
+  "blocked_status": "blocked_fixture_gate_refresh",
+  "fixture_gate_summary_required_fields": [
+    "status",
+    "selected_fixture",
+    "recommended_first_review",
+    "recommendation_status",
+    "approval_all_false",
+    "candidate_count",
+    "local_build_candidate_count",
+    "not_approved_candidate_count",
+    "max_selected_fixtures",
+    "manual_user_approval_required",
+    "no_parallel_first_loader_fixtures"
+  ],
+  "fixture_gate_summary_required_ready_values": {
+    "status": "review_queue_not_approved",
+    "selected_fixture": null,
+    "recommended_first_review": "adaptive-filter-local",
+    "recommendation_status": "queue-order-only-not-approval",
+    "approval_all_false": true,
+    "candidate_count": 2,
+    "local_build_candidate_count": 2,
+    "not_approved_candidate_count": 2,
+    "max_selected_fixtures": 1,
+    "manual_user_approval_required": true,
+    "no_parallel_first_loader_fixtures": true
+  },
+  "wiztree_refresh_summary_required_fields": [
+    "scan_mode",
+    "total_aex_count",
+    "canonical_non_generated_count",
+    "generated_target_artifact_count",
+    "generated_target_artifacts_excluded",
+    "fixture_gate_candidate_count",
+    "fixture_gate_candidates_queued_not_approved",
+    "additional_later_review_count",
+    "keep_current_two_candidate_gate",
+    "do_not_expand_from_generated_targets",
+    "do_not_select_without_manual_approval"
+  ],
+  "wiztree_refresh_summary_required_ready_values": {
+    "scan_mode": "wiztree-read-only-filtered-aex",
+    "total_aex_count": 119,
+    "canonical_non_generated_count": 40,
+    "generated_target_artifact_count": 79,
+    "generated_target_artifacts_excluded": true,
+    "fixture_gate_candidate_count": 2,
+    "fixture_gate_candidates_queued_not_approved": 2,
+    "additional_later_review_count": 3,
+    "keep_current_two_candidate_gate": true,
+    "do_not_expand_from_generated_targets": true,
+    "do_not_select_without_manual_approval": true
+  },
+  "candidate_crosscheck_required_fields": [
+    "id",
+    "path",
+    "gate_observed_size_bytes",
+    "refresh_bytes",
+    "path_matches_refresh",
+    "size_matches_refresh",
+    "gate_review_status",
+    "refresh_review_status",
+    "generated_target_artifact",
+    "blocked_reason_count"
+  ],
+  "candidate_crosscheck_required_ids": [
+    "adaptive-filter-local",
+    "median-pro-local"
+  ],
+  "candidate_crosscheck_required_ready_values": {
+    "path_matches_refresh": true,
+    "size_matches_refresh": true,
+    "gate_review_status": "not-approved",
+    "refresh_review_status": "queued-not-approved",
+    "generated_target_artifact": false
+  },
+  "required_check_names": [
+    "fixture_gate_closed_no_selection",
+    "fixture_gate_candidate_policy",
+    "wiztree_refresh_non_generated_inventory_match",
+    "wiztree_refresh_generated_targets_excluded",
+    "fixture_gate_candidates_present_in_refresh",
+    "fixture_gate_excludes_generated_target_artifacts",
+    "evidence_anti_contamination"
+  ],
+  "check_statuses": [
+    "passed",
+    "blocked"
+  ],
+  "forbidden_field_names": [
+    "sha256",
+    "binary_payload",
+    "base64_payload",
+    "payload_bytes",
+    "copied_asset",
+    "native_load_result",
+    "rendered_pixels",
+    "pixel_hash"
+  ],
+  "forbidden_serialized_tokens": [
+    "sha256",
+    "base64",
+    "binary_payload",
+    "payload_bytes",
+    "copied_asset",
+    "native_load_result",
+    "loadlibrary",
+    "rendered_pixels",
+    "pixel_hash",
+    "\"approved\":true",
+    "\"loader_enabled\":true",
+    "\"real_aex_load_enabled\":true",
+    "\"render_png_enabled\":true"
+  ],
+  "required_notes": [
+    "Fixture gate refresh audit reads JSON metadata only.",
+    "No .aex file is opened, copied, loaded, executed, described, or rendered.",
+    "A ready audit confirms queue hygiene only; it is not fixture selection or loader approval.",
+    "Generated target artifacts must stay excluded from first-loader fixture review."
+  ]
+}

@@ -1,0 +1,97 @@
+{
+  "schema_name": "AEPX production lane gate schema",
+  "schema_version": 1,
+  "publication_status": "local-only gate artifact",
+  "purpose": "Define the evidence required before any production AEPX apply writer or real .aepx input is enabled.",
+  "current_state": {
+    "aepx_patch_probe_apply_enabled": false,
+    "real_aepx_input_enabled": false,
+    "production_xml_writer_enabled": false,
+    "binary_aep_writer_enabled": false,
+    "source_overwrite_enabled": false,
+    "after_effects_tool_launch_enabled": false,
+    "external_process_invocation_in_writer_enabled": false
+  },
+  "baseline_evidence": {
+    "contract_probe": "aviutl-rs/examples/aepx_patch_probe.rs",
+    "synthetic_preservation_proof": "aviutl-rs/examples/aepx_synthetic_preservation_proof.rs",
+    "synthetic_proof_contract": "aviutl-rs/tests/aepx_synthetic_preservation_proof_contract.rs",
+    "synthetic_proof_schema": "analysis/AEPX_SYNTHETIC_PRESERVATION_PROOF_SCHEMA_2026-06-01.json",
+    "writer_strategy_decision": "analysis/AEPX_WRITER_STRATEGY_DECISION_2026-06-01.md"
+  },
+  "allowed_first_candidate": {
+    "operation_kind": "rename_comp",
+    "selector_kind": "xml_id",
+    "target_count": 1,
+    "expected_old_value_required": true,
+    "replacement_class": "single XML attribute value span",
+    "create_new_output_only": true,
+    "source_overwrite_allowed": false
+  },
+  "required_green_evidence_before_apply": [
+    "synthetic_preservation_proof_contract_green",
+    "synthetic_fixture_matrix_covers_scanner_encoding_path_and_multiop_boundaries",
+    "production_writer_path_boundary_contract_green",
+    "production_writer_exact_byte_diff_contract_green",
+    "production_writer_all_or_nothing_contract_green",
+    "production_report_privacy_contract_green",
+    "direct_xml_dependency_license_audit_green_or_no_new_dependency",
+    "real_aepx_fixture_review_receipt_local_only",
+    "manual_ae_smoke_protocol_reviewed_if_claiming_ae_acceptance",
+    "parent_approval_receipt_for_apply_slice"
+  ],
+  "must_remain_false_until_all_required_evidence_is_green": {
+    "aepx_patch_probe_apply_enabled": false,
+    "real_aepx_input_enabled": false,
+    "production_xml_writer_enabled": false,
+    "xml_body_write_performed": false,
+    "output_write_performed": false
+  },
+  "fail_closed_statuses": [
+    "invalid_request",
+    "source_not_found",
+    "output_exists",
+    "output_same_as_source",
+    "unsupported_operation",
+    "ambiguous_target",
+    "target_not_found",
+    "expected_value_mismatch",
+    "parse_error",
+    "preservation_failed",
+    "write_failed"
+  ],
+  "hard_forbidden_in_first_apply_slice": [
+    "binary .aep parsing",
+    "binary .aep writing",
+    "source overwrite",
+    "automated After Effects launch",
+    "external process invocation inside writer",
+    "name-only selector apply",
+    "ambiguous selector apply",
+    "text-node edits",
+    "CDATA edits",
+    "node insertion",
+    "node deletion",
+    "namespace rewriting",
+    "entity normalization",
+    ".aex loading",
+    "OFX routing"
+  ],
+  "report_privacy_boundary": {
+    "xml_body_embedded": false,
+    "private_patch_payloads_embedded": false,
+    "selector_values_embedded": false,
+    "expected_old_values_embedded": false,
+    "new_values_embedded": false,
+    "sentinel_values_embedded": false,
+    "metadata_only_binding_required": true
+  },
+  "transition_rule": {
+    "requires_new_parent_approved_slice": true,
+    "requires_code_review": true,
+    "requires_targeted_contract_tests": true,
+    "requires_manual_receipt_for_real_aepx_fixture": true,
+    "dry_run_evidence_accepted_as_apply_permission": false,
+    "synthetic_proof_accepted_as_ae_compatibility": false
+  }
+}

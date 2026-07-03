@@ -1,0 +1,79 @@
+{
+  "schema_version": 1,
+  "name": "OFX AEX facade contract",
+  "publication_status": "local-only design artifact",
+  "status": "deferred-contract-only",
+  "purpose": "Define the future OFX adapter as a facade over the same AEX broker/worker path, without making OFX the first AEX loader.",
+  "route": {
+    "intended_hosts": [
+      "external-ofx-hosts"
+    ],
+    "aviutlas_to_aex_route": "direct-aex-broker-not-ofx",
+    "ofx_host_may_load_aex": false,
+    "ofx_adapter_may_load_aex": false,
+    "broker_may_load_aex": false,
+    "worker_required": true,
+    "worker_protocol": "aex-image-probe/broker-worker-v0",
+    "first_loader_owner": "aex-worker-loader-slice-not-ofx"
+  },
+  "required_shared_gates": {
+    "allowlist": "same-aex-allowlist-required",
+    "loader_approval": "same-loader-approval-required",
+    "worker_identity_revalidation": "passed-required",
+    "sandbox_preflight": "passed-required",
+    "worker_attestation": "passed-required",
+    "job_object": "assigned-with-kill-on-close-required",
+    "handle_inheritance": "sentinel_not_inherited-with-explicit-handle-list-required",
+    "loader_gate": "separate-loader-slice-must-open-before-render"
+  },
+  "ofx_facade_review_gate": {
+    "status": "not_reviewed",
+    "approved": false,
+    "may_point_to_broker": false,
+    "may_issue_describe": false,
+    "may_issue_render_png": false,
+    "requires_separate_review_after_aex_loader_gate": true,
+    "requires_capability_ids_subset_of_loader_gate": true,
+    "requires_same_shared_gates": true
+  },
+  "forbidden_paths": [
+    "OFX host process loads .aex",
+    "OFX adapter process loads .aex",
+    "AviUtlas routes through OFX to reach AEX",
+    "OFX adapter bypasses AEX allowlist",
+    "OFX adapter bypasses worker identity revalidation",
+    "OFX adapter bypasses sandbox preflight",
+    "OFX SDK or header code is vendored before license audit"
+  ],
+  "current_supported_operations": [],
+  "future_operations": [
+    {
+      "name": "describe",
+      "source": "AEX broker describe request",
+      "requires_loader_enabled": false
+    },
+    {
+      "name": "render_png",
+      "source": "AEX broker render request",
+      "requires_loader_enabled": true
+    }
+  ],
+  "image_contract": {
+    "initial_pixel_format": "rgba8",
+    "transport": "same-worker-image-buffer-contract",
+    "color_management": "none-claimed-in-v0",
+    "time_model": "single-frame-first"
+  },
+  "error_contract": {
+    "worker_crash": "OFX render failure without host crash",
+    "timeout": "OFX render failure plus capability warning",
+    "unsupported_selector": "disabled render path or host message",
+    "gate_denied": "no worker render request is issued"
+  },
+  "notes": [
+    "This artifact does not implement OFX.",
+    "OFX remains deferred until the AEX worker can describe and render at least one reviewed local-build classic CPU effect.",
+    "The OFX facade must consume the same capability and loader-gate evidence as AviUtlas direct AEX integration.",
+    "A passed OFX facade contract must not change loader_approval.approved, loader_enabled, or real_aex_load_enabled."
+  ]
+}

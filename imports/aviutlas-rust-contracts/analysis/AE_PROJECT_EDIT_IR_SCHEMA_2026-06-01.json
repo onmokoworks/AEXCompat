@@ -1,0 +1,416 @@
+{
+  "schema_version": 1,
+  "name": "AE project edit IR schema",
+  "publication_status": "local-only design artifact",
+  "scope": "Neutral edit intent for AEPX dry-run/apply planning and JSX transaction generation.",
+  "ir": {
+    "schema_version": "integer, must be 1",
+    "ir_id": "stable caller id",
+    "publication_status": "local-only | public-candidate | unknown",
+    "source_project": {
+      "path": "explicit user-selected source path or synthetic placeholder",
+      "format": "aep | aepx | synthetic",
+      "publication_status": "local-only | public-candidate | unknown"
+    },
+    "output_project": {
+      "path": "explicit new output path; never inferred from source",
+      "format": "aep | aepx | synthetic",
+      "overwrite": "boolean, must be false in v0"
+    },
+    "generated_jsx": {
+      "path": "explicit generated .jsx path for JSX route, pairwise distinct from source/output",
+      "overwrite": "boolean, must be false in v0",
+      "include_ir_payload": "boolean, true means embedded JSON data only"
+    },
+    "routes": [
+      "aepx",
+      "jsx"
+    ],
+    "operations": [
+      {
+        "id": "stable operation id",
+        "kind": "rename_comp | rename_layer | set_comment | set_marker | replace_text_source | relink_asset_path",
+        "target": {
+          "kind": "project | comp | layer | marker | text_source | asset",
+          "selector": {
+            "stable_id": "preferred neutral id when available",
+            "xml_id": "AEPX stable XML id when available",
+            "ae_item_id": "AE item id when available",
+            "name": "exact item/comp name fallback",
+            "comp_name": "exact comp scope fallback",
+            "comp_ae_item_id": "AE comp item id when targeting an owned layer, marker, or text source",
+            "layer_name": "exact layer scope fallback",
+            "layer_index": "1-based AE layer index when accepted by JSX route",
+            "asset_path": "exact asset source path for relink",
+            "marker_index": "zero-based marker index when updating an existing marker"
+          }
+        },
+        "expected_old_value": "required guard for every mutating operation; mismatch must fail before mutation",
+        "new_value": "string or structured marker/path object",
+        "user_supplied": "boolean, must be true for text replacement, comments, markers, and relink paths",
+        "privacy": {
+          "contains_private_text": "boolean",
+          "contains_private_paths": "boolean",
+          "report_private_payloads": "boolean, must be false"
+        },
+        "route_support": {
+          "aepx": "planned | supported | deferred | blocked",
+          "jsx": "planned | supported | deferred | blocked"
+        }
+      }
+    ],
+    "policy": {
+      "require_new_output_path": true,
+      "source_output_paths_pairwise_distinct": true,
+      "overwrite": false,
+      "allow_ambiguous_selector": false,
+      "allow_arbitrary_js": false,
+      "run_after_effects_in_automated_tests": false,
+      "report_private_payloads": false,
+      "publication_unknown_fails_closed": true,
+      "synthetic_fixtures_only_for_automated_tests": true
+    }
+  },
+  "operation_vocabulary": [
+    "rename_comp",
+    "rename_layer",
+    "set_comment",
+    "set_marker",
+    "replace_text_source",
+    "relink_asset_path"
+  ],
+  "tool_modes_not_operation_kinds": [
+    "inspect_metadata",
+    "noop_validate",
+    "dry_run",
+    "apply",
+    "validate",
+    "generate_jsx_transaction",
+    "manual_smoke_plan"
+  ],
+  "operation_requirements": [
+    {
+      "kind": "rename_comp",
+      "target_kind": "comp",
+      "selector_requires_one_of": [
+        "stable_id",
+        "xml_id",
+        "ae_item_id",
+        "name"
+      ],
+      "expected_old_value": "required",
+      "new_value": "non-empty string",
+      "user_supplied_required": false,
+      "routes": [
+        "aepx",
+        "jsx"
+      ]
+    },
+    {
+      "kind": "rename_layer",
+      "target_kind": "layer",
+      "selector_requires_scope": [
+        "comp_name",
+        "comp_ae_item_id",
+        "stable_id",
+        "xml_id",
+        "ae_item_id"
+      ],
+      "selector_requires_layer_identity": [
+        "layer_name",
+        "layer_index",
+        "stable_id",
+        "xml_id"
+      ],
+      "expected_old_value": "required",
+      "new_value": "non-empty string",
+      "user_supplied_required": false,
+      "routes": [
+        "aepx",
+        "jsx"
+      ]
+    },
+    {
+      "kind": "set_comment",
+      "target_kind": "project | comp | layer | asset",
+      "selector_requires_one_of": [
+        "stable_id",
+        "xml_id",
+        "ae_item_id",
+        "name"
+      ],
+      "expected_old_value": "required",
+      "new_value": "user-supplied string",
+      "user_supplied_required": true,
+      "routes": [
+        "aepx",
+        "jsx"
+      ]
+    },
+    {
+      "kind": "set_marker",
+      "target_kind": "marker | comp | layer",
+      "selector_requires_one_of": [
+        "comp_name",
+        "comp_ae_item_id",
+        "ae_item_id",
+        "name"
+      ],
+      "selector_deferred_for_jsx": [
+        "stable_id",
+        "xml_id",
+        "marker_index"
+      ],
+      "expected_old_value": "required",
+      "new_value": "user-supplied marker object with time/comment fields",
+      "user_supplied_required": true,
+      "routes": [
+        "aepx",
+        "jsx"
+      ]
+    },
+    {
+      "kind": "replace_text_source",
+      "target_kind": "text_source",
+      "selector_requires_scope": [
+        "comp_name",
+        "comp_ae_item_id",
+        "stable_id",
+        "xml_id",
+        "ae_item_id"
+      ],
+      "selector_requires_layer_identity": [
+        "layer_name",
+        "layer_index",
+        "stable_id",
+        "xml_id"
+      ],
+      "expected_old_value": "required",
+      "new_value": "user-supplied string",
+      "user_supplied_required": true,
+      "routes": [
+        "aepx",
+        "jsx"
+      ]
+    },
+    {
+      "kind": "relink_asset_path",
+      "target_kind": "asset",
+      "selector_requires_one_of": [
+        "stable_id",
+        "xml_id",
+        "ae_item_id",
+        "asset_path"
+      ],
+      "expected_old_value": "required_source_path_guard",
+      "new_value": "user-supplied explicit replacement path string",
+      "user_supplied_required": true,
+      "routes": [
+        "aepx",
+        "jsx"
+      ]
+    }
+  ],
+  "path_policy": {
+    "source_project_explicit": true,
+    "output_project_explicit": true,
+    "generated_jsx_explicit": true,
+    "real_request_paths_must_be_absolute": true,
+    "synthetic_placeholders_allowed_only_in_synthetic_fixtures": true,
+    "windows_style_normalization_required": true,
+    "pairwise_distinct_paths": true,
+    "overwrite_allowed": false,
+    "same_source_output_status": "output_same_as_source",
+    "existing_output_status": "output_exists",
+    "existing_generated_jsx_status": "output_exists",
+    "adapter_rejects_existing_output_or_generated_before_request_emission": true
+  },
+  "target_kinds": [
+    "project",
+    "comp",
+    "layer",
+    "marker",
+    "text_source",
+    "asset"
+  ],
+  "selector_policy": {
+    "prefer_stable_ids": true,
+    "reject_unknown_target_kinds": true,
+    "reject_unknown_operation_fields": true,
+    "ambiguous_selector_status": "ambiguous_target",
+    "expected_value_mismatch_status": "expected_value_mismatch",
+    "jsx_layer_index_base": "1-based",
+    "aepx_marker_index_base": "zero-based",
+    "fallback_names_must_be_exact": true,
+    "unscoped_layer_or_text_selectors": "invalid_request"
+  },
+  "privacy_policy": {
+    "report_private_payloads": false,
+    "do_not_embed_project_xml": true,
+    "do_not_embed_binary_aep": true,
+    "do_not_embed_layer_text_corpora": true,
+    "do_not_copy_private_media": true,
+    "synthetic_public_tests_only": true
+  },
+  "runtime_policy": {
+    "automated_tests_launch_after_effects": false,
+    "manual_smoke_plan_allowed": true,
+    "manual_smoke_protocol_schema": "analysis/AE_PROJECT_EDIT_MANUAL_SMOKE_PROTOCOL_SCHEMA_2026-06-01.json",
+    "review_packet_schema": "analysis/AE_PROJECT_EDIT_REVIEW_PACKET_SCHEMA_2026-06-01.json",
+    "review_packet_required_before_approval": true,
+    "manual_smoke_closeout_report_schema": "analysis/AE_PROJECT_EDIT_MANUAL_SMOKE_CLOSEOUT_REPORT_SCHEMA_2026-06-01.json",
+    "manual_smoke_copy_project_only": true,
+    "manual_smoke_requires_approval_receipt": true,
+    "generated_jsx_is_data_interpreter_only": true,
+    "arbitrary_javascript_allowed": false,
+    "binary_aep_writer": "deferred"
+  },
+  "adapter_report": {
+    "route_gates_field": "route_gates",
+    "path_summary_field": "path_summary",
+    "downstream_jsx_validation_field": "downstream_jsx_validation",
+    "request_pair_manifest_output": "optional jsx_request_pair_manifest_json artifact emitted by ae_project_edit_ir",
+    "manual_smoke_closeout_template_output": "optional manual_smoke_closeout_template_json artifact emitted by ae_project_edit_ir only after a planned request",
+    "jsx_execution_gate": {
+      "application_status": "not_applied",
+      "user_approval_status": "required",
+      "after_effects_status": "not_launched",
+      "project_save_performed": false
+    },
+    "jsx_artifact_gate": {
+      "generated_jsx_write_performed_by_adapter": false,
+      "generated_jsx_write_mode_by_adapter": "not_written",
+      "output_project_write_performed_by_adapter": false,
+      "source_project_overwrite_performed_by_adapter": false
+    },
+    "aepx_write_gate": {
+      "patch_application_status": "not_applied",
+      "xml_writer_status": "not_implemented",
+      "user_approval_status": "required_before_write",
+      "output_write_performed": false,
+      "source_overwrite_performed": false
+    },
+    "path_summary": {
+      "fields": [
+        "source_project_path",
+        "output_project_path",
+        "generated_jsx_path",
+        "normalized_source_project_path",
+        "normalized_output_project_path",
+        "normalized_generated_jsx_path",
+        "source_exists",
+        "source_is_file",
+        "observed_source_file_bytes",
+        "output_exists",
+        "generated_jsx_exists",
+        "paths_absolute",
+        "pairwise_distinct_after_normalization",
+        "project_body_read"
+      ],
+      "source_project_path": "caller-supplied path only; no project payload",
+      "output_project_path": "caller-supplied path only",
+      "generated_jsx_path": "caller-supplied path only",
+      "observed_source_file_bytes": "filesystem metadata only; null when source is absent or not a regular file",
+      "output_exists": "filesystem existence check only; adapter still performs no write",
+      "generated_jsx_exists": "filesystem existence check only; adapter still performs no write",
+      "project_body_read": false
+    },
+    "downstream_jsx_validation": {
+      "validator": "ae_jsx_transaction",
+      "validate_request_operation": "validate",
+      "expected_no_ae_status": "dry_run_ok",
+      "after_effects_launch_expected": false,
+      "generated_jsx_write_expected": false,
+      "project_write_expected": false,
+      "validate_request_output": "optional jsx_validate_request_json artifact emitted by ae_project_edit_ir",
+      "scope": "no-AE validation request only; generated JSX and project writes remain separate explicit steps"
+    },
+    "request_pair_manifest": {
+      "manifest_kind": "ae_project_edit_ir_jsx_request_pair",
+      "publication_status": "local-only",
+      "request_payloads_embedded": false,
+      "approval_receipt_schema": "analysis/AE_PROJECT_EDIT_APPROVAL_RECEIPT_SCHEMA_2026-06-01.json",
+      "manual_smoke_protocol_schema": "analysis/AE_PROJECT_EDIT_MANUAL_SMOKE_PROTOCOL_SCHEMA_2026-06-01.json",
+      "review_packet_schema": "analysis/AE_PROJECT_EDIT_REVIEW_PACKET_SCHEMA_2026-06-01.json",
+      "manual_smoke_closeout_report_schema": "analysis/AE_PROJECT_EDIT_MANUAL_SMOKE_CLOSEOUT_REPORT_SCHEMA_2026-06-01.json",
+      "binding": {
+        "algorithm": "fnv1a64-v1-noncryptographic",
+        "checksum_scope": "metadata-only manifest binding; excludes request bodies and private patch payloads",
+        "payloads_embedded": false,
+        "covers_private_patch_payloads": false,
+        "cryptographic_digest": {
+          "algorithm": "sha256-v1",
+          "digest_scope": "metadata-only manifest digest; excludes request bodies and private patch payloads",
+          "payloads_embedded": false,
+          "covers_private_patch_payloads": false
+        }
+      },
+      "project_body_read": false,
+      "after_effects_launch_expected": false,
+      "project_write_expected": false,
+      "human_approval_gate": {
+        "approval_status": "required_pending",
+        "approval_receipt_required": true,
+        "required_before_ae_execution": true,
+        "required_before_project_write": true,
+        "approval_receipt_id": null,
+        "approved_by": null,
+        "approved_at_utc": null
+      },
+      "generate_request_expected_no_ae_status": "generated_jsx",
+      "validate_request_expected_no_ae_status": "dry_run_ok",
+      "validate_request_generated_jsx_write_expected": false
+    }
+  },
+  "deferred_surfaces": [
+    "binary .aep parser",
+    "binary .aep writer",
+    "automated After Effects launch",
+    "private project payload fixtures",
+    ".ffx parsing",
+    ".aex parameter extraction",
+    "effect parameter mutation",
+    "timeline/keyframe mutation beyond markers/comments",
+    "media copy/import/export",
+    "preservation-unsafe AEPX writer"
+  ],
+  "response_statuses": [
+    "planned",
+    "dry_run_ok",
+    "generated_jsx",
+    "manual_smoke_plan_ok",
+    "invalid_request",
+    "schema_error",
+    "source_not_found",
+    "output_exists",
+    "output_same_as_source",
+    "unsupported_operation",
+    "ambiguous_target",
+    "target_not_found",
+    "expected_value_mismatch",
+    "preservation_failed",
+    "forbidden_jsx_api",
+    "ae_not_run"
+  ],
+  "notes": [
+    "This IR is edit intent only; it does not parse or write binary .aep.",
+    "AEPX and JSX routes consume the same operation vocabulary but may support different subsets at a given implementation milestone.",
+    "Top-level tool modes must not drift into operations[].kind.",
+    "Unknown publication status fails closed before writes.",
+    "Generated JSX must remain a fixed interpreter over JSON data, not arbitrary JavaScript.",
+    "IR adapter reports expose route_gates so callers can see JSX execution, JSX artifact, and AEPX write boundaries before invoking downstream tools.",
+    "IR adapter jsx_artifact_gate remains not_written because the adapter emits JSON request artifacts only; generated JSX creation is a separate ae_jsx_transaction generate step using create-new semantics.",
+    "IR adapter path_summary is metadata-only: it may record caller paths, normalized paths, existence flags, and source byte length, but project_body_read remains false.",
+    "IR adapter must reject existing output project or generated JSX paths before emitting a downstream JSX transaction request.",
+    "IR adapter may emit a validate-mode JSX transaction request for downstream dry-run validation; that validate request must not launch AE, write generated JSX, or write a project.",
+    "IR adapter may emit a metadata-only JSX request-pair manifest; it must not embed request bodies or private patch payloads.",
+    "Request-pair manifests must keep human_approval_gate as required_pending until an explicit external approval receipt exists.",
+    "Approval receipts are separate artifacts and do not permit source overwrite or direct binary .aep writing.",
+    "Manual smoke protocol is copy-project-only, review-packet checked, approval-gated, and human-operated; tools must not launch AE or execute JSX.",
+    "Manual smoke closeout templates are emitted as not-run sanitized evidence shells only; operator-filled reports are not automated AE oracles.",
+    "Request-pair manifests now expose a metadata-only non-cryptographic binding checksum. It is for local artifact matching, not tamper-proof security, and it does not cover private patch payload bodies.",
+    "Automated tests use synthetic expectation fixtures and never launch After Effects.",
+    "AEPX apply remains blocked until an XML writer proves preservation of unknown nodes, attributes, comments, CDATA, namespaces, declaration, encoding, and whitespace.",
+    "AEX and FFX data remain opaque; this IR must not depend on .aex loading or .ffx parsing."
+  ]
+}

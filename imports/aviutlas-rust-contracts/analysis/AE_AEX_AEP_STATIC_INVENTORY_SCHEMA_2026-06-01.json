@@ -1,0 +1,219 @@
+{
+  "schema_version": 1,
+  "schema_name": "AE/AEX/AEP static inventory schema sidecar",
+  "inventory_artifact": "analysis/AE_AEX_AEP_STATIC_INVENTORY_2026-05-31.json",
+  "publication_status": "local-only design artifact",
+  "contract_classification": "Measured local-only inventory metadata contract",
+  "purpose": "Machine-check the local-only metadata inventory shape for AE/AEX/AEP-related candidate files without copying assets, hashing files, reading payloads, launching AE, loading AEX, executing JSX, or recording native oracle output.",
+  "inventory_required_fields": [
+    "schema_version",
+    "generated_at",
+    "target_root",
+    "publication_status",
+    "safety_notes",
+    "extension_summary",
+    "top_level_buckets",
+    "aepx_candidates",
+    "aex_candidates",
+    "next_actions"
+  ],
+  "inventory_required_values": {
+    "schema_version": 1,
+    "generated_at": "2026-05-31",
+    "publication_status": "local-only"
+  },
+  "required_safety_notes": [
+    "metadata-only inventory",
+    "no binary payloads copied",
+    "no file hashes recorded",
+    "do not publish without review"
+  ],
+  "allowed_extension_summary_keys": [
+    ".aex",
+    ".aep",
+    ".aepx",
+    ".jsx",
+    ".ffx",
+    ".auf",
+    ".exo"
+  ],
+  "extension_summary_entry_required_fields": [
+    "count",
+    "bytes"
+  ],
+  "extension_summary_required_counts": {
+    ".aex": 40,
+    ".aep": 215,
+    ".aepx": 1,
+    ".jsx": 10,
+    ".ffx": 0,
+    ".auf": 69,
+    ".exo": 42
+  },
+  "explicit_candidate_lists": {
+    ".aex": "aex_candidates",
+    ".aepx": "aepx_candidates"
+  },
+  "aggregate_only_extensions": [
+    ".aep",
+    ".jsx",
+    ".ffx",
+    ".auf",
+    ".exo"
+  ],
+  "forbidden_candidate_lists": [
+    "aep_candidates",
+    "jsx_candidates",
+    "ffx_candidates",
+    "auf_candidates",
+    "exo_candidates"
+  ],
+  "top_level_bucket_required_fields": [
+    "name",
+    "candidate_files",
+    "mb"
+  ],
+  "top_level_bucket_expected_names": [
+    "02_Privete",
+    "01_Works",
+    "04_Tools",
+    "05_other",
+    "tools",
+    "05_sites"
+  ],
+  "aex_candidate_required_fields": [
+    "path",
+    "bytes",
+    "inferred_class",
+    "fixture_status"
+  ],
+  "aex_allowed_inferred_classes": [
+    "aegp",
+    "heavy-or-specialized-effect",
+    "likely-classic-effect",
+    "unknown-effect-like"
+  ],
+  "aex_allowed_fixture_statuses": [
+    "defer",
+    "local-build-candidate",
+    "not-first-render-fixture",
+    "possible-local-build-candidate"
+  ],
+  "aex_required_class_counts": {
+    "aegp": 5,
+    "heavy-or-specialized-effect": 14,
+    "likely-classic-effect": 16,
+    "unknown-effect-like": 5
+  },
+  "aex_required_fixture_status_counts": {
+    "defer": 18,
+    "local-build-candidate": 16,
+    "not-first-render-fixture": 5,
+    "possible-local-build-candidate": 1
+  },
+  "aepx_candidate_required_fields": [
+    "path",
+    "bytes",
+    "fixture_status",
+    "recommended_use"
+  ],
+  "aepx_candidate_required_values": {
+    "fixture_status": "local-only candidate"
+  },
+  "candidate_path_policy": {
+    "path_publication": "local-only",
+    "path_fields_are_metadata_only": true,
+    "allowed_explicit_path_extensions": [
+      ".aex",
+      ".aepx"
+    ],
+    "aggregate_extensions_must_not_have_path_lists": [
+      ".aep",
+      ".jsx",
+      ".ffx",
+      ".auf",
+      ".exo"
+    ]
+  },
+  "metadata_only_invariants": {
+    "asset_copy_performed": false,
+    "hash_capture_performed": false,
+    "payload_capture_performed": false,
+    "ae_launch_performed": false,
+    "aex_load_performed": false,
+    "aep_open_performed": false,
+    "jsx_execution_performed": false,
+    "render_performed": false,
+    "external_process_started": false,
+    "native_oracle": "not_run"
+  },
+  "forbidden_inventory_fields": [
+    "hash",
+    "sha1",
+    "sha256",
+    "sha512",
+    "md5",
+    "digest",
+    "file_hash",
+    "file_digest",
+    "content_hash",
+    "binary_hash",
+    "payload",
+    "contents",
+    "content",
+    "binary",
+    "binary_payload",
+    "base64_payload",
+    "payload_bytes",
+    "payload_hash",
+    "binary_bytes",
+    "file_bytes",
+    "bytes_base64",
+    "copied_path",
+    "copied_asset",
+    "asset_copy",
+    "copied_payload",
+    "copied_contents",
+    "source_payload",
+    "project_payload",
+    "aep_payload",
+    "aepx_payload",
+    "jsx_payload",
+    "script_body",
+    "xml_body",
+    "embedded_file",
+    "embedded_bytes",
+    "render_result",
+    "rendered_pixels",
+    "pixel_hash",
+    "screenshot",
+    "output_png",
+    "native_load_result",
+    "load_result",
+    "execution_result",
+    "ae_load_result",
+    "aex_load_result",
+    "external_process_result",
+    "stdout",
+    "stderr"
+  ],
+  "forbidden_serialized_tokens": [
+    "sha256",
+    "base64",
+    "binary_payload",
+    "payload_bytes",
+    "native_load_result",
+    "loadlibrary",
+    "effectmain",
+    "rendered_pixels",
+    "pixel_hash",
+    "copied_asset",
+    "external_process_started"
+  ],
+  "notes": [
+    "This sidecar pins the measured local-only inventory metadata contract.",
+    "Only .aex and .aepx currently expose explicit local path candidate rows; .aep, .jsx, .ffx, .auf, and .exo remain aggregate-only counts and byte totals.",
+    "Candidate rows must stay path, size, and classification/status metadata only.",
+    "No AE/AEX load, asset copy, hash capture, payload capture, external worker process, render, or native oracle result is part of this inventory contract."
+  ]
+}

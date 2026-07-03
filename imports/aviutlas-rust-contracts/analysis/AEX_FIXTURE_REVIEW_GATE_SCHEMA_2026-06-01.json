@@ -1,0 +1,124 @@
+{
+  "schema_name": "AEX fixture review gate schema",
+  "schema_version": 1,
+  "artifact": "analysis/AEX_FIXTURE_REVIEW_GATE_2026-05-31.json",
+  "purpose": "Machine-check the local-only fixture review queue before any future AEX worker loader slice.",
+  "required_fields": [
+    "schema_version",
+    "name",
+    "publication_status",
+    "status",
+    "metadata_mode",
+    "purpose",
+    "selected_fixture",
+    "recommended_first_review",
+    "recommendation_status",
+    "approval",
+    "single_fixture_policy",
+    "required_runtime_evidence_before_loader",
+    "candidates",
+    "rejected_first_loader_classes",
+    "notes"
+  ],
+  "required_values": {
+    "schema_version": 1,
+    "publication_status": "local-only design artifact",
+    "status": "review_queue_not_approved",
+    "metadata_mode": "path-and-size-only-no-hash-no-binary-payload",
+    "selected_fixture": null,
+    "recommendation_status": "queue-order-only-not-approval"
+  },
+  "approval_flags_must_be_false": [
+    "approved",
+    "loader_enabled",
+    "real_aex_load_enabled",
+    "render_png_enabled",
+    "describe_enabled_for_real_aex"
+  ],
+  "single_fixture_policy_required_values": {
+    "max_selected_fixtures": 1,
+    "selection_requires_manual_user_approval": true,
+    "selection_requires_local_only_license_review": true,
+    "selection_requires_source_tree_review": true,
+    "selection_requires_binary_redistribution_review": true,
+    "selection_requires_loader_gate_opened_by_separate_slice": true,
+    "no_parallel_first_loader_fixtures": true
+  },
+  "runtime_evidence_required_values": {
+    "allowlist_loader_approval_status": "approved-local-only",
+    "request_loader_approval_status": "approved-local-only",
+    "allowed_operation": "render_png",
+    "worker_identity_revalidation": "passed",
+    "sandbox_preflight": "passed",
+    "worker_attestation": "passed",
+    "job_object": "assigned-with-kill-on-close",
+    "handle_inheritance": "sentinel_not_inherited-with-explicit-handle-list",
+    "ofx_facade": "not-a-loader-and-not-a-bypass"
+  },
+  "candidate_required_fields": [
+    "id",
+    "display_name",
+    "path",
+    "source_tree",
+    "observed_size_bytes",
+    "fixture_status",
+    "classifier_status",
+    "plugin_class",
+    "legacy_effect_entrypoint_evidence",
+    "optional_static_evidence",
+    "source_license_evidence",
+    "review_priority",
+    "review_status",
+    "blocked_reasons"
+  ],
+  "candidate_required_values": {
+    "fixture_status": "local-build-candidate",
+    "classifier_status": "candidate_for_contract_probe",
+    "plugin_class": "classic-effect-candidate",
+    "review_status": "not-approved"
+  },
+  "optional_static_evidence_required_fields": [
+    "evidence_status",
+    "pe_machine",
+    "pe_resource_summary",
+    "pe_export_entrypoint",
+    "adjacent_build_rs",
+    "adjacent_pipl_kind",
+    "adjacent_pipl_name",
+    "adjacent_pipl_category",
+    "adjacent_pipl_match_name",
+    "adjacent_entrypoint",
+    "smart_render_status"
+  ],
+  "required_candidate_blocked_reasons": [
+    "manual user approval has not selected this fixture",
+    "compiled .aex binary redistribution policy is not reviewed",
+    "real loader slice is not opened",
+    "native entrypoint has not been called"
+  ],
+  "allowed_rejected_first_loader_classes": [
+    "aegp",
+    "aeio",
+    "smartfx-only",
+    "gpu-only",
+    "ml-or-onnx-heavy",
+    "unknown"
+  ],
+  "required_notes": [
+    "This artifact is a review queue, not permission to load .aex.",
+    "No hash, binary payload, copied .aex, or private image fixture is embedded.",
+    "AEX dynamic describe/render analysis is still incomplete until a separate loader slice is explicitly opened."
+  ],
+  "forbidden_serialized_tokens": [
+    "sha256",
+    "base64",
+    "binary_payload",
+    "payload_bytes",
+    "loadlibrary",
+    "native_load_performed",
+    "\"approved\":true",
+    "\"loader_enabled\":true",
+    "\"real_aex_load_enabled\":true",
+    "\"render_png_enabled\":true"
+  ]
+}

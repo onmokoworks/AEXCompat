@@ -1,0 +1,57 @@
+{
+  "schema_version": 1,
+  "name": "AEX worker capability report schema",
+  "publication_status": "local-only design artifact",
+  "capability": {
+    "plugin_id": "stable local id from allowlist or catalog",
+    "plugin_path": "absolute path to .aex",
+    "plugin_class": "classic-effect | aegp | aeio | smartfx | unknown",
+    "publication_status": "local-only | public-candidate | blocked | unknown",
+    "load_status": "not_loaded | loaded | failed | timeout | crash",
+    "entrypoint": "resolved-from-pipl | export | unknown | null",
+    "selectors": [
+      {
+        "name": "PF_Cmd_GLOBAL_SETUP",
+        "status": "ok | unsupported | failed | not_run",
+        "error": "optional short error"
+      }
+    ],
+    "params": [
+      {
+        "id": "stable parameter id",
+        "label": "display label",
+        "kind": "float | int | bool | choice | color | point | path | unknown",
+        "default": "JSON value",
+        "min": "number or null",
+        "max": "number or null",
+        "choices": "array or null",
+        "animated": "supported | unsupported | unknown"
+      }
+    ],
+    "pixel_formats": [
+      "rgba8"
+    ],
+    "required_suites": [
+      "string names, if observed"
+    ],
+    "unsupported": [
+      "SmartFX",
+      "GPU",
+      "AEGP suites",
+      "AEIO",
+      "audio",
+      "layer checkout",
+      "custom UI"
+    ],
+    "last_result": {
+      "status": "ok | allowlist_denied | unsupported_selector | unsupported_suite | timeout | plugin_exception | worker_crash | internal_error",
+      "elapsed_ms": "integer",
+      "warnings": "array of strings"
+    }
+  },
+  "notes": [
+    "This schema is shared by aex-image-probe, future AviUtlas external effect integration, and future OFX facade.",
+    "Unsupported features must be reported instead of faked.",
+    "Crash and timeout history must not include binary payloads or private image contents."
+  ]
+}

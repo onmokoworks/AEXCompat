@@ -1,0 +1,56 @@
+{
+  "schema_version": 1,
+  "publication_status": "example-only",
+  "description": "Example allowlist shape for a local-only AEX image probe worker. Do not add private absolute paths to public artifacts.",
+  "entries": [
+    {
+      "id": "adaptive-filter-local",
+      "plugin_path": "D:\\Projects\\01_Project\\04_Tools\\Ae_Plugins\\AdaptiveFilterRust\\rust\\target\\release\\AdaptiveFilter.aex",
+      "expected_class": "classic-effect",
+      "allowed_operations": [
+        "describe",
+        "render_png"
+      ],
+      "max_width": 1024,
+      "max_height": 1024,
+      "timeout_ms": 5000,
+      "fixture_status": "local-build-candidate",
+      "loader_approval_status": "not-approved",
+      "sandbox_profile_status": "missing",
+      "worker_revalidation_status": "missing",
+      "notes": [
+        "CPU-based local-build candidate from adjacent source notes.",
+        "Real AEX loading remains disabled until sandbox and worker revalidation gates are implemented.",
+        "Do not publish this path or binary payload without review."
+      ]
+    },
+    {
+      "id": "median-pro-local",
+      "plugin_path": "D:\\Projects\\01_Project\\04_Tools\\Ae_Plugins\\MedianProRust\\rust\\target\\release\\MedianPro.aex",
+      "expected_class": "classic-effect",
+      "allowed_operations": [
+        "describe",
+        "render_png"
+      ],
+      "max_width": 1024,
+      "max_height": 1024,
+      "timeout_ms": 5000,
+      "fixture_status": "local-build-candidate",
+      "loader_approval_status": "not-approved",
+      "sandbox_profile_status": "missing",
+      "worker_revalidation_status": "missing",
+      "notes": [
+        "CPU-based local-build candidate from adjacent source notes.",
+        "Real AEX loading remains disabled until sandbox and worker revalidation gates are implemented.",
+        "Do not publish this path or binary payload without review."
+      ]
+    }
+  ],
+  "blocked_classes": [
+    "aegp",
+    "aeio",
+    "smartfx-only",
+    "gpu-only",
+    "unknown"
+  ]
+}

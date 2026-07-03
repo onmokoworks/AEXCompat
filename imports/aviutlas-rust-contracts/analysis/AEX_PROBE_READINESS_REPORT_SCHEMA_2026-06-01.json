@@ -1,0 +1,199 @@
+{
+  "schema_name": "AEX probe readiness top-level report schema",
+  "schema_version": 1,
+  "artifact": "target/aex-probe-readiness/readiness.local.json",
+  "companion_artifact": "target/aex-probe-readiness/loader-gate.local.json",
+  "purpose": "Machine-check the metadata-only top-level reports emitted by aex_probe_readiness.",
+  "compatibility_classification": "Measured readiness metadata/report contract",
+  "scope": "aex_probe_readiness top-level readiness.local.json and loader-gate.local.json",
+  "excluded_scopes": [
+    "AEX loader preflight preflight.local.json",
+    "AEX image probe worker receipt/report",
+    "per-plugin capability draft"
+  ],
+  "readiness_required_fields": [
+    "schema_version",
+    "status",
+    "publication_status",
+    "candidate_count",
+    "allowlist_entry_count",
+    "blocked_count",
+    "generated_files",
+    "entries",
+    "notes"
+  ],
+  "readiness_required_values": {
+    "schema_version": 1,
+    "status": "probe_readiness_planned",
+    "publication_status": "local-only"
+  },
+  "readiness_allowed_statuses": [
+    "probe_readiness_planned"
+  ],
+  "readiness_entry_required_fields": [
+    "effect_id",
+    "display_name",
+    "plugin_path",
+    "status",
+    "classifier_status",
+    "classifier_inferred_class",
+    "pipl_content_scan_status",
+    "pipl_content_scan_ready",
+    "allowed_operations",
+    "blocked_reason"
+  ],
+  "readiness_entry_allowed_statuses": [
+    "draft_allowlisted",
+    "blocked_or_deferred"
+  ],
+  "readiness_ready_entry_required_values": {
+    "status": "draft_allowlisted",
+    "allowed_operations": [
+      "describe"
+    ]
+  },
+  "readiness_blocked_entry_required_values": {
+    "status": "blocked_or_deferred",
+    "allowed_operations": []
+  },
+  "generated_files_required": [
+    "allowlist.local.draft.json",
+    "readiness.local.json",
+    "loader-gate.local.json"
+  ],
+  "generated_files_required_prefixes": [
+    "requests/",
+    "capabilities/"
+  ],
+  "generated_files_fixture_gate_required": [
+    "fixture-review.local.json",
+    "loader-preflight.local.json"
+  ],
+  "loader_gate_required_fields": [
+    "schema_version",
+    "status",
+    "publication_status",
+    "approved",
+    "loader_enabled",
+    "real_aex_load_enabled",
+    "candidate_count",
+    "open_candidate_count",
+    "blocked_count",
+    "entries",
+    "requirements_before_open",
+    "notes"
+  ],
+  "loader_gate_required_values": {
+    "schema_version": 1,
+    "status": "loader_gate_not_opened",
+    "publication_status": "local-only",
+    "approved": false,
+    "loader_enabled": false,
+    "real_aex_load_enabled": false,
+    "open_candidate_count": 0
+  },
+  "loader_gate_entry_required_fields": [
+    "effect_id",
+    "display_name",
+    "plugin_path",
+    "declared_size_bytes",
+    "max_plugin_bytes",
+    "pre_loader_status",
+    "loader_approval_status",
+    "allowlist_operation_status",
+    "sandbox_preflight_required",
+    "job_object_required",
+    "handle_inheritance_required",
+    "worker_identity_revalidation_required",
+    "worker_attestation_required",
+    "ofx_facade_status",
+    "blocked_reasons",
+    "required_before_loader"
+  ],
+  "loader_gate_entry_required_values": {
+    "pre_loader_status": "blocked_pending_review",
+    "loader_approval_status": "not-approved",
+    "allowlist_operation_status": "describe-only",
+    "sandbox_preflight_required": "passed",
+    "job_object_required": "assigned-with-kill-on-close",
+    "handle_inheritance_required": "sentinel_not_inherited-with-explicit-handle-list",
+    "worker_identity_revalidation_required": "passed",
+    "worker_attestation_required": "passed",
+    "ofx_facade_status": "deferred-same-broker-worker-contract"
+  },
+  "fixture_review_gate_summary_required_fields": [
+    "status",
+    "selected_fixture",
+    "recommended_first_review",
+    "recommendation_status",
+    "allowed_candidate_count",
+    "candidate_ids",
+    "effect"
+  ],
+  "fixture_review_gate_summary_required_values": {
+    "effect": "filter-describe-draft-to-review-queue"
+  },
+  "fixture_review_gate_summary_forbidden_fields": [
+    "approved",
+    "loader_enabled",
+    "real_aex_load_enabled",
+    "render_png_enabled",
+    "approval"
+  ],
+  "required_readiness_notes": [
+    "Draft readiness does not prove plugin loadability or render support.",
+    "Worker execution still requires explicit reviewed worker_exe and allowlist review.",
+    "Static-classifier catalog candidates require pipl_content_scan.status=semantic_matches with contents_emitted=false before readiness planning."
+  ],
+  "required_loader_gate_notes": [
+    "This gate is evidence for a future loader slice; it is not loader approval.",
+    "OFX must remain a facade over the same broker/worker/sandbox contract and cannot bypass AEX allowlist gates.",
+    "No .aex file is opened, hashed, loaded, executed, copied, or rendered by this planner."
+  ],
+  "forbidden_top_level_fields": [
+    "preflight_passed",
+    "native_load_performed",
+    "broker_may_load_plugin",
+    "worker_exe",
+    "input_png",
+    "output_png",
+    "report_path",
+    "request",
+    "receipt"
+  ],
+  "forbidden_field_names": [
+    "hash",
+    "sha256",
+    "binary_payload",
+    "base64_payload",
+    "worker_exe",
+    "input_png",
+    "output_png",
+    "last_probe",
+    "rendered_pixels"
+  ],
+  "forbidden_serialized_tokens": [
+    "sha256",
+    "base64",
+    "binary_payload",
+    "base64_payload",
+    "output_png",
+    "input_png",
+    "rendered_pixels",
+    "loadlibrary",
+    "libloading",
+    "effectmain"
+  ],
+  "metadata_only_invariants": {
+    "current_allowed_operation": "describe",
+    "loader_gate_must_remain_closed": true,
+    "fixture_gate_summary_is_not_approval": true,
+    "static_catalog_requires_semantic_pipl_content_scan": true,
+    "native_aex_load_render_pixel_parity_out_of_scope": true
+  },
+  "notes": [
+    "This sidecar is for the readiness planner's top-level reports only.",
+    "It is intentionally separate from the loader preflight schema and image probe receipt schema.",
+    "The reports are generated from static metadata and must not contain hashes, binary payloads, or output PNG claims."
+  ]
+}

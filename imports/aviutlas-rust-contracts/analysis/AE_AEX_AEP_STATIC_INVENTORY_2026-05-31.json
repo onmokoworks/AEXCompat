@@ -1,0 +1,331 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-05-31",
+  "target_root": "D:\\Projects\\01_Project",
+  "publication_status": "local-only",
+  "safety_notes": [
+    "metadata-only inventory",
+    "no binary payloads copied",
+    "no file hashes recorded",
+    "do not publish without review"
+  ],
+  "extension_summary": {
+    ".aex": {
+      "count": 40,
+      "bytes": 64745984
+    },
+    ".aep": {
+      "count": 215,
+      "bytes": 2995633216
+    },
+    ".aepx": {
+      "count": 1,
+      "bytes": 174352
+    },
+    ".jsx": {
+      "count": 10,
+      "bytes": 46009
+    },
+    ".ffx": {
+      "count": 0,
+      "bytes": 0
+    },
+    ".auf": {
+      "count": 69,
+      "bytes": 10152448
+    },
+    ".exo": {
+      "count": 42,
+      "bytes": 2824054
+    }
+  },
+  "top_level_buckets": [
+    {
+      "name": "02_Privete",
+      "candidate_files": 129,
+      "mb": 1206.09
+    },
+    {
+      "name": "01_Works",
+      "candidate_files": 54,
+      "mb": 1529.8
+    },
+    {
+      "name": "04_Tools",
+      "candidate_files": 40,
+      "mb": 61.66
+    },
+    {
+      "name": "05_other",
+      "candidate_files": 120,
+      "mb": 12.74
+    },
+    {
+      "name": "tools",
+      "candidate_files": 29,
+      "mb": 116.31
+    },
+    {
+      "name": "05_sites",
+      "candidate_files": 5,
+      "mb": 4.6
+    }
+  ],
+  "aepx_candidates": [
+    {
+      "path": "D:\\Projects\\01_Project\\04_Tools\\AEP2Autograph\\aftereffects.aepx",
+      "bytes": 174352,
+      "fixture_status": "local-only candidate",
+      "recommended_use": "manual inspection and patcher design only; do not overwrite"
+    }
+  ],
+  "aex_candidates": [
+    {
+      "path": "D:\\Projects\\01_Project\\04_Tools\\Ae_Plugins\\AdaptiveFilterRust\\rust\\target\\release\\AdaptiveFilter.aex",
+      "bytes": 207360,
+      "inferred_class": "likely-classic-effect",
+      "fixture_status": "local-build-candidate"
+    },
+    {
+      "path": "D:\\Projects\\01_Project\\04_Tools\\Ae_Plugins\\ae-depth-anything\\_backup_cpp_plugin_20260524\\build\\Release\\DepthAnythingV2.aex",
+      "bytes": 65536,
+      "inferred_class": "heavy-or-specialized-effect",
+      "fixture_status": "defer"
+    },
+    {
+      "path": "D:\\Projects\\01_Project\\04_Tools\\Ae_Plugins\\ae-depth-anything\\target\\release\\DepthONNX.aex",
+      "bytes": 568832,
+      "inferred_class": "heavy-or-specialized-effect",
+      "fixture_status": "defer"
+    },
+    {
+      "path": "D:\\Projects\\01_Project\\04_Tools\\Ae_Plugins\\AEPluginBuild\\AeTimelineSyncAEGP.aex",
+      "bytes": 158720,
+      "inferred_class": "aegp",
+      "fixture_status": "not-first-render-fixture"
+    },
+    {
+      "path": "D:\\Projects\\01_Project\\04_Tools\\Ae_Plugins\\AEPluginBuild\\AeTimelineSyncAEGP.from_D_Projects_AEPlugins_20260523_012606.aex",
+      "bytes": 86528,
+      "inferred_class": "aegp",
+      "fixture_status": "not-first-render-fixture"
+    },
+    {
+      "path": "D:\\Projects\\01_Project\\04_Tools\\Ae_Plugins\\AEPluginBuild\\CMYKMisreg.aex",
+      "bytes": 565760,
+      "inferred_class": "likely-classic-effect",
+      "fixture_status": "local-build-candidate"
+    },
+    {
+      "path": "D:\\Projects\\01_Project\\04_Tools\\Ae_Plugins\\AEPluginBuild\\ExEditRemoteAEGP.aex",
+      "bytes": 189952,
+      "inferred_class": "aegp",
+      "fixture_status": "not-first-render-fixture"
+    },
+    {
+      "path": "D:\\Projects\\01_Project\\04_Tools\\Ae_Plugins\\AEPluginBuild\\fin\\DistortChroma.aex",
+      "bytes": 234496,
+      "inferred_class": "likely-classic-effect",
+      "fixture_status": "local-build-candidate"
+    },
+    {
+      "path": "D:\\Projects\\01_Project\\04_Tools\\Ae_Plugins\\AEPluginBuild\\fin\\ONMK_Filters.aex",
+      "bytes": 213504,
+      "inferred_class": "likely-classic-effect",
+      "fixture_status": "local-build-candidate"
+    },
+    {
+      "path": "D:\\Projects\\01_Project\\04_Tools\\Ae_Plugins\\AEPluginBuild\\MaskOffset.aex",
+      "bytes": 200704,
+      "inferred_class": "likely-classic-effect",
+      "fixture_status": "local-build-candidate"
+    },
+    {
+      "path": "D:\\Projects\\01_Project\\04_Tools\\Ae_Plugins\\AEPluginBuild\\MinimaxMap.aex",
+      "bytes": 220672,
+      "inferred_class": "likely-classic-effect",
+      "fixture_status": "local-build-candidate"
+    },
+    {
+      "path": "D:\\Projects\\01_Project\\04_Tools\\Ae_Plugins\\AEPluginBuild\\old\\ONMK_Furikake.aex",
+      "bytes": 226304,
+      "inferred_class": "unknown-effect-like",
+      "fixture_status": "defer"
+    },
+    {
+      "path": "D:\\Projects\\01_Project\\04_Tools\\Ae_Plugins\\AEPluginBuild\\old\\UltraGlow_old.aex",
+      "bytes": 211968,
+      "inferred_class": "unknown-effect-like",
+      "fixture_status": "defer"
+    },
+    {
+      "path": "D:\\Projects\\01_Project\\04_Tools\\Ae_Plugins\\AEPluginBuild\\old\\UltraGlow_old2.aex",
+      "bytes": 233472,
+      "inferred_class": "unknown-effect-like",
+      "fixture_status": "defer"
+    },
+    {
+      "path": "D:\\Projects\\01_Project\\04_Tools\\Ae_Plugins\\AEPluginBuild\\ONMK_ColorfulEcho.aex",
+      "bytes": 240640,
+      "inferred_class": "unknown-effect-like",
+      "fixture_status": "defer"
+    },
+    {
+      "path": "D:\\Projects\\01_Project\\04_Tools\\Ae_Plugins\\AEPluginBuild\\ONMK_OpticalFlare.aex",
+      "bytes": 6480896,
+      "inferred_class": "heavy-or-specialized-effect",
+      "fixture_status": "defer"
+    },
+    {
+      "path": "D:\\Projects\\01_Project\\04_Tools\\Ae_Plugins\\AEPluginBuild\\ONMK_ParticleLab.aex",
+      "bytes": 861184,
+      "inferred_class": "heavy-or-specialized-effect",
+      "fixture_status": "defer"
+    },
+    {
+      "path": "D:\\Projects\\01_Project\\04_Tools\\Ae_Plugins\\AEPluginBuild\\ONMK_Starglow.aex",
+      "bytes": 6479360,
+      "inferred_class": "heavy-or-specialized-effect",
+      "fixture_status": "defer"
+    },
+    {
+      "path": "D:\\Projects\\01_Project\\04_Tools\\Ae_Plugins\\AEPluginBuild\\ONMK_TuiImage.aex",
+      "bytes": 5892608,
+      "inferred_class": "heavy-or-specialized-effect",
+      "fixture_status": "defer"
+    },
+    {
+      "path": "D:\\Projects\\01_Project\\04_Tools\\Ae_Plugins\\AEPluginBuild\\ONMK_TuiImage.cpu_default.aex",
+      "bytes": 5760000,
+      "inferred_class": "heavy-or-specialized-effect",
+      "fixture_status": "defer"
+    },
+    {
+      "path": "D:\\Projects\\01_Project\\04_Tools\\Ae_Plugins\\AEPluginBuild\\ONMK_TuiImage.cpu_safe.aex",
+      "bytes": 237568,
+      "inferred_class": "unknown-effect-like",
+      "fixture_status": "possible-local-build-candidate"
+    },
+    {
+      "path": "D:\\Projects\\01_Project\\04_Tools\\Ae_Plugins\\AEPluginBuild\\ONMK_TuiImage.luma_color_blur.aex",
+      "bytes": 5768192,
+      "inferred_class": "heavy-or-specialized-effect",
+      "fixture_status": "defer"
+    },
+    {
+      "path": "D:\\Projects\\01_Project\\04_Tools\\Ae_Plugins\\AEPluginBuild\\ONMK_TuiImageRenderer.aex",
+      "bytes": 5758976,
+      "inferred_class": "heavy-or-specialized-effect",
+      "fixture_status": "defer"
+    },
+    {
+      "path": "D:\\Projects\\01_Project\\04_Tools\\Ae_Plugins\\AEPluginBuild\\ParticleLab.aex",
+      "bytes": 814080,
+      "inferred_class": "heavy-or-specialized-effect",
+      "fixture_status": "defer"
+    },
+    {
+      "path": "D:\\Projects\\01_Project\\04_Tools\\Ae_Plugins\\AEPluginBuild\\PathArray.aex",
+      "bytes": 251392,
+      "inferred_class": "likely-classic-effect",
+      "fixture_status": "local-build-candidate"
+    },
+    {
+      "path": "D:\\Projects\\01_Project\\04_Tools\\Ae_Plugins\\AEPluginBuild\\RefractionDispersion.aex",
+      "bytes": 559616,
+      "inferred_class": "likely-classic-effect",
+      "fixture_status": "local-build-candidate"
+    },
+    {
+      "path": "D:\\Projects\\01_Project\\04_Tools\\Ae_Plugins\\AEPluginBuild\\ScatterMap.aex",
+      "bytes": 201216,
+      "inferred_class": "likely-classic-effect",
+      "fixture_status": "local-build-candidate"
+    },
+    {
+      "path": "D:\\Projects\\01_Project\\04_Tools\\Ae_Plugins\\AEPluginBuild\\TuiImage.aex",
+      "bytes": 5888512,
+      "inferred_class": "heavy-or-specialized-effect",
+      "fixture_status": "defer"
+    },
+    {
+      "path": "D:\\Projects\\01_Project\\04_Tools\\Ae_Plugins\\FlowONNX\\target\\release\\FlowONNX.aex",
+      "bytes": 600576,
+      "inferred_class": "heavy-or-specialized-effect",
+      "fixture_status": "defer"
+    },
+    {
+      "path": "D:\\Projects\\01_Project\\04_Tools\\Ae_Plugins\\MedianProRust\\rust\\target\\release\\MedianPro.aex",
+      "bytes": 207360,
+      "inferred_class": "likely-classic-effect",
+      "fixture_status": "local-build-candidate"
+    },
+    {
+      "path": "D:\\Projects\\01_Project\\04_Tools\\Ae_Plugins\\MedianProRust\\rust\\target\\release\\ONMK_Filters.aex",
+      "bytes": 213504,
+      "inferred_class": "likely-classic-effect",
+      "fixture_status": "local-build-candidate"
+    },
+    {
+      "path": "D:\\Projects\\01_Project\\04_Tools\\Ae_Plugins\\MinimaxMapRust\\rust\\target\\release\\MinimaxMap.aex",
+      "bytes": 220672,
+      "inferred_class": "likely-classic-effect",
+      "fixture_status": "local-build-candidate"
+    },
+    {
+      "path": "D:\\Projects\\01_Project\\04_Tools\\Ae_Plugins\\ParticleLabRust\\ParticleKit.aex",
+      "bytes": 880640,
+      "inferred_class": "heavy-or-specialized-effect",
+      "fixture_status": "defer"
+    },
+    {
+      "path": "D:\\Projects\\01_Project\\04_Tools\\Ae_Plugins\\PathArrayRust\\target\\release\\PathArray.aex",
+      "bytes": 208896,
+      "inferred_class": "likely-classic-effect",
+      "fixture_status": "local-build-candidate"
+    },
+    {
+      "path": "D:\\Projects\\01_Project\\04_Tools\\Ae_Plugins\\RefractionDispersionRust\\rust\\target\\release\\RefractionDispersion.aex",
+      "bytes": 602624,
+      "inferred_class": "likely-classic-effect",
+      "fixture_status": "local-build-candidate"
+    },
+    {
+      "path": "D:\\Projects\\01_Project\\04_Tools\\Ae_Plugins\\RefractionDispersionRust\\target\\release\\RefractionDispersion.aex",
+      "bytes": 559616,
+      "inferred_class": "likely-classic-effect",
+      "fixture_status": "local-build-candidate"
+    },
+    {
+      "path": "D:\\Projects\\01_Project\\04_Tools\\Ae_Plugins\\TimeSliceRust\\target\\release\\FrameSlice.aex",
+      "bytes": 6436864,
+      "inferred_class": "likely-classic-effect",
+      "fixture_status": "local-build-candidate"
+    },
+    {
+      "path": "D:\\Projects\\01_Project\\04_Tools\\Ae_Plugins\\TuiImageRenderer\\rust\\target\\release\\TuiImage.aex",
+      "bytes": 5888512,
+      "inferred_class": "heavy-or-specialized-effect",
+      "fixture_status": "defer"
+    },
+    {
+      "path": "D:\\Projects\\01_Project\\05_other\\AviUtlas_exedit_for_ae\\experiments\\ae-timeline-sync\\aegp-plugin\\build-aegp\\AeTimelineSyncAEGP.aex",
+      "bytes": 158720,
+      "inferred_class": "aegp",
+      "fixture_status": "not-first-render-fixture"
+    },
+    {
+      "path": "D:\\Projects\\01_Project\\05_other\\AviUtlas_exedit_for_ae\\experiments\\exedit-ae-remote\\aegp-client\\build-aegp\\ExEditRemoteAEGP.aex",
+      "bytes": 189952,
+      "inferred_class": "aegp",
+      "fixture_status": "not-first-render-fixture"
+    }
+  ],
+  "next_actions": [
+    "build AEX static catalog schema",
+    "add PiPL/resource read-only classifier before execution",
+    "choose one small likely classic effect candidate after local-build/license review",
+    "keep AEGP outputs as controller references",
+    "use the single AEPX only as local manual inspection target unless approved"
+  ]
+}

@@ -1,0 +1,88 @@
+{
+  "schema_version": 1,
+  "name": "AE JSX export artifact verification report schema",
+  "publication_status": "local-only measured preflight contract",
+  "compatibility_classification": "Measured standalone JSX artifact preflight contract",
+  "measured_from": {
+    "implementation": "aviutl-rs/examples/ae_jsx_export_artifact_verify.rs",
+    "manifest_schema": "analysis/AE_JSX_EXPORT_MANIFEST_SCHEMA_2026-06-01.json",
+    "export_report_schema": "analysis/AE_JSX_EXPORT_REPORT_SCHEMA_2026-06-01.json"
+  },
+  "scope": {
+    "accepted_manifest_kind": "ae_jsx_export_artifact_manifest",
+    "input_files": [
+      "export manifest JSON",
+      "generated JSX artifact body",
+      "optional export report JSON sidecar"
+    ],
+    "purpose": "Recalculate metadata binding and generated JSX body digest before manual approval review or manual AE execution.",
+    "not_an_approval_receipt": true,
+    "not_a_runtime_oracle": true,
+    "does_not_apply_jsx": true
+  },
+  "report": {
+    "report_kind": {
+      "type": "string",
+      "current_value": "ae_jsx_export_artifact_verification"
+    },
+    "verification_status": {
+      "type": "string",
+      "vocabulary": [
+        "verified",
+        "blocked"
+      ],
+      "accepted_value": "verified"
+    },
+    "artifact_accepted_for_manual_approval_review": {
+      "type": "boolean",
+      "accepted_value": true,
+      "meaning": "The local files are internally consistent enough to review for a separate manual approval receipt; this is not permission to run AE."
+    },
+    "required_true_fields_for_verified": [
+      "generated_jsx_path_matches_manifest",
+      "generated_jsx_bytes_match",
+      "generated_jsx_digest_match",
+      "export_manifest_binding_verified"
+    ],
+    "optional_true_fields_when_export_report_is_supplied": [
+      "export_report_path_matches_manifest",
+      "report_sidecar_consistent"
+    ],
+    "generated_jsx_digest": {
+      "algorithm_field": "generated_jsx_digest_algorithm",
+      "current_algorithm": "sha256-v1",
+      "expected_hex_field": "generated_jsx_digest_expected_hex",
+      "observed_hex_field": "generated_jsx_digest_observed_hex",
+      "match_field": "generated_jsx_digest_match",
+      "generated_jsx_embedded": false
+    },
+    "manifest_binding": {
+      "checksum_algorithm": "fnv1a64-v1-noncryptographic",
+      "digest_algorithm": "sha256-v1",
+      "binding_recalculation_required": true,
+      "payloads_embedded": false,
+      "covers_generated_jsx_body_directly": false,
+      "covers_generated_jsx_body_digest_fields": true
+    },
+    "blocked_reasons": {
+      "type": "array<string>",
+      "empty_when_verified": true
+    }
+  },
+  "cli_boundary": {
+    "usage": "ae_jsx_export_artifact_verify manifest.json generated.jsx [--export-report export-report.json] [--report verification-report.json]",
+    "verification_report_write_mode": "create_new",
+    "after_effects_launch": false,
+    "jsx_execution": false,
+    "project_payload_read": false,
+    "project_write": false,
+    "source_overwrite": false
+  },
+  "notes": [
+    "This preflight closes the gap between metadata-only manifest review and the actual generated JSX file on disk by hashing the local JSX artifact body.",
+    "A verified report is consistency evidence only; it is not an approval receipt and not tool-side execution permission.",
+    "The verifier must fail closed if the manifest binding, generated JSX path, byte length, body digest, or optional export report sidecar disagrees.",
+    "The report does not embed the generated JSX body, source snapshot JSON, private project payloads, or binary AEP data.",
+    "The tool does not launch AE, execute JSX, write .aep/.aepx projects, overwrite sources, or touch AEX/OFX/AviUtl core responsibilities."
+  ]
+}

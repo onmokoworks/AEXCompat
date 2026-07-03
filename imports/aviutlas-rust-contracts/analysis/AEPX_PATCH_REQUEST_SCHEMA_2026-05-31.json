@@ -1,0 +1,137 @@
+{
+  "schema_version": 1,
+  "name": "AEPX patch request schema",
+  "publication_status": "local-only design artifact",
+  "request": {
+    "schema_version": "integer, must be 1",
+    "operation": "inspect_metadata | noop_validate | dry_run | apply",
+    "input_aepx": "path to .aepx; required",
+    "output_aepx": "path to new .aepx; required for apply",
+    "patch_id": "stable caller id",
+    "publication_status": "local-only | public-candidate | unknown",
+    "operations": [
+      {
+        "id": "stable operation id",
+        "kind": "rename_comp | rename_layer | set_comment | set_marker | replace_text_source | relink_asset_path",
+        "target": {
+          "kind": "project | comp | layer | marker | text_source | asset",
+          "selector": {
+            "xml_id": "preferred stable XML id when known",
+            "name": "fallback exact display name",
+            "comp_name": "optional exact comp scope",
+            "layer_name": "optional exact layer scope",
+            "asset_path": "optional exact asset path",
+            "marker_index": "optional zero-based marker index"
+          }
+        },
+        "expected_old_value": "required guard for every mutating operation; string for rename_comp, rename_layer, set_comment, replace_text_source, and relink_asset_path; object for set_marker; mismatch fails the operation once apply is implemented",
+        "new_value": "string or structured marker/path object; string required for rename_comp, rename_layer, set_comment, replace_text_source, and relink_asset_path; object required for set_marker",
+        "user_supplied": "boolean, must be true for comments, markers, relink paths, and text replacement"
+      }
+    ],
+    "options": {
+      "overwrite": "boolean, must be false in v0",
+      "allow_ambiguous_selector": "boolean, must be false in v0",
+      "preserve_unknown_xml": "required",
+      "normalization_mode": "none; future explicit modes only",
+      "max_file_bytes": "integer, default 10485760",
+      "max_operations": "integer, default 100",
+      "report_private_payloads": "boolean, must be false"
+    }
+  },
+  "response": {
+    "schema_version": "integer, must be 1",
+    "status": [
+      "ok",
+      "dry_run_ok",
+      "invalid_request",
+      "schema_error",
+      "source_not_found",
+      "output_exists",
+      "output_same_as_source",
+      "unsupported_operation",
+      "ambiguous_target",
+      "target_not_found",
+      "expected_value_mismatch",
+      "parse_error",
+      "preservation_failed",
+      "write_failed",
+      "internal_error"
+    ],
+    "aepx_patch_report_binding": {
+      "algorithm": "fnv1a64-v1-noncryptographic",
+      "checksum_hex": "metadata-only 16-hex checksum over report status/path/metadata/gate/count fields; excludes XML body, selectors, expected/new values, private patch payloads, and elapsed_ms",
+      "payloads_embedded": "false",
+      "covers_xml_or_private_patch_payloads": "false",
+      "cryptographic_digest": {
+        "algorithm": "sha256-v1",
+        "digest_hex": "metadata-only 64-hex digest over the same canonical report fields",
+        "payloads_embedded": "false",
+        "covers_xml_or_private_patch_payloads": "false"
+      }
+    },
+    "input_aepx": "path",
+    "output_aepx": "path or null",
+    "metadata": {
+      "input_exists": "boolean; true when input_aepx has filesystem metadata",
+      "input_is_file": "boolean; true when input_aepx metadata is a regular file",
+      "observed_file_bytes": "integer byte length for regular files, otherwise null",
+      "normalized_input_aepx": "normalized input path used for equality/reporting, or null when request JSON did not parse",
+      "normalized_output_aepx": "normalized output path used for equality/reporting, or null when absent",
+      "xml_body_read": "boolean; false for metadata-only inspect/report normalization"
+    },
+    "operations": [
+      {
+        "id": "operation id",
+        "status": "planned | applied | skipped | failed | unsupported",
+        "target_count": "integer",
+        "warnings": []
+      }
+    ],
+    "preservation": {
+      "unknown_nodes": "preserved | rewritten | not_written | unknown",
+      "unknown_attributes": "preserved | rewritten | not_written | unknown",
+      "xml_declaration": "preserved | rewritten | not_written | unknown",
+      "encoding": "preserved | rewritten | normalized | not_written | unknown",
+      "comments": "preserved | rewritten | not_written | unknown",
+      "cdata": "preserved | rewritten | not_written | unknown",
+      "namespace_prefixes": "preserved | rewritten | not_written | unknown",
+      "whitespace": "preserved | rewritten | not_written | unknown"
+    },
+    "io_gate": {
+      "xml_body_read_performed": "boolean, false in current v0 reports",
+      "xml_body_write_performed": "boolean, false in current v0 reports",
+      "xml_body_embedded_in_report": "boolean, false in current v0 reports",
+      "private_patch_payloads_embedded_in_report": "boolean, false in current v0 reports",
+      "external_process_invoked": "boolean, false in current v0 reports",
+      "after_effects_invoked": "boolean, false in current v0 reports"
+    },
+    "write_gate": {
+      "patch_application_status": "not_applied in current v0 reports",
+      "xml_writer_status": "not_implemented in current v0 reports",
+      "user_approval_status": "required_before_write until preservation-safe apply exists",
+      "output_write_performed": "boolean, false in current v0 reports",
+      "source_overwrite_performed": "boolean, always false in current v0 reports"
+    },
+    "warnings": [],
+    "unsupported": [],
+    "elapsed_ms": "integer"
+  },
+  "notes": [
+    "Default caller behavior should be dry_run.",
+    "Top-level operation is the tool mode; operations[].kind is the edit operation.",
+    "apply requires output_aepx and output_aepx must be a new path.",
+    "inspect_metadata returns source_not_found when input_aepx is missing or not a file; it must not read the XML body.",
+    "input_aepx and output_aepx must not be equal after path normalization.",
+    "When output_aepx is supplied for dry_run, noop_validate, or inspect_metadata, v0 still validates that it is an absolute new .aepx path and refuses existing outputs.",
+    "Current v0 reports expose io_gate with no XML body read/write, no XML/private payload report embedding, no external process, and no After Effects invocation.",
+    "Current v0 reports expose write_gate as not_applied, XML writer not implemented, user approval required before write, output write not performed, and source overwrite not performed.",
+    "Current v0 reports expose aepx_patch_report_binding with FNV and sha256-v1 metadata-only values; review packets may require this binding for optional AEPX dry-run evidence.",
+    "overwrite is rejected in v0.",
+    "All mutating operations must include expected_old_value before dry_run or future apply can pass.",
+    "publication_status unknown should fail closed before writing.",
+    "report_private_payloads true is invalid.",
+    "Synthetic fixtures only; local real .aepx files are manual-smoke material.",
+    "Reports must not embed full XML payloads or private project content."
+  ]
+}

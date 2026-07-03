@@ -1,0 +1,290 @@
+{
+  "schema_name": "AEX loader approval receipt schema",
+  "schema_version": 1,
+  "publication_status": "local-only design artifact",
+  "artifact": "target/aex-loader-approval/approval-validation.local.json",
+  "purpose": "Machine-check an explicit human approval receipt for starting a separate AEX loader implementation review slice without enabling native AEX loading.",
+  "receipt": {
+    "required_fields": [
+      "schema_version",
+      "receipt_kind",
+      "approval_receipt_id",
+      "approval_status",
+      "approved_by",
+      "approved_at_utc",
+      "approval_scope",
+      "prerequisite_reports",
+      "approval_effect",
+      "safety_acknowledgements"
+    ],
+    "schema_version": {
+      "type": "integer",
+      "const": 1
+    },
+    "receipt_kind": {
+      "type": "string",
+      "const": "aex_loader_manual_approval_receipt"
+    },
+    "approval_status": {
+      "type": "string",
+      "vocabulary": [
+        "draft_unapproved",
+        "approved",
+        "rejected",
+        "revoked"
+      ],
+      "required_for_acceptance": "approved"
+    },
+    "approval_scope_required_fields": [
+      "loader_slice_review_packet_status",
+      "loader_slice_review_packet_checksum_algorithm",
+      "loader_slice_review_packet_checksum_hex",
+      "fixture_gate_status_required",
+      "selected_candidate_review_status_required",
+      "selected_candidate_fixture_status_required",
+      "selected_candidate_plugin_class_required",
+      "operation_scope",
+      "ofx_route_scope"
+    ],
+    "approval_scope_required_values": {
+      "loader_slice_review_packet_status": "ready_for_manual_loader_slice_review_no_load",
+      "loader_slice_review_packet_checksum_algorithm": "fnv1a64-v1-noncryptographic",
+      "fixture_gate_status_required": "review_queue_approved_local_only",
+      "selected_candidate_review_status_required": "approved-local-only",
+      "selected_candidate_fixture_status_required": "local-build-candidate",
+      "selected_candidate_plugin_class_required": "classic-effect-candidate",
+      "operation_scope": "render_png_first_loader_review",
+      "ofx_route_scope": "deferred_not_approved"
+    },
+    "prerequisite_reports_required_true": [
+      "loader_slice_review_packet_reviewed",
+      "fixture_gate_reviewed",
+      "loader_manifest_reviewed",
+      "provenance_audit_reviewed",
+      "worker_identity_revalidation_reviewed",
+      "sandbox_preflight_reviewed",
+      "worker_attestation_reviewed",
+      "job_object_reviewed",
+      "handle_inheritance_reviewed",
+      "license_reviewed",
+      "cleanroom_reviewed",
+      "generated_target_exclusion_reviewed"
+    ],
+    "approval_effect_required_values": {
+      "allow_separate_loader_implementation_review": true,
+      "allow_native_aex_load": false,
+      "allow_worker_plugin_load": false,
+      "allow_broker_may_load_aex": false,
+      "allow_render_png": false,
+      "allow_ofx_route": false,
+      "allow_aex_sdk_or_abi_import": false,
+      "allow_private_path_publication": false
+    },
+    "safety_acknowledgements_required_true": [
+      "local_fixture_reviewed",
+      "license_reviewed",
+      "cleanroom_reviewed",
+      "worker_isolation_reviewed",
+      "ofx_deferred_acknowledged",
+      "native_load_still_forbidden",
+      "render_still_forbidden",
+      "private_path_publication_forbidden"
+    ]
+  },
+  "loader_slice_review_packet_requirements": {
+    "status": "ready_for_manual_loader_slice_review_no_load",
+    "required_false_fields": [
+      "native_load_performed",
+      "loader_slice_approved",
+      "loader_enabled",
+      "real_aex_load_enabled",
+      "native_loader_calls_allowed",
+      "broker_may_load_aex",
+      "worker_may_load_plugin",
+      "render_performed",
+      "ofx_route_allowed",
+      "input_contains_forbidden_tokens"
+    ],
+    "required_passed_checks": [
+      "fixture_gate_manual_approval_ready_no_load",
+      "loader_manifest_ready_no_load",
+      "provenance_chain_ready_no_load",
+      "manual_review_requirements_closed",
+      "no_execution_or_route_permission",
+      "evidence_anti_contamination"
+    ],
+    "conditional_passed_checks": [
+      "fixture_identity_smoke_preserved_no_load"
+    ],
+    "fixture_gate_summary_required_values": {
+      "status": "review_queue_approved_local_only",
+      "selected_fixture_present": true,
+      "approval_approved": true,
+      "approval_loader_enabled": true,
+      "approval_real_aex_load_enabled": true,
+      "approval_render_png_enabled": true,
+      "approval_describe_enabled_for_real_aex": true,
+      "generated_target_candidate_count": 0,
+      "selected_candidate_review_status": "approved-local-only",
+      "selected_candidate_fixture_status": "local-build-candidate",
+      "selected_candidate_plugin_class": "classic-effect-candidate",
+      "selected_candidate_source_license_evidence_present": true,
+      "single_fixture_policy_ready": true,
+      "runtime_evidence_ready": true,
+      "input_contains_forbidden_tokens": false
+    },
+    "provenance_required_values": {
+      "status": "no_load_provenance_chain_ready",
+      "runtime_and_cleanroom_ready": true,
+      "ofx_readiness_ready": true
+    }
+  },
+  "validator_report": {
+    "may_be_emitted_by": "aex_loader_approval_receipt",
+    "required_fields": [
+      "schema_version",
+      "report_kind",
+      "validation_status",
+      "approval_accepted",
+      "loader_review_approved",
+      "native_load_performed",
+      "loader_enabled",
+      "real_aex_load_enabled",
+      "native_loader_calls_allowed",
+      "worker_may_load_plugin",
+      "broker_may_load_aex",
+      "render_performed",
+      "ofx_route_allowed",
+      "input_contains_forbidden_tokens",
+      "loader_slice_review_packet_checked",
+      "loader_slice_review_packet_status",
+      "loader_slice_review_packet_checksum_algorithm",
+      "loader_slice_review_packet_checksum_hex",
+      "fixture_gate_status",
+      "fixture_selected_for_review",
+      "fixture_candidate_review_status",
+      "fixture_candidate_fixture_status",
+      "fixture_candidate_plugin_class",
+      "runtime_and_cleanroom_ready",
+      "receipt_kind",
+      "receipt_approval_status",
+      "receipt_allows_separate_loader_implementation_review",
+      "receipt_allows_native_aex_load",
+      "receipt_allows_worker_plugin_load",
+      "receipt_allows_render_png",
+      "receipt_allows_ofx_route",
+      "blocked_reasons",
+      "notes"
+    ],
+    "validation_statuses": [
+      "approved_for_loader_implementation_review_no_load",
+      "invalid_receipt"
+    ],
+    "required_no_load_values": {
+      "schema_version": 1,
+      "report_kind": "aex_loader_approval_receipt_validation",
+      "native_load_performed": false,
+      "loader_enabled": false,
+      "real_aex_load_enabled": false,
+      "native_loader_calls_allowed": false,
+      "worker_may_load_plugin": false,
+      "broker_may_load_aex": false,
+      "render_performed": false,
+      "ofx_route_allowed": false,
+      "loader_slice_review_packet_checked": true,
+      "loader_slice_review_packet_checksum_algorithm": "fnv1a64-v1-noncryptographic"
+    },
+    "approved_is_not": [
+      "permission to load an AEX binary",
+      "permission for the broker to call LoadLibrary or libloading",
+      "permission for the worker to load a plug-in",
+      "permission to render pixels",
+      "permission to route AviUtlas through OFX to AEX",
+      "permission to import Adobe SDK headers or define native ABI layouts"
+    ],
+    "forbidden_serialized_tokens": [
+      "sha256",
+      "base64",
+      "loadlibrary",
+      "libloading",
+      "effectmain",
+      "aeeffect",
+      "binary_payload",
+      "payload_bytes",
+      "copied_asset",
+      "native_load_result",
+      "rendered_pixels",
+      "worker_exe",
+      "plugin_path",
+      "normalized_plugin_path",
+      "input_png",
+      "output_png",
+      ".aex",
+      "D:\\",
+      "D:/"
+    ],
+    "required_notes": [
+      "AEX loader approval receipt validation reads JSON metadata only.",
+      "An accepted receipt approves only a separate loader implementation review slice.",
+      "This validator does not enable native AEX loading, worker plug-in loading, render, or OFX routing.",
+      "Private plug-in paths and AEX static metadata labels must not be serialized in approval receipts or reports."
+    ]
+  },
+  "tool_generated_template": {
+    "may_be_emitted_by": "aex_loader_approval_receipt",
+    "command": "cargo run --example aex_loader_approval_receipt --no-default-features -- --draft-template --packet target/aex-loader-slice-review/loader-slice-review.local.json --out target/aex-loader-approval/approval-receipt-template.local.json",
+    "artifact": "target/aex-loader-approval/approval-receipt-template.local.json",
+    "template_status": "draft_unapproved_template",
+    "approval_status": "draft_unapproved",
+    "approval_receipt_id": null,
+    "approved_by": null,
+    "approved_at_utc": null,
+    "copies_scope_from_loader_slice_review_packet": true,
+    "loader_slice_review_packet_checksum_algorithm": "fnv1a64-v1-noncryptographic",
+    "requires_ready_sanitized_packet": true,
+    "rejects_blocked_packet": true,
+    "rejects_contaminated_packet": true,
+    "approval_effect_defaults": {
+      "allow_separate_loader_implementation_review": false,
+      "allow_native_aex_load": false,
+      "allow_worker_plugin_load": false,
+      "allow_broker_may_load_aex": false,
+      "allow_render_png": false,
+      "allow_ofx_route": false,
+      "allow_aex_sdk_or_abi_import": false,
+      "allow_private_path_publication": false
+    },
+    "safety_acknowledgement_defaults": {
+      "local_fixture_reviewed": false,
+      "license_reviewed": false,
+      "cleanroom_reviewed": false,
+      "worker_isolation_reviewed": false,
+      "ofx_deferred_acknowledged": false,
+      "native_load_still_forbidden": true,
+      "render_still_forbidden": true,
+      "private_path_publication_forbidden": true
+    },
+    "runtime_effect_defaults": {
+      "native_load_performed": false,
+      "loader_enabled": false,
+      "real_aex_load_enabled": false,
+      "worker_may_load_plugin": false,
+      "render_performed": false,
+      "ofx_route_allowed": false
+    },
+    "validator_result_before_human_fill": "invalid_receipt",
+    "template_is_not": [
+      "approval",
+      "permission to load an AEX binary",
+      "permission to start a worker",
+      "permission to render pixels",
+      "permission to route OFX"
+    ]
+  },
+  "notes": [
+    "The loader slice review packet is necessary but not sufficient for approval; an explicit receipt is required.",
+    "The receipt validator binds to the exact sanitized loader slice review packet by non-cryptographic metadata checksum only.",
+    "Current checked-in fixture gate data remains unapproved, so current data cannot produce an accepted receipt.",
+    "Accepted approval starts only a separate implementation/code-review slice. It still must not load, describe, render, or route an AEX plug-in."
+  ]
+}

@@ -1,0 +1,377 @@
+{
+  "schema_version": 1,
+  "name": "AE JSX transaction report schema",
+  "publication_status": "local-only measured contract sidecar",
+  "compatibility_classification": "Measured metadata/report contract",
+  "measured_from": {
+    "implementation": "aviutl-rs/examples/ae_jsx_transaction.rs",
+    "request_sidecar": "analysis/JSX_TRANSACTION_REQUEST_SCHEMA_2026-05-31.json"
+  },
+  "report": {
+    "fields": [
+      "schema_version",
+      "status",
+      "jsx_transaction_report_binding",
+      "source_project",
+      "output_project",
+      "generated_jsx",
+      "source_project_path",
+      "output_project_path",
+      "generated_jsx_path",
+      "generated_jsx_artifact_digest",
+      "source_metadata",
+      "operations",
+      "forbidden_api_scan",
+      "artifact_gate",
+      "execution_gate",
+      "warnings",
+      "unsupported",
+      "elapsed_ms"
+    ],
+    "schema_version": {
+      "type": "integer",
+      "const": 1
+    },
+    "status": {
+      "type": "string",
+      "vocabulary": [
+        "ok",
+        "dry_run_ok",
+        "generated_jsx",
+        "manual_smoke_plan_ok",
+        "ae_run_ok",
+        "invalid_request",
+        "schema_error",
+        "source_not_found",
+        "output_exists",
+        "output_same_as_source",
+        "unsupported_operation",
+        "ambiguous_target",
+        "target_not_found",
+        "expected_value_mismatch",
+        "write_failed",
+        "ae_not_run",
+        "ae_runtime_failed",
+        "forbidden_jsx_api",
+        "internal_error"
+      ],
+      "currently_emitted_by_rust_no_ae": [
+        "dry_run_ok",
+        "generated_jsx",
+        "manual_smoke_plan_ok",
+        "invalid_request",
+        "output_exists",
+        "output_same_as_source",
+        "unsupported_operation",
+        "ae_not_run",
+        "forbidden_jsx_api"
+      ]
+    },
+    "jsx_transaction_report_binding": {
+      "algorithm": "fnv1a64-v1-noncryptographic",
+      "checksum_hex": "16 lowercase hex digits in current producer",
+      "checksum_scope": "metadata-only JSX transaction report binding; excludes request bodies, generated JSX bodies, project payloads, and private patch payloads",
+      "fields_are_metadata_only": true,
+      "payloads_embedded": false,
+      "covers_project_or_generated_jsx_or_private_patch_payloads": false,
+      "excludes_elapsed_ms": true,
+      "cryptographic_digest": {
+        "algorithm": "sha256-v1",
+        "digest_hex": "64 lowercase hex digits in current producer",
+        "digest_scope": "metadata-only JSX transaction report digest; excludes request bodies, generated JSX bodies, project payloads, and private patch payloads",
+        "payloads_embedded": false,
+        "covers_project_or_generated_jsx_or_private_patch_payloads": false
+      }
+    },
+    "path_aliases": {
+      "source_project_path": "flat alias of source_project path when source_project is reported",
+      "output_project_path": "flat alias of output_project path when output_project is reported",
+      "generated_jsx_path": "flat alias of generated_jsx path when generated_jsx is reported",
+      "canonical_request_paths": [
+        "source_project.path",
+        "output_project.path",
+        "generated_jsx.path"
+      ],
+      "pairwise_distinct_after_normalization": true
+    },
+    "generated_jsx_artifact_digest": {
+      "fields": [
+        "algorithm",
+        "digest_hex",
+        "artifact_body_bytes",
+        "generated_jsx_embedded"
+      ],
+      "algorithm": "sha256-v1",
+      "digest_hex": "64 lowercase hex digits when status is generated_jsx; null for no-write statuses",
+      "artifact_body_bytes": "generated JSX byte count when status is generated_jsx; null for no-write statuses",
+      "generated_jsx_embedded": false,
+      "body_embedding_policy": "report records digest and byte count only; generated JSX body is never embedded in the report"
+    },
+    "source_metadata": {
+      "fields": [
+        "source_exists",
+        "source_is_file",
+        "observed_file_bytes",
+        "normalized_source_project_path",
+        "project_body_read"
+      ],
+      "source_exists": "boolean from filesystem metadata lookup only; false when unavailable or absent",
+      "source_is_file": "boolean from filesystem metadata lookup only",
+      "observed_file_bytes": "integer file length when source_is_file is true; otherwise null",
+      "normalized_source_project_path": "normalized source_project.path string when request JSON parsed; null only before source_project is available",
+      "project_body_read": {
+        "type": "boolean",
+        "current_no_ae_value": false
+      }
+    },
+    "operations": {
+      "type": "array",
+      "item_fields": [
+        "id",
+        "status",
+        "target_count",
+        "warnings"
+      ],
+      "status": {
+        "type": "string",
+        "vocabulary": [
+          "planned",
+          "applied",
+          "skipped",
+          "failed",
+          "unsupported"
+        ],
+        "currently_emitted_by_rust_no_ae": [
+          "planned",
+          "unsupported"
+        ]
+      },
+      "target_count": "integer after AE execution; null for no-run Rust receipts",
+      "warnings": "array of strings"
+    },
+    "forbidden_api_scan": {
+      "fields": [
+        "status",
+        "matches"
+      ],
+      "status": {
+        "type": "string",
+        "vocabulary": [
+          "passed",
+          "failed",
+          "not_run"
+        ]
+      },
+      "matches": "array of matched forbidden token strings"
+    },
+    "artifact_gate": {
+      "fields": [
+        "generated_jsx_write_performed",
+        "generated_jsx_write_mode",
+        "output_project_write_performed_by_rust",
+        "source_project_overwrite_performed"
+      ],
+      "generated_jsx_write_performed": {
+        "type": "boolean",
+        "true_only_when_status": "generated_jsx"
+      },
+      "generated_jsx_write_mode": {
+        "type": "string",
+        "vocabulary": [
+          "not_written",
+          "create_new"
+        ],
+        "current_generated_value": "create_new",
+        "current_non_generated_value": "not_written"
+      },
+      "output_project_write_performed_by_rust": {
+        "type": "boolean",
+        "current_no_ae_value": false
+      },
+      "source_project_overwrite_performed": {
+        "type": "boolean",
+        "current_no_ae_value": false
+      }
+    },
+    "execution_gate": {
+      "fields": [
+        "application_status",
+        "user_approval_status",
+        "after_effects_status",
+        "project_save_performed"
+      ],
+      "application_status": {
+        "type": "string",
+        "current_no_ae_value": "not_applied"
+      },
+      "user_approval_status": {
+        "type": "string",
+        "current_no_ae_value": "required"
+      },
+      "after_effects_status": {
+        "type": "string",
+        "current_no_ae_value": "not_launched"
+      },
+      "project_save_performed": {
+        "type": "boolean",
+        "current_no_ae_value": false
+      }
+    },
+    "warnings": "array of strings",
+    "unsupported": "array of op_id:kind strings for unsupported JSX v0 operations",
+    "elapsed_ms": "integer elapsed milliseconds measured by the Rust entry point"
+  },
+  "operation_vocabularies": {
+    "allowed_request_kinds": [
+      "rename_comp",
+      "rename_layer",
+      "set_comment",
+      "set_marker",
+      "replace_text_source",
+      "relink_asset_path"
+    ],
+    "generated_jsx_v0_supported_kinds": [
+      "rename_comp",
+      "rename_layer",
+      "set_comment",
+      "set_marker",
+      "replace_text_source",
+      "relink_asset_path"
+    ],
+    "validated_but_not_generated_in_jsx_v0": []
+  },
+  "no_run_boundary": {
+    "automated_schema_tests": {
+      "ae_launch": false,
+      "jsx_execution": false,
+      "project_save": false,
+      "native_oracle": false,
+      "external_process_spawn": false,
+      "network": false
+    },
+    "source_metadata": {
+      "metadata_lookup_only": true,
+      "project_body_read": false,
+      "records_on_parsed_invalid_requests": true,
+      "records_on_generated_jsx_reports": true,
+      "records_on_manual_smoke_plan_reports": true
+    },
+    "manual_smoke_plan": {
+      "receipt_status": "manual_smoke_plan_ok",
+      "operation_status": "planned",
+      "target_count": null,
+      "forbidden_api_scan_status": "not_run",
+      "records_optional_output_and_generated_path_aliases": true,
+      "validates_optional_output_and_generated_paths_when_present": true,
+      "warning_contains": "never launches After Effects",
+      "execution_gate": {
+        "application_status": "not_applied",
+        "user_approval_status": "required",
+        "after_effects_status": "not_launched",
+        "project_save_performed": false
+      },
+      "ae_launch": false,
+      "jsx_execution": false,
+      "project_save": false,
+      "native_oracle": false
+    },
+    "run_after_effects_in_generate_mode": {
+      "receipt_status": "ae_not_run",
+      "warning_contains": "v0 only generates plan/report data",
+      "execution_gate": {
+        "application_status": "not_applied",
+        "user_approval_status": "required",
+        "after_effects_status": "not_launched",
+        "project_save_performed": false
+      },
+      "ae_launch": false,
+      "jsx_execution": false,
+      "project_save": false
+    },
+      "validate_mode": {
+        "receipt_status": "dry_run_ok",
+        "generated_jsx_path": null,
+        "artifact_gate_generated_jsx_write_performed": false,
+        "generated_jsx_file_write": false,
+        "operation_status": "planned",
+        "validates_optional_output_and_generated_paths_when_present": true
+    }
+  },
+  "generation_boundary": {
+      "generated_jsx_write": {
+        "status_on_success": "generated_jsx",
+        "create_mode": "create_new",
+        "overwrite_allowed": false,
+        "artifact_gate_generated_jsx_write_performed_on_success": true,
+        "generated_jsx_artifact_digest_algorithm": "sha256-v1",
+        "generated_jsx_artifact_digest_embeds_body": false,
+        "automated_schema_test_executes_generation": false,
+        "output_project_created_by_rust": false,
+        "source_project_overwritten_by_rust": false,
+        "preexisting_output_or_jsx_status": "output_exists",
+        "max_bytes_limit_status": "invalid_request"
+      },
+    "forbidden_api_scan": {
+      "payload_scan_before_generation": true,
+      "generated_jsx_scan_before_write": true,
+      "status_on_match": "forbidden_jsx_api",
+      "scan_failed_status": "failed",
+      "scan_passed_status": "passed",
+      "scan_not_run_status": "not_run",
+      "tokens": [
+        "system.callSystem",
+        "File.openDialog",
+        "Folder.selectDialog",
+        "app.executeCommand",
+        "BridgeTalk",
+        "eval",
+        "Function",
+        "$.evalFile",
+        "File.execute",
+        "ExternalObject",
+        "Socket",
+        "File.open",
+        "File.write",
+        "File.remove",
+        "File.rename",
+        "File.copy",
+        "afterfx",
+        "aerender",
+        "cmd.exe",
+        "powershell",
+        "wscript",
+        "alert(",
+        "app.project.save()"
+      ]
+    },
+    "path_extension_validation": {
+      "source_project.path": [
+        ".aep",
+        ".aepx"
+      ],
+      "output_project.path": [
+        ".aep",
+        ".aepx"
+      ],
+      "generated_jsx.path": [
+        ".jsx"
+      ],
+      "mismatch_status": "invalid_request"
+    },
+    "path_collision_validation": {
+      "normalized_source_output_or_generated_collision_status": "output_same_as_source",
+      "generated_jsx_must_be_separate_from_project_paths": true
+    }
+  },
+  "notes": [
+    "This sidecar describes the Rust report contract and no-run receipts; it is not permission to execute AE or JSX.",
+    "artifact_gate is explicit so callers can distinguish the allowed generated JSX sidecar write from prohibited source/output project writes.",
+    "execution_gate is explicit so callers can distinguish generated/planned artifacts from applied project changes.",
+    "jsx_transaction_report_binding binds metadata-only report fields and excludes elapsed time, request bodies, generated JSX bodies, project payloads, and private patch payloads.",
+    "source_metadata is filesystem metadata only and must keep project_body_read=false in no-AE Rust reports.",
+    "ae_jsx_transaction_artifact_verify can independently hash the local generated JSX artifact and compare path, byte count, and sha256-v1 digest against this report before review.",
+    "Generated JSX may contain app.open(new File(sourcePath)) and app.project.save(new File(outputPath)) for future manual AE-side execution, but automated schema tests do not execute that JSX.",
+    "The report must not embed private AE project payloads.",
+    "The request sidecar remains the source for request shape; this sidecar fixes the response/report shape and measured no-run metadata."
+  ]
+}
