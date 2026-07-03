@@ -4,6 +4,9 @@ dist/
 out/
 bin/
 obj/
+__pycache__/
+*.pyc
+*.pyo
 
 *.log
 *.tmp
