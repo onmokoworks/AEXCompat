@@ -9,6 +9,12 @@ repository has a short entry point and a durable place for longer plans.
   - Claude/Fable architecture and implementation plan for AEXCompat.
   - Defines the staged target: static lab, validation harness, minimal
     compatibility host, and strict native-loading gate.
+- `IMPLEMENTATION_ROADMAP_2026-07-06.md`
+  - Task-level roadmap derived from the design document, written at a
+    granularity that an implementation agent can execute directly.
+  - Phases: A (no-load Python), B (native build without execution),
+    H (human-only blockers), D (gate-locked native execution), plus the
+    machine-checkable safety-gate checklist (G-1 to G-8).
 
 ## Related Sources
 
