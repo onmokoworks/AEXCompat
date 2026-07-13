@@ -72,6 +72,12 @@ pub fn run(repository: &Path, worker: &Path, id: &str, output: &Path) -> io::Res
     }));
     let passed = result.classification.as_str() == "ok"
         && worker_report.get("status") == Some(&Value::String("selectors_completed".into()))
+        && worker_report.get("about_message").and_then(Value::as_str)
+            .is_some_and(|m| m.contains("ScatterMap v1.0") && m.contains("Written in Rust"))
+        && ["sequence_setup_error", "sequence_resetup_error", "frame_setup_error",
+            "frame_setdown_error", "sequence_setdown_error"].iter()
+            .all(|key| worker_report.get(*key) == Some(&json!(0)))
+        && worker_report.get("lifecycle_data_null") == Some(&Value::Bool(true))
         && worker_report.get("render_performed") == Some(&Value::Bool(false));
     let report = json!({"schema_version":1,"stage":"L2","plugin_id":id,
         "receipt_id":entry.receipt_id,"expected_sha256":entry.sha256.to_ascii_uppercase(),

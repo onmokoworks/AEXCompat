@@ -12,6 +12,10 @@ Observed selector results:
 - `GLOBAL_SETUP`: error 0;
 - `PARAMS_SETUP`: error 0;
 - `GLOBAL_SETDOWN`: error 0;
+- `ABOUT`: error 0 with deterministic ScatterMap v1.0 message;
+- `SEQUENCE_SETUP`, `SEQUENCE_RESETUP`, `FRAME_SETUP`, `FRAME_SETDOWN`, and
+  `SEQUENCE_SETDOWN`: error 0 in host order;
+- sequence and frame data remained null, matching the stateless implementation;
 - reported parameter count: 8 (implicit input plus 7 registered parameters);
 - `out_flags`: 33554432;
 - `out_flags2`: 167777280;
@@ -46,5 +50,6 @@ matched the self-authored source oracle:
 - `Invert Map`: default false, label `Invert`.
 
 This result proves initialization, parameter registration, and descriptor
-defaults/ranges for the observed types. Image rendering remains future
-compatibility work.
+defaults/ranges for the observed types. The lifecycle extension also proves the
+stateless sequence/frame contract in two independent isolated runs. Rendering
+evidence is recorded separately.

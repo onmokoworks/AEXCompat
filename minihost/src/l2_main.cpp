@@ -27,9 +27,13 @@ constexpr std::size_t kInVersion = 196;
 constexpr std::size_t kInApplicationId = 204;
 constexpr std::size_t kInNumParams = 208;
 constexpr std::size_t kInGlobalData = 312;
+constexpr std::size_t kInSequenceData = 320;
+constexpr std::size_t kInFrameData = 328;
 constexpr std::size_t kInPicaBasic = 384;
 constexpr std::size_t kOutGlobalData = 40;
 constexpr std::size_t kOutNumParams = 48;
+constexpr std::size_t kOutSequenceData = 56;
+constexpr std::size_t kOutFrameData = 72;
 constexpr std::size_t kOutFlags = 96;
 constexpr std::size_t kOutMessage = 100;
 constexpr std::size_t kOutFlags2 = 400;
@@ -40,6 +44,12 @@ constexpr std::size_t kParamFlags = 48;
 constexpr int32_t kGlobalSetup = 1;
 constexpr int32_t kGlobalSetdown = 3;
 constexpr int32_t kParamsSetup = 4;
+constexpr int32_t kAbout = 0;
+constexpr int32_t kSequenceSetup = 5;
+constexpr int32_t kSequenceResetup = 6;
+constexpr int32_t kSequenceSetdown = 8;
+constexpr int32_t kFrameSetup = 10;
+constexpr int32_t kFrameSetdown = 12;
 constexpr int32_t kRender = 11;
 constexpr int32_t kSmartPreRender = 23;
 constexpr int32_t kSmartRender = 24;
@@ -597,7 +607,9 @@ SmartResult smart_render_once(EffectEntry entry, std::array<std::byte, kInSize>&
 #endif
 
 void report(const char* status, int32_t global_error, int32_t params_error,
-            int32_t setdown_error, const std::array<std::byte, kOutSize>& output) {
+            int32_t setdown_error, const std::array<std::byte, kOutSize>& output,
+            const std::string& about_message, const std::array<int32_t, 5>& lifecycle_errors,
+            bool lifecycle_data_null) {
   const char* message = reinterpret_cast<const char*>(output.data() + kOutMessage);
   std::cout << "{\"schema_version\":1,\"stage\":\"L2\",\"status\":\"" << status
             << "\",\"global_setup_error\":" << global_error
@@ -607,7 +619,14 @@ void report(const char* status, int32_t global_error, int32_t params_error,
             << ",\"out_flags\":" << read<uint32_t>(output, kOutFlags)
             << ",\"out_flags2\":" << read<uint32_t>(output, kOutFlags2)
             << ",\"return_message\":\"" << escape(std::string(message, strnlen_s(message, 256)))
-            << "\",\"parameters\":[";
+            << "\",\"about_message\":\"" << escape(about_message)
+            << "\",\"sequence_setup_error\":" << lifecycle_errors[0]
+            << ",\"sequence_resetup_error\":" << lifecycle_errors[1]
+            << ",\"frame_setup_error\":" << lifecycle_errors[2]
+            << ",\"frame_setdown_error\":" << lifecycle_errors[3]
+            << ",\"sequence_setdown_error\":" << lifecycle_errors[4]
+            << ",\"lifecycle_data_null\":" << (lifecycle_data_null ? "true" : "false")
+            << ",\"parameters\":[";
   for (std::size_t i = 0; i < g_params.size(); ++i) {
     if (i) std::cout << ',';
     const auto& param = g_params[i];
@@ -671,14 +690,65 @@ int wmain(int argc, wchar_t** argv) {
   write<uint32_t>(input, kInVersion, 0);
   write<uint32_t>(input, kInApplicationId, 0x46585443u);
   write<int32_t>(input, kInNumParams, 1);
+#if !defined(AEXCOMPAT_RENDER_WORKER) && !defined(AEXCOMPAT_SMART_WORKER)
+  std::array<std::byte, kOutSize> about_output{};
+  int32_t about_error = -1;
+  std::string about_message;
+#endif
   std::cerr << "stage:global_setup_begin\n" << std::flush;
   const int32_t global_error = entry(kGlobalSetup, input.data(), output.data(), nullptr, nullptr, nullptr);
   std::cerr << "stage:global_setup_end error=" << global_error << "\n" << std::flush;
   write<void*>(input, kInGlobalData, read<void*>(output, kOutGlobalData));
+#if !defined(AEXCOMPAT_RENDER_WORKER) && !defined(AEXCOMPAT_SMART_WORKER)
+  about_error = global_error == 0 ? entry(kAbout, input.data(), about_output.data(), nullptr, nullptr, nullptr) : -1;
+  const char* about_text = reinterpret_cast<const char*>(about_output.data() + kOutMessage);
+  about_message.assign(about_text, strnlen_s(about_text, 256));
+#endif
   std::cerr << "stage:params_setup_begin\n" << std::flush;
   const int32_t params_error = global_error == 0
       ? entry(kParamsSetup, input.data(), output.data(), nullptr, nullptr, nullptr) : -1;
   std::cerr << "stage:params_setup_end error=" << params_error << "\n" << std::flush;
+#if !defined(AEXCOMPAT_RENDER_WORKER) && !defined(AEXCOMPAT_SMART_WORKER)
+  std::array<std::array<std::byte, kParamSize>, 8> lifecycle_definitions{};
+  std::array<unsigned char, 4> lifecycle_pixel{255, 0, 0, 0};
+  std::array<std::byte, 120> lifecycle_world{};
+  write<void*>(lifecycle_world, 24, lifecycle_pixel.data());
+  write<int32_t>(lifecycle_world, 32, 4); write<int32_t>(lifecycle_world, 36, 1);
+  write<int32_t>(lifecycle_world, 40, 1); write_rect(lifecycle_world.data() + 44, 1, 1);
+  std::memcpy(lifecycle_definitions[0].data() + 56, lifecycle_world.data(), lifecycle_world.size());
+  for (std::size_t i = 0; i < g_params.size() && i + 1 < lifecycle_definitions.size(); ++i) {
+    lifecycle_definitions[i + 1] = g_params[i].raw;
+    if (g_params[i].type == 1 || g_params[i].type == 7)
+      write<int32_t>(lifecycle_definitions[i + 1], 56, static_cast<int32_t>(g_params[i].default_value));
+    else if (g_params[i].type == 4)
+      write<int32_t>(lifecycle_definitions[i + 1], 56, g_params[i].default_value != 0 ? 1 : 0);
+    else if (g_params[i].type == 10)
+      write<double>(lifecycle_definitions[i + 1], 56, g_params[i].default_value);
+  }
+  std::array<void*, 9> lifecycle_params{};
+  for (std::size_t i = 0; i < lifecycle_definitions.size(); ++i)
+    lifecycle_params[i] = lifecycle_definitions[i].data();
+  std::array<int32_t, 5> lifecycle_errors{-1, -1, -1, -1, -1};
+  std::cerr << "stage:sequence_setup_begin\n" << std::flush;
+  lifecycle_errors[0] = params_error == 0 ? entry(kSequenceSetup, input.data(), output.data(), nullptr, nullptr, nullptr) : -1;
+  std::cerr << "stage:sequence_setup_end error=" << lifecycle_errors[0] << "\n" << std::flush;
+  write<void*>(input, kInSequenceData, read<void*>(output, kOutSequenceData));
+  std::cerr << "stage:sequence_resetup_begin\n" << std::flush;
+  lifecycle_errors[1] = lifecycle_errors[0] == 0 ? entry(kSequenceResetup, input.data(), output.data(), nullptr, nullptr, nullptr) : -1;
+  std::cerr << "stage:sequence_resetup_end error=" << lifecycle_errors[1] << "\n" << std::flush;
+  write<void*>(input, kInSequenceData, read<void*>(output, kOutSequenceData));
+  std::cerr << "stage:frame_setup_begin\n" << std::flush;
+  lifecycle_errors[2] = lifecycle_errors[1] == 0 ? entry(kFrameSetup, input.data(), output.data(), lifecycle_params.data(), lifecycle_world.data(), nullptr) : -1;
+  std::cerr << "stage:frame_setup_end error=" << lifecycle_errors[2] << "\n" << std::flush;
+  write<void*>(input, kInFrameData, read<void*>(output, kOutFrameData));
+  std::cerr << "stage:frame_setdown_begin\n" << std::flush;
+  lifecycle_errors[3] = lifecycle_errors[2] == 0 ? entry(kFrameSetdown, input.data(), output.data(), lifecycle_params.data(), lifecycle_world.data(), nullptr) : -1;
+  std::cerr << "stage:frame_setdown_end error=" << lifecycle_errors[3] << "\n" << std::flush;
+  std::cerr << "stage:sequence_setdown_begin\n" << std::flush;
+  lifecycle_errors[4] = lifecycle_errors[3] == 0 ? entry(kSequenceSetdown, input.data(), output.data(), nullptr, nullptr, nullptr) : -1;
+  std::cerr << "stage:sequence_setdown_end error=" << lifecycle_errors[4] << "\n" << std::flush;
+  const bool lifecycle_data_null = read<void*>(output, kOutSequenceData) == nullptr && read<void*>(output, kOutFrameData) == nullptr;
+#endif
 #ifdef AEXCOMPAT_RENDER_WORKER
   std::string case_id;
   for (const wchar_t* p = argv[4]; *p; ++p) {
@@ -730,7 +800,7 @@ int wmain(int argc, wchar_t** argv) {
             << ",\"gpu_render_possible\":" << (smart.gpu_render_possible ? "true" : "false")
             << ",\"gpu_render_dispatched\":" << (smart.gpu_render_dispatched ? "true" : "false")
             << ",\"global_setdown_error\":" << setdown_error
-            << ",\"case_id\":\"" << case_id << "\",\"pixel_format\":\"argb8\",\"width\":"
+            << ",\"case_id\":\"" << case_id << "\",\"pixel_format\":\"" << g_smart_pixel_format << "\",\"width\":"
             << g_smart_width << ",\"height\":" << g_smart_height << ",\"rowbytes\":"
             << g_smart_rowbytes
             << ",\"input_sha256\":\"" << smart.input_hash << "\",\"output_sha256\":\""
@@ -739,7 +809,7 @@ int wmain(int argc, wchar_t** argv) {
             << ",\"render_performed\":true}\n";
 #else
   report(global_error == 0 && params_error == 0 ? "selectors_completed" : "selector_error",
-         global_error, params_error, setdown_error, output);
+         global_error, params_error, setdown_error, output, about_message, lifecycle_errors, lifecycle_data_null);
 #endif
   FreeLibrary(module);
 #ifdef AEXCOMPAT_RENDER_WORKER
@@ -748,6 +818,7 @@ int wmain(int argc, wchar_t** argv) {
   return global_error == 0 && params_error == 0 && smart.pre_error == 0 && smart.render_error == 0 &&
       smart.rects_valid && smart.guards_intact ? 0 : 22;
 #else
-  return global_error == 0 && params_error == 0 ? 0 : 20;
+  return global_error == 0 && params_error == 0 && about_error == 0 && lifecycle_data_null &&
+      std::all_of(lifecycle_errors.begin(), lifecycle_errors.end(), [](auto error) { return error == 0; }) ? 0 : 20;
 #endif
 }

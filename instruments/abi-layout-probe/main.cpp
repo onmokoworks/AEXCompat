@@ -53,6 +53,8 @@ int main() {
   field<decltype(PF_InData::utils)>("in.utils", offsetof(PF_InData, utils), first);
   field<decltype(PF_InData::effect_ref)>("in.effect_ref", offsetof(PF_InData, effect_ref), first);
   field<decltype(PF_InData::global_data)>("in.global_data", offsetof(PF_InData, global_data), first);
+  field<decltype(PF_InData::sequence_data)>("in.sequence_data", offsetof(PF_InData, sequence_data), first);
+  field<decltype(PF_InData::frame_data)>("in.frame_data", offsetof(PF_InData, frame_data), first);
   field<decltype(PF_InData::current_time)>("in.current_time", offsetof(PF_InData, current_time), first);
   field<decltype(PF_InData::time_step)>("in.time_step", offsetof(PF_InData, time_step), first);
   field<decltype(PF_InData::total_time)>("in.total_time", offsetof(PF_InData, total_time), first);
@@ -71,6 +73,8 @@ int main() {
   field<decltype(PF_UtilCallbacks::host_dispose_handle)>("utils.host_dispose_handle", offsetof(PF_UtilCallbacks, host_dispose_handle), first);
   field<decltype(PF_OutData::my_version)>("out.my_version", offsetof(PF_OutData, my_version), first);
   field<decltype(PF_OutData::global_data)>("out.global_data", offsetof(PF_OutData, global_data), first);
+  field<decltype(PF_OutData::sequence_data)>("out.sequence_data", offsetof(PF_OutData, sequence_data), first);
+  field<decltype(PF_OutData::frame_data)>("out.frame_data", offsetof(PF_OutData, frame_data), first);
   field<decltype(PF_OutData::out_flags)>("out.out_flags", offsetof(PF_OutData, out_flags), first);
   field<decltype(PF_OutData::num_params)>("out.num_params", offsetof(PF_OutData, num_params), first);
   field<decltype(PF_OutData::return_msg)>("out.return_msg", offsetof(PF_OutData, return_msg), first);
@@ -147,6 +151,11 @@ int main() {
             << "\"global_setup\":" << static_cast<int>(PF_Cmd_GLOBAL_SETUP) << ','
             << "\"global_setdown\":" << static_cast<int>(PF_Cmd_GLOBAL_SETDOWN) << ','
             << "\"params_setup\":" << static_cast<int>(PF_Cmd_PARAMS_SETUP)
+            << ",\"sequence_setup\":" << static_cast<int>(PF_Cmd_SEQUENCE_SETUP)
+            << ",\"sequence_resetup\":" << static_cast<int>(PF_Cmd_SEQUENCE_RESETUP)
+            << ",\"sequence_setdown\":" << static_cast<int>(PF_Cmd_SEQUENCE_SETDOWN)
+            << ",\"frame_setup\":" << static_cast<int>(PF_Cmd_FRAME_SETUP)
+            << ",\"frame_setdown\":" << static_cast<int>(PF_Cmd_FRAME_SETDOWN)
             << ",\"render\":" << static_cast<int>(PF_Cmd_RENDER)
             << ",\"smart_pre_render\":" << static_cast<int>(PF_Cmd_SMART_PRE_RENDER)
             << ",\"smart_render\":" << static_cast<int>(PF_Cmd_SMART_RENDER)
