@@ -84,6 +84,9 @@ struct ParamRecord {
   double default_value{};
   double current_value{};
   bool has_current{};
+  bool has_color{};
+  std::array<unsigned char, 4> default_color{};
+  std::array<unsigned char, 4> current_color{};
   int32_t precision{-1};
   std::string choices;
   std::string label;
@@ -458,6 +461,10 @@ int32_t __cdecl add_param(void*, int32_t index, void* definition) {
     record.slider_max = read<float>(bytes, u + 60);
     record.default_value = read<float>(bytes, u + 64);
     record.precision = read<int16_t>(bytes, u + 68);
+  } else if (record.type == 5) {
+    record.has_color = true;
+    std::memcpy(record.current_color.data(), bytes.data() + u, record.current_color.size());
+    std::memcpy(record.default_color.data(), bytes.data() + u + 4, record.default_color.size());
   }
   record.raw = bytes;
   g_params.push_back(std::move(record));
@@ -531,12 +538,13 @@ std::string sha256_bytes(const unsigned char* data, std::size_t size) {
 }
 
 #if defined(AEXCOMPAT_RENDER_WORKER) || defined(AEXCOMPAT_SMART_WORKER)
-enum class RequestedKind { Integer, Float };
+enum class RequestedKind { Integer, Float, Color };
 struct RequestedAssignment {
   std::wstring id;
   int32_t index{};
   RequestedKind kind{};
   double value{};
+  std::array<unsigned char, 4> color{};
 };
 using RequestedAssignments = std::vector<RequestedAssignment>;
 
@@ -572,7 +580,9 @@ bool valid_parameter_id(const std::wstring& id) {
 bool parse_parameter_payload(const wchar_t* text, RequestedAssignments& output) {
   if (!text) return false;
   const std::wstring encoded(text);
-  if (encoded.size() < 4 || encoded.size() > 4096 || encoded.compare(0, 3, L"v2|") != 0) return false;
+  const bool version3 = encoded.compare(0, 3, L"v3|") == 0;
+  if (encoded.size() < 4 || encoded.size() > 4096 ||
+      (!version3 && encoded.compare(0, 3, L"v2|") != 0)) return false;
   const std::wstring payload = encoded.substr(3);
   std::unordered_set<std::wstring> seen_ids;
   std::unordered_set<int32_t> seen_indices;
@@ -598,17 +608,35 @@ bool parse_parameter_payload(const wchar_t* text, RequestedAssignments& output) 
     RequestedKind kind{};
     if (kind_text == L"i32") kind = RequestedKind::Integer;
     else if (kind_text == L"f64") kind = RequestedKind::Float;
+    else if (version3 && kind_text == L"argb8") kind = RequestedKind::Color;
     else return false;
     double parsed{};
-    const double minimum = kind == RequestedKind::Integer
-        ? static_cast<double>((std::numeric_limits<int32_t>::min)())
-        : -(std::numeric_limits<double>::max)();
-    const double maximum = kind == RequestedKind::Integer
-        ? static_cast<double>((std::numeric_limits<int32_t>::max)())
-        : (std::numeric_limits<double>::max)();
-    if (!parse_double_arg(value.c_str(), minimum, maximum, parsed) ||
-        (kind == RequestedKind::Integer && std::trunc(parsed) != parsed)) return false;
-    output.push_back({id, index, kind, parsed});
+    std::array<unsigned char, 4> color{};
+    if (kind == RequestedKind::Color) {
+      std::size_t start = 0;
+      for (std::size_t channel = 0; channel < color.size(); ++channel) {
+        const std::size_t comma = value.find(L',', start);
+        const bool final_channel = channel + 1 == color.size();
+        if ((final_channel && comma != std::wstring::npos) ||
+            (!final_channel && comma == std::wstring::npos)) return false;
+        const std::size_t finish = final_channel ? value.size() : comma;
+        int32_t component{};
+        if (!parse_i32_arg(value.substr(start, finish - start).c_str(), 0, 255, component))
+          return false;
+        color[channel] = static_cast<unsigned char>(component);
+        start = finish + 1;
+      }
+    } else {
+      const double minimum = kind == RequestedKind::Integer
+          ? static_cast<double>((std::numeric_limits<int32_t>::min)())
+          : -(std::numeric_limits<double>::max)();
+      const double maximum = kind == RequestedKind::Integer
+          ? static_cast<double>((std::numeric_limits<int32_t>::max)())
+          : (std::numeric_limits<double>::max)();
+      if (!parse_double_arg(value.c_str(), minimum, maximum, parsed) ||
+          (kind == RequestedKind::Integer && std::trunc(parsed) != parsed)) return false;
+    }
+    output.push_back({id, index, kind, parsed, color});
     if (output.size() > kMaxParams) return false;
     if (separator == std::wstring::npos) break;
     offset = separator + 1;
@@ -623,9 +651,12 @@ bool validate_requested_assignments(const RequestedAssignments& requested) {
     const auto& descriptor = g_params[static_cast<std::size_t>(assignment.index - 1)];
     const bool integer_compatible = descriptor.type == 1 || descriptor.type == 4 || descriptor.type == 7;
     const bool float_compatible = descriptor.type == 10;
+    const bool color_compatible = descriptor.type == 5;
     if ((assignment.kind == RequestedKind::Integer && !integer_compatible) ||
-        (assignment.kind == RequestedKind::Float && !float_compatible) || !descriptor.has_numeric ||
-        assignment.value < descriptor.valid_min || assignment.value > descriptor.valid_max) return false;
+        (assignment.kind == RequestedKind::Float && !float_compatible) ||
+        (assignment.kind == RequestedKind::Color && !color_compatible) ||
+        (assignment.kind != RequestedKind::Color && (!descriptor.has_numeric ||
+         assignment.value < descriptor.valid_min || assignment.value > descriptor.valid_max))) return false;
   }
   return true;
 }
@@ -654,6 +685,8 @@ bool apply_requested_assignments(
       write<int32_t>(definitions[slot], 56, static_cast<int32_t>(assignment.value));
     else if (type == 10)
       write<double>(definitions[slot], 56, assignment.value);
+    else if (type == 5)
+      std::memcpy(definitions[slot].data() + 56, assignment.color.data(), assignment.color.size());
     else
       return false;
   }
@@ -664,7 +697,7 @@ double requested_value(const RequestedAssignments& requested, const wchar_t* id)
   const auto found = std::find_if(requested.begin(), requested.end(), [id](const auto& assignment) {
     return assignment.id == id;
   });
-  return found == requested.end() ? 0.0 : found->value;
+  return found == requested.end() || found->kind == RequestedKind::Color ? 0.0 : found->value;
 }
 
 std::string requested_parameters_json(const RequestedAssignments& requested) {
@@ -678,12 +711,18 @@ std::string requested_parameters_json(const RequestedAssignments& requested) {
     for (const wchar_t character : assignment.id) id.push_back(static_cast<char>(character));
     output << "{\"id\":\"" << id << "\",\"slot\":" << assignment.index
            << ",\"kind\":\""
-           << (assignment.kind == RequestedKind::Integer ? "integer" : "float")
+           << (assignment.kind == RequestedKind::Integer ? "integer" :
+               assignment.kind == RequestedKind::Float ? "float" : "color")
            << "\",\"value\":";
     if (assignment.kind == RequestedKind::Integer)
       output << static_cast<int32_t>(assignment.value);
-    else
+    else if (assignment.kind == RequestedKind::Float)
       output << std::setprecision(17) << assignment.value;
+    else
+      output << "{\"alpha\":" << static_cast<unsigned>(assignment.color[0])
+             << ",\"red\":" << static_cast<unsigned>(assignment.color[1])
+             << ",\"green\":" << static_cast<unsigned>(assignment.color[2])
+             << ",\"blue\":" << static_cast<unsigned>(assignment.color[3]) << "}";
     output << "}";
   }
   output << "]";
@@ -1050,6 +1089,18 @@ void report(const char* status, int32_t global_error, int32_t params_error,
       std::cout << ",\"current\":" << param.current_value
                 << ",\"current_default_mismatch\":"
                 << (param.current_value != param.default_value ? "true" : "false");
+    }
+    if (param.has_color) {
+      const auto color_json = [](const auto& color) {
+        std::ostringstream value;
+        value << "{\"alpha\":" << static_cast<unsigned>(color[0])
+              << ",\"red\":" << static_cast<unsigned>(color[1])
+              << ",\"green\":" << static_cast<unsigned>(color[2])
+              << ",\"blue\":" << static_cast<unsigned>(color[3]) << '}';
+        return value.str();
+      };
+      std::cout << ",\"default_color\":" << color_json(param.default_color)
+                << ",\"current_color\":" << color_json(param.current_color);
     }
     if (!param.choices.empty()) std::cout << ",\"choices\":\"" << escape(param.choices) << "\"";
     if (!param.label.empty()) std::cout << ",\"label\":\"" << escape(param.label) << "\"";

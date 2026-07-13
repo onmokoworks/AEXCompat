@@ -61,11 +61,15 @@ fn second_fixture_manifest_loads_through_the_generic_core() {
     fs::write(root.join("profiles/manifest.json"), MASKOFFSET_BYTES).unwrap();
     let policy = ManifestPolicy {
         path: "profiles/manifest.json",
-        sha256: "2D498526F705AE749542C7D9D0C8BE5E000243AFF8C64D37AEF36F12F60C4DC2",
+        sha256: "13876295DB0A58D4B401525E88E44071A1C489D649B146F7149FD408B651DB13",
     };
     let loaded = load(&root, "maskoffset", policy).unwrap();
     assert_eq!(loaded.observed_descriptor_count, 9);
-    assert_eq!(loaded.profile.descriptors.len(), 8);
+    assert_eq!(loaded.profile.descriptors.len(), 9);
+    assert_eq!(
+        loaded.profile.descriptors[1].kind,
+        aexcompat_broker::host_core::parameter::ValueKind::Color
+    );
     assert_eq!(loaded.receipt_id, "maskoffset-l2-20260713-001");
     fs::remove_dir_all(root).unwrap();
 }

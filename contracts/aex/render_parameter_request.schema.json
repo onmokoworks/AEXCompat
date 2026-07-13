@@ -2,19 +2,49 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://aexcompat.local/contracts/aex/render_parameter_request.schema.json",
   "schema_name": "AEXCompat render parameter request schema",
-  "schema_version": 2,
+  "schema_version": 3,
   "title": "AEXCompat render parameter request",
   "type": "object",
   "additionalProperties": false,
   "required": ["schema_version", "plugin_id", "assignments"],
   "properties": {
-    "schema_version": {"const": 2},
+    "schema_version": {"enum": [2, 3]},
     "plugin_id": {"type": "string", "pattern": "^[a-z][a-z0-9_-]{0,63}$"},
     "assignments": {
       "type": "object",
       "maxProperties": 64,
       "propertyNames": {"pattern": "^[a-z][a-z0-9_]{0,63}$"},
-      "additionalProperties": {"type": "number"}
+      "additionalProperties": {
+        "oneOf": [
+          {"type": "number"},
+          {"$ref": "#/$defs/color"}
+        ]
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"schema_version": {"const": 2}}},
+      "then": {
+        "properties": {
+          "assignments": {
+            "additionalProperties": {"type": "number"}
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "color": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["alpha", "red", "green", "blue"],
+      "properties": {
+        "alpha": {"type": "integer", "minimum": 0, "maximum": 255},
+        "red": {"type": "integer", "minimum": 0, "maximum": 255},
+        "green": {"type": "integer", "minimum": 0, "maximum": 255},
+        "blue": {"type": "integer", "minimum": 0, "maximum": 255}
+      }
     }
   }
 }

@@ -67,5 +67,7 @@ Outline suites with an independent pixel oracle. The host implements the
 `pre_render_data` transfer/delete lifecycle and PF World pixel-format query;
 suite dispatch depends only on suite name/version and opaque host handles.
 Classic render remains explicitly unsupported and is rejected before native
-launch. This is evidence toward item 5, not completion of it: configurable mask
-scenes, color parameters, and render-time failure isolation remain pending.
+launch. Descriptor/request/worker v3 now carries strict ARGB8 Color values and
+MaskOffset's custom Fill Inside output passes an independent pixel oracle. This
+is evidence toward item 5, not completion of it: configurable mask scenes and
+render-time failure isolation remain pending.

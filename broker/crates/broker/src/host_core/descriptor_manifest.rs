@@ -1,4 +1,6 @@
-use crate::host_core::parameter::{Descriptor, PluginProfile, ValueKind};
+use crate::host_core::parameter::{
+    ColorValue, Descriptor, ParameterValue, PluginProfile, ValueKind,
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
@@ -48,6 +50,8 @@ struct ObservedDescriptor {
     maximum: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     default: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    default_color: Option<ColorValue>,
 }
 
 pub struct LoadedManifest {
@@ -79,7 +83,7 @@ pub fn load(
     if !actual.eq_ignore_ascii_case(policy.sha256) {
         return Err(invalid("descriptor manifest digest mismatch"));
     }
-    if manifest.schema_version != 1
+    if !matches!(manifest.schema_version, 1 | 2)
         || manifest.plugin_id != plugin_id
         || manifest.source.stage != "L2"
         || manifest.source.plugin_sha256.len() != 64
@@ -110,29 +114,60 @@ pub fn load(
         let kind = observed
             .kind
             .ok_or_else(|| invalid("assignable descriptor kind missing"))?;
-        let minimum = observed
-            .minimum
-            .ok_or_else(|| invalid("descriptor minimum missing"))?;
-        let maximum = observed
-            .maximum
-            .ok_or_else(|| invalid("descriptor maximum missing"))?;
-        let default_value = observed
-            .default
-            .ok_or_else(|| invalid("descriptor default missing"))?;
         let type_matches = matches!(kind, ValueKind::Integer)
             && matches!(observed.observed_type, 1 | 4 | 7)
-            || matches!(kind, ValueKind::Float) && observed.observed_type == 10;
-        if !ids.insert(id.clone())
-            || !type_matches
-            || !minimum.is_finite()
-            || !maximum.is_finite()
-            || !default_value.is_finite()
-            || minimum > maximum
-            || default_value < minimum
-            || default_value > maximum
-        {
+            || matches!(kind, ValueKind::Float) && observed.observed_type == 10
+            || matches!(kind, ValueKind::Color)
+                && observed.observed_type == 5
+                && manifest.schema_version == 2;
+        if !ids.insert(id.clone()) || !type_matches {
             return Err(invalid("assignable descriptor contract invalid"));
         }
+        let (minimum, maximum, default_value) = match kind {
+            ValueKind::Integer | ValueKind::Float => {
+                let minimum = observed
+                    .minimum
+                    .ok_or_else(|| invalid("descriptor minimum missing"))?;
+                let maximum = observed
+                    .maximum
+                    .ok_or_else(|| invalid("descriptor maximum missing"))?;
+                let default_value = observed
+                    .default
+                    .ok_or_else(|| invalid("descriptor default missing"))?;
+                if observed.default_color.is_some()
+                    || !minimum.is_finite()
+                    || !maximum.is_finite()
+                    || !default_value.is_finite()
+                    || minimum > maximum
+                    || default_value < minimum
+                    || default_value > maximum
+                {
+                    return Err(invalid("assignable numeric descriptor contract invalid"));
+                }
+                (
+                    Some(minimum),
+                    Some(maximum),
+                    ParameterValue::Numeric(default_value),
+                )
+            }
+            ValueKind::Color => {
+                if observed.minimum.is_some()
+                    || observed.maximum.is_some()
+                    || observed.default.is_some()
+                {
+                    return Err(invalid("assignable color descriptor contract invalid"));
+                }
+                (
+                    None,
+                    None,
+                    ParameterValue::Color(
+                        observed
+                            .default_color
+                            .ok_or_else(|| invalid("descriptor default color missing"))?,
+                    ),
+                )
+            }
+        };
         descriptors.push(Descriptor {
             id,
             display_name: observed.display_name.clone(),

@@ -37,16 +37,17 @@ minimal L2 host does not provide it.
 The promoted descriptor manifest is
 `profiles/maskoffset/parameter_descriptors.json`, bound to L2 receipt
 `maskoffset-l2-20260713-001` and canonical SHA-256
-`2D498526F705AE749542C7D9D0C8BE5E000243AFF8C64D37AEF36F12F60C4DC2`.
+`13876295DB0A58D4B401525E88E44071A1C489D649B146F7149FD408B651DB13`.
 Regeneration from the real L2 report matched all nine observed descriptors.
-Eight numeric descriptors are assignable. `Fill Color` remains fail-closed
-until the generic request and worker ABIs support color values.
+All nine descriptors are assignable. Manifest v2 records the observed type 5
+default as a strict ARGB8 object. Request v2 remains numeric-only; request and
+worker payload v3 add typed `color` / `argb8` values without weakening v2.
 
 ## SmartFX Mask Evidence
 
 The `maskoffset` render profile advertises SmartFX only. A classic render request
 fails before allowlist access, worker launch, or report creation. The isolated
-SmartFX request applied all eight numeric descriptors twice. Both runs completed
+SmartFX requests applied all numeric descriptors and Fill Color twice. Both runs completed
 Smart PreRender and Smart Render with zero errors, preserved guard bytes, echoed
 the exact descriptor id/slot/kind/value sequence, and produced the same output.
 
@@ -65,13 +66,19 @@ makes pixels outside the rectangle transparent. The independent host oracle is
 Both isolated native runs matched it. The fixed SmartFX receipt is
 `maskoffset-smartfx-20260713-001`.
 
+A second v3 request selected Fill Inside and ARGB `(255,20,180,70)`. Both
+isolated runs matched the independent color-fill oracle
+`BF419F44E915901BAC882E9B9E3411B8407DF7F4E3A4A1C2719314BDFBB74B5F`.
+The worker revalidated type 5 before native rendering and echoed the structured
+Color value, proving that the pixel result came through `PF_ColorDef.value`.
+
 The older `--smart-request` mode remains mask-free and still exercises the
 empty-polygon fallback, allowing the two host capability states to be compared.
 
 ## Remaining Work
 
 This evidence does not claim complete MaskOffset render compatibility. Completion
-still requires generic color payloads, configurable/multiple/open/Bezier mask
-scenes, expansion/rounding/feather/invert oracle coverage, and dedicated
+still requires configurable/multiple/open/Bezier mask scenes,
+expansion/rounding/feather/invert oracle coverage, and dedicated
 mask-suite error/crash isolation cases. Those additions must not introduce
 MaskOffset identity or algorithms into `host_core`.

@@ -1,5 +1,5 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "plugin_id": "maskoffset",
   "source": {
     "stage": "L2",
@@ -8,7 +8,7 @@
   },
   "descriptors": [
     {"slot": 1, "observed_type": 7, "display_name": "Mode", "assignable": true, "id": "mode", "kind": "integer", "minimum": 1, "maximum": 5, "default": 1},
-    {"slot": 2, "observed_type": 5, "display_name": "Fill Color", "assignable": false},
+    {"slot": 2, "observed_type": 5, "display_name": "Fill Color", "assignable": true, "id": "fill_color", "kind": "color", "default_color": {"alpha": 255, "red": 255, "green": 255, "blue": 255}},
     {"slot": 3, "observed_type": 10, "display_name": "Mask Index", "assignable": true, "id": "mask_index", "kind": "float", "minimum": 1, "maximum": 128, "default": 1},
     {"slot": 4, "observed_type": 10, "display_name": "Expansion (px)", "assignable": true, "id": "expansion", "kind": "float", "minimum": -5000, "maximum": 5000, "default": 0},
     {"slot": 5, "observed_type": 4, "display_name": "Separate X/Y", "assignable": true, "id": "separate_xy", "kind": "integer", "minimum": 0, "maximum": 1, "default": 0},

@@ -19,6 +19,7 @@ OUTPUT_ROOT = LAB_ROOT / "target" / "descriptor-manifest-promotion"
 INPUT_LIMIT = 1024 * 1024
 MANIFEST_LIMIT = 64 * 1024
 NUMERIC_TYPES = {1: "integer", 4: "integer", 7: "integer", 10: "float"}
+COLOR_TYPE = 5
 
 
 def resolve_json(path: Path, root: Path, *, must_exist: bool) -> Path:
@@ -57,6 +58,11 @@ def canonical_bytes(manifest: dict[str, Any]) -> bytes:
         for key in ("minimum", "maximum", "default"):
             if key in descriptor:
                 descriptor[key] = float(descriptor[key])
+        if "default_color" in descriptor:
+            color = descriptor["default_color"]
+            descriptor["default_color"] = {
+                channel: color[channel] for channel in ("alpha", "red", "green", "blue")
+            }
     return json.dumps(normalized, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
 
 
@@ -96,7 +102,7 @@ def validate_l2(report: dict[str, Any]) -> tuple[str, str, str, list[dict[str, A
 
 def regenerate(report: dict[str, Any], promoted: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
     plugin_id, plugin_sha256, receipt_id, observed = validate_l2(report)
-    if promoted.get("schema_version") != 1 or promoted.get("plugin_id") != plugin_id:
+    if promoted.get("schema_version") not in (1, 2) or promoted.get("plugin_id") != plugin_id:
         raise ValueError("promoted manifest identity mismatch")
     promoted_descriptors = promoted.get("descriptors")
     if not isinstance(promoted_descriptors, list) or not promoted_descriptors:
@@ -133,26 +139,44 @@ def regenerate(report: dict[str, Any], promoted: dict[str, Any]) -> tuple[dict[s
         elif reviewed.get("slot") != slot:
             review_required.append(f"slot_changed:{name}")
         if assignable:
-            kind = NUMERIC_TYPES.get(observed_type)
-            if kind is None or reviewed.get("kind") != kind or not isinstance(reviewed.get("id"), str):
+            kind = "color" if observed_type == COLOR_TYPE else NUMERIC_TYPES.get(observed_type)
+            if (
+                kind is None
+                or reviewed.get("kind") != kind
+                or not isinstance(reviewed.get("id"), str)
+                or (kind == "color" and promoted.get("schema_version") != 2)
+            ):
                 raise ValueError("assignable descriptor curation conflicts with observed type")
-            minimum = finite_number(parameter.get("valid_min"), f"{name} minimum")
-            maximum = finite_number(parameter.get("valid_max"), f"{name} maximum")
-            default = finite_number(parameter.get("default"), f"{name} default")
-            if minimum > maximum or default < minimum or default > maximum:
-                raise ValueError("observed descriptor range/default is invalid")
-            descriptor.update(
-                id=reviewed["id"],
-                kind=kind,
-                minimum=minimum,
-                maximum=maximum,
-                default=default,
-            )
+            if kind == "color":
+                default_color = parameter.get("default_color")
+                if (
+                    not isinstance(default_color, dict)
+                    or set(default_color) != {"alpha", "red", "green", "blue"}
+                    or any(
+                        isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= 255
+                        for value in default_color.values()
+                    )
+                ):
+                    raise ValueError("observed color default is invalid")
+                descriptor.update(id=reviewed["id"], kind=kind, default_color=default_color)
+            else:
+                minimum = finite_number(parameter.get("valid_min"), f"{name} minimum")
+                maximum = finite_number(parameter.get("valid_max"), f"{name} maximum")
+                default = finite_number(parameter.get("default"), f"{name} default")
+                if minimum > maximum or default < minimum or default > maximum:
+                    raise ValueError("observed descriptor range/default is invalid")
+                descriptor.update(
+                    id=reviewed["id"],
+                    kind=kind,
+                    minimum=minimum,
+                    maximum=maximum,
+                    default=default,
+                )
         candidate_descriptors.append(descriptor)
     for missing in sorted(curation.keys() - observed_names):
         review_required.append(f"missing_descriptor:{missing}")
     candidate = {
-        "schema_version": 1,
+        "schema_version": promoted["schema_version"],
         "plugin_id": plugin_id,
         "source": {
             "stage": "L2",

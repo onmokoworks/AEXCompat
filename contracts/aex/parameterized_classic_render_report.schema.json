@@ -79,7 +79,7 @@
       "minProperties": 1,
       "maxProperties": 64,
       "propertyNames": {"pattern": "^[a-z][a-z0-9_]{0,63}$"},
-      "additionalProperties": {"type": "number"}
+      "additionalProperties": {"oneOf": [{"type": "number"}, {"$ref": "#/$defs/color"}]}
     },
     "run": {
       "type": "object",
@@ -101,8 +101,18 @@
       "properties": {
         "id": {"type": "string", "pattern": "^[a-z][a-z0-9_]{0,63}$"},
         "slot": {"type": "integer", "minimum": 1, "maximum": 64},
-        "kind": {"enum": ["integer", "float"]},
-        "value": {"type": "number"}
+        "kind": {"enum": ["integer", "float", "color"]},
+        "value": {"oneOf": [{"type": "number"}, {"$ref": "#/$defs/color"}]}
+      }
+    },
+    "color": {
+      "type": "object", "additionalProperties": false,
+      "required": ["alpha", "red", "green", "blue"],
+      "properties": {
+        "alpha": {"type": "integer", "minimum": 0, "maximum": 255},
+        "red": {"type": "integer", "minimum": 0, "maximum": 255},
+        "green": {"type": "integer", "minimum": 0, "maximum": 255},
+        "blue": {"type": "integer", "minimum": 0, "maximum": 255}
       }
     },
     "success_run": {

@@ -9,11 +9,17 @@ ROOT = Path(__file__).resolve().parents[1]
 class RenderParameterGateContractTests(unittest.TestCase):
     def test_request_is_strict_and_caller_cannot_supply_descriptors(self):
         schema = json.loads((ROOT / "contracts/aex/render_parameter_request.schema.json").read_text(encoding="utf-8"))
-        self.assertEqual(schema["schema_version"], 2)
-        self.assertEqual(schema["properties"]["schema_version"]["const"], 2)
+        self.assertEqual(schema["schema_version"], 3)
+        self.assertEqual(schema["properties"]["schema_version"]["enum"], [2, 3])
         self.assertFalse(schema["additionalProperties"])
         assignments = schema["properties"]["assignments"]
-        self.assertEqual(assignments["additionalProperties"], {"type": "number"})
+        alternatives = assignments["additionalProperties"]["oneOf"]
+        self.assertEqual(alternatives[0], {"type": "number"})
+        self.assertEqual(alternatives[1], {"$ref": "#/$defs/color"})
+        self.assertEqual(
+            schema["allOf"][0]["then"]["properties"]["assignments"]["additionalProperties"],
+            {"type": "number"},
+        )
         self.assertEqual(assignments["maxProperties"], 64)
         self.assertIn("propertyNames", assignments)
         self.assertNotIn("properties", assignments)
@@ -58,6 +64,7 @@ class RenderParameterGateContractTests(unittest.TestCase):
         source = (ROOT / "minihost/src/l2_main.cpp").read_text(encoding="utf-8")
         for marker in ('L"--render-request"', "parse_parameter_payload", "valid_parameter_id",
                        'encoded.compare(0, 3, L"v2|")', "encoded.size() > 4096",
+                       'encoded.compare(0, 3, L"v3|")', 'kind_text == L"argb8"',
                        "validate_requested_assignments", "apply_requested_assignments",
                        "initialize_parameter_definitions",
                        "g_params[static_cast<std::size_t>(assignment.index - 1)]",

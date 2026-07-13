@@ -2,13 +2,13 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://aexcompat.local/contracts/aex/parameter_descriptor_manifest.schema.json",
   "schema_name": "AEXCompat observed parameter descriptor manifest schema",
-  "schema_version": 1,
+  "schema_version": 2,
   "title": "AEXCompat observed parameter descriptor manifest",
   "type": "object",
   "additionalProperties": false,
   "required": ["schema_version", "plugin_id", "source", "descriptors"],
   "properties": {
-    "schema_version": {"const": 1},
+    "schema_version": {"enum": [1, 2]},
     "plugin_id": {"type": "string", "pattern": "^[a-z][a-z0-9_-]{0,63}$"},
     "source": {
       "type": "object",
@@ -38,15 +38,36 @@
         "display_name": {"type": "string", "minLength": 1, "maxLength": 63},
         "assignable": {"type": "boolean"},
         "id": {"type": "string", "pattern": "^[a-z][a-z0-9_]{0,63}$"},
-        "kind": {"enum": ["integer", "float"]},
+        "kind": {"enum": ["integer", "float", "color"]},
         "minimum": {"type": "number"},
         "maximum": {"type": "number"},
-        "default": {"type": "number"}
+        "default": {"type": "number"},
+        "default_color": {"$ref": "#/$defs/color"}
       },
       "allOf": [{
         "if": {"properties": {"assignable": {"const": true}}},
-        "then": {"required": ["id", "kind", "minimum", "maximum", "default"]}
+        "then": {
+          "required": ["id", "kind"],
+          "allOf": [
+            {
+              "if": {"properties": {"kind": {"const": "color"}}},
+              "then": {"required": ["default_color"]},
+              "else": {"required": ["minimum", "maximum", "default"]}
+            }
+          ]
+        }
       }]
+    },
+    "color": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["alpha", "red", "green", "blue"],
+      "properties": {
+        "alpha": {"type": "integer", "minimum": 0, "maximum": 255},
+        "red": {"type": "integer", "minimum": 0, "maximum": 255},
+        "green": {"type": "integer", "minimum": 0, "maximum": 255},
+        "blue": {"type": "integer", "minimum": 0, "maximum": 255}
+      }
     }
   }
 }

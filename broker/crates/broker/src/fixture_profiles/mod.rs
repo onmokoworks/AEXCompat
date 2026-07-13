@@ -139,7 +139,7 @@ static MASKOFFSET_OBSERVATION: ObservationProfile = ObservationProfile {
     },
     descriptor_manifest: ManifestPolicy {
         path: "profiles/maskoffset/parameter_descriptors.json",
-        sha256: "2D498526F705AE749542C7D9D0C8BE5E000243AFF8C64D37AEF36F12F60C4DC2",
+        sha256: "13876295DB0A58D4B401525E88E44071A1C489D649B146F7149FD408B651DB13",
     },
 };
 

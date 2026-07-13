@@ -3,7 +3,7 @@ use crate::fixture_profiles::scattermap::expected_argb8_hash;
 use crate::fixture_profiles::{ParameterizedRenderAdapter, RegisteredProfile};
 use crate::host_core::descriptor_manifest::{load as load_manifest, LoadedManifest};
 use crate::host_core::parameter::{
-    apply_defaults, encode_worker_payload, validate_assignments, PluginProfile,
+    apply_defaults, encode_worker_payload, validate_assignments, ParameterValue, PluginProfile,
     ValidatedAssignments, ValidationError, ValueKind,
 };
 use crate::windows_process::run_isolated;
@@ -26,7 +26,7 @@ struct Request {
     assignments: Assignments,
 }
 
-struct Assignments(BTreeMap<String, f64>);
+struct Assignments(BTreeMap<String, ParameterValue>);
 
 impl<'de> Deserialize<'de> for Assignments {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
@@ -47,7 +47,7 @@ impl<'de> Deserialize<'de> for Assignments {
                 M: MapAccess<'de>,
             {
                 let mut values = BTreeMap::new();
-                while let Some((id, value)) = map.next_entry::<String, f64>()? {
+                while let Some((id, value)) = map.next_entry::<String, ParameterValue>()? {
                     if values.insert(id.clone(), value).is_some() {
                         return Err(serde::de::Error::custom(format!(
                             "duplicate parameter id: {id}"
@@ -78,6 +78,16 @@ fn evaluate(
     request: &Request,
     profile: &PluginProfile,
 ) -> io::Result<(ValidatedAssignments, usize, Vec<ValidationError>)> {
+    if !matches!(request.schema_version, 2 | 3)
+        || request.schema_version == 2
+            && request
+                .assignments
+                .0
+                .values()
+                .any(|value| !matches!(value, ParameterValue::Numeric(_)))
+    {
+        return Err(invalid("render request identity mismatch"));
+    }
     let assignment_count = request.assignments.0.len();
     let (validated, errors) =
         validate_assignments(profile, &request.assignments.0).map_err(invalid)?;
@@ -88,7 +98,7 @@ fn evaluate(
 fn expected_hash(adapter: ParameterizedRenderAdapter, effective: &ValidatedAssignments) -> String {
     match adapter {
         ParameterizedRenderAdapter::ScatterMap => expected_argb8_hash(effective),
-        ParameterizedRenderAdapter::MaskOffsetRectangle => rectangle_mask_argb8_hash(),
+        ParameterizedRenderAdapter::MaskOffsetRectangle => rectangle_mask_argb8_hash(effective),
     }
 }
 
@@ -120,12 +130,27 @@ fn worker_echo_matches(
                 let expected_kind = match descriptor.kind {
                     ValueKind::Integer => "integer",
                     ValueKind::Float => "float",
+                    ValueKind::Color => "color",
+                };
+                let value_matches = match descriptor.kind {
+                    ValueKind::Integer | ValueKind::Float => {
+                        item.get("value").and_then(Value::as_f64)
+                            == effective
+                                .get(&descriptor.id)
+                                .and_then(|value| value.numeric())
+                    }
+                    ValueKind::Color => {
+                        item.get("value")
+                            == effective
+                                .get(&descriptor.id)
+                                .and_then(|value| serde_json::to_value(value).ok())
+                                .as_ref()
+                    }
                 };
                 item.get("id").and_then(Value::as_str) == Some(descriptor.id.as_str())
                     && item.get("slot").and_then(Value::as_u64) == Some(descriptor.slot as u64)
                     && item.get("kind").and_then(Value::as_str) == Some(expected_kind)
-                    && item.get("value").and_then(Value::as_f64)
-                        == effective.get(&descriptor.id).copied()
+                    && value_matches
             })
 }
 
@@ -184,9 +209,6 @@ pub fn run(repository: &Path, request_path: &Path, output_path: &Path) -> io::Re
     }
     let request: Request = serde_json::from_slice(&fs::read(request_path)?)
         .map_err(|error| invalid(format!("invalid render request: {error}")))?;
-    if request.schema_version != 2 {
-        return Err(invalid("render request identity mismatch"));
-    }
     let profile = crate::fixture_profiles::find(&request.plugin_id)
         .ok_or_else(|| invalid("unknown plugin profile"))?;
     let manifest = descriptors(repository, &request.plugin_id, profile)?;
@@ -226,9 +248,6 @@ pub fn execute(repository: &Path, request_path: &Path, output_path: &Path) -> io
     }
     let request: Request = serde_json::from_slice(&fs::read(request_path)?)
         .map_err(|error| invalid(format!("invalid render request: {error}")))?;
-    if request.schema_version != 2 {
-        return Err(invalid("render request identity mismatch"));
-    }
     let profile = crate::fixture_profiles::find(&request.plugin_id)
         .ok_or_else(|| invalid("unknown plugin profile"))?;
     let worker_spec = profile
@@ -329,9 +348,6 @@ pub fn execute_smart(
     }
     let request: Request = serde_json::from_slice(&fs::read(request_path)?)
         .map_err(|error| invalid(format!("invalid render request: {error}")))?;
-    if request.schema_version != 2 {
-        return Err(invalid("render request identity mismatch"));
-    }
     let profile = crate::fixture_profiles::find(&request.plugin_id)
         .ok_or_else(|| invalid("unknown plugin profile"))?;
     let worker_spec = profile
@@ -434,9 +450,15 @@ mod tests {
         ));
         fs::create_dir_all(root.join("target/render-requests")).unwrap();
         fs::create_dir_all(root.join("profiles/scattermap")).unwrap();
+        fs::create_dir_all(root.join("profiles/maskoffset")).unwrap();
         fs::write(
             root.join("profiles/scattermap/parameter_descriptors.json"),
             include_bytes!("../../../../profiles/scattermap/parameter_descriptors.json"),
+        )
+        .unwrap();
+        fs::write(
+            root.join("profiles/maskoffset/parameter_descriptors.json"),
+            include_bytes!("../../../../profiles/maskoffset/parameter_descriptors.json"),
         )
         .unwrap();
         root
@@ -451,13 +473,14 @@ mod tests {
                 display_name: "Radius".into(),
                 slot: 3,
                 observed_type: 10,
-                minimum: 0.0,
-                maximum: 10.0,
-                default_value: 2.5,
+                minimum: Some(0.0),
+                maximum: Some(10.0),
+                default_value: ParameterValue::Numeric(2.5),
                 kind: ValueKind::Float,
             }],
         };
-        let effective = ValidatedAssignments::from([("radius".into(), 2.5)]);
+        let effective =
+            ValidatedAssignments::from([("radius".into(), ParameterValue::Numeric(2.5))]);
         let valid = json!({"requested_parameters":[
             {"id":"radius","slot":3,"kind":"float","value":2.5}
         ]});
@@ -477,6 +500,35 @@ mod tests {
         assert!(run(&root, &request, &output).unwrap());
         let report: Value = serde_json::from_slice(&fs::read(output).unwrap()).unwrap();
         assert_eq!(report["native_dispatch_permitted"], true);
+        assert_eq!(report["native_process_started"], false);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn color_requires_v3_and_is_accepted_without_native_dispatch() {
+        let root = repository();
+        let request = root.join("target/render-requests/color.json");
+        let output = root.join("target/render-request-results/color.json");
+        let assignments = r#""fill_color":{"alpha":255,"red":20,"green":180,"blue":70}"#;
+        fs::write(
+            &request,
+            format!(
+                r#"{{"schema_version":2,"plugin_id":"maskoffset","assignments":{{{assignments}}}}}"#
+            ),
+        )
+        .unwrap();
+        assert!(run(&root, &request, &output).is_err());
+        assert!(!output.exists());
+        fs::write(
+            &request,
+            format!(
+                r#"{{"schema_version":3,"plugin_id":"maskoffset","assignments":{{{assignments}}}}}"#
+            ),
+        )
+        .unwrap();
+        assert!(run(&root, &request, &output).unwrap());
+        let report: Value = serde_json::from_slice(&fs::read(&output).unwrap()).unwrap();
+        assert_eq!(report["accepted"], true);
         assert_eq!(report["native_process_started"], false);
         fs::remove_dir_all(root).unwrap();
     }

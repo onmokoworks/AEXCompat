@@ -62,16 +62,29 @@ pub fn argb8_hash(amount: i32, direction: i32, seed: i32, mix: f64) -> String {
 
 pub fn expected_argb8_hash(assignments: &ValidatedAssignments) -> String {
     argb8_hash(
-        assignments.get("amount").copied().unwrap_or(5.0) as i32,
-        assignments.get("direction").copied().unwrap_or(3.0) as i32,
-        assignments.get("seed").copied().unwrap_or(0.0) as i32,
-        assignments.get("mix").copied().unwrap_or(100.0),
+        assignments
+            .get("amount")
+            .and_then(|value| value.numeric())
+            .unwrap_or(5.0) as i32,
+        assignments
+            .get("direction")
+            .and_then(|value| value.numeric())
+            .unwrap_or(3.0) as i32,
+        assignments
+            .get("seed")
+            .and_then(|value| value.numeric())
+            .unwrap_or(0.0) as i32,
+        assignments
+            .get("mix")
+            .and_then(|value| value.numeric())
+            .unwrap_or(100.0),
     )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::host_core::parameter::ParameterValue;
     #[test]
     fn oracle_matches_the_independent_matrix() {
         for (parameters, expected) in [
@@ -98,11 +111,11 @@ mod tests {
     #[test]
     fn adapter_applies_observed_defaults_after_generic_validation() {
         let values = ValidatedAssignments::from([
-            ("amount".into(), 13.0),
-            ("direction".into(), 3.0),
-            ("seed".into(), 0.0),
-            ("mix".into(), 25.5),
-            ("invert_map".into(), 0.0),
+            ("amount".into(), ParameterValue::Numeric(13.0)),
+            ("direction".into(), ParameterValue::Numeric(3.0)),
+            ("seed".into(), ParameterValue::Numeric(0.0)),
+            ("mix".into(), ParameterValue::Numeric(25.5)),
+            ("invert_map".into(), ParameterValue::Numeric(0.0)),
         ]);
         assert_eq!(expected_argb8_hash(&values), argb8_hash(13, 3, 0, 25.5));
     }
