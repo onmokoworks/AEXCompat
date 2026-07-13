@@ -27,6 +27,7 @@ int main() {
                "  \"pf_interact_callbacks_size\":" << sizeof(PF_InteractCallbacks) << ",\n"
                "  \"pf_param_union_size\":" << sizeof(PF_ParamDefUnion) << ",\n"
                "  \"pf_util_callbacks_size\":" << sizeof(PF_UtilCallbacks) << ",\n"
+               "  \"pf_pixel_size\":" << sizeof(PF_Pixel) << ",\n"
                "  \"fields\":{";
   field<decltype(PF_InData::version)>("in.version", offsetof(PF_InData, version), first);
   field<decltype(PF_InData::serial_num)>("in.serial_num", offsetof(PF_InData, serial_num), first);
@@ -37,6 +38,12 @@ int main() {
   field<decltype(PF_InData::utils)>("in.utils", offsetof(PF_InData, utils), first);
   field<decltype(PF_InData::effect_ref)>("in.effect_ref", offsetof(PF_InData, effect_ref), first);
   field<decltype(PF_InData::global_data)>("in.global_data", offsetof(PF_InData, global_data), first);
+  field<decltype(PF_InData::current_time)>("in.current_time", offsetof(PF_InData, current_time), first);
+  field<decltype(PF_InData::time_step)>("in.time_step", offsetof(PF_InData, time_step), first);
+  field<decltype(PF_InData::total_time)>("in.total_time", offsetof(PF_InData, total_time), first);
+  field<decltype(PF_InData::time_scale)>("in.time_scale", offsetof(PF_InData, time_scale), first);
+  field<decltype(PF_InData::width)>("in.width", offsetof(PF_InData, width), first);
+  field<decltype(PF_InData::height)>("in.height", offsetof(PF_InData, height), first);
   field<decltype(PF_InteractCallbacks::checkout_param)>("inter.checkout_param", offsetof(PF_InteractCallbacks, checkout_param), first);
   field<decltype(PF_InteractCallbacks::checkin_param)>("inter.checkin_param", offsetof(PF_InteractCallbacks, checkin_param), first);
   field<decltype(PF_InteractCallbacks::add_param)>("inter.add_param", offsetof(PF_InteractCallbacks, add_param), first);
@@ -77,10 +84,20 @@ int main() {
   field<decltype(PF_FloatSliderDef::slider_max)>("float_slider.slider_max", offsetof(PF_FloatSliderDef, slider_max), first);
   field<decltype(PF_FloatSliderDef::dephault)>("float_slider.default", offsetof(PF_FloatSliderDef, dephault), first);
   field<decltype(PF_FloatSliderDef::precision)>("float_slider.precision", offsetof(PF_FloatSliderDef, precision), first);
+  field<decltype(PF_LayerDef::width)>("layer.width", offsetof(PF_LayerDef, width), first);
+  field<decltype(PF_LayerDef::height)>("layer.height", offsetof(PF_LayerDef, height), first);
+  field<decltype(PF_LayerDef::rowbytes)>("layer.rowbytes", offsetof(PF_LayerDef, rowbytes), first);
+  field<decltype(PF_LayerDef::data)>("layer.data", offsetof(PF_LayerDef, data), first);
+  field<decltype(PF_LayerDef::extent_hint)>("layer.extent_hint", offsetof(PF_LayerDef, extent_hint), first);
+  field<decltype(PF_Pixel::alpha)>("pixel.alpha", offsetof(PF_Pixel, alpha), first);
+  field<decltype(PF_Pixel::red)>("pixel.red", offsetof(PF_Pixel, red), first);
+  field<decltype(PF_Pixel::green)>("pixel.green", offsetof(PF_Pixel, green), first);
+  field<decltype(PF_Pixel::blue)>("pixel.blue", offsetof(PF_Pixel, blue), first);
   std::cout << "\n  },\n  \"selectors\":{"
             << "\"about\":" << static_cast<int>(PF_Cmd_ABOUT) << ','
             << "\"global_setup\":" << static_cast<int>(PF_Cmd_GLOBAL_SETUP) << ','
             << "\"global_setdown\":" << static_cast<int>(PF_Cmd_GLOBAL_SETDOWN) << ','
             << "\"params_setup\":" << static_cast<int>(PF_Cmd_PARAMS_SETUP)
+            << ",\"render\":" << static_cast<int>(PF_Cmd_RENDER)
             << "}\n}\n";
 }

@@ -24,6 +24,7 @@ class AbiLayoutProbeTests(unittest.TestCase):
             "in.pica_basicP", "out.my_version", "out.num_params",
             "inter.add_param", "param.param_type", "param.name",
             "PF_Cmd_GLOBAL_SETUP", "PF_Cmd_PARAMS_SETUP",
+            "PF_Cmd_RENDER", "layer.rowbytes", "layer.data", "in.time_scale",
         ):
             self.assertIn(marker, text)
 
@@ -35,6 +36,10 @@ class AbiLayoutProbeTests(unittest.TestCase):
         self.assertEqual(data["pf_interact_callbacks_size"], 176)
         self.assertEqual(data["fields"]["inter.add_param"]["offset"], 16)
         self.assertEqual(data["fields"]["param.u"]["offset"], 56)
+        self.assertEqual(data["pf_pixel_size"], 4)
+        self.assertEqual(data["fields"]["layer.data"]["offset"], 24)
+        self.assertEqual(data["fields"]["pixel.alpha"]["offset"], 0)
+        self.assertEqual(data["selectors"]["render"], 11)
         self.assertFalse(data["native_aex_loaded"])
         self.assertFalse(data["selector_dispatched"])
 

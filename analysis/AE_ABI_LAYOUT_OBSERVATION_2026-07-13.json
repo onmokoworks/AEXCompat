@@ -12,6 +12,7 @@
   "pf_interact_callbacks_size": 176,
   "pf_param_union_size": 120,
   "pf_util_callbacks_size": 552,
+  "pf_pixel_size": 4,
   "fields": {
     "in.version": { "offset": 196, "size": 4 },
     "in.serial_num": { "offset": 200, "size": 4 },
@@ -22,6 +23,12 @@
     "in.effect_ref": { "offset": 184, "size": 8 },
     "in.utils": { "offset": 176, "size": 8 },
     "in.global_data": { "offset": 312, "size": 8 },
+    "in.current_time": { "offset": 224, "size": 4 },
+    "in.time_step": { "offset": 228, "size": 4 },
+    "in.total_time": { "offset": 232, "size": 4 },
+    "in.time_scale": { "offset": 240, "size": 4 },
+    "in.width": { "offset": 252, "size": 4 },
+    "in.height": { "offset": 256, "size": 4 },
     "inter.checkout_param": { "offset": 0, "size": 8 },
     "inter.checkin_param": { "offset": 8, "size": 8 },
     "inter.add_param": { "offset": 16, "size": 8 },
@@ -62,12 +69,22 @@
     ,"float_slider.slider_max": { "offset": 60, "size": 4 }
     ,"float_slider.default": { "offset": 64, "size": 4 }
     ,"float_slider.precision": { "offset": 68, "size": 2 }
+    ,"layer.data": { "offset": 24, "size": 8 }
+    ,"layer.rowbytes": { "offset": 32, "size": 4 }
+    ,"layer.width": { "offset": 36, "size": 4 }
+    ,"layer.height": { "offset": 40, "size": 4 }
+    ,"layer.extent_hint": { "offset": 44, "size": 16 }
+    ,"pixel.alpha": { "offset": 0, "size": 1 }
+    ,"pixel.red": { "offset": 1, "size": 1 }
+    ,"pixel.green": { "offset": 2, "size": 1 }
+    ,"pixel.blue": { "offset": 3, "size": 1 }
   },
   "selectors": {
     "about": 0,
     "global_setup": 1,
     "global_setdown": 3,
-    "params_setup": 4
+    "params_setup": 4,
+    "render": 11
   },
   "native_aex_loaded": false,
   "selector_dispatched": false
