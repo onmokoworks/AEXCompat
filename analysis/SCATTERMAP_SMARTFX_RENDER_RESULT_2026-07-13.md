@@ -37,3 +37,13 @@ Setup and setdown returned zero. The fixture did not set
 `PF_RenderOutputFlag_GPU_RENDER_POSSIBLE`, so the host correctly did not dispatch
 `PF_Cmd_SMART_RENDER_GPU`. Both fallback outputs matched the float oracle. This
 proves the observable fallback decision, not GPU pixel execution.
+
+## Error Propagation
+
+A fixed missing-input negative control made checkout id 0 return error 4. Both
+isolated runs completed without a process crash, returned Smart Render error 4,
+left the guarded output entirely at its `0xCC` sentinel value, and exited
+nonzero. The broker treated this as the expected error contract rather than a
+successful render or an internal failure. Output SHA-256 was
+`346790DBFE3BE4137B9B0B36606E504BCE22FF351867A183DE2FE8481BE1006E` in
+both runs.

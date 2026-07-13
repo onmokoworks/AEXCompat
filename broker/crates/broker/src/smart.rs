@@ -18,6 +18,7 @@ fn expected(case_id: &str) -> Option<&'static str> { match case_id {
     "deep16_default" => Some("FDC0BC732683E9353F9A855D6EA2589B17D43D29D7B538093B474BEC6D5AD026"),
     "float32_default" => Some("D707B9B7BD7C923182A0BEFCA60985896E473AFF3D0191FC310FC07CAD3FE90B"),
     "gpu_fallback_float32" => Some("D707B9B7BD7C923182A0BEFCA60985896E473AFF3D0191FC310FC07CAD3FE90B"),
+    "error_missing_input" => Some("346790DBFE3BE4137B9B0B36606E504BCE22FF351867A183DE2FE8481BE1006E"),
     _ => None,
 } }
 #[derive(Deserialize)]
@@ -61,15 +62,26 @@ pub fn run(repository: &Path, worker: &Path, id: &str, case_id: &str, output: &P
     let gpu_valid = case_id != "gpu_fallback_float32" || reports.iter().all(|(_, r)|
         r.get("gpu_device_setup_error") == Some(&json!(0)) && r.get("gpu_device_setdown_error") == Some(&json!(0)) &&
         r.get("gpu_render_possible") == Some(&Value::Bool(false)) && r.get("gpu_render_dispatched") == Some(&Value::Bool(false)));
-    let passed = deterministic && gpu_valid && hashes.iter().all(|h| h == expected) && reports.iter().all(|(c, r)|
+    let expected_error = case_id == "error_missing_input";
+    let error_valid = !expected_error || reports.iter().all(|(c, r)|
+        c.as_str() == "nonzero_exit" && r.get("pre_render_error") == Some(&json!(0)) &&
+        r.get("smart_render_error").and_then(Value::as_i64).is_some_and(|e| e != 0) &&
+        r.get("guard_bytes_intact") == Some(&Value::Bool(true)));
+    let success_valid = expected_error || reports.iter().all(|(c, r)|
         c.as_str() == "ok" && r.get("pre_render_error") == Some(&json!(0)) && r.get("smart_render_error") == Some(&json!(0)) &&
         r.get("result_rects_valid") == Some(&Value::Bool(true)) && r.get("guard_bytes_intact") == Some(&Value::Bool(true)));
+    let passed = deterministic && gpu_valid && error_valid && success_valid && hashes.iter().all(|h| h == expected);
     let summary = json!({"schema_version":1,"stage":"smartfx_render","plugin_id":id,"receipt_id":entry.receipt_id,
         "fixture_sha256":entry.sha256.to_ascii_uppercase(),"case_id":case_id,"expected_oracle_sha256":expected,
-        "run_1":{"classification":reports[0].0.as_str(),"output_sha256":hashes[0]},
-        "run_2":{"classification":reports[1].0.as_str(),"output_sha256":hashes[1]},
+        "run_1":{"classification":reports[0].0.as_str(),"output_sha256":hashes[0],
+            "smart_render_error":reports[0].1.get("smart_render_error"),
+            "guard_bytes_intact":reports[0].1.get("guard_bytes_intact")},
+        "run_2":{"classification":reports[1].0.as_str(),"output_sha256":hashes[1],
+            "smart_render_error":reports[1].1.get("smart_render_error"),
+            "guard_bytes_intact":reports[1].1.get("guard_bytes_intact")},
         "deterministic":deterministic,"oracle_match":hashes.iter().all(|h| h == expected),
-        "gpu_negotiation_valid":gpu_valid,"broker_survived":true,"passed":passed});
+        "gpu_negotiation_valid":gpu_valid,"expected_error":expected_error,"error_contract_valid":error_valid,
+        "broker_survived":true,"passed":passed});
     let mut file = OpenOptions::new().write(true).create_new(true).open(output)?;
     serde_json::to_writer_pretty(&mut file, &summary).map_err(|e| invalid(e.to_string()))?; file.write_all(b"\n")?;
     Ok(passed)
@@ -82,7 +94,7 @@ mod tests {
     fn oracle_table_covers_the_fixed_smartfx_matrix() {
         for case_id in ["default", "identity", "horizontal", "vertical_no_repeat", "mixed",
                         "odd_dimensions", "padded_stride", "connected_map", "inverted_map", "deep16_default",
-                        "float32_default", "gpu_fallback_float32"] {
+                        "float32_default", "gpu_fallback_float32", "error_missing_input"] {
             assert_eq!(expected(case_id).unwrap().len(), 64);
         }
         assert!(expected("arbitrary").is_none());

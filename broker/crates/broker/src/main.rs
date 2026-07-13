@@ -50,6 +50,7 @@ fn main() {
         "smart-deep16-scattermap" => Some("deep16_default"),
         "smart-float32-scattermap" => Some("float32_default"),
         "smart-gpu-negotiation-scattermap" => Some("gpu_fallback_float32"),
+        "smart-error-missing-input-scattermap" => Some("error_missing_input"),
         _ => None,
     };
     if let Some(case_id) = smart_case {

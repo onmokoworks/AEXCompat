@@ -477,6 +477,7 @@ SmartResult smart_render_once(EffectEntry entry, std::array<std::byte, kInSize>&
   SmartResult result;
   const bool deep16 = case_id == "deep16_default";
   const bool gpu_negotiation = case_id == "gpu_fallback_float32";
+  const bool missing_input = case_id == "error_missing_input";
   const bool float32 = case_id == "float32_default" || gpu_negotiation;
   const bool connected_map = case_id == "connected_map" || case_id == "inverted_map";
   const int32_t width = connected_map ? 11 : ((case_id == "odd_dimensions" || case_id == "padded_stride") ? 13 : 16);
@@ -489,7 +490,7 @@ SmartResult smart_render_once(EffectEntry entry, std::array<std::byte, kInSize>&
   else if (case_id == "vertical_no_repeat") { amount = 7; direction = 2; repeat = 0; }
   else if (case_id == "mixed") { amount = 12; seed = 991; mix = 37.5; }
   else if (case_id == "odd_dimensions" || case_id == "padded_stride") { amount = 4; seed = 3; }
-  else if (case_id != "default" && !deep16 && !float32 && !connected_map) return result;
+  else if (case_id != "default" && !deep16 && !float32 && !missing_input && !connected_map) return result;
   constexpr std::size_t guard = 64;
   std::vector<unsigned char> source(rowbytes * height, 0x5A);
   for (int32_t y = 0; y < height; ++y) for (int32_t x = 0; x < width; ++x) {
@@ -580,7 +581,8 @@ SmartResult smart_render_once(EffectEntry entry, std::array<std::byte, kInSize>&
   write<void*>(callbacks, 8, reinterpret_cast<void*>(&smart_checkin_pixels));
   write<void*>(callbacks, 16, reinterpret_cast<void*>(&smart_checkout_output));
   write<void*>(smart_extra, 0, smart_input.data()); write<void*>(smart_extra, 8, callbacks.data());
-  g_smart_input_world = input_world.data(); g_smart_output_world = output_world.data();
+  g_smart_input_world = missing_input ? nullptr : input_world.data();
+  g_smart_output_world = output_world.data();
   const int32_t render_selector = gpu_negotiation && result.gpu_render_possible ? kSmartRenderGpu : kSmartRender;
   result.gpu_render_dispatched = render_selector == kSmartRenderGpu;
   result.render_error = result.pre_error == 0
