@@ -19,6 +19,9 @@ Observed selector results:
 - reported parameter count: 8 (implicit input plus 7 registered parameters);
 - `out_flags`: 33554432;
 - `out_flags2`: 167777280;
+- `PF_OutFlag_SEND_UPDATE_PARAMS_UI`: not advertised;
+- `PF_OutFlag2_SUPPORTS_QUERY_DYNAMIC_FLAGS`: not advertised;
+- conditional `UPDATE_PARAMS_UI` and `QUERY_DYNAMIC_FLAGS` dispatch: correctly omitted;
 - render performed: false;
 - worker exit classification: `ok`.
 

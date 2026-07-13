@@ -77,6 +77,11 @@ pub fn run(repository: &Path, worker: &Path, id: &str, output: &Path) -> io::Res
         && ["sequence_setup_error", "sequence_resetup_error", "frame_setup_error",
             "frame_setdown_error", "sequence_setdown_error"].iter()
             .all(|key| worker_report.get(*key) == Some(&json!(0)))
+        && worker_report.get("out_flags") == Some(&json!(33_554_432))
+        && worker_report.get("out_flags2") == Some(&json!(167_777_280))
+        && worker_report.get("update_params_ui_advertised") == Some(&Value::Bool(false))
+        && worker_report.get("query_dynamic_flags_advertised") == Some(&Value::Bool(false))
+        && worker_report.get("conditional_ui_selectors_dispatched") == Some(&Value::Bool(false))
         && worker_report.get("lifecycle_data_null") == Some(&Value::Bool(true))
         && worker_report.get("render_performed") == Some(&Value::Bool(false));
     let report = json!({"schema_version":1,"stage":"L2","plugin_id":id,

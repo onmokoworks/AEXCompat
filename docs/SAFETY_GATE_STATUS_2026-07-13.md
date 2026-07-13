@@ -31,7 +31,10 @@ successfully through the isolated broker. Initialization, descriptor values,
 deterministic output, buffer guards, and independent pixel hash parity are
 observed. Extended classic render and connected map cases now have oracle
 parity. SmartFX PreRender/Render now also has two-run deterministic oracle
-parity across the ARGB8 matrix. 16-bpc and 32-bpc CPU cases reproduce the
+parity across the ARGB8 matrix. L2 also enforces the target's conditional
+selector policy: GLOBAL_SETUP advertises neither `SEND_UPDATE_PARAMS_UI` nor
+`SUPPORTS_QUERY_DYNAMIC_FLAGS`, so the host omits both selectors rather than
+inventing unsupported callbacks. 16-bpc and 32-bpc CPU cases reproduce the
 fixture's declared-but-byte-oriented writes under a harness sentinel; actual AE
 evidence shows the unwritten tail is not deterministic. GPU lifecycle
 negotiation correctly falls back because PreRender does not opt in to GPU pixel

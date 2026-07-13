@@ -668,13 +668,18 @@ void report(const char* status, int32_t global_error, int32_t params_error,
             const std::string& about_message, const std::array<int32_t, 5>& lifecycle_errors,
             bool lifecycle_data_null) {
   const char* message = reinterpret_cast<const char*>(output.data() + kOutMessage);
+  const uint32_t out_flags = read<uint32_t>(output, kOutFlags);
+  const uint32_t out_flags2 = read<uint32_t>(output, kOutFlags2);
   std::cout << "{\"schema_version\":1,\"stage\":\"L2\",\"status\":\"" << status
             << "\",\"global_setup_error\":" << global_error
             << ",\"params_setup_error\":" << params_error
             << ",\"global_setdown_error\":" << setdown_error
             << ",\"reported_num_params\":" << read<int32_t>(output, kOutNumParams)
-            << ",\"out_flags\":" << read<uint32_t>(output, kOutFlags)
-            << ",\"out_flags2\":" << read<uint32_t>(output, kOutFlags2)
+            << ",\"out_flags\":" << out_flags
+            << ",\"out_flags2\":" << out_flags2
+            << ",\"update_params_ui_advertised\":" << ((out_flags & (1u << 26)) != 0 ? "true" : "false")
+            << ",\"query_dynamic_flags_advertised\":" << ((out_flags2 & 1u) != 0 ? "true" : "false")
+            << ",\"conditional_ui_selectors_dispatched\":false"
             << ",\"return_message\":\"" << escape(std::string(message, strnlen_s(message, 256)))
             << "\",\"about_message\":\"" << escape(about_message)
             << "\",\"sequence_setup_error\":" << lifecycle_errors[0]
