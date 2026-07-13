@@ -1,0 +1,272 @@
+#include <windows.h>
+#include <bcrypt.h>
+
+#include <array>
+#include <algorithm>
+#include <cstdint>
+#include <cstring>
+#include <filesystem>
+#include <fstream>
+#include <iomanip>
+#include <iostream>
+#include <new>
+#include <sstream>
+#include <string>
+#include <unordered_set>
+#include <vector>
+
+namespace {
+constexpr std::size_t kInSize = 408;
+constexpr std::size_t kOutSize = 408;
+constexpr std::size_t kParamSize = 176;
+constexpr std::size_t kMaxParams = 64;
+constexpr std::size_t kInAddParam = 16;
+constexpr std::size_t kInUtils = 176;
+constexpr std::size_t kInEffectRef = 184;
+constexpr std::size_t kInVersion = 196;
+constexpr std::size_t kInApplicationId = 204;
+constexpr std::size_t kInNumParams = 208;
+constexpr std::size_t kInGlobalData = 312;
+constexpr std::size_t kInPicaBasic = 384;
+constexpr std::size_t kOutGlobalData = 40;
+constexpr std::size_t kOutNumParams = 48;
+constexpr std::size_t kOutFlags = 96;
+constexpr std::size_t kOutMessage = 100;
+constexpr std::size_t kOutFlags2 = 400;
+constexpr std::size_t kParamType = 12;
+constexpr std::size_t kParamName = 16;
+constexpr std::size_t kParamNameSize = 32;
+constexpr std::size_t kParamFlags = 48;
+constexpr int32_t kGlobalSetup = 1;
+constexpr int32_t kGlobalSetdown = 3;
+constexpr int32_t kParamsSetup = 4;
+constexpr std::size_t kUtilsSize = 552;
+constexpr std::size_t kUtilsNewHandle = 160;
+constexpr std::size_t kUtilsLockHandle = 168;
+constexpr std::size_t kUtilsUnlockHandle = 176;
+constexpr std::size_t kUtilsDisposeHandle = 184;
+
+using EffectEntry = int32_t(__cdecl*)(int32_t, void*, void*, void**, void*, void*);
+using AddParamCallback = int32_t(__cdecl*)(void*, int32_t, void*);
+
+struct ParamRecord {
+  int32_t index{};
+  int32_t type{};
+  uint32_t flags{};
+  std::string name;
+};
+std::vector<ParamRecord> g_params;
+struct HandleRecord { void* data{}; std::size_t size{}; };
+std::unordered_set<HandleRecord*> g_handles;
+
+void** __cdecl new_handle(uint64_t size) {
+  std::cerr << "callback:new_handle size=" << size << "\n" << std::flush;
+  if (size > 64 * 1024 * 1024) return nullptr;
+  auto* record = new (std::nothrow) HandleRecord;
+  if (!record) return nullptr;
+  record->data = ::operator new(static_cast<std::size_t>(size), std::nothrow);
+  if (!record->data && size != 0) { delete record; return nullptr; }
+  if (record->data) std::memset(record->data, 0, static_cast<std::size_t>(size));
+  record->size = static_cast<std::size_t>(size);
+  g_handles.insert(record);
+  return &record->data;
+}
+
+void* __cdecl lock_handle(void** handle) {
+  std::cerr << "callback:lock_handle\n" << std::flush;
+  auto* record = reinterpret_cast<HandleRecord*>(handle);
+  return record && g_handles.count(record) ? record->data : nullptr;
+}
+
+void __cdecl unlock_handle(void**) {}
+
+void __cdecl dispose_handle(void** handle) {
+  auto* record = reinterpret_cast<HandleRecord*>(handle);
+  if (!record || !g_handles.erase(record)) return;
+  ::operator delete(record->data);
+  delete record;
+}
+
+uint64_t __cdecl handle_size(void** handle) {
+  auto* record = reinterpret_cast<HandleRecord*>(handle);
+  return record && g_handles.count(record) ? record->size : 0;
+}
+
+int32_t __cdecl resize_handle(uint64_t size, void*** handle) {
+  if (!handle || !*handle || size > 64 * 1024 * 1024) return 4;
+  auto* record = reinterpret_cast<HandleRecord*>(*handle);
+  if (!g_handles.count(record)) return 4;
+  void* replacement = ::operator new(static_cast<std::size_t>(size), std::nothrow);
+  if (!replacement && size) return 1;
+  if (replacement) {
+    std::memset(replacement, 0, static_cast<std::size_t>(size));
+    std::memcpy(replacement, record->data, (std::min)(record->size, static_cast<std::size_t>(size)));
+  }
+  ::operator delete(record->data);
+  record->data = replacement;
+  record->size = static_cast<std::size_t>(size);
+  return 0;
+}
+
+struct HandleSuite {
+  decltype(&new_handle) create;
+  decltype(&lock_handle) lock;
+  decltype(&unlock_handle) unlock;
+  decltype(&dispose_handle) dispose;
+  decltype(&handle_size) size;
+  decltype(&resize_handle) resize;
+};
+HandleSuite g_handle_suite{&new_handle, &lock_handle, &unlock_handle,
+                           &dispose_handle, &handle_size, &resize_handle};
+
+int32_t __cdecl acquire_suite(const char* name, int32_t version, const void** suite) {
+  if (!suite) return 4;
+  *suite = nullptr;
+  if (name && std::strcmp(name, "PF Handle Suite") == 0 && version == 2) {
+    *suite = &g_handle_suite;
+    return 0;
+  }
+  return 1;
+}
+
+int32_t __cdecl release_suite(const char*, int32_t) { return 0; }
+
+struct BasicSuite {
+  decltype(&acquire_suite) acquire;
+  decltype(&release_suite) release;
+  void* unsupported[5]{};
+};
+BasicSuite g_basic_suite{&acquire_suite, &release_suite};
+
+template <typename T, std::size_t N>
+T read(const std::array<std::byte, N>& bytes, std::size_t offset) {
+  T value{};
+  std::memcpy(&value, bytes.data() + offset, sizeof(value));
+  return value;
+}
+
+template <typename T, std::size_t N>
+void write(std::array<std::byte, N>& bytes, std::size_t offset, T value) {
+  std::memcpy(bytes.data() + offset, &value, sizeof(value));
+}
+
+int32_t __cdecl add_param(void*, int32_t index, void* definition) {
+  if (!definition || g_params.size() >= kMaxParams) return 4;
+  std::array<std::byte, kParamSize> bytes{};
+  std::memcpy(bytes.data(), definition, bytes.size());
+  const char* name = reinterpret_cast<const char*>(bytes.data() + kParamName);
+  const auto length = strnlen_s(name, kParamNameSize);
+  g_params.push_back({index, read<int32_t>(bytes, kParamType),
+                      read<uint32_t>(bytes, kParamFlags),
+                      std::string(name, length)});
+  return 0;
+}
+
+std::string escape(const std::string& input) {
+  std::string output;
+  for (unsigned char ch : input) {
+    if (ch == '"' || ch == '\\') output.push_back('\\');
+    if (ch >= 0x20 && ch < 0x7f) output.push_back(static_cast<char>(ch));
+  }
+  return output;
+}
+
+bool sha256(const std::filesystem::path& path, std::string& result) {
+  BCRYPT_ALG_HANDLE algorithm{};
+  BCRYPT_HASH_HANDLE hash{};
+  DWORD object_size{}, returned{};
+  if (BCryptOpenAlgorithmProvider(&algorithm, BCRYPT_SHA256_ALGORITHM, nullptr, 0) < 0 ||
+      BCryptGetProperty(algorithm, BCRYPT_OBJECT_LENGTH,
+                        reinterpret_cast<PUCHAR>(&object_size), sizeof(object_size),
+                        &returned, 0) < 0) return false;
+  std::vector<unsigned char> object(object_size);
+  if (BCryptCreateHash(algorithm, &hash, object.data(), object_size, nullptr, 0, 0) < 0) return false;
+  std::ifstream input(path, std::ios::binary);
+  std::array<unsigned char, 65536> buffer{};
+  while (input) {
+    input.read(reinterpret_cast<char*>(buffer.data()), buffer.size());
+    if (input.gcount() > 0 && BCryptHashData(hash, buffer.data(), static_cast<ULONG>(input.gcount()), 0) < 0) return false;
+  }
+  std::array<unsigned char, 32> digest{};
+  const bool ok = input.eof() && BCryptFinishHash(hash, digest.data(), digest.size(), 0) >= 0;
+  BCryptDestroyHash(hash);
+  BCryptCloseAlgorithmProvider(algorithm, 0);
+  if (!ok) return false;
+  std::ostringstream text;
+  text << std::hex << std::setfill('0');
+  for (auto byte : digest) text << std::setw(2) << static_cast<unsigned>(byte);
+  result = text.str();
+  return true;
+}
+
+void report(const char* status, int32_t global_error, int32_t params_error,
+            int32_t setdown_error, const std::array<std::byte, kOutSize>& output) {
+  const char* message = reinterpret_cast<const char*>(output.data() + kOutMessage);
+  std::cout << "{\"schema_version\":1,\"stage\":\"L2\",\"status\":\"" << status
+            << "\",\"global_setup_error\":" << global_error
+            << ",\"params_setup_error\":" << params_error
+            << ",\"global_setdown_error\":" << setdown_error
+            << ",\"reported_num_params\":" << read<int32_t>(output, kOutNumParams)
+            << ",\"out_flags\":" << read<uint32_t>(output, kOutFlags)
+            << ",\"out_flags2\":" << read<uint32_t>(output, kOutFlags2)
+            << ",\"return_message\":\"" << escape(std::string(message, strnlen_s(message, 256)))
+            << "\",\"parameters\":[";
+  for (std::size_t i = 0; i < g_params.size(); ++i) {
+    if (i) std::cout << ',';
+    const auto& param = g_params[i];
+    std::cout << "{\"index\":" << param.index << ",\"type\":" << param.type
+              << ",\"flags\":" << param.flags << ",\"name\":\""
+              << escape(param.name) << "\"}";
+  }
+  std::cout << "],\"selectors_executed\":true,\"render_performed\":false}\n";
+}
+}  // namespace
+
+int wmain(int argc, wchar_t** argv) {
+  if (argc != 4 || std::wstring(argv[1]) != L"--l2") return 2;
+  std::string expected;
+  for (const wchar_t* p = argv[3]; *p; ++p) {
+    if (*p > 0x7f) return 2;
+    expected.push_back(static_cast<char>(*p));
+  }
+  std::string actual;
+  if (!sha256(argv[2], actual) || actual != expected) return 10;
+  SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_SYSTEM32 | LOAD_LIBRARY_SEARCH_USER_DIRS);
+  HMODULE module = LoadLibraryExW(argv[2], nullptr,
+      LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32);
+  if (!module) return 11;
+  auto entry = reinterpret_cast<EffectEntry>(GetProcAddress(module, "EffectMain"));
+  if (!entry) entry = reinterpret_cast<EffectEntry>(GetProcAddress(module, "EntryPointFunc"));
+  if (!entry) { FreeLibrary(module); return 12; }
+
+  alignas(8) std::array<std::byte, kInSize> input{};
+  alignas(8) std::array<std::byte, kOutSize> output{};
+  alignas(8) std::array<std::byte, kUtilsSize> utils{};
+  write(input, kInAddParam, static_cast<AddParamCallback>(&add_param));
+  write(utils, kUtilsNewHandle, &new_handle);
+  write(utils, kUtilsLockHandle, &lock_handle);
+  write(utils, kUtilsUnlockHandle, &unlock_handle);
+  write(utils, kUtilsDisposeHandle, &dispose_handle);
+  write<void*>(input, kInUtils, utils.data());
+  write<void*>(input, kInPicaBasic, &g_basic_suite);
+  write<void*>(input, kInEffectRef, nullptr);
+  write<uint32_t>(input, kInVersion, 0);
+  write<uint32_t>(input, kInApplicationId, 0x46585443u);
+  write<int32_t>(input, kInNumParams, 1);
+  std::cerr << "stage:global_setup_begin\n" << std::flush;
+  const int32_t global_error = entry(kGlobalSetup, input.data(), output.data(), nullptr, nullptr, nullptr);
+  std::cerr << "stage:global_setup_end error=" << global_error << "\n" << std::flush;
+  write<void*>(input, kInGlobalData, read<void*>(output, kOutGlobalData));
+  std::cerr << "stage:params_setup_begin\n" << std::flush;
+  const int32_t params_error = global_error == 0
+      ? entry(kParamsSetup, input.data(), output.data(), nullptr, nullptr, nullptr) : -1;
+  std::cerr << "stage:params_setup_end error=" << params_error << "\n" << std::flush;
+  std::cerr << "stage:global_setdown_begin\n" << std::flush;
+  const int32_t setdown_error = global_error == 0
+      ? entry(kGlobalSetdown, input.data(), output.data(), nullptr, nullptr, nullptr) : -1;
+  std::cerr << "stage:global_setdown_end error=" << setdown_error << "\n" << std::flush;
+  report(global_error == 0 && params_error == 0 ? "selectors_completed" : "selector_error",
+         global_error, params_error, setdown_error, output);
+  FreeLibrary(module);
+  return global_error == 0 && params_error == 0 ? 0 : 20;
+}

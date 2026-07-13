@@ -65,6 +65,14 @@ class NativeCodeGuardTests(unittest.TestCase):
         self.assertIn('"scattermap"', main)
         self.assertNotIn("plugin-path", main)
 
+    def test_l2_has_distinct_worker_allowlist_and_receipt(self):
+        source = (BROKER_ROOT / "crates" / "broker" / "src" / "l2.rs").read_text(encoding="utf-8")
+        self.assertIn("target/l2-allowlist/active.local.json", source)
+        self.assertIn("scattermap-l2-20260713-001", source)
+        self.assertIn('entry.approved_stage != "L2"', source)
+        self.assertIn("entries.len() != 1", source)
+        self.assertIn("worker_report_unavailable", source)
+
 
 if __name__ == "__main__":
     unittest.main()

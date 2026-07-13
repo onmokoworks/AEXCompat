@@ -4,7 +4,7 @@ fn main() {
     use std::path::{Component, PathBuf};
     let args: Vec<String> = std::env::args().collect();
     if args.len() != 3 || !args[2].ends_with(".json") {
-        eprintln!("usage: broker <selftest|l1-scattermap> <create-new-json-output>");
+        eprintln!("usage: broker <selftest|l1-scattermap|l2-scattermap> <create-new-json-output>");
         std::process::exit(2);
     }
     let executable = std::env::current_exe().expect("current executable");
@@ -18,6 +18,12 @@ fn main() {
         let worker = repository.join("target/minihost-build/aex_l1_worker.exe");
         let passed = aexcompat_broker::l1::run(repository, &worker, "scattermap", &PathBuf::from(&args[2]))
             .expect("L1 broker run");
+        std::process::exit(if passed { 0 } else { 1 });
+    }
+    if args[1] == "l2-scattermap" {
+        let worker = repository.join("target/minihost-build/aex_l2_worker.exe");
+        let passed = aexcompat_broker::l2::run(repository, &worker, "scattermap", &PathBuf::from(&args[2]))
+            .expect("L2 broker run");
         std::process::exit(if passed { 0 } else { 1 });
     }
     if args[1] != "selftest" {
