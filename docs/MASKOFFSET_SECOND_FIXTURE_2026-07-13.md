@@ -210,3 +210,9 @@ keyframe host model without fixture branches. MaskOffset is used only to prove
 that adding time-sorted outline snapshots, HOLD/LINEAR sampling, cloned values,
 and batch transactions does not alter its native static-mask render behavior.
 The `keyframe_ownership` route passed two isolated real-AEX runs.
+
+The generic Dynamic Stream Suite v4 implementation exposes the layer/mask
+property tree independently of MaskOffset. Its `dynamic_stream_tree` route
+walks both indexed and match-name paths, roundtrips typed Opacity, mutates the
+Mask Parade, restores the original scene, and passed two isolated real-AEX
+runs without changing the fixture's render oracle.

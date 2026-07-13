@@ -198,3 +198,15 @@ The fixed `keyframe_ownership` gate passed twice after native MaskOffset render,
 covering twelve mutations, two intentional type/ownership rejections, HOLD and
 LINEAR sampling, transaction rollback/commit, intact guards, and zero leaked
 MaskRef, StreamRef, StreamValue, or transaction handles.
+
+AEGP Dynamic Stream Suite v4 now exposes all 26 callback slots over a bounded
+property tree: Layer root, indexed Mask Parade, named Mask Atom, and Outline,
+Feather, Opacity, and Expansion leaves. Index and match-name traversal share
+the same StreamRef ownership as the regular Stream Suite. Stable logical mask
+ordering permits add, delete, duplicate, and reorder without moving live host
+objects. Dynamic flags, names, parent refs, modified state, and match names are
+tracked; unsupported dimension separation fails explicitly. Opacity, Feather,
+and Expansion now use typed OneD/TwoD StreamValue storage with units and bounds.
+The fixed `dynamic_stream_tree` gate passed twice after native MaskOffset
+rendering with twenty traversal queries, eight mutations, one intentional
+flag-policy rejection, restored scene state, intact guards, and balanced refs.

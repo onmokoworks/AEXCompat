@@ -48,3 +48,8 @@ AEGP Keyframe Suite v5 follows that boundary as well. Its 22-entry local table,
 are independently written. External SDK material remains outside `minihost/`;
 only audited numeric/order facts and conformance observations cross the
 instrument boundary.
+
+AEGP Dynamic Stream Suite v4 uses the same cleanroom rule for its 26-entry
+table, grouping/flag values, match-name buffers, and UTF-16 naming boundary.
+The local property-tree and StreamValue declarations are independently
+authored; no Adobe header is included or redistributed by `minihost/`.

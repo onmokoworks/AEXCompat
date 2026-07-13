@@ -46,6 +46,8 @@ class MinihostL2SourceTests(unittest.TestCase):
             "static_assert(sizeof(StreamSuite) == 23 * sizeof(void*))",
             "static_assert(sizeof(KeyframeSuite) == 22 * sizeof(void*))",
             "verify_keyframe_ownership_rejection()",
+            "static_assert(sizeof(DynamicStreamSuite) == 26 * sizeof(void*))",
+            "verify_dynamic_stream_tree_rejection()",
             "kMaxHandleCount = 1024",
             "kMaxHandleBytes = 64 * 1024 * 1024",
         ):

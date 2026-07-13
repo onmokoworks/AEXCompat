@@ -759,6 +759,16 @@ pub fn execute_smart_suite_fault(
             false,
             true,
         ),
+        "dynamic_stream_tree" => (
+            "--smart-dynamic-stream-tree-request",
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            true,
+        ),
         "world_double_dispose" => (
             "--smart-world-double-dispose-request",
             false,
@@ -922,6 +932,10 @@ pub fn execute_smart_suite_fault(
                     report.get("keyframe_fault_observed") == Some(&Value::Bool(true))
                         && report.get("keyframe_mutations") == Some(&json!(12))
                         && report.get("invalid_keyframe_operations") == Some(&json!(2))
+                } else if fault_id == "dynamic_stream_tree" {
+                    report.get("dynamic_stream_fault_observed") == Some(&Value::Bool(true))
+                        && report.get("dynamic_stream_mutations") == Some(&json!(8))
+                        && report.get("invalid_dynamic_stream_operations") == Some(&json!(1))
                 } else {
                     report.get("mask_attribute_fault_observed") == Some(&Value::Bool(true))
                         && report.get("mask_mutations") == Some(&json!(11))
@@ -981,7 +995,9 @@ pub fn execute_smart_suite_fault(
         for field in ["stream_metadata_fault_observed", "stream_metadata_queries",
                       "stream_duplicates", "invalid_stream_operations",
                       "keyframe_fault_observed", "keyframe_mutations",
-                      "invalid_keyframe_operations"] {
+                      "invalid_keyframe_operations", "dynamic_stream_fault_observed",
+                      "dynamic_stream_queries", "dynamic_stream_mutations",
+                      "invalid_dynamic_stream_operations"] {
             object.insert(field.to_string(), item.1.get(field).cloned().unwrap_or(Value::Null));
         }
         summary

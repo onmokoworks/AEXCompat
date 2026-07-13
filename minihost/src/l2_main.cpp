@@ -170,8 +170,21 @@ struct HostMask : OutlineData {
   int32_t mode{1};
   int32_t id{};
   int32_t outline_stream_id{};
+  int32_t feather_stream_id{};
+  int32_t opacity_stream_id{};
+  int32_t expansion_stream_id{};
+  int32_t dynamic_order{};
+  double opacity{100.0};
+  std::array<double, 2> feather{};
+  double expansion{};
+  std::u16string dynamic_name{u"Mask"};
+  std::array<uint32_t, 5> dynamic_flags{};
+  bool dynamic_modified{};
   std::array<double, 4> color{1.0, 1.0, 0.0, 0.0};
   std::list<HostKeyframe> keyframes;
+};
+enum class DynamicNodeKind {
+  MaskOutline, LayerRoot, MaskParade, MaskAtom, MaskFeather, MaskOpacity, MaskExpansion
 };
 struct HostStreamRef {
   OpaqueHostObject opaque{0x5354524d};
@@ -179,11 +192,18 @@ struct HostStreamRef {
   int32_t selector{};
   int32_t unique_id{};
   uint32_t live_values{};
+  DynamicNodeKind kind{DynamicNodeKind::MaskOutline};
 };
 struct StreamValue {
   void* stream;
-  void* value;
+  union {
+    void* value;
+    double one_d;
+    double two_d[2];
+    std::byte raw_value[32];
+  };
 };
+static_assert(sizeof(StreamValue) == 40);
 struct CheckedStreamValue {
   HostStreamRef* stream{};
   OutlineData* outline{};
@@ -192,6 +212,7 @@ struct CheckedStreamValue {
 };
 OutlineData* sampled_outline(HostStreamRef* stream, const HostTime* time,
                              std::unique_ptr<OutlineData>& owned);
+bool dynamic_leaf(DynamicNodeKind kind);
 int32_t __cdecl get_mask_outline_vertex_info(void* outline, int32_t index, MaskVertex* vertex);
 int32_t __cdecl set_mask_outline_vertex_info(void* outline, int32_t index,
                                               const MaskVertex* vertex);
@@ -218,6 +239,11 @@ uint32_t g_stream_metadata_queries{};
 uint32_t g_stream_duplicates{};
 uint32_t g_keyframe_mutations{};
 uint32_t g_invalid_keyframe_operations{};
+uint32_t g_dynamic_stream_queries{};
+uint32_t g_dynamic_stream_mutations{};
+uint32_t g_invalid_dynamic_stream_operations{};
+uint32_t g_layer_dynamic_flags{};
+uint32_t g_mask_parade_dynamic_flags{};
 int32_t g_next_mask_id{1};
 int32_t g_next_stream_id{1};
 constexpr std::size_t kMaxHostMasks = 8;
@@ -262,6 +288,9 @@ bool configure_mask_scene(const std::string& scene_id) {
     HostMask mask;
     mask.id = g_next_mask_id++;
     mask.outline_stream_id = g_next_stream_id++;
+    mask.feather_stream_id = g_next_stream_id++;
+    mask.opacity_stream_id = g_next_stream_id++;
+    mask.expansion_stream_id = g_next_stream_id++;
     mask.vertices = {{left, top, 0, 0, 0, 0}, {right, top, 0, 0, 0, 0},
                      {right, bottom, 0, 0, 0, 0}, {left, bottom, 0, 0, 0, 0},
                      {left, top, 0, 0, 0, 0}};
@@ -273,7 +302,18 @@ bool configure_mask_scene(const std::string& scene_id) {
     g_mask_scene.push_back(rectangle(1, 1, 7, 6));
     g_mask_scene.push_back(rectangle(9, 5, 15, 11));
   } else if (scene_id != "empty") return false;
+  int32_t order = 0;
+  for (auto& mask : g_mask_scene) mask.dynamic_order = order++;
   return true;
+}
+
+std::vector<HostMask*> ordered_active_masks() {
+  std::vector<HostMask*> masks;
+  for (auto& mask : g_mask_scene) if (!mask.deleted) masks.push_back(&mask);
+  std::sort(masks.begin(), masks.end(), [](const HostMask* left, const HostMask* right) {
+    return left->dynamic_order < right->dynamic_order;
+  });
+  return masks;
 }
 
 HostMask* find_mask(void* handle) {
@@ -533,10 +573,9 @@ int32_t __cdecl get_layer_num_masks(void* layer, int32_t* count) {
 
 int32_t __cdecl get_layer_mask_by_index(void* layer, int32_t index, void** mask) {
   if (layer != &g_layer || index < 0 || !mask) return 4;
-  auto found = std::find_if(g_mask_scene.begin(), g_mask_scene.end(),
-      [&index](const auto& candidate) { return !candidate.deleted && index-- == 0; });
-  if (found == g_mask_scene.end()) return 4;
-  auto& record = *found;
+  const auto masks = ordered_active_masks();
+  if (static_cast<std::size_t>(index) >= masks.size()) return 4;
+  auto& record = *masks[static_cast<std::size_t>(index)];
   if (record.mask_live) return 4;
   record.mask_live = true;
   ++g_mask_lifetime.masks_acquired;
@@ -598,6 +637,9 @@ int32_t __cdecl create_new_mask(void* layer, void** handle, int32_t* index) {
     ++g_invalid_mask_operations; return 4;
   }
   HostMask mask; mask.id = g_next_mask_id++; mask.outline_stream_id = g_next_stream_id++;
+  mask.feather_stream_id = g_next_stream_id++; mask.opacity_stream_id = g_next_stream_id++;
+  mask.expansion_stream_id = g_next_stream_id++;
+  mask.dynamic_order = static_cast<int32_t>(active_mask_count());
   mask.mask_live = true;
   g_mask_scene.push_back(mask);
   ++g_mask_lifetime.masks_acquired; ++g_mask_mutations;
@@ -611,7 +653,11 @@ int32_t __cdecl delete_mask_from_layer(void* handle) {
   if (!usable_mask(mask) || mask->stream_live || mask->value_live) {
     ++g_invalid_mask_operations; return 4;
   }
-  mask->deleted = true; ++g_mask_mutations; return 0;
+  const int32_t deleted_order = mask->dynamic_order;
+  mask->deleted = true;
+  for (auto& candidate : g_mask_scene)
+    if (!candidate.deleted && candidate.dynamic_order > deleted_order) --candidate.dynamic_order;
+  ++g_mask_mutations; return 0;
 }
 int32_t __cdecl get_mask_color(void* handle, double* color) {
   HostMask* mask = find_mask(handle); if (!usable_mask(mask) || !color) return 4;
@@ -650,25 +696,51 @@ int32_t __cdecl duplicate_mask(void* original_handle, void** duplicate_handle) {
   copy.mask_live = true; copy.stream_live = false; copy.value_live = false;
   copy.deleted = false; copy.id = g_next_mask_id++;
   copy.outline_stream_id = g_next_stream_id++;
+  copy.feather_stream_id = g_next_stream_id++;
+  copy.opacity_stream_id = g_next_stream_id++;
+  copy.expansion_stream_id = g_next_stream_id++;
+  copy.dynamic_order = static_cast<int32_t>(active_mask_count());
   g_mask_scene.push_back(std::move(copy));
   ++g_mask_lifetime.masks_acquired; ++g_mask_mutations;
   *duplicate_handle = &g_mask_scene.back().mask;
   return 0;
 }
 
+int32_t stream_identity(const HostMask* mask, DynamicNodeKind kind) {
+  if (!mask) return kind == DynamicNodeKind::LayerRoot ? 0x70000001 : 0x70000002;
+  switch (kind) {
+    case DynamicNodeKind::MaskOutline: return mask->outline_stream_id;
+    case DynamicNodeKind::MaskFeather: return mask->feather_stream_id;
+    case DynamicNodeKind::MaskOpacity: return mask->opacity_stream_id;
+    case DynamicNodeKind::MaskExpansion: return mask->expansion_stream_id;
+    case DynamicNodeKind::MaskAtom: return 0x10000000 + mask->id;
+    default: return 0;
+  }
+}
+int32_t create_stream_ref(HostMask* mask, DynamicNodeKind kind, int32_t selector, void** stream) {
+  if (!stream || g_stream_refs.size() >= 64) return 4;
+  g_stream_refs.push_back({{}, mask, selector, stream_identity(mask, kind), 0, kind});
+  if (mask) mask->stream_live = true;
+  ++g_mask_lifetime.streams_acquired;
+  *stream = &g_stream_refs.back().opaque;
+  return 0;
+}
 int32_t __cdecl get_new_mask_stream(int32_t plugin_id, void* mask, int32_t selector, void** stream) {
   HostMask* record = find_mask(mask);
-  if (plugin_id != 1 || !usable_mask(record) || selector != 400 || !stream ||
-      g_stream_refs.size() >= 64) {
+  DynamicNodeKind kind{};
+  if (selector == 400) kind = DynamicNodeKind::MaskOutline;
+  else if (selector == 401) kind = DynamicNodeKind::MaskOpacity;
+  else if (selector == 402) kind = DynamicNodeKind::MaskFeather;
+  else if (selector == 403) kind = DynamicNodeKind::MaskExpansion;
+  else kind = DynamicNodeKind::LayerRoot;
+  if (plugin_id != 1 || !usable_mask(record) || selector < 400 || selector > 403 || !stream) {
     ++g_invalid_stream_operations;
     if (stream) *stream = nullptr;
     return 4;
   }
-  g_stream_refs.push_back({{}, record, selector, record->outline_stream_id, 0});
-  record->stream_live = true;
-  ++g_mask_lifetime.streams_acquired;
-  *stream = &g_stream_refs.back().opaque;
-  return 0;
+  const int32_t error = create_stream_ref(record, kind, selector, stream);
+  if (error) ++g_invalid_stream_operations;
+  return error;
 }
 
 int32_t __cdecl dispose_stream(void* stream) {
@@ -681,7 +753,7 @@ int32_t __cdecl dispose_stream(void* stream) {
   HostMask* mask = record->mask;
   g_stream_refs.erase(std::find_if(g_stream_refs.begin(), g_stream_refs.end(),
       [record](auto& candidate) { return &candidate == record; }));
-  mask->stream_live = std::any_of(g_stream_refs.begin(), g_stream_refs.end(),
+  if (mask) mask->stream_live = std::any_of(g_stream_refs.begin(), g_stream_refs.end(),
       [mask](const auto& candidate) { return candidate.mask == mask; });
   ++g_mask_lifetime.streams_disposed;
   return 0;
@@ -696,14 +768,20 @@ int32_t __cdecl get_new_stream_value(int32_t plugin_id, void* stream, int32_t,
     ++g_invalid_stream_operations; return 4;
   }
   std::unique_ptr<OutlineData> owned;
-  OutlineData* outline = sampled_outline(record, time, owned);
-  if (!outline) { ++g_invalid_stream_operations; return 4; }
+  OutlineData* outline = nullptr;
+  if (record->kind == DynamicNodeKind::MaskOutline)
+    outline = sampled_outline(record, time, owned);
+  else if (!dynamic_leaf(record->kind)) { ++g_invalid_stream_operations; return 4; }
   ++record->live_values;
   record->mask->value_live = true;
   g_stream_values.emplace(value, CheckedStreamValue{record, outline, nullptr, std::move(owned)});
   ++g_mask_lifetime.values_acquired;
   value->stream = &record->opaque;
-  value->value = &outline->outline;
+  std::memset(value->raw_value, 0, sizeof(value->raw_value));
+  if (outline) value->value = &outline->outline;
+  else if (record->kind == DynamicNodeKind::MaskOpacity) value->one_d = record->mask->opacity;
+  else if (record->kind == DynamicNodeKind::MaskExpansion) value->one_d = record->mask->expansion;
+  else { value->two_d[0] = record->mask->feather[0]; value->two_d[1] = record->mask->feather[1]; }
   return 0;
 }
 
@@ -711,9 +789,11 @@ int32_t __cdecl dispose_stream_value(StreamValue* value) {
   if (!value) return 4;
   const auto owned = g_stream_values.find(value);
   HostStreamRef* stream_record = find_stream(value->stream);
-  OutlineData* outline_record = find_outline(value->value);
+  OutlineData* outline_record = owned != g_stream_values.end() && owned->second.outline
+      ? find_outline(value->value) : nullptr;
   if (owned == g_stream_values.end() || !stream_record || owned->second.stream != stream_record ||
-      owned->second.outline != outline_record || stream_record->live_values == 0) {
+      (owned->second.outline && owned->second.outline != outline_record) ||
+      stream_record->live_values == 0) {
     ++g_invalid_stream_operations; return 4;
   }
   --stream_record->live_values;
@@ -735,13 +815,15 @@ int32_t __cdecl is_stream_legal(void* layer, int32_t, uint8_t* legal) {
   return 0;
 }
 int32_t __cdecl can_vary_over_time(void* stream, uint8_t* can_vary) {
-  if (!find_stream(stream) || !can_vary) return 4;
+  HostStreamRef* record = find_stream(stream);
+  if (!record || !can_vary || !dynamic_leaf(record->kind)) return 4;
   *can_vary = 1;
   ++g_stream_metadata_queries;
   return 0;
 }
 int32_t __cdecl get_valid_interpolations(void* stream, int32_t* interpolations) {
-  if (!find_stream(stream) || !interpolations) return 4;
+  HostStreamRef* record = find_stream(stream);
+  if (!record || !interpolations || !dynamic_leaf(record->kind)) return 4;
   *interpolations = 0xffff;
   ++g_stream_metadata_queries;
   return 0;
@@ -768,37 +850,64 @@ int32_t __cdecl unsupported_stream_name(int32_t, void* stream, uint8_t, void** n
   return 4;
 }
 int32_t __cdecl get_stream_units_text(void* stream, uint8_t, char* units) {
-  if (!find_stream(stream) || !units) return 4;
-  units[0] = '\0';
+  HostStreamRef* record = find_stream(stream);
+  if (!record || !units || !dynamic_leaf(record->kind)) return 4;
+  const char* text = record->kind == DynamicNodeKind::MaskOpacity ? "%" :
+      record->kind == DynamicNodeKind::MaskOutline ? "" : "pixels";
+  strcpy_s(units, 32, text);
   ++g_stream_metadata_queries;
   return 0;
 }
 int32_t __cdecl get_stream_properties(void* stream, int32_t* flags, double* minimum,
                                       double* maximum) {
   if (!find_stream(stream) || !flags) return 4;
-  *flags = 0;
+  HostStreamRef* record = find_stream(stream);
+  if (!record || !dynamic_leaf(record->kind)) return 4;
+  *flags = record->kind == DynamicNodeKind::MaskOpacity ? 3 : 0;
   if (minimum) *minimum = 0;
-  if (maximum) *maximum = 0;
+  if (maximum) *maximum = record->kind == DynamicNodeKind::MaskOpacity ? 100 : 0;
   ++g_stream_metadata_queries;
   return 0;
 }
 int32_t __cdecl is_stream_timevarying(void* stream, uint8_t* timevarying) {
   HostStreamRef* record = find_stream(stream);
-  if (!record || !timevarying) return 4;
-  *timevarying = record->mask->keyframes.empty() ? 0 : 1;
+  if (!record || !timevarying || !dynamic_leaf(record->kind)) return 4;
+  *timevarying = record->kind == DynamicNodeKind::MaskOutline &&
+      !record->mask->keyframes.empty() ? 1 : 0;
   ++g_stream_metadata_queries;
   return 0;
 }
 int32_t __cdecl get_stream_type(void* stream, int32_t* type) {
-  if (!find_stream(stream) || !type) return 4;
-  *type = 11;
+  HostStreamRef* record = find_stream(stream);
+  if (!record || !type) return 4;
+  *type = record->kind == DynamicNodeKind::MaskOutline ? 11 :
+      record->kind == DynamicNodeKind::MaskFeather ? 4 :
+      (record->kind == DynamicNodeKind::MaskOpacity ||
+       record->kind == DynamicNodeKind::MaskExpansion) ? 5 : 0;
   ++g_stream_metadata_queries;
   return 0;
 }
-int32_t __cdecl reject_set_stream_value(int32_t, void* stream, StreamValue*) {
-  if (!find_stream(stream)) return 4;
-  ++g_invalid_stream_operations;
-  return 4;
+int32_t __cdecl reject_set_stream_value(int32_t plugin_id, void* stream, StreamValue* value) {
+  HostStreamRef* record = find_stream(stream);
+  if (plugin_id != 1 || !record || !value || value->stream != &record->opaque ||
+      !dynamic_leaf(record->kind) || record->kind == DynamicNodeKind::MaskOutline) {
+    ++g_invalid_stream_operations; return 4;
+  }
+  if (record->kind == DynamicNodeKind::MaskOpacity) {
+    if (!std::isfinite(value->one_d) || value->one_d < 0 || value->one_d > 100) {
+      ++g_invalid_stream_operations; return 4;
+    }
+    record->mask->opacity = value->one_d;
+  } else if (record->kind == DynamicNodeKind::MaskExpansion) {
+    if (!std::isfinite(value->one_d)) { ++g_invalid_stream_operations; return 4; }
+    record->mask->expansion = value->one_d;
+  } else {
+    if (!std::isfinite(value->two_d[0]) || !std::isfinite(value->two_d[1])) {
+      ++g_invalid_stream_operations; return 4;
+    }
+    record->mask->feather = {value->two_d[0], value->two_d[1]};
+  }
+  record->mask->dynamic_modified = true; ++g_dynamic_stream_mutations; return 0;
 }
 int32_t __cdecl unsupported_layer_stream_value(void*, int32_t, int32_t, const void*,
                                                uint8_t, void* value, int32_t* type) {
@@ -836,7 +945,8 @@ int32_t __cdecl duplicate_stream_ref(int32_t plugin_id, void* stream, void** dup
     ++g_invalid_stream_operations;
     return 4;
   }
-  g_stream_refs.push_back({{}, original->mask, original->selector, original->unique_id, 0});
+  g_stream_refs.push_back({{}, original->mask, original->selector, original->unique_id, 0,
+                           original->kind});
   ++g_mask_lifetime.streams_acquired;
   ++g_stream_duplicates;
   *duplicate = &g_stream_refs.back().opaque;
@@ -901,7 +1011,8 @@ OutlineData* sampled_outline(HostStreamRef* stream, const HostTime* time,
   return owned.get();
 }
 HostKeyframe* keyframe_at(HostStreamRef* stream, int32_t index) {
-  if (!stream || index < 0 || static_cast<std::size_t>(index) >= stream->mask->keyframes.size())
+  if (!stream || stream->kind != DynamicNodeKind::MaskOutline || index < 0 ||
+      static_cast<std::size_t>(index) >= stream->mask->keyframes.size())
     return nullptr;
   auto item = stream->mask->keyframes.begin();
   std::advance(item, index);
@@ -921,7 +1032,8 @@ HostKeyframe snapshot_keyframe(const HostMask& mask, const HostTime& time) {
 int32_t __cdecl get_stream_num_keyframes(void* stream, int32_t* count) {
   HostStreamRef* record = find_stream(stream);
   if (!record || !count) return 4;
-  *count = static_cast<int32_t>(record->mask->keyframes.size());
+  *count = record->kind == DynamicNodeKind::MaskOutline
+      ? static_cast<int32_t>(record->mask->keyframes.size()) : 0;
   return 0;
 }
 int32_t __cdecl get_keyframe_time(void* stream, int32_t index, int16_t time_mode,
@@ -1174,6 +1286,318 @@ bool verify_keyframe_ownership_rejection() {
       g_keyframe_mutations == mutations_before + 12 && mask_lifetimes_balanced();
 }
 
+bool dynamic_leaf(DynamicNodeKind kind) {
+  return kind == DynamicNodeKind::MaskOutline || kind == DynamicNodeKind::MaskFeather ||
+      kind == DynamicNodeKind::MaskOpacity || kind == DynamicNodeKind::MaskExpansion;
+}
+const char* dynamic_match_name(DynamicNodeKind kind) {
+  switch (kind) {
+    case DynamicNodeKind::LayerRoot: return "ADBE Abstract Layer";
+    case DynamicNodeKind::MaskParade: return "ADBE Mask Parade";
+    case DynamicNodeKind::MaskAtom: return "ADBE Mask Atom";
+    case DynamicNodeKind::MaskOutline: return "ADBE Mask Shape";
+    case DynamicNodeKind::MaskFeather: return "ADBE Mask Feather";
+    case DynamicNodeKind::MaskOpacity: return "ADBE Mask Opacity";
+    case DynamicNodeKind::MaskExpansion: return "ADBE Mask Offset";
+  }
+  return "";
+}
+int32_t dynamic_depth(DynamicNodeKind kind) {
+  if (kind == DynamicNodeKind::LayerRoot) return 0;
+  if (kind == DynamicNodeKind::MaskParade) return 1;
+  if (kind == DynamicNodeKind::MaskAtom) return 2;
+  return 3;
+}
+uint32_t* dynamic_flags(HostStreamRef* stream) {
+  if (!stream) return nullptr;
+  if (stream->kind == DynamicNodeKind::LayerRoot) return &g_layer_dynamic_flags;
+  if (stream->kind == DynamicNodeKind::MaskParade) return &g_mask_parade_dynamic_flags;
+  if (!stream->mask) return nullptr;
+  const std::size_t index = stream->kind == DynamicNodeKind::MaskOutline ? 0 :
+      stream->kind == DynamicNodeKind::MaskFeather ? 1 :
+      stream->kind == DynamicNodeKind::MaskOpacity ? 2 :
+      stream->kind == DynamicNodeKind::MaskExpansion ? 3 : 4;
+  return &stream->mask->dynamic_flags[index];
+}
+int32_t __cdecl get_new_dynamic_stream_for_layer(int32_t plugin_id, void* layer, void** stream) {
+  if (plugin_id != 1 || layer != &g_layer || !stream) return 4;
+  return create_stream_ref(nullptr, DynamicNodeKind::LayerRoot, -1, stream);
+}
+int32_t __cdecl get_new_dynamic_stream_for_mask(int32_t plugin_id, void* mask, void** stream) {
+  HostMask* record = find_mask(mask);
+  if (plugin_id != 1 || !usable_mask(record) || !stream) return 4;
+  return create_stream_ref(record, DynamicNodeKind::MaskAtom, -1, stream);
+}
+int32_t __cdecl get_dynamic_stream_depth(void* stream, int32_t* depth) {
+  HostStreamRef* record = find_stream(stream);
+  if (!record || !depth) return 4;
+  *depth = dynamic_depth(record->kind); ++g_dynamic_stream_queries; return 0;
+}
+int32_t __cdecl get_dynamic_stream_grouping_type(void* stream, int32_t* grouping) {
+  HostStreamRef* record = find_stream(stream);
+  if (!record || !grouping) return 4;
+  *grouping = dynamic_leaf(record->kind) ? 0 :
+      record->kind == DynamicNodeKind::MaskParade ? 2 : 1;
+  ++g_dynamic_stream_queries; return 0;
+}
+int32_t __cdecl get_num_streams_in_group(void* stream, int32_t* count) {
+  HostStreamRef* record = find_stream(stream);
+  if (!record || !count || dynamic_leaf(record->kind)) return 4;
+  *count = record->kind == DynamicNodeKind::LayerRoot ? 1 :
+      record->kind == DynamicNodeKind::MaskParade ? static_cast<int32_t>(active_mask_count()) : 4;
+  ++g_dynamic_stream_queries; return 0;
+}
+int32_t __cdecl get_dynamic_stream_flags(void* stream, uint32_t* flags) {
+  uint32_t* stored = dynamic_flags(find_stream(stream));
+  if (!stored || !flags) return 4;
+  *flags = *stored; ++g_dynamic_stream_queries; return 0;
+}
+int32_t __cdecl set_dynamic_stream_flag(void* stream, uint32_t flag, uint8_t undoable,
+                                        uint8_t set) {
+  HostStreamRef* record = find_stream(stream); uint32_t* stored = dynamic_flags(record);
+  if (!stored || (flag != 1 && flag != 2) || (!undoable && flag != 2)) {
+    ++g_invalid_dynamic_stream_operations; return 4;
+  }
+  if (set) *stored |= flag; else *stored &= ~flag;
+  if (record->mask) record->mask->dynamic_modified = true;
+  ++g_dynamic_stream_mutations; return 0;
+}
+int32_t dynamic_child(HostStreamRef* parent, int32_t index, HostMask*& mask,
+                      DynamicNodeKind& kind) {
+  if (!parent || index < 0 || dynamic_leaf(parent->kind)) return 4;
+  mask = parent->mask;
+  if (parent->kind == DynamicNodeKind::LayerRoot) {
+    if (index != 0) return 4; kind = DynamicNodeKind::MaskParade; mask = nullptr; return 0;
+  }
+  if (parent->kind == DynamicNodeKind::MaskParade) {
+    const auto masks = ordered_active_masks();
+    if (static_cast<std::size_t>(index) >= masks.size()) return 4;
+    mask = masks[static_cast<std::size_t>(index)]; kind = DynamicNodeKind::MaskAtom; return 0;
+  }
+  static constexpr DynamicNodeKind children[4]{DynamicNodeKind::MaskOutline,
+      DynamicNodeKind::MaskFeather, DynamicNodeKind::MaskOpacity,
+      DynamicNodeKind::MaskExpansion};
+  if (index >= 4) return 4; kind = children[index]; return 0;
+}
+int32_t __cdecl get_new_dynamic_stream_by_index(int32_t plugin_id, void* parent_stream,
+                                                int32_t index, void** stream) {
+  HostStreamRef* parent = find_stream(parent_stream); HostMask* mask{}; DynamicNodeKind kind{};
+  if (plugin_id != 1 || !stream || dynamic_child(parent, index, mask, kind) != 0) {
+    if (stream) *stream = nullptr; return 4;
+  }
+  ++g_dynamic_stream_queries;
+  return create_stream_ref(mask, kind, kind == DynamicNodeKind::MaskOutline ? 400 :
+      kind == DynamicNodeKind::MaskOpacity ? 401 : kind == DynamicNodeKind::MaskFeather ? 402 :
+      kind == DynamicNodeKind::MaskExpansion ? 403 : -1, stream);
+}
+int32_t __cdecl get_new_dynamic_stream_by_match_name(int32_t plugin_id, void* parent_stream,
+                                                     const char* match_name, void** stream) {
+  HostStreamRef* parent = find_stream(parent_stream);
+  if (plugin_id != 1 || !parent || !match_name || !stream ||
+      std::strlen(match_name) >= 40 || dynamic_leaf(parent->kind) ||
+      parent->kind == DynamicNodeKind::MaskParade) {
+    if (stream) *stream = nullptr; return 4;
+  }
+  const int32_t count = parent->kind == DynamicNodeKind::LayerRoot ? 1 : 4;
+  for (int32_t index = 0; index < count; ++index) {
+    HostMask* mask{}; DynamicNodeKind kind{};
+    if (dynamic_child(parent, index, mask, kind) == 0 &&
+        std::strcmp(match_name, dynamic_match_name(kind)) == 0)
+      return get_new_dynamic_stream_by_index(plugin_id, parent_stream, index, stream);
+  }
+  *stream = nullptr; return 4;
+}
+int32_t __cdecl delete_dynamic_stream(void* stream) {
+  HostStreamRef* record = find_stream(stream);
+  if (!record || record->kind != DynamicNodeKind::MaskAtom || !record->mask ||
+      record->mask->deleted || std::any_of(g_stream_refs.begin(), g_stream_refs.end(),
+          [record](const auto& other) { return &other != record && other.mask == record->mask; })) {
+    ++g_invalid_dynamic_stream_operations; return 4;
+  }
+  const int32_t deleted_order = record->mask->dynamic_order;
+  record->mask->deleted = true; record->mask->dynamic_modified = true;
+  for (auto& candidate : g_mask_scene)
+    if (!candidate.deleted && candidate.dynamic_order > deleted_order) --candidate.dynamic_order;
+  ++g_dynamic_stream_mutations; return 0;
+}
+int32_t __cdecl reorder_dynamic_stream(void* stream, int32_t new_index) {
+  HostStreamRef* record = find_stream(stream); const auto masks = ordered_active_masks();
+  if (!record || record->kind != DynamicNodeKind::MaskAtom || !record->mask || new_index < 0 ||
+      static_cast<std::size_t>(new_index) >= masks.size()) {
+    ++g_invalid_dynamic_stream_operations; return 4;
+  }
+  const int32_t old_index = record->mask->dynamic_order;
+  for (auto* mask : masks) {
+    if (old_index < new_index && mask->dynamic_order > old_index && mask->dynamic_order <= new_index)
+      --mask->dynamic_order;
+    else if (old_index > new_index && mask->dynamic_order >= new_index && mask->dynamic_order < old_index)
+      ++mask->dynamic_order;
+  }
+  record->mask->dynamic_order = new_index; record->mask->dynamic_modified = true;
+  ++g_dynamic_stream_mutations; return 0;
+}
+int32_t __cdecl duplicate_dynamic_stream(int32_t plugin_id, void* stream, int32_t* new_index) {
+  HostStreamRef* record = find_stream(stream);
+  if (plugin_id != 1 || !record || record->kind != DynamicNodeKind::MaskAtom || !record->mask ||
+      g_mask_scene.size() >= kMaxHostMasks) {
+    ++g_invalid_dynamic_stream_operations; return 4;
+  }
+  HostMask copy = *record->mask;
+  copy.mask_live = false; copy.stream_live = false; copy.value_live = false; copy.deleted = false;
+  copy.id = g_next_mask_id++; copy.outline_stream_id = g_next_stream_id++;
+  copy.feather_stream_id = g_next_stream_id++; copy.opacity_stream_id = g_next_stream_id++;
+  copy.expansion_stream_id = g_next_stream_id++; copy.dynamic_order = static_cast<int32_t>(active_mask_count());
+  copy.dynamic_modified = true; g_mask_scene.push_back(std::move(copy));
+  if (new_index) *new_index = g_mask_scene.back().dynamic_order;
+  ++g_dynamic_stream_mutations; return 0;
+}
+int32_t __cdecl set_dynamic_stream_name(void* stream, const uint16_t* name) {
+  HostStreamRef* record = find_stream(stream);
+  if (!record || record->kind != DynamicNodeKind::MaskAtom || !record->mask || !name) {
+    ++g_invalid_dynamic_stream_operations; return 4;
+  }
+  std::size_t length = 0; while (length <= 127 && name[length]) ++length;
+  if (length > 127) { ++g_invalid_dynamic_stream_operations; return 4; }
+  record->mask->dynamic_name.assign(reinterpret_cast<const char16_t*>(name), length);
+  record->mask->dynamic_modified = true; ++g_dynamic_stream_mutations; return 0;
+}
+int32_t __cdecl can_add_dynamic_stream(void* stream, const char* match_name, uint8_t* can_add) {
+  HostStreamRef* record = find_stream(stream);
+  if (!record || !match_name || !can_add || std::strlen(match_name) >= 40) return 4;
+  *can_add = record->kind == DynamicNodeKind::MaskParade &&
+      std::strcmp(match_name, "ADBE Mask Atom") == 0 && g_mask_scene.size() < kMaxHostMasks;
+  ++g_dynamic_stream_queries; return 0;
+}
+int32_t __cdecl add_dynamic_stream(int32_t plugin_id, void* stream, const char* match_name,
+                                   void** added) {
+  HostStreamRef* group = find_stream(stream); uint8_t can_add{};
+  if (plugin_id != 1 || !added || can_add_dynamic_stream(stream, match_name, &can_add) != 0 ||
+      !can_add || !group) { if (added) *added = nullptr; ++g_invalid_dynamic_stream_operations; return 4; }
+  HostMask mask; mask.id = g_next_mask_id++; mask.outline_stream_id = g_next_stream_id++;
+  mask.feather_stream_id = g_next_stream_id++; mask.opacity_stream_id = g_next_stream_id++;
+  mask.expansion_stream_id = g_next_stream_id++; mask.dynamic_order = static_cast<int32_t>(active_mask_count());
+  mask.dynamic_modified = true; g_mask_scene.push_back(std::move(mask));
+  ++g_dynamic_stream_mutations;
+  return create_stream_ref(&g_mask_scene.back(), DynamicNodeKind::MaskAtom, -1, added);
+}
+int32_t __cdecl get_dynamic_match_name(void* stream, char* match_name) {
+  HostStreamRef* record = find_stream(stream);
+  if (!record || !match_name) return 4;
+  strcpy_s(match_name, 40, dynamic_match_name(record->kind));
+  ++g_dynamic_stream_queries; return 0;
+}
+int32_t __cdecl get_new_parent_dynamic_stream(int32_t plugin_id, void* stream, void** parent) {
+  HostStreamRef* record = find_stream(stream);
+  if (plugin_id != 1 || !record || !parent || record->kind == DynamicNodeKind::LayerRoot) {
+    if (parent) *parent = nullptr; return 4;
+  }
+  DynamicNodeKind kind = record->kind == DynamicNodeKind::MaskParade ? DynamicNodeKind::LayerRoot :
+      record->kind == DynamicNodeKind::MaskAtom ? DynamicNodeKind::MaskParade : DynamicNodeKind::MaskAtom;
+  HostMask* mask = kind == DynamicNodeKind::MaskAtom ? record->mask : nullptr;
+  ++g_dynamic_stream_queries; return create_stream_ref(mask, kind, -1, parent);
+}
+int32_t __cdecl get_dynamic_stream_modified(void* stream, uint8_t* modified) {
+  HostStreamRef* record = find_stream(stream);
+  if (!record || !modified) return 4;
+  *modified = record->mask && record->mask->dynamic_modified ? 1 : 0;
+  ++g_dynamic_stream_queries; return 0;
+}
+int32_t __cdecl get_dynamic_stream_index(void* stream, int32_t* index) {
+  HostStreamRef* record = find_stream(stream);
+  if (!record || record->kind != DynamicNodeKind::MaskAtom || !record->mask || !index) return 4;
+  *index = record->mask->dynamic_order; ++g_dynamic_stream_queries; return 0;
+}
+int32_t __cdecl is_separation_leader(void* stream, uint8_t* leader) {
+  HostStreamRef* record = find_stream(stream);
+  if (!record || !dynamic_leaf(record->kind) || !leader) return 4;
+  *leader = 0; ++g_dynamic_stream_queries; return 0;
+}
+int32_t __cdecl are_dimensions_separated(void* stream, uint8_t* separated) {
+  HostStreamRef* record = find_stream(stream);
+  if (!record || !dynamic_leaf(record->kind) || !separated) return 4;
+  *separated = 0; ++g_dynamic_stream_queries; return 0;
+}
+int32_t __cdecl reject_set_dimensions_separated(void* stream, uint8_t) {
+  if (!find_stream(stream)) return 4; ++g_invalid_dynamic_stream_operations; return 4;
+}
+int32_t __cdecl reject_get_separation_follower(void* stream, int16_t, void** follower) {
+  if (follower) *follower = nullptr; if (!find_stream(stream)) return 4;
+  ++g_invalid_dynamic_stream_operations; return 4;
+}
+int32_t __cdecl is_separation_follower(void* stream, uint8_t* follower) {
+  HostStreamRef* record = find_stream(stream);
+  if (!record || !dynamic_leaf(record->kind) || !follower) return 4;
+  *follower = 0; ++g_dynamic_stream_queries; return 0;
+}
+int32_t __cdecl reject_get_separation_leader(void* stream, void** leader) {
+  if (leader) *leader = nullptr; if (!find_stream(stream)) return 4;
+  ++g_invalid_dynamic_stream_operations; return 4;
+}
+int32_t __cdecl reject_get_separation_dimension(void* stream, int16_t* dimension) {
+  if (dimension) *dimension = 0; if (!find_stream(stream)) return 4;
+  ++g_invalid_dynamic_stream_operations; return 4;
+}
+
+bool verify_dynamic_stream_tree_rejection() {
+  const auto original_scene = g_mask_scene;
+  const uint32_t mutations_before = g_dynamic_stream_mutations;
+  const uint32_t invalid_before = g_invalid_dynamic_stream_operations;
+  void* mask = nullptr; void* mask_root = nullptr; void* layer_root = nullptr;
+  void* parade = nullptr; void* atom = nullptr; void* outline = nullptr;
+  void* opacity = nullptr; void* parent = nullptr; void* added = nullptr;
+  if (get_layer_mask_by_index(&g_layer, 0, &mask) != 0 ||
+      get_new_dynamic_stream_for_mask(1, mask, &mask_root) != 0 ||
+      get_new_dynamic_stream_for_layer(1, &g_layer, &layer_root) != 0 ||
+      get_new_dynamic_stream_by_match_name(1, layer_root, "ADBE Mask Parade", &parade) != 0 ||
+      get_new_dynamic_stream_by_index(1, parade, 0, &atom) != 0 ||
+      get_new_dynamic_stream_by_match_name(1, atom, "ADBE Mask Shape", &outline) != 0 ||
+      get_new_dynamic_stream_by_match_name(1, atom, "ADBE Mask Opacity", &opacity) != 0)
+    return false;
+  int32_t depth{}, grouping{}, count{}, index{}; char match_name[40]{};
+  uint32_t flags{}; uint8_t boolean{};
+  bool passed = get_dynamic_stream_depth(layer_root, &depth) == 0 && depth == 0 &&
+      get_dynamic_stream_grouping_type(parade, &grouping) == 0 && grouping == 2 &&
+      get_num_streams_in_group(atom, &count) == 0 && count == 4 &&
+      get_dynamic_match_name(outline, match_name) == 0 &&
+      std::strcmp(match_name, "ADBE Mask Shape") == 0 &&
+      get_dynamic_stream_index(atom, &index) == 0 && index == 0 &&
+      get_new_parent_dynamic_stream(1, outline, &parent) == 0 &&
+      get_dynamic_stream_grouping_type(parent, &grouping) == 0 && grouping == 1 &&
+      set_dynamic_stream_flag(outline, 2, 0, 1) == 0 &&
+      get_dynamic_stream_flags(outline, &flags) == 0 && flags == 2 &&
+      set_dynamic_stream_flag(outline, 1, 0, 1) != 0 &&
+      is_separation_leader(opacity, &boolean) == 0 && boolean == 0;
+  StreamValue opacity_value{};
+  passed = passed && get_new_stream_value(1, opacity, 0, nullptr, 0, &opacity_value) == 0 &&
+      opacity_value.one_d == 100.0;
+  opacity_value.one_d = 75.0;
+  passed = passed && reject_set_stream_value(1, opacity, &opacity_value) == 0 &&
+      dispose_stream_value(&opacity_value) == 0 &&
+      can_add_dynamic_stream(parade, "ADBE Mask Atom", &boolean) == 0 && boolean == 1 &&
+      add_dynamic_stream(1, parade, "ADBE Mask Atom", &added) == 0;
+  int32_t duplicate_index = -1;
+  passed = passed && duplicate_dynamic_stream(1, atom, &duplicate_index) == 0 &&
+      duplicate_index == 2 && reorder_dynamic_stream(atom, 2) == 0 &&
+      get_dynamic_stream_index(atom, &index) == 0 && index == 2;
+  const uint16_t renamed[]{'R','e','n','a','m','e','d',0};
+  passed = passed && set_dynamic_stream_name(atom, renamed) == 0 &&
+      get_dynamic_stream_modified(atom, &boolean) == 0 && boolean == 1;
+  void* duplicate = nullptr;
+  passed = passed && get_new_dynamic_stream_by_index(1, parade, 1, &duplicate) == 0 &&
+      delete_dynamic_stream(duplicate) == 0 && dispose_stream(duplicate) == 0 &&
+      delete_dynamic_stream(added) == 0 && dispose_stream(added) == 0 &&
+      get_num_streams_in_group(parade, &count) == 0 && count == 1 &&
+      get_dynamic_stream_index(atom, &index) == 0 && index == 0;
+  passed = passed && dispose_stream(parent) == 0 && dispose_stream(opacity) == 0 &&
+      dispose_stream(outline) == 0 && dispose_stream(atom) == 0 &&
+      dispose_stream(parade) == 0 && dispose_stream(layer_root) == 0 &&
+      dispose_stream(mask_root) == 0 && dispose_mask(mask) == 0;
+  const bool balanced = mask_lifetimes_balanced();
+  g_mask_scene = original_scene; g_mask_scene.reserve(kMaxHostMasks);
+  return passed && balanced && g_dynamic_stream_mutations == mutations_before + 8 &&
+      g_invalid_dynamic_stream_operations == invalid_before + 1;
+}
+
 int32_t __cdecl is_mask_outline_open(void* outline, uint8_t* open) {
   OutlineData* record = find_outline(outline);
   if (!record || !open) return 4;
@@ -1376,7 +1800,7 @@ bool verify_stream_metadata_and_ownership_rejection() {
   void* rejected = reinterpret_cast<void*>(1);
   if (get_layer_mask_by_index(&g_layer, 0, &mask) != 0 ||
       get_new_mask_stream(1, mask, 400, &stream) != 0 ||
-      get_new_mask_stream(1, mask, 401, &rejected) == 0 || rejected != nullptr ||
+      get_new_mask_stream(1, mask, 999, &rejected) == 0 || rejected != nullptr ||
       duplicate_stream_ref(1, stream, &duplicate) != 0)
     return false;
   uint8_t boolean{};
@@ -1567,6 +1991,35 @@ struct KeyframeSuite {
   decltype(&set_keyframe_label) set_keyframe_label_color_index;
 };
 static_assert(sizeof(KeyframeSuite) == 22 * sizeof(void*));
+struct DynamicStreamSuite {
+  decltype(&get_new_dynamic_stream_for_layer) get_new_stream_ref_for_layer;
+  decltype(&get_new_dynamic_stream_for_mask) get_new_stream_ref_for_mask;
+  decltype(&get_dynamic_stream_depth) get_stream_depth;
+  decltype(&get_dynamic_stream_grouping_type) get_stream_grouping_type;
+  decltype(&get_num_streams_in_group) get_num_streams_in_group;
+  decltype(&get_dynamic_stream_flags) get_dynamic_stream_flags;
+  decltype(&set_dynamic_stream_flag) set_dynamic_stream_flag;
+  decltype(&get_new_dynamic_stream_by_index) get_new_stream_ref_by_index;
+  decltype(&get_new_dynamic_stream_by_match_name) get_new_stream_ref_by_match_name;
+  decltype(&delete_dynamic_stream) delete_stream;
+  decltype(&reorder_dynamic_stream) reorder_stream;
+  decltype(&duplicate_dynamic_stream) duplicate_stream;
+  decltype(&set_dynamic_stream_name) set_stream_name;
+  decltype(&can_add_dynamic_stream) can_add_stream;
+  decltype(&add_dynamic_stream) add_stream;
+  decltype(&get_dynamic_match_name) get_match_name;
+  decltype(&get_new_parent_dynamic_stream) get_new_parent_stream_ref;
+  decltype(&get_dynamic_stream_modified) get_stream_is_modified;
+  decltype(&get_dynamic_stream_index) get_stream_index_in_parent;
+  decltype(&is_separation_leader) is_separation_leader;
+  decltype(&are_dimensions_separated) are_dimensions_separated;
+  decltype(&reject_set_dimensions_separated) set_dimensions_separated;
+  decltype(&reject_get_separation_follower) get_separation_follower;
+  decltype(&is_separation_follower) is_separation_follower;
+  decltype(&reject_get_separation_leader) get_separation_leader;
+  decltype(&reject_get_separation_dimension) get_separation_dimension;
+};
+static_assert(sizeof(DynamicStreamSuite) == 26 * sizeof(void*));
 struct MaskOutlineSuite {
   decltype(&is_mask_outline_open) is_open;
   decltype(&set_mask_outline_open) set_open;
@@ -1609,6 +2062,19 @@ KeyframeSuite g_keyframe_suite{&get_stream_num_keyframes, &get_keyframe_time,
     &get_keyframe_interpolation, &set_keyframe_interpolation,
     &start_add_keyframes, &add_keyframes, &set_add_keyframe,
     &end_add_keyframes, &get_keyframe_label, &set_keyframe_label};
+DynamicStreamSuite g_dynamic_stream_suite{&get_new_dynamic_stream_for_layer,
+    &get_new_dynamic_stream_for_mask, &get_dynamic_stream_depth,
+    &get_dynamic_stream_grouping_type, &get_num_streams_in_group,
+    &get_dynamic_stream_flags, &set_dynamic_stream_flag,
+    &get_new_dynamic_stream_by_index, &get_new_dynamic_stream_by_match_name,
+    &delete_dynamic_stream, &reorder_dynamic_stream, &duplicate_dynamic_stream,
+    &set_dynamic_stream_name, &can_add_dynamic_stream, &add_dynamic_stream,
+    &get_dynamic_match_name, &get_new_parent_dynamic_stream,
+    &get_dynamic_stream_modified, &get_dynamic_stream_index,
+    &is_separation_leader, &are_dimensions_separated,
+    &reject_set_dimensions_separated, &reject_get_separation_follower,
+    &is_separation_follower, &reject_get_separation_leader,
+    &reject_get_separation_dimension};
 MaskOutlineSuite g_mask_outline_suite{&is_mask_outline_open, &set_mask_outline_open,
                                       &get_mask_outline_num_segments,
                                       &get_mask_outline_vertex_info,
@@ -1945,6 +2411,8 @@ int32_t __cdecl acquire_suite(const char* name, int32_t version, const void** su
     *suite = &g_stream_suite;
   else if (std::strcmp(name, "AEGP Keyframe Suite") == 0 && version == 5)
     *suite = &g_keyframe_suite;
+  else if (std::strcmp(name, "AEGP Dynamic Stream Suite") == 0 && version == 5)
+    *suite = &g_dynamic_stream_suite;
   else if (std::strcmp(name, "AEGP Mask Outline Suite") == 0 && version == 5)
     *suite = &g_mask_outline_suite;
   else
@@ -2170,6 +2638,10 @@ bool parse_mask_context_payload(const wchar_t* text) {
     HostMask mask;
     mask.id = g_next_mask_id++;
     mask.outline_stream_id = g_next_stream_id++;
+    mask.feather_stream_id = g_next_stream_id++;
+    mask.opacity_stream_id = g_next_stream_id++;
+    mask.expansion_stream_id = g_next_stream_id++;
+    mask.dynamic_order = static_cast<int32_t>(masks.size());
     mask.open = item[0] == L'1';
     std::size_t vertex_offset = 2;
     while (vertex_offset < item.size()) {
@@ -2777,6 +3249,8 @@ int wmain(int argc, wchar_t** argv) {
       std::wstring(argv[1]) == L"--smart-stream-metadata-ownership-request";
   const bool keyframe_ownership_mode = argc == 5 &&
       std::wstring(argv[1]) == L"--smart-keyframe-ownership-request";
+  const bool dynamic_stream_tree_mode = argc == 5 &&
+      std::wstring(argv[1]) == L"--smart-dynamic-stream-tree-request";
   const bool suite_release_without_acquire_mode = argc == 5 &&
       std::wstring(argv[1]) == L"--smart-suite-release-without-acquire-request";
   const bool handle_resize_while_locked_mode = argc == 5 &&
@@ -2794,6 +3268,7 @@ int wmain(int argc, wchar_t** argv) {
   const bool request_mode = mask_request_mode || mask_scene_request_mode || mask_context_request_mode ||
       mask_count_error_mode || mask_count_crash_mode || mask_double_dispose_mode ||
       stream_live_value_dispose_mode || stream_metadata_ownership_mode || keyframe_ownership_mode ||
+      dynamic_stream_tree_mode ||
       suite_release_without_acquire_mode ||
       handle_resize_while_locked_mode || world_double_dispose_mode ||
       world_allocation_limit_mode ||
@@ -2805,6 +3280,7 @@ int wmain(int argc, wchar_t** argv) {
   g_mask_model_enabled = mask_request_mode || mask_scene_request_mode || mask_context_request_mode ||
       mask_count_error_mode || mask_count_crash_mode || mask_double_dispose_mode ||
       stream_live_value_dispose_mode || stream_metadata_ownership_mode || keyframe_ownership_mode ||
+      dynamic_stream_tree_mode ||
       suite_release_without_acquire_mode ||
       handle_resize_while_locked_mode || world_double_dispose_mode ||
       world_allocation_limit_mode;
@@ -2995,6 +3471,7 @@ int wmain(int argc, wchar_t** argv) {
   bool mask_attribute_fault_observed = false;
   bool stream_metadata_fault_observed = false;
   bool keyframe_fault_observed = false;
+  bool dynamic_stream_fault_observed = false;
   std::cerr << "stage:smart_render_end pre_error=" << smart.pre_error
             << " render_error=" << smart.render_error << "\n" << std::flush;
 #endif
@@ -3020,6 +3497,8 @@ int wmain(int argc, wchar_t** argv) {
     stream_metadata_fault_observed = verify_stream_metadata_and_ownership_rejection();
   if (keyframe_ownership_mode)
     keyframe_fault_observed = verify_keyframe_ownership_rejection();
+  if (dynamic_stream_tree_mode)
+    dynamic_stream_fault_observed = verify_dynamic_stream_tree_rejection();
   #endif
   std::cerr << "stage:global_setdown_end error=" << setdown_error << "\n" << std::flush;
 #ifdef AEXCOMPAT_RENDER_WORKER
@@ -3133,6 +3612,10 @@ int wmain(int argc, wchar_t** argv) {
             << ",\"keyframe_fault_observed\":" << (keyframe_fault_observed ? "true" : "false")
             << ",\"keyframe_mutations\":" << g_keyframe_mutations
             << ",\"invalid_keyframe_operations\":" << g_invalid_keyframe_operations
+            << ",\"dynamic_stream_fault_observed\":" << (dynamic_stream_fault_observed ? "true" : "false")
+            << ",\"dynamic_stream_queries\":" << g_dynamic_stream_queries
+            << ",\"dynamic_stream_mutations\":" << g_dynamic_stream_mutations
+            << ",\"invalid_dynamic_stream_operations\":" << g_invalid_dynamic_stream_operations
             << ",\"requested_parameters\":" << requested_parameters_json(requested_parameters)
             << ",\"requested_amount\":" << static_cast<int32_t>(requested_value(requested_parameters, L"amount"))
             << ",\"requested_direction\":" << static_cast<int32_t>(requested_value(requested_parameters, L"direction"))
