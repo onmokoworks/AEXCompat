@@ -30,6 +30,8 @@ class SafetyGateStatusTests(unittest.TestCase):
         self.assertIn("8x6 world", text)
         self.assertIn("variable-alpha", text)
         self.assertIn("four-channel ARGB", text)
+        self.assertIn("37.5% mixed", text)
+        self.assertIn("round-to-nearest", text)
 
     def test_all_gate_items_are_explicit(self):
         text = STATUS.read_text(encoding="utf-8")

@@ -12,8 +12,9 @@ class AeScatterMapAlphaProbeTests(unittest.TestCase):
         for expected in (
             "app.newProject()",
             'input_kind":"variable_alpha_rgba8',
-            '{id:"identity", value:0}',
-            '{id:"default", value:5}',
+            '{id:"identity", amount:0, mix:100}',
+            '{id:"default", amount:5, mix:100}',
+            '{id:"mixed", amount:5, mix:37.5}',
             "output already exists",
             "CloseOptions.DO_NOT_SAVE_CHANGES",
         ):

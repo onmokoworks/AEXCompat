@@ -4,7 +4,7 @@ from pathlib import Path
 
 from PIL import Image
 
-from tools.ae_scattermap_downsample_verify import verify
+from tools.ae_scattermap_downsample_verify import premultiply_argb, verify
 from tools.scattermap_reference_oracle import gradient, render_source
 
 
@@ -39,6 +39,21 @@ class AeScatterMapDownsampleVerifyTests(unittest.TestCase):
             Image.frombytes("RGBA", (4, 4), argb_to_rgba(expected)).save(output)
             report = verify(identity, output, "variable_alpha")
         self.assertEqual(report["case_id"], "variable_alpha")
+
+    def test_mixed_case_uses_requested_ratio(self):
+        source = gradient(4, 4)
+        expected = render_source(source, 4, 4, mix=37.5)
+        with tempfile.TemporaryDirectory() as directory:
+            identity = Path(directory) / "identity.png"
+            output = Path(directory) / "output.png"
+            Image.frombytes("RGBA", (4, 4), argb_to_rgba(source)).save(identity)
+            Image.frombytes("RGBA", (4, 4), argb_to_rgba(expected)).save(output)
+            report = verify(identity, output, "mixed", mix=37.5)
+        self.assertTrue(report["pixel_match"])
+        self.assertEqual(report["parameters"]["mix"], 37.5)
+
+    def test_premultiply_output_uses_round_to_nearest(self):
+        self.assertEqual(premultiply_argb(bytes((128, 255, 3, 1))), bytes((128, 128, 2, 1)))
 
 
 if __name__ == "__main__":

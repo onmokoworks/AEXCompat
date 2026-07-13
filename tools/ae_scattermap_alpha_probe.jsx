@@ -28,15 +28,22 @@
         var layer = comp.layers.add(footage);
         var effect = layer.property("ADBE Effect Parade").addProperty("ScatterMap");
         var amount = effect.property("Scatter Amount");
-        var cases = [{id:"identity", value:0}, {id:"default", value:5}];
+        var mix = effect.property("Mix with Original");
+        var cases = [
+            {id:"identity", amount:0, mix:100},
+            {id:"default", amount:5, mix:100},
+            {id:"mixed", amount:5, mix:37.5}
+        ];
         for (var i = 0; i < cases.length; i += 1) {
-            amount.setValue(cases[i].value);
+            amount.setValue(cases[i].amount);
+            mix.setValue(cases[i].mix);
             var output = new File(outputDir + "/" + cases[i].id + ".png");
             if (output.exists) { throw new Error("output already exists: " + cases[i].id); }
             marker("render " + cases[i].id);
             comp.saveFrameToPng(0, output);
             results.push('{"case_id":' + esc(cases[i].id) +
-                ',"amount":' + cases[i].value + ',"render_api_completed":true}');
+                ',"amount":' + cases[i].amount + ',"mix":' + cases[i].mix +
+                ',"render_api_completed":true}');
         }
     } catch (error) {
         errorText = String(error && error.message ? error.message : error);

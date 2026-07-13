@@ -61,5 +61,7 @@ At composition resolution factor `[2,2]`, AE supplied an 8x6 world and the
 fixture output matched an oracle built from AE's exact downsampled input.
 A variable-alpha production-host case also matched the arbitrary-source oracle
 exactly, proving four-channel ARGB movement through transparent pixels.
+Its 37.5% mixed case also matches after the observed AE round-to-nearest output
+premultiplication transform.
 The ARGB8 matrix also covers valid parameter boundaries amount 500, seed 10000,
 and mix 0% in both classic and SmartFX paths with broker-enforced oracle parity.

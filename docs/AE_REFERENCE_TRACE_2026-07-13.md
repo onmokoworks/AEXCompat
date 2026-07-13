@@ -197,3 +197,12 @@ exactly equal to the AE effect output with zero differing bytes. The output
 retained alpha values from 0 through 254 across 117 distinct levels. This proves
 that production AE behavior follows the fixture's four-channel ARGB coordinate
 copy, including transparent and partially transparent pixels.
+
+A third case set Mix with Original to 37.5%. Directly mixing the exported
+identity PNG is intentionally not equivalent because AE applies output
+premultiplication after the effect. The exact host model is: run the fixture's
+four-channel mix on straight ARGB, then multiply each RGB channel by the mixed
+alpha using round-to-nearest. This model and AE output both had SHA-256
+`9FDE646043AE9B54B38014226F3430E9F5EDF5649321BF406A921B1E454CEB03`
+with zero differing bytes. Alpha alone also matched before adding the host
+output transform, which independently confirms the plug-in's alpha mix.
