@@ -3,6 +3,21 @@ use sha2::{Digest, Sha256};
 
 pub const PROFILE_ID: &str = "maskoffset";
 
+#[derive(Clone, Copy)]
+pub struct OracleMaskVertex {
+    pub x: f64,
+    pub y: f64,
+    pub tangent_in_x: f64,
+    pub tangent_in_y: f64,
+    pub tangent_out_x: f64,
+    pub tangent_out_y: f64,
+}
+
+pub struct OracleMask {
+    pub open: bool,
+    pub vertices: Vec<OracleMaskVertex>,
+}
+
 fn source_argb8() -> Vec<u8> {
     const WIDTH: i32 = 16;
     const HEIGHT: i32 = 12;
@@ -109,8 +124,8 @@ pub fn polygon_mask_argb8_hash(
     let Some(points) = mask_index.checked_sub(1).and_then(|index| masks.get(index)) else {
         return Some(source_argb8_hash());
     };
-    if points.len() < 3 {
-        return None;
+    if points.is_empty() {
+        return Some(source_argb8_hash());
     }
     let mode = assignments
         .get("mode")
@@ -171,6 +186,70 @@ pub fn polygon_mask_argb8_hash(
         }
     }
     Some(format!("{:X}", Sha256::digest(source)))
+}
+
+pub fn bezier_mask_argb8_hash(
+    assignments: &ValidatedAssignments,
+    masks: &[OracleMask],
+) -> Option<String> {
+    let polygons = masks
+        .iter()
+        .map(|mask| {
+            // MaskOffset reads [0..num_segments), while the SDK exposes vertex
+            // [0..num_segments]. Preserve that observable behavior for open paths.
+            let observed_len = if mask.open {
+                mask.vertices.len().saturating_sub(1)
+            } else {
+                mask.vertices.len()
+            };
+            let vertices = &mask.vertices[..observed_len];
+            if vertices.is_empty() {
+                return Vec::new();
+            }
+            let segment_count = if mask.open {
+                vertices.len().saturating_sub(1)
+            } else {
+                vertices.len()
+            };
+            let mut polygon = Vec::with_capacity(segment_count * 32 + usize::from(mask.open));
+            for segment in 0..segment_count {
+                let first = vertices[segment];
+                let second = if mask.open {
+                    vertices[segment + 1]
+                } else {
+                    vertices[(segment + 1) % vertices.len()]
+                };
+                let p0 = (first.x, first.y);
+                let p1 = (first.x + first.tangent_out_x, first.y + first.tangent_out_y);
+                let p2 = (
+                    second.x + second.tangent_in_x,
+                    second.y + second.tangent_in_y,
+                );
+                let p3 = (second.x, second.y);
+                for sample in 0..32 {
+                    let t = sample as f64 / 32.0;
+                    let u = 1.0 - t;
+                    polygon.push((
+                        u * u * u * p0.0
+                            + 3.0 * u * u * t * p1.0
+                            + 3.0 * u * t * t * p2.0
+                            + t * t * t * p3.0,
+                        u * u * u * p0.1
+                            + 3.0 * u * u * t * p1.1
+                            + 3.0 * u * t * t * p2.1
+                            + t * t * t * p3.1,
+                    ));
+                }
+            }
+            if mask.open {
+                if let Some(last) = vertices.last() {
+                    polygon.push((last.x, last.y));
+                }
+            }
+            polygon
+        })
+        .collect::<Vec<_>>();
+    polygon_mask_argb8_hash(assignments, &polygons)
 }
 
 #[cfg(test)]
@@ -250,6 +329,33 @@ mod tests {
         assert_eq!(
             polygon_mask_argb8_hash(&values, &rectangle),
             Some(rectangle_mask_argb8_hash(&values))
+        );
+    }
+
+    #[test]
+    fn zero_tangent_bezier_oracle_matches_polygon_oracle() {
+        let values = ValidatedAssignments::from([
+            ("mode".into(), ParameterValue::Numeric(2.0)),
+            ("mask_index".into(), ParameterValue::Numeric(1.0)),
+        ]);
+        let points = [(4.0, 3.0), (12.0, 3.0), (12.0, 9.0), (4.0, 9.0)];
+        let mask = OracleMask {
+            open: false,
+            vertices: points
+                .iter()
+                .map(|&(x, y)| OracleMaskVertex {
+                    x,
+                    y,
+                    tangent_in_x: 0.0,
+                    tangent_in_y: 0.0,
+                    tangent_out_x: 0.0,
+                    tangent_out_y: 0.0,
+                })
+                .collect(),
+        };
+        assert_eq!(
+            bezier_mask_argb8_hash(&values, &[mask]),
+            polygon_mask_argb8_hash(&values, &[points.to_vec()])
         );
     }
 }

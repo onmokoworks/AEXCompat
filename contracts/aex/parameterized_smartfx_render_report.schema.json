@@ -14,6 +14,8 @@
     "assignment_count": {"type": "integer", "minimum": 0, "maximum": 64},
     "host_context_mask_count": {"type": ["integer", "null"], "minimum": 0, "maximum": 8},
     "host_context_vertex_count": {"type": ["integer", "null"], "minimum": 0, "maximum": 128},
+    "host_context_open_mask_count": {"type": ["integer", "null"], "minimum": 0, "maximum": 8},
+    "host_context_tangent_vertex_count": {"type": ["integer", "null"], "minimum": 0, "maximum": 128},
     "accepted": {"type": "boolean"},
     "native_process_started": {"type": "boolean"},
     "passed": {"type": "boolean"},
@@ -83,7 +85,7 @@
     "run": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["classification", "pre_render_error", "smart_render_error", "output_sha256", "result_rects_valid", "guard_bytes_intact", "request_mode", "mask_scene_id", "mask_count", "requested_parameters"],
+      "required": ["classification", "pre_render_error", "smart_render_error", "output_sha256", "result_rects_valid", "guard_bytes_intact", "request_mode", "mask_scene_id", "mask_count", "mask_open_count", "mask_tangent_vertex_count", "requested_parameters"],
       "properties": {
         "classification": {"enum": ["ok", "nonzero_exit", "crashed", "timeout_killed"]},
         "pre_render_error": {"type": ["integer", "null"]},
@@ -94,6 +96,8 @@
         "request_mode": {"type": ["boolean", "null"]},
         "mask_scene_id": {"type": ["string", "null"], "maxLength": 64},
         "mask_count": {"type": ["integer", "null"], "minimum": 0, "maximum": 8},
+        "mask_open_count": {"type": ["integer", "null"], "minimum": 0, "maximum": 8},
+        "mask_tangent_vertex_count": {"type": ["integer", "null"], "minimum": 0, "maximum": 128},
         "requested_parameters": {"type": ["array", "null"], "minItems": 1, "maxItems": 64, "items": {"$ref": "#/$defs/requested_parameter"}}
       }
     },

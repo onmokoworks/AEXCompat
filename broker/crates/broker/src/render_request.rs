@@ -1,5 +1,6 @@
 use crate::fixture_profiles::maskoffset::{
-    mask_scene_argb8_hash, polygon_mask_argb8_hash, rectangle_mask_argb8_hash, source_argb8_hash,
+    bezier_mask_argb8_hash, mask_scene_argb8_hash, rectangle_mask_argb8_hash, source_argb8_hash,
+    OracleMask, OracleMaskVertex,
 };
 use crate::fixture_profiles::scattermap::expected_argb8_hash;
 use crate::fixture_profiles::{ParameterizedRenderAdapter, RegisteredProfile};
@@ -51,6 +52,17 @@ struct MaskShape {
 #[derive(Clone, Copy, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct MaskPoint {
+    x: f64,
+    y: f64,
+    #[serde(default)]
+    tangent_in: Option<MaskTangent>,
+    #[serde(default)]
+    tangent_out: Option<MaskTangent>,
+}
+
+#[derive(Clone, Copy, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct MaskTangent {
     x: f64,
     y: f64,
 }
@@ -132,23 +144,30 @@ fn validate_mask_context(context: &HostContext) -> io::Result<(usize, usize)> {
     }
     let mut vertex_count = 0usize;
     for mask in &context.mask_scene.masks {
-        if mask.open {
-            return Err(invalid("open host masks are not enabled in request v4"));
-        }
-        if !(3..=64).contains(&mask.vertices.len()) {
-            return Err(invalid("host mask vertex count must be 3 through 64"));
+        let minimum = if mask.open { 2 } else { 3 };
+        if !(minimum..=64).contains(&mask.vertices.len()) {
+            return Err(invalid("host mask vertex count outside enabled range"));
         }
         vertex_count += mask.vertices.len();
         if vertex_count > 128 {
             return Err(invalid("host mask total vertex count exceeds 128"));
         }
         if mask.vertices.iter().any(|point| {
-            !point.x.is_finite()
-                || !point.y.is_finite()
-                || point.x < -32768.0
-                || point.x > 32768.0
-                || point.y < -32768.0
-                || point.y > 32768.0
+            [
+                Some((point.x, point.y)),
+                point.tangent_in.map(|value| (value.x, value.y)),
+                point.tangent_out.map(|value| (value.x, value.y)),
+            ]
+            .into_iter()
+            .flatten()
+            .any(|(x, y)| {
+                !x.is_finite()
+                    || !y.is_finite()
+                    || x < -32768.0
+                    || x > 32768.0
+                    || y < -32768.0
+                    || y > 32768.0
+            })
         }) {
             return Err(invalid("host mask coordinate is outside bounded range"));
         }
@@ -158,17 +177,22 @@ fn validate_mask_context(context: &HostContext) -> io::Result<(usize, usize)> {
 
 fn encode_mask_context(context: &HostContext) -> io::Result<String> {
     validate_mask_context(context)?;
-    let mut encoded = String::from("v1|");
+    let mut encoded = String::from("v2|");
     for (mask_index, mask) in context.mask_scene.masks.iter().enumerate() {
         if mask_index != 0 {
             encoded.push(';');
         }
-        encoded.push_str("0:");
+        encoded.push_str(if mask.open { "1:" } else { "0:" });
         for (vertex_index, point) in mask.vertices.iter().enumerate() {
             if vertex_index != 0 {
                 encoded.push('/');
             }
-            encoded.push_str(&format!("{},{}", point.x, point.y));
+            let tangent_in = point.tangent_in.unwrap_or(MaskTangent { x: 0.0, y: 0.0 });
+            let tangent_out = point.tangent_out.unwrap_or(MaskTangent { x: 0.0, y: 0.0 });
+            encoded.push_str(&format!(
+                "{},{},{},{},{},{}",
+                point.x, point.y, tangent_in.x, tangent_in.y, tangent_out.x, tangent_out.y
+            ));
         }
     }
     if encoded.len() > 8192 {
@@ -448,6 +472,28 @@ pub fn execute_smart(
         .as_ref()
         .map(validate_mask_context)
         .transpose()?;
+    let host_context_shape_counts = request.host_context.as_ref().map(|context| {
+        let open_masks = context
+            .mask_scene
+            .masks
+            .iter()
+            .filter(|mask| mask.open)
+            .count();
+        let tangent_vertices = context
+            .mask_scene
+            .masks
+            .iter()
+            .flat_map(|mask| &mask.vertices)
+            .filter(|point| {
+                point
+                    .tangent_in
+                    .into_iter()
+                    .chain(point.tangent_out)
+                    .any(|value| value.x != 0.0 || value.y != 0.0)
+            })
+            .count();
+        (open_masks, tangent_vertices)
+    });
     if request.host_context.is_some() && worker_spec.request_mode != "--smart-mask-request" {
         return Err(invalid(
             "profile has no approved host mask context capability",
@@ -479,14 +525,28 @@ pub fn execute_smart(
             .mask_scene
             .masks
             .iter()
-            .map(|mask| {
-                mask.vertices
+            .map(|mask| OracleMask {
+                open: mask.open,
+                vertices: mask
+                    .vertices
                     .iter()
-                    .map(|point| (point.x, point.y))
-                    .collect()
+                    .map(|point| {
+                        let tangent_in = point.tangent_in.unwrap_or(MaskTangent { x: 0.0, y: 0.0 });
+                        let tangent_out =
+                            point.tangent_out.unwrap_or(MaskTangent { x: 0.0, y: 0.0 });
+                        OracleMaskVertex {
+                            x: point.x,
+                            y: point.y,
+                            tangent_in_x: tangent_in.x,
+                            tangent_in_y: tangent_in.y,
+                            tangent_out_x: tangent_out.x,
+                            tangent_out_y: tangent_out.y,
+                        }
+                    })
+                    .collect(),
             })
-            .collect::<Vec<Vec<_>>>();
-        polygon_mask_argb8_hash(&effective, &masks)
+            .collect::<Vec<_>>();
+        bezier_mask_argb8_hash(&effective, &masks)
             .ok_or_else(|| invalid("host mask context has no independent oracle"))?
     } else {
         expected_hash(profile.parameterized_render, &effective)
@@ -523,6 +583,12 @@ pub fn execute_smart(
                 report.get("mask_scene_id").and_then(Value::as_str) == Some("request_v4")
                     && report.get("mask_count").and_then(Value::as_u64)
                         == host_context_counts.map(|counts| counts.0 as u64)
+                    && report.get("mask_open_count").and_then(Value::as_u64)
+                        == host_context_shape_counts.map(|counts| counts.0 as u64)
+                    && report
+                        .get("mask_tangent_vertex_count")
+                        .and_then(Value::as_u64)
+                        == host_context_shape_counts.map(|counts| counts.1 as u64)
             })
             && report
                 .get("output_sha256")
@@ -541,6 +607,8 @@ pub fn execute_smart(
         "result_rects_valid":item.1.get("result_rects_valid"),
         "guard_bytes_intact":item.1.get("guard_bytes_intact"),"request_mode":item.1.get("request_mode"),
         "mask_scene_id":item.1.get("mask_scene_id"),"mask_count":item.1.get("mask_count"),
+        "mask_open_count":item.1.get("mask_open_count"),
+        "mask_tangent_vertex_count":item.1.get("mask_tangent_vertex_count"),
         "requested_parameters":item.1.get("requested_parameters")})
     };
     let report = json!({"schema_version":1,"stage":"parameterized_smartfx_render",
@@ -549,6 +617,8 @@ pub fn execute_smart(
         "accepted":true,"native_process_started":true,"parameters":effective,
         "host_context_mask_count":host_context_counts.map(|counts| counts.0),
         "host_context_vertex_count":host_context_counts.map(|counts| counts.1),
+        "host_context_open_mask_count":host_context_shape_counts.map(|counts| counts.0),
+        "host_context_tangent_vertex_count":host_context_shape_counts.map(|counts| counts.1),
         "expected_oracle_sha256":expected,
         "run_1":summarize(&runs[0]),"run_2":summarize(&runs[1]),"deterministic":deterministic,
         "broker_survived":true,"passed":passed});
@@ -881,7 +951,7 @@ mod tests {
         assert_eq!(validate_mask_context(context).unwrap(), (1, 4));
         assert_eq!(
             encode_mask_context(context).unwrap(),
-            "v1|0:2,2/10,2/10,8/2,8"
+            "v2|0:2,2,0,0,0,0/10,2,0,0,0,0/10,8,0,0,0,0/2,8,0,0,0,0"
         );
 
         let profile = PluginProfile {
@@ -892,12 +962,16 @@ mod tests {
     }
 
     #[test]
-    fn mask_context_rejects_open_excess_and_legacy_injection() {
+    fn mask_context_accepts_open_and_rejects_excess_and_legacy_injection() {
         let open: Request = serde_json::from_str(
             r#"{"schema_version":4,"plugin_id":"maskoffset","assignments":{},"host_context":{"mask_scene":{"masks":[{"open":true,"vertices":[{"x":0,"y":0},{"x":1,"y":0},{"x":0,"y":1}]}]}}}"#,
         )
         .unwrap();
-        assert!(validate_mask_context(open.host_context.as_ref().unwrap()).is_err());
+        let open_context = open.host_context.as_ref().unwrap();
+        assert!(validate_mask_context(open_context).is_ok());
+        assert!(encode_mask_context(open_context)
+            .unwrap()
+            .starts_with("v2|1:"));
 
         let legacy: Request = serde_json::from_str(
             r#"{"schema_version":3,"plugin_id":"maskoffset","assignments":{},"host_context":{"mask_scene":{"masks":[]}}}"#,
@@ -913,11 +987,25 @@ mod tests {
             mask_scene: MaskScene {
                 masks: vec![MaskShape {
                     open: false,
-                    vertices: vec![MaskPoint { x: 0.0, y: 0.0 }; 65],
+                    vertices: vec![
+                        MaskPoint {
+                            x: 0.0,
+                            y: 0.0,
+                            tangent_in: None,
+                            tangent_out: None,
+                        };
+                        65
+                    ],
                 }],
             },
         };
         assert!(validate_mask_context(&excessive).is_err());
+
+        let invalid_tangent: Request = serde_json::from_str(
+            r#"{"schema_version":4,"plugin_id":"maskoffset","assignments":{},"host_context":{"mask_scene":{"masks":[{"open":false,"vertices":[{"x":0,"y":0,"tangent_out":{"x":32769,"y":0}},{"x":1,"y":0},{"x":0,"y":1}]}]}}}"#,
+        )
+        .unwrap();
+        assert!(validate_mask_context(invalid_tangent.host_context.as_ref().unwrap()).is_err());
     }
 
     #[test]

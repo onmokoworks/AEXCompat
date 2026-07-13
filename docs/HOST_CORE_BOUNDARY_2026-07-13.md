@@ -75,5 +75,6 @@ paths. This is evidence toward item 5, not completion of it: configurable mask
 scenes and wider selector/suite coverage remain pending. Host-owned mask records
 now support zero, one, or multiple distinct mask/stream/outline handles, with
 fixed scene selection gated outside the ABI callback layer. Request v4 also
-accepts bounded closed straight-polygon host context; broker and worker both
-validate its shape and limits before exposing handles to native code.
+accepts bounded open/closed cubic-Bezier host context with relative tangents;
+broker and worker both validate its shape and limits before exposing handles to
+native code.

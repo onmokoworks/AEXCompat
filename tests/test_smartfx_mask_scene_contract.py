@@ -63,7 +63,8 @@ class SmartFxMaskSceneContractTests(unittest.TestCase):
             "host mask total vertex count exceeds 128",
             "host mask transport exceeds 8192 bytes",
             '"--smart-mask-context-request"',
-            "polygon_mask_argb8_hash",
+            "bezier_mask_argb8_hash",
+            "host_context_tangent_vertex_count",
         ):
             self.assertIn(marker, route)
         for marker in (
@@ -71,6 +72,9 @@ class SmartFxMaskSceneContractTests(unittest.TestCase):
             "masks.size() > 8",
             "total_vertices > 128",
             "encoded.size() > 8192",
+            'encoded.compare(0, 3, L"v2|")',
+            "mask.open = item[0] == L'1'",
+            "mask_tangent_vertex_count",
             'g_mask_scene_id = "request_v4"',
         ):
             self.assertIn(marker, worker)

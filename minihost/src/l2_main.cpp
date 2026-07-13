@@ -168,6 +168,25 @@ HostMask* find_outline(void* handle) {
   return found == g_mask_scene.end() ? nullptr : &*found;
 }
 
+std::size_t mask_open_count() {
+  return static_cast<std::size_t>(std::count_if(g_mask_scene.begin(), g_mask_scene.end(),
+      [](const auto& mask) { return mask.open; }));
+}
+
+std::size_t mask_tangent_vertex_count() {
+  std::size_t count = 0;
+  for (const auto& mask : g_mask_scene) {
+    const auto end = !mask.open && !mask.vertices.empty()
+        ? mask.vertices.end() - 1 : mask.vertices.end();
+    count += static_cast<std::size_t>(std::count_if(mask.vertices.begin(), end,
+        [](const auto& vertex) {
+          return vertex.tangent_in_x != 0 || vertex.tangent_in_y != 0 ||
+                 vertex.tangent_out_x != 0 || vertex.tangent_out_y != 0;
+        }));
+  }
+  return count;
+}
+
 void write_rect(void* destination, int32_t width, int32_t height) {
   auto* bytes = static_cast<std::byte*>(destination);
   const int32_t values[4] = {0, 0, height, width};
@@ -628,7 +647,7 @@ bool parse_double_arg(const wchar_t* text, double minimum, double maximum, doubl
 bool parse_mask_context_payload(const wchar_t* text) {
   if (!text) return false;
   const std::wstring encoded(text);
-  if (encoded.size() < 3 || encoded.size() > 8192 || encoded.compare(0, 3, L"v1|") != 0)
+  if (encoded.size() < 3 || encoded.size() > 8192 || encoded.compare(0, 3, L"v2|") != 0)
     return false;
   std::vector<HostMask> masks;
   std::size_t total_vertices = 0;
@@ -644,28 +663,37 @@ bool parse_mask_context_payload(const wchar_t* text) {
     const std::size_t mask_end = mask_separator == std::wstring::npos
         ? payload.size() : mask_separator;
     const std::wstring item = payload.substr(mask_offset, mask_end - mask_offset);
-    if (item.size() < 5 || item.compare(0, 2, L"0:") != 0) return false;
+    if (item.size() < 5 || (item.compare(0, 2, L"0:") != 0 &&
+                            item.compare(0, 2, L"1:") != 0)) return false;
     HostMask mask;
+    mask.open = item[0] == L'1';
     std::size_t vertex_offset = 2;
     while (vertex_offset < item.size()) {
       const std::size_t vertex_separator = item.find(L'/', vertex_offset);
       const std::size_t vertex_end = vertex_separator == std::wstring::npos
           ? item.size() : vertex_separator;
       const std::wstring point = item.substr(vertex_offset, vertex_end - vertex_offset);
-      const std::size_t comma = point.find(L',');
-      if (comma == std::wstring::npos || comma == 0 || comma + 1 >= point.size() ||
-          point.find(L',', comma + 1) != std::wstring::npos) return false;
-      double x{}, y{};
-      if (!parse_double_arg(point.substr(0, comma).c_str(), -32768.0, 32768.0, x) ||
-          !parse_double_arg(point.substr(comma + 1).c_str(), -32768.0, 32768.0, y)) return false;
-      mask.vertices.push_back({x, y, 0, 0, 0, 0});
+      std::array<double, 6> components{};
+      std::size_t component_offset = 0;
+      for (std::size_t component = 0; component < components.size(); ++component) {
+        const std::size_t comma = point.find(L',', component_offset);
+        const bool final_component = component + 1 == components.size();
+        if ((final_component && comma != std::wstring::npos) ||
+            (!final_component && comma == std::wstring::npos)) return false;
+        const std::size_t component_end = final_component ? point.size() : comma;
+        if (!parse_double_arg(point.substr(component_offset, component_end - component_offset).c_str(),
+                              -32768.0, 32768.0, components[component])) return false;
+        component_offset = component_end + 1;
+      }
+      mask.vertices.push_back({components[0], components[1], components[2],
+                               components[3], components[4], components[5]});
       if (mask.vertices.size() > 64 || ++total_vertices > 128) return false;
       if (vertex_separator == std::wstring::npos) break;
       vertex_offset = vertex_separator + 1;
       if (vertex_offset == item.size()) return false;
     }
-    if (mask.vertices.size() < 3) return false;
-    mask.vertices.push_back(mask.vertices.front());
+    if (mask.vertices.size() < (mask.open ? 2u : 3u)) return false;
+    if (!mask.open) mask.vertices.push_back(mask.vertices.front());
     masks.push_back(std::move(mask));
     if (masks.size() > 8) return false;
     if (mask_separator == std::wstring::npos) break;
@@ -1477,6 +1505,8 @@ int wmain(int argc, wchar_t** argv) {
             << ",\"request_mode\":" << (request_mode ? "true" : "false")
             << ",\"mask_scene_id\":\"" << g_mask_scene_id << "\""
             << ",\"mask_count\":" << g_mask_scene.size()
+            << ",\"mask_open_count\":" << mask_open_count()
+            << ",\"mask_tangent_vertex_count\":" << mask_tangent_vertex_count()
             << ",\"requested_parameters\":" << requested_parameters_json(requested_parameters)
             << ",\"requested_amount\":" << static_cast<int32_t>(requested_value(requested_parameters, L"amount"))
             << ",\"requested_direction\":" << static_cast<int32_t>(requested_value(requested_parameters, L"direction"))

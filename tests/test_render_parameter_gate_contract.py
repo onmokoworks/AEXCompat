@@ -27,7 +27,9 @@ class RenderParameterGateContractTests(unittest.TestCase):
         masks = host_context["properties"]["mask_scene"]["properties"]["masks"]
         self.assertEqual(masks["maxItems"], 8)
         self.assertEqual(schema["$defs"]["mask"]["properties"]["vertices"]["maxItems"], 64)
-        self.assertFalse(schema["$defs"]["mask"]["properties"]["open"]["const"])
+        self.assertEqual(schema["$defs"]["mask"]["properties"]["open"], {"type": "boolean"})
+        self.assertIn("tangent_in", schema["$defs"]["point"]["properties"])
+        self.assertIn("tangent_out", schema["$defs"]["point"]["properties"])
 
     def test_report_proves_pre_dispatch_rejection(self):
         schema = json.loads((ROOT / "contracts/aex/render_parameter_gate_report.schema.json").read_text(encoding="utf-8"))

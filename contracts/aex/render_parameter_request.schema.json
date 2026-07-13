@@ -75,16 +75,33 @@
       "additionalProperties": false,
       "required": ["open", "vertices"],
       "properties": {
-        "open": {"const": false},
+        "open": {"type": "boolean"},
         "vertices": {
           "type": "array",
-          "minItems": 3,
+          "minItems": 2,
           "maxItems": 64,
           "items": {"$ref": "#/$defs/point"}
         }
-      }
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"open": {"const": false}}},
+          "then": {"properties": {"vertices": {"minItems": 3}}}
+        }
+      ]
     },
     "point": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["x", "y"],
+      "properties": {
+        "x": {"type": "number", "minimum": -32768, "maximum": 32768},
+        "y": {"type": "number", "minimum": -32768, "maximum": 32768},
+        "tangent_in": {"$ref": "#/$defs/vector"},
+        "tangent_out": {"$ref": "#/$defs/vector"}
+      }
+    },
+    "vector": {
       "type": "object",
       "additionalProperties": false,
       "required": ["x", "y"],

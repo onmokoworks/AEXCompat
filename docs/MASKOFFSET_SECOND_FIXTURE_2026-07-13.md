@@ -106,18 +106,23 @@ native lookup. The worker only echoes host scene identity and count. MaskOffset
 pixel expectations remain in its fixture adapter rather than `host_core`, while
 the AEGP callbacks dispatch solely by opaque host handles.
 
-Request v4 now adds a bounded `host_context.mask_scene` to the normal SmartFX
-request path. It accepts up to 8 closed straight-polygon masks, 64 vertices per
-mask, 128 vertices total, coordinates in `[-32768, 32768]`, and an 8192-byte
-worker transport. Broker and worker independently enforce these limits. A real
-two-polygon request selected its second mask, matched an independent ray-cast
-pixel oracle twice, preserved guards, and echoed `request_v4` with mask count 2.
-An `open:true` request failed before report creation or native launch.
+Request v4 adds a bounded `host_context.mask_scene` to the normal SmartFX request
+path. It accepts up to 8 open or closed masks, 64 vertices per mask, 128 vertices
+total, position-relative cubic in/out tangents, all components in
+`[-32768, 32768]`, and an 8192-byte worker transport. Broker and worker
+independently enforce these limits. A real two-polygon request selected its
+second mask and matched an independent ray-cast oracle twice.
+
+Real open and cubic Bezier requests also matched independent 32-sample-per-
+segment oracles twice. Worker echoes proved one open mask in the first case and
+four non-zero-tangent vertices in the second. The open oracle preserves the
+target AEX's observable end-exclusive read of the SDK's `[0..num_segments]`
+vertex range while the host callback itself remains SDK-conformant.
 
 ## Remaining Work
 
 This evidence does not claim complete MaskOffset render compatibility. Completion
-still requires bounded open/Bezier mask scenes and expansion/rounding/feather/
-invert oracle coverage. Arbitrary bounded closed straight-polygon input is now
-covered. Those additions must not introduce MaskOffset identity or algorithms
-into `host_core`.
+still requires expansion/rounding/feather/invert oracle coverage and broader
+mask-suite mutation/lifetime behavior. Bounded open, closed, straight, and cubic
+Bezier host scenes are now covered. Those additions must not introduce
+MaskOffset identity or algorithms into `host_core`.
