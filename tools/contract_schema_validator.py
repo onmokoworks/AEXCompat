@@ -98,6 +98,7 @@ def main(argv: list[str] | None = None) -> int:
         "schema_version": 1,
         "checked_files": len(json_files),
         "issue_count": len(issues),
+        "strict_mode": args.strict,
         "mode": "strict" if args.strict else "warning",
         "issues": issues,
     }
@@ -107,4 +108,3 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
