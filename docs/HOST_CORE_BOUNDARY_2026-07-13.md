@@ -32,7 +32,11 @@ encoding. Render request schema v2 carries a descriptor-id keyed numeric map.
 Parameter validation and render CLI operations are fixture-neutral and resolve
 `plugin_id` through the registry. Allowlist parsing and artifact/resource
 validation are generic host policy; each profile supplies its reviewed approval
-policy and worker launch specification. Parameter workers receive one bounded, versioned
+policy and worker launch specification. L2 lifecycle validation is also generic:
+the profile registry owns receipt, expiry, About identity fragments, advertised
+flags, and conditional-selector expectations, while the runner applies the same
+setup/setdown, no-render, isolation, and report rules to every registered id.
+Parameter workers receive one bounded, versioned
 descriptor/slot/kind/value payload rather than a fixed positional argument list.
 They validate its syntax before native loading, then match every requested slot,
 kind, and range against descriptors observed during `PF_PARAMS_SETUP` before any

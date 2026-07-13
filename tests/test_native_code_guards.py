@@ -67,11 +67,13 @@ class NativeCodeGuardTests(unittest.TestCase):
 
     def test_l2_has_distinct_worker_allowlist_and_receipt(self):
         source = (BROKER_ROOT / "crates" / "broker" / "src" / "l2.rs").read_text(encoding="utf-8")
-        self.assertIn("target/l2-allowlist/active.local.json", source)
-        self.assertIn("scattermap-l2-20260713-001", source)
+        profile = (BROKER_ROOT / "crates" / "broker" / "src" / "fixture_profiles" / "mod.rs").read_text(encoding="utf-8")
+        self.assertIn("target/l2-allowlist/active.local.json", profile)
+        self.assertIn("scattermap-l2-20260713-001", profile)
         self.assertIn('entry.approved_stage != "L2"', source)
         self.assertIn("entries.len() != 1", source)
         self.assertIn("worker_report_unavailable", source)
+        self.assertIn("requested L2 profile is not registered", source)
 
     def test_render_has_distinct_allowlist_receipt_and_two_runs(self):
         source = (BROKER_ROOT / "crates" / "broker" / "src" / "render.rs").read_text(encoding="utf-8")
