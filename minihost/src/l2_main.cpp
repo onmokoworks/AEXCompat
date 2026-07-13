@@ -147,6 +147,15 @@ struct HostMask {
   bool mask_live{};
   bool stream_live{};
   bool value_live{};
+  bool deleted{};
+  bool invert{};
+  bool locked{};
+  bool roto_bezier{};
+  uint8_t motion_blur{};
+  uint8_t feather_falloff{};
+  int32_t mode{1};
+  int32_t id{};
+  std::array<double, 4> color{1.0, 1.0, 0.0, 0.0};
   std::vector<MaskVertex> vertices;
   std::vector<MaskFeather> feathers;
 };
@@ -164,6 +173,10 @@ struct MaskLifetimeCounts {
 MaskLifetimeCounts g_mask_lifetime;
 uint32_t g_invalid_outline_operations{};
 uint32_t g_outline_mutations{};
+uint32_t g_mask_mutations{};
+uint32_t g_invalid_mask_operations{};
+int32_t g_next_mask_id{1};
+constexpr std::size_t kMaxHostMasks = 8;
 constexpr std::size_t kMaxOutlineVertices = 64;
 constexpr std::size_t kMaxOutlineFeathers = 64;
 
@@ -186,10 +199,12 @@ bool mask_lifetimes_balanced() {
 
 bool configure_mask_scene(const std::string& scene_id) {
   g_mask_scene.clear();
+  g_mask_scene.reserve(kMaxHostMasks);
   g_mask_lifetime = {};
   g_mask_scene_id = scene_id;
   const auto rectangle = [](double left, double top, double right, double bottom) {
     HostMask mask;
+    mask.id = g_next_mask_id++;
     mask.vertices = {{left, top, 0, 0, 0, 0}, {right, top, 0, 0, 0, 0},
                      {right, bottom, 0, 0, 0, 0}, {left, bottom, 0, 0, 0, 0},
                      {left, top, 0, 0, 0, 0}};
@@ -198,7 +213,6 @@ bool configure_mask_scene(const std::string& scene_id) {
   if (scene_id == "rectangle") g_mask_scene.push_back(rectangle(4, 3, 12, 9));
   else if (scene_id == "translated_rectangle") g_mask_scene.push_back(rectangle(2, 2, 10, 8));
   else if (scene_id == "two_rectangles") {
-    g_mask_scene.reserve(2);
     g_mask_scene.push_back(rectangle(1, 1, 7, 6));
     g_mask_scene.push_back(rectangle(9, 5, 15, 11));
   } else if (scene_id != "empty") return false;
@@ -223,12 +237,18 @@ HostMask* find_outline(void* handle) {
 
 std::size_t mask_open_count() {
   return static_cast<std::size_t>(std::count_if(g_mask_scene.begin(), g_mask_scene.end(),
-      [](const auto& mask) { return mask.open; }));
+      [](const auto& mask) { return !mask.deleted && mask.open; }));
+}
+
+std::size_t active_mask_count() {
+  return static_cast<std::size_t>(std::count_if(g_mask_scene.begin(), g_mask_scene.end(),
+      [](const auto& mask) { return !mask.deleted; }));
 }
 
 std::size_t mask_tangent_vertex_count() {
   std::size_t count = 0;
   for (const auto& mask : g_mask_scene) {
+    if (mask.deleted) continue;
     const auto end = !mask.open && !mask.vertices.empty()
         ? mask.vertices.end() - 1 : mask.vertices.end();
     count += static_cast<std::size_t>(std::count_if(mask.vertices.begin(), end,
@@ -439,14 +459,17 @@ int32_t __cdecl get_layer_num_masks(void* layer, int32_t* count) {
     RaiseException(EXCEPTION_ACCESS_VIOLATION, 0, 0, nullptr);
   }
   if (g_mask_fault == MaskFault::CountError) return 4;
-  *count = static_cast<int32_t>(g_mask_scene.size());
+  *count = static_cast<int32_t>(std::count_if(g_mask_scene.begin(), g_mask_scene.end(),
+      [](const auto& mask) { return !mask.deleted; }));
   return 0;
 }
 
 int32_t __cdecl get_layer_mask_by_index(void* layer, int32_t index, void** mask) {
-  if (layer != &g_layer || index < 0 ||
-      static_cast<std::size_t>(index) >= g_mask_scene.size() || !mask) return 4;
-  auto& record = g_mask_scene[static_cast<std::size_t>(index)];
+  if (layer != &g_layer || index < 0 || !mask) return 4;
+  auto found = std::find_if(g_mask_scene.begin(), g_mask_scene.end(),
+      [&index](const auto& candidate) { return !candidate.deleted && index-- == 0; });
+  if (found == g_mask_scene.end()) return 4;
+  auto& record = *found;
   if (record.mask_live) return 4;
   record.mask_live = true;
   ++g_mask_lifetime.masks_acquired;
@@ -459,6 +482,108 @@ int32_t __cdecl dispose_mask(void* mask) {
   if (!record || !record->mask_live) return 4;
   record->mask_live = false;
   ++g_mask_lifetime.masks_disposed;
+  return 0;
+}
+
+bool usable_mask(const HostMask* mask) { return mask && mask->mask_live && !mask->deleted; }
+
+int32_t __cdecl get_mask_invert(void* handle, uint8_t* value) {
+  HostMask* mask = find_mask(handle); if (!usable_mask(mask) || !value) return 4;
+  *value = mask->invert; return 0;
+}
+int32_t __cdecl set_mask_invert(void* handle, uint8_t value) {
+  HostMask* mask = find_mask(handle); if (!usable_mask(mask)) return 4;
+  mask->invert = value != 0; ++g_mask_mutations; return 0;
+}
+int32_t __cdecl get_mask_mode(void* handle, int32_t* value) {
+  HostMask* mask = find_mask(handle); if (!usable_mask(mask) || !value) return 4;
+  *value = mask->mode; return 0;
+}
+int32_t __cdecl set_mask_mode(void* handle, int32_t value) {
+  HostMask* mask = find_mask(handle);
+  if (!usable_mask(mask) || value < 0 || value > 7) { ++g_invalid_mask_operations; return 4; }
+  mask->mode = value; ++g_mask_mutations; return 0;
+}
+int32_t __cdecl get_mask_motion_blur(void* handle, uint8_t* value) {
+  HostMask* mask = find_mask(handle); if (!usable_mask(mask) || !value) return 4;
+  *value = mask->motion_blur; return 0;
+}
+int32_t __cdecl set_mask_motion_blur(void* handle, uint8_t value) {
+  HostMask* mask = find_mask(handle);
+  if (!usable_mask(mask) || value > 2) { ++g_invalid_mask_operations; return 4; }
+  mask->motion_blur = value; ++g_mask_mutations; return 0;
+}
+int32_t __cdecl get_mask_feather_falloff(void* handle, uint8_t* value) {
+  HostMask* mask = find_mask(handle); if (!usable_mask(mask) || !value) return 4;
+  *value = mask->feather_falloff; return 0;
+}
+int32_t __cdecl set_mask_feather_falloff(void* handle, uint8_t value) {
+  HostMask* mask = find_mask(handle);
+  if (!usable_mask(mask) || value > 1) { ++g_invalid_mask_operations; return 4; }
+  mask->feather_falloff = value; ++g_mask_mutations; return 0;
+}
+int32_t __cdecl get_mask_id(void* handle, int32_t* value) {
+  HostMask* mask = find_mask(handle); if (!usable_mask(mask) || !value) return 4;
+  *value = mask->id; return 0;
+}
+int32_t __cdecl create_new_mask(void* layer, void** handle, int32_t* index) {
+  if (layer != &g_layer || !handle || g_mask_scene.size() >= kMaxHostMasks) {
+    ++g_invalid_mask_operations; return 4;
+  }
+  HostMask mask; mask.id = g_next_mask_id++; mask.mask_live = true;
+  g_mask_scene.push_back(mask);
+  ++g_mask_lifetime.masks_acquired; ++g_mask_mutations;
+  *handle = &g_mask_scene.back().mask;
+  if (index) *index = static_cast<int32_t>(std::count_if(g_mask_scene.begin(), g_mask_scene.end(),
+      [](const auto& item) { return !item.deleted; }) - 1);
+  return 0;
+}
+int32_t __cdecl delete_mask_from_layer(void* handle) {
+  HostMask* mask = find_mask(handle);
+  if (!usable_mask(mask) || mask->stream_live || mask->value_live) {
+    ++g_invalid_mask_operations; return 4;
+  }
+  mask->deleted = true; ++g_mask_mutations; return 0;
+}
+int32_t __cdecl get_mask_color(void* handle, double* color) {
+  HostMask* mask = find_mask(handle); if (!usable_mask(mask) || !color) return 4;
+  std::copy(mask->color.begin(), mask->color.end(), color); return 0;
+}
+int32_t __cdecl set_mask_color(void* handle, const double* color) {
+  HostMask* mask = find_mask(handle);
+  if (!usable_mask(mask) || !color || !std::all_of(color, color + 4,
+      [](double value) { return std::isfinite(value) && value >= 0 && value <= 1; })) {
+    ++g_invalid_mask_operations; return 4;
+  }
+  std::copy(color, color + 4, mask->color.begin()); ++g_mask_mutations; return 0;
+}
+int32_t __cdecl get_mask_lock(void* handle, uint8_t* value) {
+  HostMask* mask = find_mask(handle); if (!usable_mask(mask) || !value) return 4;
+  *value = mask->locked; return 0;
+}
+int32_t __cdecl set_mask_lock(void* handle, uint8_t value) {
+  HostMask* mask = find_mask(handle); if (!usable_mask(mask)) return 4;
+  mask->locked = value != 0; ++g_mask_mutations; return 0;
+}
+int32_t __cdecl get_mask_roto_bezier(void* handle, uint8_t* value) {
+  HostMask* mask = find_mask(handle); if (!usable_mask(mask) || !value) return 4;
+  *value = mask->roto_bezier; return 0;
+}
+int32_t __cdecl set_mask_roto_bezier(void* handle, uint8_t value) {
+  HostMask* mask = find_mask(handle); if (!usable_mask(mask)) return 4;
+  mask->roto_bezier = value != 0; ++g_mask_mutations; return 0;
+}
+int32_t __cdecl duplicate_mask(void* original_handle, void** duplicate_handle) {
+  HostMask* original = find_mask(original_handle);
+  if (!usable_mask(original) || !duplicate_handle || g_mask_scene.size() >= kMaxHostMasks) {
+    ++g_invalid_mask_operations; return 4;
+  }
+  HostMask copy = *original;
+  copy.mask_live = true; copy.stream_live = false; copy.value_live = false;
+  copy.deleted = false; copy.id = g_next_mask_id++;
+  g_mask_scene.push_back(std::move(copy));
+  ++g_mask_lifetime.masks_acquired; ++g_mask_mutations;
+  *duplicate_handle = &g_mask_scene.back().mask;
   return 0;
 }
 
@@ -736,6 +861,49 @@ bool verify_outline_mutation_rejection() {
       g_outline_mutations == mutations_before + 8;
 }
 
+bool verify_mask_attribute_and_ownership_rejection() {
+  const auto original_scene = g_mask_scene;
+  const uint32_t invalid_before = g_invalid_mask_operations;
+  const uint32_t mutations_before = g_mask_mutations;
+  void* original = nullptr;
+  if (get_layer_mask_by_index(&g_layer, 0, &original) != 0) return false;
+  const double color[4]{1.0, 0.2, 0.4, 0.6};
+  double observed_color[4]{};
+  uint8_t byte_value{};
+  int32_t long_value{};
+  bool passed = set_mask_invert(original, 1) == 0 &&
+      get_mask_invert(original, &byte_value) == 0 && byte_value == 1 &&
+      set_mask_mode(original, 3) == 0 && get_mask_mode(original, &long_value) == 0 &&
+      long_value == 3 && set_mask_motion_blur(original, 2) == 0 &&
+      get_mask_motion_blur(original, &byte_value) == 0 && byte_value == 2 &&
+      set_mask_feather_falloff(original, 1) == 0 &&
+      get_mask_feather_falloff(original, &byte_value) == 0 && byte_value == 1 &&
+      set_mask_color(original, color) == 0 && get_mask_color(original, observed_color) == 0 &&
+      std::equal(std::begin(color), std::end(color), std::begin(observed_color)) &&
+      set_mask_lock(original, 1) == 0 && get_mask_lock(original, &byte_value) == 0 &&
+      byte_value == 1 && set_mask_roto_bezier(original, 1) == 0 &&
+      get_mask_roto_bezier(original, &byte_value) == 0 && byte_value == 1 &&
+      set_mask_mode(original, 99) != 0;
+  int32_t original_id{}, duplicate_id{}, count{};
+  void* duplicate = nullptr;
+  passed = passed && get_mask_id(original, &original_id) == 0 &&
+      duplicate_mask(original, &duplicate) == 0 &&
+      get_mask_id(duplicate, &duplicate_id) == 0 && duplicate_id != original_id &&
+      get_layer_num_masks(&g_layer, &count) == 0 && count == 2 &&
+      delete_mask_from_layer(duplicate) == 0 && dispose_mask(duplicate) == 0 &&
+      get_layer_num_masks(&g_layer, &count) == 0 && count == 1;
+  void* created = nullptr;
+  int32_t created_index = -1;
+  passed = passed && create_new_mask(&g_layer, &created, &created_index) == 0 &&
+      created_index == 1 && delete_mask_from_layer(created) == 0 &&
+      dispose_mask(created) == 0 && dispose_mask(original) == 0;
+  const bool balanced = mask_lifetimes_balanced();
+  g_mask_scene = original_scene;
+  g_mask_scene.reserve(kMaxHostMasks);
+  return passed && g_invalid_mask_operations == invalid_before + 1 &&
+      g_mask_mutations == mutations_before + 11 && balanced;
+}
+
 struct UtilitySuite {
   // Function pointer positions mirror the reviewed Adobe suite versions.
   void* unsupported[9]{};
@@ -749,7 +917,24 @@ struct MaskSuite {
   decltype(&get_layer_num_masks) get_layer_num_masks;
   decltype(&get_layer_mask_by_index) get_layer_mask_by_index;
   decltype(&dispose_mask) dispose_mask;
-  void* unsupported[17]{};
+  decltype(&get_mask_invert) get_invert;
+  decltype(&set_mask_invert) set_invert;
+  decltype(&get_mask_mode) get_mode;
+  decltype(&set_mask_mode) set_mode;
+  decltype(&get_mask_motion_blur) get_motion_blur;
+  decltype(&set_mask_motion_blur) set_motion_blur;
+  decltype(&get_mask_feather_falloff) get_feather_falloff;
+  decltype(&set_mask_feather_falloff) set_feather_falloff;
+  decltype(&get_mask_id) get_id;
+  decltype(&create_new_mask) create_new;
+  decltype(&delete_mask_from_layer) delete_from_layer;
+  decltype(&get_mask_color) get_color;
+  decltype(&set_mask_color) set_color;
+  decltype(&get_mask_lock) get_lock;
+  decltype(&set_mask_lock) set_lock;
+  decltype(&get_mask_roto_bezier) get_roto_bezier;
+  decltype(&set_mask_roto_bezier) set_roto_bezier;
+  decltype(&duplicate_mask) duplicate;
 };
 struct StreamSuite {
   void* unsupported_before_new_mask[6]{};
@@ -776,7 +961,13 @@ struct MaskOutlineSuite {
 
 UtilitySuite g_utility_suite{{}, &register_with_aegp};
 PfInterfaceSuite g_pf_interface_suite{&get_effect_layer};
-MaskSuite g_mask_suite{&get_layer_num_masks, &get_layer_mask_by_index, &dispose_mask};
+MaskSuite g_mask_suite{&get_layer_num_masks, &get_layer_mask_by_index, &dispose_mask,
+    &get_mask_invert, &set_mask_invert, &get_mask_mode, &set_mask_mode,
+    &get_mask_motion_blur, &set_mask_motion_blur,
+    &get_mask_feather_falloff, &set_mask_feather_falloff, &get_mask_id,
+    &create_new_mask, &delete_mask_from_layer, &get_mask_color, &set_mask_color,
+    &get_mask_lock, &set_mask_lock, &get_mask_roto_bezier, &set_mask_roto_bezier,
+    &duplicate_mask};
 StreamSuite g_stream_suite{{}, &get_new_mask_stream, &dispose_stream, {},
                            &get_new_stream_value, &dispose_stream_value};
 MaskOutlineSuite g_mask_outline_suite{&is_mask_outline_open, &set_mask_outline_open,
@@ -1334,6 +1525,7 @@ bool parse_mask_context_payload(const wchar_t* text) {
     if (item.size() < 5 || (item.compare(0, 2, L"0:") != 0 &&
                             item.compare(0, 2, L"1:") != 0)) return false;
     HostMask mask;
+    mask.id = g_next_mask_id++;
     mask.open = item[0] == L'1';
     std::size_t vertex_offset = 2;
     while (vertex_offset < item.size()) {
@@ -1369,6 +1561,7 @@ bool parse_mask_context_payload(const wchar_t* text) {
     if (mask_offset == payload.size()) return false;
   }
   g_mask_scene = std::move(masks);
+  g_mask_scene.reserve(kMaxHostMasks);
   g_mask_lifetime = {};
   g_mask_scene_id = "request_v4";
   return true;
@@ -1948,6 +2141,8 @@ int wmain(int argc, wchar_t** argv) {
       std::wstring(argv[1]) == L"--smart-pixel-format-registry-request";
   const bool outline_mutation_mode = argc == 5 &&
       std::wstring(argv[1]) == L"--smart-outline-mutation-request";
+  const bool mask_attribute_mode = argc == 5 &&
+      std::wstring(argv[1]) == L"--smart-mask-attribute-request";
   const bool request_mode = mask_request_mode || mask_scene_request_mode || mask_context_request_mode ||
       mask_count_error_mode || mask_count_crash_mode || mask_double_dispose_mode ||
       stream_live_value_dispose_mode || suite_release_without_acquire_mode ||
@@ -1955,6 +2150,7 @@ int wmain(int argc, wchar_t** argv) {
       world_allocation_limit_mode ||
       pixel_format_registry_mode ||
       outline_mutation_mode ||
+      mask_attribute_mode ||
       (argc == 5 && std::wstring(argv[1]) == L"--smart-request");
   if (!request_mode && (argc != 5 || std::wstring(argv[1]) != L"--smart")) return 2;
   g_mask_model_enabled = mask_request_mode || mask_scene_request_mode || mask_context_request_mode ||
@@ -1964,6 +2160,7 @@ int wmain(int argc, wchar_t** argv) {
       world_allocation_limit_mode;
   g_mask_model_enabled = g_mask_model_enabled || pixel_format_registry_mode ||
       outline_mutation_mode;
+  g_mask_model_enabled = g_mask_model_enabled || mask_attribute_mode;
   g_mask_fault = mask_count_error_mode ? MaskFault::CountError :
       mask_count_crash_mode ? MaskFault::CountCrash : MaskFault::None;
   RequestedAssignments requested_parameters;
@@ -2145,6 +2342,7 @@ int wmain(int argc, wchar_t** argv) {
   bool world_fault_observed = false;
   bool pixel_format_fault_observed = false;
   bool outline_fault_observed = false;
+  bool mask_attribute_fault_observed = false;
   std::cerr << "stage:smart_render_end pre_error=" << smart.pre_error
             << " render_error=" << smart.render_error << "\n" << std::flush;
 #endif
@@ -2164,6 +2362,8 @@ int wmain(int argc, wchar_t** argv) {
     pixel_format_fault_observed = verify_pixel_format_registry_rejection();
   if (outline_mutation_mode)
     outline_fault_observed = verify_outline_mutation_rejection();
+  if (mask_attribute_mode)
+    mask_attribute_fault_observed = verify_mask_attribute_and_ownership_rejection();
   #endif
   std::cerr << "stage:global_setdown_end error=" << setdown_error << "\n" << std::flush;
 #ifdef AEXCOMPAT_RENDER_WORKER
@@ -2225,7 +2425,7 @@ int wmain(int argc, wchar_t** argv) {
             << ",\"guard_bytes_intact\":" << (smart.guards_intact ? "true" : "false")
             << ",\"request_mode\":" << (request_mode ? "true" : "false")
             << ",\"mask_scene_id\":\"" << g_mask_scene_id << "\""
-            << ",\"mask_count\":" << g_mask_scene.size()
+            << ",\"mask_count\":" << active_mask_count()
             << ",\"mask_open_count\":" << mask_open_count()
             << ",\"mask_tangent_vertex_count\":" << mask_tangent_vertex_count()
             << ",\"mask_lifetimes_balanced\":" << (mask_lifetimes_balanced() ? "true" : "false")
@@ -2267,6 +2467,9 @@ int wmain(int argc, wchar_t** argv) {
             << ",\"outline_fault_observed\":" << (outline_fault_observed ? "true" : "false")
             << ",\"outline_mutations\":" << g_outline_mutations
             << ",\"invalid_outline_operations\":" << g_invalid_outline_operations
+            << ",\"mask_attribute_fault_observed\":" << (mask_attribute_fault_observed ? "true" : "false")
+            << ",\"mask_mutations\":" << g_mask_mutations
+            << ",\"invalid_mask_operations\":" << g_invalid_mask_operations
             << ",\"requested_parameters\":" << requested_parameters_json(requested_parameters)
             << ",\"requested_amount\":" << static_cast<int32_t>(requested_value(requested_parameters, L"amount"))
             << ",\"requested_direction\":" << static_cast<int32_t>(requested_value(requested_parameters, L"direction"))

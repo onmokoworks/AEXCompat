@@ -41,6 +41,7 @@ class MinihostL2SourceTests(unittest.TestCase):
             "verify_world_allocation_limit_rejected()",
             "verify_pixel_format_registry_rejection()",
             "verify_outline_mutation_rejection()",
+            "verify_mask_attribute_and_ownership_rejection()",
             "kMaxHandleCount = 1024",
             "kMaxHandleBytes = 64 * 1024 * 1024",
         ):

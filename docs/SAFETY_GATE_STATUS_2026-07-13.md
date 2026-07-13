@@ -164,3 +164,11 @@ twice after successful native rendering and recorded eight valid state changes,
 one rejected invalid feather, complete state restoration, and balanced handle
 lifetimes. Its report is schema-valid. Fresh translated-mask and second-mask
 native regressions retained their independent oracle hashes.
+
+AEGP Layer Mask Suite v7 now bounds each scene to eight stable-address mask
+records and tracks Create, Duplicate, Delete, and Dispose ownership explicitly.
+Deleted masks become non-visible tombstones until disposal. The fixed
+`mask_attribute_ownership` gate ran twice after successful native MaskOffset
+rendering, exercised eleven valid attribute/ownership mutations, rejected one
+invalid mode, restored the source scene, and ended with balanced MaskRefs. A
+fresh two-mask regression retained count 2 and its independent oracle hash.

@@ -729,6 +729,16 @@ pub fn execute_smart_suite_fault(
             false,
             true,
         ),
+        "mask_attribute_ownership" => (
+            "--smart-mask-attribute-request",
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            true,
+        ),
         "world_double_dispose" => (
             "--smart-world-double-dispose-request",
             false,
@@ -879,9 +889,15 @@ pub fn execute_smart_suite_fault(
                 && report.get("pre_render_error") == Some(&json!(0))
                 && report.get("smart_render_error") == Some(&json!(0))
                 && report.get("guard_bytes_intact") == Some(&Value::Bool(true))
-                && report.get("outline_fault_observed") == Some(&Value::Bool(true))
-                && report.get("outline_mutations") == Some(&json!(8))
-                && report.get("invalid_outline_operations") == Some(&json!(1))
+                && (if fault_id == "outline_mutation" {
+                    report.get("outline_fault_observed") == Some(&Value::Bool(true))
+                        && report.get("outline_mutations") == Some(&json!(8))
+                        && report.get("invalid_outline_operations") == Some(&json!(1))
+                } else {
+                    report.get("mask_attribute_fault_observed") == Some(&Value::Bool(true))
+                        && report.get("mask_mutations") == Some(&json!(11))
+                        && report.get("invalid_mask_operations") == Some(&json!(1))
+                })
                 && report.get("mask_lifetimes_balanced") == Some(&Value::Bool(true))
         })
     } else {
@@ -927,7 +943,10 @@ pub fn execute_smart_suite_fault(
             "invalid_pixel_format_operations":item.1.get("invalid_pixel_format_operations"),
             "outline_fault_observed":item.1.get("outline_fault_observed"),
             "outline_mutations":item.1.get("outline_mutations"),
-            "invalid_outline_operations":item.1.get("invalid_outline_operations")
+            "invalid_outline_operations":item.1.get("invalid_outline_operations"),
+            "mask_attribute_fault_observed":item.1.get("mask_attribute_fault_observed"),
+            "mask_mutations":item.1.get("mask_mutations"),
+            "invalid_mask_operations":item.1.get("invalid_mask_operations")
         })
     };
     let report = json!({

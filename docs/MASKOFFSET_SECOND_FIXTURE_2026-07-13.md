@@ -146,6 +146,14 @@ rejected, and the complete original host mask is restored afterward. Both
 isolated runs observe eight valid mutations, one rejection, balanced mask
 lifetimes, intact render guards, and the unchanged native output hash.
 
+AEGP Layer Mask Suite v7 now fills all twenty-one slots. The fixed
+`mask_attribute_ownership` gate roundtrips invert, mode, motion blur, falloff,
+color, lock, and roto-Bezier state; rejects an invalid mode; duplicates and
+deletes a mask; then creates and deletes a new mask. Duplicate IDs are distinct,
+all three acquired MaskRefs are disposed, deleted records disappear from
+AE-visible indexing, and the original scene is restored. Both isolated runs
+record eleven valid mutations, one rejection, and balanced lifetimes.
+
 ## Host-Owned Mask Scenes
 
 The mask ABI no longer stores one hard-coded mask, stream, outline, or vertex

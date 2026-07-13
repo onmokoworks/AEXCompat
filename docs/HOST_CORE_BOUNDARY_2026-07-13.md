@@ -150,3 +150,17 @@ corner angles, and tension are constrained to `[0,1]`; segment indices and enum
 values are validated, and negative radius is accepted only for inner feathers.
 The local 40-byte feather ABI has compile-time size and offset checks. Invalid
 mutation returns an AEGP error without changing host state.
+
+AEGP Layer Mask Suite v7 now exposes all twenty-one SDK slots. Per-mask host
+state includes invert, mask mode, motion-blur policy, feather falloff, stable
+unique ID, ARGB floating color, lock, and roto-Bezier flags. All one-byte SDK
+types retain their exact ABI width; modes and enum ranges are validated and
+color components must be finite values in `[0,1]`.
+
+Create and Duplicate return newly owned MaskRefs and participate in the same
+acquire/dispose counters as indexed checkout. A scene reserves its complete
+eight-mask safety budget before any handles are published, preserving object
+addresses. Delete removes a mask from AE-visible indexing but retains a
+tombstone until its MaskRef is disposed, matching the SDK requirement that a
+deleted reference still be disposed. Duplicate copies geometry, feathers, and
+attributes but receives distinct opaque handles and a new unique ID.
