@@ -206,3 +206,16 @@ alpha using round-to-nearest. This model and AE output both had SHA-256
 `9FDE646043AE9B54B38014226F3430E9F5EDF5649321BF406A921B1E454CEB03`
 with zero differing bytes. Alpha alone also matched before adding the host
 output transform, which independently confirms the plug-in's alpha mix.
+
+## Odd Dimensions
+
+`tools/ae_scattermap_odd_probe.jsx` imported a fixed opaque 13x9 RGBA8 image
+and rendered Amount 0 and Amount 5 in AE 25.2. The Amount 0 frame captured the
+host's exact source interpretation; the arbitrary-source oracle then processed
+all 117 pixels at the production world's odd width and height.
+
+The actual Amount 5 output and oracle both had ARGB SHA-256
+`61183666BA5A70E7B1B5A6D2E591EE8A532A3EA152790C90035ABC981CA0B725`,
+with zero differing bytes and maximum channel delta zero. This verifies row
+transitions and the final pixel in production AE rather than relying only on
+the minihost's padded-stride 13x9 coverage.
