@@ -20,11 +20,13 @@ and an independent oracle used to prove compatibility. Profiles are test
 evidence and safety configuration; they do not define generic host semantics.
 Unknown profile ids fail closed and are never interpreted as ScatterMap.
 
-The current ScatterMap profile owns its five observed numeric descriptors and
-ARGB8 oracle. The generic parameter core owns only type/range validation. This
-is the first extracted boundary; existing command names, request shapes,
-minihost render setup, and allowlist readers still contain ScatterMap-specific
-code and must move behind profile/host interfaces incrementally.
+The current ScatterMap profile owns its five observed numeric descriptors,
+defaults, typed render adapter, and ARGB8 oracle. The generic parameter core
+owns descriptor-id lookup and type/range validation. Render request schema v2
+now carries a generic descriptor-id keyed numeric map. Existing command names,
+minihost worker ABI, dispatch route, and allowlist readers still contain
+ScatterMap-specific code and must move behind profile/host interfaces
+incrementally.
 
 ## Completion Rule
 

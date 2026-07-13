@@ -1,4 +1,4 @@
-use crate::host_core::parameter::{Descriptor, PluginProfile, ValueKind};
+use crate::host_core::parameter::{Descriptor, PluginProfile, ValidatedAssignments, ValueKind};
 use sha2::{Digest, Sha256};
 
 pub const PROFILE_ID: &str = "scattermap";
@@ -45,6 +45,25 @@ pub static PROFILE: PluginProfile = PluginProfile {
     id: PROFILE_ID,
     descriptors: &DESCRIPTORS,
 };
+
+#[derive(Clone, Copy)]
+pub struct RenderParameters {
+    pub amount: i32,
+    pub direction: i32,
+    pub seed: i32,
+    pub mix: f64,
+    pub invert_map: i32,
+}
+
+pub fn bind(assignments: &ValidatedAssignments) -> RenderParameters {
+    RenderParameters {
+        amount: assignments.get("amount").copied().unwrap_or(5.0) as i32,
+        direction: assignments.get("direction").copied().unwrap_or(3.0) as i32,
+        seed: assignments.get("seed").copied().unwrap_or(0.0) as i32,
+        mix: assignments.get("mix").copied().unwrap_or(100.0),
+        invert_map: assignments.get("invert_map").copied().unwrap_or(0.0) as i32,
+    }
+}
 
 fn hash_pixel(x: i32, y: i32, seed: i32, channel: i32) -> f32 {
     let mut value = (x as u32)
@@ -150,5 +169,16 @@ mod tests {
                 expected
             );
         }
+    }
+
+    #[test]
+    fn adapter_applies_observed_defaults_after_generic_validation() {
+        let values = ValidatedAssignments::from([("amount", 13.0), ("mix", 25.5)]);
+        let bound = bind(&values);
+        assert_eq!(bound.amount, 13);
+        assert_eq!(bound.direction, 3);
+        assert_eq!(bound.seed, 0);
+        assert_eq!(bound.mix, 25.5);
+        assert_eq!(bound.invert_map, 0);
     }
 }

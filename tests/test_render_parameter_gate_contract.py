@@ -9,11 +9,14 @@ ROOT = Path(__file__).resolve().parents[1]
 class RenderParameterGateContractTests(unittest.TestCase):
     def test_request_is_strict_and_caller_cannot_supply_descriptors(self):
         schema = json.loads((ROOT / "contracts/aex/render_parameter_request.schema.json").read_text(encoding="utf-8"))
+        self.assertEqual(schema["schema_version"], 2)
+        self.assertEqual(schema["properties"]["schema_version"]["const"], 2)
         self.assertFalse(schema["additionalProperties"])
         assignments = schema["properties"]["assignments"]
-        self.assertFalse(assignments["additionalProperties"])
-        self.assertNotIn("valid_min", assignments["properties"])
-        self.assertEqual(len(assignments["properties"]), 5)
+        self.assertEqual(assignments["additionalProperties"], {"type": "number"})
+        self.assertEqual(assignments["maxProperties"], 256)
+        self.assertIn("propertyNames", assignments)
+        self.assertNotIn("properties", assignments)
 
     def test_report_proves_pre_dispatch_rejection(self):
         schema = json.loads((ROOT / "contracts/aex/render_parameter_gate_report.schema.json").read_text(encoding="utf-8"))

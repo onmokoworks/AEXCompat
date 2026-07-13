@@ -1,8 +1,10 @@
-use crate::fixture_profiles::scattermap::argb8_hash;
-use crate::host_core::parameter::{validate, PluginProfile, ValidationError};
+use crate::fixture_profiles::scattermap::{argb8_hash, bind, RenderParameters};
+use crate::host_core::parameter::{validate_assignments, PluginProfile, ValidationError};
 use crate::windows_process::run_isolated;
-use serde::{Deserialize, Serialize};
+use serde::de::{MapAccess, Visitor};
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{json, Value};
+use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Component, Path, PathBuf};
@@ -18,19 +20,40 @@ struct Request {
     assignments: Assignments,
 }
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Assignments {
-    #[serde(rename = "Scatter Amount")]
-    scatter_amount: Option<f64>,
-    #[serde(rename = "Direction")]
-    direction: Option<f64>,
-    #[serde(rename = "Random Seed")]
-    random_seed: Option<f64>,
-    #[serde(rename = "Mix with Original")]
-    mix: Option<f64>,
-    #[serde(rename = "Invert Map")]
-    invert_map: Option<f64>,
+struct Assignments(BTreeMap<String, f64>);
+
+impl<'de> Deserialize<'de> for Assignments {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct AssignmentsVisitor;
+
+        impl<'de> Visitor<'de> for AssignmentsVisitor {
+            type Value = Assignments;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                formatter.write_str("a map of unique parameter ids to numeric values")
+            }
+
+            fn visit_map<M>(self, mut map: M) -> Result<Self::Value, M::Error>
+            where
+                M: MapAccess<'de>,
+            {
+                let mut values = BTreeMap::new();
+                while let Some((id, value)) = map.next_entry::<String, f64>()? {
+                    if values.insert(id.clone(), value).is_some() {
+                        return Err(serde::de::Error::custom(format!(
+                            "duplicate parameter id: {id}"
+                        )));
+                    }
+                }
+                Ok(Assignments(values))
+            }
+        }
+
+        deserializer.deserialize_map(AssignmentsVisitor)
+    }
 }
 
 #[derive(Serialize)]
@@ -45,47 +68,14 @@ struct Report {
     errors: Vec<ValidationError>,
 }
 
-#[derive(Clone, Copy)]
-struct Effective {
-    amount: i32,
-    direction: i32,
-    seed: i32,
-    mix: f64,
-    invert_map: i32,
-}
-
 fn evaluate(
     request: &Request,
     profile: &PluginProfile,
-) -> (Effective, usize, Vec<ValidationError>) {
-    let values = [
-        request.assignments.scatter_amount,
-        request.assignments.direction,
-        request.assignments.random_seed,
-        request.assignments.mix,
-        request.assignments.invert_map,
-    ];
-    let mut errors = Vec::new();
-    let mut assignment_count = 0;
-    for (descriptor, value) in profile.descriptors.iter().copied().zip(values) {
-        if let Some(value) = value {
-            assignment_count += 1;
-            if let Some(error) = validate(descriptor, value) {
-                errors.push(error);
-            }
-        }
-    }
-    (
-        Effective {
-            amount: request.assignments.scatter_amount.unwrap_or(5.0) as i32,
-            direction: request.assignments.direction.unwrap_or(3.0) as i32,
-            seed: request.assignments.random_seed.unwrap_or(0.0) as i32,
-            mix: request.assignments.mix.unwrap_or(100.0),
-            invert_map: request.assignments.invert_map.unwrap_or(0.0) as i32,
-        },
-        assignment_count,
-        errors,
-    )
+) -> io::Result<(RenderParameters, usize, Vec<ValidationError>)> {
+    let assignment_count = request.assignments.0.len();
+    let (validated, errors) =
+        validate_assignments(profile, &request.assignments.0).map_err(invalid)?;
+    Ok((bind(&validated), assignment_count, errors))
 }
 
 fn invalid(message: impl Into<String>) -> io::Error {
@@ -147,12 +137,12 @@ pub fn run(repository: &Path, request_path: &Path, output_path: &Path) -> io::Re
     }
     let request: Request = serde_json::from_slice(&fs::read(request_path)?)
         .map_err(|error| invalid(format!("invalid render request: {error}")))?;
-    if request.schema_version != 1 || request.plugin_id != "scattermap" {
+    if request.schema_version != 2 || request.plugin_id != "scattermap" {
         return Err(invalid("render request identity mismatch"));
     }
     let profile = crate::fixture_profiles::find(&request.plugin_id)
         .ok_or_else(|| invalid("unknown plugin profile"))?;
-    let (_, assignment_count, errors) = evaluate(&request, profile);
+    let (_, assignment_count, errors) = evaluate(&request, profile)?;
     let accepted = errors.is_empty();
     let report = Report {
         schema_version: 1,
@@ -188,12 +178,12 @@ pub fn execute(repository: &Path, request_path: &Path, output_path: &Path) -> io
     }
     let request: Request = serde_json::from_slice(&fs::read(request_path)?)
         .map_err(|error| invalid(format!("invalid render request: {error}")))?;
-    if request.schema_version != 1 || request.plugin_id != "scattermap" {
+    if request.schema_version != 2 || request.plugin_id != "scattermap" {
         return Err(invalid("render request identity mismatch"));
     }
     let profile = crate::fixture_profiles::find(&request.plugin_id)
         .ok_or_else(|| invalid("unknown plugin profile"))?;
-    let (parameters, assignment_count, errors) = evaluate(&request, profile);
+    let (parameters, assignment_count, errors) = evaluate(&request, profile)?;
     if !errors.is_empty() {
         let report = json!({"schema_version":1,"stage":"parameterized_classic_render",
             "plugin_id":"scattermap","assignment_count":assignment_count,"accepted":false,
@@ -294,12 +284,12 @@ pub fn execute_smart(
     }
     let request: Request = serde_json::from_slice(&fs::read(request_path)?)
         .map_err(|error| invalid(format!("invalid render request: {error}")))?;
-    if request.schema_version != 1 || request.plugin_id != "scattermap" {
+    if request.schema_version != 2 || request.plugin_id != "scattermap" {
         return Err(invalid("render request identity mismatch"));
     }
     let profile = crate::fixture_profiles::find(&request.plugin_id)
         .ok_or_else(|| invalid("unknown plugin profile"))?;
-    let (parameters, assignment_count, errors) = evaluate(&request, profile);
+    let (parameters, assignment_count, errors) = evaluate(&request, profile)?;
     if !errors.is_empty() {
         let report = json!({"schema_version":1,"stage":"parameterized_smartfx_render",
             "plugin_id":"scattermap","assignment_count":assignment_count,"accepted":false,
@@ -409,7 +399,7 @@ mod tests {
         let root = repository();
         let request = root.join("target/render-requests/valid.json");
         let output = root.join("target/render-request-results/valid.json");
-        fs::write(&request, br#"{"schema_version":1,"plugin_id":"scattermap","assignments":{"Scatter Amount":500,"Direction":1,"Random Seed":10000,"Mix with Original":0,"Invert Map":1}}"#).unwrap();
+        fs::write(&request, br#"{"schema_version":2,"plugin_id":"scattermap","assignments":{"amount":500,"direction":1,"seed":10000,"mix":0,"invert_map":1}}"#).unwrap();
         assert!(run(&root, &request, &output).unwrap());
         let report: Value = serde_json::from_slice(&fs::read(output).unwrap()).unwrap();
         assert_eq!(report["native_dispatch_permitted"], true);
@@ -424,7 +414,7 @@ mod tests {
         let output = root.join("target/render-request-results/rejected.json");
         fs::write(
             &request,
-            br#"{"schema_version":1,"plugin_id":"scattermap","assignments":{"Direction":4}}"#,
+            br#"{"schema_version":2,"plugin_id":"scattermap","assignments":{"direction":4}}"#,
         )
         .unwrap();
         assert!(!run(&root, &request, &output).unwrap());
@@ -438,8 +428,8 @@ mod tests {
     #[test]
     fn strict_json_rejects_unknown_and_duplicate_assignments() {
         for (name, body) in [
-            ("unknown", br#"{"schema_version":1,"plugin_id":"scattermap","assignments":{"Other":1}}"#.as_slice()),
-            ("duplicate", br#"{"schema_version":1,"plugin_id":"scattermap","assignments":{"Direction":1,"Direction":2}}"#.as_slice()),
+            ("unknown", br#"{"schema_version":2,"plugin_id":"scattermap","assignments":{"other":1}}"#.as_slice()),
+            ("duplicate", br#"{"schema_version":2,"plugin_id":"scattermap","assignments":{"direction":1,"direction":2}}"#.as_slice()),
         ] {
             let root = repository();
             let request = root.join(format!("target/render-requests/{name}.json"));
@@ -470,7 +460,7 @@ mod tests {
         let output = root.join("target/render-request-render-results/rejected.json");
         fs::write(
             &request,
-            br#"{"schema_version":1,"plugin_id":"scattermap","assignments":{"Direction":4}}"#,
+            br#"{"schema_version":2,"plugin_id":"scattermap","assignments":{"direction":4}}"#,
         )
         .unwrap();
         assert!(!execute(&root, &request, &output).unwrap());
@@ -485,7 +475,11 @@ mod tests {
         let root = repository();
         let request = root.join("target/render-requests/rejected-smart-execution.json");
         let output = root.join("target/smart-request-render-results/rejected.json");
-        fs::write(&request, br#"{"schema_version":1,"plugin_id":"scattermap","assignments":{"Mix with Original":100.1}}"#).unwrap();
+        fs::write(
+            &request,
+            br#"{"schema_version":2,"plugin_id":"scattermap","assignments":{"mix":100.1}}"#,
+        )
+        .unwrap();
         assert!(!execute_smart(&root, &request, &output).unwrap());
         let report: Value = serde_json::from_slice(&fs::read(output).unwrap()).unwrap();
         assert_eq!(report["stage"], "parameterized_smartfx_render");

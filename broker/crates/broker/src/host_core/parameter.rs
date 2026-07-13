@@ -1,4 +1,5 @@
 use serde::Serialize;
+use std::collections::BTreeMap;
 
 #[derive(Clone, Copy)]
 pub enum ValueKind {
@@ -19,6 +20,8 @@ pub struct PluginProfile {
     pub id: &'static str,
     pub descriptors: &'static [Descriptor],
 }
+
+pub type ValidatedAssignments = BTreeMap<&'static str, f64>;
 
 #[derive(Debug, Serialize, PartialEq)]
 pub struct ValidationError {
@@ -44,6 +47,31 @@ pub fn validate(descriptor: Descriptor, value: f64) -> Option<ValidationError> {
         valid_min: descriptor.minimum,
         valid_max: descriptor.maximum,
     })
+}
+
+pub fn validate_assignments(
+    profile: &PluginProfile,
+    assignments: &BTreeMap<String, f64>,
+) -> Result<(ValidatedAssignments, Vec<ValidationError>), String> {
+    if assignments.len() > profile.descriptors.len() {
+        return Err("assignment count exceeds descriptor count".into());
+    }
+    let mut validated = BTreeMap::new();
+    let mut errors = Vec::new();
+    for (id, value) in assignments {
+        let descriptor = profile
+            .descriptors
+            .iter()
+            .copied()
+            .find(|descriptor| descriptor.id == id)
+            .ok_or_else(|| format!("unknown parameter id: {id}"))?;
+        if let Some(error) = validate(descriptor, *value) {
+            errors.push(error);
+        } else {
+            validated.insert(descriptor.id, *value);
+        }
+    }
+    Ok((validated, errors))
 }
 
 #[cfg(test)]
@@ -73,6 +101,24 @@ mod tests {
         assert_eq!(
             validate(INTEGER, f64::NAN).unwrap().code,
             "invalid_parameter_value"
+        );
+    }
+
+    #[test]
+    fn assignment_validation_is_descriptor_driven_and_fail_closed() {
+        let profile = PluginProfile {
+            id: "example",
+            descriptors: &[INTEGER],
+        };
+        let valid = BTreeMap::from([("count".to_string(), 3.0)]);
+        let (values, errors) = validate_assignments(&profile, &valid).unwrap();
+        assert_eq!(values.get("count"), Some(&3.0));
+        assert!(errors.is_empty());
+
+        let unknown = BTreeMap::from([("other".to_string(), 1.0)]);
+        assert_eq!(
+            validate_assignments(&profile, &unknown).unwrap_err(),
+            "unknown parameter id: other"
         );
     }
 }
