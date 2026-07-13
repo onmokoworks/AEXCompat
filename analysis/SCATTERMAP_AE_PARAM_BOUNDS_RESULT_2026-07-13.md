@@ -27,3 +27,13 @@ a production property because AE does not enumerate that malformed descriptor.
 This establishes a host-side validation boundary: AEXCompat must reject these
 out-of-range values before dispatch rather than passing them to ScatterMap or
 silently clamping them.
+
+`tools/aex_parameter_value_gate.py` now implements that boundary independently
+of native loading. It consumes the parameter descriptors discovered at L2,
+rejects unknown, non-finite, non-integral, unsupported, malformed, and
+out-of-range assignments fail-closed, and emits an explicit
+`native_dispatch_permitted` decision using create-new output semantics. Its
+conformance matrix covers all ten production-AE rejections and the observed
+valid endpoints. The fixed render broker does not yet accept caller-supplied
+parameter requests, so wiring this decision into a generalized render request
+remains future work rather than an implied capability.

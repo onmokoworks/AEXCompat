@@ -83,3 +83,12 @@ and mix 0% in both classic and SmartFX paths with broker-enforced oracle parity.
 Production AE additionally rejects ten values immediately outside the exposed
 Amount, Direction, Seed, Mix, and Invert ranges without clamping or changing
 the stored property, establishing the pre-dispatch validation contract.
+A reusable descriptor-driven value gate now enforces that contract before any
+native dispatch is permitted. It fails closed for unknown parameters, malformed
+ranges, unsupported types, non-finite values, and fractional integer/choice
+values; generalized caller-supplied render requests are still intentionally
+closed until this decision is wired into the fixed broker boundary.
+The sentinel noninheritance probe now verifies the synthetic Event object's
+operation rather than only its numeric handle. This avoids false positives when
+Windows reuses the parent's handle number for an unrelated child pipe; the
+strengthened isolation scenario passed 20 consecutive runs.

@@ -4,11 +4,12 @@ fn main() {
         .skip_while(|arg| arg != "--sentinel-handle")
         .nth(1)
     {
-        use windows_sys::Win32::Foundation::GetHandleInformation;
+        use windows_sys::Win32::System::Threading::SetEvent;
         let handle =
             raw.parse::<usize>().expect("numeric synthetic sentinel") as *mut core::ffi::c_void;
-        let mut flags = 0;
-        let inherited = unsafe { GetHandleInformation(handle, &mut flags) } != 0;
+        // A numeric handle can be reused for an unrelated child handle. SetEvent
+        // succeeds only when the inherited object is the synthetic event itself.
+        let inherited = unsafe { SetEvent(handle) } != 0;
         println!("sentinel_inherited={inherited}");
     }
     println!("dummy worker completed");

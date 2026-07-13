@@ -1,6 +1,6 @@
 # ScatterMap SmartFX Host Plan (2026-07-13)
 
-Status: **ABI observed; worker implementation next**.
+Status: **implemented and verified for the matrix below**.
 
 The first SmartFX CPU case uses the same 16x12 ARGB8 gradient and default
 parameters as the proven classic case. The worker will:
@@ -19,4 +19,3 @@ parameters as the proven classic case. The worker will:
 8. repeat in a second disposable process and verify guards/determinism.
 
 GPU callbacks and frameworks remain disabled in this first SmartFX case.
-
