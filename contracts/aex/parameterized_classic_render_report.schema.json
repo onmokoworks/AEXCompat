@@ -89,13 +89,25 @@
     "run": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["classification", "render_error", "output_sha256", "guard_bytes_intact", "request_mode"],
+      "required": ["classification", "render_error", "output_sha256", "guard_bytes_intact", "request_mode", "requested_parameters"],
       "properties": {
         "classification": {"enum": ["ok", "nonzero_exit", "crashed", "timeout_killed"]},
         "render_error": {"type": ["integer", "null"]},
         "output_sha256": {"type": ["string", "null"]},
         "guard_bytes_intact": {"type": ["boolean", "null"]},
-        "request_mode": {"type": ["boolean", "null"]}
+        "request_mode": {"type": ["boolean", "null"]},
+        "requested_parameters": {"type": ["array", "null"], "minItems": 1, "maxItems": 64, "items": {"$ref": "#/$defs/requested_parameter"}}
+      }
+    },
+    "requested_parameter": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "slot", "kind", "value"],
+      "properties": {
+        "id": {"type": "string", "pattern": "^[a-z][a-z0-9_]{0,63}$"},
+        "slot": {"type": "integer", "minimum": 1, "maximum": 64},
+        "kind": {"enum": ["integer", "float"]},
+        "value": {"type": "number"}
       }
     },
     "success_run": {
@@ -107,7 +119,8 @@
             "render_error": {"const": 0},
             "output_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
             "guard_bytes_intact": {"const": true},
-            "request_mode": {"const": true}
+            "request_mode": {"const": true},
+            "requested_parameters": {"type": "array", "minItems": 1}
           }
         }
       ]

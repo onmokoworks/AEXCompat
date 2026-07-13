@@ -3,7 +3,7 @@ use crate::fixture_profiles::{ParameterizedRenderAdapter, RegisteredProfile};
 use crate::host_core::descriptor_manifest::{load as load_manifest, LoadedManifest};
 use crate::host_core::parameter::{
     apply_defaults, encode_worker_payload, validate_assignments, PluginProfile,
-    ValidatedAssignments, ValidationError,
+    ValidatedAssignments, ValidationError, ValueKind,
 };
 use crate::windows_process::run_isolated;
 use serde::de::{MapAccess, Visitor};
@@ -103,6 +103,31 @@ fn descriptors(
 
 fn invalid(message: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message.into())
+}
+
+fn worker_echo_matches(
+    report: &Value,
+    profile: &PluginProfile,
+    effective: &ValidatedAssignments,
+) -> bool {
+    let Some(items) = report.get("requested_parameters").and_then(Value::as_array) else {
+        return false;
+    };
+    items.len() == profile.descriptors.len()
+        && items
+            .iter()
+            .zip(&profile.descriptors)
+            .all(|(item, descriptor)| {
+                let expected_kind = match descriptor.kind {
+                    ValueKind::Integer => "integer",
+                    ValueKind::Float => "float",
+                };
+                item.get("id").and_then(Value::as_str) == Some(descriptor.id.as_str())
+                    && item.get("slot").and_then(Value::as_u64) == Some(descriptor.slot as u64)
+                    && item.get("kind").and_then(Value::as_str) == Some(expected_kind)
+                    && item.get("value").and_then(Value::as_f64)
+                        == effective.get(&descriptor.id).copied()
+            })
 }
 
 fn resolve_inside(
@@ -256,6 +281,7 @@ pub fn execute(repository: &Path, request_path: &Path, output_path: &Path) -> io
             && report.get("request_mode") == Some(&Value::Bool(true))
             && report.get("render_error") == Some(&json!(0))
             && report.get("guard_bytes_intact") == Some(&Value::Bool(true))
+            && worker_echo_matches(report, &manifest.profile, &effective)
             && report.get("requested_amount") == Some(&json!(parameters.amount))
             && report.get("requested_direction") == Some(&json!(parameters.direction))
             && report.get("requested_seed") == Some(&json!(parameters.seed))
@@ -275,7 +301,8 @@ pub fn execute(repository: &Path, request_path: &Path, output_path: &Path) -> io
         json!({
         "classification":item.0.as_str(),"render_error":item.1.get("render_error"),
         "output_sha256":item.1.get("output_sha256"),"guard_bytes_intact":item.1.get("guard_bytes_intact"),
-        "request_mode":item.1.get("request_mode")})
+        "request_mode":item.1.get("request_mode"),
+        "requested_parameters":item.1.get("requested_parameters")})
     };
     let report = json!({"schema_version":1,"stage":"parameterized_classic_render",
         "plugin_id":request.plugin_id,"receipt_id":approved.receipt_id,
@@ -368,6 +395,7 @@ pub fn execute_smart(
             && report.get("smart_render_error") == Some(&json!(0))
             && report.get("result_rects_valid") == Some(&Value::Bool(true))
             && report.get("guard_bytes_intact") == Some(&Value::Bool(true))
+            && worker_echo_matches(report, &manifest.profile, &effective)
             && report.get("requested_amount") == Some(&json!(parameters.amount))
             && report.get("requested_direction") == Some(&json!(parameters.direction))
             && report.get("requested_seed") == Some(&json!(parameters.seed))
@@ -388,7 +416,8 @@ pub fn execute_smart(
         "classification":item.0.as_str(),"pre_render_error":item.1.get("pre_render_error"),
         "smart_render_error":item.1.get("smart_render_error"),"output_sha256":item.1.get("output_sha256"),
         "result_rects_valid":item.1.get("result_rects_valid"),
-        "guard_bytes_intact":item.1.get("guard_bytes_intact"),"request_mode":item.1.get("request_mode")})
+        "guard_bytes_intact":item.1.get("guard_bytes_intact"),"request_mode":item.1.get("request_mode"),
+        "requested_parameters":item.1.get("requested_parameters")})
     };
     let report = json!({"schema_version":1,"stage":"parameterized_smartfx_render",
         "plugin_id":request.plugin_id,"receipt_id":approved.receipt_id,
@@ -431,6 +460,32 @@ mod tests {
         )
         .unwrap();
         root
+    }
+
+    #[test]
+    fn generic_worker_echo_is_descriptor_order_and_value_bound() {
+        let profile = PluginProfile {
+            id: "example".into(),
+            descriptors: vec![crate::host_core::parameter::Descriptor {
+                id: "radius".into(),
+                display_name: "Radius".into(),
+                slot: 3,
+                observed_type: 10,
+                minimum: 0.0,
+                maximum: 10.0,
+                default_value: 2.5,
+                kind: ValueKind::Float,
+            }],
+        };
+        let effective = ValidatedAssignments::from([("radius".into(), 2.5)]);
+        let valid = json!({"requested_parameters":[
+            {"id":"radius","slot":3,"kind":"float","value":2.5}
+        ]});
+        assert!(worker_echo_matches(&valid, &profile, &effective));
+        let drifted = json!({"requested_parameters":[
+            {"id":"radius","slot":4,"kind":"float","value":2.5}
+        ]});
+        assert!(!worker_echo_matches(&drifted, &profile, &effective));
     }
 
     #[test]

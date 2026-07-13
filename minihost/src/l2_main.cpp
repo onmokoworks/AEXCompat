@@ -495,6 +495,29 @@ double requested_value(const RequestedAssignments& requested, const wchar_t* id)
   });
   return found == requested.end() ? 0.0 : found->value;
 }
+
+std::string requested_parameters_json(const RequestedAssignments& requested) {
+  std::ostringstream output;
+  output << "[";
+  for (std::size_t i = 0; i < requested.size(); ++i) {
+    if (i != 0) output << ",";
+    const auto& assignment = requested[i];
+    std::string id;
+    id.reserve(assignment.id.size());
+    for (const wchar_t character : assignment.id) id.push_back(static_cast<char>(character));
+    output << "{\"id\":\"" << id << "\",\"slot\":" << assignment.index
+           << ",\"kind\":\""
+           << (assignment.kind == RequestedKind::Integer ? "integer" : "float")
+           << "\",\"value\":";
+    if (assignment.kind == RequestedKind::Integer)
+      output << static_cast<int32_t>(assignment.value);
+    else
+      output << std::setprecision(17) << assignment.value;
+    output << "}";
+  }
+  output << "]";
+  return output.str();
+}
 #endif
 
 #ifdef AEXCOMPAT_RENDER_WORKER
@@ -1052,6 +1075,7 @@ int wmain(int argc, wchar_t** argv) {
             << ",\"thread_1_guards_intact\":" << (thread_guards[0] ? "true" : "false")
             << ",\"thread_2_guards_intact\":" << (thread_guards[1] ? "true" : "false")
             << ",\"request_mode\":" << (request_mode ? "true" : "false")
+            << ",\"requested_parameters\":" << requested_parameters_json(requested_parameters)
             << ",\"requested_amount\":" << static_cast<int32_t>(requested_value(requested_parameters, L"amount"))
             << ",\"requested_direction\":" << static_cast<int32_t>(requested_value(requested_parameters, L"direction"))
             << ",\"requested_seed\":" << static_cast<int32_t>(requested_value(requested_parameters, L"seed"))
@@ -1088,6 +1112,7 @@ int wmain(int argc, wchar_t** argv) {
             << smart.output_hash << "\",\"result_rects_valid\":" << (smart.rects_valid ? "true" : "false")
             << ",\"guard_bytes_intact\":" << (smart.guards_intact ? "true" : "false")
             << ",\"request_mode\":" << (request_mode ? "true" : "false")
+            << ",\"requested_parameters\":" << requested_parameters_json(requested_parameters)
             << ",\"requested_amount\":" << static_cast<int32_t>(requested_value(requested_parameters, L"amount"))
             << ",\"requested_direction\":" << static_cast<int32_t>(requested_value(requested_parameters, L"direction"))
             << ",\"requested_seed\":" << static_cast<int32_t>(requested_value(requested_parameters, L"seed"))

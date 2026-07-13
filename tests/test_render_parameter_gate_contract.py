@@ -61,6 +61,7 @@ class RenderParameterGateContractTests(unittest.TestCase):
                        "validate_requested_assignments", "apply_requested_assignments",
                        "initialize_parameter_definitions",
                        "g_params[static_cast<std::size_t>(assignment.index - 1)]",
+                       "requested_parameters_json", "requested_parameters",
                        "requested_amount", "requested_direction", "requested_seed",
                        "requested_mix", "requested_invert_map", "std::setprecision(17)"):
             self.assertIn(marker, source)
@@ -71,7 +72,7 @@ class RenderParameterGateContractTests(unittest.TestCase):
         self.assertFalse(schema["additionalProperties"])
         run = schema["$defs"]["run"]
         for marker in ("pre_render_error", "smart_render_error", "result_rects_valid",
-                       "guard_bytes_intact", "request_mode"):
+                       "guard_bytes_intact", "request_mode", "requested_parameters"):
             self.assertIn(marker, run["required"])
         main = (ROOT / "broker/crates/broker/src/main.rs").read_text(encoding="utf-8")
         route = (ROOT / "broker/crates/broker/src/render_request.rs").read_text(encoding="utf-8")
