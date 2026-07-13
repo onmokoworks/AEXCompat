@@ -5,7 +5,7 @@ from pathlib import Path
 from PIL import Image
 
 from tools.ae_scattermap_render_verify import rgba_to_argb, verify
-from tools.scattermap_reference_oracle import render_default
+from tools.scattermap_reference_oracle import render_case, render_default
 
 
 def argb_to_rgba(argb: bytes) -> bytes:
@@ -40,6 +40,14 @@ class AeScatterMapRenderVerifyTests(unittest.TestCase):
         self.assertFalse(report["pixel_match"])
         self.assertEqual(report["different_bytes"], 1)
         self.assertEqual(report["different_pixels"], 1)
+
+    def test_identity_case_matches_source(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "identity.png"
+            Image.frombytes("RGBA", (16, 12), argb_to_rgba(render_case(amount=0))).save(path)
+            report = verify(path, "identity")
+        self.assertTrue(report["pixel_match"])
+        self.assertFalse(report["non_identity_output"])
 
 
 if __name__ == "__main__":

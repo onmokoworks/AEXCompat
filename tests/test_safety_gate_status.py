@@ -9,7 +9,7 @@ STATUS = ROOT / "docs" / "SAFETY_GATE_STATUS_2026-07-13.md"
 class SafetyGateStatusTests(unittest.TestCase):
     def test_status_records_ae_reference_parity_and_prior_contracts(self):
         text = STATUS.read_text(encoding="utf-8")
-        self.assertIn("gate_state: target_ae_reference_default_argb8_parity_verified", text)
+        self.assertIn("gate_state: target_ae_reference_scalar_argb8_matrix_verified", text)
         self.assertIn("fixed-fixture controls and re-audit", text)
         self.assertIn("SmartFX PreRender/Render", text)
         self.assertIn("GPU lifecycle", text)
@@ -18,6 +18,8 @@ class SafetyGateStatusTests(unittest.TestCase):
         self.assertIn("42/2/24", text)
         self.assertIn("H-4 default reference capture is satisfied", text)
         self.assertIn("zero byte or pixel differences", text)
+        self.assertIn("amount 0 and 500", text)
+        self.assertIn("Connected map", text)
 
     def test_all_gate_items_are_explicit(self):
         text = STATUS.read_text(encoding="utf-8")

@@ -5,7 +5,7 @@ authorization. Each stage still requires fixed-fixture controls and re-audit.
 
 ## Current Result
 
-`gate_state: target_ae_reference_default_argb8_parity_verified`
+`gate_state: target_ae_reference_scalar_argb8_matrix_verified`
 
 | Gate | Status | Evidence and remaining work |
 | --- | --- | --- |
@@ -42,6 +42,9 @@ trace: the fixed fixture was discovered, added to a temporary layer, and
 rendered from a fixed 16x12 input. PNG RGBA was normalized to PF ARGB8 and
 matched the independent oracle exactly with zero byte or pixel differences.
 See `AE_REFERENCE_TRACE_2026-07-13.md`.
+The production-host matrix additionally matches for amount 0 and 500,
+horizontal and vertical directions, seed 10000, and mix 0. Connected map,
+Invert Map, and Repeat Edge production-host evidence remain open.
 SmartFX PreRender checkout also receives a valid time basis; a nonzero
 `42/2/24` context was observed exactly while preserving deterministic output.
 The ARGB8 matrix also covers valid parameter boundaries amount 500, seed 10000,

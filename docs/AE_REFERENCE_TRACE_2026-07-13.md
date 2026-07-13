@@ -58,3 +58,24 @@ follow-up item rather than being inferred away.
 strict comparison. H-4 default-render capture is complete. Non-default AE
 parameter cases and the Repeat Edge enumeration discrepancy remain broader
 compatibility work.
+
+## Parameter Matrix
+
+`tools/ae_scattermap_matrix_probe.jsx` rendered seven cases in one AE 25.2
+session. Every normalized ARGB8 output matched `render_case` with zero differing
+bytes and zero differing pixels:
+
+| Case | ARGB8 SHA-256 | Expected behavior |
+| --- | --- | --- |
+| default | `19CEA826F356E0D94BC29FF10CB9E7F5A770FE5B288CB3D190A58372353102D9` | non-identity |
+| identity (amount 0) | `863D238F52F81ABA4017C198AF4D748CB57FE369E6216FDBACF45FD94037ECF7` | source identity |
+| horizontal | `10A2A95A0AE27CA5FE3A6F6F92EEDDFE611885FA72AFA0902A24E8BEA5D2198F` | non-identity |
+| vertical | `6D6198506967E18F619E57CF79E65C52C8F8C65C0EF89710344AF2F1045E091C` | non-identity |
+| amount 500 | `8E535435C74A9521D816A3B836DB578A2AE942EFBD80A55447B97610DC26B794` | non-identity |
+| seed 10000 | `E31BA13264E801DE7CCCE4D6863215E54C0DC0C7FF4A918E45EE75BC59E817EC` | non-identity |
+| mix 0 | `863D238F52F81ABA4017C198AF4D748CB57FE369E6216FDBACF45FD94037ECF7` | source identity |
+
+This closes AE reference parity for every script-visible scalar parameter at
+its default plus representative direction and boundary values. Connected map,
+Invert Map, and the non-enumerated Repeat Edge behavior still need production
+host matrix evidence.
