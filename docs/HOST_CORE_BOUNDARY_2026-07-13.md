@@ -68,6 +68,8 @@ Outline suites with an independent pixel oracle. The host implements the
 suite dispatch depends only on suite name/version and opaque host handles.
 Classic render remains explicitly unsupported and is rejected before native
 launch. Descriptor/request/worker v3 now carries strict ARGB8 Color values and
-MaskOffset's custom Fill Inside output passes an independent pixel oracle. This
-is evidence toward item 5, not completion of it: configurable mask scenes and
-render-time failure isolation remain pending.
+MaskOffset's custom Fill Inside output passes an independent pixel oracle.
+The fixed suite-fault route additionally proves mask callback error fallback and
+Access Violation isolation without accepting arbitrary fault modes or native
+paths. This is evidence toward item 5, not completion of it: configurable mask
+scenes and wider selector/suite coverage remain pending.

@@ -56,6 +56,21 @@ fn main() {
         };
         std::process::exit(if passed { 0 } else { 3 });
     }
+    if args.len() == 5 && args[1] == "smart-suite-fault" {
+        let passed = match aexcompat_broker::render_request::execute_smart_suite_fault(
+            repository,
+            &args[2],
+            &args[3],
+            &PathBuf::from(&args[4]),
+        ) {
+            Ok(passed) => passed,
+            Err(_) => {
+                eprintln!("SmartFX suite fault conformance failed");
+                std::process::exit(2);
+            }
+        };
+        std::process::exit(if passed { 0 } else { 3 });
+    }
     if args.len() == 4 && (args[1] == "l1" || args[1] == "l2") {
         let output = PathBuf::from(&args[3]);
         if !args[3].ends_with(".json") {

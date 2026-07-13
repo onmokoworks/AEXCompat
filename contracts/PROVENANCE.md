@@ -61,3 +61,8 @@ SDK declarations. Added 2026-07-13 for the cleanroom L1 worker.
 `aex/classic_render_report.schema.json` is an AEXCompat-authored staged render
 evidence contract. It requires deterministic double execution, pixel hashes,
 buffer guards, and broker survival. It contains no Adobe SDK declarations.
+
+`aex/smartfx_suite_fault_report.schema.json` is an AEXCompat-authored fault
+conformance contract. It records only fixed fault ids, process classifications,
+pixel hashes, guard status, and broker survival; it contains no Adobe SDK
+declarations or native payloads.

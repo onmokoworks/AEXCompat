@@ -3,10 +3,30 @@ use sha2::{Digest, Sha256};
 
 pub const PROFILE_ID: &str = "maskoffset";
 
-pub fn rectangle_mask_argb8_hash(assignments: &ValidatedAssignments) -> String {
+fn source_argb8() -> Vec<u8> {
     const WIDTH: i32 = 16;
     const HEIGHT: i32 = 12;
     let mut source = vec![0u8; (WIDTH * HEIGHT * 4) as usize];
+    for y in 0..HEIGHT {
+        for x in 0..WIDTH {
+            let offset = ((y * WIDTH + x) * 4) as usize;
+            source[offset] = 255;
+            source[offset + 1] = (x * 255 / (WIDTH - 1)) as u8;
+            source[offset + 2] = (y * 255 / (HEIGHT - 1)) as u8;
+            source[offset + 3] = ((x + y) * 255 / (WIDTH + HEIGHT - 2)) as u8;
+        }
+    }
+    source
+}
+
+pub fn source_argb8_hash() -> String {
+    format!("{:X}", Sha256::digest(source_argb8()))
+}
+
+pub fn rectangle_mask_argb8_hash(assignments: &ValidatedAssignments) -> String {
+    const WIDTH: i32 = 16;
+    const HEIGHT: i32 = 12;
+    let mut source = source_argb8();
     let mode = assignments
         .get("mode")
         .and_then(|value| value.numeric())
@@ -28,10 +48,6 @@ pub fn rectangle_mask_argb8_hash(assignments: &ValidatedAssignments) -> String {
     for y in 0..HEIGHT {
         for x in 0..WIDTH {
             let offset = ((y * WIDTH + x) * 4) as usize;
-            source[offset] = 255;
-            source[offset + 1] = (x * 255 / (WIDTH - 1)) as u8;
-            source[offset + 2] = (y * 255 / (HEIGHT - 1)) as u8;
-            source[offset + 3] = ((x + y) * 255 / (WIDTH + HEIGHT - 2)) as u8;
             let mut inside = (4..12).contains(&x) && (3..9).contains(&y);
             if invert {
                 inside = !inside;
@@ -62,6 +78,14 @@ pub fn rectangle_mask_argb8_hash(assignments: &ValidatedAssignments) -> String {
 mod tests {
     use super::*;
     use crate::host_core::parameter::ParameterValue;
+
+    #[test]
+    fn source_oracle_is_fixed() {
+        assert_eq!(
+            source_argb8_hash(),
+            "863D238F52F81ABA4017C198AF4D748CB57FE369E6216FDBACF45FD94037ECF7"
+        );
+    }
 
     #[test]
     fn rectangle_mask_oracle_is_fixed() {

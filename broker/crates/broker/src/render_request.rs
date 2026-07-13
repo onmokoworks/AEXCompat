@@ -1,4 +1,4 @@
-use crate::fixture_profiles::maskoffset::rectangle_mask_argb8_hash;
+use crate::fixture_profiles::maskoffset::{rectangle_mask_argb8_hash, source_argb8_hash};
 use crate::fixture_profiles::scattermap::expected_argb8_hash;
 use crate::fixture_profiles::{ParameterizedRenderAdapter, RegisteredProfile};
 use crate::host_core::descriptor_manifest::{load as load_manifest, LoadedManifest};
@@ -433,6 +433,98 @@ pub fn execute_smart(
     Ok(passed)
 }
 
+pub fn execute_smart_suite_fault(
+    repository: &Path,
+    plugin_id: &str,
+    fault_id: &str,
+    output_path: &Path,
+) -> io::Result<bool> {
+    let (worker_mode, expect_crash) = match fault_id {
+        "mask_count_error" => ("--smart-mask-count-error-request", false),
+        "mask_count_crash" => ("--smart-mask-count-crash-request", true),
+        _ => return Err(invalid("unknown fixed suite fault")),
+    };
+    let output_path = resolve_inside(
+        repository,
+        output_path,
+        "target/smart-suite-fault-results",
+        true,
+    )?;
+    let profile = crate::fixture_profiles::find(plugin_id)
+        .ok_or_else(|| invalid("unknown plugin profile"))?;
+    let worker_spec = profile
+        .smart_worker
+        .filter(|spec| spec.request_mode == "--smart-mask-request")
+        .ok_or_else(|| invalid("profile has no approved mask-suite fault capability"))?;
+    let manifest = descriptors(repository, plugin_id, profile)?;
+    let effective = apply_defaults(&manifest.profile, &ValidatedAssignments::new());
+    let approved = crate::smart::approved_entry(repository, plugin_id)?;
+    if !manifest
+        .plugin_sha256
+        .eq_ignore_ascii_case(&approved.sha256)
+    {
+        return Err(invalid("descriptor manifest plugin digest mismatch"));
+    }
+    let worker = repository.join(worker_spec.executable);
+    let args = [
+        worker_mode.to_string(),
+        approved.plugin_path.to_string_lossy().into_owned(),
+        approved.sha256.to_ascii_lowercase(),
+        encode_worker_payload(&manifest.profile, &effective).map_err(invalid)?,
+    ];
+    let mut runs = Vec::new();
+    for _ in 0..2 {
+        let isolated = run_isolated(&worker, &args, Duration::from_millis(approved.timeout_ms))?;
+        let report: Value = serde_json::from_str(isolated.stdout.trim())
+            .unwrap_or_else(|_| json!({"status":"worker_report_unavailable"}));
+        runs.push((isolated.classification, report));
+    }
+    let fallback_hash = source_argb8_hash();
+    let fallback_valid = |classification: crate::ExitClassification, report: &Value| {
+        classification.as_str() == "ok"
+            && report.get("pre_render_error") == Some(&json!(0))
+            && report.get("smart_render_error") == Some(&json!(0))
+            && report.get("guard_bytes_intact") == Some(&Value::Bool(true))
+            && worker_echo_matches(report, &manifest.profile, &effective)
+            && report
+                .get("output_sha256")
+                .and_then(Value::as_str)
+                .is_some_and(|hash| hash.eq_ignore_ascii_case(&fallback_hash))
+    };
+    let passed = if expect_crash {
+        runs.iter()
+            .all(|(classification, _)| classification.as_str() == "crashed")
+    } else {
+        runs.iter()
+            .all(|(classification, report)| fallback_valid(*classification, report))
+    };
+    let summarize = |item: &(crate::ExitClassification, Value)| {
+        json!({
+            "classification":item.0.as_str(),
+            "pre_render_error":item.1.get("pre_render_error"),
+            "smart_render_error":item.1.get("smart_render_error"),
+            "output_sha256":item.1.get("output_sha256"),
+            "guard_bytes_intact":item.1.get("guard_bytes_intact")
+        })
+    };
+    let report = json!({
+        "schema_version":1,"stage":"smartfx_suite_fault","plugin_id":plugin_id,
+        "receipt_id":approved.receipt_id,"fixture_sha256":approved.sha256.to_ascii_uppercase(),
+        "fault_id":fault_id,"expected_outcome":if expect_crash { "worker_crash" } else { "plugin_fallback" },
+        "expected_fallback_sha256":if expect_crash { Value::Null } else { json!(fallback_hash) },
+        "run_1":summarize(&runs[0]),"run_2":summarize(&runs[1]),
+        "broker_survived":true,"passed":passed
+    });
+    let mut output = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(output_path)?;
+    serde_json::to_writer_pretty(&mut output, &report)
+        .map_err(|error| invalid(error.to_string()))?;
+    output.write_all(b"\n")?;
+    Ok(passed)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -530,6 +622,15 @@ mod tests {
         let report: Value = serde_json::from_slice(&fs::read(&output).unwrap()).unwrap();
         assert_eq!(report["accepted"], true);
         assert_eq!(report["native_process_started"], false);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn unknown_suite_fault_fails_before_output_or_native_lookup() {
+        let root = repository();
+        let output = root.join("target/smart-suite-fault-results/unknown.json");
+        assert!(execute_smart_suite_fault(&root, "maskoffset", "arbitrary", &output).is_err());
+        assert!(!output.exists());
         fs::remove_dir_all(root).unwrap();
     }
 

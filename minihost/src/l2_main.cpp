@@ -110,6 +110,8 @@ std::array<int32_t, 4> g_map_checkout_request{-1, -1, -1, -1};
 std::string g_smart_pixel_format = "argb8";
 int32_t g_smart_rowbytes = 64;
 bool g_mask_model_enabled = false;
+enum class MaskFault { None, CountError, CountCrash };
+MaskFault g_mask_fault = MaskFault::None;
 
 struct OpaqueHostObject { uint32_t tag; };
 OpaqueHostObject g_effect{0x45464658};
@@ -237,6 +239,10 @@ int32_t __cdecl get_effect_layer(void* effect, void** layer) {
 
 int32_t __cdecl get_layer_num_masks(void* layer, int32_t* count) {
   if (layer != &g_layer || !count) return 4;
+  if (g_mask_fault == MaskFault::CountCrash) {
+    RaiseException(EXCEPTION_ACCESS_VIOLATION, 0, 0, nullptr);
+  }
+  if (g_mask_fault == MaskFault::CountError) return 4;
   *count = 1;
   return 0;
 }
@@ -1111,6 +1117,7 @@ void report(const char* status, int32_t global_error, int32_t params_error,
 }  // namespace
 
 int wmain(int argc, wchar_t** argv) {
+  SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX);
 #ifdef AEXCOMPAT_RENDER_WORKER
   const bool request_mode = argc == 5 && std::wstring(argv[1]) == L"--render-request";
   if (!request_mode && (argc != 5 || std::wstring(argv[1]) != L"--render")) return 2;
@@ -1118,10 +1125,16 @@ int wmain(int argc, wchar_t** argv) {
   if (request_mode && !parse_parameter_payload(argv[4], requested_parameters)) return 3;
 #elif defined(AEXCOMPAT_SMART_WORKER)
   const bool mask_request_mode = argc == 5 && std::wstring(argv[1]) == L"--smart-mask-request";
-  const bool request_mode = mask_request_mode ||
+  const bool mask_count_error_mode = argc == 5 &&
+      std::wstring(argv[1]) == L"--smart-mask-count-error-request";
+  const bool mask_count_crash_mode = argc == 5 &&
+      std::wstring(argv[1]) == L"--smart-mask-count-crash-request";
+  const bool request_mode = mask_request_mode || mask_count_error_mode || mask_count_crash_mode ||
       (argc == 5 && std::wstring(argv[1]) == L"--smart-request");
   if (!request_mode && (argc != 5 || std::wstring(argv[1]) != L"--smart")) return 2;
-  g_mask_model_enabled = mask_request_mode;
+  g_mask_model_enabled = mask_request_mode || mask_count_error_mode || mask_count_crash_mode;
+  g_mask_fault = mask_count_error_mode ? MaskFault::CountError :
+      mask_count_crash_mode ? MaskFault::CountCrash : MaskFault::None;
   RequestedAssignments requested_parameters;
   if (request_mode && !parse_parameter_payload(argv[4], requested_parameters)) return 3;
 #else

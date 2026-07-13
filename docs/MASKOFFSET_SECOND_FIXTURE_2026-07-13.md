@@ -47,8 +47,8 @@ worker payload v3 add typed `color` / `argb8` values without weakening v2.
 
 The `maskoffset` render profile advertises SmartFX only. A classic render request
 fails before allowlist access, worker launch, or report creation. The isolated
-SmartFX requests applied all numeric descriptors and Fill Color twice. Both runs completed
-Smart PreRender and Smart Render with zero errors, preserved guard bytes, echoed
+SmartFX requests applied all numeric descriptors and Fill Color twice. Both
+runs completed Smart PreRender and Smart Render with zero errors, preserved guard bytes, echoed
 the exact descriptor id/slot/kind/value sequence, and produced the same output.
 
 The `--smart-mask-request` worker mode publishes Utility v13, PF Interface v1,
@@ -75,10 +75,27 @@ Color value, proving that the pixel result came through `PF_ColorDef.value`.
 The older `--smart-request` mode remains mask-free and still exercises the
 empty-polygon fallback, allowing the two host capability states to be compared.
 
+## Suite Failure Isolation
+
+The `smart-suite-fault` broker route accepts only a registered mask-capable
+profile and two fixed fault ids. It reuses the reviewed AEX identity, allowlist,
+timeout, Job Object, bounded capture, parameter manifest, and create-new output
+boundary; callers cannot provide a native path or arbitrary worker mode.
+
+With `mask_count_error`, the Layer Mask Suite count callback returned an AE
+error. MaskOffset completed both selectors with zero errors and followed its
+empty-polygon fallback. Both runs preserved guards and matched the independent
+input-copy hash `863D238F52F81ABA4017C198AF4D748CB57FE369E6216FDBACF45FD94037ECF7`.
+
+With `mask_count_crash`, the same fixed callback raised an Access Violation.
+Both workers were classified `crashed`; no worker report was trusted, and the
+broker survived both runs. The fault is compiled into the isolated test worker
+and cannot be selected through a normal render request. Worker startup disables
+Windows GP-fault UI so unattended conformance cannot stall in an error modal.
+
 ## Remaining Work
 
 This evidence does not claim complete MaskOffset render compatibility. Completion
-still requires configurable/multiple/open/Bezier mask scenes,
-expansion/rounding/feather/invert oracle coverage, and dedicated
-mask-suite error/crash isolation cases. Those additions must not introduce
-MaskOffset identity or algorithms into `host_core`.
+still requires configurable/multiple/open/Bezier mask scenes and
+expansion/rounding/feather/invert oracle coverage. Those additions must not
+introduce MaskOffset identity or algorithms into `host_core`.

@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://aexcompat.local/contracts/aex/smartfx_suite_fault_report.schema.json",
+  "schema_name": "AEXCompat SmartFX suite fault conformance report schema",
+  "schema_version": 1,
+  "title": "AEXCompat SmartFX suite fault conformance report",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "stage", "plugin_id", "receipt_id", "fixture_sha256", "fault_id", "expected_outcome", "expected_fallback_sha256", "run_1", "run_2", "broker_survived", "passed"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "stage": {"const": "smartfx_suite_fault"},
+    "plugin_id": {"type": "string", "pattern": "^[a-z][a-z0-9_-]{0,63}$"},
+    "receipt_id": {"type": "string", "minLength": 1, "maxLength": 128},
+    "fixture_sha256": {"type": "string", "pattern": "^[0-9A-F]{64}$"},
+    "fault_id": {"enum": ["mask_count_error", "mask_count_crash"]},
+    "expected_outcome": {"enum": ["plugin_fallback", "worker_crash"]},
+    "expected_fallback_sha256": {"type": ["string", "null"], "pattern": "^[0-9A-F]{64}$"},
+    "run_1": {"$ref": "#/$defs/run"},
+    "run_2": {"$ref": "#/$defs/run"},
+    "broker_survived": {"const": true},
+    "passed": {"type": "boolean"}
+  },
+  "$defs": {
+    "run": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["classification", "pre_render_error", "smart_render_error", "output_sha256", "guard_bytes_intact"],
+      "properties": {
+        "classification": {"enum": ["ok", "nonzero_exit", "crashed", "timeout_killed"]},
+        "pre_render_error": {"type": ["integer", "null"]},
+        "smart_render_error": {"type": ["integer", "null"]},
+        "output_sha256": {"type": ["string", "null"]},
+        "guard_bytes_intact": {"type": ["boolean", "null"]}
+      }
+    }
+  }
+}
