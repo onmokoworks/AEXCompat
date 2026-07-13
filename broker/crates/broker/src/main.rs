@@ -34,8 +34,25 @@ fn main() {
     }
     if args[1] == "smart-scattermap" {
         let worker = repository.join("target/minihost-build/aex_smart_worker.exe");
-        let passed = aexcompat_broker::smart::run(repository, &worker, "scattermap", &PathBuf::from(&args[2]))
+        let passed = aexcompat_broker::smart::run(repository, &worker, "scattermap", "default", &PathBuf::from(&args[2]))
             .expect("SmartFX broker run");
+        std::process::exit(if passed { 0 } else { 1 });
+    }
+    let smart_case = match args[1].as_str() {
+        "smart-identity-scattermap" => Some("identity"),
+        "smart-horizontal-scattermap" => Some("horizontal"),
+        "smart-vertical-no-repeat-scattermap" => Some("vertical_no_repeat"),
+        "smart-mixed-scattermap" => Some("mixed"),
+        "smart-odd-dimensions-scattermap" => Some("odd_dimensions"),
+        "smart-padded-stride-scattermap" => Some("padded_stride"),
+        "smart-connected-map-scattermap" => Some("connected_map"),
+        "smart-inverted-map-scattermap" => Some("inverted_map"),
+        _ => None,
+    };
+    if let Some(case_id) = smart_case {
+        let worker = repository.join("target/minihost-build/aex_smart_worker.exe");
+        let passed = aexcompat_broker::smart::run(repository, &worker, "scattermap", case_id, &PathBuf::from(&args[2]))
+            .expect("extended SmartFX broker run");
         std::process::exit(if passed { 0 } else { 1 });
     }
     let extended_case = match args[1].as_str() {

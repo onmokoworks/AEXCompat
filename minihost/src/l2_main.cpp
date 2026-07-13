@@ -73,6 +73,11 @@ std::array<std::byte, kParamSize> g_checkout_definition{};
 bool g_checkout_map_available = false;
 void* g_smart_input_world = nullptr;
 void* g_smart_output_world = nullptr;
+void* g_smart_map_world = nullptr;
+int32_t g_smart_width = 16;
+int32_t g_smart_height = 12;
+int32_t g_smart_map_width = 0;
+int32_t g_smart_map_height = 0;
 
 void write_rect(void* destination, int32_t width, int32_t height) {
   auto* bytes = static_cast<std::byte*>(destination);
@@ -83,14 +88,24 @@ void write_rect(void* destination, int32_t width, int32_t height) {
 int32_t __cdecl pre_checkout_layer(void*, int32_t index, int32_t checkout_id,
                                    const void*, int32_t, int32_t, uint32_t,
                                    void* result) {
-  if (index != 0 || checkout_id != 0 || !result) return 4;
-  write_rect(result, 16, 12);
-  write_rect(static_cast<std::byte*>(result) + 16, 16, 12);
-  return 0;
+  if (!result) return 4;
+  if (index == 0 && checkout_id == 0) {
+    write_rect(result, g_smart_width, g_smart_height);
+    write_rect(static_cast<std::byte*>(result) + 16, g_smart_width, g_smart_height);
+    return 0;
+  }
+  if (index == 6 && checkout_id == 1 && g_smart_map_world) {
+    write_rect(result, g_smart_map_width, g_smart_map_height);
+    write_rect(static_cast<std::byte*>(result) + 16, g_smart_map_width, g_smart_map_height);
+    return 0;
+  }
+  return 4;
 }
 int32_t __cdecl smart_checkout_pixels(void*, int32_t checkout_id, void** world) {
-  if (!world || checkout_id != 0 || !g_smart_input_world) return 4;
-  *world = g_smart_input_world;
+  if (!world) return 4;
+  if (checkout_id == 0 && g_smart_input_world) *world = g_smart_input_world;
+  else if (checkout_id == 1 && g_smart_map_world) *world = g_smart_map_world;
+  else return 4;
   return 0;
 }
 int32_t __cdecl smart_checkin_pixels(void*, int32_t) { return 0; }
@@ -438,13 +453,24 @@ struct SmartResult {
 };
 
 SmartResult smart_render_once(EffectEntry entry, std::array<std::byte, kInSize>& input,
-                              std::array<std::byte, kOutSize>& command_output) {
-  constexpr int32_t width = 16, height = 12, rowbytes = width * 4;
-  constexpr std::size_t guard = 64;
+                              std::array<std::byte, kOutSize>& command_output,
+                              const std::string& case_id) {
   SmartResult result;
-  std::vector<unsigned char> source(rowbytes * height);
+  const bool connected_map = case_id == "connected_map" || case_id == "inverted_map";
+  const int32_t width = connected_map ? 11 : ((case_id == "odd_dimensions" || case_id == "padded_stride") ? 13 : 16);
+  const int32_t height = connected_map ? 7 : ((case_id == "odd_dimensions" || case_id == "padded_stride") ? 9 : 12);
+  const int32_t rowbytes = case_id == "padded_stride" ? 64 : width * 4;
+  int32_t amount = 5, direction = 3, seed = 0, repeat = 1; double mix = 100.0;
+  if (case_id == "identity") amount = 0;
+  else if (case_id == "horizontal") { amount = 9; direction = 1; seed = 17; }
+  else if (case_id == "vertical_no_repeat") { amount = 7; direction = 2; repeat = 0; }
+  else if (case_id == "mixed") { amount = 12; seed = 991; mix = 37.5; }
+  else if (case_id == "odd_dimensions" || case_id == "padded_stride") { amount = 4; seed = 3; }
+  else if (case_id != "default" && !connected_map) return result;
+  constexpr std::size_t guard = 64;
+  std::vector<unsigned char> source(rowbytes * height, 0x5A);
   for (int32_t y = 0; y < height; ++y) for (int32_t x = 0; x < width; ++x) {
-    auto* pixel = &source[(y * width + x) * 4];
+    auto* pixel = &source[y * rowbytes + x * 4];
     pixel[0] = 255;
     pixel[1] = static_cast<unsigned char>(x * 255 / (width - 1));
     pixel[2] = static_cast<unsigned char>(y * 255 / (height - 1));
@@ -461,13 +487,29 @@ SmartResult smart_render_once(EffectEntry entry, std::array<std::byte, kInSize>&
   };
   setup_world(input_world, source.data()); setup_world(output_world, destination);
 
+  std::vector<unsigned char> map_pixels; std::array<std::byte, 120> map_world{};
+  if (connected_map) {
+    g_smart_map_width = case_id == "connected_map" ? 5 : width;
+    g_smart_map_height = case_id == "connected_map" ? 3 : height;
+    map_pixels.resize(g_smart_map_width * g_smart_map_height * 4);
+    for (int32_t y = 0; y < g_smart_map_height; ++y) for (int32_t x = 0; x < g_smart_map_width; ++x) {
+      const auto value = static_cast<unsigned char>((x + y) * 255 / (g_smart_map_width + g_smart_map_height - 2));
+      auto* p = &map_pixels[(y * g_smart_map_width + x) * 4]; p[0] = 255; p[1] = value; p[2] = value; p[3] = value;
+    }
+    write<void*>(map_world, 24, map_pixels.data()); write<int32_t>(map_world, 32, g_smart_map_width * 4);
+    write<int32_t>(map_world, 36, g_smart_map_width); write<int32_t>(map_world, 40, g_smart_map_height);
+    write_rect(map_world.data() + 44, g_smart_map_width, g_smart_map_height);
+    g_smart_map_world = map_world.data();
+  }
+
   std::array<std::array<std::byte, kParamSize>, 8> definitions{};
   std::memcpy(definitions[0].data() + 56, input_world.data(), input_world.size());
   for (std::size_t i = 0; i < g_params.size() && i + 1 < definitions.size(); ++i)
     definitions[i + 1] = g_params[i].raw;
-  write<int32_t>(definitions[1], 56, 5); write<int32_t>(definitions[2], 56, 3);
-  write<int32_t>(definitions[3], 56, 0); write<int32_t>(definitions[4], 56, 1);
-  write<double>(definitions[5], 56, 100.0);
+  write<int32_t>(definitions[1], 56, amount); write<int32_t>(definitions[2], 56, direction);
+  write<int32_t>(definitions[3], 56, seed); write<int32_t>(definitions[4], 56, repeat);
+  write<double>(definitions[5], 56, mix);
+  if (case_id == "inverted_map") write<int32_t>(definitions[7], 56, 1);
   std::array<void*, 9> params{};
   for (std::size_t i = 0; i < definitions.size(); ++i) params[i] = definitions[i].data();
 
@@ -477,6 +519,7 @@ SmartResult smart_render_once(EffectEntry entry, std::array<std::byte, kInSize>&
   write<void*>(pre_callbacks, 0, reinterpret_cast<void*>(&pre_checkout_layer));
   write<void*>(pre_extra, 0, pre_input.data()); write<void*>(pre_extra, 8, pre_output.data());
   write<void*>(pre_extra, 16, pre_callbacks.data());
+  g_smart_width = width; g_smart_height = height;
   result.pre_error = entry(kSmartPreRender, input.data(), command_output.data(), params.data(), nullptr, pre_extra.data());
   auto valid_rect = [&](std::size_t offset) {
     const auto* p = pre_output.data() + offset;
@@ -495,9 +538,14 @@ SmartResult smart_render_once(EffectEntry entry, std::array<std::byte, kInSize>&
   g_smart_input_world = input_world.data(); g_smart_output_world = output_world.data();
   result.render_error = result.pre_error == 0
       ? entry(kSmartRender, input.data(), command_output.data(), params.data(), nullptr, smart_extra.data()) : -1;
-  g_smart_input_world = nullptr; g_smart_output_world = nullptr;
-  result.input_hash = sha256_bytes(source.data(), source.size());
-  result.output_hash = sha256_bytes(destination, rowbytes * height);
+  g_smart_input_world = nullptr; g_smart_output_world = nullptr; g_smart_map_world = nullptr;
+  std::vector<unsigned char> logical_input(width * height * 4), logical_output(width * height * 4);
+  for (int32_t y = 0; y < height; ++y) {
+    std::memcpy(logical_input.data() + y * width * 4, source.data() + y * rowbytes, width * 4);
+    std::memcpy(logical_output.data() + y * width * 4, destination + y * rowbytes, width * 4);
+  }
+  result.input_hash = sha256_bytes(logical_input.data(), logical_input.size());
+  result.output_hash = sha256_bytes(logical_output.data(), logical_output.size());
   result.guards_intact = std::all_of(guarded.begin(), guarded.begin() + guard, [](auto b) { return b == 0xA5; }) &&
       std::all_of(guarded.end() - guard, guarded.end(), [](auto b) { return b == 0xA5; });
   return result;
@@ -543,7 +591,7 @@ int wmain(int argc, wchar_t** argv) {
   if (argc != 5) return 2;
   if (std::wstring(argv[1]) != L"--render") return 2;
 #elif defined(AEXCOMPAT_SMART_WORKER)
-  if (argc != 4 || std::wstring(argv[1]) != L"--smart") return 2;
+  if (argc != 5 || std::wstring(argv[1]) != L"--smart") return 2;
 #else
   if (argc != 4) return 2;
   if (std::wstring(argv[1]) != L"--l2") return 2;
@@ -602,8 +650,10 @@ int wmain(int argc, wchar_t** argv) {
                     render_rowbytes, input_hash, output_hash, guards_intact) : -1;
   std::cerr << "stage:render_end error=" << render_error << "\n" << std::flush;
 #elif defined(AEXCOMPAT_SMART_WORKER)
+  std::string case_id;
+  for (const wchar_t* p = argv[4]; *p; ++p) { if (*p > 0x7f) return 2; case_id.push_back(static_cast<char>(*p)); }
   std::cerr << "stage:smart_render_begin\n" << std::flush;
-  const SmartResult smart = params_error == 0 ? smart_render_once(entry, input, output) : SmartResult{};
+  const SmartResult smart = params_error == 0 ? smart_render_once(entry, input, output, case_id) : SmartResult{};
   std::cerr << "stage:smart_render_end pre_error=" << smart.pre_error
             << " render_error=" << smart.render_error << "\n" << std::flush;
 #endif
@@ -632,7 +682,9 @@ int wmain(int argc, wchar_t** argv) {
             << ",\"pre_render_error\":" << smart.pre_error
             << ",\"smart_render_error\":" << smart.render_error
             << ",\"global_setdown_error\":" << setdown_error
-            << ",\"pixel_format\":\"argb8\",\"width\":16,\"height\":12,\"rowbytes\":64"
+            << ",\"case_id\":\"" << case_id << "\",\"pixel_format\":\"argb8\",\"width\":"
+            << g_smart_width << ",\"height\":" << g_smart_height << ",\"rowbytes\":"
+            << (case_id == "padded_stride" ? 64 : g_smart_width * 4)
             << ",\"input_sha256\":\"" << smart.input_hash << "\",\"output_sha256\":\""
             << smart.output_hash << "\",\"result_rects_valid\":" << (smart.rects_valid ? "true" : "false")
             << ",\"guard_bytes_intact\":" << (smart.guards_intact ? "true" : "false")

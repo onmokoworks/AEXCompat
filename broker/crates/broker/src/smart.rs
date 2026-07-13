@@ -6,7 +6,17 @@ use std::io::{self, Write};
 use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 
-const EXPECTED: &str = "19CEA826F356E0D94BC29FF10CB9E7F5A770FE5B288CB3D190A58372353102D9";
+fn expected(case_id: &str) -> Option<&'static str> { match case_id {
+    "default" => Some("19CEA826F356E0D94BC29FF10CB9E7F5A770FE5B288CB3D190A58372353102D9"),
+    "identity" => Some("863D238F52F81ABA4017C198AF4D748CB57FE369E6216FDBACF45FD94037ECF7"),
+    "horizontal" => Some("82E72A2E7C05E831A45980FA4042940B8B84C4B6CCF020057968E88ACA323779"),
+    "vertical_no_repeat" => Some("F35007B74ED682D78EF72A53737BDA0BB4F321EAEB09B76A682B09733EC19351"),
+    "mixed" => Some("19736FAE645A7CD3BEBE865344E8A066E41040C7AB80042670A8B2EC6F0E1F3D"),
+    "odd_dimensions" | "padded_stride" => Some("85AC7EB4759281BC81BA60994B58055369CD2224078383D4CAB6A8B685DECE26"),
+    "connected_map" => Some("A38568761441C209940F81A8C2792DAD50566C66EDA1463BDCF071CCA614891B"),
+    "inverted_map" => Some("3BC0C5172B880A8A83CEC24177B78721E9F0619D5330F6A26AAA02B9CC057A08"),
+    _ => None,
+} }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Allowlist { schema_version: u32, entries: Vec<Entry> }
@@ -16,7 +26,8 @@ struct Entry { id: String, plugin_path: PathBuf, sha256: String, byte_size: u64,
     approved_stage: String, receipt_id: String, expires: String, timeout_ms: u64 }
 fn invalid(s: impl Into<String>) -> io::Error { io::Error::new(io::ErrorKind::InvalidData, s.into()) }
 
-pub fn run(repository: &Path, worker: &Path, id: &str, output: &Path) -> io::Result<bool> {
+pub fn run(repository: &Path, worker: &Path, id: &str, case_id: &str, output: &Path) -> io::Result<bool> {
+    let expected = expected(case_id).ok_or_else(|| invalid("unknown fixed SmartFX case"))?;
     if output.components().any(|p| matches!(p, Component::ParentDir | Component::CurDir)) {
         return Err(invalid("output traversal forbidden"));
     }
@@ -35,7 +46,7 @@ pub fn run(repository: &Path, worker: &Path, id: &str, output: &Path) -> io::Res
     let output = if output.is_absolute() { output.to_path_buf() } else { repository.join(output) };
     let parent = output.parent().ok_or_else(|| invalid("output parent missing"))?; fs::create_dir_all(parent)?;
     if !parent.canonicalize()?.starts_with(root.canonicalize()?) { return Err(invalid("output outside SmartFX root")); }
-    let args = ["--smart".into(), entry.plugin_path.to_string_lossy().into_owned(), entry.sha256.to_ascii_lowercase()];
+    let args = ["--smart".into(), entry.plugin_path.to_string_lossy().into_owned(), entry.sha256.to_ascii_lowercase(), case_id.into()];
     let mut reports = Vec::new();
     for _ in 0..2 {
         let isolated = run_isolated(worker, &args, Duration::from_millis(entry.timeout_ms))?;
@@ -44,15 +55,28 @@ pub fn run(repository: &Path, worker: &Path, id: &str, output: &Path) -> io::Res
     }
     let hashes: Vec<String> = reports.iter().map(|(_, r)| r.get("output_sha256").and_then(Value::as_str).unwrap_or("").to_ascii_uppercase()).collect();
     let deterministic = hashes[0] == hashes[1];
-    let passed = deterministic && hashes.iter().all(|h| h == EXPECTED) && reports.iter().all(|(c, r)|
+    let passed = deterministic && hashes.iter().all(|h| h == expected) && reports.iter().all(|(c, r)|
         c.as_str() == "ok" && r.get("pre_render_error") == Some(&json!(0)) && r.get("smart_render_error") == Some(&json!(0)) &&
         r.get("result_rects_valid") == Some(&Value::Bool(true)) && r.get("guard_bytes_intact") == Some(&Value::Bool(true)));
     let summary = json!({"schema_version":1,"stage":"smartfx_render","plugin_id":id,"receipt_id":entry.receipt_id,
-        "fixture_sha256":entry.sha256.to_ascii_uppercase(),"expected_oracle_sha256":EXPECTED,
+        "fixture_sha256":entry.sha256.to_ascii_uppercase(),"case_id":case_id,"expected_oracle_sha256":expected,
         "run_1":{"classification":reports[0].0.as_str(),"output_sha256":hashes[0]},
         "run_2":{"classification":reports[1].0.as_str(),"output_sha256":hashes[1]},
-        "deterministic":deterministic,"oracle_match":hashes.iter().all(|h| h == EXPECTED),"broker_survived":true,"passed":passed});
+        "deterministic":deterministic,"oracle_match":hashes.iter().all(|h| h == expected),"broker_survived":true,"passed":passed});
     let mut file = OpenOptions::new().write(true).create_new(true).open(output)?;
     serde_json::to_writer_pretty(&mut file, &summary).map_err(|e| invalid(e.to_string()))?; file.write_all(b"\n")?;
     Ok(passed)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::expected;
+    #[test]
+    fn oracle_table_covers_the_fixed_smartfx_matrix() {
+        for case_id in ["default", "identity", "horizontal", "vertical_no_repeat", "mixed",
+                        "odd_dimensions", "padded_stride", "connected_map", "inverted_map"] {
+            assert_eq!(expected(case_id).unwrap().len(), 64);
+        }
+        assert!(expected("arbitrary").is_none());
+    }
 }

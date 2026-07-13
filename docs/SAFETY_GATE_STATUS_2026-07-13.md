@@ -5,7 +5,7 @@ authorization. Each stage still requires fixed-fixture controls and re-audit.
 
 ## Current Result
 
-`gate_state: smartfx_default_render_verified`
+`gate_state: smartfx_extended_matrix_verified`
 
 | Gate | Status | Evidence and remaining work |
 | --- | --- | --- |
@@ -24,12 +24,13 @@ authorization. Each stage still requires fixed-fixture controls and re-audit.
 2. H-2 is complete: the local SDK root and applicable project terms boundary are recorded. The SDK remains outside Git.
 3. H-3 is complete: public-document cleanroom is recorded and remains enforced.
 4. G-2 and G-3 are complete through L2.
-5. L1/L2, classic render, extended classic render, and default SmartFX render are complete.
+5. L1/L2 and the extended classic and SmartFX ARGB8 matrices are complete.
 
 L1, L2, and one explicitly approved classic default render case were executed
 successfully through the isolated broker. Initialization, descriptor values,
 deterministic output, buffer guards, and independent pixel hash parity are
 observed. Extended classic render and connected map cases now have oracle
-parity. Default SmartFX PreRender/Render now also has two-run deterministic
-oracle parity. GPU and H-4 AE reference trace capture remain pending under the
+parity. SmartFX PreRender/Render now also has two-run deterministic oracle
+parity across nine cases, including padded stride and connected/inverted maps.
+GPU and H-4 AE reference trace capture remain pending under the
 continuous authorization and existing isolation controls.
