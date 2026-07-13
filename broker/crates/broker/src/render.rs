@@ -1,38 +1,18 @@
 use crate::windows_process::run_isolated;
-use serde::Deserialize;
+use crate::host_core::approved_artifact::{load, ApprovedArtifact};
 use serde_json::{json, Value};
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
-use std::path::{Component, Path, PathBuf};
+use std::path::{Component, Path};
 use std::time::{Duration, Instant};
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Allowlist { schema_version: u32, entries: Vec<Entry> }
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct Entry {
-    pub(crate) id: String, pub(crate) plugin_path: PathBuf, pub(crate) sha256: String, pub(crate) byte_size: u64,
-    pub(crate) approved_stage: String, pub(crate) receipt_id: String, pub(crate) expires: String, pub(crate) timeout_ms: u64,
-}
 fn invalid(message: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message.into())
 }
-pub(crate) fn entry(repository: &Path, id: &str) -> io::Result<Entry> {
-    let bytes = fs::read(repository.join("target/render-allowlist/active.local.json"))?;
-    let list: Allowlist = serde_json::from_slice(&bytes).map_err(|e| invalid(e.to_string()))?;
-    if list.schema_version != 1 || list.entries.len() != 1 { return Err(invalid("one render entry required")); }
-    let entry = list.entries.into_iter().next().unwrap();
-    if entry.id != id || entry.approved_stage != "classic_render"
-        || entry.receipt_id != "scattermap-extended-render-20260713-001"
-        || entry.expires != "2026-08-12T23:59:59+09:00" {
-        return Err(invalid("render stage, receipt, or expiry mismatch"));
-    }
-    if entry.timeout_ms == 0 || entry.timeout_ms > 5_000 || entry.sha256.len() != 64
-        || !entry.sha256.bytes().all(|b| b.is_ascii_hexdigit()) { return Err(invalid("invalid render limits")); }
-    let metadata = fs::metadata(&entry.plugin_path)?;
-    if !metadata.is_file() || metadata.len() != entry.byte_size { return Err(invalid("render size mismatch")); }
-    Ok(entry)
+pub(crate) fn entry(repository: &Path, id: &str) -> io::Result<ApprovedArtifact> {
+    let profile = crate::fixture_profiles::find(id)
+        .ok_or_else(|| invalid("unknown plugin profile"))?;
+    load(repository, id, profile.classic_worker.approval)
 }
 fn classification(value: &str) -> &str {
     match value { "ok" => "ok", "crashed" => "crashed", "timeout_killed" => "timeout_killed", _ => "internal_error" }

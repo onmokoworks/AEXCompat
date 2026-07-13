@@ -75,9 +75,14 @@ class NativeCodeGuardTests(unittest.TestCase):
 
     def test_render_has_distinct_allowlist_receipt_and_two_runs(self):
         source = (BROKER_ROOT / "crates" / "broker" / "src" / "render.rs").read_text(encoding="utf-8")
-        for marker in ("target/render-allowlist/active.local.json", "scattermap-extended-render-20260713-001",
-                       "for _ in 0..2", "deterministic", "guard_bytes_intact", "create_new(true)"):
+        profile = (BROKER_ROOT / "crates" / "broker" / "src" / "fixture_profiles" / "mod.rs").read_text(encoding="utf-8")
+        approval = (BROKER_ROOT / "crates" / "broker" / "src" / "host_core" / "approved_artifact.rs").read_text(encoding="utf-8")
+        for marker in ("for _ in 0..2", "deterministic", "guard_bytes_intact", "create_new(true)"):
             self.assertIn(marker, source)
+        for marker in ("target/render-allowlist/active.local.json", "scattermap-extended-render-20260713-001"):
+            self.assertIn(marker, profile)
+        for marker in ("entries.len() != 1", "metadata.len() != entry.byte_size", "policy.max_timeout_ms"):
+            self.assertIn(marker, approval)
         self.assertIn("unknown fixed render case", source)
 
 

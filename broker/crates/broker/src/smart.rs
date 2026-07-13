@@ -1,9 +1,9 @@
 use crate::windows_process::run_isolated;
-use serde::Deserialize;
+use crate::host_core::approved_artifact::{load, ApprovedArtifact};
 use serde_json::{json, Value};
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
-use std::path::{Component, Path, PathBuf};
+use std::path::{Component, Path};
 use std::time::Duration;
 
 fn expected(case_id: &str) -> Option<&'static str> { match case_id {
@@ -27,13 +27,6 @@ fn expected(case_id: &str) -> Option<&'static str> { match case_id {
     "partial_output_request" => Some("19CEA826F356E0D94BC29FF10CB9E7F5A770FE5B288CB3D190A58372353102D9"),
     _ => None,
 } }
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Allowlist { schema_version: u32, entries: Vec<Entry> }
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct Entry { pub(crate) id: String, pub(crate) plugin_path: PathBuf, pub(crate) sha256: String, pub(crate) byte_size: u64,
-    pub(crate) approved_stage: String, pub(crate) receipt_id: String, pub(crate) expires: String, pub(crate) timeout_ms: u64 }
 fn invalid(s: impl Into<String>) -> io::Error { io::Error::new(io::ErrorKind::InvalidData, s.into()) }
 
 pub fn run(repository: &Path, worker: &Path, id: &str, case_id: &str, output: &Path) -> io::Result<bool> {
@@ -98,19 +91,10 @@ pub fn run(repository: &Path, worker: &Path, id: &str, case_id: &str, output: &P
     Ok(passed)
 }
 
-pub(crate) fn approved_entry(repository: &Path, id: &str) -> io::Result<Entry> {
-    let list: Allowlist = serde_json::from_slice(&fs::read(repository.join("target/smart-allowlist/active.local.json"))?)
-        .map_err(|e| invalid(e.to_string()))?;
-    if list.schema_version != 1 || list.entries.len() != 1 { return Err(invalid("one SmartFX entry required")); }
-    let entry = list.entries.into_iter().next().unwrap();
-    if entry.id != id || entry.approved_stage != "smartfx_render" ||
-       entry.receipt_id != "scattermap-smartfx-20260713-001" || entry.expires != "2026-08-12T23:59:59+09:00" ||
-       entry.timeout_ms == 0 || entry.timeout_ms > 5_000 || entry.sha256.len() != 64 {
-        return Err(invalid("SmartFX allowlist mismatch"));
-    }
-    let metadata = fs::metadata(&entry.plugin_path)?;
-    if !metadata.is_file() || metadata.len() != entry.byte_size { return Err(invalid("SmartFX fixture size mismatch")); }
-    Ok(entry)
+pub(crate) fn approved_entry(repository: &Path, id: &str) -> io::Result<ApprovedArtifact> {
+    let profile = crate::fixture_profiles::find(id)
+        .ok_or_else(|| invalid("unknown plugin profile"))?;
+    load(repository, id, profile.smart_worker.approval)
 }
 
 #[cfg(test)]

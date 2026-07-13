@@ -18,10 +18,12 @@ class HostCoreBoundaryTests(unittest.TestCase):
             "random seed",
             "mix with original",
             "223ff5ec",
-            "sha256",
             "hash_pixel",
         ):
             self.assertNotIn(forbidden, text)
+        approval = (CORE / "approved_artifact.rs").read_text(encoding="utf-8")
+        self.assertIn("entry.sha256.len() != 64", approval)
+        self.assertIn("is_ascii_hexdigit", approval)
 
     def test_fixture_profile_owns_target_specific_descriptors_and_oracle(self):
         source = (FIXTURES / "scattermap.rs").read_text(encoding="utf-8")

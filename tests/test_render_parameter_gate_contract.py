@@ -72,7 +72,9 @@ class RenderParameterGateContractTests(unittest.TestCase):
         self.assertIn('args[1] == "smart-parameter-request"', main)
         self.assertNotIn("smart-parameter-request-scattermap", main)
         self.assertIn("execute_smart", route)
-        self.assertIn('"--smart-request"', route)
+        registry = (ROOT / "broker/crates/broker/src/fixture_profiles/mod.rs").read_text(encoding="utf-8")
+        self.assertIn('request_mode: "--smart-request"', registry)
+        self.assertIn("profile.smart_worker.request_mode", route)
 
 
 if __name__ == "__main__":

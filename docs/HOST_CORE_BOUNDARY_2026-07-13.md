@@ -25,9 +25,10 @@ defaults, typed render adapter, and ARGB8 oracle. The generic parameter core
 owns descriptor-id lookup and type/range validation. Render request schema v2
 now carries a generic descriptor-id keyed numeric map. Parameter validation and
 render CLI operations are fixture-neutral and resolve `plugin_id` through the
-registry. The minihost worker ABI, typed render adapter, legacy fixed-case
-commands, and allowlist records still contain ScatterMap-specific code and must
-move behind profile/host interfaces incrementally.
+registry. Allowlist parsing and artifact/resource validation are generic host
+policy; each profile supplies its reviewed approval policy and worker launch
+specification. The minihost worker ABI, typed render adapter, legacy fixed-case
+commands, and concrete allowlist records remain fixture-specific migration debt.
 
 ## Completion Rule
 

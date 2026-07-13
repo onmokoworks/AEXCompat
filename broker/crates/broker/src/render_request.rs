@@ -202,7 +202,7 @@ pub fn execute(repository: &Path, request_path: &Path, output_path: &Path) -> io
         return Ok(false);
     }
     let approved = crate::render::entry(repository, &request.plugin_id)?;
-    let worker = repository.join("target/minihost-build/aex_render_worker.exe");
+    let worker = repository.join(profile.classic_worker.executable);
     let expected = argb8_hash(
         parameters.amount,
         parameters.direction,
@@ -210,7 +210,7 @@ pub fn execute(repository: &Path, request_path: &Path, output_path: &Path) -> io
         parameters.mix,
     );
     let args = [
-        "--render-request".to_string(),
+        profile.classic_worker.request_mode.to_string(),
         approved.plugin_path.to_string_lossy().into_owned(),
         approved.sha256.to_ascii_lowercase(),
         parameters.amount.to_string(),
@@ -308,7 +308,7 @@ pub fn execute_smart(
         return Ok(false);
     }
     let approved = crate::smart::approved_entry(repository, &request.plugin_id)?;
-    let worker = repository.join("target/minihost-build/aex_smart_worker.exe");
+    let worker = repository.join(profile.smart_worker.executable);
     let expected = argb8_hash(
         parameters.amount,
         parameters.direction,
@@ -316,7 +316,7 @@ pub fn execute_smart(
         parameters.mix,
     );
     let args = [
-        "--smart-request".to_string(),
+        profile.smart_worker.request_mode.to_string(),
         approved.plugin_path.to_string_lossy().into_owned(),
         approved.sha256.to_ascii_lowercase(),
         parameters.amount.to_string(),
