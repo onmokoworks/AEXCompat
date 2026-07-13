@@ -14,7 +14,7 @@ fn main() {
         .and_then(|p| p.parent())
         .and_then(|p| p.parent())
         .expect("repository root");
-    if args.len() == 4 && args[1] == "validate-render-request-scattermap" {
+    if args.len() == 4 && args[1] == "validate-render-request" {
         let accepted = match aexcompat_broker::render_request::run(
             repository,
             &PathBuf::from(&args[2]),
@@ -28,7 +28,7 @@ fn main() {
         };
         std::process::exit(if accepted { 0 } else { 3 });
     }
-    if args.len() == 4 && args[1] == "render-parameter-request-scattermap" {
+    if args.len() == 4 && args[1] == "render-parameter-request" {
         let passed = match aexcompat_broker::render_request::execute(
             repository,
             &PathBuf::from(&args[2]),
@@ -42,7 +42,7 @@ fn main() {
         };
         std::process::exit(if passed { 0 } else { 3 });
     }
-    if args.len() == 4 && args[1] == "smart-parameter-request-scattermap" {
+    if args.len() == 4 && args[1] == "smart-parameter-request" {
         let passed = match aexcompat_broker::render_request::execute_smart(
             repository,
             &PathBuf::from(&args[2]),

@@ -37,8 +37,10 @@ class RenderParameterGateContractTests(unittest.TestCase):
         self.assertIn("native_process_started: false", route)
         self.assertIn("run_isolated", route)
         self.assertIn("argb8_hash", route)
-        self.assertIn("validate-render-request-scattermap", main)
-        self.assertIn("render-parameter-request-scattermap", main)
+        self.assertIn('args[1] == "validate-render-request"', main)
+        self.assertIn('args[1] == "render-parameter-request"', main)
+        self.assertNotIn("validate-render-request-scattermap", main)
+        self.assertNotIn("render-parameter-request-scattermap", main)
         self.assertNotIn('.expect("validate render request")', main)
 
     def test_parameterized_execution_contract_separates_rejection_and_native_success(self):
@@ -67,7 +69,8 @@ class RenderParameterGateContractTests(unittest.TestCase):
             self.assertIn(marker, run["required"])
         main = (ROOT / "broker/crates/broker/src/main.rs").read_text(encoding="utf-8")
         route = (ROOT / "broker/crates/broker/src/render_request.rs").read_text(encoding="utf-8")
-        self.assertIn("smart-parameter-request-scattermap", main)
+        self.assertIn('args[1] == "smart-parameter-request"', main)
+        self.assertNotIn("smart-parameter-request-scattermap", main)
         self.assertIn("execute_smart", route)
         self.assertIn('"--smart-request"', route)
 

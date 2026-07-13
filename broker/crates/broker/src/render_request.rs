@@ -1,5 +1,6 @@
 use crate::fixture_profiles::scattermap::{argb8_hash, bind, RenderParameters};
-use crate::host_core::parameter::{validate_assignments, PluginProfile, ValidationError};
+use crate::fixture_profiles::{ParameterizedRenderAdapter, RegisteredProfile};
+use crate::host_core::parameter::{validate_assignments, ValidationError};
 use crate::windows_process::run_isolated;
 use serde::de::{MapAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
@@ -60,7 +61,7 @@ impl<'de> Deserialize<'de> for Assignments {
 struct Report {
     schema_version: u32,
     gate: &'static str,
-    plugin_id: &'static str,
+    plugin_id: String,
     assignment_count: usize,
     accepted: bool,
     native_dispatch_permitted: bool,
@@ -70,12 +71,15 @@ struct Report {
 
 fn evaluate(
     request: &Request,
-    profile: &PluginProfile,
+    profile: &RegisteredProfile,
 ) -> io::Result<(RenderParameters, usize, Vec<ValidationError>)> {
     let assignment_count = request.assignments.0.len();
     let (validated, errors) =
-        validate_assignments(profile, &request.assignments.0).map_err(invalid)?;
-    Ok((bind(&validated), assignment_count, errors))
+        validate_assignments(profile.parameters, &request.assignments.0).map_err(invalid)?;
+    let parameters = match profile.parameterized_render {
+        ParameterizedRenderAdapter::ScatterMap => bind(&validated),
+    };
+    Ok((parameters, assignment_count, errors))
 }
 
 fn invalid(message: impl Into<String>) -> io::Error {
@@ -137,7 +141,7 @@ pub fn run(repository: &Path, request_path: &Path, output_path: &Path) -> io::Re
     }
     let request: Request = serde_json::from_slice(&fs::read(request_path)?)
         .map_err(|error| invalid(format!("invalid render request: {error}")))?;
-    if request.schema_version != 2 || request.plugin_id != "scattermap" {
+    if request.schema_version != 2 {
         return Err(invalid("render request identity mismatch"));
     }
     let profile = crate::fixture_profiles::find(&request.plugin_id)
@@ -147,7 +151,7 @@ pub fn run(repository: &Path, request_path: &Path, output_path: &Path) -> io::Re
     let report = Report {
         schema_version: 1,
         gate: "pre_dispatch_parameter_validation",
-        plugin_id: "scattermap",
+        plugin_id: request.plugin_id,
         assignment_count,
         accepted,
         native_dispatch_permitted: accepted,
@@ -178,7 +182,7 @@ pub fn execute(repository: &Path, request_path: &Path, output_path: &Path) -> io
     }
     let request: Request = serde_json::from_slice(&fs::read(request_path)?)
         .map_err(|error| invalid(format!("invalid render request: {error}")))?;
-    if request.schema_version != 2 || request.plugin_id != "scattermap" {
+    if request.schema_version != 2 {
         return Err(invalid("render request identity mismatch"));
     }
     let profile = crate::fixture_profiles::find(&request.plugin_id)
@@ -186,7 +190,7 @@ pub fn execute(repository: &Path, request_path: &Path, output_path: &Path) -> io
     let (parameters, assignment_count, errors) = evaluate(&request, profile)?;
     if !errors.is_empty() {
         let report = json!({"schema_version":1,"stage":"parameterized_classic_render",
-            "plugin_id":"scattermap","assignment_count":assignment_count,"accepted":false,
+            "plugin_id":request.plugin_id,"assignment_count":assignment_count,"accepted":false,
             "native_process_started":false,"errors":errors,"passed":false});
         let mut output = OpenOptions::new()
             .write(true)
@@ -197,7 +201,7 @@ pub fn execute(repository: &Path, request_path: &Path, output_path: &Path) -> io
         output.write_all(b"\n")?;
         return Ok(false);
     }
-    let approved = crate::render::entry(repository, "scattermap")?;
+    let approved = crate::render::entry(repository, &request.plugin_id)?;
     let worker = repository.join("target/minihost-build/aex_render_worker.exe");
     let expected = argb8_hash(
         parameters.amount,
@@ -249,7 +253,7 @@ pub fn execute(repository: &Path, request_path: &Path, output_path: &Path) -> io
         "request_mode":item.1.get("request_mode")})
     };
     let report = json!({"schema_version":1,"stage":"parameterized_classic_render",
-        "plugin_id":"scattermap","receipt_id":approved.receipt_id,
+        "plugin_id":request.plugin_id,"receipt_id":approved.receipt_id,
         "fixture_sha256":approved.sha256.to_ascii_uppercase(),"assignment_count":assignment_count,
         "accepted":true,"native_process_started":true,"parameters":{"amount":parameters.amount,
         "direction":parameters.direction,"seed":parameters.seed,"mix":parameters.mix,
@@ -284,7 +288,7 @@ pub fn execute_smart(
     }
     let request: Request = serde_json::from_slice(&fs::read(request_path)?)
         .map_err(|error| invalid(format!("invalid render request: {error}")))?;
-    if request.schema_version != 2 || request.plugin_id != "scattermap" {
+    if request.schema_version != 2 {
         return Err(invalid("render request identity mismatch"));
     }
     let profile = crate::fixture_profiles::find(&request.plugin_id)
@@ -292,7 +296,7 @@ pub fn execute_smart(
     let (parameters, assignment_count, errors) = evaluate(&request, profile)?;
     if !errors.is_empty() {
         let report = json!({"schema_version":1,"stage":"parameterized_smartfx_render",
-            "plugin_id":"scattermap","assignment_count":assignment_count,"accepted":false,
+            "plugin_id":request.plugin_id,"assignment_count":assignment_count,"accepted":false,
             "native_process_started":false,"errors":errors,"passed":false});
         let mut output = OpenOptions::new()
             .write(true)
@@ -303,7 +307,7 @@ pub fn execute_smart(
         output.write_all(b"\n")?;
         return Ok(false);
     }
-    let approved = crate::smart::approved_entry(repository, "scattermap")?;
+    let approved = crate::smart::approved_entry(repository, &request.plugin_id)?;
     let worker = repository.join("target/minihost-build/aex_smart_worker.exe");
     let expected = argb8_hash(
         parameters.amount,
@@ -358,7 +362,7 @@ pub fn execute_smart(
         "guard_bytes_intact":item.1.get("guard_bytes_intact"),"request_mode":item.1.get("request_mode")})
     };
     let report = json!({"schema_version":1,"stage":"parameterized_smartfx_render",
-        "plugin_id":"scattermap","receipt_id":approved.receipt_id,
+        "plugin_id":request.plugin_id,"receipt_id":approved.receipt_id,
         "fixture_sha256":approved.sha256.to_ascii_uppercase(),"assignment_count":assignment_count,
         "accepted":true,"native_process_started":true,"parameters":{"amount":parameters.amount,
         "direction":parameters.direction,"seed":parameters.seed,"mix":parameters.mix,
@@ -439,6 +443,21 @@ mod tests {
             assert!(!output.exists());
             fs::remove_dir_all(root).unwrap();
         }
+    }
+
+    #[test]
+    fn unknown_plugin_profile_fails_before_any_output() {
+        let root = repository();
+        let request = root.join("target/render-requests/unknown-plugin.json");
+        let output = root.join("target/render-request-results/unknown-plugin.json");
+        fs::write(
+            &request,
+            br#"{"schema_version":2,"plugin_id":"unknown-aex","assignments":{}}"#,
+        )
+        .unwrap();
+        assert!(run(&root, &request, &output).is_err());
+        assert!(!output.exists());
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

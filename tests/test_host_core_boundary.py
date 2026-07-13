@@ -36,6 +36,7 @@ class HostCoreBoundaryTests(unittest.TestCase):
     def test_registry_rejects_unknown_profiles_explicitly(self):
         source = (FIXTURES / "mod.rs").read_text(encoding="utf-8")
         self.assertIn("pub fn find", source)
+        self.assertIn("ParameterizedRenderAdapter", source)
         self.assertIn("_ => None", source)
         self.assertNotIn("unwrap_or", source)
 
