@@ -12,6 +12,8 @@ parameter discovery, classic rendering, and SmartFX rendering.
 
 - [Project Design](docs/PROJECT_DESIGN_2026-07-03.md) explains the target
   architecture, migration plan, safety gate, and implementation roadmap.
+- [Host Core Boundary](docs/HOST_CORE_BOUNDARY_2026-07-13.md) separates generic
+  AEX host behavior from fixture-specific conformance profiles and oracles.
 - [Docs Index](docs/README.md) describes the documentation layout.
 - [Imported AviUtlas Contracts](imports/aviutlas-rust-contracts/README.md)
   preserves AEX/AEPX/OFX planning assets copied from AviUtlas as provenance.

@@ -24,11 +24,13 @@ class RenderParameterGateContractTests(unittest.TestCase):
         self.assertEqual(schema["properties"]["assignment_count"]["maximum"], 5)
 
     def test_rust_route_owns_ranges_and_never_starts_worker(self):
-        gate = (ROOT / "broker/crates/broker/src/parameter_gate.rs").read_text(encoding="utf-8")
+        core = (ROOT / "broker/crates/broker/src/host_core/parameter.rs").read_text(encoding="utf-8")
+        profile = (ROOT / "broker/crates/broker/src/fixture_profiles/scattermap.rs").read_text(encoding="utf-8")
         route = (ROOT / "broker/crates/broker/src/render_request.rs").read_text(encoding="utf-8")
         main = (ROOT / "broker/crates/broker/src/main.rs").read_text(encoding="utf-8")
         for marker in ("Scatter Amount", "500.0", "Random Seed", "10_000.0", "Invert Map"):
-            self.assertIn(marker, gate)
+            self.assertIn(marker, profile)
+            self.assertNotIn(marker, core)
         self.assertIn("native_process_started: false", route)
         self.assertIn("run_isolated", route)
         self.assertIn("argb8_hash", route)

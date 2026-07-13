@@ -10,10 +10,10 @@ pub mod l2;
 pub mod render;
 #[cfg(windows)]
 pub mod smart;
-pub mod parameter_gate;
+pub mod fixture_profiles;
+pub mod host_core;
 #[cfg(windows)]
 pub mod render_request;
-pub mod scattermap_oracle;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ExitClassification {

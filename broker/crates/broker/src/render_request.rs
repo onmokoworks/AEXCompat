@@ -1,5 +1,5 @@
-use crate::parameter_gate::{validate, ValidationError, SCATTERMAP_DESCRIPTORS};
-use crate::scattermap_oracle::argb8_hash;
+use crate::fixture_profiles::scattermap::argb8_hash;
+use crate::host_core::parameter::{validate, PluginProfile, ValidationError};
 use crate::windows_process::run_isolated;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -54,7 +54,10 @@ struct Effective {
     invert_map: i32,
 }
 
-fn evaluate(request: &Request) -> (Effective, usize, Vec<ValidationError>) {
+fn evaluate(
+    request: &Request,
+    profile: &PluginProfile,
+) -> (Effective, usize, Vec<ValidationError>) {
     let values = [
         request.assignments.scatter_amount,
         request.assignments.direction,
@@ -64,7 +67,7 @@ fn evaluate(request: &Request) -> (Effective, usize, Vec<ValidationError>) {
     ];
     let mut errors = Vec::new();
     let mut assignment_count = 0;
-    for (descriptor, value) in SCATTERMAP_DESCRIPTORS.into_iter().zip(values) {
+    for (descriptor, value) in profile.descriptors.iter().copied().zip(values) {
         if let Some(value) = value {
             assignment_count += 1;
             if let Some(error) = validate(descriptor, value) {
@@ -147,7 +150,9 @@ pub fn run(repository: &Path, request_path: &Path, output_path: &Path) -> io::Re
     if request.schema_version != 1 || request.plugin_id != "scattermap" {
         return Err(invalid("render request identity mismatch"));
     }
-    let (_, assignment_count, errors) = evaluate(&request);
+    let profile = crate::fixture_profiles::find(&request.plugin_id)
+        .ok_or_else(|| invalid("unknown plugin profile"))?;
+    let (_, assignment_count, errors) = evaluate(&request, profile);
     let accepted = errors.is_empty();
     let report = Report {
         schema_version: 1,
@@ -186,7 +191,9 @@ pub fn execute(repository: &Path, request_path: &Path, output_path: &Path) -> io
     if request.schema_version != 1 || request.plugin_id != "scattermap" {
         return Err(invalid("render request identity mismatch"));
     }
-    let (parameters, assignment_count, errors) = evaluate(&request);
+    let profile = crate::fixture_profiles::find(&request.plugin_id)
+        .ok_or_else(|| invalid("unknown plugin profile"))?;
+    let (parameters, assignment_count, errors) = evaluate(&request, profile);
     if !errors.is_empty() {
         let report = json!({"schema_version":1,"stage":"parameterized_classic_render",
             "plugin_id":"scattermap","assignment_count":assignment_count,"accepted":false,
@@ -290,7 +297,9 @@ pub fn execute_smart(
     if request.schema_version != 1 || request.plugin_id != "scattermap" {
         return Err(invalid("render request identity mismatch"));
     }
-    let (parameters, assignment_count, errors) = evaluate(&request);
+    let profile = crate::fixture_profiles::find(&request.plugin_id)
+        .ok_or_else(|| invalid("unknown plugin profile"))?;
+    let (parameters, assignment_count, errors) = evaluate(&request, profile);
     if !errors.is_empty() {
         let report = json!({"schema_version":1,"stage":"parameterized_smartfx_render",
             "plugin_id":"scattermap","assignment_count":assignment_count,"accepted":false,

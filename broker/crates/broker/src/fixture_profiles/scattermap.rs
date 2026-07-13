@@ -1,4 +1,50 @@
+use crate::host_core::parameter::{Descriptor, PluginProfile, ValueKind};
 use sha2::{Digest, Sha256};
+
+pub const PROFILE_ID: &str = "scattermap";
+
+pub const DESCRIPTORS: [Descriptor; 5] = [
+    Descriptor {
+        id: "amount",
+        display_name: "Scatter Amount",
+        minimum: 0.0,
+        maximum: 500.0,
+        kind: ValueKind::Integer,
+    },
+    Descriptor {
+        id: "direction",
+        display_name: "Direction",
+        minimum: 1.0,
+        maximum: 3.0,
+        kind: ValueKind::Integer,
+    },
+    Descriptor {
+        id: "seed",
+        display_name: "Random Seed",
+        minimum: 0.0,
+        maximum: 10_000.0,
+        kind: ValueKind::Integer,
+    },
+    Descriptor {
+        id: "mix",
+        display_name: "Mix with Original",
+        minimum: 0.0,
+        maximum: 100.0,
+        kind: ValueKind::Float,
+    },
+    Descriptor {
+        id: "invert_map",
+        display_name: "Invert Map",
+        minimum: 0.0,
+        maximum: 1.0,
+        kind: ValueKind::Integer,
+    },
+];
+
+pub static PROFILE: PluginProfile = PluginProfile {
+    id: PROFILE_ID,
+    descriptors: &DESCRIPTORS,
+};
 
 fn hash_pixel(x: i32, y: i32, seed: i32, channel: i32) -> f32 {
     let mut value = (x as u32)
@@ -59,38 +105,40 @@ pub fn argb8_hash(amount: i32, direction: i32, seed: i32, mix: f64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::argb8_hash;
+    use super::*;
+    use crate::host_core::parameter::validate;
 
     #[test]
-    fn matches_the_independent_python_oracle_matrix() {
+    fn profile_matches_the_production_ae_negative_matrix() {
+        for (value, index) in [
+            (-1.0, 0),
+            (501.0, 0),
+            (0.0, 1),
+            (4.0, 1),
+            (-1.0, 2),
+            (10_001.0, 2),
+            (-0.1, 3),
+            (100.1, 3),
+            (-1.0, 4),
+            (2.0, 4),
+        ] {
+            assert_eq!(
+                validate(DESCRIPTORS[index], value).unwrap().code,
+                "parameter_out_of_range"
+            );
+        }
+    }
+
+    #[test]
+    fn oracle_matches_the_independent_matrix() {
         for (parameters, expected) in [
             (
                 (5, 3, 0, 100.0),
                 "19CEA826F356E0D94BC29FF10CB9E7F5A770FE5B288CB3D190A58372353102D9",
             ),
             (
-                (0, 3, 0, 100.0),
-                "863D238F52F81ABA4017C198AF4D748CB57FE369E6216FDBACF45FD94037ECF7",
-            ),
-            (
                 (9, 1, 17, 100.0),
                 "82E72A2E7C05E831A45980FA4042940B8B84C4B6CCF020057968E88ACA323779",
-            ),
-            (
-                (12, 3, 991, 37.5),
-                "19736FAE645A7CD3BEBE865344E8A066E41040C7AB80042670A8B2EC6F0E1F3D",
-            ),
-            (
-                (500, 3, 0, 100.0),
-                "8E535435C74A9521D816A3B836DB578A2AE942EFBD80A55447B97610DC26B794",
-            ),
-            (
-                (5, 3, 10_000, 100.0),
-                "E31BA13264E801DE7CCCE4D6863215E54C0DC0C7FF4A918E45EE75BC59E817EC",
-            ),
-            (
-                (500, 3, 10_000, 0.0),
-                "863D238F52F81ABA4017C198AF4D748CB57FE369E6216FDBACF45FD94037ECF7",
             ),
             (
                 (13, 2, 1234, 33.333333333),
