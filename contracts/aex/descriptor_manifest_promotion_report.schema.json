@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://aexcompat.local/contracts/aex/descriptor_manifest_promotion_report.schema.json",
+  "schema_name": "AEXCompat descriptor manifest promotion report schema",
+  "schema_version": 1,
+  "title": "AEXCompat descriptor manifest promotion comparison",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "report_kind", "plugin_id", "source_stage", "source_receipt_id", "observed_descriptor_count", "assignable_descriptor_count", "candidate_canonical_sha256", "promoted_canonical_sha256", "matches_promoted", "review_required", "native_process_started"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "report_kind": {"const": "aex_descriptor_manifest_promotion"},
+    "plugin_id": {"type": "string", "pattern": "^[a-z][a-z0-9_-]{0,63}$"},
+    "source_stage": {"const": "L2"},
+    "source_receipt_id": {"type": "string", "minLength": 1},
+    "observed_descriptor_count": {"type": "integer", "minimum": 1, "maximum": 64},
+    "assignable_descriptor_count": {"type": "integer", "minimum": 0, "maximum": 64},
+    "candidate_canonical_sha256": {"type": "string", "pattern": "^[0-9A-F]{64}$"},
+    "promoted_canonical_sha256": {"type": "string", "pattern": "^[0-9A-F]{64}$"},
+    "matches_promoted": {"type": "boolean"},
+    "review_required": {"type": "array", "maxItems": 64, "items": {"type": "string", "minLength": 1}},
+    "native_process_started": {"const": false}
+  },
+  "allOf": [{
+    "if": {"properties": {"matches_promoted": {"const": true}}},
+    "then": {"properties": {"review_required": {"maxItems": 0}}}
+  }]
+}

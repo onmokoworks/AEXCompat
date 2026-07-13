@@ -22,6 +22,12 @@ repository has a short entry point and a durable place for longer plans.
 - `HUMAN_GATE_HANDOFF_2026-07-13.md`
   - Exact H-1/H-2/H-3 questions for the repository owner. It contains no
     approval or gate-opening declaration.
+- `HOST_CORE_BOUNDARY_2026-07-13.md`
+  - Separates generic host policy from fixture profiles and defines the evidence
+    required before general AEX support can be claimed.
+- `DESCRIPTOR_MANIFEST_PROMOTION_2026-07-13.md`
+  - Documents no-native regeneration and comparison of reviewed parameter
+    manifests from isolated L2 observations.
 
 ## Related Sources
 
