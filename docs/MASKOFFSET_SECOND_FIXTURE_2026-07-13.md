@@ -197,3 +197,10 @@ lifetime behavior, additional pixel formats, selector families, and SDK suites
 remain. Bounded open, closed, straight, cubic Bezier, transformed, feathered,
 and inverted host scenes are covered. MaskOffset identity and algorithms remain
 in the fixture adapter and do not enter `host_core`.
+
+The generic host now implements the complete 23-slot AEGP Stream Suite v11
+table. MaskOffset remains only the real-AEX conformance fixture: the stream
+registry, metadata, duplicate-ref identity, concurrent value ownership, and
+explicit unsupported callbacks contain no MaskOffset-specific branches. The
+`stream_metadata_ownership` fault route passed two isolated native runs with
+balanced MaskRef, StreamRef, and StreamValue ownership.

@@ -172,3 +172,15 @@ Deleted masks become non-visible tombstones until disposal. The fixed
 rendering, exercised eleven valid attribute/ownership mutations, rejected one
 invalid mode, restored the source scene, and ended with balanced MaskRefs. A
 fresh two-mask regression retained count 2 and its independent oracle hash.
+
+AEGP Stream Suite v11 now exposes all 23 callback slots without null function
+pointers. Mask-outline streams use independently owned, stable stream refs;
+duplicate refs preserve the underlying unique stream ID, and multiple checked-
+out values are tracked per ref. Metadata reports mask type, interpolation,
+variation, time-varying state, units, and flags. Layer/effect streams and
+Memory-Suite-backed strings fail explicitly rather than returning fabricated
+objects, while the mask-outline SetStreamValue path is rejected as required.
+The fixed `stream_metadata_ownership` gate ran twice after successful native
+MaskOffset rendering under the Job Object boundary. Each run recorded nine
+metadata queries, one duplicate ref, two intentional rejections, intact guards,
+and fully balanced mask/stream/value lifetimes.

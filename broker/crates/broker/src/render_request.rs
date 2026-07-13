@@ -739,6 +739,16 @@ pub fn execute_smart_suite_fault(
             false,
             true,
         ),
+        "stream_metadata_ownership" => (
+            "--smart-stream-metadata-ownership-request",
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            true,
+        ),
         "world_double_dispose" => (
             "--smart-world-double-dispose-request",
             false,
@@ -893,6 +903,11 @@ pub fn execute_smart_suite_fault(
                     report.get("outline_fault_observed") == Some(&Value::Bool(true))
                         && report.get("outline_mutations") == Some(&json!(8))
                         && report.get("invalid_outline_operations") == Some(&json!(1))
+                } else if fault_id == "stream_metadata_ownership" {
+                    report.get("stream_metadata_fault_observed") == Some(&Value::Bool(true))
+                        && report.get("stream_metadata_queries") == Some(&json!(9))
+                        && report.get("stream_duplicates") == Some(&json!(1))
+                        && report.get("invalid_stream_operations") == Some(&json!(2))
                 } else {
                     report.get("mask_attribute_fault_observed") == Some(&Value::Bool(true))
                         && report.get("mask_mutations") == Some(&json!(11))
@@ -905,7 +920,7 @@ pub fn execute_smart_suite_fault(
             .all(|(classification, report)| fallback_valid(*classification, report))
     };
     let summarize = |item: &(crate::ExitClassification, Value)| {
-        json!({
+        let mut summary = json!({
             "classification":item.0.as_str(),
             "pre_render_error":item.1.get("pre_render_error"),
             "smart_render_error":item.1.get("smart_render_error"),
@@ -947,7 +962,13 @@ pub fn execute_smart_suite_fault(
             "mask_attribute_fault_observed":item.1.get("mask_attribute_fault_observed"),
             "mask_mutations":item.1.get("mask_mutations"),
             "invalid_mask_operations":item.1.get("invalid_mask_operations")
-        })
+        });
+        let object = summary.as_object_mut().expect("summary is an object");
+        for field in ["stream_metadata_fault_observed", "stream_metadata_queries",
+                      "stream_duplicates", "invalid_stream_operations"] {
+            object.insert(field.to_string(), item.1.get(field).cloned().unwrap_or(Value::Null));
+        }
+        summary
     };
     let report = json!({
         "schema_version":1,"stage":"smartfx_suite_fault","plugin_id":plugin_id,

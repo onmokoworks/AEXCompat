@@ -36,3 +36,9 @@ declaration, macro body, or Adobe source is copied into `minihost/`.
 The cleanroom implementation may consume these numeric interoperability facts
 as assertions. Any declaration needed by `minihost/` must still be independently
 written from public documentation and validated against the observation.
+
+The AEGP Stream Suite v11 implementation follows the same boundary. The
+external SDK installation is used for instrument-side numeric/order auditing;
+`minihost/` neither includes nor copies Adobe headers. Its 23-entry table and
+local value/handle declarations are independently authored and guarded by
+local size/count assertions plus native conformance tests.

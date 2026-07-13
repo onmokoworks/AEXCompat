@@ -15,6 +15,7 @@
 #include <iomanip>
 #include <iostream>
 #include <limits>
+#include <list>
 #include <map>
 #include <mutex>
 #include <new>
@@ -141,7 +142,6 @@ static_assert(offsetof(MaskFeather, interp) == 32);
 static_assert(offsetof(MaskFeather, type) == 33);
 struct HostMask {
   OpaqueHostObject mask{0x4d41534b};
-  OpaqueHostObject stream{0x5354524d};
   OpaqueHostObject outline{0x4f55544c};
   bool open{};
   bool mask_live{};
@@ -155,13 +155,27 @@ struct HostMask {
   uint8_t feather_falloff{};
   int32_t mode{1};
   int32_t id{};
+  int32_t outline_stream_id{};
   std::array<double, 4> color{1.0, 1.0, 0.0, 0.0};
   std::vector<MaskVertex> vertices;
   std::vector<MaskFeather> feathers;
 };
+struct HostStreamRef {
+  OpaqueHostObject opaque{0x5354524d};
+  HostMask* mask{};
+  int32_t selector{};
+  int32_t unique_id{};
+  uint32_t live_values{};
+};
+struct StreamValue {
+  void* stream;
+  void* value;
+};
 OpaqueHostObject g_effect{0x45464658};
 OpaqueHostObject g_layer{0x4c415952};
 std::vector<HostMask> g_mask_scene;
+std::list<HostStreamRef> g_stream_refs;
+std::unordered_map<StreamValue*, HostStreamRef*> g_stream_values;
 struct MaskLifetimeCounts {
   uint32_t masks_acquired{};
   uint32_t masks_disposed{};
@@ -175,7 +189,11 @@ uint32_t g_invalid_outline_operations{};
 uint32_t g_outline_mutations{};
 uint32_t g_mask_mutations{};
 uint32_t g_invalid_mask_operations{};
+uint32_t g_invalid_stream_operations{};
+uint32_t g_stream_metadata_queries{};
+uint32_t g_stream_duplicates{};
 int32_t g_next_mask_id{1};
+int32_t g_next_stream_id{1};
 constexpr std::size_t kMaxHostMasks = 8;
 constexpr std::size_t kMaxOutlineVertices = 64;
 constexpr std::size_t kMaxOutlineFeathers = 64;
@@ -192,12 +210,14 @@ bool mask_lifetimes_balanced() {
   return g_mask_lifetime.masks_acquired == g_mask_lifetime.masks_disposed &&
       g_mask_lifetime.streams_acquired == g_mask_lifetime.streams_disposed &&
       g_mask_lifetime.values_acquired == g_mask_lifetime.values_disposed &&
+      g_stream_refs.empty() && g_stream_values.empty() &&
       std::none_of(g_mask_scene.begin(), g_mask_scene.end(), [](const auto& mask) {
         return mask.mask_live || mask.stream_live || mask.value_live;
       });
 }
 
 bool configure_mask_scene(const std::string& scene_id) {
+  if (!g_stream_refs.empty() || !g_stream_values.empty()) return false;
   g_mask_scene.clear();
   g_mask_scene.reserve(kMaxHostMasks);
   g_mask_lifetime = {};
@@ -205,6 +225,7 @@ bool configure_mask_scene(const std::string& scene_id) {
   const auto rectangle = [](double left, double top, double right, double bottom) {
     HostMask mask;
     mask.id = g_next_mask_id++;
+    mask.outline_stream_id = g_next_stream_id++;
     mask.vertices = {{left, top, 0, 0, 0, 0}, {right, top, 0, 0, 0, 0},
                      {right, bottom, 0, 0, 0, 0}, {left, bottom, 0, 0, 0, 0},
                      {left, top, 0, 0, 0, 0}};
@@ -224,10 +245,10 @@ HostMask* find_mask(void* handle) {
       [handle](auto& mask) { return handle == &mask.mask; });
   return found == g_mask_scene.end() ? nullptr : &*found;
 }
-HostMask* find_stream(void* handle) {
-  const auto found = std::find_if(g_mask_scene.begin(), g_mask_scene.end(),
-      [handle](auto& mask) { return handle == &mask.stream; });
-  return found == g_mask_scene.end() ? nullptr : &*found;
+HostStreamRef* find_stream(void* handle) {
+  const auto found = std::find_if(g_stream_refs.begin(), g_stream_refs.end(),
+      [handle](auto& stream) { return handle == &stream.opaque; });
+  return found == g_stream_refs.end() ? nullptr : &*found;
 }
 HostMask* find_outline(void* handle) {
   const auto found = std::find_if(g_mask_scene.begin(), g_mask_scene.end(),
@@ -530,7 +551,8 @@ int32_t __cdecl create_new_mask(void* layer, void** handle, int32_t* index) {
   if (layer != &g_layer || !handle || g_mask_scene.size() >= kMaxHostMasks) {
     ++g_invalid_mask_operations; return 4;
   }
-  HostMask mask; mask.id = g_next_mask_id++; mask.mask_live = true;
+  HostMask mask; mask.id = g_next_mask_id++; mask.outline_stream_id = g_next_stream_id++;
+  mask.mask_live = true;
   g_mask_scene.push_back(mask);
   ++g_mask_lifetime.masks_acquired; ++g_mask_mutations;
   *handle = &g_mask_scene.back().mask;
@@ -581,54 +603,194 @@ int32_t __cdecl duplicate_mask(void* original_handle, void** duplicate_handle) {
   HostMask copy = *original;
   copy.mask_live = true; copy.stream_live = false; copy.value_live = false;
   copy.deleted = false; copy.id = g_next_mask_id++;
+  copy.outline_stream_id = g_next_stream_id++;
   g_mask_scene.push_back(std::move(copy));
   ++g_mask_lifetime.masks_acquired; ++g_mask_mutations;
   *duplicate_handle = &g_mask_scene.back().mask;
   return 0;
 }
 
-int32_t __cdecl get_new_mask_stream(int32_t plugin_id, void* mask, int32_t, void** stream) {
+int32_t __cdecl get_new_mask_stream(int32_t plugin_id, void* mask, int32_t selector, void** stream) {
   HostMask* record = find_mask(mask);
-  if (plugin_id != 1 || !record || !record->mask_live || record->stream_live || !stream) return 4;
+  if (plugin_id != 1 || !usable_mask(record) || selector != 400 || !stream ||
+      g_stream_refs.size() >= 64) {
+    ++g_invalid_stream_operations;
+    if (stream) *stream = nullptr;
+    return 4;
+  }
+  g_stream_refs.push_back({{}, record, selector, record->outline_stream_id, 0});
   record->stream_live = true;
   ++g_mask_lifetime.streams_acquired;
-  *stream = &record->stream;
+  *stream = &g_stream_refs.back().opaque;
   return 0;
 }
 
 int32_t __cdecl dispose_stream(void* stream) {
-  HostMask* record = find_stream(stream);
-  if (!record || !record->stream_live || record->value_live) return 4;
-  record->stream_live = false;
+  HostStreamRef* record = find_stream(stream);
+  if (!record || record->live_values != 0) { ++g_invalid_stream_operations; return 4; }
+  HostMask* mask = record->mask;
+  g_stream_refs.erase(std::find_if(g_stream_refs.begin(), g_stream_refs.end(),
+      [record](auto& candidate) { return &candidate == record; }));
+  mask->stream_live = std::any_of(g_stream_refs.begin(), g_stream_refs.end(),
+      [mask](const auto& candidate) { return candidate.mask == mask; });
   ++g_mask_lifetime.streams_disposed;
   return 0;
 }
 
-struct StreamValue {
-  void* stream;
-  void* value;
-};
-
 int32_t __cdecl get_new_stream_value(int32_t plugin_id, void* stream, int32_t,
                                      const void*, int32_t, StreamValue* value) {
-  HostMask* record = find_stream(stream);
-  if (plugin_id != 1 || !record || !record->stream_live || record->value_live || !value) return 4;
-  record->value_live = true;
+  HostStreamRef* record = find_stream(stream);
+  if (plugin_id != 1 || !record || !value || g_stream_values.find(value) != g_stream_values.end()) {
+    ++g_invalid_stream_operations; return 4;
+  }
+  ++record->live_values;
+  record->mask->value_live = true;
+  g_stream_values.emplace(value, record);
   ++g_mask_lifetime.values_acquired;
-  value->stream = &record->stream;
-  value->value = &record->outline;
+  value->stream = &record->opaque;
+  value->value = &record->mask->outline;
   return 0;
 }
 
 int32_t __cdecl dispose_stream_value(StreamValue* value) {
   if (!value) return 4;
-  HostMask* stream_record = find_stream(value->stream);
+  const auto owned = g_stream_values.find(value);
+  HostStreamRef* stream_record = find_stream(value->stream);
   HostMask* outline_record = find_outline(value->value);
-  if (!stream_record || stream_record != outline_record || !stream_record->value_live) return 4;
-  stream_record->value_live = false;
+  if (owned == g_stream_values.end() || !stream_record || owned->second != stream_record ||
+      stream_record->mask != outline_record || stream_record->live_values == 0) {
+    ++g_invalid_stream_operations; return 4;
+  }
+  --stream_record->live_values;
+  g_stream_values.erase(owned);
+  outline_record->value_live = std::any_of(g_stream_refs.begin(), g_stream_refs.end(),
+      [outline_record](const auto& candidate) {
+        return candidate.mask == outline_record && candidate.live_values != 0;
+      });
   ++g_mask_lifetime.values_disposed;
   value->stream = nullptr;
   value->value = nullptr;
+  return 0;
+}
+
+int32_t __cdecl is_stream_legal(void* layer, int32_t, uint8_t* legal) {
+  if (layer != &g_layer || !legal) return 4;
+  *legal = 0;
+  ++g_stream_metadata_queries;
+  return 0;
+}
+int32_t __cdecl can_vary_over_time(void* stream, uint8_t* can_vary) {
+  if (!find_stream(stream) || !can_vary) return 4;
+  *can_vary = 1;
+  ++g_stream_metadata_queries;
+  return 0;
+}
+int32_t __cdecl get_valid_interpolations(void* stream, int32_t* interpolations) {
+  if (!find_stream(stream) || !interpolations) return 4;
+  *interpolations = 0xffff;
+  ++g_stream_metadata_queries;
+  return 0;
+}
+int32_t __cdecl unsupported_new_layer_stream(int32_t, void*, int32_t, void** stream) {
+  if (stream) *stream = nullptr;
+  ++g_invalid_stream_operations;
+  return 4;
+}
+int32_t __cdecl unsupported_effect_stream_count(void*, int32_t* count) {
+  if (count) *count = 0;
+  ++g_invalid_stream_operations;
+  return 4;
+}
+int32_t __cdecl unsupported_new_effect_stream(int32_t, void*, int32_t, void** stream) {
+  if (stream) *stream = nullptr;
+  ++g_invalid_stream_operations;
+  return 4;
+}
+int32_t __cdecl unsupported_stream_name(int32_t, void* stream, uint8_t, void** name) {
+  if (name) *name = nullptr;
+  if (!find_stream(stream)) return 4;
+  ++g_invalid_stream_operations;
+  return 4;
+}
+int32_t __cdecl get_stream_units_text(void* stream, uint8_t, char* units) {
+  if (!find_stream(stream) || !units) return 4;
+  units[0] = '\0';
+  ++g_stream_metadata_queries;
+  return 0;
+}
+int32_t __cdecl get_stream_properties(void* stream, int32_t* flags, double* minimum,
+                                      double* maximum) {
+  if (!find_stream(stream) || !flags) return 4;
+  *flags = 0;
+  if (minimum) *minimum = 0;
+  if (maximum) *maximum = 0;
+  ++g_stream_metadata_queries;
+  return 0;
+}
+int32_t __cdecl is_stream_timevarying(void* stream, uint8_t* timevarying) {
+  if (!find_stream(stream) || !timevarying) return 4;
+  *timevarying = 0;
+  ++g_stream_metadata_queries;
+  return 0;
+}
+int32_t __cdecl get_stream_type(void* stream, int32_t* type) {
+  if (!find_stream(stream) || !type) return 4;
+  *type = 11;
+  ++g_stream_metadata_queries;
+  return 0;
+}
+int32_t __cdecl reject_set_stream_value(int32_t, void* stream, StreamValue*) {
+  if (!find_stream(stream)) return 4;
+  ++g_invalid_stream_operations;
+  return 4;
+}
+int32_t __cdecl unsupported_layer_stream_value(void*, int32_t, int32_t, const void*,
+                                               uint8_t, void* value, int32_t* type) {
+  if (value) std::memset(value, 0, sizeof(void*));
+  if (type) *type = 0;
+  ++g_invalid_stream_operations;
+  return 4;
+}
+int32_t __cdecl get_expression_state(int32_t plugin_id, void* stream, uint8_t* enabled) {
+  if (plugin_id != 1 || !find_stream(stream) || !enabled) return 4;
+  *enabled = 0;
+  ++g_stream_metadata_queries;
+  return 0;
+}
+int32_t __cdecl reject_expression_state(int32_t, void* stream, uint8_t) {
+  if (!find_stream(stream)) return 4;
+  ++g_invalid_stream_operations;
+  return 4;
+}
+int32_t __cdecl unsupported_get_expression(int32_t, void* stream, void** expression) {
+  if (expression) *expression = nullptr;
+  if (!find_stream(stream)) return 4;
+  ++g_invalid_stream_operations;
+  return 4;
+}
+int32_t __cdecl unsupported_set_expression(int32_t, void* stream, const uint16_t*) {
+  if (!find_stream(stream)) return 4;
+  ++g_invalid_stream_operations;
+  return 4;
+}
+int32_t __cdecl duplicate_stream_ref(int32_t plugin_id, void* stream, void** duplicate) {
+  HostStreamRef* original = find_stream(stream);
+  if (plugin_id != 1 || !original || !duplicate || g_stream_refs.size() >= 64) {
+    if (duplicate) *duplicate = nullptr;
+    ++g_invalid_stream_operations;
+    return 4;
+  }
+  g_stream_refs.push_back({{}, original->mask, original->selector, original->unique_id, 0});
+  ++g_mask_lifetime.streams_acquired;
+  ++g_stream_duplicates;
+  *duplicate = &g_stream_refs.back().opaque;
+  return 0;
+}
+int32_t __cdecl get_unique_stream_id(void* stream, int32_t* id) {
+  HostStreamRef* record = find_stream(stream);
+  if (!record || !id) return 4;
+  *id = record->unique_id;
+  ++g_stream_metadata_queries;
   return 0;
 }
 
@@ -815,13 +977,51 @@ bool verify_stream_dispose_with_live_value_rejected() {
   void* stream = nullptr;
   StreamValue value{};
   if (get_layer_mask_by_index(&g_layer, 0, &mask) != 0 ||
-      get_new_mask_stream(1, mask, 0, &stream) != 0 ||
+      get_new_mask_stream(1, mask, 400, &stream) != 0 ||
       get_new_stream_value(1, stream, 0, nullptr, 0, &value) != 0)
     return false;
   const int32_t premature_error = dispose_stream(stream);
   return premature_error == 4 && dispose_stream_value(&value) == 0 &&
       dispose_stream(stream) == 0 && dispose_mask(mask) == 0 &&
       mask_lifetimes_balanced();
+}
+
+bool verify_stream_metadata_and_ownership_rejection() {
+  const uint32_t invalid_before = g_invalid_stream_operations;
+  const uint32_t metadata_before = g_stream_metadata_queries;
+  const uint32_t duplicates_before = g_stream_duplicates;
+  void* mask = nullptr;
+  void* stream = nullptr;
+  void* duplicate = nullptr;
+  void* rejected = reinterpret_cast<void*>(1);
+  if (get_layer_mask_by_index(&g_layer, 0, &mask) != 0 ||
+      get_new_mask_stream(1, mask, 400, &stream) != 0 ||
+      get_new_mask_stream(1, mask, 401, &rejected) == 0 || rejected != nullptr ||
+      duplicate_stream_ref(1, stream, &duplicate) != 0)
+    return false;
+  uint8_t boolean{};
+  int32_t interpolations{}, flags{}, type{}, id{}, duplicate_id{};
+  double minimum = -1, maximum = -1;
+  char units[32]{'x'};
+  StreamValue first{}, second{};
+  bool passed = can_vary_over_time(stream, &boolean) == 0 && boolean == 1 &&
+      get_valid_interpolations(stream, &interpolations) == 0 && interpolations == 0xffff &&
+      get_stream_units_text(stream, 0, units) == 0 && units[0] == '\0' &&
+      get_stream_properties(stream, &flags, &minimum, &maximum) == 0 && flags == 0 &&
+      minimum == 0 && maximum == 0 && is_stream_timevarying(stream, &boolean) == 0 &&
+      boolean == 0 && get_stream_type(stream, &type) == 0 && type == 11 &&
+      get_unique_stream_id(stream, &id) == 0 &&
+      get_unique_stream_id(duplicate, &duplicate_id) == 0 && duplicate_id == id &&
+      get_expression_state(1, stream, &boolean) == 0 && boolean == 0 &&
+      get_new_stream_value(1, stream, 0, nullptr, 0, &first) == 0 &&
+      get_new_stream_value(1, duplicate, 0, nullptr, 0, &second) == 0 &&
+      first.value == second.value && reject_set_stream_value(1, stream, &first) != 0 &&
+      dispose_stream_value(&second) == 0 && dispose_stream_value(&first) == 0 &&
+      dispose_stream(duplicate) == 0 && dispose_stream(stream) == 0 &&
+      dispose_mask(mask) == 0;
+  return passed && g_invalid_stream_operations == invalid_before + 2 &&
+      g_stream_metadata_queries == metadata_before + 9 &&
+      g_stream_duplicates == duplicates_before + 1 && mask_lifetimes_balanced();
 }
 
 bool verify_outline_mutation_rejection() {
@@ -937,13 +1137,31 @@ struct MaskSuite {
   decltype(&duplicate_mask) duplicate;
 };
 struct StreamSuite {
-  void* unsupported_before_new_mask[6]{};
+  decltype(&is_stream_legal) is_stream_legal;
+  decltype(&can_vary_over_time) can_vary_over_time;
+  decltype(&get_valid_interpolations) get_valid_interpolations;
+  decltype(&unsupported_new_layer_stream) get_new_layer_stream;
+  decltype(&unsupported_effect_stream_count) get_effect_num_param_streams;
+  decltype(&unsupported_new_effect_stream) get_new_effect_stream_by_index;
   decltype(&get_new_mask_stream) get_new_mask_stream;
   decltype(&dispose_stream) dispose_stream;
-  void* unsupported_before_value[5]{};
+  decltype(&unsupported_stream_name) get_stream_name;
+  decltype(&get_stream_units_text) get_stream_units_text;
+  decltype(&get_stream_properties) get_stream_properties;
+  decltype(&is_stream_timevarying) is_stream_timevarying;
+  decltype(&get_stream_type) get_stream_type;
   decltype(&get_new_stream_value) get_new_stream_value;
   decltype(&dispose_stream_value) dispose_stream_value;
+  decltype(&reject_set_stream_value) set_stream_value;
+  decltype(&unsupported_layer_stream_value) get_layer_stream_value;
+  decltype(&get_expression_state) get_expression_state;
+  decltype(&reject_expression_state) set_expression_state;
+  decltype(&unsupported_get_expression) get_expression;
+  decltype(&unsupported_set_expression) set_expression;
+  decltype(&duplicate_stream_ref) duplicate_stream_ref;
+  decltype(&get_unique_stream_id) get_unique_stream_id;
 };
+static_assert(sizeof(StreamSuite) == 23 * sizeof(void*));
 struct MaskOutlineSuite {
   decltype(&is_mask_outline_open) is_open;
   decltype(&set_mask_outline_open) set_open;
@@ -968,8 +1186,15 @@ MaskSuite g_mask_suite{&get_layer_num_masks, &get_layer_mask_by_index, &dispose_
     &create_new_mask, &delete_mask_from_layer, &get_mask_color, &set_mask_color,
     &get_mask_lock, &set_mask_lock, &get_mask_roto_bezier, &set_mask_roto_bezier,
     &duplicate_mask};
-StreamSuite g_stream_suite{{}, &get_new_mask_stream, &dispose_stream, {},
-                           &get_new_stream_value, &dispose_stream_value};
+StreamSuite g_stream_suite{&is_stream_legal, &can_vary_over_time,
+    &get_valid_interpolations, &unsupported_new_layer_stream,
+    &unsupported_effect_stream_count, &unsupported_new_effect_stream,
+    &get_new_mask_stream, &dispose_stream, &unsupported_stream_name,
+    &get_stream_units_text, &get_stream_properties, &is_stream_timevarying,
+    &get_stream_type, &get_new_stream_value, &dispose_stream_value,
+    &reject_set_stream_value, &unsupported_layer_stream_value,
+    &get_expression_state, &reject_expression_state, &unsupported_get_expression,
+    &unsupported_set_expression, &duplicate_stream_ref, &get_unique_stream_id};
 MaskOutlineSuite g_mask_outline_suite{&is_mask_outline_open, &set_mask_outline_open,
                                       &get_mask_outline_num_segments,
                                       &get_mask_outline_vertex_info,
@@ -1504,6 +1729,7 @@ bool parse_double_arg(const wchar_t* text, double minimum, double maximum, doubl
 
 bool parse_mask_context_payload(const wchar_t* text) {
   if (!text) return false;
+  if (!g_stream_refs.empty() || !g_stream_values.empty()) return false;
   const std::wstring encoded(text);
   if (encoded.size() < 3 || encoded.size() > 8192 || encoded.compare(0, 3, L"v2|") != 0)
     return false;
@@ -1526,6 +1752,7 @@ bool parse_mask_context_payload(const wchar_t* text) {
                             item.compare(0, 2, L"1:") != 0)) return false;
     HostMask mask;
     mask.id = g_next_mask_id++;
+    mask.outline_stream_id = g_next_stream_id++;
     mask.open = item[0] == L'1';
     std::size_t vertex_offset = 2;
     while (vertex_offset < item.size()) {
@@ -2129,6 +2356,8 @@ int wmain(int argc, wchar_t** argv) {
       std::wstring(argv[1]) == L"--smart-mask-double-dispose-request";
   const bool stream_live_value_dispose_mode = argc == 5 &&
       std::wstring(argv[1]) == L"--smart-stream-live-value-dispose-request";
+  const bool stream_metadata_ownership_mode = argc == 5 &&
+      std::wstring(argv[1]) == L"--smart-stream-metadata-ownership-request";
   const bool suite_release_without_acquire_mode = argc == 5 &&
       std::wstring(argv[1]) == L"--smart-suite-release-without-acquire-request";
   const bool handle_resize_while_locked_mode = argc == 5 &&
@@ -2145,7 +2374,8 @@ int wmain(int argc, wchar_t** argv) {
       std::wstring(argv[1]) == L"--smart-mask-attribute-request";
   const bool request_mode = mask_request_mode || mask_scene_request_mode || mask_context_request_mode ||
       mask_count_error_mode || mask_count_crash_mode || mask_double_dispose_mode ||
-      stream_live_value_dispose_mode || suite_release_without_acquire_mode ||
+      stream_live_value_dispose_mode || stream_metadata_ownership_mode ||
+      suite_release_without_acquire_mode ||
       handle_resize_while_locked_mode || world_double_dispose_mode ||
       world_allocation_limit_mode ||
       pixel_format_registry_mode ||
@@ -2155,7 +2385,8 @@ int wmain(int argc, wchar_t** argv) {
   if (!request_mode && (argc != 5 || std::wstring(argv[1]) != L"--smart")) return 2;
   g_mask_model_enabled = mask_request_mode || mask_scene_request_mode || mask_context_request_mode ||
       mask_count_error_mode || mask_count_crash_mode || mask_double_dispose_mode ||
-      stream_live_value_dispose_mode || suite_release_without_acquire_mode ||
+      stream_live_value_dispose_mode || stream_metadata_ownership_mode ||
+      suite_release_without_acquire_mode ||
       handle_resize_while_locked_mode || world_double_dispose_mode ||
       world_allocation_limit_mode;
   g_mask_model_enabled = g_mask_model_enabled || pixel_format_registry_mode ||
@@ -2343,6 +2574,7 @@ int wmain(int argc, wchar_t** argv) {
   bool pixel_format_fault_observed = false;
   bool outline_fault_observed = false;
   bool mask_attribute_fault_observed = false;
+  bool stream_metadata_fault_observed = false;
   std::cerr << "stage:smart_render_end pre_error=" << smart.pre_error
             << " render_error=" << smart.render_error << "\n" << std::flush;
 #endif
@@ -2364,6 +2596,8 @@ int wmain(int argc, wchar_t** argv) {
     outline_fault_observed = verify_outline_mutation_rejection();
   if (mask_attribute_mode)
     mask_attribute_fault_observed = verify_mask_attribute_and_ownership_rejection();
+  if (stream_metadata_ownership_mode)
+    stream_metadata_fault_observed = verify_stream_metadata_and_ownership_rejection();
   #endif
   std::cerr << "stage:global_setdown_end error=" << setdown_error << "\n" << std::flush;
 #ifdef AEXCOMPAT_RENDER_WORKER
@@ -2470,6 +2704,10 @@ int wmain(int argc, wchar_t** argv) {
             << ",\"mask_attribute_fault_observed\":" << (mask_attribute_fault_observed ? "true" : "false")
             << ",\"mask_mutations\":" << g_mask_mutations
             << ",\"invalid_mask_operations\":" << g_invalid_mask_operations
+            << ",\"stream_metadata_fault_observed\":" << (stream_metadata_fault_observed ? "true" : "false")
+            << ",\"stream_metadata_queries\":" << g_stream_metadata_queries
+            << ",\"stream_duplicates\":" << g_stream_duplicates
+            << ",\"invalid_stream_operations\":" << g_invalid_stream_operations
             << ",\"requested_parameters\":" << requested_parameters_json(requested_parameters)
             << ",\"requested_amount\":" << static_cast<int32_t>(requested_value(requested_parameters, L"amount"))
             << ",\"requested_direction\":" << static_cast<int32_t>(requested_value(requested_parameters, L"direction"))

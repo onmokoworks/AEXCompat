@@ -42,6 +42,8 @@ class MinihostL2SourceTests(unittest.TestCase):
             "verify_pixel_format_registry_rejection()",
             "verify_outline_mutation_rejection()",
             "verify_mask_attribute_and_ownership_rejection()",
+            "verify_stream_metadata_and_ownership_rejection()",
+            "static_assert(sizeof(StreamSuite) == 23 * sizeof(void*))",
             "kMaxHandleCount = 1024",
             "kMaxHandleBytes = 64 * 1024 * 1024",
         ):

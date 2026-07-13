@@ -89,10 +89,10 @@ class SmartFxMaskSceneContractTests(unittest.TestCase):
             "bool stream_live{}",
             "bool value_live{}",
             "!record->mask_live",
-            "record->stream_live || !stream",
-            "record->value_live || !value",
-            "!record->stream_live || record->value_live",
-            "!stream_record->value_live",
+            "std::list<HostStreamRef> g_stream_refs",
+            "std::unordered_map<StreamValue*, HostStreamRef*> g_stream_values",
+            "record->live_values != 0",
+            "g_stream_refs.empty() && g_stream_values.empty()",
             "mask_lifetimes_balanced()",
         ):
             self.assertIn(marker, worker)

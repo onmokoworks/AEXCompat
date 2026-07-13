@@ -37,6 +37,7 @@ class SmartFxSuiteFaultContractTests(unittest.TestCase):
             'L"--smart-mask-count-crash-request"',
             'L"--smart-mask-double-dispose-request"',
             'L"--smart-stream-live-value-dispose-request"',
+            'L"--smart-stream-metadata-ownership-request"',
             'L"--smart-suite-release-without-acquire-request"',
             'L"--smart-handle-resize-while-locked-request"',
             "MaskFault::CountError",
@@ -50,6 +51,8 @@ class SmartFxSuiteFaultContractTests(unittest.TestCase):
         self.assertIn('"mask_count_crash"', route)
         self.assertIn('"mask_double_dispose"', route)
         self.assertIn('"stream_dispose_with_live_value"', route)
+        self.assertIn('"stream_metadata_ownership"', route)
+        self.assertIn('report.get("stream_metadata_fault_observed")', route)
         self.assertIn('"callback_error_rejected"', route)
         self.assertIn('"suite_release_without_acquire"', route)
         self.assertIn('report.get("suite_fault_observed")', route)
