@@ -11,6 +11,12 @@ add_executable(trace_writer_selftest common/trace_writer_selftest/main.cpp)
 target_link_libraries(trace_writer_selftest PRIVATE aexcompat_trace_writer)
 
 if(DEFINED ENV{AE_SDK_ROOT} AND EXISTS "$ENV{AE_SDK_ROOT}")
+  add_executable(abi_layout_probe abi-layout-probe/main.cpp)
+  target_include_directories(abi_layout_probe PRIVATE
+    "$ENV{AE_SDK_ROOT}/Examples/Headers"
+    "$ENV{AE_SDK_ROOT}/Examples/Headers/SP"
+    "$ENV{AE_SDK_ROOT}/Examples/Util"
+  )
   add_subdirectory(pf-null-echo)
   add_subdirectory(pf-callback-tracer)
   add_subdirectory(pf-crashkit)

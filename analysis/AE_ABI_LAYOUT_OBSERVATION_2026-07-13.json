@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "source_kind": "compiled_instrument_observation",
+  "source_path": "instruments/abi-layout-probe/main.cpp",
+  "sdk_root_committed": false,
+  "architecture": "x86_64-windows",
+  "pointer_size": 8,
+  "pf_in_data_size": 408,
+  "pf_out_data_size": 408,
+  "pf_param_def_size": 176,
+  "pf_layer_def_size": 120,
+  "fields": {
+    "in.version": { "offset": 196, "size": 4 },
+    "in.serial_num": { "offset": 200, "size": 4 },
+    "in.appl_id": { "offset": 204, "size": 4 },
+    "in.num_params": { "offset": 208, "size": 4 },
+    "in.pica_basicP": { "offset": 384, "size": 8 },
+    "out.my_version": { "offset": 0, "size": 4 },
+    "out.num_params": { "offset": 48, "size": 4 },
+    "out.out_flags": { "offset": 96, "size": 4 },
+    "out.return_msg": { "offset": 100, "size": 256 },
+    "out.out_flags2": { "offset": 400, "size": 4 }
+  },
+  "selectors": {
+    "about": 0,
+    "global_setup": 1,
+    "global_setdown": 3,
+    "params_setup": 4
+  },
+  "native_aex_loaded": false,
+  "selector_dispatched": false
+}

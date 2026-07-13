@@ -24,3 +24,15 @@ terms allow. AEXCompat therefore adopts the following hard boundary:
 
 This satisfies the H-3 provenance choice but does not open the Safety Gate.
 The existing native-code guard continues to enforce the directory boundary.
+
+## Observed Layout Facts
+
+`instruments/abi-layout-probe` compiles against the external SDK and emits only
+numeric ABI observations (`sizeof`, `offsetof`, and selector values). The
+2026-07-13 x86_64 Windows observation is recorded in
+`analysis/AE_ABI_LAYOUT_OBSERVATION_2026-07-13.json`. No header text, field
+declaration, macro body, or Adobe source is copied into `minihost/`.
+
+The cleanroom implementation may consume these numeric interoperability facts
+as assertions. Any declaration needed by `minihost/` must still be independently
+written from public documentation and validated against the observation.
