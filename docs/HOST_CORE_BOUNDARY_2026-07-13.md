@@ -82,3 +82,10 @@ rounding, uniform and separate-X/Y expansion, feathering, inversion, and a
 combined typed-color render. These algorithms remain outside `host_core`; the
 generic host only transports descriptors, values, worlds, and bounded mask ABI
 state.
+
+Opaque mask, stream-reference, and stream-value handles now have explicit
+single-owner live states. The worker rejects duplicate disposal and refuses to
+dispose a stream while a checked-out value remains live. Broker conformance
+requires one acquire/dispose pair for each object used by a host-context render
+and verifies that no object remains live. Fixed rejection tests restore valid
+state after the expected AE error and remain unavailable to arbitrary requests.

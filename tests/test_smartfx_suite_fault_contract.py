@@ -35,6 +35,8 @@ class SmartFxSuiteFaultContractTests(unittest.TestCase):
         for marker in (
             'L"--smart-mask-count-error-request"',
             'L"--smart-mask-count-crash-request"',
+            'L"--smart-mask-double-dispose-request"',
+            'L"--smart-stream-live-value-dispose-request"',
             "MaskFault::CountError",
             "MaskFault::CountCrash",
             "RaiseException(EXCEPTION_ACCESS_VIOLATION",
@@ -43,6 +45,9 @@ class SmartFxSuiteFaultContractTests(unittest.TestCase):
             self.assertIn(marker, worker)
         self.assertIn('"mask_count_error"', route)
         self.assertIn('"mask_count_crash"', route)
+        self.assertIn('"mask_double_dispose"', route)
+        self.assertIn('"stream_dispose_with_live_value"', route)
+        self.assertIn('"callback_error_rejected"', route)
         self.assertIn('invalid("unknown fixed suite fault")', route)
         self.assertIn('spec.request_mode == "--smart-mask-request"', route)
         self.assertIn('args[1] == "smart-suite-fault"', main)

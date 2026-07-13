@@ -13,8 +13,8 @@
     "plugin_id": {"type": "string", "pattern": "^[a-z][a-z0-9_-]{0,63}$"},
     "receipt_id": {"type": "string", "minLength": 1, "maxLength": 128},
     "fixture_sha256": {"type": "string", "pattern": "^[0-9A-F]{64}$"},
-    "fault_id": {"enum": ["mask_count_error", "mask_count_crash"]},
-    "expected_outcome": {"enum": ["plugin_fallback", "worker_crash"]},
+    "fault_id": {"enum": ["mask_count_error", "mask_count_crash", "mask_double_dispose", "stream_dispose_with_live_value"]},
+    "expected_outcome": {"enum": ["plugin_fallback", "worker_crash", "callback_error_rejected"]},
     "expected_fallback_sha256": {"type": ["string", "null"], "pattern": "^[0-9A-F]{64}$"},
     "run_1": {"$ref": "#/$defs/run"},
     "run_2": {"$ref": "#/$defs/run"},
@@ -25,13 +25,15 @@
     "run": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["classification", "pre_render_error", "smart_render_error", "output_sha256", "guard_bytes_intact"],
+      "required": ["classification", "pre_render_error", "smart_render_error", "output_sha256", "guard_bytes_intact", "lifetime_fault_observed", "mask_lifetimes_balanced"],
       "properties": {
         "classification": {"enum": ["ok", "nonzero_exit", "crashed", "timeout_killed"]},
         "pre_render_error": {"type": ["integer", "null"]},
         "smart_render_error": {"type": ["integer", "null"]},
         "output_sha256": {"type": ["string", "null"]},
-        "guard_bytes_intact": {"type": ["boolean", "null"]}
+        "guard_bytes_intact": {"type": ["boolean", "null"]},
+        "lifetime_fault_observed": {"type": ["boolean", "null"]},
+        "mask_lifetimes_balanced": {"type": ["boolean", "null"]}
       }
     }
   }

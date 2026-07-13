@@ -126,14 +126,36 @@ struct HostMask {
   OpaqueHostObject stream{0x5354524d};
   OpaqueHostObject outline{0x4f55544c};
   bool open{};
+  bool mask_live{};
+  bool stream_live{};
+  bool value_live{};
   std::vector<MaskVertex> vertices;
 };
 OpaqueHostObject g_effect{0x45464658};
 OpaqueHostObject g_layer{0x4c415952};
 std::vector<HostMask> g_mask_scene;
+struct MaskLifetimeCounts {
+  uint32_t masks_acquired{};
+  uint32_t masks_disposed{};
+  uint32_t streams_acquired{};
+  uint32_t streams_disposed{};
+  uint32_t values_acquired{};
+  uint32_t values_disposed{};
+};
+MaskLifetimeCounts g_mask_lifetime;
+
+bool mask_lifetimes_balanced() {
+  return g_mask_lifetime.masks_acquired == g_mask_lifetime.masks_disposed &&
+      g_mask_lifetime.streams_acquired == g_mask_lifetime.streams_disposed &&
+      g_mask_lifetime.values_acquired == g_mask_lifetime.values_disposed &&
+      std::none_of(g_mask_scene.begin(), g_mask_scene.end(), [](const auto& mask) {
+        return mask.mask_live || mask.stream_live || mask.value_live;
+      });
+}
 
 bool configure_mask_scene(const std::string& scene_id) {
   g_mask_scene.clear();
+  g_mask_lifetime = {};
   g_mask_scene_id = scene_id;
   const auto rectangle = [](double left, double top, double right, double bottom) {
     HostMask mask;
@@ -317,20 +339,38 @@ int32_t __cdecl get_layer_num_masks(void* layer, int32_t* count) {
 int32_t __cdecl get_layer_mask_by_index(void* layer, int32_t index, void** mask) {
   if (layer != &g_layer || index < 0 ||
       static_cast<std::size_t>(index) >= g_mask_scene.size() || !mask) return 4;
-  *mask = &g_mask_scene[static_cast<std::size_t>(index)].mask;
+  auto& record = g_mask_scene[static_cast<std::size_t>(index)];
+  if (record.mask_live) return 4;
+  record.mask_live = true;
+  ++g_mask_lifetime.masks_acquired;
+  *mask = &record.mask;
   return 0;
 }
 
-int32_t __cdecl dispose_mask(void* mask) { return find_mask(mask) ? 0 : 4; }
+int32_t __cdecl dispose_mask(void* mask) {
+  HostMask* record = find_mask(mask);
+  if (!record || !record->mask_live) return 4;
+  record->mask_live = false;
+  ++g_mask_lifetime.masks_disposed;
+  return 0;
+}
 
 int32_t __cdecl get_new_mask_stream(int32_t plugin_id, void* mask, int32_t, void** stream) {
   HostMask* record = find_mask(mask);
-  if (plugin_id != 1 || !record || !stream) return 4;
+  if (plugin_id != 1 || !record || !record->mask_live || record->stream_live || !stream) return 4;
+  record->stream_live = true;
+  ++g_mask_lifetime.streams_acquired;
   *stream = &record->stream;
   return 0;
 }
 
-int32_t __cdecl dispose_stream(void* stream) { return find_stream(stream) ? 0 : 4; }
+int32_t __cdecl dispose_stream(void* stream) {
+  HostMask* record = find_stream(stream);
+  if (!record || !record->stream_live || record->value_live) return 4;
+  record->stream_live = false;
+  ++g_mask_lifetime.streams_disposed;
+  return 0;
+}
 
 struct StreamValue {
   void* stream;
@@ -340,7 +380,9 @@ struct StreamValue {
 int32_t __cdecl get_new_stream_value(int32_t plugin_id, void* stream, int32_t,
                                      const void*, int32_t, StreamValue* value) {
   HostMask* record = find_stream(stream);
-  if (plugin_id != 1 || !record || !value) return 4;
+  if (plugin_id != 1 || !record || !record->stream_live || record->value_live || !value) return 4;
+  record->value_live = true;
+  ++g_mask_lifetime.values_acquired;
   value->stream = &record->stream;
   value->value = &record->outline;
   return 0;
@@ -350,7 +392,9 @@ int32_t __cdecl dispose_stream_value(StreamValue* value) {
   if (!value) return 4;
   HostMask* stream_record = find_stream(value->stream);
   HostMask* outline_record = find_outline(value->value);
-  if (!stream_record || stream_record != outline_record) return 4;
+  if (!stream_record || stream_record != outline_record || !stream_record->value_live) return 4;
+  stream_record->value_live = false;
+  ++g_mask_lifetime.values_disposed;
   value->stream = nullptr;
   value->value = nullptr;
   return 0;
@@ -377,6 +421,27 @@ int32_t __cdecl get_mask_outline_vertex_info(void* outline, int32_t index,
       static_cast<std::size_t>(index) >= record->vertices.size()) return 4;
   *vertex = record->vertices[static_cast<std::size_t>(index)];
   return 0;
+}
+
+bool verify_mask_double_dispose_rejected() {
+  void* mask = nullptr;
+  return get_layer_mask_by_index(&g_layer, 0, &mask) == 0 &&
+      dispose_mask(mask) == 0 && dispose_mask(mask) == 4 &&
+      mask_lifetimes_balanced();
+}
+
+bool verify_stream_dispose_with_live_value_rejected() {
+  void* mask = nullptr;
+  void* stream = nullptr;
+  StreamValue value{};
+  if (get_layer_mask_by_index(&g_layer, 0, &mask) != 0 ||
+      get_new_mask_stream(1, mask, 0, &stream) != 0 ||
+      get_new_stream_value(1, stream, 0, nullptr, 0, &value) != 0)
+    return false;
+  const int32_t premature_error = dispose_stream(stream);
+  return premature_error == 4 && dispose_stream_value(&value) == 0 &&
+      dispose_stream(stream) == 0 && dispose_mask(mask) == 0 &&
+      mask_lifetimes_balanced();
 }
 
 struct UtilitySuite {
@@ -654,6 +719,7 @@ bool parse_mask_context_payload(const wchar_t* text) {
   const std::wstring payload = encoded.substr(3);
   if (payload.empty()) {
     g_mask_scene.clear();
+    g_mask_lifetime = {};
     g_mask_scene_id = "request_v4";
     return true;
   }
@@ -701,6 +767,7 @@ bool parse_mask_context_payload(const wchar_t* text) {
     if (mask_offset == payload.size()) return false;
   }
   g_mask_scene = std::move(masks);
+  g_mask_lifetime = {};
   g_mask_scene_id = "request_v4";
   return true;
 }
@@ -1263,12 +1330,18 @@ int wmain(int argc, wchar_t** argv) {
       std::wstring(argv[1]) == L"--smart-mask-count-error-request";
   const bool mask_count_crash_mode = argc == 5 &&
       std::wstring(argv[1]) == L"--smart-mask-count-crash-request";
+  const bool mask_double_dispose_mode = argc == 5 &&
+      std::wstring(argv[1]) == L"--smart-mask-double-dispose-request";
+  const bool stream_live_value_dispose_mode = argc == 5 &&
+      std::wstring(argv[1]) == L"--smart-stream-live-value-dispose-request";
   const bool request_mode = mask_request_mode || mask_scene_request_mode || mask_context_request_mode ||
-      mask_count_error_mode || mask_count_crash_mode ||
+      mask_count_error_mode || mask_count_crash_mode || mask_double_dispose_mode ||
+      stream_live_value_dispose_mode ||
       (argc == 5 && std::wstring(argv[1]) == L"--smart-request");
   if (!request_mode && (argc != 5 || std::wstring(argv[1]) != L"--smart")) return 2;
   g_mask_model_enabled = mask_request_mode || mask_scene_request_mode || mask_context_request_mode ||
-      mask_count_error_mode || mask_count_crash_mode;
+      mask_count_error_mode || mask_count_crash_mode || mask_double_dispose_mode ||
+      stream_live_value_dispose_mode;
   g_mask_fault = mask_count_error_mode ? MaskFault::CountError :
       mask_count_crash_mode ? MaskFault::CountCrash : MaskFault::None;
   RequestedAssignments requested_parameters;
@@ -1438,6 +1511,11 @@ int wmain(int argc, wchar_t** argv) {
       ? smart_render_once(entry, input, output, case_id,
                           request_mode ? &requested_parameters : nullptr)
       : SmartResult{};
+  const bool lifetime_fault_observed = mask_double_dispose_mode
+      ? verify_mask_double_dispose_rejected()
+      : stream_live_value_dispose_mode
+          ? verify_stream_dispose_with_live_value_rejected()
+          : false;
   std::cerr << "stage:smart_render_end pre_error=" << smart.pre_error
             << " render_error=" << smart.render_error << "\n" << std::flush;
 #endif
@@ -1507,6 +1585,14 @@ int wmain(int argc, wchar_t** argv) {
             << ",\"mask_count\":" << g_mask_scene.size()
             << ",\"mask_open_count\":" << mask_open_count()
             << ",\"mask_tangent_vertex_count\":" << mask_tangent_vertex_count()
+            << ",\"mask_lifetimes_balanced\":" << (mask_lifetimes_balanced() ? "true" : "false")
+            << ",\"mask_handles_acquired\":" << g_mask_lifetime.masks_acquired
+            << ",\"mask_handles_disposed\":" << g_mask_lifetime.masks_disposed
+            << ",\"stream_handles_acquired\":" << g_mask_lifetime.streams_acquired
+            << ",\"stream_handles_disposed\":" << g_mask_lifetime.streams_disposed
+            << ",\"stream_values_acquired\":" << g_mask_lifetime.values_acquired
+            << ",\"stream_values_disposed\":" << g_mask_lifetime.values_disposed
+            << ",\"lifetime_fault_observed\":" << (lifetime_fault_observed ? "true" : "false")
             << ",\"requested_parameters\":" << requested_parameters_json(requested_parameters)
             << ",\"requested_amount\":" << static_cast<int32_t>(requested_value(requested_parameters, L"amount"))
             << ",\"requested_direction\":" << static_cast<int32_t>(requested_value(requested_parameters, L"direction"))

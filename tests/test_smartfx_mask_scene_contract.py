@@ -79,6 +79,32 @@ class SmartFxMaskSceneContractTests(unittest.TestCase):
         ):
             self.assertIn(marker, worker)
 
+    def test_mask_handle_lifetimes_are_single_owner_and_broker_verified(self):
+        worker = (ROOT / "minihost/src/l2_main.cpp").read_text(encoding="utf-8")
+        route = (ROOT / "broker/crates/broker/src/render_request.rs").read_text(
+            encoding="utf-8"
+        )
+        for marker in (
+            "bool mask_live{}",
+            "bool stream_live{}",
+            "bool value_live{}",
+            "!record->mask_live",
+            "record->stream_live || !stream",
+            "record->value_live || !value",
+            "!record->stream_live || record->value_live",
+            "!stream_record->value_live",
+            "mask_lifetimes_balanced()",
+        ):
+            self.assertIn(marker, worker)
+        for marker in (
+            'report.get("mask_lifetimes_balanced")',
+            '"mask_handles_acquired"',
+            '"stream_handles_disposed"',
+            '"stream_values_disposed"',
+            "expected_mask_lifetime_count",
+        ):
+            self.assertIn(marker, route)
+
 
 if __name__ == "__main__":
     unittest.main()

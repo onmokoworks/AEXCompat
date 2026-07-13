@@ -494,6 +494,9 @@ pub fn execute_smart(
             .count();
         (open_masks, tangent_vertices)
     });
+    let expected_mask_lifetime_count = request.host_context.as_ref().map(|context| {
+        u64::from(!context.mask_scene.masks.is_empty())
+    });
     if request.host_context.is_some() && worker_spec.request_mode != "--smart-mask-request" {
         return Err(invalid(
             "profile has no approved host mask context capability",
@@ -589,6 +592,18 @@ pub fn execute_smart(
                         .get("mask_tangent_vertex_count")
                         .and_then(Value::as_u64)
                         == host_context_shape_counts.map(|counts| counts.1 as u64)
+                    && report.get("mask_lifetimes_balanced") == Some(&Value::Bool(true))
+                    && [
+                        "mask_handles_acquired",
+                        "mask_handles_disposed",
+                        "stream_handles_acquired",
+                        "stream_handles_disposed",
+                        "stream_values_acquired",
+                        "stream_values_disposed",
+                    ]
+                    .iter()
+                    .all(|field| report.get(*field).and_then(Value::as_u64)
+                        == expected_mask_lifetime_count)
             })
             && report
                 .get("output_sha256")
@@ -609,6 +624,13 @@ pub fn execute_smart(
         "mask_scene_id":item.1.get("mask_scene_id"),"mask_count":item.1.get("mask_count"),
         "mask_open_count":item.1.get("mask_open_count"),
         "mask_tangent_vertex_count":item.1.get("mask_tangent_vertex_count"),
+        "mask_lifetimes_balanced":item.1.get("mask_lifetimes_balanced"),
+        "mask_handles_acquired":item.1.get("mask_handles_acquired"),
+        "mask_handles_disposed":item.1.get("mask_handles_disposed"),
+        "stream_handles_acquired":item.1.get("stream_handles_acquired"),
+        "stream_handles_disposed":item.1.get("stream_handles_disposed"),
+        "stream_values_acquired":item.1.get("stream_values_acquired"),
+        "stream_values_disposed":item.1.get("stream_values_disposed"),
         "requested_parameters":item.1.get("requested_parameters")})
     };
     let report = json!({"schema_version":1,"stage":"parameterized_smartfx_render",
@@ -638,9 +660,15 @@ pub fn execute_smart_suite_fault(
     fault_id: &str,
     output_path: &Path,
 ) -> io::Result<bool> {
-    let (worker_mode, expect_crash) = match fault_id {
-        "mask_count_error" => ("--smart-mask-count-error-request", false),
-        "mask_count_crash" => ("--smart-mask-count-crash-request", true),
+    let (worker_mode, expect_crash, expect_lifetime_rejection) = match fault_id {
+        "mask_count_error" => ("--smart-mask-count-error-request", false, false),
+        "mask_count_crash" => ("--smart-mask-count-crash-request", true, false),
+        "mask_double_dispose" => ("--smart-mask-double-dispose-request", false, true),
+        "stream_dispose_with_live_value" => (
+            "--smart-stream-live-value-dispose-request",
+            false,
+            true,
+        ),
         _ => return Err(invalid("unknown fixed suite fault")),
     };
     let output_path = resolve_inside(
@@ -693,6 +721,15 @@ pub fn execute_smart_suite_fault(
     let passed = if expect_crash {
         runs.iter()
             .all(|(classification, _)| classification.as_str() == "crashed")
+    } else if expect_lifetime_rejection {
+        runs.iter().all(|(classification, report)| {
+            classification.as_str() == "ok"
+                && report.get("pre_render_error") == Some(&json!(0))
+                && report.get("smart_render_error") == Some(&json!(0))
+                && report.get("guard_bytes_intact") == Some(&Value::Bool(true))
+                && report.get("lifetime_fault_observed") == Some(&Value::Bool(true))
+                && report.get("mask_lifetimes_balanced") == Some(&Value::Bool(true))
+        })
     } else {
         runs.iter()
             .all(|(classification, report)| fallback_valid(*classification, report))
@@ -703,14 +740,16 @@ pub fn execute_smart_suite_fault(
             "pre_render_error":item.1.get("pre_render_error"),
             "smart_render_error":item.1.get("smart_render_error"),
             "output_sha256":item.1.get("output_sha256"),
-            "guard_bytes_intact":item.1.get("guard_bytes_intact")
+            "guard_bytes_intact":item.1.get("guard_bytes_intact"),
+            "lifetime_fault_observed":item.1.get("lifetime_fault_observed"),
+            "mask_lifetimes_balanced":item.1.get("mask_lifetimes_balanced")
         })
     };
     let report = json!({
         "schema_version":1,"stage":"smartfx_suite_fault","plugin_id":plugin_id,
         "receipt_id":approved.receipt_id,"fixture_sha256":approved.sha256.to_ascii_uppercase(),
-        "fault_id":fault_id,"expected_outcome":if expect_crash { "worker_crash" } else { "plugin_fallback" },
-        "expected_fallback_sha256":if expect_crash { Value::Null } else { json!(fallback_hash) },
+        "fault_id":fault_id,"expected_outcome":if expect_crash { "worker_crash" } else if expect_lifetime_rejection { "callback_error_rejected" } else { "plugin_fallback" },
+        "expected_fallback_sha256":if expect_crash || expect_lifetime_rejection { Value::Null } else { json!(fallback_hash) },
         "run_1":summarize(&runs[0]),"run_2":summarize(&runs[1]),
         "broker_survived":true,"passed":passed
     });

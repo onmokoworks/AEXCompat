@@ -93,6 +93,15 @@ broker survived both runs. The fault is compiled into the isolated test worker
 and cannot be selected through a normal render request. Worker startup disables
 Windows GP-fault UI so unattended conformance cannot stall in an error modal.
 
+Mask, stream-reference, and stream-value ownership is now stateful rather than
+accepting any known pointer indefinitely. A normal native render acquired and
+disposed exactly one of each object in both isolated runs, with no live object
+remaining. Two additional fixed fault ids prove that a second mask dispose and
+a stream dispose attempted while its value is live both return an AE error.
+After each rejected operation, the valid cleanup sequence restores a balanced
+state. These modes remain profile-gated and do not accept pointers or callback
+sequences from the request.
+
 ## Host-Owned Mask Scenes
 
 The mask ABI no longer stores one hard-coded mask, stream, outline, or vertex

@@ -25,6 +25,12 @@ The same regression pass reverified legacy v3, bounded v4, ScatterMap SmartFX,
 and intentional mask-suite Access Violation isolation. This expands verified
 render behavior without opening arbitrary native paths or fault modes.
 
+AEGP mask ownership is additionally verified: native MaskOffset runs balance
+mask, stream-reference, and stream-value acquisition/disposal exactly. Fixed
+profile-gated tests reject duplicate mask disposal and stream disposal with a
+live value, then prove valid cleanup restores a leak-free state. Existing count
+error, Access Violation, multi-mask, and ScatterMap regressions remain green.
+
 ## Human Work Required
 
 1. H-1 is complete: the approved self-authored fixture is identified by SHA-256 and byte size, and native loading is explicitly permitted.
