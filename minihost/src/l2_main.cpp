@@ -17,6 +17,7 @@
 #include <limits>
 #include <list>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <new>
 #include <sstream>
@@ -140,10 +141,23 @@ static_assert(offsetof(MaskFeather, segment_s) == 8);
 static_assert(offsetof(MaskFeather, radius) == 16);
 static_assert(offsetof(MaskFeather, interp) == 32);
 static_assert(offsetof(MaskFeather, type) == 33);
-struct HostMask {
-  OpaqueHostObject mask{0x4d41534b};
+struct OutlineData {
   OpaqueHostObject outline{0x4f55544c};
   bool open{};
+  std::vector<MaskVertex> vertices;
+  std::vector<MaskFeather> feathers;
+};
+struct HostTime { int32_t value{}; uint32_t scale{1}; };
+static_assert(sizeof(HostTime) == 8);
+struct HostKeyframe : OutlineData {
+  HostTime time{};
+  int32_t flags{};
+  int32_t in_interpolation{1};
+  int32_t out_interpolation{1};
+  int32_t label{};
+};
+struct HostMask : OutlineData {
+  OpaqueHostObject mask{0x4d41534b};
   bool mask_live{};
   bool stream_live{};
   bool value_live{};
@@ -157,8 +171,7 @@ struct HostMask {
   int32_t id{};
   int32_t outline_stream_id{};
   std::array<double, 4> color{1.0, 1.0, 0.0, 0.0};
-  std::vector<MaskVertex> vertices;
-  std::vector<MaskFeather> feathers;
+  std::list<HostKeyframe> keyframes;
 };
 struct HostStreamRef {
   OpaqueHostObject opaque{0x5354524d};
@@ -171,11 +184,22 @@ struct StreamValue {
   void* stream;
   void* value;
 };
+struct CheckedStreamValue {
+  HostStreamRef* stream{};
+  OutlineData* outline{};
+  HostKeyframe* source_keyframe{};
+  std::unique_ptr<OutlineData> owned_outline;
+};
+OutlineData* sampled_outline(HostStreamRef* stream, const HostTime* time,
+                             std::unique_ptr<OutlineData>& owned);
+int32_t __cdecl get_mask_outline_vertex_info(void* outline, int32_t index, MaskVertex* vertex);
+int32_t __cdecl set_mask_outline_vertex_info(void* outline, int32_t index,
+                                              const MaskVertex* vertex);
 OpaqueHostObject g_effect{0x45464658};
 OpaqueHostObject g_layer{0x4c415952};
 std::vector<HostMask> g_mask_scene;
 std::list<HostStreamRef> g_stream_refs;
-std::unordered_map<StreamValue*, HostStreamRef*> g_stream_values;
+std::unordered_map<StreamValue*, CheckedStreamValue> g_stream_values;
 struct MaskLifetimeCounts {
   uint32_t masks_acquired{};
   uint32_t masks_disposed{};
@@ -192,17 +216,28 @@ uint32_t g_invalid_mask_operations{};
 uint32_t g_invalid_stream_operations{};
 uint32_t g_stream_metadata_queries{};
 uint32_t g_stream_duplicates{};
+uint32_t g_keyframe_mutations{};
+uint32_t g_invalid_keyframe_operations{};
 int32_t g_next_mask_id{1};
 int32_t g_next_stream_id{1};
 constexpr std::size_t kMaxHostMasks = 8;
 constexpr std::size_t kMaxOutlineVertices = 64;
 constexpr std::size_t kMaxOutlineFeathers = 64;
+constexpr std::size_t kMaxKeyframesPerStream = 64;
+constexpr std::size_t kMaxCheckedStreamValues = 256;
 
-std::size_t distinct_vertex_count(const HostMask& mask) {
+struct AddKeyframesTransaction {
+  OpaqueHostObject opaque{0x41444b46};
+  HostStreamRef* stream{};
+  std::vector<HostKeyframe> staged;
+};
+std::list<AddKeyframesTransaction> g_add_keyframe_transactions;
+
+std::size_t distinct_vertex_count(const OutlineData& mask) {
   return mask.vertices.size() - static_cast<std::size_t>(!mask.open && !mask.vertices.empty());
 }
 
-void sync_closed_vertex(HostMask& mask) {
+void sync_closed_vertex(OutlineData& mask) {
   if (!mask.open && !mask.vertices.empty()) mask.vertices.back() = mask.vertices.front();
 }
 
@@ -210,14 +245,15 @@ bool mask_lifetimes_balanced() {
   return g_mask_lifetime.masks_acquired == g_mask_lifetime.masks_disposed &&
       g_mask_lifetime.streams_acquired == g_mask_lifetime.streams_disposed &&
       g_mask_lifetime.values_acquired == g_mask_lifetime.values_disposed &&
-      g_stream_refs.empty() && g_stream_values.empty() &&
+      g_stream_refs.empty() && g_stream_values.empty() && g_add_keyframe_transactions.empty() &&
       std::none_of(g_mask_scene.begin(), g_mask_scene.end(), [](const auto& mask) {
         return mask.mask_live || mask.stream_live || mask.value_live;
       });
 }
 
 bool configure_mask_scene(const std::string& scene_id) {
-  if (!g_stream_refs.empty() || !g_stream_values.empty()) return false;
+  if (!g_stream_refs.empty() || !g_stream_values.empty() ||
+      !g_add_keyframe_transactions.empty()) return false;
   g_mask_scene.clear();
   g_mask_scene.reserve(kMaxHostMasks);
   g_mask_lifetime = {};
@@ -250,10 +286,20 @@ HostStreamRef* find_stream(void* handle) {
       [handle](auto& stream) { return handle == &stream.opaque; });
   return found == g_stream_refs.end() ? nullptr : &*found;
 }
-HostMask* find_outline(void* handle) {
+OutlineData* find_outline(void* handle) {
   const auto found = std::find_if(g_mask_scene.begin(), g_mask_scene.end(),
       [handle](auto& mask) { return handle == &mask.outline; });
-  return found == g_mask_scene.end() ? nullptr : &*found;
+  if (found != g_mask_scene.end()) return &*found;
+  for (auto& mask : g_mask_scene) {
+    const auto key = std::find_if(mask.keyframes.begin(), mask.keyframes.end(),
+        [handle](auto& item) { return handle == &item.outline; });
+    if (key != mask.keyframes.end()) return &*key;
+  }
+  for (auto& item : g_stream_values) {
+    if (item.second.outline && handle == &item.second.outline->outline)
+      return item.second.outline;
+  }
+  return nullptr;
 }
 
 std::size_t mask_open_count() {
@@ -627,7 +673,11 @@ int32_t __cdecl get_new_mask_stream(int32_t plugin_id, void* mask, int32_t selec
 
 int32_t __cdecl dispose_stream(void* stream) {
   HostStreamRef* record = find_stream(stream);
-  if (!record || record->live_values != 0) { ++g_invalid_stream_operations; return 4; }
+  if (!record || record->live_values != 0 ||
+      std::any_of(g_add_keyframe_transactions.begin(), g_add_keyframe_transactions.end(),
+          [record](const auto& transaction) { return transaction.stream == record; })) {
+    ++g_invalid_stream_operations; return 4;
+  }
   HostMask* mask = record->mask;
   g_stream_refs.erase(std::find_if(g_stream_refs.begin(), g_stream_refs.end(),
       [record](auto& candidate) { return &candidate == record; }));
@@ -638,17 +688,22 @@ int32_t __cdecl dispose_stream(void* stream) {
 }
 
 int32_t __cdecl get_new_stream_value(int32_t plugin_id, void* stream, int32_t,
-                                     const void*, int32_t, StreamValue* value) {
+                                     const HostTime* time, int32_t, StreamValue* value) {
   HostStreamRef* record = find_stream(stream);
-  if (plugin_id != 1 || !record || !value || g_stream_values.find(value) != g_stream_values.end()) {
+  if (plugin_id != 1 || !record || !value ||
+      g_stream_values.size() >= kMaxCheckedStreamValues ||
+      g_stream_values.find(value) != g_stream_values.end()) {
     ++g_invalid_stream_operations; return 4;
   }
+  std::unique_ptr<OutlineData> owned;
+  OutlineData* outline = sampled_outline(record, time, owned);
+  if (!outline) { ++g_invalid_stream_operations; return 4; }
   ++record->live_values;
   record->mask->value_live = true;
-  g_stream_values.emplace(value, record);
+  g_stream_values.emplace(value, CheckedStreamValue{record, outline, nullptr, std::move(owned)});
   ++g_mask_lifetime.values_acquired;
   value->stream = &record->opaque;
-  value->value = &record->mask->outline;
+  value->value = &outline->outline;
   return 0;
 }
 
@@ -656,16 +711,16 @@ int32_t __cdecl dispose_stream_value(StreamValue* value) {
   if (!value) return 4;
   const auto owned = g_stream_values.find(value);
   HostStreamRef* stream_record = find_stream(value->stream);
-  HostMask* outline_record = find_outline(value->value);
-  if (owned == g_stream_values.end() || !stream_record || owned->second != stream_record ||
-      stream_record->mask != outline_record || stream_record->live_values == 0) {
+  OutlineData* outline_record = find_outline(value->value);
+  if (owned == g_stream_values.end() || !stream_record || owned->second.stream != stream_record ||
+      owned->second.outline != outline_record || stream_record->live_values == 0) {
     ++g_invalid_stream_operations; return 4;
   }
   --stream_record->live_values;
   g_stream_values.erase(owned);
-  outline_record->value_live = std::any_of(g_stream_refs.begin(), g_stream_refs.end(),
-      [outline_record](const auto& candidate) {
-        return candidate.mask == outline_record && candidate.live_values != 0;
+  stream_record->mask->value_live = std::any_of(g_stream_refs.begin(), g_stream_refs.end(),
+      [mask = stream_record->mask](const auto& candidate) {
+        return candidate.mask == mask && candidate.live_values != 0;
       });
   ++g_mask_lifetime.values_disposed;
   value->stream = nullptr;
@@ -728,8 +783,9 @@ int32_t __cdecl get_stream_properties(void* stream, int32_t* flags, double* mini
   return 0;
 }
 int32_t __cdecl is_stream_timevarying(void* stream, uint8_t* timevarying) {
-  if (!find_stream(stream) || !timevarying) return 4;
-  *timevarying = 0;
+  HostStreamRef* record = find_stream(stream);
+  if (!record || !timevarying) return 4;
+  *timevarying = record->mask->keyframes.empty() ? 0 : 1;
   ++g_stream_metadata_queries;
   return 0;
 }
@@ -794,15 +850,339 @@ int32_t __cdecl get_unique_stream_id(void* stream, int32_t* id) {
   return 0;
 }
 
+bool valid_time(const HostTime* time) { return time && time->scale != 0; }
+bool time_less(const HostTime& left, const HostTime& right) {
+  return static_cast<int64_t>(left.value) * right.scale <
+      static_cast<int64_t>(right.value) * left.scale;
+}
+bool time_equal(const HostTime& left, const HostTime& right) {
+  return static_cast<int64_t>(left.value) * right.scale ==
+      static_cast<int64_t>(right.value) * left.scale;
+}
+OutlineData* sampled_outline(HostStreamRef* stream, const HostTime* time,
+                             std::unique_ptr<OutlineData>& owned) {
+  if (!stream) return nullptr;
+  auto& keys = stream->mask->keyframes;
+  if (keys.empty() || !time) return stream->mask;
+  if (!valid_time(time)) return nullptr;
+  auto upper = std::find_if(keys.begin(), keys.end(),
+      [time](const auto& key) { return time_less(*time, key.time); });
+  if (upper == keys.begin()) return &*upper;
+  if (upper == keys.end()) return &keys.back();
+  auto lower = std::prev(upper);
+  if (time_equal(lower->time, *time) || lower->out_interpolation == 3) return &*lower;
+  if (lower->open != upper->open || lower->vertices.size() != upper->vertices.size() ||
+      lower->feathers.size() != upper->feathers.size()) return &*lower;
+  const double lower_seconds = static_cast<double>(lower->time.value) / lower->time.scale;
+  const double upper_seconds = static_cast<double>(upper->time.value) / upper->time.scale;
+  const double requested_seconds = static_cast<double>(time->value) / time->scale;
+  if (!(upper_seconds > lower_seconds)) return &*lower;
+  const double amount = (requested_seconds - lower_seconds) / (upper_seconds - lower_seconds);
+  owned = std::make_unique<OutlineData>(static_cast<const OutlineData&>(*lower));
+  const auto blend = [amount](double left, double right) { return left + (right - left) * amount; };
+  for (std::size_t index = 0; index < owned->vertices.size(); ++index) {
+    const MaskVertex& left = lower->vertices[index]; const MaskVertex& right = upper->vertices[index];
+    owned->vertices[index] = {blend(left.x, right.x), blend(left.y, right.y),
+        blend(left.tangent_in_x, right.tangent_in_x),
+        blend(left.tangent_in_y, right.tangent_in_y),
+        blend(left.tangent_out_x, right.tangent_out_x),
+        blend(left.tangent_out_y, right.tangent_out_y)};
+  }
+  for (std::size_t index = 0; index < owned->feathers.size(); ++index) {
+    const MaskFeather& left = lower->feathers[index]; const MaskFeather& right = upper->feathers[index];
+    if (left.segment != right.segment || left.interp != right.interp || left.type != right.type)
+      return &*lower;
+    owned->feathers[index].segment_s = blend(left.segment_s, right.segment_s);
+    owned->feathers[index].radius = blend(left.radius, right.radius);
+    owned->feathers[index].ui_corner_angle = static_cast<float>(
+        blend(left.ui_corner_angle, right.ui_corner_angle));
+    owned->feathers[index].tension = static_cast<float>(blend(left.tension, right.tension));
+  }
+  return owned.get();
+}
+HostKeyframe* keyframe_at(HostStreamRef* stream, int32_t index) {
+  if (!stream || index < 0 || static_cast<std::size_t>(index) >= stream->mask->keyframes.size())
+    return nullptr;
+  auto item = stream->mask->keyframes.begin();
+  std::advance(item, index);
+  return &*item;
+}
+AddKeyframesTransaction* find_add_transaction(void* handle) {
+  const auto found = std::find_if(g_add_keyframe_transactions.begin(),
+      g_add_keyframe_transactions.end(), [handle](auto& item) { return handle == &item.opaque; });
+  return found == g_add_keyframe_transactions.end() ? nullptr : &*found;
+}
+HostKeyframe snapshot_keyframe(const HostMask& mask, const HostTime& time) {
+  HostKeyframe key;
+  static_cast<OutlineData&>(key) = static_cast<const OutlineData&>(mask);
+  key.time = time;
+  return key;
+}
+int32_t __cdecl get_stream_num_keyframes(void* stream, int32_t* count) {
+  HostStreamRef* record = find_stream(stream);
+  if (!record || !count) return 4;
+  *count = static_cast<int32_t>(record->mask->keyframes.size());
+  return 0;
+}
+int32_t __cdecl get_keyframe_time(void* stream, int32_t index, int16_t time_mode,
+                                  HostTime* time) {
+  HostKeyframe* key = keyframe_at(find_stream(stream), index);
+  if (!key || !time || time_mode < 0 || time_mode > 1) return 4;
+  *time = key->time;
+  return 0;
+}
+int32_t __cdecl insert_keyframe(void* stream, int16_t time_mode, const HostTime* time,
+                                int32_t* index) {
+  HostStreamRef* record = find_stream(stream);
+  if (!record || time_mode < 0 || time_mode > 1 || !valid_time(time) || !index ||
+      record->mask->keyframes.size() >= kMaxKeyframesPerStream) {
+    ++g_invalid_keyframe_operations; return 4;
+  }
+  auto position = record->mask->keyframes.begin();
+  int32_t found_index = 0;
+  while (position != record->mask->keyframes.end() && time_less(position->time, *time)) {
+    ++position; ++found_index;
+  }
+  if (position != record->mask->keyframes.end() && time_equal(position->time, *time)) {
+    *index = found_index; return 0;
+  }
+  record->mask->keyframes.insert(position, snapshot_keyframe(*record->mask, *time));
+  *index = found_index;
+  ++g_keyframe_mutations;
+  return 0;
+}
+int32_t __cdecl delete_keyframe(void* stream, int32_t index) {
+  HostStreamRef* record = find_stream(stream);
+  HostKeyframe* key = keyframe_at(record, index);
+  if (!key || std::any_of(g_stream_values.begin(), g_stream_values.end(),
+      [key](const auto& item) { return item.second.source_keyframe == key; })) {
+    ++g_invalid_keyframe_operations; return 4;
+  }
+  auto position = record->mask->keyframes.begin(); std::advance(position, index);
+  record->mask->keyframes.erase(position);
+  ++g_keyframe_mutations;
+  return 0;
+}
+int32_t __cdecl get_new_keyframe_value(int32_t plugin_id, void* stream, int32_t index,
+                                       StreamValue* value) {
+  HostStreamRef* record = find_stream(stream);
+  HostKeyframe* key = keyframe_at(record, index);
+  if (plugin_id != 1 || !record || !key || !value ||
+      g_stream_values.size() >= kMaxCheckedStreamValues ||
+      g_stream_values.find(value) != g_stream_values.end()) {
+    ++g_invalid_keyframe_operations; return 4;
+  }
+  auto owned = std::make_unique<OutlineData>(static_cast<const OutlineData&>(*key));
+  OutlineData* outline = owned.get();
+  ++record->live_values; record->mask->value_live = true;
+  g_stream_values.emplace(value, CheckedStreamValue{record, outline, key, std::move(owned)});
+  ++g_mask_lifetime.values_acquired;
+  value->stream = &record->opaque; value->value = &outline->outline;
+  return 0;
+}
+int32_t __cdecl set_keyframe_value(void* stream, int32_t index, const StreamValue* value) {
+  HostStreamRef* record = find_stream(stream);
+  HostKeyframe* key = keyframe_at(record, index);
+  OutlineData* source = value ? find_outline(value->value) : nullptr;
+  if (!key || !source || source == key) { ++g_invalid_keyframe_operations; return 4; }
+  static_cast<OutlineData&>(*key) = *source;
+  ++g_keyframe_mutations;
+  return 0;
+}
+int32_t __cdecl get_stream_value_dimensionality(void* stream, int16_t* dimensions) {
+  if (!find_stream(stream) || !dimensions) return 4;
+  *dimensions = 0; return 0;
+}
+int32_t __cdecl get_stream_temporal_dimensionality(void* stream, int16_t* dimensions) {
+  if (!find_stream(stream) || !dimensions) return 4;
+  *dimensions = 0; return 0;
+}
+int32_t __cdecl reject_spatial_tangents(int32_t, void* stream, int32_t,
+                                        StreamValue* in_value, StreamValue* out_value) {
+  if (in_value) *in_value = {}; if (out_value) *out_value = {};
+  if (!find_stream(stream)) return 4;
+  ++g_invalid_keyframe_operations; return 4;
+}
+int32_t __cdecl reject_set_spatial_tangents(void* stream, int32_t,
+                                            const StreamValue*, const StreamValue*) {
+  if (!find_stream(stream)) return 4;
+  ++g_invalid_keyframe_operations; return 4;
+}
+struct KeyframeEase { double speed; double influence; };
+int32_t __cdecl reject_get_temporal_ease(void* stream, int32_t, int32_t,
+                                         KeyframeEase* in_ease, KeyframeEase* out_ease) {
+  if (in_ease) *in_ease = {}; if (out_ease) *out_ease = {};
+  if (!find_stream(stream)) return 4;
+  ++g_invalid_keyframe_operations; return 4;
+}
+int32_t __cdecl reject_set_temporal_ease(void* stream, int32_t, int32_t,
+                                         const KeyframeEase*, const KeyframeEase*) {
+  if (!find_stream(stream)) return 4;
+  ++g_invalid_keyframe_operations; return 4;
+}
+int32_t __cdecl get_keyframe_flags(void* stream, int32_t index, int32_t* flags) {
+  HostKeyframe* key = keyframe_at(find_stream(stream), index);
+  if (!key || !flags) return 4;
+  *flags = key->flags; return 0;
+}
+int32_t __cdecl set_keyframe_flag(void* stream, int32_t index, int32_t flag, uint8_t enabled) {
+  HostKeyframe* key = keyframe_at(find_stream(stream), index);
+  if (!key || flag == 0 || (flag & ~0x1f) != 0 || (flag & (flag - 1)) != 0) {
+    ++g_invalid_keyframe_operations; return 4;
+  }
+  if (enabled) key->flags |= flag; else key->flags &= ~flag;
+  ++g_keyframe_mutations; return 0;
+}
+int32_t __cdecl get_keyframe_interpolation(void* stream, int32_t index,
+                                           int32_t* in_interp, int32_t* out_interp) {
+  HostKeyframe* key = keyframe_at(find_stream(stream), index);
+  if (!key || (!in_interp && !out_interp)) return 4;
+  if (in_interp) *in_interp = key->in_interpolation;
+  if (out_interp) *out_interp = key->out_interpolation;
+  return 0;
+}
+int32_t __cdecl set_keyframe_interpolation(void* stream, int32_t index,
+                                           int32_t in_interp, int32_t out_interp) {
+  HostKeyframe* key = keyframe_at(find_stream(stream), index);
+  if (!key || in_interp < 0 || in_interp > 3 || out_interp < 0 || out_interp > 3) {
+    ++g_invalid_keyframe_operations; return 4;
+  }
+  key->in_interpolation = in_interp; key->out_interpolation = out_interp;
+  ++g_keyframe_mutations; return 0;
+}
+int32_t __cdecl start_add_keyframes(void* stream, void** transaction) {
+  HostStreamRef* record = find_stream(stream);
+  if (!record || !transaction || g_add_keyframe_transactions.size() >= 8) {
+    ++g_invalid_keyframe_operations; return 4;
+  }
+  g_add_keyframe_transactions.push_back({{}, record, {}});
+  *transaction = &g_add_keyframe_transactions.back().opaque;
+  return 0;
+}
+int32_t __cdecl add_keyframes(void* handle, int16_t time_mode, const HostTime* time,
+                              int32_t* index) {
+  AddKeyframesTransaction* transaction = find_add_transaction(handle);
+  if (!transaction || time_mode < 0 || time_mode > 1 || !valid_time(time) || !index ||
+      transaction->stream->mask->keyframes.size() + transaction->staged.size() >=
+          kMaxKeyframesPerStream) {
+    ++g_invalid_keyframe_operations; return 4;
+  }
+  const auto duplicate = std::find_if(transaction->staged.begin(), transaction->staged.end(),
+      [time](const auto& key) { return time_equal(key.time, *time); });
+  if (duplicate != transaction->staged.end()) {
+    *index = static_cast<int32_t>(duplicate - transaction->staged.begin()); return 0;
+  }
+  transaction->staged.push_back(snapshot_keyframe(*transaction->stream->mask, *time));
+  *index = static_cast<int32_t>(transaction->staged.size() - 1);
+  return 0;
+}
+int32_t __cdecl set_add_keyframe(void* handle, int32_t index, const StreamValue* value) {
+  AddKeyframesTransaction* transaction = find_add_transaction(handle);
+  OutlineData* source = value ? find_outline(value->value) : nullptr;
+  if (!transaction || index < 0 || static_cast<std::size_t>(index) >= transaction->staged.size() ||
+      !source) { ++g_invalid_keyframe_operations; return 4; }
+  static_cast<OutlineData&>(transaction->staged[index]) = *source;
+  return 0;
+}
+int32_t __cdecl end_add_keyframes(uint8_t add, void* handle) {
+  AddKeyframesTransaction* transaction = find_add_transaction(handle);
+  if (!transaction) { ++g_invalid_keyframe_operations; return 4; }
+  if (add) {
+    for (auto& staged : transaction->staged) {
+      auto position = transaction->stream->mask->keyframes.begin();
+      while (position != transaction->stream->mask->keyframes.end() &&
+             time_less(position->time, staged.time)) ++position;
+      if (position == transaction->stream->mask->keyframes.end() ||
+          !time_equal(position->time, staged.time)) {
+        transaction->stream->mask->keyframes.insert(position, std::move(staged));
+        ++g_keyframe_mutations;
+      }
+    }
+  }
+  g_add_keyframe_transactions.erase(std::find_if(g_add_keyframe_transactions.begin(),
+      g_add_keyframe_transactions.end(), [transaction](auto& item) { return &item == transaction; }));
+  return 0;
+}
+int32_t __cdecl get_keyframe_label(void* stream, int32_t index, int32_t* label) {
+  HostKeyframe* key = keyframe_at(find_stream(stream), index);
+  if (!key || !label) return 4;
+  *label = key->label; return 0;
+}
+int32_t __cdecl set_keyframe_label(void* stream, int32_t index, int32_t label) {
+  HostKeyframe* key = keyframe_at(find_stream(stream), index);
+  if (!key || label < 0 || label > 16) { ++g_invalid_keyframe_operations; return 4; }
+  key->label = label; ++g_keyframe_mutations; return 0;
+}
+
+bool verify_keyframe_ownership_rejection() {
+  const uint32_t invalid_before = g_invalid_keyframe_operations;
+  const uint32_t mutations_before = g_keyframe_mutations;
+  void* mask = nullptr; void* stream = nullptr;
+  if (get_layer_mask_by_index(&g_layer, 0, &mask) != 0 ||
+      get_new_mask_stream(1, mask, 400, &stream) != 0) return false;
+  const HostTime later{20, 1}, earlier{10, 1}, batched{30, 1}, cancelled{40, 1};
+  int32_t later_index = -1, earlier_index = -1, duplicate_index = -1, count = -1;
+  HostTime observed{};
+  bool passed = insert_keyframe(stream, 0, &later, &later_index) == 0 && later_index == 0 &&
+      insert_keyframe(stream, 0, &earlier, &earlier_index) == 0 && earlier_index == 0 &&
+      insert_keyframe(stream, 0, &earlier, &duplicate_index) == 0 && duplicate_index == 0 &&
+      get_stream_num_keyframes(stream, &count) == 0 && count == 2 &&
+      get_keyframe_time(stream, 0, 0, &observed) == 0 && time_equal(observed, earlier) &&
+      set_keyframe_flag(stream, 0, 1, 1) == 0 &&
+      set_keyframe_interpolation(stream, 0, 2, 3) == 0 &&
+      set_keyframe_label(stream, 0, 7) == 0;
+  int32_t flags{}, in_interp{}, out_interp{}, label{};
+  passed = passed && get_keyframe_flags(stream, 0, &flags) == 0 && flags == 1 &&
+      get_keyframe_interpolation(stream, 0, &in_interp, &out_interp) == 0 &&
+      in_interp == 2 && out_interp == 3 &&
+      get_keyframe_label(stream, 0, &label) == 0 && label == 7;
+  StreamValue later_value{}, hold_value{}, midpoint_value{};
+  MaskVertex later_vertex{}, hold_vertex{}, midpoint_vertex{};
+  const HostTime midpoint{15, 1};
+  passed = passed && get_new_keyframe_value(1, stream, 1, &later_value) == 0 &&
+      get_mask_outline_vertex_info(later_value.value, 0, &later_vertex) == 0;
+  later_vertex.x += 10;
+  passed = passed && set_mask_outline_vertex_info(later_value.value, 0, &later_vertex) == 0 &&
+      set_keyframe_value(stream, 1, &later_value) == 0 &&
+      dispose_stream_value(&later_value) == 0 &&
+      get_new_stream_value(1, stream, 0, &midpoint, 0, &hold_value) == 0 &&
+      get_mask_outline_vertex_info(hold_value.value, 0, &hold_vertex) == 0 &&
+      hold_vertex.x == later_vertex.x - 10 && dispose_stream_value(&hold_value) == 0 &&
+      set_keyframe_interpolation(stream, 0, 2, 1) == 0 &&
+      get_new_stream_value(1, stream, 0, &midpoint, 0, &midpoint_value) == 0 &&
+      get_mask_outline_vertex_info(midpoint_value.value, 0, &midpoint_vertex) == 0 &&
+      midpoint_vertex.x == later_vertex.x - 5 && dispose_stream_value(&midpoint_value) == 0;
+  StreamValue source{}, checked{};
+  passed = passed && get_new_stream_value(1, stream, 0, nullptr, 0, &source) == 0 &&
+      set_keyframe_value(stream, 0, &source) == 0 &&
+      get_new_keyframe_value(1, stream, 0, &checked) == 0 &&
+      checked.value != source.value && delete_keyframe(stream, 0) != 0 &&
+      reject_spatial_tangents(1, stream, 0, nullptr, nullptr) != 0 &&
+      dispose_stream_value(&checked) == 0 && dispose_stream_value(&source) == 0;
+  void* transaction = nullptr; int32_t staged_index = -1;
+  passed = passed && start_add_keyframes(stream, &transaction) == 0 &&
+      add_keyframes(transaction, 0, &cancelled, &staged_index) == 0 && staged_index == 0 &&
+      end_add_keyframes(0, transaction) == 0 &&
+      get_stream_num_keyframes(stream, &count) == 0 && count == 2 &&
+      start_add_keyframes(stream, &transaction) == 0 &&
+      add_keyframes(transaction, 0, &batched, &staged_index) == 0 &&
+      end_add_keyframes(1, transaction) == 0 &&
+      get_stream_num_keyframes(stream, &count) == 0 && count == 3 &&
+      delete_keyframe(stream, 2) == 0 && delete_keyframe(stream, 1) == 0 &&
+      delete_keyframe(stream, 0) == 0 && dispose_stream(stream) == 0 && dispose_mask(mask) == 0;
+  return passed && g_invalid_keyframe_operations == invalid_before + 2 &&
+      g_keyframe_mutations == mutations_before + 12 && mask_lifetimes_balanced();
+}
+
 int32_t __cdecl is_mask_outline_open(void* outline, uint8_t* open) {
-  HostMask* record = find_outline(outline);
+  OutlineData* record = find_outline(outline);
   if (!record || !open) return 4;
   *open = record->open ? 1 : 0;
   return 0;
 }
 
 int32_t __cdecl set_mask_outline_open(void* outline, uint8_t open) {
-  HostMask* record = find_outline(outline);
+  OutlineData* record = find_outline(outline);
   if (!record) { ++g_invalid_outline_operations; return 4; }
   const bool requested = open != 0;
   if (record->open == requested) return 0;
@@ -817,7 +1197,7 @@ int32_t __cdecl set_mask_outline_open(void* outline, uint8_t open) {
 }
 
 int32_t __cdecl get_mask_outline_num_segments(void* outline, int32_t* count) {
-  HostMask* record = find_outline(outline);
+  OutlineData* record = find_outline(outline);
   if (!record || !count) return 4;
   const std::size_t vertices = distinct_vertex_count(*record);
   *count = static_cast<int32_t>(vertices == 0 ? 0 :
@@ -827,7 +1207,7 @@ int32_t __cdecl get_mask_outline_num_segments(void* outline, int32_t* count) {
 
 int32_t __cdecl get_mask_outline_vertex_info(void* outline, int32_t index,
                                              MaskVertex* vertex) {
-  HostMask* record = find_outline(outline);
+  OutlineData* record = find_outline(outline);
   if (!record || !vertex || index < 0 ||
       static_cast<std::size_t>(index) >= record->vertices.size()) return 4;
   *vertex = record->vertices[static_cast<std::size_t>(index)];
@@ -842,7 +1222,7 @@ bool finite_vertex(const MaskVertex& vertex) {
 
 int32_t __cdecl set_mask_outline_vertex_info(void* outline, int32_t index,
                                              const MaskVertex* vertex) {
-  HostMask* record = find_outline(outline);
+  OutlineData* record = find_outline(outline);
   const std::size_t count = record ? distinct_vertex_count(*record) : 0;
   if (!record || !vertex || !finite_vertex(*vertex) || index < 0 ||
       static_cast<std::size_t>(index) > count ||
@@ -859,7 +1239,7 @@ int32_t __cdecl set_mask_outline_vertex_info(void* outline, int32_t index,
 }
 
 int32_t __cdecl create_mask_outline_vertex(void* outline, int32_t position) {
-  HostMask* record = find_outline(outline);
+  OutlineData* record = find_outline(outline);
   const std::size_t count = record ? distinct_vertex_count(*record) : 0;
   if (!record || count >= kMaxOutlineVertices) {
     ++g_invalid_outline_operations;
@@ -883,7 +1263,7 @@ int32_t __cdecl create_mask_outline_vertex(void* outline, int32_t position) {
 }
 
 int32_t __cdecl delete_mask_outline_vertex(void* outline, int32_t index) {
-  HostMask* record = find_outline(outline);
+  OutlineData* record = find_outline(outline);
   const std::size_t count = record ? distinct_vertex_count(*record) : 0;
   if (!record || index < 0 || static_cast<std::size_t>(index) >= count) {
     ++g_invalid_outline_operations;
@@ -901,13 +1281,13 @@ int32_t __cdecl delete_mask_outline_vertex(void* outline, int32_t index) {
 }
 
 int32_t __cdecl get_mask_outline_num_feathers(void* outline, int32_t* count) {
-  HostMask* record = find_outline(outline);
+  OutlineData* record = find_outline(outline);
   if (!record || !count) return 4;
   *count = static_cast<int32_t>(record->feathers.size());
   return 0;
 }
 
-bool valid_feather(const HostMask& mask, const MaskFeather& feather) {
+bool valid_feather(const OutlineData& mask, const MaskFeather& feather) {
   const std::size_t vertices = distinct_vertex_count(mask);
   const std::size_t segments = vertices == 0 ? 0 : vertices - static_cast<std::size_t>(mask.open);
   return feather.segment >= 0 && static_cast<std::size_t>(feather.segment) < segments &&
@@ -920,7 +1300,7 @@ bool valid_feather(const HostMask& mask, const MaskFeather& feather) {
 
 int32_t __cdecl get_mask_outline_feather_info(void* outline, int32_t index,
                                               MaskFeather* feather) {
-  HostMask* record = find_outline(outline);
+  OutlineData* record = find_outline(outline);
   if (!record || !feather || index < 0 ||
       static_cast<std::size_t>(index) >= record->feathers.size()) return 4;
   *feather = record->feathers[static_cast<std::size_t>(index)];
@@ -929,7 +1309,7 @@ int32_t __cdecl get_mask_outline_feather_info(void* outline, int32_t index,
 
 int32_t __cdecl set_mask_outline_feather_info(void* outline, int32_t index,
                                               const MaskFeather* feather) {
-  HostMask* record = find_outline(outline);
+  OutlineData* record = find_outline(outline);
   if (!record || !feather || !valid_feather(*record, *feather) || index < 0 ||
       static_cast<std::size_t>(index) >= record->feathers.size()) {
     ++g_invalid_outline_operations;
@@ -942,7 +1322,7 @@ int32_t __cdecl set_mask_outline_feather_info(void* outline, int32_t index,
 
 int32_t __cdecl create_mask_outline_feather(void* outline, const MaskFeather* feather,
                                             int32_t* position) {
-  HostMask* record = find_outline(outline);
+  OutlineData* record = find_outline(outline);
   if (!record || !feather || !position || !valid_feather(*record, *feather) ||
       record->feathers.size() >= kMaxOutlineFeathers) {
     ++g_invalid_outline_operations;
@@ -955,7 +1335,7 @@ int32_t __cdecl create_mask_outline_feather(void* outline, const MaskFeather* fe
 }
 
 int32_t __cdecl delete_mask_outline_feather(void* outline, int32_t index) {
-  HostMask* record = find_outline(outline);
+  OutlineData* record = find_outline(outline);
   if (!record || index < 0 || static_cast<std::size_t>(index) >= record->feathers.size()) {
     ++g_invalid_outline_operations;
     return 4;
@@ -1162,6 +1542,31 @@ struct StreamSuite {
   decltype(&get_unique_stream_id) get_unique_stream_id;
 };
 static_assert(sizeof(StreamSuite) == 23 * sizeof(void*));
+struct KeyframeSuite {
+  decltype(&get_stream_num_keyframes) get_stream_num_keyframes;
+  decltype(&get_keyframe_time) get_keyframe_time;
+  decltype(&insert_keyframe) insert_keyframe;
+  decltype(&delete_keyframe) delete_keyframe;
+  decltype(&get_new_keyframe_value) get_new_keyframe_value;
+  decltype(&set_keyframe_value) set_keyframe_value;
+  decltype(&get_stream_value_dimensionality) get_stream_value_dimensionality;
+  decltype(&get_stream_temporal_dimensionality) get_stream_temporal_dimensionality;
+  decltype(&reject_spatial_tangents) get_new_keyframe_spatial_tangents;
+  decltype(&reject_set_spatial_tangents) set_keyframe_spatial_tangents;
+  decltype(&reject_get_temporal_ease) get_keyframe_temporal_ease;
+  decltype(&reject_set_temporal_ease) set_keyframe_temporal_ease;
+  decltype(&get_keyframe_flags) get_keyframe_flags;
+  decltype(&set_keyframe_flag) set_keyframe_flag;
+  decltype(&get_keyframe_interpolation) get_keyframe_interpolation;
+  decltype(&set_keyframe_interpolation) set_keyframe_interpolation;
+  decltype(&start_add_keyframes) start_add_keyframes;
+  decltype(&add_keyframes) add_keyframes;
+  decltype(&set_add_keyframe) set_add_keyframe;
+  decltype(&end_add_keyframes) end_add_keyframes;
+  decltype(&get_keyframe_label) get_keyframe_label_color_index;
+  decltype(&set_keyframe_label) set_keyframe_label_color_index;
+};
+static_assert(sizeof(KeyframeSuite) == 22 * sizeof(void*));
 struct MaskOutlineSuite {
   decltype(&is_mask_outline_open) is_open;
   decltype(&set_mask_outline_open) set_open;
@@ -1195,6 +1600,15 @@ StreamSuite g_stream_suite{&is_stream_legal, &can_vary_over_time,
     &reject_set_stream_value, &unsupported_layer_stream_value,
     &get_expression_state, &reject_expression_state, &unsupported_get_expression,
     &unsupported_set_expression, &duplicate_stream_ref, &get_unique_stream_id};
+KeyframeSuite g_keyframe_suite{&get_stream_num_keyframes, &get_keyframe_time,
+    &insert_keyframe, &delete_keyframe, &get_new_keyframe_value,
+    &set_keyframe_value, &get_stream_value_dimensionality,
+    &get_stream_temporal_dimensionality, &reject_spatial_tangents,
+    &reject_set_spatial_tangents, &reject_get_temporal_ease,
+    &reject_set_temporal_ease, &get_keyframe_flags, &set_keyframe_flag,
+    &get_keyframe_interpolation, &set_keyframe_interpolation,
+    &start_add_keyframes, &add_keyframes, &set_add_keyframe,
+    &end_add_keyframes, &get_keyframe_label, &set_keyframe_label};
 MaskOutlineSuite g_mask_outline_suite{&is_mask_outline_open, &set_mask_outline_open,
                                       &get_mask_outline_num_segments,
                                       &get_mask_outline_vertex_info,
@@ -1529,6 +1943,8 @@ int32_t __cdecl acquire_suite(const char* name, int32_t version, const void** su
     *suite = &g_mask_suite;
   else if (std::strcmp(name, "AEGP Stream Suite") == 0 && version == 11)
     *suite = &g_stream_suite;
+  else if (std::strcmp(name, "AEGP Keyframe Suite") == 0 && version == 5)
+    *suite = &g_keyframe_suite;
   else if (std::strcmp(name, "AEGP Mask Outline Suite") == 0 && version == 5)
     *suite = &g_mask_outline_suite;
   else
@@ -1729,7 +2145,8 @@ bool parse_double_arg(const wchar_t* text, double minimum, double maximum, doubl
 
 bool parse_mask_context_payload(const wchar_t* text) {
   if (!text) return false;
-  if (!g_stream_refs.empty() || !g_stream_values.empty()) return false;
+  if (!g_stream_refs.empty() || !g_stream_values.empty() ||
+      !g_add_keyframe_transactions.empty()) return false;
   const std::wstring encoded(text);
   if (encoded.size() < 3 || encoded.size() > 8192 || encoded.compare(0, 3, L"v2|") != 0)
     return false;
@@ -2358,6 +2775,8 @@ int wmain(int argc, wchar_t** argv) {
       std::wstring(argv[1]) == L"--smart-stream-live-value-dispose-request";
   const bool stream_metadata_ownership_mode = argc == 5 &&
       std::wstring(argv[1]) == L"--smart-stream-metadata-ownership-request";
+  const bool keyframe_ownership_mode = argc == 5 &&
+      std::wstring(argv[1]) == L"--smart-keyframe-ownership-request";
   const bool suite_release_without_acquire_mode = argc == 5 &&
       std::wstring(argv[1]) == L"--smart-suite-release-without-acquire-request";
   const bool handle_resize_while_locked_mode = argc == 5 &&
@@ -2374,7 +2793,7 @@ int wmain(int argc, wchar_t** argv) {
       std::wstring(argv[1]) == L"--smart-mask-attribute-request";
   const bool request_mode = mask_request_mode || mask_scene_request_mode || mask_context_request_mode ||
       mask_count_error_mode || mask_count_crash_mode || mask_double_dispose_mode ||
-      stream_live_value_dispose_mode || stream_metadata_ownership_mode ||
+      stream_live_value_dispose_mode || stream_metadata_ownership_mode || keyframe_ownership_mode ||
       suite_release_without_acquire_mode ||
       handle_resize_while_locked_mode || world_double_dispose_mode ||
       world_allocation_limit_mode ||
@@ -2385,7 +2804,7 @@ int wmain(int argc, wchar_t** argv) {
   if (!request_mode && (argc != 5 || std::wstring(argv[1]) != L"--smart")) return 2;
   g_mask_model_enabled = mask_request_mode || mask_scene_request_mode || mask_context_request_mode ||
       mask_count_error_mode || mask_count_crash_mode || mask_double_dispose_mode ||
-      stream_live_value_dispose_mode || stream_metadata_ownership_mode ||
+      stream_live_value_dispose_mode || stream_metadata_ownership_mode || keyframe_ownership_mode ||
       suite_release_without_acquire_mode ||
       handle_resize_while_locked_mode || world_double_dispose_mode ||
       world_allocation_limit_mode;
@@ -2575,6 +2994,7 @@ int wmain(int argc, wchar_t** argv) {
   bool outline_fault_observed = false;
   bool mask_attribute_fault_observed = false;
   bool stream_metadata_fault_observed = false;
+  bool keyframe_fault_observed = false;
   std::cerr << "stage:smart_render_end pre_error=" << smart.pre_error
             << " render_error=" << smart.render_error << "\n" << std::flush;
 #endif
@@ -2598,6 +3018,8 @@ int wmain(int argc, wchar_t** argv) {
     mask_attribute_fault_observed = verify_mask_attribute_and_ownership_rejection();
   if (stream_metadata_ownership_mode)
     stream_metadata_fault_observed = verify_stream_metadata_and_ownership_rejection();
+  if (keyframe_ownership_mode)
+    keyframe_fault_observed = verify_keyframe_ownership_rejection();
   #endif
   std::cerr << "stage:global_setdown_end error=" << setdown_error << "\n" << std::flush;
 #ifdef AEXCOMPAT_RENDER_WORKER
@@ -2708,6 +3130,9 @@ int wmain(int argc, wchar_t** argv) {
             << ",\"stream_metadata_queries\":" << g_stream_metadata_queries
             << ",\"stream_duplicates\":" << g_stream_duplicates
             << ",\"invalid_stream_operations\":" << g_invalid_stream_operations
+            << ",\"keyframe_fault_observed\":" << (keyframe_fault_observed ? "true" : "false")
+            << ",\"keyframe_mutations\":" << g_keyframe_mutations
+            << ",\"invalid_keyframe_operations\":" << g_invalid_keyframe_operations
             << ",\"requested_parameters\":" << requested_parameters_json(requested_parameters)
             << ",\"requested_amount\":" << static_cast<int32_t>(requested_value(requested_parameters, L"amount"))
             << ",\"requested_direction\":" << static_cast<int32_t>(requested_value(requested_parameters, L"direction"))

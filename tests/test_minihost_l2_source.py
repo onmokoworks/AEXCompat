@@ -44,6 +44,8 @@ class MinihostL2SourceTests(unittest.TestCase):
             "verify_mask_attribute_and_ownership_rejection()",
             "verify_stream_metadata_and_ownership_rejection()",
             "static_assert(sizeof(StreamSuite) == 23 * sizeof(void*))",
+            "static_assert(sizeof(KeyframeSuite) == 22 * sizeof(void*))",
+            "verify_keyframe_ownership_rejection()",
             "kMaxHandleCount = 1024",
             "kMaxHandleBytes = 64 * 1024 * 1024",
         ):

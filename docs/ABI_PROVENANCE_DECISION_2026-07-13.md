@@ -42,3 +42,9 @@ external SDK installation is used for instrument-side numeric/order auditing;
 `minihost/` neither includes nor copies Adobe headers. Its 23-entry table and
 local value/handle declarations are independently authored and guarded by
 local size/count assertions plus native conformance tests.
+
+AEGP Keyframe Suite v5 follows that boundary as well. Its 22-entry local table,
+8-byte rational-time declaration, keyframe metadata, and transaction handles
+are independently written. External SDK material remains outside `minihost/`;
+only audited numeric/order facts and conformance observations cross the
+instrument boundary.

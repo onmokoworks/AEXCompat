@@ -204,3 +204,9 @@ registry, metadata, duplicate-ref identity, concurrent value ownership, and
 explicit unsupported callbacks contain no MaskOffset-specific branches. The
 `stream_metadata_ownership` fault route passed two isolated native runs with
 balanced MaskRef, StreamRef, and StreamValue ownership.
+
+The generic AEGP Keyframe Suite v5 implementation adds a 22-slot bounded
+keyframe host model without fixture branches. MaskOffset is used only to prove
+that adding time-sorted outline snapshots, HOLD/LINEAR sampling, cloned values,
+and batch transactions does not alter its native static-mask render behavior.
+The `keyframe_ownership` route passed two isolated real-AEX runs.

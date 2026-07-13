@@ -184,3 +184,17 @@ The fixed `stream_metadata_ownership` gate ran twice after successful native
 MaskOffset rendering under the Job Object boundary. Each run recorded nine
 metadata queries, one duplicate ref, two intentional rejections, intact guards,
 and fully balanced mask/stream/value lifetimes.
+
+AEGP Keyframe Suite v5 now exposes all 22 callback slots and bounds each mask
+outline stream to 64 time-sorted keyframes and 256 concurrent checked values.
+Keyframe values are independently
+cloned on checkout, deletion is rejected while a value is live, and batch-add
+transactions support explicit commit or cancellation. Flags, interpolation,
+labels, rational times, and whole-outline values are preserved. HOLD sampling
+returns the preceding outline; LINEAR sampling interpolates compatible vertex
+and feather topology into an owned temporary value. Spatial tangents and
+temporal ease reject mask-outline streams instead of fabricating dimensions.
+The fixed `keyframe_ownership` gate passed twice after native MaskOffset render,
+covering twelve mutations, two intentional type/ownership rejections, HOLD and
+LINEAR sampling, transaction rollback/commit, intact guards, and zero leaked
+MaskRef, StreamRef, StreamValue, or transaction handles.

@@ -749,6 +749,16 @@ pub fn execute_smart_suite_fault(
             false,
             true,
         ),
+        "keyframe_ownership" => (
+            "--smart-keyframe-ownership-request",
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            true,
+        ),
         "world_double_dispose" => (
             "--smart-world-double-dispose-request",
             false,
@@ -908,6 +918,10 @@ pub fn execute_smart_suite_fault(
                         && report.get("stream_metadata_queries") == Some(&json!(9))
                         && report.get("stream_duplicates") == Some(&json!(1))
                         && report.get("invalid_stream_operations") == Some(&json!(2))
+                } else if fault_id == "keyframe_ownership" {
+                    report.get("keyframe_fault_observed") == Some(&Value::Bool(true))
+                        && report.get("keyframe_mutations") == Some(&json!(12))
+                        && report.get("invalid_keyframe_operations") == Some(&json!(2))
                 } else {
                     report.get("mask_attribute_fault_observed") == Some(&Value::Bool(true))
                         && report.get("mask_mutations") == Some(&json!(11))
@@ -965,7 +979,9 @@ pub fn execute_smart_suite_fault(
         });
         let object = summary.as_object_mut().expect("summary is an object");
         for field in ["stream_metadata_fault_observed", "stream_metadata_queries",
-                      "stream_duplicates", "invalid_stream_operations"] {
+                      "stream_duplicates", "invalid_stream_operations",
+                      "keyframe_fault_observed", "keyframe_mutations",
+                      "invalid_keyframe_operations"] {
             object.insert(field.to_string(), item.1.get(field).cloned().unwrap_or(Value::Null));
         }
         summary
