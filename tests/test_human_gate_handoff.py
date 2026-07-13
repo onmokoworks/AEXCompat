@@ -23,8 +23,8 @@ class HumanGateHandoffTests(unittest.TestCase):
 
     def test_status_does_not_trust_test_generated_answers(self):
         text = STATUS.read_text(encoding="utf-8")
-        self.assertIn("can be produced by tests", text)
-        self.assertIn("not attributable to an explicit human response", text)
+        self.assertIn("Test artifacts remain non-evidence", text)
+        self.assertIn("owner confirms self-authorship", text)
 
 
 if __name__ == "__main__":

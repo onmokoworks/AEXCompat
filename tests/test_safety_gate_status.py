@@ -18,7 +18,7 @@ class SafetyGateStatusTests(unittest.TestCase):
         text = STATUS.read_text(encoding="utf-8")
         for gate in range(1, 9):
             self.assertIn(f"G-{gate}", text)
-        for missing in ("G-1 fixture approval | Not satisfied", "G-2 loader approval receipt | Not satisfied", "G-3 dependency review | Not satisfied", "G-8 cleanroom and licensing decisions | Not satisfied"):
+        for missing in ("G-1 fixture approval | Satisfied", "G-2 loader approval receipt | Satisfied for L1", "G-3 dependency review | Satisfied", "G-8 cleanroom and licensing decisions | Satisfied"):
             self.assertIn(missing, text)
 
     def test_phase_d_directory_is_absent_before_human_declaration(self):

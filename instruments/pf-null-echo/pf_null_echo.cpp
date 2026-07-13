@@ -30,8 +30,8 @@ PF_Err render(PF_InData*, PF_OutData*, PF_ParamDef* params[], PF_LayerDef* outpu
   const A_long rows = (input->height < output->height) ? input->height : output->height;
   const A_long bytes = (input->rowbytes < output->rowbytes) ? input->rowbytes : output->rowbytes;
   for (A_long y = 0; y < rows; ++y) {
-    std::memcpy(static_cast<char*>(output->data) + y * output->rowbytes,
-                static_cast<const char*>(input->data) + y * input->rowbytes, bytes);
+    std::memcpy(reinterpret_cast<char*>(output->data) + y * output->rowbytes,
+                reinterpret_cast<const char*>(input->data) + y * input->rowbytes, bytes);
   }
   return PF_Err_NONE;
 }

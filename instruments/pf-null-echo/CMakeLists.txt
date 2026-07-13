@@ -5,6 +5,7 @@ endif()
 add_library(pf_null_echo MODULE pf_null_echo.cpp)
 target_include_directories(pf_null_echo PRIVATE
   "$ENV{AE_SDK_ROOT}/Examples/Headers"
+  "$ENV{AE_SDK_ROOT}/Examples/Headers/SP"
   "$ENV{AE_SDK_ROOT}/Examples/Util"
 )
 target_link_libraries(pf_null_echo PRIVATE aexcompat_trace_writer)

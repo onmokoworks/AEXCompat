@@ -28,7 +28,7 @@ aexcompat::TraceWriter& trace() {
 }
 
 PF_Err params_setup(PF_InData* in_data, PF_OutData* out_data) {
-  PF_ParamDef mode{};
+  PF_ParamDef def{};
   PF_ADD_POPUP("Fault mode", 5, kModeNone,
                "none|crash|hang|bigalloc|pf_error", kModeParam);
   out_data->num_params = 2;
