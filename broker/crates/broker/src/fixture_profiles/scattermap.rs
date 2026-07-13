@@ -3,25 +3,6 @@ use sha2::{Digest, Sha256};
 
 pub const PROFILE_ID: &str = "scattermap";
 
-#[derive(Clone, Copy)]
-pub struct RenderParameters {
-    pub amount: i32,
-    pub direction: i32,
-    pub seed: i32,
-    pub mix: f64,
-    pub invert_map: i32,
-}
-
-pub fn bind(assignments: &ValidatedAssignments) -> RenderParameters {
-    RenderParameters {
-        amount: assignments.get("amount").copied().unwrap_or(5.0) as i32,
-        direction: assignments.get("direction").copied().unwrap_or(3.0) as i32,
-        seed: assignments.get("seed").copied().unwrap_or(0.0) as i32,
-        mix: assignments.get("mix").copied().unwrap_or(100.0),
-        invert_map: assignments.get("invert_map").copied().unwrap_or(0.0) as i32,
-    }
-}
-
 fn hash_pixel(x: i32, y: i32, seed: i32, channel: i32) -> f32 {
     let mut value = (x as u32)
         .wrapping_mul(374_761_393)
@@ -79,6 +60,15 @@ pub fn argb8_hash(amount: i32, direction: i32, seed: i32, mix: f64) -> String {
     format!("{:X}", Sha256::digest(output))
 }
 
+pub fn expected_argb8_hash(assignments: &ValidatedAssignments) -> String {
+    argb8_hash(
+        assignments.get("amount").copied().unwrap_or(5.0) as i32,
+        assignments.get("direction").copied().unwrap_or(3.0) as i32,
+        assignments.get("seed").copied().unwrap_or(0.0) as i32,
+        assignments.get("mix").copied().unwrap_or(100.0),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -114,11 +104,6 @@ mod tests {
             ("mix".into(), 25.5),
             ("invert_map".into(), 0.0),
         ]);
-        let bound = bind(&values);
-        assert_eq!(bound.amount, 13);
-        assert_eq!(bound.direction, 3);
-        assert_eq!(bound.seed, 0);
-        assert_eq!(bound.mix, 25.5);
-        assert_eq!(bound.invert_map, 0);
+        assert_eq!(expected_argb8_hash(&values), argb8_hash(13, 3, 0, 25.5));
     }
 }

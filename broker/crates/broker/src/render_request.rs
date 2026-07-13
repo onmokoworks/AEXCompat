@@ -1,4 +1,4 @@
-use crate::fixture_profiles::scattermap::{argb8_hash, bind, RenderParameters};
+use crate::fixture_profiles::scattermap::expected_argb8_hash;
 use crate::fixture_profiles::{ParameterizedRenderAdapter, RegisteredProfile};
 use crate::host_core::descriptor_manifest::{load as load_manifest, LoadedManifest};
 use crate::host_core::parameter::{
@@ -76,21 +76,18 @@ struct Report {
 fn evaluate(
     request: &Request,
     profile: &PluginProfile,
-    adapter: ParameterizedRenderAdapter,
-) -> io::Result<(
-    RenderParameters,
-    ValidatedAssignments,
-    usize,
-    Vec<ValidationError>,
-)> {
+) -> io::Result<(ValidatedAssignments, usize, Vec<ValidationError>)> {
     let assignment_count = request.assignments.0.len();
     let (validated, errors) =
         validate_assignments(profile, &request.assignments.0).map_err(invalid)?;
     let effective = apply_defaults(profile, &validated);
-    let parameters = match adapter {
-        ParameterizedRenderAdapter::ScatterMap => bind(&effective),
-    };
-    Ok((parameters, effective, assignment_count, errors))
+    Ok((effective, assignment_count, errors))
+}
+
+fn expected_hash(adapter: ParameterizedRenderAdapter, effective: &ValidatedAssignments) -> String {
+    match adapter {
+        ParameterizedRenderAdapter::ScatterMap => expected_argb8_hash(effective),
+    }
 }
 
 fn descriptors(
@@ -191,8 +188,7 @@ pub fn run(repository: &Path, request_path: &Path, output_path: &Path) -> io::Re
     let profile = crate::fixture_profiles::find(&request.plugin_id)
         .ok_or_else(|| invalid("unknown plugin profile"))?;
     let manifest = descriptors(repository, &request.plugin_id, profile)?;
-    let (_, _, assignment_count, errors) =
-        evaluate(&request, &manifest.profile, profile.parameterized_render)?;
+    let (_, assignment_count, errors) = evaluate(&request, &manifest.profile)?;
     let accepted = errors.is_empty();
     let report = Report {
         schema_version: 1,
@@ -234,8 +230,7 @@ pub fn execute(repository: &Path, request_path: &Path, output_path: &Path) -> io
     let profile = crate::fixture_profiles::find(&request.plugin_id)
         .ok_or_else(|| invalid("unknown plugin profile"))?;
     let manifest = descriptors(repository, &request.plugin_id, profile)?;
-    let (parameters, effective, assignment_count, errors) =
-        evaluate(&request, &manifest.profile, profile.parameterized_render)?;
+    let (effective, assignment_count, errors) = evaluate(&request, &manifest.profile)?;
     if !errors.is_empty() {
         let report = json!({"schema_version":1,"stage":"parameterized_classic_render",
             "plugin_id":request.plugin_id,"assignment_count":assignment_count,"accepted":false,
@@ -257,12 +252,7 @@ pub fn execute(repository: &Path, request_path: &Path, output_path: &Path) -> io
         return Err(invalid("descriptor manifest plugin digest mismatch"));
     }
     let worker = repository.join(profile.classic_worker.executable);
-    let expected = argb8_hash(
-        parameters.amount,
-        parameters.direction,
-        parameters.seed,
-        parameters.mix,
-    );
+    let expected = expected_hash(profile.parameterized_render, &effective);
     let args = [
         profile.classic_worker.request_mode.to_string(),
         approved.plugin_path.to_string_lossy().into_owned(),
@@ -282,11 +272,6 @@ pub fn execute(repository: &Path, request_path: &Path, output_path: &Path) -> io
             && report.get("render_error") == Some(&json!(0))
             && report.get("guard_bytes_intact") == Some(&Value::Bool(true))
             && worker_echo_matches(report, &manifest.profile, &effective)
-            && report.get("requested_amount") == Some(&json!(parameters.amount))
-            && report.get("requested_direction") == Some(&json!(parameters.direction))
-            && report.get("requested_seed") == Some(&json!(parameters.seed))
-            && report.get("requested_mix").and_then(Value::as_f64) == Some(parameters.mix)
-            && report.get("requested_invert_map") == Some(&json!(parameters.invert_map))
             && report
                 .get("output_sha256")
                 .and_then(Value::as_str)
@@ -307,9 +292,8 @@ pub fn execute(repository: &Path, request_path: &Path, output_path: &Path) -> io
     let report = json!({"schema_version":1,"stage":"parameterized_classic_render",
         "plugin_id":request.plugin_id,"receipt_id":approved.receipt_id,
         "fixture_sha256":approved.sha256.to_ascii_uppercase(),"assignment_count":assignment_count,
-        "accepted":true,"native_process_started":true,"parameters":{"amount":parameters.amount,
-        "direction":parameters.direction,"seed":parameters.seed,"mix":parameters.mix,
-        "invert_map":parameters.invert_map},"expected_oracle_sha256":expected,
+        "accepted":true,"native_process_started":true,"parameters":effective,
+        "expected_oracle_sha256":expected,
         "run_1":summarize(&runs[0]),"run_2":summarize(&runs[1]),"deterministic":deterministic,
         "broker_survived":true,"passed":passed});
     let mut output = OpenOptions::new()
@@ -346,8 +330,7 @@ pub fn execute_smart(
     let profile = crate::fixture_profiles::find(&request.plugin_id)
         .ok_or_else(|| invalid("unknown plugin profile"))?;
     let manifest = descriptors(repository, &request.plugin_id, profile)?;
-    let (parameters, effective, assignment_count, errors) =
-        evaluate(&request, &manifest.profile, profile.parameterized_render)?;
+    let (effective, assignment_count, errors) = evaluate(&request, &manifest.profile)?;
     if !errors.is_empty() {
         let report = json!({"schema_version":1,"stage":"parameterized_smartfx_render",
             "plugin_id":request.plugin_id,"assignment_count":assignment_count,"accepted":false,
@@ -369,12 +352,7 @@ pub fn execute_smart(
         return Err(invalid("descriptor manifest plugin digest mismatch"));
     }
     let worker = repository.join(profile.smart_worker.executable);
-    let expected = argb8_hash(
-        parameters.amount,
-        parameters.direction,
-        parameters.seed,
-        parameters.mix,
-    );
+    let expected = expected_hash(profile.parameterized_render, &effective);
     let args = [
         profile.smart_worker.request_mode.to_string(),
         approved.plugin_path.to_string_lossy().into_owned(),
@@ -396,11 +374,6 @@ pub fn execute_smart(
             && report.get("result_rects_valid") == Some(&Value::Bool(true))
             && report.get("guard_bytes_intact") == Some(&Value::Bool(true))
             && worker_echo_matches(report, &manifest.profile, &effective)
-            && report.get("requested_amount") == Some(&json!(parameters.amount))
-            && report.get("requested_direction") == Some(&json!(parameters.direction))
-            && report.get("requested_seed") == Some(&json!(parameters.seed))
-            && report.get("requested_mix").and_then(Value::as_f64) == Some(parameters.mix)
-            && report.get("requested_invert_map") == Some(&json!(parameters.invert_map))
             && report
                 .get("output_sha256")
                 .and_then(Value::as_str)
@@ -422,9 +395,8 @@ pub fn execute_smart(
     let report = json!({"schema_version":1,"stage":"parameterized_smartfx_render",
         "plugin_id":request.plugin_id,"receipt_id":approved.receipt_id,
         "fixture_sha256":approved.sha256.to_ascii_uppercase(),"assignment_count":assignment_count,
-        "accepted":true,"native_process_started":true,"parameters":{"amount":parameters.amount,
-        "direction":parameters.direction,"seed":parameters.seed,"mix":parameters.mix,
-        "invert_map":parameters.invert_map},"expected_oracle_sha256":expected,
+        "accepted":true,"native_process_started":true,"parameters":effective,
+        "expected_oracle_sha256":expected,
         "run_1":summarize(&runs[0]),"run_2":summarize(&runs[1]),"deterministic":deterministic,
         "broker_survived":true,"passed":passed});
     let mut output = OpenOptions::new()
