@@ -41,3 +41,5 @@ evidence. H-4 AE reference trace capture remains pending under the
 continuous authorization and existing isolation controls.
 SmartFX PreRender checkout also receives a valid time basis; a nonzero
 `42/2/24` context was observed exactly while preserving deterministic output.
+The ARGB8 matrix also covers valid parameter boundaries amount 500, seed 10000,
+and mix 0% in both classic and SmartFX paths with broker-enforced oracle parity.

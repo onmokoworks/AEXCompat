@@ -28,6 +28,24 @@
       "expected_output_sha256": "19736FAE645A7CD3BEBE865344E8A066E41040C7AB80042670A8B2EC6F0E1F3D"
     },
     {
+      "id": "amount_max", "width": 16, "height": 12,
+      "parameters": { "amount": 500, "direction": 3, "seed": 0, "repeat_edge": true, "mix": 100.0 },
+      "input_sha256": "863D238F52F81ABA4017C198AF4D748CB57FE369E6216FDBACF45FD94037ECF7",
+      "expected_output_sha256": "8E535435C74A9521D816A3B836DB578A2AE942EFBD80A55447B97610DC26B794"
+    },
+    {
+      "id": "seed_max", "width": 16, "height": 12,
+      "parameters": { "amount": 5, "direction": 3, "seed": 10000, "repeat_edge": true, "mix": 100.0 },
+      "input_sha256": "863D238F52F81ABA4017C198AF4D748CB57FE369E6216FDBACF45FD94037ECF7",
+      "expected_output_sha256": "E31BA13264E801DE7CCCE4D6863215E54C0DC0C7FF4A918E45EE75BC59E817EC"
+    },
+    {
+      "id": "mix_zero", "width": 16, "height": 12,
+      "parameters": { "amount": 500, "direction": 3, "seed": 10000, "repeat_edge": true, "mix": 0.0 },
+      "input_sha256": "863D238F52F81ABA4017C198AF4D748CB57FE369E6216FDBACF45FD94037ECF7",
+      "expected_output_sha256": "863D238F52F81ABA4017C198AF4D748CB57FE369E6216FDBACF45FD94037ECF7"
+    },
+    {
       "id": "odd_dimensions", "width": 13, "height": 9,
       "parameters": { "amount": 4, "direction": 3, "seed": 3, "repeat_edge": true, "mix": 100.0 },
       "input_sha256": "F892A4D61C6444AADE3260593D7ECF591799FF3013D0510A665F5CAEFFD652BB",

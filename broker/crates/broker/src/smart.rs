@@ -12,6 +12,9 @@ fn expected(case_id: &str) -> Option<&'static str> { match case_id {
     "horizontal" => Some("82E72A2E7C05E831A45980FA4042940B8B84C4B6CCF020057968E88ACA323779"),
     "vertical_no_repeat" => Some("F35007B74ED682D78EF72A53737BDA0BB4F321EAEB09B76A682B09733EC19351"),
     "mixed" => Some("19736FAE645A7CD3BEBE865344E8A066E41040C7AB80042670A8B2EC6F0E1F3D"),
+    "amount_max" => Some("8E535435C74A9521D816A3B836DB578A2AE942EFBD80A55447B97610DC26B794"),
+    "seed_max" => Some("E31BA13264E801DE7CCCE4D6863215E54C0DC0C7FF4A918E45EE75BC59E817EC"),
+    "mix_zero" => Some("863D238F52F81ABA4017C198AF4D748CB57FE369E6216FDBACF45FD94037ECF7"),
     "odd_dimensions" | "padded_stride" => Some("85AC7EB4759281BC81BA60994B58055369CD2224078383D4CAB6A8B685DECE26"),
     "connected_map" => Some("A38568761441C209940F81A8C2792DAD50566C66EDA1463BDCF071CCA614891B"),
     "inverted_map" => Some("3BC0C5172B880A8A83CEC24177B78721E9F0619D5330F6A26AAA02B9CC057A08"),
@@ -101,7 +104,7 @@ mod tests {
     use super::expected;
     #[test]
     fn oracle_table_covers_the_fixed_smartfx_matrix() {
-        for case_id in ["default", "identity", "horizontal", "vertical_no_repeat", "mixed",
+        for case_id in ["default", "identity", "horizontal", "vertical_no_repeat", "mixed", "amount_max", "seed_max", "mix_zero",
                         "odd_dimensions", "padded_stride", "connected_map", "inverted_map", "deep16_default",
                         "float32_default", "gpu_fallback_float32", "error_missing_input"] {
             assert_eq!(expected(case_id).unwrap().len(), 64);

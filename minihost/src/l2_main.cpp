@@ -360,6 +360,9 @@ int32_t render_once(EffectEntry entry, std::array<std::byte, kInSize>& input,
   else if (case_id == "horizontal") { amount = 9; direction = 1; seed = 17; }
   else if (case_id == "vertical_no_repeat") { amount = 7; direction = 2; repeat = 0; }
   else if (case_id == "mixed") { amount = 12; seed = 991; mix = 37.5; }
+  else if (case_id == "amount_max") amount = 500;
+  else if (case_id == "seed_max") seed = 10000;
+  else if (case_id == "mix_zero") { amount = 500; seed = 10000; mix = 0.0; }
   else if (case_id == "odd_dimensions" || case_id == "padded_stride") { amount = 4; seed = 3; }
   else if (case_id == "inverted_map") { }
   else if (case_id != "default" && case_id != "connected_map") return -2;
@@ -500,6 +503,9 @@ SmartResult smart_render_once(EffectEntry entry, std::array<std::byte, kInSize>&
   else if (case_id == "horizontal") { amount = 9; direction = 1; seed = 17; }
   else if (case_id == "vertical_no_repeat") { amount = 7; direction = 2; repeat = 0; }
   else if (case_id == "mixed") { amount = 12; seed = 991; mix = 37.5; }
+  else if (case_id == "amount_max") amount = 500;
+  else if (case_id == "seed_max") seed = 10000;
+  else if (case_id == "mix_zero") { amount = 500; seed = 10000; mix = 0.0; }
   else if (case_id == "odd_dimensions" || case_id == "padded_stride") { amount = 4; seed = 3; }
   else if (case_id != "default" && !deep16 && !float32 && !missing_input && !crash_null_output && !temporal_context && !connected_map) return result;
   constexpr std::size_t guard = 64;
