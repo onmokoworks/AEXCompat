@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "schema_name": "AEXCompat broker selftest report",
+  "required_fields": ["report_kind", "selftest_state", "scenario_count", "scenarios", "accepts_aex_path", "dll_load_performed", "native_load_enabled"],
+  "required_values": {
+    "report_kind": "broker_selftest",
+    "scenario_count": 5,
+    "accepts_aex_path": false,
+    "dll_load_performed": false,
+    "native_load_enabled": false
+  },
+  "scenario_result_values": ["ok", "nonzero_exit", "timeout_killed", "crashed"],
+  "required_scenarios": ["normal_exit", "timeout", "crash", "hang_kill", "sentinel_not_inherited"],
+  "notes": ["The selftest uses synthetic workers only and does not accept native plug-in paths."]
+}

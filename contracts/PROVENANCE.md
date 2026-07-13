@@ -42,3 +42,9 @@ files under `imports/aviutlas-rust-contracts/aviutl-rs/tests/fixtures/`.
 They cover BOM/CRLF, Unicode, duplicate IDs, ambiguous selections, multiple
 compositions, scanner edges, and preservation sentinels. Tests enforce the
 byte-for-byte provenance boundary; the imported originals remain unmodified.
+
+## Broker Contract
+
+| Canonical path | Source | Notes |
+| --- | --- | --- |
+| `contracts/broker/broker_selftest_report.schema.json` | `docs/IMPLEMENTATION_ROADMAP_2026-07-06.md`, B-1 | Locally authored process-isolation selftest contract using synthetic workers only. |

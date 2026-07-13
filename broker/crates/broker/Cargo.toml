@@ -1,0 +1,16 @@
+[package]
+name = "aexcompat-broker"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+windows-sys.workspace = true
+
+[lib]
+name = "aexcompat_broker"
+path = "src/lib.rs"
+
+[[bin]]
+name = "broker"
+path = "src/main.rs"
