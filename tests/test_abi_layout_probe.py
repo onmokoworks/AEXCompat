@@ -40,6 +40,9 @@ class AbiLayoutProbeTests(unittest.TestCase):
         self.assertEqual(data["fields"]["layer.data"]["offset"], 24)
         self.assertEqual(data["fields"]["pixel.alpha"]["offset"], 0)
         self.assertEqual(data["selectors"]["render"], 11)
+        self.assertEqual(data["selectors"]["smart_pre_render"], 23)
+        self.assertEqual(data["selectors"]["smart_render"], 24)
+        self.assertEqual(data["pf_smart_render_callbacks_size"], 24)
         self.assertFalse(data["native_aex_loaded"])
         self.assertFalse(data["selector_dispatched"])
 

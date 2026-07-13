@@ -13,6 +13,13 @@
   "pf_param_union_size": 120,
   "pf_util_callbacks_size": 552,
   "pf_pixel_size": 4,
+  "pf_pre_render_extra_size": 24,
+  "pf_pre_render_input_size": 64,
+  "pf_pre_render_output_size": 56,
+  "pf_pre_render_callbacks_size": 16,
+  "pf_smart_render_extra_size": 16,
+  "pf_smart_render_input_size": 72,
+  "pf_smart_render_callbacks_size": 24,
   "fields": {
     "in.version": { "offset": 196, "size": 4 },
     "in.serial_num": { "offset": 200, "size": 4 },
@@ -78,13 +85,27 @@
     ,"pixel.red": { "offset": 1, "size": 1 }
     ,"pixel.green": { "offset": 2, "size": 1 }
     ,"pixel.blue": { "offset": 3, "size": 1 }
+    ,"pre_extra.input": { "offset": 0, "size": 8 }
+    ,"pre_extra.output": { "offset": 8, "size": 8 }
+    ,"pre_extra.callbacks": { "offset": 16, "size": 8 }
+    ,"pre_input.output_request": { "offset": 0, "size": 44 }
+    ,"pre_output.result_rect": { "offset": 0, "size": 16 }
+    ,"pre_output.max_result_rect": { "offset": 16, "size": 16 }
+    ,"pre_callbacks.checkout_layer": { "offset": 0, "size": 8 }
+    ,"smart_extra.input": { "offset": 0, "size": 8 }
+    ,"smart_extra.callbacks": { "offset": 8, "size": 8 }
+    ,"smart_callbacks.checkout_layer_pixels": { "offset": 0, "size": 8 }
+    ,"smart_callbacks.checkin_layer_pixels": { "offset": 8, "size": 8 }
+    ,"smart_callbacks.checkout_output": { "offset": 16, "size": 8 }
   },
   "selectors": {
     "about": 0,
     "global_setup": 1,
     "global_setdown": 3,
     "params_setup": 4,
-    "render": 11
+    "render": 11,
+    "smart_pre_render": 23,
+    "smart_render": 24
   },
   "native_aex_loaded": false,
   "selector_dispatched": false

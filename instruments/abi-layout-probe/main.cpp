@@ -28,6 +28,13 @@ int main() {
                "  \"pf_param_union_size\":" << sizeof(PF_ParamDefUnion) << ",\n"
                "  \"pf_util_callbacks_size\":" << sizeof(PF_UtilCallbacks) << ",\n"
                "  \"pf_pixel_size\":" << sizeof(PF_Pixel) << ",\n"
+               "  \"pf_pre_render_extra_size\":" << sizeof(PF_PreRenderExtra) << ",\n"
+               "  \"pf_pre_render_input_size\":" << sizeof(PF_PreRenderInput) << ",\n"
+               "  \"pf_pre_render_output_size\":" << sizeof(PF_PreRenderOutput) << ",\n"
+               "  \"pf_pre_render_callbacks_size\":" << sizeof(PF_PreRenderCallbacks) << ",\n"
+               "  \"pf_smart_render_extra_size\":" << sizeof(PF_SmartRenderExtra) << ",\n"
+               "  \"pf_smart_render_input_size\":" << sizeof(PF_SmartRenderInput) << ",\n"
+               "  \"pf_smart_render_callbacks_size\":" << sizeof(PF_SmartRenderCallbacks) << ",\n"
                "  \"fields\":{";
   field<decltype(PF_InData::version)>("in.version", offsetof(PF_InData, version), first);
   field<decltype(PF_InData::serial_num)>("in.serial_num", offsetof(PF_InData, serial_num), first);
@@ -93,11 +100,25 @@ int main() {
   field<decltype(PF_Pixel::red)>("pixel.red", offsetof(PF_Pixel, red), first);
   field<decltype(PF_Pixel::green)>("pixel.green", offsetof(PF_Pixel, green), first);
   field<decltype(PF_Pixel::blue)>("pixel.blue", offsetof(PF_Pixel, blue), first);
+  field<decltype(PF_PreRenderExtra::input)>("pre_extra.input", offsetof(PF_PreRenderExtra, input), first);
+  field<decltype(PF_PreRenderExtra::output)>("pre_extra.output", offsetof(PF_PreRenderExtra, output), first);
+  field<decltype(PF_PreRenderExtra::cb)>("pre_extra.callbacks", offsetof(PF_PreRenderExtra, cb), first);
+  field<decltype(PF_PreRenderInput::output_request)>("pre_input.output_request", offsetof(PF_PreRenderInput, output_request), first);
+  field<decltype(PF_PreRenderOutput::result_rect)>("pre_output.result_rect", offsetof(PF_PreRenderOutput, result_rect), first);
+  field<decltype(PF_PreRenderOutput::max_result_rect)>("pre_output.max_result_rect", offsetof(PF_PreRenderOutput, max_result_rect), first);
+  field<decltype(PF_PreRenderCallbacks::checkout_layer)>("pre_callbacks.checkout_layer", offsetof(PF_PreRenderCallbacks, checkout_layer), first);
+  field<decltype(PF_SmartRenderExtra::input)>("smart_extra.input", offsetof(PF_SmartRenderExtra, input), first);
+  field<decltype(PF_SmartRenderExtra::cb)>("smart_extra.callbacks", offsetof(PF_SmartRenderExtra, cb), first);
+  field<decltype(PF_SmartRenderCallbacks::checkout_layer_pixels)>("smart_callbacks.checkout_layer_pixels", offsetof(PF_SmartRenderCallbacks, checkout_layer_pixels), first);
+  field<decltype(PF_SmartRenderCallbacks::checkin_layer_pixels)>("smart_callbacks.checkin_layer_pixels", offsetof(PF_SmartRenderCallbacks, checkin_layer_pixels), first);
+  field<decltype(PF_SmartRenderCallbacks::checkout_output)>("smart_callbacks.checkout_output", offsetof(PF_SmartRenderCallbacks, checkout_output), first);
   std::cout << "\n  },\n  \"selectors\":{"
             << "\"about\":" << static_cast<int>(PF_Cmd_ABOUT) << ','
             << "\"global_setup\":" << static_cast<int>(PF_Cmd_GLOBAL_SETUP) << ','
             << "\"global_setdown\":" << static_cast<int>(PF_Cmd_GLOBAL_SETDOWN) << ','
             << "\"params_setup\":" << static_cast<int>(PF_Cmd_PARAMS_SETUP)
             << ",\"render\":" << static_cast<int>(PF_Cmd_RENDER)
+            << ",\"smart_pre_render\":" << static_cast<int>(PF_Cmd_SMART_PRE_RENDER)
+            << ",\"smart_render\":" << static_cast<int>(PF_Cmd_SMART_RENDER)
             << "}\n}\n";
 }
