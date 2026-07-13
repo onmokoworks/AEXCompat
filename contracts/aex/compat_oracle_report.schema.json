@@ -1,0 +1,8 @@
+{
+  "schema_version": 1,
+  "schema_name": "AEXCompat pixel compatibility oracle report",
+  "required_fields": ["report_kind", "match_state", "dimensions_match", "max_channel_delta", "mean_channel_delta", "exceeding_pixel_count", "tolerance", "render_performed"],
+  "match_state_values": ["identical", "within_tolerance", "nonmatching"],
+  "statistics_policy": "Channel deltas only; pixel values and image payloads are forbidden.",
+  "safety_values": {"render_performed": false, "ae_invoked": false, "native_load_performed": false, "pixel_values_serialized": false}
+}

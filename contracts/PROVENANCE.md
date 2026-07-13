@@ -28,3 +28,9 @@ provenance and should not be edited during promotion.
 | `contracts/trace/host_trace_session.schema.json` | `docs/PROJECT_DESIGN_2026-07-03.md`, Host Behavior Oracle design | Session envelope for validating trace identity and completeness metadata. |
 | `contracts/trace/conformance_rules.json` | `docs/PROJECT_DESIGN_2026-07-03.md`, Host Behavior Oracle design | Initial comparison policy for future AE-versus-minihost traces. |
 | `contracts/trace/examples/synthetic_session.jsonl` | Locally generated synthetic example | Contains no native plug-in payload or measured After Effects behavior. |
+
+## Compatibility Oracle Contract
+
+| Canonical path | Source | Notes |
+| --- | --- | --- |
+| `contracts/aex/compat_oracle_report.schema.json` | `docs/IMPLEMENTATION_ROADMAP_2026-07-06.md`, A-8 | Locally authored statistics-only report contract; no pixel values or native payloads are serialized. |
