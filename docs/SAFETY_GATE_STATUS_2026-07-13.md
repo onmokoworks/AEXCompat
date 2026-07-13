@@ -5,7 +5,7 @@ authorization. Each stage still requires fixed-fixture controls and re-audit.
 
 ## Current Result
 
-`gate_state: target_ae_reference_argb8_matrix_verified_repeat_edge_gap`
+`gate_state: target_ae_reference_argb8_matrix_verified_repeat_edge_gap_explained`
 
 | Gate | Status | Evidence and remaining work |
 | --- | --- | --- |
@@ -46,6 +46,9 @@ The production-host matrix additionally matches for amount 0 and 500,
 horizontal and vertical directions, seed 10000, mix 0, a connected 5x3 map
 resampled to 11x7, and an inverted 11x7 map. Repeat Edge remains the only
 production-host parameter gap because AE does not enumerate that property.
+The cause is verified: its raw checkbox definition has current false but
+default true, while Adobe's checkbox contract initializes both fields equally.
+The cleanroom L2 report now retains this mismatch explicitly.
 SmartFX PreRender checkout also receives a valid time basis; a nonzero
 `42/2/24` context was observed exactly while preserving deterministic output.
 The ARGB8 matrix also covers valid parameter boundaries amount 500, seed 10000,

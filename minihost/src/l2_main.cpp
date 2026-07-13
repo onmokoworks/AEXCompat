@@ -76,6 +76,8 @@ struct ParamRecord {
   double slider_min{};
   double slider_max{};
   double default_value{};
+  double current_value{};
+  bool has_current{};
   int32_t precision{-1};
   std::string choices;
   std::string label;
@@ -256,11 +258,13 @@ int32_t __cdecl add_param(void*, int32_t index, void* definition) {
     if (choices) record.choices.assign(choices, strnlen_s(choices, 4096));
   } else if (record.type == 4) {
     record.has_numeric = true;
+    record.has_current = true;
     record.valid_min = 0;
     record.valid_max = 1;
     record.slider_min = 0;
     record.slider_max = 1;
     record.default_value = read<uint8_t>(bytes, u + 4) ? 1 : 0;
+    record.current_value = read<int32_t>(bytes, u) != 0 ? 1 : 0;
     const char* label = read<const char*>(bytes, u + 8);
     if (label) record.label.assign(label, strnlen_s(label, 4096));
   } else if (record.type == 10) {
@@ -671,6 +675,11 @@ void report(const char* status, int32_t global_error, int32_t params_error,
                 << ",\"default\":" << param.default_value;
     }
     if (param.precision >= 0) std::cout << ",\"precision\":" << param.precision;
+    if (param.has_current) {
+      std::cout << ",\"current\":" << param.current_value
+                << ",\"current_default_mismatch\":"
+                << (param.current_value != param.default_value ? "true" : "false");
+    }
     if (!param.choices.empty()) std::cout << ",\"choices\":\"" << escape(param.choices) << "\"";
     if (!param.label.empty()) std::cout << ",\"label\":\"" << escape(param.label) << "\"";
     std::cout << '}';

@@ -98,3 +98,21 @@ behavior, but AE does not enumerate a `Repeat Edge Pixels` property. A
 production-host no-repeat case cannot be authored through this scripting API
 until that registration discrepancy is explained or another supported control
 path is established.
+
+## Repeat Edge Root Cause
+
+An AE 25.2-created temporary AEPX reports `parn=8`, confirming the implicit
+input plus all seven low-level plug-in parameters, but its parameter template
+contains no match name for Repeat Edge (`ScatterMap--1083250007`). The rebuilt
+L2 observer records the fixed AEX checkbox definition as `current=0`,
+`default=1`, `current_default_mismatch=true`; Invert Map is consistently
+`current=0`, `default=0`.
+
+The external Adobe SDK `PF_ADD_CHECKBOX` macro initializes both `value` and
+`dephault` from the requested default. The public Rust wrapper revision used by
+the self-authored fixture implements `CheckBoxDef::set_default` by assigning
+only `dephault`. Repeat Edge requests true and therefore becomes inconsistent;
+Invert Map requests false and remains consistent by zero initialization. This
+explains why AE retains the low-level parameter count but omits the Repeat Edge
+stream. AEXCompat now preserves and reports this malformed descriptor instead
+of silently replacing its current value with its default.

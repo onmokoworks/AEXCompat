@@ -44,10 +44,18 @@ matched the self-authored source oracle:
 - `Scatter Amount`: valid 0..500, slider 0..100, default 5;
 - `Direction`: `Horizontal|Vertical|Both`, default 3 (`Both`);
 - `Random Seed`: valid/slider 0..10000, default 0;
-- `Repeat Edge Pixels`: default true, label `Repeat`;
+- `Repeat Edge Pixels`: default true, label `Repeat`, but raw current value false;
 - `Mix with Original`: 0..100, default 100, precision 1;
 - `Scatter Map`: layer parameter;
 - `Invert Map`: default false, label `Invert`.
+
+The Repeat Edge descriptor has `current=0`, `default=1`, while Invert Map has
+`current=0`, `default=0`. Adobe SDK `PF_ADD_CHECKBOX` initializes both fields
+to the requested default, but the Rust wrapper used by this fixture writes only
+`dephault`. AE 25.2 consequently reports all eight low-level parameters while
+omitting Repeat Edge from ExtendScript enumeration and AEPX parameter
+templates. This mismatch is now retained as target behavior rather than
+normalized away by the cleanroom host.
 
 This result proves initialization, parameter registration, and descriptor
 defaults/ranges for the observed types. The lifecycle extension also proves the

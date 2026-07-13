@@ -43,7 +43,8 @@ class MinihostL2SourceTests(unittest.TestCase):
     def test_l2_decodes_supported_parameter_descriptors(self):
         text = SOURCE.read_text(encoding="utf-8")
         for marker in ("record.type == 1", "record.type == 7", "record.type == 4",
-                       "record.type == 10", "valid_min", "default_value", "choices"):
+                       "record.type == 10", "valid_min", "default_value", "current_value",
+                       "current_default_mismatch", "choices"):
             self.assertIn(marker, text)
 
 

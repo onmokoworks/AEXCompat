@@ -16,6 +16,9 @@ class L2ResultTests(unittest.TestCase):
         for expected in ("valid 0..500", "Horizontal|Vertical|Both", "default true",
                          "default 100, precision 1", "default false"):
             self.assertIn(expected, text)
+        self.assertIn("current=0", text)
+        self.assertIn("default=1", text)
+        self.assertIn("omitting Repeat Edge", text)
 
     def test_l2_receipt_excludes_render(self):
         text = (ROOT / "analysis" / "SCATTERMAP_L2_APPROVAL_RECEIPT_2026-07-13.md").read_text(encoding="utf-8")
