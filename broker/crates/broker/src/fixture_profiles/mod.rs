@@ -12,15 +12,18 @@ pub struct WorkerSpec {
 
 #[derive(Clone, Copy)]
 pub struct L2ObservationPolicy {
-    pub allowlist_path: &'static str,
-    pub receipt_id: &'static str,
-    pub expires: &'static str,
-    pub max_timeout_ms: u64,
+    pub approval: ApprovalPolicy,
     pub about_substrings: &'static [&'static str],
     pub out_flags: u64,
     pub out_flags2: u64,
     pub update_params_ui_advertised: bool,
     pub query_dynamic_flags_advertised: bool,
+}
+
+pub struct ObservationProfile {
+    pub l1_approval: ApprovalPolicy,
+    pub l2: L2ObservationPolicy,
+    pub descriptor_manifest: ManifestPolicy,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -38,10 +41,13 @@ pub struct RegisteredProfile {
 
 static SCATTERMAP: RegisteredProfile = RegisteredProfile {
     l2_observation: L2ObservationPolicy {
-        allowlist_path: "target/l2-allowlist/active.local.json",
-        receipt_id: "scattermap-l2-20260713-001",
-        expires: "2026-08-12T23:59:59+09:00",
-        max_timeout_ms: 30_000,
+        approval: ApprovalPolicy {
+            allowlist_path: "target/l2-allowlist/active.local.json",
+            stage: "L2",
+            receipt_id: "scattermap-l2-20260713-001",
+            expires: "2026-08-12T23:59:59+09:00",
+            max_timeout_ms: 30_000,
+        },
         about_substrings: &["ScatterMap v1.0", "Written in Rust"],
         out_flags: 33_554_432,
         out_flags2: 167_777_280,
@@ -77,9 +83,57 @@ static SCATTERMAP: RegisteredProfile = RegisteredProfile {
     },
 };
 
+static SCATTERMAP_OBSERVATION: ObservationProfile = ObservationProfile {
+    l1_approval: ApprovalPolicy {
+        allowlist_path: "target/l1-allowlist/active.local.json",
+        stage: "L1",
+        receipt_id: "scattermap-l1-20260713-001",
+        expires: "2026-08-12T23:59:59+09:00",
+        max_timeout_ms: 30_000,
+    },
+    l2: SCATTERMAP.l2_observation,
+    descriptor_manifest: SCATTERMAP.descriptor_manifest,
+};
+
+static MASKOFFSET_OBSERVATION: ObservationProfile = ObservationProfile {
+    l1_approval: ApprovalPolicy {
+        allowlist_path: "target/l1-allowlist/maskoffset.active.local.json",
+        stage: "L1",
+        receipt_id: "maskoffset-l1-20260713-001",
+        expires: "2026-08-12T23:59:59+09:00",
+        max_timeout_ms: 30_000,
+    },
+    l2: L2ObservationPolicy {
+        approval: ApprovalPolicy {
+            allowlist_path: "target/l2-allowlist/maskoffset.active.local.json",
+            stage: "L2",
+            receipt_id: "maskoffset-l2-20260713-001",
+            expires: "2026-08-12T23:59:59+09:00",
+            max_timeout_ms: 30_000,
+        },
+        about_substrings: &["ONMK MaskOffset v1.0", "Written in Rust"],
+        out_flags: 4,
+        out_flags2: 525_312,
+        update_params_ui_advertised: false,
+        query_dynamic_flags_advertised: false,
+    },
+    descriptor_manifest: ManifestPolicy {
+        path: "profiles/maskoffset/parameter_descriptors.json",
+        sha256: "2D498526F705AE749542C7D9D0C8BE5E000243AFF8C64D37AEF36F12F60C4DC2",
+    },
+};
+
 pub fn find(id: &str) -> Option<&'static RegisteredProfile> {
     match id {
         scattermap::PROFILE_ID => Some(&SCATTERMAP),
+        _ => None,
+    }
+}
+
+pub fn find_observation(id: &str) -> Option<&'static ObservationProfile> {
+    match id {
+        scattermap::PROFILE_ID => Some(&SCATTERMAP_OBSERVATION),
+        "maskoffset" => Some(&MASKOFFSET_OBSERVATION),
         _ => None,
     }
 }
@@ -108,6 +162,7 @@ mod tests {
             find(scattermap::PROFILE_ID)
                 .unwrap()
                 .l2_observation
+                .approval
                 .receipt_id,
             "scattermap-l2-20260713-001"
         );
@@ -116,5 +171,22 @@ mod tests {
             ParameterizedRenderAdapter::ScatterMap
         );
         assert!(find("unknown-aex").is_none());
+        assert_eq!(
+            find_observation("maskoffset")
+                .unwrap()
+                .l2
+                .approval
+                .receipt_id,
+            "maskoffset-l2-20260713-001"
+        );
+        assert!(find("maskoffset").is_none());
+        assert!(find_observation("unknown-aex").is_none());
+        assert_eq!(
+            find_observation("maskoffset")
+                .unwrap()
+                .descriptor_manifest
+                .path,
+            "profiles/maskoffset/parameter_descriptors.json"
+        );
     }
 }

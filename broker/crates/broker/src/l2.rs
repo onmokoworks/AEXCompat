@@ -1,62 +1,14 @@
-use crate::fixture_profiles::{find, L2ObservationPolicy};
+use crate::fixture_profiles::{find_observation, L2ObservationPolicy};
+use crate::host_core::approved_artifact::load;
 use crate::windows_process::run_isolated;
-use serde::Deserialize;
 use serde_json::{json, Value};
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
-use std::path::{Component, Path, PathBuf};
+use std::path::{Component, Path};
 use std::time::Duration;
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Allowlist {
-    schema_version: u32,
-    entries: Vec<Entry>,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Entry {
-    id: String,
-    plugin_path: PathBuf,
-    sha256: String,
-    byte_size: u64,
-    approved_stage: String,
-    receipt_id: String,
-    expires: String,
-    timeout_ms: u64,
-}
 
 fn invalid(message: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message.into())
-}
-
-fn entry(repository: &Path, id: &str, policy: L2ObservationPolicy) -> io::Result<Entry> {
-    let bytes = fs::read(repository.join(policy.allowlist_path))?;
-    let list: Allowlist = serde_json::from_slice(&bytes).map_err(|e| invalid(e.to_string()))?;
-    if list.schema_version != 1 || list.entries.len() != 1 {
-        return Err(invalid("L2 allowlist must have one schema-v1 entry"));
-    }
-    let entry = list.entries.into_iter().next().unwrap();
-    if entry.id != id
-        || entry.approved_stage != "L2"
-        || entry.receipt_id != policy.receipt_id
-        || entry.expires != policy.expires
-    {
-        return Err(invalid("L2 identity, receipt, stage, or expiry mismatch"));
-    }
-    if entry.sha256.len() != 64
-        || !entry.sha256.bytes().all(|b| b.is_ascii_hexdigit())
-        || entry.timeout_ms == 0
-        || entry.timeout_ms > policy.max_timeout_ms
-    {
-        return Err(invalid("invalid L2 digest or resource limit"));
-    }
-    let metadata = fs::metadata(&entry.plugin_path)?;
-    if !metadata.is_file() || metadata.len() != entry.byte_size {
-        return Err(invalid("L2 size revalidation failed"));
-    }
-    Ok(entry)
 }
 
 fn worker_passed(worker_report: &Value, policy: L2ObservationPolicy) -> bool {
@@ -97,9 +49,9 @@ fn worker_passed(worker_report: &Value, policy: L2ObservationPolicy) -> bool {
 }
 
 pub fn run(repository: &Path, worker: &Path, id: &str, output: &Path) -> io::Result<bool> {
-    let policy = find(id)
+    let policy = find_observation(id)
         .ok_or_else(|| invalid("requested L2 profile is not registered"))?
-        .l2_observation;
+        .l2;
     if output
         .components()
         .any(|part| matches!(part, Component::ParentDir | Component::CurDir))
@@ -120,7 +72,7 @@ pub fn run(repository: &Path, worker: &Path, id: &str, output: &Path) -> io::Res
     if !parent.canonicalize()?.starts_with(root.canonicalize()?) {
         return Err(invalid("output outside L2 result root"));
     }
-    let entry = entry(repository, id, policy)?;
+    let entry = load(repository, id, policy.approval)?;
     let result = run_isolated(
         worker,
         &[
@@ -158,10 +110,13 @@ mod tests {
     use super::*;
 
     const POLICY: L2ObservationPolicy = L2ObservationPolicy {
-        allowlist_path: "unused",
-        receipt_id: "receipt",
-        expires: "expiry",
-        max_timeout_ms: 1,
+        approval: crate::host_core::approved_artifact::ApprovalPolicy {
+            allowlist_path: "unused",
+            stage: "L2",
+            receipt_id: "receipt",
+            expires: "expiry",
+            max_timeout_ms: 1,
+        },
         about_substrings: &["Example", "v1"],
         out_flags: 4,
         out_flags2: 8,

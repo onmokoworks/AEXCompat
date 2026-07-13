@@ -56,10 +56,12 @@ class NativeCodeGuardTests(unittest.TestCase):
 
     def test_l1_broker_uses_single_private_allowlist_and_id_only(self):
         source = (BROKER_ROOT / "crates" / "broker" / "src" / "l1.rs").read_text(encoding="utf-8")
-        self.assertIn("active.local.json", source)
-        self.assertIn("entries.len() != 1", source)
-        self.assertIn("entry.id != id", source)
-        self.assertIn("metadata.len() != entry.byte_size", source)
+        profile = (BROKER_ROOT / "crates" / "broker" / "src" / "fixture_profiles" / "mod.rs").read_text(encoding="utf-8")
+        approval = (BROKER_ROOT / "crates" / "broker" / "src" / "host_core" / "approved_artifact.rs").read_text(encoding="utf-8")
+        self.assertIn("target/l1-allowlist/active.local.json", profile)
+        self.assertIn("entries.len() != 1", approval)
+        self.assertIn("entry.id != id", approval)
+        self.assertIn("metadata.len() != entry.byte_size", approval)
         self.assertIn("create_new(true)", source)
         main = (BROKER_ROOT / "crates" / "broker" / "src" / "main.rs").read_text(encoding="utf-8")
         self.assertIn('"scattermap"', main)
@@ -68,10 +70,11 @@ class NativeCodeGuardTests(unittest.TestCase):
     def test_l2_has_distinct_worker_allowlist_and_receipt(self):
         source = (BROKER_ROOT / "crates" / "broker" / "src" / "l2.rs").read_text(encoding="utf-8")
         profile = (BROKER_ROOT / "crates" / "broker" / "src" / "fixture_profiles" / "mod.rs").read_text(encoding="utf-8")
+        approval = (BROKER_ROOT / "crates" / "broker" / "src" / "host_core" / "approved_artifact.rs").read_text(encoding="utf-8")
         self.assertIn("target/l2-allowlist/active.local.json", profile)
         self.assertIn("scattermap-l2-20260713-001", profile)
-        self.assertIn('entry.approved_stage != "L2"', source)
-        self.assertIn("entries.len() != 1", source)
+        self.assertIn('stage: "L2"', profile)
+        self.assertIn("entries.len() != 1", approval)
         self.assertIn("worker_report_unavailable", source)
         self.assertIn("requested L2 profile is not registered", source)
 

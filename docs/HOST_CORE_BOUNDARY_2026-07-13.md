@@ -58,4 +58,9 @@ support requires at least:
    isolation without changes to `host_core`.
 
 Until those conditions are met, reports must describe ScatterMap as the active
-fixture and must not describe AEXCompat as a complete general AEX host.
+render fixture and must not describe AEXCompat as a complete general AEX host.
+
+MaskOffset is now registered as a second observation fixture and passes the
+generic L1/L2 runner without `host_core` changes. This is evidence toward item 5,
+not completion of it: its render, AEGP mask suites, pixel oracle, and render-time
+failure isolation remain pending.

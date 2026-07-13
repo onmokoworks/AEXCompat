@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "plugin_id": "maskoffset",
+  "source": {
+    "stage": "L2",
+    "plugin_sha256": "B7C41F4F906FCE74B26BD2F06520F6BFDF75DCD1A2682DBB85D50D1DE833877B",
+    "receipt_id": "maskoffset-l2-20260713-001"
+  },
+  "descriptors": [
+    {"slot": 1, "observed_type": 7, "display_name": "Mode", "assignable": true, "id": "mode", "kind": "integer", "minimum": 1, "maximum": 5, "default": 1},
+    {"slot": 2, "observed_type": 5, "display_name": "Fill Color", "assignable": false},
+    {"slot": 3, "observed_type": 10, "display_name": "Mask Index", "assignable": true, "id": "mask_index", "kind": "float", "minimum": 1, "maximum": 128, "default": 1},
+    {"slot": 4, "observed_type": 10, "display_name": "Expansion (px)", "assignable": true, "id": "expansion", "kind": "float", "minimum": -5000, "maximum": 5000, "default": 0},
+    {"slot": 5, "observed_type": 4, "display_name": "Separate X/Y", "assignable": true, "id": "separate_xy", "kind": "integer", "minimum": 0, "maximum": 1, "default": 0},
+    {"slot": 6, "observed_type": 10, "display_name": "Expansion Y (px)", "assignable": true, "id": "expansion_y", "kind": "float", "minimum": -5000, "maximum": 5000, "default": 0},
+    {"slot": 7, "observed_type": 10, "display_name": "Corner Round (px)", "assignable": true, "id": "corner_round", "kind": "float", "minimum": 0, "maximum": 2000, "default": 0},
+    {"slot": 8, "observed_type": 10, "display_name": "Feather (px)", "assignable": true, "id": "feather", "kind": "float", "minimum": 0, "maximum": 500, "default": 0},
+    {"slot": 9, "observed_type": 4, "display_name": "Invert", "assignable": true, "id": "invert", "kind": "integer", "minimum": 0, "maximum": 1, "default": 0}
+  ]
+}

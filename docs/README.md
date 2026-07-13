@@ -28,6 +28,9 @@ repository has a short entry point and a durable place for longer plans.
 - `DESCRIPTOR_MANIFEST_PROMOTION_2026-07-13.md`
   - Documents no-native regeneration and comparison of reviewed parameter
     manifests from isolated L2 observations.
+- `MASKOFFSET_SECOND_FIXTURE_2026-07-13.md`
+  - Records the fixed identity, isolated L1/L2 evidence, descriptor promotion,
+    and remaining render work for the second owner-authored AEX fixture.
 
 ## Related Sources
 
