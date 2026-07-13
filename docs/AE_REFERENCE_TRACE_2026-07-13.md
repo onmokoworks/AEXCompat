@@ -167,3 +167,18 @@ After RGBA-to-ARGB normalization, each frame matched the default oracle hash
 `19CEA826F356E0D94BC29FF10CB9E7F5A770FE5B288CB3D190A58372353102D9`
 with zero differing bytes and pixels. This confirms in production AE that the
 fixture does not introduce frame-time variation when parameters are constant.
+
+## Downsample Contract
+
+`tools/ae_scattermap_downsample_probe.jsx` set a 16x12 composition resolution
+factor to `[2,2]`. AE 25.2 produced 8x6 frames for both Amount 0 and Amount 5.
+The Amount 0 frame was used as the exact host-downsampled input rather than
+assuming a resampling kernel. `tools/ae_scattermap_downsample_verify.py` then
+applied the fixture algorithm directly to those 8x6 ARGB pixels.
+
+The actual Amount 5 output and independent arbitrary-source oracle both had
+ARGB SHA-256
+`B115AC29862C051E7F87D340B115EC1197DB8F96B3F6766478EACB05604DAD51`,
+with zero differing bytes and maximum channel delta zero. This proves that the
+fixture operates on the downsampled world dimensions and, as its source
+indicates, does not scale the five-pixel amount by `downsample_x/y`.

@@ -39,10 +39,11 @@ def gradient(width: int, height: int) -> bytes:
     return bytes(pixels)
 
 
-def render_case(width: int = 16, height: int = 12, *, amount: int = 5,
-                direction: int = 3, seed: int = 0, repeat_edge: bool = True,
-                mix: float = 100.0, luma_map: list[float] | None = None) -> bytes:
-    source = gradient(width, height)
+def render_source(source: bytes, width: int, height: int, *, amount: int = 5,
+                  direction: int = 3, seed: int = 0, repeat_edge: bool = True,
+                  mix: float = 100.0, luma_map: list[float] | None = None) -> bytes:
+    if len(source) != width * height * 4:
+        raise ValueError("source must contain exactly width*height ARGB pixels")
     output = bytearray(width * height * 4)
     amount_f = f32(float(amount))
     for y in range(height):
@@ -66,6 +67,14 @@ def render_case(width: int = 16, height: int = 12, *, amount: int = 5,
             value = f32(f32(f32(float(source[index])) * inverse) + f32(f32(float(output[index])) * ratio))
             output[index] = min(255, max(0, int(value)))
     return bytes(output)
+
+
+def render_case(width: int = 16, height: int = 12, *, amount: int = 5,
+                direction: int = 3, seed: int = 0, repeat_edge: bool = True,
+                mix: float = 100.0, luma_map: list[float] | None = None) -> bytes:
+    return render_source(gradient(width, height), width, height, amount=amount,
+                         direction=direction, seed=seed, repeat_edge=repeat_edge,
+                         mix=mix, luma_map=luma_map)
 
 
 def render_default(width: int = 16, height: int = 12) -> bytes:

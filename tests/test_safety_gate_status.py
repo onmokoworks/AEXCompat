@@ -9,7 +9,7 @@ STATUS = ROOT / "docs" / "SAFETY_GATE_STATUS_2026-07-13.md"
 class SafetyGateStatusTests(unittest.TestCase):
     def test_status_records_ae_reference_parity_and_prior_contracts(self):
         text = STATUS.read_text(encoding="utf-8")
-        self.assertIn("gate_state: target_ae_argb8_roundtrip_and_time_verified_deep_tail_observed", text)
+        self.assertIn("gate_state: target_ae_argb8_roundtrip_time_and_downsample_verified", text)
         self.assertIn("fixed-fixture controls and re-audit", text)
         self.assertIn("SmartFX PreRender/Render", text)
         self.assertIn("GPU lifecycle", text)
@@ -26,6 +26,8 @@ class SafetyGateStatusTests(unittest.TestCase):
         self.assertIn("seed 10000", text)
         self.assertIn("unwritten tail is not deterministic", text)
         self.assertIn("time 0 and", text)
+        self.assertIn("resolution factor", text)
+        self.assertIn("8x6 world", text)
 
     def test_all_gate_items_are_explicit(self):
         text = STATUS.read_text(encoding="utf-8")
