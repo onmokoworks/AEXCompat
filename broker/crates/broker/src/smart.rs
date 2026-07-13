@@ -32,8 +32,8 @@ fn expected(case_id: &str) -> Option<&'static str> { match case_id {
 struct Allowlist { schema_version: u32, entries: Vec<Entry> }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Entry { id: String, plugin_path: PathBuf, sha256: String, byte_size: u64,
-    approved_stage: String, receipt_id: String, expires: String, timeout_ms: u64 }
+pub(crate) struct Entry { pub(crate) id: String, pub(crate) plugin_path: PathBuf, pub(crate) sha256: String, pub(crate) byte_size: u64,
+    pub(crate) approved_stage: String, pub(crate) receipt_id: String, pub(crate) expires: String, pub(crate) timeout_ms: u64 }
 fn invalid(s: impl Into<String>) -> io::Error { io::Error::new(io::ErrorKind::InvalidData, s.into()) }
 
 pub fn run(repository: &Path, worker: &Path, id: &str, case_id: &str, output: &Path) -> io::Result<bool> {
@@ -41,17 +41,7 @@ pub fn run(repository: &Path, worker: &Path, id: &str, case_id: &str, output: &P
     if output.components().any(|p| matches!(p, Component::ParentDir | Component::CurDir)) {
         return Err(invalid("output traversal forbidden"));
     }
-    let list: Allowlist = serde_json::from_slice(&fs::read(repository.join("target/smart-allowlist/active.local.json"))?)
-        .map_err(|e| invalid(e.to_string()))?;
-    if list.schema_version != 1 || list.entries.len() != 1 { return Err(invalid("one SmartFX entry required")); }
-    let entry = list.entries.into_iter().next().unwrap();
-    if entry.id != id || entry.approved_stage != "smartfx_render" ||
-       entry.receipt_id != "scattermap-smartfx-20260713-001" || entry.expires != "2026-08-12T23:59:59+09:00" ||
-       entry.timeout_ms == 0 || entry.timeout_ms > 5_000 || entry.sha256.len() != 64 {
-        return Err(invalid("SmartFX allowlist mismatch"));
-    }
-    let metadata = fs::metadata(&entry.plugin_path)?;
-    if !metadata.is_file() || metadata.len() != entry.byte_size { return Err(invalid("SmartFX fixture size mismatch")); }
+    let entry = approved_entry(repository, id)?;
     let root = repository.join("target/smart-results"); fs::create_dir_all(&root)?;
     let output = if output.is_absolute() { output.to_path_buf() } else { repository.join(output) };
     let parent = output.parent().ok_or_else(|| invalid("output parent missing"))?; fs::create_dir_all(parent)?;
@@ -106,6 +96,21 @@ pub fn run(repository: &Path, worker: &Path, id: &str, case_id: &str, output: &P
     let mut file = OpenOptions::new().write(true).create_new(true).open(output)?;
     serde_json::to_writer_pretty(&mut file, &summary).map_err(|e| invalid(e.to_string()))?; file.write_all(b"\n")?;
     Ok(passed)
+}
+
+pub(crate) fn approved_entry(repository: &Path, id: &str) -> io::Result<Entry> {
+    let list: Allowlist = serde_json::from_slice(&fs::read(repository.join("target/smart-allowlist/active.local.json"))?)
+        .map_err(|e| invalid(e.to_string()))?;
+    if list.schema_version != 1 || list.entries.len() != 1 { return Err(invalid("one SmartFX entry required")); }
+    let entry = list.entries.into_iter().next().unwrap();
+    if entry.id != id || entry.approved_stage != "smartfx_render" ||
+       entry.receipt_id != "scattermap-smartfx-20260713-001" || entry.expires != "2026-08-12T23:59:59+09:00" ||
+       entry.timeout_ms == 0 || entry.timeout_ms > 5_000 || entry.sha256.len() != 64 {
+        return Err(invalid("SmartFX allowlist mismatch"));
+    }
+    let metadata = fs::metadata(&entry.plugin_path)?;
+    if !metadata.is_file() || metadata.len() != entry.byte_size { return Err(invalid("SmartFX fixture size mismatch")); }
+    Ok(entry)
 }
 
 #[cfg(test)]

@@ -53,6 +53,19 @@ class RenderParameterGateContractTests(unittest.TestCase):
             self.assertIn(marker, source)
         self.assertLess(source.index("if (request_mode &&"), source.index("if (!sha256(argv[2]"))
 
+    def test_parameterized_smartfx_contract_requires_both_selectors_and_rects(self):
+        schema = json.loads((ROOT / "contracts/aex/parameterized_smartfx_render_report.schema.json").read_text(encoding="utf-8"))
+        self.assertFalse(schema["additionalProperties"])
+        run = schema["$defs"]["run"]
+        for marker in ("pre_render_error", "smart_render_error", "result_rects_valid",
+                       "guard_bytes_intact", "request_mode"):
+            self.assertIn(marker, run["required"])
+        main = (ROOT / "broker/crates/broker/src/main.rs").read_text(encoding="utf-8")
+        route = (ROOT / "broker/crates/broker/src/render_request.rs").read_text(encoding="utf-8")
+        self.assertIn("smart-parameter-request-scattermap", main)
+        self.assertIn("execute_smart", route)
+        self.assertIn('"--smart-request"', route)
+
 
 if __name__ == "__main__":
     unittest.main()

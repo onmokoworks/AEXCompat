@@ -106,3 +106,7 @@ without starting a native process.
 An arbitrary 33.333333333% Mix case also passed twice after conformance probing
 established that the target casts Mix to f32 before percentage normalization;
 both cleanroom oracles now preserve that observable operation order.
+The same arbitrary request now passes twice through SmartFX PreRender/Render
+under its separate allowlist and receipt, with valid rectangles, intact guards,
+and the identical dynamic oracle hash. SmartFX range rejection also proves no
+native process starts for invalid values.

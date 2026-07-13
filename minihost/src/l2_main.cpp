@@ -358,7 +358,7 @@ std::string sha256_bytes(const unsigned char* data, std::size_t size) {
   return text.str();
 }
 
-#ifdef AEXCOMPAT_RENDER_WORKER
+#if defined(AEXCOMPAT_RENDER_WORKER) || defined(AEXCOMPAT_SMART_WORKER)
 struct RenderParameters {
   int32_t amount{5};
   int32_t direction{3};
@@ -387,7 +387,9 @@ bool parse_double_arg(const wchar_t* text, double minimum, double maximum, doubl
   output = value;
   return true;
 }
+#endif
 
+#ifdef AEXCOMPAT_RENDER_WORKER
 int32_t render_once(EffectEntry entry, std::array<std::byte, kInSize>& input,
                     std::array<std::byte, kOutSize>& command_output,
                     const std::string& case_id, int32_t& width, int32_t& height,
@@ -542,7 +544,8 @@ struct SmartResult {
 
 SmartResult smart_render_once(EffectEntry entry, std::array<std::byte, kInSize>& input,
                               std::array<std::byte, kOutSize>& command_output,
-                              const std::string& case_id) {
+                              const std::string& case_id,
+                              const RenderParameters* requested = nullptr) {
   SmartResult result;
   const bool deep16 = case_id == "deep16_default";
   const bool gpu_negotiation = case_id == "gpu_fallback_float32";
@@ -565,7 +568,13 @@ SmartResult smart_render_once(EffectEntry entry, std::array<std::byte, kInSize>&
   else if (case_id == "seed_max") seed = 10000;
   else if (case_id == "mix_zero") { amount = 500; seed = 10000; mix = 0.0; }
   else if (case_id == "odd_dimensions" || case_id == "padded_stride") { amount = 4; seed = 3; }
-  else if (case_id != "default" && !deep16 && !float32 && !missing_input && !crash_null_output && !temporal_context && !partial_output_request && !connected_map) return result;
+  else if (case_id != "default" && case_id != "request" && !deep16 && !float32 && !missing_input && !crash_null_output && !temporal_context && !partial_output_request && !connected_map) return result;
+  if (requested) {
+    amount = requested->amount;
+    direction = requested->direction;
+    seed = requested->seed;
+    mix = requested->mix;
+  }
   constexpr std::size_t guard = 64;
   std::vector<unsigned char> source(rowbytes * height, 0x5A);
   for (int32_t y = 0; y < height; ++y) for (int32_t x = 0; x < width; ++x) {
@@ -621,6 +630,7 @@ SmartResult smart_render_once(EffectEntry entry, std::array<std::byte, kInSize>&
   write<int32_t>(definitions[3], 56, seed); write<int32_t>(definitions[4], 56, repeat);
   write<double>(definitions[5], 56, mix);
   if (case_id == "inverted_map") write<int32_t>(definitions[7], 56, 1);
+  if (requested) write<int32_t>(definitions[7], 56, requested->invert_map);
   std::array<void*, 9> params{};
   for (std::size_t i = 0; i < definitions.size(); ++i) params[i] = definitions[i].data();
   if (crash_null_output)
@@ -769,7 +779,15 @@ int wmain(int argc, wchar_t** argv) {
        !parse_double_arg(argv[7], 0.0, 100.0, requested_parameters.mix) ||
        !parse_i32_arg(argv[8], 0, 1, requested_parameters.invert_map))) return 3;
 #elif defined(AEXCOMPAT_SMART_WORKER)
-  if (argc != 5 || std::wstring(argv[1]) != L"--smart") return 2;
+  const bool request_mode = argc == 9 && std::wstring(argv[1]) == L"--smart-request";
+  if (!request_mode && (argc != 5 || std::wstring(argv[1]) != L"--smart")) return 2;
+  RenderParameters requested_parameters;
+  if (request_mode &&
+      (!parse_i32_arg(argv[4], 0, 500, requested_parameters.amount) ||
+       !parse_i32_arg(argv[5], 1, 3, requested_parameters.direction) ||
+       !parse_i32_arg(argv[6], 0, 10000, requested_parameters.seed) ||
+       !parse_double_arg(argv[7], 0.0, 100.0, requested_parameters.mix) ||
+       !parse_i32_arg(argv[8], 0, 1, requested_parameters.invert_map))) return 3;
 #else
   if (argc != 4) return 2;
   if (std::wstring(argv[1]) != L"--l2") return 2;
@@ -906,10 +924,14 @@ int wmain(int argc, wchar_t** argv) {
   }
   std::cerr << "stage:render_end error=" << render_error << "\n" << std::flush;
 #elif defined(AEXCOMPAT_SMART_WORKER)
-  std::string case_id;
-  for (const wchar_t* p = argv[4]; *p; ++p) { if (*p > 0x7f) return 2; case_id.push_back(static_cast<char>(*p)); }
+  std::string case_id = request_mode ? "request" : "";
+  if (!request_mode)
+    for (const wchar_t* p = argv[4]; *p; ++p) { if (*p > 0x7f) return 2; case_id.push_back(static_cast<char>(*p)); }
   std::cerr << "stage:smart_render_begin\n" << std::flush;
-  const SmartResult smart = params_error == 0 ? smart_render_once(entry, input, output, case_id) : SmartResult{};
+  const SmartResult smart = params_error == 0
+      ? smart_render_once(entry, input, output, case_id,
+                          request_mode ? &requested_parameters : nullptr)
+      : SmartResult{};
   std::cerr << "stage:smart_render_end pre_error=" << smart.pre_error
             << " render_error=" << smart.render_error << "\n" << std::flush;
 #endif
@@ -973,6 +995,12 @@ int wmain(int argc, wchar_t** argv) {
             << ",\"input_sha256\":\"" << smart.input_hash << "\",\"output_sha256\":\""
             << smart.output_hash << "\",\"result_rects_valid\":" << (smart.rects_valid ? "true" : "false")
             << ",\"guard_bytes_intact\":" << (smart.guards_intact ? "true" : "false")
+            << ",\"request_mode\":" << (request_mode ? "true" : "false")
+            << ",\"requested_amount\":" << requested_parameters.amount
+            << ",\"requested_direction\":" << requested_parameters.direction
+            << ",\"requested_seed\":" << requested_parameters.seed
+            << ",\"requested_mix\":" << std::setprecision(17) << requested_parameters.mix
+            << ",\"requested_invert_map\":" << requested_parameters.invert_map
             << ",\"render_performed\":true}\n";
 #else
   report(global_error == 0 && params_error == 0 ? "selectors_completed" : "selector_error",

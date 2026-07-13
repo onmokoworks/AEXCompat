@@ -42,6 +42,20 @@ fn main() {
         };
         std::process::exit(if passed { 0 } else { 3 });
     }
+    if args.len() == 4 && args[1] == "smart-parameter-request-scattermap" {
+        let passed = match aexcompat_broker::render_request::execute_smart(
+            repository,
+            &PathBuf::from(&args[2]),
+            &PathBuf::from(&args[3]),
+        ) {
+            Ok(passed) => passed,
+            Err(_) => {
+                eprintln!("parameterized SmartFX request failed");
+                std::process::exit(2);
+            }
+        };
+        std::process::exit(if passed { 0 } else { 3 });
+    }
     if args.len() != 3 || !args[2].ends_with(".json") {
         eprintln!("usage: broker <selftest|l1-scattermap|l2-scattermap|render-scattermap|smart-scattermap> <create-new-json-output>");
         std::process::exit(2);

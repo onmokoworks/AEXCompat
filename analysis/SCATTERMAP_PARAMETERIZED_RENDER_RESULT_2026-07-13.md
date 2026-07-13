@@ -36,3 +36,24 @@ or native loading.
 This establishes a generalized classic ARGB8 parameter path for an unconnected
 map. Generalized source images, connected map payloads, Repeat Edge exposure,
 and parameterized SmartFX dispatch remain separate compatibility increments.
+
+## SmartFX Parity
+
+The same strict request ABI is now implemented for SmartFX CPU rendering. The
+worker revalidates all five values before loading the AEX, binds them before
+Smart PreRender, and reports the exact values with a 17-digit Mix roundtrip.
+The broker uses the separate SmartFX allowlist and receipt, then requires two
+Job Object-isolated runs with successful PreRender and Render selectors, valid
+result rectangles, intact guards, deterministic output, and the same dynamic
+oracle used by classic rendering.
+
+Amount 13, Direction 2, Seed 1234, Mix 33.333333333, Invert 0 produced
+`3905F287DBF3042CD73527154B8B6DA89E21A86C3ECDB6902D51A67F2CB79CF1`
+in both SmartFX runs, exactly equal to classic and the independent oracle.
+Direction 4 was rejected by the SmartFX execution route with exit 3 and
+`native_process_started: false`; direct worker validation also returned exit 3.
+
+Parameterized SmartFX is currently proven for CPU ARGB8 with an unconnected map.
+Connected map request payloads, partial output requests combined with arbitrary
+values, deep/float parameterized worlds, and GPU execution remain separate
+compatibility increments.

@@ -269,6 +269,113 @@ pub fn execute(repository: &Path, request_path: &Path, output_path: &Path) -> io
     Ok(passed)
 }
 
+pub fn execute_smart(
+    repository: &Path,
+    request_path: &Path,
+    output_path: &Path,
+) -> io::Result<bool> {
+    let request_path = resolve_inside(repository, request_path, "target/render-requests", false)?;
+    let output_path = resolve_inside(
+        repository,
+        output_path,
+        "target/smart-request-render-results",
+        true,
+    )?;
+    let metadata = fs::metadata(&request_path)?;
+    if !metadata.is_file() || metadata.len() == 0 || metadata.len() > REQUEST_LIMIT {
+        return Err(invalid("render request size invalid"));
+    }
+    let request: Request = serde_json::from_slice(&fs::read(request_path)?)
+        .map_err(|error| invalid(format!("invalid render request: {error}")))?;
+    if request.schema_version != 1 || request.plugin_id != "scattermap" {
+        return Err(invalid("render request identity mismatch"));
+    }
+    let (parameters, assignment_count, errors) = evaluate(&request);
+    if !errors.is_empty() {
+        let report = json!({"schema_version":1,"stage":"parameterized_smartfx_render",
+            "plugin_id":"scattermap","assignment_count":assignment_count,"accepted":false,
+            "native_process_started":false,"errors":errors,"passed":false});
+        let mut output = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(output_path)?;
+        serde_json::to_writer_pretty(&mut output, &report)
+            .map_err(|error| invalid(error.to_string()))?;
+        output.write_all(b"\n")?;
+        return Ok(false);
+    }
+    let approved = crate::smart::approved_entry(repository, "scattermap")?;
+    let worker = repository.join("target/minihost-build/aex_smart_worker.exe");
+    let expected = argb8_hash(
+        parameters.amount,
+        parameters.direction,
+        parameters.seed,
+        parameters.mix,
+    );
+    let args = [
+        "--smart-request".to_string(),
+        approved.plugin_path.to_string_lossy().into_owned(),
+        approved.sha256.to_ascii_lowercase(),
+        parameters.amount.to_string(),
+        parameters.direction.to_string(),
+        parameters.seed.to_string(),
+        parameters.mix.to_string(),
+        parameters.invert_map.to_string(),
+    ];
+    let mut runs = Vec::new();
+    for _ in 0..2 {
+        let isolated = run_isolated(&worker, &args, Duration::from_millis(approved.timeout_ms))?;
+        let report: Value = serde_json::from_str(isolated.stdout.trim())
+            .unwrap_or_else(|_| json!({"status":"worker_report_unavailable"}));
+        runs.push((isolated.classification, report));
+    }
+    let valid_run = |classification: crate::ExitClassification, report: &Value| {
+        classification.as_str() == "ok"
+            && report.get("request_mode") == Some(&Value::Bool(true))
+            && report.get("pre_render_error") == Some(&json!(0))
+            && report.get("smart_render_error") == Some(&json!(0))
+            && report.get("result_rects_valid") == Some(&Value::Bool(true))
+            && report.get("guard_bytes_intact") == Some(&Value::Bool(true))
+            && report.get("requested_amount") == Some(&json!(parameters.amount))
+            && report.get("requested_direction") == Some(&json!(parameters.direction))
+            && report.get("requested_seed") == Some(&json!(parameters.seed))
+            && report.get("requested_mix").and_then(Value::as_f64) == Some(parameters.mix)
+            && report.get("requested_invert_map") == Some(&json!(parameters.invert_map))
+            && report
+                .get("output_sha256")
+                .and_then(Value::as_str)
+                .is_some_and(|hash| hash.eq_ignore_ascii_case(&expected))
+    };
+    let deterministic = runs[0].1.get("output_sha256") == runs[1].1.get("output_sha256");
+    let passed = deterministic
+        && runs
+            .iter()
+            .all(|(classification, report)| valid_run(*classification, report));
+    let summarize = |item: &(crate::ExitClassification, Value)| {
+        json!({
+        "classification":item.0.as_str(),"pre_render_error":item.1.get("pre_render_error"),
+        "smart_render_error":item.1.get("smart_render_error"),"output_sha256":item.1.get("output_sha256"),
+        "result_rects_valid":item.1.get("result_rects_valid"),
+        "guard_bytes_intact":item.1.get("guard_bytes_intact"),"request_mode":item.1.get("request_mode")})
+    };
+    let report = json!({"schema_version":1,"stage":"parameterized_smartfx_render",
+        "plugin_id":"scattermap","receipt_id":approved.receipt_id,
+        "fixture_sha256":approved.sha256.to_ascii_uppercase(),"assignment_count":assignment_count,
+        "accepted":true,"native_process_started":true,"parameters":{"amount":parameters.amount,
+        "direction":parameters.direction,"seed":parameters.seed,"mix":parameters.mix,
+        "invert_map":parameters.invert_map},"expected_oracle_sha256":expected,
+        "run_1":summarize(&runs[0]),"run_2":summarize(&runs[1]),"deterministic":deterministic,
+        "broker_survived":true,"passed":passed});
+    let mut output = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(output_path)?;
+    serde_json::to_writer_pretty(&mut output, &report)
+        .map_err(|error| invalid(error.to_string()))?;
+    output.write_all(b"\n")?;
+    Ok(passed)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -361,6 +468,19 @@ mod tests {
         let report: Value = serde_json::from_slice(&fs::read(output).unwrap()).unwrap();
         assert_eq!(report["native_process_started"], false);
         assert_eq!(report["passed"], false);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn smart_execution_route_rejects_before_worker_launch() {
+        let root = repository();
+        let request = root.join("target/render-requests/rejected-smart-execution.json");
+        let output = root.join("target/smart-request-render-results/rejected.json");
+        fs::write(&request, br#"{"schema_version":1,"plugin_id":"scattermap","assignments":{"Mix with Original":100.1}}"#).unwrap();
+        assert!(!execute_smart(&root, &request, &output).unwrap());
+        let report: Value = serde_json::from_slice(&fs::read(output).unwrap()).unwrap();
+        assert_eq!(report["stage"], "parameterized_smartfx_render");
+        assert_eq!(report["native_process_started"], false);
         fs::remove_dir_all(root).unwrap();
     }
 }
