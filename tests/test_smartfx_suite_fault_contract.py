@@ -56,6 +56,8 @@ class SmartFxSuiteFaultContractTests(unittest.TestCase):
         self.assertIn('"handle_resize_while_locked"', route)
         self.assertIn('"world_double_dispose"', route)
         self.assertIn('"world_allocation_limit"', route)
+        self.assertIn('"pixel_format_registry"', route)
+        self.assertIn('report.get("pixel_format_fault_observed")', route)
         self.assertIn('report.get("world_fault_observed")', route)
         self.assertIn('report.get("handle_fault_observed")', route)
         self.assertIn('invalid("unknown fixed suite fault")', route)

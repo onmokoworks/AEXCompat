@@ -126,3 +126,12 @@ and 256 MiB total, rejects unsupported formats, invalid dimensions, overflow,
 duplicate creation into a live world, borrowed disposal, and double disposal.
 Rejected allocations do not alter the caller's world. Non-cleared worlds use a
 deterministic poison fill rather than exposing stale allocator memory.
+
+PF Pixel Format Suite v2 is also available to every registered profile through
+the generic suite broker. Its two-function ABI stores explicit ARGB32, ARGB64,
+and ARGB128 declarations in call order while treating duplicate declarations
+as idempotent. ARGB32 remains the implicit host default when the declaration
+list is empty. Add and clear calls are accepted only while PF_Cmd_GLOBAL_SETUP
+is active; other selectors and unsupported CPU formats return a PF error
+without changing the declaration list. The registry is mutex-protected and can
+contain at most the three host-supported CPU formats.

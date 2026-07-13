@@ -148,3 +148,11 @@ ran twice after a successful real MaskOffset render. They observed exactly one
 rejected operation per run, left zero live worlds/bytes, preserved worker guard
 bytes, and produced schema-valid reports. ScatterMap L2, classic render, and
 SmartFX plus MaskOffset translated-mask regression remained passing afterward.
+
+PF Pixel Format Suite v2 declarations are bounded to the three implemented CPU
+formats and to the SDK-prescribed Global Setup phase. The fixed
+`pixel_format_registry` gate ran twice after a successful native MaskOffset
+render and proved ordered add, duplicate idempotence, clear, invalid-format
+rejection, and out-of-phase rejection. Each run ended with an empty registry,
+intact render guards, and a schema-valid report. ScatterMap ARGB64 and ARGB128
+render regressions and the MaskOffset two-mask regression remained passing.

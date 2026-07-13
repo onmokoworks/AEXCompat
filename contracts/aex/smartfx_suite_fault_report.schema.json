@@ -13,7 +13,7 @@
     "plugin_id": {"type": "string", "pattern": "^[a-z][a-z0-9_-]{0,63}$"},
     "receipt_id": {"type": "string", "minLength": 1, "maxLength": 128},
     "fixture_sha256": {"type": "string", "pattern": "^[0-9A-F]{64}$"},
-    "fault_id": {"enum": ["mask_count_error", "mask_count_crash", "mask_double_dispose", "stream_dispose_with_live_value", "suite_release_without_acquire", "handle_resize_while_locked", "world_double_dispose", "world_allocation_limit"]},
+    "fault_id": {"enum": ["mask_count_error", "mask_count_crash", "mask_double_dispose", "stream_dispose_with_live_value", "suite_release_without_acquire", "handle_resize_while_locked", "world_double_dispose", "world_allocation_limit", "pixel_format_registry"]},
     "expected_outcome": {"enum": ["plugin_fallback", "worker_crash", "callback_error_rejected"]},
     "expected_fallback_sha256": {"type": ["string", "null"], "pattern": "^[0-9A-F]{64}$"},
     "run_1": {"$ref": "#/$defs/run"},
@@ -25,7 +25,7 @@
     "run": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["classification", "pre_render_error", "smart_render_error", "output_sha256", "guard_bytes_intact", "lifetime_fault_observed", "mask_lifetimes_balanced", "suite_fault_observed", "suite_leases_balanced", "suite_acquires", "suite_releases", "live_suite_lease_count", "live_suite_reference_count", "live_suite_leases", "handle_fault_observed", "handle_lifetimes_balanced", "handles_created", "handles_disposed", "handle_locks", "handle_unlocks", "live_handle_count", "live_handle_bytes", "invalid_handle_operations", "world_fault_observed", "world_lifetimes_balanced", "worlds_created", "worlds_disposed", "live_world_count", "live_world_bytes", "invalid_world_operations"],
+      "required": ["classification", "pre_render_error", "smart_render_error", "output_sha256", "guard_bytes_intact", "lifetime_fault_observed", "mask_lifetimes_balanced", "suite_fault_observed", "suite_leases_balanced", "suite_acquires", "suite_releases", "live_suite_lease_count", "live_suite_reference_count", "live_suite_leases", "handle_fault_observed", "handle_lifetimes_balanced", "handles_created", "handles_disposed", "handle_locks", "handle_unlocks", "live_handle_count", "live_handle_bytes", "invalid_handle_operations", "world_fault_observed", "world_lifetimes_balanced", "worlds_created", "worlds_disposed", "live_world_count", "live_world_bytes", "invalid_world_operations", "pixel_format_fault_observed", "pixel_format_add_calls", "pixel_format_clear_calls", "supported_pixel_format_count", "invalid_pixel_format_operations"],
       "properties": {
         "classification": {"enum": ["ok", "nonzero_exit", "crashed", "timeout_killed"]},
         "pre_render_error": {"type": ["integer", "null"]},
@@ -56,7 +56,12 @@
         "worlds_disposed": {"type": ["integer", "null"], "minimum": 0, "maximum": 64},
         "live_world_count": {"type": ["integer", "null"], "minimum": 0, "maximum": 64},
         "live_world_bytes": {"type": ["integer", "null"], "minimum": 0, "maximum": 268435456},
-        "invalid_world_operations": {"type": ["integer", "null"], "minimum": 0, "maximum": 64}
+        "invalid_world_operations": {"type": ["integer", "null"], "minimum": 0, "maximum": 64},
+        "pixel_format_fault_observed": {"type": ["boolean", "null"]},
+        "pixel_format_add_calls": {"type": ["integer", "null"], "minimum": 0, "maximum": 64},
+        "pixel_format_clear_calls": {"type": ["integer", "null"], "minimum": 0, "maximum": 64},
+        "supported_pixel_format_count": {"type": ["integer", "null"], "minimum": 0, "maximum": 3},
+        "invalid_pixel_format_operations": {"type": ["integer", "null"], "minimum": 0, "maximum": 64}
       }
     }
   }

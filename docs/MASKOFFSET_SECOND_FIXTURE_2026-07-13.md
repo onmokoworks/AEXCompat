@@ -131,6 +131,13 @@ the 256 MiB aggregate limit rejects it before allocation without modifying the
 caller structure. Both cases run twice in fresh isolated workers and end with
 zero live worlds and bytes.
 
+The generic PF Pixel Format Suite v2 gate runs after the same real MaskOffset
+render and then enters a controlled Global Setup phase. It verifies ordered
+ARGB128/ARGB64 declarations, idempotent duplicate ARGB128 registration, clear,
+unsupported-format rejection, and rejection outside Global Setup. Both fresh
+workers record three accepted add calls, two accepted clears, two rejected
+operations, and an empty final declaration list.
+
 ## Host-Owned Mask Scenes
 
 The mask ABI no longer stores one hard-coded mask, stream, outline, or vertex

@@ -709,6 +709,80 @@ struct WorldSuite {
 };
 WorldSuite g_world_suite{&new_world, &dispose_world, &get_pixel_format};
 
+std::mutex g_pixel_format_mutex;
+std::vector<int32_t> g_supported_pixel_formats;
+uint32_t g_pixel_format_add_calls{};
+uint32_t g_pixel_format_clear_calls{};
+uint32_t g_invalid_pixel_format_operations{};
+std::atomic_bool g_global_setup_active{false};
+
+bool supported_cpu_pixel_format(int32_t pixel_format) {
+  return pixel_format == kPixelFormatArgb32 || pixel_format == kPixelFormatArgb64 ||
+      pixel_format == kPixelFormatArgb128;
+}
+
+int32_t __cdecl add_supported_pixel_format(void*, int32_t pixel_format) {
+  std::lock_guard<std::mutex> lock(g_pixel_format_mutex);
+  if (!g_global_setup_active || !supported_cpu_pixel_format(pixel_format)) {
+    ++g_invalid_pixel_format_operations;
+    return 4;
+  }
+  ++g_pixel_format_add_calls;
+  if (std::find(g_supported_pixel_formats.begin(), g_supported_pixel_formats.end(),
+                pixel_format) == g_supported_pixel_formats.end()) {
+    g_supported_pixel_formats.push_back(pixel_format);
+  }
+  return 0;
+}
+
+int32_t __cdecl clear_supported_pixel_formats(void*) {
+  std::lock_guard<std::mutex> lock(g_pixel_format_mutex);
+  if (!g_global_setup_active) {
+    ++g_invalid_pixel_format_operations;
+    return 4;
+  }
+  g_supported_pixel_formats.clear();
+  ++g_pixel_format_clear_calls;
+  return 0;
+}
+
+struct PixelFormatSuite {
+  decltype(&add_supported_pixel_format) add_supported_pixel_format;
+  decltype(&clear_supported_pixel_formats) clear_supported_pixel_formats;
+};
+PixelFormatSuite g_pixel_format_suite{&add_supported_pixel_format,
+                                      &clear_supported_pixel_formats};
+
+bool verify_pixel_format_registry_rejection() {
+  const uint32_t invalid_before = g_invalid_pixel_format_operations;
+  const uint32_t add_before = g_pixel_format_add_calls;
+  const uint32_t clear_before = g_pixel_format_clear_calls;
+  const bool phase_rejected = clear_supported_pixel_formats(&g_effect) != 0;
+  g_global_setup_active = true;
+  if (clear_supported_pixel_formats(&g_effect) != 0 ||
+      add_supported_pixel_format(&g_effect, kPixelFormatArgb128) != 0 ||
+      add_supported_pixel_format(&g_effect, kPixelFormatArgb64) != 0 ||
+      add_supported_pixel_format(&g_effect, kPixelFormatArgb128) != 0) {
+    g_global_setup_active = false;
+    return false;
+  }
+  bool order_valid = false;
+  {
+    std::lock_guard<std::mutex> lock(g_pixel_format_mutex);
+    order_valid = g_supported_pixel_formats ==
+        std::vector<int32_t>{kPixelFormatArgb128, kPixelFormatArgb64};
+  }
+  const bool rejected = add_supported_pixel_format(&g_effect, 1717854562) != 0;
+  const bool cleared = clear_supported_pixel_formats(&g_effect) == 0;
+  g_global_setup_active = false;
+  std::lock_guard<std::mutex> lock(g_pixel_format_mutex);
+  return phase_rejected && order_valid && rejected && cleared &&
+      g_supported_pixel_formats.empty() &&
+      g_invalid_pixel_format_operations == invalid_before + 2 &&
+      g_pixel_format_add_calls == add_before + 3 &&
+      g_pixel_format_clear_calls == clear_before + 2;
+}
+
 bool verify_world_double_dispose_rejected() {
   alignas(8) std::array<std::byte, kEffectWorldSize> world{};
   const uint32_t invalid_before = g_invalid_world_operations;
@@ -795,6 +869,11 @@ int32_t __cdecl acquire_suite(const char* name, int32_t version, const void** su
   }
   if (name && std::strcmp(name, "PF World Suite") == 0 && version == 2) {
     *suite = &g_world_suite;
+    record_suite_acquire(name, version);
+    return 0;
+  }
+  if (name && std::strcmp(name, "PF Pixel Format Suite") == 0 && version == 2) {
+    *suite = &g_pixel_format_suite;
     record_suite_acquire(name, version);
     return 0;
   }
@@ -1638,11 +1717,14 @@ int wmain(int argc, wchar_t** argv) {
       std::wstring(argv[1]) == L"--smart-world-double-dispose-request";
   const bool world_allocation_limit_mode = argc == 5 &&
       std::wstring(argv[1]) == L"--smart-world-allocation-limit-request";
+  const bool pixel_format_registry_mode = argc == 5 &&
+      std::wstring(argv[1]) == L"--smart-pixel-format-registry-request";
   const bool request_mode = mask_request_mode || mask_scene_request_mode || mask_context_request_mode ||
       mask_count_error_mode || mask_count_crash_mode || mask_double_dispose_mode ||
       stream_live_value_dispose_mode || suite_release_without_acquire_mode ||
       handle_resize_while_locked_mode || world_double_dispose_mode ||
       world_allocation_limit_mode ||
+      pixel_format_registry_mode ||
       (argc == 5 && std::wstring(argv[1]) == L"--smart-request");
   if (!request_mode && (argc != 5 || std::wstring(argv[1]) != L"--smart")) return 2;
   g_mask_model_enabled = mask_request_mode || mask_scene_request_mode || mask_context_request_mode ||
@@ -1650,6 +1732,7 @@ int wmain(int argc, wchar_t** argv) {
       stream_live_value_dispose_mode || suite_release_without_acquire_mode ||
       handle_resize_while_locked_mode || world_double_dispose_mode ||
       world_allocation_limit_mode;
+  g_mask_model_enabled = g_mask_model_enabled || pixel_format_registry_mode;
   g_mask_fault = mask_count_error_mode ? MaskFault::CountError :
       mask_count_crash_mode ? MaskFault::CountCrash : MaskFault::None;
   RequestedAssignments requested_parameters;
@@ -1708,7 +1791,9 @@ int wmain(int argc, wchar_t** argv) {
   std::string about_message;
 #endif
   std::cerr << "stage:global_setup_begin\n" << std::flush;
+  g_global_setup_active = true;
   const int32_t global_error = entry(kGlobalSetup, input.data(), output.data(), nullptr, nullptr, nullptr);
+  g_global_setup_active = false;
   std::cerr << "stage:global_setup_end error=" << global_error << "\n" << std::flush;
   write<void*>(input, kInGlobalData, read<void*>(output, kOutGlobalData));
 #if !defined(AEXCOMPAT_RENDER_WORKER) && !defined(AEXCOMPAT_SMART_WORKER)
@@ -1827,6 +1912,7 @@ int wmain(int argc, wchar_t** argv) {
   bool suite_fault_observed = false;
   bool handle_fault_observed = false;
   bool world_fault_observed = false;
+  bool pixel_format_fault_observed = false;
   std::cerr << "stage:smart_render_end pre_error=" << smart.pre_error
             << " render_error=" << smart.render_error << "\n" << std::flush;
 #endif
@@ -1842,6 +1928,8 @@ int wmain(int argc, wchar_t** argv) {
     world_fault_observed = verify_world_double_dispose_rejected();
   if (world_allocation_limit_mode)
     world_fault_observed = verify_world_allocation_limit_rejected();
+  if (pixel_format_registry_mode)
+    pixel_format_fault_observed = verify_pixel_format_registry_rejection();
   #endif
   std::cerr << "stage:global_setdown_end error=" << setdown_error << "\n" << std::flush;
 #ifdef AEXCOMPAT_RENDER_WORKER
@@ -1937,6 +2025,11 @@ int wmain(int argc, wchar_t** argv) {
             << ",\"live_world_count\":" << g_owned_worlds.size()
             << ",\"live_world_bytes\":" << g_world_bytes
             << ",\"invalid_world_operations\":" << g_invalid_world_operations
+            << ",\"pixel_format_fault_observed\":" << (pixel_format_fault_observed ? "true" : "false")
+            << ",\"pixel_format_add_calls\":" << g_pixel_format_add_calls
+            << ",\"pixel_format_clear_calls\":" << g_pixel_format_clear_calls
+            << ",\"supported_pixel_format_count\":" << g_supported_pixel_formats.size()
+            << ",\"invalid_pixel_format_operations\":" << g_invalid_pixel_format_operations
             << ",\"requested_parameters\":" << requested_parameters_json(requested_parameters)
             << ",\"requested_amount\":" << static_cast<int32_t>(requested_value(requested_parameters, L"amount"))
             << ",\"requested_direction\":" << static_cast<int32_t>(requested_value(requested_parameters, L"direction"))
