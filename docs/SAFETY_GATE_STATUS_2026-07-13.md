@@ -10,7 +10,7 @@ human records a separate explicit opening declaration.
 
 | Gate | Status | Evidence and remaining work |
 | --- | --- | --- |
-| G-1 fixture approval | Not satisfied | The canonical ScatterMap decision remains `hold` / `not_approved_for_load_gate`. A-1 answer intake has accepted answers for manual review, but its own contract states that intake is not approval. Synthetic approval files produced by tests lack a candidate hash and size and are not gate evidence. |
+| G-1 fixture approval | Not satisfied | The canonical ScatterMap decision remains `hold` / `not_approved_for_load_gate`. Accepted-looking answer and approval artifacts under `target/` can be produced by tests and are not attributable to an explicit human response. They are not gate evidence. No approved candidate hash-and-size identity exists. |
 | G-2 loader approval receipt | Not satisfied | No distinct, unexpired loader approval receipt exists. The loader-readiness contract alone is not a receipt. |
 | G-3 dependency review | Not satisfied | Current review evidence recommends `do_not_open_native_load_gate`; there is no reviewed zero-blocker dependency result for an approved candidate. |
 | G-4 process isolation | Satisfied | B-1 broker selftest passes normal, timeout, crash, hang-kill, and sentinel-noninheritance scenarios under a kill-on-close Job Object. |
@@ -21,7 +21,7 @@ human records a separate explicit opening declaration.
 
 ## Human Work Required
 
-1. H-1: review the accepted provenance answers and record an explicit candidate decision. Any approval must identify exactly one candidate by reviewed SHA-256 and byte size.
+1. H-1: provide and review explicit provenance answers, then record a candidate decision. Any approval must identify exactly one candidate by reviewed SHA-256 and byte size.
 2. H-2: obtain and review the AE SDK license, keep the SDK outside Git, and record the dated license note.
 3. H-3: choose and document the cleanroom ABI provenance boundary.
 4. Create a separate expiring loader approval receipt only after G-1, G-3, and G-8 are satisfied.

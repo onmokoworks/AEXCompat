@@ -19,6 +19,9 @@ repository has a short entry point and a durable place for longer plans.
   - Current evidence audit. Records that Phase D remains closed and identifies
     the required H-1/H-2/H-3 human decisions without treating test artifacts as
     approval evidence.
+- `HUMAN_GATE_HANDOFF_2026-07-13.md`
+  - Exact H-1/H-2/H-3 questions for the repository owner. It contains no
+    approval or gate-opening declaration.
 
 ## Related Sources
 
