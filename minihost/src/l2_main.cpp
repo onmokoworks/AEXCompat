@@ -361,6 +361,7 @@ int32_t render_once(EffectEntry entry, std::array<std::byte, kInSize>& input,
                     std::string& input_hash, std::string& output_hash,
                     bool& guards_intact) {
   const bool connected_map = case_id == "connected_map" || case_id == "inverted_map";
+  const bool partial_extent_hint = case_id == "partial_extent_hint";
   width = connected_map ? 11 : ((case_id == "odd_dimensions" || case_id == "padded_stride") ? 13 : 16);
   height = connected_map ? 7 : ((case_id == "odd_dimensions" || case_id == "padded_stride") ? 9 : 12);
   rowbytes = case_id == "padded_stride" ? 64 : width * 4;
@@ -375,7 +376,7 @@ int32_t render_once(EffectEntry entry, std::array<std::byte, kInSize>& input,
   else if (case_id == "mix_zero") { amount = 500; seed = 10000; mix = 0.0; }
   else if (case_id == "odd_dimensions" || case_id == "padded_stride") { amount = 4; seed = 3; }
   else if (case_id == "inverted_map") { }
-  else if (case_id != "default" && case_id != "connected_map") return -2;
+  else if (case_id != "default" && case_id != "connected_map" && !partial_extent_hint) return -2;
   constexpr std::size_t guard = 64;
   std::vector<unsigned char> logical_source(width * height * 4);
   std::vector<unsigned char> source(rowbytes * height, 0x5A);
@@ -456,6 +457,10 @@ int32_t render_once(EffectEntry entry, std::array<std::byte, kInSize>& input,
   write<uint32_t>(input, 240, 1);
   write<int32_t>(input, 252, width);
   write<int32_t>(input, 256, height);
+  if (partial_extent_hint) {
+    const int32_t extent[4] = {2, 3, 8, 11};
+    std::memcpy(input.data() + 260, extent, sizeof(extent));
+  }
   input_hash = sha256_bytes(logical_source.data(), logical_source.size());
   const int32_t error = entry(kRender, input.data(), command_output.data(), params.data(),
                               output_world.data(), nullptr);

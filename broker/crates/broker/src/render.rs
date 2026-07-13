@@ -48,6 +48,7 @@ fn expected(case_id: &str) -> Option<&'static str> { match case_id {
     "odd_dimensions" | "padded_stride" => Some("85AC7EB4759281BC81BA60994B58055369CD2224078383D4CAB6A8B685DECE26"),
     "connected_map" => Some("A38568761441C209940F81A8C2792DAD50566C66EDA1463BDCF071CCA614891B"),
     "inverted_map" => Some("3BC0C5172B880A8A83CEC24177B78721E9F0619D5330F6A26AAA02B9CC057A08"),
+    "partial_extent_hint" => Some("19CEA826F356E0D94BC29FF10CB9E7F5A770FE5B288CB3D190A58372353102D9"),
     _ => None,
 } }
 pub fn run(repository: &Path, worker: &Path, id: &str, case_id: &str, output: &Path) -> io::Result<bool> {
@@ -105,6 +106,7 @@ mod tests {
     fn oracle_table_rejects_unknown_cases() {
         assert!(expected("default").is_some());
         assert!(expected("amount_max").is_some());
+        assert!(expected("partial_extent_hint").is_some());
         assert!(expected("arbitrary").is_none());
     }
 }

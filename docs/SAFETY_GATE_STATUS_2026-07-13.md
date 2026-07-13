@@ -58,6 +58,9 @@ SmartFX PreRender checkout also receives a valid time basis; a nonzero
 Its partial output request contract is also verified: `[3,2,11,8]` reaches
 both source and map checkouts, and both returned result rectangles are clipped
 to that request while the isolated render remains oracle-exact.
+The classic path also remains full-world oracle-exact when `extent_hint` is
+`[3,2,11,8]`, proving this target ignores that optimization hint without
+writing outside the output world.
 Production AE also rendered byte-identical oracle-exact frames at time 0 and
 1/24 second.
 At composition resolution factor `[2,2]`, AE supplied an 8x6 world and the

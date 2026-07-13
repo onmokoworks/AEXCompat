@@ -61,6 +61,7 @@ int main() {
   field<decltype(PF_InData::time_scale)>("in.time_scale", offsetof(PF_InData, time_scale), first);
   field<decltype(PF_InData::width)>("in.width", offsetof(PF_InData, width), first);
   field<decltype(PF_InData::height)>("in.height", offsetof(PF_InData, height), first);
+  field<decltype(PF_InData::extent_hint)>("in.extent_hint", offsetof(PF_InData, extent_hint), first);
   field<decltype(PF_InteractCallbacks::checkout_param)>("inter.checkout_param", offsetof(PF_InteractCallbacks, checkout_param), first);
   field<decltype(PF_InteractCallbacks::checkin_param)>("inter.checkin_param", offsetof(PF_InteractCallbacks, checkin_param), first);
   field<decltype(PF_InteractCallbacks::add_param)>("inter.add_param", offsetof(PF_InteractCallbacks, add_param), first);

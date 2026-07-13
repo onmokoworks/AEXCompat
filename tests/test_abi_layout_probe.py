@@ -24,7 +24,7 @@ class AbiLayoutProbeTests(unittest.TestCase):
             "in.pica_basicP", "out.my_version", "out.num_params",
             "inter.add_param", "param.param_type", "param.name",
             "PF_Cmd_GLOBAL_SETUP", "PF_Cmd_PARAMS_SETUP",
-            "PF_Cmd_RENDER", "layer.rowbytes", "layer.data", "in.time_scale",
+            "PF_Cmd_RENDER", "layer.rowbytes", "layer.data", "in.time_scale", "in.extent_hint",
             "pf_pixel16_size", "pf_pixel_float_size", "layer.world_flags",
             "PF_Cmd_SMART_RENDER_GPU", "PF_Cmd_GPU_DEVICE_SETUP",
             "pf_gpu_device_setup_extra_size", "gpu_setup_input.what_gpu",
@@ -61,6 +61,7 @@ class AbiLayoutProbeTests(unittest.TestCase):
         self.assertEqual(data["fields"]["smart_input.device_index"]["offset"], 68)
         self.assertEqual(data["fields"]["gpu_setdown_input.device_index"]["offset"], 12)
         self.assertEqual(data["fields"]["in.sequence_data"]["offset"], 320)
+        self.assertEqual(data["fields"]["in.extent_hint"]["offset"], 260)
         self.assertEqual(data["fields"]["out.frame_data"]["offset"], 72)
         self.assertEqual(data["selectors"]["sequence_setup"], 5)
         self.assertEqual(data["selectors"]["frame_setdown"], 12)
