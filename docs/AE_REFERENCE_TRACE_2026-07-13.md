@@ -219,3 +219,12 @@ The actual Amount 5 output and oracle both had ARGB SHA-256
 with zero differing bytes and maximum channel delta zero. This verifies row
 transitions and the final pixel in production AE rather than relying only on
 the minihost's padded-stride 13x9 coverage.
+
+## Parameter Bounds
+
+Production AE 25.2 rejected all ten fixed out-of-range assignments across
+Scatter Amount, Direction, Random Seed, Mix with Original, and Invert Map.
+Every call raised an `out of range` exception with the exact descriptor range,
+and every property retained its prior value. The host therefore rejects rather
+than clamps invalid values before effect dispatch. See
+`SCATTERMAP_AE_PARAM_BOUNDS_RESULT_2026-07-13.md`.

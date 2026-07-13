@@ -80,3 +80,6 @@ Production AE 25.2 additionally matches the arbitrary-source oracle exactly at
 differences.
 The ARGB8 matrix also covers valid parameter boundaries amount 500, seed 10000,
 and mix 0% in both classic and SmartFX paths with broker-enforced oracle parity.
+Production AE additionally rejects ten values immediately outside the exposed
+Amount, Direction, Seed, Mix, and Invert ranges without clamping or changing
+the stored property, establishing the pre-dispatch validation contract.
