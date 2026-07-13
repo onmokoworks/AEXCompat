@@ -55,6 +55,9 @@ reconstructs the effect after close/reopen, and renders exact
 oracle-equivalent pixels.
 SmartFX PreRender checkout also receives a valid time basis; a nonzero
 `42/2/24` context was observed exactly while preserving deterministic output.
+Its partial output request contract is also verified: `[3,2,11,8]` reaches
+both source and map checkouts, and both returned result rectangles are clipped
+to that request while the isolated render remains oracle-exact.
 Production AE also rendered byte-identical oracle-exact frames at time 0 and
 1/24 second.
 At composition resolution factor `[2,2]`, AE supplied an 8x6 world and the

@@ -96,6 +96,8 @@ int32_t g_smart_map_height = 0;
 int32_t g_checkout_time = 0;
 int32_t g_checkout_time_step = 0;
 uint32_t g_checkout_time_scale = 0;
+std::array<int32_t, 4> g_input_checkout_request{-1, -1, -1, -1};
+std::array<int32_t, 4> g_map_checkout_request{-1, -1, -1, -1};
 std::string g_smart_pixel_format = "argb8";
 int32_t g_smart_rowbytes = 64;
 
@@ -106,8 +108,12 @@ void write_rect(void* destination, int32_t width, int32_t height) {
 }
 
 int32_t __cdecl pre_checkout_layer(void*, int32_t index, int32_t checkout_id,
-                                   const void*, int32_t what_time, int32_t time_step, uint32_t time_scale,
+                                   const void* request, int32_t what_time, int32_t time_step, uint32_t time_scale,
                                    void* result) {
+  if (request && index == 0 && checkout_id == 0)
+    std::memcpy(g_input_checkout_request.data(), request, sizeof(g_input_checkout_request));
+  if (request && index == 6 && checkout_id == 1)
+    std::memcpy(g_map_checkout_request.data(), request, sizeof(g_map_checkout_request));
   if (index == 0 && checkout_id == 0) {
     g_checkout_time = what_time; g_checkout_time_step = time_step; g_checkout_time_scale = time_scale;
   }
@@ -485,6 +491,7 @@ struct SmartResult {
   int32_t checkout_time{};
   int32_t checkout_time_step{};
   uint32_t checkout_time_scale{};
+  bool roi_contract_valid{};
 };
 
 SmartResult smart_render_once(EffectEntry entry, std::array<std::byte, kInSize>& input,
@@ -496,6 +503,7 @@ SmartResult smart_render_once(EffectEntry entry, std::array<std::byte, kInSize>&
   const bool missing_input = case_id == "error_missing_input";
   const bool crash_null_output = case_id == "crash_null_output_world";
   const bool temporal_context = case_id == "temporal_context";
+  const bool partial_output_request = case_id == "partial_output_request";
   const bool float32 = case_id == "float32_default" || gpu_negotiation;
   const bool connected_map = case_id == "connected_map" || case_id == "inverted_map";
   const int32_t width = connected_map ? 11 : ((case_id == "odd_dimensions" || case_id == "padded_stride") ? 13 : 16);
@@ -511,7 +519,7 @@ SmartResult smart_render_once(EffectEntry entry, std::array<std::byte, kInSize>&
   else if (case_id == "seed_max") seed = 10000;
   else if (case_id == "mix_zero") { amount = 500; seed = 10000; mix = 0.0; }
   else if (case_id == "odd_dimensions" || case_id == "padded_stride") { amount = 4; seed = 3; }
-  else if (case_id != "default" && !deep16 && !float32 && !missing_input && !crash_null_output && !temporal_context && !connected_map) return result;
+  else if (case_id != "default" && !deep16 && !float32 && !missing_input && !crash_null_output && !temporal_context && !partial_output_request && !connected_map) return result;
   constexpr std::size_t guard = 64;
   std::vector<unsigned char> source(rowbytes * height, 0x5A);
   for (int32_t y = 0; y < height; ++y) for (int32_t x = 0; x < width; ++x) {
@@ -589,10 +597,14 @@ SmartResult smart_render_once(EffectEntry entry, std::array<std::byte, kInSize>&
 
   std::array<std::byte, 64> pre_input{}; std::array<std::byte, 56> pre_output{};
   std::array<std::byte, 16> pre_callbacks{}; std::array<std::byte, 24> pre_extra{};
-  write_rect(pre_input.data(), width, height);
+  const std::array<int32_t, 4> expected_request = partial_output_request
+      ? std::array<int32_t, 4>{2, 3, 8, 11}
+      : std::array<int32_t, 4>{0, 0, height, width};
+  std::memcpy(pre_input.data(), expected_request.data(), sizeof(expected_request));
   write<void*>(pre_callbacks, 0, reinterpret_cast<void*>(&pre_checkout_layer));
   write<void*>(pre_extra, 0, pre_input.data()); write<void*>(pre_extra, 8, pre_output.data());
   write<void*>(pre_extra, 16, pre_callbacks.data());
+  g_input_checkout_request.fill(-1); g_map_checkout_request.fill(-1);
   g_smart_width = width; g_smart_height = height; g_smart_rowbytes = rowbytes;
   g_smart_pixel_format = float32 ? "argb32f" : (deep16 ? "argb16" : "argb8");
   result.pre_error = entry(kSmartPreRender, input.data(), command_output.data(), params.data(), nullptr, pre_extra.data());
@@ -603,6 +615,12 @@ SmartResult smart_render_once(EffectEntry entry, std::array<std::byte, kInSize>&
     (void)p; return top >= 0 && left >= 0 && bottom >= top && right >= left && bottom <= height && right <= width;
   };
   result.rects_valid = result.pre_error == 0 && valid_rect(0) && valid_rect(16);
+  std::array<int32_t, 4> result_rect{}, max_result_rect{};
+  std::memcpy(result_rect.data(), pre_output.data(), sizeof(result_rect));
+  std::memcpy(max_result_rect.data(), pre_output.data() + 16, sizeof(max_result_rect));
+  result.roi_contract_valid = !partial_output_request ||
+      (g_input_checkout_request == expected_request && g_map_checkout_request == expected_request &&
+       result_rect == expected_request && max_result_rect == expected_request);
   result.gpu_render_possible = (read<uint16_t>(pre_output, 34) & 0x2u) != 0;
   result.checkout_time = g_checkout_time; result.checkout_time_step = g_checkout_time_step;
   result.checkout_time_scale = g_checkout_time_scale;
@@ -843,6 +861,11 @@ int wmain(int argc, wchar_t** argv) {
             << ",\"checkout_time\":" << smart.checkout_time
             << ",\"checkout_time_step\":" << smart.checkout_time_step
             << ",\"checkout_time_scale\":" << smart.checkout_time_scale
+            << ",\"roi_contract_valid\":" << (smart.roi_contract_valid ? "true" : "false")
+            << ",\"input_checkout_request\":[" << g_input_checkout_request[1] << "," << g_input_checkout_request[0]
+            << "," << g_input_checkout_request[3] << "," << g_input_checkout_request[2] << "]"
+            << ",\"map_checkout_request\":[" << g_map_checkout_request[1] << "," << g_map_checkout_request[0]
+            << "," << g_map_checkout_request[3] << "," << g_map_checkout_request[2] << "]"
             << ",\"global_setdown_error\":" << setdown_error
             << ",\"case_id\":\"" << case_id << "\",\"pixel_format\":\"" << g_smart_pixel_format << "\",\"width\":"
             << g_smart_width << ",\"height\":" << g_smart_height << ",\"rowbytes\":"

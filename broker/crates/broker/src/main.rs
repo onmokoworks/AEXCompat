@@ -56,6 +56,7 @@ fn main() {
         "smart-error-missing-input-scattermap" => Some("error_missing_input"),
         "smart-crash-null-output-scattermap" => Some("crash_null_output_world"),
         "smart-temporal-context-scattermap" => Some("temporal_context"),
+        "smart-partial-output-request-scattermap" => Some("partial_output_request"),
         _ => None,
     };
     if let Some(case_id) = smart_case {
