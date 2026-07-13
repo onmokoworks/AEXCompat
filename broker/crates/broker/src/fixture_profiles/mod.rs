@@ -30,7 +30,7 @@ pub struct ObservationProfile {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ParameterizedRenderAdapter {
     ScatterMap,
-    MaskOffsetNoMask,
+    MaskOffsetRectangle,
 }
 
 pub struct RegisteredProfile {
@@ -88,11 +88,11 @@ static SCATTERMAP: RegisteredProfile = RegisteredProfile {
 static MASKOFFSET: RegisteredProfile = RegisteredProfile {
     l2_observation: MASKOFFSET_OBSERVATION.l2,
     descriptor_manifest: MASKOFFSET_OBSERVATION.descriptor_manifest,
-    parameterized_render: ParameterizedRenderAdapter::MaskOffsetNoMask,
+    parameterized_render: ParameterizedRenderAdapter::MaskOffsetRectangle,
     classic_worker: None,
     smart_worker: Some(WorkerSpec {
         executable: "target/minihost-build/aex_smart_worker.exe",
-        request_mode: "--smart-request",
+        request_mode: "--smart-mask-request",
         approval: ApprovalPolicy {
             allowlist_path: "target/smart-allowlist/maskoffset.active.local.json",
             stage: "smartfx_render",
@@ -202,7 +202,14 @@ mod tests {
             "maskoffset-l2-20260713-001"
         );
         assert!(find("maskoffset").unwrap().classic_worker.is_none());
-        assert!(find("maskoffset").unwrap().smart_worker.is_some());
+        assert_eq!(
+            find("maskoffset")
+                .unwrap()
+                .smart_worker
+                .unwrap()
+                .request_mode,
+            "--smart-mask-request"
+        );
         assert!(find_observation("unknown-aex").is_none());
         assert_eq!(
             find_observation("maskoffset")

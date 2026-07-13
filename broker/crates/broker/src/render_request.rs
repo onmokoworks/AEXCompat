@@ -1,4 +1,4 @@
-use crate::fixture_profiles::maskoffset::no_mask_argb8_hash;
+use crate::fixture_profiles::maskoffset::rectangle_mask_argb8_hash;
 use crate::fixture_profiles::scattermap::expected_argb8_hash;
 use crate::fixture_profiles::{ParameterizedRenderAdapter, RegisteredProfile};
 use crate::host_core::descriptor_manifest::{load as load_manifest, LoadedManifest};
@@ -88,7 +88,7 @@ fn evaluate(
 fn expected_hash(adapter: ParameterizedRenderAdapter, effective: &ValidatedAssignments) -> String {
     match adapter {
         ParameterizedRenderAdapter::ScatterMap => expected_argb8_hash(effective),
-        ParameterizedRenderAdapter::MaskOffsetNoMask => no_mask_argb8_hash(),
+        ParameterizedRenderAdapter::MaskOffsetRectangle => rectangle_mask_argb8_hash(),
     }
 }
 

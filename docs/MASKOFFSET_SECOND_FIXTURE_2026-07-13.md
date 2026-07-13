@@ -1,9 +1,8 @@
 # MaskOffset Second Conformance Fixture
 
 MaskOffset is the second owner-authored AEX used to prove that AEXCompat is not
-architecturally tied to ScatterMap. Load, selector observation, and the SmartFX
-no-mask fallback are proven. Rendering with a real AEGP mask path is not yet
-claimed.
+architecturally tied to ScatterMap. Load, selector observation, and a masked
+SmartFX render through host-provided AEGP suites are proven.
 
 ## Fixed Identity
 
@@ -43,7 +42,7 @@ Regeneration from the real L2 report matched all nine observed descriptors.
 Eight numeric descriptors are assignable. `Fill Color` remains fail-closed
 until the generic request and worker ABIs support color values.
 
-## SmartFX No-Mask Evidence
+## SmartFX Mask Evidence
 
 The `maskoffset` render profile advertises SmartFX only. A classic render request
 fails before allowlist access, worker launch, or report creation. The isolated
@@ -51,16 +50,28 @@ SmartFX request applied all eight numeric descriptors twice. Both runs completed
 Smart PreRender and Smart Render with zero errors, preserved guard bytes, echoed
 the exact descriptor id/slot/kind/value sequence, and produced the same output.
 
-The minimal host intentionally does not yet publish AEGP mask suites. MaskOffset
-therefore follows its source-defined empty-polygon behavior and copies the 16x12
-ARGB8 input. The independent fallback oracle SHA-256 is
-`863D238F52F81ABA4017C198AF4D748CB57FE369E6216FDBACF45FD94037ECF7`.
-The fixed SmartFX receipt is `maskoffset-smartfx-20260713-001`.
+The `--smart-mask-request` worker mode publishes Utility v13, PF Interface v1,
+Layer Mask v7, Stream v11, and Mask Outline v5 through their documented suite
+names and ABI slots. The host scene contains one closed rectangle with vertices
+`(4,3)`, `(12,3)`, `(12,9)`, and `(4,9)`. Handles are opaque host objects; no
+plugin identity or MaskOffset algorithm is consulted by suite dispatch.
+
+Smart PreRender reads the outline through the AEGP call chain. The host then
+transfers `pre_render_data` to Smart Render and invokes the plugin-provided
+delete callback after rendering. PF World Suite v2 reports the checked-out
+world's pixel format. Mode 2 with zero expansion, rounding, feather, and invert
+makes pixels outside the rectangle transparent. The independent host oracle is
+`D1003EF35A6EA3B037989F00672996FEA59867FBB50283A689AC95EDD9BF2359`.
+Both isolated native runs matched it. The fixed SmartFX receipt is
+`maskoffset-smartfx-20260713-001`.
+
+The older `--smart-request` mode remains mask-free and still exercises the
+empty-polygon fallback, allowing the two host capability states to be compared.
 
 ## Remaining Work
 
 This evidence does not claim complete MaskOffset render compatibility. Completion
-still requires generic color payloads, AEGP mask/stream/outline suites with real
-mask paths, masked-mode pixel oracles, and dedicated error/crash isolation cases.
-Those additions must not introduce MaskOffset identity or algorithms into
-`host_core`.
+still requires generic color payloads, configurable/multiple/open/Bezier mask
+scenes, expansion/rounding/feather/invert oracle coverage, and dedicated
+mask-suite error/crash isolation cases. Those additions must not introduce
+MaskOffset identity or algorithms into `host_core`.

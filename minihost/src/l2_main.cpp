@@ -106,6 +106,14 @@ std::array<int32_t, 4> g_input_checkout_request{-1, -1, -1, -1};
 std::array<int32_t, 4> g_map_checkout_request{-1, -1, -1, -1};
 std::string g_smart_pixel_format = "argb8";
 int32_t g_smart_rowbytes = 64;
+bool g_mask_model_enabled = false;
+
+struct OpaqueHostObject { uint32_t tag; };
+OpaqueHostObject g_effect{0x45464658};
+OpaqueHostObject g_layer{0x4c415952};
+OpaqueHostObject g_mask{0x4d41534b};
+OpaqueHostObject g_stream{0x5354524d};
+OpaqueHostObject g_outline{0x4f55544c};
 
 void write_rect(void* destination, int32_t width, int32_t height) {
   auto* bytes = static_cast<std::byte*>(destination);
@@ -212,6 +220,152 @@ struct HandleSuite {
 HandleSuite g_handle_suite{&new_handle, &lock_handle, &unlock_handle,
                            &dispose_handle, &handle_size, &resize_handle};
 
+int32_t __cdecl register_with_aegp(void*, const char*, int32_t* plugin_id) {
+  if (!plugin_id) return 4;
+  *plugin_id = 1;
+  return 0;
+}
+
+int32_t __cdecl get_effect_layer(void* effect, void** layer) {
+  if (effect != &g_effect || !layer) return 4;
+  *layer = &g_layer;
+  return 0;
+}
+
+int32_t __cdecl get_layer_num_masks(void* layer, int32_t* count) {
+  if (layer != &g_layer || !count) return 4;
+  *count = 1;
+  return 0;
+}
+
+int32_t __cdecl get_layer_mask_by_index(void* layer, int32_t index, void** mask) {
+  if (layer != &g_layer || index != 0 || !mask) return 4;
+  *mask = &g_mask;
+  return 0;
+}
+
+int32_t __cdecl dispose_mask(void* mask) { return mask == &g_mask ? 0 : 4; }
+
+int32_t __cdecl get_new_mask_stream(int32_t plugin_id, void* mask, int32_t, void** stream) {
+  if (plugin_id != 1 || mask != &g_mask || !stream) return 4;
+  *stream = &g_stream;
+  return 0;
+}
+
+int32_t __cdecl dispose_stream(void* stream) { return stream == &g_stream ? 0 : 4; }
+
+struct StreamValue {
+  void* stream;
+  void* value;
+};
+
+int32_t __cdecl get_new_stream_value(int32_t plugin_id, void* stream, int32_t,
+                                     const void*, int32_t, StreamValue* value) {
+  if (plugin_id != 1 || stream != &g_stream || !value) return 4;
+  value->stream = &g_stream;
+  value->value = &g_outline;
+  return 0;
+}
+
+int32_t __cdecl dispose_stream_value(StreamValue* value) {
+  if (!value || value->stream != &g_stream || value->value != &g_outline) return 4;
+  value->stream = nullptr;
+  value->value = nullptr;
+  return 0;
+}
+
+struct MaskVertex {
+  double x, y;
+  double tangent_in_x, tangent_in_y;
+  double tangent_out_x, tangent_out_y;
+};
+
+int32_t __cdecl is_mask_outline_open(void* outline, int32_t* open) {
+  if (outline != &g_outline || !open) return 4;
+  *open = 0;
+  return 0;
+}
+
+int32_t __cdecl get_mask_outline_num_segments(void* outline, int32_t* count) {
+  if (outline != &g_outline || !count) return 4;
+  *count = 4;
+  return 0;
+}
+
+int32_t __cdecl get_mask_outline_vertex_info(void* outline, int32_t index,
+                                             MaskVertex* vertex) {
+  static constexpr std::array<std::array<double, 2>, 5> points{{
+      {4.0, 3.0}, {12.0, 3.0}, {12.0, 9.0}, {4.0, 9.0}, {4.0, 3.0}}};
+  if (outline != &g_outline || !vertex || index < 0 || index >= points.size()) return 4;
+  *vertex = {points[index][0], points[index][1], 0.0, 0.0, 0.0, 0.0};
+  return 0;
+}
+
+struct UtilitySuite {
+  // Function pointer positions mirror the reviewed Adobe suite versions.
+  void* unsupported[9]{};
+  decltype(&register_with_aegp) register_with_aegp;
+};
+struct PfInterfaceSuite {
+  decltype(&get_effect_layer) get_effect_layer;
+  void* unsupported[4]{};
+};
+struct MaskSuite {
+  decltype(&get_layer_num_masks) get_layer_num_masks;
+  decltype(&get_layer_mask_by_index) get_layer_mask_by_index;
+  decltype(&dispose_mask) dispose_mask;
+  void* unsupported[17]{};
+};
+struct StreamSuite {
+  void* unsupported_before_new_mask[6]{};
+  decltype(&get_new_mask_stream) get_new_mask_stream;
+  decltype(&dispose_stream) dispose_stream;
+  void* unsupported_before_value[5]{};
+  decltype(&get_new_stream_value) get_new_stream_value;
+  decltype(&dispose_stream_value) dispose_stream_value;
+};
+struct MaskOutlineSuite {
+  decltype(&is_mask_outline_open) is_open;
+  void* set_open{};
+  decltype(&get_mask_outline_num_segments) get_num_segments;
+  decltype(&get_mask_outline_vertex_info) get_vertex_info;
+  void* unsupported[6]{};
+};
+
+UtilitySuite g_utility_suite{{}, &register_with_aegp};
+PfInterfaceSuite g_pf_interface_suite{&get_effect_layer};
+MaskSuite g_mask_suite{&get_layer_num_masks, &get_layer_mask_by_index, &dispose_mask};
+StreamSuite g_stream_suite{{}, &get_new_mask_stream, &dispose_stream, {},
+                           &get_new_stream_value, &dispose_stream_value};
+MaskOutlineSuite g_mask_outline_suite{&is_mask_outline_open, nullptr,
+                                      &get_mask_outline_num_segments,
+                                      &get_mask_outline_vertex_info};
+
+int32_t __cdecl get_pixel_format(const void* world, int32_t* pixel_format) {
+  if (!world || !pixel_format) return 4;
+  const auto* bytes = static_cast<const std::byte*>(world);
+  int32_t rowbytes{};
+  int32_t width{};
+  std::memcpy(&rowbytes, bytes + 32, sizeof(rowbytes));
+  std::memcpy(&width, bytes + 36, sizeof(width));
+  if (width <= 0 || rowbytes == (std::numeric_limits<int32_t>::min)()) return 4;
+  const int32_t bytes_per_pixel = std::abs(rowbytes) / width;
+  if (bytes_per_pixel >= 16)
+    *pixel_format = 842229089;  // PF_PixelFormat_ARGB128
+  else if (bytes_per_pixel >= 8)
+    *pixel_format = 909206881;  // PF_PixelFormat_ARGB64
+  else
+    *pixel_format = 1650946657;  // PF_PixelFormat_ARGB32
+  return 0;
+}
+
+struct WorldSuite {
+  void* new_world{};
+  void* dispose_world{};
+  decltype(&get_pixel_format) get_pixel_format;
+};
+WorldSuite g_world_suite{nullptr, nullptr, &get_pixel_format};
+
 int32_t __cdecl acquire_suite(const char* name, int32_t version, const void** suite) {
   if (!suite) return 4;
   *suite = nullptr;
@@ -219,7 +373,24 @@ int32_t __cdecl acquire_suite(const char* name, int32_t version, const void** su
     *suite = &g_handle_suite;
     return 0;
   }
-  return 1;
+  if (name && std::strcmp(name, "PF World Suite") == 0 && version == 2) {
+    *suite = &g_world_suite;
+    return 0;
+  }
+  if (!g_mask_model_enabled || !name) return 1;
+  if (std::strcmp(name, "AEGP Utility Suite") == 0 && version == 13)
+    *suite = &g_utility_suite;
+  else if (std::strcmp(name, "AEGP PF Interface Suite") == 0 && version == 1)
+    *suite = &g_pf_interface_suite;
+  else if (std::strcmp(name, "AEGP Layer Mask Suite") == 0 && version == 7)
+    *suite = &g_mask_suite;
+  else if (std::strcmp(name, "AEGP Stream Suite") == 0 && version == 11)
+    *suite = &g_stream_suite;
+  else if (std::strcmp(name, "AEGP Mask Outline Suite") == 0 && version == 5)
+    *suite = &g_mask_outline_suite;
+  else
+    return 1;
+  return 0;
 }
 
 int32_t __cdecl release_suite(const char*, int32_t) { return 0; }
@@ -800,6 +971,8 @@ SmartResult smart_render_once(EffectEntry entry, std::array<std::byte, kInSize>&
 
   std::array<std::byte, 72> smart_input{}; std::array<std::byte, 24> callbacks{};
   std::array<std::byte, 16> smart_extra{};
+  // PF_PreRenderOutput::pre_render_data -> PF_SmartRenderInput::pre_render_data.
+  write<void*>(smart_input, 48, read<void*>(pre_output, 40));
   write<void*>(callbacks, 0, reinterpret_cast<void*>(&smart_checkout_pixels));
   write<void*>(callbacks, 8, reinterpret_cast<void*>(&smart_checkin_pixels));
   write<void*>(callbacks, 16, reinterpret_cast<void*>(&smart_checkout_output));
@@ -817,6 +990,8 @@ SmartResult smart_render_once(EffectEntry entry, std::array<std::byte, kInSize>&
     write<void*>(setdown_extra, 0, setdown_input.data());
     result.gpu_setdown_error = entry(kGpuDeviceSetdown, input.data(), command_output.data(), params.data(), nullptr, setdown_extra.data());
   }
+  if (auto delete_pre_render_data = read<void(__cdecl*)(void*)>(pre_output, 48))
+    delete_pre_render_data(read<void*>(pre_output, 40));
   g_smart_input_world = nullptr; g_smart_output_world = nullptr; g_smart_map_world = nullptr;
   std::vector<unsigned char> logical_input(width * height * pixel_bytes), logical_output(width * height * pixel_bytes);
   for (int32_t y = 0; y < height; ++y) {
@@ -891,8 +1066,11 @@ int wmain(int argc, wchar_t** argv) {
   RequestedAssignments requested_parameters;
   if (request_mode && !parse_parameter_payload(argv[4], requested_parameters)) return 3;
 #elif defined(AEXCOMPAT_SMART_WORKER)
-  const bool request_mode = argc == 5 && std::wstring(argv[1]) == L"--smart-request";
+  const bool mask_request_mode = argc == 5 && std::wstring(argv[1]) == L"--smart-mask-request";
+  const bool request_mode = mask_request_mode ||
+      (argc == 5 && std::wstring(argv[1]) == L"--smart-request");
   if (!request_mode && (argc != 5 || std::wstring(argv[1]) != L"--smart")) return 2;
+  g_mask_model_enabled = mask_request_mode;
   RequestedAssignments requested_parameters;
   if (request_mode && !parse_parameter_payload(argv[4], requested_parameters)) return 3;
 #else
@@ -926,7 +1104,7 @@ int wmain(int argc, wchar_t** argv) {
   write(utils, kUtilsDisposeHandle, &dispose_handle);
   write<void*>(input, kInUtils, utils.data());
   write<void*>(input, kInPicaBasic, &g_basic_suite);
-  write<void*>(input, kInEffectRef, nullptr);
+  write<void*>(input, kInEffectRef, g_mask_model_enabled ? &g_effect : nullptr);
   write<uint32_t>(input, kInVersion, 0);
   write<uint32_t>(input, kInApplicationId, 0x46585443u);
   write<int32_t>(input, kInNumParams, 1);
