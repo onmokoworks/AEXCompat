@@ -156,3 +156,14 @@ This confirms that exact full-frame deep/float hashes are not a valid AE oracle
 for this malformed fixture. AEXCompat reports the deterministic `width*4`
 bytes written per row and the remaining undefined tail separately. Its `0xCC`
 tail is a containment sentinel, not an invented claim about AE pixel values.
+
+## Time Independence
+
+`tools/ae_scattermap_time_probe.jsx` rendered a three-frame 24-fps composition
+at time 0 and time 1/24 second. Both AE 25.2 PNG files were byte-identical with
+SHA-256
+`542B9E5D0BCFEC8D9A4D077C72F7A5B5839738521368B04BA3F7C6A8C27ED9C7`.
+After RGBA-to-ARGB normalization, each frame matched the default oracle hash
+`19CEA826F356E0D94BC29FF10CB9E7F5A770FE5B288CB3D190A58372353102D9`
+with zero differing bytes and pixels. This confirms in production AE that the
+fixture does not introduce frame-time variation when parameters are constant.

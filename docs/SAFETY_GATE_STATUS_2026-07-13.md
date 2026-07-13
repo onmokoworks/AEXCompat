@@ -5,7 +5,7 @@ authorization. Each stage still requires fixed-fixture controls and re-audit.
 
 ## Current Result
 
-`gate_state: target_ae_argb8_roundtrip_verified_deep_tail_nondeterminism_observed`
+`gate_state: target_ae_argb8_roundtrip_and_time_verified_deep_tail_observed`
 
 | Gate | Status | Evidence and remaining work |
 | --- | --- | --- |
@@ -55,5 +55,7 @@ reconstructs the effect after close/reopen, and renders exact
 oracle-equivalent pixels.
 SmartFX PreRender checkout also receives a valid time basis; a nonzero
 `42/2/24` context was observed exactly while preserving deterministic output.
+Production AE also rendered byte-identical oracle-exact frames at time 0 and
+1/24 second.
 The ARGB8 matrix also covers valid parameter boundaries amount 500, seed 10000,
 and mix 0% in both classic and SmartFX paths with broker-enforced oracle parity.
