@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- MULTI_COMMENT_SENTINEL: all operations resolve before writing -->
+<xmp:project xmlns:xmp="urn:aviutlas:synthetic:aepx" xmlns:meta="urn:aviutlas:synthetic:meta" meta:MULTI_ATTR_SENTINEL="keep">
+  <xmp:comp id="comp-one" name="One">
+    <xmp:layer id="layer-one" name="Layer One"/>
+  </xmp:comp>
+  <xmp:comp id="comp-two" name="Two">
+    <xmp:layer id="layer-two" name="Layer Two"/>
+  </xmp:comp>
+  <xmp:MULTI_UNKNOWN_NODE_SENTINEL meta:note="keep"/>
+</xmp:project>

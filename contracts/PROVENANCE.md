@@ -34,3 +34,11 @@ provenance and should not be edited during promotion.
 | Canonical path | Source | Notes |
 | --- | --- | --- |
 | `contracts/aex/compat_oracle_report.schema.json` | `docs/IMPLEMENTATION_ROADMAP_2026-07-06.md`, A-8 | Locally authored statistics-only report contract; no pixel values or native payloads are serialized. |
+
+## AEPX Edge Fixtures
+
+Files under `tests/fixtures/aepx/` are byte-identical copies of the same-named
+files under `imports/aviutlas-rust-contracts/aviutl-rs/tests/fixtures/`.
+They cover BOM/CRLF, Unicode, duplicate IDs, ambiguous selections, multiple
+compositions, scanner edges, and preservation sentinels. Tests enforce the
+byte-for-byte provenance boundary; the imported originals remain unmodified.

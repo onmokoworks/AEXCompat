@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- EDGE_COMMENT_SENTINEL: scanner should ignore <xmp:comp id="comp-main" name="Comment Fake"> inside comments -->
+<xmp:project xmlns:xmp="urn:aviutlas:synthetic:aepx" xmlns:meta="urn:aviutlas:synthetic:meta" meta:EDGE_UNKNOWN_ATTR_SENTINEL="keep">
+  <xmp:composition id="comp-main" name="False Positive"/>
+  <xmp:companion id="comp-main" name="False Companion"/>
+  <xmp:comp data-note="quoted > marker" meta:edgeAttr="EDGE_ATTR_SENTINEL" name='Main' id='comp-main'>
+    <xmp:layer id="layer-text" name="Text Layer">
+      <xmp:text><![CDATA[EDGE_CDATA_SENTINEL <xmp:comp id="comp-main" name="CData Fake">]]></xmp:text>
+    </xmp:layer>
+    <edge:EDGE_NODE_SENTINEL xmlns:edge="urn:aviutlas:synthetic:edge" oddSpacing = "  keep  "/>
+  </xmp:comp>
+</xmp:project>
