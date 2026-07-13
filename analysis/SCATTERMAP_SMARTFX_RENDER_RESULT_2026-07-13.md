@@ -27,4 +27,13 @@ The 32-bpc case likewise supplies a correctly laid out ARGB128 world while the
 fixture copies only `width*4` bytes per row. Native and source-derived oracle
 outputs hash to `D707B9B7BD7C923182A0BEFCA60985896E473AFF3D0191FC310FC07CAD3FE90B`.
 These results record faithful host behavior; they are not evidence of correct
-deep/float processing. GPU rendering remains unverified.
+deep/float processing.
+
+## GPU Negotiation
+
+A DirectX/device-0 negotiation case executed GPU device setup, Smart PreRender,
+CPU Smart Render fallback, and GPU device setdown twice in isolated workers.
+Setup and setdown returned zero. The fixture did not set
+`PF_RenderOutputFlag_GPU_RENDER_POSSIBLE`, so the host correctly did not dispatch
+`PF_Cmd_SMART_RENDER_GPU`. Both fallback outputs matched the float oracle. This
+proves the observable fallback decision, not GPU pixel execution.

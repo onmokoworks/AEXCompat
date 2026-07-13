@@ -43,6 +43,9 @@ constexpr int32_t kParamsSetup = 4;
 constexpr int32_t kRender = 11;
 constexpr int32_t kSmartPreRender = 23;
 constexpr int32_t kSmartRender = 24;
+constexpr int32_t kSmartRenderGpu = 31;
+constexpr int32_t kGpuDeviceSetup = 32;
+constexpr int32_t kGpuDeviceSetdown = 33;
 constexpr std::size_t kUtilsSize = 552;
 constexpr std::size_t kUtilsNewHandle = 160;
 constexpr std::size_t kUtilsLockHandle = 168;
@@ -446,12 +449,16 @@ int32_t render_once(EffectEntry entry, std::array<std::byte, kInSize>& input,
 
 #ifdef AEXCOMPAT_SMART_WORKER
 struct SmartResult {
+  int32_t gpu_setup_error{};
   int32_t pre_error{-1};
   int32_t render_error{-1};
+  int32_t gpu_setdown_error{};
   std::string input_hash;
   std::string output_hash;
   bool rects_valid{};
   bool guards_intact{};
+  bool gpu_render_possible{};
+  bool gpu_render_dispatched{};
 };
 
 SmartResult smart_render_once(EffectEntry entry, std::array<std::byte, kInSize>& input,
@@ -459,7 +466,8 @@ SmartResult smart_render_once(EffectEntry entry, std::array<std::byte, kInSize>&
                               const std::string& case_id) {
   SmartResult result;
   const bool deep16 = case_id == "deep16_default";
-  const bool float32 = case_id == "float32_default";
+  const bool gpu_negotiation = case_id == "gpu_fallback_float32";
+  const bool float32 = case_id == "float32_default" || gpu_negotiation;
   const bool connected_map = case_id == "connected_map" || case_id == "inverted_map";
   const int32_t width = connected_map ? 11 : ((case_id == "odd_dimensions" || case_id == "padded_stride") ? 13 : 16);
   const int32_t height = connected_map ? 7 : ((case_id == "odd_dimensions" || case_id == "padded_stride") ? 9 : 12);
@@ -530,6 +538,14 @@ SmartResult smart_render_once(EffectEntry entry, std::array<std::byte, kInSize>&
   std::array<void*, 9> params{};
   for (std::size_t i = 0; i < definitions.size(); ++i) params[i] = definitions[i].data();
 
+  std::array<std::byte, 8> gpu_setup_input{}, gpu_setup_output{};
+  std::array<std::byte, 16> gpu_setup_extra{};
+  if (gpu_negotiation) {
+    write<int32_t>(gpu_setup_input, 0, 4); write<uint32_t>(gpu_setup_input, 4, 0);
+    write<void*>(gpu_setup_extra, 0, gpu_setup_input.data()); write<void*>(gpu_setup_extra, 8, gpu_setup_output.data());
+    result.gpu_setup_error = entry(kGpuDeviceSetup, input.data(), command_output.data(), params.data(), nullptr, gpu_setup_extra.data());
+  }
+
   std::array<std::byte, 64> pre_input{}; std::array<std::byte, 56> pre_output{};
   std::array<std::byte, 16> pre_callbacks{}; std::array<std::byte, 24> pre_extra{};
   write_rect(pre_input.data(), width, height);
@@ -546,6 +562,7 @@ SmartResult smart_render_once(EffectEntry entry, std::array<std::byte, kInSize>&
     (void)p; return top >= 0 && left >= 0 && bottom >= top && right >= left && bottom <= height && right <= width;
   };
   result.rects_valid = result.pre_error == 0 && valid_rect(0) && valid_rect(16);
+  result.gpu_render_possible = (read<uint16_t>(pre_output, 34) & 0x2u) != 0;
 
   std::array<std::byte, 72> smart_input{}; std::array<std::byte, 24> callbacks{};
   std::array<std::byte, 16> smart_extra{};
@@ -554,8 +571,17 @@ SmartResult smart_render_once(EffectEntry entry, std::array<std::byte, kInSize>&
   write<void*>(callbacks, 16, reinterpret_cast<void*>(&smart_checkout_output));
   write<void*>(smart_extra, 0, smart_input.data()); write<void*>(smart_extra, 8, callbacks.data());
   g_smart_input_world = input_world.data(); g_smart_output_world = output_world.data();
+  const int32_t render_selector = gpu_negotiation && result.gpu_render_possible ? kSmartRenderGpu : kSmartRender;
+  result.gpu_render_dispatched = render_selector == kSmartRenderGpu;
   result.render_error = result.pre_error == 0
-      ? entry(kSmartRender, input.data(), command_output.data(), params.data(), nullptr, smart_extra.data()) : -1;
+      ? entry(render_selector, input.data(), command_output.data(), params.data(), nullptr, smart_extra.data()) : -1;
+  if (gpu_negotiation) {
+    std::array<std::byte, 16> setdown_input{}; std::array<std::byte, 8> setdown_extra{};
+    write<void*>(setdown_input, 0, read<void*>(gpu_setup_output, 0));
+    write<int32_t>(setdown_input, 8, 4); write<uint32_t>(setdown_input, 12, 0);
+    write<void*>(setdown_extra, 0, setdown_input.data());
+    result.gpu_setdown_error = entry(kGpuDeviceSetdown, input.data(), command_output.data(), params.data(), nullptr, setdown_extra.data());
+  }
   g_smart_input_world = nullptr; g_smart_output_world = nullptr; g_smart_map_world = nullptr;
   std::vector<unsigned char> logical_input(width * height * pixel_bytes), logical_output(width * height * pixel_bytes);
   for (int32_t y = 0; y < height; ++y) {
@@ -699,6 +725,10 @@ int wmain(int argc, wchar_t** argv) {
             << ",\"params_setup_error\":" << params_error
             << ",\"pre_render_error\":" << smart.pre_error
             << ",\"smart_render_error\":" << smart.render_error
+            << ",\"gpu_device_setup_error\":" << smart.gpu_setup_error
+            << ",\"gpu_device_setdown_error\":" << smart.gpu_setdown_error
+            << ",\"gpu_render_possible\":" << (smart.gpu_render_possible ? "true" : "false")
+            << ",\"gpu_render_dispatched\":" << (smart.gpu_render_dispatched ? "true" : "false")
             << ",\"global_setdown_error\":" << setdown_error
             << ",\"case_id\":\"" << case_id << "\",\"pixel_format\":\"argb8\",\"width\":"
             << g_smart_width << ",\"height\":" << g_smart_height << ",\"rowbytes\":"

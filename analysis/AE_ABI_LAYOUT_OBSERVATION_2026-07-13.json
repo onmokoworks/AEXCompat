@@ -23,6 +23,11 @@
   "pf_smart_render_extra_size": 16,
   "pf_smart_render_input_size": 72,
   "pf_smart_render_callbacks_size": 24,
+  "pf_gpu_device_setup_extra_size": 16,
+  "pf_gpu_device_setup_input_size": 8,
+  "pf_gpu_device_setup_output_size": 8,
+  "pf_gpu_device_setdown_extra_size": 8,
+  "pf_gpu_device_setdown_input_size": 16,
   "fields": {
     "in.version": { "offset": 196, "size": 4 },
     "in.serial_num": { "offset": 200, "size": 4 },
@@ -109,6 +114,19 @@
     ,"smart_callbacks.checkout_layer_pixels": { "offset": 0, "size": 8 }
     ,"smart_callbacks.checkin_layer_pixels": { "offset": 8, "size": 8 }
     ,"smart_callbacks.checkout_output": { "offset": 16, "size": 8 }
+    ,"smart_input.bitdepth": { "offset": 44, "size": 2 }
+    ,"smart_input.gpu_data": { "offset": 56, "size": 8 }
+    ,"smart_input.what_gpu": { "offset": 64, "size": 4 }
+    ,"smart_input.device_index": { "offset": 68, "size": 4 }
+    ,"gpu_setup_extra.input": { "offset": 0, "size": 8 }
+    ,"gpu_setup_extra.output": { "offset": 8, "size": 8 }
+    ,"gpu_setup_input.what_gpu": { "offset": 0, "size": 4 }
+    ,"gpu_setup_input.device_index": { "offset": 4, "size": 4 }
+    ,"gpu_setup_output.gpu_data": { "offset": 0, "size": 8 }
+    ,"gpu_setdown_extra.input": { "offset": 0, "size": 8 }
+    ,"gpu_setdown_input.gpu_data": { "offset": 0, "size": 8 }
+    ,"gpu_setdown_input.what_gpu": { "offset": 8, "size": 4 }
+    ,"gpu_setdown_input.device_index": { "offset": 12, "size": 4 }
   },
   "selectors": {
     "about": 0,

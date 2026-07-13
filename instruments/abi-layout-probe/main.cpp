@@ -38,6 +38,11 @@ int main() {
                "  \"pf_smart_render_extra_size\":" << sizeof(PF_SmartRenderExtra) << ",\n"
                "  \"pf_smart_render_input_size\":" << sizeof(PF_SmartRenderInput) << ",\n"
                "  \"pf_smart_render_callbacks_size\":" << sizeof(PF_SmartRenderCallbacks) << ",\n"
+               "  \"pf_gpu_device_setup_extra_size\":" << sizeof(PF_GPUDeviceSetupExtra) << ",\n"
+               "  \"pf_gpu_device_setup_input_size\":" << sizeof(PF_GPUDeviceSetupInput) << ",\n"
+               "  \"pf_gpu_device_setup_output_size\":" << sizeof(PF_GPUDeviceSetupOutput) << ",\n"
+               "  \"pf_gpu_device_setdown_extra_size\":" << sizeof(PF_GPUDeviceSetdownExtra) << ",\n"
+               "  \"pf_gpu_device_setdown_input_size\":" << sizeof(PF_GPUDeviceSetdownInput) << ",\n"
                "  \"fields\":{";
   field<decltype(PF_InData::version)>("in.version", offsetof(PF_InData, version), first);
   field<decltype(PF_InData::serial_num)>("in.serial_num", offsetof(PF_InData, serial_num), first);
@@ -124,6 +129,19 @@ int main() {
   field<decltype(PF_SmartRenderCallbacks::checkout_layer_pixels)>("smart_callbacks.checkout_layer_pixels", offsetof(PF_SmartRenderCallbacks, checkout_layer_pixels), first);
   field<decltype(PF_SmartRenderCallbacks::checkin_layer_pixels)>("smart_callbacks.checkin_layer_pixels", offsetof(PF_SmartRenderCallbacks, checkin_layer_pixels), first);
   field<decltype(PF_SmartRenderCallbacks::checkout_output)>("smart_callbacks.checkout_output", offsetof(PF_SmartRenderCallbacks, checkout_output), first);
+  field<decltype(PF_SmartRenderInput::bitdepth)>("smart_input.bitdepth", offsetof(PF_SmartRenderInput, bitdepth), first);
+  field<decltype(PF_SmartRenderInput::gpu_data)>("smart_input.gpu_data", offsetof(PF_SmartRenderInput, gpu_data), first);
+  field<decltype(PF_SmartRenderInput::what_gpu)>("smart_input.what_gpu", offsetof(PF_SmartRenderInput, what_gpu), first);
+  field<decltype(PF_SmartRenderInput::device_index)>("smart_input.device_index", offsetof(PF_SmartRenderInput, device_index), first);
+  field<decltype(PF_GPUDeviceSetupExtra::input)>("gpu_setup_extra.input", offsetof(PF_GPUDeviceSetupExtra, input), first);
+  field<decltype(PF_GPUDeviceSetupExtra::output)>("gpu_setup_extra.output", offsetof(PF_GPUDeviceSetupExtra, output), first);
+  field<decltype(PF_GPUDeviceSetupInput::what_gpu)>("gpu_setup_input.what_gpu", offsetof(PF_GPUDeviceSetupInput, what_gpu), first);
+  field<decltype(PF_GPUDeviceSetupInput::device_index)>("gpu_setup_input.device_index", offsetof(PF_GPUDeviceSetupInput, device_index), first);
+  field<decltype(PF_GPUDeviceSetupOutput::gpu_data)>("gpu_setup_output.gpu_data", offsetof(PF_GPUDeviceSetupOutput, gpu_data), first);
+  field<decltype(PF_GPUDeviceSetdownExtra::input)>("gpu_setdown_extra.input", offsetof(PF_GPUDeviceSetdownExtra, input), first);
+  field<decltype(PF_GPUDeviceSetdownInput::gpu_data)>("gpu_setdown_input.gpu_data", offsetof(PF_GPUDeviceSetdownInput, gpu_data), first);
+  field<decltype(PF_GPUDeviceSetdownInput::what_gpu)>("gpu_setdown_input.what_gpu", offsetof(PF_GPUDeviceSetdownInput, what_gpu), first);
+  field<decltype(PF_GPUDeviceSetdownInput::device_index)>("gpu_setdown_input.device_index", offsetof(PF_GPUDeviceSetdownInput, device_index), first);
   std::cout << "\n  },\n  \"selectors\":{"
             << "\"about\":" << static_cast<int>(PF_Cmd_ABOUT) << ','
             << "\"global_setup\":" << static_cast<int>(PF_Cmd_GLOBAL_SETUP) << ','

@@ -5,7 +5,7 @@ authorization. Each stage still requires fixed-fixture controls and re-audit.
 
 ## Current Result
 
-`gate_state: smartfx_cpu_argb8_deep16_float32_behavior_verified`
+`gate_state: smartfx_cpu_formats_and_gpu_fallback_verified`
 
 | Gate | Status | Evidence and remaining work |
 | --- | --- | --- |
@@ -32,6 +32,7 @@ deterministic output, buffer guards, and independent pixel hash parity are
 observed. Extended classic render and connected map cases now have oracle
 parity. SmartFX PreRender/Render now also has two-run deterministic oracle
 parity across the ARGB8 matrix. 16-bpc and 32-bpc CPU cases also reproduce the
-fixture's declared-but-byte-oriented deep/float behavior exactly. GPU and H-4
-AE reference trace capture remain pending under the
+fixture's declared-but-byte-oriented deep/float behavior exactly. GPU lifecycle
+negotiation correctly falls back because PreRender does not opt in to GPU pixel
+execution. H-4 AE reference trace capture remains pending under the
 continuous authorization and existing isolation controls.

@@ -27,6 +27,8 @@ class AbiLayoutProbeTests(unittest.TestCase):
             "PF_Cmd_RENDER", "layer.rowbytes", "layer.data", "in.time_scale",
             "pf_pixel16_size", "pf_pixel_float_size", "layer.world_flags",
             "PF_Cmd_SMART_RENDER_GPU", "PF_Cmd_GPU_DEVICE_SETUP",
+            "pf_gpu_device_setup_extra_size", "gpu_setup_input.what_gpu",
+            "gpu_setdown_input.gpu_data", "smart_input.device_index",
         ):
             self.assertIn(marker, text)
 
@@ -52,6 +54,10 @@ class AbiLayoutProbeTests(unittest.TestCase):
         self.assertEqual(data["selectors"]["gpu_device_setup"], 32)
         self.assertEqual(data["selectors"]["gpu_device_setdown"], 33)
         self.assertEqual(data["pf_smart_render_callbacks_size"], 24)
+        self.assertEqual(data["pf_gpu_device_setup_extra_size"], 16)
+        self.assertEqual(data["pf_gpu_device_setdown_input_size"], 16)
+        self.assertEqual(data["fields"]["smart_input.device_index"]["offset"], 68)
+        self.assertEqual(data["fields"]["gpu_setdown_input.device_index"]["offset"], 12)
         self.assertFalse(data["native_aex_loaded"])
         self.assertFalse(data["selector_dispatched"])
 
