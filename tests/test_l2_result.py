@@ -13,6 +13,9 @@ class L2ResultTests(unittest.TestCase):
             self.assertIn(name, text)
         self.assertIn("reported parameter count: 8", text)
         self.assertIn("render performed: false", text)
+        for expected in ("valid 0..500", "Horizontal|Vertical|Both", "default true",
+                         "default 100, precision 1", "default false"):
+            self.assertIn(expected, text)
 
     def test_l2_receipt_excludes_render(self):
         text = (ROOT / "analysis" / "SCATTERMAP_L2_APPROVAL_RECEIPT_2026-07-13.md").read_text(encoding="utf-8")

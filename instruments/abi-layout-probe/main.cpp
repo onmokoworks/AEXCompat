@@ -61,6 +61,22 @@ int main() {
   field<decltype(PF_ParamDef::name)>("param.name", offsetof(PF_ParamDef, name), first);
   field<decltype(PF_ParamDef::flags)>("param.flags", offsetof(PF_ParamDef, flags), first);
   field<decltype(PF_ParamDef::u)>("param.u", offsetof(PF_ParamDef, u), first);
+  field<decltype(PF_SliderDef::valid_min)>("slider.valid_min", offsetof(PF_SliderDef, valid_min), first);
+  field<decltype(PF_SliderDef::valid_max)>("slider.valid_max", offsetof(PF_SliderDef, valid_max), first);
+  field<decltype(PF_SliderDef::slider_min)>("slider.slider_min", offsetof(PF_SliderDef, slider_min), first);
+  field<decltype(PF_SliderDef::slider_max)>("slider.slider_max", offsetof(PF_SliderDef, slider_max), first);
+  field<decltype(PF_SliderDef::dephault)>("slider.default", offsetof(PF_SliderDef, dephault), first);
+  field<decltype(PF_PopupDef::num_choices)>("popup.num_choices", offsetof(PF_PopupDef, num_choices), first);
+  field<decltype(PF_PopupDef::dephault)>("popup.default", offsetof(PF_PopupDef, dephault), first);
+  field<decltype(PF_PopupDef::u)>("popup.names", offsetof(PF_PopupDef, u), first);
+  field<decltype(PF_CheckBoxDef::dephault)>("checkbox.default", offsetof(PF_CheckBoxDef, dephault), first);
+  field<decltype(PF_CheckBoxDef::u)>("checkbox.label", offsetof(PF_CheckBoxDef, u), first);
+  field<decltype(PF_FloatSliderDef::valid_min)>("float_slider.valid_min", offsetof(PF_FloatSliderDef, valid_min), first);
+  field<decltype(PF_FloatSliderDef::valid_max)>("float_slider.valid_max", offsetof(PF_FloatSliderDef, valid_max), first);
+  field<decltype(PF_FloatSliderDef::slider_min)>("float_slider.slider_min", offsetof(PF_FloatSliderDef, slider_min), first);
+  field<decltype(PF_FloatSliderDef::slider_max)>("float_slider.slider_max", offsetof(PF_FloatSliderDef, slider_max), first);
+  field<decltype(PF_FloatSliderDef::dephault)>("float_slider.default", offsetof(PF_FloatSliderDef, dephault), first);
+  field<decltype(PF_FloatSliderDef::precision)>("float_slider.precision", offsetof(PF_FloatSliderDef, precision), first);
   std::cout << "\n  },\n  \"selectors\":{"
             << "\"about\":" << static_cast<int>(PF_Cmd_ABOUT) << ','
             << "\"global_setup\":" << static_cast<int>(PF_Cmd_GLOBAL_SETUP) << ','

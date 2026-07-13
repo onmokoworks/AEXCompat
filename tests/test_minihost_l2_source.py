@@ -33,6 +33,12 @@ class MinihostL2SourceTests(unittest.TestCase):
         self.assertIn("*suite = nullptr", text)
         self.assertIn("return 1", text)
 
+    def test_l2_decodes_supported_parameter_descriptors(self):
+        text = SOURCE.read_text(encoding="utf-8")
+        for marker in ("record.type == 1", "record.type == 7", "record.type == 4",
+                       "record.type == 10", "valid_min", "default_value", "choices"):
+            self.assertIn(marker, text)
+
 
 if __name__ == "__main__":
     unittest.main()

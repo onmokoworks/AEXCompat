@@ -46,6 +46,22 @@
     "param.name": { "offset": 16, "size": 32 },
     "param.flags": { "offset": 48, "size": 4 },
     "param.u": { "offset": 56, "size": 120 }
+    ,"slider.valid_min": { "offset": 68, "size": 4 }
+    ,"slider.valid_max": { "offset": 72, "size": 4 }
+    ,"slider.slider_min": { "offset": 76, "size": 4 }
+    ,"slider.slider_max": { "offset": 80, "size": 4 }
+    ,"slider.default": { "offset": 84, "size": 4 }
+    ,"popup.num_choices": { "offset": 4, "size": 2 }
+    ,"popup.default": { "offset": 6, "size": 2 }
+    ,"popup.names": { "offset": 8, "size": 8 }
+    ,"checkbox.default": { "offset": 4, "size": 1 }
+    ,"checkbox.label": { "offset": 8, "size": 8 }
+    ,"float_slider.valid_min": { "offset": 48, "size": 4 }
+    ,"float_slider.valid_max": { "offset": 52, "size": 4 }
+    ,"float_slider.slider_min": { "offset": 56, "size": 4 }
+    ,"float_slider.slider_max": { "offset": 60, "size": 4 }
+    ,"float_slider.default": { "offset": 64, "size": 4 }
+    ,"float_slider.precision": { "offset": 68, "size": 2 }
   },
   "selectors": {
     "about": 0,

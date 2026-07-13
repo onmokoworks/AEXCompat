@@ -54,6 +54,15 @@ struct ParamRecord {
   int32_t type{};
   uint32_t flags{};
   std::string name;
+  bool has_numeric{};
+  double valid_min{};
+  double valid_max{};
+  double slider_min{};
+  double slider_max{};
+  double default_value{};
+  int32_t precision{-1};
+  std::string choices;
+  std::string label;
 };
 std::vector<ParamRecord> g_params;
 struct HandleRecord { void* data{}; std::size_t size{}; };
@@ -156,9 +165,44 @@ int32_t __cdecl add_param(void*, int32_t index, void* definition) {
   std::memcpy(bytes.data(), definition, bytes.size());
   const char* name = reinterpret_cast<const char*>(bytes.data() + kParamName);
   const auto length = strnlen_s(name, kParamNameSize);
-  g_params.push_back({index, read<int32_t>(bytes, kParamType),
-                      read<uint32_t>(bytes, kParamFlags),
-                      std::string(name, length)});
+  ParamRecord record{index, read<int32_t>(bytes, kParamType),
+                     read<uint32_t>(bytes, kParamFlags), std::string(name, length)};
+  constexpr std::size_t u = 56;
+  if (record.type == 1) {
+    record.has_numeric = true;
+    record.valid_min = read<int32_t>(bytes, u + 68);
+    record.valid_max = read<int32_t>(bytes, u + 72);
+    record.slider_min = read<int32_t>(bytes, u + 76);
+    record.slider_max = read<int32_t>(bytes, u + 80);
+    record.default_value = read<int32_t>(bytes, u + 84);
+  } else if (record.type == 7) {
+    record.has_numeric = true;
+    record.valid_min = 1;
+    record.valid_max = read<int16_t>(bytes, u + 4);
+    record.slider_min = record.valid_min;
+    record.slider_max = record.valid_max;
+    record.default_value = read<int16_t>(bytes, u + 6);
+    const char* choices = read<const char*>(bytes, u + 8);
+    if (choices) record.choices.assign(choices, strnlen_s(choices, 4096));
+  } else if (record.type == 4) {
+    record.has_numeric = true;
+    record.valid_min = 0;
+    record.valid_max = 1;
+    record.slider_min = 0;
+    record.slider_max = 1;
+    record.default_value = read<uint8_t>(bytes, u + 4) ? 1 : 0;
+    const char* label = read<const char*>(bytes, u + 8);
+    if (label) record.label.assign(label, strnlen_s(label, 4096));
+  } else if (record.type == 10) {
+    record.has_numeric = true;
+    record.valid_min = read<float>(bytes, u + 48);
+    record.valid_max = read<float>(bytes, u + 52);
+    record.slider_min = read<float>(bytes, u + 56);
+    record.slider_max = read<float>(bytes, u + 60);
+    record.default_value = read<float>(bytes, u + 64);
+    record.precision = read<int16_t>(bytes, u + 68);
+  }
+  g_params.push_back(std::move(record));
   return 0;
 }
 
@@ -216,7 +260,18 @@ void report(const char* status, int32_t global_error, int32_t params_error,
     const auto& param = g_params[i];
     std::cout << "{\"index\":" << param.index << ",\"type\":" << param.type
               << ",\"flags\":" << param.flags << ",\"name\":\""
-              << escape(param.name) << "\"}";
+              << escape(param.name) << "\"";
+    if (param.has_numeric) {
+      std::cout << ",\"valid_min\":" << param.valid_min
+                << ",\"valid_max\":" << param.valid_max
+                << ",\"slider_min\":" << param.slider_min
+                << ",\"slider_max\":" << param.slider_max
+                << ",\"default\":" << param.default_value;
+    }
+    if (param.precision >= 0) std::cout << ",\"precision\":" << param.precision;
+    if (!param.choices.empty()) std::cout << ",\"choices\":\"" << escape(param.choices) << "\"";
+    if (!param.label.empty()) std::cout << ",\"label\":\"" << escape(param.label) << "\"";
+    std::cout << '}';
   }
   std::cout << "],\"selectors_executed\":true,\"render_performed\":false}\n";
 }

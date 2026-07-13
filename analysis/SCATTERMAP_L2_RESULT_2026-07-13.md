@@ -34,6 +34,17 @@ violations, and the broker was hardened to produce a report for empty or
 crashed worker output. The passing host supplies only PICA `PF Handle Suite`
 version 2; all other suite acquisition is default-deny.
 
-This result proves initialization and parameter registration only. Parameter
-union defaults/ranges and image rendering remain future compatibility work.
+Descriptor value decoding was subsequently re-run under the same receipt and
+matched the self-authored source oracle:
 
+- `Scatter Amount`: valid 0..500, slider 0..100, default 5;
+- `Direction`: `Horizontal|Vertical|Both`, default 3 (`Both`);
+- `Random Seed`: valid/slider 0..10000, default 0;
+- `Repeat Edge Pixels`: default true, label `Repeat`;
+- `Mix with Original`: 0..100, default 100, precision 1;
+- `Scatter Map`: layer parameter;
+- `Invert Map`: default false, label `Invert`.
+
+This result proves initialization, parameter registration, and descriptor
+defaults/ranges for the observed types. Image rendering remains future
+compatibility work.
