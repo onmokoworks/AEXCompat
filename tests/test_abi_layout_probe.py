@@ -22,6 +22,7 @@ class AbiLayoutProbeTests(unittest.TestCase):
         for marker in (
             "pf_in_data_size", "pf_out_data_size", "pf_param_def_size",
             "in.pica_basicP", "out.my_version", "out.num_params",
+            "inter.add_param", "param.param_type", "param.name",
             "PF_Cmd_GLOBAL_SETUP", "PF_Cmd_PARAMS_SETUP",
         ):
             self.assertIn(marker, text)
@@ -31,6 +32,9 @@ class AbiLayoutProbeTests(unittest.TestCase):
         self.assertEqual(data["pointer_size"], 8)
         self.assertEqual(data["pf_in_data_size"], 408)
         self.assertEqual(data["pf_out_data_size"], 408)
+        self.assertEqual(data["pf_interact_callbacks_size"], 176)
+        self.assertEqual(data["fields"]["inter.add_param"]["offset"], 16)
+        self.assertEqual(data["fields"]["param.u"]["offset"], 56)
         self.assertFalse(data["native_aex_loaded"])
         self.assertFalse(data["selector_dispatched"])
 
