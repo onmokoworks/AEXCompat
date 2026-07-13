@@ -34,8 +34,27 @@ space-free path `D:\AEXCompatProbe\ae_scattermap_probe.jsx` before launch.
 
 ## Remaining H-4 Work
 
-This is load and parameter-construction evidence only. It does not prove pixel
-parity. H-4 remains open until an 8-bpc reference frame is rendered in After
-Effects from a fixed input, decoded to a documented channel order, and compared
-with the minihost oracle. Parameter value/name capture and non-default cases
-should be included in that render trace.
+The default 8-bpc reference render is now captured in After Effects 25.2. A
+16x12 lossless PNG input with SHA-256
+`5BB62CF97158128743D79E0D867DECBBA25FE17162F8507067645AAAD9254538`
+was rendered through ScatterMap. The output PNG SHA-256 was
+`542B9E5D0BCFEC8D9A4D077C72F7A5B5839738521368B04BA3F7C6A8C27ED9C7`.
+After decoding PNG RGBA and normalizing to `PF_Pixel8` ARGB, both the AE output
+and independent oracle had SHA-256
+`19CEA826F356E0D94BC29FF10CB9E7F5A770FE5B288CB3D190A58372353102D9`.
+The comparison found zero differing bytes, zero differing pixels, and maximum
+channel delta zero. The output also differs from the source hash, proving the
+comparison did not pass through identity behavior.
+
+The AE property trace exposed these defaults: Scatter Amount 5, Direction 3,
+Random Seed 0, Mix with Original 100, Scatter Map 0, and Invert Map 0. It then
+reported AE's built-in Compositing Options group. `Repeat Edge Pixels` was not
+enumerated through ExtendScript even though the exact default render parity
+shows edge-repeat behavior. This visibility discrepancy remains a specific
+follow-up item rather than being inferred away.
+
+`tools/ae_scattermap_render_probe.jsx` reproduces the host render and
+`tools/ae_scattermap_render_verify.py` performs the channel normalization and
+strict comparison. H-4 default-render capture is complete. Non-default AE
+parameter cases and the Repeat Edge enumeration discrepancy remain broader
+compatibility work.

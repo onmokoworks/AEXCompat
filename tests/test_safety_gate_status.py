@@ -7,15 +7,17 @@ STATUS = ROOT / "docs" / "SAFETY_GATE_STATUS_2026-07-13.md"
 
 
 class SafetyGateStatusTests(unittest.TestCase):
-    def test_status_records_smartfx_verification_and_remaining_scope(self):
+    def test_status_records_ae_reference_parity_and_prior_contracts(self):
         text = STATUS.read_text(encoding="utf-8")
-        self.assertIn("gate_state: target_smartfx_time_error_and_crash_contracts_verified", text)
+        self.assertIn("gate_state: target_ae_reference_default_argb8_parity_verified", text)
         self.assertIn("fixed-fixture controls and re-audit", text)
         self.assertIn("SmartFX PreRender/Render", text)
         self.assertIn("GPU lifecycle", text)
         self.assertIn("propagates error 4", text)
         self.assertIn("malformed frame contract", text)
         self.assertIn("42/2/24", text)
+        self.assertIn("H-4 default reference capture is satisfied", text)
+        self.assertIn("zero byte or pixel differences", text)
 
     def test_all_gate_items_are_explicit(self):
         text = STATUS.read_text(encoding="utf-8")

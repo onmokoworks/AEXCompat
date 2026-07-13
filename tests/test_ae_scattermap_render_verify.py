@@ -1,0 +1,46 @@
+import tempfile
+import unittest
+from pathlib import Path
+
+from PIL import Image
+
+from tools.ae_scattermap_render_verify import rgba_to_argb, verify
+from tools.scattermap_reference_oracle import render_default
+
+
+def argb_to_rgba(argb: bytes) -> bytes:
+    return bytes(
+        channel
+        for offset in range(0, len(argb), 4)
+        for channel in (argb[offset + 1], argb[offset + 2], argb[offset + 3], argb[offset])
+    )
+
+
+class AeScatterMapRenderVerifyTests(unittest.TestCase):
+    def test_rgba_channel_normalization(self):
+        self.assertEqual(rgba_to_argb(bytes((1, 2, 3, 4))), bytes((4, 1, 2, 3)))
+
+    def test_exact_oracle_png_passes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "reference.png"
+            Image.frombytes("RGBA", (16, 12), argb_to_rgba(render_default())).save(path)
+            report = verify(path)
+        self.assertTrue(report["pixel_match"])
+        self.assertTrue(report["non_identity_output"])
+        self.assertEqual(report["different_bytes"], 0)
+        self.assertEqual(report["different_pixels"], 0)
+
+    def test_changed_pixel_is_reported(self):
+        argb = bytearray(render_default())
+        argb[5] ^= 0xFF
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "changed.png"
+            Image.frombytes("RGBA", (16, 12), argb_to_rgba(argb)).save(path)
+            report = verify(path)
+        self.assertFalse(report["pixel_match"])
+        self.assertEqual(report["different_bytes"], 1)
+        self.assertEqual(report["different_pixels"], 1)
+
+
+if __name__ == "__main__":
+    unittest.main()
