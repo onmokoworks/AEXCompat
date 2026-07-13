@@ -5,7 +5,7 @@ from pathlib import Path
 from PIL import Image
 
 from tools.ae_scattermap_render_verify import rgba_to_argb, verify
-from tools.scattermap_reference_oracle import render_case, render_default
+from tools.scattermap_reference_oracle import generated_luma_map, render_case, render_default
 
 
 def argb_to_rgba(argb: bytes) -> bytes:
@@ -48,6 +48,15 @@ class AeScatterMapRenderVerifyTests(unittest.TestCase):
             report = verify(path, "identity")
         self.assertTrue(report["pixel_match"])
         self.assertFalse(report["non_identity_output"])
+
+    def test_connected_map_case_uses_11_by_7_oracle(self):
+        expected = render_case(11, 7, luma_map=generated_luma_map(11, 7, 5, 3))
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "connected.png"
+            Image.frombytes("RGBA", (11, 7), argb_to_rgba(expected)).save(path)
+            report = verify(path, "connected_map")
+        self.assertTrue(report["pixel_match"])
+        self.assertEqual((report["width"], report["height"]), (11, 7))
 
 
 if __name__ == "__main__":

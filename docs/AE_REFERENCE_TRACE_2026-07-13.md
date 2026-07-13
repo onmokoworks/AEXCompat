@@ -76,6 +76,25 @@ bytes and zero differing pixels:
 | mix 0 | `863D238F52F81ABA4017C198AF4D748CB57FE369E6216FDBACF45FD94037ECF7` | source identity |
 
 This closes AE reference parity for every script-visible scalar parameter at
-its default plus representative direction and boundary values. Connected map,
-Invert Map, and the non-enumerated Repeat Edge behavior still need production
-host matrix evidence.
+its default plus representative direction and boundary values.
+
+## Layer Map Matrix
+
+`tools/ae_scattermap_map_probe.jsx` connected production-host Layer Control
+inputs and rendered two additional 11x7 cases. A 5x3 grayscale map was checked
+out at native dimensions and resampled by the fixture for `connected_map`; an
+11x7 grayscale map was used with Invert Map enabled for `inverted_map`.
+
+| Case | ARGB8 SHA-256 | Difference from oracle |
+| --- | --- | --- |
+| connected map (5x3 to 11x7) | `A38568761441C209940F81A8C2792DAD50566C66EDA1463BDCF071CCA614891B` | 0 bytes / 0 pixels |
+| inverted map (11x7) | `3BC0C5172B880A8A83CEC24177B78721E9F0619D5330F6A26AAA02B9CC057A08` | 0 bytes / 0 pixels |
+
+Production-host ARGB8 parity is therefore established for all parameters that
+AE exposes to ExtendScript, including layer checkout, map resampling, and map
+inversion. The sole remaining parameter-observation gap is Repeat Edge: the
+source and minihost define it and default-render parity proves its default-true
+behavior, but AE does not enumerate a `Repeat Edge Pixels` property. A
+production-host no-repeat case cannot be authored through this scripting API
+until that registration discrepancy is explained or another supported control
+path is established.

@@ -11,9 +11,9 @@ from pathlib import Path
 from PIL import Image
 
 try:
-    from tools.scattermap_reference_oracle import gradient, render_case
+    from tools.scattermap_reference_oracle import generated_luma_map, gradient, render_case
 except ModuleNotFoundError:  # Direct execution places tools/ on sys.path.
-    from scattermap_reference_oracle import gradient, render_case
+    from scattermap_reference_oracle import generated_luma_map, gradient, render_case
 
 
 CASES = {
@@ -24,6 +24,8 @@ CASES = {
     "amount_max": {"amount": 500},
     "seed_max": {"seed": 10000},
     "mix_zero": {"mix": 0.0},
+    "connected_map": {"width": 11, "height": 7, "luma_map": generated_luma_map(11, 7, 5, 3)},
+    "inverted_map": {"width": 11, "height": 7, "luma_map": generated_luma_map(11, 7, 11, 7, True)},
 }
 
 
@@ -48,10 +50,13 @@ def verify(path: Path, case_id: str = "default") -> dict[str, object]:
     with Image.open(path) as image:
         size = image.size
         actual = rgba_to_argb(image.convert("RGBA").tobytes())
-    expected = render_case(**CASES[case_id])
-    source = gradient(16, 12)
-    if size != (16, 12):
-        raise ValueError(f"expected 16x12 PNG, got {size[0]}x{size[1]}")
+    parameters = CASES[case_id]
+    width = int(parameters.get("width", 16))
+    height = int(parameters.get("height", 12))
+    expected = render_case(**parameters)
+    source = gradient(width, height)
+    if size != (width, height):
+        raise ValueError(f"expected {width}x{height} PNG, got {size[0]}x{size[1]}")
     differences = [
         (index, actual_byte, expected_byte)
         for index, (actual_byte, expected_byte) in enumerate(zip(actual, expected))
@@ -59,10 +64,10 @@ def verify(path: Path, case_id: str = "default") -> dict[str, object]:
     ]
     return {
         "schema_version": 1,
-        "case_id": f"scattermap_{case_id}_argb8_16x12",
+        "case_id": f"scattermap_{case_id}_argb8_{width}x{height}",
         "channel_normalization": "PNG RGBA to PF_Pixel8 ARGB",
-        "width": 16,
-        "height": 12,
+        "width": width,
+        "height": height,
         "actual_argb_sha256": sha256(actual),
         "expected_argb_sha256": sha256(expected),
         "source_argb_sha256": sha256(source),

@@ -5,7 +5,7 @@ authorization. Each stage still requires fixed-fixture controls and re-audit.
 
 ## Current Result
 
-`gate_state: target_ae_reference_scalar_argb8_matrix_verified`
+`gate_state: target_ae_reference_argb8_matrix_verified_repeat_edge_gap`
 
 | Gate | Status | Evidence and remaining work |
 | --- | --- | --- |
@@ -43,8 +43,9 @@ rendered from a fixed 16x12 input. PNG RGBA was normalized to PF ARGB8 and
 matched the independent oracle exactly with zero byte or pixel differences.
 See `AE_REFERENCE_TRACE_2026-07-13.md`.
 The production-host matrix additionally matches for amount 0 and 500,
-horizontal and vertical directions, seed 10000, and mix 0. Connected map,
-Invert Map, and Repeat Edge production-host evidence remain open.
+horizontal and vertical directions, seed 10000, mix 0, a connected 5x3 map
+resampled to 11x7, and an inverted 11x7 map. Repeat Edge remains the only
+production-host parameter gap because AE does not enumerate that property.
 SmartFX PreRender checkout also receives a valid time basis; a nonzero
 `42/2/24` context was observed exactly while preserving deterministic output.
 The ARGB8 matrix also covers valid parameter boundaries amount 500, seed 10000,
