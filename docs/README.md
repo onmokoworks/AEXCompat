@@ -15,6 +15,10 @@ repository has a short entry point and a durable place for longer plans.
   - Phases: A (no-load Python), B (native build without execution),
     H (human-only blockers), D (gate-locked native execution), plus the
     machine-checkable safety-gate checklist (G-1 to G-8).
+- `SAFETY_GATE_STATUS_2026-07-13.md`
+  - Current evidence audit. Records that Phase D remains closed and identifies
+    the required H-1/H-2/H-3 human decisions without treating test artifacts as
+    approval evidence.
 
 ## Related Sources
 
