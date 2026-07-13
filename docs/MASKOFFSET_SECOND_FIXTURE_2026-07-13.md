@@ -93,9 +93,25 @@ broker survived both runs. The fault is compiled into the isolated test worker
 and cannot be selected through a normal render request. Worker startup disables
 Windows GP-fault UI so unattended conformance cannot stall in an error modal.
 
+## Host-Owned Mask Scenes
+
+The mask ABI no longer stores one hard-coded mask, stream, outline, or vertex
+array. Each host-owned mask record now has distinct opaque handles, open state,
+and vertices. The fixed `smart-mask-scene` gate exercises empty, translated
+rectangle, and two-mask scenes; the two-mask case independently selects both
+indices and proves distinct pixel results across deterministic double runs.
+
+Scene ids are broker-enumerated and unknown ids fail before output creation or
+native lookup. The worker only echoes host scene identity and count. MaskOffset
+pixel expectations remain in its fixture adapter rather than `host_core`, while
+the AEGP callbacks dispatch solely by opaque host handles. This is the staged
+foundation for a bounded request-v4 host-context scene transport, not a claim
+that the fixed scene catalog is the final public interface.
+
 ## Remaining Work
 
 This evidence does not claim complete MaskOffset render compatibility. Completion
-still requires configurable/multiple/open/Bezier mask scenes and
-expansion/rounding/feather/invert oracle coverage. Those additions must not
+still requires bounded configurable open/Bezier mask scenes and
+expansion/rounding/feather/invert oracle coverage. Multiple fixed masks are now
+covered, but arbitrary bounded scene input is not. Those additions must not
 introduce MaskOffset identity or algorithms into `host_core`.

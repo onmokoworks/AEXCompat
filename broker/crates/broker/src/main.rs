@@ -71,6 +71,21 @@ fn main() {
         };
         std::process::exit(if passed { 0 } else { 3 });
     }
+    if args.len() == 5 && args[1] == "smart-mask-scene" {
+        let passed = match aexcompat_broker::render_request::execute_smart_mask_scene(
+            repository,
+            &args[2],
+            &args[3],
+            &PathBuf::from(&args[4]),
+        ) {
+            Ok(passed) => passed,
+            Err(_) => {
+                eprintln!("SmartFX mask scene conformance failed");
+                std::process::exit(2);
+            }
+        };
+        std::process::exit(if passed { 0 } else { 3 });
+    }
     if args.len() == 4 && (args[1] == "l1" || args[1] == "l2") {
         let output = PathBuf::from(&args[3]);
         if !args[3].ends_with(".json") {

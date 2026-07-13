@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://aexcompat.local/contracts/aex/smartfx_mask_scene_report.schema.json",
+  "schema_name": "AEXCompat SmartFX mask scene report schema",
+  "schema_version": 1,
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "stage", "plugin_id", "receipt_id", "fixture_sha256", "scene_case_id", "host_scene_id", "mask_index", "expected_mask_count", "expected_oracle_sha256", "run_1", "run_2", "deterministic", "broker_survived", "passed"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "stage": {"const": "smartfx_mask_scene"},
+    "plugin_id": {"type": "string", "pattern": "^[a-z][a-z0-9_-]{0,63}$"},
+    "receipt_id": {"type": "string", "minLength": 1, "maxLength": 128},
+    "fixture_sha256": {"type": "string", "pattern": "^[A-F0-9]{64}$"},
+    "scene_case_id": {"enum": ["empty", "translated_rectangle", "two_rectangles_first", "two_rectangles_second"]},
+    "host_scene_id": {"enum": ["empty", "translated_rectangle", "two_rectangles"]},
+    "mask_index": {"type": "number", "enum": [1, 2]},
+    "expected_mask_count": {"type": "integer", "minimum": 0, "maximum": 2},
+    "expected_oracle_sha256": {"type": "string", "pattern": "^[A-F0-9]{64}$"},
+    "run_1": {"$ref": "#/$defs/run"},
+    "run_2": {"$ref": "#/$defs/run"},
+    "deterministic": {"const": true},
+    "broker_survived": {"const": true},
+    "passed": {"const": true}
+  },
+  "$defs": {
+    "run": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["classification", "pre_render_error", "smart_render_error", "output_sha256", "guard_bytes_intact", "mask_scene_id", "mask_count"],
+      "properties": {
+        "classification": {"const": "ok"},
+        "pre_render_error": {"const": 0},
+        "smart_render_error": {"const": 0},
+        "output_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+        "guard_bytes_intact": {"const": true},
+        "mask_scene_id": {"enum": ["empty", "translated_rectangle", "two_rectangles"]},
+        "mask_count": {"type": "integer", "minimum": 0, "maximum": 2}
+      }
+    }
+  }
+}

@@ -1,4 +1,6 @@
-use crate::fixture_profiles::maskoffset::{rectangle_mask_argb8_hash, source_argb8_hash};
+use crate::fixture_profiles::maskoffset::{
+    mask_scene_argb8_hash, rectangle_mask_argb8_hash, source_argb8_hash,
+};
 use crate::fixture_profiles::scattermap::expected_argb8_hash;
 use crate::fixture_profiles::{ParameterizedRenderAdapter, RegisteredProfile};
 use crate::host_core::descriptor_manifest::{load as load_manifest, LoadedManifest};
@@ -525,6 +527,105 @@ pub fn execute_smart_suite_fault(
     Ok(passed)
 }
 
+pub fn execute_smart_mask_scene(
+    repository: &Path,
+    plugin_id: &str,
+    scene_case_id: &str,
+    output_path: &Path,
+) -> io::Result<bool> {
+    let (scene_id, mask_index, expected_count) = match scene_case_id {
+        "empty" => ("empty", 1.0, 0),
+        "translated_rectangle" => ("translated_rectangle", 1.0, 1),
+        "two_rectangles_first" => ("two_rectangles", 1.0, 2),
+        "two_rectangles_second" => ("two_rectangles", 2.0, 2),
+        _ => return Err(invalid("unknown fixed mask scene")),
+    };
+    let output_path = resolve_inside(
+        repository,
+        output_path,
+        "target/smart-mask-scene-results",
+        true,
+    )?;
+    let profile = crate::fixture_profiles::find(plugin_id)
+        .ok_or_else(|| invalid("unknown plugin profile"))?;
+    let worker_spec = profile
+        .smart_worker
+        .filter(|spec| spec.request_mode == "--smart-mask-request")
+        .ok_or_else(|| invalid("profile has no approved mask-scene capability"))?;
+    let manifest = descriptors(repository, plugin_id, profile)?;
+    let mut effective = apply_defaults(&manifest.profile, &ValidatedAssignments::new());
+    effective.insert("mask_index".into(), ParameterValue::Numeric(mask_index));
+    let expected = mask_scene_argb8_hash(&effective, scene_id)
+        .ok_or_else(|| invalid("mask scene has no independent oracle"))?;
+    let approved = crate::smart::approved_entry(repository, plugin_id)?;
+    if !manifest
+        .plugin_sha256
+        .eq_ignore_ascii_case(&approved.sha256)
+    {
+        return Err(invalid("descriptor manifest plugin digest mismatch"));
+    }
+    let worker = repository.join(worker_spec.executable);
+    let args = [
+        "--smart-mask-scene-request".to_string(),
+        approved.plugin_path.to_string_lossy().into_owned(),
+        approved.sha256.to_ascii_lowercase(),
+        encode_worker_payload(&manifest.profile, &effective).map_err(invalid)?,
+        scene_id.to_string(),
+    ];
+    let mut runs = Vec::new();
+    for _ in 0..2 {
+        let isolated = run_isolated(&worker, &args, Duration::from_millis(approved.timeout_ms))?;
+        let report: Value = serde_json::from_str(isolated.stdout.trim())
+            .unwrap_or_else(|_| json!({"status":"worker_report_unavailable"}));
+        runs.push((isolated.classification, report));
+    }
+    let valid_run = |classification: crate::ExitClassification, report: &Value| {
+        classification.as_str() == "ok"
+            && report.get("pre_render_error") == Some(&json!(0))
+            && report.get("smart_render_error") == Some(&json!(0))
+            && report.get("guard_bytes_intact") == Some(&Value::Bool(true))
+            && report.get("mask_scene_id").and_then(Value::as_str) == Some(scene_id)
+            && report.get("mask_count").and_then(Value::as_u64) == Some(expected_count)
+            && worker_echo_matches(report, &manifest.profile, &effective)
+            && report
+                .get("output_sha256")
+                .and_then(Value::as_str)
+                .is_some_and(|hash| hash.eq_ignore_ascii_case(&expected))
+    };
+    let deterministic = runs[0].1.get("output_sha256") == runs[1].1.get("output_sha256");
+    let passed = deterministic
+        && runs
+            .iter()
+            .all(|(classification, report)| valid_run(*classification, report));
+    let summarize = |item: &(crate::ExitClassification, Value)| {
+        json!({
+            "classification":item.0.as_str(),
+            "pre_render_error":item.1.get("pre_render_error"),
+            "smart_render_error":item.1.get("smart_render_error"),
+            "output_sha256":item.1.get("output_sha256"),
+            "guard_bytes_intact":item.1.get("guard_bytes_intact"),
+            "mask_scene_id":item.1.get("mask_scene_id"),
+            "mask_count":item.1.get("mask_count")
+        })
+    };
+    let report = json!({
+        "schema_version":1,"stage":"smartfx_mask_scene","plugin_id":plugin_id,
+        "receipt_id":approved.receipt_id,"fixture_sha256":approved.sha256.to_ascii_uppercase(),
+        "scene_case_id":scene_case_id,"host_scene_id":scene_id,"mask_index":mask_index,
+        "expected_mask_count":expected_count,"expected_oracle_sha256":expected,
+        "run_1":summarize(&runs[0]),"run_2":summarize(&runs[1]),
+        "deterministic":deterministic,"broker_survived":true,"passed":passed
+    });
+    let mut output = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(output_path)?;
+    serde_json::to_writer_pretty(&mut output, &report)
+        .map_err(|error| invalid(error.to_string()))?;
+    output.write_all(b"\n")?;
+    Ok(passed)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -630,6 +731,15 @@ mod tests {
         let root = repository();
         let output = root.join("target/smart-suite-fault-results/unknown.json");
         assert!(execute_smart_suite_fault(&root, "maskoffset", "arbitrary", &output).is_err());
+        assert!(!output.exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn unknown_mask_scene_fails_before_output_or_native_lookup() {
+        let root = repository();
+        let output = root.join("target/smart-mask-scene-results/unknown.json");
+        assert!(execute_smart_mask_scene(&root, "maskoffset", "arbitrary", &output).is_err());
         assert!(!output.exists());
         fs::remove_dir_all(root).unwrap();
     }

@@ -112,13 +112,60 @@ int32_t g_smart_rowbytes = 64;
 bool g_mask_model_enabled = false;
 enum class MaskFault { None, CountError, CountCrash };
 MaskFault g_mask_fault = MaskFault::None;
+std::string g_mask_scene_id = "none";
 
 struct OpaqueHostObject { uint32_t tag; };
+struct MaskVertex {
+  double x, y;
+  double tangent_in_x, tangent_in_y;
+  double tangent_out_x, tangent_out_y;
+};
+struct HostMask {
+  OpaqueHostObject mask{0x4d41534b};
+  OpaqueHostObject stream{0x5354524d};
+  OpaqueHostObject outline{0x4f55544c};
+  bool open{};
+  std::vector<MaskVertex> vertices;
+};
 OpaqueHostObject g_effect{0x45464658};
 OpaqueHostObject g_layer{0x4c415952};
-OpaqueHostObject g_mask{0x4d41534b};
-OpaqueHostObject g_stream{0x5354524d};
-OpaqueHostObject g_outline{0x4f55544c};
+std::vector<HostMask> g_mask_scene;
+
+bool configure_mask_scene(const std::string& scene_id) {
+  g_mask_scene.clear();
+  g_mask_scene_id = scene_id;
+  const auto rectangle = [](double left, double top, double right, double bottom) {
+    HostMask mask;
+    mask.vertices = {{left, top, 0, 0, 0, 0}, {right, top, 0, 0, 0, 0},
+                     {right, bottom, 0, 0, 0, 0}, {left, bottom, 0, 0, 0, 0},
+                     {left, top, 0, 0, 0, 0}};
+    return mask;
+  };
+  if (scene_id == "rectangle") g_mask_scene.push_back(rectangle(4, 3, 12, 9));
+  else if (scene_id == "translated_rectangle") g_mask_scene.push_back(rectangle(2, 2, 10, 8));
+  else if (scene_id == "two_rectangles") {
+    g_mask_scene.reserve(2);
+    g_mask_scene.push_back(rectangle(1, 1, 7, 6));
+    g_mask_scene.push_back(rectangle(9, 5, 15, 11));
+  } else if (scene_id != "empty") return false;
+  return true;
+}
+
+HostMask* find_mask(void* handle) {
+  const auto found = std::find_if(g_mask_scene.begin(), g_mask_scene.end(),
+      [handle](auto& mask) { return handle == &mask.mask; });
+  return found == g_mask_scene.end() ? nullptr : &*found;
+}
+HostMask* find_stream(void* handle) {
+  const auto found = std::find_if(g_mask_scene.begin(), g_mask_scene.end(),
+      [handle](auto& mask) { return handle == &mask.stream; });
+  return found == g_mask_scene.end() ? nullptr : &*found;
+}
+HostMask* find_outline(void* handle) {
+  const auto found = std::find_if(g_mask_scene.begin(), g_mask_scene.end(),
+      [handle](auto& mask) { return handle == &mask.outline; });
+  return found == g_mask_scene.end() ? nullptr : &*found;
+}
 
 void write_rect(void* destination, int32_t width, int32_t height) {
   auto* bytes = static_cast<std::byte*>(destination);
@@ -243,25 +290,27 @@ int32_t __cdecl get_layer_num_masks(void* layer, int32_t* count) {
     RaiseException(EXCEPTION_ACCESS_VIOLATION, 0, 0, nullptr);
   }
   if (g_mask_fault == MaskFault::CountError) return 4;
-  *count = 1;
+  *count = static_cast<int32_t>(g_mask_scene.size());
   return 0;
 }
 
 int32_t __cdecl get_layer_mask_by_index(void* layer, int32_t index, void** mask) {
-  if (layer != &g_layer || index != 0 || !mask) return 4;
-  *mask = &g_mask;
+  if (layer != &g_layer || index < 0 ||
+      static_cast<std::size_t>(index) >= g_mask_scene.size() || !mask) return 4;
+  *mask = &g_mask_scene[static_cast<std::size_t>(index)].mask;
   return 0;
 }
 
-int32_t __cdecl dispose_mask(void* mask) { return mask == &g_mask ? 0 : 4; }
+int32_t __cdecl dispose_mask(void* mask) { return find_mask(mask) ? 0 : 4; }
 
 int32_t __cdecl get_new_mask_stream(int32_t plugin_id, void* mask, int32_t, void** stream) {
-  if (plugin_id != 1 || mask != &g_mask || !stream) return 4;
-  *stream = &g_stream;
+  HostMask* record = find_mask(mask);
+  if (plugin_id != 1 || !record || !stream) return 4;
+  *stream = &record->stream;
   return 0;
 }
 
-int32_t __cdecl dispose_stream(void* stream) { return stream == &g_stream ? 0 : 4; }
+int32_t __cdecl dispose_stream(void* stream) { return find_stream(stream) ? 0 : 4; }
 
 struct StreamValue {
   void* stream;
@@ -270,43 +319,43 @@ struct StreamValue {
 
 int32_t __cdecl get_new_stream_value(int32_t plugin_id, void* stream, int32_t,
                                      const void*, int32_t, StreamValue* value) {
-  if (plugin_id != 1 || stream != &g_stream || !value) return 4;
-  value->stream = &g_stream;
-  value->value = &g_outline;
+  HostMask* record = find_stream(stream);
+  if (plugin_id != 1 || !record || !value) return 4;
+  value->stream = &record->stream;
+  value->value = &record->outline;
   return 0;
 }
 
 int32_t __cdecl dispose_stream_value(StreamValue* value) {
-  if (!value || value->stream != &g_stream || value->value != &g_outline) return 4;
+  if (!value) return 4;
+  HostMask* stream_record = find_stream(value->stream);
+  HostMask* outline_record = find_outline(value->value);
+  if (!stream_record || stream_record != outline_record) return 4;
   value->stream = nullptr;
   value->value = nullptr;
   return 0;
 }
 
-struct MaskVertex {
-  double x, y;
-  double tangent_in_x, tangent_in_y;
-  double tangent_out_x, tangent_out_y;
-};
-
 int32_t __cdecl is_mask_outline_open(void* outline, int32_t* open) {
-  if (outline != &g_outline || !open) return 4;
-  *open = 0;
+  HostMask* record = find_outline(outline);
+  if (!record || !open) return 4;
+  *open = record->open ? 1 : 0;
   return 0;
 }
 
 int32_t __cdecl get_mask_outline_num_segments(void* outline, int32_t* count) {
-  if (outline != &g_outline || !count) return 4;
-  *count = 4;
+  HostMask* record = find_outline(outline);
+  if (!record || !count || record->vertices.empty()) return 4;
+  *count = static_cast<int32_t>(record->vertices.size() - 1);
   return 0;
 }
 
 int32_t __cdecl get_mask_outline_vertex_info(void* outline, int32_t index,
                                              MaskVertex* vertex) {
-  static constexpr std::array<std::array<double, 2>, 5> points{{
-      {4.0, 3.0}, {12.0, 3.0}, {12.0, 9.0}, {4.0, 9.0}, {4.0, 3.0}}};
-  if (outline != &g_outline || !vertex || index < 0 || index >= points.size()) return 4;
-  *vertex = {points[index][0], points[index][1], 0.0, 0.0, 0.0, 0.0};
+  HostMask* record = find_outline(outline);
+  if (!record || !vertex || index < 0 ||
+      static_cast<std::size_t>(index) >= record->vertices.size()) return 4;
+  *vertex = record->vertices[static_cast<std::size_t>(index)];
   return 0;
 }
 
@@ -1125,18 +1174,33 @@ int wmain(int argc, wchar_t** argv) {
   if (request_mode && !parse_parameter_payload(argv[4], requested_parameters)) return 3;
 #elif defined(AEXCOMPAT_SMART_WORKER)
   const bool mask_request_mode = argc == 5 && std::wstring(argv[1]) == L"--smart-mask-request";
+  const bool mask_scene_request_mode = argc == 6 &&
+      std::wstring(argv[1]) == L"--smart-mask-scene-request";
   const bool mask_count_error_mode = argc == 5 &&
       std::wstring(argv[1]) == L"--smart-mask-count-error-request";
   const bool mask_count_crash_mode = argc == 5 &&
       std::wstring(argv[1]) == L"--smart-mask-count-crash-request";
-  const bool request_mode = mask_request_mode || mask_count_error_mode || mask_count_crash_mode ||
+  const bool request_mode = mask_request_mode || mask_scene_request_mode ||
+      mask_count_error_mode || mask_count_crash_mode ||
       (argc == 5 && std::wstring(argv[1]) == L"--smart-request");
   if (!request_mode && (argc != 5 || std::wstring(argv[1]) != L"--smart")) return 2;
-  g_mask_model_enabled = mask_request_mode || mask_count_error_mode || mask_count_crash_mode;
+  g_mask_model_enabled = mask_request_mode || mask_scene_request_mode ||
+      mask_count_error_mode || mask_count_crash_mode;
   g_mask_fault = mask_count_error_mode ? MaskFault::CountError :
       mask_count_crash_mode ? MaskFault::CountCrash : MaskFault::None;
   RequestedAssignments requested_parameters;
   if (request_mode && !parse_parameter_payload(argv[4], requested_parameters)) return 3;
+  if (g_mask_model_enabled) {
+    std::string scene_id = "rectangle";
+    if (mask_scene_request_mode) {
+      scene_id.clear();
+      for (const wchar_t* p = argv[5]; *p; ++p) {
+        if (*p > 0x7f) return 3;
+        scene_id.push_back(static_cast<char>(*p));
+      }
+    }
+    if (!configure_mask_scene(scene_id)) return 3;
+  }
 #else
   if (argc != 4) return 2;
   if (std::wstring(argv[1]) != L"--l2") return 2;
@@ -1354,6 +1418,8 @@ int wmain(int argc, wchar_t** argv) {
             << smart.output_hash << "\",\"result_rects_valid\":" << (smart.rects_valid ? "true" : "false")
             << ",\"guard_bytes_intact\":" << (smart.guards_intact ? "true" : "false")
             << ",\"request_mode\":" << (request_mode ? "true" : "false")
+            << ",\"mask_scene_id\":\"" << g_mask_scene_id << "\""
+            << ",\"mask_count\":" << g_mask_scene.size()
             << ",\"requested_parameters\":" << requested_parameters_json(requested_parameters)
             << ",\"requested_amount\":" << static_cast<int32_t>(requested_value(requested_parameters, L"amount"))
             << ",\"requested_direction\":" << static_cast<int32_t>(requested_value(requested_parameters, L"direction"))

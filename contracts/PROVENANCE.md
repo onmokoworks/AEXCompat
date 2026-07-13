@@ -66,3 +66,8 @@ buffer guards, and broker survival. It contains no Adobe SDK declarations.
 conformance contract. It records only fixed fault ids, process classifications,
 pixel hashes, guard status, and broker survival; it contains no Adobe SDK
 declarations or native payloads.
+
+`aex/smartfx_mask_scene_report.schema.json` is an AEXCompat-authored host-context
+conformance contract. It records fixed scene identities, mask counts, independent
+pixel hashes, guard status, and broker survival; it contains no Adobe SDK
+declarations or native payloads.

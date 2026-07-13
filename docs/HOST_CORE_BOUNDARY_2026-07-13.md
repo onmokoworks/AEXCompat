@@ -72,4 +72,6 @@ MaskOffset's custom Fill Inside output passes an independent pixel oracle.
 The fixed suite-fault route additionally proves mask callback error fallback and
 Access Violation isolation without accepting arbitrary fault modes or native
 paths. This is evidence toward item 5, not completion of it: configurable mask
-scenes and wider selector/suite coverage remain pending.
+scenes and wider selector/suite coverage remain pending. Host-owned mask records
+now support zero, one, or multiple distinct mask/stream/outline handles, with
+fixed scene selection gated outside the ABI callback layer.

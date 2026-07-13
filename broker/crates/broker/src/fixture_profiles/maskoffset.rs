@@ -24,9 +24,29 @@ pub fn source_argb8_hash() -> String {
 }
 
 pub fn rectangle_mask_argb8_hash(assignments: &ValidatedAssignments) -> String {
+    mask_scene_argb8_hash(assignments, "rectangle").expect("registered rectangle scene")
+}
+
+pub fn mask_scene_argb8_hash(assignments: &ValidatedAssignments, scene_id: &str) -> Option<String> {
     const WIDTH: i32 = 16;
     const HEIGHT: i32 = 12;
     let mut source = source_argb8();
+    let mask_index = assignments
+        .get("mask_index")
+        .and_then(|value| value.numeric())
+        .unwrap_or(1.0) as usize;
+    let bounds = match (scene_id, mask_index) {
+        ("empty", _) => None,
+        ("rectangle", 1) => Some((4, 3, 12, 9)),
+        ("translated_rectangle", 1) => Some((2, 2, 10, 8)),
+        ("two_rectangles", 1) => Some((1, 1, 7, 6)),
+        ("two_rectangles", 2) => Some((9, 5, 15, 11)),
+        ("rectangle" | "translated_rectangle", _) => None,
+        _ => return None,
+    };
+    if bounds.is_none() {
+        return Some(format!("{:X}", Sha256::digest(source)));
+    }
     let mode = assignments
         .get("mode")
         .and_then(|value| value.numeric())
@@ -48,7 +68,9 @@ pub fn rectangle_mask_argb8_hash(assignments: &ValidatedAssignments) -> String {
     for y in 0..HEIGHT {
         for x in 0..WIDTH {
             let offset = ((y * WIDTH + x) * 4) as usize;
-            let mut inside = (4..12).contains(&x) && (3..9).contains(&y);
+            let mut inside = bounds.is_some_and(|(left, top, right, bottom)| {
+                (left..right).contains(&x) && (top..bottom).contains(&y)
+            });
             if invert {
                 inside = !inside;
             }
@@ -71,7 +93,7 @@ pub fn rectangle_mask_argb8_hash(assignments: &ValidatedAssignments) -> String {
             }
         }
     }
-    format!("{:X}", Sha256::digest(source))
+    Some(format!("{:X}", Sha256::digest(source)))
 }
 
 #[cfg(test)]
@@ -117,5 +139,26 @@ mod tests {
             rectangle_mask_argb8_hash(&values),
             "BF419F44E915901BAC882E9B9E3411B8407DF7F4E3A4A1C2719314BDFBB74B5F"
         );
+    }
+
+    #[test]
+    fn host_scene_oracles_are_distinct_and_mask_index_bound() {
+        let first = ValidatedAssignments::from([
+            ("mode".into(), ParameterValue::Numeric(2.0)),
+            ("mask_index".into(), ParameterValue::Numeric(1.0)),
+        ]);
+        let second = ValidatedAssignments::from([
+            ("mode".into(), ParameterValue::Numeric(2.0)),
+            ("mask_index".into(), ParameterValue::Numeric(2.0)),
+        ]);
+        assert_ne!(
+            mask_scene_argb8_hash(&first, "translated_rectangle"),
+            mask_scene_argb8_hash(&first, "rectangle")
+        );
+        assert_ne!(
+            mask_scene_argb8_hash(&first, "two_rectangles"),
+            mask_scene_argb8_hash(&second, "two_rectangles")
+        );
+        assert!(mask_scene_argb8_hash(&first, "arbitrary").is_none());
     }
 }
