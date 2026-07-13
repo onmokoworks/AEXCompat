@@ -41,15 +41,16 @@ def gradient(width: int, height: int) -> bytes:
 
 def render_case(width: int = 16, height: int = 12, *, amount: int = 5,
                 direction: int = 3, seed: int = 0, repeat_edge: bool = True,
-                mix: float = 100.0) -> bytes:
+                mix: float = 100.0, luma_map: list[float] | None = None) -> bytes:
     source = gradient(width, height)
     output = bytearray(width * height * 4)
     amount_f = f32(float(amount))
     for y in range(height):
         for x in range(width):
             output_offset = (y * width + x) * 4
-            dx = rust_round(f32(hash_pixel(x, y, seed, 0) * amount_f)) if direction in (1, 3) else 0
-            dy = rust_round(f32(hash_pixel(x, y, seed, 1) * amount_f)) if direction in (2, 3) else 0
+            pixel_amount = amount_f if luma_map is None else f32(amount_f * f32(luma_map[y * width + x]))
+            dx = rust_round(f32(hash_pixel(x, y, seed, 0) * pixel_amount)) if direction in (1, 3) else 0
+            dy = rust_round(f32(hash_pixel(x, y, seed, 1) * pixel_amount)) if direction in (2, 3) else 0
             raw_x, raw_y = x + dx, y + dy
             if not repeat_edge and not (0 <= raw_x < width and 0 <= raw_y < height):
                 output[output_offset:output_offset + 4] = b"\0\0\0\0"
@@ -69,6 +70,23 @@ def render_case(width: int = 16, height: int = 12, *, amount: int = 5,
 
 def render_default(width: int = 16, height: int = 12) -> bytes:
     return render_case(width, height)
+
+
+def generated_luma_map(width: int, height: int, map_width: int, map_height: int,
+                       invert: bool = False) -> list[float]:
+    source = []
+    for y in range(map_height):
+        for x in range(map_width):
+            value = (x + y) * 255 // (map_width + map_height - 2)
+            luma = (0.2126 * value + 0.7152 * value + 0.0722 * value) / 255.0
+            source.append(1.0 - luma if invert else luma)
+    result = []
+    for y in range(height):
+        sy = min(map_height - 1, y * map_height // height)
+        for x in range(width):
+            sx = min(map_width - 1, x * map_width // width)
+            result.append(source[sy * map_width + sx])
+    return result
 
 
 def hashes() -> tuple[str, str]:

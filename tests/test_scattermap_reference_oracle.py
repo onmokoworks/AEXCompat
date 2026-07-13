@@ -3,7 +3,7 @@ import hashlib
 import json
 from pathlib import Path
 
-from tools.scattermap_reference_oracle import gradient, hashes, render_case, render_default
+from tools.scattermap_reference_oracle import generated_luma_map, gradient, hashes, render_case, render_default
 
 
 class ScatterMapReferenceOracleTests(unittest.TestCase):
@@ -29,12 +29,21 @@ class ScatterMapReferenceOracleTests(unittest.TestCase):
     def test_recorded_extended_hashes_are_reproducible(self):
         root = Path(__file__).resolve().parents[1]
         record = json.loads((root / "analysis" / "SCATTERMAP_EXTENDED_ORACLE_HASHES_2026-07-13.json").read_text(encoding="utf-8"))
-        self.assertFalse(record["native_aex_loaded"])
+        self.assertTrue(record["native_aex_loaded"])
         for case in record["cases"]:
             params = dict(case["parameters"])
             params["repeat_edge"] = params.pop("repeat_edge")
+            if "map" in case:
+                map_spec = case["map"]
+                params["luma_map"] = generated_luma_map(
+                    case["width"], case["height"], map_spec["width"], map_spec["height"], map_spec["invert"])
             output = render_case(case["width"], case["height"], **params)
             self.assertEqual(hashlib.sha256(output).hexdigest().upper(), case["expected_output_sha256"])
+
+    def test_connected_map_oracles_are_distinct(self):
+        connected = render_case(11, 7, luma_map=generated_luma_map(11, 7, 5, 3))
+        inverted = render_case(11, 7, luma_map=generated_luma_map(11, 7, 11, 7, True))
+        self.assertNotEqual(connected, inverted)
 
 
 if __name__ == "__main__":

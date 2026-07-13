@@ -6,7 +6,7 @@ later stage remain forbidden until separately approved and re-audited.
 
 ## Current Result
 
-`gate_state: classic_default_render_executed_extended_render_closed`
+`gate_state: extended_classic_render_executed_smartfx_pending`
 
 | Gate | Status | Evidence and remaining work |
 | --- | --- | --- |
@@ -30,5 +30,6 @@ later stage remain forbidden until separately approved and re-audited.
 L1, L2, and one explicitly approved classic default render case were executed
 successfully through the isolated broker. Initialization, descriptor values,
 deterministic output, buffer guards, and independent pixel hash parity are
-observed. Extended render cases, connected map layers, SmartFX/GPU, and H-4 AE
-reference trace capture remain closed pending separate staged review.
+observed. Extended classic render and connected map cases now have oracle
+parity. SmartFX/GPU and H-4 AE reference trace capture remain pending under the
+continuous authorization and existing isolation controls.

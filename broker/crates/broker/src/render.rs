@@ -24,7 +24,7 @@ fn entry(repository: &Path, id: &str) -> io::Result<Entry> {
     if list.schema_version != 1 || list.entries.len() != 1 { return Err(invalid("one render entry required")); }
     let entry = list.entries.into_iter().next().unwrap();
     if entry.id != id || entry.approved_stage != "classic_render"
-        || entry.receipt_id != "scattermap-render-20260713-001"
+        || entry.receipt_id != "scattermap-extended-render-20260713-001"
         || entry.expires != "2026-08-12T23:59:59+09:00" {
         return Err(invalid("render stage, receipt, or expiry mismatch"));
     }
@@ -37,7 +37,7 @@ fn entry(repository: &Path, id: &str) -> io::Result<Entry> {
 fn classification(value: &str) -> &str {
     match value { "ok" => "ok", "crashed" => "crashed", "timeout_killed" => "timeout_killed", _ => "internal_error" }
 }
-pub fn run(repository: &Path, worker: &Path, id: &str, output: &Path) -> io::Result<bool> {
+pub fn run(repository: &Path, worker: &Path, id: &str, case_id: &str, output: &Path) -> io::Result<bool> {
     if output.components().any(|p| matches!(p, Component::ParentDir | Component::CurDir)) {
         return Err(invalid("output traversal forbidden"));
     }
@@ -48,7 +48,10 @@ pub fn run(repository: &Path, worker: &Path, id: &str, output: &Path) -> io::Res
     fs::create_dir_all(parent)?;
     if !parent.canonicalize()?.starts_with(root.canonicalize()?) { return Err(invalid("output outside render root")); }
     let entry = entry(repository, id)?;
-    let args = ["--render".into(), entry.plugin_path.to_string_lossy().into_owned(), entry.sha256.to_ascii_lowercase()];
+    let allowed = ["default", "identity", "horizontal", "vertical_no_repeat", "mixed", "odd_dimensions", "padded_stride", "connected_map", "inverted_map"];
+    if !allowed.contains(&case_id) { return Err(invalid("unknown fixed render case")); }
+    let args = ["--render".into(), entry.plugin_path.to_string_lossy().into_owned(),
+        entry.sha256.to_ascii_lowercase(), case_id.to_string()];
     let mut reports = Vec::new();
     let mut runs = Vec::new();
     for _ in 0..2 {
@@ -67,9 +70,12 @@ pub fn run(repository: &Path, worker: &Path, id: &str, output: &Path) -> io::Res
     let deterministic = runs[0]["output_sha256"] == runs[1]["output_sha256"];
     let guards = reports.iter().all(|r| r.get("guard_bytes_intact") == Some(&Value::Bool(true)));
     let passed = deterministic && guards && runs.iter().all(|r| r["classification"] == "ok" && r["render_error"] == 0);
+    let width = reports[0].get("width").and_then(Value::as_i64).unwrap_or(0);
+    let height = reports[0].get("height").and_then(Value::as_i64).unwrap_or(0);
+    let rowbytes = reports[0].get("rowbytes").and_then(Value::as_i64).unwrap_or(0);
     let report = json!({"schema_version":1,"stage":"classic_render","plugin_id":id,
         "receipt_id":entry.receipt_id,"fixture_sha256":entry.sha256.to_ascii_uppercase(),
-        "pixel_format":"argb8","width":16,"height":12,"rowbytes":64,
+        "case_id":case_id,"pixel_format":"argb8","width":width,"height":height,"rowbytes":rowbytes,
         "input_sha256":input_hash,"run_1":runs[0],"run_2":runs[1],
         "deterministic":deterministic,"guard_bytes_intact":guards,"broker_survived":true,"passed":passed});
     let mut file = OpenOptions::new().write(true).create_new(true).open(output)?;

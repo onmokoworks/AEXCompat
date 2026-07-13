@@ -9,9 +9,9 @@ STATUS = ROOT / "docs" / "SAFETY_GATE_STATUS_2026-07-13.md"
 class SafetyGateStatusTests(unittest.TestCase):
     def test_status_keeps_render_stage_closed(self):
         text = STATUS.read_text(encoding="utf-8")
-        self.assertIn("gate_state: classic_default_render_executed_extended_render_closed", text)
+        self.assertIn("gate_state: extended_classic_render_executed_smartfx_pending", text)
         self.assertIn("not blanket native execution approval", text)
-        self.assertIn("Extended render cases", text)
+        self.assertIn("SmartFX/GPU", text)
         self.assertIn("later stage remain forbidden", text)
 
     def test_all_gate_items_are_explicit(self):

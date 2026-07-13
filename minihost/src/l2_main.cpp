@@ -67,6 +67,8 @@ struct ParamRecord {
   std::array<std::byte, kParamSize> raw{};
 };
 std::vector<ParamRecord> g_params;
+std::array<std::byte, kParamSize> g_checkout_definition{};
+bool g_checkout_map_available = false;
 struct HandleRecord { void* data{}; std::size_t size{}; };
 std::unordered_set<HandleRecord*> g_handles;
 
@@ -209,7 +211,11 @@ int32_t __cdecl add_param(void*, int32_t index, void* definition) {
   return 0;
 }
 
-int32_t __cdecl checkout_param(void*, int32_t, int32_t, int32_t, uint32_t, void*) {
+int32_t __cdecl checkout_param(void*, int32_t index, int32_t, int32_t, uint32_t, void* definition) {
+  if (g_checkout_map_available && index == 6 && definition) {
+    std::memcpy(definition, g_checkout_definition.data(), g_checkout_definition.size());
+    return 0;
+  }
   return 4;
 }
 int32_t __cdecl checkin_param(void*, void*) { return 0; }
@@ -274,23 +280,39 @@ std::string sha256_bytes(const unsigned char* data, std::size_t size) {
 #ifdef AEXCOMPAT_RENDER_WORKER
 int32_t render_once(EffectEntry entry, std::array<std::byte, kInSize>& input,
                     std::array<std::byte, kOutSize>& command_output,
+                    const std::string& case_id, int32_t& width, int32_t& height,
+                    int32_t& rowbytes,
                     std::string& input_hash, std::string& output_hash,
                     bool& guards_intact) {
-  constexpr int32_t width = 16, height = 12, rowbytes = width * 4;
+  const bool connected_map = case_id == "connected_map" || case_id == "inverted_map";
+  width = connected_map ? 11 : ((case_id == "odd_dimensions" || case_id == "padded_stride") ? 13 : 16);
+  height = connected_map ? 7 : ((case_id == "odd_dimensions" || case_id == "padded_stride") ? 9 : 12);
+  rowbytes = case_id == "padded_stride" ? 64 : width * 4;
+  int32_t amount = 5, direction = 3, seed = 0, repeat = 1;
+  double mix = 100.0;
+  if (case_id == "identity") amount = 0;
+  else if (case_id == "horizontal") { amount = 9; direction = 1; seed = 17; }
+  else if (case_id == "vertical_no_repeat") { amount = 7; direction = 2; repeat = 0; }
+  else if (case_id == "mixed") { amount = 12; seed = 991; mix = 37.5; }
+  else if (case_id == "odd_dimensions" || case_id == "padded_stride") { amount = 4; seed = 3; }
+  else if (case_id == "inverted_map") { }
+  else if (case_id != "default" && case_id != "connected_map") return -2;
   constexpr std::size_t guard = 64;
-  std::vector<unsigned char> source(width * height * 4);
+  std::vector<unsigned char> logical_source(width * height * 4);
+  std::vector<unsigned char> source(rowbytes * height, 0x5A);
   for (int32_t y = 0; y < height; ++y) {
     for (int32_t x = 0; x < width; ++x) {
-      auto* pixel = &source[(y * width + x) * 4];
+      auto* pixel = &logical_source[(y * width + x) * 4];
       pixel[0] = 255;
       pixel[1] = static_cast<unsigned char>(x * 255 / (width - 1));
       pixel[2] = static_cast<unsigned char>(y * 255 / (height - 1));
       pixel[3] = static_cast<unsigned char>((x + y) * 255 / (width + height - 2));
+      std::memcpy(&source[y * rowbytes + x * 4], pixel, 4);
     }
   }
-  std::vector<unsigned char> guarded(width * height * 4 + guard * 2, 0xA5);
+  std::vector<unsigned char> guarded(rowbytes * height + guard * 2, 0xA5);
   unsigned char* destination = guarded.data() + guard;
-  std::memset(destination, 0xCC, width * height * 4);
+  std::memset(destination, 0xCC, rowbytes * height);
 
   std::array<std::byte, 120> input_world{}, output_world{};
   auto setup_world = [&](auto& world, void* pixels) {
@@ -306,6 +328,29 @@ int32_t render_once(EffectEntry entry, std::array<std::byte, kInSize>& input,
   setup_world(input_world, source.data());
   setup_world(output_world, destination);
 
+  std::vector<unsigned char> map_pixels;
+  std::array<std::byte, 120> map_world{};
+  if (connected_map) {
+    const int32_t map_width = case_id == "connected_map" ? 5 : width;
+    const int32_t map_height = case_id == "connected_map" ? 3 : height;
+    map_pixels.resize(map_width * map_height * 4);
+    for (int32_t y = 0; y < map_height; ++y) {
+      for (int32_t x = 0; x < map_width; ++x) {
+        const unsigned char value = static_cast<unsigned char>((x + y) * 255 / (map_width + map_height - 2));
+        auto* pixel = &map_pixels[(y * map_width + x) * 4];
+        pixel[0] = 255; pixel[1] = value; pixel[2] = value; pixel[3] = value;
+      }
+    }
+    write<void*>(map_world, 24, map_pixels.data());
+    write<int32_t>(map_world, 32, map_width * 4);
+    write<int32_t>(map_world, 36, map_width);
+    write<int32_t>(map_world, 40, map_height);
+    g_checkout_definition.fill(std::byte{});
+    write<int32_t>(g_checkout_definition, 12, 0);
+    std::memcpy(g_checkout_definition.data() + 56, map_world.data(), map_world.size());
+    g_checkout_map_available = true;
+  }
+
   std::array<std::array<std::byte, kParamSize>, 8> definitions{};
   std::memcpy(definitions[0].data() + 56, input_world.data(), input_world.size());
   for (std::size_t i = 0; i < g_params.size() && i + 1 < definitions.size(); ++i) {
@@ -318,6 +363,12 @@ int32_t render_once(EffectEntry entry, std::array<std::byte, kInSize>& input,
     else if (g_params[i].type == 10)
       write<double>(definitions[i + 1], u, g_params[i].default_value);
   }
+  write<int32_t>(definitions[1], 56, amount);
+  write<int32_t>(definitions[2], 56, direction);
+  write<int32_t>(definitions[3], 56, seed);
+  write<int32_t>(definitions[4], 56, repeat);
+  write<double>(definitions[5], 56, mix);
+  if (case_id == "inverted_map") write<int32_t>(definitions[7], 56, 1);
   std::array<void*, 9> params{};
   for (std::size_t i = 0; i < definitions.size(); ++i) params[i] = definitions[i].data();
   write<int32_t>(input, 224, 0);
@@ -326,11 +377,21 @@ int32_t render_once(EffectEntry entry, std::array<std::byte, kInSize>& input,
   write<uint32_t>(input, 240, 1);
   write<int32_t>(input, 252, width);
   write<int32_t>(input, 256, height);
-  input_hash = sha256_bytes(source.data(), source.size());
+  input_hash = sha256_bytes(logical_source.data(), logical_source.size());
   const int32_t error = entry(kRender, input.data(), command_output.data(), params.data(),
                               output_world.data(), nullptr);
-  output_hash = sha256_bytes(destination, width * height * 4);
-  guards_intact = std::all_of(guarded.begin(), guarded.begin() + guard, [](auto b) { return b == 0xA5; }) &&
+  g_checkout_map_available = false;
+  std::vector<unsigned char> logical_output(width * height * 4);
+  for (int32_t y = 0; y < height; ++y)
+    std::memcpy(logical_output.data() + y * width * 4, destination + y * rowbytes, width * 4);
+  output_hash = sha256_bytes(logical_output.data(), logical_output.size());
+  const bool padding_intact = rowbytes == width * 4 || [&] {
+    for (int32_t y = 0; y < height; ++y)
+      for (int32_t x = width * 4; x < rowbytes; ++x)
+        if (destination[y * rowbytes + x] != 0xCC) return false;
+    return true;
+  }();
+  guards_intact = padding_intact && std::all_of(guarded.begin(), guarded.begin() + guard, [](auto b) { return b == 0xA5; }) &&
       std::all_of(guarded.end() - guard, guarded.end(), [](auto b) { return b == 0xA5; });
   return error;
 }
@@ -371,10 +432,11 @@ void report(const char* status, int32_t global_error, int32_t params_error,
 }  // namespace
 
 int wmain(int argc, wchar_t** argv) {
-  if (argc != 4) return 2;
 #ifdef AEXCOMPAT_RENDER_WORKER
+  if (argc != 5) return 2;
   if (std::wstring(argv[1]) != L"--render") return 2;
 #else
+  if (argc != 4) return 2;
   if (std::wstring(argv[1]) != L"--l2") return 2;
 #endif
   std::string expected;
@@ -417,11 +479,18 @@ int wmain(int argc, wchar_t** argv) {
       ? entry(kParamsSetup, input.data(), output.data(), nullptr, nullptr, nullptr) : -1;
   std::cerr << "stage:params_setup_end error=" << params_error << "\n" << std::flush;
 #ifdef AEXCOMPAT_RENDER_WORKER
+  std::string case_id;
+  for (const wchar_t* p = argv[4]; *p; ++p) {
+    if (*p > 0x7f) return 2;
+    case_id.push_back(static_cast<char>(*p));
+  }
   std::string input_hash, output_hash;
   bool guards_intact = false;
+  int32_t render_width = 0, render_height = 0, render_rowbytes = 0;
   std::cerr << "stage:render_begin\n" << std::flush;
   const int32_t render_error = params_error == 0
-      ? render_once(entry, input, output, input_hash, output_hash, guards_intact) : -1;
+      ? render_once(entry, input, output, case_id, render_width, render_height,
+                    render_rowbytes, input_hash, output_hash, guards_intact) : -1;
   std::cerr << "stage:render_end error=" << render_error << "\n" << std::flush;
 #endif
   std::cerr << "stage:global_setdown_begin\n" << std::flush;
@@ -435,7 +504,8 @@ int wmain(int argc, wchar_t** argv) {
             << ",\"params_setup_error\":" << params_error
             << ",\"render_error\":" << render_error
             << ",\"global_setdown_error\":" << setdown_error
-            << ",\"pixel_format\":\"argb8\",\"width\":16,\"height\":12,\"rowbytes\":64"
+            << ",\"case_id\":\"" << case_id << "\",\"pixel_format\":\"argb8\",\"width\":"
+            << render_width << ",\"height\":" << render_height << ",\"rowbytes\":" << render_rowbytes
             << ",\"input_sha256\":\"" << input_hash << "\",\"output_sha256\":\""
             << output_hash << "\",\"guard_bytes_intact\":" << (guards_intact ? "true" : "false")
             << ",\"render_performed\":true}\n";

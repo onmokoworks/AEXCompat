@@ -28,8 +28,25 @@ fn main() {
     }
     if args[1] == "render-scattermap" {
         let worker = repository.join("target/minihost-build/aex_render_worker.exe");
-        let passed = aexcompat_broker::render::run(repository, &worker, "scattermap", &PathBuf::from(&args[2]))
+        let passed = aexcompat_broker::render::run(repository, &worker, "scattermap", "default", &PathBuf::from(&args[2]))
             .expect("render broker run");
+        std::process::exit(if passed { 0 } else { 1 });
+    }
+    let extended_case = match args[1].as_str() {
+        "render-identity-scattermap" => Some("identity"),
+        "render-horizontal-scattermap" => Some("horizontal"),
+        "render-vertical-no-repeat-scattermap" => Some("vertical_no_repeat"),
+        "render-mixed-scattermap" => Some("mixed"),
+        "render-odd-dimensions-scattermap" => Some("odd_dimensions"),
+        "render-padded-stride-scattermap" => Some("padded_stride"),
+        "render-connected-map-scattermap" => Some("connected_map"),
+        "render-inverted-map-scattermap" => Some("inverted_map"),
+        _ => None,
+    };
+    if let Some(case_id) = extended_case {
+        let worker = repository.join("target/minihost-build/aex_render_worker.exe");
+        let passed = aexcompat_broker::render::run(repository, &worker, "scattermap", case_id, &PathBuf::from(&args[2]))
+            .expect("extended render broker run");
         std::process::exit(if passed { 0 } else { 1 });
     }
     if args[1] != "selftest" {
