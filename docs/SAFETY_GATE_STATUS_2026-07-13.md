@@ -5,7 +5,7 @@ authorization. Each stage still requires fixed-fixture controls and re-audit.
 
 ## Current Result
 
-`gate_state: target_ae_argb8_roundtrip_time_and_downsample_verified`
+`gate_state: target_ae_argb8_full_channel_matrix_verified`
 
 | Gate | Status | Evidence and remaining work |
 | --- | --- | --- |
@@ -59,5 +59,7 @@ Production AE also rendered byte-identical oracle-exact frames at time 0 and
 1/24 second.
 At composition resolution factor `[2,2]`, AE supplied an 8x6 world and the
 fixture output matched an oracle built from AE's exact downsampled input.
+A variable-alpha production-host case also matched the arbitrary-source oracle
+exactly, proving four-channel ARGB movement through transparent pixels.
 The ARGB8 matrix also covers valid parameter boundaries amount 500, seed 10000,
 and mix 0% in both classic and SmartFX paths with broker-enforced oracle parity.

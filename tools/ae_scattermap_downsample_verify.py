@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Verify downsampled AE output against the actual downsampled identity input."""
+"""Verify AE output against an exact identity-rendered arbitrary input."""
 
 from __future__ import annotations
 
@@ -18,7 +18,8 @@ except ModuleNotFoundError:
     from scattermap_reference_oracle import render_source
 
 
-def verify(identity_path: Path, output_path: Path) -> dict[str, object]:
+def verify(identity_path: Path, output_path: Path,
+           case_id: str = "scattermap_downsample_2x2_default") -> dict[str, object]:
     with Image.open(identity_path) as identity_image:
         size = identity_image.size
         source = rgba_to_argb(identity_image.convert("RGBA").tobytes())
@@ -32,7 +33,7 @@ def verify(identity_path: Path, output_path: Path) -> dict[str, object]:
     digest = lambda data: hashlib.sha256(data).hexdigest().upper()
     return {
         "schema_version": 1,
-        "case_id": "scattermap_downsample_2x2_default",
+        "case_id": case_id,
         "width": width,
         "height": height,
         "identity_argb_sha256": digest(source),
@@ -48,9 +49,10 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--identity", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
+    parser.add_argument("--case-id", default="scattermap_downsample_2x2_default")
     parser.add_argument("--out", required=True, type=Path)
     args = parser.parse_args()
-    report = verify(args.identity, args.output)
+    report = verify(args.identity, args.output, args.case_id)
     args.out.parent.mkdir(parents=True, exist_ok=True)
     with args.out.open("x", encoding="utf-8", newline="\n") as handle:
         json.dump(report, handle, indent=2, sort_keys=True)

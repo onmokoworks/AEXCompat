@@ -29,6 +29,17 @@ class AeScatterMapDownsampleVerifyTests(unittest.TestCase):
         self.assertTrue(report["pixel_match"])
         self.assertEqual(report["different_bytes"], 0)
 
+    def test_custom_case_id_is_preserved(self):
+        source = gradient(4, 4)
+        expected = render_source(source, 4, 4)
+        with tempfile.TemporaryDirectory() as directory:
+            identity = Path(directory) / "identity.png"
+            output = Path(directory) / "output.png"
+            Image.frombytes("RGBA", (4, 4), argb_to_rgba(source)).save(identity)
+            Image.frombytes("RGBA", (4, 4), argb_to_rgba(expected)).save(output)
+            report = verify(identity, output, "variable_alpha")
+        self.assertEqual(report["case_id"], "variable_alpha")
+
 
 if __name__ == "__main__":
     unittest.main()

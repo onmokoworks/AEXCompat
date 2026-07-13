@@ -182,3 +182,18 @@ ARGB SHA-256
 with zero differing bytes and maximum channel delta zero. This proves that the
 fixture operates on the downsampled world dimensions and, as its source
 indicates, does not scale the five-pixel amount by `downsample_x/y`.
+
+## Variable Alpha
+
+`tools/ae_scattermap_alpha_probe.jsx` imported a fixed 16x12 RGBA8 image with
+192 distinct alpha values spanning 0 through 254. Amount 0 captured AE's exact
+interpretation of that source, including any alpha interpretation and
+premultiplication policy; Amount 5 captured the effect output.
+
+Applying the arbitrary-source oracle to the identity-rendered ARGB bytes
+produced SHA-256
+`B60B162009FB9D2A78662FE9B3B2F4032F5CF4D859508794031D12642C86539F`,
+exactly equal to the AE effect output with zero differing bytes. The output
+retained alpha values from 0 through 254 across 117 distinct levels. This proves
+that production AE behavior follows the fixture's four-channel ARGB coordinate
+copy, including transparent and partially transparent pixels.
