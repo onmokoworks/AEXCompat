@@ -17,3 +17,8 @@ cmake --build target/instruments-build --config Release
 
 Running an instrument inside After Effects is a separate H-4 human-only step.
 Built `.aex` binaries must not be committed.
+
+`pf-callback-tracer` records selector order, numeric world descriptors, and a
+small named suite census. `pf-crashkit` is a containment test instrument: its
+fault popup defaults to `none`, and crash, hang, allocation pressure, or an
+explicit PF error can occur only after a human selects that mode inside AE.

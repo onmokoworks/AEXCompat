@@ -12,6 +12,8 @@ target_link_libraries(trace_writer_selftest PRIVATE aexcompat_trace_writer)
 
 if(DEFINED ENV{AE_SDK_ROOT} AND EXISTS "$ENV{AE_SDK_ROOT}")
   add_subdirectory(pf-null-echo)
+  add_subdirectory(pf-callback-tracer)
+  add_subdirectory(pf-crashkit)
 else()
   message(STATUS "AE_SDK_ROOT is unavailable; pf-null-echo build is skipped")
 endif()
