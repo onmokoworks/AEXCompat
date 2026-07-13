@@ -77,4 +77,8 @@ now support zero, one, or multiple distinct mask/stream/outline handles, with
 fixed scene selection gated outside the ABI callback layer. Request v4 also
 accepts bounded open/closed cubic-Bezier host context with relative tangents;
 broker and worker both validate its shape and limits before exposing handles to
-native code.
+native code. The fixture-side independent oracle now also covers corner
+rounding, uniform and separate-X/Y expansion, feathering, inversion, and a
+combined typed-color render. These algorithms remain outside `host_core`; the
+generic host only transports descriptors, values, worlds, and bounded mask ABI
+state.

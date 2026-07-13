@@ -18,6 +18,13 @@ authorization. Each stage still requires fixed-fixture controls and re-audit.
 | G-7 redaction and create-new output | Satisfied | Broker output is bounded and path-redacted; selftest output uses create-new semantics. Python and Rust negative tests are green. |
 | G-8 cleanroom and licensing decisions | Satisfied | The owner selected public-document cleanroom. Adobe terms were reviewed and the external SDK root `C:\Program Files\Adobe\AfterEffectsSDK` was confirmed. SDK material remains outside Git and outside `minihost/`. |
 
+MaskOffset's bounded request-v4 host context now has deterministic two-run native
+parity for uniform expansion, separate X/Y expansion, corner rounding,
+feathering, feather-plus-invert, and a combined transformed color-fill case.
+The same regression pass reverified legacy v3, bounded v4, ScatterMap SmartFX,
+and intentional mask-suite Access Violation isolation. This expands verified
+render behavior without opening arbitrary native paths or fault modes.
+
 ## Human Work Required
 
 1. H-1 is complete: the approved self-authored fixture is identified by SHA-256 and byte size, and native loading is explicitly permitted.

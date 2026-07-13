@@ -119,10 +119,20 @@ four non-zero-tangent vertices in the second. The open oracle preserves the
 target AEX's observable end-exclusive read of the SDK's `[0..num_segments]`
 vertex range while the host callback itself remains SDK-conformant.
 
+The parameter oracle now follows the target-observable render order: corner
+rounding, centroid-relative X/Y expansion, 32-sample cubic flattening, inside
+distance feathering, and inversion. Six bounded v4 requests independently cover
+uniform expansion, separate X/Y expansion, corner rounding, feathering,
+feather-plus-invert, and a combined transformed color-fill case. Every request
+ran twice in fresh isolated workers and both native hashes matched its fixed
+oracle. The combined case also proves typed Color transport remains correct when
+all geometric and raster parameters are active together.
+
 ## Remaining Work
 
-This evidence does not claim complete MaskOffset render compatibility. Completion
-still requires expansion/rounding/feather/invert oracle coverage and broader
-mask-suite mutation/lifetime behavior. Bounded open, closed, straight, and cubic
-Bezier host scenes are now covered. Those additions must not introduce
-MaskOffset identity or algorithms into `host_core`.
+This evidence establishes the covered ARGB8 MaskOffset parameter matrix, but it
+does not claim complete AEX compatibility. Broader mask-suite mutation and
+lifetime behavior, additional pixel formats, selector families, and SDK suites
+remain. Bounded open, closed, straight, cubic Bezier, transformed, feathered,
+and inverted host scenes are covered. MaskOffset identity and algorithms remain
+in the fixture adapter and do not enter `host_core`.

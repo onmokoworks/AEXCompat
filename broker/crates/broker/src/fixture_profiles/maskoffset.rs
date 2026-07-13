@@ -136,6 +136,10 @@ pub fn polygon_mask_argb8_hash(
         .and_then(|value| value.numeric())
         .unwrap_or(0.0)
         != 0.0;
+    let feather = assignments
+        .get("feather")
+        .and_then(|value| value.numeric())
+        .unwrap_or(0.0);
     let color = assignments
         .get("fill_color")
         .and_then(|value| value.color())
@@ -162,24 +166,60 @@ pub fn polygon_mask_argb8_hash(
                 }
                 previous = current;
             }
+            let mut mask_value = if inside { 1.0 } else { 0.0 };
+            if feather > 0.5 && inside {
+                let mut minimum = f64::MAX;
+                let mut previous = points.len() - 1;
+                for current in 0..points.len() {
+                    let (x1, y1) = points[previous];
+                    let (x2, y2) = points[current];
+                    let dx = x2 - x1;
+                    let dy = y2 - y1;
+                    let length_squared = dx * dx + dy * dy;
+                    let t = if length_squared > 0.001 {
+                        ((sample_x - x1) * dx + (sample_y - y1) * dy) / length_squared
+                    } else {
+                        0.0
+                    }
+                    .clamp(0.0, 1.0);
+                    let closest_x = x1 + t * dx;
+                    let closest_y = y1 + t * dy;
+                    minimum = minimum.min(
+                        ((sample_x - closest_x).powi(2) + (sample_y - closest_y).powi(2)).sqrt(),
+                    );
+                    previous = current;
+                }
+                mask_value = (minimum / feather).min(1.0);
+            }
             if invert {
-                inside = !inside;
+                mask_value = 1.0 - mask_value;
             }
             let offset = ((y * WIDTH + x) * 4) as usize;
+            let original = [
+                source[offset],
+                source[offset + 1],
+                source[offset + 2],
+                source[offset + 3],
+            ];
             match mode {
-                1 | 2 if !inside => source[offset] = 0,
-                3 if inside => {
-                    source[offset] = color.alpha;
-                    source[offset + 1] = color.red;
-                    source[offset + 2] = color.green;
-                    source[offset + 3] = color.blue;
+                1 | 2 => source[offset] = (original[0] as f64 * mask_value) as u8,
+                3 if mask_value > 0.001 => {
+                    let fill = [color.alpha, color.red, color.green, color.blue];
+                    for channel in 0..4 {
+                        source[offset + channel] = (fill[channel] as f64 * mask_value
+                            + original[channel] as f64 * (1.0 - mask_value))
+                            as u8;
+                    }
                 }
-                4 if inside => source[offset] = 0,
-                5 if !inside => {
-                    source[offset] = color.alpha;
-                    source[offset + 1] = color.red;
-                    source[offset + 2] = color.green;
-                    source[offset + 3] = color.blue;
+                4 => source[offset] = (original[0] as f64 * (1.0 - mask_value)) as u8,
+                5 if 1.0 - mask_value > 0.001 => {
+                    let outside = 1.0 - mask_value;
+                    let fill = [color.alpha, color.red, color.green, color.blue];
+                    for channel in 0..4 {
+                        source[offset + channel] = (fill[channel] as f64 * outside
+                            + original[channel] as f64 * (1.0 - outside))
+                            as u8;
+                    }
                 }
                 _ => {}
             }
@@ -188,10 +228,119 @@ pub fn polygon_mask_argb8_hash(
     Some(format!("{:X}", Sha256::digest(source)))
 }
 
+fn apply_corner_rounding(
+    vertices: &[OracleMaskVertex],
+    closed: bool,
+    round_px: f64,
+) -> Vec<OracleMaskVertex> {
+    if round_px < 0.5 || vertices.len() < 2 {
+        return vertices.to_vec();
+    }
+    let mut result = Vec::with_capacity(vertices.len() * 2);
+    for (index, vertex) in vertices.iter().enumerate() {
+        let tangent_in_magnitude =
+            (vertex.tangent_in_x.powi(2) + vertex.tangent_in_y.powi(2)).sqrt();
+        let tangent_out_magnitude =
+            (vertex.tangent_out_x.powi(2) + vertex.tangent_out_y.powi(2)).sqrt();
+        let has_previous = index > 0 || closed;
+        let has_next = index + 1 < vertices.len() || closed;
+        if !has_previous
+            || !has_next
+            || (tangent_in_magnitude > round_px * 0.5 && tangent_out_magnitude > round_px * 0.5)
+        {
+            result.push(*vertex);
+            continue;
+        }
+
+        let previous = if index > 0 {
+            vertices[index - 1]
+        } else {
+            vertices[vertices.len() - 1]
+        };
+        let next = if index + 1 < vertices.len() {
+            vertices[index + 1]
+        } else {
+            vertices[0]
+        };
+        let dx_in = previous.x - vertex.x;
+        let dy_in = previous.y - vertex.y;
+        let distance_in = (dx_in * dx_in + dy_in * dy_in).sqrt();
+        let dx_out = next.x - vertex.x;
+        let dy_out = next.y - vertex.y;
+        let distance_out = (dx_out * dx_out + dy_out * dy_out).sqrt();
+        if distance_in < 0.001 || distance_out < 0.001 {
+            result.push(*vertex);
+            continue;
+        }
+
+        let pull_in = round_px.min(distance_in * 0.45);
+        let pull_out = round_px.min(distance_out * 0.45);
+        let direction_in = (dx_in / distance_in, dy_in / distance_in);
+        let direction_out = (dx_out / distance_out, dy_out / distance_out);
+        const KAPPA: f64 = 0.5523;
+        result.push(OracleMaskVertex {
+            x: vertex.x + direction_in.0 * pull_in,
+            y: vertex.y + direction_in.1 * pull_in,
+            tangent_in_x: 0.0,
+            tangent_in_y: 0.0,
+            tangent_out_x: -direction_in.0 * pull_in * KAPPA,
+            tangent_out_y: -direction_in.1 * pull_in * KAPPA,
+        });
+        result.push(OracleMaskVertex {
+            x: vertex.x + direction_out.0 * pull_out,
+            y: vertex.y + direction_out.1 * pull_out,
+            tangent_in_x: -direction_out.0 * pull_out * KAPPA,
+            tangent_in_y: -direction_out.1 * pull_out * KAPPA,
+            tangent_out_x: 0.0,
+            tangent_out_y: 0.0,
+        });
+    }
+    result
+}
+
+fn apply_expansion(vertices: &mut [OracleMaskVertex], expansion_x: f64, expansion_y: f64) {
+    if vertices.is_empty() || (expansion_x.abs() <= 0.001 && expansion_y.abs() <= 0.001) {
+        return;
+    }
+    let count = vertices.len() as f64;
+    let center_x = vertices.iter().map(|vertex| vertex.x).sum::<f64>() / count;
+    let center_y = vertices.iter().map(|vertex| vertex.y).sum::<f64>() / count;
+    for vertex in vertices {
+        let dx = vertex.x - center_x;
+        let dy = vertex.y - center_y;
+        let distance = (dx * dx + dy * dy).sqrt();
+        if distance > 0.001 {
+            vertex.x += dx / distance * expansion_x;
+            vertex.y += dy / distance * expansion_y;
+        }
+    }
+}
+
 pub fn bezier_mask_argb8_hash(
     assignments: &ValidatedAssignments,
     masks: &[OracleMask],
 ) -> Option<String> {
+    let expansion_x = assignments
+        .get("expansion")
+        .and_then(|value| value.numeric())
+        .unwrap_or(0.0);
+    let separate_xy = assignments
+        .get("separate_xy")
+        .and_then(|value| value.numeric())
+        .unwrap_or(0.0)
+        != 0.0;
+    let expansion_y = if separate_xy {
+        assignments
+            .get("expansion_y")
+            .and_then(|value| value.numeric())
+            .unwrap_or(expansion_x)
+    } else {
+        expansion_x
+    };
+    let corner_round = assignments
+        .get("corner_round")
+        .and_then(|value| value.numeric())
+        .unwrap_or(0.0);
     let polygons = masks
         .iter()
         .map(|mask| {
@@ -202,7 +351,9 @@ pub fn bezier_mask_argb8_hash(
             } else {
                 mask.vertices.len()
             };
-            let vertices = &mask.vertices[..observed_len];
+            let mut vertices =
+                apply_corner_rounding(&mask.vertices[..observed_len], !mask.open, corner_round);
+            apply_expansion(&mut vertices, expansion_x, expansion_y);
             if vertices.is_empty() {
                 return Vec::new();
             }
@@ -356,6 +507,79 @@ mod tests {
         assert_eq!(
             bezier_mask_argb8_hash(&values, &[mask]),
             polygon_mask_argb8_hash(&values, &[points.to_vec()])
+        );
+    }
+
+    #[test]
+    fn transform_feather_and_invert_oracles_are_fixed() {
+        let rectangle = || OracleMask {
+            open: false,
+            vertices: [(4.0, 3.0), (12.0, 3.0), (12.0, 9.0), (4.0, 9.0)]
+                .into_iter()
+                .map(|(x, y)| OracleMaskVertex {
+                    x,
+                    y,
+                    tangent_in_x: 0.0,
+                    tangent_in_y: 0.0,
+                    tangent_out_x: 0.0,
+                    tangent_out_y: 0.0,
+                })
+                .collect(),
+        };
+        let cases = [
+            ValidatedAssignments::from([
+                ("mode".into(), ParameterValue::Numeric(2.0)),
+                ("expansion".into(), ParameterValue::Numeric(2.0)),
+            ]),
+            ValidatedAssignments::from([
+                ("mode".into(), ParameterValue::Numeric(2.0)),
+                ("expansion".into(), ParameterValue::Numeric(2.0)),
+                ("separate_xy".into(), ParameterValue::Numeric(1.0)),
+                ("expansion_y".into(), ParameterValue::Numeric(-1.0)),
+            ]),
+            ValidatedAssignments::from([
+                ("mode".into(), ParameterValue::Numeric(2.0)),
+                ("corner_round".into(), ParameterValue::Numeric(2.0)),
+            ]),
+            ValidatedAssignments::from([
+                ("mode".into(), ParameterValue::Numeric(2.0)),
+                ("feather".into(), ParameterValue::Numeric(3.0)),
+            ]),
+            ValidatedAssignments::from([
+                ("mode".into(), ParameterValue::Numeric(2.0)),
+                ("feather".into(), ParameterValue::Numeric(3.0)),
+                ("invert".into(), ParameterValue::Numeric(1.0)),
+            ]),
+            ValidatedAssignments::from([
+                ("mode".into(), ParameterValue::Numeric(3.0)),
+                ("expansion".into(), ParameterValue::Numeric(1.5)),
+                ("separate_xy".into(), ParameterValue::Numeric(1.0)),
+                ("expansion_y".into(), ParameterValue::Numeric(-0.75)),
+                ("corner_round".into(), ParameterValue::Numeric(1.25)),
+                ("feather".into(), ParameterValue::Numeric(2.5)),
+                ("invert".into(), ParameterValue::Numeric(1.0)),
+                (
+                    "fill_color".into(),
+                    ParameterValue::Color(ColorValue {
+                        alpha: 220,
+                        red: 20,
+                        green: 180,
+                        blue: 70,
+                    }),
+                ),
+            ]),
+        ];
+        let actual = cases.map(|values| bezier_mask_argb8_hash(&values, &[rectangle()]).unwrap());
+        assert_eq!(
+            actual,
+            [
+                "41D5B8BC56ED8251BAAA293694FDB1A1484CC1AD50CF70CBB17DF1999A4C285A",
+                "2E51BB36FB9E1F1F6FFB6726897C8570E331BC370737DC6453D6F1D4CAA575C4",
+                "1C8999B9D780128EFB6ADF95CF3C110123A282D48842F9B07A250820BA8171C3",
+                "5A69A764EE428C1869C0BE5F4B430EE9AA7A2F104EFAEB5A465111D29BDD2C37",
+                "E0DE8B63B188C95CC6192C2A09C637244FD1D295FDEEB9362A9D93005085C52E",
+                "6E90A85270F272FF032543FAD26C858C5D3C55B1B5C8424CD76627DC440B1967",
+            ]
         );
     }
 }
