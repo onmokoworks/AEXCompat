@@ -57,6 +57,13 @@ class ScatterMapReferenceOracleTests(unittest.TestCase):
         inverted = render_case(11, 7, luma_map=generated_luma_map(11, 7, 11, 7, True))
         self.assertNotEqual(connected, inverted)
 
+    def test_arbitrary_decimal_mix_casts_before_normalization(self):
+        output = render_case(amount=13, direction=2, seed=1234, mix=33.333333333)
+        self.assertEqual(
+            hashlib.sha256(output).hexdigest().upper(),
+            "3905F287DBF3042CD73527154B8B6DA89E21A86C3ECDB6902D51A67F2CB79CF1",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

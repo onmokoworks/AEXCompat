@@ -21,7 +21,7 @@ it exposed no path or parser detail and created no output. Both request and
 output paths are `.json`-only, traversal-denied, and canonical-root checked.
 
 This closes the previous gap between the Python conformance gate and the
-broker-owned pre-dispatch boundary. It intentionally does not claim generalized
-rendering yet: an accepted request proves eligibility only. A later stage must
-bind the accepted values to a fixed-hash worker invocation and output oracle
-without introducing caller-controlled plug-in paths or descriptors.
+broker-owned pre-dispatch boundary. The validation-only command still stops at
+eligibility. A separate parameterized execution command now binds accepted
+values to the fixed-hash worker and a dynamic independent oracle; see
+`SCATTERMAP_PARAMETERIZED_RENDER_RESULT_2026-07-13.md`.

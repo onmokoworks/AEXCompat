@@ -61,7 +61,7 @@ def render_source(source: bytes, width: int, height: int, *, amount: int = 5,
                 source_offset = (sy * width + sx) * 4
                 output[output_offset:output_offset + 4] = source[source_offset:source_offset + 4]
     if mix < 100.0:
-        ratio = f32(mix / 100.0)
+        ratio = f32(f32(mix) / f32(100.0))
         inverse = f32(1.0 - ratio)
         for index in range(len(output)):
             value = f32(f32(f32(float(source[index])) * inverse) + f32(f32(float(output[index])) * ratio))

@@ -30,9 +30,28 @@ class RenderParameterGateContractTests(unittest.TestCase):
         for marker in ("Scatter Amount", "500.0", "Random Seed", "10_000.0", "Invert Map"):
             self.assertIn(marker, gate)
         self.assertIn("native_process_started: false", route)
-        self.assertNotIn("run_isolated", route)
+        self.assertIn("run_isolated", route)
+        self.assertIn("argb8_hash", route)
         self.assertIn("validate-render-request-scattermap", main)
+        self.assertIn("render-parameter-request-scattermap", main)
         self.assertNotIn('.expect("validate render request")', main)
+
+    def test_parameterized_execution_contract_separates_rejection_and_native_success(self):
+        schema = json.loads((ROOT / "contracts/aex/parameterized_classic_render_report.schema.json").read_text(encoding="utf-8"))
+        self.assertFalse(schema["additionalProperties"])
+        text = json.dumps(schema, sort_keys=True)
+        for marker in ("expected_oracle_sha256", "fixture_sha256", "deterministic", "broker_survived"):
+            self.assertIn(marker, text)
+        self.assertIn('"native_process_started": {"const": false}', text)
+        self.assertIn('"native_process_started": {"const": true}', text)
+
+    def test_worker_revalidates_and_echoes_bound_values(self):
+        source = (ROOT / "minihost/src/l2_main.cpp").read_text(encoding="utf-8")
+        for marker in ('L"--render-request"', "parse_i32_arg", "parse_double_arg",
+                       "requested_amount", "requested_direction", "requested_seed",
+                       "requested_mix", "requested_invert_map", "std::setprecision(17)"):
+            self.assertIn(marker, source)
+        self.assertLess(source.index("if (request_mode &&"), source.index("if (!sha256(argv[2]"))
 
 
 if __name__ == "__main__":

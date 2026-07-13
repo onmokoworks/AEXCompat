@@ -11,14 +11,14 @@ use std::time::{Duration, Instant};
 struct Allowlist { schema_version: u32, entries: Vec<Entry> }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Entry {
-    id: String, plugin_path: PathBuf, sha256: String, byte_size: u64,
-    approved_stage: String, receipt_id: String, expires: String, timeout_ms: u64,
+pub(crate) struct Entry {
+    pub(crate) id: String, pub(crate) plugin_path: PathBuf, pub(crate) sha256: String, pub(crate) byte_size: u64,
+    pub(crate) approved_stage: String, pub(crate) receipt_id: String, pub(crate) expires: String, pub(crate) timeout_ms: u64,
 }
 fn invalid(message: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message.into())
 }
-fn entry(repository: &Path, id: &str) -> io::Result<Entry> {
+pub(crate) fn entry(repository: &Path, id: &str) -> io::Result<Entry> {
     let bytes = fs::read(repository.join("target/render-allowlist/active.local.json"))?;
     let list: Allowlist = serde_json::from_slice(&bytes).map_err(|e| invalid(e.to_string()))?;
     if list.schema_version != 1 || list.entries.len() != 1 { return Err(invalid("one render entry required")); }

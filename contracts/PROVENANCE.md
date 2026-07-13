@@ -11,6 +11,7 @@ provenance and should not be edited during promotion.
 | `contracts/aex/image_probe_request.schema.json` | `imports/aviutlas-rust-contracts/analysis/AEX_IMAGE_PROBE_REQUEST_SCHEMA_2026-05-31.json` | Request/response shape for future image probe work. Current use remains no-load contract validation. |
 | `contracts/aex/render_parameter_request.schema.json` | Local cleanroom contract, 2026-07-13 | Strict caller value request for the broker-owned ScatterMap descriptor gate. |
 | `contracts/aex/render_parameter_gate_report.schema.json` | Local cleanroom contract, 2026-07-13 | Pre-dispatch decision report; this revision proves that no native process starts. |
+| `contracts/aex/parameterized_classic_render_report.schema.json` | Local cleanroom contract, 2026-07-13 | Fixed-hash isolated execution report for broker-validated caller parameter values. |
 | `contracts/aex/worker_capability_report.schema.json` | `imports/aviutlas-rust-contracts/analysis/AEX_WORKER_CAPABILITY_REPORT_SCHEMA_2026-05-31.json` | Capability report vocabulary for future worker results and compatibility claims. |
 | `contracts/aex/loader_readiness_gate.schema.json` | `imports/aviutlas-rust-contracts/analysis/AEX_LOADER_READINESS_GATE_SCHEMA_2026-06-03.json` | Final readiness gate contract that keeps native loading closed. |
 | `contracts/aex/image_probe_allowlist.example.json` | `imports/aviutlas-rust-contracts/analysis/AEX_IMAGE_PROBE_ALLOWLIST.example.json` | Sanitized example. Local absolute plugin paths from the source file are replaced with placeholders. |

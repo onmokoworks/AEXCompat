@@ -97,3 +97,12 @@ broker-owned descriptors. Strict requests may contain only values for five
 known fields under a dedicated local root; callers cannot supply ranges or
 plug-in paths. Valid requests currently stop at dispatch permission, while
 invalid requests return exit 3 and prove that no native process was started.
+Accepted values can now proceed through a separate parameterized classic ARGB8
+route. The fixed-hash worker revalidates all five values before AEX loading,
+runs twice under the existing Job Object boundary, echoes the bound PF values,
+and must match a dynamic independent Rust oracle. A non-table valid endpoint
+combination passed both isolated runs; the same route rejected Direction 4
+without starting a native process.
+An arbitrary 33.333333333% Mix case also passed twice after conformance probing
+established that the target casts Mix to f32 before percentage normalization;
+both cleanroom oracles now preserve that observable operation order.

@@ -13,6 +13,7 @@ pub mod smart;
 pub mod parameter_gate;
 #[cfg(windows)]
 pub mod render_request;
+pub mod scattermap_oracle;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ExitClassification {

@@ -4,7 +4,10 @@
 #include <array>
 #include <algorithm>
 #include <atomic>
+#include <cerrno>
+#include <cmath>
 #include <cstdint>
+#include <cwchar>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -356,12 +359,41 @@ std::string sha256_bytes(const unsigned char* data, std::size_t size) {
 }
 
 #ifdef AEXCOMPAT_RENDER_WORKER
+struct RenderParameters {
+  int32_t amount{5};
+  int32_t direction{3};
+  int32_t seed{0};
+  double mix{100.0};
+  int32_t invert_map{0};
+};
+
+bool parse_i32_arg(const wchar_t* text, int32_t minimum, int32_t maximum, int32_t& output) {
+  if (!text || !*text) return false;
+  wchar_t* end = nullptr;
+  errno = 0;
+  const long long value = std::wcstoll(text, &end, 10);
+  if (errno != 0 || !end || *end != L'\0' || value < minimum || value > maximum) return false;
+  output = static_cast<int32_t>(value);
+  return true;
+}
+
+bool parse_double_arg(const wchar_t* text, double minimum, double maximum, double& output) {
+  if (!text || !*text) return false;
+  wchar_t* end = nullptr;
+  errno = 0;
+  const double value = std::wcstod(text, &end);
+  if (errno != 0 || !end || *end != L'\0' || !std::isfinite(value) || value < minimum || value > maximum)
+    return false;
+  output = value;
+  return true;
+}
+
 int32_t render_once(EffectEntry entry, std::array<std::byte, kInSize>& input,
                     std::array<std::byte, kOutSize>& command_output,
                     const std::string& case_id, int32_t& width, int32_t& height,
                     int32_t& rowbytes,
                     std::string& input_hash, std::string& output_hash,
-                    bool& guards_intact) {
+                    bool& guards_intact, const RenderParameters* requested = nullptr) {
   const bool connected_map = case_id == "connected_map" || case_id == "inverted_map";
   const bool partial_extent_hint = case_id == "partial_extent_hint";
   width = connected_map ? 11 : ((case_id == "odd_dimensions" || case_id == "padded_stride") ? 13 : 16);
@@ -378,7 +410,13 @@ int32_t render_once(EffectEntry entry, std::array<std::byte, kInSize>& input,
   else if (case_id == "mix_zero") { amount = 500; seed = 10000; mix = 0.0; }
   else if (case_id == "odd_dimensions" || case_id == "padded_stride") { amount = 4; seed = 3; }
   else if (case_id == "inverted_map") { }
-  else if (case_id != "default" && case_id != "connected_map" && !partial_extent_hint) return -2;
+  else if (case_id != "default" && case_id != "connected_map" && case_id != "request" && !partial_extent_hint) return -2;
+  if (requested) {
+    amount = requested->amount;
+    direction = requested->direction;
+    seed = requested->seed;
+    mix = requested->mix;
+  }
   constexpr std::size_t guard = 64;
   std::vector<unsigned char> logical_source(width * height * 4);
   std::vector<unsigned char> source(rowbytes * height, 0x5A);
@@ -451,6 +489,7 @@ int32_t render_once(EffectEntry entry, std::array<std::byte, kInSize>& input,
   write<int32_t>(definitions[4], 56, repeat);
   write<double>(definitions[5], 56, mix);
   if (case_id == "inverted_map") write<int32_t>(definitions[7], 56, 1);
+  if (requested) write<int32_t>(definitions[7], 56, requested->invert_map);
   std::array<void*, 9> params{};
   for (std::size_t i = 0; i < definitions.size(); ++i) params[i] = definitions[i].data();
   write<int32_t>(input, 224, 0);
@@ -720,8 +759,15 @@ void report(const char* status, int32_t global_error, int32_t params_error,
 
 int wmain(int argc, wchar_t** argv) {
 #ifdef AEXCOMPAT_RENDER_WORKER
-  if (argc != 5) return 2;
-  if (std::wstring(argv[1]) != L"--render") return 2;
+  const bool request_mode = argc == 9 && std::wstring(argv[1]) == L"--render-request";
+  if (!request_mode && (argc != 5 || std::wstring(argv[1]) != L"--render")) return 2;
+  RenderParameters requested_parameters;
+  if (request_mode &&
+      (!parse_i32_arg(argv[4], 0, 500, requested_parameters.amount) ||
+       !parse_i32_arg(argv[5], 1, 3, requested_parameters.direction) ||
+       !parse_i32_arg(argv[6], 0, 10000, requested_parameters.seed) ||
+       !parse_double_arg(argv[7], 0.0, 100.0, requested_parameters.mix) ||
+       !parse_i32_arg(argv[8], 0, 1, requested_parameters.invert_map))) return 3;
 #elif defined(AEXCOMPAT_SMART_WORKER)
   if (argc != 5 || std::wstring(argv[1]) != L"--smart") return 2;
 #else
@@ -819,10 +865,12 @@ int wmain(int argc, wchar_t** argv) {
   const bool lifecycle_data_null = read<void*>(output, kOutSequenceData) == nullptr && read<void*>(output, kOutFrameData) == nullptr;
 #endif
 #ifdef AEXCOMPAT_RENDER_WORKER
-  std::string case_id;
-  for (const wchar_t* p = argv[4]; *p; ++p) {
-    if (*p > 0x7f) return 2;
-    case_id.push_back(static_cast<char>(*p));
+  std::string case_id = request_mode ? "request" : "";
+  if (!request_mode) {
+    for (const wchar_t* p = argv[4]; *p; ++p) {
+      if (*p > 0x7f) return 2;
+      case_id.push_back(static_cast<char>(*p));
+    }
   }
   std::string input_hash, output_hash;
   bool guards_intact = false;
@@ -841,7 +889,7 @@ int wmain(int argc, wchar_t** argv) {
       auto thread_output = output;
       thread_errors[index] = render_once(entry, thread_input, thread_output, "default",
           widths[index], heights[index], rowbytes[index], input_hashes[index],
-          thread_hashes[index], thread_guards[index]);
+          thread_hashes[index], thread_guards[index], nullptr);
     };
     std::thread first(run_thread, 0); std::thread second(run_thread, 1);
     first.join(); second.join();
@@ -853,7 +901,8 @@ int wmain(int argc, wchar_t** argv) {
         input_hashes[0] == input_hashes[1] && thread_hashes[0] == thread_hashes[1] ? 0 : -1;
   } else if (params_error == 0) {
     render_error = render_once(entry, input, output, case_id, render_width, render_height,
-                               render_rowbytes, input_hash, output_hash, guards_intact);
+                               render_rowbytes, input_hash, output_hash, guards_intact,
+                               request_mode ? &requested_parameters : nullptr);
   }
   std::cerr << "stage:render_end error=" << render_error << "\n" << std::flush;
 #elif defined(AEXCOMPAT_SMART_WORKER)
@@ -888,6 +937,12 @@ int wmain(int argc, wchar_t** argv) {
             << ",\"thread_2_sha256\":\"" << thread_hashes[1] << "\""
             << ",\"thread_1_guards_intact\":" << (thread_guards[0] ? "true" : "false")
             << ",\"thread_2_guards_intact\":" << (thread_guards[1] ? "true" : "false")
+            << ",\"request_mode\":" << (request_mode ? "true" : "false")
+            << ",\"requested_amount\":" << requested_parameters.amount
+            << ",\"requested_direction\":" << requested_parameters.direction
+            << ",\"requested_seed\":" << requested_parameters.seed
+            << ",\"requested_mix\":" << std::setprecision(17) << requested_parameters.mix
+            << ",\"requested_invert_map\":" << requested_parameters.invert_map
             << ",\"render_performed\":true}\n";
 #elif defined(AEXCOMPAT_SMART_WORKER)
   std::cout << "{\"schema_version\":1,\"stage\":\"smartfx_render\",\"status\":\""
