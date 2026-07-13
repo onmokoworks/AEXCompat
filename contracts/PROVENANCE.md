@@ -51,3 +51,7 @@ byte-for-byte provenance boundary; the imported originals remain unmodified.
 `aex/l1_worker_report.schema.json` is an AEXCompat-authored runtime contract
 derived from the public Windows loader behavior boundary. It contains no Adobe
 SDK declarations. Added 2026-07-13 for the cleanroom L1 worker.
+
+`aex/classic_render_report.schema.json` is an AEXCompat-authored staged render
+evidence contract. It requires deterministic double execution, pixel hashes,
+buffer guards, and broker survival. It contains no Adobe SDK declarations.

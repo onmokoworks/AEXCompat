@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://onmokoworks.local/aexcompat/classic_render_report.schema.json",
+  "schema_name": "AEXCompat classic render report schema",
+  "schema_version": 1,
+  "title": "AEXCompat classic render report",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "stage", "plugin_id", "receipt_id",
+    "fixture_sha256", "pixel_format", "width", "height", "rowbytes",
+    "input_sha256", "run_1", "run_2", "deterministic",
+    "guard_bytes_intact", "broker_survived", "passed"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "stage": { "const": "classic_render" },
+    "plugin_id": { "const": "scattermap" },
+    "receipt_id": { "type": "string", "minLength": 1 },
+    "fixture_sha256": { "$ref": "#/$defs/sha256" },
+    "pixel_format": { "const": "argb8" },
+    "width": { "type": "integer", "minimum": 1, "maximum": 1024 },
+    "height": { "type": "integer", "minimum": 1, "maximum": 1024 },
+    "rowbytes": { "type": "integer", "minimum": 4, "maximum": 4194304 },
+    "input_sha256": { "$ref": "#/$defs/sha256" },
+    "run_1": { "$ref": "#/$defs/run" },
+    "run_2": { "$ref": "#/$defs/run" },
+    "deterministic": { "type": "boolean" },
+    "guard_bytes_intact": { "type": "boolean" },
+    "broker_survived": { "type": "boolean" },
+    "passed": { "type": "boolean" }
+  },
+  "$defs": {
+    "sha256": { "type": "string", "pattern": "^[A-F0-9]{64}$" },
+    "run": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["classification", "render_error", "output_sha256", "elapsed_ms"],
+      "properties": {
+        "classification": { "enum": ["ok", "plugin_error", "crashed", "timeout_killed", "internal_error"] },
+        "render_error": { "type": "integer" },
+        "output_sha256": { "$ref": "#/$defs/sha256" },
+        "elapsed_ms": { "type": "integer", "minimum": 0, "maximum": 30000 }
+      }
+    }
+  }
+}
