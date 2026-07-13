@@ -56,3 +56,12 @@ workers. Both exits were classified as `crashed`; neither crash escaped the Job
 Object boundary, and the broker survived to write the create-new result report.
 This case is accepted only when both workers crash. It is never treated as a
 render success or ordinary nonzero error.
+
+## Time Context
+
+All SmartFX calls now provide a valid host time basis. A dedicated case used
+`current_time=42`, `time_step=2`, and `time_scale=24`; the input-layer PreRender
+checkout callback observed exactly those values in both isolated runs. The
+fixture is time-independent, so both outputs matched the default oracle hash
+`19CEA826F356E0D94BC29FF10CB9E7F5A770FE5B288CB3D190A58372353102D9`.
+The default `0/1/1` time basis was also re-run without regression.

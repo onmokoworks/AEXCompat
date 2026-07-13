@@ -5,7 +5,7 @@ authorization. Each stage still requires fixed-fixture controls and re-audit.
 
 ## Current Result
 
-`gate_state: target_render_error_and_crash_isolation_verified`
+`gate_state: target_smartfx_time_error_and_crash_contracts_verified`
 
 | Gate | Status | Evidence and remaining work |
 | --- | --- | --- |
@@ -39,3 +39,5 @@ or a process crash. A target-specific malformed frame contract crashes only its
 disposable worker in two repeated runs while the broker survives and records
 evidence. H-4 AE reference trace capture remains pending under the
 continuous authorization and existing isolation controls.
+SmartFX PreRender checkout also receives a valid time basis; a nonzero
+`42/2/24` context was observed exactly while preserving deterministic output.

@@ -52,6 +52,7 @@ fn main() {
         "smart-gpu-negotiation-scattermap" => Some("gpu_fallback_float32"),
         "smart-error-missing-input-scattermap" => Some("error_missing_input"),
         "smart-crash-null-output-scattermap" => Some("crash_null_output_world"),
+        "smart-temporal-context-scattermap" => Some("temporal_context"),
         _ => None,
     };
     if let Some(case_id) = smart_case {

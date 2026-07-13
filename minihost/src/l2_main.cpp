@@ -91,6 +91,9 @@ int32_t g_smart_width = 16;
 int32_t g_smart_height = 12;
 int32_t g_smart_map_width = 0;
 int32_t g_smart_map_height = 0;
+int32_t g_checkout_time = 0;
+int32_t g_checkout_time_step = 0;
+uint32_t g_checkout_time_scale = 0;
 std::string g_smart_pixel_format = "argb8";
 int32_t g_smart_rowbytes = 64;
 
@@ -101,8 +104,11 @@ void write_rect(void* destination, int32_t width, int32_t height) {
 }
 
 int32_t __cdecl pre_checkout_layer(void*, int32_t index, int32_t checkout_id,
-                                   const void*, int32_t, int32_t, uint32_t,
+                                   const void*, int32_t what_time, int32_t time_step, uint32_t time_scale,
                                    void* result) {
+  if (index == 0 && checkout_id == 0) {
+    g_checkout_time = what_time; g_checkout_time_step = time_step; g_checkout_time_scale = time_scale;
+  }
   if (!result) return 4;
   if (index == 0 && checkout_id == 0) {
     write_rect(result, g_smart_width, g_smart_height);
@@ -469,6 +475,9 @@ struct SmartResult {
   bool guards_intact{};
   bool gpu_render_possible{};
   bool gpu_render_dispatched{};
+  int32_t checkout_time{};
+  int32_t checkout_time_step{};
+  uint32_t checkout_time_scale{};
 };
 
 SmartResult smart_render_once(EffectEntry entry, std::array<std::byte, kInSize>& input,
@@ -479,6 +488,7 @@ SmartResult smart_render_once(EffectEntry entry, std::array<std::byte, kInSize>&
   const bool gpu_negotiation = case_id == "gpu_fallback_float32";
   const bool missing_input = case_id == "error_missing_input";
   const bool crash_null_output = case_id == "crash_null_output_world";
+  const bool temporal_context = case_id == "temporal_context";
   const bool float32 = case_id == "float32_default" || gpu_negotiation;
   const bool connected_map = case_id == "connected_map" || case_id == "inverted_map";
   const int32_t width = connected_map ? 11 : ((case_id == "odd_dimensions" || case_id == "padded_stride") ? 13 : 16);
@@ -491,7 +501,7 @@ SmartResult smart_render_once(EffectEntry entry, std::array<std::byte, kInSize>&
   else if (case_id == "vertical_no_repeat") { amount = 7; direction = 2; repeat = 0; }
   else if (case_id == "mixed") { amount = 12; seed = 991; mix = 37.5; }
   else if (case_id == "odd_dimensions" || case_id == "padded_stride") { amount = 4; seed = 3; }
-  else if (case_id != "default" && !deep16 && !float32 && !missing_input && !crash_null_output && !connected_map) return result;
+  else if (case_id != "default" && !deep16 && !float32 && !missing_input && !crash_null_output && !temporal_context && !connected_map) return result;
   constexpr std::size_t guard = 64;
   std::vector<unsigned char> source(rowbytes * height, 0x5A);
   for (int32_t y = 0; y < height; ++y) for (int32_t x = 0; x < width; ++x) {
@@ -552,6 +562,13 @@ SmartResult smart_render_once(EffectEntry entry, std::array<std::byte, kInSize>&
   if (crash_null_output)
     entry(kFrameSetup, input.data(), command_output.data(), params.data(), nullptr, nullptr);
 
+  const int32_t current_time = temporal_context ? 42 : 0;
+  const int32_t time_step = temporal_context ? 2 : 1;
+  const uint32_t time_scale = temporal_context ? 24 : 1;
+  write<int32_t>(input, 224, current_time); write<int32_t>(input, 228, time_step);
+  write<int32_t>(input, 232, temporal_context ? 240 : 1); write<uint32_t>(input, 240, time_scale);
+  g_checkout_time = 0; g_checkout_time_step = 0; g_checkout_time_scale = 0;
+
   std::array<std::byte, 8> gpu_setup_input{}, gpu_setup_output{};
   std::array<std::byte, 16> gpu_setup_extra{};
   if (gpu_negotiation) {
@@ -577,6 +594,8 @@ SmartResult smart_render_once(EffectEntry entry, std::array<std::byte, kInSize>&
   };
   result.rects_valid = result.pre_error == 0 && valid_rect(0) && valid_rect(16);
   result.gpu_render_possible = (read<uint16_t>(pre_output, 34) & 0x2u) != 0;
+  result.checkout_time = g_checkout_time; result.checkout_time_step = g_checkout_time_step;
+  result.checkout_time_scale = g_checkout_time_scale;
 
   std::array<std::byte, 72> smart_input{}; std::array<std::byte, 24> callbacks{};
   std::array<std::byte, 16> smart_extra{};
@@ -804,6 +823,9 @@ int wmain(int argc, wchar_t** argv) {
             << ",\"gpu_device_setdown_error\":" << smart.gpu_setdown_error
             << ",\"gpu_render_possible\":" << (smart.gpu_render_possible ? "true" : "false")
             << ",\"gpu_render_dispatched\":" << (smart.gpu_render_dispatched ? "true" : "false")
+            << ",\"checkout_time\":" << smart.checkout_time
+            << ",\"checkout_time_step\":" << smart.checkout_time_step
+            << ",\"checkout_time_scale\":" << smart.checkout_time_scale
             << ",\"global_setdown_error\":" << setdown_error
             << ",\"case_id\":\"" << case_id << "\",\"pixel_format\":\"" << g_smart_pixel_format << "\",\"width\":"
             << g_smart_width << ",\"height\":" << g_smart_height << ",\"rowbytes\":"

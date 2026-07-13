@@ -20,6 +20,7 @@ fn expected(case_id: &str) -> Option<&'static str> { match case_id {
     "gpu_fallback_float32" => Some("D707B9B7BD7C923182A0BEFCA60985896E473AFF3D0191FC310FC07CAD3FE90B"),
     "error_missing_input" => Some("346790DBFE3BE4137B9B0B36606E504BCE22FF351867A183DE2FE8481BE1006E"),
     "crash_null_output_world" => Some(""),
+    "temporal_context" => Some("19CEA826F356E0D94BC29FF10CB9E7F5A770FE5B288CB3D190A58372353102D9"),
     _ => None,
 } }
 #[derive(Deserialize)]
@@ -65,6 +66,9 @@ pub fn run(repository: &Path, worker: &Path, id: &str, case_id: &str, output: &P
         r.get("gpu_render_possible") == Some(&Value::Bool(false)) && r.get("gpu_render_dispatched") == Some(&Value::Bool(false)));
     let expected_error = case_id == "error_missing_input";
     let expected_crash = case_id == "crash_null_output_world";
+    let temporal_valid = case_id != "temporal_context" || reports.iter().all(|(_, r)|
+        r.get("checkout_time") == Some(&json!(42)) && r.get("checkout_time_step") == Some(&json!(2)) &&
+        r.get("checkout_time_scale") == Some(&json!(24)));
     let error_valid = !expected_error || reports.iter().all(|(c, r)|
         c.as_str() == "nonzero_exit" && r.get("pre_render_error") == Some(&json!(0)) &&
         r.get("smart_render_error").and_then(Value::as_i64).is_some_and(|e| e != 0) &&
@@ -74,7 +78,7 @@ pub fn run(repository: &Path, worker: &Path, id: &str, case_id: &str, output: &P
         c.as_str() == "ok" && r.get("pre_render_error") == Some(&json!(0)) && r.get("smart_render_error") == Some(&json!(0)) &&
         r.get("result_rects_valid") == Some(&Value::Bool(true)) && r.get("guard_bytes_intact") == Some(&Value::Bool(true)));
     let oracle_valid = expected_crash || hashes.iter().all(|h| h == expected);
-    let passed = deterministic && gpu_valid && error_valid && crash_valid && success_valid && oracle_valid;
+    let passed = deterministic && gpu_valid && temporal_valid && error_valid && crash_valid && success_valid && oracle_valid;
     let summary = json!({"schema_version":1,"stage":"smartfx_render","plugin_id":id,"receipt_id":entry.receipt_id,
         "fixture_sha256":entry.sha256.to_ascii_uppercase(),"case_id":case_id,"expected_oracle_sha256":expected,
         "run_1":{"classification":reports[0].0.as_str(),"output_sha256":hashes[0],
@@ -85,7 +89,8 @@ pub fn run(repository: &Path, worker: &Path, id: &str, case_id: &str, output: &P
             "guard_bytes_intact":reports[1].1.get("guard_bytes_intact")},
         "deterministic":deterministic,"oracle_match":oracle_valid,
         "gpu_negotiation_valid":gpu_valid,"expected_error":expected_error,"error_contract_valid":error_valid,
-        "expected_crash":expected_crash,"crash_contract_valid":crash_valid,"broker_survived":true,"passed":passed});
+        "temporal_context_valid":temporal_valid,"expected_crash":expected_crash,
+        "crash_contract_valid":crash_valid,"broker_survived":true,"passed":passed});
     let mut file = OpenOptions::new().write(true).create_new(true).open(output)?;
     serde_json::to_writer_pretty(&mut file, &summary).map_err(|e| invalid(e.to_string()))?; file.write_all(b"\n")?;
     Ok(passed)
@@ -102,6 +107,7 @@ mod tests {
             assert_eq!(expected(case_id).unwrap().len(), 64);
         }
         assert_eq!(expected("crash_null_output_world"), Some(""));
+        assert_eq!(expected("temporal_context").unwrap().len(), 64);
         assert!(expected("arbitrary").is_none());
     }
 }
