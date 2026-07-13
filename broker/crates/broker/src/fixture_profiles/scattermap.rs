@@ -67,7 +67,7 @@ pub fn bind(assignments: &ValidatedAssignments) -> RenderParameters {
 
 pub fn worker_payload(parameters: RenderParameters) -> String {
     format!(
-        "v1|amount={};direction={};seed={};mix={};invert_map={}",
+        "v2|amount@1:i32={};direction@2:i32={};seed@3:i32={};mix@5:f64={};invert_map@7:i32={}",
         parameters.amount,
         parameters.direction,
         parameters.seed,
@@ -193,7 +193,7 @@ mod tests {
         assert_eq!(bound.invert_map, 0);
         assert_eq!(
             worker_payload(bound),
-            "v1|amount=13;direction=3;seed=0;mix=25.5;invert_map=0"
+            "v2|amount@1:i32=13;direction@2:i32=3;seed@3:i32=0;mix@5:f64=25.5;invert_map@7:i32=0"
         );
     }
 }

@@ -27,10 +27,14 @@ now carries a generic descriptor-id keyed numeric map. Parameter validation and
 render CLI operations are fixture-neutral and resolve `plugin_id` through the
 registry. Allowlist parsing and artifact/resource validation are generic host
 policy; each profile supplies its reviewed approval policy and worker launch
-specification. Parameter workers receive one bounded, versioned descriptor/value
-payload rather than a fixed positional argument list, then revalidate it before
-native loading. The typed render adapter, legacy fixed-case commands, and
-concrete allowlist records remain fixture-specific migration debt.
+specification. Parameter workers receive one bounded, versioned
+descriptor/slot/kind/value payload rather than a fixed positional argument list.
+They validate its syntax before native loading, then match every requested slot,
+kind, and range against descriptors observed during `PF_PARAMS_SETUP` before any
+render selector. Classic and SmartFX build variable-length `PF_ParamDef` storage
+from those descriptors and apply observed defaults consistently. The broker-side
+typed render adapter, legacy fixed-case commands, and concrete allowlist records
+remain fixture-specific migration debt.
 
 ## Completion Rule
 

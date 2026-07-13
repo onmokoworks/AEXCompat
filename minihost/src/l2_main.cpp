@@ -13,6 +13,7 @@
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <limits>
 #include <new>
 #include <sstream>
 #include <string>
@@ -359,13 +360,14 @@ std::string sha256_bytes(const unsigned char* data, std::size_t size) {
 }
 
 #if defined(AEXCOMPAT_RENDER_WORKER) || defined(AEXCOMPAT_SMART_WORKER)
-struct RenderParameters {
-  int32_t amount{5};
-  int32_t direction{3};
-  int32_t seed{0};
-  double mix{100.0};
-  int32_t invert_map{0};
+enum class RequestedKind { Integer, Float };
+struct RequestedAssignment {
+  std::wstring id;
+  int32_t index{};
+  RequestedKind kind{};
+  double value{};
 };
+using RequestedAssignments = std::vector<RequestedAssignment>;
 
 bool parse_i32_arg(const wchar_t* text, int32_t minimum, int32_t maximum, int32_t& output) {
   if (!text || !*text) return false;
@@ -396,41 +398,102 @@ bool valid_parameter_id(const std::wstring& id) {
   });
 }
 
-bool parse_parameter_payload(const wchar_t* text, RenderParameters& output) {
+bool parse_parameter_payload(const wchar_t* text, RequestedAssignments& output) {
   if (!text) return false;
   const std::wstring encoded(text);
-  if (encoded.size() < 4 || encoded.size() > 1024 || encoded.compare(0, 3, L"v1|") != 0) return false;
+  if (encoded.size() < 4 || encoded.size() > 4096 || encoded.compare(0, 3, L"v2|") != 0) return false;
   const std::wstring payload = encoded.substr(3);
-  std::unordered_set<std::wstring> seen;
+  std::unordered_set<std::wstring> seen_ids;
+  std::unordered_set<int32_t> seen_indices;
   std::size_t offset = 0;
   while (offset < payload.size()) {
     const std::size_t separator = payload.find(L';', offset);
     const std::size_t end = separator == std::wstring::npos ? payload.size() : separator;
     const std::wstring assignment = payload.substr(offset, end - offset);
-    const std::size_t equals = assignment.find(L'=');
-    if (equals == std::wstring::npos || equals == 0 || equals + 1 >= assignment.size() ||
+    const std::size_t at = assignment.find(L'@');
+    const std::size_t colon = assignment.find(L':', at == std::wstring::npos ? 0 : at + 1);
+    const std::size_t equals = assignment.find(L'=', colon == std::wstring::npos ? 0 : colon + 1);
+    if (at == std::wstring::npos || colon == std::wstring::npos || equals == std::wstring::npos ||
+        at == 0 || colon <= at + 1 || equals <= colon + 1 || equals + 1 >= assignment.size() ||
         assignment.find(L'=', equals + 1) != std::wstring::npos) return false;
-    const std::wstring id = assignment.substr(0, equals);
+    const std::wstring id = assignment.substr(0, at);
+    const std::wstring index_text = assignment.substr(at + 1, colon - at - 1);
+    const std::wstring kind_text = assignment.substr(colon + 1, equals - colon - 1);
     const std::wstring value = assignment.substr(equals + 1);
-    if (!valid_parameter_id(id) || value.size() > 64 || !seen.insert(id).second) return false;
-    if (id == L"amount") {
-      if (!parse_i32_arg(value.c_str(), 0, 500, output.amount)) return false;
-    } else if (id == L"direction") {
-      if (!parse_i32_arg(value.c_str(), 1, 3, output.direction)) return false;
-    } else if (id == L"seed") {
-      if (!parse_i32_arg(value.c_str(), 0, 10000, output.seed)) return false;
-    } else if (id == L"mix") {
-      if (!parse_double_arg(value.c_str(), 0.0, 100.0, output.mix)) return false;
-    } else if (id == L"invert_map") {
-      if (!parse_i32_arg(value.c_str(), 0, 1, output.invert_map)) return false;
-    } else {
-      return false;
-    }
+    int32_t index{};
+    if (!valid_parameter_id(id) || value.size() > 64 ||
+        !parse_i32_arg(index_text.c_str(), 1, static_cast<int32_t>(kMaxParams), index) ||
+        !seen_ids.insert(id).second || !seen_indices.insert(index).second) return false;
+    RequestedKind kind{};
+    if (kind_text == L"i32") kind = RequestedKind::Integer;
+    else if (kind_text == L"f64") kind = RequestedKind::Float;
+    else return false;
+    double parsed{};
+    const double minimum = kind == RequestedKind::Integer
+        ? static_cast<double>((std::numeric_limits<int32_t>::min)())
+        : -(std::numeric_limits<double>::max)();
+    const double maximum = kind == RequestedKind::Integer
+        ? static_cast<double>((std::numeric_limits<int32_t>::max)())
+        : (std::numeric_limits<double>::max)();
+    if (!parse_double_arg(value.c_str(), minimum, maximum, parsed) ||
+        (kind == RequestedKind::Integer && std::trunc(parsed) != parsed)) return false;
+    output.push_back({id, index, kind, parsed});
+    if (output.size() > kMaxParams) return false;
     if (separator == std::wstring::npos) break;
     offset = separator + 1;
     if (offset == payload.size()) return false;
   }
-  return seen.size() == 5;
+  return !output.empty();
+}
+
+bool validate_requested_assignments(const RequestedAssignments& requested) {
+  for (const auto& assignment : requested) {
+    if (assignment.index < 1 || static_cast<std::size_t>(assignment.index) > g_params.size()) return false;
+    const auto& descriptor = g_params[static_cast<std::size_t>(assignment.index - 1)];
+    const bool integer_compatible = descriptor.type == 1 || descriptor.type == 4 || descriptor.type == 7;
+    const bool float_compatible = descriptor.type == 10;
+    if ((assignment.kind == RequestedKind::Integer && !integer_compatible) ||
+        (assignment.kind == RequestedKind::Float && !float_compatible) || !descriptor.has_numeric ||
+        assignment.value < descriptor.valid_min || assignment.value > descriptor.valid_max) return false;
+  }
+  return true;
+}
+
+void initialize_parameter_definitions(
+    std::vector<std::array<std::byte, kParamSize>>& definitions) {
+  for (std::size_t i = 0; i < g_params.size(); ++i) {
+    definitions[i + 1] = g_params[i].raw;
+    if (g_params[i].type == 1 || g_params[i].type == 7)
+      write<int32_t>(definitions[i + 1], 56, static_cast<int32_t>(g_params[i].default_value));
+    else if (g_params[i].type == 4)
+      write<int32_t>(definitions[i + 1], 56, g_params[i].default_value != 0 ? 1 : 0);
+    else if (g_params[i].type == 10)
+      write<double>(definitions[i + 1], 56, g_params[i].default_value);
+  }
+}
+
+bool apply_requested_assignments(
+    std::vector<std::array<std::byte, kParamSize>>& definitions,
+    const RequestedAssignments& requested) {
+  if (!validate_requested_assignments(requested)) return false;
+  for (const auto& assignment : requested) {
+    const auto slot = static_cast<std::size_t>(assignment.index);
+    const auto type = g_params[slot - 1].type;
+    if (type == 1 || type == 4 || type == 7)
+      write<int32_t>(definitions[slot], 56, static_cast<int32_t>(assignment.value));
+    else if (type == 10)
+      write<double>(definitions[slot], 56, assignment.value);
+    else
+      return false;
+  }
+  return true;
+}
+
+double requested_value(const RequestedAssignments& requested, const wchar_t* id) {
+  const auto found = std::find_if(requested.begin(), requested.end(), [id](const auto& assignment) {
+    return assignment.id == id;
+  });
+  return found == requested.end() ? 0.0 : found->value;
 }
 #endif
 
@@ -440,7 +503,7 @@ int32_t render_once(EffectEntry entry, std::array<std::byte, kInSize>& input,
                     const std::string& case_id, int32_t& width, int32_t& height,
                     int32_t& rowbytes,
                     std::string& input_hash, std::string& output_hash,
-                    bool& guards_intact, const RenderParameters* requested = nullptr) {
+                    bool& guards_intact, const RequestedAssignments* requested = nullptr) {
   const bool connected_map = case_id == "connected_map" || case_id == "inverted_map";
   const bool partial_extent_hint = case_id == "partial_extent_hint";
   width = connected_map ? 11 : ((case_id == "odd_dimensions" || case_id == "padded_stride") ? 13 : 16);
@@ -458,12 +521,6 @@ int32_t render_once(EffectEntry entry, std::array<std::byte, kInSize>& input,
   else if (case_id == "odd_dimensions" || case_id == "padded_stride") { amount = 4; seed = 3; }
   else if (case_id == "inverted_map") { }
   else if (case_id != "default" && case_id != "connected_map" && case_id != "request" && !partial_extent_hint) return -2;
-  if (requested) {
-    amount = requested->amount;
-    direction = requested->direction;
-    seed = requested->seed;
-    mix = requested->mix;
-  }
   constexpr std::size_t guard = 64;
   std::vector<unsigned char> logical_source(width * height * 4);
   std::vector<unsigned char> source(rowbytes * height, 0x5A);
@@ -518,26 +575,21 @@ int32_t render_once(EffectEntry entry, std::array<std::byte, kInSize>& input,
     g_checkout_map_available = true;
   }
 
-  std::array<std::array<std::byte, kParamSize>, 8> definitions{};
+  std::vector<std::array<std::byte, kParamSize>> definitions(g_params.size() + 1);
   std::memcpy(definitions[0].data() + 56, input_world.data(), input_world.size());
-  for (std::size_t i = 0; i < g_params.size() && i + 1 < definitions.size(); ++i) {
-    definitions[i + 1] = g_params[i].raw;
-    constexpr std::size_t u = 56;
-    if (g_params[i].type == 1 || g_params[i].type == 7)
-      write<int32_t>(definitions[i + 1], u, static_cast<int32_t>(g_params[i].default_value));
-    else if (g_params[i].type == 4)
-      write<int32_t>(definitions[i + 1], u, g_params[i].default_value != 0 ? 1 : 0);
-    else if (g_params[i].type == 10)
-      write<double>(definitions[i + 1], u, g_params[i].default_value);
+  initialize_parameter_definitions(definitions);
+  if (requested) {
+    if (!apply_requested_assignments(definitions, *requested)) return -3;
+  } else {
+    if (definitions.size() <= 7) return -3;
+    write<int32_t>(definitions[1], 56, amount);
+    write<int32_t>(definitions[2], 56, direction);
+    write<int32_t>(definitions[3], 56, seed);
+    write<int32_t>(definitions[4], 56, repeat);
+    write<double>(definitions[5], 56, mix);
+    if (case_id == "inverted_map") write<int32_t>(definitions[7], 56, 1);
   }
-  write<int32_t>(definitions[1], 56, amount);
-  write<int32_t>(definitions[2], 56, direction);
-  write<int32_t>(definitions[3], 56, seed);
-  write<int32_t>(definitions[4], 56, repeat);
-  write<double>(definitions[5], 56, mix);
-  if (case_id == "inverted_map") write<int32_t>(definitions[7], 56, 1);
-  if (requested) write<int32_t>(definitions[7], 56, requested->invert_map);
-  std::array<void*, 9> params{};
+  std::vector<void*> params(definitions.size());
   for (std::size_t i = 0; i < definitions.size(); ++i) params[i] = definitions[i].data();
   write<int32_t>(input, 224, 0);
   write<int32_t>(input, 228, 1);
@@ -590,7 +642,7 @@ struct SmartResult {
 SmartResult smart_render_once(EffectEntry entry, std::array<std::byte, kInSize>& input,
                               std::array<std::byte, kOutSize>& command_output,
                               const std::string& case_id,
-                              const RenderParameters* requested = nullptr) {
+                              const RequestedAssignments* requested = nullptr) {
   SmartResult result;
   const bool deep16 = case_id == "deep16_default";
   const bool gpu_negotiation = case_id == "gpu_fallback_float32";
@@ -614,12 +666,6 @@ SmartResult smart_render_once(EffectEntry entry, std::array<std::byte, kInSize>&
   else if (case_id == "mix_zero") { amount = 500; seed = 10000; mix = 0.0; }
   else if (case_id == "odd_dimensions" || case_id == "padded_stride") { amount = 4; seed = 3; }
   else if (case_id != "default" && case_id != "request" && !deep16 && !float32 && !missing_input && !crash_null_output && !temporal_context && !partial_output_request && !connected_map) return result;
-  if (requested) {
-    amount = requested->amount;
-    direction = requested->direction;
-    seed = requested->seed;
-    mix = requested->mix;
-  }
   constexpr std::size_t guard = 64;
   std::vector<unsigned char> source(rowbytes * height, 0x5A);
   for (int32_t y = 0; y < height; ++y) for (int32_t x = 0; x < width; ++x) {
@@ -667,16 +713,19 @@ SmartResult smart_render_once(EffectEntry entry, std::array<std::byte, kInSize>&
     g_smart_map_world = map_world.data();
   }
 
-  std::array<std::array<std::byte, kParamSize>, 8> definitions{};
+  std::vector<std::array<std::byte, kParamSize>> definitions(g_params.size() + 1);
   std::memcpy(definitions[0].data() + 56, input_world.data(), input_world.size());
-  for (std::size_t i = 0; i < g_params.size() && i + 1 < definitions.size(); ++i)
-    definitions[i + 1] = g_params[i].raw;
-  write<int32_t>(definitions[1], 56, amount); write<int32_t>(definitions[2], 56, direction);
-  write<int32_t>(definitions[3], 56, seed); write<int32_t>(definitions[4], 56, repeat);
-  write<double>(definitions[5], 56, mix);
-  if (case_id == "inverted_map") write<int32_t>(definitions[7], 56, 1);
-  if (requested) write<int32_t>(definitions[7], 56, requested->invert_map);
-  std::array<void*, 9> params{};
+  initialize_parameter_definitions(definitions);
+  if (requested) {
+    if (!apply_requested_assignments(definitions, *requested)) return result;
+  } else {
+    if (definitions.size() <= 7) return result;
+    write<int32_t>(definitions[1], 56, amount); write<int32_t>(definitions[2], 56, direction);
+    write<int32_t>(definitions[3], 56, seed); write<int32_t>(definitions[4], 56, repeat);
+    write<double>(definitions[5], 56, mix);
+    if (case_id == "inverted_map") write<int32_t>(definitions[7], 56, 1);
+  }
+  std::vector<void*> params(definitions.size());
   for (std::size_t i = 0; i < definitions.size(); ++i) params[i] = definitions[i].data();
   if (crash_null_output)
     entry(kFrameSetup, input.data(), command_output.data(), params.data(), nullptr, nullptr);
@@ -816,12 +865,12 @@ int wmain(int argc, wchar_t** argv) {
 #ifdef AEXCOMPAT_RENDER_WORKER
   const bool request_mode = argc == 5 && std::wstring(argv[1]) == L"--render-request";
   if (!request_mode && (argc != 5 || std::wstring(argv[1]) != L"--render")) return 2;
-  RenderParameters requested_parameters;
+  RequestedAssignments requested_parameters;
   if (request_mode && !parse_parameter_payload(argv[4], requested_parameters)) return 3;
 #elif defined(AEXCOMPAT_SMART_WORKER)
   const bool request_mode = argc == 5 && std::wstring(argv[1]) == L"--smart-request";
   if (!request_mode && (argc != 5 || std::wstring(argv[1]) != L"--smart")) return 2;
-  RenderParameters requested_parameters;
+  RequestedAssignments requested_parameters;
   if (request_mode && !parse_parameter_payload(argv[4], requested_parameters)) return 3;
 #else
   if (argc != 4) return 2;
@@ -876,6 +925,14 @@ int wmain(int argc, wchar_t** argv) {
   const int32_t params_error = global_error == 0
       ? entry(kParamsSetup, input.data(), output.data(), nullptr, nullptr, nullptr) : -1;
   std::cerr << "stage:params_setup_end error=" << params_error << "\n" << std::flush;
+#if defined(AEXCOMPAT_RENDER_WORKER) || defined(AEXCOMPAT_SMART_WORKER)
+  if (request_mode && (params_error != 0 || !validate_requested_assignments(requested_parameters))) {
+    if (global_error == 0)
+      entry(kGlobalSetdown, input.data(), output.data(), nullptr, nullptr, nullptr);
+    FreeLibrary(module);
+    return 3;
+  }
+#endif
 #if !defined(AEXCOMPAT_RENDER_WORKER) && !defined(AEXCOMPAT_SMART_WORKER)
   std::array<std::array<std::byte, kParamSize>, 8> lifecycle_definitions{};
   std::array<unsigned char, 4> lifecycle_pixel{255, 0, 0, 0};
@@ -995,11 +1052,11 @@ int wmain(int argc, wchar_t** argv) {
             << ",\"thread_1_guards_intact\":" << (thread_guards[0] ? "true" : "false")
             << ",\"thread_2_guards_intact\":" << (thread_guards[1] ? "true" : "false")
             << ",\"request_mode\":" << (request_mode ? "true" : "false")
-            << ",\"requested_amount\":" << requested_parameters.amount
-            << ",\"requested_direction\":" << requested_parameters.direction
-            << ",\"requested_seed\":" << requested_parameters.seed
-            << ",\"requested_mix\":" << std::setprecision(17) << requested_parameters.mix
-            << ",\"requested_invert_map\":" << requested_parameters.invert_map
+            << ",\"requested_amount\":" << static_cast<int32_t>(requested_value(requested_parameters, L"amount"))
+            << ",\"requested_direction\":" << static_cast<int32_t>(requested_value(requested_parameters, L"direction"))
+            << ",\"requested_seed\":" << static_cast<int32_t>(requested_value(requested_parameters, L"seed"))
+            << ",\"requested_mix\":" << std::setprecision(17) << requested_value(requested_parameters, L"mix")
+            << ",\"requested_invert_map\":" << static_cast<int32_t>(requested_value(requested_parameters, L"invert_map"))
             << ",\"render_performed\":true}\n";
 #elif defined(AEXCOMPAT_SMART_WORKER)
   std::cout << "{\"schema_version\":1,\"stage\":\"smartfx_render\",\"status\":\""
@@ -1031,11 +1088,11 @@ int wmain(int argc, wchar_t** argv) {
             << smart.output_hash << "\",\"result_rects_valid\":" << (smart.rects_valid ? "true" : "false")
             << ",\"guard_bytes_intact\":" << (smart.guards_intact ? "true" : "false")
             << ",\"request_mode\":" << (request_mode ? "true" : "false")
-            << ",\"requested_amount\":" << requested_parameters.amount
-            << ",\"requested_direction\":" << requested_parameters.direction
-            << ",\"requested_seed\":" << requested_parameters.seed
-            << ",\"requested_mix\":" << std::setprecision(17) << requested_parameters.mix
-            << ",\"requested_invert_map\":" << requested_parameters.invert_map
+            << ",\"requested_amount\":" << static_cast<int32_t>(requested_value(requested_parameters, L"amount"))
+            << ",\"requested_direction\":" << static_cast<int32_t>(requested_value(requested_parameters, L"direction"))
+            << ",\"requested_seed\":" << static_cast<int32_t>(requested_value(requested_parameters, L"seed"))
+            << ",\"requested_mix\":" << std::setprecision(17) << requested_value(requested_parameters, L"mix")
+            << ",\"requested_invert_map\":" << static_cast<int32_t>(requested_value(requested_parameters, L"invert_map"))
             << ",\"render_performed\":true}\n";
 #else
   report(global_error == 0 && params_error == 0 ? "selectors_completed" : "selector_error",
