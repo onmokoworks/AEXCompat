@@ -39,20 +39,36 @@ def gradient(width: int, height: int) -> bytes:
     return bytes(pixels)
 
 
-def render_default(width: int = 16, height: int = 12) -> bytes:
+def render_case(width: int = 16, height: int = 12, *, amount: int = 5,
+                direction: int = 3, seed: int = 0, repeat_edge: bool = True,
+                mix: float = 100.0) -> bytes:
     source = gradient(width, height)
     output = bytearray(width * height * 4)
-    amount = f32(5.0)
+    amount_f = f32(float(amount))
     for y in range(height):
         for x in range(width):
-            dx = rust_round(f32(hash_pixel(x, y, 0, 0) * amount))
-            dy = rust_round(f32(hash_pixel(x, y, 0, 1) * amount))
-            sx = min(width - 1, max(0, x + dx))
-            sy = min(height - 1, max(0, y + dy))
-            source_offset = (sy * width + sx) * 4
             output_offset = (y * width + x) * 4
-            output[output_offset:output_offset + 4] = source[source_offset:source_offset + 4]
+            dx = rust_round(f32(hash_pixel(x, y, seed, 0) * amount_f)) if direction in (1, 3) else 0
+            dy = rust_round(f32(hash_pixel(x, y, seed, 1) * amount_f)) if direction in (2, 3) else 0
+            raw_x, raw_y = x + dx, y + dy
+            if not repeat_edge and not (0 <= raw_x < width and 0 <= raw_y < height):
+                output[output_offset:output_offset + 4] = b"\0\0\0\0"
+            else:
+                sx = min(width - 1, max(0, raw_x))
+                sy = min(height - 1, max(0, raw_y))
+                source_offset = (sy * width + sx) * 4
+                output[output_offset:output_offset + 4] = source[source_offset:source_offset + 4]
+    if mix < 100.0:
+        ratio = f32(mix / 100.0)
+        inverse = f32(1.0 - ratio)
+        for index in range(len(output)):
+            value = f32(f32(f32(float(source[index])) * inverse) + f32(f32(float(output[index])) * ratio))
+            output[index] = min(255, max(0, int(value)))
     return bytes(output)
+
+
+def render_default(width: int = 16, height: int = 12) -> bytes:
+    return render_case(width, height)
 
 
 def hashes() -> tuple[str, str]:

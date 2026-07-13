@@ -1,6 +1,6 @@
 import unittest
 
-from tools.scattermap_reference_oracle import hashes, render_default
+from tools.scattermap_reference_oracle import gradient, hashes, render_case, render_default
 
 
 class ScatterMapReferenceOracleTests(unittest.TestCase):
@@ -11,6 +11,17 @@ class ScatterMapReferenceOracleTests(unittest.TestCase):
 
     def test_reference_output_has_expected_size(self):
         self.assertEqual(len(render_default()), 16 * 12 * 4)
+
+    def test_extended_cases_exercise_distinct_behavior(self):
+        cases = {
+            "identity": render_case(amount=0),
+            "horizontal": render_case(amount=9, direction=1, seed=17),
+            "vertical_no_repeat": render_case(amount=7, direction=2, repeat_edge=False),
+            "mixed": render_case(amount=12, direction=3, seed=991, mix=37.5),
+            "odd_dimensions": render_case(13, 9, amount=4, seed=3),
+        }
+        self.assertEqual(len({value for value in cases.values()}), len(cases))
+        self.assertEqual(cases["identity"], gradient(16, 12))
 
 
 if __name__ == "__main__":
