@@ -4,7 +4,7 @@ fn main() {
     use std::path::{Component, PathBuf};
     let args: Vec<String> = std::env::args().collect();
     if args.len() != 3 || !args[2].ends_with(".json") {
-        eprintln!("usage: broker <selftest|l1-scattermap|l2-scattermap|render-scattermap> <create-new-json-output>");
+        eprintln!("usage: broker <selftest|l1-scattermap|l2-scattermap|render-scattermap|smart-scattermap> <create-new-json-output>");
         std::process::exit(2);
     }
     let executable = std::env::current_exe().expect("current executable");
@@ -30,6 +30,12 @@ fn main() {
         let worker = repository.join("target/minihost-build/aex_render_worker.exe");
         let passed = aexcompat_broker::render::run(repository, &worker, "scattermap", "default", &PathBuf::from(&args[2]))
             .expect("render broker run");
+        std::process::exit(if passed { 0 } else { 1 });
+    }
+    if args[1] == "smart-scattermap" {
+        let worker = repository.join("target/minihost-build/aex_smart_worker.exe");
+        let passed = aexcompat_broker::smart::run(repository, &worker, "scattermap", &PathBuf::from(&args[2]))
+            .expect("SmartFX broker run");
         std::process::exit(if passed { 0 } else { 1 });
     }
     let extended_case = match args[1].as_str() {

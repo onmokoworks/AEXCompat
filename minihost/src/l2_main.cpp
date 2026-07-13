@@ -41,6 +41,8 @@ constexpr int32_t kGlobalSetup = 1;
 constexpr int32_t kGlobalSetdown = 3;
 constexpr int32_t kParamsSetup = 4;
 constexpr int32_t kRender = 11;
+constexpr int32_t kSmartPreRender = 23;
+constexpr int32_t kSmartRender = 24;
 constexpr std::size_t kUtilsSize = 552;
 constexpr std::size_t kUtilsNewHandle = 160;
 constexpr std::size_t kUtilsLockHandle = 168;
@@ -69,6 +71,34 @@ struct ParamRecord {
 std::vector<ParamRecord> g_params;
 std::array<std::byte, kParamSize> g_checkout_definition{};
 bool g_checkout_map_available = false;
+void* g_smart_input_world = nullptr;
+void* g_smart_output_world = nullptr;
+
+void write_rect(void* destination, int32_t width, int32_t height) {
+  auto* bytes = static_cast<std::byte*>(destination);
+  const int32_t values[4] = {0, 0, height, width};
+  std::memcpy(bytes, values, sizeof(values));
+}
+
+int32_t __cdecl pre_checkout_layer(void*, int32_t index, int32_t checkout_id,
+                                   const void*, int32_t, int32_t, uint32_t,
+                                   void* result) {
+  if (index != 0 || checkout_id != 0 || !result) return 4;
+  write_rect(result, 16, 12);
+  write_rect(static_cast<std::byte*>(result) + 16, 16, 12);
+  return 0;
+}
+int32_t __cdecl smart_checkout_pixels(void*, int32_t checkout_id, void** world) {
+  if (!world || checkout_id != 0 || !g_smart_input_world) return 4;
+  *world = g_smart_input_world;
+  return 0;
+}
+int32_t __cdecl smart_checkin_pixels(void*, int32_t) { return 0; }
+int32_t __cdecl smart_checkout_output(void*, void** world) {
+  if (!world || !g_smart_output_world) return 4;
+  *world = g_smart_output_world;
+  return 0;
+}
 struct HandleRecord { void* data{}; std::size_t size{}; };
 std::unordered_set<HandleRecord*> g_handles;
 
@@ -397,6 +427,83 @@ int32_t render_once(EffectEntry entry, std::array<std::byte, kInSize>& input,
 }
 #endif
 
+#ifdef AEXCOMPAT_SMART_WORKER
+struct SmartResult {
+  int32_t pre_error{-1};
+  int32_t render_error{-1};
+  std::string input_hash;
+  std::string output_hash;
+  bool rects_valid{};
+  bool guards_intact{};
+};
+
+SmartResult smart_render_once(EffectEntry entry, std::array<std::byte, kInSize>& input,
+                              std::array<std::byte, kOutSize>& command_output) {
+  constexpr int32_t width = 16, height = 12, rowbytes = width * 4;
+  constexpr std::size_t guard = 64;
+  SmartResult result;
+  std::vector<unsigned char> source(rowbytes * height);
+  for (int32_t y = 0; y < height; ++y) for (int32_t x = 0; x < width; ++x) {
+    auto* pixel = &source[(y * width + x) * 4];
+    pixel[0] = 255;
+    pixel[1] = static_cast<unsigned char>(x * 255 / (width - 1));
+    pixel[2] = static_cast<unsigned char>(y * 255 / (height - 1));
+    pixel[3] = static_cast<unsigned char>((x + y) * 255 / (width + height - 2));
+  }
+  std::vector<unsigned char> guarded(rowbytes * height + guard * 2, 0xA5);
+  auto* destination = guarded.data() + guard;
+  std::memset(destination, 0xCC, rowbytes * height);
+  std::array<std::byte, 120> input_world{}, output_world{};
+  auto setup_world = [&](auto& world, void* pixels) {
+    write<void*>(world, 24, pixels); write<int32_t>(world, 32, rowbytes);
+    write<int32_t>(world, 36, width); write<int32_t>(world, 40, height);
+    write_rect(world.data() + 44, width, height);
+  };
+  setup_world(input_world, source.data()); setup_world(output_world, destination);
+
+  std::array<std::array<std::byte, kParamSize>, 8> definitions{};
+  std::memcpy(definitions[0].data() + 56, input_world.data(), input_world.size());
+  for (std::size_t i = 0; i < g_params.size() && i + 1 < definitions.size(); ++i)
+    definitions[i + 1] = g_params[i].raw;
+  write<int32_t>(definitions[1], 56, 5); write<int32_t>(definitions[2], 56, 3);
+  write<int32_t>(definitions[3], 56, 0); write<int32_t>(definitions[4], 56, 1);
+  write<double>(definitions[5], 56, 100.0);
+  std::array<void*, 9> params{};
+  for (std::size_t i = 0; i < definitions.size(); ++i) params[i] = definitions[i].data();
+
+  std::array<std::byte, 64> pre_input{}; std::array<std::byte, 56> pre_output{};
+  std::array<std::byte, 16> pre_callbacks{}; std::array<std::byte, 24> pre_extra{};
+  write_rect(pre_input.data(), width, height);
+  write<void*>(pre_callbacks, 0, reinterpret_cast<void*>(&pre_checkout_layer));
+  write<void*>(pre_extra, 0, pre_input.data()); write<void*>(pre_extra, 8, pre_output.data());
+  write<void*>(pre_extra, 16, pre_callbacks.data());
+  result.pre_error = entry(kSmartPreRender, input.data(), command_output.data(), params.data(), nullptr, pre_extra.data());
+  auto valid_rect = [&](std::size_t offset) {
+    const auto* p = pre_output.data() + offset;
+    const int32_t top = read<int32_t>(pre_output, offset), left = read<int32_t>(pre_output, offset + 4);
+    const int32_t bottom = read<int32_t>(pre_output, offset + 8), right = read<int32_t>(pre_output, offset + 12);
+    (void)p; return top >= 0 && left >= 0 && bottom >= top && right >= left && bottom <= height && right <= width;
+  };
+  result.rects_valid = result.pre_error == 0 && valid_rect(0) && valid_rect(16);
+
+  std::array<std::byte, 72> smart_input{}; std::array<std::byte, 24> callbacks{};
+  std::array<std::byte, 16> smart_extra{};
+  write<void*>(callbacks, 0, reinterpret_cast<void*>(&smart_checkout_pixels));
+  write<void*>(callbacks, 8, reinterpret_cast<void*>(&smart_checkin_pixels));
+  write<void*>(callbacks, 16, reinterpret_cast<void*>(&smart_checkout_output));
+  write<void*>(smart_extra, 0, smart_input.data()); write<void*>(smart_extra, 8, callbacks.data());
+  g_smart_input_world = input_world.data(); g_smart_output_world = output_world.data();
+  result.render_error = result.pre_error == 0
+      ? entry(kSmartRender, input.data(), command_output.data(), params.data(), nullptr, smart_extra.data()) : -1;
+  g_smart_input_world = nullptr; g_smart_output_world = nullptr;
+  result.input_hash = sha256_bytes(source.data(), source.size());
+  result.output_hash = sha256_bytes(destination, rowbytes * height);
+  result.guards_intact = std::all_of(guarded.begin(), guarded.begin() + guard, [](auto b) { return b == 0xA5; }) &&
+      std::all_of(guarded.end() - guard, guarded.end(), [](auto b) { return b == 0xA5; });
+  return result;
+}
+#endif
+
 void report(const char* status, int32_t global_error, int32_t params_error,
             int32_t setdown_error, const std::array<std::byte, kOutSize>& output) {
   const char* message = reinterpret_cast<const char*>(output.data() + kOutMessage);
@@ -435,6 +542,8 @@ int wmain(int argc, wchar_t** argv) {
 #ifdef AEXCOMPAT_RENDER_WORKER
   if (argc != 5) return 2;
   if (std::wstring(argv[1]) != L"--render") return 2;
+#elif defined(AEXCOMPAT_SMART_WORKER)
+  if (argc != 4 || std::wstring(argv[1]) != L"--smart") return 2;
 #else
   if (argc != 4) return 2;
   if (std::wstring(argv[1]) != L"--l2") return 2;
@@ -492,6 +601,11 @@ int wmain(int argc, wchar_t** argv) {
       ? render_once(entry, input, output, case_id, render_width, render_height,
                     render_rowbytes, input_hash, output_hash, guards_intact) : -1;
   std::cerr << "stage:render_end error=" << render_error << "\n" << std::flush;
+#elif defined(AEXCOMPAT_SMART_WORKER)
+  std::cerr << "stage:smart_render_begin\n" << std::flush;
+  const SmartResult smart = params_error == 0 ? smart_render_once(entry, input, output) : SmartResult{};
+  std::cerr << "stage:smart_render_end pre_error=" << smart.pre_error
+            << " render_error=" << smart.render_error << "\n" << std::flush;
 #endif
   std::cerr << "stage:global_setdown_begin\n" << std::flush;
   const int32_t setdown_error = global_error == 0
@@ -509,6 +623,20 @@ int wmain(int argc, wchar_t** argv) {
             << ",\"input_sha256\":\"" << input_hash << "\",\"output_sha256\":\""
             << output_hash << "\",\"guard_bytes_intact\":" << (guards_intact ? "true" : "false")
             << ",\"render_performed\":true}\n";
+#elif defined(AEXCOMPAT_SMART_WORKER)
+  std::cout << "{\"schema_version\":1,\"stage\":\"smartfx_render\",\"status\":\""
+            << (smart.pre_error == 0 && smart.render_error == 0 && smart.rects_valid && smart.guards_intact
+                ? "render_completed" : "render_failed")
+            << "\",\"global_setup_error\":" << global_error
+            << ",\"params_setup_error\":" << params_error
+            << ",\"pre_render_error\":" << smart.pre_error
+            << ",\"smart_render_error\":" << smart.render_error
+            << ",\"global_setdown_error\":" << setdown_error
+            << ",\"pixel_format\":\"argb8\",\"width\":16,\"height\":12,\"rowbytes\":64"
+            << ",\"input_sha256\":\"" << smart.input_hash << "\",\"output_sha256\":\""
+            << smart.output_hash << "\",\"result_rects_valid\":" << (smart.rects_valid ? "true" : "false")
+            << ",\"guard_bytes_intact\":" << (smart.guards_intact ? "true" : "false")
+            << ",\"render_performed\":true}\n";
 #else
   report(global_error == 0 && params_error == 0 ? "selectors_completed" : "selector_error",
          global_error, params_error, setdown_error, output);
@@ -516,6 +644,9 @@ int wmain(int argc, wchar_t** argv) {
   FreeLibrary(module);
 #ifdef AEXCOMPAT_RENDER_WORKER
   return global_error == 0 && params_error == 0 && render_error == 0 && guards_intact ? 0 : 21;
+#elif defined(AEXCOMPAT_SMART_WORKER)
+  return global_error == 0 && params_error == 0 && smart.pre_error == 0 && smart.render_error == 0 &&
+      smart.rects_valid && smart.guards_intact ? 0 : 22;
 #else
   return global_error == 0 && params_error == 0 ? 0 : 20;
 #endif

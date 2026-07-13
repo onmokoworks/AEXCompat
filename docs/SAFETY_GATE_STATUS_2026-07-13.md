@@ -1,12 +1,11 @@
 # Safety Gate Status (2026-07-13)
 
-This records staged gate openings, not blanket native execution approval. L1
-and L2 have authoritative evidence and explicit receipts. Rendering and every
-later stage remain forbidden until separately approved and re-audited.
+This records staged gate openings under the owner's continuous execution
+authorization. Each stage still requires fixed-fixture controls and re-audit.
 
 ## Current Result
 
-`gate_state: extended_classic_render_executed_smartfx_pending`
+`gate_state: smartfx_default_render_verified`
 
 | Gate | Status | Evidence and remaining work |
 | --- | --- | --- |
@@ -14,8 +13,8 @@ later stage remain forbidden until separately approved and re-audited.
 | G-2 loader approval receipt | Satisfied for L2 | Receipts `scattermap-l1-20260713-001` and `scattermap-l2-20260713-001` bind direct owner approvals to the fixed hash, staged selector scope, and expiry at 2026-08-12 23:59:59 +09:00. |
 | G-3 dependency review | Satisfied | Static x64 PE import review found only Windows/API-set and release VC runtime dependencies, all locally available, with zero candidate blockers. |
 | G-4 process isolation | Satisfied | B-1 broker selftest passes normal, timeout, crash, hang-kill, and sentinel-noninheritance scenarios under a kill-on-close Job Object. |
-| G-5 broker-owned path policy | Satisfied for L2 | The request carries only fixed id `scattermap`; separate L1/L2 broker paths resolve exactly one local-only allowlist entry and enforce stage, size, receipt, expiry text, timeout, and create-new output containment. Arbitrary plug-in paths remain forbidden. |
-| G-6 crash isolation | Satisfied for L2 | B-1 fault injection passes. L1 negative controls and initial L2 access violations were contained and classified; broker survival and create-new crash reports were verified. |
+| G-5 broker-owned path policy | Satisfied through SmartFX | Fixed broker commands resolve exactly one local-only allowlist entry and enforce stage, size, receipt, expiry, timeout, and create-new output containment. Arbitrary plug-in paths remain forbidden. |
+| G-6 crash isolation | Satisfied through SmartFX | B-1 fault injection passes. SmartFX ran twice in fresh Job Object-isolated workers and the broker survived. |
 | G-7 redaction and create-new output | Satisfied | Broker output is bounded and path-redacted; selftest output uses create-new semantics. Python and Rust negative tests are green. |
 | G-8 cleanroom and licensing decisions | Satisfied | The owner selected public-document cleanroom. Adobe terms were reviewed and the external SDK root `C:\Program Files\Adobe\AfterEffectsSDK` was confirmed. SDK material remains outside Git and outside `minihost/`. |
 
@@ -25,11 +24,12 @@ later stage remain forbidden until separately approved and re-audited.
 2. H-2 is complete: the local SDK root and applicable project terms boundary are recorded. The SDK remains outside Git.
 3. H-3 is complete: public-document cleanroom is recorded and remains enforced.
 4. G-2 and G-3 are complete through L2.
-5. L1/L2 implementation and re-audit are complete. A separate render approval and receipt are required before image execution.
+5. L1/L2, classic render, extended classic render, and default SmartFX render are complete.
 
 L1, L2, and one explicitly approved classic default render case were executed
 successfully through the isolated broker. Initialization, descriptor values,
 deterministic output, buffer guards, and independent pixel hash parity are
 observed. Extended classic render and connected map cases now have oracle
-parity. SmartFX/GPU and H-4 AE reference trace capture remain pending under the
+parity. Default SmartFX PreRender/Render now also has two-run deterministic
+oracle parity. GPU and H-4 AE reference trace capture remain pending under the
 continuous authorization and existing isolation controls.

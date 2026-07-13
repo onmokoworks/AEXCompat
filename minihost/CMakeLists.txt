@@ -15,3 +15,8 @@ add_executable(aex_render_worker src/l2_main.cpp)
 target_compile_features(aex_render_worker PRIVATE cxx_std_17)
 target_compile_definitions(aex_render_worker PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX AEXCOMPAT_RENDER_WORKER=1)
 target_link_libraries(aex_render_worker PRIVATE bcrypt)
+
+add_executable(aex_smart_worker src/l2_main.cpp)
+target_compile_features(aex_smart_worker PRIVATE cxx_std_17)
+target_compile_definitions(aex_smart_worker PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX AEXCOMPAT_SMART_WORKER=1)
+target_link_libraries(aex_smart_worker PRIVATE bcrypt)

@@ -8,6 +8,8 @@ pub mod l1;
 pub mod l2;
 #[cfg(windows)]
 pub mod render;
+#[cfg(windows)]
+pub mod smart;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ExitClassification {
