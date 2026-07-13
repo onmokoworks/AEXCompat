@@ -47,6 +47,7 @@ fn main() {
         "smart-padded-stride-scattermap" => Some("padded_stride"),
         "smart-connected-map-scattermap" => Some("connected_map"),
         "smart-inverted-map-scattermap" => Some("inverted_map"),
+        "smart-deep16-scattermap" => Some("deep16_default"),
         _ => None,
     };
     if let Some(case_id) = smart_case {

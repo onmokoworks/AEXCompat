@@ -3,7 +3,7 @@ import hashlib
 import json
 from pathlib import Path
 
-from tools.scattermap_reference_oracle import generated_luma_map, gradient, hashes, render_case, render_default
+from tools.scattermap_reference_oracle import generated_luma_map, gradient, hashes, render_case, render_default, render_default16
 
 
 class ScatterMapReferenceOracleTests(unittest.TestCase):
@@ -14,6 +14,12 @@ class ScatterMapReferenceOracleTests(unittest.TestCase):
 
     def test_reference_output_has_expected_size(self):
         self.assertEqual(len(render_default()), 16 * 12 * 4)
+
+    def test_deep16_oracle_records_fixture_byte_oriented_behavior(self):
+        output = render_default16()
+        self.assertEqual(len(output), 16 * 12 * 8)
+        self.assertEqual(hashlib.sha256(output).hexdigest().upper(),
+                         "FDC0BC732683E9353F9A855D6EA2589B17D43D29D7B538093B474BEC6D5AD026")
 
     def test_extended_cases_exercise_distinct_behavior(self):
         cases = {

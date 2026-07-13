@@ -28,6 +28,9 @@ int main() {
                "  \"pf_param_union_size\":" << sizeof(PF_ParamDefUnion) << ",\n"
                "  \"pf_util_callbacks_size\":" << sizeof(PF_UtilCallbacks) << ",\n"
                "  \"pf_pixel_size\":" << sizeof(PF_Pixel) << ",\n"
+               "  \"pf_pixel16_size\":" << sizeof(PF_Pixel16) << ",\n"
+               "  \"pf_pixel_float_size\":" << sizeof(PF_PixelFloat) << ",\n"
+               "  \"pf_world_flag_deep\":" << static_cast<unsigned long>(PF_WorldFlag_DEEP) << ",\n"
                "  \"pf_pre_render_extra_size\":" << sizeof(PF_PreRenderExtra) << ",\n"
                "  \"pf_pre_render_input_size\":" << sizeof(PF_PreRenderInput) << ",\n"
                "  \"pf_pre_render_output_size\":" << sizeof(PF_PreRenderOutput) << ",\n"
@@ -95,11 +98,20 @@ int main() {
   field<decltype(PF_LayerDef::height)>("layer.height", offsetof(PF_LayerDef, height), first);
   field<decltype(PF_LayerDef::rowbytes)>("layer.rowbytes", offsetof(PF_LayerDef, rowbytes), first);
   field<decltype(PF_LayerDef::data)>("layer.data", offsetof(PF_LayerDef, data), first);
+  field<decltype(PF_LayerDef::world_flags)>("layer.world_flags", offsetof(PF_LayerDef, world_flags), first);
   field<decltype(PF_LayerDef::extent_hint)>("layer.extent_hint", offsetof(PF_LayerDef, extent_hint), first);
   field<decltype(PF_Pixel::alpha)>("pixel.alpha", offsetof(PF_Pixel, alpha), first);
   field<decltype(PF_Pixel::red)>("pixel.red", offsetof(PF_Pixel, red), first);
   field<decltype(PF_Pixel::green)>("pixel.green", offsetof(PF_Pixel, green), first);
   field<decltype(PF_Pixel::blue)>("pixel.blue", offsetof(PF_Pixel, blue), first);
+  field<decltype(PF_Pixel16::alpha)>("pixel16.alpha", offsetof(PF_Pixel16, alpha), first);
+  field<decltype(PF_Pixel16::red)>("pixel16.red", offsetof(PF_Pixel16, red), first);
+  field<decltype(PF_Pixel16::green)>("pixel16.green", offsetof(PF_Pixel16, green), first);
+  field<decltype(PF_Pixel16::blue)>("pixel16.blue", offsetof(PF_Pixel16, blue), first);
+  field<decltype(PF_PixelFloat::alpha)>("pixel_float.alpha", offsetof(PF_PixelFloat, alpha), first);
+  field<decltype(PF_PixelFloat::red)>("pixel_float.red", offsetof(PF_PixelFloat, red), first);
+  field<decltype(PF_PixelFloat::green)>("pixel_float.green", offsetof(PF_PixelFloat, green), first);
+  field<decltype(PF_PixelFloat::blue)>("pixel_float.blue", offsetof(PF_PixelFloat, blue), first);
   field<decltype(PF_PreRenderExtra::input)>("pre_extra.input", offsetof(PF_PreRenderExtra, input), first);
   field<decltype(PF_PreRenderExtra::output)>("pre_extra.output", offsetof(PF_PreRenderExtra, output), first);
   field<decltype(PF_PreRenderExtra::cb)>("pre_extra.callbacks", offsetof(PF_PreRenderExtra, cb), first);
@@ -120,5 +132,8 @@ int main() {
             << ",\"render\":" << static_cast<int>(PF_Cmd_RENDER)
             << ",\"smart_pre_render\":" << static_cast<int>(PF_Cmd_SMART_PRE_RENDER)
             << ",\"smart_render\":" << static_cast<int>(PF_Cmd_SMART_RENDER)
+            << ",\"smart_render_gpu\":" << static_cast<int>(PF_Cmd_SMART_RENDER_GPU)
+            << ",\"gpu_device_setup\":" << static_cast<int>(PF_Cmd_GPU_DEVICE_SETUP)
+            << ",\"gpu_device_setdown\":" << static_cast<int>(PF_Cmd_GPU_DEVICE_SETDOWN)
             << "}\n}\n";
 }

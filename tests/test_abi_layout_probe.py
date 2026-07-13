@@ -25,6 +25,8 @@ class AbiLayoutProbeTests(unittest.TestCase):
             "inter.add_param", "param.param_type", "param.name",
             "PF_Cmd_GLOBAL_SETUP", "PF_Cmd_PARAMS_SETUP",
             "PF_Cmd_RENDER", "layer.rowbytes", "layer.data", "in.time_scale",
+            "pf_pixel16_size", "pf_pixel_float_size", "layer.world_flags",
+            "PF_Cmd_SMART_RENDER_GPU", "PF_Cmd_GPU_DEVICE_SETUP",
         ):
             self.assertIn(marker, text)
 
@@ -37,11 +39,18 @@ class AbiLayoutProbeTests(unittest.TestCase):
         self.assertEqual(data["fields"]["inter.add_param"]["offset"], 16)
         self.assertEqual(data["fields"]["param.u"]["offset"], 56)
         self.assertEqual(data["pf_pixel_size"], 4)
+        self.assertEqual(data["pf_pixel16_size"], 8)
+        self.assertEqual(data["pf_pixel_float_size"], 16)
+        self.assertEqual(data["pf_world_flag_deep"], 1)
         self.assertEqual(data["fields"]["layer.data"]["offset"], 24)
+        self.assertEqual(data["fields"]["layer.world_flags"]["offset"], 16)
         self.assertEqual(data["fields"]["pixel.alpha"]["offset"], 0)
         self.assertEqual(data["selectors"]["render"], 11)
         self.assertEqual(data["selectors"]["smart_pre_render"], 23)
         self.assertEqual(data["selectors"]["smart_render"], 24)
+        self.assertEqual(data["selectors"]["smart_render_gpu"], 31)
+        self.assertEqual(data["selectors"]["gpu_device_setup"], 32)
+        self.assertEqual(data["selectors"]["gpu_device_setdown"], 33)
         self.assertEqual(data["pf_smart_render_callbacks_size"], 24)
         self.assertFalse(data["native_aex_loaded"])
         self.assertFalse(data["selector_dispatched"])

@@ -5,7 +5,7 @@ authorization. Each stage still requires fixed-fixture controls and re-audit.
 
 ## Current Result
 
-`gate_state: smartfx_extended_matrix_verified`
+`gate_state: smartfx_argb8_matrix_and_deep16_behavior_verified`
 
 | Gate | Status | Evidence and remaining work |
 | --- | --- | --- |
@@ -31,6 +31,7 @@ successfully through the isolated broker. Initialization, descriptor values,
 deterministic output, buffer guards, and independent pixel hash parity are
 observed. Extended classic render and connected map cases now have oracle
 parity. SmartFX PreRender/Render now also has two-run deterministic oracle
-parity across nine cases, including padded stride and connected/inverted maps.
-GPU and H-4 AE reference trace capture remain pending under the
+parity across the ARGB8 matrix. A 16-bpc case also reproduces the fixture's
+declared-but-byte-oriented deep-color behavior exactly. 32-bpc, GPU, and H-4 AE
+reference trace capture remain pending under the
 continuous authorization and existing isolation controls.
