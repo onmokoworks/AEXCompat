@@ -40,6 +40,7 @@ class SmartFxSuiteFaultContractTests(unittest.TestCase):
             'L"--smart-stream-metadata-ownership-request"',
             'L"--smart-keyframe-ownership-request"',
             'L"--smart-dynamic-stream-tree-request"',
+            'L"--smart-aegp-memory-strings-request"',
             'L"--smart-suite-release-without-acquire-request"',
             'L"--smart-handle-resize-while-locked-request"',
             "MaskFault::CountError",
@@ -59,6 +60,8 @@ class SmartFxSuiteFaultContractTests(unittest.TestCase):
         self.assertIn('report.get("keyframe_fault_observed")', route)
         self.assertIn('"dynamic_stream_tree"', route)
         self.assertIn('report.get("dynamic_stream_fault_observed")', route)
+        self.assertIn('"aegp_memory_strings"', route)
+        self.assertIn('report.get("aegp_memory_fault_observed")', route)
         self.assertIn('"callback_error_rejected"', route)
         self.assertIn('"suite_release_without_acquire"', route)
         self.assertIn('report.get("suite_fault_observed")', route)

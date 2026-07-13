@@ -769,6 +769,16 @@ pub fn execute_smart_suite_fault(
             false,
             true,
         ),
+        "aegp_memory_strings" => (
+            "--smart-aegp-memory-strings-request",
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            true,
+        ),
         "world_double_dispose" => (
             "--smart-world-double-dispose-request",
             false,
@@ -936,6 +946,13 @@ pub fn execute_smart_suite_fault(
                     report.get("dynamic_stream_fault_observed") == Some(&Value::Bool(true))
                         && report.get("dynamic_stream_mutations") == Some(&json!(8))
                         && report.get("invalid_dynamic_stream_operations") == Some(&json!(1))
+                } else if fault_id == "aegp_memory_strings" {
+                    report.get("aegp_memory_fault_observed") == Some(&Value::Bool(true))
+                        && report.get("aegp_memory_created") == Some(&json!(3))
+                        && report.get("aegp_memory_freed") == Some(&json!(3))
+                        && report.get("live_aegp_memory_handles") == Some(&json!(0))
+                        && report.get("live_aegp_memory_bytes") == Some(&json!(0))
+                        && report.get("invalid_aegp_memory_operations") == Some(&json!(1))
                 } else {
                     report.get("mask_attribute_fault_observed") == Some(&Value::Bool(true))
                         && report.get("mask_mutations") == Some(&json!(11))
@@ -997,7 +1014,10 @@ pub fn execute_smart_suite_fault(
                       "keyframe_fault_observed", "keyframe_mutations",
                       "invalid_keyframe_operations", "dynamic_stream_fault_observed",
                       "dynamic_stream_queries", "dynamic_stream_mutations",
-                      "invalid_dynamic_stream_operations"] {
+                      "invalid_dynamic_stream_operations", "aegp_memory_fault_observed",
+                      "aegp_memory_created", "aegp_memory_freed",
+                      "live_aegp_memory_handles", "live_aegp_memory_bytes",
+                      "invalid_aegp_memory_operations"] {
             object.insert(field.to_string(), item.1.get(field).cloned().unwrap_or(Value::Null));
         }
         summary

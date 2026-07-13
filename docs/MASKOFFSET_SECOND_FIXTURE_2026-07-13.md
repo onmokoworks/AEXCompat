@@ -216,3 +216,8 @@ property tree independently of MaskOffset. Its `dynamic_stream_tree` route
 walks both indexed and match-name paths, roundtrips typed Opacity, mutates the
 Mask Parade, restores the original scene, and passed two isolated real-AEX
 runs without changing the fixture's render oracle.
+
+AEGP Memory Suite v1 provides owned UTF-16 handles for generic stream names and
+expressions. The `aegp_memory_strings` route validated nested locking, resize
+rejection, stats, expression state, and complete handle cleanup in two isolated
+MaskOffset runs; no fixture-specific string logic is present in the host core.

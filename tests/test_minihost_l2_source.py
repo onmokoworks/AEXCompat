@@ -48,6 +48,8 @@ class MinihostL2SourceTests(unittest.TestCase):
             "verify_keyframe_ownership_rejection()",
             "static_assert(sizeof(DynamicStreamSuite) == 26 * sizeof(void*))",
             "verify_dynamic_stream_tree_rejection()",
+            "static_assert(sizeof(AegpMemorySuite) == 8 * sizeof(void*))",
+            "verify_aegp_memory_and_strings_rejection()",
             "kMaxHandleCount = 1024",
             "kMaxHandleBytes = 64 * 1024 * 1024",
         ):

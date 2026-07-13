@@ -53,3 +53,7 @@ AEGP Dynamic Stream Suite v4 uses the same cleanroom rule for its 26-entry
 table, grouping/flag values, match-name buffers, and UTF-16 naming boundary.
 The local property-tree and StreamValue declarations are independently
 authored; no Adobe header is included or redistributed by `minihost/`.
+
+AEGP Memory Suite v1 follows the same boundary for its eight-entry callback
+table, 32-bit size/flag values, opaque handles, and UTF-16 payload ownership.
+All storage and synchronization are independently implemented in `minihost/`.

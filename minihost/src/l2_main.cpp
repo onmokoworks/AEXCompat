@@ -180,6 +180,8 @@ struct HostMask : OutlineData {
   std::u16string dynamic_name{u"Mask"};
   std::array<uint32_t, 5> dynamic_flags{};
   bool dynamic_modified{};
+  std::array<std::u16string, 4> expressions;
+  std::array<bool, 4> expression_enabled{};
   std::array<double, 4> color{1.0, 1.0, 0.0, 0.0};
   std::list<HostKeyframe> keyframes;
 };
@@ -548,6 +550,104 @@ bool verify_handle_resize_while_locked_rejected() {
       handle_lifetimes_balanced();
 }
 
+struct AegpMemoryRecord {
+  std::vector<std::byte> bytes;
+  int32_t plugin_id{};
+  uint32_t lock_count{};
+};
+std::unordered_map<void*, std::unique_ptr<AegpMemoryRecord>> g_aegp_memory;
+std::mutex g_aegp_memory_mutex;
+uint64_t g_aegp_memory_bytes{};
+uint32_t g_aegp_memory_created{};
+uint32_t g_aegp_memory_freed{};
+uint32_t g_invalid_aegp_memory_operations{};
+bool g_aegp_memory_reporting{};
+constexpr std::size_t kMaxAegpMemoryHandles = 256;
+constexpr uint64_t kMaxAegpMemoryBytes = 16 * 1024 * 1024;
+
+int32_t __cdecl new_aegp_mem_handle(int32_t plugin_id, const char* what, uint32_t size,
+                                    int32_t flags, void** handle) {
+  std::lock_guard<std::mutex> lock(g_aegp_memory_mutex);
+  if (plugin_id != 1 || !what || std::strlen(what) > 127 || !handle || (flags & ~3) != 0 ||
+      g_aegp_memory.size() >= kMaxAegpMemoryHandles ||
+      size > kMaxAegpMemoryBytes || g_aegp_memory_bytes > kMaxAegpMemoryBytes - size) {
+    if (handle) *handle = nullptr; ++g_invalid_aegp_memory_operations; return 4;
+  }
+  auto record = std::make_unique<AegpMemoryRecord>();
+  record->plugin_id = plugin_id; record->bytes.resize(size);
+  if ((flags & 1) == 0 && size) std::memset(record->bytes.data(), 0xcd, size);
+  void* key = record.get(); g_aegp_memory.emplace(key, std::move(record));
+  g_aegp_memory_bytes += size; ++g_aegp_memory_created; *handle = key; return 0;
+}
+int32_t __cdecl free_aegp_mem_handle(void* handle) {
+  std::lock_guard<std::mutex> lock(g_aegp_memory_mutex);
+  const auto found = g_aegp_memory.find(handle);
+  if (found == g_aegp_memory.end() || found->second->lock_count != 0) {
+    ++g_invalid_aegp_memory_operations; return 4;
+  }
+  g_aegp_memory_bytes -= found->second->bytes.size(); g_aegp_memory.erase(found);
+  ++g_aegp_memory_freed; return 0;
+}
+int32_t __cdecl lock_aegp_mem_handle(void* handle, void** data) {
+  std::lock_guard<std::mutex> lock(g_aegp_memory_mutex);
+  const auto found = g_aegp_memory.find(handle);
+  if (found == g_aegp_memory.end() || !data) { ++g_invalid_aegp_memory_operations; return 4; }
+  ++found->second->lock_count;
+  *data = found->second->bytes.empty() ? nullptr : found->second->bytes.data(); return 0;
+}
+int32_t __cdecl unlock_aegp_mem_handle(void* handle) {
+  std::lock_guard<std::mutex> lock(g_aegp_memory_mutex);
+  const auto found = g_aegp_memory.find(handle);
+  if (found == g_aegp_memory.end() || found->second->lock_count == 0) {
+    ++g_invalid_aegp_memory_operations; return 4;
+  }
+  --found->second->lock_count; return 0;
+}
+int32_t __cdecl get_aegp_mem_handle_size(void* handle, uint32_t* size) {
+  std::lock_guard<std::mutex> lock(g_aegp_memory_mutex);
+  const auto found = g_aegp_memory.find(handle);
+  if (found == g_aegp_memory.end() || !size) return 4;
+  *size = static_cast<uint32_t>(found->second->bytes.size()); return 0;
+}
+int32_t __cdecl resize_aegp_mem_handle(const char* what, uint32_t size, void* handle) {
+  std::lock_guard<std::mutex> lock(g_aegp_memory_mutex);
+  const auto found = g_aegp_memory.find(handle);
+  if (!what || std::strlen(what) > 127 || found == g_aegp_memory.end() ||
+      found->second->lock_count != 0 || size > kMaxAegpMemoryBytes ||
+      g_aegp_memory_bytes - found->second->bytes.size() > kMaxAegpMemoryBytes - size) {
+    ++g_invalid_aegp_memory_operations; return 4;
+  }
+  const std::size_t old_size = found->second->bytes.size(); found->second->bytes.resize(size);
+  g_aegp_memory_bytes = g_aegp_memory_bytes - old_size + size; return 0;
+}
+int32_t __cdecl set_aegp_mem_reporting(uint8_t enabled) {
+  g_aegp_memory_reporting = enabled != 0; return 0;
+}
+int32_t __cdecl get_aegp_mem_stats(int32_t plugin_id, int32_t* count, int32_t* size) {
+  std::lock_guard<std::mutex> lock(g_aegp_memory_mutex);
+  if (plugin_id != 1 || !count || !size) return 4;
+  uint64_t total{}; int32_t handles{};
+  for (const auto& item : g_aegp_memory) if (item.second->plugin_id == plugin_id) {
+    ++handles; total += item.second->bytes.size();
+  }
+  if (total > INT32_MAX) return 4;
+  *count = handles; *size = static_cast<int32_t>(total); return 0;
+}
+bool aegp_memory_balanced() {
+  std::lock_guard<std::mutex> lock(g_aegp_memory_mutex);
+  return g_aegp_memory.empty() && g_aegp_memory_bytes == 0 &&
+      g_aegp_memory_created == g_aegp_memory_freed;
+}
+int32_t make_utf16_handle(const std::u16string& text, const char* label, void** handle) {
+  const uint64_t bytes = (text.size() + 1) * sizeof(char16_t);
+  if (bytes > UINT32_MAX || new_aegp_mem_handle(1, label, static_cast<uint32_t>(bytes), 1, handle))
+    return 4;
+  void* data = nullptr;
+  if (lock_aegp_mem_handle(*handle, &data) != 0) { free_aegp_mem_handle(*handle); *handle = nullptr; return 4; }
+  std::memcpy(data, text.c_str(), static_cast<std::size_t>(bytes));
+  return unlock_aegp_mem_handle(*handle);
+}
+
 int32_t __cdecl register_with_aegp(void*, const char*, int32_t* plugin_id) {
   if (!plugin_id) return 4;
   *plugin_id = 1;
@@ -843,11 +943,23 @@ int32_t __cdecl unsupported_new_effect_stream(int32_t, void*, int32_t, void** st
   ++g_invalid_stream_operations;
   return 4;
 }
-int32_t __cdecl unsupported_stream_name(int32_t, void* stream, uint8_t, void** name) {
+std::u16string stream_display_name(const HostStreamRef& stream) {
+  switch (stream.kind) {
+    case DynamicNodeKind::LayerRoot: return u"Layer";
+    case DynamicNodeKind::MaskParade: return u"Masks";
+    case DynamicNodeKind::MaskAtom: return stream.mask ? stream.mask->dynamic_name : u"Mask";
+    case DynamicNodeKind::MaskOutline: return u"Mask Path";
+    case DynamicNodeKind::MaskFeather: return u"Mask Feather";
+    case DynamicNodeKind::MaskOpacity: return u"Mask Opacity";
+    case DynamicNodeKind::MaskExpansion: return u"Mask Expansion";
+  }
+  return {};
+}
+int32_t __cdecl unsupported_stream_name(int32_t plugin_id, void* stream, uint8_t, void** name) {
   if (name) *name = nullptr;
-  if (!find_stream(stream)) return 4;
-  ++g_invalid_stream_operations;
-  return 4;
+  HostStreamRef* record = find_stream(stream);
+  if (plugin_id != 1 || !record || !name) return 4;
+  return make_utf16_handle(stream_display_name(*record), "stream name", name);
 }
 int32_t __cdecl get_stream_units_text(void* stream, uint8_t, char* units) {
   HostStreamRef* record = find_stream(stream);
@@ -916,27 +1028,42 @@ int32_t __cdecl unsupported_layer_stream_value(void*, int32_t, int32_t, const vo
   ++g_invalid_stream_operations;
   return 4;
 }
+int32_t expression_index(DynamicNodeKind kind) {
+  return kind == DynamicNodeKind::MaskOutline ? 0 : kind == DynamicNodeKind::MaskFeather ? 1 :
+      kind == DynamicNodeKind::MaskOpacity ? 2 : kind == DynamicNodeKind::MaskExpansion ? 3 : -1;
+}
 int32_t __cdecl get_expression_state(int32_t plugin_id, void* stream, uint8_t* enabled) {
-  if (plugin_id != 1 || !find_stream(stream) || !enabled) return 4;
-  *enabled = 0;
+  HostStreamRef* record = find_stream(stream); const int32_t index = record ? expression_index(record->kind) : -1;
+  if (plugin_id != 1 || !record || !record->mask || index < 0 || !enabled) return 4;
+  *enabled = record->mask->expression_enabled[static_cast<std::size_t>(index)] ? 1 : 0;
   ++g_stream_metadata_queries;
   return 0;
 }
-int32_t __cdecl reject_expression_state(int32_t, void* stream, uint8_t) {
-  if (!find_stream(stream)) return 4;
-  ++g_invalid_stream_operations;
-  return 4;
+int32_t __cdecl reject_expression_state(int32_t plugin_id, void* stream, uint8_t enabled) {
+  HostStreamRef* record = find_stream(stream); const int32_t index = record ? expression_index(record->kind) : -1;
+  if (plugin_id != 1 || !record || !record->mask || index < 0 ||
+      (enabled && record->mask->expressions[static_cast<std::size_t>(index)].empty())) {
+    ++g_invalid_stream_operations; return 4;
+  }
+  record->mask->expression_enabled[static_cast<std::size_t>(index)] = enabled != 0;
+  record->mask->dynamic_modified = true; return 0;
 }
-int32_t __cdecl unsupported_get_expression(int32_t, void* stream, void** expression) {
+int32_t __cdecl unsupported_get_expression(int32_t plugin_id, void* stream, void** expression) {
   if (expression) *expression = nullptr;
-  if (!find_stream(stream)) return 4;
-  ++g_invalid_stream_operations;
-  return 4;
+  HostStreamRef* record = find_stream(stream); const int32_t index = record ? expression_index(record->kind) : -1;
+  if (plugin_id != 1 || !record || !record->mask || index < 0 || !expression) return 4;
+  return make_utf16_handle(record->mask->expressions[static_cast<std::size_t>(index)],
+                           "stream expression", expression);
 }
-int32_t __cdecl unsupported_set_expression(int32_t, void* stream, const uint16_t*) {
-  if (!find_stream(stream)) return 4;
-  ++g_invalid_stream_operations;
-  return 4;
+int32_t __cdecl unsupported_set_expression(int32_t plugin_id, void* stream, const uint16_t* expression) {
+  HostStreamRef* record = find_stream(stream); const int32_t index = record ? expression_index(record->kind) : -1;
+  if (plugin_id != 1 || !record || !record->mask || index < 0 || !expression) return 4;
+  std::size_t length = 0; while (length <= 4096 && expression[length]) ++length;
+  if (length > 4096) { ++g_invalid_stream_operations; return 4; }
+  auto& stored = record->mask->expressions[static_cast<std::size_t>(index)];
+  stored.assign(reinterpret_cast<const char16_t*>(expression), length);
+  record->mask->expression_enabled[static_cast<std::size_t>(index)] = !stored.empty();
+  record->mask->dynamic_modified = true; return 0;
 }
 int32_t __cdecl duplicate_stream_ref(int32_t plugin_id, void* stream, void** duplicate) {
   HostStreamRef* original = find_stream(stream);
@@ -1598,6 +1725,46 @@ bool verify_dynamic_stream_tree_rejection() {
       g_invalid_dynamic_stream_operations == invalid_before + 1;
 }
 
+bool verify_aegp_memory_and_strings_rejection() {
+  const auto original_scene = g_mask_scene;
+  const uint32_t invalid_before = g_invalid_aegp_memory_operations;
+  const uint32_t created_before = g_aegp_memory_created;
+  const uint32_t freed_before = g_aegp_memory_freed;
+  void* memory = nullptr; void* data = nullptr; uint32_t size{}; int32_t count{}, total{};
+  bool passed = new_aegp_mem_handle(1, "fault probe", 32, 1, &memory) == 0 &&
+      lock_aegp_mem_handle(memory, &data) == 0 && data &&
+      std::all_of(static_cast<std::byte*>(data), static_cast<std::byte*>(data) + 32,
+          [](std::byte value) { return value == std::byte{}; }) &&
+      lock_aegp_mem_handle(memory, &data) == 0 &&
+      resize_aegp_mem_handle("locked", 64, memory) != 0 &&
+      unlock_aegp_mem_handle(memory) == 0 && unlock_aegp_mem_handle(memory) == 0 &&
+      resize_aegp_mem_handle("resized", 64, memory) == 0 &&
+      get_aegp_mem_handle_size(memory, &size) == 0 && size == 64 &&
+      get_aegp_mem_stats(1, &count, &total) == 0 && count == 1 && total == 64 &&
+      free_aegp_mem_handle(memory) == 0;
+  void* mask = nullptr; void* stream = nullptr; void* name = nullptr; void* expression = nullptr;
+  passed = passed && get_layer_mask_by_index(&g_layer, 0, &mask) == 0 &&
+      get_new_mask_stream(1, mask, 400, &stream) == 0 &&
+      unsupported_stream_name(1, stream, 1, &name) == 0 &&
+      lock_aegp_mem_handle(name, &data) == 0 && data &&
+      std::u16string(static_cast<const char16_t*>(data)) == u"Mask Path" &&
+      unlock_aegp_mem_handle(name) == 0 && free_aegp_mem_handle(name) == 0;
+  const uint16_t source[]{'t','i','m','e','*','2',0}; uint8_t enabled{};
+  passed = passed && unsupported_set_expression(1, stream, source) == 0 &&
+      get_expression_state(1, stream, &enabled) == 0 && enabled == 1 &&
+      unsupported_get_expression(1, stream, &expression) == 0 &&
+      lock_aegp_mem_handle(expression, &data) == 0 && data &&
+      std::u16string(static_cast<const char16_t*>(data)) == u"time*2" &&
+      unlock_aegp_mem_handle(expression) == 0 && free_aegp_mem_handle(expression) == 0 &&
+      reject_expression_state(1, stream, 0) == 0 &&
+      get_expression_state(1, stream, &enabled) == 0 && enabled == 0 &&
+      dispose_stream(stream) == 0 && dispose_mask(mask) == 0;
+  const bool balanced = mask_lifetimes_balanced() && aegp_memory_balanced();
+  g_mask_scene = original_scene; g_mask_scene.reserve(kMaxHostMasks);
+  return passed && balanced && g_invalid_aegp_memory_operations == invalid_before + 1 &&
+      g_aegp_memory_created == created_before + 3 && g_aegp_memory_freed == freed_before + 3;
+}
+
 int32_t __cdecl is_mask_outline_open(void* outline, uint8_t* open) {
   OutlineData* record = find_outline(outline);
   if (!record || !open) return 4;
@@ -2020,6 +2187,17 @@ struct DynamicStreamSuite {
   decltype(&reject_get_separation_dimension) get_separation_dimension;
 };
 static_assert(sizeof(DynamicStreamSuite) == 26 * sizeof(void*));
+struct AegpMemorySuite {
+  decltype(&new_aegp_mem_handle) new_mem_handle;
+  decltype(&free_aegp_mem_handle) free_mem_handle;
+  decltype(&lock_aegp_mem_handle) lock_mem_handle;
+  decltype(&unlock_aegp_mem_handle) unlock_mem_handle;
+  decltype(&get_aegp_mem_handle_size) get_mem_handle_size;
+  decltype(&resize_aegp_mem_handle) resize_mem_handle;
+  decltype(&set_aegp_mem_reporting) set_mem_reporting_on;
+  decltype(&get_aegp_mem_stats) get_mem_stats;
+};
+static_assert(sizeof(AegpMemorySuite) == 8 * sizeof(void*));
 struct MaskOutlineSuite {
   decltype(&is_mask_outline_open) is_open;
   decltype(&set_mask_outline_open) set_open;
@@ -2075,6 +2253,9 @@ DynamicStreamSuite g_dynamic_stream_suite{&get_new_dynamic_stream_for_layer,
     &reject_set_dimensions_separated, &reject_get_separation_follower,
     &is_separation_follower, &reject_get_separation_leader,
     &reject_get_separation_dimension};
+AegpMemorySuite g_aegp_memory_suite{&new_aegp_mem_handle, &free_aegp_mem_handle,
+    &lock_aegp_mem_handle, &unlock_aegp_mem_handle, &get_aegp_mem_handle_size,
+    &resize_aegp_mem_handle, &set_aegp_mem_reporting, &get_aegp_mem_stats};
 MaskOutlineSuite g_mask_outline_suite{&is_mask_outline_open, &set_mask_outline_open,
                                       &get_mask_outline_num_segments,
                                       &get_mask_outline_vertex_info,
@@ -2413,6 +2594,8 @@ int32_t __cdecl acquire_suite(const char* name, int32_t version, const void** su
     *suite = &g_keyframe_suite;
   else if (std::strcmp(name, "AEGP Dynamic Stream Suite") == 0 && version == 5)
     *suite = &g_dynamic_stream_suite;
+  else if (std::strcmp(name, "AEGP Memory Suite") == 0 && version == 1)
+    *suite = &g_aegp_memory_suite;
   else if (std::strcmp(name, "AEGP Mask Outline Suite") == 0 && version == 5)
     *suite = &g_mask_outline_suite;
   else
@@ -3251,6 +3434,8 @@ int wmain(int argc, wchar_t** argv) {
       std::wstring(argv[1]) == L"--smart-keyframe-ownership-request";
   const bool dynamic_stream_tree_mode = argc == 5 &&
       std::wstring(argv[1]) == L"--smart-dynamic-stream-tree-request";
+  const bool aegp_memory_strings_mode = argc == 5 &&
+      std::wstring(argv[1]) == L"--smart-aegp-memory-strings-request";
   const bool suite_release_without_acquire_mode = argc == 5 &&
       std::wstring(argv[1]) == L"--smart-suite-release-without-acquire-request";
   const bool handle_resize_while_locked_mode = argc == 5 &&
@@ -3269,6 +3454,7 @@ int wmain(int argc, wchar_t** argv) {
       mask_count_error_mode || mask_count_crash_mode || mask_double_dispose_mode ||
       stream_live_value_dispose_mode || stream_metadata_ownership_mode || keyframe_ownership_mode ||
       dynamic_stream_tree_mode ||
+      aegp_memory_strings_mode ||
       suite_release_without_acquire_mode ||
       handle_resize_while_locked_mode || world_double_dispose_mode ||
       world_allocation_limit_mode ||
@@ -3281,6 +3467,7 @@ int wmain(int argc, wchar_t** argv) {
       mask_count_error_mode || mask_count_crash_mode || mask_double_dispose_mode ||
       stream_live_value_dispose_mode || stream_metadata_ownership_mode || keyframe_ownership_mode ||
       dynamic_stream_tree_mode ||
+      aegp_memory_strings_mode ||
       suite_release_without_acquire_mode ||
       handle_resize_while_locked_mode || world_double_dispose_mode ||
       world_allocation_limit_mode;
@@ -3472,6 +3659,7 @@ int wmain(int argc, wchar_t** argv) {
   bool stream_metadata_fault_observed = false;
   bool keyframe_fault_observed = false;
   bool dynamic_stream_fault_observed = false;
+  bool aegp_memory_fault_observed = false;
   std::cerr << "stage:smart_render_end pre_error=" << smart.pre_error
             << " render_error=" << smart.render_error << "\n" << std::flush;
 #endif
@@ -3499,6 +3687,8 @@ int wmain(int argc, wchar_t** argv) {
     keyframe_fault_observed = verify_keyframe_ownership_rejection();
   if (dynamic_stream_tree_mode)
     dynamic_stream_fault_observed = verify_dynamic_stream_tree_rejection();
+  if (aegp_memory_strings_mode)
+    aegp_memory_fault_observed = verify_aegp_memory_and_strings_rejection();
   #endif
   std::cerr << "stage:global_setdown_end error=" << setdown_error << "\n" << std::flush;
 #ifdef AEXCOMPAT_RENDER_WORKER
@@ -3616,6 +3806,12 @@ int wmain(int argc, wchar_t** argv) {
             << ",\"dynamic_stream_queries\":" << g_dynamic_stream_queries
             << ",\"dynamic_stream_mutations\":" << g_dynamic_stream_mutations
             << ",\"invalid_dynamic_stream_operations\":" << g_invalid_dynamic_stream_operations
+            << ",\"aegp_memory_fault_observed\":" << (aegp_memory_fault_observed ? "true" : "false")
+            << ",\"aegp_memory_created\":" << g_aegp_memory_created
+            << ",\"aegp_memory_freed\":" << g_aegp_memory_freed
+            << ",\"live_aegp_memory_handles\":" << g_aegp_memory.size()
+            << ",\"live_aegp_memory_bytes\":" << g_aegp_memory_bytes
+            << ",\"invalid_aegp_memory_operations\":" << g_invalid_aegp_memory_operations
             << ",\"requested_parameters\":" << requested_parameters_json(requested_parameters)
             << ",\"requested_amount\":" << static_cast<int32_t>(requested_value(requested_parameters, L"amount"))
             << ",\"requested_direction\":" << static_cast<int32_t>(requested_value(requested_parameters, L"direction"))

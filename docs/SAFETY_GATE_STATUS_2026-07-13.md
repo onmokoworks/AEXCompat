@@ -210,3 +210,13 @@ and Expansion now use typed OneD/TwoD StreamValue storage with units and bounds.
 The fixed `dynamic_stream_tree` gate passed twice after native MaskOffset
 rendering with twenty traversal queries, eight mutations, one intentional
 flag-policy rejection, restored scene state, intact guards, and balanced refs.
+
+AEGP Memory Suite v1 now implements all eight callbacks with a mutex-protected
+registry capped at 256 handles and 16 MiB. Handles support CLEAR allocation,
+nested locks, size/stats queries, unlocked resize, reporting state, and strict
+free ownership. Stream names and expressions now return owned null-terminated
+UTF-16 memory handles; per-leaf expression text and enabled state are retained.
+The fixed `aegp_memory_strings` gate passed twice after native MaskOffset render,
+created and freed three handles per run, rejected one resize while nested-
+locked, roundtripped `Mask Path` and `time*2`, preserved guards, and ended with
+zero live AEGP memory handles or bytes.
