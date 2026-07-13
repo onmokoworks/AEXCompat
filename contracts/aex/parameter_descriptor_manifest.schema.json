@@ -1,0 +1,52 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://aexcompat.local/contracts/aex/parameter_descriptor_manifest.schema.json",
+  "schema_name": "AEXCompat observed parameter descriptor manifest schema",
+  "schema_version": 1,
+  "title": "AEXCompat observed parameter descriptor manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "plugin_id", "source", "descriptors"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "plugin_id": {"type": "string", "pattern": "^[a-z][a-z0-9_-]{0,63}$"},
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["stage", "plugin_sha256", "receipt_id"],
+      "properties": {
+        "stage": {"const": "L2"},
+        "plugin_sha256": {"type": "string", "pattern": "^[0-9A-F]{64}$"},
+        "receipt_id": {"type": "string", "minLength": 1, "maxLength": 128}
+      }
+    },
+    "descriptors": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 64,
+      "items": {"$ref": "#/$defs/descriptor"}
+    }
+  },
+  "$defs": {
+    "descriptor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["slot", "observed_type", "display_name", "assignable"],
+      "properties": {
+        "slot": {"type": "integer", "minimum": 1, "maximum": 64},
+        "observed_type": {"type": "integer", "minimum": 0},
+        "display_name": {"type": "string", "minLength": 1, "maxLength": 63},
+        "assignable": {"type": "boolean"},
+        "id": {"type": "string", "pattern": "^[a-z][a-z0-9_]{0,63}$"},
+        "kind": {"enum": ["integer", "float"]},
+        "minimum": {"type": "number"},
+        "maximum": {"type": "number"},
+        "default": {"type": "number"}
+      },
+      "allOf": [{
+        "if": {"properties": {"assignable": {"const": true}}},
+        "then": {"required": ["id", "kind", "minimum", "maximum", "default"]}
+      }]
+    }
+  }
+}

@@ -20,14 +20,19 @@ and an independent oracle used to prove compatibility. Profiles are test
 evidence and safety configuration; they do not define generic host semantics.
 Unknown profile ids fail closed and are never interpreted as ScatterMap.
 
-The current ScatterMap profile owns its five observed numeric descriptors,
-defaults, typed render adapter, and ARGB8 oracle. The generic parameter core
-owns descriptor-id lookup and type/range validation. Render request schema v2
-now carries a generic descriptor-id keyed numeric map. Parameter validation and
-render CLI operations are fixture-neutral and resolve `plugin_id` through the
-registry. Allowlist parsing and artifact/resource validation are generic host
-policy; each profile supplies its reviewed approval policy and worker launch
-specification. Parameter workers receive one bounded, versioned
+The current ScatterMap profile owns a typed render adapter and ARGB8 oracle. Its
+parameter definitions are not compiled into that adapter: a promoted L2
+descriptor manifest records all seven observed slots, marks five numeric slots
+assignable, binds the observation to the reviewed plug-in digest and L2 receipt,
+and is pinned by a canonical JSON SHA-256 in the registry. The generic manifest
+loader owns strict parsing, digest verification, slot continuity, uniqueness,
+type/kind agreement, and finite range/default checks. The generic parameter core
+owns descriptor-id lookup, validation, default application, and worker payload
+encoding. Render request schema v2 carries a descriptor-id keyed numeric map.
+Parameter validation and render CLI operations are fixture-neutral and resolve
+`plugin_id` through the registry. Allowlist parsing and artifact/resource
+validation are generic host policy; each profile supplies its reviewed approval
+policy and worker launch specification. Parameter workers receive one bounded, versioned
 descriptor/slot/kind/value payload rather than a fixed positional argument list.
 They validate its syntax before native loading, then match every requested slot,
 kind, and range against descriptors observed during `PF_PARAMS_SETUP` before any

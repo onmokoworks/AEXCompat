@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "plugin_id": "scattermap",
+  "source": {
+    "stage": "L2",
+    "plugin_sha256": "223FF5EC542DD74374C727F16AA6C068073D1C2D7A5CABF20512CB289F0716EB",
+    "receipt_id": "scattermap-l2-20260713-001"
+  },
+  "descriptors": [
+    {"slot": 1, "observed_type": 1, "display_name": "Scatter Amount", "assignable": true, "id": "amount", "kind": "integer", "minimum": 0, "maximum": 500, "default": 5},
+    {"slot": 2, "observed_type": 7, "display_name": "Direction", "assignable": true, "id": "direction", "kind": "integer", "minimum": 1, "maximum": 3, "default": 3},
+    {"slot": 3, "observed_type": 1, "display_name": "Random Seed", "assignable": true, "id": "seed", "kind": "integer", "minimum": 0, "maximum": 10000, "default": 0},
+    {"slot": 4, "observed_type": 4, "display_name": "Repeat Edge Pixels", "assignable": false},
+    {"slot": 5, "observed_type": 10, "display_name": "Mix with Original", "assignable": true, "id": "mix", "kind": "float", "minimum": 0, "maximum": 100, "default": 100},
+    {"slot": 6, "observed_type": 0, "display_name": "Scatter Map", "assignable": false},
+    {"slot": 7, "observed_type": 4, "display_name": "Invert Map", "assignable": true, "id": "invert_map", "kind": "integer", "minimum": 0, "maximum": 1, "default": 0}
+  ]
+}

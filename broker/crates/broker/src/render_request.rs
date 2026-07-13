@@ -1,6 +1,10 @@
-use crate::fixture_profiles::scattermap::{argb8_hash, bind, worker_payload, RenderParameters};
+use crate::fixture_profiles::scattermap::{argb8_hash, bind, RenderParameters};
 use crate::fixture_profiles::{ParameterizedRenderAdapter, RegisteredProfile};
-use crate::host_core::parameter::{validate_assignments, ValidationError};
+use crate::host_core::descriptor_manifest::{load as load_manifest, LoadedManifest};
+use crate::host_core::parameter::{
+    apply_defaults, encode_worker_payload, validate_assignments, PluginProfile,
+    ValidatedAssignments, ValidationError,
+};
 use crate::windows_process::run_isolated;
 use serde::de::{MapAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
@@ -71,15 +75,30 @@ struct Report {
 
 fn evaluate(
     request: &Request,
-    profile: &RegisteredProfile,
-) -> io::Result<(RenderParameters, usize, Vec<ValidationError>)> {
+    profile: &PluginProfile,
+    adapter: ParameterizedRenderAdapter,
+) -> io::Result<(
+    RenderParameters,
+    ValidatedAssignments,
+    usize,
+    Vec<ValidationError>,
+)> {
     let assignment_count = request.assignments.0.len();
     let (validated, errors) =
-        validate_assignments(profile.parameters, &request.assignments.0).map_err(invalid)?;
-    let parameters = match profile.parameterized_render {
-        ParameterizedRenderAdapter::ScatterMap => bind(&validated),
+        validate_assignments(profile, &request.assignments.0).map_err(invalid)?;
+    let effective = apply_defaults(profile, &validated);
+    let parameters = match adapter {
+        ParameterizedRenderAdapter::ScatterMap => bind(&effective),
     };
-    Ok((parameters, assignment_count, errors))
+    Ok((parameters, effective, assignment_count, errors))
+}
+
+fn descriptors(
+    repository: &Path,
+    plugin_id: &str,
+    registered: &RegisteredProfile,
+) -> io::Result<LoadedManifest> {
+    load_manifest(repository, plugin_id, registered.descriptor_manifest)
 }
 
 fn invalid(message: impl Into<String>) -> io::Error {
@@ -146,7 +165,9 @@ pub fn run(repository: &Path, request_path: &Path, output_path: &Path) -> io::Re
     }
     let profile = crate::fixture_profiles::find(&request.plugin_id)
         .ok_or_else(|| invalid("unknown plugin profile"))?;
-    let (_, assignment_count, errors) = evaluate(&request, profile)?;
+    let manifest = descriptors(repository, &request.plugin_id, profile)?;
+    let (_, _, assignment_count, errors) =
+        evaluate(&request, &manifest.profile, profile.parameterized_render)?;
     let accepted = errors.is_empty();
     let report = Report {
         schema_version: 1,
@@ -187,7 +208,9 @@ pub fn execute(repository: &Path, request_path: &Path, output_path: &Path) -> io
     }
     let profile = crate::fixture_profiles::find(&request.plugin_id)
         .ok_or_else(|| invalid("unknown plugin profile"))?;
-    let (parameters, assignment_count, errors) = evaluate(&request, profile)?;
+    let manifest = descriptors(repository, &request.plugin_id, profile)?;
+    let (parameters, effective, assignment_count, errors) =
+        evaluate(&request, &manifest.profile, profile.parameterized_render)?;
     if !errors.is_empty() {
         let report = json!({"schema_version":1,"stage":"parameterized_classic_render",
             "plugin_id":request.plugin_id,"assignment_count":assignment_count,"accepted":false,
@@ -202,6 +225,12 @@ pub fn execute(repository: &Path, request_path: &Path, output_path: &Path) -> io
         return Ok(false);
     }
     let approved = crate::render::entry(repository, &request.plugin_id)?;
+    if !manifest
+        .plugin_sha256
+        .eq_ignore_ascii_case(&approved.sha256)
+    {
+        return Err(invalid("descriptor manifest plugin digest mismatch"));
+    }
     let worker = repository.join(profile.classic_worker.executable);
     let expected = argb8_hash(
         parameters.amount,
@@ -213,7 +242,7 @@ pub fn execute(repository: &Path, request_path: &Path, output_path: &Path) -> io
         profile.classic_worker.request_mode.to_string(),
         approved.plugin_path.to_string_lossy().into_owned(),
         approved.sha256.to_ascii_lowercase(),
-        worker_payload(parameters),
+        encode_worker_payload(&manifest.profile, &effective).map_err(invalid)?,
     ];
     let mut runs = Vec::new();
     for _ in 0..2 {
@@ -289,7 +318,9 @@ pub fn execute_smart(
     }
     let profile = crate::fixture_profiles::find(&request.plugin_id)
         .ok_or_else(|| invalid("unknown plugin profile"))?;
-    let (parameters, assignment_count, errors) = evaluate(&request, profile)?;
+    let manifest = descriptors(repository, &request.plugin_id, profile)?;
+    let (parameters, effective, assignment_count, errors) =
+        evaluate(&request, &manifest.profile, profile.parameterized_render)?;
     if !errors.is_empty() {
         let report = json!({"schema_version":1,"stage":"parameterized_smartfx_render",
             "plugin_id":request.plugin_id,"assignment_count":assignment_count,"accepted":false,
@@ -304,6 +335,12 @@ pub fn execute_smart(
         return Ok(false);
     }
     let approved = crate::smart::approved_entry(repository, &request.plugin_id)?;
+    if !manifest
+        .plugin_sha256
+        .eq_ignore_ascii_case(&approved.sha256)
+    {
+        return Err(invalid("descriptor manifest plugin digest mismatch"));
+    }
     let worker = repository.join(profile.smart_worker.executable);
     let expected = argb8_hash(
         parameters.amount,
@@ -315,7 +352,7 @@ pub fn execute_smart(
         profile.smart_worker.request_mode.to_string(),
         approved.plugin_path.to_string_lossy().into_owned(),
         approved.sha256.to_ascii_lowercase(),
-        worker_payload(parameters),
+        encode_worker_payload(&manifest.profile, &effective).map_err(invalid)?,
     ];
     let mut runs = Vec::new();
     for _ in 0..2 {
@@ -387,6 +424,12 @@ mod tests {
             std::process::id()
         ));
         fs::create_dir_all(root.join("target/render-requests")).unwrap();
+        fs::create_dir_all(root.join("profiles/scattermap")).unwrap();
+        fs::write(
+            root.join("profiles/scattermap/parameter_descriptors.json"),
+            include_bytes!("../../../../profiles/scattermap/parameter_descriptors.json"),
+        )
+        .unwrap();
         root
     }
 

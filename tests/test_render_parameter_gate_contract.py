@@ -28,12 +28,14 @@ class RenderParameterGateContractTests(unittest.TestCase):
 
     def test_rust_route_owns_ranges_and_never_starts_worker(self):
         core = (ROOT / "broker/crates/broker/src/host_core/parameter.rs").read_text(encoding="utf-8")
-        profile = (ROOT / "broker/crates/broker/src/fixture_profiles/scattermap.rs").read_text(encoding="utf-8")
+        manifest = (ROOT / "profiles/scattermap/parameter_descriptors.json").read_text(encoding="utf-8")
         route = (ROOT / "broker/crates/broker/src/render_request.rs").read_text(encoding="utf-8")
         main = (ROOT / "broker/crates/broker/src/main.rs").read_text(encoding="utf-8")
-        for marker in ("Scatter Amount", "500.0", "Random Seed", "10_000.0", "Invert Map"):
-            self.assertIn(marker, profile)
+        for marker in ("Scatter Amount", '"maximum": 500', "Random Seed", '"maximum": 10000', "Invert Map"):
+            self.assertIn(marker, manifest)
             self.assertNotIn(marker, core)
+        self.assertIn("load_manifest", route)
+        self.assertIn("encode_worker_payload", route)
         self.assertIn("native_process_started: false", route)
         self.assertIn("run_isolated", route)
         self.assertIn("argb8_hash", route)

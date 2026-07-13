@@ -10,6 +10,7 @@ provenance and should not be edited during promotion.
 | --- | --- | --- |
 | `contracts/aex/image_probe_request.schema.json` | `imports/aviutlas-rust-contracts/analysis/AEX_IMAGE_PROBE_REQUEST_SCHEMA_2026-05-31.json` | Request/response shape for future image probe work. Current use remains no-load contract validation. |
 | `contracts/aex/render_parameter_request.schema.json` | Local cleanroom contract, 2026-07-13 | Strict caller value request for the broker-owned ScatterMap descriptor gate. |
+| `contracts/aex/parameter_descriptor_manifest.schema.json` | Local cleanroom contract, 2026-07-13 | Promoted L2 parameter observations bound to a reviewed plug-in digest and receipt. |
 | `contracts/aex/render_parameter_gate_report.schema.json` | Local cleanroom contract, 2026-07-13 | Pre-dispatch decision report; this revision proves that no native process starts. |
 | `contracts/aex/parameterized_classic_render_report.schema.json` | Local cleanroom contract, 2026-07-13 | Fixed-hash isolated execution report for broker-validated caller parameter values. |
 | `contracts/aex/parameterized_smartfx_render_report.schema.json` | Local cleanroom contract, 2026-07-13 | Smart PreRender/Render execution report for broker-validated caller parameter values. |
