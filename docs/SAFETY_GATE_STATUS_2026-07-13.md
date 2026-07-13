@@ -31,6 +31,13 @@ profile-gated tests reject duplicate mask disposal and stream disposal with a
 live value, then prove valid cleanup restores a leak-free state. Existing count
 error, Access Violation, multi-mask, and ScatterMap regressions remain green.
 
+SPBasicSuite now maintains bounded, thread-safe name/version reference counts.
+Unknown and unacquired releases fail without mutating state. Native evidence
+records MaskOffset's single module-lifetime `PF Handle Suite@2` reference while
+all AEGP suites balance; the broker rejects over-release and inconsistent
+counters rather than requiring an observationally false zero count. The new
+post-setdown rejection mode is fixed and profile-gated.
+
 ## Human Work Required
 
 1. H-1 is complete: the approved self-authored fixture is identified by SHA-256 and byte size, and native loading is explicitly permitted.

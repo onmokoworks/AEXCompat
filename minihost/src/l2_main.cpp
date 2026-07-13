@@ -14,6 +14,8 @@
 #include <iomanip>
 #include <iostream>
 #include <limits>
+#include <map>
+#include <mutex>
 #include <new>
 #include <sstream>
 #include <string>
@@ -509,15 +511,60 @@ struct WorldSuite {
 };
 WorldSuite g_world_suite{nullptr, nullptr, &get_pixel_format};
 
+std::mutex g_suite_lease_mutex;
+std::map<std::pair<std::string, int32_t>, uint32_t> g_suite_leases;
+uint32_t g_suite_acquires{};
+uint32_t g_suite_releases{};
+
+void record_suite_acquire(const char* name, int32_t version) {
+  std::lock_guard<std::mutex> lock(g_suite_lease_mutex);
+  ++g_suite_leases[{name, version}];
+  ++g_suite_acquires;
+}
+
+bool suite_leases_balanced() {
+  std::lock_guard<std::mutex> lock(g_suite_lease_mutex);
+  return g_suite_acquires == g_suite_releases &&
+      std::all_of(g_suite_leases.begin(), g_suite_leases.end(),
+                  [](const auto& lease) { return lease.second == 0; });
+}
+
+std::size_t live_suite_lease_count() {
+  std::lock_guard<std::mutex> lock(g_suite_lease_mutex);
+  return static_cast<std::size_t>(std::count_if(
+      g_suite_leases.begin(), g_suite_leases.end(),
+      [](const auto& lease) { return lease.second != 0; }));
+}
+
+uint32_t live_suite_reference_count() {
+  std::lock_guard<std::mutex> lock(g_suite_lease_mutex);
+  uint32_t count = 0;
+  for (const auto& lease : g_suite_leases) count += lease.second;
+  return count;
+}
+
+std::string live_suite_lease_summary() {
+  std::lock_guard<std::mutex> lock(g_suite_lease_mutex);
+  std::ostringstream summary;
+  for (const auto& [key, count] : g_suite_leases) {
+    if (count == 0) continue;
+    if (summary.tellp() > 0) summary << ';';
+    summary << key.first << '@' << key.second << '=' << count;
+  }
+  return summary.str();
+}
+
 int32_t __cdecl acquire_suite(const char* name, int32_t version, const void** suite) {
   if (!suite) return 4;
   *suite = nullptr;
   if (name && std::strcmp(name, "PF Handle Suite") == 0 && version == 2) {
     *suite = &g_handle_suite;
+    record_suite_acquire(name, version);
     return 0;
   }
   if (name && std::strcmp(name, "PF World Suite") == 0 && version == 2) {
     *suite = &g_world_suite;
+    record_suite_acquire(name, version);
     return 0;
   }
   if (!g_mask_model_enabled || !name) return 1;
@@ -533,10 +580,28 @@ int32_t __cdecl acquire_suite(const char* name, int32_t version, const void** su
     *suite = &g_mask_outline_suite;
   else
     return 1;
+  record_suite_acquire(name, version);
   return 0;
 }
 
-int32_t __cdecl release_suite(const char*, int32_t) { return 0; }
+int32_t __cdecl release_suite(const char* name, int32_t version) {
+  if (!name) return 1;
+  std::lock_guard<std::mutex> lock(g_suite_lease_mutex);
+  const auto found = g_suite_leases.find({name, version});
+  if (found == g_suite_leases.end() || found->second == 0) return 1;
+  --found->second;
+  ++g_suite_releases;
+  return 0;
+}
+
+bool verify_suite_release_without_acquire_rejected() {
+  const uint32_t acquires_before = g_suite_acquires;
+  const uint32_t releases_before = g_suite_releases;
+  const uint32_t live_before = live_suite_reference_count();
+  return release_suite("AEGP Layer Mask Suite", 999) != 0 &&
+      g_suite_acquires == acquires_before && g_suite_releases == releases_before &&
+      live_suite_reference_count() == live_before;
+}
 
 struct BasicSuite {
   decltype(&acquire_suite) acquire;
@@ -1334,14 +1399,16 @@ int wmain(int argc, wchar_t** argv) {
       std::wstring(argv[1]) == L"--smart-mask-double-dispose-request";
   const bool stream_live_value_dispose_mode = argc == 5 &&
       std::wstring(argv[1]) == L"--smart-stream-live-value-dispose-request";
+  const bool suite_release_without_acquire_mode = argc == 5 &&
+      std::wstring(argv[1]) == L"--smart-suite-release-without-acquire-request";
   const bool request_mode = mask_request_mode || mask_scene_request_mode || mask_context_request_mode ||
       mask_count_error_mode || mask_count_crash_mode || mask_double_dispose_mode ||
-      stream_live_value_dispose_mode ||
+      stream_live_value_dispose_mode || suite_release_without_acquire_mode ||
       (argc == 5 && std::wstring(argv[1]) == L"--smart-request");
   if (!request_mode && (argc != 5 || std::wstring(argv[1]) != L"--smart")) return 2;
   g_mask_model_enabled = mask_request_mode || mask_scene_request_mode || mask_context_request_mode ||
       mask_count_error_mode || mask_count_crash_mode || mask_double_dispose_mode ||
-      stream_live_value_dispose_mode;
+      stream_live_value_dispose_mode || suite_release_without_acquire_mode;
   g_mask_fault = mask_count_error_mode ? MaskFault::CountError :
       mask_count_crash_mode ? MaskFault::CountCrash : MaskFault::None;
   RequestedAssignments requested_parameters;
@@ -1516,12 +1583,17 @@ int wmain(int argc, wchar_t** argv) {
       : stream_live_value_dispose_mode
           ? verify_stream_dispose_with_live_value_rejected()
           : false;
+  bool suite_fault_observed = false;
   std::cerr << "stage:smart_render_end pre_error=" << smart.pre_error
             << " render_error=" << smart.render_error << "\n" << std::flush;
 #endif
   std::cerr << "stage:global_setdown_begin\n" << std::flush;
   const int32_t setdown_error = global_error == 0
       ? entry(kGlobalSetdown, input.data(), output.data(), nullptr, nullptr, nullptr) : -1;
+  #ifdef AEXCOMPAT_SMART_WORKER
+  if (suite_release_without_acquire_mode)
+    suite_fault_observed = verify_suite_release_without_acquire_rejected();
+  #endif
   std::cerr << "stage:global_setdown_end error=" << setdown_error << "\n" << std::flush;
 #ifdef AEXCOMPAT_RENDER_WORKER
   std::cout << "{\"schema_version\":1,\"stage\":\"classic_render\",\"status\":\""
@@ -1593,6 +1665,13 @@ int wmain(int argc, wchar_t** argv) {
             << ",\"stream_values_acquired\":" << g_mask_lifetime.values_acquired
             << ",\"stream_values_disposed\":" << g_mask_lifetime.values_disposed
             << ",\"lifetime_fault_observed\":" << (lifetime_fault_observed ? "true" : "false")
+            << ",\"suite_leases_balanced\":" << (suite_leases_balanced() ? "true" : "false")
+            << ",\"suite_acquires\":" << g_suite_acquires
+            << ",\"suite_releases\":" << g_suite_releases
+            << ",\"live_suite_lease_count\":" << live_suite_lease_count()
+            << ",\"live_suite_reference_count\":" << live_suite_reference_count()
+            << ",\"live_suite_leases\":\"" << live_suite_lease_summary() << "\""
+            << ",\"suite_fault_observed\":" << (suite_fault_observed ? "true" : "false")
             << ",\"requested_parameters\":" << requested_parameters_json(requested_parameters)
             << ",\"requested_amount\":" << static_cast<int32_t>(requested_value(requested_parameters, L"amount"))
             << ",\"requested_direction\":" << static_cast<int32_t>(requested_value(requested_parameters, L"direction"))

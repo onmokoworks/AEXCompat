@@ -89,3 +89,13 @@ dispose a stream while a checked-out value remains live. Broker conformance
 requires one acquire/dispose pair for each object used by a host-context render
 and verifies that no object remains live. Fixed rejection tests restore valid
 state after the expected AE error and remain unavailable to arbitrary requests.
+
+SPBasicSuite acquisition is tracked by exact suite name and version under a
+thread-safe reference count. Only successful acquisitions create a lease, and
+release of an unknown or zero-count key returns an SP error without changing
+state. Reports retain total acquisitions, releases, live keys, and live
+references. MaskOffset ends with all AEGP leases released but one
+`PF Handle Suite@2` reference retained by the dependency's raw-handle ownership
+transfer; this is recorded as a bounded module-lifetime lease rather than
+misreported as balanced. The broker forbids over-release and requires the live
+reference count to equal acquisitions minus releases.

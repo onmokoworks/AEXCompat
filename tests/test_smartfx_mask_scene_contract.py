@@ -105,6 +105,24 @@ class SmartFxMaskSceneContractTests(unittest.TestCase):
         ):
             self.assertIn(marker, route)
 
+        report_schema = json.loads(
+            (ROOT / "contracts/aex/parameterized_smartfx_render_report.schema.json")
+            .read_text(encoding="utf-8")
+        )
+        run_required = set(report_schema["$defs"]["run"]["required"])
+        for field in (
+            "mask_lifetimes_balanced",
+            "mask_handles_acquired",
+            "stream_handles_disposed",
+            "stream_values_disposed",
+            "suite_leases_balanced",
+            "suite_acquires",
+            "suite_releases",
+            "live_suite_lease_count",
+            "live_suite_reference_count",
+        ):
+            self.assertIn(field, run_required)
+
 
 if __name__ == "__main__":
     unittest.main()

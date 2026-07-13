@@ -102,6 +102,15 @@ After each rejected operation, the valid cleanup sequence restores a balanced
 state. These modes remain profile-gated and do not accept pointers or callback
 sequences from the request.
 
+PICA suite leases are also keyed by exact name and version. The observed native
+run performs 15 successful acquisitions and 14 releases. Every AEGP suite is
+balanced; the sole retained reference is `PF Handle Suite@2`, transferred with
+the plugin dependency's raw global handle and retained to module lifetime. A
+fixed post-GlobalSetdown fault attempts to release an unacquired suite/version;
+both workers return an SP error and preserve all counters and live leases.
+Normal and fault reports expose this retained reference instead of silently
+accepting every ReleaseSuite call or falsely claiming zero live suites.
+
 ## Host-Owned Mask Scenes
 
 The mask ABI no longer stores one hard-coded mask, stream, outline, or vertex

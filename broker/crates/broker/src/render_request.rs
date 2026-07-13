@@ -581,6 +581,14 @@ pub fn execute_smart(
             && report.get("smart_render_error") == Some(&json!(0))
             && report.get("result_rects_valid") == Some(&Value::Bool(true))
             && report.get("guard_bytes_intact") == Some(&Value::Bool(true))
+            && report.get("suite_acquires").and_then(Value::as_u64).is_some_and(|acquires| {
+                report.get("suite_releases").and_then(Value::as_u64).is_some_and(|releases| {
+                    report.get("live_suite_reference_count").and_then(Value::as_u64)
+                        == Some(acquires.saturating_sub(releases))
+                        && acquires >= releases
+                        && acquires <= 64
+                })
+            })
             && worker_echo_matches(report, &manifest.profile, &effective)
             && request.host_context.as_ref().is_none_or(|_| {
                 report.get("mask_scene_id").and_then(Value::as_str) == Some("request_v4")
@@ -631,6 +639,12 @@ pub fn execute_smart(
         "stream_handles_disposed":item.1.get("stream_handles_disposed"),
         "stream_values_acquired":item.1.get("stream_values_acquired"),
         "stream_values_disposed":item.1.get("stream_values_disposed"),
+        "suite_leases_balanced":item.1.get("suite_leases_balanced"),
+        "suite_acquires":item.1.get("suite_acquires"),
+        "suite_releases":item.1.get("suite_releases"),
+        "live_suite_lease_count":item.1.get("live_suite_lease_count"),
+        "live_suite_reference_count":item.1.get("live_suite_reference_count"),
+        "live_suite_leases":item.1.get("live_suite_leases"),
         "requested_parameters":item.1.get("requested_parameters")})
     };
     let report = json!({"schema_version":1,"stage":"parameterized_smartfx_render",
@@ -660,17 +674,25 @@ pub fn execute_smart_suite_fault(
     fault_id: &str,
     output_path: &Path,
 ) -> io::Result<bool> {
-    let (worker_mode, expect_crash, expect_lifetime_rejection) = match fault_id {
-        "mask_count_error" => ("--smart-mask-count-error-request", false, false),
-        "mask_count_crash" => ("--smart-mask-count-crash-request", true, false),
-        "mask_double_dispose" => ("--smart-mask-double-dispose-request", false, true),
+    let (worker_mode, expect_crash, expect_lifetime_rejection, expect_suite_rejection) =
+        match fault_id {
+        "mask_count_error" => ("--smart-mask-count-error-request", false, false, false),
+        "mask_count_crash" => ("--smart-mask-count-crash-request", true, false, false),
+        "mask_double_dispose" => ("--smart-mask-double-dispose-request", false, true, false),
         "stream_dispose_with_live_value" => (
             "--smart-stream-live-value-dispose-request",
             false,
             true,
+            false,
         ),
-        _ => return Err(invalid("unknown fixed suite fault")),
-    };
+        "suite_release_without_acquire" => (
+            "--smart-suite-release-without-acquire-request",
+            false,
+            false,
+            true,
+        ),
+            _ => return Err(invalid("unknown fixed suite fault")),
+        };
     let output_path = resolve_inside(
         repository,
         output_path,
@@ -730,6 +752,20 @@ pub fn execute_smart_suite_fault(
                 && report.get("lifetime_fault_observed") == Some(&Value::Bool(true))
                 && report.get("mask_lifetimes_balanced") == Some(&Value::Bool(true))
         })
+    } else if expect_suite_rejection {
+        runs.iter().all(|(classification, report)| {
+            classification.as_str() == "ok"
+                && report.get("pre_render_error") == Some(&json!(0))
+                && report.get("smart_render_error") == Some(&json!(0))
+                && report.get("guard_bytes_intact") == Some(&Value::Bool(true))
+                && report.get("suite_fault_observed") == Some(&Value::Bool(true))
+                && report.get("suite_acquires").and_then(Value::as_u64).is_some_and(|acquires| {
+                    report.get("suite_releases").and_then(Value::as_u64).is_some_and(|releases| {
+                        report.get("live_suite_reference_count").and_then(Value::as_u64)
+                            == Some(acquires.saturating_sub(releases)) && acquires >= releases
+                    })
+                })
+        })
     } else {
         runs.iter()
             .all(|(classification, report)| fallback_valid(*classification, report))
@@ -742,14 +778,21 @@ pub fn execute_smart_suite_fault(
             "output_sha256":item.1.get("output_sha256"),
             "guard_bytes_intact":item.1.get("guard_bytes_intact"),
             "lifetime_fault_observed":item.1.get("lifetime_fault_observed"),
-            "mask_lifetimes_balanced":item.1.get("mask_lifetimes_balanced")
+            "mask_lifetimes_balanced":item.1.get("mask_lifetimes_balanced"),
+            "suite_fault_observed":item.1.get("suite_fault_observed"),
+            "suite_leases_balanced":item.1.get("suite_leases_balanced"),
+            "suite_acquires":item.1.get("suite_acquires"),
+            "suite_releases":item.1.get("suite_releases"),
+            "live_suite_lease_count":item.1.get("live_suite_lease_count"),
+            "live_suite_leases":item.1.get("live_suite_leases"),
+            "live_suite_reference_count":item.1.get("live_suite_reference_count")
         })
     };
     let report = json!({
         "schema_version":1,"stage":"smartfx_suite_fault","plugin_id":plugin_id,
         "receipt_id":approved.receipt_id,"fixture_sha256":approved.sha256.to_ascii_uppercase(),
-        "fault_id":fault_id,"expected_outcome":if expect_crash { "worker_crash" } else if expect_lifetime_rejection { "callback_error_rejected" } else { "plugin_fallback" },
-        "expected_fallback_sha256":if expect_crash || expect_lifetime_rejection { Value::Null } else { json!(fallback_hash) },
+        "fault_id":fault_id,"expected_outcome":if expect_crash { "worker_crash" } else if expect_lifetime_rejection || expect_suite_rejection { "callback_error_rejected" } else { "plugin_fallback" },
+        "expected_fallback_sha256":if expect_crash || expect_lifetime_rejection || expect_suite_rejection { Value::Null } else { json!(fallback_hash) },
         "run_1":summarize(&runs[0]),"run_2":summarize(&runs[1]),
         "broker_survived":true,"passed":passed
     });
