@@ -5,7 +5,7 @@ authorization. Each stage still requires fixed-fixture controls and re-audit.
 
 ## Current Result
 
-`gate_state: target_ae_reference_argb8_matrix_verified_repeat_edge_gap_explained`
+`gate_state: target_ae_argb8_matrix_and_project_roundtrip_verified`
 
 | Gate | Status | Evidence and remaining work |
 | --- | --- | --- |
@@ -49,6 +49,9 @@ production-host parameter gap because AE does not enumerate that property.
 The cause is verified: its raw checkbox definition has current false but
 default true, while Adobe's checkbox contract initializes both fields equally.
 The cleanroom L2 report now retains this mismatch explicitly.
+An AE 25.2 AEPX roundtrip also preserves the non-default seed 10000,
+reconstructs the effect after close/reopen, and renders exact
+oracle-equivalent pixels.
 SmartFX PreRender checkout also receives a valid time basis; a nonzero
 `42/2/24` context was observed exactly while preserving deterministic output.
 The ARGB8 matrix also covers valid parameter boundaries amount 500, seed 10000,

@@ -116,3 +116,17 @@ Invert Map requests false and remains consistent by zero initialization. This
 explains why AE retains the low-level parameter count but omits the Repeat Edge
 stream. AEXCompat now preserves and reports this malformed descriptor instead
 of silently replacing its current value with its default.
+
+## Project Roundtrip
+
+`tools/ae_scattermap_roundtrip_probe.jsx` created a new 16x12 project, applied
+ScatterMap, set Random Seed to 10000, saved a new AEPX, closed the project,
+reopened that AEPX, located the effect by match name, and observed Seed 10000.
+It then rendered the reopened composition without modifying any existing user
+project. AE 25.2 reported every stage successful with no script-visible error.
+
+The reopened render normalized to ARGB8 SHA-256
+`E31BA13264E801DE7CCCE4D6863215E54C0DC0C7FF4A918E45EE75BC59E817EC`,
+exactly matching the seed-max oracle with zero differing bytes and pixels. This
+proves non-default parameter persistence, effect reconstruction, and
+production-host render equivalence after project serialization/resetup.
