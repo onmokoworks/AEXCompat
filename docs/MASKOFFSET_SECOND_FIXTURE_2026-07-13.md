@@ -1,8 +1,9 @@
 # MaskOffset Second Conformance Fixture
 
 MaskOffset is the second owner-authored AEX used to prove that AEXCompat is not
-architecturally tied to ScatterMap. This promotion is staged: load and selector
-observation are proven, while rendering is not yet claimed.
+architecturally tied to ScatterMap. Load, selector observation, and the SmartFX
+no-mask fallback are proven. Rendering with a real AEGP mask path is not yet
+claimed.
 
 ## Fixed Identity
 
@@ -42,10 +43,24 @@ Regeneration from the real L2 report matched all nine observed descriptors.
 Eight numeric descriptors are assignable. `Fill Color` remains fail-closed
 until the generic request and worker ABIs support color values.
 
+## SmartFX No-Mask Evidence
+
+The `maskoffset` render profile advertises SmartFX only. A classic render request
+fails before allowlist access, worker launch, or report creation. The isolated
+SmartFX request applied all eight numeric descriptors twice. Both runs completed
+Smart PreRender and Smart Render with zero errors, preserved guard bytes, echoed
+the exact descriptor id/slot/kind/value sequence, and produced the same output.
+
+The minimal host intentionally does not yet publish AEGP mask suites. MaskOffset
+therefore follows its source-defined empty-polygon behavior and copies the 16x12
+ARGB8 input. The independent fallback oracle SHA-256 is
+`863D238F52F81ABA4017C198AF4D748CB57FE369E6216FDBACF45FD94037ECF7`.
+The fixed SmartFX receipt is `maskoffset-smartfx-20260713-001`.
+
 ## Remaining Work
 
-This evidence does not claim MaskOffset render compatibility. Completion still
-requires generic color payloads, the AEGP mask/suite behavior used to obtain mask
-paths, Smart PreRender/Render world handling, an independent pixel oracle, and
-error/crash isolation cases. Those additions must not introduce MaskOffset
-identity or algorithms into `host_core`.
+This evidence does not claim complete MaskOffset render compatibility. Completion
+still requires generic color payloads, AEGP mask/stream/outline suites with real
+mask paths, masked-mode pixel oracles, and dedicated error/crash isolation cases.
+Those additions must not introduce MaskOffset identity or algorithms into
+`host_core`.

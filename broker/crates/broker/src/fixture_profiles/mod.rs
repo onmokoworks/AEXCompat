@@ -1,3 +1,4 @@
+pub mod maskoffset;
 pub mod scattermap;
 
 use crate::host_core::approved_artifact::ApprovalPolicy;
@@ -29,14 +30,15 @@ pub struct ObservationProfile {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ParameterizedRenderAdapter {
     ScatterMap,
+    MaskOffsetNoMask,
 }
 
 pub struct RegisteredProfile {
     pub l2_observation: L2ObservationPolicy,
     pub descriptor_manifest: ManifestPolicy,
     pub parameterized_render: ParameterizedRenderAdapter,
-    pub classic_worker: WorkerSpec,
-    pub smart_worker: WorkerSpec,
+    pub classic_worker: Option<WorkerSpec>,
+    pub smart_worker: Option<WorkerSpec>,
 }
 
 static SCATTERMAP: RegisteredProfile = RegisteredProfile {
@@ -59,7 +61,7 @@ static SCATTERMAP: RegisteredProfile = RegisteredProfile {
         sha256: "C797EC7C45A603D2C86FB980DC5279E8B075D0E27D466315A2ABFA15BE608C37",
     },
     parameterized_render: ParameterizedRenderAdapter::ScatterMap,
-    classic_worker: WorkerSpec {
+    classic_worker: Some(WorkerSpec {
         executable: "target/minihost-build/aex_render_worker.exe",
         request_mode: "--render-request",
         approval: ApprovalPolicy {
@@ -69,8 +71,8 @@ static SCATTERMAP: RegisteredProfile = RegisteredProfile {
             expires: "2026-08-12T23:59:59+09:00",
             max_timeout_ms: 5_000,
         },
-    },
-    smart_worker: WorkerSpec {
+    }),
+    smart_worker: Some(WorkerSpec {
         executable: "target/minihost-build/aex_smart_worker.exe",
         request_mode: "--smart-request",
         approval: ApprovalPolicy {
@@ -80,7 +82,25 @@ static SCATTERMAP: RegisteredProfile = RegisteredProfile {
             expires: "2026-08-12T23:59:59+09:00",
             max_timeout_ms: 5_000,
         },
-    },
+    }),
+};
+
+static MASKOFFSET: RegisteredProfile = RegisteredProfile {
+    l2_observation: MASKOFFSET_OBSERVATION.l2,
+    descriptor_manifest: MASKOFFSET_OBSERVATION.descriptor_manifest,
+    parameterized_render: ParameterizedRenderAdapter::MaskOffsetNoMask,
+    classic_worker: None,
+    smart_worker: Some(WorkerSpec {
+        executable: "target/minihost-build/aex_smart_worker.exe",
+        request_mode: "--smart-request",
+        approval: ApprovalPolicy {
+            allowlist_path: "target/smart-allowlist/maskoffset.active.local.json",
+            stage: "smartfx_render",
+            receipt_id: "maskoffset-smartfx-20260713-001",
+            expires: "2026-08-12T23:59:59+09:00",
+            max_timeout_ms: 5_000,
+        },
+    }),
 };
 
 static SCATTERMAP_OBSERVATION: ObservationProfile = ObservationProfile {
@@ -126,6 +146,7 @@ static MASKOFFSET_OBSERVATION: ObservationProfile = ObservationProfile {
 pub fn find(id: &str) -> Option<&'static RegisteredProfile> {
     match id {
         scattermap::PROFILE_ID => Some(&SCATTERMAP),
+        maskoffset::PROFILE_ID => Some(&MASKOFFSET),
         _ => None,
     }
 }
@@ -155,6 +176,7 @@ mod tests {
             find(scattermap::PROFILE_ID)
                 .unwrap()
                 .classic_worker
+                .unwrap()
                 .request_mode,
             "--render-request"
         );
@@ -179,7 +201,8 @@ mod tests {
                 .receipt_id,
             "maskoffset-l2-20260713-001"
         );
-        assert!(find("maskoffset").is_none());
+        assert!(find("maskoffset").unwrap().classic_worker.is_none());
+        assert!(find("maskoffset").unwrap().smart_worker.is_some());
         assert!(find_observation("unknown-aex").is_none());
         assert_eq!(
             find_observation("maskoffset")

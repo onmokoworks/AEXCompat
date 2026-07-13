@@ -10,21 +10,21 @@
   "properties": {
     "schema_version": {"const": 1},
     "gate": {"const": "pre_dispatch_parameter_validation"},
-    "plugin_id": {"const": "scattermap"},
-    "assignment_count": {"type": "integer", "minimum": 0, "maximum": 5},
+    "plugin_id": {"type": "string", "pattern": "^[a-z][a-z0-9_-]{0,63}$"},
+    "assignment_count": {"type": "integer", "minimum": 0, "maximum": 64},
     "accepted": {"type": "boolean"},
     "native_dispatch_permitted": {"type": "boolean"},
     "native_process_started": {"const": false},
     "errors": {
       "type": "array",
-      "maxItems": 5,
+      "maxItems": 64,
       "items": {
         "type": "object",
         "additionalProperties": false,
         "required": ["code", "parameter", "valid_min", "valid_max"],
         "properties": {
           "code": {"enum": ["invalid_parameter_value", "parameter_out_of_range"]},
-          "parameter": {"enum": ["Scatter Amount", "Direction", "Random Seed", "Mix with Original", "Invert Map"]},
+          "parameter": {"type": "string", "minLength": 1, "maxLength": 63},
           "valid_min": {"type": "number"},
           "valid_max": {"type": "number"}
         }

@@ -33,8 +33,10 @@ Unapproved inputs must not:
 - publish private paths, binary payloads, raw payloads, or private image data.
 
 The self-authored ScatterMap fixture has passed the staged gate through classic
-and SmartFX ARGB8 rendering. Every native run remains local-only, hash- and
-size-bound, timeout-limited, Job Object-isolated, and create-new for evidence.
+and SmartFX ARGB8 rendering. MaskOffset independently passes load, lifecycle,
+parameter discovery, and its SmartFX no-mask fallback. Every native run remains
+local-only, hash- and size-bound, timeout-limited, Job Object-isolated, and
+create-new for evidence.
 
 ## Repository Layout
 

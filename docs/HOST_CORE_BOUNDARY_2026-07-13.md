@@ -61,6 +61,8 @@ Until those conditions are met, reports must describe ScatterMap as the active
 render fixture and must not describe AEXCompat as a complete general AEX host.
 
 MaskOffset is now registered as a second observation fixture and passes the
-generic L1/L2 runner without `host_core` changes. This is evidence toward item 5,
-not completion of it: its render, AEGP mask suites, pixel oracle, and render-time
-failure isolation remain pending.
+generic L1/L2 runner without `host_core` changes. Its SmartFX no-mask fallback
+also passes descriptor-driven rendering and an independent copy oracle; classic
+render is explicitly unsupported and rejected before native launch. This is
+evidence toward item 5, not completion of it: AEGP mask suites, masked pixel
+oracles, color parameters, and render-time failure isolation remain pending.

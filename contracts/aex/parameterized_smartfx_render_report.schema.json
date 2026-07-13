@@ -10,13 +10,13 @@
   "properties": {
     "schema_version": {"const": 1},
     "stage": {"const": "parameterized_smartfx_render"},
-    "plugin_id": {"const": "scattermap"},
-    "assignment_count": {"type": "integer", "minimum": 0, "maximum": 5},
+    "plugin_id": {"type": "string", "pattern": "^[a-z][a-z0-9_-]{0,63}$"},
+    "assignment_count": {"type": "integer", "minimum": 0, "maximum": 64},
     "accepted": {"type": "boolean"},
     "native_process_started": {"type": "boolean"},
     "passed": {"type": "boolean"},
     "errors": {"type": "array", "items": {"$ref": "#/$defs/error"}},
-    "receipt_id": {"const": "scattermap-smartfx-20260713-001"},
+    "receipt_id": {"type": "string", "minLength": 1, "maxLength": 128},
     "fixture_sha256": {"$ref": "#/$defs/sha256"},
     "parameters": {"$ref": "#/$defs/parameters"},
     "expected_oracle_sha256": {"$ref": "#/$defs/sha256"},
@@ -33,7 +33,7 @@
         "properties": {
           "native_process_started": {"const": false},
           "passed": {"const": false},
-          "errors": {"type": "array", "minItems": 1, "maxItems": 5, "items": {"$ref": "#/$defs/error"}}
+          "errors": {"type": "array", "minItems": 1, "maxItems": 64, "items": {"$ref": "#/$defs/error"}}
         }
       }
     },
@@ -66,22 +66,17 @@
       "required": ["code", "parameter", "valid_min", "valid_max"],
       "properties": {
         "code": {"enum": ["invalid_parameter_value", "parameter_out_of_range"]},
-        "parameter": {"enum": ["Scatter Amount", "Direction", "Random Seed", "Mix with Original", "Invert Map"]},
+        "parameter": {"type": "string", "minLength": 1, "maxLength": 63},
         "valid_min": {"type": "number"},
         "valid_max": {"type": "number"}
       }
     },
     "parameters": {
       "type": "object",
-      "additionalProperties": false,
-      "required": ["amount", "direction", "seed", "mix", "invert_map"],
-      "properties": {
-        "amount": {"type": "integer", "minimum": 0, "maximum": 500},
-        "direction": {"type": "integer", "minimum": 1, "maximum": 3},
-        "seed": {"type": "integer", "minimum": 0, "maximum": 10000},
-        "mix": {"type": "number", "minimum": 0, "maximum": 100},
-        "invert_map": {"type": "integer", "minimum": 0, "maximum": 1}
-      }
+      "minProperties": 1,
+      "maxProperties": 64,
+      "propertyNames": {"pattern": "^[a-z][a-z0-9_]{0,63}$"},
+      "additionalProperties": {"type": "number"}
     },
     "run": {
       "type": "object",

@@ -12,7 +12,9 @@ fn invalid(message: impl Into<String>) -> io::Error {
 pub(crate) fn entry(repository: &Path, id: &str) -> io::Result<ApprovedArtifact> {
     let profile = crate::fixture_profiles::find(id)
         .ok_or_else(|| invalid("unknown plugin profile"))?;
-    load(repository, id, profile.classic_worker.approval)
+    let worker = profile.classic_worker
+        .ok_or_else(|| invalid("classic render is not approved for profile"))?;
+    load(repository, id, worker.approval)
 }
 fn classification(value: &str) -> &str {
     match value { "ok" => "ok", "crashed" => "crashed", "timeout_killed" => "timeout_killed", _ => "internal_error" }

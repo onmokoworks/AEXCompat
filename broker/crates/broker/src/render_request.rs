@@ -1,3 +1,4 @@
+use crate::fixture_profiles::maskoffset::no_mask_argb8_hash;
 use crate::fixture_profiles::scattermap::expected_argb8_hash;
 use crate::fixture_profiles::{ParameterizedRenderAdapter, RegisteredProfile};
 use crate::host_core::descriptor_manifest::{load as load_manifest, LoadedManifest};
@@ -87,6 +88,7 @@ fn evaluate(
 fn expected_hash(adapter: ParameterizedRenderAdapter, effective: &ValidatedAssignments) -> String {
     match adapter {
         ParameterizedRenderAdapter::ScatterMap => expected_argb8_hash(effective),
+        ParameterizedRenderAdapter::MaskOffsetNoMask => no_mask_argb8_hash(),
     }
 }
 
@@ -229,6 +231,9 @@ pub fn execute(repository: &Path, request_path: &Path, output_path: &Path) -> io
     }
     let profile = crate::fixture_profiles::find(&request.plugin_id)
         .ok_or_else(|| invalid("unknown plugin profile"))?;
+    let worker_spec = profile
+        .classic_worker
+        .ok_or_else(|| invalid("classic render is not supported for plugin profile"))?;
     let manifest = descriptors(repository, &request.plugin_id, profile)?;
     let (effective, assignment_count, errors) = evaluate(&request, &manifest.profile)?;
     if !errors.is_empty() {
@@ -251,10 +256,10 @@ pub fn execute(repository: &Path, request_path: &Path, output_path: &Path) -> io
     {
         return Err(invalid("descriptor manifest plugin digest mismatch"));
     }
-    let worker = repository.join(profile.classic_worker.executable);
+    let worker = repository.join(worker_spec.executable);
     let expected = expected_hash(profile.parameterized_render, &effective);
     let args = [
-        profile.classic_worker.request_mode.to_string(),
+        worker_spec.request_mode.to_string(),
         approved.plugin_path.to_string_lossy().into_owned(),
         approved.sha256.to_ascii_lowercase(),
         encode_worker_payload(&manifest.profile, &effective).map_err(invalid)?,
@@ -329,6 +334,9 @@ pub fn execute_smart(
     }
     let profile = crate::fixture_profiles::find(&request.plugin_id)
         .ok_or_else(|| invalid("unknown plugin profile"))?;
+    let worker_spec = profile
+        .smart_worker
+        .ok_or_else(|| invalid("SmartFX render is not supported for plugin profile"))?;
     let manifest = descriptors(repository, &request.plugin_id, profile)?;
     let (effective, assignment_count, errors) = evaluate(&request, &manifest.profile)?;
     if !errors.is_empty() {
@@ -351,10 +359,10 @@ pub fn execute_smart(
     {
         return Err(invalid("descriptor manifest plugin digest mismatch"));
     }
-    let worker = repository.join(profile.smart_worker.executable);
+    let worker = repository.join(worker_spec.executable);
     let expected = expected_hash(profile.parameterized_render, &effective);
     let args = [
-        profile.smart_worker.request_mode.to_string(),
+        worker_spec.request_mode.to_string(),
         approved.plugin_path.to_string_lossy().into_owned(),
         approved.sha256.to_ascii_lowercase(),
         encode_worker_payload(&manifest.profile, &effective).map_err(invalid)?,

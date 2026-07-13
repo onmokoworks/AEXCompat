@@ -12,7 +12,7 @@
     "plugin_id": {"type": "string", "pattern": "^[a-z][a-z0-9_-]{0,63}$"},
     "assignments": {
       "type": "object",
-      "maxProperties": 256,
+      "maxProperties": 64,
       "propertyNames": {"pattern": "^[a-z][a-z0-9_]{0,63}$"},
       "additionalProperties": {"type": "number"}
     }

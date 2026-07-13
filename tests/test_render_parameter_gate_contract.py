@@ -14,7 +14,7 @@ class RenderParameterGateContractTests(unittest.TestCase):
         self.assertFalse(schema["additionalProperties"])
         assignments = schema["properties"]["assignments"]
         self.assertEqual(assignments["additionalProperties"], {"type": "number"})
-        self.assertEqual(assignments["maxProperties"], 256)
+        self.assertEqual(assignments["maxProperties"], 64)
         self.assertIn("propertyNames", assignments)
         self.assertNotIn("properties", assignments)
 
@@ -24,7 +24,7 @@ class RenderParameterGateContractTests(unittest.TestCase):
         self.assertIn("native_dispatch_permitted", required)
         self.assertIn("native_process_started", required)
         self.assertFalse(schema["properties"]["native_process_started"]["const"])
-        self.assertEqual(schema["properties"]["assignment_count"]["maximum"], 5)
+        self.assertEqual(schema["properties"]["assignment_count"]["maximum"], 64)
 
     def test_rust_route_owns_ranges_and_never_starts_worker(self):
         core = (ROOT / "broker/crates/broker/src/host_core/parameter.rs").read_text(encoding="utf-8")
@@ -81,7 +81,9 @@ class RenderParameterGateContractTests(unittest.TestCase):
         self.assertIn("execute_smart", route)
         registry = (ROOT / "broker/crates/broker/src/fixture_profiles/mod.rs").read_text(encoding="utf-8")
         self.assertIn('request_mode: "--smart-request"', registry)
-        self.assertIn("profile.smart_worker.request_mode", route)
+        self.assertIn("worker_spec.request_mode", route)
+        self.assertIn("SmartFX render is not supported for plugin profile", route)
+        self.assertIn("classic render is not supported for plugin profile", route)
 
 
 if __name__ == "__main__":

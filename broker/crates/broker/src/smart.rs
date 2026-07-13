@@ -94,7 +94,9 @@ pub fn run(repository: &Path, worker: &Path, id: &str, case_id: &str, output: &P
 pub(crate) fn approved_entry(repository: &Path, id: &str) -> io::Result<ApprovedArtifact> {
     let profile = crate::fixture_profiles::find(id)
         .ok_or_else(|| invalid("unknown plugin profile"))?;
-    load(repository, id, profile.smart_worker.approval)
+    let worker = profile.smart_worker
+        .ok_or_else(|| invalid("SmartFX render is not approved for profile"))?;
+    load(repository, id, worker.approval)
 }
 
 #[cfg(test)]
