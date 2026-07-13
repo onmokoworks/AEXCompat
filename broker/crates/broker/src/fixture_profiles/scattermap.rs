@@ -65,6 +65,17 @@ pub fn bind(assignments: &ValidatedAssignments) -> RenderParameters {
     }
 }
 
+pub fn worker_payload(parameters: RenderParameters) -> String {
+    format!(
+        "v1|amount={};direction={};seed={};mix={};invert_map={}",
+        parameters.amount,
+        parameters.direction,
+        parameters.seed,
+        parameters.mix,
+        parameters.invert_map
+    )
+}
+
 fn hash_pixel(x: i32, y: i32, seed: i32, channel: i32) -> f32 {
     let mut value = (x as u32)
         .wrapping_mul(374_761_393)
@@ -180,5 +191,9 @@ mod tests {
         assert_eq!(bound.seed, 0);
         assert_eq!(bound.mix, 25.5);
         assert_eq!(bound.invert_map, 0);
+        assert_eq!(
+            worker_payload(bound),
+            "v1|amount=13;direction=3;seed=0;mix=25.5;invert_map=0"
+        );
     }
 }

@@ -54,7 +54,8 @@ class RenderParameterGateContractTests(unittest.TestCase):
 
     def test_worker_revalidates_and_echoes_bound_values(self):
         source = (ROOT / "minihost/src/l2_main.cpp").read_text(encoding="utf-8")
-        for marker in ('L"--render-request"', "parse_i32_arg", "parse_double_arg",
+        for marker in ('L"--render-request"', "parse_parameter_payload", "valid_parameter_id",
+                       'encoded.compare(0, 3, L"v1|")', "encoded.size() > 1024", "seen.size() == 5",
                        "requested_amount", "requested_direction", "requested_seed",
                        "requested_mix", "requested_invert_map", "std::setprecision(17)"):
             self.assertIn(marker, source)

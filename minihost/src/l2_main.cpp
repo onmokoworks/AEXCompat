@@ -387,6 +387,51 @@ bool parse_double_arg(const wchar_t* text, double minimum, double maximum, doubl
   output = value;
   return true;
 }
+
+bool valid_parameter_id(const std::wstring& id) {
+  if (id.empty() || id.size() > 64 || id.front() < L'a' || id.front() > L'z') return false;
+  return std::all_of(id.begin(), id.end(), [](wchar_t character) {
+    return (character >= L'a' && character <= L'z') ||
+           (character >= L'0' && character <= L'9') || character == L'_';
+  });
+}
+
+bool parse_parameter_payload(const wchar_t* text, RenderParameters& output) {
+  if (!text) return false;
+  const std::wstring encoded(text);
+  if (encoded.size() < 4 || encoded.size() > 1024 || encoded.compare(0, 3, L"v1|") != 0) return false;
+  const std::wstring payload = encoded.substr(3);
+  std::unordered_set<std::wstring> seen;
+  std::size_t offset = 0;
+  while (offset < payload.size()) {
+    const std::size_t separator = payload.find(L';', offset);
+    const std::size_t end = separator == std::wstring::npos ? payload.size() : separator;
+    const std::wstring assignment = payload.substr(offset, end - offset);
+    const std::size_t equals = assignment.find(L'=');
+    if (equals == std::wstring::npos || equals == 0 || equals + 1 >= assignment.size() ||
+        assignment.find(L'=', equals + 1) != std::wstring::npos) return false;
+    const std::wstring id = assignment.substr(0, equals);
+    const std::wstring value = assignment.substr(equals + 1);
+    if (!valid_parameter_id(id) || value.size() > 64 || !seen.insert(id).second) return false;
+    if (id == L"amount") {
+      if (!parse_i32_arg(value.c_str(), 0, 500, output.amount)) return false;
+    } else if (id == L"direction") {
+      if (!parse_i32_arg(value.c_str(), 1, 3, output.direction)) return false;
+    } else if (id == L"seed") {
+      if (!parse_i32_arg(value.c_str(), 0, 10000, output.seed)) return false;
+    } else if (id == L"mix") {
+      if (!parse_double_arg(value.c_str(), 0.0, 100.0, output.mix)) return false;
+    } else if (id == L"invert_map") {
+      if (!parse_i32_arg(value.c_str(), 0, 1, output.invert_map)) return false;
+    } else {
+      return false;
+    }
+    if (separator == std::wstring::npos) break;
+    offset = separator + 1;
+    if (offset == payload.size()) return false;
+  }
+  return seen.size() == 5;
+}
 #endif
 
 #ifdef AEXCOMPAT_RENDER_WORKER
@@ -769,25 +814,15 @@ void report(const char* status, int32_t global_error, int32_t params_error,
 
 int wmain(int argc, wchar_t** argv) {
 #ifdef AEXCOMPAT_RENDER_WORKER
-  const bool request_mode = argc == 9 && std::wstring(argv[1]) == L"--render-request";
+  const bool request_mode = argc == 5 && std::wstring(argv[1]) == L"--render-request";
   if (!request_mode && (argc != 5 || std::wstring(argv[1]) != L"--render")) return 2;
   RenderParameters requested_parameters;
-  if (request_mode &&
-      (!parse_i32_arg(argv[4], 0, 500, requested_parameters.amount) ||
-       !parse_i32_arg(argv[5], 1, 3, requested_parameters.direction) ||
-       !parse_i32_arg(argv[6], 0, 10000, requested_parameters.seed) ||
-       !parse_double_arg(argv[7], 0.0, 100.0, requested_parameters.mix) ||
-       !parse_i32_arg(argv[8], 0, 1, requested_parameters.invert_map))) return 3;
+  if (request_mode && !parse_parameter_payload(argv[4], requested_parameters)) return 3;
 #elif defined(AEXCOMPAT_SMART_WORKER)
-  const bool request_mode = argc == 9 && std::wstring(argv[1]) == L"--smart-request";
+  const bool request_mode = argc == 5 && std::wstring(argv[1]) == L"--smart-request";
   if (!request_mode && (argc != 5 || std::wstring(argv[1]) != L"--smart")) return 2;
   RenderParameters requested_parameters;
-  if (request_mode &&
-      (!parse_i32_arg(argv[4], 0, 500, requested_parameters.amount) ||
-       !parse_i32_arg(argv[5], 1, 3, requested_parameters.direction) ||
-       !parse_i32_arg(argv[6], 0, 10000, requested_parameters.seed) ||
-       !parse_double_arg(argv[7], 0.0, 100.0, requested_parameters.mix) ||
-       !parse_i32_arg(argv[8], 0, 1, requested_parameters.invert_map))) return 3;
+  if (request_mode && !parse_parameter_payload(argv[4], requested_parameters)) return 3;
 #else
   if (argc != 4) return 2;
   if (std::wstring(argv[1]) != L"--l2") return 2;

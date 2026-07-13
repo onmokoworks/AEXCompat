@@ -1,4 +1,4 @@
-use crate::fixture_profiles::scattermap::{argb8_hash, bind, RenderParameters};
+use crate::fixture_profiles::scattermap::{argb8_hash, bind, worker_payload, RenderParameters};
 use crate::fixture_profiles::{ParameterizedRenderAdapter, RegisteredProfile};
 use crate::host_core::parameter::{validate_assignments, ValidationError};
 use crate::windows_process::run_isolated;
@@ -213,11 +213,7 @@ pub fn execute(repository: &Path, request_path: &Path, output_path: &Path) -> io
         profile.classic_worker.request_mode.to_string(),
         approved.plugin_path.to_string_lossy().into_owned(),
         approved.sha256.to_ascii_lowercase(),
-        parameters.amount.to_string(),
-        parameters.direction.to_string(),
-        parameters.seed.to_string(),
-        parameters.mix.to_string(),
-        parameters.invert_map.to_string(),
+        worker_payload(parameters),
     ];
     let mut runs = Vec::new();
     for _ in 0..2 {
@@ -319,11 +315,7 @@ pub fn execute_smart(
         profile.smart_worker.request_mode.to_string(),
         approved.plugin_path.to_string_lossy().into_owned(),
         approved.sha256.to_ascii_lowercase(),
-        parameters.amount.to_string(),
-        parameters.direction.to_string(),
-        parameters.seed.to_string(),
-        parameters.mix.to_string(),
-        parameters.invert_map.to_string(),
+        worker_payload(parameters),
     ];
     let mut runs = Vec::new();
     for _ in 0..2 {
