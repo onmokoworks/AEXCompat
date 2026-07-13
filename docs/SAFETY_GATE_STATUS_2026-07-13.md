@@ -38,7 +38,10 @@ inventing unsupported callbacks. 16-bpc and 32-bpc CPU cases reproduce the
 fixture's declared-but-byte-oriented writes under a harness sentinel; actual AE
 evidence shows the unwritten tail is not deterministic. GPU lifecycle
 negotiation correctly falls back because PreRender does not opt in to GPU pixel
-execution. A missing mandatory input propagates error 4 without output writes
+execution. The advertised threaded-render contract is also verified with two
+simultaneous renders against one loaded module in each of two fresh isolated
+workers; all four outputs are guarded and oracle-exact. A missing mandatory
+input propagates error 4 without output writes
 or a process crash. A target-specific malformed frame contract crashes only its
 disposable worker in two repeated runs while the broker survives and records
 evidence. H-4 default reference capture is satisfied by an actual AE 25.2

@@ -49,6 +49,7 @@ fn expected(case_id: &str) -> Option<&'static str> { match case_id {
     "connected_map" => Some("A38568761441C209940F81A8C2792DAD50566C66EDA1463BDCF071CCA614891B"),
     "inverted_map" => Some("3BC0C5172B880A8A83CEC24177B78721E9F0619D5330F6A26AAA02B9CC057A08"),
     "partial_extent_hint" => Some("19CEA826F356E0D94BC29FF10CB9E7F5A770FE5B288CB3D190A58372353102D9"),
+    "threaded_default" => Some("19CEA826F356E0D94BC29FF10CB9E7F5A770FE5B288CB3D190A58372353102D9"),
     _ => None,
 } }
 pub fn run(repository: &Path, worker: &Path, id: &str, case_id: &str, output: &Path) -> io::Result<bool> {
@@ -76,14 +77,30 @@ pub fn run(repository: &Path, worker: &Path, id: &str, case_id: &str, output: &P
         let hash = worker_report.get("output_sha256").and_then(Value::as_str).unwrap_or("").to_ascii_uppercase();
         let render_error = worker_report.get("render_error").and_then(Value::as_i64).unwrap_or(-1);
         runs.push(json!({"classification":classification(result.classification.as_str()),
-            "render_error":render_error,"output_sha256":hash,"elapsed_ms":elapsed}));
+            "render_error":render_error,"output_sha256":hash,"elapsed_ms":elapsed,
+            "concurrent_render":worker_report.get("concurrent_render"),
+            "thread_1_error":worker_report.get("thread_1_error"),
+            "thread_2_error":worker_report.get("thread_2_error"),
+            "thread_1_sha256":worker_report.get("thread_1_sha256"),
+            "thread_2_sha256":worker_report.get("thread_2_sha256"),
+            "thread_1_guards_intact":worker_report.get("thread_1_guards_intact"),
+            "thread_2_guards_intact":worker_report.get("thread_2_guards_intact")}));
         reports.push(worker_report);
     }
     let input_hash = reports[0].get("input_sha256").and_then(Value::as_str).unwrap_or("").to_ascii_uppercase();
     let deterministic = runs[0]["output_sha256"] == runs[1]["output_sha256"];
     let oracle_match = runs.iter().all(|r| r["output_sha256"] == expected);
     let guards = reports.iter().all(|r| r.get("guard_bytes_intact") == Some(&Value::Bool(true)));
-    let passed = deterministic && oracle_match && guards && runs.iter().all(|r| r["classification"] == "ok" && r["render_error"] == 0);
+    let thread_hash_matches = |r: &Value, key: &str| r.get(key).and_then(Value::as_str)
+        .is_some_and(|hash| hash.eq_ignore_ascii_case(expected));
+    let threaded_valid = case_id != "threaded_default" || reports.iter().all(|r|
+        r.get("concurrent_render") == Some(&Value::Bool(true)) &&
+        r.get("thread_1_error") == Some(&json!(0)) && r.get("thread_2_error") == Some(&json!(0)) &&
+        thread_hash_matches(r, "thread_1_sha256") && thread_hash_matches(r, "thread_2_sha256") &&
+        r.get("thread_1_guards_intact") == Some(&Value::Bool(true)) &&
+        r.get("thread_2_guards_intact") == Some(&Value::Bool(true)));
+    let passed = deterministic && oracle_match && guards && threaded_valid &&
+        runs.iter().all(|r| r["classification"] == "ok" && r["render_error"] == 0);
     let width = reports[0].get("width").and_then(Value::as_i64).unwrap_or(0);
     let height = reports[0].get("height").and_then(Value::as_i64).unwrap_or(0);
     let rowbytes = reports[0].get("rowbytes").and_then(Value::as_i64).unwrap_or(0);
@@ -92,7 +109,8 @@ pub fn run(repository: &Path, worker: &Path, id: &str, case_id: &str, output: &P
         "case_id":case_id,"pixel_format":"argb8","width":width,"height":height,"rowbytes":rowbytes,
         "input_sha256":input_hash,"run_1":runs[0],"run_2":runs[1],
         "expected_oracle_sha256":expected,"deterministic":deterministic,"oracle_match":oracle_match,
-        "guard_bytes_intact":guards,"broker_survived":true,"passed":passed});
+        "guard_bytes_intact":guards,"threaded_render_valid":threaded_valid,
+        "broker_survived":true,"passed":passed});
     let mut file = OpenOptions::new().write(true).create_new(true).open(output)?;
     serde_json::to_writer_pretty(&mut file, &report).map_err(|e| invalid(e.to_string()))?;
     file.write_all(b"\n")?;
@@ -107,6 +125,7 @@ mod tests {
         assert!(expected("default").is_some());
         assert!(expected("amount_max").is_some());
         assert!(expected("partial_extent_hint").is_some());
+        assert!(expected("threaded_default").is_some());
         assert!(expected("arbitrary").is_none());
     }
 }

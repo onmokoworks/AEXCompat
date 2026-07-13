@@ -3,6 +3,7 @@
 
 #include <array>
 #include <algorithm>
+#include <atomic>
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
@@ -12,6 +13,7 @@
 #include <new>
 #include <sstream>
 #include <string>
+#include <thread>
 #include <unordered_set>
 #include <vector>
 
@@ -85,7 +87,7 @@ struct ParamRecord {
 };
 std::vector<ParamRecord> g_params;
 std::array<std::byte, kParamSize> g_checkout_definition{};
-bool g_checkout_map_available = false;
+std::atomic_bool g_checkout_map_available{false};
 void* g_smart_input_world = nullptr;
 void* g_smart_output_world = nullptr;
 void* g_smart_map_world = nullptr;
@@ -825,10 +827,34 @@ int wmain(int argc, wchar_t** argv) {
   std::string input_hash, output_hash;
   bool guards_intact = false;
   int32_t render_width = 0, render_height = 0, render_rowbytes = 0;
+  std::array<int32_t, 2> thread_errors{-1, -1};
+  std::array<std::string, 2> thread_hashes{};
+  std::array<bool, 2> thread_guards{false, false};
+  const bool concurrent_render = case_id == "threaded_default";
   std::cerr << "stage:render_begin\n" << std::flush;
-  const int32_t render_error = params_error == 0
-      ? render_once(entry, input, output, case_id, render_width, render_height,
-                    render_rowbytes, input_hash, output_hash, guards_intact) : -1;
+  int32_t render_error = -1;
+  if (params_error == 0 && concurrent_render) {
+    std::array<int32_t, 2> widths{}, heights{}, rowbytes{};
+    std::array<std::string, 2> input_hashes{};
+    auto run_thread = [&](std::size_t index) {
+      auto thread_input = input;
+      auto thread_output = output;
+      thread_errors[index] = render_once(entry, thread_input, thread_output, "default",
+          widths[index], heights[index], rowbytes[index], input_hashes[index],
+          thread_hashes[index], thread_guards[index]);
+    };
+    std::thread first(run_thread, 0); std::thread second(run_thread, 1);
+    first.join(); second.join();
+    render_width = widths[0]; render_height = heights[0]; render_rowbytes = rowbytes[0];
+    input_hash = input_hashes[0]; output_hash = thread_hashes[0];
+    guards_intact = thread_guards[0] && thread_guards[1];
+    render_error = thread_errors[0] == 0 && thread_errors[1] == 0 &&
+        widths[0] == widths[1] && heights[0] == heights[1] && rowbytes[0] == rowbytes[1] &&
+        input_hashes[0] == input_hashes[1] && thread_hashes[0] == thread_hashes[1] ? 0 : -1;
+  } else if (params_error == 0) {
+    render_error = render_once(entry, input, output, case_id, render_width, render_height,
+                               render_rowbytes, input_hash, output_hash, guards_intact);
+  }
   std::cerr << "stage:render_end error=" << render_error << "\n" << std::flush;
 #elif defined(AEXCOMPAT_SMART_WORKER)
   std::string case_id;
@@ -855,6 +881,13 @@ int wmain(int argc, wchar_t** argv) {
             << ",\"undefined_tail_bytes_per_row\":" << std::max(0, render_rowbytes - render_width * 4)
             << ",\"input_sha256\":\"" << input_hash << "\",\"output_sha256\":\""
             << output_hash << "\",\"guard_bytes_intact\":" << (guards_intact ? "true" : "false")
+            << ",\"concurrent_render\":" << (concurrent_render ? "true" : "false")
+            << ",\"thread_1_error\":" << thread_errors[0]
+            << ",\"thread_2_error\":" << thread_errors[1]
+            << ",\"thread_1_sha256\":\"" << thread_hashes[0] << "\""
+            << ",\"thread_2_sha256\":\"" << thread_hashes[1] << "\""
+            << ",\"thread_1_guards_intact\":" << (thread_guards[0] ? "true" : "false")
+            << ",\"thread_2_guards_intact\":" << (thread_guards[1] ? "true" : "false")
             << ",\"render_performed\":true}\n";
 #elif defined(AEXCOMPAT_SMART_WORKER)
   std::cout << "{\"schema_version\":1,\"stage\":\"smartfx_render\",\"status\":\""

@@ -78,6 +78,7 @@ fn main() {
         "render-connected-map-scattermap" => Some("connected_map"),
         "render-inverted-map-scattermap" => Some("inverted_map"),
         "render-partial-extent-hint-scattermap" => Some("partial_extent_hint"),
+        "render-threaded-default-scattermap" => Some("threaded_default"),
         _ => None,
     };
     if let Some(case_id) = extended_case {
