@@ -37,6 +37,8 @@ class MinihostL2SourceTests(unittest.TestCase):
             "handle_lifetimes_balanced()",
             "record->lock_count != 0",
             "verify_handle_resize_while_locked_rejected()",
+            "verify_world_double_dispose_rejected()",
+            "verify_world_allocation_limit_rejected()",
             "kMaxHandleCount = 1024",
             "kMaxHandleBytes = 64 * 1024 * 1024",
         ):

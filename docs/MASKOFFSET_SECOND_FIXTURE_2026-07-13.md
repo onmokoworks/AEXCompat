@@ -121,6 +121,16 @@ with create/dispose and lock/unlock counts equal.
 The host pool is bounded to 1024 records and 64 MiB total across all handles;
 the report also requires zero live bytes after GlobalSetdown.
 
+PF World Suite v2 now supplies real scratch-world creation and disposal for
+all registered AEX profiles. Two fixed post-render conformance cases use the
+real MaskOffset load/render lifecycle before testing host callbacks. The first
+creates a cleared 7x5 ARGB128 world, validates its 112-byte row stride, flags,
+pixel-format query, and zeroed 560-byte allocation, then proves that a second
+dispose is rejected. The second requests a 32768x32768 ARGB128 world and proves
+the 256 MiB aggregate limit rejects it before allocation without modifying the
+caller structure. Both cases run twice in fresh isolated workers and end with
+zero live worlds and bytes.
+
 ## Host-Owned Mask Scenes
 
 The mask ABI no longer stores one hard-coded mask, stream, outline, or vertex

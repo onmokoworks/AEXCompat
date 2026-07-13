@@ -139,3 +139,12 @@ The same arbitrary request now passes twice through SmartFX PreRender/Render
 under its separate allowlist and receipt, with valid rectangles, intact guards,
 and the identical dynamic oracle hash. SmartFX range rejection also proves no
 native process starts for invalid values.
+
+PF World Suite v2 scratch allocations are now ownership tracked independently
+from borrowed render worlds. Only ARGB32/64/128 are accepted, all size
+arithmetic is checked, and the complete pool is capped at 64 worlds and
+256 MiB. Fixed `world_double_dispose` and `world_allocation_limit` gates each
+ran twice after a successful real MaskOffset render. They observed exactly one
+rejected operation per run, left zero live worlds/bytes, preserved worker guard
+bytes, and produced schema-valid reports. ScatterMap L2, classic render, and
+SmartFX plus MaskOffset translated-mask regression remained passing afterward.

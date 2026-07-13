@@ -6,6 +6,7 @@
 #include <atomic>
 #include <cerrno>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <cwchar>
 #include <cstring>
@@ -20,6 +21,7 @@
 #include <sstream>
 #include <string>
 #include <thread>
+#include <unordered_map>
 #include <unordered_set>
 #include <utility>
 #include <vector>
@@ -562,8 +564,128 @@ MaskOutlineSuite g_mask_outline_suite{&is_mask_outline_open, nullptr,
                                       &get_mask_outline_num_segments,
                                       &get_mask_outline_vertex_info};
 
+constexpr int32_t kPixelFormatArgb32 = 1650946657;
+constexpr int32_t kPixelFormatArgb64 = 909206881;
+constexpr int32_t kPixelFormatArgb128 = 842229089;
+constexpr std::size_t kEffectWorldSize = 120;
+constexpr uint64_t kMaxWorldBytes = 256ULL * 1024 * 1024;
+constexpr std::size_t kMaxWorldCount = 64;
+
+struct LocalRect { int32_t left, top, right, bottom; };
+struct LocalRationalScale { int32_t num; uint32_t den; };
+struct LocalEffectWorld {
+  void* reserved0;
+  void* reserved1;
+  int32_t world_flags;
+  void* data;
+  int32_t rowbytes;
+  int32_t width;
+  int32_t height;
+  LocalRect extent_hint;
+  void* platform_ref;
+  int32_t reserved_long1;
+  void* reserved_long4;
+  LocalRationalScale pix_aspect_ratio;
+  void* reserved_long2;
+  int32_t origin_x;
+  int32_t origin_y;
+  int32_t reserved_long3;
+  int32_t dephault;
+};
+static_assert(sizeof(LocalEffectWorld) == kEffectWorldSize);
+static_assert(offsetof(LocalEffectWorld, world_flags) == 16);
+static_assert(offsetof(LocalEffectWorld, data) == 24);
+static_assert(offsetof(LocalEffectWorld, rowbytes) == 32);
+static_assert(offsetof(LocalEffectWorld, extent_hint) == 44);
+static_assert(offsetof(LocalEffectWorld, pix_aspect_ratio) == 88);
+
+struct OwnedWorld {
+  void* pixels{};
+  uint64_t size{};
+  int32_t pixel_format{};
+};
+std::unordered_map<void*, OwnedWorld> g_owned_worlds;
+std::mutex g_world_mutex;
+uint32_t g_worlds_created{};
+uint32_t g_worlds_disposed{};
+uint32_t g_invalid_world_operations{};
+uint64_t g_world_bytes{};
+
+bool world_lifetimes_balanced() {
+  std::lock_guard<std::mutex> lock(g_world_mutex);
+  return g_owned_worlds.empty() && g_worlds_created == g_worlds_disposed &&
+      g_world_bytes == 0;
+}
+
+int32_t __cdecl new_world(void*, int32_t width, int32_t height, int32_t clear_pixels,
+                          int32_t pixel_format, void* world) {
+  std::lock_guard<std::mutex> lock(g_world_mutex);
+  int32_t bytes_per_pixel = 0;
+  if (pixel_format == kPixelFormatArgb32) bytes_per_pixel = 4;
+  else if (pixel_format == kPixelFormatArgb64) bytes_per_pixel = 8;
+  else if (pixel_format == kPixelFormatArgb128) bytes_per_pixel = 16;
+  if (!world || width <= 0 || height <= 0 || bytes_per_pixel == 0 ||
+      g_owned_worlds.count(world) || g_owned_worlds.size() >= kMaxWorldCount) {
+    ++g_invalid_world_operations;
+    return 4;
+  }
+  const uint64_t rowbytes64 = static_cast<uint64_t>(width) * bytes_per_pixel;
+  const uint64_t size = rowbytes64 * static_cast<uint64_t>(height);
+  if (rowbytes64 > static_cast<uint64_t>((std::numeric_limits<int32_t>::max)()) ||
+      size > kMaxWorldBytes || g_world_bytes > kMaxWorldBytes - size) {
+    ++g_invalid_world_operations;
+    return 4;
+  }
+  void* pixels = ::operator new(static_cast<std::size_t>(size), std::nothrow);
+  if (!pixels) return 1;
+  // Never expose stale allocator contents when AE leaves scratch pixels unspecified.
+  std::memset(pixels, clear_pixels ? 0 : 0xcd, static_cast<std::size_t>(size));
+  std::memset(world, 0, kEffectWorldSize);
+  auto* bytes = static_cast<std::byte*>(world);
+  const int32_t flags = 2 | (pixel_format == kPixelFormatArgb32 ? 0 : 1);
+  const int32_t rowbytes = static_cast<int32_t>(rowbytes64);
+  const std::array<int32_t, 4> extent{0, 0, width, height};
+  const int32_t aspect_num = 1;
+  const uint32_t aspect_den = 1;
+  std::memcpy(bytes + 16, &flags, sizeof(flags));
+  std::memcpy(bytes + 24, &pixels, sizeof(pixels));
+  std::memcpy(bytes + 32, &rowbytes, sizeof(rowbytes));
+  std::memcpy(bytes + 36, &width, sizeof(width));
+  std::memcpy(bytes + 40, &height, sizeof(height));
+  std::memcpy(bytes + 44, extent.data(), sizeof(extent));
+  std::memcpy(bytes + 88, &aspect_num, sizeof(aspect_num));
+  std::memcpy(bytes + 92, &aspect_den, sizeof(aspect_den));
+  g_owned_worlds.emplace(world, OwnedWorld{pixels, size, pixel_format});
+  ++g_worlds_created;
+  g_world_bytes += size;
+  return 0;
+}
+
+int32_t __cdecl dispose_world(void*, void* world) {
+  std::lock_guard<std::mutex> lock(g_world_mutex);
+  const auto found = g_owned_worlds.find(world);
+  if (!world || found == g_owned_worlds.end()) {
+    ++g_invalid_world_operations;
+    return 4;
+  }
+  ::operator delete(found->second.pixels);
+  g_world_bytes -= found->second.size;
+  g_owned_worlds.erase(found);
+  ++g_worlds_disposed;
+  std::memset(world, 0, kEffectWorldSize);
+  return 0;
+}
+
 int32_t __cdecl get_pixel_format(const void* world, int32_t* pixel_format) {
   if (!world || !pixel_format) return 4;
+  {
+    std::lock_guard<std::mutex> lock(g_world_mutex);
+    const auto found = g_owned_worlds.find(const_cast<void*>(world));
+    if (found != g_owned_worlds.end()) {
+      *pixel_format = found->second.pixel_format;
+      return 0;
+    }
+  }
   const auto* bytes = static_cast<const std::byte*>(world);
   int32_t rowbytes{};
   int32_t width{};
@@ -572,20 +694,53 @@ int32_t __cdecl get_pixel_format(const void* world, int32_t* pixel_format) {
   if (width <= 0 || rowbytes == (std::numeric_limits<int32_t>::min)()) return 4;
   const int32_t bytes_per_pixel = std::abs(rowbytes) / width;
   if (bytes_per_pixel >= 16)
-    *pixel_format = 842229089;  // PF_PixelFormat_ARGB128
+    *pixel_format = kPixelFormatArgb128;
   else if (bytes_per_pixel >= 8)
-    *pixel_format = 909206881;  // PF_PixelFormat_ARGB64
+    *pixel_format = kPixelFormatArgb64;
   else
-    *pixel_format = 1650946657;  // PF_PixelFormat_ARGB32
+    *pixel_format = kPixelFormatArgb32;
   return 0;
 }
 
 struct WorldSuite {
-  void* new_world{};
-  void* dispose_world{};
+  decltype(&new_world) new_world;
+  decltype(&dispose_world) dispose_world;
   decltype(&get_pixel_format) get_pixel_format;
 };
-WorldSuite g_world_suite{nullptr, nullptr, &get_pixel_format};
+WorldSuite g_world_suite{&new_world, &dispose_world, &get_pixel_format};
+
+bool verify_world_double_dispose_rejected() {
+  alignas(8) std::array<std::byte, kEffectWorldSize> world{};
+  const uint32_t invalid_before = g_invalid_world_operations;
+  if (new_world(&g_effect, 7, 5, 1, kPixelFormatArgb128, world.data()) != 0) return false;
+  void* pixels{};
+  int32_t flags{}, rowbytes{}, width{}, height{}, format{};
+  std::memcpy(&flags, world.data() + 16, sizeof(flags));
+  std::memcpy(&pixels, world.data() + 24, sizeof(pixels));
+  std::memcpy(&rowbytes, world.data() + 32, sizeof(rowbytes));
+  std::memcpy(&width, world.data() + 36, sizeof(width));
+  std::memcpy(&height, world.data() + 40, sizeof(height));
+  const bool layout_valid = pixels && flags == 3 && rowbytes == 112 && width == 7 && height == 5 &&
+      get_pixel_format(world.data(), &format) == 0 && format == kPixelFormatArgb128 &&
+      std::all_of(static_cast<const unsigned char*>(pixels),
+                  static_cast<const unsigned char*>(pixels) + 560,
+                  [](unsigned char value) { return value == 0; });
+  const int32_t first = dispose_world(&g_effect, world.data());
+  const int32_t second = dispose_world(&g_effect, world.data());
+  return layout_valid && first == 0 && second != 0 &&
+      g_invalid_world_operations == invalid_before + 1 && world_lifetimes_balanced();
+}
+
+bool verify_world_allocation_limit_rejected() {
+  alignas(8) std::array<std::byte, kEffectWorldSize> world{};
+  world.fill(std::byte{0x5a});
+  const auto before = world;
+  const uint32_t invalid_before = g_invalid_world_operations;
+  const int32_t error = new_world(&g_effect, 32768, 32768, 1,
+                                  kPixelFormatArgb128, world.data());
+  return error != 0 && world == before &&
+      g_invalid_world_operations == invalid_before + 1 && world_lifetimes_balanced();
+}
 
 std::mutex g_suite_lease_mutex;
 std::map<std::pair<std::string, int32_t>, uint32_t> g_suite_leases;
@@ -1479,16 +1634,22 @@ int wmain(int argc, wchar_t** argv) {
       std::wstring(argv[1]) == L"--smart-suite-release-without-acquire-request";
   const bool handle_resize_while_locked_mode = argc == 5 &&
       std::wstring(argv[1]) == L"--smart-handle-resize-while-locked-request";
+  const bool world_double_dispose_mode = argc == 5 &&
+      std::wstring(argv[1]) == L"--smart-world-double-dispose-request";
+  const bool world_allocation_limit_mode = argc == 5 &&
+      std::wstring(argv[1]) == L"--smart-world-allocation-limit-request";
   const bool request_mode = mask_request_mode || mask_scene_request_mode || mask_context_request_mode ||
       mask_count_error_mode || mask_count_crash_mode || mask_double_dispose_mode ||
       stream_live_value_dispose_mode || suite_release_without_acquire_mode ||
-      handle_resize_while_locked_mode ||
+      handle_resize_while_locked_mode || world_double_dispose_mode ||
+      world_allocation_limit_mode ||
       (argc == 5 && std::wstring(argv[1]) == L"--smart-request");
   if (!request_mode && (argc != 5 || std::wstring(argv[1]) != L"--smart")) return 2;
   g_mask_model_enabled = mask_request_mode || mask_scene_request_mode || mask_context_request_mode ||
       mask_count_error_mode || mask_count_crash_mode || mask_double_dispose_mode ||
       stream_live_value_dispose_mode || suite_release_without_acquire_mode ||
-      handle_resize_while_locked_mode;
+      handle_resize_while_locked_mode || world_double_dispose_mode ||
+      world_allocation_limit_mode;
   g_mask_fault = mask_count_error_mode ? MaskFault::CountError :
       mask_count_crash_mode ? MaskFault::CountCrash : MaskFault::None;
   RequestedAssignments requested_parameters;
@@ -1665,6 +1826,7 @@ int wmain(int argc, wchar_t** argv) {
           : false;
   bool suite_fault_observed = false;
   bool handle_fault_observed = false;
+  bool world_fault_observed = false;
   std::cerr << "stage:smart_render_end pre_error=" << smart.pre_error
             << " render_error=" << smart.render_error << "\n" << std::flush;
 #endif
@@ -1676,6 +1838,10 @@ int wmain(int argc, wchar_t** argv) {
     suite_fault_observed = verify_suite_release_without_acquire_rejected();
   if (handle_resize_while_locked_mode)
     handle_fault_observed = verify_handle_resize_while_locked_rejected();
+  if (world_double_dispose_mode)
+    world_fault_observed = verify_world_double_dispose_rejected();
+  if (world_allocation_limit_mode)
+    world_fault_observed = verify_world_allocation_limit_rejected();
   #endif
   std::cerr << "stage:global_setdown_end error=" << setdown_error << "\n" << std::flush;
 #ifdef AEXCOMPAT_RENDER_WORKER
@@ -1764,6 +1930,13 @@ int wmain(int argc, wchar_t** argv) {
             << ",\"live_handle_bytes\":" << g_handle_bytes
             << ",\"invalid_handle_operations\":" << g_invalid_handle_operations
             << ",\"handle_fault_observed\":" << (handle_fault_observed ? "true" : "false")
+            << ",\"world_fault_observed\":" << (world_fault_observed ? "true" : "false")
+            << ",\"world_lifetimes_balanced\":" << (world_lifetimes_balanced() ? "true" : "false")
+            << ",\"worlds_created\":" << g_worlds_created
+            << ",\"worlds_disposed\":" << g_worlds_disposed
+            << ",\"live_world_count\":" << g_owned_worlds.size()
+            << ",\"live_world_bytes\":" << g_world_bytes
+            << ",\"invalid_world_operations\":" << g_invalid_world_operations
             << ",\"requested_parameters\":" << requested_parameters_json(requested_parameters)
             << ",\"requested_amount\":" << static_cast<int32_t>(requested_value(requested_parameters, L"amount"))
             << ",\"requested_direction\":" << static_cast<int32_t>(requested_value(requested_parameters, L"direction"))

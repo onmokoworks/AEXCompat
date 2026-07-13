@@ -111,3 +111,18 @@ then unlocks and disposes it to restore a fully balanced state.
 The worker additionally caps the complete handle pool at 1024 records and
 64 MiB total, so repeated individually valid allocations cannot bypass the
 per-handle memory bound. Resize is checked against the same aggregate budget.
+
+PF World Suite v2 is now a generic host-core service rather than a fixture
+adapter. Its local cleanroom ABI declaration follows the reviewed public SDK
+contract: NewWorld, DisposeWorld, then GetPixelFormat. NewWorld accepts explicit
+ARGB32, ARGB64, and ARGB128 formats and constructs the complete 120-byte x64
+PF_EffectWorld layout, including WRITEABLE/DEEP flags, data, rowbytes,
+dimensions, full extent, and square pixel aspect. Smart checkout worlds remain
+borrowed and cannot be disposed through this ownership path.
+
+Each created scratch world has a mutex-protected ownership record containing
+its exact format and allocation size. The host permits at most 64 live worlds
+and 256 MiB total, rejects unsupported formats, invalid dimensions, overflow,
+duplicate creation into a live world, borrowed disposal, and double disposal.
+Rejected allocations do not alter the caller's world. Non-cleared worlds use a
+deterministic poison fill rather than exposing stale allocator memory.
