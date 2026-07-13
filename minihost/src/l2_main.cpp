@@ -823,6 +823,8 @@ int wmain(int argc, wchar_t** argv) {
             << ",\"global_setdown_error\":" << setdown_error
             << ",\"case_id\":\"" << case_id << "\",\"pixel_format\":\"" << g_smart_pixel_format << "\",\"width\":"
             << render_width << ",\"height\":" << render_height << ",\"rowbytes\":" << render_rowbytes
+            << ",\"bytes_written_per_row\":" << render_width * 4
+            << ",\"undefined_tail_bytes_per_row\":" << std::max(0, render_rowbytes - render_width * 4)
             << ",\"input_sha256\":\"" << input_hash << "\",\"output_sha256\":\""
             << output_hash << "\",\"guard_bytes_intact\":" << (guards_intact ? "true" : "false")
             << ",\"render_performed\":true}\n";
@@ -845,6 +847,8 @@ int wmain(int argc, wchar_t** argv) {
             << ",\"case_id\":\"" << case_id << "\",\"pixel_format\":\"" << g_smart_pixel_format << "\",\"width\":"
             << g_smart_width << ",\"height\":" << g_smart_height << ",\"rowbytes\":"
             << g_smart_rowbytes
+            << ",\"bytes_written_per_row\":" << g_smart_width * 4
+            << ",\"undefined_tail_bytes_per_row\":" << std::max(0, g_smart_rowbytes - g_smart_width * 4)
             << ",\"input_sha256\":\"" << smart.input_hash << "\",\"output_sha256\":\""
             << smart.output_hash << "\",\"result_rects_valid\":" << (smart.rects_valid ? "true" : "false")
             << ",\"guard_bytes_intact\":" << (smart.guards_intact ? "true" : "false")

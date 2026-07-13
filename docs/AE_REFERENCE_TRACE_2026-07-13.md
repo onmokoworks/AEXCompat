@@ -130,3 +130,29 @@ The reopened render normalized to ARGB8 SHA-256
 exactly matching the seed-max oracle with zero differing bytes and pixels. This
 proves non-default parameter persistence, effect reconstruction, and
 production-host render equivalence after project serialization/resetup.
+
+## Deep And Float Observation
+
+`tools/ae_scattermap_depth_probe.jsx` rendered the same fixed input twice at
+8, 16, and 32 project bits per channel. `saveFrameToPng` emitted RGBA8 for the
+8-bpc project and RGBA16 PNGs for both 16- and 32-bpc projects. The custom
+lossless decoder in `tools/ae_png_depth_inspect.py` compared unfiltered samples
+without Pillow's 8-bit conversion:
+
+| AE project depth | PNG depth | Stable samples | Different samples | Result |
+| --- | --- | --- | --- | --- |
+| 8 bpc | 8 | 768 | 0 | deterministic and ARGB8 oracle-exact |
+| 16 bpc | 16 | 429 | 339 | nondeterministic unwritten tail |
+| 32 bpc | 16 | 766 | 2 | nondeterministic unwritten content |
+
+The two 16-bpc decoded hashes were
+`B367114389C4553E90262C59C3A3DA0293D9A272874A416824B570D1C12AB8AB`
+and `90557F84830B20463E432E3D775EC3D2BDB9A154B74FA1AEBBCEE4AFC5811A74`.
+The two 32-bpc-derived hashes were
+`8E1451ECBC236683746890A1A29DCB2B6B5B952BCBEE1F4DC71A4EE128F4C45C`
+and `97C4AAD492FAD3DB14CB87F420F0526C0E2542EDB31F80C50235120BBF0B6CE9`.
+
+This confirms that exact full-frame deep/float hashes are not a valid AE oracle
+for this malformed fixture. AEXCompat reports the deterministic `width*4`
+bytes written per row and the remaining undefined tail separately. Its `0xCC`
+tail is a containment sentinel, not an invented claim about AE pixel values.

@@ -5,7 +5,7 @@ authorization. Each stage still requires fixed-fixture controls and re-audit.
 
 ## Current Result
 
-`gate_state: target_ae_argb8_matrix_and_project_roundtrip_verified`
+`gate_state: target_ae_argb8_roundtrip_verified_deep_tail_nondeterminism_observed`
 
 | Gate | Status | Evidence and remaining work |
 | --- | --- | --- |
@@ -31,8 +31,9 @@ successfully through the isolated broker. Initialization, descriptor values,
 deterministic output, buffer guards, and independent pixel hash parity are
 observed. Extended classic render and connected map cases now have oracle
 parity. SmartFX PreRender/Render now also has two-run deterministic oracle
-parity across the ARGB8 matrix. 16-bpc and 32-bpc CPU cases also reproduce the
-fixture's declared-but-byte-oriented deep/float behavior exactly. GPU lifecycle
+parity across the ARGB8 matrix. 16-bpc and 32-bpc CPU cases reproduce the
+fixture's declared-but-byte-oriented writes under a harness sentinel; actual AE
+evidence shows the unwritten tail is not deterministic. GPU lifecycle
 negotiation correctly falls back because PreRender does not opt in to GPU pixel
 execution. A missing mandatory input propagates error 4 without output writes
 or a process crash. A target-specific malformed frame contract crashes only its

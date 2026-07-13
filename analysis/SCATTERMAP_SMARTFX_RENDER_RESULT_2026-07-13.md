@@ -21,13 +21,17 @@ intact.
 The 16-bpc case exactly reproduces a fixture limitation: although the plug-in
 declares deep-color awareness, its current layer helpers copy only `width*4`
 bytes per row. The first half of each 16-bpc row is processed as byte pixels and
-the second half remains unwritten. Native output and the source-derived oracle
-both hash to `FDC0BC732683E9353F9A855D6EA2589B17D43D29D7B538093B474BEC6D5AD026`.
+the second half remains unwritten. The isolated harness fills that tail with a
+`0xCC` safety sentinel; under this harness-owned initialization, native output
+and the source-derived oracle both hash to
+`FDC0BC732683E9353F9A855D6EA2589B17D43D29D7B538093B474BEC6D5AD026`.
 The 32-bpc case likewise supplies a correctly laid out ARGB128 world while the
-fixture copies only `width*4` bytes per row. Native and source-derived oracle
-outputs hash to `D707B9B7BD7C923182A0BEFCA60985896E473AFF3D0191FC310FC07CAD3FE90B`.
-These results record faithful host behavior; they are not evidence of correct
-deep/float processing.
+fixture copies only `width*4` bytes per row. With the same harness sentinel,
+native and source-derived oracle outputs hash to
+`D707B9B7BD7C923182A0BEFCA60985896E473AFF3D0191FC310FC07CAD3FE90B`.
+These hashes prove the plug-in's writes and guard containment, not complete AE
+deep/float pixel parity: production AE leaves the unwritten tail dependent on
+host buffer contents.
 
 ## GPU Negotiation
 
