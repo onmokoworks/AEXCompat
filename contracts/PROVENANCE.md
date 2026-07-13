@@ -20,3 +20,11 @@ provenance and should not be edited during promotion.
 - Sanitize local absolute paths before adding examples under `contracts/`.
 - Keep native loading closed; these files are contracts, not approvals.
 
+## Trace Contracts
+
+| Canonical path | Source | Notes |
+| --- | --- | --- |
+| `contracts/trace/host_trace_event.schema.json` | `docs/PROJECT_DESIGN_2026-07-03.md`, Host Behavior Oracle design | Locally authored machine-readable event contract; not imported and contains no observed AE data. |
+| `contracts/trace/host_trace_session.schema.json` | `docs/PROJECT_DESIGN_2026-07-03.md`, Host Behavior Oracle design | Session envelope for validating trace identity and completeness metadata. |
+| `contracts/trace/conformance_rules.json` | `docs/PROJECT_DESIGN_2026-07-03.md`, Host Behavior Oracle design | Initial comparison policy for future AE-versus-minihost traces. |
+| `contracts/trace/examples/synthetic_session.jsonl` | Locally generated synthetic example | Contains no native plug-in payload or measured After Effects behavior. |

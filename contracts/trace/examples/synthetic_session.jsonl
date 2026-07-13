@@ -1,0 +1,6 @@
+{"schema_version":1,"event_index":0,"event_kind":"session_start","host_kind":"minihost","host_version_label":"minihost synthetic","plugin_label":"synthetic-null"}
+{"schema_version":1,"event_index":1,"event_kind":"selector_dispatch","host_kind":"minihost","host_version_label":"minihost synthetic","plugin_label":"synthetic-null","selector":"PF_Cmd_GLOBAL_SETUP"}
+{"schema_version":1,"event_index":2,"event_kind":"suite_acquire","host_kind":"minihost","host_version_label":"minihost synthetic","plugin_label":"synthetic-null","suite":{"name":"Synthetic Suite","version":1,"granted":true}}
+{"schema_version":1,"event_index":3,"event_kind":"world_descriptor","host_kind":"minihost","host_version_label":"minihost synthetic","plugin_label":"synthetic-null","world":{"width":64,"height":64,"rowbytes":256,"pixel_format":"argb8"}}
+{"schema_version":1,"event_index":4,"event_kind":"suite_release","host_kind":"minihost","host_version_label":"minihost synthetic","plugin_label":"synthetic-null","suite":{"name":"Synthetic Suite","version":1,"granted":true}}
+{"schema_version":1,"event_index":5,"event_kind":"session_end","host_kind":"minihost","host_version_label":"minihost synthetic","plugin_label":"synthetic-null"}

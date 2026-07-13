@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://aexcompat.local/contracts/trace/host_trace_session.schema.json",
+  "schema_version": 1,
+  "title": "AEXCompat host trace session",
+  "type": "object",
+  "required": ["schema_version", "session_id", "event_count", "trace_complete", "events"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "session_id": {"type": "string", "format": "uuid"},
+    "event_count": {"type": "integer", "minimum": 0},
+    "trace_complete": {"type": "boolean"},
+    "events": {
+      "type": "array",
+      "items": {"$ref": "host_trace_event.schema.json"}
+    }
+  },
+  "additionalProperties": false
+}

@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "rules_kind": "host_trace_conformance",
+  "rules": [
+    {"event_kind": "selector_dispatch", "field": "selector", "comparison": "ordered_sequence", "level": "must_match"},
+    {"event_kind": "suite_acquire", "field": "suite.name", "comparison": "set", "level": "must_match"},
+    {"event_kind": "world_descriptor", "field": "world.width", "comparison": "value", "level": "should_match"},
+    {"event_kind": "world_descriptor", "field": "world.height", "comparison": "value", "level": "should_match"},
+    {"event_kind": "world_descriptor", "field": "world.rowbytes", "comparison": "value", "level": "should_match"},
+    {"event_kind": "world_descriptor", "field": "world.pixel_format", "comparison": "value", "level": "should_match"},
+    {"event_kind": "*", "field": "*", "comparison": "presence", "level": "informational"}
+  ]
+}
