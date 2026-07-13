@@ -478,6 +478,7 @@ SmartResult smart_render_once(EffectEntry entry, std::array<std::byte, kInSize>&
   const bool deep16 = case_id == "deep16_default";
   const bool gpu_negotiation = case_id == "gpu_fallback_float32";
   const bool missing_input = case_id == "error_missing_input";
+  const bool crash_null_output = case_id == "crash_null_output_world";
   const bool float32 = case_id == "float32_default" || gpu_negotiation;
   const bool connected_map = case_id == "connected_map" || case_id == "inverted_map";
   const int32_t width = connected_map ? 11 : ((case_id == "odd_dimensions" || case_id == "padded_stride") ? 13 : 16);
@@ -490,7 +491,7 @@ SmartResult smart_render_once(EffectEntry entry, std::array<std::byte, kInSize>&
   else if (case_id == "vertical_no_repeat") { amount = 7; direction = 2; repeat = 0; }
   else if (case_id == "mixed") { amount = 12; seed = 991; mix = 37.5; }
   else if (case_id == "odd_dimensions" || case_id == "padded_stride") { amount = 4; seed = 3; }
-  else if (case_id != "default" && !deep16 && !float32 && !missing_input && !connected_map) return result;
+  else if (case_id != "default" && !deep16 && !float32 && !missing_input && !crash_null_output && !connected_map) return result;
   constexpr std::size_t guard = 64;
   std::vector<unsigned char> source(rowbytes * height, 0x5A);
   for (int32_t y = 0; y < height; ++y) for (int32_t x = 0; x < width; ++x) {
@@ -548,6 +549,8 @@ SmartResult smart_render_once(EffectEntry entry, std::array<std::byte, kInSize>&
   if (case_id == "inverted_map") write<int32_t>(definitions[7], 56, 1);
   std::array<void*, 9> params{};
   for (std::size_t i = 0; i < definitions.size(); ++i) params[i] = definitions[i].data();
+  if (crash_null_output)
+    entry(kFrameSetup, input.data(), command_output.data(), params.data(), nullptr, nullptr);
 
   std::array<std::byte, 8> gpu_setup_input{}, gpu_setup_output{};
   std::array<std::byte, 16> gpu_setup_extra{};

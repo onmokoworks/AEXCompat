@@ -47,3 +47,12 @@ nonzero. The broker treated this as the expected error contract rather than a
 successful render or an internal failure. Output SHA-256 was
 `346790DBFE3BE4137B9B0B36606E504BCE22FF351867A183DE2FE8481BE1006E` in
 both runs.
+
+## Fixture-Specific Crash Isolation
+
+A fixed malformed frame contract supplied valid parameters but a null output
+world to `PF_Cmd_FRAME_SETUP`. The fixture's Rust wrapper aborted in both fresh
+workers. Both exits were classified as `crashed`; neither crash escaped the Job
+Object boundary, and the broker survived to write the create-new result report.
+This case is accepted only when both workers crash. It is never treated as a
+render success or ordinary nonzero error.

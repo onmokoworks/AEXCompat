@@ -5,7 +5,7 @@ authorization. Each stage still requires fixed-fixture controls and re-audit.
 
 ## Current Result
 
-`gate_state: smartfx_render_lifecycle_and_error_contract_verified`
+`gate_state: target_render_error_and_crash_isolation_verified`
 
 | Gate | Status | Evidence and remaining work |
 | --- | --- | --- |
@@ -35,5 +35,7 @@ parity across the ARGB8 matrix. 16-bpc and 32-bpc CPU cases also reproduce the
 fixture's declared-but-byte-oriented deep/float behavior exactly. GPU lifecycle
 negotiation correctly falls back because PreRender does not opt in to GPU pixel
 execution. A missing mandatory input propagates error 4 without output writes
-or a process crash. H-4 AE reference trace capture remains pending under the
+or a process crash. A target-specific malformed frame contract crashes only its
+disposable worker in two repeated runs while the broker survives and records
+evidence. H-4 AE reference trace capture remains pending under the
 continuous authorization and existing isolation controls.

@@ -9,11 +9,12 @@ STATUS = ROOT / "docs" / "SAFETY_GATE_STATUS_2026-07-13.md"
 class SafetyGateStatusTests(unittest.TestCase):
     def test_status_records_smartfx_verification_and_remaining_scope(self):
         text = STATUS.read_text(encoding="utf-8")
-        self.assertIn("gate_state: smartfx_render_lifecycle_and_error_contract_verified", text)
+        self.assertIn("gate_state: target_render_error_and_crash_isolation_verified", text)
         self.assertIn("fixed-fixture controls and re-audit", text)
         self.assertIn("SmartFX PreRender/Render", text)
         self.assertIn("GPU lifecycle", text)
         self.assertIn("propagates error 4", text)
+        self.assertIn("malformed frame contract", text)
 
     def test_all_gate_items_are_explicit(self):
         text = STATUS.read_text(encoding="utf-8")
