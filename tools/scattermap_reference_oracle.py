@@ -102,6 +102,30 @@ def render_default16(width: int = 16, height: int = 12) -> bytes:
     return bytes(output)
 
 
+def render_default32f(width: int = 16, height: int = 12) -> bytes:
+    rows = []
+    for y in range(height):
+        row = bytearray()
+        for x in range(width):
+            row.extend(struct.pack("<4f", 1.0, x / (width - 1), y / (height - 1),
+                                   (x + y) / (width + height - 2)))
+        rows.append(bytes(row))
+    # The fixture's helpers copy width*4 bytes from each ARGB128 row.
+    source = b"".join(row[:width * 4] for row in rows)
+    compact = bytearray(width * height * 4)
+    for y in range(height):
+        for x in range(width):
+            dx = rust_round(f32(hash_pixel(x, y, 0, 0) * f32(5.0)))
+            dy = rust_round(f32(hash_pixel(x, y, 0, 1) * f32(5.0)))
+            sx, sy = min(width - 1, max(0, x + dx)), min(height - 1, max(0, y + dy))
+            dst, src = (y * width + x) * 4, (sy * width + sx) * 4
+            compact[dst:dst + 4] = source[src:src + 4]
+    output = bytearray([0xCC] * width * height * 16)
+    for y in range(height):
+        output[y * width * 16:y * width * 16 + width * 4] = compact[y * width * 4:(y + 1) * width * 4]
+    return bytes(output)
+
+
 def generated_luma_map(width: int, height: int, map_width: int, map_height: int,
                        invert: bool = False) -> list[float]:
     source = []

@@ -16,6 +16,7 @@ fn expected(case_id: &str) -> Option<&'static str> { match case_id {
     "connected_map" => Some("A38568761441C209940F81A8C2792DAD50566C66EDA1463BDCF071CCA614891B"),
     "inverted_map" => Some("3BC0C5172B880A8A83CEC24177B78721E9F0619D5330F6A26AAA02B9CC057A08"),
     "deep16_default" => Some("FDC0BC732683E9353F9A855D6EA2589B17D43D29D7B538093B474BEC6D5AD026"),
+    "float32_default" => Some("D707B9B7BD7C923182A0BEFCA60985896E473AFF3D0191FC310FC07CAD3FE90B"),
     _ => None,
 } }
 #[derive(Deserialize)]
@@ -75,7 +76,8 @@ mod tests {
     #[test]
     fn oracle_table_covers_the_fixed_smartfx_matrix() {
         for case_id in ["default", "identity", "horizontal", "vertical_no_repeat", "mixed",
-                        "odd_dimensions", "padded_stride", "connected_map", "inverted_map", "deep16_default"] {
+                        "odd_dimensions", "padded_stride", "connected_map", "inverted_map", "deep16_default",
+                        "float32_default"] {
             assert_eq!(expected(case_id).unwrap().len(), 64);
         }
         assert!(expected("arbitrary").is_none());

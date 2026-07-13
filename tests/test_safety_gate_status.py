@@ -9,10 +9,10 @@ STATUS = ROOT / "docs" / "SAFETY_GATE_STATUS_2026-07-13.md"
 class SafetyGateStatusTests(unittest.TestCase):
     def test_status_records_smartfx_verification_and_remaining_scope(self):
         text = STATUS.read_text(encoding="utf-8")
-        self.assertIn("gate_state: smartfx_argb8_matrix_and_deep16_behavior_verified", text)
+        self.assertIn("gate_state: smartfx_cpu_argb8_deep16_float32_behavior_verified", text)
         self.assertIn("fixed-fixture controls and re-audit", text)
         self.assertIn("SmartFX PreRender/Render", text)
-        self.assertIn("32-bpc, GPU, and H-4", text)
+        self.assertIn("GPU and H-4", text)
 
     def test_all_gate_items_are_explicit(self):
         text = STATUS.read_text(encoding="utf-8")

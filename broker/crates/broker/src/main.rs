@@ -48,6 +48,7 @@ fn main() {
         "smart-connected-map-scattermap" => Some("connected_map"),
         "smart-inverted-map-scattermap" => Some("inverted_map"),
         "smart-deep16-scattermap" => Some("deep16_default"),
+        "smart-float32-scattermap" => Some("float32_default"),
         _ => None,
     };
     if let Some(case_id) = smart_case {

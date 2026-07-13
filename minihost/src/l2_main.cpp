@@ -459,10 +459,11 @@ SmartResult smart_render_once(EffectEntry entry, std::array<std::byte, kInSize>&
                               const std::string& case_id) {
   SmartResult result;
   const bool deep16 = case_id == "deep16_default";
+  const bool float32 = case_id == "float32_default";
   const bool connected_map = case_id == "connected_map" || case_id == "inverted_map";
   const int32_t width = connected_map ? 11 : ((case_id == "odd_dimensions" || case_id == "padded_stride") ? 13 : 16);
   const int32_t height = connected_map ? 7 : ((case_id == "odd_dimensions" || case_id == "padded_stride") ? 9 : 12);
-  const int32_t pixel_bytes = deep16 ? 8 : 4;
+  const int32_t pixel_bytes = float32 ? 16 : (deep16 ? 8 : 4);
   const int32_t rowbytes = case_id == "padded_stride" ? 64 : width * pixel_bytes;
   int32_t amount = 5, direction = 3, seed = 0, repeat = 1; double mix = 100.0;
   if (case_id == "identity") amount = 0;
@@ -470,12 +471,17 @@ SmartResult smart_render_once(EffectEntry entry, std::array<std::byte, kInSize>&
   else if (case_id == "vertical_no_repeat") { amount = 7; direction = 2; repeat = 0; }
   else if (case_id == "mixed") { amount = 12; seed = 991; mix = 37.5; }
   else if (case_id == "odd_dimensions" || case_id == "padded_stride") { amount = 4; seed = 3; }
-  else if (case_id != "default" && !deep16 && !connected_map) return result;
+  else if (case_id != "default" && !deep16 && !float32 && !connected_map) return result;
   constexpr std::size_t guard = 64;
   std::vector<unsigned char> source(rowbytes * height, 0x5A);
   for (int32_t y = 0; y < height; ++y) for (int32_t x = 0; x < width; ++x) {
     auto* pixel = &source[y * rowbytes + x * pixel_bytes];
-    if (deep16) {
+    if (float32) {
+      const float values[4] = {1.0f, static_cast<float>(x) / static_cast<float>(width - 1),
+          static_cast<float>(y) / static_cast<float>(height - 1),
+          static_cast<float>(x + y) / static_cast<float>(width + height - 2)};
+      std::memcpy(pixel, values, sizeof(values));
+    } else if (deep16) {
       const uint16_t values[4] = {32768, static_cast<uint16_t>(x * 32768 / (width - 1)),
           static_cast<uint16_t>(y * 32768 / (height - 1)),
           static_cast<uint16_t>((x + y) * 32768 / (width + height - 2))};
@@ -491,7 +497,7 @@ SmartResult smart_render_once(EffectEntry entry, std::array<std::byte, kInSize>&
   std::memset(destination, 0xCC, rowbytes * height);
   std::array<std::byte, 120> input_world{}, output_world{};
   auto setup_world = [&](auto& world, void* pixels) {
-    write<int32_t>(world, 16, deep16 ? 1 : 0);
+    write<int32_t>(world, 16, (deep16 || float32) ? 1 : 0);
     write<void*>(world, 24, pixels); write<int32_t>(world, 32, rowbytes);
     write<int32_t>(world, 36, width); write<int32_t>(world, 40, height);
     write_rect(world.data() + 44, width, height);
@@ -531,7 +537,7 @@ SmartResult smart_render_once(EffectEntry entry, std::array<std::byte, kInSize>&
   write<void*>(pre_extra, 0, pre_input.data()); write<void*>(pre_extra, 8, pre_output.data());
   write<void*>(pre_extra, 16, pre_callbacks.data());
   g_smart_width = width; g_smart_height = height; g_smart_rowbytes = rowbytes;
-  g_smart_pixel_format = deep16 ? "argb16" : "argb8";
+  g_smart_pixel_format = float32 ? "argb32f" : (deep16 ? "argb16" : "argb8");
   result.pre_error = entry(kSmartPreRender, input.data(), command_output.data(), params.data(), nullptr, pre_extra.data());
   auto valid_rect = [&](std::size_t offset) {
     const auto* p = pre_output.data() + offset;
