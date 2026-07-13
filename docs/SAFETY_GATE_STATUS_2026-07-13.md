@@ -6,7 +6,7 @@ later stage remain forbidden until separately approved and re-audited.
 
 ## Current Result
 
-`gate_state: l2_executed_render_closed`
+`gate_state: classic_default_render_executed_extended_render_closed`
 
 | Gate | Status | Evidence and remaining work |
 | --- | --- | --- |
@@ -27,7 +27,8 @@ later stage remain forbidden until separately approved and re-audited.
 4. G-2 and G-3 are complete through L2.
 5. L1/L2 implementation and re-audit are complete. A separate render approval and receipt are required before image execution.
 
-L1 and L2 were executed successfully through the isolated broker. Initialization
-and the ordered parameter list are observed. Parameter value decoding, H-4 AE
-trace capture, and all render selectors remain closed pending their own
-implementation, evidence review, and explicit staged approval.
+L1, L2, and one explicitly approved classic default render case were executed
+successfully through the isolated broker. Initialization, descriptor values,
+deterministic output, buffer guards, and independent pixel hash parity are
+observed. Extended render cases, connected map layers, SmartFX/GPU, and H-4 AE
+reference trace capture remain closed pending separate staged review.

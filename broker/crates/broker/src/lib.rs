@@ -6,6 +6,8 @@ pub mod windows_process;
 pub mod l1;
 #[cfg(windows)]
 pub mod l2;
+#[cfg(windows)]
+pub mod render;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ExitClassification {

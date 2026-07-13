@@ -20,6 +20,13 @@ class MinihostL2SourceTests(unittest.TestCase):
         self.assertNotIn("PF_Cmd_RENDER", text)
         self.assertNotIn("AE_Effect.h", text)
 
+    def test_render_code_is_compile_time_separated(self):
+        text = SOURCE.read_text(encoding="utf-8")
+        self.assertIn("#ifdef AEXCOMPAT_RENDER_WORKER", text)
+        self.assertIn('L"--render"', text)
+        self.assertIn('L"--l2"', text)
+        self.assertIn("guard_bytes_intact", text)
+
     def test_l2_provides_bounded_movable_handle_callbacks(self):
         text = SOURCE.read_text(encoding="utf-8")
         for marker in ("kUtilsSize = 552", "kUtilsNewHandle = 160", "new_handle(uint64_t size)",

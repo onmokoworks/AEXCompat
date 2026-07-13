@@ -40,6 +40,7 @@ constexpr std::size_t kParamFlags = 48;
 constexpr int32_t kGlobalSetup = 1;
 constexpr int32_t kGlobalSetdown = 3;
 constexpr int32_t kParamsSetup = 4;
+constexpr int32_t kRender = 11;
 constexpr std::size_t kUtilsSize = 552;
 constexpr std::size_t kUtilsNewHandle = 160;
 constexpr std::size_t kUtilsLockHandle = 168;
@@ -63,6 +64,7 @@ struct ParamRecord {
   int32_t precision{-1};
   std::string choices;
   std::string label;
+  std::array<std::byte, kParamSize> raw{};
 };
 std::vector<ParamRecord> g_params;
 struct HandleRecord { void* data{}; std::size_t size{}; };
@@ -202,9 +204,15 @@ int32_t __cdecl add_param(void*, int32_t index, void* definition) {
     record.default_value = read<float>(bytes, u + 64);
     record.precision = read<int16_t>(bytes, u + 68);
   }
+  record.raw = bytes;
   g_params.push_back(std::move(record));
   return 0;
 }
+
+int32_t __cdecl checkout_param(void*, int32_t, int32_t, int32_t, uint32_t, void*) {
+  return 4;
+}
+int32_t __cdecl checkin_param(void*, void*) { return 0; }
 
 std::string escape(const std::string& input) {
   std::string output;
@@ -243,6 +251,91 @@ bool sha256(const std::filesystem::path& path, std::string& result) {
   return true;
 }
 
+std::string sha256_bytes(const unsigned char* data, std::size_t size) {
+  BCRYPT_ALG_HANDLE algorithm{};
+  BCRYPT_HASH_HANDLE hash{};
+  DWORD object_size{}, returned{};
+  BCryptOpenAlgorithmProvider(&algorithm, BCRYPT_SHA256_ALGORITHM, nullptr, 0);
+  BCryptGetProperty(algorithm, BCRYPT_OBJECT_LENGTH,
+                    reinterpret_cast<PUCHAR>(&object_size), sizeof(object_size), &returned, 0);
+  std::vector<unsigned char> object(object_size);
+  BCryptCreateHash(algorithm, &hash, object.data(), object_size, nullptr, 0, 0);
+  BCryptHashData(hash, const_cast<PUCHAR>(data), static_cast<ULONG>(size), 0);
+  std::array<unsigned char, 32> digest{};
+  BCryptFinishHash(hash, digest.data(), digest.size(), 0);
+  BCryptDestroyHash(hash);
+  BCryptCloseAlgorithmProvider(algorithm, 0);
+  std::ostringstream text;
+  text << std::hex << std::setfill('0');
+  for (auto byte : digest) text << std::setw(2) << static_cast<unsigned>(byte);
+  return text.str();
+}
+
+#ifdef AEXCOMPAT_RENDER_WORKER
+int32_t render_once(EffectEntry entry, std::array<std::byte, kInSize>& input,
+                    std::array<std::byte, kOutSize>& command_output,
+                    std::string& input_hash, std::string& output_hash,
+                    bool& guards_intact) {
+  constexpr int32_t width = 16, height = 12, rowbytes = width * 4;
+  constexpr std::size_t guard = 64;
+  std::vector<unsigned char> source(width * height * 4);
+  for (int32_t y = 0; y < height; ++y) {
+    for (int32_t x = 0; x < width; ++x) {
+      auto* pixel = &source[(y * width + x) * 4];
+      pixel[0] = 255;
+      pixel[1] = static_cast<unsigned char>(x * 255 / (width - 1));
+      pixel[2] = static_cast<unsigned char>(y * 255 / (height - 1));
+      pixel[3] = static_cast<unsigned char>((x + y) * 255 / (width + height - 2));
+    }
+  }
+  std::vector<unsigned char> guarded(width * height * 4 + guard * 2, 0xA5);
+  unsigned char* destination = guarded.data() + guard;
+  std::memset(destination, 0xCC, width * height * 4);
+
+  std::array<std::byte, 120> input_world{}, output_world{};
+  auto setup_world = [&](auto& world, void* pixels) {
+    write<void*>(world, 24, pixels);
+    write<int32_t>(world, 32, rowbytes);
+    write<int32_t>(world, 36, width);
+    write<int32_t>(world, 40, height);
+    write<int32_t>(world, 44, 0);
+    write<int32_t>(world, 48, 0);
+    write<int32_t>(world, 52, height);
+    write<int32_t>(world, 56, width);
+  };
+  setup_world(input_world, source.data());
+  setup_world(output_world, destination);
+
+  std::array<std::array<std::byte, kParamSize>, 8> definitions{};
+  std::memcpy(definitions[0].data() + 56, input_world.data(), input_world.size());
+  for (std::size_t i = 0; i < g_params.size() && i + 1 < definitions.size(); ++i) {
+    definitions[i + 1] = g_params[i].raw;
+    constexpr std::size_t u = 56;
+    if (g_params[i].type == 1 || g_params[i].type == 7)
+      write<int32_t>(definitions[i + 1], u, static_cast<int32_t>(g_params[i].default_value));
+    else if (g_params[i].type == 4)
+      write<int32_t>(definitions[i + 1], u, g_params[i].default_value != 0 ? 1 : 0);
+    else if (g_params[i].type == 10)
+      write<double>(definitions[i + 1], u, g_params[i].default_value);
+  }
+  std::array<void*, 9> params{};
+  for (std::size_t i = 0; i < definitions.size(); ++i) params[i] = definitions[i].data();
+  write<int32_t>(input, 224, 0);
+  write<int32_t>(input, 228, 1);
+  write<int32_t>(input, 232, 1);
+  write<uint32_t>(input, 240, 1);
+  write<int32_t>(input, 252, width);
+  write<int32_t>(input, 256, height);
+  input_hash = sha256_bytes(source.data(), source.size());
+  const int32_t error = entry(kRender, input.data(), command_output.data(), params.data(),
+                              output_world.data(), nullptr);
+  output_hash = sha256_bytes(destination, width * height * 4);
+  guards_intact = std::all_of(guarded.begin(), guarded.begin() + guard, [](auto b) { return b == 0xA5; }) &&
+      std::all_of(guarded.end() - guard, guarded.end(), [](auto b) { return b == 0xA5; });
+  return error;
+}
+#endif
+
 void report(const char* status, int32_t global_error, int32_t params_error,
             int32_t setdown_error, const std::array<std::byte, kOutSize>& output) {
   const char* message = reinterpret_cast<const char*>(output.data() + kOutMessage);
@@ -278,7 +371,12 @@ void report(const char* status, int32_t global_error, int32_t params_error,
 }  // namespace
 
 int wmain(int argc, wchar_t** argv) {
-  if (argc != 4 || std::wstring(argv[1]) != L"--l2") return 2;
+  if (argc != 4) return 2;
+#ifdef AEXCOMPAT_RENDER_WORKER
+  if (std::wstring(argv[1]) != L"--render") return 2;
+#else
+  if (std::wstring(argv[1]) != L"--l2") return 2;
+#endif
   std::string expected;
   for (const wchar_t* p = argv[3]; *p; ++p) {
     if (*p > 0x7f) return 2;
@@ -297,6 +395,8 @@ int wmain(int argc, wchar_t** argv) {
   alignas(8) std::array<std::byte, kInSize> input{};
   alignas(8) std::array<std::byte, kOutSize> output{};
   alignas(8) std::array<std::byte, kUtilsSize> utils{};
+  write(input, 0, &checkout_param);
+  write(input, 8, &checkin_param);
   write(input, kInAddParam, static_cast<AddParamCallback>(&add_param));
   write(utils, kUtilsNewHandle, &new_handle);
   write(utils, kUtilsLockHandle, &lock_handle);
@@ -316,12 +416,37 @@ int wmain(int argc, wchar_t** argv) {
   const int32_t params_error = global_error == 0
       ? entry(kParamsSetup, input.data(), output.data(), nullptr, nullptr, nullptr) : -1;
   std::cerr << "stage:params_setup_end error=" << params_error << "\n" << std::flush;
+#ifdef AEXCOMPAT_RENDER_WORKER
+  std::string input_hash, output_hash;
+  bool guards_intact = false;
+  std::cerr << "stage:render_begin\n" << std::flush;
+  const int32_t render_error = params_error == 0
+      ? render_once(entry, input, output, input_hash, output_hash, guards_intact) : -1;
+  std::cerr << "stage:render_end error=" << render_error << "\n" << std::flush;
+#endif
   std::cerr << "stage:global_setdown_begin\n" << std::flush;
   const int32_t setdown_error = global_error == 0
       ? entry(kGlobalSetdown, input.data(), output.data(), nullptr, nullptr, nullptr) : -1;
   std::cerr << "stage:global_setdown_end error=" << setdown_error << "\n" << std::flush;
+#ifdef AEXCOMPAT_RENDER_WORKER
+  std::cout << "{\"schema_version\":1,\"stage\":\"classic_render\",\"status\":\""
+            << (render_error == 0 && guards_intact ? "render_completed" : "render_failed")
+            << "\",\"global_setup_error\":" << global_error
+            << ",\"params_setup_error\":" << params_error
+            << ",\"render_error\":" << render_error
+            << ",\"global_setdown_error\":" << setdown_error
+            << ",\"pixel_format\":\"argb8\",\"width\":16,\"height\":12,\"rowbytes\":64"
+            << ",\"input_sha256\":\"" << input_hash << "\",\"output_sha256\":\""
+            << output_hash << "\",\"guard_bytes_intact\":" << (guards_intact ? "true" : "false")
+            << ",\"render_performed\":true}\n";
+#else
   report(global_error == 0 && params_error == 0 ? "selectors_completed" : "selector_error",
          global_error, params_error, setdown_error, output);
+#endif
   FreeLibrary(module);
+#ifdef AEXCOMPAT_RENDER_WORKER
+  return global_error == 0 && params_error == 0 && render_error == 0 && guards_intact ? 0 : 21;
+#else
   return global_error == 0 && params_error == 0 ? 0 : 20;
+#endif
 }

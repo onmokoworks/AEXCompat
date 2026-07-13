@@ -73,6 +73,12 @@ class NativeCodeGuardTests(unittest.TestCase):
         self.assertIn("entries.len() != 1", source)
         self.assertIn("worker_report_unavailable", source)
 
+    def test_render_has_distinct_allowlist_receipt_and_two_runs(self):
+        source = (BROKER_ROOT / "crates" / "broker" / "src" / "render.rs").read_text(encoding="utf-8")
+        for marker in ("target/render-allowlist/active.local.json", "scattermap-render-20260713-001",
+                       "for _ in 0..2", "deterministic", "guard_bytes_intact", "create_new(true)"):
+            self.assertIn(marker, source)
+
 
 if __name__ == "__main__":
     unittest.main()
