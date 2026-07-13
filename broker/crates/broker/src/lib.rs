@@ -10,6 +10,9 @@ pub mod l2;
 pub mod render;
 #[cfg(windows)]
 pub mod smart;
+pub mod parameter_gate;
+#[cfg(windows)]
+pub mod render_request;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ExitClassification {

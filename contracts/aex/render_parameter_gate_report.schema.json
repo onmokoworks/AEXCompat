@@ -1,0 +1,54 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://aexcompat.local/contracts/aex/render_parameter_gate_report.schema.json",
+  "schema_name": "AEXCompat render parameter gate report schema",
+  "schema_version": 1,
+  "title": "AEXCompat render parameter gate report",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "gate", "plugin_id", "assignment_count", "accepted", "native_dispatch_permitted", "native_process_started", "errors"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "gate": {"const": "pre_dispatch_parameter_validation"},
+    "plugin_id": {"const": "scattermap"},
+    "assignment_count": {"type": "integer", "minimum": 0, "maximum": 5},
+    "accepted": {"type": "boolean"},
+    "native_dispatch_permitted": {"type": "boolean"},
+    "native_process_started": {"const": false},
+    "errors": {
+      "type": "array",
+      "maxItems": 5,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["code", "parameter", "valid_min", "valid_max"],
+        "properties": {
+          "code": {"enum": ["invalid_parameter_value", "parameter_out_of_range"]},
+          "parameter": {"enum": ["Scatter Amount", "Direction", "Random Seed", "Mix with Original", "Invert Map"]},
+          "valid_min": {"type": "number"},
+          "valid_max": {"type": "number"}
+        }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"accepted": {"const": true}}},
+      "then": {
+        "properties": {
+          "native_dispatch_permitted": {"const": true},
+          "errors": {"maxItems": 0}
+        }
+      }
+    },
+    {
+      "if": {"properties": {"accepted": {"const": false}}},
+      "then": {
+        "properties": {
+          "native_dispatch_permitted": {"const": false},
+          "errors": {"minItems": 1}
+        }
+      }
+    }
+  ]
+}

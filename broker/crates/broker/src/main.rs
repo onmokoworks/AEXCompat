@@ -3,8 +3,8 @@ fn main() {
     use aexcompat_broker::selftest::{run, Workers};
     use std::path::{Component, PathBuf};
     let args: Vec<String> = std::env::args().collect();
-    if args.len() != 3 || !args[2].ends_with(".json") {
-        eprintln!("usage: broker <selftest|l1-scattermap|l2-scattermap|render-scattermap|smart-scattermap> <create-new-json-output>");
+    if args.len() < 2 {
+        eprintln!("usage: broker <operation> <json arguments>");
         std::process::exit(2);
     }
     let executable = std::env::current_exe().expect("current executable");
@@ -14,6 +14,24 @@ fn main() {
         .and_then(|p| p.parent())
         .and_then(|p| p.parent())
         .expect("repository root");
+    if args.len() == 4 && args[1] == "validate-render-request-scattermap" {
+        let accepted = match aexcompat_broker::render_request::run(
+            repository,
+            &PathBuf::from(&args[2]),
+            &PathBuf::from(&args[3]),
+        ) {
+            Ok(accepted) => accepted,
+            Err(_) => {
+                eprintln!("render request validation failed");
+                std::process::exit(2);
+            }
+        };
+        std::process::exit(if accepted { 0 } else { 3 });
+    }
+    if args.len() != 3 || !args[2].ends_with(".json") {
+        eprintln!("usage: broker <selftest|l1-scattermap|l2-scattermap|render-scattermap|smart-scattermap> <create-new-json-output>");
+        std::process::exit(2);
+    }
     if args[1] == "l1-scattermap" {
         let worker = repository.join("target/minihost-build/aex_l1_worker.exe");
         let passed = aexcompat_broker::l1::run(repository, &worker, "scattermap", &PathBuf::from(&args[2]))

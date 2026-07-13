@@ -92,3 +92,8 @@ The sentinel noninheritance probe now verifies the synthetic Event object's
 operation rather than only its numeric handle. This avoids false positives when
 Windows reuses the parent's handle number for an unrelated child pipe; the
 strengthened isolation scenario passed 20 consecutive runs.
+The Rust broker now repeats the production-observed parameter validation from
+broker-owned descriptors. Strict requests may contain only values for five
+known fields under a dedicated local root; callers cannot supply ranges or
+plug-in paths. Valid requests currently stop at dispatch permission, while
+invalid requests return exit 3 and prove that no native process was started.

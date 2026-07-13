@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://aexcompat.local/contracts/aex/render_parameter_request.schema.json",
+  "schema_name": "AEXCompat render parameter request schema",
+  "schema_version": 1,
+  "title": "AEXCompat render parameter request",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "plugin_id", "assignments"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "plugin_id": {"const": "scattermap"},
+    "assignments": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "Scatter Amount": {"type": "number"},
+        "Direction": {"type": "number"},
+        "Random Seed": {"type": "number"},
+        "Mix with Original": {"type": "number"},
+        "Invert Map": {"type": "number"}
+      }
+    }
+  }
+}
