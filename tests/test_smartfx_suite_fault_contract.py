@@ -38,6 +38,7 @@ class SmartFxSuiteFaultContractTests(unittest.TestCase):
             'L"--smart-mask-double-dispose-request"',
             'L"--smart-stream-live-value-dispose-request"',
             'L"--smart-suite-release-without-acquire-request"',
+            'L"--smart-handle-resize-while-locked-request"',
             "MaskFault::CountError",
             "MaskFault::CountCrash",
             "RaiseException(EXCEPTION_ACCESS_VIOLATION",
@@ -52,6 +53,8 @@ class SmartFxSuiteFaultContractTests(unittest.TestCase):
         self.assertIn('"callback_error_rejected"', route)
         self.assertIn('"suite_release_without_acquire"', route)
         self.assertIn('report.get("suite_fault_observed")', route)
+        self.assertIn('"handle_resize_while_locked"', route)
+        self.assertIn('report.get("handle_fault_observed")', route)
         self.assertIn('invalid("unknown fixed suite fault")', route)
         self.assertIn('spec.request_mode == "--smart-mask-request"', route)
         self.assertIn('args[1] == "smart-suite-fault"', main)

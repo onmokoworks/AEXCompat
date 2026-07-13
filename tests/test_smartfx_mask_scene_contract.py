@@ -120,6 +120,14 @@ class SmartFxMaskSceneContractTests(unittest.TestCase):
             "suite_releases",
             "live_suite_lease_count",
             "live_suite_reference_count",
+            "handle_lifetimes_balanced",
+            "handles_created",
+            "handles_disposed",
+            "handle_locks",
+            "handle_unlocks",
+            "live_handle_count",
+            "live_handle_bytes",
+            "invalid_handle_operations",
         ):
             self.assertIn(field, run_required)
 

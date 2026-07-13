@@ -111,6 +111,16 @@ both workers return an SP error and preserve all counters and live leases.
 Normal and fault reports expose this retained reference instead of silently
 accepting every ReleaseSuite call or falsely claiming zero live suites.
 
+The PF Handle callbacks now maintain lock depth and reject resize/dispose while
+locked. Across each normal native run, the dependency creates one global-data
+handle, performs six locks and six unlocks, disposes it during GlobalSetdown,
+and leaves no live handle or invalid operation. A fixed post-render fault adds a
+temporary handle, attempts one resize while locked, observes the expected
+error, and completes valid unlock/dispose cleanup. Both isolated runs finish
+with create/dispose and lock/unlock counts equal.
+The host pool is bounded to 1024 records and 64 MiB total across all handles;
+the report also requires zero live bytes after GlobalSetdown.
+
 ## Host-Owned Mask Scenes
 
 The mask ABI no longer stores one hard-coded mask, stream, outline, or vertex

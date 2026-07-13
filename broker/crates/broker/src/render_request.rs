@@ -589,6 +589,12 @@ pub fn execute_smart(
                         && acquires <= 64
                 })
             })
+            && report.get("handle_lifetimes_balanced") == Some(&Value::Bool(true))
+            && report.get("live_handle_count").and_then(Value::as_u64) == Some(0)
+            && report.get("live_handle_bytes").and_then(Value::as_u64) == Some(0)
+            && report.get("invalid_handle_operations").and_then(Value::as_u64) == Some(0)
+            && report.get("handles_created") == report.get("handles_disposed")
+            && report.get("handle_locks") == report.get("handle_unlocks")
             && worker_echo_matches(report, &manifest.profile, &effective)
             && request.host_context.as_ref().is_none_or(|_| {
                 report.get("mask_scene_id").and_then(Value::as_str) == Some("request_v4")
@@ -645,6 +651,14 @@ pub fn execute_smart(
         "live_suite_lease_count":item.1.get("live_suite_lease_count"),
         "live_suite_reference_count":item.1.get("live_suite_reference_count"),
         "live_suite_leases":item.1.get("live_suite_leases"),
+        "handle_lifetimes_balanced":item.1.get("handle_lifetimes_balanced"),
+        "handles_created":item.1.get("handles_created"),
+        "handles_disposed":item.1.get("handles_disposed"),
+        "handle_locks":item.1.get("handle_locks"),
+        "handle_unlocks":item.1.get("handle_unlocks"),
+        "live_handle_count":item.1.get("live_handle_count"),
+        "live_handle_bytes":item.1.get("live_handle_bytes"),
+        "invalid_handle_operations":item.1.get("invalid_handle_operations"),
         "requested_parameters":item.1.get("requested_parameters")})
     };
     let report = json!({"schema_version":1,"stage":"parameterized_smartfx_render",
@@ -674,15 +688,27 @@ pub fn execute_smart_suite_fault(
     fault_id: &str,
     output_path: &Path,
 ) -> io::Result<bool> {
-    let (worker_mode, expect_crash, expect_lifetime_rejection, expect_suite_rejection) =
-        match fault_id {
-        "mask_count_error" => ("--smart-mask-count-error-request", false, false, false),
-        "mask_count_crash" => ("--smart-mask-count-crash-request", true, false, false),
-        "mask_double_dispose" => ("--smart-mask-double-dispose-request", false, true, false),
+    let (
+        worker_mode,
+        expect_crash,
+        expect_lifetime_rejection,
+        expect_suite_rejection,
+        expect_handle_rejection,
+    ) = match fault_id {
+        "mask_count_error" => ("--smart-mask-count-error-request", false, false, false, false),
+        "mask_count_crash" => ("--smart-mask-count-crash-request", true, false, false, false),
+        "mask_double_dispose" => (
+            "--smart-mask-double-dispose-request",
+            false,
+            true,
+            false,
+            false,
+        ),
         "stream_dispose_with_live_value" => (
             "--smart-stream-live-value-dispose-request",
             false,
             true,
+            false,
             false,
         ),
         "suite_release_without_acquire" => (
@@ -690,9 +716,17 @@ pub fn execute_smart_suite_fault(
             false,
             false,
             true,
+            false,
         ),
-            _ => return Err(invalid("unknown fixed suite fault")),
-        };
+        "handle_resize_while_locked" => (
+            "--smart-handle-resize-while-locked-request",
+            false,
+            false,
+            false,
+            true,
+        ),
+        _ => return Err(invalid("unknown fixed suite fault")),
+    };
     let output_path = resolve_inside(
         repository,
         output_path,
@@ -766,6 +800,20 @@ pub fn execute_smart_suite_fault(
                     })
                 })
         })
+    } else if expect_handle_rejection {
+        runs.iter().all(|(classification, report)| {
+            classification.as_str() == "ok"
+                && report.get("pre_render_error") == Some(&json!(0))
+                && report.get("smart_render_error") == Some(&json!(0))
+                && report.get("guard_bytes_intact") == Some(&Value::Bool(true))
+                && report.get("handle_fault_observed") == Some(&Value::Bool(true))
+                && report.get("handle_lifetimes_balanced") == Some(&Value::Bool(true))
+                && report.get("live_handle_count") == Some(&json!(0))
+                && report.get("live_handle_bytes") == Some(&json!(0))
+                && report.get("invalid_handle_operations") == Some(&json!(1))
+                && report.get("handles_created") == report.get("handles_disposed")
+                && report.get("handle_locks") == report.get("handle_unlocks")
+        })
     } else {
         runs.iter()
             .all(|(classification, report)| fallback_valid(*classification, report))
@@ -785,14 +833,23 @@ pub fn execute_smart_suite_fault(
             "suite_releases":item.1.get("suite_releases"),
             "live_suite_lease_count":item.1.get("live_suite_lease_count"),
             "live_suite_leases":item.1.get("live_suite_leases"),
-            "live_suite_reference_count":item.1.get("live_suite_reference_count")
+            "live_suite_reference_count":item.1.get("live_suite_reference_count"),
+            "handle_fault_observed":item.1.get("handle_fault_observed"),
+            "handle_lifetimes_balanced":item.1.get("handle_lifetimes_balanced"),
+            "handles_created":item.1.get("handles_created"),
+            "handles_disposed":item.1.get("handles_disposed"),
+            "handle_locks":item.1.get("handle_locks"),
+            "handle_unlocks":item.1.get("handle_unlocks"),
+            "live_handle_count":item.1.get("live_handle_count"),
+            "live_handle_bytes":item.1.get("live_handle_bytes"),
+            "invalid_handle_operations":item.1.get("invalid_handle_operations")
         })
     };
     let report = json!({
         "schema_version":1,"stage":"smartfx_suite_fault","plugin_id":plugin_id,
         "receipt_id":approved.receipt_id,"fixture_sha256":approved.sha256.to_ascii_uppercase(),
-        "fault_id":fault_id,"expected_outcome":if expect_crash { "worker_crash" } else if expect_lifetime_rejection || expect_suite_rejection { "callback_error_rejected" } else { "plugin_fallback" },
-        "expected_fallback_sha256":if expect_crash || expect_lifetime_rejection || expect_suite_rejection { Value::Null } else { json!(fallback_hash) },
+        "fault_id":fault_id,"expected_outcome":if expect_crash { "worker_crash" } else if expect_lifetime_rejection || expect_suite_rejection || expect_handle_rejection { "callback_error_rejected" } else { "plugin_fallback" },
+        "expected_fallback_sha256":if expect_crash || expect_lifetime_rejection || expect_suite_rejection || expect_handle_rejection { Value::Null } else { json!(fallback_hash) },
         "run_1":summarize(&runs[0]),"run_2":summarize(&runs[1]),
         "broker_survived":true,"passed":passed
     });

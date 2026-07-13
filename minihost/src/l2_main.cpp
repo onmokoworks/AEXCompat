@@ -253,12 +253,36 @@ int32_t __cdecl smart_checkout_output(void*, void** world) {
   *world = g_smart_output_world;
   return 0;
 }
-struct HandleRecord { void* data{}; std::size_t size{}; };
+struct HandleRecord {
+  void* data{};
+  std::size_t size{};
+  uint32_t lock_count{};
+};
 std::unordered_set<HandleRecord*> g_handles;
+std::mutex g_handle_mutex;
+uint32_t g_handles_created{};
+uint32_t g_handles_disposed{};
+uint32_t g_handle_locks{};
+uint32_t g_handle_unlocks{};
+uint32_t g_invalid_handle_operations{};
+uint64_t g_handle_bytes{};
+constexpr uint64_t kMaxHandleBytes = 64 * 1024 * 1024;
+constexpr std::size_t kMaxHandleCount = 1024;
+
+bool handle_lifetimes_balanced() {
+  std::lock_guard<std::mutex> lock(g_handle_mutex);
+  return g_handles.empty() && g_handles_created == g_handles_disposed &&
+      g_handle_locks == g_handle_unlocks;
+}
 
 void** __cdecl new_handle(uint64_t size) {
   std::cerr << "callback:new_handle size=" << size << "\n" << std::flush;
-  if (size > 64 * 1024 * 1024) return nullptr;
+  std::lock_guard<std::mutex> lock(g_handle_mutex);
+  if (size > kMaxHandleBytes || g_handles.size() >= kMaxHandleCount ||
+      g_handle_bytes > kMaxHandleBytes - size) {
+    ++g_invalid_handle_operations;
+    return nullptr;
+  }
   auto* record = new (std::nothrow) HandleRecord;
   if (!record) return nullptr;
   record->data = ::operator new(static_cast<std::size_t>(size), std::nothrow);
@@ -266,33 +290,73 @@ void** __cdecl new_handle(uint64_t size) {
   if (record->data) std::memset(record->data, 0, static_cast<std::size_t>(size));
   record->size = static_cast<std::size_t>(size);
   g_handles.insert(record);
+  ++g_handles_created;
+  g_handle_bytes += size;
   return &record->data;
 }
 
 void* __cdecl lock_handle(void** handle) {
   std::cerr << "callback:lock_handle\n" << std::flush;
   auto* record = reinterpret_cast<HandleRecord*>(handle);
-  return record && g_handles.count(record) ? record->data : nullptr;
+  std::lock_guard<std::mutex> lock(g_handle_mutex);
+  if (!record || !g_handles.count(record)) {
+    ++g_invalid_handle_operations;
+    return nullptr;
+  }
+  ++record->lock_count;
+  ++g_handle_locks;
+  return record->data;
 }
 
-void __cdecl unlock_handle(void**) {}
+void __cdecl unlock_handle(void** handle) {
+  auto* record = reinterpret_cast<HandleRecord*>(handle);
+  std::lock_guard<std::mutex> lock(g_handle_mutex);
+  if (!record || !g_handles.count(record) || record->lock_count == 0) {
+    ++g_invalid_handle_operations;
+    return;
+  }
+  --record->lock_count;
+  ++g_handle_unlocks;
+}
 
 void __cdecl dispose_handle(void** handle) {
   auto* record = reinterpret_cast<HandleRecord*>(handle);
-  if (!record || !g_handles.erase(record)) return;
+  {
+    std::lock_guard<std::mutex> lock(g_handle_mutex);
+    if (!record || !g_handles.count(record) || record->lock_count != 0) {
+      ++g_invalid_handle_operations;
+      return;
+    }
+    g_handles.erase(record);
+    ++g_handles_disposed;
+    g_handle_bytes -= record->size;
+  }
   ::operator delete(record->data);
   delete record;
 }
 
 uint64_t __cdecl handle_size(void** handle) {
   auto* record = reinterpret_cast<HandleRecord*>(handle);
-  return record && g_handles.count(record) ? record->size : 0;
+  std::lock_guard<std::mutex> lock(g_handle_mutex);
+  if (!record || !g_handles.count(record)) {
+    ++g_invalid_handle_operations;
+    return 0;
+  }
+  return record->size;
 }
 
 int32_t __cdecl resize_handle(uint64_t size, void*** handle) {
-  if (!handle || !*handle || size > 64 * 1024 * 1024) return 4;
+  std::lock_guard<std::mutex> lock(g_handle_mutex);
+  if (!handle || !*handle || size > kMaxHandleBytes) {
+    ++g_invalid_handle_operations;
+    return 4;
+  }
   auto* record = reinterpret_cast<HandleRecord*>(*handle);
-  if (!g_handles.count(record)) return 4;
+  if (!g_handles.count(record) || record->lock_count != 0 ||
+      g_handle_bytes - record->size > kMaxHandleBytes - size) {
+    ++g_invalid_handle_operations;
+    return 4;
+  }
   void* replacement = ::operator new(static_cast<std::size_t>(size), std::nothrow);
   if (!replacement && size) return 1;
   if (replacement) {
@@ -301,6 +365,7 @@ int32_t __cdecl resize_handle(uint64_t size, void*** handle) {
   }
   ::operator delete(record->data);
   record->data = replacement;
+  g_handle_bytes = g_handle_bytes - record->size + size;
   record->size = static_cast<std::size_t>(size);
   return 0;
 }
@@ -315,6 +380,17 @@ struct HandleSuite {
 };
 HandleSuite g_handle_suite{&new_handle, &lock_handle, &unlock_handle,
                            &dispose_handle, &handle_size, &resize_handle};
+
+bool verify_handle_resize_while_locked_rejected() {
+  const uint32_t invalid_before = g_invalid_handle_operations;
+  void** handle = new_handle(16);
+  if (!handle || !lock_handle(handle)) return false;
+  const int32_t resize_error = resize_handle(32, &handle);
+  unlock_handle(handle);
+  dispose_handle(handle);
+  return resize_error != 0 && g_invalid_handle_operations == invalid_before + 1 &&
+      handle_lifetimes_balanced();
+}
 
 int32_t __cdecl register_with_aegp(void*, const char*, int32_t* plugin_id) {
   if (!plugin_id) return 4;
@@ -1401,14 +1477,18 @@ int wmain(int argc, wchar_t** argv) {
       std::wstring(argv[1]) == L"--smart-stream-live-value-dispose-request";
   const bool suite_release_without_acquire_mode = argc == 5 &&
       std::wstring(argv[1]) == L"--smart-suite-release-without-acquire-request";
+  const bool handle_resize_while_locked_mode = argc == 5 &&
+      std::wstring(argv[1]) == L"--smart-handle-resize-while-locked-request";
   const bool request_mode = mask_request_mode || mask_scene_request_mode || mask_context_request_mode ||
       mask_count_error_mode || mask_count_crash_mode || mask_double_dispose_mode ||
       stream_live_value_dispose_mode || suite_release_without_acquire_mode ||
+      handle_resize_while_locked_mode ||
       (argc == 5 && std::wstring(argv[1]) == L"--smart-request");
   if (!request_mode && (argc != 5 || std::wstring(argv[1]) != L"--smart")) return 2;
   g_mask_model_enabled = mask_request_mode || mask_scene_request_mode || mask_context_request_mode ||
       mask_count_error_mode || mask_count_crash_mode || mask_double_dispose_mode ||
-      stream_live_value_dispose_mode || suite_release_without_acquire_mode;
+      stream_live_value_dispose_mode || suite_release_without_acquire_mode ||
+      handle_resize_while_locked_mode;
   g_mask_fault = mask_count_error_mode ? MaskFault::CountError :
       mask_count_crash_mode ? MaskFault::CountCrash : MaskFault::None;
   RequestedAssignments requested_parameters;
@@ -1584,6 +1664,7 @@ int wmain(int argc, wchar_t** argv) {
           ? verify_stream_dispose_with_live_value_rejected()
           : false;
   bool suite_fault_observed = false;
+  bool handle_fault_observed = false;
   std::cerr << "stage:smart_render_end pre_error=" << smart.pre_error
             << " render_error=" << smart.render_error << "\n" << std::flush;
 #endif
@@ -1593,6 +1674,8 @@ int wmain(int argc, wchar_t** argv) {
   #ifdef AEXCOMPAT_SMART_WORKER
   if (suite_release_without_acquire_mode)
     suite_fault_observed = verify_suite_release_without_acquire_rejected();
+  if (handle_resize_while_locked_mode)
+    handle_fault_observed = verify_handle_resize_while_locked_rejected();
   #endif
   std::cerr << "stage:global_setdown_end error=" << setdown_error << "\n" << std::flush;
 #ifdef AEXCOMPAT_RENDER_WORKER
@@ -1672,6 +1755,15 @@ int wmain(int argc, wchar_t** argv) {
             << ",\"live_suite_reference_count\":" << live_suite_reference_count()
             << ",\"live_suite_leases\":\"" << live_suite_lease_summary() << "\""
             << ",\"suite_fault_observed\":" << (suite_fault_observed ? "true" : "false")
+            << ",\"handle_lifetimes_balanced\":" << (handle_lifetimes_balanced() ? "true" : "false")
+            << ",\"handles_created\":" << g_handles_created
+            << ",\"handles_disposed\":" << g_handles_disposed
+            << ",\"handle_locks\":" << g_handle_locks
+            << ",\"handle_unlocks\":" << g_handle_unlocks
+            << ",\"live_handle_count\":" << g_handles.size()
+            << ",\"live_handle_bytes\":" << g_handle_bytes
+            << ",\"invalid_handle_operations\":" << g_invalid_handle_operations
+            << ",\"handle_fault_observed\":" << (handle_fault_observed ? "true" : "false")
             << ",\"requested_parameters\":" << requested_parameters_json(requested_parameters)
             << ",\"requested_amount\":" << static_cast<int32_t>(requested_value(requested_parameters, L"amount"))
             << ",\"requested_direction\":" << static_cast<int32_t>(requested_value(requested_parameters, L"direction"))

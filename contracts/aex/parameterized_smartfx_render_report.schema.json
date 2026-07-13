@@ -85,7 +85,7 @@
     "run": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["classification", "pre_render_error", "smart_render_error", "output_sha256", "result_rects_valid", "guard_bytes_intact", "request_mode", "mask_scene_id", "mask_count", "mask_open_count", "mask_tangent_vertex_count", "mask_lifetimes_balanced", "mask_handles_acquired", "mask_handles_disposed", "stream_handles_acquired", "stream_handles_disposed", "stream_values_acquired", "stream_values_disposed", "suite_leases_balanced", "suite_acquires", "suite_releases", "live_suite_lease_count", "live_suite_reference_count", "live_suite_leases", "requested_parameters"],
+      "required": ["classification", "pre_render_error", "smart_render_error", "output_sha256", "result_rects_valid", "guard_bytes_intact", "request_mode", "mask_scene_id", "mask_count", "mask_open_count", "mask_tangent_vertex_count", "mask_lifetimes_balanced", "mask_handles_acquired", "mask_handles_disposed", "stream_handles_acquired", "stream_handles_disposed", "stream_values_acquired", "stream_values_disposed", "suite_leases_balanced", "suite_acquires", "suite_releases", "live_suite_lease_count", "live_suite_reference_count", "live_suite_leases", "handle_lifetimes_balanced", "handles_created", "handles_disposed", "handle_locks", "handle_unlocks", "live_handle_count", "live_handle_bytes", "invalid_handle_operations", "requested_parameters"],
       "properties": {
         "classification": {"enum": ["ok", "nonzero_exit", "crashed", "timeout_killed"]},
         "pre_render_error": {"type": ["integer", "null"]},
@@ -111,6 +111,14 @@
         "live_suite_lease_count": {"type": ["integer", "null"], "minimum": 0},
         "live_suite_reference_count": {"type": ["integer", "null"], "minimum": 0, "maximum": 64},
         "live_suite_leases": {"type": ["string", "null"], "maxLength": 1024},
+        "handle_lifetimes_balanced": {"type": ["boolean", "null"]},
+        "handles_created": {"type": ["integer", "null"], "minimum": 0, "maximum": 1024},
+        "handles_disposed": {"type": ["integer", "null"], "minimum": 0, "maximum": 1024},
+        "handle_locks": {"type": ["integer", "null"], "minimum": 0, "maximum": 4096},
+        "handle_unlocks": {"type": ["integer", "null"], "minimum": 0, "maximum": 4096},
+        "live_handle_count": {"type": ["integer", "null"], "minimum": 0, "maximum": 1024},
+        "live_handle_bytes": {"type": ["integer", "null"], "minimum": 0, "maximum": 67108864},
+        "invalid_handle_operations": {"type": ["integer", "null"], "minimum": 0, "maximum": 64},
         "requested_parameters": {"type": ["array", "null"], "minItems": 1, "maxItems": 64, "items": {"$ref": "#/$defs/requested_parameter"}}
       }
     },
@@ -148,6 +156,10 @@
             "guard_bytes_intact": {"const": true},
             "request_mode": {"const": true},
             "mask_lifetimes_balanced": {"const": true},
+            "handle_lifetimes_balanced": {"const": true},
+            "live_handle_count": {"const": 0},
+            "live_handle_bytes": {"const": 0},
+            "invalid_handle_operations": {"const": 0},
             "requested_parameters": {"type": "array", "minItems": 1}
           }
         }

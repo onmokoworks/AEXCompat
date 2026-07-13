@@ -32,6 +32,15 @@ class MinihostL2SourceTests(unittest.TestCase):
         for marker in ("kUtilsSize = 552", "kUtilsNewHandle = 160", "new_handle(uint64_t size)",
                        "64 * 1024 * 1024", "g_handles.count", "dispose_handle"):
             self.assertIn(marker, text)
+        for marker in (
+            "uint32_t lock_count{}",
+            "handle_lifetimes_balanced()",
+            "record->lock_count != 0",
+            "verify_handle_resize_while_locked_rejected()",
+            "kMaxHandleCount = 1024",
+            "kMaxHandleBytes = 64 * 1024 * 1024",
+        ):
+            self.assertIn(marker, text)
 
     def test_l2_pica_is_default_deny_except_handle_suite(self):
         text = SOURCE.read_text(encoding="utf-8")

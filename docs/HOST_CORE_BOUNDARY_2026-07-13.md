@@ -99,3 +99,15 @@ references. MaskOffset ends with all AEGP leases released but one
 transfer; this is recorded as a bounded module-lifetime lease rather than
 misreported as balanced. The broker forbids over-release and requires the live
 reference count to equal acquisitions minus releases.
+
+PF Handle records separately track allocation, lock depth, size, and disposal.
+The callbacks are mutex-protected; unknown handles and unmatched unlocks are
+recorded, and resize or dispose while locked is rejected without invalidating
+the handle. Native MaskOffset evidence creates and disposes one global-data
+handle, performs six balanced lock/unlock pairs, and ends with zero live handles
+and zero invalid operations. This remains distinct from the retained suite
+lease above. A fixed fault locks a temporary handle, verifies resize rejection,
+then unlocks and disposes it to restore a fully balanced state.
+The worker additionally caps the complete handle pool at 1024 records and
+64 MiB total, so repeated individually valid allocations cannot bypass the
+per-handle memory bound. Resize is checked against the same aggregate budget.

@@ -38,6 +38,15 @@ all AEGP suites balance; the broker rejects over-release and inconsistent
 counters rather than requiring an observationally false zero count. The new
 post-setdown rejection mode is fixed and profile-gated.
 
+PF Handle allocation and lock ownership are now independently bounded and
+reported. Normal MaskOffset runs finish with one create/dispose, six
+lock/unlock pairs, zero live handles, and zero invalid operations. A fixed
+profile-gated case rejects resize while locked and then proves cleanup restores
+balanced state. ScatterMap, suite errors, Access Violation isolation, and all
+existing render oracles remain green.
+Handle allocation is capped at 1024 records and 64 MiB aggregate, including
+resize accounting, and successful native runs end with zero live bytes.
+
 ## Human Work Required
 
 1. H-1 is complete: the approved self-authored fixture is identified by SHA-256 and byte size, and native loading is explicitly permitted.
