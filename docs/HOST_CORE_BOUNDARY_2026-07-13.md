@@ -135,3 +135,18 @@ list is empty. Add and clear calls are accepted only while PF_Cmd_GLOBAL_SETUP
 is active; other selectors and unsupported CPU formats return a PF error
 without changing the declaration list. The registry is mutex-protected and can
 contain at most the three host-supported CPU formats.
+
+AEGP Mask Outline Suite v5 now exposes all twelve reviewed SDK slots rather
+than only its four read calls. The generic host supports open-state mutation,
+vertex set/create/delete, and feather count/get/set/create/delete. Closed masks
+retain AE's duplicated terminal vertex while mutation helpers operate on the
+distinct-vertex set and resynchronize the terminal value. Opening removes that
+terminal duplicate and closing recreates it. Vertex insertion/deletion remaps
+or removes affected feather segment indices.
+
+Outline state is bounded to 64 distinct vertices and 64 feather points per
+mask. Vertex coordinates and tangents must be finite. Feather positions,
+corner angles, and tension are constrained to `[0,1]`; segment indices and enum
+values are validated, and negative radius is accepted only for inner feathers.
+The local 40-byte feather ABI has compile-time size and offset checks. Invalid
+mutation returns an AEGP error without changing host state.

@@ -696,17 +696,18 @@ pub fn execute_smart_suite_fault(
         expect_handle_rejection,
         expect_world_rejection,
         expect_pixel_format_rejection,
+        expect_outline_rejection,
     ) = match fault_id {
-        "mask_count_error" => ("--smart-mask-count-error-request", false, false, false, false, false, false),
-        "mask_count_crash" => ("--smart-mask-count-crash-request", true, false, false, false, false, false),
+        "mask_count_error" => ("--smart-mask-count-error-request", false, false, false, false, false, false, false),
+        "mask_count_crash" => ("--smart-mask-count-crash-request", true, false, false, false, false, false, false),
         "mask_double_dispose" => (
-            "--smart-mask-double-dispose-request", false, true, false, false, false, false,
+            "--smart-mask-double-dispose-request", false, true, false, false, false, false, false,
         ),
         "stream_dispose_with_live_value" => (
-            "--smart-stream-live-value-dispose-request", false, true, false, false, false, false,
+            "--smart-stream-live-value-dispose-request", false, true, false, false, false, false, false,
         ),
         "suite_release_without_acquire" => (
-            "--smart-suite-release-without-acquire-request", false, false, true, false, false, false,
+            "--smart-suite-release-without-acquire-request", false, false, true, false, false, false, false,
         ),
         "handle_resize_while_locked" => (
             "--smart-handle-resize-while-locked-request",
@@ -716,6 +717,17 @@ pub fn execute_smart_suite_fault(
             true,
             false,
             false,
+            false,
+        ),
+        "outline_mutation" => (
+            "--smart-outline-mutation-request",
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            true,
         ),
         "world_double_dispose" => (
             "--smart-world-double-dispose-request",
@@ -724,6 +736,7 @@ pub fn execute_smart_suite_fault(
             false,
             false,
             true,
+            false,
             false,
         ),
         "pixel_format_registry" => (
@@ -734,6 +747,7 @@ pub fn execute_smart_suite_fault(
             false,
             false,
             true,
+            false,
         ),
         "world_allocation_limit" => (
             "--smart-world-allocation-limit-request",
@@ -742,6 +756,7 @@ pub fn execute_smart_suite_fault(
             false,
             false,
             true,
+            false,
             false,
         ),
         _ => return Err(invalid("unknown fixed suite fault")),
@@ -858,6 +873,17 @@ pub fn execute_smart_suite_fault(
                 && report.get("supported_pixel_format_count") == Some(&json!(0))
                 && report.get("invalid_pixel_format_operations") == Some(&json!(2))
         })
+    } else if expect_outline_rejection {
+        runs.iter().all(|(classification, report)| {
+            classification.as_str() == "ok"
+                && report.get("pre_render_error") == Some(&json!(0))
+                && report.get("smart_render_error") == Some(&json!(0))
+                && report.get("guard_bytes_intact") == Some(&Value::Bool(true))
+                && report.get("outline_fault_observed") == Some(&Value::Bool(true))
+                && report.get("outline_mutations") == Some(&json!(8))
+                && report.get("invalid_outline_operations") == Some(&json!(1))
+                && report.get("mask_lifetimes_balanced") == Some(&Value::Bool(true))
+        })
     } else {
         runs.iter()
             .all(|(classification, report)| fallback_valid(*classification, report))
@@ -898,14 +924,17 @@ pub fn execute_smart_suite_fault(
             "pixel_format_add_calls":item.1.get("pixel_format_add_calls"),
             "pixel_format_clear_calls":item.1.get("pixel_format_clear_calls"),
             "supported_pixel_format_count":item.1.get("supported_pixel_format_count"),
-            "invalid_pixel_format_operations":item.1.get("invalid_pixel_format_operations")
+            "invalid_pixel_format_operations":item.1.get("invalid_pixel_format_operations"),
+            "outline_fault_observed":item.1.get("outline_fault_observed"),
+            "outline_mutations":item.1.get("outline_mutations"),
+            "invalid_outline_operations":item.1.get("invalid_outline_operations")
         })
     };
     let report = json!({
         "schema_version":1,"stage":"smartfx_suite_fault","plugin_id":plugin_id,
         "receipt_id":approved.receipt_id,"fixture_sha256":approved.sha256.to_ascii_uppercase(),
-        "fault_id":fault_id,"expected_outcome":if expect_crash { "worker_crash" } else if expect_lifetime_rejection || expect_suite_rejection || expect_handle_rejection || expect_world_rejection || expect_pixel_format_rejection { "callback_error_rejected" } else { "plugin_fallback" },
-        "expected_fallback_sha256":if expect_crash || expect_lifetime_rejection || expect_suite_rejection || expect_handle_rejection || expect_world_rejection || expect_pixel_format_rejection { Value::Null } else { json!(fallback_hash) },
+        "fault_id":fault_id,"expected_outcome":if expect_crash { "worker_crash" } else if expect_lifetime_rejection || expect_suite_rejection || expect_handle_rejection || expect_world_rejection || expect_pixel_format_rejection || expect_outline_rejection { "callback_error_rejected" } else { "plugin_fallback" },
+        "expected_fallback_sha256":if expect_crash || expect_lifetime_rejection || expect_suite_rejection || expect_handle_rejection || expect_world_rejection || expect_pixel_format_rejection || expect_outline_rejection { Value::Null } else { json!(fallback_hash) },
         "run_1":summarize(&runs[0]),"run_2":summarize(&runs[1]),
         "broker_survived":true,"passed":passed
     });

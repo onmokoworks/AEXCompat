@@ -138,6 +138,14 @@ unsupported-format rejection, and rejection outside Global Setup. Both fresh
 workers record three accepted add calls, two accepted clears, two rejected
 operations, and an empty final declaration list.
 
+AEGP Mask Outline Suite v5 now fills every SDK function slot. A fixed mutation
+gate first completes a normal native MaskOffset render, then performs an
+open/closed roundtrip, vertex set/create/delete, and feather
+create/get/set/delete. One invalid outer feather with negative radius is
+rejected, and the complete original host mask is restored afterward. Both
+isolated runs observe eight valid mutations, one rejection, balanced mask
+lifetimes, intact render guards, and the unchanged native output hash.
+
 ## Host-Owned Mask Scenes
 
 The mask ABI no longer stores one hard-coded mask, stream, outline, or vertex

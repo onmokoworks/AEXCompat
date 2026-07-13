@@ -40,6 +40,7 @@ class MinihostL2SourceTests(unittest.TestCase):
             "verify_world_double_dispose_rejected()",
             "verify_world_allocation_limit_rejected()",
             "verify_pixel_format_registry_rejection()",
+            "verify_outline_mutation_rejection()",
             "kMaxHandleCount = 1024",
             "kMaxHandleBytes = 64 * 1024 * 1024",
         ):

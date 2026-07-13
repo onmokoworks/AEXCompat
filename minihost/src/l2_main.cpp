@@ -125,6 +125,20 @@ struct MaskVertex {
   double tangent_in_x, tangent_in_y;
   double tangent_out_x, tangent_out_y;
 };
+struct MaskFeather {
+  int32_t segment{};
+  double segment_s{};
+  double radius{};
+  float ui_corner_angle{};
+  float tension{};
+  uint8_t interp{};
+  uint8_t type{};
+};
+static_assert(sizeof(MaskFeather) == 40);
+static_assert(offsetof(MaskFeather, segment_s) == 8);
+static_assert(offsetof(MaskFeather, radius) == 16);
+static_assert(offsetof(MaskFeather, interp) == 32);
+static_assert(offsetof(MaskFeather, type) == 33);
 struct HostMask {
   OpaqueHostObject mask{0x4d41534b};
   OpaqueHostObject stream{0x5354524d};
@@ -134,6 +148,7 @@ struct HostMask {
   bool stream_live{};
   bool value_live{};
   std::vector<MaskVertex> vertices;
+  std::vector<MaskFeather> feathers;
 };
 OpaqueHostObject g_effect{0x45464658};
 OpaqueHostObject g_layer{0x4c415952};
@@ -147,6 +162,18 @@ struct MaskLifetimeCounts {
   uint32_t values_disposed{};
 };
 MaskLifetimeCounts g_mask_lifetime;
+uint32_t g_invalid_outline_operations{};
+uint32_t g_outline_mutations{};
+constexpr std::size_t kMaxOutlineVertices = 64;
+constexpr std::size_t kMaxOutlineFeathers = 64;
+
+std::size_t distinct_vertex_count(const HostMask& mask) {
+  return mask.vertices.size() - static_cast<std::size_t>(!mask.open && !mask.vertices.empty());
+}
+
+void sync_closed_vertex(HostMask& mask) {
+  if (!mask.open && !mask.vertices.empty()) mask.vertices.back() = mask.vertices.front();
+}
 
 bool mask_lifetimes_balanced() {
   return g_mask_lifetime.masks_acquired == g_mask_lifetime.masks_disposed &&
@@ -480,17 +507,34 @@ int32_t __cdecl dispose_stream_value(StreamValue* value) {
   return 0;
 }
 
-int32_t __cdecl is_mask_outline_open(void* outline, int32_t* open) {
+int32_t __cdecl is_mask_outline_open(void* outline, uint8_t* open) {
   HostMask* record = find_outline(outline);
   if (!record || !open) return 4;
   *open = record->open ? 1 : 0;
   return 0;
 }
 
+int32_t __cdecl set_mask_outline_open(void* outline, uint8_t open) {
+  HostMask* record = find_outline(outline);
+  if (!record) { ++g_invalid_outline_operations; return 4; }
+  const bool requested = open != 0;
+  if (record->open == requested) return 0;
+  if (requested) {
+    if (!record->vertices.empty()) record->vertices.pop_back();
+  } else if (!record->vertices.empty()) {
+    record->vertices.push_back(record->vertices.front());
+  }
+  record->open = requested;
+  ++g_outline_mutations;
+  return 0;
+}
+
 int32_t __cdecl get_mask_outline_num_segments(void* outline, int32_t* count) {
   HostMask* record = find_outline(outline);
-  if (!record || !count || record->vertices.empty()) return 4;
-  *count = static_cast<int32_t>(record->vertices.size() - 1);
+  if (!record || !count) return 4;
+  const std::size_t vertices = distinct_vertex_count(*record);
+  *count = static_cast<int32_t>(vertices == 0 ? 0 :
+      vertices - static_cast<std::size_t>(record->open));
   return 0;
 }
 
@@ -500,6 +544,137 @@ int32_t __cdecl get_mask_outline_vertex_info(void* outline, int32_t index,
   if (!record || !vertex || index < 0 ||
       static_cast<std::size_t>(index) >= record->vertices.size()) return 4;
   *vertex = record->vertices[static_cast<std::size_t>(index)];
+  return 0;
+}
+
+bool finite_vertex(const MaskVertex& vertex) {
+  return std::isfinite(vertex.x) && std::isfinite(vertex.y) &&
+      std::isfinite(vertex.tangent_in_x) && std::isfinite(vertex.tangent_in_y) &&
+      std::isfinite(vertex.tangent_out_x) && std::isfinite(vertex.tangent_out_y);
+}
+
+int32_t __cdecl set_mask_outline_vertex_info(void* outline, int32_t index,
+                                             const MaskVertex* vertex) {
+  HostMask* record = find_outline(outline);
+  const std::size_t count = record ? distinct_vertex_count(*record) : 0;
+  if (!record || !vertex || !finite_vertex(*vertex) || index < 0 ||
+      static_cast<std::size_t>(index) > count ||
+      (record->open && static_cast<std::size_t>(index) == count)) {
+    ++g_invalid_outline_operations;
+    return 4;
+  }
+  const std::size_t target = static_cast<std::size_t>(index) == count ? 0 :
+      static_cast<std::size_t>(index);
+  record->vertices[target] = *vertex;
+  sync_closed_vertex(*record);
+  ++g_outline_mutations;
+  return 0;
+}
+
+int32_t __cdecl create_mask_outline_vertex(void* outline, int32_t position) {
+  HostMask* record = find_outline(outline);
+  const std::size_t count = record ? distinct_vertex_count(*record) : 0;
+  if (!record || count >= kMaxOutlineVertices) {
+    ++g_invalid_outline_operations;
+    return 4;
+  }
+  if (position == 10922) position = static_cast<int32_t>(count);
+  if (position < 0 || static_cast<std::size_t>(position) > count) {
+    ++g_invalid_outline_operations;
+    return 4;
+  }
+  if (!record->open && count == 0) {
+    record->vertices = {MaskVertex{}, MaskVertex{}};
+  } else {
+    record->vertices.insert(record->vertices.begin() + position, MaskVertex{});
+  }
+  for (auto& feather : record->feathers)
+    if (feather.segment >= position) ++feather.segment;
+  sync_closed_vertex(*record);
+  ++g_outline_mutations;
+  return 0;
+}
+
+int32_t __cdecl delete_mask_outline_vertex(void* outline, int32_t index) {
+  HostMask* record = find_outline(outline);
+  const std::size_t count = record ? distinct_vertex_count(*record) : 0;
+  if (!record || index < 0 || static_cast<std::size_t>(index) >= count) {
+    ++g_invalid_outline_operations;
+    return 4;
+  }
+  if (!record->open && count == 1) record->vertices.clear();
+  else record->vertices.erase(record->vertices.begin() + index);
+  record->feathers.erase(std::remove_if(record->feathers.begin(), record->feathers.end(),
+      [index](const auto& feather) { return feather.segment == index; }), record->feathers.end());
+  for (auto& feather : record->feathers)
+    if (feather.segment > index) --feather.segment;
+  sync_closed_vertex(*record);
+  ++g_outline_mutations;
+  return 0;
+}
+
+int32_t __cdecl get_mask_outline_num_feathers(void* outline, int32_t* count) {
+  HostMask* record = find_outline(outline);
+  if (!record || !count) return 4;
+  *count = static_cast<int32_t>(record->feathers.size());
+  return 0;
+}
+
+bool valid_feather(const HostMask& mask, const MaskFeather& feather) {
+  const std::size_t vertices = distinct_vertex_count(mask);
+  const std::size_t segments = vertices == 0 ? 0 : vertices - static_cast<std::size_t>(mask.open);
+  return feather.segment >= 0 && static_cast<std::size_t>(feather.segment) < segments &&
+      std::isfinite(feather.segment_s) && feather.segment_s >= 0 && feather.segment_s <= 1 &&
+      std::isfinite(feather.radius) && std::isfinite(feather.ui_corner_angle) &&
+      feather.ui_corner_angle >= 0 && feather.ui_corner_angle <= 1 &&
+      std::isfinite(feather.tension) && feather.tension >= 0 && feather.tension <= 1 &&
+      feather.interp <= 1 && feather.type <= 1 && (feather.type == 1 || feather.radius >= 0);
+}
+
+int32_t __cdecl get_mask_outline_feather_info(void* outline, int32_t index,
+                                              MaskFeather* feather) {
+  HostMask* record = find_outline(outline);
+  if (!record || !feather || index < 0 ||
+      static_cast<std::size_t>(index) >= record->feathers.size()) return 4;
+  *feather = record->feathers[static_cast<std::size_t>(index)];
+  return 0;
+}
+
+int32_t __cdecl set_mask_outline_feather_info(void* outline, int32_t index,
+                                              const MaskFeather* feather) {
+  HostMask* record = find_outline(outline);
+  if (!record || !feather || !valid_feather(*record, *feather) || index < 0 ||
+      static_cast<std::size_t>(index) >= record->feathers.size()) {
+    ++g_invalid_outline_operations;
+    return 4;
+  }
+  record->feathers[static_cast<std::size_t>(index)] = *feather;
+  ++g_outline_mutations;
+  return 0;
+}
+
+int32_t __cdecl create_mask_outline_feather(void* outline, const MaskFeather* feather,
+                                            int32_t* position) {
+  HostMask* record = find_outline(outline);
+  if (!record || !feather || !position || !valid_feather(*record, *feather) ||
+      record->feathers.size() >= kMaxOutlineFeathers) {
+    ++g_invalid_outline_operations;
+    return 4;
+  }
+  record->feathers.push_back(*feather);
+  *position = static_cast<int32_t>(record->feathers.size() - 1);
+  ++g_outline_mutations;
+  return 0;
+}
+
+int32_t __cdecl delete_mask_outline_feather(void* outline, int32_t index) {
+  HostMask* record = find_outline(outline);
+  if (!record || index < 0 || static_cast<std::size_t>(index) >= record->feathers.size()) {
+    ++g_invalid_outline_operations;
+    return 4;
+  }
+  record->feathers.erase(record->feathers.begin() + index);
+  ++g_outline_mutations;
   return 0;
 }
 
@@ -522,6 +697,43 @@ bool verify_stream_dispose_with_live_value_rejected() {
   return premature_error == 4 && dispose_stream_value(&value) == 0 &&
       dispose_stream(stream) == 0 && dispose_mask(mask) == 0 &&
       mask_lifetimes_balanced();
+}
+
+bool verify_outline_mutation_rejection() {
+  if (g_mask_scene.empty()) return false;
+  HostMask& mask = g_mask_scene.front();
+  const HostMask original = mask;
+  const uint32_t invalid_before = g_invalid_outline_operations;
+  const uint32_t mutations_before = g_outline_mutations;
+  void* outline = &mask.outline;
+  int32_t segments = -1;
+  MaskVertex replacement{11, 2, -1, 0, 1, 0};
+  MaskVertex observed{};
+  MaskFeather feather{1, 0.25, 3.0, 0.5f, 0.75f, 0, 0};
+  int32_t feather_index = -1;
+  int32_t feather_count = -1;
+  bool passed = set_mask_outline_open(outline, 1) == 0 &&
+      get_mask_outline_num_segments(outline, &segments) == 0 && segments == 3 &&
+      set_mask_outline_open(outline, 0) == 0 &&
+      get_mask_outline_num_segments(outline, &segments) == 0 && segments == 4 &&
+      set_mask_outline_vertex_info(outline, 1, &replacement) == 0 &&
+      get_mask_outline_vertex_info(outline, 1, &observed) == 0 && observed.x == 11 &&
+      create_mask_outline_vertex(outline, 2) == 0 &&
+      get_mask_outline_num_segments(outline, &segments) == 0 && segments == 5 &&
+      delete_mask_outline_vertex(outline, 2) == 0 &&
+      create_mask_outline_feather(outline, &feather, &feather_index) == 0 &&
+      feather_index == 0 && get_mask_outline_num_feathers(outline, &feather_count) == 0 &&
+      feather_count == 1;
+  feather.radius = 2.0;
+  passed = passed && set_mask_outline_feather_info(outline, 0, &feather) == 0 &&
+      get_mask_outline_feather_info(outline, 0, &feather) == 0 && feather.radius == 2.0;
+  MaskFeather invalid = feather;
+  invalid.radius = -1.0;
+  passed = passed && set_mask_outline_feather_info(outline, 0, &invalid) != 0 &&
+      delete_mask_outline_feather(outline, 0) == 0;
+  mask = original;
+  return passed && g_invalid_outline_operations == invalid_before + 1 &&
+      g_outline_mutations == mutations_before + 8;
 }
 
 struct UtilitySuite {
@@ -549,10 +761,17 @@ struct StreamSuite {
 };
 struct MaskOutlineSuite {
   decltype(&is_mask_outline_open) is_open;
-  void* set_open{};
+  decltype(&set_mask_outline_open) set_open;
   decltype(&get_mask_outline_num_segments) get_num_segments;
   decltype(&get_mask_outline_vertex_info) get_vertex_info;
-  void* unsupported[6]{};
+  decltype(&set_mask_outline_vertex_info) set_vertex_info;
+  decltype(&create_mask_outline_vertex) create_vertex;
+  decltype(&delete_mask_outline_vertex) delete_vertex;
+  decltype(&get_mask_outline_num_feathers) get_num_feathers;
+  decltype(&get_mask_outline_feather_info) get_feather_info;
+  decltype(&set_mask_outline_feather_info) set_feather_info;
+  decltype(&create_mask_outline_feather) create_feather;
+  decltype(&delete_mask_outline_feather) delete_feather;
 };
 
 UtilitySuite g_utility_suite{{}, &register_with_aegp};
@@ -560,9 +779,17 @@ PfInterfaceSuite g_pf_interface_suite{&get_effect_layer};
 MaskSuite g_mask_suite{&get_layer_num_masks, &get_layer_mask_by_index, &dispose_mask};
 StreamSuite g_stream_suite{{}, &get_new_mask_stream, &dispose_stream, {},
                            &get_new_stream_value, &dispose_stream_value};
-MaskOutlineSuite g_mask_outline_suite{&is_mask_outline_open, nullptr,
+MaskOutlineSuite g_mask_outline_suite{&is_mask_outline_open, &set_mask_outline_open,
                                       &get_mask_outline_num_segments,
-                                      &get_mask_outline_vertex_info};
+                                      &get_mask_outline_vertex_info,
+                                      &set_mask_outline_vertex_info,
+                                      &create_mask_outline_vertex,
+                                      &delete_mask_outline_vertex,
+                                      &get_mask_outline_num_feathers,
+                                      &get_mask_outline_feather_info,
+                                      &set_mask_outline_feather_info,
+                                      &create_mask_outline_feather,
+                                      &delete_mask_outline_feather};
 
 constexpr int32_t kPixelFormatArgb32 = 1650946657;
 constexpr int32_t kPixelFormatArgb64 = 909206881;
@@ -1719,12 +1946,15 @@ int wmain(int argc, wchar_t** argv) {
       std::wstring(argv[1]) == L"--smart-world-allocation-limit-request";
   const bool pixel_format_registry_mode = argc == 5 &&
       std::wstring(argv[1]) == L"--smart-pixel-format-registry-request";
+  const bool outline_mutation_mode = argc == 5 &&
+      std::wstring(argv[1]) == L"--smart-outline-mutation-request";
   const bool request_mode = mask_request_mode || mask_scene_request_mode || mask_context_request_mode ||
       mask_count_error_mode || mask_count_crash_mode || mask_double_dispose_mode ||
       stream_live_value_dispose_mode || suite_release_without_acquire_mode ||
       handle_resize_while_locked_mode || world_double_dispose_mode ||
       world_allocation_limit_mode ||
       pixel_format_registry_mode ||
+      outline_mutation_mode ||
       (argc == 5 && std::wstring(argv[1]) == L"--smart-request");
   if (!request_mode && (argc != 5 || std::wstring(argv[1]) != L"--smart")) return 2;
   g_mask_model_enabled = mask_request_mode || mask_scene_request_mode || mask_context_request_mode ||
@@ -1732,7 +1962,8 @@ int wmain(int argc, wchar_t** argv) {
       stream_live_value_dispose_mode || suite_release_without_acquire_mode ||
       handle_resize_while_locked_mode || world_double_dispose_mode ||
       world_allocation_limit_mode;
-  g_mask_model_enabled = g_mask_model_enabled || pixel_format_registry_mode;
+  g_mask_model_enabled = g_mask_model_enabled || pixel_format_registry_mode ||
+      outline_mutation_mode;
   g_mask_fault = mask_count_error_mode ? MaskFault::CountError :
       mask_count_crash_mode ? MaskFault::CountCrash : MaskFault::None;
   RequestedAssignments requested_parameters;
@@ -1913,6 +2144,7 @@ int wmain(int argc, wchar_t** argv) {
   bool handle_fault_observed = false;
   bool world_fault_observed = false;
   bool pixel_format_fault_observed = false;
+  bool outline_fault_observed = false;
   std::cerr << "stage:smart_render_end pre_error=" << smart.pre_error
             << " render_error=" << smart.render_error << "\n" << std::flush;
 #endif
@@ -1930,6 +2162,8 @@ int wmain(int argc, wchar_t** argv) {
     world_fault_observed = verify_world_allocation_limit_rejected();
   if (pixel_format_registry_mode)
     pixel_format_fault_observed = verify_pixel_format_registry_rejection();
+  if (outline_mutation_mode)
+    outline_fault_observed = verify_outline_mutation_rejection();
   #endif
   std::cerr << "stage:global_setdown_end error=" << setdown_error << "\n" << std::flush;
 #ifdef AEXCOMPAT_RENDER_WORKER
@@ -2030,6 +2264,9 @@ int wmain(int argc, wchar_t** argv) {
             << ",\"pixel_format_clear_calls\":" << g_pixel_format_clear_calls
             << ",\"supported_pixel_format_count\":" << g_supported_pixel_formats.size()
             << ",\"invalid_pixel_format_operations\":" << g_invalid_pixel_format_operations
+            << ",\"outline_fault_observed\":" << (outline_fault_observed ? "true" : "false")
+            << ",\"outline_mutations\":" << g_outline_mutations
+            << ",\"invalid_outline_operations\":" << g_invalid_outline_operations
             << ",\"requested_parameters\":" << requested_parameters_json(requested_parameters)
             << ",\"requested_amount\":" << static_cast<int32_t>(requested_value(requested_parameters, L"amount"))
             << ",\"requested_direction\":" << static_cast<int32_t>(requested_value(requested_parameters, L"direction"))

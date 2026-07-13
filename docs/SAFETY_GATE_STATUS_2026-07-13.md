@@ -156,3 +156,11 @@ render and proved ordered add, duplicate idempotence, clear, invalid-format
 rejection, and out-of-phase rejection. Each run ended with an empty registry,
 intact render guards, and a schema-valid report. ScatterMap ARGB64 and ARGB128
 render regressions and the MaskOffset two-mask regression remained passing.
+
+AEGP Mask Outline Suite v5 mutation is bounded to 64 vertices and 64 feather
+points per mask, validates every index and numeric field, and preserves the
+SDK's closed-mask terminal-vertex rule. The fixed `outline_mutation` gate ran
+twice after successful native rendering and recorded eight valid state changes,
+one rejected invalid feather, complete state restoration, and balanced handle
+lifetimes. Its report is schema-valid. Fresh translated-mask and second-mask
+native regressions retained their independent oracle hashes.
