@@ -37,8 +37,10 @@ negotiation correctly falls back because PreRender does not opt in to GPU pixel
 execution. A missing mandatory input propagates error 4 without output writes
 or a process crash. A target-specific malformed frame contract crashes only its
 disposable worker in two repeated runs while the broker survives and records
-evidence. H-4 AE reference trace capture remains pending under the
-continuous authorization and existing isolation controls.
+evidence. H-4 AE reference capture is now partially satisfied by an actual AE
+25.2 trace: the fixed fixture was discovered, added to a temporary layer, and
+exposed seven properties without a script-visible error. Pixel-reference
+rendering and parity remain pending; see `AE_REFERENCE_TRACE_2026-07-13.md`.
 SmartFX PreRender checkout also receives a valid time basis; a nonzero
 `42/2/24` context was observed exactly while preserving deterministic output.
 The ARGB8 matrix also covers valid parameter boundaries amount 500, seed 10000,
