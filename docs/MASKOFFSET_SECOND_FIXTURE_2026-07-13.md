@@ -104,14 +104,20 @@ indices and proves distinct pixel results across deterministic double runs.
 Scene ids are broker-enumerated and unknown ids fail before output creation or
 native lookup. The worker only echoes host scene identity and count. MaskOffset
 pixel expectations remain in its fixture adapter rather than `host_core`, while
-the AEGP callbacks dispatch solely by opaque host handles. This is the staged
-foundation for a bounded request-v4 host-context scene transport, not a claim
-that the fixed scene catalog is the final public interface.
+the AEGP callbacks dispatch solely by opaque host handles.
+
+Request v4 now adds a bounded `host_context.mask_scene` to the normal SmartFX
+request path. It accepts up to 8 closed straight-polygon masks, 64 vertices per
+mask, 128 vertices total, coordinates in `[-32768, 32768]`, and an 8192-byte
+worker transport. Broker and worker independently enforce these limits. A real
+two-polygon request selected its second mask, matched an independent ray-cast
+pixel oracle twice, preserved guards, and echoed `request_v4` with mask count 2.
+An `open:true` request failed before report creation or native launch.
 
 ## Remaining Work
 
 This evidence does not claim complete MaskOffset render compatibility. Completion
-still requires bounded configurable open/Bezier mask scenes and
-expansion/rounding/feather/invert oracle coverage. Multiple fixed masks are now
-covered, but arbitrary bounded scene input is not. Those additions must not
-introduce MaskOffset identity or algorithms into `host_core`.
+still requires bounded open/Bezier mask scenes and expansion/rounding/feather/
+invert oracle coverage. Arbitrary bounded closed straight-polygon input is now
+covered. Those additions must not introduce MaskOffset identity or algorithms
+into `host_core`.

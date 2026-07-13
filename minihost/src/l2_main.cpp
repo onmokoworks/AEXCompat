@@ -19,6 +19,7 @@
 #include <string>
 #include <thread>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -624,6 +625,58 @@ bool parse_double_arg(const wchar_t* text, double minimum, double maximum, doubl
   return true;
 }
 
+bool parse_mask_context_payload(const wchar_t* text) {
+  if (!text) return false;
+  const std::wstring encoded(text);
+  if (encoded.size() < 3 || encoded.size() > 8192 || encoded.compare(0, 3, L"v1|") != 0)
+    return false;
+  std::vector<HostMask> masks;
+  std::size_t total_vertices = 0;
+  const std::wstring payload = encoded.substr(3);
+  if (payload.empty()) {
+    g_mask_scene.clear();
+    g_mask_scene_id = "request_v4";
+    return true;
+  }
+  std::size_t mask_offset = 0;
+  while (mask_offset < payload.size()) {
+    const std::size_t mask_separator = payload.find(L';', mask_offset);
+    const std::size_t mask_end = mask_separator == std::wstring::npos
+        ? payload.size() : mask_separator;
+    const std::wstring item = payload.substr(mask_offset, mask_end - mask_offset);
+    if (item.size() < 5 || item.compare(0, 2, L"0:") != 0) return false;
+    HostMask mask;
+    std::size_t vertex_offset = 2;
+    while (vertex_offset < item.size()) {
+      const std::size_t vertex_separator = item.find(L'/', vertex_offset);
+      const std::size_t vertex_end = vertex_separator == std::wstring::npos
+          ? item.size() : vertex_separator;
+      const std::wstring point = item.substr(vertex_offset, vertex_end - vertex_offset);
+      const std::size_t comma = point.find(L',');
+      if (comma == std::wstring::npos || comma == 0 || comma + 1 >= point.size() ||
+          point.find(L',', comma + 1) != std::wstring::npos) return false;
+      double x{}, y{};
+      if (!parse_double_arg(point.substr(0, comma).c_str(), -32768.0, 32768.0, x) ||
+          !parse_double_arg(point.substr(comma + 1).c_str(), -32768.0, 32768.0, y)) return false;
+      mask.vertices.push_back({x, y, 0, 0, 0, 0});
+      if (mask.vertices.size() > 64 || ++total_vertices > 128) return false;
+      if (vertex_separator == std::wstring::npos) break;
+      vertex_offset = vertex_separator + 1;
+      if (vertex_offset == item.size()) return false;
+    }
+    if (mask.vertices.size() < 3) return false;
+    mask.vertices.push_back(mask.vertices.front());
+    masks.push_back(std::move(mask));
+    if (masks.size() > 8) return false;
+    if (mask_separator == std::wstring::npos) break;
+    mask_offset = mask_separator + 1;
+    if (mask_offset == payload.size()) return false;
+  }
+  g_mask_scene = std::move(masks);
+  g_mask_scene_id = "request_v4";
+  return true;
+}
+
 bool valid_parameter_id(const std::wstring& id) {
   if (id.empty() || id.size() > 64 || id.front() < L'a' || id.front() > L'z') return false;
   return std::all_of(id.begin(), id.end(), [](wchar_t character) {
@@ -1176,15 +1229,17 @@ int wmain(int argc, wchar_t** argv) {
   const bool mask_request_mode = argc == 5 && std::wstring(argv[1]) == L"--smart-mask-request";
   const bool mask_scene_request_mode = argc == 6 &&
       std::wstring(argv[1]) == L"--smart-mask-scene-request";
+  const bool mask_context_request_mode = argc == 6 &&
+      std::wstring(argv[1]) == L"--smart-mask-context-request";
   const bool mask_count_error_mode = argc == 5 &&
       std::wstring(argv[1]) == L"--smart-mask-count-error-request";
   const bool mask_count_crash_mode = argc == 5 &&
       std::wstring(argv[1]) == L"--smart-mask-count-crash-request";
-  const bool request_mode = mask_request_mode || mask_scene_request_mode ||
+  const bool request_mode = mask_request_mode || mask_scene_request_mode || mask_context_request_mode ||
       mask_count_error_mode || mask_count_crash_mode ||
       (argc == 5 && std::wstring(argv[1]) == L"--smart-request");
   if (!request_mode && (argc != 5 || std::wstring(argv[1]) != L"--smart")) return 2;
-  g_mask_model_enabled = mask_request_mode || mask_scene_request_mode ||
+  g_mask_model_enabled = mask_request_mode || mask_scene_request_mode || mask_context_request_mode ||
       mask_count_error_mode || mask_count_crash_mode;
   g_mask_fault = mask_count_error_mode ? MaskFault::CountError :
       mask_count_crash_mode ? MaskFault::CountCrash : MaskFault::None;
@@ -1192,14 +1247,16 @@ int wmain(int argc, wchar_t** argv) {
   if (request_mode && !parse_parameter_payload(argv[4], requested_parameters)) return 3;
   if (g_mask_model_enabled) {
     std::string scene_id = "rectangle";
-    if (mask_scene_request_mode) {
+    if (mask_context_request_mode) {
+      if (!parse_mask_context_payload(argv[5])) return 3;
+    } else if (mask_scene_request_mode) {
       scene_id.clear();
       for (const wchar_t* p = argv[5]; *p; ++p) {
         if (*p > 0x7f) return 3;
         scene_id.push_back(static_cast<char>(*p));
       }
     }
-    if (!configure_mask_scene(scene_id)) return 3;
+    if (!mask_context_request_mode && !configure_mask_scene(scene_id)) return 3;
   }
 #else
   if (argc != 4) return 2;

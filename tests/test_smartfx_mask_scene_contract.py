@@ -43,6 +43,38 @@ class SmartFxMaskSceneContractTests(unittest.TestCase):
         self.assertIn('"two_rectangles_second"', route)
         self.assertIn("mask_scene_argb8_hash", route)
 
+    def test_request_v4_is_bounded_and_revalidated_by_worker(self):
+        request_schema = json.loads(
+            (ROOT / "contracts/aex/render_parameter_request.schema.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        worker = (ROOT / "minihost/src/l2_main.cpp").read_text(encoding="utf-8")
+        route = (ROOT / "broker/crates/broker/src/render_request.rs").read_text(
+            encoding="utf-8"
+        )
+        self.assertEqual(request_schema["schema_version"], 4)
+        self.assertEqual(
+            request_schema["properties"]["host_context"]["properties"]["mask_scene"]
+            ["properties"]["masks"]["maxItems"],
+            8,
+        )
+        for marker in (
+            "host mask total vertex count exceeds 128",
+            "host mask transport exceeds 8192 bytes",
+            '"--smart-mask-context-request"',
+            "polygon_mask_argb8_hash",
+        ):
+            self.assertIn(marker, route)
+        for marker in (
+            "parse_mask_context_payload",
+            "masks.size() > 8",
+            "total_vertices > 128",
+            "encoded.size() > 8192",
+            'g_mask_scene_id = "request_v4"',
+        ):
+            self.assertIn(marker, worker)
+
 
 if __name__ == "__main__":
     unittest.main()

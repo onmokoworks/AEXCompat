@@ -9,8 +9,8 @@ ROOT = Path(__file__).resolve().parents[1]
 class RenderParameterGateContractTests(unittest.TestCase):
     def test_request_is_strict_and_caller_cannot_supply_descriptors(self):
         schema = json.loads((ROOT / "contracts/aex/render_parameter_request.schema.json").read_text(encoding="utf-8"))
-        self.assertEqual(schema["schema_version"], 3)
-        self.assertEqual(schema["properties"]["schema_version"]["enum"], [2, 3])
+        self.assertEqual(schema["schema_version"], 4)
+        self.assertEqual(schema["properties"]["schema_version"]["enum"], [2, 3, 4])
         self.assertFalse(schema["additionalProperties"])
         assignments = schema["properties"]["assignments"]
         alternatives = assignments["additionalProperties"]["oneOf"]
@@ -23,6 +23,11 @@ class RenderParameterGateContractTests(unittest.TestCase):
         self.assertEqual(assignments["maxProperties"], 64)
         self.assertIn("propertyNames", assignments)
         self.assertNotIn("properties", assignments)
+        host_context = schema["properties"]["host_context"]
+        masks = host_context["properties"]["mask_scene"]["properties"]["masks"]
+        self.assertEqual(masks["maxItems"], 8)
+        self.assertEqual(schema["$defs"]["mask"]["properties"]["vertices"]["maxItems"], 64)
+        self.assertFalse(schema["$defs"]["mask"]["properties"]["open"]["const"])
 
     def test_report_proves_pre_dispatch_rejection(self):
         schema = json.loads((ROOT / "contracts/aex/render_parameter_gate_report.schema.json").read_text(encoding="utf-8"))
@@ -70,7 +75,9 @@ class RenderParameterGateContractTests(unittest.TestCase):
                        "g_params[static_cast<std::size_t>(assignment.index - 1)]",
                        "requested_parameters_json", "requested_parameters",
                        "requested_amount", "requested_direction", "requested_seed",
-                       "requested_mix", "requested_invert_map", "std::setprecision(17)"):
+                       "requested_mix", "requested_invert_map", "std::setprecision(17)",
+                       'L"--smart-mask-context-request"', "parse_mask_context_payload",
+                       "encoded.size() > 8192", "total_vertices > 128"):
             self.assertIn(marker, source)
         self.assertLess(source.index("if (request_mode &&"), source.index("if (!sha256(argv[2]"))
 

@@ -96,6 +96,83 @@ pub fn mask_scene_argb8_hash(assignments: &ValidatedAssignments, scene_id: &str)
     Some(format!("{:X}", Sha256::digest(source)))
 }
 
+pub fn polygon_mask_argb8_hash(
+    assignments: &ValidatedAssignments,
+    masks: &[Vec<(f64, f64)>],
+) -> Option<String> {
+    const WIDTH: i32 = 16;
+    const HEIGHT: i32 = 12;
+    let mask_index = assignments
+        .get("mask_index")
+        .and_then(|value| value.numeric())
+        .unwrap_or(1.0) as usize;
+    let Some(points) = mask_index.checked_sub(1).and_then(|index| masks.get(index)) else {
+        return Some(source_argb8_hash());
+    };
+    if points.len() < 3 {
+        return None;
+    }
+    let mode = assignments
+        .get("mode")
+        .and_then(|value| value.numeric())
+        .unwrap_or(1.0) as i32;
+    let invert = assignments
+        .get("invert")
+        .and_then(|value| value.numeric())
+        .unwrap_or(0.0)
+        != 0.0;
+    let color = assignments
+        .get("fill_color")
+        .and_then(|value| value.color())
+        .unwrap_or(ColorValue {
+            alpha: 255,
+            red: 255,
+            green: 255,
+            blue: 255,
+        });
+    let mut source = source_argb8();
+    for y in 0..HEIGHT {
+        for x in 0..WIDTH {
+            let sample_x = x as f64 + 0.5;
+            let sample_y = y as f64 + 0.5;
+            let mut inside = false;
+            let mut previous = points.len() - 1;
+            for current in 0..points.len() {
+                let (x1, y1) = points[current];
+                let (x2, y2) = points[previous];
+                if (y1 > sample_y) != (y2 > sample_y)
+                    && sample_x < (x2 - x1) * (sample_y - y1) / (y2 - y1) + x1
+                {
+                    inside = !inside;
+                }
+                previous = current;
+            }
+            if invert {
+                inside = !inside;
+            }
+            let offset = ((y * WIDTH + x) * 4) as usize;
+            match mode {
+                1 | 2 if !inside => source[offset] = 0,
+                3 if inside => {
+                    source[offset] = color.alpha;
+                    source[offset + 1] = color.red;
+                    source[offset + 2] = color.green;
+                    source[offset + 3] = color.blue;
+                }
+                4 if inside => source[offset] = 0,
+                5 if !inside => {
+                    source[offset] = color.alpha;
+                    source[offset + 1] = color.red;
+                    source[offset + 2] = color.green;
+                    source[offset + 3] = color.blue;
+                }
+                _ => {}
+            }
+        }
+    }
+    Some(format!("{:X}", Sha256::digest(source)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -160,5 +237,19 @@ mod tests {
             mask_scene_argb8_hash(&second, "two_rectangles")
         );
         assert!(mask_scene_argb8_hash(&first, "arbitrary").is_none());
+    }
+
+    #[test]
+    fn polygon_oracle_matches_the_original_rectangle() {
+        let values = ValidatedAssignments::from([
+            ("mode".into(), ParameterValue::Numeric(2.0)),
+            ("mask_index".into(), ParameterValue::Numeric(1.0)),
+            ("invert".into(), ParameterValue::Numeric(0.0)),
+        ]);
+        let rectangle = vec![vec![(4.0, 3.0), (12.0, 3.0), (12.0, 9.0), (4.0, 9.0)]];
+        assert_eq!(
+            polygon_mask_argb8_hash(&values, &rectangle),
+            Some(rectangle_mask_argb8_hash(&values))
+        );
     }
 }

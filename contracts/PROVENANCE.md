@@ -9,12 +9,12 @@ provenance and should not be edited during promotion.
 | Canonical path | Source path | Notes |
 | --- | --- | --- |
 | `contracts/aex/image_probe_request.schema.json` | `imports/aviutlas-rust-contracts/analysis/AEX_IMAGE_PROBE_REQUEST_SCHEMA_2026-05-31.json` | Request/response shape for future image probe work. Current use remains no-load contract validation. |
-| `contracts/aex/render_parameter_request.schema.json` | Local cleanroom contract, 2026-07-13 | Strict caller value request resolved through a broker-owned descriptor profile. |
+| `contracts/aex/render_parameter_request.schema.json` | Local cleanroom contract, 2026-07-13 | Strict caller value request resolved through a broker-owned descriptor profile; v4 adds bounded host-owned mask context. |
 | `contracts/aex/parameter_descriptor_manifest.schema.json` | Local cleanroom contract, 2026-07-13 | Promoted L2 parameter observations bound to a reviewed plug-in digest and receipt. |
 | `contracts/aex/descriptor_manifest_promotion_report.schema.json` | Local cleanroom contract, 2026-07-13 | No-native comparison evidence for regenerated and reviewed descriptor manifests. |
 | `contracts/aex/render_parameter_gate_report.schema.json` | Local cleanroom contract, 2026-07-13 | Pre-dispatch decision report; this revision proves that no native process starts. |
 | `contracts/aex/parameterized_classic_render_report.schema.json` | Local cleanroom contract, 2026-07-13 | Profile-neutral fixed-hash isolated execution report with descriptor-bound worker echoes. |
-| `contracts/aex/parameterized_smartfx_render_report.schema.json` | Local cleanroom contract, 2026-07-13 | Profile-neutral Smart PreRender/Render report with descriptor-bound worker echoes. |
+| `contracts/aex/parameterized_smartfx_render_report.schema.json` | Local cleanroom contract, 2026-07-13 | Profile-neutral Smart PreRender/Render report with descriptor-bound parameter and host-context echoes. |
 | `contracts/aex/worker_capability_report.schema.json` | `imports/aviutlas-rust-contracts/analysis/AEX_WORKER_CAPABILITY_REPORT_SCHEMA_2026-05-31.json` | Capability report vocabulary for future worker results and compatibility claims. |
 | `contracts/aex/loader_readiness_gate.schema.json` | `imports/aviutlas-rust-contracts/analysis/AEX_LOADER_READINESS_GATE_SCHEMA_2026-06-03.json` | Final readiness gate contract that keeps native loading closed. |
 | `contracts/aex/image_probe_allowlist.example.json` | `imports/aviutlas-rust-contracts/analysis/AEX_IMAGE_PROBE_ALLOWLIST.example.json` | Sanitized example. Local absolute plugin paths from the source file are replaced with placeholders. |

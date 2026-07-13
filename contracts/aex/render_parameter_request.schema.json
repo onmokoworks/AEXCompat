@@ -2,13 +2,13 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://aexcompat.local/contracts/aex/render_parameter_request.schema.json",
   "schema_name": "AEXCompat render parameter request schema",
-  "schema_version": 3,
+  "schema_version": 4,
   "title": "AEXCompat render parameter request",
   "type": "object",
   "additionalProperties": false,
   "required": ["schema_version", "plugin_id", "assignments"],
   "properties": {
-    "schema_version": {"enum": [2, 3]},
+    "schema_version": {"enum": [2, 3, 4]},
     "plugin_id": {"type": "string", "pattern": "^[a-z][a-z0-9_-]{0,63}$"},
     "assignments": {
       "type": "object",
@@ -19,6 +19,25 @@
           {"type": "number"},
           {"$ref": "#/$defs/color"}
         ]
+      }
+    },
+    "host_context": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mask_scene"],
+      "properties": {
+        "mask_scene": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["masks"],
+          "properties": {
+            "masks": {
+              "type": "array",
+              "maxItems": 8,
+              "items": {"$ref": "#/$defs/mask"}
+            }
+          }
+        }
       }
     }
   },
@@ -32,6 +51,11 @@
           }
         }
       }
+    },
+    {
+      "if": {"properties": {"schema_version": {"const": 4}}},
+      "then": {"required": ["host_context"]},
+      "else": {"not": {"required": ["host_context"]}}
     }
   ],
   "$defs": {
@@ -44,6 +68,29 @@
         "red": {"type": "integer", "minimum": 0, "maximum": 255},
         "green": {"type": "integer", "minimum": 0, "maximum": 255},
         "blue": {"type": "integer", "minimum": 0, "maximum": 255}
+      }
+    },
+    "mask": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["open", "vertices"],
+      "properties": {
+        "open": {"const": false},
+        "vertices": {
+          "type": "array",
+          "minItems": 3,
+          "maxItems": 64,
+          "items": {"$ref": "#/$defs/point"}
+        }
+      }
+    },
+    "point": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["x", "y"],
+      "properties": {
+        "x": {"type": "number", "minimum": -32768, "maximum": 32768},
+        "y": {"type": "number", "minimum": -32768, "maximum": 32768}
       }
     }
   }

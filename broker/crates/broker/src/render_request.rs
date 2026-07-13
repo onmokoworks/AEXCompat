@@ -1,5 +1,5 @@
 use crate::fixture_profiles::maskoffset::{
-    mask_scene_argb8_hash, rectangle_mask_argb8_hash, source_argb8_hash,
+    mask_scene_argb8_hash, polygon_mask_argb8_hash, rectangle_mask_argb8_hash, source_argb8_hash,
 };
 use crate::fixture_profiles::scattermap::expected_argb8_hash;
 use crate::fixture_profiles::{ParameterizedRenderAdapter, RegisteredProfile};
@@ -26,6 +26,33 @@ struct Request {
     schema_version: u32,
     plugin_id: String,
     assignments: Assignments,
+    host_context: Option<HostContext>,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct HostContext {
+    mask_scene: MaskScene,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct MaskScene {
+    masks: Vec<MaskShape>,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct MaskShape {
+    open: bool,
+    vertices: Vec<MaskPoint>,
+}
+
+#[derive(Clone, Copy, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct MaskPoint {
+    x: f64,
+    y: f64,
 }
 
 struct Assignments(BTreeMap<String, ParameterValue>);
@@ -80,13 +107,15 @@ fn evaluate(
     request: &Request,
     profile: &PluginProfile,
 ) -> io::Result<(ValidatedAssignments, usize, Vec<ValidationError>)> {
-    if !matches!(request.schema_version, 2 | 3)
+    if !matches!(request.schema_version, 2 | 3 | 4)
         || request.schema_version == 2
             && request
                 .assignments
                 .0
                 .values()
                 .any(|value| !matches!(value, ParameterValue::Numeric(_)))
+        || request.schema_version == 4 && request.host_context.is_none()
+        || request.schema_version != 4 && request.host_context.is_some()
     {
         return Err(invalid("render request identity mismatch"));
     }
@@ -95,6 +124,57 @@ fn evaluate(
         validate_assignments(profile, &request.assignments.0).map_err(invalid)?;
     let effective = apply_defaults(profile, &validated);
     Ok((effective, assignment_count, errors))
+}
+
+fn validate_mask_context(context: &HostContext) -> io::Result<(usize, usize)> {
+    if context.mask_scene.masks.len() > 8 {
+        return Err(invalid("host mask count exceeds 8"));
+    }
+    let mut vertex_count = 0usize;
+    for mask in &context.mask_scene.masks {
+        if mask.open {
+            return Err(invalid("open host masks are not enabled in request v4"));
+        }
+        if !(3..=64).contains(&mask.vertices.len()) {
+            return Err(invalid("host mask vertex count must be 3 through 64"));
+        }
+        vertex_count += mask.vertices.len();
+        if vertex_count > 128 {
+            return Err(invalid("host mask total vertex count exceeds 128"));
+        }
+        if mask.vertices.iter().any(|point| {
+            !point.x.is_finite()
+                || !point.y.is_finite()
+                || point.x < -32768.0
+                || point.x > 32768.0
+                || point.y < -32768.0
+                || point.y > 32768.0
+        }) {
+            return Err(invalid("host mask coordinate is outside bounded range"));
+        }
+    }
+    Ok((context.mask_scene.masks.len(), vertex_count))
+}
+
+fn encode_mask_context(context: &HostContext) -> io::Result<String> {
+    validate_mask_context(context)?;
+    let mut encoded = String::from("v1|");
+    for (mask_index, mask) in context.mask_scene.masks.iter().enumerate() {
+        if mask_index != 0 {
+            encoded.push(';');
+        }
+        encoded.push_str("0:");
+        for (vertex_index, point) in mask.vertices.iter().enumerate() {
+            if vertex_index != 0 {
+                encoded.push('/');
+            }
+            encoded.push_str(&format!("{},{}", point.x, point.y));
+        }
+    }
+    if encoded.len() > 8192 {
+        return Err(invalid("host mask transport exceeds 8192 bytes"));
+    }
+    Ok(encoded)
 }
 
 fn expected_hash(adapter: ParameterizedRenderAdapter, effective: &ValidatedAssignments) -> String {
@@ -211,6 +291,9 @@ pub fn run(repository: &Path, request_path: &Path, output_path: &Path) -> io::Re
     }
     let request: Request = serde_json::from_slice(&fs::read(request_path)?)
         .map_err(|error| invalid(format!("invalid render request: {error}")))?;
+    if request.host_context.is_some() {
+        return Err(invalid("host context requires SmartFX request execution"));
+    }
     let profile = crate::fixture_profiles::find(&request.plugin_id)
         .ok_or_else(|| invalid("unknown plugin profile"))?;
     let manifest = descriptors(repository, &request.plugin_id, profile)?;
@@ -250,6 +333,9 @@ pub fn execute(repository: &Path, request_path: &Path, output_path: &Path) -> io
     }
     let request: Request = serde_json::from_slice(&fs::read(request_path)?)
         .map_err(|error| invalid(format!("invalid render request: {error}")))?;
+    if request.host_context.is_some() {
+        return Err(invalid("host context is not supported by classic render"));
+    }
     let profile = crate::fixture_profiles::find(&request.plugin_id)
         .ok_or_else(|| invalid("unknown plugin profile"))?;
     let worker_spec = profile
@@ -357,6 +443,16 @@ pub fn execute_smart(
         .ok_or_else(|| invalid("SmartFX render is not supported for plugin profile"))?;
     let manifest = descriptors(repository, &request.plugin_id, profile)?;
     let (effective, assignment_count, errors) = evaluate(&request, &manifest.profile)?;
+    let host_context_counts = request
+        .host_context
+        .as_ref()
+        .map(validate_mask_context)
+        .transpose()?;
+    if request.host_context.is_some() && worker_spec.request_mode != "--smart-mask-request" {
+        return Err(invalid(
+            "profile has no approved host mask context capability",
+        ));
+    }
     if !errors.is_empty() {
         let report = json!({"schema_version":1,"stage":"parameterized_smartfx_render",
             "plugin_id":request.plugin_id,"assignment_count":assignment_count,"accepted":false,
@@ -378,13 +474,36 @@ pub fn execute_smart(
         return Err(invalid("descriptor manifest plugin digest mismatch"));
     }
     let worker = repository.join(worker_spec.executable);
-    let expected = expected_hash(profile.parameterized_render, &effective);
-    let args = [
-        worker_spec.request_mode.to_string(),
+    let expected = if let Some(context) = &request.host_context {
+        let masks = context
+            .mask_scene
+            .masks
+            .iter()
+            .map(|mask| {
+                mask.vertices
+                    .iter()
+                    .map(|point| (point.x, point.y))
+                    .collect()
+            })
+            .collect::<Vec<Vec<_>>>();
+        polygon_mask_argb8_hash(&effective, &masks)
+            .ok_or_else(|| invalid("host mask context has no independent oracle"))?
+    } else {
+        expected_hash(profile.parameterized_render, &effective)
+    };
+    let mut args = vec![
+        if request.host_context.is_some() {
+            "--smart-mask-context-request".to_string()
+        } else {
+            worker_spec.request_mode.to_string()
+        },
         approved.plugin_path.to_string_lossy().into_owned(),
         approved.sha256.to_ascii_lowercase(),
         encode_worker_payload(&manifest.profile, &effective).map_err(invalid)?,
     ];
+    if let Some(context) = &request.host_context {
+        args.push(encode_mask_context(context)?);
+    }
     let mut runs = Vec::new();
     for _ in 0..2 {
         let isolated = run_isolated(&worker, &args, Duration::from_millis(approved.timeout_ms))?;
@@ -400,6 +519,11 @@ pub fn execute_smart(
             && report.get("result_rects_valid") == Some(&Value::Bool(true))
             && report.get("guard_bytes_intact") == Some(&Value::Bool(true))
             && worker_echo_matches(report, &manifest.profile, &effective)
+            && request.host_context.as_ref().is_none_or(|_| {
+                report.get("mask_scene_id").and_then(Value::as_str) == Some("request_v4")
+                    && report.get("mask_count").and_then(Value::as_u64)
+                        == host_context_counts.map(|counts| counts.0 as u64)
+            })
             && report
                 .get("output_sha256")
                 .and_then(Value::as_str)
@@ -416,12 +540,15 @@ pub fn execute_smart(
         "smart_render_error":item.1.get("smart_render_error"),"output_sha256":item.1.get("output_sha256"),
         "result_rects_valid":item.1.get("result_rects_valid"),
         "guard_bytes_intact":item.1.get("guard_bytes_intact"),"request_mode":item.1.get("request_mode"),
+        "mask_scene_id":item.1.get("mask_scene_id"),"mask_count":item.1.get("mask_count"),
         "requested_parameters":item.1.get("requested_parameters")})
     };
     let report = json!({"schema_version":1,"stage":"parameterized_smartfx_render",
         "plugin_id":request.plugin_id,"receipt_id":approved.receipt_id,
         "fixture_sha256":approved.sha256.to_ascii_uppercase(),"assignment_count":assignment_count,
         "accepted":true,"native_process_started":true,"parameters":effective,
+        "host_context_mask_count":host_context_counts.map(|counts| counts.0),
+        "host_context_vertex_count":host_context_counts.map(|counts| counts.1),
         "expected_oracle_sha256":expected,
         "run_1":summarize(&runs[0]),"run_2":summarize(&runs[1]),"deterministic":deterministic,
         "broker_survived":true,"passed":passed});
@@ -740,6 +867,70 @@ mod tests {
         let root = repository();
         let output = root.join("target/smart-mask-scene-results/unknown.json");
         assert!(execute_smart_mask_scene(&root, "maskoffset", "arbitrary", &output).is_err());
+        assert!(!output.exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn request_v4_mask_context_is_bounded_and_transport_stable() {
+        let request: Request = serde_json::from_str(
+            r#"{"schema_version":4,"plugin_id":"maskoffset","assignments":{},"host_context":{"mask_scene":{"masks":[{"open":false,"vertices":[{"x":2,"y":2},{"x":10,"y":2},{"x":10,"y":8},{"x":2,"y":8}]}]}}}"#,
+        )
+        .unwrap();
+        let context = request.host_context.as_ref().unwrap();
+        assert_eq!(validate_mask_context(context).unwrap(), (1, 4));
+        assert_eq!(
+            encode_mask_context(context).unwrap(),
+            "v1|0:2,2/10,2/10,8/2,8"
+        );
+
+        let profile = PluginProfile {
+            id: "maskoffset".into(),
+            descriptors: vec![],
+        };
+        assert!(evaluate(&request, &profile).is_ok());
+    }
+
+    #[test]
+    fn mask_context_rejects_open_excess_and_legacy_injection() {
+        let open: Request = serde_json::from_str(
+            r#"{"schema_version":4,"plugin_id":"maskoffset","assignments":{},"host_context":{"mask_scene":{"masks":[{"open":true,"vertices":[{"x":0,"y":0},{"x":1,"y":0},{"x":0,"y":1}]}]}}}"#,
+        )
+        .unwrap();
+        assert!(validate_mask_context(open.host_context.as_ref().unwrap()).is_err());
+
+        let legacy: Request = serde_json::from_str(
+            r#"{"schema_version":3,"plugin_id":"maskoffset","assignments":{},"host_context":{"mask_scene":{"masks":[]}}}"#,
+        )
+        .unwrap();
+        let profile = PluginProfile {
+            id: "maskoffset".into(),
+            descriptors: vec![],
+        };
+        assert!(evaluate(&legacy, &profile).is_err());
+
+        let excessive = HostContext {
+            mask_scene: MaskScene {
+                masks: vec![MaskShape {
+                    open: false,
+                    vertices: vec![MaskPoint { x: 0.0, y: 0.0 }; 65],
+                }],
+            },
+        };
+        assert!(validate_mask_context(&excessive).is_err());
+    }
+
+    #[test]
+    fn host_context_requires_an_approved_profile_capability_before_native_lookup() {
+        let root = repository();
+        let request = root.join("target/render-requests/scattermap-context.json");
+        let output = root.join("target/smart-request-render-results/scattermap-context.json");
+        fs::write(
+            &request,
+            br#"{"schema_version":4,"plugin_id":"scattermap","assignments":{},"host_context":{"mask_scene":{"masks":[]}}}"#,
+        )
+        .unwrap();
+        assert!(execute_smart(&root, &request, &output).is_err());
         assert!(!output.exists());
         fs::remove_dir_all(root).unwrap();
     }
