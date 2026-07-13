@@ -2,6 +2,8 @@
 pub mod selftest;
 #[cfg(windows)]
 pub mod windows_process;
+#[cfg(windows)]
+pub mod l1;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ExitClassification {

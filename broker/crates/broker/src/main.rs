@@ -3,8 +3,8 @@ fn main() {
     use aexcompat_broker::selftest::{run, Workers};
     use std::path::{Component, PathBuf};
     let args: Vec<String> = std::env::args().collect();
-    if args.len() != 3 || args[1] != "selftest" || !args[2].ends_with(".json") {
-        eprintln!("usage: broker selftest <create-new-json-output>");
+    if args.len() != 3 || !args[2].ends_with(".json") {
+        eprintln!("usage: broker <selftest|l1-scattermap> <create-new-json-output>");
         std::process::exit(2);
     }
     let executable = std::env::current_exe().expect("current executable");
@@ -14,6 +14,16 @@ fn main() {
         .and_then(|p| p.parent())
         .and_then(|p| p.parent())
         .expect("repository root");
+    if args[1] == "l1-scattermap" {
+        let worker = repository.join("target/minihost-build/aex_l1_worker.exe");
+        let passed = aexcompat_broker::l1::run(repository, &worker, "scattermap", &PathBuf::from(&args[2]))
+            .expect("L1 broker run");
+        std::process::exit(if passed { 0 } else { 1 });
+    }
+    if args[1] != "selftest" {
+        eprintln!("unknown broker operation");
+        std::process::exit(2);
+    }
     let output_root = repository.join("target").join("broker-selftest");
     std::fs::create_dir_all(&output_root).expect("create broker selftest root");
     let requested = PathBuf::from(&args[2]);

@@ -54,6 +54,17 @@ class NativeCodeGuardTests(unittest.TestCase):
         if value is not None:
             self.assertIn(value, {"0", "1"})
 
+    def test_l1_broker_uses_single_private_allowlist_and_id_only(self):
+        source = (BROKER_ROOT / "crates" / "broker" / "src" / "l1.rs").read_text(encoding="utf-8")
+        self.assertIn("active.local.json", source)
+        self.assertIn("entries.len() != 1", source)
+        self.assertIn("entry.id != id", source)
+        self.assertIn("metadata.len() != entry.byte_size", source)
+        self.assertIn("create_new(true)", source)
+        main = (BROKER_ROOT / "crates" / "broker" / "src" / "main.rs").read_text(encoding="utf-8")
+        self.assertIn('"scattermap"', main)
+        self.assertNotIn("plugin-path", main)
+
 
 if __name__ == "__main__":
     unittest.main()

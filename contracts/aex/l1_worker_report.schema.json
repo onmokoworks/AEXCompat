@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://onmokoworks.local/aexcompat/l1_worker_report.schema.json",
+  "schema_name": "AEXCompat L1 worker report schema",
+  "schema_version": 1,
+  "title": "AEXCompat L1 worker report",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "stage", "status", "identity_verified",
+    "module_loaded", "entrypoint_resolved", "selectors_executed",
+    "render_performed", "win32_error"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "stage": { "const": "L1" },
+    "status": {
+      "enum": [
+        "invalid_request", "identity_read_failed", "identity_mismatch",
+        "dll_policy_failed", "load_failed", "entrypoint_missing",
+        "loaded_and_unloaded"
+      ]
+    },
+    "identity_verified": { "type": "boolean" },
+    "module_loaded": { "type": "boolean" },
+    "entrypoint_resolved": { "type": "boolean" },
+    "selectors_executed": { "const": false },
+    "render_performed": { "const": false },
+    "win32_error": { "type": "integer", "minimum": 0 }
+  }
+}
