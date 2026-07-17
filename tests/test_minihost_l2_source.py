@@ -800,6 +800,26 @@ class MinihostL2SourceTests(unittest.TestCase):
         self.assertIn('"last_seh_selector\\\":\\\""', text)
         self.assertIn('"last_seh_error\\\":"', text)
 
+    def test_all_macro_effect_calls_share_the_audited_seh_boundary(self):
+        text = SOURCE.read_text(encoding="utf-8")
+        self.assertIn("int32_t guarded_effect_call(EffectEntry entry", text)
+        self.assertIn("return invoke_entry_seh(entry, command, input, output, params, world, extra,", text)
+        self.assertIn("#define entry(...) guarded_effect_call(entry, __VA_ARGS__)", text)
+        self.assertNotIn("#define entry(...) audited_effect_call(entry, __VA_ARGS__)", text)
+
+    def test_effect_selector_diagnostics_cover_hosted_selector_families(self):
+        text = SOURCE.read_text(encoding="utf-8")
+        for name in (
+            "SEQUENCE_SETUP", "SEQUENCE_RESETUP", "SEQUENCE_FLATTEN",
+            "SEQUENCE_SETDOWN", "DO_DIALOG", "FRAME_SETUP", "RENDER",
+            "FRAME_SETDOWN", "USER_CHANGED_PARAM", "UPDATE_PARAMS_UI", "EVENT",
+            "GET_EXTERNAL_DEPENDENCIES", "QUERY_DYNAMIC_FLAGS", "AUDIO_RENDER",
+            "AUDIO_SETUP", "AUDIO_SETDOWN", "ARBITRARY_CALLBACK",
+            "SMART_PRE_RENDER", "SMART_RENDER", "GET_FLATTENED_SEQUENCE_DATA",
+            "SMART_RENDER_GPU", "GPU_DEVICE_SETUP", "GPU_DEVICE_SETDOWN",
+        ):
+            self.assertIn(f'return "{name}"', text)
+
     def test_params_only_discovery_does_not_require_about(self):
         text = SOURCE.read_text(encoding="utf-8")
         self.assertIn("g_skip_about =", text)

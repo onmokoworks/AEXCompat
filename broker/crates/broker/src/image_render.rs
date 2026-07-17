@@ -25,6 +25,8 @@ const MAX_INTERNAL_IMAGE_BYTES: u64 = MAX_PIXELS * 16;
 const MAX_PARAMETERS: u32 = 1024;
 const INTERACTIVE_RENDER_TIMEOUT_MS: u64 = 30_000;
 const MAX_STAGE_EVENTS: usize = 32;
+const MAX_MISSING_SUITES: usize = 16;
+const MAX_SUITE_NAME_LEN: usize = 96;
 const STALE_IMAGE_TRANSPORT_AGE: Duration = Duration::from_secs(15 * 60);
 const L2_WORKER_TRUST: WorkerTrust = WorkerTrust {
     expected_sha256: [
@@ -249,8 +251,17 @@ fn worker_diagnostics(
     let mut active_stages: Vec<String> = Vec::new();
     let mut failure_stage: Option<String> = None;
     let mut last_completed_stage: Option<String> = None;
+    let mut missing_suites = Vec::new();
+    let mut seen_missing_suites = BTreeSet::new();
 
     for line in stderr.lines() {
+        if missing_suites.len() < MAX_MISSING_SUITES {
+            if let Some((name, version)) = missing_suite_event(line.trim()) {
+                if seen_missing_suites.insert((name.clone(), version)) {
+                    missing_suites.push(json!({"name": name, "version": version}));
+                }
+            }
+        }
         let Some(body) = line.trim().strip_prefix("stage:") else {
             continue;
         };
@@ -306,7 +317,23 @@ fn worker_diagnostics(
         "active_stage": active_stage,
         "failure_stage": failure_stage,
         "last_completed_stage": last_completed_stage,
+        "missing_suites": missing_suites,
     })
+}
+
+fn missing_suite_event(line: &str) -> Option<(String, i32)> {
+    let body = line.strip_prefix("stage:suite_acquire_failed name=")?;
+    let (name, version) = body.rsplit_once(" version=")?;
+    if name.is_empty()
+        || name.len() > MAX_SUITE_NAME_LEN
+        || !name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b' ' | b'.' | b'_' | b'-'))
+    {
+        return None;
+    }
+    let version = version.parse::<i32>().ok().filter(|value| *value > 0)?;
+    Some((name.to_owned(), version))
 }
 
 fn diagnostics_contains_gpu_stage(diagnostics: &Value) -> bool {
@@ -4999,6 +5026,38 @@ mod tests {
             MAX_STAGE_EVENTS
         );
         assert_eq!(diagnostics["stderr_truncated"], true);
+    }
+
+    #[test]
+    fn worker_diagnostics_extract_bounded_unique_missing_suites() {
+        let mut trace = String::from(
+            "stage:suite_acquire_failed name=PF World Suite version=2\n\
+             stage:suite_acquire_failed name=PF World Suite version=2\n\
+             stage:suite_acquire_failed name=C:\\private\\suite version=1\n\
+             stage:suite_acquire_failed name=Bad Suite version=-1\n",
+        );
+        for index in 0..(MAX_MISSING_SUITES + 3) {
+            trace.push_str(&format!(
+                "stage:suite_acquire_failed name=Safe Suite {index} version=1\n"
+            ));
+        }
+        trace.push_str(&format!(
+            "stage:suite_acquire_failed name={} version=1\n",
+            "A".repeat(MAX_SUITE_NAME_LEN + 1)
+        ));
+
+        let diagnostics = worker_diagnostics(&trace, false, "nonzero_exit", 1, 2);
+        let suites = diagnostics["missing_suites"].as_array().unwrap();
+        assert_eq!(suites.len(), MAX_MISSING_SUITES);
+        assert_eq!(suites[0], json!({"name": "PF World Suite", "version": 2}));
+        assert_eq!(
+            suites
+                .iter()
+                .filter(|suite| suite["name"] == "PF World Suite")
+                .count(),
+            1
+        );
+        assert!(!diagnostics.to_string().contains("private"));
     }
 
     #[test]

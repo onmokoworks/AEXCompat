@@ -405,6 +405,29 @@ const char* effect_selector_name(int32_t command) {
     case kGlobalSetup: return "GLOBAL_SETUP";
     case kGlobalSetdown: return "GLOBAL_SETDOWN";
     case kParamsSetup: return "PARAMS_SETUP";
+    case kSequenceSetup: return "SEQUENCE_SETUP";
+    case kSequenceResetup: return "SEQUENCE_RESETUP";
+    case kSequenceFlatten: return "SEQUENCE_FLATTEN";
+    case kSequenceSetdown: return "SEQUENCE_SETDOWN";
+    case kDoDialog: return "DO_DIALOG";
+    case kFrameSetup: return "FRAME_SETUP";
+    case kRender: return "RENDER";
+    case kFrameSetdown: return "FRAME_SETDOWN";
+    case kUserChangedParam: return "USER_CHANGED_PARAM";
+    case kUpdateParamsUi: return "UPDATE_PARAMS_UI";
+    case kEvent: return "EVENT";
+    case kGetExternalDependencies: return "GET_EXTERNAL_DEPENDENCIES";
+    case kQueryDynamicFlags: return "QUERY_DYNAMIC_FLAGS";
+    case kAudioRender: return "AUDIO_RENDER";
+    case kAudioSetup: return "AUDIO_SETUP";
+    case kAudioSetdown: return "AUDIO_SETDOWN";
+    case kArbitraryCallback: return "ARBITRARY_CALLBACK";
+    case kSmartPreRender: return "SMART_PRE_RENDER";
+    case kSmartRender: return "SMART_RENDER";
+    case kGetFlattenedSequenceData: return "GET_FLATTENED_SEQUENCE_DATA";
+    case kSmartRenderGpu: return "SMART_RENDER_GPU";
+    case kGpuDeviceSetup: return "GPU_DEVICE_SETUP";
+    case kGpuDeviceSetdown: return "GPU_DEVICE_SETDOWN";
     default: return "UNKNOWN";
   }
 }
@@ -454,8 +477,15 @@ int32_t invoke_entry_seh(EffectEntry entry, int32_t command, void* input,
   }
 }
 
+int32_t guarded_effect_call(EffectEntry entry, int32_t command, void* input,
+                            void* output, void** params, void* world, void* extra) {
+  uint32_t exception_code{};
+  return invoke_entry_seh(entry, command, input, output, params, world, extra,
+                          &exception_code);
+}
+
 // Keep every direct EffectMain selector call on the same audited boundary.
-#define entry(...) audited_effect_call(entry, __VA_ARGS__)
+#define entry(...) guarded_effect_call(entry, __VA_ARGS__)
 
 struct ParamRecord {
   int32_t index{};
@@ -8959,6 +8989,54 @@ int32_t __cdecl param_key_index_to_time(void* effect_ref, int32_t index, int32_t
   return 0;
 }
 
+bool valid_obsolete_param_state(void* effect_ref, const PfState* state) {
+  if (effect_ref != &g_effect || !state) return false;
+  PfStateToken token{};
+  std::memcpy(token.data(), state, token.size());
+  std::lock_guard<std::mutex> lock(g_pf_state_registry_mutex);
+  const auto found = g_pf_state_registry.find(token);
+  return g_pf_state_effect_live && found != g_pf_state_registry.end() &&
+      found->second.owner == effect_ref &&
+      found->second.generation == g_pf_state_effect_generation;
+}
+
+int32_t __cdecl get_current_param_state_obsolete(void* effect_ref, PfState* state) {
+  return get_current_param_state(effect_ref, -1, nullptr, nullptr, state);
+}
+
+int32_t __cdecl has_param_changed_obsolete(void* effect_ref, const PfState* state,
+                                           int32_t, uint8_t* changed) {
+  if (!changed || !valid_obsolete_param_state(effect_ref, state))
+    return kPfBadCallbackParam;
+  *changed = 1;
+  return 0;
+}
+
+int32_t __cdecl have_inputs_changed_over_time_span_obsolete(
+    void* effect_ref, const PfState* state, const PfTime* start,
+    const PfTime* duration, uint8_t* changed) {
+  if (!changed || ((!start) != (!duration)) ||
+      (start && (start->scale == 0 || duration->scale == 0)) ||
+      !valid_obsolete_param_state(effect_ref, state))
+    return kPfBadCallbackParam;
+  *changed = 1;
+  return 0;
+}
+
+struct ParamUtilsSuite1 {
+  decltype(&update_param_ui) PF_UpdateParamUI;
+  decltype(&get_current_param_state_obsolete) PF_GetCurrentStateObsolete;
+  decltype(&has_param_changed_obsolete) PF_HasParamChangedObsolete;
+  decltype(&have_inputs_changed_over_time_span_obsolete)
+      PF_HaveInputsChangedOverTimeSpanObsolete;
+  decltype(&is_identical_param_checkout) PF_IsIdenticalCheckout;
+  decltype(&find_param_keyframe_time) PF_FindKeyframeTime;
+  decltype(&get_param_keyframe_count) PF_GetKeyframeCount;
+  decltype(&checkout_param_keyframe) PF_CheckoutKeyframe;
+  decltype(&checkin_param_keyframe) PF_CheckinKeyframe;
+  decltype(&param_key_index_to_time) PF_KeyIndexToTime;
+};
+
 struct ParamUtilsSuite3 {
   decltype(&update_param_ui) PF_UpdateParamUI;
   decltype(&get_current_param_state) PF_GetCurrentState;
@@ -8971,6 +9049,13 @@ struct ParamUtilsSuite3 {
   decltype(&param_key_index_to_time) PF_KeyIndexToTime;
 };
 static_assert(sizeof(PfState) == 16);
+static_assert(sizeof(ParamUtilsSuite1) == 10 * sizeof(void*));
+static_assert(offsetof(ParamUtilsSuite1, PF_UpdateParamUI) == 0 * sizeof(void*));
+static_assert(offsetof(ParamUtilsSuite1, PF_GetCurrentStateObsolete) == 1 * sizeof(void*));
+static_assert(offsetof(ParamUtilsSuite1, PF_HasParamChangedObsolete) == 2 * sizeof(void*));
+static_assert(offsetof(ParamUtilsSuite1, PF_HaveInputsChangedOverTimeSpanObsolete) ==
+              3 * sizeof(void*));
+static_assert(offsetof(ParamUtilsSuite1, PF_KeyIndexToTime) == 9 * sizeof(void*));
 static_assert(sizeof(ParamUtilsSuite3) == 9 * sizeof(void*));
 static_assert(offsetof(ParamUtilsSuite3, PF_UpdateParamUI) == 0 * sizeof(void*));
 static_assert(offsetof(ParamUtilsSuite3, PF_GetCurrentState) == 1 * sizeof(void*));
@@ -8979,6 +9064,10 @@ static_assert(offsetof(ParamUtilsSuite3, PF_KeyIndexToTime) == 8 * sizeof(void*)
 PointParamSuite g_point_param_suite{&floating_point_from_point};
 AngleParamSuite g_angle_param_suite{&floating_point_from_angle};
 PfColorParamSuite1 g_color_param_suite1{&floating_point_from_color};
+ParamUtilsSuite1 g_param_utils_suite1{&update_param_ui, &get_current_param_state_obsolete,
+    &has_param_changed_obsolete, &have_inputs_changed_over_time_span_obsolete,
+    &is_identical_param_checkout, &find_param_keyframe_time, &get_param_keyframe_count,
+    &checkout_param_keyframe, &checkin_param_keyframe, &param_key_index_to_time};
 ParamUtilsSuite3 g_param_utils_suite{&update_param_ui, &get_current_param_state,
     &are_param_states_identical, &is_identical_param_checkout, &find_param_keyframe_time,
     &get_param_keyframe_count, &checkout_param_keyframe, &checkin_param_keyframe,
@@ -11968,6 +12057,11 @@ int32_t __cdecl acquire_suite(const char* name, int32_t version, const void** su
   }
   if (name && std::strcmp(name, "PF Param Utils Suite") == 0 && version == 3) {
     *suite = &g_param_utils_suite;
+    record_suite_acquire(name, version);
+    return 0;
+  }
+  if (name && std::strcmp(name, "PF Param Utils Suite") == 0 && version == 2) {
+    *suite = &g_param_utils_suite1;
     record_suite_acquire(name, version);
     return 0;
   }
@@ -19085,6 +19179,31 @@ bool verify_pf_param_utils_suite3() {
       get_current_param_state(&g_effect, 1, &start, &duration, &first) == 0 &&
       get_current_param_state(&g_effect, 1, &start, &duration, &second) == 0 &&
       are_param_states_identical(&g_effect, &first, &second, &same) == 0 && same == 1;
+  const void* acquired_v1{};
+  PfState obsolete_state{};
+  uint8_t obsolete_changed = 0;
+  ok = ok && acquire_suite("PF Param Utils Suite", 2, &acquired_v1) == 0 &&
+      acquired_v1 == &g_param_utils_suite1 && acquired_v1 != acquired &&
+      std::all_of(reinterpret_cast<void* const*>(&g_param_utils_suite1),
+                  reinterpret_cast<void* const*>(&g_param_utils_suite1) + 10,
+                  [](const void* slot) { return slot != nullptr; }) &&
+      g_param_utils_suite1.PF_GetCurrentStateObsolete(&g_effect, &obsolete_state) == 0 &&
+      g_param_utils_suite1.PF_HasParamChangedObsolete(
+          &g_effect, &obsolete_state, 999, &obsolete_changed) == 0 &&
+      obsolete_changed == 1;
+  obsolete_changed = 0;
+  ok = ok && g_param_utils_suite1.PF_HaveInputsChangedOverTimeSpanObsolete(
+                 &g_effect, &obsolete_state, &start, &duration, &obsolete_changed) == 0 &&
+      obsolete_changed == 1;
+  PfState foreign_state{{9, 8, 7, 6}};
+  obsolete_changed = 0x5a;
+  ok = ok && g_param_utils_suite1.PF_HasParamChangedObsolete(
+                 &g_effect, &foreign_state, 1, &obsolete_changed) == kPfBadCallbackParam &&
+      obsolete_changed == 0x5a &&
+      g_param_utils_suite1.PF_HaveInputsChangedOverTimeSpanObsolete(
+          nullptr, &obsolete_state, nullptr, nullptr, &obsolete_changed) ==
+          kPfBadCallbackParam && obsolete_changed == 0x5a &&
+      release_suite("PF Param Utils Suite", 2) == 0;
   write<int32_t>(g_params[0].raw, 56, 43);
   ok = ok && get_current_param_state(&g_effect, 1, &start, &duration, &changed) == 0 &&
       are_param_states_identical(&g_effect, &first, &changed, &same) == 0 && same == 0 &&

@@ -315,7 +315,17 @@ struct FailureDiagnostics {
     exit_code: Option<i64>,
     elapsed_ms: Option<u64>,
     selector_error: Option<i64>,
+    missing_suites: Vec<MissingSuite>,
+    last_seh_selector: Option<String>,
+    last_seh_error: Option<i64>,
+    last_seh_exception_code: Option<u64>,
     stages: Vec<String>,
+}
+
+#[derive(Debug, PartialEq)]
+struct MissingSuite {
+    name: String,
+    version: i32,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -738,6 +748,10 @@ impl Default for FailureDiagnostics {
             exit_code: None,
             elapsed_ms: None,
             selector_error: None,
+            missing_suites: Vec::new(),
+            last_seh_selector: None,
+            last_seh_error: None,
+            last_seh_exception_code: None,
             stages: Vec::new(),
         }
     }
@@ -977,6 +991,37 @@ fn failure_diagnostics(message: &str) -> Option<FailureDiagnostics> {
         .as_ref()
         .and_then(|value| value["image_render_supported"].as_bool())
         == Some(false);
+    let missing_suites = diagnostics["missing_suites"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|suite| {
+            let name = suite["name"].as_str()?;
+            let version = i32::try_from(suite["version"].as_i64()?).ok()?;
+            valid_suite_name(name)
+                .then(|| MissingSuite {
+                    name: name.to_owned(),
+                    version,
+                })
+                .filter(|suite| suite.version > 0)
+        })
+        .fold(Vec::new(), |mut suites, suite| {
+            if suites.len() < 16 && !suites.contains(&suite) {
+                suites.push(suite);
+            }
+            suites
+        });
+    let last_seh_selector = report
+        .as_ref()
+        .and_then(|value| value["last_seh_selector"].as_str())
+        .filter(|value| {
+            !value.is_empty()
+                && value.len() <= 32
+                && value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_uppercase() || byte == b'_')
+        })
+        .map(str::to_owned);
     Some(FailureDiagnostics {
         classification: if unsupported_media_type {
             "unsupported_media_type".to_owned()
@@ -1006,8 +1051,26 @@ fn failure_diagnostics(message: &str) -> Option<FailureDiagnostics> {
         } else {
             selector_error
         },
+        missing_suites,
+        last_seh_selector,
+        last_seh_error: report
+            .as_ref()
+            .and_then(|value| value["last_seh_error"].as_i64())
+            .filter(|value| i32::try_from(*value).is_ok()),
+        last_seh_exception_code: report
+            .as_ref()
+            .and_then(|value| value["last_seh_exception_code"].as_u64())
+            .filter(|value| u32::try_from(*value).is_ok()),
         stages: completed_stages(Some(&diagnostics)),
     })
+}
+
+fn valid_suite_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 96
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b' ' | b'.' | b'_' | b'-'))
 }
 
 fn matrix_error_summary(message: &str) -> String {
@@ -3423,6 +3486,26 @@ impl eframe::App for HarnessApp {
                             .map(|value| value.to_string())
                             .unwrap_or_else(|| "unknown".into()),
                     ));
+                    if let Some(selector) = &diagnostics.last_seh_selector {
+                        ui.monospace(format!(
+                            "seh_selector={} seh_error={} exception_code={}",
+                            selector,
+                            diagnostics
+                                .last_seh_error
+                                .map(|value| value.to_string())
+                                .unwrap_or_else(|| "unknown".into()),
+                            diagnostics
+                                .last_seh_exception_code
+                                .map(|value| format!("0x{value:08X}"))
+                                .unwrap_or_else(|| "unknown".into()),
+                        ));
+                    }
+                    if !diagnostics.missing_suites.is_empty() {
+                        ui.label(RichText::new("Missing suites").strong());
+                        for suite in &diagnostics.missing_suites {
+                            ui.monospace(format!("suite:{}@{}", suite.name, suite.version));
+                        }
+                    }
                     ui.collapsing("Completed selector timeline", |ui| {
                         for stage in &diagnostics.stages {
                             ui.monospace(stage);
@@ -4817,6 +4900,42 @@ mod tests {
         assert_eq!(diagnostics.selector_error, Some(25));
         assert_eq!(diagnostics.stages.len(), 2);
         assert!(diagnostics.stages[1].contains("25"));
+    }
+
+    #[test]
+    fn failure_diagnostics_keep_only_bounded_suites_and_seh_fields() {
+        let message = concat!(
+            r#"failed: diagnostics={"classification":"crashed","missing_suites":[{"name":"PF World Suite","version":2},{"name":"PF World Suite","version":2},{"name":"C:\\private\\suite","version":1},{"name":"Bad","version":-1}]}, report="#,
+            r#"{"last_seh_selector":"SMART_RENDER_GPU","last_seh_error":512,"last_seh_exception_code":3221225477}"#,
+        );
+        let diagnostics = failure_diagnostics(message).unwrap();
+        assert_eq!(
+            diagnostics.missing_suites,
+            vec![MissingSuite {
+                name: "PF World Suite".into(),
+                version: 2
+            }]
+        );
+        assert_eq!(
+            diagnostics.last_seh_selector.as_deref(),
+            Some("SMART_RENDER_GPU")
+        );
+        assert_eq!(diagnostics.last_seh_error, Some(512));
+        assert_eq!(diagnostics.last_seh_exception_code, Some(0xC0000005));
+    }
+
+    #[test]
+    fn failure_diagnostics_reject_unbounded_seh_and_suite_values() {
+        let message = format!(
+            "failed: diagnostics={{\"classification\":\"crashed\",\"missing_suites\":[{{\"name\":\"{}\",\"version\":1}}]}}, report={{\"last_seh_selector\":\"{}\",\"last_seh_error\":4294967296,\"last_seh_exception_code\":4294967296}}",
+            "A".repeat(97),
+            "A".repeat(33),
+        );
+        let diagnostics = failure_diagnostics(&message).unwrap();
+        assert!(diagnostics.missing_suites.is_empty());
+        assert_eq!(diagnostics.last_seh_selector, None);
+        assert_eq!(diagnostics.last_seh_error, None);
+        assert_eq!(diagnostics.last_seh_exception_code, None);
     }
 
     #[test]
