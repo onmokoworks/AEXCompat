@@ -3,12 +3,20 @@
 use eframe::egui::{self, Color32, RichText};
 use sha2::{Digest, Sha256};
 use std::{
-    fs,
+    fs::{self, OpenOptions},
+    io::{Read, Write},
     path::{Path, PathBuf},
     sync::mpsc::{self, Receiver},
     thread,
     time::{Duration, Instant, SystemTime},
 };
+
+const DIAGNOSTIC_SCHEMA: &str = "aexcompat.harness-diagnostic";
+const DIAGNOSTIC_VERSION: u64 = 1;
+const MAX_DIAGNOSTIC_FILE_BYTES: u64 = 64 * 1024;
+const MAX_DIAGNOSTIC_FILES: usize = 256;
+const MAX_DIAGNOSTIC_TOTAL_BYTES: u64 = 8 * 1024 * 1024;
+const MAX_DIAGNOSTIC_SUMMARY_BYTES: usize = 1024;
 
 const SCATTERMAP_HASH: &str = "223FF5EC542DD74374C727F16AA6C068073D1C2D7A5CABF20512CB289F0716EB";
 const MASKOFFSET_HASH: &str = "B7C41F4F906FCE74B26BD2F06520F6BFDF75DCD1A2682DBB85D50D1DE833877B";
@@ -282,10 +290,287 @@ fn discover_adjacent_imports(aex_path: &Path) -> Result<Vec<SessionDependency>, 
     Ok(dependencies)
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct DispatchIdentity {
+    sha256: String,
+    size: u64,
+}
+
 struct TaskResult {
     success: bool,
     body: String,
     output: Option<PathBuf>,
+    identity: Option<DispatchIdentity>,
+    operation: Option<String>,
+    diagnostic_eligible: bool,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct DiagnosticHistory {
+    count: usize,
+    latest: Option<String>,
+}
+
+fn bounded_summary(value: &str) -> String {
+    if value.contains(['\\', '/', ':']) {
+        return "redacted".into();
+    }
+    let mut output = value
+        .chars()
+        .filter(|character| !character.is_control())
+        .take(MAX_DIAGNOSTIC_SUMMARY_BYTES)
+        .collect::<String>();
+    while output.len() > MAX_DIAGNOSTIC_SUMMARY_BYTES {
+        output.pop();
+    }
+    output
+}
+
+fn summary_component(value: &str) -> String {
+    bounded_summary(
+        &value
+            .chars()
+            .map(|character| {
+                if character.is_ascii_alphanumeric() || matches!(character, '_' | '-' | '.') {
+                    character
+                } else {
+                    '_'
+                }
+            })
+            .collect::<String>(),
+    )
+}
+
+fn diagnostic_summary(success: bool, body: &str) -> String {
+    if success {
+        if let Some(value) = serde_json::from_str::<serde_json::Value>(body)
+            .ok()
+            .as_ref()
+            .and_then(render_diagnostics)
+        {
+            return bounded_summary(&format!(
+                "render_path={}; pixel_format={}; classification={}; gpu_fallback={}",
+                summary_component(&value.render_path),
+                summary_component(&value.pixel_format),
+                summary_component(&value.worker_classification),
+                value.gpu_fallback_used
+            ));
+        }
+        return "completed".into();
+    }
+    if let Some(value) = failure_diagnostics(body) {
+        return bounded_summary(&format!(
+            "classification={}; stage={}; exit_code={}",
+            summary_component(&value.classification),
+            summary_component(value.failure_stage.as_deref().unwrap_or("unknown")),
+            value
+                .exit_code
+                .map(|code| code.to_string())
+                .as_deref()
+                .unwrap_or("unknown")
+        ));
+    }
+    "failed safely".into()
+}
+
+fn diagnostic_details(success: bool, body: &str) -> serde_json::Value {
+    if let Some(value) = (!success).then(|| failure_diagnostics(body)).flatten() {
+        return serde_json::json!({
+            "classification": value.classification,
+            "failure_stage": value.failure_stage,
+            "exit_code": value.exit_code,
+            "selector_error": value.selector_error,
+            "last_seh_selector": value.last_seh_selector,
+            "last_seh_error": value.last_seh_error,
+            "last_seh_exception_code": value.last_seh_exception_code,
+            "missing_suites": value.missing_suites.into_iter().map(|suite| {
+                serde_json::json!({"name": suite.name, "version": suite.version})
+            }).collect::<Vec<_>>(),
+        });
+    }
+    if let Some(value) = serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .as_ref()
+        .and_then(render_diagnostics)
+    {
+        return serde_json::json!({
+            "classification": value.worker_classification,
+            "render_path": value.render_path,
+            "pixel_format": value.pixel_format,
+            "gpu_fallback_used": value.gpu_fallback_used,
+        });
+    }
+    serde_json::json!({"classification": if success { "completed" } else { "failed_safely" }})
+}
+
+fn diagnostic_directory(repository: &Path, sha256: &str) -> Option<PathBuf> {
+    decode_sha256(sha256).ok()?;
+    Some(
+        repository
+            .join("target/harness-diagnostics")
+            .join(sha256.to_ascii_lowercase()),
+    )
+}
+
+fn persist_diagnostic_with_nonce(
+    repository: &Path,
+    identity: &DispatchIdentity,
+    operation: &str,
+    success: bool,
+    summary: &str,
+    details: &serde_json::Value,
+    nonce: &str,
+) -> Result<PathBuf, String> {
+    let directory =
+        diagnostic_directory(repository, &identity.sha256).ok_or("invalid dispatch SHA-256")?;
+    fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
+    let destination = directory.join(format!("{nonce}.local.json"));
+    if destination.exists() {
+        return Err("diagnostic event collision".into());
+    }
+    let temporary = directory.join(format!("{nonce}.tmp"));
+    let dto = serde_json::json!({
+        "schema": DIAGNOSTIC_SCHEMA,
+        "version": DIAGNOSTIC_VERSION,
+        "identity": {"sha256": identity.sha256.to_ascii_lowercase(), "size": identity.size},
+        "operation": bounded_summary(operation),
+        "timestamp": SystemTime::now().duration_since(SystemTime::UNIX_EPOCH)
+            .map(|value| value.as_millis()).unwrap_or_default(),
+        "success": success,
+        "summary": bounded_summary(summary),
+        "diagnostics": details,
+    });
+    let bytes = serde_json::to_vec(&dto).map_err(|error| error.to_string())?;
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temporary)
+        .map_err(|error| error.to_string())?;
+    if let Err(error) = file.write_all(&bytes).and_then(|_| file.sync_all()) {
+        let _ = fs::remove_file(&temporary);
+        return Err(error.to_string());
+    }
+    drop(file);
+    if destination.exists() {
+        let _ = fs::remove_file(&temporary);
+        return Err("diagnostic event collision".into());
+    }
+    fs::rename(&temporary, &destination).map_err(|error| {
+        let _ = fs::remove_file(&temporary);
+        error.to_string()
+    })?;
+    Ok(destination)
+}
+
+fn persist_diagnostic(
+    repository: &Path,
+    identity: &DispatchIdentity,
+    operation: &str,
+    success: bool,
+    summary: &str,
+    details: &serde_json::Value,
+) -> Result<PathBuf, String> {
+    let nonce = format!(
+        "{}-{}-{:?}",
+        SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map(|value| value.as_nanos())
+            .unwrap_or_default(),
+        std::process::id(),
+        thread::current().id()
+    )
+    .replace(['(', ')', ' '], "");
+    persist_diagnostic_with_nonce(
+        repository, identity, operation, success, summary, details, &nonce,
+    )
+}
+
+fn load_diagnostic_history(repository: &Path, sha256: &str) -> DiagnosticHistory {
+    let Some(directory) = diagnostic_directory(repository, sha256) else {
+        return DiagnosticHistory::default();
+    };
+    let Ok(entries) = fs::read_dir(directory) else {
+        return DiagnosticHistory::default();
+    };
+    let mut paths = entries
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.ends_with(".local.json"))
+        })
+        .collect::<Vec<_>>();
+    paths.sort();
+    paths.reverse();
+    let mut history = DiagnosticHistory::default();
+    let mut total = 0u64;
+    for path in paths.into_iter().take(MAX_DIAGNOSTIC_FILES) {
+        let Ok(metadata) = fs::metadata(&path) else {
+            continue;
+        };
+        if metadata.len() > MAX_DIAGNOSTIC_FILE_BYTES
+            || total.saturating_add(metadata.len()) > MAX_DIAGNOSTIC_TOTAL_BYTES
+        {
+            continue;
+        }
+        total += metadata.len();
+        let Ok(file) = fs::File::open(&path) else {
+            continue;
+        };
+        let mut bytes = Vec::new();
+        if file
+            .take(MAX_DIAGNOSTIC_FILE_BYTES + 1)
+            .read_to_end(&mut bytes)
+            .is_err()
+            || bytes.len() as u64 > MAX_DIAGNOSTIC_FILE_BYTES
+        {
+            continue;
+        }
+        let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+            continue;
+        };
+        let valid = value.as_object().is_some_and(|object| object.len() == 8)
+            && value.get("schema").and_then(|v| v.as_str()) == Some(DIAGNOSTIC_SCHEMA)
+            && value.get("version").and_then(|v| v.as_u64()) == Some(DIAGNOSTIC_VERSION)
+            && value.get("timestamp").and_then(|v| v.as_u64()).is_some()
+            && value.get("success").and_then(|v| v.as_bool()).is_some()
+            && value
+                .get("diagnostics")
+                .and_then(|v| v.as_object())
+                .is_some()
+            && value
+                .get("operation")
+                .and_then(|v| v.as_str())
+                .is_some_and(|v| !v.is_empty() && v.len() <= MAX_DIAGNOSTIC_SUMMARY_BYTES)
+            && value
+                .get("summary")
+                .and_then(|v| v.as_str())
+                .is_some_and(|v| v.len() <= MAX_DIAGNOSTIC_SUMMARY_BYTES)
+            && value
+                .get("identity")
+                .and_then(|v| v.as_object())
+                .is_some_and(|identity| identity.len() == 2)
+            && value
+                .pointer("/identity/size")
+                .and_then(|v| v.as_u64())
+                .is_some()
+            && value
+                .pointer("/identity/sha256")
+                .and_then(|v| v.as_str())
+                .is_some_and(|value| value == sha256.to_ascii_lowercase());
+        let Some(summary) = valid
+            .then(|| value.get("summary").and_then(|v| v.as_str()))
+            .flatten()
+        else {
+            continue;
+        };
+        history.count += 1;
+        if history.latest.is_none() {
+            history.latest = Some(bounded_summary(summary));
+        }
+    }
+    history
 }
 
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
@@ -1224,6 +1509,8 @@ struct HarnessApp {
     receiver: Option<Receiver<TaskResult>>,
     task_kind: TaskKind,
     inspect_after_refresh: bool,
+    diagnostic_history: DiagnosticHistory,
+    diagnostic_warning: Option<String>,
 }
 
 impl HarnessApp {
@@ -1275,6 +1562,8 @@ impl HarnessApp {
             receiver: None,
             task_kind: TaskKind::Generic,
             inspect_after_refresh: false,
+            diagnostic_history: DiagnosticHistory::default(),
+            diagnostic_warning: None,
         }
     }
 
@@ -1321,12 +1610,51 @@ impl HarnessApp {
                     success: true,
                     body,
                     output,
+                    identity: None,
+                    operation: None,
+                    diagnostic_eligible: false,
                 },
                 Err(body) => TaskResult {
                     success: false,
                     body,
                     output: None,
+                    identity: None,
+                    operation: None,
+                    diagnostic_eligible: false,
                 },
+            });
+        });
+        self.receiver = Some(receiver);
+        self.busy = true;
+        self.task_kind = TaskKind::Generic;
+    }
+
+    fn spawn_native<F>(&mut self, operation: &'static str, work: F)
+    where
+        F: FnOnce() -> Result<(String, Option<PathBuf>), String> + Send + 'static,
+    {
+        let Some(selection) = self.selection.as_ref() else {
+            return;
+        };
+        let identity = DispatchIdentity {
+            sha256: selection.sha256.clone(),
+            size: selection.size,
+        };
+        let diagnostic_eligible = selection.profile.is_none();
+        let (sender, receiver) = mpsc::channel();
+        thread::spawn(move || {
+            let result = work();
+            let (success, body, output) = match result {
+                Ok((body, output)) => (true, body, output),
+                Err(body) => (false, body, None),
+            };
+            let _ = sender.send(TaskResult {
+                success,
+                body,
+                output,
+                identity: Some(identity),
+                operation: Some(operation.into()),
+                diagnostic_eligible,
             });
         });
         self.receiver = Some(receiver);
@@ -1673,7 +2001,7 @@ impl HarnessApp {
         let plugin_path = selection.path.clone();
         let hash = selection.sha256.clone();
         self.status = "Loading Effect Controls...".into();
-        self.spawn(move || {
+        self.spawn_native("inspect_parameters", move || {
             let (parameters, diagnostics) =
                 aexcompat_broker::image_render::inspect_experimental_with_diagnostics(
                     &repository,
@@ -1707,20 +2035,27 @@ impl HarnessApp {
             "Inspecting all external dependencies..."
         }
         .into();
-        self.spawn(move || {
-            let report =
-                aexcompat_broker::image_render::inspect_experimental_external_dependencies(
-                    &repository,
-                    &plugin_path,
-                    &hash,
-                    missing_only,
-                )
-                .map_err(|error| error.to_string())?;
-            Ok((
-                serde_json::to_string_pretty(&report).map_err(|error| error.to_string())?,
-                None,
-            ))
-        });
+        self.spawn_native(
+            if missing_only {
+                "inspect_missing_dependencies"
+            } else {
+                "inspect_dependencies"
+            },
+            move || {
+                let report =
+                    aexcompat_broker::image_render::inspect_experimental_external_dependencies(
+                        &repository,
+                        &plugin_path,
+                        &hash,
+                        missing_only,
+                    )
+                    .map_err(|error| error.to_string())?;
+                Ok((
+                    serde_json::to_string_pretty(&report).map_err(|error| error.to_string())?,
+                    None,
+                ))
+            },
+        );
     }
 
     fn probe_options_dialog(&mut self) {
@@ -1731,7 +2066,7 @@ impl HarnessApp {
         let plugin_path = selection.path.clone();
         let hash = selection.sha256.clone();
         self.status = "Probing the advertised options dialog...".into();
-        self.spawn(move || {
+        self.spawn_native("probe_options_dialog", move || {
             let report = aexcompat_broker::image_render::probe_experimental_options_dialog(
                 &repository,
                 &plugin_path,
@@ -1753,7 +2088,7 @@ impl HarnessApp {
         let plugin_path = selection.path.clone();
         let hash = selection.sha256.clone();
         self.status = "Probing the sequence-requested options dialog...".into();
-        self.spawn(move || {
+        self.spawn_native("probe_automatic_options_dialog", move || {
             let report =
                 aexcompat_broker::image_render::probe_experimental_automatic_options_dialog(
                     &repository,
@@ -1776,7 +2111,7 @@ impl HarnessApp {
         let plugin_path = selection.path.clone();
         let hash = selection.sha256.clone();
         self.status = "Probing NOP_RENDER source passthrough...".into();
-        self.spawn(move || {
+        self.spawn_native("probe_nop_render", move || {
             let report = aexcompat_broker::image_render::probe_experimental_nop_render(
                 &repository,
                 &plugin_path,
@@ -1798,7 +2133,7 @@ impl HarnessApp {
         let plugin_path = selection.path.clone();
         let hash = selection.sha256.clone();
         self.status = "Probing SmartFX NOP_RENDER source passthrough...".into();
-        self.spawn(move || {
+        self.spawn_native("probe_smart_nop_render", move || {
             let report = aexcompat_broker::image_render::probe_experimental_smart_nop_render(
                 &repository,
                 &plugin_path,
@@ -1820,7 +2155,7 @@ impl HarnessApp {
         let plugin_path = selection.path.clone();
         let hash = selection.sha256.clone();
         self.status = "Probing advertised input-buffer write access...".into();
-        self.spawn(move || {
+        self.spawn_native("probe_input_buffer_write", move || {
             let report = aexcompat_broker::image_render::probe_experimental_input_buffer_write(
                 &repository,
                 &plugin_path,
@@ -1842,7 +2177,7 @@ impl HarnessApp {
         let plugin_path = selection.path.clone();
         let hash = selection.sha256.clone();
         self.status = "Probing SmartFX input-buffer write access...".into();
-        self.spawn(move || {
+        self.spawn_native("probe_smart_input_buffer_write", move || {
             let report =
                 aexcompat_broker::image_render::probe_experimental_smart_input_buffer_write(
                     &repository,
@@ -1869,26 +2204,33 @@ impl HarnessApp {
         } else {
             "Probing advertised FRAME_SETUP shrink...".into()
         };
-        self.spawn(move || {
-            let report = if expand {
-                aexcompat_broker::image_render::probe_experimental_expand_buffer(
-                    &repository,
-                    &plugin_path,
-                    &hash,
-                )
+        self.spawn_native(
+            if expand {
+                "probe_frame_expansion"
             } else {
-                aexcompat_broker::image_render::probe_experimental_shrink_buffer(
-                    &repository,
-                    &plugin_path,
-                    &hash,
-                )
-            }
-            .map_err(|error| error.to_string())?;
-            Ok((
-                serde_json::to_string_pretty(&report).map_err(|error| error.to_string())?,
-                None,
-            ))
-        });
+                "probe_frame_shrink"
+            },
+            move || {
+                let report = if expand {
+                    aexcompat_broker::image_render::probe_experimental_expand_buffer(
+                        &repository,
+                        &plugin_path,
+                        &hash,
+                    )
+                } else {
+                    aexcompat_broker::image_render::probe_experimental_shrink_buffer(
+                        &repository,
+                        &plugin_path,
+                        &hash,
+                    )
+                }
+                .map_err(|error| error.to_string())?;
+                Ok((
+                    serde_json::to_string_pretty(&report).map_err(|error| error.to_string())?,
+                    None,
+                ))
+            },
+        );
     }
 
     fn probe_persistent_sequence(&mut self) {
@@ -1899,7 +2241,7 @@ impl HarnessApp {
         let plugin_path = selection.path.clone();
         let hash = selection.sha256.clone();
         self.status = "Probing two frames in one isolated sequence...".into();
-        self.spawn(move || {
+        self.spawn_native("probe_persistent_sequence", move || {
             let report = aexcompat_broker::image_render::probe_experimental_persistent_sequence(
                 &repository,
                 &plugin_path,
@@ -1921,7 +2263,7 @@ impl HarnessApp {
         let plugin_path = selection.path.clone();
         let hash = selection.sha256.clone();
         self.status = "Probing sequence save/reload ownership...".into();
-        self.spawn(move || {
+        self.spawn_native("probe_flattened_sequence", move || {
             let report = aexcompat_broker::image_render::probe_experimental_flattened_sequence(
                 &repository,
                 &plugin_path,
@@ -1943,7 +2285,7 @@ impl HarnessApp {
         let plugin_path = selection.path.clone();
         let hash = selection.sha256.clone();
         self.status = "Probing non-destructive sequence save...".into();
-        self.spawn(move || {
+        self.spawn_native("probe_copied_flattened_sequence", move || {
             let report =
                 aexcompat_broker::image_render::probe_experimental_copied_flattened_sequence(
                     &repository,
@@ -2211,7 +2553,7 @@ impl HarnessApp {
             && pixel_format == aexcompat_broker::image_render::RenderPixelFormat::Argb8
             && audio_sidecar.is_none();
         self.status = "Rendering in an isolated worker...".into();
-        self.spawn(move || {
+        self.spawn_native("render_image", move || {
             let report = if let Some(audio) = audio_sidecar {
                 aexcompat_broker::image_render::render_experimental_image_with_audio_sidecar(
                     &repository,
@@ -2283,7 +2625,7 @@ impl HarnessApp {
         let hash = selection.sha256.clone();
         let parameters = self.parameters.clone();
         self.status = "Rendering audio in an isolated worker...".into();
-        self.spawn(move || {
+        self.spawn_native("render_audio", move || {
             let report = aexcompat_broker::image_render::render_experimental_audio(
                 &repository,
                 &plugin_path,
@@ -2346,7 +2688,7 @@ impl HarnessApp {
             .join(nonce.to_string());
         self.status = "Running six isolated Effect compatibility cases...".into();
         self.matrix_results.clear();
-        self.spawn(move || {
+        self.spawn_native("compatibility_matrix", move || {
             let report = run_effect_matrix(
                 &repository,
                 &plugin_path,
@@ -2372,7 +2714,7 @@ impl HarnessApp {
         let hash = selection.sha256.clone();
         let parameters = self.parameters.clone();
         self.status = format!("Dispatching PF_Cmd_USER_CHANGED_PARAM for slot {slot}...");
-        self.spawn(move || {
+        self.spawn_native("user_changed_parameter", move || {
             let report = aexcompat_broker::image_render::trigger_experimental_button(
                 &repository,
                 &plugin_path,
@@ -2396,7 +2738,7 @@ impl HarnessApp {
         let plugin_path = selection.path.clone();
         let hash = selection.sha256.clone();
         self.status = "Initializing AEGP in an isolated worker...".into();
-        self.spawn(move || {
+        self.spawn_native("initialize_aegp", move || {
             let report = aexcompat_broker::image_render::initialize_experimental_aegp(
                 &repository,
                 &plugin_path,
@@ -2418,7 +2760,7 @@ impl HarnessApp {
         let plugin_path = selection.path.clone();
         let hash = selection.sha256.clone();
         self.status = "Dispatching an isolated AEGP update-menu event...".into();
-        self.spawn(move || {
+        self.spawn_native("update_aegp_menu", move || {
             let report = aexcompat_broker::image_render::dispatch_experimental_aegp_update_menu(
                 &repository,
                 &plugin_path,
@@ -2440,7 +2782,7 @@ impl HarnessApp {
         let plugin_path = selection.path.clone();
         let hash = selection.sha256.clone();
         self.status = "Dispatching one isolated AEGP idle event...".into();
-        self.spawn(move || {
+        self.spawn_native("dispatch_aegp_idle", move || {
             let report = aexcompat_broker::image_render::dispatch_experimental_aegp_idle(
                 &repository,
                 &plugin_path,
@@ -2462,7 +2804,7 @@ impl HarnessApp {
         let plugin_path = selection.path.clone();
         let hash = selection.sha256.clone();
         self.status = "Dispatching an isolated AEGP command ON/OFF roundtrip...".into();
-        self.spawn(move || {
+        self.spawn_native("dispatch_aegp_command_roundtrip", move || {
             let report =
                 aexcompat_broker::image_render::dispatch_experimental_aegp_command_roundtrip(
                     &repository,
@@ -2485,7 +2827,7 @@ impl HarnessApp {
         let plugin_path = selection.path.clone();
         let hash = selection.sha256.clone();
         self.status = "Running AEGP ON / active idle / OFF in isolation...".into();
-        self.spawn(move || {
+        self.spawn_native("dispatch_aegp_active_idle_roundtrip", move || {
             let report =
                 aexcompat_broker::image_render::dispatch_experimental_aegp_active_idle_roundtrip(
                     &repository,
@@ -2508,7 +2850,7 @@ impl HarnessApp {
         let plugin_path = selection.path.clone();
         let hash = selection.sha256.clone();
         self.status = "Running AEGP ON / comp idle / OFF in isolation...".into();
-        self.spawn(move || {
+        self.spawn_native("dispatch_aegp_comp_idle_roundtrip", move || {
             let report =
                 aexcompat_broker::image_render::dispatch_experimental_aegp_comp_idle_roundtrip(
                     &repository,
@@ -2710,6 +3052,34 @@ impl HarnessApp {
         };
         let task_kind = self.task_kind;
         self.busy = false;
+        if result.diagnostic_eligible {
+            if let (Some(identity), Some(operation)) = (&result.identity, &result.operation) {
+                let summary = diagnostic_summary(result.success, &result.body);
+                let details = diagnostic_details(result.success, &result.body);
+                match persist_diagnostic(
+                    &self.repository,
+                    identity,
+                    operation,
+                    result.success,
+                    &summary,
+                    &details,
+                ) {
+                    Ok(_) => {
+                        self.diagnostic_warning = None;
+                        self.diagnostic_history = self
+                            .selection
+                            .as_ref()
+                            .map(|selection| {
+                                load_diagnostic_history(&self.repository, &selection.sha256)
+                            })
+                            .unwrap_or_default();
+                    }
+                    Err(error) => {
+                        self.diagnostic_warning = Some(format!("Diagnostic save warning: {error}"))
+                    }
+                }
+            }
+        }
         self.failure_diagnostics = (!result.success)
             .then(|| failure_diagnostics(&result.body))
             .flatten();
@@ -2746,6 +3116,7 @@ impl HarnessApp {
                 self.approved_dependencies.clear();
                 self.approval_check = false;
                 self.selection_stale = false;
+                self.diagnostic_history = load_diagnostic_history(&self.repository, hash);
                 match discover_adjacent_imports(Path::new(path)) {
                     Ok(dependencies) => {
                         self.dependencies = dependencies;
@@ -2835,6 +3206,8 @@ impl eframe::App for HarnessApp {
                 self.approved_dependencies.clear();
                 self.trust_rebuilds = false;
                 self.selection_stale = false;
+                self.diagnostic_history = DiagnosticHistory::default();
+                self.diagnostic_warning = None;
                 self.parameters.clear();
                 self.audio_input = None;
                 self.audio_effect_only = false;
@@ -2850,12 +3223,22 @@ impl eframe::App for HarnessApp {
                     ui.label(RichText::new(selected_path).strong());
                     ui.collapsing("Binary details and dependency DLLs", |ui| {
                     ui.label(format!("{} bytes", selected_size));
-                    ui.monospace(selected_hash);
+                    ui.monospace(&selected_hash);
                     if self.selection_stale {
                         ui.colored_label(Color32::from_rgb(210, 75, 55), "Build changed: native execution is paused until reload");
                     }
                     if let Some(profile) = selected_profile {
                         ui.colored_label(Color32::from_rgb(30, 150, 95), format!("Registered profile: {profile}"));
+                    }
+                    ui.separator();
+                    ui.label(RichText::new("Local diagnostics").strong());
+                    ui.label(format!("Events for selected SHA: {}", self.diagnostic_history.count));
+                    ui.label(format!("Latest: {}", self.diagnostic_history.latest.as_deref().unwrap_or("none")));
+                    if let Some(warning) = &self.diagnostic_warning {
+                        ui.colored_label(Color32::from_rgb(210, 145, 40), warning);
+                    }
+                    if ui.button("Reload diagnostics").clicked() {
+                        self.diagnostic_history = load_diagnostic_history(&self.repository, &selected_hash);
                     }
                     ui.separator();
                     ui.label(RichText::new("Session dependency DLLs").strong());
@@ -4577,6 +4960,171 @@ fn main() -> eframe::Result {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn temporary_directory(name: &str) -> PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "aexcompat-diagnostics-{name}-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&path).unwrap();
+        path
+    }
+
+    fn test_identity(byte: u8) -> DispatchIdentity {
+        DispatchIdentity {
+            sha256: format!("{byte:02x}").repeat(32),
+            size: 123,
+        }
+    }
+
+    #[test]
+    fn native_dispatch_keeps_identity_when_selection_changes() {
+        let mut app = HarnessApp::new(temporary_directory("identity-race"));
+        app.selection = Some(Selection {
+            path: PathBuf::from("first.aex"),
+            size: 11,
+            sha256: "11".repeat(32),
+            profile: None,
+            modified: None,
+        });
+        app.spawn_native("race_test", || Ok(("ok".into(), None)));
+        app.selection = Some(Selection {
+            path: PathBuf::from("second.aex"),
+            size: 22,
+            sha256: "22".repeat(32),
+            profile: None,
+            modified: None,
+        });
+        let result = app.receiver.take().unwrap().recv().unwrap();
+        assert_eq!(
+            result.identity,
+            Some(DispatchIdentity {
+                sha256: "11".repeat(32),
+                size: 11
+            })
+        );
+        assert_eq!(result.operation.as_deref(), Some("race_test"));
+    }
+
+    #[test]
+    fn diagnostic_dto_is_private_bounded_and_collision_safe() {
+        let root = temporary_directory("privacy");
+        let identity = test_identity(0x33);
+        let secret = "C:\\Users\\private\\effect.aex RAW_STDERR image-pixels ";
+        assert_eq!(diagnostic_summary(false, secret), "failed safely");
+        let summary = secret.to_owned();
+        let path = persist_diagnostic_with_nonce(
+            &root,
+            &identity,
+            "render_image",
+            false,
+            &summary,
+            &diagnostic_details(false, secret),
+            "same",
+        )
+        .unwrap();
+        assert!(persist_diagnostic_with_nonce(
+            &root,
+            &identity,
+            "render_image",
+            true,
+            "new",
+            &serde_json::json!({"classification":"completed"}),
+            "same"
+        )
+        .is_err());
+        let bytes = fs::read(path).unwrap();
+        let text = String::from_utf8(bytes.clone()).unwrap();
+        assert!(!text.contains("Users"));
+        assert!(!text.contains("RAW_STDERR"));
+        assert!(!text.contains("image-pixels"));
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(value["summary"], "redacted");
+        let keys = value
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            keys,
+            [
+                "identity",
+                "diagnostics",
+                "operation",
+                "schema",
+                "success",
+                "summary",
+                "timestamp",
+                "version"
+            ]
+            .into_iter()
+            .map(str::to_owned)
+            .collect()
+        );
+        assert!(value["summary"].as_str().unwrap().len() <= MAX_DIAGNOSTIC_SUMMARY_BYTES);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn diagnostic_reader_ignores_corrupt_oversize_sha_mismatch_and_temp() {
+        let root = temporary_directory("reader");
+        let identity = test_identity(0x44);
+        let directory = diagnostic_directory(&root, &identity.sha256).unwrap();
+        fs::create_dir_all(&directory).unwrap();
+        persist_diagnostic_with_nonce(
+            &root,
+            &identity,
+            "valid",
+            true,
+            "valid summary",
+            &serde_json::json!({"classification":"completed"}),
+            "001",
+        )
+        .unwrap();
+        fs::write(directory.join("002.local.json"), b"not-json").unwrap();
+        fs::write(
+            directory.join("003.local.json"),
+            vec![b'x'; MAX_DIAGNOSTIC_FILE_BYTES as usize + 1],
+        )
+        .unwrap();
+        let mismatch = serde_json::json!({"schema":DIAGNOSTIC_SCHEMA,"version":DIAGNOSTIC_VERSION,
+            "identity":{"sha256":"55".repeat(32),"size":1},"summary":"wrong"});
+        fs::write(
+            directory.join("004.local.json"),
+            serde_json::to_vec(&mismatch).unwrap(),
+        )
+        .unwrap();
+        fs::write(directory.join("005.tmp"), b"ignored").unwrap();
+        let history = load_diagnostic_history(&root, &identity.sha256);
+        assert_eq!(
+            history,
+            DiagnosticHistory {
+                count: 1,
+                latest: Some("valid summary".into())
+            }
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn diagnostic_details_preserve_bounded_compatibility_keys() {
+        let body = concat!(
+            r#"failed: diagnostics={"classification":"nonzero_exit","failure_stage":"render","exit_code":7,"missing_suites":[{"name":"PF World Suite","version":2}]}, report="#,
+            r#"{"last_seh_selector":"RENDER","last_seh_error":512,"last_seh_exception_code":3221225477}"#,
+        );
+        let details = diagnostic_details(false, body);
+        assert_eq!(details["classification"], "nonzero_exit");
+        assert_eq!(details["failure_stage"], "render");
+        assert_eq!(details["last_seh_selector"], "RENDER");
+        assert_eq!(details["missing_suites"][0]["name"], "PF World Suite");
+        assert_eq!(details["missing_suites"][0]["version"], 2);
+        assert!(!details.to_string().contains("failed: diagnostics="));
+    }
 
     fn temporary_aex(name: &str) -> PathBuf {
         std::env::temp_dir().join(format!(

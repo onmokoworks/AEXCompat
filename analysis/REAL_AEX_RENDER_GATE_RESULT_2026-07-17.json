@@ -1,0 +1,79 @@
+﻿{
+    "schema_version":  1,
+    "gate":  "real_aex_render_gate",
+    "classification":  "host_regression_exact",
+    "oracle":  false,
+    "status":  "passed",
+    "fixture":  "Adobe After Effects SDK ColorGrid",
+    "case":  {
+                 "render_path":  "classic",
+                 "parameter_state":  "default",
+                 "frame":  0,
+                 "pixel_format":  "rgba8",
+                 "width":  16,
+                 "height":  12,
+                 "rowbytes":  64
+             },
+    "authenticated_artifacts":  {
+                                    "aex":  {
+                                                "path":  "target/sdk-fixtures/colorgrid/ColorGrid.aex",
+                                                "size_bytes":  33280,
+                                                "sha256":  "64b0de13f978222bb40649bdf48cc533aebb3e03f98270af073b8351284ba64c"
+                                            },
+                                    "input":  {
+                                                  "path":  "target/image-transport/colorgrid-click-input.rgba",
+                                                  "size_bytes":  768,
+                                                  "sha256":  "c9ee521c7d71cbf6a41cb1a2d075add64676b912f5870098417b75ca727ba807"
+                                              },
+                                    "reference":  {
+                                                      "path":  "target/image-transport/colorgrid-normal.rgba",
+                                                      "size_bytes":  768,
+                                                      "sha256":  "91d436a039c7f5ef56c4418e97dcb48dd4a69b8b9d984f224a06f97fe3ff8578"
+                                                  },
+                                    "release_worker":  {
+                                                           "path":  "target/minihost-build/aex_render_worker.exe",
+                                                           "size_bytes":  772608,
+                                                           "sha256":  "0d6a1bf6facf7c057d796f89c7f4f199a9092ef981fdf3315a3aa6e1cbc1df51"
+                                                       }
+                                },
+    "invocation":  {
+                       "executable":  "target/minihost-build/aex_render_worker.exe",
+                       "cli":  "--render-image \u003caex\u003e \u003caex_sha256\u003e v5| \u003cinput\u003e \u003coutput\u003e 16 12 0 1 1 1",
+                       "exit_code":  0
+                   },
+    "output":  {
+                   "size_bytes":  768,
+                   "sha256":  "91d436a039c7f5ef56c4418e97dcb48dd4a69b8b9d984f224a06f97fe3ff8578",
+                   "expected_sha256":  "91d436a039c7f5ef56c4418e97dcb48dd4a69b8b9d984f224a06f97fe3ff8578"
+               },
+    "worker":  {
+                   "schema_version":  1,
+                   "stage":  "classic_render",
+                   "status":  "render_completed",
+                   "internal_output_sha256":  "4f3c8d8405d0917ab85ccda3af3c8fd2c66f6daaf12383e07cc0c7846f6407d7",
+                   "guard_bytes_intact":  true,
+                   "suite_acquires":  8,
+                   "suite_releases":  8,
+                   "live_suite_lease_count":  0,
+                   "suite_leases_balanced":  true,
+                   "handle_lifetimes_balanced":  true,
+                   "world_lifetimes_balanced":  true,
+                   "last_seh_exception_code":  0
+               },
+    "checks":  {
+                   "worker_exit_zero":  true,
+                   "worker_status_completed":  true,
+                   "dimensions_exact":  true,
+                   "output_size_exact":  true,
+                   "output_hash_exact":  true,
+                   "guards_intact":  true,
+                   "suite_leases_balanced":  true,
+                   "handle_lifetimes_balanced":  true,
+                   "world_lifetimes_balanced":  true,
+                   "selector_success":  true
+               },
+    "scope":  {
+                  "proves":  "The authenticated AEXCompat release worker reproduces this exact host output for the fixed default/frame0 vector.",
+                  "does_not_prove":  "Pixel equivalence with Adobe After Effects; this is not an AE oracle."
+              }
+}

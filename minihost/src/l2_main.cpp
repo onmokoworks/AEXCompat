@@ -4192,7 +4192,12 @@ std::array<void*, 3> g_pf_helper_suite2{
     reinterpret_cast<void*>(&pf_parse_clipboard),
     reinterpret_cast<void*>(&pf_set_current_extended_tool),
     reinterpret_cast<void*>(&pf_get_current_extended_tool)};
+// PF_AdvAppSuite1 is frozen at ten callbacks; keep its storage independent
+// from the eleven-slot v2 table so versioned suite identity cannot alias.
+std::array<void*, 10> g_adv_app_suite1{};
 std::array<void*, 11> g_adv_app_suite2{};
+static_assert(sizeof(g_adv_app_suite1) == 10 * sizeof(void*));
+static_assert(sizeof(g_adv_app_suite2) == 11 * sizeof(void*));
 struct AdvTimeDisplayPrefVersion3 {
   char display_mode;
   int32_t framemax;
@@ -11874,6 +11879,14 @@ int32_t __cdecl acquire_suite(const char* name, int32_t version, const void** su
   if (name && std::strcmp(name, "PF Effect UI Suite") == 0 && version == 1) {
     g_effect_ui_suite1[0] = reinterpret_cast<void*>(&set_options_button_name);
     *suite = g_effect_ui_suite1.data();
+    record_suite_acquire(name, version);
+    return 0;
+  }
+  if (name && std::strcmp(name, "PF AE Adv App Suite") == 0 && version == 1) {
+    g_adv_app_suite1.fill(reinterpret_cast<void*>(&aegp_unsupported_suite_call));
+    g_adv_app_suite1[6] = reinterpret_cast<void*>(&adv_app_info_text);
+    g_adv_app_suite1[8] = reinterpret_cast<void*>(&adv_app_info_text3);
+    *suite = g_adv_app_suite1.data();
     record_suite_acquire(name, version);
     return 0;
   }
@@ -19581,6 +19594,43 @@ bool verify_aegp_layer_render_options_suite2() {
 }
 #endif
 
+bool verify_pf_adv_app_suite_versions() {
+  const void* suite1 = nullptr;
+  const void* suite2 = nullptr;
+  const uint32_t acquires_before = g_suite_acquires;
+  const uint32_t releases_before = g_suite_releases;
+  bool ok = acquire_suite("PF AE Adv App Suite", 1, &suite1) == 0 &&
+      acquire_suite("PF AE Adv App Suite", 2, &suite2) == 0;
+  auto* slots1 = static_cast<void* const*>(suite1);
+  auto* slots2 = static_cast<void* const*>(suite2);
+  ok = ok && suite1 == g_adv_app_suite1.data() && suite2 == g_adv_app_suite2.data() &&
+      suite1 != suite2 && slots1 && slots2;
+  if (slots1 && slots2) {
+    ok = ok && std::all_of(slots1, slots1 + g_adv_app_suite1.size(),
+                           [](void* callback) { return callback != nullptr; }) &&
+        std::all_of(slots2, slots2 + g_adv_app_suite2.size(),
+                    [](void* callback) { return callback != nullptr; });
+    using UnsupportedProjectOperation = int32_t(__cdecl*)();
+    using UnsupportedInfoColor = int32_t(__cdecl*)(uint32_t);
+    using UnsupportedInfoText3Plus = int32_t(__cdecl*)(
+        const char*, const char*, const char*, const char*, const char*);
+    using InfoDrawText = int32_t(__cdecl*)(const char*, const char*);
+    using InfoDrawText3 = int32_t(__cdecl*)(const char*, const char*, const char*);
+    for (std::size_t slot = 0; slot < 6; ++slot)
+      ok = reinterpret_cast<UnsupportedProjectOperation>(slots1[slot])() != 0 && ok;
+    ok = ok && reinterpret_cast<UnsupportedInfoColor>(slots1[7])(0) != 0 &&
+        reinterpret_cast<UnsupportedInfoText3Plus>(slots1[9])(
+            nullptr, nullptr, nullptr, nullptr, nullptr) != 0 &&
+        reinterpret_cast<InfoDrawText>(slots1[6])("suite1-line1", "suite1-line2") == 0 &&
+        reinterpret_cast<InfoDrawText3>(slots1[8])(
+            "suite1-line1", "suite1-line2", "suite1-line3") == 0;
+  }
+  ok = release_suite("PF AE Adv App Suite", 2) == 0 &&
+      release_suite("PF AE Adv App Suite", 1) == 0 && ok;
+  return ok && g_suite_acquires == acquires_before + 2 &&
+      g_suite_releases == releases_before + 2 && suite_leases_balanced();
+}
+
 int wmain(int argc, wchar_t **argv) {
 #ifdef AEXCOMPAT_RENDER_WORKER
   wchar_t cancel_gate[2]{};
@@ -19590,6 +19640,16 @@ int wmain(int argc, wchar_t **argv) {
       cancel_gate[0] == L'1';
 #endif
   SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX);
+  if (argc == 2 && std::wstring(argv[1]) == L"--self-test-pf-adv-app-suite") {
+    const bool passed = verify_pf_adv_app_suite_versions();
+    std::cout << "{\"pf_adv_app_suite_versions\":\""
+              << (passed ? "passed" : "failed")
+              << "\",\"v1_slots\":10,\"v2_slots\":11"
+              << ",\"independent_identity\":true"
+              << ",\"suite_leases_balanced\":"
+              << (suite_leases_balanced() ? "true" : "false") << "}\n";
+    return passed ? 0 : 1;
+  }
 #ifdef AEXCOMPAT_RENDER_WORKER
   if (argc == 2 &&
       std::wstring(argv[1]) == L"--self-test-aegp-layer-render-options-suite2") {
