@@ -17,6 +17,9 @@ const MAX_DIAGNOSTIC_FILE_BYTES: u64 = 64 * 1024;
 const MAX_DIAGNOSTIC_FILES: usize = 256;
 const MAX_DIAGNOSTIC_TOTAL_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_DIAGNOSTIC_SUMMARY_BYTES: usize = 1024;
+const MAX_AGGREGATE_SHAS: usize = 4096;
+const MAX_AGGREGATE_FILES: usize = 65_536;
+const MAX_AGGREGATE_BYTES: u64 = 64 * 1024 * 1024;
 
 const SCATTERMAP_HASH: &str = "223FF5EC542DD74374C727F16AA6C068073D1C2D7A5CABF20512CB289F0716EB";
 const MASKOFFSET_HASH: &str = "B7C41F4F906FCE74B26BD2F06520F6BFDF75DCD1A2682DBB85D50D1DE833877B";
@@ -54,6 +57,60 @@ struct SessionDependency {
     path: PathBuf,
     size: u64,
     sha256: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+enum ImportKind {
+    Normal,
+    Delay,
+}
+
+impl ImportKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Normal => "normal",
+            Self::Delay => "delay",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PreflightImportWarning {
+    basename: String,
+    kind: ImportKind,
+}
+
+#[derive(Debug, Default)]
+struct AdjacentImportDiscovery {
+    dependencies: Vec<SessionDependency>,
+    warnings: Vec<PreflightImportWarning>,
+}
+
+fn resolve_adjacent_import(
+    imported_name: &str,
+    kind: ImportKind,
+    adjacent: &std::collections::HashMap<String, PathBuf>,
+    warnings: &mut std::collections::BTreeMap<(String, ImportKind), String>,
+) -> Option<PathBuf> {
+    if is_system_import_name(imported_name) {
+        return None;
+    }
+    let imported_path = Path::new(imported_name);
+    if !imported_name.is_ascii()
+        || imported_path.file_name().and_then(|name| name.to_str()) != Some(imported_name)
+    {
+        return None;
+    }
+    let key = imported_name.to_ascii_lowercase();
+    match adjacent.get(&key) {
+        Some(path) => Some(path.clone()),
+        None => {
+            warnings
+                .entry((key, kind))
+                .or_insert_with(|| imported_name.to_owned());
+            None
+        }
+    }
 }
 
 const MAX_DISCOVERY_FILE_BYTES: u64 = 512 * 1024 * 1024;
@@ -194,7 +251,7 @@ fn delay_import_libraries(bytes: &[u8], pe: &goblin::pe::PE<'_>) -> Result<Vec<S
     )
 }
 
-fn discover_adjacent_imports(aex_path: &Path) -> Result<Vec<SessionDependency>, String> {
+fn discover_adjacent_imports(aex_path: &Path) -> Result<AdjacentImportDiscovery, String> {
     const MAX_DEPENDENCIES: usize = 64;
     let directory = aex_path
         .parent()
@@ -237,6 +294,7 @@ fn discover_adjacent_imports(aex_path: &Path) -> Result<Vec<SessionDependency>, 
     let mut pending = vec![aex_path.to_path_buf()];
     let mut visited = std::collections::HashSet::new();
     let mut dependencies = Vec::new();
+    let mut warnings = std::collections::BTreeMap::new();
     let mut total_dependency_bytes = 0u64;
     while let Some(module_path) = pending.pop() {
         let bytes = read_bounded_pe(&module_path)?;
@@ -246,18 +304,22 @@ fn discover_adjacent_imports(aex_path: &Path) -> Result<Vec<SessionDependency>, 
                 module_path.display()
             )
         })?;
-        let mut imported_libraries = pe
+        let normal_libraries = pe
             .libraries
             .iter()
-            .map(|name| (*name).to_owned())
+            .map(|name| ((*name).to_owned(), ImportKind::Normal))
             .collect::<Vec<_>>();
-        imported_libraries.extend(delay_import_libraries(&bytes, &pe)?);
-        for imported_name in imported_libraries {
-            if is_system_import_name(&imported_name) {
-                continue;
-            }
+        let mut imported_libraries = normal_libraries;
+        imported_libraries.extend(
+            delay_import_libraries(&bytes, &pe)?
+                .into_iter()
+                .map(|name| (name, ImportKind::Delay)),
+        );
+        for (imported_name, kind) in imported_libraries {
             let key = imported_name.to_ascii_lowercase();
-            let Some(path) = adjacent.get(&key) else {
+            let Some(path) =
+                resolve_adjacent_import(&imported_name, kind, &adjacent, &mut warnings)
+            else {
                 continue;
             };
             if !visited.insert(key) {
@@ -268,7 +330,7 @@ fn discover_adjacent_imports(aex_path: &Path) -> Result<Vec<SessionDependency>, 
                     "Adjacent dependency graph exceeds {MAX_DEPENDENCIES} DLLs"
                 ));
             }
-            let dependency_bytes = read_bounded_pe(path)?;
+            let dependency_bytes = read_bounded_pe(&path)?;
             total_dependency_bytes = total_dependency_bytes
                 .checked_add(dependency_bytes.len() as u64)
                 .filter(|total| *total <= MAX_DISCOVERY_TOTAL_BYTES)
@@ -278,7 +340,7 @@ fn discover_adjacent_imports(aex_path: &Path) -> Result<Vec<SessionDependency>, 
                 size: dependency_bytes.len() as u64,
                 sha256: format!("{:X}", Sha256::digest(&dependency_bytes)),
             });
-            pending.push(path.clone());
+            pending.push(path);
         }
     }
     dependencies.sort_by(|left, right| {
@@ -287,7 +349,20 @@ fn discover_adjacent_imports(aex_path: &Path) -> Result<Vec<SessionDependency>, 
             .to_ascii_lowercase()
             .cmp(&right.path.to_string_lossy().to_ascii_lowercase())
     });
-    Ok(dependencies)
+    let mut warnings = warnings
+        .into_iter()
+        .map(|((_, kind), basename)| PreflightImportWarning { basename, kind })
+        .collect::<Vec<_>>();
+    warnings.sort_by(|left, right| {
+        left.basename
+            .to_ascii_lowercase()
+            .cmp(&right.basename.to_ascii_lowercase())
+            .then_with(|| left.kind.cmp(&right.kind))
+    });
+    Ok(AdjacentImportDiscovery {
+        dependencies,
+        warnings,
+    })
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -309,6 +384,238 @@ struct TaskResult {
 struct DiagnosticHistory {
     count: usize,
     latest: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct MissingSuiteGap {
+    name: String,
+    version: i32,
+    sha_count: usize,
+    event_count: usize,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct MissingSuiteAggregate {
+    top: Vec<MissingSuiteGap>,
+    discovered_sha_count: usize,
+    scanned_sha_count: usize,
+    valid_failure_event_count: usize,
+    skipped_count: usize,
+    truncated: bool,
+}
+
+fn is_plain_directory(metadata: &fs::Metadata) -> bool {
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        return false;
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        metadata.file_attributes() & 0x400 == 0
+    }
+    #[cfg(not(windows))]
+    true
+}
+
+fn is_plain_file(metadata: &fs::Metadata) -> bool {
+    if !metadata.is_file() || metadata.file_type().is_symlink() {
+        return false;
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        metadata.file_attributes() & 0x400 == 0
+    }
+    #[cfg(not(windows))]
+    true
+}
+
+fn validated_event_suites(value: &serde_json::Value, sha: &str) -> Option<Vec<MissingSuite>> {
+    let valid = value.as_object().is_some_and(|object| object.len() == 8)
+        && value.get("schema").and_then(|v| v.as_str()) == Some(DIAGNOSTIC_SCHEMA)
+        && value.get("version").and_then(|v| v.as_u64()) == Some(DIAGNOSTIC_VERSION)
+        && value.get("timestamp").and_then(|v| v.as_u64()).is_some()
+        && value.get("success").and_then(|v| v.as_bool()) == Some(false)
+        && value
+            .get("operation")
+            .and_then(|v| v.as_str())
+            .is_some_and(|v| !v.is_empty() && v.len() <= MAX_DIAGNOSTIC_SUMMARY_BYTES)
+        && value
+            .get("summary")
+            .and_then(|v| v.as_str())
+            .is_some_and(|v| v.len() <= MAX_DIAGNOSTIC_SUMMARY_BYTES)
+        && value
+            .get("identity")
+            .and_then(|v| v.as_object())
+            .is_some_and(|identity| identity.len() == 2)
+        && value.pointer("/identity/sha256").and_then(|v| v.as_str()) == Some(sha)
+        && value
+            .pointer("/identity/size")
+            .and_then(|v| v.as_u64())
+            .is_some()
+        && value
+            .get("diagnostics")
+            .and_then(|v| v.as_object())
+            .is_some();
+    if !valid {
+        return None;
+    }
+    Some(
+        value
+            .pointer("/diagnostics/missing_suites")
+            .and_then(|value| value.as_array())
+            .into_iter()
+            .flatten()
+            .filter_map(|suite| {
+                let name = suite.get("name")?.as_str()?;
+                let version = i32::try_from(suite.get("version")?.as_i64()?).ok()?;
+                (version > 0 && valid_suite_name(name)).then(|| MissingSuite {
+                    name: name.to_owned(),
+                    version,
+                })
+            })
+            .fold(Vec::new(), |mut suites, suite| {
+                if suites.len() < 16 && !suites.contains(&suite) {
+                    suites.push(suite);
+                }
+                suites
+            }),
+    )
+}
+
+fn aggregate_missing_suites(repository: &Path) -> MissingSuiteAggregate {
+    let root = repository.join("target/harness-diagnostics");
+    let Ok(entries) = fs::read_dir(root) else {
+        return MissingSuiteAggregate::default();
+    };
+    let mut aggregate = MissingSuiteAggregate::default();
+    let mut directories = Vec::new();
+    for entry in entries {
+        let Ok(entry) = entry else {
+            aggregate.skipped_count += 1;
+            continue;
+        };
+        let name = entry.file_name();
+        let Some(sha) = name.to_str().filter(|name| decode_sha256(name).is_ok()) else {
+            aggregate.skipped_count += 1;
+            continue;
+        };
+        let Ok(metadata) = fs::symlink_metadata(entry.path()) else {
+            aggregate.skipped_count += 1;
+            continue;
+        };
+        if !is_plain_directory(&metadata) {
+            aggregate.skipped_count += 1;
+            continue;
+        }
+        aggregate.discovered_sha_count += 1;
+        if directories.len() == MAX_AGGREGATE_SHAS {
+            aggregate.truncated = true;
+            continue;
+        }
+        directories.push((sha.to_ascii_lowercase(), entry.path()));
+    }
+    directories.sort_by(|left, right| left.0.cmp(&right.0));
+    let mut counts = std::collections::BTreeMap::<(String, i32), (usize, usize)>::new();
+    let mut file_count = 0usize;
+    let mut total_bytes = 0u64;
+    for (sha, directory) in directories {
+        aggregate.scanned_sha_count += 1;
+        let Ok(files) = fs::read_dir(directory) else {
+            aggregate.skipped_count += 1;
+            continue;
+        };
+        let mut seen_for_sha = std::collections::BTreeSet::new();
+        for file in files {
+            if file_count == MAX_AGGREGATE_FILES {
+                aggregate.truncated = true;
+                break;
+            }
+            let Ok(file) = file else {
+                aggregate.skipped_count += 1;
+                continue;
+            };
+            let path = file.path();
+            if !file
+                .file_name()
+                .to_str()
+                .is_some_and(|name| name.ends_with(".local.json"))
+            {
+                aggregate.skipped_count += 1;
+                continue;
+            }
+            let Ok(metadata) = fs::symlink_metadata(&path) else {
+                aggregate.skipped_count += 1;
+                continue;
+            };
+            if !is_plain_file(&metadata)
+                || metadata.len() > MAX_DIAGNOSTIC_FILE_BYTES
+                || total_bytes.saturating_add(metadata.len()) > MAX_AGGREGATE_BYTES
+            {
+                aggregate.skipped_count += 1;
+                if total_bytes.saturating_add(metadata.len()) > MAX_AGGREGATE_BYTES {
+                    aggregate.truncated = true;
+                }
+                continue;
+            }
+            file_count += 1;
+            total_bytes += metadata.len();
+            let Ok(file) = fs::File::open(path) else {
+                aggregate.skipped_count += 1;
+                continue;
+            };
+            let mut bytes = Vec::new();
+            if file
+                .take(MAX_DIAGNOSTIC_FILE_BYTES + 1)
+                .read_to_end(&mut bytes)
+                .is_err()
+            {
+                aggregate.skipped_count += 1;
+                continue;
+            }
+            let Some(suites) = serde_json::from_slice(&bytes)
+                .ok()
+                .as_ref()
+                .and_then(|value| validated_event_suites(value, &sha))
+            else {
+                aggregate.skipped_count += 1;
+                continue;
+            };
+            aggregate.valid_failure_event_count += 1;
+            for suite in suites {
+                let key = (suite.name, suite.version);
+                counts.entry(key.clone()).or_default().1 += 1;
+                seen_for_sha.insert(key);
+            }
+        }
+        for key in seen_for_sha {
+            counts.entry(key).or_default().0 += 1;
+        }
+        if file_count == MAX_AGGREGATE_FILES {
+            break;
+        }
+    }
+    aggregate.top = counts
+        .into_iter()
+        .map(
+            |((name, version), (sha_count, event_count))| MissingSuiteGap {
+                name,
+                version,
+                sha_count,
+                event_count,
+            },
+        )
+        .collect();
+    aggregate.top.sort_by(|left, right| {
+        right
+            .sha_count
+            .cmp(&left.sha_count)
+            .then_with(|| right.event_count.cmp(&left.event_count))
+            .then_with(|| left.name.cmp(&right.name))
+            .then_with(|| left.version.cmp(&right.version))
+    });
+    aggregate.top.truncate(10);
+    aggregate
 }
 
 fn bounded_summary(value: &str) -> String {
@@ -483,6 +790,31 @@ fn persist_diagnostic(
     persist_diagnostic_with_nonce(
         repository, identity, operation, success, summary, details, &nonce,
     )
+}
+
+fn persist_preflight_warnings(
+    repository: &Path,
+    identity: &DispatchIdentity,
+    warnings: &[PreflightImportWarning],
+) -> Result<(), String> {
+    if warnings.is_empty() {
+        return Ok(());
+    }
+    let details = serde_json::json!({
+        "preflight_warnings": warnings.iter().map(|warning| serde_json::json!({
+            "basename": warning.basename,
+            "kind": warning.kind.as_str(),
+        })).collect::<Vec<_>>()
+    });
+    persist_diagnostic(
+        repository,
+        identity,
+        "preflight_import_discovery",
+        true,
+        "non-system imports may be unavailable",
+        &details,
+    )?;
+    Ok(())
 }
 
 fn load_diagnostic_history(repository: &Path, sha256: &str) -> DiagnosticHistory {
@@ -1510,11 +1842,14 @@ struct HarnessApp {
     task_kind: TaskKind,
     inspect_after_refresh: bool,
     diagnostic_history: DiagnosticHistory,
+    missing_suite_aggregate: MissingSuiteAggregate,
+    preflight_warnings: Vec<PreflightImportWarning>,
     diagnostic_warning: Option<String>,
 }
 
 impl HarnessApp {
     fn new(repository: PathBuf) -> Self {
+        let missing_suite_aggregate = aggregate_missing_suites(&repository);
         Self {
             repository,
             selection: None,
@@ -1563,8 +1898,31 @@ impl HarnessApp {
             task_kind: TaskKind::Generic,
             inspect_after_refresh: false,
             diagnostic_history: DiagnosticHistory::default(),
+            missing_suite_aggregate,
+            preflight_warnings: Vec::new(),
             diagnostic_warning: None,
         }
+    }
+
+    fn accept_adjacent_discovery(&mut self, discovery: AdjacentImportDiscovery) {
+        self.dependencies = discovery.dependencies;
+        self.preflight_warnings = discovery.warnings;
+        let Some(selection) = self.selection.as_ref() else {
+            return;
+        };
+        let identity = DispatchIdentity {
+            sha256: selection.sha256.clone(),
+            size: selection.size,
+        };
+        if selection.profile.is_none() {
+            if let Err(error) =
+                persist_preflight_warnings(&self.repository, &identity, &self.preflight_warnings)
+            {
+                self.diagnostic_warning = Some(format!("Diagnostic save warning: {error}"));
+            }
+        }
+        self.diagnostic_history = load_diagnostic_history(&self.repository, &identity.sha256);
+        self.missing_suite_aggregate = aggregate_missing_suites(&self.repository);
     }
 
     fn show_image_viewer(&mut self, ctx: &egui::Context) {
@@ -1920,8 +2278,8 @@ impl HarnessApp {
                 if identity_changed {
                     self.approved_dependencies.clear();
                     match discover_adjacent_imports(&path) {
-                        Ok(dependencies) => {
-                            self.dependencies = dependencies;
+                        Ok(discovery) => {
+                            self.accept_adjacent_discovery(discovery);
                             match self.approve_session() {
                                 Ok(()) => {
                                     self.inspect_after_refresh = true;
@@ -3073,6 +3431,7 @@ impl HarnessApp {
                                 load_diagnostic_history(&self.repository, &selection.sha256)
                             })
                             .unwrap_or_default();
+                        self.missing_suite_aggregate = aggregate_missing_suites(&self.repository);
                     }
                     Err(error) => {
                         self.diagnostic_warning = Some(format!("Diagnostic save warning: {error}"))
@@ -3118,8 +3477,8 @@ impl HarnessApp {
                 self.selection_stale = false;
                 self.diagnostic_history = load_diagnostic_history(&self.repository, hash);
                 match discover_adjacent_imports(Path::new(path)) {
-                    Ok(dependencies) => {
-                        self.dependencies = dependencies;
+                    Ok(discovery) => {
+                        self.accept_adjacent_discovery(discovery);
                         match self.approve_session() {
                             Ok(()) => inspect_selected_aex = true,
                             Err(error) => {
@@ -3208,6 +3567,7 @@ impl eframe::App for HarnessApp {
                 self.selection_stale = false;
                 self.diagnostic_history = DiagnosticHistory::default();
                 self.diagnostic_warning = None;
+                self.preflight_warnings.clear();
                 self.parameters.clear();
                 self.audio_input = None;
                 self.audio_effect_only = false;
@@ -3239,11 +3599,41 @@ impl eframe::App for HarnessApp {
                     }
                     if ui.button("Reload diagnostics").clicked() {
                         self.diagnostic_history = load_diagnostic_history(&self.repository, &selected_hash);
+                        self.missing_suite_aggregate = aggregate_missing_suites(&self.repository);
+                    }
+                    let aggregate = &self.missing_suite_aggregate;
+                    ui.label(RichText::new("Missing Suite gaps across all SHA directories").strong());
+                    ui.label(format!(
+                        "Coverage: {}/{} SHA directories; {} validated failure events",
+                        aggregate.scanned_sha_count,
+                        aggregate.discovered_sha_count,
+                        aggregate.valid_failure_event_count
+                    ));
+                    ui.label(format!(
+                        "Skipped entries/files: {}; truncated: {}",
+                        aggregate.skipped_count,
+                        if aggregate.truncated { "yes" } else { "no" }
+                    ));
+                    for gap in &aggregate.top {
+                        ui.monospace(format!(
+                            "{}@{}  SHA gaps={}  events={}",
+                            gap.name, gap.version, gap.sha_count, gap.event_count
+                        ));
                     }
                     ui.separator();
                     ui.label(RichText::new("Session dependency DLLs").strong());
                     if self.dependencies.is_empty() {
                         ui.label("No additional DLLs selected.");
+                    }
+                    for warning in &self.preflight_warnings {
+                        ui.colored_label(
+                            Color32::from_rgb(210, 145, 40),
+                            format!(
+                                "Preflight note: {} ({}) was not found beside the AEX; it may be supplied by the runtime environment.",
+                                warning.basename,
+                                warning.kind.as_str()
+                            ),
+                        );
                     }
                     let mut remove = None;
                     for (index, dependency) in self.dependencies.iter().enumerate() {
@@ -3262,6 +3652,7 @@ impl eframe::App for HarnessApp {
                         }
                         if ui.add_enabled(!self.busy && !self.dependencies.is_empty(), egui::Button::new("Clear all")).clicked() {
                             self.dependencies.clear();
+                            self.preflight_warnings.clear();
                             self.approved_dependencies.clear();
                             self.session_approved = true;
                             self.status = "Dependency list cleared.".into();
@@ -4981,6 +5372,198 @@ mod tests {
         }
     }
 
+    fn persist_missing_suite_event(
+        root: &Path,
+        identity: &DispatchIdentity,
+        nonce: &str,
+        suites: serde_json::Value,
+    ) {
+        persist_diagnostic_with_nonce(
+            root,
+            identity,
+            "render",
+            false,
+            "failed safely",
+            &serde_json::json!({"classification":"failed", "missing_suites":suites}),
+            nonce,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn missing_suite_aggregate_prefers_sha_coverage_and_separates_case_and_version() {
+        let root = temporary_directory("aggregate-bias");
+        let first = test_identity(0x10);
+        let second = test_identity(0x20);
+        for nonce in ["a", "b", "c"] {
+            persist_missing_suite_event(
+                &root,
+                &first,
+                nonce,
+                serde_json::json!([{"name":"Repeated Suite","version":1}]),
+            );
+        }
+        persist_missing_suite_event(
+            &root,
+            &first,
+            "d",
+            serde_json::json!([
+                {"name":"Covered Suite","version":1},
+                {"name":"covered suite","version":1},
+                {"name":"Covered Suite","version":2}
+            ]),
+        );
+        persist_missing_suite_event(
+            &root,
+            &second,
+            "e",
+            serde_json::json!([{"name":"Covered Suite","version":1}]),
+        );
+        let aggregate = aggregate_missing_suites(&root);
+        assert_eq!(aggregate.top[0].name, "Covered Suite");
+        assert_eq!(
+            (aggregate.top[0].sha_count, aggregate.top[0].event_count),
+            (2, 2)
+        );
+        assert!(aggregate.top.iter().any(|gap| gap.name == "covered suite"));
+        assert!(aggregate
+            .top
+            .iter()
+            .any(|gap| gap.name == "Covered Suite" && gap.version == 2));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn missing_suite_aggregate_skips_corrupt_oversize_and_sha_mismatch_without_private_fields() {
+        let root = temporary_directory("aggregate-bounds");
+        let identity = test_identity(0x30);
+        persist_missing_suite_event(
+            &root,
+            &identity,
+            "valid",
+            serde_json::json!([{"name":"PF World Suite","version":2}]),
+        );
+        let directory = diagnostic_directory(&root, &identity.sha256).unwrap();
+        fs::write(directory.join("corrupt.local.json"), b"not-json").unwrap();
+        fs::File::create(directory.join("oversize.local.json"))
+            .unwrap()
+            .set_len(MAX_DIAGNOSTIC_FILE_BYTES + 1)
+            .unwrap();
+        let mismatch = fs::read(directory.join("valid.local.json")).unwrap();
+        let mut mismatch: serde_json::Value = serde_json::from_slice(&mismatch).unwrap();
+        mismatch["identity"]["sha256"] = serde_json::json!("ff".repeat(32));
+        fs::write(
+            directory.join("mismatch.local.json"),
+            serde_json::to_vec(&mismatch).unwrap(),
+        )
+        .unwrap();
+        let aggregate = aggregate_missing_suites(&root);
+        assert_eq!(aggregate.valid_failure_event_count, 1);
+        assert!(aggregate.skipped_count >= 3);
+        let debug = format!("{aggregate:?}");
+        assert!(!debug.contains(&identity.sha256));
+        assert!(!debug.contains("local.json"));
+        assert!(!debug.contains("failed safely"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn missing_suite_aggregate_rejects_reparse_sha_directories() {
+        use std::os::windows::fs::symlink_dir;
+        let root = temporary_directory("aggregate-reparse");
+        let target = temporary_directory("aggregate-reparse-target");
+        let diagnostics = root.join("target/harness-diagnostics");
+        fs::create_dir_all(&diagnostics).unwrap();
+        let link = diagnostics.join("ab".repeat(32));
+        if symlink_dir(&target, &link).is_ok() {
+            let aggregate = aggregate_missing_suites(&root);
+            assert_eq!(aggregate.scanned_sha_count, 0);
+            assert_eq!(aggregate.skipped_count, 1);
+        }
+        fs::remove_dir_all(root).unwrap();
+        fs::remove_dir_all(target).unwrap();
+    }
+
+    #[test]
+    fn adjacent_import_resolution_tracks_normal_delay_missing_present_and_system() {
+        let mut adjacent = std::collections::HashMap::new();
+        adjacent.insert("present.dll".into(), PathBuf::from("present.dll"));
+        let mut warnings = std::collections::BTreeMap::new();
+        assert!(resolve_adjacent_import(
+            "present.dll",
+            ImportKind::Normal,
+            &adjacent,
+            &mut warnings
+        )
+        .is_some());
+        assert!(resolve_adjacent_import(
+            "missing.dll",
+            ImportKind::Normal,
+            &adjacent,
+            &mut warnings
+        )
+        .is_none());
+        assert!(resolve_adjacent_import(
+            "missing.dll",
+            ImportKind::Delay,
+            &adjacent,
+            &mut warnings
+        )
+        .is_none());
+        resolve_adjacent_import("missing.dll", ImportKind::Normal, &adjacent, &mut warnings);
+        resolve_adjacent_import(
+            "api-ms-win-core-file-l1-1-0.dll",
+            ImportKind::Delay,
+            &adjacent,
+            &mut warnings,
+        );
+        assert_eq!(warnings.len(), 2);
+        assert!(warnings.contains_key(&("missing.dll".into(), ImportKind::Normal)));
+        assert!(warnings.contains_key(&("missing.dll".into(), ImportKind::Delay)));
+        resolve_adjacent_import(
+            "C:\\private\\secret.dll",
+            ImportKind::Normal,
+            &adjacent,
+            &mut warnings,
+        );
+        assert_eq!(warnings.len(), 2);
+    }
+
+    #[test]
+    fn preflight_warning_event_contains_only_basenames_and_kinds() {
+        let root = temporary_directory("preflight-privacy");
+        let identity = test_identity(0x42);
+        persist_preflight_warnings(
+            &root,
+            &identity,
+            &[PreflightImportWarning {
+                basename: "helper.dll".into(),
+                kind: ImportKind::Delay,
+            }],
+        )
+        .unwrap();
+        let directory = diagnostic_directory(&root, &identity.sha256).unwrap();
+        let path = fs::read_dir(directory)
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        let value: serde_json::Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+        assert_eq!(value["success"], true);
+        assert_eq!(
+            value["diagnostics"]["preflight_warnings"][0],
+            serde_json::json!({
+                "basename":"helper.dll", "kind":"delay"
+            })
+        );
+        let diagnostics = value["diagnostics"].to_string();
+        assert!(!diagnostics.contains("path"));
+        assert!(!diagnostics.contains("error"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn native_dispatch_keeps_identity_when_selection_changes() {
         let mut app = HarnessApp::new(temporary_directory("identity-race"));
@@ -5643,7 +6226,8 @@ mod tests {
         fs::create_dir(&root).unwrap();
         let valid = root.join("valid.aex");
         fs::copy(std::env::current_exe().unwrap(), &valid).unwrap();
-        assert!(discover_adjacent_imports(&valid).unwrap().is_empty());
+        let discovery = discover_adjacent_imports(&valid).unwrap();
+        assert!(discovery.dependencies.is_empty());
 
         let malformed = root.join("malformed.aex");
         fs::write(&malformed, b"not a PE image").unwrap();

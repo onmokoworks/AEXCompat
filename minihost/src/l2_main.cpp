@@ -4208,6 +4208,13 @@ struct AdvTimeDisplayPrefVersion3 {
   uint8_t use_feet_frames;
 };
 static_assert(sizeof(AdvTimeDisplayPrefVersion3) == 16);
+struct AdvTimeDisplayPrefVersion1 {
+  char time_display_format;
+  char framemax;
+  char nondrop30;
+  char frames_per_foot;
+};
+static_assert(sizeof(AdvTimeDisplayPrefVersion1) == 4);
 
 constexpr int64_t kHeadlessFramesPerSecond = 30;
 constexpr std::size_t kPfMaxTimeBufferSize = 32;
@@ -4261,6 +4268,16 @@ int32_t __cdecl adv_time_get_display_pref(AdvTimeDisplayPrefVersion3* pref,
   *starting_frame = 0;
   return 0;
 }
+int32_t __cdecl adv_time_get_display_pref_v1(AdvTimeDisplayPrefVersion1* pref,
+                                              int32_t* starting_frame) {
+  if (!pref || !starting_frame) return 4;
+  pref->time_display_format = 1;
+  pref->framemax = static_cast<char>(kHeadlessFramesPerSecond);
+  pref->nondrop30 = 1;
+  pref->frames_per_foot = 0;
+  *starting_frame = 0;
+  return 0;
+}
 int32_t __cdecl adv_time_count_frames(const HostTime* start, const HostTime* step,
                                       uint8_t include_partial, int32_t* frame_count) {
   if (frame_count) *frame_count = 0;
@@ -4281,12 +4298,28 @@ int32_t __cdecl adv_time_count_frames(const HostTime* start, const HostTime* ste
   return 0;
 }
 
-std::array<void*, 5> g_adv_time_suite4{
-    reinterpret_cast<void*>(&adv_time_format_active),
-    reinterpret_cast<void*>(&adv_time_format),
-    reinterpret_cast<void*>(&adv_time_format_plus),
-    reinterpret_cast<void*>(&adv_time_get_display_pref),
-    reinterpret_cast<void*>(&adv_time_count_frames)};
+struct AdvTimeSuite1 {
+  decltype(&adv_time_format_active) format_active;
+  decltype(&adv_time_format) format;
+  decltype(&adv_time_format_plus) format_plus;
+  decltype(&adv_time_get_display_pref_v1) get_display_pref;
+};
+struct AdvTimeSuite4 {
+  decltype(&adv_time_format_active) format_active;
+  decltype(&adv_time_format) format;
+  decltype(&adv_time_format_plus) format_plus;
+  decltype(&adv_time_get_display_pref) get_display_pref;
+  decltype(&adv_time_count_frames) count_frames;
+};
+static_assert(sizeof(AdvTimeSuite1) == 4 * sizeof(void*));
+static_assert(sizeof(AdvTimeSuite4) == 5 * sizeof(void*));
+static_assert(std::is_same_v<decltype(AdvTimeSuite1::format_active), decltype(AdvTimeSuite4::format_active)>);
+static_assert(std::is_same_v<decltype(AdvTimeSuite1::format), decltype(AdvTimeSuite4::format)>);
+static_assert(std::is_same_v<decltype(AdvTimeSuite1::format_plus), decltype(AdvTimeSuite4::format_plus)>);
+AdvTimeSuite1 g_adv_time_suite1{&adv_time_format_active, &adv_time_format,
+    &adv_time_format_plus, &adv_time_get_display_pref_v1};
+AdvTimeSuite4 g_adv_time_suite4{&adv_time_format_active, &adv_time_format,
+    &adv_time_format_plus, &adv_time_get_display_pref, &adv_time_count_frames};
 struct PfAdvItemSuite1;
 extern PfAdvItemSuite1 g_adv_item_suite1;
 std::array<void*, 2> g_drawbot_draw_suite1{};
@@ -12016,8 +12049,13 @@ int32_t __cdecl acquire_suite(const char* name, int32_t version, const void** su
     record_suite_acquire(name, version);
     return 0;
   }
+  if (name && std::strcmp(name, "PF AE Adv Time Suite") == 0 && version == 1) {
+    *suite = &g_adv_time_suite1;
+    record_suite_acquire(name, version);
+    return 0;
+  }
   if (name && std::strcmp(name, "PF AE Adv Time Suite") == 0 && version == 4) {
-    *suite = g_adv_time_suite4.data();
+    *suite = &g_adv_time_suite4;
     record_suite_acquire(name, version);
     return 0;
   }
@@ -19631,6 +19669,34 @@ bool verify_pf_adv_app_suite_versions() {
       g_suite_releases == releases_before + 2 && suite_leases_balanced();
 }
 
+bool verify_pf_adv_time_suite1() {
+  struct GuardedPref { uint32_t before{0x13579bdf}; AdvTimeDisplayPrefVersion1 pref{}; uint32_t after{0x2468ace0}; } guarded;
+  struct GuardedBuffer { uint32_t before{0x89abcdef}; char text[kPfMaxTimeBufferSize]{}; uint32_t after{0xfedcba98}; } formatted;
+  const void* suite1 = nullptr;
+  const void* suite4 = nullptr;
+  const uint32_t acquires_before = g_suite_acquires;
+  const uint32_t releases_before = g_suite_releases;
+  bool ok = acquire_suite("PF AE Adv Time Suite", 1, &suite1) == 0 &&
+      acquire_suite("PF AE Adv Time Suite", 4, &suite4) == 0 &&
+      suite1 == &g_adv_time_suite1 && suite4 == &g_adv_time_suite4 && suite1 != suite4;
+  int32_t starting_frame = -1;
+  if (suite1) {
+    const auto* v1 = static_cast<const AdvTimeSuite1*>(suite1);
+    ok = ok && v1->format_active == g_adv_time_suite4.format_active &&
+        v1->format == g_adv_time_suite4.format && v1->format_plus == g_adv_time_suite4.format_plus &&
+        v1->format_active(1, 1, 0, formatted.text) == 0 && std::strcmp(formatted.text, "30") == 0 &&
+        v1->get_display_pref(&guarded.pref, &starting_frame) == 0;
+  }
+  ok = ok && formatted.before == 0x89abcdef && formatted.after == 0xfedcba98 &&
+      guarded.before == 0x13579bdf && guarded.after == 0x2468ace0 &&
+      guarded.pref.time_display_format == 1 && guarded.pref.framemax == 30 &&
+      guarded.pref.nondrop30 == 1 && guarded.pref.frames_per_foot == 0 && starting_frame == 0;
+  ok = release_suite("PF AE Adv Time Suite", 4) == 0 &&
+      release_suite("PF AE Adv Time Suite", 1) == 0 && ok;
+  return ok && g_suite_acquires == acquires_before + 2 &&
+      g_suite_releases == releases_before + 2 && suite_leases_balanced();
+}
+
 int wmain(int argc, wchar_t **argv) {
 #ifdef AEXCOMPAT_RENDER_WORKER
   wchar_t cancel_gate[2]{};
@@ -19640,6 +19706,14 @@ int wmain(int argc, wchar_t **argv) {
       cancel_gate[0] == L'1';
 #endif
   SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX);
+  if (argc == 2 && std::wstring(argv[1]) == L"--self-test-pf-adv-time-suite1") {
+    const bool passed = verify_pf_adv_time_suite1();
+    std::cout << "{\"pf_adv_time_suite1\":\"" << (passed ? "passed" : "failed")
+              << "\",\"v1_slots\":4,\"v4_slots\":5,\"independent_identity\":true"
+              << ",\"guard_intact\":true,\"reverse_release\":true,\"suite_leases_balanced\":"
+              << (suite_leases_balanced() ? "true" : "false") << "}\n";
+    return passed ? 0 : 1;
+  }
   if (argc == 2 && std::wstring(argv[1]) == L"--self-test-pf-adv-app-suite") {
     const bool passed = verify_pf_adv_app_suite_versions();
     std::cout << "{\"pf_adv_app_suite_versions\":\""

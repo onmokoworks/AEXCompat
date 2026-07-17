@@ -114,11 +114,21 @@ int wmain(int argc, wchar_t** argv) {
     report("load_failed", true, false, false, GetLastError());
     return kLoadFailed;
   }
-  const bool entrypoint = GetProcAddress(module, "EffectMain") != nullptr ||
-                          GetProcAddress(module, "EntryPointFunc") != nullptr;
+  SetLastError(ERROR_SUCCESS);
+  const FARPROC effect_main = GetProcAddress(module, "EffectMain");
+  const DWORD effect_main_error = GetLastError();
+  SetLastError(ERROR_SUCCESS);
+  const FARPROC entry_point_func = GetProcAddress(module, "EntryPointFunc");
+  const DWORD entry_point_func_error = GetLastError();
+  const bool entrypoint = effect_main != nullptr || entry_point_func != nullptr;
   if (!entrypoint) {
     FreeLibrary(module);
-    report("entrypoint_missing", true, false, false);
+    const DWORD error = entry_point_func_error != ERROR_SUCCESS
+                            ? entry_point_func_error
+                            : (effect_main_error != ERROR_SUCCESS
+                                   ? effect_main_error
+                                   : ERROR_PROC_NOT_FOUND);
+    report("entrypoint_missing", true, true, false, error);
     return kEntrypointMissing;
   }
   FreeLibrary(module);

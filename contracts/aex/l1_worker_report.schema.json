@@ -27,5 +27,23 @@
     "selectors_executed": { "const": false },
     "render_performed": { "const": false },
     "win32_error": { "type": "integer", "minimum": 0 }
-  }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "status": { "enum": ["invalid_request", "identity_read_failed", "identity_mismatch"] } }, "required": ["status"] },
+      "then": { "properties": { "identity_verified": { "const": false }, "module_loaded": { "const": false }, "entrypoint_resolved": { "const": false }, "win32_error": { "const": 0 } } }
+    },
+    {
+      "if": { "properties": { "status": { "enum": ["dll_policy_failed", "load_failed"] } }, "required": ["status"] },
+      "then": { "properties": { "identity_verified": { "const": true }, "module_loaded": { "const": false }, "entrypoint_resolved": { "const": false }, "win32_error": { "minimum": 1 } } }
+    },
+    {
+      "if": { "properties": { "status": { "const": "entrypoint_missing" } }, "required": ["status"] },
+      "then": { "properties": { "identity_verified": { "const": true }, "module_loaded": { "const": true }, "entrypoint_resolved": { "const": false }, "win32_error": { "const": 127 } } }
+    },
+    {
+      "if": { "properties": { "status": { "const": "loaded_and_unloaded" } }, "required": ["status"] },
+      "then": { "properties": { "identity_verified": { "const": true }, "module_loaded": { "const": true }, "entrypoint_resolved": { "const": true }, "win32_error": { "const": 0 } } }
+    }
+  ]
 }

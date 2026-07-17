@@ -32,8 +32,8 @@
                                                   },
                                     "release_worker":  {
                                                            "path":  "target/minihost-build/aex_render_worker.exe",
-                                                           "size_bytes":  772608,
-                                                           "sha256":  "0d6a1bf6facf7c057d796f89c7f4f199a9092ef981fdf3315a3aa6e1cbc1df51"
+                                                           "size_bytes":  774144,
+                                                           "sha256":  "d8d9ae179af28bbe430ba1c3cc4774088df48cabaccd0138e93889d4f052c9f9"
                                                        }
                                 },
     "invocation":  {

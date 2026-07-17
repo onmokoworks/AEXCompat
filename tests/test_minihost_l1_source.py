@@ -29,6 +29,17 @@ class MinihostL1SourceTests(unittest.TestCase):
         for forbidden in ("AE_Effect", "AEConfig", "Param_Utils", "SPBasic"):
             self.assertNotIn(forbidden, text)
 
+    def test_entrypoint_errors_are_captured_without_load_stage_confusion(self):
+        text = SOURCE.read_text(encoding="utf-8")
+        for export in ("EffectMain", "EntryPointFunc"):
+            call = f'GetProcAddress(module, "{export}")'
+            position = text.index(call)
+            self.assertIn("SetLastError(ERROR_SUCCESS)", text[position - 100:position])
+            self.assertIn("GetLastError()", text[position:position + 150])
+        missing = text[text.index('report("entrypoint_missing"') - 300:]
+        self.assertIn("true, true, false, error", missing)
+        self.assertIn("ERROR_PROC_NOT_FOUND", missing)
+
 
 if __name__ == "__main__":
     unittest.main()
