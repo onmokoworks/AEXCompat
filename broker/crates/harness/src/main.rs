@@ -41,11 +41,82 @@ struct Selection {
     modified: Option<SystemTime>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 struct SessionDependency {
     path: PathBuf,
     size: u64,
     sha256: String,
+}
+
+fn discover_adjacent_imports(aex_path: &Path) -> Result<Vec<SessionDependency>, String> {
+    const MAX_DEPENDENCIES: usize = 64;
+    let directory = aex_path
+        .parent()
+        .ok_or("Selected AEX has no parent directory")?;
+    let mut adjacent = std::collections::HashMap::new();
+    for entry in fs::read_dir(directory).map_err(|error| error.to_string())? {
+        let path = entry.map_err(|error| error.to_string())?.path();
+        if path
+            .extension()
+            .and_then(|value| value.to_str())
+            .is_some_and(|value| value.eq_ignore_ascii_case("dll"))
+        {
+            let Some(name) = path
+                .file_name()
+                .and_then(|value| value.to_str())
+                .map(str::to_owned)
+            else {
+                continue;
+            };
+            let key = name.to_ascii_lowercase();
+            if adjacent.insert(key, path).is_some() {
+                return Err(format!(
+                    "Ambiguous case-insensitive dependency name: {name}"
+                ));
+            }
+        }
+    }
+
+    let mut pending = vec![aex_path.to_path_buf()];
+    let mut visited = std::collections::HashSet::new();
+    let mut dependencies = Vec::new();
+    while let Some(module_path) = pending.pop() {
+        let bytes = fs::read(&module_path).map_err(|error| error.to_string())?;
+        let pe = goblin::pe::PE::parse(&bytes).map_err(|error| {
+            format!(
+                "Could not inspect PE imports for {}: {error}",
+                module_path.display()
+            )
+        })?;
+        for imported_name in pe.libraries {
+            let key = imported_name.to_ascii_lowercase();
+            let Some(path) = adjacent.get(&key) else {
+                continue;
+            };
+            if !visited.insert(key) {
+                continue;
+            }
+            if dependencies.len() == MAX_DEPENDENCIES {
+                return Err(format!(
+                    "Adjacent dependency graph exceeds {MAX_DEPENDENCIES} DLLs"
+                ));
+            }
+            let dependency_bytes = fs::read(path).map_err(|error| error.to_string())?;
+            dependencies.push(SessionDependency {
+                path: path.clone(),
+                size: dependency_bytes.len() as u64,
+                sha256: format!("{:X}", Sha256::digest(&dependency_bytes)),
+            });
+            pending.push(path.clone());
+        }
+    }
+    dependencies.sort_by(|left, right| {
+        left.path
+            .to_string_lossy()
+            .to_ascii_lowercase()
+            .cmp(&right.path.to_string_lossy().to_ascii_lowercase())
+    });
+    Ok(dependencies)
 }
 
 struct TaskResult {
@@ -926,6 +997,7 @@ struct HarnessApp {
     matrix_results: Vec<MatrixCase>,
     receiver: Option<Receiver<TaskResult>>,
     task_kind: TaskKind,
+    inspect_after_refresh: bool,
 }
 
 impl HarnessApp {
@@ -976,6 +1048,7 @@ impl HarnessApp {
             matrix_results: Vec::new(),
             receiver: None,
             task_kind: TaskKind::Generic,
+            inspect_after_refresh: false,
         }
     }
 
@@ -1277,7 +1350,7 @@ impl HarnessApp {
                 let profile = profile_for_hash(&hash);
                 let identity_changed = hash != previous_hash;
                 self.selection = Some(Selection {
-                    path,
+                    path: path.clone(),
                     size: bytes.len() as u64,
                     sha256: hash,
                     profile,
@@ -1291,13 +1364,31 @@ impl HarnessApp {
                 self.output_image = None;
                 self.preview = None;
                 if identity_changed {
-                    self.session_approved = true;
                     self.approved_dependencies.clear();
-                    if !self.dependencies.is_empty() && self.approve_session().is_err() {
-                        self.session_approved = false;
+                    match discover_adjacent_imports(&path) {
+                        Ok(dependencies) => {
+                            self.dependencies = dependencies;
+                            match self.approve_session() {
+                                Ok(()) => {
+                                    self.inspect_after_refresh = true;
+                                    self.status =
+                                        "Rebuilt AEX identity and dependencies refreshed.".into();
+                                }
+                                Err(error) => {
+                                    self.invalidate_session_approval(
+                                        "Rebuilt dependency manifest validation failed.",
+                                    );
+                                    self.report = error;
+                                }
+                            }
+                        }
+                        Err(error) => {
+                            self.invalidate_session_approval(
+                                "Rebuilt dependency discovery failed safely.",
+                            );
+                            self.report = error;
+                        }
                     }
-                    self.status =
-                        "Rebuilt AEX identity refreshed. Inspect parameters again.".into();
                 } else {
                     self.status = "AEX identity is unchanged.".into();
                 }
@@ -2429,7 +2520,26 @@ impl HarnessApp {
                 self.approved_dependencies.clear();
                 self.approval_check = false;
                 self.selection_stale = false;
-                inspect_selected_aex = true;
+                match discover_adjacent_imports(Path::new(path)) {
+                    Ok(dependencies) => {
+                        self.dependencies = dependencies;
+                        match self.approve_session() {
+                            Ok(()) => inspect_selected_aex = true,
+                            Err(error) => {
+                                self.invalidate_session_approval(
+                                    "Automatic dependency manifest validation failed.",
+                                );
+                                self.report = error;
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        self.invalidate_session_approval(
+                            "Automatic adjacent dependency discovery failed safely.",
+                        );
+                        self.report = error;
+                    }
+                }
             }
         }
         if task_kind == TaskKind::InspectParameters && result.success {
@@ -2473,6 +2583,10 @@ impl eframe::App for HarnessApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll(ctx);
         self.check_selected_identity();
+        if self.inspect_after_refresh && !self.busy {
+            self.inspect_after_refresh = false;
+            self.inspect_parameters_async();
+        }
         egui::TopBottomPanel::top("header").show(ctx, |ui| {
             ui.add_space(10.0);
             ui.heading(RichText::new("AEXCompat Effect Harness").size(25.0));
@@ -4639,9 +4753,10 @@ mod tests {
     #[test]
     fn rebuilt_dev_binary_is_rehashed_and_automatically_enabled() {
         let path = temporary_aex("reload");
-        fs::write(&path, b"first build").unwrap();
+        let mut first_build = fs::read(std::env::current_exe().unwrap()).unwrap();
+        fs::write(&path, &first_build).unwrap();
         let metadata = fs::metadata(&path).unwrap();
-        let first_hash = format!("{:X}", Sha256::digest(b"first build"));
+        let first_hash = format!("{:X}", Sha256::digest(&first_build));
         let mut app = HarnessApp::new(std::env::temp_dir());
         app.selection = Some(Selection {
             path: path.clone(),
@@ -4654,7 +4769,8 @@ mod tests {
         app.trust_rebuilds = true;
         app.last_identity_check = Instant::now() - Duration::from_secs(1);
 
-        fs::write(&path, b"second build with a different size").unwrap();
+        first_build.extend_from_slice(b"second build");
+        fs::write(&path, &first_build).unwrap();
         app.check_selected_identity();
         assert!(app.selection_stale);
 
@@ -4663,13 +4779,38 @@ mod tests {
         assert_ne!(refreshed.sha256, first_hash);
         assert!(!app.selection_stale);
         assert!(app.session_approved);
+        assert!(app.inspect_after_refresh);
         assert!(app.parameters.is_empty());
         assert!(app.preview.is_none());
 
         app.trust_rebuilds = false;
-        fs::write(&path, b"third build").unwrap();
+        first_build.extend_from_slice(b"third build");
+        fs::write(&path, &first_build).unwrap();
         app.refresh_aex();
         assert!(app.session_approved);
         fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn adjacent_import_discovery_accepts_a_valid_pe_and_rejects_malformed_input() {
+        let root = std::env::temp_dir().join(format!(
+            "aexcompat-import-discovery-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir(&root).unwrap();
+        let valid = root.join("valid.aex");
+        fs::copy(std::env::current_exe().unwrap(), &valid).unwrap();
+        assert!(discover_adjacent_imports(&valid).unwrap().is_empty());
+
+        let malformed = root.join("malformed.aex");
+        fs::write(&malformed, b"not a PE image").unwrap();
+        assert!(discover_adjacent_imports(&malformed)
+            .unwrap_err()
+            .contains("Could not inspect PE imports"));
+        fs::remove_dir_all(root).unwrap();
     }
 }
