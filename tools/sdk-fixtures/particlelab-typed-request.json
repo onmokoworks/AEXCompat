@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "timing": { "frame": 1, "fps": 30, "duration_frames": 300 },
+  "assignments": [
+    { "slot": 8, "value": 1 },
+    { "slot": 9, "components": [42.0, 58.0] },
+    { "slot": 11, "layer": "target/gpu-effects/probe-invert.png" },
+    { "slot": 18, "value": 240.0 },
+    { "slot": 47, "color": [255, 255, 96, 32] }
+  ]
+}

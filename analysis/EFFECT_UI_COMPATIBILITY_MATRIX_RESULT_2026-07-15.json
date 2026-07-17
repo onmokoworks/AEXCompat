@@ -1,0 +1,38 @@
+{
+  "schema_version": 1,
+  "subject": "Effect development UI six-case compatibility matrix",
+  "dimensions": [37, 23],
+  "cases": [
+    "classic/argb8",
+    "classic/argb16",
+    "classic/argb32f",
+    "smartfx/argb8",
+    "smartfx/argb16",
+    "smartfx/argb32f"
+  ],
+  "full_compatibility_fixture": {
+    "name": "Adobe SDK SDK_Invert_ProcAmp CPU observation build",
+    "sha256": "f782038561c0c62c018abada0f952a3cbbd21bbbcf57fb374a546f78601a24ad",
+    "case_count": 6,
+    "passed_count": 6,
+    "failed_count": 0
+  },
+  "partial_compatibility_fixture": {
+    "name": "owner-authored PF Null Echo Classic effect",
+    "sha256": "8bc33b2884524f0648b81c3f4a84d63c3dbb10d08014f0323a82fc92ad140b37",
+    "case_count": 6,
+    "passed_count": 3,
+    "failed_count": 3,
+    "classic_cases_passed": 3,
+    "smartfx_cases_failed": 3,
+    "smartfx_failure_stage": "result_rect_validation",
+    "all_cases_completed_after_first_failure": true,
+    "failed_cases_created_no_output": true
+  },
+  "invariants": {
+    "fresh_worker_per_case": true,
+    "distinct_output_per_case": true,
+    "one_failure_does_not_stop_remaining_cases": true,
+    "raw_worker_error_is_not_duplicated_into_ui_rows": true
+  }
+}

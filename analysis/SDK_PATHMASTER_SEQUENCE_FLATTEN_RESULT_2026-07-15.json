@@ -1,0 +1,50 @@
+{
+  "schema_version": 1,
+  "result": "pathmaster_sequence_data_flatten_resetup_render_roundtrip_completed",
+  "fixture": {
+    "source": "Adobe After Effects SDK Examples/Effect/PathMaster",
+    "sha256": "F6FA2C4977DFDEE094A0B00EC5146F3A4878258BE6D2B314EF2F680985969C40"
+  },
+  "abi": {
+    "sequence_setup_selector": 5,
+    "sequence_resetup_selector": 6,
+    "sequence_flatten_selector": 7,
+    "sequence_setdown_selector": 8
+  },
+  "roundtrip": {
+    "sequence_setup_error": 0,
+    "sequence_flatten_error": 0,
+    "sequence_resetup_error": 0,
+    "frame_render_error": 0,
+    "sequence_setdown_error": 0,
+    "unflat_to_flat_handle_replaced": true,
+    "flat_to_unflat_handle_replaced": true,
+    "flattened_handle_host_disposed": true,
+    "render_after_resetup_completed": true
+  },
+  "ownership": {
+    "handles_created": 3,
+    "handles_disposed": 3,
+    "handle_lifetimes_balanced": true,
+    "suite_acquires": 14,
+    "suite_releases": 14,
+    "suite_leases_balanced": true,
+    "world_lifetimes_balanced": true
+  },
+  "path_render_after_resetup": {
+    "checkout_calls": 1,
+    "checkin_calls": 1,
+    "mask_world_calls": 1,
+    "path_lifetimes_balanced": true,
+    "invalid_path_operations": 0,
+    "output_sha256": "efb5af5a12ef6aaa7e56bc19eefbb1923af383451e517a099a96d0cb366df3d9",
+    "guard_bytes_intact": true
+  },
+  "isolation": {
+    "broker_hash_revalidation": true,
+    "worker_timeout_ms": 30000,
+    "bounded_stage_allowlist_includes_sequence_flatten": true,
+    "worker_classification": "ok",
+    "exit_code": 0
+  }
+}

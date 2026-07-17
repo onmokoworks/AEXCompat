@@ -1,0 +1,74 @@
+{
+  "schema_version": 1,
+  "result": "sdk_paramarama_parameter_and_classic_render_contract_completed",
+  "fixture": {
+    "source": "Adobe After Effects SDK Examples/Effect/Paramarama",
+    "source_modified": false,
+    "build_toolset": "v143",
+    "sha256": "4AB18C55F9FC20EDED09663F50C45623272B0655AB0CBF06E7C121B6A35523B0"
+  },
+  "inspection": {
+    "reported_num_params_including_input": 9,
+    "editable_parameter_count": 8,
+    "parameters": [
+      { "slot": 1, "name": "An obsolete slider", "kind": "integer", "default": 93.0, "minimum": 0.0, "maximum": 100.0 },
+      { "slot": 2, "name": "Color to mix", "kind": "color", "default_argb": [255, 111, 33, 222] },
+      { "slot": 3, "name": "Some float value", "kind": "float", "default": 27.62, "minimum": 2.387, "maximum": 987.653 },
+      { "slot": 4, "name": "Some checkbox", "kind": "integer", "default": 0.0, "minimum": 0.0, "maximum": 1.0 },
+      { "slot": 5, "name": "An angle control", "kind": "angle", "default_components": [0.0] },
+      { "slot": 6, "name": "Pop-up param", "kind": "integer", "default": 1.0, "choices": ["Make Slower", "Make Jaggy", "(-", "Plan A", "Plan B"] },
+      { "slot": 7, "name": "3D Point", "kind": "point3d", "default_components": [50.0, 50.0, 50.0] },
+      { "slot": 8, "name": "Button", "kind": "button", "supervised": true }
+    ]
+  },
+  "copy_oracle": {
+    "requested_amount": 0,
+    "status": "render_completed",
+    "pixel_format": "argb8",
+    "input_sha256": "531fe73fe40a02dfa9271a0d17c0c658e327ab80f5f82748d799a3a07ba23b4d",
+    "output_sha256": "531fe73fe40a02dfa9271a0d17c0c658e327ab80f5f82748d799a3a07ba23b4d",
+    "pixel_exact_copy": true
+  },
+  "typed_convolve_oracle": {
+    "status": "render_completed",
+    "pixel_format": "argb8",
+    "input_sha256": "531fe73fe40a02dfa9271a0d17c0c658e327ab80f5f82748d799a3a07ba23b4d",
+    "output_sha256": "d68cbab9d96faad25178e826ae91ff4c7cecd27b8130ce5c050e079e1ac9b2dc",
+    "differing_input_pixels": 851,
+    "requested_values": {
+      "integer": 93,
+      "color_argb": [255, 111, 33, 222],
+      "float": 27.62,
+      "checkbox": 1,
+      "angle": [45.0],
+      "popup": 4,
+      "point3d": [25.0, 50.0, 75.0]
+    }
+  },
+  "classic_matrix": {
+    "case_count": 6,
+    "applicable_count": 2,
+    "passed_count": 2,
+    "unsupported_count": 4,
+    "failed_count": 0,
+    "argb8_pixels_changed": 851,
+    "argb16_pixels_changed": 851,
+    "argb32f_classification": "unsupported_pixel_depth",
+    "smartfx_classification": "unsupported_render_path"
+  },
+  "supervised_button": {
+    "slot": 8,
+    "selector_error": 0,
+    "return_message": "Paramarama button hit!",
+    "display_error_message_flag_set": true
+  },
+  "safety": {
+    "guard_bytes_intact": true,
+    "handle_lifetimes_balanced": true,
+    "world_lifetimes_balanced": true,
+    "suite_acquires": 1,
+    "suite_releases": 1,
+    "suite_leases_balanced": true,
+    "param_checkouts_balanced": true
+  }
+}

@@ -30,41 +30,179 @@ struct Request {
     host_context: Option<HostContext>,
 }
 
-#[derive(Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-struct HostContext {
-    mask_scene: MaskScene,
+pub struct HostContext {
+    pub mask_scene: MaskScene,
+    #[serde(default)]
+    pub spatial: Option<SpatialContext>,
+    #[serde(default)]
+    pub render_environment: Option<RenderEnvironment>,
+    #[serde(default)]
+    pub aux_channels: Vec<AuxChannel>,
+    /// Layer parameter slots whose pre-effect alpha plane may be exposed as COVR.
+    /// No other auxiliary plane is inferred from RGBA pixels.
+    #[serde(default)]
+    pub alpha_as_coverage_params: Vec<u32>,
 }
 
-#[derive(Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-struct MaskScene {
-    masks: Vec<MaskShape>,
+pub struct AuxChannel {
+    pub param_index: u32,
+    pub channel: AuxChannelDescriptor,
 }
 
-#[derive(Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-struct MaskShape {
-    open: bool,
-    vertices: Vec<MaskPoint>,
+pub struct AuxChannelDescriptor {
+    #[serde(rename = "type")]
+    pub channel_type: i32,
+    pub name: String,
+    pub data_type: AuxDataType,
+    pub dimension: u8,
+    pub width: u32,
+    pub height: u32,
+    /// Signed native plane stride. Negative values describe bottom-up storage.
+    #[serde(default)]
+    pub row_bytes: Option<i32>,
+    #[serde(default)]
+    pub origin_x: i32,
+    #[serde(default)]
+    pub origin_y: i32,
+    #[serde(default = "unit_scale")]
+    pub downsample_x: RationalScale,
+    #[serde(default = "unit_scale")]
+    pub downsample_y: RationalScale,
+    #[serde(default = "default_aux_coordinate_space")]
+    pub coordinate_space: String,
+    #[serde(default = "default_aux_units")]
+    pub units: String,
+    pub samples: Vec<AuxChannelSample>,
+}
+
+fn unit_scale() -> RationalScale {
+    RationalScale {
+        numerator: 1,
+        denominator: 1,
+    }
+}
+
+fn default_aux_coordinate_space() -> String {
+    "source_pixel".into()
+}
+fn default_aux_units() -> String {
+    "unitless".into()
+}
+
+#[derive(Clone, Copy, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AuxDataType {
+    F32le,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct AuxChannelSample {
+    pub time: i32,
+    pub time_scale: u32,
+    pub path: PathBuf,
+    pub sampling: AuxSampling,
+    pub interpretation: AuxInterpretation,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum AuxSampling {
+    Exact,
+    Hold,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum AuxInterpretation {
+    Depth,
+    Normals,
+    MotionVectors,
+    Generic,
+}
+
+#[derive(Clone, Copy, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct RenderEnvironment {
+    pub quality: RenderQuality,
+    pub field: RenderField,
+    pub shutter_angle: f64,
+    pub shutter_phase: f64,
+}
+
+#[derive(Clone, Copy, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RenderQuality {
+    Low,
+    High,
+}
+
+#[derive(Clone, Copy, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RenderField {
+    Frame,
+    Upper,
+    Lower,
 }
 
 #[derive(Clone, Copy, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-struct MaskPoint {
-    x: f64,
-    y: f64,
+pub struct SpatialContext {
+    pub downsample_x: RationalScale,
+    pub downsample_y: RationalScale,
+    pub pixel_aspect_ratio: RationalScale,
     #[serde(default)]
-    tangent_in: Option<MaskTangent>,
+    pub full_resolution_width: Option<u32>,
     #[serde(default)]
-    tangent_out: Option<MaskTangent>,
+    pub full_resolution_height: Option<u32>,
+    #[serde(default)]
+    pub pre_effect_source_origin_x: Option<i32>,
+    #[serde(default)]
+    pub pre_effect_source_origin_y: Option<i32>,
 }
 
 #[derive(Clone, Copy, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-struct MaskTangent {
-    x: f64,
-    y: f64,
+pub struct RationalScale {
+    pub numerator: i32,
+    pub denominator: u32,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct MaskScene {
+    pub masks: Vec<MaskShape>,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct MaskShape {
+    pub open: bool,
+    pub vertices: Vec<MaskPoint>,
+}
+
+#[derive(Clone, Copy, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct MaskPoint {
+    pub x: f64,
+    pub y: f64,
+    #[serde(default)]
+    pub tangent_in: Option<MaskTangent>,
+    #[serde(default)]
+    pub tangent_out: Option<MaskTangent>,
+}
+
+#[derive(Clone, Copy, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct MaskTangent {
+    pub x: f64,
+    pub y: f64,
 }
 
 struct Assignments(BTreeMap<String, ParameterValue>);
@@ -119,15 +257,20 @@ fn evaluate(
     request: &Request,
     profile: &PluginProfile,
 ) -> io::Result<(ValidatedAssignments, usize, Vec<ValidationError>)> {
-    if !matches!(request.schema_version, 2 | 3 | 4)
+    if !matches!(request.schema_version, 2 | 3 | 4 | 5)
         || request.schema_version == 2
             && request
                 .assignments
                 .0
                 .values()
                 .any(|value| !matches!(value, ParameterValue::Numeric(_)))
-        || request.schema_version == 4 && request.host_context.is_none()
-        || request.schema_version != 4 && request.host_context.is_some()
+        || matches!(request.schema_version, 4 | 5) && request.host_context.is_none()
+        || request.schema_version < 4 && request.host_context.is_some()
+        || request.schema_version < 5
+            && request
+                .host_context
+                .as_ref()
+                .is_some_and(|context| !context.aux_channels.is_empty())
     {
         return Err(invalid("render request identity mismatch"));
     }
@@ -175,7 +318,7 @@ fn validate_mask_context(context: &HostContext) -> io::Result<(usize, usize)> {
     Ok((context.mask_scene.masks.len(), vertex_count))
 }
 
-fn encode_mask_context(context: &HostContext) -> io::Result<String> {
+pub(crate) fn encode_mask_context(context: &HostContext) -> io::Result<String> {
     validate_mask_context(context)?;
     let mut encoded = String::from("v2|");
     for (mask_index, mask) in context.mask_scene.masks.iter().enumerate() {
@@ -201,6 +344,110 @@ fn encode_mask_context(context: &HostContext) -> io::Result<String> {
     Ok(encoded)
 }
 
+pub(crate) fn encode_spatial_context(context: &HostContext) -> io::Result<Option<String>> {
+    let Some(spatial) = context.spatial else {
+        return Ok(None);
+    };
+    let scales = [
+        spatial.downsample_x,
+        spatial.downsample_y,
+        spatial.pixel_aspect_ratio,
+    ];
+    if scales.iter().any(|scale| {
+        scale.numerator <= 0
+            || scale.numerator > 1_000_000
+            || scale.denominator == 0
+            || scale.denominator > 1_000_000
+    }) {
+        return Err(invalid("host spatial ratio is outside enabled range"));
+    }
+    let origin = match (
+        spatial.pre_effect_source_origin_x,
+        spatial.pre_effect_source_origin_y,
+    ) {
+        (None, None) => None,
+        (Some(x), Some(y)) if (-32768..=32768).contains(&x) && (-32768..=32768).contains(&y) => {
+            Some((x, y))
+        }
+        _ => return Err(invalid("host pre-effect source origin is invalid")),
+    };
+    match (
+        spatial.full_resolution_width,
+        spatial.full_resolution_height,
+        origin,
+    ) {
+        (None, None, None) => Ok(Some(format!(
+            "spatial:v1|{},{},{},{},{},{}",
+            scales[0].numerator,
+            scales[0].denominator,
+            scales[1].numerator,
+            scales[1].denominator,
+            scales[2].numerator,
+            scales[2].denominator
+        ))),
+        (Some(width), Some(height), None)
+            if (1..=32768).contains(&width) && (1..=32768).contains(&height) =>
+        {
+            Ok(Some(format!(
+                "spatial:v2|{},{},{},{},{},{},{},{}",
+                scales[0].numerator,
+                scales[0].denominator,
+                scales[1].numerator,
+                scales[1].denominator,
+                scales[2].numerator,
+                scales[2].denominator,
+                width,
+                height
+            )))
+        }
+        (width, height, Some((origin_x, origin_y)))
+            if width.is_none() == height.is_none()
+                && width.is_none_or(|value| (1..=32768).contains(&value))
+                && height.is_none_or(|value| (1..=32768).contains(&value)) =>
+        {
+            Ok(Some(format!(
+                "spatial:v3|{},{},{},{},{},{},{},{},{},{}",
+                scales[0].numerator,
+                scales[0].denominator,
+                scales[1].numerator,
+                scales[1].denominator,
+                scales[2].numerator,
+                scales[2].denominator,
+                width.unwrap_or(0),
+                height.unwrap_or(0),
+                origin_x,
+                origin_y
+            )))
+        }
+        _ => Err(invalid("host full-resolution dimensions are invalid")),
+    }
+}
+
+pub(crate) fn encode_render_environment(context: &HostContext) -> io::Result<Option<String>> {
+    let Some(environment) = context.render_environment else {
+        return Ok(None);
+    };
+    if !environment.shutter_angle.is_finite()
+        || !(0.0..=1.0).contains(&environment.shutter_angle)
+        || !environment.shutter_phase.is_finite()
+        || !(-1.0..=1.0).contains(&environment.shutter_phase)
+    {
+        return Err(invalid("host render environment is outside enabled range"));
+    }
+    let quality = match environment.quality {
+        RenderQuality::Low => 0,
+        RenderQuality::High => 1,
+    };
+    let field = match environment.field {
+        RenderField::Frame => 0,
+        RenderField::Upper => 1,
+        RenderField::Lower => 2,
+    };
+    let angle = (environment.shutter_angle * 65536.0).round() as i32;
+    let phase = (environment.shutter_phase * 65536.0).round() as i32;
+    Ok(Some(format!("render:v1|{quality},{field},{angle},{phase}")))
+}
+
 fn expected_hash(adapter: ParameterizedRenderAdapter, effective: &ValidatedAssignments) -> String {
     match adapter {
         ParameterizedRenderAdapter::ScatterMap => expected_argb8_hash(effective),
@@ -218,6 +465,45 @@ fn descriptors(
 
 fn invalid(message: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message.into())
+}
+
+pub(crate) fn validate_image_buffer_layout(
+    width: u64,
+    height: u64,
+    rowbytes: u64,
+    bytes_per_pixel: u64,
+    capacity: Option<u64>,
+    max_dimension: u64,
+    max_pixels: u64,
+    max_buffer_bytes: u64,
+) -> io::Result<u64> {
+    if width == 0 || height == 0 || width > max_dimension || height > max_dimension {
+        return Err(invalid("image dimensions are outside the enabled range"));
+    }
+    let pixels = width
+        .checked_mul(height)
+        .ok_or_else(|| invalid("image pixel count overflows"))?;
+    if pixels > max_pixels {
+        return Err(invalid("image pixel count exceeds the enabled limit"));
+    }
+    let minimum_rowbytes = width
+        .checked_mul(bytes_per_pixel)
+        .ok_or_else(|| invalid("image row size overflows"))?;
+    if bytes_per_pixel == 0 || rowbytes < minimum_rowbytes {
+        return Err(invalid("image rowbytes is smaller than a packed row"));
+    }
+    let required = rowbytes
+        .checked_mul(height)
+        .ok_or_else(|| invalid("image buffer size overflows"))?;
+    if required > max_buffer_bytes {
+        return Err(invalid("image buffer exceeds the enabled byte limit"));
+    }
+    if capacity.is_some_and(|capacity| capacity < required || capacity > max_buffer_bytes) {
+        return Err(invalid(
+            "image buffer capacity is inconsistent with its layout",
+        ));
+    }
+    Ok(required)
 }
 
 fn worker_echo_matches(
@@ -494,9 +780,10 @@ pub fn execute_smart(
             .count();
         (open_masks, tangent_vertices)
     });
-    let expected_mask_lifetime_count = request.host_context.as_ref().map(|context| {
-        u64::from(!context.mask_scene.masks.is_empty())
-    });
+    let expected_mask_lifetime_count = request
+        .host_context
+        .as_ref()
+        .map(|context| u64::from(!context.mask_scene.masks.is_empty()));
     if request.host_context.is_some() && worker_spec.request_mode != "--smart-mask-request" {
         return Err(invalid(
             "profile has no approved host mask context capability",
@@ -581,18 +868,29 @@ pub fn execute_smart(
             && report.get("smart_render_error") == Some(&json!(0))
             && report.get("result_rects_valid") == Some(&Value::Bool(true))
             && report.get("guard_bytes_intact") == Some(&Value::Bool(true))
-            && report.get("suite_acquires").and_then(Value::as_u64).is_some_and(|acquires| {
-                report.get("suite_releases").and_then(Value::as_u64).is_some_and(|releases| {
-                    report.get("live_suite_reference_count").and_then(Value::as_u64)
-                        == Some(acquires.saturating_sub(releases))
-                        && acquires >= releases
-                        && acquires <= 64
+            && report
+                .get("suite_acquires")
+                .and_then(Value::as_u64)
+                .is_some_and(|acquires| {
+                    report
+                        .get("suite_releases")
+                        .and_then(Value::as_u64)
+                        .is_some_and(|releases| {
+                            report
+                                .get("live_suite_reference_count")
+                                .and_then(Value::as_u64)
+                                == Some(acquires.saturating_sub(releases))
+                                && acquires >= releases
+                                && acquires <= 64
+                        })
                 })
-            })
             && report.get("handle_lifetimes_balanced") == Some(&Value::Bool(true))
             && report.get("live_handle_count").and_then(Value::as_u64) == Some(0)
             && report.get("live_handle_bytes").and_then(Value::as_u64) == Some(0)
-            && report.get("invalid_handle_operations").and_then(Value::as_u64) == Some(0)
+            && report
+                .get("invalid_handle_operations")
+                .and_then(Value::as_u64)
+                == Some(0)
             && report.get("handles_created") == report.get("handles_disposed")
             && report.get("handle_locks") == report.get("handle_unlocks")
             && worker_echo_matches(report, &manifest.profile, &effective)
@@ -616,8 +914,9 @@ pub fn execute_smart(
                         "stream_values_disposed",
                     ]
                     .iter()
-                    .all(|field| report.get(*field).and_then(Value::as_u64)
-                        == expected_mask_lifetime_count)
+                    .all(|field| {
+                        report.get(*field).and_then(Value::as_u64) == expected_mask_lifetime_count
+                    })
             })
             && report
                 .get("output_sha256")
@@ -698,16 +997,55 @@ pub fn execute_smart_suite_fault(
         expect_pixel_format_rejection,
         expect_outline_rejection,
     ) = match fault_id {
-        "mask_count_error" => ("--smart-mask-count-error-request", false, false, false, false, false, false, false),
-        "mask_count_crash" => ("--smart-mask-count-crash-request", true, false, false, false, false, false, false),
+        "mask_count_error" => (
+            "--smart-mask-count-error-request",
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+        ),
+        "mask_count_crash" => (
+            "--smart-mask-count-crash-request",
+            true,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+        ),
         "mask_double_dispose" => (
-            "--smart-mask-double-dispose-request", false, true, false, false, false, false, false,
+            "--smart-mask-double-dispose-request",
+            false,
+            true,
+            false,
+            false,
+            false,
+            false,
+            false,
         ),
         "stream_dispose_with_live_value" => (
-            "--smart-stream-live-value-dispose-request", false, true, false, false, false, false, false,
+            "--smart-stream-live-value-dispose-request",
+            false,
+            true,
+            false,
+            false,
+            false,
+            false,
+            false,
         ),
         "suite_release_without_acquire" => (
-            "--smart-suite-release-without-acquire-request", false, false, true, false, false, false, false,
+            "--smart-suite-release-without-acquire-request",
+            false,
+            false,
+            true,
+            false,
+            false,
+            false,
+            false,
         ),
         "handle_resize_while_locked" => (
             "--smart-handle-resize-while-locked-request",
@@ -877,12 +1215,21 @@ pub fn execute_smart_suite_fault(
                 && report.get("smart_render_error") == Some(&json!(0))
                 && report.get("guard_bytes_intact") == Some(&Value::Bool(true))
                 && report.get("suite_fault_observed") == Some(&Value::Bool(true))
-                && report.get("suite_acquires").and_then(Value::as_u64).is_some_and(|acquires| {
-                    report.get("suite_releases").and_then(Value::as_u64).is_some_and(|releases| {
-                        report.get("live_suite_reference_count").and_then(Value::as_u64)
-                            == Some(acquires.saturating_sub(releases)) && acquires >= releases
+                && report
+                    .get("suite_acquires")
+                    .and_then(Value::as_u64)
+                    .is_some_and(|acquires| {
+                        report
+                            .get("suite_releases")
+                            .and_then(Value::as_u64)
+                            .is_some_and(|releases| {
+                                report
+                                    .get("live_suite_reference_count")
+                                    .and_then(Value::as_u64)
+                                    == Some(acquires.saturating_sub(releases))
+                                    && acquires >= releases
+                            })
                     })
-                })
         })
     } else if expect_handle_rejection {
         runs.iter().all(|(classification, report)| {
@@ -1009,16 +1356,29 @@ pub fn execute_smart_suite_fault(
             "invalid_mask_operations":item.1.get("invalid_mask_operations")
         });
         let object = summary.as_object_mut().expect("summary is an object");
-        for field in ["stream_metadata_fault_observed", "stream_metadata_queries",
-                      "stream_duplicates", "invalid_stream_operations",
-                      "keyframe_fault_observed", "keyframe_mutations",
-                      "invalid_keyframe_operations", "dynamic_stream_fault_observed",
-                      "dynamic_stream_queries", "dynamic_stream_mutations",
-                      "invalid_dynamic_stream_operations", "aegp_memory_fault_observed",
-                      "aegp_memory_created", "aegp_memory_freed",
-                      "live_aegp_memory_handles", "live_aegp_memory_bytes",
-                      "invalid_aegp_memory_operations"] {
-            object.insert(field.to_string(), item.1.get(field).cloned().unwrap_or(Value::Null));
+        for field in [
+            "stream_metadata_fault_observed",
+            "stream_metadata_queries",
+            "stream_duplicates",
+            "invalid_stream_operations",
+            "keyframe_fault_observed",
+            "keyframe_mutations",
+            "invalid_keyframe_operations",
+            "dynamic_stream_fault_observed",
+            "dynamic_stream_queries",
+            "dynamic_stream_mutations",
+            "invalid_dynamic_stream_operations",
+            "aegp_memory_fault_observed",
+            "aegp_memory_created",
+            "aegp_memory_freed",
+            "live_aegp_memory_handles",
+            "live_aegp_memory_bytes",
+            "invalid_aegp_memory_operations",
+        ] {
+            object.insert(
+                field.to_string(),
+                item.1.get(field).cloned().unwrap_or(Value::Null),
+            );
         }
         summary
     };
@@ -1142,6 +1502,98 @@ pub fn execute_smart_mask_scene(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn aux_channel_json_is_strict_and_f32le_only() {
+        let json = r#"{"mask_scene":{"masks":[]},"aux_channels":[{"param_index":0,"channel":{"type":1146111048,"name":"depth","data_type":"f32le","dimension":1,"width":2,"height":1,"samples":[{"time":0,"time_scale":30,"path":"target/render-requests/depth.f32","sampling":"exact","interpretation":"depth"}]}}]}"#;
+        let context: HostContext = serde_json::from_str(json).unwrap();
+        assert_eq!(context.aux_channels.len(), 1);
+        assert!(serde_json::from_str::<HostContext>(
+            &json.replace("\"data_type\":\"f32le\"", "\"data_type\":\"f64le\"")
+        )
+        .is_err());
+        assert!(serde_json::from_str::<HostContext>(
+            &json.replace("\"dimension\":1", "\"dimension\":1,\"unknown\":true")
+        )
+        .is_err());
+        assert!(serde_json::from_str::<HostContext>(
+            &json.replace("\"param_index\":0", "\"param_index\":0,\"param_index\":1")
+        )
+        .is_err());
+        assert!(serde_json::from_str::<HostContext>(
+            &json.replace("\"sampling\":\"exact\"", "\"sampling\":\"nearest\"")
+        )
+        .is_err());
+        assert!(serde_json::from_str::<HostContext>(&json.replace(
+            "\"interpretation\":\"depth\"",
+            "\"interpretation\":\"position\""
+        ))
+        .is_err());
+    }
+
+    #[test]
+    fn image_buffer_layout_checks_stride_capacity_and_limits() {
+        assert_eq!(
+            validate_image_buffer_layout(13, 9, 64, 4, Some(576), 4096, 16_777_216, 67_108_864)
+                .unwrap(),
+            576
+        );
+        assert!(validate_image_buffer_layout(
+            13,
+            9,
+            51,
+            4,
+            Some(576),
+            4096,
+            16_777_216,
+            67_108_864
+        )
+        .is_err());
+        assert!(validate_image_buffer_layout(
+            13,
+            9,
+            64,
+            4,
+            Some(575),
+            4096,
+            16_777_216,
+            67_108_864
+        )
+        .is_err());
+        assert!(validate_image_buffer_layout(
+            4096, 4096, 65_536, 16, None, 4096, 16_777_216, 67_108_864
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn image_buffer_layout_rejects_zero_and_checked_arithmetic_overflow() {
+        assert!(
+            validate_image_buffer_layout(0, 1, 4, 4, None, u64::MAX, u64::MAX, u64::MAX).is_err()
+        );
+        assert!(validate_image_buffer_layout(
+            u64::MAX,
+            2,
+            u64::MAX,
+            1,
+            None,
+            u64::MAX,
+            u64::MAX,
+            u64::MAX
+        )
+        .is_err());
+        assert!(validate_image_buffer_layout(
+            1,
+            2,
+            u64::MAX,
+            1,
+            None,
+            u64::MAX,
+            u64::MAX,
+            u64::MAX
+        )
+        .is_err());
+    }
     use serde_json::Value;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -1278,6 +1730,72 @@ mod tests {
     }
 
     #[test]
+    fn spatial_context_is_bounded_and_transport_stable() {
+        let context: HostContext = serde_json::from_str(
+            r#"{"mask_scene":{"masks":[]},"spatial":{"downsample_x":{"numerator":1,"denominator":2},"downsample_y":{"numerator":3,"denominator":4},"pixel_aspect_ratio":{"numerator":10,"denominator":11}}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            encode_spatial_context(&context).unwrap().as_deref(),
+            Some("spatial:v1|1,2,3,4,10,11")
+        );
+
+        let dimensions: HostContext = serde_json::from_str(
+            r#"{"mask_scene":{"masks":[]},"spatial":{"downsample_x":{"numerator":1,"denominator":2},"downsample_y":{"numerator":1,"denominator":2},"pixel_aspect_ratio":{"numerator":1,"denominator":1},"full_resolution_width":74,"full_resolution_height":46}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            encode_spatial_context(&dimensions).unwrap().as_deref(),
+            Some("spatial:v2|1,2,1,2,1,1,74,46")
+        );
+
+        let origin: HostContext = serde_json::from_str(
+            r#"{"mask_scene":{"masks":[]},"spatial":{"downsample_x":{"numerator":1,"denominator":2},"downsample_y":{"numerator":1,"denominator":2},"pixel_aspect_ratio":{"numerator":1,"denominator":1},"full_resolution_width":74,"full_resolution_height":46,"pre_effect_source_origin_x":-7,"pre_effect_source_origin_y":9}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            encode_spatial_context(&origin).unwrap().as_deref(),
+            Some("spatial:v3|1,2,1,2,1,1,74,46,-7,9")
+        );
+
+        let unpaired: HostContext = serde_json::from_str(
+            r#"{"mask_scene":{"masks":[]},"spatial":{"downsample_x":{"numerator":1,"denominator":1},"downsample_y":{"numerator":1,"denominator":1},"pixel_aspect_ratio":{"numerator":1,"denominator":1},"full_resolution_width":74}}"#,
+        )
+        .unwrap();
+        assert!(encode_spatial_context(&unpaired).is_err());
+
+        let unpaired_origin: HostContext = serde_json::from_str(
+            r#"{"mask_scene":{"masks":[]},"spatial":{"downsample_x":{"numerator":1,"denominator":1},"downsample_y":{"numerator":1,"denominator":1},"pixel_aspect_ratio":{"numerator":1,"denominator":1},"pre_effect_source_origin_x":1}}"#,
+        )
+        .unwrap();
+        assert!(encode_spatial_context(&unpaired_origin).is_err());
+
+        let invalid: HostContext = serde_json::from_str(
+            r#"{"mask_scene":{"masks":[]},"spatial":{"downsample_x":{"numerator":1,"denominator":0},"downsample_y":{"numerator":1,"denominator":1},"pixel_aspect_ratio":{"numerator":1,"denominator":1}}}"#,
+        )
+        .unwrap();
+        assert!(encode_spatial_context(&invalid).is_err());
+    }
+
+    #[test]
+    fn render_environment_is_fixed_point_bounded_and_transport_stable() {
+        let context: HostContext = serde_json::from_str(
+            r#"{"mask_scene":{"masks":[]},"render_environment":{"quality":"low","field":"upper","shutter_angle":0.5,"shutter_phase":-0.25}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            encode_render_environment(&context).unwrap().as_deref(),
+            Some("render:v1|0,1,32768,-16384")
+        );
+
+        let invalid: HostContext = serde_json::from_str(
+            r#"{"mask_scene":{"masks":[]},"render_environment":{"quality":"high","field":"frame","shutter_angle":1.01,"shutter_phase":0}}"#,
+        )
+        .unwrap();
+        assert!(encode_render_environment(&invalid).is_err());
+    }
+
+    #[test]
     fn mask_context_accepts_open_and_rejects_excess_and_legacy_injection() {
         let open: Request = serde_json::from_str(
             r#"{"schema_version":4,"plugin_id":"maskoffset","assignments":{},"host_context":{"mask_scene":{"masks":[{"open":true,"vertices":[{"x":0,"y":0},{"x":1,"y":0},{"x":0,"y":1}]}]}}}"#,
@@ -1314,6 +1832,10 @@ mod tests {
                     ],
                 }],
             },
+            spatial: None,
+            render_environment: None,
+            aux_channels: Vec::new(),
+            alpha_as_coverage_params: Vec::new(),
         };
         assert!(validate_mask_context(&excessive).is_err());
 

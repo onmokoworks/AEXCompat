@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "captured_at": "2026-07-15",
+  "scope": "PF_CHECKOUT_LAYER_AUDIO time-window conversion and host-owned lifetime",
+  "transport": {"sample_rate":44100,"sample_format":"float32_le","channels":1,"source_samples":16},
+  "conversion": {
+    "start_sample": "floor(start_time * 44100 / time_scale)",
+    "end_sample": "ceil((start_time + duration) * 44100 / time_scale)",
+    "outside_source": "zero-filled silence",
+    "maximum_returned_samples": 10000000
+  },
+  "cases": [
+    {"fixture":"pf_visual_audio_sidecar_probe","sha256":"65fb3d968301d99336c88eafb7dd529ff8f5e8043d357ddc8c141f818564035b","request":{"start_time":4,"duration":6,"time_scale":44100},"returned":{"start_sample":4,"sample_count":6,"silence_samples":0,"first_sample":0.25,"last_sample":0.5625},"status":"render_completed"},
+    {"fixture":"pf_visual_audio_boundary_probe","sha256":"76a6c598d78dd6b237ea9807e15cfc4cd020cb0dc2759d848642337d8e683c20","verified_windows":[{"start_time":-2,"duration":20,"time_scale":44100,"sample_count":20,"silence_samples":4},{"start_time":14,"duration":8,"time_scale":44100,"sample_count":8,"silence_samples":6},{"start_time":3,"duration":0,"time_scale":44100,"sample_count":0,"data_is_null":true},{"start_time":1,"duration":1,"time_scale":30000,"start_sample":1,"sample_count":2}],"checkout_calls":4,"get_data_calls":4,"checkin_calls":4,"invalid_audio_operations":0,"audio_lifetimes_balanced":true,"status":"render_completed"},
+    {"fixture":"Adobe SDK SDK_Backwards.aex","sha256":"4e964032194c0f8faafc4c9178f5113f8eec61d678d6c3332844a673854dfda0","request":{"start_time":0,"duration":16,"time_scale":44100},"returned":{"start_sample":0,"sample_count":16,"silence_samples":0},"broker_output_sha256":"d87dfbb4e03c9af7d5735c716f737d97686aa2bca516c49a2ef41e4a2754d2b9","bitwise_exact_reverse":true,"status":"render_completed"}
+  ],
+  "conclusion": "AEXCompat maps SDK time units to a bounded host-owned 44.1 kHz checkout buffer, pads source-boundary gaps with silence, and keeps each handle valid until checkin."
+}

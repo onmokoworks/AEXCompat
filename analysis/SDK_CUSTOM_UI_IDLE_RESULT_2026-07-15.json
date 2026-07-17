@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "subject": "PF custom UI idle event inside a complete context lifecycle",
+  "event_sequence": [
+    "new_context",
+    "activate",
+    "idle",
+    "deactivate",
+    "close_context"
+  ],
+  "ccu_layer_ui": {
+    "fixture": "Adobe SDK CCU",
+    "target": "layer",
+    "lifecycle_errors": [0, 0, 0, 0, 0],
+    "context_stable": true,
+    "host_state_cleared_after_close": true,
+    "handle_lifetimes_balanced": true,
+    "suite_leases_balanced": true
+  },
+  "colorgrid_effect_ui": {
+    "fixture": "Adobe SDK ColorGrid",
+    "target": "effect_controls",
+    "lifecycle_errors": [0, 0, 0, 0, 0],
+    "context_stable": true,
+    "host_state_cleared_after_close": true,
+    "arbitrary_values_disposed": true,
+    "handle_lifetimes_balanced": true,
+    "suite_leases_balanced": true
+  }
+}

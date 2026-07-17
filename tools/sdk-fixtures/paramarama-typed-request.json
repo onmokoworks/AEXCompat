@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "timing": { "frame": 0, "fps": 30, "duration_frames": 300 },
+  "assignments": [
+    { "slot": 1, "value": 93 },
+    { "slot": 2, "color": [255, 111, 33, 222] },
+    { "slot": 3, "value": 27.62 },
+    { "slot": 4, "value": 1 },
+    { "slot": 5, "components": [45.0] },
+    { "slot": 6, "value": 4 },
+    { "slot": 7, "components": [25.0, 50.0, 75.0] }
+  ]
+}

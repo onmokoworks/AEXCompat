@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "captured_at": "2026-07-15",
+  "scope": "PF_OutFlag_I_USE_AUDIO admission for visual effects",
+  "sdk_constant": {"PF_OutFlag_I_USE_AUDIO": 1048576},
+  "cases": [
+    {"fixture":"pf_visual_audio_advertised_probe","sha256":"60d78922495cbb884075c4c5980b10b2e581f7b4a3ad3f6a86c807557ad73e56","status":"render_completed","audio_usage_advertised":true,"audio_checkout_allowed":true,"audio_source_available":false,"rejected_unadvertised_audio_checkouts":0,"output_sha256":"a51cbf8d8684c8bcc1f599394e2f125de03ec7555d7d3548fe98d81c94821eb8","guard_bytes_intact":true},
+    {"fixture":"pf_visual_audio_unadvertised_probe","sha256":"3aadd33167229e790a577e6358dfbb1da22b7ec602aa7f9ca3e3a852d1ee85d5","status":"render_completed","audio_usage_advertised":false,"audio_checkout_allowed":false,"audio_source_available":false,"rejected_unadvertised_audio_checkouts":1,"output_sha256":"a51cbf8d8684c8bcc1f599394e2f125de03ec7555d7d3548fe98d81c94821eb8","guard_bytes_intact":true},
+    {"fixture":"pf_visual_audio_sidecar_probe","sha256":"65fb3d968301d99336c88eafb7dd529ff8f5e8043d357ddc8c141f818564035b","status":"render_completed","broker_passed":true,"worker_classification":"ok","audio_usage_advertised":true,"audio_checkout_allowed":true,"audio_source_available":true,"audio_checkout_calls":1,"audio_get_data_calls":1,"audio_checkin_calls":1,"invalid_audio_operations":0,"last_audio_checkout_start_time":4,"last_audio_checkout_duration":6,"last_audio_checkout_time_scale":44100,"last_audio_window_start_sample":4,"last_audio_window_sample_count":6,"last_audio_window_silence_samples":0,"audio_lifetimes_balanced":true,"audio_sidecar_transport":"mono_f32le_44100","audio_sidecar_input_sha256":"fe2c378962118dff1b9b78dcdb81f5f4a190b62ec2d7a80ddd0f132c25931910","output_sha256":"ad63d51ef9d4076c5451440d795176471bd2b3cc7a51d9fa071cd9241b6d6fca","guard_bytes_intact":true},
+    {"fixture":"Adobe SDK SDK_Backwards.aex","sha256":"4e964032194c0f8faafc4c9178f5113f8eec61d678d6c3332844a673854dfda0","media_type":"audio_only","status":"render_completed","audio_usage_advertised":false,"audio_checkout_allowed":true,"audio_checkout_calls":1,"audio_checkin_calls":1,"last_audio_checkout_duration":16,"last_audio_checkout_time_scale":44100,"last_audio_window_sample_count":16,"invalid_audio_operations":0,"audio_lifetimes_balanced":true}
+  ],
+  "visual_audio_sidecar_transport_implemented": true,
+  "sidecar_limits": {"sample_format":"float32_le","channels":1,"sample_rate":44100,"maximum_samples":10000000,"supported_render_path":"classic_argb8"},
+  "conclusion": "Visual effects require I_USE_AUDIO admission; audio-only selectors are exempt. Advertised visual effects can checkout a bounded mono float32 sidecar during classic ARGB8 image rendering."
+}

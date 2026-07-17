@@ -1,0 +1,44 @@
+{
+  "schema_version": 1,
+  "fixture": "Adobe After Effects SDK SmartyPants",
+  "fixture_sha256": "47fe55f77600f041a3297b4558108fad5d6e886b6cc66eed2e51f88dac922ede",
+  "result": "dynamic_flags_and_smart_image_io_completed",
+  "descriptor": {
+    "reported_parameter_count": 3,
+    "effect_parameter_count": 2,
+    "channel_choices": 16,
+    "default_channel": 1,
+    "default_blend": 0.0,
+    "supports_deep_color": true,
+    "supports_float_color": true,
+    "supports_smart_render": true,
+    "supports_query_dynamic_flags": true
+  },
+  "lifecycle": {
+    "query_dynamic_flags_dispatched": true,
+    "query_dynamic_flags_error": 0,
+    "query_checkout_time": 0,
+    "query_checkout_time_step": 1,
+    "query_checkout_time_scale": 1,
+    "sequence_setup_error": 0,
+    "sequence_resetup_error": 0,
+    "sequence_setdown_error": 0,
+    "lifecycle_data_null": true
+  },
+  "render": {
+    "argb8_rgb_invert_oracle_exact": true,
+    "argb16_rgb_invert_oracle_exact": true,
+    "argb32f_rgb_invert_oracle_exact": true,
+    "output_rgba_sha256": "edef1a2fa6531ef01061747189b2bcaa9cd04cfb20d5ede0800922e6dfdb870a",
+    "parameter_checkout_count": 4,
+    "parameter_checkin_count": 4,
+    "automatic_parameter_checkin_count": 1,
+    "suite_acquire_count": 2,
+    "suite_release_count": 2,
+    "suite_leases_balanced": true,
+    "handle_lifetimes_balanced": true,
+    "world_lifetimes_balanced": true,
+    "parameter_checkouts_balanced": true,
+    "guard_bytes_intact": true
+  }
+}

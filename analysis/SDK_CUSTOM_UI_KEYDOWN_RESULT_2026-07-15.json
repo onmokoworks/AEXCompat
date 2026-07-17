@@ -1,0 +1,42 @@
+{
+  "schema_version": 1,
+  "subject": "PF_Event_KEYDOWN ABI and bounded lifecycle dispatch",
+  "abi": {
+    "source": "compiled Adobe After Effects SDK instrument",
+    "size": 20,
+    "offsets": {
+      "when": 0,
+      "screen_point": 4,
+      "keycode": 12,
+      "modifiers": 16
+    }
+  },
+  "input": {
+    "screen_point": [20, 20],
+    "keycode": 2147483713,
+    "meaning": "printable A",
+    "modifiers": 0
+  },
+  "observations": [
+    {
+      "fixture": "Adobe SDK CCU",
+      "target": "layer",
+      "lifecycle_errors": [0, 0, 0, 0, 0],
+      "context_stable": true,
+      "host_state_cleared_after_close": true
+    },
+    {
+      "fixture": "Adobe SDK ColorGrid",
+      "target": "effect_controls",
+      "lifecycle_errors": [0, 0, 0, 0, 0],
+      "context_stable": true,
+      "host_state_cleared_after_close": true
+    }
+  ],
+  "invariants": {
+    "exact_sha256_approval_required": true,
+    "reserved_keycode_bits_rejected": true,
+    "coordinates_bounded": true,
+    "worker_timeout_bounded": true
+  }
+}

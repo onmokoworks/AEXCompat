@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "status": "oracle_not_captured",
+  "date": "2026-07-16",
+  "probe": {
+    "path": "target/pf-color-oracle-build/Release/pf_color_oracle.aex",
+    "size_bytes": 46592,
+    "sha256": "c0a947dfbe045098465f9848c65698661cb9d50a400164e6aedabb8bbea46bb3"
+  },
+  "runner": "tools/ae-color-oracle-run.jsx",
+  "requested_callbacks": [
+    "PF Color Suite v1",
+    "PF Color16 Suite v1",
+    "PF ColorFloat Suite v1",
+    "legacy PF_ColorCallbacks"
+  ],
+  "captured_values": null,
+  "observations": [
+    "The probe source, PiPL, build runner, AE runner, and static tests were prepared.",
+    "The current probe validates world sizes, callback tables, suite pointers, and suite leases, and converts C++ allocation failures at the C ABI boundary.",
+    "The vector set now covers 8/16-bit achromatic and half-way boundaries, float signed zero, subnormal, normal, adjacent, and maximum-finite values, plus direct HLS/YIQ inverse inputs.",
+    "The runner records canAddProperty, returned name and matchName, and preserves separate native results for each requested depth.",
+    "No After Effects in-process render result was captured during this attempt.",
+    "No callback result, coefficient, rounding behavior, clamp behavior, or exceptional-float behavior is inferred."
+  ],
+  "conclusion": "AE oracle values remain unobserved; run tools/ae-color-oracle-run.jsx with the built probe installed before making compatibility claims."
+}

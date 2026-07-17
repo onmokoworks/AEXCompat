@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "timing": { "frame": 0, "fps": 30, "duration_frames": 300 },
+  "host_context": {
+    "mask_scene": { "masks": [] },
+    "render_environment": {
+      "quality": "low",
+      "field": "upper",
+      "shutter_angle": 0.5,
+      "shutter_phase": -0.25
+    }
+  },
+  "assignments": [
+    { "slot": 1, "layer": "target/gpu-effects/probe-invert.png" },
+    { "slot": 2, "value": 1.0 },
+    { "slot": 3, "value": 4.0 }
+  ]
+}

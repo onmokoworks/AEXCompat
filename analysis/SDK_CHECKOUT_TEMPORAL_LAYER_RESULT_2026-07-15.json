@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "fixture": "Adobe After Effects SDK Checkout",
+  "fixture_sha256": "7fa3de46062ae9d726eb75617aabc53e66ee7a7073f78f1ad1c45395978b4898",
+  "result": "render_completed",
+  "render": {
+    "pixel_format": "argb8",
+    "width": 4,
+    "height": 4,
+    "current_time": 10,
+    "frame_offset": 2,
+    "time_step": 3,
+    "time_scale": 30,
+    "checkout_slot": 2,
+    "checkout_time": 16,
+    "checkout_calls": 1,
+    "checkin_calls": 1,
+    "wide_time_checkout_allowed": true,
+    "rejected_temporal_param_checkouts": 0,
+    "param_checkouts_balanced": true,
+    "channel_count_queries": 1,
+    "options_button_name": "Whatever I want!",
+    "top_half_is_checked_out_layer": true,
+    "bottom_half_is_input_top_half": true,
+    "guard_bytes_intact": true,
+    "suite_leases_balanced": true,
+    "handle_lifetimes_balanced": true,
+    "world_lifetimes_balanced": true
+  }
+}

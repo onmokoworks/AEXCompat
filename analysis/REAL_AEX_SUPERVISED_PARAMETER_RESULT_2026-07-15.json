@@ -1,0 +1,40 @@
+{
+  "schema_version": 1,
+  "subject": "PF_ParamFlag_SUPERVISE current-value and dynamic-UI compatibility",
+  "fixture": "ParticleLab",
+  "fixture_sha256": "695e68380bce43b05a8aead8965e4b317ab88d1f6a91ba4baffe6f9c4a9d179d",
+  "request": "tools/sdk-fixtures/particlelab-supervised-change-request.json",
+  "observed_supervised_parameters": {
+    "button_count": 5,
+    "standard_parameter_count": 7,
+    "standard_slots": [8, 49, 54, 61, 88, 92, 102]
+  },
+  "dispatch": {
+    "slot": 8,
+    "kind": "integer",
+    "requested_value": 2,
+    "value_echo_matched": true,
+    "user_changed_param_error": 0,
+    "update_params_ui_advertised": true,
+    "update_params_ui_error": 0,
+    "conditional_ui_selectors_dispatched": true
+  },
+  "lifecycle": {
+    "global_setup_error": 0,
+    "params_setup_error": 0,
+    "sequence_setup_error": 0,
+    "sequence_resetup_error": 0,
+    "frame_setup_error": 0,
+    "frame_setdown_error": 0,
+    "sequence_setdown_error": 0,
+    "lifecycle_data_null": true
+  },
+  "invariants": {
+    "current_parameter_payload_validated_before_selector": true,
+    "non_supervised_slot_rejected_by_broker": true,
+    "standard_supervised_parameters_are_not_button_limited": true,
+    "ui_dispatches_on_supervised_value_change": true,
+    "dynamic_ui_flags_applied_atomically": true,
+    "worker_is_timeout_isolated": true
+  }
+}

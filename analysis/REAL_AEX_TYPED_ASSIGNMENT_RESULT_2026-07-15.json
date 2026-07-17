@@ -1,0 +1,81 @@
+{
+  "schema_version": 1,
+  "subject": "Strict mixed typed parameter assignments for Effect AEX debugging",
+  "fixture": "ParticleLab",
+  "assignment_file": "tools/sdk-fixtures/particlelab-typed-request.json",
+  "timing": {
+    "frame": 1,
+    "fps": 30,
+    "duration_frames": 300,
+    "current_time": 1,
+    "time_step": 1,
+    "total_time": 300,
+    "time_scale": 30
+  },
+  "fractional_timebase": {
+    "assignment_file": "tools/sdk-fixtures/particlelab-fractional-time-request.json",
+    "nominal_fps": 29.97002997002997,
+    "frame": 1,
+    "duration_frames": 300,
+    "current_time": 1001,
+    "time_step": 1001,
+    "total_time": 300300,
+    "time_scale": 30000,
+    "classic_passed": true,
+    "smartfx_passed": true,
+    "guard_bytes_intact": true,
+    "param_checkouts_balanced": true,
+    "world_lifetimes_balanced": true
+  },
+  "assigned": [
+    { "slot": 8, "kind": "integer", "value": 1 },
+    { "slot": 9, "kind": "point", "value": [42.0, 58.0] },
+    { "slot": 11, "kind": "layer", "dimensions": [37, 23] },
+    { "slot": 18, "kind": "float", "value": 240.0 },
+    { "slot": 47, "kind": "color", "argb8": [255, 255, 96, 32] }
+  ],
+  "classic": {
+    "passed": true,
+    "output_dimensions": [37, 23],
+    "frame_zero_output_matched": true,
+    "guard_bytes_intact": true,
+    "param_checkouts_balanced": true
+  },
+  "smartfx": {
+    "passed": true,
+    "output_dimensions": [1840, 1856],
+    "expanded_buffer_observed": true,
+    "frame_zero_output_matched": false,
+    "temporal_output_change_observed": true,
+    "guard_bytes_intact": true,
+    "param_checkouts_balanced": true
+  },
+  "worker_echo": {
+    "integer_value_matched": true,
+    "point_value_matched": true,
+    "float_value_matched": true,
+    "color_value_matched": true,
+    "layer_slot_matched": true
+  },
+  "strictness": {
+    "maximum_document_bytes": 65536,
+    "maximum_assignments": 1024,
+    "unknown_fields_rejected": true,
+    "duplicate_slots_rejected": true,
+    "wrong_typed_value_rejected": true,
+    "out_of_range_value_rejected": true,
+    "invalid_timing_rejected": true,
+    "timing_frame_range": [0, 10000000],
+    "timing_fps_range": [1, 1000],
+    "duration_frames_range": [1, 10000001],
+    "duration_independent_from_current_frame": true,
+    "fractional_timebase_supported": true,
+    "time_scale_range": [1, 1000000],
+    "time_step_range": [1, 100000],
+    "time_products_checked_for_i32_overflow": true,
+    "ui_save_load_roundtrip": true,
+    "ui_load_is_atomic": true,
+    "failed_assignment_is_atomic": true,
+    "rejected_output_created": false
+  }
+}

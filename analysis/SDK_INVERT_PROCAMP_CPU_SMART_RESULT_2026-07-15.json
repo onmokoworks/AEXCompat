@@ -1,0 +1,50 @@
+{
+  "schema_version": 1,
+  "fixture": "Adobe After Effects SDK SDK_Invert_ProcAmp CPU observation build",
+  "fixture_sha256": "f782038561c0c62c018abada0f952a3cbbd21bbbcf57fb374a546f78601a24ad",
+  "result": "smart_cpu_procamp_image_io_completed",
+  "build_boundary": {
+    "official_effect_source_modified": false,
+    "cuda_kernel_custom_build_excluded": true,
+    "hlsl_kernel_custom_build_excluded": true,
+    "cpu_filter_source_retained": true,
+    "gpu_execution_enabled": false
+  },
+  "descriptor": {
+    "reported_parameter_count": 5,
+    "effect_parameter_count": 4,
+    "parameters": ["Brightness", "Contrast", "Hue", "Saturation"],
+    "supports_deep_color": true,
+    "supports_float_color": true,
+    "supports_smart_render": true,
+    "advertises_gpu_render_possible": true
+  },
+  "render": {
+    "argb8_fixed_point_oracle_exact": true,
+    "argb8_ideal_invert_max_error": 1,
+    "argb16_default_invert_oracle_exact": true,
+    "argb32f_default_invert_oracle_exact": true,
+    "argb32f_adjusted_procamp_oracle_exact": true,
+    "argb8_rgba_sha256": "783f5ccf4fd91793da74431cb98871f429c362e9a551d890099d16d481fbd64e",
+    "argb16_and_argb32f_rgba_sha256": "edef1a2fa6531ef01061747189b2bcaa9cd04cfb20d5ede0800922e6dfdb870a",
+    "adjusted_argb32f_rgba_sha256": "1ab72b9083f688c67055ca609abccb1d9ec111bbc34a0ebaa16e20d0df6648d0",
+    "adjusted_parameters": {
+      "brightness": 25.0,
+      "contrast": 50.0,
+      "hue_degrees": 90.0,
+      "saturation": 50.0
+    },
+    "parameter_checkout_count": 4,
+    "parameter_checkin_count": 4,
+    "automatic_parameter_checkin_count": 4,
+    "gpu_render_possible": true,
+    "gpu_render_dispatched": false,
+    "suite_acquire_count": 2,
+    "suite_release_count": 2,
+    "suite_leases_balanced": true,
+    "handle_lifetimes_balanced": true,
+    "world_lifetimes_balanced": true,
+    "parameter_checkouts_balanced": true,
+    "guard_bytes_intact": true
+  }
+}

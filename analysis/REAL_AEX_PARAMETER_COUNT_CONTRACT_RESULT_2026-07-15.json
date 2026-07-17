@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "subject": "PF_InData num_params forwarding and Params Setup sanity check",
+  "sdk_contract": {
+    "implicit_input_layer_included": true,
+    "out_data_count_must_match_add_param_calls_plus_one": true,
+    "maximum_host_count": 1025,
+    "mismatch_rejected_before_lifecycle_or_render": true
+  },
+  "resizer_classic": {
+    "fixture": "Adobe SDK Resizer",
+    "explicit_parameter_count": 4,
+    "in_data_num_params": 5,
+    "passed": true
+  },
+  "patharray_classic": {
+    "fixture": "PathArray",
+    "explicit_parameter_count": 9,
+    "in_data_num_params": 10,
+    "passed": true
+  },
+  "patharray_smartfx": {
+    "fixture": "PathArray",
+    "explicit_parameter_count": 9,
+    "in_data_num_params": 10,
+    "passed": true
+  },
+  "invariants": {
+    "worker_report_is_bounded": true,
+    "broker_matches_interactive_descriptor_count": true,
+    "classic_and_smartfx_share_count_contract": true
+  }
+}

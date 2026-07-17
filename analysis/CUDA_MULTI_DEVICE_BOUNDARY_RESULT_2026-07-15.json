@@ -1,0 +1,46 @@
+{
+  "schema_version": 1,
+  "result": "cuda_device_enumeration_and_ordinal_boundary_completed",
+  "host": {
+    "driver_api_loaded_from_system32": true,
+    "device_count_api": "cuDeviceGetCount",
+    "maximum_published_devices": 16,
+    "observed_device_count": 1,
+    "observed_device_0": "NVIDIA GeForce RTX 4070 Ti"
+  },
+  "context_ownership": {
+    "primary_context_retained_per_published_device": true,
+    "selected_context_only_pushed_for_render": true,
+    "contexts_released_in_reverse_order": true,
+    "device_info_contains_device_and_context": true
+  },
+  "world_ownership": {
+    "gpu_world_records_device_index": true,
+    "dispose_uses_recorded_device_index": true,
+    "world_device_query_returns_recorded_index": true,
+    "memory_calls_reject_non_selected_device": true
+  },
+  "device_0_runtime": {
+    "fixture": "SDK_Invert_ProcAmp_CUDA.aex",
+    "gpu_render_dispatched": true,
+    "gpu_setup_error": 0,
+    "gpu_setdown_error": 0,
+    "selector_error": 0,
+    "render_error": 0,
+    "upload_bytes": 13616,
+    "download_bytes": 13616,
+    "allocations_created": 3,
+    "allocations_freed": 3,
+    "output_pixels_valid": true
+  },
+  "invalid_ordinal_runtime": {
+    "requested_device_index": 15,
+    "observed_device_count": 1,
+    "gpu_setup_error": -6,
+    "gpu_render_dispatched": false,
+    "device_allocations_created": 0,
+    "guard_bytes_intact": true,
+    "worker_process_crashed": false
+  },
+  "remaining": "Run the same selector and pixel oracle on physical CUDA device index 1 or greater when such hardware is available; DirectX and OpenCL remain separate framework boundaries."
+}

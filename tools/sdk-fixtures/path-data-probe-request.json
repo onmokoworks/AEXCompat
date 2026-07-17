@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "assignments": [],
+  "host_context": {
+    "mask_scene": {
+      "masks": [
+        {
+          "open": false,
+          "vertices": [
+            {"x": 8.0, "y": 5.0},
+            {"x": 29.0, "y": 5.0},
+            {"x": 29.0, "y": 18.0},
+            {"x": 8.0, "y": 18.0}
+          ]
+        }
+      ]
+    }
+  }
+}

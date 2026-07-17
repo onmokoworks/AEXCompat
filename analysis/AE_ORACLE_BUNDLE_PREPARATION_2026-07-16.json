@@ -1,0 +1,43 @@
+{
+  "schema_version": 1,
+  "status": "prepared_not_captured",
+  "bundle_manifest": {
+    "path": "target/ae-oracle-bundle/manifest.json",
+    "size_bytes": 1831,
+    "sha256": "edcfc14560b13d3c3b8d898b67ca493297f6356bf3d3edc8be0030e874ff58f2"
+  },
+  "probes": [
+    {
+      "id": "transform-multimatrix",
+      "artifact": "target/pf-transform-multimatrix-oracle-build/Release/pf_transform_multimatrix_oracle.aex",
+      "size_bytes": 10752,
+      "sha256": "93e4e991436c06332f1d50927c475feec76fef6511e27da110c148f396572b6f",
+      "runner_sha256": "cf08c7eb54f59229e6b5eca45dcd269beeb40b41045c1e8fd8b9a22844ef9c03"
+    },
+    {
+      "id": "path-curve",
+      "artifact": "target/pf-path-curve-probe-build/Release/pf_path_curve_probe.aex",
+      "size_bytes": 18944,
+      "sha256": "bfaefce43a617702ebf0c9a1a8b6ad3a3c7421908bbbf569f1a48763014407af",
+      "runner_sha256": "a6fc3c55d4ec4cf80d66d2a750790d5e7e614ac3b557f2bb37d6856269bd7caf"
+    },
+    {
+      "id": "color",
+      "artifact": "target/pf-color-oracle-build/Release/pf_color_oracle.aex",
+      "size_bytes": 46592,
+      "sha256": "c0a947dfbe045098465f9848c65698661cb9d50a400164e6aedabb8bbea46bb3",
+      "runner_sha256": "8be3f842a0ee1f2628eb8207f6578e91bfe01509ee2524839a2b557c0592e49f"
+    }
+  ],
+  "safety_contract": {
+    "self_elevates": false,
+    "requires_ae_stopped_for_install_remove": true,
+    "copy_and_removal_require_manifest_hash_match": true,
+    "fixed_install_child": "AEXCompatOracleBundle"
+  },
+  "observations": [
+    "All three capture runners use the shared AEXCOMPAT_AE_* environment contract.",
+    "Preparation does not modify the After Effects installation or an open project.",
+    "No After Effects oracle values or pixel-equivalence claims are recorded by this preparation result."
+  ]
+}

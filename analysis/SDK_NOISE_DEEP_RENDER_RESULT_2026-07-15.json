@@ -1,0 +1,66 @@
+{
+  "schema_version": 1,
+  "fixture": {
+    "source": "Adobe After Effects SDK Examples/Effect/SDK_Noise",
+    "build_toolset": "v143",
+    "sha256": "859F19C087956DA756A52E303EE3AFA497A24E2B0092A65FA0DEB949B4AFEB59"
+  },
+  "inspection": {
+    "status": "parameters_inspected",
+    "reported_num_params": 2,
+    "parameter": {
+      "slot": 1,
+      "disk_id": 1,
+      "type": 10,
+      "name": "Noise variation",
+      "valid_min": 0.0,
+      "valid_max": 1000.0,
+      "slider_min": 0.0,
+      "slider_max": 100.0,
+      "default": 10.0,
+      "precision": 1
+    }
+  },
+  "classic_argb8": {
+    "status": "render_completed",
+    "render_error": 0,
+    "input_sha256": "863d238f52f81aba4017c198af4d748cb57fe369e6216fdbacf45fd94037ecf7",
+    "output_sha256": "224f550568a9a50801fb3811f2633ad5864c9afb6d16cad2ceba7aa7a8d88ddc",
+    "guard_bytes_intact": true
+  },
+  "smart": [
+    {
+      "pixel_format": "argb8",
+      "status": "render_completed",
+      "pre_render_error": 0,
+      "render_error": 0,
+      "output_sha256": "224f550568a9a50801fb3811f2633ad5864c9afb6d16cad2ceba7aa7a8d88ddc",
+      "guard_bytes_intact": true,
+      "suite_leases_balanced": true
+    },
+    {
+      "pixel_format": "argb16",
+      "status": "render_completed",
+      "pre_render_error": 0,
+      "render_error": 0,
+      "output_sha256": "28a49cafff38c738de39e1c4cd8d0864dbc6ba073fcf70763fba8126ecb81fa7",
+      "guard_bytes_intact": true,
+      "suite_leases_balanced": true
+    },
+    {
+      "pixel_format": "argb32f",
+      "status": "render_completed",
+      "pre_render_error": 0,
+      "render_error": 0,
+      "output_sha256": "8eebf85bdf2565b6249998b9d690ae3fd9595b24279b03ec6397a56602cf5cbf",
+      "guard_bytes_intact": true,
+      "suite_leases_balanced": true
+    }
+  ],
+  "ownership_observation": {
+    "handle_lifetimes_balanced": false,
+    "live_handle_count": 1,
+    "live_handle_bytes": 8,
+    "reason": "SDK_Noise locks its pre_render_data handle again in SmartRender and registers no delete_pre_render_data_func"
+  }
+}

@@ -1,0 +1,62 @@
+{
+  "schema_version": 1,
+  "subject": "Real AEX effect-debug six-case matrix with AE pixel-depth negotiation",
+  "input": "target/gpu-effects/probe-invert.png",
+  "output_root": "target/real-aex-six-case-matrix/final-2026-07-15",
+  "cases_per_plugin": [
+    "classic/argb8",
+    "classic/argb16",
+    "classic/argb32f",
+    "smartfx/argb8",
+    "smartfx/argb16",
+    "smartfx/argb32f"
+  ],
+  "plugins": {
+    "CMYKMisreg": 6,
+    "MaskOffset": 2,
+    "MinimaxMap": 6,
+    "ONMK_ColorfulEcho": 6,
+    "ONMK_OpticalFlare": 6,
+    "ONMK_Starglow": 6,
+    "ONMK_TuiImage": 2,
+    "ParticleLab": 2,
+    "PathArray": 2,
+    "RefractionDispersion": 6,
+    "ScatterMap": 6,
+    "TuiImage": 2
+  },
+  "case_count": 72,
+  "applicable_count": 52,
+  "passed_count": 52,
+  "failed_count": 0,
+  "unsupported_count": 20,
+  "unsupported_pixel_depth_count": 20,
+  "selector_failure_count": 0,
+  "depth_negotiation": {
+    "argb8_requires_capability_flag": false,
+    "argb16_requires_out_flag_deep_color_aware": true,
+    "argb32f_requires_out_flag2_float_color_aware": true,
+    "unsupported_selectors_dispatched": false,
+    "unsupported_cases_are_failures": false,
+    "fully_depth_capable_plugins": 7,
+    "eight_bpc_only_plugins": 5
+  },
+  "superseded_observation": {
+    "passed_count": 72,
+    "reason": "The earlier matrix forced 16/32-bpc worlds into five effects that did not advertise those depths. AE would not dispatch those combinations, so they are no longer compatibility passes."
+  },
+  "compatibility_fix": {
+    "unconnected_layer_checkout_returns_zeroed_effect_world": true,
+    "param_def_value_move_before_checkin_supported": true,
+    "checkin_without_live_checkout_rejected": true,
+    "worker_isolated_per_case": true
+  },
+  "verification": {
+    "minihost_workers_built": true,
+    "cargo_workspace_tests_passed": true,
+    "cargo_broker_unit_tests": 43,
+    "cargo_harness_unit_tests": 7,
+    "python_tests_passed": 541,
+    "python_subtests_passed": 127
+  }
+}

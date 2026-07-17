@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "subject": "PF_Event_MOUSE_EXITED Layer/Comp-only dispatch",
+  "sdk_contract": "notification is valid for layer or comp custom UI only",
+  "positive_observation": {
+    "fixture": "Adobe SDK CCU",
+    "target": "layer",
+    "event_sequence": [
+      "new_context",
+      "activate",
+      "mouse_exited",
+      "deactivate",
+      "close_context"
+    ],
+    "lifecycle_errors": [0, 0, 0, 0, 0],
+    "context_stable": true,
+    "host_state_cleared_after_close": true,
+    "handle_lifetimes_balanced": true,
+    "suite_leases_balanced": true
+  },
+  "negative_observation": {
+    "fixture": "Adobe SDK ColorGrid",
+    "registered_target": "effect_controls",
+    "native_event_dispatched": false,
+    "worker_exit_code": 19
+  }
+}

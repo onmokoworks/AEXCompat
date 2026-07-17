@@ -1,0 +1,68 @@
+{
+  "schema_version": 1,
+  "subject": "AE reference pixel-comparison surface for Effect AEX debugging",
+  "comparison_space": "decoded RGBA8",
+  "metrics": [
+    "pixel_exact",
+    "differing_pixels",
+    "max_channel_error",
+    "mean_absolute_error"
+  ],
+  "ui": {
+    "reference_image_selection": true,
+    "input_output_reference_previews": true,
+    "dimension_mismatch_is_explicit": true,
+    "comparison_refreshes_after_render": true
+  },
+  "cli": {
+    "command": "--compare-images AE_REFERENCE AEX_OUTPUT",
+    "exact_exit_code": 0,
+    "pixel_difference_exit_code": 2,
+    "invalid_or_dimension_mismatch_exit_code": 1,
+    "json_report": true
+  },
+  "smoke_observations": {
+    "same_real_aex_png": {
+      "dimensions": [37, 23],
+      "pixel_count": 851,
+      "differing_pixels": 0,
+      "max_channel_error": 0,
+      "mean_absolute_error": 0.0,
+      "exit_code": 0
+    },
+    "two_distinct_real_aex_pngs": {
+      "dimensions": [37, 23],
+      "pixel_count": 851,
+      "differing_pixels": 851,
+      "max_channel_error": 255,
+      "mean_absolute_error": 101.0948883666275,
+      "exit_code": 2
+    }
+  },
+  "six_case_reference_matrix": {
+    "command": "--render-experimental-reference-matrix AEX INPUT AE_REFERENCE_DIRECTORY OUTPUT_DIRECTORY",
+    "reference_names": [
+      "classic-argb8.png",
+      "classic-argb16.png",
+      "classic-argb32f.png",
+      "smartfx-argb8.png",
+      "smartfx-argb16.png",
+      "smartfx-argb32f.png"
+    ],
+    "deterministic_scattermap_rerun": {
+      "workers_completed": 6,
+      "pixel_exact": 6,
+      "failed": 0,
+      "exit_code": 0
+    },
+    "missing_reference_negative_case": {
+      "workers_completed": 6,
+      "reference_validation_errors": 6,
+      "failed": 6,
+      "exit_code": 2,
+      "continued_after_first_failure": true
+    }
+  },
+  "ae_reference_corpus_available": false,
+  "remaining_evidence": "Export matching frames from After Effects and run the comparator against each AEXCompat output."
+}

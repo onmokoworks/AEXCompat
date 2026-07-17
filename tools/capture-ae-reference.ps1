@@ -1,0 +1,87 @@
+param(
+    [Parameter(Mandatory = $true)][string]$AfterEffects,
+    [Parameter(Mandatory = $true)][string]$TestedAex,
+    [Parameter(Mandatory = $true)][string]$InstalledAex,
+    [Parameter(Mandatory = $true)][string]$InputImage,
+    [Parameter(Mandatory = $true)][string]$OutputPng,
+    [Parameter(Mandatory = $true)][string]$EffectName,
+    [string]$ScriptPath,
+    [ValidateRange(0, 10000000)][int]$Frame = 0,
+    [ValidateRange(1, 1000)][int]$Fps = 30,
+    [ValidateRange(1, 10000001)][int]$DurationFrames = 300,
+    [ValidateSet(8, 16, 32)][int]$Bpc = 8,
+    [ValidateRange(5, 600)][int]$TimeoutSeconds = 120
+)
+
+$ErrorActionPreference = 'Stop'
+if (Get-Process AfterFX,aerender,aerendercore -ErrorAction SilentlyContinue) {
+    throw 'After Effects is already running; refusing to touch an existing user session.'
+}
+if ($DurationFrames -le $Frame) {
+    throw 'DurationFrames must be greater than Frame.'
+}
+
+$afterEffectsPath = (Resolve-Path -LiteralPath $AfterEffects).Path
+$testedPath = (Resolve-Path -LiteralPath $TestedAex).Path
+$installedPath = (Resolve-Path -LiteralPath $InstalledAex).Path
+$inputPath = (Resolve-Path -LiteralPath $InputImage).Path
+$outputPath = [System.IO.Path]::GetFullPath($OutputPng)
+if (Test-Path -LiteralPath $outputPath) {
+    throw 'OutputPng already exists.'
+}
+$outputParent = Split-Path -Parent $outputPath
+if (-not (Test-Path -LiteralPath $outputParent -PathType Container)) {
+    throw 'OutputPng parent directory does not exist.'
+}
+
+$testedHash = (Get-FileHash -LiteralPath $testedPath -Algorithm SHA256).Hash
+$installedHash = (Get-FileHash -LiteralPath $installedPath -Algorithm SHA256).Hash
+if ($testedHash -ne $installedHash) {
+    throw "Installed AEX hash does not match tested AEX: $installedHash != $testedHash"
+}
+
+$scriptPath = if ($ScriptPath) {
+    (Resolve-Path -LiteralPath $ScriptPath).Path
+} else {
+    Join-Path $PSScriptRoot 'ae-reference-capture.jsx'
+}
+$resultPath = [System.IO.Path]::ChangeExtension($outputPath, '.result.json')
+if (Test-Path -LiteralPath $resultPath) {
+    throw 'Reference result file already exists.'
+}
+
+$env:AEXCOMPAT_AE_INPUT = $inputPath
+$env:AEXCOMPAT_AE_OUTPUT = $outputPath
+$env:AEXCOMPAT_AE_RESULT = $resultPath
+$env:AEXCOMPAT_AE_EFFECT = $EffectName
+$env:AEXCOMPAT_AE_FRAME = [string]$Frame
+$env:AEXCOMPAT_AE_FPS = [string]$Fps
+$env:AEXCOMPAT_AE_DURATION = [string]$DurationFrames
+$env:AEXCOMPAT_AE_BPC = [string]$Bpc
+try {
+    $escapedScriptPath = $scriptPath.Replace('"', '\"')
+    $arguments = '-m -noui -r "{0}"' -f $escapedScriptPath
+    $process = Start-Process -FilePath $afterEffectsPath -ArgumentList $arguments -PassThru -WindowStyle Hidden
+    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    while ([DateTime]::UtcNow -lt $deadline -and -not (Test-Path -LiteralPath $resultPath)) {
+        Start-Sleep -Milliseconds 250
+    }
+    if (-not (Test-Path -LiteralPath $resultPath)) {
+        Get-Process AfterFX,aerendercore -ErrorAction SilentlyContinue |
+            Stop-Process -Force -ErrorAction SilentlyContinue
+        throw 'After Effects reference capture timed out without a result.'
+    }
+} finally {
+    'AEXCOMPAT_AE_INPUT','AEXCOMPAT_AE_OUTPUT','AEXCOMPAT_AE_RESULT','AEXCOMPAT_AE_EFFECT',
+    'AEXCOMPAT_AE_FRAME','AEXCOMPAT_AE_FPS','AEXCOMPAT_AE_DURATION','AEXCOMPAT_AE_BPC' |
+        ForEach-Object { Remove-Item "Env:$_" -ErrorAction SilentlyContinue }
+}
+
+$result = Get-Content -LiteralPath $resultPath -Raw | ConvertFrom-Json
+if ($result.status -ne 'captured') {
+    throw "After Effects reference capture failed: $($result.error)"
+}
+if (-not (Test-Path -LiteralPath $outputPath)) {
+    throw 'After Effects reported capture success without creating the PNG.'
+}
+$result | ConvertTo-Json -Depth 8

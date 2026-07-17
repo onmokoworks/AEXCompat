@@ -1,0 +1,57 @@
+{
+  "schema_version": 1,
+  "fixture": {
+    "source": "Adobe After Effects SDK Examples/Effect/Resizer",
+    "build_toolset": "v143",
+    "sha256": "A5777179D1BCDBE60EAEB515F0C927466BE5E2B0B9A833FC4D5BFB0AF7757C85"
+  },
+  "inspection": {
+    "status": "parameters_inspected",
+    "reported_num_params": 5,
+    "query_dynamic_flags_advertised": true,
+    "parameters": [
+      {"slot": 1, "disk_id": 1, "type": 1, "name": "Resizer", "default": 50},
+      {"slot": 2, "disk_id": 2, "type": 5, "name": "Resized Area Color"},
+      {"slot": 3, "disk_id": 3, "type": 4, "name": "Use Downsample Factors", "default": 1},
+      {"slot": 4, "disk_id": 4, "type": 4, "name": "Use lights and cameras", "default": 0}
+    ]
+  },
+  "render": {
+    "input_dimensions": [2, 2],
+    "border_pixels": 1,
+    "output_dimensions": [4, 4],
+    "origin": [1, 1],
+    "border_rgba": [128, 255, 255, 255],
+    "center_rgba": [
+      [255, 0, 0, 255],
+      [0, 255, 0, 255],
+      [0, 0, 255, 255],
+      [255, 255, 255, 255]
+    ],
+    "rgba8_output_sha256": "8CB35CDD65F5D941511A1741E13884BF464129B778A3FB677D83F08C92C0C2D5",
+    "argb16_to_rgba8_output_sha256": "8CB35CDD65F5D941511A1741E13884BF464129B778A3FB677D83F08C92C0C2D5",
+    "argb8_status": "render_completed",
+    "argb16_status": "render_completed",
+    "guard_bytes_intact": true
+  },
+  "origin32_regression": {
+    "request": "tools/sdk-fixtures/resizer-origin32-request.json",
+    "input_dimensions": [37, 23],
+    "output_dimensions": [137, 123],
+    "output_origin": [50, 50],
+    "output_sha256": "5ff4499c8e452c56f10d16505b349ed6cc2b9a7176d3d02263376dc7e4eb094e",
+    "passed": true,
+    "guard_bytes_intact": true,
+    "world_lifetimes_balanced": true,
+    "param_checkouts_balanced": true,
+    "legacy_int16_y_offset_would_fail": true
+  },
+  "host_contracts": [
+    "PF_Cmd_QUERY_DYNAMIC_FLAGS parameter checkout",
+    "PF_Cmd_FRAME_SETUP output width height and origin",
+    "PF_Point origin components read as signed 32-bit A_long at offsets 88 and 92",
+    "PF Fill Matte Suite 2",
+    "PF World Transform Suite 1 origin-aware copy",
+    "PF_RationalScale defaults of 1/1"
+  ]
+}

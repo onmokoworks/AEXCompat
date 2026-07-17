@@ -1,0 +1,41 @@
+{
+  "schema_version": 1,
+  "subject": "PF_OutFlag2 SmartFX render-path negotiation",
+  "fixtures": [
+    {
+      "name": "Adobe After Effects SDK Paramarama",
+      "sha256": "55742b6496d5fd0b6396f9438e89e30ce34fdb0bc4486000d64a22ea8aefcf4b",
+      "smart_render_advertised": false,
+      "classic_applicable_formats": ["argb8", "argb16"],
+      "classic_passed": 2,
+      "smart_cases_not_dispatched": 3
+    },
+    {
+      "name": "Adobe After Effects SDK PathMaster",
+      "sha256": "f6fa2c4977dfdee094a0b00ec5146f3a4878258be6d2b314ef2f680985969c40",
+      "smart_render_advertised": false,
+      "classic_applicable_formats": ["argb8", "argb16"],
+      "classic_passed": 2,
+      "smart_cases_not_dispatched": 3
+    }
+  ],
+  "gate": {
+    "advertisement_flag": "PF_OutFlag2_SUPPORTS_SMART_RENDER",
+    "advertisement_bit": 10,
+    "checked_after_global_setup": true,
+    "checked_before_smart_pre_render": true,
+    "classification": "unsupported_render_path",
+    "failure_stage": "render_path_negotiation",
+    "selector_error": null,
+    "non_applicable_not_counted_as_failure": true
+  },
+  "positive_control": {
+    "name": "Adobe After Effects SDK HistoGrid",
+    "sha256": "b66bc86b5041f22aa6acb3f02dde619dd40f2fec6a87bf4db0ceccc73e67b5aa",
+    "smart_render_advertised": true,
+    "matrix_applicable": 6,
+    "matrix_passed": 6,
+    "matrix_failed": 0
+  },
+  "result": "non_advertised_smart_selectors_are_not_dispatched"
+}

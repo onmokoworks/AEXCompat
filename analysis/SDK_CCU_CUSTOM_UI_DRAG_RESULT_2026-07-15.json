@@ -1,0 +1,41 @@
+{
+  "schema_version": 1,
+  "fixture": "Adobe After Effects SDK CCU",
+  "source_location": "external_sdk_only",
+  "aex_path": "target/sdk-fixtures/ccu/CCU.aex",
+  "status": "event_completed",
+  "selector": 15,
+  "event_sequence": ["do_click", "drag", "drag", "drag", "drag"],
+  "window_type": "layer",
+  "start_point": [0, 0],
+  "end_point": [20, 20],
+  "drag_requested": true,
+  "drag_calls": 4,
+  "drag_terminated": true,
+  "final_last_time": true,
+  "continue_refcon_preserved": true,
+  "coordinate_transform_calls": 5,
+  "event_error": 0,
+  "event_out_flags": 1,
+  "changed_value": true,
+  "handle_lifetimes_balanced": true,
+  "suite_leases_balanced": true,
+  "bounds": {
+    "maximum_steps": 32,
+    "maximum_coordinate": 8192
+  },
+  "custom_ui_draw": {
+    "status": "event_completed",
+    "event_target": "layer",
+    "event_error": 0,
+    "event_out_flags": 1,
+    "paint_rect_calls": 4,
+    "overlay_stroke_path_calls": 1,
+    "path_objects_created": 1,
+    "path_objects_released": 1,
+    "invalid_drawbot_operations": 0,
+    "coordinate_transform_calls": 4,
+    "handle_lifetimes_balanced": true,
+    "suite_leases_balanced": true
+  }
+}

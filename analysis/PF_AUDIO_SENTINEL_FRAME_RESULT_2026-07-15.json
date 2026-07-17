@@ -1,0 +1,16 @@
+{
+  "schema_version":1,
+  "captured_at":"2026-07-15",
+  "scope":"PF_GET_AUDIO_DATA trailing silent sentinel frame",
+  "sdk_evidence":{"file":"Examples/Effect/SDK_Backwards/SDK_Backwards.cpp","behavior":"get_audio_data returns one extra zero sample and SDK_Backwards subtracts one from the returned count"},
+  "host_contract":{"requested_window_frames_excludes_sentinel":true,"returned_sample_frames":"requested_window_frames + 1","sentinel_channels":"all requested channels","sentinel_value":"format-appropriate silence"},
+  "verified_cases":[
+    {"fixture":"pf_visual_audio_sidecar_probe","window_frames":6,"returned_frames":7,"format":"float32","sentinel":0.0},
+    {"fixture":"pf_visual_audio_boundary_probe","window_frames":0,"returned_frames":1,"format":"float32","sentinel":0.0},
+    {"fixture":"pf_visual_audio_format_probe","window_frames":4,"returned_frames":5,"format":"unsigned_pcm8","sentinel":128},
+    {"fixture":"pf_visual_audio_format_probe","window_frames":4,"returned_frames":5,"format":"signed_pcm16_stereo","sentinel":[0,0]},
+    {"fixture":"pf_visual_audio_multi_handle_probe","live_handles":2,"window_frames_per_handle":4,"returned_frames_per_handle":5,"both_sentinels_verified":true}
+  ],
+  "sdk_backwards_regression":{"status":"render_completed","output_sha256":"d87dfbb4e03c9af7d5735c716f737d97686aa2bca516c49a2ef41e4a2754d2b9"},
+  "conclusion":"Every successful checkout returns its requested window plus one readable silent frame, matching the observable Adobe SDK sample contract."
+}

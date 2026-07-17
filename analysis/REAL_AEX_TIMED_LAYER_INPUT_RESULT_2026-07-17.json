@@ -1,0 +1,57 @@
+{
+  "schema_version": 1,
+  "status": "passed",
+  "captured_at": "2026-07-17",
+  "scope": "direct local Classic Render worker validation of exact rational-time secondary-layer selection",
+  "fixture": {
+    "plugin": "ScatterMap.aex",
+    "plugin_size": 201216,
+    "plugin_sha256": "223ff5ec542dd74374c727f16aa6c068073d1c2d7a5cabf20512cb289f0716eb",
+    "layer_slot": 6,
+    "render_time": 1,
+    "render_time_scale": 2
+  },
+  "worker": {
+    "build": "target/minihost-timed-layers/Release/aex_render_worker.exe",
+    "size": 666624,
+    "sha256": "9c3f7d5defc9c4c780538d76146b0ca580f15867b7321252d1c076c07b2c2c7f"
+  },
+  "inputs": {
+    "source_rgba_sha256": "54e2e0bfacc53d9e9b0a3e1e65149812a73936accc5b851e02cb5bd8a072f38d",
+    "secondary_rgba_sha256": "fb2841a247b7e5f2b373af5e89572bfbfa73592eee9f62affd144ec5d8483c67",
+    "dimensions": [2, 2]
+  },
+  "matching_key": {
+    "transport_key": "v1|6|1|2",
+    "worker_exit_code": 0,
+    "status": "render_completed",
+    "render_error": 0,
+    "param_checkout_calls": 1,
+    "param_checkin_calls": 1,
+    "last_param_checkout_index": 6,
+    "last_param_checkout_time": 1,
+    "last_param_checkout_time_scale": 2,
+    "worker_output_sha256": "4d8b9c1b66af66277d904ccfc6a3fc989736f0d7d960ac22b6b5e706e2d0d0e5",
+    "output_file_sha256": "acba6e557a01af23a8f39f1b30c6aefa8715cd992454b961a1fd3cde1f4fa1f9"
+  },
+  "nonmatching_key": {
+    "transport_key": "v1|6|0|1",
+    "worker_exit_code": 0,
+    "status": "render_completed",
+    "render_error": 0,
+    "param_checkout_calls": 0,
+    "worker_output_sha256": "1f5cdfdad5b8cd795423561ac11cacc3bc5b2924362a5a00067d924eba15f1eb",
+    "output_file_sha256": "e3cb1e8bf70abfef9d7b5bcb117f2668511898348c7c0369f072e8ab5fcc9f07"
+  },
+  "assertions": {
+    "matching_key_selected_at_exact_rational_time": true,
+    "checkout_checkin_balanced": true,
+    "matching_and_nonmatching_outputs_differ": true,
+    "guard_bytes_intact": true
+  },
+  "limitations": [
+    "This run used the newly built worker directly, outside the sealed broker transaction; module audit therefore reported not_required.",
+    "The nonmatching key proves that the secondary world was not selected, but the effect validly rendered without requesting a missing world.",
+    "SmartFX and a wide-time effect that requests two distinct non-current frames still require runtime evidence."
+  ]
+}

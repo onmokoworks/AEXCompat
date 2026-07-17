@@ -1,0 +1,51 @@
+{
+  "schema_version": 1,
+  "result": "sequence_requested_options_dialog_lifecycle_completed",
+  "abi": {
+    "do_dialog_selector": 9,
+    "i_do_dialog_flag": 32,
+    "send_do_dialog_flag": 128
+  },
+  "automatic_request": {
+    "fixture": "AEXCompat owner-authored pf-auto-dialog-probe",
+    "fixture_sha256": "147085E9FCB30D93D729A9DECB8394C168A9EA3D8D103750D44050C44D814E8D",
+    "dialog_capability_advertised": true,
+    "automatic_dialog_requested": true,
+    "selector_dispatched": true,
+    "selector_order": [
+      "global_setup",
+      "params_setup",
+      "sequence_setup",
+      "do_dialog",
+      "sequence_setdown",
+      "global_setdown"
+    ],
+    "sequence_setup_error": 0,
+    "dialog_error": 0,
+    "return_message": "automatic options dialog completed",
+    "sequence_setdown_error": 0,
+    "global_setdown_error": 0,
+    "all_exception_codes_zero": true,
+    "handle_lifetimes_balanced": true
+  },
+  "capability_without_request": {
+    "fixture": "Adobe After Effects SDK Examples/Effect/Checkout",
+    "fixture_sha256": "7FA3DE46062AE9D726EB75617AABC53E66EE7A7073F78F1AD1C45395978B4898",
+    "dialog_capability_advertised": true,
+    "automatic_dialog_requested": false,
+    "selector_dispatched": false,
+    "worker_status": "automatic_dialog_not_requested",
+    "worker_exit_code": 21,
+    "sequence_setup_error": 0,
+    "sequence_setdown_error": 0,
+    "global_setdown_error": 0
+  },
+  "safety": {
+    "isolated_worker": true,
+    "timeout_ms": 5000,
+    "exact_aex_hash_revalidated": true,
+    "seh_boundaries": ["sequence_setup", "do_dialog", "sequence_setdown"],
+    "both_capability_and_sequence_request_required": true,
+    "bounded_diagnostics": true
+  }
+}

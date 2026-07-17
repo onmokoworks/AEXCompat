@@ -1,0 +1,79 @@
+{
+  "schema_version": 2,
+  "subject": "Adobe After Effects SDK UI/Supervisor Param Utils lifecycle compatibility",
+  "date": "2026-07-16",
+  "status": "passed",
+  "fixture": {
+    "sdk_source": "C:\\Program Files\\Adobe\\AfterEffectsSDK\\Examples\\UI\\Supervisor",
+    "source_project": "C:\\Program Files\\Adobe\\AfterEffectsSDK\\Examples\\UI\\Supervisor\\Win\\Supervisor.vcxproj",
+    "build_script": "tools/build-sdk-supervisor.ps1",
+    "configuration": "Release|x64",
+    "platform_toolset": "v143",
+    "sdk_source_file_count": 12,
+    "sdk_source_unchanged": true,
+    "artifact": "target/sdk-fixtures/supervisor/Supervisor.aex",
+    "artifact_size": 34304,
+    "artifact_sha256": "55b41ad85802401a50eb71b2497b1921afeb1d57f459ee16b08841392604a774"
+  },
+  "param_utils_selftest": {
+    "command": "target/minihost-build-v18/aex_render_worker.exe --self-test-pf-param-utils-suite",
+    "exit_code": 0,
+    "report": {"pf_param_utils_suite3": "passed"},
+    "report_sha256": "0f145ff46986cde0950dba976605dfcc01fcfd0e81a161e141efd232767b189f"
+  },
+  "e2e": {
+    "l2_basic": {
+      "command": "aex_l2_worker.exe --l2 Supervisor.aex <sha256>",
+      "exit_code": 0,
+      "sequence_setup_error": 0,
+      "update_params_ui_error": 0,
+      "pf_get_current_state_calls": 4,
+      "pf_are_states_identical_calls": 1,
+      "suite_leases_balanced": true,
+      "lifecycle_data_null": true,
+      "report_sha256": "6538fc57d1f3ea2ab6b059011896706297ed9cf6e36a3332b88c0518a95790aa"
+    },
+    "user_changed_checkbox": {
+      "command": "aex_l2_worker.exe --user-changed Supervisor.aex <sha256> 5 v2|param_5@5:i32=1",
+      "exit_code": 0,
+      "user_changed_param_error": 0,
+      "update_param_ui_calls": 3,
+      "pf_get_current_state_calls": 4,
+      "pf_are_states_identical_calls": 1,
+      "suite_leases_balanced": true,
+      "report_sha256": "5e90467441a6214084d1daceff5912fc9a796699bcc7eb15113d17b8d74b6e2f"
+    },
+    "classic_render": {
+      "command": "aex_render_worker.exe --render-image Supervisor.aex <sha256> v2| input.rgba output.rgba 2 2 0 1 1 1",
+      "exit_code": 0,
+      "render_error": 0,
+      "render_completed": true,
+      "output_size": 16,
+      "guard_bytes_intact": true,
+      "suite_leases_balanced": true,
+      "report_sha256": "02ddacfe284da857057030416fed7df764ee5d4b452119e1b3f3188272a8d516",
+      "output_sha256": "d28c269596d8ceb6795f45d2d6f863a4a9ecd6bbb2ac51447045b7f49870169a"
+    }
+  },
+  "resolved_host_gaps": [
+    "Sequence setup now precedes user-changed and conditional UI selectors.",
+    "Classic and SmartFX render lifecycles now begin before conditional UI dispatch.",
+    "AEGP Stream Suite v2 supports simultaneous effect parameter stream leases.",
+    "AEGP Dynamic Stream Suite v2 exposes hidden-flag updates.",
+    "AEGP Effect Suite v2/v3 exposes parameter union lookup and effect disposal.",
+    "PF AE App Suite v4 exposes personal information used by the About selector."
+  ],
+  "safety_and_reporting": {
+    "isolated_workers": true,
+    "suite_leases_balanced": true,
+    "guard_bytes_intact": true,
+    "sdk_original_modified": false,
+    "worker_json_reports_emitted": true
+  },
+  "artifact_hashes": {
+    "minihost/src/l2_main.cpp": "1b13b1e2809a24aa5f8cbda7414ec9a762cc6537cfad010db2c779739e44a424",
+    "aex_l2_worker.exe": "df40d79a728436e837eb2df154bfee8c692d4324c70fbd8fdea0ccc52ef27dc6",
+    "aex_render_worker.exe": "6eddf956afb9720ea277d5580ffb41e85861f20e86e7c29d8fbea9dbe17128db",
+    "aex_smart_worker.exe": "84fad22b22acd9ad9ef375525b638571cc77cf9b2ac14a44e7813e9432b201c0"
+  }
+}

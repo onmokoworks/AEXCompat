@@ -1,0 +1,38 @@
+{
+  "schema_version": 1,
+  "subject": "Multiple secondary Layer inputs through the Effect debugging CLI",
+  "commands": [
+    "--render-experimental-layer-slots",
+    "--render-experimental-smart-layer-slots"
+  ],
+  "refraction_dispersion": {
+    "layer_slots": [26, 27],
+    "layer_count": 2,
+    "dimensions": [37, 23],
+    "classic_passed": true,
+    "smartfx_passed": true,
+    "classic_smart_output_sha256_equal": true,
+    "guard_bytes_intact": true,
+    "param_checkouts_balanced": true
+  },
+  "particle_lab": {
+    "layer_slots": [11, 93, 103, 141],
+    "layer_count": 4,
+    "dimensions": [37, 23],
+    "classic_passed": true,
+    "smartfx_passed": true,
+    "guard_bytes_intact": true,
+    "param_checkouts_balanced": true
+  },
+  "negative_cases": {
+    "duplicate_slot_rejected": true,
+    "non_layer_slot_rejected": true,
+    "rejected_output_created": false,
+    "assignments_applied_atomically": true
+  },
+  "transport_limits": {
+    "maximum_secondary_layers": 8,
+    "duplicate_slots_rejected_by_broker": true,
+    "slot_kind_revalidated_from_fresh_parameter_inspection": true
+  }
+}

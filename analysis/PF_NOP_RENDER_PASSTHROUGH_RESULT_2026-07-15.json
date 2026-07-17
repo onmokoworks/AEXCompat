@@ -1,0 +1,79 @@
+{
+  "schema_version": 1,
+  "result": "nop_render_source_passthrough_completed_without_frame_dispatch",
+  "abi": {
+    "nop_render_flag": 262144
+  },
+  "fixture": {
+    "name": "AEXCompat owner-authored pf-nop-render-probe",
+    "sha256": "0404770868908520F5FBBEF9700AB05C715CCA5CD0714B2AA1338361A3069897"
+  },
+  "classic_argb8": {
+    "status": "render_completed",
+    "advertised_out_flags": 263168,
+    "nop_render_advertised": true,
+    "selector_order": [
+      "global_setup",
+      "params_setup",
+      "sequence_setup",
+      "sequence_setdown",
+      "global_setdown"
+    ],
+    "frame_setup_dispatched": false,
+    "render_selector_dispatched": false,
+    "frame_setdown_dispatched": false,
+    "render_performed": false,
+    "render_error": 0,
+    "width": 16,
+    "height": 12,
+    "rowbytes": 64,
+    "input_sha256": "863d238f52f81aba4017c198af4d748cb57fe369e6216fdbacf45fd94037ecf7",
+    "output_sha256": "863d238f52f81aba4017c198af4d748cb57fe369e6216fdbacf45fd94037ecf7",
+    "guard_bytes_intact": true,
+    "global_setdown_error": 0,
+    "handle_lifetimes_balanced": true,
+    "world_lifetimes_balanced": true,
+    "suite_leases_balanced": true
+  },
+  "smartfx_argb8": {
+    "status": "render_completed",
+    "advertised_out_flags": 263168,
+    "advertised_out_flags2": 1024,
+    "smart_render_supported": true,
+    "nop_render_advertised": true,
+    "selector_order": [
+      "global_setup",
+      "params_setup",
+      "sequence_setup",
+      "sequence_setdown",
+      "global_setdown"
+    ],
+    "frame_setup_dispatched": false,
+    "smart_pre_render_dispatched": false,
+    "smart_render_selector_dispatched": false,
+    "frame_setdown_dispatched": false,
+    "render_performed": false,
+    "pre_render_error": 0,
+    "smart_render_error": 0,
+    "width": 16,
+    "height": 12,
+    "rowbytes": 64,
+    "result_rect": [0, 0, 16, 12],
+    "max_result_rect": [0, 0, 16, 12],
+    "input_sha256": "863d238f52f81aba4017c198af4d748cb57fe369e6216fdbacf45fd94037ecf7",
+    "output_sha256": "863d238f52f81aba4017c198af4d748cb57fe369e6216fdbacf45fd94037ecf7",
+    "guard_bytes_intact": true,
+    "global_setdown_error": 0,
+    "handle_lifetimes_balanced": true,
+    "world_lifetimes_balanced": true,
+    "suite_leases_balanced": true
+  },
+  "safety": {
+    "isolated_worker": true,
+    "exact_aex_hash_revalidated": true,
+    "timeout_limited": true,
+    "fixture_returns_error_on_any_classic_or_smart_frame_selector": true,
+    "bounded_dimensions": true,
+    "guarded_output": true
+  }
+}

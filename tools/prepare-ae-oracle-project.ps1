@@ -1,0 +1,85 @@
+param(
+    [Parameter(Mandatory = $true)][string]$AfterEffects,
+    [Parameter(Mandatory = $true)][string]$InputImage,
+    [Parameter(Mandatory = $true)][string]$OutputAep,
+    [Parameter(Mandatory = $true)][string]$OutputExr,
+    [Parameter(Mandatory = $true)][string]$ResultJson,
+    [Parameter(Mandatory = $true)][string]$EffectName,
+    [ValidateSet(8, 16, 32)][int]$Bpc = 32,
+    [ValidateRange(1, 1000)][int]$Fps = 30,
+    [ValidateRange(1, 10000000)][int]$DurationFrames = 1,
+    [ValidateRange(5, 600)][int]$TimeoutSeconds = 120
+)
+
+$ErrorActionPreference = 'Stop'
+if (Get-Process AfterFX,aerender,aerendercore -ErrorAction SilentlyContinue) {
+    throw 'After Effects rendering is active; refusing to touch an existing user session.'
+}
+
+$afterEffectsPath = (Resolve-Path -LiteralPath $AfterEffects).Path
+$inputPath = (Resolve-Path -LiteralPath $InputImage).Path
+if ([System.IO.Path]::GetFileName($afterEffectsPath) -ine 'AfterFX.exe') {
+    throw 'AfterEffects must point to AfterFX.exe.'
+}
+
+$projectPath = [System.IO.Path]::GetFullPath($OutputAep)
+$outputPath = [System.IO.Path]::GetFullPath($OutputExr)
+$resultPath = [System.IO.Path]::GetFullPath($ResultJson)
+foreach ($path in @($projectPath, $outputPath, $resultPath)) {
+    if (Test-Path -LiteralPath $path) {
+        throw "Refusing to overwrite existing output: $path"
+    }
+    $parent = Split-Path -Parent $path
+    if (-not (Test-Path -LiteralPath $parent -PathType Container)) {
+        throw "Output parent directory does not exist: $parent"
+    }
+}
+if ([System.IO.Path]::GetExtension($projectPath) -ine '.aep' -or
+    [System.IO.Path]::GetExtension($outputPath) -ine '.exr' -or
+    [System.IO.Path]::GetExtension($resultPath) -ine '.json') {
+    throw 'OutputAep, OutputExr, and ResultJson must use .aep, .exr, and .json extensions.'
+}
+
+$scriptPath = Join-Path $PSScriptRoot 'ae-oracle-project.jsx'
+$environmentNames = @(
+    'AEXCOMPAT_AE_ORACLE_INPUT', 'AEXCOMPAT_AE_ORACLE_PROJECT',
+    'AEXCOMPAT_AE_ORACLE_OUTPUT', 'AEXCOMPAT_AE_ORACLE_RESULT',
+    'AEXCOMPAT_AE_ORACLE_EFFECT', 'AEXCOMPAT_AE_ORACLE_BPC',
+    'AEXCOMPAT_AE_ORACLE_FPS', 'AEXCOMPAT_AE_ORACLE_DURATION'
+)
+$env:AEXCOMPAT_AE_ORACLE_INPUT = $inputPath
+$env:AEXCOMPAT_AE_ORACLE_PROJECT = $projectPath
+$env:AEXCOMPAT_AE_ORACLE_OUTPUT = $outputPath
+$env:AEXCOMPAT_AE_ORACLE_RESULT = $resultPath
+$env:AEXCOMPAT_AE_ORACLE_EFFECT = $EffectName
+$env:AEXCOMPAT_AE_ORACLE_BPC = [string]$Bpc
+$env:AEXCOMPAT_AE_ORACLE_FPS = [string]$Fps
+$env:AEXCOMPAT_AE_ORACLE_DURATION = [string]$DurationFrames
+try {
+    $process = Start-Process -FilePath $afterEffectsPath `
+        -ArgumentList @('-m', '-noui', '-r', $scriptPath) `
+        -PassThru -WindowStyle Hidden
+    if (-not $process.WaitForExit($TimeoutSeconds * 1000)) {
+        Stop-Process -Id $process.Id -Force
+        throw 'After Effects oracle project preparation timed out and was terminated.'
+    }
+} finally {
+    $environmentNames | ForEach-Object { Remove-Item "Env:$_" -ErrorAction SilentlyContinue }
+}
+
+if (-not (Test-Path -LiteralPath $resultPath) -or -not (Test-Path -LiteralPath $projectPath)) {
+    throw "After Effects did not create the oracle project and result (exit code $($process.ExitCode))."
+}
+$result = Get-Content -LiteralPath $resultPath -Raw | ConvertFrom-Json
+if ($result.status -ne 'prepared') {
+    throw "After Effects oracle project preparation failed: $($result.error)"
+}
+if ([System.IO.Path]::GetFullPath([string]$result.project) -ne $projectPath -or
+    [System.IO.Path]::GetFullPath([string]$result.output) -ne $outputPath -or
+    [int]$result.bpc -ne $Bpc) {
+    throw 'After Effects oracle result does not match the requested paths or pixel depth.'
+}
+if (-not [bool]$result.full_float_settings_applied) {
+    throw 'After Effects did not confirm full-float straight-alpha OpenEXR settings.'
+}
+$result | ConvertTo-Json -Depth 8

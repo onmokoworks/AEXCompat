@@ -1,0 +1,47 @@
+{
+  "schema_version": 1,
+  "fixture": {
+    "source": "Adobe After Effects SDK Examples/Effect/Gamma_Table",
+    "build_toolset": "v143",
+    "sha256": "6FCB4946C77A9FCB4FAB8E15DBBC54FFB4B1AB08656CE9ACEA39C44099B6DFA8"
+  },
+  "inspection": {
+    "global_setup_error": 0,
+    "params_setup_error": 0,
+    "reported_num_params": 2,
+    "parameter": {
+      "type": 2,
+      "name": "Gamma",
+      "valid_min": 0.0,
+      "valid_max": 2.0,
+      "slider_min": 0.0,
+      "slider_max": 2.0,
+      "default": 1.0,
+      "current": 1.0,
+      "precision": 1
+    }
+  },
+  "render": {
+    "requested_slot": 1,
+    "requested_kind": "float",
+    "requested_value": 1.5,
+    "status": "render_completed",
+    "render_error": 0,
+    "width": 16,
+    "height": 12,
+    "rowbytes": 64,
+    "pixel_format": "argb8",
+    "input_sha256": "863d238f52f81aba4017c198af4d748cb57fe369e6216fdbacf45fd94037ecf7",
+    "output_sha256": "1c612d285a5cb72b0b3643fa7d58eac2ba3f31712cd15cc1aa51c1c1dc6337da",
+    "guard_bytes_intact": true,
+    "lifecycle_errors": {
+      "global_setup": 0,
+      "params_setup": 0,
+      "sequence_setup": 0,
+      "frame_setup": 0,
+      "frame_setdown": 0,
+      "sequence_setdown": 0,
+      "global_setdown": 0
+    }
+  }
+}

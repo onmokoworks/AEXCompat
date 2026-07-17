@@ -94,7 +94,7 @@ pub fn load(
             .all(|byte| byte.is_ascii_hexdigit())
         || manifest.source.receipt_id.is_empty()
         || manifest.descriptors.is_empty()
-        || manifest.descriptors.len() > 64
+        || manifest.descriptors.len() > 1024
     {
         return Err(invalid("descriptor manifest identity invalid"));
     }

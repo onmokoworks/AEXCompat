@@ -1,0 +1,61 @@
+{
+  "schema_version": 1,
+  "date": "2026-07-15",
+  "subject": "SDK_Invert_ProcAmp real CUDA device-world compatibility",
+  "fixture": {
+    "source": "Adobe After Effects SDK SDK_Invert_ProcAmp",
+    "source_modified": false,
+    "cuda_toolkit": "13.2",
+    "architecture": "sm_75",
+    "sha256": "6970fa5d8b883758a26a52112b74cec6b2448d3d187cb593af3e7655851be683",
+    "size": 569344,
+    "binary_reproducible": false,
+    "identity_policy": "Rehash and approve each generated artifact; link metadata changes the binary hash.",
+    "reproducible_build_script": "tools/build-sdk-invert-cuda.ps1"
+  },
+  "host": {
+    "gpu_framework": "CUDA",
+    "driver_library": "System32/nvcuda.dll",
+    "device_index": 0,
+    "primary_context": true,
+    "pinned_host_allocations": true,
+    "pixel_format": "PF_PixelFormat_GPU_BGRA128",
+    "maximum_allocation_count": 256,
+    "maximum_live_bytes": 268435456
+  },
+  "one_pixel_oracle": {
+    "input_rgba8": [10, 20, 30, 255],
+    "output_rgba8": [245, 235, 225, 255],
+    "selector_error": 0,
+    "render_error": 0,
+    "output_pixels_valid": true
+  },
+  "image_oracle": {
+    "dimensions": [37, 23],
+    "gpu_selector_error": 0,
+    "gpu_render_error": 0,
+    "gpu_float_world_sha256": "6d51b5672f83f3403fec92a8abbd23d4b71f936ef1ae88e19e121a7cae80620c",
+    "cpu_float_world_sha256": "d1151e96fb3c0a30047739a4c36294ba8ca32e5fbd64daa2018b8d32814e4b58",
+    "rgba8_sha256": "6f24052bf442cc05899fdfe3779514c610652c6ab1d8dcba083dbf36f9ad0617",
+    "gpu_cpu_different_rgba8_bytes": 0,
+    "gpu_cpu_max_rgba8_error": 0,
+    "gpu_cpu_mean_rgba8_error": 0.0
+  },
+  "ownership": {
+    "device_allocations_created": 3,
+    "device_allocations_freed": 3,
+    "live_device_allocations": 0,
+    "live_device_bytes": 0,
+    "invalid_gpu_operations": 0,
+    "cuda_upload_bytes": 13616,
+    "cuda_download_bytes": 13616,
+    "cuda_sync_failures": 0,
+    "gpu_memory_lifetimes_balanced": true,
+    "guard_bytes_intact": true
+  },
+  "broker": {
+    "gpu_render_dispatched": true,
+    "gpu_fallback_used": false,
+    "validated_png_created": true
+  }
+}

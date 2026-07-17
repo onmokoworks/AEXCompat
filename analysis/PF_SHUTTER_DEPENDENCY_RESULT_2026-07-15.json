@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "captured_at": "2026-07-15",
+  "scope": "PF_InData shutter transport and PF_OutFlag_I_USE_SHUTTER_ANGLE dependency advertisement",
+  "sdk_constant": {"PF_OutFlag_I_USE_SHUTTER_ANGLE": 524288},
+  "request": {"shutter_angle_fixed": 32768, "shutter_phase_fixed": -16384},
+  "cases": [
+    {"fixture":"pf_shutter_dependency_probe","sha256":"f386346dc344b83ef33b872439ed6140e46a8b8a12fe3e9404681e8a37d08b30","status":"render_completed","render_error":0,"shutter_dependency_advertised":true,"shutter_angle_fixed":32768,"shutter_phase_fixed":-16384,"output_sha256":"e72bbd4d429ac914a8a6c5bd49632ff6b00d4fef42afb443f0b8047df06c85d2","guard_bytes_intact":true},
+    {"fixture":"pf_shutter_unadvertised_probe","sha256":"1295dcaa4e2e45594d94b0ee1557802e714efbe57d15b55a7d9a35e33acb7030","status":"render_completed","render_error":0,"shutter_dependency_advertised":false,"shutter_angle_fixed":32768,"shutter_phase_fixed":-16384,"output_sha256":"e72bbd4d429ac914a8a6c5bd49632ff6b00d4fef42afb443f0b8047df06c85d2","guard_bytes_intact":true}
+  ],
+  "render_cache_implemented": false,
+  "cache_contract": "When a frame cache is introduced, shutter values belong in the cache dependency key only while the effective flag is advertised.",
+  "conclusion": "The host always transports shutter values. The flag advertises dependency and does not gate PF_InData field visibility."
+}

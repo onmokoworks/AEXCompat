@@ -1,0 +1,12 @@
+{
+  "schema_version":1,
+  "captured_at":"2026-07-15",
+  "scope":"PF_Arbitrary_SCAN_FUNC ownership boundary",
+  "generic_contract":{"input":"bounded PRINT output","required_result":"new non-null host-live handle distinct from source","validation":"COMPARE equal","cleanup":"DISPOSE scanned handle on every owned path","scan_failure_is_optional_capability":true},
+  "adobe_sdk_colorgrid":{"source_modified":false,"print_calls":1,"scan_calls":0,"scan_failures":1,"scan_callback_error":0,"scan_returned_handle":false,"status":"render_completed","render_error":0,"invalid_arbitrary_operations":0,"handle_lifetimes_balanced":true,"guard_bytes_intact":true},
+  "cleanroom_positive_assignment":{"fixture":"pf_arbitrary_scan_probe.aex","requested_text":"value=7","status":"render_completed","render_error":0,"scan_calls":2,"scan_failures":0,"invalid_arbitrary_operations":0,"handle_lifetimes_balanced":true,"guard_bytes_intact":true,"output_matches_input":true},
+  "rejected_assignment":{"requested_text":"nope","status":"render_failed","render_error":-5,"output_created":false,"scan_failures":1,"invalid_arbitrary_operations":0,"handle_lifetimes_balanced":true,"guard_bytes_intact":true},
+  "interpretation":"The shipped ColorGrid scan body is commented out and returns success without creating a handle. AEXCompat leaves its observed value renderable but safely rejects edited text. The cleanroom fixture proves the positive SCAN/COMPARE/DISPOSE assignment path.",
+  "ui_editing_enabled":true,
+  "remaining_requirement":"Expand conformance coverage to real effects whose arbitrary SCAN callback supports assignment."
+}

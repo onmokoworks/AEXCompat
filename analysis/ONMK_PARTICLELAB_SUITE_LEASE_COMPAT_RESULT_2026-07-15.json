@@ -1,0 +1,62 @@
+{
+  "schema_version": 1,
+  "date": "2026-07-15",
+  "subject": "ONMK_ParticleLab SmartFX suite-lease compatibility",
+  "plugin_sha256": "695e68380bce43b05a8aead8965e4b317ab88d1f6a91ba4baffe6f9c4a9d179d",
+  "host_policy": {
+    "suite_lease_imbalance": "diagnostic_warning",
+    "handle_world_and_param_ownership": "render_failure",
+    "selector_or_guard_failure": "render_failure"
+  },
+  "observation": {
+    "render_path": "smartfx",
+    "pixel_format": "argb8",
+    "input_dimensions": [37, 23],
+    "output_dimensions": [1848, 1848],
+    "pre_render_error": 0,
+    "smart_render_error": 0,
+    "guard_bytes_intact": true,
+    "handle_lifetimes_balanced": true,
+    "world_lifetimes_balanced": true,
+    "param_checkouts_balanced": true,
+    "suite_acquires": 36,
+    "suite_releases": 35,
+    "suite_leases_balanced": false,
+    "suite_lease_warning": true,
+    "live_suite_leases": "PF Handle Suite@2=1",
+    "raw_output_sha256": "f68cf8bc872d860f4a32d971ec7b18d8d5e0abaa8759e4aaab3fb5d86f78de67",
+    "png_sha256": "75af656a710f17ccc5b2e366ed615c2f8b9c37b4fbdd4f4b0ef9cb36213fd26f",
+    "passed": true
+  },
+  "depth_matrix": [
+    {
+      "render_path": "classic",
+      "pixel_format": "argb16",
+      "output_dimensions": [37, 23],
+      "raw_output_sha256": "8b87456bcf6e277e3435f7fd991f4dd31cd39023e319ce1bf85163434fdbb832",
+      "passed": true
+    },
+    {
+      "render_path": "classic",
+      "pixel_format": "argb32f",
+      "output_dimensions": [37, 23],
+      "raw_output_sha256": "da69cca8316fe2ef026e5d2989d9aa79318b18325f98cdd221eb8fe511b85c7e",
+      "passed": true
+    },
+    {
+      "render_path": "smartfx",
+      "pixel_format": "argb16",
+      "output_dimensions": [1848, 1848],
+      "raw_output_sha256": "2eb55984b3d9962aa049396140d3e8c1e13d1b7a899ce1d00171ebefd2683d1e",
+      "passed": true
+    },
+    {
+      "render_path": "smartfx",
+      "pixel_format": "argb32f",
+      "output_dimensions": [1848, 1848],
+      "raw_output_sha256": "a83eafc5b8a71e414af5944a987ca2052db6b40f9d143344df4b7aa958de87d6",
+      "passed": true
+    }
+  ],
+  "cleanroom_note": "The policy is based on observable host-facing selector results and ownership counters; no plug-in implementation was inspected."
+}

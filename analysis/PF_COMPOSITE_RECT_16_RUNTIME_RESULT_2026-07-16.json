@@ -1,0 +1,72 @@
+{
+    "schema_version":  2,
+    "result":  "runtime_render_succeeded",
+    "captured_at":  "2026-07-17",
+    "authenticated_artifacts":  {
+                                    "minihost_source":  {
+                                                            "path":  "minihost/src/l2_main.cpp",
+                                                   "size_bytes":  1138218,
+                                                   "sha256":  "4fce425483d59eeef6335bcc885c904a6c406e2449cd879e2daad5447f1bf9f7"
+                                                        },
+                                    "worker":  {
+                                                   "path":  "target/minihost-build/aex_render_worker.exe",
+                                                   "size_bytes":  768512,
+                                                   "sha256":  "94bbad9e150e60306073e66c3ab4a56d6ccf9b42e56af082db9014cc683b4254"
+                                               },
+                                    "probe":  {
+                                                  "path":  "target/pf-composite-rect-probe-build/Release/pf_composite_rect_probe.aex",
+                                                  "size_bytes":  13312,
+                                                  "sha256":  "492d6d56c8350528421d6dc1eaa1b075001259d227a03acd18d4def94ba99f4b"
+                                              },
+                                    "input":  {
+                                                  "path":  "target/gpu-effects/opencl-input.rgba",
+                                                  "size_bytes":  3404,
+                                                  "sha256":  "e262995eeaf4ba4ac17385566eadae4597ec4a974ea0c116a170c0edb1e632f9"
+                                              }
+                                },
+    "environment":  {
+                        "temp":  "target/tmp",
+                        "tmp":  "target/tmp"
+                    },
+    "runs":  [
+                 {
+                     "pixel_format":  "argb16",
+                     "command":  "target/minihost-build/aex_render_worker.exe --render-image16 target/pf-composite-rect-probe-build/Release/pf_composite_rect_probe.aex 492d6d56c8350528421d6dc1eaa1b075001259d227a03acd18d4def94ba99f4b v5| target/gpu-effects/opencl-input.rgba target/gpu-effects/composite-rect-probe-argb16-output-20260717-nativeaux4.rgba 37 23 0 1 1 1",
+                     "exit_code":  0,
+                     "status":  "render_completed",
+                     "render_error":  0,
+                     "report":  {
+                                    "path":  "target/gpu-effects/composite-rect-probe-argb16-report-20260717-nativeaux4.json",
+                                    "size_bytes":  6348,
+                                    "sha256":  "6752e41ab09ce1c4db0477af3b4a91d83762c5a736d1e838c384c81671e06dcf"
+                                },
+                     "width":  37,
+                     "height":  23,
+                     "rowbytes":  296,
+                     "bytes_written_per_row":  296,
+                     "report_input_sha256":  "8b87456bcf6e277e3435f7fd991f4dd31cd39023e319ce1bf85163434fdbb832",
+                     "report_internal_output_sha256":  "bbac8251e939b6f267c082fd3bcd8f3739abe8f706aacb3e8483278aa4a5e2ed",
+                     "external_output":  {
+                                             "path":  "target/gpu-effects/composite-rect-probe-argb16-output-20260717-nativeaux4.rgba",
+                                             "size_bytes":  3404,
+                                             "sha256":  "013f45f2e81b60d159d20ab3927d174ed029c3e308c0e62057dc9e1b56c81c1f"
+                                         },
+                     "guard_bytes_intact":  true,
+                     "suite_leases_balanced":  true,
+                     "suite_acquires":  2,
+                     "suite_releases":  2,
+                     "live_suite_lease_count":  0,
+                     "world_lifetimes_balanced":  true,
+                     "worlds_created":  1,
+                     "worlds_disposed":  1,
+                     "handle_lifetimes_balanced":  true,
+                     "param_checkouts_balanced":  true
+                 }
+             ],
+    "claim":  "The authenticated AEXCompat run executes composite_rect through a host-created, format-authenticated ARGB16 source world, including the output-alias case, with intact guards and balanced world and suite lifetimes.",
+    "pending":  {
+                    "argb32f":  "pending and intentionally rejected by the current implementation",
+                    "real_after_effects_pixel_oracle":  "pending",
+                    "exact_adobe_pixel_equivalence":  "not claimed by this runtime evidence"
+                }
+}

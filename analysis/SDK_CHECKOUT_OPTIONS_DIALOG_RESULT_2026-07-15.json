@@ -1,0 +1,39 @@
+{
+  "schema_version": 1,
+  "result": "advertised_options_dialog_completed_and_unadvertised_dispatch_refused",
+  "abi": {
+    "selector": 9,
+    "i_do_dialog_flag": 32,
+    "display_error_message_flag": 256
+  },
+  "advertised_fixture": {
+    "fixture": "Adobe After Effects SDK Examples/Effect/Checkout",
+    "fixture_sha256": "7FA3DE46062AE9D726EB75617AABC53E66EE7A7073F78F1AD1C45395978B4898",
+    "dialog_advertised": true,
+    "selector_dispatched": true,
+    "selector_error": 0,
+    "exception_code": 0,
+    "display_error_message": true,
+    "return_message": "This would be a fine place fora platform-specific options dialog.",
+    "global_setdown_error": 0,
+    "handle_lifetimes_balanced": true
+  },
+  "unadvertised_fixture": {
+    "fixture": "Adobe After Effects SDK Examples/Effect/Resizer",
+    "fixture_sha256": "A5777179D1BCDBE60EAEB515F0C927466BE5E2B0B9A833FC4D5BFB0AF7757C85",
+    "dialog_advertised": false,
+    "selector_dispatched": false,
+    "worker_status": "dialog_not_advertised",
+    "worker_exit_code": 21,
+    "global_setdown_error": 0,
+    "handle_lifetimes_balanced": true
+  },
+  "safety": {
+    "isolated_worker": true,
+    "timeout_ms": 5000,
+    "exact_aex_hash_revalidated": true,
+    "seh_boundary": true,
+    "advertisement_required_before_dispatch": true,
+    "bounded_diagnostics": true
+  }
+}

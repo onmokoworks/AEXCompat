@@ -1,0 +1,135 @@
+{
+    "schema_version":  1,
+    "captured_at":  "2026-07-17",
+    "result":  "ordinary_render_checked_out_real_upstream_layer_receipt",
+    "commands":  [
+                     "target/minihost-build/aex_render_worker.exe --render-image target/pf-aegp-layer-receipt-probe-build/Release/pf_aegp_layer_receipt_probe.aex 309c14e50e8a5213ebb57acc766611e91d6687b1229e451511cb58d2ece42d90 v5| target/gpu-effects/opencl-input.rgba target/gpu-effects/layer-receipt-output-8-nativeaux4.rgba 37 23 0 1 1 1",
+                     "target/minihost-build/aex_render_worker.exe --render-image16 target/pf-aegp-layer-receipt-probe-build/Release/pf_aegp_layer_receipt_probe.aex 309c14e50e8a5213ebb57acc766611e91d6687b1229e451511cb58d2ece42d90 v5| target/gpu-effects/opencl-input.rgba target/gpu-effects/layer-receipt-output-16-nativeaux4.rgba 37 23 0 1 1 1",
+                     "target/minihost-build/aex_render_worker.exe --render-image32 target/pf-aegp-layer-receipt-probe-build/Release/pf_aegp_layer_receipt_probe.aex 309c14e50e8a5213ebb57acc766611e91d6687b1229e451511cb58d2ece42d90 v5| target/gpu-effects/opencl-input.rgba target/gpu-effects/layer-receipt-output-32-nativeaux4.rgba 37 23 0 1 1 1"
+                 ],
+    "authenticated_artifacts":  {
+                                    "source":  {
+                                                   "path":  "minihost/src/l2_main.cpp",
+                                                   "size_bytes":  1138218,
+                                                   "sha256":  "4fce425483d59eeef6335bcc885c904a6c406e2449cd879e2daad5447f1bf9f7"
+                                               },
+                                    "worker":  {
+                                                   "path":  "target/minihost-build/aex_render_worker.exe",
+                                                   "size_bytes":  768512,
+                                                   "sha256":  "94bbad9e150e60306073e66c3ab4a56d6ccf9b42e56af082db9014cc683b4254"
+                                               },
+                                    "probe":  {
+                                                  "path":  "target/pf-aegp-layer-receipt-probe-build/Release/pf_aegp_layer_receipt_probe.aex",
+                                                  "size_bytes":  12288,
+                                                  "sha256":  "309c14e50e8a5213ebb57acc766611e91d6687b1229e451511cb58d2ece42d90"
+                                              },
+                                    "input":  {
+                                                  "path":  "target/gpu-effects/opencl-input.rgba",
+                                                  "size_bytes":  3404,
+                                                  "sha256":  "e262995eeaf4ba4ac17385566eadae4597ec4a974ea0c116a170c0edb1e632f9"
+                                              },
+                                    "argb8_output":  {
+                                                         "path":  "target/gpu-effects/layer-receipt-output-8-nativeaux4.rgba",
+                                                         "size_bytes":  3404,
+                                                         "sha256":  "0cafb3304ca0c203de2202bcf1dae0688ea6a98d4507dbea25299567029ca013"
+                                                     },
+                                    "argb8_report":  {
+                                                         "path":  "target/gpu-effects/layer-receipt-report-8-nativeaux4.json",
+                                                         "size_bytes":  6350,
+                                                         "sha256":  "f90d89392e8071f0d05e0ccbdc1ef4456e7103be4dc6a737274c63e7996ec550"
+                                                     },
+                                    "argb16_output":  {
+                                                          "path":  "target/gpu-effects/layer-receipt-output-16-nativeaux4.rgba",
+                                                          "size_bytes":  3404,
+                                                          "sha256":  "aff894130eb7030c567c71d9f9d42fe66c7c50f222c500641cf2d565fbf9fcbc"
+                                                      },
+                                    "argb16_report":  {
+                                                          "path":  "target/gpu-effects/layer-receipt-report-16-nativeaux4.json",
+                                                          "size_bytes":  6351,
+                                                          "sha256":  "b9a0785221e517ec5b7826d89f43f841c320f045fa1fbb241c2ef93a978662fd"
+                                                      },
+                                    "argb32f_output":  {
+                                                           "path":  "target/gpu-effects/layer-receipt-output-32-nativeaux4.rgba",
+                                                           "size_bytes":  3404,
+                                                           "sha256":  "aff894130eb7030c567c71d9f9d42fe66c7c50f222c500641cf2d565fbf9fcbc"
+                                                       },
+                                    "argb32f_report":  {
+                                                           "path":  "target/gpu-effects/layer-receipt-report-32-nativeaux4.json",
+                                                           "size_bytes":  6352,
+                                                           "sha256":  "688c14ccc1ac9497469d4d3f1ffb984305c3a144e38810e067965fa71ec9263f"
+                                                       }
+                                },
+    "runtime":  [
+                    {
+                        "command_mode":  "--render-image",
+                        "pixel_format":  "argb8",
+                        "exit_code":  0,
+                        "status":  "render_completed",
+                        "render_error":  0,
+                        "width":  37,
+                        "height":  23,
+                        "input_sha256":  "531fe73fe40a02dfa9271a0d17c0c658e327ab80f5f82748d799a3a07ba23b4d",
+                        "internal_output_sha256":  "987f2a4cb2feb2b2ef2351069553bd5764e41101d3d27018d57c7e1c42d66107",
+                        "external_output_sha256":  "0cafb3304ca0c203de2202bcf1dae0688ea6a98d4507dbea25299567029ca013",
+                        "receipts_created":  1,
+                        "receipts_checked_in":  1,
+                        "live_receipts":  0,
+                        "live_receipt_bytes":  0,
+                        "invalid_receipt_operations":  0,
+                        "suite_acquires":  7,
+                        "suite_releases":  7,
+                        "suite_leases_balanced":  true,
+                        "guard_bytes_intact":  true,
+                        "last_seh_exception_code":  0
+                    },
+                    {
+                        "command_mode":  "--render-image16",
+                        "pixel_format":  "argb16",
+                        "exit_code":  0,
+                        "status":  "render_completed",
+                        "render_error":  0,
+                        "width":  37,
+                        "height":  23,
+                        "input_sha256":  "8b87456bcf6e277e3435f7fd991f4dd31cd39023e319ce1bf85163434fdbb832",
+                        "internal_output_sha256":  "7ace337eeb5bd5fcffb19673b605a3a26fc0b964d7679e65214589a050662879",
+                        "external_output_sha256":  "aff894130eb7030c567c71d9f9d42fe66c7c50f222c500641cf2d565fbf9fcbc",
+                        "receipts_created":  1,
+                        "receipts_checked_in":  1,
+                        "live_receipts":  0,
+                        "live_receipt_bytes":  0,
+                        "invalid_receipt_operations":  0,
+                        "suite_acquires":  7,
+                        "suite_releases":  7,
+                        "suite_leases_balanced":  true,
+                        "guard_bytes_intact":  true,
+                        "last_seh_exception_code":  0
+                    },
+                    {
+                        "command_mode":  "--render-image32",
+                        "pixel_format":  "argb32f",
+                        "exit_code":  0,
+                        "status":  "render_completed",
+                        "render_error":  0,
+                        "width":  37,
+                        "height":  23,
+                        "input_sha256":  "e24cecd7dc37fa2f6d9d68c891cc7cbe07caad7f26bcbcdc9fa1c1472a87cdb7",
+                        "internal_output_sha256":  "be7d4e56332b9870ef38040d90f84cf57747d5103cde9357e1a05655dba63284",
+                        "external_output_sha256":  "aff894130eb7030c567c71d9f9d42fe66c7c50f222c500641cf2d565fbf9fcbc",
+                        "receipts_created":  1,
+                        "receipts_checked_in":  1,
+                        "live_receipts":  0,
+                        "live_receipt_bytes":  0,
+                        "invalid_receipt_operations":  0,
+                        "suite_acquires":  7,
+                        "suite_releases":  7,
+                        "suite_leases_balanced":  true,
+                        "guard_bytes_intact":  true,
+                        "last_seh_exception_code":  0
+                    }
+                ],
+    "claim":  "A real PF AEX loaded by the ordinary image worker acquired current Render Suite 5, checked out ARGB8, ARGB16, and ARGB32F upstream layer worlds, transformed their pixels, checked every receipt back in, and produced authenticated outputs with balanced host ownership.",
+    "not_claimed":  [
+                        "asynchronous Render Suite 5 requests",
+                        "pixel equivalence with Adobe After Effects"
+                    ]
+}

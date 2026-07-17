@@ -1,0 +1,48 @@
+{
+  "schema_version": 1,
+  "subject": "PF_InData render environment transport for effect debugging",
+  "fixture": {
+    "name": "PathArray",
+    "sha256": "d1daf958aa3f6da2d5ee88997b56029b9074e82d77233969b9e5f7862a687ac8",
+    "request": "tools/sdk-fixtures/patharray-render-environment-request.json"
+  },
+  "requested": {
+    "quality": "low",
+    "quality_value": 0,
+    "field": "upper",
+    "field_value": 1,
+    "shutter_angle": 0.5,
+    "shutter_angle_fixed": 32768,
+    "shutter_phase": -0.25,
+    "shutter_phase_fixed": -16384
+  },
+  "classic": {
+    "passed": true,
+    "worker_echo_matches": true,
+    "guard_bytes_intact": true,
+    "world_lifetimes_balanced": true,
+    "param_checkouts_balanced": true
+  },
+  "smartfx": {
+    "passed": true,
+    "worker_echo_matches": true,
+    "guard_bytes_intact": true,
+    "world_lifetimes_balanced": true,
+    "param_checkouts_balanced": true
+  },
+  "transport": {
+    "tag": "render:v1",
+    "unknown_fields_rejected": true,
+    "non_finite_values_rejected": true,
+    "angle_range": [0.0, 1.0],
+    "phase_range": [-1.0, 1.0],
+    "worker_revalidates_payload": true,
+    "broker_rejects_worker_echo_mismatch": true,
+    "unspecified_defaults": {
+      "quality": "high",
+      "field": "frame",
+      "shutter_angle": 0.0,
+      "shutter_phase": 0.0
+    }
+  }
+}

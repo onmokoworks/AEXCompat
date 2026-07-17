@@ -1,0 +1,40 @@
+{
+  "schema_version": 1,
+  "date": "2026-07-15",
+  "subject": "SDK_Invert_ProcAmp GPU negotiation boundary",
+  "plugin_sha256": "f782038561c0c62c018abada0f952a3cbbd21bbbcf57fb374a546f78601a24ad",
+  "pixel_format": "argb32f",
+  "observation": {
+    "gpu_framework": "cuda",
+    "gpu_device_setup_error": 0,
+    "gpu_device_info_completed": true,
+    "smart_pre_render_error": 0,
+    "gpu_render_possible": true,
+    "gpu_render_dispatched": true,
+    "smart_render_selector_error": 0,
+    "smart_render_error": -6,
+    "output_pixels_valid": false,
+    "gpu_device_setdown_error": 0,
+    "gpu_device_setdown_exception_code": 0,
+    "failure_stage": "output_validation",
+    "classification": "nonzero_exit",
+    "output_created": false
+  },
+  "implemented_boundary": {
+    "pre_render_gpu_abi_offsets": [44, 48, 56, 60],
+    "smart_render_gpu_abi_offsets": [48, 56, 64, 68],
+    "gpu_device_suite_version": 1,
+    "gpu_device_suite_entries": 15,
+    "gpu_world_format": "PF_PixelFormat_GPU_BGRA128",
+    "setdown_framework_matches_setup": true,
+    "setdown_seh_isolation": true,
+    "unwritten_or_nonfinite_output_is_fatal": true
+  },
+  "broker_fallback":{"fresh_cpu_worker":true,"gpu_attempt_failure_stage":"output_validation","gpu_attempt_selector_error":0,"gpu_attempt_render_error":-6,"gpu_attempt_output_pixels_valid":false,"gpu_attempt_setdown_error":0,"gpu_attempt_setdown_exception_code":0,"cpu_fallback_passed":true,"output_created":true,"output_sha256":"d1151e96fb3c0a30047739a4c36294ba8ca32e5fbd64daa2018b8d32814e4b58"},
+  "superseded_observation": {"gpu_device_setdown_exception_code": 3221225477, "reason": "The host incorrectly sent DirectX framework 4 to setdown after CUDA framework 3 setup."},
+  "completed_followup":{"evidence":"analysis/SDK_CUDA_DEVICE_WORLD_RESULT_2026-07-15.json","real_cuda_device_memory":true,"primary_context":true,"bgra128_upload_download":true,"fresh_worker_cpu_fallback":true},
+  "multi_device_followup":{"evidence":"analysis/CUDA_MULTI_DEVICE_BOUNDARY_RESULT_2026-07-15.json","driver_enumeration":true,"ordinal_bound":16,"physical_secondary_device_tested":false},
+  "opencl_followup":{"evidence":"analysis/SDK_OPENCL_DEVICE_WORLD_RESULT_2026-07-15.json","system32_icd":true,"real_cl_mem":true,"bgra128_upload_download":true,"rgba8_cpu_conformance":true},
+  "directx_followup":{"evidence":"analysis/SDK_DIRECTX_DEVICE_WORLD_RESULT_2026-07-16.json","hardware_adapter_count":2,"real_d3d12_resource":true,"bgra128_upload_download":true,"rgba8_cpu_conformance":true},
+  "remaining": "Run CUDA pixel conformance on physical device index 1 or greater when available."
+}

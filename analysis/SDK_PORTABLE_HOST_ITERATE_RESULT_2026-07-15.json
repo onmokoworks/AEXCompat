@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "fixture": "Adobe After Effects SDK Portable",
+  "fixture_sha256": "0ff3ffe028ba3cb008620334355eebf70a586606c452eba151ebd0441a94ec16",
+  "result": "lifecycle_and_classic_render_completed",
+  "lifecycle": {
+    "about_selector_dispatched": true,
+    "sequence_setup_error": 0,
+    "sequence_resetup_error": 0,
+    "frame_setup_error": 0,
+    "frame_setdown_error": 0,
+    "sequence_setdown_error": 0,
+    "lifecycle_data_null": true,
+    "host_detection_message": "Running in After Effects 2020 (17.1) or later."
+  },
+  "render": {
+    "pixel_format": "argb8",
+    "default_mix": 10.0,
+    "default_mix_rgba_oracle_exact": true,
+    "zero_mix_identity_exact": true,
+    "guard_bytes_intact": true,
+    "suite_leases_balanced": true,
+    "handle_lifetimes_balanced": true,
+    "world_lifetimes_balanced": true,
+    "param_checkouts_balanced": true
+  }
+}

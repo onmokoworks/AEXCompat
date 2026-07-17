@@ -1,0 +1,36 @@
+{
+  "schema_version": 1,
+  "fixture": "Adobe After Effects SDK Transformer",
+  "fixture_sha256": "fa389fa274db7ac9fc74c6e1600ad6fb971c9605220bea646a514511dd5b9be4",
+  "result": "classic_multi_input_render_completed",
+  "parameter_observation": {
+    "reported_num_params": 7,
+    "layer_slot": 5,
+    "layer_default": -1
+  },
+  "default_render": {
+    "pixel_formats": ["argb8", "argb16"],
+    "difference_rgb_oracle_exact": true,
+    "alpha_preserved": true,
+    "abort_calls": 6,
+    "checkout_calls": 1,
+    "checkin_calls": 1,
+    "worlds_created": 1,
+    "worlds_disposed": 1,
+    "suite_leases_balanced": true,
+    "handle_lifetimes_balanced": true,
+    "world_lifetimes_balanced": true,
+    "param_checkouts_balanced": true,
+    "guard_bytes_intact": true
+  },
+  "external_layer_render": {
+    "layer_slot": 5,
+    "layer_opacity": 0.5,
+    "current_time": 7,
+    "time_step": 2,
+    "time_scale": 30,
+    "checkout_time": 7,
+    "rgba_oracle_exact": true,
+    "guard_bytes_intact": true
+  }
+}

@@ -1,0 +1,118 @@
+import hashlib
+import json
+import math
+import subprocess
+from pathlib import Path
+
+import pytest
+
+
+ROOT = Path(__file__).resolve().parents[1]
+SOURCE = ROOT / "instruments" / "pf-aegp-layer-receipt-probe" / "pf_aegp_layer_receipt_probe.cpp"
+WORKER = ROOT / "target" / "minihost-build" / "aex_render_worker.exe"
+PROBE = ROOT / "target" / "pf-aegp-layer-receipt-probe-build" / "Release" / "pf_aegp_layer_receipt_probe.aex"
+INPUT = ROOT / "target" / "gpu-effects" / "opencl-input.rgba"
+
+
+def test_probe_uses_the_requested_aegp_receipt_path():
+    source = SOURCE.read_text(encoding="utf-8")
+    for token in (
+        "kAEGPPFInterfaceSuiteVersion1",
+        "kAEGPEffectSuiteVersion3",
+        "kAEGPLayerRenderOptionsSuiteVersion1",
+        "kAEGPRenderSuiteVersion5",
+        "kAEGPWorldSuiteVersion3",
+        "AEGP_GetNewEffectForEffect",
+        "AEGP_NewFromUpstreamOfEffect",
+        "AEGP_RenderAndCheckoutLayerFrame",
+        "AEGP_GetReceiptWorld",
+        "AEGP_GetBaseAddr8",
+        "AEGP_GetBaseAddr16",
+        "AEGP_GetBaseAddr32",
+        "PF_GetPixelFormat",
+        "PF_PixelFormat_ARGB32",
+        "PF_PixelFormat_ARGB64",
+        "PF_PixelFormat_ARGB128",
+    ):
+        assert token in source
+
+
+def test_probe_unwinds_all_owned_resources():
+    source = SOURCE.read_text(encoding="utf-8")
+    assert "AEGP_CheckinFrame(receipt)" in source
+    assert "AEGP_Dispose(options)" in source
+    assert "AEGP_DisposeEffect(effect)" in source
+    assert source.count("ReleaseSuite(") >= 7
+    assert "std::memset(output->data" in source
+    assert "rowbytes < static_cast<A_u_long>(width) * pixel_size" in source
+
+
+def _expected_output(source, width, depth):
+    expected = bytearray(len(source))
+    for pixel in range(width * (len(source) // (width * 4))):
+        x, y = pixel % width, pixel // width
+        red, green, blue, alpha = source[pixel * 4:pixel * 4 + 4]
+        if depth == 8:
+            transformed = (green ^ (x & 0xff), blue ^ (y & 0xff),
+                           red ^ ((x + y) & 0xff), alpha)
+        elif depth == 16:
+            to_16 = lambda value: (value * 32768 + 127) // 255
+            to_8 = lambda value: (min(value, 32768) * 255 + 16384) // 32768
+            transformed = (
+                to_8(to_16(green) ^ (x & 0xffff)),
+                to_8(to_16(blue) ^ (y & 0xffff)),
+                to_8(to_16(red) ^ ((x + y) & 0xffff)),
+                alpha,
+            )
+        else:
+            to_8 = lambda value: math.floor(min(max(value, 0.0), 1.0) * 255.0 + 0.5)
+            transformed = (
+                to_8(green / 255.0 + x / 65536.0),
+                to_8(blue / 255.0 + y / 65536.0),
+                to_8(red / 255.0 + (x + y) / 65536.0),
+                alpha,
+            )
+        expected[pixel * 4:pixel * 4 + 4] = bytes(transformed)
+    return expected
+
+
+@pytest.mark.parametrize(
+    ("command", "depth"),
+    (("--render-image", 8), ("--render-image16", 16), ("--render-image32", 32)),
+)
+def test_real_probe_checks_out_typed_upstream_pixels_during_ordinary_render(
+        tmp_path, command, depth):
+    assert WORKER.is_file()
+    assert PROBE.is_file()
+    assert INPUT.is_file()
+    output = tmp_path / f"layer-receipt-output-{depth}.rgba"
+    probe_hash = hashlib.sha256(PROBE.read_bytes()).hexdigest()
+    completed = subprocess.run(
+        [
+            str(WORKER), command, str(PROBE), probe_hash, "v5|",
+            str(INPUT), str(output), "37", "23", "0", "1", "1", "1",
+        ],
+        cwd=ROOT,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        capture_output=True,
+        timeout=30,
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    report = json.loads(completed.stdout)
+    assert report["status"] == "render_completed"
+    assert report["render_error"] == 0
+    assert report["receipt_lifetimes_balanced"] is True
+    assert report["receipts_created"] == 1
+    assert report["receipts_checked_in"] == 1
+    assert report["live_receipts"] == 0
+    assert report["live_receipt_bytes"] == 0
+    assert report["invalid_receipt_operations"] == 0
+    assert report["suite_leases_balanced"] is True
+    assert report["suite_acquires"] == report["suite_releases"] == 7
+    assert report["guard_bytes_intact"] is True
+
+    source = INPUT.read_bytes()
+    assert output.read_bytes() == _expected_output(source, 37, depth)
+    assert report["input_sha256"] != report["output_sha256"]

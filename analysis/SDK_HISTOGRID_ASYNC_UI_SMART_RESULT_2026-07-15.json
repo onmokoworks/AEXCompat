@@ -1,0 +1,83 @@
+{
+  "schema_version": 1,
+  "fixture": "Adobe After Effects SDK HistoGrid Debug build",
+  "fixture_sha256": "b66bc86b5041f22aa6acb3f02dde619dd40f2fec6a87bf4db0ceccc73e67b5aa",
+  "result": "async_custom_ui_draw_and_smartfx_image_io_completed",
+  "build_boundary": {
+    "official_effect_source_modified": false,
+    "platform_toolset_override": "v143",
+    "disabled_warning": "C4103",
+    "all_other_warnings_remain_errors": true
+  },
+  "initialization": {
+    "global_setup_error": 0,
+    "params_setup_error": 0,
+    "global_setdown_error": 0,
+    "reported_parameter_count": 2,
+    "custom_ui_events": 4,
+    "supports_smart_render": true,
+    "supports_async_custom_ui_manager": true
+  },
+  "custom_ui_draw": {
+    "event_error": 0,
+    "event_out_flags": 1,
+    "paint_rect_calls": 1,
+    "stroke_path_calls": 100,
+    "drawbot_objects_created": 101,
+    "drawbot_objects_released": 101,
+    "drawbot_invalid_operations": 0,
+    "async_checkout_completed_without_receipt": true,
+    "sequence_setdown_error": 0,
+    "suite_leases_balanced": true,
+    "handle_lifetimes_balanced": true
+  },
+  "smartfx_render": {
+    "dimensions": [37, 23],
+    "pixel_format": "argb8",
+    "pre_render_error": 0,
+    "smart_render_error": 0,
+    "input_sha256": "69e49b857a7bb143fdb9e423f6dd7e525781fb827b156f16b7373c93e86800f3",
+    "output_sha256": "771d91ac4c0436a9214aa89a325ff488ce1e6193400be74f7fb4c0a70d1cbe5c",
+    "result_rects_valid": true,
+    "guard_bytes_intact": true,
+    "handle_lifetimes_balanced": true,
+    "world_lifetimes_balanced": true,
+    "parameter_checkouts_balanced": true,
+    "suite_leases_balanced": false,
+    "suite_lease_warning": true,
+    "live_suite_leases": "PF World Suite@2=99",
+    "image_retained_despite_non_ownership_warning": true
+  },
+  "integrated_draw_smartfx_render": {
+    "production_broker_api": "render_experimental_image_at_time_with_format_context_and_ui_action",
+    "single_isolated_worker": true,
+    "action_payload": "draw:v1",
+    "draw_dispatched": true,
+    "draw_error": 0,
+    "draw_out_flags": 1,
+    "ui_lifecycle_errors": [0, 0, 0, 0],
+    "ui_context_closed_before_setdown": true,
+    "pre_render_error": 0,
+    "smart_render_error": 0,
+    "depth_cases": [
+      {
+        "pixel_format": "argb8",
+        "input_sha256": "69e49b857a7bb143fdb9e423f6dd7e525781fb827b156f16b7373c93e86800f3",
+        "output_sha256": "771d91ac4c0436a9214aa89a325ff488ce1e6193400be74f7fb4c0a70d1cbe5c"
+      },
+      {
+        "pixel_format": "argb16",
+        "input_sha256": "adafafc883b3502e00f5a7d675264153ad80fc090ac34379db249e2881e90f60",
+        "output_sha256": "ba0ff15c18016004b35d93033964a7355a3b3df9602aef994aecc7a92b12e170"
+      },
+      {
+        "pixel_format": "argb32f",
+        "input_sha256": "6e7faf0d7e49d822e0589b2b2a76b740eb8ffb338defe134408bce69f305e961",
+        "output_sha256": "e1450efef5192c6ab5c2ecb1afdc1611aa07932fb857644d3c976d6aa7546425"
+      }
+    ],
+    "distinct_depth_output_hashes": 3,
+    "png_saved": true,
+    "passed": true
+  }
+}

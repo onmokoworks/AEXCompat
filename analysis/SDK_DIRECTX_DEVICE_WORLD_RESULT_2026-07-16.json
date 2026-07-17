@@ -1,0 +1,57 @@
+{
+  "schema_version": 1,
+  "date": "2026-07-16",
+  "subject": "SDK_Invert_ProcAmp real DirectX device-world compatibility",
+  "fixture": {
+    "source": "Adobe After Effects SDK SDK_Invert_ProcAmp",
+    "source_modified": false,
+    "reproducible_build_script": "tools/build-sdk-invert-directx.ps1",
+    "sha256": "6cbbb9a25539c7958e7eb5dce458eb2ef62b9efeecb7108e1c04973270b13428"
+  },
+  "host": {
+    "gpu_framework": "DirectX",
+    "hardware_adapter_count": 2,
+    "device_index": 0,
+    "pixel_format": "PF_PixelFormat_GPU_BGRA128"
+  },
+  "device_world_smoke": {
+    "dimensions": [16, 12],
+    "gpu_device_setup_error": 0,
+    "gpu_smart_pre_render_error": 0,
+    "gpu_smart_render_error": 0,
+    "gpu_device_setdown_error": 0,
+    "render_completed": true,
+    "output_pixels_valid": true
+  },
+  "external_image_oracle": {
+    "commands": ["--smart-image32-directx", "--smart-image32-cpu"],
+    "same_fixture_and_parameters": true,
+    "dimensions": [37, 23],
+    "directx_exit_code": 0,
+    "cpu_exit_code": 0,
+    "public_pixel_format": "RGBA8 raw",
+    "directx_rgba8_bytes": 3404,
+    "cpu_rgba8_bytes": 3404,
+    "directx_device_setup_error": 0,
+    "directx_smart_pre_render_error": 0,
+    "directx_smart_render_error": 0,
+    "directx_device_setdown_error": 0,
+    "directx_rgba8_sha256": "6f24052bf442cc05899fdfe3779514c610652c6ab1d8dcba083dbf36f9ad0617",
+    "cpu_rgba8_sha256": "6f24052bf442cc05899fdfe3779514c610652c6ab1d8dcba083dbf36f9ad0617",
+    "gpu_cpu_different_rgba8_bytes": 0,
+    "gpu_cpu_max_rgba8_error": 0,
+    "rgba8_conformance": "pass"
+  },
+  "ownership": {
+    "device_allocations_created": 3,
+    "device_allocations_freed": 3,
+    "live_device_allocations": 0,
+    "live_device_bytes": 0,
+    "directx_sync_failures": 0,
+    "gpu_memory_lifetimes_balanced": true
+  },
+  "isolation": {
+    "seh_exceptions": 0
+  },
+  "interpretation": "The real DirectX SDK fixture completed setup, Smart Pre-Render, Smart Render, and setdown on hardware adapter index 0. Its public 37x23 RGBA8 output is byte-identical to the CPU path, with balanced device-world ownership and no SEH exception."
+}

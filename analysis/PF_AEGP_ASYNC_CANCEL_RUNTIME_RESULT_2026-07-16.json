@@ -1,0 +1,74 @@
+{
+    "schema_version":  1,
+    "captured_at":  "2026-07-17",
+    "result":  "render_suite5_async_request_deterministically_canceled",
+    "authenticated_artifacts":  {
+                                    "source":  {
+                                                   "path":  "minihost/src/l2_main.cpp",
+                                                   "size_bytes":  1138218,
+                                                   "sha256":  "4fce425483d59eeef6335bcc885c904a6c406e2449cd879e2daad5447f1bf9f7"
+                                               },
+                                    "worker":  {
+                                                   "path":  "target/minihost-build/aex_render_worker.exe",
+                                                   "size_bytes":  768512,
+                                                   "sha256":  "94bbad9e150e60306073e66c3ab4a56d6ccf9b42e56af082db9014cc683b4254"
+                                               },
+                                    "probe":  {
+                                                  "path":  "target/pf-aegp-async-cancel-probe-build/Release/pf_aegp_async_cancel_probe.aex",
+                                                  "size_bytes":  13312,
+                                                  "sha256":  "4a883a240ca905bf2a88c46d3b9d4a74bb006ae39afd2cc24d7ab5a0a1ffbde5"
+                                              },
+                                    "input":  {
+                                                  "path":  "target/gpu-effects/opencl-input.rgba",
+                                                  "size_bytes":  3404,
+                                                  "sha256":  "e262995eeaf4ba4ac17385566eadae4597ec4a974ea0c116a170c0edb1e632f9"
+                                              },
+                                    "output":  {
+                                                   "path":  "target/gpu-effects/async-cancel-output-20260717-nativeaux4.rgba",
+                                                   "size_bytes":  3404,
+                                                   "sha256":  "0fa3b2fe607b1ad8b45ff0797c18c1072336e61c08667c24073241cd27ef479c"
+                                               },
+                                    "report":  {
+                                                   "path":  "target/gpu-effects/async-cancel-report-20260717-nativeaux4.json",
+                                                   "size_bytes":  6343,
+                                                   "sha256":  "53f3644b77aa9f23bb5f968fd8ec672ba0fab1bbbfc4dea12e3bb317925c43d9"
+                                               }
+                                },
+    "runtime":  {
+                    "command_mode":  "--render-image",
+                    "test_environment":  "AEXCOMPAT_TEST_ASYNC_CANCEL_GATE=1",
+                    "exit_code":  0,
+                    "status":  "render_completed",
+                    "render_error":  0,
+                    "width":  37,
+                    "height":  23,
+                    "input_sha256":  "531fe73fe40a02dfa9271a0d17c0c658e327ab80f5f82748d799a3a07ba23b4d",
+                    "internal_output_sha256":  "0fa3b2fe607b1ad8b45ff0797c18c1072336e61c08667c24073241cd27ef479c",
+                    "external_output_sha256":  "0fa3b2fe607b1ad8b45ff0797c18c1072336e61c08667c24073241cd27ef479c",
+                    "async_layer_requests_created":  1,
+                    "async_layer_requests_completed":  0,
+                    "async_layer_requests_canceled":  1,
+                    "async_layer_callback_failures":  0,
+                    "async_layer_callback_exceptions":  0,
+                    "live_async_layer_requests":  0,
+                    "async_layer_reserved_bytes":  0,
+                    "async_layer_requests_balanced":  true,
+                    "receipts_created":  0,
+                    "receipts_checked_in":  0,
+                    "live_receipts":  0,
+                    "live_receipt_bytes":  0,
+                    "invalid_receipt_operations":  0,
+                    "receipt_lifetimes_balanced":  true,
+                    "suite_acquires":  5,
+                    "suite_releases":  5,
+                    "suite_leases_balanced":  true,
+                    "guard_bytes_intact":  true,
+                    "last_seh_exception_code":  0
+                },
+    "claim":  "A real PF AEX submitted one Render Suite 5 async layer request, canceled it before completion through the deterministic test gate, received exactly one canceled callback without a receipt, and left no request, receipt, or reserved-byte ownership live.",
+    "not_claimed":  [
+                        "Production scheduler timing equivalence with Adobe After Effects",
+                        "Safety against a plugin callback that blocks forever",
+                        "Execution inside Adobe After Effects"
+                    ]
+}

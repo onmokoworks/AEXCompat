@@ -1,3 +1,4 @@
+use crate::restricted_worker_token::RestrictedWorkerToken;
 use crate::{classify_exit, redact_windows_paths, ExitClassification};
 use std::ffi::c_void;
 use std::io;
@@ -16,18 +17,20 @@ use windows_sys::Win32::Storage::FileSystem::ReadFile;
 use windows_sys::Win32::System::JobObjects::{
     AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
     SetInformationJobObject, TerminateJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
-    JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+    JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, JOB_OBJECT_LIMIT_PROCESS_MEMORY,
 };
 use windows_sys::Win32::System::Pipes::CreatePipe;
 use windows_sys::Win32::System::Threading::{
-    CreateEventW, CreateProcessW, DeleteProcThreadAttributeList, GetExitCodeProcess,
-    InitializeProcThreadAttributeList, ResumeThread, UpdateProcThreadAttribute,
-    WaitForSingleObject, CREATE_NO_WINDOW, CREATE_SUSPENDED, EXTENDED_STARTUPINFO_PRESENT,
-    INFINITE, PROCESS_INFORMATION, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, STARTF_USESTDHANDLES,
-    STARTUPINFOEXW,
+    CreateEventW, CreateProcessAsUserW, CreateProcessW, DeleteProcThreadAttributeList,
+    GetExitCodeProcess, InitializeProcThreadAttributeList, ResumeThread, TerminateProcess,
+    UpdateProcThreadAttribute, WaitForSingleObject, CREATE_NO_WINDOW, CREATE_SUSPENDED,
+    EXTENDED_STARTUPINFO_PRESENT, PROCESS_INFORMATION, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
+    STARTF_USESTDHANDLES, STARTUPINFOEXW,
 };
 
 const CAPTURE_LIMIT: usize = 64 * 1024;
+const PROCESS_MEMORY_LIMIT: usize = 512 * 1024 * 1024;
+const TERMINATION_GRACE_MS: u32 = 5_000;
 
 pub struct ProcessResult {
     pub classification: ExitClassification,
@@ -100,7 +103,24 @@ fn pipe() -> io::Result<(OwnedHandle, OwnedHandle)> {
 }
 
 fn quote(value: &str) -> String {
-    format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
+    let mut quoted = String::with_capacity(value.len() + 2);
+    quoted.push('"');
+    let mut backslashes = 0;
+    for character in value.chars() {
+        if character == '\\' {
+            backslashes += 1;
+        } else {
+            if character == '"' {
+                quoted.extend(std::iter::repeat_n('\\', backslashes + 1));
+            }
+            quoted.extend(std::iter::repeat_n('\\', backslashes));
+            backslashes = 0;
+            quoted.push(character);
+        }
+    }
+    quoted.extend(std::iter::repeat_n('\\', backslashes * 2));
+    quoted.push('"');
+    quoted
 }
 
 fn reader(handle_value: usize) -> thread::JoinHandle<io::Result<(String, bool)>> {
@@ -135,16 +155,57 @@ fn reader(handle_value: usize) -> thread::JoinHandle<io::Result<(String, bool)>>
     })
 }
 
+fn terminate_job_and_wait(job: HANDLE, process: HANDLE, wait_ms: u32) -> io::Result<()> {
+    if unsafe { TerminateJobObject(job, 0xDEAD) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+
+    match unsafe { WaitForSingleObject(process, wait_ms) } {
+        WAIT_OBJECT_0 => Ok(()),
+        WAIT_TIMEOUT => Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            "process did not exit after its job was terminated",
+        )),
+        _ => Err(io::Error::last_os_error()),
+    }
+}
+
 pub fn run_isolated(
     program: &Path,
     args: &[String],
     timeout: Duration,
 ) -> io::Result<ProcessResult> {
+    run_isolated_impl(program, args, timeout, None)
+}
+
+pub fn run_isolated_with_restricted_token(
+    program: &Path,
+    args: &[String],
+    timeout: Duration,
+    token: &RestrictedWorkerToken,
+    current_directory: &Path,
+) -> io::Result<ProcessResult> {
+    run_isolated_impl(
+        program,
+        args,
+        timeout,
+        Some((token.as_raw_handle(), current_directory)),
+    )
+}
+
+fn run_isolated_impl(
+    program: &Path,
+    args: &[String],
+    timeout: Duration,
+    token: Option<(HANDLE, &Path)>,
+) -> io::Result<ProcessResult> {
     let (stdout_read, stdout_write) = pipe()?;
     let (stderr_read, stderr_write) = pipe()?;
     let job = OwnedHandle::new(unsafe { CreateJobObjectW(null(), null()) })?;
     let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { zeroed() };
-    limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+    limits.BasicLimitInformation.LimitFlags =
+        JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_PROCESS_MEMORY;
+    limits.ProcessMemoryLimit = PROCESS_MEMORY_LIMIT;
     if unsafe {
         SetInformationJobObject(
             job.raw(),
@@ -203,6 +264,7 @@ pub fn run_isolated(
         .encode_wide()
         .chain(Some(0))
         .collect();
+    let application_wide: Vec<u16> = program.as_os_str().encode_wide().chain(Some(0)).collect();
     let mut startup: STARTUPINFOEXW = unsafe { zeroed() };
     startup.StartupInfo.cb = size_of::<STARTUPINFOEXW>() as u32;
     startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
@@ -211,31 +273,57 @@ pub fn run_isolated(
     startup.StartupInfo.hStdInput = null_mut();
     startup.lpAttributeList = attribute_list;
     let mut process: PROCESS_INFORMATION = unsafe { zeroed() };
+    let creation_flags = EXTENDED_STARTUPINFO_PRESENT | CREATE_SUSPENDED | CREATE_NO_WINDOW;
     let created = unsafe {
-        CreateProcessW(
-            null(),
-            command_wide.as_mut_ptr(),
-            null(),
-            null(),
-            1,
-            EXTENDED_STARTUPINFO_PRESENT | CREATE_SUSPENDED | CREATE_NO_WINDOW,
-            null(),
-            null(),
-            &startup.StartupInfo,
-            &mut process,
-        )
+        match token {
+            Some((token, current_directory)) => {
+                let current_directory_wide: Vec<u16> = current_directory
+                    .as_os_str()
+                    .encode_wide()
+                    .chain(Some(0))
+                    .collect();
+                CreateProcessAsUserW(
+                    token,
+                    application_wide.as_ptr(),
+                    command_wide.as_mut_ptr(),
+                    null(),
+                    null(),
+                    1,
+                    creation_flags,
+                    null(),
+                    current_directory_wide.as_ptr(),
+                    &startup.StartupInfo,
+                    &mut process,
+                )
+            }
+            None => CreateProcessW(
+                null(),
+                command_wide.as_mut_ptr(),
+                null(),
+                null(),
+                1,
+                creation_flags,
+                null(),
+                null(),
+                &startup.StartupInfo,
+                &mut process,
+            ),
+        }
     };
     if created == 0 {
         return Err(io::Error::last_os_error());
     }
     let process_handle = OwnedHandle::new(process.hProcess)?;
     let thread_handle = OwnedHandle::new(process.hThread)?;
+    let mut suspended_cleanup = SuspendedProcessCleanup::new(process_handle.raw(), job.raw());
     if unsafe { AssignProcessToJobObject(job.raw(), process_handle.raw()) } == 0 {
         return Err(io::Error::last_os_error());
     }
+    suspended_cleanup.assigned_to_job = true;
     if unsafe { ResumeThread(thread_handle.raw()) } == u32::MAX {
         return Err(io::Error::last_os_error());
     }
+    suspended_cleanup.disarm();
     drop(thread_handle);
     drop(stdout_write);
     drop(stderr_write);
@@ -249,15 +337,18 @@ pub fn run_isolated(
     };
     let timed_out = wait == WAIT_TIMEOUT;
     if timed_out {
-        unsafe {
-            TerminateJobObject(job.raw(), 0xDEAD);
-            WaitForSingleObject(process_handle.raw(), INFINITE);
-        }
+        terminate_job_and_wait(job.raw(), process_handle.raw(), TERMINATION_GRACE_MS)?;
     } else if wait != WAIT_OBJECT_0 {
         return Err(io::Error::last_os_error());
     }
     let mut exit_code = 0;
     if unsafe { GetExitCodeProcess(process_handle.raw(), &mut exit_code) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // A plug-in or GPU driver may leave descendants holding inherited pipe
+    // handles. End the job before joining readers so capture cannot wait for
+    // an unrelated descendant after the worker itself has exited.
+    if !timed_out && unsafe { TerminateJobObject(job.raw(), exit_code) } == 0 {
         return Err(io::Error::last_os_error());
     }
     let (stdout, stdout_truncated) = stdout_reader
@@ -274,4 +365,62 @@ pub fn run_isolated(
         stdout_truncated,
         stderr_truncated,
     })
+}
+
+struct SuspendedProcessCleanup {
+    process: HANDLE,
+    job: HANDLE,
+    assigned_to_job: bool,
+    armed: bool,
+}
+
+impl SuspendedProcessCleanup {
+    fn new(process: HANDLE, job: HANDLE) -> Self {
+        Self {
+            process,
+            job,
+            assigned_to_job: false,
+            armed: true,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for SuspendedProcessCleanup {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        unsafe {
+            if self.assigned_to_job {
+                TerminateJobObject(self.job, 0xDEAD);
+            } else {
+                TerminateProcess(self.process, 0xDEAD);
+            }
+            WaitForSingleObject(self.process, TERMINATION_GRACE_MS);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn timeout_cleanup_reports_job_termination_failure_without_waiting() {
+        let error = terminate_job_and_wait(null_mut(), null_mut(), u32::MAX).unwrap_err();
+        assert_eq!(error.raw_os_error(), Some(6)); // ERROR_INVALID_HANDLE
+    }
+
+    #[test]
+    fn timeout_cleanup_uses_a_bounded_process_wait() {
+        let job = OwnedHandle::new(unsafe { CreateJobObjectW(null(), null()) }).unwrap();
+        let process = OwnedHandle::new(unsafe { CreateEventW(null(), 0, 0, null()) }).unwrap();
+
+        let error = terminate_job_and_wait(job.raw(), process.raw(), 0).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+    }
 }

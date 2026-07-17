@@ -1,0 +1,63 @@
+{
+  "schema_version": 1,
+  "subject": "PF_InData spatial context transport for effect debugging",
+  "sdk_layout": {
+    "downsample_x_offset": 284,
+    "downsample_y_offset": 292,
+    "pixel_aspect_ratio_offset": 300,
+    "source": "Adobe After Effects SDK AE_Effect.h and local ABI layout probe"
+  },
+  "fixture": {
+    "name": "PathArray",
+    "sha256": "d1daf958aa3f6da2d5ee88997b56029b9074e82d77233969b9e5f7862a687ac8",
+    "request": "tools/sdk-fixtures/patharray-spatial-context-request.json",
+    "input_dimensions": [37, 23]
+  },
+  "requested_spatial_context": {
+    "downsample_x": [1, 2],
+    "downsample_y": [1, 2],
+    "pixel_aspect_ratio": [10, 11],
+    "full_resolution_dimensions": [74, 46],
+    "pre_effect_source_origin": [-7, 9]
+  },
+  "classic": {
+    "passed": true,
+    "reported_spatial_context_matches": true,
+    "quality": 1,
+    "local_time_step": 1,
+    "in_data_dimensions": [74, 46],
+    "pre_effect_source_origin": [-7, 9],
+    "output_origin": [0, 0],
+    "output_dimensions": [37, 23],
+    "guard_bytes_intact": true,
+    "world_lifetimes_balanced": true,
+    "param_checkouts_balanced": true
+  },
+  "smartfx": {
+    "passed": true,
+    "reported_spatial_context_matches": true,
+    "quality": 1,
+    "local_time_step": 1,
+    "in_data_dimensions": [74, 46],
+    "pre_effect_source_origin": [-7, 9],
+    "output_origin": [2000, 2000],
+    "output_dimensions": [4037, 4023],
+    "guard_bytes_intact": true,
+    "world_lifetimes_balanced": true,
+    "param_checkouts_balanced": true
+  },
+  "transport": {
+    "tag": "spatial:v3",
+    "legacy_tags_accepted": ["spatial:v1", "spatial:v2"],
+    "world_dimensions": [37, 23],
+    "full_resolution_dimensions": [74, 46],
+    "pre_effect_source_origin_range": [-32768, 32768],
+    "unpaired_origin_rejected_before_native_dispatch": true,
+    "maximum_component": 1000000,
+    "zero_denominator_rejected_before_native_dispatch": true,
+    "worker_revalidates_payload": true,
+    "broker_rejects_worker_echo_mismatch": true,
+    "smartfx_frame_context_populated_before_conditional_ui": true,
+    "unspecified_default": [1, 1]
+  }
+}

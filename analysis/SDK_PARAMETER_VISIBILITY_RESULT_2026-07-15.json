@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "host_spec_version": {"major": 13, "minor": 28},
+  "paramarama": {
+    "source": "Adobe After Effects SDK Examples/Effect/Paramarama",
+    "sha256": "55742B6496D5FD0B6396F9438E89E30CE34FDB0BC4486000D64A22EA8AEFCF4B",
+    "status": "parameters_inspected",
+    "parameter_types": [1, 5, 10, 4, 3, 7, 18, 15],
+    "modern_ae_only_types_present": [18, 15]
+  },
+  "pathmaster": {
+    "source": "Adobe After Effects SDK Examples/Effect/PathMaster",
+    "sha256": "F6FA2C4977DFDEE094A0B00EC5146F3A4878258BE6D2B314EF2F680985969C40",
+    "status": "parameters_inspected",
+    "parameter_count": 6,
+    "parameter_types": [12, 5, 2, 2, 4, 2],
+    "broker_path_parameter": {"slot": 1, "name": "Path", "kind": "path"},
+    "selectors_dispatched": ["GLOBAL_SETUP", "PARAMS_SETUP", "GLOBAL_SETDOWN"],
+    "render_lifecycle_dispatched": false
+  }
+}

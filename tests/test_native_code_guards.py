@@ -5,12 +5,13 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 BROKER_ROOT = ROOT / "broker"
+BROKER_SOURCE_ROOT = BROKER_ROOT / "crates"
 MINIHOST_ROOT = ROOT / "minihost"
 
 
 class NativeCodeGuardTests(unittest.TestCase):
     def test_broker_sources_exclude_native_loader_symbols_and_plugin_extension(self):
-        sources = sorted(BROKER_ROOT.rglob("*.rs"))
+        sources = sorted(BROKER_SOURCE_ROOT.rglob("*.rs"))
         self.assertTrue(sources)
         forbidden = ("LoadLibrary", "GetProcAddress", "." + "aex")
         for path in sources:
@@ -20,11 +21,11 @@ class NativeCodeGuardTests(unittest.TestCase):
                     self.assertNotIn(token, text)
 
     def test_broker_has_no_network_or_shell_process_dependencies(self):
-        cargo_files = sorted(BROKER_ROOT.rglob("Cargo.toml"))
+        cargo_files = [BROKER_ROOT / "Cargo.toml", *sorted(BROKER_SOURCE_ROOT.rglob("Cargo.toml"))]
         combined = "\n".join(path.read_text(encoding="utf-8") for path in cargo_files)
         for dependency in ("reqwest", "hyper", "tokio", "std::net"):
             self.assertNotIn(dependency, combined)
-        for path in BROKER_ROOT.rglob("*.rs"):
+        for path in BROKER_SOURCE_ROOT.rglob("*.rs"):
             text = path.read_text(encoding="utf-8")
             self.assertNotIn("cmd.exe", text)
             self.assertNotIn("powershell", text.lower())

@@ -1,0 +1,62 @@
+{
+  "schema_version": 1,
+  "date": "2026-07-15",
+  "subject": "SDK_Invert_ProcAmp real OpenCL device-world compatibility",
+  "fixture": {
+    "source": "Adobe After Effects SDK SDK_Invert_ProcAmp",
+    "source_modified": false,
+    "reproducible_build_script": "tools/build-sdk-invert-opencl.ps1"
+  },
+  "host": {
+    "gpu_framework": "OpenCL",
+    "driver_library": "System32/OpenCL.dll",
+    "device_count": 1,
+    "device_index": 0,
+    "pixel_format": "PF_PixelFormat_GPU_BGRA128"
+  },
+  "device_world_smoke": {
+    "dimensions": [16, 12],
+    "bgra128_bytes": 3072,
+    "opencl_upload_bytes": 3072,
+    "opencl_download_bytes": 3072,
+    "gpu_selector_error": 0,
+    "gpu_device_setup_error": 0,
+    "gpu_device_setdown_error": 0,
+    "output_pixels_valid": true,
+    "gpu_float_world_sha256": "d82c5991c0da941942618cdc73bea901a765dafad172d7e9e9569764482075d4",
+    "cpu_float_world_sha256": "695e591da5d3ca88395b7981ffe4833883251f3dfe3a285ccfa5dfb1cae48933",
+    "float_world_hashes_identical": false
+  },
+  "external_image_oracle": {
+    "commands": ["--smart-image32-opencl", "--smart-image32-cpu"],
+    "same_fixture_and_parameters": true,
+    "dimensions": [37, 23],
+    "public_pixel_format": "RGBA8 raw",
+    "public_rgba8_bytes": 3404,
+    "opencl_bgra128_upload_bytes": 13616,
+    "opencl_bgra128_download_bytes": 13616,
+    "opencl_selector_error": 0,
+    "opencl_device_setup_error": 0,
+    "opencl_render_error": 0,
+    "opencl_device_setdown_error": 0,
+    "opencl_output_pixels_valid": true,
+    "opencl_rgba8_sha256": "6f24052bf442cc05899fdfe3779514c610652c6ab1d8dcba083dbf36f9ad0617",
+    "cpu_rgba8_sha256": "6f24052bf442cc05899fdfe3779514c610652c6ab1d8dcba083dbf36f9ad0617",
+    "gpu_cpu_different_rgba8_bytes": 0,
+    "gpu_cpu_max_rgba8_error": 0,
+    "rgba8_conformance": "pass"
+  },
+  "ownership": {
+    "device_allocations_created": 3,
+    "device_allocations_freed": 3,
+    "live_device_allocations": 0,
+    "live_device_bytes": 0,
+    "opencl_sync_failures": 0,
+    "gpu_memory_lifetimes_balanced": true
+  },
+  "observed_reports": {
+    "opencl": "target/gpu-effects/opencl-external-report.json",
+    "cpu": "target/gpu-effects/opencl-cpu-external-report.json"
+  },
+  "interpretation": "The internal float-world hashes are not expected to be byte-identical. RGBA8 conformance passes because the same 37x23 fixture and parameters produce byte-identical public RGBA8 output."
+}

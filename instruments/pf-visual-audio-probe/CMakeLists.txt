@@ -1,0 +1,27 @@
+foreach(target pf_visual_audio_advertised_probe pf_visual_audio_unadvertised_probe
+    pf_visual_audio_sidecar_probe pf_visual_audio_boundary_probe
+    pf_visual_audio_format_probe pf_visual_audio_multi_handle_probe
+    pf_visual_audio_double_checkin_probe)
+  add_library(${target} MODULE pf_visual_audio_probe.cpp)
+  target_include_directories(${target} PRIVATE
+    "$ENV{AE_SDK_ROOT}/Examples/Headers"
+    "$ENV{AE_SDK_ROOT}/Examples/Headers/SP"
+    "$ENV{AE_SDK_ROOT}/Examples/Util"
+  )
+  set_target_properties(${target} PROPERTIES PREFIX "" SUFFIX ".aex")
+endforeach()
+target_compile_definitions(pf_visual_audio_advertised_probe PRIVATE AEXCOMPAT_ADVERTISE_AUDIO=1)
+target_compile_definitions(pf_visual_audio_sidecar_probe PRIVATE
+  AEXCOMPAT_ADVERTISE_AUDIO=1 AEXCOMPAT_REQUIRE_AUDIO_SIDECAR=1)
+target_compile_definitions(pf_visual_audio_boundary_probe PRIVATE
+  AEXCOMPAT_ADVERTISE_AUDIO=1 AEXCOMPAT_REQUIRE_AUDIO_SIDECAR=1
+  AEXCOMPAT_AUDIO_BOUNDARY_PROBE=1)
+target_compile_definitions(pf_visual_audio_format_probe PRIVATE
+  AEXCOMPAT_ADVERTISE_AUDIO=1 AEXCOMPAT_REQUIRE_AUDIO_SIDECAR=1
+  AEXCOMPAT_AUDIO_FORMAT_PROBE=1)
+target_compile_definitions(pf_visual_audio_multi_handle_probe PRIVATE
+  AEXCOMPAT_ADVERTISE_AUDIO=1 AEXCOMPAT_REQUIRE_AUDIO_SIDECAR=1
+  AEXCOMPAT_AUDIO_MULTI_HANDLE_PROBE=1)
+target_compile_definitions(pf_visual_audio_double_checkin_probe PRIVATE
+  AEXCOMPAT_ADVERTISE_AUDIO=1 AEXCOMPAT_REQUIRE_AUDIO_SIDECAR=1
+  AEXCOMPAT_AUDIO_DOUBLE_CHECKIN_PROBE=1)

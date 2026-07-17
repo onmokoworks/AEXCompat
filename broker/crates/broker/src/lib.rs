@@ -1,7 +1,7 @@
+pub mod fixture_profiles;
+pub mod host_core;
 #[cfg(windows)]
-pub mod selftest;
-#[cfg(windows)]
-pub mod windows_process;
+pub mod image_render;
 #[cfg(windows)]
 pub mod l1;
 #[cfg(windows)]
@@ -9,11 +9,23 @@ pub mod l2;
 #[cfg(windows)]
 pub mod render;
 #[cfg(windows)]
-pub mod smart;
-pub mod fixture_profiles;
-pub mod host_core;
-#[cfg(windows)]
 pub mod render_request;
+pub mod restricted_worker_acl;
+pub mod restricted_worker_token;
+pub mod runtime_module_identity;
+pub mod runtime_module_policy;
+pub mod sealed_load_tree;
+pub mod secure_image_dispatch;
+pub mod secure_launch;
+#[cfg(windows)]
+pub mod selftest;
+pub mod session_dependency_manifest;
+#[cfg(windows)]
+pub mod smart;
+pub mod trusted_worker_stage;
+#[cfg(windows)]
+pub mod windows_process;
+pub mod worker_module_audit;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ExitClassification {

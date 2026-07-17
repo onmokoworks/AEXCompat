@@ -1,0 +1,194 @@
+{
+  "schema_version": 1,
+  "result": "aexcompat_sampling_and_fill_premultiply_runtime_succeeded",
+  "authenticated_current_sampling_artifacts": {
+    "source": {
+      "path": "minihost/src/l2_main.cpp",
+      "size_bytes": 1138218,
+      "sha256": "4fce425483d59eeef6335bcc885c904a6c406e2449cd879e2daad5447f1bf9f7"
+    },
+    "worker": {
+      "path": "target/minihost-build/aex_render_worker.exe",
+      "size_bytes": 768512,
+      "sha256": "94bbad9e150e60306073e66c3ab4a56d6ccf9b42e56af082db9014cc683b4254"
+    },
+    "input": {
+      "path": "target/gpu-effects/opencl-input.rgba",
+      "size_bytes": 3404,
+      "sha256": "e262995eeaf4ba4ac17385566eadae4597ec4a974ea0c116a170c0edb1e632f9"
+    },
+    "probe": {
+      "path": "target/pf-sampling-probe-build/Release/pf_sampling_probe.aex",
+      "size_bytes": 17408,
+      "sha256": "f675965d3e48220d6e35852143964a6dd6657690661e20d13a56e265da087d05"
+    },
+    "fill_probe": {
+      "path": "target/pf-fill-premultiply-probe/pf_fill_premultiply_probe.aex",
+      "size_bytes": 14848,
+      "sha256": "c3e54e7feadb1b51005ff0e05d5235810959e6c925063968d90d0f065608d16e"
+    },
+    "sampling_output": {
+      "path": "target/sampling-depth-8.rgba",
+      "size_bytes": 3404,
+      "sha256": "0abda9bfbcf3d08083e54b05b91804b5d2a87cb2b2266aeffc2cc12d9e374590"
+    },
+    "sampling_report": {
+      "path": "target/sampling-depth-8.json",
+      "size_bytes": 6350,
+      "sha256": "e888f81c01a57a907670a390b773da4b06ef6d5afdab68d67c132cffd7c90cb2"
+    },
+    "fill_output": {
+      "path": "target/fill-premultiply-probe-output-20260717-current.rgba",
+      "size_bytes": 3404,
+      "sha256": "e354d9fa74e2f5e29ed84f65fc583509e56f9ee80bdd3027d2b65c2097c8489d"
+    },
+    "fill_report": {
+      "path": "target/fill-premultiply-probe-report-20260717-current.json",
+      "size_bytes": 6352,
+      "sha256": "3cca9c099515e31387a4559cbc01eb6970697301b70b7b9cfd73623a8f8ef69e"
+    }
+  },
+  "sampling_probe": {
+    "artifact": "target/pf-sampling-probe-build/Release/pf_sampling_probe.aex",
+    "size_bytes": 17408,
+    "sha256": "f675965d3e48220d6e35852143964a6dd6657690661e20d13a56e265da087d05",
+    "command": "target/minihost-build/aex_render_worker.exe --render-image target/pf-sampling-probe-build/Release/pf_sampling_probe.aex f675965d3e48220d6e35852143964a6dd6657690661e20d13a56e265da087d05 v5| target/gpu-effects/opencl-input.rgba target/sampling-probe-output-20260717-current.rgba 37 23 0 1 1 1",
+    "report": "target/sampling-probe-report-20260717-current.json",
+    "width": 37,
+    "height": 23,
+    "exit_code": 0,
+    "status": "render_completed",
+    "render_error": 0,
+    "output_sha256": "5776731f99b55ef990d41cc4a17a8e342e059d06b669155bdf9298fbcaf007f4",
+    "guard_bytes_intact": true,
+    "suite_leases_balanced": true,
+    "suite_acquires": 1,
+    "suite_releases": 1,
+    "last_seh_exception_code": 0,
+    "last_seh_exception_address": 0,
+    "last_seh_exception_module": ""
+  },
+  "fill_premultiply_probe": {
+    "artifact": "target/pf-fill-premultiply-probe/pf_fill_premultiply_probe.aex",
+    "size_bytes": 14848,
+    "sha256": "c3e54e7feadb1b51005ff0e05d5235810959e6c925063968d90d0f065608d16e",
+    "command": "target/minihost-build/aex_render_worker.exe --render-image target/pf-fill-premultiply-probe/pf_fill_premultiply_probe.aex c3e54e7feadb1b51005ff0e05d5235810959e6c925063968d90d0f065608d16e v5| target/gpu-effects/opencl-input.rgba target/fill-premultiply-probe-output-20260717-current.rgba 37 23 0 1 1 1",
+    "report": "target/fill-premultiply-probe-report-20260717-current.json",
+    "exit_code": 0,
+    "status": "render_completed",
+    "render_error": 0,
+    "output_sha256": "aa040b86e3ed808472e2400316674b2186c0748782f2ba26fe1a116837ba335b",
+    "guard_bytes_intact": true,
+    "suite_leases_balanced": true,
+    "suite_acquires": 2,
+    "suite_releases": 2,
+    "last_seh_exception_code": 0,
+    "last_seh_exception_address": 0,
+    "last_seh_exception_module": ""
+  },
+  "fill_color_depth_matrix": {
+    "numeric_oracle": "The verifier independently seeds typed ARGB pixels, applies source * alpha + matte * (1 - alpha), converts the typed result to external RGBA8, and compares all 851 pixels.",
+    "runs": [
+      {
+        "mode": "--render-image",
+        "operation": "premultiply_color8",
+        "depth": 8,
+        "pixel_format": "argb8",
+        "exit_code": 0,
+        "status": "render_completed",
+        "render_error": 0,
+        "input_sha256": "d75d749d0fe8b40bd5d7fcf1f20e57ee1ce9cf3aedfed4aa2e26ad09bd51bc7d",
+        "internal_output_sha256": "ab520565b270b02ceadc02b5489782e76d6fb41fe0e34289bbf31e54a62c8885",
+        "output": {
+          "path": "target/fill-premultiply-depth-8.rgba",
+          "size_bytes": 3404,
+          "sha256": "f5ee70a2acf62ad10ae2c330d2815c4d13b3956ee82e411c0bb4f8ab582ddc30"
+        },
+        "report": {
+          "path": "target/fill-premultiply-depth-8.json",
+          "size_bytes": 6404,
+          "sha256": "7614fcfe2529640e616db122c84394d4fda44bc363c6a8367442eda65eba6494"
+        },
+        "suite_acquires": 2,
+        "suite_releases": 2,
+        "guard_bytes_intact": true,
+        "last_seh_exception_code": 0
+      },
+      {
+        "mode": "--render-image16",
+        "operation": "premultiply_color16",
+        "depth": 16,
+        "pixel_format": "argb16",
+        "exit_code": 0,
+        "status": "render_completed",
+        "render_error": 0,
+        "input_sha256": "33f27c17af8f00627a497ef13571b8fd07c8600b372e848299a5bd29c0fa34e1",
+        "internal_output_sha256": "6f96ec0a312419aa4ee7e70cee3753e4f3fce6d207cbbd2997982953f40ac92b",
+        "output": {
+          "path": "target/fill-premultiply-depth-16.rgba",
+          "size_bytes": 3404,
+          "sha256": "1239a8eefbca91aa875b2c643ef019e805efe5728613e74d155c2d11257e3141"
+        },
+        "report": {
+          "path": "target/fill-premultiply-depth-16.json",
+          "size_bytes": 6405,
+          "sha256": "11a87ae0c059fb0ec534463d8fbd3314dc4da4e8be94360b4e5551c9bd24deb5"
+        },
+        "suite_acquires": 2,
+        "suite_releases": 2,
+        "guard_bytes_intact": true,
+        "last_seh_exception_code": 0
+      },
+      {
+        "mode": "--render-image32",
+        "operation": "premultiply_color_float",
+        "depth": 32,
+        "pixel_format": "argb32f",
+        "exit_code": 0,
+        "status": "render_completed",
+        "render_error": 0,
+        "input_sha256": "e7406ee4db10421ec20d279ee6fdbd6011d4bb40b6a3b2e416d04ce2e941ebbc",
+        "internal_output_sha256": "be598b2fda6406fe30ff8483ba55aa7b3549e8d6bbe8304107e0a55793672f39",
+        "output": {
+          "path": "target/fill-premultiply-depth-32.rgba",
+          "size_bytes": 3404,
+          "sha256": "f5ee70a2acf62ad10ae2c330d2815c4d13b3956ee82e411c0bb4f8ab582ddc30"
+        },
+        "report": {
+          "path": "target/fill-premultiply-depth-32.json",
+          "size_bytes": 6406,
+          "sha256": "eca24a4fac384360fd4d8d66b51fe57b9f34167e55d69efcabe5f650137640c1"
+        },
+        "suite_acquires": 2,
+        "suite_releases": 2,
+        "guard_bytes_intact": true,
+        "last_seh_exception_code": 0
+      }
+    ]
+  },
+  "source_contract": {
+    "sampling_area_callbacks": [
+      "area_sample8",
+      "area_sample16",
+      "area_sample_float"
+    ],
+    "sampling_area_suite_slot": 2,
+    "fill_premultiply_callbacks": [
+      "premultiply_world8",
+      "premultiply_color8",
+      "premultiply_color16",
+      "premultiply_color_float"
+    ],
+    "fill_premultiply_suite_slots": [
+      3,
+      4,
+      5,
+      6
+    ]
+  },
+  "scope": {
+    "aexcompat_runtime_success": true,
+    "ae_pixel_oracle_comparison": "pending",
+    "note": "This evidence establishes AEXCompat runtime success only; comparison against an After Effects pixel oracle is pending."
+  }
+}

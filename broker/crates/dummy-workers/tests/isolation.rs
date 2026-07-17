@@ -20,3 +20,22 @@ fn five_isolation_scenarios_pass() {
     assert!(report.contains("\"accepts_aex_path\": false"));
     std::fs::remove_file(output).expect("remove report");
 }
+
+#[cfg(windows)]
+#[test]
+fn pipe_holding_descendant_does_not_block_capture() {
+    use aexcompat_broker::windows_process::run_isolated;
+    use std::path::Path;
+    use std::time::{Duration, Instant};
+
+    let started = Instant::now();
+    let result = run_isolated(
+        Path::new(env!("CARGO_BIN_EXE_dummy_descendant")),
+        &[],
+        Duration::from_secs(2),
+    )
+    .expect("run descendant worker");
+    assert_eq!(result.classification.as_str(), "ok");
+    assert!(result.stdout.contains("parent completed"));
+    assert!(started.elapsed() < Duration::from_secs(5));
+}

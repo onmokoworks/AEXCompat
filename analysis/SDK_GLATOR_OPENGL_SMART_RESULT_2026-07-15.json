@@ -1,0 +1,53 @@
+{
+  "schema_version": 1,
+  "fixture": "Adobe After Effects SDK GLator safety-patched observation build",
+  "fixture_sha256": "da8447f6f88e78fb00d5bd2d7e0cdc1d6bdcf1918b77e8684288a6d700c9f2ce",
+  "reviewed_sdk_gl_base_sha256": "3d1fcd345a1df48c507f2401573afcb113b1851314008341953e66a0bfff57f6",
+  "result": "opengl_smart_image_io_completed",
+  "build_boundary": {
+    "installed_sdk_modified": false,
+    "reviewed_source_hash_required": true,
+    "shader_buffer_allocates_terminator": true,
+    "shader_arrays_use_delete_array": true,
+    "shader_files_are_closed": true
+  },
+  "descriptor": {
+    "reported_parameter_count": 2,
+    "effect_parameter_count": 1,
+    "slider_min": 0,
+    "slider_max": 100,
+    "slider_default": 50,
+    "supports_deep_color": true,
+    "supports_float_color": true,
+    "supports_smart_render": true
+  },
+  "host_callbacks": {
+    "platform_data_path_is_absolute_and_bounded": true,
+    "get_pixel_data8_depth_checked": true,
+    "get_pixel_data16_depth_checked": true,
+    "native_stdout_isolated_from_json_protocol": true,
+    "worker_stdout_json_line_count": 1
+  },
+  "opengl": {
+    "global_context_version": "4.6",
+    "render_context_version": "3.3",
+    "renderer": "NVIDIA GeForce RTX 4070 Ti/PCIe/SSE2",
+    "global_setup_error": 0,
+    "smart_pre_render_error": 0,
+    "smart_render_error": 0,
+    "global_setdown_error": 0
+  },
+  "render": {
+    "slider_value": 25,
+    "expected_green_rgba8": 64,
+    "argb8_oracle_exact": true,
+    "argb16_oracle_exact": true,
+    "argb32f_oracle_exact": true,
+    "rgba_sha256": "1561a56a334c0c31b2c4976445727a63a919e4cf570ea15ad10aa40e0c0c3905",
+    "suite_leases_balanced": true,
+    "handle_lifetimes_balanced": true,
+    "world_lifetimes_balanced": true,
+    "parameter_checkouts_balanced": true,
+    "guard_bytes_intact": true
+  }
+}

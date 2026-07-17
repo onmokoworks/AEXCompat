@@ -1,0 +1,39 @@
+{
+  "schema_version": 1,
+  "subject": "Effect matrix output relation classification",
+  "input": "target/gpu-effects/probe-invert.png",
+  "input_dimensions": [37, 23],
+  "classifications": [
+    "pixels_changed",
+    "pixel_exact_passthrough",
+    "different_dimensions",
+    "comparison_unavailable"
+  ],
+  "fixtures": {
+    "CMYKMisreg": {
+      "applicable_cases": 6,
+      "pixels_changed_cases": 6,
+      "differing_pixels_per_case": 851,
+      "passthrough_cases": 0
+    },
+    "PathArray": {
+      "applicable_cases": 2,
+      "classic_argb8": {
+        "output_relation": "pixels_changed",
+        "differing_input_pixels": 851
+      },
+      "smartfx_argb8": {
+        "output_relation": "pixel_exact_passthrough",
+        "differing_input_pixels": 0
+      },
+      "unsupported_depth_cases": 4
+    }
+  },
+  "policy": {
+    "render_success_is_not_inferred_from_visual_change": true,
+    "passthrough_is_not_automatically_a_failure": true,
+    "generator_and_unconnected_input_effects_may_legitimately_match_input": true,
+    "output_relation_is_visible_per_ui_matrix_row": true,
+    "ae_reference_comparison_remains_the_fidelity_oracle": true
+  }
+}

@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "captured_at": "2026-07-15",
+  "scope": "PF_CHECKOUT_LAYER_AUDIO requested format conversion",
+  "source_transport": {"rate":44100,"channels":1,"format":"signed_float","bytes_per_sample":4},
+  "supported_request_matrix": {
+    "rate_fixed_16_16_hz_range":[1000,65535],
+    "channels":[1,2],
+    "unsigned_pcm_bytes":[1,2,4],
+    "signed_pcm_bytes":[1,2,4],
+    "signed_float_bytes":[4],
+    "resampler":"linear",
+    "stereo_policy":"duplicate_mono"
+  },
+  "fixture": {
+    "name":"pf_visual_audio_format_probe",
+    "verified_requests":[
+      {"rate":22050,"channels":1,"format":"signed_float","bytes_per_sample":4,"frames":4,"samples":[0.0,0.125,0.25,0.375]},
+      {"rate":22050,"channels":2,"format":"signed_pcm","bytes_per_sample":2,"frames":4,"first_interleaved_samples":[0,0,4096,4096]},
+      {"rate":22050,"channels":1,"format":"unsigned_pcm","bytes_per_sample":1,"frames":4,"samples":[128,143,159,175]}
+    ],
+    "checkout_calls":3,
+    "get_data_calls":3,
+    "checkin_calls":3,
+    "invalid_audio_operations":0,
+    "rejected_audio_format_requests":1,
+    "audio_lifetimes_balanced":true,
+    "status":"render_completed"
+  },
+  "safety":{"maximum_frames":10000000,"maximum_buffer_bytes":80000000,"unsupported_combinations_fail_before_handle_publication":true}
+}

@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "captured_at": "2026-07-15",
+  "scope": "classic PF_CHECKOUT_PARAM non-current-time admission",
+  "sdk_constants": {"PF_OutFlag_WIDE_TIME_INPUT": 2, "PF_OutFlag2_AUTOMATIC_WIDE_TIME_INPUT": 131072},
+  "cases": [
+    {"fixture":"pf_wide_time_allowed_probe","sha256":"f67dd372d9842b541b4901a8aa6020d5a277a000e2911d12fe6eb0637947c360","status":"render_completed","wide_time_checkout_allowed":true,"rejected_temporal_param_checkouts":0,"checkout_calls":1,"checkin_calls":1,"param_checkouts_balanced":true,"output_sha256":"5a97ba4f4da7ab929ebe51658dce885b3d81de6b89bcb26ea5df9637d1faa969","guard_bytes_intact":true},
+    {"fixture":"pf_wide_time_denied_probe","sha256":"d5bd1bb8927bf1aa672173b721c45e6c5ed976e46ac688e67e039ba425f5ac8a","status":"render_completed","wide_time_checkout_allowed":false,"rejected_temporal_param_checkouts":1,"checkout_calls":0,"checkin_calls":0,"param_checkouts_balanced":true,"output_sha256":"5a97ba4f4da7ab929ebe51658dce885b3d81de6b89bcb26ea5df9637d1faa969","guard_bytes_intact":true},
+    {"fixture":"pf_automatic_wide_time_allowed_probe","sha256":"1a498d1f69956e010b74e5dd798165e71d2dd6d55ca97736cf58d034af2c9727","status":"render_completed","pre_render_error":0,"smart_render_error":0,"wide_time_checkout_allowed":true,"rejected_temporal_param_checkouts":0,"requested_time":1,"output_sha256":"863d238f52f81aba4017c198af4d748cb57fe369e6216fdbacf45fd94037ecf7","guard_bytes_intact":true,"param_checkouts_balanced":true},
+    {"fixture":"pf_automatic_wide_time_denied_probe","sha256":"ec74fefc94d07ad5e286ad73a806ec896ad0b5bbee4a790f2228ff91d5d9c6b6","status":"render_completed","pre_render_error":0,"smart_render_error":0,"wide_time_checkout_allowed":false,"rejected_temporal_param_checkouts":1,"requested_time":1,"output_sha256":"863d238f52f81aba4017c198af4d748cb57fe369e6216fdbacf45fd94037ecf7","guard_bytes_intact":true,"param_checkouts_balanced":true},
+    {"fixture":"Adobe SDK Checkout.aex","sha256":"7fa3de46062ae9d726eb75617aabc53e66ee7a7073f78f1ad1c45395978b4898","current_time":10,"time_step":3,"requested_time":16,"status":"render_completed","wide_time_checkout_allowed":true,"rejected_temporal_param_checkouts":0,"checkout_calls":1,"checkin_calls":1,"param_checkouts_balanced":true,"guard_bytes_intact":true}
+  ],
+  "conclusion": "Classic non-current PF_CHECKOUT_PARAM calls require WIDE_TIME_INPUT; SmartFX non-current checkout_layer calls require WIDE_TIME_INPUT or AUTOMATIC_WIDE_TIME_INPUT."
+}

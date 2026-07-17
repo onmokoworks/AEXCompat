@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "fixture": "Adobe After Effects SDK Shifter",
+  "fixture_sha256": "f1f7c17eca0cef1f786f3770243f2727d174e45aee9b50b7d3982c188921f4c4",
+  "result": "classic_and_smart_render_completed",
+  "classic": {
+    "pixel_formats": ["argb8", "argb16", "argb32f"],
+    "translation_test": [1, 1],
+    "opacity": 127,
+    "zero_translation_rgba_oracle_exact": true,
+    "shifted_guard_bytes_intact": true,
+    "transform_world_calls": 1,
+    "suite_leases_balanced": true,
+    "handle_lifetimes_balanced": true,
+    "world_lifetimes_balanced": true
+  },
+  "smart": {
+    "pixel_formats": ["argb8", "argb16", "argb32f"],
+    "subpixel_offset": [2, 2],
+    "argb8_sampling_blend_oracle_exact": true,
+    "param_checkout_calls": 2,
+    "automatic_param_checkins": 2,
+    "automatic_pre_render_handle_disposals": 1,
+    "guard_bytes_intact": true,
+    "suite_leases_balanced": true,
+    "handle_lifetimes_balanced": true,
+    "world_lifetimes_balanced": true,
+    "param_checkouts_balanced": true
+  }
+}

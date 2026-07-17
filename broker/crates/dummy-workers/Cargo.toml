@@ -19,3 +19,11 @@ path = "src/bin/dummy_sleep.rs"
 [[bin]]
 name = "dummy_abort"
 path = "src/bin/dummy_abort.rs"
+
+[[bin]]
+name = "dummy_descendant"
+path = "src/bin/dummy_descendant.rs"
+
+[[bin]]
+name = "sealed_acl_probe"
+path = "src/sealed_acl_probe.rs"

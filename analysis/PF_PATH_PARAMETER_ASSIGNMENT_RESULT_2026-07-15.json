@@ -1,0 +1,17 @@
+{
+  "schema_version":1,
+  "captured_at":"2026-07-15",
+  "scope":"typed PF_Param_PATH assignment against explicit mask context",
+  "fixture":"pf_path_param_probe",
+  "sdk_semantics":{"none":0,"mask_index_base":1,"render_value":"PF_PathID resolved from the selected active mask"},
+  "positive":{"connected_masks":2,"requested_index":2,"observed_path_id":2,"status":"render_completed","render_error":0,"guard_bytes_intact":true,"pixel_exact_copy":true,"output_sha256":"bfe94a32e72675cbf466864b7ee6e6ebaa60b46658827ba510bb521cb0c3f521"},
+  "default_resolution":[
+    {"descriptor_default":0,"connected_masks":2,"observed_path_id":0,"implicit_first_mask_selected":false,"status":"render_completed"},
+    {"descriptor_default":2,"connected_masks":2,"observed_path_id":2,"status":"render_completed"},
+    {"descriptor_default":3,"connected_masks":2,"observed_path_id":0,"missing_default_resolves_none":true,"status":"render_completed"}
+  ],
+  "assignment_precedence":{"descriptor_default":0,"requested_index":2,"observed_path_id":2,"explicit_assignment_wins":true},
+  "negative":{"connected_masks":2,"requested_index":3,"worker_exit_code":3,"render_selector_dispatched":false,"output_created":false},
+  "interfaces":{"desktop_control":"integer mask index with 0=None","typed_request_field":"value","worker_payload":"slot-bound i32","request_save_load_preserved":true},
+  "conclusion":"Path parameters are assignable without fabricating masks; descriptor defaults and explicit assignments resolve only indices present in the bounded mask scene, and attaching masks alone never selects one."
+}

@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "captured_at": "2026-07-15",
+  "scope": "cleanroom PF_Cmd_FRAME_SETUP output-dimension contract",
+  "input_dimensions": [16, 12],
+  "sdk_constants": {"PF_OutFlag_I_EXPAND_BUFFER": 512, "PF_OutFlag_I_SHRINK_BUFFER": 4096},
+  "cases": [
+    {"fixture":"pf_expand_allowed_probe","sha256":"5936acb3a4fe664ffb8ea708a7c6adecc474bf97cda8cec3194016048671809c","advertised_out_flags":1536,"status":"render_completed","render_error":0,"output_dimensions":[20,16],"output_sha256":"f01f41c58a55bc3995a3397e9805a3196103b3a9892eaaf132e76fb714e81e62","guard_bytes_intact":true},
+    {"fixture":"pf_expand_denied_probe","sha256":"02181140cb70bf18553859d71c0c5968245b413637ddc07f2b2eef97c852d3f4","advertised_out_flags":1024,"status":"render_failed","render_error":4,"output_dimensions":[16,12],"render_selector_dispatched":false,"guard_bytes_intact":true},
+    {"fixture":"pf_shrink_allowed_probe","sha256":"896b4b85a84065f4ebc9b48622d8b4eb23ab852d04a807e58f2faae3f64dda1e","advertised_out_flags":5120,"status":"render_completed","render_error":0,"output_dimensions":[12,8],"output_sha256":"7e18f1b2ca4e075b955848b4deafd56e47eeda83cc15b3ecdeb71d7ff58a5f57","guard_bytes_intact":true},
+    {"fixture":"pf_shrink_denied_probe","sha256":"b34e397f7de04a0a70c69f2a24997b5baa501520d035275cee193487f2721d08","advertised_out_flags":1024,"status":"render_failed","render_error":4,"output_dimensions":[16,12],"render_selector_dispatched":false,"guard_bytes_intact":true}
+  ],
+  "conclusion": "FRAME_SETUP may resize an output world only when the matching Global Setup flag is advertised; unsupported changes fail before RENDER."
+}

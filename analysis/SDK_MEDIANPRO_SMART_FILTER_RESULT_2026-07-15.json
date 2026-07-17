@@ -1,0 +1,36 @@
+{
+  "schema_version": 1,
+  "fixture": "Adobe After Effects SDK MedianPro",
+  "fixture_sha256": "fde93e15449b0b43a1e7bbcb4463baa5102bc0cd843c7eb52a23a612b0bf99c5",
+  "result": "smart_cpu_image_io_completed",
+  "descriptor": {
+    "parameter_count": 5,
+    "supports_deep_color": true,
+    "supports_float_color": true,
+    "supports_smart_render": true,
+    "supports_gpu_float32": true
+  },
+  "render": {
+    "default_pixel_format": "argb8",
+    "radius_one_median_independent_oracle_exact": true,
+    "mix_zero_identity_exact": true,
+    "argb16_cpu_passthrough_exact": true,
+    "argb32f_cpu_passthrough_exact": true,
+    "input_rgba_sha256": "7c8f94942ea0b0e4e6ab182fee9a615ce8d920a093b42746830592877bc54c6f",
+    "radius_one_median_rgba_sha256": "cea52c2768c2289dc278b5005eea4b3c1d32ce85f726d35622fed9e65e405809",
+    "input_checkout_request": [-1, -1, 5, 5],
+    "output_rect": [0, 0, 4, 4],
+    "parameter_checkout_count": 5,
+    "automatic_parameter_checkin_count": 5,
+    "suite_leases_balanced": true,
+    "handle_lifetimes_balanced": true,
+    "world_lifetimes_balanced": true,
+    "parameter_checkouts_balanced": true
+  },
+  "gpu_policy": {
+    "pre_render_can_report_gpu_possible": true,
+    "normal_image_mode_dispatches_cpu": true,
+    "gpu_execution_requires_a_real_backend_and_matching_suites": true,
+    "unsupported_framework_setup_isolated_to_worker": true
+  }
+}

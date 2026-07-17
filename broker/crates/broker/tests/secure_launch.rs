@@ -1,0 +1,259 @@
+#[cfg(windows)]
+mod windows_e2e {
+    use aexcompat_broker::sealed_load_tree::{LoadEntry, SealedLoadTree};
+    use aexcompat_broker::secure_launch::{secure_launch, SecureLaunchRequest};
+    use aexcompat_broker::ExitClassification;
+    use sha2::{Digest, Sha256};
+    use std::collections::HashSet;
+    use std::fs;
+    use std::path::{Path, PathBuf};
+    use std::time::Duration;
+
+    struct TempDir(PathBuf);
+
+    impl TempDir {
+        fn new(prefix: &str) -> Self {
+            let path =
+                std::env::temp_dir().join(format!("{prefix}-{:032x}", rand::random::<u128>()));
+            fs::create_dir(&path).unwrap();
+            Self(path)
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn external_worker_reads_sealed_plugin_and_tree_is_cleaned_after_exit() {
+        let worker_dir = TempDir::new("aexcompat-secure-launch-worker");
+        let worker = build_worker(&worker_dir.0);
+        let worker_bytes = fs::read(&worker).unwrap();
+        let source = TempDir::new("aexcompat-secure-launch-payload");
+        let basename = "fixture.plugin";
+        let plugin_source = source.0.join(basename);
+        let plugin_bytes = b"authenticated sealed plugin";
+        fs::write(&plugin_source, plugin_bytes).unwrap();
+        let entry = LoadEntry {
+            source: plugin_source,
+            relative_basename: basename.into(),
+            expected_sha256: Sha256::digest(plugin_bytes).into(),
+            expected_size: plugin_bytes.len() as u64,
+        };
+        let tree = SealedLoadTree::create(entry, vec![]).unwrap();
+        let sealed_root = tree.root().to_owned();
+        let before = vec!["before".to_owned()];
+        let after = vec!["after".to_owned()];
+        let request = SecureLaunchRequest {
+            worker_program: &worker,
+            worker_expected_sha256: Sha256::digest(&worker_bytes).into(),
+            worker_expected_size: worker_bytes.len() as u64,
+            plugin_basename: basename,
+            args_before_plugin: &before,
+            args_after_plugin: &after,
+            require_module_audit: false,
+        };
+
+        let result = secure_launch(tree, request, Duration::from_secs(10)).unwrap();
+
+        assert_eq!(
+            result.classification,
+            ExitClassification::Ok,
+            "worker result: {result:?}"
+        );
+        assert_eq!(result.exit_code, 0);
+        assert_eq!(result.stdout.trim(), "payload-ok");
+        assert!(
+            !sealed_root.exists(),
+            "tree must be removed after worker exit"
+        );
+    }
+
+    #[test]
+    fn worker_hash_mismatch_never_starts_process_and_cleans_tree() {
+        let worker_dir = TempDir::new("aexcompat-secure-launch-worker-mismatch");
+        let marker = worker_dir.0.join("started.marker");
+        let worker = build_marker_worker(&worker_dir.0);
+        let tree = plugin_tree(b"authenticated plugin");
+        let sealed_root = tree.root().to_owned();
+        let before = vec![marker.to_string_lossy().into_owned()];
+        let request = SecureLaunchRequest {
+            worker_program: &worker,
+            worker_expected_sha256: [0; 32],
+            worker_expected_size: fs::metadata(&worker).unwrap().len(),
+            plugin_basename: "fixture.plugin",
+            args_before_plugin: &before,
+            args_after_plugin: &[],
+            require_module_audit: false,
+        };
+
+        let error = secure_launch(tree, request, Duration::from_secs(2)).unwrap_err();
+
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(error.to_string().contains("trusted worker staging"));
+        assert!(!marker.exists(), "hash-rejected worker must never start");
+        assert!(
+            !sealed_root.exists(),
+            "failed launch must clean sealed tree"
+        );
+    }
+
+    #[test]
+    fn tampered_plugin_is_rejected_before_process_can_start() {
+        let worker_dir = TempDir::new("aexcompat-secure-launch-plugin-tamper");
+        let marker = worker_dir.0.join("started.marker");
+        let _worker = build_marker_worker(&worker_dir.0);
+        let source = TempDir::new("aexcompat-secure-launch-tampered-payload");
+        let plugin = source.0.join("fixture.plugin");
+        let approved = b"approved plugin";
+        fs::write(&plugin, approved).unwrap();
+        let entry = LoadEntry {
+            source: plugin.clone(),
+            relative_basename: "fixture.plugin".into(),
+            expected_sha256: Sha256::digest(approved).into(),
+            expected_size: approved.len() as u64,
+        };
+        fs::write(plugin, b"tampered plugin").unwrap();
+
+        let error = SealedLoadTree::create(entry, vec![]).unwrap_err();
+
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(!marker.exists(), "plugin-rejected worker must never start");
+    }
+
+    #[test]
+    fn timeout_kills_worker_and_cleans_sealed_and_staged_trees() {
+        let stages_before = trusted_stage_roots();
+        let worker_dir = TempDir::new("aexcompat-secure-launch-timeout");
+        let marker = worker_dir.0.join("started.marker");
+        let worker = build_marker_worker(&worker_dir.0);
+        let worker_bytes = fs::read(&worker).unwrap();
+        let tree = plugin_tree(b"authenticated plugin");
+        let sealed_root = tree.root().to_owned();
+        let before = vec![marker.to_string_lossy().into_owned()];
+        let after = vec!["sleep".to_owned()];
+        let request = SecureLaunchRequest {
+            worker_program: &worker,
+            worker_expected_sha256: Sha256::digest(&worker_bytes).into(),
+            worker_expected_size: worker_bytes.len() as u64,
+            plugin_basename: "fixture.plugin",
+            args_before_plugin: &before,
+            args_after_plugin: &after,
+            require_module_audit: false,
+        };
+
+        let result = secure_launch(tree, request, Duration::from_millis(250)).unwrap();
+
+        assert_eq!(result.classification, ExitClassification::TimeoutKilled);
+        assert!(
+            marker.exists(),
+            "timeout fixture must prove the worker started"
+        );
+        assert!(!sealed_root.exists(), "timeout must clean sealed tree");
+        let leaked_stages: Vec<_> = trusted_stage_roots()
+            .difference(&stages_before)
+            .cloned()
+            .collect();
+        assert!(
+            leaked_stages.is_empty(),
+            "staged roots leaked: {leaked_stages:?}"
+        );
+    }
+
+    fn trusted_stage_roots() -> HashSet<PathBuf> {
+        fs::read_dir(std::env::temp_dir())
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("aexcompat-trusted-worker-")
+            })
+            .map(|entry| entry.path())
+            .collect()
+    }
+
+    fn plugin_tree(bytes: &[u8]) -> SealedLoadTree {
+        let source = std::env::temp_dir().join(format!(
+            "aexcompat-secure-launch-tree-source-{:032x}",
+            rand::random::<u128>()
+        ));
+        fs::create_dir(&source).unwrap();
+        let plugin = source.join("fixture.plugin");
+        fs::write(&plugin, bytes).unwrap();
+        let tree = SealedLoadTree::create(
+            LoadEntry {
+                source: plugin,
+                relative_basename: "fixture.plugin".into(),
+                expected_sha256: Sha256::digest(bytes).into(),
+                expected_size: bytes.len() as u64,
+            },
+            vec![],
+        )
+        .unwrap();
+        fs::remove_dir_all(source).unwrap();
+        tree
+    }
+
+    fn build_marker_worker(dir: &Path) -> PathBuf {
+        let source = dir.join("marker_worker.rs");
+        let executable = dir.join("marker_worker.exe");
+        fs::write(
+            &source,
+            r#"fn main() {
+    let args: Vec<_> = std::env::args_os().skip(1).collect();
+    std::fs::write(&args[0], b"started").unwrap();
+    if args.get(2).is_some_and(|arg| arg == "sleep") {
+        std::thread::sleep(std::time::Duration::from_secs(30));
+    }
+}"#,
+        )
+        .unwrap();
+        let status = std::process::Command::new("rustc")
+            .arg(&source)
+            .args(["-C", "target-feature=+crt-static"])
+            .arg("-o")
+            .arg(&executable)
+            .status()
+            .expect("run rustc for marker worker");
+        assert!(status.success(), "marker worker build failed");
+        executable
+    }
+
+    fn build_worker(dir: &Path) -> PathBuf {
+        let source = dir.join("dummy_secure_worker.rs");
+        let executable = dir.join("dummy_secure_worker.exe");
+        fs::write(
+            &source,
+            r#"fn main() {
+    let mut all_args = std::env::args_os();
+    let argv0 = all_args.next().unwrap();
+    let args: Vec<_> = all_args.collect();
+    let argv0 = std::path::PathBuf::from(argv0);
+    let current = std::env::current_dir().unwrap();
+    assert!(argv0.is_absolute());
+    assert_eq!(argv0.parent(), Some(current.as_path()));
+    assert_eq!(argv0, current.join("trusted-worker.exe"));
+    assert_eq!(args.len(), 3);
+    assert_eq!(args[0], "before");
+    assert_eq!(args[2], "after");
+    let bytes = std::fs::read(&args[1]).expect("read sealed plugin");
+    assert_eq!(bytes, b"authenticated sealed plugin");
+    println!("payload-ok");
+}"#,
+        )
+        .unwrap();
+        let status = std::process::Command::new("rustc")
+            .arg(&source)
+            .args(["-C", "target-feature=+crt-static"])
+            .arg("-o")
+            .arg(&executable)
+            .status()
+            .expect("run rustc for secure launch dummy worker");
+        assert!(status.success(), "secure launch dummy worker build failed");
+        executable
+    }
+}

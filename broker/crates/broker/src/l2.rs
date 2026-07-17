@@ -1,6 +1,7 @@
 use crate::fixture_profiles::{find_observation, L2ObservationPolicy};
-use crate::host_core::approved_artifact::load;
-use crate::windows_process::run_isolated;
+use crate::host_core::approved_artifact::load_v2_load_tree;
+use crate::sealed_load_tree::SealedLoadTree;
+use crate::secure_launch::{secure_launch, SecureLaunchRequest};
 use serde_json::{json, Value};
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
@@ -72,16 +73,22 @@ pub fn run(repository: &Path, worker: &Path, id: &str, output: &Path) -> io::Res
     if !parent.canonicalize()?.starts_with(root.canonicalize()?) {
         return Err(invalid("output outside L2 result root"));
     }
-    let entry = load(repository, id, policy.approval)?;
-    let result = run_isolated(
-        worker,
-        &[
-            "--l2".into(),
-            entry.plugin_path.to_string_lossy().into_owned(),
-            entry.sha256.to_ascii_lowercase(),
-        ],
-        Duration::from_millis(entry.timeout_ms),
-    )?;
+    let approved = load_v2_load_tree(repository, id, policy.approval)?;
+    let plugin_basename = approved.main.relative_basename.clone();
+    let plugin_sha256 = approved.main.expected_sha256;
+    let tree = SealedLoadTree::create(approved.main, approved.dependencies)?;
+    let before = ["--l2".to_owned()];
+    let after = [hex_sha256(plugin_sha256)];
+    let request = SecureLaunchRequest {
+        worker_program: worker,
+        worker_expected_sha256: approved.worker_sha256,
+        worker_expected_size: approved.worker_byte_size,
+        plugin_basename: &plugin_basename,
+        args_before_plugin: &before,
+        args_after_plugin: &after,
+        require_module_audit: true,
+    };
+    let result = secure_launch(tree, request, Duration::from_millis(approved.timeout_ms))?;
     let worker_report: Value = serde_json::from_str(result.stdout.trim()).unwrap_or_else(|_| {
         json!({
             "status": "worker_report_unavailable",
@@ -91,7 +98,7 @@ pub fn run(repository: &Path, worker: &Path, id: &str, output: &Path) -> io::Res
     });
     let passed = result.classification.as_str() == "ok" && worker_passed(&worker_report, policy);
     let report = json!({"schema_version":1,"stage":"L2","plugin_id":id,
-        "receipt_id":entry.receipt_id,"expected_sha256":entry.sha256.to_ascii_uppercase(),
+        "receipt_id":policy.approval.receipt_id,"expected_sha256":hex_sha256(plugin_sha256).to_ascii_uppercase(),
         "worker_exit":result.classification.as_str(),"worker_exit_code":result.exit_code,
         "stdout_truncated":result.stdout_truncated,"stderr_truncated":result.stderr_truncated,
         "stderr":result.stderr,
@@ -105,9 +112,14 @@ pub fn run(repository: &Path, worker: &Path, id: &str, output: &Path) -> io::Res
     Ok(passed)
 }
 
+fn hex_sha256(digest: [u8; 32]) -> String {
+    digest.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
 
     const POLICY: L2ObservationPolicy = L2ObservationPolicy {
         approval: crate::host_core::approved_artifact::ApprovalPolicy {
@@ -145,5 +157,42 @@ mod tests {
         assert!(worker_passed(&value, POLICY));
         value["out_flags"] = json!(5);
         assert!(!worker_passed(&value, POLICY));
+    }
+
+    #[test]
+    fn plugin_hash_argument_is_lowercase_sha256() {
+        assert_eq!(hex_sha256([0xab; 32]), "ab".repeat(32));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "requires locally approved real L2 fixtures"]
+    fn real_registered_l2_fixtures_use_secure_production_launch_when_present() {
+        let repository = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .ancestors()
+            .nth(3)
+            .unwrap()
+            .to_path_buf();
+        let worker = repository.join("target/minihost-build/aex_l2_worker.exe");
+        if !worker.is_file() {
+            return;
+        }
+
+        let mut failed = Vec::new();
+        for id in ["scattermap", "maskoffset"] {
+            let policy = find_observation(id).unwrap().l2.approval;
+            let approved = load_v2_load_tree(&repository, id, policy).unwrap();
+            if !approved.main.source.is_file() {
+                continue;
+            }
+            let output = PathBuf::from(format!(
+                "target/l2-results/{id}-secure-launch-test-{:032x}.json",
+                rand::random::<u128>()
+            ));
+            if !run(&repository, &worker, id, &output).unwrap() {
+                failed.push(id);
+            }
+        }
+        assert!(failed.is_empty(), "failed fixtures: {failed:?}");
     }
 }

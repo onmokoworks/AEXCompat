@@ -1,0 +1,78 @@
+{
+  "schema_version": 1,
+  "result": "advertised_input_write_allowed_and_unadvertised_write_isolated",
+  "abi": {
+    "i_write_input_buffer_flag": 2048
+  },
+  "advertised_write": {
+    "fixture": "AEXCompat owner-authored pf_input_write_allowed_probe",
+    "fixture_sha256": "AC1875F8FD638BC9CC62512AFF493B63B7661BFD3A96D9B01F60AB8F58B1FE18",
+    "advertised_out_flags": 3072,
+    "input_write_advertised": true,
+    "input_buffer_writable": true,
+    "render_error": 0,
+    "input_sha256": "863d238f52f81aba4017c198af4d748cb57fe369e6216fdbacf45fd94037ecf7",
+    "output_sha256": "6232b2fc98e93754b771a0bf22a5b3c81bc0bce580499dbc4fb32ad0490e2b5a",
+    "mutated_first_argb_pixel": [255, 17, 34, 51],
+    "guard_bytes_intact": true,
+    "global_setdown_error": 0,
+    "handle_lifetimes_balanced": true,
+    "world_lifetimes_balanced": true
+  },
+  "unadvertised_write": {
+    "fixture": "AEXCompat owner-authored pf_input_write_denied_probe",
+    "fixture_sha256": "47302CD57112E4C8DA1DE1A7AA4E28D49EC1CFBEDFBBA2EDD1E75CCAB73DF28B",
+    "input_write_advertised": false,
+    "input_buffer_writable": false,
+    "classification": "crashed",
+    "windows_exit_code": 3221225477,
+    "windows_exception": "0xC0000005",
+    "failure_stage": "render",
+    "last_completed_stage": "frame_setup",
+    "broker_failed_safely": true
+  },
+  "smartfx_advertised_write": {
+    "fixture": "AEXCompat owner-authored pf_input_write_allowed_probe",
+    "fixture_sha256": "AC1875F8FD638BC9CC62512AFF493B63B7661BFD3A96D9B01F60AB8F58B1FE18",
+    "advertised_out_flags": 3072,
+    "advertised_out_flags2": 1024,
+    "smart_render_supported": true,
+    "input_write_advertised": true,
+    "input_buffer_writable": true,
+    "pre_render_error": 0,
+    "smart_render_error": 0,
+    "input_checkout_request": [0, 0, 16, 12],
+    "input_sha256": "6232b2fc98e93754b771a0bf22a5b3c81bc0bce580499dbc4fb32ad0490e2b5a",
+    "output_sha256": "6232b2fc98e93754b771a0bf22a5b3c81bc0bce580499dbc4fb32ad0490e2b5a",
+    "mutated_first_argb_pixel": [255, 17, 34, 51],
+    "result_rect": [0, 0, 16, 12],
+    "max_result_rect": [0, 0, 16, 12],
+    "guard_bytes_intact": true,
+    "global_setdown_error": 0,
+    "handle_lifetimes_balanced": true,
+    "world_lifetimes_balanced": true
+  },
+  "smartfx_unadvertised_write": {
+    "fixture": "AEXCompat owner-authored pf_input_write_denied_probe",
+    "fixture_sha256": "47302CD57112E4C8DA1DE1A7AA4E28D49EC1CFBEDFBBA2EDD1E75CCAB73DF28B",
+    "input_write_advertised": false,
+    "input_buffer_writable": false,
+    "classification": "crashed",
+    "windows_exit_code": 3221225477,
+    "windows_exception": "0xC0000005",
+    "failure_stage": "smart_render_cpu",
+    "last_completed_stage": "smart_pre_render",
+    "broker_failed_safely": true
+  },
+  "safety": {
+    "input_storage_uses_dedicated_virtual_allocation": true,
+    "unadvertised_input_is_page_read_only": true,
+    "advertised_input_is_page_read_write": true,
+    "output_buffer_is_separate": true,
+    "isolated_worker": true,
+    "exact_aex_hash_revalidated": true,
+    "timeout_limited": true,
+    "bounded_diagnostics": true
+  },
+  "scope_note": "WORKS_IN_PLACE alias semantics were not inferred because the installed Adobe SDK provides no behavioral definition or fixture."
+}

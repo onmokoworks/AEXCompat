@@ -1,0 +1,35 @@
+{
+  "schema_version": 1,
+  "status": "oracle_not_captured",
+  "date": "2026-07-16",
+  "after_effects": {
+    "version": "25.2x131",
+    "executable": "C:/Program Files/Adobe/Adobe After Effects 2025/Support Files/AfterFX.exe"
+  },
+  "probe": {
+    "path": "target/pf-transform-multimatrix-oracle-build/Release/pf_transform_multimatrix_oracle.aex",
+    "size_bytes": 10752,
+    "sha256": "7317de28eddc5acd8ce73b1f5d9d9775039f2aabb1712f9297161371bb531537",
+    "matrices": [
+      [1, 0, 0, 0, 1, 0, 0, 0, 1],
+      [1, 0, 0, 0, 1, 0, 2, 0, 1]
+    ],
+    "num_matrices": 2,
+    "source_to_destination": true
+  },
+  "input": "target/image-smoke-input.png",
+  "requested_output": "target/ae-oracles/transform-multimatrix-ui.png",
+  "observations": [
+    "the existing AE MCP bridge executed short JSX probes successfully",
+    "the oracle runner reached before_add_property on footage and null layers",
+    "the PiPL now uses the unique display name PF Transform Multi Matrix Oracle and match name AEXCompat PF MultiMatrix Oracle instead of colliding with the affine probe",
+    "the rebuilt x64 fixture exports EffectMain, contains a .rsrc section, and passes the focused PiPL registration tests",
+    "the fixture now aligns PiPL and GlobalSetup flags and validates selector pointers, acquired suites, signed rowbytes, height, and world-size multiplication before rendering",
+    "a complete scan of all 1582 app.effects entries did not expose the oracle registration",
+    "placing the corrected binary at fresh V3 paths did not change registration visibility",
+    "a 2026-07-16 retry installed the hash-authenticated fixture under the writable per-user Adobe Common MediaCore directory, but After Effects exited with code 1 before producing the guarded result JSON or PNG",
+    "the per-user temporary plug-in directory and all capture processes were removed after the failed retry",
+    "no PNG was produced and all temporary plugin folders and AE processes were removed"
+  ],
+  "conclusion": "No pixel or weighting claim can be made. The duplicate PiPL identity is fixed; the next blocker is diagnosing the guarded AE launch that exits before the capture script emits a result."
+}

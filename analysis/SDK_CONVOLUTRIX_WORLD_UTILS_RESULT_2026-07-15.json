@@ -1,0 +1,50 @@
+{
+  "schema_version": 1,
+  "fixture": {
+    "source": "Adobe After Effects SDK Examples/Effect/Convolutrix",
+    "build_toolset": "v143",
+    "sha256": "92BE0721EB8C68201B79831995CC261BE60501688040854E14F89E5F58BC638C"
+  },
+  "inspection": {
+    "status": "parameters_inspected",
+    "reported_num_params": 6,
+    "parameters": [
+      {"slot": 1, "disk_id": 3, "type": 10, "name": "Convolve", "default": 50},
+      {"slot": 2, "disk_id": 4, "type": 13, "name": "Blend Controls"},
+      {"slot": 3, "disk_id": 5, "type": 10, "name": "Blend percentage", "default": 50},
+      {"slot": 4, "disk_id": 2, "type": 5, "name": "Blend color"},
+      {"slot": 5, "disk_id": 7, "type": 14, "name": "Blend color"}
+    ]
+  },
+  "convolve": {
+    "input_dimensions": [3, 3],
+    "amount": 50.0,
+    "input_rgba_sha256": "1EED9BB2AE3AE72B4EBAC508CAD8D33DDDCA3699A1F5E1225F4B805AF82BAD34",
+    "argb8_to_rgba8_sha256": "B840631C6AE08E93327F96252A0D17B41E1BDBFB80BF54DA55986E50DBB44E2E",
+    "argb16_to_rgba8_sha256": "B840631C6AE08E93327F96252A0D17B41E1BDBFB80BF54DA55986E50DBB44E2E",
+    "argb8_status": "render_completed",
+    "argb16_status": "render_completed",
+    "guard_bytes_intact": true
+  },
+  "blend": {
+    "convolve_amount": 50.0,
+    "blend_percentage": 50.0,
+    "blend_color_argb8": [255, 255, 0, 255],
+    "status": "render_completed",
+    "output_sha256": "24fa9be50153a7a52f69922a5ee9f485ad4e36a376a7c8ae4e255781dd98bf09",
+    "suite_acquires": 2,
+    "suite_releases": 2,
+    "worlds_created": 1,
+    "worlds_disposed": 1,
+    "suite_leases_balanced": true,
+    "handle_lifetimes_balanced": true,
+    "world_lifetimes_balanced": true
+  },
+  "host_contracts": [
+    "PF ANSI Suite 1 ceil",
+    "PF World Transform Suite 1 convolve and blend",
+    "legacy PF_UtilCallbacks blend convolve fill new_world dispose_world",
+    "bounded 3x3 clamped convolution",
+    "alias-safe fixed-point image blend"
+  ]
+}

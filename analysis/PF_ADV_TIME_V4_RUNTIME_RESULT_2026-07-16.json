@@ -1,0 +1,66 @@
+{
+    "schema_version":  1,
+    "result":  "current_worker_exercised_all_adv_time_v4_slots",
+    "authenticated_artifacts":  {
+                                    "source":  {
+                                                   "path":  "minihost/src/l2_main.cpp",
+                                                   "size_bytes":  1138218,
+                                                   "sha256":  "4fce425483d59eeef6335bcc885c904a6c406e2449cd879e2daad5447f1bf9f7"
+                                               },
+                                    "worker":  {
+                                                   "path":  "target/minihost-build/aex_render_worker.exe",
+                                                   "size_bytes":  768512,
+                                                   "sha256":  "94bbad9e150e60306073e66c3ab4a56d6ccf9b42e56af082db9014cc683b4254"
+                                               },
+                                    "probe":  {
+                                                  "path":  "target/pf-adv-time-probe-build/Release/pf_adv_time_probe.aex",
+                                                  "size_bytes":  41984,
+                                                  "sha256":  "672b0bb2ec8fc4b3474177528d8ecea672fbbb00ee09ba90fc33bc94223b8ee3"
+                                              },
+                                    "input":  {
+                                                  "path":  "target/gpu-effects/opencl-input.rgba",
+                                                  "size_bytes":  3404,
+                                                  "sha256":  "e262995eeaf4ba4ac17385566eadae4597ec4a974ea0c116a170c0edb1e632f9"
+                                              },
+                                    "output":  {
+                                                   "path":  "target/gpu-effects/pf-adv-time-probe-output-20260717-nativeaux4.rgba",
+                                                   "size_bytes":  3404,
+                                                   "sha256":  "47bf9f8abe5d60ef7426bc5e17d98482e91b3d20ab3167c1cee81b6636c32591"
+                                               },
+                                    "report":  {
+                                                   "path":  "target/gpu-effects/pf-adv-time-probe-report-20260717-nativeaux4.json",
+                                                   "size_bytes":  6343,
+                                                   "sha256":  "1fc1ef6b27cd9fff7a847dee98d07faad91e67ba8a5f4ed1fe36f42b9a796427"
+                                               },
+                                    "sidecar":  {
+                                                    "path":  "target/tmp/aexcompat-pf-adv-time-v4.json",
+                                                    "size_bytes":  1385,
+                                                    "sha256":  "b17661a15d1237b66674dda08c6124b2efb1ed7113a85c9e59f570fd71957799"
+                                                }
+                                },
+    "runtime":  {
+                    "command":  "target/minihost-build/aex_render_worker.exe --render-image target/pf-adv-time-probe-build/Release/pf_adv_time_probe.aex 672b0bb2ec8fc4b3474177528d8ecea672fbbb00ee09ba90fc33bc94223b8ee3 v5| target/gpu-effects/opencl-input.rgba target/gpu-effects/pf-adv-time-probe-output-20260717-nativeaux4.rgba 37 23 0 1 1 1",
+                    "exit_code":  0,
+                    "status":  "render_completed",
+                    "suite_acquires":  2,
+                    "suite_releases":  2,
+                    "probe_acquire_err":  0,
+                    "probe_release_err":  0,
+                    "probe_lease_balanced":  true,
+                    "guards_intact":  true,
+                    "exceptions":  0,
+                    "display_pref_raw_bytes":  "010000001e0000000000000000010000",
+                    "starting_frame":  0,
+                    "exact_count":  4,
+                    "partial_excluded_count":  4,
+                    "partial_included_count":  5,
+                    "invalid_scale_error":  4,
+                    "overflow_error":  4,
+                    "null_error":  4
+                },
+    "not_claimed":  [
+                        "Adobe After Effects user-preference formatting equivalence",
+                        "drop-frame, source-timecode, or feet-and-frames equivalence",
+                        "execution inside Adobe After Effects"
+                    ]
+}

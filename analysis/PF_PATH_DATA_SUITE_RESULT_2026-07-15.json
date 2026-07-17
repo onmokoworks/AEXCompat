@@ -1,0 +1,54 @@
+{
+  "schema_version": 1,
+  "fixture": "AEXCompat self-authored PF Path Data probe",
+  "request": "tools/sdk-fixtures/path-data-probe-request.json",
+  "result": "all_path_data_suite1_callbacks_completed_with_image_io",
+  "api_contract": {
+    "suite_version": 1,
+    "callback_count": 11,
+    "callbacks_exercised": [
+      "PF_PathIsOpen",
+      "PF_PathNumSegments",
+      "PF_PathVertexInfo",
+      "PF_PathPrepareSegLength",
+      "PF_PathGetSegLength",
+      "PF_PathEvalSegLength",
+      "PF_PathEvalSegLengthDeriv1",
+      "PF_PathCleanupSegLength",
+      "PF_PathIsInverted",
+      "PF_PathGetMaskMode",
+      "PF_PathGetName"
+    ],
+    "rectangle_segment_count": 4,
+    "segment_frequency": 64,
+    "derivative_is_unit_length": true,
+    "mask_mode": "add",
+    "mask_name": "Mask 1"
+  },
+  "render": {
+    "passed": true,
+    "worker_classification": "ok",
+    "pixel_format": "argb8",
+    "dimensions": [37, 23],
+    "input_sha256": "531fe73fe40a02dfa9271a0d17c0c658e327ab80f5f82748d799a3a07ba23b4d",
+    "output_sha256": "531fe73fe40a02dfa9271a0d17c0c658e327ab80f5f82748d799a3a07ba23b4d",
+    "guards_intact": true
+  },
+  "ownership": {
+    "path_checkout_calls": 1,
+    "path_checkin_calls": 1,
+    "segment_preps_created": 1,
+    "segment_preps_disposed": 1,
+    "suite_acquires": 2,
+    "suite_releases": 2,
+    "invalid_path_operations": 0,
+    "path_lifetimes_balanced": true,
+    "suite_lifetimes_balanced": true
+  },
+  "abi_fix": {
+    "pf_boolean_windows_size_bytes": 1,
+    "path_is_open_writes_one_byte": true,
+    "path_is_inverted_writes_one_byte": true,
+    "prior_failure_classification": "debug_runtime_stack_corruption_modal_timeout"
+  }
+}

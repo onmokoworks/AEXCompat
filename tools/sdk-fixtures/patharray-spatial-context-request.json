@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "timing": { "frame": 0, "fps": 30, "duration_frames": 300 },
+  "host_context": {
+    "mask_scene": { "masks": [] },
+    "spatial": {
+      "downsample_x": { "numerator": 1, "denominator": 2 },
+      "downsample_y": { "numerator": 1, "denominator": 2 },
+      "pixel_aspect_ratio": { "numerator": 10, "denominator": 11 },
+      "full_resolution_width": 74,
+      "full_resolution_height": 46,
+      "pre_effect_source_origin_x": -7,
+      "pre_effect_source_origin_y": 9
+    }
+  },
+  "assignments": [
+    { "slot": 1, "layer": "target/gpu-effects/probe-invert.png" },
+    { "slot": 2, "value": 1.0 },
+    { "slot": 3, "value": 4.0 }
+  ]
+}

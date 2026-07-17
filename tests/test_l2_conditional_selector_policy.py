@@ -15,7 +15,10 @@ class L2ConditionalSelectorPolicyTests(unittest.TestCase):
         self.assertIn("update_params_ui_advertised", worker)
         self.assertIn("query_dynamic_flags_advertised", worker)
         self.assertIn("(1u << 26)", worker)
-        self.assertIn("conditional_ui_selectors_dispatched\\\":false", worker)
+        self.assertIn("dispatch_conditional_ui_selectors", worker)
+        self.assertIn("kUpdateParamsUi = 14", worker)
+        self.assertIn("kQueryDynamicFlags = 18", worker)
+        self.assertIn('std::strcmp(name, "PF Param Utils Suite")', worker)
 
     def test_broker_enforces_profile_flags_and_conditional_dispatch(self):
         broker = BROKER.read_text(encoding="utf-8")

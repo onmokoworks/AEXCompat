@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <!-- Keep the SDK tree read-only: generate and compile the PiPL from target/. -->
+    <CustomBuild Update="..\Grabba_PiPL.r">
+      <ExcludedFromBuild>true</ExcludedFromBuild>
+    </CustomBuild>
+    <ResourceCompile Remove="Grabba_PiPL.rc" />
+    <ResourceCompile Include="$(AEXCompatGrabbaPiPLRc)" />
+  </ItemGroup>
+  <ItemDefinitionGroup>
+    <ClCompile>
+      <DisableSpecificWarnings>4103;%(DisableSpecificWarnings)</DisableSpecificWarnings>
+    </ClCompile>
+  </ItemDefinitionGroup>
+</Project>

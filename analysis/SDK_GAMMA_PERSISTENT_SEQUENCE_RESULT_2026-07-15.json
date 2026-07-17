@@ -1,0 +1,46 @@
+{
+  "schema_version": 1,
+  "result": "two_frames_rendered_in_one_persistent_sequence",
+  "fixture": {
+    "source": "Adobe After Effects SDK Examples/Effect/Gamma_Table",
+    "sha256": "6FCB4946C77A9FCB4FAB8E15DBBC54FFB4B1AB08656CE9ACEA39C44099B6DFA8"
+  },
+  "selector_order": ["GLOBAL_SETUP", "PARAMS_SETUP", "SEQUENCE_SETUP", "FRAME_SETUP", "RENDER", "FRAME_SETDOWN", "FRAME_SETUP", "RENDER", "FRAME_SETDOWN", "SEQUENCE_SETDOWN", "GLOBAL_SETDOWN"],
+  "sequence": {
+    "persistent": true,
+    "sequence_setup_calls": 1,
+    "sequence_setup_error": 0,
+    "frame_setup_calls": 2,
+    "frame_setdown_calls": 2,
+    "frame_errors": [0, 0],
+    "sequence_setdown_calls": 1,
+    "sequence_setdown_error": 0,
+    "frame_times": [0, 1],
+    "time_step": 1,
+    "total_time": 2,
+    "time_scale": 1
+  },
+  "render": {
+    "status": "render_completed",
+    "pixel_format": "argb8",
+    "width": 16,
+    "height": 12,
+    "frame_hashes": ["863d238f52f81aba4017c198af4d748cb57fe369e6216fdbacf45fd94037ecf7", "863d238f52f81aba4017c198af4d748cb57fe369e6216fdbacf45fd94037ecf7"],
+    "guard_bytes_intact": true
+  },
+  "ownership": {
+    "sequence_handles_created": 1,
+    "sequence_handles_disposed": 1,
+    "handle_lifetimes_balanced": true,
+    "world_lifetimes_balanced": true,
+    "suite_leases_balanced": true,
+    "param_checkouts_balanced": true
+  },
+  "isolation": {
+    "broker_hash_revalidation": true,
+    "worker_timeout_ms": 30000,
+    "bounded_diagnostics": true,
+    "worker_classification": "ok",
+    "exit_code": 0
+  }
+}

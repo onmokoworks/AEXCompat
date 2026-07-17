@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "date": "2026-07-15",
+  "subject": "Real effect AEX SmartFX 32-bpc compatibility matrix",
+  "input_dimensions": [37, 23],
+  "pixel_format": "argb32f",
+  "host_policy": "A suite lease retained through Global Setdown is reported as a warning; selector, guard, handle, world, and checked-out parameter failures remain fatal.",
+  "results": [
+    ["CMYKMisreg", "18d7ea1aa7a27185fdb1174afa6381423f9e97b1e1fbe31810bccdb4ded07c93", 37, 23, "d02b404441607f71ebd4210b7bccff8c7c3e58c4598f362125352dec0a0120ec"],
+    ["MaskOffset", "b7c41f4f906fce74b26bd2f06520f6bfdf75dcd1a2682dbb85d50d1de833877b", 37, 23, "5e3b506f654d99ef1ce710964fc109b2996265a583db1e73ee3ced0398232fdf"],
+    ["MinimaxMap", "1089295a66a62cda275cbefc6d8d7dacdbadf3ad6adda619b3428870d6a955dc", 37, 23, "284a8424d2729b6239f4ca361f030d1eefa706d8128e1caea739d8356bdc9a8d"],
+    ["ONMK_ColorfulEcho", "d06cbf7af990d7f8a2ff7558654ca22d6a0214517336cfdefbc8005cefd494ce", 37, 23, "e02b3c1139deaf4b5e87ca8a4be8e75977e48bd7223c092f2311843df1da766d"],
+    ["ONMK_OpticalFlare", "1f926cc75e4520692539b9f5f35ac7f5b330ceda28049b48b345c1514018a8e4", 37, 23, "d02b404441607f71ebd4210b7bccff8c7c3e58c4598f362125352dec0a0120ec"],
+    ["ONMK_Starglow", "18a44153a4caee80bb838accbbdb062358e11acb1b68f0d93a18dcaf9b948740", 37, 23, "d02b404441607f71ebd4210b7bccff8c7c3e58c4598f362125352dec0a0120ec"],
+    ["ONMK_TuiImage", "13da4d8b5f7b4897fe4663960fedc584ebd00f4779327bba12505f9157dc51e9", 37, 23, "0de150ddd7ec428333718531ba3dcb3965511a94fcd2ff0de03561bef760e2cf"],
+    ["ParticleLab", "c61d708e3dfc6b9d1e3ad67ede2f54a6af303184547cd80cd49802f5ee672ae6", 1848, 1848, "c6c3ef8467f73927bca5e22ab9e1993247e9df2c45a095f0ee3304b22a9dcf41"],
+    ["PathArray", "d1daf958aa3f6da2d5ee88997b56029b9074e82d77233969b9e5f7862a687ac8", 37, 23, "da69cca8316fe2ef026e5d2989d9aa79318b18325f98cdd221eb8fe511b85c7e"],
+    ["RefractionDispersion", "352cf22a7dfccfb77ec57c8b7cfba88438b280a48aac1e676ab58f1dba671904", 37, 23, "e986816c4545d472389b606d47a71d83cb07bcb8da70e2b6af158ddb0c2553c8"],
+    ["ScatterMap", "223ff5ec542dd74374c727f16aa6c068073d1c2d7a5cabf20512cb289f0716eb", 37, 23, "e5dc99e388c98a1edd6a86efc0b63a807833cfb331b97a002709cdf2b24bf94f"],
+    ["TuiImage", "f3e34ba56cf6d653d03b525c3f9ba564f41cb50d48f10945ea6eee30801f194d", 37, 23, "0de150ddd7ec428333718531ba3dcb3965511a94fcd2ff0de03561bef760e2cf"]
+  ],
+  "columns": ["name", "plugin_sha256", "output_width", "output_height", "raw_output_sha256"],
+  "invariants": {
+    "all_passed": true,
+    "all_guard_bytes_intact": true,
+    "all_handle_lifetimes_balanced": true,
+    "all_world_lifetimes_balanced": true,
+    "all_param_checkouts_balanced": true,
+    "all_suite_lease_warnings_visible": true
+  },
+  "cleanroom_note": "Only host-observable execution results and artifact identities were recorded."
+}

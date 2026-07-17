@@ -1,0 +1,67 @@
+﻿{
+    "schema_version":  1,
+    "generated_at":  "2026-07-15T15:10:33.3894363Z",
+    "status":  "built",
+    "sdk_root":  "C:\\Program Files\\Adobe\\AfterEffectsSDK\\Examples",
+    "configuration":  {
+                          "architecture":  "x64",
+                          "shader_profile":  "cs_6_5",
+                          "has_hlsl":  1,
+                          "has_cuda":  0
+                      },
+    "tools":  {
+                  "vcvars64":  "C:\\Program Files\\Microsoft Visual Studio\\18\\Community\\VC\\Auxiliary\\Build\\vcvars64.bat",
+                  "dxc":  "C:\\Program Files (x86)\\Windows Kits\\10\\bin\\10.0.26100.0\\x64\\dxc.exe",
+                  "dxc_version":  "1.8.2502.11",
+                  "python":  "Python 3.11.9"
+              },
+    "inputs":  [
+                   {
+                       "path":  "C:\\Program Files\\Adobe\\AfterEffectsSDK\\Examples\\Effect\\SDK_Invert_ProcAmp\\SDK_Invert_ProcAmp_Kernel.chlsl",
+                       "size":  444,
+                       "sha256":  "c9f615882960feeb744e1643fe467cbbcd01d347a6e54bc331e71dab5def7d53"
+                   },
+                   {
+                       "path":  "C:\\Program Files\\Adobe\\AfterEffectsSDK\\Examples\\Effect\\SDK_Invert_ProcAmp\\SDK_Invert_ProcAmp_Kernel.cu",
+                       "size":  3363,
+                       "sha256":  "b7da57b3e48f0484014ce6593c92cf22827a1e6148da18236eac2870cfa57c37"
+                   },
+                   {
+                       "path":  "C:\\Program Files\\Adobe\\AfterEffectsSDK\\Examples\\Effect\\SDK_Invert_ProcAmp\\SDK_Invert_ProcAmp.cpp",
+                       "size":  39097,
+                       "sha256":  "aeb95b2a2c3de83f770d9546030ab4aca1fcc6500160597c70e6a456e225bc2f"
+                   },
+                   {
+                       "path":  "C:\\Program Files\\Adobe\\AfterEffectsSDK\\Examples\\GPUUtils\\ParseHLSL.py",
+                       "size":  10743,
+                       "sha256":  "3340298a945e516cae01f4f56c481cc2d7ab6f40189b29eb159f6a9119418bdb"
+                   }
+               ],
+    "artifacts":  [
+                      {
+                          "path":  "D:\\Projects\\01_Project\\04_Tools\\AEXCompat\\target\\sdk-fixtures\\invert-procamp-directx\\SDK_Invert_ProcAmp_DirectX.aex",
+                          "size":  109568,
+                          "sha256":  "6cbbb9a25539c7958e7eb5dce458eb2ef62b9efeecb7108e1c04973270b13428"
+                      },
+                      {
+                          "path":  "D:\\Projects\\01_Project\\04_Tools\\AEXCompat\\target\\sdk-fixtures\\invert-procamp-directx\\DirectX_Assets\\InvertColorKernel.cso",
+                          "size":  4336,
+                          "sha256":  "10e185024c949a6dd6b587a2c7df03a9ef9297208ad74ac37ba725e03022de3d"
+                      },
+                      {
+                          "path":  "D:\\Projects\\01_Project\\04_Tools\\AEXCompat\\target\\sdk-fixtures\\invert-procamp-directx\\DirectX_Assets\\InvertColorKernel.rs",
+                          "size":  200,
+                          "sha256":  "eb0f29101cd56e01cb4134837f4588b9593cf08b96193b647aa807201a36e3b5"
+                      },
+                      {
+                          "path":  "D:\\Projects\\01_Project\\04_Tools\\AEXCompat\\target\\sdk-fixtures\\invert-procamp-directx\\DirectX_Assets\\ProcAmp2Kernel.cso",
+                          "size":  4660,
+                          "sha256":  "fcbe33eca76acad5dcc48e5a423a93efe30024ecd609ffd4822cce2a14b06f39"
+                      },
+                      {
+                          "path":  "D:\\Projects\\01_Project\\04_Tools\\AEXCompat\\target\\sdk-fixtures\\invert-procamp-directx\\DirectX_Assets\\ProcAmp2Kernel.rs",
+                          "size":  200,
+                          "sha256":  "eb0f29101cd56e01cb4134837f4588b9593cf08b96193b647aa807201a36e3b5"
+                      }
+                  ]
+}

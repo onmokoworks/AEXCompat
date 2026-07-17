@@ -1,0 +1,15 @@
+{
+  "schema_version":1,
+  "captured_at":"2026-07-15",
+  "scope":"overlapping PF_LayerAudio handle ownership",
+  "maximum_live_handles":16,
+  "fixture":"pf_visual_audio_multi_handle_probe",
+  "windows":[
+    {"start_time":0,"duration":4,"time_scale":44100,"first_sample":0.0,"last_sample":0.1875},
+    {"start_time":8,"duration":4,"time_scale":44100,"first_sample":0.5,"last_sample":0.6875}
+  ],
+  "run":{"status":"render_completed","checkout_calls":2,"get_data_calls":2,"checkin_calls":2,"peak_live_audio_handles":2,"audio_handle_exhaustions":0,"invalid_audio_operations":0,"distinct_opaque_handles":true,"reverse_order_checkin":true,"audio_lifetimes_balanced":true},
+  "negative":{"fixture":"pf_visual_audio_double_checkin_probe","operation":"second checkin of released handle","callback_rejected":true,"invalid_audio_operations":1,"successful_checkin_calls":1,"status":"render_failed","worker_exit_code":21,"process_crashed":false},
+  "sdk_backwards_regression":{"status":"render_completed","output_sha256":"d87dfbb4e03c9af7d5735c716f737d97686aa2bca516c49a2ef41e4a2754d2b9","audio_lifetimes_balanced":true},
+  "conclusion":"AEXCompat owns up to 16 stable audio handles concurrently and permits get/checkin in an order independent of checkout order."
+}

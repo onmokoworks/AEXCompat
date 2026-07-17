@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <!-- The SDK project requires Premiere kernel headers and DXC assets even for CPU-only testing. -->
+  <ItemGroup>
+    <CustomBuild Remove="..\SDK_Invert_ProcAmp_Kernel.cu" />
+    <CustomBuild Remove="..\SDK_Invert_ProcAmp_Kernel.chlsl" />
+  </ItemGroup>
+  <ItemDefinitionGroup>
+    <Link>
+      <AdditionalDependencies>OpenCL.lib;d3dcompiler.lib</AdditionalDependencies>
+    </Link>
+  </ItemDefinitionGroup>
+</Project>

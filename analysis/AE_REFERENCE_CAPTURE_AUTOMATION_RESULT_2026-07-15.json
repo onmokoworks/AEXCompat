@@ -1,0 +1,44 @@
+{
+  "schema_version": 1,
+  "subject": "Non-destructive After Effects reference PNG capture automation",
+  "status": "ready_waiting_for_no_running_ae_session",
+  "tools": [
+    "tools/capture-ae-reference.ps1",
+    "tools/ae-reference-capture.jsx"
+  ],
+  "installed_hash_audit": {
+    "tested_plugins_checked": 10,
+    "exact_installed_matches": 4,
+    "exact_match_names": ["MaskOffset", "ONMK_ColorfulEcho", "PathArray", "TuiImage"],
+    "mismatched_binary_count": 6,
+    "mismatched_binaries_are_rejected": true
+  },
+  "safety_gates": {
+    "existing_afterfx_process_rejected": true,
+    "saved_or_nonempty_project_rejected_in_jsx": true,
+    "jsx_does_not_quit_rejected_existing_session": true,
+    "tested_and_installed_aex_sha256_must_match": true,
+    "create_new_output_only": true,
+    "existing_result_file_rejected": true,
+    "output_parent_must_exist": true,
+    "bounded_timeout_with_process_termination": true,
+    "temporary_project_closed_without_save": true
+  },
+  "refusal_observation": {
+    "ae_2025_was_running": true,
+    "capture_refused": true,
+    "output_created": false,
+    "result_created": false,
+    "existing_ae_process_terminated": false
+  },
+  "capture_contract": {
+    "imports_input_image": true,
+    "creates_same_dimension_comp": true,
+    "sets_project_bpc": [8, 16, 32],
+    "sets_frame_fps_and_duration": true,
+    "adds_effect_by_match_or_display_name": true,
+    "uses_compitem_save_frame_to_png": true,
+    "writes_machine_readable_result": true
+  },
+  "remaining_evidence": "Run after the user's AE session is closed, then compare the resulting PNG with AEXCompat using --compare-images or the six-case reference matrix."
+}

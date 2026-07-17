@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "fixture": "owner-authored PF GPU Device Suite v1 memory probe",
+  "fixture_sha256": "a8f5a20ae5f12eb4509b5a73fc7c21aee4b3530a080ef963b41adc1bcc9d62f0",
+  "sdk_root": "C:/Program Files/Adobe/AfterEffectsSDK",
+  "result": "gpu_device_suite_all_15_slots_hosted",
+  "render": {
+    "render_path": "classic",
+    "pixel_format": "argb8",
+    "width": 37,
+    "height": 23,
+    "input_sha256": "531fe73fe40a02dfa9271a0d17c0c658e327ab80f5f82748d799a3a07ba23b4d",
+    "output_sha256": "531fe73fe40a02dfa9271a0d17c0c658e327ab80f5f82748d799a3a07ba23b4d",
+    "suite_acquires": 1,
+    "suite_releases": 1,
+    "device_allocations": 1,
+    "host_allocations": 1,
+    "allocations_created": 2,
+    "allocations_freed": 2,
+    "purged_bytes": 0,
+    "double_free_rejected": true,
+    "invalid_operations": 1,
+    "live_allocation_count": 0,
+    "live_bytes": 0,
+    "exclusive_access_depth": 0,
+    "gpu_memory_lifetimes_balanced": true,
+    "guard_bytes_intact": true,
+    "passed": true
+  },
+  "cleanroom_note": "The probe uses the public SDK ABI and records only observable host results."
+}

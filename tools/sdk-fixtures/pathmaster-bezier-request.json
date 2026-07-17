@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "assignments": [
+    {"slot": 3, "value": 0.0},
+    {"slot": 4, "value": 0.0},
+    {"slot": 5, "value": 0.0},
+    {"slot": 6, "value": 1.0}
+  ],
+  "host_context": {
+    "mask_scene": {
+      "masks": [
+        {
+          "open": false,
+          "vertices": [
+            {"x": 18.5, "y": 3.0, "tangent_in": {"x": -7.455, "y": 0.0}, "tangent_out": {"x": 7.455, "y": 0.0}},
+            {"x": 32.0, "y": 11.5, "tangent_in": {"x": 0.0, "y": -4.693}, "tangent_out": {"x": 0.0, "y": 4.693}},
+            {"x": 18.5, "y": 20.0, "tangent_in": {"x": 7.455, "y": 0.0}, "tangent_out": {"x": -7.455, "y": 0.0}},
+            {"x": 5.0, "y": 11.5, "tangent_in": {"x": 0.0, "y": 4.693}, "tangent_out": {"x": 0.0, "y": -4.693}}
+          ]
+        }
+      ]
+    }
+  }
+}

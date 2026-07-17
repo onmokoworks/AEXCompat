@@ -70,8 +70,9 @@ class RenderParameterGateContractTests(unittest.TestCase):
     def test_worker_revalidates_and_echoes_bound_values(self):
         source = (ROOT / "minihost/src/l2_main.cpp").read_text(encoding="utf-8")
         for marker in ('L"--render-request"', "parse_parameter_payload", "valid_parameter_id",
-                       'encoded.compare(0, 3, L"v2|")', "encoded.size() > 4096",
+                       'encoded.compare(0, 3, L"v2|")', "encoded.size() > 16384",
                        'encoded.compare(0, 3, L"v3|")', 'kind_text == L"argb8"',
+                       'kind_text == L"arbhex"',
                        "validate_requested_assignments", "apply_requested_assignments",
                        "initialize_parameter_definitions",
                        "g_params[static_cast<std::size_t>(assignment.index - 1)]",

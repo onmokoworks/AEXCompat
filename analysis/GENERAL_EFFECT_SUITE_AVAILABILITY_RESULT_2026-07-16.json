@@ -1,0 +1,40 @@
+{
+  "schema_version": 1,
+  "evidence_kind": "source_contract",
+  "source": "minihost/src/l2_main.cpp",
+  "runtime_measurement_performed": false,
+  "measured_render_availability": null,
+  "conclusion": "source_contract_passed_runtime_measurement_pending",
+  "contracted_suites": [
+    {"name": "PF Sampling16 Suite", "version": 1},
+    {"name": "PF SamplingFloat Suite", "version": 1},
+    {"name": "PF World Transform Suite", "version": 1},
+    {"name": "PF Fill Matte Suite", "version": 2}
+  ],
+  "availability_contract": "acquire_suite publishes each contracted suite without requiring g_mask_model_enabled",
+  "unknown_versions": "rejected_by_exact_match_and_fallback",
+  "function_markers": [
+    "subpixel_sample16",
+    "subpixel_sample_float",
+    "blend_world",
+    "convolve_world",
+    "copy_world8",
+    "transfer_rect",
+    "transform_world",
+    "fill_world8",
+    "fill_world16",
+    "fill_world_float"
+  ],
+  "safety_upper_bounds": {
+    "maximum_width": 4096,
+    "maximum_height": 4096,
+    "maximum_pixels": 16777216,
+    "maximum_rowbytes": 65536,
+    "maximum_convolution_kernel_size": 15
+  },
+  "limitations": [
+    "This evidence inspects source structure only.",
+    "No plugin render or runtime suite acquisition was measured.",
+    "Runtime availability remains pending a separate measured test."
+  ]
+}

@@ -1,0 +1,48 @@
+{
+  "schema_version": 1,
+  "result": "bounded_external_dependency_queries_completed",
+  "abi": {
+    "selector": 16,
+    "extra_handle_offset": 8,
+    "handle_size": 8,
+    "maximum_dependency_bytes": 65536
+  },
+  "all_dependencies": {
+    "fixture": "Adobe After Effects SDK Examples/Effect/Convolutrix",
+    "fixture_sha256": "92BE0721EB8C68201B79831995CC261BE60501688040854E14F89E5F58BC638C",
+    "check_type": 1,
+    "selector_error": 0,
+    "exception_code": 0,
+    "dependency_text": "All Dependencies requested.",
+    "dependency_bytes": 28,
+    "handle_returned": true,
+    "handle_valid": true,
+    "nul_terminated": true,
+    "handle_host_disposed": true,
+    "handles_created": 1,
+    "handles_disposed": 1
+  },
+  "missing_dependencies_none": {
+    "fixture": "Adobe After Effects SDK Examples/Effect/Resizer",
+    "fixture_sha256": "A5777179D1BCDBE60EAEB515F0C927466BE5E2B0B9A833FC4D5BFB0AF7757C85",
+    "check_type": 2,
+    "selector_error": 0,
+    "exception_code": 0,
+    "dependency_text": "",
+    "dependency_bytes": 0,
+    "handle_returned": false,
+    "null_handle_is_valid_empty_result": true,
+    "handles_created": 0,
+    "handles_disposed": 0
+  },
+  "safety": {
+    "isolated_worker": true,
+    "timeout_ms": 5000,
+    "exact_aex_hash_revalidated": true,
+    "seh_boundary": true,
+    "nul_termination_required": true,
+    "host_disposes_returned_handle": true,
+    "handle_lifetimes_balanced": true,
+    "bounded_diagnostics": true
+  }
+}

@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "fixture": "Adobe After Effects SDK SDK_Invert_ProcAmp CPU observation build",
+  "fixture_sha256": "f782038561c0c62c018abada0f952a3cbbd21bbbcf57fb374a546f78601a24ad",
+  "result": "fresh_worker_cpu_fallback_completed",
+  "render": {
+    "render_path": "smartfx",
+    "pixel_format": "argb32f",
+    "width": 37,
+    "height": 23,
+    "gpu_render_possible": true,
+    "gpu_render_dispatched": true,
+    "gpu_smart_render_error": 0,
+    "gpu_device_setdown_error": 512,
+    "gpu_device_setdown_exception_code": 3221225477,
+    "gpu_worker_classification": "nonzero_exit",
+    "gpu_output_rejected": true,
+    "cpu_retry_new_process": true,
+    "cpu_gpu_render_dispatched": false,
+    "cpu_worker_classification": "ok",
+    "gpu_fallback_used": true,
+    "output_sha256": "d1151e96fb3c0a30047739a4c36294ba8ca32e5fbd64daa2018b8d32814e4b58",
+    "guard_bytes_intact": true,
+    "passed": true
+  }
+}

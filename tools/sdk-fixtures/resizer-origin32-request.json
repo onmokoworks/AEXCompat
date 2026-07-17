@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "timing": { "frame": 0, "fps": 30, "duration_frames": 300 },
+  "assignments": [
+    { "slot": 1, "value": 50 },
+    { "slot": 2, "color": [255, 128, 255, 255] },
+    { "slot": 3, "value": 1 },
+    { "slot": 4, "value": 0 }
+  ]
+}

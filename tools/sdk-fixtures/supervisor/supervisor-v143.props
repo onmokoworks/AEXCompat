@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <!-- Generate PiPL resources under target/ without touching the SDK sample. -->
+    <CustomBuild Update="..\SupervisorPiPL.r">
+      <ExcludedFromBuild>true</ExcludedFromBuild>
+    </CustomBuild>
+    <ResourceCompile Remove="SupervisorPiPL.rc" />
+    <ResourceCompile Include="$(AEXCompatSupervisorPiPLRc)" />
+  </ItemGroup>
+  <ItemDefinitionGroup>
+    <ClCompile>
+      <DisableSpecificWarnings>4103;4996;%(DisableSpecificWarnings)</DisableSpecificWarnings>
+    </ClCompile>
+  </ItemDefinitionGroup>
+</Project>

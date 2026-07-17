@@ -1,0 +1,94 @@
+{
+  "schema_version": 1,
+  "date": "2026-07-15",
+  "subject": "PF CrashKit image-harness isolation",
+  "plugin_sha256": "5ec416589862dda721ecb56bd24411392d756b9138c514df0573cad4f15d6d23",
+  "limits": {
+    "render_timeout_ms": 30000,
+    "process_memory_bytes": 536870912,
+    "capture_bytes_per_stream": 65536
+  },
+  "cases": [
+    {
+      "mode": "none",
+      "parameter_slot": 1,
+      "parameter_value": 1,
+      "classification": "ok",
+      "failure_stage": null,
+      "output_created": true
+    },
+    {
+      "mode": "crash",
+      "parameter_slot": 1,
+      "parameter_value": 2,
+      "classification": "crashed",
+      "exit_code": 3221225477,
+      "failure_stage": "render",
+      "output_created": false
+    },
+    {
+      "mode": "hang",
+      "parameter_slot": 1,
+      "parameter_value": 3,
+      "classification": "timeout_killed",
+      "exit_code": 57005,
+      "failure_stage": "render",
+      "output_created": false
+    },
+    {
+      "mode": "bigalloc",
+      "parameter_slot": 1,
+      "parameter_value": 4,
+      "classification": "nonzero_exit",
+      "worker_exit_code": 21,
+      "render_error": 4,
+      "failure_stage": "render",
+      "output_created": false
+    },
+    {
+      "mode": "pf_error",
+      "parameter_slot": 1,
+      "parameter_value": 5,
+      "classification": "nonzero_exit",
+      "worker_exit_code": 21,
+      "render_error": 512,
+      "failure_stage": "render",
+      "output_created": false
+    }
+  ],
+  "custom_ui_event_cases": {
+    "event_sequence": [
+      "new_context",
+      "activate",
+      "idle",
+      "deactivate",
+      "close_context"
+    ],
+    "parameter_assignment": {
+      "mode_slot": 1,
+      "stage_slot": 2,
+      "stage_value": 2,
+      "applied_in_same_worker": true
+    },
+    "crash": {
+      "broker_result": "failed_safely",
+      "lifecycle_errors": [0, 0, 512, 0, 0],
+      "close_context_completed": true,
+      "global_setdown_completed": true
+    },
+    "hang": {
+      "broker_result": "failed_safely",
+      "classification": "timeout_killed",
+      "bounded_timeout_ms": 5000,
+      "parent_test_process_survived": true
+    }
+  },
+  "invariants": {
+    "parent_harness_survived_all_faults": true,
+    "fault_cases_created_no_output": true,
+    "nested_selector_diagnostics_identified_render": true,
+    "memory_fault_was_bounded_by_job_object": true,
+    "ui_fault_parameters_use_production_encoder": true,
+    "ui_crash_and_hang_remain_inside_worker": true
+  }
+}
