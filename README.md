@@ -1,5 +1,7 @@
 # AEXCompat
 
+Project direction, achieved milestones, current limitations, and roadmap are documented bilingually in [docs/PROJECT_DIRECTION.md](docs/PROJECT_DIRECTION.md). The Japanese text is authoritative.
+
 AEXCompat is a cleanroom compatibility lab and staged isolated host for After
 Effects `.aex` plug-in behavior.
 

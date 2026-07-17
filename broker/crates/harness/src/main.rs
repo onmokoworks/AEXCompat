@@ -54,6 +54,14 @@ struct TaskResult {
     output: Option<PathBuf>,
 }
 
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+enum TaskKind {
+    #[default]
+    Generic,
+    IdentifyAex,
+    InspectParameters,
+}
+
 #[derive(Debug, Default, PartialEq)]
 struct RenderDiagnostics {
     render_path: String,
@@ -917,6 +925,7 @@ struct HarnessApp {
     failure_diagnostics: Option<FailureDiagnostics>,
     matrix_results: Vec<MatrixCase>,
     receiver: Option<Receiver<TaskResult>>,
+    task_kind: TaskKind,
 }
 
 impl HarnessApp {
@@ -966,6 +975,7 @@ impl HarnessApp {
             failure_diagnostics: None,
             matrix_results: Vec::new(),
             receiver: None,
+            task_kind: TaskKind::Generic,
         }
     }
 
@@ -1022,6 +1032,7 @@ impl HarnessApp {
         });
         self.receiver = Some(receiver);
         self.busy = true;
+        self.task_kind = TaskKind::Generic;
     }
 
     fn choose_aex(&mut self) {
@@ -1040,6 +1051,7 @@ impl HarnessApp {
                 None,
             ))
         });
+        self.task_kind = TaskKind::IdentifyAex;
     }
 
     fn add_dependency(&mut self) {
@@ -1336,41 +1348,33 @@ impl HarnessApp {
         }
     }
 
-    fn inspect_parameters(&mut self) {
+    fn inspect_parameters_async(&mut self) {
         let Some(selection) = &self.selection else {
             return;
         };
-        self.status = "Inspecting PF_PARAMS_SETUP in an isolated worker...".into();
-        match aexcompat_broker::image_render::inspect_experimental_with_diagnostics(
-            &self.repository,
-            &selection.path,
-            &selection.sha256,
-        ) {
-            Ok((parameters, diagnostics)) => {
-                self.audio_effect_only =
-                    diagnostics["audio_effect_only"].as_bool().unwrap_or(false);
-                self.status = format!(
-                    "Discovered {} editable parameters in {} ms ({}).",
-                    parameters.len(),
-                    diagnostics["elapsed_ms"].as_u64().unwrap_or(0),
-                    if self.audio_effect_only {
-                        "audio-only effect"
-                    } else {
-                        "image effect"
-                    }
-                );
-                self.report = serde_json::to_string_pretty(&serde_json::json!({
-                    "parameters": parameters,
-                    "worker_diagnostics": diagnostics,
-                }))
-                .unwrap_or_default();
-                self.parameters = parameters;
-            }
-            Err(error) => {
-                self.status = "Parameter inspection failed safely.".into();
-                self.report = error.to_string();
-            }
-        }
+        let repository = self.repository.clone();
+        let plugin_path = selection.path.clone();
+        let hash = selection.sha256.clone();
+        self.status = "Loading Effect Controls...".into();
+        self.spawn(move || {
+            let (parameters, diagnostics) =
+                aexcompat_broker::image_render::inspect_experimental_with_diagnostics(
+                    &repository,
+                    &plugin_path,
+                    &hash,
+                )
+                .map_err(|error| error.to_string())?;
+            let report = serde_json::json!({
+                "stage": "parameter_inspection",
+                "parameters": parameters,
+                "worker_diagnostics": diagnostics,
+            });
+            Ok((
+                serde_json::to_string_pretty(&report).map_err(|error| error.to_string())?,
+                None,
+            ))
+        });
+        self.task_kind = TaskKind::InspectParameters;
     }
 
     fn inspect_external_dependencies(&mut self, missing_only: bool) {
@@ -2202,6 +2206,180 @@ impl HarnessApp {
         });
     }
 
+    fn show_effect_controls(&mut self, ui: &mut egui::Ui) {
+        ui.heading(RichText::new("Effect Controls").size(20.0));
+        if let Some(selection) = &self.selection {
+            ui.label(
+                selection
+                    .path
+                    .file_stem()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("Selected AEX"),
+            );
+        } else {
+            ui.label("Select an AEX to load its parameters.");
+        }
+        ui.separator();
+        if self.busy && self.task_kind == TaskKind::InspectParameters {
+            ui.horizontal(|ui| {
+                ui.spinner();
+                ui.label("Loading parameters...");
+            });
+        } else if self.selection.is_some() && self.parameters.is_empty() {
+            ui.label("This effect exposed no editable parameters.");
+            if ui.small_button("Reload controls").clicked() {
+                self.inspect_parameters_async();
+            }
+        }
+
+        let mut clicked_button = None;
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                for parameter in &mut self.parameters {
+                    if !parameter.visible {
+                        continue;
+                    }
+                    if parameter.kind == "group_start" {
+                        ui.add_space(8.0);
+                        ui.label(RichText::new(&parameter.name).strong());
+                        continue;
+                    }
+                    if parameter.kind == "group_end" {
+                        ui.separator();
+                        continue;
+                    }
+                    if parameter.kind == "button" {
+                        if ui
+                            .add_enabled(
+                                parameter.enabled && !self.busy,
+                                egui::Button::new(&parameter.name),
+                            )
+                            .clicked()
+                        {
+                            clicked_button = Some(parameter.slot);
+                        }
+                        continue;
+                    }
+                    if matches!(parameter.kind.as_str(), "custom" | "no_data") {
+                        ui.label(&parameter.name);
+                        ui.small(format!("{} (read-only)", parameter.kind));
+                        continue;
+                    }
+
+                    let previous_value = parameter.value;
+                    let previous_color = parameter.color;
+                    let previous_components = parameter.components;
+                    let previous_layer = parameter.layer_path.clone();
+                    let previous_summary = parameter.debug_summary.clone();
+                    ui.add_enabled_ui(parameter.enabled && !self.busy, |ui| {
+                        ui.label(RichText::new(&parameter.name).small());
+                        if parameter.kind == "layer" {
+                            ui.horizontal(|ui| {
+                                if ui.small_button("Choose image").clicked() {
+                                    parameter.layer_path = rfd::FileDialog::new()
+                                        .add_filter(
+                                            "Image",
+                                            &["png", "jpg", "jpeg", "bmp", "tif", "tiff", "webp"],
+                                        )
+                                        .pick_file();
+                                }
+                                ui.label(
+                                    parameter
+                                        .layer_path
+                                        .as_ref()
+                                        .and_then(|path| path.file_name())
+                                        .and_then(|name| name.to_str())
+                                        .unwrap_or("Not connected"),
+                                );
+                            });
+                        } else if parameter.kind == "arbitrary_data" {
+                            ui.add(
+                                egui::TextEdit::singleline(
+                                    parameter.debug_summary.get_or_insert_with(String::new),
+                                )
+                                .desired_width(f32::INFINITY),
+                            );
+                        } else if parameter.kind == "path" {
+                            ui.add(
+                                egui::DragValue::new(&mut parameter.value)
+                                    .range(0.0..=parameter.maximum),
+                            );
+                        } else if matches!(parameter.kind.as_str(), "angle" | "point" | "point3d") {
+                            ui.horizontal(|ui| {
+                                for (index, label) in ["X", "Y", "Z"]
+                                    .iter()
+                                    .enumerate()
+                                    .take(parameter.component_count)
+                                {
+                                    ui.label(*label);
+                                    ui.add(
+                                        egui::DragValue::new(&mut parameter.components[index])
+                                            .speed(0.1),
+                                    );
+                                }
+                            });
+                        } else if parameter.kind == "color" {
+                            let mut color = Color32::from_rgba_unmultiplied(
+                                parameter.color[1],
+                                parameter.color[2],
+                                parameter.color[3],
+                                parameter.color[0],
+                            );
+                            if ui.color_edit_button_srgba(&mut color).changed() {
+                                parameter.color = [color.a(), color.r(), color.g(), color.b()];
+                            }
+                        } else if !parameter.choices.is_empty() {
+                            let mut selected = parameter.value as usize;
+                            egui::ComboBox::from_id_salt(("effect-control", parameter.slot))
+                                .selected_text(
+                                    parameter
+                                        .choices
+                                        .get(selected.saturating_sub(1))
+                                        .map(String::as_str)
+                                        .unwrap_or("Unknown"),
+                                )
+                                .show_ui(ui, |ui| {
+                                    for (index, choice) in parameter.choices.iter().enumerate() {
+                                        ui.selectable_value(&mut selected, index + 1, choice);
+                                    }
+                                });
+                            parameter.value = selected as f64;
+                        } else if parameter.kind == "integer"
+                            && parameter.minimum == 0.0
+                            && parameter.maximum == 1.0
+                        {
+                            let mut checked = parameter.value != 0.0;
+                            if ui.checkbox(&mut checked, "Enabled").changed() {
+                                parameter.value = f64::from(checked);
+                            }
+                        } else {
+                            ui.add(
+                                egui::Slider::new(
+                                    &mut parameter.value,
+                                    parameter.minimum..=parameter.maximum,
+                                )
+                                .show_value(true),
+                            );
+                        }
+                    });
+                    if parameter.supervised
+                        && (parameter.value != previous_value
+                            || parameter.color != previous_color
+                            || parameter.components != previous_components
+                            || parameter.layer_path != previous_layer
+                            || parameter.debug_summary != previous_summary)
+                    {
+                        clicked_button = Some(parameter.slot);
+                    }
+                    ui.add_space(4.0);
+                }
+            });
+        if let Some(slot) = clicked_button {
+            self.trigger_button(slot);
+        }
+    }
+
     fn poll(&mut self, ctx: &egui::Context) {
         let result = self
             .receiver
@@ -2213,6 +2391,7 @@ impl HarnessApp {
             }
             return;
         };
+        let task_kind = self.task_kind;
         self.busy = false;
         self.failure_diagnostics = (!result.success)
             .then(|| failure_diagnostics(&result.body))
@@ -2231,7 +2410,8 @@ impl HarnessApp {
             "Failed safely"
         }
         .into();
-        if self.selection.is_none() && result.success {
+        let mut inspect_selected_aex = false;
+        if task_kind == TaskKind::IdentifyAex && result.success {
             let mut lines = result.body.lines();
             if let (Some(path), Some(size), Some(hash)) = (lines.next(), lines.next(), lines.next())
             {
@@ -2249,6 +2429,21 @@ impl HarnessApp {
                 self.approved_dependencies.clear();
                 self.approval_check = false;
                 self.selection_stale = false;
+                inspect_selected_aex = true;
+            }
+        }
+        if task_kind == TaskKind::InspectParameters && result.success {
+            if let Ok(report) = serde_json::from_str::<serde_json::Value>(&result.body) {
+                if let Ok(parameters) = serde_json::from_value(report["parameters"].clone()) {
+                    self.parameters = parameters;
+                    self.audio_effect_only = report["worker_diagnostics"]["audio_effect_only"]
+                        .as_bool()
+                        .unwrap_or(false);
+                    self.status = format!(
+                        "Effect Controls ready: {} editable parameter(s).",
+                        self.parameters.len()
+                    );
+                }
             }
         }
         if let Some(output) = result.output {
@@ -2267,6 +2462,10 @@ impl HarnessApp {
         }
         self.report = result.body;
         self.receiver = None;
+        self.task_kind = TaskKind::Generic;
+        if inspect_selected_aex {
+            self.inspect_parameters_async();
+        }
     }
 }
 
@@ -2280,6 +2479,12 @@ impl eframe::App for HarnessApp {
             ui.label("Isolated image and audio host for Effect AEX development");
             ui.add_space(8.0);
         });
+        egui::SidePanel::left("effect_controls")
+            .default_width(320.0)
+            .min_width(240.0)
+            .max_width(520.0)
+            .resizable(true)
+            .show(ctx, |ui| self.show_effect_controls(ui));
         egui::CentralPanel::default().show(ctx, |ui| {
             egui::ScrollArea::vertical()
                 .auto_shrink([false, false])
@@ -2360,7 +2565,7 @@ impl eframe::App for HarnessApp {
                 });
                 if self.session_approved && !self.selection_stale {
                     ui.add_space(10.0);
-                    if ui.add_enabled(!self.busy, egui::Button::new("2. Inspect parameters")).clicked() { self.inspect_parameters(); }
+                    if ui.add_enabled(!self.busy, egui::Button::new("Reload Effect Controls")).clicked() { self.inspect_parameters_async(); }
                     ui.collapsing("Developer probes and diagnostics", |ui| {
                     ui.horizontal(|ui| {
                         if ui.add_enabled(!self.busy, egui::Button::new("Inspect all dependencies")).clicked() { self.inspect_external_dependencies(false); }
@@ -2473,6 +2678,8 @@ impl eframe::App for HarnessApp {
                         if ui.add_enabled(!self.busy, egui::Button::new("Run AEGP comp-idle roundtrip")).clicked() { self.dispatch_aegp_comp_idle_roundtrip(); }
                     });
                     });
+                    // Effect parameters live in the persistent left-side Effect Controls panel.
+                    if false {
                     let mut clicked_button = None;
                     for parameter in &mut self.parameters {
                         if !parameter.visible {
@@ -2589,6 +2796,7 @@ impl eframe::App for HarnessApp {
                     }
                     if let Some(slot) = clicked_button {
                         self.trigger_button(slot);
+                    }
                     }
                     ui.horizontal(|ui| {
                         ui.label("Render path:");
