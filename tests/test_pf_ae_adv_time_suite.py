@@ -9,19 +9,15 @@ def source() -> str:
     return SOURCE.read_text(encoding="utf-8")
 
 
-def test_adv_time_v4_has_exact_public_name_version_and_five_slots():
+def test_adv_time_versions_have_exact_public_name_and_independent_typed_tables():
     text = source()
-    assert 'std::strcmp(name, "PF AE Adv Time Suite") == 0 && version == 4' in text
-    assert "std::array<void*, 5> g_adv_time_suite4" in text
-    callbacks = [
-        "adv_time_format_active",
-        "adv_time_format",
-        "adv_time_format_plus",
-        "adv_time_get_display_pref",
-        "adv_time_count_frames",
-    ]
-    positions = [text.index(f"reinterpret_cast<void*>(&{name})") for name in callbacks]
-    assert positions == sorted(positions)
+    for version in range(1, 5):
+        assert f'std::strcmp(name, "PF AE Adv Time Suite") == 0 && version == {version}' in text
+        assert f"AdvTimeSuite{version} g_adv_time_suite{version}" in text
+    assert "static_assert(sizeof(AdvTimeSuite1) == 4 * sizeof(void*))" in text
+    assert "static_assert(sizeof(AdvTimeSuite2) == 4 * sizeof(void*))" in text
+    assert "static_assert(sizeof(AdvTimeSuite3) == 4 * sizeof(void*))" in text
+    assert "static_assert(sizeof(AdvTimeSuite4) == 5 * sizeof(void*))" in text
 
 
 def test_headless_display_policy_is_explicit_and_does_not_claim_ae_preferences():

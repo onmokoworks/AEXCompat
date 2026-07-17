@@ -25,8 +25,12 @@ def test_sdk_declares_independent_v1_four_slot_abi():
 #include <type_traits>
 #include "AE_Effect.h"
 #include "AE_AdvEffectSuites.h"
-static_assert(sizeof(PF_TimeDisplayPref) == 4);
+static_assert(sizeof(PF_TimeDisplayPref) == 4 && alignof(PF_TimeDisplayPref) == 1);
+static_assert(sizeof(PF_TimeDisplayPrefVersion2) == 7 && alignof(PF_TimeDisplayPrefVersion2) == 1);
+static_assert(sizeof(PF_TimeDisplayPrefVersion3) == 16 && alignof(PF_TimeDisplayPrefVersion3) == 4);
 static_assert(sizeof(PF_AdvTimeSuite1) == 4 * sizeof(void*));
+static_assert(sizeof(PF_AdvTimeSuite2) == 4 * sizeof(void*));
+static_assert(sizeof(PF_AdvTimeSuite3) == 4 * sizeof(void*));
 static_assert(sizeof(PF_AdvTimeSuite4) == 5 * sizeof(void*));
 static_assert(std::is_same_v<decltype(PF_AdvTimeSuite1::PF_FormatTimeActiveItem), decltype(PF_AdvTimeSuite4::PF_FormatTimeActiveItem)>);
 static_assert(std::is_same_v<decltype(PF_AdvTimeSuite1::PF_FormatTime), decltype(PF_AdvTimeSuite4::PF_FormatTime)>);
@@ -48,7 +52,8 @@ def test_release_worker_native_v1_v4_guard_and_lease_selftest():
     result = subprocess.run([str(WORKER), "--self-test-pf-adv-time-suite1"], cwd=ROOT,
                             check=True, capture_output=True, text=True, timeout=60)
     assert json.loads(result.stdout) == {
-        "pf_adv_time_suite1": "passed", "v1_slots": 4, "v4_slots": 5,
+        "pf_adv_time_suite_versions": "passed", "v1_slots": 4, "v2_slots": 4,
+        "v3_slots": 4, "v4_slots": 5,
         "independent_identity": True, "guard_intact": True,
         "reverse_release": True, "suite_leases_balanced": True,
     }

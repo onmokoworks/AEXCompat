@@ -393,6 +393,82 @@ class InputPixelBuffer {
   unsigned char* data_{};
 };
 
+class OutputPixelBuffer {
+ public:
+  static constexpr std::size_t kSentinelBytes = 64;
+  OutputPixelBuffer() = default;
+  explicit OutputPixelBuffer(std::size_t size) { reset(size); }
+  ~OutputPixelBuffer() { release(); }
+  OutputPixelBuffer(const OutputPixelBuffer&) = delete;
+  OutputPixelBuffer& operator=(const OutputPixelBuffer&) = delete;
+
+  bool reset(std::size_t size) {
+    SYSTEM_INFO info{};
+    GetSystemInfo(&info);
+    const std::size_t page_size = info.dwPageSize;
+    if (!size || !page_size || size > SIZE_MAX - 2 * kSentinelBytes) return false;
+    const std::size_t payload = size + 2 * kSentinelBytes;
+    if (payload > SIZE_MAX - (page_size - 1)) return false;
+    const std::size_t committed_size = (payload + page_size - 1) / page_size * page_size;
+    if (committed_size < payload || committed_size > SIZE_MAX - 2 * page_size) return false;
+    const std::size_t allocation_size = committed_size + 2 * page_size;
+    auto* allocation = static_cast<unsigned char*>(VirtualAlloc(
+        nullptr, allocation_size, MEM_RESERVE, PAGE_NOACCESS));
+    if (!allocation || !VirtualAlloc(allocation + page_size, committed_size,
+                                     MEM_COMMIT, PAGE_READWRITE)) {
+      if (allocation) VirtualFree(allocation, 0, MEM_RELEASE);
+      return false;
+    }
+    release();
+    allocation_ = allocation;
+    page_size_ = page_size;
+    committed_size_ = committed_size;
+    allocation_size_ = allocation_size;
+    size_ = size;
+    data_ = allocation_ + page_size_ + kSentinelBytes;
+    std::memset(allocation_ + page_size_, 0xA5, committed_size_);
+    std::memset(data_, 0xCC, size_);
+    return true;
+  }
+  explicit operator bool() const { return data_ != nullptr; }
+  unsigned char* data() { return data_; }
+  const unsigned char* data() const { return data_; }
+  std::size_t size() const { return size_; }
+  bool sentinels_intact() const {
+    if (!data_) return false;
+    const auto intact = [](const unsigned char* begin, const unsigned char* end) {
+      return std::all_of(begin, end, [](unsigned char byte) { return byte == 0xA5; });
+    };
+    const unsigned char* committed_begin = allocation_ + page_size_;
+    return intact(committed_begin, data_) &&
+        intact(data_ + size_, committed_begin + committed_size_);
+  }
+  bool guard_pages_intact() const {
+    if (!allocation_) return false;
+    MEMORY_BASIC_INFORMATION before{}, after{};
+    const auto inaccessible_reservation = [](const MEMORY_BASIC_INFORMATION& page) {
+      return page.State == MEM_RESERVE && page.AllocationProtect == PAGE_NOACCESS;
+    };
+    return VirtualQuery(allocation_, &before, sizeof(before)) == sizeof(before) &&
+        VirtualQuery(allocation_ + page_size_ + committed_size_, &after, sizeof(after)) ==
+            sizeof(after) &&
+        inaccessible_reservation(before) && inaccessible_reservation(after);
+  }
+
+ private:
+  void release() {
+    if (allocation_) VirtualFree(allocation_, 0, MEM_RELEASE);
+    allocation_ = data_ = nullptr;
+    size_ = page_size_ = committed_size_ = allocation_size_ = 0;
+  }
+  unsigned char* allocation_{};
+  unsigned char* data_{};
+  std::size_t size_{};
+  std::size_t page_size_{};
+  std::size_t committed_size_{};
+  std::size_t allocation_size_{};
+};
+
 uint32_t g_last_seh_exception_code{};
 uint64_t g_last_seh_exception_address{};
 std::string g_last_seh_exception_module;
@@ -482,6 +558,19 @@ int32_t guarded_effect_call(EffectEntry entry, int32_t command, void* input,
   uint32_t exception_code{};
   return invoke_entry_seh(entry, command, input, output, params, world, extra,
                           &exception_code);
+}
+
+int32_t invoke_smart_pre_render_cleanup_seh(void(__cdecl* cleanup)(void*), void* data) {
+  if (!cleanup) return 0;
+  __try {
+    cleanup(data);
+    return 0;
+  } __except(capture_seh_exception(GetExceptionInformation())) {
+    g_last_seh_selector = "SMART_PRE_RENDER_CLEANUP";
+    g_last_seh_error = 512;
+    capture_module_audit_phase();
+    return 512;
+  }
 }
 
 // Keep every direct EffectMain selector call on the same audited boundary.
@@ -4208,6 +4297,32 @@ struct AdvTimeDisplayPrefVersion3 {
   uint8_t use_feet_frames;
 };
 static_assert(sizeof(AdvTimeDisplayPrefVersion3) == 16);
+static_assert(alignof(AdvTimeDisplayPrefVersion3) == alignof(int32_t));
+static_assert(offsetof(AdvTimeDisplayPrefVersion3, display_mode) == 0);
+static_assert(offsetof(AdvTimeDisplayPrefVersion3, framemax) == 4);
+static_assert(offsetof(AdvTimeDisplayPrefVersion3, frames_per_foot) == 8);
+static_assert(offsetof(AdvTimeDisplayPrefVersion3, frames_start) == 12);
+static_assert(offsetof(AdvTimeDisplayPrefVersion3, nondrop30) == 13);
+static_assert(offsetof(AdvTimeDisplayPrefVersion3, honor_source_timecode) == 14);
+static_assert(offsetof(AdvTimeDisplayPrefVersion3, use_feet_frames) == 15);
+struct AdvTimeDisplayPrefVersion2 {
+  char display_mode;
+  char framemax;
+  char frames_per_foot;
+  char frames_start;
+  uint8_t nondrop30;
+  uint8_t honor_source_timecode;
+  uint8_t use_feet_frames;
+};
+static_assert(sizeof(AdvTimeDisplayPrefVersion2) == 7);
+static_assert(alignof(AdvTimeDisplayPrefVersion2) == 1);
+static_assert(offsetof(AdvTimeDisplayPrefVersion2, display_mode) == 0);
+static_assert(offsetof(AdvTimeDisplayPrefVersion2, framemax) == 1);
+static_assert(offsetof(AdvTimeDisplayPrefVersion2, frames_per_foot) == 2);
+static_assert(offsetof(AdvTimeDisplayPrefVersion2, frames_start) == 3);
+static_assert(offsetof(AdvTimeDisplayPrefVersion2, nondrop30) == 4);
+static_assert(offsetof(AdvTimeDisplayPrefVersion2, honor_source_timecode) == 5);
+static_assert(offsetof(AdvTimeDisplayPrefVersion2, use_feet_frames) == 6);
 struct AdvTimeDisplayPrefVersion1 {
   char time_display_format;
   char framemax;
@@ -4215,6 +4330,11 @@ struct AdvTimeDisplayPrefVersion1 {
   char frames_per_foot;
 };
 static_assert(sizeof(AdvTimeDisplayPrefVersion1) == 4);
+static_assert(alignof(AdvTimeDisplayPrefVersion1) == 1);
+static_assert(offsetof(AdvTimeDisplayPrefVersion1, time_display_format) == 0);
+static_assert(offsetof(AdvTimeDisplayPrefVersion1, framemax) == 1);
+static_assert(offsetof(AdvTimeDisplayPrefVersion1, nondrop30) == 2);
+static_assert(offsetof(AdvTimeDisplayPrefVersion1, frames_per_foot) == 3);
 
 constexpr int64_t kHeadlessFramesPerSecond = 30;
 constexpr std::size_t kPfMaxTimeBufferSize = 32;
@@ -4278,6 +4398,24 @@ int32_t __cdecl adv_time_get_display_pref_v1(AdvTimeDisplayPrefVersion1* pref,
   *starting_frame = 0;
   return 0;
 }
+bool checked_adv_time_char(int32_t value, char* narrowed) {
+  if (!narrowed || value < CHAR_MIN || value > CHAR_MAX) return false;
+  *narrowed = static_cast<char>(value);
+  return true;
+}
+int32_t __cdecl adv_time_get_display_pref_v2(AdvTimeDisplayPrefVersion2* pref,
+                                              int32_t* starting_frame) {
+  if (!pref || !starting_frame) return 4;
+  AdvTimeDisplayPrefVersion2 result{};
+  if (!checked_adv_time_char(1, &result.display_mode) ||
+      !checked_adv_time_char(static_cast<int32_t>(kHeadlessFramesPerSecond), &result.framemax) ||
+      !checked_adv_time_char(0, &result.frames_per_foot) ||
+      !checked_adv_time_char(0, &result.frames_start)) return 4;
+  result.nondrop30 = 1;
+  *pref = result;
+  *starting_frame = 0;
+  return 0;
+}
 int32_t __cdecl adv_time_count_frames(const HostTime* start, const HostTime* step,
                                       uint8_t include_partial, int32_t* frame_count) {
   if (frame_count) *frame_count = 0;
@@ -4304,6 +4442,18 @@ struct AdvTimeSuite1 {
   decltype(&adv_time_format_plus) format_plus;
   decltype(&adv_time_get_display_pref_v1) get_display_pref;
 };
+struct AdvTimeSuite2 {
+  decltype(&adv_time_format_active) format_active;
+  decltype(&adv_time_format) format;
+  decltype(&adv_time_format_plus) format_plus;
+  decltype(&adv_time_get_display_pref_v2) get_display_pref;
+};
+struct AdvTimeSuite3 {
+  decltype(&adv_time_format_active) format_active;
+  decltype(&adv_time_format) format;
+  decltype(&adv_time_format_plus) format_plus;
+  decltype(&adv_time_get_display_pref) get_display_pref;
+};
 struct AdvTimeSuite4 {
   decltype(&adv_time_format_active) format_active;
   decltype(&adv_time_format) format;
@@ -4312,12 +4462,26 @@ struct AdvTimeSuite4 {
   decltype(&adv_time_count_frames) count_frames;
 };
 static_assert(sizeof(AdvTimeSuite1) == 4 * sizeof(void*));
+static_assert(sizeof(AdvTimeSuite2) == 4 * sizeof(void*));
+static_assert(sizeof(AdvTimeSuite3) == 4 * sizeof(void*));
 static_assert(sizeof(AdvTimeSuite4) == 5 * sizeof(void*));
+static_assert(alignof(AdvTimeSuite1) == alignof(void*));
+static_assert(alignof(AdvTimeSuite2) == alignof(void*));
+static_assert(alignof(AdvTimeSuite3) == alignof(void*));
+static_assert(alignof(AdvTimeSuite4) == alignof(void*));
+static_assert(offsetof(AdvTimeSuite1, format_active) == 0 && offsetof(AdvTimeSuite1, format) == sizeof(void*) && offsetof(AdvTimeSuite1, format_plus) == 2 * sizeof(void*) && offsetof(AdvTimeSuite1, get_display_pref) == 3 * sizeof(void*));
+static_assert(offsetof(AdvTimeSuite2, format_active) == 0 && offsetof(AdvTimeSuite2, format) == sizeof(void*) && offsetof(AdvTimeSuite2, format_plus) == 2 * sizeof(void*) && offsetof(AdvTimeSuite2, get_display_pref) == 3 * sizeof(void*));
+static_assert(offsetof(AdvTimeSuite3, format_active) == 0 && offsetof(AdvTimeSuite3, format) == sizeof(void*) && offsetof(AdvTimeSuite3, format_plus) == 2 * sizeof(void*) && offsetof(AdvTimeSuite3, get_display_pref) == 3 * sizeof(void*));
+static_assert(offsetof(AdvTimeSuite4, format_active) == 0 && offsetof(AdvTimeSuite4, format) == sizeof(void*) && offsetof(AdvTimeSuite4, format_plus) == 2 * sizeof(void*) && offsetof(AdvTimeSuite4, get_display_pref) == 3 * sizeof(void*) && offsetof(AdvTimeSuite4, count_frames) == 4 * sizeof(void*));
 static_assert(std::is_same_v<decltype(AdvTimeSuite1::format_active), decltype(AdvTimeSuite4::format_active)>);
 static_assert(std::is_same_v<decltype(AdvTimeSuite1::format), decltype(AdvTimeSuite4::format)>);
 static_assert(std::is_same_v<decltype(AdvTimeSuite1::format_plus), decltype(AdvTimeSuite4::format_plus)>);
 AdvTimeSuite1 g_adv_time_suite1{&adv_time_format_active, &adv_time_format,
     &adv_time_format_plus, &adv_time_get_display_pref_v1};
+AdvTimeSuite2 g_adv_time_suite2{&adv_time_format_active, &adv_time_format,
+    &adv_time_format_plus, &adv_time_get_display_pref_v2};
+AdvTimeSuite3 g_adv_time_suite3{&adv_time_format_active, &adv_time_format,
+    &adv_time_format_plus, &adv_time_get_display_pref};
 AdvTimeSuite4 g_adv_time_suite4{&adv_time_format_active, &adv_time_format,
     &adv_time_format_plus, &adv_time_get_display_pref, &adv_time_count_frames};
 struct PfAdvItemSuite1;
@@ -11657,6 +11821,7 @@ int32_t reject_suite_acquire(const char* name, int32_t version) {
 int32_t __cdecl acquire_suite(const char* name, int32_t version, const void** suite) {
   if (!suite) return 4;
   *suite = nullptr;
+  if (!name) return 4;
   if (name && version == 2 && std::strcmp(name, "AE Plugin Helper Suite2") == 0) {
     *suite = g_pf_helper_suite2.data();
     record_suite_acquire(name, version);
@@ -12054,6 +12219,16 @@ int32_t __cdecl acquire_suite(const char* name, int32_t version, const void** su
     record_suite_acquire(name, version);
     return 0;
   }
+  if (name && std::strcmp(name, "PF AE Adv Time Suite") == 0 && version == 2) {
+    *suite = &g_adv_time_suite2;
+    record_suite_acquire(name, version);
+    return 0;
+  }
+  if (name && std::strcmp(name, "PF AE Adv Time Suite") == 0 && version == 3) {
+    *suite = &g_adv_time_suite3;
+    record_suite_acquire(name, version);
+    return 0;
+  }
   if (name && std::strcmp(name, "PF AE Adv Time Suite") == 0 && version == 4) {
     *suite = &g_adv_time_suite4;
     record_suite_acquire(name, version);
@@ -12222,6 +12397,11 @@ int32_t __cdecl acquire_suite(const char* name, int32_t version, const void** su
     record_suite_acquire(name, version);
     return 0;
   }
+  if (name && std::strcmp(name, "AEGP Utility Suite") == 0 && version == 13) {
+    *suite = &g_utility_suite;
+    record_suite_acquire(name, version);
+    return 0;
+  }
   if (name && std::strcmp(name, "AEGP Effect Suite") == 0 &&
       (version == 2 || version == 3)) {
     g_aegp_effect_suite3.fill(reinterpret_cast<void*>(&aegp_unsupported_suite_call));
@@ -12369,9 +12549,7 @@ int32_t __cdecl acquire_suite(const char* name, int32_t version, const void** su
     return 0;
   }
   if (!g_mask_model_enabled || !name) return reject_suite_acquire(name, version);
-  if (std::strcmp(name, "AEGP Utility Suite") == 0 && version == 13)
-    *suite = &g_utility_suite;
-  else if (std::strcmp(name, "AEGP PF Interface Suite") == 0 && version == 1)
+  if (std::strcmp(name, "AEGP PF Interface Suite") == 0 && version == 1)
     *suite = &g_pf_interface_suite;
   else if (std::strcmp(name, "AEGP Layer Mask Suite") == 0 && version == 6)
     *suite = &g_mask_suite5;
@@ -17845,7 +18023,6 @@ int32_t render_once(EffectEntry entry, std::array<std::byte, kInSize>& input,
   else if (case_id == "odd_dimensions" || case_id == "padded_stride") { amount = 4; seed = 3; }
   else if (case_id == "inverted_map") { }
   else if (case_id != "default" && case_id != "connected_map" && case_id != "request" && !partial_extent_hint) return -2;
-  constexpr std::size_t guard = 64;
   std::vector<unsigned char> logical_source(width * height * pixel_bytes);
   InputPixelBuffer source(static_cast<std::size_t>(rowbytes) * height);
   if (!source) return -3;
@@ -17869,9 +18046,9 @@ int32_t render_once(EffectEntry entry, std::array<std::byte, kInSize>& input,
   const bool input_write_advertised =
       (read<uint32_t>(command_output, kOutFlags) & kOutFlagIWriteInputBuffer) != 0;
   if (!source.set_plugin_writable(input_write_advertised)) return -3;
-  std::vector<unsigned char> guarded(rowbytes * height + guard * 2, 0xA5);
-  unsigned char* destination = guarded.data() + guard;
-  std::memset(destination, 0xCC, rowbytes * height);
+  OutputPixelBuffer guarded(static_cast<std::size_t>(rowbytes) * height);
+  if (!guarded) return -3;
+  unsigned char* destination = guarded.data();
   guards_intact = true;
 
   std::array<std::byte, 120> input_world{}, output_world{};
@@ -18073,9 +18250,8 @@ int32_t render_once(EffectEntry entry, std::array<std::byte, kInSize>& input,
           width = requested_width;
           height = requested_height;
           rowbytes = width * pixel_bytes;
-          guarded.assign(static_cast<std::size_t>(rowbytes) * height + guard * 2, 0xA5);
-          destination = guarded.data() + guard;
-          std::memset(destination, 0xCC, static_cast<std::size_t>(rowbytes) * height);
+          if (!guarded.reset(static_cast<std::size_t>(rowbytes) * height)) return -3;
+          destination = guarded.data();
           setup_world(output_world, destination);
           if (!dispatch_worlds.register_world(output_world.data(), dispatch_pixel_format))
             error = 4;
@@ -18141,8 +18317,7 @@ int32_t render_once(EffectEntry entry, std::array<std::byte, kInSize>& input,
         if (destination[y * rowbytes + x] != 0xCC) return false;
     return true;
   }();
-  guards_intact = padding_intact && std::all_of(guarded.begin(), guarded.begin() + guard, [](auto b) { return b == 0xA5; }) &&
-      std::all_of(guarded.end() - guard, guarded.end(), [](auto b) { return b == 0xA5; });
+  guards_intact = padding_intact && guarded.sentinels_intact();
   g_smart_pixel_format = pixel_bytes == 16 ? "argb32f" : (pixel_bytes == 8 ? "argb16" : "argb8");
   if (!close_render_ui_context(entry, input, command_output, definitions)) return -5;
   return error;
@@ -18292,7 +18467,6 @@ SmartResult smart_render_once(EffectEntry entry, std::array<std::byte, kInSize>&
   else if (case_id == "mix_zero") { amount = 500; seed = 10000; mix = 0.0; }
   else if (case_id == "odd_dimensions" || case_id == "padded_stride") { amount = 4; seed = 3; }
   else if (case_id != "default" && case_id != "request" && !deep16 && !float32 && !missing_input && !crash_null_output && !temporal_context && !partial_output_request && !connected_map) return result;
-  constexpr std::size_t guard = 64;
   InputPixelBuffer source(static_cast<std::size_t>(rowbytes) * height);
   if (!source) return result;
   std::memset(source.data(), 0x5A, static_cast<std::size_t>(rowbytes) * height);
@@ -18321,9 +18495,9 @@ SmartResult smart_render_once(EffectEntry entry, std::array<std::byte, kInSize>&
   const bool input_write_advertised =
       (read<uint32_t>(command_output, kOutFlags) & kOutFlagIWriteInputBuffer) != 0;
   if (!source.set_plugin_writable(input_write_advertised)) return result;
-  std::vector<unsigned char> guarded(rowbytes * height + guard * 2, 0xA5);
-  auto* destination = guarded.data() + guard;
-  std::memset(destination, 0xCC, rowbytes * height);
+  OutputPixelBuffer guarded(static_cast<std::size_t>(rowbytes) * height);
+  if (!guarded) return result;
+  auto* destination = guarded.data();
   result.guards_intact = true;
   std::array<std::byte, 120> input_world{}, output_world{};
   auto setup_world = [&](auto& world, void* pixels) {
@@ -18534,11 +18708,7 @@ SmartResult smart_render_once(EffectEntry entry, std::array<std::byte, kInSize>&
       if (!file || !file.write(reinterpret_cast<const char*>(rgba.data()), rgba.size()))
         result.render_error = -4;
     }
-    result.guards_intact =
-        std::all_of(guarded.begin(), guarded.begin() + guard,
-                    [](auto byte) { return byte == 0xA5; }) &&
-        std::all_of(guarded.end() - guard, guarded.end(),
-                    [](auto byte) { return byte == 0xA5; });
+    result.guards_intact = guarded.sentinels_intact();
     if (g_render_ui_context_active &&
         !close_render_ui_context(entry, input, command_output, definitions) &&
         result.render_error == 0)
@@ -18628,9 +18798,11 @@ SmartResult smart_render_once(EffectEntry entry, std::array<std::byte, kInSize>&
     const int32_t output_height = max_result_rect[3] - max_result_rect[1];
     if (output_width > 0 && output_height > 0) {
       const int32_t output_rowbytes = output_width * pixel_bytes;
-      guarded.assign(static_cast<std::size_t>(output_rowbytes) * output_height + guard * 2, 0xA5);
-      destination = guarded.data() + guard;
-      std::memset(destination, 0xCC, static_cast<std::size_t>(output_rowbytes) * output_height);
+      if (!guarded.reset(static_cast<std::size_t>(output_rowbytes) * output_height)) {
+        result.rects_valid = false;
+        result.pre_error = -3;
+      }
+      destination = guarded.data();
       write<void*>(output_world, 24, destination);
       write<int32_t>(output_world, 32, output_rowbytes);
       write<int32_t>(output_world, 36, output_width);
@@ -18722,7 +18894,8 @@ SmartResult smart_render_once(EffectEntry entry, std::array<std::byte, kInSize>&
     result.gpu_setdown_error = -6;
   void* pre_render_data = read<void*>(pre_output, 40);
   if (auto delete_pre_render_data = read<void(__cdecl*)(void*)>(pre_output, 48)) {
-    delete_pre_render_data(pre_render_data);
+    // A supplied callback owns cleanup even if it faults; host fallback would double-free.
+    invoke_smart_pre_render_cleanup_seh(delete_pre_render_data, pre_render_data);
   } else if (pre_render_data) {
     bool host_owned = false;
     {
@@ -18781,8 +18954,7 @@ SmartResult smart_render_once(EffectEntry entry, std::array<std::byte, kInSize>&
     std::ofstream file(*external_output, std::ios::binary | std::ios::out);
     if (!file || !file.write(reinterpret_cast<const char*>(rgba.data()), rgba.size())) result.render_error = -4;
   }
-  result.guards_intact = std::all_of(guarded.begin(), guarded.begin() + guard, [](auto b) { return b == 0xA5; }) &&
-      std::all_of(guarded.end() - guard, guarded.end(), [](auto b) { return b == 0xA5; });
+  result.guards_intact = guarded.sentinels_intact();
   return result;
 }
 #endif
@@ -19669,32 +19841,113 @@ bool verify_pf_adv_app_suite_versions() {
       g_suite_releases == releases_before + 2 && suite_leases_balanced();
 }
 
-bool verify_pf_adv_time_suite1() {
-  struct GuardedPref { uint32_t before{0x13579bdf}; AdvTimeDisplayPrefVersion1 pref{}; uint32_t after{0x2468ace0}; } guarded;
+bool verify_pf_adv_time_suite_versions() {
+  struct GuardedPref1 { uint32_t before{0x13579bdf}; AdvTimeDisplayPrefVersion1 pref{}; uint32_t after{0x2468ace0}; } guarded1;
+  struct GuardedPref2 { uint32_t before{0x11223344}; AdvTimeDisplayPrefVersion2 pref{}; uint32_t after{0x55667788}; } guarded2;
+  struct GuardedPref3 { uint32_t before{0x10203040}; AdvTimeDisplayPrefVersion3 pref{}; uint32_t after{0x50607080}; } guarded3;
   struct GuardedBuffer { uint32_t before{0x89abcdef}; char text[kPfMaxTimeBufferSize]{}; uint32_t after{0xfedcba98}; } formatted;
   const void* suite1 = nullptr;
+  const void* suite2 = nullptr;
+  const void* suite3 = nullptr;
   const void* suite4 = nullptr;
   const uint32_t acquires_before = g_suite_acquires;
   const uint32_t releases_before = g_suite_releases;
   bool ok = acquire_suite("PF AE Adv Time Suite", 1, &suite1) == 0 &&
+      acquire_suite("PF AE Adv Time Suite", 2, &suite2) == 0 &&
+      acquire_suite("PF AE Adv Time Suite", 3, &suite3) == 0 &&
       acquire_suite("PF AE Adv Time Suite", 4, &suite4) == 0 &&
-      suite1 == &g_adv_time_suite1 && suite4 == &g_adv_time_suite4 && suite1 != suite4;
-  int32_t starting_frame = -1;
-  if (suite1) {
+      suite1 == &g_adv_time_suite1 && suite2 == &g_adv_time_suite2 &&
+      suite3 == &g_adv_time_suite3 && suite4 == &g_adv_time_suite4 &&
+      suite1 != suite2 && suite1 != suite3 && suite1 != suite4 &&
+      suite2 != suite3 && suite2 != suite4 && suite3 != suite4;
+  int32_t starting_frame1 = -1, starting_frame2 = -1, starting_frame3 = -1;
+  if (suite1 && suite2 && suite3) {
     const auto* v1 = static_cast<const AdvTimeSuite1*>(suite1);
+    const auto* v2 = static_cast<const AdvTimeSuite2*>(suite2);
+    const auto* v3 = static_cast<const AdvTimeSuite3*>(suite3);
     ok = ok && v1->format_active == g_adv_time_suite4.format_active &&
         v1->format == g_adv_time_suite4.format && v1->format_plus == g_adv_time_suite4.format_plus &&
         v1->format_active(1, 1, 0, formatted.text) == 0 && std::strcmp(formatted.text, "30") == 0 &&
-        v1->get_display_pref(&guarded.pref, &starting_frame) == 0;
+        v1->get_display_pref(&guarded1.pref, &starting_frame1) == 0 &&
+        v2->get_display_pref(&guarded2.pref, &starting_frame2) == 0 &&
+        v3->get_display_pref(&guarded3.pref, &starting_frame3) == 0 &&
+        v3->get_display_pref == g_adv_time_suite4.get_display_pref;
   }
   ok = ok && formatted.before == 0x89abcdef && formatted.after == 0xfedcba98 &&
-      guarded.before == 0x13579bdf && guarded.after == 0x2468ace0 &&
-      guarded.pref.time_display_format == 1 && guarded.pref.framemax == 30 &&
-      guarded.pref.nondrop30 == 1 && guarded.pref.frames_per_foot == 0 && starting_frame == 0;
+      guarded1.before == 0x13579bdf && guarded1.after == 0x2468ace0 &&
+      guarded2.before == 0x11223344 && guarded2.after == 0x55667788 &&
+      guarded3.before == 0x10203040 && guarded3.after == 0x50607080 &&
+      guarded1.pref.time_display_format == 1 && guarded1.pref.framemax == 30 &&
+      guarded1.pref.nondrop30 == 1 && guarded1.pref.frames_per_foot == 0 &&
+      guarded2.pref.display_mode == 1 && guarded2.pref.framemax == 30 &&
+      guarded2.pref.frames_per_foot == 0 && guarded2.pref.frames_start == 0 &&
+      guarded2.pref.nondrop30 == 1 && guarded3.pref.display_mode == 1 &&
+      guarded3.pref.framemax == 30 && guarded3.pref.nondrop30 == 1 &&
+      starting_frame1 == 0 && starting_frame2 == 0 && starting_frame3 == 0;
+  char narrowed = 42;
+  ok = ok && !checked_adv_time_char(CHAR_MAX + 1, &narrowed) && narrowed == 42 &&
+      !checked_adv_time_char(CHAR_MIN - 1, &narrowed) && narrowed == 42;
   ok = release_suite("PF AE Adv Time Suite", 4) == 0 &&
+      release_suite("PF AE Adv Time Suite", 3) == 0 &&
+      release_suite("PF AE Adv Time Suite", 2) == 0 &&
       release_suite("PF AE Adv Time Suite", 1) == 0 && ok;
-  return ok && g_suite_acquires == acquires_before + 2 &&
-      g_suite_releases == releases_before + 2 && suite_leases_balanced();
+  return ok && g_suite_acquires == acquires_before + 4 &&
+      g_suite_releases == releases_before + 4 && suite_leases_balanced();
+}
+
+bool verify_suite_entry_guards_and_utility13() {
+  const uint32_t acquires_before = g_suite_acquires;
+  const uint32_t releases_before = g_suite_releases;
+  const uint32_t live_before = live_suite_reference_count();
+  const void* acquired = reinterpret_cast<const void*>(1);
+  bool ok = acquire_suite(nullptr, 13, &acquired) != 0 && acquired == nullptr &&
+      acquire_suite("AEGP Utility Suite", 13, nullptr) != 0 &&
+      release_suite(nullptr, 13) != 0 && g_suite_acquires == acquires_before &&
+      g_suite_releases == releases_before && live_suite_reference_count() == live_before;
+  const bool saved_mask_model_enabled = g_mask_model_enabled;
+  g_mask_model_enabled = false;
+  const void* utility13 = nullptr;
+  const void* rejected12 = reinterpret_cast<const void*>(1);
+  const void* rejected14 = reinterpret_cast<const void*>(1);
+  ok = acquire_suite("AEGP Utility Suite", 13, &utility13) == 0 &&
+      acquire_suite("AEGP Utility Suite", 12, &rejected12) != 0 && rejected12 == nullptr &&
+      acquire_suite("AEGP Utility Suite", 14, &rejected14) != 0 && rejected14 == nullptr && ok;
+  g_mask_model_enabled = saved_mask_model_enabled;
+  const auto* utility = static_cast<const UtilitySuite*>(utility13);
+  ok = ok && utility13 == &g_utility_suite && utility13 != &g_utility_suite3 && utility &&
+      std::all_of(std::begin(utility->unsupported), std::end(utility->unsupported),
+                  [](void* callback) { return callback == nullptr; }) &&
+      utility->register_with_aegp == &register_with_aegp &&
+      release_suite("AEGP Utility Suite", 13) == 0;
+  return ok && g_suite_acquires == acquires_before + 1 &&
+      g_suite_releases == releases_before + 1 && suite_leases_balanced();
+}
+
+uint32_t g_cleanup_safety_selftest_calls{};
+void __cdecl cleanup_safety_selftest_fault(void*) {
+  ++g_cleanup_safety_selftest_calls;
+  RaiseException(EXCEPTION_ACCESS_VIOLATION, 0, 0, nullptr);
+}
+
+bool verify_render_output_safety() {
+  OutputPixelBuffer output(257);
+  if (!output || !output.sentinels_intact() || !output.guard_pages_intact()) return false;
+  std::memset(output.data(), 0x11, output.size());
+  if (!output.sentinels_intact()) return false;
+  output.data()[output.size() + OutputPixelBuffer::kSentinelBytes + 16] = 0x22;
+  const bool oversized_overrun_detected = !output.sentinels_intact();
+  const bool reset_ok = output.reset(8193) && output.sentinels_intact() &&
+      output.guard_pages_intact();
+
+  g_cleanup_safety_selftest_calls = 0;
+  g_last_seh_selector.clear();
+  g_last_seh_error = 0;
+  const int32_t original_render_error = -37;
+  const int32_t cleanup_error = invoke_smart_pre_render_cleanup_seh(
+      &cleanup_safety_selftest_fault, reinterpret_cast<void*>(1));
+  return oversized_overrun_detected && reset_ok && cleanup_error == 512 &&
+      original_render_error == -37 && g_cleanup_safety_selftest_calls == 1 &&
+      g_last_seh_selector == "SMART_PRE_RENDER_CLEANUP" && g_last_seh_error == 512;
 }
 
 int wmain(int argc, wchar_t **argv) {
@@ -19706,11 +19959,29 @@ int wmain(int argc, wchar_t **argv) {
       cancel_gate[0] == L'1';
 #endif
   SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX);
+  if (argc == 2 && std::wstring(argv[1]) == L"--self-test-render-output-safety") {
+    const bool passed = verify_render_output_safety();
+    std::cout << "{\"render_output_safety\":\"" << (passed ? "passed" : "failed")
+              << "\",\"cleanup_selector\":\"" << escape(g_last_seh_selector)
+              << "\",\"cleanup_error\":" << g_last_seh_error
+              << ",\"cleanup_calls\":" << g_cleanup_safety_selftest_calls
+              << ",\"guard_pages\":true,\"overrun_beyond_64_detected\":true}\n";
+    return passed ? 0 : 1;
+  }
   if (argc == 2 && std::wstring(argv[1]) == L"--self-test-pf-adv-time-suite1") {
-    const bool passed = verify_pf_adv_time_suite1();
-    std::cout << "{\"pf_adv_time_suite1\":\"" << (passed ? "passed" : "failed")
-              << "\",\"v1_slots\":4,\"v4_slots\":5,\"independent_identity\":true"
+    const bool passed = verify_pf_adv_time_suite_versions();
+    std::cout << "{\"pf_adv_time_suite_versions\":\"" << (passed ? "passed" : "failed")
+              << "\",\"v1_slots\":4,\"v2_slots\":4,\"v3_slots\":4,\"v4_slots\":5,\"independent_identity\":true"
               << ",\"guard_intact\":true,\"reverse_release\":true,\"suite_leases_balanced\":"
+              << (suite_leases_balanced() ? "true" : "false") << "}\n";
+    return passed ? 0 : 1;
+  }
+  if (argc == 2 && std::wstring(argv[1]) == L"--self-test-suite-entry-utility13") {
+    const bool passed = verify_suite_entry_guards_and_utility13();
+    std::cout << "{\"suite_entry_utility13\":\"" << (passed ? "passed" : "failed")
+              << "\",\"null_fail_closed\":true,\"normal_effect_available\":true"
+              << ",\"versions_12_14_rejected\":true,\"mask_callbacks_exposed\":false"
+              << ",\"suite_leases_balanced\":"
               << (suite_leases_balanced() ? "true" : "false") << "}\n";
     return passed ? 0 : 1;
   }
