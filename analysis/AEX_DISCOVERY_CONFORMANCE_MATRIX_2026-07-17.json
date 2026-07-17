@@ -1,0 +1,36 @@
+{
+  "schema_version": 1,
+  "stage": "aex_discovery_conformance_matrix",
+  "generated_at_utc": "2026-07-17T14:09:50.9738954Z",
+  "passed": true,
+  "cases": [
+    {
+      "name": "paramarama",
+      "aex_sha256": "4AB18C55F9FC20EDED09663F50C45623272B0655AB0CBF06E7C121B6A35523B0",
+      "parameter_count": 8,
+      "kinds": ["angle", "button", "color", "float", "integer", "point3d"],
+      "passed": true
+    },
+    {
+      "name": "colorgrid",
+      "aex_sha256": "64B0DE13F978222BB40649BDF48CC533AEBB3E03F98270AF073B8351284BA64C",
+      "parameter_count": 1,
+      "kinds": ["arbitrary_data"],
+      "passed": true
+    },
+    {
+      "name": "pathmaster",
+      "aex_sha256": "F6FA2C4977DFDEE094A0B00EC5146F3A4878258BE6D2B314EF2F680985969C40",
+      "parameter_count": 6,
+      "kinds": ["color", "float", "integer", "path"],
+      "passed": true
+    },
+    {
+      "name": "smartypants",
+      "aex_sha256": "47FE55F77600F041A3297B4558108FAD5D6E886B6CC66EED2E51F88DAC922EDE",
+      "parameter_count": 2,
+      "kinds": ["float", "integer"],
+      "passed": true
+    }
+  ]
+}

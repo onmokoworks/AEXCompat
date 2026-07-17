@@ -791,6 +791,21 @@ class MinihostL2SourceTests(unittest.TestCase):
             'std::strcmp(name, "AEGP Utility Suite") == 0 && version == 7', text
         )
 
+    def test_discovery_selectors_share_the_seh_boundary_and_report_selector(self):
+        text = SOURCE.read_text(encoding="utf-8")
+        for selector in ("kGlobalSetup", "kAbout", "kParamsSetup", "kGlobalSetdown"):
+            self.assertRegex(text, rf"invoke_entry_seh\s*\(\s*entry,\s*{selector}")
+        for name in ("ABOUT", "GLOBAL_SETUP", "GLOBAL_SETDOWN", "PARAMS_SETUP"):
+            self.assertIn(f'return "{name}"', text)
+        self.assertIn('"last_seh_selector\\\":\\\""', text)
+        self.assertIn('"last_seh_error\\\":"', text)
+
+    def test_params_only_discovery_does_not_require_about(self):
+        text = SOURCE.read_text(encoding="utf-8")
+        self.assertIn("g_skip_about =", text)
+        self.assertIn("params_only_mode || external_dependencies_mode", text)
+        self.assertIn("about_error = g_skip_about ? 0", text)
+
 
 if __name__ == "__main__":
     unittest.main()

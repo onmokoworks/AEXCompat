@@ -48,13 +48,159 @@ struct SessionDependency {
     sha256: String,
 }
 
+const MAX_DISCOVERY_FILE_BYTES: u64 = 512 * 1024 * 1024;
+const MAX_DISCOVERY_TOTAL_BYTES: u64 = 1024 * 1024 * 1024;
+const MAX_ADJACENT_ENTRIES: usize = 4096;
+
+fn read_bounded_pe(path: &Path) -> Result<Vec<u8>, String> {
+    let size = fs::metadata(path).map_err(|error| error.to_string())?.len();
+    if size == 0 || size > MAX_DISCOVERY_FILE_BYTES {
+        return Err(format!(
+            "PE image size must be 1..={MAX_DISCOVERY_FILE_BYTES} bytes: {}",
+            path.display()
+        ));
+    }
+    fs::read(path).map_err(|error| error.to_string())
+}
+
+fn is_system_import_name(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    if lower.starts_with("api-ms-win-") || lower.starts_with("ext-ms-win-") {
+        return true;
+    }
+    std::env::var_os("WINDIR")
+        .is_some_and(|windows| PathBuf::from(windows).join("System32").join(name).is_file())
+}
+
+fn parse_delay_import_table(
+    bytes: &[u8],
+    table_offset: usize,
+    size: usize,
+    image_base: u64,
+    is_64: bool,
+    mut rva_to_offset: impl FnMut(usize) -> Option<usize>,
+) -> Result<Vec<String>, String> {
+    const DESCRIPTOR_SIZE: usize = 32;
+    const MAX_DESCRIPTORS: usize = 2048;
+    const MAX_DLL_NAME: usize = 260;
+    if size < DESCRIPTOR_SIZE
+        || size > DESCRIPTOR_SIZE * MAX_DESCRIPTORS
+        || size % DESCRIPTOR_SIZE != 0
+    {
+        return Err("PE delay-import directory has an invalid size".into());
+    }
+    let table_end = table_offset
+        .checked_add(size)
+        .filter(|end| *end <= bytes.len())
+        .ok_or("PE delay-import directory exceeds file bounds")?;
+    let mut libraries = Vec::new();
+    let mut terminated = false;
+    for descriptor in bytes[table_offset..table_end]
+        .chunks_exact(DESCRIPTOR_SIZE)
+        .take(MAX_DESCRIPTORS)
+    {
+        let read_u32 =
+            |offset: usize| u32::from_le_bytes(descriptor[offset..offset + 4].try_into().unwrap());
+        let attributes = read_u32(0);
+        let name_pointer = read_u32(4);
+        if descriptor.iter().all(|byte| *byte == 0) {
+            terminated = true;
+            break;
+        }
+        if attributes & !1 != 0 || name_pointer == 0 {
+            return Err("PE delay-import descriptor is malformed".into());
+        }
+        let name_rva = if attributes & 1 == 1 {
+            u64::from(name_pointer)
+        } else {
+            if is_64 {
+                return Err("PE32+ delay-import descriptors must use RVA attributes".into());
+            }
+            u64::from(name_pointer)
+                .checked_sub(image_base)
+                .ok_or("PE delay-import VA precedes image base")?
+        };
+        let name_rva = usize::try_from(name_rva)
+            .map_err(|_| "PE delay-import name RVA does not fit this host")?;
+        let name_offset =
+            rva_to_offset(name_rva).ok_or("PE delay-import DLL name does not map to file data")?;
+        let tail = bytes
+            .get(name_offset..)
+            .ok_or("PE delay-import DLL name exceeds file bounds")?;
+        let length = tail
+            .iter()
+            .take(MAX_DLL_NAME + 1)
+            .position(|byte| *byte == 0)
+            .filter(|length| *length > 0 && *length <= MAX_DLL_NAME)
+            .ok_or("PE delay-import DLL name is not bounded and NUL-terminated")?;
+        let name = std::str::from_utf8(&tail[..length])
+            .map_err(|_| "PE delay-import DLL name is not UTF-8/ASCII")?;
+        let path = Path::new(name);
+        if path.file_name().and_then(|value| value.to_str()) != Some(name)
+            || !path
+                .extension()
+                .and_then(|value| value.to_str())
+                .is_some_and(|value| value.eq_ignore_ascii_case("dll"))
+        {
+            return Err("PE delay-import name must be a DLL basename".into());
+        }
+        libraries.push(name.to_owned());
+    }
+    if !terminated {
+        return Err("PE delay-import directory has no zero terminator".into());
+    }
+    libraries.sort_by_key(|name| name.to_ascii_lowercase());
+    libraries.dedup_by(|left, right| left.eq_ignore_ascii_case(right));
+    Ok(libraries)
+}
+
+fn delay_import_libraries(bytes: &[u8], pe: &goblin::pe::PE<'_>) -> Result<Vec<String>, String> {
+    let Some(optional) = pe.header.optional_header.as_ref() else {
+        return Err("PE image has no optional header".into());
+    };
+    let Some(directory) = optional.data_directories.get_delay_import_descriptor() else {
+        return Ok(Vec::new());
+    };
+    let options = goblin::pe::options::ParseOptions::default();
+    let table_offset = goblin::pe::utils::find_offset(
+        directory.virtual_address as usize,
+        &pe.sections,
+        optional.windows_fields.file_alignment,
+        &options,
+    )
+    .ok_or("PE delay-import directory does not map to file data")?;
+    parse_delay_import_table(
+        bytes,
+        table_offset,
+        directory.size as usize,
+        optional.windows_fields.image_base,
+        pe.is_64,
+        |rva| {
+            goblin::pe::utils::find_offset(
+                rva,
+                &pe.sections,
+                optional.windows_fields.file_alignment,
+                &options,
+            )
+        },
+    )
+}
+
 fn discover_adjacent_imports(aex_path: &Path) -> Result<Vec<SessionDependency>, String> {
     const MAX_DEPENDENCIES: usize = 64;
     let directory = aex_path
         .parent()
         .ok_or("Selected AEX has no parent directory")?;
     let mut adjacent = std::collections::HashMap::new();
-    for entry in fs::read_dir(directory).map_err(|error| error.to_string())? {
+    for (entry_index, entry) in fs::read_dir(directory)
+        .map_err(|error| error.to_string())?
+        .enumerate()
+    {
+        if entry_index == MAX_ADJACENT_ENTRIES {
+            return Err(format!(
+                "AEX directory exceeds {MAX_ADJACENT_ENTRIES} entries"
+            ));
+        }
         let path = entry.map_err(|error| error.to_string())?.path();
         if path
             .extension()
@@ -68,6 +214,9 @@ fn discover_adjacent_imports(aex_path: &Path) -> Result<Vec<SessionDependency>, 
             else {
                 continue;
             };
+            if !name.is_ascii() {
+                continue;
+            }
             let key = name.to_ascii_lowercase();
             if adjacent.insert(key, path).is_some() {
                 return Err(format!(
@@ -80,15 +229,25 @@ fn discover_adjacent_imports(aex_path: &Path) -> Result<Vec<SessionDependency>, 
     let mut pending = vec![aex_path.to_path_buf()];
     let mut visited = std::collections::HashSet::new();
     let mut dependencies = Vec::new();
+    let mut total_dependency_bytes = 0u64;
     while let Some(module_path) = pending.pop() {
-        let bytes = fs::read(&module_path).map_err(|error| error.to_string())?;
+        let bytes = read_bounded_pe(&module_path)?;
         let pe = goblin::pe::PE::parse(&bytes).map_err(|error| {
             format!(
                 "Could not inspect PE imports for {}: {error}",
                 module_path.display()
             )
         })?;
-        for imported_name in pe.libraries {
+        let mut imported_libraries = pe
+            .libraries
+            .iter()
+            .map(|name| (*name).to_owned())
+            .collect::<Vec<_>>();
+        imported_libraries.extend(delay_import_libraries(&bytes, &pe)?);
+        for imported_name in imported_libraries {
+            if is_system_import_name(&imported_name) {
+                continue;
+            }
             let key = imported_name.to_ascii_lowercase();
             let Some(path) = adjacent.get(&key) else {
                 continue;
@@ -101,7 +260,11 @@ fn discover_adjacent_imports(aex_path: &Path) -> Result<Vec<SessionDependency>, 
                     "Adjacent dependency graph exceeds {MAX_DEPENDENCIES} DLLs"
                 ));
             }
-            let dependency_bytes = fs::read(path).map_err(|error| error.to_string())?;
+            let dependency_bytes = read_bounded_pe(path)?;
+            total_dependency_bytes = total_dependency_bytes
+                .checked_add(dependency_bytes.len() as u64)
+                .filter(|total| *total <= MAX_DISCOVERY_TOTAL_BYTES)
+                .ok_or("Adjacent dependency graph exceeds the 1 GiB byte limit")?;
             dependencies.push(SessionDependency {
                 path: path.clone(),
                 size: dependency_bytes.len() as u64,
@@ -1117,7 +1280,7 @@ impl HarnessApp {
         };
         self.status = "Computing AEX identity...".into();
         self.spawn(move || {
-            let bytes = fs::read(&path).map_err(|error| error.to_string())?;
+            let bytes = read_bounded_pe(&path)?;
             let hash = format!("{:X}", Sha256::digest(&bytes));
             Ok((
                 format!("{}\n{}\n{}", path.display(), bytes.len(), hash),
@@ -1134,7 +1297,7 @@ impl HarnessApp {
         else {
             return;
         };
-        match fs::read(&path) {
+        match read_bounded_pe(&path) {
             Ok(bytes) => {
                 let key = path.to_string_lossy().to_lowercase();
                 if self
@@ -1343,7 +1506,7 @@ impl HarnessApp {
         };
         let path = selected.path.clone();
         let previous_hash = selected.sha256.clone();
-        match fs::read(&path) {
+        match read_bounded_pe(&path) {
             Ok(bytes) => {
                 let hash = format!("{:X}", Sha256::digest(&bytes));
                 let metadata = fs::metadata(&path).ok();
@@ -1414,7 +1577,7 @@ impl HarnessApp {
             return;
         };
         let modified = metadata.modified().ok();
-        let hash_changed = fs::read(&selected.path).map_or(true, |bytes| {
+        let hash_changed = read_bounded_pe(&selected.path).map_or(true, |bytes| {
             !format!("{:X}", Sha256::digest(bytes)).eq_ignore_ascii_case(&selected.sha256)
         });
         if metadata.len() != selected.size || modified != selected.modified || hash_changed {
@@ -1427,7 +1590,7 @@ impl HarnessApp {
             self.approved_dependencies.clear();
         }
         if self.dependencies.iter().any(|dependency| {
-            fs::read(&dependency.path).map_or(true, |bytes| {
+            read_bounded_pe(&dependency.path).map_or(true, |bytes| {
                 bytes.len() as u64 != dependency.size
                     || !format!("{:X}", Sha256::digest(&bytes))
                         .eq_ignore_ascii_case(&dependency.sha256)
@@ -4752,7 +4915,16 @@ mod tests {
 
     #[test]
     fn rebuilt_dev_binary_is_rehashed_and_automatically_enabled() {
-        let path = temporary_aex("reload");
+        let root = std::env::temp_dir().join(format!(
+            "aexcompat-reload-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir(&root).unwrap();
+        let path = root.join("reload.aex");
         let mut first_build = fs::read(std::env::current_exe().unwrap()).unwrap();
         fs::write(&path, &first_build).unwrap();
         let metadata = fs::metadata(&path).unwrap();
@@ -4778,7 +4950,7 @@ mod tests {
         let refreshed = app.selection.as_ref().unwrap();
         assert_ne!(refreshed.sha256, first_hash);
         assert!(!app.selection_stale);
-        assert!(app.session_approved);
+        assert!(app.session_approved, "{} / {}", app.status, app.report);
         assert!(app.inspect_after_refresh);
         assert!(app.parameters.is_empty());
         assert!(app.preview.is_none());
@@ -4788,7 +4960,7 @@ mod tests {
         fs::write(&path, &first_build).unwrap();
         app.refresh_aex();
         assert!(app.session_approved);
-        fs::remove_file(path).unwrap();
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -4812,5 +4984,56 @@ mod tests {
             .unwrap_err()
             .contains("Could not inspect PE imports"));
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn delay_import_table_is_bounded_terminated_and_basename_only() {
+        let mut bytes = vec![0u8; 96];
+        bytes[0..4].copy_from_slice(&1u32.to_le_bytes());
+        bytes[4..8].copy_from_slice(&0x1000u32.to_le_bytes());
+        bytes[64..75].copy_from_slice(b"helper.dll\0");
+        assert_eq!(
+            parse_delay_import_table(&bytes, 0, 64, 0x400000, true, |rva| {
+                (rva == 0x1000).then_some(64)
+            })
+            .unwrap(),
+            ["helper.dll"]
+        );
+
+        assert!(
+            parse_delay_import_table(&bytes, 0, 63, 0x400000, true, |_| Some(64))
+                .unwrap_err()
+                .contains("invalid size")
+        );
+        assert!(
+            parse_delay_import_table(&bytes, 0, 32, 0x400000, true, |_| Some(64))
+                .unwrap_err()
+                .contains("zero terminator")
+        );
+
+        bytes[64..75].copy_from_slice(b"..\\bad.dll\0");
+        assert!(
+            parse_delay_import_table(&bytes, 0, 64, 0x400000, true, |_| Some(64))
+                .unwrap_err()
+                .contains("DLL basename")
+        );
+    }
+
+    #[test]
+    fn automatic_dependency_discovery_excludes_system_names_and_oversized_pe_files() {
+        assert!(is_system_import_name("api-ms-win-core-file-l1-1-0.dll"));
+        if std::env::var_os("WINDIR").is_some() {
+            assert!(is_system_import_name("kernel32.dll"));
+        }
+
+        let path = temporary_aex("oversized");
+        fs::File::create(&path)
+            .unwrap()
+            .set_len(MAX_DISCOVERY_FILE_BYTES + 1)
+            .unwrap();
+        assert!(read_bounded_pe(&path)
+            .unwrap_err()
+            .contains("PE image size"));
+        fs::remove_file(path).unwrap();
     }
 }

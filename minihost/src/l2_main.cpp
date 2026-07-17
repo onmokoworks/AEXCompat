@@ -396,6 +396,18 @@ class InputPixelBuffer {
 uint32_t g_last_seh_exception_code{};
 uint64_t g_last_seh_exception_address{};
 std::string g_last_seh_exception_module;
+std::string g_last_seh_selector;
+int32_t g_last_seh_error{};
+
+const char* effect_selector_name(int32_t command) {
+  switch (command) {
+    case kAbout: return "ABOUT";
+    case kGlobalSetup: return "GLOBAL_SETUP";
+    case kGlobalSetdown: return "GLOBAL_SETDOWN";
+    case kParamsSetup: return "PARAMS_SETUP";
+    default: return "UNKNOWN";
+  }
+}
 
 int capture_seh_exception(EXCEPTION_POINTERS* information) {
   g_last_seh_exception_code = information && information->ExceptionRecord
@@ -435,6 +447,8 @@ int32_t invoke_entry_seh(EffectEntry entry, int32_t command, void* input,
     return audited_effect_call(entry, command, input, output, params, world, extra);
   } __except(capture_seh_exception(GetExceptionInformation())) {
     *out_exception_code = GetExceptionCode();
+    g_last_seh_selector = effect_selector_name(command);
+    g_last_seh_error = 512;
     capture_module_audit_phase();
     return 512;
   }
@@ -8736,7 +8750,9 @@ void reset_pf_state_effect_lifetime(void* owner, bool live) {
 }
 
 int32_t invoke_global_setdown(EffectEntry entry, void* input, void* output) {
-  const int32_t error = entry(kGlobalSetdown, input, output, nullptr, nullptr, nullptr);
+  uint32_t exception_code{};
+  const int32_t error = invoke_entry_seh(entry, kGlobalSetdown, input, output, nullptr,
+                                         nullptr, nullptr, &exception_code);
   reset_pf_state_effect_lifetime(&g_effect, false);
   reset_pf_helper_tools();
   return error;
@@ -18665,6 +18681,8 @@ void report(const char* status, int32_t global_error, int32_t params_error,
             << ",\"return_message\":\"" << escape(std::string(message, strnlen_s(message, 256)))
             << "\",\"about_message\":\"" << escape(about_message)
             << "\",\"about_selector_dispatched\":" << (g_skip_about ? "false" : "true")
+            << ",\"last_seh_selector\":\"" << escape(g_last_seh_selector) << "\""
+            << ",\"last_seh_error\":" << g_last_seh_error
             << ",\"sequence_setup_error\":" << lifecycle_errors[0]
             << ",\"sequence_resetup_error\":" << lifecycle_errors[1]
             << ",\"frame_setup_error\":" << lifecycle_errors[2]
@@ -20630,12 +20648,16 @@ int wmain(int argc, wchar_t **argv) {
 #if !defined(AEXCOMPAT_RENDER_WORKER) && !defined(AEXCOMPAT_SMART_WORKER)
   std::array<std::byte, kOutSize> about_output{};
   int32_t about_error = -1;
+  uint32_t about_exception_code{};
   std::string about_message;
 #endif
   std::cerr << "stage:global_setup_begin\n" << std::flush;
   reset_pf_state_effect_lifetime(&g_effect, true);
   g_global_setup_active = true;
-  const int32_t global_error = entry(kGlobalSetup, input.data(), output.data(), nullptr, nullptr, nullptr);
+  uint32_t global_setup_exception_code{};
+  const int32_t global_error = invoke_entry_seh(
+      entry, kGlobalSetup, input.data(), output.data(), nullptr, nullptr, nullptr,
+      &global_setup_exception_code);
   g_global_setup_active = false;
   std::cerr << "stage:global_setup_end error=" << global_error << "\n" << std::flush;
   const uint32_t advertised_out_flags = read<uint32_t>(output, kOutFlags);
@@ -20670,13 +20692,17 @@ int wmain(int argc, wchar_t **argv) {
   write<void*>(input, kInGlobalData, read<void*>(output, kOutGlobalData));
 #if !defined(AEXCOMPAT_RENDER_WORKER) && !defined(AEXCOMPAT_SMART_WORKER)
   about_error = g_skip_about ? 0 :
-      (global_error == 0 ? entry(kAbout, input.data(), about_output.data(), nullptr, nullptr, nullptr) : -1);
+      (global_error == 0 ? invoke_entry_seh(
+          entry, kAbout, input.data(), about_output.data(), nullptr, nullptr, nullptr,
+          &about_exception_code) : -1);
   const char* about_text = reinterpret_cast<const char*>(about_output.data() + kOutMessage);
   about_message.assign(about_text, strnlen_s(about_text, 256));
 #endif
   std::cerr << "stage:params_setup_begin\n" << std::flush;
+  uint32_t params_setup_exception_code{};
   const int32_t params_error = global_error == 0
-      ? entry(kParamsSetup, input.data(), output.data(), nullptr, nullptr, nullptr) : -1;
+      ? invoke_entry_seh(entry, kParamsSetup, input.data(), output.data(), nullptr,
+                         nullptr, nullptr, &params_setup_exception_code) : -1;
   std::cerr << "stage:params_setup_end error=" << params_error << "\n" << std::flush;
   if (params_error == 0) observe_arbitrary_defaults(entry, input, output);
   const int32_t expected_num_params = static_cast<int32_t>(g_params.size() + 1);
@@ -21881,6 +21907,8 @@ int wmain(int argc, wchar_t **argv) {
             << ",\"last_seh_exception_code\":" << g_last_seh_exception_code
             << ",\"last_seh_exception_address\":" << g_last_seh_exception_address
             << ",\"last_seh_exception_module\":\"" << escape(g_last_seh_exception_module) << "\""
+            << ",\"last_seh_selector\":\"" << escape(g_last_seh_selector) << "\""
+            << ",\"last_seh_error\":" << g_last_seh_error
             << ",\"param_checkouts_balanced\":" << (param_checkouts_balanced() ? "true" : "false")
             << ",\"param_checkout_calls\":" << g_param_checkout_calls
             << ",\"param_checkin_calls\":" << g_param_checkin_calls
@@ -22091,6 +22119,8 @@ int wmain(int argc, wchar_t **argv) {
             << ",\"last_seh_exception_code\":" << g_last_seh_exception_code
             << ",\"last_seh_exception_address\":" << g_last_seh_exception_address
             << ",\"last_seh_exception_module\":\"" << escape(g_last_seh_exception_module) << "\""
+            << ",\"last_seh_selector\":\"" << escape(g_last_seh_selector) << "\""
+            << ",\"last_seh_error\":" << g_last_seh_error
             << ",\"cuda_context_used\":" << (g_cuda_upload_bytes > 0 ? "true" : "false")
             << ",\"cuda_upload_bytes\":" << g_cuda_upload_bytes
             << ",\"cuda_download_bytes\":" << g_cuda_download_bytes

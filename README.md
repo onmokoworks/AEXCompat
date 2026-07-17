@@ -32,7 +32,7 @@ AEXCompatは、Adobe After EffectsのEffect AEXをAfter Effects本体の外で�
 ### 主な機能
 
 - 登録済み・未登録AEXの読み込みとSHA-256による実行直前の同一性確認
-- PE import tableから到達する隣接DLLの再帰的な自動検出とhash固定
+- 通常・delay-load PE importから到達する隣接DLLの再帰的な自動検出とhash固定
 - AE風の常設Effect Controlsと型付きパラメーター編集
 - PNG、JPEG、BMP、TIFF、WebPの画像入力とPNG出力
 - Classic RenderおよびSmartFX
@@ -189,7 +189,7 @@ The goal is practical, faithful compatibility with general Effect AEX plug-ins, 
 ### Features
 
 - Registered and previously unknown AEX execution with pre-launch SHA-256 revalidation
-- Recursive discovery and hash pinning of adjacent DLLs referenced by PE imports
+- Recursive discovery and hash pinning of adjacent DLLs referenced by normal and delay-load PE imports
 - Persistent AE-inspired Effect Controls with typed parameter editing
 - PNG, JPEG, BMP, TIFF, and WebP input; PNG output
 - Classic Render and SmartFX
