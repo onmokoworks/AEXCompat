@@ -83,8 +83,23 @@ while true; do
     if [ -n "$findings" ]; then echo "$findings"; exit 0; fi
   fi
 
-  # 3. CLEAN when a head-bound clean exists and no finding is newer than it.
+  # 3. CLEAN when a head-bound clean exists, no finding is newer than it, AND no
+  #    owner activity is newer than it. The last check aligns CLEAN with what
+  #    codex-merge-guard.sh will accept: without it, a stale head-bound clean
+  #    that predates owner feedback (which arrived after that clean but before
+  #    SINCE, so owner_hit above does not see it) would emit CLEAN, then the
+  #    guard refuses on the same owner-after-clean feedback — an early-clean/
+  #    refuse loop. When owner feedback postdates the clean we keep waiting for
+  #    the fresh Codex verdict (a new clean will postdate that feedback). Full
+  #    history, inclusive (>=), same predicates as the guard.
   if [ -n "$clean_ts" ] && { [ -z "$find_ts" ] || [[ ! "$find_ts" > "$clean_ts" ]]; }; then
-    echo "CLEAN: codex clean for head ${head:0:10}"; exit 0
+    owner_after=$(
+      { owner_inline_after "$clean_ts" <<<"$pr_comments"
+        owner_comments_after "$clean_ts" <<<"$issue_comments"
+        owner_reviews_after "$clean_ts" <<<"$reviews"; } | grep -v '^$' || true
+    )
+    if [ -z "$owner_after" ]; then
+      echo "CLEAN: codex clean for head ${head:0:10}"; exit 0
+    fi
   fi
 done
