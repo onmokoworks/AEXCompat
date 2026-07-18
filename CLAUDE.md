@@ -20,8 +20,11 @@ and bounded image input/output are now the main implementation path.
   as a security boundary against untrusted binaries. Require this tier only when
   producing evidence that will be compared, committed, or trusted later; do not
   force it onto interactive observation or reverse-engineering.
-- In the evidence tier, do not bypass identity checks, approval receipts,
-  dependency manifests, or output bounds to make an AEX appear compatible.
+- Do not bypass output bounds or pixel/output validation to make an AEX
+  appear compatible. Containing malformed AEX output is part of the always-on
+  crash-containment floor, not an evidence-tier concern.
+- In the evidence tier, do not bypass identity checks, approval receipts, or
+  dependency manifests to make an AEX appear compatible.
 - Recording `sha256(aex)` as result metadata is cheap provenance and is fine in
   the default tier; enforcing that hash as a load precondition belongs to the
   evidence tier only. Record versus enforce are separate decisions.
