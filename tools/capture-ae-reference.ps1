@@ -129,7 +129,10 @@ try {
         Start-Sleep -Milliseconds 250
     }
     if (-not (Test-Path -LiteralPath $resultPath)) {
-        Get-Process AfterFX,aerendercore -ErrorAction SilentlyContinue |
+        # Stop the AfterFX.com shim too: the launch gate above refuses on a
+        # lingering shim, so leaving one behind here would block every
+        # subsequent capture until it is killed manually.
+        Get-Process AfterFX,'AfterFX.com',aerendercore -ErrorAction SilentlyContinue |
             Stop-Process -Force -ErrorAction SilentlyContinue
         throw 'After Effects reference capture timed out without a result.'
     }
