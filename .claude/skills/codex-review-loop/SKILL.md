@@ -48,11 +48,7 @@ repo owner (`onmokoworks` および `naari3`) が PR に残したレビュー / 
 
 ### 1. トリガー
 
-**PR を開いた直後はトリガー不要**。PR 作成 (および draft の ready 化) で最初の
-レビューが自動で走るので、`@codex review` はコメントせず、PR の `created_at` を
-`since` として手順 2 の監視に入る。
-
-**追 commit を push した後の再レビューのみ**明示トリガーが必要:
+**PR 作成直後も、追 commit の push 後も、毎回明示的に `@codex review` する**:
 
 ```bash
 gh api -X POST repos/{owner}/{repo}/issues/{PR}/comments -f body="@codex review" -q '.created_at'
@@ -60,6 +56,12 @@ gh api -X POST repos/{owner}/{repo}/issues/{PR}/comments -f body="@codex review"
 
 出力の `created_at` を必ず控える (次の監視の `since` になる。これを polling 開始時刻に
 すると、monitor 起動前に届いた応答を取り逃す)。
+
+PR 作成で auto first-review も走るが、**findings ゼロのときは非 mergeable な
+👍 reaction しか出さない** (SHA 拘束が無く merge-guard が受理しない。実例 PR #44)。
+明示トリガーは clean のとき `Didn't find any major issues` の **SHA 拘束 text
+clean** を出すので、最初から明示トリガーしておけば reaction 待ちや再トリガーの
+往復を避け、そのまま merge 可能な verdict に到達できる。
 
 ### 2. 応答待ち (Monitor)
 
@@ -110,9 +112,10 @@ merge 側 (`codex-merge-guard.sh` が head 拘束 clean なしに merge を拒�
 - **TIMEOUT**: 1時間 verdict が来なかった。Codex 不調を疑い PR を直接確認し、
   必要なら `@codex review` を再トリガーして監視を張り直す。
 - **CLEAN-REACTION (bot +1 のみ、text clean 無し)**: Codex は指摘ゼロだが SHA
-  拘束 clean が無い (auto first-review でよくある)。merge-guard は受理しないので、
-  `@codex review` を再トリガーして SHA 拘束の text clean を得てから CLEAN 分岐へ
-  進む。owner 指摘が別途あればそちらを先に処理する。
+  拘束 clean が無い。手順 1 で毎回明示トリガーしていれば通常は text clean が来る
+  ので、これは fallback (auto-review の reaction だけ先着した等)。merge-guard は
+  受理しないので、`@codex review` を再トリガーして SHA 拘束の text clean を得てから
+  CLEAN 分岐へ進む。owner 指摘が別途あればそちらを先に処理する。
 - **FINDING (Codex 指摘あり)**:
   1. 各指摘の妥当性を自分で判断する (盲従しない。妥当でなければ理由を付けて返信のみ)
   2. 妥当な指摘に対応し、commit・push

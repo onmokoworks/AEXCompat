@@ -102,13 +102,16 @@ and bounded image input/output are now the main implementation path.
 - The After Effects installation is an exclusive machine resource. Before any
   capture or aerender run, verify no AfterFX/aerender/aerendercore process is
   running; if one is, another session owns it — wait instead of killing it.
-- Every PR goes through the Codex review loop before merging. Opening a PR
-  triggers the first review automatically — no comment needed; wait for it
-  instead of posting "@codex review". After pushing new commits, re-trigger
-  explicitly with an "@codex review" comment. Address findings and repeat
-  until Codex replies "Didn't find any major issues" for the latest commit,
-  then merge; never merge without that reply (the `codex-review-loop` skill
-  automates this loop).
+- Every PR goes through the Codex review loop before merging. Post an
+  "@codex review" comment explicitly at PR creation AND after every new
+  commit. Opening a PR does fire an automatic first review, but when it finds
+  nothing that review signals clean only with a non-mergeable +1 reaction on
+  the PR body (no SHA-bound text comment; see PR #44), which the merge guard
+  will not accept. An explicit "@codex review" yields a SHA-bound "Didn't find
+  any major issues" text clean, so triggering from the start avoids waiting on
+  a reaction and re-triggering later. Address findings and repeat until Codex
+  replies that text clean for the latest commit, then merge; never merge
+  without it (the `codex-review-loop` skill automates this loop).
 - Repo-owner review comments (`onmokoworks`, `naari3`) outrank Codex and are
   handled first: the owner catches issues Codex misses. Never merge while an
   owner review comment on the PR is unresolved, even if Codex is clean —
