@@ -5,11 +5,16 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "minihost" / "src" / "l2_main.cpp"
+SCENE_SELFTEST_SOURCE = ROOT / "minihost" / "src" / "worker_aegp_scene_selftests.cpp"
+
+
+def scene_source() -> str:
+    return SOURCE.read_text(encoding="utf-8") + SCENE_SELFTEST_SOURCE.read_text(encoding="utf-8")
 BUILD = ROOT / "target" / "minihost-build"
 
 
 def test_pf_interface_slot_3_uses_exact_sdk_shape_and_offset():
-    source = SOURCE.read_text(encoding="utf-8")
+    source = scene_source()
     assert "int32_t __cdecl get_effect_camera(\n    void* effect, const AegpTime* comp_time, void** camera_layer)" in source
     assert "decltype(&get_effect_camera) get_effect_camera;" in source
     assert "offsetof(PfInterfaceSuite, get_effect_camera) == 3 * sizeof(void*)" in source
@@ -18,7 +23,7 @@ def test_pf_interface_slot_3_uses_exact_sdk_shape_and_offset():
 
 
 def test_pf_interface_slot_4_camera_matrix_uses_exact_sdk_shape_and_offset():
-    source = SOURCE.read_text(encoding="utf-8")
+    source = scene_source()
     assert "struct AegpMatrix4 { double mat[4][4]{}; };" in source
     assert "static_assert(sizeof(AegpMatrix4) == 16 * sizeof(double));" in source
     assert "decltype(&get_effect_camera_matrix) get_effect_camera_matrix;" in source
@@ -27,7 +32,7 @@ def test_pf_interface_slot_4_camera_matrix_uses_exact_sdk_shape_and_offset():
 
 
 def test_camera_matrix_is_atomic_bounded_and_deterministic():
-    source = SOURCE.read_text(encoding="utf-8")
+    source = scene_source()
     assert "!camera_matrix || !distance_to_image_plane || !image_plane_width" in source
     assert "width > INT16_MAX || height > INT16_MAX" in source
     assert "result.mat[index][index] = 1.0" in source
@@ -36,7 +41,7 @@ def test_camera_matrix_is_atomic_bounded_and_deterministic():
 
 
 def test_camera_lookup_is_fail_closed_and_preserves_output_on_error():
-    source = SOURCE.read_text(encoding="utf-8")
+    source = scene_source()
     assert "effect != &g_effect || !g_pf_state_effect_live" in source
     assert "!valid_comp_time(*comp_time)" in source
     assert "if (index >= g_aegp_layers.size()) return 4;" in source
