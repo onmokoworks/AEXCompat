@@ -22,6 +22,17 @@ if ($DurationFrames -le $Frame) {
 }
 
 $afterEffectsPath = (Resolve-Path -LiteralPath $AfterEffects).Path
+# AfterFX.exe launches, loads plug-ins, and exits with code 0 WITHOUT executing
+# the -r script (observed on AE 25.3). Only AfterFX.com runs it, so refuse the
+# silent no-op instead of timing out later.
+if ([System.IO.Path]::GetFileName($afterEffectsPath) -ieq 'AfterFX.exe') {
+    $comPath = Join-Path (Split-Path -Parent $afterEffectsPath) 'AfterFX.com'
+    if (-not (Test-Path -LiteralPath $comPath)) {
+        throw 'AfterFX.exe does not execute -r scripts; AfterFX.com is required but was not found next to it.'
+    }
+    Write-Warning 'AfterFX.exe does not execute -r scripts; using AfterFX.com instead.'
+    $afterEffectsPath = $comPath
+}
 $testedPath = (Resolve-Path -LiteralPath $TestedAex).Path
 $installedPath = (Resolve-Path -LiteralPath $InstalledAex).Path
 $inputPath = (Resolve-Path -LiteralPath $InputImage).Path
@@ -58,6 +69,9 @@ $env:AEXCOMPAT_AE_FRAME = [string]$Frame
 $env:AEXCOMPAT_AE_FPS = [string]$Fps
 $env:AEXCOMPAT_AE_DURATION = [string]$DurationFrames
 $env:AEXCOMPAT_AE_BPC = [string]$Bpc
+# The JSX polls for the asynchronous saveFrameToPng output; keep its bound
+# inside the outer watchdog so the wait can never outlive this script.
+$env:AEXCOMPAT_AE_SAVE_TIMEOUT_MS = [string]($TimeoutSeconds * 1000)
 try {
     $escapedScriptPath = $scriptPath.Replace('"', '\"')
     $arguments = '-m -noui -r "{0}"' -f $escapedScriptPath
@@ -73,7 +87,8 @@ try {
     }
 } finally {
     'AEXCOMPAT_AE_INPUT','AEXCOMPAT_AE_OUTPUT','AEXCOMPAT_AE_RESULT','AEXCOMPAT_AE_EFFECT',
-    'AEXCOMPAT_AE_FRAME','AEXCOMPAT_AE_FPS','AEXCOMPAT_AE_DURATION','AEXCOMPAT_AE_BPC' |
+    'AEXCOMPAT_AE_FRAME','AEXCOMPAT_AE_FPS','AEXCOMPAT_AE_DURATION','AEXCOMPAT_AE_BPC',
+    'AEXCOMPAT_AE_SAVE_TIMEOUT_MS' |
         ForEach-Object { Remove-Item "Env:$_" -ErrorAction SilentlyContinue }
 }
 
