@@ -71,19 +71,19 @@ since="{since}"
 while true; do
   sleep 30
   # 最優先: repo owner の inline review コメント (Codex より先に判定する)
-  owner=$(gh api "repos/{owner}/{repo}/pulls/{PR}/comments" --jq ".[] | select(.created_at > \"$since\") | select(.user.login == \"onmokoworks\" or .user.login == \"naari3\") | \"OWNER-FINDING id=\(.id) \(.path):\(.line // .original_line) \(.body | split(\"\n\")[0])\"" 2>/dev/null || true)
-  owner_issue=$(gh api "repos/{owner}/{repo}/issues/{PR}/comments" --jq ".[] | select(.created_at > \"$since\") | select(.user.login == \"onmokoworks\" or .user.login == \"naari3\") | select(.body | test(\"@codex review\") | not) | \"OWNER-COMMENT: \(.body | split(\"\n\")[0])\"" 2>/dev/null || true)
+  owner=$(gh api "repos/{owner}/{repo}/pulls/{PR}/comments" --paginate --jq ".[] | select(.created_at > \"$since\") | select(.user.login == \"onmokoworks\" or .user.login == \"naari3\") | \"OWNER-FINDING id=\(.id) \(.path):\(.line // .original_line) \(.body | split(\"\n\")[0])\"" 2>/dev/null || true)
+  owner_issue=$(gh api "repos/{owner}/{repo}/issues/{PR}/comments" --paginate --jq ".[] | select(.created_at > \"$since\") | select(.user.login == \"onmokoworks\" or .user.login == \"naari3\") | select(.body | test(\"@codex review\") | not) | \"OWNER-COMMENT: \(.body | split(\"\n\")[0])\"" 2>/dev/null || true)
   if [ -n "$owner" ] || [ -n "$owner_issue" ]; then
     [ -n "$owner" ] && echo "$owner"
     [ -n "$owner_issue" ] && echo "$owner_issue"
     break
   fi
-  clean=$(gh api "repos/{owner}/{repo}/issues/{PR}/comments" --jq ".[] | select(.created_at > \"$since\") | select(.user.login | startswith(\"chatgpt-codex-connector\")) | select(.body | test(\"Didn.t find any major issues\")) | \"CLEAN: \(.body | split(\"\n\")[0])\"" 2>/dev/null || true)
+  clean=$(gh api "repos/{owner}/{repo}/issues/{PR}/comments" --paginate --jq ".[] | select(.created_at > \"$since\") | select(.user.login | startswith(\"chatgpt-codex-connector\")) | select(.body | test(\"Didn.t find any major issues\")) | \"CLEAN: \(.body | split(\"\n\")[0])\"" 2>/dev/null || true)
   if [ -n "$clean" ]; then echo "$clean"; break; fi
-  review=$(gh api "repos/{owner}/{repo}/pulls/{PR}/reviews" --jq ".[] | select(.submitted_at > \"$since\") | select(.user.login | startswith(\"chatgpt-codex-connector\")) | \"REVIEW \(.state) at \(.submitted_at)\"" 2>/dev/null || true)
+  review=$(gh api "repos/{owner}/{repo}/pulls/{PR}/reviews" --paginate --jq ".[] | select(.submitted_at > \"$since\") | select(.user.login | startswith(\"chatgpt-codex-connector\")) | \"REVIEW \(.state) at \(.submitted_at)\"" 2>/dev/null || true)
   if [ -n "$review" ]; then
     echo "$review"
-    gh api "repos/{owner}/{repo}/pulls/{PR}/comments" --jq ".[] | select(.created_at > \"$since\") | select(.user.login | startswith(\"chatgpt-codex-connector\")) | \"FINDING id=\(.id) \(.path):\(.line // .original_line) \(.body | split(\"\n\")[0])\"" 2>/dev/null || true
+    gh api "repos/{owner}/{repo}/pulls/{PR}/comments" --paginate --jq ".[] | select(.created_at > \"$since\") | select(.user.login | startswith(\"chatgpt-codex-connector\")) | \"FINDING id=\(.id) \(.path):\(.line // .original_line) \(.body | split(\"\n\")[0])\"" 2>/dev/null || true
     break
   fi
 done
@@ -112,9 +112,9 @@ done
   コメント)。GitHub では PR も issue なので、top-level コメントは
   `issues/{PR}/comments` に出る。3面すべてを見る:
   ```bash
-  gh api repos/{owner}/{repo}/pulls/{PR}/comments  --jq '.[] | select(.user.login=="onmokoworks" or .user.login=="naari3") | "\(.created_at) inline \(.path):\(.line): \(.body | split("\n")[0])"'
-  gh api repos/{owner}/{repo}/pulls/{PR}/reviews   --jq '.[] | select(.user.login=="onmokoworks" or .user.login=="naari3") | "\(.submitted_at) review \(.state): \(.body | split("\n")[0])"'
-  gh api repos/{owner}/{repo}/issues/{PR}/comments --jq '.[] | select(.user.login=="onmokoworks" or .user.login=="naari3") | select(.body | test("@codex review") | not) | "\(.created_at) comment: \(.body | split("\n")[0])"'
+  gh api repos/{owner}/{repo}/pulls/{PR}/comments  --paginate --jq '.[] | select(.user.login=="onmokoworks" or .user.login=="naari3") | "\(.created_at) inline \(.path):\(.line): \(.body | split("\n")[0])"'
+  gh api repos/{owner}/{repo}/pulls/{PR}/reviews   --paginate --jq '.[] | select(.user.login=="onmokoworks" or .user.login=="naari3") | "\(.submitted_at) review \(.state): \(.body | split("\n")[0])"'
+  gh api repos/{owner}/{repo}/issues/{PR}/comments --paginate --jq '.[] | select(.user.login=="onmokoworks" or .user.login=="naari3") | select(.body | test("@codex review") | not) | "\(.created_at) comment: \(.body | split("\n")[0])"'
   ```
   owner の未対応レビュー / コメントがあれば **merge せず** OWNER-FINDING の
   手順へ。無ければ最新 commit への clean であることを確認して merge:
