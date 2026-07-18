@@ -142,6 +142,8 @@ def resolve_hook(hook: dict[str, Any], offset_map: dict[str, dict[str, int]]) ->
         name = entry["name"]
         interpret = entry["as"]
         phase = entry.get("phase", "enter")
+        if phase not in plan:
+            raise ResolutionError(f"{symbol}: read {name!r} has unsupported phase {phase!r} (allowed: {list(PHASES)})")
         prefix = name.split(".", 1)[0]
         if prefix not in struct_args:
             raise ResolutionError(
@@ -179,6 +181,8 @@ def resolve_hook(hook: dict[str, Any], offset_map: dict[str, dict[str, int]]) ->
         name = entry["name"]
         interpret = entry["as"]
         phase = entry.get("phase", "enter")
+        if phase not in plan:
+            raise ResolutionError(f"{symbol}: scalar arg {name!r} has unsupported phase {phase!r} (allowed: {list(PHASES)})")
         index = entry["index"]
         width = entry.get("width")
         if interpret == "float":

@@ -180,6 +180,20 @@ class ResolveTests(unittest.TestCase):
             resolve_spec(spec, self.offset_map)
         self.assertIn("unsupported interpretation", str(ctx.exception))
 
+    def test_unsupported_read_phase_is_rejected_not_keyerror(self):
+        spec = copy.deepcopy(self.spec)
+        spec["hooks"][0]["reads"][0]["phase"] = "exit"  # typo for enter/leave
+        with self.assertRaises(ResolutionError) as ctx:
+            resolve_spec(spec, self.offset_map)
+        self.assertIn("unsupported phase", str(ctx.exception))
+
+    def test_unsupported_scalar_phase_is_rejected_not_keyerror(self):
+        spec = copy.deepcopy(self.spec)
+        spec["hooks"][0]["scalar_args"][0]["phase"] = "exit"
+        with self.assertRaises(ResolutionError) as ctx:
+            resolve_spec(spec, self.offset_map)
+        self.assertIn("unsupported phase", str(ctx.exception))
+
     def test_unsupported_return_as_is_rejected(self):
         spec = copy.deepcopy(self.spec)
         spec["hooks"][0]["return_as"] = "uint64"  # typo / unsupported
