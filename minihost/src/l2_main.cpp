@@ -53,6 +53,12 @@ namespace {
 
 using aexcompat::strict_json::JsonValue;
 using aexcompat::strict_json::StrictJsonParser;
+using aexcompat::strict_json::json_exact_keys;
+using aexcompat::strict_json::json_i32;
+using aexcompat::strict_json::json_member;
+using aexcompat::strict_json::json_number;
+using aexcompat::strict_json::json_string;
+using aexcompat::strict_json::json_u64;
 
 constexpr std::size_t kMaxAuditedModules = 512;
 
@@ -16809,51 +16815,6 @@ thread_local ExternalAuxSet g_native_aux_set;
 std::vector<int32_t> g_alpha_as_coverage_params;
 bool g_external_aux_loaded = false;
 thread_local bool g_external_aux_active = false;
-
-const JsonValue* json_member(const JsonValue::Object& object, const char* key) {
-  const auto found = object.find(key); return found == object.end() ? nullptr : &found->second;
-}
-bool json_exact_keys(const JsonValue::Object& object, std::initializer_list<const char*> keys) {
-  if (object.size() != keys.size()) return false;
-  return std::all_of(keys.begin(), keys.end(), [&](const char* key) { return object.count(key) == 1; });
-}
-bool json_i32(const JsonValue::Object &o, const char *k, int32_t &v) {
-  const auto *x = json_member(o, k);
-  if (!x || !std::holds_alternative<int64_t>(x->value))
-    return false;
-  const auto n = std::get<int64_t>(x->value);
-  if (n < INT32_MIN || n > INT32_MAX)
-    return false;
-  v = static_cast<int32_t>(n);
-  return true;
-}
-bool json_u64(const JsonValue::Object &o, const char *k, uint64_t &v) {
-  const auto *x = json_member(o, k);
-  if (!x || !std::holds_alternative<int64_t>(x->value) ||
-      std::get<int64_t>(x->value) < 0)
-    return false;
-  v = static_cast<uint64_t>(std::get<int64_t>(x->value));
-  return true;
-}
-bool json_string(const JsonValue::Object &o, const char *k, std::string &v) {
-  const auto *x = json_member(o, k);
-  if (!x || !std::holds_alternative<std::string>(x->value))
-    return false;
-  v = std::get<std::string>(x->value);
-  return true;
-}
-bool json_number(const JsonValue::Object &o, const char *k, double &v) {
-  const auto *x = json_member(o, k);
-  if (!x)
-    return false;
-  if (std::holds_alternative<double>(x->value))
-    v = std::get<double>(x->value);
-  else if (std::holds_alternative<int64_t>(x->value))
-    v = static_cast<double>(std::get<int64_t>(x->value));
-  else
-    return false;
-  return std::isfinite(v);
-}
 
 bool load_parameter_animation(const std::filesystem::path &path,
                               std::vector<ParameterTimeline> &result) {

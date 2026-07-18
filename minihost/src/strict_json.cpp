@@ -1,6 +1,8 @@
 #include "strict_json.hpp"
 
+#include <algorithm>
 #include <cctype>
+#include <climits>
 #include <cmath>
 #include <utility>
 
@@ -175,6 +177,56 @@ bool StrictJsonParser::value(JsonValue& out) {
   } catch (...) {
     return false;
   }
+}
+
+const JsonValue* json_member(const JsonValue::Object& object, const char* key) {
+  const auto found = object.find(key);
+  return found == object.end() ? nullptr : &found->second;
+}
+
+bool json_exact_keys(const JsonValue::Object& object,
+                     std::initializer_list<const char*> keys) {
+  if (object.size() != keys.size()) return false;
+  return std::all_of(keys.begin(), keys.end(),
+                     [&](const char* key) { return object.count(key) == 1; });
+}
+
+bool json_i32(const JsonValue::Object& object, const char* key, int32_t& value) {
+  const auto* json = json_member(object, key);
+  if (!json || !std::holds_alternative<int64_t>(json->value)) return false;
+  const auto number = std::get<int64_t>(json->value);
+  if (number < INT32_MIN || number > INT32_MAX) return false;
+  value = static_cast<int32_t>(number);
+  return true;
+}
+
+bool json_u64(const JsonValue::Object& object, const char* key, uint64_t& value) {
+  const auto* json = json_member(object, key);
+  if (!json || !std::holds_alternative<int64_t>(json->value) ||
+      std::get<int64_t>(json->value) < 0)
+    return false;
+  value = static_cast<uint64_t>(std::get<int64_t>(json->value));
+  return true;
+}
+
+bool json_string(const JsonValue::Object& object, const char* key,
+                 std::string& value) {
+  const auto* json = json_member(object, key);
+  if (!json || !std::holds_alternative<std::string>(json->value)) return false;
+  value = std::get<std::string>(json->value);
+  return true;
+}
+
+bool json_number(const JsonValue::Object& object, const char* key, double& value) {
+  const auto* json = json_member(object, key);
+  if (!json) return false;
+  if (std::holds_alternative<double>(json->value))
+    value = std::get<double>(json->value);
+  else if (std::holds_alternative<int64_t>(json->value))
+    value = static_cast<double>(std::get<int64_t>(json->value));
+  else
+    return false;
+  return std::isfinite(value);
 }
 
 }  // namespace aexcompat::strict_json

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <initializer_list>
 #include <map>
 #include <string>
 #include <variant>
@@ -28,5 +29,14 @@ class StrictJsonParser {
   std::string text_;
   std::size_t pos_{};
 };
+
+const JsonValue* json_member(const JsonValue::Object& object, const char* key);
+bool json_exact_keys(const JsonValue::Object& object,
+                     std::initializer_list<const char*> keys);
+bool json_i32(const JsonValue::Object& object, const char* key, int32_t& value);
+bool json_u64(const JsonValue::Object& object, const char* key, uint64_t& value);
+bool json_string(const JsonValue::Object& object, const char* key,
+                 std::string& value);
+bool json_number(const JsonValue::Object& object, const char* key, double& value);
 
 }  // namespace aexcompat::strict_json
