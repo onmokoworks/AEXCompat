@@ -256,3 +256,25 @@ therefore unblocked: the host can now export 16-bit PNGs and raw
 (`--raw-format rgba16le --raw-integer-max 32768`). It still needs a fresh
 AE 16 bpc capture (none is retained under `target/`), so the full-precision
 comparison remains future work, not a claim of this note.
+
+## Follow-up: fresh 16 bpc comparison detects a real unresolved difference
+   (2026-07-19)
+
+A fresh capture used a deterministic 1920x1080 RGBA gradient (PNG SHA-256
+`29ebf3c2245a3b078bc430adc0b49b9906b092ab5f37c436895fc9c2035288cd`),
+ntsc-rs defaults, frame 0, fps 1, one-frame duration, and project working
+space `None`. Both AE and the host used the same plug-in binary and the host
+used SmartFX ARGB16 with native-depth transport.
+
+The comparison is **not equivalent** at 16-bit precision. Alpha is exact,
+but 5,315,732 channels differ and 5,311,798 exceed one PNG16 integer step.
+Mean absolute RGB error is R 0.01117, G 0.00896, B 0.02539; maximum error is
+1.0. Clamping the host samples to 0..1 does not change those figures. The
+images remain strongly correlated (R 0.9972, G 0.9980, B 0.9727), so this is
+not a channel-order, gross color-space, alpha, or spatial-offset failure.
+
+This observation supersedes no earlier equivalence claim because it uses a
+new input and deeper comparison boundary. It establishes an unresolved
+compatibility gap that needs parameter/world/timing-call tracing before the
+host can claim ntsc-rs equivalence at 16 bpc. The artifacts are local under
+`target/ntsc-rs-oracle16-v2-*`; hashes are recorded by the comparison report.

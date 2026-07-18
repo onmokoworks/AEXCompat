@@ -5107,6 +5107,43 @@ fn main() -> eframe::Result {
         }
         return Ok(());
     }
+    if args.len() == 7 && args[1] == "--render-experimental-smart-32-cpu-time" {
+        let plugin = Path::new(&args[2]);
+        let frame = args[5].to_string_lossy().parse::<i32>().unwrap_or(-1);
+        let fps = args[6].to_string_lossy().parse::<u32>().unwrap_or(0);
+        let timing = aexcompat_broker::image_render::RenderTiming {
+            current_time: frame,
+            time_step: 1,
+            total_time: frame.saturating_add(1),
+            time_scale: fps,
+        };
+        let hash = format!("{:X}", Sha256::digest(fs::read(plugin).unwrap()));
+        let parameters =
+            aexcompat_broker::image_render::inspect_experimental(&repository, plugin, &hash)
+                .unwrap_or_default();
+        let report = aexcompat_broker::image_render::render_experimental_image_at_time_with_format_context_ui_action_and_gpu_backend(
+            &repository,
+            plugin,
+            &hash,
+            Path::new(&args[3]),
+            Path::new(&args[4]),
+            &parameters,
+            timing,
+            true,
+            aexcompat_broker::image_render::RenderPixelFormat::Argb32f,
+            None,
+            None,
+            aexcompat_broker::image_render::RenderGpuBackend::Cpu,
+        );
+        match report {
+            Ok(value) => println!("{}", serde_json::to_string_pretty(&value).unwrap()),
+            Err(error) => {
+                eprintln!("{error}");
+                std::process::exit(1);
+            }
+        }
+        return Ok(());
+    }
     if args.len() == 7
         && (args[1] == "--render-experimental-time"
             || args[1] == "--render-experimental-smart-time")
