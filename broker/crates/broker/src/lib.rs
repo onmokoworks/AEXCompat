@@ -1,3 +1,4 @@
+pub mod conformance;
 pub mod fixture_profiles;
 pub mod host_core;
 #[cfg(windows)]
