@@ -118,12 +118,18 @@ class ResolveTests(unittest.TestCase):
         with self.assertRaises(ResolutionError):
             resolve_spec(spec, self.offset_map)
 
-    def test_lowercase_absolute_address_rejected_by_bound(self):
+    def test_lowercase_absolute_address_rejected_by_shape(self):
         spec = copy.deepcopy(self.spec)
-        spec["hooks"][0]["module_rva"] = "0x7ffabc001c40"  # valid shape, absolute magnitude
+        spec["hooks"][0]["module_rva"] = "0x7ffabc001c40"  # >8 hex digits (absolute)
         with self.assertRaises(ResolutionError) as ctx:
             resolve_spec(spec, self.offset_map)
-        self.assertIn("module-relative bound", str(ctx.exception))
+        self.assertIn("module-relative", str(ctx.exception))
+
+    def test_rva_over_eight_digits_rejected(self):
+        spec = copy.deepcopy(self.spec)
+        spec["hooks"][0]["module_rva"] = "0x000000001"  # 9 digits, schema-invalid
+        with self.assertRaises(ResolutionError):
+            resolve_spec(spec, self.offset_map)
 
     def test_negative_offset_in_offset_map_is_rejected(self):
         offset_map = copy.deepcopy(self.offset_map)

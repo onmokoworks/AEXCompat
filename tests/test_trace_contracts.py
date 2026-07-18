@@ -118,7 +118,7 @@ class TraceContractTests(unittest.TestCase):
         enter = copy.deepcopy(load_native_observation_events()[1])
         enter["known_function"]["module_rva"] = "0x7FFABC001C40"
         self.assertIn(
-            "known_function.module_rva must be a lowercase-hex module offset",
+            "known_function.module_rva must be a lowercase-hex module offset (<=8 digits)",
             validate_event(enter),
         )
 
@@ -165,13 +165,28 @@ class TraceContractTests(unittest.TestCase):
         for event in (load_native_observation_events()[0], load_native_observation_events()[-1]):
             self.assertEqual([], validate_event(event))
 
+    def test_known_function_rva_over_eight_digits_is_rejected(self):
+        # 9 hex digits (even with leading zeroes) is below 4 GiB numerically but
+        # exceeds the schema's {1,8} pattern; the validator must agree so a
+        # producer cannot emit JSONL the schema rejects.
+        enter = copy.deepcopy(load_native_observation_events()[1])
+        enter["known_function"]["module_rva"] = "0x000000001"
+        self.assertIn(
+            "known_function.module_rva must be a lowercase-hex module offset (<=8 digits)",
+            validate_event(enter),
+        )
+        # And the module_rva the validator accepts also satisfies the schema pattern.
+        import re
+        good = load_native_observation_events()[1]["known_function"]["module_rva"]
+        self.assertRegex(good, r"^0x[0-9a-f]{1,8}$")
+
     def test_known_function_lowercase_absolute_address_is_rejected(self):
-        # A lowercased 64-bit ASLR address matches the hex shape but is not a
-        # module-relative offset; the magnitude bound must reject it.
+        # A lowercased 64-bit ASLR address has more than 8 hex digits, so it is
+        # rejected by shape (consistent with the schema pattern).
         enter = copy.deepcopy(load_native_observation_events()[1])
         enter["known_function"]["module_rva"] = "0x7ffabc001c40"
         self.assertIn(
-            "known_function.module_rva exceeds the module-relative bound (looks absolute)",
+            "known_function.module_rva must be a lowercase-hex module offset (<=8 digits)",
             validate_event(enter),
         )
 
