@@ -83,6 +83,10 @@ $env:AEXCOMPAT_AE_SAVE_TIMEOUT_MS = [string]($TimeoutSeconds * 1000)
 if ($ParamName) {
     $env:AEXCOMPAT_AE_PARAM_NAME = $ParamName
     $env:AEXCOMPAT_AE_PARAM_VALUE = $ParamValue
+} else {
+    # The JSX reads these directly; clear inherited values so a default
+    # capture cannot pick up a stale override from the calling environment.
+    Remove-Item 'Env:AEXCOMPAT_AE_PARAM_NAME','Env:AEXCOMPAT_AE_PARAM_VALUE' -ErrorAction SilentlyContinue
 }
 try {
     $escapedScriptPath = $scriptPath.Replace('"', '\"')
