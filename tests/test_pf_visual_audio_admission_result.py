@@ -6,7 +6,9 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def worker_source():
     return ((ROOT / "minihost" / "src" / "l2_main.cpp").read_text() + "\n" +
-            (ROOT / "minihost" / "src" / "l2_cli_dispatch.cpp").read_text())
+            (ROOT / "minihost" / "src" / "l2_cli_dispatch.cpp").read_text() + "\n" +
+            (ROOT / "minihost" / "src" / "host_audio_runtime.hpp").read_text() + "\n" +
+            (ROOT / "minihost" / "src" / "host_audio_runtime.cpp").read_text())
 
 
 def test_visual_audio_admission_and_audio_only_exemption():
@@ -36,10 +38,10 @@ def test_visual_audio_admission_and_audio_only_exemption():
 
 def test_worker_checks_admission_before_source_availability():
     source = worker_source()
-    admission = source.index("if (!g_audio_checkout_allowed)")
-    source_check = source.index("!g_audio_source", admission)
+    admission = source.index("if (!telemetry_.checkout_allowed)")
+    source_check = source.index("!source_", admission)
     assert admission < source_check
-    assert "audio_mode || g_audio_usage_advertised" in source
+    assert "audio_only_mode || usage_advertised" in source
     assert 'L"--render-image-audio"' in source
     fixture = (ROOT / "instruments" / "pf-visual-audio-probe" / "pf_visual_audio_probe.cpp").read_text()
     assert "PF_CHECKOUT_LAYER_AUDIO" in fixture
@@ -71,9 +73,9 @@ def test_audio_checkout_windows_are_bounded_owned_and_time_scaled():
     worker = worker_source()
     assert "std::vector<unsigned char> samples;" in worker
     assert "kMaxCheckoutSamples = 10'000'000" in worker
-    assert "layer_audio.samples.assign" in worker
+    assert "handle.samples.assign" in worker
     assert "const bool sentinel_frame = frame == window_count" in worker
-    assert "g_last_audio_window_silence_samples = static_cast<int32_t>(silence_frames)" in worker
+    assert "telemetry_.last_window_silence_samples" in worker
     assert "write<uint32_t>(input, kInTimeScale, 44100);" in worker
     broker = (ROOT / "broker" / "crates" / "broker" / "src" / "image_render.rs").read_text()
     assert '"last_audio_window_sample_count"' in broker
@@ -98,8 +100,8 @@ def test_audio_checkout_converts_requested_sdk_formats():
     assert "requested_rate" in source
     assert "source_position" in source
     assert "std::clamp(value, -1.0f, 1.0f)" in source
-    assert "g_last_audio_output_format" in source
-    assert "g_rejected_audio_format_requests" in source
+    assert "telemetry_.last_output_format" in source
+    assert "telemetry_.rejected_format_requests" in source
 
 
 def test_audio_handles_support_bounded_overlapping_lifetimes():
@@ -116,10 +118,10 @@ def test_audio_handles_support_bounded_overlapping_lifetimes():
     assert data["negative"]["status"] == "render_failed"
     assert data["negative"]["worker_exit_code"] == 21
     source = worker_source()
-    assert "kMaxLayerAudioHandles = 16" in source
-    assert "g_layer_audio_handles" in source
+    assert "std::array<Handle, 16> handles_" in source
+    assert "live_handle_count" in source
     assert "audio_handle_lifetimes_balanced()" in source
-    assert "g_peak_live_audio_handles" in source
+    assert "telemetry_.peak_live_handles" in source
 
 
 def test_audio_data_includes_the_sdk_trailing_silent_frame():
@@ -134,4 +136,4 @@ def test_audio_data_includes_the_sdk_trailing_silent_frame():
     source = worker_source()
     assert "returned_frames = window_count + 1" in source
     assert "sentinel_frame = frame == window_count" in source
-    assert "g_last_audio_returned_sample_frames" in source
+    assert "telemetry_.last_returned_sample_frames" in source

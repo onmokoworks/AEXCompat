@@ -7,6 +7,8 @@ RESULT = ROOT / "analysis" / "SDK_BACKWARDS_AUDIO_RESULT_2026-07-15.json"
 WORKER_SOURCES = (
     ROOT / "minihost" / "src" / "l2_main.cpp",
     ROOT / "minihost" / "src" / "l2_cli_dispatch.cpp",
+    ROOT / "minihost" / "src" / "host_audio_runtime.hpp",
+    ROOT / "minihost" / "src" / "host_audio_runtime.cpp",
 )
 BROKER = ROOT / "broker" / "crates" / "broker" / "src" / "image_render.rs"
 HARNESS = ROOT / "broker" / "crates" / "harness" / "src" / "main.rs"
@@ -67,7 +69,7 @@ def test_audio_abi_is_instrumented_and_runtime_boundaries_are_explicit():
         "kAudioGuardSamples",
         "checkout_layer_audio",
         "audio_lifetimes_balanced",
-        "g_audio_checkout_allowed",
+        "checkout_allowed",
         "kUtilsAnsiSin",
     ):
         assert marker in worker

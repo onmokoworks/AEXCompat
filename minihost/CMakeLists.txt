@@ -20,6 +20,7 @@ set(AEXCOMPAT_L2_WORKER_SOURCES
     src/gpu_device_info_registry.cpp
     src/gpu_memory_world_transport.cpp
     src/gpu_opencl_backend.cpp
+    src/host_audio_runtime.cpp
     src/l2_cli_dispatch.cpp
     src/l2_main.cpp
     src/native_stdout_guard.cpp
