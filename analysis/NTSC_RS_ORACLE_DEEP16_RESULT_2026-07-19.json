@@ -17,6 +17,43 @@
     "observed": true,
     "meaning": "AE 16 bpc captures of the gradient input at comp fps 24 and fps 1 (one-frame duration) are byte-identical"
   },
+  "mechanism": {
+    "verified_by": "tools/verify-deep16-mechanism.py",
+    "artifacts": {
+      "smart_input_dump": "target/oracle-deep16/host-gradient-smart-input.rgba16le",
+      "noeffect_capture_png": "target/oracle-deep16/ae-noeffect-16.png",
+      "noeffect_capture_fps": 24
+    },
+    "manifest": {
+      "ae_composed_map": {
+        "deviation_bounded_by_one": true,
+        "deviation_histogram": {
+          "-1": 126,
+          "0": 129,
+          "1": 1
+        },
+        "distinct_8bit_values_observed": 256,
+        "formula": "v * 257 + d, d in {-1, 0, +1}",
+        "holds": true,
+        "input_png_sha256": "bb84e35ea6bdbfa178d13d6571dbff84aa2b78e57f3dbc9831aa7448c619c97e",
+        "mapping_deterministic": true,
+        "noeffect_png_sha256": "147a11cc365f1b3681638792e10c27fc99c63197dda8c2c2782b17d1a40a5634",
+        "roundtrip_round_v16_div_257_exact": true
+      },
+      "generated_by": "tools/verify-deep16-mechanism.py",
+      "holds": true,
+      "host_promotion": {
+        "formula": "round(v * 32768 / 255) = (v * 32768 + 127) // 255",
+        "holds": true,
+        "input_decoded_bit_depth": 8,
+        "input_png_sha256": "bb84e35ea6bdbfa178d13d6571dbff84aa2b78e57f3dbc9831aa7448c619c97e",
+        "mismatched_samples": 0,
+        "smart_input_dump_sha256": "a04dfc11c53ef80d2dd180a49efc748450b3770d5c143bb7d72f88ef9de647b6",
+        "total_samples": 8294400
+      },
+      "schema_version": 1
+    }
+  },
   "cases": [
     {
       "name": "gradient-fps24",
@@ -39,7 +76,15 @@
         "fps": 24,
         "bpc": 16,
         "color_pinned": false,
-        "working_space": "None"
+        "working_space": "None",
+        "effect_match_name": "ntsc-rs",
+        "installed_aex_pinned_for_session": true,
+        "match_name_scan": {
+          "ae_plugins_root_scanned": true,
+          "aex_files_scanned": 563,
+          "other_files_containing_effect_name": 0,
+          "installed_contains_effect_name": true
+        }
       },
       "comparison": {
         "comparison_boundary": {
@@ -102,7 +147,15 @@
         "fps": 1,
         "bpc": 16,
         "color_pinned": false,
-        "working_space": "None"
+        "working_space": "None",
+        "effect_match_name": "ntsc-rs",
+        "installed_aex_pinned_for_session": true,
+        "match_name_scan": {
+          "ae_plugins_root_scanned": true,
+          "aex_files_scanned": 563,
+          "other_files_containing_effect_name": 0,
+          "installed_contains_effect_name": true
+        }
       },
       "comparison": {
         "comparison_boundary": {
@@ -165,7 +218,15 @@
         "fps": 24,
         "bpc": 16,
         "color_pinned": false,
-        "working_space": "None"
+        "working_space": "None",
+        "effect_match_name": "ntsc-rs",
+        "installed_aex_pinned_for_session": true,
+        "match_name_scan": {
+          "ae_plugins_root_scanned": true,
+          "aex_files_scanned": 563,
+          "other_files_containing_effect_name": 0,
+          "installed_contains_effect_name": true
+        }
       },
       "comparison": {
         "comparison_boundary": {

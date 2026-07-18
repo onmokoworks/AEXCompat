@@ -7,10 +7,15 @@ param(
 
 # Regenerates the ntsc-rs full-precision 16 bpc oracle evidence document from
 # the executed capture/render/comparison artifacts under $CorpusRoot
-# (issue #53). Evidence documents in analysis/ are refresh-script territory
+# (issue #53, hardened per the PR #56 review in issue #61). Evidence
+# documents in analysis/ are refresh-script territory
 # (docs/EVIDENCE_POLICY_2026-07-18.md section 5.2); this script only reads
 # artifacts that the recorded commands produced and never serializes absolute
-# paths or raw image contents.
+# paths or raw image contents. Every judgment value is recomputed here: the
+# pixel comparisons are re-executed and required to equal the stored
+# comparison JSONs, the host renders (including the smart-input world dump)
+# are re-executed and required byte-identical, and the promotion/export
+# mechanism manifest is recomputed by tools/verify-deep16-mechanism.py.
 
 $ErrorActionPreference = 'Stop'
 
@@ -40,6 +45,55 @@ function DecodedRgbaSha256([string]$PngPath) {
 $corpus = (Resolve-Path -LiteralPath $CorpusRoot).Path
 $aexPath = (Resolve-Path -LiteralPath $TestedAex).Path
 $harnessPath = (Resolve-Path -LiteralPath $Harness).Path
+$repoRoot = Split-Path -Parent $PSScriptRoot
+$expectedMatchName = 'ntsc-rs'
+
+# Fail-closed identity validation for one capture result (issue #61): the
+# capture runner records the installed plug-in hash before and after the AE
+# session plus a match-name collision scan over the plug-in search roots.
+# A result without those fields, or with a hash that differs from the tested
+# AEX, is refused instead of being copied into evidence.
+function Assert-CaptureIdentity([object]$Capture, [string]$CaseName, [string]$TestedHash) {
+    foreach ($field in 'installed_aex_sha256_before', 'installed_aex_sha256_after', 'match_name_scan') {
+        if ($null -eq $Capture.$field) {
+            throw "capture result for $CaseName lacks the AE-loaded-module identity field '$field' (re-capture with the current runner)"
+        }
+    }
+    if ([string]$Capture.installed_aex_sha256_before -ne $TestedHash -or
+        [string]$Capture.installed_aex_sha256_after -ne $TestedHash) {
+        throw "capture result for $CaseName does not pin the installed plug-in to the tested AEX for the whole AE session"
+    }
+    $scan = $Capture.match_name_scan
+    if ([string]$scan.effect_name -ne $expectedMatchName -or
+        -not [bool]$scan.ae_plugins_root_scanned -or
+        [int]$scan.other_files_containing_effect_name -ne 0 -or
+        -not [bool]$scan.installed_contains_effect_name) {
+        throw "capture result for $CaseName does not establish a collision-free match-name scan for '$expectedMatchName'"
+    }
+}
+
+# Re-run one pixel comparison with the frozen arguments and require the
+# regenerated report to deep-equal the stored comparison JSON (issue #61):
+# without this, a stored comparison with only its hash fields rewritten
+# could smuggle arbitrary judgment values into the evidence.
+function Assert-ComparisonReproduces([string]$HostRaw, [string]$AePng, [int]$Width, [int]$Height, [string]$StoredPath, [string]$CaseName) {
+    $scratch = Join-Path ([System.IO.Path]::GetTempPath()) ("aexcompat-refresh-" + [guid]::NewGuid().ToString('N') + '.json')
+    try {
+        & python (Join-Path $PSScriptRoot 'compare-pixel-oracles.py') `
+            --raw $HostRaw --render $AePng --width $Width --height $Height `
+            --raw-format rgba16le --raw-integer-max 32768 --tolerance 0.000125 |
+            Set-Content -LiteralPath $scratch -Encoding utf8
+        if ($LASTEXITCODE -ne 0) {
+            throw "re-running compare-pixel-oracles.py failed for $CaseName"
+        }
+        & python -c "import json, sys; a = json.load(open(sys.argv[1], encoding='utf-8-sig')); b = json.load(open(sys.argv[2], encoding='utf-8-sig')); sys.exit(0 if a == b else 1)" $scratch $StoredPath
+        if ($LASTEXITCODE -ne 0) {
+            throw "stored comparison for $CaseName does not equal the recomputed comparison report"
+        }
+    } finally {
+        Remove-Item -LiteralPath $scratch -ErrorAction SilentlyContinue
+    }
+}
 
 $cases = @(
     [ordered]@{
@@ -108,6 +162,11 @@ $caseRecords = foreach ($case in $cases) {
     if ([int]$capture.fps -ne $case.expected_fps) {
         throw "capture fps for $($case.name) does not match the case definition"
     }
+    if (-not [bool]$capture.effect_applied -or
+        [string]$capture.effect_match_name -ne $expectedMatchName) {
+        throw "capture for $($case.name) did not resolve the effect match name '$expectedMatchName'"
+    }
+    Assert-CaptureIdentity $capture $case.name (Sha256 $aexPath)
     if ($null -eq $aeVersion) { $aeVersion = [string]$capture.ae_version }
     elseif ($aeVersion -ne [string]$capture.ae_version) {
         throw 'captures span more than one After Effects version'
@@ -120,6 +179,7 @@ $caseRecords = foreach ($case in $cases) {
     if ($comparison.hashes.render_sha256 -ne (Sha256 $aePng)) {
         throw "comparison for $($case.name) was not produced from $($case.ae_prefix).png"
     }
+    Assert-ComparisonReproduces $hostRaw $aePng $case.width $case.height $comparePath $case.name
     # Bind the host render to the recorded input: re-execute the recorded
     # render command against this input and require byte-identical deep
     # outputs (both the RGBA16 PNG and the rgba16le transport sidecar; the
@@ -128,7 +188,13 @@ $caseRecords = foreach ($case in $cases) {
         $scratchBase = Join-Path ([System.IO.Path]::GetTempPath()) ("aexcompat-refresh-" + [guid]::NewGuid().ToString('N'))
         $rerenderPng = "$scratchBase.png"
         $rerenderRaw = "$scratchBase.rgba16le"
+        # The world-dump directory must sit under <repository>/target and
+        # start empty (broker constraint); dumping during the re-render binds
+        # the stored smart-input world snapshot to this input as well.
+        $dumpDir = Join-Path $repoRoot ("target\refresh-dumps-" + [guid]::NewGuid().ToString('N'))
+        New-Item -ItemType Directory -Path $dumpDir | Out-Null
         try {
+            $env:AEXCOMPAT_DUMP_WORLDS_DIR = $dumpDir
             & $harnessPath --render-experimental-smart-16-deep $aexPath $inputPath $rerenderPng | Out-Null
             if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $rerenderPng) -or
                 -not (Test-Path -LiteralPath $rerenderRaw)) {
@@ -140,9 +206,21 @@ $caseRecords = foreach ($case in $cases) {
             if ((Sha256 $rerenderRaw) -ne (Sha256 $hostRaw)) {
                 throw "$($case.host_prefix).rgba16le is not the transport sidecar of the recorded render (re-render differs)"
             }
+            $storedDump = Join-Path $corpus ("{0}-smart-input.rgba16le" -f $case.host_prefix)
+            if (Test-Path -LiteralPath $storedDump) {
+                $freshDump = Join-Path $dumpDir ("000-smart-input-{0}x{1}.rgba16le" -f $case.width, $case.height)
+                if (-not (Test-Path -LiteralPath $freshDump)) {
+                    throw "re-render for $($case.name) produced no smart-input world snapshot"
+                }
+                if ((Sha256 $freshDump) -ne (Sha256 $storedDump)) {
+                    throw "$($case.host_prefix)-smart-input.rgba16le is not the smart-input world of the recorded render (re-dump differs)"
+                }
+            }
         } finally {
+            Remove-Item "Env:AEXCOMPAT_DUMP_WORLDS_DIR" -ErrorAction SilentlyContinue
             Remove-Item -LiteralPath $rerenderPng -ErrorAction SilentlyContinue
             Remove-Item -LiteralPath $rerenderRaw -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath $dumpDir -Recurse -Force -ErrorAction SilentlyContinue
         }
         $rerendered[$case.host_prefix] = $true
     }
@@ -169,9 +247,67 @@ $caseRecords = foreach ($case in $cases) {
             bpc = [int]$capture.bpc
             color_pinned = [bool]$capture.color_pinned
             working_space = [string]$capture.working_space
+            effect_match_name = [string]$capture.effect_match_name
+            installed_aex_pinned_for_session = $true
+            match_name_scan = [ordered]@{
+                ae_plugins_root_scanned = [bool]$capture.match_name_scan.ae_plugins_root_scanned
+                aex_files_scanned = [int]$capture.match_name_scan.aex_files_scanned
+                other_files_containing_effect_name = [int]$capture.match_name_scan.other_files_containing_effect_name
+                installed_contains_effect_name = [bool]$capture.match_name_scan.installed_contains_effect_name
+            }
         }
         comparison = $comparison
     }
+}
+
+# Promotion/export mechanism manifest (issue #61): recomputed from the
+# stored smart-input world snapshot and the no-effect 16 bpc control
+# capture, so the mechanism claims in the capture note stay auditable from
+# a clean clone. The no-effect capture goes through the same fail-closed
+# identity checks as the effect captures (minus the effect resolution).
+$noeffectPng = Join-Path $corpus 'ae-noeffect-16.png'
+$noeffectResult = Join-Path $corpus 'ae-noeffect-16.result.json'
+$gradientInput = Join-Path $corpus 'input-gradient-1920x1080.png'
+$gradientDump = Join-Path $corpus 'host-gradient-smart-input.rgba16le'
+foreach ($required in @($noeffectPng, $noeffectResult, $gradientDump)) {
+    if (-not (Test-Path -LiteralPath $required)) {
+        throw "missing mechanism artifact: $required"
+    }
+}
+$noeffectCapture = ReadJson $noeffectResult
+if ($noeffectCapture.status -ne 'captured' -or [bool]$noeffectCapture.effect_applied) {
+    throw 'no-effect capture result is not a captured no-effect control'
+}
+if ([string]$noeffectCapture.input_sha256 -ne (Sha256 $gradientInput)) {
+    throw 'no-effect capture does not record the gradient input image'
+}
+if ([int]$noeffectCapture.bpc -ne 16) {
+    throw 'no-effect capture is not a 16 bpc capture'
+}
+Assert-CaptureIdentity $noeffectCapture 'noeffect-control' (Sha256 $aexPath)
+if ($aeVersion -ne [string]$noeffectCapture.ae_version) {
+    throw 'no-effect capture is from a different After Effects version'
+}
+$mechanismScratch = Join-Path ([System.IO.Path]::GetTempPath()) ("aexcompat-refresh-" + [guid]::NewGuid().ToString('N') + '.json')
+try {
+    & python (Join-Path $PSScriptRoot 'verify-deep16-mechanism.py') `
+        --input-png $gradientInput --smart-input-dump $gradientDump `
+        --noeffect-png $noeffectPng --out $mechanismScratch | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        throw 'verify-deep16-mechanism.py refuted a mechanism claim; refusing to write evidence'
+    }
+    $mechanism = ReadJson $mechanismScratch
+} finally {
+    Remove-Item -LiteralPath $mechanismScratch -ErrorAction SilentlyContinue
+}
+$mechanismRecord = [ordered]@{
+    verified_by = 'tools/verify-deep16-mechanism.py'
+    artifacts = [ordered]@{
+        smart_input_dump = 'target/oracle-deep16/host-gradient-smart-input.rgba16le'
+        noeffect_capture_png = 'target/oracle-deep16/ae-noeffect-16.png'
+        noeffect_capture_fps = [int]$noeffectCapture.fps
+    }
+    manifest = $mechanism
 }
 
 # The two gradient captures differ only in comp fps (24 vs 1, one-frame
@@ -203,6 +339,7 @@ $document = [ordered]@{
         observed = $fpsInvariant
         meaning = 'AE 16 bpc captures of the gradient input at comp fps 24 and fps 1 (one-frame duration) are byte-identical'
     }
+    mechanism = $mechanismRecord
     cases = @($caseRecords)
 }
 

@@ -70,6 +70,47 @@ class NtscRsOracleDeep16ResultTests(unittest.TestCase):
         self.assertEqual(fps1["ae_capture"]["fps"], 1)
         self.assertTrue(self.document["ae_fps_invariance"]["observed"])
 
+    def test_every_effect_capture_pins_the_ae_loaded_module_identity(self):
+        # Issue #61: the evidence must not accept a capture whose AE-loaded
+        # module identity is unestablished (same-match-name shadow plug-in,
+        # or an installed file swapped during the AE session).
+        for case in self.document["cases"]:
+            capture = case["ae_capture"]
+            with self.subTest(case=case["name"]):
+                self.assertEqual(capture["effect_match_name"], "ntsc-rs")
+                self.assertTrue(capture["installed_aex_pinned_for_session"])
+                scan = capture["match_name_scan"]
+                self.assertTrue(scan["ae_plugins_root_scanned"])
+                self.assertGreater(scan["aex_files_scanned"], 0)
+                self.assertEqual(scan["other_files_containing_effect_name"], 0)
+                self.assertTrue(scan["installed_contains_effect_name"])
+
+    def test_mechanism_manifest_is_recomputed_and_holds(self):
+        mechanism = self.document["mechanism"]
+        self.assertEqual(mechanism["verified_by"],
+                         "tools/verify-deep16-mechanism.py")
+        manifest = mechanism["manifest"]
+        self.assertTrue(manifest["holds"])
+        promotion = manifest["host_promotion"]
+        self.assertTrue(promotion["holds"])
+        self.assertEqual(promotion["mismatched_samples"], 0)
+        self.assertGreater(promotion["total_samples"], 0)
+        self.assertTrue(SHA256.match(promotion["smart_input_dump_sha256"]))
+        ae_map = manifest["ae_composed_map"]
+        self.assertTrue(ae_map["holds"])
+        self.assertTrue(ae_map["mapping_deterministic"])
+        self.assertTrue(ae_map["deviation_bounded_by_one"])
+        self.assertTrue(ae_map["roundtrip_round_v16_div_257_exact"])
+        self.assertLessEqual(set(ae_map["deviation_histogram"]),
+                             {"-1", "0", "1"})
+        self.assertEqual(ae_map["distinct_8bit_values_observed"], 256)
+        artifacts = mechanism["artifacts"]
+        self.assertEqual(
+            artifacts["smart_input_dump"],
+            "target/oracle-deep16/host-gradient-smart-input.rgba16le")
+        self.assertEqual(artifacts["noeffect_capture_png"],
+                         "target/oracle-deep16/ae-noeffect-16.png")
+
     def test_recorded_identities_are_well_formed(self):
         self.assertTrue(SHA256.match(self.document["environment"]["plugin_sha256"]))
         self.assertEqual(self.document["environment"]["host_pixel_format"], "argb16")

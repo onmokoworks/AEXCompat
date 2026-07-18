@@ -414,3 +414,52 @@ Two side findings from the same session, tracked separately:
   lingering `AfterFX.com` shim (observed orphaned from an earlier
   session) is named `AfterFX.com` and passes the gate. The capture gate
   now also refuses on `AfterFX.com`.
+
+## Follow-up: evidence hardening after the PR #56 review (2026-07-19,
+   issue #61)
+
+The post-merge review of PR #56 found three gaps in the deep16 evidence
+chain. All three are addressed; the evidence document was regenerated from
+fresh captures taken with the hardened runner (all four AE renders came
+back byte-identical to the previous session's captures, which doubles as
+another determinism observation).
+
+1. **AE-loaded module identity.** The capture runner now scans the
+   installed plug-in's folder tree and the AE application's own `Plug-ins`
+   tree for any other `.aex` containing the effect name bytes (refusing on
+   a collision), and re-hashes the installed plug-in after AE exits
+   (refusing on change). Both hashes and the scan summary are recorded in
+   the capture result; the refresh script fails closed unless every
+   capture pins the installed plug-in to the tested bytes for the whole
+   session, with a collision-free scan and the expected
+   `effect_match_name`. Residual assumption, stated rather than hidden:
+   the scan covers the two plug-in search roots named above, and the
+   pre-launch scan races a file added between scan and AE startup only
+   within a window of seconds.
+2. **Comparisons are recomputed at refresh time.** The refresh script now
+   re-runs `tools/compare-pixel-oracles.py` with the frozen arguments for
+   every case and requires the regenerated report to deep-equal the stored
+   comparison JSON, so a stored comparison with rewritten hash fields can
+   no longer smuggle judgment values into the evidence.
+3. **The promotion/export mechanism is artifact-bound.** The smart-input
+   world snapshot (`host-gradient-smart-input.rgba16le`, re-dumped and
+   hash-verified during the refresh re-render) and the no-effect 16 bpc
+   control capture (`ae-noeffect-16.png`, identity-checked like the effect
+   captures) are corpus artifacts now, and
+   `tools/verify-deep16-mechanism.py` recomputes both mechanism claims
+   from them at refresh time: the host promotion
+   `round(v * 32768 / 255)` holds on all 8,294,400 samples, and AE's
+   composed import/export map is `v * 257 + d` with `d` in {-1, 0, +1}
+   (histogram -1: 126, 0: 129, +1: 1 over all 256 values), deterministic
+   and exactly invertible by `round(v16 / 257)`. The earlier section's
+   mechanism statements are thereby machine-checked instead of resting on
+   session-local observations; the export-map measurement (observation)
+   remains separate from the residue attribution (explanation consistent
+   with those bounds, not a per-sample proof).
+
+The AE-side captures for this refresh also surfaced an operational
+constraint worth recording: launching a capture while the previous AE
+instance is still tearing down can hand the `-r` script to the dying
+instance, which rejects it ("Attempt was made to run a second script
+while another script was already running") and the new capture times out.
+Waiting for process exit plus a grace period between captures avoids it.

@@ -29,6 +29,10 @@ def test_reference_capture_contract_is_hash_bound_create_new_and_temporary():
     script = SCRIPT.read_text(encoding="utf-8")
     assert "Get-Process AfterFX,'AfterFX.com',aerender,aerendercore" in runner
     assert "Installed AEX hash does not match tested AEX" in runner
+    assert "Installed AEX changed during the capture session" in runner
+    assert "the AE-loaded module identity would be ambiguous" in runner
+    assert "installed_aex_sha256_after" in runner
+    assert "match_name_scan" in runner
     assert "OutputPng already exists" in runner
     assert "Test-Path -LiteralPath $resultPath" in runner
     assert "[DateTime]::UtcNow -lt $deadline" in runner

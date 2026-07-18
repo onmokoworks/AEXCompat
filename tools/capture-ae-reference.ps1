@@ -90,6 +90,37 @@ $stagedInput = Join-Path ([System.IO.Path]::GetTempPath()) `
 Copy-Item -LiteralPath $inputPath -Destination $stagedInput
 $inputHash = Get-Sha256Hex $stagedInput
 
+# AE-loaded module identity (issue #61): AE resolves the effect by its match
+# name, so another .aex carrying the same name bytes anywhere in the plug-in
+# search roots could shadow the installed plug-in and still satisfy this
+# capture. Scan the installed plug-in's folder tree and the AE application's
+# own Plug-ins tree for .aex files containing the effect name bytes and
+# refuse on any collision. ISO-8859-1 (28591) preserves bytes 1:1 and exists
+# on both Windows PowerShell and pwsh, so an ordinal string search over that
+# decoding is a byte search.
+$installedRoot = Split-Path -Parent $installedPath
+$aePluginsRoot = Join-Path (Split-Path -Parent $afterEffectsPath) 'Plug-ins'
+$aePluginsRootExists = Test-Path -LiteralPath $aePluginsRoot -PathType Container
+$scanRoots = @($installedRoot) + @(if ($aePluginsRootExists) { $aePluginsRoot })
+$aexFilesScanned = 0
+$collisions = @()
+$installedContainsEffectName = $false
+foreach ($root in $scanRoots) {
+    foreach ($aexFile in Get-ChildItem -LiteralPath $root -Recurse -Filter '*.aex' -File -ErrorAction Stop) {
+        $aexFilesScanned++
+        $aexText = [System.IO.File]::ReadAllText($aexFile.FullName, [System.Text.Encoding]::GetEncoding(28591))
+        $containsName = $aexText.IndexOf($EffectName, [System.StringComparison]::Ordinal) -ge 0
+        if ($aexFile.FullName -ieq $installedPath) {
+            $installedContainsEffectName = $containsName
+        } elseif ($containsName) {
+            $collisions += $aexFile.Name
+        }
+    }
+}
+if ($collisions.Count -gt 0) {
+    throw "Another .aex in the plug-in search roots contains the effect name '$EffectName': $($collisions -join ', '); the AE-loaded module identity would be ambiguous."
+}
+
 $env:AEXCOMPAT_AE_INPUT = $stagedInput
 $env:AEXCOMPAT_AE_OUTPUT = $outputPath
 $env:AEXCOMPAT_AE_RESULT = $resultPath
@@ -159,5 +190,21 @@ if (-not (Test-Path -LiteralPath $outputPath)) {
 # manifest, and evidence refresh scripts verify against it).
 $result | Add-Member -NotePropertyName 'input_sha256' -NotePropertyValue $inputHash
 $result | Add-Member -NotePropertyName 'tested_aex_sha256' -NotePropertyValue $testedHash.ToLowerInvariant()
+# Re-hash the installed plug-in after AE has quit: together with the
+# pre-launch hash gate and the match-name collision scan this binds the
+# whole AE session to the tested bytes (issue #61). Fail closed on change.
+$installedHashAfter = Get-Sha256Hex $installedPath
+if ($installedHashAfter -ne $testedHash) {
+    throw 'Installed AEX changed during the capture session; the capture identity is void.'
+}
+$result | Add-Member -NotePropertyName 'installed_aex_sha256_before' -NotePropertyValue $installedHash.ToLowerInvariant()
+$result | Add-Member -NotePropertyName 'installed_aex_sha256_after' -NotePropertyValue $installedHashAfter.ToLowerInvariant()
+$result | Add-Member -NotePropertyName 'match_name_scan' -NotePropertyValue ([ordered]@{
+    effect_name = $EffectName
+    ae_plugins_root_scanned = $aePluginsRootExists
+    aex_files_scanned = $aexFilesScanned
+    other_files_containing_effect_name = $collisions.Count
+    installed_contains_effect_name = $installedContainsEffectName
+})
 $result | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $resultPath -Encoding utf8
 $result | ConvertTo-Json -Depth 8
