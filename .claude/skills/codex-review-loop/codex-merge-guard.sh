@@ -49,5 +49,22 @@ if [ -n "$find_ts" ] && [[ "$find_ts" > "$clean_ts" ]]; then
   echo "REFUSE: newer Codex findings after the clean"; exit 1
 fi
 
+# Owner comment race: owner_review_gate only sees review STATES. An owner can
+# raise a concern as a top-level PR comment or a fresh inline review comment
+# WITHOUT a CHANGES_REQUESTED review, after Codex went clean but before the
+# merge. Refuse when any such owner activity is newer than the clean. Scoped to
+# "> clean" so already-addressed history does not block forever, and inline
+# replies (an ack thread) are excluded so this session's own replies-as-owner
+# do not self-block.
+owner_after=$(
+  { owner_inline_after "$clean_ts" <<<"$pr_comments"
+    owner_comments_after "$clean_ts" <<<"$issue_comments"; } | grep -v '^$' || true
+)
+if [ -n "$owner_after" ]; then
+  echo "REFUSE: owner raised comments after the Codex clean; address them first:"
+  echo "$owner_after"
+  exit 1
+fi
+
 # Atomic: fails if head moved since the checks above.
 gh pr merge "$PR" --repo "$OWNER/$REPO" --merge --delete-branch --match-head-commit "$head"

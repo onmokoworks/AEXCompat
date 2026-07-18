@@ -67,18 +67,23 @@ owner_blocking_reviews() {
     | "OWNER-REVIEW \(.state): \(((.body // "") | split("\n"))[0])"'
 }
 
-# Merge gate over the FULL review history: block while an owner CHANGES_REQUESTED
-# is not yet cleared. Only a later APPROVED or DISMISSED clears it; a COMMENTED
-# review is neutral (a reply to an inline comment posts a bodyless COMMENTED
-# review as the owner, which must NOT dismiss a real change request). This
-# avoids blocking forever on resolved history AND avoids a reply silently
-# clearing the gate (input: reviews array). Echoes "BLOCK" or "".
+# Merge gate over the FULL review history: block while ANY owner's change
+# request is unresolved. Resolution is PER REVIEWER — only a later APPROVED or
+# DISMISSED from the SAME login clears that login's CHANGES_REQUESTED. A
+# COMMENTED review is neutral (a reply to an inline comment posts a bodyless
+# COMMENTED review, which must not dismiss a real change request), and one
+# owner's APPROVED must not clear another owner's blocker (input: reviews
+# array). Echoes "BLOCK" or "".
 owner_review_gate() {
   jq -r --argjson owner "$OWNER_LOGINS" '
-    [ .[] | select([.user.login] | inside($owner)) ] as $r
-    | ( [ $r[] | select(.state == "CHANGES_REQUESTED") | .submitted_at ] | max // "" ) as $cr
-    | ( [ $r[] | select(.state == "APPROVED" or .state == "DISMISSED") | .submitted_at ] | max // "" ) as $clear
-    | if ($cr != "" and ($clear == "" or $cr > $clear)) then "BLOCK" else "" end'
+    [ .[] | select([.user.login] | inside($owner)) ]
+    | group_by(.user.login)
+    | any(
+        ( [ .[] | select(.state == "CHANGES_REQUESTED") | .submitted_at ] | max // "" ) as $cr
+        | ( [ .[] | select(.state == "APPROVED" or .state == "DISMISSED") | .submitted_at ] | max // "" ) as $clear
+        | $cr != "" and ($clear == "" or $cr > $clear)
+      )
+    | if . then "BLOCK" else "" end'
 }
 
 # Timestamp of the newest Codex CLEAN that references $1 (full head SHA), or ""
@@ -124,6 +129,30 @@ owner_inline() {
   jq -r --argjson owner "$OWNER_LOGINS" '
     .[] | select([.user.login] | inside($owner))
     | "OWNER-FINDING id=\(.id) \(.path):\(.line // .original_line): \((.body | split("\n")[0]))"'
+}
+
+# Merge-gate view of owner activity AFTER a Codex clean at $1 (the race the
+# guard must catch: the owner speaks after clean but before merge). Scoped to
+# "> clean" so old, already-addressed items do not block forever, and excludes
+# reply comments (an ack thread is not a new finding) so this session's own
+# replies-as-owner do not self-block (input: pull review-comments array).
+owner_inline_after() {
+  jq -r --arg ts "$1" --argjson owner "$OWNER_LOGINS" '
+    .[] | select([.user.login] | inside($owner))
+    | select(.created_at > $ts)
+    | select((.in_reply_to_id // null) == null)
+    | "OWNER-INLINE id=\(.id) \(.path):\(.line // .original_line): \((.body | split("\n")[0]))"'
+}
+
+# Owner top-level comments after a Codex clean at $1, excluding a bare trigger
+# (input: issue-comments array). This session posts its summaries before
+# re-triggering, so they precede the clean and are excluded by "> clean".
+owner_comments_after() {
+  jq -r --arg ts "$1" --argjson owner "$OWNER_LOGINS" '
+    .[] | select([.user.login] | inside($owner))
+    | select(.created_at > $ts)
+    | select((.body | ascii_downcase | gsub("[[:space:]]"; "")) != "@codexreview")
+    | "OWNER-COMMENT: \((.body | split("\n"))[0])"'
 }
 
 # Owner top-level PR comments, excluding ONLY a bare "@codex review" trigger.

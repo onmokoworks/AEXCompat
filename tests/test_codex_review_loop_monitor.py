@@ -163,6 +163,70 @@ def test_commented_review_does_not_clear_changes_requested() -> None:
     assert _call("owner_review_gate", payload) == "BLOCK"
 
 
+def test_one_owner_approved_does_not_clear_another_owners_changes_requested() -> None:
+    # Per-reviewer gate: naari3's later APPROVED must NOT dismiss onmokoworks's
+    # CHANGES_REQUESTED. An aggregate-max clear would wrongly unblock here.
+    payload = [
+        {"user": {"login": "onmokoworks"}, "state": "CHANGES_REQUESTED", "submitted_at": "2026-07-18T19:19:00Z"},
+        {"user": {"login": "naari3"}, "state": "APPROVED", "submitted_at": "2026-07-18T19:40:00Z"},
+    ]
+    assert _call("owner_review_gate", payload) == "BLOCK"
+
+
+def test_same_owner_later_approved_clears_own_changes_requested() -> None:
+    payload = [
+        {"user": {"login": "onmokoworks"}, "state": "CHANGES_REQUESTED", "submitted_at": "2026-07-18T19:19:00Z"},
+        {"user": {"login": "onmokoworks"}, "state": "APPROVED", "submitted_at": "2026-07-18T19:40:00Z"},
+    ]
+    assert _call("owner_review_gate", payload) == ""
+
+
+# --- owner_*_after: merge-guard race check, scoped to "> clean" ---------------
+
+def test_owner_inline_after_clean_blocks() -> None:
+    clean_ts = "2026-07-18T19:16:44Z"
+    payload = [{"user": {"login": "onmokoworks"}, "id": 9, "path": "x.sh", "line": 3,
+                "created_at": "2026-07-18T19:20:00Z", "body": "wait, this is wrong"}]
+    assert "OWNER-INLINE" in _call("owner_inline_after", payload, clean_ts)
+
+
+def test_owner_inline_before_clean_is_ignored() -> None:
+    clean_ts = "2026-07-18T19:16:44Z"
+    payload = [{"user": {"login": "onmokoworks"}, "id": 9, "path": "x.sh", "line": 3,
+                "created_at": "2026-07-18T19:10:00Z", "body": "old, already addressed"}]
+    assert _call("owner_inline_after", payload, clean_ts) == ""
+
+
+def test_owner_inline_reply_after_clean_is_not_a_new_finding() -> None:
+    # A reply (in_reply_to_id set) is an ack thread, e.g. this session's own
+    # reply-as-owner; it must not self-block the merge.
+    clean_ts = "2026-07-18T19:16:44Z"
+    payload = [{"user": {"login": "naari3"}, "id": 9, "in_reply_to_id": 8, "path": "x.sh", "line": 3,
+                "created_at": "2026-07-18T19:20:00Z", "body": "対応済み"}]
+    assert _call("owner_inline_after", payload, clean_ts) == ""
+
+
+def test_owner_comment_after_clean_blocks() -> None:
+    clean_ts = "2026-07-18T19:16:44Z"
+    payload = [{"user": {"login": "onmokoworks"},
+                "created_at": "2026-07-18T19:20:00Z", "body": "hold on, don't merge yet"}]
+    assert "OWNER-COMMENT" in _call("owner_comments_after", payload, clean_ts)
+
+
+def test_bare_trigger_comment_after_clean_is_ignored() -> None:
+    clean_ts = "2026-07-18T19:16:44Z"
+    payload = [{"user": {"login": "naari3"},
+                "created_at": "2026-07-18T19:20:00Z", "body": "@codex review"}]
+    assert _call("owner_comments_after", payload, clean_ts) == ""
+
+
+def test_owner_comment_before_clean_is_ignored() -> None:
+    clean_ts = "2026-07-18T19:16:44Z"
+    payload = [{"user": {"login": "naari3"},
+                "created_at": "2026-07-18T19:10:00Z", "body": "対応済みの要約"}]
+    assert _call("owner_comments_after", payload, clean_ts) == ""
+
+
 def test_inline_error_message_is_not_a_finding() -> None:
     # The "To use Codex here" onboarding/error can arrive as an inline comment;
     # it must be classified as an error, not a finding.
