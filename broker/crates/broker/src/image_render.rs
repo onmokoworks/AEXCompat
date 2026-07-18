@@ -1,5 +1,8 @@
 use crate::host_core::descriptor_manifest::load as load_manifest;
 use crate::host_core::parameter::{apply_defaults, encode_worker_payload, ValidatedAssignments};
+use crate::runtime_module_authorization::{
+    encode_runtime_module_authorization, RuntimeModulePurpose,
+};
 use crate::runtime_module_policy::{
     authenticate_gpu_worker_report, ApprovedClassifiedModule, RuntimeBackend, RuntimeModulePolicy,
     WorkerModuleValidation,
@@ -31,19 +34,19 @@ const STALE_IMAGE_TRANSPORT_AGE: Duration = Duration::from_secs(15 * 60);
 include!("generated_l2_worker_trust.rs");
 const RENDER_WORKER_TRUST: WorkerTrust = WorkerTrust {
     expected_sha256: [
-        0xc4, 0x15, 0x85, 0x09, 0xea, 0x56, 0xb7, 0x49, 0x10, 0x23, 0x83, 0x47, 0x19, 0xe9, 0x2c,
-        0x24, 0xe1, 0x35, 0x26, 0xbf, 0xc6, 0x5a, 0xdc, 0x91, 0xd0, 0xc5, 0x5c, 0x10, 0x90, 0xe2,
-        0xba, 0x53,
+        0xf5, 0xae, 0x10, 0xb9, 0x65, 0x82, 0x84, 0x0c, 0x13, 0xa6, 0x83, 0x73, 0x06, 0x82, 0xc2,
+        0x3a, 0x0b, 0x01, 0xc7, 0xe0, 0x31, 0x28, 0xe4, 0x37, 0x7b, 0x27, 0x77, 0x97, 0x86, 0x4f,
+        0x41, 0xd0,
     ],
-    expected_size: 780_800,
+    expected_size: 781_824,
 };
 const SMART_WORKER_TRUST: WorkerTrust = WorkerTrust {
     expected_sha256: [
-        0x9c, 0x14, 0xc2, 0xb6, 0x53, 0xe9, 0x68, 0x07, 0xd3, 0x2f, 0xdc, 0xb1, 0x2f, 0x80, 0x96,
-        0x2b, 0xc5, 0x8a, 0x41, 0x88, 0xd9, 0xa3, 0x67, 0xe8, 0xba, 0x44, 0x96, 0x15, 0x33, 0xf2,
-        0xf2, 0x33,
+        0x2a, 0xe2, 0x21, 0xf0, 0xa5, 0x80, 0x09, 0xb2, 0x19, 0xb9, 0xd9, 0xaa, 0x53, 0x47, 0xb8,
+        0xbe, 0x82, 0x25, 0xf8, 0x50, 0x44, 0xa8, 0x43, 0xa8, 0x42, 0xa2, 0xab, 0x16, 0x63, 0xb0,
+        0x47, 0x54,
     ],
-    expected_size: 797_696,
+    expected_size: 799_232,
 };
 
 fn dispatch_approved_image(
@@ -70,6 +73,82 @@ fn dispatch_approved_image(
         args_before_plugin,
         args_after_plugin,
         timeout,
+    })
+}
+
+fn dispatch_approved_image_with_dependencies(
+    repository: &Path,
+    worker_kind: WorkerKind,
+    worker_trust: WorkerTrust,
+    plugin_path: &Path,
+    approved_sha256: &str,
+    dependencies: Vec<ApprovedImageArtifact>,
+    args_before_plugin: &[String],
+    args_after_plugin: &[String],
+    timeout: Duration,
+) -> io::Result<crate::secure_launch::SecureLaunchResult> {
+    dispatch_secure_image(SecureImageDispatch {
+        repository,
+        worker_kind,
+        worker_trust,
+        plugin: ApprovedImageArtifact {
+            path: plugin_path.to_path_buf(),
+            expected_sha256: decode_sha256_hex(approved_sha256)?,
+            expected_size: fs::metadata(plugin_path)?.len(),
+        },
+        dependencies,
+        args_before_plugin,
+        args_after_plugin,
+        timeout,
+    })
+}
+
+struct RuntimeAuthorizationTransport {
+    path: PathBuf,
+    artifact: ApprovedImageArtifact,
+    basename: String,
+}
+
+impl Drop for RuntimeAuthorizationTransport {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+    }
+}
+
+fn prepare_runtime_authorization_transport(
+    repository: &Path,
+    policy: &RuntimeModulePolicy,
+    backend: RuntimeBackend,
+) -> io::Result<RuntimeAuthorizationTransport> {
+    let mut session_identity = rand::random::<[u8; 32]>();
+    if session_identity.iter().all(|byte| *byte == 0) {
+        session_identity[0] = 1;
+    }
+    let manifest = encode_runtime_module_authorization(
+        policy,
+        RuntimeModulePurpose::PfParameterInspect,
+        backend,
+        session_identity,
+    )?;
+    let root = repository.join("target/runtime-module-authorization");
+    fs::create_dir_all(&root)?;
+    let basename = format!("authorization-{:032x}.bin", rand::random::<u128>());
+    let path = root.join(&basename);
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)?;
+    file.write_all(&manifest.bytes)?;
+    file.sync_all()?;
+    drop(file);
+    Ok(RuntimeAuthorizationTransport {
+        path: path.clone(),
+        artifact: ApprovedImageArtifact {
+            path,
+            expected_sha256: manifest.sha256,
+            expected_size: manifest.size,
+        },
+        basename,
     })
 }
 
@@ -340,6 +419,38 @@ fn missing_suite_event(line: &str) -> Option<(String, i32)> {
     }
     let version = version.parse::<i32>().ok().filter(|value| *value > 0)?;
     Some((name.to_owned(), version))
+}
+
+fn module_audit_summary(audit: &Value) -> Option<Value> {
+    let union = audit.get("observed_union")?;
+    let policy = union
+        .get("policy")?
+        .as_array()?
+        .iter()
+        .filter_map(Value::as_str)
+        .filter(|name| {
+            !name.is_empty()
+                && name.len() <= 260
+                && name.bytes().all(|byte| {
+                    byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-' | b' ')
+                })
+        })
+        .take(MAX_MISSING_SUITES)
+        .collect::<Vec<_>>();
+    Some(json!({
+        "status": audit.get("status").and_then(Value::as_str),
+        "unknown_count": audit.get("unknown_count").and_then(Value::as_u64),
+        "phase_count": audit.get("phase_count").and_then(Value::as_u64),
+        "authorized_policy_modules": policy,
+    }))
+}
+
+fn failed_module_audit_summary(stdout: &str) -> Option<Value> {
+    let report: Value = serde_json::from_str(stdout.trim()).ok()?;
+    if report.get("stage")? != "module_audit" {
+        return None;
+    }
+    module_audit_summary(report.get("module_audit")?)
 }
 
 fn diagnostics_contains_gpu_stage(diagnostics: &Value) -> bool {
@@ -2250,23 +2361,80 @@ pub fn inspect_experimental_with_diagnostics(
     plugin_path: &Path,
     approved_sha256: &str,
 ) -> io::Result<(Vec<InteractiveParameter>, Value)> {
+    inspect_experimental_with_diagnostics_and_runtime_policy(
+        repository,
+        plugin_path,
+        approved_sha256,
+        None,
+    )
+}
+
+pub fn inspect_experimental_with_runtime_policy(
+    repository: &Path,
+    plugin_path: &Path,
+    approved_sha256: &str,
+    policy: &RuntimeModulePolicy,
+    backend: RuntimeBackend,
+) -> io::Result<(Vec<InteractiveParameter>, Value)> {
+    if backend == RuntimeBackend::Cpu {
+        return Err(invalid(
+            "runtime-authorized inspection requires a GPU backend",
+        ));
+    }
+    inspect_experimental_with_diagnostics_and_runtime_policy(
+        repository,
+        plugin_path,
+        approved_sha256,
+        Some((policy, backend)),
+    )
+}
+
+fn inspect_experimental_with_diagnostics_and_runtime_policy(
+    repository: &Path,
+    plugin_path: &Path,
+    approved_sha256: &str,
+    runtime_policy: Option<(&RuntimeModulePolicy, RuntimeBackend)>,
+) -> io::Result<(Vec<InteractiveParameter>, Value)> {
     let actual = format!("{:X}", Sha256::digest(fs::read(plugin_path)?));
     if !actual.eq_ignore_ascii_case(approved_sha256) {
         return Err(invalid("selected AEX changed after session approval"));
     }
     let args_before_plugin = vec!["--l2-params-only".into()];
-    let args_after_plugin = vec![actual.to_ascii_lowercase()];
+    let mut args_after_plugin = vec![actual.to_ascii_lowercase()];
+    let authorization = runtime_policy
+        .map(|(policy, backend)| {
+            prepare_runtime_authorization_transport(repository, policy, backend)
+        })
+        .transpose()?;
+    if let Some(authorization) = &authorization {
+        args_after_plugin.push("--runtime-module-authorization-v1".into());
+        args_after_plugin.push(authorization.basename.clone());
+    }
     let started = Instant::now();
-    let isolated = dispatch_approved_image(
-        repository,
-        WorkerKind::L2,
-        L2_WORKER_TRUST,
-        plugin_path,
-        approved_sha256,
-        &args_before_plugin,
-        &args_after_plugin,
-        Duration::from_millis(5_000),
-    )?;
+    let isolated = if let Some(authorization) = &authorization {
+        dispatch_approved_image_with_dependencies(
+            repository,
+            WorkerKind::L2,
+            L2_WORKER_TRUST,
+            plugin_path,
+            approved_sha256,
+            vec![authorization.artifact.clone()],
+            &args_before_plugin,
+            &args_after_plugin,
+            Duration::from_millis(5_000),
+        )?
+    } else {
+        dispatch_approved_image(
+            repository,
+            WorkerKind::L2,
+            L2_WORKER_TRUST,
+            plugin_path,
+            approved_sha256,
+            &args_before_plugin,
+            &args_after_plugin,
+            Duration::from_millis(5_000),
+        )?
+    };
     let mut diagnostics = worker_diagnostics(
         &isolated.stderr,
         isolated.stderr_truncated,
@@ -2275,12 +2443,18 @@ pub fn inspect_experimental_with_diagnostics(
         started.elapsed().as_millis(),
     );
     if isolated.classification.as_str() != "ok" {
+        if let Some(summary) = failed_module_audit_summary(&isolated.stdout) {
+            diagnostics["module_audit_failure"] = summary;
+        }
         return Err(invalid(format!(
             "AEX parameter inspection worker failed safely: {diagnostics}"
         )));
     }
     let report: Value = serde_json::from_str(isolated.stdout.trim())
         .map_err(|_| invalid("inspection worker report is invalid"))?;
+    if let Some(summary) = report.get("module_audit").and_then(module_audit_summary) {
+        diagnostics["module_audit"] = summary;
+    }
     let advertised_out_flags = report.get("out_flags").and_then(Value::as_u64).unwrap_or(0);
     let advertised_out_flags2 = report
         .get("out_flags2")
@@ -2291,6 +2465,7 @@ pub fn inspect_experimental_with_diagnostics(
     diagnostics["advertised_out_flags2"] = json!(advertised_out_flags2);
     diagnostics["audio_effect_only"] = json!(audio_effect_only);
     diagnostics["image_render_supported"] = json!(!audio_effect_only);
+    diagnostics["runtime_module_policy_applied"] = json!(runtime_policy.is_some());
     if report.get("params_setup_error") != Some(&json!(0)) {
         return Err(invalid("AEX rejected PF_PARAMS_SETUP"));
     }

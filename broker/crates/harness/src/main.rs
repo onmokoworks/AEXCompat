@@ -4910,6 +4910,50 @@ fn main() -> eframe::Result {
         }
         return Ok(());
     }
+    if args.len() == 5 && args[1] == "--inspect-experimental-runtime-policy" {
+        let plugin = Path::new(&args[2]);
+        let backend = match args[3].to_string_lossy().as_ref() {
+            "cuda" => aexcompat_broker::runtime_module_policy::RuntimeBackend::Cuda,
+            "opencl" => aexcompat_broker::runtime_module_policy::RuntimeBackend::Opencl,
+            "directx" => aexcompat_broker::runtime_module_policy::RuntimeBackend::Directx,
+            "opengl" => aexcompat_broker::runtime_module_policy::RuntimeBackend::Opengl,
+            _ => {
+                eprintln!("runtime policy backend must be cuda, opencl, directx, or opengl");
+                std::process::exit(1);
+            }
+        };
+        let policy = match fs::read(&args[4])
+            .and_then(|bytes| aexcompat_broker::runtime_module_policy::parse_and_validate(&bytes))
+        {
+            Ok(policy) => policy,
+            Err(error) => {
+                eprintln!("runtime module policy rejected: {error}");
+                std::process::exit(1);
+            }
+        };
+        let hash = format!("{:X}", Sha256::digest(fs::read(plugin).unwrap()));
+        match aexcompat_broker::image_render::inspect_experimental_with_runtime_policy(
+            &repository,
+            plugin,
+            &hash,
+            &policy,
+            backend,
+        ) {
+            Ok((parameters, diagnostics)) => println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "parameters": parameters,
+                    "diagnostics": diagnostics,
+                }))
+                .unwrap()
+            ),
+            Err(error) => {
+                eprintln!("{error}");
+                std::process::exit(1);
+            }
+        }
+        return Ok(());
+    }
     if args.len() == 4 && args[1] == "--inspect-experimental-dependencies" {
         let plugin = Path::new(&args[2]);
         let mode = args[3].to_string_lossy();

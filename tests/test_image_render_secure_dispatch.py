@@ -16,11 +16,11 @@ def test_render_workers_use_fixed_preapproved_trust_tuples():
     generated = (SOURCE.parent / "generated_l2_worker_trust.rs").read_text(encoding="utf-8")
     assert 'include!("generated_l2_worker_trust.rs")' in source
     assert "const L2_WORKER_TRUST: WorkerTrust" in generated
-    assert "expected_size: 780_800" in source
-    assert "expected_size: 797_696" in source
+    assert "expected_size: 781_824" in source
+    assert "expected_size: 799_232" in source
     assert "expected_sha256: [" in generated
-    assert "0xc4, 0x15, 0x85, 0x09" in source
-    assert "0x9c, 0x14, 0xc2, 0xb6" in source
+    assert "0xf5, 0xae, 0x10, 0xb9" in source
+    assert "0x2a, 0xe2, 0x21, 0xf0" in source
     assert "Sha256::digest(fs::read(&worker" not in render_function()
 
 
@@ -85,7 +85,7 @@ def test_all_other_image_routes_use_secure_dispatch_without_isolated_fallback():
     assert "windows_process::run_isolated" not in source
     assert "run_isolated(" not in source
     assert source.count("dispatch_approved_image(") == 33
-    assert source.count("WorkerKind::L2,") == 23
+    assert source.count("WorkerKind::L2,") == 24
     assert source.count("WorkerKind::Render,") == 7
     assert source.count("WorkerKind::Smart,") == 2
 

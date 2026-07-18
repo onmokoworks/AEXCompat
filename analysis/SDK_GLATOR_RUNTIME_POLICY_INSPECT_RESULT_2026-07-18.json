@@ -1,0 +1,64 @@
+{
+    "schema_version":  1,
+    "result":  "passed",
+    "route":  "sealed restricted L2 worker / purpose-bound OpenGL runtime module authorization",
+    "authenticated_artifacts":  {
+                                    "release_harness":  {
+                                                            "size_bytes":  9944064,
+                                                            "sha256":  "4a15e80c77289b10e40449823833f2ad56627bf1f7e96ba43b25d924f9e68cd4"
+                                                        },
+                                    "canonical_l2_worker":  {
+                                                                "size_bytes":  710144,
+                                                                "sha256":  "c18e30ba0cc351506bfb2744cb25d74d08b48add045e376e9105d83ee51c0e1f"
+                                                            },
+                                    "sdk_glator_fixture":  {
+                                                               "size_bytes":  6087168,
+                                                               "sha256":  "da8447f6f88e78fb00d5bd2d7e0cdc1d6bdcf1918b77e8684288a6d700c9f2ce"
+                                                           }
+                                },
+    "authorized_runtime_modules":  [
+                                       {
+                                           "basename":  "nvoglv64.dll",
+                                           "size_bytes":  46564584,
+                                           "sha256":  "ca92775bcfa44eaa8ccb8c530e8df45bf88e19573cea4a6e0232342114355238",
+                                           "version":  "32.0.15.9579",
+                                           "backend":  "opengl"
+                                       },
+                                       {
+                                           "basename":  "nvgpucomp64.dll",
+                                           "size_bytes":  83758904,
+                                           "sha256":  "c2d9c1d9a20b1275a6c4c66bd45e168088ffb3d5fdc928121a61531843f23098",
+                                           "version":  "32.0.15.9579",
+                                           "backend":  "opengl"
+                                       }
+                                   ],
+    "inspect":  {
+                    "classification":  "ok",
+                    "runtime_module_policy_applied":  true,
+                    "module_audit_status":  "passed",
+                    "unknown_count":  0,
+                    "policy_modules":  [
+                                           "nvgpucomp64.dll",
+                                           "nvoglv64.dll"
+                                       ],
+                    "global_setup_error":  0,
+                    "params_setup_error":  0,
+                    "global_setdown_error":  0,
+                    "parameter_count":  1,
+                    "parameter_name":  "GLator"
+                },
+    "fail_closed_control":  {
+                                "omitted_module":  "nvgpucomp64.dll",
+                                "worker_exit_code":  14,
+                                "first_failure_stage":  "global_setup",
+                                "unknown_count":  1,
+                                "authorized_policy_modules":  [
+                                                                  "nvoglv64.dll"
+                                                              ],
+                                "passed":  false
+                            },
+    "privacy":  {
+                    "local_paths_exported":  false,
+                    "private_stderr_exported":  false
+                }
+}

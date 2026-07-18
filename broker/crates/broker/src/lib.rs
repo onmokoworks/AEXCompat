@@ -12,6 +12,7 @@ pub mod render;
 pub mod render_request;
 pub mod restricted_worker_acl;
 pub mod restricted_worker_token;
+pub mod runtime_module_authorization;
 pub mod runtime_module_identity;
 pub mod runtime_module_policy;
 pub mod sealed_load_tree;

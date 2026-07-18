@@ -1,5 +1,5 @@
 [CmdletBinding()]
-param()
+param([switch]$SkipBuild)
 
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
@@ -56,24 +56,26 @@ $buildScripts = @(
     'build-pf-smart-timed-multilayer-probe.ps1'
 )
 
-Invoke-Checked $cmake @('--build', 'target/minihost-build', '--config', 'Release')
-foreach ($script in $buildScripts) {
-    $scriptPath = Join-Path $PSScriptRoot $script
-    $sourceText = Get-Content -LiteralPath $scriptPath -Raw
-    if ($sourceText -match 'target\\([^"'']+-build)') {
-        $buildRoot = [IO.Path]::GetFullPath((Join-Path $root "target/$($matches[1])"))
-        $targetRoot = [IO.Path]::GetFullPath((Join-Path $root 'target')) + [IO.Path]::DirectorySeparatorChar
-        if (-not $buildRoot.StartsWith($targetRoot, [StringComparison]::OrdinalIgnoreCase)) {
-            throw "Refusing to clear CMake cache outside target: $buildRoot"
+if (-not $SkipBuild) {
+    Invoke-Checked $cmake @('--build', 'target/minihost-build', '--config', 'Release')
+    foreach ($script in $buildScripts) {
+        $scriptPath = Join-Path $PSScriptRoot $script
+        $sourceText = Get-Content -LiteralPath $scriptPath -Raw
+        if ($sourceText -match 'target\\([^"'']+-build)') {
+            $buildRoot = [IO.Path]::GetFullPath((Join-Path $root "target/$($matches[1])"))
+            $targetRoot = [IO.Path]::GetFullPath((Join-Path $root 'target')) + [IO.Path]::DirectorySeparatorChar
+            if (-not $buildRoot.StartsWith($targetRoot, [StringComparison]::OrdinalIgnoreCase)) {
+                throw "Refusing to clear CMake cache outside target: $buildRoot"
+            }
+            Remove-Item -LiteralPath (Join-Path $buildRoot 'CMakeCache.txt') -Force -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath (Join-Path $buildRoot 'CMakeFiles') -Recurse -Force -ErrorAction SilentlyContinue
         }
-        Remove-Item -LiteralPath (Join-Path $buildRoot 'CMakeCache.txt') -Force -ErrorAction SilentlyContinue
-        Remove-Item -LiteralPath (Join-Path $buildRoot 'CMakeFiles') -Recurse -Force -ErrorAction SilentlyContinue
+        $arguments = @('-NoProfile', '-File', $scriptPath)
+        $parameters = (Get-Command $scriptPath).Parameters
+        if ($parameters.ContainsKey('Generator')) { $arguments += @('-Generator', 'Visual Studio 17 2022') }
+        if ($parameters.ContainsKey('CMake')) { $arguments += @('-CMake', $cmake) }
+        Invoke-Checked $powerShell $arguments
     }
-    $arguments = @('-NoProfile', '-File', $scriptPath)
-    $parameters = (Get-Command $scriptPath).Parameters
-    if ($parameters.ContainsKey('Generator')) { $arguments += @('-Generator', 'Visual Studio 17 2022') }
-    if ($parameters.ContainsKey('CMake')) { $arguments += @('-CMake', $cmake) }
-    Invoke-Checked $powerShell $arguments
 }
 
 $evidenceNames = @(

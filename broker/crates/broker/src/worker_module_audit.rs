@@ -27,6 +27,8 @@ struct AuditSnapshot {
     worker: Vec<String>,
     plugin: Vec<String>,
     system32: Vec<String>,
+    #[serde(default)]
+    policy: Option<Vec<String>>,
 }
 
 pub fn validate_required_worker_audit(stdout: &str, stdout_truncated: bool) -> io::Result<()> {
@@ -61,6 +63,8 @@ pub fn validate_required_worker_audit(stdout: &str, stdout_truncated: bool) -> i
     require_subset(&audit.pre_unload.worker, &audit.observed_union.worker)?;
     require_subset(&audit.pre_unload.plugin, &audit.observed_union.plugin)?;
     require_subset(&audit.pre_unload.system32, &audit.observed_union.system32)?;
+    require_optional_subset(&audit.post_load.policy, &audit.observed_union.policy)?;
+    require_optional_subset(&audit.pre_unload.policy, &audit.observed_union.policy)?;
     Ok(())
 }
 
@@ -70,7 +74,10 @@ fn validate_snapshot(snapshot: &AuditSnapshot, label: &str) -> io::Result<()> {
             "secure worker {label} module audit failed"
         )));
     }
-    let count = snapshot.worker.len() + snapshot.plugin.len() + snapshot.system32.len();
+    let count = snapshot.worker.len()
+        + snapshot.plugin.len()
+        + snapshot.system32.len()
+        + snapshot.policy.as_ref().map_or(0, Vec::len);
     if count > MAX_AUDITED_MODULES {
         return Err(invalid("secure worker module audit limit exceeded"));
     }
@@ -80,6 +87,7 @@ fn validate_snapshot(snapshot: &AuditSnapshot, label: &str) -> io::Result<()> {
         .iter()
         .chain(&snapshot.plugin)
         .chain(&snapshot.system32)
+        .chain(snapshot.policy.iter().flatten())
     {
         validate_basename(name)?;
         if !names.insert(name.to_ascii_lowercase()) {
@@ -87,6 +95,20 @@ fn validate_snapshot(snapshot: &AuditSnapshot, label: &str) -> io::Result<()> {
         }
     }
     Ok(())
+}
+
+fn require_optional_subset(
+    values: &Option<Vec<String>>,
+    union: &Option<Vec<String>>,
+) -> io::Result<()> {
+    match (values, union) {
+        (None, None) => Ok(()),
+        (Some(values), Some(union)) => require_subset(values, union),
+        (None, Some(_)) => Ok(()),
+        (Some(_), None) => Err(invalid(
+            "secure worker observed union policy is inconsistent",
+        )),
+    }
 }
 
 fn validate_basename(name: &str) -> io::Result<()> {
@@ -184,6 +206,29 @@ mod tests {
 
         let mut report: Value = serde_json::from_str(&valid_report()).unwrap();
         report["module_audit"]["post_load"]["plugin"] = json!(["other.plugin"]);
+        assert!(validate_required_worker_audit(&report.to_string(), false).is_err());
+    }
+
+    #[test]
+    fn validates_optional_policy_names_bounds_and_union_consistency() {
+        let mut report: Value = serde_json::from_str(&valid_report()).unwrap();
+        for phase in ["post_load", "pre_unload", "observed_union"] {
+            report["module_audit"][phase]["policy"] = json!(["gpu-runtime.dll"]);
+        }
+        validate_required_worker_audit(&report.to_string(), false).unwrap();
+
+        report["module_audit"]["post_load"]["policy"] = json!(["kernel32.dll"]);
+        assert!(validate_required_worker_audit(&report.to_string(), false).is_err());
+
+        let mut report: Value = serde_json::from_str(&valid_report()).unwrap();
+        report["module_audit"]["post_load"]["policy"] = json!(["gpu-runtime.dll"]);
+        assert!(validate_required_worker_audit(&report.to_string(), false).is_err());
+
+        let mut report: Value = serde_json::from_str(&valid_report()).unwrap();
+        let names: Vec<_> = (0..126)
+            .map(|index| format!("runtime-{index}.dll"))
+            .collect();
+        report["module_audit"]["observed_union"]["policy"] = json!(names);
         assert!(validate_required_worker_audit(&report.to_string(), false).is_err());
     }
 }
