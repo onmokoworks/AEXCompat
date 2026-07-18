@@ -1,14 +1,11 @@
 # Crash Minidumps (2026-07-19)
 
-Opt-in local crash dumps (issue #18). When a worker crashes inside the
-SEH-guarded effect call, the existing diagnostics record the exception code,
-faulting address, module, and selector but no stack. With a minidump directory
-configured, the worker also writes a create-new `.dmp` so the crashing call
-stack in the plug-in can be reconstructed in a debugger. Default off; local
-only; the dump contains plug-in memory and is never serialized into shareable
-reports.
+Opt-in local crash dumps for issue #18. The default is off. A dump can contain
+plug-in memory and is never copied into shareable reports.
 
 ## Enabling
+
+Set the existing opt-in directory policy before launching the broker:
 
 ```powershell
 $env:AEXCOMPAT_MINIDUMP_DIR = 'target/crash-dumps'
@@ -16,45 +13,52 @@ broker\target\release\aexcompat-harness.exe --render-experimental-smart `
     <plugin.aex> <input.png> <output.png>
 ```
 
-The flag is injected once in `secure_launch`, the single choke point every
-sealed worker dispatch funnels through, so it applies uniformly to every
-launch path: the experimental image render/smart routes, the schema-v2
-production L2/render/SmartFX dispatches (`l2.rs`, `render.rs`, `smart.rs`,
-`render_request.rs`), and future callers, not just the image-render wrapper.
-The worker consumes the trailing `--minidump-v1 <dir>` pair before its
-argc-exact mode dispatch, so it is transparent to the per-kind argument
-parsing.
+The broker resolves the value below the repository `target/` tree, rejects
+`.`/`..` traversal and reparse-point components, and creates one `CREATE_NEW`
+file for the launch. It then authenticates the file's final path and inherits
+the handle through the same explicit `PROC_THREAD_ATTRIBUTE_HANDLE_LIST`
+transport used by the trace channel. The worker receives only the numeric
+handle value; it never receives a dump path and never re-opens one.
 
-The broker validates the directory before dispatch (fail-closed):
+The broker policy bounds both dimensions of local storage:
 
-- must resolve under the repository `target/` tree, no `.`/`..` traversal;
-- unlike world-dump directories it may be non-empty, because dumps accumulate
-  across runs as create-new files.
+- at most 16 retained dump files;
+- at most 256 MiB cumulative dump bytes;
+- at most 64 MiB for one dump.
+
+A lock file serializes budget checks and reservations across concurrent worker
+launches. The lock and the create-new dump handle remain owned by the broker
+launch boundary until the worker exits.
 
 ## Behavior
 
-- One dump per worker process, named `crash-<pid>.dmp`, written with
-  `CREATE_NEW` so an existing dump is never overwritten.
-- Written from the production `__except` filter (`capture_seh_exception`) that
-  guards every effect entry call, and additionally from a
-  `SetUnhandledExceptionFilter` top-level filter for crashes that never reach
-  an `__except` (for example on a plug-in's own thread). The top-level filter
-  returns `EXCEPTION_CONTINUE_SEARCH`, so the exit code and default handling
-  are unchanged. Stack-overflow crashes may still be uncapturable because the
-  handler itself needs stack; this limit is expected.
-- `dbghelp.dll` is loaded dynamically (system32 only) and `MiniDumpWriteDump`
-  resolved at crash time, so a machine without dbghelp degrades to a
-  `stage:minidump_failed reason=dbghelp_unavailable` note rather than a
-  secondary failure.
-- The worker emits a `stage:minidump_written name=… bytes=…` or
-  `stage:minidump_failed reason=…` line to stderr. The broker surfaces this as
-  `minidump` in the worker diagnostics JSON (basename and reason only, never a
-  full path) and records the managed dump directory as `minidump_directory` in
-  the render report.
+The worker starts a dedicated writer thread before dispatch. The SEH filter
+copies the exception record and context into broker-owned storage, signals that
+thread, and waits up to two seconds. `MiniDumpWriteDump` is never called from
+the faulting thread. The writer loads `dbghelp.dll` from system32, uses the
+authenticated inherited handle, and applies a 64 MiB write callback limit.
+
+The worker emits one of these bounded diagnostics:
+
+- `stage:minidump_written bytes=<n>`;
+- `stage:minidump_failed reason=dbghelp_unavailable`;
+- `stage:minidump_failed reason=entry_unavailable`;
+- `stage:minidump_failed reason=handle_invalid`;
+- `stage:minidump_failed reason=writer_unavailable`;
+- `stage:minidump_failed reason=writer_timeout`;
+- `stage:minidump_failed reason=write_failed code=<n>`.
+
+Reports expose the configured directory as a managed display value and expose
+only the bounded minidump marker. They do not include a full local path,
+handle value, or dump contents.
 
 ## Verification
 
-`--self-test-crash-minidump <dir>` raises a real access violation under the
-production guard and confirms a non-empty `MDMP`-signed dump landed. Covered by
-`tests/test_worker_crash_minidump.py` for all three workers (registered in
-`tests/local_artifact_tests.txt` since it runs a built worker).
+`--self-test-crash-minidump` raises a real access violation under the
+production SEH guard. The native test supplies an already-created inheritable
+file handle, then verifies a non-empty `MDMP` file and the byte bound.
+
+`--self-test-crash-no-minidump` raises the same real access violation without
+opt-in and verifies that no writer was attempted. Both modes are covered for
+all three worker executables by `tests/test_worker_crash_minidump.py` when the
+minihost binaries are built.

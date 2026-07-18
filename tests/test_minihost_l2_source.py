@@ -829,6 +829,22 @@ class MinihostL2SourceTests(unittest.TestCase):
         self.assertIn("params_only_mode || external_dependencies_mode", text)
         self.assertIn("about_error = g_skip_about ? 0", text)
 
+    def test_crash_minidump_uses_dedicated_writer_and_inherited_handle(self):
+        text = SOURCE.read_text(encoding="utf-8")
+        for marker in (
+            "minidump_writer_thread",
+            "CreateThread(nullptr, 0, minidump_writer_thread",
+            "request_crash_minidump",
+            "input->Io",
+            "LOAD_LIBRARY_SEARCH_SYSTEM32",
+            "AEXCOMPAT_MINIDUMP_HANDLE",
+            'L"--self-test-crash-minidump"',
+            'L"--self-test-crash-no-minidump"',
+        ):
+            self.assertIn(marker, text)
+        self.assertNotIn("--minidump-v1", text)
+        self.assertNotIn("CreateFileW(dump_path", text)
+
 
 if __name__ == "__main__":
     unittest.main()

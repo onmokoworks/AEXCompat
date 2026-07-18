@@ -429,18 +429,11 @@ fn worker_diagnostics(
 /// worker/plug-in output, so a plug-in could otherwise spoof
 /// `stage:minidump_written name=C:\...` and smuggle a private path into
 /// shareable diagnostics; anything not matching a worker-owned shape is
-/// dropped. The dump basename is worker-generated (`crash-<pid>.dmp`) and is
-/// deliberately not echoed back.
+/// dropped. The broker-owned file name is deliberately never serialized.
 fn minidump_marker(line: &str) -> Option<String> {
     let body = line.strip_prefix("stage:minidump_")?;
-    if let Some(rest) = body.strip_prefix("written name=crash-") {
-        let (pid, bytes) = rest.split_once(".dmp bytes=")?;
-        if pid.bytes().all(|b| b.is_ascii_digit())
-            && !pid.is_empty()
-            && bytes.bytes().all(|b| b.is_ascii_digit())
-            && !bytes.is_empty()
-            && bytes.len() <= 20
-        {
+    if let Some(bytes) = body.strip_prefix("written bytes=") {
+        if bytes.bytes().all(|b| b.is_ascii_digit()) && !bytes.is_empty() && bytes.len() <= 20 {
             return Some(format!("written bytes={bytes}"));
         }
         return None;
@@ -449,7 +442,13 @@ fn minidump_marker(line: &str) -> Option<String> {
     let reason = reason.split_once(" code=").map_or(reason, |(head, _)| head);
     matches!(
         reason,
-        "dbghelp_unavailable" | "entry_unavailable" | "create_failed" | "write_failed"
+        "dbghelp_unavailable"
+            | "entry_unavailable"
+            | "create_failed"
+            | "write_failed"
+            | "handle_invalid"
+            | "writer_unavailable"
+            | "writer_timeout"
     )
     .then(|| format!("failed reason={reason}"))
 }
@@ -673,41 +672,8 @@ struct WorldDumpDir {
     display: String,
 }
 
-/// Opt-in crash minidump directory (issue #18). Default off; the worker
-/// writes at most one create-new dump per process. Dumps contain plug-in
-/// memory, so they stay local and are never serialized into shareable
-/// reports; diagnostics carry only the basename.
-const MINIDUMP_DIR_ENV: &str = "AEXCOMPAT_MINIDUMP_DIR";
-
-fn requested_minidump_dir(repository: &Path) -> io::Result<Option<WorldDumpDir>> {
-    match std::env::var_os(MINIDUMP_DIR_ENV) {
-        Some(value) => resolve_managed_dump_dir(repository, Path::new(&value), false).map(Some),
-        None => Ok(None),
-    }
-}
-
-/// The `--minidump-v1 <dir>` argument pair for a dispatch, or empty when the
-/// opt-in env var is unset. Every worker dispatch appends this at the tail
-/// (see `dispatch_secure_image`) so the crash path is uniform across worker
-/// kinds; the worker consumes the trailing pair before its argc-exact mode
-/// dispatch.
-pub(crate) fn minidump_dispatch_args(repository: &Path) -> io::Result<Vec<String>> {
-    minidump_dispatch_args_for(repository, std::env::var_os(MINIDUMP_DIR_ENV))
-}
-
-/// Pure resolution split out so tests exercise it without mutating the
-/// process-global env var (which races other tests under parallelism).
-fn minidump_dispatch_args_for(
-    repository: &Path,
-    requested: Option<std::ffi::OsString>,
-) -> io::Result<Vec<String>> {
-    Ok(match requested {
-        Some(value) => {
-            let dump = resolve_managed_dump_dir(repository, Path::new(&value), false)?;
-            vec!["--minidump-v1".into(), dump.path.to_string_lossy().into_owned()]
-        }
-        None => Vec::new(),
-    })
+fn requested_minidump_directory(repository: &Path) -> io::Result<Option<String>> {
+    crate::minidump_policy::configured_directory_display(repository)
 }
 
 fn requested_world_dump_dir(repository: &Path) -> io::Result<Option<WorldDumpDir>> {
@@ -4249,7 +4215,7 @@ fn render_with_artifact(
         nonce,
     )?;
     let world_dump_dir = requested_world_dump_dir(repository)?;
-    let minidump_dir = requested_minidump_dir(repository)?;
+    let minidump_directory = requested_minidump_directory(repository)?;
     let output_checksum_detail = output_checksum_detail_requested();
 
     let worker_kind = if smart {
@@ -4385,8 +4351,6 @@ fn render_with_artifact(
             dump.path.to_string_lossy().into_owned(),
         ]);
     }
-    // The --minidump-v1 flag is injected at the dispatch tail for every worker
-    // kind by dispatch_secure_image; minidump_dir here is only for the report.
     if output_checksum_detail {
         args_after_plugin.extend(["--output-checksum-detail-v1".into(), "1".into()]);
     }
@@ -4790,8 +4754,8 @@ fn render_with_artifact(
             }),
         );
     }
-    if let Some(dump) = &minidump_dir {
-        report_object.insert("minidump_directory".into(), json!(dump.display));
+    if let Some(directory) = &minidump_directory {
+        report_object.insert("minidump_directory".into(), json!(directory));
     }
     if output_checksum_detail {
         for field in ["output_row_crc32", "output_channel_sha256"] {
@@ -5477,36 +5441,6 @@ mod tests {
     }
 
     #[test]
-    fn minidump_dispatch_args_are_opt_in_and_tail_shaped() {
-        // Every worker dispatch funnels through this helper: no request means
-        // no flag (the crash path stays off by default) and a request yields
-        // exactly the trailing --minidump-v1 <dir> pair. Uses the pure form so
-        // the test never mutates the process-global env var.
-        let repository = std::env::temp_dir().join(format!(
-            "aexcompat-minidump-args-{}-{}",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        fs::create_dir_all(repository.join("target")).unwrap();
-
-        assert!(minidump_dispatch_args_for(&repository, None).unwrap().is_empty());
-
-        let args =
-            minidump_dispatch_args_for(&repository, Some("target/crash-dumps".into())).unwrap();
-        assert_eq!(args.len(), 2);
-        assert_eq!(args[0], "--minidump-v1");
-        assert!(Path::new(&args[1]).ends_with("crash-dumps"));
-
-        // Containment still applies to the resolved directory.
-        assert!(minidump_dispatch_args_for(&repository, Some("target/../escape".into())).is_err());
-
-        fs::remove_dir_all(repository).unwrap();
-    }
-
-    #[test]
     fn world_dump_dir_is_fail_closed_under_the_target_tree() {
         let repository = std::env::temp_dir().join(format!(
             "aexcompat-world-dump-{}",
@@ -5530,19 +5464,6 @@ mod tests {
         )
         .unwrap();
         assert!(resolve_world_dump_dir(&repository, Path::new("target/world-dumps")).is_err());
-
-        // Minidumps accumulate across runs (create-new files), so their
-        // resolver accepts a non-empty managed directory but keeps every
-        // other containment rule.
-        assert!(
-            resolve_managed_dump_dir(&repository, Path::new("target/world-dumps"), false).is_ok()
-        );
-        assert!(
-            resolve_managed_dump_dir(&repository, Path::new("target/../escape"), false).is_err()
-        );
-        assert!(
-            resolve_managed_dump_dir(&repository, Path::new("not-target/dumps"), false).is_err()
-        );
 
         assert!(resolve_world_dump_dir(&repository, Path::new("")).is_err());
         assert!(resolve_world_dump_dir(&repository, Path::new("target/../escape")).is_err());
@@ -5763,7 +5684,7 @@ mod tests {
     fn minidump_marker_accepts_only_worker_owned_shapes() {
         // Legitimate worker lines normalize to a path-free marker.
         assert_eq!(
-            minidump_marker("stage:minidump_written name=crash-1234.dmp bytes=51790"),
+            minidump_marker("stage:minidump_written bytes=51790"),
             Some("written bytes=51790".to_owned())
         );
         assert_eq!(
@@ -5780,10 +5701,7 @@ mod tests {
             minidump_marker("stage:minidump_written name=C:\\Users\\secret\\a.dmp bytes=1"),
             None
         );
-        assert_eq!(
-            minidump_marker("stage:minidump_written name=crash-1234.dmp bytes=../etc"),
-            None
-        );
+        assert_eq!(minidump_marker("stage:minidump_written bytes=../etc"), None);
         assert_eq!(
             minidump_marker("stage:minidump_failed reason=totally_made_up"),
             None

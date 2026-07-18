@@ -148,12 +148,14 @@ fn quote(value: &str) -> String {
     quoted
 }
 
-fn child_environment(trace_handle: Option<HANDLE>) -> Vec<u16> {
+fn child_environment(trace_handle: Option<HANDLE>, minidump_handle: Option<HANDLE>) -> Vec<u16> {
     let mut entries: Vec<(String, std::ffi::OsString, std::ffi::OsString)> = std::env::vars_os()
         .filter_map(|(key, value)| {
             let normalized = key.to_string_lossy().to_ascii_uppercase();
             if normalized == "AEX_INSTRUMENT_TRACE_DIR"
                 || normalized == "AEX_INSTRUMENT_TRACE_HANDLE"
+                || normalized == "AEXCOMPAT_MINIDUMP_DIR"
+                || normalized == "AEXCOMPAT_MINIDUMP_HANDLE"
             {
                 None
             } else {
@@ -165,6 +167,13 @@ fn child_environment(trace_handle: Option<HANDLE>) -> Vec<u16> {
         entries.push((
             "AEX_INSTRUMENT_TRACE_HANDLE".into(),
             "AEX_INSTRUMENT_TRACE_HANDLE".into(),
+            (handle as usize).to_string().into(),
+        ));
+    }
+    if let Some(handle) = minidump_handle {
+        entries.push((
+            "AEXCOMPAT_MINIDUMP_HANDLE".into(),
+            "AEXCOMPAT_MINIDUMP_HANDLE".into(),
             (handle as usize).to_string().into(),
         ));
     }
@@ -275,7 +284,7 @@ pub fn run_isolated(
     args: &[String],
     timeout: Duration,
 ) -> io::Result<ProcessResult> {
-    run_isolated_impl(program, args, timeout, None)
+    run_isolated_impl(program, args, timeout, None, None)
 }
 
 pub fn run_isolated_with_restricted_token(
@@ -284,12 +293,14 @@ pub fn run_isolated_with_restricted_token(
     timeout: Duration,
     token: &RestrictedWorkerToken,
     current_directory: &Path,
+    repository: &Path,
 ) -> io::Result<ProcessResult> {
     run_isolated_impl(
         program,
         args,
         timeout,
         Some((token.as_raw_handle(), current_directory)),
+        Some(repository),
     )
 }
 
@@ -298,8 +309,13 @@ fn run_isolated_impl(
     args: &[String],
     timeout: Duration,
     token: Option<(HANDLE, &Path)>,
+    repository: Option<&Path>,
 ) -> io::Result<ProcessResult> {
     let trace_file = crate::trace_policy::create_trace_file_for_launch()?;
+    let minidump_file = repository
+        .map(crate::minidump_policy::create_minidump_file_for_launch)
+        .transpose()?
+        .flatten();
     let (stdout_read, stdout_write) = pipe()?;
     let (stderr_read, stderr_write) = pipe()?;
     let job = OwnedHandle::new(unsafe { CreateJobObjectW(null(), null()) })?;
@@ -343,6 +359,9 @@ fn run_isolated_impl(
     if let Some(trace_file) = trace_file.as_ref() {
         inherited.push(trace_file.raw());
     }
+    if let Some(minidump_file) = minidump_file.as_ref() {
+        inherited.push(minidump_file.raw());
+    }
     if unsafe {
         UpdateProcThreadAttribute(
             attribute_list,
@@ -369,7 +388,10 @@ fn run_isolated_impl(
         .chain(Some(0))
         .collect();
     let application_wide: Vec<u16> = program.as_os_str().encode_wide().chain(Some(0)).collect();
-    let mut environment = child_environment(trace_file.as_ref().map(|file| file.raw()));
+    let mut environment = child_environment(
+        trace_file.as_ref().map(|file| file.raw()),
+        minidump_file.as_ref().map(|file| file.raw()),
+    );
     let mut startup: STARTUPINFOEXW = unsafe { zeroed() };
     startup.StartupInfo.cb = size_of::<STARTUPINFOEXW>() as u32;
     startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
