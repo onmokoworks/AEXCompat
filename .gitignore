@@ -2,7 +2,7 @@ target/
 build/
 dist/
 out/
-bin/
+/bin/
 obj/
 __pycache__/
 *.pyc

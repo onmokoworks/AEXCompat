@@ -16,11 +16,11 @@ def test_render_workers_use_fixed_preapproved_trust_tuples():
     generated = (SOURCE.parent / "generated_l2_worker_trust.rs").read_text(encoding="utf-8")
     assert 'include!("generated_l2_worker_trust.rs")' in source
     assert "const L2_WORKER_TRUST: WorkerTrust" in generated
-    assert "expected_size: 796_160" in source
-    assert "expected_size: 813_568" in source
+    assert "expected_size: 811_008" in source
+    assert "expected_size: 827_904" in source
     assert "expected_sha256: [" in generated
-    assert "0xf1, 0x82, 0xe7, 0x0f" in source
-    assert "0xcd, 0x77, 0x38, 0xfd" in source
+    assert "0x2c, 0xba, 0x31, 0x87" in source
+    assert "0x66, 0xea, 0xd9, 0x83" in source
     assert "Sha256::digest(fs::read(&worker" not in render_function()
 
 

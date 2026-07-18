@@ -4,13 +4,13 @@
     "authenticated_current_sampling_artifacts":  {
                                                      "source":  {
                                                                     "path":  "minihost/src/l2_main.cpp",
-                                                                    "size_bytes":  1210999,
-                                                                    "sha256":  "2b27745c4ba0641b6ea8ea777c634ad5a68205f5cca36a24444cf9d1206060be"
+                                                                    "size_bytes":  1228407,
+                                                                    "sha256":  "7c22442f881ec9ca8436cce844b3cd43ff4c33aa86d703798d8b8025e57757ce"
                                                                 },
                                                      "worker":  {
                                                                     "path":  "target/minihost-build/aex_render_worker.exe",
-                                                                    "size_bytes":  796160,
-                                                                    "sha256":  "f182e70fa70a4f38c29736994e936dd61c0b46138fc30a570c3ac868b54e1202"
+                                                                    "size_bytes":  811008,
+                                                                    "sha256":  "2cba31875b7e0f39fff870a3fbff4fc14442fe4d73755dbb9b1f9b6be96d0e8e"
                                                                 },
                                                      "input":  {
                                                                    "path":  "target/gpu-effects/opencl-input.rgba",

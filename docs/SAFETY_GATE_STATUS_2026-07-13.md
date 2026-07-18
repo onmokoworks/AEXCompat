@@ -194,6 +194,15 @@ identity. The fixed `aegp_apply_effect` self-test passes in the L2, Classic
 render, and SmartFX workers; the refreshed real-AEX render and SmartFX safety
 gates remain passing.
 
+Effect stack mutation keeps instance slots stable and changes a separate
+per-layer order, preventing Reorder from retargeting existing leases.
+Delete advances the instance generation so metadata and child streams fail
+immediately while the original owned EffectRef remains disposable. Duplicate
+preflights both instance and lease capacity, deep-copies parameter state, and
+rolls order changes back on failure. Stream Suite v2 binds each effect stream
+to its creating plug-in owner and parent generation; foreign-owner and
+non-finite SetStreamValue attempts leave state unchanged.
+
 AEGP Keyframe Suite v5 now exposes all 22 callback slots and bounds each mask
 outline stream to 64 time-sorted keyframes and 256 concurrent checked values.
 Keyframe values are independently

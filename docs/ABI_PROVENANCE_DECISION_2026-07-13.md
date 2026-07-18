@@ -56,6 +56,13 @@ used only by a temporary conformance translation unit to audit the
 lease representation in `minihost` are independently authored and do not
 include or redistribute Adobe headers.
 
+The same compiled probe pins SetEffectFlags, ReorderEffect,
+DeleteLayerEffect, and DuplicateEffect at slots 5/6/10/16 (x64 offsets
+40/48/80/128). Stream Suite v2 is independently represented as the SDK-sized
+22-entry/176-byte table acquired at version 7; its legacy name buffer and
+StreamValue signatures are compiled against the external SDK without importing
+Adobe declarations into `minihost`.
+
 AEGP Dynamic Stream Suite v4 uses the same cleanroom rule for its 26-entry
 table, grouping/flag values, match-name buffers, and UTF-16 naming boundary.
 The local property-tree and StreamValue declarations are independently

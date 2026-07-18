@@ -10,7 +10,7 @@ $fixture = Join-Path $root 'target\sdk-fixtures\shifter\Shifter.aex'
 $inputImage = Join-Path $root 'target\ae-oracle-colorgrid-input.png'
 
 $expectedArtifacts = [ordered]@{
-    release_harness = [ordered]@{ path = 'broker/target/release/aexcompat-harness.exe'; size_bytes = 9945600; sha256 = '0927d2ec34677b3326d210fa482ccf9035891413a03e25134f197238939b378f' }
+    release_harness = [ordered]@{ path = 'broker/target/release/aexcompat-harness.exe'; size_bytes = 9945600; sha256 = 'b713fb4e4abb07b792943028c312027a76eb55b9c43c6cc9149c5937579ca80a' }
     sdk_shifter_fixture = [ordered]@{ path = 'target/sdk-fixtures/shifter/Shifter.aex'; size_bytes = 23552; sha256 = 'f1f7c17eca0cef1f786f3770243f2727d174e45aee9b50b7d3982c188921f4c4' }
     deterministic_input = [ordered]@{ path = 'target/ae-oracle-colorgrid-input.png'; size_bytes = 677; sha256 = 'aad2e9973bc87d70af998a0522c4b83060539183230a4937744c6838fb66e2db' }
 }
