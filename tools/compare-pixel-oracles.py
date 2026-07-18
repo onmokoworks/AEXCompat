@@ -12,7 +12,10 @@ import sys
 from pathlib import Path
 from typing import Sequence
 
-from PIL import Image
+try:
+    from tools.ae_png_depth_inspect import decode_png
+except ModuleNotFoundError:  # Direct execution places tools/ on sys.path.
+    from ae_png_depth_inspect import decode_png
 
 
 CHANNELS = ("r", "g", "b", "a")
@@ -98,16 +101,20 @@ def load_render(path: Path) -> tuple[int, int, list[float], str]:
             raise InputError(f"unable to decode EXR: {exc}") from exc
         return width, height, values, "exr"
     try:
-        with Image.open(path) as image:
-            if image.format != "PNG":
-                raise InputError(f"expected PNG or EXR, got {image.format or 'unknown'}")
-            width, height = image.size
-            values = [value / 255.0 for value in image.convert("RGBA").tobytes()]
-    except InputError:
-        raise
+        metadata, decoded = decode_png(path)
+        width = metadata["width"]
+        height = metadata["height"]
+        bit_depth = metadata["bit_depth"]
+        if bit_depth == 8:
+            samples = decoded
+            maximum = 255
+        else:
+            samples = struct.unpack(f">{width * height * 4}H", decoded)
+            maximum = 65535
+        values = [value / maximum for value in samples]
     except Exception as exc:
         raise InputError(f"unable to decode PNG: {exc}") from exc
-    return width, height, values, "png_rgba8"
+    return width, height, values, f"png_rgba{bit_depth}"
 
 
 def compare(raw_path: Path, render_path: Path, width: int, height: int,
@@ -151,8 +158,10 @@ def compare(raw_path: Path, render_path: Path, width: int, height: int,
                 }
 
     pixels = width * height
-    if render_format == "png_rgba8" and raw_format != "rgba8":
-        claim_level = "quantized_export_only"
+    raw_depth = {"rgba8": 8, "rgba16le": 16, "rgba32f-le": 32}[raw_format]
+    render_depth = {"png_rgba8": 8, "png_rgba16": 16}.get(render_format, 32)
+    if raw_depth != render_depth:
+        claim_level = "cross_precision_export_only"
     elif render_format == "exr" and raw_format == "rgba32f-le":
         claim_level = "float_export_exact" if exact_mismatches == 0 else "float_export_tolerance"
     else:

@@ -5,6 +5,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import zlib
 from pathlib import Path
 
 from PIL import Image
@@ -16,6 +17,23 @@ SPEC = importlib.util.spec_from_file_location("compare_pixel_oracles", TOOL)
 MODULE = importlib.util.module_from_spec(SPEC)
 assert SPEC.loader is not None
 SPEC.loader.exec_module(MODULE)
+
+
+def write_rgba16_png(path: Path, width: int, height: int, samples: tuple[int, ...]):
+    signature = b"\x89PNG\r\n\x1a\n"
+
+    def chunk(kind: bytes, payload: bytes) -> bytes:
+        return (struct.pack(">I", len(payload)) + kind + payload +
+                struct.pack(">I", zlib.crc32(kind + payload) & 0xFFFFFFFF))
+
+    rows = b"".join(
+        b"\0" + struct.pack(f">{width * 4}H", *samples[y * width * 4:(y + 1) * width * 4])
+        for y in range(height)
+    )
+    path.write_bytes(
+        signature + chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 16, 6, 0, 0, 0)) +
+        chunk(b"IDAT", zlib.compress(rows)) + chunk(b"IEND", b"")
+    )
 
 
 class ComparePixelOraclesTests(unittest.TestCase):
@@ -75,12 +93,27 @@ class ComparePixelOraclesTests(unittest.TestCase):
             self.assertTrue(report16["match"])
             self.assertEqual(
                 report16["comparison_boundary"]["claim_level"],
-                "quantized_export_only",
+                "cross_precision_export_only",
             )
             raw32 = root / "expected32.rgba"
             raw32.write_bytes(struct.pack("<4f", 1.0, 128 / 255, 0.0, 1.0))
             self.assertTrue(MODULE.compare(
                 raw32, png, 1, 1, "rgba32f-le", tolerance=1e-7)["match"])
+
+    def test_rgba16_png_is_compared_without_pillow_truncation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            raw = root / "expected.rgba"
+            png = root / "actual.png"
+            raw.write_bytes(struct.pack("<4H", 32768, 16384, 1, 32768))
+            write_rgba16_png(png, 1, 1, (65535, 32768, 2, 65535))
+            report = MODULE.compare(
+                raw, png, 1, 1, "rgba16le", tolerance=1 / 32768,
+                raw_integer_max=32768,
+            )
+        self.assertTrue(report["match"])
+        self.assertEqual(report["formats"]["render"], "png_rgba16")
+        self.assertEqual(report["comparison_boundary"]["claim_level"], "export_tolerance")
 
     def test_bad_raw_size_and_dimensions_are_rejected(self):
         with tempfile.TemporaryDirectory() as directory:
