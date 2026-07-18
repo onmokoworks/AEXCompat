@@ -5,12 +5,29 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "minihost" / "src" / "l2_main.cpp"
+CMAKE_SOURCE = ROOT / "minihost" / "CMakeLists.txt"
 SCENE_SELFTEST_SOURCE = ROOT / "minihost" / "src" / "worker_aegp_scene_selftests.cpp"
+SCENE_SELFTEST_IMPL = ROOT / "minihost" / "src" / "worker_aegp_scene_selftests_impl.inc"
+PF_SUITE_SOURCE = ROOT / "minihost" / "src" / "worker_pf_suites.hpp"
 
 
 def scene_source() -> str:
-    return SOURCE.read_text(encoding="utf-8") + SCENE_SELFTEST_SOURCE.read_text(encoding="utf-8")
+    return "\n".join(path.read_text(encoding="utf-8") for path in
+                     (SOURCE, SCENE_SELFTEST_SOURCE, SCENE_SELFTEST_IMPL, PF_SUITE_SOURCE))
 BUILD = ROOT / "target" / "minihost-build"
+
+
+def test_scene_host_boundary_is_compiled_for_each_worker_target():
+    cmake = CMAKE_SOURCE.read_text(encoding="utf-8")
+    l2_source = SOURCE.read_text(encoding="utf-8")
+    scene_source = (ROOT / "minihost" / "src" / "worker_aegp_scene.cpp").read_text(
+        encoding="utf-8")
+    selftest_source = SCENE_SELFTEST_SOURCE.read_text(encoding="utf-8")
+    assert "src/worker_aegp_scene.cpp" in cmake
+    assert "src/worker_aegp_scene_selftests.cpp" in cmake
+    assert '#include "worker_aegp_scene.cpp"' not in l2_source
+    assert "configure_scene_context" in scene_source
+    assert "scene_selftests_translation_unit_linked" in selftest_source
 
 
 def test_pf_interface_slot_3_uses_exact_sdk_shape_and_offset():

@@ -61,6 +61,7 @@
 #include "suite_lease_tracker.hpp"
 #include "worker_selector_dispatch.hpp"
 #include "worker_aegp_render_options.hpp"
+#include "worker_aegp_scene.hpp"
 #include "worker_handle_runtime.hpp"
 #include "worker_suite_abi.hpp"
 #include "worker_world_safety.hpp"
@@ -8746,7 +8747,7 @@ struct SwitchPipeProbe {
   ~SwitchPipeProbe() { stop(); }
 };
 // AEGP project/item/comp/layer/effect/collection/stream/keyframe family.
-#include "worker_aegp_scene.cpp"
+#include "worker_aegp_scene_impl.inc"
 bool __cdecl validate_render_options_item(int32_t plugin_id, void* item) {
   return plugin_id == 1 && item == &g_aegp_comp_item;
 }
@@ -8768,6 +8769,15 @@ bool __cdecl initialize_layer_render_options(
   }
   *value = initialized;
   return true;
+}
+
+bool __cdecl scene_initialize_layer_render_options(
+    int32_t plugin_id, void* source, int32_t boundary, void* value) noexcept {
+  if (boundary < static_cast<int32_t>(AegpLayerEffectBoundary::all) ||
+      boundary > static_cast<int32_t>(AegpLayerEffectBoundary::downstream)) return false;
+  return initialize_layer_render_options(
+      plugin_id, source, static_cast<AegpLayerEffectBoundary>(boundary),
+      static_cast<AegpLayerRenderOptionsValue*>(value));
 }
 
 std::string live_suite_lease_summary() {
@@ -15852,6 +15862,13 @@ bool verify_aegp_projector_levels() {
 }
 
 int wmain(int argc, wchar_t **argv) {
+  const SceneContext scene_host{
+      {&bump_render_project_timestamp, &validate_render_options_item,
+       &scene_initialize_layer_render_options, &suite_leases_balanced},
+      &g_aegp_comp_item, &g_aegp_comp, &g_full_resolution_width,
+      &g_full_resolution_height, &g_smart_width, &g_smart_height};
+  if (!configure_scene_context(scene_host) || !scene_translation_unit_linked() ||
+      !scene_selftests_translation_unit_linked()) return 23;
   configure_validators(&validate_render_options_item, &initialize_layer_render_options);
   configure_cache_on_load_suite(&g_effect);
   const PfHostContext pf_host_context{
