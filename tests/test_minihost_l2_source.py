@@ -9,6 +9,8 @@ HANDLE_RUNTIME_SOURCE = ROOT / "minihost" / "src" / "worker_handle_runtime.cpp"
 HANDLE_RUNTIME_HEADER = ROOT / "minihost" / "src" / "worker_handle_runtime.hpp"
 PF_SUITES_HEADER = ROOT / "minihost" / "src" / "worker_pf_suites.hpp"
 PF_SUITES_SOURCE = ROOT / "minihost" / "src" / "worker_pf_suites.cpp"
+RENDER_HEADER = ROOT / "minihost" / "src" / "render_subsystem.h"
+RENDER_SOURCE = ROOT / "minihost" / "src" / "render_subsystem.cpp"
 
 
 def l2_family_source():
@@ -18,6 +20,27 @@ def l2_family_source():
 
 
 class MinihostL2SourceTests(unittest.TestCase):
+    def test_render_dispatch_is_a_real_translation_unit_with_explicit_host_hooks(self):
+        header = RENDER_HEADER.read_text(encoding="utf-8")
+        implementation = RENDER_SOURCE.read_text(encoding="utf-8")
+        cmake = (ROOT / "minihost" / "CMakeLists.txt").read_text(encoding="utf-8")
+        worker = SOURCE.read_text(encoding="utf-8")
+
+        self.assertIn("struct HostHooks", header)
+        self.assertIn("struct RenderContext", header)
+        self.assertIn("guarded_effect_main", header)
+        self.assertIn("dependencies_ready", header)
+        self.assertIn("int dispatch(RenderContext& context)", header)
+        self.assertIn("context.primary_error != 0 ?", implementation)
+        self.assertIn("context.cleanup_error", implementation)
+        self.assertNotIn('#include "l2_main.cpp"', implementation)
+        self.assertNotIn("#if 0", implementation)
+        self.assertIn("src/render_subsystem.cpp", cmake)
+        self.assertIn("ClassicRenderRequest", worker)
+        self.assertIn("SmartRenderRequest", worker)
+        self.assertIn("classic_render_runtime", worker)
+        self.assertIn("smart_render_runtime", worker)
+
     def test_batch_sampling_suite_is_typed_and_fail_closed(self):
         text = l2_family_source()
         for marker in (

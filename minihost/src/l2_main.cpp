@@ -55,6 +55,7 @@
 #include "render_lifecycle.hpp"
 #include "render_pixel_buffer.hpp"
 #include "render_pixel_transport.hpp"
+#include "render_subsystem.h"
 #include "runtime_module_audit.hpp"
 #include "strict_json.hpp"
 #include "suite_lease_tracker.hpp"
@@ -13148,7 +13149,7 @@ int32_t end_render_lifecycle(EffectEntry effect_entry,
 #endif
 
 #ifdef AEXCOMPAT_RENDER_WORKER
-int32_t render_once(EffectEntry entry, std::array<std::byte, kInSize>& input,
+int32_t classic_render_runtime(EffectEntry entry, std::array<std::byte, kInSize>& input,
                     std::array<std::byte, kOutSize>& command_output,
                     const std::string& case_id, int32_t& width, int32_t& height,
                     int32_t& rowbytes,
@@ -13492,6 +13493,84 @@ int32_t render_once(EffectEntry entry, std::array<std::byte, kInSize>& input,
   return error;
 }
 
+// The request keeps render-local state out of wmain.  The shared subsystem
+// controls admission and failure priority; this hook retains the audited host
+// implementation that prepares PF worlds, params, suites, and lifecycle data.
+struct ClassicRenderRequest {
+  EffectEntry entry;
+  std::array<std::byte, kInSize>& input;
+  std::array<std::byte, kOutSize>& output;
+  const std::string& case_id;
+  int32_t& width;
+  int32_t& height;
+  int32_t& rowbytes;
+  std::string& input_hash;
+  std::string& output_hash;
+  bool& guards_intact;
+  const RequestedAssignments* requested;
+  const std::vector<unsigned char>* external_rgba;
+  const std::filesystem::path* external_output;
+  int32_t external_width;
+  int32_t external_height;
+  const std::vector<ExternalLayerInput>* external_layers;
+  int32_t external_current_time;
+  int32_t external_time_step;
+  int32_t external_total_time;
+  uint32_t external_time_scale;
+  int32_t external_pixel_bytes;
+  bool manage_sequence;
+  std::vector<unsigned char>* captured_argb;
+};
+
+bool classic_render_dependencies_ready(void* opaque) {
+  const auto& request = *static_cast<ClassicRenderRequest*>(opaque);
+  return request.entry && request.width >= 0 && request.height >= 0 &&
+      request.external_time_scale != 0;
+}
+
+int classic_render_guarded_effect_main(void* opaque) {
+  auto& request = *static_cast<ClassicRenderRequest*>(opaque);
+  return classic_render_runtime(request.entry, request.input, request.output, request.case_id,
+      request.width, request.height, request.rowbytes, request.input_hash, request.output_hash,
+      request.guards_intact, request.requested, request.external_rgba, request.external_output,
+      request.external_width, request.external_height, request.external_layers,
+      request.external_current_time, request.external_time_step, request.external_total_time,
+      request.external_time_scale, request.external_pixel_bytes, request.manage_sequence,
+      request.captured_argb);
+}
+
+int classic_render_cleanup(void*) {
+  // classic_render_runtime performs sequence/frame/UI/world cleanup before it
+  // returns.  This explicit hook documents the completed cleanup boundary.
+  return 0;
+}
+
+int32_t render_once(EffectEntry entry, std::array<std::byte, kInSize>& input,
+                    std::array<std::byte, kOutSize>& output,
+                    const std::string& case_id, int32_t& width, int32_t& height,
+                    int32_t& rowbytes, std::string& input_hash, std::string& output_hash,
+                    bool& guards_intact, const RequestedAssignments* requested = nullptr,
+                    const std::vector<unsigned char>* external_rgba = nullptr,
+                    const std::filesystem::path* external_output = nullptr,
+                    int32_t external_width = 0, int32_t external_height = 0,
+                    const std::vector<ExternalLayerInput>* external_layers = nullptr,
+                    int32_t external_current_time = 0, int32_t external_time_step = 1,
+                    int32_t external_total_time = 1, uint32_t external_time_scale = 1,
+                    int32_t external_pixel_bytes = 4, bool manage_sequence = true,
+                    std::vector<unsigned char>* captured_argb = nullptr) {
+  ClassicRenderRequest request{entry, input, output, case_id, width, height, rowbytes,
+      input_hash, output_hash, guards_intact, requested, external_rgba, external_output,
+      external_width, external_height, external_layers, external_current_time,
+      external_time_step, external_total_time, external_time_scale, external_pixel_bytes,
+      manage_sequence, captured_argb};
+  aexcompat::render::RenderContext context{
+      aexcompat::render::RenderKind::Classic, &request,
+      {&classic_render_guarded_effect_main, &classic_render_cleanup,
+       &classic_render_dependencies_ready},
+      g_module_audit.required};
+  return aexcompat::render::dispatch(context);
+}
+
 bool exercise_loaded_effect_item_receipt(EffectEntry entry,
     std::array<std::byte, kInSize>& input, std::array<std::byte, kOutSize>& output) {
   g_loaded_effect_receipt_context = {
@@ -13568,7 +13647,7 @@ struct SmartResult {
   int32_t output_rowbytes{};
 };
 
-SmartResult smart_render_once(EffectEntry entry, std::array<std::byte, kInSize>& input,
+SmartResult smart_render_runtime(EffectEntry entry, std::array<std::byte, kInSize>& input,
                               std::array<std::byte, kOutSize>& command_output,
                               const std::string& case_id,
                               const RequestedAssignments* requested = nullptr,
@@ -14129,6 +14208,80 @@ SmartResult smart_render_once(EffectEntry entry, std::array<std::byte, kInSize>&
   }
   result.guards_intact = guarded.sentinels_intact();
   return result;
+}
+
+struct SmartRenderRequest {
+  EffectEntry entry;
+  std::array<std::byte, kInSize>& input;
+  std::array<std::byte, kOutSize>& output;
+  const std::string& case_id;
+  const RequestedAssignments* requested;
+  const std::vector<unsigned char>* external_rgba;
+  const std::filesystem::path* external_output;
+  int32_t external_width;
+  int32_t external_height;
+  const std::vector<ExternalLayerInput>* external_layers;
+  int32_t external_current_time;
+  int32_t external_time_step;
+  int32_t external_total_time;
+  uint32_t external_time_scale;
+  int32_t external_pixel_bytes;
+  SmartResult result;
+};
+
+bool smart_render_dependencies_ready(void* opaque) {
+  const auto& request = *static_cast<SmartRenderRequest*>(opaque);
+  // SmartFX requires both a non-null entry point and valid rational time before
+  // PF_Cmd_SMART_PRE_RENDER / CPU-or-GPU SMART_RENDER can be admitted.
+  return request.entry && request.external_time_scale != 0 &&
+      request.external_time_step > 0 && request.external_total_time >= request.external_current_time;
+}
+
+int smart_render_guarded_effect_main(void* opaque) {
+  auto& request = *static_cast<SmartRenderRequest*>(opaque);
+  request.result = smart_render_runtime(request.entry, request.input, request.output,
+      request.case_id, request.requested, request.external_rgba, request.external_output,
+      request.external_width, request.external_height, request.external_layers,
+      request.external_current_time, request.external_time_step, request.external_total_time,
+      request.external_time_scale, request.external_pixel_bytes);
+  // GPU setup / pre-render / selector errors preserve their own precise field;
+  // render_error is the lifecycle's primary result for shared error priority.
+  if (request.result.gpu_setup_error != 0) return request.result.gpu_setup_error;
+  if (request.result.pre_error != 0) return request.result.pre_error;
+  return request.result.render_error;
+}
+
+int smart_render_cleanup(void*) {
+  // smart_render_runtime performs GPU setdown, pre-render data cleanup,
+  // automatic parameter checkins, suite releases, and world cleanup itself.
+  return 0;
+}
+
+SmartResult smart_render_once(EffectEntry entry, std::array<std::byte, kInSize>& input,
+                              std::array<std::byte, kOutSize>& output,
+                              const std::string& case_id,
+                              const RequestedAssignments* requested = nullptr,
+                              const std::vector<unsigned char>* external_rgba = nullptr,
+                              const std::filesystem::path* external_output = nullptr,
+                              int32_t external_width = 0, int32_t external_height = 0,
+                              const std::vector<ExternalLayerInput>* external_layers = nullptr,
+                              int32_t external_current_time = 0, int32_t external_time_step = 1,
+                              int32_t external_total_time = 1,
+                              uint32_t external_time_scale = 1,
+                              int32_t external_pixel_bytes = 4) {
+  SmartRenderRequest request{entry, input, output, case_id, requested, external_rgba,
+      external_output, external_width, external_height, external_layers, external_current_time,
+      external_time_step, external_total_time, external_time_scale, external_pixel_bytes, {}};
+  aexcompat::render::RenderContext context{
+      aexcompat::render::RenderKind::SmartPreRenderAndRender, &request,
+      {&smart_render_guarded_effect_main, &smart_render_cleanup,
+       &smart_render_dependencies_ready},
+      g_module_audit.required};
+  const int dispatch_error = aexcompat::render::dispatch(context);
+  // Never mask the detailed native result. The generic result only supplies a
+  // pre-admission failure when no selector executed.
+  if (!context.selector_started && dispatch_error != 0) request.result.render_error = dispatch_error;
+  return request.result;
 }
 #endif
 
