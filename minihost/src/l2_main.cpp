@@ -49,6 +49,7 @@
 #include "native_stdout_guard.hpp"
 #include "parameter_animation_transport.hpp"
 #include "pf_cache_on_load_suite.hpp"
+#include "render_lifecycle.hpp"
 #include "render_pixel_transport.hpp"
 #include "strict_json.hpp"
 #include "suite_lease_tracker.hpp"
@@ -72,6 +73,9 @@ using aexcompat::parameter_animation::load_parameter_animation;
 using aexcompat::parameter_animation::rational_less;
 using aexcompat::suites::cache_on_load_suite;
 using aexcompat::suites::configure_cache_on_load_suite;
+#if defined(AEXCOMPAT_RENDER_WORKER) || defined(AEXCOMPAT_SMART_WORKER)
+using aexcompat::render_lifecycle::RenderLifecycle;
+#endif
 using aexcompat::suite_runtime::SuiteLeaseTracker;
 using aexcompat::worker_runtime::redirect_native_stdout;
 using aexcompat::worker_runtime::restore_native_stdout;
@@ -18680,84 +18684,76 @@ std::string world_debug_report_json() {
   return json.str();
 }
 
-struct RenderLifecycle {
-  bool sequence_started{};
-  bool frame_started{};
-  int32_t setup_error{};
-};
+struct LifecycleContext { EffectEntry effect_entry; };
 
-RenderLifecycle begin_frame_lifecycle(EffectEntry entry,
-    std::array<std::byte, kInSize>& input,
-    std::array<std::byte, kOutSize>& output, void** params, void* world) {
-  RenderLifecycle lifecycle;
-  std::cerr << "stage:frame_setup_begin\n" << std::flush;
-  const int32_t frame_error = entry(kFrameSetup, input.data(), output.data(), params, world, nullptr);
-  std::cerr << "stage:frame_setup_end error=" << frame_error << "\n" << std::flush;
-  if (frame_error != 0) {
-    lifecycle.setup_error = frame_error;
-    return lifecycle;
-  }
-  lifecycle.frame_started = true;
-  write<void*>(input, kInFrameData, read<void*>(output, kOutFrameData));
-  return lifecycle;
+constexpr aexcompat::render_lifecycle::Layout kRenderLifecycleLayout{
+    kInSequenceData, kOutSequenceData, kInFrameData, kOutFrameData,
+    kSequenceSetup, kSequenceSetdown, kFrameSetup, kFrameSetdown};
+
+int32_t lifecycle_invoke_frame(void* opaque, int32_t selector, void* input,
+                               void* output, void** params, void* world) {
+  const EffectEntry effect_entry = static_cast<LifecycleContext*>(opaque)->effect_entry;
+  return guarded_effect_call(effect_entry, selector, input, output, params, world, nullptr);
 }
 
-int32_t end_frame_lifecycle(EffectEntry entry,
-    std::array<std::byte, kInSize>& input,
-    std::array<std::byte, kOutSize>& output, void** params, void* world,
-    const RenderLifecycle& lifecycle, int32_t primary_error) {
-  int32_t result = primary_error;
-  if (lifecycle.frame_started) {
-    std::cerr << "stage:frame_setdown_begin\n" << std::flush;
-    const int32_t error = entry(kFrameSetdown, input.data(), output.data(), params, world, nullptr);
-    std::cerr << "stage:frame_setdown_end error=" << error << "\n" << std::flush;
-    if (result == 0 && error != 0) result = error;
-    write<void*>(input, kInFrameData, nullptr);
-  }
-  return result;
+int32_t lifecycle_invoke_sequence(void* opaque, int32_t selector, void* input,
+                                  void* output) {
+  return invoke_sequence_selector(
+      static_cast<LifecycleContext*>(opaque)->effect_entry, selector, input, output);
 }
 
-RenderLifecycle begin_render_lifecycle(EffectEntry entry,
-    std::array<std::byte, kInSize>& input,
-    std::array<std::byte, kOutSize>& output, void** params, void* world) {
-  RenderLifecycle lifecycle;
-  std::cerr << "stage:sequence_setup_begin\n" << std::flush;
-  const int32_t sequence_error = invoke_sequence_selector(
-      entry, kSequenceSetup, input.data(), output.data());
-  std::cerr << "stage:sequence_setup_end error=" << sequence_error << "\n" << std::flush;
-  if (sequence_error != 0) {
-    lifecycle.setup_error = sequence_error;
-    return lifecycle;
-  }
-  lifecycle.sequence_started = true;
+void lifecycle_activate_aux(void*) {
   g_external_aux_active = g_external_aux_loaded;
-  write<void*>(input, kInSequenceData, read<void*>(output, kOutSequenceData));
-
-  const RenderLifecycle frame = begin_frame_lifecycle(entry, input, output, params, world);
-  lifecycle.frame_started = frame.frame_started;
-  lifecycle.setup_error = frame.setup_error;
-  return lifecycle;
 }
 
-int32_t end_render_lifecycle(EffectEntry entry,
-    std::array<std::byte, kInSize>& input,
-    std::array<std::byte, kOutSize>& output, void** params, void* world,
-    const RenderLifecycle& lifecycle, int32_t primary_error) {
-  int32_t result = end_frame_lifecycle(entry, input, output, params, world,
-                                       lifecycle, primary_error);
-  if (lifecycle.sequence_started) {
-    std::cerr << "stage:sequence_setdown_begin\n" << std::flush;
-    const int32_t error = invoke_sequence_selector(
-        entry, kSequenceSetdown, input.data(), output.data());
-    std::cerr << "stage:sequence_setdown_end error=" << error << "\n" << std::flush;
-    if (result == 0 && error != 0) result = error;
-    write<void*>(input, kInSequenceData, nullptr);
-  }
+void lifecycle_cleanup_aux(void*) {
   // Aux channel chunks are host-owned and cannot outlive a render lifecycle.
   reclaim_layer_channels();
   g_external_aux_active = false;
   clear_native_aux_provider();
-  return result;
+}
+
+aexcompat::render_lifecycle::Hooks lifecycle_hooks(LifecycleContext& context) {
+  return {&context, &lifecycle_invoke_frame, &lifecycle_invoke_sequence,
+          &lifecycle_activate_aux, &lifecycle_cleanup_aux};
+}
+
+RenderLifecycle begin_frame_lifecycle(EffectEntry effect_entry,
+    std::array<std::byte, kInSize>& input,
+    std::array<std::byte, kOutSize>& output, void** params, void* world) {
+  LifecycleContext context{effect_entry};
+  return aexcompat::render_lifecycle::begin_frame(
+      lifecycle_hooks(context), kRenderLifecycleLayout, input.data(), output.data(),
+      params, world);
+}
+
+int32_t end_frame_lifecycle(EffectEntry effect_entry,
+    std::array<std::byte, kInSize>& input,
+    std::array<std::byte, kOutSize>& output, void** params, void* world,
+    const RenderLifecycle& lifecycle, int32_t primary_error) {
+  LifecycleContext context{effect_entry};
+  return aexcompat::render_lifecycle::end_frame(
+      lifecycle_hooks(context), kRenderLifecycleLayout, input.data(), output.data(),
+      params, world, lifecycle, primary_error);
+}
+
+RenderLifecycle begin_render_lifecycle(EffectEntry effect_entry,
+    std::array<std::byte, kInSize>& input,
+    std::array<std::byte, kOutSize>& output, void** params, void* world) {
+  LifecycleContext context{effect_entry};
+  return aexcompat::render_lifecycle::begin_render(
+      lifecycle_hooks(context), kRenderLifecycleLayout, input.data(), output.data(),
+      params, world);
+}
+
+int32_t end_render_lifecycle(EffectEntry effect_entry,
+    std::array<std::byte, kInSize>& input,
+    std::array<std::byte, kOutSize>& output, void** params, void* world,
+    const RenderLifecycle& lifecycle, int32_t primary_error) {
+  LifecycleContext context{effect_entry};
+  return aexcompat::render_lifecycle::end_render(
+      lifecycle_hooks(context), kRenderLifecycleLayout, input.data(), output.data(),
+      params, world, lifecycle, primary_error);
 }
 #endif
 

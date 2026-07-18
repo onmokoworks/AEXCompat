@@ -337,20 +337,28 @@ class MinihostL2SourceTests(unittest.TestCase):
 
     def test_interactive_render_uses_balanced_sequence_and_frame_lifecycle(self):
         text = SOURCE.read_text(encoding="utf-8")
+        lifecycle = (ROOT / "minihost" / "src" / "render_lifecycle.cpp").read_text(
+            encoding="utf-8"
+        )
         for marker in (
             "RenderLifecycle begin_render_lifecycle",
-            "invoke_sequence_selector(\n      entry, kSequenceSetup",
-            "write<void*>(input, kInSequenceData, read<void*>(output, kOutSequenceData))",
-            "entry(kFrameSetup",
-            "write<void*>(input, kInFrameData, read<void*>(output, kOutFrameData))",
             "g_classic_render_selector_dispatched = true;\n      error = entry(kRender",
-            "entry(kFrameSetdown",
-            "invoke_sequence_selector(\n        entry, kSequenceSetdown",
             "end_render_lifecycle(entry, input, command_output, params.data()",
         ):
             self.assertIn(marker, text)
-        self.assertLess(text.index("entry(kFrameSetdown"),
-                        text.index("entry, kSequenceSetdown"))
+        for marker in (
+            "hooks.invoke_sequence(\n      hooks.context, layout.sequence_setup",
+            "transfer_pointer(input, layout.in_sequence_data",
+            "hooks.invoke_frame(\n      hooks.context, layout.frame_setup",
+            "transfer_pointer(input, layout.in_frame_data",
+            "hooks.invoke_frame(hooks.context, layout.frame_setdown",
+            "hooks.invoke_sequence(hooks.context, layout.sequence_setdown",
+            "if (result == 0 && error != 0) result = error",
+            "if (hooks.cleanup_aux) hooks.cleanup_aux(hooks.context)",
+        ):
+            self.assertIn(marker, lifecycle)
+        self.assertLess(lifecycle.index("layout.frame_setdown"),
+                        lifecycle.index("layout.sequence_setdown"))
 
     def test_interactive_render_supports_bounded_deep_pixel_worlds(self):
         text = SOURCE.read_text(encoding="utf-8")
