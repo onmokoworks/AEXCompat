@@ -10,20 +10,33 @@ from typing import Any
 ABSOLUTE_PATH = re.compile(r"(^|[^A-Za-z])[A-Za-z]:\\")
 EVENT_KINDS = {
     "session_start", "selector_dispatch", "suite_acquire", "suite_release",
-    "callback_invoke", "world_descriptor", "error", "unimplemented", "session_end",
+    "callback_invoke", "world_descriptor", "known_function_invoke",
+    "error", "unimplemented", "session_end",
 }
-HOST_KINDS = {"after_effects_manual", "minihost"}
+HOST_KINDS = {"after_effects_manual", "minihost", "native_observation"}
 PIXEL_FORMATS = {"argb8", "argb16", "argb32f", "rgba8", "unknown"}
+MODULE_RVA = re.compile(r"^0x[0-9a-f]+$")
+KNOWN_FUNCTION_PHASES = {"enter", "leave"}
 BASE_FIELDS = {
     "schema_version", "event_index", "event_kind", "host_kind",
     "host_version_label", "plugin_label",
 }
-PAYLOAD_FIELDS = {"selector", "suite", "world", "error"}
+PAYLOAD_FIELDS = {"selector", "suite", "world", "error", "known_function"}
 FORBIDDEN_FIELDS = {"raw_payload", "binary_payload", "pixels", "pointer"}
 
 
 def _is_int(value: Any) -> bool:
     return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _is_number(value: Any) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def _check_stem(value: Any, field: str, errors: list[str]) -> None:
+    _check_string(value, field, errors)
+    if isinstance(value, str) and any(c in value for c in "\\/:"):
+        errors.append(f"{field} must be a filename stem")
 
 
 def _check_string(value: Any, field: str, errors: list[str], *, nonempty: bool = True) -> None:
@@ -83,6 +96,40 @@ def validate_event(event: Any) -> list[str]:
                     errors.append(f"world.{field} must be a non-negative integer")
             if world["pixel_format"] not in PIXEL_FORMATS:
                 errors.append("world.pixel_format is unsupported")
+    if kind == "known_function_invoke":
+        known = event.get("known_function")
+        allowed = {"symbol", "module_label", "module_rva", "phase", "return_value", "fields"}
+        required = {"symbol", "module_label", "module_rva", "phase"}
+        if not isinstance(known, dict):
+            errors.append("known_function must be an object")
+        else:
+            for field in sorted(set(known) - allowed):
+                errors.append(f"known_function.{field} is not allowed")
+            for field in sorted(required - set(known)):
+                errors.append(f"known_function.{field} is required")
+            _check_stem(known.get("symbol"), "known_function.symbol", errors)
+            _check_stem(known.get("module_label"), "known_function.module_label", errors)
+            rva = known.get("module_rva")
+            if not isinstance(rva, str) or not MODULE_RVA.match(rva):
+                errors.append("known_function.module_rva must be a lowercase-hex module offset")
+            if known.get("phase") not in KNOWN_FUNCTION_PHASES:
+                errors.append("known_function.phase must be enter or leave")
+            if "return_value" in known and not _is_number(known["return_value"]):
+                errors.append("known_function.return_value must be a numeric scalar")
+            if "fields" in known:
+                fields = known["fields"]
+                if not isinstance(fields, list):
+                    errors.append("known_function.fields must be an array")
+                else:
+                    for index, entry in enumerate(fields):
+                        label = f"known_function.fields[{index}]"
+                        if not isinstance(entry, dict) or set(entry) != {"name", "value"}:
+                            errors.append(f"{label} must contain exactly name and value")
+                            continue
+                        _check_string(entry["name"], f"{label}.name", errors)
+                        value = entry["value"]
+                        if not _is_number(value) and not isinstance(value, bool):
+                            errors.append(f"{label}.value must be a numeric or boolean scalar")
     if kind in {"error", "unimplemented"}:
         detail = event.get("error")
         if not isinstance(detail, dict) or set(detail) != {"code_label", "message"}:

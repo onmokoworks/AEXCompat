@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "spec_kind": "known_function_hook_set",
+  "module_label": "gamma-classic",
+  "hooks": [
+    {
+      "symbol": "apply_gamma",
+      "module_rva": "0x1c40",
+      "arg_structs": [
+        {"index": 0, "struct": "in"},
+        {"index": 1, "struct": "out"}
+      ],
+      "scalar_args": [
+        {"index": 2, "name": "mode", "as": "int", "phase": "enter"}
+      ],
+      "reads": [
+        {"name": "in.width", "as": "int", "phase": "enter"},
+        {"name": "in.height", "as": "int", "phase": "enter"},
+        {"name": "in.quality", "as": "int", "phase": "enter"},
+        {"name": "out.width", "as": "int", "phase": "leave"},
+        {"name": "out.height", "as": "int", "phase": "leave"}
+      ],
+      "return_as": "int"
+    }
+  ]
+}

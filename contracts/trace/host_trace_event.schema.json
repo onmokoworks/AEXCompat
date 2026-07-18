@@ -9,9 +9,9 @@
     "schema_version": {"const": 1},
     "event_index": {"type": "integer", "minimum": 0},
     "event_kind": {
-      "enum": ["session_start", "selector_dispatch", "suite_acquire", "suite_release", "callback_invoke", "world_descriptor", "error", "unimplemented", "session_end"]
+      "enum": ["session_start", "selector_dispatch", "suite_acquire", "suite_release", "callback_invoke", "world_descriptor", "known_function_invoke", "error", "unimplemented", "session_end"]
     },
-    "host_kind": {"enum": ["after_effects_manual", "minihost"]},
+    "host_kind": {"enum": ["after_effects_manual", "minihost", "native_observation"]},
     "host_version_label": {"type": "string", "minLength": 1, "not": {"pattern": "^[A-Za-z]:\\\\"}},
     "plugin_label": {"type": "string", "minLength": 1, "pattern": "^[^\\\\/:]+$"},
     "selector": {"type": "string", "minLength": 1, "not": {"pattern": "^[A-Za-z]:\\\\"}},
@@ -44,12 +44,37 @@
         "message": {"type": "string", "not": {"pattern": "(^|[^A-Za-z])[A-Za-z]:\\\\"}}
       },
       "additionalProperties": false
+    },
+    "known_function": {
+      "type": "object",
+      "required": ["symbol", "module_label", "module_rva", "phase"],
+      "properties": {
+        "symbol": {"type": "string", "minLength": 1, "pattern": "^[^\\\\/:]+$"},
+        "module_label": {"type": "string", "minLength": 1, "pattern": "^[^\\\\/:]+$"},
+        "module_rva": {"type": "string", "pattern": "^0x[0-9a-f]+$"},
+        "phase": {"enum": ["enter", "leave"]},
+        "return_value": {"type": "number"},
+        "fields": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["name", "value"],
+            "properties": {
+              "name": {"type": "string", "minLength": 1, "not": {"pattern": "(^|[^A-Za-z])[A-Za-z]:\\\\"}},
+              "value": {"type": ["number", "boolean"]}
+            },
+            "additionalProperties": false
+          }
+        }
+      },
+      "additionalProperties": false
     }
   },
   "allOf": [
     {"if": {"properties": {"event_kind": {"const": "selector_dispatch"}}}, "then": {"required": ["selector"]}},
     {"if": {"properties": {"event_kind": {"enum": ["suite_acquire", "suite_release"]}}}, "then": {"required": ["suite"]}},
     {"if": {"properties": {"event_kind": {"const": "world_descriptor"}}}, "then": {"required": ["world"]}},
+    {"if": {"properties": {"event_kind": {"const": "known_function_invoke"}}}, "then": {"required": ["known_function"]}},
     {"if": {"properties": {"event_kind": {"enum": ["error", "unimplemented"]}}}, "then": {"required": ["error"]}}
   ],
   "additionalProperties": false

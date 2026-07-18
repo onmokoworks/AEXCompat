@@ -1,0 +1,71 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://aexcompat.local/contracts/observation/known_function_hook_set.schema.json",
+  "schema_version": 1,
+  "title": "AEXCompat known-function hook set",
+  "description": "Declares known module-relative functions to observe under Frida. This is a reverse-engineering / observation input; it produces native_observation traces that carry no integrity or provenance and never become After Effects equivalence evidence.",
+  "type": "object",
+  "required": ["schema_version", "spec_kind", "module_label", "hooks"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "spec_kind": {"const": "known_function_hook_set"},
+    "module_label": {"type": "string", "minLength": 1, "pattern": "^[^\\\\/:]+$"},
+    "hooks": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"$ref": "#/$defs/hook"}
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "hook": {
+      "type": "object",
+      "required": ["symbol", "module_rva"],
+      "properties": {
+        "symbol": {"type": "string", "minLength": 1, "pattern": "^[^\\\\/:]+$"},
+        "module_rva": {"type": "string", "pattern": "^0x[0-9a-f]+$"},
+        "arg_structs": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["index", "struct"],
+            "properties": {
+              "index": {"type": "integer", "minimum": 0},
+              "struct": {"type": "string", "minLength": 1, "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"}
+            },
+            "additionalProperties": false
+          }
+        },
+        "scalar_args": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["index", "name", "as"],
+            "properties": {
+              "index": {"type": "integer", "minimum": 0},
+              "name": {"type": "string", "minLength": 1, "not": {"pattern": "(^|[^A-Za-z])[A-Za-z]:\\\\"}},
+              "as": {"enum": ["int", "uint", "bool"]},
+              "phase": {"enum": ["enter", "leave"]}
+            },
+            "additionalProperties": false
+          }
+        },
+        "reads": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["name", "as"],
+            "properties": {
+              "name": {"type": "string", "minLength": 1, "not": {"pattern": "(^|[^A-Za-z])[A-Za-z]:\\\\"}},
+              "as": {"enum": ["int", "uint", "float", "bool"]},
+              "phase": {"enum": ["enter", "leave"]}
+            },
+            "additionalProperties": false
+          }
+        },
+        "return_as": {"enum": ["int", "uint"]}
+      },
+      "additionalProperties": false
+    }
+  }
+}
