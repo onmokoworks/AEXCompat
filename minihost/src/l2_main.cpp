@@ -50,6 +50,7 @@
 #include "parameter_animation_transport.hpp"
 #include "pf_cache_on_load_suite.hpp"
 #include "render_lifecycle.hpp"
+#include "render_pixel_buffer.hpp"
 #include "render_pixel_transport.hpp"
 #include "strict_json.hpp"
 #include "suite_lease_tracker.hpp"
@@ -73,6 +74,8 @@ using aexcompat::parameter_animation::load_parameter_animation;
 using aexcompat::parameter_animation::rational_less;
 using aexcompat::suites::cache_on_load_suite;
 using aexcompat::suites::configure_cache_on_load_suite;
+using aexcompat::render_safety::InputPixelBuffer;
+using aexcompat::render_safety::OutputPixelBuffer;
 #if defined(AEXCOMPAT_RENDER_WORKER) || defined(AEXCOMPAT_SMART_WORKER)
 using aexcompat::render_lifecycle::RenderLifecycle;
 #endif
@@ -537,107 +540,6 @@ constexpr std::size_t kUtilsGetPixelData16 = 536;
 using EffectEntry = int32_t(__cdecl*)(int32_t, void*, void*, void**, void*, void*);
 using AegpEntry = int32_t(__cdecl*)(void*, int32_t, int32_t, int32_t, void**);
 using AddParamCallback = int32_t(__cdecl*)(void*, int32_t, void*);
-
-class InputPixelBuffer {
- public:
-  explicit InputPixelBuffer(std::size_t size)
-      : size_(size), data_(static_cast<unsigned char*>(VirtualAlloc(
-            nullptr, size, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE))) {}
-  ~InputPixelBuffer() {
-    if (data_) VirtualFree(data_, 0, MEM_RELEASE);
-  }
-  InputPixelBuffer(const InputPixelBuffer&) = delete;
-  InputPixelBuffer& operator=(const InputPixelBuffer&) = delete;
-  explicit operator bool() const { return data_ != nullptr; }
-  unsigned char* data() { return data_; }
-  const unsigned char* data() const { return data_; }
-  unsigned char& operator[](std::size_t index) { return data_[index]; }
-  bool set_plugin_writable(bool writable) {
-    DWORD previous = 0;
-    return data_ && VirtualProtect(data_, size_, writable ? PAGE_READWRITE : PAGE_READONLY,
-                                   &previous) != FALSE;
-  }
-
- private:
-  std::size_t size_{};
-  unsigned char* data_{};
-};
-
-class OutputPixelBuffer {
- public:
-  static constexpr std::size_t kSentinelBytes = 64;
-  OutputPixelBuffer() = default;
-  explicit OutputPixelBuffer(std::size_t size) { reset(size); }
-  ~OutputPixelBuffer() { release(); }
-  OutputPixelBuffer(const OutputPixelBuffer&) = delete;
-  OutputPixelBuffer& operator=(const OutputPixelBuffer&) = delete;
-
-  bool reset(std::size_t size) {
-    SYSTEM_INFO info{};
-    GetSystemInfo(&info);
-    const std::size_t page_size = info.dwPageSize;
-    if (!size || !page_size || size > SIZE_MAX - 2 * kSentinelBytes) return false;
-    const std::size_t payload = size + 2 * kSentinelBytes;
-    if (payload > SIZE_MAX - (page_size - 1)) return false;
-    const std::size_t committed_size = (payload + page_size - 1) / page_size * page_size;
-    if (committed_size < payload || committed_size > SIZE_MAX - 2 * page_size) return false;
-    const std::size_t allocation_size = committed_size + 2 * page_size;
-    auto* allocation = static_cast<unsigned char*>(VirtualAlloc(
-        nullptr, allocation_size, MEM_RESERVE, PAGE_NOACCESS));
-    if (!allocation || !VirtualAlloc(allocation + page_size, committed_size,
-                                     MEM_COMMIT, PAGE_READWRITE)) {
-      if (allocation) VirtualFree(allocation, 0, MEM_RELEASE);
-      return false;
-    }
-    release();
-    allocation_ = allocation;
-    page_size_ = page_size;
-    committed_size_ = committed_size;
-    allocation_size_ = allocation_size;
-    size_ = size;
-    data_ = allocation_ + page_size_ + kSentinelBytes;
-    std::memset(allocation_ + page_size_, 0xA5, committed_size_);
-    std::memset(data_, 0xCC, size_);
-    return true;
-  }
-  explicit operator bool() const { return data_ != nullptr; }
-  unsigned char* data() { return data_; }
-  const unsigned char* data() const { return data_; }
-  std::size_t size() const { return size_; }
-  bool sentinels_intact() const {
-    if (!data_) return false;
-    const auto intact = [](const unsigned char* begin, const unsigned char* end) {
-      return std::all_of(begin, end, [](unsigned char byte) { return byte == 0xA5; });
-    };
-    const unsigned char* committed_begin = allocation_ + page_size_;
-    return intact(committed_begin, data_) &&
-        intact(data_ + size_, committed_begin + committed_size_);
-  }
-  bool guard_pages_intact() const {
-    if (!allocation_) return false;
-    MEMORY_BASIC_INFORMATION before{}, after{};
-    const auto inaccessible_reservation = [](const MEMORY_BASIC_INFORMATION& page) {
-      return page.State == MEM_RESERVE && page.AllocationProtect == PAGE_NOACCESS;
-    };
-    return VirtualQuery(allocation_, &before, sizeof(before)) == sizeof(before) &&
-        VirtualQuery(allocation_ + page_size_ + committed_size_, &after, sizeof(after)) ==
-            sizeof(after) &&
-        inaccessible_reservation(before) && inaccessible_reservation(after);
-  }
-
- private:
-  void release() {
-    if (allocation_) VirtualFree(allocation_, 0, MEM_RELEASE);
-    allocation_ = data_ = nullptr;
-    size_ = page_size_ = committed_size_ = allocation_size_ = 0;
-  }
-  unsigned char* allocation_{};
-  unsigned char* data_{};
-  std::size_t size_{};
-  std::size_t page_size_{};
-  std::size_t committed_size_{};
-  std::size_t allocation_size_{};
-};
 
 auto& g_last_seh_exception_code = selector_dispatch_telemetry().seh_code;
 auto& g_last_seh_exception_address = selector_dispatch_telemetry().seh_address;

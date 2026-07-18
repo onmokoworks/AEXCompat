@@ -20,6 +20,7 @@ set(AEXCOMPAT_L2_WORKER_SOURCES
     src/parameter_animation_transport.cpp
     src/pf_cache_on_load_suite.cpp
     src/render_lifecycle.cpp
+    src/render_pixel_buffer.cpp
     src/render_pixel_transport.cpp
     src/strict_json.cpp
     src/suite_lease_tracker.cpp
