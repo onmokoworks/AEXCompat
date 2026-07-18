@@ -1287,6 +1287,41 @@ void write_rect(void* destination, int32_t width, int32_t height) {
   std::memcpy(bytes, values, sizeof(values));
 }
 
+constexpr uint32_t kMaxGuidMixInBytes = 1024 * 1024;
+std::atomic<uint32_t> g_comp_bg_color_successes{};
+std::atomic<uint32_t> g_comp_bg_color_rejections{};
+std::atomic<uint32_t> g_guid_mix_in_calls{};
+std::atomic<uint32_t> g_guid_mix_in_successes{};
+std::atomic<uint32_t> g_guid_mix_in_rejections{};
+std::atomic<uint32_t> g_guid_mix_in_last_size{};
+std::atomic<uint32_t> g_guid_mix_in_max_size{};
+std::atomic<int32_t> g_guid_mix_in_last_result{};
+
+void reset_smart_host_telemetry() {
+  g_comp_bg_color_successes.store(0, std::memory_order_relaxed);
+  g_comp_bg_color_rejections.store(0, std::memory_order_relaxed);
+  g_guid_mix_in_calls.store(0, std::memory_order_relaxed);
+  g_guid_mix_in_successes.store(0, std::memory_order_relaxed);
+  g_guid_mix_in_rejections.store(0, std::memory_order_relaxed);
+  g_guid_mix_in_last_size.store(0, std::memory_order_relaxed);
+  g_guid_mix_in_max_size.store(0, std::memory_order_relaxed);
+  g_guid_mix_in_last_result.store(0, std::memory_order_relaxed);
+}
+
+int32_t __cdecl guid_mix_in_ptr(void* effect_ref, uint32_t size, const void* bytes) {
+  g_guid_mix_in_calls.fetch_add(1, std::memory_order_relaxed);
+  g_guid_mix_in_last_size.store(size, std::memory_order_relaxed);
+  uint32_t observed = g_guid_mix_in_max_size.load(std::memory_order_relaxed);
+  while (observed < size && !g_guid_mix_in_max_size.compare_exchange_weak(
+      observed, size, std::memory_order_relaxed)) {}
+  const int32_t result = effect_ref == &g_effect && bytes && size > 0 &&
+      size <= kMaxGuidMixInBytes ? 0 : 4;
+  (result == 0 ? g_guid_mix_in_successes : g_guid_mix_in_rejections)
+      .fetch_add(1, std::memory_order_relaxed);
+  g_guid_mix_in_last_result.store(result, std::memory_order_relaxed);
+  return result;
+}
+
 int32_t __cdecl pre_checkout_layer(void*, int32_t index, int32_t checkout_id,
                                    const void* request, int32_t what_time, int32_t time_step, uint32_t time_scale,
                                    void* result) {
@@ -9502,9 +9537,13 @@ void* aegp_comp_item_handle() { return &g_aegp_comp_item; }
 struct AegpColorVal { double alpha, red, green, blue; };
 static_assert(sizeof(AegpColorVal) == 4 * sizeof(double));
 int32_t __cdecl aegp_get_comp_bg_color(void* comp, AegpColorVal* color) {
-  if (comp != &g_aegp_comp || !color) return 4;
+  if (comp != &g_aegp_comp || !color) {
+    g_comp_bg_color_rejections.fetch_add(1, std::memory_order_relaxed);
+    return 4;
+  }
   const AegpColorVal headless_color{1.0, 0.0, 0.0, 0.0};
   *color = headless_color;
+  g_comp_bg_color_successes.fetch_add(1, std::memory_order_relaxed);
   return 0;
 }
 
@@ -12035,8 +12074,7 @@ int32_t __cdecl acquire_suite(const char* name, int32_t version, const void** su
     record_suite_acquire(name, version);
     return 0;
   }
-  if (g_aegp_comp_idle_roundtrip_mode && name &&
-      std::strcmp(name, "AEGP Layer Suite") == 0 && version == 14) {
+  if (name && std::strcmp(name, "AEGP Layer Suite") == 0 && version == 14) {
     g_aegp_layer_suite8.fill(reinterpret_cast<void*>(&aegp_unsupported_suite_call));
     g_aegp_layer_suite8[0] = reinterpret_cast<void*>(&aegp_get_comp_num_layers);
     g_aegp_layer_suite8[1] = reinterpret_cast<void*>(&aegp_get_comp_layer_by_index);
@@ -18465,6 +18503,7 @@ SmartResult smart_render_once(EffectEntry entry, std::array<std::byte, kInSize>&
                               int32_t external_current_time = 0, int32_t external_time_step = 1,
                               int32_t external_total_time = 1, uint32_t external_time_scale = 1,
                               int32_t external_pixel_bytes = 4) {
+  reset_smart_host_telemetry();
   SmartResult result;
   const uint32_t effective_out_flags = read<uint32_t>(command_output, kOutFlags);
   const uint32_t effective_out_flags2 = read<uint32_t>(command_output, kOutFlags2);
@@ -18819,6 +18858,7 @@ SmartResult smart_render_once(EffectEntry entry, std::array<std::byte, kInSize>&
     write<uint32_t>(pre_input, 60, gpu_device_index);
   }
   write<void*>(pre_callbacks, 0, reinterpret_cast<void*>(&pre_checkout_layer));
+  write<void*>(pre_callbacks, 8, reinterpret_cast<void*>(&guid_mix_in_ptr));
   write<void*>(pre_extra, 0, pre_input.data()); write<void*>(pre_extra, 8, pre_output.data());
   write<void*>(pre_extra, 16, pre_callbacks.data());
   g_input_checkout_request.fill(-1); g_map_checkout_request.fill(-1);
@@ -22625,6 +22665,23 @@ int wmain(int argc, wchar_t **argv) {
             << ",\"shutter_dependency_advertised\":" << (g_shutter_dependency_advertised ? "true" : "false")
             << ",\"smart_pre_render_dispatched\":" << (nop_render_advertised ? "false" : "true")
             << ",\"smart_render_selector_dispatched\":" << (nop_render_advertised ? "false" : "true")
+            << ",\"comp_bg_color_success_count\":"
+            << g_comp_bg_color_successes.load(std::memory_order_relaxed)
+            << ",\"comp_bg_color_rejection_count\":"
+            << g_comp_bg_color_rejections.load(std::memory_order_relaxed)
+            << ",\"guid_mix_in_call_count\":"
+            << g_guid_mix_in_calls.load(std::memory_order_relaxed)
+            << ",\"guid_mix_in_success_count\":"
+            << g_guid_mix_in_successes.load(std::memory_order_relaxed)
+            << ",\"guid_mix_in_rejection_count\":"
+            << g_guid_mix_in_rejections.load(std::memory_order_relaxed)
+            << ",\"guid_mix_in_last_size\":"
+            << g_guid_mix_in_last_size.load(std::memory_order_relaxed)
+            << ",\"guid_mix_in_max_size\":"
+            << g_guid_mix_in_max_size.load(std::memory_order_relaxed)
+            << ",\"guid_mix_in_size_limit\":" << kMaxGuidMixInBytes
+            << ",\"guid_mix_in_last_result\":"
+            << g_guid_mix_in_last_result.load(std::memory_order_relaxed)
             << ",\"depth_supported\":" << (depth_supported ? "true" : "false")
             << ",\"pre_render_error\":" << smart.pre_error
             << ",\"smart_render_error\":" << smart.render_error

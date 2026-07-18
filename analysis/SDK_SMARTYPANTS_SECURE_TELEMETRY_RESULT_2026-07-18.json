@@ -1,0 +1,70 @@
+{
+    "schema_version":  1,
+    "result":  "passed",
+    "route":  "schema-v2 sealed load tree / restricted SmartFX worker",
+    "authenticated_artifacts":  {
+                                    "release_harness":  {
+                                                            "size_bytes":  9864704,
+                                                            "sha256":  "81d48015a2972f4d6446b0eadccad658235fbe04f833a34bfac39541f80b8469"
+                                                        },
+                                    "canonical_smart_worker":  {
+                                                                   "size_bytes":  797696,
+                                                                   "sha256":  "086df3b70d124b5f18c687702b0fbfe0d77d33fc954c10ea6e9e462fc4591ae0"
+                                                               },
+                                    "sdk_smartypants_fixture":  {
+                                                                    "size_bytes":  31232,
+                                                                    "sha256":  "47fe55f77600f041a3297b4558108fad5d6e886b6cc66eed2e51f88dac922ede"
+                                                                },
+                                    "deterministic_input":  {
+                                                                "size_bytes":  3100,
+                                                                "sha256":  "8e2b249fd979826a60ad089b783e84e8f65d9b692c157be065953775a8aa6c91"
+                                                            }
+                                },
+    "module_audit":  {
+                         "required":  true,
+                         "broker_validation":  "passed",
+                         "basis":  "secure_image_dispatch requires and validates the worker module audit before returning an ok classification"
+                     },
+    "smart_pre_render":  {
+                             "error":  0,
+                             "comp_suite_version":  21,
+                             "comp_suite_slot":  4,
+                             "comp_bg_color_success_count":  1,
+                             "comp_bg_color_rejection_count":  0,
+                             "guid_mix_in_call_count":  1,
+                             "guid_mix_in_success_count":  1,
+                             "guid_mix_in_rejection_count":  0,
+                             "guid_mix_in_size":  32,
+                             "guid_mix_in_size_limit":  1048576,
+                             "guid_mix_in_result":  0
+                         },
+    "render":  {
+                   "smart_render_error":  0,
+                   "worker_classification":  "ok",
+                   "suite_acquires":  5,
+                   "suite_releases":  5,
+                   "suite_leases_balanced":  true,
+                   "handle_lifetimes_balanced":  true,
+                   "world_lifetimes_balanced":  true,
+                   "output_pixels_valid":  true,
+                   "passed":  true
+               },
+    "event_boundary":  {
+                           "dispatched":  false,
+                           "attributed_to_event":  false,
+                           "fixture_behavior":  "SmartyPants does not implement PF_Cmd_EVENT; its default EffectMain return is 0.",
+                           "telemetry_origin":  "PF_Cmd_SMART_PRE_RENDER only"
+                       },
+    "checks":  {
+                   "passed":  true,
+                   "worker_ok":  true,
+                   "smart_render_ok":  true,
+                   "comp_bg_exact":  true,
+                   "guid_mix_exact":  true,
+                   "guid_mix_bounded":  true,
+                   "suites_balanced":  true,
+                   "handles_balanced":  true,
+                   "worlds_balanced":  true,
+                   "module_audit_enforced":  true
+               }
+}

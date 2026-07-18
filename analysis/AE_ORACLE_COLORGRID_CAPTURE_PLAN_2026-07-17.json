@@ -1,44 +1,11 @@
-﻿{
+{
     "schema_version":  1,
     "status":  "blocked_existing_ae_session",
     "side_effects_performed":  false,
     "blocker":  "After Effects is already running; capture was not launched.",
     "running_process_ids":  [
-                                52384
+                                39032
                             ],
-    "plan_mode":  "PlanOnly",
-    "current_artifact_snapshot":  {
-                                        "source":  {
-                                                       "path":  "D:\\Projects\\01_Project\\04_Tools\\AEXCompat\\minihost\\src\\l2_main.cpp",
-                                                       "size_bytes":  1138218,
-                                                       "sha256":  "4fce425483d59eeef6335bcc885c904a6c406e2449cd879e2daad5447f1bf9f7"
-                                                   },
-                                  "l2_worker":  {
-                                                       "path":  "D:\\Projects\\01_Project\\04_Tools\\AEXCompat\\target\\minihost-build\\aex_l2_worker.exe",
-                                                       "size_bytes":  689152,
-                                                       "sha256":  "53a928b41f8d3e543eb246aa6255af3965a8f145e0188cc700d05fa400284c0a"
-                                                   },
-                                  "render_worker":  {
-                                                              "path":  "D:\\Projects\\01_Project\\04_Tools\\AEXCompat\\target\\minihost-build\\aex_render_worker.exe",
-                                                              "size_bytes":  768512,
-                                                              "sha256":  "94bbad9e150e60306073e66c3ab4a56d6ccf9b42e56af082db9014cc683b4254"
-                                                          },
-                                  "smart_worker":  {
-                                                          "path":  "D:\\Projects\\01_Project\\04_Tools\\AEXCompat\\target\\minihost-build\\aex_smart_worker.exe",
-                                                          "size_bytes":  787456,
-                                                          "sha256":  "7e14dae3c4997c794b7ccd24ed44c6754deffc7fb84c5da2cad85d78e93aeb98"
-                                                      },
-                                  "harness":  {
-                                                        "path":  "D:\\Projects\\01_Project\\04_Tools\\AEXCompat\\broker\\target\\debug\\aexcompat-harness.exe",
-                                                        "size_bytes":  18589696,
-                                                        "sha256":  "474476324654a00b556f61797647f23454397c435efc07e5dc69c2618f2227b7"
-                                                    }
-                                    },
-    "runtime_evidence_authentication":  {
-                                              "path":  "D:\\Projects\\01_Project\\04_Tools\\AEXCompat\\analysis\\SDK_COLORGRID_ARBITRARY_TIMELINE_RESULT_2026-07-17.json",
-                                              "size_bytes":  5639,
-                                                                                   "sha256":  "b7e254de1663fd24d7241f50cbd95bd1554ba329c042c57c491f46c94b693bdc"
-                                          },
     "fixture":  {
                     "path":  "D:\\Projects\\01_Project\\04_Tools\\AEXCompat\\target\\sdk-fixtures\\colorgrid\\ColorGrid.aex",
                     "size_bytes":  33280,
@@ -46,8 +13,8 @@
                 },
     "input":  {
                   "path":  "D:\\Projects\\01_Project\\04_Tools\\AEXCompat\\target\\ae-oracle-colorgrid-input.png",
-                  "size_bytes":  677,
-                  "sha256":  "aad2e9973bc87d70af998a0522c4b83060539183230a4937744c6838fb66e2db"
+                  "sha256":  "aad2e9973bc87d70af998a0522c4b83060539183230a4937744c6838fb66e2db",
+                  "size_bytes":  677
               },
     "expected_raw":  {
                          "path":  "D:\\Projects\\01_Project\\04_Tools\\AEXCompat\\target\\image-transport\\colorgrid-normal.rgba",
@@ -57,11 +24,6 @@
                          "height":  12,
                          "format":  "rgba8"
                      },
-    "expected_raw_provenance":  {
-                                     "runtime_evidence":  "analysis/SDK_COLORGRID_ARBITRARY_TIMELINE_RESULT_2026-07-17.json",
-                                     "artifact_role":  "left_output",
-                                     "note":  "The raw candidate is authenticated by the focused ColorGrid timeline run. It has not been compared with Adobe After Effects and was produced by the same current source and render-worker snapshot recorded above."
-                                 },
     "capture_argv":  [
                          "\u0026",
                          "D:\\Projects\\01_Project\\04_Tools\\AEXCompat\\tools\\capture-ae-probe-oracle.ps1",
@@ -95,5 +57,43 @@
                          "0",
                          "--out",
                          "D:\\Projects\\01_Project\\04_Tools\\AEXCompat\\analysis\\AE_ORACLE_COLORGRID_COMPARISON_2026-07-17.json"
-                     ]
+                     ],
+    "plan_mode":  "PlanOnly",
+    "current_artifact_snapshot":  {
+                                      "source":  {
+                                                     "path":  "D:\\Projects\\01_Project\\04_Tools\\AEXCompat\\minihost\\src\\l2_main.cpp",
+                                                     "size_bytes":  1174788,
+                                                     "sha256":  "0239025fac0e8a0d7d21d1132ea80d3f13e309c8e65c7aed4f88dcbb3935fa6d"
+                                                 },
+                                      "l2_worker":  {
+                                                        "path":  "D:\\Projects\\01_Project\\04_Tools\\AEXCompat\\target\\minihost-build\\aex_l2_worker.exe",
+                                                        "size_bytes":  700416,
+                                                        "sha256":  "f78517b91603ba39a32242c58818ad7982d2693af544a0e67f1530a3588bc153"
+                                                    },
+                                      "render_worker":  {
+                                                            "path":  "D:\\Projects\\01_Project\\04_Tools\\AEXCompat\\target\\minihost-build\\aex_render_worker.exe",
+                                                            "size_bytes":  780288,
+                                                            "sha256":  "776dcebca906d51c593b3d1797ce89ac058257b47f466509333f851359127269"
+                                                        },
+                                      "smart_worker":  {
+                                                           "path":  "D:\\Projects\\01_Project\\04_Tools\\AEXCompat\\target\\minihost-build\\aex_smart_worker.exe",
+                                                           "size_bytes":  797696,
+                                                           "sha256":  "086df3b70d124b5f18c687702b0fbfe0d77d33fc954c10ea6e9e462fc4591ae0"
+                                                       },
+                                      "harness":  {
+                                                      "path":  "D:\\Projects\\01_Project\\04_Tools\\AEXCompat\\broker\\target\\debug\\aexcompat-harness.exe",
+                                                      "size_bytes":  19858432,
+                                                      "sha256":  "967fe4d79f6a7b9da4bfe3a41583b5f29edbeb37958ad7b6f7b68ab52ad3380a"
+                                                  }
+                                  },
+    "runtime_evidence_authentication":  {
+                                            "path":  "D:\\Projects\\01_Project\\04_Tools\\AEXCompat\\analysis\\SDK_COLORGRID_ARBITRARY_TIMELINE_RESULT_2026-07-17.json",
+                                            "size_bytes":  10042,
+                                            "sha256":  "a1f194c2565e9427e911fc398a4c71f3f11fc4b829c1ebb93e4d899bea4c732f"
+                                        },
+    "expected_raw_provenance":  {
+                                    "runtime_evidence":  "analysis/SDK_COLORGRID_ARBITRARY_TIMELINE_RESULT_2026-07-17.json",
+                                    "artifact_role":  "left_output",
+                                    "note":  "The raw candidate is authenticated by the focused ColorGrid timeline run. It has not been compared with Adobe After Effects and was produced by the same current source and render-worker snapshot recorded above."
+                                }
 }

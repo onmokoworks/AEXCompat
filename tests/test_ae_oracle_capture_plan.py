@@ -60,7 +60,8 @@ def test_colorgrid_plan_records_real_fixture_without_claiming_capture():
     assert payload["status"] == "blocked_existing_ae_session"
     assert payload["side_effects_performed"] is False
     assert payload["plan_mode"] == "PlanOnly"
-    assert payload["running_process_ids"] == [52384]
+    assert payload["running_process_ids"]
+    assert all(isinstance(pid, int) and pid > 0 for pid in payload["running_process_ids"])
     assert payload["blocker"] == "After Effects is already running; capture was not launched."
     assert payload["fixture"]["sha256"] == (
         "64b0de13f978222bb40649bdf48cc533aebb3e03f98270af073b8351284ba64c"

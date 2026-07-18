@@ -5,18 +5,18 @@
     "authenticated_artifacts":  {
                                     "minihost_source":  {
                                                             "path":  "minihost/src/l2_main.cpp",
-                                                   "size_bytes":  1138218,
-                                                   "sha256":  "4fce425483d59eeef6335bcc885c904a6c406e2449cd879e2daad5447f1bf9f7"
+                                                            "size_bytes":  1174788,
+                                                            "sha256":  "0239025fac0e8a0d7d21d1132ea80d3f13e309c8e65c7aed4f88dcbb3935fa6d"
                                                         },
                                     "worker":  {
                                                    "path":  "target/minihost-build/aex_render_worker.exe",
-                                                   "size_bytes":  768512,
-                                                   "sha256":  "94bbad9e150e60306073e66c3ab4a56d6ccf9b42e56af082db9014cc683b4254"
+                                                   "size_bytes":  780288,
+                                                   "sha256":  "776dcebca906d51c593b3d1797ce89ac058257b47f466509333f851359127269"
                                                },
                                     "probe":  {
                                                   "path":  "target/pf-composite-rect-probe-build/Release/pf_composite_rect_probe.aex",
-                                                  "size_bytes":  13312,
-                                                  "sha256":  "492d6d56c8350528421d6dc1eaa1b075001259d227a03acd18d4def94ba99f4b"
+                                                  "size_bytes":  14848,
+                                                  "sha256":  "7f1a7364a6cbc562017f810a5719657c66d59c3457fd778ebb595847f1b9dbf3"
                                               },
                                     "input":  {
                                                   "path":  "target/gpu-effects/opencl-input.rgba",

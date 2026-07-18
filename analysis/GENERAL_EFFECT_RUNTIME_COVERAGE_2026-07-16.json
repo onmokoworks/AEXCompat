@@ -1,159 +1,533 @@
 {
-  "schema_version": 1,
-  "snapshot_date": "2026-07-16",
-  "scope": "general_effect_runtime_coverage",
-  "source_of_truth": {
-    "implementation": "minihost/src/l2_main.cpp",
-    "compiled_sdk_abi": "target/pf-suite-abi-probe-build/pf-suite-abi.json"
-  },
-  "current_artifact_snapshot": {
-    "captured_at": "2026-07-17",
-    "note": "This authenticates the current worktree and production artifacts. Focused runtime records remain bound to their measured artifacts; the sampling record was recaptured with this same production source and render worker.",
-    "source": {"path": "minihost/src/l2_main.cpp", "size_bytes": 1138218, "sha256": "4fce425483d59eeef6335bcc885c904a6c406e2449cd879e2daad5447f1bf9f7"},
-    "broker_dispatch_source": {"path": "broker/crates/broker/src/image_render.rs", "size_bytes": 192446, "sha256": "b15b917b52d13bbf42c8dce93022b276d6af698f3d904deb37d11466b7c31d43"},
-    "l2_worker": {"path": "target/minihost-build/aex_l2_worker.exe", "size_bytes": 689152, "sha256": "53a928b41f8d3e543eb246aa6255af3965a8f145e0188cc700d05fa400284c0a"},
-    "render_worker": {"path": "target/minihost-build/aex_render_worker.exe", "size_bytes": 768512, "sha256": "94bbad9e150e60306073e66c3ab4a56d6ccf9b42e56af082db9014cc683b4254"},
-    "smart_worker": {"path": "target/minihost-build/aex_smart_worker.exe", "size_bytes": 787456, "sha256": "7e14dae3c4997c794b7ccd24ed44c6754deffc7fb84c5da2cad85d78e93aeb98"},
-    "harness": {"path": "broker/target/debug/aexcompat-harness.exe", "size_bytes": 18589696, "sha256": "474476324654a00b556f61797647f23454397c435efc07e5dc69c2618f2227b7"}
-  },
-  "latest_recaptured_evidence": [
-    {"path": "analysis/PF_ADV_TIME_V4_RUNTIME_RESULT_2026-07-16.json", "size_bytes": 4553, "sha256": "d4c67352007606eff176be89ac3d2e54bc2c9fb2726d0e8c41e8c4113166d07c"},
-    {"path": "analysis/PF_COMPOSITE_RECT_16_RUNTIME_RESULT_2026-07-16.json", "size_bytes": 4844, "sha256": "71febd1a74f298ca93f990dd5682cb1dedbd04f74b6301d855dfaa9865059277"},
-    {"path": "analysis/PF_AEGP_ASYNC_CANCEL_RUNTIME_RESULT_2026-07-16.json", "size_bytes": 4986, "sha256": "a230a8d193bd30459f6fdb8d7b1d8746c971c04e3715fc0a713ba3a93dee7474"},
-    {"path": "analysis/PF_AEGP_ASYNC_LAYER_RECEIPT_RUNTIME_RESULT_2026-07-16.json", "size_bytes": 4764, "sha256": "d756ea57669421a5257fa7dadfa6943e983fe5c18832a533891b6a2d8713c823"},
-    {"path": "analysis/PF_AEGP_LAYER_RECEIPT_RUNTIME_RESULT_2026-07-16.json", "size_bytes": 9945, "sha256": "6c8b7a5923d7670c09e46874206dfeed22c371d1ef3c61caa50176dd67719039"},
-    {"path": "analysis/PF_SAMPLING_FILL_RUNTIME_RESULT_2026-07-16.json", "size_bytes": 7975, "sha256": "b827d0e90fdcb68756308ed06f14799ed7bfe5a16e25461aa42b2fd02e8241c1"},
-    {"path": "analysis/PF_SAMPLING_DEPTH_MATRIX_RESULT_2026-07-17.json", "size_bytes": 4192, "sha256": "fde5ba07a615c8593e7af61db1ff5f3caf47f1a13d4217ef224d5d08165f93de"},
-    {"path": "analysis/SDK_COLORGRID_ARBITRARY_TIMELINE_RESULT_2026-07-17.json", "size_bytes": 5639, "sha256": "b7e254de1663fd24d7241f50cbd95bd1554ba329c042c57c491f46c94b693bdc"},
-    {"path": "analysis/REAL_AEX_SMART_TIMED_MULTI_LAYER_RESULT_2026-07-17.json", "size_bytes": 8220, "sha256": "a3cea7914fd89f4e2db24e9a23475661eab7ed6defcd3c5acf545bc9f8324247"},
-    {"path": "analysis/AEGP_ASYNC_RECEIPT_RUNTIME_RESULT_2026-07-16.json", "size_bytes": 7019, "sha256": "1ac2a7436862b5ae41c3cf61e0a20ac5e840ca5d02cdf21e4f9c178dbb00d31e"},
-    {"path": "analysis/SDK_GRABBA_AEGP_RUNTIME_RESULT_2026-07-16.json", "size_bytes": 8161, "sha256": "183b4286624d12af70b7ade09c0a0c73e45c2bc2bfcf5827fe925f5550341b20"}
-  ],
-  "verification_levels": {
-    "source_wired": "A callback is published by the current source.",
-    "aexcompat_runtime": "A focused fixture or AEXCompat render exercised the behavior.",
-    "real_ae_pixel_oracle": "The same operation was compared against pixels produced by Adobe After Effects."
-  },
-  "compiled_abi": {
-    "architecture": "x86_64-windows",
-    "pointer_size": 8,
-    "PF_WorldTransformSuite1": {"size": 56, "slots": 7},
-    "PF_PathDataSuite1": {"size": 88, "slots": 11},
-    "AEGP_RenderOptionsSuite1": {"size": 136, "slots": 17},
-    "AEGP_WorldSuite3": {"size": 104, "slots": 13}
-  },
-  "suites": {
-    "PF_WorldTransformSuite1": {
-      "version": 1,
-      "acquisition": "available",
-      "slots": [
-        {"index": 0, "name": "composite_rect", "callback": "composite_rect8", "status": "implemented_argb8_argb16_argb32f_and_native_runtime_tested", "runtime_evidence": "verify_world_transform_composite_rect", "pending": ["real_ae_pixel_oracle", "ARGB32F mode/opacity matrix"]},
-        {"index": 1, "name": "blend", "callback": "blend_world", "status": "implemented_matching_depth_argb8_argb16_argb32f_alias_safe", "runtime_evidence": "--self-test-world-transform-blend", "pending": ["real_ae_pixel_oracle"]},
-        {"index": 2, "name": "convolve", "callback": "convolve_world", "status": "implemented_argb8_argb16_argb32f_and_real_pf_aex_argb8_tested", "runtime_evidence": "pf-convolve-depth-probe", "covered": ["1D/2D", "normalized/unnormalized", "long/char/fixed kernels", "transparent/replicated borders", "straight/alpha-weighted", "in-place aliasing"], "pending": ["real_ae_pixel_oracle", "ARGB16/ARGB32F real AEX numeric vectors", "Adobe final-division rounding", "ARGB32F HDR clamp semantics"]},
-        {"index": 3, "name": "copy", "callback": "copy_world8", "status": "implemented_matching_depth_argb8_argb16_argb32f", "pending": ["real_ae_pixel_oracle"]},
-        {"index": 4, "name": "copy_hq", "callback": "copy_world_hq", "status": "implemented_verified_equal_size_subset", "pending": ["Adobe oracle for unequal-size HQ semantics", "real_ae_pixel_oracle"]},
-        {"index": 5, "name": "transfer_rect", "callback": "transfer_rect", "status": "implemented_copy_behind_in_front_difference_mask_world_and_real_pf_aex_argb8_tested", "runtime_evidence": ["pf-transfer-rect-probe", "pf-transfer-mask-probe", "--self-test-world-transform-transfer-mask"], "covered": ["COPY opacity interpolation", "BEHIND straight/premultiplied alpha", "IN_FRONT straight/premultiplied source-over", "DIFFERENCE rgb-only", "ARGB8/ARGB16/ARGB32F", "PF_MaskWorld alpha/luminance/inverted coverage and offset", "invalid mask flags return PF_Err_BAD_CALLBACK_PARAM", "field parity", "clipping", "in-place alias snapshot"], "pending": ["AE oracle for mask luminance/offset/rounding semantics", "remaining transfer modes", "real_ae_pixel_oracle", "Adobe final-division rounding"]},
-        {"index": 6, "name": "transform_world", "callback": "transform_world", "status": "implemented_single_projective_matrix_mask_world_and_real_pf_aex_argb8_tested", "runtime_evidence": ["--self-test-world-transform-affine", "pf-transform-affine-probe"], "covered": ["source-to-destination and destination-to-source row-vector matrices", "identity/translation/scale/90-degree rotation vectors", "full 3x3 projective inversion and homogeneous sampling", "real PF AEX projective vectors in both matrix directions", "LO nearest", "HI straight-alpha-aware bilinear", "ARGB8/ARGB16/ARGB32F", "PF_MaskWorld alpha/luminance/inverted coverage and offset", "real PF AEX alpha mask vector", "field parity", "opacity", "source and mask alias snapshots"], "pending": ["real_ae_pixel_oracle", "multiple-matrix motion blur", "non-COPY transfer modes"]}
-      ]
-    },
-    "PF_PathDataSuite1": {
-      "version": 1,
-      "acquisition": "available_only_when_mask_model_enabled",
-      "implemented_slots": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
-      "callbacks": ["pf_path_is_open", "pf_path_num_segments", "pf_path_vertex_info", "pf_path_prepare_seg_length", "pf_path_get_seg_length", "pf_path_eval_seg_length", "pf_path_eval_seg_length_deriv1", "pf_path_cleanup_seg_length", "pf_path_is_inverted", "pf_path_get_mask_mode", "pf_path_get_name"],
-      "status": "all_slots_source_wired_with_known_fidelity_gaps",
-      "caveats": [
-        "Segment length and arc-length evaluation use a fixed-frequency polyline approximation rather than adaptive cubic integration.",
-        "Derivative evaluation uses sampled chord direction rather than the analytic cubic derivative.",
-        "A zero-vertex open path can underflow the current unsigned segment-count expression.",
-        "Preparation cleanup currently requires a live checked-out path, so checkin-before-cleanup can strand a preparation.",
-        "No real Adobe After Effects pixel or numeric oracle comparison has been completed."
-      ]
-    },
-    "AEGP_WorldSuite3": {
-      "version": 3,
-      "acquisition": "available",
-      "slots": [
-        {"range": [0, 1], "names": ["AEGP_New", "AEGP_Dispose"], "status": "implemented_and_real_pf_aex_runtime_tested"},
-        {"range": [2, 8], "names": ["AEGP_GetType", "AEGP_GetSize", "AEGP_GetRowBytes", "AEGP_GetBaseAddr8", "AEGP_GetBaseAddr16", "AEGP_GetBaseAddr32", "AEGP_FillOutPFEffectWorld"], "status": "implemented_and_focused_runtime_tested"},
-        {"range": [9, 9], "names": ["AEGP_FastBlur"], "status": "implemented_and_real_pf_aex_runtime_tested_approximate_kernel"},
-        {"range": [10, 12], "names": ["AEGP_NewPlatformWorld", "AEGP_DisposePlatformWorld", "AEGP_NewReferenceFromPlatformWorld"], "status": "implemented_and_real_pf_aex_runtime_tested"}
-      ],
-      "ownership": "Owned AEGP worlds, PlatformWorld handles, independently disposable PlatformWorld references, and read-only receipt worlds use distinct bounded registrations with non-reused opaque handles.",
-      "fast_blur_caveat": "The SDK does not publish its radius mapping, kernel, quality algorithm, or edge policy. The host implements deterministic separable LO box and HI triangular kernels with straight-alpha handling; exact Adobe pixel equivalence remains unproven pending an AE oracle matrix.",
-      "async_receipt_integration": {
-        "status": "implemented_for_layer_argb8_argb16_argb32f_and_focused_runtime_tested",
-        "source_observation": "The final source publishes AEGP Render Suite numeric version 5, snapshots each bounded layer-render-options handle, creates a non-null ARGB8, ARGB16, or ARGB32F layer receipt, exposes its borrowed world, and invalidates that world on checkin.",
-        "task_start_observation": "At task start checkout_layer_frame_async returned success with a null receipt and no AEGP Render Suite version 5 was published; concurrent implementation changed this before the inventory was finalized.",
-        "pending": ["real After Effects HistoGrid execution", "Adobe scheduler and callback-thread equivalence"]
-      }
-    },
-    "AEGP_RenderOptionsSuite1": {
-      "version": 1,
-      "acquisition": "available",
-      "slot_count": 17,
-      "status": "implemented_and_focused_runtime_tested",
-      "source_observation": "All 17 typed slots are published with exact offset assertions. A bounded ABA-resistant registry implements creation, duplication, disposal, and every set/get pair. Item receipts snapshot options and produce a documented synthetic coordinate/time raster: world type converts ARGB8/16/32F, downsample selects source coordinates, ROI and field constrain writes, supported matte mode changes alpha, and PREMUL_BG_COLOR fails closed.",
-      "runtime_evidence": "verify_aegp_render_options_suite1",
-      "pending": ["real composition/effect rendering instead of the bounded synthetic item raster", "Adobe-defined field and matte semantic oracle", "real After Effects pixel oracle"]
-    },
-    "AEGP_RenderOptionsSuite4": {
-      "version": 4,
-      "acquisition": "available_during_pf_rendering",
-      "slot_count": 23,
-      "status": "all_slots_implemented_and_tail_real_pf_aex_runtime_tested",
-      "tail_slots": ["AEGP_SetChannelOrder", "AEGP_GetChannelOrder", "AEGP_GetRenderGuideLayers", "AEGP_SetRenderGuideLayers", "AEGP_GetRenderQuality", "AEGP_SetRenderQuality"],
-      "source_observation": "The version-4 table preserves the 17 core render-options slots and adds exact typed 8-bit channel-order/quality and Boolean guide-layer callbacks. Values are duplicated and snapshotted into receipts, sufficiency checks, and external-frame cache keys; BGRA changes synthetic receipt byte order.",
-      "runtime_evidence": "pf_aegp_render_options4_tail_probe.aex",
-      "pending": ["Adobe oracle for guide-layer inclusion", "Adobe footage draft-versus-best decode oracle", "real BGRA receipt pixel oracle"]
-    },
-    "PF_FillMatteSuite2": {
-      "version": 2,
-      "acquisition": "available",
-      "slots": [
-        {"range": [0, 2], "callbacks": ["fill_world8", "fill_world16", "fill_world_float"], "status": "source_wired"},
-        {"range": [3, 6], "callbacks": ["premultiply_world8", "premultiply_color8", "premultiply_color16", "premultiply_color_float"], "status": "source_wired_and_aexcompat_runtime_tested"}
-      ],
-      "real_ae_pixel_oracle": "pending"
-    },
-    "PF_SamplingSuites1": {
-      "versions": {"PF Sampling8 Suite": 1, "PF Sampling16 Suite": 1, "PF SamplingFloat Suite": 1},
-      "acquisition": "available",
-      "slot_semantics": {"0": "nearest", "1": "subpixel", "2": "area"},
-      "callbacks": {
-        "8": ["nearest_sample8", "subpixel_sample8", "area_sample8"],
-        "16": ["nearest_sample16", "subpixel_sample16", "area_sample16"],
-        "float": ["nearest_sample_float", "subpixel_sample_float", "area_sample_float"]
-      },
-      "status": "all_slots_current_source_wired_and_authenticated_current_worker_runtime_tested",
-      "runtime_evidence": "analysis/PF_SAMPLING_FILL_RUNTIME_RESULT_2026-07-16.json",
-      "artifact_note": "The authenticated 2026-07-17 runtime result was recaptured with the current source and production render worker. The previous b17b9b... probe artifact is retained only as separate historical provenance.",
-      "runtime_record_authentication": {
-        "record": {"path": "analysis/PF_SAMPLING_FILL_RUNTIME_RESULT_2026-07-16.json", "size_bytes": 7975, "sha256": "b827d0e90fdcb68756308ed06f14799ed7bfe5a16e25461aa42b2fd02e8241c1"},
-        "persisted_reports": [
-          {"path": "target/sampling-depth-8.json", "size_bytes": 6350, "sha256": "e888f81c01a57a907670a390b773da4b06ef6d5afdab68d67c132cffd7c90cb2"},
-          {"path": "target/fill-premultiply-probe-report-20260717-current.json", "size_bytes": 6352, "sha256": "3cca9c099515e31387a4559cbc01eb6970697301b70b7b9cfd73623a8f8ef69e"}
-        ],
-        "persisted_outputs": [
-          {"path": "target/sampling-depth-8.rgba", "size_bytes": 3404, "sha256": "0abda9bfbcf3d08083e54b05b91804b5d2a87cb2b2266aeffc2cc12d9e374590"},
-          {"path": "target/fill-premultiply-probe-output-20260717-current.rgba", "size_bytes": 3404, "sha256": "e354d9fa74e2f5e29ed84f65fc583509e56f9ee80bdd3027d2b65c2097c8489d"}
-        ],
-        "transient_outputs_currently_available": true
-      },
-      "real_ae_pixel_oracle": "pending"
-    }
-  },
-  "evidence_artifacts": [
-    {"path": "target/pf-suite-abi-probe-build/Release/pf_suite_abi_probe.exe", "size_bytes": 24064, "sha256": "cf304a217a1cfe50276ed6e851362d20c9cf9fd2321c6799288fcb1873cb9d18", "evidence": "compiled_sdk_abi"},
-    {"path": "target/pf-composite-rect-probe-build/Release/pf_composite_rect_probe.aex", "size_bytes": 13312, "sha256": "492d6d56c8350528421d6dc1eaa1b075001259d227a03acd18d4def94ba99f4b", "evidence": "aexcompat_argb8_argb16_runtime"},
-    {"path": "target/pf-path-curve-probe-build/Release/pf_path_curve_probe.aex", "size_bytes": 18944, "sha256": "bfaefce43a617702ebf0c9a1a8b6ad3a3c7421908bbbf569f1a48763014407af", "evidence": "probe_artifact_only"},
-    {"path": "target/aegp-world-suite3-probe-build/Release/aegp_world_suite3_probe.exe", "size_bytes": 14848, "sha256": "d48d4dd492be905c39bea5407f24d61d2bfcfb7cb4d79d7d64726d425e9fcb65", "evidence": "focused_sdk_abi_fixture"},
-    {"path": "target/pf-fill-premultiply-probe/pf_fill_premultiply_probe.aex", "size_bytes": 14848, "sha256": "c3e54e7feadb1b51005ff0e05d5235810959e6c925063968d90d0f065608d16e", "evidence": "current_artifact_and_historical_aexcompat_runtime"},
-    {"path": "target/pf-sampling-probe-build/Release/pf_sampling_probe.aex", "size_bytes": 17408, "sha256": "f675965d3e48220d6e35852143964a6dd6657690661e20d13a56e265da087d05", "evidence": "authenticated_aexcompat_runtime_snapshot", "runtime_evidence": "analysis/PF_SAMPLING_FILL_RUNTIME_RESULT_2026-07-16.json", "historical_runtime_artifact_sha256": "8bcee7edc5c4868b3020b714eccc59543512d12b620923717d9d944b505920c7"}
-  ],
-  "overall": {
-    "real_ae_pixel_oracle": "not_run",
-    "complete_after_effects_compatibility": false,
-    "statement": "This inventory records current source wiring, compiled SDK ABI observations, and AEXCompat-local evidence only; it does not claim pixel equivalence with Adobe After Effects."
-  }
+    "schema_version":  1,
+    "snapshot_date":  "2026-07-16",
+    "scope":  "general_effect_runtime_coverage",
+    "source_of_truth":  {
+                            "implementation":  "minihost/src/l2_main.cpp",
+                            "compiled_sdk_abi":  "target/pf-suite-abi-probe-build/pf-suite-abi.json"
+                        },
+    "current_artifact_snapshot":  {
+                                      "captured_at":  "2026-07-18",
+                                      "note":  "This authenticates the current worktree and production artifacts. Focused runtime records remain bound to their measured artifacts; the sampling record was recaptured with this same production source and render worker.",
+                                      "source":  {
+                                                     "path":  "minihost/src/l2_main.cpp",
+                                                     "size_bytes":  1174788,
+                                                     "sha256":  "0239025fac0e8a0d7d21d1132ea80d3f13e309c8e65c7aed4f88dcbb3935fa6d"
+                                                 },
+                                      "broker_dispatch_source":  {
+                                                                     "path":  "broker/crates/broker/src/image_render.rs",
+                                                                     "size_bytes":  195316,
+                                                                     "sha256":  "465808f76d3d4bf9bd09bec3bb16dd40c31496812e4196971fad6ba4b13c8c7d"
+                                                                 },
+                                      "l2_worker":  {
+                                                        "path":  "target/minihost-build/aex_l2_worker.exe",
+                                                        "size_bytes":  700416,
+                                                        "sha256":  "f78517b91603ba39a32242c58818ad7982d2693af544a0e67f1530a3588bc153"
+                                                    },
+                                      "render_worker":  {
+                                                            "path":  "target/minihost-build/aex_render_worker.exe",
+                                                            "size_bytes":  780288,
+                                                            "sha256":  "776dcebca906d51c593b3d1797ce89ac058257b47f466509333f851359127269"
+                                                        },
+                                      "smart_worker":  {
+                                                           "path":  "target/minihost-build/aex_smart_worker.exe",
+                                                           "size_bytes":  797696,
+                                                           "sha256":  "086df3b70d124b5f18c687702b0fbfe0d77d33fc954c10ea6e9e462fc4591ae0"
+                                                       },
+                                      "harness":  {
+                                                      "path":  "broker/target/debug/aexcompat-harness.exe",
+                                                      "size_bytes":  19858432,
+                                                      "sha256":  "967fe4d79f6a7b9da4bfe3a41583b5f29edbeb37958ad7b6f7b68ab52ad3380a"
+                                                  }
+                                  },
+    "latest_recaptured_evidence":  [
+                                       {
+                                           "path":  "analysis/PF_ADV_TIME_V4_RUNTIME_RESULT_2026-07-16.json",
+                                           "size_bytes":  4562,
+                                           "sha256":  "c9529fa58ab610e4947e2fef55bf6793525551d0ee09908a51b22cdab4e3b6f0"
+                                       },
+                                       {
+                                           "path":  "analysis/PF_COMPOSITE_RECT_16_RUNTIME_RESULT_2026-07-16.json",
+                                           "size_bytes":  4871,
+                                           "sha256":  "64322f20cc8a3d15cfcdb556d31630df5a4d603f8194a602b52eb0b5cac40187"
+                                       },
+                                       {
+                                           "path":  "analysis/PF_AEGP_ASYNC_CANCEL_RUNTIME_RESULT_2026-07-16.json",
+                                           "size_bytes":  4994,
+                                           "sha256":  "1825f9a999fe03a33161b4d122ef5ff67b3a07829a0a4caf62c2fc5e4ff4df0b"
+                                       },
+                                       {
+                                           "path":  "analysis/PF_AEGP_ASYNC_LAYER_RECEIPT_RUNTIME_RESULT_2026-07-16.json",
+                                           "size_bytes":  4772,
+                                           "sha256":  "92bd6bbdad2c7227dc750c98a4619aae352413a733428a4abab23d509725a655"
+                                       },
+                                       {
+                                           "path":  "analysis/PF_AEGP_LAYER_RECEIPT_RUNTIME_RESULT_2026-07-16.json",
+                                           "size_bytes":  9964,
+                                           "sha256":  "5932c46b28cb7112ea09111b246c037b3807f6168b57a939bfd5c369228d7cb3"
+                                       },
+                                       {
+                                           "path":  "analysis/PF_SAMPLING_FILL_RUNTIME_RESULT_2026-07-16.json",
+                                           "size_bytes":  16699,
+                                           "sha256":  "ec3a82085ee09ca2cf9490d4222c0a0946b9589b59ce255f1ac842cfed7e6156"
+                                       },
+                                       {
+                                           "path":  "analysis/PF_SAMPLING_DEPTH_MATRIX_RESULT_2026-07-17.json",
+                                           "size_bytes":  6471,
+                                           "sha256":  "cfdf899f589e13e945a3ca77c8bf4dba5336528d11adf1868cdb92a8840521f8"
+                                       },
+                                       {
+                                           "path":  "analysis/SDK_COLORGRID_ARBITRARY_TIMELINE_RESULT_2026-07-17.json",
+                                           "size_bytes":  10042,
+                                           "sha256":  "a1f194c2565e9427e911fc398a4c71f3f11fc4b829c1ebb93e4d899bea4c732f"
+                                       },
+                                       {
+                                           "path":  "analysis/REAL_AEX_SMART_TIMED_MULTI_LAYER_RESULT_2026-07-17.json",
+                                           "size_bytes":  16839,
+                                           "sha256":  "5c1aedf401e61bce620723bb6add389c70c79df2680fe145644acf4e9533e3e7"
+                                       },
+                                       {
+                                           "path":  "analysis/AEGP_ASYNC_RECEIPT_RUNTIME_RESULT_2026-07-16.json",
+                                           "size_bytes":  13717,
+                                           "sha256":  "316283efacd3a0a8e57ef6bde2f7cece161520e3c87019216253022c13443400"
+                                       },
+                                       {
+                                           "path":  "analysis/SDK_GRABBA_AEGP_RUNTIME_RESULT_2026-07-16.json",
+                                           "size_bytes":  67217,
+                                           "sha256":  "55bd0d6cffaad3effa003718665bbda252eba2e7877ec685a8882be2bb8d1bda"
+                                       }
+                                   ],
+    "verification_levels":  {
+                                "source_wired":  "A callback is published by the current source.",
+                                "aexcompat_runtime":  "A focused fixture or AEXCompat render exercised the behavior.",
+                                "real_ae_pixel_oracle":  "The same operation was compared against pixels produced by Adobe After Effects."
+                            },
+    "compiled_abi":  {
+                         "architecture":  "x86_64-windows",
+                         "pointer_size":  8,
+                         "PF_WorldTransformSuite1":  {
+                                                         "size":  56,
+                                                         "slots":  7
+                                                     },
+                         "PF_PathDataSuite1":  {
+                                                   "size":  88,
+                                                   "slots":  11
+                                               },
+                         "AEGP_RenderOptionsSuite1":  {
+                                                          "size":  136,
+                                                          "slots":  17
+                                                      },
+                         "AEGP_WorldSuite3":  {
+                                                  "size":  104,
+                                                  "slots":  13
+                                              }
+                     },
+    "suites":  {
+                   "PF_WorldTransformSuite1":  {
+                                                   "version":  1,
+                                                   "acquisition":  "available",
+                                                   "slots":  [
+                                                                 {
+                                                                     "index":  0,
+                                                                     "name":  "composite_rect",
+                                                                     "callback":  "composite_rect8",
+                                                                     "status":  "implemented_argb8_argb16_argb32f_and_native_runtime_tested",
+                                                                     "runtime_evidence":  "verify_world_transform_composite_rect",
+                                                                     "pending":  [
+                                                                                     "real_ae_pixel_oracle",
+                                                                                     "ARGB32F mode/opacity matrix"
+                                                                                 ]
+                                                                 },
+                                                                 {
+                                                                     "index":  1,
+                                                                     "name":  "blend",
+                                                                     "callback":  "blend_world",
+                                                                     "status":  "implemented_matching_depth_argb8_argb16_argb32f_alias_safe",
+                                                                     "runtime_evidence":  "--self-test-world-transform-blend",
+                                                                     "pending":  [
+                                                                                     "real_ae_pixel_oracle"
+                                                                                 ]
+                                                                 },
+                                                                 {
+                                                                     "index":  2,
+                                                                     "name":  "convolve",
+                                                                     "callback":  "convolve_world",
+                                                                     "status":  "implemented_argb8_argb16_argb32f_and_real_pf_aex_argb8_tested",
+                                                                     "runtime_evidence":  "pf-convolve-depth-probe",
+                                                                     "covered":  [
+                                                                                     "1D/2D",
+                                                                                     "normalized/unnormalized",
+                                                                                     "long/char/fixed kernels",
+                                                                                     "transparent/replicated borders",
+                                                                                     "straight/alpha-weighted",
+                                                                                     "in-place aliasing"
+                                                                                 ],
+                                                                     "pending":  [
+                                                                                     "real_ae_pixel_oracle",
+                                                                                     "ARGB16/ARGB32F real AEX numeric vectors",
+                                                                                     "Adobe final-division rounding",
+                                                                                     "ARGB32F HDR clamp semantics"
+                                                                                 ]
+                                                                 },
+                                                                 {
+                                                                     "index":  3,
+                                                                     "name":  "copy",
+                                                                     "callback":  "copy_world8",
+                                                                     "status":  "implemented_matching_depth_argb8_argb16_argb32f",
+                                                                     "pending":  [
+                                                                                     "real_ae_pixel_oracle"
+                                                                                 ]
+                                                                 },
+                                                                 {
+                                                                     "index":  4,
+                                                                     "name":  "copy_hq",
+                                                                     "callback":  "copy_world_hq",
+                                                                     "status":  "implemented_verified_equal_size_subset",
+                                                                     "pending":  [
+                                                                                     "Adobe oracle for unequal-size HQ semantics",
+                                                                                     "real_ae_pixel_oracle"
+                                                                                 ]
+                                                                 },
+                                                                 {
+                                                                     "index":  5,
+                                                                     "name":  "transfer_rect",
+                                                                     "callback":  "transfer_rect",
+                                                                     "status":  "implemented_copy_behind_in_front_difference_mask_world_and_real_pf_aex_argb8_tested",
+                                                                     "runtime_evidence":  [
+                                                                                              "pf-transfer-rect-probe",
+                                                                                              "pf-transfer-mask-probe",
+                                                                                              "--self-test-world-transform-transfer-mask"
+                                                                                          ],
+                                                                     "covered":  [
+                                                                                     "COPY opacity interpolation",
+                                                                                     "BEHIND straight/premultiplied alpha",
+                                                                                     "IN_FRONT straight/premultiplied source-over",
+                                                                                     "DIFFERENCE rgb-only",
+                                                                                     "ARGB8/ARGB16/ARGB32F",
+                                                                                     "PF_MaskWorld alpha/luminance/inverted coverage and offset",
+                                                                                     "invalid mask flags return PF_Err_BAD_CALLBACK_PARAM",
+                                                                                     "field parity",
+                                                                                     "clipping",
+                                                                                     "in-place alias snapshot"
+                                                                                 ],
+                                                                     "pending":  [
+                                                                                     "AE oracle for mask luminance/offset/rounding semantics",
+                                                                                     "remaining transfer modes",
+                                                                                     "real_ae_pixel_oracle",
+                                                                                     "Adobe final-division rounding"
+                                                                                 ]
+                                                                 },
+                                                                 {
+                                                                     "index":  6,
+                                                                     "name":  "transform_world",
+                                                                     "callback":  "transform_world",
+                                                                     "status":  "implemented_single_projective_matrix_mask_world_and_real_pf_aex_argb8_tested",
+                                                                     "runtime_evidence":  [
+                                                                                              "--self-test-world-transform-affine",
+                                                                                              "pf-transform-affine-probe"
+                                                                                          ],
+                                                                     "covered":  [
+                                                                                     "source-to-destination and destination-to-source row-vector matrices",
+                                                                                     "identity/translation/scale/90-degree rotation vectors",
+                                                                                     "full 3x3 projective inversion and homogeneous sampling",
+                                                                                     "real PF AEX projective vectors in both matrix directions",
+                                                                                     "LO nearest",
+                                                                                     "HI straight-alpha-aware bilinear",
+                                                                                     "ARGB8/ARGB16/ARGB32F",
+                                                                                     "PF_MaskWorld alpha/luminance/inverted coverage and offset",
+                                                                                     "real PF AEX alpha mask vector",
+                                                                                     "field parity",
+                                                                                     "opacity",
+                                                                                     "source and mask alias snapshots"
+                                                                                 ],
+                                                                     "pending":  [
+                                                                                     "real_ae_pixel_oracle",
+                                                                                     "multiple-matrix motion blur",
+                                                                                     "non-COPY transfer modes"
+                                                                                 ]
+                                                                 }
+                                                             ]
+                                               },
+                   "PF_PathDataSuite1":  {
+                                             "version":  1,
+                                             "acquisition":  "available_only_when_mask_model_enabled",
+                                             "implemented_slots":  [
+                                                                       0,
+                                                                       1,
+                                                                       2,
+                                                                       3,
+                                                                       4,
+                                                                       5,
+                                                                       6,
+                                                                       7,
+                                                                       8,
+                                                                       9,
+                                                                       10
+                                                                   ],
+                                             "callbacks":  [
+                                                               "pf_path_is_open",
+                                                               "pf_path_num_segments",
+                                                               "pf_path_vertex_info",
+                                                               "pf_path_prepare_seg_length",
+                                                               "pf_path_get_seg_length",
+                                                               "pf_path_eval_seg_length",
+                                                               "pf_path_eval_seg_length_deriv1",
+                                                               "pf_path_cleanup_seg_length",
+                                                               "pf_path_is_inverted",
+                                                               "pf_path_get_mask_mode",
+                                                               "pf_path_get_name"
+                                                           ],
+                                             "status":  "all_slots_source_wired_with_known_fidelity_gaps",
+                                             "caveats":  [
+                                                             "Segment length and arc-length evaluation use a fixed-frequency polyline approximation rather than adaptive cubic integration.",
+                                                             "Derivative evaluation uses sampled chord direction rather than the analytic cubic derivative.",
+                                                             "A zero-vertex open path can underflow the current unsigned segment-count expression.",
+                                                             "Preparation cleanup currently requires a live checked-out path, so checkin-before-cleanup can strand a preparation.",
+                                                             "No real Adobe After Effects pixel or numeric oracle comparison has been completed."
+                                                         ]
+                                         },
+                   "AEGP_WorldSuite3":  {
+                                            "version":  3,
+                                            "acquisition":  "available",
+                                            "slots":  [
+                                                          {
+                                                              "range":  [
+                                                                            0,
+                                                                            1
+                                                                        ],
+                                                              "names":  [
+                                                                            "AEGP_New",
+                                                                            "AEGP_Dispose"
+                                                                        ],
+                                                              "status":  "implemented_and_real_pf_aex_runtime_tested"
+                                                          },
+                                                          {
+                                                              "range":  [
+                                                                            2,
+                                                                            8
+                                                                        ],
+                                                              "names":  [
+                                                                            "AEGP_GetType",
+                                                                            "AEGP_GetSize",
+                                                                            "AEGP_GetRowBytes",
+                                                                            "AEGP_GetBaseAddr8",
+                                                                            "AEGP_GetBaseAddr16",
+                                                                            "AEGP_GetBaseAddr32",
+                                                                            "AEGP_FillOutPFEffectWorld"
+                                                                        ],
+                                                              "status":  "implemented_and_focused_runtime_tested"
+                                                          },
+                                                          {
+                                                              "range":  [
+                                                                            9,
+                                                                            9
+                                                                        ],
+                                                              "names":  [
+                                                                            "AEGP_FastBlur"
+                                                                        ],
+                                                              "status":  "implemented_and_real_pf_aex_runtime_tested_approximate_kernel"
+                                                          },
+                                                          {
+                                                              "range":  [
+                                                                            10,
+                                                                            12
+                                                                        ],
+                                                              "names":  [
+                                                                            "AEGP_NewPlatformWorld",
+                                                                            "AEGP_DisposePlatformWorld",
+                                                                            "AEGP_NewReferenceFromPlatformWorld"
+                                                                        ],
+                                                              "status":  "implemented_and_real_pf_aex_runtime_tested"
+                                                          }
+                                                      ],
+                                            "ownership":  "Owned AEGP worlds, PlatformWorld handles, independently disposable PlatformWorld references, and read-only receipt worlds use distinct bounded registrations with non-reused opaque handles.",
+                                            "fast_blur_caveat":  "The SDK does not publish its radius mapping, kernel, quality algorithm, or edge policy. The host implements deterministic separable LO box and HI triangular kernels with straight-alpha handling; exact Adobe pixel equivalence remains unproven pending an AE oracle matrix.",
+                                            "async_receipt_integration":  {
+                                                                              "status":  "implemented_for_layer_argb8_argb16_argb32f_and_focused_runtime_tested",
+                                                                              "source_observation":  "The final source publishes AEGP Render Suite numeric version 5, snapshots each bounded layer-render-options handle, creates a non-null ARGB8, ARGB16, or ARGB32F layer receipt, exposes its borrowed world, and invalidates that world on checkin.",
+                                                                              "task_start_observation":  "At task start checkout_layer_frame_async returned success with a null receipt and no AEGP Render Suite version 5 was published; concurrent implementation changed this before the inventory was finalized.",
+                                                                              "pending":  [
+                                                                                              "real After Effects HistoGrid execution",
+                                                                                              "Adobe scheduler and callback-thread equivalence"
+                                                                                          ]
+                                                                          }
+                                        },
+                   "AEGP_RenderOptionsSuite1":  {
+                                                    "version":  1,
+                                                    "acquisition":  "available",
+                                                    "slot_count":  17,
+                                                    "status":  "implemented_and_focused_runtime_tested",
+                                                    "source_observation":  "All 17 typed slots are published with exact offset assertions. A bounded ABA-resistant registry implements creation, duplication, disposal, and every set/get pair. Item receipts snapshot options and produce a documented synthetic coordinate/time raster: world type converts ARGB8/16/32F, downsample selects source coordinates, ROI and field constrain writes, supported matte mode changes alpha, and PREMUL_BG_COLOR fails closed.",
+                                                    "runtime_evidence":  "verify_aegp_render_options_suite1",
+                                                    "pending":  [
+                                                                    "real composition/effect rendering instead of the bounded synthetic item raster",
+                                                                    "Adobe-defined field and matte semantic oracle",
+                                                                    "real After Effects pixel oracle"
+                                                                ]
+                                                },
+                   "AEGP_RenderOptionsSuite4":  {
+                                                    "version":  4,
+                                                    "acquisition":  "available_during_pf_rendering",
+                                                    "slot_count":  23,
+                                                    "status":  "all_slots_implemented_and_tail_real_pf_aex_runtime_tested",
+                                                    "tail_slots":  [
+                                                                       "AEGP_SetChannelOrder",
+                                                                       "AEGP_GetChannelOrder",
+                                                                       "AEGP_GetRenderGuideLayers",
+                                                                       "AEGP_SetRenderGuideLayers",
+                                                                       "AEGP_GetRenderQuality",
+                                                                       "AEGP_SetRenderQuality"
+                                                                   ],
+                                                    "source_observation":  "The version-4 table preserves the 17 core render-options slots and adds exact typed 8-bit channel-order/quality and Boolean guide-layer callbacks. Values are duplicated and snapshotted into receipts, sufficiency checks, and external-frame cache keys; BGRA changes synthetic receipt byte order.",
+                                                    "runtime_evidence":  "pf_aegp_render_options4_tail_probe.aex",
+                                                    "pending":  [
+                                                                    "Adobe oracle for guide-layer inclusion",
+                                                                    "Adobe footage draft-versus-best decode oracle",
+                                                                    "real BGRA receipt pixel oracle"
+                                                                ]
+                                                },
+                   "PF_FillMatteSuite2":  {
+                                              "version":  2,
+                                              "acquisition":  "available",
+                                              "slots":  [
+                                                            {
+                                                                "range":  [
+                                                                              0,
+                                                                              2
+                                                                          ],
+                                                                "callbacks":  [
+                                                                                  "fill_world8",
+                                                                                  "fill_world16",
+                                                                                  "fill_world_float"
+                                                                              ],
+                                                                "status":  "source_wired"
+                                                            },
+                                                            {
+                                                                "range":  [
+                                                                              3,
+                                                                              6
+                                                                          ],
+                                                                "callbacks":  [
+                                                                                  "premultiply_world8",
+                                                                                  "premultiply_color8",
+                                                                                  "premultiply_color16",
+                                                                                  "premultiply_color_float"
+                                                                              ],
+                                                                "status":  "source_wired_and_aexcompat_runtime_tested"
+                                                            }
+                                                        ],
+                                              "real_ae_pixel_oracle":  "pending"
+                                          },
+                   "PF_SamplingSuites1":  {
+                                              "versions":  {
+                                                               "PF Sampling8 Suite":  1,
+                                                               "PF Sampling16 Suite":  1,
+                                                               "PF SamplingFloat Suite":  1
+                                                           },
+                                              "acquisition":  "available",
+                                              "slot_semantics":  {
+                                                                     "0":  "nearest",
+                                                                     "1":  "subpixel",
+                                                                     "2":  "area"
+                                                                 },
+                                              "callbacks":  {
+                                                                "8":  [
+                                                                          "nearest_sample8",
+                                                                          "subpixel_sample8",
+                                                                          "area_sample8"
+                                                                      ],
+                                                                "16":  [
+                                                                           "nearest_sample16",
+                                                                           "subpixel_sample16",
+                                                                           "area_sample16"
+                                                                       ],
+                                                                "float":  [
+                                                                              "nearest_sample_float",
+                                                                              "subpixel_sample_float",
+                                                                              "area_sample_float"
+                                                                          ]
+                                                            },
+                                              "status":  "all_slots_current_source_wired_and_authenticated_current_worker_runtime_tested",
+                                              "runtime_evidence":  "analysis/PF_SAMPLING_FILL_RUNTIME_RESULT_2026-07-16.json",
+                                              "artifact_note":  "The authenticated 2026-07-17 runtime result was recaptured with the current source and production render worker. The previous b17b9b... probe artifact is retained only as separate historical provenance.",
+                                              "runtime_record_authentication":  {
+                                                                                    "record":  {
+                                                                                                   "path":  "analysis/PF_SAMPLING_FILL_RUNTIME_RESULT_2026-07-16.json",
+                                                                                                   "size_bytes":  16699,
+                                                                                                   "sha256":  "ec3a82085ee09ca2cf9490d4222c0a0946b9589b59ce255f1ac842cfed7e6156"
+                                                                                               },
+                                                                                    "persisted_reports":  [
+                                                                                                              {
+                                                                                                                  "path":  "target/sampling-depth-8.json",
+                                                                                                                  "size_bytes":  6350,
+                                                                                                                  "sha256":  "e888f81c01a57a907670a390b773da4b06ef6d5afdab68d67c132cffd7c90cb2"
+                                                                                                              },
+                                                                                                              {
+                                                                                                                  "path":  "target/fill-premultiply-probe-report-20260717-current.json",
+                                                                                                                  "size_bytes":  6352,
+                                                                                                                  "sha256":  "3cca9c099515e31387a4559cbc01eb6970697301b70b7b9cfd73623a8f8ef69e"
+                                                                                                              }
+                                                                                                          ],
+                                                                                    "persisted_outputs":  [
+                                                                                                              {
+                                                                                                                  "path":  "target/sampling-depth-8.rgba",
+                                                                                                                  "size_bytes":  3404,
+                                                                                                                  "sha256":  "0abda9bfbcf3d08083e54b05b91804b5d2a87cb2b2266aeffc2cc12d9e374590"
+                                                                                                              },
+                                                                                                              {
+                                                                                                                  "path":  "target/fill-premultiply-probe-output-20260717-current.rgba",
+                                                                                                                  "size_bytes":  3404,
+                                                                                                                  "sha256":  "e354d9fa74e2f5e29ed84f65fc583509e56f9ee80bdd3027d2b65c2097c8489d"
+                                                                                                              }
+                                                                                                          ],
+                                                                                    "transient_outputs_currently_available":  true
+                                                                                },
+                                              "real_ae_pixel_oracle":  "pending"
+                                          }
+               },
+    "evidence_artifacts":  [
+                               {
+                                   "path":  "target/pf-suite-abi-probe-build/Release/pf_suite_abi_probe.exe",
+                                   "size_bytes":  24064,
+                                   "sha256":  "cf304a217a1cfe50276ed6e851362d20c9cf9fd2321c6799288fcb1873cb9d18",
+                                   "evidence":  "compiled_sdk_abi"
+                               },
+                               {
+                                   "path":  "target/pf-composite-rect-probe-build/Release/pf_composite_rect_probe.aex",
+                                   "size_bytes":  14848,
+                                   "sha256":  "7f1a7364a6cbc562017f810a5719657c66d59c3457fd778ebb595847f1b9dbf3",
+                                   "evidence":  "aexcompat_argb8_argb16_runtime"
+                               },
+                               {
+                                   "path":  "target/pf-path-curve-probe-build/Release/pf_path_curve_probe.aex",
+                                   "size_bytes":  18944,
+                                   "sha256":  "bfaefce43a617702ebf0c9a1a8b6ad3a3c7421908bbbf569f1a48763014407af",
+                                   "evidence":  "probe_artifact_only"
+                               },
+                               {
+                                   "path":  "target/aegp-world-suite3-probe-build/Release/aegp_world_suite3_probe.exe",
+                                   "size_bytes":  14848,
+                                   "sha256":  "d48d4dd492be905c39bea5407f24d61d2bfcfb7cb4d79d7d64726d425e9fcb65",
+                                   "evidence":  "focused_sdk_abi_fixture"
+                               },
+                               {
+                                   "path":  "target/pf-fill-premultiply-probe/pf_fill_premultiply_probe.aex",
+                                   "size_bytes":  14848,
+                                   "sha256":  "23e307cbf5bd95a9cb7ae1daafb46da4ac3521e015da97af2f3b1ddc9c006ce1",
+                                   "evidence":  "current_artifact_and_historical_aexcompat_runtime"
+                               },
+                               {
+                                   "path":  "target/pf-sampling-probe-build/Release/pf_sampling_probe.aex",
+                                   "size_bytes":  18944,
+                                   "sha256":  "fba46a9dd3350aac3964f2a0cbecf8eeefef83a93a96718f7a20b1f9adba29b0",
+                                   "evidence":  "authenticated_aexcompat_runtime_snapshot",
+                                   "runtime_evidence":  "analysis/PF_SAMPLING_FILL_RUNTIME_RESULT_2026-07-16.json",
+                                   "historical_runtime_artifact_sha256":  "8bcee7edc5c4868b3020b714eccc59543512d12b620923717d9d944b505920c7"
+                               }
+                           ],
+    "overall":  {
+                    "real_ae_pixel_oracle":  "not_run",
+                    "complete_after_effects_compatibility":  false,
+                    "statement":  "This inventory records current source wiring, compiled SDK ABI observations, and AEXCompat-local evidence only; it does not claim pixel equivalence with Adobe After Effects."
+                }
 }

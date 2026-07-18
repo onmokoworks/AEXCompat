@@ -10,18 +10,18 @@
     "authenticated_artifacts":  {
                                     "source":  {
                                                    "path":  "minihost/src/l2_main.cpp",
-                                                   "size_bytes":  1138218,
-                                                   "sha256":  "4fce425483d59eeef6335bcc885c904a6c406e2449cd879e2daad5447f1bf9f7"
+                                                   "size_bytes":  1174788,
+                                                   "sha256":  "0239025fac0e8a0d7d21d1132ea80d3f13e309c8e65c7aed4f88dcbb3935fa6d"
                                                },
                                     "worker":  {
                                                    "path":  "target/minihost-build/aex_render_worker.exe",
-                                                   "size_bytes":  768512,
-                                                   "sha256":  "94bbad9e150e60306073e66c3ab4a56d6ccf9b42e56af082db9014cc683b4254"
+                                                   "size_bytes":  780288,
+                                                   "sha256":  "776dcebca906d51c593b3d1797ce89ac058257b47f466509333f851359127269"
                                                },
                                     "probe":  {
                                                   "path":  "target/pf-aegp-layer-receipt-probe-build/Release/pf_aegp_layer_receipt_probe.aex",
-                                                  "size_bytes":  12288,
-                                                  "sha256":  "309c14e50e8a5213ebb57acc766611e91d6687b1229e451511cb58d2ece42d90"
+                                                  "size_bytes":  13312,
+                                                  "sha256":  "16c3d12e4adc507afb48ac9dec8a95308cba781daf85895d9d07963e56364c27"
                                               },
                                     "input":  {
                                                   "path":  "target/gpu-effects/opencl-input.rgba",

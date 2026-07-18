@@ -24,8 +24,8 @@ $artifacts = [ordered]@{
     }
     release_worker = [ordered]@{
         path = "target/minihost-build/aex_render_worker.exe"
-        size_bytes = 779776
-        sha256 = "2d037812b6159b9cf00b1beec60b354c33ba20942a5899d1b85941b6d49f8757"
+        size_bytes = 780288
+        sha256 = "776dcebca906d51c593b3d1797ce89ac058257b47f466509333f851359127269"
     }
 }
 

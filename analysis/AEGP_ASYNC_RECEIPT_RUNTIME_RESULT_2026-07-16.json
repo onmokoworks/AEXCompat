@@ -1,162 +1,162 @@
 {
-  "schema_version": 1,
-  "recorded_at": "2026-07-17T11:08:00+09:00",
-  "result": "focused_receipt_self_test_and_current_histogrid_broker_test_passed",
-  "scope": {
-    "directly_proven": [
-      "The focused native self-test created and checked in four bounded synthetic receipts and ended with no live receipts or receipt bytes.",
-      "The current HistoGrid broker integration test completed its ARGB8, ARGB16, and ARGB32F draw-plus-SmartFX cases in isolated workers.",
-      "The passing HistoGrid broker integration used mandatory worker module-audit validation; a missing, failed, non-three-phase, or unknown-module audit cannot return a successful broker result."
-    ],
-    "not_proven": [
-      "The HistoGrid broker report does not expose async receipt counters, so that integration test does not directly prove its receipt creation or check-in counts.",
-      "No execution in Adobe After Effects was performed for this evidence record.",
-      "Pixel equivalence with Adobe After Effects is not established by these tests."
-    ]
-  },
-  "abi_source": {
-    "installed_sdk_root": "C:/Program Files/Adobe/AfterEffectsSDK",
-    "current_header": {
-      "path": "C:/Program Files/Adobe/AfterEffectsSDK/Examples/Headers/AE_GeneralPlug.h",
-      "size_bytes": 212088,
-      "sha256": "632a648d4061a92897ab49b3273cc471afabc5e539d680444c8ced64232c6e5c",
-      "observations": [
-        "The SDK ABI suite name is the frozen spelling AEGP Render Asyc Manager Suite.",
-        "AEGP_RenderAsyncManagerSuite1 contains item-frame and layer-frame checkout callbacks."
-      ]
-    },
-    "legacy_header": {
-      "path": "C:/Program Files/Adobe/AfterEffectsSDK/Examples/Headers/AE_GeneralPlugOld.h",
-      "size_bytes": 402938,
-      "sha256": "36c81f155bb55f1bc0039e90abd51d98537d5490fc09770e2d03d0fcf4fcc5de",
-      "observations": [
-        "kAEGPRenderSuiteVersion4 has numeric acquisition version 5.",
-        "AEGP_RenderSuite4 supplies AEGP_CheckinFrame and AEGP_GetReceiptWorld."
-      ]
-    }
-  },
-  "source_provenance": {
-    "git_head": "e4616599cc887545232c50cb51ab977991f1337d",
-    "worktree_was_dirty": true,
-    "files": [
-      {
-        "path": "minihost/src/l2_main.cpp",
-        "size_bytes": 1138218,
-        "sha256": "4fce425483d59eeef6335bcc885c904a6c406e2449cd879e2daad5447f1bf9f7"
-      },
-      {
-        "path": "broker/crates/broker/src/image_render.rs",
-        "size_bytes": 192446,
-        "sha256": "b15b917b52d13bbf42c8dce93022b276d6af698f3d904deb37d11466b7c31d43"
-      }
-    ]
-  },
-  "focused_native_self_test": {
-    "command": "target/minihost-build/aex_render_worker.exe --self-test-aegp-async-receipt",
-    "working_directory": "repository_root",
-    "exit_code": 0,
-    "stdout": {
-      "aegp_async_receipt": "passed",
-      "created": 4,
-      "checked_in": 4,
-      "live": 0,
-      "live_bytes": 0,
-      "invalid_operations": 6
-    },
-    "coverage": [
-      "ARGB8, ARGB16, and ARGB32F receipt-owned borrowed worlds",
-      "world metadata and correctly typed base-address access",
-      "wrong-depth access rejection",
-      "borrowed-world dispose rejection",
-      "world invalidation after check-in",
-      "stale and double check-in rejection",
-      "layer checkout remains valid after render-options disposal"
-    ],
-    "artifact": {
-      "path": "target/minihost-build/aex_render_worker.exe",
-      "size_bytes": 768512,
-      "sha256": "94bbad9e150e60306073e66c3ab4a56d6ccf9b42e56af082db9014cc683b4254"
-    },
-    "report_artifact": {
-      "path": "target/final-integration-evidence/aegp-async-receipt.json",
-      "size_bytes": 110,
-      "sha256": "b4424dabad8b1d7889ca42db6c70ba9c25ef2dc0ef2b962bd7b047acfca48ae0"
-    }
-  },
-  "histogrid_broker_integration": {
-    "command": "cargo test -p aexcompat-broker histogrid_draw_and_smartfx_render_share_one_isolated_worker -- --nocapture",
-    "working_directory": "broker",
-    "exit_code": 0,
-    "test_result": {
-      "executed": 1,
-      "passed": 1,
-      "failed": 0,
-      "ignored": 0,
-      "name": "image_render::tests::histogrid_draw_and_smartfx_render_share_one_isolated_worker"
-    },
-    "runtime_preconditions_observed": {
-      "histogrid_fixture_existed": true,
-      "smart_worker_existed": true,
-      "therefore_test_did_not_take_missing_artifact_early_return": true
-    },
-    "coverage": [
-      "The production broker API dispatches draw:v1 and SmartFX rendering for ARGB8, ARGB16, and ARGB32F.",
-      "Each case reports successful draw and UI lifecycle, successful render, and a created output image.",
-      "The three output hashes are distinct."
-    ],
-    "receipt_counter_visibility": {
-      "exposed_by_broker_report": false,
-      "claim": "This passing integration test is not used as evidence for exact receipt created, checked-in, live, or live-byte counters. Those values come only from the focused native self-test."
-    },
-    "artifacts": [
-      {
-        "path": "target/sdk-fixtures/histogrid/HistoGrid.aex",
-        "size_bytes": 83456,
-        "sha256": "b66bc86b5041f22aa6acb3f02dde619dd40f2fec6a87bf4db0ceccc73e67b5aa"
-      },
-      {
-        "path": "target/minihost-build/aex_smart_worker.exe",
-        "size_bytes": 787456,
-        "sha256": "7e14dae3c4997c794b7ccd24ed44c6754deffc7fb84c5da2cad85d78e93aeb98"
-      }
-    ],
-    "required_module_audit": {
-      "required_by_production_dispatch": true,
-      "validation_result": "passed",
-      "phase_count_required": 3,
-      "unknown_count_required": 0,
-      "evidence": "The integration returned success through production broker dispatch, which rejects a successful worker classification unless the required module audit is present, passed, three-phase, and has zero unknown modules."
-    }
-  },
-  "production_artifact_snapshot": [
-    {
-      "role": "render_worker",
-      "path": "target/minihost-build/aex_render_worker.exe",
-      "size_bytes": 768512,
-      "sha256": "94bbad9e150e60306073e66c3ab4a56d6ccf9b42e56af082db9014cc683b4254"
-    },
-    {
-      "role": "aegp_worker",
-      "path": "target/minihost-build/aex_l2_worker.exe",
-      "size_bytes": 689152,
-      "sha256": "53a928b41f8d3e543eb246aa6255af3965a8f145e0188cc700d05fa400284c0a"
-    },
-    {
-      "role": "smart_worker",
-      "path": "target/minihost-build/aex_smart_worker.exe",
-      "size_bytes": 787456,
-      "sha256": "7e14dae3c4997c794b7ccd24ed44c6754deffc7fb84c5da2cad85d78e93aeb98"
-    },
-    {
-      "role": "command_harness",
-      "path": "broker/target/debug/aexcompat-harness.exe",
-      "size_bytes": 18589696,
-      "sha256": "474476324654a00b556f61797647f23454397c435efc07e5dc69c2618f2227b7"
-    }
-  ],
-  "pending": [
-    "Run the HistoGrid async receipt path inside a supported Adobe After Effects installation and capture lifecycle and pixel evidence.",
-    "Expose receipt lifecycle counters in the broker integration report if direct integrated ownership evidence is required.",
-    "Compare resulting pixels with an Adobe After Effects oracle before claiming behavioral or pixel-exact compatibility."
-  ]
+    "schema_version":  1,
+    "recorded_at":  "2026-07-17T11:08:00+09:00",
+    "result":  "focused_receipt_self_test_and_current_histogrid_broker_test_passed",
+    "scope":  {
+                  "directly_proven":  [
+                                          "The focused native self-test created and checked in four bounded synthetic receipts and ended with no live receipts or receipt bytes.",
+                                          "The current HistoGrid broker integration test completed its ARGB8, ARGB16, and ARGB32F draw-plus-SmartFX cases in isolated workers.",
+                                          "The passing HistoGrid broker integration used mandatory worker module-audit validation; a missing, failed, non-three-phase, or unknown-module audit cannot return a successful broker result."
+                                      ],
+                  "not_proven":  [
+                                     "The HistoGrid broker report does not expose async receipt counters, so that integration test does not directly prove its receipt creation or check-in counts.",
+                                     "No execution in Adobe After Effects was performed for this evidence record.",
+                                     "Pixel equivalence with Adobe After Effects is not established by these tests."
+                                 ]
+              },
+    "abi_source":  {
+                       "installed_sdk_root":  "C:/Program Files/Adobe/AfterEffectsSDK",
+                       "current_header":  {
+                                              "path":  "C:/Program Files/Adobe/AfterEffectsSDK/Examples/Headers/AE_GeneralPlug.h",
+                                              "size_bytes":  212088,
+                                              "sha256":  "632a648d4061a92897ab49b3273cc471afabc5e539d680444c8ced64232c6e5c",
+                                              "observations":  [
+                                                                   "The SDK ABI suite name is the frozen spelling AEGP Render Asyc Manager Suite.",
+                                                                   "AEGP_RenderAsyncManagerSuite1 contains item-frame and layer-frame checkout callbacks."
+                                                               ]
+                                          },
+                       "legacy_header":  {
+                                             "path":  "C:/Program Files/Adobe/AfterEffectsSDK/Examples/Headers/AE_GeneralPlugOld.h",
+                                             "size_bytes":  402938,
+                                             "sha256":  "36c81f155bb55f1bc0039e90abd51d98537d5490fc09770e2d03d0fcf4fcc5de",
+                                             "observations":  [
+                                                                  "kAEGPRenderSuiteVersion4 has numeric acquisition version 5.",
+                                                                  "AEGP_RenderSuite4 supplies AEGP_CheckinFrame and AEGP_GetReceiptWorld."
+                                                              ]
+                                         }
+                   },
+    "source_provenance":  {
+                              "git_head":  "e4616599cc887545232c50cb51ab977991f1337d",
+                              "worktree_was_dirty":  true,
+                              "files":  [
+                                            {
+                                                "path":  "minihost/src/l2_main.cpp",
+                                                "size_bytes":  1174788,
+                                                "sha256":  "0239025fac0e8a0d7d21d1132ea80d3f13e309c8e65c7aed4f88dcbb3935fa6d"
+                                            },
+                                            {
+                                                "path":  "broker/crates/broker/src/image_render.rs",
+                                                "size_bytes":  195316,
+                                                "sha256":  "465808f76d3d4bf9bd09bec3bb16dd40c31496812e4196971fad6ba4b13c8c7d"
+                                            }
+                                        ]
+                          },
+    "focused_native_self_test":  {
+                                     "command":  "target/minihost-build/aex_render_worker.exe --self-test-aegp-async-receipt",
+                                     "working_directory":  "repository_root",
+                                     "exit_code":  0,
+                                     "stdout":  {
+                                                    "aegp_async_receipt":  "passed",
+                                                    "created":  4,
+                                                    "checked_in":  4,
+                                                    "live":  0,
+                                                    "live_bytes":  0,
+                                                    "invalid_operations":  6
+                                                },
+                                     "coverage":  [
+                                                      "ARGB8, ARGB16, and ARGB32F receipt-owned borrowed worlds",
+                                                      "world metadata and correctly typed base-address access",
+                                                      "wrong-depth access rejection",
+                                                      "borrowed-world dispose rejection",
+                                                      "world invalidation after check-in",
+                                                      "stale and double check-in rejection",
+                                                      "layer checkout remains valid after render-options disposal"
+                                                  ],
+                                     "artifact":  {
+                                                      "path":  "target/minihost-build/aex_render_worker.exe",
+                                                      "size_bytes":  780288,
+                                                      "sha256":  "776dcebca906d51c593b3d1797ce89ac058257b47f466509333f851359127269"
+                                                  },
+                                     "report_artifact":  {
+                                                             "path":  "target/final-integration-evidence/aegp-async-receipt.json",
+                                                             "size_bytes":  110,
+                                                             "sha256":  "b4424dabad8b1d7889ca42db6c70ba9c25ef2dc0ef2b962bd7b047acfca48ae0"
+                                                         }
+                                 },
+    "histogrid_broker_integration":  {
+                                         "command":  "cargo test -p aexcompat-broker histogrid_draw_and_smartfx_render_share_one_isolated_worker -- --nocapture",
+                                         "working_directory":  "broker",
+                                         "exit_code":  0,
+                                         "test_result":  {
+                                                             "executed":  1,
+                                                             "passed":  1,
+                                                             "failed":  0,
+                                                             "ignored":  0,
+                                                             "name":  "image_render::tests::histogrid_draw_and_smartfx_render_share_one_isolated_worker"
+                                                         },
+                                         "runtime_preconditions_observed":  {
+                                                                                "histogrid_fixture_existed":  true,
+                                                                                "smart_worker_existed":  true,
+                                                                                "therefore_test_did_not_take_missing_artifact_early_return":  true
+                                                                            },
+                                         "coverage":  [
+                                                          "The production broker API dispatches draw:v1 and SmartFX rendering for ARGB8, ARGB16, and ARGB32F.",
+                                                          "Each case reports successful draw and UI lifecycle, successful render, and a created output image.",
+                                                          "The three output hashes are distinct."
+                                                      ],
+                                         "receipt_counter_visibility":  {
+                                                                            "exposed_by_broker_report":  false,
+                                                                            "claim":  "This passing integration test is not used as evidence for exact receipt created, checked-in, live, or live-byte counters. Those values come only from the focused native self-test."
+                                                                        },
+                                         "artifacts":  [
+                                                           {
+                                                               "path":  "target/sdk-fixtures/histogrid/HistoGrid.aex",
+                                                               "size_bytes":  83456,
+                                                               "sha256":  "b66bc86b5041f22aa6acb3f02dde619dd40f2fec6a87bf4db0ceccc73e67b5aa"
+                                                           },
+                                                           {
+                                                               "path":  "target/minihost-build/aex_smart_worker.exe",
+                                                               "size_bytes":  797696,
+                                                               "sha256":  "086df3b70d124b5f18c687702b0fbfe0d77d33fc954c10ea6e9e462fc4591ae0"
+                                                           }
+                                                       ],
+                                         "required_module_audit":  {
+                                                                       "required_by_production_dispatch":  true,
+                                                                       "validation_result":  "passed",
+                                                                       "phase_count_required":  3,
+                                                                       "unknown_count_required":  0,
+                                                                       "evidence":  "The integration returned success through production broker dispatch, which rejects a successful worker classification unless the required module audit is present, passed, three-phase, and has zero unknown modules."
+                                                                   }
+                                     },
+    "production_artifact_snapshot":  [
+                                         {
+                                             "role":  "render_worker",
+                                             "path":  "target/minihost-build/aex_render_worker.exe",
+                                             "size_bytes":  780288,
+                                             "sha256":  "776dcebca906d51c593b3d1797ce89ac058257b47f466509333f851359127269"
+                                         },
+                                         {
+                                             "role":  "aegp_worker",
+                                             "path":  "target/minihost-build/aex_l2_worker.exe",
+                                             "size_bytes":  700416,
+                                             "sha256":  "f78517b91603ba39a32242c58818ad7982d2693af544a0e67f1530a3588bc153"
+                                         },
+                                         {
+                                             "role":  "smart_worker",
+                                             "path":  "target/minihost-build/aex_smart_worker.exe",
+                                             "size_bytes":  797696,
+                                             "sha256":  "086df3b70d124b5f18c687702b0fbfe0d77d33fc954c10ea6e9e462fc4591ae0"
+                                         },
+                                         {
+                                             "role":  "command_harness",
+                                             "path":  "broker/target/debug/aexcompat-harness.exe",
+                                             "size_bytes":  19858432,
+                                             "sha256":  "967fe4d79f6a7b9da4bfe3a41583b5f29edbeb37958ad7b6f7b68ab52ad3380a"
+                                         }
+                                     ],
+    "pending":  [
+                    "Run the HistoGrid async receipt path inside a supported Adobe After Effects installation and capture lifecycle and pixel evidence.",
+                    "Expose receipt lifecycle counters in the broker integration report if direct integrated ownership evidence is required.",
+                    "Compare resulting pixels with an Adobe After Effects oracle before claiming behavioral or pixel-exact compatibility."
+                ]
 }

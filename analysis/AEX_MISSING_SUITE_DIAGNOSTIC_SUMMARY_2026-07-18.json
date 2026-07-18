@@ -1,0 +1,155 @@
+{
+  "candidate_ranking_state": "no_missing_suite_observed_no_candidate_ranked",
+  "cases": [
+    {
+      "fixture": "CCU",
+      "inspect_succeeded": true,
+      "missing_suite_count": 0,
+      "sha256": "4e35131b964638c3f90419ac1de32a1aaf67b2232905b2ea4e571043602c477f"
+    },
+    {
+      "fixture": "Checkout",
+      "inspect_succeeded": true,
+      "missing_suite_count": 0,
+      "sha256": "7fa3de46062ae9d726eb75617aabc53e66ee7a7073f78f1ad1c45395978b4898"
+    },
+    {
+      "fixture": "ColorGrid",
+      "inspect_succeeded": true,
+      "missing_suite_count": 0,
+      "sha256": "64b0de13f978222bb40649bdf48cc533aebb3e03f98270af073b8351284ba64c"
+    },
+    {
+      "fixture": "Convolutrix",
+      "inspect_succeeded": true,
+      "missing_suite_count": 0,
+      "sha256": "92be0721eb8c68201b79831995cc261be60501688040854e14f89e5f58bc638c"
+    },
+    {
+      "fixture": "Gamma_Table",
+      "inspect_succeeded": true,
+      "missing_suite_count": 0,
+      "sha256": "6fcb4946c77a9fcb4fab8e15dbbc54ffb4b1ab08656ce9acea39c44099b6dfa8"
+    },
+    {
+      "fixture": "GLator",
+      "inspect_succeeded": false,
+      "missing_suite_count": 0,
+      "sha256": "da8447f6f88e78fb00d5bd2d7e0cdc1d6bdcf1918b77e8684288a6d700c9f2ce"
+    },
+    {
+      "fixture": "Grabba",
+      "inspect_succeeded": false,
+      "missing_suite_count": 0,
+      "sha256": "711dec2bd5fcea61fa6935d9e3d4cc9a7773343292263408dab6eca5286f36c0"
+    },
+    {
+      "fixture": "HistoGrid",
+      "inspect_succeeded": true,
+      "missing_suite_count": 0,
+      "sha256": "b66bc86b5041f22aa6acb3f02dde619dd40f2fec6a87bf4db0ceccc73e67b5aa"
+    },
+    {
+      "fixture": "SDK_Invert_ProcAmp_DirectX",
+      "inspect_succeeded": true,
+      "missing_suite_count": 0,
+      "sha256": "6cbbb9a25539c7958e7eb5dce458eb2ef62b9efeecb7108e1c04973270b13428"
+    },
+    {
+      "fixture": "SDK_Invert_ProcAmp",
+      "inspect_succeeded": true,
+      "missing_suite_count": 0,
+      "sha256": "f782038561c0c62c018abada0f952a3cbbd21bbbcf57fb374a546f78601a24ad"
+    },
+    {
+      "fixture": "SDK_Invert_ProcAmp_CUDA",
+      "inspect_succeeded": true,
+      "missing_suite_count": 0,
+      "sha256": "6970fa5d8b883758a26a52112b74cec6b2448d3d187cb593af3e7655851be683"
+    },
+    {
+      "fixture": "SDK_Invert_ProcAmp_OpenCL",
+      "inspect_succeeded": true,
+      "missing_suite_count": 0,
+      "sha256": "6ad8f4e0808c1fe2cda1cf8a66e79b5f333095bb8ff28f1aa1764260730f586c"
+    },
+    {
+      "fixture": "MedianPro",
+      "inspect_succeeded": true,
+      "missing_suite_count": 0,
+      "sha256": "fde93e15449b0b43a1e7bbcb4463baa5102bc0cd843c7eb52a23a612b0bf99c5"
+    },
+    {
+      "fixture": "Paramarama",
+      "inspect_succeeded": true,
+      "missing_suite_count": 0,
+      "sha256": "4ab18c55f9fc20eded09663f50c45623272b0655ab0cbf06e7c121b6a35523b0"
+    },
+    {
+      "fixture": "PathMaster",
+      "inspect_succeeded": true,
+      "missing_suite_count": 0,
+      "sha256": "f6fa2c4977dfdee094a0b00ec5146f3a4878258be6d2b314ef2f680985969c40"
+    },
+    {
+      "fixture": "Portable",
+      "inspect_succeeded": true,
+      "missing_suite_count": 0,
+      "sha256": "0ff3ffe028ba3cb008620334355eebf70a586606c452eba151ebd0441a94ec16"
+    },
+    {
+      "fixture": "Resizer",
+      "inspect_succeeded": true,
+      "missing_suite_count": 0,
+      "sha256": "a5777179d1bcdbe60eaeb515f0c927466be5e2b0b9a833fc4d5bfb0af7757c85"
+    },
+    {
+      "fixture": "SDK_Backwards",
+      "inspect_succeeded": true,
+      "missing_suite_count": 0,
+      "sha256": "4e964032194c0f8faafc4c9178f5113f8eec61d678d6c3332844a673854dfda0"
+    },
+    {
+      "fixture": "SDK_Noise",
+      "inspect_succeeded": true,
+      "missing_suite_count": 0,
+      "sha256": "859f19c087956da756a52e303ee3afa497a24e2b0092a65fa0deb949b4afeb59"
+    },
+    {
+      "fixture": "Shifter",
+      "inspect_succeeded": true,
+      "missing_suite_count": 0,
+      "sha256": "f1f7c17eca0cef1f786f3770243f2727d174e45aee9b50b7d3982c188921f4c4"
+    },
+    {
+      "fixture": "SmartyPants",
+      "inspect_succeeded": true,
+      "missing_suite_count": 0,
+      "sha256": "47fe55f77600f041a3297b4558108fad5d6e886b6cc66eed2e51f88dac922ede"
+    },
+    {
+      "fixture": "Supervisor",
+      "inspect_succeeded": true,
+      "missing_suite_count": 0,
+      "sha256": "55b41ad85802401a50eb71b2497b1921afeb1d57f459ee16b08841392604a774"
+    },
+    {
+      "fixture": "Transformer",
+      "inspect_succeeded": true,
+      "missing_suite_count": 0,
+      "sha256": "fa389fa274db7ac9fc74c6e1600ad6fb971c9605220bea646a514511dd5b9be4"
+    }
+  ],
+  "fixture_count": 23,
+  "inspect_failure_count": 2,
+  "inspect_success_count": 21,
+  "missing_suite_sha_count": 0,
+  "next_unimplemented_suite_candidates": [],
+  "privacy": {
+    "local_paths_exported": false,
+    "private_stderr_exported": false
+  },
+  "schema_version": 1,
+  "stage": "aex_missing_suite_diagnostic_summary",
+  "top_missing_suites": []
+}

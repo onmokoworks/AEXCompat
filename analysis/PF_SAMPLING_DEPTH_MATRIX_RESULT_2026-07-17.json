@@ -1,112 +1,112 @@
 {
-  "schema_version": 1,
-  "captured_at": "2026-07-17",
-  "result": "pf_sampling_8_16_float_numeric_depth_matrix_passed",
-  "dimensions": {
-    "width": 37,
-    "height": 23
-  },
-  "numeric_oracle": {
-    "cases": [
-      "nearest_integer",
-      "nearest_half",
-      "subpixel_half",
-      "alpha_weighted_area",
-      "zero_edge",
-      "zero_outside"
-    ],
-    "method": "The AEX independently derives expected typed pixels from the input world and rejects a mismatch; the Python verifier independently derives the expected external RGBA pattern from the transport input and compares every output pixel."
-  },
-  "artifacts": {
-    "worker": {
-      "path": "target/minihost-build/aex_render_worker.exe",
-      "size_bytes": 768512,
-      "sha256": "94bbad9e150e60306073e66c3ab4a56d6ccf9b42e56af082db9014cc683b4254"
-    },
-    "probe": {
-      "path": "target/pf-sampling-probe-build/Release/pf_sampling_probe.aex",
-      "size_bytes": 17408,
-      "sha256": "f675965d3e48220d6e35852143964a6dd6657690661e20d13a56e265da087d05"
-    },
-    "input": {
-      "path": "target/gpu-effects/opencl-input.rgba",
-      "size_bytes": 3404,
-      "sha256": "e262995eeaf4ba4ac17385566eadae4597ec4a974ea0c116a170c0edb1e632f9"
-    }
-  },
-  "runs": [
-    {
-      "mode": "--render-image",
-      "depth": 8,
-      "pixel_format": "argb8",
-      "exit_code": 0,
-      "status": "render_completed",
-      "render_error": 0,
-      "input_sha256": "531fe73fe40a02dfa9271a0d17c0c658e327ab80f5f82748d799a3a07ba23b4d",
-      "internal_output_sha256": "5776731f99b55ef990d41cc4a17a8e342e059d06b669155bdf9298fbcaf007f4",
-      "output": {
-        "path": "target/sampling-depth-8.rgba",
-        "size_bytes": 3404,
-        "sha256": "0abda9bfbcf3d08083e54b05b91804b5d2a87cb2b2266aeffc2cc12d9e374590"
-      },
-      "report": {
-        "path": "target/sampling-depth-8.json",
-        "size_bytes": 6350,
-        "sha256": "e888f81c01a57a907670a390b773da4b06ef6d5afdab68d67c132cffd7c90cb2"
-      },
-      "suite_acquires": 1,
-      "suite_releases": 1,
-      "guard_bytes_intact": true,
-      "last_seh_exception_code": 0
-    },
-    {
-      "mode": "--render-image16",
-      "depth": 16,
-      "pixel_format": "argb16",
-      "exit_code": 0,
-      "status": "render_completed",
-      "render_error": 0,
-      "input_sha256": "8b87456bcf6e277e3435f7fd991f4dd31cd39023e319ce1bf85163434fdbb832",
-      "internal_output_sha256": "1d24ab30da7a90771cfbbd3faf24176dfe970e207c02f183f923627d5273179c",
-      "output": {
-        "path": "target/sampling-depth-16.rgba",
-        "size_bytes": 3404,
-        "sha256": "0abda9bfbcf3d08083e54b05b91804b5d2a87cb2b2266aeffc2cc12d9e374590"
-      },
-      "report": {
-        "path": "target/sampling-depth-16.json",
-        "size_bytes": 6351,
-        "sha256": "609de4bbf3bd02ccc9ef454445edefc98f4d2a60be11c7402bbd3fd9b0c630db"
-      },
-      "suite_acquires": 1,
-      "suite_releases": 1,
-      "guard_bytes_intact": true,
-      "last_seh_exception_code": 0
-    },
-    {
-      "mode": "--render-image32",
-      "depth": 32,
-      "pixel_format": "argb32f",
-      "exit_code": 0,
-      "status": "render_completed",
-      "render_error": 0,
-      "input_sha256": "e24cecd7dc37fa2f6d9d68c891cc7cbe07caad7f26bcbcdc9fa1c1472a87cdb7",
-      "internal_output_sha256": "cfcd7a6dd81c101aadba05aa1e206253451ac1628e86893f85c7874b583540db",
-      "output": {
-        "path": "target/sampling-depth-32.rgba",
-        "size_bytes": 3404,
-        "sha256": "0abda9bfbcf3d08083e54b05b91804b5d2a87cb2b2266aeffc2cc12d9e374590"
-      },
-      "report": {
-        "path": "target/sampling-depth-32.json",
-        "size_bytes": 6352,
-        "sha256": "0a66e9b7fac8f9c25e1a0de778df321291ecbdffdf6727d2ac1c4c9e1f5ae3f3"
-      },
-      "suite_acquires": 1,
-      "suite_releases": 1,
-      "guard_bytes_intact": true,
-      "last_seh_exception_code": 0
-    }
-  ],
-  "claim": "The production render worker loaded a real PF AEX and exercised Sampling Suite 8, 16, and Float point/subpixel/area callbacks with independent numeric oracles, balanced suite leases, intact guards, and no SEH exception."
+    "schema_version":  1,
+    "captured_at":  "2026-07-17",
+    "result":  "pf_sampling_8_16_float_numeric_depth_matrix_passed",
+    "dimensions":  {
+                       "width":  37,
+                       "height":  23
+                   },
+    "numeric_oracle":  {
+                           "cases":  [
+                                         "nearest_integer",
+                                         "nearest_half",
+                                         "subpixel_half",
+                                         "alpha_weighted_area",
+                                         "zero_edge",
+                                         "zero_outside"
+                                     ],
+                           "method":  "The AEX independently derives expected typed pixels from the input world and rejects a mismatch; the Python verifier independently derives the expected external RGBA pattern from the transport input and compares every output pixel."
+                       },
+    "artifacts":  {
+                      "worker":  {
+                                     "path":  "target/minihost-build/aex_render_worker.exe",
+                                     "size_bytes":  780288,
+                                     "sha256":  "776dcebca906d51c593b3d1797ce89ac058257b47f466509333f851359127269"
+                                 },
+                      "probe":  {
+                                    "path":  "target/pf-sampling-probe-build/Release/pf_sampling_probe.aex",
+                                    "size_bytes":  18944,
+                                    "sha256":  "fba46a9dd3350aac3964f2a0cbecf8eeefef83a93a96718f7a20b1f9adba29b0"
+                                },
+                      "input":  {
+                                    "path":  "target/gpu-effects/opencl-input.rgba",
+                                    "size_bytes":  3404,
+                                    "sha256":  "e262995eeaf4ba4ac17385566eadae4597ec4a974ea0c116a170c0edb1e632f9"
+                                }
+                  },
+    "runs":  [
+                 {
+                     "mode":  "--render-image",
+                     "depth":  8,
+                     "pixel_format":  "argb8",
+                     "exit_code":  0,
+                     "status":  "render_completed",
+                     "render_error":  0,
+                     "input_sha256":  "531fe73fe40a02dfa9271a0d17c0c658e327ab80f5f82748d799a3a07ba23b4d",
+                     "internal_output_sha256":  "5776731f99b55ef990d41cc4a17a8e342e059d06b669155bdf9298fbcaf007f4",
+                     "output":  {
+                                    "path":  "target/sampling-depth-8.rgba",
+                                    "size_bytes":  3404,
+                                    "sha256":  "0abda9bfbcf3d08083e54b05b91804b5d2a87cb2b2266aeffc2cc12d9e374590"
+                                },
+                     "report":  {
+                                    "path":  "target/sampling-depth-8.json",
+                                    "size_bytes":  6350,
+                                    "sha256":  "e888f81c01a57a907670a390b773da4b06ef6d5afdab68d67c132cffd7c90cb2"
+                                },
+                     "suite_acquires":  1,
+                     "suite_releases":  1,
+                     "guard_bytes_intact":  true,
+                     "last_seh_exception_code":  0
+                 },
+                 {
+                     "mode":  "--render-image16",
+                     "depth":  16,
+                     "pixel_format":  "argb16",
+                     "exit_code":  0,
+                     "status":  "render_completed",
+                     "render_error":  0,
+                     "input_sha256":  "8b87456bcf6e277e3435f7fd991f4dd31cd39023e319ce1bf85163434fdbb832",
+                     "internal_output_sha256":  "1d24ab30da7a90771cfbbd3faf24176dfe970e207c02f183f923627d5273179c",
+                     "output":  {
+                                    "path":  "target/sampling-depth-16.rgba",
+                                    "size_bytes":  3404,
+                                    "sha256":  "0abda9bfbcf3d08083e54b05b91804b5d2a87cb2b2266aeffc2cc12d9e374590"
+                                },
+                     "report":  {
+                                    "path":  "target/sampling-depth-16.json",
+                                    "size_bytes":  6351,
+                                    "sha256":  "609de4bbf3bd02ccc9ef454445edefc98f4d2a60be11c7402bbd3fd9b0c630db"
+                                },
+                     "suite_acquires":  1,
+                     "suite_releases":  1,
+                     "guard_bytes_intact":  true,
+                     "last_seh_exception_code":  0
+                 },
+                 {
+                     "mode":  "--render-image32",
+                     "depth":  32,
+                     "pixel_format":  "argb32f",
+                     "exit_code":  0,
+                     "status":  "render_completed",
+                     "render_error":  0,
+                     "input_sha256":  "e24cecd7dc37fa2f6d9d68c891cc7cbe07caad7f26bcbcdc9fa1c1472a87cdb7",
+                     "internal_output_sha256":  "cfcd7a6dd81c101aadba05aa1e206253451ac1628e86893f85c7874b583540db",
+                     "output":  {
+                                    "path":  "target/sampling-depth-32.rgba",
+                                    "size_bytes":  3404,
+                                    "sha256":  "0abda9bfbcf3d08083e54b05b91804b5d2a87cb2b2266aeffc2cc12d9e374590"
+                                },
+                     "report":  {
+                                    "path":  "target/sampling-depth-32.json",
+                                    "size_bytes":  6352,
+                                    "sha256":  "0a66e9b7fac8f9c25e1a0de778df321291ecbdffdf6727d2ac1c4c9e1f5ae3f3"
+                                },
+                     "suite_acquires":  1,
+                     "suite_releases":  1,
+                     "guard_bytes_intact":  true,
+                     "last_seh_exception_code":  0
+                 }
+             ],
+    "claim":  "The production render worker loaded a real PF AEX and exercised Sampling Suite 8, 16, and Float point/subpixel/area callbacks with independent numeric oracles, balanced suite leases, intact guards, and no SEH exception."
 }

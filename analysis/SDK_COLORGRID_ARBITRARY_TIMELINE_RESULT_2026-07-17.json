@@ -1,155 +1,155 @@
 {
-  "schema_version": 2,
-  "captured_at": "2026-07-17",
-  "result": "two_key_arbitrary_timeline_rendered_with_balanced_ownership",
-  "authenticated_artifacts": {
-    "source": {
-      "path": "minihost/src/l2_main.cpp",
-      "size_bytes": 1138218,
-      "sha256": "4fce425483d59eeef6335bcc885c904a6c406e2449cd879e2daad5447f1bf9f7"
-    },
-    "worker": {
-      "path": "target/minihost-build/aex_render_worker.exe",
-      "size_bytes": 768512,
-      "sha256": "94bbad9e150e60306073e66c3ab4a56d6ccf9b42e56af082db9014cc683b4254"
-    },
-    "fixture": {
-      "path": "target/sdk-fixtures/colorgrid/ColorGrid.aex",
-      "size_bytes": 33280,
-      "sha256": "64b0de13f978222bb40649bdf48cc533aebb3e03f98270af073b8351284ba64c"
-    },
-    "input": {
-      "path": "target/image-transport/colorgrid-click-input.rgba",
-      "size_bytes": 768,
-      "sha256": "c9ee521c7d71cbf6a41cb1a2d075add64676b912f5870098417b75ca727ba807"
-    },
-    "sidecar": {
-      "path": "target/image-transport/colorgrid-arbitrary-animation-v1.json",
-      "size_bytes": 1098,
-      "sha256": "9479418f5fccb1469ae163bd3884b97b5ebfd22554b720fd7c9e4476c86a083d"
-    },
-    "left_output": {
-      "path": "target/colorgrid-arbitrary-0.rgba",
-      "size_bytes": 768,
-      "sha256": "91d436a039c7f5ef56c4418e97dcb48dd4a69b8b9d984f224a06f97fe3ff8578"
-    },
-    "midpoint_output": {
-      "path": "target/colorgrid-arbitrary-12.rgba",
-      "size_bytes": 768,
-      "sha256": "68937b10308ad6bc49703fc6dc955a8c2c345b7a9be8ea6071215153482c8914"
-    },
-    "right_output": {
-      "path": "target/colorgrid-arbitrary-24.rgba",
-      "size_bytes": 768,
-      "sha256": "a7776fc34181f424adc2d05243acaca8fa5cdead5cafc085eed1aaac48d57844"
-    },
-    "left_report": {
-      "path": "target/colorgrid-arbitrary-0-report.json",
-      "size_bytes": 6357,
-      "sha256": "e45e9f546de9026a85ae15184c35b492d11858ebef289c7ad7720b32141d32fd"
-    },
-    "midpoint_report": {
-      "path": "target/colorgrid-arbitrary-12-report.json",
-      "size_bytes": 6359,
-      "sha256": "ef0a90ea4fa378eee27af534e882d5fbcfad8325cb7b63347d027a77ac441939"
-    },
-    "right_report": {
-      "path": "target/colorgrid-arbitrary-24-report.json",
-      "size_bytes": 6357,
-      "sha256": "5159c6de5084caf834d0f1cdc5ed2bf8ccf509e1748d919bb196eca68f4dd502"
-    }
-  },
-  "timeline": {
-    "slot": 1,
-    "key_count": 2,
-    "flattened_bytes_per_key": 144,
-    "key_times": [
-      {
-        "value": 0,
-        "scale": 24
-      },
-      {
-        "value": 24,
-        "scale": 24
-      }
-    ],
-    "sample_times": [
-      0,
-      12,
-      24
-    ],
-    "worker_argv_time_step": 1,
-    "worker_argv_total_time": 24,
-    "worker_argv_time_scale": 24
-  },
-  "runs": [
-    {
-      "time": 0,
-      "exit_code": 0,
-      "status": "render_completed",
-      "internal_output_sha256": "4f3c8d8405d0917ab85ccda3af3c8fd2c66f6daaf12383e07cc0c7846f6407d7",
-      "file_output_sha256": "91d436a039c7f5ef56c4418e97dcb48dd4a69b8b9d984f224a06f97fe3ff8578",
-      "arbitrary_interpolation_amount": 0,
-      "arbitrary_interpolation_calls": 0,
-      "arbitrary_new_calls": 0,
-      "handles_created": 5,
-      "handles_disposed": 5,
-      "handle_lifetimes_balanced": true,
-      "exception_code": 0
-    },
-    {
-      "time": 12,
-      "exit_code": 0,
-      "status": "render_completed",
-      "internal_output_sha256": "c9afccf483627699430e23d02105111f5f4bdaf9b37b70b56246032148a87e24",
-      "file_output_sha256": "68937b10308ad6bc49703fc6dc955a8c2c345b7a9be8ea6071215153482c8914",
-      "arbitrary_interpolation_amount": 0.5,
-      "arbitrary_interpolation_calls": 1,
-      "arbitrary_new_calls": 1,
-      "handles_created": 7,
-      "handles_disposed": 7,
-      "handle_lifetimes_balanced": true,
-      "exception_code": 0
-    },
-    {
-      "time": 24,
-      "exit_code": 0,
-      "status": "render_completed",
-      "internal_output_sha256": "8c5bdd485e1cc920146ec61f15b2c47c60dc099d00148bcea8abc57184b9ec0a",
-      "file_output_sha256": "a7776fc34181f424adc2d05243acaca8fa5cdead5cafc085eed1aaac48d57844",
-      "arbitrary_interpolation_amount": 1,
-      "arbitrary_interpolation_calls": 0,
-      "arbitrary_new_calls": 0,
-      "handles_created": 5,
-      "handles_disposed": 5,
-      "handle_lifetimes_balanced": true,
-      "exception_code": 0
-    }
-  ],
-  "midpoint_stress": {
-    "iterations": 25,
-    "successful_iterations": 25,
-    "failed_iterations": 0,
-    "observed_signature_count": 1,
-    "exit_code": 0,
-    "status": "render_completed",
-    "arbitrary_interpolation_amount": 0.5,
-    "arbitrary_interpolation_calls": 1,
-    "arbitrary_new_calls": 1,
-    "handles_created": 7,
-    "handles_disposed": 7,
-    "handle_lifetimes_balanced": true,
-    "exception_code": 0,
-    "internal_output_sha256": "c9afccf483627699430e23d02105111f5f4bdaf9b37b70b56246032148a87e24",
-    "file_output_sha256": "68937b10308ad6bc49703fc6dc955a8c2c345b7a9be8ea6071215153482c8914"
-  },
-  "directly_proven": [
-    "All three sampled renders and all 25 midpoint stress renders exited zero, completed rendering, raised no native exception, and balanced host Handle ownership.",
-    "With worker time scale 24 matching the key time scale, every midpoint run invoked ARB_NEW and ARB_INTERP exactly once with amount 0.5.",
-    "The midpoint internal and file output hashes were distinct from both endpoint hashes in every observed midpoint run."
-  ],
-  "not_proven": [
-    "Pixel equivalence with Adobe After Effects.",
-    "Bezier or temporal-ease interpolation semantics."
-  ]
+    "schema_version":  2,
+    "captured_at":  "2026-07-17",
+    "result":  "two_key_arbitrary_timeline_rendered_with_balanced_ownership",
+    "authenticated_artifacts":  {
+                                    "source":  {
+                                                   "path":  "minihost/src/l2_main.cpp",
+                                                   "size_bytes":  1174788,
+                                                   "sha256":  "0239025fac0e8a0d7d21d1132ea80d3f13e309c8e65c7aed4f88dcbb3935fa6d"
+                                               },
+                                    "worker":  {
+                                                   "path":  "target/minihost-build/aex_render_worker.exe",
+                                                   "size_bytes":  780288,
+                                                   "sha256":  "776dcebca906d51c593b3d1797ce89ac058257b47f466509333f851359127269"
+                                               },
+                                    "fixture":  {
+                                                    "path":  "target/sdk-fixtures/colorgrid/ColorGrid.aex",
+                                                    "size_bytes":  33280,
+                                                    "sha256":  "64b0de13f978222bb40649bdf48cc533aebb3e03f98270af073b8351284ba64c"
+                                                },
+                                    "input":  {
+                                                  "path":  "target/image-transport/colorgrid-click-input.rgba",
+                                                  "size_bytes":  768,
+                                                  "sha256":  "c9ee521c7d71cbf6a41cb1a2d075add64676b912f5870098417b75ca727ba807"
+                                              },
+                                    "sidecar":  {
+                                                    "path":  "target/image-transport/colorgrid-arbitrary-animation-v1.json",
+                                                    "size_bytes":  1098,
+                                                    "sha256":  "9479418f5fccb1469ae163bd3884b97b5ebfd22554b720fd7c9e4476c86a083d"
+                                                },
+                                    "left_output":  {
+                                                        "path":  "target/colorgrid-arbitrary-0.rgba",
+                                                        "size_bytes":  768,
+                                                        "sha256":  "91d436a039c7f5ef56c4418e97dcb48dd4a69b8b9d984f224a06f97fe3ff8578"
+                                                    },
+                                    "midpoint_output":  {
+                                                            "path":  "target/colorgrid-arbitrary-12.rgba",
+                                                            "size_bytes":  768,
+                                                            "sha256":  "68937b10308ad6bc49703fc6dc955a8c2c345b7a9be8ea6071215153482c8914"
+                                                        },
+                                    "right_output":  {
+                                                         "path":  "target/colorgrid-arbitrary-24.rgba",
+                                                         "size_bytes":  768,
+                                                         "sha256":  "a7776fc34181f424adc2d05243acaca8fa5cdead5cafc085eed1aaac48d57844"
+                                                     },
+                                    "left_report":  {
+                                                        "path":  "target/colorgrid-arbitrary-0-report.json",
+                                                        "size_bytes":  6357,
+                                                        "sha256":  "e45e9f546de9026a85ae15184c35b492d11858ebef289c7ad7720b32141d32fd"
+                                                    },
+                                    "midpoint_report":  {
+                                                            "path":  "target/colorgrid-arbitrary-12-report.json",
+                                                            "size_bytes":  6359,
+                                                            "sha256":  "ef0a90ea4fa378eee27af534e882d5fbcfad8325cb7b63347d027a77ac441939"
+                                                        },
+                                    "right_report":  {
+                                                         "path":  "target/colorgrid-arbitrary-24-report.json",
+                                                         "size_bytes":  6357,
+                                                         "sha256":  "5159c6de5084caf834d0f1cdc5ed2bf8ccf509e1748d919bb196eca68f4dd502"
+                                                     }
+                                },
+    "timeline":  {
+                     "slot":  1,
+                     "key_count":  2,
+                     "flattened_bytes_per_key":  144,
+                     "key_times":  [
+                                       {
+                                           "value":  0,
+                                           "scale":  24
+                                       },
+                                       {
+                                           "value":  24,
+                                           "scale":  24
+                                       }
+                                   ],
+                     "sample_times":  [
+                                          0,
+                                          12,
+                                          24
+                                      ],
+                     "worker_argv_time_step":  1,
+                     "worker_argv_total_time":  24,
+                     "worker_argv_time_scale":  24
+                 },
+    "runs":  [
+                 {
+                     "time":  0,
+                     "exit_code":  0,
+                     "status":  "render_completed",
+                     "internal_output_sha256":  "4f3c8d8405d0917ab85ccda3af3c8fd2c66f6daaf12383e07cc0c7846f6407d7",
+                     "file_output_sha256":  "91d436a039c7f5ef56c4418e97dcb48dd4a69b8b9d984f224a06f97fe3ff8578",
+                     "arbitrary_interpolation_amount":  0,
+                     "arbitrary_interpolation_calls":  0,
+                     "arbitrary_new_calls":  0,
+                     "handles_created":  5,
+                     "handles_disposed":  5,
+                     "handle_lifetimes_balanced":  true,
+                     "exception_code":  0
+                 },
+                 {
+                     "time":  12,
+                     "exit_code":  0,
+                     "status":  "render_completed",
+                     "internal_output_sha256":  "c9afccf483627699430e23d02105111f5f4bdaf9b37b70b56246032148a87e24",
+                     "file_output_sha256":  "68937b10308ad6bc49703fc6dc955a8c2c345b7a9be8ea6071215153482c8914",
+                     "arbitrary_interpolation_amount":  0.5,
+                     "arbitrary_interpolation_calls":  1,
+                     "arbitrary_new_calls":  1,
+                     "handles_created":  7,
+                     "handles_disposed":  7,
+                     "handle_lifetimes_balanced":  true,
+                     "exception_code":  0
+                 },
+                 {
+                     "time":  24,
+                     "exit_code":  0,
+                     "status":  "render_completed",
+                     "internal_output_sha256":  "8c5bdd485e1cc920146ec61f15b2c47c60dc099d00148bcea8abc57184b9ec0a",
+                     "file_output_sha256":  "a7776fc34181f424adc2d05243acaca8fa5cdead5cafc085eed1aaac48d57844",
+                     "arbitrary_interpolation_amount":  1,
+                     "arbitrary_interpolation_calls":  0,
+                     "arbitrary_new_calls":  0,
+                     "handles_created":  5,
+                     "handles_disposed":  5,
+                     "handle_lifetimes_balanced":  true,
+                     "exception_code":  0
+                 }
+             ],
+    "midpoint_stress":  {
+                            "iterations":  25,
+                            "successful_iterations":  25,
+                            "failed_iterations":  0,
+                            "observed_signature_count":  1,
+                            "exit_code":  0,
+                            "status":  "render_completed",
+                            "arbitrary_interpolation_amount":  0.5,
+                            "arbitrary_interpolation_calls":  1,
+                            "arbitrary_new_calls":  1,
+                            "handles_created":  7,
+                            "handles_disposed":  7,
+                            "handle_lifetimes_balanced":  true,
+                            "exception_code":  0,
+                            "internal_output_sha256":  "c9afccf483627699430e23d02105111f5f4bdaf9b37b70b56246032148a87e24",
+                            "file_output_sha256":  "68937b10308ad6bc49703fc6dc955a8c2c345b7a9be8ea6071215153482c8914"
+                        },
+    "directly_proven":  [
+                            "All three sampled renders and all 25 midpoint stress renders exited zero, completed rendering, raised no native exception, and balanced host Handle ownership.",
+                            "With worker time scale 24 matching the key time scale, every midpoint run invoked ARB_NEW and ARB_INTERP exactly once with amount 0.5.",
+                            "The midpoint internal and file output hashes were distinct from both endpoint hashes in every observed midpoint run."
+                        ],
+    "not_proven":  [
+                       "Pixel equivalence with Adobe After Effects.",
+                       "Bezier or temporal-ease interpolation semantics."
+                   ]
 }
