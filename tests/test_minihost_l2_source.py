@@ -4,6 +4,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "minihost" / "src" / "l2_main.cpp"
+MODE_EXECUTION_HEADER = ROOT / "minihost" / "src" / "l2_mode_execution.hpp"
+MODE_EXECUTION_SOURCE = ROOT / "minihost" / "src" / "l2_mode_execution.cpp"
 CLI_DISPATCH_SOURCE = ROOT / "minihost" / "src" / "l2_cli_dispatch.cpp"
 WORLD_SAFETY_SOURCE = ROOT / "minihost" / "src" / "worker_world_safety.cpp"
 HANDLE_RUNTIME_SOURCE = ROOT / "minihost" / "src" / "worker_handle_runtime.cpp"
@@ -25,7 +27,8 @@ MINIHOST_CMAKE = ROOT / "minihost" / "CMakeLists.txt"
 
 def l2_family_source():
     return "\n".join(path.read_text(encoding="utf-8") for path in (
-        SOURCE, CLI_DISPATCH_SOURCE, PF_SUITES_HEADER, PF_SUITES_SOURCE,
+        SOURCE, MODE_EXECUTION_HEADER, MODE_EXECUTION_SOURCE,
+        CLI_DISPATCH_SOURCE, PF_SUITES_HEADER, PF_SUITES_SOURCE,
         AEGP_SCENE_SOURCE, AEGP_SCENE_RUNTIME_HEADER, AEGP_SCENE_RUNTIME_SOURCE,
         AEGP_SCENE_IMPL, REPORT_HEADER, REPORT_SOURCE, RUNTIME_ADMISSION_SOURCE
     ))
@@ -545,8 +548,9 @@ class MinihostL2SourceTests(unittest.TestCase):
         for marker in (
             'L"--l2-params-only"',
             '"parameters_inspected"',
-            "const std::array<int32_t, 5> skipped_lifecycle{-1, -1, -1, -1, -1}",
-            "params_setdown_error == 0 ? 0 : 20",
+            "EarlyMode::ParametersOnly",
+            "dispose_arbitrary_defaults(r.context)",
+            "defaults_disposed && setdown_error == 0 ? 0 : 20",
         ):
             self.assertIn(marker, text)
         params_only = text.index("if (params_only_mode)")
