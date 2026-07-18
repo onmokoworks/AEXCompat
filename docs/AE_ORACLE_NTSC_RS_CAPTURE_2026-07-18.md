@@ -278,3 +278,59 @@ new input and deeper comparison boundary. It establishes an unresolved
 compatibility gap that needs parameter/world/timing-call tracing before the
 host can claim ntsc-rs equivalence at 16 bpc. The artifacts are local under
 `target/ntsc-rs-oracle16-v2-*`; hashes are recorded by the comparison report.
+
+## Follow-up: corpus expansion to a popup parameter and input-shape
+   variations (2026-07-19, issue #31)
+
+All previous samples used one float slider and the single 1920x1080 opaque
+gradient input. Four new samples extend the corpus along the parameter-kind
+and input-shape axes (all observations; same plug-in `ad129f80...`, AE
+25.3.1x3, frame 0, fps 24, 8 bpc, default parameters except where noted).
+The machine-readable judgments live in
+`analysis/NTSC_RS_ORACLE_CORPUS_RESULT_2026-07-19.json` (regenerated only
+via `tools/refresh-ntsc-rs-oracle-corpus-evidence.ps1` from the executed
+artifacts under `target/oracle-corpus/`; validated by
+`tests/test_ntsc_rs_oracle_corpus_result.py`), produced with
+`tools/compare-pixel-oracles.py --tolerance 0.004` (accepts +/-1 LSB at
+8 bits, rejects +/-2). The host side ran the freshly rebuilt workers and
+harness on this branch; the broker integration tests passed after the
+rebuild.
+
+1. **Popup parameter (`Use field` = `Both`).** First verification that
+   `capture-ae-reference.ps1 -ParamName` drives a PF_Param_POPUP: the JSX
+   `setValue(6)` applied cleanly (result JSON reads back `param_value: 6`).
+   Host side used `--render-experimental-smart-param ... 4 6` (slot 4,
+   1-based choice index; the harness `--inspect-experimental` listing pins
+   `Use field` to slot 4 with choices Alternating/Upper only/Lower
+   only/Interleaved upper/Interleaved lower/Both, default 4). Input is the
+   existing gradient (`bb84e35e...`). Result: 151 of 8,294,400 channel
+   samples differ, all +/-1 LSB, alpha exact.
+2. **Alpha-gradient input.** New deterministic RGBA input with a vertical
+   alpha ramp 0..255 (`tools/generate-oracle-rgba-input.py`, SHA-256
+   `c8acdee2...`). 178 differing channel samples, all +/-1 LSB; the alpha
+   channel is exact everywhere, including fully and partially transparent
+   rows.
+3. **Odd dimensions (1919x1077).** Same generator, opaque
+   (`12bf45b4...`). 197 differing channel samples, all +/-1 LSB, alpha
+   exact. No row-stride or edge structure: an incorrect stride would shear
+   every row after the first, which would produce large structured errors,
+   not boundary-value jitter.
+4. **4K (3840x2160).** Same generator, opaque (`d56a353c...`). 729 of
+   33,177,600 channel samples differ, all +/-1 LSB, alpha exact - the same
+   per-sample rate order as the 1080p samples (~2e-5), consistent with the
+   value-dependent rounding jitter verified earlier, now at 4x the pixel
+   count.
+
+Claim level: with the four pre-existing samples this makes eight AE-oracle
+equivalence samples for ntsc-rs SmartFX at +/-1 LSB (8-bit precision),
+now spanning a popup parameter, a float parameter, alpha-carrying input,
+odd dimensions, and 4K resolution. Field-dependent rendering with
+non-`Both` interlacing choices and deeper-precision comparisons remain
+uncovered here (the latter continues in the EXR/deep-transport work).
+
+Tooling shipped with this follow-up: `tools/generate-oracle-rgba-input.py`
+(deterministic RGBA oracle inputs; the input formula is documented in the
+tool and locked by `tests/test_oracle_input_tools.py`),
+`tools/png-to-rgba-raw.py` (lossless PNG-to-raw conversion so host PNG
+outputs can feed `compare-pixel-oracles.py --raw`), and the evidence
+refresh script named above.

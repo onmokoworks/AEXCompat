@@ -1,0 +1,279 @@
+{
+  "schema_version": 1,
+  "title": "ntsc-rs AE oracle corpus: popup parameter and input-shape variations (issue #31)",
+  "generated_by": "tools/refresh-ntsc-rs-oracle-corpus-evidence.ps1",
+  "environment": {
+    "ae_version": "25.3.1x3",
+    "plugin_file": "ntsc-rs-ae.aex",
+    "plugin_sha256": "ad129f8029914a09346de0d1ed60ee5d5a7ad5d3df4a17782260ef2421fd354a",
+    "host_render_path": "smartfx",
+    "host_pixel_format": "argb8"
+  },
+  "comparison_tool": "tools/compare-pixel-oracles.py",
+  "tolerance": 0.004,
+  "tolerance_meaning": "accepts +/-1 LSB at 8-bit precision (1/255 ~= 0.00392), rejects +/-2 (2/255 ~= 0.00784)",
+  "cases": [
+    {
+      "name": "popup-use-field-both",
+      "axis": "popup_parameter",
+      "input": {
+        "file": "target/oracle-corpus/input-gradient-1920x1080.png",
+        "sha256": "bb84e35ea6bdbfa178d13d6571dbff84aa2b78e57f3dbc9831aa7448c619c97e",
+        "width": 1920,
+        "height": 1080,
+        "provenance": "pre-existing 1920x1080 gradient oracle input (docs/AE_ORACLE_NTSC_RS_CAPTURE_2026-07-18.md)"
+      },
+      "parameter": {
+        "host_slot": 4,
+        "ae_property_name": "Use field",
+        "value": 6,
+        "choice_label": "Both",
+        "kind": "popup"
+      },
+      "host": {
+        "render_flag": "--render-experimental-smart-param",
+        "output_png_sha256": "5a3c02c9c150118aff6cfe1155753ad6aa98c06d2cbfd763b53b600fe679e20a",
+        "output_raw_rgba8_sha256": "71198faa2255a5e0339153debcff14358a1c25e2cf51619e48c14395a3839a32"
+      },
+      "ae_capture": {
+        "output_png_sha256": "5b30e297354f91bbc93cb2b4469b44ad2775a2a7e10cbb9ee61db7e47f7b73e4",
+        "frame": 0,
+        "fps": 24,
+        "bpc": 8,
+        "color_pinned": false,
+        "working_space": "None"
+      },
+      "comparison": {
+        "comparison_boundary": {
+          "actual": "ae_export_artifact",
+          "claim_level": "export_tolerance",
+          "expected": "host_raw_world",
+          "raw_world_exact": false
+        },
+        "dimensions": {
+          "height": 1080,
+          "width": 1920
+        },
+        "exact_mismatched_channels": 151,
+        "first_mismatch": null,
+        "formats": {
+          "raw": "rgba8",
+          "render": "png_rgba8"
+        },
+        "hashes": {
+          "raw_sha256": "71198faa2255a5e0339153debcff14358a1c25e2cf51619e48c14395a3839a32",
+          "render_sha256": "5b30e297354f91bbc93cb2b4469b44ad2775a2a7e10cbb9ee61db7e47f7b73e4"
+        },
+        "match": true,
+        "max_abs_error": {
+          "a": 0.0,
+          "b": 0.0039215686274510775,
+          "g": 0.0039215686274510775,
+          "r": 0.0039215686274510775
+        },
+        "mean_abs_error": {
+          "a": 0.0,
+          "b": 8.888586298717027E-08,
+          "g": 8.888586298717019E-08,
+          "r": 1.0779774872912117E-07
+        },
+        "over_tolerance_channels": 0,
+        "raw_integer_max": null,
+        "schema_version": 1,
+        "tolerance": 0.004
+      }
+    },
+    {
+      "name": "alpha-gradient-input",
+      "axis": "alpha_input",
+      "input": {
+        "file": "target/oracle-corpus/input-alpha-1920x1080.png",
+        "sha256": "c8acdee2a7a48aaf401482dc644d97f930186bb5f4acd0a815c7a316aa79df08",
+        "width": 1920,
+        "height": 1080,
+        "provenance": "tools/generate-oracle-rgba-input.py --width 1920 --height 1080 --alpha-mode vertical-gradient"
+      },
+      "parameter": null,
+      "host": {
+        "render_flag": "--render-experimental-smart",
+        "output_png_sha256": "902b7f1ca0da94160a1ae47f508a504c6331f8679b7bce42cecfe0fca89438d0",
+        "output_raw_rgba8_sha256": "7035eff99cadaa3195fa7da3d86efd40dd5ade27c3b3e75e3a0fdb8e727cfeb0"
+      },
+      "ae_capture": {
+        "output_png_sha256": "46aa224b1c5ca5c6b68637cbbb949c8835a51d4aaa55c2d1dbc8485555427692",
+        "frame": 0,
+        "fps": 24,
+        "bpc": 8,
+        "color_pinned": false,
+        "working_space": "None"
+      },
+      "comparison": {
+        "comparison_boundary": {
+          "actual": "ae_export_artifact",
+          "claim_level": "export_tolerance",
+          "expected": "host_raw_world",
+          "raw_world_exact": false
+        },
+        "dimensions": {
+          "height": 1080,
+          "width": 1920
+        },
+        "exact_mismatched_channels": 178,
+        "first_mismatch": null,
+        "formats": {
+          "raw": "rgba8",
+          "render": "png_rgba8"
+        },
+        "hashes": {
+          "raw_sha256": "7035eff99cadaa3195fa7da3d86efd40dd5ade27c3b3e75e3a0fdb8e727cfeb0",
+          "render_sha256": "46aa224b1c5ca5c6b68637cbbb949c8835a51d4aaa55c2d1dbc8485555427692"
+        },
+        "match": true,
+        "max_abs_error": {
+          "a": 0.0,
+          "b": 0.0039215686274510775,
+          "g": 0.0039215686274510775,
+          "r": 0.0039215686274510775
+        },
+        "mean_abs_error": {
+          "a": 0.0,
+          "b": 1.9101004599370604E-07,
+          "g": 7.375635439360925E-08,
+          "r": 7.186516581941415E-08
+        },
+        "over_tolerance_channels": 0,
+        "raw_integer_max": null,
+        "schema_version": 1,
+        "tolerance": 0.004
+      }
+    },
+    {
+      "name": "odd-dimensions-input",
+      "axis": "odd_dimensions",
+      "input": {
+        "file": "target/oracle-corpus/input-odd-1919x1077.png",
+        "sha256": "12bf45b4965ce2ae152e21e6c2c32ea7e25cc77b0d744e403cb8c1639c31edfd",
+        "width": 1919,
+        "height": 1077,
+        "provenance": "tools/generate-oracle-rgba-input.py --width 1919 --height 1077 --alpha-mode opaque"
+      },
+      "parameter": null,
+      "host": {
+        "render_flag": "--render-experimental-smart",
+        "output_png_sha256": "520d326cd9b086b0e50b1d378d49cb619fbcd819d9cced552be7b51b7f6a7f77",
+        "output_raw_rgba8_sha256": "1e5c011040381ec5fedd604244fca9b70c9cc6bf6f09fb9eca54488ea5e0d7f6"
+      },
+      "ae_capture": {
+        "output_png_sha256": "60820a9ea0ff1e207d9eba42c1c6a7ee87854238efaa497822dd6348f918d0d0",
+        "frame": 0,
+        "fps": 24,
+        "bpc": 8,
+        "color_pinned": false,
+        "working_space": "None"
+      },
+      "comparison": {
+        "comparison_boundary": {
+          "actual": "ae_export_artifact",
+          "claim_level": "export_tolerance",
+          "expected": "host_raw_world",
+          "raw_world_exact": false
+        },
+        "dimensions": {
+          "height": 1077,
+          "width": 1919
+        },
+        "exact_mismatched_channels": 197,
+        "first_mismatch": null,
+        "formats": {
+          "raw": "rgba8",
+          "render": "png_rgba8"
+        },
+        "hashes": {
+          "raw_sha256": "1e5c011040381ec5fedd604244fca9b70c9cc6bf6f09fb9eca54488ea5e0d7f6",
+          "render_sha256": "60820a9ea0ff1e207d9eba42c1c6a7ee87854238efaa497822dd6348f918d0d0"
+        },
+        "match": true,
+        "max_abs_error": {
+          "a": 0.0,
+          "b": 0.0039215686274510775,
+          "g": 0.0039215686274510775,
+          "r": 0.0039215686274510775
+        },
+        "mean_abs_error": {
+          "a": 0.0,
+          "b": 1.859495866193636E-07,
+          "g": 1.0435946187821425E-07,
+          "r": 8.348756950257153E-08
+        },
+        "over_tolerance_channels": 0,
+        "raw_integer_max": null,
+        "schema_version": 1,
+        "tolerance": 0.004
+      }
+    },
+    {
+      "name": "4k-input",
+      "axis": "resolution_4k",
+      "input": {
+        "file": "target/oracle-corpus/input-4k-3840x2160.png",
+        "sha256": "d56a353c07f92dc0cde55e4f5ee5bc3a6d9b3d7620c249cf84b96a08148a34d8",
+        "width": 3840,
+        "height": 2160,
+        "provenance": "tools/generate-oracle-rgba-input.py --width 3840 --height 2160 --alpha-mode opaque"
+      },
+      "parameter": null,
+      "host": {
+        "render_flag": "--render-experimental-smart",
+        "output_png_sha256": "ccb459e8bc26af5647b985855a01ef7703fd62a7a37c703d3880c9a65492567d",
+        "output_raw_rgba8_sha256": "176694e0b804b5099276c334657f0bc2eebbe560e3d69a39ea3d0b13b4e9e5a8"
+      },
+      "ae_capture": {
+        "output_png_sha256": "0e5b73314434b9b290942acfb1edaf4bbe13b3468689de34b3a7976534a2b1ce",
+        "frame": 0,
+        "fps": 24,
+        "bpc": 8,
+        "color_pinned": false,
+        "working_space": "None"
+      },
+      "comparison": {
+        "comparison_boundary": {
+          "actual": "ae_export_artifact",
+          "claim_level": "export_tolerance",
+          "expected": "host_raw_world",
+          "raw_world_exact": false
+        },
+        "dimensions": {
+          "height": 2160,
+          "width": 3840
+        },
+        "exact_mismatched_channels": 729,
+        "first_mismatch": null,
+        "formats": {
+          "raw": "rgba8",
+          "render": "png_rgba8"
+        },
+        "hashes": {
+          "raw_sha256": "176694e0b804b5099276c334657f0bc2eebbe560e3d69a39ea3d0b13b4e9e5a8",
+          "render_sha256": "0e5b73314434b9b290942acfb1edaf4bbe13b3468689de34b3a7976534a2b1ce"
+        },
+        "match": true,
+        "max_abs_error": {
+          "a": 0.0,
+          "b": 0.0039215686274510775,
+          "g": 0.0039215686274510775,
+          "r": 0.0039215686274510775
+        },
+        "mean_abs_error": {
+          "a": 0.0,
+          "b": 1.796629145485353E-07,
+          "g": 7.564754296780437E-08,
+          "r": 8.93586601307189E-08
+        },
+        "over_tolerance_channels": 0,
+        "raw_integer_max": null,
+        "schema_version": 1,
+        "tolerance": 0.004
+      }
+    }
+  ]
+}
