@@ -5,13 +5,13 @@
     "authenticated_artifacts":  {
                                     "source":  {
                                                    "path":  "minihost/src/l2_main.cpp",
-                                                   "size_bytes":  1181742,
-                                                   "sha256":  "6b9fddff79319418e99693dfe9c16b03029c155a8b730deae6af4218eae6878b"
+                                                   "size_bytes":  1187473,
+                                                   "sha256":  "c16490d1e22331f7995397959ff08dea78782e6980e9b7f18e951c672f00b776"
                                                },
                                     "worker":  {
                                                    "path":  "target/minihost-build/aex_render_worker.exe",
-                                                   "size_bytes":  781824,
-                                                   "sha256":  "f5ae10b96582840c13a683730682c23a0b01c7e03128e4377b277797864f41d0"
+                                                   "size_bytes":  783360,
+                                                   "sha256":  "5a1cc8c8912d6143470643048c7dfa604f2c19d2b8e0cee76fef9ea3e7cf4185"
                                                },
                                     "probe":  {
                                                   "path":  "target/pf-aegp-async-layer-receipt-probe-build/Release/pf_aegp_async_layer_receipt_probe.aex",

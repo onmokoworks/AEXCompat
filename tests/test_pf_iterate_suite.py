@@ -58,7 +58,10 @@ def test_iterate_callbacks_are_bounded_and_propagate_errors():
 def test_world_iterate_reports_rows_and_checks_abort_without_masking_pixel_errors():
     text = source_text()
     assert "progress_span * completed_rows / rows" in text
-    assert "progress_callback(effect_ref, current, progress_final)" in text
+    assert "progress_callback(effect_ref, current, callback_total)" in text
+    assert "const bool reverse_progress = progress_final < progress_base" in text
+    assert "const int32_t callback_total = reverse_progress" in text
+    assert "? static_cast<int32_t>(progress_span)" in text
     assert "completed_rows < rows && abort_callback" in text
     assert "if (error != 0) return error;" in text
     assert "interaction.progress != std::vector<int32_t>({11, 12, 13, 14})" in text

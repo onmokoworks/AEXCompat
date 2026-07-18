@@ -1,0 +1,174 @@
+﻿{
+    "schema_version":  1,
+    "gate":  "sdk_gamma_classic_render_gate",
+    "status":  "passed",
+    "classification":  "authenticated_host_regression_exact",
+    "fixture":  "Adobe After Effects SDK Examples/Effect/Gamma_Table",
+    "authenticated_artifacts":  {
+                                    "fixture":  {
+                                                    "path":  "target/sdk-fixtures/gamma/Gamma_Table.aex",
+                                                    "size_bytes":  45056,
+                                                    "sha256":  "6fcb4946c77a9fcb4fab8e15dbbc54ffb4b1ab08656ce9acea39c44099b6dfa8"
+                                                },
+                                    "worker":  {
+                                                   "path":  "target/minihost-build/aex_render_worker.exe",
+                                                   "size_bytes":  783360,
+                                                   "sha256":  "5a1cc8c8912d6143470643048c7dfa604f2c19d2b8e0cee76fef9ea3e7cf4185"
+                                               },
+                                    "input":  {
+                                                  "path":  "target/image-transport/colorgrid-click-input.rgba",
+                                                  "size_bytes":  768,
+                                                  "sha256":  "c9ee521c7d71cbf6a41cb1a2d075add64676b912f5870098417b75ca727ba807"
+                                              }
+                                },
+    "execution":  {
+                      "render_path":  "classic",
+                      "pixel_format":  "argb8",
+                      "width":  16,
+                      "height":  12,
+                      "worker_processes":  4,
+                      "fresh_authenticated_stage_per_run":  true
+                  },
+    "cases":  {
+                  "identity":  {
+                                   "gamma":  1,
+                                   "deterministic":  true,
+                                   "runs":  [
+                                                {
+                                                    "run":  1,
+                                                    "internal_output_sha256":  "0d11e1fe35958d6d9cc29520a22212093d70e24f406350d7d785a0e6ff36923e",
+                                                    "transport_output_sha256":  "c9ee521c7d71cbf6a41cb1a2d075add64676b912f5870098417b75ca727ba807",
+                                                    "selector_errors":  {
+                                                                            "global_setup":  0,
+                                                                            "params_setup":  0,
+                                                                            "sequence_setup":  0,
+                                                                            "frame_setup":  0,
+                                                                            "frame_setdown":  0,
+                                                                            "sequence_setdown":  0,
+                                                                            "render":  0,
+                                                                            "global_setdown":  0
+                                                                        },
+                                                    "module_audit":  {
+                                                                         "status":  "passed",
+                                                                         "unknown_count":  0,
+                                                                         "phase_count":  10
+                                                                     },
+                                                    "checks":  {
+                                                                   "completed":  true,
+                                                                   "dimensions_exact":  true,
+                                                                   "parameter_exact":  true,
+                                                                   "output_exact":  true,
+                                                                   "selectors_success":  true,
+                                                                   "guards_intact":  true,
+                                                                   "lifetimes_balanced":  true,
+                                                                   "module_audit_passed":  true
+                                                               }
+                                                },
+                                                {
+                                                    "run":  2,
+                                                    "internal_output_sha256":  "0d11e1fe35958d6d9cc29520a22212093d70e24f406350d7d785a0e6ff36923e",
+                                                    "transport_output_sha256":  "c9ee521c7d71cbf6a41cb1a2d075add64676b912f5870098417b75ca727ba807",
+                                                    "selector_errors":  {
+                                                                            "global_setup":  0,
+                                                                            "params_setup":  0,
+                                                                            "sequence_setup":  0,
+                                                                            "frame_setup":  0,
+                                                                            "frame_setdown":  0,
+                                                                            "sequence_setdown":  0,
+                                                                            "render":  0,
+                                                                            "global_setdown":  0
+                                                                        },
+                                                    "module_audit":  {
+                                                                         "status":  "passed",
+                                                                         "unknown_count":  0,
+                                                                         "phase_count":  10
+                                                                     },
+                                                    "checks":  {
+                                                                   "completed":  true,
+                                                                   "dimensions_exact":  true,
+                                                                   "parameter_exact":  true,
+                                                                   "output_exact":  true,
+                                                                   "selectors_success":  true,
+                                                                   "guards_intact":  true,
+                                                                   "lifetimes_balanced":  true,
+                                                                   "module_audit_passed":  true
+                                                               }
+                                                }
+                                            ]
+                               },
+                  "changed":  {
+                                  "gamma":  1.5,
+                                  "deterministic":  true,
+                                  "runs":  [
+                                               {
+                                                   "run":  1,
+                                                   "internal_output_sha256":  "b70debc5ae1c2d1217da1de787b4fd097d006c9a92757e15407c70bc6eabc4a5",
+                                                   "transport_output_sha256":  "8c65d686a935fc7aeb8a5d943cd2e1c3511d5c54e15349f7c318127dffcc72af",
+                                                   "selector_errors":  {
+                                                                           "global_setup":  0,
+                                                                           "params_setup":  0,
+                                                                           "sequence_setup":  0,
+                                                                           "frame_setup":  0,
+                                                                           "frame_setdown":  0,
+                                                                           "sequence_setdown":  0,
+                                                                           "render":  0,
+                                                                           "global_setdown":  0
+                                                                       },
+                                                   "module_audit":  {
+                                                                        "status":  "passed",
+                                                                        "unknown_count":  0,
+                                                                        "phase_count":  10
+                                                                    },
+                                                   "checks":  {
+                                                                  "completed":  true,
+                                                                  "dimensions_exact":  true,
+                                                                  "parameter_exact":  true,
+                                                                  "output_exact":  true,
+                                                                  "selectors_success":  true,
+                                                                  "guards_intact":  true,
+                                                                  "lifetimes_balanced":  true,
+                                                                  "module_audit_passed":  true
+                                                              }
+                                               },
+                                               {
+                                                   "run":  2,
+                                                   "internal_output_sha256":  "b70debc5ae1c2d1217da1de787b4fd097d006c9a92757e15407c70bc6eabc4a5",
+                                                   "transport_output_sha256":  "8c65d686a935fc7aeb8a5d943cd2e1c3511d5c54e15349f7c318127dffcc72af",
+                                                   "selector_errors":  {
+                                                                           "global_setup":  0,
+                                                                           "params_setup":  0,
+                                                                           "sequence_setup":  0,
+                                                                           "frame_setup":  0,
+                                                                           "frame_setdown":  0,
+                                                                           "sequence_setdown":  0,
+                                                                           "render":  0,
+                                                                           "global_setdown":  0
+                                                                       },
+                                                   "module_audit":  {
+                                                                        "status":  "passed",
+                                                                        "unknown_count":  0,
+                                                                        "phase_count":  10
+                                                                    },
+                                                   "checks":  {
+                                                                  "completed":  true,
+                                                                  "dimensions_exact":  true,
+                                                                  "parameter_exact":  true,
+                                                                  "output_exact":  true,
+                                                                  "selectors_success":  true,
+                                                                  "guards_intact":  true,
+                                                                  "lifetimes_balanced":  true,
+                                                                  "module_audit_passed":  true
+                                                              }
+                                               }
+                                           ]
+                              }
+              },
+    "cross_case":  {
+                       "outputs_differ":  true,
+                       "identity_matches_input_transport":  true
+                   },
+    "scope":  {
+                  "proves":  "The fixed authenticated Gamma_Table fixture is deterministic for Gamma 1.0 and 1.5 through the current canonical audited Classic worker.",
+                  "does_not_prove":  "Adobe After Effects pixel equivalence or compatibility after an unreviewed worker change."
+              }
+}

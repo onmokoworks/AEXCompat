@@ -20,7 +20,8 @@ pub struct FileIdentity {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AuthenticodeEvidence {
-    Unsupported,
+    Embedded,
+    Catalog,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -39,6 +40,7 @@ pub enum IdentityEvidenceErrorKind {
     UnsafeFile,
     InvalidPe,
     Unsupported,
+    UntrustedSignature,
     Io,
 }
 
@@ -71,15 +73,11 @@ pub fn capture_runtime_module_identity(
     capture_impl(path)
 }
 
-/// Fails closed until full WinVerifyTrust policy and chain evidence is implemented.
 pub fn require_verified_authenticode(
     evidence: &RuntimeModuleIdentityEvidence,
 ) -> Result<(), IdentityEvidenceError> {
     match evidence.authenticode {
-        AuthenticodeEvidence::Unsupported => Err(error(
-            IdentityEvidenceErrorKind::Unsupported,
-            "Authenticode verification is unsupported",
-        )),
+        AuthenticodeEvidence::Embedded | AuthenticodeEvidence::Catalog => Ok(()),
     }
 }
 
@@ -127,13 +125,9 @@ fn capture_impl(path: &Path) -> Result<RuntimeModuleIdentityEvidence, IdentityEv
     io::copy(&mut file, &mut hash)?;
     let sha256: [u8; 32] = hash.finalize().into();
 
-    // Re-resolve while the no-write/no-delete-share handle is alive to detect namespace replacement.
-    if fs::canonicalize(path)? != canonical_path {
-        return Err(error(
-            IdentityEvidenceErrorKind::UnsafeFile,
-            "runtime module path changed during evidence capture",
-        ));
-    }
+    verify_open_file_identity(path, &canonical_path, &file, &info)?;
+    let authenticode = verify_authenticode(&file, &canonical_path)?;
+    verify_open_file_identity(path, &canonical_path, &file, &info)?;
     Ok(RuntimeModuleIdentityEvidence {
         canonical_path,
         size,
@@ -143,8 +137,212 @@ fn capture_impl(path: &Path) -> Result<RuntimeModuleIdentityEvidence, IdentityEv
             volume_serial_number: info.dwVolumeSerialNumber,
             file_index: (u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow),
         },
-        authenticode: AuthenticodeEvidence::Unsupported,
+        authenticode,
     })
+}
+
+#[cfg(windows)]
+fn verify_open_file_identity(
+    input_path: &Path,
+    canonical_path: &Path,
+    file: &File,
+    original: &windows_sys::Win32::Storage::FileSystem::BY_HANDLE_FILE_INFORMATION,
+) -> Result<(), IdentityEvidenceError> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{
+        GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION,
+    };
+
+    let mut current: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
+    if unsafe { GetFileInformationByHandle(file.as_raw_handle() as _, &mut current) } == 0 {
+        return Err(io::Error::last_os_error().into());
+    }
+    if fs::canonicalize(input_path)? != canonical_path
+        || current.dwVolumeSerialNumber != original.dwVolumeSerialNumber
+        || current.nFileIndexHigh != original.nFileIndexHigh
+        || current.nFileIndexLow != original.nFileIndexLow
+        || current.nFileSizeHigh != original.nFileSizeHigh
+        || current.nFileSizeLow != original.nFileSizeLow
+    {
+        return Err(error(
+            IdentityEvidenceErrorKind::UnsafeFile,
+            "runtime module path or open file identity changed during evidence capture",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn verify_authenticode(
+    file: &File,
+    canonical_path: &Path,
+) -> Result<AuthenticodeEvidence, IdentityEvidenceError> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Security::Cryptography::Catalog::{
+        CryptCATAdminAcquireContext2, CryptCATAdminCalcHashFromFileHandle2,
+        CryptCATAdminEnumCatalogFromHash, CryptCATAdminReleaseCatalogContext,
+        CryptCATAdminReleaseContext, CryptCATCatalogInfoFromContext, CATALOG_INFO,
+    };
+    use windows_sys::Win32::Security::WinTrust::{
+        WINTRUST_CATALOG_INFO, WINTRUST_DATA_0, WINTRUST_FILE_INFO, WTD_CHOICE_CATALOG,
+        WTD_CHOICE_FILE,
+    };
+
+    let path_wide = wide_null(canonical_path.as_os_str());
+    let mut file_info = WINTRUST_FILE_INFO {
+        cbStruct: std::mem::size_of::<WINTRUST_FILE_INFO>() as u32,
+        pcwszFilePath: path_wide.as_ptr(),
+        hFile: file.as_raw_handle() as _,
+        pgKnownSubject: std::ptr::null_mut(),
+    };
+    let mut embedded_data = trust_data(WTD_CHOICE_FILE);
+    embedded_data.Anonymous = WINTRUST_DATA_0 {
+        pFile: &mut file_info,
+    };
+    if verify_and_close(&mut embedded_data) == 0 {
+        return Ok(AuthenticodeEvidence::Embedded);
+    }
+
+    struct CatalogAdmin(isize);
+    impl Drop for CatalogAdmin {
+        fn drop(&mut self) {
+            unsafe { CryptCATAdminReleaseContext(self.0, 0) };
+        }
+    }
+    struct CatalogContext {
+        admin: isize,
+        context: isize,
+    }
+    impl Drop for CatalogContext {
+        fn drop(&mut self) {
+            unsafe { CryptCATAdminReleaseCatalogContext(self.admin, self.context, 0) };
+        }
+    }
+
+    let mut admin = 0isize;
+    if unsafe {
+        CryptCATAdminAcquireContext2(
+            &mut admin,
+            std::ptr::null(),
+            windows_sys::core::w!("SHA256"),
+            std::ptr::null(),
+            0,
+        )
+    } == 0
+    {
+        return Err(untrusted("failed to acquire the Windows catalog context"));
+    }
+    let admin = CatalogAdmin(admin);
+    let mut hash_len = 0u32;
+    let handle = file.as_raw_handle() as _;
+    if unsafe {
+        CryptCATAdminCalcHashFromFileHandle2(
+            admin.0,
+            handle,
+            &mut hash_len,
+            std::ptr::null_mut(),
+            0,
+        )
+    } == 0
+        || hash_len == 0
+    {
+        return Err(untrusted("failed to size the catalog member hash"));
+    }
+    let mut hash = vec![0u8; hash_len as usize];
+    if unsafe {
+        CryptCATAdminCalcHashFromFileHandle2(admin.0, handle, &mut hash_len, hash.as_mut_ptr(), 0)
+    } == 0
+    {
+        return Err(untrusted("failed to calculate the catalog member hash"));
+    }
+    hash.truncate(hash_len as usize);
+    let catalog = unsafe {
+        CryptCATAdminEnumCatalogFromHash(admin.0, hash.as_ptr(), hash_len, 0, std::ptr::null_mut())
+    };
+    if catalog == 0 {
+        return Err(untrusted(
+            "no verified embedded or catalog signature was found",
+        ));
+    }
+    let catalog = CatalogContext {
+        admin: admin.0,
+        context: catalog,
+    };
+    let mut catalog_path: CATALOG_INFO = unsafe { std::mem::zeroed() };
+    catalog_path.cbStruct = std::mem::size_of::<CATALOG_INFO>() as u32;
+    if unsafe { CryptCATCatalogInfoFromContext(catalog.context, &mut catalog_path, 0) } == 0 {
+        return Err(untrusted("failed to resolve the catalog path"));
+    }
+    let member_tag = hash
+        .iter()
+        .map(|byte| format!("{byte:02X}"))
+        .collect::<String>();
+    let member_tag_wide: Vec<u16> = member_tag.encode_utf16().chain(Some(0)).collect();
+    let mut catalog_info = WINTRUST_CATALOG_INFO {
+        cbStruct: std::mem::size_of::<WINTRUST_CATALOG_INFO>() as u32,
+        dwCatalogVersion: 0,
+        pcwszCatalogFilePath: catalog_path.wszCatalogFile.as_ptr(),
+        pcwszMemberTag: member_tag_wide.as_ptr(),
+        pcwszMemberFilePath: path_wide.as_ptr(),
+        hMemberFile: handle,
+        pbCalculatedFileHash: hash.as_mut_ptr(),
+        cbCalculatedFileHash: hash_len,
+        pcCatalogContext: std::ptr::null_mut(),
+        hCatAdmin: admin.0,
+    };
+    let mut catalog_data = trust_data(WTD_CHOICE_CATALOG);
+    catalog_data.Anonymous = WINTRUST_DATA_0 {
+        pCatalog: &mut catalog_info,
+    };
+    if verify_and_close(&mut catalog_data) == 0 {
+        Ok(AuthenticodeEvidence::Catalog)
+    } else {
+        Err(untrusted("catalog member signature verification failed"))
+    }
+}
+
+#[cfg(windows)]
+fn trust_data(choice: u32) -> windows_sys::Win32::Security::WinTrust::WINTRUST_DATA {
+    use windows_sys::Win32::Security::WinTrust::*;
+    WINTRUST_DATA {
+        cbStruct: std::mem::size_of::<WINTRUST_DATA>() as u32,
+        pPolicyCallbackData: std::ptr::null_mut(),
+        pSIPClientData: std::ptr::null_mut(),
+        dwUIChoice: WTD_UI_NONE,
+        fdwRevocationChecks: WTD_REVOKE_NONE,
+        dwUnionChoice: choice,
+        Anonymous: WINTRUST_DATA_0 {
+            pFile: std::ptr::null_mut(),
+        },
+        dwStateAction: WTD_STATEACTION_VERIFY,
+        hWVTStateData: std::ptr::null_mut(),
+        pwszURLReference: std::ptr::null_mut(),
+        dwProvFlags: WTD_CACHE_ONLY_URL_RETRIEVAL | WTD_REVOCATION_CHECK_NONE,
+        dwUIContext: WTD_UICONTEXT_EXECUTE,
+        pSignatureSettings: std::ptr::null_mut(),
+    }
+}
+
+#[cfg(windows)]
+fn verify_and_close(data: &mut windows_sys::Win32::Security::WinTrust::WINTRUST_DATA) -> i32 {
+    use windows_sys::Win32::Security::WinTrust::{
+        WinVerifyTrust, WINTRUST_ACTION_GENERIC_VERIFY_V2, WTD_STATEACTION_CLOSE,
+    };
+    let mut action = WINTRUST_ACTION_GENERIC_VERIFY_V2;
+    let status = unsafe { WinVerifyTrust(std::ptr::null_mut(), &mut action, data as *mut _ as _) };
+    data.dwStateAction = WTD_STATEACTION_CLOSE;
+    unsafe { WinVerifyTrust(std::ptr::null_mut(), &mut action, data as *mut _ as _) };
+    status
+}
+
+#[cfg(windows)]
+fn wide_null(value: &std::ffi::OsStr) -> Vec<u16> {
+    use std::os::windows::ffi::OsStrExt;
+    value.encode_wide().chain(Some(0)).collect()
+}
+
+fn untrusted(message: &str) -> IdentityEvidenceError {
+    error(IdentityEvidenceErrorKind::UntrustedSignature, message)
 }
 
 #[cfg(not(windows))]

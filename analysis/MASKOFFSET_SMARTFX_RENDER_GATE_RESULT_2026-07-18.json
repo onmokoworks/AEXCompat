@@ -7,13 +7,13 @@
     "authenticated_artifacts":  {
                                     "broker":  {
                                                    "path":  "broker/target/release/broker.exe",
-                                                   "size_bytes":  1146880,
-                                                   "sha256":  "c5167fc2169ecc10ff2f00adfc423c22f1df0fec7cdfa1bb30960a2a4f040976"
+                                                   "size_bytes":  1154560,
+                                                   "sha256":  "1d98ec9a0b6f2b76223ef7729017f6be792e482748733ab16036a3533877a234"
                                                },
                                     "worker":  {
                                                    "path":  "target/minihost-build/aex_smart_worker.exe",
-                                                   "size_bytes":  799232,
-                                                   "sha256":  "2ae221f0a58009b219b9d9aa5347b8be8225f85044a843a842a2ab1663b04754"
+                                                   "size_bytes":  801280,
+                                                   "sha256":  "60094903544c2e15b6d26b3b41b1c4ea96b565afd514dc7167c943ccd70cb4dd"
                                                },
                                     "request":  {
                                                     "path":  "target/render-requests/maskoffset-color-fill-20260713-001.json",

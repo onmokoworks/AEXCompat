@@ -1775,6 +1775,8 @@ int32_t __cdecl get_new_effect_for_effect(int32_t plugin_id, void* effect, void*
 struct AegpTime;
 int32_t __cdecl convert_effect_to_comp_time(
     void* effect, int32_t what_time, uint32_t time_scale, AegpTime* comp_time);
+int32_t __cdecl get_effect_camera(
+    void* effect, const AegpTime* comp_time, void** camera_layer);
 
 int32_t __cdecl get_layer_num_masks(void* layer, int32_t* count) {
   if (layer != &g_layer || !count) return 4;
@@ -3384,10 +3386,13 @@ struct PfInterfaceSuite {
   decltype(&get_effect_layer) get_effect_layer;
   decltype(&get_new_effect_for_effect) get_new_effect_for_effect;
   decltype(&convert_effect_to_comp_time) convert_effect_to_comp_time;
-  void* unsupported[2]{};
+  decltype(&get_effect_camera) get_effect_camera;
+  void* unsupported[1]{};
 };
 static_assert(sizeof(PfInterfaceSuite) == 5 * sizeof(void*));
 static_assert(offsetof(PfInterfaceSuite, convert_effect_to_comp_time) == 2 * sizeof(void*));
+static_assert(offsetof(PfInterfaceSuite, get_effect_camera) == 3 * sizeof(void*));
+static_assert(offsetof(PfInterfaceSuite, get_effect_camera) == 24);
 int32_t __cdecl unsupported_path_mask() { return 4; }
 struct LegacyRect { int32_t left, top, right, bottom; };
 struct PfPathVertex {
@@ -4332,9 +4337,8 @@ struct MaskOutlineSuite {
 UtilitySuite g_utility_suite{{}, &register_with_aegp};
 UtilitySuite3 g_utility_suite3{{}, &register_with_aegp};
 PfInterfaceSuite g_pf_interface_suite{&get_effect_layer, &get_new_effect_for_effect,
-    &convert_effect_to_comp_time,
-    {reinterpret_cast<void*>(&unsupported_path_mask),
-     reinterpret_cast<void*>(&unsupported_path_mask)}};
+    &convert_effect_to_comp_time, &get_effect_camera,
+    {reinterpret_cast<void*>(&unsupported_path_mask)}};
 std::array<void*, 16> g_aegp_effect_suite3{};
 std::array<void*, 19> g_aegp_stream_suite2{};
 std::array<void*, 14> g_aegp_dynamic_stream_suite2{};
@@ -9857,6 +9861,47 @@ int32_t __cdecl render_options_set_quality(void* handle, int8_t value) {
 std::array<AegpSceneObject, 3> g_aegp_layers{{
     {0x4c415930}, {0x4c415931}, {0x4c415932}}};
 AegpSceneObject g_aegp_effect{0x45464643};
+extern std::array<AegpTime, 3> g_aegp_layer_in_points;
+extern std::array<AegpTime, 3> g_aegp_layer_durations;
+int32_t g_aegp_active_camera_layer_index = -1;
+
+bool valid_comp_time(const AegpTime& time) {
+  if (time.scale == 0) return false;
+  constexpr int64_t kCompDurationValue = 300;
+  constexpr uint32_t kCompDurationScale = 30;
+  const int64_t scaled_time = static_cast<int64_t>(time.value) * kCompDurationScale;
+  const int64_t scaled_duration = kCompDurationValue * static_cast<int64_t>(time.scale);
+  return scaled_time >= 0 && scaled_time < scaled_duration;
+}
+
+bool layer_active_at_time(std::size_t index, const AegpTime& time) {
+  if (index >= g_aegp_layer_in_points.size() || index >= g_aegp_layer_durations.size())
+    return false;
+  const auto& in_point = g_aegp_layer_in_points[index];
+  const auto& duration = g_aegp_layer_durations[index];
+  if (in_point.scale == 0 || duration.scale == 0 || duration.value <= 0) return false;
+  const long double seconds =
+      static_cast<long double>(time.value) / static_cast<long double>(time.scale);
+  const long double in_seconds =
+      static_cast<long double>(in_point.value) / static_cast<long double>(in_point.scale);
+  const long double duration_seconds =
+      static_cast<long double>(duration.value) / static_cast<long double>(duration.scale);
+  return seconds >= in_seconds && seconds < in_seconds + duration_seconds;
+}
+
+int32_t __cdecl get_effect_camera(
+    void* effect, const AegpTime* comp_time, void** camera_layer) {
+  if (effect != &g_effect || !g_pf_state_effect_live || !comp_time || !camera_layer ||
+      !valid_comp_time(*comp_time)) return 4;
+  void* result = nullptr;
+  if (g_aegp_active_camera_layer_index >= 0) {
+    const auto index = static_cast<std::size_t>(g_aegp_active_camera_layer_index);
+    if (index >= g_aegp_layers.size()) return 4;
+    if (layer_active_at_time(index, *comp_time)) result = &g_aegp_layers[index];
+  }
+  *camera_layer = result;
+  return 0;
+}
 struct AegpSelectionCollection { uint32_t tag{0x434f4c4c}; bool live{}; };
 AegpSelectionCollection g_aegp_selection;
 #pragma pack(push, 1)
@@ -15162,11 +15207,19 @@ int32_t iterate_world_typed(void* in_data, int32_t progress_base, int32_t progre
       if (error != 0) return error;
     }
     const int32_t completed_rows = y - bounds.top + 1;
-    const int64_t progress_span = static_cast<int64_t>(progress_final) - progress_base;
-    const int32_t current = static_cast<int32_t>(
-        static_cast<int64_t>(progress_base) + progress_span * completed_rows / rows);
+    const bool reverse_progress = progress_final < progress_base;
+    const int64_t progress_span = reverse_progress
+        ? static_cast<int64_t>(progress_base) - progress_final
+        : static_cast<int64_t>(progress_final) - progress_base;
+    if (progress_span > std::numeric_limits<int32_t>::max()) return 4;
+    const int32_t current = static_cast<int32_t>(reverse_progress
+        ? progress_span * completed_rows / rows
+        : static_cast<int64_t>(progress_base) + progress_span * completed_rows / rows);
+    const int32_t callback_total = reverse_progress
+        ? static_cast<int32_t>(progress_span)
+        : progress_final;
     if (progress_callback) {
-      const int32_t error = progress_callback(effect_ref, current, progress_final);
+      const int32_t error = progress_callback(effect_ref, current, callback_total);
       if (error != 0) return error;
     }
     if (completed_rows < rows && abort_callback) {
@@ -20219,7 +20272,71 @@ bool verify_legacy_effect_compat_suites() {
   return ok;
 }
 
+bool verify_aegp_get_effect_camera_case(bool smart_case) {
+  const int32_t saved_camera_index = g_aegp_active_camera_layer_index;
+  const bool saved_effect_live = g_pf_state_effect_live;
+  const auto saved_in_points = g_aegp_layer_in_points;
+  const auto saved_durations = g_aegp_layer_durations;
+  reset_pf_state_effect_lifetime(&g_effect, true);
+  g_aegp_active_camera_layer_index = -1;
+
+  const AegpTime active_time{smart_case ? 45 : 15, 30};
+  void* camera = reinterpret_cast<void*>(static_cast<uintptr_t>(0x1234));
+  bool ok = get_effect_camera(&g_effect, &active_time, &camera) == 0 && camera == nullptr;
+
+  g_aegp_active_camera_layer_index = 2;
+  g_aegp_layer_in_points[2] = {smart_case ? 30 : 10, 30};
+  g_aegp_layer_durations[2] = {60, 30};
+  camera = nullptr;
+  ok = ok && get_effect_camera(&g_effect, &active_time, &camera) == 0 &&
+      camera == &g_aegp_layers[2] && aegp_layer_index(camera) == 2;
+
+  const auto unchanged = reinterpret_cast<void*>(static_cast<uintptr_t>(0x5678));
+  camera = unchanged;
+  AegpTime invalid_scale{active_time.value, 0};
+  AegpTime before_in{smart_case ? 29 : 9, 30};
+  AegpTime after_out{smart_case ? 90 : 70, 30};
+  OpaqueHostObject foreign_effect{0x464f5247};
+  ok = ok && get_effect_camera(nullptr, &active_time, &camera) != 0 && camera == unchanged &&
+      get_effect_camera(&foreign_effect, &active_time, &camera) != 0 && camera == unchanged &&
+      get_effect_camera(&g_effect, nullptr, &camera) != 0 && camera == unchanged &&
+      get_effect_camera(&g_effect, &invalid_scale, &camera) != 0 && camera == unchanged;
+  camera = unchanged;
+  ok = ok && get_effect_camera(&g_effect, &before_in, &camera) == 0 && camera == nullptr;
+  camera = unchanged;
+  ok = ok && get_effect_camera(&g_effect, &after_out, &camera) == 0 && camera == nullptr &&
+      get_effect_camera(&g_effect, &active_time, nullptr) != 0;
+  camera = unchanged;
+  reset_pf_state_effect_lifetime(&g_effect, false);
+  ok = ok && get_effect_camera(&g_effect, &active_time, &camera) != 0 && camera == unchanged;
+
+  g_aegp_active_camera_layer_index = saved_camera_index;
+  g_aegp_layer_in_points = saved_in_points;
+  g_aegp_layer_durations = saved_durations;
+  reset_pf_state_effect_lifetime(&g_effect, saved_effect_live);
+  return ok;
+}
+
+bool verify_aegp_get_effect_camera() {
+  const void* suite = nullptr;
+  bool ok = acquire_suite("AEGP PF Interface Suite", 1, &suite) == 0 &&
+      suite == &g_pf_interface_suite &&
+      g_pf_interface_suite.get_effect_camera == &get_effect_camera &&
+      verify_aegp_get_effect_camera_case(false) &&
+      verify_aegp_get_effect_camera_case(true);
+  ok = release_suite("AEGP PF Interface Suite", 1) == 0 && ok;
+  return ok && suite_leases_balanced();
+}
+
 int wmain(int argc, wchar_t **argv) {
+  if (argc == 2 && std::wstring(argv[1]) == L"--self-test-aegp-get-effect-camera") {
+    const bool passed = verify_aegp_get_effect_camera();
+    std::cout << "{\"aegp_get_effect_camera\":\""
+              << (passed ? "passed" : "failed")
+              << "\",\"slot\":3,\"offset_x64\":24,"
+                 "\"classic\":\"tested\",\"smart\":\"tested\"}\n";
+    return passed ? 0 : 67;
+  }
   if (argc == 2 && std::wstring(argv[1]) == L"--self-test-legacy-effect-compat") {
     const bool passed = verify_legacy_effect_compat_suites();
     std::cout << "{\"legacy_effect_compat\":\""

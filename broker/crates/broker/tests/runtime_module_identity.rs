@@ -25,26 +25,42 @@ fn fixture(machine: u16) -> (PathBuf, Vec<u8>) {
 
 #[test]
 fn captures_canonical_hash_machine_and_stable_file_identity() {
-    let (path, bytes) = fixture(0x8664);
+    // Core KnownDLLs are servicing hard links; this Microsoft component is a regular file.
+    let path = PathBuf::from(std::env::var_os("WINDIR").unwrap()).join("System32\\appverifUI.dll");
+    let bytes = fs::read(&path).unwrap();
     let first = capture_runtime_module_identity(&path).unwrap();
     let second = capture_runtime_module_identity(&path).unwrap();
     assert_eq!(first.canonical_path, fs::canonicalize(&path).unwrap());
     assert_eq!(first.size, bytes.len() as u64);
     assert_eq!(first.sha256.as_slice(), Sha256::digest(&bytes).as_slice());
-    assert_eq!(first.pe_machine, PeMachine::Amd64);
+    assert!(matches!(
+        first.pe_machine,
+        PeMachine::Amd64 | PeMachine::Arm64
+    ));
     assert_eq!(first.file_identity, second.file_identity);
-    assert_eq!(first.authenticode, AuthenticodeEvidence::Unsupported);
+    assert!(matches!(
+        first.authenticode,
+        AuthenticodeEvidence::Embedded | AuthenticodeEvidence::Catalog
+    ));
+    require_verified_authenticode(&first).unwrap();
+}
+
+#[test]
+fn rejects_unsigned_pe_fixture_fail_closed() {
+    let (path, _) = fixture(0x8664);
+    assert_eq!(
+        capture_runtime_module_identity(&path).unwrap_err().kind,
+        IdentityEvidenceErrorKind::UntrustedSignature
+    );
     fs::remove_file(path).unwrap();
 }
 
 #[test]
 fn rejects_malformed_pe_and_fails_closed_for_authenticode() {
     let (path, _) = fixture(0x014c);
-    let evidence = capture_runtime_module_identity(&path).unwrap();
-    assert_eq!(evidence.pe_machine, PeMachine::I386);
     assert_eq!(
-        require_verified_authenticode(&evidence).unwrap_err().kind,
-        IdentityEvidenceErrorKind::Unsupported
+        capture_runtime_module_identity(&path).unwrap_err().kind,
+        IdentityEvidenceErrorKind::UntrustedSignature
     );
     fs::write(&path, b"not a PE").unwrap();
     assert_eq!(
