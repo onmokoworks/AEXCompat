@@ -79,6 +79,40 @@
         }
 
         app.project.bitsPerChannel = depth;
+
+        // Pin the project color pipeline when requested. AE 25.3 exposes
+        // workingSpace / linearizeWorkingSpace as silently-coercing setters
+        // (an unknown profile name leaves the previous value), so every set
+        // is verified by readback and fails closed on mismatch. The observed
+        // state is always recorded in the result for evidence identity.
+        var requestedSpace = $.getenv("AEXCOMPAT_AE_WORKING_SPACE");
+        var colorPinned = false;
+        if (requestedSpace) {
+            // Setting the empty string turns color management off; AE reads
+            // that state back as "None", so accept "None" as the request.
+            app.project.workingSpace =
+                requestedSpace === "None" ? "" : requestedSpace;
+            if (app.project.workingSpace !== requestedSpace) {
+                throw new Error(
+                    "working space did not apply: requested " +
+                    requestedSpace + ", got " + app.project.workingSpace
+                );
+            }
+            colorPinned = true;
+        }
+        var requestedLinearize = $.getenv("AEXCOMPAT_AE_LINEARIZE");
+        if (requestedLinearize === "0" || requestedLinearize === "1") {
+            var wantLinearize = requestedLinearize === "1";
+            app.project.linearizeWorkingSpace = wantLinearize;
+            if (app.project.linearizeWorkingSpace !== wantLinearize) {
+                throw new Error(
+                    "linearize working space did not apply: requested " +
+                    wantLinearize
+                );
+            }
+            colorPinned = true;
+        }
+
         var comp = app.project.items.addComp(
             "AEXCompat AE Reference",
             footage.width,
@@ -149,6 +183,13 @@
             fps: fps,
             duration_frames: durationFrames,
             bpc: depth,
+            color_pinned: colorPinned,
+            working_space: app.project.workingSpace,
+            working_gamma: app.project.workingGamma,
+            linearize_working_space: app.project.linearizeWorkingSpace,
+            linear_blending: app.project.linearBlending,
+            compensate_for_scene_referred_profiles:
+                app.project.compensateForSceneReferredProfiles,
             save_wait_ms: waitedMs,
             output: outputFile.fsName
         };

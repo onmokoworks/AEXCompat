@@ -38,3 +38,21 @@ def test_reference_capture_contract_is_hash_bound_create_new_and_temporary():
     assert 'AEXCOMPAT_AE_NO_EFFECT' in script
     assert 'effect_applied: !noEffect' in script
     assert "CloseOptions.DO_NOT_SAVE_CHANGES" in script
+
+
+def test_reference_capture_color_pipeline_pin_is_optional_and_fail_closed():
+    runner = RUNNER.read_text(encoding="utf-8")
+    script = SCRIPT.read_text(encoding="utf-8")
+    # The runner only exports the pin variables when explicitly requested, so
+    # existing captures keep the fresh-project defaults byte-for-byte, and it
+    # clears inherited ambient values so the environment cannot pin silently.
+    assert "Remove-Item Env:AEXCOMPAT_AE_WORKING_SPACE -ErrorAction SilentlyContinue" in runner
+    assert "Remove-Item Env:AEXCOMPAT_AE_LINEARIZE -ErrorAction SilentlyContinue" in runner
+    assert "if ($WorkingSpace) { $env:AEXCOMPAT_AE_WORKING_SPACE = $WorkingSpace }" in runner
+    assert "if ($LinearizeWorkingSpace) { $env:AEXCOMPAT_AE_LINEARIZE = $LinearizeWorkingSpace }" in runner
+    assert "'AEXCOMPAT_AE_WORKING_SPACE','AEXCOMPAT_AE_LINEARIZE'" in runner
+    # The JSX verifies every pin by readback and records the observed state.
+    assert "working space did not apply" in script
+    assert "linearize working space did not apply" in script
+    assert "working_space: app.project.workingSpace" in script
+    assert "linearize_working_space: app.project.linearizeWorkingSpace" in script
