@@ -207,22 +207,27 @@ powershell -File tools\build-pf-adv-time-probe.ps1 -Generator "Visual Studio 17 
 
 ## CI (GitHub Actions)
 
-`.github/workflows/ci.yml` が push (main) / pull request ごとに windows runner
-で以下を実行する:
+CI は 2 本の workflow に分かれる。いずれも push (main) / pull request ごとに
+windows runner で走る。
 
-- private release `ci-sdk-ae25.2` の asset
-  `AfterEffectsSDK-ae25.2-win.zip` を `GITHUB_TOKEN` でダウンロード・展開し、
-  `AFTER_EFFECTS_SDK_ROOT` を設定する (Gyroflow が CI で Adobe SDK zip を
-  取得するのと同じ方式)。zip の SHA-256 は workflow に pin されており、
-  不一致は fail-closed。SDK 世代を更新するときは新しい asset を release に
-  上げ、workflow の `SDK_RELEASE_TAG` / `SDK_ASSET` / `SDK_SHA256` を合わせて
-  更新する。
-- `python -m pytest -q -rs --run-sdk-tests --validate-local-artifact-manifest`。
-  SDK 依存テスト (`tests/sdk_required_tests.txt` と、`AFTER_EFFECTS_SDK_ROOT`
-  を inline skip で見るテスト) が実行対象になる。実行後、pytest 出力に
-  `set AFTER_EFFECTS_SDK_ROOT` を理由とする skip が残っていれば fail させ、
-  SDK テストが skip されたまま green になる silent success を防ぐ。
-- `cargo test --manifest-path broker/Cargo.toml --workspace`。
+- `.github/workflows/windows-clean-clone.yml`: source-only 検証。SDK なしの
+  clean clone 相当で `cargo check` / `cargo test` (hosted runner の restricted
+  token では起動できない 2 テストを `--skip`) と `python -m pytest -q` を実行
+  する。
+- `.github/workflows/ae-sdk-tests.yml`: SDK 込み検証。
+  - private release `ci-sdk-ae25.2` の asset
+    `AfterEffectsSDK-ae25.2-win.zip` を `GITHUB_TOKEN` でダウンロード・展開し、
+    `AFTER_EFFECTS_SDK_ROOT` を設定する (Gyroflow が CI で Adobe SDK zip を
+    取得するのと同じ方式)。zip の SHA-256 は workflow に pin されており、
+    不一致は fail-closed。SDK 世代を更新するときは新しい asset を release に
+    上げ、workflow の `SDK_RELEASE_TAG` / `SDK_ASSET` / `SDK_SHA256` を
+    合わせて更新する。
+  - `python -m pytest -q -rs --run-sdk-tests --validate-local-artifact-manifest`
+    を実行する。SDK 依存テスト (`tests/sdk_required_tests.txt` と、
+    `AFTER_EFFECTS_SDK_ROOT` を inline skip で見るテスト) が実行対象になる。
+    実行後、pytest 出力に `set AFTER_EFFECTS_SDK_ROOT` を理由とする skip が
+    残っていれば fail させ、SDK テストが skip されたまま green になる silent
+    success を防ぐ。
 
 local artifact テスト (`--run-local-artifact-tests`)、prebuilt テスト、
 AE 実機 oracle、GPU runtime 検証は CI の対象外で、従来どおりローカル gate で
@@ -309,14 +314,17 @@ Per-component prerequisites on Windows x64:
   `C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools` with no
   override parameter, so that fixture needs VS 2022 Build Tools with v143 at
   that default location.
-- **CI**: `.github/workflows/ci.yml` runs on a Windows runner per push /
-  pull request. It downloads the hash-pinned SDK zip from the private
-  release `ci-sdk-ae25.2` with `GITHUB_TOKEN`, sets
-  `AFTER_EFFECTS_SDK_ROOT`, runs
-  `python -m pytest -q -rs --run-sdk-tests --validate-local-artifact-manifest`
-  and `cargo test --workspace`, and fails if any test was skipped for a
-  missing `AFTER_EFFECTS_SDK_ROOT`. Local-artifact, prebuilt, AE oracle,
-  and GPU gates stay local-only.
+- **CI**: two Windows workflows run per push / pull request.
+  `windows-clean-clone.yml` covers source-only verification (`cargo check`,
+  `cargo test` minus two launch tests the hosted runner's restricted token
+  cannot execute, and `python -m pytest -q` without the SDK).
+  `ae-sdk-tests.yml` covers SDK-backed verification: it downloads the
+  hash-pinned SDK zip from the private release `ci-sdk-ae25.2` with
+  `GITHUB_TOKEN`, sets `AFTER_EFFECTS_SDK_ROOT`, runs
+  `python -m pytest -q -rs --run-sdk-tests --validate-local-artifact-manifest`,
+  and fails if any test was skipped for a missing
+  `AFTER_EFFECTS_SDK_ROOT`. Local-artifact, prebuilt, AE oracle, and GPU
+  gates stay local-only.
 - **Optional**: a matching GPU runtime for GPU render checks, and After
   Effects 25.2 itself for oracle capture only. Building the GPU SDK fixtures
   (`tools/build-sdk-invert-*.ps1`) additionally needs build-time inputs

@@ -1,4 +1,4 @@
-name: CI
+name: AE SDK tests
 
 on:
   push:
@@ -6,13 +6,18 @@ on:
   pull_request:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ae-sdk-tests-${{ github.ref }}
   cancel-in-progress: true
 
+# cargo test と source-only (SDK なし) の pytest は windows-clean-clone.yml が
+# 担当する。この workflow は SDK 込み検証 (--run-sdk-tests) 専用。
 jobs:
-  test:
-    name: pytest + cargo test (windows)
+  sdk-backed:
+    name: pytest with AE SDK (windows)
     runs-on: windows-latest
     timeout-minutes: 120
     env:
@@ -27,12 +32,6 @@ jobs:
           python-version: "3.14"
           cache: pip
           cache-dependency-path: requirements-dev.txt
-
-      - uses: dtolnay/rust-toolchain@stable
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: broker
 
       # Gyroflow 方式: SDK zip を取得・展開して AFTER_EFFECTS_SDK_ROOT を通す。
       # asset は private release (collaborator 限定) にあり、hash mismatch は fail-closed。
@@ -73,6 +72,3 @@ jobs:
             $leaks | ForEach-Object { $_.Line }
             throw 'SDK-dependent tests were skipped even though AFTER_EFFECTS_SDK_ROOT is set'
           }
-
-      - name: Run cargo test (broker workspace)
-        run: cargo test --manifest-path broker/Cargo.toml --workspace
