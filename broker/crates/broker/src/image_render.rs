@@ -575,6 +575,30 @@ fn native_rgba_to_preview(bytes: &[u8], format: RenderPixelFormat) -> io::Result
     }
 }
 
+/// AE 16-bpc white point: ARGB16 transport samples are 0..=32768, not 0..=65535.
+const AE_ARGB16_WHITE: u32 = 32768;
+
+/// Expand AE-range RGBA16 transport bytes to full-range PNG16 samples.
+/// Over-white samples are clamped exactly like the 8-bit preview path; the
+/// count is returned so reports can surface them instead of hiding the clamp.
+fn rgba16_transport_to_png16(bytes: &[u8]) -> io::Result<(Vec<u16>, u64)> {
+    if bytes.len() % 8 != 0 {
+        return Err(invalid("RGBA16 output is misaligned"));
+    }
+    let mut overrange_samples = 0u64;
+    let samples = bytes
+        .chunks_exact(2)
+        .map(|sample| {
+            let value = u32::from(u16::from_le_bytes([sample[0], sample[1]]));
+            if value > AE_ARGB16_WHITE {
+                overrange_samples += 1;
+            }
+            ((value.min(AE_ARGB16_WHITE) * 65535 + 16384) / 32768) as u16
+        })
+        .collect();
+    Ok((samples, overrange_samples))
+}
+
 #[derive(Clone, Copy, Debug)]
 pub enum RenderUiAction {
     Click { point: [u16; 2], color: [f32; 4] },
@@ -1152,6 +1176,7 @@ pub fn render_image(
         None,
         Vec::new(),
         None,
+        false,
     )
 }
 
@@ -1526,6 +1551,51 @@ pub fn render_experimental_image_with_approved_dependencies_and_gpu_runtime_poli
         None,
         dependencies,
         gpu_runtime_policy,
+        false,
+    )
+}
+
+/// Argb16 render whose output PNG keeps 16-bit depth: the worker's AE-range
+/// RGBA16 transport is expanded to full-range RGBA16 PNG samples instead of
+/// being quantized to the 8-bit preview. The depth-preserving raw sidecar is
+/// written exactly as in the preview path.
+pub fn render_experimental_image_at_time_with_deep16_png(
+    repository: &Path,
+    plugin_path: &Path,
+    approved_sha256: &str,
+    input_path: &Path,
+    output_path: &Path,
+    parameters: &[InteractiveParameter],
+    timing: RenderTiming,
+    smart: bool,
+) -> io::Result<Value> {
+    let bytes = fs::read(plugin_path)?;
+    let actual = format!("{:X}", Sha256::digest(&bytes));
+    if !actual.eq_ignore_ascii_case(approved_sha256) {
+        return Err(invalid("selected AEX changed after session approval"));
+    }
+    render_with_artifact(
+        repository,
+        "experimental",
+        plugin_path,
+        &actual,
+        INTERACTIVE_RENDER_TIMEOUT_MS,
+        input_path,
+        output_path,
+        Some(encode_interactive_payload(parameters)?),
+        Some(parameters),
+        None,
+        timing,
+        smart,
+        RenderPixelFormat::Argb16,
+        RenderGpuBackend::Auto,
+        None,
+        None,
+        None,
+        None,
+        Vec::new(),
+        None,
+        true,
     )
 }
 
@@ -1567,6 +1637,7 @@ pub fn render_experimental_image_with_timed_layers(
         Some(timed_layers),
         Vec::new(),
         None,
+        false,
     )
 }
 
@@ -1608,6 +1679,7 @@ pub fn render_experimental_image_with_parameter_animation(
         None,
         Vec::new(),
         None,
+        false,
     )
 }
 
@@ -1647,6 +1719,7 @@ pub fn render_experimental_image_with_audio_sidecar(
         None,
         Vec::new(),
         None,
+        false,
     )
 }
 
@@ -3754,9 +3827,15 @@ fn render_with_artifact(
     timed_layers: Option<&[TimedLayerImage]>,
     dependencies: Vec<ApprovedImageArtifact>,
     gpu_runtime_policy: Option<GpuRuntimePolicyInput<'_>>,
+    deep_png_output: bool,
 ) -> io::Result<Value> {
     if !timing.is_valid() {
         return Err(invalid("render timing is invalid"));
+    }
+    if deep_png_output && pixel_format != RenderPixelFormat::Argb16 {
+        return Err(invalid(
+            "16-bit deep PNG output requires the Argb16 render format",
+        ));
     }
     const MAX_AUDIO_SAMPLES: usize = 10_000_000;
     let audio = if let Some(path) = audio_sidecar {
@@ -4450,15 +4529,30 @@ fn render_with_artifact(
             .open(path)?
             .write_all(&rendered)?;
     }
-    let preview = native_rgba_to_preview(&rendered, pixel_format)?;
-    let image = image::RgbaImage::from_raw(rendered_width, rendered_height, preview)
-        .ok_or_else(|| invalid("worker output dimensions are invalid"))?;
     if let Some(parent) = output_path.parent() {
         fs::create_dir_all(parent)?;
     }
-    image
-        .save_with_format(output_path, ImageFormat::Png)
-        .map_err(|error| invalid(format!("output PNG save failed: {error}")))?;
+    let mut deep_overrange_samples = None;
+    if deep_png_output {
+        let (samples, overrange_samples) = rgba16_transport_to_png16(&rendered)?;
+        deep_overrange_samples = Some(overrange_samples);
+        let image = image::ImageBuffer::<image::Rgba<u16>, Vec<u16>>::from_raw(
+            rendered_width,
+            rendered_height,
+            samples,
+        )
+        .ok_or_else(|| invalid("worker output dimensions are invalid"))?;
+        image
+            .save_with_format(output_path, ImageFormat::Png)
+            .map_err(|error| invalid(format!("output PNG save failed: {error}")))?;
+    } else {
+        let preview = native_rgba_to_preview(&rendered, pixel_format)?;
+        let image = image::RgbaImage::from_raw(rendered_width, rendered_height, preview)
+            .ok_or_else(|| invalid("worker output dimensions are invalid"))?;
+        image
+            .save_with_format(output_path, ImageFormat::Png)
+            .map_err(|error| invalid(format!("output PNG save failed: {error}")))?;
+    }
     let gpu_memory = json!({
         "lifetimes_balanced": worker_report.get("gpu_memory_lifetimes_balanced"),
         "allocations_created": worker_report.get("gpu_allocations_created"),
@@ -4509,7 +4603,13 @@ fn render_with_artifact(
     let report_object = report
         .as_object_mut()
         .expect("interactive render report is an object");
-    if pixel_format != RenderPixelFormat::Argb8 {
+    if deep_png_output {
+        report_object.insert("output_transport".into(), json!("native_raw+rgba16_png"));
+        report_object.insert(
+            "output_overrange_samples".into(),
+            json!(deep_overrange_samples),
+        );
+    } else if pixel_format != RenderPixelFormat::Argb8 {
         report_object.insert(
             "output_transport".into(),
             json!("native_raw+rgba8_png_preview"),
@@ -5189,6 +5289,37 @@ mod tests {
         assert_eq!(RenderPixelFormat::Argb8.bytes_per_pixel(), 4);
         assert_eq!(RenderPixelFormat::Argb16.bytes_per_pixel(), 8);
         assert_eq!(RenderPixelFormat::Argb32f.bytes_per_pixel(), 16);
+    }
+
+    #[test]
+    fn deep16_png_expands_ae_range_and_counts_overrange_samples() {
+        let rgba16 = [0u16, 16_384, 32_768, 65_535]
+            .into_iter()
+            .flat_map(u16::to_le_bytes)
+            .collect::<Vec<_>>();
+        let (samples, overrange) = rgba16_transport_to_png16(&rgba16).unwrap();
+        assert_eq!(samples, vec![0, 32_768, 65_535, 65_535]);
+        assert_eq!(overrange, 1);
+        assert!(rgba16_transport_to_png16(&rgba16[..6]).is_err());
+    }
+
+    #[test]
+    fn deep16_png_rounds_to_the_same_8_bit_values_as_the_preview() {
+        // The 16-bit PNG must stay interchangeable with the 8-bit preview:
+        // rounding its full-range samples back to 8 bits has to reproduce the
+        // preview quantization for every representable AE-range value.
+        for value in 0..=32_768u32 {
+            let bytes = (value as u16).to_le_bytes();
+            let transport = [bytes[0], bytes[1], 0, 0, 0, 0, 0, 0];
+            let (samples, overrange) = rgba16_transport_to_png16(&transport).unwrap();
+            assert_eq!(overrange, 0);
+            let png16 = u32::from(samples[0]);
+            let rounded8 = (png16 * 255 + 32_767) / 65_535;
+            let preview8 = (value * 255 + 16_384) / 32_768;
+            assert_eq!(rounded8, preview8, "value {value}");
+            // Full-range expansion must be lossless for AE-range data.
+            assert_eq!((png16 * 32_768 + 32_767) / 65_535, value, "value {value}");
+        }
     }
 
     #[test]
