@@ -74,7 +74,7 @@ while true; do
   # inline review コメント / review 本体 / top-level PR コメントのどれにも出る。
   owner=$(gh api "repos/{owner}/{repo}/pulls/{PR}/comments" --paginate --jq ".[] | select(.created_at > \"$since\") | select(.user.login == \"onmokoworks\" or .user.login == \"naari3\") | \"OWNER-FINDING id=\(.id) \(.path):\(.line // .original_line) \(.body | split(\"\n\")[0])\"" 2>/dev/null || true)
   owner_rev=$(gh api "repos/{owner}/{repo}/pulls/{PR}/reviews" --paginate --jq ".[] | select(.submitted_at > \"$since\") | select(.user.login == \"onmokoworks\" or .user.login == \"naari3\") | select(.body != \"\") | \"OWNER-REVIEW \(.state): \(.body | split(\"\n\")[0])\"" 2>/dev/null || true)
-  owner_issue=$(gh api "repos/{owner}/{repo}/issues/{PR}/comments" --paginate --jq ".[] | select(.created_at > \"$since\") | select(.user.login == \"onmokoworks\" or .user.login == \"naari3\") | select(.body | test(\"@codex review\") | not) | \"OWNER-COMMENT: \(.body | split(\"\n\")[0])\"" 2>/dev/null || true)
+  owner_issue=$(gh api "repos/{owner}/{repo}/issues/{PR}/comments" --paginate --jq ".[] | select(.created_at > \"$since\") | select(.user.login == \"onmokoworks\" or .user.login == \"naari3\") | select((.body | ascii_downcase | gsub(\"[[:space:]]\";\"\")) != \"@codexreview\") | \"OWNER-COMMENT: \(.body | split(\"\n\")[0])\"" 2>/dev/null || true)
   if [ -n "$owner" ] || [ -n "$owner_rev" ] || [ -n "$owner_issue" ]; then
     [ -n "$owner" ] && echo "$owner"
     [ -n "$owner_rev" ] && echo "$owner_rev"
@@ -117,7 +117,7 @@ done
   ```bash
   gh api repos/{owner}/{repo}/pulls/{PR}/comments  --paginate --jq '.[] | select(.user.login=="onmokoworks" or .user.login=="naari3") | "\(.created_at) inline \(.path):\(.line): \(.body | split("\n")[0])"'
   gh api repos/{owner}/{repo}/pulls/{PR}/reviews   --paginate --jq '.[] | select(.user.login=="onmokoworks" or .user.login=="naari3") | "\(.submitted_at) review \(.state): \(.body | split("\n")[0])"'
-  gh api repos/{owner}/{repo}/issues/{PR}/comments --paginate --jq '.[] | select(.user.login=="onmokoworks" or .user.login=="naari3") | select(.body | test("@codex review") | not) | "\(.created_at) comment: \(.body | split("\n")[0])"'
+  gh api repos/{owner}/{repo}/issues/{PR}/comments --paginate --jq '.[] | select(.user.login=="onmokoworks" or .user.login=="naari3") | select((.body | ascii_downcase | gsub("[[:space:]]";"")) != "@codexreview") | "\(.created_at) comment: \(.body | split("\n")[0])"'
   ```
   owner の未対応レビュー / コメントがあれば **merge せず** OWNER-FINDING の
   手順へ。無ければ最新 commit への clean であることを確認して merge:

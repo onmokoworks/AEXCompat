@@ -25,20 +25,29 @@ CLEAN_FILTER = (
     '| select(.body | test("Didn.t find any major issues")) | "CLEAN"'
 )
 
+# Owner-comment exclusion: drop ONLY a bare "@codex review" trigger, keeping
+# real owner feedback even when it contains the trigger phrase. Mirrors the
+# skill's owner_issue predicate.
+OWNER_COMMENT_FILTER = (
+    '.[] | select((.body | ascii_downcase | gsub("[[:space:]]";"")) '
+    '!= "@codexreview") | .body'
+)
+
 
 def _run_jq(filter_expr: str, payload: list) -> str:
     jq = shutil.which("jq")
     if jq is None:
         pytest.skip("jq is not installed")
+    # Decode jq's UTF-8 output explicitly; text=True would use the locale
+    # encoding (cp932 on Japanese Windows) and mangle non-ASCII bodies.
     result = subprocess.run(
         [jq, "-r", filter_expr],
-        input=json.dumps(payload),
+        input=json.dumps(payload).encode("utf-8"),
         capture_output=True,
-        text=True,
         timeout=30,
     )
-    assert result.returncode == 0, result.stderr
-    return result.stdout.strip()
+    assert result.returncode == 0, result.stderr.decode("utf-8", "replace")
+    return result.stdout.decode("utf-8").strip()
 
 
 @pytest.mark.parametrize("login", ["chatgpt-codex-connector", "chatgpt-codex-connector[bot]"])
@@ -69,3 +78,17 @@ def test_prefix_spoof_login_is_rejected(login: str) -> None:
 def test_codex_without_clean_phrase_is_not_clean() -> None:
     payload = [{"user": {"login": "chatgpt-codex-connector[bot]"}, "body": "Here are some suggestions."}]
     assert _run_jq(CLEAN_FILTER, payload) == ""
+
+
+@pytest.mark.parametrize("body", ["@codex review", "  @codex review  ", "@Codex Review"])
+def test_bare_trigger_comment_is_excluded(body: str) -> None:
+    assert _run_jq(OWNER_COMMENT_FILTER, [{"body": body}]) == ""
+
+
+@pytest.mark.parametrize(
+    "body",
+    ["fix X, then @codex review again", "[P1] これ直して", "please rework the caps"],
+)
+def test_owner_feedback_is_kept_even_with_trigger_phrase(body: str) -> None:
+    # Real feedback must never be dropped, even if it contains "@codex review".
+    assert _run_jq(OWNER_COMMENT_FILTER, [{"body": body}]) == body
