@@ -18,6 +18,7 @@ SCHEMA = "aexcompat.harness-diagnostic"
 SUITE_RE = re.compile(r"^[A-Za-z0-9 ._-]{1,128}$")
 SHA_RE = re.compile(r"^[0-9a-f]{64}$")
 MARKER = "diagnostics="
+WORKER_FAILURE_MARKER = "AEX parameter inspection worker failed safely:"
 
 
 def sha256_file(path: Path) -> str:
@@ -54,7 +55,9 @@ def json_after_marker(text: str) -> dict:
 
 
 def missing_suites(stderr: str) -> list[dict]:
-    diagnostics = json_after_marker(stderr)
+    diagnostics = worker_failure(stderr)
+    if not diagnostics:
+        diagnostics = json_after_marker(stderr)
     output = []
     seen = set()
     for suite in diagnostics.get("missing_suites", [])[:16]:
@@ -75,7 +78,63 @@ def missing_suites(stderr: str) -> list[dict]:
     return output
 
 
-def persist_event(repository: Path, sha: str, size: int, suites: list[dict], nonce: str) -> Path:
+def worker_failure(stderr: str) -> dict:
+    start = stderr.find(WORKER_FAILURE_MARKER)
+    if start < 0:
+        return {}
+    decoder = json.JSONDecoder()
+    try:
+        value, _ = decoder.raw_decode(stderr[start + len(WORKER_FAILURE_MARKER) :].lstrip())
+    except (json.JSONDecodeError, TypeError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def classify_failure(stderr: str, process_exit: int) -> dict:
+    diagnostics = worker_failure(stderr)
+    worker_exit = diagnostics.get("exit_code")
+    failure_stage = diagnostics.get("first_failure_stage", diagnostics.get("failure_stage"))
+    events = diagnostics.get("stage_events")
+    if not isinstance(worker_exit, int) or isinstance(worker_exit, bool):
+        worker_exit = None
+    if not isinstance(failure_stage, str) or failure_stage not in {
+        "global_setup", "params_setup", "global_setdown"
+    }:
+        failure_stage = None
+    selector_error = None
+    if isinstance(events, list):
+        for event in events[:16]:
+            if not isinstance(event, dict) or event.get("state") != "end":
+                continue
+            errors = event.get("errors")
+            error = errors.get("error") if isinstance(errors, dict) else None
+            if isinstance(error, int) and not isinstance(error, bool) and error != 0 and error != -1:
+                selector_error = error
+                break
+    plugin_kind = diagnostics.get("plugin_kind")
+    if plugin_kind not in {"aegp_candidate", "unknown_no_effect_entrypoint"}:
+        plugin_kind = None
+    if worker_exit == 12 and plugin_kind == "aegp_candidate" and not events:
+        kind = "unsupported_plugin_kind_for_pf_inspect"
+    elif worker_exit == 12 and not events:
+        kind = "effect_entrypoint_missing"
+    elif missing_suites(stderr):
+        kind = "missing_suite"
+    elif selector_error is not None:
+        kind = "selector_error"
+    else:
+        kind = "worker_failure"
+    return {
+        "kind": kind,
+        "process_exit_code": process_exit,
+        "worker_exit_code": worker_exit,
+        "failure_stage": failure_stage,
+        "selector_error": selector_error,
+        "plugin_kind": plugin_kind,
+    }
+
+
+def persist_event(repository: Path, sha: str, size: int, suites: list[dict], failure: dict, nonce: str) -> Path:
     if not SHA_RE.fullmatch(sha):
         raise ValueError("invalid SHA-256")
     directory = repository / "target" / "harness-diagnostics" / sha
@@ -87,9 +146,12 @@ def persist_event(repository: Path, sha: str, size: int, suites: list[dict], non
         "timestamp": int(time.time() * 1000),
         "success": False,
         "operation": "inspect_experimental",
-        "summary": "classification=inspect_failed; stage=unknown; exit_code=1",
+        "summary": (
+            f"classification={failure['kind']}; stage={failure['failure_stage'] or 'none'}; "
+            f"exit_code={failure['worker_exit_code'] if failure['worker_exit_code'] is not None else failure['process_exit_code']}"
+        ),
         "identity": {"sha256": sha, "size": size},
-        "diagnostics": {"missing_suites": suites},
+        "diagnostics": {"missing_suites": suites, **failure},
     }
     with path.open("x", encoding="utf-8", newline="\n") as stream:
         json.dump(event, stream, indent=2, sort_keys=True)
@@ -131,22 +193,35 @@ def run(repository: Path, fixture_root: Path, harness: Path) -> dict:
             check=False,
         )
         suites = missing_suites(process.stderr)
+        failure = classify_failure(process.stderr, process.returncode)
         if process.returncode != 0:
-            persist_event(repository, sha, fixture.stat().st_size, suites, f"{nonce_base}-{index:03d}")
+            persist_event(repository, sha, fixture.stat().st_size, suites, failure, f"{nonce_base}-{index:03d}")
             failures.append((sha, suites))
         cases.append({
             "fixture": fixture.stem,
             "sha256": sha,
             "inspect_succeeded": process.returncode == 0,
             "missing_suite_count": len(suites),
+            "failure": failure if process.returncode != 0 else None,
         })
     top = aggregate(failures)
+    out_of_scope_count = sum(
+        (case.get("failure") or {}).get("kind") == "unsupported_plugin_kind_for_pf_inspect"
+        for case in cases
+    )
     return {
         "schema_version": 1,
         "stage": "aex_missing_suite_diagnostic_summary",
         "fixture_count": len(cases),
         "inspect_success_count": sum(case["inspect_succeeded"] for case in cases),
         "inspect_failure_count": sum(not case["inspect_succeeded"] for case in cases),
+        "effect_fixture_count": len(cases) - out_of_scope_count,
+        "effect_inspect_failure_count": sum(
+            not case["inspect_succeeded"]
+            and (case.get("failure") or {}).get("kind") != "unsupported_plugin_kind_for_pf_inspect"
+            for case in cases
+        ),
+        "out_of_scope_plugin_count": out_of_scope_count,
         "missing_suite_sha_count": len({sha for sha, suites in failures if suites}),
         "top_missing_suites": top,
         "next_unimplemented_suite_candidates": top,

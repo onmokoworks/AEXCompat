@@ -21258,7 +21258,14 @@ int wmain(int argc, wchar_t **argv) {
     return passed ? 0 : 23;
   }
   auto entry = reinterpret_cast<EffectEntry>(GetProcAddress(module, "EffectMain"));
-  if (!entry) { FreeLibrary(module); return 12; }
+  if (!entry) {
+    const bool has_aegp_entry = GetProcAddress(module, "EntryPointFunc") != nullptr;
+    std::cerr << "plugin_kind:"
+              << (has_aegp_entry ? "aegp_candidate" : "unknown_no_effect_entrypoint")
+              << "\n" << std::flush;
+    FreeLibrary(module);
+    return 12;
+  }
 
   alignas(8) std::array<std::byte, kInSize> input{};
   alignas(8) std::array<std::byte, kOutSize> output{};

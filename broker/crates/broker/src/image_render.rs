@@ -31,17 +31,17 @@ const STALE_IMAGE_TRANSPORT_AGE: Duration = Duration::from_secs(15 * 60);
 include!("generated_l2_worker_trust.rs");
 const RENDER_WORKER_TRUST: WorkerTrust = WorkerTrust {
     expected_sha256: [
-        0x77, 0x6d, 0xce, 0xbc, 0xa9, 0x06, 0xd5, 0x1c, 0x59, 0x3b, 0x3d, 0x17, 0x97, 0xce, 0x89,
-        0xac, 0x05, 0x82, 0x57, 0xb4, 0x7f, 0x46, 0x65, 0x09, 0x33, 0x3f, 0x85, 0x13, 0x59, 0x12,
-        0x72, 0x69,
+        0xc4, 0x15, 0x85, 0x09, 0xea, 0x56, 0xb7, 0x49, 0x10, 0x23, 0x83, 0x47, 0x19, 0xe9, 0x2c,
+        0x24, 0xe1, 0x35, 0x26, 0xbf, 0xc6, 0x5a, 0xdc, 0x91, 0xd0, 0xc5, 0x5c, 0x10, 0x90, 0xe2,
+        0xba, 0x53,
     ],
-    expected_size: 780_288,
+    expected_size: 780_800,
 };
 const SMART_WORKER_TRUST: WorkerTrust = WorkerTrust {
     expected_sha256: [
-        0x08, 0x6d, 0xf3, 0xb7, 0x0d, 0x12, 0x4b, 0x5f, 0x18, 0xc6, 0x87, 0x70, 0x2b, 0x0f, 0xbf,
-        0xe0, 0xd7, 0x7d, 0x33, 0xfc, 0x95, 0x4c, 0x10, 0xea, 0x6e, 0x9e, 0x46, 0x2f, 0xc4, 0x59,
-        0x1a, 0xe0,
+        0x9c, 0x14, 0xc2, 0xb6, 0x53, 0xe9, 0x68, 0x07, 0xd3, 0x2f, 0xdc, 0xb1, 0x2f, 0x80, 0x96,
+        0x2b, 0xc5, 0x8a, 0x41, 0x88, 0xd9, 0xa3, 0x67, 0xe8, 0xba, 0x44, 0x96, 0x15, 0x33, 0xf2,
+        0xf2, 0x33,
     ],
     expected_size: 797_696,
 };
@@ -242,12 +242,19 @@ fn worker_diagnostics(
     ];
     let mut events = Vec::new();
     let mut active_stages: Vec<String> = Vec::new();
+    let mut first_failure_stage: Option<String> = None;
     let mut failure_stage: Option<String> = None;
     let mut last_completed_stage: Option<String> = None;
     let mut missing_suites = Vec::new();
     let mut seen_missing_suites = BTreeSet::new();
+    let mut plugin_kind: Option<&str> = None;
 
     for line in stderr.lines() {
+        plugin_kind = plugin_kind.or_else(|| match line.trim() {
+            "plugin_kind:aegp_candidate" => Some("aegp_candidate"),
+            "plugin_kind:unknown_no_effect_entrypoint" => Some("unknown_no_effect_entrypoint"),
+            _ => None,
+        });
         if missing_suites.len() < MAX_MISSING_SUITES {
             if let Some((name, version)) = missing_suite_event(line.trim()) {
                 if seen_missing_suites.insert((name.clone(), version)) {
@@ -291,6 +298,9 @@ fn worker_diagnostics(
                 .values()
                 .any(|value| value.as_i64().unwrap_or(0) != 0)
             {
+                if first_failure_stage.is_none() {
+                    first_failure_stage = Some(stage.to_owned());
+                }
                 failure_stage = Some(stage.to_owned());
             }
         }
@@ -299,6 +309,7 @@ fn worker_diagnostics(
     let active_stage = active_stages.last().cloned();
     if failure_stage.is_none() && classification != "ok" {
         failure_stage = active_stage.clone();
+        first_failure_stage = active_stage.clone();
     }
 
     json!({
@@ -309,8 +320,10 @@ fn worker_diagnostics(
         "stage_events": events,
         "active_stage": active_stage,
         "failure_stage": failure_stage,
+        "first_failure_stage": first_failure_stage,
         "last_completed_stage": last_completed_stage,
         "missing_suites": missing_suites,
+        "plugin_kind": plugin_kind,
     })
 }
 
@@ -4317,12 +4330,20 @@ fn render_with_artifact(
         .as_object_mut()
         .expect("interactive render report is an object");
     for field in [
-        "comp_bg_color_success_count", "comp_bg_color_rejection_count",
-        "guid_mix_in_call_count", "guid_mix_in_success_count",
-        "guid_mix_in_rejection_count", "guid_mix_in_last_size",
-        "guid_mix_in_max_size", "guid_mix_in_size_limit", "guid_mix_in_last_result",
+        "comp_bg_color_success_count",
+        "comp_bg_color_rejection_count",
+        "guid_mix_in_call_count",
+        "guid_mix_in_success_count",
+        "guid_mix_in_rejection_count",
+        "guid_mix_in_last_size",
+        "guid_mix_in_max_size",
+        "guid_mix_in_size_limit",
+        "guid_mix_in_last_result",
     ] {
-        report_object.insert(field.into(), worker_report.get(field).cloned().unwrap_or(Value::Null));
+        report_object.insert(
+            field.into(),
+            worker_report.get(field).cloned().unwrap_or(Value::Null),
+        );
     }
     report_object.insert("output_origin_contract_ok".into(), json!(output_origin_ok));
     report_object.insert(
@@ -5004,6 +5025,7 @@ mod tests {
             8,
         );
         assert_eq!(failed["failure_stage"], "smart_render");
+        assert_eq!(failed["first_failure_stage"], "smart_render");
         assert!(failed.to_string().find("private").is_none());
 
         let nested_crash = worker_diagnostics(
@@ -5015,7 +5037,18 @@ mod tests {
         );
         assert_eq!(nested_crash["active_stage"], "render");
         assert_eq!(nested_crash["failure_stage"], "render");
+        assert_eq!(nested_crash["first_failure_stage"], "render");
         assert_eq!(nested_crash["last_completed_stage"], "frame_setup");
+
+        let cleanup_failure = worker_diagnostics(
+            "stage:global_setup_begin\nstage:global_setup_end error=512\nstage:global_setdown_begin\nstage:global_setdown_end error=-1\n",
+            false,
+            "nonzero_exit",
+            14,
+            12,
+        );
+        assert_eq!(cleanup_failure["first_failure_stage"], "global_setup");
+        assert_eq!(cleanup_failure["failure_stage"], "global_setdown");
     }
 
     #[test]

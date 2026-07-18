@@ -20,8 +20,8 @@ def test_gate_is_broker_only_and_invokes_cli_twice():
 
 def test_gate_authenticates_broker_worker_request_and_approval():
     script = SCRIPT.read_text(encoding="utf-8-sig").lower()
-    assert "4cf1f06ca6ede35ee484e369f03591352a5b7bacdf002d04ba32094370ba9d02" in script
-    assert "086df3b70d124b5f18c687702b0fbfe0d77d33fc954c10ea6e9e462fc4591ae0" in script
+    assert "88bc5191bc4f9d81433d8e8073d3370446984af51b48f43df65e1d0ff3cc9d29" in script
+    assert "9c14c2b653e96807d32fdcb12f80962bc58a4188d9a367e8ba44961533f2f233" in script
     assert "d92568e9f880ec9d06ceccb03de0ebb62d3dd00b0bdb9e3978c5fd687b7e26d7" in script
     assert "maskoffset-smartfx-20260713-001" in script
 

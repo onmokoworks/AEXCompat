@@ -4,18 +4,18 @@
     "authenticated_artifacts":  {
                                     "source":  {
                                                    "path":  "minihost/src/l2_main.cpp",
-                                                   "size_bytes":  1174788,
-                                                   "sha256":  "0239025fac0e8a0d7d21d1132ea80d3f13e309c8e65c7aed4f88dcbb3935fa6d"
+                                                   "size_bytes":  1175036,
+                                                   "sha256":  "fee365f42a49ced93322c6bcd7544ce59ee7593adfa0f665e4d17b1ba0fb5e07"
                                                },
                                     "worker":  {
                                                    "path":  "target/minihost-build/aex_render_worker.exe",
-                                                   "size_bytes":  780288,
-                                                   "sha256":  "776dcebca906d51c593b3d1797ce89ac058257b47f466509333f851359127269"
+                                                   "size_bytes":  780800,
+                                                   "sha256":  "c4158509ea56b7491023834719e92c24e13526bfc65adc91d0c55c1090e2ba53"
                                                },
                                     "probe":  {
                                                   "path":  "target/pf-adv-time-probe-build/Release/pf_adv_time_probe.aex",
                                                   "size_bytes":  43008,
-                                                  "sha256":  "57154c697dfe64545e8aa07819bff340f26d5078204a8964db7c7ac3ac7096b2"
+                                                  "sha256":  "505d0c9e003981f567146d1f85b4cc328d8cf46dfbe8d250a393ffed3d10af00"
                                               },
                                     "input":  {
                                                   "path":  "target/gpu-effects/opencl-input.rgba",

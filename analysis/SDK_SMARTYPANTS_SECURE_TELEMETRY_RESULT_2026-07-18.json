@@ -4,12 +4,12 @@
     "route":  "schema-v2 sealed load tree / restricted SmartFX worker",
     "authenticated_artifacts":  {
                                     "release_harness":  {
-                                                            "size_bytes":  9864704,
-                                                            "sha256":  "81d48015a2972f4d6446b0eadccad658235fbe04f833a34bfac39541f80b8469"
+                                                            "size_bytes":  9868800,
+                                                            "sha256":  "e8be0b6d4251801443b6008ae3e4a36c7a0af33507940789e2567741ed369f3b"
                                                         },
                                     "canonical_smart_worker":  {
                                                                    "size_bytes":  797696,
-                                                                   "sha256":  "086df3b70d124b5f18c687702b0fbfe0d77d33fc954c10ea6e9e462fc4591ae0"
+                                                                   "sha256":  "9c14c2b653e96807d32fdcb12f80962bc58a4188d9a367e8ba44961533f2f233"
                                                                },
                                     "sdk_smartypants_fixture":  {
                                                                     "size_bytes":  31232,

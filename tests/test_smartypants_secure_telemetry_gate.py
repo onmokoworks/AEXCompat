@@ -35,8 +35,8 @@ def test_secure_runtime_balances_resources_and_enforces_module_audit():
 def test_artifact_identities_are_path_free_and_event_is_not_misattributed():
     result = json.loads(EVIDENCE.read_text(encoding="utf-8"))
     expected = {
-        "release_harness": (9864704, "81d48015a2972f4d6446b0eadccad658235fbe04f833a34bfac39541f80b8469"),
-        "canonical_smart_worker": (797696, "086df3b70d124b5f18c687702b0fbfe0d77d33fc954c10ea6e9e462fc4591ae0"),
+        "release_harness": (9868800, "e8be0b6d4251801443b6008ae3e4a36c7a0af33507940789e2567741ed369f3b"),
+        "canonical_smart_worker": (797696, "9c14c2b653e96807d32fdcb12f80962bc58a4188d9a367e8ba44961533f2f233"),
         "sdk_smartypants_fixture": (31232, "47fe55f77600f041a3297b4558108fad5d6e886b6cc66eed2e51f88dac922ede"),
         "deterministic_input": (3100, "8e2b249fd979826a60ad089b783e84e8f65d9b692c157be065953775a8aa6c91"),
     }

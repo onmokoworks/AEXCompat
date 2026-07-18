@@ -9,9 +9,9 @@ $allowlistRelative = "target/smart-allowlist/maskoffset.active.local.json"
 $brokerRelative = "broker/target/release/broker.exe"
 $workerRelative = "target/minihost-build/aex_smart_worker.exe"
 $expectedOutput = "bf419f44e915901bac882e9b9e3411b8407df7f4e3a4a1c2719314bdfbb74b5f"
-$expectedBrokerHash = "4cf1f06ca6ede35ee484e369f03591352a5b7bacdf002d04ba32094370ba9d02"
+$expectedBrokerHash = "88bc5191bc4f9d81433d8e8073d3370446984af51b48f43df65e1d0ff3cc9d29"
 $expectedBrokerSize = 1147904
-$expectedWorkerHash = "086df3b70d124b5f18c687702b0fbfe0d77d33fc954c10ea6e9e462fc4591ae0"
+$expectedWorkerHash = "9c14c2b653e96807d32fdcb12f80962bc58a4188d9a367e8ba44961533f2f233"
 $expectedWorkerSize = 797696
 $expectedRequestHash = "d92568e9f880ec9d06ceccb03de0ebb62d3dd00b0bdb9e3978c5fd687b7e26d7"
 
