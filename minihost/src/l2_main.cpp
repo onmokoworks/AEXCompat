@@ -10439,6 +10439,24 @@ int32_t __cdecl aegp_get_layer_to_world_xform(
   *transform = result;
   return 0;
 }
+int32_t __cdecl aegp_get_item_from_comp(void* comp, void** item) {
+  if (comp != &g_aegp_comp || !item) return 4;
+  *item = &g_aegp_comp_item;
+  return 0;
+}
+int32_t __cdecl aegp_get_item_dimensions(
+    void* item, int32_t* width, int32_t* height) {
+  if (item != &g_aegp_comp_item || !width || !height) return 4;
+  const int32_t result_width = g_full_resolution_width > 0
+      ? g_full_resolution_width : g_smart_width;
+  const int32_t result_height = g_full_resolution_height > 0
+      ? g_full_resolution_height : g_smart_height;
+  if (result_width <= 0 || result_height <= 0 ||
+      result_width > 32768 || result_height > 32768) return 4;
+  *width = result_width;
+  *height = result_height;
+  return 0;
+}
 
 union AegpLegacyStreamVal { double one_d; };
 int32_t __cdecl aegp_get_layer_stream_value_v2(void* layer, int32_t which_stream,
@@ -11042,6 +11060,7 @@ int32_t __cdecl aegp_dispose_stream(void* stream) {
 }
 
 std::array<void*, 41> g_aegp_comp_suite10{};
+std::array<void*, 28> g_aegp_comp_suite4{};
 std::array<void*, 44> g_aegp_comp_suite11{};
 std::array<void*, 44> g_aegp_comp_suite12{};
 std::array<void*, 46> g_aegp_layer_suite5{};
@@ -11051,6 +11070,7 @@ std::array<void*, 22> g_aegp_effect_suite4{};
 std::array<void*, 23> g_aegp_stream_suite6{};
 std::array<void*, 22> g_aegp_keyframe_suite5{};
 static_assert(sizeof(g_aegp_comp_suite10) == 41 * sizeof(void*));
+static_assert(sizeof(g_aegp_comp_suite4) == 28 * sizeof(void*));
 static_assert(sizeof(g_aegp_comp_suite11) == 352);
 static_assert(sizeof(g_aegp_comp_suite12) == 352);
 static_assert(sizeof(g_aegp_layer_suite5) == 368);
@@ -12411,6 +12431,25 @@ int32_t __cdecl acquire_suite(const char* name, int32_t version, const void** su
     g_aegp_comp_suite10.fill(reinterpret_cast<void*>(&aegp_unsupported_suite_call));
     g_aegp_comp_suite10[4] = reinterpret_cast<void*>(&aegp_get_comp_bg_color);
     *suite = g_aegp_comp_suite10.data();
+    record_suite_acquire(name, version);
+    return 0;
+  }
+  if (name && std::strcmp(name, "AEGP Comp Suite") == 0 && version == 9) {
+    g_aegp_comp_suite4.fill(reinterpret_cast<void*>(&aegp_unsupported_suite_call));
+    g_aegp_comp_suite4[0] = reinterpret_cast<void*>(&aegp_get_comp_from_item);
+    g_aegp_comp_suite4[1] = reinterpret_cast<void*>(&aegp_get_item_from_comp);
+    *suite = g_aegp_comp_suite4.data();
+    record_suite_acquire(name, version);
+    return 0;
+  }
+  if (name && std::strcmp(name, "AEGP Item Suite") == 0 && version == 10) {
+    std::fill_n(reinterpret_cast<void**>(&g_aegp_legacy_item_suite6), 26,
+                reinterpret_cast<void*>(&aegp_unsupported_suite_call));
+    g_aegp_legacy_item_suite6.get_active_item = &aegp_get_active_item;
+    g_aegp_legacy_item_suite6.get_item_type = &aegp_get_item_type;
+    reinterpret_cast<void**>(&g_aegp_legacy_item_suite6)[16] =
+        reinterpret_cast<void*>(&aegp_get_item_dimensions);
+    *suite = &g_aegp_legacy_item_suite6;
     record_suite_acquire(name, version);
     return 0;
   }
@@ -20425,6 +20464,8 @@ bool verify_aegp_get_effect_camera_matrix_case(bool smart_case) {
 bool verify_aegp_resizer_3d_chain() {
   const void* layer_suite = nullptr;
   const void* stream_suite = nullptr;
+  const void* comp_suite = nullptr;
+  const void* item_suite = nullptr;
   const int32_t saved_camera_index = g_aegp_active_camera_layer_index;
   const int32_t saved_width = g_full_resolution_width;
   const int32_t saved_height = g_full_resolution_height;
@@ -20442,7 +20483,14 @@ bool verify_aegp_resizer_3d_chain() {
       g_aegp_layer_suite8[38] == reinterpret_cast<void*>(&aegp_get_layer_to_world_xform) &&
       acquire_suite("AEGP Stream Suite", 7, &stream_suite) == 0 &&
       stream_suite == g_aegp_stream_suite2.data() &&
-      g_aegp_stream_suite2[16] == reinterpret_cast<void*>(&aegp_get_layer_stream_value_v2);
+      g_aegp_stream_suite2[16] == reinterpret_cast<void*>(&aegp_get_layer_stream_value_v2) &&
+      acquire_suite("AEGP Comp Suite", 9, &comp_suite) == 0 &&
+      comp_suite == g_aegp_comp_suite4.data() &&
+      g_aegp_comp_suite4[1] == reinterpret_cast<void*>(&aegp_get_item_from_comp) &&
+      acquire_suite("AEGP Item Suite", 10, &item_suite) == 0 &&
+      item_suite == &g_aegp_legacy_item_suite6 &&
+      reinterpret_cast<void**>(&g_aegp_legacy_item_suite6)[16] ==
+          reinterpret_cast<void*>(&aegp_get_item_dimensions);
   AegpMatrix4 matrix{};
   ok = ok && aegp_get_layer_to_world_xform(&g_aegp_layers[2], &time, &matrix) == 0;
   for (std::size_t row = 0; row < 4; ++row) {
@@ -20453,6 +20501,13 @@ bool verify_aegp_resizer_3d_chain() {
   int32_t type = -1;
   ok = ok && aegp_get_layer_stream_value_v2(&g_aegp_layers[2], 11, 1,
       &time, 0, &zoom, &type) == 0 && zoom.one_d == 1920.0 && type == 5;
+  void* item = nullptr;
+  int32_t width = -1;
+  int32_t height = -1;
+  ok = ok && aegp_get_item_from_comp(&g_aegp_comp, &item) == 0 &&
+      item == &g_aegp_comp_item &&
+      aegp_get_item_dimensions(item, &width, &height) == 0 &&
+      width == 1920 && height == 1080;
 
   AegpLegacyStreamVal sentinel{-2.0};
   type = -2;
@@ -20466,7 +20521,16 @@ bool verify_aegp_resizer_3d_chain() {
   matrix = matrix_sentinel;
   ok = ok && aegp_get_layer_to_world_xform(&g_aegp_layers[2], &invalid, &matrix) != 0 &&
       std::memcmp(&matrix, &matrix_sentinel, sizeof(matrix)) == 0;
+  void* item_sentinel = reinterpret_cast<void*>(static_cast<uintptr_t>(0x1234));
+  width = -2;
+  height = -3;
+  ok = ok && aegp_get_item_from_comp(&g_layer, &item_sentinel) != 0 &&
+      item_sentinel == reinterpret_cast<void*>(static_cast<uintptr_t>(0x1234)) &&
+      aegp_get_item_dimensions(&g_layer, &width, &height) != 0 &&
+      width == -2 && height == -3;
 
+  ok = release_suite("AEGP Item Suite", 10) == 0 && ok;
+  ok = release_suite("AEGP Comp Suite", 9) == 0 && ok;
   ok = release_suite("AEGP Stream Suite", 7) == 0 && ok;
   ok = release_suite("AEGP Layer Suite", 14) == 0 && ok;
   g_aegp_active_camera_layer_index = saved_camera_index;
@@ -20497,7 +20561,9 @@ int wmain(int argc, wchar_t **argv) {
     std::cout << "{\"aegp_resizer_3d\":\"" << (passed ? "passed" : "failed")
               << "\",\"layer_slot\":38,\"layer_offset_x64\":304,"
                  "\"stream_slot\":16,\"stream_offset_x64\":128,"
-                 "\"zoom\":1920}\n";
+                 "\"comp_slot\":1,\"comp_offset_x64\":8,"
+                 "\"item_slot\":16,\"item_offset_x64\":128,"
+                 "\"zoom\":1920,\"dimensions\":[1920,1080]}\n";
     return passed ? 0 : 68;
   }
   if (argc == 2 && std::wstring(argv[1]) == L"--self-test-aegp-get-effect-camera") {
