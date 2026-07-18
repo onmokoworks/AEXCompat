@@ -1,6 +1,8 @@
 use crate::runtime_module_policy::{AuthenticatedGpuModuleReport, RuntimeBackend};
 use crate::sealed_load_tree::{LoadEntry, SealedLoadTree};
 use crate::secure_launch::{secure_launch, SecureLaunchRequest, SecureLaunchResult};
+use sha2::{Digest, Sha256};
+use std::fs::File;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -31,18 +33,9 @@ pub struct ApprovedImageArtifact {
     pub expected_size: u64,
 }
 
-/// The expected identity of a worker, supplied by fixed policy or explicitly
-/// by the caller. Dispatch never hashes the worker to manufacture this tuple.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct WorkerTrust {
-    pub expected_sha256: [u8; 32],
-    pub expected_size: u64,
-}
-
 pub struct SecureImageDispatch<'a> {
     pub repository: &'a Path,
     pub worker_kind: WorkerKind,
-    pub worker_trust: WorkerTrust,
     pub plugin: ApprovedImageArtifact,
     pub dependencies: Vec<ApprovedImageArtifact>,
     pub args_before_plugin: &'a [String],
@@ -72,10 +65,6 @@ pub fn dispatch_secure_gpu_image(
 }
 
 pub fn dispatch_secure_image(input: SecureImageDispatch<'_>) -> io::Result<SecureLaunchResult> {
-    if input.worker_trust.expected_size == 0 {
-        return Err(invalid("trusted worker size must be nonzero"));
-    }
-
     let worker_program = input
         .repository
         .join(input.worker_kind.repository_relative_program());
@@ -87,16 +76,35 @@ pub fn dispatch_secure_image(input: SecureImageDispatch<'_>) -> io::Result<Secur
         .map(load_entry)
         .collect::<io::Result<Vec<_>>>()?;
     let tree = SealedLoadTree::create(main, dependencies)?;
+    let (worker_sha256, worker_size) = admit_local_worker(&worker_program)?;
     let request = SecureLaunchRequest {
         worker_program: &worker_program,
-        worker_expected_sha256: input.worker_trust.expected_sha256,
-        worker_expected_size: input.worker_trust.expected_size,
+        worker_expected_sha256: worker_sha256,
+        worker_expected_size: worker_size,
         plugin_basename: &plugin_basename,
         args_before_plugin: input.args_before_plugin,
         args_after_plugin: input.args_after_plugin,
         require_module_audit: true,
     };
     secure_launch(tree, request, input.timeout)
+}
+
+/// Admits the locally built worker by reading it exactly once. The returned
+/// identity binds the staged copy that actually executes to the bytes observed
+/// here; the build tree itself is the trust root, because anyone who can
+/// replace the worker binary can equally rebuild the broker that dispatches
+/// it. Receipt-driven flows keep supplying an externally pinned identity
+/// through `secure_launch` and do not pass through this admission.
+fn admit_local_worker(path: &Path) -> io::Result<([u8; 32], u64)> {
+    let mut file = File::open(path).map_err(|error| {
+        io::Error::new(error.kind(), "local worker binary is missing or unreadable")
+    })?;
+    let mut hasher = Sha256::new();
+    let size = io::copy(&mut file, &mut hasher)?;
+    if size == 0 {
+        return Err(invalid("local worker binary is empty"));
+    }
+    Ok((hasher.finalize().into(), size))
 }
 
 fn load_entry(artifact: ApprovedImageArtifact) -> io::Result<LoadEntry> {
@@ -124,7 +132,6 @@ fn invalid(message: &'static str) -> io::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sha2::{Digest, Sha256};
     use std::fs;
     use std::time::SystemTime;
 
@@ -155,20 +162,47 @@ mod tests {
     }
 
     #[test]
-    fn rejects_missing_worker_trust_without_reading_worker() {
-        let missing_repository = Path::new("repository-that-does-not-exist");
+    fn rejects_missing_local_worker_after_sealing_the_plugin() {
+        let root = std::env::temp_dir().join(format!(
+            "aexcompat-secure-image-dispatch-{:032x}",
+            rand::random::<u128>()
+        ));
+        fs::create_dir(&root).unwrap();
+        let plugin = artifact(&root, "plugin.plugin", b"plugin");
+
         let error = dispatch_secure_image(SecureImageDispatch {
-            repository: missing_repository,
+            repository: &root,
             worker_kind: WorkerKind::Render,
-            worker_trust: WorkerTrust {
-                expected_sha256: [0; 32],
-                expected_size: 0,
-            },
-            plugin: ApprovedImageArtifact {
-                path: PathBuf::from("plugin.plugin"),
-                expected_sha256: [0; 32],
-                expected_size: 1,
-            },
+            plugin,
+            dependencies: vec![],
+            args_before_plugin: &[],
+            args_after_plugin: &[],
+            timeout: Duration::from_secs(1),
+        })
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "local worker binary is missing or unreadable"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn rejects_empty_local_worker_before_launch() {
+        let root = std::env::temp_dir().join(format!(
+            "aexcompat-secure-image-dispatch-{:032x}",
+            rand::random::<u128>()
+        ));
+        fs::create_dir(&root).unwrap();
+        let plugin = artifact(&root, "plugin.plugin", b"plugin");
+        let worker = root.join("target/minihost-build/aex_render_worker.exe");
+        fs::create_dir_all(worker.parent().unwrap()).unwrap();
+        fs::write(&worker, b"").unwrap();
+
+        let error = dispatch_secure_image(SecureImageDispatch {
+            repository: &root,
+            worker_kind: WorkerKind::Render,
+            plugin,
             dependencies: vec![],
             args_before_plugin: &[],
             args_after_plugin: &[],
@@ -176,7 +210,8 @@ mod tests {
         })
         .unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
-        assert_eq!(error.to_string(), "trusted worker size must be nonzero");
+        assert_eq!(error.to_string(), "local worker binary is empty");
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -193,10 +228,6 @@ mod tests {
         let error = dispatch_secure_image(SecureImageDispatch {
             repository: &root,
             worker_kind: WorkerKind::Smart,
-            worker_trust: WorkerTrust {
-                expected_sha256: [7; 32],
-                expected_size: 123,
-            },
             plugin,
             dependencies: vec![dependency],
             args_before_plugin: &["--before".into()],
@@ -219,10 +250,6 @@ mod tests {
         let make_input = || SecureImageDispatch {
             repository: Path::new("repository-that-does-not-exist"),
             worker_kind: WorkerKind::Smart,
-            worker_trust: WorkerTrust {
-                expected_sha256: [7; 32],
-                expected_size: 123,
-            },
             plugin: ApprovedImageArtifact {
                 path: PathBuf::from("plugin.plugin"),
                 expected_sha256: [0; 32],

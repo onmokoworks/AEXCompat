@@ -9,7 +9,7 @@ use crate::runtime_module_policy::{
 };
 use crate::secure_image_dispatch::{
     dispatch_secure_gpu_image, dispatch_secure_image, ApprovedImageArtifact,
-    GpuRuntimeAuthorization, SecureImageDispatch, WorkerKind, WorkerTrust,
+    GpuRuntimeAuthorization, SecureImageDispatch, WorkerKind,
 };
 use image::ImageFormat;
 use serde::{Deserialize, Serialize};
@@ -31,14 +31,10 @@ const MAX_STAGE_EVENTS: usize = 32;
 const MAX_MISSING_SUITES: usize = 16;
 const MAX_SUITE_NAME_LEN: usize = 96;
 const STALE_IMAGE_TRANSPORT_AGE: Duration = Duration::from_secs(15 * 60);
-include!("generated_l2_worker_trust.rs");
-include!("generated_render_worker_trust.rs");
-include!("generated_smart_worker_trust.rs");
 
 fn dispatch_approved_image(
     repository: &Path,
     worker_kind: WorkerKind,
-    worker_trust: WorkerTrust,
     plugin_path: &Path,
     approved_sha256: &str,
     args_before_plugin: &[String],
@@ -48,7 +44,6 @@ fn dispatch_approved_image(
     dispatch_secure_image(SecureImageDispatch {
         repository,
         worker_kind,
-        worker_trust,
         plugin: ApprovedImageArtifact {
             path: plugin_path.to_path_buf(),
             expected_sha256: decode_sha256_hex(approved_sha256)?,
@@ -65,7 +60,6 @@ fn dispatch_approved_image(
 fn dispatch_approved_image_with_dependencies(
     repository: &Path,
     worker_kind: WorkerKind,
-    worker_trust: WorkerTrust,
     plugin_path: &Path,
     approved_sha256: &str,
     dependencies: Vec<ApprovedImageArtifact>,
@@ -76,7 +70,6 @@ fn dispatch_approved_image_with_dependencies(
     dispatch_secure_image(SecureImageDispatch {
         repository,
         worker_kind,
-        worker_trust,
         plugin: ApprovedImageArtifact {
             path: plugin_path.to_path_buf(),
             expected_sha256: decode_sha256_hex(approved_sha256)?,
@@ -1196,7 +1189,6 @@ pub fn render_experimental_audio(
     let isolated = dispatch_approved_image(
         repository,
         WorkerKind::Render,
-        RENDER_WORKER_TRUST,
         plugin_path,
         approved_sha256,
         &args_before_plugin,
@@ -1683,7 +1675,6 @@ pub fn inspect_experimental_external_dependencies(
     let isolated = dispatch_approved_image(
         repository,
         WorkerKind::L2,
-        L2_WORKER_TRUST,
         plugin_path,
         approved_sha256,
         &args_before_plugin,
@@ -1739,7 +1730,6 @@ pub fn probe_experimental_options_dialog(
     let isolated = dispatch_approved_image(
         repository,
         WorkerKind::L2,
-        L2_WORKER_TRUST,
         plugin_path,
         approved_sha256,
         &args_before_plugin,
@@ -1789,7 +1779,6 @@ pub fn probe_experimental_automatic_options_dialog(
     let isolated = dispatch_approved_image(
         repository,
         WorkerKind::L2,
-        L2_WORKER_TRUST,
         plugin_path,
         approved_sha256,
         &args_before_plugin,
@@ -1844,7 +1833,6 @@ pub fn probe_experimental_nop_render(
     let isolated = dispatch_approved_image(
         repository,
         WorkerKind::Render,
-        RENDER_WORKER_TRUST,
         plugin_path,
         approved_sha256,
         &args_before_plugin,
@@ -1901,7 +1889,6 @@ pub fn probe_experimental_smart_nop_render(
     let isolated = dispatch_approved_image(
         repository,
         WorkerKind::Smart,
-        SMART_WORKER_TRUST,
         plugin_path,
         approved_sha256,
         &args_before_plugin,
@@ -1962,7 +1949,6 @@ pub fn probe_experimental_input_buffer_write(
     let isolated = dispatch_approved_image(
         repository,
         WorkerKind::Render,
-        RENDER_WORKER_TRUST,
         plugin_path,
         approved_sha256,
         &args_before_plugin,
@@ -2019,7 +2005,6 @@ pub fn probe_experimental_smart_input_buffer_write(
     let isolated = dispatch_approved_image(
         repository,
         WorkerKind::Smart,
-        SMART_WORKER_TRUST,
         plugin_path,
         approved_sha256,
         &args_before_plugin,
@@ -2087,7 +2072,6 @@ fn probe_experimental_frame_resize(
     let isolated = dispatch_approved_image(
         repository,
         WorkerKind::Render,
-        RENDER_WORKER_TRUST,
         plugin_path,
         approved_sha256,
         &args_before_plugin,
@@ -2185,7 +2169,6 @@ pub fn probe_experimental_persistent_sequence(
     let isolated = dispatch_approved_image(
         repository,
         WorkerKind::Render,
-        RENDER_WORKER_TRUST,
         plugin_path,
         approved_sha256,
         &args_before_plugin,
@@ -2243,7 +2226,6 @@ pub fn probe_experimental_flattened_sequence(
     let isolated = dispatch_approved_image(
         repository,
         WorkerKind::Render,
-        RENDER_WORKER_TRUST,
         plugin_path,
         approved_sha256,
         &args_before_plugin,
@@ -2302,7 +2284,6 @@ pub fn probe_experimental_copied_flattened_sequence(
     let isolated = dispatch_approved_image(
         repository,
         WorkerKind::Render,
-        RENDER_WORKER_TRUST,
         plugin_path,
         approved_sha256,
         &args_before_plugin,
@@ -2401,7 +2382,6 @@ fn inspect_experimental_with_diagnostics_and_runtime_policy(
         dispatch_approved_image_with_dependencies(
             repository,
             WorkerKind::L2,
-            L2_WORKER_TRUST,
             plugin_path,
             approved_sha256,
             vec![authorization.artifact.clone()],
@@ -2413,7 +2393,6 @@ fn inspect_experimental_with_diagnostics_and_runtime_policy(
         dispatch_approved_image(
             repository,
             WorkerKind::L2,
-            L2_WORKER_TRUST,
             plugin_path,
             approved_sha256,
             &args_before_plugin,
@@ -2583,7 +2562,6 @@ pub fn probe_experimental_custom_ui_cursor(
     let isolated = dispatch_approved_image(
         repository,
         WorkerKind::L2,
-        L2_WORKER_TRUST,
         plugin_path,
         approved_sha256,
         &args_before_plugin,
@@ -2624,7 +2602,6 @@ pub fn probe_experimental_custom_ui_draw(
     let isolated = dispatch_approved_image(
         repository,
         WorkerKind::L2,
-        L2_WORKER_TRUST,
         plugin_path,
         approved_sha256,
         &args_before_plugin,
@@ -2682,7 +2659,6 @@ pub fn probe_experimental_custom_ui_lifecycle(
     let isolated = dispatch_approved_image(
         repository,
         WorkerKind::L2,
-        L2_WORKER_TRUST,
         plugin_path,
         approved_sha256,
         &args_before_plugin,
@@ -2726,7 +2702,6 @@ pub fn probe_experimental_custom_ui_idle(
     let isolated = dispatch_approved_image(
         repository,
         WorkerKind::L2,
-        L2_WORKER_TRUST,
         plugin_path,
         approved_sha256,
         &args_before_plugin,
@@ -2777,7 +2752,6 @@ pub fn probe_experimental_custom_ui_keydown(
     let isolated = dispatch_approved_image(
         repository,
         WorkerKind::L2,
-        L2_WORKER_TRUST,
         plugin_path,
         approved_sha256,
         &args_before_plugin,
@@ -2823,7 +2797,6 @@ pub fn probe_experimental_custom_ui_mouse_exited(
     let isolated = dispatch_approved_image(
         repository,
         WorkerKind::L2,
-        L2_WORKER_TRUST,
         plugin_path,
         approved_sha256,
         &args_before_plugin,
@@ -2884,7 +2857,6 @@ pub fn probe_experimental_custom_ui_click(
     let isolated = dispatch_approved_image(
         repository,
         WorkerKind::L2,
-        L2_WORKER_TRUST,
         plugin_path,
         approved_sha256,
         &args_before_plugin,
@@ -2941,7 +2913,6 @@ pub fn probe_experimental_custom_ui_drag(
     let isolated = dispatch_approved_image(
         repository,
         WorkerKind::L2,
-        L2_WORKER_TRUST,
         plugin_path,
         approved_sha256,
         &args_before_plugin,
@@ -2993,7 +2964,6 @@ pub fn trigger_experimental_button(
     let isolated = dispatch_approved_image(
         repository,
         WorkerKind::L2,
-        L2_WORKER_TRUST,
         plugin_path,
         approved_sha256,
         &args_before_plugin,
@@ -3031,7 +3001,6 @@ pub fn initialize_experimental_aegp(
     let isolated = dispatch_approved_image(
         repository,
         WorkerKind::L2,
-        L2_WORKER_TRUST,
         plugin_path,
         approved_sha256,
         &args_before_plugin,
@@ -3069,7 +3038,6 @@ pub fn dispatch_experimental_aegp_update_menu(
     let isolated = dispatch_approved_image(
         repository,
         WorkerKind::L2,
-        L2_WORKER_TRUST,
         plugin_path,
         approved_sha256,
         &args_before_plugin,
@@ -3108,7 +3076,6 @@ pub fn dispatch_experimental_aegp_idle(
     let isolated = dispatch_approved_image(
         repository,
         WorkerKind::L2,
-        L2_WORKER_TRUST,
         plugin_path,
         approved_sha256,
         &args_before_plugin,
@@ -3152,7 +3119,6 @@ pub fn dispatch_experimental_aegp_command_roundtrip(
     let isolated = dispatch_approved_image(
         repository,
         WorkerKind::L2,
-        L2_WORKER_TRUST,
         plugin_path,
         approved_sha256,
         &args_before_plugin,
@@ -3192,7 +3158,6 @@ pub fn dispatch_experimental_aegp_active_idle_roundtrip(
     let isolated = dispatch_approved_image(
         repository,
         WorkerKind::L2,
-        L2_WORKER_TRUST,
         plugin_path,
         approved_sha256,
         &args_before_plugin,
@@ -3234,7 +3199,6 @@ pub fn dispatch_experimental_aegp_comp_idle_roundtrip(
     let isolated = dispatch_approved_image(
         repository,
         WorkerKind::L2,
-        L2_WORKER_TRUST,
         plugin_path,
         approved_sha256,
         &args_before_plugin,
@@ -3423,7 +3387,6 @@ pub fn dispatch_experimental_aegp_keyframe_roundtrip(
     let isolated = dispatch_approved_image(
         repository,
         WorkerKind::L2,
-        L2_WORKER_TRUST,
         plugin_path,
         approved_sha256,
         &args_before_plugin,
@@ -3491,7 +3454,6 @@ pub fn dispatch_experimental_aegp_seek_roundtrip(
     let isolated = dispatch_approved_image(
         repository,
         WorkerKind::L2,
-        L2_WORKER_TRUST,
         plugin_path,
         approved_sha256,
         &args_before_plugin,
@@ -3552,7 +3514,6 @@ pub fn dispatch_experimental_aegp_trim_roundtrip(
     let isolated = dispatch_approved_image(
         repository,
         WorkerKind::L2,
-        L2_WORKER_TRUST,
         plugin_path,
         approved_sha256,
         &args_before_plugin,
@@ -3605,7 +3566,6 @@ pub fn dispatch_experimental_aegp_switch_roundtrip(
     let isolated = dispatch_approved_image(
         repository,
         WorkerKind::L2,
-        L2_WORKER_TRUST,
         plugin_path,
         approved_sha256,
         &args_before_plugin,
@@ -4010,11 +3970,6 @@ fn render_with_artifact(
     } else {
         WorkerKind::Render
     };
-    let worker_trust = if smart {
-        SMART_WORKER_TRUST
-    } else {
-        RENDER_WORKER_TRUST
-    };
     let trusted_worker_path = if smart {
         "target/minihost-build/aex_smart_worker.exe"
     } else {
@@ -4142,7 +4097,6 @@ fn render_with_artifact(
     let initial_dispatch = SecureImageDispatch {
         repository,
         worker_kind,
-        worker_trust,
         plugin: plugin.clone(),
         dependencies: dependencies.clone(),
         args_before_plugin: &args_before_plugin,
@@ -4244,7 +4198,6 @@ fn render_with_artifact(
         isolated = dispatch_secure_image(SecureImageDispatch {
             repository,
             worker_kind,
-            worker_trust,
             plugin,
             dependencies,
             args_before_plugin: &args_before_plugin,
