@@ -79,40 +79,51 @@ while true; do
   # stale head-bound clean emits a premature CLEAN that the merge guard (which
   # checks all comments) then refuses — an early-clean/refuse loop. Compare
   # against all findings; only the PRINTED list below is scoped to new comments.
-  # A clean is either a head-bound text comment OR a head-covering +1 reaction
-  # on the PR body (the auto first-review signals clean only by reaction, with
-  # no text comment; see PR #44). Take the newest of the two.
+  #
+  # Two clean signals with DIFFERENT strength:
+  #   - text_clean_ts: a "Didn't find any major issues" comment bound to the
+  #     current head SHA. Mergeable — the guard accepts it, so it emits CLEAN.
+  #   - react_clean_ts: a +1 reaction on the PR body, the auto first-review's
+  #     only clean signal (no text comment; see PR #44). It carries no SHA and
+  #     cannot be reliably head-bound (committer.date is self-reported, so a
+  #     cherry-picked/old-dated push could forge coverage), so the guard will
+  #     NOT merge on it. It is surfaced as a distinct CLEAN-REACTION advisory so
+  #     the watch does not run to timeout; the operator re-triggers to obtain a
+  #     mergeable SHA-bound clean.
   text_clean_ts=$(codex_clean_ts_for_head "$head" <<<"$issue_comments")
   react_clean_ts=$(codex_reaction_clean_ts "$head_date" <<<"$pr_reactions")
-  clean_ts=$text_clean_ts
-  if [ -n "$react_clean_ts" ] && { [ -z "$clean_ts" ] || [[ "$react_clean_ts" > "$clean_ts" ]]; }; then
-    clean_ts=$react_clean_ts
-  fi
   find_ts=$(codex_finding_max_ts <<<"$pr_comments")
 
-  # 2. Findings newer than any accepted clean supersede it.
-  if [ -n "$find_ts" ] && { [ -z "$clean_ts" ] || [[ "$find_ts" > "$clean_ts" ]]; }; then
+  # 2. Findings newer than the newest clean signal (text or reaction) supersede
+  #    it. Compare against both so a reaction does not mask a later finding.
+  newest_clean=$text_clean_ts
+  if [ -n "$react_clean_ts" ] && { [ -z "$newest_clean" ] || [[ "$react_clean_ts" > "$newest_clean" ]]; }; then
+    newest_clean=$react_clean_ts
+  fi
+  if [ -n "$find_ts" ] && { [ -z "$newest_clean" ] || [[ "$find_ts" > "$newest_clean" ]]; }; then
     findings=$(codex_findings <<<"$new_pr_comments" | grep -v '^$' || true)
     if [ -n "$findings" ]; then echo "$findings"; exit 0; fi
   fi
 
-  # 3. CLEAN when a head-bound clean exists, no finding is newer than it, AND no
-  #    owner activity is newer than it. The last check aligns CLEAN with what
-  #    codex-merge-guard.sh will accept: without it, a stale head-bound clean
-  #    that predates owner feedback (which arrived after that clean but before
-  #    SINCE, so owner_hit above does not see it) would emit CLEAN, then the
-  #    guard refuses on the same owner-after-clean feedback — an early-clean/
-  #    refuse loop. When owner feedback postdates the clean we keep waiting for
-  #    the fresh Codex verdict (a new clean will postdate that feedback). Full
-  #    history, inclusive (>=), same predicates as the guard.
-  if [ -n "$clean_ts" ] && { [ -z "$find_ts" ] || [[ ! "$find_ts" > "$clean_ts" ]]; }; then
-    owner_after=$(
-      { owner_inline_after "$clean_ts" <<<"$pr_comments"
-        owner_comments_after "$clean_ts" <<<"$issue_comments"
-        owner_reviews_after "$clean_ts" <<<"$reviews"; } | grep -v '^$' || true
-    )
-    if [ -z "$owner_after" ]; then
-      echo "CLEAN: codex clean for head ${head:0:10}"; exit 0
-    fi
+  # Owner activity newer than a clean supersedes it (aligns with what the guard
+  # accepts; prevents the stale-clean/refuse loop). Full history, inclusive.
+  owner_after_of() {
+    { owner_inline_after "$1" <<<"$pr_comments"
+      owner_comments_after "$1" <<<"$issue_comments"
+      owner_reviews_after "$1" <<<"$reviews"; } | grep -v '^$' || true
+  }
+
+  # 3. Mergeable CLEAN: a SHA-bound text clean, no newer finding, no newer owner
+  #    activity. This is exactly what codex-merge-guard.sh will accept.
+  if [ -n "$text_clean_ts" ] && { [ -z "$find_ts" ] || [[ ! "$find_ts" > "$text_clean_ts" ]]; } \
+     && [ -z "$(owner_after_of "$text_clean_ts")" ]; then
+    echo "CLEAN: codex clean for head ${head:0:10}"; exit 0
+  fi
+
+  # 4. Reaction-only advisory: Codex +1 on the PR body, not SHA-bound. Not
+  #    mergeable by the guard; the operator must re-trigger for a text clean.
+  if [ -n "$react_clean_ts" ] && { [ -z "$find_ts" ] || [[ ! "$find_ts" > "$react_clean_ts" ]]; } \
+     && [ -z "$(owner_after_of "$react_clean_ts")" ]; then
+    echo "CLEAN-REACTION: codex +1 on PR body for head ${head:0:10} (no SHA-bound text clean; re-trigger @codex review for a mergeable verdict)"; exit 0
   fi
 done

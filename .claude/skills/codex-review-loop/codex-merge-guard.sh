@@ -6,12 +6,15 @@
 # Refuses to merge unless, for the CURRENT head SHA:
 #   - no owner blocker is pending (inline finding, CHANGES_REQUESTED / bodied
 #     COMMENTED review, or non-trigger top-level comment), and
-#   - Codex went clean for that head, EITHER via a "Didn't find any major
-#     issues" comment referencing that head SHA, OR via a "+1" reaction on the
-#     PR body covering the head commit (the auto first-review's only clean
-#     signal; see PR #44).
-# Then merges with --match-head-commit so a head that advanced between the check
-# and the merge fails the merge instead of merging an unreviewed SHA (finding 2).
+#   - Codex went clean for that head via a "Didn't find any major issues"
+#     comment referencing that head SHA (a SHA-bound clean).
+# A +1 reaction on the PR body (the auto first-review's clean signal) is NOT
+# accepted here: it carries no SHA and cannot be reliably head-bound (a
+# cherry-picked/old-dated push could forge coverage), so it must not gate a
+# merge. When only a reaction exists, re-trigger @codex review to obtain a
+# SHA-bound text clean. Then merges with --match-head-commit so a head that
+# advanced between the check and the merge fails instead of merging an
+# unreviewed SHA (finding 2).
 set -uo pipefail
 
 OWNER="$1"; REPO="$2"; PR="$3"
@@ -27,13 +30,10 @@ fetch() {
 
 head=$(gh api "repos/$OWNER/$REPO/pulls/$PR" --jq '.head.sha') || {
   echo "REFUSE: cannot read PR head"; exit 1; }
-head_date=$(gh api "repos/$OWNER/$REPO/commits/$head" --jq '.commit.committer.date') || {
-  echo "REFUSE: cannot read head commit date"; exit 1; }
 
 pr_comments=$(fetch "pulls/$PR/comments") || { echo "REFUSE: pulls/comments fetch failed"; exit 1; }
 reviews=$(fetch "pulls/$PR/reviews") || { echo "REFUSE: pulls/reviews fetch failed"; exit 1; }
 issue_comments=$(fetch "issues/$PR/comments") || { echo "REFUSE: issues/comments fetch failed"; exit 1; }
-pr_reactions=$(fetch "issues/$PR/reactions") || { echo "REFUSE: issues/reactions fetch failed"; exit 1; }
 
 # Owner gate by LATEST review state, not history: a CHANGES_REQUESTED that the
 # owner later dismisses/approves must not block forever (finding: resolved
@@ -42,20 +42,14 @@ if [ -n "$(owner_review_gate <<<"$reviews")" ]; then
   echo "REFUSE: owner's latest review is CHANGES_REQUESTED"; exit 1
 fi
 
-# Codex gate: a head-bound clean must exist (finding 1), and no Codex FINDING
-# may be newer than it (finding 2). A Codex error is not a verdict and does not
-# invalidate a clean on the same head — but note the clean is head-bound, so if
-# head moved the clean is already stale and this refuses for lack of a clean.
-# The clean is a head-bound text comment OR a head-covering +1 reaction on the
-# PR body (the auto first-review's only clean signal; see PR #44).
-text_clean_ts=$(codex_clean_ts_for_head "$head" <<<"$issue_comments")
-react_clean_ts=$(codex_reaction_clean_ts "$head_date" <<<"$pr_reactions")
-clean_ts=$text_clean_ts
-if [ -n "$react_clean_ts" ] && { [ -z "$clean_ts" ] || [[ "$react_clean_ts" > "$clean_ts" ]]; }; then
-  clean_ts=$react_clean_ts
-fi
+# Codex gate: a SHA-bound text clean must exist (finding 1), and no Codex
+# FINDING may be newer than it (finding 2). A Codex error is not a verdict and
+# does not invalidate a clean on the same head — but note the clean is
+# head-bound, so if head moved the clean is already stale and this refuses for
+# lack of a clean. A +1 reaction is deliberately not accepted here (see header).
+clean_ts=$(codex_clean_ts_for_head "$head" <<<"$issue_comments")
 if [ -z "$clean_ts" ]; then
-  echo "REFUSE: no Codex clean for current head ${head:0:10}"; exit 1
+  echo "REFUSE: no SHA-bound Codex clean for current head ${head:0:10} (a +1 reaction alone is not mergeable; re-trigger @codex review)"; exit 1
 fi
 find_ts=$(codex_finding_max_ts <<<"$pr_comments")
 if [ -n "$find_ts" ] && [[ "$find_ts" > "$clean_ts" ]]; then

@@ -78,14 +78,17 @@ bash {SKILL_DIR}/codex-review-monitor.sh {owner} {repo} {PR} "{since}"
   owner review は **state ベース**で判定する (bodyless な `CHANGES_REQUESTED`
   も blocker)。純粋な `@codex review` トリガーのみのコメントは除外し、トリガー
   句を含む実フィードバックは拾う。
-- `CLEAN: codex clean for head <sha>` — Codex clean が **現在の head に拘束**
-  され、かつそれより新しい finding も owner 活動も無い (最新 verdict)。clean
-  シグナルは2系統: (1) `Didn't find any major issues` の issue コメント (SHA
-  拘束)、(2) **PR 本体への bot の 👍 (+1) リアクション** (auto first-review で
-  findings ゼロのときはこれだけが合図。text コメントは出ない。実例 PR #44)。
-  後者は SHA を持たないので head commit の日時で拘束する (👍 の後にコミットが
-  載っていれば stale)。古い SHA の clean や、後続 finding に覆された clean では
-  成立しない。
+- `CLEAN: codex clean for head <sha>` — **SHA 拘束の text clean**
+  (`Didn't find any major issues` の issue コメントが現在の head SHA を参照)
+  で、それより新しい finding も owner 活動も無い。これは merge-guard が受理する
+  = そのまま merge 可能な verdict。
+- `CLEAN-REACTION: codex +1 on PR body ...` — **PR 本体への bot の 👍 (+1)
+  リアクション**による clean。auto first-review で findings ゼロのとき、Codex は
+  text コメントを出さず本体に +1 を付けるだけ (実例 PR #44)。これだけを拾って
+  1h タイムアウトを防ぐ。ただし +1 は SHA を持たず head 拘束が committer.date
+  頼み (cherry-pick/古い日時の push で偽装余地) なので **merge-guard は受理しない**。
+  受け取ったら `@codex review` を再トリガーして SHA 拘束の text clean を得てから
+  merge する。
 - `FINDING ...` — Codex の inline 指摘 (エラー本文は除外)。
 - `TIMEOUT` — 1時間到達。Codex 不調を疑い PR を直接確認。
 
@@ -106,6 +109,10 @@ merge 側 (`codex-merge-guard.sh` が head 拘束 clean なしに merge を拒�
   4. **owner の要求が未解決の間は merge しない** (CHANGES_REQUESTED は特に)
 - **TIMEOUT**: 1時間 verdict が来なかった。Codex 不調を疑い PR を直接確認し、
   必要なら `@codex review` を再トリガーして監視を張り直す。
+- **CLEAN-REACTION (bot +1 のみ、text clean 無し)**: Codex は指摘ゼロだが SHA
+  拘束 clean が無い (auto first-review でよくある)。merge-guard は受理しないので、
+  `@codex review` を再トリガーして SHA 拘束の text clean を得てから CLEAN 分岐へ
+  進む。owner 指摘が別途あればそちらを先に処理する。
 - **FINDING (Codex 指摘あり)**:
   1. 各指摘の妥当性を自分で判断する (盲従しない。妥当でなければ理由を付けて返信のみ)
   2. 妥当な指摘に対応し、commit・push
@@ -116,8 +123,8 @@ merge 側 (`codex-merge-guard.sh` が head 拘束 clean なしに merge を拒�
   これが (a) owner blocker の不在 (review state、および clean より後に owner が
   出した top-level コメント・新規 inline finding の不在。owner_review_gate は
   review state しか見ないので、CHANGES_REQUESTED を伴わない owner コメントの
-  race をここで塞ぐ)、(b) 現在の head に拘束された Codex clean (text コメントの
-  SHA 拘束、または PR 本体 👍 の head commit 日時拘束) を fail-closed で再確認し、
+  race をここで塞ぐ)、(b) 現在の head SHA に拘束された Codex text clean を
+  fail-closed で再確認し (PR 本体 👍 だけの reaction clean は受理しない)、
   (c) `gh pr merge --match-head-commit <head>` で atomic に merge する
   (確認後に head が進めば merge は失敗する):
   ```bash
@@ -146,14 +153,16 @@ merge 側 (`codex-merge-guard.sh` が head 拘束 clean なしに merge を拒�
     (文面の後半は変動。`Reviewed commit` の SHA で head 拘束)
   - **auto first-review (findings ゼロ)**: text コメントは出ず、**PR 本体に
     bot の 👍 (+1) リアクション**だけ (`issues/{PR}/reactions` に
-    `content=="+1"`, `user.login` が Codex bot)。実例 PR #44。監視・merge-guard
-    はこの reaction を head commit 日時で拘束して clean と判定する
+    `content=="+1"`, `user.login` が Codex bot)。実例 PR #44。monitor はこれを
+    committer.date で best-effort に head 拘束し `CLEAN-REACTION` advisory を
+    出す (1h timeout 回避)。SHA を持たず偽装余地があるので merge-guard は受理
+    せず、再トリガーで text clean を得てから merge する
 
 ## 注意
 
-- clean は「最新 commit に対する応答」であることを確認してから merge する
-  (text clean は "Reviewed commit" SHA が HEAD と一致するか、reaction clean は
-  👍 の後にコミットが載っていないかを見る。両方 monitor/guard が自動判定する)
+- merge に使う clean は「最新 commit に対する SHA 拘束の応答」であること。
+  merge-guard は text clean の "Reviewed commit" SHA が HEAD と一致するかを
+  自動判定する。reaction clean (👍) は merge に使わない (再トリガーで text clean 化)
 - monitor を張る前に、応答が既に届いていないか一度手動で確認する (polling の隙間対策)
 - 通知はバッチで届くことがある。CLEAN と stream-end が同時に来ても正常
 - 監視が 1 時間 (timeout) を超えたら Codex 側の不調を疑い、PR の画面を直接確認する

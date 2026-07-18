@@ -102,15 +102,18 @@ codex_clean_ts_for_head() {
     | if length > 0 then max else "" end'
 }
 
-# Timestamp of the newest Codex clean REACTION covering the current head, or ""
-# (input: PR-body reactions array from issues/{pr}/reactions; arg $1 = the head
-# commit's ISO date). On an auto first-review with no findings, Codex signals
-# clean NOT with a text comment but with a "+1" reaction on the PR body (see
-# PR #44). That reaction carries no SHA, so bind it to the head by time: it
-# counts only when it is at or after the head commit's date, i.e. no commit
-# landed after Codex reacted. A later push moves the head commit date past the
-# old reaction, which then no longer counts (stale), exactly like a stale
-# head-bound text clean. Only the Codex bot's own +1 qualifies, never a human's.
+# Timestamp of the newest Codex clean REACTION plausibly covering the current
+# head, or "" (input: PR-body reactions array from issues/{pr}/reactions; arg
+# $1 = the head commit's ISO committer date). On an auto first-review with no
+# findings, Codex signals clean NOT with a text comment but with a "+1" reaction
+# on the PR body (see PR #44). That reaction carries no SHA, so it can only be
+# bound to the head by time: it is counted when at or after the head commit
+# date. This is a BEST-EFFORT, ADVISORY proxy only, NOT a mergeable verdict:
+# committer.date is self-reported, so a cherry-picked or old-dated push could
+# make an old reaction appear to cover a head Codex never reviewed. Only the
+# monitor uses this, and only to emit a distinct CLEAN-REACTION advisory that
+# prompts a re-trigger; codex-merge-guard.sh requires a SHA-bound text clean and
+# never merges on a reaction. Only the Codex bot's own +1 qualifies.
 codex_reaction_clean_ts() {
   local headdate="$1"
   [ -n "$headdate" ] || { echo ""; return 0; }
