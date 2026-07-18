@@ -321,6 +321,19 @@ class _JobIsolation:  # pragma: no cover - Windows runtime path
 
         k32 = ctypes.WinDLL("kernel32", use_last_error=True)
         self._kernel32 = k32
+        # Declare HANDLE-sized signatures so a 64-bit HANDLE is not truncated to
+        # ctypes' default 32-bit c_int return/argument type.
+        HANDLE = wintypes.HANDLE
+        k32.CreateJobObjectW.restype = HANDLE
+        k32.CreateJobObjectW.argtypes = [wintypes.LPVOID, wintypes.LPCWSTR]
+        k32.OpenProcess.restype = HANDLE
+        k32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        k32.SetInformationJobObject.restype = wintypes.BOOL
+        k32.SetInformationJobObject.argtypes = [HANDLE, ctypes.c_int, wintypes.LPVOID, wintypes.DWORD]
+        k32.AssignProcessToJobObject.restype = wintypes.BOOL
+        k32.AssignProcessToJobObject.argtypes = [HANDLE, HANDLE]
+        k32.CloseHandle.restype = wintypes.BOOL
+        k32.CloseHandle.argtypes = [HANDLE]
         JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x2000
         JOB_OBJECT_LIMIT_PROCESS_MEMORY = 0x0100
         JobObjectExtendedLimitInformation = 9

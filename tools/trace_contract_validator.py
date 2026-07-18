@@ -28,6 +28,21 @@ BASE_FIELDS = {
     "host_version_label", "plugin_label",
 }
 PAYLOAD_FIELDS = {"selector", "suite", "world", "error", "known_function"}
+# The payload field each event_kind may carry. A payload that does not belong to
+# the current kind is rejected, so e.g. a known_function_invoke cannot also smuggle
+# an unchecked `error.message` past the redaction boundary.
+KIND_PAYLOAD = {
+    "session_start": set(),
+    "session_end": set(),
+    "callback_invoke": set(),
+    "selector_dispatch": {"selector"},
+    "suite_acquire": {"suite"},
+    "suite_release": {"suite"},
+    "world_descriptor": {"world"},
+    "known_function_invoke": {"known_function"},
+    "error": {"error"},
+    "unimplemented": {"error"},
+}
 FORBIDDEN_FIELDS = {"raw_payload", "binary_payload", "pixels", "pointer"}
 
 
@@ -68,6 +83,11 @@ def validate_event(event: Any) -> list[str]:
     for field in BASE_FIELDS:
         if field not in event:
             errors.append(f"missing field: {field}")
+    # A payload field only belongs to its own event_kind; anything else is a
+    # smuggled payload that bypasses that field's shape/redaction checks.
+    allowed_payload = KIND_PAYLOAD.get(event.get("event_kind"), set())
+    for field in sorted((set(event) & PAYLOAD_FIELDS) - allowed_payload):
+        errors.append(f"payload field {field} is not allowed for event_kind {event.get('event_kind')}")
 
     if event.get("schema_version") != 1:
         errors.append("schema_version must be 1")

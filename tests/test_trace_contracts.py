@@ -122,6 +122,19 @@ class TraceContractTests(unittest.TestCase):
             validate_event(enter),
         )
 
+    def test_known_function_rejects_smuggled_foreign_payload(self):
+        # A known_function_invoke must not also carry an `error` payload, which
+        # would otherwise slip an absolute path past redaction via the error branch.
+        enter = copy.deepcopy(load_native_observation_events()[1])
+        enter["error"] = {"code_label": "x", "message": "C:\\secret\\leak"}
+        errors = validate_event(enter)
+        self.assertTrue(any("not allowed for event_kind known_function_invoke" in e for e in errors))
+
+    def test_selector_payload_rejected_on_wrong_kind(self):
+        event = copy.deepcopy(load_events()[0])  # session_start
+        event["selector"] = "PF_Cmd_RENDER"
+        self.assertTrue(any("not allowed for event_kind session_start" in e for e in validate_event(event)))
+
     def test_known_function_requires_native_observation_host_kind(self):
         # Observation payloads must not masquerade as evidence-tier host events.
         enter = copy.deepcopy(load_native_observation_events()[1])

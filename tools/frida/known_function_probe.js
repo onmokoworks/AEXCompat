@@ -52,8 +52,11 @@ function readStruct(base, read) {
 // width.
 function readRegister(slot, read) {
   if (read.width === 8) {
-    const n = parseInt(slot.toString(), 16);
-    return read.interpret === 'bool' ? n !== 0 : n;
+    // Use signed/unsigned 64-bit conversion so a negative int (e.g. -1 arriving
+    // as 0xffffffffffffffff) is recorded as -1, not a huge positive number.
+    if (read.interpret === 'bool') return !slot.isNull();
+    const hex = slot.toString();
+    return (read.interpret === 'int' ? int64(hex) : uint64(hex)).toNumber();
   }
   switch (read.interpret) {
     case 'uint':

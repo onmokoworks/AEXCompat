@@ -281,6 +281,10 @@ class FridaScriptTests(unittest.TestCase):
         # The null-pointer check is struct-only; a register scalar of 0 (a valid
         # NativePointer(0)) must not be rejected.
         self.assertIn("null struct pointer", text)
+        # 64-bit register scalars use signed/unsigned conversion (not a bare
+        # parseInt), so a negative int is not corrupted into a huge positive.
+        self.assertIn("int64(", text)
+        self.assertIn("uint64(", text)
 
     def test_script_parses_with_node(self):
         node = shutil.which("node")
