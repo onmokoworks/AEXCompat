@@ -2591,6 +2591,10 @@ fn inspect_experimental_with_diagnostics_and_runtime_policy(
         )?
     };
     let mut diagnostics = isolated_worker_diagnostics(&isolated, started.elapsed().as_millis());
+    let worker_report: Option<Value> = serde_json::from_str(isolated.stdout.trim()).ok();
+    if let Some(report) = &worker_report {
+        propagate_missing_suites(&mut diagnostics, report);
+    }
     if isolated.classification.as_str() != "ok" {
         if let Some(summary) = failed_module_audit_summary(&isolated.stdout) {
             diagnostics["module_audit_failure"] = summary;
@@ -2599,8 +2603,7 @@ fn inspect_experimental_with_diagnostics_and_runtime_policy(
             "AEX parameter inspection worker failed safely: {diagnostics}"
         )));
     }
-    let report: Value = serde_json::from_str(isolated.stdout.trim())
-        .map_err(|_| invalid("inspection worker report is invalid"))?;
+    let report = worker_report.ok_or_else(|| invalid("inspection worker report is invalid"))?;
     if let Some(summary) = report.get("module_audit").and_then(module_audit_summary) {
         diagnostics["module_audit"] = summary;
     }

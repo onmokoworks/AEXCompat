@@ -9690,7 +9690,12 @@ void record_suite_acquire(const char* name, int32_t version) {
 }
 
 void record_missing_suite(const std::string& name, int32_t version) {
-  if (name.empty() || version <= 0) return;
+  const bool valid_name = !name.empty() && name.size() <= 96 &&
+      std::all_of(name.begin(), name.end(), [](unsigned char character) {
+        return std::isalnum(character) || character == ' ' || character == '.' ||
+            character == '_' || character == '-';
+      });
+  if (!valid_name || version <= 0) return;
   std::lock_guard<std::mutex> lock(g_suite_lease_mutex);
   const auto entry = std::make_pair(name, version);
   if (std::find(g_missing_suites.begin(), g_missing_suites.end(), entry) ==
