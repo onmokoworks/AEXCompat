@@ -21892,6 +21892,16 @@ bool verify_aegp_projector_levels() {
   return ok;
 }
 
+bool narrow_ascii_checked(const std::wstring& text, std::string& output) {
+  output.clear();
+  output.reserve(text.size());
+  for (wchar_t character : text) {
+    if (character < L' ' || character > L'~') return false;
+    output.push_back(static_cast<char>(character));
+  }
+  return true;
+}
+
 bool parse_conformance_render_settings(const wchar_t* encoded) {
   if (!encoded) return false;
   std::vector<std::wstring> fields;
@@ -21908,14 +21918,12 @@ bool parse_conformance_render_settings(const wchar_t* encoded) {
       (fields[1] != L"straight" && fields[1] != L"premultiplied" &&
        fields[1] != L"opaque") ||
       (fields[5] != L"AEXCompat CPU" && fields[5] != L"software")) return false;
-  const auto ascii = [](const std::wstring& text) {
-    return std::all_of(text.begin(), text.end(), [](wchar_t character) {
-      return character >= 0x20 && character <= 0x7e;
-    });
-  };
-  if (!ascii(fields[1]) || !ascii(fields[5])) return false;
-  g_conformance_premultiplication = std::string(fields[1].begin(), fields[1].end());
-  g_conformance_renderer = std::string(fields[5].begin(), fields[5].end());
+  std::string premultiplication;
+  std::string renderer;
+  if (!narrow_ascii_checked(fields[1], premultiplication) ||
+      !narrow_ascii_checked(fields[5], renderer)) return false;
+  g_conformance_premultiplication = std::move(premultiplication);
+  g_conformance_renderer = std::move(renderer);
   g_conformance_render_settings_seen = true;
   return true;
 }
