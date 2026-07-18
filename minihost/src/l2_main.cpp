@@ -52,6 +52,7 @@
 #include "gpu_memory_world_transport.hpp"
 #include "host_audio_runtime.hpp"
 #include "l2_cli_dispatch.h"
+#include "l2_mode_execution.hpp"
 #include "parameter_animation_transport.hpp"
 #include "pf_cache_on_load_suite.hpp"
 #include "render_lifecycle.hpp"
@@ -13979,6 +13980,82 @@ void report(const char* status, int32_t global_error, int32_t params_error,
   std::cout << aexcompat::worker_report::serialize_l2_report(c);
 }
 
+struct EarlyModeBridge {
+  EffectEntry entry{};
+  std::array<std::byte, kInSize>* input{};
+  std::array<std::byte, kOutSize>* output{};
+  HMODULE module{};
+  const std::string* about_message{};
+};
+uint32_t early_mode_out_flags(void* opaque) {
+  const auto& b = *static_cast<EarlyModeBridge*>(opaque);
+  return read<uint32_t>(*b.output, kOutFlags);
+}
+void early_mode_copy_sequence_data_to_input(void* opaque) {
+  const auto& b = *static_cast<EarlyModeBridge*>(opaque);
+  write<void**>(*b.input, kInSequenceData, read<void**>(*b.output, kOutSequenceData));
+}
+int32_t early_mode_sequence_setup(void* opaque, uint32_t* exception) {
+  const auto& b = *static_cast<EarlyModeBridge*>(opaque);
+  return invoke_sequence_selector(b.entry, kSequenceSetup, b.input->data(), b.output->data(), exception);
+}
+int32_t early_mode_sequence_setdown(void* opaque, uint32_t* exception) {
+  const auto& b = *static_cast<EarlyModeBridge*>(opaque);
+  return invoke_sequence_selector(b.entry, kSequenceSetdown, b.input->data(), b.output->data(), exception);
+}
+int32_t early_mode_do_dialog(void* opaque, uint32_t* exception) {
+  const auto& b = *static_cast<EarlyModeBridge*>(opaque);
+  return invoke_entry_seh(b.entry, kDoDialog, b.input->data(), b.output->data(),
+                          nullptr, nullptr, nullptr, exception);
+}
+int32_t early_mode_global_setdown(void* opaque) {
+  const auto& b = *static_cast<EarlyModeBridge*>(opaque);
+  return invoke_global_setdown(b.entry, b.input->data(), b.output->data());
+}
+std::string early_mode_return_message(void* opaque) {
+  const auto& b = *static_cast<EarlyModeBridge*>(opaque);
+  const char* message = reinterpret_cast<const char*>(b.output->data() + kOutMessage);
+  return {message, strnlen_s(message, kOutSize - kOutMessage)};
+}
+bool early_mode_handle_lifetimes_balanced(void*) { return handle_lifetimes_balanced(); }
+void early_mode_restore_stdout(void*) { restore_native_stdout(); }
+void early_mode_unload_module(void* opaque) {
+  FreeLibrary(static_cast<EarlyModeBridge*>(opaque)->module);
+}
+void* early_mode_external_dependencies(void* opaque, int32_t check_type,
+                                       int32_t* error, uint32_t* exception) {
+  const auto& b = *static_cast<EarlyModeBridge*>(opaque);
+  std::array<std::byte, 16> extra{};
+  write<int32_t>(extra, 0, check_type);
+  *error = invoke_entry_seh(b.entry, kGetExternalDependencies, b.input->data(), b.output->data(),
+                            nullptr, nullptr, extra.data(), exception);
+  return read<void**>(extra, 8);
+}
+bool early_mode_handle_is_live(void*, void* handle) { return host_handle_is_live(static_cast<void**>(handle)); }
+uint64_t early_mode_handle_size(void*, void* handle) { return handle_size(static_cast<void**>(handle)); }
+void* early_mode_lock_handle(void*, void* handle) { return lock_handle(static_cast<void**>(handle)); }
+void early_mode_unlock_handle(void*, void* handle) { unlock_handle(static_cast<void**>(handle)); }
+void early_mode_dispose_handle(void*, void* handle) { dispose_handle(static_cast<void**>(handle)); }
+aexcompat::l2mode::HandleStatistics early_mode_handle_statistics(void*) {
+  const auto s = statistics(); return {s.created, s.disposed};
+}
+bool early_mode_dispose_arbitrary_defaults(void* opaque) {
+  const auto& b = *static_cast<EarlyModeBridge*>(opaque);
+  return dispose_arbitrary_defaults(b.entry, *b.input, *b.output);
+}
+bool early_mode_module_audit_required(void*) { return g_module_audit.required; }
+bool early_mode_capture_pre_unload_audit_passed(void*) {
+  g_module_audit.pre_unload = capture_module_audit();
+  return g_module_audit.pre_unload.status == "passed";
+}
+std::string early_mode_module_audit_json(void*) { return module_audit_json(); }
+void early_mode_report_parameters(void* opaque, const char* status, int32_t global_error,
+                                  int32_t params_error, int32_t setdown_error) {
+  const auto& b = *static_cast<EarlyModeBridge*>(opaque);
+  report(status, global_error, params_error, setdown_error, *b.output, *b.about_message,
+         {-1, -1, -1, -1, -1}, true);
+}
+
 bool verify_pf_color_settings_suite6() {
   g_working_color_space_kind = ColorProfileKind::Srgb;
   g_working_color_space_icc.clear();
@@ -17212,209 +17289,28 @@ int worker_main_impl(int argc, wchar_t **argv) {
     FreeLibrary(module);
     return 3;
   }
-  if (!is_rendering_worker() && auto_dialog_mode) {
-    const uint32_t global_flags = read<uint32_t>(output, kOutFlags);
-    const bool dialog_capability_advertised = (global_flags & kOutFlagIDoDialog) != 0;
-    uint32_t sequence_exception_code = 0;
-    std::cerr << "stage:sequence_setup_begin\n" << std::flush;
-    const int32_t auto_sequence_error = params_error == 0
-        ? invoke_sequence_selector(entry, kSequenceSetup, input.data(), output.data(),
-                                   &sequence_exception_code) : -1;
-    std::cerr << "stage:sequence_setup_end error=" << auto_sequence_error << "\n" << std::flush;
-    void** sequence_handle = read<void**>(output, kOutSequenceData);
-    write<void**>(input, kInSequenceData, sequence_handle);
-    const uint32_t sequence_flags = read<uint32_t>(output, kOutFlags);
-    const bool automatic_dialog_requested =
-        (sequence_flags & kOutFlagSendDoDialog) != 0;
-    const bool dispatch_allowed = dialog_capability_advertised &&
-        automatic_dialog_requested && auto_sequence_error == 0;
-    uint32_t dialog_exception_code = 0;
-    int32_t automatic_dialog_error = -1;
-    if (dispatch_allowed) {
-      std::cerr << "stage:do_dialog_begin\n" << std::flush;
-      automatic_dialog_error = invoke_entry_seh(entry, kDoDialog, input.data(), output.data(),
-                                                nullptr, nullptr, nullptr,
-                                                &dialog_exception_code);
-      std::cerr << "stage:do_dialog_end error=" << automatic_dialog_error << "\n" << std::flush;
-    }
-    const char* message = reinterpret_cast<const char*>(output.data() + kOutMessage);
-    const std::size_t message_length = strnlen_s(message, kOutSize - kOutMessage);
-    const std::string dialog_message(message, message_length);
-    uint32_t setdown_exception_code = 0;
-    std::cerr << "stage:sequence_setdown_begin\n" << std::flush;
-    const int32_t auto_sequence_setdown_error = auto_sequence_error == 0
-        ? invoke_sequence_selector(entry, kSequenceSetdown, input.data(), output.data(),
-                                   &setdown_exception_code) : -1;
-    std::cerr << "stage:sequence_setdown_end error=" << auto_sequence_setdown_error
-              << "\n" << std::flush;
-    std::cerr << "stage:global_setdown_begin\n" << std::flush;
-    const int32_t auto_global_setdown_error = global_error == 0
-        ? invoke_global_setdown(entry, input.data(), output.data()) : -1;
-    std::cerr << "stage:global_setdown_end error=" << auto_global_setdown_error
-              << "\n" << std::flush;
-    const bool contract_valid = dispatch_allowed && sequence_exception_code == 0 &&
-        automatic_dialog_error == 0 && dialog_exception_code == 0 &&
-        auto_sequence_setdown_error == 0 && setdown_exception_code == 0 &&
-        auto_global_setdown_error == 0 && handle_lifetimes_balanced();
-    restore_native_stdout();
-    std::cout << "{\"schema_version\":1,\"stage\":\"automatic_dialog\",\"status\":\""
-              << (contract_valid ? "automatic_dialog_completed" :
-                  (automatic_dialog_requested ? "automatic_dialog_error" :
-                   "automatic_dialog_not_requested"))
-              << "\",\"dialog_capability_advertised\":"
-              << (dialog_capability_advertised ? "true" : "false")
-              << ",\"automatic_dialog_requested\":"
-              << (automatic_dialog_requested ? "true" : "false")
-              << ",\"selector_dispatched\":" << (dispatch_allowed ? "true" : "false")
-              << ",\"sequence_setup_error\":" << auto_sequence_error
-              << ",\"sequence_setup_exception_code\":" << sequence_exception_code
-              << ",\"dialog_error\":" << automatic_dialog_error
-              << ",\"dialog_exception_code\":" << dialog_exception_code
-              << ",\"return_message\":\"" << escape(dialog_message) << "\""
-              << ",\"sequence_setdown_error\":" << auto_sequence_setdown_error
-              << ",\"sequence_setdown_exception_code\":" << setdown_exception_code
-              << ",\"handle_lifetimes_balanced\":"
-              << (handle_lifetimes_balanced() ? "true" : "false")
-              << ",\"global_setdown_error\":" << auto_global_setdown_error << "}\n";
-    FreeLibrary(module);
-    return contract_valid ? 0 : (automatic_dialog_requested ? 20 : 21);
-  }
-  if (do_dialog_mode) {
-    const uint32_t advertised_flags = read<uint32_t>(output, kOutFlags);
-    const bool dialog_advertised = (advertised_flags & kOutFlagIDoDialog) != 0;
-    uint32_t dialog_exception_code = 0;
-    int32_t dialog_error = -1;
-    if (params_error == 0 && dialog_advertised) {
-      std::cerr << "stage:do_dialog_begin\n" << std::flush;
-      dialog_error = invoke_entry_seh(entry, kDoDialog, input.data(), output.data(),
-                                      nullptr, nullptr, nullptr,
-                                      &dialog_exception_code);
-      std::cerr << "stage:do_dialog_end error=" << dialog_error << "\n" << std::flush;
-    }
-    const uint32_t returned_flags = read<uint32_t>(output, kOutFlags);
-    const char* message = reinterpret_cast<const char*>(output.data() + kOutMessage);
-    const std::size_t message_length = strnlen_s(message, kOutSize - kOutMessage);
-    const std::string dialog_message(message, message_length);
-    std::cerr << "stage:global_setdown_begin\n" << std::flush;
-    const int32_t dialog_setdown_error = global_error == 0
-        ? invoke_global_setdown(entry, input.data(), output.data()) : -1;
-    std::cerr << "stage:global_setdown_end error=" << dialog_setdown_error << "\n" << std::flush;
-    const bool contract_valid = params_error == 0 && dialog_advertised &&
-        dialog_error == 0 && dialog_exception_code == 0 && dialog_setdown_error == 0 &&
-        handle_lifetimes_balanced();
-    restore_native_stdout();
-    std::cout << "{\"schema_version\":1,\"stage\":\"do_dialog\",\"status\":\""
-              << (contract_valid ? "dialog_completed" :
-                  (dialog_advertised ? "dialog_error" : "dialog_not_advertised"))
-              << "\",\"dialog_advertised\":" << (dialog_advertised ? "true" : "false")
-              << ",\"selector_dispatched\":" << (dialog_advertised ? "true" : "false")
-              << ",\"selector_error\":" << dialog_error
-              << ",\"exception_code\":" << dialog_exception_code
-              << ",\"display_error_message\":"
-              << ((returned_flags & kOutFlagDisplayErrorMessage) ? "true" : "false")
-              << ",\"return_message\":\"" << escape(dialog_message) << "\""
-              << ",\"handle_lifetimes_balanced\":"
-              << (handle_lifetimes_balanced() ? "true" : "false")
-              << ",\"global_setdown_error\":" << dialog_setdown_error << "}\n";
-    FreeLibrary(module);
-    return contract_valid ? 0 : (dialog_advertised ? 20 : 21);
-  }
-  if (external_dependencies_mode) {
-    int32_t check_type = -1;
-    try { check_type = std::stoi(argv[4]); } catch (...) { check_type = -1; }
-    if (check_type < 0 || check_type > 2) {
-      if (global_error == 0)
-        invoke_global_setdown(entry, input.data(), output.data());
-      FreeLibrary(module);
-      return 3;
-    }
-    std::array<std::byte, 16> dependency_extra{};
-    write<int32_t>(dependency_extra, 0, check_type);
-    uint32_t dependency_exception_code = 0;
-    std::cerr << "stage:get_external_dependencies_begin\n" << std::flush;
-    const int32_t dependency_error = params_error == 0
-        ? invoke_entry_seh(entry, kGetExternalDependencies, input.data(), output.data(),
-                           nullptr, nullptr, dependency_extra.data(),
-                           &dependency_exception_code) : -1;
-    std::cerr << "stage:get_external_dependencies_end error=" << dependency_error
-              << "\n" << std::flush;
-    void** dependency_handle = read<void**>(dependency_extra, 8);
-    constexpr uint64_t kMaxDependencyBytes = 64 * 1024;
-    uint64_t dependency_bytes = 0;
-    bool dependency_nul_terminated = dependency_handle == nullptr;
-    bool dependency_handle_valid = dependency_handle == nullptr;
-    std::string dependency_text;
-    if (dependency_handle) {
-      dependency_handle_valid = host_handle_is_live(dependency_handle);
-      dependency_bytes = dependency_handle_valid ? handle_size(dependency_handle) : 0;
-      if (dependency_bytes > 0 && dependency_bytes <= kMaxDependencyBytes) {
-        const char* text = static_cast<const char*>(lock_handle(dependency_handle));
-        if (text) {
-          const void* terminator = std::memchr(text, '\0', static_cast<std::size_t>(dependency_bytes));
-          dependency_nul_terminated = terminator != nullptr;
-          if (terminator)
-            dependency_text.assign(text, static_cast<const char*>(terminator));
-          unlock_handle(dependency_handle);
-        }
-      }
-      dispose_handle(dependency_handle);
-    }
-    const bool dependency_handle_disposed = !dependency_handle ||
-        !host_handle_is_live(dependency_handle);
-    std::cerr << "stage:global_setdown_begin\n" << std::flush;
-    const int32_t dependency_setdown_error = global_error == 0
-        ? invoke_global_setdown(entry, input.data(), output.data()) : -1;
-    std::cerr << "stage:global_setdown_end error=" << dependency_setdown_error
-              << "\n" << std::flush;
-    restore_native_stdout();
-    std::cout << "{\"schema_version\":1,\"stage\":\"external_dependencies\",\"status\":\""
-              << (dependency_error == 0 && dependency_handle_valid &&
-                  dependency_nul_terminated && dependency_handle_disposed &&
-                  dependency_setdown_error == 0 && handle_lifetimes_balanced()
-                  ? "dependencies_inspected" : "dependency_error")
-              << "\",\"check_type\":" << check_type
-              << ",\"selector_error\":" << dependency_error
-              << ",\"exception_code\":" << dependency_exception_code
-              << ",\"dependency_text\":\"" << escape(dependency_text) << "\""
-              << ",\"dependency_bytes\":" << dependency_bytes
-              << ",\"handle_returned\":" << (dependency_handle ? "true" : "false")
-              << ",\"handle_valid\":" << (dependency_handle_valid ? "true" : "false")
-              << ",\"nul_terminated\":" << (dependency_nul_terminated ? "true" : "false")
-              << ",\"handle_host_disposed\":" << (dependency_handle_disposed ? "true" : "false")
-              << ",\"handles_created\":" << statistics().created
-              << ",\"handles_disposed\":" << statistics().disposed
-              << ",\"handle_lifetimes_balanced\":"
-              << (handle_lifetimes_balanced() ? "true" : "false")
-              << ",\"global_setdown_error\":" << dependency_setdown_error << "}\n";
-    FreeLibrary(module);
-    return dependency_error == 0 && dependency_handle_valid && dependency_nul_terminated &&
-        dependency_handle_disposed && dependency_setdown_error == 0 &&
-        handle_lifetimes_balanced() ? 0 : 20;
-  }
-  if (params_only_mode) {
-    const bool arbitrary_defaults_disposed = dispose_arbitrary_defaults(entry, input, output);
-    std::cerr << "stage:global_setdown_begin\n" << std::flush;
-    const int32_t params_setdown_error = global_error == 0
-        ? invoke_global_setdown(entry, input.data(), output.data()) : -1;
-    std::cerr << "stage:global_setdown_end error=" << params_setdown_error << "\n" << std::flush;
-    const std::array<int32_t, 5> skipped_lifecycle{-1, -1, -1, -1, -1};
-    if (g_module_audit.required)
-      g_module_audit.pre_unload = capture_module_audit();
-    if (g_module_audit.required && g_module_audit.pre_unload.status != "passed") {
-      restore_native_stdout();
-      std::cout << "{\"schema_version\":1,\"stage\":\"module_audit\","
-                   "\"status\":\"module_audit_failed\",\"module_audit\":"
-                << module_audit_json() << "}\n";
-      FreeLibrary(module);
-      return 14;
-    }
-    report(global_error == 0 && params_error == 0 && parameter_count_contract_valid ?
-               "parameters_inspected" : "selector_error",
-           global_error, params_error, params_setdown_error, output, about_message,
-           skipped_lifecycle, true);
-    FreeLibrary(module);
-    return global_error == 0 && params_error == 0 && parameter_count_contract_valid && arbitrary_defaults_disposed &&
-        params_setdown_error == 0 ? 0 : 20;
+  aexcompat::l2mode::EarlyMode early_mode = aexcompat::l2mode::EarlyMode::None;
+  if (auto_dialog_mode) early_mode = aexcompat::l2mode::EarlyMode::AutomaticDialog;
+  else if (do_dialog_mode) early_mode = aexcompat::l2mode::EarlyMode::DoDialog;
+  else if (external_dependencies_mode) early_mode = aexcompat::l2mode::EarlyMode::ExternalDependencies;
+  else if (params_only_mode) early_mode = aexcompat::l2mode::EarlyMode::ParametersOnly;
+  if (!is_rendering_worker() && early_mode != aexcompat::l2mode::EarlyMode::None) {
+    EarlyModeBridge bridge{entry, &input, &output, module, &about_message};
+    const aexcompat::l2mode::Hooks hooks{
+        early_mode_out_flags, early_mode_copy_sequence_data_to_input,
+        early_mode_sequence_setup, early_mode_sequence_setdown, early_mode_do_dialog,
+        early_mode_global_setdown, early_mode_return_message, early_mode_handle_lifetimes_balanced,
+        early_mode_restore_stdout, early_mode_unload_module, early_mode_external_dependencies,
+        early_mode_handle_is_live, early_mode_handle_size, early_mode_lock_handle,
+        early_mode_unlock_handle, early_mode_dispose_handle, early_mode_handle_statistics,
+        early_mode_dispose_arbitrary_defaults, early_mode_module_audit_required,
+        early_mode_capture_pre_unload_audit_passed, early_mode_module_audit_json,
+        early_mode_report_parameters};
+    return aexcompat::l2mode::run_early_mode(
+        {early_mode, &bridge, hooks, global_error, params_error,
+         parameter_count_contract_valid,
+         external_dependencies_mode ? argv[4] : nullptr});
+
   }
   if (is_render_worker() && audio_mode) {
     constexpr std::size_t kAudioGuardSamples = 8;
