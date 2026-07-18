@@ -10,6 +10,8 @@ param(
     [ValidateRange(1, 1000)][int]$Fps = 30,
     [ValidateRange(1, 10000001)][int]$DurationFrames = 300,
     [ValidateSet(8, 16, 32)][int]$Bpc = 8,
+    [string]$WorkingSpace = '',
+    [ValidateSet('', '0', '1')][string]$LinearizeWorkingSpace = '',
     [switch]$NoEffect,
     [ValidateRange(5, 600)][int]$TimeoutSeconds = 120
 )
@@ -71,6 +73,11 @@ $env:AEXCOMPAT_AE_FPS = [string]$Fps
 $env:AEXCOMPAT_AE_DURATION = [string]$DurationFrames
 $env:AEXCOMPAT_AE_BPC = [string]$Bpc
 $env:AEXCOMPAT_AE_NO_EFFECT = if ($NoEffect) { '1' } else { '0' }
+# Unset means "leave the fresh project's defaults untouched"; the JSX records
+# the observed color state either way and fails closed when a pin does not
+# apply verbatim.
+if ($WorkingSpace) { $env:AEXCOMPAT_AE_WORKING_SPACE = $WorkingSpace }
+if ($LinearizeWorkingSpace) { $env:AEXCOMPAT_AE_LINEARIZE = $LinearizeWorkingSpace }
 # The JSX polls for the asynchronous saveFrameToPng output; keep its bound
 # inside the outer watchdog so the wait can never outlive this script.
 $env:AEXCOMPAT_AE_SAVE_TIMEOUT_MS = [string]($TimeoutSeconds * 1000)
@@ -90,7 +97,8 @@ try {
 } finally {
     'AEXCOMPAT_AE_INPUT','AEXCOMPAT_AE_OUTPUT','AEXCOMPAT_AE_RESULT','AEXCOMPAT_AE_EFFECT',
     'AEXCOMPAT_AE_FRAME','AEXCOMPAT_AE_FPS','AEXCOMPAT_AE_DURATION','AEXCOMPAT_AE_BPC',
-    'AEXCOMPAT_AE_SAVE_TIMEOUT_MS','AEXCOMPAT_AE_NO_EFFECT' |
+    'AEXCOMPAT_AE_SAVE_TIMEOUT_MS','AEXCOMPAT_AE_NO_EFFECT',
+    'AEXCOMPAT_AE_WORKING_SPACE','AEXCOMPAT_AE_LINEARIZE' |
         ForEach-Object { Remove-Item "Env:$_" -ErrorAction SilentlyContinue }
 }
 
