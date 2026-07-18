@@ -55,6 +55,7 @@
 #include "strict_json.hpp"
 #include "suite_lease_tracker.hpp"
 #include "worker_selector_dispatch.hpp"
+#include "worker_suite_abi.hpp"
 #include "worker_world_safety.hpp"
 
 namespace {
@@ -4716,36 +4717,32 @@ int32_t __cdecl aegp_world_fast_blur(double, uint32_t, int32_t, void**);
 int32_t __cdecl aegp_world_new_platform(int32_t, int32_t, int32_t, int32_t, void**);
 int32_t __cdecl aegp_world_dispose_platform(void*);
 int32_t __cdecl aegp_world_reference_platform(int32_t, void*, void***);
-struct AegpWorldSuite3 {
-  decltype(&aegp_world_new_owned) new_world;
-  decltype(&aegp_world_dispose) dispose;
-  decltype(&aegp_world_get_type) get_type;
-  decltype(&aegp_world_get_size) get_size;
-  decltype(&aegp_world_get_rowbytes) get_rowbytes;
-  decltype(&aegp_world_get_base_addr8) get_base_addr8;
-  decltype(&aegp_world_get_base_addr16) get_base_addr16;
-  decltype(&aegp_world_get_base_addr32) get_base_addr32;
-  decltype(&aegp_world_fill_pf_world) fill_pf_world;
-  decltype(&aegp_world_fast_blur) fast_blur;
-  decltype(&aegp_world_new_platform) new_platform_world;
-  decltype(&aegp_world_dispose_platform) dispose_platform_world;
-  decltype(&aegp_world_reference_platform) reference_platform_world;
-};
-static_assert(sizeof(AegpWorldSuite3) == 13 * sizeof(void*));
-static_assert(offsetof(AegpWorldSuite3, new_world) == 0 * sizeof(void*));
-static_assert(offsetof(AegpWorldSuite3, dispose) == 1 * sizeof(void*));
-static_assert(offsetof(AegpWorldSuite3, get_type) == 2 * sizeof(void*));
-static_assert(offsetof(AegpWorldSuite3, get_size) == 3 * sizeof(void*));
-static_assert(offsetof(AegpWorldSuite3, get_rowbytes) == 4 * sizeof(void*));
-static_assert(offsetof(AegpWorldSuite3, get_base_addr8) == 5 * sizeof(void*));
-static_assert(offsetof(AegpWorldSuite3, get_base_addr16) == 6 * sizeof(void*));
-static_assert(offsetof(AegpWorldSuite3, get_base_addr32) == 7 * sizeof(void*));
-static_assert(offsetof(AegpWorldSuite3, fill_pf_world) == 8 * sizeof(void*));
-static_assert(offsetof(AegpWorldSuite3, fast_blur) == 9 * sizeof(void*));
-static_assert(offsetof(AegpWorldSuite3, new_platform_world) == 10 * sizeof(void*));
-static_assert(offsetof(AegpWorldSuite3, dispose_platform_world) == 11 * sizeof(void*));
-static_assert(offsetof(AegpWorldSuite3, reference_platform_world) == 12 * sizeof(void*));
-AegpWorldSuite3 g_aegp_world_suite3{};
+static_assert(std::is_same_v<decltype(&aegp_world_new_owned),
+                             aexcompat::suite_abi::AegpWorldNew>);
+static_assert(std::is_same_v<decltype(&aegp_world_dispose),
+                             aexcompat::suite_abi::AegpWorldDispose>);
+static_assert(std::is_same_v<decltype(&aegp_world_get_type),
+                             aexcompat::suite_abi::AegpWorldGetType>);
+static_assert(std::is_same_v<decltype(&aegp_world_get_size),
+                             aexcompat::suite_abi::AegpWorldGetSize>);
+static_assert(std::is_same_v<decltype(&aegp_world_get_rowbytes),
+                             aexcompat::suite_abi::AegpWorldGetRowbytes>);
+static_assert(std::is_same_v<decltype(&aegp_world_get_base_addr8),
+                             aexcompat::suite_abi::AegpWorldGetBaseAddress8>);
+static_assert(std::is_same_v<decltype(&aegp_world_get_base_addr16),
+                             aexcompat::suite_abi::AegpWorldGetBaseAddress16>);
+static_assert(std::is_same_v<decltype(&aegp_world_get_base_addr32),
+                             aexcompat::suite_abi::AegpWorldGetBaseAddress32>);
+static_assert(std::is_same_v<decltype(&aegp_world_fill_pf_world),
+                             aexcompat::suite_abi::AegpWorldFillPfWorld>);
+static_assert(std::is_same_v<decltype(&aegp_world_fast_blur),
+                             aexcompat::suite_abi::AegpWorldFastBlur>);
+static_assert(std::is_same_v<decltype(&aegp_world_new_platform),
+                             aexcompat::suite_abi::AegpWorldNewPlatform>);
+static_assert(std::is_same_v<decltype(&aegp_world_dispose_platform),
+                             aexcompat::suite_abi::AegpWorldDisposePlatform>);
+static_assert(std::is_same_v<decltype(&aegp_world_reference_platform),
+                             aexcompat::suite_abi::AegpWorldReferencePlatform>);
 enum class ColorProfileKind : uint8_t { Srgb, LinearSrgb, ImportedRgb };
 struct AegpGuidValue { std::array<uint8_t, 16> bytes{}; };
 struct ColorProfileRecord {
@@ -12871,13 +12868,14 @@ int32_t __cdecl acquire_suite(const char* name, int32_t version, const void** su
     return 0;
   }
   if (name && std::strcmp(name, "AEGP World Suite") == 0 && version == 3) {
-    g_aegp_world_suite3 = {&aegp_world_new_owned, &aegp_world_dispose,
+    auto& world_suite3 = aexcompat::suite_abi::aegp_world_suite3_table();
+    world_suite3 = {&aegp_world_new_owned, &aegp_world_dispose,
         &aegp_world_get_type, &aegp_world_get_size, &aegp_world_get_rowbytes,
         &aegp_world_get_base_addr8, &aegp_world_get_base_addr16,
         &aegp_world_get_base_addr32, &aegp_world_fill_pf_world,
         &aegp_world_fast_blur, &aegp_world_new_platform,
         &aegp_world_dispose_platform, &aegp_world_reference_platform};
-    *suite = &g_aegp_world_suite3;
+    *suite = &world_suite3;
     record_suite_acquire(name, version);
     return 0;
   }

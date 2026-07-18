@@ -26,6 +26,7 @@ set(AEXCOMPAT_L2_WORKER_SOURCES
     src/strict_json.cpp
     src/suite_lease_tracker.cpp
     src/worker_selector_dispatch.cpp
+    src/worker_suite_abi.cpp
     src/worker_world_safety.cpp)
 
 add_executable(aex_l2_worker ${AEXCOMPAT_L2_WORKER_SOURCES})
