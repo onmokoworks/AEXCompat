@@ -18,7 +18,8 @@ set(AEXCOMPAT_L2_WORKER_SOURCES
     src/l2_main.cpp
     src/parameter_animation_transport.cpp
     src/render_pixel_transport.cpp
-    src/strict_json.cpp)
+    src/strict_json.cpp
+    src/suite_lease_tracker.cpp)
 
 add_executable(aex_l2_worker ${AEXCOMPAT_L2_WORKER_SOURCES})
 target_compile_features(aex_l2_worker PRIVATE cxx_std_17)

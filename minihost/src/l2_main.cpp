@@ -49,6 +49,7 @@
 #include "parameter_animation_transport.hpp"
 #include "render_pixel_transport.hpp"
 #include "strict_json.hpp"
+#include "suite_lease_tracker.hpp"
 
 namespace {
 #pragma comment(lib, "psapi.lib")
@@ -66,6 +67,7 @@ using aexcompat::parameter_animation::ParameterAnimationKey;
 using aexcompat::parameter_animation::ParameterTimeline;
 using aexcompat::parameter_animation::load_parameter_animation;
 using aexcompat::parameter_animation::rational_less;
+using aexcompat::suite_runtime::SuiteLeaseTracker;
 #if defined(AEXCOMPAT_RENDER_WORKER) || defined(AEXCOMPAT_SMART_WORKER)
 using aexcompat::render_pixel_transport::argb_to_rgba8;
 using aexcompat::render_pixel_transport::argb_to_rgba_native;
@@ -9775,20 +9777,14 @@ bool verify_world_allocation_limit_rejected() {
       g_invalid_world_operations == invalid_before + 1 && world_lifetimes_balanced();
 }
 
-std::mutex g_suite_lease_mutex;
-std::map<std::pair<std::string, int32_t>, uint32_t> g_suite_leases;
-uint32_t g_suite_acquires{};
-uint32_t g_suite_releases{};
+SuiteLeaseTracker g_suite_lease_tracker;
+std::mutex g_missing_suites_mutex;
 constexpr std::size_t kMaxMissingSuites = 16;
 std::vector<std::pair<std::string, int32_t>> g_missing_suites;
 std::string escape(const std::string& input);
 
 void record_suite_acquire(const char* name, int32_t version) {
-  {
-    std::lock_guard<std::mutex> lock(g_suite_lease_mutex);
-    ++g_suite_leases[{name, version}];
-    ++g_suite_acquires;
-  }
+  g_suite_lease_tracker.acquire(name, version);
   if (g_trace_writer && name) g_trace_writer->suite_acquire(name, version, true);
 }
 
@@ -9799,7 +9795,7 @@ void record_missing_suite(const std::string& name, int32_t version) {
             character == '_' || character == '-';
       });
   if (!valid_name || version <= 0) return;
-  std::lock_guard<std::mutex> lock(g_suite_lease_mutex);
+  std::lock_guard<std::mutex> lock(g_missing_suites_mutex);
   const auto entry = std::make_pair(name, version);
   if (std::find(g_missing_suites.begin(), g_missing_suites.end(), entry) ==
           g_missing_suites.end() &&
@@ -9809,7 +9805,7 @@ void record_missing_suite(const std::string& name, int32_t version) {
 }
 
 std::string missing_suites_report_json() {
-  std::lock_guard<std::mutex> lock(g_suite_lease_mutex);
+  std::lock_guard<std::mutex> lock(g_missing_suites_mutex);
   std::ostringstream json;
   json << ",\"missing_suites\":[";
   for (std::size_t index = 0; index < g_missing_suites.size(); ++index) {
@@ -9822,25 +9818,19 @@ std::string missing_suites_report_json() {
 }
 
 bool suite_leases_balanced() {
-  std::lock_guard<std::mutex> lock(g_suite_lease_mutex);
-  return g_suite_acquires == g_suite_releases &&
-      std::all_of(g_suite_leases.begin(), g_suite_leases.end(),
-                  [](const auto& lease) { return lease.second == 0; });
+  return g_suite_lease_tracker.balanced();
 }
 
 std::size_t live_suite_lease_count() {
-  std::lock_guard<std::mutex> lock(g_suite_lease_mutex);
-  return static_cast<std::size_t>(std::count_if(
-      g_suite_leases.begin(), g_suite_leases.end(),
-      [](const auto& lease) { return lease.second != 0; }));
+  return g_suite_lease_tracker.live_lease_count();
 }
 
 uint32_t live_suite_reference_count() {
-  std::lock_guard<std::mutex> lock(g_suite_lease_mutex);
-  uint32_t count = 0;
-  for (const auto& lease : g_suite_leases) count += lease.second;
-  return count;
+  return g_suite_lease_tracker.live_reference_count();
 }
+
+uint32_t suite_acquire_count() { return g_suite_lease_tracker.acquire_count(); }
+uint32_t suite_release_count() { return g_suite_lease_tracker.release_count(); }
 
 int32_t __cdecl aegp_get_unique_command(int32_t* command) {
   if (!command || g_aegp_commands_created >= 64) return 4;
@@ -11676,21 +11666,13 @@ static_assert(sizeof(g_aegp_stream_suite6) == 184);
 static_assert(sizeof(g_aegp_keyframe_suite5) == 176);
 
 std::string live_suite_lease_summary() {
-  std::lock_guard<std::mutex> lock(g_suite_lease_mutex);
-  std::ostringstream summary;
-  for (const auto& [key, count] : g_suite_leases) {
-    if (count == 0) continue;
-    if (summary.tellp() > 0) summary << ';';
-    summary << key.first << '@' << key.second << '=' << count;
-  }
-  return summary.str();
+  return g_suite_lease_tracker.live_summary();
 }
 
 bool isolated_aegp_read_cache_is_bounded() {
-  std::lock_guard<std::mutex> lock(g_suite_lease_mutex);
+  const auto snapshot = g_suite_lease_tracker.snapshot();
   uint32_t total = 0;
-  for (const auto& [key, count] : g_suite_leases) {
-    if (count == 0) continue;
+  for (const auto& [key, count] : snapshot.live_leases) {
     const bool allowed =
         (key.first == "AEGP Item Suite" && key.second == 14) ||
         (key.first == "AEGP Comp Suite" && (key.second == 25 || key.second == 26)) ||
@@ -13555,27 +13537,19 @@ int32_t __cdecl acquire_suite(const char* name, int32_t version, const void** su
 }
 
 int32_t __cdecl release_suite(const char* name, int32_t version) {
-  bool released = false;
-  if (name) {
-    std::lock_guard<std::mutex> lock(g_suite_lease_mutex);
-    const auto found = g_suite_leases.find({name, version});
-    if (found != g_suite_leases.end() && found->second != 0) {
-      --found->second;
-      ++g_suite_releases;
-      released = true;
-    }
-  }
+  const bool released = g_suite_lease_tracker.release(name, version);
   if (g_trace_writer && name)
     g_trace_writer->suite_release(name, std::max<int32_t>(version, 0), released);
   return released ? 0 : 1;
 }
 
 bool verify_suite_release_without_acquire_rejected() {
-  const uint32_t acquires_before = g_suite_acquires;
-  const uint32_t releases_before = g_suite_releases;
+  const uint32_t acquires_before = suite_acquire_count();
+  const uint32_t releases_before = suite_release_count();
   const uint32_t live_before = live_suite_reference_count();
   return release_suite("AEGP Layer Mask Suite", 999) != 0 &&
-      g_suite_acquires == acquires_before && g_suite_releases == releases_before &&
+      suite_acquire_count() == acquires_before &&
+      suite_release_count() == releases_before &&
       live_suite_reference_count() == live_before;
 }
 
@@ -20740,8 +20714,8 @@ bool verify_aegp_layer_render_options_suite2() {
 bool verify_pf_adv_app_suite_versions() {
   const void* suite1 = nullptr;
   const void* suite2 = nullptr;
-  const uint32_t acquires_before = g_suite_acquires;
-  const uint32_t releases_before = g_suite_releases;
+  const uint32_t acquires_before = suite_acquire_count();
+  const uint32_t releases_before = suite_release_count();
   bool ok = acquire_suite("PF AE Adv App Suite", 1, &suite1) == 0 &&
       acquire_suite("PF AE Adv App Suite", 2, &suite2) == 0;
   auto* slots1 = static_cast<void* const*>(suite1);
@@ -20770,8 +20744,8 @@ bool verify_pf_adv_app_suite_versions() {
   }
   ok = release_suite("PF AE Adv App Suite", 2) == 0 &&
       release_suite("PF AE Adv App Suite", 1) == 0 && ok;
-  return ok && g_suite_acquires == acquires_before + 2 &&
-      g_suite_releases == releases_before + 2 && suite_leases_balanced();
+  return ok && suite_acquire_count() == acquires_before + 2 &&
+      suite_release_count() == releases_before + 2 && suite_leases_balanced();
 }
 
 bool verify_pf_adv_time_suite_versions() {
@@ -20783,8 +20757,8 @@ bool verify_pf_adv_time_suite_versions() {
   const void* suite2 = nullptr;
   const void* suite3 = nullptr;
   const void* suite4 = nullptr;
-  const uint32_t acquires_before = g_suite_acquires;
-  const uint32_t releases_before = g_suite_releases;
+  const uint32_t acquires_before = suite_acquire_count();
+  const uint32_t releases_before = suite_release_count();
   bool ok = acquire_suite("PF AE Adv Time Suite", 1, &suite1) == 0 &&
       acquire_suite("PF AE Adv Time Suite", 2, &suite2) == 0 &&
       acquire_suite("PF AE Adv Time Suite", 3, &suite3) == 0 &&
@@ -20824,19 +20798,19 @@ bool verify_pf_adv_time_suite_versions() {
       release_suite("PF AE Adv Time Suite", 3) == 0 &&
       release_suite("PF AE Adv Time Suite", 2) == 0 &&
       release_suite("PF AE Adv Time Suite", 1) == 0 && ok;
-  return ok && g_suite_acquires == acquires_before + 4 &&
-      g_suite_releases == releases_before + 4 && suite_leases_balanced();
+  return ok && suite_acquire_count() == acquires_before + 4 &&
+      suite_release_count() == releases_before + 4 && suite_leases_balanced();
 }
 
 bool verify_suite_entry_guards_and_utility13() {
-  const uint32_t acquires_before = g_suite_acquires;
-  const uint32_t releases_before = g_suite_releases;
+  const uint32_t acquires_before = suite_acquire_count();
+  const uint32_t releases_before = suite_release_count();
   const uint32_t live_before = live_suite_reference_count();
   const void* acquired = reinterpret_cast<const void*>(1);
   bool ok = acquire_suite(nullptr, 13, &acquired) != 0 && acquired == nullptr &&
       acquire_suite("AEGP Utility Suite", 13, nullptr) != 0 &&
-      release_suite(nullptr, 13) != 0 && g_suite_acquires == acquires_before &&
-      g_suite_releases == releases_before && live_suite_reference_count() == live_before;
+      release_suite(nullptr, 13) != 0 && suite_acquire_count() == acquires_before &&
+      suite_release_count() == releases_before && live_suite_reference_count() == live_before;
   const bool saved_mask_model_enabled = g_mask_model_enabled;
   g_mask_model_enabled = false;
   const void* utility13 = nullptr;
@@ -20859,8 +20833,8 @@ bool verify_suite_entry_guards_and_utility13() {
       utility->get_main_hwnd(&main_window) == 0 &&
       main_window == GetDesktopWindow() &&
       release_suite("AEGP Utility Suite", 13) == 0;
-  return ok && g_suite_acquires == acquires_before + 1 &&
-      g_suite_releases == releases_before + 1 && suite_leases_balanced();
+  return ok && suite_acquire_count() == acquires_before + 1 &&
+      suite_release_count() == releases_before + 1 && suite_leases_balanced();
 }
 
 uint32_t g_cleanup_safety_selftest_calls{};
@@ -22738,8 +22712,8 @@ int wmain(int argc, wchar_t **argv) {
               << ",\"aegp_memory_freed\":" << g_aegp_memory_freed
               << ",\"aegp_memory_lifetimes_balanced\":"
               << (aegp_memory_lifetimes_balanced ? "true" : "false")
-              << ",\"suite_acquires\":" << g_suite_acquires
-              << ",\"suite_releases\":" << g_suite_releases
+              << ",\"suite_acquires\":" << suite_acquire_count()
+              << ",\"suite_releases\":" << suite_release_count()
               << ",\"live_suite_reference_count\":" << live_suite_references
               << ",\"live_suite_leases\":\"" << live_suite_summary << "\""
               << ",\"suite_cache_reclaimed_at_process_exit\":"
@@ -24004,8 +23978,8 @@ int wmain(int argc, wchar_t **argv) {
             << g_app_picker_color[3] << ']'
             << ",\"suite_leases_balanced\":" << (suite_leases_balanced() ? "true" : "false")
             << ",\"suite_lease_warning\":" << (!suite_leases_balanced() ? "true" : "false")
-            << ",\"suite_acquires\":" << g_suite_acquires
-            << ",\"suite_releases\":" << g_suite_releases
+            << ",\"suite_acquires\":" << suite_acquire_count()
+            << ",\"suite_releases\":" << suite_release_count()
             << missing_suites_report_json()
             << ",\"live_suite_lease_count\":" << live_suite_lease_count()
             << ",\"live_suite_reference_count\":" << live_suite_reference_count()
@@ -24271,8 +24245,8 @@ int wmain(int argc, wchar_t **argv) {
             << ",\"lifetime_fault_observed\":" << (lifetime_fault_observed ? "true" : "false")
             << ",\"suite_leases_balanced\":" << (suite_leases_balanced() ? "true" : "false")
             << ",\"suite_lease_warning\":" << (!suite_leases_balanced() ? "true" : "false")
-            << ",\"suite_acquires\":" << g_suite_acquires
-            << ",\"suite_releases\":" << g_suite_releases
+            << ",\"suite_acquires\":" << suite_acquire_count()
+            << ",\"suite_releases\":" << suite_release_count()
             << missing_suites_report_json()
             << ",\"live_suite_lease_count\":" << live_suite_lease_count()
             << ",\"live_suite_reference_count\":" << live_suite_reference_count()
