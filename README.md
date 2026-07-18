@@ -51,7 +51,7 @@ AEXCompatは、Adobe After EffectsのEffect AEXをAfter Effects本体の外で�
 |---|---|
 | OS | Windows x64 |
 | SDK | Adobe After Effects SDK 2025を基準に検証 |
-| UI / broker | Rust 2021 edition |
+| UI / broker | Rust 2024 edition |
 | native worker | C++ / MSVC x64 |
 | 入力画像 | PNG、JPEG、BMP、TIFF、WebP |
 | 出力画像 | PNG |
@@ -109,9 +109,11 @@ python -m pytest -q
 
 `pytest` がPythonテストの正規ランナーです。`unittest discover` ではbare function形式のテストを収集できないため、完全な検証には使用しません。一部のnative fixture、GPU、After Effects oracleテストには、ローカルSDK、対応GPU runtime、またはAE本体が必要です。ビルド生成物やローカル承認receiptを必要とするテストは、それらを生成する明示的なgateまたはbuild手順と組み合わせて実行します。
 
-ローカル成果物を生成した開発環境で、それらを認証・実行するテストも含める場合は `python -m pytest -q --run-local-artifact-tests` を使用します。通常のclean cloneでは該当テストを理由付きでskipします。
+ローカル成果物を要するテストは2つに分かれます。この checkout からビルドした worker / probe を自己計算の期待値で検証するテストは `--run-built-artifact-tests` (CIでも実行)、記録済み evidence をローカル現物と照合する machine-bound テストは `--run-local-artifact-tests` (ローカル専用) を付けて実行します。通常のclean cloneではどちらも理由付きでskipします。
 
 注意: SDKなしのclean cloneでは0 failにはなりません。SDKヘッダのABI検証テストはskipしますが、probe / fixtureを実際にビルドするテスト群はSDK不在でfailします (期待されるfail)。ソースのみ検証とSDK込み検証それぞれの期待結果は `docs/BUILD_REQUIREMENTS.md` を参照してください。
+
+CI (GitHub Actions) はwindows runner上で2本のworkflowを実行します。`windows-clean-clone.yml` がsource-only検証 (SDKなしのpytestと `cargo test`)、`ae-sdk-tests.yml` がAE SDKをprivate release assetから取得して `AFTER_EFFECTS_SDK_ROOT` を設定した `--run-sdk-tests` 付きpytestを担当します (`docs/BUILD_REQUIREMENTS.md` の「CI (GitHub Actions)」を参照)。
 
 ### アーキテクチャ
 
@@ -223,7 +225,7 @@ The goal is practical, faithful compatibility with general Effect AEX plug-ins, 
 |---|---|
 | OS | Windows x64 |
 | SDK baseline | Adobe After Effects SDK 2025 |
-| UI / broker | Rust 2021 edition |
+| UI / broker | Rust 2024 edition |
 | native worker | C++ / MSVC x64 |
 | image input | PNG, JPEG, BMP, TIFF, WebP |
 | image output | PNG |
@@ -264,9 +266,11 @@ python -m pytest -q
 
 `pytest` is the canonical Python test runner. `unittest discover` does not collect the repository's bare-function tests and must not be used as the complete verification command. Some native-fixture, GPU, and AE-oracle tests require a local SDK, a matching GPU runtime, or After Effects. Tests that require generated binaries or local approval receipts must be paired with their explicit build or gate step.
 
-After generating the local artifacts, run `python -m pytest -q --run-local-artifact-tests` to include tests that authenticate or execute them. A normal clean clone skips those tests with an explicit reason.
+Tests that need local artifacts are split in two: `--run-built-artifact-tests` runs tests that execute workers / probes built from this checkout against self-computed expectations (CI runs these too), while `--run-local-artifact-tests` runs machine-bound tests that authenticate recorded evidence against local files (local-only). A normal clean clone skips both with an explicit reason.
 
 Note that a clean clone without the SDK does not reach 0 failures: SDK-header ABI tests skip explicitly, but the tests that actually build probes / fixtures fail when the SDK is absent (this is the expected outcome). See `docs/BUILD_REQUIREMENTS.md` for the expected results of source-only versus SDK-backed verification.
+
+CI (GitHub Actions) runs two Windows workflows: `windows-clean-clone.yml` for source-only verification (pytest and `cargo test` without the SDK), and `ae-sdk-tests.yml`, which fetches the AE SDK from a private release asset, sets `AFTER_EFFECTS_SDK_ROOT`, and runs pytest with `--run-sdk-tests` (see "CI (GitHub Actions)" in `docs/BUILD_REQUIREMENTS.md`).
 
 ### DirectX SDK fixture
 

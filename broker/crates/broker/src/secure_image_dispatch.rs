@@ -65,6 +65,7 @@ pub fn dispatch_secure_gpu_image(
 }
 
 pub fn dispatch_secure_image(input: SecureImageDispatch<'_>) -> io::Result<SecureLaunchResult> {
+    crate::trace_policy::validate_broker_trace_directory(input.repository)?;
     let worker_program = input
         .repository
         .join(input.worker_kind.repository_relative_program());
@@ -84,6 +85,9 @@ pub fn dispatch_secure_image(input: SecureImageDispatch<'_>) -> io::Result<Secur
         plugin_basename: &plugin_basename,
         args_before_plugin: input.args_before_plugin,
         args_after_plugin: input.args_after_plugin,
+        // Opt-in crash minidumps (issue #18) are injected uniformly in
+        // secure_launch for every sealed dispatch.
+        repository: input.repository,
         require_module_audit: true,
     };
     secure_launch(tree, request, input.timeout)

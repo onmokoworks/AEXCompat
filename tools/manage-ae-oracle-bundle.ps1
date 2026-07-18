@@ -5,7 +5,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-if (Get-Process AfterFX,aerender,aerendercore -ErrorAction SilentlyContinue) {
+if (Get-Process AfterFX,AfterFX.com,aerender,aerendercore -ErrorAction SilentlyContinue) {
     throw 'After Effects is running; refusing to modify its plug-in directory.'
 }
 

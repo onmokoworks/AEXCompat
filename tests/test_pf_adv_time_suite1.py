@@ -9,16 +9,20 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 SDK_ROOT = os.environ.get("AFTER_EFFECTS_SDK_ROOT")
 SDK_HEADERS = Path(SDK_ROOT) / "Examples" / "Headers" if SDK_ROOT else None
-BUILD = ROOT / "target/minihost-build-adv-time-v1"
-WORKER = BUILD / "Release/aex_render_worker.exe"
-VS_ROOT = Path(r"C:\Program Files\Microsoft Visual Studio\18\Community")
-CMAKE = VS_ROOT / r"Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe"
-
-
 def run_in_vs_environment(command, *, cwd=None, timeout=420):
+    program_files_x86 = os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")
+    vswhere = Path(program_files_x86) / "Microsoft Visual Studio" / "Installer" / "vswhere.exe"
+    result = subprocess.run(
+        [str(vswhere), "-latest", "-products", "*", "-requires",
+         "Microsoft.VisualStudio.Component.VC.Tools.x86.x64", "-property", "installationPath"],
+        check=True, capture_output=True, text=True,
+    )
+    vs_root = Path(result.stdout.strip())
+    if not vs_root.is_dir():
+        pytest.fail("no Visual Studio installation with the C++ x64 toolset")
     with tempfile.TemporaryDirectory() as directory:
         script = Path(directory) / "run.bat"
-        script.write_text(f'@call "{VS_ROOT}\\VC\\Auxiliary\\Build\\vcvars64.bat" >nul\n{command}\n',
+        script.write_text(f'@call "{vs_root}\\VC\\Auxiliary\\Build\\vcvars64.bat" >nul\n{command}\n',
                           encoding="ascii")
         subprocess.run([str(script)], cwd=cwd, check=True, timeout=timeout)
 
@@ -51,11 +55,8 @@ int main() { return 0; }
         run_in_vs_environment(command, timeout=120)
 
 
-def test_release_worker_native_v1_v4_guard_and_lease_selftest():
-    command = (f'"{CMAKE}" -S minihost -B "{BUILD}" -G "Visual Studio 18 2026" -A x64 && '
-               f'"{CMAKE}" --build "{BUILD}" --config Release --target aex_render_worker"')
-    run_in_vs_environment(command, cwd=ROOT)
-    result = subprocess.run([str(WORKER), "--self-test-pf-adv-time-suite1"], cwd=ROOT,
+def test_release_worker_native_v1_v4_guard_and_lease_selftest(canonical_release_worker):
+    result = subprocess.run([str(canonical_release_worker), "--self-test-pf-adv-time-suite1"], cwd=ROOT,
                             check=True, capture_output=True, text=True, timeout=60)
     assert json.loads(result.stdout) == {
         "pf_adv_time_suite_versions": "passed", "v1_slots": 4, "v2_slots": 4,

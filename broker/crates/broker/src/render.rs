@@ -70,6 +70,7 @@ pub fn run(
     case_id: &str,
     output: &Path,
 ) -> io::Result<bool> {
+    crate::trace_policy::validate_broker_trace_directory(repository)?;
     if output
         .components()
         .any(|p| matches!(p, Component::ParentDir | Component::CurDir))
@@ -140,6 +141,7 @@ pub fn run(
             plugin_basename: &plugin_basename,
             args_before_plugin: &args_before_plugin,
             args_after_plugin: &args_after_plugin,
+            repository,
             require_module_audit: true,
         };
         let start = Instant::now();

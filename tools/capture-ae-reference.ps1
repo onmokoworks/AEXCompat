@@ -18,8 +18,12 @@ param(
     [ValidateRange(5, 600)][int]$TimeoutSeconds = 120
 )
 
+. (Join-Path $PSScriptRoot 'sha256.ps1')
+
 $ErrorActionPreference = 'Stop'
-if (Get-Process AfterFX,aerender,aerendercore -ErrorAction SilentlyContinue) {
+# 'AfterFX.com' is the console shim's own process name; a lingering shim
+# (e.g. orphaned by an interrupted capture) would otherwise pass this gate.
+if (Get-Process AfterFX,'AfterFX.com',aerender,aerendercore -ErrorAction SilentlyContinue) {
     throw 'After Effects is already running; refusing to touch an existing user session.'
 }
 if ($DurationFrames -le $Frame) {
@@ -59,12 +63,11 @@ if (-not (Test-Path -LiteralPath $outputParent -PathType Container)) {
     throw 'OutputPng parent directory does not exist.'
 }
 
-$testedHash = (Get-FileHash -LiteralPath $testedPath -Algorithm SHA256).Hash
-$installedHash = (Get-FileHash -LiteralPath $installedPath -Algorithm SHA256).Hash
+$testedHash = Get-Sha256Hex $testedPath
+$installedHash = Get-Sha256Hex $installedPath
 if ($testedHash -ne $installedHash) {
     throw "Installed AEX hash does not match tested AEX: $installedHash != $testedHash"
 }
-
 $scriptPath = if ($ScriptPath) {
     (Resolve-Path -LiteralPath $ScriptPath).Path
 } else {
@@ -75,7 +78,19 @@ if (Test-Path -LiteralPath $resultPath) {
     throw 'Reference result file already exists.'
 }
 
-$env:AEXCOMPAT_AE_INPUT = $inputPath
+# Stage a private copy of the input and hash that copy: hashing the original
+# would leave a window (before AE imports it, or after the run) in which a
+# rewritten file makes the recorded identity diverge from the bytes AE
+# actually rendered. AE is pointed at the staged copy, so the hash and the
+# rendered bytes are the same file by construction. This is the last
+# preflight step, so every refusal above leaves nothing behind in the temp
+# directory and the cleanup block below removes the copy on every later path.
+$stagedInput = Join-Path ([System.IO.Path]::GetTempPath()) `
+    ("aexcompat-ae-input-" + [guid]::NewGuid().ToString('N') + [System.IO.Path]::GetExtension($inputPath))
+Copy-Item -LiteralPath $inputPath -Destination $stagedInput
+$inputHash = Get-Sha256Hex $stagedInput
+
+$env:AEXCOMPAT_AE_INPUT = $stagedInput
 $env:AEXCOMPAT_AE_OUTPUT = $outputPath
 $env:AEXCOMPAT_AE_RESULT = $resultPath
 $env:AEXCOMPAT_AE_EFFECT = $EffectName
@@ -106,17 +121,57 @@ if ($ParamName) {
 try {
     $escapedScriptPath = $scriptPath.Replace('"', '\"')
     # AE 25.2 can abort before JSX execution when -noui hits a failed GPU3
-    # sanity state. UI launch still runs the script and the JSX quits AE.
-    $arguments = '-m -r "{0}"' -f $escapedScriptPath
+    # sanity state; there the UI launch still runs the script and the JSX
+    # quits AE. On AE 25.3.1 `-noui` was measured to execute the JSX and exit
+    # cleanly (issue #54, 2026-07-19), so 25.3+ runs headless and older
+    # versions keep the UI fallback.
+    $versionSource = Join-Path (Split-Path -Parent $afterEffectsPath) 'AfterFX.exe'
+    if (-not (Test-Path -LiteralPath $versionSource)) {
+        $versionSource = $afterEffectsPath
+    }
+    # Build the version from the numeric File*Part fields: the FileVersion
+    # string can carry trailing text (e.g. "10.0.26100.1 (WinBuild...)") that
+    # [Version] cannot parse, and the parts do not depend on the PowerShell
+    # ETS-provided FileVersionRaw property. A file without version info
+    # yields 0.0.0.0, i.e. the UI fallback.
+    $versionInfo = (Get-Item -LiteralPath $versionSource).VersionInfo
+    $aeFileVersion = [Version]::new($versionInfo.FileMajorPart, $versionInfo.FileMinorPart,
+        $versionInfo.FileBuildPart, $versionInfo.FilePrivatePart)
+    $arguments = if ($aeFileVersion -ge [Version]'25.3') {
+        '-m -noui -r "{0}"' -f $escapedScriptPath
+    } else {
+        '-m -r "{0}"' -f $escapedScriptPath
+    }
     $process = Start-Process -FilePath $afterEffectsPath -ArgumentList $arguments -PassThru
     $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
     while ([DateTime]::UtcNow -lt $deadline -and -not (Test-Path -LiteralPath $resultPath)) {
         Start-Sleep -Milliseconds 250
     }
     if (-not (Test-Path -LiteralPath $resultPath)) {
-        Get-Process AfterFX,aerendercore -ErrorAction SilentlyContinue |
-            Stop-Process -Force -ErrorAction SilentlyContinue
+        # Kill only this launch's process tree, addressed by the PID from
+        # Start-Process: /T reaches a GUI-mode child AfterFX or aerendercore,
+        # while an unrelated AE session started after the startup gate is
+        # never touched (a name-based kill could hit it), and the shim
+        # itself is the tree root, so no lingering shim can block the gate.
+        # If the launch already exited on its own there is nothing to kill
+        # and the numeric PID may have been reused - never taskkill it then.
+        if (-not $process.HasExited) {
+            & taskkill.exe /PID $process.Id /T /F 2>$null | Out-Null
+        }
         throw 'After Effects reference capture timed out without a result.'
+    }
+    # The result JSON is written while After Effects is still quitting, and
+    # the wrapper can hold the output PNG for a moment afterwards (observed
+    # on AE 25.3.1): returning here breaks an immediate hash of the PNG and
+    # trips the next capture's already-running gate. Wait on the launched
+    # process itself, so the bound applies only to this capture's identity,
+    # and report a quit that outlives it as a failure, not a silent success.
+    # The shutdown gets the same configured patience as the capture itself,
+    # so the TimeoutSeconds knob covers all AE work (a slow quit on a large
+    # output is not a failure as long as the caller allowed the time).
+    if (-not $process.WaitForExit($TimeoutSeconds * 1000) -and -not $process.HasExited) {
+        & taskkill.exe /PID $process.Id /T /F 2>$null | Out-Null
+        throw 'After Effects did not exit after writing the capture result.'
     }
 } finally {
     'AEXCOMPAT_AE_INPUT','AEXCOMPAT_AE_OUTPUT','AEXCOMPAT_AE_RESULT','AEXCOMPAT_AE_EFFECT',
@@ -125,6 +180,7 @@ try {
     'AEXCOMPAT_AE_WORKING_SPACE','AEXCOMPAT_AE_LINEARIZE',
     'AEXCOMPAT_AE_PARAM_NAME','AEXCOMPAT_AE_PARAM_VALUE' |
         ForEach-Object { Remove-Item "Env:$_" -ErrorAction SilentlyContinue }
+    Remove-Item -LiteralPath $stagedInput -ErrorAction SilentlyContinue
 }
 
 $result = Get-Content -LiteralPath $resultPath -Raw | ConvertFrom-Json
@@ -134,4 +190,11 @@ if ($result.status -ne 'captured') {
 if (-not (Test-Path -LiteralPath $outputPath)) {
     throw 'After Effects reported capture success without creating the PNG.'
 }
+# Bind the capture evidence to its verified inputs: both hashes were taken
+# before After Effects launched, so record those identities in the result
+# document (the cross-machine runbook requires the input hash in the returned
+# manifest, and evidence refresh scripts verify against it).
+$result | Add-Member -NotePropertyName 'input_sha256' -NotePropertyValue $inputHash
+$result | Add-Member -NotePropertyName 'tested_aex_sha256' -NotePropertyValue $testedHash.ToLowerInvariant()
+$result | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $resultPath -Encoding utf8
 $result | ConvertTo-Json -Depth 8

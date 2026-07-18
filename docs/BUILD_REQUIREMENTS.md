@@ -22,7 +22,7 @@
 
 ## Rust broker / harness
 
-- Rust toolchain (rustup / cargo)。workspace は edition 2021。
+- Rust toolchain (rustup / cargo)。workspace は edition 2024 (Rust 1.85 以降)。
 - 標準の `x86_64-pc-windows-msvc` target ではリンクに MSVC linker と
   Windows SDK が必要。Visual Studio (または Build Tools) の
   「C++ によるデスクトップ開発」workload を入れておく。
@@ -61,10 +61,18 @@ python -m pytest -q
   ビルド系である」こと。それ以外の fail は regression を疑う。
 - **SDK 込み検証**: `AFTER_EFFECTS_SDK_ROOT` と Visual Studio を揃えた構成。
   0 failed が期待結果 (「検証済み構成」の節を参照)。
-- 上記と別軸で、ローカル生成物 (ビルド済み worker、machine-bound receipt 等)
-  を要するテストは `tests/local_artifact_tests.txt` に列挙されており、常に
-  既定で skip される。実行するには対象のビルド / gate スクリプトを走らせた後
-  `--run-local-artifact-tests` を付ける。
+- 上記と別軸で、ローカル生成物を要するテストは 2 つの manifest に分かれており、
+  いずれも既定で skip される。
+  - `tests/built_artifact_tests.txt` (`--run-built-artifact-tests`): この
+    checkout からビルドした worker / probe / 生成入力 fixture を実行し、期待値を
+    実行時に自己計算するテスト。フレッシュビルドで成立するため CI でも実行される
+    (「CI (GitHub Actions)」の節を参照)。ローカルでは minihost の Ninja ビルド、
+    worker の複製配置、probe ビルド、入力 fixture 生成 (workflow
+    `ae-sdk-tests.yml` の該当 step と同じ手順) の後にフラグを付けて実行する。
+  - `tests/local_artifact_tests.txt` (`--run-local-artifact-tests`): 記録済み
+    evidence (sha256 / receipt) をローカル現物と照合する machine-bound テスト。
+    evidence を採取したビルド状態でのみ成立するため CI 対象外。対象のビルド /
+    gate スクリプトを走らせた後にフラグを付けて実行する。
 
 ## C++ worker (minihost)
 
@@ -125,30 +133,31 @@ amendment を参照)、第三者環境でも worker をビルドすればその�
 
 ## CMake と Visual Studio
 
-- `instruments/` のビルドスクリプト (`tools/build-*.ps1`) は既定 generator が
-  `Visual Studio 18 2026`。VS 2026 は必須ではなく既定・検証済み構成であり、
-  各スクリプトの `-Generator` 引数で `Visual Studio 17 2022` 等へ上書きできる
+- `instruments/` のビルドスクリプト (`tools/build-*.ps1`) は、`-Generator`
+  未指定時に `tools/resolve-cmake-generator.ps1` が vswhere で検出した VS の
+  major version から generator を導出する (17 → `Visual Studio 17 2022`、
+  18 → `Visual Studio 18 2026`。未知の major は明示 fail)。従来のような
+  VS 2026 固定の既定値ではないため、VS 2022 のみの環境でもそのまま動く。
+  `-Generator` 引数で明示上書きもできる
   (`tools/refresh-runtime-evidence.ps1` は実際に VS 2022 generator を渡している)。
 - CMake の最低要件は各 `CMakeLists.txt` の `cmake_minimum_required` で 3.20。
   ただし `Visual Studio 18 2026` generator を使う場合は、その generator を
   認識するより新しい CMake が必要 (bundled 4.3.1 で検証。3.24 は
   `Visual Studio 18 2026` を解決できない)。CMake は Visual Studio bundled の
   もので足りる。
-- CMake の見つけ方はスクリプトにより二通り混在している。
-  `tools/resolve-build-cmake.ps1` で VS bundled CMake を自動発見するもの
-  (`build-pf-composite-rect-probe.ps1` 等) と、`$CMake` の既定値を
-  VS 2026 Community の bundled パスに固定したままのもの
-  (`build-pf-adv-time-probe.ps1` / `build-pf-transform-affine-probe.ps1` 等)
-  がある。後者は VS 2026 Community が無い環境ではそのままでは fail するため、
-  `-CMake` で cmake.exe を明示指定する。
+- CMake は `-CMake` 未指定時に `tools/resolve-build-cmake.ps1` が自動発見する
+  (指定 generator を認識する cmake.exe を、vswhere で見つかる VS bundled →
+  既知パス → PATH の順で探索)。以前は `$CMake` の既定値を VS 2026 Community の
+  bundled パスに固定したスクリプトが混在していたが、現在は CMake を使う
+  `tools/build-*.ps1` すべてが resolver 経由に統一されている。
 
-VS 2022 でビルドする場合の実行例:
+generator / cmake を明示したい場合の実行例:
 
 ```powershell
-# resolver 対応スクリプト: generator の指定だけでよい
-powershell -File tools\build-pf-composite-rect-probe.ps1 -Generator "Visual Studio 17 2022"
+# 通常は引数なしで、インストール済み VS から generator / CMake が解決される
+powershell -File tools\build-pf-composite-rect-probe.ps1
 
-# 既定 CMake パス固定のスクリプト: cmake.exe も明示する
+# 明示上書きする場合
 powershell -File tools\build-pf-adv-time-probe.ps1 -Generator "Visual Studio 17 2022" `
   -CMake "C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe"
 ```
@@ -204,6 +213,46 @@ powershell -File tools\build-pf-adv-time-probe.ps1 -Generator "Visual Studio 17 
 - **AE oracle**: After Effects 25.2 実機。`tools/*.jsx` を AE 内で実行して
   参照画像 / trace を取得する。通常の harness 実行には不要。
 
+## CI (GitHub Actions)
+
+CI は 2 本の workflow に分かれる。いずれも push (main) / pull request ごとに
+windows runner で走る。
+
+- `.github/workflows/windows-clean-clone.yml`: source-only 検証。SDK なしの
+  clean clone 相当で `cargo check` / `cargo test` (hosted runner の restricted
+  token では起動できない 2 テストを `--skip`) と `python -m pytest -q` を実行
+  する。
+- `.github/workflows/ae-sdk-tests.yml`: SDK 込み検証 + built artifact 検証。
+  - private release `ci-sdk-ae25.2` の asset
+    `AfterEffectsSDK-ae25.2-win.zip` を `GITHUB_TOKEN` でダウンロード・展開し、
+    `AFTER_EFFECTS_SDK_ROOT` を設定する (Gyroflow が CI で Adobe SDK zip を
+    取得するのと同じ方式)。zip の SHA-256 は workflow に pin されており、
+    不一致は fail-closed。SDK 世代を更新するときは新しい asset を release に
+    上げ、workflow の `SDK_RELEASE_TAG` / `SDK_ASSET` / `SDK_SHA256` を
+    合わせて更新する。
+  - minihost workers を Ninja でビルドして `target\minihost-build` に置き、
+    multi-config 時代の固定パス (`minihost-build-v18\[Release]` /
+    `minihost-timed-layers\Release` / `minihost-build\Release`) へ複製する。
+    probe .aex 群を `tools/build-*.ps1` でビルドし、probe 入力 fixture
+    (37x23 raw RGBA) を決定論的に生成する。
+  - `python -m pytest -q -rs --run-sdk-tests --run-built-artifact-tests
+    --validate-local-artifact-manifest` を実行する。SDK 依存テスト
+    (`tests/sdk_required_tests.txt` と `AFTER_EFFECTS_SDK_ROOT` を inline skip
+    で見るテスト) に加え、`tests/built_artifact_tests.txt` の built artifact
+    テストが実行対象になる。実行後、pytest 出力に SDK 起因 skip
+    (`set AFTER_EFFECTS_SDK_ROOT`) や成果物不在 skip (`is not built` /
+    `are not present`) が残っていれば fail させ、skip されたまま green になる
+    silent success を防ぐ。
+
+local artifact テスト (`--run-local-artifact-tests`、machine-bound evidence
+照合)、prebuilt テスト、AE 実機 oracle、GPU runtime 検証は CI の対象外で、
+従来どおりローカル gate で実行する。SDK asset は private repo の collaborator 限定 asset であり、SDK の
+公開再配布ではない (リポジトリへ SDK を複製しない方針は維持)。
+
+CI の Python は両 workflow とも 3.12 (OpenEXR の win_amd64 wheel が 3.14 に
+無く、ソースビルドで約 2.5 分かかるため)。ローカルの検証済み構成 (3.14) とは
+版が異なる点に注意。3.14 に wheel が出たら揃えてよい。
+
 ## 最低対応版と検証済み構成
 
 最低対応バージョンとして確認できているのは CMake の 3.20
@@ -245,8 +294,12 @@ Per-component prerequisites on Windows x64:
   is an SDK-absence build failure (`Set AFTER_EFFECTS_SDK_ROOT ...`) — any
   other failure suggests a regression. SDK-backed verification (SDK plus
   Visual Studio) expects 0 failed.
-  Independently, tests listed in `tests/local_artifact_tests.txt`
-  always skip by default (`--run-local-artifact-tests` to opt in).
+  Independently, tests needing local artifacts are split across two
+  default-skip manifests: `tests/built_artifact_tests.txt`
+  (`--run-built-artifact-tests`; runs artifacts built from this checkout
+  with self-computed expectations, so CI runs it too) and
+  `tests/local_artifact_tests.txt` (`--run-local-artifact-tests`;
+  machine-bound evidence comparison, local-only).
 - **C++ workers (minihost)**: build with the Ninja generator into
   `target\minihost-build\` so the harness and gate scripts find the four
   `aex_*_worker.exe` binaries directly under that directory. No SDK needed.
@@ -261,15 +314,15 @@ Per-component prerequisites on Windows x64:
   identity (for example `AE_GeneralPlug.h`, 212,088 bytes, SHA-256
   `632a648d...`); differing headers fail hash comparison. This file identity
   is separate from the AE runtime evidence being `25.2x131`.
-- **CMake / Visual Studio**: probe build scripts default to the
-  `Visual Studio 18 2026` generator, overridable per script with
-  `-Generator` (VS 2026 is the verified default, not a hard requirement).
+- **CMake / Visual Studio**: when `-Generator` is omitted, probe build
+  scripts derive the CMake generator from the installed Visual Studio via
+  `tools/resolve-cmake-generator.ps1` (vswhere major version 17 →
+  `Visual Studio 17 2022`, 18 → `Visual Studio 18 2026`; unknown majors fail
+  explicitly), so machines with only VS 2022 work without overrides.
   `cmake_minimum_required` is 3.20, but the VS 2026 generator needs a newer
-  CMake (bundled 4.3.1 verified). CMake lookup is mixed: some scripts
-  auto-discover the VS-bundled CMake via `tools/resolve-build-cmake.ps1`,
-  while others still default `$CMake` to the VS 2026 Community bundled path
-  and need an explicit `-CMake` on machines without it (a VS 2022 example
-  command line is included in the Japanese section and was verified). One
+  CMake (bundled 4.3.1 verified). All CMake-based `tools/build-*.ps1`
+  scripts auto-discover cmake.exe through `tools/resolve-build-cmake.ps1`
+  (`-CMake` still overrides). One
   probe, `build-pf-fill-premultiply-probe.ps1`, does not use CMake at all:
   it drives cl / rc / link directly through vcvars64 and has no `-Generator`
   or `-CMake` parameter, only `-VisualStudio` (defaulting to the VS 2022
@@ -284,6 +337,21 @@ Per-component prerequisites on Windows x64:
   `C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools` with no
   override parameter, so that fixture needs VS 2022 Build Tools with v143 at
   that default location.
+- **CI**: two Windows workflows run per push / pull request.
+  `windows-clean-clone.yml` covers source-only verification (`cargo check`,
+  `cargo test` minus two launch tests the hosted runner's restricted token
+  cannot execute, and `python -m pytest -q` without the SDK).
+  `ae-sdk-tests.yml` covers SDK-backed and built-artifact verification: it
+  downloads the hash-pinned SDK zip from the private release
+  `ci-sdk-ae25.2` with `GITHUB_TOKEN`, sets `AFTER_EFFECTS_SDK_ROOT`,
+  builds the minihost workers (Ninja) and the probe AEX set, mirrors the
+  workers into the multi-config layout paths, generates the deterministic
+  probe input fixture, runs
+  `python -m pytest -q -rs --run-sdk-tests --run-built-artifact-tests
+  --validate-local-artifact-manifest`, and fails if any test was skipped
+  for a missing SDK or missing built artifact. Local-artifact
+  (machine-bound evidence), prebuilt, AE oracle, and GPU gates stay
+  local-only.
 - **Optional**: a matching GPU runtime for GPU render checks, and After
   Effects 25.2 itself for oracle capture only. Building the GPU SDK fixtures
   (`tools/build-sdk-invert-*.ps1`) additionally needs build-time inputs

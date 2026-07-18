@@ -256,3 +256,237 @@ therefore unblocked: the host can now export 16-bit PNGs and raw
 (`--raw-format rgba16le --raw-integer-max 32768`). It still needs a fresh
 AE 16 bpc capture (none is retained under `target/`), so the full-precision
 comparison remains future work, not a claim of this note.
+
+## Follow-up: fresh 16 bpc comparison detects a real unresolved difference
+   (2026-07-19)
+
+A fresh capture used a deterministic 1920x1080 RGBA gradient (PNG SHA-256
+`29ebf3c2245a3b078bc430adc0b49b9906b092ab5f37c436895fc9c2035288cd`),
+ntsc-rs defaults, frame 0, fps 1, one-frame duration, and project working
+space `None`. Both AE and the host used the same plug-in binary and the host
+used SmartFX ARGB16 with native-depth transport.
+
+The comparison is **not equivalent** at 16-bit precision. Alpha is exact,
+but 5,315,732 channels differ and 5,311,798 exceed one PNG16 integer step.
+Mean absolute RGB error is R 0.01117, G 0.00896, B 0.02539; maximum error is
+1.0. Clamping the host samples to 0..1 does not change those figures. The
+images remain strongly correlated (R 0.9972, G 0.9980, B 0.9727), so this is
+not a channel-order, gross color-space, alpha, or spatial-offset failure.
+
+This observation supersedes no earlier equivalence claim because it uses a
+new input and deeper comparison boundary. It establishes an unresolved
+compatibility gap that needs parameter/world/timing-call tracing before the
+host can claim ntsc-rs equivalence at 16 bpc. The artifacts are local under
+`target/ntsc-rs-oracle16-v2-*`; hashes are recorded by the comparison report.
+
+## Follow-up: corpus expansion to a popup parameter and input-shape
+   variations (2026-07-19, issue #31)
+
+All previous samples used one float slider and the single 1920x1080 opaque
+gradient input. Four new samples extend the corpus along the parameter-kind
+and input-shape axes (all observations; same plug-in `ad129f80...`, AE
+25.3.1x3, frame 0, fps 24, 8 bpc, default parameters except where noted).
+The machine-readable judgments live in
+`analysis/NTSC_RS_ORACLE_CORPUS_RESULT_2026-07-19.json` (regenerated only
+via `tools/refresh-ntsc-rs-oracle-corpus-evidence.ps1` from the executed
+artifacts under `target/oracle-corpus/`; validated by
+`tests/test_ntsc_rs_oracle_corpus_result.py`), produced with
+`tools/compare-pixel-oracles.py --tolerance 0.004` (accepts +/-1 LSB at
+8 bits, rejects +/-2). The host side ran the freshly rebuilt workers and
+harness on this branch; the broker integration tests passed after the
+rebuild.
+
+1. **Popup parameter (`Use field` = `Both`).** First verification that
+   `capture-ae-reference.ps1 -ParamName` drives a PF_Param_POPUP: the JSX
+   `setValue(6)` applied cleanly (result JSON reads back `param_value: 6`).
+   Host side used `--render-experimental-smart-param ... 4 6` (slot 4,
+   1-based choice index; the harness `--inspect-experimental` listing pins
+   `Use field` to slot 4 with choices Alternating/Upper only/Lower
+   only/Interleaved upper/Interleaved lower/Both, default 4). Input is the
+   existing gradient (`bb84e35e...`). Result: 151 of 8,294,400 channel
+   samples differ, all +/-1 LSB, alpha exact.
+2. **Alpha-gradient input.** New deterministic RGBA input with a vertical
+   alpha ramp 0..255 (`tools/generate-oracle-rgba-input.py`; decoded RGBA
+   SHA-256 `dcee3c8f...`). 178 differing channel samples, all +/-1 LSB;
+   the alpha channel is exact everywhere, including fully and partially
+   transparent rows.
+3. **Odd dimensions (1919x1077).** Same generator, opaque (decoded RGBA
+   `58be1365...`). 197 differing channel samples, all +/-1 LSB, alpha
+   exact. No row-stride or edge structure: an incorrect stride would shear
+   every row after the first, which would produce large structured errors,
+   not boundary-value jitter.
+4. **4K (3840x2160).** Same generator, opaque (decoded RGBA
+   `582719c3...`). 729 of 33,177,600 channel samples differ, all +/-1 LSB,
+   alpha exact - the same per-sample rate order as the 1080p samples
+   (~2e-5), consistent with the value-dependent rounding jitter verified
+   earlier, now at 4x the pixel count.
+
+Generated inputs are identified by their decoded RGBA hash, not the PNG
+file hash: the PNG container bytes depend on the local zlib build, so only
+the decoded pixel stream is machine-portable (the evidence document
+records both).
+
+Claim level: with the four pre-existing samples this makes eight AE-oracle
+equivalence samples for ntsc-rs SmartFX at +/-1 LSB (8-bit precision),
+now spanning a popup parameter, a float parameter, alpha-carrying input,
+odd dimensions, and 4K resolution. Field-dependent rendering with
+non-`Both` interlacing choices and deeper-precision comparisons remain
+uncovered here (the latter continues in the EXR/deep-transport work).
+
+Tooling shipped with this follow-up: `tools/generate-oracle-rgba-input.py`
+(deterministic RGBA oracle inputs; the input formula is documented in the
+tool and locked by `tests/test_oracle_input_tools.py`),
+`tools/png-to-rgba-raw.py` (lossless PNG-to-raw conversion so host PNG
+outputs can feed `compare-pixel-oracles.py --raw`), and the evidence
+refresh script named above.
+
+## Follow-up: the 2026-07-19 16 bpc difference does not reproduce;
+   full-precision equivalence holds (2026-07-19, issue #53)
+
+The "fresh 16 bpc comparison detects a real unresolved difference" section
+above is corrected by this follow-up. Its artifacts
+(`target/ntsc-rs-oracle16-v2-*`) no longer exist on this machine, its input
+(PNG SHA-256 `29ebf3c2...`) is not reproducible by
+`tools/generate-oracle-rgba-input.py` (neither alpha mode yields that hash),
+and a controlled re-run detects no such difference. Observations first,
+then the corrected reading.
+
+1. **Host determinism across a rebuild (observation).** On a fresh checkout
+   of `main` (a283695) with rebuilt workers and harness (broker workspace
+   tests pass), `--render-experimental-smart-16-deep` on the original
+   gradient input `bb84e35e...` reproduces the earlier session's transport
+   sidecar byte-identically (rgba16le SHA-256 `a5bfbb40...`).
+2. **AE 16 bpc captures are fps-invariant (observation).** Fresh captures of
+   the same input at comp fps 24 and fps 1 (one-frame duration) are
+   byte-identical PNGs (SHA-256 `deb77139...`). The fps-1 configuration the
+   unreproduced comparison used cannot have changed the AE render.
+3. **Full-precision comparison matches (observation).** Host rgba16le
+   (white = 32768) against the AE RGBA16 PNG: mean absolute error per RGB
+   channel is at most 6.3e-6, the maximum error is 6.0e-5 (2 transport
+   codes), and alpha is exact. A second, generator-produced opaque input
+   (decoded RGBA `d6f2a543...`) gives the same scale (max 6.1e-5). About
+   4.1-5.2 million of 8.29 million channels differ by 1-2 codes; none
+   differ more.
+4. **The residue is quantization boundary behavior, not a rendering gap
+   (observation + verified mechanism).** The host's smart-input world is
+   exactly `round(v * 32768 / 255)` of the 8-bit input (verified against
+   the `AEXCOMPAT_DUMP_WORLDS_DIR` smart-input snapshot on all 8,294,400
+   samples). AE's composed 8-bit-import -> 16 bpc -> `saveFrameToPng`
+   chain, measured with a no-effect 16 bpc capture of the same input, is
+   `v * 257` with a deterministic 0/-1-step deviation (one value +1) -
+   the same downward exporter quantization family already documented for
+   32 bpc. Sub-code input differences propagated through the effect's
+   filters bound the observed 1-2-code output residue.
+5. **The unreproduced difference has the signature of a noise-realization
+   mismatch (observation + hypothesis).** Two host renders differing only
+   in `Random seed` (0 vs 12345) differ with mean absolute RGB error
+   0.010-0.016, maximum 1.0, alpha exact, correlation ~0.99. The
+   unreproduced report's figures (mean 0.009-0.025, maximum 1.0, alpha
+   exact, correlation 0.973-0.998, blue worst) are the same signature
+   class; ntsc-rs's default chroma noise (intensity 0.1) lands on I/Q,
+   whose largest RGB coefficient is blue, so a differing noise
+   realization degrades blue first. Hypothesis, unverifiable now that the
+   artifacts are gone: that comparison's AE and host sides rendered
+   different noise realizations (a seed, frame, or parameter mismatch in
+   that session), not different depth behavior.
+
+Corrected claim level: the unresolved-16-bpc-gap observation above is
+withdrawn as evidence; it is unreproduced and its artifacts are
+unavailable. In its place, this follow-up establishes AE-oracle
+equivalence for ntsc-rs SmartFX at full 16 bpc transport precision
+(tolerance 4/32768, observed residue within 2/32768), frame 0, default
+parameters, across two inputs and two comp fps values. The
+machine-readable judgments live in
+`analysis/NTSC_RS_ORACLE_DEEP16_RESULT_2026-07-19.json` (regenerated only
+via `tools/refresh-ntsc-rs-oracle-deep16-evidence.ps1` from the executed
+artifacts under `target/oracle-deep16/`; validated by
+`tests/test_ntsc_rs_oracle_deep16_result.py`).
+
+Two side findings from the same session, tracked separately:
+
+- The worker's `fill_world8` promotes 8-bit fill colors to ARGB16 with
+  `v * 128` (255 -> 32640), while the input-world path uses
+  `round(v * 32768 / 255)` (255 -> 32768). Not implicated in this
+  comparison (ntsc-rs does not use the fill callback on this path), but
+  it is an inconsistent promotion inside one worker.
+- `tools/capture-ae-reference.ps1`'s running-session gate checks the
+  process names `AfterFX`, `aerender`, and `aerendercore`, but a
+  lingering `AfterFX.com` shim (observed orphaned from an earlier
+  session) is named `AfterFX.com` and passes the gate. The capture gate
+  now also refuses on `AfterFX.com`.
+
+## Follow-up: `-noui` restored for AE 25.3+ captures (2026-07-19, issue #54)
+
+Commit `7085261` removed `-noui` from `tools/capture-ae-reference.ps1`
+because AE 25.2 could abort before JSX execution when `-noui` hit a failed
+GPU3 sanity state, which made every capture raise the AE GUI (and a hung
+JSX left that GUI running indefinitely). Issue #54 asked whether 25.3 still
+needs the UI launch. Measurements on this machine (AE 25.3.1x3, the same
+install as every capture in this note):
+
+1. **`AfterFX.com -m -noui -r <jsx>` executes the JSX on AE 25.3.1 even in
+   the failed-GPU3-sanity state (observation).** This machine is in
+   exactly the state that aborted 25.2: every launch prints
+   `*** GPU Warning: GPU3 failed (previous) sanity test ***` on the
+   wrapper's stderr (alongside an unrelated ORT version notice). A minimal
+   marker JSX (write file, `app.quit()`) still completed in 13.9 s with no
+   visible window (no process ever exposed a main-window title) and no
+   surviving process, recording `app.version 25.3.1x3` and
+   `app.availableGPUAccelTypes` raw enum values `1813,1816`. So 25.3.1
+   demonstrably tolerates under `-noui` the same GPU3 sanity failure that
+   made 25.2 abort before JSX execution. AE 25.2 itself is no longer
+   installed here (only its leftover preferences folder), so the 25.2
+   abort stands unrefuted for 25.2 and the fix branches on version instead
+   of replacing the fallback.
+2. **Two full `-noui` captures reproduce the GUI-path reference
+   byte-for-byte (observation).** `ntsc-rs`, gradient input `bb84e35e...`,
+   frame 0, fps 24, 8 bpc, defaults: both runs produced SHA-256
+   `2cd24acf039b61151438e6d4ddd14f1eef1ee28b66591893c6e1cf0309ac16bf`,
+   identical to this note's original UI-launch reference. The launch mode
+   does not affect the rendered bytes for this configuration.
+3. **A `-noui` launch runs entirely inside the `AfterFX.com` wrapper
+   process (observation).** Sampling the process table at 200 ms intervals
+   during a full capture found only a process literally named
+   `AfterFX.com` - Windows keeps the `.com` extension in the process name
+   (only `.exe` is stripped), and no `AfterFX`-named process ever existed.
+   The previous timeout kill (`Get-Process AfterFX,aerendercore`) and the
+   already-running gates (`Get-Process AfterFX,aerender,aerendercore`)
+   were both blind to it: a hung `-noui` capture would have left AE
+   running, exactly the leftover-GUI failure mode the issue reported for
+   the UI path.
+4. **The runner returns while AE is still quitting (observation).** The
+   result JSON appears before AE finishes shutting down: one run held the
+   PNG handle for under a second afterwards (an immediate `Get-FileHash`
+   failed with a sharing violation and succeeded on retry), and another
+   still showed the `AfterFX.com` process alive right after the runner
+   returned; it exited on its own within seconds. The runner therefore now
+   waits (bounded by the same `-TimeoutSeconds` knob as the capture
+   itself) on the process it launched after the result appears,
+   so callers can hash the PNG and start the next capture immediately; a
+   quit that outlives the bound is killed and reported as a failure rather
+   than returned as success. Both that kill and the no-result timeout kill
+   are scoped to the launched process tree by PID (`taskkill /T`), never by
+   process name, so an unrelated AE session started mid-capture is never
+   touched; a launch that already exited is never killed at all, since its
+   numeric PID could have been reused by an unrelated process.
+
+Changes shipped: `capture-ae-reference.ps1` reads the `AfterFX.exe` file
+version from the numeric `File*Part` fields (the `FileVersion` string can
+carry non-numeric text, and the parts need no ETS-provided
+`FileVersionRaw` property; measured on this machine both Windows
+PowerShell 5.1 and pwsh 7 do expose `FileVersionRaw`, so the parts are a
+robustness choice, not a bug fix) and launches `-m -noui -r` on 25.3+,
+keeping the UI launch as the fallback for older versions (the 25.2
+GPU3-abort path). Every
+already-running gate across the AE oracle tools
+(`capture-ae-reference.ps1`, `prepare-ae-oracle-project.ps1`,
+`capture-ae-probe-oracle.ps1`, `capture-ae-exr-oracle.ps1`,
+`manage-ae-oracle-bundle.ps1`) now includes `AfterFX.com`;
+`capture-ae-reference.ps1` waits on and, on timeout, kills only the
+process tree it launched (by PID), never processes matched by name, and
+`capture-ae-probe-oracle.ps1`'s cleanup no longer kills by name either: it
+reports lingering AE-named processes and lets the probe plug-in removal
+fail explicitly instead.
+`tests/test_ae_reference_capture_automation.py` locks the version branch,
+the gate list, the PID-scoped shutdown, and the survival of an unrelated
+AE-named process that appears mid-capture.

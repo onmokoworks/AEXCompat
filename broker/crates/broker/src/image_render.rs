@@ -265,6 +265,47 @@ fn decode_bounded_image(path: &Path, role: &str) -> io::Result<image::DynamicIma
         .map_err(|error| invalid(format!("{role} image decode failed: {error}")))
 }
 
+/// Diagnostics for a dispatched worker run, including the kill evidence from
+/// Job Object accounting (issue #21): why a dead worker died (timeout versus
+/// allocations failing at the memory cap) and how much memory it peaked at.
+fn isolated_worker_diagnostics(
+    isolated: &crate::secure_launch::SecureLaunchResult,
+    elapsed_ms: u128,
+) -> Value {
+    let mut diagnostics = worker_diagnostics(
+        &isolated.stderr,
+        isolated.stderr_truncated,
+        isolated.classification.as_str(),
+        isolated.exit_code,
+        elapsed_ms,
+    );
+    let object = diagnostics
+        .as_object_mut()
+        .expect("worker_diagnostics returns an object");
+    object.insert("kill_reason".into(), json!(isolated.kill_reason));
+    object.insert(
+        "memory_limit_reached".into(),
+        json!(isolated.memory_limit_reached),
+    );
+    object.insert(
+        "worker_peak_commit_bytes".into(),
+        json!(isolated.worker_peak_commit_bytes),
+    );
+    object.insert(
+        "peak_process_memory_bytes".into(),
+        json!(isolated.peak_process_memory_bytes),
+    );
+    object.insert(
+        "peak_job_memory_bytes".into(),
+        json!(isolated.peak_job_memory_bytes),
+    );
+    object.insert(
+        "process_memory_limit_bytes".into(),
+        json!(isolated.process_memory_limit_bytes),
+    );
+    diagnostics
+}
+
 fn worker_diagnostics(
     stderr: &str,
     stderr_truncated: bool,
@@ -303,9 +344,8 @@ fn worker_diagnostics(
     let mut first_failure_stage: Option<String> = None;
     let mut failure_stage: Option<String> = None;
     let mut last_completed_stage: Option<String> = None;
-    let mut missing_suites = Vec::new();
-    let mut seen_missing_suites = BTreeSet::new();
     let mut plugin_kind: Option<&str> = None;
+    let mut minidump: Option<String> = None;
 
     for line in stderr.lines() {
         plugin_kind = plugin_kind.or_else(|| match line.trim() {
@@ -313,11 +353,9 @@ fn worker_diagnostics(
             "plugin_kind:unknown_no_effect_entrypoint" => Some("unknown_no_effect_entrypoint"),
             _ => None,
         });
-        if missing_suites.len() < MAX_MISSING_SUITES {
-            if let Some((name, version)) = missing_suite_event(line.trim()) {
-                if seen_missing_suites.insert((name.clone(), version)) {
-                    missing_suites.push(json!({"name": name, "version": version}));
-                }
+        if minidump.is_none() {
+            if let Some(marker) = minidump_marker(line.trim()) {
+                minidump = Some(marker);
             }
         }
         let Some(body) = line.trim().strip_prefix("stage:") else {
@@ -380,24 +418,73 @@ fn worker_diagnostics(
         "failure_stage": failure_stage,
         "first_failure_stage": first_failure_stage,
         "last_completed_stage": last_completed_stage,
-        "missing_suites": missing_suites,
+        "missing_suites": [],
         "plugin_kind": plugin_kind,
+        "minidump": minidump,
     })
 }
 
-fn missing_suite_event(line: &str) -> Option<(String, i32)> {
-    let body = line.strip_prefix("stage:suite_acquire_failed name=")?;
-    let (name, version) = body.rsplit_once(" version=")?;
-    if name.is_empty()
-        || name.len() > MAX_SUITE_NAME_LEN
-        || !name
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b' ' | b'.' | b'_' | b'-'))
-    {
+/// Validates a `stage:minidump_*` stderr line against the exact shapes the
+/// worker emits and returns a normalized, path-free marker. stderr is mixed
+/// worker/plug-in output, so a plug-in could otherwise spoof
+/// `stage:minidump_written name=C:\...` and smuggle a private path into
+/// shareable diagnostics; anything not matching a worker-owned shape is
+/// dropped. The dump basename is worker-generated (`crash-<pid>.dmp`) and is
+/// deliberately not echoed back.
+fn minidump_marker(line: &str) -> Option<String> {
+    let body = line.strip_prefix("stage:minidump_")?;
+    if let Some(rest) = body.strip_prefix("written name=crash-") {
+        let (pid, bytes) = rest.split_once(".dmp bytes=")?;
+        if pid.bytes().all(|b| b.is_ascii_digit())
+            && !pid.is_empty()
+            && bytes.bytes().all(|b| b.is_ascii_digit())
+            && !bytes.is_empty()
+            && bytes.len() <= 20
+        {
+            return Some(format!("written bytes={bytes}"));
+        }
         return None;
     }
-    let version = version.parse::<i32>().ok().filter(|value| *value > 0)?;
-    Some((name.to_owned(), version))
+    let reason = body.strip_prefix("failed reason=")?;
+    let reason = reason.split_once(" code=").map_or(reason, |(head, _)| head);
+    matches!(
+        reason,
+        "dbghelp_unavailable" | "entry_unavailable" | "create_failed" | "write_failed"
+    )
+    .then(|| format!("failed reason={reason}"))
+}
+
+fn propagate_missing_suites(diagnostics: &mut Value, worker_report: &Value) {
+    let mut suites = Vec::new();
+    let mut seen = BTreeSet::new();
+    for suite in worker_report["missing_suites"]
+        .as_array()
+        .into_iter()
+        .flatten()
+    {
+        if suites.len() >= MAX_MISSING_SUITES {
+            break;
+        }
+        let Some(name) = suite["name"].as_str().filter(|name| {
+            !name.is_empty()
+                && name.len() <= MAX_SUITE_NAME_LEN
+                && name.bytes().all(|byte| {
+                    byte.is_ascii_alphanumeric() || matches!(byte, b' ' | b'.' | b'_' | b'-')
+                })
+        }) else {
+            continue;
+        };
+        let Some(version) = suite["version"]
+            .as_i64()
+            .filter(|version| *version > 0 && *version <= i32::MAX as i64)
+        else {
+            continue;
+        };
+        if seen.insert((name.to_owned(), version)) {
+            suites.push(json!({"name": name, "version": version}));
+        }
+    }
+    diagnostics["missing_suites"] = Value::Array(suites);
 }
 
 fn module_audit_summary(audit: &Value) -> Option<Value> {
@@ -573,6 +660,148 @@ fn native_rgba_to_preview(bytes: &[u8], format: RenderPixelFormat) -> io::Result
                 .collect())
         }
     }
+}
+
+/// Opt-in world snapshot dumps and output checksum detail (issue #19). Both
+/// default off and only take effect for broker-dispatched image renders.
+const WORLD_DUMP_DIR_ENV: &str = "AEXCOMPAT_DUMP_WORLDS_DIR";
+const OUTPUT_CHECKSUM_DETAIL_ENV: &str = "AEXCOMPAT_CHECKSUM_DETAIL";
+const WORLD_DUMP_EXTENSIONS: [&str; 3] = [".rgba8", ".rgba16le", ".rgba32f-le"];
+
+struct WorldDumpDir {
+    path: PathBuf,
+    display: String,
+}
+
+/// Opt-in crash minidump directory (issue #18). Default off; the worker
+/// writes at most one create-new dump per process. Dumps contain plug-in
+/// memory, so they stay local and are never serialized into shareable
+/// reports; diagnostics carry only the basename.
+const MINIDUMP_DIR_ENV: &str = "AEXCOMPAT_MINIDUMP_DIR";
+
+fn requested_minidump_dir(repository: &Path) -> io::Result<Option<WorldDumpDir>> {
+    match std::env::var_os(MINIDUMP_DIR_ENV) {
+        Some(value) => resolve_managed_dump_dir(repository, Path::new(&value), false).map(Some),
+        None => Ok(None),
+    }
+}
+
+/// The `--minidump-v1 <dir>` argument pair for a dispatch, or empty when the
+/// opt-in env var is unset. Every worker dispatch appends this at the tail
+/// (see `dispatch_secure_image`) so the crash path is uniform across worker
+/// kinds; the worker consumes the trailing pair before its argc-exact mode
+/// dispatch.
+pub(crate) fn minidump_dispatch_args(repository: &Path) -> io::Result<Vec<String>> {
+    minidump_dispatch_args_for(repository, std::env::var_os(MINIDUMP_DIR_ENV))
+}
+
+/// Pure resolution split out so tests exercise it without mutating the
+/// process-global env var (which races other tests under parallelism).
+fn minidump_dispatch_args_for(
+    repository: &Path,
+    requested: Option<std::ffi::OsString>,
+) -> io::Result<Vec<String>> {
+    Ok(match requested {
+        Some(value) => {
+            let dump = resolve_managed_dump_dir(repository, Path::new(&value), false)?;
+            vec!["--minidump-v1".into(), dump.path.to_string_lossy().into_owned()]
+        }
+        None => Vec::new(),
+    })
+}
+
+fn requested_world_dump_dir(repository: &Path) -> io::Result<Option<WorldDumpDir>> {
+    match std::env::var_os(WORLD_DUMP_DIR_ENV) {
+        Some(value) => resolve_world_dump_dir(repository, Path::new(&value)).map(Some),
+        None => Ok(None),
+    }
+}
+
+/// Fail-closed resolution of the requested dump directory: it must resolve to
+/// a broker-managed location under `<repository>/target/`, must not use
+/// traversal components, and must start empty so stale snapshots can never be
+/// mistaken for this run's output.
+fn resolve_world_dump_dir(repository: &Path, requested: &Path) -> io::Result<WorldDumpDir> {
+    resolve_managed_dump_dir(repository, requested, true)
+}
+
+fn resolve_managed_dump_dir(
+    repository: &Path,
+    requested: &Path,
+    require_empty: bool,
+) -> io::Result<WorldDumpDir> {
+    if requested.as_os_str().is_empty() {
+        return Err(invalid("world dump directory must not be empty"));
+    }
+    if requested.components().any(|component| {
+        matches!(
+            component,
+            std::path::Component::CurDir | std::path::Component::ParentDir
+        )
+    }) {
+        return Err(invalid(
+            "world dump directory must not contain traversal components",
+        ));
+    }
+    let resolved = if requested.is_absolute() {
+        requested.to_path_buf()
+    } else {
+        repository.join(requested)
+    };
+    let target_root = repository.join("target");
+    // Lexical pre-check before creating anything, so a rejected request never
+    // leaves a directory outside the broker-managed target tree behind.
+    if !resolved.starts_with(&target_root) {
+        return Err(invalid(
+            "world dump directory must stay under the repository target tree",
+        ));
+    }
+    fs::create_dir_all(&resolved)?;
+    let canonical = resolved.canonicalize()?;
+    let canonical_target = target_root.canonicalize()?;
+    if !canonical.starts_with(&canonical_target) {
+        return Err(invalid(
+            "world dump directory must stay under the repository target tree",
+        ));
+    }
+    if require_empty && fs::read_dir(&canonical)?.next().is_some() {
+        return Err(invalid("world dump directory must start empty"));
+    }
+    let display = canonical
+        .strip_prefix(canonical_target.parent().unwrap_or(&canonical_target))
+        .map(|relative| relative.to_string_lossy().replace('\\', "/"))
+        .unwrap_or_else(|_| "target/(world-dumps)".into());
+    Ok(WorldDumpDir {
+        path: canonical,
+        display,
+    })
+}
+
+fn output_checksum_detail_requested() -> bool {
+    matches!(
+        std::env::var(OUTPUT_CHECKSUM_DETAIL_ENV),
+        Ok(value) if value == "1" || value.eq_ignore_ascii_case("true")
+    )
+}
+
+/// Delete only the snapshot files this feature owns (NNN-<stage>-WxH.<ext>)
+/// before a retry dispatch, so a fallback run cannot inherit stale dumps.
+fn clear_world_dump_files(directory: &Path) -> io::Result<()> {
+    for entry in fs::read_dir(directory)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        let owned = name.len() > 4
+            && name.as_bytes()[..3].iter().all(u8::is_ascii_digit)
+            && name.as_bytes()[3] == b'-'
+            && WORLD_DUMP_EXTENSIONS
+                .iter()
+                .any(|extension| name.ends_with(extension));
+        if owned && entry.file_type()?.is_file() {
+            fs::remove_file(entry.path())?;
+        }
+    }
+    Ok(())
 }
 
 /// AE 16-bpc white point: ARGB16 transport samples are 0..=32768, not 0..=65535.
@@ -1262,13 +1491,7 @@ pub fn render_experimental_audio(
         &args_after_plugin,
         Duration::from_millis(INTERACTIVE_RENDER_TIMEOUT_MS),
     )?;
-    let diagnostics = worker_diagnostics(
-        &isolated.stderr,
-        isolated.stderr_truncated,
-        isolated.classification.as_str(),
-        isolated.exit_code,
-        started.elapsed().as_millis(),
-    );
+    let diagnostics = isolated_worker_diagnostics(&isolated, started.elapsed().as_millis());
     if isolated.classification.as_str() != "ok" {
         return Err(invalid(format!(
             "audio render worker failed safely: {diagnostics}"
@@ -1796,13 +2019,7 @@ pub fn inspect_experimental_external_dependencies(
         &args_after_plugin,
         Duration::from_millis(5_000),
     )?;
-    let diagnostics = worker_diagnostics(
-        &isolated.stderr,
-        isolated.stderr_truncated,
-        isolated.classification.as_str(),
-        isolated.exit_code,
-        started.elapsed().as_millis(),
-    );
+    let diagnostics = isolated_worker_diagnostics(&isolated, started.elapsed().as_millis());
     if isolated.classification.as_str() != "ok" {
         return Err(invalid(format!(
             "external dependency inspection failed safely: {diagnostics}"
@@ -1851,13 +2068,7 @@ pub fn probe_experimental_options_dialog(
         &args_after_plugin,
         Duration::from_millis(5_000),
     )?;
-    let diagnostics = worker_diagnostics(
-        &isolated.stderr,
-        isolated.stderr_truncated,
-        isolated.classification.as_str(),
-        isolated.exit_code,
-        started.elapsed().as_millis(),
-    );
+    let diagnostics = isolated_worker_diagnostics(&isolated, started.elapsed().as_millis());
     if isolated.classification.as_str() != "ok" {
         return Err(invalid(format!(
             "options dialog probe failed safely: {diagnostics}"
@@ -1900,13 +2111,7 @@ pub fn probe_experimental_automatic_options_dialog(
         &args_after_plugin,
         Duration::from_millis(5_000),
     )?;
-    let diagnostics = worker_diagnostics(
-        &isolated.stderr,
-        isolated.stderr_truncated,
-        isolated.classification.as_str(),
-        isolated.exit_code,
-        started.elapsed().as_millis(),
-    );
+    let diagnostics = isolated_worker_diagnostics(&isolated, started.elapsed().as_millis());
     if isolated.classification.as_str() != "ok" {
         return Err(invalid(format!(
             "automatic options dialog probe failed safely: {diagnostics}"
@@ -1954,13 +2159,7 @@ pub fn probe_experimental_nop_render(
         &args_after_plugin,
         Duration::from_millis(INTERACTIVE_RENDER_TIMEOUT_MS),
     )?;
-    let diagnostics = worker_diagnostics(
-        &isolated.stderr,
-        isolated.stderr_truncated,
-        isolated.classification.as_str(),
-        isolated.exit_code,
-        started.elapsed().as_millis(),
-    );
+    let diagnostics = isolated_worker_diagnostics(&isolated, started.elapsed().as_millis());
     if isolated.classification.as_str() != "ok" {
         return Err(invalid(format!(
             "NOP_RENDER probe failed safely: {diagnostics}"
@@ -2010,13 +2209,7 @@ pub fn probe_experimental_smart_nop_render(
         &args_after_plugin,
         Duration::from_millis(INTERACTIVE_RENDER_TIMEOUT_MS),
     )?;
-    let diagnostics = worker_diagnostics(
-        &isolated.stderr,
-        isolated.stderr_truncated,
-        isolated.classification.as_str(),
-        isolated.exit_code,
-        started.elapsed().as_millis(),
-    );
+    let diagnostics = isolated_worker_diagnostics(&isolated, started.elapsed().as_millis());
     if isolated.classification.as_str() != "ok" {
         return Err(invalid(format!(
             "SmartFX NOP_RENDER probe failed safely: {diagnostics}"
@@ -2070,13 +2263,7 @@ pub fn probe_experimental_input_buffer_write(
         &args_after_plugin,
         Duration::from_millis(INTERACTIVE_RENDER_TIMEOUT_MS),
     )?;
-    let diagnostics = worker_diagnostics(
-        &isolated.stderr,
-        isolated.stderr_truncated,
-        isolated.classification.as_str(),
-        isolated.exit_code,
-        started.elapsed().as_millis(),
-    );
+    let diagnostics = isolated_worker_diagnostics(&isolated, started.elapsed().as_millis());
     if isolated.classification.as_str() != "ok" {
         return Err(invalid(format!(
             "input-buffer write probe failed safely: {diagnostics}"
@@ -2126,13 +2313,7 @@ pub fn probe_experimental_smart_input_buffer_write(
         &args_after_plugin,
         Duration::from_millis(INTERACTIVE_RENDER_TIMEOUT_MS),
     )?;
-    let diagnostics = worker_diagnostics(
-        &isolated.stderr,
-        isolated.stderr_truncated,
-        isolated.classification.as_str(),
-        isolated.exit_code,
-        started.elapsed().as_millis(),
-    );
+    let diagnostics = isolated_worker_diagnostics(&isolated, started.elapsed().as_millis());
     if isolated.classification.as_str() != "ok" {
         return Err(invalid(format!(
             "SmartFX input-buffer write probe failed safely: {diagnostics}"
@@ -2193,13 +2374,7 @@ fn probe_experimental_frame_resize(
         &args_after_plugin,
         Duration::from_millis(INTERACTIVE_RENDER_TIMEOUT_MS),
     )?;
-    let diagnostics = worker_diagnostics(
-        &isolated.stderr,
-        isolated.stderr_truncated,
-        isolated.classification.as_str(),
-        isolated.exit_code,
-        started.elapsed().as_millis(),
-    );
+    let diagnostics = isolated_worker_diagnostics(&isolated, started.elapsed().as_millis());
     if isolated.classification.as_str() != "ok" {
         return Err(invalid(format!(
             "FRAME_SETUP resize probe failed safely: {diagnostics}"
@@ -2290,13 +2465,7 @@ pub fn probe_experimental_persistent_sequence(
         &args_after_plugin,
         Duration::from_millis(INTERACTIVE_RENDER_TIMEOUT_MS),
     )?;
-    let diagnostics = worker_diagnostics(
-        &isolated.stderr,
-        isolated.stderr_truncated,
-        isolated.classification.as_str(),
-        isolated.exit_code,
-        started.elapsed().as_millis(),
-    );
+    let diagnostics = isolated_worker_diagnostics(&isolated, started.elapsed().as_millis());
     if isolated.classification.as_str() != "ok" {
         return Err(invalid(format!(
             "persistent sequence probe failed safely: {diagnostics}"
@@ -2347,13 +2516,7 @@ pub fn probe_experimental_flattened_sequence(
         &args_after_plugin,
         Duration::from_millis(INTERACTIVE_RENDER_TIMEOUT_MS),
     )?;
-    let diagnostics = worker_diagnostics(
-        &isolated.stderr,
-        isolated.stderr_truncated,
-        isolated.classification.as_str(),
-        isolated.exit_code,
-        started.elapsed().as_millis(),
-    );
+    let diagnostics = isolated_worker_diagnostics(&isolated, started.elapsed().as_millis());
     if isolated.classification.as_str() != "ok" {
         return Err(invalid(format!(
             "flattened sequence probe failed safely: {diagnostics}"
@@ -2405,13 +2568,7 @@ pub fn probe_experimental_copied_flattened_sequence(
         &args_after_plugin,
         Duration::from_millis(INTERACTIVE_RENDER_TIMEOUT_MS),
     )?;
-    let diagnostics = worker_diagnostics(
-        &isolated.stderr,
-        isolated.stderr_truncated,
-        isolated.classification.as_str(),
-        isolated.exit_code,
-        started.elapsed().as_millis(),
-    );
+    let diagnostics = isolated_worker_diagnostics(&isolated, started.elapsed().as_millis());
     if isolated.classification.as_str() != "ok" {
         return Err(invalid(format!(
             "non-destructive sequence save probe failed safely: {diagnostics}"
@@ -2515,13 +2672,11 @@ fn inspect_experimental_with_diagnostics_and_runtime_policy(
             Duration::from_millis(5_000),
         )?
     };
-    let mut diagnostics = worker_diagnostics(
-        &isolated.stderr,
-        isolated.stderr_truncated,
-        isolated.classification.as_str(),
-        isolated.exit_code,
-        started.elapsed().as_millis(),
-    );
+    let mut diagnostics = isolated_worker_diagnostics(&isolated, started.elapsed().as_millis());
+    let worker_report: Option<Value> = serde_json::from_str(isolated.stdout.trim()).ok();
+    if let Some(report) = &worker_report {
+        propagate_missing_suites(&mut diagnostics, report);
+    }
     if isolated.classification.as_str() != "ok" {
         if let Some(summary) = failed_module_audit_summary(&isolated.stdout) {
             diagnostics["module_audit_failure"] = summary;
@@ -2530,8 +2685,7 @@ fn inspect_experimental_with_diagnostics_and_runtime_policy(
             "AEX parameter inspection worker failed safely: {diagnostics}"
         )));
     }
-    let report: Value = serde_json::from_str(isolated.stdout.trim())
-        .map_err(|_| invalid("inspection worker report is invalid"))?;
+    let report = worker_report.ok_or_else(|| invalid("inspection worker report is invalid"))?;
     if let Some(summary) = report.get("module_audit").and_then(module_audit_summary) {
         diagnostics["module_audit"] = summary;
     }
@@ -4094,6 +4248,9 @@ fn render_with_artifact(
         &root,
         nonce,
     )?;
+    let world_dump_dir = requested_world_dump_dir(repository)?;
+    let minidump_dir = requested_minidump_dir(repository)?;
+    let output_checksum_detail = output_checksum_detail_requested();
 
     let worker_kind = if smart {
         WorkerKind::Smart
@@ -4222,6 +4379,17 @@ fn render_with_artifact(
             path.to_string_lossy().into_owned(),
         ]);
     }
+    if let Some(dump) = &world_dump_dir {
+        args_after_plugin.extend([
+            "--dump-worlds-v1".into(),
+            dump.path.to_string_lossy().into_owned(),
+        ]);
+    }
+    // The --minidump-v1 flag is injected at the dispatch tail for every worker
+    // kind by dispatch_secure_image; minidump_dir here is only for the report.
+    if output_checksum_detail {
+        args_after_plugin.extend(["--output-checksum-detail-v1".into(), "1".into()]);
+    }
     let mut args_before_plugin = vec![command.into()];
     let started = Instant::now();
     let initial_dispatch = SecureImageDispatch {
@@ -4268,14 +4436,11 @@ fn render_with_artifact(
     } else {
         dispatch_secure_image(initial_dispatch)?
     };
-    let mut diagnostics = worker_diagnostics(
-        &isolated.stderr,
-        isolated.stderr_truncated,
-        isolated.classification.as_str(),
-        isolated.exit_code,
-        started.elapsed().as_millis(),
-    );
+    let mut diagnostics = isolated_worker_diagnostics(&isolated, started.elapsed().as_millis());
     let initial_report: Option<Value> = serde_json::from_str(isolated.stdout.trim()).ok();
+    if let Some(report) = &initial_report {
+        propagate_missing_suites(&mut diagnostics, report);
+    }
     if initial_report
         .as_ref()
         .is_some_and(|report| report.get("output_pixels_valid") == Some(&Value::Bool(false)))
@@ -4317,6 +4482,9 @@ fn render_with_artifact(
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}
             Err(error) => return Err(error.into()),
         }
+        if let Some(dump) = &world_dump_dir {
+            clear_world_dump_files(&dump.path)?;
+        }
         args_before_plugin[0] = image_worker_command(
             smart,
             pixel_format,
@@ -4334,18 +4502,13 @@ fn render_with_artifact(
             args_after_plugin: &args_after_plugin,
             timeout: Duration::from_millis(timeout_ms),
         })?;
-        diagnostics = worker_diagnostics(
-            &isolated.stderr,
-            isolated.stderr_truncated,
-            isolated.classification.as_str(),
-            isolated.exit_code,
-            retry_started.elapsed().as_millis(),
-        );
+        diagnostics = isolated_worker_diagnostics(&isolated, retry_started.elapsed().as_millis());
         let retry_report = serde_json::from_str(isolated.stdout.trim()).map_err(|_| {
             invalid(format!(
                 "CPU fallback worker report unavailable: {diagnostics}"
             ))
         })?;
+        propagate_missing_suites(&mut diagnostics, &retry_report);
         gpu_fallback_used = true;
         retry_report
     } else {
@@ -4616,6 +4779,28 @@ fn render_with_artifact(
         );
     }
     report_object.insert("output_raw".into(), json!(output_raw));
+    if let Some(dump) = &world_dump_dir {
+        report_object.insert(
+            "world_dumps".into(),
+            json!({
+                "directory": dump.display,
+                "written": worker_report.get("world_dumps_written"),
+                "skipped": worker_report.get("world_dumps_skipped"),
+                "bytes": worker_report.get("world_dump_bytes"),
+            }),
+        );
+    }
+    if let Some(dump) = &minidump_dir {
+        report_object.insert("minidump_directory".into(), json!(dump.display));
+    }
+    if output_checksum_detail {
+        for field in ["output_row_crc32", "output_channel_sha256"] {
+            report_object.insert(
+                field.into(),
+                worker_report.get(field).cloned().unwrap_or(Value::Null),
+            );
+        }
+    }
     for field in [
         "comp_bg_color_success_count",
         "comp_bg_color_rejection_count",
@@ -5292,6 +5477,118 @@ mod tests {
     }
 
     #[test]
+    fn minidump_dispatch_args_are_opt_in_and_tail_shaped() {
+        // Every worker dispatch funnels through this helper: no request means
+        // no flag (the crash path stays off by default) and a request yields
+        // exactly the trailing --minidump-v1 <dir> pair. Uses the pure form so
+        // the test never mutates the process-global env var.
+        let repository = std::env::temp_dir().join(format!(
+            "aexcompat-minidump-args-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(repository.join("target")).unwrap();
+
+        assert!(minidump_dispatch_args_for(&repository, None).unwrap().is_empty());
+
+        let args =
+            minidump_dispatch_args_for(&repository, Some("target/crash-dumps".into())).unwrap();
+        assert_eq!(args.len(), 2);
+        assert_eq!(args[0], "--minidump-v1");
+        assert!(Path::new(&args[1]).ends_with("crash-dumps"));
+
+        // Containment still applies to the resolved directory.
+        assert!(minidump_dispatch_args_for(&repository, Some("target/../escape".into())).is_err());
+
+        fs::remove_dir_all(repository).unwrap();
+    }
+
+    #[test]
+    fn world_dump_dir_is_fail_closed_under_the_target_tree() {
+        let repository = std::env::temp_dir().join(format!(
+            "aexcompat-world-dump-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(repository.join("target")).unwrap();
+
+        let accepted =
+            resolve_world_dump_dir(&repository, Path::new("target/world-dumps")).unwrap();
+        assert!(accepted.path.is_dir());
+        assert_eq!(accepted.display, "target/world-dumps");
+
+        // A non-empty directory is refused so stale snapshots cannot be
+        // mistaken for the coming run's output.
+        fs::write(
+            accepted.path.join("000-classic-input-2x2.rgba8"),
+            [0_u8; 16],
+        )
+        .unwrap();
+        assert!(resolve_world_dump_dir(&repository, Path::new("target/world-dumps")).is_err());
+
+        // Minidumps accumulate across runs (create-new files), so their
+        // resolver accepts a non-empty managed directory but keeps every
+        // other containment rule.
+        assert!(
+            resolve_managed_dump_dir(&repository, Path::new("target/world-dumps"), false).is_ok()
+        );
+        assert!(
+            resolve_managed_dump_dir(&repository, Path::new("target/../escape"), false).is_err()
+        );
+        assert!(
+            resolve_managed_dump_dir(&repository, Path::new("not-target/dumps"), false).is_err()
+        );
+
+        assert!(resolve_world_dump_dir(&repository, Path::new("")).is_err());
+        assert!(resolve_world_dump_dir(&repository, Path::new("target/../escape")).is_err());
+        assert!(resolve_world_dump_dir(&repository, Path::new("not-target/dumps")).is_err());
+        let outside = std::env::temp_dir().join(format!(
+            "aexcompat-world-dump-outside-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        assert!(resolve_world_dump_dir(&repository, &outside).is_err());
+        assert!(!outside.exists() || fs::remove_dir_all(&outside).is_ok());
+        fs::remove_dir_all(repository).unwrap();
+    }
+
+    #[test]
+    fn world_dump_cleanup_removes_only_owned_snapshot_files() {
+        let directory = std::env::temp_dir().join(format!(
+            "aexcompat-world-dump-clear-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&directory).unwrap();
+        let owned = [
+            "000-classic-input-4x2.rgba8",
+            "001-smart-output-4x2.rgba16le",
+            "002-smart-layer-slot7-4x2.rgba32f-le",
+        ];
+        let foreign = ["notes.txt", "xyz-classic-input-4x2.rgba8", "003-.png"];
+        for name in owned.iter().chain(foreign.iter()) {
+            fs::write(directory.join(name), b"x").unwrap();
+        }
+        clear_world_dump_files(&directory).unwrap();
+        for name in owned {
+            assert!(!directory.join(name).exists(), "{name} should be removed");
+        }
+        for name in foreign {
+            assert!(directory.join(name).exists(), "{name} should survive");
+        }
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
     fn deep16_png_expands_ae_range_and_counts_overrange_samples() {
         let rgba16 = [0u16, 16_384, 32_768, 65_535]
             .into_iter()
@@ -5406,7 +5703,7 @@ mod tests {
     }
 
     #[test]
-    fn worker_diagnostics_extract_bounded_unique_missing_suites() {
+    fn structured_worker_report_supplies_bounded_unique_missing_suites() {
         let mut trace = String::from(
             "stage:suite_acquire_failed name=PF World Suite version=2\n\
              stage:suite_acquire_failed name=PF World Suite version=2\n\
@@ -5423,7 +5720,18 @@ mod tests {
             "A".repeat(MAX_SUITE_NAME_LEN + 1)
         ));
 
-        let diagnostics = worker_diagnostics(&trace, false, "nonzero_exit", 1, 2);
+        let mut diagnostics = worker_diagnostics(&trace, false, "nonzero_exit", 1, 2);
+        assert!(diagnostics["missing_suites"].as_array().unwrap().is_empty());
+        let mut reported = vec![
+            json!({"name": "PF World Suite", "version": 2}),
+            json!({"name": "PF World Suite", "version": 2}),
+            json!({"name": "C:\\private\\suite", "version": 1}),
+            json!({"name": "Bad Suite", "version": -1}),
+        ];
+        for index in 0..(MAX_MISSING_SUITES + 3) {
+            reported.push(json!({"name": format!("Safe Suite {index}"), "version": 1}));
+        }
+        propagate_missing_suites(&mut diagnostics, &json!({"missing_suites": reported}));
         let suites = diagnostics["missing_suites"].as_array().unwrap();
         assert_eq!(suites.len(), MAX_MISSING_SUITES);
         assert_eq!(suites[0], json!({"name": "PF World Suite", "version": 2}));
@@ -5449,6 +5757,84 @@ mod tests {
         });
         assert!(diagnostics_contains_gpu_stage(&gpu));
         assert!(!diagnostics_contains_gpu_stage(&cpu));
+    }
+
+    #[test]
+    fn minidump_marker_accepts_only_worker_owned_shapes() {
+        // Legitimate worker lines normalize to a path-free marker.
+        assert_eq!(
+            minidump_marker("stage:minidump_written name=crash-1234.dmp bytes=51790"),
+            Some("written bytes=51790".to_owned())
+        );
+        assert_eq!(
+            minidump_marker("stage:minidump_failed reason=dbghelp_unavailable"),
+            Some("failed reason=dbghelp_unavailable".to_owned())
+        );
+        assert_eq!(
+            minidump_marker("stage:minidump_failed reason=create_failed code=5"),
+            Some("failed reason=create_failed".to_owned())
+        );
+
+        // A plug-in cannot smuggle a path or fake reason through the marker.
+        assert_eq!(
+            minidump_marker("stage:minidump_written name=C:\\Users\\secret\\a.dmp bytes=1"),
+            None
+        );
+        assert_eq!(
+            minidump_marker("stage:minidump_written name=crash-1234.dmp bytes=../etc"),
+            None
+        );
+        assert_eq!(
+            minidump_marker("stage:minidump_failed reason=totally_made_up"),
+            None
+        );
+        assert_eq!(minidump_marker("stage:minidump_written whatever"), None);
+        assert_eq!(minidump_marker("stage:other"), None);
+    }
+
+    #[test]
+    fn isolated_worker_diagnostics_expose_kill_reason_and_memory_peaks() {
+        let isolated = crate::secure_launch::SecureLaunchResult {
+            classification: crate::ExitClassification::NonzeroExit,
+            exit_code: 42,
+            stdout: String::new(),
+            stderr: String::new(),
+            stdout_truncated: false,
+            stderr_truncated: false,
+            kill_reason: Some("memory_limit"),
+            worker_peak_commit_bytes: Some(529_000_000),
+            peak_process_memory_bytes: Some(530_000_000),
+            peak_job_memory_bytes: Some(531_000_000),
+            process_memory_limit_bytes: 536_870_912,
+            memory_limit_reached: true,
+        };
+        let diagnostics = isolated_worker_diagnostics(&isolated, 1_234);
+        assert_eq!(diagnostics["kill_reason"], "memory_limit");
+        assert_eq!(diagnostics["memory_limit_reached"], true);
+        assert_eq!(diagnostics["worker_peak_commit_bytes"], 529_000_000u64);
+        assert_eq!(diagnostics["peak_process_memory_bytes"], 530_000_000u64);
+        assert_eq!(diagnostics["peak_job_memory_bytes"], 531_000_000u64);
+        assert_eq!(diagnostics["process_memory_limit_bytes"], 536_870_912u64);
+        assert_eq!(diagnostics["classification"], "nonzero_exit");
+        assert_eq!(diagnostics["elapsed_ms"], 1_234);
+
+        let alive = crate::secure_launch::SecureLaunchResult {
+            classification: crate::ExitClassification::Ok,
+            exit_code: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+            stdout_truncated: false,
+            stderr_truncated: false,
+            kill_reason: None,
+            worker_peak_commit_bytes: Some(900_000),
+            peak_process_memory_bytes: Some(1_000_000),
+            peak_job_memory_bytes: Some(1_000_000),
+            process_memory_limit_bytes: 536_870_912,
+            memory_limit_reached: false,
+        };
+        let diagnostics = isolated_worker_diagnostics(&alive, 5);
+        assert_eq!(diagnostics["kill_reason"], Value::Null);
+        assert_eq!(diagnostics["memory_limit_reached"], false);
     }
 
     #[test]

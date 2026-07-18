@@ -1,4 +1,6 @@
 #include <windows.h>
+// MiniDumpWriteDump types only; dbghelp.dll is loaded dynamically on crash.
+#include <DbgHelp.h>
 #include <bcrypt.h>
 #include <d3d12.h>
 #include <dxgi1_6.h>
@@ -6,6 +8,8 @@
 #include <io.h>
 #include <excpt.h>
 #include <psapi.h>
+
+#include "trace_writer.hpp"
 
 #include <array>
 #include <algorithm>
@@ -598,6 +602,17 @@ uint64_t g_last_seh_exception_address{};
 std::string g_last_seh_exception_module;
 std::string g_last_seh_selector;
 int32_t g_last_seh_error{};
+aexcompat::TraceWriter* g_trace_writer{};
+
+const char* trace_worker_label() {
+#if defined(AEXCOMPAT_RENDER_WORKER)
+  return "aex_render_worker";
+#elif defined(AEXCOMPAT_SMART_WORKER)
+  return "aex_smart_worker";
+#else
+  return "aex_l2_worker";
+#endif
+}
 
 const char* effect_selector_name(int32_t command) {
   switch (command) {
@@ -632,7 +647,75 @@ const char* effect_selector_name(int32_t command) {
   }
 }
 
+// Opt-in crash minidumps (issue #18): broker-validated directory passed via
+// --minidump-v1. Default off; one create-new dump per process; local only.
+std::filesystem::path g_minidump_dir;
+// Atomic one-time guard: a plug-in can crash several of its own threads at
+// once, and the top-level filter runs on each, so the writer must admit only
+// the first.
+std::atomic<bool> g_minidump_attempted{false};
+
+void write_crash_minidump(EXCEPTION_POINTERS* information) {
+  if (g_minidump_dir.empty() || !information) return;
+  if (g_minidump_attempted.exchange(true)) return;
+  HMODULE dbghelp = LoadLibraryExW(L"dbghelp.dll", nullptr,
+                                   LOAD_LIBRARY_SEARCH_SYSTEM32);
+  if (!dbghelp) {
+    std::fprintf(stderr, "stage:minidump_failed reason=dbghelp_unavailable\n");
+    return;
+  }
+  using MiniDumpWriteDumpFn = BOOL(WINAPI*)(HANDLE, DWORD, HANDLE,
+                                            MINIDUMP_TYPE,
+                                            PMINIDUMP_EXCEPTION_INFORMATION,
+                                            void*, void*);
+  const auto write_dump = reinterpret_cast<MiniDumpWriteDumpFn>(
+      GetProcAddress(dbghelp, "MiniDumpWriteDump"));
+  if (!write_dump) {
+    std::fprintf(stderr, "stage:minidump_failed reason=entry_unavailable\n");
+    return;
+  }
+  wchar_t name[64]{};
+  std::swprintf(name, std::size(name), L"crash-%lu.dmp", GetCurrentProcessId());
+  const std::filesystem::path dump_path = g_minidump_dir / name;
+  // CREATE_NEW enforces the create-new policy: never overwrite an existing
+  // dump, even across an unexpected process id reuse.
+  HANDLE file = CreateFileW(dump_path.c_str(), GENERIC_WRITE, 0, nullptr,
+                            CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
+  if (file == INVALID_HANDLE_VALUE) {
+    std::fprintf(stderr, "stage:minidump_failed reason=create_failed code=%lu\n",
+                 GetLastError());
+    return;
+  }
+  MINIDUMP_EXCEPTION_INFORMATION exception_info{};
+  exception_info.ThreadId = GetCurrentThreadId();
+  exception_info.ExceptionPointers = information;
+  exception_info.ClientPointers = FALSE;
+  const BOOL written = write_dump(GetCurrentProcess(), GetCurrentProcessId(),
+                                  file, MiniDumpNormal, &exception_info,
+                                  nullptr, nullptr);
+  LARGE_INTEGER size{};
+  GetFileSizeEx(file, &size);
+  CloseHandle(file);
+  if (written) {
+    std::fprintf(stderr, "stage:minidump_written name=crash-%lu.dmp bytes=%lld\n",
+                 GetCurrentProcessId(), static_cast<long long>(size.QuadPart));
+  } else {
+    std::fprintf(stderr, "stage:minidump_failed reason=write_failed code=%lu\n",
+                 GetLastError());
+    DeleteFileW(dump_path.c_str());
+  }
+}
+
+// Best-effort coverage for crashes that never reach an __except filter
+// (e.g. on foreign threads). Continue the search so default handling and the
+// nonzero exit code are unchanged.
+LONG WINAPI top_level_crash_filter(EXCEPTION_POINTERS* information) {
+  write_crash_minidump(information);
+  return EXCEPTION_CONTINUE_SEARCH;
+}
+
 int capture_seh_exception(EXCEPTION_POINTERS* information) {
+  write_crash_minidump(information);
   g_last_seh_exception_code = information && information->ExceptionRecord
       ? information->ExceptionRecord->ExceptionCode : 0;
   const void* address = information && information->ExceptionRecord
@@ -655,8 +738,22 @@ int capture_seh_exception(EXCEPTION_POINTERS* information) {
   return EXCEPTION_EXECUTE_HANDLER;
 }
 
+// Raises a real access violation under the production __except filter so the
+// crash-minidump path can be exercised end to end. Kept in its own function
+// because a frame mixing __try with unwindable C++ objects will not compile.
+uint32_t selftest_trigger_guarded_crash() {
+  __try {
+    volatile int* target = nullptr;
+    *target = 1;
+    return 0;
+  } __except (capture_seh_exception(GetExceptionInformation())) {
+    return GetExceptionCode();
+  }
+}
+
 int32_t audited_effect_call(EffectEntry entry, int32_t command, void* input,
                             void* output, void** params, void* world, void* extra) {
+  if (g_trace_writer) g_trace_writer->selector_dispatch(effect_selector_name(command));
   const int32_t error = entry(command, input, output, params, world, extra);
   capture_module_audit_phase();
   return module_audit_passed() ? error : 512;
@@ -1050,6 +1147,18 @@ uint32_t g_checkout_time_scale = 0;
 std::array<int32_t, 4> g_input_checkout_request{-1, -1, -1, -1};
 std::array<int32_t, 4> g_map_checkout_request{-1, -1, -1, -1};
 std::string g_smart_pixel_format = "argb8";
+// Opt-in world snapshot dumps and output checksum detail (issue #19). Both
+// default off; the broker enables them per run with the --dump-worlds-v1 and
+// --output-checksum-detail-v1 argv trailers, and the dump directory is
+// broker-managed. Raw pixel bytes never enter the JSON report; only counts,
+// row CRCs, and channel digests do.
+std::filesystem::path g_dump_worlds_dir;
+uint32_t g_world_dumps_written = 0;
+uint32_t g_world_dumps_skipped = 0;
+uint64_t g_world_dump_bytes = 0;
+bool g_output_checksum_detail = false;
+std::vector<uint32_t> g_output_row_crc32;
+std::array<std::string, 4> g_output_channel_sha256;
 int32_t g_smart_rowbytes = 64;
 bool g_mask_model_enabled = false;
 enum class MaskFault { None, CountError, CountCrash };
@@ -9667,11 +9776,46 @@ std::mutex g_suite_lease_mutex;
 std::map<std::pair<std::string, int32_t>, uint32_t> g_suite_leases;
 uint32_t g_suite_acquires{};
 uint32_t g_suite_releases{};
+constexpr std::size_t kMaxMissingSuites = 16;
+std::vector<std::pair<std::string, int32_t>> g_missing_suites;
+std::string escape(const std::string& input);
 
 void record_suite_acquire(const char* name, int32_t version) {
+  {
+    std::lock_guard<std::mutex> lock(g_suite_lease_mutex);
+    ++g_suite_leases[{name, version}];
+    ++g_suite_acquires;
+  }
+  if (g_trace_writer && name) g_trace_writer->suite_acquire(name, version, true);
+}
+
+void record_missing_suite(const std::string& name, int32_t version) {
+  const bool valid_name = !name.empty() && name.size() <= 96 &&
+      std::all_of(name.begin(), name.end(), [](unsigned char character) {
+        return std::isalnum(character) || character == ' ' || character == '.' ||
+            character == '_' || character == '-';
+      });
+  if (!valid_name || version <= 0) return;
   std::lock_guard<std::mutex> lock(g_suite_lease_mutex);
-  ++g_suite_leases[{name, version}];
-  ++g_suite_acquires;
+  const auto entry = std::make_pair(name, version);
+  if (std::find(g_missing_suites.begin(), g_missing_suites.end(), entry) ==
+          g_missing_suites.end() &&
+      g_missing_suites.size() < kMaxMissingSuites) {
+    g_missing_suites.push_back(entry);
+  }
+}
+
+std::string missing_suites_report_json() {
+  std::lock_guard<std::mutex> lock(g_suite_lease_mutex);
+  std::ostringstream json;
+  json << ",\"missing_suites\":[";
+  for (std::size_t index = 0; index < g_missing_suites.size(); ++index) {
+    if (index != 0) json << ',';
+    json << "{\"name\":\"" << escape(g_missing_suites[index].first)
+         << "\",\"version\":" << g_missing_suites[index].second << '}';
+  }
+  json << ']';
+  return json.str();
 }
 
 bool suite_leases_balanced() {
@@ -12592,6 +12736,9 @@ int32_t reject_suite_acquire(const char* name, int32_t version) {
     const unsigned char character = static_cast<unsigned char>(name[index]);
     safe_name.push_back(character >= 0x20 && character <= 0x7e ? name[index] : '?');
   }
+  record_missing_suite(safe_name, version);
+  if (g_trace_writer && !safe_name.empty())
+    g_trace_writer->suite_acquire(safe_name, std::max<int32_t>(version, 0), false);
   std::cerr << "stage:suite_acquire_failed name=" << safe_name
             << " version=" << version << "\n" << std::flush;
   return 1;
@@ -13405,13 +13552,19 @@ int32_t __cdecl acquire_suite(const char* name, int32_t version, const void** su
 }
 
 int32_t __cdecl release_suite(const char* name, int32_t version) {
-  if (!name) return 1;
-  std::lock_guard<std::mutex> lock(g_suite_lease_mutex);
-  const auto found = g_suite_leases.find({name, version});
-  if (found == g_suite_leases.end() || found->second == 0) return 1;
-  --found->second;
-  ++g_suite_releases;
-  return 0;
+  bool released = false;
+  if (name) {
+    std::lock_guard<std::mutex> lock(g_suite_lease_mutex);
+    const auto found = g_suite_leases.find({name, version});
+    if (found != g_suite_leases.end() && found->second != 0) {
+      --found->second;
+      ++g_suite_releases;
+      released = true;
+    }
+  }
+  if (g_trace_writer && name)
+    g_trace_writer->suite_release(name, std::max<int32_t>(version, 0), released);
+  return released ? 0 : 1;
 }
 
 bool verify_suite_release_without_acquire_rejected() {
@@ -18859,6 +19012,108 @@ void argb_to_rgba_native(void* rgba, const void* source, int32_t pixel_bytes) {
   }
 }
 
+// World snapshot dump caps: a debug run never writes more than 32 snapshots
+// or 1 GiB in total; anything beyond is counted as skipped, not an error.
+constexpr uint32_t kMaxWorldDumps = 32;
+constexpr uint64_t kMaxWorldDumpBytes = 1ull << 30;
+
+const char* world_dump_extension(int32_t pixel_bytes) {
+  return pixel_bytes == 16 ? "rgba32f-le" : (pixel_bytes == 8 ? "rgba16le" : "rgba8");
+}
+
+// Write one packed-ARGB world as raw RGBA in the byte layout that
+// tools/compare-pixel-oracles.py consumes (rgba8 / rgba16le / rgba32f-le,
+// row-major, no stride padding). Little-endian is the only supported target.
+void dump_world_snapshot(const std::string& stage, const unsigned char* packed_argb,
+                         int32_t width, int32_t height, int32_t pixel_bytes) {
+  if (g_dump_worlds_dir.empty() || !packed_argb || width <= 0 || height <= 0) return;
+  const uint64_t bytes = static_cast<uint64_t>(width) * height * pixel_bytes;
+  if (g_world_dumps_written >= kMaxWorldDumps ||
+      bytes > kMaxWorldDumpBytes - g_world_dump_bytes) {
+    ++g_world_dumps_skipped;
+    return;
+  }
+  std::vector<unsigned char> rgba(static_cast<std::size_t>(bytes));
+  const std::size_t pixels = static_cast<std::size_t>(width) * height;
+  for (std::size_t pixel = 0; pixel < pixels; ++pixel)
+    argb_to_rgba_native(rgba.data() + pixel * pixel_bytes,
+                        packed_argb + pixel * pixel_bytes, pixel_bytes);
+  char name[128];
+  std::snprintf(name, sizeof(name), "%03u-%s-%dx%d.%s", g_world_dumps_written,
+                stage.c_str(), width, height, world_dump_extension(pixel_bytes));
+  std::ofstream file(g_dump_worlds_dir / name, std::ios::binary | std::ios::out);
+  if (!file || !file.write(reinterpret_cast<const char*>(rgba.data()), rgba.size())) {
+    ++g_world_dumps_skipped;
+    return;
+  }
+  ++g_world_dumps_written;
+  g_world_dump_bytes += bytes;
+}
+
+uint32_t crc32_ieee(const unsigned char* data, std::size_t size) {
+  static const auto table = [] {
+    std::array<uint32_t, 256> built{};
+    for (uint32_t index = 0; index < 256; ++index) {
+      uint32_t value = index;
+      for (int bit = 0; bit < 8; ++bit)
+        value = (value >> 1) ^ ((value & 1u) ? 0xEDB88320u : 0u);
+      built[index] = value;
+    }
+    return built;
+  }();
+  uint32_t crc = 0xFFFFFFFFu;
+  for (std::size_t index = 0; index < size; ++index)
+    crc = (crc >> 8) ^ table[(crc ^ data[index]) & 0xFFu];
+  return crc ^ 0xFFFFFFFFu;
+}
+
+// Record per-row CRC32 and per-channel SHA-256 of the RGBA-ordered output
+// transport bytes, so a differing region can be narrowed to rows and channels
+// without shipping any pixel content in the report.
+void record_output_checksum_detail(const unsigned char* rgba, int32_t width,
+                                   int32_t height, int32_t pixel_bytes) {
+  if (!g_output_checksum_detail || !rgba || width <= 0 || height <= 0) return;
+  const std::size_t row_bytes = static_cast<std::size_t>(width) * pixel_bytes;
+  g_output_row_crc32.clear();
+  g_output_row_crc32.reserve(static_cast<std::size_t>(height));
+  for (int32_t row = 0; row < height; ++row)
+    g_output_row_crc32.push_back(crc32_ieee(rgba + row * row_bytes, row_bytes));
+  const std::size_t sample_bytes = static_cast<std::size_t>(pixel_bytes) / 4;
+  const std::size_t pixels = static_cast<std::size_t>(width) * height;
+  std::vector<unsigned char> plane(pixels * sample_bytes);
+  for (std::size_t channel = 0; channel < 4; ++channel) {
+    for (std::size_t pixel = 0; pixel < pixels; ++pixel)
+      std::memcpy(plane.data() + pixel * sample_bytes,
+                  rgba + pixel * pixel_bytes + channel * sample_bytes, sample_bytes);
+    g_output_channel_sha256[channel] = sha256_bytes(plane.data(), plane.size());
+  }
+}
+
+// Single insertion point for both image report emitters: dump counters are
+// always present, checksum detail only when the opt-in trailer enabled it.
+std::string world_debug_report_json() {
+  std::ostringstream json;
+  json << ",\"world_dumps_written\":" << g_world_dumps_written
+       << ",\"world_dumps_skipped\":" << g_world_dumps_skipped
+       << ",\"world_dump_bytes\":" << g_world_dump_bytes;
+  if (g_output_checksum_detail) {
+    json << ",\"output_row_crc32\":[";
+    for (std::size_t row = 0; row < g_output_row_crc32.size(); ++row) {
+      if (row) json << ',';
+      char text[12];
+      std::snprintf(text, sizeof(text), "\"%08x\"", g_output_row_crc32[row]);
+      json << text;
+    }
+    json << "],\"output_channel_sha256\":[";
+    for (std::size_t channel = 0; channel < 4; ++channel) {
+      if (channel) json << ',';
+      json << '"' << g_output_channel_sha256[channel] << '"';
+    }
+    json << ']';
+  }
+  return json.str();
+}
+
 struct RenderLifecycle {
   bool sequence_started{};
   bool frame_started{};
@@ -19000,6 +19255,7 @@ int32_t render_once(EffectEntry entry, std::array<std::byte, kInSize>& input,
       std::memcpy(&source[y * rowbytes + x * pixel_bytes], pixel, pixel_bytes);
     }
   }
+  dump_world_snapshot("classic-input", logical_source.data(), width, height, pixel_bytes);
   const bool input_write_advertised =
       (read<uint32_t>(command_output, kOutFlags) & kOutFlagIWriteInputBuffer) != 0;
   if (!source.set_plugin_writable(input_write_advertised)) return -3;
@@ -19078,6 +19334,8 @@ int32_t render_once(EffectEntry entry, std::array<std::byte, kInSize>& input,
       rgba8_to_argb(pixels.data() + (offset / 4) * pixel_bytes,
                     layer.rgba.data() + offset, pixel_bytes);
     }
+    dump_world_snapshot("classic-layer-slot" + std::to_string(layer.slot),
+                        pixels.data(), layer.width, layer.height, pixel_bytes);
     auto& world = hosted_worlds[layer_index];
     write<int32_t>(world, 16, pixel_bytes == 4 ? 0 : 1);
     write<void*>(world, 24, pixels.data()); write<int32_t>(world, 32, layer.width * pixel_bytes);
@@ -19260,11 +19518,13 @@ int32_t render_once(EffectEntry entry, std::array<std::byte, kInSize>& input,
     error = 4;
   }
   if (captured_argb) *captured_argb = logical_output;
+  dump_world_snapshot("classic-output", logical_output.data(), width, height, pixel_bytes);
   if (external_output && error == 0) {
     std::vector<unsigned char> rgba(static_cast<std::size_t>(width) * height * pixel_bytes);
     for (std::size_t pixel = 0; pixel < static_cast<std::size_t>(width) * height; ++pixel)
       argb_to_rgba_native(rgba.data() + pixel * pixel_bytes,
                     logical_output.data() + pixel * pixel_bytes, pixel_bytes);
+    record_output_checksum_detail(rgba.data(), width, height, pixel_bytes);
     std::ofstream file(*external_output, std::ios::binary | std::ios::out);
     if (!file || !file.write(reinterpret_cast<const char*>(rgba.data()), rgba.size())) return -4;
   }
@@ -19516,6 +19776,8 @@ SmartResult smart_render_once(EffectEntry entry, std::array<std::byte, kInSize>&
       rgba8_to_argb(pixels.data() + (offset / 4) * pixel_bytes,
                     layer.rgba.data() + offset, pixel_bytes);
     }
+    dump_world_snapshot("smart-layer-slot" + std::to_string(layer.slot),
+                        pixels.data(), layer.width, layer.height, pixel_bytes);
     auto& world = hosted_worlds[layer_index];
     write<int32_t>(world, 16, pixel_bytes == 4 ? 0 : 1);
     write<void*>(world, 24, pixels.data()); write<int32_t>(world, 32, layer.width * pixel_bytes);
@@ -19592,6 +19854,7 @@ SmartResult smart_render_once(EffectEntry entry, std::array<std::byte, kInSize>&
     std::memcpy(pre_render_source.data() + static_cast<std::size_t>(row) * width * pixel_bytes,
                 source.data() + static_cast<std::size_t>(row) * rowbytes,
                 static_cast<std::size_t>(width) * pixel_bytes);
+  dump_world_snapshot("smart-input", pre_render_source.data(), width, height, pixel_bytes);
   // This immutable provider is published before Smart Pre-Render and remains pinned
   // through Smart Render; output pixels are never used to infer auxiliary planes.
   publish_alpha_coverage_provider(pre_render_source, width, height, pixel_bytes,
@@ -19657,11 +19920,13 @@ SmartResult smart_render_once(EffectEntry entry, std::array<std::byte, kInSize>&
     }
     result.input_hash = sha256_bytes(logical_input.data(), logical_input.size());
     result.output_hash = sha256_bytes(logical_output.data(), logical_output.size());
+    dump_world_snapshot("smart-output", logical_output.data(), width, height, pixel_bytes);
     if (external_output && result.render_error == 0) {
       std::vector<unsigned char> rgba(static_cast<std::size_t>(width) * height * pixel_bytes);
       for (std::size_t pixel = 0; pixel < static_cast<std::size_t>(width) * height; ++pixel)
         argb_to_rgba_native(rgba.data() + pixel * pixel_bytes,
                       logical_output.data() + pixel * pixel_bytes, pixel_bytes);
+      record_output_checksum_detail(rgba.data(), width, height, pixel_bytes);
       std::ofstream file(*external_output, std::ios::binary | std::ios::out);
       if (!file || !file.write(reinterpret_cast<const char*>(rgba.data()), rgba.size()))
         result.render_error = -4;
@@ -19888,6 +20153,8 @@ SmartResult smart_render_once(EffectEntry entry, std::array<std::byte, kInSize>&
                 static_cast<std::size_t>(result.output_width) * pixel_bytes);
   result.input_hash = sha256_bytes(logical_input.data(), logical_input.size());
   result.output_hash = sha256_bytes(logical_output.data(), logical_output.size());
+  dump_world_snapshot("smart-output", logical_output.data(), result.output_width,
+                      result.output_height, pixel_bytes);
   const bool output_untouched = !logical_output.empty() &&
       std::all_of(logical_output.begin(), logical_output.end(),
                   [](unsigned char byte) { return byte == 0xCC; });
@@ -19911,6 +20178,8 @@ SmartResult smart_render_once(EffectEntry entry, std::array<std::byte, kInSize>&
                                       result.output_height; ++pixel)
       argb_to_rgba_native(rgba.data() + pixel * pixel_bytes,
                     logical_output.data() + pixel * pixel_bytes, pixel_bytes);
+    record_output_checksum_detail(rgba.data(), result.output_width,
+                                  result.output_height, pixel_bytes);
     std::ofstream file(*external_output, std::ios::binary | std::ios::out);
     if (!file || !file.write(reinterpret_cast<const char*>(rgba.data()), rgba.size())) result.render_error = -4;
   }
@@ -21560,6 +21829,32 @@ int wmain(int argc, wchar_t **argv) {
               << ",\"guard_pages\":true,\"overrun_beyond_64_detected\":true}\n";
     return passed ? 0 : 1;
   }
+  if (argc == 3 && std::wstring(argv[1]) == L"--self-test-crash-minidump") {
+    // End-to-end proof that the SEH-guarded path writes a minidump when the
+    // opt-in directory is set. Raises a real access violation under the same
+    // __except filter production uses, then reports whether the dump landed.
+    g_minidump_dir = std::filesystem::path(argv[2]);
+    std::error_code minidump_dir_error;
+    if (g_minidump_dir.empty() ||
+        !std::filesystem::is_directory(g_minidump_dir, minidump_dir_error)) {
+      std::cout << "{\"crash_minidump\":\"failed\",\"reason\":\"bad_directory\"}\n";
+      return 1;
+    }
+    const uint32_t exception_code = selftest_trigger_guarded_crash();
+    wchar_t name[64]{};
+    std::swprintf(name, std::size(name), L"crash-%lu.dmp", GetCurrentProcessId());
+    const std::filesystem::path dump_path = g_minidump_dir / name;
+    std::error_code dump_size_error;
+    const auto dump_size =
+        std::filesystem::file_size(dump_path, dump_size_error);
+    const bool written = !dump_size_error && dump_size > 0;
+    std::cout << "{\"crash_minidump\":\"" << (written ? "passed" : "failed")
+              << "\",\"exception_code\":" << exception_code
+              << ",\"dump_bytes\":" << (written ? dump_size : 0)
+              << ",\"attempted\":" << (g_minidump_attempted.load() ? "true" : "false")
+              << "}\n";
+    return written ? 0 : 1;
+  }
   if (argc == 2 && std::wstring(argv[1]) == L"--self-test-pf-adv-time-suite1") {
     const bool passed = verify_pf_adv_time_suite_versions();
     std::cout << "{\"pf_adv_time_suite_versions\":\"" << (passed ? "passed" : "failed")
@@ -21859,12 +22154,39 @@ int wmain(int argc, wchar_t **argv) {
               << "}\n";
     return passed ? 0 : 1;
   }
+  // Consume an optional trailing --minidump-v1 <dir> pair for every worker
+  // kind (render, smart, and the L2 inspection/params paths below) before any
+  // kind-specific, argc-exact dispatch runs. Reducing argc hides the pair from
+  // those checks; the crash path is opt-in and off by default (issue #18).
+  if (argc >= 3 && std::wstring(argv[argc - 2]) == L"--minidump-v1") {
+    g_minidump_dir = std::filesystem::path(argv[argc - 1]);
+    std::error_code minidump_dir_error;
+    if (g_minidump_dir.empty() ||
+        !std::filesystem::is_directory(g_minidump_dir, minidump_dir_error))
+      return 3;
+    SetUnhandledExceptionFilter(top_level_crash_filter);
+    argc -= 2;
+  }
 #ifdef AEXCOMPAT_RENDER_WORKER
   int effective_argc = argc;
   bool saw_aux = false, saw_animation = false, saw_coverage = false;
+  bool saw_dump_worlds = false, saw_checksum_detail = false;
   while (effective_argc >= 3) {
     const std::wstring flag(argv[effective_argc - 2]);
-    if (flag == L"--aux-manifest-v1" && !saw_aux) {
+    if (flag == L"--dump-worlds-v1" && !saw_dump_worlds) {
+      g_dump_worlds_dir = std::filesystem::path(argv[effective_argc - 1]);
+      std::error_code dump_dir_error;
+      if (g_dump_worlds_dir.empty() ||
+          !std::filesystem::is_directory(g_dump_worlds_dir, dump_dir_error))
+        return 3;
+      saw_dump_worlds = true;
+      effective_argc -= 2;
+    } else if (flag == L"--output-checksum-detail-v1" && !saw_checksum_detail) {
+      if (std::wstring(argv[effective_argc - 1]) != L"1") return 3;
+      g_output_checksum_detail = true;
+      saw_checksum_detail = true;
+      effective_argc -= 2;
+    } else if (flag == L"--aux-manifest-v1" && !saw_aux) {
       if (!load_aux_manifest(std::filesystem::path(argv[effective_argc - 1]),
                              g_external_aux_set))
         return 3;
@@ -22029,9 +22351,23 @@ int wmain(int argc, wchar_t **argv) {
 #elif defined(AEXCOMPAT_SMART_WORKER)
   int effective_argc = argc;
   bool saw_aux = false, saw_animation = false, saw_coverage = false;
+  bool saw_dump_worlds = false, saw_checksum_detail = false;
   while (effective_argc >= 3) {
     const std::wstring flag(argv[effective_argc - 2]);
-    if (flag == L"--aux-manifest-v1" && !saw_aux) {
+    if (flag == L"--dump-worlds-v1" && !saw_dump_worlds) {
+      g_dump_worlds_dir = std::filesystem::path(argv[effective_argc - 1]);
+      std::error_code dump_dir_error;
+      if (g_dump_worlds_dir.empty() ||
+          !std::filesystem::is_directory(g_dump_worlds_dir, dump_dir_error))
+        return 3;
+      saw_dump_worlds = true;
+      effective_argc -= 2;
+    } else if (flag == L"--output-checksum-detail-v1" && !saw_checksum_detail) {
+      if (std::wstring(argv[effective_argc - 1]) != L"1") return 3;
+      g_output_checksum_detail = true;
+      saw_checksum_detail = true;
+      effective_argc -= 2;
+    } else if (flag == L"--aux-manifest-v1" && !saw_aux) {
       if (!load_aux_manifest(std::filesystem::path(argv[effective_argc - 1]),
                              g_external_aux_set))
         return 3;
@@ -22339,6 +22675,9 @@ int wmain(int argc, wchar_t **argv) {
   if (runtime_module_authorization_mode &&
       !parse_runtime_module_authorization(plugin_path, argv[5])) return 15;
 #endif
+  aexcompat::TraceWriter trace_writer(
+      "minihost", trace_worker_label(), plugin_path.filename().string());
+  if (trace_writer.requested() && !trace_writer.enabled()) return 16;
   g_plugin_file_path = plugin_path.wstring();
   SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_SYSTEM32 | LOAD_LIBRARY_SEARCH_USER_DIRS);
   HMODULE module = LoadLibraryExW(plugin_path.c_str(), nullptr,
@@ -22357,6 +22696,10 @@ int wmain(int argc, wchar_t **argv) {
       FreeLibrary(module);
       return 14;
     }
+  }
+  if (trace_writer.enabled()) {
+    g_trace_writer = &trace_writer;
+    trace_writer.session_start();
   }
   if (!redirect_native_stdout()) { FreeLibrary(module); return 13; }
   if (g_aegp_init_mode) {
@@ -23940,6 +24283,7 @@ int wmain(int argc, wchar_t **argv) {
                 (g_smart_pixel_format == "argb32f" ? 16 : (g_smart_pixel_format == "argb16" ? 8 : 4)))
             << ",\"input_sha256\":\"" << input_hash << "\",\"output_sha256\":\""
             << output_hash << "\",\"guard_bytes_intact\":" << (guards_intact ? "true" : "false")
+            << world_debug_report_json()
             << ",\"custom_ui_click_dispatched\":" << (g_render_click_enabled ? "true" : "false")
             << ",\"custom_ui_click_error\":" << g_render_click_error
             << ",\"custom_ui_click_out_flags\":" << g_render_click_out_flags
@@ -23962,6 +24306,7 @@ int wmain(int argc, wchar_t **argv) {
             << ",\"suite_lease_warning\":" << (!suite_leases_balanced() ? "true" : "false")
             << ",\"suite_acquires\":" << g_suite_acquires
             << ",\"suite_releases\":" << g_suite_releases
+            << missing_suites_report_json()
             << ",\"live_suite_lease_count\":" << live_suite_lease_count()
             << ",\"live_suite_reference_count\":" << live_suite_reference_count()
             << ",\"live_suite_leases\":\"" << live_suite_lease_summary() << "\""
@@ -24167,6 +24512,7 @@ int wmain(int argc, wchar_t **argv) {
             << ",\"undefined_tail_bytes_per_row\":0"
             << ",\"input_sha256\":\"" << smart.input_hash << "\",\"output_sha256\":\""
             << smart.output_hash << "\",\"result_rects_valid\":" << (smart.rects_valid ? "true" : "false")
+            << world_debug_report_json()
             << ",\"custom_ui_click_dispatched\":" << (g_render_click_enabled ? "true" : "false")
             << ",\"custom_ui_click_error\":" << g_render_click_error
             << ",\"custom_ui_click_out_flags\":" << g_render_click_out_flags
@@ -24227,6 +24573,7 @@ int wmain(int argc, wchar_t **argv) {
             << ",\"suite_lease_warning\":" << (!suite_leases_balanced() ? "true" : "false")
             << ",\"suite_acquires\":" << g_suite_acquires
             << ",\"suite_releases\":" << g_suite_releases
+            << missing_suites_report_json()
             << ",\"live_suite_lease_count\":" << live_suite_lease_count()
             << ",\"live_suite_reference_count\":" << live_suite_reference_count()
             << ",\"live_suite_leases\":\"" << live_suite_lease_summary() << "\""
@@ -24333,6 +24680,10 @@ int wmain(int argc, wchar_t **argv) {
   report(global_error == 0 && params_error == 0 ? "selectors_completed" : "selector_error",
          global_error, params_error, setdown_error, output, about_message, lifecycle_errors, lifecycle_data_null);
 #endif
+  if (g_trace_writer) {
+    g_trace_writer->session_end();
+    g_trace_writer = nullptr;
+  }
   FreeLibrary(module);
 #ifdef AEXCOMPAT_RENDER_WORKER
   return global_error == 0 && params_error == 0 && parameter_count_contract_valid &&

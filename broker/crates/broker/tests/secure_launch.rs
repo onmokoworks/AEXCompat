@@ -53,6 +53,7 @@ mod windows_e2e {
             plugin_basename: basename,
             args_before_plugin: &before,
             args_after_plugin: &after,
+            repository: &worker_dir.0,
             require_module_audit: false,
         };
 
@@ -86,6 +87,7 @@ mod windows_e2e {
             plugin_basename: "fixture.plugin",
             args_before_plugin: &before,
             args_after_plugin: &[],
+            repository: &worker_dir.0,
             require_module_audit: false,
         };
 
@@ -141,10 +143,15 @@ mod windows_e2e {
             plugin_basename: "fixture.plugin",
             args_before_plugin: &before,
             args_after_plugin: &after,
+            repository: &worker_dir.0,
             require_module_audit: false,
         };
 
-        let result = secure_launch(tree, request, Duration::from_millis(250)).unwrap();
+        // The deadline must outlive worker startup (restricted-token process
+        // creation plus antivirus scanning of the freshly compiled fixture can
+        // exceed hundreds of milliseconds) while still firing during the
+        // fixture's 30 s sleep. 250 ms raced against startup and flaked.
+        let result = secure_launch(tree, request, Duration::from_secs(5)).unwrap();
 
         assert_eq!(result.classification, ExitClassification::TimeoutKilled);
         assert!(

@@ -1,0 +1,211 @@
+{
+  "schema_version": 1,
+  "title": "ntsc-rs AE oracle: full-precision 16 bpc comparison via deep transport (issue #53)",
+  "generated_by": "tools/refresh-ntsc-rs-oracle-deep16-evidence.ps1",
+  "environment": {
+    "ae_version": "25.3.1x3",
+    "plugin_file": "ntsc-rs-ae.aex",
+    "plugin_sha256": "ad129f8029914a09346de0d1ed60ee5d5a7ad5d3df4a17782260ef2421fd354a",
+    "host_render_path": "smartfx",
+    "host_pixel_format": "argb16",
+    "transport": "rgba16le sidecar, AE range (white = 32768)"
+  },
+  "comparison_tool": "tools/compare-pixel-oracles.py",
+  "tolerance": 0.000125,
+  "tolerance_meaning": "accepts up to 4 AE 16-bpc transport codes (4/32768 ~= 1.22e-4), ~32x below one 8-bit LSB; observed residue stays within 2 codes and is explained by 8-to-16 input promotion rounding plus the downward AE PNG16 export quantization",
+  "ae_fps_invariance": {
+    "observed": true,
+    "meaning": "AE 16 bpc captures of the gradient input at comp fps 24 and fps 1 (one-frame duration) are byte-identical"
+  },
+  "cases": [
+    {
+      "name": "gradient-fps24",
+      "input": {
+        "file": "target/oracle-deep16/input-gradient-1920x1080.png",
+        "sha256": "bb84e35ea6bdbfa178d13d6571dbff84aa2b78e57f3dbc9831aa7448c619c97e",
+        "decoded_rgba_sha256": "6a61410bf64979058211863812316b60e8b9c1dc2a6005cda55f1fd776e9920a",
+        "width": 1920,
+        "height": 1080,
+        "provenance": "pre-existing 1920x1080 gradient oracle input (docs/AE_ORACLE_NTSC_RS_CAPTURE_2026-07-18.md)"
+      },
+      "host": {
+        "render_flag": "--render-experimental-smart-16-deep",
+        "output_png16_sha256": "e7eb8fd38b83123eb3fd051d69690ceff269adad352d3961f3efe96b629111f0",
+        "output_raw_rgba16le_sha256": "a5bfbb4033a9a987f05f730d0103ada5f3295d7a0b0c7a6ffb8e78445cbf4d70"
+      },
+      "ae_capture": {
+        "output_png_sha256": "deb77139bcec50641b5eadccaf0c7b2561720c3d2cd5b1cf1691703db9d1e823",
+        "frame": 0,
+        "fps": 24,
+        "bpc": 16,
+        "color_pinned": false,
+        "working_space": "None"
+      },
+      "comparison": {
+        "comparison_boundary": {
+          "actual": "ae_export_artifact",
+          "claim_level": "export_tolerance",
+          "expected": "host_raw_world",
+          "raw_world_exact": false
+        },
+        "dimensions": {
+          "height": 1080,
+          "width": 1920
+        },
+        "exact_mismatched_channels": 4071963,
+        "first_mismatch": null,
+        "formats": {
+          "raw": "rgba16le",
+          "render": "png_rgba16"
+        },
+        "hashes": {
+          "raw_sha256": "a5bfbb4033a9a987f05f730d0103ada5f3295d7a0b0c7a6ffb8e78445cbf4d70",
+          "render_sha256": "deb77139bcec50641b5eadccaf0c7b2561720c3d2cd5b1cf1691703db9d1e823"
+        },
+        "match": true,
+        "max_abs_error": {
+          "a": 0.0,
+          "b": 4.577613435330358E-05,
+          "g": 4.577613435330358E-05,
+          "r": 5.9748980148932596E-05
+        },
+        "mean_abs_error": {
+          "a": 0.0,
+          "b": 4.361150322610103E-06,
+          "g": 6.213407741763119E-06,
+          "r": 5.473508903212507E-06
+        },
+        "over_tolerance_channels": 0,
+        "raw_integer_max": 32768,
+        "schema_version": 1,
+        "tolerance": 0.000125
+      }
+    },
+    {
+      "name": "gradient-fps1",
+      "input": {
+        "file": "target/oracle-deep16/input-gradient-1920x1080.png",
+        "sha256": "bb84e35ea6bdbfa178d13d6571dbff84aa2b78e57f3dbc9831aa7448c619c97e",
+        "decoded_rgba_sha256": "6a61410bf64979058211863812316b60e8b9c1dc2a6005cda55f1fd776e9920a",
+        "width": 1920,
+        "height": 1080,
+        "provenance": "pre-existing 1920x1080 gradient oracle input (docs/AE_ORACLE_NTSC_RS_CAPTURE_2026-07-18.md)"
+      },
+      "host": {
+        "render_flag": "--render-experimental-smart-16-deep",
+        "output_png16_sha256": "e7eb8fd38b83123eb3fd051d69690ceff269adad352d3961f3efe96b629111f0",
+        "output_raw_rgba16le_sha256": "a5bfbb4033a9a987f05f730d0103ada5f3295d7a0b0c7a6ffb8e78445cbf4d70"
+      },
+      "ae_capture": {
+        "output_png_sha256": "deb77139bcec50641b5eadccaf0c7b2561720c3d2cd5b1cf1691703db9d1e823",
+        "frame": 0,
+        "fps": 1,
+        "bpc": 16,
+        "color_pinned": false,
+        "working_space": "None"
+      },
+      "comparison": {
+        "comparison_boundary": {
+          "actual": "ae_export_artifact",
+          "claim_level": "export_tolerance",
+          "expected": "host_raw_world",
+          "raw_world_exact": false
+        },
+        "dimensions": {
+          "height": 1080,
+          "width": 1920
+        },
+        "exact_mismatched_channels": 4071963,
+        "first_mismatch": null,
+        "formats": {
+          "raw": "rgba16le",
+          "render": "png_rgba16"
+        },
+        "hashes": {
+          "raw_sha256": "a5bfbb4033a9a987f05f730d0103ada5f3295d7a0b0c7a6ffb8e78445cbf4d70",
+          "render_sha256": "deb77139bcec50641b5eadccaf0c7b2561720c3d2cd5b1cf1691703db9d1e823"
+        },
+        "match": true,
+        "max_abs_error": {
+          "a": 0.0,
+          "b": 4.577613435330358E-05,
+          "g": 4.577613435330358E-05,
+          "r": 5.9748980148932596E-05
+        },
+        "mean_abs_error": {
+          "a": 0.0,
+          "b": 4.361150322610103E-06,
+          "g": 6.213407741763119E-06,
+          "r": 5.473508903212507E-06
+        },
+        "over_tolerance_channels": 0,
+        "raw_integer_max": 32768,
+        "schema_version": 1,
+        "tolerance": 0.000125
+      }
+    },
+    {
+      "name": "generated-fps24",
+      "input": {
+        "file": "target/oracle-deep16/input-generated-1920x1080.png",
+        "sha256": "46597dfa86970c5a349163a9f26c951e50985991f41715c4c5ecf71d08ddf470",
+        "decoded_rgba_sha256": "d6f2a543ea8f83e2061a32fdb60632e5badb19206a40fd1914e1ba6727d1d2f1",
+        "width": 1920,
+        "height": 1080,
+        "provenance": "tools/generate-oracle-rgba-input.py --width 1920 --height 1080 --alpha-mode opaque"
+      },
+      "host": {
+        "render_flag": "--render-experimental-smart-16-deep",
+        "output_png16_sha256": "2e7d24eb4225b8f28164bd5d050b37e3cf75d1a8f89b0b90e491c7e15f222548",
+        "output_raw_rgba16le_sha256": "b11c7db312eebed2d721f13d7fe430b1dacb32d4a01b3881fcd487b900d7b406"
+      },
+      "ae_capture": {
+        "output_png_sha256": "3efad52eeff6a9e78f89ed291441f0b2cf7b103953bb2ed7245c71bf733697ee",
+        "frame": 0,
+        "fps": 24,
+        "bpc": 16,
+        "color_pinned": false,
+        "working_space": "None"
+      },
+      "comparison": {
+        "comparison_boundary": {
+          "actual": "ae_export_artifact",
+          "claim_level": "export_tolerance",
+          "expected": "host_raw_world",
+          "raw_world_exact": false
+        },
+        "dimensions": {
+          "height": 1080,
+          "width": 1920
+        },
+        "exact_mismatched_channels": 5244455,
+        "first_mismatch": null,
+        "formats": {
+          "raw": "rgba16le",
+          "render": "png_rgba16"
+        },
+        "hashes": {
+          "raw_sha256": "b11c7db312eebed2d721f13d7fe430b1dacb32d4a01b3881fcd487b900d7b406",
+          "render_sha256": "3efad52eeff6a9e78f89ed291441f0b2cf7b103953bb2ed7245c71bf733697ee"
+        },
+        "match": true,
+        "max_abs_error": {
+          "a": 0.0,
+          "b": 6.1031896571250854E-05,
+          "g": 4.576961499580377E-05,
+          "r": 6.102770555571624E-05
+        },
+        "mean_abs_error": {
+          "a": 0.0,
+          "b": 7.817538147492155E-06,
+          "g": 6.463794403899393E-06,
+          "r": 5.454731895796275E-06
+        },
+        "over_tolerance_channels": 0,
+        "raw_integer_max": 32768,
+        "schema_version": 1,
+        "tolerance": 0.000125
+      }
+    }
+  ]
+}

@@ -9,5 +9,7 @@ def test_native_worker_output_reorders_channels_without_quantizing_depth():
     assert "void argb_to_rgba_native" in SOURCE
     assert "output[0] = pixel[1]" in SOURCE
     assert "height * pixel_bytes" in SOURCE
+    # Three external-output transport blocks plus the world snapshot dump
+    # helper reuse the same depth-preserving reorder.
     deep_output_blocks = SOURCE.count("argb_to_rgba_native(rgba.data() + pixel * pixel_bytes")
-    assert deep_output_blocks == 3
+    assert deep_output_blocks == 4

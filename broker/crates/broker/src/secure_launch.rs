@@ -12,6 +12,15 @@ pub struct SecureLaunchResult {
     pub stderr: String,
     pub stdout_truncated: bool,
     pub stderr_truncated: bool,
+    /// Kill evidence from Job Object accounting (see
+    /// `windows_process::ProcessResult`): "timeout" or "memory_limit" when
+    /// the cause of a dead worker is knowable, None otherwise.
+    pub kill_reason: Option<&'static str>,
+    pub worker_peak_commit_bytes: Option<u64>,
+    pub peak_process_memory_bytes: Option<u64>,
+    pub peak_job_memory_bytes: Option<u64>,
+    pub process_memory_limit_bytes: u64,
+    pub memory_limit_reached: bool,
 }
 
 pub struct SecureLaunchRequest<'a> {
@@ -21,7 +30,25 @@ pub struct SecureLaunchRequest<'a> {
     pub plugin_basename: &'a str,
     pub args_before_plugin: &'a [String],
     pub args_after_plugin: &'a [String],
+    /// Repository root, used to resolve the opt-in crash minidump directory
+    /// (issue #18). Every sealed dispatch funnels through `secure_launch`, so
+    /// the `--minidump-v1` flag is injected here once for all worker kinds.
+    pub repository: &'a Path,
     pub require_module_audit: bool,
+}
+
+/// The `--minidump-v1 <dir>` tail pair for a dispatch, or empty when the
+/// opt-in env var is unset. The resolver lives in the Windows-only
+/// image_render module, so a cfg-gated shim keeps this unconditionally
+/// compiled path building on non-Windows, where dispatch already fails closed.
+#[cfg(windows)]
+fn minidump_dispatch_args(repository: &Path) -> io::Result<Vec<String>> {
+    crate::image_render::minidump_dispatch_args(repository)
+}
+
+#[cfg(not(windows))]
+fn minidump_dispatch_args(_repository: &Path) -> io::Result<Vec<String>> {
+    Ok(Vec::new())
 }
 
 /// Launches a trusted external worker with an authenticated sealed plugin.
@@ -34,11 +61,19 @@ pub fn secure_launch(
     timeout: Duration,
 ) -> io::Result<SecureLaunchResult> {
     let plugin_path = tree.plugin_path(request.plugin_basename)?;
-    let mut args =
-        Vec::with_capacity(request.args_before_plugin.len() + 1 + request.args_after_plugin.len());
+    let minidump_args = minidump_dispatch_args(request.repository)?;
+    let mut args = Vec::with_capacity(
+        request.args_before_plugin.len()
+            + 1
+            + request.args_after_plugin.len()
+            + minidump_args.len(),
+    );
     args.extend_from_slice(request.args_before_plugin);
     args.push(plugin_path.into_os_string().to_string_lossy().into_owned());
     args.extend_from_slice(request.args_after_plugin);
+    // Tail position is required: the worker consumes the trailing
+    // --minidump-v1 <dir> pair before its argc-exact mode dispatch.
+    args.extend(minidump_args);
     secure_launch_impl(
         tree,
         request.worker_program,
@@ -107,6 +142,12 @@ fn secure_launch_impl(
         stderr: result.stderr,
         stdout_truncated: result.stdout_truncated,
         stderr_truncated: result.stderr_truncated,
+        kill_reason: result.kill_reason,
+        worker_peak_commit_bytes: result.worker_peak_commit_bytes,
+        peak_process_memory_bytes: result.peak_process_memory_bytes,
+        peak_job_memory_bytes: result.peak_job_memory_bytes,
+        process_memory_limit_bytes: result.process_memory_limit_bytes,
+        memory_limit_reached: result.memory_limit_reached,
     })
 }
 
@@ -171,6 +212,7 @@ mod tests {
                 plugin_basename: target,
                 args_before_plugin: &[],
                 args_after_plugin: &[],
+                repository: Path::new("."),
                 require_module_audit: false,
             };
             let error = secure_launch(tree, request, Duration::from_secs(1)).unwrap_err();
@@ -190,6 +232,7 @@ mod tests {
             plugin_basename: "worker.exe",
             args_before_plugin: &[],
             args_after_plugin: &[],
+            repository: Path::new("."),
             require_module_audit: false,
         };
         let error = secure_launch(tree, request, Duration::from_secs(1)).unwrap_err();

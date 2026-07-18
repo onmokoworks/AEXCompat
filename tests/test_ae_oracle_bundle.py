@@ -38,7 +38,7 @@ def test_manager_never_self_elevates_and_validates_before_mutation() -> None:
     lowered = MANAGE.lower()
     assert "runas" not in lowered
     assert "start-process" not in lowered
-    assert "get-process afterfx,aerender,aerendercore" in lowered
+    assert "get-process afterfx,afterfx.com,aerender,aerendercore" in lowered
     assert "assert-manifestpayload -root $bundle" in lowered
     assert "assert-manifestpayload -root $installroot -installed" in lowered
     assert "refusing removal because the installed manifest differs" in lowered

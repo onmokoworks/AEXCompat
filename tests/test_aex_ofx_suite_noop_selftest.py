@@ -3,6 +3,7 @@ import json
 import sys
 import time
 import unittest
+import uuid
 from pathlib import Path
 
 
@@ -48,7 +49,7 @@ def make_packet() -> dict:
 def create_ppm(name: str, width: int, height: int, pattern: str) -> Path:
     root = LAB_ROOT / "target" / "ppm-fixtures"
     root.mkdir(parents=True, exist_ok=True)
-    path = root / f"{time.time_ns()}-{name}.ppm"
+    path = root / f"{uuid.uuid4().hex}-{name}.ppm"
     ppm_fixture_tool.write_ppm_create_new(path, ppm_fixture_tool.generate_image(width, height, pattern))
     return path
 

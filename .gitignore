@@ -20,3 +20,7 @@ __pycache__/
 .env.*
 .DS_Store
 Thumbs.db
+
+# After Effects third-party plug-ins can write junk into the CWD during
+# oracle captures (e.g. Watchtower's invalidParam/ tree); never commit it.
+invalidParam/

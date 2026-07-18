@@ -57,6 +57,7 @@ pub fn run(
     case_id: &str,
     output: &Path,
 ) -> io::Result<bool> {
+    crate::trace_policy::validate_broker_trace_directory(repository)?;
     let expected = expected(case_id).ok_or_else(|| invalid("unknown fixed SmartFX case"))?;
     if output
         .components()
@@ -110,6 +111,7 @@ pub fn run(
                 plugin_basename: &plugin_basename,
                 args_before_plugin: &args_before_plugin,
                 args_after_plugin: &args_after_plugin,
+                repository,
                 require_module_audit: true,
             },
             timeout,

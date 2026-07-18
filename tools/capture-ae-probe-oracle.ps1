@@ -21,9 +21,11 @@ param(
     [ValidateRange(5, 600)][int]$TimeoutSeconds = 120
 )
 
+. (Join-Path $PSScriptRoot 'sha256.ps1')
+
 $ErrorActionPreference = 'Stop'
 $probePath = (Resolve-Path -LiteralPath $ProbeAex).Path
-$probeHash = (Get-FileHash -LiteralPath $probePath -Algorithm SHA256).Hash
+$probeHash = Get-Sha256Hex $probePath
 $afterEffectsPath = (Resolve-Path -LiteralPath $AfterEffects).Path
 $supportFiles = Split-Path -Parent $afterEffectsPath
 $pluginRoot = if ($PluginRoot) {
@@ -87,7 +89,7 @@ if ($PlanOnly) {
             throw "Planned output parent does not exist: $newPath"
         }
     }
-    $running = @(Get-Process AfterFX,aerender,aerendercore -ErrorAction SilentlyContinue)
+    $running = @(Get-Process AfterFX,AfterFX.com,aerender,aerendercore -ErrorAction SilentlyContinue)
     $capture = @(
         '&', (Join-Path $PSScriptRoot 'capture-ae-probe-oracle.ps1'),
         '-AfterEffects', $afterEffectsPath, '-ProbeAex', $probePath,
@@ -130,8 +132,8 @@ if ($PlanOnly) {
         blocker = if ($running.Count) { 'After Effects is already running; capture was not launched.' } else { $null }
         running_process_ids = @($running | ForEach-Object Id)
         fixture = [ordered]@{ path = $probePath; size_bytes = (Get-Item $probePath).Length; sha256 = $probeHash.ToLowerInvariant() }
-        input = [ordered]@{ path = $inputPath; sha256 = (Get-FileHash $inputPath -Algorithm SHA256).Hash.ToLowerInvariant() }
-        expected_raw = [ordered]@{ path = $rawPath; size_bytes = (Get-Item $rawPath).Length; sha256 = (Get-FileHash $rawPath -Algorithm SHA256).Hash.ToLowerInvariant(); width = $Width; height = $Height; format = $RawFormat }
+        input = [ordered]@{ path = $inputPath; sha256 = Get-Sha256Hex $inputPath }
+        expected_raw = [ordered]@{ path = $rawPath; size_bytes = (Get-Item $rawPath).Length; sha256 = Get-Sha256Hex $rawPath; width = $Width; height = $Height; format = $RawFormat }
         capture_argv = $capture
         compare_argv = $compare
         no_effect_control = if ($controlOutputPath) {
@@ -139,7 +141,7 @@ if ($PlanOnly) {
                 expected_raw = [ordered]@{
                     path = $controlRawPath
                     size_bytes = (Get-Item $controlRawPath).Length
-                    sha256 = (Get-FileHash $controlRawPath -Algorithm SHA256).Hash.ToLowerInvariant()
+                    sha256 = Get-Sha256Hex $controlRawPath
                 }
                 capture_argv = $controlCapture
                 compare_argv = $controlCompare
@@ -151,7 +153,7 @@ if ($PlanOnly) {
     return
 }
 
-if (Get-Process AfterFX,aerender,aerendercore -ErrorAction SilentlyContinue) {
+if (Get-Process AfterFX,AfterFX.com,aerender,aerendercore -ErrorAction SilentlyContinue) {
     throw 'After Effects is already running; refusing to install or capture an oracle.'
 }
 if (Test-Path -LiteralPath $installRoot) {
@@ -161,7 +163,7 @@ if (Test-Path -LiteralPath $installRoot) {
 try {
     New-Item -ItemType Directory -Path $installRoot -Force | Out-Null
     Copy-Item -LiteralPath $probePath -Destination $installedPath
-    $installedHash = (Get-FileHash -LiteralPath $installedPath -Algorithm SHA256).Hash
+    $installedHash = Get-Sha256Hex $installedPath
     if ($installedHash -ne $probeHash) {
         throw "Temporary AEX hash mismatch: $installedHash != $probeHash"
     }
@@ -192,9 +194,16 @@ try {
             -Report $ControlComparisonReport
     }
 } finally {
-    if (Get-Process AfterFX,aerender,aerendercore -ErrorAction SilentlyContinue) {
-        Get-Process AfterFX,aerender,aerendercore -ErrorAction SilentlyContinue |
-            Stop-Process -Force -ErrorAction SilentlyContinue
+    # capture-ae-reference.ps1 shuts down or kills its own launch tree by
+    # PID before returning, so an AE-named process still alive here is most
+    # likely an unrelated session started after the startup gate; a
+    # name-based kill would terminate it (review on #59). Report it instead
+    # and let the plug-in removal below fail explicitly if that process
+    # still holds the probe binary.
+    $lingering = Get-Process AfterFX,AfterFX.com,aerender,aerendercore -ErrorAction SilentlyContinue
+    if ($lingering) {
+        Write-Warning ('Not terminating AE-named processes this run did not launch: ' +
+            (($lingering | ForEach-Object { "$($_.ProcessName):$($_.Id)" }) -join ', '))
     }
     if (Test-Path -LiteralPath $installRoot) {
         $resolvedRoot = (Resolve-Path -LiteralPath $installRoot).Path
