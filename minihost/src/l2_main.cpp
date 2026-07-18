@@ -1611,7 +1611,11 @@ uint32_t g_handle_unlocks{};
 uint32_t g_invalid_handle_operations{};
 uint32_t g_automatic_pre_render_handle_disposals{};
 uint64_t g_handle_bytes{};
-constexpr uint64_t kMaxHandleBytes = 64 * 1024 * 1024;
+// Sized so one float32 3-plane scratch buffer over the largest permitted
+// world (4096 * 4096 * 3 * 4 = 192 MiB) fits; ntsc-rs allocates such a
+// full-frame YIQ handle per render and 4K inputs exceeded the previous
+// 64 MiB pool.
+constexpr uint64_t kMaxHandleBytes = 256 * 1024 * 1024;
 constexpr std::size_t kMaxHandleCount = 1024;
 
 bool handle_lifetimes_balanced() {
@@ -1843,6 +1847,19 @@ int32_t make_utf16_handle(const std::u16string& text, const char* label, void** 
 int32_t __cdecl register_with_aegp(void*, const char*, int32_t* plugin_id) {
   if (!plugin_id) return 4;
   *plugin_id = 1;
+  return 0;
+}
+
+uint32_t g_main_hwnd_queries{};
+
+// AE always fills the caller-owned HWND storage. The headless worker has no
+// application window, so the desktop window is published as the deterministic
+// dialog parent instead of leaving the caller's buffer uninitialized.
+int32_t __cdecl get_main_hwnd(void* main_hwnd) {
+  if (!main_hwnd) return 4;
+  ++g_main_hwnd_queries;
+  const HWND desktop = GetDesktopWindow();
+  std::memcpy(main_hwnd, &desktop, sizeof(desktop));
   return 0;
 }
 
@@ -3459,13 +3476,29 @@ bool verify_mask_attribute_and_ownership_rejection() {
 
 struct UtilitySuite {
   // Function pointer positions mirror the reviewed Adobe suite versions.
+  // AEGP_UtilitySuite6 (acquisition version 13) publishes 33 slots; only
+  // RegisterWithAEGP (slot 9) and GetMainHWND (slot 10) are supported, the
+  // rest stay null so out-of-range reads fail closed instead of leaving the
+  // table shorter than the ABI the effect compiled against.
   void* unsupported[9]{};
   decltype(&register_with_aegp) register_with_aegp;
+  decltype(&get_main_hwnd) get_main_hwnd;
+  void* unsupported_tail[22]{};
 };
+static_assert(sizeof(UtilitySuite) == 33 * sizeof(void*));
+static_assert(offsetof(UtilitySuite, register_with_aegp) == 9 * sizeof(void*));
+static_assert(offsetof(UtilitySuite, get_main_hwnd) == 10 * sizeof(void*));
 struct UtilitySuite3 {
+  // AEGP_UtilitySuite3 (acquisition version 7) publishes 25 slots with
+  // RegisterWithAEGP at slot 7 and GetMainHWND at slot 8.
   void* unsupported[7]{};
   decltype(&register_with_aegp) register_with_aegp;
+  decltype(&get_main_hwnd) get_main_hwnd;
+  void* unsupported_tail[16]{};
 };
+static_assert(sizeof(UtilitySuite3) == 25 * sizeof(void*));
+static_assert(offsetof(UtilitySuite3, register_with_aegp) == 7 * sizeof(void*));
+static_assert(offsetof(UtilitySuite3, get_main_hwnd) == 8 * sizeof(void*));
 struct PfInterfaceSuite {
   decltype(&get_effect_layer) get_effect_layer;
   decltype(&get_new_effect_for_effect) get_new_effect_for_effect;
@@ -4419,8 +4452,8 @@ struct MaskOutlineSuite {
   decltype(&delete_mask_outline_feather) delete_feather;
 };
 
-UtilitySuite g_utility_suite{{}, &register_with_aegp};
-UtilitySuite3 g_utility_suite3{{}, &register_with_aegp};
+UtilitySuite g_utility_suite{{}, &register_with_aegp, &get_main_hwnd, {}};
+UtilitySuite3 g_utility_suite3{{}, &register_with_aegp, &get_main_hwnd, {}};
 PfInterfaceSuite g_pf_interface_suite{&get_effect_layer, &get_new_effect_for_effect,
     &convert_effect_to_comp_time, &get_effect_camera,
     &get_effect_camera_matrix};
@@ -20830,10 +20863,17 @@ bool verify_suite_entry_guards_and_utility13() {
       acquire_suite("AEGP Utility Suite", 14, &rejected14) != 0 && rejected14 == nullptr && ok;
   g_mask_model_enabled = saved_mask_model_enabled;
   const auto* utility = static_cast<const UtilitySuite*>(utility13);
+  HWND main_window = reinterpret_cast<HWND>(static_cast<uintptr_t>(0xCDCDCDCD));
   ok = ok && utility13 == &g_utility_suite && utility13 != &g_utility_suite3 && utility &&
       std::all_of(std::begin(utility->unsupported), std::end(utility->unsupported),
                   [](void* callback) { return callback == nullptr; }) &&
+      std::all_of(std::begin(utility->unsupported_tail), std::end(utility->unsupported_tail),
+                  [](void* callback) { return callback == nullptr; }) &&
       utility->register_with_aegp == &register_with_aegp &&
+      utility->get_main_hwnd == &get_main_hwnd &&
+      utility->get_main_hwnd(nullptr) != 0 &&
+      utility->get_main_hwnd(&main_window) == 0 &&
+      main_window == GetDesktopWindow() &&
       release_suite("AEGP Utility Suite", 13) == 0;
   return ok && g_suite_acquires == acquires_before + 1 &&
       g_suite_releases == releases_before + 1 && suite_leases_balanced();
