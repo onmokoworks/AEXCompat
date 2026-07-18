@@ -50,6 +50,7 @@
 #include "gpu_directx_backend.hpp"
 #include "gpu_opencl_backend.hpp"
 #include "gpu_memory_world_transport.hpp"
+#include "host_audio_runtime.hpp"
 #include "l2_cli_dispatch.h"
 #include "parameter_animation_transport.hpp"
 #include "pf_cache_on_load_suite.hpp"
@@ -136,6 +137,9 @@ using aexcompat::gpu_runtime::CudaDevicePointer;
 using aexcompat::gpu_runtime::gpu_get_device_count;
 using aexcompat::gpu_runtime::gpu_get_device_info;
 using aexcompat::gpu_runtime::kMaxGpuDevices;
+using aexcompat::host_audio::checkout_layer_audio;
+using aexcompat::host_audio::checkin_layer_audio;
+using aexcompat::host_audio::get_audio_data;
 using namespace aexcompat::worker_runtime::handles;
 using aexcompat::render_safety::InputPixelBuffer;
 using aexcompat::render_safety::OutputPixelBuffer;
@@ -473,50 +477,11 @@ uint32_t g_arbitrary_interpolation_calls{};
 uint32_t g_arbitrary_interpolation_failures{};
 double g_last_arbitrary_interpolation_amount{};
 std::wstring g_plugin_file_path;
-struct HostLayerAudio {
-  std::vector<unsigned char> samples;
-  bool checked_out{};
-  uint32_t rate{};
-  int32_t sample_frames{};
-  int32_t bytes_per_sample{};
-  int32_t channels{};
-  int32_t format{};
-};
-std::vector<float>* g_audio_source{};
-int32_t g_audio_source_sample_count{};
-constexpr std::size_t kMaxLayerAudioHandles = 16;
-std::array<HostLayerAudio, kMaxLayerAudioHandles> g_layer_audio_handles{};
-uint32_t g_audio_checkout_calls{};
-uint32_t g_audio_checkin_calls{};
-uint32_t g_audio_get_data_calls{};
-uint32_t g_invalid_audio_operations{};
-bool g_audio_checkout_allowed = false;
-bool g_audio_usage_advertised = false;
-uint32_t g_rejected_unadvertised_audio_checkouts = 0;
-uint32_t g_rejected_audio_format_requests = 0;
-uint32_t g_audio_handle_exhaustions = 0;
-int32_t g_last_audio_checkout_start_time{};
-int32_t g_last_audio_checkout_duration{};
-uint32_t g_last_audio_checkout_time_scale{};
-int64_t g_last_audio_window_start_sample{};
-int32_t g_last_audio_window_sample_count{};
-int32_t g_last_audio_window_silence_samples{};
-uint32_t g_last_audio_output_rate{};
-int32_t g_last_audio_output_bytes_per_sample{};
-int32_t g_last_audio_output_channels{};
-int32_t g_last_audio_output_format{};
-int32_t g_last_audio_returned_sample_frames{};
-uint32_t g_peak_live_audio_handles{};
-
-uint32_t live_audio_handle_count() {
-  return static_cast<uint32_t>(std::count_if(g_layer_audio_handles.begin(),
-      g_layer_audio_handles.end(), [](const HostLayerAudio& handle) {
-        return handle.checked_out;
-      }));
+const aexcompat::host_audio::Telemetry& audio_telemetry() {
+  return aexcompat::host_audio::runtime().telemetry();
 }
-
 bool audio_handle_lifetimes_balanced() {
-  return live_audio_handle_count() == 0 && g_audio_checkout_calls == g_audio_checkin_calls;
+  return aexcompat::host_audio::runtime().lifetimes_balanced();
 }
 bool g_update_params_ui_advertised = false;
 bool g_query_dynamic_flags_advertised = false;
@@ -9993,149 +9958,6 @@ int32_t __cdecl checkout_param(void*, int32_t index, int32_t what_time, int32_t 
   return 4;
 }
 
-int32_t __cdecl checkout_layer_audio(void* effect_ref, int32_t index, int32_t start_time,
-                                     int32_t duration, uint32_t time_scale,
-                                     uint32_t rate, int32_t bytes_per_sample,
-                                     int32_t num_channels, int32_t format, void** audio) {
-  if (!g_audio_checkout_allowed) {
-    ++g_rejected_unadvertised_audio_checkouts;
-    ++g_invalid_audio_operations;
-    return 4;
-  }
-  if (!effect_ref || !audio || *audio || !g_audio_source || index != 0 ||
-      duration < 0 || time_scale == 0) {
-    ++g_invalid_audio_operations;
-    return 4;
-  }
-  if (rate < (1000u << 16) || rate > (65535u << 16) ||
-      (num_channels != 1 && num_channels != 2) ||
-      (bytes_per_sample != 1 && bytes_per_sample != 2 && bytes_per_sample != 4) ||
-      (format != 0 && format != 1 && format != 2) ||
-      (format == 2 && bytes_per_sample != 4)) {
-    ++g_rejected_audio_format_requests;
-    return 4;
-  }
-  auto handle_it = std::find_if(g_layer_audio_handles.begin(), g_layer_audio_handles.end(),
-      [](const HostLayerAudio& handle) { return !handle.checked_out; });
-  if (handle_it == g_layer_audio_handles.end()) {
-    ++g_audio_handle_exhaustions;
-    return 4;
-  }
-  HostLayerAudio& layer_audio = *handle_it;
-  constexpr int64_t kMaxCheckoutSamples = 10'000'000;
-  const double requested_rate = static_cast<double>(rate) / 65536.0;
-  const auto floor_samples = [=](int64_t time) {
-    return static_cast<int64_t>(std::floor(
-        static_cast<double>(time) * requested_rate / time_scale));
-  };
-  const auto ceil_samples = [=](int64_t time) {
-    return static_cast<int64_t>(std::ceil(
-        static_cast<double>(time) * requested_rate / time_scale));
-  };
-  const int64_t end_time = static_cast<int64_t>(start_time) + duration;
-  const int64_t window_start = floor_samples(start_time);
-  const int64_t window_end = ceil_samples(end_time);
-  const int64_t window_count = window_end - window_start;
-  if (window_count < 0 || window_count > kMaxCheckoutSamples) {
-    ++g_invalid_audio_operations;
-    return 4;
-  }
-
-  const int64_t returned_frames = window_count + 1;
-  const uint64_t byte_count = static_cast<uint64_t>(returned_frames) * num_channels * bytes_per_sample;
-  if (byte_count > static_cast<uint64_t>(kMaxCheckoutSamples + 1) * 2 * 4) {
-    ++g_invalid_audio_operations;
-    return 4;
-  }
-  layer_audio.samples.assign(static_cast<std::size_t>(byte_count), 0);
-  auto encode_sample = [&](std::size_t offset, float value) {
-    value = std::clamp(value, -1.0f, 1.0f);
-    if (format == 2) {
-      std::memcpy(layer_audio.samples.data() + offset, &value, 4);
-    } else if (format == 1) {
-      if (bytes_per_sample == 1) { const int8_t v = static_cast<int8_t>(std::lround(value * 127.0)); std::memcpy(layer_audio.samples.data() + offset, &v, 1); }
-      else if (bytes_per_sample == 2) { const int16_t v = static_cast<int16_t>(std::lround(value * 32767.0)); std::memcpy(layer_audio.samples.data() + offset, &v, 2); }
-      else { const int32_t v = static_cast<int32_t>(std::llround(value * 2147483647.0)); std::memcpy(layer_audio.samples.data() + offset, &v, 4); }
-    } else {
-      if (bytes_per_sample == 1) { const uint8_t v = static_cast<uint8_t>(std::lround((value + 1.0) * 127.5)); std::memcpy(layer_audio.samples.data() + offset, &v, 1); }
-      else if (bytes_per_sample == 2) { const uint16_t v = static_cast<uint16_t>(std::lround((value + 1.0) * 32767.5)); std::memcpy(layer_audio.samples.data() + offset, &v, 2); }
-      else { const uint32_t v = static_cast<uint32_t>(std::llround((value + 1.0) * 2147483647.5)); std::memcpy(layer_audio.samples.data() + offset, &v, 4); }
-    }
-  };
-  int64_t silence_frames = 0;
-  for (int64_t frame = 0; frame < returned_frames; ++frame) {
-    const bool sentinel_frame = frame == window_count;
-    const double source_position = static_cast<double>(window_start + frame) * 44100.0 / requested_rate;
-    float value = 0.0f;
-    if (!sentinel_frame && source_position >= 0.0 && source_position < g_audio_source_sample_count) {
-      const auto left = static_cast<int64_t>(std::floor(source_position));
-      const auto right = std::min<int64_t>(left + 1, g_audio_source_sample_count - 1);
-      const double fraction = source_position - left;
-      value = static_cast<float>((*g_audio_source)[left] * (1.0 - fraction) +
-                                 (*g_audio_source)[right] * fraction);
-    } else if (!sentinel_frame) {
-      ++silence_frames;
-    }
-    for (int32_t channel = 0; channel < num_channels; ++channel)
-      encode_sample(static_cast<std::size_t>((frame * num_channels + channel) * bytes_per_sample), value);
-  }
-  layer_audio.checked_out = true;
-  layer_audio.rate = rate;
-  layer_audio.sample_frames = static_cast<int32_t>(returned_frames);
-  layer_audio.bytes_per_sample = bytes_per_sample;
-  layer_audio.channels = num_channels;
-  layer_audio.format = format;
-  g_last_audio_checkout_start_time = start_time;
-  g_last_audio_checkout_duration = duration;
-  g_last_audio_checkout_time_scale = time_scale;
-  g_last_audio_window_start_sample = window_start;
-  g_last_audio_window_sample_count = static_cast<int32_t>(window_count);
-  g_last_audio_window_silence_samples = static_cast<int32_t>(silence_frames);
-  g_last_audio_output_rate = rate;
-  g_last_audio_output_bytes_per_sample = bytes_per_sample;
-  g_last_audio_output_channels = num_channels;
-  g_last_audio_output_format = format;
-  g_last_audio_returned_sample_frames = static_cast<int32_t>(returned_frames);
-  *audio = &layer_audio;
-  ++g_audio_checkout_calls;
-  g_peak_live_audio_handles = std::max(g_peak_live_audio_handles, live_audio_handle_count());
-  return 0;
-}
-
-int32_t __cdecl checkin_layer_audio(void* effect_ref, void* audio) {
-  auto handle_it = std::find_if(g_layer_audio_handles.begin(), g_layer_audio_handles.end(),
-      [=](const HostLayerAudio& handle) { return audio == &handle; });
-  if (!effect_ref || handle_it == g_layer_audio_handles.end() || !handle_it->checked_out) {
-    ++g_invalid_audio_operations;
-    return 4;
-  }
-  handle_it->checked_out = false;
-  handle_it->samples.clear();
-  ++g_audio_checkin_calls;
-  return 0;
-}
-
-int32_t __cdecl get_audio_data(void* effect_ref, void* audio, void** data,
-                               int32_t* num_samples, uint32_t* rate,
-                               int32_t* bytes_per_sample, int32_t* num_channels,
-                               int32_t* format) {
-  auto handle_it = std::find_if(g_layer_audio_handles.begin(), g_layer_audio_handles.end(),
-      [=](const HostLayerAudio& handle) { return audio == &handle; });
-  if (!effect_ref || handle_it == g_layer_audio_handles.end() || !handle_it->checked_out ||
-      handle_it->samples.size() > 80'000'008) {
-    ++g_invalid_audio_operations;
-    return 4;
-  }
-  if (data) *data = handle_it->samples.empty() ? nullptr : handle_it->samples.data();
-  if (num_samples) *num_samples = handle_it->sample_frames;
-  if (rate) *rate = handle_it->rate;
-  if (bytes_per_sample) *bytes_per_sample = handle_it->bytes_per_sample;
-  if (num_channels) *num_channels = handle_it->channels;
-  if (format) *format = handle_it->format;
-  ++g_audio_get_data_calls;
-  return 0;
-}
-
 constexpr int32_t kPfErrBadCallbackParam = 516;
 
 uint8_t composite_divide_255(uint32_t numerator) {
@@ -16327,8 +16149,7 @@ int worker_main_impl(int argc, wchar_t **argv) {
     if (!file.read(reinterpret_cast<char*>(external_audio.data()), byte_count) ||
         std::any_of(external_audio.begin(), external_audio.end() - 1,
                     [](float value) { return !std::isfinite(value); })) return 3;
-    g_audio_source = &external_audio;
-    g_audio_source_sample_count = external_audio_samples;
+    aexcompat::host_audio::runtime().set_source(&external_audio, external_audio_samples);
   }
   if (image_mode) {
     try { external_width = std::stoi(argv[7]); external_height = std::stoi(argv[8]); } catch (...) { return 3; }
@@ -17072,10 +16893,8 @@ int worker_main_impl(int argc, wchar_t **argv) {
   const uint32_t advertised_out_flags = read<uint32_t>(output, kOutFlags);
   const uint32_t advertised_out_flags2 = read<uint32_t>(output, kOutFlags2);
   if (is_render_worker()) {
-    g_audio_usage_advertised =
-        (advertised_out_flags & kOutFlagIUseAudio) != 0;
-    g_audio_checkout_allowed = audio_mode || g_audio_usage_advertised;
-    g_rejected_unadvertised_audio_checkouts = 0;
+    aexcompat::host_audio::runtime().configure_admission(
+        audio_mode, (advertised_out_flags & kOutFlagIUseAudio) != 0);
   }
   const bool image_render_supported =
       (advertised_out_flags & kOutFlagAudioEffectOnly) == 0;
@@ -17623,8 +17442,7 @@ int worker_main_impl(int argc, wchar_t **argv) {
     write<int16_t>(input, 364, 4);
     write<int32_t>(input, 368, external_audio_samples);
     write<void*>(input, 376, external_audio.data());
-    g_audio_source = &external_audio;
-    g_audio_source_sample_count = external_audio_samples;
+    aexcompat::host_audio::runtime().set_source(&external_audio, external_audio_samples);
 
     std::cerr << "stage:audio_setup_begin\n" << std::flush;
     const int32_t audio_setup_error = assignments_applied
@@ -17679,7 +17497,7 @@ int worker_main_impl(int argc, wchar_t **argv) {
     const bool passed = global_error == 0 && params_error == 0 && assignments_applied &&
         audio_setup_error == 0 && audio_render_error == 0 && audio_setdown_error == 0 &&
         setup_range_valid && guards_intact && samples_finite && audio_lifetimes_balanced &&
-        g_invalid_audio_operations == 0 && arbitrary_defaults_disposed &&
+        audio_telemetry().invalid_operations == 0 && arbitrary_defaults_disposed &&
         handle_lifetimes_balanced() && audio_global_setdown_error == 0;
     bool output_created = false;
     if (passed) {
@@ -17710,27 +17528,27 @@ int worker_main_impl(int argc, wchar_t **argv) {
               << ",\"setup_range_valid\":" << (setup_range_valid ? "true" : "false")
               << ",\"guard_bytes_intact\":" << (guards_intact ? "true" : "false")
               << ",\"samples_finite\":" << (samples_finite ? "true" : "false")
-              << ",\"audio_checkout_calls\":" << g_audio_checkout_calls
-              << ",\"audio_usage_advertised\":" << (g_audio_usage_advertised ? "true" : "false")
-              << ",\"audio_checkout_allowed\":" << (g_audio_checkout_allowed ? "true" : "false")
-              << ",\"rejected_unadvertised_audio_checkouts\":" << g_rejected_unadvertised_audio_checkouts
-              << ",\"rejected_audio_format_requests\":" << g_rejected_audio_format_requests
-              << ",\"audio_handle_exhaustions\":" << g_audio_handle_exhaustions
-              << ",\"peak_live_audio_handles\":" << g_peak_live_audio_handles
-              << ",\"audio_checkin_calls\":" << g_audio_checkin_calls
-              << ",\"audio_get_data_calls\":" << g_audio_get_data_calls
-              << ",\"invalid_audio_operations\":" << g_invalid_audio_operations
-              << ",\"last_audio_checkout_start_time\":" << g_last_audio_checkout_start_time
-              << ",\"last_audio_checkout_duration\":" << g_last_audio_checkout_duration
-              << ",\"last_audio_checkout_time_scale\":" << g_last_audio_checkout_time_scale
-              << ",\"last_audio_window_start_sample\":" << g_last_audio_window_start_sample
-              << ",\"last_audio_window_sample_count\":" << g_last_audio_window_sample_count
-              << ",\"last_audio_window_silence_samples\":" << g_last_audio_window_silence_samples
-              << ",\"last_audio_output_rate_fixed\":" << g_last_audio_output_rate
-              << ",\"last_audio_output_bytes_per_sample\":" << g_last_audio_output_bytes_per_sample
-              << ",\"last_audio_output_channels\":" << g_last_audio_output_channels
-              << ",\"last_audio_output_format\":" << g_last_audio_output_format
-              << ",\"last_audio_returned_sample_frames\":" << g_last_audio_returned_sample_frames
+              << ",\"audio_checkout_calls\":" << audio_telemetry().checkout_calls
+              << ",\"audio_usage_advertised\":" << (audio_telemetry().usage_advertised ? "true" : "false")
+              << ",\"audio_checkout_allowed\":" << (audio_telemetry().checkout_allowed ? "true" : "false")
+              << ",\"rejected_unadvertised_audio_checkouts\":" << audio_telemetry().rejected_unadvertised_checkouts
+              << ",\"rejected_audio_format_requests\":" << audio_telemetry().rejected_format_requests
+              << ",\"audio_handle_exhaustions\":" << audio_telemetry().handle_exhaustions
+              << ",\"peak_live_audio_handles\":" << audio_telemetry().peak_live_handles
+              << ",\"audio_checkin_calls\":" << audio_telemetry().checkin_calls
+              << ",\"audio_get_data_calls\":" << audio_telemetry().get_data_calls
+              << ",\"invalid_audio_operations\":" << audio_telemetry().invalid_operations
+              << ",\"last_audio_checkout_start_time\":" << audio_telemetry().last_checkout_start_time
+              << ",\"last_audio_checkout_duration\":" << audio_telemetry().last_checkout_duration
+              << ",\"last_audio_checkout_time_scale\":" << audio_telemetry().last_checkout_time_scale
+              << ",\"last_audio_window_start_sample\":" << audio_telemetry().last_window_start_sample
+              << ",\"last_audio_window_sample_count\":" << audio_telemetry().last_window_sample_count
+              << ",\"last_audio_window_silence_samples\":" << audio_telemetry().last_window_silence_samples
+              << ",\"last_audio_output_rate_fixed\":" << audio_telemetry().last_output_rate
+              << ",\"last_audio_output_bytes_per_sample\":" << audio_telemetry().last_output_bytes_per_sample
+              << ",\"last_audio_output_channels\":" << audio_telemetry().last_output_channels
+              << ",\"last_audio_output_format\":" << audio_telemetry().last_output_format
+              << ",\"last_audio_returned_sample_frames\":" << audio_telemetry().last_returned_sample_frames
               << ",\"audio_lifetimes_balanced\":"
               << (audio_lifetimes_balanced ? "true" : "false")
               << ",\"output_created\":" << (output_created ? "true" : "false") << "}\n";
@@ -18136,7 +17954,7 @@ int worker_main_impl(int argc, wchar_t **argv) {
                 pf_path_lifetimes_balanced() &&
                 async_receipt_lifetimes_balanced() &&
                 async_layer_requests_balanced() &&
-                audio_handle_lifetimes_balanced() && g_invalid_audio_operations == 0 &&
+                audio_handle_lifetimes_balanced() && audio_telemetry().invalid_operations == 0 &&
                 param_checkouts_balanced() &&
                 ((!g_render_click_enabled && !g_render_draw_enabled) ||
                  g_render_ui_context_closed)
@@ -18154,28 +17972,28 @@ int worker_main_impl(int argc, wchar_t **argv) {
             << ",\"wide_time_checkout_allowed\":" << (g_wide_time_checkout_allowed ? "true" : "false")
             << ",\"rejected_temporal_param_checkouts\":" << g_rejected_temporal_param_checkouts
             << ",\"shutter_dependency_advertised\":" << (g_shutter_dependency_advertised ? "true" : "false")
-            << ",\"audio_usage_advertised\":" << (g_audio_usage_advertised ? "true" : "false")
-            << ",\"audio_checkout_allowed\":" << (g_audio_checkout_allowed ? "true" : "false")
-            << ",\"audio_source_available\":" << (g_audio_source ? "true" : "false")
-            << ",\"rejected_unadvertised_audio_checkouts\":" << g_rejected_unadvertised_audio_checkouts
-            << ",\"rejected_audio_format_requests\":" << g_rejected_audio_format_requests
-            << ",\"audio_handle_exhaustions\":" << g_audio_handle_exhaustions
-            << ",\"peak_live_audio_handles\":" << g_peak_live_audio_handles
-            << ",\"audio_checkout_calls\":" << g_audio_checkout_calls
-            << ",\"audio_checkin_calls\":" << g_audio_checkin_calls
-            << ",\"audio_get_data_calls\":" << g_audio_get_data_calls
-            << ",\"invalid_audio_operations\":" << g_invalid_audio_operations
-            << ",\"last_audio_checkout_start_time\":" << g_last_audio_checkout_start_time
-            << ",\"last_audio_checkout_duration\":" << g_last_audio_checkout_duration
-            << ",\"last_audio_checkout_time_scale\":" << g_last_audio_checkout_time_scale
-            << ",\"last_audio_window_start_sample\":" << g_last_audio_window_start_sample
-            << ",\"last_audio_window_sample_count\":" << g_last_audio_window_sample_count
-            << ",\"last_audio_window_silence_samples\":" << g_last_audio_window_silence_samples
-            << ",\"last_audio_output_rate_fixed\":" << g_last_audio_output_rate
-            << ",\"last_audio_output_bytes_per_sample\":" << g_last_audio_output_bytes_per_sample
-            << ",\"last_audio_output_channels\":" << g_last_audio_output_channels
-            << ",\"last_audio_output_format\":" << g_last_audio_output_format
-            << ",\"last_audio_returned_sample_frames\":" << g_last_audio_returned_sample_frames
+            << ",\"audio_usage_advertised\":" << (audio_telemetry().usage_advertised ? "true" : "false")
+            << ",\"audio_checkout_allowed\":" << (audio_telemetry().checkout_allowed ? "true" : "false")
+            << ",\"audio_source_available\":" << (audio_telemetry().source_available ? "true" : "false")
+            << ",\"rejected_unadvertised_audio_checkouts\":" << audio_telemetry().rejected_unadvertised_checkouts
+            << ",\"rejected_audio_format_requests\":" << audio_telemetry().rejected_format_requests
+            << ",\"audio_handle_exhaustions\":" << audio_telemetry().handle_exhaustions
+            << ",\"peak_live_audio_handles\":" << audio_telemetry().peak_live_handles
+            << ",\"audio_checkout_calls\":" << audio_telemetry().checkout_calls
+            << ",\"audio_checkin_calls\":" << audio_telemetry().checkin_calls
+            << ",\"audio_get_data_calls\":" << audio_telemetry().get_data_calls
+            << ",\"invalid_audio_operations\":" << audio_telemetry().invalid_operations
+            << ",\"last_audio_checkout_start_time\":" << audio_telemetry().last_checkout_start_time
+            << ",\"last_audio_checkout_duration\":" << audio_telemetry().last_checkout_duration
+            << ",\"last_audio_checkout_time_scale\":" << audio_telemetry().last_checkout_time_scale
+            << ",\"last_audio_window_start_sample\":" << audio_telemetry().last_window_start_sample
+            << ",\"last_audio_window_sample_count\":" << audio_telemetry().last_window_sample_count
+            << ",\"last_audio_window_silence_samples\":" << audio_telemetry().last_window_silence_samples
+            << ",\"last_audio_output_rate_fixed\":" << audio_telemetry().last_output_rate
+            << ",\"last_audio_output_bytes_per_sample\":" << audio_telemetry().last_output_bytes_per_sample
+            << ",\"last_audio_output_channels\":" << audio_telemetry().last_output_channels
+            << ",\"last_audio_output_format\":" << audio_telemetry().last_output_format
+            << ",\"last_audio_returned_sample_frames\":" << audio_telemetry().last_returned_sample_frames
             << ",\"audio_lifetimes_balanced\":"
             << (audio_handle_lifetimes_balanced() ? "true" : "false")
             << ",\"render_selector_dispatched\":"
@@ -18383,7 +18201,7 @@ int worker_main_impl(int argc, wchar_t **argv) {
                 smart.gpu_setup_error == 0 && smart.gpu_setdown_error == 0 &&
                 smart.guards_intact && handle_lifetimes_balanced() &&
                 world_lifetimes_balanced() && gpu_memory_lifetimes_balanced() &&
-                audio_handle_lifetimes_balanced() && g_invalid_audio_operations == 0 &&
+                audio_handle_lifetimes_balanced() && audio_telemetry().invalid_operations == 0 &&
                 param_checkouts_balanced() &&
                 ((!g_render_click_enabled && !g_render_draw_enabled) ||
                  g_render_ui_context_closed)
@@ -18624,7 +18442,7 @@ int worker_main_impl(int argc, wchar_t **argv) {
       async_receipt_lifetimes_balanced() &&
       async_layer_requests_balanced() &&
       gpu_memory_lifetimes_balanced() &&
-      audio_handle_lifetimes_balanced() && g_invalid_audio_operations == 0 &&
+      audio_handle_lifetimes_balanced() && audio_telemetry().invalid_operations == 0 &&
       param_checkouts_balanced() &&
       ((!g_render_click_enabled && !g_render_draw_enabled) ||
        g_render_ui_context_closed) ? 0 : 21;
@@ -18636,7 +18454,7 @@ int worker_main_impl(int argc, wchar_t **argv) {
       smart.rects_valid && smart.guards_intact &&
       handle_lifetimes_balanced() && world_lifetimes_balanced() &&
       gpu_memory_lifetimes_balanced() &&
-      audio_handle_lifetimes_balanced() && g_invalid_audio_operations == 0 &&
+      audio_handle_lifetimes_balanced() && audio_telemetry().invalid_operations == 0 &&
       param_checkouts_balanced() &&
       ((!g_render_click_enabled && !g_render_draw_enabled) ||
        g_render_ui_context_closed) ? 0 : 22;
