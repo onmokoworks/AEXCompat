@@ -46,24 +46,30 @@ After Effects SDK は不要。GUI の起動だけならこれで足りる
 python -m pytest -q
 ```
 
-- ローカル生成物 (ビルド済み worker、machine-bound receipt 等) を要するテストは
-  `tests/local_artifact_tests.txt` に列挙されており、既定で skip される。
-  実行するには対象のビルド / gate スクリプトを走らせた後
+期待結果は「ソースのみ検証」と「SDK 込み検証」で異なるため、入口で分けて
+考える。
+
+- **ソースのみ検証 (SDK なし)**: clean clone + `requirements-dev.txt` だけで
+  実行した場合。SDK ヘッダの ABI を検証するテストは `AFTER_EFFECTS_SDK_ROOT`
+  が未設定 (または無効) なら `pytest.skip` で明示的に skip される (一部は
+  Visual Studio C++ tools 不在時も skip)。一方、probe / fixture を
+  `tools/build-*.ps1` 経由で実際にビルドするテスト群は SDK の有無を事前
+  チェックせず、SDK 解決の throw で fail する。**SDK なしでは fail が残るのが
+  現状の想定結果** (2026-07-18 の計測で 936 passed / 25 failed / 108 skipped。
+  25 fail はすべて SDK 不在によるビルド系)。
+- **SDK 込み検証**: `AFTER_EFFECTS_SDK_ROOT` と Visual Studio を揃えた構成。
+  0 failed が期待結果 (「検証済み構成」の節を参照)。
+- 上記と別軸で、ローカル生成物 (ビルド済み worker、machine-bound receipt 等)
+  を要するテストは `tests/local_artifact_tests.txt` に列挙されており、常に
+  既定で skip される。実行するには対象のビルド / gate スクリプトを走らせた後
   `--run-local-artifact-tests` を付ける。
-- SDK ヘッダの ABI を検証するテストは `AFTER_EFFECTS_SDK_ROOT` が未設定
-  (または無効) の場合 `pytest.skip` で明示的に skip される。一部は
-  Visual Studio C++ tools が見つからない場合も skip する。
-- 一方、probe / fixture を `tools/build-*.ps1` 経由で実際にビルドするテスト群は
-  SDK / VS の有無を事前チェックしない。SDK 環境変数なしの環境ではビルド
-  スクリプトが SDK 解決で throw して fail する (2026-07-18 時点、VS ありの
-  clean 環境で 935 passed / 25 failed / 106 skipped を確認)。全テストを
-  green にするには下記の After Effects SDK と Visual Studio を揃える。
 
 ## C++ worker (minihost)
 
 harness からの AEX inspect / render は `target\minihost-build\` 直下の worker
 実行ファイルを参照する。clone 直後に inspect / render まで進むには、harness の
-ビルドに加えて minihost を single-config generator (Ninja) でビルドしておく。
+ビルドに加えて minihost を single-config generator (Ninja) でビルドし、さらに
+後述の **worker trust** を自分のビルドに合わせて更新する必要がある。
 After Effects SDK は不要 (include は Windows SDK と C++ 標準ライブラリのみ)。
 
 ```powershell
@@ -82,6 +88,25 @@ Get-ChildItem target\minihost-build\aex_*.exe
 broker / harness と gate スクリプト (`tools/refresh-sdk-grabba-evidence.ps1` 等)
 はこのパス直下の exe を前提にしているため、multi-config generator
 (Visual Studio) で `Release\` 配下に出すと参照されない点に注意。
+
+### worker trust (第三者環境での注意)
+
+harness の secure dispatch 経路は、worker 実行ファイルを **broker ソースに
+埋め込まれた SHA-256 / size (trust tuple)** と照合してから起動する。worker の
+バイナリはビルド環境 (toolchain のバージョン等) で変わるため、第三者環境で
+ビルドした worker は記録済みの trust と一致せず、該当経路の inspect / render
+は拒否される。ビルドしただけでは足りない点に注意。
+
+- **L2 worker**: trust は `broker/crates/broker/src/generated_l2_worker_trust.rs`
+  に生成される。`tools/refresh-sdk-grabba-evidence.ps1` が minihost の
+  再ビルド → hash 計測 → この定数の再生成までを行う (After Effects SDK が
+  必要。Grabba fixture の再ビルドと evidence 更新も同時に走る)。
+- **render / smart worker**: trust は
+  `broker/crates/broker/src/image_render.rs` 内の `RENDER_WORKER_TRUST` /
+  `SMART_WORKER_TRUST` 定数。現時点で再生成スクリプトは無く、自分のビルドの
+  SHA-256 / size に手動で合わせる必要がある。
+- trust はコンパイル時に harness へ取り込まれるため、更新後は
+  `cargo build -p aexcompat-harness --release` で harness を再ビルドする。
 
 ## After Effects SDK
 
@@ -111,8 +136,25 @@ broker / harness と gate スクリプト (`tools/refresh-sdk-grabba-evidence.ps
   ただし `Visual Studio 18 2026` generator を使う場合は、その generator を
   認識するより新しい CMake が必要 (bundled 4.3.1 で検証。3.24 は
   `Visual Studio 18 2026` を解決できない)。CMake は Visual Studio bundled の
-  もので足りる。ビルドスクリプトは `-CMake` 未指定時に
-  `tools/resolve-build-cmake.ps1` で VS bundled CMake を自動発見する。
+  もので足りる。
+- CMake の見つけ方はスクリプトにより二通り混在している。
+  `tools/resolve-build-cmake.ps1` で VS bundled CMake を自動発見するもの
+  (`build-pf-composite-rect-probe.ps1` 等) と、`$CMake` の既定値を
+  VS 2026 Community の bundled パスに固定したままのもの
+  (`build-pf-adv-time-probe.ps1` / `build-pf-transform-affine-probe.ps1` 等)
+  がある。後者は VS 2026 Community が無い環境ではそのままでは fail するため、
+  `-CMake` で cmake.exe を明示指定する。
+
+VS 2022 でビルドする場合の実行例:
+
+```powershell
+# resolver 対応スクリプト: generator の指定だけでよい
+powershell -File tools\build-pf-composite-rect-probe.ps1 -Generator "Visual Studio 17 2022"
+
+# 既定 CMake パス固定のスクリプト: cmake.exe も明示する
+powershell -File tools\build-pf-adv-time-probe.ps1 -Generator "Visual Studio 17 2022" `
+  -CMake "C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe"
+```
 - SDK sample fixture のうち `.vcxproj` を `PlatformToolset=v143` 固定でビルド
   するもの (`tools/build-sdk-grabba.ps1` / `tools/build-sdk-supervisor.ps1` の
   MSBuild build と、`tools/sdk-fixtures/*-v143.props` を使う fixture 群) は
@@ -172,18 +214,26 @@ Per-component prerequisites on Windows x64:
   Windows SDK (the default `x86_64-pc-windows-msvc` target needs the MSVC
   linker). No After Effects SDK.
 - **Python tests**: Python 3.x plus `requirements-dev.txt` (pytest, Pillow,
-  jsonschema; the latter two are imported at collection time). Tests that
-  need locally built workers or machine-bound receipts are listed in
-  `tests/local_artifact_tests.txt` and skip by default
-  (`--run-local-artifact-tests` to opt in). SDK-header ABI tests explicitly
-  skip when `AFTER_EFFECTS_SDK_ROOT` is unset (some also skip without VS C++
-  tools), but the probe / fixture build tests that invoke `tools/build-*.ps1`
-  do not pre-check and fail without the SDK (935 passed / 25 failed /
-  106 skipped measured on 2026-07-18 in a clean environment with VS but no
-  SDK variable). A fully green run needs the SDK and Visual Studio below.
+  jsonschema; the latter two are imported at collection time). Expected
+  results differ by entry point. Source-only verification (no SDK):
+  SDK-header ABI tests explicitly skip, but the probe / fixture build tests
+  that invoke `tools/build-*.ps1` do not pre-check and fail without the SDK
+  (936 passed / 25 failed / 108 skipped measured on 2026-07-18; all 25
+  failures are SDK-absence build failures and are the expected source-only
+  outcome). SDK-backed verification (SDK plus Visual Studio) expects
+  0 failed. Independently, tests listed in `tests/local_artifact_tests.txt`
+  always skip by default (`--run-local-artifact-tests` to opt in).
 - **C++ workers (minihost)**: build with the Ninja generator into
   `target\minihost-build\` so the harness and gate scripts find the four
   `aex_*_worker.exe` binaries directly under that directory. No SDK needed.
+  Note the harness's secure dispatch verifies workers against SHA-256 / size
+  trust tuples embedded in the broker sources, so third-party builds are
+  rejected until the trust is refreshed: the L2 tuple is regenerated by
+  `tools/refresh-sdk-grabba-evidence.ps1` into
+  `broker/crates/broker/src/generated_l2_worker_trust.rs`, while
+  `RENDER_WORKER_TRUST` / `SMART_WORKER_TRUST` in
+  `broker/crates/broker/src/image_render.rs` currently have no regeneration
+  script and must be updated manually; rebuild the harness afterwards.
 - **After Effects SDK**: set `AFTER_EFFECTS_SDK_ROOT` to a directory that
   directly contains `Examples\`. The verified configuration uses the AE 25.2
   SDK generation. Provenance receipts record the verified SDK header file
@@ -194,8 +244,11 @@ Per-component prerequisites on Windows x64:
   `Visual Studio 18 2026` generator, overridable per script with
   `-Generator` (VS 2026 is the verified default, not a hard requirement).
   `cmake_minimum_required` is 3.20, but the VS 2026 generator needs a newer
-  CMake (bundled 4.3.1 verified; scripts auto-discover the bundled CMake via
-  `tools/resolve-build-cmake.ps1`, overridable with `-CMake`). Only the
+  CMake (bundled 4.3.1 verified). CMake lookup is mixed: some scripts
+  auto-discover the VS-bundled CMake via `tools/resolve-build-cmake.ps1`,
+  while others still default `$CMake` to the VS 2026 Community bundled path
+  and need an explicit `-CMake` on machines without it (a VS 2022 example
+  command line is included in the Japanese section and was verified). Only the
   v143-pinned SDK sample fixture builds (Grabba / Supervisor and the
   `*-v143.props` fixtures) additionally require the v143 toolset
   (MSVC 14.3x/14.4x) and MSBuild. `build-sdk-grabba.ps1` discovers a

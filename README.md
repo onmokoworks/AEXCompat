@@ -64,9 +64,9 @@ macOS、Apple Silicon、Windows ARM64は現時点で対象外です。After Effe
 
 - Windows 10または11 x64
 - Rust toolchainとCargo
-- Visual Studio 2022 C++ Build Tools
+- Visual Studio（MSVC C++ toolchain。必要なedition・toolsetはコンポーネントごとに異なる）
 - CMake
-- ローカルのAfter Effects SDK（native workerやprobeをbuildする場合）
+- ローカルのAfter Effects SDK（probeやSDK fixtureをbuildする場合。minihost workerのbuildには不要）
 
 コンポーネント別の詳細な要件（SDKの世代、Visual Studioのバージョンとtoolset、CMakeの条件など）は[Build Requirements](docs/BUILD_REQUIREMENTS.md)を参照してください。
 
@@ -230,7 +230,7 @@ macOS, Apple Silicon, and Windows ARM64 are not currently supported. After Effec
 
 ### Quick Start
 
-Requirements: Windows x64, Rust/Cargo, Visual Studio 2022 C++ Build Tools, CMake, and a local After Effects SDK when building native workers or probes. See [Build Requirements](docs/BUILD_REQUIREMENTS.md) for per-component details, SDK generation, and toolset requirements.
+Requirements: Windows x64, Rust/Cargo, Visual Studio with the MSVC C++ toolchain (the required edition and toolset vary by component), CMake, and a local After Effects SDK when building probes or SDK fixtures (not needed for minihost worker builds). See [Build Requirements](docs/BUILD_REQUIREMENTS.md) for per-component details, SDK generation, and toolset requirements.
 
 Before SDK-backed tests or builds, set the SDK root as a user environment variable and reopen PowerShell:
 
