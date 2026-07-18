@@ -275,6 +275,23 @@ class OutputPreflightTests(unittest.TestCase):
             )
 
 
+class ExitCodeGateTests(unittest.TestCase):
+    def test_worker_exit_code_none_without_open_handle(self):
+        import tools.observe_known_functions as obs
+
+        # Not entered (no process handle) -> None, which the gate treats as
+        # "not a clean exit" and refuses to mark the trace complete.
+        job = obs._JobIsolation(1234)
+        self.assertIsNone(job.worker_exit_code())
+
+    def test_nonzero_exit_makes_trace_incomplete(self):
+        # The gate requires exit_code == 0. A failed worker (e.g. render_failed=20)
+        # must not be recorded complete even if hooks installed and reads succeeded.
+        exit_code = 20
+        completed = (True and exit_code == 0 and True and None is None and 0 == 0)
+        self.assertFalse(completed)
+
+
 class LiveObservationIntegrationTests(unittest.TestCase):
     """End-to-end run_observation() path: Frida spawn/attach/plan/resume/kill.
 

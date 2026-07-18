@@ -302,7 +302,7 @@ def run_observation(
         # The kill wraps the Job Object context so that even a failure inside
         # _JobIsolation.__enter__ (e.g. job assignment denied) still terminates the
         # suspended spawned worker rather than leaking it.
-        with _JobIsolation(pid):
+        with _JobIsolation(pid) as job:
             session = device.attach(pid)
             script = session.create_script(script_source)
             script.on("message", on_message)
@@ -318,14 +318,19 @@ def run_observation(
                 raise ObservationError(f"Frida hook install failed: {collector.install_error}")
             device.resume(pid)
             exited = _await_exit(frida, device, pid, timeout_seconds)
-            # A trace is complete only if the worker exited, the expected hooks
-            # attached, no invocation was rejected by the formatter, and every
-            # requested field read succeeded. A read_error means a requested field
-            # was dropped (null/out-of-extent/unsafe 64-bit), so the observation is
-            # missing data and must not be reported complete on the side-channel
-            # count alone.
+            # Read the worker's own exit code before __exit__ kills the tree; a
+            # non-zero exit (e.g. minihost render_failed=20) is a failed/partial
+            # run and must not be recorded as complete.
+            exit_code = job.worker_exit_code() if exited else None
+            # A trace is complete only if the worker exited cleanly (code 0), the
+            # expected hooks attached, no invocation was rejected by the formatter,
+            # and every requested field read succeeded. A read_error means a
+            # requested field was dropped (null/out-of-extent/unsafe 64-bit), so the
+            # observation is missing data and must not be reported complete on the
+            # side-channel count alone.
             completed = (
                 exited
+                and exit_code == 0
                 and collector.installed_hook_count == expected_hook_count
                 and collector.format_error is None
                 and collector.read_error_count == 0
@@ -362,6 +367,8 @@ class _JobIsolation:  # pragma: no cover - Windows runtime path
         self.pid = pid
         self._job = None
         self._kernel32 = None
+        self._proc_handle = None
+        self._ctypes = None
 
     def __enter__(self):
         if sys.platform != "win32":
@@ -384,12 +391,17 @@ class _JobIsolation:  # pragma: no cover - Windows runtime path
         k32.AssignProcessToJobObject.argtypes = [HANDLE, HANDLE]
         k32.CloseHandle.restype = wintypes.BOOL
         k32.CloseHandle.argtypes = [HANDLE]
+        k32.GetExitCodeProcess.restype = wintypes.BOOL
+        k32.GetExitCodeProcess.argtypes = [HANDLE, ctypes.POINTER(wintypes.DWORD)]
+        self._ctypes = ctypes
+        self._dword = wintypes.DWORD
         JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x2000
         JOB_OBJECT_LIMIT_PROCESS_MEMORY = 0x0100
         JOB_OBJECT_LIMIT_JOB_MEMORY = 0x0200
         JobObjectExtendedLimitInformation = 9
         PROCESS_SET_QUOTA = 0x0100
         PROCESS_TERMINATE = 0x0001
+        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
 
         job = k32.CreateJobObjectW(None, None)
         if not job:
@@ -441,23 +453,46 @@ class _JobIsolation:  # pragma: no cover - Windows runtime path
             k32.CloseHandle(job)
             raise ObservationError(f"SetInformationJobObject failed: {err}")
 
-        handle = k32.OpenProcess(PROCESS_SET_QUOTA | PROCESS_TERMINATE, False, self.pid)
+        handle = k32.OpenProcess(
+            PROCESS_SET_QUOTA | PROCESS_TERMINATE | PROCESS_QUERY_LIMITED_INFORMATION,
+            False,
+            self.pid,
+        )
         if not handle:
             err = ctypes.get_last_error()
             k32.CloseHandle(job)
             raise ObservationError(f"OpenProcess({self.pid}) failed: {err}")
-        try:
-            if not k32.AssignProcessToJobObject(job, handle):
-                err = ctypes.get_last_error()
-                k32.CloseHandle(job)
-                raise ObservationError(f"AssignProcessToJobObject failed: {err}")
-        finally:
+        if not k32.AssignProcessToJobObject(job, handle):
+            err = ctypes.get_last_error()
             k32.CloseHandle(handle)
+            k32.CloseHandle(job)
+            raise ObservationError(f"AssignProcessToJobObject failed: {err}")
+        # Keep the handle open (with query rights) so worker_exit_code() can read
+        # the real exit code after a natural exit, before __exit__ kills the tree.
+        self._proc_handle = handle
         self._job = job
         return self
 
+    def worker_exit_code(self):
+        """Return the worker's exit code, or None if unavailable.
+
+        Call this after the worker has exited naturally and before __exit__ (which
+        kills the tree), so the code is the worker's own, not our termination code.
+        """
+
+        if not self._proc_handle or not self._kernel32 or not self._ctypes:
+            return None
+        STILL_ACTIVE = 259
+        code = self._dword()
+        if not self._kernel32.GetExitCodeProcess(self._proc_handle, self._ctypes.byref(code)):
+            return None
+        return None if code.value == STILL_ACTIVE else int(code.value)
+
     def __exit__(self, *exc):
         # Closing the job handle triggers kill-on-close, terminating the tree.
+        if self._proc_handle and self._kernel32:
+            self._kernel32.CloseHandle(self._proc_handle)
+            self._proc_handle = None
         if self._job and self._kernel32:
             self._kernel32.CloseHandle(self._job)
             self._job = None
