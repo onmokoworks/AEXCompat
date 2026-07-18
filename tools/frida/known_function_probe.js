@@ -77,7 +77,9 @@ function readRegister(slot, read) {
   }
   switch (read.interpret) {
     case 'uint':
-      return slot.toUInt32();
+      // NativePointer exposes toInt32(); `>>> 0` reinterprets the low 32 bits as
+      // unsigned without relying on a toUInt32() method.
+      return slot.toInt32() >>> 0;
     case 'bool':
       return slot.toInt32() !== 0;
     case 'int':
@@ -127,7 +129,7 @@ function interpretReturn(retval, spec) {
     const hex = retval.toString();
     return toSafeNumber(spec.interpret === 'int' ? int64(hex) : uint64(hex));
   }
-  return spec.interpret === 'uint' ? retval.toUInt32() : retval.toInt32();
+  return spec.interpret === 'uint' ? (retval.toInt32() >>> 0) : retval.toInt32();
 }
 
 function maxArgIndex(hook) {

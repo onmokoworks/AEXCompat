@@ -401,6 +401,10 @@ class FridaScriptTests(unittest.TestCase):
         self.assertIn("uint64(", text)
         # 64-bit values are only emitted if losslessly representable as a Number.
         self.assertIn("isSafeInteger", text)
+        # Unsigned 32-bit uses `>>> 0` on toInt32(); NativePointer.toUInt32() is
+        # not a documented method, so it must not be called.
+        self.assertNotIn(".toUInt32(", text)
+        self.assertIn(">>> 0", text)
         # Struct booleans honour their declared width (not just the first byte).
         self.assertIn("p.readU16() !== 0", text)
 
