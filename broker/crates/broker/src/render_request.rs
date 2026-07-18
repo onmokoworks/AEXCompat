@@ -903,6 +903,7 @@ pub fn execute_smart(
                 plugin_basename: &plugin_basename,
                 args_before_plugin: &args_before_plugin,
                 args_after_plugin: &args_after_plugin,
+                repository,
                 require_module_audit: true,
             },
             Duration::from_millis(timeout_ms),

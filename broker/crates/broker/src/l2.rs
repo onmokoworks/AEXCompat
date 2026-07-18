@@ -86,6 +86,7 @@ pub fn run(repository: &Path, worker: &Path, id: &str, output: &Path) -> io::Res
         plugin_basename: &plugin_basename,
         args_before_plugin: &before,
         args_after_plugin: &after,
+        repository,
         require_module_audit: true,
     };
     let result = secure_launch(tree, request, Duration::from_millis(approved.timeout_ms))?;

@@ -84,6 +84,9 @@ pub fn dispatch_secure_image(input: SecureImageDispatch<'_>) -> io::Result<Secur
         plugin_basename: &plugin_basename,
         args_before_plugin: input.args_before_plugin,
         args_after_plugin: input.args_after_plugin,
+        // Opt-in crash minidumps (issue #18) are injected uniformly in
+        // secure_launch for every sealed dispatch.
+        repository: input.repository,
         require_module_audit: true,
     };
     secure_launch(tree, request, input.timeout)
