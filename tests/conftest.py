@@ -45,6 +45,7 @@ def canonical_release_worker(tmp_path_factory):
         check=True,
         capture_output=True,
         text=True,
+        encoding="utf-8-sig",
     )
     installations = json.loads(result.stdout)
     if not installations:
@@ -59,20 +60,21 @@ def canonical_release_worker(tmp_path_factory):
         pytest.fail("cmake is unavailable on PATH")
 
     major = int(installation["installationVersion"].split(".", 1)[0])
-    product_line = installation.get("catalog", {}).get("productLineVersion")
     known_generator_years = {17: "2022", 18: "2026"}
-    generator_year = product_line if product_line and product_line.isdigit() else known_generator_years.get(major)
+    generator_year = known_generator_years.get(major)
     if generator_year is None:
         pytest.fail(f"unsupported Visual Studio CMake generator version: {major}")
     generator = f"Visual Studio {major} {generator_year}"
     build = tmp_path_factory.mktemp("canonical-release-worker")
     source = ROOT / "minihost"
     command = (
-        f'call "{vcvars}" >nul && '
+        f'@call "{vcvars}" >nul && '
         f'"{cmake}" -S "{source}" -B "{build}" -G "{generator}" -A x64 && '
         f'"{cmake}" --build "{build}" --config Release --target aex_render_worker'
     )
-    subprocess.run(["cmd", "/d", "/s", "/c", command], check=True, timeout=420)
+    batch = build / "build-worker.bat"
+    batch.write_text(command + "\n", encoding="ascii")
+    subprocess.run(["cmd", "/d", "/c", str(batch)], check=True, timeout=420)
     worker = build / "Release" / "aex_render_worker.exe"
     assert worker.is_file(), f"canonical worker was not produced: {worker}"
     return worker

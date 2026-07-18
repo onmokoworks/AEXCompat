@@ -86,7 +86,7 @@ if (Test-Path -LiteralPath $resultPath) {
 $stagedInput = Join-Path ([System.IO.Path]::GetTempPath()) `
     ("aexcompat-ae-input-" + [guid]::NewGuid().ToString('N') + [System.IO.Path]::GetExtension($inputPath))
 Copy-Item -LiteralPath $inputPath -Destination $stagedInput
-$inputHash = (Get-FileHash -LiteralPath $stagedInput -Algorithm SHA256).Hash.ToLowerInvariant()
+$inputHash = Get-Sha256Hex $stagedInput
 
 $env:AEXCOMPAT_AE_INPUT = $stagedInput
 $env:AEXCOMPAT_AE_OUTPUT = $outputPath
