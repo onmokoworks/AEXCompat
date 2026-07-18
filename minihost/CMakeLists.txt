@@ -14,7 +14,7 @@ target_compile_features(aex_l1_worker PRIVATE cxx_std_17)
 target_compile_definitions(aex_l1_worker PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
 target_link_libraries(aex_l1_worker PRIVATE bcrypt)
 
-set(AEXCOMPAT_L2_WORKER_SOURCES
+set(AEXCOMPAT_WORKER_RUNTIME_CORE_SOURCES
     src/gpu_cuda_backend.cpp
     src/gpu_directx_backend.cpp
     src/gpu_device_info_registry.cpp
@@ -46,17 +46,22 @@ set(AEXCOMPAT_L2_WORKER_SOURCES
     src/worker_suite_abi.cpp
     src/worker_world_safety.cpp)
 
-add_executable(aex_l2_worker ${AEXCOMPAT_L2_WORKER_SOURCES})
+add_library(aex_worker_runtime_core OBJECT ${AEXCOMPAT_WORKER_RUNTIME_CORE_SOURCES})
+target_compile_features(aex_worker_runtime_core PRIVATE cxx_std_17)
+target_compile_definitions(aex_worker_runtime_core PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX AEXCOMPAT_COMPILE_AEGP_SCENE_CALLBACKS=1)
+target_link_libraries(aex_worker_runtime_core PRIVATE aexcompat_trace_writer)
+
+add_executable(aex_l2_worker src/worker_l2_entry.cpp $<TARGET_OBJECTS:aex_worker_runtime_core>)
 target_compile_features(aex_l2_worker PRIVATE cxx_std_17)
 target_compile_definitions(aex_l2_worker PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
 target_link_libraries(aex_l2_worker PRIVATE bcrypt aexcompat_trace_writer)
 
-add_executable(aex_render_worker ${AEXCOMPAT_L2_WORKER_SOURCES})
+add_executable(aex_render_worker src/worker_render_entry.cpp $<TARGET_OBJECTS:aex_worker_runtime_core>)
 target_compile_features(aex_render_worker PRIVATE cxx_std_17)
-target_compile_definitions(aex_render_worker PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX AEXCOMPAT_RENDER_WORKER=1)
+target_compile_definitions(aex_render_worker PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
 target_link_libraries(aex_render_worker PRIVATE bcrypt aexcompat_trace_writer)
 
-add_executable(aex_smart_worker ${AEXCOMPAT_L2_WORKER_SOURCES})
+add_executable(aex_smart_worker src/worker_smart_entry.cpp $<TARGET_OBJECTS:aex_worker_runtime_core>)
 target_compile_features(aex_smart_worker PRIVATE cxx_std_17)
-target_compile_definitions(aex_smart_worker PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX AEXCOMPAT_SMART_WORKER=1)
+target_compile_definitions(aex_smart_worker PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
 target_link_libraries(aex_smart_worker PRIVATE bcrypt aexcompat_trace_writer)

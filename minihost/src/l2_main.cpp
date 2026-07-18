@@ -72,8 +72,12 @@
 #include "worker_world_safety.hpp"
 #include "worker_pf_suites_internal.hpp"
 #include "worker_report.hpp"
+#include "worker_target.hpp"
 
 namespace {
+
+aexcompat::worker_target::Kind g_worker_target =
+    aexcompat::worker_target::Kind::L2;
 
 namespace opencl = aexcompat::gpu_runtime::opencl;
 
@@ -296,13 +300,12 @@ void record_selector_dispatch(const char* selector) {
 }
 
 const char* trace_worker_label() {
-#if defined(AEXCOMPAT_RENDER_WORKER)
-  return "aex_render_worker";
-#elif defined(AEXCOMPAT_SMART_WORKER)
-  return "aex_smart_worker";
-#else
+  switch (g_worker_target) {
+    case aexcompat::worker_target::Kind::Render: return "aex_render_worker";
+    case aexcompat::worker_target::Kind::Smart: return "aex_smart_worker";
+    case aexcompat::worker_target::Kind::L2: return "aex_l2_worker";
+  }
   return "aex_l2_worker";
-#endif
 }
 
 // Opt-in crash minidumps (issue #18): broker-validated directory passed via
@@ -15557,7 +15560,7 @@ bool load_l2_parameter_animation(void*, const wchar_t* value) {
                                   g_parameter_timelines);
 }
 
-int wmain(int argc, wchar_t **argv) {
+int worker_main_impl(int argc, wchar_t **argv) {
   const SceneContext scene_host{
       {&bump_render_project_timestamp, &validate_render_options_item,
        &scene_initialize_layer_render_options, &suite_leases_balanced},
@@ -18231,4 +18234,9 @@ int wmain(int argc, wchar_t **argv) {
       user_changed_ok && conditional_ui_ok && about_error == 0 && lifecycle_data_null &&
       std::all_of(lifecycle_errors.begin(), lifecycle_errors.end(), [](auto error) { return error == 0; }) ? 0 : 20;
 #endif
+}
+
+int aexcompat::worker_target::run(Kind kind, int argc, wchar_t** argv) {
+  g_worker_target = kind;
+  return worker_main_impl(argc, argv);
 }
