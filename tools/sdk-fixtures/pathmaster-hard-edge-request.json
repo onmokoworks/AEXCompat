@@ -1,6 +1,7 @@
 {
   "schema_version": 1,
   "assignments": [
+    {"slot": 1, "value": 1},
     {"slot": 3, "value": 0.0},
     {"slot": 4, "value": 0.0},
     {"slot": 5, "value": 0.0},

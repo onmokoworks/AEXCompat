@@ -1,0 +1,256 @@
+{
+    "schema_version":  1,
+    "gate":  "sdk_shifter_production_matrix_gate",
+    "status":  "passed",
+    "fixture":  "Adobe After Effects SDK Shifter",
+    "run_count":  12,
+    "runs_per_case":  2,
+    "authenticated_artifacts":  {
+                                    "release_harness":  {
+                                                            "path":  "broker/target/release/aexcompat-harness.exe",
+                                                            "size_bytes":  9945600,
+                                                            "sha256":  "67e9ac8e731f5a3514e43c85f35095d4a027e00541f2d16a34c679d3213956d4"
+                                                        },
+                                    "sdk_shifter_fixture":  {
+                                                                "path":  "target/sdk-fixtures/shifter/Shifter.aex",
+                                                                "size_bytes":  23552,
+                                                                "sha256":  "f1f7c17eca0cef1f786f3770243f2727d174e45aee9b50b7d3982c188921f4c4"
+                                                            },
+                                    "deterministic_input":  {
+                                                                "path":  "target/ae-oracle-colorgrid-input.png",
+                                                                "size_bytes":  677,
+                                                                "sha256":  "aad2e9973bc87d70af998a0522c4b83060539183230a4937744c6838fb66e2db"
+                                                            }
+                                },
+    "coverage":  {
+                     "route_count":  6,
+                     "classic":  [
+                                     "argb8",
+                                     "argb16",
+                                     "argb32f"
+                                 ],
+                     "smart_cpu":  [
+                                       "argb8",
+                                       "argb16",
+                                       "argb32f"
+                                   ]
+                 },
+    "cases":  [
+                  {
+                      "id":  "classic_argb8",
+                      "command":  "--render-experimental",
+                      "render_path":  "classic",
+                      "pixel_format":  "argb8",
+                      "expected_output_sha256":  "53f924951ebb8ad7a6cba214dac79f73ff3008d68dcdb681a0b7b91e08036f76",
+                      "deterministic":  true,
+                      "runs":  [
+                                   {
+                                       "run":  1,
+                                       "output_sha256":  "53f924951ebb8ad7a6cba214dac79f73ff3008d68dcdb681a0b7b91e08036f76",
+                                       "checks":  {
+                                                      "output_identity":  true,
+                                                      "worker_ok":  true,
+                                                      "route_exact":  true,
+                                                      "guards_intact":  true,
+                                                      "lifetimes_balanced":  true,
+                                                      "stage_diagnostics":  true,
+                                                      "smart32_cpu_only":  true
+                                                  }
+                                   },
+                                   {
+                                       "run":  2,
+                                       "output_sha256":  "53f924951ebb8ad7a6cba214dac79f73ff3008d68dcdb681a0b7b91e08036f76",
+                                       "checks":  {
+                                                      "output_identity":  true,
+                                                      "worker_ok":  true,
+                                                      "route_exact":  true,
+                                                      "guards_intact":  true,
+                                                      "lifetimes_balanced":  true,
+                                                      "stage_diagnostics":  true,
+                                                      "smart32_cpu_only":  true
+                                                  }
+                                   }
+                               ]
+                  },
+                  {
+                      "id":  "classic_argb16",
+                      "command":  "--render-experimental-16",
+                      "render_path":  "classic",
+                      "pixel_format":  "argb16",
+                      "expected_output_sha256":  "80422bc3d307b4a25bdafcc84ac7fb01cb55a09810e8b0f37bb12e0edb5c48ca",
+                      "deterministic":  true,
+                      "runs":  [
+                                   {
+                                       "run":  1,
+                                       "output_sha256":  "80422bc3d307b4a25bdafcc84ac7fb01cb55a09810e8b0f37bb12e0edb5c48ca",
+                                       "checks":  {
+                                                      "output_identity":  true,
+                                                      "worker_ok":  true,
+                                                      "route_exact":  true,
+                                                      "guards_intact":  true,
+                                                      "lifetimes_balanced":  true,
+                                                      "stage_diagnostics":  true,
+                                                      "smart32_cpu_only":  true
+                                                  }
+                                   },
+                                   {
+                                       "run":  2,
+                                       "output_sha256":  "80422bc3d307b4a25bdafcc84ac7fb01cb55a09810e8b0f37bb12e0edb5c48ca",
+                                       "checks":  {
+                                                      "output_identity":  true,
+                                                      "worker_ok":  true,
+                                                      "route_exact":  true,
+                                                      "guards_intact":  true,
+                                                      "lifetimes_balanced":  true,
+                                                      "stage_diagnostics":  true,
+                                                      "smart32_cpu_only":  true
+                                                  }
+                                   }
+                               ]
+                  },
+                  {
+                      "id":  "classic_argb32",
+                      "command":  "--render-experimental-32",
+                      "render_path":  "classic",
+                      "pixel_format":  "argb32f",
+                      "expected_output_sha256":  "e80232b4d18d0bb7e794be263ba937626f383f9917d4b8a737ba893a8f752293",
+                      "deterministic":  true,
+                      "runs":  [
+                                   {
+                                       "run":  1,
+                                       "output_sha256":  "e80232b4d18d0bb7e794be263ba937626f383f9917d4b8a737ba893a8f752293",
+                                       "checks":  {
+                                                      "output_identity":  true,
+                                                      "worker_ok":  true,
+                                                      "route_exact":  true,
+                                                      "guards_intact":  true,
+                                                      "lifetimes_balanced":  true,
+                                                      "stage_diagnostics":  true,
+                                                      "smart32_cpu_only":  true
+                                                  }
+                                   },
+                                   {
+                                       "run":  2,
+                                       "output_sha256":  "e80232b4d18d0bb7e794be263ba937626f383f9917d4b8a737ba893a8f752293",
+                                       "checks":  {
+                                                      "output_identity":  true,
+                                                      "worker_ok":  true,
+                                                      "route_exact":  true,
+                                                      "guards_intact":  true,
+                                                      "lifetimes_balanced":  true,
+                                                      "stage_diagnostics":  true,
+                                                      "smart32_cpu_only":  true
+                                                  }
+                                   }
+                               ]
+                  },
+                  {
+                      "id":  "smart_argb8",
+                      "command":  "--render-experimental-smart",
+                      "render_path":  "smartfx",
+                      "pixel_format":  "argb8",
+                      "expected_output_sha256":  "035b570ce7263e9b8d0dabefaba9b85c068bc6d4221c72e397df8fe6653a47f2",
+                      "deterministic":  true,
+                      "runs":  [
+                                   {
+                                       "run":  1,
+                                       "output_sha256":  "035b570ce7263e9b8d0dabefaba9b85c068bc6d4221c72e397df8fe6653a47f2",
+                                       "checks":  {
+                                                      "output_identity":  true,
+                                                      "worker_ok":  true,
+                                                      "route_exact":  true,
+                                                      "guards_intact":  true,
+                                                      "lifetimes_balanced":  true,
+                                                      "stage_diagnostics":  true,
+                                                      "smart32_cpu_only":  true
+                                                  }
+                                   },
+                                   {
+                                       "run":  2,
+                                       "output_sha256":  "035b570ce7263e9b8d0dabefaba9b85c068bc6d4221c72e397df8fe6653a47f2",
+                                       "checks":  {
+                                                      "output_identity":  true,
+                                                      "worker_ok":  true,
+                                                      "route_exact":  true,
+                                                      "guards_intact":  true,
+                                                      "lifetimes_balanced":  true,
+                                                      "stage_diagnostics":  true,
+                                                      "smart32_cpu_only":  true
+                                                  }
+                                   }
+                               ]
+                  },
+                  {
+                      "id":  "smart_argb16",
+                      "command":  "--render-experimental-smart-16",
+                      "render_path":  "smartfx",
+                      "pixel_format":  "argb16",
+                      "expected_output_sha256":  "789bf72e48415186b1d028642795416bdf41b636e3500c413b7e5a34187f1868",
+                      "deterministic":  true,
+                      "runs":  [
+                                   {
+                                       "run":  1,
+                                       "output_sha256":  "789bf72e48415186b1d028642795416bdf41b636e3500c413b7e5a34187f1868",
+                                       "checks":  {
+                                                      "output_identity":  true,
+                                                      "worker_ok":  true,
+                                                      "route_exact":  true,
+                                                      "guards_intact":  true,
+                                                      "lifetimes_balanced":  true,
+                                                      "stage_diagnostics":  true,
+                                                      "smart32_cpu_only":  true
+                                                  }
+                                   },
+                                   {
+                                       "run":  2,
+                                       "output_sha256":  "789bf72e48415186b1d028642795416bdf41b636e3500c413b7e5a34187f1868",
+                                       "checks":  {
+                                                      "output_identity":  true,
+                                                      "worker_ok":  true,
+                                                      "route_exact":  true,
+                                                      "guards_intact":  true,
+                                                      "lifetimes_balanced":  true,
+                                                      "stage_diagnostics":  true,
+                                                      "smart32_cpu_only":  true
+                                                  }
+                                   }
+                               ]
+                  },
+                  {
+                      "id":  "smart_argb32_cpu",
+                      "command":  "--render-experimental-smart-32-cpu",
+                      "render_path":  "smartfx",
+                      "pixel_format":  "argb32f",
+                      "expected_output_sha256":  "beab8e9e207bb415c69d5948523e47ef92634aeb7de4efa22d114a52bb8f9ef6",
+                      "deterministic":  true,
+                      "runs":  [
+                                   {
+                                       "run":  1,
+                                       "output_sha256":  "beab8e9e207bb415c69d5948523e47ef92634aeb7de4efa22d114a52bb8f9ef6",
+                                       "checks":  {
+                                                      "output_identity":  true,
+                                                      "worker_ok":  true,
+                                                      "route_exact":  true,
+                                                      "guards_intact":  true,
+                                                      "lifetimes_balanced":  true,
+                                                      "stage_diagnostics":  true,
+                                                      "smart32_cpu_only":  true
+                                                  }
+                                   },
+                                   {
+                                       "run":  2,
+                                       "output_sha256":  "beab8e9e207bb415c69d5948523e47ef92634aeb7de4efa22d114a52bb8f9ef6",
+                                       "checks":  {
+                                                      "output_identity":  true,
+                                                      "worker_ok":  true,
+                                                      "route_exact":  true,
+                                                      "guards_intact":  true,
+                                                      "lifetimes_balanced":  true,
+                                                      "stage_diagnostics":  true,
+                                                      "smart32_cpu_only":  true
+                                                  }
+                                   }
+                               ]
+                  }
+              ]
+}
