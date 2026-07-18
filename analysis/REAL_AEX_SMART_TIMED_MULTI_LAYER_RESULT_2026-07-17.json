@@ -111,8 +111,8 @@
     "artifacts":  {
                       "source":  {
                                      "path":  "minihost/src/l2_main.cpp",
-                                     "size_bytes":  1187473,
-                                     "sha256":  "c16490d1e22331f7995397959ff08dea78782e6980e9b7f18e951c672f00b776"
+                                     "size_bytes":  1191225,
+                                     "sha256":  "457c87bffb958257606d74bede57dd28fa2f2b15f44a19cd30a4044f08440e6a"
                                  },
                       "probe_source":  {
                                            "path":  "instruments/pf-smart-timed-multilayer-probe/pf_smart_timed_multilayer_probe.cpp",
@@ -126,8 +126,8 @@
                                 },
                       "worker":  {
                                      "path":  "target/minihost-build/aex_smart_worker.exe",
-                                     "size_bytes":  801280,
-                                     "sha256":  "60094903544c2e15b6d26b3b41b1c4ea96b565afd514dc7167c943ccd70cb4dd"
+                                     "size_bytes":  802304,
+                                     "sha256":  "64b74b25b5eb3aa997b89eaa309215e0a4d58ffc9a0acfecec0c399a3a2507ad"
                                  },
                       "runner":  {
                                      "path":  "target/evidence-runner/target/debug/evidence-runner.exe",

@@ -13,8 +13,8 @@ $stderrPath = Join-Path $runRoot 'stderr.txt'
 $evidencePath = Join-Path $root 'analysis\SDK_GLATOR_RUNTIME_POLICY_INSPECT_RESULT_2026-07-18.json'
 
 $expected = [ordered]@{
-    harness = @{ path = $harness; size = 9945088; sha256 = '87b9e94646ba8aa6882f54797086a1dc45abfed8ba4da8c5295d72b78e2e6253' }
-    worker = @{ path = $worker; size = 711680; sha256 = '8ef8f79f9121e9d9c10ceaf52398fd6d16327e0a0a0cbadcbaff9cba27627e7d' }
+    harness = @{ path = $harness; size = 9945088; sha256 = '07eb66051bd4dd7d1265a5bfdf2bb20c5f702cb985b8c52066bbd409263ebef3' }
+    worker = @{ path = $worker; size = 713216; sha256 = 'f4a4f3de926c15dda63fa78d923f83e3deb1697a283c6593be49cc908e63ac82' }
     fixture = @{ path = $fixture; size = 6087168; sha256 = 'da8447f6f88e78fb00d5bd2d7e0cdc1d6bdcf1918b77e8684288a6d700c9f2ce' }
 }
 $moduleSpecs = @(

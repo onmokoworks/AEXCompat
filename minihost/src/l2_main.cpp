@@ -1773,10 +1773,14 @@ int32_t __cdecl get_effect_layer(void* effect, void** layer) {
 }
 int32_t __cdecl get_new_effect_for_effect(int32_t plugin_id, void* effect, void** effect_ref);
 struct AegpTime;
+struct AegpMatrix4;
 int32_t __cdecl convert_effect_to_comp_time(
     void* effect, int32_t what_time, uint32_t time_scale, AegpTime* comp_time);
 int32_t __cdecl get_effect_camera(
     void* effect, const AegpTime* comp_time, void** camera_layer);
+int32_t __cdecl get_effect_camera_matrix(void* effect, const AegpTime* comp_time,
+    AegpMatrix4* camera_matrix, double* distance_to_image_plane,
+    int16_t* image_plane_width, int16_t* image_plane_height);
 
 int32_t __cdecl get_layer_num_masks(void* layer, int32_t* count) {
   if (layer != &g_layer || !count) return 4;
@@ -3387,12 +3391,13 @@ struct PfInterfaceSuite {
   decltype(&get_new_effect_for_effect) get_new_effect_for_effect;
   decltype(&convert_effect_to_comp_time) convert_effect_to_comp_time;
   decltype(&get_effect_camera) get_effect_camera;
-  void* unsupported[1]{};
+  decltype(&get_effect_camera_matrix) get_effect_camera_matrix;
 };
 static_assert(sizeof(PfInterfaceSuite) == 5 * sizeof(void*));
 static_assert(offsetof(PfInterfaceSuite, convert_effect_to_comp_time) == 2 * sizeof(void*));
 static_assert(offsetof(PfInterfaceSuite, get_effect_camera) == 3 * sizeof(void*));
 static_assert(offsetof(PfInterfaceSuite, get_effect_camera) == 24);
+static_assert(offsetof(PfInterfaceSuite, get_effect_camera_matrix) == 32);
 int32_t __cdecl unsupported_path_mask() { return 4; }
 struct LegacyRect { int32_t left, top, right, bottom; };
 struct PfPathVertex {
@@ -4338,7 +4343,7 @@ UtilitySuite g_utility_suite{{}, &register_with_aegp};
 UtilitySuite3 g_utility_suite3{{}, &register_with_aegp};
 PfInterfaceSuite g_pf_interface_suite{&get_effect_layer, &get_new_effect_for_effect,
     &convert_effect_to_comp_time, &get_effect_camera,
-    {reinterpret_cast<void*>(&unsupported_path_mask)}};
+    &get_effect_camera_matrix};
 std::array<void*, 16> g_aegp_effect_suite3{};
 std::array<void*, 19> g_aegp_stream_suite2{};
 std::array<void*, 14> g_aegp_dynamic_stream_suite2{};
@@ -4675,6 +4680,8 @@ std::array<void*, 6> g_drawbot_path_suite1{};
 std::array<void*, 1> g_effect_custom_ui_suite1{};
 std::array<void*, 2> g_effect_custom_ui_suite2{};
 struct AegpTime { int32_t value{}; uint32_t scale{1}; };
+struct AegpMatrix4 { double mat[4][4]{}; };
+static_assert(sizeof(AegpMatrix4) == 16 * sizeof(double));
 int32_t __cdecl convert_effect_to_comp_time(
     void* effect, int32_t what_time, uint32_t time_scale, AegpTime* comp_time) {
   if (effect != &g_effect || time_scale == 0 || !comp_time) return 4;
@@ -9900,6 +9907,30 @@ int32_t __cdecl get_effect_camera(
     if (layer_active_at_time(index, *comp_time)) result = &g_aegp_layers[index];
   }
   *camera_layer = result;
+  return 0;
+}
+
+int32_t __cdecl get_effect_camera_matrix(void* effect, const AegpTime* comp_time,
+    AegpMatrix4* camera_matrix, double* distance_to_image_plane,
+    int16_t* image_plane_width, int16_t* image_plane_height) {
+  if (effect != &g_effect || !g_pf_state_effect_live || !comp_time ||
+      !camera_matrix || !distance_to_image_plane || !image_plane_width ||
+      !image_plane_height || !valid_comp_time(*comp_time)) return 4;
+  const int32_t width = g_full_resolution_width > 0
+      ? g_full_resolution_width : g_smart_width;
+  const int32_t height = g_full_resolution_height > 0
+      ? g_full_resolution_height : g_smart_height;
+  if (width <= 0 || height <= 0 || width > INT16_MAX || height > INT16_MAX)
+    return 4;
+
+  // The headless scene uses an unrotated default camera and a deterministic
+  // image-plane distance until project camera transforms are modeled.
+  AegpMatrix4 result{};
+  for (std::size_t index = 0; index < 4; ++index) result.mat[index][index] = 1.0;
+  *camera_matrix = result;
+  *distance_to_image_plane = static_cast<double>(width);
+  *image_plane_width = static_cast<int16_t>(width);
+  *image_plane_height = static_cast<int16_t>(height);
   return 0;
 }
 struct AegpSelectionCollection { uint32_t tag{0x434f4c4c}; bool live{}; };
@@ -20317,13 +20348,56 @@ bool verify_aegp_get_effect_camera_case(bool smart_case) {
   return ok;
 }
 
+bool verify_aegp_get_effect_camera_matrix_case(bool smart_case) {
+  const bool saved_effect_live = g_pf_state_effect_live;
+  const int32_t saved_width = g_full_resolution_width;
+  const int32_t saved_height = g_full_resolution_height;
+  reset_pf_state_effect_lifetime(&g_effect, true);
+  g_full_resolution_width = smart_case ? 1920 : 640;
+  g_full_resolution_height = smart_case ? 1080 : 480;
+  const AegpTime time{smart_case ? 45 : 15, 30};
+  AegpMatrix4 matrix{};
+  double distance = -1.0;
+  int16_t width = -1, height = -1;
+  bool ok = get_effect_camera_matrix(&g_effect, &time, &matrix, &distance,
+      &width, &height) == 0 && distance == g_full_resolution_width &&
+      width == g_full_resolution_width && height == g_full_resolution_height;
+  for (std::size_t row = 0; row < 4; ++row) {
+    for (std::size_t column = 0; column < 4; ++column) {
+      ok = ok && matrix.mat[row][column] == (row == column ? 1.0 : 0.0);
+    }
+  }
+
+  AegpMatrix4 sentinel{};
+  std::memset(&sentinel, 0x5a, sizeof(sentinel));
+  matrix = sentinel;
+  distance = -2.0; width = -2; height = -2;
+  AegpTime invalid_time{time.value, 0};
+  ok = ok && get_effect_camera_matrix(nullptr, &time, &matrix, &distance,
+      &width, &height) != 0 && std::memcmp(&matrix, &sentinel, sizeof(matrix)) == 0 &&
+      distance == -2.0 && width == -2 && height == -2 &&
+      get_effect_camera_matrix(&g_effect, &invalid_time, &matrix, &distance,
+      &width, &height) != 0 && std::memcmp(&matrix, &sentinel, sizeof(matrix)) == 0;
+  reset_pf_state_effect_lifetime(&g_effect, false);
+  ok = ok && get_effect_camera_matrix(&g_effect, &time, &matrix, &distance,
+      &width, &height) != 0 && std::memcmp(&matrix, &sentinel, sizeof(matrix)) == 0;
+
+  g_full_resolution_width = saved_width;
+  g_full_resolution_height = saved_height;
+  reset_pf_state_effect_lifetime(&g_effect, saved_effect_live);
+  return ok;
+}
+
 bool verify_aegp_get_effect_camera() {
   const void* suite = nullptr;
   bool ok = acquire_suite("AEGP PF Interface Suite", 1, &suite) == 0 &&
       suite == &g_pf_interface_suite &&
       g_pf_interface_suite.get_effect_camera == &get_effect_camera &&
+      g_pf_interface_suite.get_effect_camera_matrix == &get_effect_camera_matrix &&
       verify_aegp_get_effect_camera_case(false) &&
-      verify_aegp_get_effect_camera_case(true);
+      verify_aegp_get_effect_camera_case(true) &&
+      verify_aegp_get_effect_camera_matrix_case(false) &&
+      verify_aegp_get_effect_camera_matrix_case(true);
   ok = release_suite("AEGP PF Interface Suite", 1) == 0 && ok;
   return ok && suite_leases_balanced();
 }
@@ -20333,7 +20407,8 @@ int wmain(int argc, wchar_t **argv) {
     const bool passed = verify_aegp_get_effect_camera();
     std::cout << "{\"aegp_get_effect_camera\":\""
               << (passed ? "passed" : "failed")
-              << "\",\"slot\":3,\"offset_x64\":24,"
+              << "\",\"camera_slot\":3,\"camera_offset_x64\":24,"
+                 "\"matrix_slot\":4,\"matrix_offset_x64\":32,"
                  "\"classic\":\"tested\",\"smart\":\"tested\"}\n";
     return passed ? 0 : 67;
   }

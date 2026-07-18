@@ -1,6 +1,6 @@
 {
     "schema_version":  1,
-    "recorded_at":  "2026-07-18T15:18:51+09:00",
+    "recorded_at":  "2026-07-18T15:39:03+09:00",
     "result":  "official_sdk_grabba_aegp_initialization_and_update_menu_passed",
     "scope":  {
                   "directly_proven":  [
@@ -19,23 +19,23 @@
                                  ]
               },
     "source_provenance":  {
-                              "git_head":  "c813d85a3f867214f0ceb6bc4972eabf50d67fbc",
+                              "git_head":  "3a46bbac1e177f1541220f5cd7e812155f504eac",
                               "worktree_was_dirty":  true,
                               "files":  [
                                             {
                                                 "path":  "minihost/src/l2_main.cpp",
-                                                "size_bytes":  1187473,
-                                                "sha256":  "c16490d1e22331f7995397959ff08dea78782e6980e9b7f18e951c672f00b776"
+                                                "size_bytes":  1191225,
+                                                "sha256":  "457c87bffb958257606d74bede57dd28fa2f2b15f44a19cd30a4044f08440e6a"
                                             },
                                             {
                                                 "path":  "broker/crates/broker/src/image_render.rs",
                                                 "size_bytes":  202221,
-                                                "sha256":  "6a4b34fd1436454d28d334f63bfa72064884994237854c7ab9941e351eeb44c2"
+                                                "sha256":  "85d1b1b2538d2e9faa4cfdd29ab8816b1f84ec35e03099951b6e2553d260d89f"
                                             },
                                             {
                                                 "path":  "broker/crates/broker/src/generated_l2_worker_trust.rs",
-                                                "size_bytes":  413,
-                                                "sha256":  "fbe06366367241611c4db636ee5cfe496eb0f9c111a1db55a3131bbdca98f637"
+                                                "size_bytes":  412,
+                                                "sha256":  "8d6fe86682a3a3821e7a32c77d546044e33731bd8044d3a2d390199f146b01d4"
                                             }
                                         ]
                           },
@@ -770,9 +770,9 @@
                                                                                            "apphelp.dll",
                                                                                            "bcrypt.dll",
                                                                                            "ucrtbase.dll",
-                                                                                           "vcruntime140.dll",
                                                                                            "msvcp140.dll",
                                                                                            "vcruntime140_1.dll",
+                                                                                           "vcruntime140.dll",
                                                                                            "bcryptprimitives.dll"
                                                                                        ],
                                                                           "unknown_count":  0,
@@ -796,9 +796,9 @@
                                                                                       "apphelp.dll",
                                                                                       "bcrypt.dll",
                                                                                       "ucrtbase.dll",
-                                                                                      "vcruntime140.dll",
                                                                                       "msvcp140.dll",
                                                                                       "vcruntime140_1.dll",
+                                                                                      "vcruntime140.dll",
                                                                                       "bcryptprimitives.dll"
                                                                                   ],
                                                                      "unknown_count":  0,
@@ -821,9 +821,9 @@
                                                                                        "apphelp.dll",
                                                                                        "bcrypt.dll",
                                                                                        "ucrtbase.dll",
-                                                                                       "vcruntime140.dll",
                                                                                        "msvcp140.dll",
                                                                                        "vcruntime140_1.dll",
+                                                                                       "vcruntime140.dll",
                                                                                        "bcryptprimitives.dll"
                                                                                    ],
                                                                       "unknown_count":  0,
@@ -900,14 +900,14 @@
                                     {
                                         "role":  "aegp_worker",
                                         "path":  "target/minihost-build/aex_l2_worker.exe",
-                                        "size_bytes":  711680,
-                                        "sha256":  "8ef8f79f9121e9d9c10ceaf52398fd6d16327e0a0a0cbadcbaff9cba27627e7d"
+                                        "size_bytes":  713216,
+                                        "sha256":  "f4a4f3de926c15dda63fa78d923f83e3deb1697a283c6593be49cc908e63ac82"
                                     },
                                     {
                                         "role":  "command_harness",
                                         "path":  "broker/target/debug/aexcompat-harness.exe",
                                         "size_bytes":  19972096,
-                                        "sha256":  "a548534731f647207330a4c058524019187e26e1303a2c1538595cf2d3adfd4a"
+                                        "sha256":  "924b6d8ea2588ce2c03635e0f99096ef7efdd859ff74f5d219a6bd9965f2c745"
                                     }
                                 ],
     "authenticated_reports":  [
@@ -921,7 +921,7 @@
                                       "route":  "command_roundtrip",
                                       "path":  "target/final-integration-evidence/grabba-command-roundtrip.json",
                                       "size_bytes":  9961,
-                                      "sha256":  "4d1f29e2e35dbe2c1db6982f1097f821f09a467cda42159a6c348af0e3278b5e"
+                                      "sha256":  "4bf39e3ca99604e9d8526f95cabd247a5b69427dc966daf1c13bd77ae2fcb67b"
                                   },
                                   {
                                       "route":  "idle",
@@ -940,26 +940,26 @@
                                          {
                                              "role":  "render_worker",
                                              "path":  "target/minihost-build/aex_render_worker.exe",
-                                             "size_bytes":  783360,
-                                             "sha256":  "5a1cc8c8912d6143470643048c7dfa604f2c19d2b8e0cee76fef9ea3e7cf4185"
+                                             "size_bytes":  784896,
+                                             "sha256":  "31444606d2778d1ba45be963fb30379911ce8c77a94d5983c7d1382e4359b06d"
                                          },
                                          {
                                              "role":  "aegp_worker",
                                              "path":  "target/minihost-build/aex_l2_worker.exe",
-                                             "size_bytes":  711680,
-                                             "sha256":  "8ef8f79f9121e9d9c10ceaf52398fd6d16327e0a0a0cbadcbaff9cba27627e7d"
+                                             "size_bytes":  713216,
+                                             "sha256":  "f4a4f3de926c15dda63fa78d923f83e3deb1697a283c6593be49cc908e63ac82"
                                          },
                                          {
                                              "role":  "smart_worker",
                                              "path":  "target/minihost-build/aex_smart_worker.exe",
-                                             "size_bytes":  801280,
-                                             "sha256":  "60094903544c2e15b6d26b3b41b1c4ea96b565afd514dc7167c943ccd70cb4dd"
+                                             "size_bytes":  802304,
+                                             "sha256":  "64b74b25b5eb3aa997b89eaa309215e0a4d58ffc9a0acfecec0c399a3a2507ad"
                                          },
                                          {
                                              "role":  "command_harness",
                                              "path":  "broker/target/debug/aexcompat-harness.exe",
                                              "size_bytes":  19972096,
-                                             "sha256":  "a548534731f647207330a4c058524019187e26e1303a2c1538595cf2d3adfd4a"
+                                             "sha256":  "924b6d8ea2588ce2c03635e0f99096ef7efdd859ff74f5d219a6bd9965f2c745"
                                          }
                                      ],
     "pending":  [

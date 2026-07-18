@@ -9,10 +9,10 @@ $allowlistRelative = "target/smart-allowlist/maskoffset.active.local.json"
 $brokerRelative = "broker/target/release/broker.exe"
 $workerRelative = "target/minihost-build/aex_smart_worker.exe"
 $expectedOutput = "bf419f44e915901bac882e9b9e3411b8407df7f4e3a4a1c2719314bdfbb74b5f"
-$expectedBrokerHash = "1d98ec9a0b6f2b76223ef7729017f6be792e482748733ab16036a3533877a234"
+$expectedBrokerHash = "feda40b45903bc573e995ab860c1f55302301acee18b25464ab68a79372d3399"
 $expectedBrokerSize = 1154560
-$expectedWorkerHash = "60094903544c2e15b6d26b3b41b1c4ea96b565afd514dc7167c943ccd70cb4dd"
-$expectedWorkerSize = 801280
+$expectedWorkerHash = "64b74b25b5eb3aa997b89eaa309215e0a4d58ffc9a0acfecec0c399a3a2507ad"
+$expectedWorkerSize = 802304
 $expectedRequestHash = "d92568e9f880ec9d06ceccb03de0ebb62d3dd00b0bdb9e3978c5fd687b7e26d7"
 
 function Resolve-RepositoryFile([string]$relative) {

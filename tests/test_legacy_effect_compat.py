@@ -23,6 +23,7 @@ def test_sdk_headers_confirm_legacy_suite_abis_and_signatures() -> None:
 
 using CompBG = A_Err (SPAPI *)(AEGP_CompH, AEGP_ColorVal*);
 using ConvertTime = A_Err (SPAPI *)(PF_ProgPtr, A_long, A_u_long, A_Time*);
+using GetCameraMatrix = A_Err (SPAPI *)(PF_ProgPtr, const A_Time*, A_Matrix4*, A_FpLong*, A_short*, A_short*);
 using CurrentTool = PF_Err (SPAPI *)(PF_SuiteTool*);
 
 static_assert(kAEGPCompSuiteVersion10 == 21);
@@ -32,6 +33,8 @@ static_assert(std::is_same_v<decltype(AEGP_CompSuite10::AEGP_GetCompBGColor), Co
 static_assert(sizeof(AEGP_PFInterfaceSuite1) == 5 * sizeof(void*));
 static_assert(offsetof(AEGP_PFInterfaceSuite1, AEGP_ConvertEffectToCompTime) == 2 * sizeof(void*));
 static_assert(std::is_same_v<decltype(AEGP_PFInterfaceSuite1::AEGP_ConvertEffectToCompTime), ConvertTime>);
+static_assert(offsetof(AEGP_PFInterfaceSuite1, AEGP_GetEffectCameraMatrix) == 4 * sizeof(void*));
+static_assert(std::is_same_v<decltype(AEGP_PFInterfaceSuite1::AEGP_GetEffectCameraMatrix), GetCameraMatrix>);
 static_assert(kPFHelperSuiteVersion1 == 1);
 static_assert(sizeof(PF_HelperSuite1) == sizeof(void*));
 static_assert(offsetof(PF_HelperSuite1, PF_GetCurrentTool) == 0);
