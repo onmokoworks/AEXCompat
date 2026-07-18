@@ -354,10 +354,8 @@ fn worker_diagnostics(
             _ => None,
         });
         if minidump.is_none() {
-            if let Some(event) = line.trim().strip_prefix("stage:minidump_") {
-                // Worker emits only reason codes and the dump basename here,
-                // never a full path, so this is safe to carry in diagnostics.
-                minidump = Some(event.chars().take(96).collect());
+            if let Some(marker) = minidump_marker(line.trim()) {
+                minidump = Some(marker);
             }
         }
         let Some(body) = line.trim().strip_prefix("stage:") else {
@@ -424,6 +422,36 @@ fn worker_diagnostics(
         "plugin_kind": plugin_kind,
         "minidump": minidump,
     })
+}
+
+/// Validates a `stage:minidump_*` stderr line against the exact shapes the
+/// worker emits and returns a normalized, path-free marker. stderr is mixed
+/// worker/plug-in output, so a plug-in could otherwise spoof
+/// `stage:minidump_written name=C:\...` and smuggle a private path into
+/// shareable diagnostics; anything not matching a worker-owned shape is
+/// dropped. The dump basename is worker-generated (`crash-<pid>.dmp`) and is
+/// deliberately not echoed back.
+fn minidump_marker(line: &str) -> Option<String> {
+    let body = line.strip_prefix("stage:minidump_")?;
+    if let Some(rest) = body.strip_prefix("written name=crash-") {
+        let (pid, bytes) = rest.split_once(".dmp bytes=")?;
+        if pid.bytes().all(|b| b.is_ascii_digit())
+            && !pid.is_empty()
+            && bytes.bytes().all(|b| b.is_ascii_digit())
+            && !bytes.is_empty()
+            && bytes.len() <= 20
+        {
+            return Some(format!("written bytes={bytes}"));
+        }
+        return None;
+    }
+    let reason = body.strip_prefix("failed reason=")?;
+    let reason = reason.split_once(" code=").map_or(reason, |(head, _)| head);
+    matches!(
+        reason,
+        "dbghelp_unavailable" | "entry_unavailable" | "create_failed" | "write_failed"
+    )
+    .then(|| format!("failed reason={reason}"))
 }
 
 fn propagate_missing_suites(diagnostics: &mut Value, worker_report: &Value) {
@@ -5679,6 +5707,39 @@ mod tests {
         });
         assert!(diagnostics_contains_gpu_stage(&gpu));
         assert!(!diagnostics_contains_gpu_stage(&cpu));
+    }
+
+    #[test]
+    fn minidump_marker_accepts_only_worker_owned_shapes() {
+        // Legitimate worker lines normalize to a path-free marker.
+        assert_eq!(
+            minidump_marker("stage:minidump_written name=crash-1234.dmp bytes=51790"),
+            Some("written bytes=51790".to_owned())
+        );
+        assert_eq!(
+            minidump_marker("stage:minidump_failed reason=dbghelp_unavailable"),
+            Some("failed reason=dbghelp_unavailable".to_owned())
+        );
+        assert_eq!(
+            minidump_marker("stage:minidump_failed reason=create_failed code=5"),
+            Some("failed reason=create_failed".to_owned())
+        );
+
+        // A plug-in cannot smuggle a path or fake reason through the marker.
+        assert_eq!(
+            minidump_marker("stage:minidump_written name=C:\\Users\\secret\\a.dmp bytes=1"),
+            None
+        );
+        assert_eq!(
+            minidump_marker("stage:minidump_written name=crash-1234.dmp bytes=../etc"),
+            None
+        );
+        assert_eq!(
+            minidump_marker("stage:minidump_failed reason=totally_made_up"),
+            None
+        );
+        assert_eq!(minidump_marker("stage:minidump_written whatever"), None);
+        assert_eq!(minidump_marker("stage:other"), None);
     }
 
     #[test]
