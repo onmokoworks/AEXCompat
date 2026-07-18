@@ -46,6 +46,7 @@
 #include <vector>
 
 #include "native_stdout_guard.hpp"
+#include "gpu_device_info_registry.hpp"
 #include "parameter_animation_transport.hpp"
 #include "pf_cache_on_load_suite.hpp"
 #include "render_lifecycle.hpp"
@@ -75,6 +76,10 @@ using aexcompat::parameter_animation::load_parameter_animation;
 using aexcompat::parameter_animation::rational_less;
 using aexcompat::suites::cache_on_load_suite;
 using aexcompat::suites::configure_cache_on_load_suite;
+using aexcompat::gpu_runtime::device_info_registry;
+using aexcompat::gpu_runtime::gpu_get_device_count;
+using aexcompat::gpu_runtime::gpu_get_device_info;
+using aexcompat::gpu_runtime::kMaxGpuDevices;
 using aexcompat::render_safety::InputPixelBuffer;
 using aexcompat::render_safety::OutputPixelBuffer;
 #if defined(AEXCOMPAT_RENDER_WORKER) || defined(AEXCOMPAT_SMART_WORKER)
@@ -11053,40 +11058,7 @@ bool isolated_aegp_read_cache_is_bounded() {
 }
 
 constexpr uint32_t kMaxCudaDevices = 16;
-uint32_t g_cuda_device_count{1};
-std::array<int32_t, kMaxCudaDevices> g_cuda_devices_for_info{};
-std::array<void*, kMaxCudaDevices> g_cuda_contexts_for_info{};
-int32_t g_active_gpu_framework{3};
-std::array<void*, kMaxCudaDevices> g_gpu_platforms_for_info{};
-std::array<void*, kMaxCudaDevices> g_gpu_devices_for_info{};
-std::array<void*, kMaxCudaDevices> g_gpu_contexts_for_info{};
-std::array<void*, kMaxCudaDevices> g_gpu_queues_for_info{};
-
-int32_t __cdecl gpu_get_device_count(void*, uint32_t* count) {
-  if (!count) return 4;
-  *count = g_cuda_device_count;
-  return 0;
-}
-
-int32_t __cdecl gpu_get_device_info(void*, uint32_t index, void* info) {
-  std::cerr << "stage:gpu_device_info_begin\n" << std::flush;
-  if (index >= g_cuda_device_count || !info) return 4;
-  std::memset(info, 0, 56);
-  const int32_t framework = g_active_gpu_framework;
-  const uint8_t compatible = 1;
-  std::memcpy(static_cast<std::byte*>(info), &framework, sizeof(framework));
-  std::memcpy(static_cast<std::byte*>(info) + 4, &compatible, sizeof(compatible));
-  std::memcpy(static_cast<std::byte*>(info) + 8, &g_gpu_platforms_for_info[index],
-              sizeof(g_gpu_platforms_for_info[index]));
-  std::memcpy(static_cast<std::byte*>(info) + 16, &g_gpu_devices_for_info[index],
-              sizeof(g_gpu_devices_for_info[index]));
-  std::memcpy(static_cast<std::byte*>(info) + 24, &g_gpu_contexts_for_info[index],
-              sizeof(g_gpu_contexts_for_info[index]));
-  std::memcpy(static_cast<std::byte*>(info) + 32, &g_gpu_queues_for_info[index],
-              sizeof(g_gpu_queues_for_info[index]));
-  std::cerr << "stage:gpu_device_info_end error=0\n" << std::flush;
-  return 0;
-}
+static_assert(kMaxCudaDevices == kMaxGpuDevices);
 
 constexpr std::size_t kMaxGpuAllocations = 256;
 constexpr std::size_t kMaxGpuAllocationBytes = 256u * 1024u * 1024u;
@@ -11196,17 +11168,16 @@ bool begin_cuda_context(uint32_t active_device_index) {
     return false;
   }
   g_cuda.pushed = true;
-  g_cuda_device_count = g_cuda.device_count;
+  device_info_registry().set_device_count(g_cuda.device_count);
   g_last_cuda_device_count = g_cuda.device_count;
   g_last_cuda_device_index = active_device_index;
   for (uint32_t index = 0; index < g_cuda.device_count; ++index) {
-    g_cuda_devices_for_info[index] = g_cuda.devices[index];
-    g_cuda_contexts_for_info[index] = g_cuda.contexts[index];
-    g_gpu_devices_for_info[index] = reinterpret_cast<void*>(
-        static_cast<uintptr_t>(g_cuda.devices[index]));
-    g_gpu_contexts_for_info[index] = g_cuda.contexts[index];
+    device_info_registry().set_device(
+        index, nullptr,
+        reinterpret_cast<void*>(static_cast<uintptr_t>(g_cuda.devices[index])),
+        g_cuda.contexts[index], nullptr);
   }
-  g_active_gpu_framework = 3;
+  device_info_registry().set_framework(3);
   g_cuda_context_for_info = g_cuda.contexts[active_device_index];
   return true;
 }
@@ -11225,13 +11196,7 @@ bool end_cuda_context() {
   }
   if (g_cuda.module) FreeLibrary(g_cuda.module);
   g_cuda = {};
-  g_cuda_device_count = 1;
-  g_cuda_devices_for_info.fill(0);
-  g_cuda_contexts_for_info.fill(nullptr);
-  g_gpu_platforms_for_info.fill(nullptr);
-  g_gpu_devices_for_info.fill(nullptr);
-  g_gpu_contexts_for_info.fill(nullptr);
-  g_gpu_queues_for_info.fill(nullptr);
+  device_info_registry().reset_devices();
   g_cuda_context_for_info = nullptr;
   return valid;
 }
@@ -11354,13 +11319,12 @@ bool begin_opencl_context(uint32_t active_device_index) {
   }
   g_opencl.active_device_index = active_device_index;
   g_opencl.active = true;
-  g_cuda_device_count = g_opencl.device_count;
-  g_active_gpu_framework = 1;
+  device_info_registry().set_device_count(g_opencl.device_count);
+  device_info_registry().set_framework(1);
   for (uint32_t index = 0; index < g_opencl.device_count; ++index) {
-    g_gpu_platforms_for_info[index] = g_opencl.platforms[index];
-    g_gpu_devices_for_info[index] = g_opencl.devices[index];
-    g_gpu_contexts_for_info[index] = g_opencl.contexts[index];
-    g_gpu_queues_for_info[index] = g_opencl.queues[index];
+    device_info_registry().set_device(
+        index, g_opencl.platforms[index], g_opencl.devices[index],
+        g_opencl.contexts[index], g_opencl.queues[index]);
   }
   return true;
 }
@@ -11375,11 +11339,7 @@ bool end_opencl_context() {
   }
   if (g_opencl.module) FreeLibrary(g_opencl.module);
   g_opencl = {};
-  g_cuda_device_count = 1;
-  g_gpu_platforms_for_info.fill(nullptr);
-  g_gpu_devices_for_info.fill(nullptr);
-  g_gpu_contexts_for_info.fill(nullptr);
-  g_gpu_queues_for_info.fill(nullptr);
+  device_info_registry().reset_devices();
   return valid;
 }
 
@@ -11404,14 +11364,6 @@ uint64_t g_directx_upload_bytes{};
 uint64_t g_directx_download_bytes{};
 uint32_t g_directx_sync_failures{};
 
-void reset_gpu_device_info() {
-  g_cuda_device_count = 1;
-  g_gpu_platforms_for_info.fill(nullptr);
-  g_gpu_devices_for_info.fill(nullptr);
-  g_gpu_contexts_for_info.fill(nullptr);
-  g_gpu_queues_for_info.fill(nullptr);
-}
-
 bool end_directx_context() {
   for (uint32_t index = 0; index < g_directx.device_count; ++index) {
     if (g_directx.queues[index]) g_directx.queues[index]->Release();
@@ -11422,7 +11374,7 @@ bool end_directx_context() {
   if (g_directx.d3d12_module) FreeLibrary(g_directx.d3d12_module);
   if (g_directx.dxgi_module) FreeLibrary(g_directx.dxgi_module);
   g_directx = {};
-  reset_gpu_device_info();
+  device_info_registry().reset_devices();
   return true;
 }
 
@@ -11477,11 +11429,11 @@ bool begin_directx_context(uint32_t active_device_index) {
   g_directx.active_device_index = active_device_index;
   g_directx.active = true;
   g_directx_context_used = true;
-  g_cuda_device_count = g_directx.device_count;
-  g_active_gpu_framework = 4;
+  device_info_registry().set_device_count(g_directx.device_count);
+  device_info_registry().set_framework(4);
   for (uint32_t index = 0; index < g_directx.device_count; ++index) {
-    g_gpu_devices_for_info[index] = g_directx.devices[index];
-    g_gpu_queues_for_info[index] = g_directx.queues[index];
+    device_info_registry().set_device(
+        index, nullptr, g_directx.devices[index], nullptr, g_directx.queues[index]);
   }
   return true;
 }

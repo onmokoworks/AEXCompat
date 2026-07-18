@@ -15,6 +15,7 @@ target_compile_definitions(aex_l1_worker PRIVATE UNICODE _UNICODE WIN32_LEAN_AND
 target_link_libraries(aex_l1_worker PRIVATE bcrypt)
 
 set(AEXCOMPAT_L2_WORKER_SOURCES
+    src/gpu_device_info_registry.cpp
     src/l2_main.cpp
     src/native_stdout_guard.cpp
     src/parameter_animation_transport.cpp
