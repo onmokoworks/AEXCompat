@@ -78,9 +78,9 @@ while true; do
     [ -n "$owner_issue" ] && echo "$owner_issue"
     break
   fi
-  clean=$(gh api "repos/{owner}/{repo}/issues/{PR}/comments" --jq ".[] | select(.created_at > \"$since\") | select(.user.login == \"chatgpt-codex-connector[bot]\") | select(.body | test(\"Didn.t find any major issues\")) | \"CLEAN: \(.body | split(\"\n\")[0])\"" 2>/dev/null || true)
+  clean=$(gh api "repos/{owner}/{repo}/issues/{PR}/comments" --jq ".[] | select(.created_at > \"$since\") | select(.user.login | startswith(\"chatgpt-codex-connector\")) | select(.body | test(\"Didn.t find any major issues\")) | \"CLEAN: \(.body | split(\"\n\")[0])\"" 2>/dev/null || true)
   if [ -n "$clean" ]; then echo "$clean"; break; fi
-  review=$(gh api "repos/{owner}/{repo}/pulls/{PR}/reviews" --jq ".[] | select(.submitted_at > \"$since\") | select(.user.login == \"chatgpt-codex-connector[bot]\") | \"REVIEW \(.state) at \(.submitted_at)\"" 2>/dev/null || true)
+  review=$(gh api "repos/{owner}/{repo}/pulls/{PR}/reviews" --jq ".[] | select(.submitted_at > \"$since\") | select(.user.login | startswith(\"chatgpt-codex-connector\")) | \"REVIEW \(.state) at \(.submitted_at)\"" 2>/dev/null || true)
   if [ -n "$review" ]; then
     echo "$review"
     gh api "repos/{owner}/{repo}/pulls/{PR}/comments" --jq ".[] | select(.created_at > \"$since\") | \"FINDING \(.path):\(.line // .original_line) \(.body | split(\"\n\")[0])\"" 2>/dev/null || true
@@ -120,6 +120,12 @@ done
 
 ## Codex の応答パターン (誤判定防止)
 
+- **actor login は API 面で表記が揺れる**。`issues/{PR}/comments` と
+  `pulls/{PR}/reviews` の REST は `chatgpt-codex-connector[bot]` を返すが、
+  `gh pr view --json author` など別経路は `[bot]` なしの
+  `chatgpt-codex-connector` を返す。**必ず `startswith("chatgpt-codex-connector")`
+  で prefix 一致させる** (完全一致だと経路差で1件も拾えずループが止まる)。
+  この判定は `tests/test_codex_review_loop_monitor.py` の fixture テストで固定。
 - 受理直後: trigger コメントに 👀 reaction → **単なる ack。シグナルとして扱わない**
 - 指摘あり: review (state=COMMENTED) + inline コメント。P1/P2/P3 バッジ付き
 - 指摘なし: issue コメントで "Didn't find any major issues ..." (文面の後半は変動する。
