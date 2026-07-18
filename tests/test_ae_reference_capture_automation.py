@@ -27,7 +27,7 @@ def test_reference_capture_is_fail_closed_while_user_ae_session_is_running():
 def test_reference_capture_contract_is_hash_bound_create_new_and_temporary():
     runner = RUNNER.read_text(encoding="utf-8")
     script = SCRIPT.read_text(encoding="utf-8")
-    assert "Get-Process AfterFX,aerender,aerendercore" in runner
+    assert "Get-Process AfterFX,'AfterFX.com',aerender,aerendercore" in runner
     assert "Installed AEX hash does not match tested AEX" in runner
     assert "OutputPng already exists" in runner
     assert "Test-Path -LiteralPath $resultPath" in runner
