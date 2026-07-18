@@ -69,6 +69,9 @@ $env:AEXCOMPAT_AE_FRAME = [string]$Frame
 $env:AEXCOMPAT_AE_FPS = [string]$Fps
 $env:AEXCOMPAT_AE_DURATION = [string]$DurationFrames
 $env:AEXCOMPAT_AE_BPC = [string]$Bpc
+# The JSX polls for the asynchronous saveFrameToPng output; keep its bound
+# inside the outer watchdog so the wait can never outlive this script.
+$env:AEXCOMPAT_AE_SAVE_TIMEOUT_MS = [string]($TimeoutSeconds * 1000)
 try {
     $escapedScriptPath = $scriptPath.Replace('"', '\"')
     $arguments = '-m -noui -r "{0}"' -f $escapedScriptPath
@@ -84,7 +87,8 @@ try {
     }
 } finally {
     'AEXCOMPAT_AE_INPUT','AEXCOMPAT_AE_OUTPUT','AEXCOMPAT_AE_RESULT','AEXCOMPAT_AE_EFFECT',
-    'AEXCOMPAT_AE_FRAME','AEXCOMPAT_AE_FPS','AEXCOMPAT_AE_DURATION','AEXCOMPAT_AE_BPC' |
+    'AEXCOMPAT_AE_FRAME','AEXCOMPAT_AE_FPS','AEXCOMPAT_AE_DURATION','AEXCOMPAT_AE_BPC',
+    'AEXCOMPAT_AE_SAVE_TIMEOUT_MS' |
         ForEach-Object { Remove-Item "Env:$_" -ErrorAction SilentlyContinue }
 }
 

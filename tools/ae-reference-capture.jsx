@@ -10,7 +10,17 @@
     // After Effects 25.3 ExtendScript has no JSON object, and referencing the
     // missing global aborts the script mid-write, so serialize by hand.
     function jsonString(value) {
-        return '"' + String(value).replace(/\\/g, "\\\\").replace(/"/g, '\\"') + '"';
+        var escaped = String(value)
+            .replace(/\\/g, "\\\\")
+            .replace(/"/g, '\\"')
+            .replace(/[\x00-\x1f]/g, function (ch) {
+                var hex = ch.charCodeAt(0).toString(16);
+                while (hex.length < 4) {
+                    hex = "0" + hex;
+                }
+                return "\\u" + hex;
+            });
+        return '"' + escaped + '"';
     }
 
     function jsonValue(value) {
@@ -87,15 +97,20 @@
             throw new Error("CompItem.saveFrameToPng is unavailable");
         }
         // saveFrameToPng queues an asynchronous write; quitting immediately
-        // discards it, so poll until the file exists.
+        // discards it, so poll until the file exists. The bound comes from the
+        // runner so the JSX never outlives the outer watchdog.
+        var saveTimeoutMs = Number($.getenv("AEXCOMPAT_AE_SAVE_TIMEOUT_MS"));
+        if (!(saveTimeoutMs > 0)) {
+            saveTimeoutMs = 120000;
+        }
         comp.saveFrameToPng(comp.time, outputFile);
         var waitedMs = 0;
-        while (!outputFile.exists && waitedMs < 180000) {
+        while (!outputFile.exists && waitedMs < saveTimeoutMs) {
             $.sleep(500);
             waitedMs += 500;
         }
         if (!outputFile.exists) {
-            throw new Error("saveFrameToPng did not produce the PNG within 180s");
+            throw new Error("saveFrameToPng did not produce the PNG within " + saveTimeoutMs + "ms");
         }
         writeResult({
             schema_version: 1,
