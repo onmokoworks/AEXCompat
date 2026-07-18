@@ -63,6 +63,16 @@ class MinihostL2SourceTests(unittest.TestCase):
         self.assertIn("build_argb_input", implementation)
         self.assertIn("record_output_checksum_detail", implementation)
         self.assertIn("world_debug_report_json", implementation)
+        self.assertIn("struct WorldLayout", header)
+        self.assertIn("struct ParameterProfile", header)
+        self.assertIn("struct SmartOutputBounds", header)
+        for marker in (
+            "prepare_world_layout", "prepare_parameter_profile",
+            "validate_output_extent", "prepare_smart_output_bounds",
+            "copy_packed_world", "finite_float_world", "prepare_connected_map_world",
+        ):
+            self.assertIn(marker, implementation)
+            self.assertIn(f"aexcompat::render::{marker}", worker)
         self.assertNotIn('#include "l2_main.cpp"', implementation)
         self.assertNotIn("#if 0", implementation)
         self.assertIn("src/render_subsystem.cpp", cmake)
@@ -319,7 +329,7 @@ class MinihostL2SourceTests(unittest.TestCase):
             'std::strcmp(name, "PF Fill Matte Suite") == 0',
             "fill_world_typed(16, color, area, world)",
             "const int32_t requested_width = read<int32_t>(command_output, kOutWidth)",
-            "static_cast<int64_t>(requested_width) * requested_height > 16'777'216",
+            "aexcompat::render::validate_output_extent",
             "write<int32_t>(input, 284, g_downsample_x.numerator)",
             'encoded.compare(0, 11, L"spatial:v1|")',
             'encoded.compare(0, 11, L"spatial:v2|")',
@@ -369,11 +379,14 @@ class MinihostL2SourceTests(unittest.TestCase):
 
     def test_smartfx_expanded_extent_is_bounded_and_origin_aware(self):
         text = l2_family_source()
-        for marker in ("rect_width <= 4096", "rect_height <= 4096",
-                       "rect_width * rect_height <= 16'777'216",
+        bounds = RENDER_SOURCE.read_text(encoding="utf-8")
+        for marker in ("aexcompat::render::prepare_smart_output_bounds",
                        "write<int32_t>(input, 276", "write<int32_t>(input, 280",
                        "result.output_width", "result.output_height"):
             self.assertIn(marker, text)
+        for marker in ("width <= 4096", "height <= 4096",
+                       "width * height <= 16'777'216"):
+            self.assertIn(marker, bounds)
 
     def test_classic_render_defaults_extent_hint_to_the_full_input_world(self):
         text = l2_family_source()
@@ -459,9 +472,12 @@ class MinihostL2SourceTests(unittest.TestCase):
             'L"--smart-image16"',
             'L"--smart-image32"',
             "pixel_bytes != 4 && pixel_bytes != 8 && pixel_bytes != 16",
-            "write<int32_t>(world, 16, pixel_bytes == 4 ? 0 : 1)",
+            "aexcompat::render::prepare_world_layout",
         ):
             self.assertIn(marker, text)
+        self.assertIn("store_world_field(world, 16, layout.world_flags)", RENDER_SOURCE.read_text(
+            encoding="utf-8"
+        ))
         for marker in (
             "rgba8_to_argb",
             "argb_to_rgba8",

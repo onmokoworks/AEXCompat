@@ -1,12 +1,147 @@
 #include "render_subsystem.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <fstream>
 #include <sstream>
 
 namespace aexcompat::render {
+
+namespace {
+template <typename T>
+void store_world_field(std::array<std::byte, 120>& world, std::size_t offset, T value) {
+  std::memcpy(world.data() + offset, &value, sizeof(value));
+}
+
+bool valid_world_layout(const WorldLayout& layout) {
+  return layout.pixel_bytes == 4 || layout.pixel_bytes == 8 || layout.pixel_bytes == 16
+      ? layout.width > 0 && layout.height > 0 && layout.width <= 4096 &&
+            layout.height <= 4096 && layout.rowbytes >= layout.width * layout.pixel_bytes
+      : false;
+}
+
+bool valid_rect(const std::array<int32_t, 4>& rect) {
+  const int64_t width = static_cast<int64_t>(rect[2]) - rect[0];
+  const int64_t height = static_cast<int64_t>(rect[3]) - rect[1];
+  return rect[2] >= rect[0] && rect[3] >= rect[1] && width <= 4096 && height <= 4096 &&
+      width * height <= 16'777'216;
+}
+}  // namespace
+
+bool prepare_world_layout(std::array<std::byte, 120>& world,
+                          const WorldLayout& layout, void* pixels) {
+  if (!pixels || !valid_world_layout(layout)) return false;
+  world.fill(std::byte{});
+  store_world_field(world, 16, layout.world_flags);
+  store_world_field(world, 24, pixels);
+  store_world_field(world, 32, layout.rowbytes);
+  store_world_field(world, 36, layout.width);
+  store_world_field(world, 40, layout.height);
+  const std::array<int32_t, 4> extent{0, 0, layout.width, layout.height};
+  std::memcpy(world.data() + 44, extent.data(), sizeof(extent));
+  return true;
+}
+
+bool prepare_connected_map_world(const std::string& case_id, int32_t input_width,
+                                 int32_t input_height, MapWorld& map) {
+  if (input_width <= 0 || input_height <= 0 || input_width > 4096 || input_height > 4096)
+    return false;
+  map.width = case_id == "connected_map" ? 5 : input_width;
+  map.height = case_id == "connected_map" ? 3 : input_height;
+  map.pixels.resize(static_cast<std::size_t>(map.width) * map.height * 4);
+  for (int32_t y = 0; y < map.height; ++y) {
+    for (int32_t x = 0; x < map.width; ++x) {
+      auto* pixel = map.pixels.data() + (static_cast<std::size_t>(y) * map.width + x) * 4;
+      const unsigned char value = static_cast<unsigned char>(
+          (x + y) * 255 / (map.width + map.height - 2));
+      pixel[0] = 255; pixel[1] = value; pixel[2] = value; pixel[3] = value;
+    }
+  }
+  return prepare_world_layout(map.world, {0, 4, map.width, map.height, map.width * 4},
+                              map.pixels.data());
+}
+
+ParameterProfile prepare_parameter_profile(const std::string& case_id) {
+  ParameterProfile profile;
+  if (case_id == "identity") profile.amount = 0;
+  else if (case_id == "horizontal") { profile.amount = 9; profile.direction = 1; profile.seed = 17; }
+  else if (case_id == "vertical_no_repeat") { profile.amount = 7; profile.direction = 2; profile.repeat = 0; }
+  else if (case_id == "mixed") { profile.amount = 12; profile.seed = 991; profile.mix = 37.5; }
+  else if (case_id == "amount_max") profile.amount = 500;
+  else if (case_id == "seed_max") profile.seed = 10000;
+  else if (case_id == "mix_zero") { profile.amount = 500; profile.seed = 10000; profile.mix = 0.0; }
+  else if (case_id == "odd_dimensions" || case_id == "padded_stride") { profile.amount = 4; profile.seed = 3; }
+  else if (case_id == "inverted_map") profile.inverted_map = true;
+  return profile;
+}
+
+bool validate_output_extent(int32_t current_width, int32_t current_height,
+                            int32_t requested_width, int32_t requested_height,
+                            uint32_t output_flags) {
+  if (requested_width == 0 && requested_height == 0) return true;
+  if (requested_width <= 0 || requested_height <= 0 || requested_width > 4096 ||
+      requested_height > 4096 ||
+      static_cast<int64_t>(requested_width) * requested_height > 16'777'216)
+    return false;
+  const bool expands = requested_width > current_width || requested_height > current_height;
+  const bool shrinks = requested_width < current_width || requested_height < current_height;
+  constexpr uint32_t kExpandBuffer = 1u << 9;
+  constexpr uint32_t kShrinkBuffer = 1u << 12;
+  return (!expands || (output_flags & kExpandBuffer) != 0) &&
+      (!shrinks || (output_flags & kShrinkBuffer) != 0);
+}
+
+SmartOutputBounds prepare_smart_output_bounds(const void* pre_render_output,
+                                              std::size_t output_size,
+                                              int32_t pixel_bytes) {
+  SmartOutputBounds bounds;
+  if (!pre_render_output || output_size < 32 ||
+      (pixel_bytes != 4 && pixel_bytes != 8 && pixel_bytes != 16)) return bounds;
+  std::memcpy(bounds.result_rect.data(), pre_render_output, sizeof(bounds.result_rect));
+  std::memcpy(bounds.max_result_rect.data(),
+              static_cast<const std::byte*>(pre_render_output) + 16,
+              sizeof(bounds.max_result_rect));
+  if (!valid_rect(bounds.result_rect) || !valid_rect(bounds.max_result_rect) ||
+      bounds.result_rect[0] < bounds.max_result_rect[0] ||
+      bounds.result_rect[1] < bounds.max_result_rect[1] ||
+      bounds.result_rect[2] > bounds.max_result_rect[2] ||
+      bounds.result_rect[3] > bounds.max_result_rect[3]) return bounds;
+  bounds.width = bounds.max_result_rect[2] - bounds.max_result_rect[0];
+  bounds.height = bounds.max_result_rect[3] - bounds.max_result_rect[1];
+  if (bounds.width <= 0 || bounds.height <= 0) return bounds;
+  bounds.rowbytes = bounds.width * pixel_bytes;
+  bounds.valid = true;
+  return bounds;
+}
+
+bool copy_packed_world(const unsigned char* strided_source, int32_t rowbytes,
+                       int32_t width, int32_t height, int32_t pixel_bytes,
+                       std::vector<unsigned char>& packed_destination) {
+  if (!strided_source || width < 0 || height < 0) return false;
+  if (width == 0 || height == 0) {
+    packed_destination.clear();
+    return true;
+  }
+  if (!valid_world_layout({0, pixel_bytes, width, height, rowbytes})) return false;
+  packed_destination.resize(static_cast<std::size_t>(width) * height * pixel_bytes);
+  for (int32_t y = 0; y < height; ++y)
+    std::memcpy(packed_destination.data() + static_cast<std::size_t>(y) * width * pixel_bytes,
+                strided_source + static_cast<std::size_t>(y) * rowbytes,
+                static_cast<std::size_t>(width) * pixel_bytes);
+  return true;
+}
+
+bool finite_float_world(const std::vector<unsigned char>& packed) {
+  if (packed.empty() || packed.size() % sizeof(float) != 0) return false;
+  for (std::size_t offset = 0; offset < packed.size(); offset += sizeof(float)) {
+    float value{};
+    std::memcpy(&value, packed.data() + offset, sizeof(value));
+    if (!std::isfinite(value)) return false;
+  }
+  return true;
+}
 
 int dispatch(RenderContext& context) {
   if (!context.request || !context.hooks.guarded_effect_main ||

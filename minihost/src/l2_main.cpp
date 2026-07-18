@@ -13120,17 +13120,8 @@ int32_t classic_render_runtime(EffectEntry entry, std::array<std::byte, kInSize>
   const int32_t pixel_bytes = image_request.pixel_bytes;
   g_smart_pixel_format = pixel_bytes == 16 ? "argb32f" : (pixel_bytes == 8 ? "argb16" : "argb8");
   rowbytes = image_request.rowbytes;
-  int32_t amount = 5, direction = 3, seed = 0, repeat = 1;
-  double mix = 100.0;
-  if (case_id == "identity") amount = 0;
-  else if (case_id == "horizontal") { amount = 9; direction = 1; seed = 17; }
-  else if (case_id == "vertical_no_repeat") { amount = 7; direction = 2; repeat = 0; }
-  else if (case_id == "mixed") { amount = 12; seed = 991; mix = 37.5; }
-  else if (case_id == "amount_max") amount = 500;
-  else if (case_id == "seed_max") seed = 10000;
-  else if (case_id == "mix_zero") { amount = 500; seed = 10000; mix = 0.0; }
-  else if (case_id == "odd_dimensions" || case_id == "padded_stride") { amount = 4; seed = 3; }
-  else if (case_id == "inverted_map") { }
+  const aexcompat::render::ParameterProfile parameter_profile =
+      aexcompat::render::prepare_parameter_profile(case_id);
   std::vector<unsigned char> logical_source(width * height * pixel_bytes);
   InputPixelBuffer source(static_cast<std::size_t>(rowbytes) * height);
   if (!source) return -3;
@@ -13147,43 +13138,23 @@ int32_t classic_render_runtime(EffectEntry entry, std::array<std::byte, kInSize>
   guards_intact = true;
 
   std::array<std::byte, 120> input_world{}, output_world{};
-  auto setup_world = [&](auto& world, void* pixels) {
-    write<int32_t>(world, 16, pixel_bytes == 4 ? 0 : 1);
-    write<void*>(world, 24, pixels);
-    write<int32_t>(world, 32, rowbytes);
-    write<int32_t>(world, 36, width);
-    write<int32_t>(world, 40, height);
-    write_rect(world.data() + 44, width, height);
-  };
-  setup_world(input_world, source.data());
-  setup_world(output_world, destination);
+  const aexcompat::render::WorldLayout primary_world{
+      pixel_bytes == 4 ? 0 : 1, pixel_bytes, width, height, rowbytes};
+  if (!aexcompat::render::prepare_world_layout(input_world, primary_world, source.data()) ||
+      !aexcompat::render::prepare_world_layout(output_world, primary_world, destination)) return -3;
   const int32_t dispatch_pixel_format = pixel_bytes == 4 ? kPixelFormatArgb32 :
       (pixel_bytes == 8 ? kPixelFormatArgb64 : kPixelFormatArgb128);
   DispatchWorldFormatScope dispatch_worlds;
   if (!dispatch_worlds.register_world(input_world.data(), dispatch_pixel_format) ||
       !dispatch_worlds.register_world(output_world.data(), dispatch_pixel_format)) return -3;
 
-  std::vector<unsigned char> map_pixels;
-  std::array<std::byte, 120> map_world{};
+  aexcompat::render::MapWorld map_world;
   if (connected_map) {
-    const int32_t map_width = case_id == "connected_map" ? 5 : width;
-    const int32_t map_height = case_id == "connected_map" ? 3 : height;
-    map_pixels.resize(map_width * map_height * 4);
-    for (int32_t y = 0; y < map_height; ++y) {
-      for (int32_t x = 0; x < map_width; ++x) {
-        auto* pixel = &map_pixels[(y * map_width + x) * 4];
-        const unsigned char value = static_cast<unsigned char>((x + y) * 255 / (map_width + map_height - 2));
-        pixel[0] = 255; pixel[1] = value; pixel[2] = value; pixel[3] = value;
-      }
-    }
-    write<void*>(map_world, 24, map_pixels.data());
-    write<int32_t>(map_world, 32, map_width * 4);
-    write<int32_t>(map_world, 36, map_width);
-    write<int32_t>(map_world, 40, map_height);
-    if (!dispatch_worlds.register_world(map_world.data(), kPixelFormatArgb32)) return -3;
+    if (!aexcompat::render::prepare_connected_map_world(case_id, width, height, map_world) ||
+        !dispatch_worlds.register_world(map_world.world.data(), kPixelFormatArgb32)) return -3;
     g_checkout_definition.fill(std::byte{});
     write<int32_t>(g_checkout_definition, 12, 0);
-    std::memcpy(g_checkout_definition.data() + 56, map_world.data(), map_world.size());
+    std::memcpy(g_checkout_definition.data() + 56, map_world.world.data(), map_world.world.size());
     g_checkout_map_available = true;
   }
 
@@ -13219,11 +13190,10 @@ int32_t classic_render_runtime(EffectEntry entry, std::array<std::byte, kInSize>
     dump_world_snapshot("classic-layer-slot" + std::to_string(layer.slot),
                         pixels.data(), layer.width, layer.height, pixel_bytes);
     auto& world = hosted_worlds[layer_index];
-    write<int32_t>(world, 16, pixel_bytes == 4 ? 0 : 1);
-    write<void*>(world, 24, pixels.data()); write<int32_t>(world, 32, layer.width * pixel_bytes);
-    write<int32_t>(world, 36, layer.width); write<int32_t>(world, 40, layer.height);
-    write_rect(world.data() + 44, layer.width, layer.height);
-    if (!dispatch_worlds.register_world(world.data(), dispatch_pixel_format)) return -3;
+    if (!aexcompat::render::prepare_world_layout(
+            world, {pixel_bytes == 4 ? 0 : 1, pixel_bytes, layer.width, layer.height,
+                    layer.width * pixel_bytes}, pixels.data()) ||
+        !dispatch_worlds.register_world(world.data(), dispatch_pixel_format)) return -3;
     if (!layer.timed || same_rational_time(layer.time, layer.time_scale,
             external_current_time, external_time_scale))
       std::memcpy(definitions[layer.slot].data() + 56, world.data(), world.size());
@@ -13238,12 +13208,12 @@ int32_t classic_render_runtime(EffectEntry entry, std::array<std::byte, kInSize>
   if (requested) {
     if (!apply_requested_assignments(definitions, *requested)) return -3;
   } else if (definitions.size() > 7) {
-    write<int32_t>(definitions[1], 56, amount);
-    write<int32_t>(definitions[2], 56, direction);
-    write<int32_t>(definitions[3], 56, seed);
-    write<int32_t>(definitions[4], 56, repeat);
-    write<double>(definitions[5], 56, mix);
-    if (case_id == "inverted_map") write<int32_t>(definitions[7], 56, 1);
+    write<int32_t>(definitions[1], 56, parameter_profile.amount);
+    write<int32_t>(definitions[2], 56, parameter_profile.direction);
+    write<int32_t>(definitions[3], 56, parameter_profile.seed);
+    write<int32_t>(definitions[4], 56, parameter_profile.repeat);
+    write<double>(definitions[5], 56, parameter_profile.mix);
+    if (parameter_profile.inverted_map) write<int32_t>(definitions[7], 56, 1);
   }
   if (!apply_parameter_animation(definitions, external_current_time, external_time_scale)) return -3;
   if (!apply_arbitrary_parameter_animation(entry, input, command_output, definitions,
@@ -13331,25 +13301,20 @@ int32_t classic_render_runtime(EffectEntry entry, std::array<std::byte, kInSize>
     if (error == 0) {
       const int32_t requested_width = read<int32_t>(command_output, kOutWidth);
       const int32_t requested_height = read<int32_t>(command_output, kOutHeight);
-      if ((requested_width > 0 || requested_height > 0) &&
-          (requested_width <= 0 || requested_height <= 0 || requested_width > 4096 ||
-           requested_height > 4096 ||
-           static_cast<int64_t>(requested_width) * requested_height > 16'777'216)) {
+      if (!aexcompat::render::validate_output_extent(
+              width, height, requested_width, requested_height,
+              read<uint32_t>(command_output, kOutFlags))) {
         error = 4;
       } else if (requested_width > 0 && requested_height > 0) {
-        const uint32_t resize_flags = read<uint32_t>(command_output, kOutFlags);
-        const bool expands = requested_width > width || requested_height > height;
-        const bool shrinks = requested_width < width || requested_height < height;
-        if ((expands && (resize_flags & kOutFlagIExpandBuffer) == 0) ||
-            (shrinks && (resize_flags & kOutFlagIShrinkBuffer) == 0)) {
-          error = 4;
-        } else {
+        {
           width = requested_width;
           height = requested_height;
           rowbytes = width * pixel_bytes;
           if (!guarded.reset(static_cast<std::size_t>(rowbytes) * height)) return -3;
           destination = guarded.data();
-          setup_world(output_world, destination);
+          if (!aexcompat::render::prepare_world_layout(
+                  output_world, {pixel_bytes == 4 ? 0 : 1, pixel_bytes, width, height, rowbytes},
+                  destination)) return -3;
           if (!dispatch_worlds.register_world(output_world.data(), dispatch_pixel_format))
             error = 4;
           write<int32_t>(input, 276, read<int32_t>(command_output, kOutOrigin));
@@ -13386,10 +13351,9 @@ int32_t classic_render_runtime(EffectEntry entry, std::array<std::byte, kInSize>
   }
   g_checkout_map_available = false;
   g_checkout_layer_definitions.clear();
-  std::vector<unsigned char> logical_output(width * height * pixel_bytes);
-  for (int32_t y = 0; y < height; ++y)
-    std::memcpy(logical_output.data() + y * width * pixel_bytes, destination + y * rowbytes,
-                width * pixel_bytes);
+  std::vector<unsigned char> logical_output;
+  if (!aexcompat::render::copy_packed_world(destination, rowbytes, width, height,
+                                             pixel_bytes, logical_output)) return -3;
   output_hash = sha256_bytes(logical_output.data(), logical_output.size());
   if (error == 0 && !publish_staged_item_world(aegp_comp_item_handle(),
           {external_current_time, external_time_scale},
@@ -13635,16 +13599,9 @@ SmartResult smart_render_runtime(EffectEntry entry, std::array<std::byte, kInSiz
   if (width <= 0 || height <= 0 || width > 4096 || height > 4096) return result;
   const int32_t pixel_bytes = float32 ? 16 : (deep16 ? 8 : 4);
   const int32_t rowbytes = case_id == "padded_stride" ? 64 : width * pixel_bytes;
-  int32_t amount = 5, direction = 3, seed = 0, repeat = 1; double mix = 100.0;
-  if (case_id == "identity") amount = 0;
-  else if (case_id == "horizontal") { amount = 9; direction = 1; seed = 17; }
-  else if (case_id == "vertical_no_repeat") { amount = 7; direction = 2; repeat = 0; }
-  else if (case_id == "mixed") { amount = 12; seed = 991; mix = 37.5; }
-  else if (case_id == "amount_max") amount = 500;
-  else if (case_id == "seed_max") seed = 10000;
-  else if (case_id == "mix_zero") { amount = 500; seed = 10000; mix = 0.0; }
-  else if (case_id == "odd_dimensions" || case_id == "padded_stride") { amount = 4; seed = 3; }
-  else if (case_id != "default" && case_id != "request" && !deep16 && !float32 && !missing_input && !crash_null_output && !temporal_context && !partial_output_request && !connected_map) return result;
+  const aexcompat::render::ParameterProfile parameter_profile =
+      aexcompat::render::prepare_parameter_profile(case_id);
+  if (case_id != "default" && case_id != "request" && !deep16 && !float32 && !missing_input && !crash_null_output && !temporal_context && !partial_output_request && !connected_map) return result;
   InputPixelBuffer source(static_cast<std::size_t>(rowbytes) * height);
   if (!source) return result;
   std::memset(source.data(), 0x5A, static_cast<std::size_t>(rowbytes) * height);
@@ -13678,34 +13635,23 @@ SmartResult smart_render_runtime(EffectEntry entry, std::array<std::byte, kInSiz
   auto* destination = guarded.data();
   result.guards_intact = true;
   std::array<std::byte, 120> input_world{}, output_world{};
-  auto setup_world = [&](auto& world, void* pixels) {
-    write<int32_t>(world, 16, (deep16 || float32) ? 1 : 0);
-    write<void*>(world, 24, pixels); write<int32_t>(world, 32, rowbytes);
-    write<int32_t>(world, 36, width); write<int32_t>(world, 40, height);
-    write_rect(world.data() + 44, width, height);
-  };
-  setup_world(input_world, source.data()); setup_world(output_world, destination);
+  const aexcompat::render::WorldLayout primary_world{
+      (deep16 || float32) ? 1 : 0, pixel_bytes, width, height, rowbytes};
+  if (!aexcompat::render::prepare_world_layout(input_world, primary_world, source.data()) ||
+      !aexcompat::render::prepare_world_layout(output_world, primary_world, destination)) return result;
   const int32_t dispatch_pixel_format = float32 ? kPixelFormatArgb128 :
       (deep16 ? kPixelFormatArgb64 : kPixelFormatArgb32);
   DispatchWorldFormatScope dispatch_worlds;
   if (!dispatch_worlds.register_world(input_world.data(), dispatch_pixel_format) ||
       !dispatch_worlds.register_world(output_world.data(), dispatch_pixel_format)) return result;
 
-  std::vector<unsigned char> map_pixels; std::array<std::byte, 120> map_world{};
+  aexcompat::render::MapWorld map_world;
   if (connected_map) {
-    g_smart_map_width = case_id == "connected_map" ? 5 : width;
-    g_smart_map_height = case_id == "connected_map" ? 3 : height;
-    map_pixels.resize(g_smart_map_width * g_smart_map_height * 4);
-    for (int32_t y = 0; y < g_smart_map_height; ++y) for (int32_t x = 0; x < g_smart_map_width; ++x) {
-      auto* p = &map_pixels[(y * g_smart_map_width + x) * 4];
-      const auto value = static_cast<unsigned char>((x + y) * 255 / (g_smart_map_width + g_smart_map_height - 2));
-      p[0] = 255; p[1] = value; p[2] = value; p[3] = value;
-    }
-    write<void*>(map_world, 24, map_pixels.data()); write<int32_t>(map_world, 32, g_smart_map_width * 4);
-    write<int32_t>(map_world, 36, g_smart_map_width); write<int32_t>(map_world, 40, g_smart_map_height);
-    write_rect(map_world.data() + 44, g_smart_map_width, g_smart_map_height);
-    if (!dispatch_worlds.register_world(map_world.data(), kPixelFormatArgb32)) return result;
-    g_smart_map_world = map_world.data();
+    if (!aexcompat::render::prepare_connected_map_world(case_id, width, height, map_world) ||
+        !dispatch_worlds.register_world(map_world.world.data(), kPixelFormatArgb32)) return result;
+    g_smart_map_width = map_world.width;
+    g_smart_map_height = map_world.height;
+    g_smart_map_world = map_world.world.data();
   }
 
   std::vector<std::array<std::byte, kParamSize>> definitions(g_params.size() + 1);
@@ -13739,11 +13685,10 @@ SmartResult smart_render_runtime(EffectEntry entry, std::array<std::byte, kInSiz
     dump_world_snapshot("smart-layer-slot" + std::to_string(layer.slot),
                         pixels.data(), layer.width, layer.height, pixel_bytes);
     auto& world = hosted_worlds[layer_index];
-    write<int32_t>(world, 16, pixel_bytes == 4 ? 0 : 1);
-    write<void*>(world, 24, pixels.data()); write<int32_t>(world, 32, layer.width * pixel_bytes);
-    write<int32_t>(world, 36, layer.width); write<int32_t>(world, 40, layer.height);
-    write_rect(world.data() + 44, layer.width, layer.height);
-    if (!dispatch_worlds.register_world(world.data(), dispatch_pixel_format)) return result;
+    if (!aexcompat::render::prepare_world_layout(
+            world, {pixel_bytes == 4 ? 0 : 1, pixel_bytes, layer.width, layer.height,
+                    layer.width * pixel_bytes}, pixels.data()) ||
+        !dispatch_worlds.register_world(world.data(), dispatch_pixel_format)) return result;
     const int32_t requested_time = temporal_context ? 42 : external_current_time;
     const uint32_t requested_scale = temporal_context ? 24 : external_time_scale;
     if (!layer.timed || same_rational_time(layer.time, layer.time_scale,
@@ -13755,10 +13700,12 @@ SmartResult smart_render_runtime(EffectEntry entry, std::array<std::byte, kInSiz
   if (requested) {
     if (!apply_requested_assignments(definitions, *requested)) return result;
   } else if (definitions.size() > 7) {
-    write<int32_t>(definitions[1], 56, amount); write<int32_t>(definitions[2], 56, direction);
-    write<int32_t>(definitions[3], 56, seed); write<int32_t>(definitions[4], 56, repeat);
-    write<double>(definitions[5], 56, mix);
-    if (case_id == "inverted_map") write<int32_t>(definitions[7], 56, 1);
+    write<int32_t>(definitions[1], 56, parameter_profile.amount);
+    write<int32_t>(definitions[2], 56, parameter_profile.direction);
+    write<int32_t>(definitions[3], 56, parameter_profile.seed);
+    write<int32_t>(definitions[4], 56, parameter_profile.repeat);
+    write<double>(definitions[5], 56, parameter_profile.mix);
+    if (parameter_profile.inverted_map) write<int32_t>(definitions[7], 56, 1);
   }
   const int32_t animation_time = temporal_context ? 42 : external_current_time;
   const uint32_t animation_scale = temporal_context ? 24 : external_time_scale;
@@ -13961,47 +13908,30 @@ SmartResult smart_render_runtime(EffectEntry entry, std::array<std::byte, kInSiz
       : -1;
   std::cerr << "stage:smart_pre_render_end error=" << result.pre_error << "\n" << std::flush;
   automatic_checkin_pre_render_params();
-  auto valid_rect = [&](std::size_t offset) {
-    const int32_t left = read<int32_t>(pre_output, offset), top = read<int32_t>(pre_output, offset + 4);
-    const int32_t right = read<int32_t>(pre_output, offset + 8), bottom = read<int32_t>(pre_output, offset + 12);
-    const int64_t rect_width = static_cast<int64_t>(right) - left;
-    const int64_t rect_height = static_cast<int64_t>(bottom) - top;
-    return bottom >= top && right >= left && rect_width <= 4096 && rect_height <= 4096 &&
-        rect_width * rect_height <= 16'777'216;
-  };
-  std::array<int32_t, 4> result_rect{}, max_result_rect{};
-  std::memcpy(result_rect.data(), pre_output.data(), sizeof(result_rect));
-  std::memcpy(max_result_rect.data(), pre_output.data() + 16, sizeof(max_result_rect));
+  const aexcompat::render::SmartOutputBounds smart_bounds =
+      aexcompat::render::prepare_smart_output_bounds(pre_output.data(), pre_output.size(),
+                                                      pixel_bytes);
+  const auto& result_rect = smart_bounds.result_rect;
+  const auto& max_result_rect = smart_bounds.max_result_rect;
   result.result_rect = result_rect;
   result.max_result_rect = max_result_rect;
-  result.rects_valid = result.pre_error == 0 && valid_rect(0) && valid_rect(16) &&
-      result_rect[0] >= max_result_rect[0] && result_rect[1] >= max_result_rect[1] &&
-      result_rect[2] <= max_result_rect[2] && result_rect[3] <= max_result_rect[3];
+  result.rects_valid = result.pre_error == 0 && smart_bounds.valid;
   if (result.rects_valid) {
-    const int32_t output_width = max_result_rect[2] - max_result_rect[0];
-    const int32_t output_height = max_result_rect[3] - max_result_rect[1];
-    if (output_width > 0 && output_height > 0) {
-      const int32_t output_rowbytes = output_width * pixel_bytes;
-      if (!guarded.reset(static_cast<std::size_t>(output_rowbytes) * output_height)) {
-        result.rects_valid = false;
-        result.pre_error = -3;
-      }
-      destination = guarded.data();
-      write<void*>(output_world, 24, destination);
-      write<int32_t>(output_world, 32, output_rowbytes);
-      write<int32_t>(output_world, 36, output_width);
-      write<int32_t>(output_world, 40, output_height);
-      write_rect(output_world.data() + 44, output_width, output_height);
-      if (!dispatch_worlds.register_world(output_world.data(), dispatch_pixel_format))
-        result.rects_valid = false;
-      write<int32_t>(input, 276, -max_result_rect[0]);
-      write<int32_t>(input, 280, -max_result_rect[1]);
-      result.output_width = output_width;
-      result.output_height = output_height;
-      result.output_rowbytes = output_rowbytes;
-    } else {
+    if (!guarded.reset(static_cast<std::size_t>(smart_bounds.rowbytes) * smart_bounds.height)) {
       result.rects_valid = false;
+      result.pre_error = -3;
     }
+    destination = guarded.data();
+    if (!aexcompat::render::prepare_world_layout(
+            output_world, {(deep16 || float32) ? 1 : 0, pixel_bytes, smart_bounds.width,
+                           smart_bounds.height, smart_bounds.rowbytes}, destination) ||
+        !dispatch_worlds.register_world(output_world.data(), dispatch_pixel_format))
+      result.rects_valid = false;
+    write<int32_t>(input, 276, -max_result_rect[0]);
+    write<int32_t>(input, 280, -max_result_rect[1]);
+    result.output_width = smart_bounds.width;
+    result.output_height = smart_bounds.height;
+    result.output_rowbytes = smart_bounds.rowbytes;
   }
   result.roi_contract_valid = !partial_output_request ||
       (g_input_checkout_request == expected_request && g_map_checkout_request == expected_request &&
@@ -14093,16 +14023,13 @@ SmartResult smart_render_runtime(EffectEntry entry, std::array<std::byte, kInSiz
   g_smart_input_world = nullptr; g_smart_output_world = nullptr; g_smart_map_world = nullptr;
   g_gpu_world_mode = false;
   g_smart_hosted_layers.clear();
-  std::vector<unsigned char> logical_input(width * height * pixel_bytes);
-  std::vector<unsigned char> logical_output(
-      static_cast<std::size_t>(result.output_width) * result.output_height * pixel_bytes);
-  for (int32_t y = 0; y < height; ++y) {
-    std::memcpy(logical_input.data() + y * width * pixel_bytes, source.data() + y * rowbytes, width * pixel_bytes);
-  }
-  for (int32_t y = 0; y < result.output_height; ++y)
-    std::memcpy(logical_output.data() + static_cast<std::size_t>(y) * result.output_width * pixel_bytes,
-                destination + static_cast<std::size_t>(y) * result.output_rowbytes,
-                static_cast<std::size_t>(result.output_width) * pixel_bytes);
+  std::vector<unsigned char> logical_input;
+  std::vector<unsigned char> logical_output;
+  if (!aexcompat::render::copy_packed_world(source.data(), rowbytes, width, height,
+                                             pixel_bytes, logical_input) ||
+      !aexcompat::render::copy_packed_world(destination, result.output_rowbytes,
+                                             result.output_width, result.output_height,
+                                             pixel_bytes, logical_output)) return result;
   result.input_hash = sha256_bytes(logical_input.data(), logical_input.size());
   result.output_hash = sha256_bytes(logical_output.data(), logical_output.size());
   dump_world_snapshot("smart-output", logical_output.data(), result.output_width,
@@ -14110,17 +14037,7 @@ SmartResult smart_render_runtime(EffectEntry entry, std::array<std::byte, kInSiz
   const bool output_untouched = !logical_output.empty() &&
       std::all_of(logical_output.begin(), logical_output.end(),
                   [](unsigned char byte) { return byte == 0xCC; });
-  bool output_finite = true;
-  if (float32) {
-    for (std::size_t offset = 0; offset < logical_output.size(); offset += sizeof(float)) {
-      float value{};
-      std::memcpy(&value, logical_output.data() + offset, sizeof(value));
-      if (!std::isfinite(value)) {
-        output_finite = false;
-        break;
-      }
-    }
-  }
+  const bool output_finite = !float32 || aexcompat::render::finite_float_world(logical_output);
   result.output_pixels_valid = !logical_output.empty() && !output_untouched && output_finite;
   if (result.render_error == 0 && !result.output_pixels_valid) result.render_error = -6;
   if (external_output && result.render_error == 0) {

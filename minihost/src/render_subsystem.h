@@ -54,6 +54,74 @@ struct ImageRequest {
   bool partial_extent_hint{};
 };
 
+// PF_World is a host ABI blob, but the bounded layout we expose to an effect
+// is common to Classic and SmartFX.  Keeping the raw-byte preparation here
+// makes its dimensions, row stride, and extent checks independent of either
+// worker's selector plumbing.
+struct WorldLayout {
+  int32_t world_flags{};
+  int32_t pixel_bytes{};
+  int32_t width{};
+  int32_t height{};
+  int32_t rowbytes{};
+};
+
+bool prepare_world_layout(std::array<std::byte, 120>& world,
+                          const WorldLayout& layout, void* pixels);
+
+struct MapWorld {
+  int32_t width{};
+  int32_t height{};
+  std::vector<unsigned char> pixels;
+  std::array<std::byte, 120> world{};
+};
+
+// Construct the bounded ARGB8 map world used by the connected-map Classic
+// and SmartFX requests.  The worker retains registration and callback
+// ownership while this subsystem owns the shared pixel/world preparation.
+bool prepare_connected_map_world(const std::string& case_id, int32_t input_width,
+                                 int32_t input_height, MapWorld& map);
+
+struct ParameterProfile {
+  int32_t amount{5};
+  int32_t direction{3};
+  int32_t seed{};
+  int32_t repeat{1};
+  double mix{100.0};
+  bool inverted_map{};
+};
+
+// Named worker cases select parameter defaults before PF parameter records
+// are allocated.  Both render paths consume this immutable profile.
+ParameterProfile prepare_parameter_profile(const std::string& case_id);
+
+// Validates effect-requested Classic output resizing before the host swaps a
+// guarded output world.  The selector may only grow/shrink with the matching
+// advertised output flag, and all extents remain bounded.
+bool validate_output_extent(int32_t current_width, int32_t current_height,
+                            int32_t requested_width, int32_t requested_height,
+                            uint32_t output_flags);
+
+struct SmartOutputBounds {
+  bool valid{};
+  std::array<int32_t, 4> result_rect{};
+  std::array<int32_t, 4> max_result_rect{};
+  int32_t width{};
+  int32_t height{};
+  int32_t rowbytes{};
+};
+
+// Parses Smart Pre-Render rectangles and applies the same output bounds used
+// to allocate the guarded Smart render world.
+SmartOutputBounds prepare_smart_output_bounds(const void* pre_render_output,
+                                              std::size_t output_size,
+                                              int32_t pixel_bytes);
+
+bool copy_packed_world(const unsigned char* strided_source, int32_t rowbytes,
+                       int32_t width, int32_t height, int32_t pixel_bytes,
+                       std::vector<unsigned char>& packed_destination);
+bool finite_float_world(const std::vector<unsigned char>& packed);
+
 int prepare_image_request(const std::string& case_id, bool has_external_input,
                           int32_t external_width, int32_t external_height,
                           int32_t external_pixel_bytes, ImageRequest& request);
