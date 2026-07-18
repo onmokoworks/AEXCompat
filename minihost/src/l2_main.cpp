@@ -1411,6 +1411,23 @@ void write_rect(void* destination, int32_t width, int32_t height) {
   std::memcpy(bytes, values, sizeof(values));
 }
 
+// PF_CheckoutResult is 76 bytes: result_rect @0, max_result_rect @16,
+// par (rational num/den) @32, solid + 3 reserved bytes @40, ref_width @44,
+// ref_height @48, 6 reserved longs @52. Callers pass the struct uninitialized,
+// so every field must be written, not only the rects.
+constexpr size_t kCheckoutResultBytes = 76;
+
+void write_checkout_result(void* destination, int32_t width, int32_t height) {
+  auto* bytes = static_cast<std::byte*>(destination);
+  std::memset(bytes, 0, kCheckoutResultBytes);
+  write_rect(bytes, width, height);
+  write_rect(bytes + 16, width, height);
+  const int32_t square_par[2] = {1, 1};
+  std::memcpy(bytes + 32, square_par, sizeof(square_par));
+  const int32_t reference_size[2] = {width, height};
+  std::memcpy(bytes + 44, reference_size, sizeof(reference_size));
+}
+
 constexpr uint32_t kMaxGuidMixInBytes = 1024 * 1024;
 std::atomic<uint32_t> g_comp_bg_color_successes{};
 std::atomic<uint32_t> g_comp_bg_color_rejections{};
@@ -1470,8 +1487,7 @@ int32_t __cdecl pre_checkout_layer(void*, int32_t index, int32_t checkout_id,
     if (request) std::memcpy(g_map_checkout_request.data(), request, sizeof(g_map_checkout_request));
     hosted->checkout_id = checkout_id;
     if (!result) return 4;
-    write_rect(result, hosted->width, hosted->height);
-    write_rect(static_cast<std::byte*>(result) + 16, hosted->width, hosted->height);
+    write_checkout_result(result, hosted->width, hosted->height);
     return 0;
   }
   if (timed_slot) return 4;
@@ -1486,18 +1502,49 @@ int32_t __cdecl pre_checkout_layer(void*, int32_t index, int32_t checkout_id,
   }
   if (!result) return 4;
   if (index == 0 && checkout_id == 0) {
-    write_rect(result, g_smart_width, g_smart_height);
-    write_rect(static_cast<std::byte*>(result) + 16, g_smart_width, g_smart_height);
+    write_checkout_result(result, g_smart_width, g_smart_height);
     return 0;
   }
   if (index == g_secondary_layer_slot && g_smart_map_world) {
     g_secondary_checkout_id = checkout_id;
-    write_rect(result, g_smart_map_width, g_smart_map_height);
-    write_rect(static_cast<std::byte*>(result) + 16, g_smart_map_width, g_smart_map_height);
+    write_checkout_result(result, g_smart_map_width, g_smart_map_height);
     return 0;
   }
   return 4;
 }
+bool verify_pre_checkout_result_contract() {
+  const int32_t saved_width = g_smart_width;
+  const int32_t saved_height = g_smart_height;
+  g_smart_width = 640;
+  g_smart_height = 360;
+  std::array<std::byte, kCheckoutResultBytes> result{};
+  result.fill(std::byte{0xCD});
+  const int32_t status = pre_checkout_layer(
+      nullptr, 0, 0, nullptr, g_checkout_current_time, 1,
+      g_checkout_current_time_scale, result.data());
+  g_smart_width = saved_width;
+  g_smart_height = saved_height;
+  if (status != 0) return false;
+  int32_t rect[4];
+  std::memcpy(rect, result.data(), sizeof(rect));
+  if (rect[0] != 0 || rect[1] != 0 || rect[2] != 640 || rect[3] != 360) return false;
+  std::memcpy(rect, result.data() + 16, sizeof(rect));
+  if (rect[0] != 0 || rect[1] != 0 || rect[2] != 640 || rect[3] != 360) return false;
+  int32_t par[2];
+  std::memcpy(par, result.data() + 32, sizeof(par));
+  if (par[0] != 1 || par[1] != 1) return false;
+  int32_t reference_size[2];
+  std::memcpy(reference_size, result.data() + 44, sizeof(reference_size));
+  if (reference_size[0] != 640 || reference_size[1] != 360) return false;
+  for (std::size_t offset = 40; offset < 44; ++offset) {
+    if (result[offset] != std::byte{0}) return false;
+  }
+  for (std::size_t offset = 52; offset < kCheckoutResultBytes; ++offset) {
+    if (result[offset] != std::byte{0}) return false;
+  }
+  return true;
+}
+
 int32_t __cdecl smart_checkout_pixels(void*, int32_t checkout_id, void** world) {
   if (!world) return 4;
   const auto hosted = std::find_if(g_smart_hosted_layers.begin(), g_smart_hosted_layers.end(),
@@ -21530,6 +21577,12 @@ int wmain(int argc, wchar_t **argv) {
               << ",\"live\":" << g_pf_path_segment_preps.size()
               << ",\"balanced\":" << (pf_path_lifetimes_balanced() ? "true" : "false")
               << "}\n";
+    return passed ? 0 : 1;
+  }
+  if (argc == 2 && std::wstring(argv[1]) == L"--self-test-pf-pre-checkout-result") {
+    const bool passed = verify_pre_checkout_result_contract();
+    std::cout << "{\"pf_pre_checkout_result\":\""
+              << (passed ? "passed" : "failed") << "\"}\n";
     return passed ? 0 : 1;
   }
   if (argc == 2 && std::wstring(argv[1]) == L"--self-test-pf-pixel-data") {
