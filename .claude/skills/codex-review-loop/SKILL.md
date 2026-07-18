@@ -78,9 +78,14 @@ bash {SKILL_DIR}/codex-review-monitor.sh {owner} {repo} {PR} "{since}"
   owner review は **state ベース**で判定する (bodyless な `CHANGES_REQUESTED`
   も blocker)。純粋な `@codex review` トリガーのみのコメントは除外し、トリガー
   句を含む実フィードバックは拾う。
-- `CLEAN: codex clean for head <sha>` — Codex clean が **現在の head SHA に
-  拘束**され、かつそれより新しい finding が無い (最新 verdict)。古い SHA の
-  clean や、後続 finding に覆された clean では成立しない。
+- `CLEAN: codex clean for head <sha>` — Codex clean が **現在の head に拘束**
+  され、かつそれより新しい finding も owner 活動も無い (最新 verdict)。clean
+  シグナルは2系統: (1) `Didn't find any major issues` の issue コメント (SHA
+  拘束)、(2) **PR 本体への bot の 👍 (+1) リアクション** (auto first-review で
+  findings ゼロのときはこれだけが合図。text コメントは出ない。実例 PR #44)。
+  後者は SHA を持たないので head commit の日時で拘束する (👍 の後にコミットが
+  載っていれば stale)。古い SHA の clean や、後続 finding に覆された clean では
+  成立しない。
 - `FINDING ...` — Codex の inline 指摘 (エラー本文は除外)。
 - `TIMEOUT` — 1時間到達。Codex 不調を疑い PR を直接確認。
 
@@ -111,8 +116,9 @@ merge 側 (`codex-merge-guard.sh` が head 拘束 clean なしに merge を拒�
   これが (a) owner blocker の不在 (review state、および clean より後に owner が
   出した top-level コメント・新規 inline finding の不在。owner_review_gate は
   review state しか見ないので、CHANGES_REQUESTED を伴わない owner コメントの
-  race をここで塞ぐ)、(b) 現在の head SHA に拘束された Codex clean を fail-closed
-  で再確認し、(c) `gh pr merge --match-head-commit <head>` で atomic に merge する
+  race をここで塞ぐ)、(b) 現在の head に拘束された Codex clean (text コメントの
+  SHA 拘束、または PR 本体 👍 の head commit 日時拘束) を fail-closed で再確認し、
+  (c) `gh pr merge --match-head-commit <head>` で atomic に merge する
   (確認後に head が進めば merge は失敗する):
   ```bash
   bash {SKILL_DIR}/codex-merge-guard.sh {owner} {repo} {PR}
@@ -132,15 +138,22 @@ merge 側 (`codex-merge-guard.sh` が head 拘束 clean なしに merge を拒�
   spoof login を拾うので使わない。この判定は
   `tests/test_codex_review_loop_monitor.py` の fixture テストで固定
   (両形式を受理し、prefix spoof を拒否する)。
-- 受理直後: trigger コメントに 👀 reaction → **単なる ack。シグナルとして扱わない**
+- 受理直後: trigger コメント/PR 本体に 👀 (eyes) reaction → **レビュー中の ack。
+  clean シグナルではない** (完了時に除去される)
 - 指摘あり: review (state=COMMENTED) + inline コメント。P1/P2/P3 バッジ付き
-- 指摘なし: issue コメントで "Didn't find any major issues ..." (文面の後半は変動する。
-  reaction ではなくこのコメントだけが clean の合図)
+- 指摘なし (2系統):
+  - **再トリガー後**: issue コメントで "Didn't find any major issues ..."
+    (文面の後半は変動。`Reviewed commit` の SHA で head 拘束)
+  - **auto first-review (findings ゼロ)**: text コメントは出ず、**PR 本体に
+    bot の 👍 (+1) リアクション**だけ (`issues/{PR}/reactions` に
+    `content=="+1"`, `user.login` が Codex bot)。実例 PR #44。監視・merge-guard
+    はこの reaction を head commit 日時で拘束して clean と判定する
 
 ## 注意
 
 - clean は「最新 commit に対する応答」であることを確認してから merge する
-  (clean コメントの "Reviewed commit" SHA が HEAD と一致するか見る)
+  (text clean は "Reviewed commit" SHA が HEAD と一致するか、reaction clean は
+  👍 の後にコミットが載っていないかを見る。両方 monitor/guard が自動判定する)
 - monitor を張る前に、応答が既に届いていないか一度手動で確認する (polling の隙間対策)
 - 通知はバッチで届くことがある。CLEAN と stream-end が同時に来ても正常
 - 監視が 1 時間 (timeout) を超えたら Codex 側の不調を疑い、PR の画面を直接確認する

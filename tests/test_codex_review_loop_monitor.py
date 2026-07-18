@@ -63,6 +63,42 @@ def test_clean_only_from_exact_codex_identities(login: str) -> None:
     assert _call("codex_clean_for_head", payload, head) == ""
 
 
+# --- codex_reaction_clean_ts: +1 on the PR body is a clean signal -------------
+
+def test_reaction_clean_when_bot_plus_one_covers_head() -> None:
+    # Auto first-review with no findings: Codex signals clean only via a +1 on
+    # the PR body (PR #44). The reaction is at/after the head commit date.
+    head_date = "2026-07-18T15:00:00Z"
+    payload = [{"user": {"login": "chatgpt-codex-connector[bot]"}, "content": "+1",
+                "created_at": "2026-07-18T15:30:20Z"}]
+    assert _call("codex_reaction_clean_ts", payload, head_date) == "2026-07-18T15:30:20Z"
+
+
+def test_reaction_clean_is_stale_when_a_commit_landed_after_it() -> None:
+    # A commit pushed after Codex reacted moves the head commit date past the
+    # +1, so the reaction no longer covers the head.
+    head_date = "2026-07-18T16:00:00Z"
+    payload = [{"user": {"login": "chatgpt-codex-connector[bot]"}, "content": "+1",
+                "created_at": "2026-07-18T15:30:20Z"}]
+    assert _call("codex_reaction_clean_ts", payload, head_date) == ""
+
+
+@pytest.mark.parametrize("login", ["naari3", "onmokoworks", "someone"])
+def test_reaction_clean_only_from_codex_bot(login: str) -> None:
+    # A human thumbs-up is not a Codex verdict.
+    head_date = "2026-07-18T15:00:00Z"
+    payload = [{"user": {"login": login}, "content": "+1", "created_at": "2026-07-18T15:30:20Z"}]
+    assert _call("codex_reaction_clean_ts", payload, head_date) == ""
+
+
+def test_reaction_clean_ignores_non_plus_one_reactions() -> None:
+    # 👀 (eyes) is an ack, not clean.
+    head_date = "2026-07-18T15:00:00Z"
+    payload = [{"user": {"login": "chatgpt-codex-connector[bot]"}, "content": "eyes",
+                "created_at": "2026-07-18T15:30:20Z"}]
+    assert _call("codex_reaction_clean_ts", payload, head_date) == ""
+
+
 # --- codex_error: error/onboarding messages mean the review did not run -------
 
 @pytest.mark.parametrize(

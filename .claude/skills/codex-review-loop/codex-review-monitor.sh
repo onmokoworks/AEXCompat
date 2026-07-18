@@ -47,9 +47,14 @@ while true; do
   # Bind CLEAN to the CURRENT head each iteration (finding 1). A transient API
   # failure is retried on the next tick, not treated as a terminal event.
   if ! head=$(gh api "repos/$OWNER/$REPO/pulls/$PR" --jq '.head.sha' 2>/dev/null); then continue; fi
+  # Head commit date bounds the reaction-clean (a +1 with no SHA): it counts
+  # only if no commit landed after Codex reacted. committer.date reflects when
+  # the commit landed on the branch (push/rebase), the right proxy here.
+  if ! head_date=$(gh api "repos/$OWNER/$REPO/commits/$head" --jq '.commit.committer.date' 2>/dev/null); then continue; fi
   if ! pr_comments=$(fetch "pulls/$PR/comments"); then continue; fi
   if ! reviews=$(fetch "pulls/$PR/reviews"); then continue; fi
   if ! issue_comments=$(fetch "issues/$PR/comments"); then continue; fi
+  if ! pr_reactions=$(fetch "issues/$PR/reactions"); then continue; fi
 
   new_pr_comments=$(since_filter <<<"$pr_comments")
   new_reviews=$(since_filter <<<"$reviews")
@@ -74,7 +79,15 @@ while true; do
   # stale head-bound clean emits a premature CLEAN that the merge guard (which
   # checks all comments) then refuses — an early-clean/refuse loop. Compare
   # against all findings; only the PRINTED list below is scoped to new comments.
-  clean_ts=$(codex_clean_ts_for_head "$head" <<<"$issue_comments")
+  # A clean is either a head-bound text comment OR a head-covering +1 reaction
+  # on the PR body (the auto first-review signals clean only by reaction, with
+  # no text comment; see PR #44). Take the newest of the two.
+  text_clean_ts=$(codex_clean_ts_for_head "$head" <<<"$issue_comments")
+  react_clean_ts=$(codex_reaction_clean_ts "$head_date" <<<"$pr_reactions")
+  clean_ts=$text_clean_ts
+  if [ -n "$react_clean_ts" ] && { [ -z "$clean_ts" ] || [[ "$react_clean_ts" > "$clean_ts" ]]; }; then
+    clean_ts=$react_clean_ts
+  fi
   find_ts=$(codex_finding_max_ts <<<"$pr_comments")
 
   # 2. Findings newer than any accepted clean supersede it.
