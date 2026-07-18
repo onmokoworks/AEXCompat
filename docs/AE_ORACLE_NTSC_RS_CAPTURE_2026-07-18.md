@@ -62,10 +62,43 @@ frame 0, fps 24, 8 bpc, all parameters at defaults on both sides:
 
 Claim level: this is AE-oracle equivalence evidence for ntsc-rs SmartFX,
 frame 0, default parameters, 8 bpc, within a ±1 LSB rounding tolerance. It
-says nothing yet about other frames, parameter changes, or 16/32 bpc; those
-need their own captures. The ±1 LSB residue is hypothesized to be
-float-to-8-bit rounding differences between AE's and the host's pipelines,
-not a behavioral divergence; this has not been verified.
+says nothing yet about parameter changes or 16/32 bpc; those need their own
+captures. The ±1 LSB residue was initially hypothesized to be float-to-8-bit
+rounding differences between AE's and the host's pipelines; the follow-up
+below verified that reading as far as 8-bit data allows.
+
+## Follow-up: the ±1 LSB residue is value-dependent, not structural
+   (verified 2026-07-18, same day)
+
+Two checks, both on otherwise identical configurations:
+
+1. **Distribution of the frame-0 differences.** All 178 differing pixels
+   differ in exactly one channel; the channel split is R 61 / G 62 / B 55 /
+   A 0, the direction split is host-higher 78 vs AE-higher 100, and the
+   locations scatter across the whole frame (161 distinct rows, at most 2
+   hits per row). No spatial structure, no channel bias, no single-direction
+   bias, alpha exact.
+2. **A second capture at frame 12** (ntsc-rs seeds its noise from the frame
+   number, so the noise content changes completely). AE reference
+   `c561d9c30a213dd60e3e636f34562824a3d16d35efef266cd8e20ce0287ae73d`,
+   host output `target/ntsc-rs-time-f12.png`
+   `17a9958b4f7051bd8b2db0754b3afc8ef99794d2de91d31b600d12d9b82a6042`:
+   162 differing pixels, again all exactly ±1 LSB, mixed directions, alpha
+   exact. **The frame-0 and frame-12 difference locations overlap in zero
+   pixels.**
+
+A structural host defect (wrong coordinate handling, stride or edge errors,
+a biased conversion) would produce differences correlated by location or
+direction across frames. Instead the differences move entirely with the
+noise content, which means they are value-dependent: pixels whose
+pre-quantization value sits at an 8-bit rounding boundary resolve to
+adjacent integers in the two pipelines. Float-level confirmation is not
+currently possible because the worker-to-broker image transport is fixed at
+8-bit RGBA; if that ever gains a deeper path, the check can be repeated at
+16/32-bit precision.
+
+The frame-12 capture doubles as the second AE-oracle equivalence sample
+(same tolerance, different frame/noise seed).
 
 ## Tooling changes shipped with this note
 
