@@ -21,7 +21,9 @@ param(
 . (Join-Path $PSScriptRoot 'sha256.ps1')
 
 $ErrorActionPreference = 'Stop'
-if (Get-Process AfterFX,aerender,aerendercore -ErrorAction SilentlyContinue) {
+# 'AfterFX.com' is the console shim's own process name; a lingering shim
+# (e.g. orphaned by an interrupted capture) would otherwise pass this gate.
+if (Get-Process AfterFX,'AfterFX.com',aerender,aerendercore -ErrorAction SilentlyContinue) {
     throw 'After Effects is already running; refusing to touch an existing user session.'
 }
 if ($DurationFrames -le $Frame) {
@@ -127,7 +129,10 @@ try {
         Start-Sleep -Milliseconds 250
     }
     if (-not (Test-Path -LiteralPath $resultPath)) {
-        Get-Process AfterFX,aerendercore -ErrorAction SilentlyContinue |
+        # Stop the AfterFX.com shim too: the launch gate above refuses on a
+        # lingering shim, so leaving one behind here would block every
+        # subsequent capture until it is killed manually.
+        Get-Process AfterFX,'AfterFX.com',aerendercore -ErrorAction SilentlyContinue |
             Stop-Process -Force -ErrorAction SilentlyContinue
         throw 'After Effects reference capture timed out without a result.'
     }

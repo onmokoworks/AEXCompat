@@ -339,3 +339,78 @@ tool and locked by `tests/test_oracle_input_tools.py`),
 `tools/png-to-rgba-raw.py` (lossless PNG-to-raw conversion so host PNG
 outputs can feed `compare-pixel-oracles.py --raw`), and the evidence
 refresh script named above.
+
+## Follow-up: the 2026-07-19 16 bpc difference does not reproduce;
+   full-precision equivalence holds (2026-07-19, issue #53)
+
+The "fresh 16 bpc comparison detects a real unresolved difference" section
+above is corrected by this follow-up. Its artifacts
+(`target/ntsc-rs-oracle16-v2-*`) no longer exist on this machine, its input
+(PNG SHA-256 `29ebf3c2...`) is not reproducible by
+`tools/generate-oracle-rgba-input.py` (neither alpha mode yields that hash),
+and a controlled re-run detects no such difference. Observations first,
+then the corrected reading.
+
+1. **Host determinism across a rebuild (observation).** On a fresh checkout
+   of `main` (a283695) with rebuilt workers and harness (broker workspace
+   tests pass), `--render-experimental-smart-16-deep` on the original
+   gradient input `bb84e35e...` reproduces the earlier session's transport
+   sidecar byte-identically (rgba16le SHA-256 `a5bfbb40...`).
+2. **AE 16 bpc captures are fps-invariant (observation).** Fresh captures of
+   the same input at comp fps 24 and fps 1 (one-frame duration) are
+   byte-identical PNGs (SHA-256 `deb77139...`). The fps-1 configuration the
+   unreproduced comparison used cannot have changed the AE render.
+3. **Full-precision comparison matches (observation).** Host rgba16le
+   (white = 32768) against the AE RGBA16 PNG: mean absolute error per RGB
+   channel is at most 6.3e-6, the maximum error is 6.0e-5 (2 transport
+   codes), and alpha is exact. A second, generator-produced opaque input
+   (decoded RGBA `d6f2a543...`) gives the same scale (max 6.1e-5). About
+   4.1-5.2 million of 8.29 million channels differ by 1-2 codes; none
+   differ more.
+4. **The residue is quantization boundary behavior, not a rendering gap
+   (observation + verified mechanism).** The host's smart-input world is
+   exactly `round(v * 32768 / 255)` of the 8-bit input (verified against
+   the `AEXCOMPAT_DUMP_WORLDS_DIR` smart-input snapshot on all 8,294,400
+   samples). AE's composed 8-bit-import -> 16 bpc -> `saveFrameToPng`
+   chain, measured with a no-effect 16 bpc capture of the same input, is
+   `v * 257` with a deterministic 0/-1-step deviation (one value +1) -
+   the same downward exporter quantization family already documented for
+   32 bpc. Sub-code input differences propagated through the effect's
+   filters bound the observed 1-2-code output residue.
+5. **The unreproduced difference has the signature of a noise-realization
+   mismatch (observation + hypothesis).** Two host renders differing only
+   in `Random seed` (0 vs 12345) differ with mean absolute RGB error
+   0.010-0.016, maximum 1.0, alpha exact, correlation ~0.99. The
+   unreproduced report's figures (mean 0.009-0.025, maximum 1.0, alpha
+   exact, correlation 0.973-0.998, blue worst) are the same signature
+   class; ntsc-rs's default chroma noise (intensity 0.1) lands on I/Q,
+   whose largest RGB coefficient is blue, so a differing noise
+   realization degrades blue first. Hypothesis, unverifiable now that the
+   artifacts are gone: that comparison's AE and host sides rendered
+   different noise realizations (a seed, frame, or parameter mismatch in
+   that session), not different depth behavior.
+
+Corrected claim level: the unresolved-16-bpc-gap observation above is
+withdrawn as evidence; it is unreproduced and its artifacts are
+unavailable. In its place, this follow-up establishes AE-oracle
+equivalence for ntsc-rs SmartFX at full 16 bpc transport precision
+(tolerance 4/32768, observed residue within 2/32768), frame 0, default
+parameters, across two inputs and two comp fps values. The
+machine-readable judgments live in
+`analysis/NTSC_RS_ORACLE_DEEP16_RESULT_2026-07-19.json` (regenerated only
+via `tools/refresh-ntsc-rs-oracle-deep16-evidence.ps1` from the executed
+artifacts under `target/oracle-deep16/`; validated by
+`tests/test_ntsc_rs_oracle_deep16_result.py`).
+
+Two side findings from the same session, tracked separately:
+
+- The worker's `fill_world8` promotes 8-bit fill colors to ARGB16 with
+  `v * 128` (255 -> 32640), while the input-world path uses
+  `round(v * 32768 / 255)` (255 -> 32768). Not implicated in this
+  comparison (ntsc-rs does not use the fill callback on this path), but
+  it is an inconsistent promotion inside one worker.
+- `tools/capture-ae-reference.ps1`'s running-session gate checks the
+  process names `AfterFX`, `aerender`, and `aerendercore`, but a
+  lingering `AfterFX.com` shim (observed orphaned from an earlier
+  session) is named `AfterFX.com` and passes the gate. The capture gate
+  now also refuses on `AfterFX.com`.
