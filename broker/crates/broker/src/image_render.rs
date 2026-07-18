@@ -265,6 +265,43 @@ fn decode_bounded_image(path: &Path, role: &str) -> io::Result<image::DynamicIma
         .map_err(|error| invalid(format!("{role} image decode failed: {error}")))
 }
 
+/// Diagnostics for a dispatched worker run, including the kill evidence from
+/// Job Object accounting (issue #21): why a dead worker died (timeout versus
+/// allocations failing at the memory cap) and how much memory it peaked at.
+fn isolated_worker_diagnostics(
+    isolated: &crate::secure_launch::SecureLaunchResult,
+    elapsed_ms: u128,
+) -> Value {
+    let mut diagnostics = worker_diagnostics(
+        &isolated.stderr,
+        isolated.stderr_truncated,
+        isolated.classification.as_str(),
+        isolated.exit_code,
+        elapsed_ms,
+    );
+    let object = diagnostics
+        .as_object_mut()
+        .expect("worker_diagnostics returns an object");
+    object.insert("kill_reason".into(), json!(isolated.kill_reason));
+    object.insert(
+        "memory_limit_reached".into(),
+        json!(isolated.memory_limit_reached),
+    );
+    object.insert(
+        "peak_process_memory_bytes".into(),
+        json!(isolated.peak_process_memory_bytes),
+    );
+    object.insert(
+        "peak_job_memory_bytes".into(),
+        json!(isolated.peak_job_memory_bytes),
+    );
+    object.insert(
+        "process_memory_limit_bytes".into(),
+        json!(isolated.process_memory_limit_bytes),
+    );
+    diagnostics
+}
+
 fn worker_diagnostics(
     stderr: &str,
     stderr_truncated: bool,
@@ -1359,13 +1396,7 @@ pub fn render_experimental_audio(
         &args_after_plugin,
         Duration::from_millis(INTERACTIVE_RENDER_TIMEOUT_MS),
     )?;
-    let diagnostics = worker_diagnostics(
-        &isolated.stderr,
-        isolated.stderr_truncated,
-        isolated.classification.as_str(),
-        isolated.exit_code,
-        started.elapsed().as_millis(),
-    );
+    let diagnostics = isolated_worker_diagnostics(&isolated, started.elapsed().as_millis());
     if isolated.classification.as_str() != "ok" {
         return Err(invalid(format!(
             "audio render worker failed safely: {diagnostics}"
@@ -1893,13 +1924,7 @@ pub fn inspect_experimental_external_dependencies(
         &args_after_plugin,
         Duration::from_millis(5_000),
     )?;
-    let diagnostics = worker_diagnostics(
-        &isolated.stderr,
-        isolated.stderr_truncated,
-        isolated.classification.as_str(),
-        isolated.exit_code,
-        started.elapsed().as_millis(),
-    );
+    let diagnostics = isolated_worker_diagnostics(&isolated, started.elapsed().as_millis());
     if isolated.classification.as_str() != "ok" {
         return Err(invalid(format!(
             "external dependency inspection failed safely: {diagnostics}"
@@ -1948,13 +1973,7 @@ pub fn probe_experimental_options_dialog(
         &args_after_plugin,
         Duration::from_millis(5_000),
     )?;
-    let diagnostics = worker_diagnostics(
-        &isolated.stderr,
-        isolated.stderr_truncated,
-        isolated.classification.as_str(),
-        isolated.exit_code,
-        started.elapsed().as_millis(),
-    );
+    let diagnostics = isolated_worker_diagnostics(&isolated, started.elapsed().as_millis());
     if isolated.classification.as_str() != "ok" {
         return Err(invalid(format!(
             "options dialog probe failed safely: {diagnostics}"
@@ -1997,13 +2016,7 @@ pub fn probe_experimental_automatic_options_dialog(
         &args_after_plugin,
         Duration::from_millis(5_000),
     )?;
-    let diagnostics = worker_diagnostics(
-        &isolated.stderr,
-        isolated.stderr_truncated,
-        isolated.classification.as_str(),
-        isolated.exit_code,
-        started.elapsed().as_millis(),
-    );
+    let diagnostics = isolated_worker_diagnostics(&isolated, started.elapsed().as_millis());
     if isolated.classification.as_str() != "ok" {
         return Err(invalid(format!(
             "automatic options dialog probe failed safely: {diagnostics}"
@@ -2051,13 +2064,7 @@ pub fn probe_experimental_nop_render(
         &args_after_plugin,
         Duration::from_millis(INTERACTIVE_RENDER_TIMEOUT_MS),
     )?;
-    let diagnostics = worker_diagnostics(
-        &isolated.stderr,
-        isolated.stderr_truncated,
-        isolated.classification.as_str(),
-        isolated.exit_code,
-        started.elapsed().as_millis(),
-    );
+    let diagnostics = isolated_worker_diagnostics(&isolated, started.elapsed().as_millis());
     if isolated.classification.as_str() != "ok" {
         return Err(invalid(format!(
             "NOP_RENDER probe failed safely: {diagnostics}"
@@ -2107,13 +2114,7 @@ pub fn probe_experimental_smart_nop_render(
         &args_after_plugin,
         Duration::from_millis(INTERACTIVE_RENDER_TIMEOUT_MS),
     )?;
-    let diagnostics = worker_diagnostics(
-        &isolated.stderr,
-        isolated.stderr_truncated,
-        isolated.classification.as_str(),
-        isolated.exit_code,
-        started.elapsed().as_millis(),
-    );
+    let diagnostics = isolated_worker_diagnostics(&isolated, started.elapsed().as_millis());
     if isolated.classification.as_str() != "ok" {
         return Err(invalid(format!(
             "SmartFX NOP_RENDER probe failed safely: {diagnostics}"
@@ -2167,13 +2168,7 @@ pub fn probe_experimental_input_buffer_write(
         &args_after_plugin,
         Duration::from_millis(INTERACTIVE_RENDER_TIMEOUT_MS),
     )?;
-    let diagnostics = worker_diagnostics(
-        &isolated.stderr,
-        isolated.stderr_truncated,
-        isolated.classification.as_str(),
-        isolated.exit_code,
-        started.elapsed().as_millis(),
-    );
+    let diagnostics = isolated_worker_diagnostics(&isolated, started.elapsed().as_millis());
     if isolated.classification.as_str() != "ok" {
         return Err(invalid(format!(
             "input-buffer write probe failed safely: {diagnostics}"
@@ -2223,13 +2218,7 @@ pub fn probe_experimental_smart_input_buffer_write(
         &args_after_plugin,
         Duration::from_millis(INTERACTIVE_RENDER_TIMEOUT_MS),
     )?;
-    let diagnostics = worker_diagnostics(
-        &isolated.stderr,
-        isolated.stderr_truncated,
-        isolated.classification.as_str(),
-        isolated.exit_code,
-        started.elapsed().as_millis(),
-    );
+    let diagnostics = isolated_worker_diagnostics(&isolated, started.elapsed().as_millis());
     if isolated.classification.as_str() != "ok" {
         return Err(invalid(format!(
             "SmartFX input-buffer write probe failed safely: {diagnostics}"
@@ -2290,13 +2279,7 @@ fn probe_experimental_frame_resize(
         &args_after_plugin,
         Duration::from_millis(INTERACTIVE_RENDER_TIMEOUT_MS),
     )?;
-    let diagnostics = worker_diagnostics(
-        &isolated.stderr,
-        isolated.stderr_truncated,
-        isolated.classification.as_str(),
-        isolated.exit_code,
-        started.elapsed().as_millis(),
-    );
+    let diagnostics = isolated_worker_diagnostics(&isolated, started.elapsed().as_millis());
     if isolated.classification.as_str() != "ok" {
         return Err(invalid(format!(
             "FRAME_SETUP resize probe failed safely: {diagnostics}"
@@ -2387,13 +2370,7 @@ pub fn probe_experimental_persistent_sequence(
         &args_after_plugin,
         Duration::from_millis(INTERACTIVE_RENDER_TIMEOUT_MS),
     )?;
-    let diagnostics = worker_diagnostics(
-        &isolated.stderr,
-        isolated.stderr_truncated,
-        isolated.classification.as_str(),
-        isolated.exit_code,
-        started.elapsed().as_millis(),
-    );
+    let diagnostics = isolated_worker_diagnostics(&isolated, started.elapsed().as_millis());
     if isolated.classification.as_str() != "ok" {
         return Err(invalid(format!(
             "persistent sequence probe failed safely: {diagnostics}"
@@ -2444,13 +2421,7 @@ pub fn probe_experimental_flattened_sequence(
         &args_after_plugin,
         Duration::from_millis(INTERACTIVE_RENDER_TIMEOUT_MS),
     )?;
-    let diagnostics = worker_diagnostics(
-        &isolated.stderr,
-        isolated.stderr_truncated,
-        isolated.classification.as_str(),
-        isolated.exit_code,
-        started.elapsed().as_millis(),
-    );
+    let diagnostics = isolated_worker_diagnostics(&isolated, started.elapsed().as_millis());
     if isolated.classification.as_str() != "ok" {
         return Err(invalid(format!(
             "flattened sequence probe failed safely: {diagnostics}"
@@ -2502,13 +2473,7 @@ pub fn probe_experimental_copied_flattened_sequence(
         &args_after_plugin,
         Duration::from_millis(INTERACTIVE_RENDER_TIMEOUT_MS),
     )?;
-    let diagnostics = worker_diagnostics(
-        &isolated.stderr,
-        isolated.stderr_truncated,
-        isolated.classification.as_str(),
-        isolated.exit_code,
-        started.elapsed().as_millis(),
-    );
+    let diagnostics = isolated_worker_diagnostics(&isolated, started.elapsed().as_millis());
     if isolated.classification.as_str() != "ok" {
         return Err(invalid(format!(
             "non-destructive sequence save probe failed safely: {diagnostics}"
@@ -2612,13 +2577,7 @@ fn inspect_experimental_with_diagnostics_and_runtime_policy(
             Duration::from_millis(5_000),
         )?
     };
-    let mut diagnostics = worker_diagnostics(
-        &isolated.stderr,
-        isolated.stderr_truncated,
-        isolated.classification.as_str(),
-        isolated.exit_code,
-        started.elapsed().as_millis(),
-    );
+    let mut diagnostics = isolated_worker_diagnostics(&isolated, started.elapsed().as_millis());
     if isolated.classification.as_str() != "ok" {
         if let Some(summary) = failed_module_audit_summary(&isolated.stdout) {
             diagnostics["module_audit_failure"] = summary;
@@ -4376,13 +4335,7 @@ fn render_with_artifact(
     } else {
         dispatch_secure_image(initial_dispatch)?
     };
-    let mut diagnostics = worker_diagnostics(
-        &isolated.stderr,
-        isolated.stderr_truncated,
-        isolated.classification.as_str(),
-        isolated.exit_code,
-        started.elapsed().as_millis(),
-    );
+    let mut diagnostics = isolated_worker_diagnostics(&isolated, started.elapsed().as_millis());
     let initial_report: Option<Value> = serde_json::from_str(isolated.stdout.trim()).ok();
     if initial_report
         .as_ref()
@@ -4445,13 +4398,7 @@ fn render_with_artifact(
             args_after_plugin: &args_after_plugin,
             timeout: Duration::from_millis(timeout_ms),
         })?;
-        diagnostics = worker_diagnostics(
-            &isolated.stderr,
-            isolated.stderr_truncated,
-            isolated.classification.as_str(),
-            isolated.exit_code,
-            retry_started.elapsed().as_millis(),
-        );
+        diagnostics = isolated_worker_diagnostics(&isolated, retry_started.elapsed().as_millis());
         let retry_report = serde_json::from_str(isolated.stdout.trim()).map_err(|_| {
             invalid(format!(
                 "CPU fallback worker report unavailable: {diagnostics}"
@@ -5648,6 +5595,48 @@ mod tests {
         });
         assert!(diagnostics_contains_gpu_stage(&gpu));
         assert!(!diagnostics_contains_gpu_stage(&cpu));
+    }
+
+    #[test]
+    fn isolated_worker_diagnostics_expose_kill_reason_and_memory_peaks() {
+        let isolated = crate::secure_launch::SecureLaunchResult {
+            classification: crate::ExitClassification::NonzeroExit,
+            exit_code: 42,
+            stdout: String::new(),
+            stderr: String::new(),
+            stdout_truncated: false,
+            stderr_truncated: false,
+            kill_reason: Some("memory_limit"),
+            peak_process_memory_bytes: Some(530_000_000),
+            peak_job_memory_bytes: Some(531_000_000),
+            process_memory_limit_bytes: 536_870_912,
+            memory_limit_reached: true,
+        };
+        let diagnostics = isolated_worker_diagnostics(&isolated, 1_234);
+        assert_eq!(diagnostics["kill_reason"], "memory_limit");
+        assert_eq!(diagnostics["memory_limit_reached"], true);
+        assert_eq!(diagnostics["peak_process_memory_bytes"], 530_000_000u64);
+        assert_eq!(diagnostics["peak_job_memory_bytes"], 531_000_000u64);
+        assert_eq!(diagnostics["process_memory_limit_bytes"], 536_870_912u64);
+        assert_eq!(diagnostics["classification"], "nonzero_exit");
+        assert_eq!(diagnostics["elapsed_ms"], 1_234);
+
+        let alive = crate::secure_launch::SecureLaunchResult {
+            classification: crate::ExitClassification::Ok,
+            exit_code: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+            stdout_truncated: false,
+            stderr_truncated: false,
+            kill_reason: None,
+            peak_process_memory_bytes: Some(1_000_000),
+            peak_job_memory_bytes: Some(1_000_000),
+            process_memory_limit_bytes: 536_870_912,
+            memory_limit_reached: false,
+        };
+        let diagnostics = isolated_worker_diagnostics(&alive, 5);
+        assert_eq!(diagnostics["kill_reason"], Value::Null);
+        assert_eq!(diagnostics["memory_limit_reached"], false);
     }
 
     #[test]

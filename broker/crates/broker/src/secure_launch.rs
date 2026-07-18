@@ -12,6 +12,14 @@ pub struct SecureLaunchResult {
     pub stderr: String,
     pub stdout_truncated: bool,
     pub stderr_truncated: bool,
+    /// Kill evidence from Job Object accounting (see
+    /// `windows_process::ProcessResult`): "timeout" or "memory_limit" when
+    /// the cause of a dead worker is knowable, None otherwise.
+    pub kill_reason: Option<&'static str>,
+    pub peak_process_memory_bytes: Option<u64>,
+    pub peak_job_memory_bytes: Option<u64>,
+    pub process_memory_limit_bytes: u64,
+    pub memory_limit_reached: bool,
 }
 
 pub struct SecureLaunchRequest<'a> {
@@ -107,6 +115,11 @@ fn secure_launch_impl(
         stderr: result.stderr,
         stdout_truncated: result.stdout_truncated,
         stderr_truncated: result.stderr_truncated,
+        kill_reason: result.kill_reason,
+        peak_process_memory_bytes: result.peak_process_memory_bytes,
+        peak_job_memory_bytes: result.peak_job_memory_bytes,
+        process_memory_limit_bytes: result.process_memory_limit_bytes,
+        memory_limit_reached: result.memory_limit_reached,
     })
 }
 
