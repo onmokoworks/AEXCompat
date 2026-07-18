@@ -22,6 +22,7 @@ set(AEXCOMPAT_L2_WORKER_SOURCES
     src/render_lifecycle.cpp
     src/render_pixel_buffer.cpp
     src/render_pixel_transport.cpp
+    src/runtime_module_audit.cpp
     src/strict_json.cpp
     src/suite_lease_tracker.cpp
     src/worker_selector_dispatch.cpp)
