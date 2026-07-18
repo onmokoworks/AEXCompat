@@ -1,9 +1,10 @@
 [CmdletBinding()]
 param(
-    [string]$SdkRoot = 'C:\Program Files\Adobe\AfterEffectsSDK'
+    [string]$SdkRoot = $env:AFTER_EFFECTS_SDK_ROOT
 )
 
 $ErrorActionPreference = 'Stop'
+$SdkRoot = & "$PSScriptRoot\resolve-after-effects-sdk.ps1" $SdkRoot
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $sourceRoot = Join-Path $SdkRoot 'Examples\AEGP\Grabba'
 $project = Join-Path $sourceRoot 'Win\Grabba.vcxproj'

@@ -3,14 +3,18 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+import pytest
+
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "minihost" / "src" / "l2_main.cpp"
-SDK_HEADERS = Path(r"C:\Program Files\Adobe\AfterEffectsSDK\Examples\Headers")
+SDK_ROOT = os.environ.get("AFTER_EFFECTS_SDK_ROOT")
+SDK_HEADERS = Path(SDK_ROOT) / "Examples" / "Headers" if SDK_ROOT else None
 
 
 def test_sdk_headers_confirm_legacy_suite_abis_and_signatures() -> None:
-    assert SDK_HEADERS.exists()
+    if SDK_HEADERS is None or not SDK_HEADERS.is_dir():
+        pytest.skip("set AFTER_EFFECTS_SDK_ROOT to a valid After Effects SDK root")
     source = r'''
 #include <cstddef>
 #include <type_traits>

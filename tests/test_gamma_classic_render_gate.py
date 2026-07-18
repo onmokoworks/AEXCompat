@@ -23,8 +23,8 @@ def test_gate_authenticates_fixed_fixture_worker_and_input():
         "sha256": "6fcb4946c77a9fcb4fab8e15dbbc54ffb4b1ab08656ce9acea39c44099b6dfa8",
     }
     assert artifacts["worker"]["path"] == "target/minihost-build/aex_render_worker.exe"
-    assert artifacts["worker"]["size_bytes"] == 811008
-    assert artifacts["worker"]["sha256"] == "2cba31875b7e0f39fff870a3fbff4fc14442fe4d73755dbb9b1f9b6be96d0e8e"
+    assert artifacts["worker"]["size_bytes"] == 828928
+    assert artifacts["worker"]["sha256"] == "373f5b48b2afb8b5b0b168e0ebb022312b2b1eb1ad6ffbd27f328c9a60b40055"
     assert artifacts["input"]["sha256"] == "c9ee521c7d71cbf6a41cb1a2d075add64676b912f5870098417b75ca727ba807"
 
 

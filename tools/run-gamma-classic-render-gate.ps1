@@ -13,8 +13,8 @@ $artifacts = [ordered]@{
     }
     worker = [ordered]@{
         path = "target/minihost-build/aex_render_worker.exe"
-        size_bytes = 811008
-        sha256 = "2cba31875b7e0f39fff870a3fbff4fc14442fe4d73755dbb9b1f9b6be96d0e8e"
+        size_bytes = 828928
+        sha256 = "373f5b48b2afb8b5b0b168e0ebb022312b2b1eb1ad6ffbd27f328c9a60b40055"
     }
     input = [ordered]@{
         path = "target/image-transport/colorgrid-click-input.rgba"

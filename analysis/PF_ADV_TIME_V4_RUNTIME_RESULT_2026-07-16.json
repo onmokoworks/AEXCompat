@@ -4,13 +4,13 @@
     "authenticated_artifacts":  {
                                     "source":  {
                                                    "path":  "minihost/src/l2_main.cpp",
-                                                   "size_bytes":  1228407,
-                                                   "sha256":  "7c22442f881ec9ca8436cce844b3cd43ff4c33aa86d703798d8b8025e57757ce"
+                                                   "size_bytes":  1241709,
+                                                   "sha256":  "3beb22dd515f2933bc514b821fd5eaa386c189e0ef3855b009a622889bebf5d8"
                                                },
                                     "worker":  {
                                                    "path":  "target/minihost-build/aex_render_worker.exe",
-                                                   "size_bytes":  811008,
-                                                   "sha256":  "2cba31875b7e0f39fff870a3fbff4fc14442fe4d73755dbb9b1f9b6be96d0e8e"
+                                                   "size_bytes":  828928,
+                                                   "sha256":  "373f5b48b2afb8b5b0b168e0ebb022312b2b1eb1ad6ffbd27f328c9a60b40055"
                                                },
                                     "probe":  {
                                                   "path":  "target/pf-adv-time-probe-build/Release/pf_adv_time_probe.aex",

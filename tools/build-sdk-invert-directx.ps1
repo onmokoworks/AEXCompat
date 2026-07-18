@@ -1,5 +1,5 @@
 param(
-    [string]$AfterEffectsSdk = "C:\Program Files\Adobe\AfterEffectsSDK\Examples",
+    [string]$AfterEffectsSdk = $env:AFTER_EFFECTS_SDK_ROOT,
     [string]$BoostInclude = "C:\Program Files\Autodesk\MotionBuilder 2024\OpenRealitySDK\include",
     [string]$OpenClSdk = "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.2",
     [string]$VisualStudio = "",
@@ -9,6 +9,8 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+$AfterEffectsSdk = & "$PSScriptRoot\resolve-after-effects-sdk.ps1" $AfterEffectsSdk
+$AfterEffectsSdk = Join-Path $AfterEffectsSdk "Examples"
 $repository = Split-Path -Parent $PSScriptRoot
 if (-not $OutputDirectory) { $OutputDirectory = Join-Path $repository "target\sdk-fixtures\invert-procamp-directx" }
 if (-not $EvidencePath) { $EvidencePath = Join-Path $repository "analysis\SDK_DIRECTX_FIXTURE_BUILD_RESULT_2026-07-16.json" }

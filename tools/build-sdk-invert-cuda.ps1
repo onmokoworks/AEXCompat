@@ -1,5 +1,5 @@
 param(
-    [string]$AfterEffectsSdk = "C:\Program Files\Adobe\AfterEffectsSDK\Examples",
+    [string]$AfterEffectsSdk = $env:AFTER_EFFECTS_SDK_ROOT,
     [string]$CudaRoot = "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.2",
     [string]$BoostInclude = "C:\Program Files\Autodesk\MotionBuilder 2024\OpenRealitySDK\include",
     [string]$VisualStudio = "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools",
@@ -7,6 +7,8 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+$AfterEffectsSdk = & "$PSScriptRoot\resolve-after-effects-sdk.ps1" $AfterEffectsSdk
+$AfterEffectsSdk = Join-Path $AfterEffectsSdk "Examples"
 $repository = Split-Path -Parent $PSScriptRoot
 $build = Join-Path $repository "target\sdk-fixtures\invert-procamp-cuda-build"
 $output = Join-Path $repository "target\sdk-fixtures\invert-procamp\SDK_Invert_ProcAmp_CUDA.aex"

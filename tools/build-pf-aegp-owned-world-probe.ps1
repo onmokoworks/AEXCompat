@@ -1,5 +1,5 @@
 param(
-    [string]$AfterEffectsSdk = "C:\Program Files\Adobe\AfterEffectsSDK",
+    [string]$AfterEffectsSdk = $env:AFTER_EFFECTS_SDK_ROOT,
     [string]$Generator = "Visual Studio 18 2026",
     [string]$Architecture = "x64",
     [string]$CMake = "",
@@ -7,6 +7,7 @@ param(
     [string]$Configuration = "Release"
 )
 $ErrorActionPreference = "Stop"
+$AfterEffectsSdk = & "$PSScriptRoot\resolve-after-effects-sdk.ps1" $AfterEffectsSdk
 $repository = Split-Path -Parent $PSScriptRoot
 $source = Join-Path $repository "instruments\pf-aegp-owned-world-probe"
 $build = Join-Path $repository "target\pf-aegp-owned-world-probe-build"

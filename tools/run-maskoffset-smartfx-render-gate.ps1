@@ -11,8 +11,8 @@ $workerRelative = "target/minihost-build/aex_smart_worker.exe"
 $expectedOutput = "bf419f44e915901bac882e9b9e3411b8407df7f4e3a4a1c2719314bdfbb74b5f"
 $expectedBrokerHash = "57bb8ba3c882ebee19784e855ae25b0569ddea7733c6a51e5f681e18bfdefc83"
 $expectedBrokerSize = 1154560
-$expectedWorkerHash = "66ead9839ba02540c309b9ffdd8ce0a898f94e49baf75bf9a90be55a6c6cd68d"
-$expectedWorkerSize = 827904
+$expectedWorkerHash = "fd69dd640b3ae2ddbe6d8caa595069f9e10a1bd2d9aac2cc8d069bf6b92b33ad"
+$expectedWorkerSize = 845824
 $expectedRequestHash = "d92568e9f880ec9d06ceccb03de0ebb62d3dd00b0bdb9e3978c5fd687b7e26d7"
 
 function Resolve-RepositoryFile([string]$relative) {

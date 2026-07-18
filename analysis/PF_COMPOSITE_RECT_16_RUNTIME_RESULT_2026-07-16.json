@@ -5,18 +5,18 @@
     "authenticated_artifacts":  {
                                     "minihost_source":  {
                                                             "path":  "minihost/src/l2_main.cpp",
-                                                            "size_bytes":  1228407,
-                                                            "sha256":  "7c22442f881ec9ca8436cce844b3cd43ff4c33aa86d703798d8b8025e57757ce"
+                                                            "size_bytes":  1241709,
+                                                            "sha256":  "3beb22dd515f2933bc514b821fd5eaa386c189e0ef3855b009a622889bebf5d8"
                                                         },
                                     "worker":  {
                                                    "path":  "target/minihost-build/aex_render_worker.exe",
-                                                   "size_bytes":  811008,
-                                                   "sha256":  "2cba31875b7e0f39fff870a3fbff4fc14442fe4d73755dbb9b1f9b6be96d0e8e"
+                                                   "size_bytes":  828928,
+                                                   "sha256":  "373f5b48b2afb8b5b0b168e0ebb022312b2b1eb1ad6ffbd27f328c9a60b40055"
                                                },
                                     "probe":  {
                                                   "path":  "target/pf-composite-rect-probe-build/Release/pf_composite_rect_probe.aex",
                                                   "size_bytes":  14848,
-                                                  "sha256":  "7f1a7364a6cbc562017f810a5719657c66d59c3457fd778ebb595847f1b9dbf3"
+                                                  "sha256":  "2af39d1da24bd0f4a8df8ca9017b660ae18a9cef636cc42305eb7ca4f06d6520"
                                               },
                                     "input":  {
                                                   "path":  "target/gpu-effects/opencl-input.rgba",

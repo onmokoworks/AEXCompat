@@ -4,14 +4,24 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+import pytest
+
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "minihost" / "src" / "l2_main.cpp"
 BUILD = ROOT / "target" / "minihost-build"
-HEADERS = Path(r"C:\Program Files\Adobe\AfterEffectsSDK\Examples\Headers")
+SDK_ROOT = os.environ.get("AFTER_EFFECTS_SDK_ROOT")
+HEADERS = Path(SDK_ROOT) / "Examples" / "Headers" if SDK_ROOT else None
+
+
+def _sdk_headers() -> Path:
+    if HEADERS is None or not HEADERS.is_dir():
+        pytest.skip("set AFTER_EFFECTS_SDK_ROOT to a valid After Effects SDK root")
+    return HEADERS
 
 
 def test_sdk_frozen_apply_effect_abi_compiles() -> None:
+    headers = _sdk_headers()
     source = r'''
 #include <cstddef>
 #include <type_traits>
@@ -57,8 +67,8 @@ int main() { return 0; }
         cpp.write_text(source, encoding="ascii")
         batch.write_text(
             f'@call "{vcvars}" >nul\n'
-            f'@cl /nologo /std:c++17 /DWIN32 /D_WINDOWS /c /I"{HEADERS}" '
-            f'/I"{HEADERS / "SP"}" /Fo"{obj}" "{cpp}"\n',
+            f'@cl /nologo /std:c++17 /DWIN32 /D_WINDOWS /c /I"{headers}" '
+            f'/I"{headers / "SP"}" /Fo"{obj}" "{cpp}"\n',
             encoding="ascii",
         )
         subprocess.run(["cmd", "/d", "/c", str(batch)], check=True, timeout=120)

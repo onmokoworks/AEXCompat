@@ -3,13 +3,19 @@ import re
 import subprocess
 from pathlib import Path
 
+import pytest
+
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "minihost/src/l2_main.cpp"
-SDK = Path(os.environ.get(
-    "AE_EFFECT_SUITES_OLD_HEADER",
-    r"C:\Program Files\Adobe\AfterEffectsSDK\Examples\Headers\AE_EffectSuitesOld.h",
-))
+SDK_ROOT = os.environ.get("AFTER_EFFECTS_SDK_ROOT")
+SDK = Path(SDK_ROOT) / "Examples" / "Headers" / "AE_EffectSuitesOld.h" if SDK_ROOT else None
+
+
+def _sdk_header() -> Path:
+    if SDK is None or not SDK.is_file():
+        pytest.skip("set AFTER_EFFECTS_SDK_ROOT to a valid After Effects SDK root")
+    return SDK
 
 
 def _worker():
@@ -23,7 +29,7 @@ def _worker():
 
 
 def test_sdk_freezes_param_utils_suite1_at_acquisition_version_2_with_ten_slots():
-    sdk = SDK.read_text(encoding="utf-8", errors="replace")
+    sdk = _sdk_header().read_text(encoding="utf-8", errors="replace")
     assert re.search(r"#define\s+kPFParamUtilsSuiteVersion1\s+2\b", sdk)
     table = sdk.split("typedef struct PF_ParamUtilsSuite1 {", 1)[1].split(
         "} PF_ParamUtilsSuite1;", 1

@@ -1,6 +1,6 @@
 {
     "schema_version":  1,
-    "recorded_at":  "2026-07-18T17:53:34+09:00",
+    "recorded_at":  "2026-07-18T19:14:21+09:00",
     "result":  "official_sdk_grabba_aegp_initialization_and_update_menu_passed",
     "scope":  {
                   "directly_proven":  [
@@ -19,23 +19,23 @@
                                  ]
               },
     "source_provenance":  {
-                              "git_head":  "908f5921fcd72a9ef3f86ae7e2675bc4116aef92",
+                              "git_head":  "412d819f9519d4f5af3edc3e478c513dc346825f",
                               "worktree_was_dirty":  true,
                               "files":  [
                                             {
                                                 "path":  "minihost/src/l2_main.cpp",
-                                                "size_bytes":  1228407,
-                                                "sha256":  "7c22442f881ec9ca8436cce844b3cd43ff4c33aa86d703798d8b8025e57757ce"
+                                                "size_bytes":  1241709,
+                                                "sha256":  "3beb22dd515f2933bc514b821fd5eaa386c189e0ef3855b009a622889bebf5d8"
                                             },
                                             {
                                                 "path":  "broker/crates/broker/src/image_render.rs",
                                                 "size_bytes":  202221,
-                                                "sha256":  "33160ebba5c406a7095272e50663319b7b57de1d5aff7924cdddaad519096e52"
+                                                "sha256":  "850395c65c7b8a9f64c8645d5ea087466f87629ba89df51eb915903f104c5e30"
                                             },
                                             {
                                                 "path":  "broker/crates/broker/src/generated_l2_worker_trust.rs",
-                                                "size_bytes":  412,
-                                                "sha256":  "26c3f0ba8dd2f89eb63516cf935a3344f70086c6a74a890c60565ad634a37fbd"
+                                                "size_bytes":  413,
+                                                "sha256":  "be17b83e6c0fe22baa41dbf5f7c8502c06c217453d8f79fe4e7afb1ee8dbc639"
                                             }
                                         ]
                           },
@@ -135,8 +135,8 @@
                                                                                                        "apphelp.dll",
                                                                                                        "bcrypt.dll",
                                                                                                        "ucrtbase.dll",
-                                                                                                       "vcruntime140.dll",
                                                                                                        "msvcp140.dll",
+                                                                                                       "vcruntime140.dll",
                                                                                                        "vcruntime140_1.dll",
                                                                                                        "bcryptprimitives.dll"
                                                                                                    ],
@@ -161,8 +161,8 @@
                                                                                                   "apphelp.dll",
                                                                                                   "bcrypt.dll",
                                                                                                   "ucrtbase.dll",
-                                                                                                  "vcruntime140.dll",
                                                                                                   "msvcp140.dll",
+                                                                                                  "vcruntime140.dll",
                                                                                                   "vcruntime140_1.dll",
                                                                                                   "bcryptprimitives.dll"
                                                                                               ],
@@ -186,8 +186,8 @@
                                                                                                    "apphelp.dll",
                                                                                                    "bcrypt.dll",
                                                                                                    "ucrtbase.dll",
-                                                                                                   "vcruntime140.dll",
                                                                                                    "msvcp140.dll",
+                                                                                                   "vcruntime140.dll",
                                                                                                    "vcruntime140_1.dll",
                                                                                                    "bcryptprimitives.dll"
                                                                                                ],
@@ -560,8 +560,8 @@
                                                                               "bcrypt.dll",
                                                                               "ucrtbase.dll",
                                                                               "msvcp140.dll",
-                                                                              "vcruntime140.dll",
                                                                               "vcruntime140_1.dll",
+                                                                              "vcruntime140.dll",
                                                                               "bcryptprimitives.dll"
                                                                           ],
                                                              "unknown_count":  0,
@@ -586,8 +586,8 @@
                                                                          "bcrypt.dll",
                                                                          "ucrtbase.dll",
                                                                          "msvcp140.dll",
-                                                                         "vcruntime140.dll",
                                                                          "vcruntime140_1.dll",
+                                                                         "vcruntime140.dll",
                                                                          "bcryptprimitives.dll"
                                                                      ],
                                                         "unknown_count":  0,
@@ -611,8 +611,8 @@
                                                                           "bcrypt.dll",
                                                                           "ucrtbase.dll",
                                                                           "msvcp140.dll",
-                                                                          "vcruntime140.dll",
                                                                           "vcruntime140_1.dll",
+                                                                          "vcruntime140.dll",
                                                                           "bcryptprimitives.dll"
                                                                       ],
                                                          "unknown_count":  0,
@@ -770,8 +770,8 @@
                                                                                            "apphelp.dll",
                                                                                            "bcrypt.dll",
                                                                                            "ucrtbase.dll",
-                                                                                           "msvcp140.dll",
                                                                                            "vcruntime140.dll",
+                                                                                           "msvcp140.dll",
                                                                                            "vcruntime140_1.dll",
                                                                                            "bcryptprimitives.dll"
                                                                                        ],
@@ -796,8 +796,8 @@
                                                                                       "apphelp.dll",
                                                                                       "bcrypt.dll",
                                                                                       "ucrtbase.dll",
-                                                                                      "msvcp140.dll",
                                                                                       "vcruntime140.dll",
+                                                                                      "msvcp140.dll",
                                                                                       "vcruntime140_1.dll",
                                                                                       "bcryptprimitives.dll"
                                                                                   ],
@@ -821,8 +821,8 @@
                                                                                        "apphelp.dll",
                                                                                        "bcrypt.dll",
                                                                                        "ucrtbase.dll",
-                                                                                       "msvcp140.dll",
                                                                                        "vcruntime140.dll",
+                                                                                       "msvcp140.dll",
                                                                                        "vcruntime140_1.dll",
                                                                                        "bcryptprimitives.dll"
                                                                                    ],
@@ -900,14 +900,14 @@
                                     {
                                         "role":  "aegp_worker",
                                         "path":  "target/minihost-build/aex_l2_worker.exe",
-                                        "size_bytes":  738304,
-                                        "sha256":  "6a4ef95698e107e4e532c8043101c6513f60926e44ef488aede0fdbab88766dc"
+                                        "size_bytes":  756736,
+                                        "sha256":  "cc8958ea36af84946d31f83eb61f40d6b375c3a7484197c2fac0968881136bfc"
                                     },
                                     {
                                         "role":  "command_harness",
                                         "path":  "broker/target/debug/aexcompat-harness.exe",
                                         "size_bytes":  19973632,
-                                        "sha256":  "b8aec7f1ea529a88d64af87c840999d7c6eeee1ff80c161f15e16f087667bd0f"
+                                        "sha256":  "83bfc165a0b0c4d176e209da4eaf82ac84583d8b53b9625454397c56a895da08"
                                     }
                                 ],
     "authenticated_reports":  [
@@ -915,19 +915,19 @@
                                       "route":  "initialization",
                                       "path":  "target/final-integration-evidence/grabba-initialization.json",
                                       "size_bytes":  9945,
-                                      "sha256":  "6bc9fbf0a42b9a27156242a9115603d2c9b60888a5f48652dfcc17d238973aa0"
+                                      "sha256":  "18be42b7709035326425110d251f2a707ea843c62342bf4c8c33dd259d064d2e"
                                   },
                                   {
                                       "route":  "command_roundtrip",
                                       "path":  "target/final-integration-evidence/grabba-command-roundtrip.json",
                                       "size_bytes":  9961,
-                                      "sha256":  "22fec6f4fdb36e692c86d0877ab764f52833c5ecfba7bdd1d4a6f36ec768f8f9"
+                                      "sha256":  "4d1f29e2e35dbe2c1db6982f1097f821f09a467cda42159a6c348af0e3278b5e"
                                   },
                                   {
                                       "route":  "idle",
                                       "path":  "target/final-integration-evidence/grabba-idle.json",
                                       "size_bytes":  9948,
-                                      "sha256":  "ff8e2990aa5bcfeffb93e0d830b79a376993fbc71ea1b6804b85196a7d9efe7e"
+                                      "sha256":  "785fc1c21cd350c28c66fbb8ccfdb72b7f0e5fbfd6968456f8e32d427dc532d8"
                                   },
                                   {
                                       "route":  "update_menu",
@@ -940,26 +940,26 @@
                                          {
                                              "role":  "render_worker",
                                              "path":  "target/minihost-build/aex_render_worker.exe",
-                                             "size_bytes":  811008,
-                                             "sha256":  "2cba31875b7e0f39fff870a3fbff4fc14442fe4d73755dbb9b1f9b6be96d0e8e"
+                                             "size_bytes":  828928,
+                                             "sha256":  "373f5b48b2afb8b5b0b168e0ebb022312b2b1eb1ad6ffbd27f328c9a60b40055"
                                          },
                                          {
                                              "role":  "aegp_worker",
                                              "path":  "target/minihost-build/aex_l2_worker.exe",
-                                             "size_bytes":  738304,
-                                             "sha256":  "6a4ef95698e107e4e532c8043101c6513f60926e44ef488aede0fdbab88766dc"
+                                             "size_bytes":  756736,
+                                             "sha256":  "cc8958ea36af84946d31f83eb61f40d6b375c3a7484197c2fac0968881136bfc"
                                          },
                                          {
                                              "role":  "smart_worker",
                                              "path":  "target/minihost-build/aex_smart_worker.exe",
-                                             "size_bytes":  827904,
-                                             "sha256":  "66ead9839ba02540c309b9ffdd8ce0a898f94e49baf75bf9a90be55a6c6cd68d"
+                                             "size_bytes":  845824,
+                                             "sha256":  "fd69dd640b3ae2ddbe6d8caa595069f9e10a1bd2d9aac2cc8d069bf6b92b33ad"
                                          },
                                          {
                                              "role":  "command_harness",
                                              "path":  "broker/target/debug/aexcompat-harness.exe",
                                              "size_bytes":  19973632,
-                                             "sha256":  "b8aec7f1ea529a88d64af87c840999d7c6eeee1ff80c161f15e16f087667bd0f"
+                                             "sha256":  "83bfc165a0b0c4d176e209da4eaf82ac84583d8b53b9625454397c56a895da08"
                                          }
                                      ],
     "pending":  [

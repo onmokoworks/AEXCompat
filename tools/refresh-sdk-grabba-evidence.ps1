@@ -1,10 +1,11 @@
 [CmdletBinding()]
 param(
-    [string]$SdkRoot = 'C:\Program Files\Adobe\AfterEffectsSDK',
+    [string]$SdkRoot = $env:AFTER_EFFECTS_SDK_ROOT,
     [switch]$SkipBuild
 )
 
 $ErrorActionPreference = 'Stop'
+$SdkRoot = & "$PSScriptRoot\resolve-after-effects-sdk.ps1" $SdkRoot
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $worker = Join-Path $repoRoot 'target\minihost-build\aex_l2_worker.exe'
 $trustSource = Join-Path $repoRoot 'broker\crates\broker\src\generated_l2_worker_trust.rs'

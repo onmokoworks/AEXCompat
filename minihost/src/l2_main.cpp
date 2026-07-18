@@ -10290,6 +10290,7 @@ struct SwitchPipeProbe {
 bool g_aegp_effect_live = false;
 constexpr std::size_t kAegpEffectInstanceCapacity = 8;
 constexpr std::size_t kAegpEffectLeaseCapacity = 16;
+constexpr std::size_t kAegpEffectParameterCapacity = 12;
 struct AegpEffectInstance {
   void* layer{};
   int32_t installed_key{};
@@ -10297,7 +10298,7 @@ struct AegpEffectInstance {
   uint32_t flags{1};
   uint32_t generation{};
   bool occupied{};
-  std::array<std::array<double, 4>, 4> parameter_values{{
+  std::array<std::array<double, 4>, kAegpEffectParameterCapacity> parameter_values{{
       {{42.5, 0.0, 0.0, 0.0}},
       {{160.0, 90.0, 0.0, 0.0}},
       {{1.0, 2.0, 3.0, 0.0}},
@@ -10383,12 +10384,34 @@ struct AegpInstalledEffectRecord {
   const char* name;
   const char* match_name;
   const char* category;
+  int32_t parameter_count;
+};
+struct AegpEffectParameterRecord {
+  const char* name;
+  int32_t type;
+  std::array<double, 4> default_value;
+  bool writable;
 };
 const AegpInstalledEffectRecord* find_installed_effect(int32_t key);
+const AegpEffectParameterRecord* find_effect_parameter(int32_t key, int32_t index);
+void initialize_effect_parameter_values(AegpEffectInstance& instance);
 constexpr int32_t kAegpInstalledEffectKeyNone = 0;
 constexpr std::size_t kAegpMaxEffectCategoryNameSize = 128;
-constexpr std::array<AegpInstalledEffectRecord, 1> kAegpInstalledEffects{{
-    {3001, "AEXCompat Probe", "AEXCompat.Probe", "AEXCompat"}}};
+constexpr std::array<AegpEffectParameterRecord, 5> kAegpProbeParameters{{
+    {"Input", 9, {}, false}, {"Amount", 5, {{42.5, 0.0, 0.0, 0.0}}, true},
+    {"Center", 4, {{160.0, 90.0, 0.0, 0.0}}, true},
+    {"Vector", 2, {{1.0, 2.0, 3.0, 0.0}}, true},
+    {"Tint", 6, {{0.25, 0.5, 0.75, 1.0}}, true}}};
+constexpr std::array<AegpEffectParameterRecord, 7> kAegpLevelsParameters{{
+    {"Input", 9, {}, false}, {"Channel", 5, {}, true},
+    {"Histogram", 5, {}, false}, {"Reset", 5, {}, false},
+    {"Input Black", 5, {{0.0, 0.0, 0.0, 0.0}}, true},
+    {"Input White", 5, {{1.0, 0.0, 0.0, 0.0}}, true},
+    {"Gamma", 5, {{1.0, 0.0, 0.0, 0.0}}, true}}};
+constexpr std::array<AegpInstalledEffectRecord, 3> kAegpInstalledEffects{{
+    {3001, "AEXCompat Probe", "AEXCompat.Probe", "AEXCompat", 5},
+    {3002, "Levels", "ADBE Easy Levels", "Color Correction", 7},
+    {3003, "Levels (Individual Controls)", "ADBE Pro Levels", "Color Correction", 7}}};
 static_assert(kAegpInstalledEffects[0].key != kAegpInstalledEffectKeyNone);
 static_assert(sizeof("AEXCompat") <= kAegpMaxEffectCategoryNameSize);
 struct AegpTransformStream {
@@ -10402,17 +10425,22 @@ struct AegpTransformStream {
   uint32_t effect_instance_generation{};
   int32_t owner_plugin_id{};
 } g_aegp_transform_stream;
+struct AegpStreamValue;
 struct AegpLegacyEffectStream {
-  AegpSceneObject object{0x53545232};
   int32_t param_index{-1};
   bool live{};
   bool hidden{};
   bool value_live{};
+  AegpStreamValue* checked_out_value{};
   uint32_t effect_instance_index{};
   uint32_t effect_instance_generation{};
+  uint32_t generation{};
   int32_t owner_plugin_id{};
 };
-std::array<AegpLegacyEffectStream, 6> g_aegp_legacy_effect_streams{};
+constexpr std::size_t kAegpLegacyEffectStreamCapacity = 16;
+std::array<AegpLegacyEffectStream, kAegpLegacyEffectStreamCapacity>
+    g_aegp_legacy_effect_streams{};
+uint32_t g_aegp_legacy_effect_stream_generation{};
 struct AegpStreamValue {
   void* stream{};
   std::array<std::byte, 32> value{};
@@ -10852,8 +10880,10 @@ int32_t __cdecl aegp_apply_effect(
   uint32_t generation = instance_slot->generation + 1;
   if (generation == 0) generation = 1;
   *instance_slot = {layer, installed_key, stack_order, 1, generation, true};
+  initialize_effect_parameter_values(*instance_slot);
   if (!acquire_effect_lease(plugin_id, instance_index, effect)) {
     *instance_slot = {};
+    instance_slot->generation = generation;
     return 4;
   }
   bump_render_project_timestamp();
@@ -10900,8 +10930,10 @@ int32_t __cdecl aegp_duplicate_effect(void* original, void** duplicate) {
   if (generation == 0) generation = 1;
   *instance_slot = {const_cast<void*>(layer), installed_key, inserted_order,
                     flags, generation, true};
+  instance_slot->parameter_values = source->parameter_values;
   if (!acquire_effect_lease(source_lease->owner_plugin_id, instance_index, duplicate)) {
     *instance_slot = {};
+    instance_slot->generation = generation;
     for (auto& value : g_aegp_effect_instances)
       if (value.occupied && value.layer == layer && value.stack_order > inserted_order)
         --value.stack_order;
@@ -11078,6 +11110,26 @@ const AegpInstalledEffectRecord* find_installed_effect(int32_t key) {
     if (effect.key == key) return &effect;
   return nullptr;
 }
+const AegpEffectParameterRecord* find_effect_parameter(int32_t key, int32_t index) {
+  const auto* effect = find_installed_effect(key);
+  if (!effect || index < 0 || index >= effect->parameter_count) return nullptr;
+  if (key == kAegpInstalledEffects[0].key)
+    return &kAegpProbeParameters[static_cast<std::size_t>(index)];
+  if (key == kAegpInstalledEffects[1].key || key == kAegpInstalledEffects[2].key)
+    return &kAegpLevelsParameters[static_cast<std::size_t>(index)];
+  return nullptr;
+}
+void initialize_effect_parameter_values(AegpEffectInstance& instance) {
+  instance.parameter_values = {};
+  const auto* effect = find_installed_effect(instance.installed_key);
+  if (!effect) return;
+  for (int32_t index = 1; index < effect->parameter_count; ++index) {
+    const auto* parameter = find_effect_parameter(instance.installed_key, index);
+    if (parameter)
+      instance.parameter_values[static_cast<std::size_t>(index - 1)] =
+          parameter->default_value;
+  }
+}
 int32_t __cdecl aegp_get_num_installed_effects(int32_t* count) {
   if (!count) return 4;
   *count = static_cast<int32_t>(kAegpInstalledEffects.size());
@@ -11088,10 +11140,13 @@ int32_t __cdecl aegp_get_next_installed_effect(int32_t key, int32_t* next_key) {
   if (!next_key) return 4;
   if (key == kAegpInstalledEffectKeyNone) {
     *next_key = kAegpInstalledEffects[0].key;
-  } else if (key == kAegpInstalledEffects[0].key) {
-    *next_key = kAegpInstalledEffectKeyNone;
   } else {
-    return 4;
+    const auto found = std::find_if(kAegpInstalledEffects.begin(),
+        kAegpInstalledEffects.end(), [key](const auto& effect) { return effect.key == key; });
+    if (found == kAegpInstalledEffects.end()) return 4;
+    const auto next = std::next(found);
+    *next_key = next == kAegpInstalledEffects.end()
+        ? kAegpInstalledEffectKeyNone : next->key;
   }
   ++g_aegp_effect_metadata_calls;
   return 0;
@@ -11119,9 +11174,11 @@ int32_t __cdecl aegp_get_effect_category(int32_t key, char* category) {
   ++g_aegp_effect_metadata_calls;
   return 0;
 }
-int32_t __cdecl aegp_get_effect_num_param_streams(void* effect, int32_t* count) {
-  if (!resolve_effect_instance(effect) || !count) return 4;
-  *count = 5;
+int32_t __cdecl aegp_get_effect_num_param_streams_v2(void* effect, int32_t* count) {
+  const auto* instance = resolve_effect_instance(effect);
+  const auto* installed = instance ? find_installed_effect(instance->installed_key) : nullptr;
+  if (!installed || !count) return 4;
+  *count = installed->parameter_count;
   return 0;
 }
 bool supported_transform_stream(int32_t selector) {
@@ -11158,6 +11215,12 @@ int32_t __cdecl aegp_get_new_effect_stream_by_index(
   g_aegp_transform_stream.owner_plugin_id = plugin_id;
   ++g_aegp_stream_acquires;
   *stream = &g_aegp_transform_stream.object;
+  return 0;
+}
+int32_t __cdecl aegp_get_effect_num_param_streams_v6(void* effect, int32_t* count) {
+  const auto* instance = resolve_effect_instance(effect);
+  if (!instance || instance->installed_key != kAegpInstalledEffects[0].key || !count) return 4;
+  *count = kAegpInstalledEffects[0].parameter_count;
   return 0;
 }
 bool effect_stream_parent_live() {
@@ -12650,7 +12713,7 @@ int32_t __cdecl acquire_suite(const char* name, int32_t version, const void** su
       std::strcmp(name, "AEGP Stream Suite") == 0 && version == 11) {
     g_aegp_stream_suite6.fill(reinterpret_cast<void*>(&aegp_unsupported_suite_call));
     g_aegp_stream_suite6[3] = reinterpret_cast<void*>(&aegp_get_new_layer_stream);
-    g_aegp_stream_suite6[4] = reinterpret_cast<void*>(&aegp_get_effect_num_param_streams);
+    g_aegp_stream_suite6[4] = reinterpret_cast<void*>(&aegp_get_effect_num_param_streams_v6);
     g_aegp_stream_suite6[5] = reinterpret_cast<void*>(&aegp_get_new_effect_stream_by_index);
     g_aegp_stream_suite6[7] = reinterpret_cast<void*>(&aegp_dispose_stream);
     g_aegp_stream_suite6[8] = reinterpret_cast<void*>(&aegp_get_stream_name);
@@ -13065,7 +13128,7 @@ int32_t __cdecl acquire_suite(const char* name, int32_t version, const void** su
   }
   if (name && std::strcmp(name, "AEGP Stream Suite") == 0 && version == 7) {
     g_aegp_stream_suite2.fill(reinterpret_cast<void*>(&aegp_unsupported_suite_call));
-    g_aegp_stream_suite2[4] = reinterpret_cast<void*>(&aegp_get_effect_num_param_streams);
+    g_aegp_stream_suite2[4] = reinterpret_cast<void*>(&aegp_get_effect_num_param_streams_v2);
     g_aegp_stream_suite2[5] = reinterpret_cast<void*>(&aegp_get_new_effect_stream_by_index_v2);
     g_aegp_stream_suite2[7] = reinterpret_cast<void*>(&aegp_dispose_stream_v2);
     g_aegp_stream_suite2[8] = reinterpret_cast<void*>(&aegp_get_stream_name_v2);
@@ -13918,27 +13981,40 @@ int32_t __cdecl aegp_get_new_effect_stream_by_index_v2(
     int32_t plugin_id, void* effect, int32_t index, void** stream) {
   std::size_t instance_index = 0;
   const auto* instance = resolve_effect_instance(effect, plugin_id, &instance_index);
-  if (plugin_id <= 0 || !instance || !stream ||
-      index <= 0 || index >= static_cast<int32_t>(g_aegp_legacy_effect_streams.size()) ||
-      static_cast<std::size_t>(index) >= g_active_ui_param_count) return 4;
-  auto& value = g_aegp_legacy_effect_streams[static_cast<std::size_t>(index)];
-  if (value.live) return 4;
+  const auto* parameter = instance
+      ? find_effect_parameter(instance->installed_key, index) : nullptr;
+  if (plugin_id <= 0 || !instance || !stream || !parameter) return 4;
+  const auto free_slot = std::find_if(g_aegp_legacy_effect_streams.begin(),
+      g_aegp_legacy_effect_streams.end(), [](const auto& value) { return !value.live; });
+  if (free_slot == g_aegp_legacy_effect_streams.end()) return 4;
+  auto& value = *free_slot;
+  const std::size_t slot = static_cast<std::size_t>(
+      std::distance(g_aegp_legacy_effect_streams.begin(), free_slot));
+  uint32_t generation = ++g_aegp_legacy_effect_stream_generation;
+  if (generation == 0) generation = ++g_aegp_legacy_effect_stream_generation;
+  const uintptr_t encoded = (static_cast<uintptr_t>(generation) << 8) |
+      (static_cast<uintptr_t>(slot) << 2) | 3;
+  if (encoded <= 3) return 4;
   value.param_index = index;
   value.live = true;
   value.hidden = false;
   value.value_live = false;
   value.effect_instance_index = static_cast<uint32_t>(instance_index);
   value.effect_instance_generation = instance->generation;
+  value.generation = generation;
   value.owner_plugin_id = plugin_id;
   ++g_aegp_stream_acquires;
-  *stream = &value.object;
+  *stream = reinterpret_cast<void*>(encoded);
   return 0;
 }
 AegpLegacyEffectStream* legacy_effect_stream(void* stream) {
-  for (auto& value : g_aegp_legacy_effect_streams) {
-    if (stream == &value.object && value.live) return &value;
-  }
-  return nullptr;
+  const uintptr_t encoded = reinterpret_cast<uintptr_t>(stream);
+  if (!stream || (encoded & 3) != 3) return nullptr;
+  const std::size_t slot = (encoded >> 2) & 0x3f;
+  const uint32_t generation = static_cast<uint32_t>(encoded >> 8);
+  if (slot >= g_aegp_legacy_effect_streams.size()) return nullptr;
+  auto& value = g_aegp_legacy_effect_streams[slot];
+  return value.live && value.generation == generation ? &value : nullptr;
 }
 bool legacy_effect_stream_parent_live(const AegpLegacyEffectStream& stream) {
   if (stream.effect_instance_index >= g_aegp_effect_instances.size()) return false;
@@ -13948,19 +14024,19 @@ bool legacy_effect_stream_parent_live(const AegpLegacyEffectStream& stream) {
 int32_t __cdecl aegp_get_stream_name_v2(void* stream, uint8_t, char* name) {
   auto* value = legacy_effect_stream(stream);
   if (!value || !legacy_effect_stream_parent_live(*value) || !name) return 4;
-  constexpr std::array<const char*, 5> names{{"", "Amount", "Center", "Vector", "Tint"}};
-  if (value->param_index < 1 || value->param_index >= static_cast<int32_t>(names.size()))
-    return 4;
-  std::strcpy(name, names[static_cast<std::size_t>(value->param_index)]);
+  const auto& instance = g_aegp_effect_instances[value->effect_instance_index];
+  const auto* parameter = find_effect_parameter(instance.installed_key, value->param_index);
+  if (!parameter) return 4;
+  std::strcpy(name, parameter->name);
   return 0;
 }
 int32_t __cdecl aegp_get_stream_type_v2(void* stream, int32_t* type) {
   auto* value = legacy_effect_stream(stream);
   if (!value || !legacy_effect_stream_parent_live(*value) || !type) return 4;
-  constexpr std::array<int32_t, 5> types{{0, 5, 4, 2, 6}};
-  if (value->param_index < 1 || value->param_index >= static_cast<int32_t>(types.size()))
-    return 4;
-  *type = types[static_cast<std::size_t>(value->param_index)];
+  const auto& instance = g_aegp_effect_instances[value->effect_instance_index];
+  const auto* parameter = find_effect_parameter(instance.installed_key, value->param_index);
+  if (!parameter) return 4;
+  *type = parameter->type;
   return 0;
 }
 int32_t __cdecl aegp_get_new_stream_value_v2(
@@ -13969,24 +14045,32 @@ int32_t __cdecl aegp_get_new_stream_value_v2(
   auto* value = legacy_effect_stream(stream);
   if (!value || !legacy_effect_stream_parent_live(*value) ||
       plugin_id != value->owner_plugin_id || value->value_live || !time ||
-      time->scale == 0 || !output || value->param_index < 1 || value->param_index > 4)
+      time->scale == 0 || !output)
     return 4;
+  const auto& instance = g_aegp_effect_instances[value->effect_instance_index];
+  const auto* parameter = find_effect_parameter(instance.installed_key, value->param_index);
+  if (!parameter) return 4;
   output->stream = stream;
   output->value.fill(std::byte{});
-  const auto& instance = g_aegp_effect_instances[value->effect_instance_index];
-  std::memcpy(output->value.data(),
-              instance.parameter_values[static_cast<std::size_t>(value->param_index - 1)].data(),
-              sizeof(instance.parameter_values[0]));
+  if (value->param_index == 0) {
+    std::memcpy(output->value.data(), &instance.layer, sizeof(instance.layer));
+  } else {
+    std::memcpy(output->value.data(),
+                instance.parameter_values[static_cast<std::size_t>(value->param_index - 1)].data(),
+                sizeof(instance.parameter_values[0]));
+  }
   value->value_live = true;
+  value->checked_out_value = output;
   ++g_aegp_stream_value_acquires;
   return 0;
 }
 int32_t __cdecl aegp_dispose_stream_value_v2(AegpStreamValue* output) {
   if (!output) return 4;
   auto* stream = legacy_effect_stream(output->stream);
-  if (!stream || !stream->value_live) return 4;
+  if (!stream || !stream->value_live || stream->checked_out_value != output) return 4;
   output->stream = nullptr;
   stream->value_live = false;
+  stream->checked_out_value = nullptr;
   ++g_aegp_stream_value_disposes;
   return 0;
 }
@@ -13995,11 +14079,14 @@ int32_t __cdecl aegp_set_stream_value_v2(
   auto* value = legacy_effect_stream(stream);
   if (!value || !legacy_effect_stream_parent_live(*value) ||
       plugin_id != value->owner_plugin_id || !value->value_live || !input ||
-      input->stream != stream || value->param_index < 1 || value->param_index > 4)
+      input->stream != stream || value->checked_out_value != input)
     return 4;
+  const auto& current = g_aegp_effect_instances[value->effect_instance_index];
+  const auto* parameter = find_effect_parameter(current.installed_key, value->param_index);
+  if (!parameter || value->param_index == 0 || !parameter->writable) return 4;
   std::array<double, 4> candidate{};
   std::memcpy(candidate.data(), input->value.data(), sizeof(candidate));
-  for (int32_t index = 0; index < value->param_index; ++index)
+  for (std::size_t index = 0; index < candidate.size(); ++index)
     if (!std::isfinite(candidate[static_cast<std::size_t>(index)])) return 4;
   auto& instance = g_aegp_effect_instances[value->effect_instance_index];
   instance.parameter_values[static_cast<std::size_t>(value->param_index - 1)] = candidate;
@@ -14013,6 +14100,7 @@ int32_t __cdecl aegp_dispose_stream_v2(void* stream) {
   value->param_index = -1;
   value->effect_instance_index = 0;
   value->effect_instance_generation = 0;
+  value->checked_out_value = nullptr;
   value->owner_plugin_id = 0;
   ++g_aegp_stream_disposes;
   return 0;
@@ -14021,7 +14109,8 @@ int32_t __cdecl aegp_set_dynamic_stream_flag_v2(
     void* stream, uint32_t one_flag, uint8_t undoable, uint8_t set) {
   auto* value = legacy_effect_stream(stream);
   constexpr uint32_t kHidden = 1u << 1;
-  if (!value || one_flag != kHidden || undoable > 1 || set > 1) return 4;
+  if (!value || !legacy_effect_stream_parent_live(*value) ||
+      one_flag != kHidden || undoable > 1 || set > 1) return 4;
   value->hidden = set != 0;
   return 0;
 }
@@ -20342,7 +20431,8 @@ bool verify_aegp_installed_effect_catalog_suite4() {
   bool ok = acquire_suite("AEGP Effect Suite", 4, &acquired) == 0 &&
             acquired == g_aegp_effect_suite4.data();
   int32_t count = -1;
-  ok = ok && aegp_get_num_installed_effects(&count) == 0 && count == 1;
+  ok = ok && aegp_get_num_installed_effects(&count) == 0 &&
+       count == static_cast<int32_t>(kAegpInstalledEffects.size());
   count = 0x12345678;
   ok = ok && aegp_get_num_installed_effects(nullptr) == 4 && count == 0x12345678;
 
@@ -20350,7 +20440,10 @@ bool verify_aegp_installed_effect_catalog_suite4() {
   ok = ok && aegp_get_next_installed_effect(kAegpInstalledEffectKeyNone, &key) == 0 &&
        key == kAegpInstalledEffects[0].key;
   const int32_t installed_key = key;
-  ok = ok && aegp_get_next_installed_effect(installed_key, &key) == 0 &&
+  for (std::size_t index = 1; index < kAegpInstalledEffects.size(); ++index)
+    ok = ok && aegp_get_next_installed_effect(key, &key) == 0 &&
+         key == kAegpInstalledEffects[index].key;
+  ok = ok && aegp_get_next_installed_effect(key, &key) == 0 &&
        key == kAegpInstalledEffectKeyNone;
   key = 0x12345678;
   ok = ok && aegp_get_next_installed_effect(9999, &key) == 4 &&
@@ -21118,7 +21211,158 @@ bool verify_aegp_effect_stack() {
   return ok && suite_leases_balanced();
 }
 
+bool verify_aegp_projector_levels() {
+  const auto saved_instances = g_aegp_effect_instances;
+  const auto saved_leases = g_aegp_effect_leases;
+  const auto saved_streams = g_aegp_legacy_effect_streams;
+  const bool saved_mode = g_aegp_comp_idle_roundtrip_mode;
+  const uint32_t stream_acquires_before = g_aegp_stream_acquires;
+  const uint32_t stream_disposes_before = g_aegp_stream_disposes;
+  const uint32_t value_acquires_before = g_aegp_stream_value_acquires;
+  const uint32_t value_disposes_before = g_aegp_stream_value_disposes;
+  g_aegp_effect_instances = {};
+  g_aegp_effect_leases = {};
+  g_aegp_legacy_effect_streams = {};
+  g_aegp_comp_idle_roundtrip_mode = true;
+
+  bool ok = true;
+  int32_t count = -1;
+  int32_t key = kAegpInstalledEffectKeyNone;
+  int32_t easy_levels_key = kAegpInstalledEffectKeyNone;
+  std::array<char, kAegpMaxEffectCategoryNameSize> match_name{};
+  ok = aegp_get_num_installed_effects(&count) == 0 && count == 3;
+  for (int32_t index = 0; ok && index < count; ++index) {
+    ok = aegp_get_next_installed_effect(key, &key) == 0 && key != 0 &&
+         aegp_get_effect_match_name(key, match_name.data()) == 0;
+    if (ok && std::strcmp(match_name.data(), "ADBE Easy Levels") == 0)
+      easy_levels_key = key;
+  }
+  int32_t end_key = -1;
+  ok = ok && easy_levels_key != 0 &&
+       aegp_get_next_installed_effect(key, &end_key) == 0 && end_key == 0;
+
+  void* effect = nullptr;
+  ok = ok && aegp_apply_effect(7, &g_aegp_layers[1], easy_levels_key, &effect) == 0;
+  ok = ok && aegp_get_effect_num_param_streams_v2(effect, &count) == 0 && count == 7;
+  void* input = nullptr;
+  void* black = nullptr;
+  void* white = nullptr;
+  void* black_duplicate = nullptr;
+  ok = ok && aegp_get_new_effect_stream_by_index_v2(7, effect, 0, &input) == 0 &&
+       aegp_get_new_effect_stream_by_index_v2(7, effect, 4, &black) == 0 &&
+       aegp_get_new_effect_stream_by_index_v2(7, effect, 5, &white) == 0 &&
+       aegp_get_new_effect_stream_by_index_v2(7, effect, 4, &black_duplicate) == 0 &&
+       input != black && black != white && black != black_duplicate;
+
+  char name[64]{};
+  int32_t type = -1;
+  AegpTime time{0, 30};
+  AegpStreamValue input_value{}, black_value{}, white_value{}, duplicate_value{};
+  ok = ok && aegp_get_stream_name_v2(input, 1, name) == 0 &&
+       std::strcmp(name, "Input") == 0 && aegp_get_stream_type_v2(input, &type) == 0 &&
+       type == 9 && aegp_get_new_stream_value_v2(7, input, 1, &time, 1, &input_value) == 0;
+  void* input_layer = nullptr;
+  std::memcpy(&input_layer, input_value.value.data(), sizeof(input_layer));
+  ok = ok && input_layer == &g_aegp_layers[1] &&
+       aegp_set_stream_value_v2(7, input, &input_value) == 4;
+
+  ok = ok && aegp_get_stream_name_v2(black, 1, name) == 0 &&
+       std::strcmp(name, "Input Black") == 0 && aegp_get_stream_type_v2(black, &type) == 0 &&
+       type == 5 && aegp_get_new_stream_value_v2(7, black, 1, &time, 1, &black_value) == 0 &&
+       aegp_get_stream_name_v2(white, 1, name) == 0 &&
+       std::strcmp(name, "Input White") == 0 && aegp_get_stream_type_v2(white, &type) == 0 &&
+       type == 5 && aegp_get_new_stream_value_v2(7, white, 1, &time, 1, &white_value) == 0 &&
+       aegp_get_new_stream_value_v2(7, black_duplicate, 1, &time, 1, &duplicate_value) == 0;
+  double black_default = -1.0, white_default = -1.0, duplicate_default = -1.0;
+  std::memcpy(&black_default, black_value.value.data(), sizeof(double));
+  std::memcpy(&white_default, white_value.value.data(), sizeof(double));
+  std::memcpy(&duplicate_default, duplicate_value.value.data(), sizeof(double));
+  const double black_changed = .62745098;
+  const double white_changed = .92156862745;
+  std::memcpy(black_value.value.data(), &black_changed, sizeof(double));
+  std::memcpy(white_value.value.data(), &white_changed, sizeof(double));
+  ok = ok && black_default == 0.0 && white_default == 1.0 && duplicate_default == 0.0 &&
+       aegp_set_stream_value_v2(8, black, &black_value) == 4 &&
+       aegp_set_stream_value_v2(7, black, &black_value) == 0 &&
+       aegp_set_stream_value_v2(7, white, &white_value) == 0;
+
+  const AegpStreamValue stale_black_value = black_value;
+  ok = ok && aegp_dispose_stream_value_v2(&duplicate_value) == 0 &&
+       aegp_dispose_stream_value_v2(&white_value) == 0 &&
+       aegp_dispose_stream_value_v2(&black_value) == 0;
+  AegpStreamValue black_readback{}, white_readback{};
+  ok = ok && aegp_get_new_stream_value_v2(7, black_duplicate, 1, &time, 1,
+                                           &black_readback) == 0 &&
+       aegp_get_new_stream_value_v2(7, white, 1, &time, 1, &white_readback) == 0;
+  double black_actual = 0.0, white_actual = 0.0;
+  std::memcpy(&black_actual, black_readback.value.data(), sizeof(double));
+  std::memcpy(&white_actual, white_readback.value.data(), sizeof(double));
+  ok = ok && std::abs(black_actual - black_changed) < 1e-12 &&
+       std::abs(white_actual - white_changed) < 1e-12 &&
+       aegp_dispose_stream_value_v2(&white_readback) == 0 &&
+       aegp_dispose_stream_value_v2(&black_readback) == 0 &&
+       aegp_dispose_stream_value_v2(&input_value) == 0;
+  AegpStreamValue current_black_value{};
+  AegpStreamValue stale_copy = stale_black_value;
+  ok = ok && aegp_get_new_stream_value_v2(7, black, 1, &time, 1,
+                                           &current_black_value) == 0 &&
+       aegp_dispose_stream_value_v2(&stale_copy) == 4 &&
+       stale_copy.stream == black &&
+       aegp_dispose_stream_value_v2(&current_black_value) == 0;
+
+  std::array<void*, kAegpLegacyEffectStreamCapacity - 4> capacity_streams{};
+  for (std::size_t index = 0; ok && index < capacity_streams.size(); ++index)
+    ok = aegp_get_new_effect_stream_by_index_v2(7, effect, 4,
+                                                &capacity_streams[index]) == 0;
+  void* unchanged = reinterpret_cast<void*>(static_cast<uintptr_t>(0x1234));
+  ok = ok && aegp_get_new_effect_stream_by_index_v2(7, effect, 4, &unchanged) == 4 &&
+       unchanged == reinterpret_cast<void*>(static_cast<uintptr_t>(0x1234));
+  for (auto iterator = capacity_streams.rbegin(); iterator != capacity_streams.rend(); ++iterator)
+    if (*iterator) ok = aegp_dispose_stream_v2(*iterator) == 0 && ok;
+  ok = aegp_dispose_stream_v2(black_duplicate) == 0 && ok;
+  ok = aegp_dispose_stream_v2(white) == 0 && ok;
+  ok = aegp_dispose_stream_v2(black) == 0 && ok;
+  ok = aegp_dispose_stream_v2(input) == 0 && ok;
+
+  void* reused_stream = nullptr;
+  type = 0x12345678;
+  ok = ok && aegp_get_new_effect_stream_by_index_v2(7, effect, 4, &reused_stream) == 0 &&
+       reused_stream != black && aegp_get_stream_type_v2(black, &type) == 4 &&
+       type == 0x12345678 && aegp_get_stream_type_v2(reused_stream, &type) == 0 &&
+       type == 5 && aegp_dispose_stream_v2(reused_stream) == 0;
+
+  void* stale_stream = nullptr;
+  ok = ok && aegp_get_new_effect_stream_by_index_v2(7, effect, 4, &stale_stream) == 0 &&
+       aegp_delete_layer_effect(effect) == 0;
+  type = 0x12345678;
+  ok = ok && aegp_get_stream_type_v2(stale_stream, &type) == 4 &&
+       type == 0x12345678 && aegp_dispose_stream_v2(stale_stream) == 0 &&
+       aegp_dispose_effect(effect) == 0;
+
+  ok = ok && g_aegp_stream_acquires - stream_acquires_before ==
+                 g_aegp_stream_disposes - stream_disposes_before &&
+       g_aegp_stream_value_acquires - value_acquires_before ==
+                 g_aegp_stream_value_disposes - value_disposes_before;
+  g_aegp_effect_instances = saved_instances;
+  g_aegp_effect_leases = saved_leases;
+  g_aegp_legacy_effect_streams = saved_streams;
+  g_aegp_comp_idle_roundtrip_mode = saved_mode;
+  return ok;
+}
+
 int wmain(int argc, wchar_t **argv) {
+  if (argc == 2 && std::wstring(argv[1]) == L"--self-test-aegp-projector-levels") {
+    const bool passed = verify_aegp_projector_levels();
+    std::cout << "{\"projector_levels\":\""
+              << (passed ? "passed" : "failed")
+              << "\",\"catalog\":[\"ADBE Easy Levels\",\"ADBE Pro Levels\"],"
+                 "\"stream_suite\":{\"version\":7,\"slots\":22,\"size_x64\":176},"
+                 "\"index_zero_input\":true,\"simultaneous_stream_refs\":true,"
+                 "\"parameters\":[\"Input\",\"Input Black\",\"Input White\"],"
+                 "\"value_roundtrip\":true,\"reverse_dispose\":true,"
+                 "\"fail_closed\":true}\n";
+    return passed ? 0 : 71;
+  }
   if (argc == 2 && std::wstring(argv[1]) == L"--self-test-aegp-effect-stack") {
     const bool passed = verify_aegp_effect_stack();
     std::cout << "{\"stack_mutation\":\"" << (passed ? "passed" : "failed")

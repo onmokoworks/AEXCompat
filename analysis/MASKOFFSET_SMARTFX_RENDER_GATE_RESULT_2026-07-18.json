@@ -12,8 +12,8 @@
                                                },
                                     "worker":  {
                                                    "path":  "target/minihost-build/aex_smart_worker.exe",
-                                                   "size_bytes":  827904,
-                                                   "sha256":  "66ead9839ba02540c309b9ffdd8ce0a898f94e49baf75bf9a90be55a6c6cd68d"
+                                                   "size_bytes":  845312,
+                                                   "sha256":  "da3ed8263e78dda3c2451dc3feb72478cbd3c13f94acf323e852b69ae8a3298d"
                                                },
                                     "request":  {
                                                     "path":  "target/render-requests/maskoffset-color-fill-20260713-001.json",

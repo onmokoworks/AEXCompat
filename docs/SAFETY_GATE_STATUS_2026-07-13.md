@@ -203,6 +203,14 @@ rolls order changes back on failure. Stream Suite v2 binds each effect stream
 to its creating plug-in owner and parent generation; foreign-owner and
 non-finite SetStreamValue attempts leave state unchanged.
 
+The Projector-compatible Stream Suite v2 path replaces parameter-index-addressed
+static objects with a bounded 16-slot, generation-encoded StreamRef pool.
+Metadata, value, mutation, and disposal paths validate the owner, stream slot
+generation, parent effect generation, and exact checked-out value address.
+Disposed handles cannot revive after slot reuse, stale value copies cannot
+dispose a later checkout, index 0 layer values are read-only, and failed Apply
+or Duplicate rollback preserves the consumed instance generation.
+
 AEGP Keyframe Suite v5 now exposes all 22 callback slots and bounds each mask
 outline stream to 64 time-sorted keyframes and 256 concurrent checked values.
 Keyframe values are independently

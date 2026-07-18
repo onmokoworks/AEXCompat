@@ -1,10 +1,14 @@
 import json
+import os
 import subprocess
 import tempfile
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[1]
-SDK_HEADERS = Path(r"C:\Program Files\Adobe\AfterEffectsSDK\Examples\Headers")
+SDK_ROOT = os.environ.get("AFTER_EFFECTS_SDK_ROOT")
+SDK_HEADERS = Path(SDK_ROOT) / "Examples" / "Headers" if SDK_ROOT else None
 BUILD = ROOT / "target/minihost-build-adv-time-v1"
 WORKER = BUILD / "Release/aex_render_worker.exe"
 VS_ROOT = Path(r"C:\Program Files\Microsoft Visual Studio\18\Community")
@@ -20,6 +24,8 @@ def run_in_vs_environment(command, *, cwd=None, timeout=420):
 
 
 def test_sdk_declares_independent_v1_four_slot_abi():
+    if SDK_HEADERS is None or not SDK_HEADERS.is_dir():
+        pytest.skip("set AFTER_EFFECTS_SDK_ROOT to a valid After Effects SDK root")
     source = r'''#include "AEConfig.h"
 #include "entry.h"
 #include <type_traits>

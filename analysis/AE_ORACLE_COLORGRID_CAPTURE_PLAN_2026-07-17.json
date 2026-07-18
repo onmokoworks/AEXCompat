@@ -62,34 +62,34 @@
     "current_artifact_snapshot":  {
                                       "source":  {
                                                      "path":  "D:\\Projects\\01_Project\\04_Tools\\AEXCompat\\minihost\\src\\l2_main.cpp",
-                                                     "size_bytes":  1228407,
-                                                     "sha256":  "7c22442f881ec9ca8436cce844b3cd43ff4c33aa86d703798d8b8025e57757ce"
+                                                     "size_bytes":  1241709,
+                                                     "sha256":  "3beb22dd515f2933bc514b821fd5eaa386c189e0ef3855b009a622889bebf5d8"
                                                  },
                                       "l2_worker":  {
                                                         "path":  "D:\\Projects\\01_Project\\04_Tools\\AEXCompat\\target\\minihost-build\\aex_l2_worker.exe",
-                                                        "size_bytes":  738304,
-                                                        "sha256":  "6a4ef95698e107e4e532c8043101c6513f60926e44ef488aede0fdbab88766dc"
+                                                        "size_bytes":  756736,
+                                                        "sha256":  "cc8958ea36af84946d31f83eb61f40d6b375c3a7484197c2fac0968881136bfc"
                                                     },
                                       "render_worker":  {
                                                             "path":  "D:\\Projects\\01_Project\\04_Tools\\AEXCompat\\target\\minihost-build\\aex_render_worker.exe",
-                                                            "size_bytes":  811008,
-                                                            "sha256":  "2cba31875b7e0f39fff870a3fbff4fc14442fe4d73755dbb9b1f9b6be96d0e8e"
+                                                            "size_bytes":  828928,
+                                                            "sha256":  "373f5b48b2afb8b5b0b168e0ebb022312b2b1eb1ad6ffbd27f328c9a60b40055"
                                                         },
                                       "smart_worker":  {
                                                            "path":  "D:\\Projects\\01_Project\\04_Tools\\AEXCompat\\target\\minihost-build\\aex_smart_worker.exe",
-                                                           "size_bytes":  827904,
-                                                           "sha256":  "66ead9839ba02540c309b9ffdd8ce0a898f94e49baf75bf9a90be55a6c6cd68d"
+                                                           "size_bytes":  845824,
+                                                           "sha256":  "fd69dd640b3ae2ddbe6d8caa595069f9e10a1bd2d9aac2cc8d069bf6b92b33ad"
                                                        },
                                       "harness":  {
                                                       "path":  "D:\\Projects\\01_Project\\04_Tools\\AEXCompat\\broker\\target\\debug\\aexcompat-harness.exe",
                                                       "size_bytes":  19973632,
-                                                      "sha256":  "b8aec7f1ea529a88d64af87c840999d7c6eeee1ff80c161f15e16f087667bd0f"
+                                                      "sha256":  "dc83b78a71d43c4bf933c9dc93033bc47fd4208590c30ba96efed45cf78d5f0c"
                                                   }
                                   },
     "runtime_evidence_authentication":  {
                                             "path":  "D:\\Projects\\01_Project\\04_Tools\\AEXCompat\\analysis\\SDK_COLORGRID_ARBITRARY_TIMELINE_RESULT_2026-07-17.json",
                                             "size_bytes":  10042,
-                                            "sha256":  "27992e41899a0925c7ba5a88fce42adee0b3bc0858713d029a4813f0d604f79d"
+                                            "sha256":  "ca5a2bf1a0ee0206240c25ab1a47989bf0ff842a956a1267a582f7b70f4bcaea"
                                         },
     "expected_raw_provenance":  {
                                     "runtime_evidence":  "analysis/SDK_COLORGRID_ARBITRARY_TIMELINE_RESULT_2026-07-17.json",

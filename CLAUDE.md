@@ -12,8 +12,8 @@ and bounded image input/output are now the main implementation path.
 - Do not bypass identity checks, approval receipts, dependency manifests, or
   output bounds to make an AEX appear compatible.
 - Keep `imports/` as frozen provenance. Do not redistribute Adobe SDK headers
-  or source; the SDK at `C:\Program Files\Adobe\AfterEffectsSDK` is an external
-  ABI verification and fixture-build input only.
+  or source; the SDK selected by `AFTER_EFFECTS_SDK_ROOT` is an external ABI
+  verification and fixture-build input only.
 - Do not serialize private absolute paths, plug-in bytes, raw image contents,
   or machine-specific authorization data into shareable reports.
 - Compatibility gaps must fail explicitly and become reproducible diagnostics,
@@ -24,6 +24,8 @@ and bounded image input/output are now the main implementation path.
 ## Canonical Verification
 
 ```powershell
+[Environment]::SetEnvironmentVariable('AFTER_EFFECTS_SDK_ROOT', 'C:\path\to\AfterEffectsSDK', 'User')
+# Reopen PowerShell after changing the user environment.
 python -m pip install -r requirements-dev.txt
 python -m pytest -q
 cargo test --manifest-path broker\Cargo.toml --workspace

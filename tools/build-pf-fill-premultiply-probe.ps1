@@ -1,9 +1,11 @@
 param(
-    [string]$AfterEffectsSdk = "C:\Program Files\Adobe\AfterEffectsSDK\Examples",
+    [string]$AfterEffectsSdk = $env:AFTER_EFFECTS_SDK_ROOT,
     [string]$VisualStudio = "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools"
 )
 
 $ErrorActionPreference = "Stop"
+$AfterEffectsSdk = & "$PSScriptRoot\resolve-after-effects-sdk.ps1" $AfterEffectsSdk
+$AfterEffectsSdk = Join-Path $AfterEffectsSdk "Examples"
 $repository = Split-Path -Parent $PSScriptRoot
 $source = Join-Path $repository "instruments\pf-fill-premultiply-probe"
 $build = Join-Path $repository "target\pf-fill-premultiply-probe-build"

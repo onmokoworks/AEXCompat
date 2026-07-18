@@ -5,11 +5,11 @@
     "authenticated_artifacts":  {
                                     "release_harness":  {
                                                             "size_bytes":  9945600,
-                                                            "sha256":  "b713fb4e4abb07b792943028c312027a76eb55b9c43c6cc9149c5937579ca80a"
+                                                            "sha256":  "bda35050e1505bb7cd1996738d965ebebb4c8f0812518ea13db7c3af129599a8"
                                                         },
                                     "canonical_smart_worker":  {
-                                                                   "size_bytes":  827904,
-                                                                   "sha256":  "66ead9839ba02540c309b9ffdd8ce0a898f94e49baf75bf9a90be55a6c6cd68d"
+                                                                   "size_bytes":  845824,
+                                                                   "sha256":  "fd69dd640b3ae2ddbe6d8caa595069f9e10a1bd2d9aac2cc8d069bf6b92b33ad"
                                                                },
                                     "sdk_smartypants_fixture":  {
                                                                     "size_bytes":  31232,

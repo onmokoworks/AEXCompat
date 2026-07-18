@@ -4,9 +4,12 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+import pytest
+
 
 ROOT = Path(__file__).resolve().parents[1]
-SDK_HEADERS = Path(r"C:\Program Files\Adobe\AfterEffectsSDK\Examples\Headers")
+SDK_ROOT = os.environ.get("AFTER_EFFECTS_SDK_ROOT")
+SDK_HEADERS = Path(SDK_ROOT) / "Examples" / "Headers" if SDK_ROOT else None
 WORKER = ROOT / "target" / "minihost-build-v18" / "Release" / "aex_render_worker.exe"
 
 
@@ -23,6 +26,8 @@ def _visual_studio_installation() -> Path:
 
 
 def test_sdk_header_compiled_x64_probe_fixes_v1_to_ten_ordered_slots():
+    if SDK_HEADERS is None or not SDK_HEADERS.is_dir():
+        pytest.skip("set AFTER_EFFECTS_SDK_ROOT to a valid After Effects SDK root")
     source = r'''
 #include <cstddef>
 #include <iostream>

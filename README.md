@@ -68,6 +68,12 @@ macOS、Apple Silicon、Windows ARM64は現時点で対象外です。After Effe
 - CMake
 - ローカルのAfter Effects SDK（native workerやprobeをbuildする場合）
 
+SDKを使うテスト・ビルドの前に、SDKルートをユーザー環境変数へ設定し、PowerShellを開き直してください。
+
+```powershell
+[Environment]::SetEnvironmentVariable('AFTER_EFFECTS_SDK_ROOT', 'C:\path\to\AfterEffectsSDK', 'User')
+```
+
 #### UIを起動
 
 ```powershell
@@ -223,6 +229,12 @@ macOS, Apple Silicon, and Windows ARM64 are not currently supported. After Effec
 ### Quick Start
 
 Requirements: Windows x64, Rust/Cargo, Visual Studio 2022 C++ Build Tools, CMake, and a local After Effects SDK when building native workers or probes.
+
+Before SDK-backed tests or builds, set the SDK root as a user environment variable and reopen PowerShell:
+
+```powershell
+[Environment]::SetEnvironmentVariable('AFTER_EFFECTS_SDK_ROOT', 'C:\path\to\AfterEffectsSDK', 'User')
+```
 
 ```powershell
 git clone https://github.com/onmokoworks/AEXCompat.git
