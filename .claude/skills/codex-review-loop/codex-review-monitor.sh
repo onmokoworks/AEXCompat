@@ -67,8 +67,15 @@ while true; do
   # clean supersedes it (finding 2). A Codex error is NOT a verdict — it is
   # ignored here so a transient error does not stop the watch; the loop keeps
   # waiting for the real review.
+  #
+  # clean_ts scans the FULL history, so find_ts must too, or the two are
+  # asymmetric: re-running on the SAME head after only replying (no new commit)
+  # leaves the superseding finding before SINCE, find_ts goes empty, and the
+  # stale head-bound clean emits a premature CLEAN that the merge guard (which
+  # checks all comments) then refuses — an early-clean/refuse loop. Compare
+  # against all findings; only the PRINTED list below is scoped to new comments.
   clean_ts=$(codex_clean_ts_for_head "$head" <<<"$issue_comments")
-  find_ts=$(codex_finding_max_ts <<<"$new_pr_comments")
+  find_ts=$(codex_finding_max_ts <<<"$pr_comments")
 
   # 2. Findings newer than any accepted clean supersede it.
   if [ -n "$find_ts" ] && { [ -z "$clean_ts" ] || [[ "$find_ts" > "$clean_ts" ]]; }; then
