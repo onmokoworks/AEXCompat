@@ -54,7 +54,7 @@ def fixture(tmp_path: Path):
     adapter.write_text(
         "import argparse, hashlib, json\n"
         "p=argparse.ArgumentParser()\n"
-        "[p.add_argument(x) for x in ('--depth','--runner','--plugin','--input','--output','--world-dump-dir')]\n"
+        "[p.add_argument(x) for x in ('--depth','--runner','--plugin','--input','--output','--request','--world-dump-dir')]\n"
         "a=p.parse_args(); bpp={'argb8':4,'argb16':8,'argb32f':16}[a.depth]\n"
         "data=b'output-'+a.depth.encode(); open(a.output,'wb').write(data)\n"
         "import os; os.makedirs(a.world_dump_dir); open(os.path.join(a.world_dump_dir,'000-smart-input-2x2.raw'),'wb').write(b'i'*(4*bpp)); open(os.path.join(a.world_dump_dir,'001-smart-output-2x2.raw'),'wb').write(b'o'*(4*bpp))\n"
@@ -91,6 +91,7 @@ def test_creates_self_contained_schema_valid_bundle(tmp_path):
     assert (output / "outputs" / "argb16.png").is_file()
     metadata = json.loads((output / "diagnostics" / "run.json").read_text())
     assert len(metadata["bundle_runner"]["sha256"]) == 64
+    assert metadata["status"] == "completed"
     assert report["parameters"][0]["initial_value"] == 50
     assert report["results"][0]["raw_input"]["path"].startswith("raw/argb8/")
 
@@ -103,7 +104,9 @@ def test_refuses_existing_bundle_and_identity_mismatch(tmp_path):
     output.rmdir()
     (manifest.parent / "inputs" / "input.png").write_bytes(b"changed")
     assert invoke(manifest, output, adapter).returncode != 0
-    assert not output.exists()
+    assert output.exists()
+    assert (output / "diagnostics" / "failure.json").is_file()
+    assert not (output / "report.json").exists()
 
 
 def test_semantic_report_is_reproducible(tmp_path):
@@ -141,8 +144,8 @@ def test_failure_leaves_bounded_diagnostic_bundle(tmp_path):
     report = json.loads((output / "report.json").read_text())
     assert {item["classification"] for item in report["results"]} == {"nonzero_exit"}
     detail = json.loads((output / "diagnostics" / "run.json").read_text())
-    assert detail["diagnostics"]["argb8"]["stderr"]["truncated"] is True
-    assert len(detail["diagnostics"]["argb8"]["stderr"]["text"].encode()) <= 65536
+    assert detail["depths"]["argb8"]["stderr"]["truncated"] is True
+    assert len(detail["depths"]["argb8"]["stderr"]["text"].encode()) <= 65536
 
 
 def test_adapter_cannot_claim_success_for_wrong_output_identity(tmp_path):
@@ -156,8 +159,74 @@ def test_adapter_cannot_claim_success_for_wrong_output_identity(tmp_path):
     assert {item["classification"] for item in report["results"]} == {"invalid_output"}
 
 
+def test_request_sidecar_records_execution_and_redacted_full_argv(tmp_path):
+    manifest, adapter = fixture(tmp_path)
+    output = tmp_path / "bundle"
+    assert invoke(manifest, output, adapter).returncode == 0
+    request = json.loads((output / "requests" / "argb8.json").read_text())
+    assert request["timing"] == {"frame": 0, "time_scale": 30, "time_step": 1}
+    assert request["assignments"] == [{"slot": 1, "value": 50}]
+    run = json.loads((output / "diagnostics" / "run.json").read_text())
+    argv = run["depths"]["argb8"]["argv"]
+    assert [item["index"] for item in argv] == list(range(len(argv)))
+    assert any(item["role"] == "request" for item in argv if item["kind"] == "path")
+    assert str(manifest.parent) not in json.dumps(run)
+
+
+def test_validator_failure_persists_failure_evidence_without_report(tmp_path):
+    manifest, adapter = fixture(tmp_path)
+    adapter.write_text(
+        adapter.read_text(encoding="utf-8").replace("'row_bytes':2*bpp", "'row_bytes':1"),
+        encoding="utf-8",
+    )
+    output = tmp_path / "bundle"
+    completed = invoke(manifest, output, adapter)
+    assert completed.returncode != 0
+    failure = json.loads((output / "diagnostics" / "failure.json").read_text())
+    assert failure["stage"] == "validate_report"
+    assert failure["report_written"] is False
+    assert failure["report_status"] == "not_a_report"
+    assert not (output / "report.json").exists()
+
+
+def test_captured_oracle_is_compared_per_depth(tmp_path):
+    manifest_path, adapter = fixture(tmp_path)
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    oracle_root = manifest_path.parent / "oracle"
+    oracle_root.mkdir()
+    oracle_artifacts = {}
+    for depth, bytes_per_pixel in (("argb8", 4), ("argb16", 8)):
+        oracle = oracle_root / f"{depth}.raw"
+        oracle.write_bytes(b"o" * (4 * bytes_per_pixel))
+        oracle_artifacts[depth] = identity(oracle, f"oracle/{depth}.raw")
+    manifest["oracle"] = {
+        "state": "captured",
+        "identity_match": True,
+        "artifacts": oracle_artifacts,
+    }
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    output = tmp_path / "bundle"
+    assert invoke(manifest_path, output, adapter).returncode == 0
+    report = json.loads((output / "report.json").read_text())
+    assert {item["oracle"]["state"] for item in report["results"]} == {"captured"}
+    assert {item["oracle"]["exact"] for item in report["results"]} == {True}
+
+
 def test_source_has_no_host_reimplementation():
     source = RUNNER.read_text(encoding="utf-8")
     assert "DEPTH_COMMANDS" in source
-    assert "subprocess.run" in source
+    assert "subprocess.Popen" in source
+    assert "capture_output" not in source
+    assert "MAX_DIAGNOSTIC_BYTES" in source
     assert "LoadLibrary" not in source
+
+
+def test_harness_exposes_depth_variants_of_typed_request_cli():
+    source = (ROOT / "broker" / "crates" / "harness" / "src" / "main.rs").read_text()
+    for flag in (
+        '"--render-experimental-smart-request"',
+        '"--render-experimental-smart-request-16"',
+        '"--render-experimental-smart-request-32-cpu"',
+    ):
+        assert flag in source
+    assert "let pixel_format = if command.contains(\"-16\")" in source

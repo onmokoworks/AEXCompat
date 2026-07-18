@@ -323,6 +323,12 @@ def validate_bundle(manifest: dict, report: dict, bundle_root: Path) -> None:
         oracle = result["oracle"]
         if oracle["identity_match"] != manifest_oracle_identity:
             errors.append(f"{result['depth']} oracle identity_match does not match manifest")
+        if (
+            manifest["oracle"]["state"] == "captured"
+            and result["classification"] == "ok"
+            and oracle["state"] != "captured"
+        ):
+            errors.append(f"{result['depth']} successful result lacks captured oracle comparison")
         if not manifest_oracle_identity and oracle["exact"]:
             errors.append(f"{result['depth']} exact oracle requires manifest identity match")
         output_hash = result["output_sha256"]

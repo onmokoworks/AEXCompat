@@ -4897,10 +4897,26 @@ fn main() -> eframe::Result {
         return Ok(());
     }
     if args.len() == 6
-        && (args[1] == "--render-experimental-request"
-            || args[1] == "--render-experimental-smart-request")
+        && matches!(
+            args[1].to_string_lossy().as_ref(),
+            "--render-experimental-request"
+                | "--render-experimental-smart-request"
+                | "--render-experimental-request-16"
+                | "--render-experimental-smart-request-16"
+                | "--render-experimental-request-32"
+                | "--render-experimental-smart-request-32-cpu"
+        )
     {
-        let smart = args[1] == "--render-experimental-smart-request";
+        use aexcompat_broker::image_render::RenderPixelFormat;
+        let command = args[1].to_string_lossy();
+        let smart = command.contains("-smart-");
+        let pixel_format = if command.contains("-16") {
+            RenderPixelFormat::Argb16
+        } else if command.contains("-32") {
+            RenderPixelFormat::Argb32f
+        } else {
+            RenderPixelFormat::Argb8
+        };
         let request_path = Path::new(&args[5]);
         let request_bytes = fs::read(request_path).unwrap_or_else(|error| {
             eprintln!("assignment document could not be read: {error}");
@@ -4941,7 +4957,7 @@ fn main() -> eframe::Result {
             &parameters,
             timing,
             smart,
-            aexcompat_broker::image_render::RenderPixelFormat::Argb8,
+            pixel_format,
             host_context.as_ref(),
         );
         match report {
