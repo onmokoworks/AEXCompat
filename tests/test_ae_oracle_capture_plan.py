@@ -8,6 +8,7 @@ from PIL import Image
 
 ROOT = Path(__file__).resolve().parents[1]
 RUNNER = ROOT / "tools" / "capture-ae-probe-oracle.ps1"
+RUNNER_SOURCE = RUNNER.read_text(encoding="utf-8")
 EVIDENCE = ROOT / "analysis" / "AE_ORACLE_COLORGRID_CAPTURE_PLAN_2026-07-17.json"
 
 
@@ -53,6 +54,12 @@ def test_plan_only_requires_complete_comparison_contract(tmp_path):
     ], capture_output=True, text=True, check=False)
     assert result.returncode != 0
     assert "ExpectedRaw" in result.stderr
+
+
+def test_capture_mode_executes_the_declared_comparison_contract():
+    assert "& python (Join-Path $PSScriptRoot 'compare-pixel-oracles.py')" in RUNNER_SOURCE
+    assert "Pixel oracle comparison failed with exit code" in RUNNER_SOURCE
+    assert "AE oracle output exceeded the configured comparison tolerance" in RUNNER_SOURCE
 
 
 def test_colorgrid_plan_records_real_fixture_without_claiming_capture():
