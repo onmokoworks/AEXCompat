@@ -30,6 +30,19 @@ and bounded image input/output are now the main implementation path.
   fail-closed; after any worker rebuild, run the broker integration tests
   before relying on broker dispatch.
 
+## Issue Claim and PR Linking
+
+- Before starting work on a GitHub issue, the working session itself posts a
+  claim comment on that issue ("作業をclaimします" plus a one-line scope).
+  Do not start on an issue that another session has already claimed unless
+  its claim has been explicitly withdrawn.
+- A PR that implements a claimed issue must carry `Closes #N` in its body.
+  Without a corresponding issue, reference related issues with `Refs #N`
+  instead; never `Closes` an issue the PR does not actually complete.
+- The After Effects installation is an exclusive machine resource. Before any
+  capture or aerender run, verify no AfterFX/aerender/aerendercore process is
+  running; if one is, another session owns it — wait instead of killing it.
+
 ## Canonical Verification
 
 ```powershell
