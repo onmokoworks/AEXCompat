@@ -96,6 +96,10 @@ def safe_output_path(out_path: Path) -> Path:
     resolved = candidate.resolve()
     if not (resolved == root or root in resolved.parents):
         raise ObservationError(f"output must stay under {OUTPUT_ROOT}")
+    # Must be a file path, not the root or an existing directory, so an invalid
+    # target fails here (before spawn) rather than at the final os.replace.
+    if resolved == root or resolved.is_dir():
+        raise ObservationError("output must be a file path, not a directory")
     # Reject a reparse point / symlink anywhere on the existing prefix below root.
     probe = resolved
     while probe != root and probe != probe.parent:

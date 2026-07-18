@@ -173,6 +173,27 @@ class ResolveTests(unittest.TestCase):
             resolve_spec(self.spec, offset_map)
         self.assertIn("exceeds", str(ctx.exception))
 
+    def test_misspelled_hook_key_is_rejected(self):
+        # A typo like "readz" must fail closed, not be silently ignored (which
+        # would install a hook with no requested fields yet report complete).
+        spec = copy.deepcopy(self.spec)
+        spec["hooks"][0]["readz"] = spec["hooks"][0].pop("reads")
+        with self.assertRaises(ResolutionError) as ctx:
+            resolve_spec(spec, self.offset_map)
+        self.assertIn("unknown field", str(ctx.exception))
+
+    def test_unknown_entry_and_spec_keys_are_rejected(self):
+        for mutate in (
+            lambda s: s["hooks"][0]["reads"][0].__setitem__("sizes", 4),
+            lambda s: s["hooks"][0]["arg_structs"][0].__setitem__("offset", 0),
+            lambda s: s["hooks"][0]["scalar_args"][0].__setitem__("kind", "x"),
+            lambda s: s.__setitem__("extra_top_level", 1),
+        ):
+            spec = copy.deepcopy(self.spec)
+            mutate(spec)
+            with self.assertRaises(ResolutionError):
+                resolve_spec(spec, self.offset_map)
+
     def test_malformed_entries_raise_resolution_error_not_keyerror(self):
         for mutate in (
             lambda s: s["hooks"][0]["arg_structs"].append({"struct": "p"}),  # missing index/extent

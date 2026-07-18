@@ -51,6 +51,13 @@ PHASES = ("enter", "leave")
 READ_INTERPRETS = {"int", "uint", "float", "bool"}
 REGISTER_INTERPRETS = {"int", "uint", "bool"}
 RETURN_INTERPRETS = {"int", "uint"}
+# Allowed keys per object, mirroring the schema's additionalProperties:false so a
+# misspelled key (e.g. "readz") fails closed instead of being silently ignored.
+SPEC_KEYS = {"schema_version", "spec_kind", "module_label", "hooks"}
+HOOK_KEYS = {"symbol", "module_rva", "arg_structs", "scalar_args", "reads", "return_as", "return_width"}
+ARG_STRUCT_KEYS = {"index", "struct", "extent"}
+READ_KEYS = {"name", "as", "phase"}
+SCALAR_ARG_KEYS = {"index", "name", "as", "width", "phase"}
 
 
 class ResolutionError(ValueError):
@@ -117,6 +124,12 @@ def _require_fields(entry: Any, required: tuple[str, ...], where: str) -> None:
         raise ResolutionError(f"{where} is missing required field(s) {missing}")
 
 
+def _reject_unknown(entry: dict[str, Any], allowed: set[str], where: str) -> None:
+    extra = sorted(set(entry) - allowed)
+    if extra:
+        raise ResolutionError(f"{where} has unknown field(s) {extra}")
+
+
 def resolve_hook(hook: dict[str, Any], offset_map: dict[str, dict[str, int]]) -> dict[str, Any]:
     """Resolve one hook into a per-phase read plan.
 
@@ -130,6 +143,7 @@ def resolve_hook(hook: dict[str, Any], offset_map: dict[str, dict[str, int]]) ->
     symbol = hook.get("symbol")
     if not isinstance(symbol, str) or not symbol:
         raise ResolutionError("hook.symbol is required")
+    _reject_unknown(hook, HOOK_KEYS, f"hook {symbol!r}")
     module_rva = hook.get("module_rva")
     rva_int = _rva_to_int(module_rva)
 
@@ -138,6 +152,7 @@ def resolve_hook(hook: dict[str, Any], offset_map: dict[str, dict[str, int]]) ->
     struct_args: dict[str, tuple[int, int]] = {}
     for entry in hook.get("arg_structs", []):
         _require_fields(entry, ("index", "struct", "extent"), f"{symbol}: arg_structs entry")
+        _reject_unknown(entry, ARG_STRUCT_KEYS, f"{symbol}: arg_structs entry")
         index = entry["index"]
         extent = entry.get("extent")
         struct = entry["struct"]
@@ -154,6 +169,7 @@ def resolve_hook(hook: dict[str, Any], offset_map: dict[str, dict[str, int]]) ->
 
     for entry in hook.get("reads", []):
         _require_fields(entry, ("name", "as"), f"{symbol}: read entry")
+        _reject_unknown(entry, READ_KEYS, f"{symbol}: read entry")
         name = entry["name"]
         interpret = entry["as"]
         phase = entry.get("phase", "enter")
@@ -194,6 +210,7 @@ def resolve_hook(hook: dict[str, Any], offset_map: dict[str, dict[str, int]]) ->
 
     for entry in hook.get("scalar_args", []):
         _require_fields(entry, ("index", "name", "as", "width"), f"{symbol}: scalar_args entry")
+        _reject_unknown(entry, SCALAR_ARG_KEYS, f"{symbol}: scalar_args entry")
         name = entry["name"]
         interpret = entry["as"]
         phase = entry.get("phase", "enter")
@@ -251,6 +268,9 @@ def resolve_hook(hook: dict[str, Any], offset_map: dict[str, dict[str, int]]) ->
 
 
 def resolve_spec(spec: dict[str, Any], offset_map: Any) -> dict[str, Any]:
+    if not isinstance(spec, dict):
+        raise ResolutionError("spec must be an object")
+    _reject_unknown(spec, SPEC_KEYS, "spec")
     if spec.get("spec_kind") != "known_function_hook_set":
         raise ResolutionError("spec_kind must be known_function_hook_set")
     module_label = spec.get("module_label")

@@ -141,6 +141,20 @@ class OutputPathSafetyTests(unittest.TestCase):
         with self.assertRaises(ObservationError):
             safe_output_path(Path("C:/Windows/Temp/trace.jsonl"))
 
+    def test_directory_output_is_rejected(self):
+        # The allowed root itself (a directory) must be rejected as a destination
+        # so it fails before spawn, not at the final os.replace.
+        OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
+        with self.assertRaises(ObservationError):
+            safe_output_path(OUTPUT_ROOT)
+        existing_dir = OUTPUT_ROOT / "a-directory"
+        existing_dir.mkdir(exist_ok=True)
+        try:
+            with self.assertRaises(ObservationError):
+                safe_output_path(existing_dir)
+        finally:
+            existing_dir.rmdir()
+
     def test_symlinked_output_root_is_rejected(self):
         import tempfile
         import tools.observe_known_functions as obs
