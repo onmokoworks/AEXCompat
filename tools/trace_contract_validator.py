@@ -169,6 +169,11 @@ def validate_event(event: Any) -> list[str]:
                             errors.append(f"{label} must contain exactly name and value")
                             continue
                         _check_string(entry["name"], f"{label}.name", errors)
+                        # Field names are dotted struct paths; any path separator
+                        # (\\ / :) means an absolute path in either OS form, which
+                        # the backslash-only ABSOLUTE_PATH regex would miss.
+                        if isinstance(entry["name"], str) and any(c in entry["name"] for c in "\\/:"):
+                            errors.append(f"{label}.name must not contain a path separator")
                         value = entry["value"]
                         if not _is_number(value) and not isinstance(value, bool):
                             errors.append(f"{label}.value must be a numeric or boolean scalar")

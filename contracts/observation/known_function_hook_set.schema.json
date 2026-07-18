@@ -45,7 +45,7 @@
             "required": ["index", "name", "as", "width"],
             "properties": {
               "index": {"type": "integer", "minimum": 0, "maximum": 32},
-              "name": {"type": "string", "minLength": 1, "not": {"pattern": "(^|[^A-Za-z])[A-Za-z]:\\\\"}},
+              "name": {"type": "string", "minLength": 1, "pattern": "^[^\\/:]+$"},
               "as": {"enum": ["int", "uint", "bool"]},
               "width": {"enum": [4, 8], "description": "integer register width in bytes; pointers are not representable"},
               "phase": {"enum": ["enter", "leave"]}
@@ -59,7 +59,7 @@
             "type": "object",
             "required": ["name", "as"],
             "properties": {
-              "name": {"type": "string", "minLength": 1, "not": {"pattern": "(^|[^A-Za-z])[A-Za-z]:\\\\"}},
+              "name": {"type": "string", "minLength": 1, "pattern": "^[^\\/:]+$"},
               "as": {"enum": ["int", "uint", "float", "bool"]},
               "phase": {"enum": ["enter", "leave"]}
             },

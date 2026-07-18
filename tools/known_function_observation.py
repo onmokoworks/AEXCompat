@@ -50,6 +50,7 @@ PHASES = ("enter", "leave")
 # (a float arg lives in XMM, and a pointer is not a representable role).
 READ_INTERPRETS = {"int", "uint", "float", "bool"}
 REGISTER_INTERPRETS = {"int", "uint", "bool"}
+RETURN_INTERPRETS = {"int", "uint"}
 
 
 class ResolutionError(ValueError):
@@ -218,7 +219,12 @@ def resolve_hook(hook: dict[str, Any], offset_map: dict[str, dict[str, int]]) ->
         "return": None,
     }
     if "return_as" in hook:
-        resolved["return"] = {"interpret": hook["return_as"]}
+        return_as = hook["return_as"]
+        if return_as not in RETURN_INTERPRETS:
+            raise ResolutionError(
+                f"{symbol}: return_as {return_as!r} must be one of {sorted(RETURN_INTERPRETS)}"
+            )
+        resolved["return"] = {"interpret": return_as}
     return resolved
 
 

@@ -174,6 +174,13 @@ class ResolveTests(unittest.TestCase):
             resolve_spec(spec, self.offset_map)
         self.assertIn("unsupported interpretation", str(ctx.exception))
 
+    def test_unsupported_return_as_is_rejected(self):
+        spec = copy.deepcopy(self.spec)
+        spec["hooks"][0]["return_as"] = "uint64"  # typo / unsupported
+        with self.assertRaises(ResolutionError) as ctx:
+            resolve_spec(spec, self.offset_map)
+        self.assertIn("return_as", str(ctx.exception))
+
 
 class FormatTests(unittest.TestCase):
     kwargs = dict(

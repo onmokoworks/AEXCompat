@@ -60,7 +60,7 @@
             "type": "object",
             "required": ["name", "value"],
             "properties": {
-              "name": {"type": "string", "minLength": 1, "not": {"pattern": "(^|[^A-Za-z])[A-Za-z]:\\\\"}},
+              "name": {"type": "string", "minLength": 1, "pattern": "^[^\\\\/:]+$"},
               "value": {"type": ["number", "boolean"]}
             },
             "additionalProperties": false

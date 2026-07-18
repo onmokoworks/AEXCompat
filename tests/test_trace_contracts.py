@@ -180,6 +180,16 @@ class TraceContractTests(unittest.TestCase):
         enter["known_function"]["fields"][0]["name"] = "C:\\Private\\in.width"
         self.assertTrue(validate_event(enter))
 
+    def test_known_function_field_forward_slash_absolute_path_is_rejected(self):
+        # A forward-slash absolute path (C:/Users/...) must also fail closed; the
+        # backslash-only ABSOLUTE_PATH regex alone would miss it.
+        enter = copy.deepcopy(load_native_observation_events()[1])
+        enter["known_function"]["fields"][0]["name"] = "C:/Users/alice/secret"
+        self.assertIn(
+            "known_function.fields[0].name must not contain a path separator",
+            validate_event(enter),
+        )
+
     def test_known_function_rejects_raw_pointer_scalar(self):
         enter = copy.deepcopy(load_native_observation_events()[1])
         enter["known_function"]["fields"][0]["value"] = "0x7ffabc00"
