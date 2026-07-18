@@ -9679,11 +9679,43 @@ std::mutex g_suite_lease_mutex;
 std::map<std::pair<std::string, int32_t>, uint32_t> g_suite_leases;
 uint32_t g_suite_acquires{};
 uint32_t g_suite_releases{};
+constexpr std::size_t kMaxMissingSuites = 16;
+std::vector<std::pair<std::string, int32_t>> g_missing_suites;
+std::string escape(const std::string& input);
 
 void record_suite_acquire(const char* name, int32_t version) {
   std::lock_guard<std::mutex> lock(g_suite_lease_mutex);
   ++g_suite_leases[{name, version}];
   ++g_suite_acquires;
+}
+
+void record_missing_suite(const std::string& name, int32_t version) {
+  const bool valid_name = !name.empty() && name.size() <= 96 &&
+      std::all_of(name.begin(), name.end(), [](unsigned char character) {
+        return std::isalnum(character) || character == ' ' || character == '.' ||
+            character == '_' || character == '-';
+      });
+  if (!valid_name || version <= 0) return;
+  std::lock_guard<std::mutex> lock(g_suite_lease_mutex);
+  const auto entry = std::make_pair(name, version);
+  if (std::find(g_missing_suites.begin(), g_missing_suites.end(), entry) ==
+          g_missing_suites.end() &&
+      g_missing_suites.size() < kMaxMissingSuites) {
+    g_missing_suites.push_back(entry);
+  }
+}
+
+std::string missing_suites_report_json() {
+  std::lock_guard<std::mutex> lock(g_suite_lease_mutex);
+  std::ostringstream json;
+  json << ",\"missing_suites\":[";
+  for (std::size_t index = 0; index < g_missing_suites.size(); ++index) {
+    if (index != 0) json << ',';
+    json << "{\"name\":\"" << escape(g_missing_suites[index].first)
+         << "\",\"version\":" << g_missing_suites[index].second << '}';
+  }
+  json << ']';
+  return json.str();
 }
 
 bool suite_leases_balanced() {
@@ -12604,6 +12636,7 @@ int32_t reject_suite_acquire(const char* name, int32_t version) {
     const unsigned char character = static_cast<unsigned char>(name[index]);
     safe_name.push_back(character >= 0x20 && character <= 0x7e ? name[index] : '?');
   }
+  record_missing_suite(safe_name, version);
   std::cerr << "stage:suite_acquire_failed name=" << safe_name
             << " version=" << version << "\n" << std::flush;
   return 1;
@@ -24119,6 +24152,7 @@ int wmain(int argc, wchar_t **argv) {
             << ",\"suite_lease_warning\":" << (!suite_leases_balanced() ? "true" : "false")
             << ",\"suite_acquires\":" << g_suite_acquires
             << ",\"suite_releases\":" << g_suite_releases
+            << missing_suites_report_json()
             << ",\"live_suite_lease_count\":" << live_suite_lease_count()
             << ",\"live_suite_reference_count\":" << live_suite_reference_count()
             << ",\"live_suite_leases\":\"" << live_suite_lease_summary() << "\""
@@ -24385,6 +24419,7 @@ int wmain(int argc, wchar_t **argv) {
             << ",\"suite_lease_warning\":" << (!suite_leases_balanced() ? "true" : "false")
             << ",\"suite_acquires\":" << g_suite_acquires
             << ",\"suite_releases\":" << g_suite_releases
+            << missing_suites_report_json()
             << ",\"live_suite_lease_count\":" << live_suite_lease_count()
             << ",\"live_suite_reference_count\":" << live_suite_reference_count()
             << ",\"live_suite_leases\":\"" << live_suite_lease_summary() << "\""

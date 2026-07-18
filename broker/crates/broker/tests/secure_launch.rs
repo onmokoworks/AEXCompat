@@ -144,7 +144,11 @@ mod windows_e2e {
             require_module_audit: false,
         };
 
-        let result = secure_launch(tree, request, Duration::from_millis(250)).unwrap();
+        // The deadline must outlive worker startup (restricted-token process
+        // creation plus antivirus scanning of the freshly compiled fixture can
+        // exceed hundreds of milliseconds) while still firing during the
+        // fixture's 30 s sleep. 250 ms raced against startup and flaked.
+        let result = secure_launch(tree, request, Duration::from_secs(5)).unwrap();
 
         assert_eq!(result.classification, ExitClassification::TimeoutKilled);
         assert!(

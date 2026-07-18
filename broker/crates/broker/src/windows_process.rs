@@ -16,8 +16,9 @@ use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
 use windows_sys::Win32::Storage::FileSystem::ReadFile;
 use windows_sys::Win32::System::JobObjects::{
     AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
-    SetInformationJobObject, TerminateJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
-    JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, JOB_OBJECT_LIMIT_PROCESS_MEMORY,
+    QueryInformationJobObject, SetInformationJobObject, TerminateJobObject,
+    JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+    JOB_OBJECT_LIMIT_PROCESS_MEMORY,
 };
 use windows_sys::Win32::System::Pipes::CreatePipe;
 use windows_sys::Win32::System::Threading::{
@@ -31,6 +32,9 @@ use windows_sys::Win32::System::Threading::{
 const CAPTURE_LIMIT: usize = 64 * 1024;
 const PROCESS_MEMORY_LIMIT: usize = 512 * 1024 * 1024;
 const TERMINATION_GRACE_MS: u32 = 5_000;
+// See memory_limit_reached: the largest single failed allocation the
+// detection tolerates between the recorded peak and the cap.
+const MEMORY_LIMIT_DETECTION_SLACK: u64 = 16 * 1024 * 1024;
 
 pub struct ProcessResult {
     pub classification: ExitClassification,
@@ -39,6 +43,27 @@ pub struct ProcessResult {
     pub stderr: String,
     pub stdout_truncated: bool,
     pub stderr_truncated: bool,
+    /// Why the worker was killed, when that is knowable: "timeout" when the
+    /// broker terminated the job on deadline, "memory_limit" when a non-ok
+    /// exit coincides with the launched worker's own peak commit having
+    /// reached the Job Object memory cap (allocations were failing). None
+    /// otherwise.
+    pub kill_reason: Option<&'static str>,
+    /// Peak commit of the launched worker process itself, from
+    /// GetProcessMemoryInfo on its handle. This is the value kill-reason
+    /// detection uses; a descendant blowing the cap does not implicate the
+    /// worker. None when the query itself failed.
+    pub worker_peak_commit_bytes: Option<u64>,
+    /// Peak commit of any single process ever associated with the job
+    /// (worker or descendant), from Job Object accounting.
+    pub peak_process_memory_bytes: Option<u64>,
+    /// Peak committed memory of the whole job (worker plus descendants).
+    pub peak_job_memory_bytes: Option<u64>,
+    /// The per-process commit cap the job enforces, for context.
+    pub process_memory_limit_bytes: u64,
+    /// True when the worker's own peak commit reached the cap, meaning
+    /// allocations beyond it were failing inside the worker.
+    pub memory_limit_reached: bool,
 }
 
 pub fn run_sentinel_check(program: &Path, timeout: Duration) -> io::Result<ProcessResult> {
@@ -153,6 +178,49 @@ fn reader(handle_value: usize) -> thread::JoinHandle<io::Result<(String, bool)>>
         let (redacted, redaction_truncated) = redact_windows_paths(&text, CAPTURE_LIMIT);
         Ok((redacted, truncated || redaction_truncated))
     })
+}
+
+/// Job Object accounting survives worker exit for as long as the job handle
+/// is open, so this can run after the process is gone. A failed query yields
+/// (None, None) rather than failing the whole run; the peaks are diagnostics,
+/// not a contract.
+fn query_job_memory_peaks(job: HANDLE) -> (Option<u64>, Option<u64>) {
+    let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { zeroed() };
+    let ok = unsafe {
+        QueryInformationJobObject(
+            job,
+            JobObjectExtendedLimitInformation,
+            &mut info as *mut _ as *mut c_void,
+            size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+            null_mut(),
+        )
+    };
+    if ok == 0 {
+        (None, None)
+    } else {
+        (
+            Some(info.PeakProcessMemoryUsed as u64),
+            Some(info.PeakJobMemoryUsed as u64),
+        )
+    }
+}
+
+/// Peak commit of one specific process, queryable after exit while a handle
+/// stays open. Unlike the job accounting, this cannot be inflated by
+/// descendants.
+fn query_worker_peak_commit(process: HANDLE) -> Option<u64> {
+    use windows_sys::Win32::System::ProcessStatus::{
+        K32GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS,
+    };
+    let mut counters: PROCESS_MEMORY_COUNTERS = unsafe { zeroed() };
+    let ok = unsafe {
+        K32GetProcessMemoryInfo(
+            process,
+            &mut counters,
+            size_of::<PROCESS_MEMORY_COUNTERS>() as u32,
+        )
+    };
+    (ok != 0).then_some(counters.PeakPagefileUsage as u64)
 }
 
 fn terminate_job_and_wait(job: HANDLE, process: HANDLE, wait_ms: u32) -> io::Result<()> {
@@ -357,13 +425,41 @@ fn run_isolated_impl(
     let (stderr, stderr_truncated) = stderr_reader
         .join()
         .map_err(|_| io::Error::other("stderr reader panicked"))??;
+    let (peak_process_memory_bytes, peak_job_memory_bytes) = query_job_memory_peaks(job.raw());
+    let worker_peak_commit_bytes = query_worker_peak_commit(process_handle.raw());
+    let classification = classify_exit(exit_code, timed_out);
+    // The hard commit cap rejects the allocation that would cross it, so the
+    // recorded peak stops short of the limit by up to one failed request.
+    // Treat "peaked within the slack below the cap" as having hit it; this is
+    // a heuristic marker, not proof, and it only escalates to a kill reason
+    // when the worker also died. The check uses the worker's own peak, not
+    // the job aggregate, so a descendant blowing the cap does not implicate
+    // the worker.
+    let memory_limit_reached = worker_peak_commit_bytes
+        .is_some_and(|peak| peak >= PROCESS_MEMORY_LIMIT as u64 - MEMORY_LIMIT_DETECTION_SLACK);
+    let kill_reason = if timed_out {
+        Some("timeout")
+    } else if classification != ExitClassification::Ok && memory_limit_reached {
+        // The job's hard commit cap makes allocations fail rather than
+        // killing the process, so a non-ok exit at the cap is the observable
+        // form of an out-of-memory death.
+        Some("memory_limit")
+    } else {
+        None
+    };
     Ok(ProcessResult {
-        classification: classify_exit(exit_code, timed_out),
+        classification,
         exit_code,
         stdout,
         stderr,
         stdout_truncated,
         stderr_truncated,
+        kill_reason,
+        worker_peak_commit_bytes,
+        peak_process_memory_bytes,
+        peak_job_memory_bytes,
+        process_memory_limit_bytes: PROCESS_MEMORY_LIMIT as u64,
+        memory_limit_reached,
     })
 }
 

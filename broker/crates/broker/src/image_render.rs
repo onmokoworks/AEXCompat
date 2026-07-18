@@ -265,6 +265,47 @@ fn decode_bounded_image(path: &Path, role: &str) -> io::Result<image::DynamicIma
         .map_err(|error| invalid(format!("{role} image decode failed: {error}")))
 }
 
+/// Diagnostics for a dispatched worker run, including the kill evidence from
+/// Job Object accounting (issue #21): why a dead worker died (timeout versus
+/// allocations failing at the memory cap) and how much memory it peaked at.
+fn isolated_worker_diagnostics(
+    isolated: &crate::secure_launch::SecureLaunchResult,
+    elapsed_ms: u128,
+) -> Value {
+    let mut diagnostics = worker_diagnostics(
+        &isolated.stderr,
+        isolated.stderr_truncated,
+        isolated.classification.as_str(),
+        isolated.exit_code,
+        elapsed_ms,
+    );
+    let object = diagnostics
+        .as_object_mut()
+        .expect("worker_diagnostics returns an object");
+    object.insert("kill_reason".into(), json!(isolated.kill_reason));
+    object.insert(
+        "memory_limit_reached".into(),
+        json!(isolated.memory_limit_reached),
+    );
+    object.insert(
+        "worker_peak_commit_bytes".into(),
+        json!(isolated.worker_peak_commit_bytes),
+    );
+    object.insert(
+        "peak_process_memory_bytes".into(),
+        json!(isolated.peak_process_memory_bytes),
+    );
+    object.insert(
+        "peak_job_memory_bytes".into(),
+        json!(isolated.peak_job_memory_bytes),
+    );
+    object.insert(
+        "process_memory_limit_bytes".into(),
+        json!(isolated.process_memory_limit_bytes),
+    );
+    diagnostics
+}
+
 fn worker_diagnostics(
     stderr: &str,
     stderr_truncated: bool,
@@ -303,8 +344,6 @@ fn worker_diagnostics(
     let mut first_failure_stage: Option<String> = None;
     let mut failure_stage: Option<String> = None;
     let mut last_completed_stage: Option<String> = None;
-    let mut missing_suites = Vec::new();
-    let mut seen_missing_suites = BTreeSet::new();
     let mut plugin_kind: Option<&str> = None;
 
     for line in stderr.lines() {
@@ -313,13 +352,6 @@ fn worker_diagnostics(
             "plugin_kind:unknown_no_effect_entrypoint" => Some("unknown_no_effect_entrypoint"),
             _ => None,
         });
-        if missing_suites.len() < MAX_MISSING_SUITES {
-            if let Some((name, version)) = missing_suite_event(line.trim()) {
-                if seen_missing_suites.insert((name.clone(), version)) {
-                    missing_suites.push(json!({"name": name, "version": version}));
-                }
-            }
-        }
         let Some(body) = line.trim().strip_prefix("stage:") else {
             continue;
         };
@@ -380,24 +412,42 @@ fn worker_diagnostics(
         "failure_stage": failure_stage,
         "first_failure_stage": first_failure_stage,
         "last_completed_stage": last_completed_stage,
-        "missing_suites": missing_suites,
+        "missing_suites": [],
         "plugin_kind": plugin_kind,
     })
 }
 
-fn missing_suite_event(line: &str) -> Option<(String, i32)> {
-    let body = line.strip_prefix("stage:suite_acquire_failed name=")?;
-    let (name, version) = body.rsplit_once(" version=")?;
-    if name.is_empty()
-        || name.len() > MAX_SUITE_NAME_LEN
-        || !name
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b' ' | b'.' | b'_' | b'-'))
+fn propagate_missing_suites(diagnostics: &mut Value, worker_report: &Value) {
+    let mut suites = Vec::new();
+    let mut seen = BTreeSet::new();
+    for suite in worker_report["missing_suites"]
+        .as_array()
+        .into_iter()
+        .flatten()
     {
-        return None;
+        if suites.len() >= MAX_MISSING_SUITES {
+            break;
+        }
+        let Some(name) = suite["name"].as_str().filter(|name| {
+            !name.is_empty()
+                && name.len() <= MAX_SUITE_NAME_LEN
+                && name.bytes().all(|byte| {
+                    byte.is_ascii_alphanumeric() || matches!(byte, b' ' | b'.' | b'_' | b'-')
+                })
+        }) else {
+            continue;
+        };
+        let Some(version) = suite["version"]
+            .as_i64()
+            .filter(|version| *version > 0 && *version <= i32::MAX as i64)
+        else {
+            continue;
+        };
+        if seen.insert((name.to_owned(), version)) {
+            suites.push(json!({"name": name, "version": version}));
+        }
     }
-    let version = version.parse::<i32>().ok().filter(|value| *value > 0)?;
-    Some((name.to_owned(), version))
+    diagnostics["missing_suites"] = Value::Array(suites);
 }
 
 fn module_audit_summary(audit: &Value) -> Option<Value> {
@@ -1359,13 +1409,7 @@ pub fn render_experimental_audio(
         &args_after_plugin,
         Duration::from_millis(INTERACTIVE_RENDER_TIMEOUT_MS),
     )?;
-    let diagnostics = worker_diagnostics(
-        &isolated.stderr,
-        isolated.stderr_truncated,
-        isolated.classification.as_str(),
-        isolated.exit_code,
-        started.elapsed().as_millis(),
-    );
+    let diagnostics = isolated_worker_diagnostics(&isolated, started.elapsed().as_millis());
     if isolated.classification.as_str() != "ok" {
         return Err(invalid(format!(
             "audio render worker failed safely: {diagnostics}"
@@ -1893,13 +1937,7 @@ pub fn inspect_experimental_external_dependencies(
         &args_after_plugin,
         Duration::from_millis(5_000),
     )?;
-    let diagnostics = worker_diagnostics(
-        &isolated.stderr,
-        isolated.stderr_truncated,
-        isolated.classification.as_str(),
-        isolated.exit_code,
-        started.elapsed().as_millis(),
-    );
+    let diagnostics = isolated_worker_diagnostics(&isolated, started.elapsed().as_millis());
     if isolated.classification.as_str() != "ok" {
         return Err(invalid(format!(
             "external dependency inspection failed safely: {diagnostics}"
@@ -1948,13 +1986,7 @@ pub fn probe_experimental_options_dialog(
         &args_after_plugin,
         Duration::from_millis(5_000),
     )?;
-    let diagnostics = worker_diagnostics(
-        &isolated.stderr,
-        isolated.stderr_truncated,
-        isolated.classification.as_str(),
-        isolated.exit_code,
-        started.elapsed().as_millis(),
-    );
+    let diagnostics = isolated_worker_diagnostics(&isolated, started.elapsed().as_millis());
     if isolated.classification.as_str() != "ok" {
         return Err(invalid(format!(
             "options dialog probe failed safely: {diagnostics}"
@@ -1997,13 +2029,7 @@ pub fn probe_experimental_automatic_options_dialog(
         &args_after_plugin,
         Duration::from_millis(5_000),
     )?;
-    let diagnostics = worker_diagnostics(
-        &isolated.stderr,
-        isolated.stderr_truncated,
-        isolated.classification.as_str(),
-        isolated.exit_code,
-        started.elapsed().as_millis(),
-    );
+    let diagnostics = isolated_worker_diagnostics(&isolated, started.elapsed().as_millis());
     if isolated.classification.as_str() != "ok" {
         return Err(invalid(format!(
             "automatic options dialog probe failed safely: {diagnostics}"
@@ -2051,13 +2077,7 @@ pub fn probe_experimental_nop_render(
         &args_after_plugin,
         Duration::from_millis(INTERACTIVE_RENDER_TIMEOUT_MS),
     )?;
-    let diagnostics = worker_diagnostics(
-        &isolated.stderr,
-        isolated.stderr_truncated,
-        isolated.classification.as_str(),
-        isolated.exit_code,
-        started.elapsed().as_millis(),
-    );
+    let diagnostics = isolated_worker_diagnostics(&isolated, started.elapsed().as_millis());
     if isolated.classification.as_str() != "ok" {
         return Err(invalid(format!(
             "NOP_RENDER probe failed safely: {diagnostics}"
@@ -2107,13 +2127,7 @@ pub fn probe_experimental_smart_nop_render(
         &args_after_plugin,
         Duration::from_millis(INTERACTIVE_RENDER_TIMEOUT_MS),
     )?;
-    let diagnostics = worker_diagnostics(
-        &isolated.stderr,
-        isolated.stderr_truncated,
-        isolated.classification.as_str(),
-        isolated.exit_code,
-        started.elapsed().as_millis(),
-    );
+    let diagnostics = isolated_worker_diagnostics(&isolated, started.elapsed().as_millis());
     if isolated.classification.as_str() != "ok" {
         return Err(invalid(format!(
             "SmartFX NOP_RENDER probe failed safely: {diagnostics}"
@@ -2167,13 +2181,7 @@ pub fn probe_experimental_input_buffer_write(
         &args_after_plugin,
         Duration::from_millis(INTERACTIVE_RENDER_TIMEOUT_MS),
     )?;
-    let diagnostics = worker_diagnostics(
-        &isolated.stderr,
-        isolated.stderr_truncated,
-        isolated.classification.as_str(),
-        isolated.exit_code,
-        started.elapsed().as_millis(),
-    );
+    let diagnostics = isolated_worker_diagnostics(&isolated, started.elapsed().as_millis());
     if isolated.classification.as_str() != "ok" {
         return Err(invalid(format!(
             "input-buffer write probe failed safely: {diagnostics}"
@@ -2223,13 +2231,7 @@ pub fn probe_experimental_smart_input_buffer_write(
         &args_after_plugin,
         Duration::from_millis(INTERACTIVE_RENDER_TIMEOUT_MS),
     )?;
-    let diagnostics = worker_diagnostics(
-        &isolated.stderr,
-        isolated.stderr_truncated,
-        isolated.classification.as_str(),
-        isolated.exit_code,
-        started.elapsed().as_millis(),
-    );
+    let diagnostics = isolated_worker_diagnostics(&isolated, started.elapsed().as_millis());
     if isolated.classification.as_str() != "ok" {
         return Err(invalid(format!(
             "SmartFX input-buffer write probe failed safely: {diagnostics}"
@@ -2290,13 +2292,7 @@ fn probe_experimental_frame_resize(
         &args_after_plugin,
         Duration::from_millis(INTERACTIVE_RENDER_TIMEOUT_MS),
     )?;
-    let diagnostics = worker_diagnostics(
-        &isolated.stderr,
-        isolated.stderr_truncated,
-        isolated.classification.as_str(),
-        isolated.exit_code,
-        started.elapsed().as_millis(),
-    );
+    let diagnostics = isolated_worker_diagnostics(&isolated, started.elapsed().as_millis());
     if isolated.classification.as_str() != "ok" {
         return Err(invalid(format!(
             "FRAME_SETUP resize probe failed safely: {diagnostics}"
@@ -2387,13 +2383,7 @@ pub fn probe_experimental_persistent_sequence(
         &args_after_plugin,
         Duration::from_millis(INTERACTIVE_RENDER_TIMEOUT_MS),
     )?;
-    let diagnostics = worker_diagnostics(
-        &isolated.stderr,
-        isolated.stderr_truncated,
-        isolated.classification.as_str(),
-        isolated.exit_code,
-        started.elapsed().as_millis(),
-    );
+    let diagnostics = isolated_worker_diagnostics(&isolated, started.elapsed().as_millis());
     if isolated.classification.as_str() != "ok" {
         return Err(invalid(format!(
             "persistent sequence probe failed safely: {diagnostics}"
@@ -2444,13 +2434,7 @@ pub fn probe_experimental_flattened_sequence(
         &args_after_plugin,
         Duration::from_millis(INTERACTIVE_RENDER_TIMEOUT_MS),
     )?;
-    let diagnostics = worker_diagnostics(
-        &isolated.stderr,
-        isolated.stderr_truncated,
-        isolated.classification.as_str(),
-        isolated.exit_code,
-        started.elapsed().as_millis(),
-    );
+    let diagnostics = isolated_worker_diagnostics(&isolated, started.elapsed().as_millis());
     if isolated.classification.as_str() != "ok" {
         return Err(invalid(format!(
             "flattened sequence probe failed safely: {diagnostics}"
@@ -2502,13 +2486,7 @@ pub fn probe_experimental_copied_flattened_sequence(
         &args_after_plugin,
         Duration::from_millis(INTERACTIVE_RENDER_TIMEOUT_MS),
     )?;
-    let diagnostics = worker_diagnostics(
-        &isolated.stderr,
-        isolated.stderr_truncated,
-        isolated.classification.as_str(),
-        isolated.exit_code,
-        started.elapsed().as_millis(),
-    );
+    let diagnostics = isolated_worker_diagnostics(&isolated, started.elapsed().as_millis());
     if isolated.classification.as_str() != "ok" {
         return Err(invalid(format!(
             "non-destructive sequence save probe failed safely: {diagnostics}"
@@ -2612,13 +2590,11 @@ fn inspect_experimental_with_diagnostics_and_runtime_policy(
             Duration::from_millis(5_000),
         )?
     };
-    let mut diagnostics = worker_diagnostics(
-        &isolated.stderr,
-        isolated.stderr_truncated,
-        isolated.classification.as_str(),
-        isolated.exit_code,
-        started.elapsed().as_millis(),
-    );
+    let mut diagnostics = isolated_worker_diagnostics(&isolated, started.elapsed().as_millis());
+    let worker_report: Option<Value> = serde_json::from_str(isolated.stdout.trim()).ok();
+    if let Some(report) = &worker_report {
+        propagate_missing_suites(&mut diagnostics, report);
+    }
     if isolated.classification.as_str() != "ok" {
         if let Some(summary) = failed_module_audit_summary(&isolated.stdout) {
             diagnostics["module_audit_failure"] = summary;
@@ -2627,8 +2603,7 @@ fn inspect_experimental_with_diagnostics_and_runtime_policy(
             "AEX parameter inspection worker failed safely: {diagnostics}"
         )));
     }
-    let report: Value = serde_json::from_str(isolated.stdout.trim())
-        .map_err(|_| invalid("inspection worker report is invalid"))?;
+    let report = worker_report.ok_or_else(|| invalid("inspection worker report is invalid"))?;
     if let Some(summary) = report.get("module_audit").and_then(module_audit_summary) {
         diagnostics["module_audit"] = summary;
     }
@@ -4376,14 +4351,11 @@ fn render_with_artifact(
     } else {
         dispatch_secure_image(initial_dispatch)?
     };
-    let mut diagnostics = worker_diagnostics(
-        &isolated.stderr,
-        isolated.stderr_truncated,
-        isolated.classification.as_str(),
-        isolated.exit_code,
-        started.elapsed().as_millis(),
-    );
+    let mut diagnostics = isolated_worker_diagnostics(&isolated, started.elapsed().as_millis());
     let initial_report: Option<Value> = serde_json::from_str(isolated.stdout.trim()).ok();
+    if let Some(report) = &initial_report {
+        propagate_missing_suites(&mut diagnostics, report);
+    }
     if initial_report
         .as_ref()
         .is_some_and(|report| report.get("output_pixels_valid") == Some(&Value::Bool(false)))
@@ -4445,18 +4417,13 @@ fn render_with_artifact(
             args_after_plugin: &args_after_plugin,
             timeout: Duration::from_millis(timeout_ms),
         })?;
-        diagnostics = worker_diagnostics(
-            &isolated.stderr,
-            isolated.stderr_truncated,
-            isolated.classification.as_str(),
-            isolated.exit_code,
-            retry_started.elapsed().as_millis(),
-        );
+        diagnostics = isolated_worker_diagnostics(&isolated, retry_started.elapsed().as_millis());
         let retry_report = serde_json::from_str(isolated.stdout.trim()).map_err(|_| {
             invalid(format!(
                 "CPU fallback worker report unavailable: {diagnostics}"
             ))
         })?;
+        propagate_missing_suites(&mut diagnostics, &retry_report);
         gpu_fallback_used = true;
         retry_report
     } else {
@@ -5605,7 +5572,7 @@ mod tests {
     }
 
     #[test]
-    fn worker_diagnostics_extract_bounded_unique_missing_suites() {
+    fn structured_worker_report_supplies_bounded_unique_missing_suites() {
         let mut trace = String::from(
             "stage:suite_acquire_failed name=PF World Suite version=2\n\
              stage:suite_acquire_failed name=PF World Suite version=2\n\
@@ -5622,7 +5589,18 @@ mod tests {
             "A".repeat(MAX_SUITE_NAME_LEN + 1)
         ));
 
-        let diagnostics = worker_diagnostics(&trace, false, "nonzero_exit", 1, 2);
+        let mut diagnostics = worker_diagnostics(&trace, false, "nonzero_exit", 1, 2);
+        assert!(diagnostics["missing_suites"].as_array().unwrap().is_empty());
+        let mut reported = vec![
+            json!({"name": "PF World Suite", "version": 2}),
+            json!({"name": "PF World Suite", "version": 2}),
+            json!({"name": "C:\\private\\suite", "version": 1}),
+            json!({"name": "Bad Suite", "version": -1}),
+        ];
+        for index in 0..(MAX_MISSING_SUITES + 3) {
+            reported.push(json!({"name": format!("Safe Suite {index}"), "version": 1}));
+        }
+        propagate_missing_suites(&mut diagnostics, &json!({"missing_suites": reported}));
         let suites = diagnostics["missing_suites"].as_array().unwrap();
         assert_eq!(suites.len(), MAX_MISSING_SUITES);
         assert_eq!(suites[0], json!({"name": "PF World Suite", "version": 2}));
@@ -5648,6 +5626,51 @@ mod tests {
         });
         assert!(diagnostics_contains_gpu_stage(&gpu));
         assert!(!diagnostics_contains_gpu_stage(&cpu));
+    }
+
+    #[test]
+    fn isolated_worker_diagnostics_expose_kill_reason_and_memory_peaks() {
+        let isolated = crate::secure_launch::SecureLaunchResult {
+            classification: crate::ExitClassification::NonzeroExit,
+            exit_code: 42,
+            stdout: String::new(),
+            stderr: String::new(),
+            stdout_truncated: false,
+            stderr_truncated: false,
+            kill_reason: Some("memory_limit"),
+            worker_peak_commit_bytes: Some(529_000_000),
+            peak_process_memory_bytes: Some(530_000_000),
+            peak_job_memory_bytes: Some(531_000_000),
+            process_memory_limit_bytes: 536_870_912,
+            memory_limit_reached: true,
+        };
+        let diagnostics = isolated_worker_diagnostics(&isolated, 1_234);
+        assert_eq!(diagnostics["kill_reason"], "memory_limit");
+        assert_eq!(diagnostics["memory_limit_reached"], true);
+        assert_eq!(diagnostics["worker_peak_commit_bytes"], 529_000_000u64);
+        assert_eq!(diagnostics["peak_process_memory_bytes"], 530_000_000u64);
+        assert_eq!(diagnostics["peak_job_memory_bytes"], 531_000_000u64);
+        assert_eq!(diagnostics["process_memory_limit_bytes"], 536_870_912u64);
+        assert_eq!(diagnostics["classification"], "nonzero_exit");
+        assert_eq!(diagnostics["elapsed_ms"], 1_234);
+
+        let alive = crate::secure_launch::SecureLaunchResult {
+            classification: crate::ExitClassification::Ok,
+            exit_code: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+            stdout_truncated: false,
+            stderr_truncated: false,
+            kill_reason: None,
+            worker_peak_commit_bytes: Some(900_000),
+            peak_process_memory_bytes: Some(1_000_000),
+            peak_job_memory_bytes: Some(1_000_000),
+            process_memory_limit_bytes: 536_870_912,
+            memory_limit_reached: false,
+        };
+        let diagnostics = isolated_worker_diagnostics(&alive, 5);
+        assert_eq!(diagnostics["kill_reason"], Value::Null);
+        assert_eq!(diagnostics["memory_limit_reached"], false);
     }
 
     #[test]
