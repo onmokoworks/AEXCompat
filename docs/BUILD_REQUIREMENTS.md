@@ -61,10 +61,18 @@ python -m pytest -q
   ビルド系である」こと。それ以外の fail は regression を疑う。
 - **SDK 込み検証**: `AFTER_EFFECTS_SDK_ROOT` と Visual Studio を揃えた構成。
   0 failed が期待結果 (「検証済み構成」の節を参照)。
-- 上記と別軸で、ローカル生成物 (ビルド済み worker、machine-bound receipt 等)
-  を要するテストは `tests/local_artifact_tests.txt` に列挙されており、常に
-  既定で skip される。実行するには対象のビルド / gate スクリプトを走らせた後
-  `--run-local-artifact-tests` を付ける。
+- 上記と別軸で、ローカル生成物を要するテストは 2 つの manifest に分かれており、
+  いずれも既定で skip される。
+  - `tests/built_artifact_tests.txt` (`--run-built-artifact-tests`): この
+    checkout からビルドした worker / probe / 生成入力 fixture を実行し、期待値を
+    実行時に自己計算するテスト。フレッシュビルドで成立するため CI でも実行される
+    (「CI (GitHub Actions)」の節を参照)。ローカルでは minihost の Ninja ビルド、
+    worker の複製配置、probe ビルド、入力 fixture 生成 (workflow
+    `ae-sdk-tests.yml` の該当 step と同じ手順) の後にフラグを付けて実行する。
+  - `tests/local_artifact_tests.txt` (`--run-local-artifact-tests`): 記録済み
+    evidence (sha256 / receipt) をローカル現物と照合する machine-bound テスト。
+    evidence を採取したビルド状態でのみ成立するため CI 対象外。対象のビルド /
+    gate スクリプトを走らせた後にフラグを付けて実行する。
 
 ## C++ worker (minihost)
 
@@ -214,7 +222,7 @@ windows runner で走る。
   clean clone 相当で `cargo check` / `cargo test` (hosted runner の restricted
   token では起動できない 2 テストを `--skip`) と `python -m pytest -q` を実行
   する。
-- `.github/workflows/ae-sdk-tests.yml`: SDK 込み検証。
+- `.github/workflows/ae-sdk-tests.yml`: SDK 込み検証 + built artifact 検証。
   - private release `ci-sdk-ae25.2` の asset
     `AfterEffectsSDK-ae25.2-win.zip` を `GITHUB_TOKEN` でダウンロード・展開し、
     `AFTER_EFFECTS_SDK_ROOT` を設定する (Gyroflow が CI で Adobe SDK zip を
@@ -222,16 +230,23 @@ windows runner で走る。
     不一致は fail-closed。SDK 世代を更新するときは新しい asset を release に
     上げ、workflow の `SDK_RELEASE_TAG` / `SDK_ASSET` / `SDK_SHA256` を
     合わせて更新する。
-  - `python -m pytest -q -rs --run-sdk-tests --validate-local-artifact-manifest`
-    を実行する。SDK 依存テスト (`tests/sdk_required_tests.txt` と、
-    `AFTER_EFFECTS_SDK_ROOT` を inline skip で見るテスト) が実行対象になる。
-    実行後、pytest 出力に `set AFTER_EFFECTS_SDK_ROOT` を理由とする skip が
-    残っていれば fail させ、SDK テストが skip されたまま green になる silent
-    success を防ぐ。
+  - minihost workers を Ninja でビルドして `target\minihost-build` に置き、
+    multi-config 時代の固定パス (`minihost-build-v18\[Release]` /
+    `minihost-timed-layers\Release` / `minihost-build\Release`) へ複製する。
+    probe .aex 群を `tools/build-*.ps1` でビルドし、probe 入力 fixture
+    (37x23 raw RGBA) を決定論的に生成する。
+  - `python -m pytest -q -rs --run-sdk-tests --run-built-artifact-tests
+    --validate-local-artifact-manifest` を実行する。SDK 依存テスト
+    (`tests/sdk_required_tests.txt` と `AFTER_EFFECTS_SDK_ROOT` を inline skip
+    で見るテスト) に加え、`tests/built_artifact_tests.txt` の built artifact
+    テストが実行対象になる。実行後、pytest 出力に SDK 起因 skip
+    (`set AFTER_EFFECTS_SDK_ROOT`) や成果物不在 skip (`is not built` /
+    `are not present`) が残っていれば fail させ、skip されたまま green になる
+    silent success を防ぐ。
 
-local artifact テスト (`--run-local-artifact-tests`)、prebuilt テスト、
-AE 実機 oracle、GPU runtime 検証は CI の対象外で、従来どおりローカル gate で
-実行する。SDK asset は private repo の collaborator 限定 asset であり、SDK の
+local artifact テスト (`--run-local-artifact-tests`、machine-bound evidence
+照合)、prebuilt テスト、AE 実機 oracle、GPU runtime 検証は CI の対象外で、
+従来どおりローカル gate で実行する。SDK asset は private repo の collaborator 限定 asset であり、SDK の
 公開再配布ではない (リポジトリへ SDK を複製しない方針は維持)。
 
 CI の Python は両 workflow とも 3.12 (OpenEXR の win_amd64 wheel が 3.14 に
@@ -279,8 +294,12 @@ Per-component prerequisites on Windows x64:
   is an SDK-absence build failure (`Set AFTER_EFFECTS_SDK_ROOT ...`) — any
   other failure suggests a regression. SDK-backed verification (SDK plus
   Visual Studio) expects 0 failed.
-  Independently, tests listed in `tests/local_artifact_tests.txt`
-  always skip by default (`--run-local-artifact-tests` to opt in).
+  Independently, tests needing local artifacts are split across two
+  default-skip manifests: `tests/built_artifact_tests.txt`
+  (`--run-built-artifact-tests`; runs artifacts built from this checkout
+  with self-computed expectations, so CI runs it too) and
+  `tests/local_artifact_tests.txt` (`--run-local-artifact-tests`;
+  machine-bound evidence comparison, local-only).
 - **C++ workers (minihost)**: build with the Ninja generator into
   `target\minihost-build\` so the harness and gate scripts find the four
   `aex_*_worker.exe` binaries directly under that directory. No SDK needed.
@@ -322,13 +341,17 @@ Per-component prerequisites on Windows x64:
   `windows-clean-clone.yml` covers source-only verification (`cargo check`,
   `cargo test` minus two launch tests the hosted runner's restricted token
   cannot execute, and `python -m pytest -q` without the SDK).
-  `ae-sdk-tests.yml` covers SDK-backed verification: it downloads the
-  hash-pinned SDK zip from the private release `ci-sdk-ae25.2` with
-  `GITHUB_TOKEN`, sets `AFTER_EFFECTS_SDK_ROOT`, runs
-  `python -m pytest -q -rs --run-sdk-tests --validate-local-artifact-manifest`,
-  and fails if any test was skipped for a missing
-  `AFTER_EFFECTS_SDK_ROOT`. Local-artifact, prebuilt, AE oracle, and GPU
-  gates stay local-only.
+  `ae-sdk-tests.yml` covers SDK-backed and built-artifact verification: it
+  downloads the hash-pinned SDK zip from the private release
+  `ci-sdk-ae25.2` with `GITHUB_TOKEN`, sets `AFTER_EFFECTS_SDK_ROOT`,
+  builds the minihost workers (Ninja) and the probe AEX set, mirrors the
+  workers into the multi-config layout paths, generates the deterministic
+  probe input fixture, runs
+  `python -m pytest -q -rs --run-sdk-tests --run-built-artifact-tests
+  --validate-local-artifact-manifest`, and fails if any test was skipped
+  for a missing SDK or missing built artifact. Local-artifact
+  (machine-bound evidence), prebuilt, AE oracle, and GPU gates stay
+  local-only.
 - **Optional**: a matching GPU runtime for GPU render checks, and After
   Effects 25.2 itself for oracle capture only. Building the GPU SDK fixtures
   (`tools/build-sdk-invert-*.ps1`) additionally needs build-time inputs

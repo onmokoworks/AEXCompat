@@ -27,6 +27,12 @@ TEST_CLASSES = (
         "--run-prebuilt-tests",
         "requires a named native build artifact produced before pytest",
     ),
+    (
+        ROOT / "tests" / "built_artifact_tests.txt",
+        "built_artifact",
+        "--run-built-artifact-tests",
+        "requires workers, probes, and input fixtures built from this checkout",
+    ),
 )
 
 
@@ -112,6 +118,12 @@ def pytest_addoption(parser):
         action="store_true",
         default=False,
         help="run tests requiring prebuilt native artifacts",
+    )
+    parser.addoption(
+        "--run-built-artifact-tests",
+        action="store_true",
+        default=False,
+        help="run tests requiring workers, probes, and fixtures built from this checkout",
     )
     parser.addoption(
         "--validate-local-artifact-manifest",
