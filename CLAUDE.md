@@ -36,16 +36,19 @@ and bounded image input/output are now the main implementation path.
   selected/approved identity, as the shipped `ApprovedImageArtifact.expected_sha256`
   does) is the evidence-tier gate, and is what the default tier drops so a
   post-selection rebuild is not treated as a mismatch.
-- Implementation gap: production dispatch has no normal-token fallback; every
-  path goes through the sealed/restricted launch. The identity source differs by
-  path. L2 and the deterministic render/smart profile flows require schema-v2
-  approval receipts. Interactive image dispatch (`image_render.rs` via
-  `dispatch_secure_image`) instead uses per-session approval
-  (`ApprovedImageArtifact` from `selection.sha256`), which enforces a pre-selection
-  hash match and already admits the locally built worker at dispatch time
-  (`docs/EVIDENCE_POLICY_2026-07-18.md` §3), so it is not a schema-v2 receipt.
-  Either way the crash-containment-only default tier is not yet the shipped
-  default; restoring it is tracked work (#36). Do not describe the light path as
+- Implementation gap: there is no single shipped tier today. The sealed/restricted
+  launch with no normal-token fallback is wired for two paths: the L2 launch
+  transaction (schema-v2 approval receipts) and interactive image dispatch
+  (`image_render.rs` via `dispatch_secure_image`, which uses per-session
+  `ApprovedImageArtifact` from `selection.sha256` enforcing a pre-selection hash
+  match, not a schema-v2 receipt, and already admits the locally built worker at
+  dispatch time per `docs/EVIDENCE_POLICY_2026-07-18.md` §3). Other broker CLI
+  routes still call normal-token `run_isolated`: `render-parameter-request`,
+  `smart-suite-fault`, `smart-mask-scene` (`render_request.rs`) and `l1`
+  (`l1.rs`). So neither claim holds globally: the crash-containment-only default
+  tier is not yet the standard path, and not every dispatch is sealed either.
+  Restoring an explicit receipt-free default tier is tracked work (#36). Do not
+  assume every production route is already sealed, nor that the light path is
   already available in the shipped host.
 - Keep `imports/` as frozen provenance. Do not redistribute Adobe SDK headers
   or source; the SDK selected by `AFTER_EFFECTS_SDK_ROOT` is an external ABI
