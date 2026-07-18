@@ -1,0 +1,72 @@
+﻿{
+    "schema_version":  2,
+    "gate":  "maskoffset_smartfx_real_aex_render_gate",
+    "classification":  "host_regression_exact",
+    "oracle":  false,
+    "status":  "passed",
+    "authenticated_artifacts":  {
+                                    "broker":  {
+                                                   "path":  "broker/target/release/broker.exe",
+                                                   "size_bytes":  1147904,
+                                                   "sha256":  "94b1699028f9128be33de9c97c9e7d29e9faa0285c7b1686b357b45263c1899c"
+                                               },
+                                    "worker":  {
+                                                   "path":  "target/minihost-build/aex_smart_worker.exe",
+                                                   "size_bytes":  797184,
+                                                   "sha256":  "18f8a538786f56a58ea12460de4e98da0f9a824818a1bca694f14e9e7742f557"
+                                               },
+                                    "request":  {
+                                                    "path":  "target/render-requests/maskoffset-color-fill-20260713-001.json",
+                                                    "size_bytes":  307,
+                                                    "sha256":  "d92568e9f880ec9d06ceccb03de0ebb62d3dd00b0bdb9e3978c5fd687b7e26d7"
+                                                },
+                                    "fixture":  {
+                                                    "basename":  "MaskOffset.aex",
+                                                    "size_bytes":  200704,
+                                                    "sha256":  "b7c41f4f906fce74b26bd2f06520f6bfdf75dcd1a2682dbb85d50d1de833877b"
+                                                },
+                                    "approval":  {
+                                                     "receipt_id":  "maskoffset-smartfx-20260713-001",
+                                                     "approved_stage":  "smartfx_render"
+                                                 }
+                                },
+    "execution":  {
+                      "invocation":  "broker smart-parameter-request \u003crequest\u003e \u003ccreate-new-output\u003e",
+                      "broker_invocation_count":  2,
+                      "worker_runs_per_receipt":  2
+                  },
+    "expected_output_sha256":  "bf419f44e915901bac882e9b9e3411b8407df7f4e3a4a1c2719314bdfbb74b5f",
+    "receipts":  [
+                     {
+                         "receipt":  1,
+                         "output_sha256":  "bf419f44e915901bac882e9b9e3411b8407df7f4e3a4a1c2719314bdfbb74b5f",
+                         "checks":  {
+                                        "receipt_passed":  true,
+                                        "plugin_authenticated":  true,
+                                        "request_authenticated":  true,
+                                        "output_exact":  true,
+                                        "selectors_success":  true,
+                                        "guards_intact":  true,
+                                        "secure_route":  true,
+                                        "ownership_valid":  true
+                                    }
+                     },
+                     {
+                         "receipt":  2,
+                         "output_sha256":  "bf419f44e915901bac882e9b9e3411b8407df7f4e3a4a1c2719314bdfbb74b5f",
+                         "checks":  {
+                                        "receipt_passed":  true,
+                                        "plugin_authenticated":  true,
+                                        "request_authenticated":  true,
+                                        "output_exact":  true,
+                                        "selectors_success":  true,
+                                        "guards_intact":  true,
+                                        "secure_route":  true,
+                                        "ownership_valid":  true
+                                    }
+                     }
+                 ],
+    "scope":  {
+                  "does_not_prove":  "Pixel equivalence with Adobe After Effects; this is not an AE pixel oracle."
+              }
+}

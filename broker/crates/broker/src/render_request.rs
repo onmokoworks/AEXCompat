@@ -4,11 +4,14 @@ use crate::fixture_profiles::maskoffset::{
 };
 use crate::fixture_profiles::scattermap::expected_argb8_hash;
 use crate::fixture_profiles::{ParameterizedRenderAdapter, RegisteredProfile};
+use crate::host_core::approved_artifact::load_v2_load_tree;
 use crate::host_core::descriptor_manifest::{load as load_manifest, LoadedManifest};
 use crate::host_core::parameter::{
     apply_defaults, encode_worker_payload, validate_assignments, ParameterValue, PluginProfile,
     ValidatedAssignments, ValidationError, ValueKind,
 };
+use crate::sealed_load_tree::SealedLoadTree;
+use crate::secure_launch::{secure_launch, SecureLaunchRequest};
 use crate::windows_process::run_isolated;
 use serde::de::{MapAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
@@ -802,13 +805,6 @@ pub fn execute_smart(
         output.write_all(b"\n")?;
         return Ok(false);
     }
-    let approved = crate::smart::approved_entry(repository, &request.plugin_id)?;
-    if !manifest
-        .plugin_sha256
-        .eq_ignore_ascii_case(&approved.sha256)
-    {
-        return Err(invalid("descriptor manifest plugin digest mismatch"));
-    }
     let worker = repository.join(worker_spec.executable);
     let expected = if let Some(context) = &request.host_context {
         let masks = context
@@ -847,18 +843,83 @@ pub fn execute_smart(
         } else {
             worker_spec.request_mode.to_string()
         },
-        approved.plugin_path.to_string_lossy().into_owned(),
-        approved.sha256.to_ascii_lowercase(),
         encode_worker_payload(&manifest.profile, &effective).map_err(invalid)?,
     ];
     if let Some(context) = &request.host_context {
         args.push(encode_mask_context(context)?);
     }
     let mut runs = Vec::new();
+    let mut secure_launches = Vec::new();
+    let mut approved_fixture_sha256 = String::new();
     for _ in 0..2 {
-        let isolated = run_isolated(&worker, &args, Duration::from_millis(approved.timeout_ms))?;
+        // secure_launch consumes both the sealed tree and worker stage. Reload the
+        // schema-v2 receipt so each determinism run has an independent stage.
+        let approved = load_v2_load_tree(repository, &request.plugin_id, worker_spec.approval)?;
+        let receipt_worker = if approved.worker_path.is_absolute() {
+            approved.worker_path.clone()
+        } else {
+            repository.join(&approved.worker_path)
+        };
+        if fs::canonicalize(&worker)? != fs::canonicalize(&receipt_worker)? {
+            return Err(invalid(
+                "SmartFX worker differs from approved trusted worker",
+            ));
+        }
+        let plugin_basename = approved.main.relative_basename.clone();
+        let fixture_sha256 = approved
+            .main
+            .expected_sha256
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        if !manifest.plugin_sha256.eq_ignore_ascii_case(&fixture_sha256) {
+            return Err(invalid("descriptor manifest plugin digest mismatch"));
+        }
+        if approved_fixture_sha256.is_empty() {
+            approved_fixture_sha256 = fixture_sha256.to_ascii_uppercase();
+        } else if !approved_fixture_sha256.eq_ignore_ascii_case(&fixture_sha256) {
+            return Err(invalid("SmartFX fixture approval changed between runs"));
+        }
+        let worker_sha256 = approved.worker_sha256;
+        let worker_byte_size = approved.worker_byte_size;
+        let timeout_ms = approved.timeout_ms;
+        let tree = SealedLoadTree::create(approved.main, approved.dependencies)?;
+        let sealed_manifest_sha256 = tree
+            .manifest_digest()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        let args_before_plugin = [args[0].clone()];
+        let mut args_after_plugin = vec![fixture_sha256, args[1].clone()];
+        if let Some(host_context) = args.get(2) {
+            args_after_plugin.push(host_context.clone());
+        }
+        let isolated = secure_launch(
+            tree,
+            SecureLaunchRequest {
+                worker_program: &receipt_worker,
+                worker_expected_sha256: worker_sha256,
+                worker_expected_size: worker_byte_size,
+                plugin_basename: &plugin_basename,
+                args_before_plugin: &args_before_plugin,
+                args_after_plugin: &args_after_plugin,
+                require_module_audit: true,
+            },
+            Duration::from_millis(timeout_ms),
+        )?;
         let report: Value = serde_json::from_str(isolated.stdout.trim())
             .unwrap_or_else(|_| json!({"status":"worker_report_unavailable"}));
+        secure_launches.push(json!({
+            "launch_mode":"sealed_load_tree_restricted_token",
+            "worker_authenticated":true,
+            "worker_size_bytes":worker_byte_size,
+            "worker_sha256":worker_sha256.iter().map(|byte| format!("{byte:02x}")).collect::<String>(),
+            "plugin_basename":plugin_basename,
+            "plugin_sha256":approved_fixture_sha256,
+            "sealed_manifest_sha256":sealed_manifest_sha256,
+            "module_audit_required":true,
+            "module_audit":report.get("module_audit")
+        }));
         runs.push((isolated.classification, report));
     }
     let valid_run = |classification: crate::ExitClassification, report: &Value| {
@@ -961,15 +1022,17 @@ pub fn execute_smart(
         "requested_parameters":item.1.get("requested_parameters")})
     };
     let report = json!({"schema_version":1,"stage":"parameterized_smartfx_render",
-        "plugin_id":request.plugin_id,"receipt_id":approved.receipt_id,
-        "fixture_sha256":approved.sha256.to_ascii_uppercase(),"assignment_count":assignment_count,
+        "plugin_id":request.plugin_id,"receipt_id":worker_spec.approval.receipt_id,
+        "fixture_sha256":approved_fixture_sha256,"assignment_count":assignment_count,
         "accepted":true,"native_process_started":true,"parameters":effective,
         "host_context_mask_count":host_context_counts.map(|counts| counts.0),
         "host_context_vertex_count":host_context_counts.map(|counts| counts.1),
         "host_context_open_mask_count":host_context_shape_counts.map(|counts| counts.0),
         "host_context_tangent_vertex_count":host_context_shape_counts.map(|counts| counts.1),
         "expected_oracle_sha256":expected,
-        "run_1":summarize(&runs[0]),"run_2":summarize(&runs[1]),"deterministic":deterministic,
+        "run_1":summarize(&runs[0]),"run_2":summarize(&runs[1]),
+        "secure_launch_1":secure_launches[0],"secure_launch_2":secure_launches[1],
+        "secure_launch_count":2,"normal_token_fallback":false,"deterministic":deterministic,
         "broker_survived":true,"passed":passed});
     let mut output = OpenOptions::new()
         .write(true)

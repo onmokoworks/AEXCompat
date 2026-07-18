@@ -242,6 +242,16 @@ python -m unittest discover -s tests
 
 Some native-fixture, GPU, and AE-oracle tests require a local SDK, a matching GPU runtime, or After Effects.
 
+### DirectX SDK fixture
+
+The authenticated DirectX device-world fixture is rebuilt from the local After Effects SDK with:
+
+```powershell
+.\tools\build-sdk-invert-directx.ps1
+```
+
+The recorded device selection, shader build, worker identity, and render result are documented in [`analysis/SDK_DIRECTX_DEVICE_WORLD_RESULT_2026-07-16.json`](analysis/SDK_DIRECTX_DEVICE_WORLD_RESULT_2026-07-16.json). This fixture is a bounded DirectX compatibility check, not a claim that every GPU AEX or device produces Adobe-identical pixels.
+
 ### Architecture
 
 ```text

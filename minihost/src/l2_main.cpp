@@ -1077,6 +1077,7 @@ uint32_t g_pf_path_preps_disposed{};
 constexpr std::size_t kMaxPfPathSegmentPreps = 256;
 constexpr int32_t kPfOutOfMemory = 4;
 constexpr int32_t kPfBadCallbackParam = 516;
+constexpr int32_t kPfSuiteToolNone = 0;
 constexpr int32_t kPfExtendedSuiteToolMin = 0;
 constexpr int32_t kPfExtendedSuiteToolMax = 44;  // PF_ExtendedSuiteTool_CYLINDER
 constexpr std::size_t kPfHelperUiContextCount = 3;
@@ -1111,6 +1112,12 @@ int32_t __cdecl pf_set_current_extended_tool(int32_t tool) {
 int32_t __cdecl pf_get_current_extended_tool(int32_t* tool) {
   if (!tool) return kPfBadCallbackParam;
   *tool = current_pf_helper_tool().load(std::memory_order_acquire);
+  return 0;
+}
+
+int32_t __cdecl pf_get_current_tool(int32_t* tool) {
+  if (!tool) return kPfBadCallbackParam;
+  *tool = kPfSuiteToolNone;
   return 0;
 }
 
@@ -1606,6 +1613,9 @@ int32_t __cdecl get_effect_layer(void* effect, void** layer) {
   return 0;
 }
 int32_t __cdecl get_new_effect_for_effect(int32_t plugin_id, void* effect, void** effect_ref);
+struct AegpTime;
+int32_t __cdecl convert_effect_to_comp_time(
+    void* effect, int32_t what_time, uint32_t time_scale, AegpTime* comp_time);
 
 int32_t __cdecl get_layer_num_masks(void* layer, int32_t* count) {
   if (layer != &g_layer || !count) return 4;
@@ -3214,8 +3224,11 @@ struct UtilitySuite3 {
 struct PfInterfaceSuite {
   decltype(&get_effect_layer) get_effect_layer;
   decltype(&get_new_effect_for_effect) get_new_effect_for_effect;
-  void* unsupported[3]{};
+  decltype(&convert_effect_to_comp_time) convert_effect_to_comp_time;
+  void* unsupported[2]{};
 };
+static_assert(sizeof(PfInterfaceSuite) == 5 * sizeof(void*));
+static_assert(offsetof(PfInterfaceSuite, convert_effect_to_comp_time) == 2 * sizeof(void*));
 int32_t __cdecl unsupported_path_mask() { return 4; }
 struct LegacyRect { int32_t left, top, right, bottom; };
 struct PfPathVertex {
@@ -4159,7 +4172,10 @@ struct MaskOutlineSuite {
 
 UtilitySuite g_utility_suite{{}, &register_with_aegp};
 UtilitySuite3 g_utility_suite3{{}, &register_with_aegp};
-PfInterfaceSuite g_pf_interface_suite{&get_effect_layer, &get_new_effect_for_effect};
+PfInterfaceSuite g_pf_interface_suite{&get_effect_layer, &get_new_effect_for_effect,
+    &convert_effect_to_comp_time,
+    {reinterpret_cast<void*>(&unsupported_path_mask),
+     reinterpret_cast<void*>(&unsupported_path_mask)}};
 std::array<void*, 16> g_aegp_effect_suite3{};
 std::array<void*, 19> g_aegp_stream_suite2{};
 std::array<void*, 14> g_aegp_dynamic_stream_suite2{};
@@ -4281,6 +4297,9 @@ std::array<void*, 3> g_pf_helper_suite2{
     reinterpret_cast<void*>(&pf_parse_clipboard),
     reinterpret_cast<void*>(&pf_set_current_extended_tool),
     reinterpret_cast<void*>(&pf_get_current_extended_tool)};
+std::array<void*, 1> g_pf_helper_suite1{
+    reinterpret_cast<void*>(&pf_get_current_tool)};
+static_assert(sizeof(g_pf_helper_suite1) == sizeof(void*));
 // PF_AdvAppSuite1 is frozen at ten callbacks; keep its storage independent
 // from the eleven-slot v2 table so versioned suite identity cannot alias.
 std::array<void*, 10> g_adv_app_suite1{};
@@ -4493,6 +4512,20 @@ std::array<void*, 6> g_drawbot_path_suite1{};
 std::array<void*, 1> g_effect_custom_ui_suite1{};
 std::array<void*, 2> g_effect_custom_ui_suite2{};
 struct AegpTime { int32_t value{}; uint32_t scale{1}; };
+int32_t __cdecl convert_effect_to_comp_time(
+    void* effect, int32_t what_time, uint32_t time_scale, AegpTime* comp_time) {
+  if (effect != &g_effect || time_scale == 0 || !comp_time) return 4;
+  const int64_t checked_value = static_cast<int64_t>(what_time);
+  const uint64_t checked_scale = static_cast<uint64_t>(time_scale);
+  if (checked_value < (std::numeric_limits<int32_t>::min)() ||
+      checked_value > (std::numeric_limits<int32_t>::max)() ||
+      checked_scale > (std::numeric_limits<uint32_t>::max)())
+    return 4;
+  const AegpTime converted{static_cast<int32_t>(checked_value),
+                           static_cast<uint32_t>(checked_scale)};
+  *comp_time = converted;
+  return 0;
+}
 struct AegpTimeStamp { std::array<uint8_t, 4> bytes{}; };
 static_assert(sizeof(AegpTimeStamp) == 4);
 struct AegpRect { int32_t left, top, right, bottom; };
@@ -9466,6 +9499,14 @@ struct AegpSceneObject { uint32_t tag{}; };
 AegpSceneObject g_aegp_comp_item{0x4954454d};
 AegpSceneObject g_aegp_comp{0x434f4d50};
 void* aegp_comp_item_handle() { return &g_aegp_comp_item; }
+struct AegpColorVal { double alpha, red, green, blue; };
+static_assert(sizeof(AegpColorVal) == 4 * sizeof(double));
+int32_t __cdecl aegp_get_comp_bg_color(void* comp, AegpColorVal* color) {
+  if (comp != &g_aegp_comp || !color) return 4;
+  const AegpColorVal headless_color{1.0, 0.0, 0.0, 0.0};
+  *color = headless_color;
+  return 0;
+}
 
 int32_t insert_render_options(const AegpRenderOptionsValue& value, void** output) {
   if (!output) return 4;
@@ -10732,6 +10773,7 @@ int32_t __cdecl aegp_dispose_stream(void* stream) {
   return 0;
 }
 
+std::array<void*, 41> g_aegp_comp_suite10{};
 std::array<void*, 44> g_aegp_comp_suite11{};
 std::array<void*, 44> g_aegp_comp_suite12{};
 std::array<void*, 46> g_aegp_layer_suite5{};
@@ -10740,6 +10782,7 @@ std::array<void*, 53> g_aegp_layer_suite9{};
 std::array<void*, 22> g_aegp_effect_suite4{};
 std::array<void*, 23> g_aegp_stream_suite6{};
 std::array<void*, 22> g_aegp_keyframe_suite5{};
+static_assert(sizeof(g_aegp_comp_suite10) == 41 * sizeof(void*));
 static_assert(sizeof(g_aegp_comp_suite11) == 352);
 static_assert(sizeof(g_aegp_comp_suite12) == 352);
 static_assert(sizeof(g_aegp_layer_suite5) == 368);
@@ -11822,6 +11865,11 @@ int32_t __cdecl acquire_suite(const char* name, int32_t version, const void** su
   if (!suite) return 4;
   *suite = nullptr;
   if (!name) return 4;
+  if (version == 1 && std::strcmp(name, "AE Plugin Helper Suite") == 0) {
+    *suite = g_pf_helper_suite1.data();
+    record_suite_acquire(name, version);
+    return 0;
+  }
   if (name && version == 2 && std::strcmp(name, "AE Plugin Helper Suite2") == 0) {
     *suite = g_pf_helper_suite2.data();
     record_suite_acquire(name, version);
@@ -12085,6 +12133,13 @@ int32_t __cdecl acquire_suite(const char* name, int32_t version, const void** su
     g_adv_app_suite1[6] = reinterpret_cast<void*>(&adv_app_info_text);
     g_adv_app_suite1[8] = reinterpret_cast<void*>(&adv_app_info_text3);
     *suite = g_adv_app_suite1.data();
+    record_suite_acquire(name, version);
+    return 0;
+  }
+  if (name && std::strcmp(name, "AEGP Comp Suite") == 0 && version == 21) {
+    g_aegp_comp_suite10.fill(reinterpret_cast<void*>(&aegp_unsupported_suite_call));
+    g_aegp_comp_suite10[4] = reinterpret_cast<void*>(&aegp_get_comp_bg_color);
+    *suite = g_aegp_comp_suite10.data();
     record_suite_acquire(name, version);
     return 0;
   }
@@ -19950,7 +20005,65 @@ bool verify_render_output_safety() {
       g_last_seh_selector == "SMART_PRE_RENDER_CLEANUP" && g_last_seh_error == 512;
 }
 
+bool verify_legacy_effect_compat_suites() {
+  const void* comp_suite = nullptr;
+  const void* interface_suite = nullptr;
+  const void* helper_suite = nullptr;
+  bool ok = acquire_suite("AEGP Comp Suite", 21, &comp_suite) == 0 &&
+      comp_suite == g_aegp_comp_suite10.data() &&
+      acquire_suite("AEGP PF Interface Suite", 1, &interface_suite) == 0 &&
+      interface_suite == &g_pf_interface_suite &&
+      acquire_suite("AE Plugin Helper Suite", 1, &helper_suite) == 0 &&
+      helper_suite == g_pf_helper_suite1.data();
+
+  AegpColorVal color{-1.0, -2.0, -3.0, -4.0};
+  const AegpColorVal color_sentinel = color;
+  ok = ok && aegp_get_comp_bg_color(&g_aegp_comp, &color) == 0 &&
+      color.alpha == 1.0 && color.red == 0.0 && color.green == 0.0 && color.blue == 0.0;
+  color = color_sentinel;
+  ok = ok && aegp_get_comp_bg_color(nullptr, &color) != 0 &&
+      std::memcmp(&color, &color_sentinel, sizeof(color)) == 0 &&
+      aegp_get_comp_bg_color(&g_aegp_comp_item, &color) != 0 &&
+      std::memcmp(&color, &color_sentinel, sizeof(color)) == 0 &&
+      aegp_get_comp_bg_color(&g_aegp_comp, nullptr) != 0;
+
+  AegpTime time{77, 99};
+  const AegpTime time_sentinel = time;
+  ok = ok && convert_effect_to_comp_time(&g_effect, -17, 24000, &time) == 0 &&
+      time.value == -17 && time.scale == 24000;
+  time = time_sentinel;
+  ok = ok && convert_effect_to_comp_time(nullptr, 1, 30, &time) != 0 &&
+      time.value == time_sentinel.value && time.scale == time_sentinel.scale &&
+      convert_effect_to_comp_time(&g_effect, 1, 0, &time) != 0 &&
+      time.value == time_sentinel.value && time.scale == time_sentinel.scale &&
+      convert_effect_to_comp_time(&g_effect, (std::numeric_limits<int32_t>::min)(),
+                                  (std::numeric_limits<uint32_t>::max)(), &time) == 0 &&
+      time.value == (std::numeric_limits<int32_t>::min)() &&
+      time.scale == (std::numeric_limits<uint32_t>::max)() &&
+      convert_effect_to_comp_time(&g_effect, 0, 1, nullptr) != 0;
+
+  g_pf_helper_effect_tool.store(14, std::memory_order_release);
+  int32_t tool = -1;
+  ok = ok && pf_get_current_tool(&tool) == 0 && tool == kPfSuiteToolNone &&
+      pf_get_current_tool(nullptr) == kPfBadCallbackParam &&
+      g_pf_helper_effect_tool.load(std::memory_order_acquire) == 14;
+  reset_pf_helper_tools();
+
+  ok = release_suite("AE Plugin Helper Suite", 1) == 0 && ok;
+  ok = release_suite("AEGP PF Interface Suite", 1) == 0 && ok;
+  ok = release_suite("AEGP Comp Suite", 21) == 0 && ok;
+  return ok;
+}
+
 int wmain(int argc, wchar_t **argv) {
+  if (argc == 2 && std::wstring(argv[1]) == L"--self-test-legacy-effect-compat") {
+    const bool passed = verify_legacy_effect_compat_suites();
+    std::cout << "{\"legacy_effect_compat\":\""
+              << (passed ? "passed" : "failed")
+              << "\",\"comp_suite_version\":21,\"comp_slots\":41"
+                 ",\"pf_interface_slots\":5,\"helper_v1_slots\":1}\n";
+    return passed ? 0 : 39;
+  }
 #ifdef AEXCOMPAT_RENDER_WORKER
   wchar_t cancel_gate[2]{};
   g_async_layer_cancel_test_gate =

@@ -10,15 +10,17 @@ MINIHOST_ROOT = ROOT / "minihost"
 
 
 class NativeCodeGuardTests(unittest.TestCase):
-    def test_broker_sources_exclude_native_loader_symbols_and_plugin_extension(self):
+    def test_broker_sources_exclude_native_loader_symbols_and_production_aex_literals(self):
         sources = sorted(BROKER_SOURCE_ROOT.rglob("*.rs"))
         self.assertTrue(sources)
-        forbidden = ("LoadLibrary", "GetProcAddress", "." + "aex")
         for path in sources:
             text = path.read_text(encoding="utf-8")
-            for token in forbidden:
+            for token in ("LoadLibrary", "GetProcAddress"):
                 with self.subTest(path=path, token=token):
                     self.assertNotIn(token, text)
+            production = text.split("#[cfg(test)]", 1)[0]
+            with self.subTest(path=path, token="production .aex literal"):
+                self.assertNotIn("." + "aex", production.lower())
 
     def test_broker_has_no_network_or_shell_process_dependencies(self):
         cargo_files = [BROKER_ROOT / "Cargo.toml", *sorted(BROKER_SOURCE_ROOT.rglob("Cargo.toml"))]

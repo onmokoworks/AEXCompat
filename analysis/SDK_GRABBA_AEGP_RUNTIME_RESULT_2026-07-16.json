@@ -1,188 +1,933 @@
 {
-  "schema_version": 1,
-  "recorded_at": "2026-07-17T11:08:00+09:00",
-  "result": "official_sdk_grabba_aegp_initialization_and_update_menu_passed",
-  "scope": {
-    "directly_proven": [
-      "The current official SDK Grabba artifact exported and entered EntryPointFunc with init_error 0.",
-      "The command, death, idle, and update-menu hooks each registered once.",
-      "The death hook was invoked once and returned death_error 0.",
-      "The update-menu hook completed with event_error 0 through the SDK-derived Item Suite version 10 adapter.",
-      "The idle hook completed once with event_error 0 and idle_max_sleep 0.",
-      "The command roundtrip invoked the command hook twice, handled both calls, and completed with event_error 0.",
-      "The update-menu run released all five suite leases with zero live references and suite_leases_balanced true.",
-      "Every rerun completed the required three-phase native module audit with zero unknown modules."
-    ],
-    "not_proven": [
-      "No pixel render was performed by this initialization command.",
-      "No Adobe After Effects execution or Adobe oracle comparison was performed, so no Adobe behavioral or pixel oracle is proven."
-    ]
-  },
-  "source_provenance": {
-    "git_head": "e4616599cc887545232c50cb51ab977991f1337d",
-    "worktree_was_dirty": true,
-    "files": [
-      {
-        "path": "minihost/src/l2_main.cpp",
-        "size_bytes": 1138218,
-        "sha256": "4fce425483d59eeef6335bcc885c904a6c406e2449cd879e2daad5447f1bf9f7"
-      },
-      {
-        "path": "broker/crates/broker/src/image_render.rs",
-        "size_bytes": 192446,
-        "sha256": "b15b917b52d13bbf42c8dce93022b276d6af698f3d904deb37d11466b7c31d43"
-      }
-    ]
-  },
-  "initialization": {
-    "command": "broker/target/debug/aexcompat-harness.exe --initialize-experimental-aegp target/sdk-fixtures/grabba/Grabba.aex",
-    "working_directory": "repository_root",
-    "exit_code": 0,
-    "report": {
-      "schema_version": 1,
-      "stage": "aegp_init",
-      "status": "initialized",
-      "entrypoint": "EntryPointFunc",
-      "identity_verified": true,
-      "init_error": 0,
-      "command_hooks_registered": 1,
-      "death_hooks_registered": 1,
-      "idle_hooks_registered": 1,
-      "update_menu_hooks_registered": 1,
-      "death_hooks_invoked": 1,
-      "death_error": 0,
-      "suite_acquires": 3,
-      "suite_releases": 3,
-      "live_suite_reference_count": 0,
-      "suite_leases_balanced": true,
-      "render_performed": false,
-      "module_audit_status": "passed",
-      "module_audit_phase_count": 3,
-      "module_audit_unknown_count": 0,
-      "module_audit_phases": {
-        "post_load": {"status": "passed", "unknown_count": 0},
-        "pre_unload": {"status": "passed", "unknown_count": 0},
-        "observed_union": {"status": "passed", "unknown_count": 0}
-      }
-    }
-  },
-  "update_menu": {
-    "command": "broker/target/debug/aexcompat-harness.exe --dispatch-experimental-aegp-update-menu target/sdk-fixtures/grabba/Grabba.aex",
-    "working_directory": "repository_root",
-    "exit_code": 0,
-    "status": "event_completed",
-    "event_requested": "update_menu",
-    "event_error": 0,
-    "hooks_invoked": 1,
-    "suite_acquires": 5,
-    "suite_releases": 5,
-    "live_suite_reference_count": 0,
-    "suite_leases_balanced": true,
-    "module_audit_status": "passed",
-    "module_audit_phase_count": 3,
-    "module_audit_unknown_count": 0,
-    "module_audit_phases": {
-      "post_load": {"status": "passed", "unknown_count": 0},
-      "pre_unload": {"status": "passed", "unknown_count": 0},
-      "observed_union": {"status": "passed", "unknown_count": 0}
-    },
-    "compatibility_boundary": "SDK-derived AEGP Item Suite acquisition version 10 exposes legacy GetActiveItem and GetItemType while unsupported slots remain fail-closed."
-  },
-  "idle": {
-    "command": "broker/target/debug/aexcompat-harness.exe --dispatch-experimental-aegp-idle target/sdk-fixtures/grabba/Grabba.aex",
-    "exit_code": 0,
-    "event_error": 0,
-    "hooks_invoked": 1,
-    "idle_max_sleep": 0,
-    "suite_acquires": 3,
-    "suite_releases": 3,
-    "suite_leases_balanced": true,
-    "module_audit_status": "passed",
-    "module_audit_phase_count": 3,
-    "module_audit_unknown_count": 0,
-    "module_audit_phases": {
-      "post_load": {"status": "passed", "unknown_count": 0},
-      "pre_unload": {"status": "passed", "unknown_count": 0},
-      "observed_union": {"status": "passed", "unknown_count": 0}
-    }
-  },
-  "command_roundtrip": {
-    "command": "broker/target/debug/aexcompat-harness.exe --dispatch-experimental-aegp-command-roundtrip target/sdk-fixtures/grabba/Grabba.aex",
-    "exit_code": 0,
-    "event_error": 0,
-    "command_hooks_invoked": 2,
-    "command_handled_count": 2,
-    "receipts_created": 2,
-    "receipts_checked_in": 2,
-    "live_receipts": 0,
-    "render_performed": true,
-    "suite_acquires": 9,
-    "suite_releases": 9,
-    "suite_leases_balanced": true,
-    "module_audit_status": "passed",
-    "module_audit_phase_count": 3,
-    "module_audit_unknown_count": 0,
-    "module_audit_phases": {
-      "post_load": {"status": "passed", "unknown_count": 0},
-      "pre_unload": {"status": "passed", "unknown_count": 0},
-      "observed_union": {"status": "passed", "unknown_count": 0}
-    }
-  },
-  "authenticated_artifacts": [
-    {
-      "role": "official_sdk_grabba_fixture",
-      "path": "target/sdk-fixtures/grabba/Grabba.aex",
-      "size_bytes": 21504,
-      "authentication": "The rebuild-varying PE artifact is authenticated against target/sdk-fixtures/grabba/build-result.json, which records the SHA-256 of the current unchanged-SDK-source build.",
-      "build_result_path": "target/sdk-fixtures/grabba/build-result.json"
-    },
-    {
-      "role": "aegp_worker",
-      "path": "target/minihost-build/aex_l2_worker.exe",
-      "size_bytes": 689152,
-      "sha256": "53a928b41f8d3e543eb246aa6255af3965a8f145e0188cc700d05fa400284c0a"
-    },
-    {
-      "role": "command_harness",
-      "path": "broker/target/debug/aexcompat-harness.exe",
-      "size_bytes": 18589696,
-      "sha256": "474476324654a00b556f61797647f23454397c435efc07e5dc69c2618f2227b7"
-    }
-  ],
-  "authenticated_reports": [
-    {"route": "initialization", "path": "target/final-integration-evidence/grabba-initialize.json", "size_bytes": 5032, "sha256": "ec5cf490757bb51911e3fcc02aeb490f8ff1da44ba77d3c63a045c3c8c656e03"},
-    {"route": "update_menu", "path": "target/final-integration-evidence/grabba-update-menu.json", "size_bytes": 5043, "sha256": "782c9d98e8b3b0c7db1ec6eb0578faa5eb06f828c2ed7e72ea478db8b1136c3a"},
-    {"route": "idle", "path": "target/final-integration-evidence/grabba-idle.json", "size_bytes": 5035, "sha256": "1003a5ed4779066cf002949d4d5b7a9a2eaaa7f496477f366cb7fd9adfe8759d"},
-    {"route": "command_roundtrip", "path": "target/final-integration-evidence/grabba-command-roundtrip.json", "size_bytes": 5048, "sha256": "26def50ae4633e33fcbfbd3d33cbf38d5096ebed97c77cb9ccd280c85a70d8ca"}
-  ],
-  "production_artifact_snapshot": [
-    {
-      "role": "render_worker",
-      "path": "target/minihost-build/aex_render_worker.exe",
-      "size_bytes": 768512,
-      "sha256": "94bbad9e150e60306073e66c3ab4a56d6ccf9b42e56af082db9014cc683b4254"
-    },
-    {
-      "role": "aegp_worker",
-      "path": "target/minihost-build/aex_l2_worker.exe",
-      "size_bytes": 689152,
-      "sha256": "53a928b41f8d3e543eb246aa6255af3965a8f145e0188cc700d05fa400284c0a"
-    },
-    {
-      "role": "smart_worker",
-      "path": "target/minihost-build/aex_smart_worker.exe",
-      "size_bytes": 787456,
-      "sha256": "7e14dae3c4997c794b7ccd24ed44c6754deffc7fb84c5da2cad85d78e93aeb98"
-    },
-    {
-      "role": "command_harness",
-      "path": "broker/target/debug/aexcompat-harness.exe",
-      "size_bytes": 18589696,
-      "sha256": "474476324654a00b556f61797647f23454397c435efc07e5dc69c2618f2227b7"
-    }
-  ],
-  "pending": [
-    "Exercise Grabba against a richer real project/item scene beyond the bounded synthetic host scene.",
-    "Run Grabba in a supported Adobe After Effects installation and capture an Adobe oracle before claiming behavioral or pixel compatibility."
-  ]
+    "schema_version":  1,
+    "recorded_at":  "2026-07-18T02:04:57+09:00",
+    "result":  "official_sdk_grabba_aegp_initialization_and_update_menu_passed",
+    "scope":  {
+                  "directly_proven":  [
+                                          "The current official SDK Grabba artifact exported and entered EntryPointFunc with init_error 0.",
+                                          "The command, death, idle, and update-menu hooks each registered once.",
+                                          "The death hook was invoked once and returned death_error 0.",
+                                          "The update-menu hook completed with event_error 0 through the SDK-derived Item Suite version 10 adapter.",
+                                          "The idle hook completed once with event_error 0 and idle_max_sleep 0.",
+                                          "The command roundtrip invoked the command hook twice, handled both calls, and completed with event_error 0.",
+                                          "The update-menu run released all five suite leases with zero live references and suite_leases_balanced true.",
+                                          "Every rerun completed the required three-phase native module audit with zero unknown modules."
+                                      ],
+                  "not_proven":  [
+                                     "No pixel render was performed by this initialization command.",
+                                     "No Adobe After Effects execution or Adobe oracle comparison was performed, so no Adobe behavioral or pixel oracle is proven."
+                                 ]
+              },
+    "source_provenance":  {
+                              "git_head":  "a4b529f358ffcb6cf9b8668710e5e468060f3600",
+                              "worktree_was_dirty":  true,
+                              "files":  [
+                                            {
+                                                "path":  "minihost/src/l2_main.cpp",
+                                                "size_bytes":  1171820,
+                                                "sha256":  "e1cc25a758745d8b895855e1fd1c25a54a7d1d583b234fd727af3a2338e93da2"
+                                            },
+                                            {
+                                                "path":  "broker/crates/broker/src/image_render.rs",
+                                                "size_bytes":  194897,
+                                                "sha256":  "a51c0425f74faa5eac474ffc205ad76664c08b29b886b027f40040057b79ae98"
+                                            },
+                                            {
+                                                "path":  "broker/crates/broker/src/generated_l2_worker_trust.rs",
+                                                "size_bytes":  413,
+                                                "sha256":  "292a8483a7731a54eb92564daea4fa7723f62dfe742751a54f78e315f5739388"
+                                            }
+                                        ]
+                          },
+    "initialization":  {
+                           "command":  "broker/target/debug/aexcompat-harness.exe --initialize-experimental-aegp target/sdk-fixtures/grabba/Grabba.aex",
+                           "working_directory":  "repository_root",
+                           "exit_code":  0,
+                           "report":  {
+                                          "aegp_memory_created":  0,
+                                          "aegp_memory_freed":  0,
+                                          "aegp_memory_lifetimes_balanced":  true,
+                                          "collection_creates":  0,
+                                          "collection_disposes":  0,
+                                          "collection_item_reads":  0,
+                                          "collection_lifetimes_balanced":  true,
+                                          "command_check_calls":  0,
+                                          "command_checked_false_calls":  0,
+                                          "command_checked_true_calls":  0,
+                                          "command_enable_calls":  0,
+                                          "command_handled_count":  0,
+                                          "command_hooks_invoked":  0,
+                                          "command_hooks_registered":  1,
+                                          "commands_created":  1,
+                                          "comp_framerate_calls":  0,
+                                          "comp_from_item_calls":  0,
+                                          "death_error":  0,
+                                          "death_hooks_invoked":  1,
+                                          "death_hooks_registered":  1,
+                                          "driver_major_version":  24,
+                                          "driver_minor_version":  0,
+                                          "effect_acquires":  0,
+                                          "effect_count_calls":  0,
+                                          "effect_disposes":  0,
+                                          "effect_lifetimes_balanced":  true,
+                                          "effect_metadata_calls":  0,
+                                          "effect_param_name_calls":  0,
+                                          "effect_param_union_calls":  0,
+                                          "effect_param_value_calls":  0,
+                                          "entrypoint":  "EntryPointFunc",
+                                          "event_error":  0,
+                                          "event_requested":  "none",
+                                          "global_refcon_nonnull":  false,
+                                          "hooks_invoked":  0,
+                                          "identity_verified":  true,
+                                          "idle_hooks_registered":  1,
+                                          "idle_max_sleep":  -1,
+                                          "init_error":  0,
+                                          "item_current_time_calls":  0,
+                                          "item_duration_calls":  0,
+                                          "item_last_set_time_scale":  0,
+                                          "item_last_set_time_value":  -1,
+                                          "item_name_calls":  0,
+                                          "item_set_current_time_calls":  0,
+                                          "keyframe_count_calls":  0,
+                                          "keyframe_interpolation_calls":  0,
+                                          "keyframe_pipe_connected":  false,
+                                          "keyframe_pipe_request_sent":  false,
+                                          "keyframe_pipe_response_bytes":  0,
+                                          "keyframe_pipe_response_received":  false,
+                                          "keyframe_pipe_response_valid":  false,
+                                          "keyframe_time_calls":  0,
+                                          "keyframe_value_calls":  0,
+                                          "keyframed_stream_reports":  0,
+                                          "layer_1_duration_scale":  30,
+                                          "layer_1_duration_value":  300,
+                                          "layer_1_flags":  5,
+                                          "layer_1_in_point_scale":  30,
+                                          "layer_1_in_point_value":  0,
+                                          "layer_2_flags":  5,
+                                          "layer_3_flags":  5,
+                                          "layer_attribute_calls":  0,
+                                          "layer_by_index_calls":  0,
+                                          "layer_count_calls":  0,
+                                          "layer_flag_set_calls":  0,
+                                          "layer_id_calls":  0,
+                                          "layer_name_calls":  0,
+                                          "layer_source_item_calls":  0,
+                                          "layer_trim_set_calls":  0,
+                                          "live_receipts":  0,
+                                          "live_suite_leases":  "",
+                                          "live_suite_reference_count":  0,
+                                          "menu_commands_inserted":  1,
+                                          "menu_hooks_invoked":  0,
+                                          "module_audit":  {
+                                                               "observed_union":  {
+                                                                                      "plugin":  [
+                                                                                                     "Grabba.aex"
+                                                                                                 ],
+                                                                                      "status":  "passed",
+                                                                                      "system32":  [
+                                                                                                       "ntdll.dll",
+                                                                                                       "kernel32.dll",
+                                                                                                       "KernelBase.dll",
+                                                                                                       "apphelp.dll",
+                                                                                                       "bcrypt.dll",
+                                                                                                       "ucrtbase.dll",
+                                                                                                       "vcruntime140.dll",
+                                                                                                       "msvcp140.dll",
+                                                                                                       "vcruntime140_1.dll",
+                                                                                                       "bcryptprimitives.dll"
+                                                                                                   ],
+                                                                                      "unknown_count":  0,
+                                                                                      "worker":  [
+                                                                                                     "trusted-worker.exe"
+                                                                                                 ]
+                                                                                  },
+                                                               "phase_count":  3,
+                                                               "post_load":  {
+                                                                                 "plugin":  [
+                                                                                                "Grabba.aex"
+                                                                                            ],
+                                                                                 "status":  "passed",
+                                                                                 "system32":  [
+                                                                                                  "ntdll.dll",
+                                                                                                  "kernel32.dll",
+                                                                                                  "KernelBase.dll",
+                                                                                                  "apphelp.dll",
+                                                                                                  "bcrypt.dll",
+                                                                                                  "ucrtbase.dll",
+                                                                                                  "vcruntime140.dll",
+                                                                                                  "msvcp140.dll",
+                                                                                                  "vcruntime140_1.dll",
+                                                                                                  "bcryptprimitives.dll"
+                                                                                              ],
+                                                                                 "unknown_count":  0,
+                                                                                 "worker":  [
+                                                                                                "trusted-worker.exe"
+                                                                                            ]
+                                                                             },
+                                                               "pre_unload":  {
+                                                                                  "plugin":  [
+                                                                                                 "Grabba.aex"
+                                                                                             ],
+                                                                                  "status":  "passed",
+                                                                                  "system32":  [
+                                                                                                   "ntdll.dll",
+                                                                                                   "kernel32.dll",
+                                                                                                   "KernelBase.dll",
+                                                                                                   "apphelp.dll",
+                                                                                                   "bcrypt.dll",
+                                                                                                   "ucrtbase.dll",
+                                                                                                   "vcruntime140.dll",
+                                                                                                   "msvcp140.dll",
+                                                                                                   "vcruntime140_1.dll",
+                                                                                                   "bcryptprimitives.dll"
+                                                                                               ],
+                                                                                  "unknown_count":  0,
+                                                                                  "worker":  [
+                                                                                                 "trusted-worker.exe"
+                                                                                             ]
+                                                                              },
+                                                               "schema":  1,
+                                                               "status":  "passed",
+                                                               "unknown_count":  0
+                                                           },
+                                          "plugin_id":  1,
+                                          "receipts_checked_in":  0,
+                                          "receipts_created":  0,
+                                          "render_performed":  false,
+                                          "scene_current_frame":  1,
+                                          "scene_first_observed_frame":  -1,
+                                          "scene_last_observed_frame":  -1,
+                                          "scene_layer_count":  3,
+                                          "scene_selected_layer_count":  2,
+                                          "schema_version":  1,
+                                          "seek_pipe_ack_received":  false,
+                                          "seek_pipe_ack_valid":  false,
+                                          "seek_pipe_connected":  false,
+                                          "seek_pipe_request_sent":  false,
+                                          "stage":  "aegp_init",
+                                          "status":  "initialized",
+                                          "stream_acquires":  0,
+                                          "stream_disposes":  0,
+                                          "stream_lifetimes_balanced":  true,
+                                          "stream_sampled_selector_mask":  0,
+                                          "stream_value_acquires":  0,
+                                          "stream_value_disposes":  0,
+                                          "suite_acquires":  3,
+                                          "suite_cache_reclaimed_at_process_exit":  false,
+                                          "suite_leases_balanced":  true,
+                                          "suite_releases":  3,
+                                          "switch_pipe_ack_received":  false,
+                                          "switch_pipe_ack_valid":  false,
+                                          "switch_pipe_connected":  false,
+                                          "switch_pipe_request_sent":  false,
+                                          "trim_pipe_ack_received":  false,
+                                          "trim_pipe_ack_valid":  false,
+                                          "trim_pipe_connected":  false,
+                                          "trim_pipe_request_sent":  false,
+                                          "update_menu_hooks_registered":  1,
+                                          "exit_code":  0,
+                                          "module_audit_status":  "passed",
+                                          "module_audit_phase_count":  3,
+                                          "module_audit_unknown_count":  0,
+                                          "module_audit_phases":  {
+                                                                      "post_load":  {
+                                                                                        "status":  "passed",
+                                                                                        "unknown_count":  0
+                                                                                    },
+                                                                      "pre_unload":  {
+                                                                                         "status":  "passed",
+                                                                                         "unknown_count":  0
+                                                                                     },
+                                                                      "observed_union":  {
+                                                                                             "status":  "passed",
+                                                                                             "unknown_count":  0
+                                                                                         }
+                                                                  }
+                                      }
+                       },
+    "update_menu":  {
+                        "aegp_memory_created":  0,
+                        "aegp_memory_freed":  0,
+                        "aegp_memory_lifetimes_balanced":  true,
+                        "collection_creates":  0,
+                        "collection_disposes":  0,
+                        "collection_item_reads":  0,
+                        "collection_lifetimes_balanced":  true,
+                        "command_check_calls":  0,
+                        "command_checked_false_calls":  0,
+                        "command_checked_true_calls":  0,
+                        "command_enable_calls":  1,
+                        "command_handled_count":  0,
+                        "command_hooks_invoked":  0,
+                        "command_hooks_registered":  1,
+                        "commands_created":  1,
+                        "comp_framerate_calls":  0,
+                        "comp_from_item_calls":  0,
+                        "death_error":  0,
+                        "death_hooks_invoked":  1,
+                        "death_hooks_registered":  1,
+                        "driver_major_version":  24,
+                        "driver_minor_version":  0,
+                        "effect_acquires":  0,
+                        "effect_count_calls":  0,
+                        "effect_disposes":  0,
+                        "effect_lifetimes_balanced":  true,
+                        "effect_metadata_calls":  0,
+                        "effect_param_name_calls":  0,
+                        "effect_param_union_calls":  0,
+                        "effect_param_value_calls":  0,
+                        "entrypoint":  "EntryPointFunc",
+                        "event_error":  0,
+                        "event_requested":  "update_menu",
+                        "global_refcon_nonnull":  false,
+                        "hooks_invoked":  1,
+                        "identity_verified":  true,
+                        "idle_hooks_registered":  1,
+                        "idle_max_sleep":  -1,
+                        "init_error":  0,
+                        "item_current_time_calls":  0,
+                        "item_duration_calls":  0,
+                        "item_last_set_time_scale":  0,
+                        "item_last_set_time_value":  -1,
+                        "item_name_calls":  0,
+                        "item_set_current_time_calls":  0,
+                        "keyframe_count_calls":  0,
+                        "keyframe_interpolation_calls":  0,
+                        "keyframe_pipe_connected":  false,
+                        "keyframe_pipe_request_sent":  false,
+                        "keyframe_pipe_response_bytes":  0,
+                        "keyframe_pipe_response_received":  false,
+                        "keyframe_pipe_response_valid":  false,
+                        "keyframe_time_calls":  0,
+                        "keyframe_value_calls":  0,
+                        "keyframed_stream_reports":  0,
+                        "layer_1_duration_scale":  30,
+                        "layer_1_duration_value":  300,
+                        "layer_1_flags":  5,
+                        "layer_1_in_point_scale":  30,
+                        "layer_1_in_point_value":  0,
+                        "layer_2_flags":  5,
+                        "layer_3_flags":  5,
+                        "layer_attribute_calls":  0,
+                        "layer_by_index_calls":  0,
+                        "layer_count_calls":  0,
+                        "layer_flag_set_calls":  0,
+                        "layer_id_calls":  0,
+                        "layer_name_calls":  0,
+                        "layer_source_item_calls":  0,
+                        "layer_trim_set_calls":  0,
+                        "live_receipts":  0,
+                        "live_suite_leases":  "",
+                        "live_suite_reference_count":  0,
+                        "menu_commands_inserted":  1,
+                        "menu_hooks_invoked":  0,
+                        "module_audit":  {
+                                             "observed_union":  {
+                                                                    "plugin":  [
+                                                                                   "Grabba.aex"
+                                                                               ],
+                                                                    "status":  "passed",
+                                                                    "system32":  [
+                                                                                     "ntdll.dll",
+                                                                                     "kernel32.dll",
+                                                                                     "KernelBase.dll",
+                                                                                     "apphelp.dll",
+                                                                                     "bcrypt.dll",
+                                                                                     "ucrtbase.dll",
+                                                                                     "msvcp140.dll",
+                                                                                     "vcruntime140_1.dll",
+                                                                                     "vcruntime140.dll",
+                                                                                     "bcryptprimitives.dll"
+                                                                                 ],
+                                                                    "unknown_count":  0,
+                                                                    "worker":  [
+                                                                                   "trusted-worker.exe"
+                                                                               ]
+                                                                },
+                                             "phase_count":  3,
+                                             "post_load":  {
+                                                               "plugin":  [
+                                                                              "Grabba.aex"
+                                                                          ],
+                                                               "status":  "passed",
+                                                               "system32":  [
+                                                                                "ntdll.dll",
+                                                                                "kernel32.dll",
+                                                                                "KernelBase.dll",
+                                                                                "apphelp.dll",
+                                                                                "bcrypt.dll",
+                                                                                "ucrtbase.dll",
+                                                                                "msvcp140.dll",
+                                                                                "vcruntime140_1.dll",
+                                                                                "vcruntime140.dll",
+                                                                                "bcryptprimitives.dll"
+                                                                            ],
+                                                               "unknown_count":  0,
+                                                               "worker":  [
+                                                                              "trusted-worker.exe"
+                                                                          ]
+                                                           },
+                                             "pre_unload":  {
+                                                                "plugin":  [
+                                                                               "Grabba.aex"
+                                                                           ],
+                                                                "status":  "passed",
+                                                                "system32":  [
+                                                                                 "ntdll.dll",
+                                                                                 "kernel32.dll",
+                                                                                 "KernelBase.dll",
+                                                                                 "apphelp.dll",
+                                                                                 "bcrypt.dll",
+                                                                                 "ucrtbase.dll",
+                                                                                 "msvcp140.dll",
+                                                                                 "vcruntime140_1.dll",
+                                                                                 "vcruntime140.dll",
+                                                                                 "bcryptprimitives.dll"
+                                                                             ],
+                                                                "unknown_count":  0,
+                                                                "worker":  [
+                                                                               "trusted-worker.exe"
+                                                                           ]
+                                                            },
+                                             "schema":  1,
+                                             "status":  "passed",
+                                             "unknown_count":  0
+                                         },
+                        "plugin_id":  1,
+                        "receipts_checked_in":  0,
+                        "receipts_created":  0,
+                        "render_performed":  false,
+                        "scene_current_frame":  1,
+                        "scene_first_observed_frame":  -1,
+                        "scene_last_observed_frame":  -1,
+                        "scene_layer_count":  3,
+                        "scene_selected_layer_count":  2,
+                        "schema_version":  1,
+                        "seek_pipe_ack_received":  false,
+                        "seek_pipe_ack_valid":  false,
+                        "seek_pipe_connected":  false,
+                        "seek_pipe_request_sent":  false,
+                        "stage":  "aegp_init",
+                        "status":  "event_completed",
+                        "stream_acquires":  0,
+                        "stream_disposes":  0,
+                        "stream_lifetimes_balanced":  true,
+                        "stream_sampled_selector_mask":  0,
+                        "stream_value_acquires":  0,
+                        "stream_value_disposes":  0,
+                        "suite_acquires":  5,
+                        "suite_cache_reclaimed_at_process_exit":  false,
+                        "suite_leases_balanced":  true,
+                        "suite_releases":  5,
+                        "switch_pipe_ack_received":  false,
+                        "switch_pipe_ack_valid":  false,
+                        "switch_pipe_connected":  false,
+                        "switch_pipe_request_sent":  false,
+                        "trim_pipe_ack_received":  false,
+                        "trim_pipe_ack_valid":  false,
+                        "trim_pipe_connected":  false,
+                        "trim_pipe_request_sent":  false,
+                        "update_menu_hooks_registered":  1,
+                        "exit_code":  0,
+                        "module_audit_status":  "passed",
+                        "module_audit_phase_count":  3,
+                        "module_audit_unknown_count":  0,
+                        "module_audit_phases":  {
+                                                    "post_load":  {
+                                                                      "status":  "passed",
+                                                                      "unknown_count":  0
+                                                                  },
+                                                    "pre_unload":  {
+                                                                       "status":  "passed",
+                                                                       "unknown_count":  0
+                                                                   },
+                                                    "observed_union":  {
+                                                                           "status":  "passed",
+                                                                           "unknown_count":  0
+                                                                       }
+                                                },
+                        "compatibility_boundary":  "SDK-derived AEGP Item Suite acquisition version 10 exposes legacy GetActiveItem and GetItemType while unsupported slots remain fail-closed."
+                    },
+    "idle":  {
+                 "aegp_memory_created":  0,
+                 "aegp_memory_freed":  0,
+                 "aegp_memory_lifetimes_balanced":  true,
+                 "collection_creates":  0,
+                 "collection_disposes":  0,
+                 "collection_item_reads":  0,
+                 "collection_lifetimes_balanced":  true,
+                 "command_check_calls":  0,
+                 "command_checked_false_calls":  0,
+                 "command_checked_true_calls":  0,
+                 "command_enable_calls":  0,
+                 "command_handled_count":  0,
+                 "command_hooks_invoked":  0,
+                 "command_hooks_registered":  1,
+                 "commands_created":  1,
+                 "comp_framerate_calls":  0,
+                 "comp_from_item_calls":  0,
+                 "death_error":  0,
+                 "death_hooks_invoked":  1,
+                 "death_hooks_registered":  1,
+                 "driver_major_version":  24,
+                 "driver_minor_version":  0,
+                 "effect_acquires":  0,
+                 "effect_count_calls":  0,
+                 "effect_disposes":  0,
+                 "effect_lifetimes_balanced":  true,
+                 "effect_metadata_calls":  0,
+                 "effect_param_name_calls":  0,
+                 "effect_param_union_calls":  0,
+                 "effect_param_value_calls":  0,
+                 "entrypoint":  "EntryPointFunc",
+                 "event_error":  0,
+                 "event_requested":  "idle",
+                 "global_refcon_nonnull":  false,
+                 "hooks_invoked":  1,
+                 "identity_verified":  true,
+                 "idle_hooks_registered":  1,
+                 "idle_max_sleep":  0,
+                 "init_error":  0,
+                 "item_current_time_calls":  0,
+                 "item_duration_calls":  0,
+                 "item_last_set_time_scale":  0,
+                 "item_last_set_time_value":  -1,
+                 "item_name_calls":  0,
+                 "item_set_current_time_calls":  0,
+                 "keyframe_count_calls":  0,
+                 "keyframe_interpolation_calls":  0,
+                 "keyframe_pipe_connected":  false,
+                 "keyframe_pipe_request_sent":  false,
+                 "keyframe_pipe_response_bytes":  0,
+                 "keyframe_pipe_response_received":  false,
+                 "keyframe_pipe_response_valid":  false,
+                 "keyframe_time_calls":  0,
+                 "keyframe_value_calls":  0,
+                 "keyframed_stream_reports":  0,
+                 "layer_1_duration_scale":  30,
+                 "layer_1_duration_value":  300,
+                 "layer_1_flags":  5,
+                 "layer_1_in_point_scale":  30,
+                 "layer_1_in_point_value":  0,
+                 "layer_2_flags":  5,
+                 "layer_3_flags":  5,
+                 "layer_attribute_calls":  0,
+                 "layer_by_index_calls":  0,
+                 "layer_count_calls":  0,
+                 "layer_flag_set_calls":  0,
+                 "layer_id_calls":  0,
+                 "layer_name_calls":  0,
+                 "layer_source_item_calls":  0,
+                 "layer_trim_set_calls":  0,
+                 "live_receipts":  0,
+                 "live_suite_leases":  "",
+                 "live_suite_reference_count":  0,
+                 "menu_commands_inserted":  1,
+                 "menu_hooks_invoked":  0,
+                 "module_audit":  {
+                                      "observed_union":  {
+                                                             "plugin":  [
+                                                                            "Grabba.aex"
+                                                                        ],
+                                                             "status":  "passed",
+                                                             "system32":  [
+                                                                              "ntdll.dll",
+                                                                              "kernel32.dll",
+                                                                              "KernelBase.dll",
+                                                                              "apphelp.dll",
+                                                                              "bcrypt.dll",
+                                                                              "ucrtbase.dll",
+                                                                              "msvcp140.dll",
+                                                                              "vcruntime140_1.dll",
+                                                                              "vcruntime140.dll",
+                                                                              "bcryptprimitives.dll"
+                                                                          ],
+                                                             "unknown_count":  0,
+                                                             "worker":  [
+                                                                            "trusted-worker.exe"
+                                                                        ]
+                                                         },
+                                      "phase_count":  3,
+                                      "post_load":  {
+                                                        "plugin":  [
+                                                                       "Grabba.aex"
+                                                                   ],
+                                                        "status":  "passed",
+                                                        "system32":  [
+                                                                         "ntdll.dll",
+                                                                         "kernel32.dll",
+                                                                         "KernelBase.dll",
+                                                                         "apphelp.dll",
+                                                                         "bcrypt.dll",
+                                                                         "ucrtbase.dll",
+                                                                         "msvcp140.dll",
+                                                                         "vcruntime140_1.dll",
+                                                                         "vcruntime140.dll",
+                                                                         "bcryptprimitives.dll"
+                                                                     ],
+                                                        "unknown_count":  0,
+                                                        "worker":  [
+                                                                       "trusted-worker.exe"
+                                                                   ]
+                                                    },
+                                      "pre_unload":  {
+                                                         "plugin":  [
+                                                                        "Grabba.aex"
+                                                                    ],
+                                                         "status":  "passed",
+                                                         "system32":  [
+                                                                          "ntdll.dll",
+                                                                          "kernel32.dll",
+                                                                          "KernelBase.dll",
+                                                                          "apphelp.dll",
+                                                                          "bcrypt.dll",
+                                                                          "ucrtbase.dll",
+                                                                          "msvcp140.dll",
+                                                                          "vcruntime140_1.dll",
+                                                                          "vcruntime140.dll",
+                                                                          "bcryptprimitives.dll"
+                                                                      ],
+                                                         "unknown_count":  0,
+                                                         "worker":  [
+                                                                        "trusted-worker.exe"
+                                                                    ]
+                                                     },
+                                      "schema":  1,
+                                      "status":  "passed",
+                                      "unknown_count":  0
+                                  },
+                 "plugin_id":  1,
+                 "receipts_checked_in":  0,
+                 "receipts_created":  0,
+                 "render_performed":  false,
+                 "scene_current_frame":  1,
+                 "scene_first_observed_frame":  -1,
+                 "scene_last_observed_frame":  -1,
+                 "scene_layer_count":  3,
+                 "scene_selected_layer_count":  2,
+                 "schema_version":  1,
+                 "seek_pipe_ack_received":  false,
+                 "seek_pipe_ack_valid":  false,
+                 "seek_pipe_connected":  false,
+                 "seek_pipe_request_sent":  false,
+                 "stage":  "aegp_init",
+                 "status":  "event_completed",
+                 "stream_acquires":  0,
+                 "stream_disposes":  0,
+                 "stream_lifetimes_balanced":  true,
+                 "stream_sampled_selector_mask":  0,
+                 "stream_value_acquires":  0,
+                 "stream_value_disposes":  0,
+                 "suite_acquires":  3,
+                 "suite_cache_reclaimed_at_process_exit":  false,
+                 "suite_leases_balanced":  true,
+                 "suite_releases":  3,
+                 "switch_pipe_ack_received":  false,
+                 "switch_pipe_ack_valid":  false,
+                 "switch_pipe_connected":  false,
+                 "switch_pipe_request_sent":  false,
+                 "trim_pipe_ack_received":  false,
+                 "trim_pipe_ack_valid":  false,
+                 "trim_pipe_connected":  false,
+                 "trim_pipe_request_sent":  false,
+                 "update_menu_hooks_registered":  1,
+                 "exit_code":  0,
+                 "module_audit_status":  "passed",
+                 "module_audit_phase_count":  3,
+                 "module_audit_unknown_count":  0,
+                 "module_audit_phases":  {
+                                             "post_load":  {
+                                                               "status":  "passed",
+                                                               "unknown_count":  0
+                                                           },
+                                             "pre_unload":  {
+                                                                "status":  "passed",
+                                                                "unknown_count":  0
+                                                            },
+                                             "observed_union":  {
+                                                                    "status":  "passed",
+                                                                    "unknown_count":  0
+                                                                }
+                                         }
+             },
+    "command_roundtrip":  {
+                              "aegp_memory_created":  0,
+                              "aegp_memory_freed":  0,
+                              "aegp_memory_lifetimes_balanced":  true,
+                              "collection_creates":  0,
+                              "collection_disposes":  0,
+                              "collection_item_reads":  0,
+                              "collection_lifetimes_balanced":  true,
+                              "command_check_calls":  0,
+                              "command_checked_false_calls":  0,
+                              "command_checked_true_calls":  0,
+                              "command_enable_calls":  0,
+                              "command_handled_count":  2,
+                              "command_hooks_invoked":  2,
+                              "command_hooks_registered":  1,
+                              "commands_created":  1,
+                              "comp_framerate_calls":  0,
+                              "comp_from_item_calls":  0,
+                              "death_error":  0,
+                              "death_hooks_invoked":  1,
+                              "death_hooks_registered":  1,
+                              "driver_major_version":  24,
+                              "driver_minor_version":  0,
+                              "effect_acquires":  0,
+                              "effect_count_calls":  0,
+                              "effect_disposes":  0,
+                              "effect_lifetimes_balanced":  true,
+                              "effect_metadata_calls":  0,
+                              "effect_param_name_calls":  0,
+                              "effect_param_union_calls":  0,
+                              "effect_param_value_calls":  0,
+                              "entrypoint":  "EntryPointFunc",
+                              "event_error":  0,
+                              "event_requested":  "command_roundtrip",
+                              "global_refcon_nonnull":  false,
+                              "hooks_invoked":  0,
+                              "identity_verified":  true,
+                              "idle_hooks_registered":  1,
+                              "idle_max_sleep":  -1,
+                              "init_error":  0,
+                              "item_current_time_calls":  0,
+                              "item_duration_calls":  0,
+                              "item_last_set_time_scale":  0,
+                              "item_last_set_time_value":  -1,
+                              "item_name_calls":  0,
+                              "item_set_current_time_calls":  0,
+                              "keyframe_count_calls":  0,
+                              "keyframe_interpolation_calls":  0,
+                              "keyframe_pipe_connected":  false,
+                              "keyframe_pipe_request_sent":  false,
+                              "keyframe_pipe_response_bytes":  0,
+                              "keyframe_pipe_response_received":  false,
+                              "keyframe_pipe_response_valid":  false,
+                              "keyframe_time_calls":  0,
+                              "keyframe_value_calls":  0,
+                              "keyframed_stream_reports":  0,
+                              "layer_1_duration_scale":  30,
+                              "layer_1_duration_value":  300,
+                              "layer_1_flags":  5,
+                              "layer_1_in_point_scale":  30,
+                              "layer_1_in_point_value":  0,
+                              "layer_2_flags":  5,
+                              "layer_3_flags":  5,
+                              "layer_attribute_calls":  0,
+                              "layer_by_index_calls":  0,
+                              "layer_count_calls":  0,
+                              "layer_flag_set_calls":  0,
+                              "layer_id_calls":  0,
+                              "layer_name_calls":  0,
+                              "layer_source_item_calls":  0,
+                              "layer_trim_set_calls":  0,
+                              "live_receipts":  0,
+                              "live_suite_leases":  "",
+                              "live_suite_reference_count":  0,
+                              "menu_commands_inserted":  1,
+                              "menu_hooks_invoked":  0,
+                              "module_audit":  {
+                                                   "observed_union":  {
+                                                                          "plugin":  [
+                                                                                         "Grabba.aex"
+                                                                                     ],
+                                                                          "status":  "passed",
+                                                                          "system32":  [
+                                                                                           "ntdll.dll",
+                                                                                           "kernel32.dll",
+                                                                                           "KernelBase.dll",
+                                                                                           "apphelp.dll",
+                                                                                           "bcrypt.dll",
+                                                                                           "ucrtbase.dll",
+                                                                                           "msvcp140.dll",
+                                                                                           "vcruntime140_1.dll",
+                                                                                           "vcruntime140.dll",
+                                                                                           "bcryptprimitives.dll"
+                                                                                       ],
+                                                                          "unknown_count":  0,
+                                                                          "worker":  [
+                                                                                         "trusted-worker.exe"
+                                                                                     ]
+                                                                      },
+                                                   "phase_count":  3,
+                                                   "post_load":  {
+                                                                     "plugin":  [
+                                                                                    "Grabba.aex"
+                                                                                ],
+                                                                     "status":  "passed",
+                                                                     "system32":  [
+                                                                                      "ntdll.dll",
+                                                                                      "kernel32.dll",
+                                                                                      "KernelBase.dll",
+                                                                                      "apphelp.dll",
+                                                                                      "bcrypt.dll",
+                                                                                      "ucrtbase.dll",
+                                                                                      "msvcp140.dll",
+                                                                                      "vcruntime140_1.dll",
+                                                                                      "vcruntime140.dll",
+                                                                                      "bcryptprimitives.dll"
+                                                                                  ],
+                                                                     "unknown_count":  0,
+                                                                     "worker":  [
+                                                                                    "trusted-worker.exe"
+                                                                                ]
+                                                                 },
+                                                   "pre_unload":  {
+                                                                      "plugin":  [
+                                                                                     "Grabba.aex"
+                                                                                 ],
+                                                                      "status":  "passed",
+                                                                      "system32":  [
+                                                                                       "ntdll.dll",
+                                                                                       "kernel32.dll",
+                                                                                       "KernelBase.dll",
+                                                                                       "apphelp.dll",
+                                                                                       "bcrypt.dll",
+                                                                                       "ucrtbase.dll",
+                                                                                       "msvcp140.dll",
+                                                                                       "vcruntime140_1.dll",
+                                                                                       "vcruntime140.dll",
+                                                                                       "bcryptprimitives.dll"
+                                                                                   ],
+                                                                      "unknown_count":  0,
+                                                                      "worker":  [
+                                                                                     "trusted-worker.exe"
+                                                                                 ]
+                                                                  },
+                                                   "schema":  1,
+                                                   "status":  "passed",
+                                                   "unknown_count":  0
+                                               },
+                              "plugin_id":  1,
+                              "receipts_checked_in":  2,
+                              "receipts_created":  2,
+                              "render_performed":  true,
+                              "scene_current_frame":  1,
+                              "scene_first_observed_frame":  -1,
+                              "scene_last_observed_frame":  -1,
+                              "scene_layer_count":  3,
+                              "scene_selected_layer_count":  2,
+                              "schema_version":  1,
+                              "seek_pipe_ack_received":  false,
+                              "seek_pipe_ack_valid":  false,
+                              "seek_pipe_connected":  false,
+                              "seek_pipe_request_sent":  false,
+                              "stage":  "aegp_init",
+                              "status":  "event_completed",
+                              "stream_acquires":  0,
+                              "stream_disposes":  0,
+                              "stream_lifetimes_balanced":  true,
+                              "stream_sampled_selector_mask":  0,
+                              "stream_value_acquires":  0,
+                              "stream_value_disposes":  0,
+                              "suite_acquires":  9,
+                              "suite_cache_reclaimed_at_process_exit":  false,
+                              "suite_leases_balanced":  true,
+                              "suite_releases":  9,
+                              "switch_pipe_ack_received":  false,
+                              "switch_pipe_ack_valid":  false,
+                              "switch_pipe_connected":  false,
+                              "switch_pipe_request_sent":  false,
+                              "trim_pipe_ack_received":  false,
+                              "trim_pipe_ack_valid":  false,
+                              "trim_pipe_connected":  false,
+                              "trim_pipe_request_sent":  false,
+                              "update_menu_hooks_registered":  1,
+                              "exit_code":  0,
+                              "module_audit_status":  "passed",
+                              "module_audit_phase_count":  3,
+                              "module_audit_unknown_count":  0,
+                              "module_audit_phases":  {
+                                                          "post_load":  {
+                                                                            "status":  "passed",
+                                                                            "unknown_count":  0
+                                                                        },
+                                                          "pre_unload":  {
+                                                                             "status":  "passed",
+                                                                             "unknown_count":  0
+                                                                         },
+                                                          "observed_union":  {
+                                                                                 "status":  "passed",
+                                                                                 "unknown_count":  0
+                                                                             }
+                                                      }
+                          },
+    "authenticated_artifacts":  [
+                                    {
+                                        "role":  "official_sdk_grabba_fixture",
+                                        "path":  "target/sdk-fixtures/grabba/Grabba.aex",
+                                        "size_bytes":  21504,
+                                        "authentication":  "The rebuild-varying PE artifact is authenticated against target/sdk-fixtures/grabba/build-result.json, which records the SHA-256 of the current unchanged-SDK-source build.",
+                                        "build_result_path":  "target/sdk-fixtures/grabba/build-result.json"
+                                    },
+                                    {
+                                        "role":  "aegp_worker",
+                                        "path":  "target/minihost-build/aex_l2_worker.exe",
+                                        "size_bytes":  699904,
+                                        "sha256":  "c8bbd7bf7f58bed903a67925f0bf0a8c947e2bd018883291ee0e1b72e7fdb4b2"
+                                    },
+                                    {
+                                        "role":  "command_harness",
+                                        "path":  "broker/target/debug/aexcompat-harness.exe",
+                                        "size_bytes":  19856384,
+                                        "sha256":  "2bfe5bce1ac1262749bc946519dc35b668c9895be088f38b9adc9512d1060f21"
+                                    }
+                                ],
+    "authenticated_reports":  [
+                                  {
+                                      "route":  "initialization",
+                                      "path":  "target/final-integration-evidence/grabba-initialization.json",
+                                      "size_bytes":  9582,
+                                      "sha256":  "6b36a138002d40aadbabe60907e50935f05bd7eca018e9147fa206e53519ef8d"
+                                  },
+                                  {
+                                      "route":  "command_roundtrip",
+                                      "path":  "target/final-integration-evidence/grabba-command-roundtrip.json",
+                                      "size_bytes":  9598,
+                                      "sha256":  "df9fbb81d588220caede2f2eb9b9c3814c65a9c03dc458b751496a8cec40733b"
+                                  },
+                                  {
+                                      "route":  "idle",
+                                      "path":  "target/final-integration-evidence/grabba-idle.json",
+                                      "size_bytes":  9585,
+                                      "sha256":  "eb13cefd5647bbf4049a65474cf2e72ec465db67d45d413ae2e6f5ea4432ea1e"
+                                  },
+                                  {
+                                      "route":  "update_menu",
+                                      "path":  "target/final-integration-evidence/grabba-update-menu.json",
+                                      "size_bytes":  9768,
+                                      "sha256":  "e23ce8f78d82237083b2fa5013b8c2db00f698b15eb0b4cc908748b21da91237"
+                                  }
+                              ],
+    "production_artifact_snapshot":  [
+                                         {
+                                             "role":  "render_worker",
+                                             "path":  "target/minihost-build/aex_render_worker.exe",
+                                             "size_bytes":  779776,
+                                             "sha256":  "2d037812b6159b9cf00b1beec60b354c33ba20942a5899d1b85941b6d49f8757"
+                                         },
+                                         {
+                                             "role":  "aegp_worker",
+                                             "path":  "target/minihost-build/aex_l2_worker.exe",
+                                             "size_bytes":  699904,
+                                             "sha256":  "c8bbd7bf7f58bed903a67925f0bf0a8c947e2bd018883291ee0e1b72e7fdb4b2"
+                                         },
+                                         {
+                                             "role":  "smart_worker",
+                                             "path":  "target/minihost-build/aex_smart_worker.exe",
+                                             "size_bytes":  797184,
+                                             "sha256":  "18f8a538786f56a58ea12460de4e98da0f9a824818a1bca694f14e9e7742f557"
+                                         },
+                                         {
+                                             "role":  "command_harness",
+                                             "path":  "broker/target/debug/aexcompat-harness.exe",
+                                             "size_bytes":  19856384,
+                                             "sha256":  "2bfe5bce1ac1262749bc946519dc35b668c9895be088f38b9adc9512d1060f21"
+                                         }
+                                     ],
+    "pending":  [
+                    "Exercise Grabba against a richer real project/item scene beyond the bounded synthetic host scene.",
+                    "Run Grabba in a supported Adobe After Effects installation and capture an Adobe oracle before claiming behavioral or pixel compatibility."
+                ]
 }
