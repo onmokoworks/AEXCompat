@@ -36,17 +36,17 @@ if [ -n "$(owner_review_gate <<<"$reviews")" ]; then
   echo "REFUSE: owner's latest review is CHANGES_REQUESTED"; exit 1
 fi
 
-# Codex gate: a head-bound clean must exist AND be the latest verdict (no newer
-# finding or error), so a later same-head review with findings invalidates it.
+# Codex gate: a head-bound clean must exist (finding 1), and no Codex FINDING
+# may be newer than it (finding 2). A Codex error is not a verdict and does not
+# invalidate a clean on the same head — but note the clean is head-bound, so if
+# head moved the clean is already stale and this refuses for lack of a clean.
 clean_ts=$(codex_clean_ts_for_head "$head" <<<"$issue_comments")
 if [ -z "$clean_ts" ]; then
   echo "REFUSE: no Codex clean for current head ${head:0:10}"; exit 1
 fi
 find_ts=$(codex_finding_max_ts <<<"$pr_comments")
-err_ts=$(codex_error_max_ts <<<"$issue_comments")
-if { [ -n "$find_ts" ] && [[ "$find_ts" > "$clean_ts" ]]; } \
-   || { [ -n "$err_ts" ] && [[ "$err_ts" > "$clean_ts" ]]; }; then
-  echo "REFUSE: newer Codex findings/errors after the clean"; exit 1
+if [ -n "$find_ts" ] && [[ "$find_ts" > "$clean_ts" ]]; then
+  echo "REFUSE: newer Codex findings after the clean"; exit 1
 fi
 
 # Atomic: fails if head moved since the checks above.

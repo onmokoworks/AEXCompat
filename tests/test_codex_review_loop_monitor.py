@@ -172,3 +172,20 @@ def test_inline_error_message_is_not_a_finding() -> None:
     assert _call("codex_findings", payload) == ""
     assert _call("codex_error", payload) == "CODEX-ERROR"
     assert _call("codex_finding_max_ts", payload) == ""
+
+
+def test_error_after_clean_does_not_invalidate_a_head_bound_clean() -> None:
+    # A transient error is not a verdict: with a head-bound clean present and a
+    # later error, the clean still stands (find_ts stays empty, clean_ts set).
+    head = "6de58c3dbb095c277dca598cb5621d28cbed723a"
+    issue = [
+        {"user": {"login": "chatgpt-codex-connector[bot]"},
+         "body": "Didn't find any major issues `6de58c3dbb`", "created_at": "2026-07-18T19:16:44Z"},
+        {"user": {"login": "chatgpt-codex-connector[bot]"},
+         "body": "Something went wrong. Try again later.", "created_at": "2026-07-18T19:40:00Z"},
+    ]
+    inline_error = [{"user": {"login": "chatgpt-codex-connector[bot]"},
+                     "body": "To use Codex here, connect to github.", "created_at": "2026-07-18T19:41:00Z"}]
+    assert _call("codex_clean_ts_for_head", issue, head) == "2026-07-18T19:16:44Z"
+    # The inline error is not counted as a finding, so nothing supersedes the clean.
+    assert _call("codex_finding_max_ts", inline_error) == ""

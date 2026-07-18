@@ -78,14 +78,18 @@ bash {SKILL_DIR}/codex-review-monitor.sh {owner} {repo} {PR} "{since}"
   owner review は **state ベース**で判定する (bodyless な `CHANGES_REQUESTED`
   も blocker)。純粋な `@codex review` トリガーのみのコメントは除外し、トリガー
   句を含む実フィードバックは拾う。
-- `CODEX-ERROR` — Codex が "Something went wrong" / "Unknown error" /
-  "To use Codex" を返した = **レビュー未実行**。clean でも finding でもない。
 - `CLEAN: codex clean for head <sha>` — Codex clean が **現在の head SHA に
-  拘束**されている (本文の Reviewed commit が head の prefix)。古い SHA の
-  clean では成立しない。
-- `FINDING ...` — Codex の inline 指摘。
-- `API-ERROR` / `TIMEOUT` — API 失敗 (fail-closed で停止) / 1時間到達。
-  どちらも **merge に進まない**。
+  拘束**され、かつそれより新しい finding が無い (最新 verdict)。古い SHA の
+  clean や、後続 finding に覆された clean では成立しない。
+- `FINDING ...` — Codex の inline 指摘 (エラー本文は除外)。
+- `TIMEOUT` — 1時間到達。Codex 不調を疑い PR を直接確認。
+
+**Codex の error/onboarding メッセージ ("Something went wrong" / "Unknown
+error" / "To use Codex") と一時的な API 失敗は terminal ではない**。error は
+transient で、Codex は内部リトライして数秒〜数分後に本物の verdict を出す
+(実測: 18:59/19:08 に error、19:16 に clean)。monitor はこれらで停止せず、
+本物の review を待ち続ける (停止すると verdict を取り逃す)。fail-closed は
+merge 側 (`codex-merge-guard.sh` が head 拘束 clean なしに merge を拒否) が担う。
 
 ### 3. 分岐
 
@@ -95,8 +99,8 @@ bash {SKILL_DIR}/codex-review-monitor.sh {owner} {repo} {PR} "{since}"
      妥当なら対応・commit・push、inline コメントには返信
   3. owner の指摘へ返信して対応済みを明示し、手順 1 に戻る (再トリガー)
   4. **owner の要求が未解決の間は merge しない** (CHANGES_REQUESTED は特に)
-- **CODEX-ERROR / API-ERROR / TIMEOUT**: merge に進まない。ERROR は少し時間を
-  置いて `@codex review` を再トリガー。TIMEOUT は Codex 不調を疑い PR を直接確認。
+- **TIMEOUT**: 1時間 verdict が来なかった。Codex 不調を疑い PR を直接確認し、
+  必要なら `@codex review` を再トリガーして監視を張り直す。
 - **FINDING (Codex 指摘あり)**:
   1. 各指摘の妥当性を自分で判断する (盲従しない。妥当でなければ理由を付けて返信のみ)
   2. 妥当な指摘に対応し、commit・push
