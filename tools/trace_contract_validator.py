@@ -16,6 +16,11 @@ EVENT_KINDS = {
 HOST_KINDS = {"after_effects_manual", "minihost", "native_observation"}
 PIXEL_FORMATS = {"argb8", "argb16", "argb32f", "rgba8", "unknown"}
 MODULE_RVA = re.compile(r"^0x[0-9a-f]+$")
+# A module-relative offset is bounded by the plug-in image size, always well
+# under 4 GiB. A 64-bit absolute (ASLR'd) code address lowercases to the same
+# hex shape but is far larger, so bound the magnitude to reject it: a genuine
+# absolute address like 0x7ffabc001c40 must not slip through as an "RVA".
+MODULE_RVA_LIMIT = 0x1_0000_0000
 KNOWN_FUNCTION_PHASES = {"enter", "leave"}
 BASE_FIELDS = {
     "schema_version", "event_index", "event_kind", "host_kind",
@@ -112,6 +117,8 @@ def validate_event(event: Any) -> list[str]:
             rva = known.get("module_rva")
             if not isinstance(rva, str) or not MODULE_RVA.match(rva):
                 errors.append("known_function.module_rva must be a lowercase-hex module offset")
+            elif int(rva, 16) >= MODULE_RVA_LIMIT:
+                errors.append("known_function.module_rva exceeds the module-relative bound (looks absolute)")
             if known.get("phase") not in KNOWN_FUNCTION_PHASES:
                 errors.append("known_function.phase must be enter or leave")
             if "return_value" in known and not _is_number(known["return_value"]):

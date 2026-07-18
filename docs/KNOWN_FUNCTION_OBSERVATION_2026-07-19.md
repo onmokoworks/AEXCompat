@@ -31,9 +31,12 @@ The trace validator (`tools/trace_contract_validator.py`) is the enforcing
 authority. For `known_function_invoke` it allows only:
 
 - `symbol`, `module_label`: filename-stem strings (no `\ / :`).
-- `module_rva`: `^0x[0-9a-f]+$`, **module-relative**. Raw absolute addresses
-  (e.g. an ASLR'd `0x7FFA...`) fail the lowercase-hex-offset check. Compute the
-  RVA as `address - module.base` before it ever leaves the process.
+- `module_rva`: `^0x[0-9a-f]+$` **and** numerically bounded below 4 GiB
+  (`MODULE_RVA_LIMIT`), so it is **module-relative**. Uppercase absolute addresses
+  fail the shape check; a lowercased ASLR address such as `0x7ffabc001c40` passes
+  the shape but is rejected by the magnitude bound (module images are far under
+  4 GiB, 64-bit code addresses are far above it). Compute the RVA as
+  `address - module.base` before it ever leaves the process.
 - `phase`: `enter` | `leave`.
 - `return_value`: a numeric scalar (e.g. a `PF_Err`), never a pointer.
 - `fields[]`: `{name, value}` where `value` is a number or boolean only. Field
@@ -153,10 +156,19 @@ Both are unit tested without Frida (`tests/test_known_function_observation.py`).
 ## Frida script (thin)
 
 `tools/frida/known_function_probe.js`. It receives the resolved plan
-(`recv('plan', ...)`), locates the module base, attaches `Interceptor` at
-`base + module_rva_int`, reads exactly the scalars the plan names, and forwards
-them with `send()`. It writes no files, forwards no raw bytes/pointers, and never
-blocks. Frida 17.x is assumed (`Process.getModuleByName().base`).
+(`recv('plan', ...)`), attaches `Interceptor` at `base + module_rva_int`, reads
+exactly the scalars the plan names, and forwards them with `send()`. It writes no
+files, forwards no raw bytes/pointers, and never blocks. Frida 17.x is assumed
+(`Process.findModuleByName().base`).
+
+Because the launcher spawns the worker **suspended**, the plug-in DLL is not
+mapped yet — it is `LoadLibrary`'d later, during the render. So the script cannot
+attach the hooks before resume. Instead it arms a loader watch (`LoadLibrary*`
+`onLeave`) synchronously and attaches the moment the module appears, then emits a
+`ready` control message meaning "safe to resume". If the module is already loaded
+it attaches immediately and `ready` carries `installed: true`. The known functions
+are render-path functions invoked well after load, so attaching in the loader's
+`onLeave` never misses them.
 
 ## Launcher and the PID-resolution decision
 
@@ -167,8 +179,13 @@ worker (`aex_render_worker.exe`) already exposes a standalone render contract
 (`--render-image <aex> <aex_sha256> v5| <input> <output> 16 12 0 1 1 1` and the
 `16`/`32`/`-layer`/`--render-request` variants — see
 `tools/run-aex-render-gate.ps1`). Frida spawns that argv suspended, the launcher
-injects the read plan, then resumes. Frida owns the PID, so hooks are installed
-before any render code runs and every invocation is captured deterministically.
+injects the read plan, **waits for the `ready` acknowledgement** (loader watch
+armed / hooks attached) before resuming, then resumes. Frida owns the PID, so the
+loader watch is armed before any code runs and every plug-in invocation is
+captured deterministically. If the worker does not exit within
+`--timeout-seconds`, the launcher kills it and finalises the session as
+**incomplete** (`trace_complete: false`, no `session_end`, CLI exit 3) rather than
+writing a truncated trace that looks complete.
 
 Trade-offs versus the alternatives the issue listed:
 

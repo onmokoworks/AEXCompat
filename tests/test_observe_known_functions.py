@@ -63,6 +63,19 @@ class MessageCollectorTests(unittest.TestCase):
         self.assertEqual([], validate_session(session))
         self.assertEqual(2, session["event_count"])
 
+    def test_incomplete_session_omits_end_and_marks_not_complete(self):
+        collector = self.collector()
+        collector.handle({
+            "type": "known_function", "symbol": "apply_gamma", "module_rva": "0x1c40",
+            "phase": "enter", "fields": [{"name": "in.width", "value": 1920}],
+        })
+        session = collector.finalize(completed=False)
+        # A timed-out worker must not fabricate a session_end boundary.
+        self.assertFalse(session["trace_complete"])
+        self.assertNotIn("session_end", [e["event_kind"] for e in session["events"]])
+        # trace_complete=False matches the absent boundary, so it still validates.
+        self.assertEqual([], validate_session(session))
+
     def test_redaction_violation_fails_closed(self):
         collector = self.collector()
         with self.assertRaises(ValueError):
@@ -70,6 +83,15 @@ class MessageCollectorTests(unittest.TestCase):
                 "type": "known_function", "symbol": "apply_gamma", "module_rva": "0x1c40",
                 "phase": "enter", "fields": [{"name": "in.width", "value": "0x7ffabc00"}],
             })
+
+    def test_ready_is_control_only_and_sets_readiness(self):
+        collector = self.collector()
+        collector.handle({"type": "ready", "installed": True, "hook_count": 2})
+        session = collector.finalize()
+        self.assertTrue(collector.ready)
+        self.assertEqual(2, collector.installed_hook_count)
+        # 'ready' is a control signal; it must not appear as a trace event.
+        self.assertEqual(2, session["event_count"])
 
     def test_install_error_is_captured_not_traced(self):
         collector = self.collector()

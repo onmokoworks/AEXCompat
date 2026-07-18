@@ -122,6 +122,16 @@ class TraceContractTests(unittest.TestCase):
             validate_event(enter),
         )
 
+    def test_known_function_lowercase_absolute_address_is_rejected(self):
+        # A lowercased 64-bit ASLR address matches the hex shape but is not a
+        # module-relative offset; the magnitude bound must reject it.
+        enter = copy.deepcopy(load_native_observation_events()[1])
+        enter["known_function"]["module_rva"] = "0x7ffabc001c40"
+        self.assertIn(
+            "known_function.module_rva exceeds the module-relative bound (looks absolute)",
+            validate_event(enter),
+        )
+
     def test_known_function_field_absolute_path_is_rejected(self):
         enter = copy.deepcopy(load_native_observation_events()[1])
         enter["known_function"]["fields"][0]["name"] = "C:\\Private\\in.width"

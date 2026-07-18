@@ -30,6 +30,9 @@ except ModuleNotFoundError:  # invoked as a script from tools/
 
 
 MODULE_RVA = re.compile(r"^0x[0-9a-f]+$")
+# Module-relative offsets are bounded by the plug-in image size (well under
+# 4 GiB); a 64-bit absolute address lowercases to the same shape but is larger.
+MODULE_RVA_LIMIT = 0x1_0000_0000
 # Interpretation -> byte widths the thin Frida reader can honour.
 INT_SIZES = {1, 2, 4, 8}
 FLOAT_SIZES = {4, 8}
@@ -44,7 +47,10 @@ class ResolutionError(ValueError):
 def _rva_to_int(rva: Any) -> int:
     if not isinstance(rva, str) or not MODULE_RVA.match(rva):
         raise ResolutionError(f"module_rva must match ^0x[0-9a-f]+$, got {rva!r}")
-    return int(rva, 16)
+    value = int(rva, 16)
+    if value >= MODULE_RVA_LIMIT:
+        raise ResolutionError(f"module_rva {rva} exceeds the module-relative bound (looks absolute)")
+    return value
 
 
 def _check_interpret(interpret: str, size: int, where: str) -> None:

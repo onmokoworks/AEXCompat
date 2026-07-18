@@ -115,6 +115,13 @@ class ResolveTests(unittest.TestCase):
         with self.assertRaises(ResolutionError):
             resolve_spec(spec, self.offset_map)
 
+    def test_lowercase_absolute_address_rejected_by_bound(self):
+        spec = copy.deepcopy(self.spec)
+        spec["hooks"][0]["module_rva"] = "0x7ffabc001c40"  # valid shape, absolute magnitude
+        with self.assertRaises(ResolutionError) as ctx:
+            resolve_spec(spec, self.offset_map)
+        self.assertIn("module-relative bound", str(ctx.exception))
+
 
 class FormatTests(unittest.TestCase):
     kwargs = dict(
@@ -199,9 +206,17 @@ class FridaScriptTests(unittest.TestCase):
         # only via send(), and locates the module base itself.
         self.assertIn("recv('plan'", text)
         self.assertIn("send(", text)
-        self.assertIn("Process.getModuleByName", text)
+        self.assertIn("Process.findModuleByName", text)
         self.assertNotIn("writeFile", text)
         self.assertNotIn("File(", text)
+
+    def test_script_arms_loader_watch_before_ready(self):
+        text = self.SCRIPT.read_text(encoding="utf-8")
+        # Spawn-suspended workers load the plug-in later, so the script must arm a
+        # loader watch and signal 'ready' (safe to resume) rather than requiring the
+        # module to be present up front.
+        self.assertIn("LoadLibrary", text)
+        self.assertIn("type: 'ready'", text)
 
     def test_script_parses_with_node(self):
         node = shutil.which("node")

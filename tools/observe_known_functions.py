@@ -23,6 +23,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import threading
 import uuid
 from pathlib import Path
 from typing import Any
@@ -69,6 +70,7 @@ class MessageCollector:
         self.session_id = session_id
         self.install_error: str | None = None
         self.installed_hook_count: int | None = None
+        self.ready: bool = False
         self._events: list[dict[str, Any]] = [
             session_boundary_event(
                 "session_start",
@@ -89,27 +91,41 @@ class MessageCollector:
                 event_index=len(self._events),
             )
             self._events.append(event)
+        elif kind == "ready":
+            # Loader watch armed (or hooks already attached). Safe to resume.
+            self.ready = True
+            if payload.get("installed"):
+                self.installed_hook_count = payload.get("hook_count")
         elif kind == "installed":
             self.installed_hook_count = payload.get("hook_count")
         elif kind == "install_error":
             self.install_error = str(payload.get("message"))
-        # Unknown message types are ignored; only known_function reaches the trace.
+        # Only known_function reaches the trace; control messages never do.
 
-    def finalize(self) -> dict[str, Any]:
+    def finalize(self, *, completed: bool = True) -> dict[str, Any]:
+        """Close the session.
+
+        ``completed`` must reflect whether the worker actually exited. On a
+        timeout/hang it is ``False``: no ``session_end`` boundary is appended and
+        ``trace_complete`` is ``False``, so downstream validation sees a truncated
+        observation as incomplete instead of trusting a fabricated end marker.
+        """
+
         events = list(self._events)
-        events.append(
-            session_boundary_event(
-                "session_end",
-                plugin_label=self.plugin_label,
-                host_version_label=self.host_version_label,
-                event_index=len(events),
+        if completed:
+            events.append(
+                session_boundary_event(
+                    "session_end",
+                    plugin_label=self.plugin_label,
+                    host_version_label=self.host_version_label,
+                    event_index=len(events),
+                )
             )
-        )
         return {
             "schema_version": 1,
             "session_id": self.session_id,
             "event_count": len(events),
-            "trace_complete": True,
+            "trace_complete": bool(completed),
             "events": events,
         }
 
@@ -155,38 +171,57 @@ def run_observation(
         module_label=plan["module_label"],
         session_id=str(uuid.uuid4()),
     )
+    # Set once the JS acknowledges hook installation (or reports a failure), so we
+    # never resume the worker before the hooks are actually in place.
+    installed = threading.Event()
 
     def on_message(message, _data):  # pragma: no cover - requires frida runtime
         if message.get("type") == "send":
-            collector.handle(message.get("payload") or {})
+            payload = message.get("payload") or {}
+            collector.handle(payload)
+            # 'ready' means the loader watch is armed (or hooks already attached),
+            # so it is safe to resume; 'install_error' means it never will be.
+            if payload.get("type") in ("ready", "install_error"):
+                installed.set()
         elif message.get("type") == "error":
             collector.install_error = message.get("stack") or message.get("description")
+            installed.set()
 
     device = frida.get_local_device()
     argv = build_worker_argv(worker_program, render_args)
     pid = device.spawn(argv)
+    completed = False
     try:  # pragma: no cover - requires frida runtime + worker build
         session = device.attach(pid)
         script = session.create_script(script_source)
         script.on("message", on_message)
         script.load()
-        # send() is asynchronous and never blocks the render, so the worker's own
-        # 30s-scale render stays within timeout; we still bound the wait ourselves.
+        # The JS installs hooks from an async recv('plan') handler, so wait for the
+        # install acknowledgement before resuming — otherwise the worker could reach
+        # the observed function before any hook exists and we would miss the calls
+        # this path is meant to capture. send() itself is asynchronous and never
+        # blocks the render, so the 30s render window is unaffected.
         script.post({"type": "plan", "plan": plan, "module_file": module_file})
+        if not installed.wait(timeout=min(timeout_seconds, DEFAULT_TIMEOUT_SECONDS)):
+            raise ObservationError("Frida hooks were not acknowledged installed before resume")
+        if collector.install_error:
+            raise ObservationError(f"Frida hook install failed: {collector.install_error}")
         device.resume(pid)
-        _await_exit(frida, device, pid, timeout_seconds)
+        completed = _await_exit(frida, device, pid, timeout_seconds)
     finally:  # pragma: no cover - requires frida runtime
         try:
             device.kill(pid)
         except frida.ProcessNotFoundError:
             pass
 
-    result = collector.finalize()
+    result = collector.finalize(completed=completed)
     write_session_jsonl(result, out_path)
     return result
 
 
-def _await_exit(frida_module, device, pid, timeout_seconds):  # pragma: no cover - runtime path
+def _await_exit(frida_module, device, pid, timeout_seconds) -> bool:  # pragma: no cover - runtime path
+    """Return True if the worker exited within the timeout, False on timeout/hang."""
+
     import time  # local import keeps the module import side-effect free
 
     deadline = time.monotonic() + timeout_seconds
@@ -194,8 +229,9 @@ def _await_exit(frida_module, device, pid, timeout_seconds):  # pragma: no cover
         try:
             device.get_process(pid)
         except frida_module.ProcessNotFoundError:
-            return
+            return True
         time.sleep(0.05)
+    return False
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -227,7 +263,12 @@ def main(argv: list[str] | None = None) -> int:
     except (OSError, ValueError, ObservationError) as exc:
         print(f"observe_known_functions: {type(exc).__name__}: {exc}", file=sys.stderr)
         return 2
-    print(json.dumps({"observed": True, "event_count": result["event_count"]}))
+    complete = result["trace_complete"]
+    print(json.dumps({"observed": True, "event_count": result["event_count"], "complete": complete}))
+    if not complete:
+        # The worker did not exit within the timeout; the trace is truncated.
+        print("observe_known_functions: worker timed out; trace is incomplete", file=sys.stderr)
+        return 3
     return 0
 
 

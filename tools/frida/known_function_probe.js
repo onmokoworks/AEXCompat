@@ -102,12 +102,42 @@ function attachHook(base, hook) {
   });
 }
 
-function installPlan(plan, moduleFile) {
-  const module = Process.getModuleByName(moduleFile);
+function tryAttach(plan, moduleFile) {
+  const module = Process.findModuleByName(moduleFile);
+  if (module === null) return false;
   for (const hook of plan.hooks) {
     attachHook(module.base, hook);
   }
-  send({ type: 'installed', hook_count: plan.hooks.length });
+  return true;
+}
+
+// When the launcher spawns the worker suspended, the plug-in DLL is not mapped
+// yet — it is LoadLibrary'd later, during the render. So we cannot install the
+// hooks before resume. Instead we arm a loader watch synchronously (before the
+// launcher resumes) and attach the moment the module appears. The known
+// functions are render-path functions invoked well after load, so attaching in
+// LoadLibrary's onLeave (right after the DLL is mapped) never misses them.
+function installPlan(plan, moduleFile) {
+  if (tryAttach(plan, moduleFile)) {
+    send({ type: 'ready', installed: true, hook_count: plan.hooks.length });
+    return;
+  }
+  const k32 = Process.getModuleByName('kernel32.dll');
+  let attached = false;
+  const watch = function () {
+    if (attached) return;
+    if (tryAttach(plan, moduleFile)) {
+      attached = true;
+      send({ type: 'installed', hook_count: plan.hooks.length });
+    }
+  };
+  for (const name of ['LoadLibraryW', 'LoadLibraryExW', 'LoadLibraryA', 'LoadLibraryExA']) {
+    const addr = k32.findExportByName(name);
+    if (addr !== null) Interceptor.attach(addr, { onLeave: watch });
+  }
+  // 'ready' means the loader watch is armed; it is now safe for the launcher to
+  // resume. The later 'installed' message reports the actual attach.
+  send({ type: 'ready', installed: false, hook_count: plan.hooks.length });
 }
 
 recv('plan', function onPlan(message) {
