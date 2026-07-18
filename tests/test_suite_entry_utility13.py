@@ -14,9 +14,30 @@ SDK_ROOT = os.environ.get("AFTER_EFFECTS_SDK_ROOT")
 HEADERS = Path(SDK_ROOT) / "Examples" / "Headers" if SDK_ROOT else None
 
 
+def _msvc_vcvars() -> Path:
+    if os.name != "nt":
+        pytest.skip("SDK ABI compile test requires the Windows MSVC toolchain")
+    program_files_x86 = os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")
+    vswhere = Path(program_files_x86) / "Microsoft Visual Studio" / "Installer" / "vswhere.exe"
+    if not vswhere.is_file():
+        pytest.skip("vswhere.exe is unavailable; install Visual Studio C++ tools")
+    installation = subprocess.run(
+        [str(vswhere), "-latest", "-products", "*", "-requires",
+         "Microsoft.VisualStudio.Component.VC.Tools.x86.x64", "-property", "installationPath"],
+        capture_output=True, text=True,
+    ).stdout.strip()
+    if not installation:
+        pytest.skip("no Visual Studio installation with the C++ x64 toolset")
+    vcvars = Path(installation) / "VC" / "Auxiliary" / "Build" / "vcvars64.bat"
+    if not vcvars.is_file():
+        pytest.skip("vcvars64.bat is unavailable; install Visual Studio C++ tools")
+    return vcvars
+
+
 def test_sdk_frozen_utility_suite_hwnd_slots_compile() -> None:
     if HEADERS is None or not HEADERS.is_dir():
         pytest.skip("set AFTER_EFFECTS_SDK_ROOT to a valid After Effects SDK root")
+    vcvars = _msvc_vcvars()
     source = r'''
 #include <cstddef>
 #include "AEConfig.h"
@@ -32,14 +53,6 @@ static_assert(offsetof(AEGP_UtilitySuite3, AEGP_RegisterWithAEGP) == 7 * sizeof(
 static_assert(offsetof(AEGP_UtilitySuite3, AEGP_GetMainHWND) == 8 * sizeof(void*));
 int main() { return 0; }
 '''
-    program_files_x86 = os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")
-    vswhere = Path(program_files_x86) / "Microsoft Visual Studio" / "Installer" / "vswhere.exe"
-    installation = subprocess.check_output(
-        [str(vswhere), "-latest", "-products", "*", "-requires",
-         "Microsoft.VisualStudio.Component.VC.Tools.x86.x64", "-property", "installationPath"],
-        text=True,
-    ).strip()
-    vcvars = Path(installation) / "VC" / "Auxiliary" / "Build" / "vcvars64.bat"
     with tempfile.TemporaryDirectory() as directory:
         cpp = Path(directory) / "utility_suite_hwnd_abi.cpp"
         obj = Path(directory) / "utility_suite_hwnd_abi.obj"
