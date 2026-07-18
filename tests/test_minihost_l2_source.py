@@ -806,22 +806,30 @@ class MinihostL2SourceTests(unittest.TestCase):
 
     def test_discovery_selectors_share_the_seh_boundary_and_report_selector(self):
         text = SOURCE.read_text(encoding="utf-8")
+        dispatch = (ROOT / "minihost" / "src" / "worker_selector_dispatch.cpp").read_text(
+            encoding="utf-8"
+        )
         for selector in ("kGlobalSetup", "kAbout", "kParamsSetup", "kGlobalSetdown"):
             self.assertRegex(text, rf"invoke_entry_seh\s*\(\s*entry,\s*{selector}")
         for name in ("ABOUT", "GLOBAL_SETUP", "GLOBAL_SETDOWN", "PARAMS_SETUP"):
-            self.assertIn(f'return "{name}"', text)
+            self.assertIn(f'return "{name}"', dispatch)
         self.assertIn('"last_seh_selector\\\":\\\""', text)
         self.assertIn('"last_seh_error\\\":"', text)
 
     def test_all_macro_effect_calls_share_the_audited_seh_boundary(self):
         text = SOURCE.read_text(encoding="utf-8")
-        self.assertIn("int32_t guarded_effect_call(EffectEntry entry", text)
-        self.assertIn("return invoke_entry_seh(entry, command, input, output, params, world, extra,", text)
+        dispatch = (ROOT / "minihost" / "src" / "worker_selector_dispatch.cpp").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("int32_t guarded_effect_call(EffectEntry entry", dispatch)
+        self.assertIn("return invoke_entry_seh(entry, command, input, output, params, world, extra,", dispatch)
         self.assertIn("#define entry(...) guarded_effect_call(entry, __VA_ARGS__)", text)
         self.assertNotIn("#define entry(...) audited_effect_call(entry, __VA_ARGS__)", text)
 
     def test_effect_selector_diagnostics_cover_hosted_selector_families(self):
-        text = SOURCE.read_text(encoding="utf-8")
+        text = (ROOT / "minihost" / "src" / "worker_selector_dispatch.cpp").read_text(
+            encoding="utf-8"
+        )
         for name in (
             "SEQUENCE_SETUP", "SEQUENCE_RESETUP", "SEQUENCE_FLATTEN",
             "SEQUENCE_SETDOWN", "DO_DIALOG", "FRAME_SETUP", "RENDER",

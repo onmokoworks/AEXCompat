@@ -4,6 +4,9 @@ import re
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = (ROOT / "minihost" / "src" / "l2_main.cpp").read_text(encoding="utf-8")
+DISPATCH = (ROOT / "minihost" / "src" / "worker_selector_dispatch.cpp").read_text(
+    encoding="utf-8"
+)
 
 
 def test_sealed_workers_audit_immediately_after_load_before_symbol_lookup():
@@ -60,13 +63,12 @@ def test_pre_unload_audit_precedes_final_free_and_direct_workers_remain_optional
 
 
 def test_all_effectmain_calls_share_the_cumulative_audit_boundary():
-    wrapper = SOURCE[SOURCE.index("int32_t audited_effect_call"):
-                     SOURCE.index("struct ParamRecord")]
-    assert "capture_module_audit_phase();" in wrapper
-    assert "module_audit_passed() ? error : 512" in wrapper
-    assert "return audited_effect_call(entry, command" in wrapper
-    assert "return invoke_entry_seh(entry, command" in wrapper
-    assert "#define entry(...) guarded_effect_call(entry, __VA_ARGS__)" in wrapper
+    assert "g_capture_audit();" in DISPATCH
+    assert "g_audit_passed() ? error : kAuditFailure" in DISPATCH
+    assert "return audited_effect_call(entry, command" in DISPATCH
+    assert "return invoke_entry_seh(entry, command" in DISPATCH
+    assert "configure_selector_dispatch_audit(&capture_module_audit_phase" in SOURCE
+    assert "#define entry(...) guarded_effect_call(entry, __VA_ARGS__)" in SOURCE
 
 
 def test_observed_modules_are_bounded_deduplicated_and_unknowns_are_sticky():

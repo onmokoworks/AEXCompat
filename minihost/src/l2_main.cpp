@@ -52,6 +52,7 @@
 #include "render_pixel_transport.hpp"
 #include "strict_json.hpp"
 #include "suite_lease_tracker.hpp"
+#include "worker_selector_dispatch.hpp"
 
 namespace {
 #pragma comment(lib, "psapi.lib")
@@ -74,6 +75,12 @@ using aexcompat::suites::configure_cache_on_load_suite;
 using aexcompat::suite_runtime::SuiteLeaseTracker;
 using aexcompat::worker_runtime::redirect_native_stdout;
 using aexcompat::worker_runtime::restore_native_stdout;
+using aexcompat::worker_runtime::configure_selector_dispatch_audit;
+using aexcompat::worker_runtime::effect_selector_name;
+using aexcompat::worker_runtime::guarded_effect_call;
+using aexcompat::worker_runtime::invoke_entry_seh;
+using aexcompat::worker_runtime::invoke_smart_pre_render_cleanup_seh;
+using aexcompat::worker_runtime::selector_dispatch_telemetry;
 #if defined(AEXCOMPAT_RENDER_WORKER) || defined(AEXCOMPAT_SMART_WORKER)
 using aexcompat::render_pixel_transport::argb_to_rgba8;
 using aexcompat::render_pixel_transport::argb_to_rgba_native;
@@ -628,11 +635,11 @@ class OutputPixelBuffer {
   std::size_t allocation_size_{};
 };
 
-uint32_t g_last_seh_exception_code{};
-uint64_t g_last_seh_exception_address{};
-std::string g_last_seh_exception_module;
-std::string g_last_seh_selector;
-int32_t g_last_seh_error{};
+auto& g_last_seh_exception_code = selector_dispatch_telemetry().seh_code;
+auto& g_last_seh_exception_address = selector_dispatch_telemetry().seh_address;
+auto& g_last_seh_exception_module = selector_dispatch_telemetry().seh_module;
+auto& g_last_seh_selector = selector_dispatch_telemetry().selector;
+auto& g_last_seh_error = selector_dispatch_telemetry().error;
 aexcompat::TraceWriter* g_trace_writer{};
 
 const char* trace_worker_label() {
@@ -643,39 +650,6 @@ const char* trace_worker_label() {
 #else
   return "aex_l2_worker";
 #endif
-}
-
-const char* effect_selector_name(int32_t command) {
-  switch (command) {
-    case kAbout: return "ABOUT";
-    case kGlobalSetup: return "GLOBAL_SETUP";
-    case kGlobalSetdown: return "GLOBAL_SETDOWN";
-    case kParamsSetup: return "PARAMS_SETUP";
-    case kSequenceSetup: return "SEQUENCE_SETUP";
-    case kSequenceResetup: return "SEQUENCE_RESETUP";
-    case kSequenceFlatten: return "SEQUENCE_FLATTEN";
-    case kSequenceSetdown: return "SEQUENCE_SETDOWN";
-    case kDoDialog: return "DO_DIALOG";
-    case kFrameSetup: return "FRAME_SETUP";
-    case kRender: return "RENDER";
-    case kFrameSetdown: return "FRAME_SETDOWN";
-    case kUserChangedParam: return "USER_CHANGED_PARAM";
-    case kUpdateParamsUi: return "UPDATE_PARAMS_UI";
-    case kEvent: return "EVENT";
-    case kGetExternalDependencies: return "GET_EXTERNAL_DEPENDENCIES";
-    case kQueryDynamicFlags: return "QUERY_DYNAMIC_FLAGS";
-    case kAudioRender: return "AUDIO_RENDER";
-    case kAudioSetup: return "AUDIO_SETUP";
-    case kAudioSetdown: return "AUDIO_SETDOWN";
-    case kArbitraryCallback: return "ARBITRARY_CALLBACK";
-    case kSmartPreRender: return "SMART_PRE_RENDER";
-    case kSmartRender: return "SMART_RENDER";
-    case kGetFlattenedSequenceData: return "GET_FLATTENED_SEQUENCE_DATA";
-    case kSmartRenderGpu: return "SMART_RENDER_GPU";
-    case kGpuDeviceSetup: return "GPU_DEVICE_SETUP";
-    case kGpuDeviceSetdown: return "GPU_DEVICE_SETDOWN";
-    default: return "UNKNOWN";
-  }
 }
 
 // Opt-in crash minidumps (issue #18): broker-validated directory passed via
@@ -779,49 +753,6 @@ uint32_t selftest_trigger_guarded_crash() {
     return 0;
   } __except (capture_seh_exception(GetExceptionInformation())) {
     return GetExceptionCode();
-  }
-}
-
-int32_t audited_effect_call(EffectEntry entry, int32_t command, void* input,
-                            void* output, void** params, void* world, void* extra) {
-  if (g_trace_writer) g_trace_writer->selector_dispatch(effect_selector_name(command));
-  const int32_t error = entry(command, input, output, params, world, extra);
-  capture_module_audit_phase();
-  return module_audit_passed() ? error : 512;
-}
-
-int32_t invoke_entry_seh(EffectEntry entry, int32_t command, void* input,
-                         void* output, void** params, void* world, void* extra,
-                         uint32_t* out_exception_code) {
-  *out_exception_code = 0;
-  __try {
-    return audited_effect_call(entry, command, input, output, params, world, extra);
-  } __except(capture_seh_exception(GetExceptionInformation())) {
-    *out_exception_code = GetExceptionCode();
-    g_last_seh_selector = effect_selector_name(command);
-    g_last_seh_error = 512;
-    capture_module_audit_phase();
-    return 512;
-  }
-}
-
-int32_t guarded_effect_call(EffectEntry entry, int32_t command, void* input,
-                            void* output, void** params, void* world, void* extra) {
-  uint32_t exception_code{};
-  return invoke_entry_seh(entry, command, input, output, params, world, extra,
-                          &exception_code);
-}
-
-int32_t invoke_smart_pre_render_cleanup_seh(void(__cdecl* cleanup)(void*), void* data) {
-  if (!cleanup) return 0;
-  __try {
-    cleanup(data);
-    return 0;
-  } __except(capture_seh_exception(GetExceptionInformation())) {
-    g_last_seh_selector = "SMART_PRE_RENDER_CLEANUP";
-    g_last_seh_error = 512;
-    capture_module_audit_phase();
-    return 512;
   }
 }
 
@@ -21391,6 +21322,8 @@ bool verify_aegp_projector_levels() {
 
 int wmain(int argc, wchar_t **argv) {
   configure_cache_on_load_suite(&g_effect);
+  configure_selector_dispatch_audit(&capture_module_audit_phase,
+                                    &module_audit_passed);
   if (argc == 2 && std::wstring(argv[1]) == L"--self-test-aegp-projector-levels") {
     const bool passed = verify_aegp_projector_levels();
     std::cout << "{\"projector_levels\":\""

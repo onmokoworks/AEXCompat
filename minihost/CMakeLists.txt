@@ -21,7 +21,8 @@ set(AEXCOMPAT_L2_WORKER_SOURCES
     src/pf_cache_on_load_suite.cpp
     src/render_pixel_transport.cpp
     src/strict_json.cpp
-    src/suite_lease_tracker.cpp)
+    src/suite_lease_tracker.cpp
+    src/worker_selector_dispatch.cpp)
 
 add_executable(aex_l2_worker ${AEXCOMPAT_L2_WORKER_SOURCES})
 target_compile_features(aex_l2_worker PRIVATE cxx_std_17)

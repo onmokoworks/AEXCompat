@@ -1,0 +1,128 @@
+#include "worker_selector_dispatch.hpp"
+
+#include <windows.h>
+
+#include <array>
+#include <filesystem>
+
+namespace aexcompat::worker_runtime {
+namespace {
+
+constexpr int32_t kAuditFailure = 512;
+AuditCapture g_capture_audit{};
+AuditPassed g_audit_passed{};
+SelectorDispatchTelemetry g_telemetry;
+
+int capture_seh_exception(EXCEPTION_POINTERS* information) {
+  g_telemetry.seh_code = information && information->ExceptionRecord
+      ? information->ExceptionRecord->ExceptionCode : 0;
+  const void* address = information && information->ExceptionRecord
+      ? information->ExceptionRecord->ExceptionAddress : nullptr;
+  g_telemetry.seh_address = reinterpret_cast<uint64_t>(address);
+  g_telemetry.seh_module.clear();
+  HMODULE module{};
+  if (address && GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+          GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+          reinterpret_cast<LPCWSTR>(address), &module)) {
+    std::array<wchar_t, MAX_PATH> path{};
+    if (GetModuleFileNameW(module, path.data(), static_cast<DWORD>(path.size())) > 0) {
+      const std::wstring filename = std::filesystem::path(path.data()).filename().wstring();
+      for (wchar_t ch : filename)
+        g_telemetry.seh_module.push_back(ch >= 0x20 && ch <= 0x7e
+            ? static_cast<char>(ch) : '?');
+    }
+  }
+  return EXCEPTION_EXECUTE_HANDLER;
+}
+
+int32_t audited_effect_call(EffectEntry entry, int32_t command, void* input,
+                            void* output, void** params, void* world, void* extra) {
+  if (!entry || !g_capture_audit || !g_audit_passed) return kAuditFailure;
+  const int32_t error = entry(command, input, output, params, world, extra);
+  g_capture_audit();
+  return g_audit_passed() ? error : kAuditFailure;
+}
+
+}  // namespace
+
+void configure_selector_dispatch_audit(AuditCapture capture,
+                                       AuditPassed passed) noexcept {
+  g_capture_audit = capture;
+  g_audit_passed = passed;
+}
+
+SelectorDispatchTelemetry& selector_dispatch_telemetry() noexcept {
+  return g_telemetry;
+}
+
+const char* effect_selector_name(int32_t command) noexcept {
+  switch (command) {
+    case 0: return "ABOUT";
+    case 1: return "GLOBAL_SETUP";
+    case 3: return "GLOBAL_SETDOWN";
+    case 4: return "PARAMS_SETUP";
+    case 5: return "SEQUENCE_SETUP";
+    case 6: return "SEQUENCE_RESETUP";
+    case 7: return "SEQUENCE_FLATTEN";
+    case 8: return "SEQUENCE_SETDOWN";
+    case 9: return "DO_DIALOG";
+    case 10: return "FRAME_SETUP";
+    case 11: return "RENDER";
+    case 12: return "FRAME_SETDOWN";
+    case 13: return "USER_CHANGED_PARAM";
+    case 14: return "UPDATE_PARAMS_UI";
+    case 15: return "EVENT";
+    case 16: return "GET_EXTERNAL_DEPENDENCIES";
+    case 18: return "QUERY_DYNAMIC_FLAGS";
+    case 19: return "AUDIO_RENDER";
+    case 20: return "AUDIO_SETUP";
+    case 21: return "AUDIO_SETDOWN";
+    case 22: return "ARBITRARY_CALLBACK";
+    case 23: return "SMART_PRE_RENDER";
+    case 24: return "SMART_RENDER";
+    case 28: return "GET_FLATTENED_SEQUENCE_DATA";
+    case 31: return "SMART_RENDER_GPU";
+    case 32: return "GPU_DEVICE_SETUP";
+    case 33: return "GPU_DEVICE_SETDOWN";
+    default: return "UNKNOWN";
+  }
+}
+
+int32_t invoke_entry_seh(EffectEntry entry, int32_t command, void* input,
+                         void* output, void** params, void* world, void* extra,
+                         uint32_t* out_exception_code) {
+  if (!out_exception_code) return kAuditFailure;
+  *out_exception_code = 0;
+  __try {
+    return audited_effect_call(entry, command, input, output, params, world, extra);
+  } __except(capture_seh_exception(GetExceptionInformation())) {
+    *out_exception_code = GetExceptionCode();
+    g_telemetry.selector = effect_selector_name(command);
+    g_telemetry.error = kAuditFailure;
+    if (g_capture_audit) g_capture_audit();
+    return kAuditFailure;
+  }
+}
+
+int32_t guarded_effect_call(EffectEntry entry, int32_t command, void* input,
+                            void* output, void** params, void* world, void* extra) {
+  uint32_t exception_code{};
+  return invoke_entry_seh(entry, command, input, output, params, world, extra,
+                          &exception_code);
+}
+
+int32_t invoke_smart_pre_render_cleanup_seh(void(__cdecl* cleanup)(void*),
+                                            void* data) {
+  if (!cleanup) return 0;
+  __try {
+    cleanup(data);
+    return 0;
+  } __except(capture_seh_exception(GetExceptionInformation())) {
+    g_telemetry.selector = "SMART_PRE_RENDER_CLEANUP";
+    g_telemetry.error = kAuditFailure;
+    if (g_capture_audit) g_capture_audit();
+    return kAuditFailure;
+  }
+}
+
+}  // namespace aexcompat::worker_runtime
