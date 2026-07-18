@@ -59,13 +59,21 @@ def safe_output_path(out_path: Path) -> Path:
     symlink or reparse point.
     """
 
+    # Reject a reparse point on the FIXED root components (target/, the subdir)
+    # before resolving: otherwise OUTPUT_ROOT.resolve() would follow a symlinked
+    # 'target' and adopt the redirected destination as the allowed root, so a
+    # normal --out would pass containment yet write outside the repo. REPO_ROOT is
+    # already canonical (Path.resolve() at import).
+    for component in (OUTPUT_ROOT, OUTPUT_ROOT.parent):
+        if component.is_symlink():
+            raise ObservationError(f"output root component is a reparse point: {component.name}")
+    OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
     root = OUTPUT_ROOT.resolve()
-    root.mkdir(parents=True, exist_ok=True)
     candidate = out_path if out_path.is_absolute() else (REPO_ROOT / out_path)
     resolved = candidate.resolve()
     if not (resolved == root or root in resolved.parents):
         raise ObservationError(f"output must stay under {OUTPUT_ROOT}")
-    # Reject a reparse point / symlink anywhere on the existing prefix.
+    # Reject a reparse point / symlink anywhere on the existing prefix below root.
     probe = resolved
     while probe != root and probe != probe.parent:
         if probe.exists() and probe.is_symlink():

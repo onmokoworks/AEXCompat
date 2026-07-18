@@ -67,10 +67,15 @@ function readRegister(slot, read) {
 }
 
 function readOne(read, slot) {
-  if (slot === undefined || slot === null || slot.isNull()) {
-    throw new Error('null/absent pointer for ' + read.name);
+  if (slot === undefined || slot === null) {
+    throw new Error('absent arg slot for ' + read.name);
   }
   if (read.source === 'struct') {
+    // A null struct pointer is a genuine failure; a register scalar of 0 is a
+    // legitimate value (NativePointer(0)), so only struct reads reject null.
+    if (slot.isNull()) {
+      throw new Error('null struct pointer for ' + read.name);
+    }
     // Defence in depth: the resolver already bounds offset/size within extent,
     // but re-check at runtime so a malformed plan cannot walk outside the struct.
     if (read.offset < 0 || read.offset + read.size > read.extent) {

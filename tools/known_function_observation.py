@@ -46,6 +46,10 @@ MAX_ARG_SLOT = 32
 # from the abi-layout-probe *_size fields.
 MAX_STRUCT_EXTENT = 0x10_0000
 PHASES = ("enter", "leave")
+# Allowed interpretations. Struct reads may be float; register scalars may not
+# (a float arg lives in XMM, and a pointer is not a representable role).
+READ_INTERPRETS = {"int", "uint", "float", "bool"}
+REGISTER_INTERPRETS = {"int", "uint", "bool"}
 
 
 class ResolutionError(ValueError):
@@ -147,6 +151,11 @@ def resolve_hook(hook: dict[str, Any], offset_map: dict[str, dict[str, int]]) ->
             )
         if name not in offset_map:
             raise ResolutionError(f"{symbol}: read {name!r} is absent from the offset map")
+        if interpret not in READ_INTERPRETS:
+            raise ResolutionError(
+                f"{symbol}: read {name!r} has unsupported interpretation {interpret!r} "
+                f"(allowed: {sorted(READ_INTERPRETS)})"
+            )
         arg_index, extent = struct_args[prefix]
         offset = offset_map[name]["offset"]
         size = offset_map[name]["size"]
@@ -180,6 +189,11 @@ def resolve_hook(hook: dict[str, Any], offset_map: dict[str, dict[str, int]]) ->
             raise ResolutionError(
                 f"{symbol}: scalar arg {name!r} is float; float args live in XMM, "
                 "read the value through a struct field instead"
+            )
+        if interpret not in REGISTER_INTERPRETS:
+            raise ResolutionError(
+                f"{symbol}: scalar arg {name!r} has unsupported interpretation {interpret!r} "
+                f"(allowed: {sorted(REGISTER_INTERPRETS)})"
             )
         if not _is_plain_int(index) or not 0 <= index <= MAX_ARG_SLOT:
             raise ResolutionError(f"{symbol}: scalar arg {name!r} index must be 0..{MAX_ARG_SLOT}")

@@ -160,6 +160,20 @@ class ResolveTests(unittest.TestCase):
         with self.assertRaises(ResolutionError):
             resolve_spec(spec, self.offset_map)
 
+    def test_unsupported_read_interpretation_is_rejected(self):
+        spec = copy.deepcopy(self.spec)
+        spec["hooks"][0]["reads"][0]["as"] = "int32"  # misspelled / unsupported
+        with self.assertRaises(ResolutionError) as ctx:
+            resolve_spec(spec, self.offset_map)
+        self.assertIn("unsupported interpretation", str(ctx.exception))
+
+    def test_unsupported_scalar_interpretation_is_rejected(self):
+        spec = copy.deepcopy(self.spec)
+        spec["hooks"][0]["scalar_args"][0]["as"] = "handle"  # not int/uint/bool
+        with self.assertRaises(ResolutionError) as ctx:
+            resolve_spec(spec, self.offset_map)
+        self.assertIn("unsupported interpretation", str(ctx.exception))
+
 
 class FormatTests(unittest.TestCase):
     kwargs = dict(
@@ -264,6 +278,9 @@ class FridaScriptTests(unittest.TestCase):
         self.assertIn("isNull()", text)
         self.assertIn("read.extent", text)
         self.assertIn("read_error", text)
+        # The null-pointer check is struct-only; a register scalar of 0 (a valid
+        # NativePointer(0)) must not be rejected.
+        self.assertIn("null struct pointer", text)
 
     def test_script_parses_with_node(self):
         node = shutil.which("node")

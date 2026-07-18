@@ -124,6 +124,33 @@ class OutputPathSafetyTests(unittest.TestCase):
         with self.assertRaises(ObservationError):
             safe_output_path(Path("C:/Windows/Temp/trace.jsonl"))
 
+    def test_symlinked_output_root_is_rejected(self):
+        import tempfile
+        import tools.observe_known_functions as obs
+
+        # If the fixed root (or its 'target' parent) is a reparse point, resolving
+        # it must not adopt the redirected destination as the allowed root.
+        real_elsewhere = Path(tempfile.mkdtemp(prefix="obs-elsewhere-"))
+        fake_root = obs.OUTPUT_ROOT.parent / "obs-symlink-root-test"
+        try:
+            fake_root.symlink_to(real_elsewhere, target_is_directory=True)
+        except (OSError, NotImplementedError):
+            self.skipTest("creating a symlink requires privilege/developer mode")
+        original = obs.OUTPUT_ROOT
+        obs.OUTPUT_ROOT = fake_root
+        try:
+            with self.assertRaises(ObservationError):
+                obs.safe_output_path(fake_root / "trace.jsonl")
+        finally:
+            obs.OUTPUT_ROOT = original
+            try:
+                fake_root.unlink()
+            except OSError:
+                pass
+            for p in real_elsewhere.iterdir():
+                p.unlink()
+            real_elsewhere.rmdir()
+
     def test_path_under_root_is_accepted_and_atomic_write_lands(self):
         session = {
             "schema_version": 1,
