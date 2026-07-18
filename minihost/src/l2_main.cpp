@@ -46,6 +46,7 @@
 #include <variant>
 #include <vector>
 
+#include "parameter_animation_transport.hpp"
 #include "strict_json.hpp"
 
 namespace {
@@ -56,9 +57,14 @@ using aexcompat::strict_json::StrictJsonParser;
 using aexcompat::strict_json::json_exact_keys;
 using aexcompat::strict_json::json_i32;
 using aexcompat::strict_json::json_member;
-using aexcompat::strict_json::json_number;
 using aexcompat::strict_json::json_string;
 using aexcompat::strict_json::json_u64;
+using aexcompat::parameter_animation::AnimationKey;
+using aexcompat::parameter_animation::AnimationValueKind;
+using aexcompat::parameter_animation::ParameterAnimationKey;
+using aexcompat::parameter_animation::ParameterTimeline;
+using aexcompat::parameter_animation::load_parameter_animation;
+using aexcompat::parameter_animation::rational_less;
 
 constexpr std::size_t kMaxAuditedModules = 512;
 
@@ -838,23 +844,6 @@ struct ParamRecord {
   std::array<std::byte, kParamSize> raw{};
 };
 std::vector<ParamRecord> g_params;
-enum class AnimationValueKind { Scalar, Color, Components, Arbitrary };
-struct ParameterAnimationKey {
-  int32_t time{};
-  uint32_t scale{};
-  bool hold{};
-  AnimationValueKind kind{};
-  double scalar{};
-  std::array<unsigned char, 4> color{};
-  std::array<double, 3> components{};
-  int32_t component_count{};
-  std::vector<unsigned char> arbitrary;
-};
-using AnimationKey = ParameterAnimationKey;
-struct ParameterTimeline {
-  int32_t slot{};
-  std::vector<ParameterAnimationKey> keys;
-};
 std::vector<ParameterTimeline> g_parameter_timelines;
 std::unordered_map<void *, std::array<std::byte, kParamSize>>
     g_keyframe_checkout_ledger;
@@ -864,9 +853,6 @@ const ParameterTimeline *parameter_timeline(int32_t slot) {
       std::find_if(g_parameter_timelines.begin(), g_parameter_timelines.end(),
                    [slot](const auto &t) { return t.slot == slot; });
   return it == g_parameter_timelines.end() ? nullptr : &*it;
-}
-bool rational_less(int32_t av, uint32_t as, int32_t bv, uint32_t bs) {
-  return static_cast<int64_t>(av) * bs < static_cast<int64_t>(bv) * as;
 }
 uint32_t g_arbitrary_copy_calls{};
 uint32_t g_arbitrary_dispose_calls{};
@@ -16815,155 +16801,6 @@ thread_local ExternalAuxSet g_native_aux_set;
 std::vector<int32_t> g_alpha_as_coverage_params;
 bool g_external_aux_loaded = false;
 thread_local bool g_external_aux_active = false;
-
-bool load_parameter_animation(const std::filesystem::path &path,
-                              std::vector<ParameterTimeline> &result) {
-  std::error_code ec;
-  const auto absolute = std::filesystem::absolute(path, ec),
-             canonical = std::filesystem::canonical(path, ec);
-  const auto owned = std::filesystem::canonical(
-      std::filesystem::current_path() / "target" / "image-transport", ec);
-  if (ec || !path.is_absolute() || absolute.lexically_normal() != canonical ||
-      canonical.parent_path() != owned)
-    return false;
-  const auto size = std::filesystem::file_size(canonical, ec);
-  if (ec || size == 0 || size > 1024 * 1024)
-    return false;
-  std::ifstream input(canonical, std::ios::binary);
-  std::string text((std::istreambuf_iterator<char>(input)), {});
-  JsonValue root;
-  if (input.bad() || !StrictJsonParser(std::move(text)).parse(root) ||
-      !std::holds_alternative<JsonValue::Object>(root.value))
-    return false;
-  const auto &object = std::get<JsonValue::Object>(root.value);
-  int32_t version{};
-  if (!json_exact_keys(object, {"schema_version", "parameters"}) ||
-      !json_i32(object, "schema_version", version) || version != 1)
-    return false;
-  const auto *pv = json_member(object, "parameters");
-  if (!pv || !std::holds_alternative<JsonValue::Array>(pv->value))
-    return false;
-  std::set<int32_t> slots;
-  std::size_t total = 0;
-  std::size_t arbitrary_total = 0;
-  std::vector<ParameterTimeline> parsed;
-  for (const auto &item : std::get<JsonValue::Array>(pv->value)) {
-    if (!std::holds_alternative<JsonValue::Object>(item.value))
-      return false;
-    const auto &po = std::get<JsonValue::Object>(item.value);
-    ParameterTimeline timeline;
-    int32_t slot{};
-    if (!json_exact_keys(po, {"slot", "keys"}) || !json_i32(po, "slot", slot) ||
-        slot <= 0 || slot > static_cast<int32_t>(kMaxParams) ||
-        !slots.insert(slot).second)
-      return false;
-    timeline.slot = slot;
-    const auto *kv = json_member(po, "keys");
-    if (!kv || !std::holds_alternative<JsonValue::Array>(kv->value))
-      return false;
-    const auto &keys = std::get<JsonValue::Array>(kv->value);
-    if (keys.empty() || keys.size() > 256 || total > 4096 - keys.size())
-      return false;
-    total += keys.size();
-    for (const auto &item_key : keys) {
-      if (!std::holds_alternative<JsonValue::Object>(item_key.value))
-        return false;
-      const auto &ko = std::get<JsonValue::Object>(item_key.value);
-      if (!json_exact_keys(ko, {"time", "interpolation", "value"}))
-        return false;
-      AnimationKey key;
-      std::string interpolation;
-      const auto *tv = json_member(ko, "time");
-      const auto *vv = json_member(ko, "value");
-      if (!tv || !vv || !std::holds_alternative<JsonValue::Object>(tv->value) ||
-          !std::holds_alternative<JsonValue::Object>(vv->value) ||
-          !json_string(ko, "interpolation", interpolation) ||
-          (interpolation != "hold" && interpolation != "linear"))
-        return false;
-      key.hold = interpolation == "hold";
-      const auto &to = std::get<JsonValue::Object>(tv->value);
-      int32_t scale{};
-      if (!json_exact_keys(to, {"value", "scale"}) ||
-          !json_i32(to, "value", key.time) || !json_i32(to, "scale", scale) ||
-          scale <= 0)
-        return false;
-      key.scale = static_cast<uint32_t>(scale);
-      if (!timeline.keys.empty() &&
-          !rational_less(timeline.keys.back().time, timeline.keys.back().scale,
-                         key.time, key.scale))
-        return false;
-      const auto &vo = std::get<JsonValue::Object>(vv->value);
-      std::string type;
-      if (!json_string(vo, "type", type) ||
-          !json_exact_keys(vo, {"type", "value"}))
-        return false;
-      const auto *value = json_member(vo, "value");
-      if (type == "scalar") {
-        key.kind = AnimationValueKind::Scalar;
-        if (!json_number(vo, "value", key.scalar))
-          return false;
-      } else if (type == "color") {
-        key.kind = AnimationValueKind::Color;
-        if (!value || !std::holds_alternative<JsonValue::Array>(value->value) ||
-            std::get<JsonValue::Array>(value->value).size() != 4)
-          return false;
-        for (std::size_t i = 0; i < 4; ++i) {
-          const auto &c = std::get<JsonValue::Array>(value->value)[i];
-          if (!std::holds_alternative<int64_t>(c.value) ||
-              std::get<int64_t>(c.value) < 0 ||
-              std::get<int64_t>(c.value) > 255)
-            return false;
-          key.color[i] = static_cast<unsigned char>(std::get<int64_t>(c.value));
-        }
-      } else if (type == "components") {
-        key.kind = AnimationValueKind::Components;
-        if (!value || !std::holds_alternative<JsonValue::Array>(value->value))
-          return false;
-        const auto &components = std::get<JsonValue::Array>(value->value);
-        if (components.empty() || components.size() > 3)
-          return false;
-        key.component_count = static_cast<int32_t>(components.size());
-        for (std::size_t i = 0; i < components.size(); ++i) {
-          if (std::holds_alternative<double>(components[i].value))
-            key.components[i] = std::get<double>(components[i].value);
-          else if (std::holds_alternative<int64_t>(components[i].value))
-            key.components[i] =
-                static_cast<double>(std::get<int64_t>(components[i].value));
-          else
-            return false;
-          if (!std::isfinite(key.components[i]))
-            return false;
-        }
-      } else if (type == "arbitrary") {
-        key.kind = AnimationValueKind::Arbitrary;
-        if (!value || !std::holds_alternative<JsonValue::Array>(value->value))
-          return false;
-        const auto &bytes = std::get<JsonValue::Array>(value->value);
-        if (bytes.empty() || bytes.size() > 64 * 1024 ||
-            arbitrary_total > 1024 * 1024 - bytes.size())
-          return false;
-        arbitrary_total += bytes.size();
-        key.arbitrary.reserve(bytes.size());
-        for (const auto &byte : bytes) {
-          if (!std::holds_alternative<int64_t>(byte.value) ||
-              std::get<int64_t>(byte.value) < 0 || std::get<int64_t>(byte.value) > 255)
-            return false;
-          key.arbitrary.push_back(static_cast<unsigned char>(std::get<int64_t>(byte.value)));
-        }
-      } else
-        return false;
-      timeline.keys.push_back(key);
-    }
-    const bool has_arbitrary = std::any_of(timeline.keys.begin(), timeline.keys.end(),
-        [](const auto &key) { return key.kind == AnimationValueKind::Arbitrary; });
-    if (has_arbitrary && std::any_of(timeline.keys.begin(), timeline.keys.end(),
-        [](const auto &key) { return key.kind != AnimationValueKind::Arbitrary; }))
-      return false;
-    parsed.push_back(std::move(timeline));
-  }
-  result = std::move(parsed);
-  return true;
-}
 
 bool load_aux_manifest(const std::filesystem::path &manifest_path,
                        ExternalAuxSet &result) {
