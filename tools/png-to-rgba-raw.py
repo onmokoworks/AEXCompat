@@ -9,7 +9,6 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-import struct
 import sys
 from pathlib import Path
 
@@ -33,8 +32,13 @@ def main(argv: list[str] | None = None) -> int:
         raw = bytes(decoded)
         raw_format = "rgba8"
     else:
-        count = metadata["width"] * metadata["height"] * 4
-        raw = struct.pack(f"<{count}H", *struct.unpack(f">{count}H", decoded))
+        # Swap each big-endian sample to little-endian with C-level slice
+        # assignments; unpacking tens of millions of samples into Python
+        # integers would balloon memory on 4K-sized deep renders.
+        swapped = bytearray(len(decoded))
+        swapped[0::2] = decoded[1::2]
+        swapped[1::2] = decoded[0::2]
+        raw = bytes(swapped)
         raw_format = "rgba16le"
     try:
         with args.out.open("xb") as handle:

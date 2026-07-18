@@ -64,6 +64,10 @@ $installedHash = (Get-FileHash -LiteralPath $installedPath -Algorithm SHA256).Ha
 if ($testedHash -ne $installedHash) {
     throw "Installed AEX hash does not match tested AEX: $installedHash != $testedHash"
 }
+# Hash the input image before After Effects launches: hashing after the run
+# could bind the capture evidence to bytes that replaced the file while AE
+# was rendering the original.
+$inputHash = (Get-FileHash -LiteralPath $inputPath -Algorithm SHA256).Hash.ToLowerInvariant()
 
 $scriptPath = if ($ScriptPath) {
     (Resolve-Path -LiteralPath $ScriptPath).Path
@@ -134,11 +138,10 @@ if ($result.status -ne 'captured') {
 if (-not (Test-Path -LiteralPath $outputPath)) {
     throw 'After Effects reported capture success without creating the PNG.'
 }
-# Bind the capture evidence to its verified inputs: the runner hashed the
-# input image and the tested AEX before launch, so record those identities in
-# the result document (the cross-machine runbook requires the input hash in
-# the returned manifest, and evidence refresh scripts verify against it).
-$inputHash = (Get-FileHash -LiteralPath $inputPath -Algorithm SHA256).Hash.ToLowerInvariant()
+# Bind the capture evidence to its verified inputs: both hashes were taken
+# before After Effects launched, so record those identities in the result
+# document (the cross-machine runbook requires the input hash in the returned
+# manifest, and evidence refresh scripts verify against it).
 $result | Add-Member -NotePropertyName 'input_sha256' -NotePropertyValue $inputHash
 $result | Add-Member -NotePropertyName 'tested_aex_sha256' -NotePropertyValue $testedHash.ToLowerInvariant()
 $result | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $resultPath -Encoding utf8
