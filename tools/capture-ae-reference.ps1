@@ -64,10 +64,15 @@ $installedHash = (Get-FileHash -LiteralPath $installedPath -Algorithm SHA256).Ha
 if ($testedHash -ne $installedHash) {
     throw "Installed AEX hash does not match tested AEX: $installedHash != $testedHash"
 }
-# Hash the input image before After Effects launches: hashing after the run
-# could bind the capture evidence to bytes that replaced the file while AE
-# was rendering the original.
-$inputHash = (Get-FileHash -LiteralPath $inputPath -Algorithm SHA256).Hash.ToLowerInvariant()
+# Stage a private copy of the input and hash that copy: hashing the original
+# would leave a window (before AE imports it, or after the run) in which a
+# rewritten file makes the recorded identity diverge from the bytes AE
+# actually rendered. AE is pointed at the staged copy, so the hash and the
+# rendered bytes are the same file by construction.
+$stagedInput = Join-Path ([System.IO.Path]::GetTempPath()) `
+    ("aexcompat-ae-input-" + [guid]::NewGuid().ToString('N') + [System.IO.Path]::GetExtension($inputPath))
+Copy-Item -LiteralPath $inputPath -Destination $stagedInput
+$inputHash = (Get-FileHash -LiteralPath $stagedInput -Algorithm SHA256).Hash.ToLowerInvariant()
 
 $scriptPath = if ($ScriptPath) {
     (Resolve-Path -LiteralPath $ScriptPath).Path
@@ -79,7 +84,7 @@ if (Test-Path -LiteralPath $resultPath) {
     throw 'Reference result file already exists.'
 }
 
-$env:AEXCOMPAT_AE_INPUT = $inputPath
+$env:AEXCOMPAT_AE_INPUT = $stagedInput
 $env:AEXCOMPAT_AE_OUTPUT = $outputPath
 $env:AEXCOMPAT_AE_RESULT = $resultPath
 $env:AEXCOMPAT_AE_EFFECT = $EffectName
@@ -129,6 +134,7 @@ try {
     'AEXCOMPAT_AE_WORKING_SPACE','AEXCOMPAT_AE_LINEARIZE',
     'AEXCOMPAT_AE_PARAM_NAME','AEXCOMPAT_AE_PARAM_VALUE' |
         ForEach-Object { Remove-Item "Env:$_" -ErrorAction SilentlyContinue }
+    Remove-Item -LiteralPath $stagedInput -ErrorAction SilentlyContinue
 }
 
 $result = Get-Content -LiteralPath $resultPath -Raw | ConvertFrom-Json

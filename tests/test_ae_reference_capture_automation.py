@@ -1,5 +1,9 @@
 import json
+import shutil
+import sys
 from pathlib import Path
+
+import pytest
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -59,6 +63,9 @@ def test_reference_capture_color_pipeline_pin_is_optional_and_fail_closed():
     assert "linearize_working_space: app.project.linearizeWorkingSpace" in script
 
 
+@pytest.mark.skipif(
+    sys.platform != "win32" or shutil.which("powershell") is None,
+    reason="mock capture run requires Windows PowerShell and a Windows executable")
 def test_reference_capture_result_records_prelaunch_input_identities(tmp_path):
     # Behavioral check (no After Effects needed): the runner is executed with
     # a mock AE binary; while the "capture" is in flight the input image is
@@ -66,7 +73,6 @@ def test_reference_capture_result_records_prelaunch_input_identities(tmp_path):
     # The runner must record the hashes taken BEFORE launch - the bytes the
     # real AE would have rendered - not the replaced file.
     import hashlib
-    import shutil
     import subprocess
     import time
 
