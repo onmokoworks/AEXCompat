@@ -42,6 +42,11 @@ and bounded image input/output are now the main implementation path.
 - The After Effects installation is an exclusive machine resource. Before any
   capture or aerender run, verify no AfterFX/aerender/aerendercore process is
   running; if one is, another session owns it — wait instead of killing it.
+- Every PR goes through the Codex review loop before merging: comment
+  "@codex review", wait for the response, address findings and re-trigger
+  until Codex replies "Didn't find any major issues", then merge. Do not
+  merge a PR that has not received that reply for its latest commit (the
+  `codex-review-loop` skill automates this loop).
 
 ## Canonical Verification
 
