@@ -123,12 +123,16 @@ merge 側 (`codex-merge-guard.sh` が head 拘束 clean なしに merge を拒�
      `gh api -X POST repos/{owner}/{repo}/pulls/{PR}/comments/{comment_id}/replies -f body="対応済み (<sha>)。<内容>"`
   4. 手順 1 に戻る (新しい `since` で再トリガー)
 - **CLEAN (Codex 指摘なし)**: **merge は `codex-merge-guard.sh` 経由でのみ行う**。
-  これが (a) owner blocker の不在 (review state、および clean より後に owner が
-  出した top-level コメント・新規 inline finding の不在。owner_review_gate は
-  review state しか見ないので、CHANGES_REQUESTED を伴わない owner コメントの
-  race をここで塞ぐ)、(b) 現在の head SHA に拘束された Codex text clean を
-  fail-closed で再確認し (PR 本体 👍 だけの reaction clean は受理しない)、
-  (c) `gh pr merge --match-head-commit <head>` で atomic に merge する
+  これが (a) owner blocker の不在 (owner_review_gate の CHANGES_REQUESTED、
+  および **現 head に対する owner フィードバック**の不在。後者は head commit
+  日時以降の owner の top-level コメント・inline finding・bodied review を拾い、
+  clean の直前に来たものも捕捉する。owner_review_gate は review state しか見ない
+  ので、CHANGES_REQUESTED を伴わない owner コメントの race をここで塞ぐ。self-block
+  回避はタイムスタンプではなく **authorship** で行う: セッション自身の認証 login
+  (`gh api user`) を除外し、別 login の owner フィードバックは拾う)、(b) 現在の
+  head SHA に拘束された Codex text clean を fail-closed で再確認し (PR 本体 👍
+  だけの reaction clean は受理しない)、(c) `gh pr merge --match-head-commit
+  <head>` で atomic に merge する
   (確認後に head が進めば merge は失敗する):
   ```bash
   bash {SKILL_DIR}/codex-merge-guard.sh {owner} {repo} {PR}

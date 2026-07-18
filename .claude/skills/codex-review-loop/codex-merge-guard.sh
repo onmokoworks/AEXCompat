@@ -30,6 +30,15 @@ fetch() {
 
 head=$(gh api "repos/$OWNER/$REPO/pulls/$PR" --jq '.head.sha') || {
   echo "REFUSE: cannot read PR head"; exit 1; }
+# Lower bound for owner-feedback-on-current-head: the head commit's date. Owner
+# feedback after the head was pushed is about this head and must block even if
+# it predates the Codex clean.
+head_date=$(gh api "repos/$OWNER/$REPO/commits/$head" --jq '.commit.committer.date') || {
+  echo "REFUSE: cannot read head commit date"; exit 1; }
+# This session's own login, excluded from the owner-feedback check so its acks,
+# summaries, and inline replies (posted under an owner login) do not self-block;
+# a different owner login (the human reviewer) still blocks.
+ME=$(gh api user --jq '.login') || { echo "REFUSE: cannot read authenticated login"; exit 1; }
 
 pr_comments=$(fetch "pulls/$PR/comments") || { echo "REFUSE: pulls/comments fetch failed"; exit 1; }
 reviews=$(fetch "pulls/$PR/reviews") || { echo "REFUSE: pulls/reviews fetch failed"; exit 1; }
@@ -56,21 +65,22 @@ if [ -n "$find_ts" ] && [[ "$find_ts" > "$clean_ts" ]]; then
   echo "REFUSE: newer Codex findings after the clean"; exit 1
 fi
 
-# Owner comment race: owner_review_gate only sees review STATES. An owner can
-# raise a concern as a top-level PR comment, a fresh inline review comment, or a
-# bodied non-inline review WITHOUT a CHANGES_REQUESTED state, after Codex went
-# clean but before the merge. Refuse when any such owner activity is at or after
-# the clean. Scoped inclusively (>=) to the clean so addressed history does not
-# block forever while same-second activity still fails closed; this session's
-# own replies-as-owner precede the clean (posted before re-triggering), so the
-# timestamp scope excludes them.
+# Owner feedback on the current head: owner_review_gate only sees review STATES.
+# An owner can raise a concern as a top-level PR comment, a fresh inline review
+# comment, or a bodied non-inline review WITHOUT a CHANGES_REQUESTED state, any
+# time after the current head was pushed — including a few seconds BEFORE Codex
+# posts its clean. Bounding by the clean would miss that race, so bound by the
+# head commit date: any such owner feedback on the current head must block
+# (owner comments outrank Codex). Feedback before the head-push was about a
+# superseded state. This session's own login is excluded so its acks do not
+# self-block; a different owner login still blocks.
 owner_after=$(
-  { owner_inline_after "$clean_ts" <<<"$pr_comments"
-    owner_comments_after "$clean_ts" <<<"$issue_comments"
-    owner_reviews_after "$clean_ts" <<<"$reviews"; } | grep -v '^$' || true
+  { owner_inline_after "$head_date" "$ME" <<<"$pr_comments"
+    owner_comments_after "$head_date" "$ME" <<<"$issue_comments"
+    owner_reviews_after "$head_date" "$ME" <<<"$reviews"; } | grep -v '^$' || true
 )
 if [ -n "$owner_after" ]; then
-  echo "REFUSE: owner raised comments after the Codex clean; address them first:"
+  echo "REFUSE: owner raised feedback on the current head; address it first:"
   echo "$owner_after"
   exit 1
 fi

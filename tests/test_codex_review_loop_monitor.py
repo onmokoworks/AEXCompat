@@ -217,117 +217,105 @@ def test_same_owner_later_approved_clears_own_changes_requested() -> None:
     assert _call("owner_review_gate", payload) == ""
 
 
-# --- owner_*_after: merge-guard race check, scoped to "> clean" ---------------
+# --- owner_*_after: owner feedback on the current head (bound = head commit
+# --- date; second arg = this session's login, excluded to avoid self-block) ---
 
-def test_owner_inline_after_clean_blocks() -> None:
-    clean_ts = "2026-07-18T19:16:44Z"
+HEAD_DATE = "2026-07-18T19:00:00Z"  # when the current head was pushed
+ME = "naari3"                       # this session's authenticated login
+
+
+def test_owner_inline_after_head_blocks() -> None:
     payload = [{"user": {"login": "onmokoworks"}, "id": 9, "path": "x.sh", "line": 3,
                 "created_at": "2026-07-18T19:20:00Z", "body": "wait, this is wrong"}]
-    assert "OWNER-INLINE" in _call("owner_inline_after", payload, clean_ts)
+    assert "OWNER-INLINE" in _call("owner_inline_after", payload, HEAD_DATE, ME)
 
 
-def test_owner_inline_before_clean_is_ignored() -> None:
-    clean_ts = "2026-07-18T19:16:44Z"
+def test_owner_inline_before_head_is_ignored() -> None:
+    # Feedback before the current head was pushed was about a superseded state.
     payload = [{"user": {"login": "onmokoworks"}, "id": 9, "path": "x.sh", "line": 3,
-                "created_at": "2026-07-18T19:10:00Z", "body": "old, already addressed"}]
-    assert _call("owner_inline_after", payload, clean_ts) == ""
+                "created_at": "2026-07-18T18:50:00Z", "body": "old, on the previous head"}]
+    assert _call("owner_inline_after", payload, HEAD_DATE, ME) == ""
 
 
-def test_owner_inline_reply_after_clean_blocks() -> None:
-    # An owner reply on an existing thread after the clean (e.g. "still not
-    # fixed") is real feedback and must block, even though it carries
-    # in_reply_to_id. Self-block by this session's own ack replies is prevented
-    # by the timestamp scope (they precede the clean), not by dropping replies.
-    clean_ts = "2026-07-18T19:16:44Z"
+def test_owner_inline_before_the_clean_but_after_head_blocks() -> None:
+    # The P1 race: owner feedback after the head was pushed but seconds before
+    # the Codex clean must still block (bound is the head date, not the clean).
+    payload = [{"user": {"login": "onmokoworks"}, "id": 9, "path": "x.sh", "line": 3,
+                "created_at": "2026-07-18T19:16:40Z", "body": "this is wrong"}]
+    assert "OWNER-INLINE" in _call("owner_inline_after", payload, HEAD_DATE, ME)
+
+
+def test_owner_inline_reply_from_other_owner_blocks() -> None:
+    # A genuine owner reply on an existing thread ("still not fixed") blocks,
+    # even with in_reply_to_id set, because it is not this session's login.
     payload = [{"user": {"login": "onmokoworks"}, "id": 9, "in_reply_to_id": 8, "path": "x.sh", "line": 3,
                 "created_at": "2026-07-18T19:20:00Z", "body": "still not fixed"}]
-    assert "OWNER-INLINE" in _call("owner_inline_after", payload, clean_ts)
+    assert "OWNER-INLINE" in _call("owner_inline_after", payload, HEAD_DATE, ME)
 
 
-def test_owner_inline_reply_before_clean_is_ignored() -> None:
-    # This session's ack reply, posted before re-triggering, precedes the next
-    # clean and is excluded by the timestamp scope.
-    clean_ts = "2026-07-18T19:16:44Z"
-    payload = [{"user": {"login": "naari3"}, "id": 9, "in_reply_to_id": 8, "path": "x.sh", "line": 3,
-                "created_at": "2026-07-18T19:10:00Z", "body": "対応済み"}]
-    assert _call("owner_inline_after", payload, clean_ts) == ""
+def test_session_own_inline_reply_is_excluded_by_login() -> None:
+    # This session's own ack reply (posted under its owner login) must not
+    # self-block, regardless of timing — the exclusion is by authorship now.
+    payload = [{"user": {"login": ME}, "id": 9, "in_reply_to_id": 8, "path": "x.sh", "line": 3,
+                "created_at": "2026-07-18T19:20:00Z", "body": "対応済み"}]
+    assert _call("owner_inline_after", payload, HEAD_DATE, ME) == ""
 
 
-def test_owner_inline_same_second_as_clean_blocks() -> None:
-    # GitHub timestamps are second-resolution; an owner finding in the same
-    # second as the clean must fail closed (inclusive lower bound).
-    clean_ts = "2026-07-18T19:16:44Z"
+def test_session_own_toplevel_summary_is_excluded_by_login() -> None:
+    payload = [{"user": {"login": ME},
+                "created_at": "2026-07-18T19:20:00Z", "body": "対応済みの要約"}]
+    assert _call("owner_comments_after", payload, HEAD_DATE, ME) == ""
+
+
+def test_owner_inline_same_second_as_head_blocks() -> None:
+    # Inclusive lower bound: same-second-as-head activity fails closed.
     payload = [{"user": {"login": "onmokoworks"}, "id": 9, "path": "x.sh", "line": 3,
-                "created_at": clean_ts, "body": "actually this is wrong"}]
-    assert "OWNER-INLINE" in _call("owner_inline_after", payload, clean_ts)
+                "created_at": HEAD_DATE, "body": "actually this is wrong"}]
+    assert "OWNER-INLINE" in _call("owner_inline_after", payload, HEAD_DATE, ME)
 
 
-def test_owner_comment_same_second_as_clean_blocks() -> None:
-    clean_ts = "2026-07-18T19:16:44Z"
-    payload = [{"user": {"login": "onmokoworks"},
-                "created_at": clean_ts, "body": "hold on"}]
-    assert "OWNER-COMMENT" in _call("owner_comments_after", payload, clean_ts)
-
-
-def test_owner_comment_after_clean_blocks() -> None:
-    clean_ts = "2026-07-18T19:16:44Z"
+def test_owner_comment_after_head_blocks() -> None:
     payload = [{"user": {"login": "onmokoworks"},
                 "created_at": "2026-07-18T19:20:00Z", "body": "hold on, don't merge yet"}]
-    assert "OWNER-COMMENT" in _call("owner_comments_after", payload, clean_ts)
+    assert "OWNER-COMMENT" in _call("owner_comments_after", payload, HEAD_DATE, ME)
 
 
-def test_bare_trigger_comment_after_clean_is_ignored() -> None:
-    clean_ts = "2026-07-18T19:16:44Z"
-    payload = [{"user": {"login": "naari3"},
+def test_bare_trigger_comment_is_ignored() -> None:
+    payload = [{"user": {"login": "onmokoworks"},
                 "created_at": "2026-07-18T19:20:00Z", "body": "@codex review"}]
-    assert _call("owner_comments_after", payload, clean_ts) == ""
+    assert _call("owner_comments_after", payload, HEAD_DATE, ME) == ""
 
 
-def test_owner_comment_before_clean_is_ignored() -> None:
-    clean_ts = "2026-07-18T19:16:44Z"
-    payload = [{"user": {"login": "naari3"},
-                "created_at": "2026-07-18T19:10:00Z", "body": "対応済みの要約"}]
-    assert _call("owner_comments_after", payload, clean_ts) == ""
-
-
-def test_owner_bodied_commented_review_after_clean_blocks() -> None:
-    # A non-inline owner review with a body after the clean is a blocker the
-    # monitor honors; the merge guard must too (owner_review_gate only sees
-    # CHANGES_REQUESTED).
-    clean_ts = "2026-07-18T19:16:44Z"
+def test_owner_bodied_commented_review_after_head_blocks() -> None:
     payload = [{"user": {"login": "onmokoworks"}, "state": "COMMENTED",
                 "submitted_at": "2026-07-18T19:20:00Z", "body": "[P1] hold on, this is wrong"}]
-    assert "OWNER-REVIEW COMMENTED" in _call("owner_reviews_after", payload, clean_ts)
+    assert "OWNER-REVIEW COMMENTED" in _call("owner_reviews_after", payload, HEAD_DATE, ME)
 
 
-def test_owner_bodyless_commented_review_after_clean_is_ignored() -> None:
-    # Replying to an inline thread posts a bodyless COMMENTED review as the
-    # owner; it must not self-block the merge.
-    clean_ts = "2026-07-18T19:16:44Z"
-    payload = [{"user": {"login": "naari3"}, "state": "COMMENTED",
+def test_owner_bodyless_commented_review_is_ignored() -> None:
+    # A bodyless COMMENTED review (this session's inline reply) is excluded both
+    # by having no body and by the session-login filter.
+    payload = [{"user": {"login": ME}, "state": "COMMENTED",
                 "submitted_at": "2026-07-18T19:20:00Z", "body": ""}]
-    assert _call("owner_reviews_after", payload, clean_ts) == ""
+    assert _call("owner_reviews_after", payload, HEAD_DATE, ME) == ""
 
 
-def test_owner_changes_requested_review_after_clean_blocks() -> None:
-    clean_ts = "2026-07-18T19:16:44Z"
+def test_owner_changes_requested_review_after_head_blocks() -> None:
     payload = [{"user": {"login": "onmokoworks"}, "state": "CHANGES_REQUESTED",
                 "submitted_at": "2026-07-18T19:20:00Z", "body": ""}]
-    assert "OWNER-REVIEW CHANGES_REQUESTED" in _call("owner_reviews_after", payload, clean_ts)
+    assert "OWNER-REVIEW CHANGES_REQUESTED" in _call("owner_reviews_after", payload, HEAD_DATE, ME)
 
 
-def test_owner_review_before_clean_is_ignored() -> None:
-    clean_ts = "2026-07-18T19:16:44Z"
+def test_owner_review_before_head_is_ignored() -> None:
     payload = [{"user": {"login": "onmokoworks"}, "state": "COMMENTED",
-                "submitted_at": "2026-07-18T19:10:00Z", "body": "[P1] old, addressed"}]
-    assert _call("owner_reviews_after", payload, clean_ts) == ""
+                "submitted_at": "2026-07-18T18:50:00Z", "body": "[P1] old, on previous head"}]
+    assert _call("owner_reviews_after", payload, HEAD_DATE, ME) == ""
 
 
-def test_owner_approved_review_after_clean_does_not_block() -> None:
-    clean_ts = "2026-07-18T19:16:44Z"
+def test_owner_approved_review_after_head_does_not_block() -> None:
     payload = [{"user": {"login": "onmokoworks"}, "state": "APPROVED",
                 "submitted_at": "2026-07-18T19:20:00Z", "body": "looks good"}]
-    assert _call("owner_reviews_after", payload, clean_ts) == ""
+    assert _call("owner_reviews_after", payload, HEAD_DATE, ME) == ""
 
 
 def test_inline_error_message_is_not_a_finding() -> None:

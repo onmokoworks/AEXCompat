@@ -155,48 +155,54 @@ owner_inline() {
     | "OWNER-FINDING id=\(.id) \(.path):\(.line // .original_line): \((.body | split("\n")[0]))"'
 }
 
-# Merge-gate view of owner activity AT OR AFTER a Codex clean at $1 (the race
-# the guard must catch: the owner speaks after clean but before merge). The
-# lower bound is INCLUSIVE (>=): GitHub timestamps are second-resolution, so an
-# owner comment in the same second as the clean must fail closed and block, not
-# slip through. Reply comments (in_reply_to_id set) are INCLUDED: an owner reply
-# like "still not fixed" on an existing thread after the clean is real feedback
-# and must block. Self-block by this session's own ack replies is prevented by
-# the "> = clean" timestamp scope, not by dropping replies: this session posts
-# its replies before re-triggering (so before the next clean), and the CLEAN
-# branch runs the guard without posting any reply, so any owner reply newer than
-# the clean is genuinely the owner's (input: pull review-comments array).
+# Merge-gate view of owner activity on the CURRENT head. Args: $1 = lower-bound
+# ts = the head commit's date; $2 = the login to exclude (this session's own
+# authenticated account). The lower bound is the head commit date, NOT the Codex
+# clean: an owner can post feedback after the head is pushed but seconds BEFORE
+# Codex posts its clean, and bounding by the clean would miss it (that feedback
+# is about the current head and must block, since owner comments outrank Codex).
+# Bounding instead by head_date scopes to the current head: feedback before the
+# head-push was about a superseded state. Inclusive (>=): GitHub timestamps are
+# second-resolution, so same-second activity must fail closed. Reply comments
+# (in_reply_to_id set) are INCLUDED so a genuine owner "still not fixed" reply
+# blocks. Self-block is avoided by AUTHORSHIP, not timing: this session's own
+# acks/summaries/replies are posted under $2 and dropped, while a different owner
+# login (the human reviewer) still blocks (input: pull review-comments array).
 owner_inline_after() {
-  jq -r --arg ts "$1" --argjson owner "$OWNER_LOGINS" '
+  jq -r --arg ts "$1" --arg me "$2" --argjson owner "$OWNER_LOGINS" '
     .[] | select([.user.login] | inside($owner))
+    | select(.user.login != $me)
     | select(.created_at >= $ts)
     | "OWNER-INLINE id=\(.id) \(.path):\(.line // .original_line): \((.body | split("\n")[0]))"'
 }
 
-# Owner blocking REVIEWS at or after a Codex clean at $1 (input: reviews array).
-# owner_review_gate blocks unresolved CHANGES_REQUESTED over full history, but a
-# repo owner can also submit a non-inline PR review with state COMMENTED and a
-# BODY after the clean but before the guard runs; that is a blocker the monitor
-# already honors (owner_blocking_reviews) yet neither owner_review_gate nor the
-# comment/inline after-checks catch. Same blocking predicate as the monitor
-# (CHANGES_REQUESTED, or COMMENTED with a body), scoped inclusively (>=) to the
-# clean. Bodyless COMMENTED reviews (posted when this session replies to an
-# inline thread) carry no body and are excluded, so they do not self-block.
+# Owner blocking REVIEWS on the current head. Args: $1 = head commit date lower
+# bound; $2 = login to exclude (input: reviews array). owner_review_gate blocks
+# unresolved CHANGES_REQUESTED over full history, but a repo owner can also
+# submit a non-inline PR review with state COMMENTED and a BODY on the current
+# head; that is a blocker the monitor honors (owner_blocking_reviews) yet neither
+# owner_review_gate nor a clean-bounded check catches. Same blocking predicate as
+# the monitor (CHANGES_REQUESTED, or COMMENTED with a body), scoped inclusively
+# (>=) to the head commit date and excluding this session's own login. Bodyless
+# COMMENTED reviews (this session's inline-thread replies) carry no body and are
+# also excluded.
 owner_reviews_after() {
-  jq -r --arg ts "$1" --argjson owner "$OWNER_LOGINS" '
+  jq -r --arg ts "$1" --arg me "$2" --argjson owner "$OWNER_LOGINS" '
     .[] | select([.user.login] | inside($owner))
+    | select(.user.login != $me)
     | select((.submitted_at // "") >= $ts)
     | select(.state == "CHANGES_REQUESTED" or (.state == "COMMENTED" and ((.body // "") | length) > 0))
     | "OWNER-REVIEW \(.state): \(((.body // "") | split("\n"))[0])"'
 }
 
-# Owner top-level comments at or after a Codex clean at $1, excluding a bare
-# trigger (input: issue-comments array). Same inclusive (>=) same-second
-# fail-closed rule as owner_inline_after. This session posts its summaries
-# before re-triggering, so they precede the clean second and are excluded.
+# Owner top-level comments on the current head, excluding a bare trigger. Args:
+# $1 = head commit date lower bound; $2 = login to exclude (input: issue-comments
+# array). Same head-date lower bound, inclusive (>=) same-second fail-closed
+# rule, and session-login exclusion as owner_inline_after.
 owner_comments_after() {
-  jq -r --arg ts "$1" --argjson owner "$OWNER_LOGINS" '
+  jq -r --arg ts "$1" --arg me "$2" --argjson owner "$OWNER_LOGINS" '
     .[] | select([.user.login] | inside($owner))
+    | select(.user.login != $me)
     | select(.created_at >= $ts)
     | select((.body | ascii_downcase | gsub("[[:space:]]"; "")) != "@codexreview")
     | "OWNER-COMMENT: \((.body | split("\n"))[0])"'

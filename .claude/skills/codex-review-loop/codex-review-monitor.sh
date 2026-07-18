@@ -22,6 +22,11 @@ LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/codex-review-lib.sh"
 
 DEADLINE=$(( $(date +%s) + 3600 ))   # documented 1h hard timeout (finding 5)
 
+# This session's own login, excluded from the owner-feedback-on-head check so
+# its acks/summaries/replies (posted under an owner login) do not self-block.
+# Fetched once; empty means no exclusion (best effort) if the call fails.
+ME=$(gh api user --jq '.login' 2>/dev/null || echo "")
+
 # Fetch a list endpoint across all pages as a single JSON array, or fail.
 fetch() {
   local out
@@ -111,25 +116,27 @@ while true; do
     if [ -n "$findings" ]; then echo "$findings"; exit 0; fi
   fi
 
-  # Owner activity newer than a clean supersedes it (aligns with what the guard
-  # accepts; prevents the stale-clean/refuse loop). Full history, inclusive.
-  owner_after_of() {
-    { owner_inline_after "$1" <<<"$pr_comments"
-      owner_comments_after "$1" <<<"$issue_comments"
-      owner_reviews_after "$1" <<<"$reviews"; } | grep -v '^$' || true
-  }
+  # Owner feedback on the current head blocks a clean (aligns with what the guard
+  # accepts; prevents the stale-clean/refuse loop). Bounded by the head commit
+  # date so feedback predating the Codex clean still counts, and excluding this
+  # session's own login so its acks do not self-block.
+  owner_on_head=$(
+    { owner_inline_after "$head_date" "$ME" <<<"$pr_comments"
+      owner_comments_after "$head_date" "$ME" <<<"$issue_comments"
+      owner_reviews_after "$head_date" "$ME" <<<"$reviews"; } | grep -v '^$' || true
+  )
 
-  # 3. Mergeable CLEAN: a SHA-bound text clean, no newer finding, no newer owner
-  #    activity. This is exactly what codex-merge-guard.sh will accept.
+  # 3. Mergeable CLEAN: a SHA-bound text clean, no newer finding, no owner
+  #    feedback on the current head. This is exactly what the guard will accept.
   if [ -n "$text_clean_ts" ] && { [ -z "$find_ts" ] || [[ ! "$find_ts" > "$text_clean_ts" ]]; } \
-     && [ -z "$(owner_after_of "$text_clean_ts")" ]; then
+     && [ -z "$owner_on_head" ]; then
     echo "CLEAN: codex clean for head ${head:0:10}"; exit 0
   fi
 
   # 4. Reaction-only advisory: Codex +1 on the PR body, not SHA-bound. Not
   #    mergeable by the guard; the operator must re-trigger for a text clean.
   if [ -n "$react_clean_ts" ] && { [ -z "$find_ts" ] || [[ ! "$find_ts" > "$react_clean_ts" ]]; } \
-     && [ -z "$(owner_after_of "$react_clean_ts")" ]; then
+     && [ -z "$owner_on_head" ]; then
     echo "CLEAN-REACTION: codex +1 on PR body for head ${head:0:10} (no SHA-bound text clean; re-trigger @codex review for a mergeable verdict)"; exit 0
   fi
 done
