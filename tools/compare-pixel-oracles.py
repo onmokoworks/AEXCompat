@@ -88,13 +88,23 @@ def _coerce_rgba(array: object) -> tuple[int, int, list[float]]:
 def load_render(path: Path) -> tuple[int, int, list[float], str]:
     if path.suffix.lower() == ".exr":
         try:
-            import imageio.v3 as iio
+            import OpenEXR
         except ImportError as exc:
             raise InputError(
-                "EXR support is optional; install imageio with an EXR-capable backend"
+                "EXR support requires the OpenEXR package from requirements-dev.txt"
             ) from exc
         try:
-            width, height, values = _coerce_rgba(iio.imread(path))
+            with OpenEXR.File(str(path)) as infile:
+                if len(infile.parts) != 1:
+                    raise InputError("only single-part EXR renders are supported")
+                channels = infile.channels()
+                name = next((candidate for candidate in ("RGBA", "RGB", "Y")
+                             if candidate in channels), None)
+                if name is None:
+                    raise InputError(
+                        f"EXR has no RGBA, RGB, or Y channel group: {sorted(channels)}"
+                    )
+                width, height, values = _coerce_rgba(channels[name].pixels)
         except InputError:
             raise
         except Exception as exc:
