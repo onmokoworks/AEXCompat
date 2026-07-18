@@ -637,11 +637,14 @@ const char* effect_selector_name(int32_t command) {
 // Opt-in crash minidumps (issue #18): broker-validated directory passed via
 // --minidump-v1. Default off; one create-new dump per process; local only.
 std::filesystem::path g_minidump_dir;
-bool g_minidump_attempted = false;
+// Atomic one-time guard: a plug-in can crash several of its own threads at
+// once, and the top-level filter runs on each, so the writer must admit only
+// the first.
+std::atomic<bool> g_minidump_attempted{false};
 
 void write_crash_minidump(EXCEPTION_POINTERS* information) {
-  if (g_minidump_dir.empty() || g_minidump_attempted || !information) return;
-  g_minidump_attempted = true;
+  if (g_minidump_dir.empty() || !information) return;
+  if (g_minidump_attempted.exchange(true)) return;
   HMODULE dbghelp = LoadLibraryExW(L"dbghelp.dll", nullptr,
                                    LOAD_LIBRARY_SEARCH_SYSTEM32);
   if (!dbghelp) {
@@ -21823,7 +21826,7 @@ int wmain(int argc, wchar_t **argv) {
     std::cout << "{\"crash_minidump\":\"" << (written ? "passed" : "failed")
               << "\",\"exception_code\":" << exception_code
               << ",\"dump_bytes\":" << (written ? dump_size : 0)
-              << ",\"attempted\":" << (g_minidump_attempted ? "true" : "false")
+              << ",\"attempted\":" << (g_minidump_attempted.load() ? "true" : "false")
               << "}\n";
     return written ? 0 : 1;
   }
