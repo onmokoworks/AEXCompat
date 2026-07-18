@@ -106,6 +106,17 @@ def _is_plain_int(value: Any) -> bool:
     return isinstance(value, int) and not isinstance(value, bool)
 
 
+def _require_fields(entry: Any, required: tuple[str, ...], where: str) -> None:
+    """Raise ResolutionError (not KeyError/TypeError) if entry is not a dict with
+    all required keys, so a malformed hand-authored spec fails closed via main."""
+
+    if not isinstance(entry, dict):
+        raise ResolutionError(f"{where} must be an object")
+    missing = [key for key in required if key not in entry]
+    if missing:
+        raise ResolutionError(f"{where} is missing required field(s) {missing}")
+
+
 def resolve_hook(hook: dict[str, Any], offset_map: dict[str, dict[str, int]]) -> dict[str, Any]:
     """Resolve one hook into a per-phase read plan.
 
@@ -114,6 +125,8 @@ def resolve_hook(hook: dict[str, Any], offset_map: dict[str, dict[str, int]]) ->
     silently producing nothing.
     """
 
+    if not isinstance(hook, dict):
+        raise ResolutionError("hook must be an object")
     symbol = hook.get("symbol")
     if not isinstance(symbol, str) or not symbol:
         raise ResolutionError("hook.symbol is required")
@@ -124,6 +137,7 @@ def resolve_hook(hook: dict[str, Any], offset_map: dict[str, dict[str, int]]) ->
     # from that pointer so a bad offset cannot walk outside the struct.
     struct_args: dict[str, tuple[int, int]] = {}
     for entry in hook.get("arg_structs", []):
+        _require_fields(entry, ("index", "struct", "extent"), f"{symbol}: arg_structs entry")
         index = entry["index"]
         extent = entry.get("extent")
         struct = entry["struct"]
@@ -139,6 +153,7 @@ def resolve_hook(hook: dict[str, Any], offset_map: dict[str, dict[str, int]]) ->
     plan: dict[str, list[dict[str, Any]]] = {"enter": [], "leave": []}
 
     for entry in hook.get("reads", []):
+        _require_fields(entry, ("name", "as"), f"{symbol}: read entry")
         name = entry["name"]
         interpret = entry["as"]
         phase = entry.get("phase", "enter")
@@ -178,6 +193,7 @@ def resolve_hook(hook: dict[str, Any], offset_map: dict[str, dict[str, int]]) ->
         })
 
     for entry in hook.get("scalar_args", []):
+        _require_fields(entry, ("index", "name", "as", "width"), f"{symbol}: scalar_args entry")
         name = entry["name"]
         interpret = entry["as"]
         phase = entry.get("phase", "enter")

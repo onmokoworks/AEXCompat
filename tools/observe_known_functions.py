@@ -380,6 +380,7 @@ class _JobIsolation:  # pragma: no cover - Windows runtime path
         k32.CloseHandle.argtypes = [HANDLE]
         JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x2000
         JOB_OBJECT_LIMIT_PROCESS_MEMORY = 0x0100
+        JOB_OBJECT_LIMIT_JOB_MEMORY = 0x0200
         JobObjectExtendedLimitInformation = 9
         PROCESS_SET_QUOTA = 0x0100
         PROCESS_TERMINATE = 0x0001
@@ -418,9 +419,15 @@ class _JobIsolation:  # pragma: no cover - Windows runtime path
 
         info = JOBOBJECT_EXTENDED_LIMIT_INFORMATION()
         info.BasicLimitInformation.LimitFlags = (
-            JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_PROCESS_MEMORY
+            JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+            | JOB_OBJECT_LIMIT_PROCESS_MEMORY
+            | JOB_OBJECT_LIMIT_JOB_MEMORY
         )
+        # Per-process cap AND a tree-wide (job-total) cap, so a plug-in that spawns
+        # many children each under the per-process limit cannot exhaust memory in
+        # aggregate - the crash-containment floor covers the whole tree.
         info.ProcessMemoryLimit = WORKER_MEMORY_CAP
+        info.JobMemoryLimit = WORKER_MEMORY_CAP
         if not k32.SetInformationJobObject(
             job, JobObjectExtendedLimitInformation, ctypes.byref(info), ctypes.sizeof(info)
         ):

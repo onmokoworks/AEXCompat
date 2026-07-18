@@ -173,6 +173,19 @@ class ResolveTests(unittest.TestCase):
             resolve_spec(self.spec, offset_map)
         self.assertIn("exceeds", str(ctx.exception))
 
+    def test_malformed_entries_raise_resolution_error_not_keyerror(self):
+        for mutate in (
+            lambda s: s["hooks"][0]["arg_structs"].append({"struct": "p"}),  # missing index/extent
+            lambda s: s["hooks"][0]["arg_structs"].append("not-an-object"),
+            lambda s: s["hooks"][0]["reads"].append({"as": "int"}),  # missing name
+            lambda s: s["hooks"][0]["scalar_args"].append({"name": "x"}),  # missing index/as/width
+            lambda s: s["hooks"].append("not-an-object"),
+        ):
+            spec = copy.deepcopy(self.spec)
+            mutate(spec)
+            with self.assertRaises(ResolutionError):
+                resolve_spec(spec, self.offset_map)
+
     def test_arg_struct_requires_extent(self):
         spec = copy.deepcopy(self.spec)
         del spec["hooks"][0]["arg_structs"][0]["extent"]
