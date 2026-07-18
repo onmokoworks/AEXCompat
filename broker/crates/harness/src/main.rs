@@ -4510,6 +4510,7 @@ fn main() -> eframe::Result {
                 | "--render-experimental-smart"
                 | "--render-experimental-smart-16"
                 | "--render-experimental-smart-32"
+                | "--render-experimental-smart-32-cpu"
         )
     {
         use aexcompat_broker::image_render::RenderPixelFormat;
@@ -4517,7 +4518,7 @@ fn main() -> eframe::Result {
         let smart = command.contains("smart");
         let pixel_format = if command.ends_with("-16") {
             RenderPixelFormat::Argb16
-        } else if command.ends_with("-32") {
+        } else if command.ends_with("-32") || command.ends_with("-32-cpu") {
             RenderPixelFormat::Argb32f
         } else {
             RenderPixelFormat::Argb8
@@ -4527,17 +4528,34 @@ fn main() -> eframe::Result {
         let parameters =
             aexcompat_broker::image_render::inspect_experimental(&repository, plugin, &hash)
                 .unwrap_or_default();
-        let report = aexcompat_broker::image_render::render_experimental_image_at_time_with_format(
-            &repository,
-            plugin,
-            &hash,
-            Path::new(&args[3]),
-            Path::new(&args[4]),
-            &parameters,
-            aexcompat_broker::image_render::RenderTiming::default(),
-            smart,
-            pixel_format,
-        );
+        let report = if command.ends_with("-32-cpu") {
+            aexcompat_broker::image_render::render_experimental_image_at_time_with_format_context_ui_action_and_gpu_backend(
+                &repository,
+                plugin,
+                &hash,
+                Path::new(&args[3]),
+                Path::new(&args[4]),
+                &parameters,
+                aexcompat_broker::image_render::RenderTiming::default(),
+                smart,
+                pixel_format,
+                None,
+                None,
+                aexcompat_broker::image_render::RenderGpuBackend::Cpu,
+            )
+        } else {
+            aexcompat_broker::image_render::render_experimental_image_at_time_with_format(
+                &repository,
+                plugin,
+                &hash,
+                Path::new(&args[3]),
+                Path::new(&args[4]),
+                &parameters,
+                aexcompat_broker::image_render::RenderTiming::default(),
+                smart,
+                pixel_format,
+            )
+        };
         match report {
             Ok(value) => println!("{}", serde_json::to_string_pretty(&value).unwrap()),
             Err(error) => {

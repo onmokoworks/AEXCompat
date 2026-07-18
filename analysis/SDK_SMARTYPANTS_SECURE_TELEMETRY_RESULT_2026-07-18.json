@@ -4,8 +4,8 @@
     "route":  "schema-v2 sealed load tree / restricted SmartFX worker",
     "authenticated_artifacts":  {
                                     "release_harness":  {
-                                                            "size_bytes":  9945088,
-                                                            "sha256":  "d079fb8523560b801490c26d05d7581eab02b83c25f3a22d45b9659a780fd9a0"
+                                                            "size_bytes":  9945600,
+                                                            "sha256":  "67e9ac8e731f5a3514e43c85f35095d4a027e00541f2d16a34c679d3213956d4"
                                                         },
                                     "canonical_smart_worker":  {
                                                                    "size_bytes":  805888,

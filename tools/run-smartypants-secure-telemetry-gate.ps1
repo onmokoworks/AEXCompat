@@ -14,7 +14,7 @@ $stderrReport = Join-Path $runRoot 'harness-stderr.txt'
 $evidence = Join-Path $repo 'analysis\SDK_SMARTYPANTS_SECURE_TELEMETRY_RESULT_2026-07-18.json'
 
 $expected = @{
-    harness = @{ size = 9945088; sha256 = 'd079fb8523560b801490c26d05d7581eab02b83c25f3a22d45b9659a780fd9a0' }
+    harness = @{ size = 9945600; sha256 = '67e9ac8e731f5a3514e43c85f35095d4a027e00541f2d16a34c679d3213956d4' }
     worker = @{ size = 805888; sha256 = 'c511e835f9e476edabedcfd39b1ec6f66d39189357ce2801f00c4cf89a6bb5f9' }
     fixture = @{ size = 31232; sha256 = '47fe55f77600f041a3297b4558108fad5d6e886b6cc66eed2e51f88dac922ede' }
     input = @{ size = 3100; sha256 = '8e2b249fd979826a60ad089b783e84e8f65d9b692c157be065953775a8aa6c91' }
