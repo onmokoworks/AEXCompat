@@ -151,11 +151,24 @@ def compare(raw_path: Path, render_path: Path, width: int, height: int,
                 }
 
     pixels = width * height
+    if render_format == "png_rgba8" and raw_format != "rgba8":
+        claim_level = "quantized_export_only"
+    elif render_format == "exr" and raw_format == "rgba32f-le":
+        claim_level = "float_export_exact" if exact_mismatches == 0 else "float_export_tolerance"
+    else:
+        claim_level = "export_exact" if exact_mismatches == 0 else "export_tolerance"
+
     return {
         "schema_version": 1,
         "match": over_tolerance == 0,
         "dimensions": {"width": width, "height": height},
         "formats": {"raw": raw_format, "render": render_format},
+        "comparison_boundary": {
+            "expected": "host_raw_world",
+            "actual": "ae_export_artifact",
+            "claim_level": claim_level,
+            "raw_world_exact": False,
+        },
         "tolerance": tolerance,
         "raw_integer_max": raw_integer_max if raw_format == "rgba16le" else None,
         "hashes": {

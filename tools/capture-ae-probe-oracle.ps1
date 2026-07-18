@@ -30,6 +30,11 @@ $pluginRoot = if ($PluginRoot) {
 }
 $installRoot = Join-Path $pluginRoot "AEXCompatOracle-$($probeHash.Substring(0, 12))"
 $installedPath = Join-Path $installRoot ([System.IO.Path]::GetFileName($probePath))
+$comparisonValues = @($ExpectedRaw, $ComparisonReport) | Where-Object { $_ }
+if ($comparisonValues.Count -gt 0 -and
+    (-not $ExpectedRaw -or $Width -le 0 -or $Height -le 0 -or -not $ComparisonReport)) {
+    throw 'ExpectedRaw, positive Width/Height, and ComparisonReport must be supplied together.'
+}
 
 if ($PlanOnly) {
     if (-not $PlanPath) { throw 'PlanPath is required with PlanOnly.' }
@@ -106,6 +111,27 @@ try {
     }
     if ($CaptureScript) { $captureArgs.ScriptPath = $CaptureScript }
     & (Join-Path $PSScriptRoot 'capture-ae-reference.ps1') @captureArgs
+
+    if ($ExpectedRaw) {
+        $rawPath = (Resolve-Path -LiteralPath $ExpectedRaw).Path
+        $reportPath = [System.IO.Path]::GetFullPath($ComparisonReport)
+        if (Test-Path -LiteralPath $reportPath) {
+            throw "Refusing to overwrite comparison report: $reportPath"
+        }
+        & python (Join-Path $PSScriptRoot 'compare-pixel-oracles.py') `
+            --raw $rawPath --render ([System.IO.Path]::GetFullPath($OutputPng)) `
+            --width $Width --height $Height --raw-format $RawFormat `
+            --tolerance $Tolerance --out $reportPath
+        $comparisonExit = $LASTEXITCODE
+        if ($comparisonExit -gt 1) {
+            throw "Pixel oracle comparison failed with exit code $comparisonExit."
+        }
+        Get-Content -LiteralPath $reportPath -Raw | ConvertFrom-Json |
+            ConvertTo-Json -Depth 10
+        if ($comparisonExit -eq 1) {
+            throw 'AE oracle output exceeded the configured comparison tolerance.'
+        }
+    }
 } finally {
     if (Get-Process AfterFX,aerender,aerendercore -ErrorAction SilentlyContinue) {
         Get-Process AfterFX,aerender,aerendercore -ErrorAction SilentlyContinue |

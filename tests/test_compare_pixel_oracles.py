@@ -28,6 +28,8 @@ class ComparePixelOraclesTests(unittest.TestCase):
             Image.frombytes("RGBA", (2, 1), pixels).save(png)
             report = MODULE.compare(raw, png, 2, 1)
         self.assertTrue(report["match"])
+        self.assertEqual(report["comparison_boundary"]["claim_level"], "export_exact")
+        self.assertFalse(report["comparison_boundary"]["raw_world_exact"])
         self.assertEqual(report["exact_mismatched_channels"], 0)
         self.assertIsNone(report["first_mismatch"])
         self.assertEqual(report["hashes"]["raw_sha256"],
@@ -68,8 +70,13 @@ class ComparePixelOraclesTests(unittest.TestCase):
             Image.new("RGBA", (1, 1), (255, 128, 0, 255)).save(png)
             raw16 = root / "expected16.rgba"
             raw16.write_bytes(struct.pack("<4H", 32768, 16448, 0, 32768))
-            self.assertTrue(MODULE.compare(
-                raw16, png, 1, 1, "rgba16le", 1 / 32768, 32768)["match"])
+            report16 = MODULE.compare(
+                raw16, png, 1, 1, "rgba16le", 1 / 32768, 32768)
+            self.assertTrue(report16["match"])
+            self.assertEqual(
+                report16["comparison_boundary"]["claim_level"],
+                "quantized_export_only",
+            )
             raw32 = root / "expected32.rgba"
             raw32.write_bytes(struct.pack("<4f", 1.0, 128 / 255, 0.0, 1.0))
             self.assertTrue(MODULE.compare(
