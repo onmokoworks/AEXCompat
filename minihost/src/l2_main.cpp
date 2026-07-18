@@ -46,6 +46,7 @@
 #include <variant>
 #include <vector>
 
+#include "native_stdout_guard.hpp"
 #include "parameter_animation_transport.hpp"
 #include "render_pixel_transport.hpp"
 #include "strict_json.hpp"
@@ -68,6 +69,8 @@ using aexcompat::parameter_animation::ParameterTimeline;
 using aexcompat::parameter_animation::load_parameter_animation;
 using aexcompat::parameter_animation::rational_less;
 using aexcompat::suite_runtime::SuiteLeaseTracker;
+using aexcompat::worker_runtime::redirect_native_stdout;
+using aexcompat::worker_runtime::restore_native_stdout;
 #if defined(AEXCOMPAT_RENDER_WORKER) || defined(AEXCOMPAT_SMART_WORKER)
 using aexcompat::render_pixel_transport::argb_to_rgba8;
 using aexcompat::render_pixel_transport::argb_to_rgba_native;
@@ -921,33 +924,6 @@ uint32_t live_audio_handle_count() {
 
 bool audio_handle_lifetimes_balanced() {
   return live_audio_handle_count() == 0 && g_audio_checkout_calls == g_audio_checkin_calls;
-}
-int g_saved_stdout_fd{-1};
-int g_native_stdout_sink_fd{-1};
-
-bool redirect_native_stdout() {
-  std::cout.flush();
-  std::fflush(stdout);
-  g_saved_stdout_fd = _dup(_fileno(stdout));
-  g_native_stdout_sink_fd = _open("NUL", _O_WRONLY);
-  if (g_saved_stdout_fd < 0 || g_native_stdout_sink_fd < 0 ||
-      _dup2(g_native_stdout_sink_fd, _fileno(stdout)) != 0) {
-    if (g_saved_stdout_fd >= 0) _close(g_saved_stdout_fd);
-    if (g_native_stdout_sink_fd >= 0) _close(g_native_stdout_sink_fd);
-    g_saved_stdout_fd = g_native_stdout_sink_fd = -1;
-    return false;
-  }
-  return true;
-}
-
-void restore_native_stdout() {
-  if (g_saved_stdout_fd < 0) return;
-  std::cout.flush();
-  std::fflush(stdout);
-  _dup2(g_saved_stdout_fd, _fileno(stdout));
-  _close(g_saved_stdout_fd);
-  if (g_native_stdout_sink_fd >= 0) _close(g_native_stdout_sink_fd);
-  g_saved_stdout_fd = g_native_stdout_sink_fd = -1;
 }
 bool g_update_params_ui_advertised = false;
 bool g_query_dynamic_flags_advertised = false;

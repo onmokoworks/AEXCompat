@@ -619,10 +619,14 @@ class MinihostL2SourceTests(unittest.TestCase):
 
     def test_native_stdout_cannot_corrupt_the_worker_json_protocol(self):
         text = SOURCE.read_text(encoding="utf-8")
+        guard = (ROOT / "minihost" / "src" / "native_stdout_guard.cpp").read_text(
+            encoding="utf-8"
+        )
         for marker in ('_open("NUL", _O_WRONLY)',
                        "_dup2(g_native_stdout_sink_fd, _fileno(stdout))",
-                       "if (!redirect_native_stdout()) { FreeLibrary(module); return 13; }",
-                       "void restore_native_stdout()",
+                       "void restore_native_stdout()"):
+            self.assertIn(marker, guard)
+        for marker in ("if (!redirect_native_stdout()) { FreeLibrary(module); return 13; }",
                        "restore_native_stdout();"):
             self.assertIn(marker, text)
 
