@@ -1,6 +1,7 @@
 [CmdletBinding()]
 param(
-    [string]$SdkRoot = $env:AFTER_EFFECTS_SDK_ROOT
+    [string]$SdkRoot = $env:AFTER_EFFECTS_SDK_ROOT,
+    [string]$VisualStudioRoot
 )
 
 $ErrorActionPreference = 'Stop'
@@ -14,7 +15,7 @@ $intermediate = Join-Path $target 'obj'
 $pipRc = Join-Path $target 'Grabba_PiPL.rc'
 $artifact = Join-Path $target 'Grabba.aex'
 $manifest = Join-Path $target 'build-result.json'
-$vsRoot = 'C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools'
+$vsRoot = & "$PSScriptRoot\resolve-msvc-tools.ps1" $VisualStudioRoot -RequireV143Toolset -RequireMSBuild
 $vcvars = Join-Path $vsRoot 'VC\Auxiliary\Build\vcvars64.bat'
 $msbuild = Join-Path $vsRoot 'MSBuild\Current\Bin\MSBuild.exe'
 $pipTool = Join-Path $SdkRoot 'Examples\Resources\PiPLTool.exe'
