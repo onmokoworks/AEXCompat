@@ -75,7 +75,13 @@ class AepxStaticProbeTests(unittest.TestCase):
         resolved = aepx_static_probe.validate_aepx_input_path(source)
         self.assertEqual(resolved, source.resolve())
 
-        with tempfile.TemporaryDirectory(prefix="aexcompat-outside-") as directory:
+        outside_root = next(
+            root for root in (Path(tempfile.gettempdir()), Path.home())
+            if not root.resolve().is_relative_to(LAB_ROOT.parent.resolve())
+        )
+        with tempfile.TemporaryDirectory(
+            prefix="aexcompat-outside-", dir=outside_root
+        ) as directory:
             outside = Path(directory) / f"{time.time_ns()}-outside.aepx"
             outside.write_text("<x/>", encoding="utf-8")
             with self.assertRaises(ValueError):

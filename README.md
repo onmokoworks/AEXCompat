@@ -101,6 +101,8 @@ python -m pytest -q
 
 `pytest` がPythonテストの正規ランナーです。`unittest discover` ではbare function形式のテストを収集できないため、完全な検証には使用しません。一部のnative fixture、GPU、After Effects oracleテストには、ローカルSDK、対応GPU runtime、またはAE本体が必要です。ビルド生成物やローカル承認receiptを必要とするテストは、それらを生成する明示的なgateまたはbuild手順と組み合わせて実行します。
 
+ローカル成果物を生成した開発環境で、それらを認証・実行するテストも含める場合は `python -m pytest -q --run-local-artifact-tests` を使用します。通常のclean cloneでは該当テストを理由付きでskipし、ソースだけで再現可能なテストをすべて実行します。
+
 ### アーキテクチャ
 
 ```text
@@ -245,6 +247,8 @@ python -m pytest -q
 ```
 
 `pytest` is the canonical Python test runner. `unittest discover` does not collect the repository's bare-function tests and must not be used as the complete verification command. Some native-fixture, GPU, and AE-oracle tests require a local SDK, a matching GPU runtime, or After Effects. Tests that require generated binaries or local approval receipts must be paired with their explicit build or gate step.
+
+After generating the local artifacts, run `python -m pytest -q --run-local-artifact-tests` to include tests that authenticate or execute them. A normal clean clone skips those tests with an explicit reason and runs every source-reproducible test.
 
 ### DirectX SDK fixture
 
