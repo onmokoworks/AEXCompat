@@ -1384,6 +1384,11 @@ pub fn render_image(
     {
         return Err(invalid("descriptor and approved artifact digests differ"));
     }
+    let payload = encode_worker_payload(
+        &manifest.profile,
+        &apply_defaults(&manifest.profile, &ValidatedAssignments::new()),
+    )
+    .map_err(invalid)?;
     render_with_artifact(
         repository,
         plugin_id,
@@ -1392,7 +1397,7 @@ pub fn render_image(
         approved.timeout_ms,
         input_path,
         output_path,
-        None,
+        Some(payload),
         None,
         None,
         RenderTiming::default(),
@@ -4167,20 +4172,10 @@ fn render_with_artifact(
         timed_secondaries.push((layer.slot, layer.time, layer_width, layer_height, rgba));
     }
 
-    let profile = crate::fixture_profiles::find("scattermap")
-        .ok_or_else(|| invalid("scattermap profile missing"))?;
-    let worker_spec = if smart {
-        profile.smart_worker
-    } else {
-        profile.classic_worker
-    }
-    .ok_or_else(|| invalid("requested image worker missing"))?;
-    let manifest = load_manifest(repository, "scattermap", profile.descriptor_manifest)?;
-    let effective = apply_defaults(&manifest.profile, &ValidatedAssignments::new());
-    let payload = match payload_override {
-        Some(payload) => payload,
-        None => encode_worker_payload(&manifest.profile, &effective).map_err(invalid)?,
-    };
+    // Experimental rendering always receives the generic interactive payload.
+    // Fixture manifests are resolved by fixture-specific public entrypoints,
+    // never by this AEX-agnostic transport path.
+    let payload = payload_override.unwrap_or_else(|| "v2|".to_owned());
 
     let root = repository.join("target/image-transport");
     fs::create_dir_all(&root)?;
@@ -4257,16 +4252,6 @@ fn render_with_artifact(
     } else {
         WorkerKind::Render
     };
-    let trusted_worker_path = if smart {
-        "target/minihost-build/aex_smart_worker.exe"
-    } else {
-        "target/minihost-build/aex_render_worker.exe"
-    };
-    if worker_spec.executable != trusted_worker_path {
-        return Err(invalid(
-            "image worker profile does not match fixed trust policy",
-        ));
-    }
     let plugin = ApprovedImageArtifact {
         path: plugin_path.to_path_buf(),
         expected_sha256: decode_sha256_hex(plugin_sha256)?,
@@ -4766,6 +4751,20 @@ fn render_with_artifact(
     let report_object = report
         .as_object_mut()
         .expect("interactive render report is an object");
+    for (name, source) in [
+        ("row_bytes", "rowbytes"),
+        ("pixel_format", "pixel_format"),
+        ("premultiplication", "premultiplication"),
+        ("result_rect", "result_rect"),
+        ("max_result_rect", "max_result_rect"),
+        ("input_world", "input_world"),
+        ("output_world", "output_world"),
+    ] {
+        report_object.insert(
+            name.into(),
+            worker_report.get(source).cloned().unwrap_or(Value::Null),
+        );
+    }
     if deep_png_output {
         report_object.insert("output_transport".into(), json!("native_raw+rgba16_png"));
         report_object.insert(
