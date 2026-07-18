@@ -161,3 +161,14 @@ def test_commented_review_does_not_clear_changes_requested() -> None:
         {"user": {"login": "naari3"}, "state": "COMMENTED", "submitted_at": "2026-07-18T19:29:00Z"},
     ]
     assert _call("owner_review_gate", payload) == "BLOCK"
+
+
+def test_inline_error_message_is_not_a_finding() -> None:
+    # The "To use Codex here" onboarding/error can arrive as an inline comment;
+    # it must be classified as an error, not a finding.
+    payload = [{"user": {"login": "chatgpt-codex-connector[bot]"},
+                "path": "x.sh", "line": 31, "id": 1,
+                "body": "To use Codex here, create a Codex account and connect to github."}]
+    assert _call("codex_findings", payload) == ""
+    assert _call("codex_error", payload) == "CODEX-ERROR"
+    assert _call("codex_finding_max_ts", payload) == ""

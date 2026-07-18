@@ -9,6 +9,9 @@ set -uo pipefail
 # like "chatgpt-codex-connector-fake", so this is an allowlist, not startswith.
 CODEX_LOGINS='["chatgpt-codex-connector","chatgpt-codex-connector[bot]"]'
 OWNER_LOGINS='["onmokoworks","naari3"]'
+# Bodies Codex emits when a review did not actually run (rate-limit, auth,
+# transient error). Not a finding and not clean.
+CODEX_ERROR_RE='Something went wrong|Unknown error|To use Codex here'
 
 # CLEAN only when a Codex issue-comment says "Didn't find any major issues" AND
 # its "Reviewed commit" SHA is a prefix of the given (full) head SHA. Codex
@@ -31,19 +34,24 @@ codex_clean_for_head() {
 
 # A Codex error/onboarding message means the review did NOT run. It is neither
 # clean nor a finding; the caller must treat it as an error (retry or stop),
-# never proceed to merge.
+# never proceed to merge. Such a message can arrive as an issue comment OR an
+# inline review comment, so run this over both.
 codex_error() {
-  jq -r --argjson codex "$CODEX_LOGINS" '
+  jq -r --arg errre "$CODEX_ERROR_RE" --argjson codex "$CODEX_LOGINS" '
     [ .[]
       | select([.user.login] | inside($codex))
-      | select(.body | test("Something went wrong|Unknown error|To use Codex here")) ]
+      | select((.body // "") | test($errre)) ]
     | if length > 0 then "CODEX-ERROR" else "" end'
 }
 
-# Codex inline findings (input: a pull review-comments array).
+
+# Codex inline findings (input: a pull review-comments array). Error/onboarding
+# messages can also arrive as inline comments; they are NOT findings (the review
+# did not run) and are excluded here — codex_*_error picks them up instead.
 codex_findings() {
-  jq -r --argjson codex "$CODEX_LOGINS" '
+  jq -r --arg errre "$CODEX_ERROR_RE" --argjson codex "$CODEX_LOGINS" '
     .[] | select([.user.login] | inside($codex))
+    | select((.body // "") | test($errre) | not)
     | "FINDING id=\(.id) \(.path):\(.line // .original_line): \((.body | split("\n")[0]))"'
 }
 
@@ -89,20 +97,24 @@ codex_clean_ts_for_head() {
     | if length > 0 then max else "" end'
 }
 
-# Timestamp of the newest Codex inline finding, or "" (input: review-comments).
+# Timestamp of the newest Codex inline FINDING, or "" (input: review-comments).
+# Excludes error/onboarding messages, consistent with codex_findings.
 codex_finding_max_ts() {
-  jq -r --argjson codex "$CODEX_LOGINS" '
-    [ .[] | select([.user.login] | inside($codex)) | .created_at ]
+  jq -r --arg errre "$CODEX_ERROR_RE" --argjson codex "$CODEX_LOGINS" '
+    [ .[]
+      | select([.user.login] | inside($codex))
+      | select((.body // "") | test($errre) | not)
+      | .created_at ]
     | if length > 0 then max else "" end'
 }
 
-# Timestamp of the newest Codex error/onboarding comment, or "" (input:
-# issue-comments array).
+# Timestamp of the newest Codex error/onboarding comment, or "". Works for
+# either issue-comments or inline review-comments (both carry .created_at).
 codex_error_max_ts() {
-  jq -r --argjson codex "$CODEX_LOGINS" '
+  jq -r --arg errre "$CODEX_ERROR_RE" --argjson codex "$CODEX_LOGINS" '
     [ .[]
       | select([.user.login] | inside($codex))
-      | select(.body | test("Something went wrong|Unknown error|To use Codex here"))
+      | select((.body // "") | test($errre))
       | .created_at ]
     | if length > 0 then max else "" end'
 }

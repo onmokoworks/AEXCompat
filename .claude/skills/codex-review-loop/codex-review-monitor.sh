@@ -65,7 +65,13 @@ while true; do
   # Codex signals: the LATEST verdict wins. Compare timestamps so a newer
   # finding/error supersedes an older head-bound clean (and vice versa).
   clean_ts=$(codex_clean_ts_for_head "$head" <<<"$issue_comments")
-  err_ts=$(codex_error_max_ts <<<"$new_issue_comments")
+  # A Codex error can arrive as an issue comment OR an inline review comment;
+  # take the newest across both so it is never misread as a finding/clean.
+  err_issue_ts=$(codex_error_max_ts <<<"$new_issue_comments")
+  err_inline_ts=$(codex_error_max_ts <<<"$new_pr_comments")
+  err_ts=$err_issue_ts
+  [ -z "$err_ts" ] || { [ -n "$err_inline_ts" ] && [[ "$err_inline_ts" > "$err_ts" ]] && err_ts=$err_inline_ts; }
+  [ -n "$err_ts" ] || err_ts=$err_inline_ts
   find_ts=$(codex_finding_max_ts <<<"$new_pr_comments")
 
   # 2. A Codex error newer than any accepted clean => review did not run;
