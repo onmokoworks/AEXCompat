@@ -68,6 +68,8 @@ macOS、Apple Silicon、Windows ARM64は現時点で対象外です。After Effe
 - CMake
 - ローカルのAfter Effects SDK（native workerやprobeをbuildする場合）
 
+コンポーネント別の詳細な要件（SDKの世代、Visual Studioのバージョンとtoolset、CMakeの条件など）は[Build Requirements](docs/BUILD_REQUIREMENTS.md)を参照してください。
+
 SDKを使うテスト・ビルドの前に、SDKルートをユーザー環境変数へ設定し、PowerShellを開き直してください。
 
 ```powershell
@@ -228,7 +230,7 @@ macOS, Apple Silicon, and Windows ARM64 are not currently supported. After Effec
 
 ### Quick Start
 
-Requirements: Windows x64, Rust/Cargo, Visual Studio 2022 C++ Build Tools, CMake, and a local After Effects SDK when building native workers or probes.
+Requirements: Windows x64, Rust/Cargo, Visual Studio 2022 C++ Build Tools, CMake, and a local After Effects SDK when building native workers or probes. See [Build Requirements](docs/BUILD_REQUIREMENTS.md) for per-component details, SDK generation, and toolset requirements.
 
 Before SDK-backed tests or builds, set the SDK root as a user environment variable and reopen PowerShell:
 
