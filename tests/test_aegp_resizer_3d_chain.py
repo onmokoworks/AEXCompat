@@ -8,7 +8,10 @@ import pytest
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SOURCE = ROOT / "minihost" / "src" / "l2_main.cpp"
+SOURCES = (
+    ROOT / "minihost" / "src" / "l2_main.cpp",
+    ROOT / "minihost" / "src" / "worker_aegp_scene_impl.inc",
+)
 BUILD = ROOT / "target" / "minihost-build"
 SDK_ROOT = os.environ.get("AFTER_EFFECTS_SDK_ROOT")
 HEADERS = Path(SDK_ROOT) / "Examples" / "Headers" if SDK_ROOT else None
@@ -70,7 +73,7 @@ int main() { return 0; }
 
 
 def test_host_chain_is_typed_bounded_and_atomic() -> None:
-    source = SOURCE.read_text(encoding="utf-8")
+    source = "\n".join(path.read_text(encoding="utf-8") for path in SOURCES)
     for marker in (
         "g_aegp_layer_suite5[38] = reinterpret_cast<void*>(&aegp_get_layer_to_world_xform)",
         "g_aegp_layer_suite8[38] = reinterpret_cast<void*>(&aegp_get_layer_to_world_xform)",

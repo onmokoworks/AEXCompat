@@ -4,7 +4,10 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SOURCE = ROOT / "minihost" / "src" / "l2_main.cpp"
+SOURCES = (
+    ROOT / "minihost" / "src" / "l2_main.cpp",
+    ROOT / "minihost" / "src" / "worker_pf_suites.hpp",
+)
 SCRIPT = ROOT / "tools" / "build-pf-effect-sequence-data-abi-probe.ps1"
 REPORT = ROOT / "target" / "pf-effect-sequence-data-abi-probe-build" / "pf-effect-sequence-data-abi.json"
 
@@ -22,7 +25,7 @@ def test_sdk_abi_probe_compiles_and_confirms_frozen_single_slot_suite():
 
 
 def test_minihost_uses_bounded_borrowed_unflattened_registry():
-    source = SOURCE.read_text(encoding="utf-8")
+    source = "\n".join(path.read_text(encoding="utf-8") for path in SOURCES)
     assert '"PF Effect Sequence Data Suite"' in source
     assert "kMaxLiveEffectSequences = 64" in source
     assert "using PfConstHandle = const void* const*;" in source

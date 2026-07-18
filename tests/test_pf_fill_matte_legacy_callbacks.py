@@ -6,11 +6,16 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SOURCE = ROOT / "minihost" / "src" / "l2_main.cpp"
+SOURCES = (
+    ROOT / "minihost" / "src" / "l2_main.cpp",
+    ROOT / "minihost" / "src" / "worker_pf_suites.cpp",
+    ROOT / "minihost" / "src" / "worker_pf_suites.hpp",
+    ROOT / "minihost" / "src" / "worker_pf_suites_internal.hpp",
+)
 
 
 def source_text():
-    return SOURCE.read_text(encoding="utf-8")
+    return "\n".join(path.read_text(encoding="utf-8") for path in SOURCES)
 
 
 def worker(name):

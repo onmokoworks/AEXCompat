@@ -4,7 +4,10 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 RESULT = ROOT / "analysis" / "SDK_TRANSFORMER_MULTI_INPUT_RESULT_2026-07-15.json"
-SOURCE = ROOT / "minihost" / "src" / "l2_main.cpp"
+SOURCES = (
+    ROOT / "minihost" / "src" / "l2_main.cpp",
+    ROOT / "minihost" / "src" / "worker_pf_suites.cpp",
+)
 
 
 def test_transformer_observes_multi_input_difference_render():
@@ -32,7 +35,7 @@ def test_transformer_observes_multi_input_difference_render():
 
 
 def test_transformer_callbacks_match_the_frozen_effect_abi():
-    source = SOURCE.read_text(encoding="utf-8")
+    source = "\n".join(path.read_text(encoding="utf-8") for path in SOURCES)
 
     assert "write(input, 24, &abort_render);" in source
     assert "write(input, 32, &report_progress);" in source

@@ -4,7 +4,10 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 RESULT = ROOT / "analysis" / "SDK_SHIFTER_TRANSFORM_SAMPLING_RESULT_2026-07-15.json"
-SOURCE = ROOT / "minihost" / "src" / "l2_main.cpp"
+SOURCES = (
+    ROOT / "minihost" / "src" / "l2_main.cpp",
+    ROOT / "minihost" / "src" / "worker_pf_suites.cpp",
+)
 
 
 def test_shifter_covers_classic_transform_and_smart_sampling_at_all_depths():
@@ -27,7 +30,7 @@ def test_shifter_covers_classic_transform_and_smart_sampling_at_all_depths():
 
 
 def test_shifter_host_callbacks_are_bounded_and_depth_aware():
-    source = SOURCE.read_text(encoding="utf-8")
+    source = "\n".join(path.read_text(encoding="utf-8") for path in SOURCES)
 
     for marker in (
         "kUtilsTransformWorld",

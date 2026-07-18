@@ -7,7 +7,17 @@ import pytest
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SOURCE = ROOT / "minihost" / "src" / "l2_main.cpp"
+SOURCES = (
+    ROOT / "minihost" / "src" / "l2_main.cpp",
+    ROOT / "minihost" / "src" / "worker_aegp_scene_impl.inc",
+    ROOT / "minihost" / "src" / "worker_pf_suites.cpp",
+    ROOT / "minihost" / "src" / "worker_pf_suites.hpp",
+)
+SUITE_ABI = ROOT / "minihost" / "src" / "worker_suite_abi.hpp"
+
+
+def source_text() -> str:
+    return "\n".join(path.read_text(encoding="utf-8") for path in SOURCES)
 SDK_ROOT = os.environ.get("AFTER_EFFECTS_SDK_ROOT")
 SDK_HEADERS = Path(SDK_ROOT) / "Examples" / "Headers" if SDK_ROOT else None
 
@@ -67,7 +77,7 @@ int main() { return 0; }
 
 
 def test_minihost_publishes_typed_fail_closed_legacy_effect_suites() -> None:
-    text = SOURCE.read_text(encoding="utf-8")
+    text = source_text()
     for marker in (
         "std::array<void*, 41> g_aegp_comp_suite10",
         "g_aegp_comp_suite10[4] = reinterpret_cast<void*>(&aegp_get_comp_bg_color)",
@@ -85,14 +95,15 @@ def test_minihost_publishes_typed_fail_closed_legacy_effect_suites() -> None:
     assert "comp != &g_aegp_comp || !color" in bg
     assert bg.index("return 4") < bg.index("*color = headless_color")
 
-    convert = text[text.index("int32_t __cdecl convert_effect_to_comp_time(", text.index("struct AegpTime {")) :]
+    assert "struct AegpTime {" in SUITE_ABI.read_text(encoding="utf-8")
+    convert = text[text.rindex("int32_t __cdecl convert_effect_to_comp_time(") :]
     convert = convert[: convert.index("\n}")]
     assert "effect != &g_effect || time_scale == 0 || !comp_time" in convert
     assert convert.index("return 4") < convert.index("*comp_time = converted")
 
 
 def test_helper_v1_has_independent_lease_and_headless_none_policy() -> None:
-    text = SOURCE.read_text(encoding="utf-8")
+    text = source_text()
     helper = text[text.index("int32_t __cdecl pf_get_current_tool") :]
     helper = helper[: helper.index("\n}")]
     assert "if (!tool) return kPfBadCallbackParam;" in helper

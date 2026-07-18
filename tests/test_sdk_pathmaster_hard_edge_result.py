@@ -4,7 +4,11 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 RESULT = ROOT / "analysis" / "SDK_PATHMASTER_HARD_EDGE_RESULT_2026-07-15.json"
-WORKER = ROOT / "minihost" / "src" / "l2_main.cpp"
+WORKER_SOURCES = (
+    ROOT / "minihost" / "src" / "l2_main.cpp",
+    ROOT / "minihost" / "src" / "worker_pf_suites.cpp",
+    ROOT / "minihost" / "src" / "worker_pf_suites.hpp",
+)
 BROKER = ROOT / "broker" / "crates" / "broker" / "src" / "image_render.rs"
 
 
@@ -43,7 +47,7 @@ def test_pf_path_checkout_mask_and_lifecycle_ownership_are_balanced():
 
 
 def test_worker_and_broker_keep_the_path_boundary_explicit_and_observable():
-    worker = WORKER.read_text(encoding="utf-8")
+    worker = "\n".join(path.read_text(encoding="utf-8") for path in WORKER_SOURCES)
     broker = BROKER.read_text(encoding="utf-8")
 
     for marker in (

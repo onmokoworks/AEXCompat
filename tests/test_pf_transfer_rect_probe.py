@@ -24,7 +24,7 @@ def test_probe_contains_exact_partial_alpha_vectors():
     assert "PF_MF_Alpha_STRAIGHT" in source
 
 def test_host_accepts_all_public_sdk_transfer_modes_and_rejects_reserved_values():
-    source = (ROOT / "minihost/src/l2_main.cpp").read_text(encoding="utf-8")
+    source = (ROOT / "minihost/src/worker_pf_suites.cpp").read_text(encoding="utf-8")
     assert "transfer_mode < 0 || transfer_mode > 38" in source
     assert "random_seed" in source
     assert "hash & 0x00ffffffu" in source

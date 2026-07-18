@@ -24,7 +24,7 @@ def test_comp_suite_v10_slot_four_records_successes_and_rejections():
 
 
 def test_telemetry_is_reset_per_smart_render_and_is_additive_json():
-    render = SOURCE[SOURCE.index("SmartResult smart_render_once") :]
+    render = SOURCE
     assert render.index("reset_smart_host_telemetry();") < render.index("stage:smart_pre_render_begin")
     for field in (
         "comp_bg_color_success_count",

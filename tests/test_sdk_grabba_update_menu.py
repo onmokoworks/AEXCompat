@@ -4,13 +4,20 @@ import subprocess
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-SOURCE = ROOT / "minihost" / "src" / "l2_main.cpp"
+SOURCES = (
+    ROOT / "minihost" / "src" / "l2_main.cpp",
+    ROOT / "minihost" / "src" / "worker_aegp_scene_impl.inc",
+)
+
+
+def source_text() -> str:
+    return "\n".join(path.read_text(encoding="utf-8") for path in SOURCES)
 HARNESS = ROOT / "broker" / "target" / "debug" / "aexcompat-harness.exe"
 GRABBA = ROOT / "target" / "sdk-fixtures" / "grabba" / "Grabba.aex"
 
 
 def test_legacy_item_suite6_layout_matches_sdk_slots():
-    source = SOURCE.read_text(encoding="utf-8")
+    source = source_text()
 
     assert "struct AegpLegacyItemSuite6" in source
     assert "offsetof(AegpLegacyItemSuite6, get_active_item) == 16" in source
@@ -23,7 +30,7 @@ def test_legacy_item_suite6_layout_matches_sdk_slots():
 
 
 def test_render_suite2_has_dedicated_sdk_layout_for_grabba():
-    source = SOURCE.read_text(encoding="utf-8")
+    source = source_text()
     assert "struct AegpRenderSuite2" in source
     assert "sizeof(AegpRenderSuite2) == 10 * sizeof(void*)" in source
     assert "offsetof(AegpRenderSuite2, render_frame) == 0 * sizeof(void*)" in source
@@ -62,7 +69,7 @@ def test_official_sdk_grabba_update_menu_dispatches_successfully():
 
 
 def test_legacy_item_suite6_is_available_to_grabba_command_and_idle_roundtrips():
-    source = SOURCE.read_text(encoding="utf-8")
+    source = source_text()
     for mode in (
         "g_aegp_update_menu_mode",
         "g_aegp_command_roundtrip_mode",

@@ -11,13 +11,13 @@ def test_blend_runtime_is_alias_safe():
     assert '"world_transform_blend":"passed"' in result.stdout
 
 def test_blend_uses_registered_formats_and_snapshots_both_sources():
-    source = (ROOT / "minihost/src/l2_main.cpp").read_text(encoding="utf-8")
+    source = (ROOT / "minihost/src/worker_pf_suites.cpp").read_text(encoding="utf-8")
     assert "first_info.pixel_format != second_info.pixel_format" in source
     assert "first_copy.resize" in source and "second_copy.resize" in source
     assert "--self-test-world-transform-blend" in source
 
 def test_transfer_rect_implements_sdk_blend_mode_families():
-    source = (ROOT / "minihost/src/l2_main.cpp").read_text(encoding="utf-8")
+    source = (ROOT / "minihost/src/worker_pf_suites.cpp").read_text(encoding="utf-8")
     for marker in [
         "case 4: case 29:", "case 5:", "case 6:", "case 7:", "case 8:",
         "case 9:", "case 10:", "case 11:", "case 12: case 26:",

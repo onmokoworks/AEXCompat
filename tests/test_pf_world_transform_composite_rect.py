@@ -5,7 +5,15 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SOURCE = ROOT / "minihost" / "src" / "l2_main.cpp"
+SOURCES = (
+    ROOT / "minihost" / "src" / "l2_main.cpp",
+    ROOT / "minihost" / "src" / "worker_pf_suites.hpp",
+    ROOT / "minihost" / "src" / "worker_pf_suites.cpp",
+)
+
+
+def source_text() -> str:
+    return "\n".join(path.read_text(encoding="utf-8") for path in SOURCES)
 
 
 def _worker() -> Path | None:
@@ -19,7 +27,7 @@ def _worker() -> Path | None:
 
 
 def test_world_transform_suite_has_typed_frozen_abi_and_wired_composite_rect():
-    text = SOURCE.read_text(encoding="utf-8")
+    text = source_text()
     assert "decltype(&composite_rect8) composite_rect;" in text
     assert "static_assert(sizeof(WorldTransformSuite1) == 7 * sizeof(void*))" in text
     assert "offsetof(WorldTransformSuite1, transform_world) == 6 * sizeof(void*)" in text
@@ -28,7 +36,7 @@ def test_world_transform_suite_has_typed_frozen_abi_and_wired_composite_rect():
 
 
 def test_composite_rect_source_contains_bounded_cleanroom_guards():
-    text = SOURCE.read_text(encoding="utf-8")
+    text = source_text()
     for marker in (
         "constexpr int32_t kPfErrBadCallbackParam = 516",
         "source_opacity < 0 || source_opacity > 255",

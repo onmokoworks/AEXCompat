@@ -2,11 +2,14 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SOURCE = ROOT / "minihost" / "src" / "l2_main.cpp"
+SOURCES = (
+    ROOT / "minihost" / "src" / "l2_main.cpp",
+    ROOT / "minihost" / "src" / "worker_pf_suites.hpp",
+)
 
 
 def source() -> str:
-    return SOURCE.read_text(encoding="utf-8")
+    return "\n".join(path.read_text(encoding="utf-8") for path in SOURCES)
 
 
 def test_helper_suite2_uses_the_sdk_name_version_and_three_slot_abi() -> None:

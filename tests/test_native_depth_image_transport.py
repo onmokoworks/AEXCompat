@@ -2,7 +2,13 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SOURCE = (ROOT / "minihost/src/l2_main.cpp").read_text(encoding="utf-8")
+SOURCE = "\n".join(
+    path.read_text(encoding="utf-8")
+    for path in (
+        ROOT / "minihost/src/l2_main.cpp",
+        ROOT / "minihost/src/render_subsystem.cpp",
+    )
+)
 PIXEL_TRANSPORT = (ROOT / "minihost/src/render_pixel_transport.cpp").read_text(
     encoding="utf-8"
 )

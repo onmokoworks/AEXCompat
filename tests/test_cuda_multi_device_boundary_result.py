@@ -24,7 +24,7 @@ def test_cuda_multi_device_evidence_preserves_runtime_and_failure_isolation():
 
 
 def test_cuda_device_enumeration_is_bounded_and_worlds_keep_their_ordinal():
-    source = (ROOT / "minihost" / "src" / "l2_main.cpp").read_text()
+    source = (ROOT / "minihost" / "src" / "gpu_memory_world_transport.cpp").read_text()
     backend = (ROOT / "minihost" / "src" / "gpu_cuda_backend.cpp").read_text()
     for marker in (
         'load_function(state->module, state->device_get_count, "cuDeviceGetCount")',

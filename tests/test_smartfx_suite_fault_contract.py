@@ -27,7 +27,13 @@ class SmartFxSuiteFaultContractTests(unittest.TestCase):
         self.assertTrue(schema["properties"]["broker_survived"]["const"])
 
     def test_fault_modes_are_fixed_and_profile_gated(self):
-        worker = (ROOT / "minihost/src/l2_main.cpp").read_text(encoding="utf-8")
+        worker = "\n".join(
+            path.read_text(encoding="utf-8")
+            for path in (
+                ROOT / "minihost/src/l2_main.cpp",
+                ROOT / "minihost/src/l2_cli_dispatch.cpp",
+            )
+        )
         route = (ROOT / "broker/crates/broker/src/render_request.rs").read_text(
             encoding="utf-8"
         )

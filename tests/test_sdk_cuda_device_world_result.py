@@ -25,7 +25,7 @@ def test_cuda_device_world_matches_cpu_public_pixels_and_balances_ownership():
 
 
 def test_cuda_driver_boundary_is_dynamic_bounded_and_channel_explicit():
-    source = (ROOT / "minihost" / "src" / "l2_main.cpp").read_text()
+    source = (ROOT / "minihost" / "src" / "gpu_memory_world_transport.cpp").read_text()
     backend = (ROOT / "minihost" / "src" / "gpu_cuda_backend.cpp").read_text()
     for marker in (
         'LoadLibraryExW(L"nvcuda.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32)',

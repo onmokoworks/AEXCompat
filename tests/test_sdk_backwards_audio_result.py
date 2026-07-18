@@ -4,7 +4,10 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 RESULT = ROOT / "analysis" / "SDK_BACKWARDS_AUDIO_RESULT_2026-07-15.json"
-WORKER = ROOT / "minihost" / "src" / "l2_main.cpp"
+WORKER_SOURCES = (
+    ROOT / "minihost" / "src" / "l2_main.cpp",
+    ROOT / "minihost" / "src" / "l2_cli_dispatch.cpp",
+)
 BROKER = ROOT / "broker" / "crates" / "broker" / "src" / "image_render.rs"
 HARNESS = ROOT / "broker" / "crates" / "harness" / "src" / "main.rs"
 PROBE = ROOT / "instruments" / "abi-layout-probe" / "main.cpp"
@@ -47,7 +50,7 @@ def test_audio_selector_and_checkout_lifetimes_are_balanced():
 
 def test_audio_abi_is_instrumented_and_runtime_boundaries_are_explicit():
     probe = PROBE.read_text(encoding="utf-8")
-    worker = WORKER.read_text(encoding="utf-8")
+    worker = "\n".join(path.read_text(encoding="utf-8") for path in WORKER_SOURCES)
     broker = BROKER.read_text(encoding="utf-8")
     harness = HARNESS.read_text(encoding="utf-8")
 
@@ -60,7 +63,7 @@ def test_audio_abi_is_instrumented_and_runtime_boundaries_are_explicit():
     ):
         assert marker in probe
     for marker in (
-        'render_command == L"--render-audio"',
+        'mode.audio_mode = effective_argc == 9 && equals(command, L"--render-audio")',
         "kAudioGuardSamples",
         "checkout_layer_audio",
         "audio_lifetimes_balanced",
@@ -82,7 +85,7 @@ def test_audio_abi_is_instrumented_and_runtime_boundaries_are_explicit():
 def test_audio_only_effect_is_never_dispatched_through_an_image_selector():
     result = json.loads(RESULT.read_text(encoding="utf-8"))
     gate = result["image_media_negotiation"]
-    worker = WORKER.read_text(encoding="utf-8")
+    worker = "\n".join(path.read_text(encoding="utf-8") for path in WORKER_SOURCES)
     harness = HARNESS.read_text(encoding="utf-8")
 
     assert gate["advertisement_flag"] == "PF_OutFlag_AUDIO_EFFECT_ONLY"
