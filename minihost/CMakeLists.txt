@@ -21,7 +21,7 @@ set(AEXCOMPAT_L2_WORKER_SOURCES
     src/gpu_memory_world_transport.cpp
     src/gpu_opencl_backend.cpp
     src/l2_cli_dispatch.cpp
-    src/l2_main.cpp
+    src/worker_aegp_scene_impl.cpp
     src/native_stdout_guard.cpp
     src/parameter_animation_transport.cpp
     src/pf_cache_on_load_suite.cpp

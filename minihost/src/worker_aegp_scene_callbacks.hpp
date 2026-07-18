@@ -1,7 +1,6 @@
 // Copyright (c) AEXCompat contributors.
-// Private implementation fragment for the AEGP scene family. Included by
-// l2_main.cpp after the worker ABI/state prelude so callback addresses retain
-// their exact clean-room __cdecl ABI and bounded worker-state ownership.
+// Private callback/table implementation for the AEGP scene family. It is
+// compiled by worker_aegp_scene_impl.cpp after the worker ABI/state prelude.
 
 #include "worker_aegp_scene.hpp"
 
