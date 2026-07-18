@@ -83,7 +83,7 @@ while true; do
   review=$(gh api "repos/{owner}/{repo}/pulls/{PR}/reviews" --jq ".[] | select(.submitted_at > \"$since\") | select(.user.login | startswith(\"chatgpt-codex-connector\")) | \"REVIEW \(.state) at \(.submitted_at)\"" 2>/dev/null || true)
   if [ -n "$review" ]; then
     echo "$review"
-    gh api "repos/{owner}/{repo}/pulls/{PR}/comments" --jq ".[] | select(.created_at > \"$since\") | \"FINDING \(.path):\(.line // .original_line) \(.body | split(\"\n\")[0])\"" 2>/dev/null || true
+    gh api "repos/{owner}/{repo}/pulls/{PR}/comments" --jq ".[] | select(.created_at > \"$since\") | select(.user.login | startswith(\"chatgpt-codex-connector\")) | \"FINDING id=\(.id) \(.path):\(.line // .original_line) \(.body | split(\"\n\")[0])\"" 2>/dev/null || true
     break
   fi
 done
