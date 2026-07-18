@@ -79,7 +79,9 @@ def write_session_jsonl(session: dict[str, Any], out_path: Path) -> Path:
     """Atomically write the trace under the allowed root (temp + os.replace)."""
 
     destination = safe_output_path(out_path)
-    lines = [json.dumps(event, ensure_ascii=False) for event in session["events"]]
+    # allow_nan=False keeps the JSONL strict/portable: NaN/Infinity are already
+    # rejected upstream by the validator, but fail closed at serialization too.
+    lines = [json.dumps(event, ensure_ascii=False, allow_nan=False) for event in session["events"]]
     body = "\n".join(lines) + "\n"
     fd, tmp_name = tempfile.mkstemp(dir=str(destination.parent), suffix=".jsonl.tmp")
     try:
