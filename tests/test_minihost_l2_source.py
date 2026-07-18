@@ -56,9 +56,12 @@ class MinihostL2SourceTests(unittest.TestCase):
             "suite_timeline_report_json",
             '\\"suite_timeline\\"',
             "g_suite_selector = effect_selector_name(command)",
-            "record_suite_event_locked(true, name, version, 0)",
-            "record_suite_acquire_failure(name, version, 1)",
-            "record_suite_event_locked(false, name, version, 0)",
+            "record_suite_event_locked(true, safe_name, version, 0)",
+            "record_suite_acquire_failure(safe_name, version, 1)",
+            "record_suite_event_locked(false, safe_name, version, released ? 0 : 1)",
+            "copy_suite_name_seh",
+            "std::array<char, kMaxSuiteName + 8> unterminated",
+            "--self-test-suite-name-guards",
         ):
             self.assertIn(marker, text)
 

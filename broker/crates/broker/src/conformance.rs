@@ -110,6 +110,7 @@ pub struct RuntimeFailure {
     pub classification: Classification,
     pub selector_error: Option<i64>,
     pub missing_suites: Vec<MissingSuite>,
+    pub suite_timeline: Vec<SuiteEvent>,
     pub retry_classic: bool,
 }
 
@@ -119,6 +120,7 @@ impl RuntimeFailure {
             classification,
             selector_error: None,
             missing_suites: Vec::new(),
+            suite_timeline: Vec::new(),
             retry_classic: false,
         }
     }
@@ -201,30 +203,45 @@ fn normalize_success(
     depth: PixelDepth,
     report: &Value,
 ) -> Result<DepthResult, RuntimeFailure> {
+    let timeline = suite_timeline(report);
     if let Some(failure) = classify_report(path, report) {
-        return Err(failure);
+        return Err(with_suite_timeline(failure, &timeline));
     }
 
     let width = report.get("width").and_then(Value::as_u64);
     let height = report.get("height").and_then(Value::as_u64);
     let output_sha256 = report.get("output_sha256").and_then(Value::as_str);
     let (Some(width), Some(height), Some(output_sha256)) = (width, height, output_sha256) else {
-        return Err(RuntimeFailure::new(Classification::InvalidOutput));
+        return Err(with_suite_timeline(
+            RuntimeFailure::new(Classification::InvalidOutput),
+            &timeline,
+        ));
     };
     if width == 0 || height == 0 || width > u32::MAX as u64 || height > u32::MAX as u64 {
-        return Err(RuntimeFailure::new(Classification::InvalidOutput));
+        return Err(with_suite_timeline(
+            RuntimeFailure::new(Classification::InvalidOutput),
+            &timeline,
+        ));
     }
     if output_sha256.len() != 64 || !output_sha256.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        return Err(RuntimeFailure::new(Classification::InvalidOutput));
+        return Err(with_suite_timeline(
+            RuntimeFailure::new(Classification::InvalidOutput),
+            &timeline,
+        ));
     }
-    let input_world = parse_world(report.get("input_world"))?;
-    let output_world = parse_world(report.get("output_world"))?;
+    let input_world = parse_world(report.get("input_world"))
+        .map_err(|failure| with_suite_timeline(failure, &timeline))?;
+    let output_world = parse_world(report.get("output_world"))
+        .map_err(|failure| with_suite_timeline(failure, &timeline))?;
     if input_world.pixel_format != depth
         || output_world.pixel_format != depth
         || u64::from(output_world.width) != width
         || u64::from(output_world.height) != height
     {
-        return Err(RuntimeFailure::new(Classification::HostValidationError));
+        return Err(with_suite_timeline(
+            RuntimeFailure::new(Classification::HostValidationError),
+            &timeline,
+        ));
     }
     Ok(DepthResult {
         depth,
@@ -238,7 +255,7 @@ fn normalize_success(
         world: Some(output_world),
         output_sha256: Some(output_sha256.to_ascii_lowercase()),
         missing_suites: Vec::new(),
-        suite_timeline: suite_timeline(report),
+        suite_timeline: timeline,
     })
 }
 
@@ -261,7 +278,7 @@ fn failed_result_with_input(
         world: None,
         output_sha256: None,
         missing_suites: failure.missing_suites,
-        suite_timeline: Vec::new(),
+        suite_timeline: failure.suite_timeline,
     }
 }
 
@@ -370,6 +387,11 @@ fn suite_timeline(report: &Value) -> Vec<SuiteEvent> {
         .collect()
 }
 
+fn with_suite_timeline(mut failure: RuntimeFailure, timeline: &[SuiteEvent]) -> RuntimeFailure {
+    failure.suite_timeline = timeline.to_vec();
+    failure
+}
+
 fn valid_suite_event(event: &SuiteEvent) -> bool {
     let selector = event.selector.as_bytes();
     let valid_selector = (1..=64).contains(&selector.len())
@@ -402,6 +424,7 @@ fn classify_report(path: RenderPath, report: &Value) -> Option<RuntimeFailure> {
             classification: Classification::MissingSuite,
             selector_error: selector_error(report, path),
             missing_suites: suites,
+            suite_timeline: Vec::new(),
             retry_classic: false,
         });
     }
@@ -422,6 +445,7 @@ fn classify_report(path: RenderPath, report: &Value) -> Option<RuntimeFailure> {
             classification: Classification::Unsupported,
             selector_error: None,
             missing_suites: Vec::new(),
+            suite_timeline: Vec::new(),
             retry_classic: false,
         });
     }
@@ -430,6 +454,7 @@ fn classify_report(path: RenderPath, report: &Value) -> Option<RuntimeFailure> {
             classification: Classification::Unsupported,
             selector_error: None,
             missing_suites: Vec::new(),
+            suite_timeline: Vec::new(),
             retry_classic: true,
         });
     }
@@ -442,6 +467,7 @@ fn classify_report(path: RenderPath, report: &Value) -> Option<RuntimeFailure> {
             classification: Classification::SelectorError,
             selector_error,
             missing_suites: Vec::new(),
+            suite_timeline: Vec::new(),
             retry_classic: false,
         });
     }
@@ -539,6 +565,13 @@ fn runtime_failure_from_values(
         .and_then(|value| classify_report(path, value))
         .or_else(|| diagnostics.and_then(|value| classify_report(path, value)))
         .unwrap_or_else(|| RuntimeFailure::new(Classification::NonzeroExit));
+    let report_timeline = report.map(suite_timeline).unwrap_or_default();
+    let diagnostics_timeline = diagnostics.map(suite_timeline).unwrap_or_default();
+    failure.suite_timeline = if report_timeline.is_empty() {
+        diagnostics_timeline
+    } else {
+        report_timeline
+    };
     let mut suites = diagnostics.map(missing_suites).unwrap_or_default();
     if let Some(report) = report {
         suites.extend(missing_suites(report));
@@ -572,9 +605,21 @@ pub fn runtime_failure_from_io(path: RenderPath, error: &io::Error) -> RuntimeFa
             .and_then(Value::as_str)
             == Some("ok")
     });
+    let broker_io_marker = [
+        "failed validation",
+        "validated worker",
+        "worker report unavailable",
+        "worker output",
+        "input image",
+        "image decode",
+        "image format",
+    ]
+    .iter()
+    .any(|needle| message.to_ascii_lowercase().contains(needle));
     if ((!diagnostics.is_some() && !report.is_some())
         || diagnostics_is_worker_success
-        || report_is_worker_success)
+        || report_is_worker_success
+        || (error.kind() == io::ErrorKind::InvalidData && broker_io_marker))
         && failure.classification == Classification::NonzeroExit
     {
         failure.classification = classify_broker_io_error(&message);
@@ -784,12 +829,14 @@ mod tests {
                     name: "PF World Suite".into(),
                     version: 2,
                 }],
+                suite_timeline: Vec::new(),
                 retry_classic: false,
             },
             RuntimeFailure {
                 classification: Classification::SelectorError,
                 selector_error: Some(25),
                 missing_suites: vec![],
+                suite_timeline: Vec::new(),
                 retry_classic: false,
             },
             RuntimeFailure::new(Classification::Crashed),
@@ -921,6 +968,7 @@ mod tests {
                     classification: Classification::Unsupported,
                     selector_error: None,
                     missing_suites: Vec::new(),
+                    suite_timeline: Vec::new(),
                     retry_classic: true,
                 }),
                 Ok(successful_report(PixelDepth::Argb8)),
@@ -986,6 +1034,73 @@ mod tests {
             runtime_failure_from_io(RenderPath::Classic, &diagnostics_only).classification,
             Classification::InvalidOutput
         );
+
+        let validation_with_worker_failure = io::Error::new(
+            io::ErrorKind::InvalidData,
+            "isolated AEX image render failed validation: diagnostics={\"classification\":\"nonzero_exit\"}, report={\"worker_classification\":\"nonzero_exit\"}",
+        );
+        assert_eq!(
+            runtime_failure_from_io(RenderPath::Classic, &validation_with_worker_failure)
+                .classification,
+            Classification::HostValidationError
+        );
+
+        let output_with_worker_failure = io::Error::new(
+            io::ErrorKind::InvalidData,
+            "validated worker output size mismatch: diagnostics={\"classification\":\"nonzero_exit\"}, report={\"worker_classification\":\"nonzero_exit\"}",
+        );
+        assert_eq!(
+            runtime_failure_from_io(RenderPath::Classic, &output_with_worker_failure)
+                .classification,
+            Classification::InvalidOutput
+        );
+    }
+
+    #[test]
+    fn preserves_suite_timeline_for_failed_depth_reports() {
+        let timeline = json!([
+            {"sequence": 0, "action": "acquire", "name": "PF World Suite", "version": 2, "selector": "PF Render", "result": 0}
+        ]);
+        for (field, value, expected) in [
+            ("render_error", json!(25), Classification::SelectorError),
+            (
+                "output_pixels_valid",
+                json!(false),
+                Classification::InvalidOutput,
+            ),
+            (
+                "result_rects_valid",
+                json!(false),
+                Classification::HostValidationError,
+            ),
+        ] {
+            let mut report = successful_report(PixelDepth::Argb8);
+            report[field] = value;
+            report["suite_timeline"] = timeline.clone();
+            let mut backend = FakeBackend {
+                inspect: Ok(json!({})),
+                renders: VecDeque::from([Ok(report)]),
+            };
+            let result =
+                collect_runtime_results(&mut backend, &[RenderPath::Classic], &[PixelDepth::Argb8]);
+            assert_eq!(result[0].classification, expected);
+            assert_eq!(result[0].suite_timeline.len(), 1);
+            assert_eq!(result[0].suite_timeline[0].action, SuiteAction::Acquire);
+        }
+
+        let mut report = successful_report(PixelDepth::Argb8);
+        report["missing_suites"] = json!([
+            {"name": "PF World Suite", "version": 2}
+        ]);
+        report["suite_timeline"] = timeline;
+        let mut backend = FakeBackend {
+            inspect: Ok(json!({})),
+            renders: VecDeque::from([Ok(report)]),
+        };
+        let result =
+            collect_runtime_results(&mut backend, &[RenderPath::Classic], &[PixelDepth::Argb8]);
+        assert_eq!(result[0].classification, Classification::MissingSuite);
+        assert_eq!(result[0].suite_timeline.len(), 1);
     }
 
     #[test]
@@ -997,6 +1112,7 @@ mod tests {
                     classification: Classification::Unsupported,
                     selector_error: None,
                     missing_suites: Vec::new(),
+                    suite_timeline: Vec::new(),
                     retry_classic: false,
                 }),
                 Ok(successful_report(PixelDepth::Argb8)),

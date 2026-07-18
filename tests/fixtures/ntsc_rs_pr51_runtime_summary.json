@@ -1,0 +1,25 @@
+{
+  "artifact": "ntsc-rs-ae.aex",
+  "input_dimensions": [1920, 1080],
+  "smartfx_auto": {
+    "path": "smartfx",
+    "results": [
+      {"depth": "argb8", "classification": "ok", "timeline_events": 25},
+      {"depth": "argb16", "classification": "ok", "timeline_events": 25},
+      {"depth": "argb32f", "classification": "ok", "timeline_events": 25}
+    ]
+  },
+  "classic_only": {
+    "results": [
+      {"depth": "argb8", "classification": "selector_error", "error_code": 516, "timeline_events": 17},
+      {"depth": "argb16", "classification": "selector_error", "error_code": 516, "timeline_events": 17},
+      {"depth": "argb32f", "classification": "selector_error", "error_code": 516, "timeline_events": 17}
+    ]
+  },
+  "world": {
+    "width": 1920,
+    "height": 1080,
+    "extent_hint": {"left": 0, "top": 0, "right": 1920, "bottom": 1080},
+    "premultiplication": "premultiplied"
+  }
+}

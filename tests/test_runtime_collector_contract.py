@@ -23,3 +23,4 @@ def test_runtime_collector_keeps_host_failures_and_checked_partial_extents():
 def test_runtime_report_promotes_native_suite_timeline():
     text = IMAGE_RENDER.read_text(encoding="utf-8")
     assert '("suite_timeline", "suite_timeline")' in text
+    assert '"suite_timeline": initial_report.as_ref()' in text

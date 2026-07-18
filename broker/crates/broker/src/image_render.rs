@@ -602,6 +602,27 @@ fn runtime_backend(backend: RenderGpuBackend) -> Option<RuntimeBackend> {
     }
 }
 
+fn is_auto_gpu_preflight_error(error: &io::Error) -> bool {
+    let message = error.to_string().to_ascii_lowercase();
+    [
+        "gpu render requires",
+        "gpu infrastructure",
+        "gpu backend unavailable",
+        "gpu unavailable",
+        "host policy",
+        "runtime module",
+        "gpu dispatch",
+        "restricted token",
+        "sealed tree acl",
+        "trusted worker staging",
+        "restricted process launch",
+        "worker module audit validation",
+        "local worker binary",
+    ]
+    .iter()
+    .any(|needle| message.contains(needle))
+}
+
 impl RenderPixelFormat {
     fn report_name(self) -> &'static str {
         match self {
@@ -4392,32 +4413,64 @@ fn render_with_artifact(
         && timed_secondaries.is_empty()
         && audio.is_none()
         && runtime_backend(gpu_backend).is_some();
+    let auto_gpu_cpu_fallback = gpu_backend == RenderGpuBackend::Auto
+        && smart
+        && pixel_format == RenderPixelFormat::Argb32f
+        && gpu_initial_attempt;
+    let mut gpu_fallback_used = false;
+    let mut gpu_fallback_reason: Option<String> = None;
+    let mut gpu_attempt: Option<Value> = None;
     let mut isolated = if gpu_initial_attempt {
-        let policy_input = gpu_runtime_policy.ok_or_else(|| {
-            invalid(
-                "GPU render requires a session-bound authenticated runtime module policy report; use the runtime-policy render API or select CPU",
-            )
-        })?;
-        let backend = runtime_backend(gpu_backend).expect("GPU attempt has a runtime backend");
-        let report = authenticate_gpu_worker_report(
-            policy_input.module_report_json,
-            &policy_input.session_identity,
-            backend,
-            WorkerModuleValidation {
-                policy: policy_input.policy,
-                sealed: policy_input.sealed_modules,
-                trusted: policy_input.trusted_modules,
-                system32: policy_input.system32,
-            },
-        )?;
-        dispatch_secure_gpu_image(
-            initial_dispatch,
-            GpuRuntimeAuthorization {
+        let gpu_result = (|| -> io::Result<_> {
+            let policy_input = gpu_runtime_policy.ok_or_else(|| {
+                invalid(
+                    "GPU render requires a session-bound authenticated runtime module policy report; use the runtime-policy render API or select CPU",
+                )
+            })?;
+            let backend = runtime_backend(gpu_backend).expect("GPU attempt has a runtime backend");
+            let report = authenticate_gpu_worker_report(
+                policy_input.module_report_json,
+                &policy_input.session_identity,
                 backend,
-                session_identity: policy_input.session_identity,
-                module_report: &report,
-            },
-        )?
+                WorkerModuleValidation {
+                    policy: policy_input.policy,
+                    sealed: policy_input.sealed_modules,
+                    trusted: policy_input.trusted_modules,
+                    system32: policy_input.system32,
+                },
+            )?;
+            dispatch_secure_gpu_image(
+                initial_dispatch,
+                GpuRuntimeAuthorization {
+                    backend,
+                    session_identity: policy_input.session_identity,
+                    module_report: &report,
+                },
+            )
+        })();
+        match gpu_result {
+            Ok(result) => result,
+            Err(error) if auto_gpu_cpu_fallback && is_auto_gpu_preflight_error(&error) => {
+                gpu_fallback_used = true;
+                gpu_fallback_reason = Some(error.to_string());
+                gpu_attempt = Some(json!({
+                    "classification": "gpu_preflight_error",
+                    "error": error.to_string(),
+                }));
+                args_before_plugin[0] =
+                    image_worker_command(smart, pixel_format, false, RenderGpuBackend::Cpu)?.into();
+                dispatch_secure_image(SecureImageDispatch {
+                    repository,
+                    worker_kind,
+                    plugin: plugin.clone(),
+                    dependencies: dependencies.clone(),
+                    args_before_plugin: &args_before_plugin,
+                    args_after_plugin: &args_after_plugin,
+                    timeout: Duration::from_millis(timeout_ms),
+                })?
+            }
+            Err(error) => return Err(error),
+        }
     } else {
         dispatch_secure_image(initial_dispatch)?
     };
@@ -4445,9 +4498,8 @@ fn render_with_artifact(
                         || worker_report.get("gpu_device_setup_error") != Some(&json!(0))
                         || worker_report.get("gpu_device_setdown_error") != Some(&json!(0)))
             }));
-    let mut gpu_fallback_used = false;
-    let mut gpu_attempt = None;
     let worker_report = if gpu_attempt_failed {
+        gpu_fallback_reason = Some("GPU worker attempt failed; CPU retry used".into());
         gpu_attempt = Some(json!({
             "worker_classification": isolated.classification.as_str(),
             "worker_diagnostics": diagnostics,
@@ -4456,6 +4508,7 @@ fn render_with_artifact(
             "smart_render_error": initial_report.as_ref().and_then(|report| report.get("smart_render_error")),
             "smart_render_selector_error": initial_report.as_ref().and_then(|report| report.get("smart_render_selector_error")),
             "output_pixels_valid": initial_report.as_ref().and_then(|report| report.get("output_pixels_valid")),
+            "suite_timeline": initial_report.as_ref().and_then(|report| report.get("suite_timeline")),
             "gpu_device_setup_error": initial_report.as_ref().and_then(|report| report.get("gpu_device_setup_error")),
             "gpu_device_setdown_error": initial_report.as_ref().and_then(|report| report.get("gpu_device_setdown_error")),
             "gpu_device_setdown_exception_code": initial_report.as_ref().and_then(|report| report.get("gpu_device_setdown_exception_code")),
@@ -4739,7 +4792,6 @@ fn render_with_artifact(
         "gpu_render_dispatched": worker_report.get("gpu_render_dispatched"),
         "gpu_memory": gpu_memory,
         "gpu_fallback_used": gpu_fallback_used,
-        "gpu_attempt": gpu_attempt,
         "input_sha256": worker_report.get("input_sha256"),
         "output_sha256": worker_report.get("output_sha256"),
         "requested_parameters": worker_report.get("requested_parameters"),
@@ -4751,6 +4803,11 @@ fn render_with_artifact(
     let report_object = report
         .as_object_mut()
         .expect("interactive render report is an object");
+    report_object.insert("gpu_fallback_reason".into(), json!(gpu_fallback_reason));
+    report_object.insert(
+        "gpu_attempt".into(),
+        gpu_attempt.unwrap_or(Value::Null),
+    );
     for (name, source) in [
         ("row_bytes", "rowbytes"),
         ("pixel_format", "pixel_format"),
@@ -5856,6 +5913,28 @@ mod tests {
             Some(RuntimeBackend::Directx)
         );
         assert_eq!(runtime_backend(RenderGpuBackend::Cpu), None);
+    }
+
+    #[test]
+    fn auto_gpu_fallback_is_limited_to_host_preflight_failures() {
+        for message in [
+            "GPU render requires a session-bound authenticated runtime module policy report",
+            "GPU infrastructure is unavailable",
+            "GPU backend unavailable on this host",
+            "host policy rejected GPU dispatch",
+            "runtime module policy is expired",
+            "trusted worker staging failed",
+            "restricted process launch failed",
+        ] {
+            assert!(is_auto_gpu_preflight_error(&io::Error::other(message)));
+        }
+        for message in [
+            "isolated AEX image render failed validation: selector_error=17",
+            "worker crashed during SMART_RENDER",
+            "validated worker output size mismatch",
+        ] {
+            assert!(!is_auto_gpu_preflight_error(&io::Error::other(message)));
+        }
     }
 
     #[test]

@@ -9784,6 +9784,7 @@ uint32_t g_suite_acquires{};
 uint32_t g_suite_releases{};
 constexpr std::size_t kMaxMissingSuites = 16;
 constexpr std::size_t kMaxSuiteTimeline = 65536;
+constexpr std::size_t kMaxSuiteName = 96;
 std::vector<std::pair<std::string, int32_t>> g_missing_suites;
 struct SuiteTimelineEvent {
   uint32_t sequence{};
@@ -9797,36 +9798,67 @@ std::vector<SuiteTimelineEvent> g_suite_timeline;
 thread_local const char* g_suite_selector = "HOST";
 std::string escape(const std::string& input);
 
-void record_suite_event_locked(bool acquire, const char* name, int32_t version,
+struct SuiteNameCopy {
+  std::array<char, kMaxSuiteName + 1> text{};
+  std::size_t length{};
+  bool readable{};
+  bool terminated{};
+};
+
+SuiteNameCopy copy_suite_name_seh(const char* source) {
+  SuiteNameCopy copy;
+  if (!source) return copy;
+  __try {
+    for (; copy.length < kMaxSuiteName; ++copy.length) {
+      const unsigned char character = static_cast<unsigned char>(source[copy.length]);
+      if (character == 0) {
+        copy.terminated = true;
+        break;
+      }
+      copy.text[copy.length] = character >= 0x20 && character <= 0x7e
+          ? static_cast<char>(character) : '?';
+    }
+    copy.readable = true;
+  } __except(EXCEPTION_EXECUTE_HANDLER) {
+    copy.readable = false;
+  }
+  copy.text[copy.length] = '\0';
+  return copy;
+}
+
+std::string suite_name_string(const SuiteNameCopy& name) {
+  return std::string(name.text.data(), name.length);
+}
+
+void record_suite_event_locked(bool acquire, const SuiteNameCopy& name, int32_t version,
                                int32_t result) {
   if (g_suite_timeline.size() >= kMaxSuiteTimeline) return;
   g_suite_timeline.push_back({
       static_cast<uint32_t>(g_suite_timeline.size()), acquire,
-      name ? name : "", version, g_suite_selector ? g_suite_selector : "HOST", result});
+      suite_name_string(name), version, g_suite_selector ? g_suite_selector : "HOST", result});
 }
 
 void record_suite_acquire(const char* name, int32_t version) {
+  const SuiteNameCopy safe_name = copy_suite_name_seh(name);
+  const std::string safe_name_text = suite_name_string(safe_name);
   {
     std::lock_guard<std::mutex> lock(g_suite_lease_mutex);
-    ++g_suite_leases[{name, version}];
+    ++g_suite_leases[{safe_name_text, version}];
     ++g_suite_acquires;
-    record_suite_event_locked(true, name, version, 0);
+    record_suite_event_locked(true, safe_name, version, 0);
   }
-  if (g_trace_writer && name) g_trace_writer->suite_acquire(name, version, true);
+  if (g_trace_writer && safe_name.readable && !safe_name_text.empty())
+    g_trace_writer->suite_acquire(safe_name_text, version, true);
 }
 
-void record_suite_acquire_failure(const char* name, int32_t version, int32_t result) {
+void record_suite_acquire_failure(const SuiteNameCopy& safe_name, int32_t version,
+                                  int32_t result) {
   std::lock_guard<std::mutex> lock(g_suite_lease_mutex);
-  record_suite_event_locked(true, name, version, result);
-}
-
-void record_suite_release(const char* name, int32_t version, int32_t result) {
-  std::lock_guard<std::mutex> lock(g_suite_lease_mutex);
-  record_suite_event_locked(false, name, version, result);
+  record_suite_event_locked(true, safe_name, version, result);
 }
 
 void record_missing_suite(const std::string& name, int32_t version) {
-  const bool valid_name = !name.empty() && name.size() <= 96 &&
+  const bool valid_name = !name.empty() && name.size() <= kMaxSuiteName &&
       std::all_of(name.begin(), name.end(), [](unsigned char character) {
         return std::isalnum(character) || character == ' ' || character == '.' ||
             character == '_' || character == '-';
@@ -12785,28 +12817,27 @@ std::array<void*, 15> g_gpu_device_suite1{
     reinterpret_cast<void*>(&gpu_get_world_device_index)};
 
 int32_t reject_suite_acquire(const char* name, int32_t version) {
-  std::string safe_name;
-  if (name) for (std::size_t index = 0; name[index] && index < 96; ++index) {
-    const unsigned char character = static_cast<unsigned char>(name[index]);
-    safe_name.push_back(character >= 0x20 && character <= 0x7e ? name[index] : '?');
-  }
-  record_missing_suite(safe_name, version);
-  if (g_trace_writer && !safe_name.empty())
-    g_trace_writer->suite_acquire(safe_name, std::max<int32_t>(version, 0), false);
-  record_suite_acquire_failure(name, version, 1);
-  std::cerr << "stage:suite_acquire_failed name=" << safe_name
+  const SuiteNameCopy safe_name = copy_suite_name_seh(name);
+  const std::string safe_name_text = suite_name_string(safe_name);
+  record_missing_suite(safe_name_text, version);
+  if (g_trace_writer && safe_name.readable && !safe_name_text.empty())
+    g_trace_writer->suite_acquire(safe_name_text, std::max<int32_t>(version, 0), false);
+  record_suite_acquire_failure(safe_name, version, 1);
+  std::cerr << "stage:suite_acquire_failed name=" << safe_name_text
             << " version=" << version << "\n" << std::flush;
   return 1;
 }
 
-int32_t __cdecl acquire_suite(const char* name, int32_t version, const void** suite) {
+int32_t __cdecl acquire_suite(const char* plugin_name, int32_t version, const void** suite) {
+  const SuiteNameCopy safe_name = copy_suite_name_seh(plugin_name);
+  const char* name = safe_name.text.data();
   if (!suite) {
-    record_suite_acquire_failure(name, version, 4);
+    record_suite_acquire_failure(safe_name, version, 4);
     return 4;
   }
   *suite = nullptr;
-  if (!name) {
-    record_suite_acquire_failure(name, version, 4);
+  if (!plugin_name) {
+    record_suite_acquire_failure(safe_name, version, 4);
     return 4;
   }
   if (version == 1 && std::strcmp(name, "AE Plugin Helper Suite") == 0) {
@@ -13613,21 +13644,23 @@ int32_t __cdecl acquire_suite(const char* name, int32_t version, const void** su
 }
 
 int32_t __cdecl release_suite(const char* name, int32_t version) {
+  const SuiteNameCopy safe_name = copy_suite_name_seh(name);
+  const std::string safe_name_text = suite_name_string(safe_name);
   bool released = false;
   {
     std::lock_guard<std::mutex> lock(g_suite_lease_mutex);
-    if (name) {
-      const auto found = g_suite_leases.find({name, version});
+    if (safe_name.readable) {
+      const auto found = g_suite_leases.find({safe_name_text, version});
       if (found != g_suite_leases.end() && found->second != 0) {
         --found->second;
         ++g_suite_releases;
         released = true;
       }
     }
-    record_suite_event_locked(false, name, version, released ? 0 : 1);
+    record_suite_event_locked(false, safe_name, version, released ? 0 : 1);
   }
-  if (g_trace_writer && name)
-    g_trace_writer->suite_release(name, std::max<int32_t>(version, 0), released);
+  if (g_trace_writer && safe_name.readable && !safe_name_text.empty())
+    g_trace_writer->suite_release(safe_name_text, std::max<int32_t>(version, 0), released);
   return released ? 0 : 1;
 }
 
@@ -21254,6 +21287,22 @@ bool verify_render_output_safety() {
       g_last_seh_selector == "SMART_PRE_RENDER_CLEANUP" && g_last_seh_error == 512;
 }
 
+bool verify_suite_name_copy_guards() {
+  const uint32_t acquires_before = g_suite_acquires;
+  const uint32_t releases_before = g_suite_releases;
+  const void* suite = reinterpret_cast<const void*>(1);
+  bool ok = acquire_suite(nullptr, 13, &suite) != 0 && suite == nullptr;
+  suite = reinterpret_cast<const void*>(1);
+  ok = ok && acquire_suite(reinterpret_cast<const char*>(static_cast<uintptr_t>(1)), 13,
+                           &suite) != 0 && suite == nullptr;
+  std::array<char, kMaxSuiteName + 8> unterminated{};
+  unterminated.fill('A');
+  suite = reinterpret_cast<const void*>(1);
+  ok = ok && acquire_suite(unterminated.data(), 13, &suite) != 0 && suite == nullptr;
+  return ok && g_suite_acquires == acquires_before &&
+      g_suite_releases == releases_before;
+}
+
 bool verify_legacy_effect_compat_suites() {
   const void* comp_suite = nullptr;
   const void* interface_suite = nullptr;
@@ -21934,6 +21983,14 @@ int wmain(int argc, wchar_t **argv) {
               << ",\"versions_12_14_rejected\":true,\"mask_callbacks_exposed\":false"
               << ",\"suite_leases_balanced\":"
               << (suite_leases_balanced() ? "true" : "false") << "}\n";
+    return passed ? 0 : 1;
+  }
+  if (argc == 2 && std::wstring(argv[1]) == L"--self-test-suite-name-guards") {
+    const bool passed = verify_suite_name_copy_guards();
+    std::cout << "{\"suite_name_copy_guards\":\""
+              << (passed ? "passed" : "failed")
+              << "\",\"seh_safe_bounded_copy\":true"
+              << ",\"null_invalid_unterminated\":true}\n";
     return passed ? 0 : 1;
   }
   if (argc == 2 && std::wstring(argv[1]) == L"--self-test-pf-adv-app-suite") {
