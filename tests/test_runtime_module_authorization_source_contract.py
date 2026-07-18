@@ -3,6 +3,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 MAIN = (ROOT / "minihost" / "src" / "l2_main.cpp").read_text(encoding="utf-8")
+ADMISSION = (ROOT / "minihost" / "src" / "worker_runtime_admission.cpp").read_text(
+    encoding="utf-8"
+)
 SOURCE = (ROOT / "minihost" / "src" / "runtime_module_audit.cpp").read_text(
     encoding="utf-8"
 )
@@ -17,8 +20,8 @@ def test_manifest_is_strictly_parsed_before_plugin_load():
         "actual_size != declared_size", "actual_hash != declared_hash",
     ):
         assert marker in parser
-    parse_call = MAIN.index("parse_runtime_module_authorization(plugin_path, argv[5])")
-    load = MAIN.index("HMODULE module = LoadLibraryExW(plugin_path.c_str()", parse_call)
+    parse_call = ADMISSION.index("parse_runtime_module_authorization(plugin_path,")
+    load = ADMISSION.index("HMODULE module = LoadLibraryExW(plugin_path.c_str()", parse_call)
     assert parse_call < load
 
 
@@ -51,7 +54,8 @@ def test_optional_argument_is_l2_params_only_and_exactly_positioned():
 
 def test_hash_dependency_is_configured_before_authorization_and_fails_closed():
     configure = MAIN.index("configure_runtime_module_hash(&sha256)")
-    parse_call = MAIN.index("parse_runtime_module_authorization(plugin_path, argv[5])")
-    assert configure < parse_call
+    admission = MAIN.index("admit_runtime(runtime_hooks, runtime_request, runtime_context)")
+    assert configure < admission
+    assert "RuntimeHostHooks runtime_hooks{&sha256" in MAIN
     assert "if (!g_file_sha256 || manifest_name.empty()" in SOURCE
     assert "found == g_authorized_runtime_modules.end() || !g_file_sha256" in SOURCE

@@ -61,6 +61,7 @@
 #include "strict_json.hpp"
 #include "suite_lease_tracker.hpp"
 #include "worker_selector_dispatch.hpp"
+#include "worker_runtime_admission.hpp"
 #include "worker_aegp_render_options.hpp"
 #include "worker_aegp_scene.hpp"
 #include "worker_aegp_scene_runtime.hpp"
@@ -135,14 +136,16 @@ using aexcompat::worker_runtime::capture_module_audit;
 using aexcompat::worker_runtime::capture_module_audit_phase;
 using aexcompat::worker_runtime::effect_selector_name;
 using aexcompat::worker_runtime::guarded_effect_call;
-using aexcompat::worker_runtime::has_prefixed_basename;
 using aexcompat::worker_runtime::invoke_entry_seh;
 using aexcompat::worker_runtime::invoke_smart_pre_render_cleanup_seh;
 using aexcompat::worker_runtime::module_audit_json;
 using aexcompat::worker_runtime::module_audit_passed;
 using aexcompat::worker_runtime::module_audit_report;
-using aexcompat::worker_runtime::parse_runtime_module_authorization;
 using aexcompat::worker_runtime::selector_dispatch_telemetry;
+using aexcompat::worker_runtime::RuntimeAdmissionRequest;
+using aexcompat::worker_runtime::RuntimeContext;
+using aexcompat::worker_runtime::RuntimeHostHooks;
+using aexcompat::worker_runtime::admit_runtime;
 using aexcompat::world_safety::DispatchWorldFormat;
 using aexcompat::world_safety::DispatchWorldFormatScope;
 using aexcompat::world_safety::LocalEffectWorld;
@@ -16480,41 +16483,29 @@ int wmain(int argc, wchar_t **argv) {
     if (*p > 0x7f) return 2;
     expected.push_back(static_cast<char>(*p));
   }
-  std::string actual;
-  if (!sha256(argv[2], actual) || actual != expected) return 10;
-  const std::filesystem::path plugin_path = std::filesystem::absolute(argv[2]);
-  if (!plugin_path.is_absolute()) return 11;
+  RuntimeHostHooks runtime_hooks{&sha256, &redirect_native_stdout,
+                                 &restore_native_stdout};
+  RuntimeAdmissionRequest runtime_request;
+  runtime_request.plugin_argument = argv[2];
+  runtime_request.expected_sha256 = expected;
 #if !defined(AEXCOMPAT_RENDER_WORKER) && !defined(AEXCOMPAT_SMART_WORKER)
-  if (runtime_module_authorization_mode &&
-      !parse_runtime_module_authorization(plugin_path, argv[5])) return 15;
+  runtime_request.authorize_runtime_modules = runtime_module_authorization_mode;
+  if (runtime_module_authorization_mode)
+    runtime_request.authorization_manifest = argv[5];
 #endif
   aexcompat::TraceWriter trace_writer(
-      "minihost", trace_worker_label(), plugin_path.filename().string());
+      "minihost", trace_worker_label(),
+      std::filesystem::path(argv[2]).filename().string());
   if (trace_writer.requested() && !trace_writer.enabled()) return 16;
-  g_plugin_file_path = plugin_path.wstring();
-  SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_SYSTEM32 | LOAD_LIBRARY_SEARCH_USER_DIRS);
-  HMODULE module = LoadLibraryExW(plugin_path.c_str(), nullptr,
-      LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32);
-  if (!module) return 11;
-  g_module_audit.required = has_prefixed_basename(
-      plugin_path.parent_path(), L"aexcompat-sealed-");
-  g_module_audit.plugin_path = plugin_path;
-  if (g_module_audit.required) {
-    g_module_audit.post_load = capture_module_audit();
-    if (g_module_audit.post_load.status != "passed") {
-      g_module_audit.pre_unload = capture_module_audit();
-      std::cout << "{\"schema_version\":1,\"stage\":\"module_audit\","
-                   "\"status\":\"module_audit_failed\",\"module_audit\":"
-                << module_audit_json() << "}\n";
-      FreeLibrary(module);
-      return 14;
-    }
-  }
+  RuntimeContext runtime_context;
+  const int admission_error = admit_runtime(runtime_hooks, runtime_request, runtime_context);
+  if (admission_error != 0) return admission_error;
+  g_plugin_file_path = runtime_context.plugin_path.wstring();
+  HMODULE module = runtime_context.module;
   if (trace_writer.enabled()) {
     g_trace_writer = &trace_writer;
     trace_writer.session_start();
   }
-  if (!redirect_native_stdout()) { FreeLibrary(module); return 13; }
   if (g_aegp_init_mode) {
     g_synthetic_receipt_test_mode = g_aegp_command_roundtrip_mode;
     auto aegp_entry = reinterpret_cast<AegpEntry>(GetProcAddress(module, "EntryPointFunc"));

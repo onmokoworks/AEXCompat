@@ -4,6 +4,9 @@ import re
 
 ROOT = Path(__file__).resolve().parents[1]
 MAIN = (ROOT / "minihost" / "src" / "l2_main.cpp").read_text(encoding="utf-8")
+ADMISSION = (ROOT / "minihost" / "src" / "worker_runtime_admission.cpp").read_text(
+    encoding="utf-8"
+)
 SOURCE = (ROOT / "minihost" / "src" / "runtime_module_audit.cpp").read_text(
     encoding="utf-8"
 )
@@ -16,12 +19,12 @@ DISPATCH = (ROOT / "minihost" / "src" / "worker_selector_dispatch.cpp").read_tex
 
 
 def test_sealed_workers_audit_immediately_after_load_before_symbol_lookup():
-    load = MAIN.index("HMODULE module = LoadLibraryExW(plugin_path.c_str()")
-    post_load = MAIN.index("g_module_audit.post_load = capture_module_audit()", load)
-    lookup = MAIN.index("GetProcAddress(module", load)
-    assert load < post_load < lookup
-    assert 'plugin_path.parent_path(), L"aexcompat-sealed-"' in MAIN
-    assert 'g_module_audit.required' in MAIN
+    load = ADMISSION.index("HMODULE module = LoadLibraryExW(plugin_path.c_str()")
+    post_load = ADMISSION.index("audit.post_load = capture_module_audit()", load)
+    assert load < post_load
+    assert 'L"aexcompat-sealed-"' in ADMISSION
+    assert "RuntimeContext runtime_context" in MAIN
+    assert "GetProcAddress(module" in MAIN
 
 
 def test_module_enumeration_is_bounded_and_incomplete_results_fail_closed():

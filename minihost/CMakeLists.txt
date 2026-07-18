@@ -33,6 +33,7 @@ set(AEXCOMPAT_L2_WORKER_SOURCES
     src/strict_json.cpp
     src/suite_lease_tracker.cpp
     src/worker_selector_dispatch.cpp
+    src/worker_runtime_admission.cpp
     src/worker_aegp_render_options.cpp
     src/worker_aegp_scene.cpp
     src/worker_aegp_scene_runtime.cpp
