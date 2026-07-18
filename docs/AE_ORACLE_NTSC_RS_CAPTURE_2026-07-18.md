@@ -138,9 +138,78 @@ numbers below come from the true 16-bit samples (decoded via ffmpeg to
   (working space, linearization) explicitly and the result must be
   validated against a no-effect passthrough capture first.
 
+## Follow-up: 32 bpc is comparable; the blocker was a fixed export range
+   mapping, not color management (2026-07-18, later session)
+
+The previous section hypothesized that the 32 bpc project linearizes the
+working space. The observations below refute that hypothesis and replace it
+with a verified mechanical explanation.
+
+1. **Project color defaults are depth-independent (observation).** A scripted
+   probe on AE 25.3.1x3 shows a fresh project has `workingSpace "None"`,
+   `workingGamma 2.4`, `linearizeWorkingSpace false`, `linearBlending false`,
+   `compensateForSceneReferredProfiles true`, and none of these change when
+   `bitsPerChannel` is set to 8, 16, or 32. All of them are scriptable
+   read/write; `listColorProfiles()` returns 102 profiles.
+2. **`saveFrameToPng` at 32 bpc applies a fixed RGB range mapping
+   (observation).** A no-effect passthrough capture of
+   `target/ntsc-rs-input.png` (frame 0, fps 24, defaults) produced
+   `target/ae-noeffect-32.png`, SHA-256
+   `9d91f98d6eb78ffb91296d62d6d932ae90aeed7f6c1e7823f89355a7f6ceb8c0`.
+   Every 8-bit input value v maps deterministically (all channels alike) to
+   approximately `round(v/255 * 6553.5)` with an error of 0 to -2 uint16
+   steps, i.e. RGB float 0..10 maps linearly onto uint16 0..65535 and the
+   comp's float value v/255 is stored at one tenth of full scale. Alpha is
+   not scaled (1.0 stores as 65535). The PNG carries no gAMA/iCCP/cICP
+   chunk. Undoing the mapping (multiply by 10, round to 8 bits) reproduces
+   the input **exactly, every pixel, RGB and alpha**.
+3. **The mapping is independent of the project working space (observation).**
+   The same capture with the working space pinned to `sRGB IEC61966-2.1`
+   (`target/ae-noeffect-32-srgb.png`) is byte-identical to the
+   default-project capture (same SHA-256 as above). Pinning the color
+   pipeline neither causes nor removes the transform, so the earlier
+   "effect receives linearized input" hypothesis is refuted: the earlier
+   32 bpc numbers (span 0-16195/65535, mean 5.7% vs host 52%) are exactly
+   the x0.1 export mapping, not linearization (0.52 / 10 = 0.052).
+   Hypothesis, unverified: the fixed 0..10 range exists to preserve
+   overbright float values in a 16-bit integer container; the residual
+   0..-2-step error looks like an internal LUT/quantization artifact of the
+   exporter and its cause is not identified.
+4. **32 bpc effect comparison (observation).** AE capture
+   `target/ae-ntsc-rs-32.png`, SHA-256
+   `0f4194bf09ed9dca7ace548a74f2ae3beb40673912dfa4e671c468999a9dfa63`,
+   same input/frame/defaults as the 8 bpc run. The AE float world (after
+   undoing x0.1) spans 0..2.471 with mean 0.5703 - the effect emits
+   overbrights above 1.0 (ringing), which the host's 8-bit output clamps.
+   Comparing `clip(round(ae_float * 255), 0, 255)` against the host's
+   `target/ntsc-rs-output-32f.png` (`--render-experimental-smart-32-cpu`,
+   SHA-256 `7df6db96c0d05c05851269dd9365a729dcd64c13859198000ff0b615d8d2f296`):
+   147,468 of 6,220,800 RGB samples differ, **all by exactly +/-1 LSB**
+   (147,218 host-higher, 250 AE-higher), alpha exact, mean abs difference
+   9.3e-5. The direction bias is fully explained by the exporter's downward
+   0..-2-step quantization: 100% of the host-higher samples sit just below
+   an 8-bit rounding boundary (median distance 0.021 LSB, p95 0.060) and
+   all 250 AE-higher samples sit just above one, while matching samples are
+   uniformly distributed. No spatial or channel structure beyond that.
+
+Claim level: this is AE-oracle equivalence evidence for ntsc-rs SmartFX at
+32 bpc (CPU path), frame 0, default parameters, at 8-bit precision within
++/-1 LSB, after undoing the documented saveFrameToPng x0.1 export mapping and
+clamping to the host's 8-bit output range. Overbrights above 1.0 and
+sub-8-bit precision remain unverified on the host side until the
+worker-to-broker transport can carry more than 8-bit RGBA; the AE-side EXR
+runner (`tools/capture-ae-exr-oracle.ps1`) is the deeper-precision path.
+
 ## Tooling changes shipped with this note
 
 - `tools/ae-reference-capture.jsx`: hand-rolled JSON serialization (no
   `JSON` global on AE 25.3) and asynchronous-save polling.
 - `tools/capture-ae-reference.ps1`: refuses the silent `AfterFX.exe` no-op;
   substitutes the sibling `AfterFX.com` with a warning when given the `.exe`.
+- Later session: optional `-WorkingSpace` / `-LinearizeWorkingSpace`
+  parameters pin the project color pipeline (readback-verified, fail-closed;
+  unset leaves the fresh-project defaults untouched), and every capture
+  result now records the observed working space, gamma, linearize, linear
+  blending, and scene-referred-compensation state for evidence identity.
+  The 8 bpc reference re-captured byte-identically after this change
+  (SHA-256 `2cd24acf...` unchanged).
