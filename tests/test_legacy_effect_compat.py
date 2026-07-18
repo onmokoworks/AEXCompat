@@ -9,7 +9,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 SOURCES = (
     ROOT / "minihost" / "src" / "l2_main.cpp",
-    ROOT / "minihost" / "src" / "worker_aegp_scene_callbacks.hpp",
+    ROOT / "minihost" / "src" / "worker_aegp_scene_impl.inc",
     ROOT / "minihost" / "src" / "worker_pf_suites.cpp",
     ROOT / "minihost" / "src" / "worker_pf_suites.hpp",
 )

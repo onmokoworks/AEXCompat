@@ -8754,11 +8754,8 @@ struct SwitchPipeProbe {
   }
   ~SwitchPipeProbe() { stop(); }
 };
-// AEGP project/item/comp/layer/effect/collection/stream/keyframe callback
-// tables are compiled by worker_aegp_scene_impl.cpp.
-#if defined(AEXCOMPAT_COMPILE_AEGP_SCENE_CALLBACKS)
-#include "worker_aegp_scene_callbacks.hpp"
-#endif
+// AEGP project/item/comp/layer/effect/collection/stream/keyframe family.
+#include "worker_aegp_scene_impl.inc"
 bool __cdecl validate_render_options_item(int32_t plugin_id, void* item) {
   return plugin_id == 1 && item == &g_aegp_comp_item;
 }

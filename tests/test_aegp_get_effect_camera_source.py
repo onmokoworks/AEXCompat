@@ -7,12 +7,13 @@ ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "minihost" / "src" / "l2_main.cpp"
 CMAKE_SOURCE = ROOT / "minihost" / "CMakeLists.txt"
 SCENE_SELFTEST_SOURCE = ROOT / "minihost" / "src" / "worker_aegp_scene_selftests.cpp"
+SCENE_SELFTEST_IMPL = ROOT / "minihost" / "src" / "worker_aegp_scene_selftests_impl.inc"
 PF_SUITE_SOURCE = ROOT / "minihost" / "src" / "worker_pf_suites.hpp"
 
 
 def scene_source() -> str:
     return "\n".join(path.read_text(encoding="utf-8") for path in
-                     (SOURCE, SCENE_SELFTEST_SOURCE, PF_SUITE_SOURCE))
+                     (SOURCE, SCENE_SELFTEST_SOURCE, SCENE_SELFTEST_IMPL, PF_SUITE_SOURCE))
 BUILD = ROOT / "target" / "minihost-build"
 
 
