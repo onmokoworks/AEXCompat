@@ -57,3 +57,13 @@ def test_reference_capture_color_pipeline_pin_is_optional_and_fail_closed():
     assert "linearize working space did not apply" in script
     assert "working_space: app.project.workingSpace" in script
     assert "linearize_working_space: app.project.linearizeWorkingSpace" in script
+
+
+def test_reference_capture_result_records_verified_input_identities():
+    runner = RUNNER.read_text(encoding="utf-8")
+    # The runner binds the result document to the hashed input image and the
+    # hash-verified AEX so downstream evidence can verify the capture was
+    # produced from the recorded input.
+    assert "-NotePropertyName 'input_sha256'" in runner
+    assert "-NotePropertyName 'tested_aex_sha256'" in runner
+    assert "Set-Content -LiteralPath $resultPath -Encoding utf8" in runner

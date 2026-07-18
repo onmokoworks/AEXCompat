@@ -1,5 +1,6 @@
 param(
     [Parameter(Mandatory = $true)][string]$TestedAex,
+    [string]$Harness = 'broker\target\release\aexcompat-harness.exe',
     [string]$CorpusRoot = 'target\oracle-corpus',
     [string]$OutJson = 'analysis\NTSC_RS_ORACLE_CORPUS_RESULT_2026-07-19.json'
 )
@@ -53,6 +54,7 @@ function DecodedRgbaSha256([string]$PngPath) {
 
 $corpus = (Resolve-Path -LiteralPath $CorpusRoot).Path
 $aexPath = (Resolve-Path -LiteralPath $TestedAex).Path
+$harnessPath = (Resolve-Path -LiteralPath $Harness).Path
 
 $cases = @(
     [ordered]@{
@@ -118,6 +120,15 @@ $caseRecords = foreach ($case in $cases) {
     if ($capture.status -ne 'captured') {
         throw "capture result for $($case.name) is not 'captured'"
     }
+    # Bind the AE capture to the recorded input and plug-in: the capture
+    # runner hashes both before launch and records them in the result, so a
+    # replaced input image next to stale capture artifacts fails here.
+    if ([string]$capture.input_sha256 -ne (Sha256 $inputPath)) {
+        throw "capture result for $($case.name) does not record this input image (input_sha256 mismatch or missing)"
+    }
+    if ([string]$capture.tested_aex_sha256 -ne (Sha256 $aexPath)) {
+        throw "capture result for $($case.name) does not record the tested AEX"
+    }
     if ([int]$capture.width -ne $case.width -or [int]$capture.height -ne $case.height) {
         throw "capture dimensions for $($case.name) do not match the case definition"
     }
@@ -145,6 +156,26 @@ $caseRecords = foreach ($case in $cases) {
     $conversion = ConvertPngToRaw $hostPng
     if ($conversion.raw_sha256 -ne $comparison.hashes.raw_sha256) {
         throw "host-$($case.prefix).rgba is not the conversion of host-$($case.prefix).png"
+    }
+    # Bind the host render to the recorded input: re-execute the recorded
+    # render command against this input and require a byte-identical PNG
+    # (ntsc-rs seeds its noise from the frame number, so the render is
+    # deterministic; two byte-identical renders are already on record).
+    $rerender = Join-Path ([System.IO.Path]::GetTempPath()) ("aexcompat-refresh-" + [guid]::NewGuid().ToString('N') + '.png')
+    try {
+        $renderArgs = @($case.host_render_flag, $aexPath, $inputPath, $rerender)
+        if ($null -ne $case.parameter) {
+            $renderArgs += @([string]$case.parameter.host_slot, [string]$case.parameter.value)
+        }
+        & $harnessPath @renderArgs | Out-Null
+        if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $rerender)) {
+            throw "host re-render failed for $($case.name)"
+        }
+        if ((Sha256 $rerender) -ne (Sha256 $hostPng)) {
+            throw "host-$($case.prefix).png is not the render of the recorded input (re-render differs)"
+        }
+    } finally {
+        Remove-Item -LiteralPath $rerender -ErrorAction SilentlyContinue
     }
 
     [ordered]@{
