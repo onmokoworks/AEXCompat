@@ -61,9 +61,9 @@ while true; do
   if ! issue_comments=$(fetch "issues/$PR/comments"); then continue; fi
   if ! pr_reactions=$(fetch "issues/$PR/reactions"); then continue; fi
 
+  # Only the PRINTED finding list is scoped to SINCE (new findings this cycle);
+  # the verdict timestamps below use full history.
   new_pr_comments=$(since_filter <<<"$pr_comments")
-  new_reviews=$(since_filter <<<"$reviews")
-  new_issue_comments=$(since_filter <<<"$issue_comments")
   # Reactions are scoped to SINCE too: with the always-trigger policy an auto
   # first-review +1 usually predates the explicit @codex review, and an unscoped
   # read would keep returning that stale advisory, exiting CLEAN-REACTION before
@@ -71,13 +71,24 @@ while true; do
   # +1 at/after the trigger counts as this cycle's advisory.
   new_reactions=$(since_filter <<<"$pr_reactions")
 
-  # 1. Owner blockers, top priority: inline findings, blocking review states
-  #    (incl. bodyless CHANGES_REQUESTED), and non-trigger comments.
-  owner_hit=$(printf '%s\n%s\n%s' \
-    "$(owner_inline <<<"$new_pr_comments")" \
-    "$(owner_blocking_reviews <<<"$new_reviews")" \
-    "$(owner_comments <<<"$new_issue_comments")" | grep -v '^$' || true)
-  if [ -n "$owner_hit" ]; then echo "$owner_hit"; exit 0; fi
+  # 1. Owner blockers outrank Codex, so surface them as a TERMINAL event (not
+  #    just suppress a clean — that would poll to the 1h timeout when the owner
+  #    feedback predates SINCE and the since-scoped check misses it). This
+  #    mirrors the merge guard's owner gate exactly, so monitor CLEAN <=> guard
+  #    accepts: (a) an unresolved CHANGES_REQUESTED (per-reviewer, full history)
+  #    and (b) comments / inline / bodied reviews on the CURRENT head (head_date
+  #    bound), minus this session's own ack replies, minus ones the owner later
+  #    cleared. Emitting on head_date (not SINCE) is what catches owner feedback
+  #    that arrived before this trigger.
+  clearances=$(owner_clearances <<<"$reviews")
+  owner_block=$(
+    { [ -n "$(owner_review_gate <<<"$reviews")" ] \
+        && echo "OWNER-REVIEW CHANGES_REQUESTED (unresolved; owner must approve/dismiss)"
+      owner_inline_after "$head_date" "$ME" "$clearances" <<<"$pr_comments"
+      owner_comments_after "$head_date" "$clearances" <<<"$issue_comments"
+      owner_reviews_after "$head_date" "$clearances" <<<"$reviews"; } | grep -v '^$' || true
+  )
+  if [ -n "$owner_block" ]; then echo "$owner_block"; exit 0; fi
 
   # Codex verdict. A clean is head-bound (finding 1); a FINDING newer than the
   # clean supersedes it (finding 2). A Codex error is NOT a verdict — it is
@@ -116,29 +127,19 @@ while true; do
     if [ -n "$findings" ]; then echo "$findings"; exit 0; fi
   fi
 
-  # Owner feedback on the current head blocks a clean (aligns with what the guard
-  # accepts; prevents the stale-clean/refuse loop). Bounded by the head commit
-  # date so feedback predating the Codex clean still counts; this session's own
-  # ack replies are exempted by authorship; a later owner approval/dismissal
-  # clears an addressed comment (clearances).
-  clearances=$(owner_clearances <<<"$reviews")
-  owner_on_head=$(
-    { owner_inline_after "$head_date" "$ME" "$clearances" <<<"$pr_comments"
-      owner_comments_after "$head_date" "$clearances" <<<"$issue_comments"
-      owner_reviews_after "$head_date" "$clearances" <<<"$reviews"; } | grep -v '^$' || true
-  )
+  # (Owner feedback on the current head was already emitted as a terminal event
+  # in step 1 and would have exited; reaching here means there is none, so the
+  # clean paths below need no further owner check — they match the guard.)
 
-  # 3. Mergeable CLEAN: a SHA-bound text clean, no newer finding, no owner
-  #    feedback on the current head. This is exactly what the guard will accept.
-  if [ -n "$text_clean_ts" ] && { [ -z "$find_ts" ] || [[ ! "$find_ts" > "$text_clean_ts" ]]; } \
-     && [ -z "$owner_on_head" ]; then
+  # 3. Mergeable CLEAN: a SHA-bound text clean, no newer finding. This is exactly
+  #    what the guard will accept (owner gate already passed in step 1).
+  if [ -n "$text_clean_ts" ] && { [ -z "$find_ts" ] || [[ ! "$find_ts" > "$text_clean_ts" ]]; }; then
     echo "CLEAN: codex clean for head ${head:0:10}"; exit 0
   fi
 
   # 4. Reaction-only advisory: Codex +1 on the PR body, not SHA-bound. Not
   #    mergeable by the guard; the operator must re-trigger for a text clean.
-  if [ -n "$react_clean_ts" ] && { [ -z "$find_ts" ] || [[ ! "$find_ts" > "$react_clean_ts" ]]; } \
-     && [ -z "$owner_on_head" ]; then
+  if [ -n "$react_clean_ts" ] && { [ -z "$find_ts" ] || [[ ! "$find_ts" > "$react_clean_ts" ]]; }; then
     echo "CLEAN-REACTION: codex +1 on PR body for head ${head:0:10} (no SHA-bound text clean; re-trigger @codex review for a mergeable verdict)"; exit 0
   fi
 done
