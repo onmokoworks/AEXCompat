@@ -3,7 +3,6 @@
 #include <DbgHelp.h>
 #include <bcrypt.h>
 #include <d3d12.h>
-#include <dxgi1_6.h>
 #include <fcntl.h>
 #include <io.h>
 #include <excpt.h>
@@ -47,6 +46,7 @@
 
 #include "native_stdout_guard.hpp"
 #include "gpu_device_info_registry.hpp"
+#include "gpu_directx_backend.hpp"
 #include "gpu_opencl_backend.hpp"
 #include "parameter_animation_transport.hpp"
 #include "pf_cache_on_load_suite.hpp"
@@ -80,6 +80,7 @@ using aexcompat::parameter_animation::rational_less;
 using aexcompat::suites::cache_on_load_suite;
 using aexcompat::suites::configure_cache_on_load_suite;
 using aexcompat::gpu_runtime::device_info_registry;
+namespace directx_backend = aexcompat::gpu_runtime::directx_backend;
 using aexcompat::gpu_runtime::gpu_get_device_count;
 using aexcompat::gpu_runtime::gpu_get_device_info;
 using aexcompat::gpu_runtime::kMaxGpuDevices;
@@ -11208,178 +11209,6 @@ uint64_t g_opencl_upload_bytes{};
 uint64_t g_opencl_download_bytes{};
 uint32_t g_opencl_sync_failures{};
 
-struct DirectXApi {
-  HMODULE dxgi_module{};
-  HMODULE d3d12_module{};
-  HRESULT (WINAPI* create_factory)(REFIID, void**){};
-  HRESULT (WINAPI* create_device)(IUnknown*, D3D_FEATURE_LEVEL, REFIID, void**){};
-  IDXGIFactory1* factory{};
-  std::array<IDXGIAdapter1*, kMaxCudaDevices> adapters{};
-  std::array<ID3D12Device*, kMaxCudaDevices> devices{};
-  std::array<ID3D12CommandQueue*, kMaxCudaDevices> queues{};
-  uint32_t device_count{};
-  uint32_t active_device_index{};
-  bool active{};
-};
-DirectXApi g_directx;
-uint32_t g_last_directx_device_count{};
-uint32_t g_last_directx_device_index{};
-bool g_directx_context_used{};
-uint64_t g_directx_upload_bytes{};
-uint64_t g_directx_download_bytes{};
-uint32_t g_directx_sync_failures{};
-
-bool end_directx_context() {
-  for (uint32_t index = 0; index < g_directx.device_count; ++index) {
-    if (g_directx.queues[index]) g_directx.queues[index]->Release();
-    if (g_directx.devices[index]) g_directx.devices[index]->Release();
-    if (g_directx.adapters[index]) g_directx.adapters[index]->Release();
-  }
-  if (g_directx.factory) g_directx.factory->Release();
-  if (g_directx.d3d12_module) FreeLibrary(g_directx.d3d12_module);
-  if (g_directx.dxgi_module) FreeLibrary(g_directx.dxgi_module);
-  g_directx = {};
-  device_info_registry().reset_devices();
-  return true;
-}
-
-bool begin_directx_context(uint32_t active_device_index) {
-  g_directx.dxgi_module = LoadLibraryExW(L"dxgi.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
-  g_directx.d3d12_module = LoadLibraryExW(L"d3d12.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
-  if (!g_directx.dxgi_module || !g_directx.d3d12_module) {
-    end_directx_context();
-    return false;
-  }
-  g_directx.create_factory = reinterpret_cast<decltype(g_directx.create_factory)>(
-      GetProcAddress(g_directx.dxgi_module, "CreateDXGIFactory1"));
-  g_directx.create_device = reinterpret_cast<decltype(g_directx.create_device)>(
-      GetProcAddress(g_directx.d3d12_module, "D3D12CreateDevice"));
-  if (!g_directx.create_factory || !g_directx.create_device ||
-      FAILED(g_directx.create_factory(IID_PPV_ARGS(&g_directx.factory)))) {
-    end_directx_context();
-    return false;
-  }
-  for (uint32_t ordinal = 0; ordinal < kMaxCudaDevices; ++ordinal) {
-    IDXGIAdapter1* adapter{};
-    if (g_directx.factory->EnumAdapters1(ordinal, &adapter) == DXGI_ERROR_NOT_FOUND) break;
-    if (!adapter) continue;
-    DXGI_ADAPTER_DESC1 description{};
-    const bool usable = SUCCEEDED(adapter->GetDesc1(&description)) &&
-        (description.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) == 0;
-    ID3D12Device* device{};
-    if (!usable || FAILED(g_directx.create_device(
-                       adapter, D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&device)))) {
-      adapter->Release();
-      continue;
-    }
-    D3D12_COMMAND_QUEUE_DESC queue_description{};
-    queue_description.Type = D3D12_COMMAND_LIST_TYPE_COMPUTE;
-    ID3D12CommandQueue* queue{};
-    if (FAILED(device->CreateCommandQueue(&queue_description, IID_PPV_ARGS(&queue)))) {
-      device->Release();
-      adapter->Release();
-      continue;
-    }
-    const uint32_t index = g_directx.device_count++;
-    g_directx.adapters[index] = adapter;
-    g_directx.devices[index] = device;
-    g_directx.queues[index] = queue;
-  }
-  g_last_directx_device_count = g_directx.device_count;
-  g_last_directx_device_index = active_device_index;
-  if (g_directx.device_count == 0 || active_device_index >= g_directx.device_count) {
-    end_directx_context();
-    return false;
-  }
-  g_directx.active_device_index = active_device_index;
-  g_directx.active = true;
-  g_directx_context_used = true;
-  device_info_registry().set_device_count(g_directx.device_count);
-  device_info_registry().set_framework(4);
-  for (uint32_t index = 0; index < g_directx.device_count; ++index) {
-    device_info_registry().set_device(
-        index, nullptr, g_directx.devices[index], nullptr, g_directx.queues[index]);
-  }
-  return true;
-}
-
-bool directx_copy_buffer(ID3D12Resource* device_buffer, void* host_data,
-                         std::size_t size, bool upload) {
-  if (!g_directx.active || !device_buffer || !host_data || size == 0) return false;
-  const uint32_t index = g_directx.active_device_index;
-  ID3D12Device* device = g_directx.devices[index];
-  ID3D12CommandAllocator* allocator{};
-  ID3D12GraphicsCommandList* list{};
-  ID3D12Resource* staging{};
-  ID3D12Fence* fence{};
-  HANDLE event = nullptr;
-  bool valid = SUCCEEDED(device->CreateCommandAllocator(
-      D3D12_COMMAND_LIST_TYPE_COMPUTE, IID_PPV_ARGS(&allocator)));
-  if (valid) valid = SUCCEEDED(device->CreateCommandList(
-      0, D3D12_COMMAND_LIST_TYPE_COMPUTE, allocator, nullptr, IID_PPV_ARGS(&list)));
-  D3D12_HEAP_PROPERTIES heap{};
-  heap.Type = upload ? D3D12_HEAP_TYPE_UPLOAD : D3D12_HEAP_TYPE_READBACK;
-  D3D12_RESOURCE_DESC description{};
-  description.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
-  description.Width = size;
-  description.Height = 1;
-  description.DepthOrArraySize = 1;
-  description.MipLevels = 1;
-  description.SampleDesc.Count = 1;
-  description.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
-  if (valid) valid = SUCCEEDED(device->CreateCommittedResource(
-      &heap, D3D12_HEAP_FLAG_NONE, &description,
-      upload ? D3D12_RESOURCE_STATE_GENERIC_READ : D3D12_RESOURCE_STATE_COPY_DEST,
-      nullptr, IID_PPV_ARGS(&staging)));
-  if (valid && upload) {
-    void* mapped{};
-    valid = SUCCEEDED(staging->Map(0, nullptr, &mapped)) && mapped;
-    if (valid) std::memcpy(mapped, host_data, size);
-    if (mapped) staging->Unmap(0, nullptr);
-  }
-  const D3D12_RESOURCE_STATES copy_state = upload
-      ? D3D12_RESOURCE_STATE_COPY_DEST : D3D12_RESOURCE_STATE_COPY_SOURCE;
-  if (valid) {
-    D3D12_RESOURCE_BARRIER before{};
-    before.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-    before.Transition.pResource = device_buffer;
-    before.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-    before.Transition.StateBefore = D3D12_RESOURCE_STATE_COMMON;
-    before.Transition.StateAfter = copy_state;
-    list->ResourceBarrier(1, &before);
-    if (upload) list->CopyBufferRegion(device_buffer, 0, staging, 0, size);
-    else list->CopyBufferRegion(staging, 0, device_buffer, 0, size);
-    std::swap(before.Transition.StateBefore, before.Transition.StateAfter);
-    list->ResourceBarrier(1, &before);
-    valid = SUCCEEDED(list->Close());
-  }
-  if (valid) {
-    ID3D12CommandList* lists[]{list};
-    g_directx.queues[index]->ExecuteCommandLists(1, lists);
-    valid = SUCCEEDED(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence)));
-    event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
-    valid = valid && event && SUCCEEDED(g_directx.queues[index]->Signal(fence, 1)) &&
-        SUCCEEDED(fence->SetEventOnCompletion(1, event)) &&
-        WaitForSingleObject(event, 30'000) == WAIT_OBJECT_0;
-  }
-  if (valid && !upload) {
-    void* mapped{};
-    D3D12_RANGE read_range{0, size};
-    valid = SUCCEEDED(staging->Map(0, &read_range, &mapped)) && mapped;
-    if (valid) std::memcpy(host_data, mapped, size);
-    if (mapped) {
-      D3D12_RANGE written_range{0, 0};
-      staging->Unmap(0, &written_range);
-    }
-  }
-  if (event) CloseHandle(event);
-  if (fence) fence->Release();
-  if (staging) staging->Release();
-  if (list) list->Release();
-  if (allocator) allocator->Release();
-  return valid;
-}
-
 std::mutex g_gpu_memory_mutex;
 std::unordered_map<void*, std::size_t> g_gpu_device_memory;
 std::unordered_map<void*, std::size_t> g_gpu_host_memory;
@@ -11390,7 +11219,7 @@ uint64_t g_gpu_allocations_freed{};
 uint64_t g_invalid_gpu_memory_operations{};
 
 uint32_t active_gpu_device_index() {
-  if (g_directx.active) return g_directx.active_device_index;
+  if (directx_backend::active()) return directx_backend::active_device_index();
   return opencl::active() ? opencl::active_device_index() : g_cuda.active_device_index;
 }
 
@@ -11459,7 +11288,7 @@ int32_t gpu_free_memory(uint32_t index, void* memory,
 
 int32_t __cdecl gpu_allocate_device_memory(void*, uint32_t index, std::size_t size,
                                              void** memory) {
-  if (g_directx.active) {
+  if (directx_backend::active()) {
     if (index != active_gpu_device_index() || !memory || size == 0 ||
         size > kMaxGpuAllocationBytes) return 4;
     std::lock_guard<std::mutex> lock(g_gpu_memory_mutex);
@@ -11478,7 +11307,7 @@ int32_t __cdecl gpu_allocate_device_memory(void*, uint32_t index, std::size_t si
     description.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
     description.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
     ID3D12Resource* resource{};
-    if (FAILED(g_directx.devices[index]->CreateCommittedResource(
+    if (FAILED(directx_backend::device(index)->CreateCommittedResource(
             &heap, D3D12_HEAP_FLAG_NONE, &description, D3D12_RESOURCE_STATE_COMMON,
             nullptr, IID_PPV_ARGS(&resource)))) return 2;
     *memory = resource;
@@ -11521,7 +11350,7 @@ int32_t __cdecl gpu_allocate_device_memory(void*, uint32_t index, std::size_t si
 }
 
 int32_t __cdecl gpu_free_device_memory(void*, uint32_t index, void* memory) {
-  if (g_directx.active) {
+  if (directx_backend::active()) {
     std::lock_guard<std::mutex> lock(g_gpu_memory_mutex);
     const auto found = g_gpu_device_memory.find(memory);
     if (index != active_gpu_device_index() || !memory ||
@@ -11620,7 +11449,7 @@ int32_t __cdecl gpu_create_world(void*, uint32_t index, int32_t width, int32_t h
                                   uint8_t clear_pixels, void** world) {
   if (index != active_gpu_device_index() || !world || pixel_format != kPixelFormatGpuBgra128 ||
       width <= 0 || height <= 0 || width > 4096 || height > 4096) return 4;
-  if (!g_cuda.pushed && !opencl::active() && !g_directx.active) {
+  if (!g_cuda.pushed && !opencl::active() && !directx_backend::active()) {
     auto descriptor = std::make_unique<std::array<std::byte, kEffectWorldSize>>();
     const int32_t error = new_world(nullptr, width, height, clear_pixels != 0,
                                     pixel_format, descriptor->data());
@@ -11638,7 +11467,7 @@ int32_t __cdecl gpu_create_world(void*, uint32_t index, int32_t width, int32_t h
       nullptr, index, static_cast<std::size_t>(size64), &pixels);
   if (error != 0) return error;
   bool initialized = false;
-  if (g_directx.active) {
+  if (directx_backend::active()) {
     // Buffers begin in COMMON; the SDK sample relies on buffer state promotion
     // for its raw SRV/UAV views and synchronizes each dispatch on the host queue.
     initialized = true;
@@ -11714,7 +11543,7 @@ struct CudaRenderTransport {
 
 bool prepare_cuda_render_transport(void* input_world, void* output_world,
                                    CudaRenderTransport& transport) {
-  if ((!g_cuda.pushed && !opencl::active() && !g_directx.active) ||
+  if ((!g_cuda.pushed && !opencl::active() && !directx_backend::active()) ||
       !input_world || !output_world) return false;
   transport.input_world = input_world;
   transport.output_world = output_world;
@@ -11758,11 +11587,11 @@ bool prepare_cuda_render_transport(void* input_world, void* output_world,
     }
   }
   bool uploaded = false;
-  if (g_directx.active) {
+  if (directx_backend::active()) {
     std::vector<unsigned char> sentinel(output_size, 0xCC);
-    uploaded = directx_copy_buffer(static_cast<ID3D12Resource*>(transport.input_device),
+    uploaded = directx_backend::copy_buffer(static_cast<ID3D12Resource*>(transport.input_device),
                                    bgra.data(), input_size, true) &&
-        directx_copy_buffer(static_cast<ID3D12Resource*>(transport.output_device),
+        directx_backend::copy_buffer(static_cast<ID3D12Resource*>(transport.output_device),
                             sentinel.data(), output_size, true);
   } else if (opencl::active()) {
     const unsigned char pattern = 0xCC;
@@ -11784,7 +11613,7 @@ bool prepare_cuda_render_transport(void* input_world, void* output_world,
     transport.input_device = transport.output_device = nullptr;
     return false;
   }
-  if (g_directx.active) g_directx_upload_bytes += input_size;
+  if (directx_backend::active()) directx_backend::record_upload(input_size);
   else if (opencl::active()) g_opencl_upload_bytes += input_size;
   else g_cuda_upload_bytes += input_size;
   std::memcpy(static_cast<std::byte*>(input_world) + 24, &transport.input_device,
@@ -11797,11 +11626,11 @@ bool prepare_cuda_render_transport(void* input_world, void* output_world,
 bool finish_cuda_render_transport(CudaRenderTransport& transport) {
   if (!transport.input_device || !transport.output_device) return false;
   const uint32_t device_index = active_gpu_device_index();
-  bool valid = g_directx.active || (opencl::active()
+  bool valid = directx_backend::active() || (opencl::active()
       ? opencl::finish(device_index) == opencl::kSuccess
       : g_cuda.synchronize() == kCudaSuccess);
   if (!valid) {
-    if (g_directx.active) ++g_directx_sync_failures;
+    if (directx_backend::active()) directx_backend::record_sync_failure();
     else if (opencl::active()) ++g_opencl_sync_failures;
     else ++g_cuda_sync_failures;
   }
@@ -11809,8 +11638,8 @@ bool finish_cuda_render_transport(CudaRenderTransport& transport) {
       transport.output_height * 16;
   std::vector<float> bgra(output_size / sizeof(float));
   bool downloaded = false;
-  if (valid && g_directx.active)
-    downloaded = directx_copy_buffer(
+  if (valid && directx_backend::active())
+    downloaded = directx_backend::copy_buffer(
         static_cast<ID3D12Resource*>(transport.output_device), bgra.data(), output_size, false);
   else if (valid && opencl::active())
     downloaded = opencl::enqueue_read(device_index, transport.output_device,
@@ -11821,7 +11650,7 @@ bool finish_cuda_render_transport(CudaRenderTransport& transport) {
     downloaded = g_cuda.copy_device_to_host(bgra.data(), output_device, output_size) == kCudaSuccess;
   }
   if (downloaded) {
-    if (g_directx.active) g_directx_download_bytes += output_size;
+    if (directx_backend::active()) directx_backend::record_download(output_size);
     else if (opencl::active()) g_opencl_download_bytes += output_size;
     else g_cuda_download_bytes += output_size;
     for (int32_t y = 0; y < transport.output_height; ++y) {
@@ -18786,7 +18615,7 @@ SmartResult smart_render_once(EffectEntry entry, std::array<std::byte, kInSize>&
   if (gpu_negotiation) capture_module_audit();
   const bool gpu_context_started = use_cuda ? begin_cuda_context(gpu_device_index) :
       (use_opencl ? opencl::begin_context(gpu_device_index) :
-       (use_directx ? begin_directx_context(gpu_device_index) : true));
+       (use_directx ? directx_backend::begin_context(gpu_device_index) : true));
   if (gpu_negotiation) {
     write<int32_t>(gpu_setup_input, 0, gpu_framework);
     write<uint32_t>(gpu_setup_input, 4, gpu_device_index);
@@ -18938,7 +18767,7 @@ SmartResult smart_render_once(EffectEntry entry, std::array<std::byte, kInSize>&
   if (use_opencl && gpu_context_started && !opencl::end_context() &&
       result.gpu_setdown_error == 0)
     result.gpu_setdown_error = -6;
-  if (use_directx && gpu_context_started && !end_directx_context() &&
+  if (use_directx && gpu_context_started && !directx_backend::end_context() &&
       result.gpu_setdown_error == 0)
     result.gpu_setdown_error = -6;
   void* pre_render_data = read<void*>(pre_output, 40);
@@ -23203,12 +23032,12 @@ int wmain(int argc, wchar_t **argv) {
             << ",\"opencl_sync_failures\":" << g_opencl_sync_failures
             << ",\"opencl_device_count\":" << opencl::last_device_count()
             << ",\"opencl_device_index\":" << opencl::last_device_index()
-            << ",\"directx_context_used\":" << (g_directx_context_used ? "true" : "false")
-            << ",\"directx_device_count\":" << g_last_directx_device_count
-            << ",\"directx_device_index\":" << g_last_directx_device_index
-            << ",\"directx_upload_bytes\":" << g_directx_upload_bytes
-            << ",\"directx_download_bytes\":" << g_directx_download_bytes
-            << ",\"directx_sync_failures\":" << g_directx_sync_failures
+            << ",\"directx_context_used\":" << (directx_backend::diagnostics().context_used ? "true" : "false")
+            << ",\"directx_device_count\":" << directx_backend::diagnostics().device_count
+            << ",\"directx_device_index\":" << directx_backend::diagnostics().device_index
+            << ",\"directx_upload_bytes\":" << directx_backend::diagnostics().upload_bytes
+            << ",\"directx_download_bytes\":" << directx_backend::diagnostics().download_bytes
+            << ",\"directx_sync_failures\":" << directx_backend::diagnostics().sync_failures
             << ",\"gpu_allocations_created\":" << g_gpu_allocations_created
             << ",\"gpu_allocations_freed\":" << g_gpu_allocations_freed
             << ",\"live_gpu_allocation_count\":" << (g_gpu_device_memory.size() + g_gpu_host_memory.size())
@@ -23463,12 +23292,12 @@ int wmain(int argc, wchar_t **argv) {
             << ",\"opencl_sync_failures\":" << g_opencl_sync_failures
             << ",\"opencl_device_count\":" << opencl::last_device_count()
             << ",\"opencl_device_index\":" << opencl::last_device_index()
-            << ",\"directx_context_used\":" << (g_directx_context_used ? "true" : "false")
-            << ",\"directx_device_count\":" << g_last_directx_device_count
-            << ",\"directx_device_index\":" << g_last_directx_device_index
-            << ",\"directx_upload_bytes\":" << g_directx_upload_bytes
-            << ",\"directx_download_bytes\":" << g_directx_download_bytes
-            << ",\"directx_sync_failures\":" << g_directx_sync_failures
+            << ",\"directx_context_used\":" << (directx_backend::diagnostics().context_used ? "true" : "false")
+            << ",\"directx_device_count\":" << directx_backend::diagnostics().device_count
+            << ",\"directx_device_index\":" << directx_backend::diagnostics().device_index
+            << ",\"directx_upload_bytes\":" << directx_backend::diagnostics().upload_bytes
+            << ",\"directx_download_bytes\":" << directx_backend::diagnostics().download_bytes
+            << ",\"directx_sync_failures\":" << directx_backend::diagnostics().sync_failures
             << ",\"pixel_format_fault_observed\":" << (pixel_format_fault_observed ? "true" : "false")
             << ",\"pixel_format_add_calls\":" << g_pixel_format_add_calls
             << ",\"pixel_format_clear_calls\":" << g_pixel_format_clear_calls

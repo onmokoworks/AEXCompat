@@ -6,6 +6,7 @@ HEADER = ROOT / "minihost" / "src" / "gpu_device_info_registry.hpp"
 SOURCE = ROOT / "minihost" / "src" / "gpu_device_info_registry.cpp"
 MAIN = ROOT / "minihost" / "src" / "l2_main.cpp"
 OPENCL = ROOT / "minihost" / "src" / "gpu_opencl_backend.cpp"
+DIRECTX = ROOT / "minihost" / "src" / "gpu_directx_backend.cpp"
 
 
 def test_gpu_device_info_registry_preserves_bounded_abi_contract():
@@ -32,6 +33,7 @@ def test_gpu_device_info_registry_preserves_bounded_abi_contract():
 def test_gpu_device_info_callbacks_and_reset_keep_existing_protocol():
     source = SOURCE.read_text(encoding="utf-8")
     main = MAIN.read_text(encoding="utf-8")
+    directx = DIRECTX.read_text(encoding="utf-8")
 
     assert '"stage:gpu_device_info_begin\\n"' in source
     assert '"stage:gpu_device_info_end error=0\\n"' in source
@@ -45,4 +47,6 @@ def test_gpu_device_info_callbacks_and_reset_keep_existing_protocol():
     assert "framework_" not in reset
     assert "int32_t __cdecl gpu_get_device_count" not in main
     assert "int32_t __cdecl gpu_get_device_info" not in main
+    assert "device_info_registry().reset_devices()" in main
     assert "device_info_registry().reset_devices()" in OPENCL.read_text(encoding="utf-8")
+    assert "device_info_registry().reset_devices()" in directx
