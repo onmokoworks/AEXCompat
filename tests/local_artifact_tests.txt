@@ -102,3 +102,6 @@ tests/test_worker_crash_minidump.py::test_guarded_crash_writes_a_minidump[aex_sm
 tests/test_worker_crash_minidump.py::test_crash_writes_nothing_without_opt_in[aex_l2_worker.exe]
 tests/test_worker_crash_minidump.py::test_crash_writes_nothing_without_opt_in[aex_render_worker.exe]
 tests/test_worker_crash_minidump.py::test_crash_writes_nothing_without_opt_in[aex_smart_worker.exe]
+tests/test_worker_crash_minidump.py::test_directory_cap_stops_further_dumps[aex_l2_worker.exe]
+tests/test_worker_crash_minidump.py::test_directory_cap_stops_further_dumps[aex_render_worker.exe]
+tests/test_worker_crash_minidump.py::test_directory_cap_stops_further_dumps[aex_smart_worker.exe]

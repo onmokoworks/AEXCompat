@@ -449,7 +449,15 @@ fn minidump_marker(line: &str) -> Option<String> {
     let reason = reason.split_once(" code=").map_or(reason, |(head, _)| head);
     matches!(
         reason,
-        "dbghelp_unavailable" | "entry_unavailable" | "create_failed" | "write_failed"
+        "dbghelp_unavailable"
+            | "entry_unavailable"
+            | "create_failed"
+            | "write_failed"
+            | "size_exceeded"
+            | "timeout"
+            | "dir_cap"
+            | "event_unavailable"
+            | "thread_unavailable"
     )
     .then(|| format!("failed reason={reason}"))
 }
@@ -5773,6 +5781,15 @@ mod tests {
         assert_eq!(
             minidump_marker("stage:minidump_failed reason=create_failed code=5"),
             Some("failed reason=create_failed".to_owned())
+        );
+        // Hardening reasons (timeout, size_exceeded, dir_cap, ...) are accepted.
+        assert_eq!(
+            minidump_marker("stage:minidump_failed reason=timeout"),
+            Some("failed reason=timeout".to_owned())
+        );
+        assert_eq!(
+            minidump_marker("stage:minidump_failed reason=size_exceeded"),
+            Some("failed reason=size_exceeded".to_owned())
         );
 
         // A plug-in cannot smuggle a path or fake reason through the marker.

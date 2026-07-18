@@ -33,28 +33,58 @@ The broker validates the directory before dispatch (fail-closed):
 
 ## Behavior
 
-- One dump per worker process, named `crash-<pid>.dmp`, written with
-  `CREATE_NEW` so an existing dump is never overwritten.
-- Written from the production `__except` filter (`capture_seh_exception`) that
-  guards every effect entry call, and additionally from a
-  `SetUnhandledExceptionFilter` top-level filter for crashes that never reach
-  an `__except` (for example on a plug-in's own thread). The top-level filter
-  returns `EXCEPTION_CONTINUE_SEARCH`, so the exit code and default handling
-  are unchanged. Stack-overflow crashes may still be uncapturable because the
-  handler itself needs stack; this limit is expected.
-- `dbghelp.dll` is loaded dynamically (system32 only) and `MiniDumpWriteDump`
-  resolved at crash time, so a machine without dbghelp degrades to a
-  `stage:minidump_failed reason=dbghelp_unavailable` note rather than a
-  secondary failure.
-- The worker emits a `stage:minidump_written name=… bytes=…` or
-  `stage:minidump_failed reason=…` line to stderr. The broker surfaces this as
-  `minidump` in the worker diagnostics JSON (basename and reason only, never a
-  full path) and records the managed dump directory as `minidump_directory` in
-  the render report.
+Enabling happens once, before the plug-in loads, in `minidump::enable()`:
+
+- **The directory is pinned by an open handle** (`FILE_FLAG_BACKUP_SEMANTICS |
+  FILE_FLAG_OPEN_REPARSE_POINT`) and verified to be a real directory, not a
+  reparse point. Holding the handle blocks the directory from being renamed or
+  replaced, and its canonical path is resolved once via
+  `GetFinalPathNameByHandle`. The dump is later created under that pinned path
+  with `FILE_FLAG_OPEN_REPARSE_POINT`, so a plug-in (running under the same
+  user token) cannot redirect the dump outside the managed tree by swapping the
+  directory or leaf for a junction after the broker validated it.
+- **`dbghelp.dll` is loaded and `MiniDumpWriteDump` resolved up front**, and a
+  dedicated dumper thread is pre-started. The crash path does no loader work.
+- **Directory accumulation cap** (`kMaxDirFiles` = 64, `kMaxDirBytes` = 512 MiB):
+  if the directory already holds that many `crash-*.dmp` files or bytes,
+  enabling degrades (keeps rendering, no dumps) rather than letting repeated
+  crashes exhaust the target tree.
+- Missing dbghelp, event/thread creation failure, or the dir cap all degrade
+  (render continues without dumps); only a bad directory fails the worker
+  closed. Enabling is opt-in, so nothing above runs by default.
+
+On a crash:
+
+- The SEH filter (`capture_seh_exception`, guarding every effect entry) and the
+  `SetUnhandledExceptionFilter` top-level filter (for crashes that never reach
+  an `__except`, e.g. on a plug-in's own thread) both route to
+  `write_crash_minidump`. **`MiniDumpWriteDump` never runs on the faulting
+  thread**: the filter copies the exception record and context to stable
+  storage, signals the pre-started dumper thread, and waits with a 15 s
+  timeout. A loader-deadlocked dump therefore cannot hang crash containment —
+  on timeout the filter returns and the worker still converts to 512 and exits.
+  The top-level filter returns `EXCEPTION_CONTINUE_SEARCH`, so the exit code is
+  unchanged. Stack-overflow crashes may still be uncapturable (the handler
+  itself needs stack); this limit is expected.
+- One dump per process, `crash-<pid>.dmp`, `CREATE_NEW` (never overwrites).
+  A **per-file cap** (`kMaxFileBytes` = 64 MiB) deletes and reports
+  `size_exceeded` if a dump exceeds it.
+- The worker emits `stage:minidump_written name=… bytes=…` or
+  `stage:minidump_failed reason=…` to stderr (reasons include `timeout`,
+  `size_exceeded`, `dir_cap`, `create_failed`, `write_failed`,
+  `dbghelp_unavailable`). The broker validates this against the exact
+  worker-owned shape and surfaces it as `minidump` in the diagnostics JSON
+  (reason/bytes only, never a path), plus `minidump_directory` in the report.
 
 ## Verification
 
-`--self-test-crash-minidump <dir>` raises a real access violation under the
-production guard and confirms a non-empty `MDMP`-signed dump landed. Covered by
-`tests/test_worker_crash_minidump.py` for all three workers (registered in
-`tests/local_artifact_tests.txt` since it runs a built worker).
+`tests/test_worker_crash_minidump.py` (all three workers, registered in
+`tests/local_artifact_tests.txt` since it runs built workers):
+
+- `--self-test-crash-minidump <dir>` raises a real access violation under the
+  production guard and confirms a non-empty `MDMP`-signed dump landed (proving
+  the dedicated-thread path end to end).
+- `--self-test-crash-no-minidump <dir>` raises the same guarded crash with
+  minidumps disabled and confirms no dump is produced (the default-off path).
+- A directory pre-filled past the cap confirms enabling degrades and no further
+  dump is written.
