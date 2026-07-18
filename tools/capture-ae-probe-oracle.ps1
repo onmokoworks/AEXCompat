@@ -89,7 +89,7 @@ if ($PlanOnly) {
             throw "Planned output parent does not exist: $newPath"
         }
     }
-    $running = @(Get-Process AfterFX,aerender,aerendercore -ErrorAction SilentlyContinue)
+    $running = @(Get-Process AfterFX,AfterFX.com,aerender,aerendercore -ErrorAction SilentlyContinue)
     $capture = @(
         '&', (Join-Path $PSScriptRoot 'capture-ae-probe-oracle.ps1'),
         '-AfterEffects', $afterEffectsPath, '-ProbeAex', $probePath,
@@ -153,7 +153,7 @@ if ($PlanOnly) {
     return
 }
 
-if (Get-Process AfterFX,aerender,aerendercore -ErrorAction SilentlyContinue) {
+if (Get-Process AfterFX,AfterFX.com,aerender,aerendercore -ErrorAction SilentlyContinue) {
     throw 'After Effects is already running; refusing to install or capture an oracle.'
 }
 if (Test-Path -LiteralPath $installRoot) {
@@ -194,9 +194,16 @@ try {
             -Report $ControlComparisonReport
     }
 } finally {
-    if (Get-Process AfterFX,aerender,aerendercore -ErrorAction SilentlyContinue) {
-        Get-Process AfterFX,aerender,aerendercore -ErrorAction SilentlyContinue |
-            Stop-Process -Force -ErrorAction SilentlyContinue
+    # capture-ae-reference.ps1 shuts down or kills its own launch tree by
+    # PID before returning, so an AE-named process still alive here is most
+    # likely an unrelated session started after the startup gate; a
+    # name-based kill would terminate it (review on #59). Report it instead
+    # and let the plug-in removal below fail explicitly if that process
+    # still holds the probe binary.
+    $lingering = Get-Process AfterFX,AfterFX.com,aerender,aerendercore -ErrorAction SilentlyContinue
+    if ($lingering) {
+        Write-Warning ('Not terminating AE-named processes this run did not launch: ' +
+            (($lingering | ForEach-Object { "$($_.ProcessName):$($_.Id)" }) -join ', '))
     }
     if (Test-Path -LiteralPath $installRoot) {
         $resolvedRoot = (Resolve-Path -LiteralPath $installRoot).Path

@@ -121,20 +121,46 @@ if ($ParamName) {
 try {
     $escapedScriptPath = $scriptPath.Replace('"', '\"')
     # AE 25.2 can abort before JSX execution when -noui hits a failed GPU3
-    # sanity state. UI launch still runs the script and the JSX quits AE.
-    $arguments = '-m -r "{0}"' -f $escapedScriptPath
+    # sanity state; there the UI launch still runs the script and the JSX
+    # quits AE. On AE 25.3.1 `-noui` was measured to execute the JSX and exit
+    # cleanly (issue #54, 2026-07-19), so 25.3+ runs headless and older
+    # versions keep the UI fallback.
+    $versionSource = Join-Path (Split-Path -Parent $afterEffectsPath) 'AfterFX.exe'
+    if (-not (Test-Path -LiteralPath $versionSource)) {
+        $versionSource = $afterEffectsPath
+    }
+    # FileVersionRaw is the parsed numeric version; the FileVersion string can
+    # carry trailing text (e.g. "10.0.26100.1 (WinBuild...)") that [Version]
+    # cannot parse. A missing version resolves to 0.0, i.e. the UI fallback.
+    $aeFileVersion = (Get-Item -LiteralPath $versionSource).VersionInfo.FileVersionRaw
+    $arguments = if ($aeFileVersion -ge [Version]'25.3') {
+        '-m -noui -r "{0}"' -f $escapedScriptPath
+    } else {
+        '-m -r "{0}"' -f $escapedScriptPath
+    }
     $process = Start-Process -FilePath $afterEffectsPath -ArgumentList $arguments -PassThru
     $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
     while ([DateTime]::UtcNow -lt $deadline -and -not (Test-Path -LiteralPath $resultPath)) {
         Start-Sleep -Milliseconds 250
     }
     if (-not (Test-Path -LiteralPath $resultPath)) {
-        # Stop the AfterFX.com shim too: the launch gate above refuses on a
-        # lingering shim, so leaving one behind here would block every
-        # subsequent capture until it is killed manually.
-        Get-Process AfterFX,'AfterFX.com',aerendercore -ErrorAction SilentlyContinue |
-            Stop-Process -Force -ErrorAction SilentlyContinue
+        # Kill only this launch's process tree, addressed by the PID from
+        # Start-Process: /T reaches a GUI-mode child AfterFX or aerendercore,
+        # while an unrelated AE session started after the startup gate is
+        # never touched (a name-based kill could hit it), and the shim
+        # itself is the tree root, so no lingering shim can block the gate.
+        & taskkill.exe /PID $process.Id /T /F 2>$null | Out-Null
         throw 'After Effects reference capture timed out without a result.'
+    }
+    # The result JSON is written while After Effects is still quitting, and
+    # the wrapper can hold the output PNG for a moment afterwards (observed
+    # on AE 25.3.1): returning here breaks an immediate hash of the PNG and
+    # trips the next capture's already-running gate. Wait on the launched
+    # process itself, so the bound applies only to this capture's identity,
+    # and report a quit that outlives it as a failure, not a silent success.
+    if (-not $process.WaitForExit(30000)) {
+        & taskkill.exe /PID $process.Id /T /F 2>$null | Out-Null
+        throw 'After Effects did not exit after writing the capture result.'
     }
 } finally {
     'AEXCOMPAT_AE_INPUT','AEXCOMPAT_AE_OUTPUT','AEXCOMPAT_AE_RESULT','AEXCOMPAT_AE_EFFECT',

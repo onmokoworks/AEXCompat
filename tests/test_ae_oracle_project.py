@@ -25,7 +25,7 @@ def test_oracle_jsx_is_fail_closed_and_prepares_exr_render_queue():
 
 def test_oracle_runner_refuses_live_ae_and_uses_isolated_launch():
     source = RUNNER.read_text(encoding="utf-8")
-    assert "Get-Process AfterFX,aerender,aerendercore" in source
+    assert "Get-Process AfterFX,AfterFX.com,aerender,aerendercore" in source
     assert "Join-Path (Split-Path -Parent $afterEffectsPath) 'AfterFX.com'" in source
     assert "& $scriptHostPath -m -r $scriptPath" in source
     assert "-noui" not in source

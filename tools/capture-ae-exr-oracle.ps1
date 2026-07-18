@@ -58,7 +58,7 @@ if ($PlanOnly) {
     return
 }
 
-if (Get-Process AfterFX,aerender,aerendercore -ErrorAction SilentlyContinue) {
+if (Get-Process AfterFX,AfterFX.com,aerender,aerendercore -ErrorAction SilentlyContinue) {
     throw 'After Effects rendering is active; refusing to start an oracle run.'
 }
 if (Test-Path -LiteralPath $root) { throw "Refusing to overwrite output root: $root" }
