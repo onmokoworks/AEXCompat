@@ -197,12 +197,23 @@ def test_owner_inline_before_clean_is_ignored() -> None:
     assert _call("owner_inline_after", payload, clean_ts) == ""
 
 
-def test_owner_inline_reply_after_clean_is_not_a_new_finding() -> None:
-    # A reply (in_reply_to_id set) is an ack thread, e.g. this session's own
-    # reply-as-owner; it must not self-block the merge.
+def test_owner_inline_reply_after_clean_blocks() -> None:
+    # An owner reply on an existing thread after the clean (e.g. "still not
+    # fixed") is real feedback and must block, even though it carries
+    # in_reply_to_id. Self-block by this session's own ack replies is prevented
+    # by the timestamp scope (they precede the clean), not by dropping replies.
+    clean_ts = "2026-07-18T19:16:44Z"
+    payload = [{"user": {"login": "onmokoworks"}, "id": 9, "in_reply_to_id": 8, "path": "x.sh", "line": 3,
+                "created_at": "2026-07-18T19:20:00Z", "body": "still not fixed"}]
+    assert "OWNER-INLINE" in _call("owner_inline_after", payload, clean_ts)
+
+
+def test_owner_inline_reply_before_clean_is_ignored() -> None:
+    # This session's ack reply, posted before re-triggering, precedes the next
+    # clean and is excluded by the timestamp scope.
     clean_ts = "2026-07-18T19:16:44Z"
     payload = [{"user": {"login": "naari3"}, "id": 9, "in_reply_to_id": 8, "path": "x.sh", "line": 3,
-                "created_at": "2026-07-18T19:20:00Z", "body": "対応済み"}]
+                "created_at": "2026-07-18T19:10:00Z", "body": "対応済み"}]
     assert _call("owner_inline_after", payload, clean_ts) == ""
 
 

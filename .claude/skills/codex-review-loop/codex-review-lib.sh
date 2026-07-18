@@ -135,14 +135,17 @@ owner_inline() {
 # the guard must catch: the owner speaks after clean but before merge). The
 # lower bound is INCLUSIVE (>=): GitHub timestamps are second-resolution, so an
 # owner comment in the same second as the clean must fail closed and block, not
-# slip through. Excludes reply comments (an ack thread is not a new finding) so
-# this session's own replies-as-owner do not self-block (input: pull
-# review-comments array).
+# slip through. Reply comments (in_reply_to_id set) are INCLUDED: an owner reply
+# like "still not fixed" on an existing thread after the clean is real feedback
+# and must block. Self-block by this session's own ack replies is prevented by
+# the "> = clean" timestamp scope, not by dropping replies: this session posts
+# its replies before re-triggering (so before the next clean), and the CLEAN
+# branch runs the guard without posting any reply, so any owner reply newer than
+# the clean is genuinely the owner's (input: pull review-comments array).
 owner_inline_after() {
   jq -r --arg ts "$1" --argjson owner "$OWNER_LOGINS" '
     .[] | select([.user.login] | inside($owner))
     | select(.created_at >= $ts)
-    | select((.in_reply_to_id // null) == null)
     | "OWNER-INLINE id=\(.id) \(.path):\(.line // .original_line): \((.body | split("\n")[0]))"'
 }
 
