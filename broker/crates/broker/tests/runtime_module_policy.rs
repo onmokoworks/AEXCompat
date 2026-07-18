@@ -5,7 +5,10 @@ use aexcompat_broker::runtime_module_policy::{
 use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+static FIXTURE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 struct Fixture {
     root: PathBuf,
@@ -102,12 +105,13 @@ fn gpu_report_rejects_cpu_and_unbound_or_wrong_backend_reports() {
 impl Fixture {
     fn new() -> Self {
         let root = std::env::temp_dir().join(format!(
-            "aex-runtime-policy-{}-{}",
+            "aex-runtime-policy-{}-{}-{}",
             std::process::id(),
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
-                .as_nanos()
+                .as_nanos(),
+            FIXTURE_SEQUENCE.fetch_add(1, Ordering::Relaxed)
         ));
         fs::create_dir(&root).unwrap();
         let root = fs::canonicalize(root).unwrap();
