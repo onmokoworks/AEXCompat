@@ -6,10 +6,10 @@ repository has a short entry point and a durable place for longer plans.
 ## Contributor Guides
 
 - `BUILD_REQUIREMENTS.md`
-  - Per-component build prerequisites: Rust-only harness builds, Python test
-    dependencies, After Effects SDK generation and `AFTER_EFFECTS_SDK_ROOT`,
-    Visual Studio / CMake / v143 toolset requirements, and a verified
-    machine configuration.
+  - Per-component build prerequisites: Rust harness builds, Python test
+    dependencies, minihost worker builds, After Effects SDK generation and
+    `AFTER_EFFECTS_SDK_ROOT`, Visual Studio / CMake / v143 toolset
+    requirements, and a verified machine configuration.
 
 ## Design Documents
 
