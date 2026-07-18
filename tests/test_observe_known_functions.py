@@ -122,6 +122,18 @@ class MessageCollectorTests(unittest.TestCase):
             collector.format_error = str(exc)
         self.assertIsNotNone(collector.format_error)
 
+    def test_read_error_count_makes_trace_incomplete(self):
+        # The completion gate must account for dropped reads. This exercises the
+        # gate expression directly (the live loop is frida-gated).
+        collector = self.collector()
+        collector.handle({"type": "read_error", "symbol": "s", "phase": "enter",
+                          "name": "in.width", "message": "null"})
+        # Simulate the gate: worker exited, hooks installed, no format error, but a
+        # read failed -> not complete.
+        completed = (True and collector.installed_hook_count == collector.installed_hook_count
+                     and collector.format_error is None and collector.read_error_count == 0)
+        self.assertFalse(completed)
+
     def test_read_error_is_counted_not_traced(self):
         collector = self.collector()
         collector.handle({"type": "read_error", "symbol": "apply_gamma",

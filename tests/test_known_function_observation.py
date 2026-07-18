@@ -274,6 +274,13 @@ class ResolveTests(unittest.TestCase):
             resolve_spec(spec, self.offset_map)
         self.assertIn("unsupported phase", str(ctx.exception))
 
+    def test_non_string_phase_is_rejected_not_typeerror(self):
+        for target in ("reads", "scalar_args"):
+            spec = copy.deepcopy(self.spec)
+            spec["hooks"][0][target][0]["phase"] = []  # unhashable, not a string
+            with self.assertRaises(ResolutionError):
+                resolve_spec(spec, self.offset_map)
+
     def test_unsupported_return_as_is_rejected(self):
         spec = copy.deepcopy(self.spec)
         spec["hooks"][0]["return_as"] = "uint64"  # typo / unsupported

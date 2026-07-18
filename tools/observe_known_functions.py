@@ -319,14 +319,16 @@ def run_observation(
             device.resume(pid)
             exited = _await_exit(frida, device, pid, timeout_seconds)
             # A trace is complete only if the worker exited, the expected hooks
-            # actually attached, and no invocation was rejected by the formatter.
-            # If the module never loaded (module_path wrong, or a loader path we do
-            # not watch) hooks never install; if a payload failed validation the
-            # invocation was dropped - either way the trace is not complete.
+            # attached, no invocation was rejected by the formatter, and every
+            # requested field read succeeded. A read_error means a requested field
+            # was dropped (null/out-of-extent/unsafe 64-bit), so the observation is
+            # missing data and must not be reported complete on the side-channel
+            # count alone.
             completed = (
                 exited
                 and collector.installed_hook_count == expected_hook_count
                 and collector.format_error is None
+                and collector.read_error_count == 0
             )
     finally:
         try:
