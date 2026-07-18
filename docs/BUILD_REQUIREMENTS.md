@@ -155,6 +155,14 @@ powershell -File tools\build-pf-composite-rect-probe.ps1 -Generator "Visual Stud
 powershell -File tools\build-pf-adv-time-probe.ps1 -Generator "Visual Studio 17 2022" `
   -CMake "C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe"
 ```
+
+- 例外として `tools/build-pf-fill-premultiply-probe.ps1` は CMake を使わず、
+  vcvars64 環境で cl / rc / link を直接呼ぶ。`-Generator` / `-CMake` 引数は
+  存在せず、`-VisualStudio` (既定は
+  `C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools`) で
+  `VC\Auxiliary\Build\vcvars64.bat` を持つ VS instance の root を指定する。
+  既定パスに VS 2022 Build Tools が無い環境では `-VisualStudio` の明示指定が
+  必須 (VS 2026 等でも vcvars64.bat があれば可)。
 - SDK sample fixture のうち `.vcxproj` を `PlatformToolset=v143` 固定でビルド
   するもの (`tools/build-sdk-grabba.ps1` / `tools/build-sdk-supervisor.ps1` の
   MSBuild build と、`tools/sdk-fixtures/*-v143.props` を使う fixture 群) は
@@ -178,8 +186,24 @@ powershell -File tools\build-pf-adv-time-probe.ps1 -Generator "Visual Studio 17 
 
 ## 任意 (機能別)
 
-- **GPU render / device world 検証**: 対応 GPU と runtime
+- **GPU render / device world 検証 (runtime)**: 対応 GPU と runtime
   (CUDA `nvcuda.dll` / OpenCL / DirectX 12)。結果は driver-build 固有。
+- **GPU fixture の build (`tools/build-sdk-invert-*.ps1`)**: runtime とは別に、
+  ビルド時の依存が必要。いずれも引数で場所を上書きできるが、既定パスは
+  検証環境の固有値なので第三者環境ではまず一致しない。
+  - 共通: **Boost の preprocessor ヘッダ** (`-BoostInclude`。既定は
+    MotionBuilder 2024 OpenReality SDK の include パス) と、SDK の
+    `GPUUtils` スクリプトを動かす **Python**。
+  - `build-sdk-invert-directx.ps1`: **DXC** (`-Dxc`。未指定なら
+    Windows Kits 10 配下から自動発見) と **OpenCL ヘッダ / OpenCL.lib**
+    (`-OpenClSdk`。既定は CUDA v13.2 パス)。vcvars64 は未指定なら
+    VS 既知パスから最新を自動発見。
+  - `build-sdk-invert-cuda.ps1`: **CUDA toolkit (nvcc)** (`-CudaRoot`。既定は
+    CUDA v13.2)。`-VisualStudio` の既定は VS 2022 Build Tools 固定パス。
+  - `build-sdk-invert-opencl.ps1`: **OpenCL ヘッダ / OpenCL.lib**
+    (`-OpenClSdk`。既定は CUDA v13.2 パス)。`-VisualStudio` の既定は
+    VS 2026 Community 固定パス。
+  - GPU デバイス自体はビルドには不要 (必要になるのは runtime 検証時)。
 - **AE oracle**: After Effects 25.2 実機。`tools/*.jsx` を AE 内で実行して
   参照画像 / trace を取得する。通常の harness 実行には不要。
 
@@ -248,7 +272,12 @@ Per-component prerequisites on Windows x64:
   auto-discover the VS-bundled CMake via `tools/resolve-build-cmake.ps1`,
   while others still default `$CMake` to the VS 2026 Community bundled path
   and need an explicit `-CMake` on machines without it (a VS 2022 example
-  command line is included in the Japanese section and was verified). Only the
+  command line is included in the Japanese section and was verified). One
+  probe, `build-pf-fill-premultiply-probe.ps1`, does not use CMake at all:
+  it drives cl / rc / link directly through vcvars64 and has no `-Generator`
+  or `-CMake` parameter, only `-VisualStudio` (defaulting to the VS 2022
+  Build Tools path), so machines without that default install must pass
+  `-VisualStudio` explicitly. Only the
   v143-pinned SDK sample fixture builds (Grabba / Supervisor and the
   `*-v143.props` fixtures) additionally require the v143 toolset
   (MSVC 14.3x/14.4x) and MSBuild. `build-sdk-grabba.ps1` discovers a
@@ -259,4 +288,11 @@ Per-component prerequisites on Windows x64:
   override parameter, so that fixture needs VS 2022 Build Tools with v143 at
   that default location.
 - **Optional**: a matching GPU runtime for GPU render checks, and After
-  Effects 25.2 itself for oracle capture only.
+  Effects 25.2 itself for oracle capture only. Building the GPU SDK fixtures
+  (`tools/build-sdk-invert-*.ps1`) additionally needs build-time inputs
+  independent of any GPU device: Boost preprocessor headers and Python for
+  all three, plus DXC and OpenCL headers / `OpenCL.lib` for the DirectX
+  variant, the CUDA toolkit (nvcc) for the CUDA variant, and an OpenCL SDK
+  for the OpenCL variant. All locations are overridable via script
+  parameters; the defaults point at machine-specific install paths that a
+  clean environment will not have.
