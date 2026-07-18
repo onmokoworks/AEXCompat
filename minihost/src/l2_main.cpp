@@ -59,6 +59,7 @@
 #include "strict_json.hpp"
 #include "suite_lease_tracker.hpp"
 #include "worker_selector_dispatch.hpp"
+#include "worker_handle_runtime.hpp"
 #include "worker_suite_abi.hpp"
 #include "worker_world_safety.hpp"
 
@@ -88,6 +89,7 @@ using aexcompat::gpu_runtime::CudaDevicePointer;
 using aexcompat::gpu_runtime::gpu_get_device_count;
 using aexcompat::gpu_runtime::gpu_get_device_info;
 using aexcompat::gpu_runtime::kMaxGpuDevices;
+using namespace aexcompat::worker_runtime::handles;
 using aexcompat::render_safety::InputPixelBuffer;
 using aexcompat::render_safety::OutputPixelBuffer;
 #if defined(AEXCOMPAT_RENDER_WORKER) || defined(AEXCOMPAT_SMART_WORKER)
@@ -1229,251 +1231,15 @@ int32_t __cdecl smart_checkout_output(void*, void** world) {
   *world = g_smart_output_world;
   return 0;
 }
-struct HandleRecord {
-  void* data{};
-  std::size_t size{};
-  uint32_t lock_count{};
-};
-std::unordered_set<HandleRecord*> g_handles;
-std::mutex g_handle_mutex;
-uint32_t g_handles_created{};
-uint32_t g_handles_disposed{};
-uint32_t g_handle_locks{};
-uint32_t g_handle_unlocks{};
-uint32_t g_invalid_handle_operations{};
-uint32_t g_automatic_pre_render_handle_disposals{};
-uint64_t g_handle_bytes{};
-// Sized so one float32 3-plane scratch buffer over the largest permitted
-// world (4096 * 4096 * 3 * 4 = 192 MiB) fits; ntsc-rs allocates such a
-// full-frame YIQ handle per render and 4K inputs exceeded the previous
-// 64 MiB pool.
-constexpr uint64_t kMaxHandleBytes = 256 * 1024 * 1024;
-constexpr std::size_t kMaxHandleCount = 1024;
-
-bool handle_lifetimes_balanced() {
-  std::lock_guard<std::mutex> lock(g_handle_mutex);
-  return g_handles.empty() && g_handles_created == g_handles_disposed &&
-      g_handle_locks == g_handle_unlocks;
-}
-
-bool host_handle_is_live(void* handle) {
-  std::lock_guard<std::mutex> lock(g_handle_mutex);
-  return handle && g_handles.count(reinterpret_cast<HandleRecord*>(handle)) != 0;
-}
-
-void** __cdecl new_handle(uint64_t size) {
-  std::cerr << "callback:new_handle size=" << size << "\n" << std::flush;
-  std::lock_guard<std::mutex> lock(g_handle_mutex);
-  if (size > kMaxHandleBytes || g_handles.size() >= kMaxHandleCount ||
-      g_handle_bytes > kMaxHandleBytes - size) {
-    ++g_invalid_handle_operations;
-    return nullptr;
-  }
-  auto* record = new (std::nothrow) HandleRecord;
-  if (!record) return nullptr;
-  record->data = ::operator new(static_cast<std::size_t>(size), std::nothrow);
-  if (!record->data && size != 0) { delete record; return nullptr; }
-  if (record->data) std::memset(record->data, 0, static_cast<std::size_t>(size));
-  record->size = static_cast<std::size_t>(size);
-  g_handles.insert(record);
-  ++g_handles_created;
-  g_handle_bytes += size;
-  return &record->data;
-}
-
-void* __cdecl lock_handle(void** handle) {
-  std::cerr << "callback:lock_handle\n" << std::flush;
-  auto* record = reinterpret_cast<HandleRecord*>(handle);
-  std::lock_guard<std::mutex> lock(g_handle_mutex);
-  if (!record || !g_handles.count(record)) {
-    ++g_invalid_handle_operations;
-    return nullptr;
-  }
-  ++record->lock_count;
-  ++g_handle_locks;
-  return record->data;
-}
-
-void __cdecl unlock_handle(void** handle) {
-  auto* record = reinterpret_cast<HandleRecord*>(handle);
-  std::lock_guard<std::mutex> lock(g_handle_mutex);
-  if (!record || !g_handles.count(record) || record->lock_count == 0) {
-    ++g_invalid_handle_operations;
-    return;
-  }
-  --record->lock_count;
-  ++g_handle_unlocks;
-}
-
-void __cdecl dispose_handle(void** handle) {
-  auto* record = reinterpret_cast<HandleRecord*>(handle);
-  {
-    std::lock_guard<std::mutex> lock(g_handle_mutex);
-    if (!record || !g_handles.count(record) || record->lock_count != 0) {
-      ++g_invalid_handle_operations;
-      return;
-    }
-    g_handles.erase(record);
-    ++g_handles_disposed;
-    g_handle_bytes -= record->size;
-  }
-  ::operator delete(record->data);
-  delete record;
-}
-
-uint64_t __cdecl handle_size(void** handle) {
-  auto* record = reinterpret_cast<HandleRecord*>(handle);
-  std::lock_guard<std::mutex> lock(g_handle_mutex);
-  if (!record || !g_handles.count(record)) {
-    ++g_invalid_handle_operations;
-    return 0;
-  }
-  return record->size;
-}
-
-int32_t __cdecl resize_handle(uint64_t size, void*** handle) {
-  std::lock_guard<std::mutex> lock(g_handle_mutex);
-  if (!handle || !*handle || size > kMaxHandleBytes) {
-    ++g_invalid_handle_operations;
-    return 4;
-  }
-  auto* record = reinterpret_cast<HandleRecord*>(*handle);
-  if (!g_handles.count(record) || record->lock_count != 0 ||
-      g_handle_bytes - record->size > kMaxHandleBytes - size) {
-    ++g_invalid_handle_operations;
-    return 4;
-  }
-  void* replacement = ::operator new(static_cast<std::size_t>(size), std::nothrow);
-  if (!replacement && size) return 1;
-  if (replacement) {
-    std::memset(replacement, 0, static_cast<std::size_t>(size));
-    std::memcpy(replacement, record->data, (std::min)(record->size, static_cast<std::size_t>(size)));
-  }
-  ::operator delete(record->data);
-  record->data = replacement;
-  g_handle_bytes = g_handle_bytes - record->size + size;
-  record->size = static_cast<std::size_t>(size);
-  return 0;
-}
-
-struct HandleSuite {
-  decltype(&new_handle) create;
-  decltype(&lock_handle) lock;
-  decltype(&unlock_handle) unlock;
-  decltype(&dispose_handle) dispose;
-  decltype(&handle_size) size;
-  decltype(&resize_handle) resize;
-};
-HandleSuite g_handle_suite{&new_handle, &lock_handle, &unlock_handle,
-                           &dispose_handle, &handle_size, &resize_handle};
-
 bool verify_handle_resize_while_locked_rejected() {
-  const uint32_t invalid_before = g_invalid_handle_operations;
+  const uint32_t invalid_before = statistics().invalid_operations;
   void** handle = new_handle(16);
   if (!handle || !lock_handle(handle)) return false;
   const int32_t resize_error = resize_handle(32, &handle);
   unlock_handle(handle);
   dispose_handle(handle);
-  return resize_error != 0 && g_invalid_handle_operations == invalid_before + 1 &&
+  return resize_error != 0 && statistics().invalid_operations == invalid_before + 1 &&
       handle_lifetimes_balanced();
-}
-
-struct AegpMemoryRecord {
-  std::vector<std::byte> bytes;
-  int32_t plugin_id{};
-  uint32_t lock_count{};
-};
-std::unordered_map<void*, std::unique_ptr<AegpMemoryRecord>> g_aegp_memory;
-std::mutex g_aegp_memory_mutex;
-uint64_t g_aegp_memory_bytes{};
-uint32_t g_aegp_memory_created{};
-uint32_t g_aegp_memory_freed{};
-uint32_t g_invalid_aegp_memory_operations{};
-bool g_aegp_memory_reporting{};
-constexpr std::size_t kMaxAegpMemoryHandles = 256;
-constexpr uint64_t kMaxAegpMemoryBytes = 16 * 1024 * 1024;
-
-int32_t __cdecl new_aegp_mem_handle(int32_t plugin_id, const char* what, uint32_t size,
-                                    int32_t flags, void** handle) {
-  std::lock_guard<std::mutex> lock(g_aegp_memory_mutex);
-  if (plugin_id != 1 || !what || std::strlen(what) > 127 || !handle || (flags & ~3) != 0 ||
-      g_aegp_memory.size() >= kMaxAegpMemoryHandles ||
-      size > kMaxAegpMemoryBytes || g_aegp_memory_bytes > kMaxAegpMemoryBytes - size) {
-    if (handle) *handle = nullptr; ++g_invalid_aegp_memory_operations; return 4;
-  }
-  auto record = std::make_unique<AegpMemoryRecord>();
-  record->plugin_id = plugin_id; record->bytes.resize(size);
-  if ((flags & 1) == 0 && size) std::memset(record->bytes.data(), 0xcd, size);
-  void* key = record.get(); g_aegp_memory.emplace(key, std::move(record));
-  g_aegp_memory_bytes += size; ++g_aegp_memory_created; *handle = key; return 0;
-}
-int32_t __cdecl free_aegp_mem_handle(void* handle) {
-  std::lock_guard<std::mutex> lock(g_aegp_memory_mutex);
-  const auto found = g_aegp_memory.find(handle);
-  if (found == g_aegp_memory.end() || found->second->lock_count != 0) {
-    ++g_invalid_aegp_memory_operations; return 4;
-  }
-  g_aegp_memory_bytes -= found->second->bytes.size(); g_aegp_memory.erase(found);
-  ++g_aegp_memory_freed; return 0;
-}
-int32_t __cdecl lock_aegp_mem_handle(void* handle, void** data) {
-  std::lock_guard<std::mutex> lock(g_aegp_memory_mutex);
-  const auto found = g_aegp_memory.find(handle);
-  if (found == g_aegp_memory.end() || !data) { ++g_invalid_aegp_memory_operations; return 4; }
-  ++found->second->lock_count;
-  *data = found->second->bytes.empty() ? nullptr : found->second->bytes.data(); return 0;
-}
-int32_t __cdecl unlock_aegp_mem_handle(void* handle) {
-  std::lock_guard<std::mutex> lock(g_aegp_memory_mutex);
-  const auto found = g_aegp_memory.find(handle);
-  if (found == g_aegp_memory.end() || found->second->lock_count == 0) {
-    ++g_invalid_aegp_memory_operations; return 4;
-  }
-  --found->second->lock_count; return 0;
-}
-int32_t __cdecl get_aegp_mem_handle_size(void* handle, uint32_t* size) {
-  std::lock_guard<std::mutex> lock(g_aegp_memory_mutex);
-  const auto found = g_aegp_memory.find(handle);
-  if (found == g_aegp_memory.end() || !size) return 4;
-  *size = static_cast<uint32_t>(found->second->bytes.size()); return 0;
-}
-int32_t __cdecl resize_aegp_mem_handle(const char* what, uint32_t size, void* handle) {
-  std::lock_guard<std::mutex> lock(g_aegp_memory_mutex);
-  const auto found = g_aegp_memory.find(handle);
-  if (!what || std::strlen(what) > 127 || found == g_aegp_memory.end() ||
-      found->second->lock_count != 0 || size > kMaxAegpMemoryBytes ||
-      g_aegp_memory_bytes - found->second->bytes.size() > kMaxAegpMemoryBytes - size) {
-    ++g_invalid_aegp_memory_operations; return 4;
-  }
-  const std::size_t old_size = found->second->bytes.size(); found->second->bytes.resize(size);
-  g_aegp_memory_bytes = g_aegp_memory_bytes - old_size + size; return 0;
-}
-int32_t __cdecl set_aegp_mem_reporting(uint8_t enabled) {
-  g_aegp_memory_reporting = enabled != 0; return 0;
-}
-int32_t __cdecl get_aegp_mem_stats(int32_t plugin_id, int32_t* count, int32_t* size) {
-  std::lock_guard<std::mutex> lock(g_aegp_memory_mutex);
-  if (plugin_id != 1 || !count || !size) return 4;
-  uint64_t total{}; int32_t handles{};
-  for (const auto& item : g_aegp_memory) if (item.second->plugin_id == plugin_id) {
-    ++handles; total += item.second->bytes.size();
-  }
-  if (total > INT32_MAX) return 4;
-  *count = handles; *size = static_cast<int32_t>(total); return 0;
-}
-bool aegp_memory_balanced() {
-  std::lock_guard<std::mutex> lock(g_aegp_memory_mutex);
-  return g_aegp_memory.empty() && g_aegp_memory_bytes == 0 &&
-      g_aegp_memory_created == g_aegp_memory_freed;
-}
-int32_t make_utf16_handle(const std::u16string& text, const char* label, void** handle) {
-  const uint64_t bytes = (text.size() + 1) * sizeof(char16_t);
-  if (bytes > UINT32_MAX || new_aegp_mem_handle(1, label, static_cast<uint32_t>(bytes), 1, handle))
-    return 4;
-  void* data = nullptr;
-  if (lock_aegp_mem_handle(*handle, &data) != 0) { free_aegp_mem_handle(*handle); *handle = nullptr; return 4; }
-  std::memcpy(data, text.c_str(), static_cast<std::size_t>(bytes));
-  return unlock_aegp_mem_handle(*handle);
 }
 
 int32_t __cdecl register_with_aegp(void*, const char*, int32_t* plugin_id) {
@@ -2726,9 +2492,7 @@ bool verify_dynamic_stream_tree_rejection() {
 
 bool verify_aegp_memory_and_strings_rejection() {
   const auto original_scene = g_mask_scene;
-  const uint32_t invalid_before = g_invalid_aegp_memory_operations;
-  const uint32_t created_before = g_aegp_memory_created;
-  const uint32_t freed_before = g_aegp_memory_freed;
+  const auto memory_before = aegp_memory_statistics();
   void* memory = nullptr; void* data = nullptr; uint32_t size{}; int32_t count{}, total{};
   bool passed = new_aegp_mem_handle(1, "fault probe", 32, 1, &memory) == 0 &&
       lock_aegp_mem_handle(memory, &data) == 0 && data &&
@@ -2760,8 +2524,11 @@ bool verify_aegp_memory_and_strings_rejection() {
       dispose_stream(stream) == 0 && dispose_mask(mask) == 0;
   const bool balanced = mask_lifetimes_balanced() && aegp_memory_balanced();
   g_mask_scene = original_scene; g_mask_scene.reserve(kMaxHostMasks);
-  return passed && balanced && g_invalid_aegp_memory_operations == invalid_before + 1 &&
-      g_aegp_memory_created == created_before + 3 && g_aegp_memory_freed == freed_before + 3;
+  const auto memory_after = aegp_memory_statistics();
+  return passed && balanced &&
+      memory_after.invalid_operations == memory_before.invalid_operations + 1 &&
+      memory_after.created == memory_before.created + 3 &&
+      memory_after.freed == memory_before.freed + 3;
 }
 
 int32_t __cdecl is_mask_outline_open(void* outline, uint8_t* open) {
@@ -4058,17 +3825,6 @@ struct DynamicStreamSuite {
   decltype(&reject_get_separation_dimension) get_separation_dimension;
 };
 static_assert(sizeof(DynamicStreamSuite) == 26 * sizeof(void*));
-struct AegpMemorySuite {
-  decltype(&new_aegp_mem_handle) new_mem_handle;
-  decltype(&free_aegp_mem_handle) free_mem_handle;
-  decltype(&lock_aegp_mem_handle) lock_mem_handle;
-  decltype(&unlock_aegp_mem_handle) unlock_mem_handle;
-  decltype(&get_aegp_mem_handle_size) get_mem_handle_size;
-  decltype(&resize_aegp_mem_handle) resize_mem_handle;
-  decltype(&set_aegp_mem_reporting) set_mem_reporting_on;
-  decltype(&get_aegp_mem_stats) get_mem_stats;
-};
-static_assert(sizeof(AegpMemorySuite) == 8 * sizeof(void*));
 struct MaskOutlineSuite {
   decltype(&is_mask_outline_open) is_open;
   decltype(&set_mask_outline_open) set_open;
@@ -5221,9 +4977,6 @@ DynamicStreamSuite g_dynamic_stream_suite{&get_new_dynamic_stream_for_layer,
     &reject_set_dimensions_separated, &reject_get_separation_follower,
     &is_separation_follower, &reject_get_separation_leader,
     &reject_get_separation_dimension};
-AegpMemorySuite g_aegp_memory_suite{&new_aegp_mem_handle, &free_aegp_mem_handle,
-    &lock_aegp_mem_handle, &unlock_aegp_mem_handle, &get_aegp_mem_handle_size,
-    &resize_aegp_mem_handle, &set_aegp_mem_reporting, &get_aegp_mem_stats};
 MaskOutlineSuite g_mask_outline_suite{&is_mask_outline_open, &set_mask_outline_open,
                                       &get_mask_outline_num_segments,
                                       &get_mask_outline_vertex_info,
@@ -18170,14 +17923,10 @@ SmartResult smart_render_once(EffectEntry entry, std::array<std::byte, kInSize>&
     // A supplied callback owns cleanup even if it faults; host fallback would double-free.
     invoke_smart_pre_render_cleanup_seh(delete_pre_render_data, pre_render_data);
   } else if (pre_render_data) {
-    bool host_owned = false;
-    {
-      std::lock_guard<std::mutex> lock(g_handle_mutex);
-      host_owned = g_handles.count(reinterpret_cast<HandleRecord*>(pre_render_data)) != 0;
-    }
+    const bool host_owned = host_handle_is_live(pre_render_data);
     if (host_owned) {
       dispose_handle(reinterpret_cast<void**>(pre_render_data));
-      ++g_automatic_pre_render_handle_disposals;
+      record_automatic_pre_render_disposal();
     }
   }
   if (g_render_ui_context_active &&
@@ -20062,12 +19811,10 @@ int wmain(int argc, wchar_t **argv) {
     uint32_t memory_created = 0;
     uint32_t memory_freed = 0;
     uint64_t memory_residual = 0;
-    {
-      std::lock_guard<std::mutex> lock(g_aegp_memory_mutex);
-      memory_created = g_aegp_memory_created;
-      memory_freed = g_aegp_memory_freed;
-      memory_residual = g_aegp_memory_bytes;
-    }
+    const auto memory_stats = aegp_memory_statistics();
+    memory_created = memory_stats.created;
+    memory_freed = memory_stats.freed;
+    memory_residual = memory_stats.live_bytes;
     std::cout << "{\"pf_color_settings_suite6\":\"" << (passed ? "passed" : "failed")
               << "\",\"profiles_created\":" << g_color_profiles_created
               << ",\"profiles_disposed\":" << g_color_profiles_disposed
@@ -21087,8 +20834,8 @@ int wmain(int argc, wchar_t **argv) {
               << ",\"collection_item_reads\":" << g_aegp_collection_item_reads
               << ",\"collection_lifetimes_balanced\":"
               << (collection_lifetimes_balanced ? "true" : "false")
-              << ",\"aegp_memory_created\":" << g_aegp_memory_created
-              << ",\"aegp_memory_freed\":" << g_aegp_memory_freed
+              << ",\"aegp_memory_created\":" << aegp_memory_statistics().created
+              << ",\"aegp_memory_freed\":" << aegp_memory_statistics().freed
               << ",\"aegp_memory_lifetimes_balanced\":"
               << (aegp_memory_lifetimes_balanced ? "true" : "false")
               << ",\"suite_acquires\":" << suite_acquire_count()
@@ -21407,7 +21154,8 @@ int wmain(int argc, wchar_t **argv) {
       write<void*>(input, kInSequenceData, nullptr);
       write<void*>(output, kOutSequenceData, nullptr);
     }
-    arbitrary_values_disposed = g_handles_created == g_handles_disposed + 1;
+    const auto handle_stats = statistics();
+    arbitrary_values_disposed = handle_stats.created == handle_stats.disposed + 1;
     const bool defaults_disposed = dispose_arbitrary_defaults(entry, input, output);
     const int32_t event_setdown_error = global_error == 0
         ? invoke_global_setdown(entry, input.data(), output.data()) : -1;
@@ -21692,8 +21440,8 @@ int wmain(int argc, wchar_t **argv) {
               << ",\"handle_valid\":" << (dependency_handle_valid ? "true" : "false")
               << ",\"nul_terminated\":" << (dependency_nul_terminated ? "true" : "false")
               << ",\"handle_host_disposed\":" << (dependency_handle_disposed ? "true" : "false")
-              << ",\"handles_created\":" << g_handles_created
-              << ",\"handles_disposed\":" << g_handles_disposed
+              << ",\"handles_created\":" << statistics().created
+              << ",\"handles_disposed\":" << statistics().disposed
               << ",\"handle_lifetimes_balanced\":"
               << (handle_lifetimes_balanced() ? "true" : "false")
               << ",\"global_setdown_error\":" << dependency_setdown_error << "}\n";
@@ -22379,8 +22127,8 @@ int wmain(int argc, wchar_t **argv) {
             << ",\"pf_path_last_bounds\":[" << g_pf_path_last_bounds[0] << ','
             << g_pf_path_last_bounds[1] << ',' << g_pf_path_last_bounds[2] << ','
             << g_pf_path_last_bounds[3] << ']'
-            << ",\"handles_created\":" << g_handles_created
-            << ",\"handles_disposed\":" << g_handles_disposed
+            << ",\"handles_created\":" << statistics().created
+            << ",\"handles_disposed\":" << statistics().disposed
             << ",\"arbitrary_copy_calls\":" << g_arbitrary_copy_calls
             << ",\"arbitrary_dispose_calls\":" << g_arbitrary_dispose_calls
             << ",\"arbitrary_print_calls\":" << g_arbitrary_print_calls
@@ -22632,8 +22380,8 @@ int wmain(int argc, wchar_t **argv) {
             << ",\"live_suite_leases\":\"" << live_suite_lease_summary() << "\""
             << ",\"suite_fault_observed\":" << (suite_fault_observed ? "true" : "false")
             << ",\"handle_lifetimes_balanced\":" << (handle_lifetimes_balanced() ? "true" : "false")
-            << ",\"handles_created\":" << g_handles_created
-            << ",\"handles_disposed\":" << g_handles_disposed
+            << ",\"handles_created\":" << statistics().created
+            << ",\"handles_disposed\":" << statistics().disposed
             << ",\"arbitrary_copy_calls\":" << g_arbitrary_copy_calls
             << ",\"arbitrary_dispose_calls\":" << g_arbitrary_dispose_calls
             << ",\"arbitrary_print_calls\":" << g_arbitrary_print_calls
@@ -22649,12 +22397,12 @@ int wmain(int argc, wchar_t **argv) {
             << ",\"arbitrary_interpolation_amount\":" << g_last_arbitrary_interpolation_amount
             << ",\"invalid_arbitrary_operations\":" << g_invalid_arbitrary_operations
             << ",\"automatic_pre_render_handle_disposals\":"
-            << g_automatic_pre_render_handle_disposals
-            << ",\"handle_locks\":" << g_handle_locks
-            << ",\"handle_unlocks\":" << g_handle_unlocks
-            << ",\"live_handle_count\":" << g_handles.size()
-            << ",\"live_handle_bytes\":" << g_handle_bytes
-            << ",\"invalid_handle_operations\":" << g_invalid_handle_operations
+            << statistics().automatic_pre_render_disposals
+            << ",\"handle_locks\":" << statistics().locks
+            << ",\"handle_unlocks\":" << statistics().unlocks
+            << ",\"live_handle_count\":" << statistics().live_count
+            << ",\"live_handle_bytes\":" << statistics().live_bytes
+            << ",\"invalid_handle_operations\":" << statistics().invalid_operations
             << ",\"handle_fault_observed\":" << (handle_fault_observed ? "true" : "false")
             << ",\"world_fault_observed\":" << (world_fault_observed ? "true" : "false")
             << ",\"world_lifetimes_balanced\":" << (world_lifetimes_balanced() ? "true" : "false")
@@ -22716,11 +22464,11 @@ int wmain(int argc, wchar_t **argv) {
             << ",\"dynamic_stream_mutations\":" << g_dynamic_stream_mutations
             << ",\"invalid_dynamic_stream_operations\":" << g_invalid_dynamic_stream_operations
             << ",\"aegp_memory_fault_observed\":" << (aegp_memory_fault_observed ? "true" : "false")
-            << ",\"aegp_memory_created\":" << g_aegp_memory_created
-            << ",\"aegp_memory_freed\":" << g_aegp_memory_freed
-            << ",\"live_aegp_memory_handles\":" << g_aegp_memory.size()
-            << ",\"live_aegp_memory_bytes\":" << g_aegp_memory_bytes
-            << ",\"invalid_aegp_memory_operations\":" << g_invalid_aegp_memory_operations
+            << ",\"aegp_memory_created\":" << aegp_memory_statistics().created
+            << ",\"aegp_memory_freed\":" << aegp_memory_statistics().freed
+            << ",\"live_aegp_memory_handles\":" << aegp_memory_statistics().live_count
+            << ",\"live_aegp_memory_bytes\":" << aegp_memory_statistics().live_bytes
+            << ",\"invalid_aegp_memory_operations\":" << aegp_memory_statistics().invalid_operations
             << ",\"requested_parameters\":" << requested_parameters_json(requested_parameters)
             << ",\"requested_amount\":" << static_cast<int32_t>(requested_value(requested_parameters, L"amount"))
             << ",\"requested_direction\":" << static_cast<int32_t>(requested_value(requested_parameters, L"direction"))

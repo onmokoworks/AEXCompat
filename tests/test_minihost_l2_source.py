@@ -5,6 +5,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "minihost" / "src" / "l2_main.cpp"
 WORLD_SAFETY_SOURCE = ROOT / "minihost" / "src" / "worker_world_safety.cpp"
+HANDLE_RUNTIME_SOURCE = ROOT / "minihost" / "src" / "worker_handle_runtime.cpp"
+HANDLE_RUNTIME_HEADER = ROOT / "minihost" / "src" / "worker_handle_runtime.hpp"
 
 
 class MinihostL2SourceTests(unittest.TestCase):
@@ -50,13 +52,20 @@ class MinihostL2SourceTests(unittest.TestCase):
 
     def test_l2_provides_bounded_movable_handle_callbacks(self):
         text = SOURCE.read_text(encoding="utf-8")
-        for marker in ("kUtilsSize = 552", "kUtilsNewHandle = 160", "new_handle(uint64_t size)",
-                       "256 * 1024 * 1024", "g_handles.count", "dispose_handle"):
+        runtime = HANDLE_RUNTIME_SOURCE.read_text(encoding="utf-8")
+        header = HANDLE_RUNTIME_HEADER.read_text(encoding="utf-8")
+        for marker in ("kUtilsSize = 552", "kUtilsNewHandle = 160", "dispose_handle"):
             self.assertIn(marker, text)
+        for marker in ("new_handle(std::uint64_t size)", "g_handles.count", "invalid_operation()",
+                       "record->lock_count != 0", "g_statistics.live_bytes"):
+            self.assertIn(marker, runtime)
+        for marker in ("kMaxHandleCount = 1024", "kMaxHandleBytes = 256ULL * 1024ULL * 1024ULL",
+                       "Statistics statistics()", "__cdecl resize_handle",
+                       "static_assert(sizeof(AegpMemorySuite) == 8 * sizeof(void*))",
+                       "kMaxAegpMemoryHandles = 256", "aegp_memory_balanced()"):
+            self.assertIn(marker, header)
         for marker in (
-            "uint32_t lock_count{}",
             "handle_lifetimes_balanced()",
-            "record->lock_count != 0",
             "verify_handle_resize_while_locked_rejected()",
             "verify_world_double_dispose_rejected()",
             "verify_world_allocation_limit_rejected()",
@@ -76,10 +85,7 @@ class MinihostL2SourceTests(unittest.TestCase):
             "verify_keyframe_ownership_rejection()",
             "static_assert(sizeof(DynamicStreamSuite) == 26 * sizeof(void*))",
             "verify_dynamic_stream_tree_rejection()",
-            "static_assert(sizeof(AegpMemorySuite) == 8 * sizeof(void*))",
             "verify_aegp_memory_and_strings_rejection()",
-            "kMaxHandleCount = 1024",
-            "kMaxHandleBytes = 256 * 1024 * 1024",
         ):
             self.assertIn(marker, text)
 
