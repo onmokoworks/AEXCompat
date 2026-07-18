@@ -21,6 +21,10 @@ $inputPath = (Resolve-Path -LiteralPath $InputImage).Path
 if ([System.IO.Path]::GetFileName($afterEffectsPath) -ine 'AfterFX.exe') {
     throw 'AfterEffects must point to AfterFX.exe.'
 }
+$scriptHostPath = Join-Path (Split-Path -Parent $afterEffectsPath) 'AfterFX.com'
+if (-not (Test-Path -LiteralPath $scriptHostPath -PathType Leaf)) {
+    throw 'AfterFX.com is required next to AfterFX.exe to execute the oracle setup script.'
+}
 
 $projectPath = [System.IO.Path]::GetFullPath($OutputAep)
 $outputPath = [System.IO.Path]::GetFullPath($OutputExr)
@@ -56,7 +60,9 @@ $env:AEXCOMPAT_AE_ORACLE_BPC = [string]$Bpc
 $env:AEXCOMPAT_AE_ORACLE_FPS = [string]$Fps
 $env:AEXCOMPAT_AE_ORACLE_DURATION = [string]$DurationFrames
 try {
-    $process = Start-Process -FilePath $afterEffectsPath `
+    # AfterFX.exe silently ignores -r on AE 25.3; the sibling COM launcher
+    # executes the script and preserves a process handle for the watchdog.
+    $process = Start-Process -FilePath $scriptHostPath `
         -ArgumentList @('-m', '-noui', '-r', $scriptPath) `
         -PassThru -WindowStyle Hidden
     if (-not $process.WaitForExit($TimeoutSeconds * 1000)) {
