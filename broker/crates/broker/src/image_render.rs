@@ -686,6 +686,18 @@ fn requested_minidump_dir(repository: &Path) -> io::Result<Option<WorldDumpDir>>
     }
 }
 
+/// The `--minidump-v1 <dir>` argument pair for a dispatch, or empty when the
+/// opt-in env var is unset. Every worker dispatch appends this at the tail
+/// (see `dispatch_secure_image`) so the crash path is uniform across worker
+/// kinds; the worker consumes the trailing pair before its argc-exact mode
+/// dispatch.
+pub(crate) fn minidump_dispatch_args(repository: &Path) -> io::Result<Vec<String>> {
+    Ok(match requested_minidump_dir(repository)? {
+        Some(dump) => vec!["--minidump-v1".into(), dump.path.to_string_lossy().into_owned()],
+        None => Vec::new(),
+    })
+}
+
 fn requested_world_dump_dir(repository: &Path) -> io::Result<Option<WorldDumpDir>> {
     match std::env::var_os(WORLD_DUMP_DIR_ENV) {
         Some(value) => resolve_world_dump_dir(repository, Path::new(&value)).map(Some),
@@ -4361,12 +4373,8 @@ fn render_with_artifact(
             dump.path.to_string_lossy().into_owned(),
         ]);
     }
-    if let Some(dump) = &minidump_dir {
-        args_after_plugin.extend([
-            "--minidump-v1".into(),
-            dump.path.to_string_lossy().into_owned(),
-        ]);
-    }
+    // The --minidump-v1 flag is injected at the dispatch tail for every worker
+    // kind by dispatch_secure_image; minidump_dir here is only for the report.
     if output_checksum_detail {
         args_after_plugin.extend(["--output-checksum-detail-v1".into(), "1".into()]);
     }
@@ -5454,6 +5462,38 @@ mod tests {
         assert_eq!(RenderPixelFormat::Argb8.bytes_per_pixel(), 4);
         assert_eq!(RenderPixelFormat::Argb16.bytes_per_pixel(), 8);
         assert_eq!(RenderPixelFormat::Argb32f.bytes_per_pixel(), 16);
+    }
+
+    #[test]
+    fn minidump_dispatch_args_are_opt_in_and_tail_shaped() {
+        // Every worker dispatch funnels through minidump_dispatch_args, so a
+        // missing env var must yield no flag (the crash path stays off by
+        // default) and a set one must yield exactly the trailing pair.
+        let repository = std::env::temp_dir().join(format!(
+            "aexcompat-minidump-args-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(repository.join("target")).unwrap();
+
+        let prior = std::env::var_os(MINIDUMP_DIR_ENV);
+        std::env::remove_var(MINIDUMP_DIR_ENV);
+        assert!(minidump_dispatch_args(&repository).unwrap().is_empty());
+
+        std::env::set_var(MINIDUMP_DIR_ENV, "target/crash-dumps");
+        let args = minidump_dispatch_args(&repository).unwrap();
+        assert_eq!(args.len(), 2);
+        assert_eq!(args[0], "--minidump-v1");
+        assert!(Path::new(&args[1]).ends_with("crash-dumps"));
+
+        match prior {
+            Some(value) => std::env::set_var(MINIDUMP_DIR_ENV, value),
+            None => std::env::remove_var(MINIDUMP_DIR_ENV),
+        }
+        fs::remove_dir_all(repository).unwrap();
     }
 
     #[test]

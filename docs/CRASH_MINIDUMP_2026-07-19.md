@@ -16,6 +16,13 @@ broker\target\release\aexcompat-harness.exe --render-experimental-smart `
     <plugin.aex> <input.png> <output.png>
 ```
 
+The flag is injected once at the dispatch boundary (`dispatch_secure_image`),
+so it applies to every worker kind uniformly - the render and smart image
+paths and the L2 inspection/params/dependency paths alike, not just image
+render. The worker consumes the trailing `--minidump-v1 <dir>` pair before its
+argc-exact mode dispatch, so it is transparent to the per-kind argument
+parsing.
+
 The broker validates the directory before dispatch (fail-closed):
 
 - must resolve under the repository `target/` tree, no `.`/`..` traversal;

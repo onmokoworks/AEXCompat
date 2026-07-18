@@ -22129,21 +22129,26 @@ int wmain(int argc, wchar_t **argv) {
               << "}\n";
     return passed ? 0 : 1;
   }
+  // Consume an optional trailing --minidump-v1 <dir> pair for every worker
+  // kind (render, smart, and the L2 inspection/params paths below) before any
+  // kind-specific, argc-exact dispatch runs. Reducing argc hides the pair from
+  // those checks; the crash path is opt-in and off by default (issue #18).
+  if (argc >= 3 && std::wstring(argv[argc - 2]) == L"--minidump-v1") {
+    g_minidump_dir = std::filesystem::path(argv[argc - 1]);
+    std::error_code minidump_dir_error;
+    if (g_minidump_dir.empty() ||
+        !std::filesystem::is_directory(g_minidump_dir, minidump_dir_error))
+      return 3;
+    SetUnhandledExceptionFilter(top_level_crash_filter);
+    argc -= 2;
+  }
 #ifdef AEXCOMPAT_RENDER_WORKER
   int effective_argc = argc;
   bool saw_aux = false, saw_animation = false, saw_coverage = false;
   bool saw_dump_worlds = false, saw_checksum_detail = false;
   while (effective_argc >= 3) {
     const std::wstring flag(argv[effective_argc - 2]);
-    if (flag == L"--minidump-v1" && g_minidump_dir.empty()) {
-      g_minidump_dir = std::filesystem::path(argv[effective_argc - 1]);
-      std::error_code minidump_dir_error;
-      if (g_minidump_dir.empty() ||
-          !std::filesystem::is_directory(g_minidump_dir, minidump_dir_error))
-        return 3;
-      SetUnhandledExceptionFilter(top_level_crash_filter);
-      effective_argc -= 2;
-    } else if (flag == L"--dump-worlds-v1" && !saw_dump_worlds) {
+    if (flag == L"--dump-worlds-v1" && !saw_dump_worlds) {
       g_dump_worlds_dir = std::filesystem::path(argv[effective_argc - 1]);
       std::error_code dump_dir_error;
       if (g_dump_worlds_dir.empty() ||
@@ -22324,15 +22329,7 @@ int wmain(int argc, wchar_t **argv) {
   bool saw_dump_worlds = false, saw_checksum_detail = false;
   while (effective_argc >= 3) {
     const std::wstring flag(argv[effective_argc - 2]);
-    if (flag == L"--minidump-v1" && g_minidump_dir.empty()) {
-      g_minidump_dir = std::filesystem::path(argv[effective_argc - 1]);
-      std::error_code minidump_dir_error;
-      if (g_minidump_dir.empty() ||
-          !std::filesystem::is_directory(g_minidump_dir, minidump_dir_error))
-        return 3;
-      SetUnhandledExceptionFilter(top_level_crash_filter);
-      effective_argc -= 2;
-    } else if (flag == L"--dump-worlds-v1" && !saw_dump_worlds) {
+    if (flag == L"--dump-worlds-v1" && !saw_dump_worlds) {
       g_dump_worlds_dir = std::filesystem::path(argv[effective_argc - 1]);
       std::error_code dump_dir_error;
       if (g_dump_worlds_dir.empty() ||

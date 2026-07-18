@@ -77,13 +77,29 @@ pub fn dispatch_secure_image(input: SecureImageDispatch<'_>) -> io::Result<Secur
         .collect::<io::Result<Vec<_>>>()?;
     let tree = SealedLoadTree::create(main, dependencies)?;
     let (worker_sha256, worker_size) = admit_local_worker(&worker_program)?;
+    // Opt-in crash minidumps (issue #18) apply to every worker kind, so the
+    // flag is injected here, once, at the tail of args_after_plugin. The
+    // worker strips the trailing pair before its kind-specific dispatch.
+    let minidump_args = crate::image_render::minidump_dispatch_args(input.repository)?;
+    let args_after_owned: Vec<String>;
+    let args_after_plugin: &[String] = if minidump_args.is_empty() {
+        input.args_after_plugin
+    } else {
+        args_after_owned = input
+            .args_after_plugin
+            .iter()
+            .cloned()
+            .chain(minidump_args)
+            .collect();
+        &args_after_owned
+    };
     let request = SecureLaunchRequest {
         worker_program: &worker_program,
         worker_expected_sha256: worker_sha256,
         worker_expected_size: worker_size,
         plugin_basename: &plugin_basename,
         args_before_plugin: input.args_before_plugin,
-        args_after_plugin: input.args_after_plugin,
+        args_after_plugin,
         require_module_audit: true,
     };
     secure_launch(tree, request, input.timeout)
