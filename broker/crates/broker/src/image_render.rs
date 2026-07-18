@@ -531,6 +531,48 @@ impl RenderPixelFormat {
             Self::Argb32f => 16,
         }
     }
+
+    fn raw_extension(self) -> Option<&'static str> {
+        match self {
+            Self::Argb8 => None,
+            Self::Argb16 => Some("rgba16le"),
+            Self::Argb32f => Some("rgba32f-le"),
+        }
+    }
+}
+
+fn native_rgba_to_preview(bytes: &[u8], format: RenderPixelFormat) -> io::Result<Vec<u8>> {
+    match format {
+        RenderPixelFormat::Argb8 => Ok(bytes.to_vec()),
+        RenderPixelFormat::Argb16 => {
+            if bytes.len() % 8 != 0 {
+                return Err(invalid("RGBA16 output is misaligned"));
+            }
+            Ok(bytes
+                .chunks_exact(2)
+                .map(|sample| {
+                    let value = u16::from_le_bytes([sample[0], sample[1]]);
+                    ((u32::from(value.min(32768)) * 255 + 16384) / 32768) as u8
+                })
+                .collect())
+        }
+        RenderPixelFormat::Argb32f => {
+            if bytes.len() % 16 != 0 {
+                return Err(invalid("RGBA32f output is misaligned"));
+            }
+            Ok(bytes
+                .chunks_exact(4)
+                .map(|sample| {
+                    let value = f32::from_le_bytes(sample.try_into().expect("four-byte sample"));
+                    if value.is_finite() {
+                        (value.clamp(0.0, 1.0) * 255.0).round() as u8
+                    } else {
+                        0
+                    }
+                })
+                .collect())
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -3787,6 +3829,15 @@ fn render_with_artifact(
             "output image already exists",
         ));
     }
+    let preserved_output = pixel_format
+        .raw_extension()
+        .map(|extension| output_path.with_extension(extension));
+    if preserved_output.as_ref().is_some_and(|path| path.exists()) {
+        return Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            "depth-preserving output already exists",
+        ));
+    }
     let decoded = decode_bounded_image(input_path, "input")?;
     let (width, height) = (decoded.width(), decoded.height());
     if width == 0
@@ -4361,12 +4412,12 @@ fn render_with_artifact(
     let expected_bytes_u64 = crate::render_request::validate_image_buffer_layout(
         u64::from(rendered_width),
         u64::from(rendered_height),
-        u64::from(rendered_width) * 4,
-        4,
+        u64::from(rendered_width) * pixel_format.bytes_per_pixel(),
+        pixel_format.bytes_per_pixel(),
         None,
         u64::from(MAX_DIMENSION),
         MAX_PIXELS,
-        MAX_RGBA_TRANSPORT_BYTES,
+        MAX_INTERNAL_IMAGE_BYTES,
     )?;
     let expected_bytes = usize::try_from(expected_bytes_u64)
         .map_err(|_| invalid("worker output size does not fit this broker"))?;
@@ -4389,7 +4440,18 @@ fn render_with_artifact(
             rendered.len()
         )));
     }
-    let image = image::RgbaImage::from_raw(rendered_width, rendered_height, rendered)
+    if let Some(path) = &preserved_output {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)?
+            .write_all(&rendered)?;
+    }
+    let preview = native_rgba_to_preview(&rendered, pixel_format)?;
+    let image = image::RgbaImage::from_raw(rendered_width, rendered_height, preview)
         .ok_or_else(|| invalid("worker output dimensions are invalid"))?;
     if let Some(parent) = output_path.parent() {
         fs::create_dir_all(parent)?;
@@ -4406,12 +4468,16 @@ fn render_with_artifact(
         "exclusive_access_depth": worker_report.get("gpu_exclusive_access_depth"),
         "invalid_operations": worker_report.get("invalid_gpu_memory_operations"),
     });
+    let output_raw = preserved_output
+        .as_ref()
+        .map(|path| path.to_string_lossy().into_owned());
     let mut report = json!({
         "schema_version": 1, "stage": "interactive_image_render", "plugin_id": plugin_id,
         "render_path": if smart { "smartfx" } else { "classic" },
         "pixel_format": pixel_format.report_name(),
         "width": rendered_width, "height": rendered_height,
-        "input_width": width, "input_height": height, "output_transport": "rgba8_png", "output_png": output_path,
+        "input_width": width, "input_height": height,
+        "output_transport": "rgba8_png", "output_png": output_path,
         "current_time": timing.current_time, "time_step": timing.time_step,
         "total_time": timing.total_time, "time_scale": timing.time_scale,
         "worker_classification": isolated.classification.as_str(),
@@ -4443,6 +4509,13 @@ fn render_with_artifact(
     let report_object = report
         .as_object_mut()
         .expect("interactive render report is an object");
+    if pixel_format != RenderPixelFormat::Argb8 {
+        report_object.insert(
+            "output_transport".into(),
+            json!("native_raw+rgba8_png_preview"),
+        );
+    }
+    report_object.insert("output_raw".into(), json!(output_raw));
     for field in [
         "comp_bg_color_success_count",
         "comp_bg_color_rejection_count",
@@ -5116,6 +5189,31 @@ mod tests {
         assert_eq!(RenderPixelFormat::Argb8.bytes_per_pixel(), 4);
         assert_eq!(RenderPixelFormat::Argb16.bytes_per_pixel(), 8);
         assert_eq!(RenderPixelFormat::Argb32f.bytes_per_pixel(), 16);
+    }
+
+    #[test]
+    fn native_depth_transport_keeps_raw_precision_and_builds_preview() {
+        assert_eq!(RenderPixelFormat::Argb16.raw_extension(), Some("rgba16le"));
+        assert_eq!(
+            RenderPixelFormat::Argb32f.raw_extension(),
+            Some("rgba32f-le")
+        );
+        let rgba16 = [0u16, 16_384, 32_768, 65_535]
+            .into_iter()
+            .flat_map(u16::to_le_bytes)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            native_rgba_to_preview(&rgba16, RenderPixelFormat::Argb16).unwrap(),
+            vec![0, 128, 255, 255]
+        );
+        let rgba32 = [-1.0f32, 0.5, 2.0, f32::NAN]
+            .into_iter()
+            .flat_map(f32::to_le_bytes)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            native_rgba_to_preview(&rgba32, RenderPixelFormat::Argb32f).unwrap(),
+            vec![0, 128, 255, 0]
+        );
     }
 
     #[test]

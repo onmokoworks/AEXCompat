@@ -18845,6 +18845,20 @@ void argb_to_rgba8(unsigned char* rgba, const void* source, int32_t pixel_bytes)
   }
 }
 
+void argb_to_rgba_native(void* rgba, const void* source, int32_t pixel_bytes) {
+  if (pixel_bytes == 4) {
+    argb_to_rgba8(static_cast<unsigned char*>(rgba), source, pixel_bytes);
+  } else if (pixel_bytes == 8) {
+    const auto* pixel = static_cast<const uint16_t*>(source);
+    auto* output = static_cast<uint16_t*>(rgba);
+    output[0] = pixel[1]; output[1] = pixel[2]; output[2] = pixel[3]; output[3] = pixel[0];
+  } else {
+    const auto* pixel = static_cast<const float*>(source);
+    auto* output = static_cast<float*>(rgba);
+    output[0] = pixel[1]; output[1] = pixel[2]; output[2] = pixel[3]; output[3] = pixel[0];
+  }
+}
+
 struct RenderLifecycle {
   bool sequence_started{};
   bool frame_started{};
@@ -19247,9 +19261,9 @@ int32_t render_once(EffectEntry entry, std::array<std::byte, kInSize>& input,
   }
   if (captured_argb) *captured_argb = logical_output;
   if (external_output && error == 0) {
-    std::vector<unsigned char> rgba(static_cast<std::size_t>(width) * height * 4);
-    for (std::size_t pixel = 0; pixel < rgba.size() / 4; ++pixel)
-      argb_to_rgba8(rgba.data() + pixel * 4,
+    std::vector<unsigned char> rgba(static_cast<std::size_t>(width) * height * pixel_bytes);
+    for (std::size_t pixel = 0; pixel < static_cast<std::size_t>(width) * height; ++pixel)
+      argb_to_rgba_native(rgba.data() + pixel * pixel_bytes,
                     logical_output.data() + pixel * pixel_bytes, pixel_bytes);
     std::ofstream file(*external_output, std::ios::binary | std::ios::out);
     if (!file || !file.write(reinterpret_cast<const char*>(rgba.data()), rgba.size())) return -4;
@@ -19644,9 +19658,9 @@ SmartResult smart_render_once(EffectEntry entry, std::array<std::byte, kInSize>&
     result.input_hash = sha256_bytes(logical_input.data(), logical_input.size());
     result.output_hash = sha256_bytes(logical_output.data(), logical_output.size());
     if (external_output && result.render_error == 0) {
-      std::vector<unsigned char> rgba(static_cast<std::size_t>(width) * height * 4);
-      for (std::size_t pixel = 0; pixel < rgba.size() / 4; ++pixel)
-        argb_to_rgba8(rgba.data() + pixel * 4,
+      std::vector<unsigned char> rgba(static_cast<std::size_t>(width) * height * pixel_bytes);
+      for (std::size_t pixel = 0; pixel < static_cast<std::size_t>(width) * height; ++pixel)
+        argb_to_rgba_native(rgba.data() + pixel * pixel_bytes,
                       logical_output.data() + pixel * pixel_bytes, pixel_bytes);
       std::ofstream file(*external_output, std::ios::binary | std::ios::out);
       if (!file || !file.write(reinterpret_cast<const char*>(rgba.data()), rgba.size()))
@@ -19892,9 +19906,10 @@ SmartResult smart_render_once(EffectEntry entry, std::array<std::byte, kInSize>&
   if (result.render_error == 0 && !result.output_pixels_valid) result.render_error = -6;
   if (external_output && result.render_error == 0) {
     std::vector<unsigned char> rgba(static_cast<std::size_t>(result.output_width) *
-                                    result.output_height * 4);
-    for (std::size_t pixel = 0; pixel < rgba.size() / 4; ++pixel)
-      argb_to_rgba8(rgba.data() + pixel * 4,
+                                    result.output_height * pixel_bytes);
+    for (std::size_t pixel = 0; pixel < static_cast<std::size_t>(result.output_width) *
+                                      result.output_height; ++pixel)
+      argb_to_rgba_native(rgba.data() + pixel * pixel_bytes,
                     logical_output.data() + pixel * pixel_bytes, pixel_bytes);
     std::ofstream file(*external_output, std::ios::binary | std::ios::out);
     if (!file || !file.write(reinterpret_cast<const char*>(rgba.data()), rgba.size())) result.render_error = -4;
