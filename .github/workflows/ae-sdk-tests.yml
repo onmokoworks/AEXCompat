@@ -1,0 +1,83 @@
+name: AE SDK tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ae-sdk-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+# cargo test と source-only (SDK なし) の pytest は windows-clean-clone.yml が
+# 担当する。この workflow は SDK 込み検証 (--run-sdk-tests) 専用。
+jobs:
+  sdk-backed:
+    name: pytest with AE SDK (windows)
+    runs-on: windows-latest
+    # fork (untrusted) PR では実行しない: SDK asset は collaborator 限定であり、
+    # PR 側コードに asset へ届く token 付きで pytest を走らせない (fail-closed)。
+    # 現状 private repo で same-repo branch PR のみなので挙動は変わらない。
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    timeout-minutes: 120
+    env:
+      SDK_RELEASE_TAG: ci-sdk-ae25.2
+      SDK_ASSET: AfterEffectsSDK-ae25.2-win.zip
+      SDK_SHA256: 23F724D6B9C3E8F66B6C1A449EDA1F4C0B73D5A1C2706734C258EBF00E461F21
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+
+      # Gyroflow 方式: SDK zip を取得・展開して AFTER_EFFECTS_SDK_ROOT を通す。
+      # asset は private release (collaborator 限定) にあり、hash mismatch は fail-closed。
+      - name: Fetch After Effects SDK
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $zip = Join-Path $env:RUNNER_TEMP $env:SDK_ASSET
+          gh release download $env:SDK_RELEASE_TAG --repo $env:GITHUB_REPOSITORY --pattern $env:SDK_ASSET --output $zip
+          $hash = (Get-FileHash -Algorithm SHA256 $zip).Hash
+          if ($hash -ne $env:SDK_SHA256) { throw "SDK asset hash mismatch: expected $env:SDK_SHA256, got $hash" }
+          $dest = Join-Path $env:RUNNER_TEMP 'aesdk'
+          Expand-Archive -Path $zip -DestinationPath $dest -Force
+          $root = Join-Path $dest 'AfterEffectsSDK'
+          if (-not (Test-Path (Join-Path $root 'Examples\Headers\AE_Effect.h'))) {
+            throw 'extracted SDK is missing Examples\Headers\AE_Effect.h'
+          }
+          "AFTER_EFFECTS_SDK_ROOT=$root" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Install Python dependencies
+        run: python -m pip install -r requirements-dev.txt
+
+      # cmd で実行する: pwsh の step から spawn すると、テストが起動する
+      # powershell.exe (5.1) が pwsh 用の PSModulePath を継承してしまい、
+      # Get-FileHash 等の組み込み cmdlet を解決できなくなる。
+      - name: Run pytest with SDK tests
+        shell: cmd
+        run: |
+          set "PSModulePath=%ProgramFiles%\WindowsPowerShell\Modules;%SystemRoot%\System32\WindowsPowerShell\v1.0\Modules;%PSModulePath%"
+          python -m pytest -q -rs --run-sdk-tests --validate-local-artifact-manifest > pytest-output.txt 2>&1
+          set PYTEST_EXIT=%ERRORLEVEL%
+          type pytest-output.txt
+          exit /b %PYTEST_EXIT%
+
+      # AFTER_EFFECTS_SDK_ROOT が通っていれば SDK 由来の skip は 1 件も出ないはず。
+      # skip されたまま green になる silent success を fail にする。
+      - name: Fail if SDK-dependent tests were skipped
+        shell: pwsh
+        run: |
+          $leaks = Select-String -Path pytest-output.txt -Pattern 'set AFTER_EFFECTS_SDK_ROOT' -SimpleMatch
+          if ($leaks) {
+            $leaks | ForEach-Object { $_.Line }
+            throw 'SDK-dependent tests were skipped even though AFTER_EFFECTS_SDK_ROOT is set'
+          }

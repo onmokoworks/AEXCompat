@@ -113,6 +113,8 @@ python -m pytest -q
 
 注意: SDKなしのclean cloneでは0 failにはなりません。SDKヘッダのABI検証テストはskipしますが、probe / fixtureを実際にビルドするテスト群はSDK不在でfailします (期待されるfail)。ソースのみ検証とSDK込み検証それぞれの期待結果は `docs/BUILD_REQUIREMENTS.md` を参照してください。
 
+CI (GitHub Actions) はwindows runner上で2本のworkflowを実行します。`windows-clean-clone.yml` がsource-only検証 (SDKなしのpytestと `cargo test`)、`ae-sdk-tests.yml` がAE SDKをprivate release assetから取得して `AFTER_EFFECTS_SDK_ROOT` を設定した `--run-sdk-tests` 付きpytestを担当します (`docs/BUILD_REQUIREMENTS.md` の「CI (GitHub Actions)」を参照)。
+
 ### アーキテクチャ
 
 ```text
@@ -267,6 +269,8 @@ python -m pytest -q
 After generating the local artifacts, run `python -m pytest -q --run-local-artifact-tests` to include tests that authenticate or execute them. A normal clean clone skips those tests with an explicit reason.
 
 Note that a clean clone without the SDK does not reach 0 failures: SDK-header ABI tests skip explicitly, but the tests that actually build probes / fixtures fail when the SDK is absent (this is the expected outcome). See `docs/BUILD_REQUIREMENTS.md` for the expected results of source-only versus SDK-backed verification.
+
+CI (GitHub Actions) runs two Windows workflows: `windows-clean-clone.yml` for source-only verification (pytest and `cargo test` without the SDK), and `ae-sdk-tests.yml`, which fetches the AE SDK from a private release asset, sets `AFTER_EFFECTS_SDK_ROOT`, and runs pytest with `--run-sdk-tests` (see "CI (GitHub Actions)" in `docs/BUILD_REQUIREMENTS.md`).
 
 ### DirectX SDK fixture
 
