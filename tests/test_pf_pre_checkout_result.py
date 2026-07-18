@@ -66,11 +66,12 @@ def test_l2_source_writes_full_checkout_result() -> None:
         "constexpr size_t kCheckoutResultBytes = 76;",
         "void write_checkout_result(void* destination",
         "std::memset(bytes, 0, kCheckoutResultBytes);",
-        "std::memcpy(bytes + 32, square_par, sizeof(square_par));",
+        "const int32_t par[2] = {g_pixel_aspect_ratio.numerator,",
+        "std::memcpy(bytes + 32, par, sizeof(par));",
         "std::memcpy(bytes + 44, reference_size, sizeof(reference_size));",
-        "write_checkout_result(result, hosted->width, hosted->height);",
-        "write_checkout_result(result, g_smart_width, g_smart_height);",
-        "write_checkout_result(result, g_smart_map_width, g_smart_map_height);",
+        "g_full_resolution_width > 0 ? g_full_resolution_width : g_smart_width;",
+        "write_checkout_result(result, g_smart_width, g_smart_height,\n"
+        "                          reference_width, reference_height);",
         'L"--self-test-pf-pre-checkout-result"',
     ):
         assert marker in source

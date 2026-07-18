@@ -1414,17 +1414,21 @@ void write_rect(void* destination, int32_t width, int32_t height) {
 // PF_CheckoutResult is 76 bytes: result_rect @0, max_result_rect @16,
 // par (rational num/den) @32, solid + 3 reserved bytes @40, ref_width @44,
 // ref_height @48, 6 reserved longs @52. Callers pass the struct uninitialized,
-// so every field must be written, not only the rects.
+// so every field must be written, not only the rects. ref_width/ref_height are
+// the pre-downsample layer dimensions, which differ from the checkout world
+// size when a spatial context supplies a full resolution.
 constexpr size_t kCheckoutResultBytes = 76;
 
-void write_checkout_result(void* destination, int32_t width, int32_t height) {
+void write_checkout_result(void* destination, int32_t width, int32_t height,
+                           int32_t reference_width, int32_t reference_height) {
   auto* bytes = static_cast<std::byte*>(destination);
   std::memset(bytes, 0, kCheckoutResultBytes);
   write_rect(bytes, width, height);
   write_rect(bytes + 16, width, height);
-  const int32_t square_par[2] = {1, 1};
-  std::memcpy(bytes + 32, square_par, sizeof(square_par));
-  const int32_t reference_size[2] = {width, height};
+  const int32_t par[2] = {g_pixel_aspect_ratio.numerator,
+                          static_cast<int32_t>(g_pixel_aspect_ratio.denominator)};
+  std::memcpy(bytes + 32, par, sizeof(par));
+  const int32_t reference_size[2] = {reference_width, reference_height};
   std::memcpy(bytes + 44, reference_size, sizeof(reference_size));
 }
 
@@ -1487,7 +1491,8 @@ int32_t __cdecl pre_checkout_layer(void*, int32_t index, int32_t checkout_id,
     if (request) std::memcpy(g_map_checkout_request.data(), request, sizeof(g_map_checkout_request));
     hosted->checkout_id = checkout_id;
     if (!result) return 4;
-    write_checkout_result(result, hosted->width, hosted->height);
+    write_checkout_result(result, hosted->width, hosted->height,
+                          hosted->width, hosted->height);
     return 0;
   }
   if (timed_slot) return 4;
@@ -1502,28 +1507,31 @@ int32_t __cdecl pre_checkout_layer(void*, int32_t index, int32_t checkout_id,
   }
   if (!result) return 4;
   if (index == 0 && checkout_id == 0) {
-    write_checkout_result(result, g_smart_width, g_smart_height);
+    const int32_t reference_width =
+        g_full_resolution_width > 0 ? g_full_resolution_width : g_smart_width;
+    const int32_t reference_height =
+        g_full_resolution_height > 0 ? g_full_resolution_height : g_smart_height;
+    write_checkout_result(result, g_smart_width, g_smart_height,
+                          reference_width, reference_height);
     return 0;
   }
   if (index == g_secondary_layer_slot && g_smart_map_world) {
     g_secondary_checkout_id = checkout_id;
-    write_checkout_result(result, g_smart_map_width, g_smart_map_height);
+    write_checkout_result(result, g_smart_map_width, g_smart_map_height,
+                          g_smart_map_width, g_smart_map_height);
     return 0;
   }
   return 4;
 }
-bool verify_pre_checkout_result_contract() {
-  const int32_t saved_width = g_smart_width;
-  const int32_t saved_height = g_smart_height;
-  g_smart_width = 640;
-  g_smart_height = 360;
+bool verify_pre_checkout_result_case(int32_t expected_par_numerator,
+                                     int32_t expected_par_denominator,
+                                     int32_t expected_reference_width,
+                                     int32_t expected_reference_height) {
   std::array<std::byte, kCheckoutResultBytes> result{};
   result.fill(std::byte{0xCD});
   const int32_t status = pre_checkout_layer(
       nullptr, 0, 0, nullptr, g_checkout_current_time, 1,
       g_checkout_current_time_scale, result.data());
-  g_smart_width = saved_width;
-  g_smart_height = saved_height;
   if (status != 0) return false;
   int32_t rect[4];
   std::memcpy(rect, result.data(), sizeof(rect));
@@ -1532,10 +1540,11 @@ bool verify_pre_checkout_result_contract() {
   if (rect[0] != 0 || rect[1] != 0 || rect[2] != 640 || rect[3] != 360) return false;
   int32_t par[2];
   std::memcpy(par, result.data() + 32, sizeof(par));
-  if (par[0] != 1 || par[1] != 1) return false;
+  if (par[0] != expected_par_numerator || par[1] != expected_par_denominator) return false;
   int32_t reference_size[2];
   std::memcpy(reference_size, result.data() + 44, sizeof(reference_size));
-  if (reference_size[0] != 640 || reference_size[1] != 360) return false;
+  if (reference_size[0] != expected_reference_width ||
+      reference_size[1] != expected_reference_height) return false;
   for (std::size_t offset = 40; offset < 44; ++offset) {
     if (result[offset] != std::byte{0}) return false;
   }
@@ -1543,6 +1552,30 @@ bool verify_pre_checkout_result_contract() {
     if (result[offset] != std::byte{0}) return false;
   }
   return true;
+}
+
+bool verify_pre_checkout_result_contract() {
+  const int32_t saved_width = g_smart_width;
+  const int32_t saved_height = g_smart_height;
+  const SpatialRatio saved_par = g_pixel_aspect_ratio;
+  const int32_t saved_full_width = g_full_resolution_width;
+  const int32_t saved_full_height = g_full_resolution_height;
+  g_smart_width = 640;
+  g_smart_height = 360;
+  g_pixel_aspect_ratio = {1, 1};
+  g_full_resolution_width = 0;
+  g_full_resolution_height = 0;
+  bool passed = verify_pre_checkout_result_case(1, 1, 640, 360);
+  g_pixel_aspect_ratio = {10, 11};
+  g_full_resolution_width = 1280;
+  g_full_resolution_height = 720;
+  passed = verify_pre_checkout_result_case(10, 11, 1280, 720) && passed;
+  g_smart_width = saved_width;
+  g_smart_height = saved_height;
+  g_pixel_aspect_ratio = saved_par;
+  g_full_resolution_width = saved_full_width;
+  g_full_resolution_height = saved_full_height;
+  return passed;
 }
 
 int32_t __cdecl smart_checkout_pixels(void*, int32_t checkout_id, void** world) {
