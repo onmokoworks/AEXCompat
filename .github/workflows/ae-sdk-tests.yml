@@ -55,12 +55,17 @@ jobs:
       - name: Install Python dependencies
         run: python -m pip install -r requirements-dev.txt
 
+      # cmd で実行する: pwsh の step から spawn すると、テストが起動する
+      # powershell.exe (5.1) が pwsh 用の PSModulePath を継承してしまい、
+      # Get-FileHash 等の組み込み cmdlet を解決できなくなる。
       - name: Run pytest with SDK tests
-        shell: pwsh
+        shell: cmd
         run: |
-          python -m pytest -q -rs --run-sdk-tests --validate-local-artifact-manifest 2>&1 |
-            Tee-Object -FilePath pytest-output.txt
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          set "PSModulePath=%ProgramFiles%\WindowsPowerShell\Modules;%SystemRoot%\System32\WindowsPowerShell\v1.0\Modules;%PSModulePath%"
+          python -m pytest -q -rs --run-sdk-tests --validate-local-artifact-manifest > pytest-output.txt 2>&1
+          set PYTEST_EXIT=%ERRORLEVEL%
+          type pytest-output.txt
+          exit /b %PYTEST_EXIT%
 
       # AFTER_EFFECTS_SDK_ROOT が通っていれば SDK 由来の skip は 1 件も出ないはず。
       # skip されたまま green になる silent success を fail にする。
