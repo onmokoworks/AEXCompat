@@ -19,6 +19,10 @@ jobs:
   sdk-backed:
     name: pytest with AE SDK (windows)
     runs-on: windows-latest
+    # fork (untrusted) PR では実行しない: SDK asset は collaborator 限定であり、
+    # PR 側コードに asset へ届く token 付きで pytest を走らせない (fail-closed)。
+    # 現状 private repo で same-repo branch PR のみなので挙動は変わらない。
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     timeout-minutes: 120
     env:
       SDK_RELEASE_TAG: ci-sdk-ae25.2
