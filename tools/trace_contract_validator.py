@@ -153,8 +153,12 @@ def validate_event(event: Any) -> list[str]:
                 errors.append("known_function.module_rva must be a lowercase-hex module offset (<=8 digits)")
             if known.get("phase") not in KNOWN_FUNCTION_PHASES:
                 errors.append("known_function.phase must be enter or leave")
-            if "return_value" in known and not _is_number(known["return_value"]):
-                errors.append("known_function.return_value must be a numeric scalar")
+            if "return_value" in known:
+                if not _is_number(known["return_value"]):
+                    errors.append("known_function.return_value must be a numeric scalar")
+                if known.get("phase") != "leave":
+                    # A return value only exists after the call returns.
+                    errors.append("known_function.return_value is only allowed on the leave phase")
             if "fields" in known:
                 fields = known["fields"]
                 if not isinstance(fields, list):

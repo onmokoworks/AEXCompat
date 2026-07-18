@@ -110,6 +110,14 @@ class ResolveTests(unittest.TestCase):
             resolve_spec(spec, self.offset_map)
         self.assertIn("return_width", str(ctx.exception))
 
+    def test_return_width_without_return_as_is_rejected(self):
+        spec = copy.deepcopy(self.spec)
+        spec["hooks"][0].pop("return_as", None)
+        spec["hooks"][0]["return_width"] = 8
+        with self.assertRaises(ResolutionError) as ctx:
+            resolve_spec(spec, self.offset_map)
+        self.assertIn("return_width requires return_as", str(ctx.exception))
+
     def test_missing_offset_field_fails_loud(self):
         spec = copy.deepcopy(self.spec)
         spec["hooks"][0]["reads"].append({"name": "in.absent", "as": "int"})

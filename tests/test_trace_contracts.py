@@ -213,6 +213,16 @@ class TraceContractTests(unittest.TestCase):
             validate_event(enter),
         )
 
+    def test_return_value_only_allowed_on_leave(self):
+        enter = copy.deepcopy(load_native_observation_events()[1])  # phase enter
+        enter["known_function"]["return_value"] = 0
+        self.assertIn(
+            "known_function.return_value is only allowed on the leave phase",
+            validate_event(enter),
+        )
+        # The example leave event carries a return_value and stays valid.
+        self.assertEqual([], validate_event(load_native_observation_events()[2]))
+
     def test_known_function_rejects_non_finite_values(self):
         enter = copy.deepcopy(load_native_observation_events()[1])
         enter["known_function"]["fields"][0]["value"] = float("nan")

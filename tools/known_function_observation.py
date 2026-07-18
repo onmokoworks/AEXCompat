@@ -252,6 +252,8 @@ def resolve_hook(hook: dict[str, Any], offset_map: dict[str, dict[str, int]]) ->
         "leave_reads": plan["leave"],
         "return": None,
     }
+    if "return_width" in hook and "return_as" not in hook:
+        raise ResolutionError(f"{symbol}: return_width requires return_as")
     if "return_as" in hook:
         return_as = hook["return_as"]
         if return_as not in RETURN_INTERPRETS:

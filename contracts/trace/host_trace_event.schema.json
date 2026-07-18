@@ -67,7 +67,10 @@
           }
         }
       },
-      "additionalProperties": false
+      "additionalProperties": false,
+      "allOf": [
+        {"if": {"required": ["phase"], "properties": {"phase": {"const": "leave"}}}, "then": true, "else": {"properties": {"return_value": false}}}
+      ]
     }
   },
   "allOf": [
