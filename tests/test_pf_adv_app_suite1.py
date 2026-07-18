@@ -8,6 +8,7 @@ import pytest
 
 
 ROOT = Path(__file__).resolve().parents[1]
+PF_SUITES_ABI = ROOT / "minihost" / "src" / "worker_pf_suites.hpp"
 SDK_ROOT = os.environ.get("AFTER_EFFECTS_SDK_ROOT")
 SDK_HEADERS = Path(SDK_ROOT) / "Examples" / "Headers" if SDK_ROOT else None
 WORKER = ROOT / "target" / "minihost-build-v18" / "Release" / "aex_render_worker.exe"
@@ -93,7 +94,7 @@ def test_worker_v1_v2_tables_are_independent_non_null_fail_closed_and_balanced()
 
 
 def test_source_keeps_v1_storage_and_acquisition_separate_from_v2():
-    source = (ROOT / "minihost/src/l2_main.cpp").read_text(encoding="utf-8")
+    source = "\n".join(path.read_text(encoding="utf-8") for path in (ROOT / "minihost/src/l2_main.cpp", PF_SUITES_ABI))
     assert "std::array<void*, 10> g_adv_app_suite1" in source
     assert "std::array<void*, 11> g_adv_app_suite2" in source
     assert "*suite = g_adv_app_suite1.data();" in source

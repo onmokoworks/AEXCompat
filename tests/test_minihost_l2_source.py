@@ -7,11 +7,19 @@ SOURCE = ROOT / "minihost" / "src" / "l2_main.cpp"
 WORLD_SAFETY_SOURCE = ROOT / "minihost" / "src" / "worker_world_safety.cpp"
 HANDLE_RUNTIME_SOURCE = ROOT / "minihost" / "src" / "worker_handle_runtime.cpp"
 HANDLE_RUNTIME_HEADER = ROOT / "minihost" / "src" / "worker_handle_runtime.hpp"
+PF_SUITES_HEADER = ROOT / "minihost" / "src" / "worker_pf_suites.hpp"
+PF_SUITES_SOURCE = ROOT / "minihost" / "src" / "worker_pf_suites.cpp"
+
+
+def l2_family_source():
+    return "\n".join(path.read_text(encoding="utf-8") for path in (
+        ROOT / "minihost" / "src" / "l2_main.cpp", PF_SUITES_HEADER, PF_SUITES_SOURCE
+    ))
 
 
 class MinihostL2SourceTests(unittest.TestCase):
     def test_batch_sampling_suite_is_typed_and_fail_closed(self):
-        text = (ROOT / "minihost" / "src" / "l2_main.cpp").read_text(encoding="utf-8")
+        text = l2_family_source()
         for marker in (
             "struct PfBatchSamplingSuite1", "4 * sizeof(void*)",
             'strcmp(name, "PF Batch Sampling Suite") == 0',
@@ -23,13 +31,13 @@ class MinihostL2SourceTests(unittest.TestCase):
             self.assertIn(marker, text)
 
     def test_layout_matches_observed_contract(self):
-        text = SOURCE.read_text(encoding="utf-8")
+        text = l2_family_source()
         for marker in ("kInSize = 408", "kOutSize = 408", "kParamSize = 176",
                        "kInAddParam = 16", "kInGlobalData = 312", "kOutGlobalData = 40"):
             self.assertIn(marker, text)
 
     def test_host_advertises_the_current_sdk_spec_version(self):
-        text = SOURCE.read_text(encoding="utf-8")
+        text = l2_family_source()
         self.assertIn("kHostSpecMajor = 13", text)
         self.assertIn("kHostSpecMinor = 28", text)
         self.assertIn("write<int16_t>(input, kInVersion, kHostSpecMajor)", text)
@@ -37,21 +45,21 @@ class MinihostL2SourceTests(unittest.TestCase):
         self.assertNotIn("write<uint32_t>(input, kInVersion, 0)", text)
 
     def test_l2_is_non_rendering_and_bounded(self):
-        text = SOURCE.read_text(encoding="utf-8")
+        text = l2_family_source()
         self.assertIn("kMaxParams = 1024", text)
         self.assertIn('render_performed\\\":false', text)
         self.assertNotIn("PF_Cmd_RENDER", text)
         self.assertNotIn("AE_Effect.h", text)
 
     def test_render_code_is_compile_time_separated(self):
-        text = SOURCE.read_text(encoding="utf-8")
+        text = l2_family_source()
         self.assertIn("#ifdef AEXCOMPAT_RENDER_WORKER", text)
         self.assertIn('L"--render"', text)
         self.assertIn('L"--l2"', text)
         self.assertIn("guard_bytes_intact", text)
 
     def test_l2_provides_bounded_movable_handle_callbacks(self):
-        text = SOURCE.read_text(encoding="utf-8")
+        text = l2_family_source()
         runtime = HANDLE_RUNTIME_SOURCE.read_text(encoding="utf-8")
         header = HANDLE_RUNTIME_HEADER.read_text(encoding="utf-8")
         for marker in ("kUtilsSize = 552", "kUtilsNewHandle = 160", "dispose_handle"):
@@ -90,7 +98,7 @@ class MinihostL2SourceTests(unittest.TestCase):
             self.assertIn(marker, text)
 
     def test_l2_pica_is_default_deny_except_bounded_parameter_suites(self):
-        text = SOURCE.read_text(encoding="utf-8")
+        text = l2_family_source()
         self.assertIn('std::strcmp(name, "PF Handle Suite")', text)
         self.assertIn('std::strcmp(name, "PF PointParamSuite")', text)
         self.assertIn('std::strcmp(name, "PF AngleParamSuite")', text)
@@ -101,7 +109,7 @@ class MinihostL2SourceTests(unittest.TestCase):
         self.assertIn("return 1", text)
 
     def test_aegp_keyframe_suite5_wires_all_mutations(self):
-        text = SOURCE.read_text(encoding="utf-8")
+        text = l2_family_source()
         for slot, function in (
             (0, "aegp_get_stream_num_keyframes"), (1, "aegp_get_keyframe_time"),
             (2, "insert_keyframe"), (3, "delete_keyframe"),
@@ -137,7 +145,7 @@ class MinihostL2SourceTests(unittest.TestCase):
             self.assertIn(marker, text)
 
     def test_aegp_item_suite9_wires_get_item_type_at_slot_5(self):
-        text = SOURCE.read_text(encoding="utf-8")
+        text = l2_family_source()
         for marker in (
             "offsetof(AegpItemSuite, get_item_type) == 40",
             "g_aegp_item_suite.get_item_type = &aegp_get_item_type",
@@ -148,7 +156,7 @@ class MinihostL2SourceTests(unittest.TestCase):
             self.assertIn(marker, text)
 
     def test_l2_decodes_supported_parameter_descriptors(self):
-        text = SOURCE.read_text(encoding="utf-8")
+        text = l2_family_source()
         for marker in ("record.type == 1", "record.type == 2", "record.type == 3", "record.type == 6",
                        "record.type == 7", "record.type == 4", "record.type == 10",
                        "record.type == 18", "valid_min", "default_value", "current_value",
@@ -158,7 +166,7 @@ class MinihostL2SourceTests(unittest.TestCase):
             self.assertIn(marker, text)
 
     def test_fixed_slider_uses_sdk_16_16_layout_and_float_transport(self):
-        text = SOURCE.read_text(encoding="utf-8")
+        text = l2_family_source()
         for marker in (
             "record.type == 2",
             "read<int32_t>(bytes, u + 68) / 65536.0",
@@ -171,7 +179,7 @@ class MinihostL2SourceTests(unittest.TestCase):
             self.assertIn(marker, text)
 
     def test_legacy_copy_and_iterate_callbacks_are_bounded_argb8(self):
-        text = SOURCE.read_text(encoding="utf-8") + WORLD_SAFETY_SOURCE.read_text(encoding="utf-8")
+        text = l2_family_source() + WORLD_SAFETY_SOURCE.read_text(encoding="utf-8")
         for marker in (
             "kUtilsCopy = 64",
             "kUtilsIterate = 88",
@@ -198,7 +206,7 @@ class MinihostL2SourceTests(unittest.TestCase):
             self.assertIn(marker, text)
 
     def test_render_exposes_bounded_suite_adapters_for_path_effects(self):
-        text = SOURCE.read_text(encoding="utf-8")
+        text = l2_family_source()
         for marker in (
             "struct PfMaskSuite1",
             "struct Iterate8Suite2",
@@ -216,7 +224,7 @@ class MinihostL2SourceTests(unittest.TestCase):
             self.assertIn(marker, text)
 
     def test_smart_render_exposes_bounded_deep_iterate_suites(self):
-        text = SOURCE.read_text(encoding="utf-8") + WORLD_SAFETY_SOURCE.read_text(encoding="utf-8")
+        text = l2_family_source() + WORLD_SAFETY_SOURCE.read_text(encoding="utf-8")
         for marker in (
             'std::strcmp(name, "PF iterate16 Suite") == 0',
             'std::strcmp(name, "PF iterateFloat Suite") == 0',
@@ -229,7 +237,7 @@ class MinihostL2SourceTests(unittest.TestCase):
             self.assertIn(marker, text)
 
     def test_classic_render_honors_frame_setup_resize_and_fill(self):
-        text = SOURCE.read_text(encoding="utf-8")
+        text = l2_family_source()
         for marker in (
             "constexpr std::size_t kOutWidth = 80",
             "constexpr std::size_t kOutOrigin = 88",
@@ -246,7 +254,7 @@ class MinihostL2SourceTests(unittest.TestCase):
             self.assertIn(marker, text)
 
     def test_classic_world_utilities_are_bounded_and_ownership_tracked(self):
-        text = SOURCE.read_text(encoding="utf-8")
+        text = l2_family_source()
         for marker in (
             "constexpr std::size_t kUtilsBlend = 48",
             "constexpr std::size_t kUtilsConvolve = 56",
@@ -262,14 +270,14 @@ class MinihostL2SourceTests(unittest.TestCase):
             self.assertIn(marker, text)
 
     def test_component_parameter_transport_is_slot_bound_and_versioned(self):
-        text = SOURCE.read_text(encoding="utf-8")
+        text = l2_family_source()
         for marker in ('L"v4|"', "RequestedKind::Angle", "RequestedKind::Point",
                        "RequestedKind::Point3D", 'kind_text == L"angle"',
                        'kind_text == L"point"', 'kind_text == L"point3d"'):
             self.assertIn(marker, text)
 
     def test_secondary_layer_transport_is_multi_slot_bound(self):
-        text = SOURCE.read_text(encoding="utf-8")
+        text = l2_family_source()
         for marker in ('L"--render-image-layer"', 'L"--smart-image-layer"',
                        "g_checkout_layer_definitions", "g_smart_hosted_layers",
                        "existing.slot != layer.slot", "g_params[layer.slot - 1].type != 0",
@@ -280,14 +288,14 @@ class MinihostL2SourceTests(unittest.TestCase):
             self.assertIn(marker, text)
 
     def test_large_parameter_sets_use_bounded_dynamic_storage(self):
-        text = SOURCE.read_text(encoding="utf-8")
+        text = l2_family_source()
         self.assertIn("kMaxParams = 1024", text)
         self.assertIn("lifecycle_definitions(g_params.size() + 1)", text)
         self.assertIn("std::vector<void*> lifecycle_params", text)
         self.assertNotIn("lifecycle_definitions{}", text)
 
     def test_smartfx_expanded_extent_is_bounded_and_origin_aware(self):
-        text = SOURCE.read_text(encoding="utf-8")
+        text = l2_family_source()
         for marker in ("rect_width <= 4096", "rect_height <= 4096",
                        "rect_width * rect_height <= 16'777'216",
                        "write<int32_t>(input, 276", "write<int32_t>(input, 280",
@@ -295,7 +303,7 @@ class MinihostL2SourceTests(unittest.TestCase):
             self.assertIn(marker, text)
 
     def test_classic_render_defaults_extent_hint_to_the_full_input_world(self):
-        text = SOURCE.read_text(encoding="utf-8")
+        text = l2_family_source()
         self.assertIn("const int32_t full_extent[4] = {0, 0, width, height}", text)
         self.assertIn("std::memcpy(input.data() + 260, full_extent", text)
         self.assertLess(
@@ -304,7 +312,7 @@ class MinihostL2SourceTests(unittest.TestCase):
         )
 
     def test_interactive_image_time_context_is_validated_and_forwarded(self):
-        text = SOURCE.read_text(encoding="utf-8")
+        text = l2_family_source()
         for marker in ("external_current_time", "external_time_step",
                        "external_total_time", "external_time_scale",
                        "external_total_time < external_current_time",
@@ -312,7 +320,7 @@ class MinihostL2SourceTests(unittest.TestCase):
             self.assertIn(marker, text)
 
     def test_effect_render_defaults_to_high_quality_and_complete_frame_context(self):
-        text = SOURCE.read_text(encoding="utf-8")
+        text = l2_family_source()
         for marker in (
             "constexpr std::size_t kInQuality = 192",
             "constexpr std::size_t kInLocalTimeStep = 236",
@@ -326,13 +334,13 @@ class MinihostL2SourceTests(unittest.TestCase):
             self.assertIn(marker, text)
 
     def test_frame_setup_origin_uses_two_signed_32_bit_components(self):
-        text = SOURCE.read_text(encoding="utf-8")
+        text = l2_family_source()
         self.assertIn("read<int32_t>(command_output, kOutOrigin)", text)
         self.assertIn("read<int32_t>(command_output, kOutOrigin + 4)", text)
         self.assertNotIn("read<int16_t>(command_output, kOutOrigin)", text)
 
     def test_params_setup_count_is_forwarded_and_sanity_checked(self):
-        text = SOURCE.read_text(encoding="utf-8")
+        text = l2_family_source()
         for marker in (
             "expected_num_params = static_cast<int32_t>(g_params.size() + 1)",
             "parameter_count_contract_valid",
@@ -343,7 +351,7 @@ class MinihostL2SourceTests(unittest.TestCase):
             self.assertIn(marker, text)
 
     def test_interactive_render_uses_balanced_sequence_and_frame_lifecycle(self):
-        text = SOURCE.read_text(encoding="utf-8")
+        text = l2_family_source()
         lifecycle = (ROOT / "minihost" / "src" / "render_lifecycle.cpp").read_text(
             encoding="utf-8"
         )
@@ -368,7 +376,7 @@ class MinihostL2SourceTests(unittest.TestCase):
                         lifecycle.index("layout.sequence_setdown"))
 
     def test_interactive_render_supports_bounded_deep_pixel_worlds(self):
-        text = SOURCE.read_text(encoding="utf-8")
+        text = l2_family_source()
         pixel_transport = (ROOT / "minihost" / "src" / "render_pixel_transport.cpp").read_text(
             encoding="utf-8"
         )
@@ -391,7 +399,7 @@ class MinihostL2SourceTests(unittest.TestCase):
             self.assertIn(marker, pixel_transport)
 
     def test_supervised_parameter_dispatch_is_slot_bound_typed_and_explicit(self):
-        text = SOURCE.read_text(encoding="utf-8")
+        text = l2_family_source()
         for marker in ('L"--user-changed"', "kUserChangedParam = 13",
                        "g_params[offset].flags & (1u << 6)",
                        "parse_parameter_payload(argv[5], g_user_changed_parameters)",
@@ -402,13 +410,13 @@ class MinihostL2SourceTests(unittest.TestCase):
         self.assertNotIn("g_params[offset].type != 15", text)
 
     def test_ui_flags_use_the_observed_paramdef_offset(self):
-        text = SOURCE.read_text(encoding="utf-8")
+        text = l2_family_source()
         self.assertIn("kParamUiFlags = 4", text)
         self.assertIn('read<uint32_t>(param.raw, kParamUiFlags)', text)
         self.assertNotIn('read<uint32_t>(param.raw, 0)', text)
 
     def test_aegp_initialization_has_a_distinct_default_deny_abi(self):
-        text = SOURCE.read_text(encoding="utf-8")
+        text = l2_family_source()
         for marker in ('L"--aegp-init"', 'GetProcAddress(module, "EntryPointFunc")',
                        'std::strcmp(name, "AEGP Command Suite") == 0 && version == 1',
                        'std::strcmp(name, "AEGP Register Suite") == 0 && version == 6',
@@ -419,13 +427,13 @@ class MinihostL2SourceTests(unittest.TestCase):
         self.assertNotIn('reinterpret_cast<EffectEntry>(GetProcAddress(module, "EntryPointFunc"))', text)
 
     def test_parameter_inspection_can_isolate_optional_about_crashes(self):
-        text = SOURCE.read_text(encoding="utf-8")
+        text = l2_family_source()
         self.assertIn('L"--l2-no-about"', text)
         self.assertIn('about_selector_dispatched', text)
         self.assertIn('about_error = g_skip_about ? 0', text)
 
     def test_parameter_inspection_does_not_require_render_lifecycle(self):
-        text = SOURCE.read_text(encoding="utf-8")
+        text = l2_family_source()
         for marker in (
             'L"--l2-params-only"',
             '"parameters_inspected"',
@@ -438,7 +446,7 @@ class MinihostL2SourceTests(unittest.TestCase):
         self.assertLess(params_only, lifecycle)
 
     def test_aegp_update_menu_event_owns_and_invokes_registered_hooks(self):
-        text = SOURCE.read_text(encoding="utf-8")
+        text = l2_family_source()
         for marker in ('L"--aegp-update-menu"', "AegpUpdateMenuRegistration",
                        "g_aegp_update_menu_registrations.size() >= 64",
                        "registration.hook(", "global_refcon, registration.refcon, 0)",
@@ -446,7 +454,7 @@ class MinihostL2SourceTests(unittest.TestCase):
             self.assertIn(marker, text)
 
     def test_aegp_idle_event_is_single_tick_bounded_and_owned(self):
-        text = SOURCE.read_text(encoding="utf-8")
+        text = l2_family_source()
         for marker in ('L"--aegp-idle"', "AegpIdleRegistration",
                        "g_aegp_idle_registrations.size() >= 64",
                        "requested_sleep < 0 || requested_sleep > 3600",
@@ -454,7 +462,7 @@ class MinihostL2SourceTests(unittest.TestCase):
             self.assertIn(marker, text)
 
     def test_aegp_death_hooks_are_owned_before_module_unload(self):
-        text = SOURCE.read_text(encoding="utf-8")
+        text = l2_family_source()
         for marker in ("AegpDeathRegistration", "g_aegp_death_registrations.size() >= 64",
                        "registration.hook(global_refcon, registration.refcon)",
                        '"death_hooks_invoked\\\":"', '"death_error\\\":"'):
@@ -463,7 +471,7 @@ class MinihostL2SourceTests(unittest.TestCase):
         self.assertLess(death_call, text.index("FreeLibrary(module);", death_call))
 
     def test_aegp_command_roundtrip_tracks_filter_priority_and_handled(self):
-        text = SOURCE.read_text(encoding="utf-8")
+        text = l2_family_source()
         for marker in ('L"--aegp-command-roundtrip"', "AegpCommandRegistration",
                        "priority != 1 && priority != 2", "registration.command != 0",
                        "registration.command != command", "already_handled, &handled",
@@ -471,7 +479,7 @@ class MinihostL2SourceTests(unittest.TestCase):
             self.assertIn(marker, text)
 
     def test_active_aegp_idle_roundtrip_hosts_an_observed_empty_item_scene(self):
-        text = SOURCE.read_text(encoding="utf-8")
+        text = l2_family_source()
         for marker in ('L"--aegp-active-idle-roundtrip"', '"AEGP Item Suite"',
                        "version == 14", "static_assert(sizeof(AegpItemSuite) == 208)",
                        "*item = (g_aegp_update_menu_mode || g_aegp_command_roundtrip_mode ||",
@@ -481,7 +489,7 @@ class MinihostL2SourceTests(unittest.TestCase):
             self.assertIn(marker, text)
 
     def test_comp_aegp_idle_roundtrip_hosts_typed_item_comp_and_layer_handles(self):
-        text = SOURCE.read_text(encoding="utf-8")
+        text = l2_family_source()
         for marker in ('L"--aegp-comp-idle-roundtrip"', '"AEGP Comp Suite"',
                        '"AEGP Layer Suite"', "version == 25", "version == 11",
                        "version == 15", "sizeof(g_aegp_comp_suite11) == 352",
@@ -557,7 +565,7 @@ class MinihostL2SourceTests(unittest.TestCase):
             self.assertIn(marker, text)
 
     def test_keyframe_roundtrip_owns_a_bounded_explicit_pipe(self):
-        text = SOURCE.read_text(encoding="utf-8")
+        text = l2_family_source()
         for marker in ('L"--aegp-keyframe-roundtrip"',
                        "static_assert(sizeof(TimelineKeyframeRequest) == 32)",
                        "static_assert(sizeof(TimelineKeyframesSnapshotHeader) == 40)",
@@ -573,7 +581,7 @@ class MinihostL2SourceTests(unittest.TestCase):
             self.assertIn(marker, text)
 
     def test_seek_roundtrip_applies_item_time_and_validates_ack(self):
-        text = SOURCE.read_text(encoding="utf-8")
+        text = l2_family_source()
         for marker in ('L"--aegp-seek-roundtrip"',
                        "static_assert(sizeof(TimelineHostSeekRequest) == 48)",
                        "static_assert(sizeof(TimelineHostSeekAck) == 44)",
@@ -587,7 +595,7 @@ class MinihostL2SourceTests(unittest.TestCase):
             self.assertIn(marker, text)
 
     def test_trim_roundtrip_mutates_one_layer_and_validates_ack(self):
-        text = SOURCE.read_text(encoding="utf-8")
+        text = l2_family_source()
         for marker in ('L"--aegp-trim-roundtrip"',
                        "static_assert(sizeof(TimelineHostTrimRequest) == 48)",
                        "static_assert(sizeof(TimelineHostTrimAck) == 40)",
@@ -600,7 +608,7 @@ class MinihostL2SourceTests(unittest.TestCase):
             self.assertIn(marker, text)
 
     def test_switch_roundtrip_handles_inverted_active_flags_and_ack(self):
-        text = SOURCE.read_text(encoding="utf-8")
+        text = l2_family_source()
         for marker in ('L"--aegp-switch-roundtrip"',
                        "static_assert(sizeof(TimelineHostSwitchRequest) == 40)",
                        "static_assert(sizeof(TimelineHostSwitchAck) == 36)",
@@ -613,7 +621,7 @@ class MinihostL2SourceTests(unittest.TestCase):
             self.assertIn(marker, text)
 
     def test_platform_data_is_absolute_bounded_and_fail_closed(self):
-        text = SOURCE.read_text(encoding="utf-8")
+        text = l2_family_source()
         for marker in ("kUtilsGetPlatformData = 432",
                        "kExeFilePathWide = 7",
                        "kResourceFilePathWide = 8",
@@ -623,7 +631,7 @@ class MinihostL2SourceTests(unittest.TestCase):
             self.assertIn(marker, text)
 
     def test_typed_pixel_data_callbacks_validate_depth_and_world_bounds(self):
-        text = SOURCE.read_text(encoding="utf-8")
+        text = l2_family_source()
         for marker in ("kUtilsGetPixelData8 = 528",
                        "kUtilsGetPixelData16 = 536",
                        "if (format != required_format) return 0",
@@ -633,7 +641,7 @@ class MinihostL2SourceTests(unittest.TestCase):
             self.assertIn(marker, text)
 
     def test_native_stdout_cannot_corrupt_the_worker_json_protocol(self):
-        text = SOURCE.read_text(encoding="utf-8")
+        text = l2_family_source()
         guard = (ROOT / "minihost" / "src" / "native_stdout_guard.cpp").read_text(
             encoding="utf-8"
         )
@@ -646,7 +654,7 @@ class MinihostL2SourceTests(unittest.TestCase):
             self.assertIn(marker, text)
 
     def test_arbitrary_debug_print_is_bounded_and_crash_isolated(self):
-        text = SOURCE.read_text(encoding="utf-8")
+        text = l2_family_source()
         for marker in (
             "kArbitraryCallback = 22",
             "kMaxArbitraryPrintBytes = 64 * 1024",
@@ -658,7 +666,7 @@ class MinihostL2SourceTests(unittest.TestCase):
             self.assertIn(marker, text)
 
     def test_arbitrary_serialization_roundtrip_is_guarded_and_handle_checked(self):
-        text = SOURCE.read_text(encoding="utf-8")
+        text = l2_family_source()
         for marker in (
             "kMaxFlatBytes = 16 * 1024 * 1024",
             "roundtrip_arbitrary_values",
@@ -670,7 +678,7 @@ class MinihostL2SourceTests(unittest.TestCase):
             self.assertIn(marker, text)
 
     def test_arbitrary_temporal_interpolation_is_time_bound_and_owned(self):
-        text = SOURCE.read_text(encoding="utf-8")
+        text = l2_family_source()
         for marker in (
             "interpolate_arbitrary_values",
             "static_cast<double>(current_time) / total_time",
@@ -681,7 +689,7 @@ class MinihostL2SourceTests(unittest.TestCase):
             self.assertIn(marker, text)
 
     def test_custom_ui_registration_is_bounded_and_reported(self):
-        text = SOURCE.read_text(encoding="utf-8")
+        text = l2_family_source()
         for marker in (
             "struct CustomUiRegistration",
             "std::array<std::byte, 44> bytes",
@@ -693,7 +701,7 @@ class MinihostL2SourceTests(unittest.TestCase):
             self.assertIn(marker, text)
 
     def test_custom_ui_adjust_cursor_is_isolated_and_owned(self):
-        text = SOURCE.read_text(encoding="utf-8")
+        text = l2_family_source()
         for marker in (
             "kEvent = 15",
             'L"--l2-adjust-cursor"',
@@ -705,7 +713,7 @@ class MinihostL2SourceTests(unittest.TestCase):
             self.assertIn(marker, text)
 
     def test_custom_ui_drawbot_commands_are_bounded_and_owned(self):
-        text = SOURCE.read_text(encoding="utf-8")
+        text = l2_family_source()
         for marker in (
             'L"--l2-draw-event"',
             '"DRAWBOT Draw Suite"',
@@ -720,7 +728,7 @@ class MinihostL2SourceTests(unittest.TestCase):
             self.assertIn(marker, text)
 
     def test_custom_ui_click_is_bounded_changed_and_invalidated(self):
-        text = SOURCE.read_text(encoding="utf-8")
+        text = l2_family_source()
         for marker in (
             'L"--l2-click-event"',
             'L"%d,%d,%f,%f,%f,%f"',
@@ -734,7 +742,7 @@ class MinihostL2SourceTests(unittest.TestCase):
             self.assertIn(marker, text)
 
     def test_custom_ui_click_can_mutate_the_same_state_used_for_classic_and_smart_render(self):
-        text = SOURCE.read_text(encoding="utf-8")
+        text = l2_family_source()
         for marker in (
             'L"click:v1|"',
             "smart_image_click_context",
@@ -750,7 +758,7 @@ class MinihostL2SourceTests(unittest.TestCase):
             self.assertIn(marker, text)
 
     def test_custom_ui_draw_can_share_the_classic_or_smart_render_lifecycle(self):
-        text = SOURCE.read_text(encoding="utf-8")
+        text = l2_family_source()
         for marker in (
             'L"draw:v1"',
             "g_render_draw_enabled",
@@ -763,7 +771,7 @@ class MinihostL2SourceTests(unittest.TestCase):
             self.assertIn(marker, text)
 
     def test_custom_ui_context_is_a_valid_effect_window_handle(self):
-        text = SOURCE.read_text(encoding="utf-8")
+        text = l2_family_source()
         for marker in (
             "struct HostUiContext",
             "uint32_t magic{0x05ea771e}",
@@ -776,7 +784,7 @@ class MinihostL2SourceTests(unittest.TestCase):
             self.assertIn(marker, text)
 
     def test_custom_ui_drag_is_continuation_bound_and_finalized(self):
-        text = SOURCE.read_text(encoding="utf-8")
+        text = l2_family_source()
         for marker in (
             'L"--l2-drag-event"',
             "drag_steps < 1 || drag_steps > 32",
@@ -789,7 +797,7 @@ class MinihostL2SourceTests(unittest.TestCase):
             self.assertIn(marker, text)
 
     def test_comp_layer_draw_uses_overlay_theme_and_registered_target(self):
-        text = SOURCE.read_text(encoding="utf-8")
+        text = l2_family_source()
         for marker in (
             '"PF Effect Custom UI Overlay Theme Suite"',
             "overlay_foreground",
@@ -802,7 +810,7 @@ class MinihostL2SourceTests(unittest.TestCase):
             self.assertIn(marker, text)
 
     def test_suite_lease_leaks_are_reported_without_discarding_valid_images(self):
-        text = SOURCE.read_text(encoding="utf-8")
+        text = l2_family_source()
         self.assertIn('"suite_lease_warning\\\":"', text)
         self.assertIn("smart.guards_intact && handle_lifetimes_balanced()", text)
         self.assertNotIn(
@@ -811,7 +819,7 @@ class MinihostL2SourceTests(unittest.TestCase):
         )
 
     def test_effect_initialization_exposes_the_frozen_utility_suite3_layout(self):
-        text = SOURCE.read_text(encoding="utf-8")
+        text = l2_family_source()
         self.assertIn("struct UtilitySuite3", text)
         self.assertIn("void* unsupported[7]{}", text)
         self.assertIn("UtilitySuite3 g_utility_suite3", text)
@@ -820,7 +828,7 @@ class MinihostL2SourceTests(unittest.TestCase):
         )
 
     def test_discovery_selectors_share_the_seh_boundary_and_report_selector(self):
-        text = SOURCE.read_text(encoding="utf-8")
+        text = l2_family_source()
         dispatch = (ROOT / "minihost" / "src" / "worker_selector_dispatch.cpp").read_text(
             encoding="utf-8"
         )
@@ -832,7 +840,7 @@ class MinihostL2SourceTests(unittest.TestCase):
         self.assertIn('"last_seh_error\\\":"', text)
 
     def test_all_macro_effect_calls_share_the_audited_seh_boundary(self):
-        text = SOURCE.read_text(encoding="utf-8")
+        text = l2_family_source()
         dispatch = (ROOT / "minihost" / "src" / "worker_selector_dispatch.cpp").read_text(
             encoding="utf-8"
         )
@@ -857,7 +865,7 @@ class MinihostL2SourceTests(unittest.TestCase):
             self.assertIn(f'return "{name}"', text)
 
     def test_params_only_discovery_does_not_require_about(self):
-        text = SOURCE.read_text(encoding="utf-8")
+        text = l2_family_source()
         self.assertIn("g_skip_about =", text)
         self.assertIn("params_only_mode || external_dependencies_mode", text)
         self.assertIn("about_error = g_skip_about ? 0", text)

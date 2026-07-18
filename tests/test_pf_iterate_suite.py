@@ -5,11 +5,13 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
+PF_SUITES = ROOT / "minihost" / "src" / "worker_pf_suites.cpp"
+PF_SUITES_ABI = ROOT / "minihost" / "src" / "worker_pf_suites.hpp"
 SOURCE = ROOT / "minihost" / "src" / "l2_main.cpp"
 
 
 def source_text():
-    return SOURCE.read_text(encoding="utf-8")
+    return "\n".join(path.read_text(encoding="utf-8") for path in (SOURCE, PF_SUITES_ABI, PF_SUITES))
 
 
 def worker():

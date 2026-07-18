@@ -6,6 +6,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "minihost" / "src" / "l2_main.cpp"
 WORLD_SAFETY_SOURCE = ROOT / "minihost" / "src" / "worker_world_safety.cpp"
+PF_SUITES_SOURCE = ROOT / "minihost" / "src" / "worker_pf_suites.cpp"
 RESULT = ROOT / "analysis" / "GENERAL_EFFECT_SUITE_AVAILABILITY_RESULT_2026-07-16.json"
 
 
@@ -61,7 +62,7 @@ def test_general_effect_suites_are_available_without_mask_mode_and_are_version_e
 
 
 def test_general_effect_suite_functions_keep_existing_safety_bounds():
-    source = SOURCE.read_text(encoding="utf-8") + WORLD_SAFETY_SOURCE.read_text(encoding="utf-8")
+    source = SOURCE.read_text(encoding="utf-8") + PF_SUITES_SOURCE.read_text(encoding="utf-8") + WORLD_SAFETY_SOURCE.read_text(encoding="utf-8")
 
     for marker in (
         "int32_t __cdecl subpixel_sample16(",
