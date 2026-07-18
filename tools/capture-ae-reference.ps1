@@ -64,7 +64,6 @@ $installedHash = (Get-FileHash -LiteralPath $installedPath -Algorithm SHA256).Ha
 if ($testedHash -ne $installedHash) {
     throw "Installed AEX hash does not match tested AEX: $installedHash != $testedHash"
 }
-
 $scriptPath = if ($ScriptPath) {
     (Resolve-Path -LiteralPath $ScriptPath).Path
 } else {
@@ -75,7 +74,19 @@ if (Test-Path -LiteralPath $resultPath) {
     throw 'Reference result file already exists.'
 }
 
-$env:AEXCOMPAT_AE_INPUT = $inputPath
+# Stage a private copy of the input and hash that copy: hashing the original
+# would leave a window (before AE imports it, or after the run) in which a
+# rewritten file makes the recorded identity diverge from the bytes AE
+# actually rendered. AE is pointed at the staged copy, so the hash and the
+# rendered bytes are the same file by construction. This is the last
+# preflight step, so every refusal above leaves nothing behind in the temp
+# directory and the cleanup block below removes the copy on every later path.
+$stagedInput = Join-Path ([System.IO.Path]::GetTempPath()) `
+    ("aexcompat-ae-input-" + [guid]::NewGuid().ToString('N') + [System.IO.Path]::GetExtension($inputPath))
+Copy-Item -LiteralPath $inputPath -Destination $stagedInput
+$inputHash = (Get-FileHash -LiteralPath $stagedInput -Algorithm SHA256).Hash.ToLowerInvariant()
+
+$env:AEXCOMPAT_AE_INPUT = $stagedInput
 $env:AEXCOMPAT_AE_OUTPUT = $outputPath
 $env:AEXCOMPAT_AE_RESULT = $resultPath
 $env:AEXCOMPAT_AE_EFFECT = $EffectName
@@ -125,6 +136,7 @@ try {
     'AEXCOMPAT_AE_WORKING_SPACE','AEXCOMPAT_AE_LINEARIZE',
     'AEXCOMPAT_AE_PARAM_NAME','AEXCOMPAT_AE_PARAM_VALUE' |
         ForEach-Object { Remove-Item "Env:$_" -ErrorAction SilentlyContinue }
+    Remove-Item -LiteralPath $stagedInput -ErrorAction SilentlyContinue
 }
 
 $result = Get-Content -LiteralPath $resultPath -Raw | ConvertFrom-Json
@@ -134,4 +146,11 @@ if ($result.status -ne 'captured') {
 if (-not (Test-Path -LiteralPath $outputPath)) {
     throw 'After Effects reported capture success without creating the PNG.'
 }
+# Bind the capture evidence to its verified inputs: both hashes were taken
+# before After Effects launched, so record those identities in the result
+# document (the cross-machine runbook requires the input hash in the returned
+# manifest, and evidence refresh scripts verify against it).
+$result | Add-Member -NotePropertyName 'input_sha256' -NotePropertyValue $inputHash
+$result | Add-Member -NotePropertyName 'tested_aex_sha256' -NotePropertyValue $testedHash.ToLowerInvariant()
+$result | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $resultPath -Encoding utf8
 $result | ConvertTo-Json -Depth 8
