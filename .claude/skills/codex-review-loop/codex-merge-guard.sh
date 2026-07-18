@@ -59,22 +59,21 @@ if [ -n "$find_ts" ] && [[ "$find_ts" > "$clean_ts" ]]; then
   echo "REFUSE: newer Codex findings after the clean"; exit 1
 fi
 
-# Owner feedback on the current head, beyond the CHANGES_REQUESTED that
-# owner_review_gate covers: an inline comment or a bodied COMMENTED review
-# submitted against the current head SHA (.commit_id == head). SHA association,
-# not timestamps — a comment/review on a superseded commit drops out, and a
-# comment on the current head blocks (owner feedback outranks Codex). This
-# session's inline ACK replies are exempt; a later owner approval/dismissal
-# clears an addressed comment. Top-level PR comments carry no commit
-# association, so they are bound to the accepted clean instead: a non-trigger
-# owner comment at/after that clean cannot have been surfaced by the monitor
-# (it exits on CLEAN), so it blocks here as the last-minute gate; address it
-# and re-trigger for a fresh, newer clean to proceed.
+# Unresolved owner feedback, beyond the CHANGES_REQUESTED that
+# owner_review_gate covers. No implicit supersession: neither a later push nor
+# a later Codex clean resolves owner feedback (see the resolution model in
+# codex-review-lib.sh). Inline threads block until this session replied after
+# the owner's last message in the thread; bodied COMMENTED reviews and
+# top-level comments (no reply threading) block until a later non-trigger
+# top-level ack comment by this session; each is also cleared by its author's
+# later approval/dismissal. This covers feedback that predates this loop
+# invocation entirely — a pre-existing unaddressed owner comment fails closed.
 clearances=$(owner_clearances <<<"$reviews")
+ack_ts=$(me_ack_ts "$ME" <<<"$issue_comments")
 owner_after=$(
-  { owner_inline_on_head "$head" "$ME" "$clearances" <<<"$pr_comments"
-    owner_reviews_on_head "$head" "$clearances" <<<"$reviews"
-    owner_comments_after "$clean_ts" "$clearances" <<<"$issue_comments"; } | grep -v '^$' || true
+  { owner_inline_unresolved "$ME" "$clearances" <<<"$pr_comments"
+    owner_reviews_unresolved "$clearances" "$ack_ts" <<<"$reviews"
+    owner_comments_unresolved "$ME" "$clearances" <<<"$issue_comments"; } | grep -v '^$' || true
 )
 if [ -n "$owner_after" ]; then
   echo "REFUSE: owner raised feedback on the current head; address it first:"

@@ -135,18 +135,20 @@ def test_bodied_commented_review_blocks() -> None:
     assert "OWNER-REVIEW COMMENTED" in _call("owner_blocking_reviews", payload)
 
 
-# --- owner_comments: exclude only a bare @codex review trigger ----------------
+# --- owner_comments_unresolved: exclude only a bare @codex review trigger -----
 
 @pytest.mark.parametrize("body", ["@codex review", "  @codex review  ", "@Codex Review"])
 def test_bare_trigger_comment_is_excluded(body: str) -> None:
-    payload = [{"user": {"login": "naari3"}, "body": body}]
-    assert _call("owner_comments", payload) == ""
+    payload = [{"user": {"login": "onmokoworks"}, "id": 1,
+                "created_at": "2026-07-18T10:00:00Z", "body": body}]
+    assert _call("owner_comments_unresolved", payload, "naari3", "{}") == ""
 
 
 @pytest.mark.parametrize("body", ["fix X, then @codex review again", "[P1] これ直して"])
 def test_owner_feedback_is_kept_even_with_trigger_phrase(body: str) -> None:
-    payload = [{"user": {"login": "onmokoworks"}, "body": body}]
-    assert _call("owner_comments", payload) == f"OWNER-COMMENT: {body}"
+    payload = [{"user": {"login": "onmokoworks"}, "id": 1,
+                "created_at": "2026-07-18T10:00:00Z", "body": body}]
+    assert _call("owner_comments_unresolved", payload, "naari3", "{}") == f"OWNER-COMMENT id=1: {body}"
 
 
 # --- owner_review_gate: latest review state, not history ----------------------
@@ -219,104 +221,118 @@ def test_same_owner_later_approved_clears_own_changes_requested() -> None:
 
 
 # --- owner feedback on the current head, by SHA association --------------------
-# owner_inline_on_head(head_sha, me, clearances); owner_reviews_on_head(head_sha,
-# clearances). A comment/review is "on the current head" iff its .commit_id ==
-# head (GitHub does not move that stamp to later commits). No timestamps. Narrow
-# self-ack exemption (only this session's inline replies). A later owner
-# approval/dismissal clears an addressed comment. Top-level PR comments carry no
-# commit association; the merge guard binds them to the accepted clean's
-# timestamp instead (owner_comments_after, below).
+# owner_inline_unresolved(me, clearances); owner_reviews_unresolved(clearances,
+# ack_ts); owner_comments_unresolved(me, clearances); me_ack_ts(me). Explicit
+# resolution only: a push or a later Codex clean never resolves owner feedback.
+# Inline threads resolve when the session replied after the owner's last
+# message; bodied reviews and top-level comments resolve via a later non-trigger
+# top-level ack comment by the session; anything resolves via its author's
+# later approval/dismissal.
 
-HEAD = "6de58c3dbb095c277dca598cb5621d28cbed723a"  # current head SHA
-OLD = "31bef1dfc1aabbccddeeff00112233445566778899"  # a superseded commit SHA
 ME = "naari3"                                        # this session's login
 NO_CLEAR = "{}"                                      # no owner has approved/dismissed
 
 
-def _inline(login, sha, **kw):
+def _inline(login, **kw):
     d = {"user": {"login": login}, "id": 9, "path": "x.sh", "line": 3,
-         "commit_id": sha, "created_at": "2026-07-18T19:20:00Z", "body": "wrong"}
+         "commit_id": "31bef1dfc1aabbccddeeff0011223344556677",
+         "created_at": "2026-07-18T19:20:00Z", "body": "wrong"}
     d.update(kw)
-    return [d]
+    return d
 
 
-def test_owner_inline_on_head_blocks() -> None:
-    assert "OWNER-INLINE" in _call("owner_inline_on_head", _inline("onmokoworks", HEAD), HEAD, ME, NO_CLEAR)
+def test_owner_inline_with_no_reply_blocks() -> None:
+    assert "OWNER-INLINE" in _call("owner_inline_unresolved", [_inline("onmokoworks")], ME, NO_CLEAR)
 
 
-def test_owner_inline_on_superseded_commit_is_ignored() -> None:
-    # A comment stamped with an old commit_id is outdated (superseded by a push).
-    assert _call("owner_inline_on_head", _inline("onmokoworks", OLD), HEAD, ME, NO_CLEAR) == ""
+def test_owner_inline_survives_a_push_until_replied() -> None:
+    # Finding: a follow-up push leaves .commit_id on the old commit; that must
+    # NOT resolve the feedback. No commit/SHA input exists at all — an
+    # unanswered owner comment blocks regardless of how far the head advanced.
+    payload = [_inline("onmokoworks", commit_id="0000000000000000000000000000000000000000")]
+    assert "OWNER-INLINE" in _call("owner_inline_unresolved", payload, ME, NO_CLEAR)
 
 
-def test_owner_inline_reply_from_other_owner_blocks() -> None:
-    # A genuine owner reply ("still not fixed") on the head commit blocks even
-    # with in_reply_to_id set, because it is not this session's login.
-    payload = _inline("onmokoworks", HEAD, in_reply_to_id=8, body="still not fixed")
-    assert "OWNER-INLINE" in _call("owner_inline_on_head", payload, HEAD, ME, NO_CLEAR)
+def test_owner_inline_resolved_by_later_session_reply() -> None:
+    payload = [_inline("onmokoworks"),
+               _inline(ME, id=11, in_reply_to_id=9, created_at="2026-07-18T19:25:00Z", body="対応済み")]
+    assert _call("owner_inline_unresolved", payload, ME, NO_CLEAR) == ""
 
 
-def test_session_own_inline_reply_is_excluded() -> None:
-    # This session's own ack REPLY (in_reply_to_id + session login) is exempt.
-    payload = _inline(ME, HEAD, in_reply_to_id=8, body="対応済み")
-    assert _call("owner_inline_on_head", payload, HEAD, ME, NO_CLEAR) == ""
+def test_owner_reply_after_ack_reblocks() -> None:
+    # The owner speaking last in the thread ("still not fixed") re-blocks.
+    payload = [_inline("onmokoworks"),
+               _inline(ME, id=11, in_reply_to_id=9, created_at="2026-07-18T19:25:00Z", body="対応済み"),
+               _inline("onmokoworks", id=12, in_reply_to_id=9,
+                       created_at="2026-07-18T19:30:00Z", body="still not fixed")]
+    out = _call("owner_inline_unresolved", payload, ME, NO_CLEAR)
+    assert "OWNER-INLINE id=12" in out
+
+
+def test_session_own_reply_alone_does_not_block() -> None:
+    # A thread that contains only this session's ack reply has no owner message.
+    payload = [_inline(ME, in_reply_to_id=8, body="対応済み")]
+    assert _call("owner_inline_unresolved", payload, ME, NO_CLEAR) == ""
 
 
 def test_session_own_non_reply_inline_still_blocks() -> None:
     # A NON-reply inline comment from this session's login is genuine feedback,
     # not an ack, and must still block — the exemption is replies only.
-    payload = _inline(ME, HEAD, body="actually, reconsider this")
-    assert "OWNER-INLINE" in _call("owner_inline_on_head", payload, HEAD, ME, NO_CLEAR)
-
-
-def test_owner_inline_uses_original_commit_id_when_commit_id_absent() -> None:
-    payload = [{"user": {"login": "onmokoworks"}, "id": 9, "path": "x.sh", "line": 3,
-                "original_commit_id": HEAD, "created_at": "2026-07-18T19:20:00Z", "body": "wrong"}]
-    assert "OWNER-INLINE" in _call("owner_inline_on_head", payload, HEAD, ME, NO_CLEAR)
+    payload = [_inline(ME, body="actually, reconsider this")]
+    assert "OWNER-INLINE" in _call("owner_inline_unresolved", payload, ME, NO_CLEAR)
 
 
 def test_owner_inline_cleared_by_later_approval() -> None:
     clr = json.dumps({"onmokoworks": "2026-07-18T19:30:00Z"})
-    payload = _inline("onmokoworks", HEAD, created_at="2026-07-18T19:20:00Z")
-    assert _call("owner_inline_on_head", payload, HEAD, ME, clr) == ""
+    assert _call("owner_inline_unresolved", [_inline("onmokoworks")], ME, clr) == ""
 
 
 def test_owner_inline_after_approval_still_blocks() -> None:
     clr = json.dumps({"onmokoworks": "2026-07-18T19:30:00Z"})
-    payload = _inline("onmokoworks", HEAD, created_at="2026-07-18T19:40:00Z")
-    assert "OWNER-INLINE" in _call("owner_inline_on_head", payload, HEAD, ME, clr)
+    payload = [_inline("onmokoworks", created_at="2026-07-18T19:40:00Z")]
+    assert "OWNER-INLINE" in _call("owner_inline_unresolved", payload, ME, clr)
 
 
-def test_owner_bodied_review_on_head_blocks() -> None:
-    payload = [{"user": {"login": "onmokoworks"}, "state": "COMMENTED", "commit_id": HEAD,
-                "submitted_at": "2026-07-18T19:20:00Z", "body": "[P1] hold on"}]
-    assert "OWNER-REVIEW COMMENTED" in _call("owner_reviews_on_head", payload, HEAD, NO_CLEAR)
+ACK = "2026-07-18T19:26:49Z"  # the session's newest non-trigger ack comment
 
 
-def test_owner_bodied_review_on_superseded_commit_is_ignored() -> None:
-    payload = [{"user": {"login": "onmokoworks"}, "state": "COMMENTED", "commit_id": OLD,
-                "submitted_at": "2026-07-18T19:20:00Z", "body": "[P1] old"}]
-    assert _call("owner_reviews_on_head", payload, HEAD, NO_CLEAR) == ""
+def test_owner_bodied_review_with_no_later_ack_blocks() -> None:
+    payload = [{"user": {"login": "onmokoworks"}, "state": "COMMENTED",
+                "submitted_at": "2026-07-18T19:30:00Z", "body": "[P1] hold on"}]
+    assert "OWNER-REVIEW COMMENTED" in _call("owner_reviews_unresolved", payload, NO_CLEAR, ACK)
 
 
-def test_owner_bodyless_review_on_head_is_ignored() -> None:
+def test_owner_bodied_review_before_ack_is_resolved() -> None:
+    payload = [{"user": {"login": "onmokoworks"}, "state": "COMMENTED",
+                "submitted_at": "2026-07-18T19:20:00Z", "body": "[P1] answered"}]
+    assert _call("owner_reviews_unresolved", payload, NO_CLEAR, ACK) == ""
+
+
+def test_owner_bodied_review_in_same_second_as_ack_blocks() -> None:
+    # Second-resolution race: an ack in the same second may not have seen it.
+    payload = [{"user": {"login": "onmokoworks"}, "state": "COMMENTED",
+                "submitted_at": ACK, "body": "[P1] race"}]
+    assert "OWNER-REVIEW COMMENTED" in _call("owner_reviews_unresolved", payload, NO_CLEAR, ACK)
+
+
+def test_owner_bodyless_review_is_ignored() -> None:
     # A bodyless COMMENTED review (this session's inline reply) has no body.
-    payload = [{"user": {"login": ME}, "state": "COMMENTED", "commit_id": HEAD,
-                "submitted_at": "2026-07-18T19:20:00Z", "body": ""}]
-    assert _call("owner_reviews_on_head", payload, HEAD, NO_CLEAR) == ""
+    payload = [{"user": {"login": ME}, "state": "COMMENTED",
+                "submitted_at": "2026-07-18T19:30:00Z", "body": ""}]
+    assert _call("owner_reviews_unresolved", payload, NO_CLEAR, ACK) == ""
 
 
 def test_owner_approved_review_does_not_block() -> None:
-    payload = [{"user": {"login": "onmokoworks"}, "state": "APPROVED", "commit_id": HEAD,
-                "submitted_at": "2026-07-18T19:20:00Z", "body": "looks good"}]
-    assert _call("owner_reviews_on_head", payload, HEAD, NO_CLEAR) == ""
+    payload = [{"user": {"login": "onmokoworks"}, "state": "APPROVED",
+                "submitted_at": "2026-07-18T19:30:00Z", "body": "looks good"}]
+    assert _call("owner_reviews_unresolved", payload, NO_CLEAR, ACK) == ""
 
 
 def test_owner_bodied_review_cleared_by_later_approval() -> None:
-    clr = json.dumps({"onmokoworks": "2026-07-18T19:30:00Z"})
-    payload = [{"user": {"login": "onmokoworks"}, "state": "COMMENTED", "commit_id": HEAD,
-                "submitted_at": "2026-07-18T19:20:00Z", "body": "[P1] concern"}]
-    assert _call("owner_reviews_on_head", payload, HEAD, clr) == ""
+    clr = json.dumps({"onmokoworks": "2026-07-18T19:40:00Z"})
+    payload = [{"user": {"login": "onmokoworks"}, "state": "COMMENTED",
+                "submitted_at": "2026-07-18T19:30:00Z", "body": "[P1] concern"}]
+    assert _call("owner_reviews_unresolved", payload, clr, ACK) == ""
 
 
 # --- owner_clearances ----------------------------------------------------------
@@ -333,8 +349,7 @@ def test_owner_clearances_reports_latest_approval_per_login() -> None:
 def test_one_owner_approval_does_not_clear_another_owners_inline() -> None:
     # Per-reviewer: naari3's approval must not clear onmokoworks's comment.
     clr = json.dumps({"naari3": "2026-07-18T19:30:00Z"})
-    payload = _inline("onmokoworks", HEAD, created_at="2026-07-18T19:20:00Z")
-    assert "OWNER-INLINE" in _call("owner_inline_on_head", payload, HEAD, ME, clr)
+    assert "OWNER-INLINE" in _call("owner_inline_unresolved", [_inline("onmokoworks")], ME, clr)
 
 
 def test_inline_error_message_is_not_a_finding() -> None:
@@ -348,45 +363,64 @@ def test_inline_error_message_is_not_a_finding() -> None:
     assert _call("codex_finding_max_ts", payload) == ""
 
 
-# --- owner_comments_after: last-minute merge gate for top-level comments -------
-# Top-level comments cannot be SHA-bound, so the guard blocks on any non-trigger
-# owner comment at/after the accepted clean (the monitor exits on CLEAN, so
-# nothing else would surface such a comment before the merge).
-
-CLEAN_TS = "2026-07-18T20:00:00Z"
-
-
-def _toplevel(login, created_at, body):
-    return [{"user": {"login": login}, "id": 77, "created_at": created_at, "body": body}]
+# --- owner_comments_unresolved / me_ack_ts: top-level explicit resolution -----
+# Top-level comments have no reply threading; they resolve only via a later
+# non-trigger ack comment by the session or their author's approval/dismissal.
+# A pre-existing unaddressed owner comment fails closed — a fresh Codex clean
+# never supersedes it (finding on 39a1c5f).
 
 
-def test_owner_comment_after_clean_blocks() -> None:
-    payload = _toplevel("onmokoworks", "2026-07-18T20:00:30Z", "wait, one more thing")
-    assert "OWNER-COMMENT" in _call("owner_comments_after", payload, CLEAN_TS, NO_CLEAR)
+def _toplevel(login, created_at, body, id=77):
+    return {"user": {"login": login}, "id": id, "created_at": created_at, "body": body}
 
 
-def test_owner_comment_in_same_second_as_clean_blocks() -> None:
-    # Second-resolution timestamps: the race window includes the clean's second.
-    payload = _toplevel("onmokoworks", CLEAN_TS, "hold the merge")
-    assert "OWNER-COMMENT" in _call("owner_comments_after", payload, CLEAN_TS, NO_CLEAR)
+def test_preexisting_owner_comment_with_no_ack_blocks() -> None:
+    # Loop started after the owner had already commented: still blocks.
+    payload = [_toplevel("onmokoworks", "2026-07-18T10:00:00Z", "old unaddressed")]
+    assert "OWNER-COMMENT" in _call("owner_comments_unresolved", payload, ME, NO_CLEAR)
 
 
-def test_owner_comment_before_clean_is_ignored() -> None:
-    # An older comment was surfaced by a monitor cycle and handled there; a
-    # fresh clean issued after it supersedes it.
-    payload = _toplevel("onmokoworks", "2026-07-18T19:59:00Z", "earlier note")
-    assert _call("owner_comments_after", payload, CLEAN_TS, NO_CLEAR) == ""
+def test_owner_comment_before_session_ack_is_resolved() -> None:
+    payload = [_toplevel("onmokoworks", "2026-07-18T10:00:00Z", "note"),
+               _toplevel(ME, "2026-07-18T11:00:00Z", "addressed in abc123", id=78)]
+    assert _call("owner_comments_unresolved", payload, ME, NO_CLEAR) == ""
 
 
-def test_bare_trigger_after_clean_is_ignored() -> None:
-    payload = _toplevel("naari3", "2026-07-18T20:00:30Z", "@codex review")
-    assert _call("owner_comments_after", payload, CLEAN_TS, NO_CLEAR) == ""
+def test_owner_comment_in_same_second_as_ack_blocks() -> None:
+    # Second-resolution race: the ack may not have seen a same-second comment.
+    payload = [_toplevel("onmokoworks", "2026-07-18T11:00:00Z", "hold the merge"),
+               _toplevel(ME, "2026-07-18T11:00:00Z", "addressed", id=78)]
+    assert "OWNER-COMMENT" in _call("owner_comments_unresolved", payload, ME, NO_CLEAR)
 
 
-def test_owner_comment_after_clean_cleared_by_later_approval() -> None:
-    clr = json.dumps({"onmokoworks": "2026-07-18T20:05:00Z"})
-    payload = _toplevel("onmokoworks", "2026-07-18T20:00:30Z", "resolved concern")
-    assert _call("owner_comments_after", payload, CLEAN_TS, clr) == ""
+def test_session_trigger_is_not_an_ack() -> None:
+    # A bare "@codex review" by the session must not resolve owner comments.
+    payload = [_toplevel("onmokoworks", "2026-07-18T10:00:00Z", "unaddressed"),
+               _toplevel(ME, "2026-07-18T11:00:00Z", "@codex review", id=78)]
+    assert "OWNER-COMMENT" in _call("owner_comments_unresolved", payload, ME, NO_CLEAR)
+
+
+def test_session_own_comment_does_not_block() -> None:
+    # The session's own top-level comments are the ack channel, not blockers.
+    payload = [_toplevel(ME, "2026-07-18T11:00:00Z", "status update")]
+    assert _call("owner_comments_unresolved", payload, ME, NO_CLEAR) == ""
+
+
+def test_owner_comment_cleared_by_later_approval() -> None:
+    clr = json.dumps({"onmokoworks": "2026-07-18T12:00:00Z"})
+    payload = [_toplevel("onmokoworks", "2026-07-18T10:00:00Z", "resolved concern")]
+    assert _call("owner_comments_unresolved", payload, ME, clr) == ""
+
+
+def test_me_ack_ts_ignores_triggers() -> None:
+    payload = [_toplevel(ME, "2026-07-18T11:00:00Z", "addressed"),
+               _toplevel(ME, "2026-07-18T12:00:00Z", "@codex review", id=78)]
+    assert _call("me_ack_ts", payload, ME) == "2026-07-18T11:00:00Z"
+
+
+def test_me_ack_ts_empty_without_acks() -> None:
+    payload = [_toplevel(ME, "2026-07-18T12:00:00Z", "@codex review")]
+    assert _call("me_ack_ts", payload, ME) == ""
 
 
 def test_error_after_clean_does_not_invalidate_a_head_bound_clean() -> None:

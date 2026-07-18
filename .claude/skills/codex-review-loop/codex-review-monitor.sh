@@ -22,10 +22,10 @@ LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/codex-review-lib.sh"
 
 DEADLINE=$(( $(date +%s) + 3600 ))   # documented 1h hard timeout (finding 5)
 
-# This session's own login, excluded from the owner-feedback-on-head check so
-# its acks/summaries/replies (posted under an owner login) do not self-block.
-# Fetched once; empty means no exclusion (best effort) if the call fails.
-ME=$(gh api user --jq '.login' 2>/dev/null || echo "")
+# This session's own login is fetched inside the loop: the unresolved-owner
+# predicates treat $me's replies/acks as resolution signals, so an empty login
+# would mark every resolved thread as blocking. A failed fetch retries on the
+# next tick like the other API calls.
 
 # Fetch a list endpoint across all pages as a single JSON array, or fail.
 fetch() {
@@ -38,8 +38,9 @@ fetch() {
 }
 
 # Inclusive lower bound: GitHub timestamps are second-resolution, so an event
-# in the same second as the trigger would be dropped by strict ">". The trigger
-# comment itself is a bare "@codex review", which owner_comments excludes.
+# in the same second as the trigger would be dropped by strict ">". Used only
+# for the printed finding list and the reaction advisory; owner feedback is
+# checked over the FULL history by the unresolved predicates.
 since_filter() { jq --arg s "$SINCE" '[ .[] | select((.created_at // .submitted_at) >= $s) ]'; }
 
 while true; do
@@ -51,6 +52,7 @@ while true; do
 
   # Bind CLEAN to the CURRENT head each iteration (finding 1). A transient API
   # failure is retried on the next tick, not treated as a terminal event.
+  if ! ME=$(gh api user --jq '.login' 2>/dev/null); then continue; fi
   if ! head=$(gh api "repos/$OWNER/$REPO/pulls/$PR" --jq '.head.sha' 2>/dev/null); then continue; fi
   # Head commit date bounds the reaction-clean (a +1 with no SHA): it counts
   # only if no commit landed after Codex reacted. committer.date reflects when
@@ -61,11 +63,9 @@ while true; do
   if ! issue_comments=$(fetch "issues/$PR/comments"); then continue; fi
   if ! pr_reactions=$(fetch "issues/$PR/reactions"); then continue; fi
 
-  # Only the PRINTED finding list and the advisory top-level owner comments are
-  # scoped to SINCE (new this cycle); the verdict timestamps below use full
-  # history.
+  # Only the PRINTED finding list is scoped to SINCE (new this cycle); the
+  # verdict timestamps and owner checks below use full history.
   new_pr_comments=$(since_filter <<<"$pr_comments")
-  new_issue_comments=$(since_filter <<<"$issue_comments")
   # Reactions are scoped to SINCE too: with the always-trigger policy an auto
   # first-review +1 usually predates the explicit @codex review, and an unscoped
   # read would keep returning that stale advisory, exiting CLEAN-REACTION before
@@ -77,19 +77,20 @@ while true; do
   #    just suppress a clean — that would poll to the 1h timeout when the owner
   #    feedback predates SINCE and a since-scoped check misses it). The hard
   #    blockers mirror the merge guard exactly, so monitor CLEAN <=> guard
-  #    accepts: (a) an unresolved CHANGES_REQUESTED (per-reviewer, full history)
-  #    and (b) inline comments / bodied reviews associated with the current head
-  #    SHA (.commit_id == head), minus this session's ack replies, minus cleared
-  #    ones. Plus (advisory) any NEW top-level owner comment this cycle: it has
-  #    no commit association so the guard cannot hard-block on it, but surfacing
-  #    a fresh one lets the operator judge it (it is not re-surfaced once old).
+  #    accepts: (a) an unresolved CHANGES_REQUESTED (per-reviewer, full
+  #    history) and (b) unresolved owner feedback under the explicit-resolution
+  #    model (codex-review-lib.sh): inline threads where the owner spoke last,
+  #    and bodied COMMENTED reviews / top-level comments with no later ack
+  #    comment by this session — regardless of which commit or when; a push or
+  #    a fresh clean never implicitly resolves owner feedback.
   clearances=$(owner_clearances <<<"$reviews")
+  ack_ts=$(me_ack_ts "$ME" <<<"$issue_comments")
   owner_block=$(
     { [ -n "$(owner_review_gate <<<"$reviews")" ] \
         && echo "OWNER-REVIEW CHANGES_REQUESTED (unresolved; owner must approve/dismiss)"
-      owner_inline_on_head "$head" "$ME" "$clearances" <<<"$pr_comments"
-      owner_reviews_on_head "$head" "$clearances" <<<"$reviews"
-      owner_comments <<<"$new_issue_comments"; } | grep -v '^$' || true
+      owner_inline_unresolved "$ME" "$clearances" <<<"$pr_comments"
+      owner_reviews_unresolved "$clearances" "$ack_ts" <<<"$reviews"
+      owner_comments_unresolved "$ME" "$clearances" <<<"$issue_comments"; } | grep -v '^$' || true
   )
   if [ -n "$owner_block" ]; then echo "$owner_block"; exit 0; fi
 

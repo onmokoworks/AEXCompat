@@ -171,74 +171,83 @@ owner_clearances() {
     | from_entries'
 }
 
-# Merge-gate view of owner INLINE feedback on the CURRENT head, bound by SHA
-# ASSOCIATION, not timestamps. Args: $1 = current head SHA; $2 = this session's
-# login; $3 = clearances JSON. GitHub stamps each inline comment with the commit
-# it was made against and does NOT move that stamp to later commits (verified on
-# PR #62: onmokoworks's comments keep commit_id at the reviewed SHA even after 20
-# pushes), so `.commit_id == head` reliably means "feedback on the current head",
-# with no dependence on committer.date (which is self-reported and mis-orders
-# push boundaries in both directions). A comment on a superseded commit has a
-# different commit_id and drops out. Self-block exemption is NARROW: only this
-# session's own ACK replies (in_reply_to_id set AND authored by $2). A comment is
-# cleared once its author later approved/dismissed (input: pull review-comments).
-owner_inline_on_head() {
-  jq -r --arg head "$1" --arg me "$2" --argjson clr "$3" --argjson owner "$OWNER_LOGINS" '
-    .[] | select([.user.login] | inside($owner))
-    | select( (((.in_reply_to_id // null) != null) and .user.login == $me) | not )
-    | select((.commit_id // .original_commit_id // "") == $head)
-    | . as $c | select( ($clr[$c.user.login] // "") == "" or $c.created_at > $clr[$c.user.login] )
+# RESOLUTION MODEL for owner feedback (inline, bodied reviews, top-level
+# comments): NO implicit supersession. Neither a later push (an inline comment's
+# .commit_id stays on the old commit, so "commit superseded" says nothing about
+# whether the feedback was addressed) nor a later Codex clean resolves owner
+# feedback. Feedback blocks until an EXPLICIT signal:
+#   - inline: this session ($me) replied in that thread AFTER the owner's last
+#     message (the loop's "対応済み" reply), or the author later
+#     approved/dismissed;
+#   - bodied COMMENTED reviews / top-level comments (no reply threading): a
+#     later non-trigger top-level ack comment by $me, or the author's later
+#     approval/dismissal. $me's own top-level comments are the ack channel and
+#     do not themselves block; $me hard-blocks via a review or a non-reply
+#     inline comment, which DO block even from $me.
+
+# Owner INLINE feedback with no later resolution, thread-scoped (input: pull
+# review-comments array). Args: $1 = this session's login; $2 = clearances JSON.
+# A thread is keyed by its root (.in_reply_to_id // .id). Owner messages exclude
+# ONLY $me's replies (the ack channel); a non-reply inline comment from $me is
+# genuine feedback. The thread blocks iff its last owner message is newer than
+# $me's last reply in that thread and the author has no later approval/dismissal.
+# An owner replying again after an ack ("still not fixed") re-blocks.
+owner_inline_unresolved() {
+  jq -r --arg me "$1" --argjson clr "$2" --argjson owner "$OWNER_LOGINS" '
+    group_by(.in_reply_to_id // .id)[]
+    | ( [ .[] | select([.user.login] | inside($owner))
+          | select( (((.in_reply_to_id // null) != null) and .user.login == $me) | not ) ] ) as $msgs
+    | select(($msgs | length) > 0)
+    | ( [ .[] | select(.user.login == $me and (.in_reply_to_id // null) != null)
+          | .created_at ] | max // "" ) as $ack
+    | ($msgs | max_by(.created_at)) as $last
+    | select($last.created_at > $ack)
+    | $last | select( ($clr[.user.login] // "") == "" or .created_at > $clr[.user.login] )
     | "OWNER-INLINE id=\(.id) \(.path):\(.line // .original_line): \((.body | split("\n")[0]))"'
 }
 
-# Owner bodied non-inline REVIEWS on the current head, by SHA association. Args:
-# $1 = head SHA; $2 = clearances JSON (input: reviews array). owner_review_gate
-# already handles CHANGES_REQUESTED (per-reviewer, full history, persists across
-# commits like GitHub), so this covers the gap it misses: a COMMENTED review WITH
-# a body submitted against the current head (its .commit_id == head). A bodied
-# review on a superseded commit drops out. Bodyless COMMENTED reviews (this
-# session's inline-thread replies) carry no body and are excluded. Cleared if the
-# reviewer later approved/dismissed.
-owner_reviews_on_head() {
-  jq -r --arg head "$1" --argjson clr "$2" --argjson owner "$OWNER_LOGINS" '
+# Timestamp of $me's newest non-trigger top-level ack comment, or "" (input:
+# issue-comments array). Bare "@codex review" triggers are not acks.
+me_ack_ts() {
+  jq -r --arg me "$1" '
+    [ .[] | select(.user.login == $me)
+      | select((.body | ascii_downcase | gsub("[[:space:]]"; "")) != "@codexreview")
+      | .created_at ]
+    | if length > 0 then max else "" end'
+}
+
+# Owner bodied non-inline REVIEWS with no later resolution (input: reviews
+# array). Args: $1 = clearances JSON; $2 = $me ack timestamp (me_ack_ts).
+# owner_review_gate already handles CHANGES_REQUESTED; this covers the bodied
+# COMMENTED review it misses. Reviews have no reply threading, so resolution is
+# a later ack comment (>= blocks a same-second race, fail-closed) or the
+# reviewer's later approval/dismissal. Bodyless COMMENTED reviews (this
+# session's inline-thread replies) are excluded.
+owner_reviews_unresolved() {
+  jq -r --argjson clr "$1" --arg ack "$2" --argjson owner "$OWNER_LOGINS" '
     .[] | select([.user.login] | inside($owner))
-    | select((.commit_id // "") == $head)
     | select(.state == "COMMENTED" and ((.body // "") | length) > 0)
+    | select(.submitted_at >= $ack)
     | . as $r | select( ($clr[$r.user.login] // "") == "" or $r.submitted_at > $clr[$r.user.login] )
     | "OWNER-REVIEW \(.state): \(((.body // "") | split("\n"))[0])"'
 }
 
-# NOTE: top-level PR (issue) comments carry NO commit association, so they cannot
-# be SHA-bound to the current head. The monitor surfaces NEW ones (owner_comments
-# over the since-window) as a terminal event; the merge guard hard-blocks on the
-# post-clean window via owner_comments_after (bound to the accepted clean's
-# timestamp instead of a SHA). Older top-level comments were surfaced by a
-# monitor cycle and handled there.
-
-# Owner top-level PR comments, excluding ONLY a bare "@codex review" trigger.
-# Real feedback that merely contains the phrase (e.g. "fix X, then @codex
-# review") is kept (input: issue-comments array).
-owner_comments() {
-  jq -r --argjson owner "$OWNER_LOGINS" '
-    .[] | select([.user.login] | inside($owner))
-    | select((.body | ascii_downcase | gsub("[[:space:]]"; "")) != "@codexreview")
-    | "OWNER-COMMENT: \((.body | split("\n"))[0])"'
-}
-
-# Merge-gate view of owner TOP-LEVEL comments. They cannot be SHA-bound, so bind
-# them to the accepted clean instead: a non-trigger owner comment at/after the
-# clean the guard is about to merge on cannot have been surfaced by the monitor
-# (it exits the moment it emits CLEAN), so it must block the merge. Inclusive
-# ">=" because GitHub timestamps are second-resolution and the comment can land
-# in the same second as the clean. Resolution is natural: address the comment
-# and re-trigger; the fresh clean's newer timestamp supersedes it. Also cleared
-# if its author later approved/dismissed. Args: $1 = the accepted clean's
-# created_at; $2 = clearances JSON (input: issue-comments array).
-owner_comments_after() {
-  jq -r --arg ts "$1" --argjson clr "$2" --argjson owner "$OWNER_LOGINS" '
-    .[] | select([.user.login] | inside($owner))
-    | select((.body | ascii_downcase | gsub("[[:space:]]"; "")) != "@codexreview")
-    | select(.created_at >= $ts)
+# Owner TOP-LEVEL comments with no later resolution (input: issue-comments
+# array). Args: $1 = this session's login; $2 = clearances JSON. Excludes bare
+# "@codex review" triggers (real feedback containing the phrase is kept) and
+# $me's own comments (the ack channel). Blocks a non-$me owner comment with no
+# later $me ack (>= blocks a same-second race, fail-closed) and no later
+# approval/dismissal by its author — including comments that predate this loop
+# invocation entirely: a pre-existing unaddressed owner comment must fail
+# closed, not be superseded by a fresh Codex clean.
+owner_comments_unresolved() {
+  jq -r --arg me "$1" --argjson clr "$2" --argjson owner "$OWNER_LOGINS" '
+    def nontrigger: select((.body | ascii_downcase | gsub("[[:space:]]"; "")) != "@codexreview");
+    ( [ .[] | nontrigger | select(.user.login == $me) | .created_at ] | max // "" ) as $ack
+    | .[] | nontrigger
+    | select([.user.login] | inside($owner))
+    | select(.user.login != $me)
+    | select(.created_at >= $ack)
     | . as $c | select( ($clr[$c.user.login] // "") == "" or $c.created_at > $clr[$c.user.login] )
     | "OWNER-COMMENT id=\(.id): \((.body | split("\n"))[0])"'
 }

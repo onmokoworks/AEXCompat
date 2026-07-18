@@ -124,18 +124,19 @@ merge 側 (`codex-merge-guard.sh` が head 拘束 clean なしに merge を拒�
   4. 手順 1 に戻る (新しい `since` で再トリガー)
 - **CLEAN (Codex 指摘なし)**: **merge は `codex-merge-guard.sh` 経由でのみ行う**。
   これが (a) owner blocker の不在 (owner_review_gate の CHANGES_REQUESTED、
-  および **現 head に対する owner フィードバック**の不在。inline finding・bodied
-  review は **SHA association** (`.commit_id == head`) で現 head に拘束して拾う。
-  top-level コメントは commit association を持たないため、代わりに **merge に
-  使う clean の時刻以降**の非トリガー owner コメントを last-minute gate として
-  拾う (monitor は CLEAN を emit した瞬間に exit するので、それ以降のコメントは
-  誰も見ていない。対応して再トリガーすれば新しい clean が上書きして解除される)。
-  owner_review_gate は review state しか見ないので、CHANGES_REQUESTED を伴わない
-  owner コメントの race をここで塞ぐ。self-block
+  および **未解決の owner フィードバック**の不在。解決は**明示シグナルのみ**:
+  push しても inline コメントの `.commit_id` は旧 commit に残るだけなので
+  「commit が進んだ」ことは対応済みを意味せず、後続の Codex clean も owner
+  フィードバックを解決しない。inline はスレッド単位で「owner の最後の発言より
+  後にセッションの返信があるか」で判定 (owner が ack 後に再返信すれば再 block)。
+  bodied COMMENTED review と top-level コメントは返信スレッドを持たないため、
+  「セッションのより新しい非トリガー top-level ack コメント」で解決する (ループ
+  開始前から存在する未対応 owner コメントも fail-closed に block する)。いずれも
+  作者自身の後続 approve/dismiss でも clear される (per-reviewer)。self-block
   回避は **authorship** で狭く行う: セッション自身の認証 login (`gh api user`) の
-  **inline 返信 (in_reply_to_id) だけ**を除外し、同 login でも top-level コメントや
-  非返信 inline は本物の owner フィードバックとして拾う。さらに各 owner の後続
-  approve/dismiss で解決済みコメントを clear する (per-reviewer))、(b) 現在の
+  inline 返信と top-level コメント (ack チャネル) だけを blocker から除外し、
+  同 login でも非返信 inline や bodied review は本物のフィードバックとして拾う)、
+  (b) 現在の
   head SHA に拘束された Codex text clean を fail-closed で再確認し (PR 本体 👍
   だけの reaction clean は受理しない)、(c) `gh pr merge --match-head-commit
   <head>` で atomic に merge する
