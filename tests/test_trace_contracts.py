@@ -144,6 +144,27 @@ class TraceContractTests(unittest.TestCase):
             validate_event(enter),
         )
 
+    def test_native_observation_limited_to_observation_kinds(self):
+        # A native_observation selector_dispatch would otherwise slip into the
+        # event_kind-keyed conformance comparison despite carrying no integrity.
+        event = {
+            "schema_version": 1,
+            "event_index": 0,
+            "event_kind": "selector_dispatch",
+            "host_kind": "native_observation",
+            "host_version_label": "native-observation frida",
+            "plugin_label": "gamma-classic",
+            "selector": "PF_Cmd_RENDER",
+        }
+        self.assertIn(
+            "host_kind native_observation is limited to session boundaries and known_function_invoke",
+            validate_event(event),
+        )
+
+    def test_native_observation_boundaries_are_allowed(self):
+        for event in (load_native_observation_events()[0], load_native_observation_events()[-1]):
+            self.assertEqual([], validate_event(event))
+
     def test_known_function_lowercase_absolute_address_is_rejected(self):
         # A lowercased 64-bit ASLR address matches the hex shape but is not a
         # module-relative offset; the magnitude bound must reject it.

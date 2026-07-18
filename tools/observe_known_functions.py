@@ -51,6 +51,29 @@ class ObservationError(RuntimeError):
     pass
 
 
+def _is_reparse_point(path: Path) -> bool:
+    """True for a symlink OR a Windows junction/mount point.
+
+    ``Path.is_symlink()`` does not report NTFS junctions, which are reparse points
+    that ``resolve()`` still follows; check the reparse attribute on Windows too.
+    """
+
+    try:
+        if path.is_symlink():
+            return True
+    except OSError:
+        return False
+    if sys.platform == "win32":
+        import stat as _stat
+
+        try:
+            attrs = os.lstat(path).st_file_attributes
+        except (OSError, AttributeError):
+            return False
+        return bool(attrs & getattr(_stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400))
+    return False
+
+
 def safe_output_path(out_path: Path) -> Path:
     """Resolve ``out_path`` under OUTPUT_ROOT, rejecting escapes and reparse points.
 
@@ -65,7 +88,7 @@ def safe_output_path(out_path: Path) -> Path:
     # normal --out would pass containment yet write outside the repo. REPO_ROOT is
     # already canonical (Path.resolve() at import).
     for component in (OUTPUT_ROOT, OUTPUT_ROOT.parent):
-        if component.is_symlink():
+        if _is_reparse_point(component):
             raise ObservationError(f"output root component is a reparse point: {component.name}")
     OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
     root = OUTPUT_ROOT.resolve()
@@ -76,8 +99,8 @@ def safe_output_path(out_path: Path) -> Path:
     # Reject a reparse point / symlink anywhere on the existing prefix below root.
     probe = resolved
     while probe != root and probe != probe.parent:
-        if probe.exists() and probe.is_symlink():
-            raise ObservationError(f"output path component is a symlink: {probe.name}")
+        if probe.exists() and _is_reparse_point(probe):
+            raise ObservationError(f"output path component is a reparse point: {probe.name}")
         probe = probe.parent
     resolved.parent.mkdir(parents=True, exist_ok=True)
     return resolved

@@ -15,6 +15,10 @@ EVENT_KINDS = {
     "error", "unimplemented", "session_end",
 }
 HOST_KINDS = {"after_effects_manual", "minihost", "native_observation"}
+# native_observation carries no integrity/provenance, so it may only appear on
+# session boundaries and known_function_invoke - never on the selector/suite/world
+# events that conformance rules compare, keeping observation out of evidence.
+NATIVE_OBSERVATION_KINDS = {"session_start", "session_end", "known_function_invoke"}
 PIXEL_FORMATS = {"argb8", "argb16", "argb32f", "rgba8", "unknown"}
 MODULE_RVA = re.compile(r"^0x[0-9a-f]+$")
 # A module-relative offset is bounded by the plug-in image size, always well
@@ -98,6 +102,8 @@ def validate_event(event: Any) -> list[str]:
         errors.append("event_kind is unsupported")
     if event.get("host_kind") not in HOST_KINDS:
         errors.append("host_kind is unsupported")
+    if event.get("host_kind") == "native_observation" and kind not in NATIVE_OBSERVATION_KINDS:
+        errors.append("host_kind native_observation is limited to session boundaries and known_function_invoke")
     _check_string(event.get("host_version_label"), "host_version_label", errors)
     _check_string(event.get("plugin_label"), "plugin_label", errors)
     if isinstance(event.get("plugin_label"), str) and any(c in event["plugin_label"] for c in "\\/:"):
