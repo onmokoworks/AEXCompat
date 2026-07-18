@@ -123,6 +123,8 @@ def _open_windows_beneath(bundle_root: Path, relative: Path) -> tuple[int, tuple
     get_info.argtypes = [wintypes.HANDLE, ctypes.POINTER(ByHandleFileInformation)]
     get_info.restype = wintypes.BOOL
     close_handle = kernel32.CloseHandle
+    close_handle.argtypes = [wintypes.HANDLE]
+    close_handle.restype = wintypes.BOOL
 
     share_all = 0x1 | 0x2 | 0x4
     open_existing = 3
@@ -323,12 +325,16 @@ def validate_bundle(manifest: dict, report: dict, bundle_root: Path) -> None:
             errors.append(f"{result['depth']} oracle identity_match does not match manifest")
         if not manifest_oracle_identity and oracle["exact"]:
             errors.append(f"{result['depth']} exact oracle requires manifest identity match")
+        output_hash = result["output_sha256"]
+        raw_output = result["raw_output"]
+        if output_hash is not None and (
+            raw_output is None or output_hash != raw_output["sha256"]
+        ):
+            errors.append(f"{result['depth']} output hash does not match raw output")
         if oracle["state"] == "captured":
             oracle_artifact = oracle_artifacts.get(result["depth"])
             if oracle_artifact is None or oracle["expected_sha256"] != oracle_artifact["sha256"]:
                 errors.append(f"{result['depth']} expected oracle hash does not match manifest")
-            output_hash = result["output_sha256"]
-            raw_output = result["raw_output"]
             if output_hash is None or raw_output is None:
                 errors.append(f"{result['depth']} captured oracle has no real output")
             elif oracle["actual_sha256"] != output_hash or output_hash != raw_output["sha256"]:

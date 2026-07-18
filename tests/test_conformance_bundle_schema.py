@@ -230,6 +230,20 @@ class ConformanceBundleSchemaTests(unittest.TestCase):
             with self.assertRaises(BundleValidationError):
                 validate_bundle(self.manifest, report, self.bundle_root)
 
+    def test_validator_binds_non_oracle_output_hash_to_raw_output(self):
+        report = self.valid_report()
+        self.manifest["oracle"] = {"state": "not_captured", "identity_match": False}
+        for result in report["results"]:
+            result["oracle"] = {
+                "state": "not_captured",
+                "identity_match": False,
+                "exact": False,
+            }
+        report["results"][0]["output_sha256"] = "3" * 64
+
+        with self.assertRaisesRegex(BundleValidationError, "output hash does not match raw output"):
+            validate_bundle(self.manifest, report, self.bundle_root)
+
     def test_validator_binds_each_oracle_to_its_depth(self):
         report = self.valid_report()
         report["results"][1]["oracle"]["expected_sha256"] = self.manifest["oracle"]["artifacts"]["argb8"]["sha256"]
