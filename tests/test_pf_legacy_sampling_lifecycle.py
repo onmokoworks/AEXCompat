@@ -22,7 +22,7 @@ def test_legacy_sampling_lifecycle_is_bounded_and_balanced():
     for marker in (
         "struct LegacySamplingSession",
         "g_legacy_sampling_sessions.emplace",
-        "bounded_typed_world(source_world, 4",
+        "resolve_world(source_world, 4",
         "found->second.quality != quality",
         "found->second.mode_flags != mode_flags",
         "found->second.thread_id != GetCurrentThreadId()",

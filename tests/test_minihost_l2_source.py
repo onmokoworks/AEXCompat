@@ -11,6 +11,8 @@ PF_SUITES_HEADER = ROOT / "minihost" / "src" / "worker_pf_suites.hpp"
 PF_SUITES_SOURCE = ROOT / "minihost" / "src" / "worker_pf_suites.cpp"
 RENDER_HEADER = ROOT / "minihost" / "src" / "render_subsystem.h"
 RENDER_SOURCE = ROOT / "minihost" / "src" / "render_subsystem.cpp"
+PF_SUITES_INTERNAL = ROOT / "minihost" / "src" / "worker_pf_suites_internal.hpp"
+MINIHOST_CMAKE = ROOT / "minihost" / "CMakeLists.txt"
 
 
 def l2_family_source():
@@ -40,6 +42,23 @@ class MinihostL2SourceTests(unittest.TestCase):
         self.assertIn("SmartRenderRequest", worker)
         self.assertIn("classic_render_runtime", worker)
         self.assertIn("smart_render_runtime", worker)
+
+    def test_pf_suites_are_a_real_translation_unit_with_explicit_host_hooks(self):
+        l2 = SOURCE.read_text(encoding="utf-8")
+        cmake = MINIHOST_CMAKE.read_text(encoding="utf-8")
+        internal = PF_SUITES_INTERNAL.read_text(encoding="utf-8")
+
+        self.assertNotIn('#include "worker_pf_suites.cpp"', l2)
+        self.assertEqual(cmake.count("src/worker_pf_suites.cpp"), 1)
+        self.assertIn("struct PfHostHooks", internal)
+        self.assertIn("struct PfHostContext", internal)
+        self.assertIn("resolve_world", internal)
+        self.assertIn("resolve_dispatch_world_format", internal)
+        self.assertIn("acquire_suite", internal)
+        self.assertIn("release_suite", internal)
+        self.assertIn("PfTransformTelemetry", internal)
+        self.assertIn("configure_pf_host_context(pf_host_context)", l2)
+        self.assertIn("pf_host_context_configured()", l2)
 
     def test_batch_sampling_suite_is_typed_and_fail_closed(self):
         text = l2_family_source()

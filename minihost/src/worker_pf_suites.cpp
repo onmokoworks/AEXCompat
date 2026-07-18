@@ -1,8 +1,132 @@
+#define AEXCOMPAT_PF_SUITE_IMPLEMENTATION 1
+#include "worker_pf_suites_internal.hpp"
+#include "worker_world_safety.hpp"
+
+#include <windows.h>
+
+#include <algorithm>
+#include <array>
+#include <cmath>
+#include <cstddef>
+#include <cstdint>
+#include <cstring>
+#include <limits>
+#include <mutex>
+#include <string>
+#include <thread>
+#include <unordered_map>
+#include <vector>
+
+using aexcompat::world_safety::DispatchWorldFormat;
+using aexcompat::world_safety::DispatchWorldFormatScope;
+using aexcompat::world_safety::kEffectWorldSize;
+using aexcompat::world_safety::bounded_argb8_world;
+
+namespace {
+
+constexpr int32_t kPfBadCallbackParam = 4;
+constexpr int32_t kPfErrBadCallbackParam = 516;
+constexpr int32_t kPixelFormatArgb32 = 1650946657;
+constexpr int32_t kPixelFormatArgb64 = 1650946658;
+constexpr int32_t kPixelFormatArgb128 = 1650946659;
+constexpr uint64_t kMaxAsyncReceiptBytes = 64ULL * 1024 * 1024;
+constexpr std::size_t kInSize = 408;
+constexpr std::size_t kInEffectRef = 184;
+constexpr std::size_t kUtilsSize = 552;
+constexpr std::size_t kUtilsFill = 72;
+constexpr std::size_t kUtilsPremultiply = 96;
+constexpr std::size_t kUtilsPremultiplyColor = 104;
+constexpr std::size_t kUtilsFill16 = 488;
+constexpr std::size_t kUtilsPremultiplyColor16 = 496;
+
+PfHostContext g_pf_host{};
+bool g_pf_host_configured{};
+
+bool resolve_world(void* world, int32_t pixel_bytes, unsigned char*& pixels,
+                   int32_t& rowbytes, int32_t& width, int32_t& height) {
+  return g_pf_host_configured && g_pf_host.hooks.resolve_world &&
+      g_pf_host.hooks.resolve_world(world, pixel_bytes, pixels, rowbytes, width, height);
+}
+
+bool resolve_dispatch_world_format(const void* world, DispatchWorldFormat& result) {
+  return g_pf_host_configured && g_pf_host.hooks.resolve_dispatch_world_format &&
+      g_pf_host.hooks.resolve_dispatch_world_format(world, result);
+}
+
+const char* pixel_format() {
+  return g_pf_host_configured && g_pf_host.hooks.pixel_format
+      ? g_pf_host.hooks.pixel_format() : "";
+}
+
+bool set_pixel_format(const char* value) {
+  return g_pf_host_configured && g_pf_host.hooks.set_pixel_format &&
+      g_pf_host.hooks.set_pixel_format(value);
+}
+
+int32_t acquire_host_suite(const char* name, int32_t version, const void** suite) {
+  if (!suite) return kPfBadCallbackParam;
+  *suite = nullptr;
+  return g_pf_host_configured && g_pf_host.hooks.acquire_suite
+      ? g_pf_host.hooks.acquire_suite(name, version, suite) : kPfBadCallbackParam;
+}
+
+int32_t release_host_suite(const char* name, int32_t version) {
+  return g_pf_host_configured && g_pf_host.hooks.release_suite
+      ? g_pf_host.hooks.release_suite(name, version) : kPfBadCallbackParam;
+}
+
+bool normalize_legacy_rect(const LegacyRect* requested, int32_t width, int32_t height,
+                           LegacyRect& result) {
+  if (width <= 0 || height <= 0) return false;
+  result = requested ? *requested : LegacyRect{0, 0, width, height};
+  return result.left >= 0 && result.top >= 0 && result.right >= result.left &&
+      result.bottom >= result.top && result.right <= width && result.bottom <= height;
+}
+
+template <typename T, std::size_t N>
+T read(const std::array<std::byte, N>& bytes, std::size_t offset) {
+  T value{};
+  if (offset > N || sizeof(value) > N - offset) return value;
+  std::memcpy(&value, bytes.data() + offset, sizeof(value));
+  return value;
+}
+
+template <typename T, std::size_t N>
+void write(std::array<std::byte, N>& bytes, std::size_t offset, T value) {
+  if (offset > N || sizeof(value) > N - offset) return;
+  std::memcpy(bytes.data() + offset, &value, sizeof(value));
+}
+
+struct PfBatchSamplingSuite1 {
+  int32_t (__cdecl *begin_sampling)(void*, int32_t, uint32_t, void*);
+  int32_t (__cdecl *end_sampling)(void*, int32_t, uint32_t, void*);
+  int32_t (__cdecl *get_batch_func)(void*, int32_t, uint32_t, const void*, void**);
+  int32_t (__cdecl *get_batch_func16)(void*, int32_t, uint32_t, const void*, void**);
+};
+static_assert(sizeof(PfBatchSamplingSuite1) == 4 * sizeof(void*));
+PfBatchSamplingSuite1 g_pf_batch_sampling_suite1{
+    &begin_sampling8, &end_sampling8, &unsupported_batch_sample_func,
+    &unsupported_batch_sample_func};
+
+}  // namespace
+
+void configure_pf_host_context(const PfHostContext& context) {
+  g_pf_host = context;
+  g_pf_host_configured = context.hooks.resolve_world && context.hooks.pixel_format &&
+      context.hooks.set_pixel_format && context.hooks.acquire_suite &&
+      context.hooks.release_suite && context.hooks.resolve_dispatch_world_format &&
+      context.effect_ref && context.batch_sampling_suite &&
+      context.transform_telemetry.calls && context.transform_telemetry.last_x &&
+      context.transform_telemetry.last_y && context.transform_telemetry.last_opacity;
+}
+
+bool pf_host_context_configured() { return g_pf_host_configured; }
+
 int32_t fill_world_typed(int32_t pixel_bytes, const void* color,
                          const LegacyRect* requested, void* world) {
   unsigned char* pixels{};
   int32_t rowbytes{}, width{}, height{};
-  if (!bounded_typed_world(world, pixel_bytes, pixels, rowbytes, width, height)) return 4;
+  if (!resolve_world(world, pixel_bytes, pixels, rowbytes, width, height)) return 4;
   const std::array<unsigned char, 16> transparent_black{};
   if (!color) color = transparent_black.data();
   LegacyRect bounds{};
@@ -16,13 +140,13 @@ int32_t fill_world_typed(int32_t pixel_bytes, const void* color,
 }
 
 int32_t __cdecl fill_world8(void*, const void* color, const LegacyRect* area, void* world) {
-  if (g_smart_pixel_format == "argb16") {
+  if (std::strcmp(pixel_format(), "argb16") == 0) {
     std::array<uint16_t, 4> deep{};
     if (color) for (int channel = 0; channel < 4; ++channel)
       deep[channel] = static_cast<uint16_t>(static_cast<const uint8_t*>(color)[channel] * 128u);
     return fill_world_typed(8, color ? deep.data() : nullptr, area, world);
   }
-  if (g_smart_pixel_format == "argb32f") {
+  if (std::strcmp(pixel_format(), "argb32f") == 0) {
     std::array<float, 4> floating{};
     if (color) for (int channel = 0; channel < 4; ++channel)
       floating[channel] = static_cast<const uint8_t*>(color)[channel] / 255.0f;
@@ -43,9 +167,9 @@ int32_t premultiply_color_typed(int32_t pixel_bytes, void* source_world, const v
   unsigned char *source{}, *destination{};
   int32_t source_rowbytes{}, source_width{}, source_height{};
   int32_t destination_rowbytes{}, destination_width{}, destination_height{};
-  if (!bounded_typed_world(source_world, pixel_bytes, source, source_rowbytes,
+  if (!resolve_world(source_world, pixel_bytes, source, source_rowbytes,
                            source_width, source_height) ||
-      !bounded_typed_world(destination_world, pixel_bytes, destination, destination_rowbytes,
+      !resolve_world(destination_world, pixel_bytes, destination, destination_rowbytes,
                            destination_width, destination_height) ||
       source_width != destination_width || source_height != destination_height) return 4;
   const std::size_t packed_row = static_cast<std::size_t>(source_width) * pixel_bytes;
@@ -99,11 +223,11 @@ int32_t premultiply_color_typed(int32_t pixel_bytes, void* source_world, const v
 }
 
 int32_t __cdecl premultiply_world8(void*, int32_t forward, void* world) {
-  if (g_smart_pixel_format == "argb16") {
+  if (std::strcmp(pixel_format(), "argb16") == 0) {
     const std::array<uint16_t, 4> black{};
     return premultiply_color_typed(8, world, black.data(), forward, world);
   }
-  if (g_smart_pixel_format == "argb32f") {
+  if (std::strcmp(pixel_format(), "argb32f") == 0) {
     const std::array<float, 4> black{};
     return premultiply_color_typed(16, world, black.data(), forward, world);
   }
@@ -154,8 +278,10 @@ bool verify_legacy_fill_matte_callbacks() {
       premultiply != &premultiply_world8 || premultiply8 != &premultiply_color8 ||
       premultiply16 != &premultiply_color16) return false;
 
-  const std::string saved_format = g_smart_pixel_format;
-  g_smart_pixel_format = "argb8";
+  const char* active_format = pixel_format();
+  if (!active_format) return false;
+  const std::string saved_format = active_format;
+  if (!set_pixel_format("argb8")) return false;
   std::array<uint8_t, 24> guarded8{};
   guarded8.fill(0xa5);
   LocalEffectWorld world8{};
@@ -195,7 +321,7 @@ bool verify_legacy_fill_matte_callbacks() {
   ok = ok && premultiply(nullptr, 1, &world8) == 0 &&
       premultiply8(nullptr, nullptr, color8.data(), 1, &world8) == 4 &&
       premultiply16(nullptr, &world16, nullptr, 1, &world16) == 4;
-  g_smart_pixel_format = saved_format;
+  if (!set_pixel_format(saved_format.c_str())) return false;
   return ok;
 }
 
@@ -212,8 +338,10 @@ int32_t __cdecl convolve_world(void*, void* source_world, const LegacyRect* requ
   constexpr uint32_t kReplicateBorders = 1u << 6;
   constexpr uint32_t kAlphaWeighted = 1u << 7;
   constexpr uint32_t kKnownFlags = (1u << 8) - 1;
-  const int32_t pixel_bytes = g_smart_pixel_format == "argb32f" ? 16 :
-      (g_smart_pixel_format == "argb16" ? 8 : 4);
+  const char* active_format = pixel_format();
+  if (!active_format) return 4;
+  const int32_t pixel_bytes = std::strcmp(active_format, "argb32f") == 0 ? 16 :
+      (std::strcmp(active_format, "argb16") == 0 ? 8 : 4);
   unsigned char *source{}, *destination{};
   int32_t source_rowbytes{}, source_width{}, source_height{};
   int32_t destination_rowbytes{}, destination_width{}, destination_height{};
@@ -221,9 +349,9 @@ int32_t __cdecl convolve_world(void*, void* source_world, const LegacyRect* requ
       kernel_size <= 0 || kernel_size > 15 ||
       (kernel_size & 1) == 0 || !alpha_kernel || !red_kernel || !green_kernel ||
       !blue_kernel ||
-      !bounded_typed_world(source_world, pixel_bytes, source, source_rowbytes,
+      !resolve_world(source_world, pixel_bytes, source, source_rowbytes,
                            source_width, source_height) ||
-      !bounded_typed_world(destination_world, pixel_bytes, destination,
+      !resolve_world(destination_world, pixel_bytes, destination,
                            destination_rowbytes, destination_width, destination_height) ||
       source_width != destination_width || source_height != destination_height) return 4;
   LegacyRect bounds{};
@@ -659,10 +787,10 @@ int32_t __cdecl transform_world(void* effect_ref, int32_t quality, uint32_t mode
       }
     }
   }
-  ++g_transform_world_calls;
-  g_last_transform_x = static_cast<int32_t>(std::lround(matrix[6]));
-  g_last_transform_y = static_cast<int32_t>(std::lround(matrix[7]));
-  g_last_transform_opacity = opacity;
+  ++*g_pf_host.transform_telemetry.calls;
+  *g_pf_host.transform_telemetry.last_x = static_cast<int32_t>(std::lround(matrix[6]));
+  *g_pf_host.transform_telemetry.last_y = static_cast<int32_t>(std::lround(matrix[7]));
+  *g_pf_host.transform_telemetry.last_opacity = opacity;
   return 0;
 }
 
@@ -1223,9 +1351,9 @@ int32_t iterate_world_typed(void* in_data, int32_t progress_base, int32_t progre
   int32_t source_rowbytes{}, source_width{}, source_height{};
   int32_t destination_rowbytes{}, destination_width{}, destination_height{};
   if (!pixel_function ||
-      !bounded_typed_world(source_world, pixel_bytes, source, source_rowbytes,
+      !resolve_world(source_world, pixel_bytes, source, source_rowbytes,
                            source_width, source_height) ||
-      !bounded_typed_world(destination_world, pixel_bytes, destination,
+      !resolve_world(destination_world, pixel_bytes, destination,
                            destination_rowbytes, destination_width, destination_height)) return 4;
   LegacyRect bounds{};
   if (!normalize_legacy_rect(area, std::min(source_width, destination_width),
@@ -1303,9 +1431,9 @@ int32_t iterate_origin_typed(int32_t pixel_bytes, void* source_world, const Lega
   int32_t source_rowbytes{}, source_width{}, source_height{};
   int32_t destination_rowbytes{}, destination_width{}, destination_height{};
   if (!origin || !pixel_function ||
-      !bounded_typed_world(source_world, pixel_bytes, source, source_rowbytes,
+      !resolve_world(source_world, pixel_bytes, source, source_rowbytes,
                            source_width, source_height) ||
-      !bounded_typed_world(destination_world, pixel_bytes, destination, destination_rowbytes,
+      !resolve_world(destination_world, pixel_bytes, destination, destination_rowbytes,
                            destination_width, destination_height)) return 4;
   LegacyRect bounds{};
   if (!normalize_legacy_rect(area, destination_width, destination_height, bounds)) return 4;
@@ -1509,7 +1637,7 @@ bool verify_iterate_suites() {
   alignas(8) std::array<std::byte, kInSize> input{};
   write(input, 24, &iterate_test_abort);
   write(input, 32, &iterate_test_progress);
-  write<void*>(input, kInEffectRef, &g_effect);
+  write<void*>(input, kInEffectRef, g_pf_host.effect_ref);
   const LegacyRect four_rows{0, 0, 1, 4};
   for (const int32_t pixel_bytes : {4, 8, 16}) {
     std::array<unsigned char, 64> typed_source{}, typed_destination{};
@@ -1557,7 +1685,7 @@ int32_t subpixel_sample_typed(int32_t pixel_bytes, void* effect_ref, int32_t fix
               sizeof(source_world));
   unsigned char* source{};
   int32_t rowbytes{}, width{}, height{};
-  if (!bounded_typed_world(source_world, pixel_bytes, source, rowbytes, width, height)) return 4;
+  if (!resolve_world(source_world, pixel_bytes, source, rowbytes, width, height)) return 4;
   const double x = fixed_x / 65536.0;
   const double y = fixed_y / 65536.0;
   const int32_t x0 = static_cast<int32_t>(std::floor(x));
@@ -1601,7 +1729,7 @@ int32_t nearest_sample_typed(int32_t pixel_bytes, void* effect_ref, int32_t fixe
               sizeof(source_world));
   unsigned char* source{};
   int32_t rowbytes{}, width{}, height{};
-  if (!bounded_typed_world(source_world, pixel_bytes, source, rowbytes, width, height)) return 4;
+  if (!resolve_world(source_world, pixel_bytes, source, rowbytes, width, height)) return 4;
   const int32_t x = static_cast<int32_t>(std::floor(fixed_x / 65536.0 + 0.5));
   const int32_t y = static_cast<int32_t>(std::floor(fixed_y / 65536.0 + 0.5));
   if (x < 0 || x >= width || y < 0 || y >= height) {
@@ -1647,7 +1775,7 @@ int32_t area_sample_typed(int32_t pixel_bytes, void* effect_ref, int32_t fixed_x
       radius_x >= 128.0 || radius_y >= 128.0) return 4;
   unsigned char* source{};
   int32_t rowbytes{}, width{}, height{};
-  if (!bounded_typed_world(source_world, pixel_bytes, source, rowbytes, width, height)) return 4;
+  if (!resolve_world(source_world, pixel_bytes, source, rowbytes, width, height)) return 4;
   const double center_x = fixed_x / 65536.0;
   const double center_y = fixed_y / 65536.0;
   const double left = center_x - radius_x, right = center_x + radius_x;
@@ -1720,14 +1848,14 @@ std::unordered_map<void*, LegacySamplingSession> g_legacy_sampling_sessions;
 
 int32_t __cdecl begin_sampling8(void* effect_ref, int32_t quality, uint32_t mode_flags,
                                 void* sampling_params) {
-  if (effect_ref != &g_effect || !sampling_params || (quality != 0 && quality != 1))
+  if (effect_ref != g_pf_host.effect_ref || !sampling_params || (quality != 0 && quality != 1))
     return kPfBadCallbackParam;
   void* source_world{};
   std::memcpy(&source_world, static_cast<std::byte*>(sampling_params) + 16,
               sizeof(source_world));
   unsigned char* source{};
   int32_t rowbytes{}, width{}, height{};
-  if (!bounded_typed_world(source_world, 4, source, rowbytes, width, height))
+  if (!resolve_world(source_world, 4, source, rowbytes, width, height))
     return kPfBadCallbackParam;
   std::lock_guard<std::mutex> lock(g_legacy_sampling_mutex);
   const auto [_, inserted] = g_legacy_sampling_sessions.emplace(
@@ -1738,7 +1866,7 @@ int32_t __cdecl begin_sampling8(void* effect_ref, int32_t quality, uint32_t mode
 
 int32_t __cdecl end_sampling8(void* effect_ref, int32_t quality, uint32_t mode_flags,
                               void* sampling_params) {
-  if (effect_ref != &g_effect || !sampling_params) return kPfBadCallbackParam;
+  if (effect_ref != g_pf_host.effect_ref || !sampling_params) return kPfBadCallbackParam;
   std::lock_guard<std::mutex> lock(g_legacy_sampling_mutex);
   const auto found = g_legacy_sampling_sessions.find(sampling_params);
   if (found == g_legacy_sampling_sessions.end() || found->second.quality != quality ||
@@ -1754,7 +1882,7 @@ int32_t __cdecl unsupported_batch_sample_func(void* effect_ref, int32_t quality,
                                                void** batch) {
   if (!batch) return kPfBadCallbackParam;
   *batch = nullptr;
-  if (effect_ref != &g_effect || !sampling_params || (quality != 0 && quality != 1))
+  if (effect_ref != g_pf_host.effect_ref || !sampling_params || (quality != 0 && quality != 1))
     return kPfBadCallbackParam;
   (void)mode_flags;
   return 4;
@@ -1762,8 +1890,8 @@ int32_t __cdecl unsupported_batch_sample_func(void* effect_ref, int32_t quality,
 
 bool verify_pf_batch_sampling_suite() {
   const void* acquired{};
-  if (acquire_suite("PF Batch Sampling Suite", 1, &acquired) != 0 ||
-      acquired != &g_batch_sampling_suite1)
+  if (acquire_host_suite("PF Batch Sampling Suite", 1, &acquired) != 0 ||
+      acquired != g_pf_host.batch_sampling_suite)
     return false;
 
   alignas(void*) std::array<std::byte, 64> world{};
@@ -1778,37 +1906,37 @@ bool verify_pf_batch_sampling_suite() {
   void* source_world = world.data();
   std::memcpy(params.data() + 16, &source_world, sizeof(source_world));
 
-  auto& suite = g_batch_sampling_suite1;
-  bool passed = suite.begin_sampling(&g_effect, 1, 0x12, params.data()) == 0 &&
-      suite.begin_sampling(&g_effect, 1, 0x12, params.data()) == kPfBadCallbackParam &&
-      suite.end_sampling(&g_effect, 0, 0x12, params.data()) == kPfBadCallbackParam &&
-      suite.end_sampling(&g_effect, 1, 0x13, params.data()) == kPfBadCallbackParam;
+  auto& suite = g_pf_batch_sampling_suite1;
+  bool passed = suite.begin_sampling(g_pf_host.effect_ref, 1, 0x12, params.data()) == 0 &&
+      suite.begin_sampling(g_pf_host.effect_ref, 1, 0x12, params.data()) == kPfBadCallbackParam &&
+      suite.end_sampling(g_pf_host.effect_ref, 0, 0x12, params.data()) == kPfBadCallbackParam &&
+      suite.end_sampling(g_pf_host.effect_ref, 1, 0x13, params.data()) == kPfBadCallbackParam;
 
   int32_t cross_thread_result{};
   std::thread foreign_thread([&] {
-    cross_thread_result = suite.end_sampling(&g_effect, 1, 0x12, params.data());
+    cross_thread_result = suite.end_sampling(g_pf_host.effect_ref, 1, 0x12, params.data());
   });
   foreign_thread.join();
   passed = passed && cross_thread_result == kPfBadCallbackParam &&
-      suite.end_sampling(&g_effect, 1, 0x12, params.data()) == 0 &&
-      suite.end_sampling(&g_effect, 1, 0x12, params.data()) == kPfBadCallbackParam &&
+      suite.end_sampling(g_pf_host.effect_ref, 1, 0x12, params.data()) == 0 &&
+      suite.end_sampling(g_pf_host.effect_ref, 1, 0x12, params.data()) == kPfBadCallbackParam &&
       suite.begin_sampling(nullptr, 1, 0, params.data()) == kPfBadCallbackParam &&
-      suite.begin_sampling(&g_effect, 2, 0, params.data()) == kPfBadCallbackParam &&
-      suite.begin_sampling(&g_effect, 1, 0, nullptr) == kPfBadCallbackParam;
+      suite.begin_sampling(g_pf_host.effect_ref, 2, 0, params.data()) == kPfBadCallbackParam &&
+      suite.begin_sampling(g_pf_host.effect_ref, 1, 0, nullptr) == kPfBadCallbackParam;
 
   void* batch = reinterpret_cast<void*>(0x1234);
-  passed = passed && suite.get_batch_func(&g_effect, 1, 0, params.data(), &batch) == 4 &&
+  passed = passed && suite.get_batch_func(g_pf_host.effect_ref, 1, 0, params.data(), &batch) == 4 &&
       batch == nullptr;
   batch = reinterpret_cast<void*>(0x5678);
-  passed = passed && suite.get_batch_func16(&g_effect, 0, 0, params.data(), &batch) == 4 &&
+  passed = passed && suite.get_batch_func16(g_pf_host.effect_ref, 0, 0, params.data(), &batch) == 4 &&
       batch == nullptr;
   batch = reinterpret_cast<void*>(0x9abc);
   passed = passed &&
       suite.get_batch_func(nullptr, 1, 0, params.data(), &batch) == kPfBadCallbackParam &&
       batch == nullptr &&
-      suite.get_batch_func(&g_effect, 1, 0, params.data(), nullptr) == kPfBadCallbackParam;
+      suite.get_batch_func(g_pf_host.effect_ref, 1, 0, params.data(), nullptr) == kPfBadCallbackParam;
 
-  passed = release_suite("PF Batch Sampling Suite", 1) == 0 && passed;
+  passed = release_host_suite("PF Batch Sampling Suite", 1) == 0 && passed;
   std::lock_guard<std::mutex> lock(g_legacy_sampling_mutex);
   return passed && g_legacy_sampling_sessions.empty();
 }

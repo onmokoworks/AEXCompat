@@ -34,6 +34,7 @@ set(AEXCOMPAT_L2_WORKER_SOURCES
     src/worker_selector_dispatch.cpp
     src/worker_aegp_render_options.cpp
     src/worker_handle_runtime.cpp
+    src/worker_pf_suites.cpp
     src/worker_suite_abi.cpp
     src/worker_world_safety.cpp)
 

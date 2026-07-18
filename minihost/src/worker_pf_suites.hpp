@@ -4,6 +4,10 @@ using IteratePixelRaw = int32_t(__cdecl*)(void*, int32_t, int32_t, void*, void*)
 using IterateGenericCallback = int32_t(__cdecl*)(void*, int32_t, int32_t, int32_t);
 using IterateAbortCallback = int32_t(__cdecl*)(void*);
 using IterateProgressCallback = int32_t(__cdecl*)(void*, int32_t, int32_t);
+// These callbacks are implemented by worker_pf_suites.cpp.  Keep C linkage so
+// this header can be consumed from the L2 anonymous namespace without turning
+// the translation unit boundary into a private mangled-symbol dependency.
+extern "C" {
 int32_t __cdecl copy_world8(void*, void*, void*, const LegacyRect*, const LegacyRect*);
 int32_t __cdecl copy_world_hq(void*, void*, void*, const LegacyRect*, const LegacyRect*);
 int32_t __cdecl iterate_world8(void*, int32_t, int32_t, void*, const LegacyRect*, void*,
@@ -73,6 +77,13 @@ int32_t __cdecl composite_rect8(void*, LegacyRect*, int32_t, void*, int32_t, int
                                 int32_t, int32_t, void*);
 int32_t __cdecl legacy_new_world(void*, int32_t, int32_t, int32_t, void*);
 int32_t __cdecl dispose_world(void*, void*);
+bool verify_legacy_fill_matte_callbacks();
+bool verify_world_transform_blend();
+bool verify_world_transform_affine();
+bool verify_world_transform_transfer_mask();
+bool verify_iterate_suites();
+bool verify_pf_batch_sampling_suite();
+}
 double __cdecl ansi_atan(double);
 double __cdecl ansi_atan2(double, double);
 double __cdecl ansi_ceil(double);

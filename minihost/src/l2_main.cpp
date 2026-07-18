@@ -64,6 +64,7 @@
 #include "worker_handle_runtime.hpp"
 #include "worker_suite_abi.hpp"
 #include "worker_world_safety.hpp"
+#include "worker_pf_suites_internal.hpp"
 
 namespace {
 
@@ -10872,7 +10873,6 @@ int32_t __cdecl pf_mask_world_with_path(void* effect_ref, void** path, double fe
   return 0;
 }
 
-#include "worker_pf_suites.cpp"
 template <typename Operation>
 double finite_ansi_unary(double value, Operation operation) noexcept {
   if (!std::isfinite(value)) return 0.0;
@@ -15854,6 +15854,33 @@ bool verify_aegp_projector_levels() {
 int wmain(int argc, wchar_t **argv) {
   configure_validators(&validate_render_options_item, &initialize_layer_render_options);
   configure_cache_on_load_suite(&g_effect);
+  const PfHostContext pf_host_context{
+      {
+          [](void* world, int32_t pixel_bytes, unsigned char*& pixels,
+             int32_t& rowbytes, int32_t& width, int32_t& height) -> bool {
+            return bounded_typed_world(world, pixel_bytes, pixels, rowbytes, width, height);
+          },
+          [](const void* world, DispatchWorldFormat& result) -> bool {
+            return resolve_dispatch_world_format(world, result);
+          },
+          []() -> const char* { return g_smart_pixel_format.c_str(); },
+          [](const char* value) -> bool {
+            if (!value || (std::strcmp(value, "argb8") != 0 &&
+                           std::strcmp(value, "argb16") != 0 &&
+                           std::strcmp(value, "argb32f") != 0)) return false;
+            g_smart_pixel_format = value;
+            return true;
+          },
+          &acquire_suite,
+          &release_suite,
+      },
+      &g_effect,
+      &g_batch_sampling_suite1,
+      {&g_transform_world_calls, &g_last_transform_x, &g_last_transform_y,
+       &g_last_transform_opacity},
+  };
+  configure_pf_host_context(pf_host_context);
+  if (!pf_host_context_configured()) return 72;
   configure_runtime_module_hash(&sha256);
   configure_selector_dispatch_audit(&capture_module_audit_phase,
                                     &module_audit_passed);
@@ -17182,7 +17209,11 @@ int wmain(int argc, wchar_t **argv) {
   write(utils, kUtilsBlend, &blend_world);
   write(utils, kUtilsConvolve, &convolve_world);
   write(utils, kUtilsCopy, &copy_world8);
-  wire_legacy_fill_matte_callbacks(utils);
+  write(utils, kUtilsFill, &fill_world8);
+  write(utils, kUtilsPremultiply, &premultiply_world8);
+  write(utils, kUtilsPremultiplyColor, &premultiply_color8);
+  write(utils, kUtilsFill16, &fill_world16);
+  write(utils, kUtilsPremultiplyColor16, &premultiply_color16);
   write(utils, kUtilsIterate, &iterate_world8);
   write(utils, kUtilsNewWorld, &legacy_new_world);
   write(utils, kUtilsDisposeWorld, &dispose_world);
