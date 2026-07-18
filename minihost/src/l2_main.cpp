@@ -50,6 +50,7 @@
 #include "gpu_directx_backend.hpp"
 #include "gpu_opencl_backend.hpp"
 #include "gpu_memory_world_transport.hpp"
+#include "l2_cli_dispatch.h"
 #include "parameter_animation_transport.hpp"
 #include "pf_cache_on_load_suite.hpp"
 #include "render_lifecycle.hpp"
@@ -15861,6 +15862,33 @@ bool verify_aegp_projector_levels() {
   return ok;
 }
 
+bool set_l2_dump_worlds_dir(void*, const wchar_t* value) {
+  g_dump_worlds_dir = std::filesystem::path(value ? value : L"");
+  std::error_code error;
+  return !g_dump_worlds_dir.empty() && std::filesystem::is_directory(g_dump_worlds_dir, error);
+}
+
+bool enable_l2_checksum_detail(void*) {
+  g_output_checksum_detail = true;
+  return true;
+}
+
+bool load_l2_aux_manifest(void*, const wchar_t* value) {
+  if (!load_aux_manifest(std::filesystem::path(value ? value : L""), g_external_aux_set))
+    return false;
+  g_external_aux_loaded = true;
+  return true;
+}
+
+bool parse_l2_alpha_coverage(void*, const wchar_t* value) {
+  return parse_alpha_coverage_params(value ? value : L"");
+}
+
+bool load_l2_parameter_animation(void*, const wchar_t* value) {
+  return load_parameter_animation(std::filesystem::path(value ? value : L""),
+                                  g_parameter_timelines);
+}
+
 int wmain(int argc, wchar_t **argv) {
   const SceneContext scene_host{
       {&bump_render_project_timestamp, &validate_render_options_item,
@@ -16312,79 +16340,32 @@ int wmain(int argc, wchar_t **argv) {
     argc -= 2;
   }
 #ifdef AEXCOMPAT_RENDER_WORKER
-  int effective_argc = argc;
-  bool saw_aux = false, saw_animation = false, saw_coverage = false;
-  bool saw_dump_worlds = false, saw_checksum_detail = false;
-  while (effective_argc >= 3) {
-    const std::wstring flag(argv[effective_argc - 2]);
-    if (flag == L"--dump-worlds-v1" && !saw_dump_worlds) {
-      g_dump_worlds_dir = std::filesystem::path(argv[effective_argc - 1]);
-      std::error_code dump_dir_error;
-      if (g_dump_worlds_dir.empty() ||
-          !std::filesystem::is_directory(g_dump_worlds_dir, dump_dir_error))
-        return 3;
-      saw_dump_worlds = true;
-      effective_argc -= 2;
-    } else if (flag == L"--output-checksum-detail-v1" && !saw_checksum_detail) {
-      if (std::wstring(argv[effective_argc - 1]) != L"1") return 3;
-      g_output_checksum_detail = true;
-      saw_checksum_detail = true;
-      effective_argc -= 2;
-    } else if (flag == L"--aux-manifest-v1" && !saw_aux) {
-      if (!load_aux_manifest(std::filesystem::path(argv[effective_argc - 1]),
-                             g_external_aux_set))
-        return 3;
-      g_external_aux_loaded = true;
-      saw_aux = true;
-      effective_argc -= 2;
-    } else if (flag == L"--alpha-as-coverage-v1" && !saw_coverage) {
-      if (!parse_alpha_coverage_params(argv[effective_argc - 1])) return 3;
-      saw_coverage = true;
-      effective_argc -= 2;
-    } else if (flag == L"--parameter-animation-v1" && !saw_animation) {
-      if (!load_parameter_animation(
-              std::filesystem::path(argv[effective_argc - 1]),
-              g_parameter_timelines))
-        return 3;
-      saw_animation = true;
-      effective_argc -= 2;
-    } else
-      break;
-  }
-  const std::wstring render_command = argc > 1 ? argv[1] : L"";
-  const bool audio_mode =
-      effective_argc == 9 && render_command == L"--render-audio";
-  const bool image_audio_mode =
-      effective_argc == 16 && render_command == L"--render-image-audio";
-  const bool image16 = render_command == L"--render-image16" ||
-                       render_command == L"--render-image16-layer";
-  const bool image32 = render_command == L"--render-image32" ||
-                       render_command == L"--render-image32-layer";
-  const int32_t external_pixel_bytes = image32 ? 16 : (image16 ? 8 : 4);
-  const int transport_argc = image_audio_mode ? 13 : effective_argc;
-  const bool image_click_context = transport_argc >= 14 &&
-      std::wstring(argv[transport_argc - 1]).compare(0, 9, L"click:v1|") == 0;
-  const bool image_draw_context = transport_argc >= 14 &&
-      std::wstring(argv[transport_argc - 1]) == L"draw:v1";
-  const int image_click_argc = transport_argc - ((image_click_context || image_draw_context) ? 1 : 0);
-  const bool image_render_environment = image_click_argc >= 14 &&
-      std::wstring(argv[image_click_argc - 1]).compare(0, 10, L"render:v1|") == 0;
-  const int image_environment_argc = image_click_argc - (image_render_environment ? 1 : 0);
-  const bool image_spatial_context = image_environment_argc >= 14 &&
-      std::wstring(argv[image_environment_argc - 1]).compare(0, 9, L"spatial:v") == 0;
-  const int image_trailer_argc = image_environment_argc - (image_spatial_context ? 1 : 0);
-  const bool image_mask_context = image_trailer_argc >= 14 &&
-      std::wstring(argv[image_trailer_argc - 1]).compare(0, 3, L"v2|") == 0;
-  const int image_argc = image_trailer_argc - (image_mask_context ? 1 : 0);
-  const bool layered_image_mode = image_argc >= 17 && (image_argc - 13) % 4 == 0 &&
-      (image_argc - 13) / 4 <= 64 &&
-      (render_command == L"--render-image-layer" ||
-       render_command == L"--render-image16-layer" || render_command == L"--render-image32-layer");
-  const bool image_mode = image_audio_mode || (image_argc == 13 && (render_command == L"--render-image" ||
-      render_command == L"--render-image16" || render_command == L"--render-image32")) || layered_image_mode;
-  const bool request_mode = (effective_argc == 5 && std::wstring(argv[1]) == L"--render-request") ||
-      image_mode || audio_mode;
-  if (!request_mode && (effective_argc != 5 || std::wstring(argv[1]) != L"--render")) return 2;
+  const aexcompat::l2cli::AuxiliaryOptionHooks auxiliary_hooks{
+      nullptr, set_l2_dump_worlds_dir, enable_l2_checksum_detail,
+      load_l2_aux_manifest, parse_l2_alpha_coverage, load_l2_parameter_animation};
+  const auto auxiliary_options =
+      aexcompat::l2cli::strip_auxiliary_options(argc, argv, auxiliary_hooks);
+  if (!auxiliary_options.accepted) return 3;
+  const int effective_argc = auxiliary_options.effective_argc;
+  const auto worker_mode = aexcompat::l2cli::classify_worker_mode(
+      aexcompat::l2cli::WorkerKind::Render, argc, argv, effective_argc);
+  const bool audio_mode = worker_mode.audio_mode;
+  const bool image_audio_mode = worker_mode.image_audio_mode;
+  const int32_t external_pixel_bytes = worker_mode.external_pixel_bytes;
+  const int transport_argc = worker_mode.transport_argc;
+  const bool image_click_context = worker_mode.image_click_context;
+  const bool image_draw_context = worker_mode.image_draw_context;
+  const int image_click_argc = worker_mode.image_click_argc;
+  const bool image_render_environment = worker_mode.image_render_environment;
+  const int image_environment_argc = worker_mode.image_environment_argc;
+  const bool image_spatial_context = worker_mode.image_spatial_context;
+  const int image_trailer_argc = worker_mode.image_trailer_argc;
+  const bool image_mask_context = worker_mode.image_mask_context;
+  const int image_argc = worker_mode.image_argc;
+  const bool layered_image_mode = worker_mode.layered_image_mode;
+  const bool image_mode = worker_mode.image_mode;
+  const bool request_mode = worker_mode.request_mode;
+  if (!worker_mode.command_accepted) return 2;
   RequestedAssignments requested_parameters;
   if (request_mode && !parse_parameter_payload(argv[4], requested_parameters)) return 3;
   std::vector<unsigned char> external_rgba;
@@ -16493,139 +16474,51 @@ int wmain(int argc, wchar_t **argv) {
       g_render_draw_enabled = true;
   }
 #elif defined(AEXCOMPAT_SMART_WORKER)
-  int effective_argc = argc;
-  bool saw_aux = false, saw_animation = false, saw_coverage = false;
-  bool saw_dump_worlds = false, saw_checksum_detail = false;
-  while (effective_argc >= 3) {
-    const std::wstring flag(argv[effective_argc - 2]);
-    if (flag == L"--dump-worlds-v1" && !saw_dump_worlds) {
-      g_dump_worlds_dir = std::filesystem::path(argv[effective_argc - 1]);
-      std::error_code dump_dir_error;
-      if (g_dump_worlds_dir.empty() ||
-          !std::filesystem::is_directory(g_dump_worlds_dir, dump_dir_error))
-        return 3;
-      saw_dump_worlds = true;
-      effective_argc -= 2;
-    } else if (flag == L"--output-checksum-detail-v1" && !saw_checksum_detail) {
-      if (std::wstring(argv[effective_argc - 1]) != L"1") return 3;
-      g_output_checksum_detail = true;
-      saw_checksum_detail = true;
-      effective_argc -= 2;
-    } else if (flag == L"--aux-manifest-v1" && !saw_aux) {
-      if (!load_aux_manifest(std::filesystem::path(argv[effective_argc - 1]),
-                             g_external_aux_set))
-        return 3;
-      g_external_aux_loaded = true;
-      saw_aux = true;
-      effective_argc -= 2;
-    } else if (flag == L"--alpha-as-coverage-v1" && !saw_coverage) {
-      if (!parse_alpha_coverage_params(argv[effective_argc - 1])) return 3;
-      saw_coverage = true;
-      effective_argc -= 2;
-    } else if (flag == L"--parameter-animation-v1" && !saw_animation) {
-      if (!load_parameter_animation(
-              std::filesystem::path(argv[effective_argc - 1]),
-              g_parameter_timelines))
-        return 3;
-      saw_animation = true;
-      effective_argc -= 2;
-    } else
-      break;
-  }
-  const std::wstring smart_command = argc > 1 ? argv[1] : L"";
-  const bool smart_force_cpu = smart_command == L"--smart-image32-cpu" ||
-                               smart_command == L"--smart-image32-cpu-layer";
-  const bool smart_opencl = smart_command == L"--smart-image32-opencl";
-  const bool smart_directx = smart_command == L"--smart-image32-directx";
-  const bool smart_image16 = smart_command == L"--smart-image16" ||
-                             smart_command == L"--smart-image16-layer";
-  const bool smart_image32 = smart_command == L"--smart-image32" ||
-      smart_command == L"--smart-image32-layer" || smart_force_cpu || smart_opencl ||
-      smart_directx;
-  const int32_t external_pixel_bytes = smart_image32 ? 16 : (smart_image16 ? 8 : 4);
-  const bool smart_image_click_context = effective_argc >= 14 &&
-      std::wstring(argv[effective_argc - 1]).compare(0, 9, L"click:v1|") == 0;
-  const bool smart_image_draw_context = effective_argc >= 14 &&
-      std::wstring(argv[effective_argc - 1]) == L"draw:v1";
-  const int smart_image_click_argc = effective_argc -
-      ((smart_image_click_context || smart_image_draw_context) ? 1 : 0);
-  const bool smart_image_render_environment = smart_image_click_argc >= 14 &&
-      std::wstring(argv[smart_image_click_argc - 1]).compare(0, 10, L"render:v1|") == 0;
-  const int smart_image_environment_argc = smart_image_click_argc - (smart_image_render_environment ? 1 : 0);
-  const bool smart_image_spatial_context = smart_image_environment_argc >= 14 &&
-      std::wstring(argv[smart_image_environment_argc - 1]).compare(0, 9, L"spatial:v") == 0;
-  const int smart_image_trailer_argc = smart_image_environment_argc - (smart_image_spatial_context ? 1 : 0);
-  const bool smart_image_mask_context = smart_image_trailer_argc >= 14 &&
-      std::wstring(argv[smart_image_trailer_argc - 1]).compare(0, 3, L"v2|") == 0;
-  const int smart_image_argc = smart_image_trailer_argc - (smart_image_mask_context ? 1 : 0);
-  const bool smart_layered_image_mode = smart_image_argc >= 17 &&
-      (smart_image_argc - 13) % 4 == 0 && (smart_image_argc - 13) / 4 <= 64 &&
-      (smart_command == L"--smart-image-layer" || smart_command == L"--smart-image16-layer" ||
-       smart_command == L"--smart-image32-layer" ||
-       smart_command == L"--smart-image32-cpu-layer");
-  const bool smart_image_mode = (smart_image_argc == 13 && (smart_command == L"--smart-image" ||
-      smart_command == L"--smart-image16" || smart_command == L"--smart-image32" ||
-      smart_command == L"--smart-image32-cpu" || smart_opencl || smart_directx)) ||
-      smart_layered_image_mode;
-  const bool mask_request_mode = argc == 5 && std::wstring(argv[1]) == L"--smart-mask-request";
-  const bool mask_scene_request_mode = argc == 6 &&
-      std::wstring(argv[1]) == L"--smart-mask-scene-request";
-  const bool mask_context_request_mode = argc == 6 &&
-      std::wstring(argv[1]) == L"--smart-mask-context-request";
-  const bool mask_count_error_mode = argc == 5 &&
-      std::wstring(argv[1]) == L"--smart-mask-count-error-request";
-  const bool mask_count_crash_mode = argc == 5 &&
-      std::wstring(argv[1]) == L"--smart-mask-count-crash-request";
-  const bool mask_double_dispose_mode = argc == 5 &&
-      std::wstring(argv[1]) == L"--smart-mask-double-dispose-request";
-  const bool stream_live_value_dispose_mode = argc == 5 &&
-      std::wstring(argv[1]) == L"--smart-stream-live-value-dispose-request";
-  const bool stream_metadata_ownership_mode = argc == 5 &&
-      std::wstring(argv[1]) == L"--smart-stream-metadata-ownership-request";
-  const bool keyframe_ownership_mode = argc == 5 &&
-      std::wstring(argv[1]) == L"--smart-keyframe-ownership-request";
-  const bool dynamic_stream_tree_mode = argc == 5 &&
-      std::wstring(argv[1]) == L"--smart-dynamic-stream-tree-request";
-  const bool aegp_memory_strings_mode = argc == 5 &&
-      std::wstring(argv[1]) == L"--smart-aegp-memory-strings-request";
-  const bool suite_release_without_acquire_mode = argc == 5 &&
-      std::wstring(argv[1]) == L"--smart-suite-release-without-acquire-request";
-  const bool handle_resize_while_locked_mode = argc == 5 &&
-      std::wstring(argv[1]) == L"--smart-handle-resize-while-locked-request";
-  const bool world_double_dispose_mode = argc == 5 &&
-      std::wstring(argv[1]) == L"--smart-world-double-dispose-request";
-  const bool world_allocation_limit_mode = argc == 5 &&
-      std::wstring(argv[1]) == L"--smart-world-allocation-limit-request";
-  const bool pixel_format_registry_mode = argc == 5 &&
-      std::wstring(argv[1]) == L"--smart-pixel-format-registry-request";
-  const bool outline_mutation_mode = argc == 5 &&
-      std::wstring(argv[1]) == L"--smart-outline-mutation-request";
-  const bool mask_attribute_mode = argc == 5 &&
-      std::wstring(argv[1]) == L"--smart-mask-attribute-request";
-  const bool request_mode = smart_image_mode || mask_request_mode || mask_scene_request_mode || mask_context_request_mode ||
-      mask_count_error_mode || mask_count_crash_mode || mask_double_dispose_mode ||
-      stream_live_value_dispose_mode || stream_metadata_ownership_mode || keyframe_ownership_mode ||
-      dynamic_stream_tree_mode ||
-      aegp_memory_strings_mode ||
-      suite_release_without_acquire_mode ||
-      handle_resize_while_locked_mode || world_double_dispose_mode ||
-      world_allocation_limit_mode ||
-      pixel_format_registry_mode ||
-      outline_mutation_mode ||
-      mask_attribute_mode ||
-      (argc == 5 && std::wstring(argv[1]) == L"--smart-request");
-  if (!request_mode && (argc != 5 || std::wstring(argv[1]) != L"--smart")) return 2;
-  g_mask_model_enabled = mask_request_mode || mask_scene_request_mode || mask_context_request_mode ||
-      mask_count_error_mode || mask_count_crash_mode || mask_double_dispose_mode ||
-      stream_live_value_dispose_mode || stream_metadata_ownership_mode || keyframe_ownership_mode ||
-      dynamic_stream_tree_mode ||
-      aegp_memory_strings_mode ||
-      suite_release_without_acquire_mode ||
-      handle_resize_while_locked_mode || world_double_dispose_mode ||
-      world_allocation_limit_mode;
-  g_mask_model_enabled = g_mask_model_enabled || pixel_format_registry_mode ||
-      outline_mutation_mode;
-  g_mask_model_enabled = g_mask_model_enabled || mask_attribute_mode;
+  const aexcompat::l2cli::AuxiliaryOptionHooks auxiliary_hooks{
+      nullptr, set_l2_dump_worlds_dir, enable_l2_checksum_detail,
+      load_l2_aux_manifest, parse_l2_alpha_coverage, load_l2_parameter_animation};
+  const auto auxiliary_options =
+      aexcompat::l2cli::strip_auxiliary_options(argc, argv, auxiliary_hooks);
+  if (!auxiliary_options.accepted) return 3;
+  const int effective_argc = auxiliary_options.effective_argc;
+  const auto worker_mode = aexcompat::l2cli::classify_worker_mode(
+      aexcompat::l2cli::WorkerKind::Smart, argc, argv, effective_argc);
+  const bool smart_force_cpu = worker_mode.force_cpu;
+  const bool smart_opencl = worker_mode.opencl;
+  const bool smart_directx = worker_mode.directx;
+  const int32_t external_pixel_bytes = worker_mode.external_pixel_bytes;
+  const bool smart_image_click_context = worker_mode.image_click_context;
+  const bool smart_image_draw_context = worker_mode.image_draw_context;
+  const int smart_image_click_argc = worker_mode.image_click_argc;
+  const bool smart_image_render_environment = worker_mode.image_render_environment;
+  const int smart_image_environment_argc = worker_mode.image_environment_argc;
+  const bool smart_image_spatial_context = worker_mode.image_spatial_context;
+  const int smart_image_trailer_argc = worker_mode.image_trailer_argc;
+  const bool smart_image_mask_context = worker_mode.image_mask_context;
+  const int smart_image_argc = worker_mode.image_argc;
+  const bool smart_layered_image_mode = worker_mode.layered_image_mode;
+  const bool smart_image_mode = worker_mode.image_mode;
+  const bool mask_request_mode = worker_mode.mask_request_mode;
+  const bool mask_scene_request_mode = worker_mode.mask_scene_request_mode;
+  const bool mask_context_request_mode = worker_mode.mask_context_request_mode;
+  const bool mask_count_error_mode = worker_mode.mask_count_error_mode;
+  const bool mask_count_crash_mode = worker_mode.mask_count_crash_mode;
+  const bool mask_double_dispose_mode = worker_mode.mask_double_dispose_mode;
+  const bool stream_live_value_dispose_mode = worker_mode.stream_live_value_dispose_mode;
+  const bool stream_metadata_ownership_mode = worker_mode.stream_metadata_ownership_mode;
+  const bool keyframe_ownership_mode = worker_mode.keyframe_ownership_mode;
+  const bool dynamic_stream_tree_mode = worker_mode.dynamic_stream_tree_mode;
+  const bool aegp_memory_strings_mode = worker_mode.aegp_memory_strings_mode;
+  const bool suite_release_without_acquire_mode = worker_mode.suite_release_without_acquire_mode;
+  const bool handle_resize_while_locked_mode = worker_mode.handle_resize_while_locked_mode;
+  const bool world_double_dispose_mode = worker_mode.world_double_dispose_mode;
+  const bool world_allocation_limit_mode = worker_mode.world_allocation_limit_mode;
+  const bool pixel_format_registry_mode = worker_mode.pixel_format_registry_mode;
+  const bool outline_mutation_mode = worker_mode.outline_mutation_mode;
+  const bool mask_attribute_mode = worker_mode.mask_attribute_mode;
+  const bool request_mode = worker_mode.request_mode;
+  if (!worker_mode.command_accepted) return 2;
+  g_mask_model_enabled = worker_mode.mask_model_enabled;
   g_mask_fault = mask_count_error_mode ? MaskFault::CountError :
       mask_count_crash_mode ? MaskFault::CountCrash : MaskFault::None;
   RequestedAssignments requested_parameters;

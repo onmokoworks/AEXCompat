@@ -6,6 +6,11 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def worker_source():
+    return ((ROOT / "minihost" / "src" / "l2_main.cpp").read_text(encoding="utf-8") + "\n" +
+            (ROOT / "minihost" / "src" / "l2_cli_dispatch.cpp").read_text(encoding="utf-8"))
+
+
 class RenderParameterGateContractTests(unittest.TestCase):
     def test_request_is_strict_and_caller_cannot_supply_descriptors(self):
         schema = json.loads((ROOT / "contracts/aex/render_parameter_request.schema.json").read_text(encoding="utf-8"))
@@ -68,7 +73,7 @@ class RenderParameterGateContractTests(unittest.TestCase):
         self.assertIn('"native_process_started": {"const": true}', text)
 
     def test_worker_revalidates_and_echoes_bound_values(self):
-        source = (ROOT / "minihost/src/l2_main.cpp").read_text(encoding="utf-8")
+        source = worker_source()
         for marker in ('L"--render-request"', "parse_parameter_payload", "valid_parameter_id",
                        'encoded.compare(0, 3, L"v2|")', "encoded.size() > 16384",
                        'encoded.compare(0, 3, L"v3|")', 'kind_text == L"argb8"',

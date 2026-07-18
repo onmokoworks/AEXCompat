@@ -6,6 +6,11 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def worker_source():
+    return ((ROOT / "minihost/src/l2_main.cpp").read_text(encoding="utf-8") + "\n" +
+            (ROOT / "minihost/src/l2_cli_dispatch.cpp").read_text(encoding="utf-8"))
+
+
 class SmartFxMaskSceneContractTests(unittest.TestCase):
     def test_report_requires_scene_echo_oracle_and_double_run(self):
         schema = json.loads(
@@ -27,7 +32,7 @@ class SmartFxMaskSceneContractTests(unittest.TestCase):
             self.assertIn(field, required)
 
     def test_worker_uses_host_owned_records_and_fixed_scene_gate(self):
-        worker = (ROOT / "minihost/src/l2_main.cpp").read_text(encoding="utf-8")
+        worker = worker_source()
         route = (ROOT / "broker/crates/broker/src/render_request.rs").read_text(
             encoding="utf-8"
         )
@@ -49,7 +54,7 @@ class SmartFxMaskSceneContractTests(unittest.TestCase):
                 encoding="utf-8"
             )
         )
-        worker = (ROOT / "minihost/src/l2_main.cpp").read_text(encoding="utf-8")
+        worker = worker_source()
         route = (ROOT / "broker/crates/broker/src/render_request.rs").read_text(
             encoding="utf-8"
         )
@@ -80,7 +85,7 @@ class SmartFxMaskSceneContractTests(unittest.TestCase):
             self.assertIn(marker, worker)
 
     def test_mask_handle_lifetimes_are_single_owner_and_broker_verified(self):
-        worker = (ROOT / "minihost/src/l2_main.cpp").read_text(encoding="utf-8")
+        worker = worker_source()
         route = (ROOT / "broker/crates/broker/src/render_request.rs").read_text(
             encoding="utf-8"
         )

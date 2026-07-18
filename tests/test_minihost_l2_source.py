@@ -4,6 +4,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "minihost" / "src" / "l2_main.cpp"
+CLI_DISPATCH_SOURCE = ROOT / "minihost" / "src" / "l2_cli_dispatch.cpp"
 WORLD_SAFETY_SOURCE = ROOT / "minihost" / "src" / "worker_world_safety.cpp"
 HANDLE_RUNTIME_SOURCE = ROOT / "minihost" / "src" / "worker_handle_runtime.cpp"
 HANDLE_RUNTIME_HEADER = ROOT / "minihost" / "src" / "worker_handle_runtime.hpp"
@@ -19,7 +20,8 @@ MINIHOST_CMAKE = ROOT / "minihost" / "CMakeLists.txt"
 
 def l2_family_source():
     return "\n".join(path.read_text(encoding="utf-8") for path in (
-        SOURCE, PF_SUITES_HEADER, PF_SUITES_SOURCE, AEGP_SCENE_SOURCE, AEGP_SCENE_IMPL
+        SOURCE, CLI_DISPATCH_SOURCE, PF_SUITES_HEADER, PF_SUITES_SOURCE,
+        AEGP_SCENE_SOURCE, AEGP_SCENE_IMPL
     ))
 
 
@@ -325,8 +327,7 @@ class MinihostL2SourceTests(unittest.TestCase):
         for marker in ('L"--render-image-layer"', 'L"--smart-image-layer"',
                        "g_checkout_layer_definitions", "g_smart_hosted_layers",
                        "existing.slot != layer.slot", "g_params[layer.slot - 1].type != 0",
-                       "(image_argc - 13) / 4 <= 64",
-                       "(smart_image_argc - 13) / 4 <= 64",
+                       "(mode.image_argc - 13) / 4 <= 64",
                        'L"v1|%d|%d|%u%n"', "same_rational_time",
                        "g_timed_classic_layers", "timed_slot"):
             self.assertIn(marker, text)
