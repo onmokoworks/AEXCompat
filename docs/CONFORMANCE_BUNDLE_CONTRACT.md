@@ -13,6 +13,9 @@ This is the minimum fixture and result contract for the Issue #4 runner. The man
 - すべてのartifactはbundle rootからの相対POSIX path、lowercase SHA-256、byte sizeで識別します。
 - 未知field、絶対path、親directory参照、backslash pathを拒否します。
 - `exact: true`はAE oracleが`captured`、identityが一致し、比較結果が0 mismatchの場合だけ有効です。
+- manifestは時間、parameter値、premultiplication、color management、linear light、rendererを固定します。
+- reportはparameter metadata、depth別のinput/output worldとraw artifact、Suite timelineを保持します。
+- `tools/conformance_bundle_validator.py`がmanifest/report間のidentity、depth集合、exact hash一致を検証します。
 - `not_requested`と`not_captured`は失敗ではありませんが、exact一致の根拠にはできません。
 - AEX本体、依存DLL、入力、runnerを別identityとして保持します。
 
