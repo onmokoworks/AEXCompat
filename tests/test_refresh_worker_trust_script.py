@@ -1,11 +1,20 @@
 import hashlib
 import re
+import shutil
 import subprocess
 from pathlib import Path
+
+import pytest
 
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "tools" / "refresh-worker-trust.ps1"
+POWERSHELL = shutil.which("powershell") or shutil.which("pwsh")
+
+pytestmark = pytest.mark.skipif(
+    POWERSHELL is None,
+    reason="requires a PowerShell executable (powershell or pwsh)",
+)
 
 WORKERS = {
     "aex_l2_worker": ("L2_WORKER_TRUST", "generated_l2_worker_trust.rs"),
@@ -17,7 +26,7 @@ WORKERS = {
 def run_refresh(build_root, trust_root):
     return subprocess.run(
         [
-            "powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
+            POWERSHELL, "-NoProfile", "-ExecutionPolicy", "Bypass",
             "-File", str(SCRIPT),
             "-SkipBuild", "-BuildRoot", str(build_root), "-TrustRoot", str(trust_root),
         ],
