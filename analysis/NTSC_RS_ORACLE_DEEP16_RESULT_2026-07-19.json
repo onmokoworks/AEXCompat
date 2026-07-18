@@ -2,6 +2,12 @@
   "schema_version": 1,
   "title": "ntsc-rs AE oracle: full-precision 16 bpc comparison via deep transport (issue #53)",
   "generated_by": "tools/refresh-ntsc-rs-oracle-deep16-evidence.ps1",
+  "oracle_identity": {
+    "state": "unverified",
+    "reason": "legacy captures do not record the AEX module loaded by the AE process",
+    "exact_claim_allowed": false,
+    "recapture_requirement": "tools/capture-ae-reference.ps1 -RequireLoadedAexIdentity"
+  },
   "environment": {
     "ae_version": "25.3.1x3",
     "plugin_file": "ntsc-rs-ae.aex",
@@ -12,7 +18,7 @@
   },
   "comparison_tool": "tools/compare-pixel-oracles.py",
   "tolerance": 0.000125,
-  "tolerance_meaning": "accepts up to 4 AE 16-bpc transport codes (4/32768 ~= 1.22e-4), ~32x below one 8-bit LSB; observed residue stays within 2 codes and is explained by 8-to-16 input promotion rounding plus the downward AE PNG16 export quantization",
+  "tolerance_meaning": "accepts 4.096 AE 16-bpc transport codes (0.000125), ~31x below one 8-bit LSB; observed residue stays within 2 codes and is consistent with input-promotion and PNG16 export quantization",
   "ae_fps_invariance": {
     "observed": true,
     "meaning": "AE 16 bpc captures of the gradient input at comp fps 24 and fps 1 (one-frame duration) are byte-identical"

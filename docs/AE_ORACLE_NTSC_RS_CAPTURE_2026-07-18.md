@@ -341,7 +341,7 @@ outputs can feed `compare-pixel-oracles.py --raw`), and the evidence
 refresh script named above.
 
 ## Follow-up: the 2026-07-19 16 bpc difference does not reproduce;
-   full-precision equivalence holds (2026-07-19, issue #53)
+   replacement captures agree within full-precision tolerance (2026-07-19, issue #53)
 
 The "fresh 16 bpc comparison detects a real unresolved difference" section
 above is corrected by this follow-up. Its artifacts
@@ -367,9 +367,9 @@ then the corrected reading.
    (decoded RGBA `d6f2a543...`) gives the same scale (max 6.1e-5). About
    4.1-5.2 million of 8.29 million channels differ by 1-2 codes; none
    differ more.
-4. **The residue is quantization boundary behavior, not a rendering gap
-   (observation + verified mechanism).** The host's smart-input world is
-   exactly `round(v * 32768 / 255)` of the 8-bit input (verified against
+4. **The residue is consistent with quantization boundary behavior
+   (observation; mechanism evidence not retained).** The host's smart-input world was
+   observed as `round(v * 32768 / 255)` of the 8-bit input (checked against
    the `AEXCOMPAT_DUMP_WORLDS_DIR` smart-input snapshot on all 8,294,400
    samples). AE's composed 8-bit-import -> 16 bpc -> `saveFrameToPng`
    chain, measured with a no-effect 16 bpc capture of the same input, is
@@ -392,10 +392,14 @@ then the corrected reading.
 
 Corrected claim level: the unresolved-16-bpc-gap observation above is
 withdrawn as evidence; it is unreproduced and its artifacts are
-unavailable. In its place, this follow-up establishes AE-oracle
-equivalence for ntsc-rs SmartFX at full 16 bpc transport precision
+unavailable. The replacement captures show export-tolerance agreement for
+ntsc-rs SmartFX at full 16 bpc transport precision
 (tolerance 4/32768, observed residue within 2/32768), frame 0, default
-parameters, across two inputs and two comp fps values. The
+parameters, across two inputs and two comp fps values. They do not prove
+which AEX module AE loaded because the old capture result did not record a
+loaded-module identity. Therefore this is not yet identity-bound AE-oracle
+equivalence. A fresh capture with `-RequireLoadedAexIdentity` is required
+before promoting the claim again. The
 machine-readable judgments live in
 `analysis/NTSC_RS_ORACLE_DEEP16_RESULT_2026-07-19.json` (regenerated only
 via `tools/refresh-ntsc-rs-oracle-deep16-evidence.ps1` from the executed

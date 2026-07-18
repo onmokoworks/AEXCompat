@@ -1,5 +1,6 @@
 param(
     [Parameter(Mandatory = $true)][string]$TestedAex,
+    [Parameter(Mandatory = $true)][string]$InstalledAex,
     [string]$Harness = 'broker\target\release\aexcompat-harness.exe',
     [string]$CorpusRoot = 'target\oracle-deep16',
     [string]$OutJson = 'analysis\NTSC_RS_ORACLE_DEEP16_RESULT_2026-07-19.json'
@@ -13,6 +14,7 @@ param(
 # paths or raw image contents.
 
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'windows-file-identity.ps1')
 
 function Sha256([string]$Path) {
     (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
@@ -39,7 +41,16 @@ function DecodedRgbaSha256([string]$PngPath) {
 
 $corpus = (Resolve-Path -LiteralPath $CorpusRoot).Path
 $aexPath = (Resolve-Path -LiteralPath $TestedAex).Path
+$installedAexPath = (Resolve-Path -LiteralPath $InstalledAex).Path
 $harnessPath = (Resolve-Path -LiteralPath $Harness).Path
+$installedLock = [System.IO.File]::Open(
+    $installedAexPath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read,
+    [System.IO.FileShare]::Read)
+try { $currentInstalledIdentity = Get-LockedFileIdentity $installedLock }
+finally { $installedLock.Dispose() }
+if ($currentInstalledIdentity.sha256 -ne (Sha256 $aexPath)) {
+    throw 'Installed AEX content does not match TestedAex'
+}
 
 $cases = @(
     [ordered]@{
@@ -79,8 +90,7 @@ $caseRecords = foreach ($case in $cases) {
     $hostRaw = Join-Path $corpus ("{0}.rgba16le" -f $case.host_prefix)
     $aePng = Join-Path $corpus ("{0}.png" -f $case.ae_prefix)
     $aeResult = Join-Path $corpus ("{0}.result.json" -f $case.ae_prefix)
-    $comparePath = Join-Path $corpus ("compare-{0}.json" -f $case.name)
-    foreach ($required in @($inputPath, $hostPng, $hostRaw, $aePng, $aeResult, $comparePath)) {
+    foreach ($required in @($inputPath, $hostPng, $hostRaw, $aePng, $aeResult)) {
         if (-not (Test-Path -LiteralPath $required)) {
             throw "missing deep16 oracle artifact: $required"
         }
@@ -99,6 +109,15 @@ $caseRecords = foreach ($case in $cases) {
     if ([string]$capture.tested_aex_sha256 -ne (Sha256 $aexPath)) {
         throw "capture result for $($case.name) does not record the tested AEX"
     }
+    if ([string]$capture.loaded_aex_identity.state -ne 'verified' -or
+        [string]$capture.loaded_aex_identity.sha256 -ne (Sha256 $aexPath) -or
+        [string]$capture.loaded_aex_identity.canonical_path_sha256 -notmatch '^[0-9a-f]{64}$' -or
+        [string]$capture.loaded_aex_identity.file_id -notmatch '^[0-9a-f]{8}:[0-9a-f]{8}:[0-9a-f]{8}$' -or
+        [string]$capture.loaded_aex_identity.canonical_path_sha256 -ne $currentInstalledIdentity.canonical_path_sha256 -or
+        [string]$capture.loaded_aex_identity.file_id -ne $currentInstalledIdentity.file_id -or
+        -not [bool]$capture.loaded_aex_identity.replacement_locked) {
+        throw "capture result for $($case.name) does not prove the loaded AE module identity; recapture with -RequireLoadedAexIdentity"
+    }
     if ([int]$capture.width -ne $case.width -or [int]$capture.height -ne $case.height) {
         throw "capture dimensions for $($case.name) do not match the case definition"
     }
@@ -113,12 +132,22 @@ $caseRecords = foreach ($case in $cases) {
         throw 'captures span more than one After Effects version'
     }
 
-    $comparison = ReadJson $comparePath
-    if ($comparison.hashes.raw_sha256 -ne (Sha256 $hostRaw)) {
-        throw "comparison for $($case.name) was not produced from $($case.host_prefix).rgba16le"
-    }
-    if ($comparison.hashes.render_sha256 -ne (Sha256 $aePng)) {
-        throw "comparison for $($case.name) was not produced from $($case.ae_prefix).png"
+    # Never trust a stale or hand-edited comparison report. Recompute every
+    # statistic from the pinned raw world and AE artifact using the declared
+    # deep16 comparison contract, then serialize that fresh result.
+    $comparisonScratch = Join-Path ([System.IO.Path]::GetTempPath()) `
+        ("aexcompat-deep16-compare-" + [guid]::NewGuid().ToString('N') + '.json')
+    try {
+        & python (Join-Path $PSScriptRoot 'compare-pixel-oracles.py') `
+            --raw $hostRaw --render $aePng --width $case.width --height $case.height `
+            --raw-format rgba16le --raw-integer-max 32768 --tolerance 0.000125 `
+            --out $comparisonScratch | Out-Null
+        if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $comparisonScratch)) {
+            throw "pixel comparator failed for $($case.name)"
+        }
+        $comparison = ReadJson $comparisonScratch
+    } finally {
+        Remove-Item -LiteralPath $comparisonScratch -ErrorAction SilentlyContinue
     }
     # Bind the host render to the recorded input: re-execute the recorded
     # render command against this input and require byte-identical deep
@@ -169,6 +198,14 @@ $caseRecords = foreach ($case in $cases) {
             bpc = [int]$capture.bpc
             color_pinned = [bool]$capture.color_pinned
             working_space = [string]$capture.working_space
+            loaded_aex_identity = [ordered]@{
+                state = [string]$capture.loaded_aex_identity.state
+                sha256 = [string]$capture.loaded_aex_identity.sha256
+                file_name = [string]$capture.loaded_aex_identity.file_name
+                canonical_path_sha256 = [string]$capture.loaded_aex_identity.canonical_path_sha256
+                file_id = [string]$capture.loaded_aex_identity.file_id
+                replacement_locked = [bool]$capture.loaded_aex_identity.replacement_locked
+            }
         }
         comparison = $comparison
     }
@@ -196,9 +233,15 @@ $document = [ordered]@{
         host_pixel_format = 'argb16'
         transport = 'rgba16le sidecar, AE range (white = 32768)'
     }
+    oracle_identity = [ordered]@{
+        state = 'verified'
+        exact_claim_allowed = $true
+        plugin_sha256 = Sha256 $aexPath
+        evidence = 'locked installed file plus matching loaded-module canonical path'
+    }
     comparison_tool = 'tools/compare-pixel-oracles.py'
     tolerance = 0.000125
-    tolerance_meaning = 'accepts up to 4 AE 16-bpc transport codes (4/32768 ~= 1.22e-4), ~32x below one 8-bit LSB; observed residue stays within 2 codes and is explained by 8-to-16 input promotion rounding plus the downward AE PNG16 export quantization'
+    tolerance_meaning = 'accepts 4.096 AE 16-bpc transport codes (0.000125), ~31x below one 8-bit LSB; observed residue stays within 2 codes and is consistent with input-promotion and PNG16 export quantization'
     ae_fps_invariance = [ordered]@{
         observed = $fpsInvariant
         meaning = 'AE 16 bpc captures of the gradient input at comp fps 24 and fps 1 (one-frame duration) are byte-identical'

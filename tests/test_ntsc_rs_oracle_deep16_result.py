@@ -7,6 +7,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 RESULT = ROOT / "analysis" / "NTSC_RS_ORACLE_DEEP16_RESULT_2026-07-19.json"
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
+REFRESH = ROOT / "tools" / "refresh-ntsc-rs-oracle-deep16-evidence.ps1"
 
 
 class NtscRsOracleDeep16ResultTests(unittest.TestCase):
@@ -18,6 +19,12 @@ class NtscRsOracleDeep16ResultTests(unittest.TestCase):
         names = {case["name"] for case in self.document["cases"]}
         self.assertLessEqual(
             {"gradient-fps24", "gradient-fps1", "generated-fps24"}, names)
+
+    def test_legacy_capture_is_not_presented_as_identity_bound_oracle(self):
+        identity = self.document["oracle_identity"]
+        self.assertEqual(identity["state"], "unverified")
+        self.assertFalse(identity["exact_claim_allowed"])
+        self.assertIn("RequireLoadedAexIdentity", identity["recapture_requirement"])
 
     def test_tolerance_is_a_sub_8bit_transport_code_judgment(self):
         tolerance = self.document["tolerance"]
@@ -89,6 +96,20 @@ class NtscRsOracleDeep16ResultTests(unittest.TestCase):
         self.assertNotRegex(text, r"[A-Za-z]:\\\\")
         self.assertNotRegex(text, r"[A-Za-z]:/")
         self.assertNotIn("\\\\Users", text)
+
+    def test_refresh_recomputes_pixels_and_requires_loaded_module_identity(self):
+        source = REFRESH.read_text(encoding="utf-8")
+        self.assertIn("loaded_aex_identity.state", source)
+        self.assertIn("-RequireLoadedAexIdentity", source)
+        self.assertIn("canonical_path_sha256 -notmatch", source)
+        self.assertIn("file_id -notmatch", source)
+        self.assertIn("currentInstalledIdentity.canonical_path_sha256", source)
+        self.assertIn("currentInstalledIdentity.file_id", source)
+        self.assertIn("compare-pixel-oracles.py", source)
+        self.assertIn("--raw-format rgba16le", source)
+        self.assertIn("--raw-integer-max 32768", source)
+        self.assertIn("--tolerance 0.000125", source)
+        self.assertNotIn("compare-{0}.json", source)
 
 
 if __name__ == "__main__":

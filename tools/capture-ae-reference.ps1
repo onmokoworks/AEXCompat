@@ -15,10 +15,12 @@ param(
     [string]$WorkingSpace = '',
     [ValidateSet('', '0', '1')][string]$LinearizeWorkingSpace = '',
     [switch]$NoEffect,
+    [switch]$RequireLoadedAexIdentity,
     [ValidateRange(5, 600)][int]$TimeoutSeconds = 120
 )
 
 . (Join-Path $PSScriptRoot 'sha256.ps1')
+. (Join-Path $PSScriptRoot 'windows-file-identity.ps1')
 
 $ErrorActionPreference = 'Stop'
 # 'AfterFX.com' is the console shim's own process name; a lingering shim
@@ -118,6 +120,29 @@ if ($ParamName) {
     # capture cannot pick up a stale override from the calling environment.
     Remove-Item 'Env:AEXCOMPAT_AE_PARAM_NAME','Env:AEXCOMPAT_AE_PARAM_VALUE' -ErrorAction SilentlyContinue
 }
+# Lock immediately before launch, after every other preflight/staging step.
+# Denying write/delete sharing binds the hash to the file AE can map and
+# prevents replacement until the launched process has finished or is killed.
+$installedLock = [System.IO.File]::Open(
+    $installedPath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read,
+    [System.IO.FileShare]::Read)
+try {
+$lockedIdentity = Get-LockedFileIdentity $installedLock
+$lockedInstalledHash = $lockedIdentity.sha256
+} catch {
+    $installedLock.Dispose()
+    throw
+}
+$installedLock.Position = 0
+if ($lockedInstalledHash -ne $testedHash) {
+    $installedLock.Dispose()
+    throw "Installed AEX changed before launch: $lockedInstalledHash != $testedHash"
+}
+$installedHash = $lockedInstalledHash
+$lockedFinalPath = $lockedIdentity.final_path
+$lockedFileId = $lockedIdentity.file_id
+$process = $null
+$captureFailed = $true
 try {
     $escapedScriptPath = $scriptPath.Replace('"', '\"')
     # AE 25.2 can abort before JSX execution when -noui hits a failed GPU3
@@ -143,8 +168,36 @@ try {
         '-m -r "{0}"' -f $escapedScriptPath
     }
     $process = Start-Process -FilePath $afterEffectsPath -ArgumentList $arguments -PassThru
+    $loadedAexIdentity = $null
     $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
     while ([DateTime]::UtcNow -lt $deadline -and -not (Test-Path -LiteralPath $resultPath)) {
+        # Bind the requested plug-in to the module that this exact AE process
+        # mapped. ExtendScript exposes matchName but not the backing module.
+        # Process.Modules supplies the missing host-side observation.
+        if ($null -eq $loadedAexIdentity -and -not $process.HasExited) {
+            try {
+                $process.Refresh()
+                $loadedModule = @($process.Modules) | Where-Object {
+                    $_.FileName -and
+                    ([System.IO.Path]::GetFullPath($_.FileName) -ieq $lockedFinalPath)
+                } | Select-Object -First 1
+                if ($null -ne $loadedModule) {
+                    $loadedAexIdentity = [ordered]@{
+                        state = 'verified'
+                        sha256 = $installedHash.ToLowerInvariant()
+                        file_name = [System.IO.Path]::GetFileName($loadedModule.FileName)
+                        canonical_path_sha256 = $lockedIdentity.canonical_path_sha256
+                        file_id = $lockedFileId
+                        process_id = $process.Id
+                        replacement_locked = $true
+                    }
+                }
+            } catch {
+                if ($RequireLoadedAexIdentity) {
+                    throw "Unable to inspect the launched AE process module identity: $($_.Exception.Message)"
+                }
+            }
+        }
         Start-Sleep -Milliseconds 250
     }
     if (-not (Test-Path -LiteralPath $resultPath)) {
@@ -160,20 +213,31 @@ try {
         }
         throw 'After Effects reference capture timed out without a result.'
     }
-    # The result JSON is written while After Effects is still quitting, and
-    # the wrapper can hold the output PNG for a moment afterwards (observed
-    # on AE 25.3.1): returning here breaks an immediate hash of the PNG and
-    # trips the next capture's already-running gate. Wait on the launched
-    # process itself, so the bound applies only to this capture's identity,
-    # and report a quit that outlives it as a failure, not a silent success.
-    # The shutdown gets the same configured patience as the capture itself,
-    # so the TimeoutSeconds knob covers all AE work (a slow quit on a large
-    # output is not a failure as long as the caller allowed the time).
+    if ($RequireLoadedAexIdentity -and $null -eq $loadedAexIdentity) {
+        # JSX may already have written status=captured. Rewrite it before
+        # throwing so no later consumer can mistake an unbound artifact for
+        # verified oracle evidence.
+        $unverifiedResult = Get-Content -LiteralPath $resultPath -Raw | ConvertFrom-Json
+        $unverifiedResult.status = 'identity_unverified'
+        $unverifiedResult | Add-Member -Force -NotePropertyName 'loaded_aex_identity' `
+            -NotePropertyValue ([ordered]@{
+                state = 'unverified'; reason = 'loaded_module_not_observed'
+            })
+        $unverifiedResult | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $resultPath -Encoding utf8
+        throw 'AE capture completed without verified loaded AEX module identity.'
+    }
+    # Wait only on this launch identity; never kill by process name. Check
+    # the original handle before taskkill so a reused numeric PID is safe.
     if (-not $process.WaitForExit($TimeoutSeconds * 1000) -and -not $process.HasExited) {
         & taskkill.exe /PID $process.Id /T /F 2>$null | Out-Null
         throw 'After Effects did not exit after writing the capture result.'
     }
+    $captureFailed = $false
 } finally {
+    if ($captureFailed -and $null -ne $process -and -not $process.HasExited) {
+        & taskkill.exe /PID $process.Id /T /F 2>$null | Out-Null
+        try { $process.WaitForExit(30000) | Out-Null } catch {}
+    }
     'AEXCOMPAT_AE_INPUT','AEXCOMPAT_AE_OUTPUT','AEXCOMPAT_AE_RESULT','AEXCOMPAT_AE_EFFECT',
     'AEXCOMPAT_AE_FRAME','AEXCOMPAT_AE_FPS','AEXCOMPAT_AE_DURATION','AEXCOMPAT_AE_BPC',
     'AEXCOMPAT_AE_SAVE_TIMEOUT_MS','AEXCOMPAT_AE_NO_EFFECT',
@@ -181,6 +245,7 @@ try {
     'AEXCOMPAT_AE_PARAM_NAME','AEXCOMPAT_AE_PARAM_VALUE' |
         ForEach-Object { Remove-Item "Env:$_" -ErrorAction SilentlyContinue }
     Remove-Item -LiteralPath $stagedInput -ErrorAction SilentlyContinue
+    $installedLock.Dispose()
 }
 
 $result = Get-Content -LiteralPath $resultPath -Raw | ConvertFrom-Json
@@ -196,5 +261,11 @@ if (-not (Test-Path -LiteralPath $outputPath)) {
 # manifest, and evidence refresh scripts verify against it).
 $result | Add-Member -NotePropertyName 'input_sha256' -NotePropertyValue $inputHash
 $result | Add-Member -NotePropertyName 'tested_aex_sha256' -NotePropertyValue $testedHash.ToLowerInvariant()
+$identityRecord = if ($null -ne $loadedAexIdentity) {
+    $loadedAexIdentity
+} else {
+    [ordered]@{ state = 'unverified'; reason = 'loaded_module_not_observed' }
+}
+$result | Add-Member -NotePropertyName 'loaded_aex_identity' -NotePropertyValue $identityRecord
 $result | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $resultPath -Encoding utf8
 $result | ConvertTo-Json -Depth 8
