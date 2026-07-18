@@ -39,6 +39,12 @@ class MinihostL2SourceTests(unittest.TestCase):
         self.assertIn("int dispatch(RenderContext& context)", header)
         self.assertIn("context.primary_error != 0 ?", implementation)
         self.assertIn("context.cleanup_error", implementation)
+        self.assertIn("struct ImageRequest", header)
+        self.assertIn("struct RenderTelemetry", header)
+        self.assertIn("prepare_image_request", implementation)
+        self.assertIn("build_argb_input", implementation)
+        self.assertIn("record_output_checksum_detail", implementation)
+        self.assertIn("world_debug_report_json", implementation)
         self.assertNotIn('#include "l2_main.cpp"', implementation)
         self.assertNotIn("#if 0", implementation)
         self.assertIn("src/render_subsystem.cpp", cmake)
@@ -46,6 +52,10 @@ class MinihostL2SourceTests(unittest.TestCase):
         self.assertIn("SmartRenderRequest", worker)
         self.assertIn("classic_render_runtime", worker)
         self.assertIn("smart_render_runtime", worker)
+        self.assertIn("aexcompat::render::prepare_image_request", worker)
+        self.assertIn("aexcompat::render::build_argb_input", worker)
+        self.assertIn("aexcompat::render::record_output_checksum_detail", worker)
+        self.assertNotIn("uint32_t crc32_ieee", worker)
 
     def test_pf_suites_are_a_real_translation_unit_with_explicit_host_hooks(self):
         l2 = SOURCE.read_text(encoding="utf-8")
