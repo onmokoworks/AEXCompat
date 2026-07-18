@@ -12,6 +12,8 @@ PF_SUITES_HEADER = ROOT / "minihost" / "src" / "worker_pf_suites.hpp"
 PF_SUITES_SOURCE = ROOT / "minihost" / "src" / "worker_pf_suites.cpp"
 RENDER_HEADER = ROOT / "minihost" / "src" / "render_subsystem.h"
 RENDER_SOURCE = ROOT / "minihost" / "src" / "render_subsystem.cpp"
+REPORT_HEADER = ROOT / "minihost" / "src" / "worker_report.hpp"
+REPORT_SOURCE = ROOT / "minihost" / "src" / "worker_report.cpp"
 PF_SUITES_INTERNAL = ROOT / "minihost" / "src" / "worker_pf_suites_internal.hpp"
 AEGP_SCENE_SOURCE = ROOT / "minihost" / "src" / "worker_aegp_scene.cpp"
 AEGP_SCENE_IMPL = ROOT / "minihost" / "src" / "worker_aegp_scene_impl.inc"
@@ -24,7 +26,7 @@ def l2_family_source():
     return "\n".join(path.read_text(encoding="utf-8") for path in (
         SOURCE, CLI_DISPATCH_SOURCE, PF_SUITES_HEADER, PF_SUITES_SOURCE,
         AEGP_SCENE_SOURCE, AEGP_SCENE_RUNTIME_HEADER, AEGP_SCENE_RUNTIME_SOURCE,
-        AEGP_SCENE_IMPL
+        AEGP_SCENE_IMPL, REPORT_HEADER, REPORT_SOURCE
     ))
 
 
@@ -84,6 +86,22 @@ class MinihostL2SourceTests(unittest.TestCase):
         self.assertIn("aexcompat::render::build_argb_input", worker)
         self.assertIn("aexcompat::render::record_output_checksum_detail", worker)
         self.assertNotIn("uint32_t crc32_ieee", worker)
+
+    def test_report_serialization_is_a_real_translation_unit_with_value_only_context(self):
+        header = REPORT_HEADER.read_text(encoding="utf-8")
+        implementation = REPORT_SOURCE.read_text(encoding="utf-8")
+        cmake = MINIHOST_CMAKE.read_text(encoding="utf-8")
+        worker = SOURCE.read_text(encoding="utf-8")
+
+        self.assertIn("struct L2ReportContext", header)
+        self.assertIn("struct ParameterSnapshot", header)
+        self.assertIn("no host handles, absolute paths, pixels, or plugin bytes", header)
+        self.assertIn("bounded_diagnostic_text", implementation)
+        self.assertIn("serialize_l2_report", implementation)
+        self.assertIn("src/worker_report.cpp", cmake)
+        self.assertIn("worker_report.hpp", worker)
+        self.assertIn("serialize_l2_report(c)", worker)
+        self.assertNotIn('#include "l2_main.cpp"', implementation)
 
     def test_pf_suites_are_a_real_translation_unit_with_explicit_host_hooks(self):
         l2 = SOURCE.read_text(encoding="utf-8")
@@ -501,8 +519,8 @@ class MinihostL2SourceTests(unittest.TestCase):
     def test_ui_flags_use_the_observed_paramdef_offset(self):
         text = l2_family_source()
         self.assertIn("kParamUiFlags = 4", text)
-        self.assertIn('read<uint32_t>(param.raw, kParamUiFlags)', text)
-        self.assertNotIn('read<uint32_t>(param.raw, 0)', text)
+        self.assertIn('read<uint32_t>(p.raw, kParamUiFlags)', text)
+        self.assertNotIn('read<uint32_t>(p.raw, 0)', text)
 
     def test_aegp_initialization_has_a_distinct_default_deny_abi(self):
         text = l2_family_source()

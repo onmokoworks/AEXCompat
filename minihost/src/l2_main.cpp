@@ -68,6 +68,7 @@
 #include "worker_suite_abi.hpp"
 #include "worker_world_safety.hpp"
 #include "worker_pf_suites_internal.hpp"
+#include "worker_report.hpp"
 
 namespace {
 
@@ -14136,107 +14137,32 @@ void report(const char* status, int32_t global_error, int32_t params_error,
             const std::string& about_message, const std::array<int32_t, 5>& lifecycle_errors,
             bool lifecycle_data_null) {
   restore_native_stdout();
-  const char* message = reinterpret_cast<const char*>(output.data() + kOutMessage);
-  const uint32_t out_flags = read<uint32_t>(output, kOutFlags);
-  const uint32_t out_flags2 = read<uint32_t>(output, kOutFlags2);
-  std::cout << "{\"schema_version\":1,\"stage\":\"L2\",\"status\":\"" << status
-            << "\",\"global_setup_error\":" << global_error
-            << ",\"params_setup_error\":" << params_error
-            << ",\"global_setdown_error\":" << setdown_error
-            << ",\"reported_num_params\":" << read<int32_t>(output, kOutNumParams)
-            << ",\"register_ui_calls\":" << g_register_ui_calls
-            << ",\"invalid_custom_ui_registrations\":" << g_invalid_custom_ui_registrations
-            << ",\"custom_ui\":{\"events\":" << g_custom_ui_registration.events
-            << ",\"comp_size\":[" << g_custom_ui_registration.comp_width << ',' << g_custom_ui_registration.comp_height << ']'
-            << ",\"layer_size\":[" << g_custom_ui_registration.layer_width << ',' << g_custom_ui_registration.layer_height << ']'
-            << ",\"preview_size\":[" << g_custom_ui_registration.preview_width << ',' << g_custom_ui_registration.preview_height << "]}"
-            << ",\"out_flags\":" << out_flags
-            << ",\"out_flags2\":" << out_flags2
-            << ",\"update_params_ui_advertised\":" << (g_update_params_ui_advertised ? "true" : "false")
-            << ",\"query_dynamic_flags_advertised\":" << (g_query_dynamic_flags_advertised ? "true" : "false")
-            << ",\"conditional_ui_selectors_dispatched\":"
-            << (g_conditional_ui_selectors_dispatched ? "true" : "false")
-            << ",\"update_params_ui_error\":" << g_update_params_ui_error
-            << ",\"query_dynamic_flags_error\":" << g_query_dynamic_flags_error
-            << ",\"update_param_ui_calls\":" << g_update_param_ui_calls
-            << ",\"pf_get_current_state_calls\":" << g_pf_get_current_state_calls
-            << ",\"pf_are_states_identical_calls\":" << g_pf_are_states_identical_calls
-            << ",\"suite_leases_balanced\":" << (suite_leases_balanced() ? "true" : "false")
-            << ",\"user_changed_param_requested\":" << (g_user_changed_param_requested ? "true" : "false")
-            << ",\"user_changed_param_slot\":" << g_user_changed_param_slot
-            << ",\"user_changed_param_error\":" << g_user_changed_param_error
-            << ",\"user_changed_parameters\":"
-            << requested_parameters_json(g_user_changed_parameters)
-            << ",\"return_message\":\"" << escape(std::string(message, strnlen_s(message, 256)))
-            << "\",\"about_message\":\"" << escape(about_message)
-            << "\",\"about_selector_dispatched\":" << (g_skip_about ? "false" : "true")
-            << ",\"last_seh_selector\":\"" << escape(g_last_seh_selector) << "\""
-            << ",\"last_seh_error\":" << g_last_seh_error
-            << ",\"sequence_setup_error\":" << lifecycle_errors[0]
-            << ",\"sequence_resetup_error\":" << lifecycle_errors[1]
-            << ",\"frame_setup_error\":" << lifecycle_errors[2]
-            << ",\"frame_setdown_error\":" << lifecycle_errors[3]
-            << ",\"sequence_setdown_error\":" << lifecycle_errors[4]
-            << ",\"lifecycle_data_null\":" << (lifecycle_data_null ? "true" : "false")
-            << ",\"parameters\":[";
-  for (std::size_t i = 0; i < g_params.size(); ++i) {
-    if (i) std::cout << ',';
-    const auto& param = g_params[i];
-    const auto* updated_name = reinterpret_cast<const char*>(param.raw.data() + kParamName);
-    std::cout << "{\"index\":" << param.index << ",\"disk_id\":" << param.disk_id
-              << ",\"type\":" << param.type
-              << ",\"ui_flags\":" << read<uint32_t>(param.raw, kParamUiFlags)
-              << ",\"ui_width\":" << read<int16_t>(param.raw, 8)
-              << ",\"ui_height\":" << read<int16_t>(param.raw, 10)
-              << ",\"flags\":" << read<uint32_t>(param.raw, kParamFlags) << ",\"name\":\""
-              << escape(std::string(updated_name, strnlen_s(updated_name, kParamNameSize))) << "\"";
-    if (param.has_numeric) {
-      std::cout << ",\"valid_min\":" << param.valid_min
-                << ",\"valid_max\":" << param.valid_max
-                << ",\"slider_min\":" << param.slider_min
-                << ",\"slider_max\":" << param.slider_max
-                << ",\"default\":" << param.default_value;
-    }
-    if (param.precision >= 0) std::cout << ",\"precision\":" << param.precision;
-    if (param.has_current) {
-      std::cout << ",\"current\":" << param.current_value
-                << ",\"current_default_mismatch\":"
-                << (param.current_value != param.default_value ? "true" : "false");
-    }
-    if (param.has_color) {
-      const auto color_json = [](const auto& color) {
-        std::ostringstream value;
-        value << "{\"alpha\":" << static_cast<unsigned>(color[0])
-              << ",\"red\":" << static_cast<unsigned>(color[1])
-              << ",\"green\":" << static_cast<unsigned>(color[2])
-              << ",\"blue\":" << static_cast<unsigned>(color[3]) << '}';
-        return value.str();
-      };
-      std::cout << ",\"default_color\":" << color_json(param.default_color)
-                << ",\"current_color\":" << color_json(param.current_color);
-    }
-    if (param.component_count > 0) {
-      std::cout << ",\"default_components\":[";
-      for (int component = 0; component < param.component_count; ++component) {
-        if (component) std::cout << ',';
-        std::cout << std::setprecision(17) << param.default_components[component];
-      }
-      std::cout << "],\"current_components\":[";
-      for (int component = 0; component < param.component_count; ++component) {
-        if (component) std::cout << ',';
-        std::cout << std::setprecision(17) << param.current_components[component];
-      }
-      std::cout << ']';
-    }
-    if (!param.choices.empty()) std::cout << ",\"choices\":\"" << escape(param.choices) << "\"";
-    if (!param.label.empty()) std::cout << ",\"label\":\"" << escape(param.label) << "\"";
-    if (!param.arbitrary_summary.empty())
-      std::cout << ",\"arbitrary_summary\":\"" << escape(param.arbitrary_summary) << "\"";
-    if (param.type == 0) std::cout << ",\"layer_default\":" << param.layer_default;
-    std::cout << '}';
+  aexcompat::worker_report::L2ReportContext c;
+  c.status = status ? status : ""; c.global_error = global_error; c.params_error = params_error;
+  c.setdown_error = setdown_error; c.reported_num_params = read<int32_t>(output, kOutNumParams);
+  c.register_ui_calls = g_register_ui_calls; c.invalid_custom_ui_registrations = g_invalid_custom_ui_registrations;
+  c.custom_ui_events = g_custom_ui_registration.events;
+  c.custom_ui_comp_size = {g_custom_ui_registration.comp_width, g_custom_ui_registration.comp_height};
+  c.custom_ui_layer_size = {g_custom_ui_registration.layer_width, g_custom_ui_registration.layer_height};
+  c.custom_ui_preview_size = {g_custom_ui_registration.preview_width, g_custom_ui_registration.preview_height};
+  c.out_flags = read<uint32_t>(output, kOutFlags); c.out_flags2 = read<uint32_t>(output, kOutFlags2);
+  c.update_params_ui_advertised = g_update_params_ui_advertised; c.query_dynamic_flags_advertised = g_query_dynamic_flags_advertised;
+  c.conditional_ui_selectors_dispatched = g_conditional_ui_selectors_dispatched; c.update_params_ui_error = g_update_params_ui_error;
+  c.query_dynamic_flags_error = g_query_dynamic_flags_error; c.update_param_ui_calls = g_update_param_ui_calls;
+  c.pf_get_current_state_calls = g_pf_get_current_state_calls; c.pf_are_states_identical_calls = g_pf_are_states_identical_calls;
+  c.suite_leases_balanced = suite_leases_balanced(); c.user_changed_param_requested = g_user_changed_param_requested;
+  c.user_changed_param_slot = g_user_changed_param_slot; c.user_changed_param_error = g_user_changed_param_error;
+  c.user_changed_parameters_json = requested_parameters_json(g_user_changed_parameters);
+  const auto* message = reinterpret_cast<const char*>(output.data() + kOutMessage);
+  c.return_message.assign(message, strnlen_s(message, 256)); c.about_message = about_message;
+  c.about_selector_dispatched = !g_skip_about; c.last_seh_selector = g_last_seh_selector; c.last_seh_error = g_last_seh_error;
+  c.lifecycle_errors = lifecycle_errors; c.lifecycle_data_null = lifecycle_data_null; c.module_audit_json = module_audit_json();
+  c.parameters.reserve(g_params.size());
+  for (const auto& p : g_params) {
+    const auto* name = reinterpret_cast<const char*>(p.raw.data() + kParamName);
+    c.parameters.push_back({p.index, p.disk_id, p.type, read<uint32_t>(p.raw, kParamUiFlags), read<int16_t>(p.raw, 8), read<int16_t>(p.raw, 10), read<uint32_t>(p.raw, kParamFlags), std::string(name, strnlen_s(name, kParamNameSize)), p.has_numeric, p.valid_min, p.valid_max, p.slider_min, p.slider_max, p.default_value, p.has_current, p.current_value, p.has_color, p.default_color, p.current_color, p.component_count, p.default_components, p.current_components, p.precision, p.choices, p.label, p.arbitrary_summary, p.layer_default});
   }
-  std::cout << "],\"selectors_executed\":true,\"render_performed\":false"
-            << ",\"module_audit\":" << module_audit_json() << "}\n";
+  std::cout << aexcompat::worker_report::serialize_l2_report(c);
 }
 
 bool verify_pf_color_settings_suite6() {
