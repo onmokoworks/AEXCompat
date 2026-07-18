@@ -55,6 +55,7 @@
 #include "strict_json.hpp"
 #include "suite_lease_tracker.hpp"
 #include "worker_selector_dispatch.hpp"
+#include "worker_world_safety.hpp"
 
 namespace {
 
@@ -95,6 +96,15 @@ using aexcompat::worker_runtime::module_audit_passed;
 using aexcompat::worker_runtime::module_audit_report;
 using aexcompat::worker_runtime::parse_runtime_module_authorization;
 using aexcompat::worker_runtime::selector_dispatch_telemetry;
+using aexcompat::world_safety::DispatchWorldFormat;
+using aexcompat::world_safety::DispatchWorldFormatScope;
+using aexcompat::world_safety::LocalEffectWorld;
+using aexcompat::world_safety::LocalRationalScale;
+using aexcompat::world_safety::OwnedWorldResolution;
+using aexcompat::world_safety::bounded_argb8_world;
+using aexcompat::world_safety::bounded_typed_world;
+using aexcompat::world_safety::kEffectWorldSize;
+using aexcompat::world_safety::resolve_registered_dispatch_world;
 #if defined(AEXCOMPAT_RENDER_WORKER) || defined(AEXCOMPAT_SMART_WORKER)
 using aexcompat::render_pixel_transport::argb_to_rgba8;
 using aexcompat::render_pixel_transport::argb_to_rgba_native;
@@ -5220,37 +5230,8 @@ constexpr int32_t kPixelFormatArgb32 = 1650946657;
 constexpr int32_t kPixelFormatArgb64 = 909206881;
 constexpr int32_t kPixelFormatArgb128 = 842229089;
 constexpr int32_t kPixelFormatGpuBgra128 = 1094992704;
-constexpr std::size_t kEffectWorldSize = 120;
 constexpr uint64_t kMaxWorldBytes = 256ULL * 1024 * 1024;
 constexpr std::size_t kMaxWorldCount = 64;
-
-struct LocalRect { int32_t left, top, right, bottom; };
-struct LocalRationalScale { int32_t num; uint32_t den; };
-struct LocalEffectWorld {
-  void* reserved0;
-  void* reserved1;
-  int32_t world_flags;
-  void* data;
-  int32_t rowbytes;
-  int32_t width;
-  int32_t height;
-  LocalRect extent_hint;
-  void* platform_ref;
-  int32_t reserved_long1;
-  void* reserved_long4;
-  LocalRationalScale pix_aspect_ratio;
-  void* reserved_long2;
-  int32_t origin_x;
-  int32_t origin_y;
-  int32_t reserved_long3;
-  int32_t dephault;
-};
-static_assert(sizeof(LocalEffectWorld) == kEffectWorldSize);
-static_assert(offsetof(LocalEffectWorld, world_flags) == 16);
-static_assert(offsetof(LocalEffectWorld, data) == 24);
-static_assert(offsetof(LocalEffectWorld, rowbytes) == 32);
-static_assert(offsetof(LocalEffectWorld, extent_hint) == 44);
-static_assert(offsetof(LocalEffectWorld, pix_aspect_ratio) == 88);
 
 struct OwnedWorld {
   void* pixels{};
@@ -5296,112 +5277,42 @@ constexpr std::size_t kMaxPlatformReferences = 64;
 constexpr std::size_t kMaxOwnedAegpWorlds = 64;
 constexpr uint64_t kMaxPlatformWorldBytes = 64ULL * 1024 * 1024;
 std::mutex g_world_mutex;
-struct DispatchWorldFormat {
-  const void* world{};
-  void* data{};
-  int32_t width{};
-  int32_t height{};
-  int32_t rowbytes{};
-  int32_t pixel_format{};
-  uint64_t generation{};
-};
-thread_local std::vector<std::vector<DispatchWorldFormat>> g_dispatch_world_formats;
-thread_local uint64_t g_dispatch_world_generation{};
 
-class DispatchWorldFormatScope {
- public:
-  DispatchWorldFormatScope() { g_dispatch_world_formats.emplace_back(); }
-  DispatchWorldFormatScope(const DispatchWorldFormatScope&) = delete;
-  DispatchWorldFormatScope& operator=(const DispatchWorldFormatScope&) = delete;
-  ~DispatchWorldFormatScope() { g_dispatch_world_formats.pop_back(); }
+OwnedWorldResolution resolve_owned_world(
+    const void* world, void* data, int32_t rowbytes, int32_t width,
+    int32_t height, DispatchWorldFormat& result) {
+  std::lock_guard<std::mutex> lock(g_world_mutex);
+  const auto exact = g_owned_worlds.find(const_cast<void*>(world));
+  if (exact != g_owned_worlds.end()) {
+    if (exact->second.pixels != data) return OwnedWorldResolution::rejected;
+    result = {world, data, width, height, rowbytes, exact->second.pixel_format, 0};
+    return OwnedWorldResolution::resolved;
+  }
+  const OwnedWorld* unique_owned = nullptr;
+  const void* unique_world = nullptr;
+  for (const auto& candidate : g_owned_worlds) {
+    if (candidate.second.pixels != data) continue;
+    const auto* candidate_bytes = static_cast<const std::byte*>(candidate.first);
+    int32_t candidate_rowbytes{}, candidate_width{}, candidate_height{};
+    std::memcpy(&candidate_rowbytes, candidate_bytes + 32, sizeof(candidate_rowbytes));
+    std::memcpy(&candidate_width, candidate_bytes + 36, sizeof(candidate_width));
+    std::memcpy(&candidate_height, candidate_bytes + 40, sizeof(candidate_height));
+    if (candidate_rowbytes != rowbytes || candidate_width != width ||
+        candidate_height != height) continue;
+    if (unique_owned) return OwnedWorldResolution::rejected;
+    unique_owned = &candidate.second;
+    unique_world = candidate.first;
+  }
+  if (!unique_owned) return OwnedWorldResolution::not_owned;
+  result = {unique_world, data, width, height, rowbytes,
+            unique_owned->pixel_format, 0};
+  return OwnedWorldResolution::resolved;
+}
 
-  bool register_world(const void* world, int32_t pixel_format) {
-    if (!world || g_dispatch_world_formats.empty()) return false;
-    const auto* bytes = static_cast<const std::byte*>(world);
-    DispatchWorldFormat entry{};
-    entry.world = world;
-    entry.pixel_format = pixel_format;
-    entry.generation = ++g_dispatch_world_generation;
-    std::memcpy(&entry.data, bytes + 24, sizeof(entry.data));
-    std::memcpy(&entry.rowbytes, bytes + 32, sizeof(entry.rowbytes));
-    std::memcpy(&entry.width, bytes + 36, sizeof(entry.width));
-    std::memcpy(&entry.height, bytes + 40, sizeof(entry.height));
-    if (!entry.data || entry.width <= 0 || entry.height <= 0 || entry.rowbytes <= 0)
-      return false;
-    auto& entries = g_dispatch_world_formats.back();
-    entries.erase(std::remove_if(entries.begin(), entries.end(),
-                                 [&](const auto& old) { return old.world == world; }),
-                  entries.end());
-    entries.push_back(entry);
-    return true;
-  }
-};
-
-bool resolve_dispatch_world_format(const void* world, DispatchWorldFormat& result) {
-  if (!world) return false;
-  const auto* bytes = static_cast<const std::byte*>(world);
-  void* data{};
-  int32_t rowbytes{}, width{}, height{};
-  std::memcpy(&data, bytes + 24, sizeof(data));
-  std::memcpy(&rowbytes, bytes + 32, sizeof(rowbytes));
-  std::memcpy(&width, bytes + 36, sizeof(width));
-  std::memcpy(&height, bytes + 40, sizeof(height));
-  {
-    std::lock_guard<std::mutex> lock(g_world_mutex);
-    const auto exact = g_owned_worlds.find(const_cast<void*>(world));
-    if (exact != g_owned_worlds.end()) {
-      if (exact->second.pixels != data) return false;
-      result = {world, data, width, height, rowbytes, exact->second.pixel_format,
-                g_dispatch_world_generation};
-      return true;
-    }
-    const OwnedWorld* unique_owned = nullptr;
-    const void* unique_world = nullptr;
-    for (const auto& candidate : g_owned_worlds) {
-      if (candidate.second.pixels != data) continue;
-      const auto* candidate_bytes = static_cast<const std::byte*>(candidate.first);
-      int32_t candidate_rowbytes{}, candidate_width{}, candidate_height{};
-      std::memcpy(&candidate_rowbytes, candidate_bytes + 32, sizeof(candidate_rowbytes));
-      std::memcpy(&candidate_width, candidate_bytes + 36, sizeof(candidate_width));
-      std::memcpy(&candidate_height, candidate_bytes + 40, sizeof(candidate_height));
-      if (candidate_rowbytes != rowbytes || candidate_width != width ||
-          candidate_height != height) continue;
-      if (unique_owned) return false;
-      unique_owned = &candidate.second;
-      unique_world = candidate.first;
-    }
-    if (unique_owned) {
-      result = {unique_world, data, width, height, rowbytes, unique_owned->pixel_format,
-                g_dispatch_world_generation};
-      return true;
-    }
-  }
-  for (auto scope = g_dispatch_world_formats.rbegin(); scope != g_dispatch_world_formats.rend();
-       ++scope) {
-    for (auto entry = scope->rbegin(); entry != scope->rend(); ++entry) {
-      if (entry->world == world) {
-        if (entry->data != data || entry->rowbytes != rowbytes || entry->width != width ||
-            entry->height != height) return false;
-        result = *entry;
-        return true;
-      }
-    }
-  }
-  const DispatchWorldFormat* unique = nullptr;
-  for (auto scope = g_dispatch_world_formats.rbegin(); scope != g_dispatch_world_formats.rend();
-       ++scope) {
-    for (const auto& entry : *scope) {
-      if (entry.data == data && entry.rowbytes == rowbytes && entry.width == width &&
-          entry.height == height) {
-        if (unique && (unique->world != entry.world ||
-                       unique->pixel_format != entry.pixel_format)) return false;
-        unique = &entry;
-      }
-    }
-  }
-  if (!unique) return false;
-  result = *unique;
-  return true;
+bool resolve_dispatch_world_format(const void* world,
+                                   DispatchWorldFormat& result) {
+  return aexcompat::world_safety::resolve_dispatch_world_format(
+      world, &resolve_owned_world, result);
 }
 uint32_t g_worlds_created{};
 uint32_t g_worlds_disposed{};
@@ -5641,27 +5552,7 @@ bool active_adv_item_context(void* in_data) {
 }
 
 bool active_adv_item_world(const void* world, DispatchWorldFormat& result) {
-  if (!world) return false;
-  for (auto scope = g_dispatch_world_formats.rbegin();
-       scope != g_dispatch_world_formats.rend(); ++scope) {
-    const auto match = std::find_if(scope->begin(), scope->end(),
-                                    [&](const auto& entry) { return entry.world == world; });
-    if (match != scope->end()) {
-      const auto* bytes = static_cast<const std::byte*>(world);
-      void* data{};
-      int32_t rowbytes{}, width{}, height{};
-      std::memcpy(&data, bytes + 24, sizeof(data));
-      std::memcpy(&rowbytes, bytes + 32, sizeof(rowbytes));
-      std::memcpy(&width, bytes + 36, sizeof(width));
-      std::memcpy(&height, bytes + 40, sizeof(height));
-      if (data != match->data || rowbytes != match->rowbytes ||
-          width != match->width || height != match->height)
-        return false;
-      result = *match;
-      return true;
-    }
-  }
-  return false;
+  return resolve_registered_dispatch_world(world, result);
 }
 
 int32_t __cdecl adv_item_move_time_step(void* in_data, void* world,
@@ -13462,28 +13353,6 @@ int32_t __cdecl get_audio_data(void* effect_ref, void* audio, void** data,
   if (format) *format = handle_it->format;
   ++g_audio_get_data_calls;
   return 0;
-}
-
-bool bounded_typed_world(void* world, int32_t pixel_bytes, unsigned char*& pixels,
-                         int32_t& rowbytes, int32_t& width, int32_t& height) {
-  if (!world) return false;
-  auto* bytes = static_cast<std::byte*>(world);
-  std::memcpy(&pixels, bytes + 24, sizeof(pixels));
-  std::memcpy(&rowbytes, bytes + 32, sizeof(rowbytes));
-  std::memcpy(&width, bytes + 36, sizeof(width));
-  std::memcpy(&height, bytes + 40, sizeof(height));
-  int32_t flags{};
-  std::memcpy(&flags, bytes + 16, sizeof(flags));
-  const bool depth_matches = pixel_bytes == 4 ? (flags & 1) == 0 : (flags & 1) != 0;
-  return pixels && (pixel_bytes == 4 || pixel_bytes == 8 || pixel_bytes == 16) &&
-      width > 0 && height > 0 && width <= 4096 && height <= 4096 &&
-      static_cast<int64_t>(width) * height <= 16'777'216 &&
-      rowbytes >= width * pixel_bytes && rowbytes <= 4096 * 16 && depth_matches;
-}
-
-bool bounded_argb8_world(void* world, unsigned char*& pixels, int32_t& rowbytes,
-                         int32_t& width, int32_t& height) {
-  return bounded_typed_world(world, 4, pixels, rowbytes, width, height);
 }
 
 constexpr int32_t kPfErrBadCallbackParam = 516;

@@ -4,6 +4,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "minihost" / "src" / "l2_main.cpp"
+WORLD_SAFETY_SOURCE = ROOT / "minihost" / "src" / "worker_world_safety.cpp"
 
 
 class MinihostL2SourceTests(unittest.TestCase):
@@ -164,7 +165,7 @@ class MinihostL2SourceTests(unittest.TestCase):
             self.assertIn(marker, text)
 
     def test_legacy_copy_and_iterate_callbacks_are_bounded_argb8(self):
-        text = SOURCE.read_text(encoding="utf-8")
+        text = SOURCE.read_text(encoding="utf-8") + WORLD_SAFETY_SOURCE.read_text(encoding="utf-8")
         for marker in (
             "kUtilsCopy = 64",
             "kUtilsIterate = 88",
@@ -209,7 +210,7 @@ class MinihostL2SourceTests(unittest.TestCase):
             self.assertIn(marker, text)
 
     def test_smart_render_exposes_bounded_deep_iterate_suites(self):
-        text = SOURCE.read_text(encoding="utf-8")
+        text = SOURCE.read_text(encoding="utf-8") + WORLD_SAFETY_SOURCE.read_text(encoding="utf-8")
         for marker in (
             'std::strcmp(name, "PF iterate16 Suite") == 0',
             'std::strcmp(name, "PF iterateFloat Suite") == 0',

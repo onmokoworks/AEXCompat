@@ -25,7 +25,8 @@ set(AEXCOMPAT_L2_WORKER_SOURCES
     src/runtime_module_audit.cpp
     src/strict_json.cpp
     src/suite_lease_tracker.cpp
-    src/worker_selector_dispatch.cpp)
+    src/worker_selector_dispatch.cpp
+    src/worker_world_safety.cpp)
 
 add_executable(aex_l2_worker ${AEXCOMPAT_L2_WORKER_SOURCES})
 target_compile_features(aex_l2_worker PRIVATE cxx_std_17)
