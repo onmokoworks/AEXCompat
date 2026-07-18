@@ -7,11 +7,11 @@
       "symbol": "apply_gamma",
       "module_rva": "0x1c40",
       "arg_structs": [
-        {"index": 0, "struct": "in"},
-        {"index": 1, "struct": "out"}
+        {"index": 0, "struct": "in", "extent": 400},
+        {"index": 1, "struct": "out", "extent": 200}
       ],
       "scalar_args": [
-        {"index": 2, "name": "mode", "as": "int", "phase": "enter"}
+        {"index": 2, "name": "mode", "as": "int", "width": 4, "phase": "enter"}
       ],
       "reads": [
         {"name": "in.width", "as": "int", "phase": "enter"},

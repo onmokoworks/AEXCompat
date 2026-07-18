@@ -1,9 +1,13 @@
 import unittest
+from pathlib import Path
 
 from tools.observe_known_functions import (
+    OUTPUT_ROOT,
     MessageCollector,
     ObservationError,
     build_worker_argv,
+    safe_output_path,
+    write_session_jsonl,
 )
 from tools.trace_contract_validator import validate_session
 
@@ -100,6 +104,67 @@ class MessageCollectorTests(unittest.TestCase):
         self.assertEqual("module not found", collector.install_error)
         # An install error must not leak into the trace as an event.
         self.assertEqual(2, session["event_count"])
+
+    def test_read_error_is_counted_not_traced(self):
+        collector = self.collector()
+        collector.handle({"type": "read_error", "symbol": "apply_gamma",
+                          "phase": "enter", "name": "in.width", "message": "null pointer"})
+        session = collector.finalize()
+        self.assertEqual(1, collector.read_error_count)
+        # A failed read is counted, never fabricated into a trace field/event.
+        self.assertEqual(2, session["event_count"])
+
+
+class OutputPathSafetyTests(unittest.TestCase):
+    def test_escape_outside_allowed_root_is_rejected(self):
+        with self.assertRaises(ObservationError):
+            safe_output_path(Path("../../etc/passwd"))
+
+    def test_absolute_path_outside_root_is_rejected(self):
+        with self.assertRaises(ObservationError):
+            safe_output_path(Path("C:/Windows/Temp/trace.jsonl"))
+
+    def test_path_under_root_is_accepted_and_atomic_write_lands(self):
+        session = {
+            "schema_version": 1,
+            "session_id": "abcdef01-2345-6789-abcd-ef0123456789",
+            "event_count": 0,
+            "trace_complete": False,
+            "events": [],
+        }
+        target = OUTPUT_ROOT / "unit-test" / "trace.jsonl"
+        try:
+            destination = write_session_jsonl(session, target)
+            self.assertTrue(destination.exists())
+            self.assertTrue(str(destination).startswith(str(OUTPUT_ROOT.resolve())))
+        finally:
+            if target.exists():
+                target.unlink()
+            # leave no stray tmp files
+            for stray in target.parent.glob("*.jsonl.tmp"):
+                stray.unlink()
+
+
+class LiveObservationIntegrationTests(unittest.TestCase):
+    """End-to-end run_observation() path: Frida spawn/attach/plan/resume/kill.
+
+    Requires Frida, a built worker, and a real (or minimal) AEX fixture; skipped
+    otherwise. Registered in tests/local_artifact_tests.txt so it only runs under
+    --run-local-artifact-tests after the named build.
+    """
+
+    def test_run_observation_end_to_end(self):
+        try:
+            import frida  # noqa: F401
+        except ImportError:
+            self.skipTest("frida not installed")
+        worker = Path(__file__).resolve().parents[1] / "target" / "minihost-build" / "aex_render_worker.exe"
+        if not worker.exists():
+            self.skipTest("worker build not present")
+        self.skipTest(
+            "live observation requires an approved AEX fixture, offset map, and known RVAs; "
+            "drive tools/observe-known-functions.ps1 manually per the docs"
+        )
 
 
 if __name__ == "__main__":

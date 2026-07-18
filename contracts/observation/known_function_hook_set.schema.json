@@ -28,10 +28,12 @@
           "type": "array",
           "items": {
             "type": "object",
-            "required": ["index", "struct"],
+            "required": ["index", "struct", "extent"],
             "properties": {
-              "index": {"type": "integer", "minimum": 0},
-              "struct": {"type": "string", "minLength": 1, "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"}
+              "index": {"type": "integer", "minimum": 0, "maximum": 32},
+              "struct": {"type": "string", "minLength": 1, "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"},
+              "extent": {"type": "integer", "minimum": 1, "maximum": 1048576,
+                         "description": "the struct's declared byte size from abi-layout-probe; bounds every read from this pointer"}
             },
             "additionalProperties": false
           }
@@ -40,11 +42,12 @@
           "type": "array",
           "items": {
             "type": "object",
-            "required": ["index", "name", "as"],
+            "required": ["index", "name", "as", "width"],
             "properties": {
-              "index": {"type": "integer", "minimum": 0},
+              "index": {"type": "integer", "minimum": 0, "maximum": 32},
               "name": {"type": "string", "minLength": 1, "not": {"pattern": "(^|[^A-Za-z])[A-Za-z]:\\\\"}},
               "as": {"enum": ["int", "uint", "bool"]},
+              "width": {"enum": [4, 8], "description": "integer register width in bytes; pointers are not representable"},
               "phase": {"enum": ["enter", "leave"]}
             },
             "additionalProperties": false

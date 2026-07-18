@@ -6,12 +6,13 @@ full trade-off write-up): this launcher *spawns* ``aex_render_worker.exe`` throu
 its own documented render CLI (``--render-image`` and friends) with Frida, injects
 the resolved read plan while the process is suspended, then resumes. Frida owns the
 PID, so hooks are in place before any render code runs and every invocation is
-captured. This deliberately does not go through the broker's Job Object / restricted
-token / sealed load tree: that hardened launch path is for evidence-tier dispatch,
-and known-function observation is an explicitly non-evidence reverse-engineering
-path. The worker still performs its own plug-in hash and admission checks. The two
-rejected alternatives (process-name enumeration; a broker-core PID handoff with a
-resume gate) are documented in the same file.
+captured. This does not go through the broker's evidence-tier restricted token or
+sealed load tree, but it still enforces the crash-containment floor: the spawned
+worker is assigned to a Windows Job Object with kill-on-close and a process-memory
+cap, so the whole process tree (including any descendant the plug-in spawns) is
+terminated on exit/timeout. The worker also performs its own plug-in hash and
+admission checks. The rejected alternatives (process-name enumeration; a broker-core
+PID handoff with a resume gate) are documented in the same file.
 
 The message-to-event pipeline and spawn-argv assembly here are importable and unit
 tested without Frida; only :func:`run_observation` imports ``frida`` (lazily), so the
@@ -22,7 +23,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
+import tempfile
 import threading
 import uuid
 from pathlib import Path
@@ -34,12 +37,62 @@ except ModuleNotFoundError:  # invoked as a script from tools/
     from known_function_observation import build_event, resolve_spec, session_boundary_event
 
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_WORKER = "target/minihost-build/aex_render_worker.exe"
+# Observation traces may only be written under this root, canonicalised, with no
+# reparse point on the path - so a -Out race cannot redirect the write elsewhere.
+OUTPUT_ROOT = REPO_ROOT / "target" / "known-function-observation"
 DEFAULT_TIMEOUT_SECONDS = 30
+# Process-memory cap for the isolated worker tree (bytes).
+WORKER_MEMORY_CAP = 2 * 1024 * 1024 * 1024
 
 
 class ObservationError(RuntimeError):
     pass
+
+
+def safe_output_path(out_path: Path) -> Path:
+    """Resolve ``out_path`` under OUTPUT_ROOT, rejecting escapes and reparse points.
+
+    Guards against a path race / symlink redirect: the destination must resolve
+    inside the allowed root and no existing component of the path may be a
+    symlink or reparse point.
+    """
+
+    root = OUTPUT_ROOT.resolve()
+    root.mkdir(parents=True, exist_ok=True)
+    candidate = out_path if out_path.is_absolute() else (REPO_ROOT / out_path)
+    resolved = candidate.resolve()
+    if not (resolved == root or root in resolved.parents):
+        raise ObservationError(f"output must stay under {OUTPUT_ROOT}")
+    # Reject a reparse point / symlink anywhere on the existing prefix.
+    probe = resolved
+    while probe != root and probe != probe.parent:
+        if probe.exists() and probe.is_symlink():
+            raise ObservationError(f"output path component is a symlink: {probe.name}")
+        probe = probe.parent
+    resolved.parent.mkdir(parents=True, exist_ok=True)
+    return resolved
+
+
+def write_session_jsonl(session: dict[str, Any], out_path: Path) -> Path:
+    """Atomically write the trace under the allowed root (temp + os.replace)."""
+
+    destination = safe_output_path(out_path)
+    lines = [json.dumps(event, ensure_ascii=False) for event in session["events"]]
+    body = "\n".join(lines) + "\n"
+    fd, tmp_name = tempfile.mkstemp(dir=str(destination.parent), suffix=".jsonl.tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(body)
+        os.replace(tmp_name, destination)  # atomic; does not follow a target symlink
+    except BaseException:
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+        raise
+    return destination
 
 
 def build_worker_argv(worker_program: str, render_args: list[str]) -> list[str]:
@@ -71,6 +124,7 @@ class MessageCollector:
         self.install_error: str | None = None
         self.installed_hook_count: int | None = None
         self.ready: bool = False
+        self.read_error_count: int = 0
         self._events: list[dict[str, Any]] = [
             session_boundary_event(
                 "session_start",
@@ -100,6 +154,10 @@ class MessageCollector:
             self.installed_hook_count = payload.get("hook_count")
         elif kind == "install_error":
             self.install_error = str(payload.get("message"))
+        elif kind == "read_error":
+            # A field read failed (null/out-of-range pointer); the field is
+            # omitted from the trace and counted, never fabricated.
+            self.read_error_count += 1
         # Only known_function reaches the trace; control messages never do.
 
     def finalize(self, *, completed: bool = True) -> dict[str, Any]:
@@ -130,16 +188,11 @@ class MessageCollector:
         }
 
 
-def write_session_jsonl(session: dict[str, Any], out_path: Path) -> None:
-    lines = [json.dumps(event, ensure_ascii=False) for event in session["events"]]
-    out_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-
-
 def run_observation(
     *,
     spec_path: Path,
     offset_map_path: Path,
-    module_file: str,
+    module_path: str,
     render_args: list[str],
     out_path: Path,
     worker_program: str = DEFAULT_WORKER,
@@ -149,8 +202,10 @@ def run_observation(
 ) -> dict[str, Any]:
     """Spawn the worker under Frida, inject the plan, and write the trace.
 
-    Imports ``frida`` lazily so the module stays importable (and unit testable)
-    without the observation runtime.
+    ``module_path`` is the expected canonical path of the plug-in the worker
+    loads; the JS binds hook installation to that exact module (not just its
+    basename). Imports ``frida`` lazily so the module stays importable (and unit
+    testable) without the observation runtime.
     """
 
     try:
@@ -163,6 +218,8 @@ def run_observation(
 
     spec = json.loads(spec_path.read_text(encoding="utf-8"))
     plan = resolve_spec(spec, offset_map_path)
+    expected_hook_count = len(plan["hooks"])
+    module_path = str(Path(module_path).resolve())
     script_source = (Path(__file__).parent / "frida" / "known_function_probe.js").read_text(encoding="utf-8")
 
     collector = MessageCollector(
@@ -171,52 +228,157 @@ def run_observation(
         module_label=plan["module_label"],
         session_id=str(uuid.uuid4()),
     )
-    # Set once the JS acknowledges hook installation (or reports a failure), so we
-    # never resume the worker before the hooks are actually in place.
-    installed = threading.Event()
+    # Set once the JS acknowledges the loader watch is armed (or reports a
+    # failure), so we never resume before it is safe.
+    ready = threading.Event()
 
     def on_message(message, _data):  # pragma: no cover - requires frida runtime
         if message.get("type") == "send":
             payload = message.get("payload") or {}
             collector.handle(payload)
-            # 'ready' means the loader watch is armed (or hooks already attached),
-            # so it is safe to resume; 'install_error' means it never will be.
             if payload.get("type") in ("ready", "install_error"):
-                installed.set()
+                ready.set()
         elif message.get("type") == "error":
             collector.install_error = message.get("stack") or message.get("description")
-            installed.set()
+            ready.set()
 
     device = frida.get_local_device()
     argv = build_worker_argv(worker_program, render_args)
     pid = device.spawn(argv)
     completed = False
-    try:  # pragma: no cover - requires frida runtime + worker build
-        session = device.attach(pid)
-        script = session.create_script(script_source)
-        script.on("message", on_message)
-        script.load()
-        # The JS installs hooks from an async recv('plan') handler, so wait for the
-        # install acknowledgement before resuming — otherwise the worker could reach
-        # the observed function before any hook exists and we would miss the calls
-        # this path is meant to capture. send() itself is asynchronous and never
-        # blocks the render, so the 30s render window is unaffected.
-        script.post({"type": "plan", "plan": plan, "module_file": module_file})
-        if not installed.wait(timeout=min(timeout_seconds, DEFAULT_TIMEOUT_SECONDS)):
-            raise ObservationError("Frida hooks were not acknowledged installed before resume")
-        if collector.install_error:
-            raise ObservationError(f"Frida hook install failed: {collector.install_error}")
-        device.resume(pid)
-        completed = _await_exit(frida, device, pid, timeout_seconds)
-    finally:  # pragma: no cover - requires frida runtime
+    with _JobIsolation(pid):  # pragma: no cover - requires frida runtime + worker
         try:
-            device.kill(pid)
-        except frida.ProcessNotFoundError:
-            pass
+            session = device.attach(pid)
+            script = session.create_script(script_source)
+            script.on("message", on_message)
+            script.load()
+            # The JS installs hooks from an async recv('plan') handler, so wait for
+            # the 'ready' acknowledgement (loader watch armed) before resuming -
+            # otherwise the worker could reach the observed function before any hook
+            # exists. send() is asynchronous and never blocks the render.
+            script.post({"type": "plan", "plan": plan, "module_path": module_path})
+            if not ready.wait(timeout=min(timeout_seconds, DEFAULT_TIMEOUT_SECONDS)):
+                raise ObservationError("Frida loader watch was not acknowledged before resume")
+            if collector.install_error:
+                raise ObservationError(f"Frida hook install failed: {collector.install_error}")
+            device.resume(pid)
+            exited = _await_exit(frida, device, pid, timeout_seconds)
+            # A trace is complete only if the worker exited AND the expected hooks
+            # actually attached. If the module never loaded (module_path wrong, or a
+            # loader path we do not watch), hooks never install and an empty trace
+            # must not be reported as complete.
+            completed = exited and collector.installed_hook_count == expected_hook_count
+        finally:
+            try:
+                device.kill(pid)
+            except frida.ProcessNotFoundError:
+                pass
 
-    result = collector.finalize(completed=completed)
-    write_session_jsonl(result, out_path)
+    session = collector.finalize(completed=completed)
+    destination = write_session_jsonl(session, out_path)
+    # The returned result carries run metadata alongside the schema-clean session
+    # (the session dict itself stays validatable; metadata lives on the result).
+    result = dict(session)
+    result["output_path"] = str(destination)
+    result["read_error_count"] = collector.read_error_count
     return result
+
+
+class _JobIsolation:  # pragma: no cover - Windows runtime path
+    """Assign a spawned PID to a Job Object with kill-on-close and a memory cap.
+
+    This gives the observation path a crash-containment floor equivalent to the
+    broker default tier: the whole process tree (including any descendant the
+    plug-in spawns) is terminated when the job handle closes, and the tree is
+    bounded by a process-memory cap. It is not a confidentiality sandbox and does
+    not apply a restricted token (Frida spawn cannot); use secure_launch for the
+    evidence tier. A no-op off Windows.
+    """
+
+    def __init__(self, pid: int):
+        self.pid = pid
+        self._job = None
+        self._kernel32 = None
+
+    def __enter__(self):
+        if sys.platform != "win32":
+            return self
+        import ctypes
+        from ctypes import wintypes
+
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        self._kernel32 = k32
+        JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x2000
+        JOB_OBJECT_LIMIT_PROCESS_MEMORY = 0x0100
+        JobObjectExtendedLimitInformation = 9
+        PROCESS_SET_QUOTA = 0x0100
+        PROCESS_TERMINATE = 0x0001
+
+        job = k32.CreateJobObjectW(None, None)
+        if not job:
+            raise ObservationError(f"CreateJobObject failed: {ctypes.get_last_error()}")
+
+        class JOBOBJECT_BASIC_LIMIT_INFORMATION(ctypes.Structure):
+            _fields_ = [
+                ("PerProcessUserTimeLimit", ctypes.c_int64),
+                ("PerJobUserTimeLimit", ctypes.c_int64),
+                ("LimitFlags", wintypes.DWORD),
+                ("MinimumWorkingSetSize", ctypes.c_size_t),
+                ("MaximumWorkingSetSize", ctypes.c_size_t),
+                ("ActiveProcessLimit", wintypes.DWORD),
+                ("Affinity", ctypes.c_size_t),
+                ("PriorityClass", wintypes.DWORD),
+                ("SchedulingClass", wintypes.DWORD),
+            ]
+
+        class IO_COUNTERS(ctypes.Structure):
+            _fields_ = [(n, ctypes.c_uint64) for n in
+                        ("ReadOperationCount", "WriteOperationCount", "OtherOperationCount",
+                         "ReadTransferCount", "WriteTransferCount", "OtherTransferCount")]
+
+        class JOBOBJECT_EXTENDED_LIMIT_INFORMATION(ctypes.Structure):
+            _fields_ = [
+                ("BasicLimitInformation", JOBOBJECT_BASIC_LIMIT_INFORMATION),
+                ("IoInfo", IO_COUNTERS),
+                ("ProcessMemoryLimit", ctypes.c_size_t),
+                ("JobMemoryLimit", ctypes.c_size_t),
+                ("PeakProcessMemoryUsed", ctypes.c_size_t),
+                ("PeakJobMemoryUsed", ctypes.c_size_t),
+            ]
+
+        info = JOBOBJECT_EXTENDED_LIMIT_INFORMATION()
+        info.BasicLimitInformation.LimitFlags = (
+            JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_PROCESS_MEMORY
+        )
+        info.ProcessMemoryLimit = WORKER_MEMORY_CAP
+        if not k32.SetInformationJobObject(
+            job, JobObjectExtendedLimitInformation, ctypes.byref(info), ctypes.sizeof(info)
+        ):
+            err = ctypes.get_last_error()
+            k32.CloseHandle(job)
+            raise ObservationError(f"SetInformationJobObject failed: {err}")
+
+        handle = k32.OpenProcess(PROCESS_SET_QUOTA | PROCESS_TERMINATE, False, self.pid)
+        if not handle:
+            err = ctypes.get_last_error()
+            k32.CloseHandle(job)
+            raise ObservationError(f"OpenProcess({self.pid}) failed: {err}")
+        try:
+            if not k32.AssignProcessToJobObject(job, handle):
+                err = ctypes.get_last_error()
+                k32.CloseHandle(job)
+                raise ObservationError(f"AssignProcessToJobObject failed: {err}")
+        finally:
+            k32.CloseHandle(handle)
+        self._job = job
+        return self
+
+    def __exit__(self, *exc):
+        # Closing the job handle triggers kill-on-close, terminating the tree.
+        if self._job and self._kernel32:
+            self._kernel32.CloseHandle(self._job)
+            self._job = None
+        return False
 
 
 def _await_exit(frida_module, device, pid, timeout_seconds) -> bool:  # pragma: no cover - runtime path
@@ -238,8 +400,8 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--spec", required=True, type=Path)
     parser.add_argument("--offset-map", required=True, type=Path)
-    parser.add_argument("--out", required=True, type=Path)
-    parser.add_argument("--module-file", required=True, help="on-disk basename of the plug-in module to locate")
+    parser.add_argument("--out", required=True, type=Path, help="trace destination (must resolve under target/known-function-observation)")
+    parser.add_argument("--module-path", required=True, help="canonical path of the plug-in module the worker loads; hooks bind to this exact module")
     parser.add_argument("--plugin-label", required=True, help="redacted filename stem for the trace")
     parser.add_argument("--worker", default=DEFAULT_WORKER)
     parser.add_argument("--timeout-seconds", type=int, default=DEFAULT_TIMEOUT_SECONDS)
@@ -253,7 +415,7 @@ def main(argv: list[str] | None = None) -> int:
         result = run_observation(
             spec_path=args.spec,
             offset_map_path=args.offset_map,
-            module_file=args.module_file,
+            module_path=args.module_path,
             render_args=render_args,
             out_path=args.out,
             worker_program=args.worker,
@@ -264,10 +426,15 @@ def main(argv: list[str] | None = None) -> int:
         print(f"observe_known_functions: {type(exc).__name__}: {exc}", file=sys.stderr)
         return 2
     complete = result["trace_complete"]
-    print(json.dumps({"observed": True, "event_count": result["event_count"], "complete": complete}))
+    print(json.dumps({
+        "observed": True,
+        "event_count": result["event_count"],
+        "complete": complete,
+        "read_errors": result.get("read_error_count", 0),
+    }))
     if not complete:
-        # The worker did not exit within the timeout; the trace is truncated.
-        print("observe_known_functions: worker timed out; trace is incomplete", file=sys.stderr)
+        # The worker timed out or the hooks never attached; the trace is truncated.
+        print("observe_known_functions: incomplete observation (timeout or hooks not installed)", file=sys.stderr)
         return 3
     return 0
 

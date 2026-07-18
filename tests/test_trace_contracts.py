@@ -145,6 +145,17 @@ class TraceContractTests(unittest.TestCase):
             validate_event(enter),
         )
 
+    def test_known_function_rejects_non_finite_values(self):
+        enter = copy.deepcopy(load_native_observation_events()[1])
+        enter["known_function"]["fields"][0]["value"] = float("nan")
+        self.assertTrue(validate_event(enter))
+        leave = copy.deepcopy(load_native_observation_events()[2])
+        leave["known_function"]["return_value"] = float("inf")
+        self.assertIn(
+            "known_function.return_value must be a numeric scalar",
+            validate_event(leave),
+        )
+
     def test_known_function_return_value_rejects_nonscalar(self):
         leave = copy.deepcopy(load_native_observation_events()[2])
         leave["known_function"]["return_value"] = "noErr"

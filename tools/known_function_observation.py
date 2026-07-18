@@ -37,6 +37,14 @@ MODULE_RVA_LIMIT = 0x1_0000_0000
 INT_SIZES = {1, 2, 4, 8}
 FLOAT_SIZES = {4, 8}
 BOOL_SIZES = {1, 2, 4, 8}
+REGISTER_WIDTHS = {4, 8}
+# Bound the declarable argument slot. Win64 passes the first 4 integer/pointer
+# args in registers and the rest on the stack; Frida's args[] exposes both, but
+# we cap the index so a spec cannot name an implausible slot and read garbage.
+MAX_ARG_SLOT = 32
+# A struct extent (bytes) is bounded well under any pointer magnitude; it comes
+# from the abi-layout-probe *_size fields.
+MAX_STRUCT_EXTENT = 0x10_0000
 PHASES = ("enter", "leave")
 
 
@@ -83,8 +91,17 @@ def load_offset_map(source: Any) -> dict[str, dict[str, int]]:
     for name, entry in fields.items():
         if not isinstance(entry, dict) or "offset" not in entry or "size" not in entry:
             raise ResolutionError(f"offset map field {name!r} must have offset and size")
-        resolved[name] = {"offset": int(entry["offset"]), "size": int(entry["size"])}
+        offset, size = entry["offset"], entry["size"]
+        if not _is_plain_int(offset) or offset < 0:
+            raise ResolutionError(f"offset map field {name!r} has a non-negative-integer offset requirement")
+        if not _is_plain_int(size) or size <= 0:
+            raise ResolutionError(f"offset map field {name!r} has a positive-integer size requirement")
+        resolved[name] = {"offset": int(offset), "size": int(size)}
     return resolved
+
+
+def _is_plain_int(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
 
 
 def resolve_hook(hook: dict[str, Any], offset_map: dict[str, dict[str, int]]) -> dict[str, Any]:
@@ -101,9 +118,21 @@ def resolve_hook(hook: dict[str, Any], offset_map: dict[str, dict[str, int]]) ->
     module_rva = hook.get("module_rva")
     rva_int = _rva_to_int(module_rva)
 
-    struct_args: dict[str, int] = {}
+    # struct namespace -> (arg_index, extent bytes). The extent bounds every read
+    # from that pointer so a bad offset cannot walk outside the struct.
+    struct_args: dict[str, tuple[int, int]] = {}
     for entry in hook.get("arg_structs", []):
-        struct_args[entry["struct"]] = int(entry["index"])
+        index = entry["index"]
+        extent = entry.get("extent")
+        struct = entry["struct"]
+        if not _is_plain_int(index) or not 0 <= index <= MAX_ARG_SLOT:
+            raise ResolutionError(f"{symbol}: arg_structs index for {struct!r} must be 0..{MAX_ARG_SLOT}")
+        if not _is_plain_int(extent) or not 0 < extent <= MAX_STRUCT_EXTENT:
+            raise ResolutionError(
+                f"{symbol}: arg_structs {struct!r} needs an extent in 1..{MAX_STRUCT_EXTENT} "
+                "(the struct's declared byte size from abi-layout-probe)"
+            )
+        struct_args[struct] = (index, extent)
 
     plan: dict[str, list[dict[str, Any]]] = {"enter": [], "leave": []}
 
@@ -118,15 +147,24 @@ def resolve_hook(hook: dict[str, Any], offset_map: dict[str, dict[str, int]]) ->
             )
         if name not in offset_map:
             raise ResolutionError(f"{symbol}: read {name!r} is absent from the offset map")
+        arg_index, extent = struct_args[prefix]
         offset = offset_map[name]["offset"]
         size = offset_map[name]["size"]
+        # load_offset_map already guarantees offset >= 0 and size > 0; bound the
+        # field within the declared struct extent so a read can never leave it.
+        if offset + size > extent:
+            raise ResolutionError(
+                f"{symbol}: read {name!r} (offset {offset}, size {size}) exceeds "
+                f"struct {prefix!r} extent {extent}"
+            )
         _check_interpret(interpret, size, f"{symbol} read {name}")
         plan[phase].append({
             "name": name,
             "source": "struct",
-            "arg_index": struct_args[prefix],
+            "arg_index": arg_index,
             "offset": offset,
             "size": size,
+            "extent": extent,
             "interpret": interpret,
         })
 
@@ -134,6 +172,8 @@ def resolve_hook(hook: dict[str, Any], offset_map: dict[str, dict[str, int]]) ->
         name = entry["name"]
         interpret = entry["as"]
         phase = entry.get("phase", "enter")
+        index = entry["index"]
+        width = entry.get("width")
         if interpret == "float":
             # x64 passes float/double in XMM registers, not the integer arg
             # slots, so a float scalar arg cannot be read from args[index].
@@ -141,10 +181,17 @@ def resolve_hook(hook: dict[str, Any], offset_map: dict[str, dict[str, int]]) ->
                 f"{symbol}: scalar arg {name!r} is float; float args live in XMM, "
                 "read the value through a struct field instead"
             )
+        if not _is_plain_int(index) or not 0 <= index <= MAX_ARG_SLOT:
+            raise ResolutionError(f"{symbol}: scalar arg {name!r} index must be 0..{MAX_ARG_SLOT}")
+        if width not in REGISTER_WIDTHS:
+            raise ResolutionError(
+                f"{symbol}: scalar arg {name!r} needs an explicit width in {sorted(REGISTER_WIDTHS)}"
+            )
         plan[phase].append({
             "name": name,
             "source": "register",
-            "arg_index": int(entry["index"]),
+            "arg_index": index,
+            "width": width,
             "interpret": interpret,
         })
 

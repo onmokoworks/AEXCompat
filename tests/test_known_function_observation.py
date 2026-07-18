@@ -69,15 +69,18 @@ class ResolveTests(unittest.TestCase):
 
         enter = {r["name"]: r for r in hook["enter_reads"]}
         self.assertEqual(
-            {"name": "in.width", "source": "struct", "arg_index": 0, "offset": 260, "size": 4, "interpret": "int"},
+            {"name": "in.width", "source": "struct", "arg_index": 0, "offset": 260,
+             "size": 4, "extent": 400, "interpret": "int"},
             enter["in.width"],
         )
         # struct prefix "out" maps to arg 1 and lands in the leave phase.
         leave = {r["name"]: r for r in hook["leave_reads"]}
         self.assertEqual(1, leave["out.width"]["arg_index"])
-        # scalar arg read straight from the integer register slot.
+        self.assertEqual(200, leave["out.width"]["extent"])
+        # scalar arg read straight from the integer register slot, explicit width.
         self.assertEqual("register", enter["mode"]["source"])
         self.assertEqual(2, enter["mode"]["arg_index"])
+        self.assertEqual(4, enter["mode"]["width"])
         self.assertEqual({"interpret": "int"}, hook["return"])
 
     def test_missing_offset_field_fails_loud(self):
@@ -121,6 +124,41 @@ class ResolveTests(unittest.TestCase):
         with self.assertRaises(ResolutionError) as ctx:
             resolve_spec(spec, self.offset_map)
         self.assertIn("module-relative bound", str(ctx.exception))
+
+    def test_negative_offset_in_offset_map_is_rejected(self):
+        offset_map = copy.deepcopy(self.offset_map)
+        offset_map["fields"]["in.width"] = {"offset": -8, "size": 4}
+        with self.assertRaises(ResolutionError) as ctx:
+            resolve_spec(self.spec, offset_map)
+        self.assertIn("non-negative", str(ctx.exception))
+
+    def test_read_beyond_struct_extent_is_rejected(self):
+        offset_map = copy.deepcopy(self.offset_map)
+        # in.width sits at 260..264 but the declared in extent is 400; push it out.
+        offset_map["fields"]["in.width"] = {"offset": 398, "size": 4}
+        with self.assertRaises(ResolutionError) as ctx:
+            resolve_spec(self.spec, offset_map)
+        self.assertIn("exceeds", str(ctx.exception))
+
+    def test_arg_struct_requires_extent(self):
+        spec = copy.deepcopy(self.spec)
+        del spec["hooks"][0]["arg_structs"][0]["extent"]
+        with self.assertRaises(ResolutionError) as ctx:
+            resolve_spec(spec, self.offset_map)
+        self.assertIn("extent", str(ctx.exception))
+
+    def test_scalar_arg_requires_width(self):
+        spec = copy.deepcopy(self.spec)
+        del spec["hooks"][0]["scalar_args"][0]["width"]
+        with self.assertRaises(ResolutionError) as ctx:
+            resolve_spec(spec, self.offset_map)
+        self.assertIn("width", str(ctx.exception))
+
+    def test_arg_slot_index_is_bounded(self):
+        spec = copy.deepcopy(self.spec)
+        spec["hooks"][0]["scalar_args"][0]["index"] = 999
+        with self.assertRaises(ResolutionError):
+            resolve_spec(spec, self.offset_map)
 
 
 class FormatTests(unittest.TestCase):
@@ -206,7 +244,9 @@ class FridaScriptTests(unittest.TestCase):
         # only via send(), and locates the module base itself.
         self.assertIn("recv('plan'", text)
         self.assertIn("send(", text)
-        self.assertIn("Process.findModuleByName", text)
+        # Identity by full path (not basename) + executable-range verification.
+        self.assertIn("Process.enumerateModules", text)
+        self.assertIn("Process.findRangeByAddress", text)
         self.assertNotIn("writeFile", text)
         self.assertNotIn("File(", text)
 
@@ -217,6 +257,13 @@ class FridaScriptTests(unittest.TestCase):
         # module to be present up front.
         self.assertIn("LoadLibrary", text)
         self.assertIn("type: 'ready'", text)
+
+    def test_script_reads_are_memory_safe(self):
+        text = self.SCRIPT.read_text(encoding="utf-8")
+        # Null-check + extent bound + read failures reported (never thrown out).
+        self.assertIn("isNull()", text)
+        self.assertIn("read.extent", text)
+        self.assertIn("read_error", text)
 
     def test_script_parses_with_node(self):
         node = shutil.which("node")
