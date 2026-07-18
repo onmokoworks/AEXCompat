@@ -285,6 +285,10 @@ class FridaScriptTests(unittest.TestCase):
         # parseInt), so a negative int is not corrupted into a huge positive.
         self.assertIn("int64(", text)
         self.assertIn("uint64(", text)
+        # 64-bit values are only emitted if losslessly representable as a Number.
+        self.assertIn("isSafeInteger", text)
+        # Struct booleans honour their declared width (not just the first byte).
+        self.assertIn("p.readU16() !== 0", text)
 
     def test_script_parses_with_node(self):
         node = shutil.which("node")

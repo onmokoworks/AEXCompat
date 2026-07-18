@@ -51,7 +51,7 @@
       "properties": {
         "symbol": {"type": "string", "minLength": 1, "pattern": "^[^\\\\/:]+$"},
         "module_label": {"type": "string", "minLength": 1, "pattern": "^[^\\\\/:]+$"},
-        "module_rva": {"type": "string", "pattern": "^0x[0-9a-f]+$"},
+        "module_rva": {"type": "string", "pattern": "^0x[0-9a-f]{1,8}$"},
         "phase": {"enum": ["enter", "leave"]},
         "return_value": {"type": "number"},
         "fields": {

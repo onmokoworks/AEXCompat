@@ -24,6 +24,17 @@ function normalizePath(p) {
   return String(p).replace(/\//g, '\\').toLowerCase();
 }
 
+// A JS Number cannot hold every 64-bit integer exactly; round-tripping through
+// Number would silently corrupt large values. Convert losslessly or fail the
+// read (reported as read_error, never a rounded number).
+function toSafeNumber(v64) {
+  const n = v64.toNumber();
+  if (!Number.isSafeInteger(n)) {
+    throw new Error('64-bit value exceeds JS safe-integer range');
+  }
+  return n;
+}
+
 function readStruct(base, read) {
   const p = base.add(read.offset);
   switch (read.interpret) {
@@ -31,16 +42,21 @@ function readStruct(base, read) {
       if (read.size === 1) return p.readS8();
       if (read.size === 2) return p.readS16();
       if (read.size === 4) return p.readS32();
-      return p.readS64().toNumber();
+      return toSafeNumber(p.readS64());
     case 'uint':
       if (read.size === 1) return p.readU8();
       if (read.size === 2) return p.readU16();
       if (read.size === 4) return p.readU32();
-      return p.readU64().toNumber();
+      return toSafeNumber(p.readU64());
     case 'float':
       return read.size === 4 ? p.readFloat() : p.readDouble();
     case 'bool':
-      return p.readU8() !== 0;
+      // Compare the whole declared width to zero, not just the first byte, so a
+      // Win32-style boolean with its nonzero bit in a higher byte is not missed.
+      if (read.size === 1) return p.readU8() !== 0;
+      if (read.size === 2) return p.readU16() !== 0;
+      if (read.size === 4) return p.readU32() !== 0;
+      return p.readU32() !== 0 || p.add(4).readU32() !== 0;
     default:
       throw new Error('unknown interpret ' + read.interpret);
   }
@@ -53,10 +69,11 @@ function readStruct(base, read) {
 function readRegister(slot, read) {
   if (read.width === 8) {
     // Use signed/unsigned 64-bit conversion so a negative int (e.g. -1 arriving
-    // as 0xffffffffffffffff) is recorded as -1, not a huge positive number.
+    // as 0xffffffffffffffff) is recorded as -1, not a huge positive number, and
+    // fail the read if it cannot be represented losslessly as a JS Number.
     if (read.interpret === 'bool') return !slot.isNull();
     const hex = slot.toString();
-    return (read.interpret === 'int' ? int64(hex) : uint64(hex)).toNumber();
+    return toSafeNumber(read.interpret === 'int' ? int64(hex) : uint64(hex));
   }
   switch (read.interpret) {
     case 'uint':
