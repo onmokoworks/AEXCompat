@@ -58,7 +58,8 @@ fi
 # do not self-block.
 owner_after=$(
   { owner_inline_after "$clean_ts" <<<"$pr_comments"
-    owner_comments_after "$clean_ts" <<<"$issue_comments"; } | grep -v '^$' || true
+    owner_comments_after "$clean_ts" <<<"$issue_comments"
+    owner_reviews_after "$clean_ts" <<<"$reviews"; } | grep -v '^$' || true
 )
 if [ -n "$owner_after" ]; then
   echo "REFUSE: owner raised comments after the Codex clean; address them first:"

@@ -254,6 +254,46 @@ def test_owner_comment_before_clean_is_ignored() -> None:
     assert _call("owner_comments_after", payload, clean_ts) == ""
 
 
+def test_owner_bodied_commented_review_after_clean_blocks() -> None:
+    # A non-inline owner review with a body after the clean is a blocker the
+    # monitor honors; the merge guard must too (owner_review_gate only sees
+    # CHANGES_REQUESTED).
+    clean_ts = "2026-07-18T19:16:44Z"
+    payload = [{"user": {"login": "onmokoworks"}, "state": "COMMENTED",
+                "submitted_at": "2026-07-18T19:20:00Z", "body": "[P1] hold on, this is wrong"}]
+    assert "OWNER-REVIEW COMMENTED" in _call("owner_reviews_after", payload, clean_ts)
+
+
+def test_owner_bodyless_commented_review_after_clean_is_ignored() -> None:
+    # Replying to an inline thread posts a bodyless COMMENTED review as the
+    # owner; it must not self-block the merge.
+    clean_ts = "2026-07-18T19:16:44Z"
+    payload = [{"user": {"login": "naari3"}, "state": "COMMENTED",
+                "submitted_at": "2026-07-18T19:20:00Z", "body": ""}]
+    assert _call("owner_reviews_after", payload, clean_ts) == ""
+
+
+def test_owner_changes_requested_review_after_clean_blocks() -> None:
+    clean_ts = "2026-07-18T19:16:44Z"
+    payload = [{"user": {"login": "onmokoworks"}, "state": "CHANGES_REQUESTED",
+                "submitted_at": "2026-07-18T19:20:00Z", "body": ""}]
+    assert "OWNER-REVIEW CHANGES_REQUESTED" in _call("owner_reviews_after", payload, clean_ts)
+
+
+def test_owner_review_before_clean_is_ignored() -> None:
+    clean_ts = "2026-07-18T19:16:44Z"
+    payload = [{"user": {"login": "onmokoworks"}, "state": "COMMENTED",
+                "submitted_at": "2026-07-18T19:10:00Z", "body": "[P1] old, addressed"}]
+    assert _call("owner_reviews_after", payload, clean_ts) == ""
+
+
+def test_owner_approved_review_after_clean_does_not_block() -> None:
+    clean_ts = "2026-07-18T19:16:44Z"
+    payload = [{"user": {"login": "onmokoworks"}, "state": "APPROVED",
+                "submitted_at": "2026-07-18T19:20:00Z", "body": "looks good"}]
+    assert _call("owner_reviews_after", payload, clean_ts) == ""
+
+
 def test_inline_error_message_is_not_a_finding() -> None:
     # The "To use Codex here" onboarding/error can arrive as an inline comment;
     # it must be classified as an error, not a finding.

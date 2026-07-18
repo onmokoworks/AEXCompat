@@ -149,6 +149,23 @@ owner_inline_after() {
     | "OWNER-INLINE id=\(.id) \(.path):\(.line // .original_line): \((.body | split("\n")[0]))"'
 }
 
+# Owner blocking REVIEWS at or after a Codex clean at $1 (input: reviews array).
+# owner_review_gate blocks unresolved CHANGES_REQUESTED over full history, but a
+# repo owner can also submit a non-inline PR review with state COMMENTED and a
+# BODY after the clean but before the guard runs; that is a blocker the monitor
+# already honors (owner_blocking_reviews) yet neither owner_review_gate nor the
+# comment/inline after-checks catch. Same blocking predicate as the monitor
+# (CHANGES_REQUESTED, or COMMENTED with a body), scoped inclusively (>=) to the
+# clean. Bodyless COMMENTED reviews (posted when this session replies to an
+# inline thread) carry no body and are excluded, so they do not self-block.
+owner_reviews_after() {
+  jq -r --arg ts "$1" --argjson owner "$OWNER_LOGINS" '
+    .[] | select([.user.login] | inside($owner))
+    | select((.submitted_at // "") >= $ts)
+    | select(.state == "CHANGES_REQUESTED" or (.state == "COMMENTED" and ((.body // "") | length) > 0))
+    | "OWNER-REVIEW \(.state): \(((.body // "") | split("\n"))[0])"'
+}
+
 # Owner top-level comments at or after a Codex clean at $1, excluding a bare
 # trigger (input: issue-comments array). Same inclusive (>=) same-second
 # fail-closed rule as owner_inline_after. This session posts its summaries
