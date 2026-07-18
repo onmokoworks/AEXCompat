@@ -70,6 +70,7 @@ pub fn run(
     case_id: &str,
     output: &Path,
 ) -> io::Result<bool> {
+    crate::trace_policy::validate_broker_trace_directory(repository)?;
     if output
         .components()
         .any(|p| matches!(p, Component::ParentDir | Component::CurDir))

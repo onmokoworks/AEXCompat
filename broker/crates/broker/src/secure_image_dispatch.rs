@@ -65,6 +65,7 @@ pub fn dispatch_secure_gpu_image(
 }
 
 pub fn dispatch_secure_image(input: SecureImageDispatch<'_>) -> io::Result<SecureLaunchResult> {
+    crate::trace_policy::validate_broker_trace_directory(input.repository)?;
     let worker_program = input
         .repository
         .join(input.worker_kind.repository_relative_program());
