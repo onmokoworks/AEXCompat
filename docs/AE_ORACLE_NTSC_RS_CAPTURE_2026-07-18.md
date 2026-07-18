@@ -517,10 +517,12 @@ another determinism observation).
    captures predate that stronger proof, so `oracle_identity.state` remains
    `unverified` and exact claims remain disabled until a fresh recapture.
 2. **Comparisons are recomputed at refresh time.** The refresh script now
-   re-runs `tools/compare-pixel-oracles.py` with the frozen arguments for
-   every case and requires the regenerated report to deep-equal the stored
-   comparison JSON, so a stored comparison with rewritten hash fields can
-   no longer smuggle judgment values into the evidence.
+    re-runs `tools/compare-pixel-oracles.py` with the frozen arguments for
+    every case, using the pinned raw world and the AE PNG whose hash is bound
+    to its capture manifest. It serializes that freshly generated scratch
+    report directly into the evidence document; stored comparison JSON is
+    neither required nor trusted, so stale or rewritten judgment fields cannot
+    be carried into refreshed evidence.
 3. **The promotion/export mechanism is bound to local-only artifacts.** The smart-input
    world snapshot (`host-gradient-smart-input.rgba16le`, re-dumped and
    hash-verified during the refresh re-render) and the no-effect 16 bpc
