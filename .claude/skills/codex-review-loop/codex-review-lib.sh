@@ -50,12 +50,61 @@ codex_findings() {
 # Owner reviews that BLOCK merge, by submission state (input: reviews array).
 # CHANGES_REQUESTED always blocks, even with an empty body; a COMMENTED review
 # blocks when it carries a body. Bodyless COMMENTED reviews with inline findings
-# are caught separately by owner_inline.
+# are caught separately by owner_inline. Used by the live monitor over the
+# since-window (new events only); the merge gate uses owner_review_gate.
 owner_blocking_reviews() {
   jq -r --argjson owner "$OWNER_LOGINS" '
     .[] | select([.user.login] | inside($owner))
     | select(.state == "CHANGES_REQUESTED" or (.state == "COMMENTED" and ((.body // "") | length) > 0))
     | "OWNER-REVIEW \(.state): \(((.body // "") | split("\n"))[0])"'
+}
+
+# Merge gate over the FULL review history: block while an owner CHANGES_REQUESTED
+# is not yet cleared. Only a later APPROVED or DISMISSED clears it; a COMMENTED
+# review is neutral (a reply to an inline comment posts a bodyless COMMENTED
+# review as the owner, which must NOT dismiss a real change request). This
+# avoids blocking forever on resolved history AND avoids a reply silently
+# clearing the gate (input: reviews array). Echoes "BLOCK" or "".
+owner_review_gate() {
+  jq -r --argjson owner "$OWNER_LOGINS" '
+    [ .[] | select([.user.login] | inside($owner)) ] as $r
+    | ( [ $r[] | select(.state == "CHANGES_REQUESTED") | .submitted_at ] | max // "" ) as $cr
+    | ( [ $r[] | select(.state == "APPROVED" or .state == "DISMISSED") | .submitted_at ] | max // "" ) as $clear
+    | if ($cr != "" and ($clear == "" or $cr > $clear)) then "BLOCK" else "" end'
+}
+
+# Timestamp of the newest Codex CLEAN that references $1 (full head SHA), or ""
+# (input: issue-comments array). Used to require the LATEST verdict.
+codex_clean_ts_for_head() {
+  local head="$1"
+  [ -n "$head" ] || { echo ""; return 0; }
+  jq -r --arg head "$head" --argjson codex "$CODEX_LOGINS" '
+    ($head | ascii_downcase) as $h
+    | [ .[]
+        | select([.user.login] | inside($codex))
+        | select(.body | test("Didn.t find any major issues"))
+        | select([ .body | ascii_downcase | scan("[0-9a-f]{7,40}") ]
+                 | any(. as $s | $h | startswith($s)))
+        | .created_at ]
+    | if length > 0 then max else "" end'
+}
+
+# Timestamp of the newest Codex inline finding, or "" (input: review-comments).
+codex_finding_max_ts() {
+  jq -r --argjson codex "$CODEX_LOGINS" '
+    [ .[] | select([.user.login] | inside($codex)) | .created_at ]
+    | if length > 0 then max else "" end'
+}
+
+# Timestamp of the newest Codex error/onboarding comment, or "" (input:
+# issue-comments array).
+codex_error_max_ts() {
+  jq -r --argjson codex "$CODEX_LOGINS" '
+    [ .[]
+      | select([.user.login] | inside($codex))
+      | select(.body | test("Something went wrong|Unknown error|To use Codex here"))
+      | .created_at ]
+    | if length > 0 then max else "" end'
 }
 
 # Owner inline review comments (input: pull review-comments array).

@@ -28,7 +28,10 @@ fetch() {
   jq -s '.' <<<"$out"
 }
 
-since_filter() { jq --arg s "$SINCE" '[ .[] | select((.created_at // .submitted_at) > $s) ]'; }
+# Inclusive lower bound: GitHub timestamps are second-resolution, so an event
+# in the same second as the trigger would be dropped by strict ">". The trigger
+# comment itself is a bare "@codex review", which owner_comments excludes.
+since_filter() { jq --arg s "$SINCE" '[ .[] | select((.created_at // .submitted_at) >= $s) ]'; }
 
 while true; do
   if [ "$(date +%s)" -ge "$DEADLINE" ]; then
@@ -59,17 +62,29 @@ while true; do
     "$(owner_comments <<<"$new_issue_comments")" | grep -v '^$' || true)
   if [ -n "$owner_hit" ]; then echo "$owner_hit"; exit 0; fi
 
-  # 2. Codex error => review did not run; fail-closed, do not merge (finding 3).
-  if [ -n "$(codex_error <<<"$new_issue_comments")" ]; then
+  # Codex signals: the LATEST verdict wins. Compare timestamps so a newer
+  # finding/error supersedes an older head-bound clean (and vice versa).
+  clean_ts=$(codex_clean_ts_for_head "$head" <<<"$issue_comments")
+  err_ts=$(codex_error_max_ts <<<"$new_issue_comments")
+  find_ts=$(codex_finding_max_ts <<<"$new_pr_comments")
+
+  # 2. A Codex error newer than any accepted clean => review did not run;
+  #    fail-closed, never merge (finding 3, latest-verdict).
+  if [ -n "$err_ts" ] && { [ -z "$clean_ts" ] || [[ "$err_ts" > "$clean_ts" ]]; }; then
     echo "CODEX-ERROR: review did not run; re-trigger @codex review"; exit 0
   fi
 
-  # 3. Codex CLEAN, only if it references the current head SHA (finding 1).
-  if [ -n "$(codex_clean_for_head "$head" <<<"$issue_comments")" ]; then
-    echo "CLEAN: codex clean for head ${head:0:10}"; exit 0
+  # 3. Codex findings newer than any accepted clean supersede it.
+  if [ -n "$find_ts" ] && { [ -z "$clean_ts" ] || [[ "$find_ts" > "$clean_ts" ]]; }; then
+    findings=$(codex_findings <<<"$new_pr_comments" | grep -v '^$' || true)
+    if [ -n "$findings" ]; then echo "$findings"; exit 0; fi
   fi
 
-  # 4. Codex findings.
-  findings=$(codex_findings <<<"$new_pr_comments" | grep -v '^$' || true)
-  if [ -n "$findings" ]; then echo "$findings"; exit 0; fi
+  # 4. CLEAN only when a head-bound clean exists and is the latest verdict
+  #    (no newer finding or error). Bound to the current head SHA (finding 1).
+  if [ -n "$clean_ts" ] \
+     && { [ -z "$find_ts" ] || [[ ! "$find_ts" > "$clean_ts" ]]; } \
+     && { [ -z "$err_ts" ] || [[ ! "$err_ts" > "$clean_ts" ]]; }; then
+    echo "CLEAN: codex clean for head ${head:0:10}"; exit 0
+  fi
 done

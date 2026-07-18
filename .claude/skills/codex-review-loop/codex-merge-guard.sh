@@ -29,16 +29,24 @@ pr_comments=$(fetch "pulls/$PR/comments") || { echo "REFUSE: pulls/comments fetc
 reviews=$(fetch "pulls/$PR/reviews") || { echo "REFUSE: pulls/reviews fetch failed"; exit 1; }
 issue_comments=$(fetch "issues/$PR/comments") || { echo "REFUSE: issues/comments fetch failed"; exit 1; }
 
-owner_hit=$(printf '%s\n%s\n%s' \
-  "$(owner_inline <<<"$pr_comments")" \
-  "$(owner_blocking_reviews <<<"$reviews")" \
-  "$(owner_comments <<<"$issue_comments")" | grep -v '^$' || true)
-if [ -n "$owner_hit" ]; then
-  echo "REFUSE: unresolved owner items:"; echo "$owner_hit"; exit 1
+# Owner gate by LATEST review state, not history: a CHANGES_REQUESTED that the
+# owner later dismisses/approves must not block forever (finding: resolved
+# history). GitHub itself gates merges this way.
+if [ -n "$(owner_review_gate <<<"$reviews")" ]; then
+  echo "REFUSE: owner's latest review is CHANGES_REQUESTED"; exit 1
 fi
 
-if [ -z "$(codex_clean_for_head "$head" <<<"$issue_comments")" ]; then
+# Codex gate: a head-bound clean must exist AND be the latest verdict (no newer
+# finding or error), so a later same-head review with findings invalidates it.
+clean_ts=$(codex_clean_ts_for_head "$head" <<<"$issue_comments")
+if [ -z "$clean_ts" ]; then
   echo "REFUSE: no Codex clean for current head ${head:0:10}"; exit 1
+fi
+find_ts=$(codex_finding_max_ts <<<"$pr_comments")
+err_ts=$(codex_error_max_ts <<<"$issue_comments")
+if { [ -n "$find_ts" ] && [[ "$find_ts" > "$clean_ts" ]]; } \
+   || { [ -n "$err_ts" ] && [[ "$err_ts" > "$clean_ts" ]]; }; then
+  echo "REFUSE: newer Codex findings/errors after the clean"; exit 1
 fi
 
 # Atomic: fails if head moved since the checks above.

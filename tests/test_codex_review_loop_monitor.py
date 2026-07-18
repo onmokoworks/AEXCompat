@@ -110,3 +110,54 @@ def test_bare_trigger_comment_is_excluded(body: str) -> None:
 def test_owner_feedback_is_kept_even_with_trigger_phrase(body: str) -> None:
     payload = [{"user": {"login": "onmokoworks"}, "body": body}]
     assert _call("owner_comments", payload) == f"OWNER-COMMENT: {body}"
+
+
+# --- owner_review_gate: latest review state, not history ----------------------
+
+def test_latest_approved_dismisses_earlier_changes_requested() -> None:
+    payload = [
+        {"user": {"login": "onmokoworks"}, "state": "CHANGES_REQUESTED", "submitted_at": "2026-07-18T19:19:00Z"},
+        {"user": {"login": "onmokoworks"}, "state": "APPROVED", "submitted_at": "2026-07-18T19:40:00Z"},
+    ]
+    assert _call("owner_review_gate", payload) == ""
+
+
+def test_latest_changes_requested_blocks() -> None:
+    payload = [
+        {"user": {"login": "onmokoworks"}, "state": "APPROVED", "submitted_at": "2026-07-18T18:35:00Z"},
+        {"user": {"login": "onmokoworks"}, "state": "CHANGES_REQUESTED", "submitted_at": "2026-07-18T19:19:00Z"},
+    ]
+    assert _call("owner_review_gate", payload) == "BLOCK"
+
+
+# --- latest-verdict timestamps ------------------------------------------------
+
+def test_clean_ts_is_the_newest_head_bound_clean() -> None:
+    head = "6de58c3dbb095c277dca598cb5621d28cbed723a"
+    payload = [
+        {"user": {"login": "chatgpt-codex-connector[bot]"},
+         "body": "Didn't find any major issues `6de58c3dbb`", "created_at": "2026-07-18T19:16:44Z"},
+        {"user": {"login": "chatgpt-codex-connector[bot]"},
+         "body": "Didn't find any major issues `31bef1dfc1`", "created_at": "2026-07-18T18:37:23Z"},
+    ]
+    assert _call("codex_clean_ts_for_head", payload, head) == "2026-07-18T19:16:44Z"
+
+
+def test_finding_newer_than_clean_supersedes() -> None:
+    # A finding after the clean has a later timestamp; the script compares them.
+    clean = [{"user": {"login": "chatgpt-codex-connector[bot]"},
+              "body": "Didn't find any major issues `6de58c3dbb`", "created_at": "2026-07-18T19:16:44Z"}]
+    findings = [{"user": {"login": "chatgpt-codex-connector[bot]"}, "created_at": "2026-07-18T19:26:00Z"}]
+    clean_ts = _call("codex_clean_ts_for_head", clean, "6de58c3dbb095c277dca598cb5621d28cbed723a")
+    find_ts = _call("codex_finding_max_ts", findings)
+    assert find_ts > clean_ts
+
+
+def test_commented_review_does_not_clear_changes_requested() -> None:
+    # Replying to an inline comment posts a bodyless COMMENTED review as the
+    # owner; it must NOT dismiss an earlier CHANGES_REQUESTED.
+    payload = [
+        {"user": {"login": "onmokoworks"}, "state": "CHANGES_REQUESTED", "submitted_at": "2026-07-18T19:19:00Z"},
+        {"user": {"login": "naari3"}, "state": "COMMENTED", "submitted_at": "2026-07-18T19:29:00Z"},
+    ]
+    assert _call("owner_review_gate", payload) == "BLOCK"
