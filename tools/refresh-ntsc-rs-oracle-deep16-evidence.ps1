@@ -116,6 +116,9 @@ $caseRecords = foreach ($case in $cases) {
         [string]$capture.loaded_aex_identity.file_id -notmatch '^[0-9a-f]{8}:[0-9a-f]{8}:[0-9a-f]{8}$' -or
         [string]$capture.loaded_aex_identity.canonical_path_sha256 -ne $currentInstalledIdentity.canonical_path_sha256 -or
         [string]$capture.loaded_aex_identity.file_id -ne $currentInstalledIdentity.file_id -or
+        [string]$capture.effect_provenance.state -ne 'verified' -or
+        -not [bool]$capture.effect_provenance.unique_loaded_provider -or
+        [string]$capture.effect_provenance.provider_sha256 -ne (Sha256 $aexPath) -or
         -not [bool]$capture.loaded_aex_identity.replacement_locked) {
         throw "capture result for $($case.name) does not prove the loaded AE module identity; recapture with -RequireLoadedAexIdentity"
     }
@@ -220,6 +223,7 @@ $caseRecords = foreach ($case in $cases) {
                 file_id = [string]$capture.loaded_aex_identity.file_id
                 replacement_locked = [bool]$capture.loaded_aex_identity.replacement_locked
             }
+            effect_provenance = $capture.effect_provenance
         }
         comparison = $comparison
     }

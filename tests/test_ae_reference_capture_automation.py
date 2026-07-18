@@ -38,6 +38,9 @@ def test_reference_capture_contract_is_hash_bound_create_new_and_temporary():
     assert "Process.Modules" in runner
     assert "loaded_aex_identity" in runner
     assert "RequireLoadedAexIdentity" in runner
+    assert "Get-LaunchedProcessTreeIds" in runner
+    assert "effect_provenance" in runner
+    assert "unique_loaded_provider" in runner
     helper = (ROOT / "tools" / "windows-file-identity.ps1").read_text(encoding="utf-8")
     assert "GetFinalPathNameByHandleW" in helper
     assert "GetFileInformationByHandle" in helper

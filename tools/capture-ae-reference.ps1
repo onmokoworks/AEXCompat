@@ -22,6 +22,36 @@ param(
 . (Join-Path $PSScriptRoot 'sha256.ps1')
 . (Join-Path $PSScriptRoot 'windows-file-identity.ps1')
 
+function Get-LaunchedProcessTreeIds([int]$RootId) {
+    $all = @(Get-CimInstance Win32_Process -ErrorAction Stop |
+        Select-Object ProcessId,ParentProcessId)
+    $ids = [System.Collections.Generic.HashSet[int]]::new()
+    [void]$ids.Add($RootId)
+    $changed = $true
+    while ($changed) {
+        $changed = $false
+        foreach ($entry in $all) {
+            if ($ids.Contains([int]$entry.ParentProcessId) -and
+                $ids.Add([int]$entry.ProcessId)) { $changed = $true }
+        }
+    }
+    @($ids)
+}
+
+function Test-FileContainsUtf8([string]$Path, [string]$Value) {
+    $haystack = [System.IO.File]::ReadAllBytes($Path)
+    $needle = [System.Text.Encoding]::UTF8.GetBytes($Value)
+    if ($needle.Length -eq 0 -or $haystack.Length -lt $needle.Length) { return $false }
+    for ($offset = 0; $offset -le $haystack.Length - $needle.Length; $offset++) {
+        $equal = $true
+        for ($index = 0; $index -lt $needle.Length; $index++) {
+            if ($haystack[$offset + $index] -ne $needle[$index]) { $equal = $false; break }
+        }
+        if ($equal) { return $true }
+    }
+    $false
+}
+
 $ErrorActionPreference = 'Stop'
 # 'AfterFX.com' is the console shim's own process name; a lingering shim
 # (e.g. orphaned by an interrupted capture) would otherwise pass this gate.
@@ -169,26 +199,38 @@ try {
     }
     $process = Start-Process -FilePath $afterEffectsPath -ArgumentList $arguments -PassThru
     $loadedAexIdentity = $null
+    $observedAexModules = [System.Collections.Generic.HashSet[string]]::new(
+        [System.StringComparer]::OrdinalIgnoreCase)
     $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
     while ([DateTime]::UtcNow -lt $deadline -and -not (Test-Path -LiteralPath $resultPath)) {
         # Bind the requested plug-in to the module that this exact AE process
         # mapped. ExtendScript exposes matchName but not the backing module.
         # Process.Modules supplies the missing host-side observation.
-        if ($null -eq $loadedAexIdentity -and -not $process.HasExited) {
+        if (-not $process.HasExited) {
             try {
-                $process.Refresh()
-                $loadedModule = @($process.Modules) | Where-Object {
-                    $_.FileName -and
-                    ([System.IO.Path]::GetFullPath($_.FileName) -ieq $lockedFinalPath)
+                $treeIds = Get-LaunchedProcessTreeIds $process.Id
+                $treeModules = foreach ($treeId in $treeIds) {
+                    $treeProcess = Get-Process -Id $treeId -ErrorAction SilentlyContinue
+                    if ($null -ne $treeProcess) { try { @($treeProcess.Modules) } catch { @() } }
+                }
+                foreach ($module in $treeModules) {
+                    if ($module.FileName -and
+                        [System.IO.Path]::GetExtension($module.FileName) -ieq '.aex') {
+                        [void]$observedAexModules.Add([System.IO.Path]::GetFullPath($module.FileName))
+                    }
+                }
+                $loadedModule = @($treeModules) | Where-Object {
+                    $_.FileName -and ([System.IO.Path]::GetFullPath($_.FileName) -ieq $lockedFinalPath)
                 } | Select-Object -First 1
                 if ($null -ne $loadedModule) {
                     $loadedAexIdentity = [ordered]@{
-                        state = 'verified'
+                        state = 'module_loaded'
                         sha256 = $installedHash.ToLowerInvariant()
                         file_name = [System.IO.Path]::GetFileName($loadedModule.FileName)
                         canonical_path_sha256 = $lockedIdentity.canonical_path_sha256
                         file_id = $lockedFileId
                         process_id = $process.Id
+                        observed_process_tree = $true
                         replacement_locked = $true
                     }
                 }
@@ -245,9 +287,10 @@ try {
     'AEXCOMPAT_AE_PARAM_NAME','AEXCOMPAT_AE_PARAM_VALUE' |
         ForEach-Object { Remove-Item "Env:$_" -ErrorAction SilentlyContinue }
     Remove-Item -LiteralPath $stagedInput -ErrorAction SilentlyContinue
-    $installedLock.Dispose()
+    if ($captureFailed) { $installedLock.Dispose() }
 }
 
+try {
 $result = Get-Content -LiteralPath $resultPath -Raw | ConvertFrom-Json
 if ($result.status -ne 'captured') {
     throw "After Effects reference capture failed: $($result.error)"
@@ -261,11 +304,39 @@ if (-not (Test-Path -LiteralPath $outputPath)) {
 # manifest, and evidence refresh scripts verify against it).
 $result | Add-Member -NotePropertyName 'input_sha256' -NotePropertyValue $inputHash
 $result | Add-Member -NotePropertyName 'tested_aex_sha256' -NotePropertyValue $testedHash.ToLowerInvariant()
+$effectProvenance = [ordered]@{
+    state = 'unverified'
+    reason = 'effect_match_name_not_uniquely_bound_to_loaded_module'
+}
+if ($null -ne $loadedAexIdentity -and [string]$result.effect_match_name) {
+    $providers = @($observedAexModules | Where-Object {
+        Test-FileContainsUtf8 $_ ([string]$result.effect_match_name)
+    })
+    if ($providers.Count -eq 1 -and
+        [System.IO.Path]::GetFullPath($providers[0]) -ieq $lockedFinalPath) {
+        $effectProvenance = [ordered]@{
+            state = 'verified'
+            effect_match_name = [string]$result.effect_match_name
+            unique_loaded_provider = $true
+            provider_sha256 = $installedHash.ToLowerInvariant()
+        }
+        $loadedAexIdentity.state = 'verified'
+    }
+}
 $identityRecord = if ($null -ne $loadedAexIdentity) {
     $loadedAexIdentity
 } else {
     [ordered]@{ state = 'unverified'; reason = 'loaded_module_not_observed' }
 }
 $result | Add-Member -NotePropertyName 'loaded_aex_identity' -NotePropertyValue $identityRecord
+$result | Add-Member -NotePropertyName 'effect_provenance' -NotePropertyValue $effectProvenance
 $result | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $resultPath -Encoding utf8
+if ($RequireLoadedAexIdentity -and $effectProvenance.state -ne 'verified') {
+    $result.status = 'identity_unverified'
+    $result | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $resultPath -Encoding utf8
+    throw 'AE capture completed without verified effect-to-module provenance.'
+}
 $result | ConvertTo-Json -Depth 8
+} finally {
+    $installedLock.Dispose()
+}

@@ -134,6 +134,8 @@ class NtscRsOracleDeep16ResultTests(unittest.TestCase):
         self.assertIn("file_id -notmatch", source)
         self.assertIn("currentInstalledIdentity.canonical_path_sha256", source)
         self.assertIn("currentInstalledIdentity.file_id", source)
+        self.assertIn("effect_provenance.state", source)
+        self.assertIn("unique_loaded_provider", source)
         self.assertIn("compare-pixel-oracles.py", source)
         self.assertIn("--raw-format rgba16le", source)
         self.assertIn("--raw-integer-max 32768", source)
