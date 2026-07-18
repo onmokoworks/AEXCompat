@@ -22,7 +22,7 @@
 
 ## Rust broker / harness
 
-- Rust toolchain (rustup / cargo)。workspace は edition 2021。
+- Rust toolchain (rustup / cargo)。workspace は edition 2024 (Rust 1.85 以降)。
 - 標準の `x86_64-pc-windows-msvc` target ではリンクに MSVC linker と
   Windows SDK が必要。Visual Studio (または Build Tools) の
   「C++ によるデスクトップ開発」workload を入れておく。

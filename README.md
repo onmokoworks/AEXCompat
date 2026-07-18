@@ -51,7 +51,7 @@ AEXCompatは、Adobe After EffectsのEffect AEXをAfter Effects本体の外で�
 |---|---|
 | OS | Windows x64 |
 | SDK | Adobe After Effects SDK 2025を基準に検証 |
-| UI / broker | Rust 2021 edition |
+| UI / broker | Rust 2024 edition |
 | native worker | C++ / MSVC x64 |
 | 入力画像 | PNG、JPEG、BMP、TIFF、WebP |
 | 出力画像 | PNG |
@@ -223,7 +223,7 @@ The goal is practical, faithful compatibility with general Effect AEX plug-ins, 
 |---|---|
 | OS | Windows x64 |
 | SDK baseline | Adobe After Effects SDK 2025 |
-| UI / broker | Rust 2021 edition |
+| UI / broker | Rust 2024 edition |
 | native worker | C++ / MSVC x64 |
 | image input | PNG, JPEG, BMP, TIFF, WebP |
 | image output | PNG |
