@@ -521,7 +521,7 @@ another determinism observation).
    every case and requires the regenerated report to deep-equal the stored
    comparison JSON, so a stored comparison with rewritten hash fields can
    no longer smuggle judgment values into the evidence.
-3. **The promotion/export mechanism is artifact-bound.** The smart-input
+3. **The promotion/export mechanism is bound to local-only artifacts.** The smart-input
    world snapshot (`host-gradient-smart-input.rgba16le`, re-dumped and
    hash-verified during the refresh re-render) and the no-effect 16 bpc
    control capture (`ae-noeffect-16.png`, identity-checked like the effect
@@ -532,8 +532,11 @@ another determinism observation).
    composed import/export map is `v * 257 + d` with `d` in {-1, 0, +1}
    (histogram -1: 126, 0: 129, +1: 1 over all 256 values), deterministic
    and exactly invertible by `round(v16 / 257)`. The earlier section's
-   mechanism statements are thereby machine-checked instead of resting on
-   session-local observations; the export-map measurement (observation)
+   mechanism statements were machine-checked instead of resting only on
+   memory. These `target/oracle-deep16` raw artifacts are not committed, so
+   a clean clone cannot independently rerun this verification; the evidence
+   records `clean_clone_reproducible=false` until they are admitted into a
+   portable conformance bundle. The export-map measurement (observation)
    remains separate from the residue attribution (explanation consistent
    with those bounds, not a per-sample proof).
 

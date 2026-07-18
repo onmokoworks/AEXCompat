@@ -81,6 +81,9 @@ class NtscRsOracleDeep16ResultTests(unittest.TestCase):
         mechanism = self.document["mechanism"]
         self.assertEqual(mechanism["verified_by"],
                          "tools/verify-deep16-mechanism.py")
+        self.assertEqual(mechanism["artifact_availability"],
+                         "local_only_not_committed")
+        self.assertFalse(mechanism["clean_clone_reproducible"])
         manifest = mechanism["manifest"]
         self.assertTrue(manifest["holds"])
         promotion = manifest["host_promotion"]

@@ -255,6 +255,8 @@ try {
 }
 $mechanismRecord = [ordered]@{
     verified_by = 'tools/verify-deep16-mechanism.py'
+    artifact_availability = 'local_only_not_committed'
+    clean_clone_reproducible = $false
     artifacts = [ordered]@{
         smart_input_dump = 'target/oracle-deep16/host-gradient-smart-input.rgba16le'
         noeffect_capture_png = 'target/oracle-deep16/ae-noeffect-16.png'
