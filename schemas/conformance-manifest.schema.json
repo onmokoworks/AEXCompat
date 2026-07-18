@@ -1,0 +1,72 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://aexcompat.local/schemas/conformance-manifest.schema.json",
+  "title": "AEXCompat conformance bundle manifest",
+  "schema_name": "AEXCompat conformance bundle manifest schema",
+  "schema_version": 1,
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "fixture_id", "plugin", "input", "runner", "requested_depths", "oracle"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "fixture_id": {"type": "string", "pattern": "^[a-z][a-z0-9_-]{0,63}$"},
+    "plugin": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["aex", "dependencies"],
+      "properties": {
+        "aex": {"$ref": "#/$defs/artifact"},
+        "dependencies": {
+          "type": "array",
+          "maxItems": 64,
+          "items": {"$ref": "#/$defs/artifact"}
+        }
+      }
+    },
+    "input": {"$ref": "#/$defs/artifact"},
+    "runner": {"$ref": "#/$defs/artifact"},
+    "requested_depths": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 3,
+      "uniqueItems": true,
+      "items": {"enum": ["argb8", "argb16", "argb32f"]}
+    },
+    "oracle": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["state", "identity_match"],
+      "properties": {
+        "state": {"enum": ["not_requested", "not_captured", "captured"]},
+        "identity_match": {"type": "boolean"},
+        "artifact": {"$ref": "#/$defs/artifact"}
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"state": {"const": "captured"}}, "required": ["state"]},
+          "then": {"required": ["artifact"]},
+          "else": {"properties": {"identity_match": {"const": false}}, "not": {"required": ["artifact"]}}
+        }
+      ]
+    }
+  },
+  "$defs": {
+    "relative_path": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 240,
+      "pattern": "^(?![A-Za-z]:)(?![/\\\\])(?!.*(?:^|/)\\.\\.(?:/|$))(?!.*\\\\)[A-Za-z0-9._ -]+(?:/[A-Za-z0-9._ -]+)*$"
+    },
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "sha256", "size_bytes"],
+      "properties": {
+        "path": {"$ref": "#/$defs/relative_path"},
+        "sha256": {"$ref": "#/$defs/sha256"},
+        "size_bytes": {"type": "integer", "minimum": 0, "maximum": 1099511627776}
+      }
+    }
+  }
+}

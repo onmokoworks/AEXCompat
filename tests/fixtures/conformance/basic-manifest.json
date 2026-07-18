@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "fixture_id": "sdk-skeleton-control",
+  "plugin": {
+    "aex": {"path": "artifacts/Skeleton.aex", "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "size_bytes": 4096},
+    "dependencies": [
+      {"path": "artifacts/helper.dll", "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "size_bytes": 1024}
+    ]
+  },
+  "input": {"path": "inputs/control.png", "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", "size_bytes": 256},
+  "runner": {"path": "runner/aexcompat-harness.exe", "sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd", "size_bytes": 8192},
+  "requested_depths": ["argb8", "argb16", "argb32f"],
+  "oracle": {
+    "state": "captured",
+    "identity_match": true,
+    "artifact": {"path": "oracle/ae-argb8.rgba", "sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee", "size_bytes": 64}
+  }
+}
