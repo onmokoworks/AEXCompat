@@ -713,6 +713,7 @@ LONG WINAPI top_level_crash_filter(EXCEPTION_POINTERS* information) {
   write_crash_minidump(information);
   return EXCEPTION_CONTINUE_SEARCH;
 }
+extern thread_local const char* g_suite_selector;
 
 int capture_seh_exception(EXCEPTION_POINTERS* information) {
   write_crash_minidump(information);
@@ -763,15 +764,20 @@ int32_t invoke_entry_seh(EffectEntry entry, int32_t command, void* input,
                          void* output, void** params, void* world, void* extra,
                          uint32_t* out_exception_code) {
   *out_exception_code = 0;
+  const char* previous_suite_selector = g_suite_selector;
+  g_suite_selector = effect_selector_name(command);
+  int32_t result = 0;
   __try {
-    return audited_effect_call(entry, command, input, output, params, world, extra);
+    result = audited_effect_call(entry, command, input, output, params, world, extra);
   } __except(capture_seh_exception(GetExceptionInformation())) {
     *out_exception_code = GetExceptionCode();
     g_last_seh_selector = effect_selector_name(command);
     g_last_seh_error = 512;
     capture_module_audit_phase();
-    return 512;
+    result = 512;
   }
+  g_suite_selector = previous_suite_selector;
+  return result;
 }
 
 int32_t guarded_effect_call(EffectEntry entry, int32_t command, void* input,
@@ -9777,16 +9783,46 @@ std::map<std::pair<std::string, int32_t>, uint32_t> g_suite_leases;
 uint32_t g_suite_acquires{};
 uint32_t g_suite_releases{};
 constexpr std::size_t kMaxMissingSuites = 16;
+constexpr std::size_t kMaxSuiteTimeline = 65536;
 std::vector<std::pair<std::string, int32_t>> g_missing_suites;
+struct SuiteTimelineEvent {
+  uint32_t sequence{};
+  bool acquire{};
+  std::string name;
+  int32_t version{};
+  std::string selector;
+  int32_t result{};
+};
+std::vector<SuiteTimelineEvent> g_suite_timeline;
+thread_local const char* g_suite_selector = "HOST";
 std::string escape(const std::string& input);
+
+void record_suite_event_locked(bool acquire, const char* name, int32_t version,
+                               int32_t result) {
+  if (g_suite_timeline.size() >= kMaxSuiteTimeline) return;
+  g_suite_timeline.push_back({
+      static_cast<uint32_t>(g_suite_timeline.size()), acquire,
+      name ? name : "", version, g_suite_selector ? g_suite_selector : "HOST", result});
+}
 
 void record_suite_acquire(const char* name, int32_t version) {
   {
     std::lock_guard<std::mutex> lock(g_suite_lease_mutex);
     ++g_suite_leases[{name, version}];
     ++g_suite_acquires;
+    record_suite_event_locked(true, name, version, 0);
   }
   if (g_trace_writer && name) g_trace_writer->suite_acquire(name, version, true);
+}
+
+void record_suite_acquire_failure(const char* name, int32_t version, int32_t result) {
+  std::lock_guard<std::mutex> lock(g_suite_lease_mutex);
+  record_suite_event_locked(true, name, version, result);
+}
+
+void record_suite_release(const char* name, int32_t version, int32_t result) {
+  std::lock_guard<std::mutex> lock(g_suite_lease_mutex);
+  record_suite_event_locked(false, name, version, result);
 }
 
 void record_missing_suite(const std::string& name, int32_t version) {
@@ -9813,6 +9849,24 @@ std::string missing_suites_report_json() {
     if (index != 0) json << ',';
     json << "{\"name\":\"" << escape(g_missing_suites[index].first)
          << "\",\"version\":" << g_missing_suites[index].second << '}';
+  }
+  json << ']';
+  return json.str();
+}
+
+std::string suite_timeline_report_json() {
+  std::lock_guard<std::mutex> lock(g_suite_lease_mutex);
+  std::ostringstream json;
+  json << ",\"suite_timeline\":[";
+  for (std::size_t index = 0; index < g_suite_timeline.size(); ++index) {
+    if (index != 0) json << ',';
+    const auto& event = g_suite_timeline[index];
+    json << "{\"sequence\":" << event.sequence
+         << ",\"action\":\"" << (event.acquire ? "acquire" : "release")
+         << "\",\"name\":\"" << escape(event.name)
+         << "\",\"version\":" << event.version
+         << ",\"selector\":\"" << escape(event.selector)
+         << "\",\"result\":" << event.result << '}';
   }
   json << ']';
   return json.str();
@@ -12739,15 +12793,22 @@ int32_t reject_suite_acquire(const char* name, int32_t version) {
   record_missing_suite(safe_name, version);
   if (g_trace_writer && !safe_name.empty())
     g_trace_writer->suite_acquire(safe_name, std::max<int32_t>(version, 0), false);
+  record_suite_acquire_failure(name, version, 1);
   std::cerr << "stage:suite_acquire_failed name=" << safe_name
             << " version=" << version << "\n" << std::flush;
   return 1;
 }
 
 int32_t __cdecl acquire_suite(const char* name, int32_t version, const void** suite) {
-  if (!suite) return 4;
+  if (!suite) {
+    record_suite_acquire_failure(name, version, 4);
+    return 4;
+  }
   *suite = nullptr;
-  if (!name) return 4;
+  if (!name) {
+    record_suite_acquire_failure(name, version, 4);
+    return 4;
+  }
   if (version == 1 && std::strcmp(name, "AE Plugin Helper Suite") == 0) {
     *suite = g_pf_helper_suite1.data();
     record_suite_acquire(name, version);
@@ -13553,14 +13614,17 @@ int32_t __cdecl acquire_suite(const char* name, int32_t version, const void** su
 
 int32_t __cdecl release_suite(const char* name, int32_t version) {
   bool released = false;
-  if (name) {
+  {
     std::lock_guard<std::mutex> lock(g_suite_lease_mutex);
-    const auto found = g_suite_leases.find({name, version});
-    if (found != g_suite_leases.end() && found->second != 0) {
-      --found->second;
-      ++g_suite_releases;
-      released = true;
+    if (name) {
+      const auto found = g_suite_leases.find({name, version});
+      if (found != g_suite_leases.end() && found->second != 0) {
+        --found->second;
+        ++g_suite_releases;
+        released = true;
+      }
     }
+    record_suite_event_locked(false, name, version, released ? 0 : 1);
   }
   if (g_trace_writer && name)
     g_trace_writer->suite_release(name, std::max<int32_t>(version, 0), released);
@@ -24320,6 +24384,7 @@ int wmain(int argc, wchar_t **argv) {
             << ",\"suite_acquires\":" << g_suite_acquires
             << ",\"suite_releases\":" << g_suite_releases
             << missing_suites_report_json()
+            << suite_timeline_report_json()
             << ",\"live_suite_lease_count\":" << live_suite_lease_count()
             << ",\"live_suite_reference_count\":" << live_suite_reference_count()
             << ",\"live_suite_leases\":\"" << live_suite_lease_summary() << "\""
@@ -24603,6 +24668,7 @@ int wmain(int argc, wchar_t **argv) {
             << ",\"suite_acquires\":" << g_suite_acquires
             << ",\"suite_releases\":" << g_suite_releases
             << missing_suites_report_json()
+            << suite_timeline_report_json()
             << ",\"live_suite_lease_count\":" << live_suite_lease_count()
             << ",\"live_suite_reference_count\":" << live_suite_reference_count()
             << ",\"live_suite_leases\":\"" << live_suite_lease_summary() << "\""

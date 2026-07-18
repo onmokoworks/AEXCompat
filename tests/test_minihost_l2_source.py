@@ -47,6 +47,21 @@ class MinihostL2SourceTests(unittest.TestCase):
         self.assertIn('L"--l2"', text)
         self.assertIn("guard_bytes_intact", text)
 
+    def test_suite_timeline_is_structured_and_selector_bound(self):
+        text = SOURCE.read_text(encoding="utf-8")
+        for marker in (
+            "struct SuiteTimelineEvent",
+            "kMaxSuiteTimeline = 65536",
+            "record_suite_event_locked",
+            "suite_timeline_report_json",
+            '\\"suite_timeline\\"',
+            "g_suite_selector = effect_selector_name(command)",
+            "record_suite_event_locked(true, name, version, 0)",
+            "record_suite_acquire_failure(name, version, 1)",
+            "record_suite_event_locked(false, name, version, 0)",
+        ):
+            self.assertIn(marker, text)
+
     def test_l2_provides_bounded_movable_handle_callbacks(self):
         text = SOURCE.read_text(encoding="utf-8")
         for marker in ("kUtilsSize = 552", "kUtilsNewHandle = 160", "new_handle(uint64_t size)",

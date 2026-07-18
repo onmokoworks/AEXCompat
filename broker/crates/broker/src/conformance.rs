@@ -326,10 +326,12 @@ fn parse_world(value: Option<&Value>) -> Result<WorldMetadata, RuntimeFailure> {
         || width > u32::MAX as u64
         || height > u32::MAX as u64
         || row_bytes < width.saturating_mul(bytes_per_pixel)
-        || extent_hint.right < extent_hint.left
-        || extent_hint.bottom < extent_hint.top
-        || extent_hint.right - extent_hint.left != i64::try_from(width).unwrap_or(i64::MAX)
-        || extent_hint.bottom - extent_hint.top != i64::try_from(height).unwrap_or(i64::MAX)
+        || extent_hint.left < 0
+        || extent_hint.top < 0
+        || extent_hint.right <= extent_hint.left
+        || extent_hint.bottom <= extent_hint.top
+        || extent_hint.right > i64::try_from(width).unwrap_or(i64::MAX)
+        || extent_hint.bottom > i64::try_from(height).unwrap_or(i64::MAX)
     {
         return Err(RuntimeFailure::new(Classification::HostValidationError));
     }
@@ -443,6 +445,15 @@ fn classify_report(path: RenderPath, report: &Value) -> Option<RuntimeFailure> {
             retry_classic: false,
         });
     }
+    match report.get("output_pixels_valid").and_then(Value::as_bool) {
+        Some(false) => {
+            return Some(RuntimeFailure::new(Classification::InvalidOutput));
+        }
+        _ => {}
+    }
+    if report.get("result_rects_valid").and_then(Value::as_bool) == Some(false) {
+        return Some(RuntimeFailure::new(Classification::HostValidationError));
+    }
     match report
         .get("worker_classification")
         .or_else(|| report.get("classification"))
@@ -546,7 +557,52 @@ pub fn runtime_failure_from_io(path: RenderPath, error: &io::Error) -> RuntimeFa
     let diagnostics = parse_bounded_json_after(&message, b"diagnostics=")
         .or_else(|| parse_bounded_json_object(&message));
     let report = parse_bounded_json_after(&message, b"report=");
-    runtime_failure_from_values(path, diagnostics.as_ref(), report.as_ref())
+    let mut failure = runtime_failure_from_values(path, diagnostics.as_ref(), report.as_ref());
+    let diagnostics_is_worker_success = diagnostics.as_ref().is_some_and(|value| {
+        value
+            .get("worker_classification")
+            .or_else(|| value.get("classification"))
+            .and_then(Value::as_str)
+            == Some("ok")
+    });
+    let report_is_worker_success = report.as_ref().is_some_and(|value| {
+        value
+            .get("worker_classification")
+            .or_else(|| value.get("classification"))
+            .and_then(Value::as_str)
+            == Some("ok")
+    });
+    if ((!diagnostics.is_some() && !report.is_some())
+        || diagnostics_is_worker_success
+        || report_is_worker_success)
+        && failure.classification == Classification::NonzeroExit
+    {
+        failure.classification = classify_broker_io_error(&message);
+        failure.selector_error = None;
+        failure.retry_classic = false;
+    }
+    failure
+}
+
+fn classify_broker_io_error(message: &str) -> Classification {
+    let message = message.to_ascii_lowercase();
+    if [
+        "worker output",
+        "output raw",
+        "output png",
+        "output file",
+        "output size",
+        "output unavailable",
+        "output dimensions",
+        "output path",
+    ]
+    .iter()
+    .any(|needle| message.contains(needle))
+    {
+        Classification::InvalidOutput
+    } else {
+        Classification::HostValidationError
+    }
 }
 
 #[cfg(windows)]
@@ -699,7 +755,7 @@ mod tests {
             "output_world": {
                 "width": 2, "height": 3, "row_bytes": row_bytes,
                 "pixel_format": pixel_format, "premultiplication": "premultiplied",
-                "extent_hint": {"left": 1, "top": 2, "right": 3, "bottom": 5}
+                "extent_hint": {"left": 0, "top": 1, "right": 2, "bottom": 3}
             }
         })
     }
@@ -715,7 +771,7 @@ mod tests {
         assert_eq!(result[0].classification, Classification::Ok);
         assert_eq!(result[0].selector.error_code, Some(0));
         assert_eq!(result[0].world.as_ref().unwrap().row_bytes, 16);
-        assert_eq!(result[0].world.as_ref().unwrap().extent_hint.left, 1);
+        assert_eq!(result[0].world.as_ref().unwrap().extent_hint.left, 0);
     }
 
     #[test]
@@ -817,6 +873,29 @@ mod tests {
     }
 
     #[test]
+    fn rejects_extent_outside_world_or_with_signed_overflow_inputs() {
+        for extent in [
+            json!({"left": -1, "top": 0, "right": 2, "bottom": 3}),
+            json!({"left": 0, "top": 0, "right": 3, "bottom": 3}),
+            json!({"left": 1, "top": 1, "right": 1, "bottom": 2}),
+            json!({"left": 0, "top": 0, "right": i64::MAX, "bottom": 3}),
+        ] {
+            let mut report = successful_report(PixelDepth::Argb8);
+            report["output_world"]["extent_hint"] = extent;
+            let mut backend = FakeBackend {
+                inspect: Ok(json!({})),
+                renders: VecDeque::from([Ok(report)]),
+            };
+            let result =
+                collect_runtime_results(&mut backend, &[RenderPath::Classic], &[PixelDepth::Argb8]);
+            assert_eq!(
+                result[0].classification,
+                Classification::HostValidationError
+            );
+        }
+    }
+
+    #[test]
     fn preserves_bounded_valid_suite_timeline() {
         let mut report = successful_report(PixelDepth::Argb8);
         report["suite_timeline"] = json!([
@@ -873,6 +952,40 @@ mod tests {
         assert_eq!(failure.classification, Classification::SelectorError);
         assert_eq!(failure.selector_error, Some(25));
         assert!(!failure.retry_classic);
+    }
+
+    #[test]
+    fn preserves_broker_io_and_validation_classifications() {
+        let output = io::Error::new(
+            io::ErrorKind::InvalidData,
+            "validated worker output size mismatch",
+        );
+        assert_eq!(
+            runtime_failure_from_io(RenderPath::Classic, &output).classification,
+            Classification::InvalidOutput
+        );
+
+        let input = io::Error::new(io::ErrorKind::InvalidData, "input image decode failed");
+        assert_eq!(
+            runtime_failure_from_io(RenderPath::Classic, &input).classification,
+            Classification::HostValidationError
+        );
+
+        let report = io::Error::other(
+            "validated worker output unavailable: error=missing, diagnostics={\"classification\":\"ok\"}, report={\"worker_classification\":\"ok\"}",
+        );
+        assert_eq!(
+            runtime_failure_from_io(RenderPath::Classic, &report).classification,
+            Classification::InvalidOutput
+        );
+
+        let diagnostics_only = io::Error::other(
+            "validated worker output unavailable: error=missing, diagnostics={\"classification\":\"ok\"}",
+        );
+        assert_eq!(
+            runtime_failure_from_io(RenderPath::Classic, &diagnostics_only).classification,
+            Classification::InvalidOutput
+        );
     }
 
     #[test]

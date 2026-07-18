@@ -4759,6 +4759,7 @@ fn render_with_artifact(
         ("max_result_rect", "max_result_rect"),
         ("input_world", "input_world"),
         ("output_world", "output_world"),
+        ("suite_timeline", "suite_timeline"),
     ] {
         report_object.insert(
             name.into(),
