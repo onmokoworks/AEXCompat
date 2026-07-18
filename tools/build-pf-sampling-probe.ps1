@@ -18,21 +18,7 @@ if (-not (Test-Path -LiteralPath $headers)) {
     throw "After Effects SDK headers were not found: $headers"
 }
 
-if (-not $CMake) {
-    $pathCommand = Get-Command cmake -ErrorAction SilentlyContinue
-    if ($pathCommand) {
-        $CMake = $pathCommand.Source
-    } else {
-        $CMake = @(
-            "C:\Program Files\Microsoft Visual Studio\18\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe",
-            "C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe",
-            "C:\Program Files\CMake\bin\cmake.exe"
-        ) | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
-    }
-}
-if (-not $CMake -or -not (Test-Path -LiteralPath $CMake)) {
-    throw "cmake.exe was not found; pass -CMake with its absolute path"
-}
+$CMake = & "$PSScriptRoot\resolve-build-cmake.ps1" $CMake $Generator
 
 $env:AE_SDK_ROOT = $AfterEffectsSdk
 & $CMake -S $source -B $build -G $Generator -A $Architecture
