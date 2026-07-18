@@ -76,6 +76,10 @@ and bounded image input/output are now the main implementation path.
   claim comment on that issue ("作業をclaimします" plus a one-line scope).
   Do not start on an issue that another session has already claimed unless
   its claim has been explicitly withdrawn.
+- When you hit a problem that looks out of scope for the task at hand, always
+  search the existing GitHub issues first; if none covers it, file a new issue
+  describing the observation before continuing. Do not silently fix it in the
+  current PR, and do not drop it unrecorded.
 - A PR that implements a claimed issue must carry `Closes #N` in its body.
   Without a corresponding issue, reference related issues with `Refs #N`
   instead; never `Closes` an issue the PR does not actually complete.
