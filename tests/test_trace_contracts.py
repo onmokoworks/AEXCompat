@@ -122,6 +122,15 @@ class TraceContractTests(unittest.TestCase):
             validate_event(enter),
         )
 
+    def test_known_function_requires_native_observation_host_kind(self):
+        # Observation payloads must not masquerade as evidence-tier host events.
+        enter = copy.deepcopy(load_native_observation_events()[1])
+        enter["host_kind"] = "minihost"
+        self.assertIn(
+            "known_function_invoke requires host_kind native_observation",
+            validate_event(enter),
+        )
+
     def test_known_function_lowercase_absolute_address_is_rejected(self):
         # A lowercased 64-bit ASLR address matches the hex shape but is not a
         # module-relative offset; the magnitude bound must reject it.

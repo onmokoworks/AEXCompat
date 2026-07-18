@@ -256,8 +256,11 @@ def run_observation(
     argv = build_worker_argv(worker_program, render_args)
     pid = device.spawn(argv)
     completed = False
-    with _JobIsolation(pid):  # pragma: no cover - requires frida runtime + worker
-        try:
+    try:  # pragma: no cover - requires frida runtime + worker
+        # The kill wraps the Job Object context so that even a failure inside
+        # _JobIsolation.__enter__ (e.g. job assignment denied) still terminates the
+        # suspended spawned worker rather than leaking it.
+        with _JobIsolation(pid):
             session = device.attach(pid)
             script = session.create_script(script_source)
             script.on("message", on_message)
@@ -278,11 +281,11 @@ def run_observation(
             # loader path we do not watch), hooks never install and an empty trace
             # must not be reported as complete.
             completed = exited and collector.installed_hook_count == expected_hook_count
-        finally:
-            try:
-                device.kill(pid)
-            except frida.ProcessNotFoundError:
-                pass
+    finally:
+        try:
+            device.kill(pid)
+        except frida.ProcessNotFoundError:
+            pass
 
     session = collector.finalize(completed=completed)
     destination = write_session_jsonl(session, out_path)
@@ -391,6 +394,20 @@ class _JobIsolation:  # pragma: no cover - Windows runtime path
         return False
 
 
+def _process_alive(device, pid) -> bool:  # pragma: no cover - runtime path
+    """PID-aware liveness check.
+
+    ``Device.get_process`` takes a process *name* (it lowercases the argument),
+    so passing an int raises ``AttributeError``. Enumerate by PID instead.
+    """
+
+    try:
+        procs = device.enumerate_processes(pids=[pid])
+    except TypeError:  # older frida without the pids filter
+        procs = [p for p in device.enumerate_processes() if p.pid == pid]
+    return any(p.pid == pid for p in procs)
+
+
 def _await_exit(frida_module, device, pid, timeout_seconds) -> bool:  # pragma: no cover - runtime path
     """Return True if the worker exited within the timeout, False on timeout/hang."""
 
@@ -398,9 +415,7 @@ def _await_exit(frida_module, device, pid, timeout_seconds) -> bool:  # pragma: 
 
     deadline = time.monotonic() + timeout_seconds
     while time.monotonic() < deadline:
-        try:
-            device.get_process(pid)
-        except frida_module.ProcessNotFoundError:
+        if not _process_alive(device, pid):
             return True
         time.sleep(0.05)
     return False

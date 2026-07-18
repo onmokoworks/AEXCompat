@@ -107,6 +107,10 @@ def validate_event(event: Any) -> list[str]:
             if world["pixel_format"] not in PIXEL_FORMATS:
                 errors.append("world.pixel_format is unsupported")
     if kind == "known_function_invoke":
+        # The observation/evidence boundary: known-function payloads are
+        # observation-only and must not masquerade as an evidence-tier host event.
+        if event.get("host_kind") != "native_observation":
+            errors.append("known_function_invoke requires host_kind native_observation")
         known = event.get("known_function")
         allowed = {"symbol", "module_label", "module_rva", "phase", "return_value", "fields"}
         required = {"symbol", "module_label", "module_rva", "phase"}

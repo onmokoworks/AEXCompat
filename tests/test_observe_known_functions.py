@@ -172,6 +172,48 @@ class OutputPathSafetyTests(unittest.TestCase):
                 stray.unlink()
 
 
+class ProcessLivenessTests(unittest.TestCase):
+    def test_await_exit_uses_pid_aware_enumeration(self):
+        import tools.observe_known_functions as obs
+
+        class FakeProc:
+            def __init__(self, pid):
+                self.pid = pid
+
+        class FakeDevice:
+            def __init__(self):
+                self.calls = []
+
+            def enumerate_processes(self, pids=None):
+                self.calls.append(pids)
+                # PID present on the first poll, gone on the next.
+                if len(self.calls) == 1:
+                    return [FakeProc(4321)]
+                return []
+
+        device = FakeDevice()
+        # No get_process(name) call: liveness is decided by PID enumeration.
+        self.assertTrue(obs._process_alive(device, 4321))
+        self.assertFalse(obs._process_alive(device, 4321))
+        self.assertEqual([[4321], [4321]], device.calls)
+
+    def test_process_alive_falls_back_without_pids_filter(self):
+        import tools.observe_known_functions as obs
+
+        class FakeProc:
+            def __init__(self, pid):
+                self.pid = pid
+
+        class OldDevice:
+            def enumerate_processes(self, pids=None):
+                if pids is not None:
+                    raise TypeError("unexpected keyword 'pids'")
+                return [FakeProc(1), FakeProc(4321)]
+
+        self.assertTrue(obs._process_alive(OldDevice(), 4321))
+        self.assertFalse(obs._process_alive(OldDevice(), 9999))
+
+
 class LiveObservationIntegrationTests(unittest.TestCase):
     """End-to-end run_observation() path: Frida spawn/attach/plan/resume/kill.
 
