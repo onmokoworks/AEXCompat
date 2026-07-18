@@ -273,6 +273,8 @@ def resolve_spec(spec: dict[str, Any], offset_map: Any) -> dict[str, Any]:
     if not isinstance(spec, dict):
         raise ResolutionError("spec must be an object")
     _reject_unknown(spec, SPEC_KEYS, "spec")
+    if spec.get("schema_version") != 1:
+        raise ResolutionError("schema_version must be 1")
     if spec.get("spec_kind") != "known_function_hook_set":
         raise ResolutionError("spec_kind must be known_function_hook_set")
     module_label = spec.get("module_label")

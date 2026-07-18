@@ -110,6 +110,17 @@ class ResolveTests(unittest.TestCase):
             resolve_spec(spec, self.offset_map)
         self.assertIn("return_width", str(ctx.exception))
 
+    def test_unsupported_schema_version_is_rejected(self):
+        for version in (2, None):
+            spec = copy.deepcopy(self.spec)
+            if version is None:
+                spec.pop("schema_version", None)
+            else:
+                spec["schema_version"] = version
+            with self.assertRaises(ResolutionError) as ctx:
+                resolve_spec(spec, self.offset_map)
+            self.assertIn("schema_version", str(ctx.exception))
+
     def test_return_width_without_return_as_is_rejected(self):
         spec = copy.deepcopy(self.spec)
         spec["hooks"][0].pop("return_as", None)
