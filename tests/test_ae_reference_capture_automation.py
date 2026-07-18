@@ -42,7 +42,7 @@ def test_reference_capture_contract_is_hash_bound_create_new_and_temporary():
     # After the result appears the runner waits for the launched process to
     # finish quitting (the wrapper can briefly hold the output PNG), and a
     # quit that outlives the bound is an explicit failure, not a silent pass.
-    assert "$process.WaitForExit(30000)" in runner
+    assert "$process.WaitForExit($TimeoutSeconds * 1000)" in runner
     assert "After Effects did not exit after writing the capture result" in runner
     assert "-r \"{0}\"" in runner
     assert "Resolve-Path -LiteralPath $ScriptPath" in runner

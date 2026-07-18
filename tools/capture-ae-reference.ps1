@@ -166,7 +166,10 @@ try {
     # trips the next capture's already-running gate. Wait on the launched
     # process itself, so the bound applies only to this capture's identity,
     # and report a quit that outlives it as a failure, not a silent success.
-    if (-not $process.WaitForExit(30000) -and -not $process.HasExited) {
+    # The shutdown gets the same configured patience as the capture itself,
+    # so the TimeoutSeconds knob covers all AE work (a slow quit on a large
+    # output is not a failure as long as the caller allowed the time).
+    if (-not $process.WaitForExit($TimeoutSeconds * 1000) -and -not $process.HasExited) {
         & taskkill.exe /PID $process.Id /T /F 2>$null | Out-Null
         throw 'After Effects did not exit after writing the capture result.'
     }

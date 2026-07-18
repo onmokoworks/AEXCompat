@@ -460,7 +460,8 @@ install as every capture in this note):
    failed with a sharing violation and succeeded on retry), and another
    still showed the `AfterFX.com` process alive right after the runner
    returned; it exited on its own within seconds. The runner therefore now
-   waits (30 s bound) on the process it launched after the result appears,
+   waits (bounded by the same `-TimeoutSeconds` knob as the capture
+   itself) on the process it launched after the result appears,
    so callers can hash the PNG and start the next capture immediately; a
    quit that outlives the bound is killed and reported as a failure rather
    than returned as success. Both that kill and the no-result timeout kill
