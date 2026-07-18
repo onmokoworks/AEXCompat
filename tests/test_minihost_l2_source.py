@@ -12,12 +12,14 @@ PF_SUITES_SOURCE = ROOT / "minihost" / "src" / "worker_pf_suites.cpp"
 RENDER_HEADER = ROOT / "minihost" / "src" / "render_subsystem.h"
 RENDER_SOURCE = ROOT / "minihost" / "src" / "render_subsystem.cpp"
 PF_SUITES_INTERNAL = ROOT / "minihost" / "src" / "worker_pf_suites_internal.hpp"
+AEGP_SCENE_SOURCE = ROOT / "minihost" / "src" / "worker_aegp_scene.cpp"
+AEGP_SCENE_IMPL = ROOT / "minihost" / "src" / "worker_aegp_scene_impl.inc"
 MINIHOST_CMAKE = ROOT / "minihost" / "CMakeLists.txt"
 
 
 def l2_family_source():
     return "\n".join(path.read_text(encoding="utf-8") for path in (
-        ROOT / "minihost" / "src" / "l2_main.cpp", PF_SUITES_HEADER, PF_SUITES_SOURCE
+        SOURCE, PF_SUITES_HEADER, PF_SUITES_SOURCE, AEGP_SCENE_SOURCE, AEGP_SCENE_IMPL
     ))
 
 
