@@ -53,6 +53,7 @@ mod windows_e2e {
             plugin_basename: basename,
             args_before_plugin: &before,
             args_after_plugin: &after,
+            repository: &worker_dir.0,
             require_module_audit: false,
         };
 
@@ -86,6 +87,7 @@ mod windows_e2e {
             plugin_basename: "fixture.plugin",
             args_before_plugin: &before,
             args_after_plugin: &[],
+            repository: &worker_dir.0,
             require_module_audit: false,
         };
 
@@ -141,6 +143,7 @@ mod windows_e2e {
             plugin_basename: "fixture.plugin",
             args_before_plugin: &before,
             args_after_plugin: &after,
+            repository: &worker_dir.0,
             require_module_audit: false,
         };
 

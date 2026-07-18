@@ -64,16 +64,6 @@ pub fn dispatch_secure_gpu_image(
     dispatch_secure_image(input)
 }
 
-#[cfg(windows)]
-fn minidump_dispatch_args(repository: &Path) -> io::Result<Vec<String>> {
-    crate::image_render::minidump_dispatch_args(repository)
-}
-
-#[cfg(not(windows))]
-fn minidump_dispatch_args(_repository: &Path) -> io::Result<Vec<String>> {
-    Ok(Vec::new())
-}
-
 pub fn dispatch_secure_image(input: SecureImageDispatch<'_>) -> io::Result<SecureLaunchResult> {
     let worker_program = input
         .repository
@@ -87,32 +77,16 @@ pub fn dispatch_secure_image(input: SecureImageDispatch<'_>) -> io::Result<Secur
         .collect::<io::Result<Vec<_>>>()?;
     let tree = SealedLoadTree::create(main, dependencies)?;
     let (worker_sha256, worker_size) = admit_local_worker(&worker_program)?;
-    // Opt-in crash minidumps (issue #18) apply to every worker kind, so the
-    // flag is injected here, once, at the tail of args_after_plugin. The
-    // worker strips the trailing pair before its kind-specific dispatch. The
-    // resolver lives in the Windows-only image_render module, so a thin
-    // cfg-gated shim keeps this unconditionally-compiled module building on
-    // non-Windows, where dispatch already fails closed.
-    let minidump_args = minidump_dispatch_args(input.repository)?;
-    let args_after_owned: Vec<String>;
-    let args_after_plugin: &[String] = if minidump_args.is_empty() {
-        input.args_after_plugin
-    } else {
-        args_after_owned = input
-            .args_after_plugin
-            .iter()
-            .cloned()
-            .chain(minidump_args)
-            .collect();
-        &args_after_owned
-    };
     let request = SecureLaunchRequest {
         worker_program: &worker_program,
         worker_expected_sha256: worker_sha256,
         worker_expected_size: worker_size,
         plugin_basename: &plugin_basename,
         args_before_plugin: input.args_before_plugin,
-        args_after_plugin,
+        args_after_plugin: input.args_after_plugin,
+        // Opt-in crash minidumps (issue #18) are injected uniformly in
+        // secure_launch for every sealed dispatch.
+        repository: input.repository,
         require_module_audit: true,
     };
     secure_launch(tree, request, input.timeout)
