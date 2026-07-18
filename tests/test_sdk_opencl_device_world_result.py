@@ -54,6 +54,7 @@ def test_opencl_device_world_evidence_records_exact_public_rgba8_conformance():
 
 def test_opencl_boundary_and_fixture_build_markers_are_present():
     source = (ROOT / "minihost" / "src" / "l2_main.cpp").read_text()
+    transport = (ROOT / "minihost" / "src" / "gpu_memory_world_transport.cpp").read_text()
     backend = (ROOT / "minihost" / "src" / "gpu_opencl_backend.cpp").read_text()
     for marker in (
         'LoadLibraryExW(L"OpenCL.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32)',
@@ -71,10 +72,10 @@ def test_opencl_boundary_and_fixture_build_markers_are_present():
 
     for marker in (
         'smart_command == L"--smart-image32-opencl"',
-        "g_opencl_upload_bytes += input_size",
-        "g_opencl_download_bytes += output_size",
     ):
         assert marker in source
+    assert "opencl_upload_bytes += input_size" in transport
+    assert "opencl_download_bytes += output_size" in transport
 
     build = (ROOT / "tools" / "build-sdk-invert-opencl.ps1").read_text()
     for marker in (

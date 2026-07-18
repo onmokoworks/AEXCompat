@@ -25,8 +25,8 @@ def test_gpu_device_suite_memory_probe_is_balanced_and_rejects_double_free():
 
 
 def test_gpu_device_suite_has_no_unsupported_slots_and_is_bounded():
-    source = (ROOT / "minihost" / "src" / "l2_main.cpp").read_text()
-    table = source[source.index("std::array<void*, 15> g_gpu_device_suite1") :]
+    source = (ROOT / "minihost" / "src" / "gpu_memory_world_transport.cpp").read_text()
+    table = source[source.index("std::array<void*, 15> gpu_device_suite1") :]
     table = table[: table.index("};")]
     assert "gpu_unsupported" not in table
     assert "kMaxGpuAllocations = 256" in source

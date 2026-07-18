@@ -6,6 +6,7 @@ HEADER = ROOT / "minihost" / "src" / "gpu_opencl_backend.hpp"
 SOURCE = ROOT / "minihost" / "src" / "gpu_opencl_backend.cpp"
 MAIN = ROOT / "minihost" / "src" / "l2_main.cpp"
 CMAKE = ROOT / "minihost" / "CMakeLists.txt"
+TRANSPORT = ROOT / "minihost" / "src" / "gpu_memory_world_transport.cpp"
 
 
 def test_opencl_loader_and_context_ownership_are_isolated_and_bounded():
@@ -31,20 +32,21 @@ def test_opencl_loader_and_context_ownership_are_isolated_and_bounded():
     assert "LoadLibraryExW(L\"OpenCL.dll\"" not in main
 
 
-def test_opencl_transport_and_orchestration_stay_in_l2_main():
+def test_opencl_transport_is_isolated_while_orchestration_stays_in_l2_main():
     source = SOURCE.read_text(encoding="utf-8")
     main = MAIN.read_text(encoding="utf-8")
     cmake = CMAKE.read_text(encoding="utf-8")
 
+    transport = TRANSPORT.read_text(encoding="utf-8")
     for marker in (
-        "g_gpu_device_memory",
         "CudaRenderTransport",
         "smart_opencl",
-        "opencl::begin_context(gpu_device_index)",
-        "g_opencl_upload_bytes += input_size",
-        "g_opencl_download_bytes += output_size",
+        "gpu_transport::begin_backend_context",
     ):
         assert marker in main
-    assert "CudaRenderTransport" not in source
+    for marker in ("g_device_memory", "opencl_upload_bytes += input_size",
+                   "opencl_download_bytes += output_size"):
+        assert marker in transport
     assert "g_gpu_device_memory" not in source
     assert "src/gpu_opencl_backend.cpp" in cmake
+    assert "src/gpu_memory_world_transport.cpp" in cmake

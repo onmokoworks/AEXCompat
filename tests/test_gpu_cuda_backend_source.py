@@ -5,6 +5,7 @@ ROOT = Path(__file__).resolve().parents[1]
 HEADER = ROOT / "minihost" / "src" / "gpu_cuda_backend.hpp"
 SOURCE = ROOT / "minihost" / "src" / "gpu_cuda_backend.cpp"
 MAIN = ROOT / "minihost" / "src" / "l2_main.cpp"
+TRANSPORT = ROOT / "minihost" / "src" / "gpu_memory_world_transport.cpp"
 CMAKE = ROOT / "minihost" / "CMakeLists.txt"
 
 
@@ -51,10 +52,12 @@ def test_smart_gpu_stage_and_module_audit_semantics_remain_in_main():
     setdown_audit = main.index("capture_module_audit();", render_stage)
     setdown_stage = main.index('"stage:gpu_device_setdown_begin', setdown_audit)
     cleanup_audit = main.index("if (gpu_negotiation) capture_module_audit();", setdown_stage)
-    cleanup = main.index("end_cuda_context()", cleanup_audit)
+    cleanup = main.index("end_backend_context(gpu_framework)", cleanup_audit)
     assert setup_audit < setup_stage < render_stage < setdown_audit < setdown_stage
     assert setdown_stage < cleanup_audit < cleanup
 
-    assert "g_gpu_device_memory" in main
+    transport = TRANSPORT.read_text(encoding="utf-8")
+    assert "g_device_memory" in transport
     assert "CudaRenderTransport" in main
     assert "prepare_cuda_render_transport" in main
+    assert "prepare_render_transport" in transport

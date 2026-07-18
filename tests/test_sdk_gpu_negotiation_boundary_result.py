@@ -5,6 +5,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 EVIDENCE = ROOT / "analysis" / "SDK_GPU_NEGOTIATION_BOUNDARY_RESULT_2026-07-15.json"
 SOURCE = ROOT / "minihost" / "src" / "l2_main.cpp"
+TRANSPORT = ROOT / "minihost" / "src" / "gpu_memory_world_transport.cpp"
 BROKER = ROOT / "broker" / "crates" / "broker" / "src" / "image_render.rs"
 
 
@@ -40,12 +41,13 @@ def test_gpu_abi_and_suite_table_are_explicit():
         "write<int32_t>(smart_input, 64",
         "write<uint32_t>(smart_input, 68",
         "write<int32_t>(setdown_input, 8, gpu_framework)",
-        "std::array<void*, 15> g_gpu_device_suite1",
         'std::strcmp(name, "PF GPU Device Suite") == 0 && version == 1',
         "kPixelFormatGpuBgra128",
         "result.output_pixels_valid = !logical_output.empty() && !output_untouched && output_finite",
     ):
         assert marker in source
+    transport = TRANSPORT.read_text(encoding="utf-8")
+    assert "std::array<void*, 15> gpu_device_suite1" in transport
     assert "write<int32_t>(setdown_input, 8, 4)" not in source
 
 

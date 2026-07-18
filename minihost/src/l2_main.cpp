@@ -49,6 +49,7 @@
 #include "gpu_device_info_registry.hpp"
 #include "gpu_directx_backend.hpp"
 #include "gpu_opencl_backend.hpp"
+#include "gpu_memory_world_transport.hpp"
 #include "parameter_animation_transport.hpp"
 #include "pf_cache_on_load_suite.hpp"
 #include "render_lifecycle.hpp"
@@ -11066,547 +11067,61 @@ bool isolated_aegp_read_cache_is_bounded() {
 
 constexpr uint32_t kMaxCudaDevices = kMaxGpuDevices;
 
-constexpr std::size_t kMaxGpuAllocations = 256;
-constexpr std::size_t kMaxGpuAllocationBytes = 256u * 1024u * 1024u;
-uint64_t g_cuda_upload_bytes{};
-uint64_t g_cuda_download_bytes{};
-uint32_t g_cuda_sync_failures{};
-uint32_t g_last_cuda_device_count{};
-uint32_t g_last_cuda_device_index{};
 
-bool begin_cuda_context(uint32_t active_device_index) {
-  const bool started = cuda_backend().begin(active_device_index);
-  if (cuda_backend().device_count() != 0)
-    g_last_cuda_device_count = cuda_backend().device_count();
-  g_last_cuda_device_index = active_device_index;
-  g_cuda_context_for_info = cuda_backend().active_context();
-  return started;
+namespace gpu_transport = aexcompat::gpu_runtime::memory_world_transport;
+using CudaRenderTransport = gpu_transport::RenderTransport;
+auto& g_gpu_device_suite1 = gpu_transport::gpu_device_suite1;
+auto& g_cuda_upload_bytes = gpu_transport::cuda_upload_bytes;
+auto& g_cuda_download_bytes = gpu_transport::cuda_download_bytes;
+auto& g_cuda_sync_failures = gpu_transport::cuda_sync_failures;
+auto& g_last_cuda_device_count = gpu_transport::last_cuda_device_count;
+auto& g_last_cuda_device_index = gpu_transport::last_cuda_device_index;
+auto& g_opencl_upload_bytes = gpu_transport::opencl_upload_bytes;
+auto& g_opencl_download_bytes = gpu_transport::opencl_download_bytes;
+auto& g_opencl_sync_failures = gpu_transport::opencl_sync_failures;
+auto& g_gpu_allocations_created = gpu_transport::allocations_created;
+auto& g_gpu_allocations_freed = gpu_transport::allocations_freed;
+auto& g_invalid_gpu_memory_operations = gpu_transport::invalid_memory_operations;
+
+bool host_owns_gpu_fallback_world(void* world) {
+  std::lock_guard<std::mutex> lock(g_world_mutex);
+  return g_owned_worlds.count(world) != 0;
 }
 
-bool end_cuda_context() {
-  const bool valid = cuda_backend().end();
-  g_cuda_context_for_info = nullptr;
-  return valid;
+bool host_recognizes_smart_gpu_world(void* world) {
+  return world && (world == g_smart_input_world || world == g_smart_output_world);
 }
 
-uint64_t g_opencl_upload_bytes{};
-uint64_t g_opencl_download_bytes{};
-uint32_t g_opencl_sync_failures{};
-
-std::mutex g_gpu_memory_mutex;
-std::unordered_map<void*, std::size_t> g_gpu_device_memory;
-std::unordered_map<void*, std::size_t> g_gpu_host_memory;
-std::size_t g_gpu_memory_bytes{};
-uint32_t g_gpu_exclusive_access_depth{};
-uint64_t g_gpu_allocations_created{};
-uint64_t g_gpu_allocations_freed{};
-uint64_t g_invalid_gpu_memory_operations{};
-
-uint32_t active_gpu_device_index() {
-  if (directx_backend::active()) return directx_backend::active_device_index();
-  return opencl::active() ? opencl::active_device_index() : cuda_backend().active_device_index();
-}
-
-int32_t __cdecl gpu_acquire_exclusive(void*, uint32_t index) {
-  std::lock_guard<std::mutex> lock(g_gpu_memory_mutex);
-  if (index != active_gpu_device_index() || g_gpu_exclusive_access_depth == 64) {
-    ++g_invalid_gpu_memory_operations;
-    return 4;
-  }
-  if (cuda_backend().active() && !cuda_backend().push(index)) {
-    ++g_invalid_gpu_memory_operations;
-    return 4;
-  }
-  ++g_gpu_exclusive_access_depth;
-  return 0;
-}
-
-int32_t __cdecl gpu_release_exclusive(void*, uint32_t index) {
-  std::lock_guard<std::mutex> lock(g_gpu_memory_mutex);
-  if (index != active_gpu_device_index() || g_gpu_exclusive_access_depth == 0) {
-    ++g_invalid_gpu_memory_operations;
-    return 4;
-  }
-  if (cuda_backend().active()) {
-    if (!cuda_backend().pop(index)) {
-      ++g_invalid_gpu_memory_operations;
-      return 4;
-    }
-  }
-  --g_gpu_exclusive_access_depth;
-  return 0;
-}
-
-int32_t gpu_allocate_memory(uint32_t index, std::size_t size, void** memory,
-                            std::unordered_map<void*, std::size_t>& allocations) {
-  if (index != active_gpu_device_index() || !memory || size == 0 ||
-      size > kMaxGpuAllocationBytes) return 4;
-  std::lock_guard<std::mutex> lock(g_gpu_memory_mutex);
-  *memory = nullptr;
-  if (g_gpu_device_memory.size() + g_gpu_host_memory.size() >= kMaxGpuAllocations ||
-      g_gpu_memory_bytes > kMaxGpuAllocationBytes - size) return 4;
-  void* allocated = ::operator new(size, std::nothrow);
-  if (!allocated) return 2;
-  allocations.emplace(allocated, size);
-  g_gpu_memory_bytes += size;
-  ++g_gpu_allocations_created;
-  *memory = allocated;
-  return 0;
-}
-
-int32_t gpu_free_memory(uint32_t index, void* memory,
-                        std::unordered_map<void*, std::size_t>& allocations) {
-  std::lock_guard<std::mutex> lock(g_gpu_memory_mutex);
-  const auto found = allocations.find(memory);
-  if (index != active_gpu_device_index() || !memory || found == allocations.end()) {
-    ++g_invalid_gpu_memory_operations;
-    return 4;
-  }
-  g_gpu_memory_bytes -= found->second;
-  allocations.erase(found);
-  ::operator delete(memory);
-  ++g_gpu_allocations_freed;
-  return 0;
-}
-
-int32_t __cdecl gpu_allocate_device_memory(void*, uint32_t index, std::size_t size,
-                                             void** memory) {
-  if (directx_backend::active()) {
-    if (index != active_gpu_device_index() || !memory || size == 0 ||
-        size > kMaxGpuAllocationBytes) return 4;
-    std::lock_guard<std::mutex> lock(g_gpu_memory_mutex);
-    *memory = nullptr;
-    if (g_gpu_device_memory.size() + g_gpu_host_memory.size() >= kMaxGpuAllocations ||
-        g_gpu_memory_bytes > kMaxGpuAllocationBytes - size) return 4;
-    D3D12_HEAP_PROPERTIES heap{};
-    heap.Type = D3D12_HEAP_TYPE_DEFAULT;
-    D3D12_RESOURCE_DESC description{};
-    description.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
-    description.Width = size;
-    description.Height = 1;
-    description.DepthOrArraySize = 1;
-    description.MipLevels = 1;
-    description.SampleDesc.Count = 1;
-    description.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
-    description.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
-    ID3D12Resource* resource{};
-    if (FAILED(directx_backend::device(index)->CreateCommittedResource(
-            &heap, D3D12_HEAP_FLAG_NONE, &description, D3D12_RESOURCE_STATE_COMMON,
-            nullptr, IID_PPV_ARGS(&resource)))) return 2;
-    *memory = resource;
-    g_gpu_device_memory.emplace(resource, size);
-    g_gpu_memory_bytes += size;
-    ++g_gpu_allocations_created;
-    return 0;
-  }
-  if (opencl::active()) {
-    if (index != active_gpu_device_index() || !memory || size == 0 ||
-        size > kMaxGpuAllocationBytes) return 4;
-    std::lock_guard<std::mutex> lock(g_gpu_memory_mutex);
-    *memory = nullptr;
-    if (g_gpu_device_memory.size() + g_gpu_host_memory.size() >= kMaxGpuAllocations ||
-        g_gpu_memory_bytes > kMaxGpuAllocationBytes - size) return 4;
-    opencl::Int error = opencl::kSuccess;
-    *memory = opencl::create_buffer(index, opencl::kMemReadWrite, size, nullptr, &error);
-    if (error != opencl::kSuccess || !*memory) return 2;
-    g_gpu_device_memory.emplace(*memory, size);
-    g_gpu_memory_bytes += size;
-    ++g_gpu_allocations_created;
-    return 0;
-  }
-  if (!cuda_backend().active())
-    return gpu_allocate_memory(index, size, memory, g_gpu_device_memory);
-  if (index != active_gpu_device_index() || !memory || size == 0 ||
-      size > kMaxGpuAllocationBytes) return 4;
-  std::lock_guard<std::mutex> lock(g_gpu_memory_mutex);
-  *memory = nullptr;
-  if (g_gpu_device_memory.size() + g_gpu_host_memory.size() >= kMaxGpuAllocations ||
-      g_gpu_memory_bytes > kMaxGpuAllocationBytes - size) return 4;
-  CudaDevicePointer allocated{};
-  if (!cuda_backend().allocate(&allocated, size) || allocated == 0) return 2;
-  void* pointer = reinterpret_cast<void*>(static_cast<uintptr_t>(allocated));
-  g_gpu_device_memory.emplace(pointer, size);
-  g_gpu_memory_bytes += size;
-  ++g_gpu_allocations_created;
-  *memory = pointer;
-  return 0;
-}
-
-int32_t __cdecl gpu_free_device_memory(void*, uint32_t index, void* memory) {
-  if (directx_backend::active()) {
-    std::lock_guard<std::mutex> lock(g_gpu_memory_mutex);
-    const auto found = g_gpu_device_memory.find(memory);
-    if (index != active_gpu_device_index() || !memory ||
-        found == g_gpu_device_memory.end()) {
-      ++g_invalid_gpu_memory_operations;
-      return 4;
-    }
-    static_cast<ID3D12Resource*>(memory)->Release();
-    g_gpu_memory_bytes -= found->second;
-    g_gpu_device_memory.erase(found);
-    ++g_gpu_allocations_freed;
-    return 0;
-  }
-  if (opencl::active()) {
-    std::lock_guard<std::mutex> lock(g_gpu_memory_mutex);
-    const auto found = g_gpu_device_memory.find(memory);
-    if (index != active_gpu_device_index() || !memory ||
-        found == g_gpu_device_memory.end()) {
-      ++g_invalid_gpu_memory_operations;
-      return 4;
-    }
-    if (opencl::release_mem(memory) != opencl::kSuccess) return 4;
-    g_gpu_memory_bytes -= found->second;
-    g_gpu_device_memory.erase(found);
-    ++g_gpu_allocations_freed;
-    return 0;
-  }
-  if (!cuda_backend().active())
-    return gpu_free_memory(index, memory, g_gpu_device_memory);
-  std::lock_guard<std::mutex> lock(g_gpu_memory_mutex);
-  const auto found = g_gpu_device_memory.find(memory);
-  if (index != active_gpu_device_index() || !memory ||
-      found == g_gpu_device_memory.end() || !cuda_backend().active()) {
-    ++g_invalid_gpu_memory_operations;
-    return 4;
-  }
-  if (!cuda_backend().free(
-          static_cast<CudaDevicePointer>(reinterpret_cast<uintptr_t>(memory)))) return 4;
-  g_gpu_memory_bytes -= found->second;
-  g_gpu_device_memory.erase(found);
-  ++g_gpu_allocations_freed;
-  return 0;
-}
-
-int32_t __cdecl gpu_purge_memory(void*, uint32_t index, std::size_t, std::size_t* purged) {
-  if (index != active_gpu_device_index()) return 4;
-  if (purged) *purged = 0;
-  return 0;
-}
-
-int32_t __cdecl gpu_allocate_host_memory(void*, uint32_t index, std::size_t size,
-                                          void** memory) {
-  if (cuda_backend().active()) {
-    if (index != active_gpu_device_index() || !memory || size == 0 ||
-        size > kMaxGpuAllocationBytes) return 4;
-    std::lock_guard<std::mutex> lock(g_gpu_memory_mutex);
-    *memory = nullptr;
-    if (g_gpu_device_memory.size() + g_gpu_host_memory.size() >= kMaxGpuAllocations ||
-        g_gpu_memory_bytes > kMaxGpuAllocationBytes - size) return 4;
-    if (!cuda_backend().allocate_host(memory, size) || !*memory) return 2;
-    g_gpu_host_memory.emplace(*memory, size);
-    g_gpu_memory_bytes += size;
-    ++g_gpu_allocations_created;
-    return 0;
-  }
-  return gpu_allocate_memory(index, size, memory, g_gpu_host_memory);
-}
-
-int32_t __cdecl gpu_free_host_memory(void*, uint32_t index, void* memory) {
-  if (cuda_backend().active()) {
-    std::lock_guard<std::mutex> lock(g_gpu_memory_mutex);
-    const auto found = g_gpu_host_memory.find(memory);
-    if (index != active_gpu_device_index() || !memory || found == g_gpu_host_memory.end()) {
-      ++g_invalid_gpu_memory_operations;
-      return 4;
-    }
-    if (!cuda_backend().free_host(memory)) return 4;
-    g_gpu_memory_bytes -= found->second;
-    g_gpu_host_memory.erase(found);
-    ++g_gpu_allocations_freed;
-    return 0;
-  }
-  return gpu_free_memory(index, memory, g_gpu_host_memory);
-}
-
-bool gpu_memory_lifetimes_balanced() {
-  std::lock_guard<std::mutex> lock(g_gpu_memory_mutex);
-  return g_gpu_device_memory.empty() && g_gpu_host_memory.empty() &&
-      g_gpu_memory_bytes == 0 && g_gpu_exclusive_access_depth == 0;
-}
-
-std::unordered_map<void*, uint32_t> g_gpu_created_worlds;
-
-int32_t __cdecl gpu_create_world(void*, uint32_t index, int32_t width, int32_t height,
-                                  LocalRationalScale, int32_t, int32_t pixel_format,
-                                  uint8_t clear_pixels, void** world) {
-  if (index != active_gpu_device_index() || !world || pixel_format != kPixelFormatGpuBgra128 ||
-      width <= 0 || height <= 0 || width > 4096 || height > 4096) return 4;
-  if (!cuda_backend().active() && !opencl::active() && !directx_backend::active()) {
-    auto descriptor = std::make_unique<std::array<std::byte, kEffectWorldSize>>();
-    const int32_t error = new_world(nullptr, width, height, clear_pixels != 0,
-                                    pixel_format, descriptor->data());
-    if (error != 0) return error;
-    *world = descriptor.release();
-    g_gpu_created_worlds.emplace(*world, index);
-    return 0;
-  }
-  const uint64_t rowbytes64 = static_cast<uint64_t>(width) * 16;
-  const uint64_t size64 = rowbytes64 * static_cast<uint64_t>(height);
-  if (size64 == 0 || size64 > kMaxGpuAllocationBytes) return 4;
-  auto descriptor = std::make_unique<std::array<std::byte, kEffectWorldSize>>();
-  void* pixels{};
-  const int32_t error = gpu_allocate_device_memory(
-      nullptr, index, static_cast<std::size_t>(size64), &pixels);
-  if (error != 0) return error;
-  bool initialized = false;
-  if (directx_backend::active()) {
-    // Buffers begin in COMMON; the SDK sample relies on buffer state promotion
-    // for its raw SRV/UAV views and synchronizes each dispatch on the host queue.
-    initialized = true;
-  } else if (opencl::active()) {
-    const unsigned char pattern = clear_pixels ? 0 : 0xCD;
-    initialized = opencl::enqueue_fill(index, pixels, &pattern, sizeof(pattern), 0,
-        static_cast<std::size_t>(size64)) == opencl::kSuccess;
-  } else {
-    const CudaDevicePointer device = static_cast<CudaDevicePointer>(
-        reinterpret_cast<uintptr_t>(pixels));
-    initialized = cuda_backend().memset(
-        device, clear_pixels ? 0 : 0xCD, static_cast<std::size_t>(size64));
-  }
-  if (!initialized) {
-    gpu_free_device_memory(nullptr, index, pixels);
-    return 4;
-  }
-  descriptor->fill(std::byte{});
-  const int32_t flags = 3;
-  const int32_t rowbytes = static_cast<int32_t>(rowbytes64);
-  const std::array<int32_t, 4> extent{0, 0, width, height};
-  const int32_t aspect_num = 1;
-  const uint32_t aspect_den = 1;
-  std::memcpy(descriptor->data() + 16, &flags, sizeof(flags));
-  std::memcpy(descriptor->data() + 24, &pixels, sizeof(pixels));
-  std::memcpy(descriptor->data() + 32, &rowbytes, sizeof(rowbytes));
-  std::memcpy(descriptor->data() + 36, &width, sizeof(width));
-  std::memcpy(descriptor->data() + 40, &height, sizeof(height));
-  std::memcpy(descriptor->data() + 44, extent.data(), sizeof(extent));
-  std::memcpy(descriptor->data() + 88, &aspect_num, sizeof(aspect_num));
-  std::memcpy(descriptor->data() + 92, &aspect_den, sizeof(aspect_den));
-  *world = descriptor.release();
-  g_gpu_created_worlds.emplace(*world, index);
-  return 0;
-}
-
-int32_t __cdecl gpu_dispose_world(void*, void* world) {
-  const auto owned = g_gpu_created_worlds.find(world);
-  if (!world || owned == g_gpu_created_worlds.end()) return 4;
-  const uint32_t device_index = owned->second;
-  g_gpu_created_worlds.erase(owned);
-  bool host_world = false;
-  {
-    std::lock_guard<std::mutex> lock(g_world_mutex);
-    host_world = g_owned_worlds.count(world) != 0;
-  }
-  if (host_world) {
-    const int32_t error = dispose_world(nullptr, world);
-    delete static_cast<std::array<std::byte, kEffectWorldSize>*>(world);
-    return error;
-  }
-  void* pixels{};
-  std::memcpy(&pixels, static_cast<std::byte*>(world) + 24, sizeof(pixels));
-  const int32_t error = gpu_free_device_memory(nullptr, device_index, pixels);
-  std::memset(world, 0, kEffectWorldSize);
-  delete static_cast<std::array<std::byte, kEffectWorldSize>*>(world);
-  return error;
-}
-
-struct CudaRenderTransport {
-  void* input_world{};
-  void* output_world{};
-  void* input_host{};
-  void* output_host{};
-  void* input_device{};
-  void* output_device{};
-  int32_t input_width{};
-  int32_t input_height{};
-  int32_t input_rowbytes{};
-  int32_t output_width{};
-  int32_t output_height{};
-  int32_t output_rowbytes{};
-};
-
-bool prepare_cuda_render_transport(void* input_world, void* output_world,
-                                   CudaRenderTransport& transport) {
-  if ((!cuda_backend().active() && !opencl::active() && !directx_backend::active()) ||
-      !input_world || !output_world) return false;
-  transport.input_world = input_world;
-  transport.output_world = output_world;
-  auto read_world = [](void* world, void*& pixels, int32_t& rowbytes,
-                       int32_t& width, int32_t& height) {
-    auto* bytes = static_cast<std::byte*>(world);
-    std::memcpy(&pixels, bytes + 24, sizeof(pixels));
-    std::memcpy(&rowbytes, bytes + 32, sizeof(rowbytes));
-    std::memcpy(&width, bytes + 36, sizeof(width));
-    std::memcpy(&height, bytes + 40, sizeof(height));
-    return pixels && width > 0 && height > 0 && width <= 4096 && height <= 4096 &&
-        rowbytes >= width * 16;
-  };
-  if (!read_world(input_world, transport.input_host, transport.input_rowbytes,
-                  transport.input_width, transport.input_height) ||
-      !read_world(output_world, transport.output_host, transport.output_rowbytes,
-                  transport.output_width, transport.output_height)) return false;
-  const std::size_t input_size = static_cast<std::size_t>(transport.input_width) *
-      transport.input_height * 16;
-  const std::size_t output_size = static_cast<std::size_t>(transport.output_width) *
-      transport.output_height * 16;
-  const uint32_t device_index = active_gpu_device_index();
-  if (gpu_allocate_device_memory(nullptr, device_index, input_size,
-                                 &transport.input_device) != 0 ||
-      gpu_allocate_device_memory(nullptr, device_index, output_size,
-                                 &transport.output_device) != 0) {
-    if (transport.input_device)
-      gpu_free_device_memory(nullptr, device_index, transport.input_device);
-    return false;
-  }
-  std::vector<float> bgra(input_size / sizeof(float));
-  for (int32_t y = 0; y < transport.input_height; ++y) {
-    const auto* source = static_cast<const float*>(transport.input_host) +
-        static_cast<std::size_t>(y) * transport.input_rowbytes / sizeof(float);
-    auto* destination = bgra.data() + static_cast<std::size_t>(y) * transport.input_width * 4;
-    for (int32_t x = 0; x < transport.input_width; ++x) {
-      destination[x * 4] = source[x * 4 + 3];
-      destination[x * 4 + 1] = source[x * 4 + 2];
-      destination[x * 4 + 2] = source[x * 4 + 1];
-      destination[x * 4 + 3] = source[x * 4];
-    }
-  }
-  bool uploaded = false;
-  if (directx_backend::active()) {
-    std::vector<unsigned char> sentinel(output_size, 0xCC);
-    uploaded = directx_backend::copy_buffer(static_cast<ID3D12Resource*>(transport.input_device),
-                                   bgra.data(), input_size, true) &&
-        directx_backend::copy_buffer(static_cast<ID3D12Resource*>(transport.output_device),
-                            sentinel.data(), output_size, true);
-  } else if (opencl::active()) {
-    const unsigned char pattern = 0xCC;
-    uploaded = opencl::enqueue_write(device_index, transport.input_device,
-        1, 0, input_size, bgra.data()) == opencl::kSuccess &&
-        opencl::enqueue_fill(device_index, transport.output_device,
-        &pattern, sizeof(pattern), 0, output_size) == opencl::kSuccess;
-  } else {
-    const auto input_device = static_cast<CudaDevicePointer>(
-        reinterpret_cast<uintptr_t>(transport.input_device));
-    const auto output_device = static_cast<CudaDevicePointer>(
-        reinterpret_cast<uintptr_t>(transport.output_device));
-    uploaded = cuda_backend().copy_to_device(input_device, bgra.data(), input_size) &&
-        cuda_backend().memset(output_device, 0xCC, output_size);
-  }
-  if (!uploaded) {
-    gpu_free_device_memory(nullptr, device_index, transport.output_device);
-    gpu_free_device_memory(nullptr, device_index, transport.input_device);
-    transport.input_device = transport.output_device = nullptr;
-    return false;
-  }
-  if (directx_backend::active()) directx_backend::record_upload(input_size);
-  else if (opencl::active()) g_opencl_upload_bytes += input_size;
-  else g_cuda_upload_bytes += input_size;
-  std::memcpy(static_cast<std::byte*>(input_world) + 24, &transport.input_device,
-              sizeof(transport.input_device));
-  std::memcpy(static_cast<std::byte*>(output_world) + 24, &transport.output_device,
-              sizeof(transport.output_device));
+const bool g_gpu_transport_configured = [] {
+  gpu_transport::configure_host_world_fallback(
+      &new_world, &dispose_world, &host_owns_gpu_fallback_world,
+      &host_recognizes_smart_gpu_world);
   return true;
+}();
+
+using gpu_transport::active_gpu_device_index;
+using gpu_transport::gpu_acquire_exclusive;
+using gpu_transport::gpu_allocate_device_memory;
+using gpu_transport::gpu_allocate_host_memory;
+using gpu_transport::gpu_create_world;
+using gpu_transport::gpu_dispose_world;
+using gpu_transport::gpu_free_device_memory;
+using gpu_transport::gpu_free_host_memory;
+using gpu_transport::gpu_get_world_data;
+using gpu_transport::gpu_get_world_device_index;
+using gpu_transport::gpu_get_world_size;
+using gpu_transport::gpu_memory_lifetimes_balanced;
+using gpu_transport::gpu_purge_memory;
+using gpu_transport::gpu_release_exclusive;
+
+bool prepare_cuda_render_transport(void* input, void* output,
+                                   CudaRenderTransport& transport) {
+  return gpu_transport::prepare_render_transport(input, output, transport);
 }
 
 bool finish_cuda_render_transport(CudaRenderTransport& transport) {
-  if (!transport.input_device || !transport.output_device) return false;
-  const uint32_t device_index = active_gpu_device_index();
-  bool valid = directx_backend::active() || (opencl::active()
-      ? opencl::finish(device_index) == opencl::kSuccess
-      : cuda_backend().synchronize());
-  if (!valid) {
-    if (directx_backend::active()) directx_backend::record_sync_failure();
-    else if (opencl::active()) ++g_opencl_sync_failures;
-    else ++g_cuda_sync_failures;
-  }
-  const std::size_t output_size = static_cast<std::size_t>(transport.output_width) *
-      transport.output_height * 16;
-  std::vector<float> bgra(output_size / sizeof(float));
-  bool downloaded = false;
-  if (valid && directx_backend::active())
-    downloaded = directx_backend::copy_buffer(
-        static_cast<ID3D12Resource*>(transport.output_device), bgra.data(), output_size, false);
-  else if (valid && opencl::active())
-    downloaded = opencl::enqueue_read(device_index, transport.output_device,
-        1, 0, output_size, bgra.data()) == opencl::kSuccess;
-  else if (valid) {
-    const auto output_device = static_cast<CudaDevicePointer>(
-        reinterpret_cast<uintptr_t>(transport.output_device));
-    downloaded = cuda_backend().copy_to_host(bgra.data(), output_device, output_size);
-  }
-  if (downloaded) {
-    if (directx_backend::active()) directx_backend::record_download(output_size);
-    else if (opencl::active()) g_opencl_download_bytes += output_size;
-    else g_cuda_download_bytes += output_size;
-    for (int32_t y = 0; y < transport.output_height; ++y) {
-      auto* destination = static_cast<float*>(transport.output_host) +
-          static_cast<std::size_t>(y) * transport.output_rowbytes / sizeof(float);
-      const auto* source = bgra.data() + static_cast<std::size_t>(y) *
-          transport.output_width * 4;
-      for (int32_t x = 0; x < transport.output_width; ++x) {
-        destination[x * 4] = source[x * 4 + 3];
-        destination[x * 4 + 1] = source[x * 4 + 2];
-        destination[x * 4 + 2] = source[x * 4 + 1];
-        destination[x * 4 + 3] = source[x * 4];
-      }
-    }
-  } else {
-    valid = false;
-  }
-  std::memcpy(static_cast<std::byte*>(transport.input_world) + 24,
-              &transport.input_host, sizeof(transport.input_host));
-  std::memcpy(static_cast<std::byte*>(transport.output_world) + 24,
-              &transport.output_host, sizeof(transport.output_host));
-  valid = gpu_free_device_memory(nullptr, device_index, transport.output_device) == 0 && valid;
-  valid = gpu_free_device_memory(nullptr, device_index, transport.input_device) == 0 && valid;
-  transport.input_device = transport.output_device = nullptr;
-  return valid;
+  return gpu_transport::finish_render_transport(transport);
 }
-
-bool is_active_gpu_world(void* world) {
-  return world && (world == g_smart_input_world || world == g_smart_output_world ||
-                   g_gpu_created_worlds.count(world) != 0);
-}
-
-int32_t __cdecl gpu_get_world_data(void*, void* world, void** pixels) {
-  if (!is_active_gpu_world(world) || !pixels) return 4;
-  std::memcpy(pixels, static_cast<std::byte*>(world) + 24, sizeof(void*));
-  return *pixels ? 0 : 4;
-}
-
-int32_t __cdecl gpu_get_world_size(void*, void* world, std::size_t* size) {
-  if (!is_active_gpu_world(world) || !size) return 4;
-  int32_t rowbytes = 0, height = 0;
-  std::memcpy(&rowbytes, static_cast<std::byte*>(world) + 32, sizeof(rowbytes));
-  std::memcpy(&height, static_cast<std::byte*>(world) + 40, sizeof(height));
-  if (rowbytes <= 0 || height <= 0 || rowbytes > 4096 * 16 || height > 4096) return 4;
-  *size = static_cast<std::size_t>(rowbytes) * static_cast<std::size_t>(height);
-  return 0;
-}
-
-int32_t __cdecl gpu_get_world_device_index(void*, void* world, uint32_t* index) {
-  if (!is_active_gpu_world(world) || !index) return 4;
-  const auto owned = g_gpu_created_worlds.find(world);
-  *index = owned == g_gpu_created_worlds.end()
-      ? active_gpu_device_index() : owned->second;
-  return 0;
-}
-
-std::array<void*, 15> g_gpu_device_suite1{
-    reinterpret_cast<void*>(&gpu_get_device_count),
-    reinterpret_cast<void*>(&gpu_get_device_info),
-    reinterpret_cast<void*>(&gpu_acquire_exclusive),
-    reinterpret_cast<void*>(&gpu_release_exclusive),
-    reinterpret_cast<void*>(&gpu_allocate_device_memory),
-    reinterpret_cast<void*>(&gpu_free_device_memory),
-    reinterpret_cast<void*>(&gpu_purge_memory),
-    reinterpret_cast<void*>(&gpu_allocate_host_memory),
-    reinterpret_cast<void*>(&gpu_free_host_memory),
-    reinterpret_cast<void*>(&gpu_purge_memory),
-    reinterpret_cast<void*>(&gpu_create_world),
-    reinterpret_cast<void*>(&gpu_dispose_world),
-    reinterpret_cast<void*>(&gpu_get_world_data),
-    reinterpret_cast<void*>(&gpu_get_world_size),
-    reinterpret_cast<void*>(&gpu_get_world_device_index)};
 
 int32_t reject_suite_acquire(const char* name, int32_t version) {
   std::string safe_name;
@@ -18497,9 +18012,9 @@ SmartResult smart_render_once(EffectEntry entry, std::array<std::byte, kInSize>&
   const bool use_opencl = gpu_negotiation && gpu_framework == 1;
   const bool use_directx = gpu_negotiation && gpu_framework == 4;
   if (gpu_negotiation) capture_module_audit();
-  const bool gpu_context_started = use_cuda ? begin_cuda_context(gpu_device_index) :
-      (use_opencl ? opencl::begin_context(gpu_device_index) :
-       (use_directx ? directx_backend::begin_context(gpu_device_index) : true));
+  const bool gpu_context_started = gpu_transport::begin_backend_context(
+      gpu_framework, gpu_device_index);
+  if (use_cuda) g_cuda_context_for_info = gpu_transport::active_cuda_context();
   if (gpu_negotiation) {
     write<int32_t>(gpu_setup_input, 0, gpu_framework);
     write<uint32_t>(gpu_setup_input, 4, gpu_device_index);
@@ -18645,15 +18160,11 @@ SmartResult smart_render_once(EffectEntry entry, std::array<std::byte, kInSize>&
     std::cerr << "stage:gpu_device_setdown_end error=" << result.gpu_setdown_error << "\n" << std::flush;
   }
   if (gpu_negotiation) capture_module_audit();
-  if (use_cuda && gpu_context_started && !end_cuda_context() &&
+  if (gpu_negotiation && gpu_context_started &&
+      !gpu_transport::end_backend_context(gpu_framework) &&
       result.gpu_setdown_error == 0)
     result.gpu_setdown_error = -6;
-  if (use_opencl && gpu_context_started && !opencl::end_context() &&
-      result.gpu_setdown_error == 0)
-    result.gpu_setdown_error = -6;
-  if (use_directx && gpu_context_started && !directx_backend::end_context() &&
-      result.gpu_setdown_error == 0)
-    result.gpu_setdown_error = -6;
+  if (use_cuda) g_cuda_context_for_info = nullptr;
   void* pre_render_data = read<void*>(pre_output, 40);
   if (auto delete_pre_render_data = read<void(__cdecl*)(void*)>(pre_output, 48)) {
     // A supplied callback owns cleanup even if it faults; host fallback would double-free.
@@ -22924,9 +22435,9 @@ int wmain(int argc, wchar_t **argv) {
             << ",\"directx_sync_failures\":" << directx_backend::diagnostics().sync_failures
             << ",\"gpu_allocations_created\":" << g_gpu_allocations_created
             << ",\"gpu_allocations_freed\":" << g_gpu_allocations_freed
-            << ",\"live_gpu_allocation_count\":" << (g_gpu_device_memory.size() + g_gpu_host_memory.size())
-            << ",\"live_gpu_memory_bytes\":" << g_gpu_memory_bytes
-            << ",\"gpu_exclusive_access_depth\":" << g_gpu_exclusive_access_depth
+            << ",\"live_gpu_allocation_count\":" << gpu_transport::live_allocation_count()
+            << ",\"live_gpu_memory_bytes\":" << gpu_transport::live_memory_bytes()
+            << ",\"gpu_exclusive_access_depth\":" << gpu_transport::exclusive_access_depth()
             << ",\"invalid_gpu_memory_operations\":" << g_invalid_gpu_memory_operations
             << ",\"last_seh_exception_code\":" << g_last_seh_exception_code
             << ",\"last_seh_exception_address\":" << g_last_seh_exception_address
@@ -23155,9 +22666,9 @@ int wmain(int argc, wchar_t **argv) {
             << ",\"gpu_memory_lifetimes_balanced\":" << (gpu_memory_lifetimes_balanced() ? "true" : "false")
             << ",\"gpu_allocations_created\":" << g_gpu_allocations_created
             << ",\"gpu_allocations_freed\":" << g_gpu_allocations_freed
-            << ",\"live_gpu_allocation_count\":" << (g_gpu_device_memory.size() + g_gpu_host_memory.size())
-            << ",\"live_gpu_memory_bytes\":" << g_gpu_memory_bytes
-            << ",\"gpu_exclusive_access_depth\":" << g_gpu_exclusive_access_depth
+            << ",\"live_gpu_allocation_count\":" << gpu_transport::live_allocation_count()
+            << ",\"live_gpu_memory_bytes\":" << gpu_transport::live_memory_bytes()
+            << ",\"gpu_exclusive_access_depth\":" << gpu_transport::exclusive_access_depth()
             << ",\"invalid_gpu_memory_operations\":" << g_invalid_gpu_memory_operations
             << ",\"last_seh_exception_code\":" << g_last_seh_exception_code
             << ",\"last_seh_exception_address\":" << g_last_seh_exception_address

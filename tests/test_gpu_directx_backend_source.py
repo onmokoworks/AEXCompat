@@ -6,6 +6,7 @@ HEADER = (ROOT / "minihost" / "src" / "gpu_directx_backend.hpp").read_text()
 SOURCE = (ROOT / "minihost" / "src" / "gpu_directx_backend.cpp").read_text()
 MAIN = (ROOT / "minihost" / "src" / "l2_main.cpp").read_text()
 CMAKE = (ROOT / "minihost" / "CMakeLists.txt").read_text()
+TRANSPORT = (ROOT / "minihost" / "src" / "gpu_memory_world_transport.cpp").read_text()
 
 
 def test_directx_backend_owns_secure_dynamic_loader_and_lifecycle():
@@ -35,19 +36,20 @@ def test_directx_backend_preserves_adapter_ordinals_cleanup_and_registry_wiring(
     assert "nullptr, g_directx.queues[index]" in SOURCE
 
 
-def test_directx_copy_is_backend_local_while_transport_stays_in_main():
+def test_directx_copy_and_shared_transport_have_explicit_boundaries():
     assert "bool copy_buffer(ID3D12Resource*" in HEADER
     assert "WaitForSingleObject(event, 30'000) == WAIT_OBJECT_0" in SOURCE
     assert "if (event) CloseHandle(event);" in SOURCE
     for marker in (
-        "g_gpu_device_memory",
         "CudaRenderTransport",
         "prepare_cuda_render_transport",
         "finish_cuda_render_transport",
-        "directx_backend::copy_buffer",
-        "directx_backend::begin_context",
+        "gpu_transport::begin_backend_context",
     ):
         assert marker in MAIN
+    for marker in ("g_device_memory", "directx::copy_buffer",
+                   "prepare_render_transport", "finish_render_transport"):
+        assert marker in TRANSPORT
     assert "struct DirectXApi" not in MAIN
     assert 'LoadLibraryExW(L"dxgi.dll"' not in MAIN
     assert "src/gpu_directx_backend.cpp" in CMAKE
