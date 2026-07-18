@@ -7,6 +7,8 @@
 #include <excpt.h>
 #include <psapi.h>
 
+#include "trace_writer.hpp"
+
 #include <array>
 #include <algorithm>
 #include <atomic>
@@ -598,6 +600,17 @@ uint64_t g_last_seh_exception_address{};
 std::string g_last_seh_exception_module;
 std::string g_last_seh_selector;
 int32_t g_last_seh_error{};
+aexcompat::TraceWriter* g_trace_writer{};
+
+const char* trace_worker_label() {
+#if defined(AEXCOMPAT_RENDER_WORKER)
+  return "aex_render_worker";
+#elif defined(AEXCOMPAT_SMART_WORKER)
+  return "aex_smart_worker";
+#else
+  return "aex_l2_worker";
+#endif
+}
 
 const char* effect_selector_name(int32_t command) {
   switch (command) {
@@ -657,6 +670,7 @@ int capture_seh_exception(EXCEPTION_POINTERS* information) {
 
 int32_t audited_effect_call(EffectEntry entry, int32_t command, void* input,
                             void* output, void** params, void* world, void* extra) {
+  if (g_trace_writer) g_trace_writer->selector_dispatch(effect_selector_name(command));
   const int32_t error = entry(command, input, output, params, world, extra);
   capture_module_audit_phase();
   return module_audit_passed() ? error : 512;
@@ -9684,9 +9698,12 @@ std::vector<std::pair<std::string, int32_t>> g_missing_suites;
 std::string escape(const std::string& input);
 
 void record_suite_acquire(const char* name, int32_t version) {
-  std::lock_guard<std::mutex> lock(g_suite_lease_mutex);
-  ++g_suite_leases[{name, version}];
-  ++g_suite_acquires;
+  {
+    std::lock_guard<std::mutex> lock(g_suite_lease_mutex);
+    ++g_suite_leases[{name, version}];
+    ++g_suite_acquires;
+  }
+  if (g_trace_writer && name) g_trace_writer->suite_acquire(name, version, true);
 }
 
 void record_missing_suite(const std::string& name, int32_t version) {
@@ -12637,6 +12654,8 @@ int32_t reject_suite_acquire(const char* name, int32_t version) {
     safe_name.push_back(character >= 0x20 && character <= 0x7e ? name[index] : '?');
   }
   record_missing_suite(safe_name, version);
+  if (g_trace_writer && !safe_name.empty())
+    g_trace_writer->suite_acquire(safe_name, std::max<int32_t>(version, 0), false);
   std::cerr << "stage:suite_acquire_failed name=" << safe_name
             << " version=" << version << "\n" << std::flush;
   return 1;
@@ -13450,13 +13469,19 @@ int32_t __cdecl acquire_suite(const char* name, int32_t version, const void** su
 }
 
 int32_t __cdecl release_suite(const char* name, int32_t version) {
-  if (!name) return 1;
-  std::lock_guard<std::mutex> lock(g_suite_lease_mutex);
-  const auto found = g_suite_leases.find({name, version});
-  if (found == g_suite_leases.end() || found->second == 0) return 1;
-  --found->second;
-  ++g_suite_releases;
-  return 0;
+  bool released = false;
+  if (name) {
+    std::lock_guard<std::mutex> lock(g_suite_lease_mutex);
+    const auto found = g_suite_leases.find({name, version});
+    if (found != g_suite_leases.end() && found->second != 0) {
+      --found->second;
+      ++g_suite_releases;
+      released = true;
+    }
+  }
+  if (g_trace_writer && name)
+    g_trace_writer->suite_release(name, std::max<int32_t>(version, 0), released);
+  return released ? 0 : 1;
 }
 
 bool verify_suite_release_without_acquire_rejected() {
@@ -22528,6 +22553,8 @@ int wmain(int argc, wchar_t **argv) {
   if (runtime_module_authorization_mode &&
       !parse_runtime_module_authorization(plugin_path, argv[5])) return 15;
 #endif
+  aexcompat::TraceWriter trace_writer(
+      "minihost", trace_worker_label(), plugin_path.filename().string());
   g_plugin_file_path = plugin_path.wstring();
   SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_SYSTEM32 | LOAD_LIBRARY_SEARCH_USER_DIRS);
   HMODULE module = LoadLibraryExW(plugin_path.c_str(), nullptr,
@@ -22546,6 +22573,10 @@ int wmain(int argc, wchar_t **argv) {
       FreeLibrary(module);
       return 14;
     }
+  }
+  if (trace_writer.enabled()) {
+    g_trace_writer = &trace_writer;
+    trace_writer.session_start();
   }
   if (!redirect_native_stdout()) { FreeLibrary(module); return 13; }
   if (g_aegp_init_mode) {
@@ -24526,6 +24557,10 @@ int wmain(int argc, wchar_t **argv) {
   report(global_error == 0 && params_error == 0 ? "selectors_completed" : "selector_error",
          global_error, params_error, setdown_error, output, about_message, lifecycle_errors, lifecycle_data_null);
 #endif
+  if (g_trace_writer) {
+    g_trace_writer->session_end();
+    g_trace_writer = nullptr;
+  }
   FreeLibrary(module);
 #ifdef AEXCOMPAT_RENDER_WORKER
   return global_error == 0 && params_error == 0 && parameter_count_contract_valid &&

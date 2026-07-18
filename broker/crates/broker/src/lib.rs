@@ -23,6 +23,7 @@ pub mod selftest;
 pub mod session_dependency_manifest;
 #[cfg(windows)]
 pub mod smart;
+pub mod trace_policy;
 pub mod trusted_worker_stage;
 #[cfg(windows)]
 pub mod windows_process;

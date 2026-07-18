@@ -633,6 +633,7 @@ pub fn run(repository: &Path, request_path: &Path, output_path: &Path) -> io::Re
 }
 
 pub fn execute(repository: &Path, request_path: &Path, output_path: &Path) -> io::Result<bool> {
+    crate::trace_policy::validate_broker_trace_directory(repository)?;
     let request_path = resolve_inside(repository, request_path, "target/render-requests", false)?;
     let output_path = resolve_inside(
         repository,
@@ -736,6 +737,7 @@ pub fn execute_smart(
     request_path: &Path,
     output_path: &Path,
 ) -> io::Result<bool> {
+    crate::trace_policy::validate_broker_trace_directory(repository)?;
     let request_path = resolve_inside(repository, request_path, "target/render-requests", false)?;
     let output_path = resolve_inside(
         repository,
@@ -1050,6 +1052,7 @@ pub fn execute_smart_suite_fault(
     fault_id: &str,
     output_path: &Path,
 ) -> io::Result<bool> {
+    crate::trace_policy::validate_broker_trace_directory(repository)?;
     let (
         worker_mode,
         expect_crash,
@@ -1469,6 +1472,7 @@ pub fn execute_smart_mask_scene(
     scene_case_id: &str,
     output_path: &Path,
 ) -> io::Result<bool> {
+    crate::trace_policy::validate_broker_trace_directory(repository)?;
     let (scene_id, mask_index, expected_count) = match scene_case_id {
         "empty" => ("empty", 1.0, 0),
         "translated_rectangle" => ("translated_rectangle", 1.0, 1),

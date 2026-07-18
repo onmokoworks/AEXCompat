@@ -9,6 +9,10 @@
 namespace aexcompat {
 namespace {
 
+constexpr std::size_t kMaxEvents = 4096;
+constexpr std::size_t kMaxStringBytes = 256;
+constexpr std::size_t kMaxPayloadBytes = 1024;
+
 std::filesystem::path trace_directory() {
   wchar_t buffer[32768]{};
   const DWORD length = GetEnvironmentVariableW(L"AEX_INSTRUMENT_TRACE_DIR", buffer,
@@ -37,6 +41,10 @@ TraceWriter::TraceWriter(std::string host_kind, std::string host_version_label,
   if (!stream_) path_.clear();
 }
 
+TraceWriter::~TraceWriter() {
+  if (session_started_ && !session_ended_) session_end();
+}
+
 bool TraceWriter::enabled() const { return stream_.is_open(); }
 const std::filesystem::path& TraceWriter::path() const { return path_; }
 
@@ -57,6 +65,9 @@ std::string TraceWriter::escape(const std::string& value) {
 }
 
 bool TraceWriter::safe_string(const std::string& value) {
+  if (value.size() > kMaxStringBytes) return false;
+  if (!value.empty() && (value.front() == '/' || value.front() == '\\')) return false;
+  if (value.size() >= 2 && value[0] == '\\' && value[1] == '\\') return false;
   for (std::size_t i = 0; i + 2 < value.size(); ++i) {
     if (((value[i] >= 'A' && value[i] <= 'Z') || (value[i] >= 'a' && value[i] <= 'z')) &&
         value[i + 1] == ':' && (value[i + 2] == '\\' || value[i + 2] == '/')) return false;
@@ -65,7 +76,9 @@ bool TraceWriter::safe_string(const std::string& value) {
 }
 
 void TraceWriter::write_base(const std::string& event_kind, const std::string& payload) {
-  if (!enabled() || !safe_string(event_kind) || !safe_string(payload)) return;
+  if (!enabled() || event_index_ >= kMaxEvents || event_kind.size() > kMaxStringBytes ||
+      payload.size() > kMaxPayloadBytes || !safe_string(event_kind) || !safe_string(payload))
+    return;
   stream_ << "{\"schema_version\":1,\"event_index\":" << event_index_++
           << ",\"event_kind\":\"" << escape(event_kind) << "\",\"host_kind\":\""
           << escape(host_kind_) << "\",\"host_version_label\":\""
@@ -74,7 +87,11 @@ void TraceWriter::write_base(const std::string& event_kind, const std::string& p
   stream_.flush();
 }
 
-void TraceWriter::session_start() { write_base("session_start"); }
+void TraceWriter::session_start() {
+  if (session_started_) return;
+  session_started_ = true;
+  write_base("session_start");
+}
 void TraceWriter::selector_dispatch(const std::string& selector) {
   if (safe_string(selector)) write_base("selector_dispatch", ",\"selector\":\"" + escape(selector) + "\"");
 }
@@ -91,6 +108,10 @@ void TraceWriter::callback_invoke() { write_base("callback_invoke"); }
 void TraceWriter::error(const std::string& code_label, const std::string& message, bool unimplemented) {
   if (safe_string(code_label) && safe_string(message)) write_base(unimplemented ? "unimplemented" : "error", ",\"error\":{\"code_label\":\"" + escape(code_label) + "\",\"message\":\"" + escape(message) + "\"}");
 }
-void TraceWriter::session_end() { write_base("session_end"); }
+void TraceWriter::session_end() {
+  if (!session_started_ || session_ended_) return;
+  session_ended_ = true;
+  write_base("session_end");
+}
 
 }  // namespace aexcompat

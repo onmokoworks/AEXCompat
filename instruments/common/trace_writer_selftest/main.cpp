@@ -6,6 +6,8 @@ int main() {
   aexcompat::TraceWriter writer("minihost", "trace-writer-selftest", "synthetic-null");
   if (!writer.enabled()) return 2;
   writer.session_start();
+  writer.selector_dispatch(std::string(300, 'x'));
+  writer.suite_acquire("C:\\private\\plugin-bytes", 1, true);
   writer.selector_dispatch("PF_Cmd_GLOBAL_SETUP");
   writer.suite_acquire("Synthetic Suite", 1, true);
   writer.world_descriptor(16, 12, 64, "argb8");

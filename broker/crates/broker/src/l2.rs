@@ -50,6 +50,7 @@ fn worker_passed(worker_report: &Value, policy: L2ObservationPolicy) -> bool {
 }
 
 pub fn run(repository: &Path, worker: &Path, id: &str, output: &Path) -> io::Result<bool> {
+    crate::trace_policy::validate_broker_trace_directory(repository)?;
     let policy = find_observation(id)
         .ok_or_else(|| invalid("requested L2 profile is not registered"))?
         .l2;

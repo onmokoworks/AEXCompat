@@ -11,6 +11,10 @@ class TraceWriter {
  public:
   TraceWriter(std::string host_kind, std::string host_version_label,
               std::string plugin_label);
+  ~TraceWriter();
+
+  TraceWriter(const TraceWriter&) = delete;
+  TraceWriter& operator=(const TraceWriter&) = delete;
 
   bool enabled() const;
   const std::filesystem::path& path() const;
@@ -36,6 +40,8 @@ class TraceWriter {
   std::uint64_t event_index_ = 0;
   std::filesystem::path path_;
   std::ofstream stream_;
+  bool session_started_ = false;
+  bool session_ended_ = false;
 };
 
 }  // namespace aexcompat
