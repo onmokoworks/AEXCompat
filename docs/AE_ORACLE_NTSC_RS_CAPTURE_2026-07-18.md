@@ -100,6 +100,44 @@ currently possible because the worker-to-broker image transport is fixed at
 The frame-12 capture doubles as the second AE-oracle equivalence sample
 (same tolerance, different frame/noise seed).
 
+## Follow-up: 16 and 32 bpc captures (2026-07-18, same day)
+
+Both deeper-depth captures ran with the same input, frame 0, defaults.
+
+An analysis-tooling correction first: at 16 and 32 bpc,
+`CompItem.saveFrameToPng` exports **RGBA16 PNGs** (IHDR bit depth 16,
+consistent with `docs/AE_REFERENCE_TRACE_2026-07-13.md`). A first pass of
+this analysis read those files with PIL, which silently truncates 16-bit
+RGB(A) PNGs to 8 bits (a `>>8`, not a rounding), and concluded that
+`saveFrameToPng` writes 8-bit files and that 42% of 16 bpc pixels differ.
+Both statements were artifacts of the truncation and are wrong; the
+numbers below come from the true 16-bit samples (decoded via ffmpeg to
+`rgba64le`).
+
+- **16 bpc: equivalence holds at 8-bit precision, ±1 LSB.** Rounding the
+  AE RGBA16 capture to 8 bits (`round(v * 255 / 65535)`) and comparing
+  against the host's `--render-experimental-smart-16` 8-bit output:
+  8,473 of 2,073,600 pixels differ, every one by exactly ±1 LSB, nothing
+  at ±2 or more, alpha exact. The count is higher than the 8 bpc run
+  (178) because the host side still quantizes through its own 16-bit
+  path before the 8-bit export. A comparison at full 16-bit precision
+  has exactly one remaining blocker: the worker-to-broker image
+  transport is fixed at 8-bit RGBA, so the host cannot export deeper
+  than 8 bits today. The AE side already can.
+- **32 bpc: not comparable as captured; color management interferes.**
+  The true 16-bit samples span 0–16195 of 65535 (a quarter of the
+  scale; mean 5.7% of full scale vs the host's 52%), and no per-pixel
+  post-transform of the host output explains them (best fit,
+  sRGB-linearize plus 1/4 scale, still leaves ~5% of full scale as mean
+  error). So the 32 bpc project is not merely exporting differently; the
+  effect appears to receive transformed (likely linearized) input and
+  renders genuinely different data. Hypothesis, unverified: the 32 bpc
+  project linearizes or reinterprets the working space and
+  `saveFrameToPng` exports without the display transform. Before any
+  32 bpc comparison, the capture JSX must pin the project color pipeline
+  (working space, linearization) explicitly and the result must be
+  validated against a no-effect passthrough capture first.
+
 ## Tooling changes shipped with this note
 
 - `tools/ae-reference-capture.jsx`: hand-rolled JSON serialization (no

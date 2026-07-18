@@ -35,4 +35,6 @@ def test_reference_capture_contract_is_hash_bound_create_new_and_temporary():
     assert "safeToQuit" in script
     assert 'addProperty(env("AEXCOMPAT_AE_EFFECT"))' in script
     assert "comp.saveFrameToPng(comp.time, outputFile)" in script
+    assert 'AEXCOMPAT_AE_NO_EFFECT' in script
+    assert 'effect_applied: !noEffect' in script
     assert "CloseOptions.DO_NOT_SAVE_CHANGES" in script

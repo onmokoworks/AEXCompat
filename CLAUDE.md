@@ -23,9 +23,12 @@ and bounded image input/output are now the main implementation path.
 - Prefer machine-portable behavioral self-tests for new compatibility work, and
   update frozen evidence values in `analysis/` only through the
   `tools/refresh-*-evidence.ps1` scripts (`docs/EVIDENCE_POLICY_2026-07-18.md`).
-- Worker trust constants are runtime admission state, not regression evidence:
-  after any worker rebuild, regenerate them with `tools/refresh-worker-trust.ps1`
-  and run the broker integration tests before relying on broker dispatch.
+- Image dispatch admits the locally built worker at dispatch time (no frozen
+  trust constants; see the section 3 amendment in
+  `docs/EVIDENCE_POLICY_2026-07-18.md`). Receipt-pinned worker identity, the
+  worker's own plug-in hash check, and plug-in/dependency admission stay
+  fail-closed; after any worker rebuild, run the broker integration tests
+  before relying on broker dispatch.
 
 ## Canonical Verification
 
