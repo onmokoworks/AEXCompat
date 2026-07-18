@@ -39,7 +39,8 @@ After Effects SDK は不要。GUI の起動だけならこれで足りる
 ## Python テスト
 
 - Python 3.x (3.14 で検証)
-- `python -m pip install -r requirements-dev.txt` (pytest)
+- `python -m pip install -r requirements-dev.txt` (pytest / Pillow / jsonschema)。
+  Pillow と jsonschema はテストが collection 時に import するため必須。
 
 ```powershell
 python -m pytest -q
@@ -49,11 +50,14 @@ python -m pytest -q
   `tests/local_artifact_tests.txt` に列挙されており、既定で skip される。
   実行するには対象のビルド / gate スクリプトを走らせた後
   `--run-local-artifact-tests` を付ける。
-- SDK ヘッダを使うテストは `AFTER_EFFECTS_SDK_ROOT` が未設定 (または無効) の
-  場合 `pytest.skip` で明示的に skip される。一部は Visual Studio C++ tools が
-  見つからない場合も skip する。つまり clean clone での `python -m pytest -q`
-  はこれらが skip されて通る。下記の SDK と Visual Studio が必要になるのは、
-  probe / fixture を実際にコンパイル・実行する場合のみ。
+- SDK ヘッダの ABI を検証するテストは `AFTER_EFFECTS_SDK_ROOT` が未設定
+  (または無効) の場合 `pytest.skip` で明示的に skip される。一部は
+  Visual Studio C++ tools が見つからない場合も skip する。
+- 一方、probe / fixture を `tools/build-*.ps1` 経由で実際にビルドするテスト群は
+  SDK / VS の有無を事前チェックしない。SDK 環境変数なしの環境ではビルド
+  スクリプトが SDK 解決で throw して fail する (2026-07-18 時点、VS ありの
+  clean 環境で 935 passed / 25 failed / 106 skipped を確認)。全テストを
+  green にするには下記の After Effects SDK と Visual Studio を揃える。
 
 ## C++ worker (minihost)
 
@@ -156,13 +160,16 @@ Per-component prerequisites on Windows x64:
 - **Rust broker / harness**: Rust toolchain plus MSVC Build Tools and the
   Windows SDK (the default `x86_64-pc-windows-msvc` target needs the MSVC
   linker). No After Effects SDK.
-- **Python tests**: Python 3.x plus `requirements-dev.txt`. Tests that need
-  locally built workers or machine-bound receipts are listed in
+- **Python tests**: Python 3.x plus `requirements-dev.txt` (pytest, Pillow,
+  jsonschema; the latter two are imported at collection time). Tests that
+  need locally built workers or machine-bound receipts are listed in
   `tests/local_artifact_tests.txt` and skip by default
-  (`--run-local-artifact-tests` to opt in). SDK-header tests explicitly skip
-  when `AFTER_EFFECTS_SDK_ROOT` is unset (some also skip without VS C++
-  tools), so a clean-clone `python -m pytest -q` passes with skips; the SDK
-  and Visual Studio are needed only to actually compile probes / fixtures.
+  (`--run-local-artifact-tests` to opt in). SDK-header ABI tests explicitly
+  skip when `AFTER_EFFECTS_SDK_ROOT` is unset (some also skip without VS C++
+  tools), but the probe / fixture build tests that invoke `tools/build-*.ps1`
+  do not pre-check and fail without the SDK (935 passed / 25 failed /
+  106 skipped measured on 2026-07-18 in a clean environment with VS but no
+  SDK variable). A fully green run needs the SDK and Visual Studio below.
 - **C++ workers (minihost)**: build with the Ninja generator into
   `target\minihost-build\` so the harness and gate scripts find the four
   `aex_*_worker.exe` binaries directly under that directory. No SDK needed.
