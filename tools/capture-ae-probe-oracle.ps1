@@ -12,6 +12,9 @@ param(
     [ValidateSet('rgba8', 'rgba16le', 'rgba32f-le')][string]$RawFormat = 'rgba8',
     [double]$Tolerance = 0,
     [string]$ComparisonReport,
+    [string]$ControlOutputPng,
+    [string]$ControlExpectedRaw,
+    [string]$ControlComparisonReport,
     [string]$PlanPath,
     [switch]$PlanOnly,
     [ValidateSet(8, 16, 32)][int]$Bpc = 8,
@@ -35,6 +38,31 @@ if ($comparisonValues.Count -gt 0 -and
     (-not $ExpectedRaw -or $Width -le 0 -or $Height -le 0 -or -not $ComparisonReport)) {
     throw 'ExpectedRaw, positive Width/Height, and ComparisonReport must be supplied together.'
 }
+$controlValues = @($ControlOutputPng, $ControlExpectedRaw, $ControlComparisonReport) |
+    Where-Object { $_ }
+if ($controlValues.Count -gt 0 -and $controlValues.Count -ne 3) {
+    throw 'ControlOutputPng, ControlExpectedRaw, and ControlComparisonReport must be supplied together.'
+}
+
+function Invoke-OracleComparison {
+    param([string]$Raw, [string]$Render, [string]$Report)
+    $rawPath = (Resolve-Path -LiteralPath $Raw).Path
+    $reportPath = [System.IO.Path]::GetFullPath($Report)
+    if (Test-Path -LiteralPath $reportPath) {
+        throw "Refusing to overwrite comparison report: $reportPath"
+    }
+    & python (Join-Path $PSScriptRoot 'compare-pixel-oracles.py') `
+        --raw $rawPath --render ([System.IO.Path]::GetFullPath($Render)) `
+        --width $Width --height $Height --raw-format $RawFormat `
+        --tolerance $Tolerance --out $reportPath
+    $exitCode = $LASTEXITCODE
+    if ($exitCode -gt 1) { throw "Pixel oracle comparison failed with exit code $exitCode." }
+    Get-Content -LiteralPath $reportPath -Raw | ConvertFrom-Json |
+        ConvertTo-Json -Depth 10
+    if ($exitCode -eq 1) {
+        throw 'AE oracle output exceeded the configured comparison tolerance.'
+    }
+}
 
 if ($PlanOnly) {
     if (-not $PlanPath) { throw 'PlanPath is required with PlanOnly.' }
@@ -46,7 +74,14 @@ if ($PlanOnly) {
     $outputPath = [System.IO.Path]::GetFullPath($OutputPng)
     $reportPath = [System.IO.Path]::GetFullPath($ComparisonReport)
     $planFullPath = [System.IO.Path]::GetFullPath($PlanPath)
-    foreach ($newPath in @($outputPath, $reportPath, $planFullPath)) {
+    $controlOutputPath = if ($ControlOutputPng) {
+        [System.IO.Path]::GetFullPath($ControlOutputPng)
+    } else { $null }
+    $controlReportPath = if ($ControlComparisonReport) {
+        [System.IO.Path]::GetFullPath($ControlComparisonReport)
+    } else { $null }
+    foreach ($newPath in @($outputPath, $reportPath, $planFullPath,
+            $controlOutputPath, $controlReportPath) | Where-Object { $_ }) {
         if (Test-Path -LiteralPath $newPath) { throw "Refusing to overwrite planned output: $newPath" }
         if (-not (Test-Path -LiteralPath (Split-Path -Parent $newPath) -PathType Container)) {
             throw "Planned output parent does not exist: $newPath"
@@ -67,6 +102,27 @@ if ($PlanOnly) {
         '--raw-format', $RawFormat, '--tolerance', [string]$Tolerance,
         '--out', $reportPath
     )
+    $controlRawPath = if ($ControlExpectedRaw) {
+        (Resolve-Path -LiteralPath $ControlExpectedRaw).Path
+    } else { $null }
+    $controlCapture = if ($controlOutputPath) {
+        @(
+            '&', (Join-Path $PSScriptRoot 'capture-ae-reference.ps1'),
+            '-AfterEffects', $afterEffectsPath, '-TestedAex', $probePath,
+            '-InstalledAex', $installedPath,
+            '-InputImage', $inputPath, '-OutputPng', $controlOutputPath,
+            '-EffectName', $EffectName, '-Bpc', [string]$Bpc, '-NoEffect'
+        )
+    } else { $null }
+    $controlCompare = if ($controlOutputPath) {
+        @(
+            'python', (Join-Path $PSScriptRoot 'compare-pixel-oracles.py'),
+            '--raw', $controlRawPath, '--render', $controlOutputPath,
+            '--width', [string]$Width, '--height', [string]$Height,
+            '--raw-format', $RawFormat, '--tolerance', [string]$Tolerance,
+            '--out', $controlReportPath
+        )
+    } else { $null }
     $plan = [ordered]@{
         schema_version = 1
         status = if ($running.Count) { 'blocked_existing_ae_session' } else { 'ready_to_capture' }
@@ -78,6 +134,17 @@ if ($PlanOnly) {
         expected_raw = [ordered]@{ path = $rawPath; size_bytes = (Get-Item $rawPath).Length; sha256 = (Get-FileHash $rawPath -Algorithm SHA256).Hash.ToLowerInvariant(); width = $Width; height = $Height; format = $RawFormat }
         capture_argv = $capture
         compare_argv = $compare
+        no_effect_control = if ($controlOutputPath) {
+            [ordered]@{
+                expected_raw = [ordered]@{
+                    path = $controlRawPath
+                    size_bytes = (Get-Item $controlRawPath).Length
+                    sha256 = (Get-FileHash $controlRawPath -Algorithm SHA256).Hash.ToLowerInvariant()
+                }
+                capture_argv = $controlCapture
+                compare_argv = $controlCompare
+            }
+        } else { $null }
     }
     $plan | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $planFullPath -Encoding utf8
     $plan | ConvertTo-Json -Depth 8
@@ -113,24 +180,16 @@ try {
     & (Join-Path $PSScriptRoot 'capture-ae-reference.ps1') @captureArgs
 
     if ($ExpectedRaw) {
-        $rawPath = (Resolve-Path -LiteralPath $ExpectedRaw).Path
-        $reportPath = [System.IO.Path]::GetFullPath($ComparisonReport)
-        if (Test-Path -LiteralPath $reportPath) {
-            throw "Refusing to overwrite comparison report: $reportPath"
-        }
-        & python (Join-Path $PSScriptRoot 'compare-pixel-oracles.py') `
-            --raw $rawPath --render ([System.IO.Path]::GetFullPath($OutputPng)) `
-            --width $Width --height $Height --raw-format $RawFormat `
-            --tolerance $Tolerance --out $reportPath
-        $comparisonExit = $LASTEXITCODE
-        if ($comparisonExit -gt 1) {
-            throw "Pixel oracle comparison failed with exit code $comparisonExit."
-        }
-        Get-Content -LiteralPath $reportPath -Raw | ConvertFrom-Json |
-            ConvertTo-Json -Depth 10
-        if ($comparisonExit -eq 1) {
-            throw 'AE oracle output exceeded the configured comparison tolerance.'
-        }
+        Invoke-OracleComparison -Raw $ExpectedRaw -Render $OutputPng -Report $ComparisonReport
+    }
+
+    if ($ControlOutputPng) {
+        $controlArgs = $captureArgs.Clone()
+        $controlArgs.OutputPng = $ControlOutputPng
+        $controlArgs.NoEffect = $true
+        & (Join-Path $PSScriptRoot 'capture-ae-reference.ps1') @controlArgs
+        Invoke-OracleComparison -Raw $ControlExpectedRaw -Render $ControlOutputPng `
+            -Report $ControlComparisonReport
     }
 } finally {
     if (Get-Process AfterFX,aerender,aerendercore -ErrorAction SilentlyContinue) {

@@ -88,9 +88,13 @@
             fps
         );
         var layer = comp.layers.add(footage);
-        var effect = layer.property("ADBE Effect Parade").addProperty(env("AEXCOMPAT_AE_EFFECT"));
-        if (!effect) {
-            throw new Error("effect could not be added by match or display name");
+        var noEffect = $.getenv("AEXCOMPAT_AE_NO_EFFECT") === "1";
+        var effect = null;
+        if (!noEffect) {
+            effect = layer.property("ADBE Effect Parade").addProperty(env("AEXCOMPAT_AE_EFFECT"));
+            if (!effect) {
+                throw new Error("effect could not be added by match or display name");
+            }
         }
         comp.time = frame / fps;
         if (typeof comp.saveFrameToPng !== "function") {
@@ -116,8 +120,9 @@
             schema_version: 1,
             status: "captured",
             ae_version: app.version,
-            effect_name: effect.name,
-            effect_match_name: effect.matchName,
+            effect_applied: !noEffect,
+            effect_name: effect ? effect.name : "",
+            effect_match_name: effect ? effect.matchName : "",
             width: comp.width,
             height: comp.height,
             frame: frame,

@@ -56,10 +56,46 @@ def test_plan_only_requires_complete_comparison_contract(tmp_path):
     assert "ExpectedRaw" in result.stderr
 
 
+def test_plan_only_records_no_effect_control_commands(tmp_path):
+    fixture = tmp_path / "fixture.aex"
+    image = tmp_path / "input.png"
+    raw = tmp_path / "effect.rgba"
+    control_raw = tmp_path / "control.rgba"
+    fixture.write_bytes(b"fixture")
+    raw.write_bytes(bytes((1, 2, 3, 255)))
+    control_raw.write_bytes(bytes((4, 5, 6, 255)))
+    Image.new("RGBA", (1, 1)).save(image)
+    plan = tmp_path / "plan.json"
+    result = subprocess.run([
+        "powershell", "-NoProfile", "-File", str(RUNNER), "-PlanOnly",
+        "-PlanPath", str(plan), "-AfterEffects", "C:/Windows/System32/notepad.exe",
+        "-ProbeAex", str(fixture), "-InputImage", str(image),
+        "-OutputPng", str(tmp_path / "effect.png"), "-EffectName", "Fixture Effect",
+        "-ExpectedRaw", str(raw), "-Width", "1", "-Height", "1",
+        "-ComparisonReport", str(tmp_path / "effect.json"),
+        "-ControlOutputPng", str(tmp_path / "control.png"),
+        "-ControlExpectedRaw", str(control_raw),
+        "-ControlComparisonReport", str(tmp_path / "control.json"),
+    ], capture_output=True, text=True, check=False)
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(plan.read_text(encoding="utf-8-sig"))
+    control = payload["no_effect_control"]
+    assert control["expected_raw"]["sha256"]
+    assert "-NoEffect" in control["capture_argv"]
+    assert any(value.endswith("compare-pixel-oracles.py") for value in control["compare_argv"])
+
+
 def test_capture_mode_executes_the_declared_comparison_contract():
+    assert "function Invoke-OracleComparison" in RUNNER_SOURCE
     assert "& python (Join-Path $PSScriptRoot 'compare-pixel-oracles.py')" in RUNNER_SOURCE
     assert "Pixel oracle comparison failed with exit code" in RUNNER_SOURCE
     assert "AE oracle output exceeded the configured comparison tolerance" in RUNNER_SOURCE
+
+
+def test_capture_mode_supports_a_separate_no_effect_control():
+    assert "ControlOutputPng, ControlExpectedRaw, and ControlComparisonReport" in RUNNER_SOURCE
+    assert "$controlArgs.NoEffect = $true" in RUNNER_SOURCE
+    assert "-Raw $ControlExpectedRaw -Render $ControlOutputPng" in RUNNER_SOURCE
 
 
 def test_colorgrid_plan_records_real_fixture_without_claiming_capture():
