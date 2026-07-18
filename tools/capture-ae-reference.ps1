@@ -22,6 +22,17 @@ if ($DurationFrames -le $Frame) {
 }
 
 $afterEffectsPath = (Resolve-Path -LiteralPath $AfterEffects).Path
+# AfterFX.exe launches, loads plug-ins, and exits with code 0 WITHOUT executing
+# the -r script (observed on AE 25.3). Only AfterFX.com runs it, so refuse the
+# silent no-op instead of timing out later.
+if ([System.IO.Path]::GetFileName($afterEffectsPath) -ieq 'AfterFX.exe') {
+    $comPath = Join-Path (Split-Path -Parent $afterEffectsPath) 'AfterFX.com'
+    if (-not (Test-Path -LiteralPath $comPath)) {
+        throw 'AfterFX.exe does not execute -r scripts; AfterFX.com is required but was not found next to it.'
+    }
+    Write-Warning 'AfterFX.exe does not execute -r scripts; using AfterFX.com instead.'
+    $afterEffectsPath = $comPath
+}
 $testedPath = (Resolve-Path -LiteralPath $TestedAex).Path
 $installedPath = (Resolve-Path -LiteralPath $InstalledAex).Path
 $inputPath = (Resolve-Path -LiteralPath $InputImage).Path

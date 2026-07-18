@@ -7,13 +7,36 @@
         return value;
     }
 
+    // After Effects 25.3 ExtendScript has no JSON object, and referencing the
+    // missing global aborts the script mid-write, so serialize by hand.
+    function jsonString(value) {
+        return '"' + String(value).replace(/\\/g, "\\\\").replace(/"/g, '\\"') + '"';
+    }
+
+    function jsonValue(value) {
+        if (typeof value === "number" || typeof value === "boolean") {
+            return String(value);
+        }
+        return jsonString(value);
+    }
+
+    function serialize(payload) {
+        var parts = [];
+        for (var key in payload) {
+            if (payload.hasOwnProperty(key)) {
+                parts.push(jsonString(key) + ":" + jsonValue(payload[key]));
+            }
+        }
+        return "{" + parts.join(",") + "}";
+    }
+
     function writeResult(payload) {
         var file = new File(env("AEXCOMPAT_AE_RESULT"));
         file.encoding = "UTF-8";
         if (!file.open("w")) {
             throw new Error("could not create result file");
         }
-        file.write(JSON.stringify(payload));
+        file.write(serialize(payload));
         file.close();
     }
 
@@ -63,7 +86,17 @@
         if (typeof comp.saveFrameToPng !== "function") {
             throw new Error("CompItem.saveFrameToPng is unavailable");
         }
+        // saveFrameToPng queues an asynchronous write; quitting immediately
+        // discards it, so poll until the file exists.
         comp.saveFrameToPng(comp.time, outputFile);
+        var waitedMs = 0;
+        while (!outputFile.exists && waitedMs < 180000) {
+            $.sleep(500);
+            waitedMs += 500;
+        }
+        if (!outputFile.exists) {
+            throw new Error("saveFrameToPng did not produce the PNG within 180s");
+        }
         writeResult({
             schema_version: 1,
             status: "captured",
@@ -76,6 +109,7 @@
             fps: fps,
             duration_frames: durationFrames,
             bpc: depth,
+            save_wait_ms: waitedMs,
             output: outputFile.fsName
         });
     } catch (error) {
