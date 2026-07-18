@@ -93,6 +93,12 @@ and bounded image input/output are now the main implementation path.
   until Codex replies "Didn't find any major issues" for the latest commit,
   then merge; never merge without that reply (the `codex-review-loop` skill
   automates this loop).
+- Repo-owner review comments (`onmokoworks`, `naari3`) outrank Codex and are
+  handled first: the owner catches issues Codex misses. Never merge while an
+  owner review comment on the PR is unresolved, even if Codex is clean —
+  address and reply first. Before every merge, re-check the PR for a newer
+  owner review or comment, since an owner review and a Codex "clean" can land
+  seconds apart.
 
 ## Canonical Verification
 
