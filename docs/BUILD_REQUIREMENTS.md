@@ -234,6 +234,10 @@ AE 実機 oracle、GPU runtime 検証は CI の対象外で、従来どおりロ
 実行する。SDK asset は private repo の collaborator 限定 asset であり、SDK の
 公開再配布ではない (リポジトリへ SDK を複製しない方針は維持)。
 
+CI の Python は両 workflow とも 3.12 (OpenEXR の win_amd64 wheel が 3.14 に
+無く、ソースビルドで約 2.5 分かかるため)。ローカルの検証済み構成 (3.14) とは
+版が異なる点に注意。3.14 に wheel が出たら揃えてよい。
+
 ## 最低対応版と検証済み構成
 
 最低対応バージョンとして確認できているのは CMake の 3.20
