@@ -49,12 +49,19 @@
       "properties": {
         "state": {"enum": ["not_requested", "not_captured", "captured"]},
         "identity_match": {"type": "boolean"},
-        "artifact": {"$ref": "#/$defs/artifact"}
+        "artifacts": {
+          "type": "object", "additionalProperties": false, "minProperties": 1,
+          "properties": {
+            "argb8": {"$ref": "#/$defs/artifact"},
+            "argb16": {"$ref": "#/$defs/artifact"},
+            "argb32f": {"$ref": "#/$defs/artifact"}
+          }
+        }
       },
       "allOf": [{
         "if": {"properties": {"state": {"const": "captured"}}, "required": ["state"]},
-        "then": {"required": ["artifact"]},
-        "else": {"properties": {"identity_match": {"const": false}}, "not": {"required": ["artifact"]}}
+        "then": {"required": ["artifacts"]},
+        "else": {"properties": {"identity_match": {"const": false}}, "not": {"required": ["artifacts"]}}
       }]
     }
   },

@@ -2,6 +2,7 @@ import hashlib
 import json
 import os
 import stat
+import sys
 from pathlib import Path
 
 from jsonschema import Draft202012Validator
@@ -45,57 +46,164 @@ def _is_reparse(metadata: os.stat_result) -> bool:
     return bool(getattr(metadata, "st_file_attributes", 0) & _REPARSE_POINT)
 
 
+def _open_posix_beneath(bundle_root: Path, relative: Path) -> int:
+    nofollow = getattr(os, "O_NOFOLLOW", None)
+    directory = getattr(os, "O_DIRECTORY", None)
+    if nofollow is None or directory is None or os.open not in os.supports_dir_fd:
+        raise OSError("secure dirfd traversal is unavailable")
+
+    root_fd = os.open(bundle_root, os.O_RDONLY | directory | nofollow)
+    current_fd = root_fd
+    try:
+        root_path_metadata = bundle_root.lstat()
+        root_handle_metadata = os.fstat(root_fd)
+        if (root_path_metadata.st_dev, root_path_metadata.st_ino) != (
+            root_handle_metadata.st_dev, root_handle_metadata.st_ino
+        ):
+            raise OSError("bundle root changed while it was opened")
+        for index, part in enumerate(relative.parts):
+            final = index == len(relative.parts) - 1
+            flags = os.O_RDONLY | nofollow | (0 if final else directory)
+            next_fd = os.open(part, flags, dir_fd=current_fd)
+            if current_fd != root_fd:
+                os.close(current_fd)
+            current_fd = next_fd
+        descriptor = current_fd
+        current_fd = -1
+        return descriptor
+    finally:
+        if current_fd >= 0 and current_fd != root_fd:
+            os.close(current_fd)
+        os.close(root_fd)
+
+
+def _windows_final_path(handle) -> str:
+    import ctypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    get_final_path = kernel32.GetFinalPathNameByHandleW
+    get_final_path.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p, ctypes.c_uint32, ctypes.c_uint32]
+    get_final_path.restype = ctypes.c_uint32
+    length = get_final_path(handle, None, 0, 0)
+    if not length:
+        raise ctypes.WinError(ctypes.get_last_error())
+    buffer = ctypes.create_unicode_buffer(length + 1)
+    if not get_final_path(handle, buffer, len(buffer), 0):
+        raise ctypes.WinError(ctypes.get_last_error())
+    value = buffer.value
+    if value.startswith("\\\\?\\UNC\\"):
+        return "\\\\" + value[8:]
+    if value.startswith("\\\\?\\"):
+        return value[4:]
+    return value
+
+
+def _open_windows_beneath(bundle_root: Path, relative: Path) -> tuple[int, tuple[int, int, int]]:
+    import ctypes
+    import msvcrt
+    from ctypes import wintypes
+
+    class ByHandleFileInformation(ctypes.Structure):
+        _fields_ = [
+            ("attributes", wintypes.DWORD), ("creation_low", wintypes.DWORD),
+            ("creation_high", wintypes.DWORD), ("access_low", wintypes.DWORD),
+            ("access_high", wintypes.DWORD), ("write_low", wintypes.DWORD),
+            ("write_high", wintypes.DWORD), ("volume_serial", wintypes.DWORD),
+            ("size_high", wintypes.DWORD), ("size_low", wintypes.DWORD),
+            ("links", wintypes.DWORD), ("file_index_high", wintypes.DWORD),
+            ("file_index_low", wintypes.DWORD),
+        ]
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    create_file = kernel32.CreateFileW
+    create_file.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, ctypes.c_void_p,
+                            wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE]
+    create_file.restype = wintypes.HANDLE
+    get_info = kernel32.GetFileInformationByHandle
+    get_info.argtypes = [wintypes.HANDLE, ctypes.POINTER(ByHandleFileInformation)]
+    get_info.restype = wintypes.BOOL
+    close_handle = kernel32.CloseHandle
+
+    share_all = 0x1 | 0x2 | 0x4
+    open_existing = 3
+    backup_semantics = 0x02000000
+    open_reparse_point = 0x00200000
+    invalid = wintypes.HANDLE(-1).value
+
+    def open_handle(path: Path, directory: bool):
+        flags = open_reparse_point | (backup_semantics if directory else 0)
+        handle = create_file(str(path), 0x80000000, share_all, None, open_existing, flags, None)
+        if handle == invalid:
+            raise ctypes.WinError(ctypes.get_last_error())
+        return handle
+
+    root_handle = open_handle(bundle_root, True)
+    file_handle = None
+    try:
+        root_path = Path(_windows_final_path(root_handle))
+        file_handle = open_handle(bundle_root / relative, False)
+        info = ByHandleFileInformation()
+        if not get_info(file_handle, ctypes.byref(info)):
+            raise ctypes.WinError(ctypes.get_last_error())
+        if info.attributes & _REPARSE_POINT:
+            raise OSError("artifact handle is a reparse point")
+        final_path = Path(_windows_final_path(file_handle))
+        try:
+            contained = os.path.commonpath((os.path.normcase(str(root_path)), os.path.normcase(str(final_path)))) == os.path.normcase(str(root_path))
+        except ValueError:
+            contained = False
+        if not contained or final_path == root_path:
+            raise OSError("opened artifact handle is outside bundle root")
+        identity = (info.volume_serial, info.file_index_high, info.file_index_low)
+        descriptor = msvcrt.open_osfhandle(file_handle, os.O_RDONLY | getattr(os, "O_BINARY", 0))
+        file_handle = None  # descriptor now owns the HANDLE
+        return descriptor, identity
+    finally:
+        if file_handle is not None:
+            close_handle(file_handle)
+        close_handle(root_handle)
+
+
+def _open_artifact_beneath(bundle_root: Path, relative: Path) -> tuple[int, object]:
+    if os.name == "nt":
+        return _open_windows_beneath(bundle_root, relative)
+    if os.name == "posix":
+        descriptor = _open_posix_beneath(bundle_root, relative)
+        metadata = os.fstat(descriptor)
+        return descriptor, (metadata.st_dev, metadata.st_ino)
+    raise OSError(f"secure artifact opening is unsupported on {sys.platform}")
+
+
 def _verify_artifact(bundle_root: Path, artifact: dict, label: str) -> str | None:
     relative = Path(*artifact["path"].split("/"))
-    candidate = bundle_root / relative
+    descriptor = None
     try:
-        if os.path.commonpath((str(bundle_root), str(candidate.resolve(strict=False)))) != str(bundle_root):
-            return f"{label} resolves outside bundle root"
+        descriptor, identity = _open_artifact_beneath(bundle_root, relative)
+        before = os.fstat(descriptor)
+        if not stat.S_ISREG(before.st_mode) or _is_reparse(before):
+            return f"{label} is not a regular file"
+        if before.st_size != artifact["size_bytes"]:
+            return f"{label} size does not match manifest"
 
-        current = bundle_root
-        for part in relative.parts:
-            current = current / part
-            metadata = current.lstat()
-            if stat.S_ISLNK(metadata.st_mode) or _is_reparse(metadata):
-                return f"{label} contains a symlink or reparse point"
+        digest = hashlib.sha256()
+        with os.fdopen(descriptor, "rb", closefd=False) as stream:
+            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                digest.update(chunk)
 
-        flags = os.O_RDONLY | getattr(os, "O_BINARY", 0)
-        descriptor = os.open(candidate, flags)
-        try:
-            before = os.fstat(descriptor)
-            path_metadata = candidate.stat()
-            if not stat.S_ISREG(before.st_mode) or _is_reparse(before):
-                return f"{label} is not a regular file"
-            if (before.st_dev, before.st_ino) != (path_metadata.st_dev, path_metadata.st_ino):
-                return f"{label} changed while it was opened"
-            if os.path.commonpath((str(bundle_root), str(candidate.resolve(strict=True)))) != str(bundle_root):
-                return f"{label} changed to resolve outside bundle root"
-            current = bundle_root
-            for part in relative.parts:
-                current = current / part
-                metadata = current.lstat()
-                if stat.S_ISLNK(metadata.st_mode) or _is_reparse(metadata):
-                    return f"{label} changed to contain a symlink or reparse point"
-            if before.st_size != artifact["size_bytes"]:
-                return f"{label} size does not match manifest"
-
-            digest = hashlib.sha256()
-            with os.fdopen(descriptor, "rb", closefd=False) as stream:
-                for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-                    digest.update(chunk)
-
-            after = os.fstat(descriptor)
-            stable_fields = ("st_dev", "st_ino", "st_size", "st_mtime_ns", "st_ctime_ns")
-            if any(getattr(before, field) != getattr(after, field) for field in stable_fields):
-                return f"{label} changed while it was hashed"
-            if digest.hexdigest() != artifact["sha256"]:
-                return f"{label} SHA-256 does not match manifest"
-        finally:
-            os.close(descriptor)
+        after = os.fstat(descriptor)
+        after_identity = identity if os.name == "nt" else (after.st_dev, after.st_ino)
+        stable_fields = ("st_dev", "st_ino", "st_size", "st_mtime_ns", "st_ctime_ns")
+        if after_identity != identity or any(getattr(before, field) != getattr(after, field) for field in stable_fields):
+            return f"{label} changed while it was hashed"
+        if digest.hexdigest() != artifact["sha256"]:
+            return f"{label} SHA-256 does not match manifest"
     except (FileNotFoundError, NotADirectoryError):
         return f"{label} does not exist"
     except OSError as error:
         return f"{label} cannot be verified: {error}"
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
     return None
 
 
@@ -105,8 +213,8 @@ def _artifacts(manifest: dict, report: dict):
         yield f"manifest dependency {index}", artifact
     yield "manifest input", manifest["input"]
     yield "manifest runner", manifest["runner"]
-    if "artifact" in manifest["oracle"]:
-        yield "manifest oracle", manifest["oracle"]["artifact"]
+    for depth, artifact in manifest["oracle"].get("artifacts", {}).items():
+        yield f"manifest oracle {depth}", artifact
     for index, result in enumerate(report["results"]):
         yield f"result {index} raw_input", result["raw_input"]
         if result["raw_output"] is not None:
@@ -177,11 +285,14 @@ def validate_bundle(manifest: dict, report: dict, bundle_root: Path) -> None:
     if set(reported) != set(requested) or len(reported) != len(requested):
         errors.append("report depths do not exactly match requested_depths")
 
-    oracle_artifact = manifest["oracle"].get("artifact")
+    oracle_artifacts = manifest["oracle"].get("artifacts", {})
+    if manifest["oracle"]["state"] == "captured" and set(oracle_artifacts) != set(requested):
+        errors.append("manifest oracle depths do not exactly match requested_depths")
     for result in report["results"]:
         _validate_world(result, errors)
         oracle = result["oracle"]
         if oracle["state"] == "captured":
+            oracle_artifact = oracle_artifacts.get(result["depth"])
             if oracle_artifact is None or oracle["expected_sha256"] != oracle_artifact["sha256"]:
                 errors.append(f"{result['depth']} expected oracle hash does not match manifest")
             output_hash = result["output_sha256"]

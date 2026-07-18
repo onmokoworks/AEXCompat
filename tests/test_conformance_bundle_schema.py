@@ -1,9 +1,11 @@
 import copy
 import hashlib
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from jsonschema import Draft202012Validator
 from referencing import Registry, Resource
@@ -38,7 +40,8 @@ class ConformanceBundleSchemaTests(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.bundle_root = Path(self.temp.name)
         for label, artifact in self.manifest_artifacts():
-            size = 16 if label == "oracle" else artifact["size_bytes"]
+            oracle_sizes = {"oracle-argb8": 16, "oracle-argb16": 32, "oracle-argb32f": 64}
+            size = oracle_sizes.get(label, artifact["size_bytes"])
             self.materialize(artifact, (label.encode("ascii") * (size + len(label)))[:size])
 
     def manifest_artifacts(self):
@@ -47,7 +50,8 @@ class ConformanceBundleSchemaTests(unittest.TestCase):
             yield f"dependency-{index}", artifact
         yield "input", self.manifest["input"]
         yield "runner", self.manifest["runner"]
-        yield "oracle", self.manifest["oracle"]["artifact"]
+        for depth, artifact in self.manifest["oracle"]["artifacts"].items():
+            yield f"oracle-{depth}", artifact
 
     def materialize(self, artifact, content):
         path = self.bundle_root.joinpath(*artifact["path"].split("/"))
@@ -91,7 +95,7 @@ class ConformanceBundleSchemaTests(unittest.TestCase):
         candidate = copy.deepcopy(self.manifest)
         candidate["oracle"] = {"state": "not_captured", "identity_match": False}
         self.manifest_validator.validate(candidate)
-        candidate["oracle"]["artifact"] = self.manifest["oracle"]["artifact"]
+        candidate["oracle"]["artifacts"] = self.manifest["oracle"]["artifacts"]
         self.assert_invalid(self.manifest_validator, candidate)
 
     def valid_report(self):
@@ -105,23 +109,17 @@ class ConformanceBundleSchemaTests(unittest.TestCase):
             raw_input = self.materialize(
                 {"path": f"raw/{depth}-input.bin"}, bytes([1]) * raw_size
             )
-            if depth == "argb8":
-                output_content = self.bundle_root.joinpath(
-                    *self.manifest["oracle"]["artifact"]["path"].split("/")
-                ).read_bytes()
-            else:
-                output_content = bytes([2]) * raw_size
+            oracle_artifact = self.manifest["oracle"]["artifacts"][depth]
+            output_content = self.bundle_root.joinpath(
+                *oracle_artifact["path"].split("/")
+            ).read_bytes()
             raw_output = self.materialize(
                 {"path": f"raw/{depth}-output.bin"}, output_content
             )
             output_sha = raw_output["sha256"]
-            oracle = (
-                {"state": "captured", "identity_match": True, "exact": True,
-                 "expected_sha256": self.manifest["oracle"]["artifact"]["sha256"],
-                 "actual_sha256": output_sha, "mismatched_pixels": 0}
-                if depth == "argb8"
-                else {"state": "not_captured", "identity_match": False, "exact": False}
-            )
+            oracle = {"state": "captured", "identity_match": True, "exact": True,
+                      "expected_sha256": oracle_artifact["sha256"],
+                      "actual_sha256": output_sha, "mismatched_pixels": 0}
             results.append({
                 "depth": depth, "classification": "ok",
                 "selector": {"render_path": "classic", "completed": True, "error_code": 0},
@@ -216,7 +214,7 @@ class ConformanceBundleSchemaTests(unittest.TestCase):
             runner_path.symlink_to(target)
         except OSError as error:
             self.skipTest(f"symlink creation is unavailable: {error}")
-        with self.assertRaisesRegex(BundleValidationError, "symlink or reparse"):
+        with self.assertRaisesRegex(BundleValidationError, "reparse point|symlink"):
             validate_bundle(self.manifest, report, self.bundle_root)
 
     def test_validator_rejects_disconnected_oracle_hash_chain(self):
@@ -228,6 +226,37 @@ class ConformanceBundleSchemaTests(unittest.TestCase):
         for mutate in mutations:
             report = self.valid_report()
             mutate(report["results"][0])
+            with self.assertRaises(BundleValidationError):
+                validate_bundle(self.manifest, report, self.bundle_root)
+
+    def test_validator_binds_each_oracle_to_its_depth(self):
+        report = self.valid_report()
+        report["results"][1]["oracle"]["expected_sha256"] = self.manifest["oracle"]["artifacts"]["argb8"]["sha256"]
+        with self.assertRaisesRegex(BundleValidationError, "expected oracle hash"):
+            validate_bundle(self.manifest, report, self.bundle_root)
+
+        manifest = copy.deepcopy(self.manifest)
+        manifest["oracle"]["artifacts"].pop("argb32f")
+        with self.assertRaisesRegex(BundleValidationError, "oracle depths"):
+            validate_bundle(manifest, self.valid_report(), self.bundle_root)
+
+    @unittest.skipUnless(os.name == "posix", "POSIX dirfd race regression")
+    def test_artifact_open_cannot_be_redirected_by_absolute_path_race(self):
+        report = self.valid_report()
+        artifact = report["results"][0]["raw_input"]
+        candidate = self.bundle_root.joinpath(*artifact["path"].split("/"))
+        outside = self.bundle_root.parent / "outside-secret.bin"
+        outside.write_bytes(b"outside-secret")
+        artifact["size_bytes"] = outside.stat().st_size
+        artifact["sha256"] = hashlib.sha256(outside.read_bytes()).hexdigest()
+        original_open = os.open
+
+        def raced_open(path, flags, *args, **kwargs):
+            if Path(path) == candidate:
+                return original_open(outside, flags, *args, **kwargs)
+            return original_open(path, flags, *args, **kwargs)
+
+        with patch("tools.conformance_bundle_validator.os.open", side_effect=raced_open):
             with self.assertRaises(BundleValidationError):
                 validate_bundle(self.manifest, report, self.bundle_root)
 

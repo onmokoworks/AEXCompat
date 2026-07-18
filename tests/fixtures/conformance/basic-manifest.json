@@ -21,6 +21,10 @@
   "oracle": {
     "state": "captured",
     "identity_match": true,
-    "artifact": {"path": "oracle/ae-argb8.rgba", "sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee", "size_bytes": 64}
+    "artifacts": {
+      "argb8": {"path": "oracle/ae-argb8.rgba", "sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee", "size_bytes": 64},
+      "argb16": {"path": "oracle/ae-argb16.rgba", "sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff", "size_bytes": 128},
+      "argb32f": {"path": "oracle/ae-argb32f.rgba", "sha256": "1111111111111111111111111111111111111111111111111111111111111111", "size_bytes": 256}
+    }
   }
 }
