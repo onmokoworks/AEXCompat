@@ -158,6 +158,7 @@ class MessageCollector:
         self.installed_hook_count: int | None = None
         self.ready: bool = False
         self.read_error_count: int = 0
+        self.format_error: str | None = None
         self._events: list[dict[str, Any]] = [
             session_boundary_event(
                 "session_start",
@@ -268,7 +269,12 @@ def run_observation(
     def on_message(message, _data):  # pragma: no cover - requires frida runtime
         if message.get("type") == "send":
             payload = message.get("payload") or {}
-            collector.handle(payload)
+            try:
+                collector.handle(payload)
+            except Exception as exc:  # noqa: BLE001 - Frida swallows callback errors
+                # Record the failure so the run fails closed instead of silently
+                # dropping a rejected invocation while still reporting complete.
+                collector.format_error = str(exc)
             if payload.get("type") in ("ready", "install_error"):
                 ready.set()
         elif message.get("type") == "error":
@@ -299,11 +305,16 @@ def run_observation(
                 raise ObservationError(f"Frida hook install failed: {collector.install_error}")
             device.resume(pid)
             exited = _await_exit(frida, device, pid, timeout_seconds)
-            # A trace is complete only if the worker exited AND the expected hooks
-            # actually attached. If the module never loaded (module_path wrong, or a
-            # loader path we do not watch), hooks never install and an empty trace
-            # must not be reported as complete.
-            completed = exited and collector.installed_hook_count == expected_hook_count
+            # A trace is complete only if the worker exited, the expected hooks
+            # actually attached, and no invocation was rejected by the formatter.
+            # If the module never loaded (module_path wrong, or a loader path we do
+            # not watch) hooks never install; if a payload failed validation the
+            # invocation was dropped - either way the trace is not complete.
+            completed = (
+                exited
+                and collector.installed_hook_count == expected_hook_count
+                and collector.format_error is None
+            )
     finally:
         try:
             device.kill(pid)
@@ -317,6 +328,7 @@ def run_observation(
     result = dict(session)
     result["output_path"] = str(destination)
     result["read_error_count"] = collector.read_error_count
+    result["format_error"] = collector.format_error
     return result
 
 
@@ -492,10 +504,11 @@ def main(argv: list[str] | None = None) -> int:
         "event_count": result["event_count"],
         "complete": complete,
         "read_errors": result.get("read_error_count", 0),
+        "format_error": result.get("format_error"),
     }))
     if not complete:
-        # The worker timed out or the hooks never attached; the trace is truncated.
-        print("observe_known_functions: incomplete observation (timeout or hooks not installed)", file=sys.stderr)
+        reason = result.get("format_error") or "timeout or hooks not installed"
+        print(f"observe_known_functions: incomplete observation ({reason})", file=sys.stderr)
         return 3
     return 0
 

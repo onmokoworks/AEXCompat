@@ -105,6 +105,20 @@ class MessageCollectorTests(unittest.TestCase):
         # An install error must not leak into the trace as an event.
         self.assertEqual(2, session["event_count"])
 
+    def test_formatter_failure_is_captured_for_fail_closed(self):
+        # A rejected invocation must be recorded (format_error) so the launcher can
+        # refuse to report the trace complete, not silently drop it. This mirrors
+        # the on_message try/except at the Frida boundary.
+        collector = self.collector()
+        try:
+            collector.handle({
+                "type": "known_function", "symbol": "apply_gamma", "module_rva": "0x1c40",
+                "phase": "enter", "fields": [{"name": "in.width", "value": float("nan")}],
+            })
+        except ValueError as exc:
+            collector.format_error = str(exc)
+        self.assertIsNotNone(collector.format_error)
+
     def test_read_error_is_counted_not_traced(self):
         collector = self.collector()
         collector.handle({"type": "read_error", "symbol": "apply_gamma",

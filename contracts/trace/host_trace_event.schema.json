@@ -76,7 +76,12 @@
     {"if": {"properties": {"event_kind": {"const": "world_descriptor"}}}, "then": {"required": ["world"]}},
     {"if": {"properties": {"event_kind": {"const": "known_function_invoke"}}}, "then": {"required": ["known_function"], "properties": {"host_kind": {"const": "native_observation"}}}},
     {"if": {"properties": {"host_kind": {"const": "native_observation"}}}, "then": {"properties": {"event_kind": {"enum": ["session_start", "session_end", "known_function_invoke"]}}}},
-    {"if": {"properties": {"event_kind": {"enum": ["error", "unimplemented"]}}}, "then": {"required": ["error"]}}
+    {"if": {"properties": {"event_kind": {"enum": ["error", "unimplemented"]}}}, "then": {"required": ["error"]}},
+    {"if": {"required": ["event_kind"], "properties": {"event_kind": {"const": "known_function_invoke"}}}, "then": true, "else": {"properties": {"known_function": false}}},
+    {"if": {"required": ["event_kind"], "properties": {"event_kind": {"const": "selector_dispatch"}}}, "then": true, "else": {"properties": {"selector": false}}},
+    {"if": {"required": ["event_kind"], "properties": {"event_kind": {"enum": ["suite_acquire", "suite_release"]}}}, "then": true, "else": {"properties": {"suite": false}}},
+    {"if": {"required": ["event_kind"], "properties": {"event_kind": {"const": "world_descriptor"}}}, "then": true, "else": {"properties": {"world": false}}},
+    {"if": {"required": ["event_kind"], "properties": {"event_kind": {"enum": ["error", "unimplemented"]}}}, "then": true, "else": {"properties": {"error": false}}}
   ],
   "additionalProperties": false
 }
