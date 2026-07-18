@@ -18,6 +18,8 @@ param(
     [ValidateRange(5, 600)][int]$TimeoutSeconds = 120
 )
 
+. (Join-Path $PSScriptRoot 'sha256.ps1')
+
 $ErrorActionPreference = 'Stop'
 if (Get-Process AfterFX,aerender,aerendercore -ErrorAction SilentlyContinue) {
     throw 'After Effects is already running; refusing to touch an existing user session.'
@@ -59,8 +61,8 @@ if (-not (Test-Path -LiteralPath $outputParent -PathType Container)) {
     throw 'OutputPng parent directory does not exist.'
 }
 
-$testedHash = (Get-FileHash -LiteralPath $testedPath -Algorithm SHA256).Hash
-$installedHash = (Get-FileHash -LiteralPath $installedPath -Algorithm SHA256).Hash
+$testedHash = Get-Sha256Hex $testedPath
+$installedHash = Get-Sha256Hex $installedPath
 if ($testedHash -ne $installedHash) {
     throw "Installed AEX hash does not match tested AEX: $installedHash != $testedHash"
 }

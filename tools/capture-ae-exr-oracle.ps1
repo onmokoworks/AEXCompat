@@ -14,6 +14,8 @@ param(
     [ValidateRange(5, 600)][int]$TimeoutSeconds = 180
 )
 
+. (Join-Path $PSScriptRoot 'sha256.ps1')
+
 $ErrorActionPreference = 'Stop'
 if ($Width -le 0 -or $Height -le 0) { throw 'Width and Height must be positive.' }
 
@@ -22,8 +24,8 @@ $testedPath = (Resolve-Path -LiteralPath $TestedAex).Path
 $installedPath = (Resolve-Path -LiteralPath $InstalledAex).Path
 $inputPath = (Resolve-Path -LiteralPath $InputImage).Path
 $rawPath = (Resolve-Path -LiteralPath $ExpectedRaw).Path
-$testedHash = (Get-FileHash $testedPath -Algorithm SHA256).Hash.ToLowerInvariant()
-$installedHash = (Get-FileHash $installedPath -Algorithm SHA256).Hash.ToLowerInvariant()
+$testedHash = Get-Sha256Hex $testedPath
+$installedHash = Get-Sha256Hex $installedPath
 if ($testedHash -ne $installedHash) { throw 'Installed AEX hash does not match tested AEX.' }
 
 $root = [System.IO.Path]::GetFullPath($OutputRoot)
@@ -43,8 +45,8 @@ $plan = [ordered]@{
     pixel_depth = 32
     comparison_boundary = 'host_raw_world_vs_ae_float_export'
     fixture = [ordered]@{ tested = $testedPath; installed = $installedPath; sha256 = $testedHash }
-    input = [ordered]@{ path = $inputPath; sha256 = (Get-FileHash $inputPath -Algorithm SHA256).Hash.ToLowerInvariant() }
-    expected_raw = [ordered]@{ path = $rawPath; format = 'rgba32f-le'; width = $Width; height = $Height; sha256 = (Get-FileHash $rawPath -Algorithm SHA256).Hash.ToLowerInvariant() }
+    input = [ordered]@{ path = $inputPath; sha256 = Get-Sha256Hex $inputPath }
+    expected_raw = [ordered]@{ path = $rawPath; format = 'rgba32f-le'; width = $Width; height = $Height; sha256 = Get-Sha256Hex $rawPath }
     outputs = [ordered]@{ root = $root; project = $project; exr = $exr; setup = $setup; comparison = $comparison; evidence = $evidence }
 }
 if ($PlanOnly) {
@@ -87,7 +89,7 @@ if ($comparisonExit -gt 1) { throw "EXR comparison failed with exit code $compar
 
 function Artifact([string]$Path) {
     $item = Get-Item -LiteralPath $Path
-    [ordered]@{ path = $item.FullName; size_bytes = $item.Length; sha256 = (Get-FileHash $item.FullName -Algorithm SHA256).Hash.ToLowerInvariant() }
+    [ordered]@{ path = $item.FullName; size_bytes = $item.Length; sha256 = Get-Sha256Hex $item.FullName }
 }
 $result = [ordered]@{
     schema = 'aexcompat-ae-exr-oracle-evidence-v1'
