@@ -107,10 +107,14 @@ done
   3. 各 inline コメントに対応内容を返信:
      `gh api -X POST repos/{owner}/{repo}/pulls/{PR}/comments/{comment_id}/replies -f body="対応済み (<sha>)。<内容>"`
   4. 手順 1 に戻る (新しい `since` で再トリガー)
-- **CLEAN (Codex 指摘なし)**: **merge の前に owner レビューを必ず確認する**:
+- **CLEAN (Codex 指摘なし)**: **merge の前に owner レビュー・コメントを必ず確認する**。
+  owner の指摘は3面に出る (inline review コメント / review 本体 / top-level PR
+  コメント)。GitHub では PR も issue なので、top-level コメントは
+  `issues/{PR}/comments` に出る。3面すべてを見る:
   ```bash
-  gh api repos/{owner}/{repo}/pulls/{PR}/comments --jq '.[] | select(.user.login=="onmokoworks" or .user.login=="naari3") | "\(.created_at) \(.path):\(.line): \(.body | split("\n")[0])"'
-  gh api repos/{owner}/{repo}/pulls/{PR}/reviews  --jq '.[] | select(.user.login=="onmokoworks" or .user.login=="naari3") | "\(.submitted_at) \(.state): \(.body | split("\n")[0])"'
+  gh api repos/{owner}/{repo}/pulls/{PR}/comments  --jq '.[] | select(.user.login=="onmokoworks" or .user.login=="naari3") | "\(.created_at) inline \(.path):\(.line): \(.body | split("\n")[0])"'
+  gh api repos/{owner}/{repo}/pulls/{PR}/reviews   --jq '.[] | select(.user.login=="onmokoworks" or .user.login=="naari3") | "\(.submitted_at) review \(.state): \(.body | split("\n")[0])"'
+  gh api repos/{owner}/{repo}/issues/{PR}/comments --jq '.[] | select(.user.login=="onmokoworks" or .user.login=="naari3") | select(.body | test("@codex review") | not) | "\(.created_at) comment: \(.body | split("\n")[0])"'
   ```
   owner の未対応レビュー / コメントがあれば **merge せず** OWNER-FINDING の
   手順へ。無ければ最新 commit への clean であることを確認して merge:
