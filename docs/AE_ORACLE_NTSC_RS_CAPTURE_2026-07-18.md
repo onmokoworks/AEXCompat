@@ -213,3 +213,46 @@ runner (`tools/capture-ae-exr-oracle.ps1`) is the deeper-precision path.
   blending, and scene-referred-compensation state for evidence identity.
   The 8 bpc reference re-captured byte-identically after this change
   (SHA-256 `2cd24acf...` unchanged).
+
+## Follow-up: the 8-bit transport blocker is resolved (2026-07-18, later
+   the same day)
+
+Correction to the two "transport is fixed at 8-bit RGBA" statements above:
+they described the state at capture time and are no longer true.
+
+1. The worker-to-broker image transport now carries the worker's native
+   pixel depth for `argb16`/`argb32f` renders, and the broker preserves it
+   as a raw sidecar (`<output>.rgba16le` / `<output>.rgba32f-le`) next to
+   the 8-bit preview PNG ("Preserve native pixel depth across worker
+   transport").
+2. On top of that, `--render-experimental-16-deep` and
+   `--render-experimental-smart-16-deep` now write the output PNG itself as
+   full-range RGBA16 (IHDR bit depth 16), expanding the AE-range transport
+   samples (white = 32768) with `round(v * 65535 / 32768)`. The expansion
+   is exhaustively verified to be lossless for AE-range data and to
+   reproduce the 8-bit preview under `round(v16 * 255 / 65535)`
+   (broker unit test, all 32769 values).
+
+Verification against this note's earlier capture (observations, same input
+`bb84e35e...`, same plug-in `ad129f80...`, frame 0, defaults):
+
+- `--render-experimental-smart-16` re-rendered with the current worker and
+  broker produces a preview PNG pixel-identical to this note's
+  `target/ntsc-rs-output-16.png` (8,294,400 RGBA8 samples, zero
+  differences), so the native-depth transport did not change the 8-bit
+  route.
+- `--render-experimental-smart-16-deep` on the same input renders with an
+  identical worker output hash
+  (`94aaae84e573a090abd0c472fa79d548b1667beed2661be1fd63d61b548a74f6` for
+  both routes), writes a bit-depth-16 RGBA PNG, and rounding its
+  16,588,800 samples to 8 bits reproduces the preview PNG exactly (zero
+  mismatches). The raw sidecars of both routes are byte-identical; all raw
+  samples sit in 0..=32768 (no over-white values), and the 16-bit PNG is
+  the exact lossless expansion of the raw data.
+
+The float/16-bit-level AE comparison the earlier section called blocked is
+therefore unblocked: the host can now export 16-bit PNGs and raw
+`rgba16le` buffers, and `tools/compare-pixel-oracles.py` accepts them
+(`--raw-format rgba16le --raw-integer-max 32768`). It still needs a fresh
+AE 16 bpc capture (none is retained under `target/`), so the full-precision
+comparison remains future work, not a claim of this note.

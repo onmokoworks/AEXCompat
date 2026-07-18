@@ -6,6 +6,8 @@ param(
     [Parameter(Mandatory = $true)][string]$OutputPng,
     [Parameter(Mandatory = $true)][string]$EffectName,
     [string]$ScriptPath,
+    [string]$ParamName = '',
+    [string]$ParamValue = '',
     [ValidateRange(0, 10000000)][int]$Frame = 0,
     [ValidateRange(1, 1000)][int]$Fps = 30,
     [ValidateRange(1, 10000001)][int]$DurationFrames = 300,
@@ -22,6 +24,15 @@ if (Get-Process AfterFX,aerender,aerendercore -ErrorAction SilentlyContinue) {
 }
 if ($DurationFrames -le $Frame) {
     throw 'DurationFrames must be greater than Frame.'
+}
+if ($ParamName -and -not ($ParamValue -match '^-?\d+(\.\d+)?$')) {
+    throw 'ParamValue must be a number when ParamName is set.'
+}
+if ($ParamValue -and -not $ParamName) {
+    throw 'ParamName is required when ParamValue is set.'
+}
+if ($ParamName -and $NoEffect) {
+    throw 'ParamName cannot be combined with NoEffect; there is no effect to set the parameter on.'
 }
 
 $afterEffectsPath = (Resolve-Path -LiteralPath $AfterEffects).Path
@@ -84,6 +95,14 @@ if ($LinearizeWorkingSpace) { $env:AEXCOMPAT_AE_LINEARIZE = $LinearizeWorkingSpa
 # The JSX polls for the asynchronous saveFrameToPng output; keep its bound
 # inside the outer watchdog so the wait can never outlive this script.
 $env:AEXCOMPAT_AE_SAVE_TIMEOUT_MS = [string]($TimeoutSeconds * 1000)
+if ($ParamName) {
+    $env:AEXCOMPAT_AE_PARAM_NAME = $ParamName
+    $env:AEXCOMPAT_AE_PARAM_VALUE = $ParamValue
+} else {
+    # The JSX reads these directly; clear inherited values so a default
+    # capture cannot pick up a stale override from the calling environment.
+    Remove-Item 'Env:AEXCOMPAT_AE_PARAM_NAME','Env:AEXCOMPAT_AE_PARAM_VALUE' -ErrorAction SilentlyContinue
+}
 try {
     $escapedScriptPath = $scriptPath.Replace('"', '\"')
     $arguments = '-m -noui -r "{0}"' -f $escapedScriptPath
@@ -101,7 +120,8 @@ try {
     'AEXCOMPAT_AE_INPUT','AEXCOMPAT_AE_OUTPUT','AEXCOMPAT_AE_RESULT','AEXCOMPAT_AE_EFFECT',
     'AEXCOMPAT_AE_FRAME','AEXCOMPAT_AE_FPS','AEXCOMPAT_AE_DURATION','AEXCOMPAT_AE_BPC',
     'AEXCOMPAT_AE_SAVE_TIMEOUT_MS','AEXCOMPAT_AE_NO_EFFECT',
-    'AEXCOMPAT_AE_WORKING_SPACE','AEXCOMPAT_AE_LINEARIZE' |
+    'AEXCOMPAT_AE_WORKING_SPACE','AEXCOMPAT_AE_LINEARIZE',
+    'AEXCOMPAT_AE_PARAM_NAME','AEXCOMPAT_AE_PARAM_VALUE' |
         ForEach-Object { Remove-Item "Env:$_" -ErrorAction SilentlyContinue }
 }
 
