@@ -41,13 +41,13 @@
                               "files":  [
                                             {
                                                 "path":  "minihost/src/l2_main.cpp",
-                                                "size_bytes":  1191225,
-                                                "sha256":  "457c87bffb958257606d74bede57dd28fa2f2b15f44a19cd30a4044f08440e6a"
+                                                "size_bytes":  1195951,
+                                                "sha256":  "a872c731982f89e5bfe8aa223a614e9c92fbd1b3f5fbfabeb7ba68b9b0fff693"
                                             },
                                             {
                                                 "path":  "broker/crates/broker/src/image_render.rs",
                                                 "size_bytes":  202221,
-                                                "sha256":  "85d1b1b2538d2e9faa4cfdd29ab8816b1f84ec35e03099951b6e2553d260d89f"
+                                                "sha256":  "da4721ca106e4694711376ea724d659f4da93264c9811ab73b43d58f52d5e1db"
                                             }
                                         ]
                           },
@@ -74,8 +74,8 @@
                                                   ],
                                      "artifact":  {
                                                       "path":  "target/minihost-build/aex_render_worker.exe",
-                                                      "size_bytes":  784896,
-                                                      "sha256":  "31444606d2778d1ba45be963fb30379911ce8c77a94d5983c7d1382e4359b06d"
+                                                      "size_bytes":  786944,
+                                                      "sha256":  "5ce506bef4f0ecffbcf5633d73c99df86c9622275be1749fbf2ade42bb5df220"
                                                   },
                                      "report_artifact":  {
                                                              "path":  "target/final-integration-evidence/aegp-async-receipt.json",
@@ -116,8 +116,8 @@
                                                            },
                                                            {
                                                                "path":  "target/minihost-build/aex_smart_worker.exe",
-                                                               "size_bytes":  802304,
-                                                               "sha256":  "64b74b25b5eb3aa997b89eaa309215e0a4d58ffc9a0acfecec0c399a3a2507ad"
+                                                               "size_bytes":  804352,
+                                                               "sha256":  "627b2a3073c41cc2b698dbc46f8ebc14c1ff02b189f0adedd9e9fc6973d5cfc8"
                                                            }
                                                        ],
                                          "required_module_audit":  {
@@ -132,26 +132,26 @@
                                          {
                                              "role":  "render_worker",
                                              "path":  "target/minihost-build/aex_render_worker.exe",
-                                             "size_bytes":  784896,
-                                             "sha256":  "31444606d2778d1ba45be963fb30379911ce8c77a94d5983c7d1382e4359b06d"
+                                             "size_bytes":  786944,
+                                             "sha256":  "5ce506bef4f0ecffbcf5633d73c99df86c9622275be1749fbf2ade42bb5df220"
                                          },
                                          {
                                              "role":  "aegp_worker",
                                              "path":  "target/minihost-build/aex_l2_worker.exe",
-                                             "size_bytes":  713216,
-                                             "sha256":  "f4a4f3de926c15dda63fa78d923f83e3deb1697a283c6593be49cc908e63ac82"
+                                             "size_bytes":  715264,
+                                             "sha256":  "40ad5fb0b62e296a189a623b9a4fd858523d8d8ed1b2d6db54183a7a83c6c8ba"
                                          },
                                          {
                                              "role":  "smart_worker",
                                              "path":  "target/minihost-build/aex_smart_worker.exe",
-                                             "size_bytes":  802304,
-                                             "sha256":  "64b74b25b5eb3aa997b89eaa309215e0a4d58ffc9a0acfecec0c399a3a2507ad"
+                                             "size_bytes":  804352,
+                                             "sha256":  "627b2a3073c41cc2b698dbc46f8ebc14c1ff02b189f0adedd9e9fc6973d5cfc8"
                                          },
                                          {
                                              "role":  "command_harness",
                                              "path":  "broker/target/debug/aexcompat-harness.exe",
                                              "size_bytes":  19972096,
-                                             "sha256":  "924b6d8ea2588ce2c03635e0f99096ef7efdd859ff74f5d219a6bd9965f2c745"
+                                             "sha256":  "22c81e1691b62063163aef6d943741e7025585dc57aef057ac9b67a46f578490"
                                          }
                                      ],
     "pending":  [

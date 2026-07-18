@@ -10430,6 +10430,35 @@ int32_t aegp_layer_index(void* layer) {
     if (layer == &g_aegp_layers[index]) return static_cast<int32_t>(index);
   return -1;
 }
+int32_t __cdecl aegp_get_layer_to_world_xform(
+    void* layer, const AegpTime* comp_time, AegpMatrix4* transform) {
+  if (aegp_layer_index(layer) < 0 || !comp_time || !transform ||
+      !valid_comp_time(*comp_time)) return 4;
+  AegpMatrix4 result{};
+  for (std::size_t index = 0; index < 4; ++index) result.mat[index][index] = 1.0;
+  *transform = result;
+  return 0;
+}
+
+union AegpLegacyStreamVal { double one_d; };
+int32_t __cdecl aegp_get_layer_stream_value_v2(void* layer, int32_t which_stream,
+    int16_t time_mode, const AegpTime* time, uint8_t,
+    AegpLegacyStreamVal* value, int32_t* stream_type) {
+  constexpr int32_t kLayerStreamZoom = 11;
+  constexpr int16_t kCompTimeMode = 1;
+  constexpr int32_t kStreamTypeOneD = 5;
+  const int32_t index = aegp_layer_index(layer);
+  if (index < 0 || index != g_aegp_active_camera_layer_index ||
+      which_stream != kLayerStreamZoom || time_mode != kCompTimeMode ||
+      !time || !value || !valid_comp_time(*time) ||
+      !layer_active_at_time(static_cast<std::size_t>(index), *time)) return 4;
+  const int32_t width = g_full_resolution_width > 0
+      ? g_full_resolution_width : g_smart_width;
+  if (width <= 0 || width > INT16_MAX) return 4;
+  value->one_d = static_cast<double>(width);
+  if (stream_type) *stream_type = kStreamTypeOneD;
+  return 0;
+}
 int32_t __cdecl aegp_get_active_layer(void** layer) {
   if (!layer) return 4;
   // AE returns a non-null active layer only when exactly one layer is selected.
@@ -12229,6 +12258,7 @@ int32_t __cdecl acquire_suite(const char* name, int32_t version, const void** su
     g_aegp_layer_suite9[3] = reinterpret_cast<void*>(&aegp_get_layer_index);
     g_aegp_layer_suite9[4] = reinterpret_cast<void*>(&aegp_get_layer_source_item);
     g_aegp_layer_suite9[6] = reinterpret_cast<void*>(&aegp_get_layer_parent_comp);
+    g_aegp_layer_suite9[38] = reinterpret_cast<void*>(&aegp_get_layer_to_world_xform);
     *suite = g_aegp_layer_suite9.data();
     record_suite_acquire(name, version);
     return 0;
@@ -12247,6 +12277,7 @@ int32_t __cdecl acquire_suite(const char* name, int32_t version, const void** su
     g_aegp_layer_suite5[15] = reinterpret_cast<void*>(&aegp_get_layer_in_point);
     g_aegp_layer_suite5[16] = reinterpret_cast<void*>(&aegp_get_layer_duration);
     g_aegp_layer_suite5[17] = reinterpret_cast<void*>(&aegp_set_layer_in_point_and_duration);
+    g_aegp_layer_suite5[38] = reinterpret_cast<void*>(&aegp_get_layer_to_world_xform);
     g_aegp_layer_suite5[41] = reinterpret_cast<void*>(&aegp_get_layer_parent);
     g_aegp_layer_suite5[45] = reinterpret_cast<void*>(&aegp_get_layer_from_id);
     *suite = g_aegp_layer_suite5.data();
@@ -12268,6 +12299,7 @@ int32_t __cdecl acquire_suite(const char* name, int32_t version, const void** su
     g_aegp_layer_suite9[17] = reinterpret_cast<void*>(&aegp_set_layer_in_point_and_duration);
     g_aegp_layer_suite9[28] = reinterpret_cast<void*>(&aegp_get_layer_object_type);
     g_aegp_layer_suite9[37] = reinterpret_cast<void*>(&aegp_get_layer_id);
+    g_aegp_layer_suite9[38] = reinterpret_cast<void*>(&aegp_get_layer_to_world_xform);
     g_aegp_layer_suite9[41] = reinterpret_cast<void*>(&aegp_get_layer_parent);
     g_aegp_layer_suite9[45] = reinterpret_cast<void*>(&aegp_get_layer_from_id);
     *suite = g_aegp_layer_suite9.data();
@@ -12286,6 +12318,7 @@ int32_t __cdecl acquire_suite(const char* name, int32_t version, const void** su
     g_aegp_layer_suite8[10] = reinterpret_cast<void*>(&aegp_get_layer_flags);
     g_aegp_layer_suite8[11] = reinterpret_cast<void*>(&aegp_set_layer_flag);
     g_aegp_layer_suite8[22] = reinterpret_cast<void*>(&aegp_get_layer_transfer_mode);
+    g_aegp_layer_suite8[38] = reinterpret_cast<void*>(&aegp_get_layer_to_world_xform);
     g_aegp_layer_suite8[41] = reinterpret_cast<void*>(&aegp_get_layer_parent);
     g_aegp_layer_suite8[45] = reinterpret_cast<void*>(&aegp_get_layer_from_id);
     *suite = g_aegp_layer_suite8.data();
@@ -12709,6 +12742,7 @@ int32_t __cdecl acquire_suite(const char* name, int32_t version, const void** su
     g_aegp_stream_suite2[4] = reinterpret_cast<void*>(&aegp_get_effect_num_param_streams);
     g_aegp_stream_suite2[5] = reinterpret_cast<void*>(&aegp_get_new_effect_stream_by_index_v2);
     g_aegp_stream_suite2[7] = reinterpret_cast<void*>(&aegp_dispose_stream_v2);
+    g_aegp_stream_suite2[16] = reinterpret_cast<void*>(&aegp_get_layer_stream_value_v2);
     *suite = g_aegp_stream_suite2.data();
     record_suite_acquire(name, version);
     return 0;
@@ -20388,6 +20422,61 @@ bool verify_aegp_get_effect_camera_matrix_case(bool smart_case) {
   return ok;
 }
 
+bool verify_aegp_resizer_3d_chain() {
+  const void* layer_suite = nullptr;
+  const void* stream_suite = nullptr;
+  const int32_t saved_camera_index = g_aegp_active_camera_layer_index;
+  const int32_t saved_width = g_full_resolution_width;
+  const int32_t saved_height = g_full_resolution_height;
+  const auto saved_in_points = g_aegp_layer_in_points;
+  const auto saved_durations = g_aegp_layer_durations;
+  g_aegp_active_camera_layer_index = 2;
+  g_aegp_layer_in_points[2] = {0, 30};
+  g_aegp_layer_durations[2] = {300, 30};
+  g_full_resolution_width = 1920;
+  g_full_resolution_height = 1080;
+  const AegpTime time{45, 30};
+
+  bool ok = acquire_suite("AEGP Layer Suite", 14, &layer_suite) == 0 &&
+      layer_suite == g_aegp_layer_suite8.data() &&
+      g_aegp_layer_suite8[38] == reinterpret_cast<void*>(&aegp_get_layer_to_world_xform) &&
+      acquire_suite("AEGP Stream Suite", 7, &stream_suite) == 0 &&
+      stream_suite == g_aegp_stream_suite2.data() &&
+      g_aegp_stream_suite2[16] == reinterpret_cast<void*>(&aegp_get_layer_stream_value_v2);
+  AegpMatrix4 matrix{};
+  ok = ok && aegp_get_layer_to_world_xform(&g_aegp_layers[2], &time, &matrix) == 0;
+  for (std::size_t row = 0; row < 4; ++row) {
+    for (std::size_t column = 0; column < 4; ++column)
+      ok = ok && matrix.mat[row][column] == (row == column ? 1.0 : 0.0);
+  }
+  AegpLegacyStreamVal zoom{-1.0};
+  int32_t type = -1;
+  ok = ok && aegp_get_layer_stream_value_v2(&g_aegp_layers[2], 11, 1,
+      &time, 0, &zoom, &type) == 0 && zoom.one_d == 1920.0 && type == 5;
+
+  AegpLegacyStreamVal sentinel{-2.0};
+  type = -2;
+  AegpTime invalid{45, 0};
+  ok = ok && aegp_get_layer_stream_value_v2(&g_aegp_layers[1], 11, 1,
+      &time, 0, &sentinel, &type) != 0 && sentinel.one_d == -2.0 && type == -2 &&
+      aegp_get_layer_stream_value_v2(&g_aegp_layers[2], 10, 1,
+      &time, 0, &sentinel, &type) != 0 && sentinel.one_d == -2.0 && type == -2;
+  AegpMatrix4 matrix_sentinel{};
+  std::memset(&matrix_sentinel, 0x5a, sizeof(matrix_sentinel));
+  matrix = matrix_sentinel;
+  ok = ok && aegp_get_layer_to_world_xform(&g_aegp_layers[2], &invalid, &matrix) != 0 &&
+      std::memcmp(&matrix, &matrix_sentinel, sizeof(matrix)) == 0;
+
+  ok = release_suite("AEGP Stream Suite", 7) == 0 && ok;
+  ok = release_suite("AEGP Layer Suite", 14) == 0 && ok;
+  g_aegp_active_camera_layer_index = saved_camera_index;
+  g_full_resolution_width = saved_width;
+  g_full_resolution_height = saved_height;
+  g_aegp_layer_in_points = saved_in_points;
+  g_aegp_layer_durations = saved_durations;
+  return ok && suite_leases_balanced();
+}
+
 bool verify_aegp_get_effect_camera() {
   const void* suite = nullptr;
   bool ok = acquire_suite("AEGP PF Interface Suite", 1, &suite) == 0 &&
@@ -20403,6 +20492,14 @@ bool verify_aegp_get_effect_camera() {
 }
 
 int wmain(int argc, wchar_t **argv) {
+  if (argc == 2 && std::wstring(argv[1]) == L"--self-test-aegp-resizer-3d") {
+    const bool passed = verify_aegp_resizer_3d_chain();
+    std::cout << "{\"aegp_resizer_3d\":\"" << (passed ? "passed" : "failed")
+              << "\",\"layer_slot\":38,\"layer_offset_x64\":304,"
+                 "\"stream_slot\":16,\"stream_offset_x64\":128,"
+                 "\"zoom\":1920}\n";
+    return passed ? 0 : 68;
+  }
   if (argc == 2 && std::wstring(argv[1]) == L"--self-test-aegp-get-effect-camera") {
     const bool passed = verify_aegp_get_effect_camera();
     std::cout << "{\"aegp_get_effect_camera\":\""
