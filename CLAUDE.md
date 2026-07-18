@@ -21,8 +21,11 @@ and bounded image input/output are now the main implementation path.
   as a security boundary against untrusted binaries. Require this tier only when
   producing evidence that will be compared, committed, or trusted later; do not
   force it onto interactive observation or reverse-engineering.
-- Do not bypass output bounds or pixel/output validation to make an AEX
-  appear compatible. Containing malformed AEX output is part of the always-on
+- Do not bypass output bounds, pixel/output validation, or fail-closed
+  suite/handle ownership (reject stale, foreign, exhausted, or double-disposed
+  references) to make an AEX appear compatible. These are host-protection
+  runtime invariants that keep a malformed plug-in producing diagnostics instead
+  of corrupting host state or crashing; they are part of the always-on
   crash-containment floor, not an evidence-tier concern.
 - In the evidence tier, do not bypass identity checks, approval receipts, or
   dependency manifests to make an AEX appear compatible.
@@ -87,9 +90,11 @@ artifacts from a previous checkout.
 3. Verify image input/output across Classic, SmartFX, depths, and multiple inputs.
 4. Build an After Effects oracle corpus and distinguish host regression evidence
    from Adobe-equivalence evidence.
-5. Keep crash containment (process isolation, Job Object, timeout) and output
-   bounds always on; treat fail-closed ownership, module identity, and receipt
-   pinning as the evidence tier rather than a universal requirement.
+5. Keep crash containment (process isolation, Job Object, timeout), output
+   bounds, and fail-closed suite/handle ownership (stale, foreign, exhausted, or
+   double-disposed references) always on as host-protection invariants; treat
+   module identity, receipt pinning, and load-tree ownership as the evidence tier
+   rather than a universal requirement.
 
 Current status is tracked in `docs/COMPATIBILITY_STATUS_2026-07-16.md`, current
 direction in `docs/PROJECT_DIRECTION.md`, and security limitations in
