@@ -60,21 +60,19 @@ $env:AEXCOMPAT_AE_ORACLE_BPC = [string]$Bpc
 $env:AEXCOMPAT_AE_ORACLE_FPS = [string]$Fps
 $env:AEXCOMPAT_AE_ORACLE_DURATION = [string]$DurationFrames
 try {
-    # AfterFX.exe silently ignores -r on AE 25.3; the sibling COM launcher
-    # executes the script and preserves a process handle for the watchdog.
-    $process = Start-Process -FilePath $scriptHostPath `
-        -ArgumentList @('-m', '-noui', '-r', $scriptPath) `
-        -PassThru -WindowStyle Hidden
-    if (-not $process.WaitForExit($TimeoutSeconds * 1000)) {
-        Stop-Process -Id $process.Id -Force
-        throw 'After Effects oracle project preparation timed out and was terminated.'
-    }
+    # Direct invocation is required on AE 25.2; Start-Process can return zero
+    # without dispatching the JSX even with identical arguments.
+    & $scriptHostPath -m -r $scriptPath
+    $processExitCode = $LASTEXITCODE
 } finally {
     $environmentNames | ForEach-Object { Remove-Item "Env:$_" -ErrorAction SilentlyContinue }
 }
 
 if (-not (Test-Path -LiteralPath $resultPath) -or -not (Test-Path -LiteralPath $projectPath)) {
-    throw "After Effects did not create the oracle project and result (exit code $($process.ExitCode))."
+    $detail = if (Test-Path -LiteralPath $resultPath) {
+        Get-Content -LiteralPath $resultPath -Raw
+    } else { 'result missing' }
+    throw "After Effects did not create the oracle project and result (exit code $processExitCode): $detail"
 }
 $result = Get-Content -LiteralPath $resultPath -Raw | ConvertFrom-Json
 if ($result.status -ne 'prepared') {

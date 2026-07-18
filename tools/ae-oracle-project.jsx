@@ -7,20 +7,51 @@
         return value;
     }
 
+    function jsonString(value) {
+        var escaped = String(value)
+            .replace(/\\/g, "\\\\")
+            .replace(/"/g, '\\"')
+            .replace(/[\x00-\x1f]/g, function (ch) {
+                var hex = ch.charCodeAt(0).toString(16);
+                while (hex.length < 4) {
+                    hex = "0" + hex;
+                }
+                return "\\u" + hex;
+            });
+        return '"' + escaped + '"';
+    }
+
+    function jsonValue(value) {
+        if (typeof value === "number" || typeof value === "boolean") {
+            return String(value);
+        }
+        return jsonString(value);
+    }
+
+    function serialize(payload) {
+        var parts = [];
+        for (var key in payload) {
+            if (payload.hasOwnProperty(key)) {
+                parts.push(jsonString(key) + ":" + jsonValue(payload[key]));
+            }
+        }
+        return "{" + parts.join(",") + "}";
+    }
+
     function writeJson(path, payload) {
         var file = new File(path);
         file.encoding = "UTF-8";
         if (!file.open("w")) {
             throw new Error("could not create result JSON");
         }
-        file.write(JSON.stringify(payload));
+        file.write(serialize(payload));
         file.close();
     }
 
     function findOpenExrTemplate(outputModule) {
         var templates = outputModule.templates;
         for (var i = 0; i < templates.length; i += 1) {
-            if (/openexr|open exr/i.test(templates[i])) {
+            if (/openexr|open exr|\bexr\b/i.test(templates[i])) {
                 return templates[i];
             }
         }
@@ -72,11 +103,12 @@
         var outputModule = renderItem.outputModule(1);
         var exrTemplate = findOpenExrTemplate(outputModule);
         if (!exrTemplate) {
-            throw new Error("no OpenEXR output module template is installed");
+            throw new Error("no OpenEXR output module template is installed; available=" +
+                outputModule.templates.join(" | "));
         }
         outputModule.applyTemplate(exrTemplate);
 
-        var fullFloatApplied = false;
+        var fullFloatApplied = /32.*float/i.test(exrTemplate);
         try {
             outputModule.setSettings({
                 "Output Module Settings": {

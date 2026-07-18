@@ -105,8 +105,10 @@ if ($ParamName) {
 }
 try {
     $escapedScriptPath = $scriptPath.Replace('"', '\"')
-    $arguments = '-m -noui -r "{0}"' -f $escapedScriptPath
-    $process = Start-Process -FilePath $afterEffectsPath -ArgumentList $arguments -PassThru -WindowStyle Hidden
+    # AE 25.2 can abort before JSX execution when -noui hits a failed GPU3
+    # sanity state. UI launch still runs the script and the JSX quits AE.
+    $arguments = '-m -r "{0}"' -f $escapedScriptPath
+    $process = Start-Process -FilePath $afterEffectsPath -ArgumentList $arguments -PassThru
     $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
     while ([DateTime]::UtcNow -lt $deadline -and -not (Test-Path -LiteralPath $resultPath)) {
         Start-Sleep -Milliseconds 250
