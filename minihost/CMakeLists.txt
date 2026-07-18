@@ -35,6 +35,7 @@ set(AEXCOMPAT_L2_WORKER_SOURCES
     src/worker_selector_dispatch.cpp
     src/worker_aegp_render_options.cpp
     src/worker_aegp_scene.cpp
+    src/worker_aegp_scene_runtime.cpp
     src/worker_aegp_scene_selftests.cpp
     src/worker_handle_runtime.cpp
     src/worker_pf_suites.cpp

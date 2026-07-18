@@ -63,6 +63,7 @@
 #include "worker_selector_dispatch.hpp"
 #include "worker_aegp_render_options.hpp"
 #include "worker_aegp_scene.hpp"
+#include "worker_aegp_scene_runtime.hpp"
 #include "worker_handle_runtime.hpp"
 #include "worker_suite_abi.hpp"
 #include "worker_world_safety.hpp"
@@ -15895,7 +15896,13 @@ int wmain(int argc, wchar_t **argv) {
        &scene_initialize_layer_render_options, &suite_leases_balanced},
       &g_aegp_comp_item, &g_aegp_comp, &g_full_resolution_width,
       &g_full_resolution_height, &g_smart_width, &g_smart_height};
+  const SceneRuntimeContext scene_runtime_host{
+      {&suite_leases_balanced}, &g_aegp_comp_item, &g_aegp_comp,
+      &g_full_resolution_width, &g_full_resolution_height,
+      &g_smart_width, &g_smart_height};
   if (!configure_scene_context(scene_host) || !scene_translation_unit_linked() ||
+      !configure_scene_runtime_context(scene_runtime_host) ||
+      !scene_runtime_translation_unit_linked() ||
       !scene_selftests_translation_unit_linked()) return 23;
   configure_validators(&validate_render_options_item, &initialize_layer_render_options);
   configure_cache_on_load_suite(&g_effect);
