@@ -2,6 +2,7 @@ import copy
 import hashlib
 import json
 import os
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -239,6 +240,38 @@ class ConformanceBundleSchemaTests(unittest.TestCase):
         manifest["oracle"]["artifacts"].pop("argb32f")
         with self.assertRaisesRegex(BundleValidationError, "oracle depths"):
             validate_bundle(manifest, self.valid_report(), self.bundle_root)
+
+    def test_validator_binds_report_oracle_identity_to_manifest(self):
+        report = self.valid_report()
+        self.manifest["oracle"]["identity_match"] = False
+        with self.assertRaisesRegex(BundleValidationError, "identity_match does not match manifest"):
+            validate_bundle(self.manifest, report, self.bundle_root)
+
+    @unittest.skipUnless(os.name == "nt", "Windows junction regression")
+    def test_artifact_open_rejects_intermediate_junction_inside_bundle(self):
+        report = self.valid_report()
+        target_dir = self.bundle_root / "real-runner"
+        target_dir.mkdir()
+        content = b"junction-artifact"
+        (target_dir / "runner.exe").write_bytes(content)
+        junction = self.bundle_root / "alias-runner"
+        created = subprocess.run(
+            ["cmd", "/c", "mklink", "/J", str(junction), str(target_dir)],
+            capture_output=True,
+            text=True,
+        )
+        if created.returncode:
+            self.skipTest(f"junction creation is unavailable: {created.stderr}")
+
+        artifact = {
+            "path": "alias-runner/runner.exe",
+            "sha256": hashlib.sha256(content).hexdigest(),
+            "size_bytes": len(content),
+        }
+        self.manifest["runner"] = artifact
+        report["identities"]["runner"] = copy.deepcopy(artifact)
+        with self.assertRaisesRegex(BundleValidationError, "reparse point|component handle"):
+            validate_bundle(self.manifest, report, self.bundle_root)
 
     @unittest.skipUnless(os.name == "posix", "POSIX dirfd race regression")
     def test_artifact_open_cannot_be_redirected_by_absolute_path_race(self):

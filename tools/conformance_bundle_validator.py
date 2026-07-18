@@ -137,31 +137,58 @@ def _open_windows_beneath(bundle_root: Path, relative: Path) -> tuple[int, tuple
             raise ctypes.WinError(ctypes.get_last_error())
         return handle
 
-    root_handle = open_handle(bundle_root, True)
-    file_handle = None
-    try:
-        root_path = Path(_windows_final_path(root_handle))
-        file_handle = open_handle(bundle_root / relative, False)
+    def handle_info(handle):
         info = ByHandleFileInformation()
-        if not get_info(file_handle, ctypes.byref(info)):
+        if not get_info(handle, ctypes.byref(info)):
             raise ctypes.WinError(ctypes.get_last_error())
         if info.attributes & _REPARSE_POINT:
-            raise OSError("artifact handle is a reparse point")
-        final_path = Path(_windows_final_path(file_handle))
-        try:
-            contained = os.path.commonpath((os.path.normcase(str(root_path)), os.path.normcase(str(final_path)))) == os.path.normcase(str(root_path))
-        except ValueError:
-            contained = False
-        if not contained or final_path == root_path:
-            raise OSError("opened artifact handle is outside bundle root")
+            raise OSError("artifact path contains a reparse point")
         identity = (info.volume_serial, info.file_index_high, info.file_index_low)
+        return info, identity
+
+    def normalized(path: Path) -> str:
+        return os.path.normcase(os.path.normpath(str(path)))
+
+    handles = []
+    file_handle = None
+    try:
+        root_handle = open_handle(bundle_root, True)
+        handles.append(root_handle)
+        _, root_identity = handle_info(root_handle)
+        root_path = Path(_windows_final_path(root_handle))
+        expected = root_path
+        identities = [root_identity]
+
+        for index, part in enumerate(relative.parts):
+            final = index == len(relative.parts) - 1
+            expected = expected / part
+            handle = open_handle(bundle_root.joinpath(*relative.parts[: index + 1]), not final)
+            handles.append(handle)
+            _, identity = handle_info(handle)
+            identities.append(identity)
+            if normalized(Path(_windows_final_path(handle))) != normalized(expected):
+                raise OSError("artifact component handle does not match its bundle path")
+
+        # Keep every component handle alive and verify the complete chain again so
+        # rename/replacement races cannot splice handles from different trees.
+        expected = root_path
+        for index, handle in enumerate(handles):
+            if index:
+                expected = expected / relative.parts[index - 1]
+            _, identity = handle_info(handle)
+            if identity != identities[index] or normalized(Path(_windows_final_path(handle))) != normalized(expected):
+                raise OSError("artifact path changed while component handles were opened")
+
+        file_handle = handles.pop()
+        identity = identities[-1]
         descriptor = msvcrt.open_osfhandle(file_handle, os.O_RDONLY | getattr(os, "O_BINARY", 0))
         file_handle = None  # descriptor now owns the HANDLE
         return descriptor, identity
     finally:
         if file_handle is not None:
             close_handle(file_handle)
-        close_handle(root_handle)
+        for handle in reversed(handles):
+            close_handle(handle)
 
 
 def _open_artifact_beneath(bundle_root: Path, relative: Path) -> tuple[int, object]:
@@ -286,11 +313,16 @@ def validate_bundle(manifest: dict, report: dict, bundle_root: Path) -> None:
         errors.append("report depths do not exactly match requested_depths")
 
     oracle_artifacts = manifest["oracle"].get("artifacts", {})
+    manifest_oracle_identity = manifest["oracle"]["identity_match"]
     if manifest["oracle"]["state"] == "captured" and set(oracle_artifacts) != set(requested):
         errors.append("manifest oracle depths do not exactly match requested_depths")
     for result in report["results"]:
         _validate_world(result, errors)
         oracle = result["oracle"]
+        if oracle["identity_match"] != manifest_oracle_identity:
+            errors.append(f"{result['depth']} oracle identity_match does not match manifest")
+        if not manifest_oracle_identity and oracle["exact"]:
+            errors.append(f"{result['depth']} exact oracle requires manifest identity match")
         if oracle["state"] == "captured":
             oracle_artifact = oracle_artifacts.get(result["depth"])
             if oracle_artifact is None or oracle["expected_sha256"] != oracle_artifact["sha256"]:
