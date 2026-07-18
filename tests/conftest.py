@@ -1,3 +1,7 @@
+import json
+import os
+import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -24,6 +28,54 @@ TEST_CLASSES = (
         "requires a named native build artifact produced before pytest",
     ),
 )
+
+
+@pytest.fixture(scope="session")
+def canonical_release_worker(tmp_path_factory):
+    if os.name != "nt":
+        pytest.skip("native worker self-tests require Windows")
+
+    program_files_x86 = os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")
+    vswhere = Path(program_files_x86) / "Microsoft Visual Studio" / "Installer" / "vswhere.exe"
+    if not vswhere.is_file():
+        pytest.fail("vswhere.exe is unavailable; install Visual Studio C++ tools")
+    result = subprocess.run(
+        [str(vswhere), "-latest", "-products", "*", "-requires",
+         "Microsoft.VisualStudio.Component.VC.Tools.x86.x64", "-format", "json"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    installations = json.loads(result.stdout)
+    if not installations:
+        pytest.fail("no Visual Studio installation with the C++ x64 toolset")
+    installation = installations[0]
+    vs_root = Path(installation["installationPath"])
+    vcvars = vs_root / "VC" / "Auxiliary" / "Build" / "vcvars64.bat"
+    if not vcvars.is_file():
+        pytest.fail("vcvars64.bat is unavailable; install Visual Studio C++ tools")
+    cmake = shutil.which("cmake")
+    if cmake is None:
+        pytest.fail("cmake is unavailable on PATH")
+
+    major = int(installation["installationVersion"].split(".", 1)[0])
+    product_line = installation.get("catalog", {}).get("productLineVersion")
+    known_generator_years = {17: "2022", 18: "2026"}
+    generator_year = product_line if product_line and product_line.isdigit() else known_generator_years.get(major)
+    if generator_year is None:
+        pytest.fail(f"unsupported Visual Studio CMake generator version: {major}")
+    generator = f"Visual Studio {major} {generator_year}"
+    build = tmp_path_factory.mktemp("canonical-release-worker")
+    source = ROOT / "minihost"
+    command = (
+        f'call "{vcvars}" >nul && '
+        f'"{cmake}" -S "{source}" -B "{build}" -G "{generator}" -A x64 && '
+        f'"{cmake}" --build "{build}" --config Release --target aex_render_worker'
+    )
+    subprocess.run(["cmd", "/d", "/s", "/c", command], check=True, timeout=420)
+    worker = build / "Release" / "aex_render_worker.exe"
+    assert worker.is_file(), f"canonical worker was not produced: {worker}"
+    return worker
 
 
 def _manifest_entries(path):

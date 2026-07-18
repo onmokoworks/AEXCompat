@@ -8,8 +8,6 @@ import pytest
 
 
 ROOT = Path(__file__).resolve().parents[1]
-BUILD = ROOT / "target/minihost-build-adv-time-v1"
-WORKER = BUILD / "Release/aex_render_worker.exe"
 SDK_ROOT = os.environ.get("AFTER_EFFECTS_SDK_ROOT")
 HEADERS = Path(SDK_ROOT) / "Examples" / "Headers" if SDK_ROOT else None
 
@@ -67,10 +65,9 @@ int main() { return 0; }
         subprocess.run(["cmd", "/d", "/c", str(batch)], check=True, timeout=120)
 
 
-def test_suite_entry_guards_and_utility13_native_contract():
-    assert WORKER.exists(), "focused Adv Time test must build the release worker first"
+def test_suite_entry_guards_and_utility13_native_contract(canonical_release_worker):
     result = subprocess.run(
-        [str(WORKER), "--self-test-suite-entry-utility13"],
+        [str(canonical_release_worker), "--self-test-suite-entry-utility13"],
         cwd=ROOT,
         check=True,
         capture_output=True,

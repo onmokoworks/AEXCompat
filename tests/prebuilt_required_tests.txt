@@ -1,3 +1,1 @@
 # Tests that execute a native artifact produced by a separate, documented build step.
-tests/test_pf_adv_time_suite1.py::test_release_worker_native_v1_v4_guard_and_lease_selftest
-tests/test_suite_entry_utility13.py::test_suite_entry_guards_and_utility13_native_contract
