@@ -15,9 +15,12 @@ import subprocess
 
 import pytest
 
-# Must mirror the predicate used in the skill's monitor snippet.
+# Must mirror the predicate used in the skill's monitor snippet: an exact
+# allowlist of the two known Codex logins (not a prefix, which would accept a
+# spoofed login like "chatgpt-codex-connector-fake").
 CLEAN_FILTER = (
-    '.[] | select(.user.login | startswith("chatgpt-codex-connector")) '
+    '.[] | select(.user.login == "chatgpt-codex-connector" '
+    'or .user.login == "chatgpt-codex-connector[bot]") '
     '| select(.body | test("Didn.t find any major issues")) | "CLEAN"'
 )
 
@@ -48,6 +51,17 @@ def test_non_codex_author_is_not_treated_as_clean() -> None:
         {"user": {"login": "naari3"}, "body": "Didn't find any major issues"},
         {"user": {"login": "some-other-bot[bot]"}, "body": "Didn't find any major issues"},
     ]
+    assert _run_jq(CLEAN_FILTER, payload) == ""
+
+
+@pytest.mark.parametrize(
+    "login",
+    ["chatgpt-codex-connector-fake", "chatgpt-codex-connector2", "chatgpt-codex-connector[bot]-x"],
+)
+def test_prefix_spoof_login_is_rejected(login: str) -> None:
+    # A login that merely starts with the Codex prefix must not be accepted;
+    # only the two exact identities count.
+    payload = [{"user": {"login": login}, "body": "Didn't find any major issues"}]
     assert _run_jq(CLEAN_FILTER, payload) == ""
 
 

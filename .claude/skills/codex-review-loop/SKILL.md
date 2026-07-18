@@ -70,20 +70,23 @@ Monitor ツールで以下を張る ({owner}/{repo}/{PR}/{since} を置換)。
 since="{since}"
 while true; do
   sleep 30
-  # 最優先: repo owner の inline review コメント (Codex より先に判定する)
+  # 最優先: repo owner の3面すべて (Codex より先に判定する)。owner の指摘は
+  # inline review コメント / review 本体 / top-level PR コメントのどれにも出る。
   owner=$(gh api "repos/{owner}/{repo}/pulls/{PR}/comments" --paginate --jq ".[] | select(.created_at > \"$since\") | select(.user.login == \"onmokoworks\" or .user.login == \"naari3\") | \"OWNER-FINDING id=\(.id) \(.path):\(.line // .original_line) \(.body | split(\"\n\")[0])\"" 2>/dev/null || true)
+  owner_rev=$(gh api "repos/{owner}/{repo}/pulls/{PR}/reviews" --paginate --jq ".[] | select(.submitted_at > \"$since\") | select(.user.login == \"onmokoworks\" or .user.login == \"naari3\") | select(.body != \"\") | \"OWNER-REVIEW \(.state): \(.body | split(\"\n\")[0])\"" 2>/dev/null || true)
   owner_issue=$(gh api "repos/{owner}/{repo}/issues/{PR}/comments" --paginate --jq ".[] | select(.created_at > \"$since\") | select(.user.login == \"onmokoworks\" or .user.login == \"naari3\") | select(.body | test(\"@codex review\") | not) | \"OWNER-COMMENT: \(.body | split(\"\n\")[0])\"" 2>/dev/null || true)
-  if [ -n "$owner" ] || [ -n "$owner_issue" ]; then
+  if [ -n "$owner" ] || [ -n "$owner_rev" ] || [ -n "$owner_issue" ]; then
     [ -n "$owner" ] && echo "$owner"
+    [ -n "$owner_rev" ] && echo "$owner_rev"
     [ -n "$owner_issue" ] && echo "$owner_issue"
     break
   fi
-  clean=$(gh api "repos/{owner}/{repo}/issues/{PR}/comments" --paginate --jq ".[] | select(.created_at > \"$since\") | select(.user.login | startswith(\"chatgpt-codex-connector\")) | select(.body | test(\"Didn.t find any major issues\")) | \"CLEAN: \(.body | split(\"\n\")[0])\"" 2>/dev/null || true)
+  clean=$(gh api "repos/{owner}/{repo}/issues/{PR}/comments" --paginate --jq ".[] | select(.created_at > \"$since\") | select((.user.login == \"chatgpt-codex-connector\" or .user.login == \"chatgpt-codex-connector[bot]\")) | select(.body | test(\"Didn.t find any major issues\")) | \"CLEAN: \(.body | split(\"\n\")[0])\"" 2>/dev/null || true)
   if [ -n "$clean" ]; then echo "$clean"; break; fi
-  review=$(gh api "repos/{owner}/{repo}/pulls/{PR}/reviews" --paginate --jq ".[] | select(.submitted_at > \"$since\") | select(.user.login | startswith(\"chatgpt-codex-connector\")) | \"REVIEW \(.state) at \(.submitted_at)\"" 2>/dev/null || true)
+  review=$(gh api "repos/{owner}/{repo}/pulls/{PR}/reviews" --paginate --jq ".[] | select(.submitted_at > \"$since\") | select((.user.login == \"chatgpt-codex-connector\" or .user.login == \"chatgpt-codex-connector[bot]\")) | \"REVIEW \(.state) at \(.submitted_at)\"" 2>/dev/null || true)
   if [ -n "$review" ]; then
     echo "$review"
-    gh api "repos/{owner}/{repo}/pulls/{PR}/comments" --paginate --jq ".[] | select(.created_at > \"$since\") | select(.user.login | startswith(\"chatgpt-codex-connector\")) | \"FINDING id=\(.id) \(.path):\(.line // .original_line) \(.body | split(\"\n\")[0])\"" 2>/dev/null || true
+    gh api "repos/{owner}/{repo}/pulls/{PR}/comments" --paginate --jq ".[] | select(.created_at > \"$since\") | select((.user.login == \"chatgpt-codex-connector\" or .user.login == \"chatgpt-codex-connector[bot]\")) | \"FINDING id=\(.id) \(.path):\(.line // .original_line) \(.body | split(\"\n\")[0])\"" 2>/dev/null || true
     break
   fi
 done
@@ -124,12 +127,15 @@ done
 
 ## Codex の応答パターン (誤判定防止)
 
-- **actor login は API 面で表記が揺れる**。`issues/{PR}/comments` と
+- **actor login は API 面で2形式ある**。`issues/{PR}/comments` と
   `pulls/{PR}/reviews` の REST は `chatgpt-codex-connector[bot]` を返すが、
   `gh pr view --json author` など別経路は `[bot]` なしの
-  `chatgpt-codex-connector` を返す。**必ず `startswith("chatgpt-codex-connector")`
-  で prefix 一致させる** (完全一致だと経路差で1件も拾えずループが止まる)。
-  この判定は `tests/test_codex_review_loop_monitor.py` の fixture テストで固定。
+  `chatgpt-codex-connector` を返す。**両方を exact allowlist で受理する**
+  (`== "chatgpt-codex-connector" or == "chatgpt-codex-connector[bot]"`)。
+  `startswith` の prefix 一致は `chatgpt-codex-connector-fake` のような
+  spoof login を拾うので使わない。この判定は
+  `tests/test_codex_review_loop_monitor.py` の fixture テストで固定
+  (両形式を受理し、prefix spoof を拒否する)。
 - 受理直後: trigger コメントに 👀 reaction → **単なる ack。シグナルとして扱わない**
 - 指摘あり: review (state=COMMENTED) + inline コメント。P1/P2/P3 バッジ付き
 - 指摘なし: issue コメントで "Didn't find any major issues ..." (文面の後半は変動する。

@@ -57,6 +57,16 @@ and bounded image input/output are now the main implementation path.
   or machine-specific authorization data into shareable reports.
 - Compatibility gaps must fail explicitly and become reproducible diagnostics,
   not crashes or fixture-specific silent success.
+- When the broker grants the worker access to a filesystem target it validated
+  (a dump directory, an output path), pass an already-opened, path-authenticated
+  HANDLE (inherited through the existing handle-list transport), not a path
+  string the worker re-opens. The worker runs under the same user token as the
+  plug-in, so any path the worker re-resolves is a TOCTOU window: the plug-in
+  can swap a directory or leaf for a junction between the broker's check and the
+  worker's open. Pinning the directory by handle is weaker than never handing
+  the worker a path at all. Learned from the issue #18 minidump review: #66's
+  broker-created inherited dump handle superseded #67's directory-pin plus
+  worker-side re-open.
 - The worker is crash containment, not a confidentiality sandbox. Do not claim
   that it prevents user-token filesystem or network access. The evidence-tier
   integrity machinery guarantees which bytes ran, not that the plug-in is safe.
@@ -80,6 +90,12 @@ and bounded image input/output are now the main implementation path.
   search the existing GitHub issues first; if none covers it, file a new issue
   describing the observation before continuing. Do not silently fix it in the
   current PR, and do not drop it unrecorded.
+- Follow-up work on an already-closed issue (e.g. a fix-forward after review
+  findings on a merged PR) still needs a fresh, claimed issue before starting.
+  A closed issue is invisible as an in-progress signal, so skipping this lets
+  parallel sessions implement the same fix twice. Learned from PR #50: its
+  post-merge review findings were re-implemented as both #67 and #66 because
+  no follow-up issue was claimed.
 - A PR that implements a claimed issue must carry `Closes #N` in its body.
   Without a corresponding issue, reference related issues with `Refs #N`
   instead; never `Closes` an issue the PR does not actually complete.
