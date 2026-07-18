@@ -1,0 +1,33 @@
+name: Windows clean clone
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  source-reproducible:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install Python test dependencies
+        run: python -m pip install -r requirements-dev.txt
+      - name: Check Rust workspace
+        working-directory: broker
+        run: cargo check --workspace --locked
+      - name: Test Rust workspace
+        working-directory: broker
+        run: cargo test --workspace --locked
+      - name: Validate Python collection and local-artifact manifest
+        run: python -m pytest --collect-only -q --validate-local-artifact-manifest
+      - name: Run source-reproducible Python tests
+        run: python -m pytest -q
