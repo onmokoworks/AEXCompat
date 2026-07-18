@@ -8,6 +8,7 @@ pub const MINIDUMP_HANDLE_ENV: &str = "AEXCOMPAT_MINIDUMP_HANDLE";
 pub const MAX_MINIDUMP_FILE_BYTES: u64 = 64 * 1024 * 1024;
 pub const MAX_MINIDUMP_TOTAL_BYTES: u64 = 256 * 1024 * 1024;
 pub const MAX_MINIDUMP_FILES: u64 = 16;
+pub const MINIDUMP_POLICY_LOCK_TIMEOUT_MS: u64 = 5_000;
 
 struct MinidumpDirectory {
     path: PathBuf,
@@ -126,7 +127,7 @@ pub(crate) fn configured_directory_display(repository: &Path) -> io::Result<Opti
 #[cfg(windows)]
 pub(crate) struct MinidumpLaunchFile {
     dump_handle: windows_sys::Win32::Foundation::HANDLE,
-    lock_handle: windows_sys::Win32::Foundation::HANDLE,
+    path: PathBuf,
 }
 
 #[cfg(windows)]
@@ -139,9 +140,16 @@ impl MinidumpLaunchFile {
 #[cfg(windows)]
 impl Drop for MinidumpLaunchFile {
     fn drop(&mut self) {
+        let mut size = 0i64;
+        let empty = unsafe {
+            windows_sys::Win32::Storage::FileSystem::GetFileSizeEx(self.dump_handle, &mut size)
+        } != 0
+            && size == 0;
         unsafe {
             windows_sys::Win32::Foundation::CloseHandle(self.dump_handle);
-            windows_sys::Win32::Foundation::CloseHandle(self.lock_handle);
+        }
+        if empty {
+            let _ = fs::remove_file(&self.path);
         }
     }
 }
@@ -209,9 +217,34 @@ fn authenticate_file_handle(
 }
 
 #[cfg(windows)]
-fn acquire_policy_lock(directory: &Path) -> io::Result<windows_sys::Win32::Foundation::HANDLE> {
+struct PolicyLock(windows_sys::Win32::Foundation::HANDLE);
+
+#[cfg(windows)]
+impl Drop for PolicyLock {
+    fn drop(&mut self) {
+        unsafe { windows_sys::Win32::Foundation::CloseHandle(self.0) };
+    }
+}
+
+#[cfg(windows)]
+fn acquire_policy_lock(directory: &Path) -> io::Result<PolicyLock> {
+    acquire_policy_lock_with_timeout(
+        directory,
+        std::time::Duration::from_millis(MINIDUMP_POLICY_LOCK_TIMEOUT_MS),
+    )
+}
+
+#[cfg(windows)]
+fn acquire_policy_lock_with_timeout(
+    directory: &Path,
+    timeout: std::time::Duration,
+) -> io::Result<PolicyLock> {
     use std::os::windows::ffi::OsStrExt;
-    use windows_sys::Win32::Foundation::{GENERIC_READ, GENERIC_WRITE, INVALID_HANDLE_VALUE};
+    use std::thread::sleep;
+    use std::time::{Duration, Instant};
+    use windows_sys::Win32::Foundation::{
+        ERROR_SHARING_VIOLATION, GENERIC_READ, GENERIC_WRITE, INVALID_HANDLE_VALUE,
+    };
     use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
     use windows_sys::Win32::Storage::FileSystem::{
         CreateFileW, DELETE, FILE_ATTRIBUTE_HIDDEN, FILE_FLAG_DELETE_ON_CLOSE,
@@ -220,30 +253,43 @@ fn acquire_policy_lock(directory: &Path) -> io::Result<windows_sys::Win32::Found
 
     let path = directory.join(".aexcompat-minidump.lock");
     let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
-    let mut security = SECURITY_ATTRIBUTES {
+    let security = SECURITY_ATTRIBUTES {
         nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
         lpSecurityDescriptor: std::ptr::null_mut(),
         bInheritHandle: 0,
     };
-    let handle = unsafe {
-        CreateFileW(
-            wide.as_ptr(),
-            GENERIC_READ | GENERIC_WRITE | DELETE,
-            0,
-            &mut security,
-            OPEN_ALWAYS,
-            FILE_ATTRIBUTE_HIDDEN | FILE_FLAG_DELETE_ON_CLOSE | FILE_FLAG_OPEN_REPARSE_POINT,
-            std::ptr::null_mut(),
-        )
-    };
-    if handle == INVALID_HANDLE_VALUE {
-        return Err(io::Error::last_os_error());
+    let deadline = Instant::now() + timeout;
+    loop {
+        let handle = unsafe {
+            CreateFileW(
+                wide.as_ptr(),
+                GENERIC_READ | GENERIC_WRITE | DELETE,
+                0,
+                &security,
+                OPEN_ALWAYS,
+                FILE_ATTRIBUTE_HIDDEN | FILE_FLAG_DELETE_ON_CLOSE | FILE_FLAG_OPEN_REPARSE_POINT,
+                std::ptr::null_mut(),
+            )
+        };
+        if handle != INVALID_HANDLE_VALUE {
+            if let Err(error) = authenticate_file_handle(handle, directory, false) {
+                unsafe { windows_sys::Win32::Foundation::CloseHandle(handle) };
+                return Err(error);
+            }
+            return Ok(PolicyLock(handle));
+        }
+        let error = io::Error::last_os_error();
+        if error.raw_os_error() != Some(ERROR_SHARING_VIOLATION as i32) {
+            return Err(error);
+        }
+        if Instant::now() >= deadline {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "minidump policy lock acquisition timed out",
+            ));
+        }
+        sleep(Duration::from_millis(25));
     }
-    if let Err(error) = authenticate_file_handle(handle, directory, false) {
-        unsafe { windows_sys::Win32::Foundation::CloseHandle(handle) };
-        return Err(error);
-    }
-    Ok(handle)
 }
 
 fn enforce_budget(directory: &Path) -> io::Result<()> {
@@ -274,6 +320,16 @@ fn enforce_budget(directory: &Path) -> io::Result<()> {
 pub(crate) fn create_minidump_file_for_launch(
     repository: &Path,
 ) -> io::Result<Option<MinidumpLaunchFile>> {
+    let Some(directory) = configured_directory(repository)? else {
+        return Ok(None);
+    };
+    create_minidump_file_in_directory(&directory).map(Some)
+}
+
+#[cfg(windows)]
+fn create_minidump_file_in_directory(
+    directory: &MinidumpDirectory,
+) -> io::Result<MinidumpLaunchFile> {
     use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::Foundation::{HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE};
     use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
@@ -281,12 +337,10 @@ pub(crate) fn create_minidump_file_for_launch(
         CreateFileW, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, FILE_GENERIC_WRITE,
     };
 
-    let Some(directory) = configured_directory(repository)? else {
-        return Ok(None);
-    };
-    let lock_handle = acquire_policy_lock(&directory.path)?;
+    // This lock covers only the budget scan and CREATE_NEW reservation. The
+    // reservation handle itself remains alive until the worker exits.
+    let _policy_lock = acquire_policy_lock(&directory.path)?;
     if let Err(error) = enforce_budget(&directory.path) {
-        unsafe { windows_sys::Win32::Foundation::CloseHandle(lock_handle) };
         return Err(error);
     }
     let path = directory
@@ -310,30 +364,20 @@ pub(crate) fn create_minidump_file_for_launch(
         )
     };
     if dump_handle == INVALID_HANDLE_VALUE {
-        unsafe { windows_sys::Win32::Foundation::CloseHandle(lock_handle) };
         return Err(io::Error::last_os_error());
     }
     if let Err(error) = authenticate_file_handle(dump_handle, &directory.path, true) {
-        unsafe {
-            windows_sys::Win32::Foundation::CloseHandle(dump_handle);
-            windows_sys::Win32::Foundation::CloseHandle(lock_handle);
-        }
+        unsafe { windows_sys::Win32::Foundation::CloseHandle(dump_handle) };
         return Err(error);
     }
     let mut flags = 0;
     if unsafe { windows_sys::Win32::Foundation::GetHandleInformation(dump_handle, &mut flags) } == 0
         || flags & HANDLE_FLAG_INHERIT == 0
     {
-        unsafe {
-            windows_sys::Win32::Foundation::CloseHandle(dump_handle);
-            windows_sys::Win32::Foundation::CloseHandle(lock_handle);
-        }
+        unsafe { windows_sys::Win32::Foundation::CloseHandle(dump_handle) };
         return Err(invalid("minidump file handle inheritance check failed"));
     }
-    Ok(Some(MinidumpLaunchFile {
-        dump_handle,
-        lock_handle,
-    }))
+    Ok(MinidumpLaunchFile { dump_handle, path })
 }
 
 #[cfg(test)]
@@ -389,6 +433,70 @@ mod tests {
             fs::write(directory.join(format!("crash-{index}.dmp")), [0u8; 1]).expect("write dump");
         }
         assert!(enforce_budget(&directory).is_err());
+        let _ = fs::remove_dir_all(repository);
+    }
+
+    #[cfg(windows)]
+    fn test_windows_directory() -> (PathBuf, MinidumpDirectory) {
+        let repository = test_repository();
+        let path = repository.join("target/crash-dumps");
+        fs::create_dir_all(&path).expect("create dump directory");
+        let path = fs::canonicalize(path).expect("canonical dump directory");
+        let display = path.to_string_lossy().into_owned();
+        (repository, MinidumpDirectory { path, display })
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn dropped_empty_reservations_do_not_consume_file_cap() {
+        let (repository, directory) = test_windows_directory();
+        for _ in 0..(MAX_MINIDUMP_FILES + 4) {
+            let reservation = create_minidump_file_in_directory(&directory)
+                .expect("reservation should be created");
+            drop(reservation);
+        }
+        let retained = fs::read_dir(&directory.path)
+            .expect("read dump directory")
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry.file_name().to_string_lossy().starts_with("crash-")
+                    && entry.file_name().to_string_lossy().ends_with(".dmp")
+            })
+            .count();
+        assert_eq!(retained, 0);
+        let _ = fs::remove_dir_all(repository);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn policy_lock_waits_for_a_concurrent_reservation() {
+        use std::thread;
+        use std::time::Duration;
+
+        let (repository, directory) = test_windows_directory();
+        let first = acquire_policy_lock(&directory.path).expect("first lock");
+        let path = directory.path.clone();
+        let contender = thread::spawn(move || {
+            let lock = acquire_policy_lock(&path).expect("contender should wait");
+            drop(lock);
+        });
+        thread::sleep(Duration::from_millis(100));
+        drop(first);
+        contender.join().expect("contender thread");
+        let _ = fs::remove_dir_all(repository);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn policy_lock_timeout_has_an_explicit_error_kind() {
+        let (repository, directory) = test_windows_directory();
+        let first = acquire_policy_lock(&directory.path).expect("first lock");
+        let error =
+            acquire_policy_lock_with_timeout(&directory.path, std::time::Duration::from_millis(50))
+                .err()
+                .expect("held policy lock should time out");
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        drop(first);
         let _ = fs::remove_dir_all(repository);
     }
 }

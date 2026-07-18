@@ -26,9 +26,12 @@ The broker policy bounds both dimensions of local storage:
 - at most 256 MiB cumulative dump bytes;
 - at most 64 MiB for one dump.
 
-A lock file serializes budget checks and reservations across concurrent worker
-launches. The lock and the create-new dump handle remain owned by the broker
-launch boundary until the worker exits.
+A lock file serializes only the budget check and `CREATE_NEW` reservation. A
+contender waits for the lock with a bounded timeout, then proceeds once the
+reservation is complete. The authenticated dump handle remains owned by the
+broker launch boundary until the worker exits. If the timeout expires, the
+broker returns an explicit `TimedOut` launch error rather than silently
+dropping the dispatch.
 
 ## Behavior
 
@@ -61,4 +64,6 @@ file handle, then verifies a non-empty `MDMP` file and the byte bound.
 `--self-test-crash-no-minidump` raises the same real access violation without
 opt-in and verifies that no writer was attempted. Both modes are covered for
 all three worker executables by `tests/test_worker_crash_minidump.py` when the
-minihost binaries are built.
+minihost binaries are built. Broker unit tests also cover cleanup of more than
+the file-count cap worth of successful empty reservations, concurrent policy
+lock queueing, and explicit lock timeout classification.
