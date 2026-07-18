@@ -3,6 +3,14 @@
 This directory keeps project-level design material out of the root README so the
 repository has a short entry point and a durable place for longer plans.
 
+## Contributor Guides
+
+- `BUILD_REQUIREMENTS.md`
+  - Per-component build prerequisites: Rust harness builds, Python test
+    dependencies, minihost worker builds, After Effects SDK generation and
+    `AFTER_EFFECTS_SDK_ROOT`, Visual Studio / CMake / v143 toolset
+    requirements, and a verified machine configuration.
+
 ## Design Documents
 
 - `PROJECT_DESIGN_2026-07-03.md`
