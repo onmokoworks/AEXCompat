@@ -9,6 +9,7 @@ import pytest
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "minihost" / "src" / "l2_main.cpp"
 ABI = ROOT / "minihost" / "src" / "worker_suite_abi.hpp"
+REGISTRY = ROOT / "minihost" / "src" / "worker_aegp_render_options.cpp"
 
 
 def _worker() -> pathlib.Path | None:
@@ -52,11 +53,8 @@ def test_render_options_suite1_has_exact_typed_17_slot_abi():
 
 def test_registry_is_bounded_aba_resistant_and_receipts_snapshot_options():
     text = SOURCE.read_text(encoding="utf-8")
+    registry = REGISTRY.read_text(encoding="utf-8")
     for marker in (
-        "kMaxRenderOptions = 32",
-        "std::atomic<uint64_t> g_render_options_generation{1}",
-        "generation << 1",
-        "std::unordered_map<uintptr_t, AegpRenderOptionsValue> g_render_options",
         "receipt->render_options = *options",
         "snapshot.matte == 2",
         "kSyntheticCompWidth + options->downsample_x - 1",
@@ -68,6 +66,14 @@ def test_registry_is_bounded_aba_resistant_and_receipts_snapshot_options():
         "converted[channel] = static_cast<float>(pixel[channel]) / 255.0f",
     ):
         assert marker in text
+    for marker in (
+        "kMaxItemOptions = 32",
+        "std::atomic<uint64_t> g_item_generation{1}",
+        "next_handle(g_item_generation, 1, 1)",
+        "std::unordered_map<uintptr_t, ItemValue> g_items",
+        "g_items.size() >= kMaxItemOptions",
+    ):
+        assert marker in registry
 
 
 def test_item_async_and_render_suite_slot_zero_publish_ready_receipts():

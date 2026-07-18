@@ -21,6 +21,9 @@ def test_render_suite_cluster_is_owned_by_worker_suite_abi():
         assert f"sizeof({suite}) == {slots} * sizeof(void*)" in header
         assert f"alignof({suite}) == alignof(void*)" in header
         assert f"struct {suite}" not in main
+    assert "#if 0  // Callback implementations moved" not in main
+    assert "g_render_options_mutex" not in main
+    assert "g_layer_render_options_mutex" not in main
     assert "g_aegp_layer_render_options_suite1" in source
     assert "g_aegp_render_options_suite4" in source
 

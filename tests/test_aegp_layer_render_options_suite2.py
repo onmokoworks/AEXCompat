@@ -5,6 +5,7 @@ ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "minihost" / "src" / "l2_main.cpp"
 ABI_PROBE = ROOT / "instruments" / "abi-layout-probe" / "main.cpp"
 ABI = ROOT / "minihost" / "src" / "worker_suite_abi.hpp"
+REGISTRY = ROOT / "minihost" / "src" / "worker_aegp_render_options.cpp"
 
 
 def test_sdk_probe_freezes_all_layer_render_options_suite2_slots():
@@ -62,14 +63,15 @@ def test_layer_checkout_applies_options_to_real_source_pixels():
 
 def test_effect_boundaries_accept_only_finalized_staged_downstream():
     text = SOURCE.read_text(encoding="utf-8")
-    assert "AegpLayerEffectBoundary::upstream" in text
-    assert "AegpLayerEffectBoundary::downstream" in text
+    registry = REGISTRY.read_text(encoding="utf-8")
+    assert "LayerEffectBoundary::upstream" in registry
+    assert "LayerEffectBoundary::downstream" in registry
     assert "layer_effect_boundary_is_live(options)" in text
     assert "context.downstream_finalized" in text
     assert "wants_downstream && !context.downstream_finalized" in text
     assert "context.downstream_argb" in text
     assert "context.all_effects_finalized" in text
-    assert "g_layer_render_options.size() >= kMaxLayerRenderOptions" in text
+    assert "g_layers.size() >= kMaxLayerOptions" in registry
 
 
 def test_sync_and_async_paths_share_the_same_pixel_publisher():

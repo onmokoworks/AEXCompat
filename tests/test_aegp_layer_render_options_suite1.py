@@ -4,6 +4,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "minihost" / "src" / "l2_main.cpp"
 ABI = ROOT / "minihost" / "src" / "worker_suite_abi.hpp"
+REGISTRY = ROOT / "minihost" / "src" / "worker_aegp_render_options.cpp"
 
 
 def test_layer_render_options_suite1_has_exact_typed_14_slot_abi():
@@ -34,14 +35,14 @@ def test_layer_render_options_suite1_has_exact_typed_14_slot_abi():
 
 
 def test_layer_render_options_registry_is_bounded_and_aba_resistant():
-    text = SOURCE.read_text(encoding="utf-8")
+    text = REGISTRY.read_text(encoding="utf-8")
     for marker in (
-        "kMaxLayerRenderOptions = 256",
-        "std::atomic<uint64_t> g_layer_render_options_generation{1}",
-        "generation << 2",
-        "std::unordered_map<uintptr_t, AegpLayerRenderOptionsValue> g_layer_render_options",
-        "g_layer_render_options.size() >= kMaxLayerRenderOptions",
-        "g_layer_render_options.erase(found)",
+        "kMaxLayerOptions = 256",
+        "std::atomic<uint64_t> g_layer_generation{1}",
+        "next_handle(g_layer_generation, 2, 2)",
+        "std::unordered_map<uintptr_t, LayerValue> g_layers",
+        "g_layers.size() >= kMaxLayerOptions",
+        "g_layers.erase(i)",
     ):
         assert marker in text
 
