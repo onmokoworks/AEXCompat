@@ -131,26 +131,29 @@ owner_inline() {
     | "OWNER-FINDING id=\(.id) \(.path):\(.line // .original_line): \((.body | split("\n")[0]))"'
 }
 
-# Merge-gate view of owner activity AFTER a Codex clean at $1 (the race the
-# guard must catch: the owner speaks after clean but before merge). Scoped to
-# "> clean" so old, already-addressed items do not block forever, and excludes
-# reply comments (an ack thread is not a new finding) so this session's own
-# replies-as-owner do not self-block (input: pull review-comments array).
+# Merge-gate view of owner activity AT OR AFTER a Codex clean at $1 (the race
+# the guard must catch: the owner speaks after clean but before merge). The
+# lower bound is INCLUSIVE (>=): GitHub timestamps are second-resolution, so an
+# owner comment in the same second as the clean must fail closed and block, not
+# slip through. Excludes reply comments (an ack thread is not a new finding) so
+# this session's own replies-as-owner do not self-block (input: pull
+# review-comments array).
 owner_inline_after() {
   jq -r --arg ts "$1" --argjson owner "$OWNER_LOGINS" '
     .[] | select([.user.login] | inside($owner))
-    | select(.created_at > $ts)
+    | select(.created_at >= $ts)
     | select((.in_reply_to_id // null) == null)
     | "OWNER-INLINE id=\(.id) \(.path):\(.line // .original_line): \((.body | split("\n")[0]))"'
 }
 
-# Owner top-level comments after a Codex clean at $1, excluding a bare trigger
-# (input: issue-comments array). This session posts its summaries before
-# re-triggering, so they precede the clean and are excluded by "> clean".
+# Owner top-level comments at or after a Codex clean at $1, excluding a bare
+# trigger (input: issue-comments array). Same inclusive (>=) same-second
+# fail-closed rule as owner_inline_after. This session posts its summaries
+# before re-triggering, so they precede the clean second and are excluded.
 owner_comments_after() {
   jq -r --arg ts "$1" --argjson owner "$OWNER_LOGINS" '
     .[] | select([.user.login] | inside($owner))
-    | select(.created_at > $ts)
+    | select(.created_at >= $ts)
     | select((.body | ascii_downcase | gsub("[[:space:]]"; "")) != "@codexreview")
     | "OWNER-COMMENT: \((.body | split("\n"))[0])"'
 }

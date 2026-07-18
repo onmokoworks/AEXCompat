@@ -206,6 +206,22 @@ def test_owner_inline_reply_after_clean_is_not_a_new_finding() -> None:
     assert _call("owner_inline_after", payload, clean_ts) == ""
 
 
+def test_owner_inline_same_second_as_clean_blocks() -> None:
+    # GitHub timestamps are second-resolution; an owner finding in the same
+    # second as the clean must fail closed (inclusive lower bound).
+    clean_ts = "2026-07-18T19:16:44Z"
+    payload = [{"user": {"login": "onmokoworks"}, "id": 9, "path": "x.sh", "line": 3,
+                "created_at": clean_ts, "body": "actually this is wrong"}]
+    assert "OWNER-INLINE" in _call("owner_inline_after", payload, clean_ts)
+
+
+def test_owner_comment_same_second_as_clean_blocks() -> None:
+    clean_ts = "2026-07-18T19:16:44Z"
+    payload = [{"user": {"login": "onmokoworks"},
+                "created_at": clean_ts, "body": "hold on"}]
+    assert "OWNER-COMMENT" in _call("owner_comments_after", payload, clean_ts)
+
+
 def test_owner_comment_after_clean_blocks() -> None:
     clean_ts = "2026-07-18T19:16:44Z"
     payload = [{"user": {"login": "onmokoworks"},
