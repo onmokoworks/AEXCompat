@@ -692,8 +692,20 @@ fn requested_minidump_dir(repository: &Path) -> io::Result<Option<WorldDumpDir>>
 /// kinds; the worker consumes the trailing pair before its argc-exact mode
 /// dispatch.
 pub(crate) fn minidump_dispatch_args(repository: &Path) -> io::Result<Vec<String>> {
-    Ok(match requested_minidump_dir(repository)? {
-        Some(dump) => vec!["--minidump-v1".into(), dump.path.to_string_lossy().into_owned()],
+    minidump_dispatch_args_for(repository, std::env::var_os(MINIDUMP_DIR_ENV))
+}
+
+/// Pure resolution split out so tests exercise it without mutating the
+/// process-global env var (which races other tests under parallelism).
+fn minidump_dispatch_args_for(
+    repository: &Path,
+    requested: Option<std::ffi::OsString>,
+) -> io::Result<Vec<String>> {
+    Ok(match requested {
+        Some(value) => {
+            let dump = resolve_managed_dump_dir(repository, Path::new(&value), false)?;
+            vec!["--minidump-v1".into(), dump.path.to_string_lossy().into_owned()]
+        }
         None => Vec::new(),
     })
 }
@@ -5466,9 +5478,10 @@ mod tests {
 
     #[test]
     fn minidump_dispatch_args_are_opt_in_and_tail_shaped() {
-        // Every worker dispatch funnels through minidump_dispatch_args, so a
-        // missing env var must yield no flag (the crash path stays off by
-        // default) and a set one must yield exactly the trailing pair.
+        // Every worker dispatch funnels through this helper: no request means
+        // no flag (the crash path stays off by default) and a request yields
+        // exactly the trailing --minidump-v1 <dir> pair. Uses the pure form so
+        // the test never mutates the process-global env var.
         let repository = std::env::temp_dir().join(format!(
             "aexcompat-minidump-args-{}-{}",
             std::process::id(),
@@ -5479,20 +5492,17 @@ mod tests {
         ));
         fs::create_dir_all(repository.join("target")).unwrap();
 
-        let prior = std::env::var_os(MINIDUMP_DIR_ENV);
-        std::env::remove_var(MINIDUMP_DIR_ENV);
-        assert!(minidump_dispatch_args(&repository).unwrap().is_empty());
+        assert!(minidump_dispatch_args_for(&repository, None).unwrap().is_empty());
 
-        std::env::set_var(MINIDUMP_DIR_ENV, "target/crash-dumps");
-        let args = minidump_dispatch_args(&repository).unwrap();
+        let args =
+            minidump_dispatch_args_for(&repository, Some("target/crash-dumps".into())).unwrap();
         assert_eq!(args.len(), 2);
         assert_eq!(args[0], "--minidump-v1");
         assert!(Path::new(&args[1]).ends_with("crash-dumps"));
 
-        match prior {
-            Some(value) => std::env::set_var(MINIDUMP_DIR_ENV, value),
-            None => std::env::remove_var(MINIDUMP_DIR_ENV),
-        }
+        // Containment still applies to the resolved directory.
+        assert!(minidump_dispatch_args_for(&repository, Some("target/../escape".into())).is_err());
+
         fs::remove_dir_all(repository).unwrap();
     }
 
