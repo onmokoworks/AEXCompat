@@ -100,6 +100,36 @@ currently possible because the worker-to-broker image transport is fixed at
 The frame-12 capture doubles as the second AE-oracle equivalence sample
 (same tolerance, different frame/noise seed).
 
+## Follow-up: 16 and 32 bpc captures (2026-07-18, same day)
+
+Both deeper-depth captures ran with the same input, frame 0, defaults.
+Neither produces a clean equivalence claim yet; the observations and the
+concrete blockers are recorded here so the gaps stay explicit.
+
+- **16 bpc: bounded, but dominated by export-conversion conventions.**
+  AE 16 bpc capture vs the host's `--render-experimental-smart-16` output
+  (both exported as 8-bit PNGs): every difference is again exactly ±1 LSB
+  (nothing at ±2 or more, alpha exact), but 882,040 of 2,073,600 pixels
+  differ, in mixed directions. The same comparison between AE's own 16 bpc
+  and 8 bpc captures differs at 1,393,980 pixels, so the spread is largely
+  the down-conversion convention (AE's 0–32768 pipeline vs the host's
+  16-bit path, each rounding to 8 bits differently), not effect behavior.
+  A meaningful 16 bpc equivalence claim needs both sides to export at
+  16-bit precision; the worker-to-broker transport (8-bit RGBA) and the
+  capture JSX (`saveFrameToPng` writes 8-bit) both lack that today.
+- **32 bpc: not comparable as captured; color management interferes.**
+  The AE 32 bpc capture comes back compressed into the 0–63 range
+  (mean 14.2 vs host 132.9) and is not explained by any per-pixel
+  post-transform of the host output (best fit, sRGB-linearize plus 1/4
+  scale, still leaves mean error ~12 LSB). The likely reading is that the
+  32 bpc project applies color transforms on the effect's input side, so
+  the effect itself renders different data. Hypothesis, unverified: a
+  32 bpc project linearizes or reinterprets the working space and
+  `saveFrameToPng` exports without the display transform. Before any
+  32 bpc comparison, the capture JSX must pin the project color pipeline
+  (working space, linearization) explicitly and the result must be
+  validated against a no-effect passthrough capture first.
+
 ## Tooling changes shipped with this note
 
 - `tools/ae-reference-capture.jsx`: hand-rolled JSON serialization (no
