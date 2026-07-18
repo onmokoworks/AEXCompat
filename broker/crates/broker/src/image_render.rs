@@ -31,6 +31,44 @@ const MAX_STAGE_EVENTS: usize = 32;
 const MAX_MISSING_SUITES: usize = 16;
 const MAX_SUITE_NAME_LEN: usize = 96;
 const STALE_IMAGE_TRANSPORT_AGE: Duration = Duration::from_secs(15 * 60);
+const CONFORMANCE_RENDER_SETTINGS_ENV: &str = "AEXCOMPAT_CONFORMANCE_RENDER_SETTINGS";
+
+fn conformance_render_settings_transport() -> io::Result<Option<String>> {
+    let Ok(encoded) = std::env::var(CONFORMANCE_RENDER_SETTINGS_ENV) else {
+        return Ok(None);
+    };
+    let fields = encoded.split('|').collect::<Vec<_>>();
+    if fields.len() != 6
+        || fields[0] != "v1"
+        || !matches!(fields[1], "straight" | "premultiplied" | "opaque")
+        || fields[2] != "0"
+        || fields[3] != "-"
+        || fields[4] != "0"
+        || !matches!(fields[5], "AEXCompat CPU" | "software")
+        || encoded.bytes().any(|byte| byte < 0x20)
+    {
+        return Err(invalid(
+            "unsupported or malformed conformance render settings",
+        ));
+    }
+    Ok(Some(encoded))
+}
+
+fn apply_conformance_premultiplication(rgba: &mut [u8], mode: &str) {
+    if mode == "straight" {
+        return;
+    }
+    for pixel in rgba.chunks_exact_mut(4) {
+        if mode == "premultiplied" {
+            let alpha = u16::from(pixel[3]);
+            for channel in &mut pixel[..3] {
+                *channel = ((u16::from(*channel) * alpha + 127) / 255) as u8;
+            }
+        } else if mode == "opaque" {
+            pixel[3] = 255;
+        }
+    }
+}
 
 fn dispatch_approved_image(
     repository: &Path,
@@ -4097,6 +4135,7 @@ fn render_with_artifact(
             "depth-preserving output already exists",
         ));
     }
+    let conformance_render_settings = conformance_render_settings_transport()?;
     let decoded = decode_bounded_image(input_path, "input")?;
     let (width, height) = (decoded.width(), decoded.height());
     if width == 0
@@ -4107,7 +4146,11 @@ fn render_with_artifact(
     {
         return Err(invalid("input dimensions exceed the ARGB8 harness limit"));
     }
-    let rgba = decoded.into_rgba8().into_raw();
+    let mut rgba = decoded.into_rgba8().into_raw();
+    if let Some(settings) = &conformance_render_settings {
+        let mode = settings.split('|').nth(1).expect("validated settings mode");
+        apply_conformance_premultiplication(&mut rgba, mode);
+    }
     crate::render_request::validate_image_buffer_layout(
         u64::from(width),
         u64::from(height),
@@ -4395,6 +4438,9 @@ fn render_with_artifact(
     // kind by dispatch_secure_image; minidump_dir here is only for the report.
     if output_checksum_detail {
         args_after_plugin.extend(["--output-checksum-detail-v1".into(), "1".into()]);
+    }
+    if let Some(settings) = &conformance_render_settings {
+        args_after_plugin.extend(["--conformance-render-settings-v1".into(), settings.clone()]);
     }
     let mut args_before_plugin = vec![command.into()];
     let started = Instant::now();

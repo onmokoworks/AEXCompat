@@ -1165,6 +1165,9 @@ uint64_t g_world_dump_bytes = 0;
 bool g_output_checksum_detail = false;
 std::vector<uint32_t> g_output_row_crc32;
 std::array<std::string, 4> g_output_channel_sha256;
+std::string g_conformance_premultiplication = "straight";
+std::string g_conformance_renderer = "software";
+bool g_conformance_render_settings_seen = false;
 int32_t g_smart_rowbytes = 64;
 bool g_mask_model_enabled = false;
 enum class MaskFault { None, CountError, CountCrash };
@@ -21889,6 +21892,55 @@ bool verify_aegp_projector_levels() {
   return ok;
 }
 
+bool parse_conformance_render_settings(const wchar_t* encoded) {
+  if (!encoded) return false;
+  std::vector<std::wstring> fields;
+  std::wstring value(encoded);
+  std::size_t start = 0;
+  while (start <= value.size()) {
+    const std::size_t end = value.find(L'|', start);
+    fields.push_back(value.substr(start, end == std::wstring::npos ? end : end - start));
+    if (end == std::wstring::npos) break;
+    start = end + 1;
+  }
+  if (fields.size() != 6 || fields[0] != L"v1" || fields[2] != L"0" ||
+      fields[3] != L"-" || fields[4] != L"0" ||
+      (fields[1] != L"straight" && fields[1] != L"premultiplied" &&
+       fields[1] != L"opaque") ||
+      (fields[5] != L"AEXCompat CPU" && fields[5] != L"software")) return false;
+  const auto ascii = [](const std::wstring& text) {
+    return std::all_of(text.begin(), text.end(), [](wchar_t character) {
+      return character >= 0x20 && character <= 0x7e;
+    });
+  };
+  if (!ascii(fields[1]) || !ascii(fields[5])) return false;
+  g_conformance_premultiplication = std::string(fields[1].begin(), fields[1].end());
+  g_conformance_renderer = std::string(fields[5].begin(), fields[5].end());
+  g_conformance_render_settings_seen = true;
+  return true;
+}
+
+std::string conformance_render_settings_report_json() {
+  if (!g_conformance_render_settings_seen) return ",\"render_settings\":null";
+  return ",\"render_settings\":{\"premultiplication\":\"" +
+      escape(g_conformance_premultiplication) +
+      "\",\"color_management\":{\"enabled\":false,\"working_space\":null},\"linear_light\":false,\"renderer\":\"" +
+      escape(g_conformance_renderer) + "\"}";
+}
+
+std::string conformance_world_report_json(int32_t width, int32_t height,
+                                          int32_t row_bytes,
+                                          const std::string& pixel_format) {
+  std::ostringstream json;
+  json << "{\"width\":" << width << ",\"height\":" << height
+       << ",\"row_bytes\":" << row_bytes << ",\"pixel_format\":\""
+       << escape(pixel_format) << "\",\"premultiplication\":\""
+       << escape(g_conformance_premultiplication)
+       << "\",\"extent_hint\":{\"left\":0,\"top\":0,\"right\":"
+       << width << ",\"bottom\":" << height << "}}";
+  return json.str();
+}
+
 int wmain(int argc, wchar_t **argv) {
   if (argc == 2 && std::wstring(argv[1]) == L"--self-test-aegp-projector-levels") {
     const bool passed = verify_aegp_projector_levels();
@@ -22314,6 +22366,7 @@ int wmain(int argc, wchar_t **argv) {
   int effective_argc = argc;
   bool saw_aux = false, saw_animation = false, saw_coverage = false;
   bool saw_dump_worlds = false, saw_checksum_detail = false;
+  bool saw_render_settings = false;
   while (effective_argc >= 3) {
     const std::wstring flag(argv[effective_argc - 2]);
     if (flag == L"--dump-worlds-v1" && !saw_dump_worlds) {
@@ -22328,6 +22381,10 @@ int wmain(int argc, wchar_t **argv) {
       if (std::wstring(argv[effective_argc - 1]) != L"1") return 3;
       g_output_checksum_detail = true;
       saw_checksum_detail = true;
+      effective_argc -= 2;
+    } else if (flag == L"--conformance-render-settings-v1" && !saw_render_settings) {
+      if (!parse_conformance_render_settings(argv[effective_argc - 1])) return 3;
+      saw_render_settings = true;
       effective_argc -= 2;
     } else if (flag == L"--aux-manifest-v1" && !saw_aux) {
       if (!load_aux_manifest(std::filesystem::path(argv[effective_argc - 1]),
@@ -22495,6 +22552,7 @@ int wmain(int argc, wchar_t **argv) {
   int effective_argc = argc;
   bool saw_aux = false, saw_animation = false, saw_coverage = false;
   bool saw_dump_worlds = false, saw_checksum_detail = false;
+  bool saw_render_settings = false;
   while (effective_argc >= 3) {
     const std::wstring flag(argv[effective_argc - 2]);
     if (flag == L"--dump-worlds-v1" && !saw_dump_worlds) {
@@ -22509,6 +22567,10 @@ int wmain(int argc, wchar_t **argv) {
       if (std::wstring(argv[effective_argc - 1]) != L"1") return 3;
       g_output_checksum_detail = true;
       saw_checksum_detail = true;
+      effective_argc -= 2;
+    } else if (flag == L"--conformance-render-settings-v1" && !saw_render_settings) {
+      if (!parse_conformance_render_settings(argv[effective_argc - 1])) return 3;
+      saw_render_settings = true;
       effective_argc -= 2;
     } else if (flag == L"--aux-manifest-v1" && !saw_aux) {
       if (!load_aux_manifest(std::filesystem::path(argv[effective_argc - 1]),
@@ -24592,6 +24654,14 @@ int wmain(int argc, wchar_t **argv) {
             << ",\"pre_effect_source_origin\":[" << read<int32_t>(input, 392) << "," << read<int32_t>(input, 396) << "]"
             << ",\"output_origin\":[" << read<int32_t>(input, 276) << "," << read<int32_t>(input, 280) << "]"
             << ",\"requested_parameters\":" << requested_parameters_json(requested_parameters)
+            << ",\"input_world\":" << conformance_world_report_json(
+                external_width, external_height,
+                external_width * external_pixel_bytes, g_smart_pixel_format)
+            << ",\"world\":" << conformance_world_report_json(
+                external_width, external_height,
+                external_width * external_pixel_bytes, g_smart_pixel_format)
+            << conformance_render_settings_report_json()
+            << suite_timeline_report_json()
             << ",\"requested_amount\":" << static_cast<int32_t>(requested_value(requested_parameters, L"amount"))
             << ",\"requested_direction\":" << static_cast<int32_t>(requested_value(requested_parameters, L"direction"))
             << ",\"requested_seed\":" << static_cast<int32_t>(requested_value(requested_parameters, L"seed"))
@@ -24682,6 +24752,7 @@ int wmain(int argc, wchar_t **argv) {
             << smart.output_width << ",\"bottom\":" << smart.output_height << "}}"
             << ",\"bytes_written_per_row\":" << smart.output_rowbytes
             << ",\"undefined_tail_bytes_per_row\":0"
+            << conformance_render_settings_report_json()
             << ",\"input_sha256\":\"" << smart.input_hash << "\",\"output_sha256\":\""
             << smart.output_hash << "\",\"result_rects_valid\":" << (smart.rects_valid ? "true" : "false")
             << world_debug_report_json()

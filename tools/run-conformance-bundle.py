@@ -32,6 +32,11 @@ ROOT = Path(__file__).resolve().parents[1]
 SCHEMAS = ROOT / "schemas"
 MAX_DIAGNOSTIC_BYTES = 64 * 1024
 MAX_REQUEST_BYTES = 64 * 1024
+MAX_PROTOCOL_BYTES = int(
+    json.loads((SCHEMAS / "conformance-report.schema.json").read_text(encoding="utf-8"))[
+        "x-protocol-max-bytes"
+    ]
+)
 DEPTH_COMMANDS = {
     "argb8": "--render-experimental-smart-request",
     "argb16": "--render-experimental-smart-request-16",
@@ -66,6 +71,17 @@ def bounded_bytes(data: bytes | bytearray | None) -> dict[str, Any]:
     raw = bytes(data or b"")
     truncated = len(raw) > MAX_DIAGNOSTIC_BYTES
     raw = raw[:MAX_DIAGNOSTIC_BYTES]
+    return {
+        "text": raw.decode("utf-8", errors="replace"),
+        "truncated": truncated,
+        "bytes_kept": len(raw),
+    }
+
+
+def bounded_protocol_bytes(data: bytes | bytearray | None) -> dict[str, Any]:
+    raw = bytes(data or b"")
+    truncated = len(raw) > MAX_PROTOCOL_BYTES
+    raw = raw[:MAX_PROTOCOL_BYTES]
     return {
         "text": raw.decode("utf-8", errors="replace"),
         "truncated": truncated,
@@ -205,7 +221,7 @@ def failed_result(
         "raw_input": None,
         "raw_output": None,
         "output_sha256": None,
-        "suite_timeline": [],
+        "suite_timeline": None,
         "oracle": {"state": "not_captured", "identity_match": False, "exact": False},
     }
 
@@ -220,9 +236,13 @@ def normalize_harness_report(
     if not value.get("passed") or not output.is_file():
         return failed_result(depth, input_world, "invalid_output")
     try:
-        width = int(value["width"])
-        height = int(value["height"])
+        actual_input_world = value["input_world"]
+        actual_world = value["world"]
+        width = int(actual_world["width"])
+        height = int(actual_world["height"])
     except (KeyError, TypeError, ValueError):
+        return failed_result(depth, input_world, "invalid_output")
+    if not isinstance(actual_input_world, dict) or not isinstance(actual_world, dict):
         return failed_result(depth, input_world, "invalid_output")
     result = {
         "depth": depth,
@@ -232,12 +252,12 @@ def normalize_harness_report(
             "completed": True,
             "error_code": 0,
         },
-        "input_world": input_world,
-        "world": world(width, height, depth, premultiplication),
+        "input_world": actual_input_world,
+        "world": actual_world,
         "raw_input": None,
         "raw_output": None,
         "output_sha256": sha256(output),
-        "suite_timeline": value.get("suite_timeline", [])[:65536],
+        "suite_timeline": value.get("suite_timeline"),
         "oracle": {"state": "not_captured", "identity_match": False, "exact": False},
     }
     missing = value.get("missing_suites")
@@ -246,7 +266,72 @@ def normalize_harness_report(
     return result
 
 
-def _stream_to_bounded_file(stream, destination: Path, state: dict[str, Any]) -> None:
+def normalize_structured_failure(
+    depth: str, value: dict[str, Any], input_world: dict[str, Any]
+) -> dict[str, Any]:
+    classification = value.get("classification")
+    if classification not in {
+        "unsupported",
+        "selector_error",
+        "missing_suite",
+        "nonzero_exit",
+        "crashed",
+        "timeout_killed",
+        "invalid_output",
+        "host_validation_error",
+    }:
+        worker_classification = value.get("worker_classification")
+        if worker_classification in {"crashed", "timeout_killed", "host_validation_error"}:
+            classification = worker_classification
+        elif value.get("missing_suites") or (
+            isinstance(value.get("worker_diagnostics"), dict)
+            and value["worker_diagnostics"].get("missing_suites")
+        ):
+            classification = "missing_suite"
+        elif value.get("smart_render_selector_error") not in (None, 0):
+            classification = "selector_error"
+        elif value.get("depth_supported") is False or value.get("smart_render_supported") is False:
+            classification = "unsupported"
+        else:
+            classification = "nonzero_exit"
+    selector = value.get("selector")
+    if not isinstance(selector, dict):
+        selector = {
+            "render_path": "smartfx",
+            "completed": False,
+            "error_code": value.get("smart_render_selector_error"),
+        }
+    actual_input_world = value.get("input_world")
+    if not isinstance(actual_input_world, dict):
+        actual_input_world = input_world
+    actual_world = value.get("world")
+    if not isinstance(actual_world, dict):
+        actual_world = None
+    result = {
+        "depth": depth,
+        "classification": classification,
+        "selector": selector,
+        "input_world": actual_input_world,
+        "world": actual_world,
+        "raw_input": None,
+        "raw_output": None,
+        "output_sha256": None,
+        "suite_timeline": value.get("suite_timeline") if isinstance(value.get("suite_timeline"), list) else None,
+        "oracle": {"state": "not_captured", "identity_match": False, "exact": False},
+    }
+    missing = value.get("missing_suites")
+    if not missing and isinstance(value.get("worker_diagnostics"), dict):
+        missing = value["worker_diagnostics"].get("missing_suites")
+    if isinstance(missing, list) and missing:
+        result["missing_suites"] = missing[:16]
+        if result["classification"] == "nonzero_exit":
+            result["classification"] = "missing_suite"
+    return result
+
+
+def _stream_to_bounded_file(
+    stream, destination: Path, state: dict[str, Any], limit: int
+) -> None:
     kept = 0
     try:
         with destination.open("wb") as output:
@@ -254,20 +339,20 @@ def _stream_to_bounded_file(stream, destination: Path, state: dict[str, Any]) ->
                 chunk = stream.read(64 * 1024)
                 if not chunk:
                     break
-                if kept < MAX_DIAGNOSTIC_BYTES:
-                    retained = chunk[: MAX_DIAGNOSTIC_BYTES - kept]
+                if kept < limit:
+                    retained = chunk[: limit - kept]
                     output.write(retained)
                     kept += len(retained)
-                if len(chunk) > max(0, MAX_DIAGNOSTIC_BYTES - kept):
+                if len(chunk) > max(0, limit - kept):
                     state["truncated"] = True
     except (OSError, ValueError) as error:
         state["error"] = str(error)
     state["bytes_kept"] = kept
 
 
-def _read_bounded_file(path: Path, state: dict[str, Any]) -> dict[str, Any]:
+def _read_bounded_file(path: Path, state: dict[str, Any], limit: int) -> dict[str, Any]:
     try:
-        result = bounded_bytes(path.read_bytes())
+        result = bounded_protocol_bytes(path.read_bytes()) if limit == MAX_PROTOCOL_BYTES else bounded_bytes(path.read_bytes())
     except OSError as error:
         result = bounded_text(str(error))
         result["read_error"] = True
@@ -322,12 +407,12 @@ def run_process(
 
         stdout_thread = threading.Thread(
             target=_stream_to_bounded_file,
-            args=(process.stdout, stdout_path, stdout_state),
+            args=(process.stdout, stdout_path, stdout_state, MAX_PROTOCOL_BYTES),
             daemon=True,
         )
         stderr_thread = threading.Thread(
             target=_stream_to_bounded_file,
-            args=(process.stderr, stderr_path, stderr_state),
+            args=(process.stderr, stderr_path, stderr_state, MAX_DIAGNOSTIC_BYTES),
             daemon=True,
         )
         stdout_thread.start()
@@ -348,11 +433,13 @@ def run_process(
             stdout_thread.join(timeout=1)
             stderr_thread.join(timeout=1)
 
-        stdout = _read_bounded_file(stdout_path, stdout_state)["text"]
-        stderr = _read_bounded_file(stderr_path, stderr_state)["text"]
+        stdout_detail = _read_bounded_file(stdout_path, stdout_state, MAX_PROTOCOL_BYTES)
+        stderr_detail = _read_bounded_file(stderr_path, stderr_state, MAX_DIAGNOSTIC_BYTES)
+        stdout = stdout_detail["text"]
+        stderr = stderr_detail["text"]
         return returncode, stdout, stderr, timed_out, {
-            "stdout": _read_bounded_file(stdout_path, stdout_state),
-            "stderr": _read_bounded_file(stderr_path, stderr_state),
+            "stdout": stdout_detail,
+            "stderr": stderr_detail,
         }
 
 
@@ -385,6 +472,12 @@ def write_request_sidecar(manifest: dict[str, Any], depth: str, destination: Pat
         "schema_version": 1,
         "timing": {"frame": time_value, "time_scale": time_scale, "time_step": 1},
         "assignments": [_parameter_assignment(item) for item in manifest["execution"]["parameters"]],
+        "render_settings": {
+            "premultiplication": manifest["execution"]["premultiplication"],
+            "color_management": manifest["execution"]["color_management"],
+            "linear_light": manifest["execution"]["linear_light"],
+            "renderer": manifest["execution"]["renderer"],
+        },
     }
     encoded = (json.dumps(request, indent=2, sort_keys=True) + "\n").encode("utf-8")
     if len(encoded) > MAX_REQUEST_BYTES:
@@ -455,14 +548,18 @@ def run_depth(
         return failed_result(depth, input_world, "host_validation_error"), detail
     if timed_out:
         return failed_result(depth, input_world, "timeout_killed"), detail
-    if returncode != 0:
-        return failed_result(depth, input_world), detail
     try:
         value = json.loads(stdout)
     except json.JSONDecodeError:
+        if returncode != 0:
+            return failed_result(depth, input_world), detail
         return failed_result(depth, input_world, "invalid_output"), detail
     if not isinstance(value, dict):
+        if returncode != 0:
+            return failed_result(depth, input_world), detail
         return failed_result(depth, input_world, "invalid_output"), detail
+    if returncode != 0:
+        return normalize_structured_failure(depth, value, input_world), detail
     if adapter:
         if value.get("classification") == "ok":
             if not output.is_file() or value.get("output_sha256") != sha256(output):
@@ -547,8 +644,8 @@ def attach_oracle(
     mismatched = _mismatched_pixels(oracle_path, actual_path, depth)
     result["oracle"] = {
         "state": "captured",
-        "identity_match": manifest_identity_match and expected_hash == actual_hash,
-        "exact": manifest_identity_match and expected_hash == actual_hash and mismatched == 0,
+        "identity_match": manifest_identity_match,
+        "exact": manifest_identity_match and mismatched == 0,
         "expected_sha256": expected_hash,
         "actual_sha256": actual_hash,
         "mismatched_pixels": mismatched,

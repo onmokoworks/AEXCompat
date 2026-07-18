@@ -146,6 +146,49 @@ def test_failure_leaves_bounded_diagnostic_bundle(tmp_path):
     detail = json.loads((output / "diagnostics" / "run.json").read_text())
     assert detail["depths"]["argb8"]["stderr"]["truncated"] is True
     assert len(detail["depths"]["argb8"]["stderr"]["text"].encode()) <= 65536
+    assert report["results"][0]["suite_timeline"] is None
+
+
+def test_structured_nonzero_failure_preserves_protocol_and_missing_suites(tmp_path):
+    manifest, adapter = fixture(tmp_path)
+    adapter.write_text(
+        "import json, sys\n"
+        "payload={'classification':'missing_suite','missing_suites':[{'name':'PF World Suite','version':2}],"
+        "'suite_timeline':None,'diagnostic_padding':'x'*70000}\n"
+        "print(json.dumps(payload)); raise SystemExit(7)\n",
+        encoding="utf-8",
+    )
+    output = tmp_path / "bundle"
+    completed = invoke(manifest, output, adapter)
+    assert completed.returncode == 0, completed.stderr
+    report = json.loads((output / "report.json").read_text())
+    assert {item["classification"] for item in report["results"]} == {"missing_suite"}
+    assert report["results"][0]["missing_suites"] == [{"name": "PF World Suite", "version": 2}]
+    detail = json.loads((output / "diagnostics" / "run.json").read_text())
+    assert detail["depths"]["argb8"]["stdout"]["truncated"] is False
+    assert detail["depths"]["argb8"]["stdout"]["bytes_kept"] > 65536
+
+
+def test_captured_oracle_identity_is_not_derived_from_bytes(tmp_path):
+    manifest_path, adapter = fixture(tmp_path)
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    oracle_root = manifest_path.parent / "oracle"
+    oracle_root.mkdir()
+    oracle = oracle_root / "argb8.raw"
+    oracle.write_bytes(b"o" * 16)
+    manifest["requested_depths"] = ["argb8"]
+    manifest["oracle"] = {
+        "state": "captured",
+        "identity_match": False,
+        "artifacts": {"argb8": identity(oracle, "oracle/argb8.raw")},
+    }
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    output = tmp_path / "bundle"
+    assert invoke(manifest_path, output, adapter).returncode == 0
+    oracle_result = json.loads((output / "report.json").read_text())["results"][0]["oracle"]
+    assert oracle_result["identity_match"] is False
+    assert oracle_result["exact"] is False
+    assert oracle_result["mismatched_pixels"] == 0
 
 
 def test_adapter_cannot_claim_success_for_wrong_output_identity(tmp_path):
@@ -166,6 +209,12 @@ def test_request_sidecar_records_execution_and_redacted_full_argv(tmp_path):
     request = json.loads((output / "requests" / "argb8.json").read_text())
     assert request["timing"] == {"frame": 0, "time_scale": 30, "time_step": 1}
     assert request["assignments"] == [{"slot": 1, "value": 50}]
+    assert request["render_settings"] == {
+        "premultiplication": "straight",
+        "color_management": {"enabled": False, "working_space": None},
+        "linear_light": False,
+        "renderer": "AEXCompat CPU",
+    }
     run = json.loads((output / "diagnostics" / "run.json").read_text())
     argv = run["depths"]["argb8"]["argv"]
     assert [item["index"] for item in argv] == list(range(len(argv)))
@@ -218,6 +267,7 @@ def test_source_has_no_host_reimplementation():
     assert "subprocess.Popen" in source
     assert "capture_output" not in source
     assert "MAX_DIAGNOSTIC_BYTES" in source
+    assert "MAX_PROTOCOL_BYTES" in source
     assert "LoadLibrary" not in source
 
 
@@ -230,3 +280,4 @@ def test_harness_exposes_depth_variants_of_typed_request_cli():
     ):
         assert flag in source
     assert "let pixel_format = if command.contains(\"-16\")" in source
+    assert "typed_request_render_settings" in source

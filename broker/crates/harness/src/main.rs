@@ -1064,7 +1064,7 @@ fn apply_typed_assignments(
     if root.keys().any(|key| {
         !matches!(
             key.as_str(),
-            "schema_version" | "assignments" | "timing" | "host_context"
+            "schema_version" | "assignments" | "timing" | "host_context" | "render_settings"
         )
     }) || root
         .get("schema_version")
@@ -1190,6 +1190,93 @@ fn apply_typed_assignments(
     }
     *parameters = updated;
     Ok(())
+}
+
+const CONFORMANCE_RENDER_SETTINGS_ENV: &str = "AEXCOMPAT_CONFORMANCE_RENDER_SETTINGS";
+
+fn typed_request_render_settings(document: &serde_json::Value) -> Result<Option<String>, String> {
+    let Some(settings) = document.get("render_settings") else {
+        return Ok(None);
+    };
+    let settings = settings
+        .as_object()
+        .ok_or_else(|| "render_settings must be an object".to_owned())?;
+    if settings.keys().any(|key| {
+        !matches!(
+            key.as_str(),
+            "premultiplication" | "color_management" | "linear_light" | "renderer"
+        )
+    }) {
+        return Err("render_settings contains an unknown field".into());
+    }
+    let premultiplication = settings
+        .get("premultiplication")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| matches!(*value, "straight" | "premultiplied" | "opaque"))
+        .ok_or_else(|| "render_settings premultiplication is unsupported".to_owned())?;
+    let color_management = settings
+        .get("color_management")
+        .and_then(serde_json::Value::as_object)
+        .ok_or_else(|| "render_settings color_management must be an object".to_owned())?;
+    if color_management
+        .keys()
+        .any(|key| !matches!(key.as_str(), "enabled" | "working_space"))
+    {
+        return Err("render_settings color_management contains an unknown field".into());
+    }
+    let color_enabled = color_management
+        .get("enabled")
+        .and_then(serde_json::Value::as_bool)
+        .ok_or_else(|| "render_settings color_management.enabled must be boolean".to_owned())?;
+    let working_space = color_management
+        .get("working_space")
+        .ok_or_else(|| "render_settings color_management.working_space is required".to_owned())?;
+    if color_enabled || !working_space.is_null() {
+        return Err("unsupported render setting: color management".into());
+    }
+    let linear_light = settings
+        .get("linear_light")
+        .and_then(serde_json::Value::as_bool)
+        .ok_or_else(|| "render_settings linear_light must be boolean".to_owned())?;
+    if linear_light {
+        return Err("unsupported render setting: linear light".into());
+    }
+    let renderer = settings
+        .get("renderer")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| matches!(*value, "AEXCompat CPU" | "software"))
+        .ok_or_else(|| "unsupported render setting: renderer".to_owned())?;
+    if [premultiplication, renderer]
+        .iter()
+        .any(|value| value.bytes().any(|byte| byte < 0x20 || byte == b'|'))
+    {
+        return Err("render_settings contains an unsafe transport value".into());
+    }
+    Ok(Some(format!("v1|{premultiplication}|0|-|0|{renderer}")))
+}
+
+struct ConformanceRenderSettingsGuard {
+    previous: Option<std::ffi::OsString>,
+}
+
+impl ConformanceRenderSettingsGuard {
+    fn install(encoded: Option<&str>) -> Result<Self, String> {
+        let previous = std::env::var_os(CONFORMANCE_RENDER_SETTINGS_ENV);
+        match encoded {
+            Some(value) => std::env::set_var(CONFORMANCE_RENDER_SETTINGS_ENV, value),
+            None => std::env::remove_var(CONFORMANCE_RENDER_SETTINGS_ENV),
+        }
+        Ok(Self { previous })
+    }
+}
+
+impl Drop for ConformanceRenderSettingsGuard {
+    fn drop(&mut self) {
+        match &self.previous {
+            Some(value) => std::env::set_var(CONFORMANCE_RENDER_SETTINGS_ENV, value),
+            None => std::env::remove_var(CONFORMANCE_RENDER_SETTINGS_ENV),
+        }
+    }
 }
 
 fn typed_request_timing(
@@ -4944,6 +5031,12 @@ fn main() -> eframe::Result {
             eprintln!("{error}");
             std::process::exit(1);
         });
+        let render_settings = typed_request_render_settings(&document).unwrap_or_else(|error| {
+            eprintln!("{error}");
+            std::process::exit(1);
+        });
+        let _render_settings_guard =
+            ConformanceRenderSettingsGuard::install(render_settings.as_deref()).unwrap();
         if let Err(error) = apply_typed_assignments(&mut parameters, &document) {
             eprintln!("{error}");
             std::process::exit(1);
@@ -6342,6 +6435,31 @@ mod tests {
             serde_json::json!({"timing":{"frame":10000000,"time_scale":1000000,"time_step":100000,"duration_frames":10000001}}),
         ] {
             assert!(typed_request_timing(&invalid_timing).is_err());
+        }
+    }
+
+    #[test]
+    fn conformance_render_settings_are_supported_or_rejected_before_render() {
+        let supported = serde_json::json!({
+            "render_settings": {
+                "premultiplication": "premultiplied",
+                "color_management": {"enabled": false, "working_space": null},
+                "linear_light": false,
+                "renderer": "AEXCompat CPU"
+            }
+        });
+        assert_eq!(
+            typed_request_render_settings(&supported)
+                .unwrap()
+                .as_deref(),
+            Some("v1|premultiplied|0|-|0|AEXCompat CPU")
+        );
+        for unsupported in [
+            serde_json::json!({"render_settings": {"premultiplication":"straight","color_management":{"enabled":true,"working_space":null},"linear_light":false,"renderer":"AEXCompat CPU"}}),
+            serde_json::json!({"render_settings": {"premultiplication":"straight","color_management":{"enabled":false,"working_space":null},"linear_light":true,"renderer":"AEXCompat CPU"}}),
+            serde_json::json!({"render_settings": {"premultiplication":"straight","color_management":{"enabled":false,"working_space":null},"linear_light":false,"renderer":"GPU"}}),
+        ] {
+            assert!(typed_request_render_settings(&unsupported).is_err());
         }
     }
 
