@@ -25,12 +25,16 @@ def test_cuda_multi_device_evidence_preserves_runtime_and_failure_isolation():
 
 def test_cuda_device_enumeration_is_bounded_and_worlds_keep_their_ordinal():
     source = (ROOT / "minihost" / "src" / "l2_main.cpp").read_text()
+    backend = (ROOT / "minihost" / "src" / "gpu_cuda_backend.cpp").read_text()
     for marker in (
-        'load_cuda_function(g_cuda.device_get_count, "cuDeviceGetCount")',
-        "kMaxCudaDevices = 16",
-        "active_device_index >= static_cast<uint32_t>(discovered_count)",
-        "g_cuda.primary_retain(&g_cuda.contexts[index]",
-        "g_cuda.context_push(g_cuda.contexts[active_device_index])",
+        'load_function(state->module, state->device_get_count, "cuDeviceGetCount")',
+        "static_assert(kMaxGpuDevices == 16)",
+        "active_device_index >= last_discovered_device_count_",
+        "state->primary_retain(&state->contexts[index]",
+        "state->context_push(state->contexts[active_device_index])",
+    ):
+        assert marker in backend
+    for marker in (
         "g_gpu_created_worlds.emplace(*world, index)",
         "gpu_free_device_memory(nullptr, device_index, pixels)",
         "? active_gpu_device_index() : owned->second",

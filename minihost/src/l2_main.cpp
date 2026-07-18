@@ -45,6 +45,7 @@
 #include <vector>
 
 #include "native_stdout_guard.hpp"
+#include "gpu_cuda_backend.hpp"
 #include "gpu_device_info_registry.hpp"
 #include "gpu_directx_backend.hpp"
 #include "gpu_opencl_backend.hpp"
@@ -81,6 +82,8 @@ using aexcompat::suites::cache_on_load_suite;
 using aexcompat::suites::configure_cache_on_load_suite;
 using aexcompat::gpu_runtime::device_info_registry;
 namespace directx_backend = aexcompat::gpu_runtime::directx_backend;
+using aexcompat::gpu_runtime::cuda_backend;
+using aexcompat::gpu_runtime::CudaDevicePointer;
 using aexcompat::gpu_runtime::gpu_get_device_count;
 using aexcompat::gpu_runtime::gpu_get_device_info;
 using aexcompat::gpu_runtime::kMaxGpuDevices;
@@ -11061,146 +11064,27 @@ bool isolated_aegp_read_cache_is_bounded() {
   return total > 0 && total <= 32;
 }
 
-constexpr uint32_t kMaxCudaDevices = 16;
-static_assert(kMaxCudaDevices == kMaxGpuDevices);
+constexpr uint32_t kMaxCudaDevices = kMaxGpuDevices;
 
 constexpr std::size_t kMaxGpuAllocations = 256;
 constexpr std::size_t kMaxGpuAllocationBytes = 256u * 1024u * 1024u;
-using CuResult = int32_t;
-using CuDevice = int32_t;
-using CuContext = void*;
-using CuDevicePtr = uint64_t;
-constexpr CuResult kCudaSuccess = 0;
-
-struct CudaDriverApi {
-  HMODULE module{};
-  CuResult (__stdcall* init)(uint32_t){};
-  CuResult (__stdcall* device_get_count)(int32_t*){};
-  CuResult (__stdcall* device_get)(CuDevice*, int32_t){};
-  CuResult (__stdcall* primary_retain)(CuContext*, CuDevice){};
-  CuResult (__stdcall* primary_release)(CuDevice){};
-  CuResult (__stdcall* context_push)(CuContext){};
-  CuResult (__stdcall* context_pop)(CuContext*){};
-  CuResult (__stdcall* synchronize)(){};
-  CuResult (__stdcall* mem_alloc)(CuDevicePtr*, std::size_t){};
-  CuResult (__stdcall* mem_free)(CuDevicePtr){};
-  CuResult (__stdcall* copy_host_to_device)(CuDevicePtr, const void*, std::size_t){};
-  CuResult (__stdcall* copy_device_to_host)(void*, CuDevicePtr, std::size_t){};
-  CuResult (__stdcall* memset_device)(CuDevicePtr, unsigned char, std::size_t){};
-  CuResult (__stdcall* host_alloc)(void**, std::size_t, uint32_t){};
-  CuResult (__stdcall* host_free)(void*){};
-  std::array<CuDevice, kMaxCudaDevices> devices{};
-  std::array<CuContext, kMaxCudaDevices> contexts{};
-  uint32_t device_count{1};
-  uint32_t active_device_index{};
-  uint32_t retained_count{};
-  bool pushed{};
-};
-CudaDriverApi g_cuda;
 uint64_t g_cuda_upload_bytes{};
 uint64_t g_cuda_download_bytes{};
 uint32_t g_cuda_sync_failures{};
 uint32_t g_last_cuda_device_count{};
 uint32_t g_last_cuda_device_index{};
 
-template <typename Function>
-bool load_cuda_function(Function& function, const char* name) {
-  function = reinterpret_cast<Function>(GetProcAddress(g_cuda.module, name));
-  return function != nullptr;
-}
-
 bool begin_cuda_context(uint32_t active_device_index) {
-  if (g_cuda.pushed) return true;
-  g_cuda.module = LoadLibraryExW(L"nvcuda.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
-  if (!g_cuda.module ||
-      !load_cuda_function(g_cuda.init, "cuInit") ||
-      !load_cuda_function(g_cuda.device_get_count, "cuDeviceGetCount") ||
-      !load_cuda_function(g_cuda.device_get, "cuDeviceGet") ||
-      !load_cuda_function(g_cuda.primary_retain, "cuDevicePrimaryCtxRetain") ||
-      !load_cuda_function(g_cuda.primary_release, "cuDevicePrimaryCtxRelease_v2") ||
-      !load_cuda_function(g_cuda.context_push, "cuCtxPushCurrent_v2") ||
-      !load_cuda_function(g_cuda.context_pop, "cuCtxPopCurrent_v2") ||
-      !load_cuda_function(g_cuda.synchronize, "cuCtxSynchronize") ||
-      !load_cuda_function(g_cuda.mem_alloc, "cuMemAlloc_v2") ||
-      !load_cuda_function(g_cuda.mem_free, "cuMemFree_v2") ||
-      !load_cuda_function(g_cuda.copy_host_to_device, "cuMemcpyHtoD_v2") ||
-      !load_cuda_function(g_cuda.copy_device_to_host, "cuMemcpyDtoH_v2") ||
-      !load_cuda_function(g_cuda.memset_device, "cuMemsetD8_v2") ||
-      !load_cuda_function(g_cuda.host_alloc, "cuMemHostAlloc") ||
-      !load_cuda_function(g_cuda.host_free, "cuMemFreeHost") ||
-      g_cuda.init(0) != kCudaSuccess) {
-    if (g_cuda.module) FreeLibrary(g_cuda.module);
-    g_cuda = {};
-    return false;
-  }
-  int32_t discovered_count = 0;
-  if (g_cuda.device_get_count(&discovered_count) != kCudaSuccess || discovered_count <= 0 ||
-      discovered_count > static_cast<int32_t>(kMaxCudaDevices)) {
-    FreeLibrary(g_cuda.module);
-    g_cuda = {};
-    return false;
-  }
-  g_last_cuda_device_count = static_cast<uint32_t>(discovered_count);
+  const bool started = cuda_backend().begin(active_device_index);
+  if (cuda_backend().device_count() != 0)
+    g_last_cuda_device_count = cuda_backend().device_count();
   g_last_cuda_device_index = active_device_index;
-  if (active_device_index >= static_cast<uint32_t>(discovered_count)) {
-    FreeLibrary(g_cuda.module);
-    g_cuda = {};
-    return false;
-  }
-  g_cuda.device_count = static_cast<uint32_t>(discovered_count);
-  g_cuda.active_device_index = active_device_index;
-  for (uint32_t index = 0; index < g_cuda.device_count; ++index) {
-    if (g_cuda.device_get(&g_cuda.devices[index], static_cast<int32_t>(index)) != kCudaSuccess ||
-        g_cuda.primary_retain(&g_cuda.contexts[index], g_cuda.devices[index]) != kCudaSuccess) {
-      while (g_cuda.retained_count > 0) {
-        --g_cuda.retained_count;
-        g_cuda.primary_release(g_cuda.devices[g_cuda.retained_count]);
-      }
-      FreeLibrary(g_cuda.module);
-      g_cuda = {};
-      return false;
-    }
-    ++g_cuda.retained_count;
-  }
-  if (g_cuda.context_push(g_cuda.contexts[active_device_index]) != kCudaSuccess) {
-    while (g_cuda.retained_count > 0) {
-      --g_cuda.retained_count;
-      g_cuda.primary_release(g_cuda.devices[g_cuda.retained_count]);
-    }
-    FreeLibrary(g_cuda.module);
-    g_cuda = {};
-    return false;
-  }
-  g_cuda.pushed = true;
-  device_info_registry().set_device_count(g_cuda.device_count);
-  g_last_cuda_device_count = g_cuda.device_count;
-  g_last_cuda_device_index = active_device_index;
-  for (uint32_t index = 0; index < g_cuda.device_count; ++index) {
-    device_info_registry().set_device(
-        index, nullptr,
-        reinterpret_cast<void*>(static_cast<uintptr_t>(g_cuda.devices[index])),
-        g_cuda.contexts[index], nullptr);
-  }
-  device_info_registry().set_framework(3);
-  g_cuda_context_for_info = g_cuda.contexts[active_device_index];
-  return true;
+  g_cuda_context_for_info = cuda_backend().active_context();
+  return started;
 }
 
 bool end_cuda_context() {
-  bool valid = true;
-  if (g_cuda.pushed) {
-    CuContext popped{};
-    valid = g_cuda.context_pop(&popped) == kCudaSuccess &&
-        popped == g_cuda.contexts[g_cuda.active_device_index];
-    g_cuda.pushed = false;
-  }
-  while (g_cuda.retained_count > 0) {
-    --g_cuda.retained_count;
-    valid = g_cuda.primary_release(g_cuda.devices[g_cuda.retained_count]) == kCudaSuccess && valid;
-  }
-  if (g_cuda.module) FreeLibrary(g_cuda.module);
-  g_cuda = {};
-  device_info_registry().reset_devices();
+  const bool valid = cuda_backend().end();
   g_cuda_context_for_info = nullptr;
   return valid;
 }
@@ -11220,7 +11104,7 @@ uint64_t g_invalid_gpu_memory_operations{};
 
 uint32_t active_gpu_device_index() {
   if (directx_backend::active()) return directx_backend::active_device_index();
-  return opencl::active() ? opencl::active_device_index() : g_cuda.active_device_index;
+  return opencl::active() ? opencl::active_device_index() : cuda_backend().active_device_index();
 }
 
 int32_t __cdecl gpu_acquire_exclusive(void*, uint32_t index) {
@@ -11229,7 +11113,7 @@ int32_t __cdecl gpu_acquire_exclusive(void*, uint32_t index) {
     ++g_invalid_gpu_memory_operations;
     return 4;
   }
-  if (g_cuda.pushed && g_cuda.context_push(g_cuda.contexts[index]) != kCudaSuccess) {
+  if (cuda_backend().active() && !cuda_backend().push(index)) {
     ++g_invalid_gpu_memory_operations;
     return 4;
   }
@@ -11243,9 +11127,8 @@ int32_t __cdecl gpu_release_exclusive(void*, uint32_t index) {
     ++g_invalid_gpu_memory_operations;
     return 4;
   }
-  if (g_cuda.pushed) {
-    CuContext popped{};
-    if (g_cuda.context_pop(&popped) != kCudaSuccess || popped != g_cuda.contexts[index]) {
+  if (cuda_backend().active()) {
+    if (!cuda_backend().pop(index)) {
       ++g_invalid_gpu_memory_operations;
       return 4;
     }
@@ -11331,7 +11214,7 @@ int32_t __cdecl gpu_allocate_device_memory(void*, uint32_t index, std::size_t si
     ++g_gpu_allocations_created;
     return 0;
   }
-  if (!g_cuda.pushed)
+  if (!cuda_backend().active())
     return gpu_allocate_memory(index, size, memory, g_gpu_device_memory);
   if (index != active_gpu_device_index() || !memory || size == 0 ||
       size > kMaxGpuAllocationBytes) return 4;
@@ -11339,8 +11222,8 @@ int32_t __cdecl gpu_allocate_device_memory(void*, uint32_t index, std::size_t si
   *memory = nullptr;
   if (g_gpu_device_memory.size() + g_gpu_host_memory.size() >= kMaxGpuAllocations ||
       g_gpu_memory_bytes > kMaxGpuAllocationBytes - size) return 4;
-  CuDevicePtr allocated{};
-  if (g_cuda.mem_alloc(&allocated, size) != kCudaSuccess || allocated == 0) return 2;
+  CudaDevicePointer allocated{};
+  if (!cuda_backend().allocate(&allocated, size) || allocated == 0) return 2;
   void* pointer = reinterpret_cast<void*>(static_cast<uintptr_t>(allocated));
   g_gpu_device_memory.emplace(pointer, size);
   g_gpu_memory_bytes += size;
@@ -11378,17 +11261,17 @@ int32_t __cdecl gpu_free_device_memory(void*, uint32_t index, void* memory) {
     ++g_gpu_allocations_freed;
     return 0;
   }
-  if (!g_cuda.pushed)
+  if (!cuda_backend().active())
     return gpu_free_memory(index, memory, g_gpu_device_memory);
   std::lock_guard<std::mutex> lock(g_gpu_memory_mutex);
   const auto found = g_gpu_device_memory.find(memory);
   if (index != active_gpu_device_index() || !memory ||
-      found == g_gpu_device_memory.end() || !g_cuda.pushed) {
+      found == g_gpu_device_memory.end() || !cuda_backend().active()) {
     ++g_invalid_gpu_memory_operations;
     return 4;
   }
-  if (g_cuda.mem_free(static_cast<CuDevicePtr>(reinterpret_cast<uintptr_t>(memory))) !=
-      kCudaSuccess) return 4;
+  if (!cuda_backend().free(
+          static_cast<CudaDevicePointer>(reinterpret_cast<uintptr_t>(memory)))) return 4;
   g_gpu_memory_bytes -= found->second;
   g_gpu_device_memory.erase(found);
   ++g_gpu_allocations_freed;
@@ -11403,14 +11286,14 @@ int32_t __cdecl gpu_purge_memory(void*, uint32_t index, std::size_t, std::size_t
 
 int32_t __cdecl gpu_allocate_host_memory(void*, uint32_t index, std::size_t size,
                                           void** memory) {
-  if (g_cuda.pushed) {
+  if (cuda_backend().active()) {
     if (index != active_gpu_device_index() || !memory || size == 0 ||
         size > kMaxGpuAllocationBytes) return 4;
     std::lock_guard<std::mutex> lock(g_gpu_memory_mutex);
     *memory = nullptr;
     if (g_gpu_device_memory.size() + g_gpu_host_memory.size() >= kMaxGpuAllocations ||
         g_gpu_memory_bytes > kMaxGpuAllocationBytes - size) return 4;
-    if (g_cuda.host_alloc(memory, size, 0) != kCudaSuccess || !*memory) return 2;
+    if (!cuda_backend().allocate_host(memory, size) || !*memory) return 2;
     g_gpu_host_memory.emplace(*memory, size);
     g_gpu_memory_bytes += size;
     ++g_gpu_allocations_created;
@@ -11420,14 +11303,14 @@ int32_t __cdecl gpu_allocate_host_memory(void*, uint32_t index, std::size_t size
 }
 
 int32_t __cdecl gpu_free_host_memory(void*, uint32_t index, void* memory) {
-  if (g_cuda.pushed) {
+  if (cuda_backend().active()) {
     std::lock_guard<std::mutex> lock(g_gpu_memory_mutex);
     const auto found = g_gpu_host_memory.find(memory);
     if (index != active_gpu_device_index() || !memory || found == g_gpu_host_memory.end()) {
       ++g_invalid_gpu_memory_operations;
       return 4;
     }
-    if (g_cuda.host_free(memory) != kCudaSuccess) return 4;
+    if (!cuda_backend().free_host(memory)) return 4;
     g_gpu_memory_bytes -= found->second;
     g_gpu_host_memory.erase(found);
     ++g_gpu_allocations_freed;
@@ -11449,7 +11332,7 @@ int32_t __cdecl gpu_create_world(void*, uint32_t index, int32_t width, int32_t h
                                   uint8_t clear_pixels, void** world) {
   if (index != active_gpu_device_index() || !world || pixel_format != kPixelFormatGpuBgra128 ||
       width <= 0 || height <= 0 || width > 4096 || height > 4096) return 4;
-  if (!g_cuda.pushed && !opencl::active() && !directx_backend::active()) {
+  if (!cuda_backend().active() && !opencl::active() && !directx_backend::active()) {
     auto descriptor = std::make_unique<std::array<std::byte, kEffectWorldSize>>();
     const int32_t error = new_world(nullptr, width, height, clear_pixels != 0,
                                     pixel_format, descriptor->data());
@@ -11476,9 +11359,10 @@ int32_t __cdecl gpu_create_world(void*, uint32_t index, int32_t width, int32_t h
     initialized = opencl::enqueue_fill(index, pixels, &pattern, sizeof(pattern), 0,
         static_cast<std::size_t>(size64)) == opencl::kSuccess;
   } else {
-    const CuDevicePtr device = static_cast<CuDevicePtr>(reinterpret_cast<uintptr_t>(pixels));
-    initialized = g_cuda.memset_device(device, clear_pixels ? 0 : 0xCD,
-                                       static_cast<std::size_t>(size64)) == kCudaSuccess;
+    const CudaDevicePointer device = static_cast<CudaDevicePointer>(
+        reinterpret_cast<uintptr_t>(pixels));
+    initialized = cuda_backend().memset(
+        device, clear_pixels ? 0 : 0xCD, static_cast<std::size_t>(size64));
   }
   if (!initialized) {
     gpu_free_device_memory(nullptr, index, pixels);
@@ -11543,7 +11427,7 @@ struct CudaRenderTransport {
 
 bool prepare_cuda_render_transport(void* input_world, void* output_world,
                                    CudaRenderTransport& transport) {
-  if ((!g_cuda.pushed && !opencl::active() && !directx_backend::active()) ||
+  if ((!cuda_backend().active() && !opencl::active() && !directx_backend::active()) ||
       !input_world || !output_world) return false;
   transport.input_world = input_world;
   transport.output_world = output_world;
@@ -11600,12 +11484,12 @@ bool prepare_cuda_render_transport(void* input_world, void* output_world,
         opencl::enqueue_fill(device_index, transport.output_device,
         &pattern, sizeof(pattern), 0, output_size) == opencl::kSuccess;
   } else {
-    const auto input_device = static_cast<CuDevicePtr>(
+    const auto input_device = static_cast<CudaDevicePointer>(
         reinterpret_cast<uintptr_t>(transport.input_device));
-    const auto output_device = static_cast<CuDevicePtr>(
+    const auto output_device = static_cast<CudaDevicePointer>(
         reinterpret_cast<uintptr_t>(transport.output_device));
-    uploaded = g_cuda.copy_host_to_device(input_device, bgra.data(), input_size) == kCudaSuccess &&
-        g_cuda.memset_device(output_device, 0xCC, output_size) == kCudaSuccess;
+    uploaded = cuda_backend().copy_to_device(input_device, bgra.data(), input_size) &&
+        cuda_backend().memset(output_device, 0xCC, output_size);
   }
   if (!uploaded) {
     gpu_free_device_memory(nullptr, device_index, transport.output_device);
@@ -11628,7 +11512,7 @@ bool finish_cuda_render_transport(CudaRenderTransport& transport) {
   const uint32_t device_index = active_gpu_device_index();
   bool valid = directx_backend::active() || (opencl::active()
       ? opencl::finish(device_index) == opencl::kSuccess
-      : g_cuda.synchronize() == kCudaSuccess);
+      : cuda_backend().synchronize());
   if (!valid) {
     if (directx_backend::active()) directx_backend::record_sync_failure();
     else if (opencl::active()) ++g_opencl_sync_failures;
@@ -11645,9 +11529,9 @@ bool finish_cuda_render_transport(CudaRenderTransport& transport) {
     downloaded = opencl::enqueue_read(device_index, transport.output_device,
         1, 0, output_size, bgra.data()) == opencl::kSuccess;
   else if (valid) {
-    const auto output_device = static_cast<CuDevicePtr>(
+    const auto output_device = static_cast<CudaDevicePointer>(
         reinterpret_cast<uintptr_t>(transport.output_device));
-    downloaded = g_cuda.copy_device_to_host(bgra.data(), output_device, output_size) == kCudaSuccess;
+    downloaded = cuda_backend().copy_to_host(bgra.data(), output_device, output_size);
   }
   if (downloaded) {
     if (directx_backend::active()) directx_backend::record_download(output_size);
