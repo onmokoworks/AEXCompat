@@ -171,57 +171,48 @@ owner_clearances() {
     | from_entries'
 }
 
-# Merge-gate view of owner INLINE feedback on the CURRENT head. Args: $1 =
-# lower-bound ts = the head commit's date; $2 = this session's own login; $3 =
-# clearances JSON from owner_clearances. Lower bound is the head commit date, NOT
-# the Codex clean: an owner can post feedback after the head is pushed but seconds
-# BEFORE Codex's clean, and bounding by the clean would miss it (owner feedback
-# outranks Codex). Feedback before the head-push was about a superseded state.
-# Inclusive (>=): second-resolution timestamps, so same-second activity fails
-# closed. Self-block exemption is NARROW: only this session's own ACK replies
-# (in_reply_to_id set AND authored by $2) are dropped — a genuine owner reply
-# ("still not fixed") from any login, and any NON-reply comment from $2 itself,
-# still block. A comment is cleared if its author later approved/dismissed (its
-# created_at is not after that owner's clearance) (input: pull review-comments).
-owner_inline_after() {
-  jq -r --arg ts "$1" --arg me "$2" --argjson clr "$3" --argjson owner "$OWNER_LOGINS" '
+# Merge-gate view of owner INLINE feedback on the CURRENT head, bound by SHA
+# ASSOCIATION, not timestamps. Args: $1 = current head SHA; $2 = this session's
+# login; $3 = clearances JSON. GitHub stamps each inline comment with the commit
+# it was made against and does NOT move that stamp to later commits (verified on
+# PR #62: onmokoworks's comments keep commit_id at the reviewed SHA even after 20
+# pushes), so `.commit_id == head` reliably means "feedback on the current head",
+# with no dependence on committer.date (which is self-reported and mis-orders
+# push boundaries in both directions). A comment on a superseded commit has a
+# different commit_id and drops out. Self-block exemption is NARROW: only this
+# session's own ACK replies (in_reply_to_id set AND authored by $2). A comment is
+# cleared once its author later approved/dismissed (input: pull review-comments).
+owner_inline_on_head() {
+  jq -r --arg head "$1" --arg me "$2" --argjson clr "$3" --argjson owner "$OWNER_LOGINS" '
     .[] | select([.user.login] | inside($owner))
     | select( (((.in_reply_to_id // null) != null) and .user.login == $me) | not )
-    | select(.created_at >= $ts)
+    | select((.commit_id // .original_commit_id // "") == $head)
     | . as $c | select( ($clr[$c.user.login] // "") == "" or $c.created_at > $clr[$c.user.login] )
     | "OWNER-INLINE id=\(.id) \(.path):\(.line // .original_line): \((.body | split("\n")[0]))"'
 }
 
-# Owner bodied non-inline REVIEWS on the current head. Args: $1 = head commit
-# date; $2 = clearances JSON (input: reviews array). owner_review_gate already
-# handles CHANGES_REQUESTED (per-reviewer, full history), so this covers the gap
-# it misses: a COMMENTED review WITH a body on the current head. Bodyless
-# COMMENTED reviews (this session's inline-thread replies) carry no body and are
-# excluded, so no session-login filter is needed here. Cleared if the reviewer
-# later approved/dismissed.
-owner_reviews_after() {
-  jq -r --arg ts "$1" --argjson clr "$2" --argjson owner "$OWNER_LOGINS" '
+# Owner bodied non-inline REVIEWS on the current head, by SHA association. Args:
+# $1 = head SHA; $2 = clearances JSON (input: reviews array). owner_review_gate
+# already handles CHANGES_REQUESTED (per-reviewer, full history, persists across
+# commits like GitHub), so this covers the gap it misses: a COMMENTED review WITH
+# a body submitted against the current head (its .commit_id == head). A bodied
+# review on a superseded commit drops out. Bodyless COMMENTED reviews (this
+# session's inline-thread replies) carry no body and are excluded. Cleared if the
+# reviewer later approved/dismissed.
+owner_reviews_on_head() {
+  jq -r --arg head "$1" --argjson clr "$2" --argjson owner "$OWNER_LOGINS" '
     .[] | select([.user.login] | inside($owner))
-    | select((.submitted_at // "") >= $ts)
+    | select((.commit_id // "") == $head)
     | select(.state == "COMMENTED" and ((.body // "") | length) > 0)
     | . as $r | select( ($clr[$r.user.login] // "") == "" or $r.submitted_at > $clr[$r.user.login] )
     | "OWNER-REVIEW \(.state): \(((.body // "") | split("\n"))[0])"'
 }
 
-# Owner top-level comments on the current head, excluding a bare trigger. Args:
-# $1 = head commit date; $2 = clearances JSON (input: issue-comments array). No
-# session-login filter: this session posts only bare "@codex review" triggers as
-# top-level comments (already excluded) and does its acks as inline replies, so a
-# top-level comment from ANY owner — including this session's login — is genuine
-# feedback and must block (P1). Cleared if the author later approved/dismissed.
-owner_comments_after() {
-  jq -r --arg ts "$1" --argjson clr "$2" --argjson owner "$OWNER_LOGINS" '
-    .[] | select([.user.login] | inside($owner))
-    | select(.created_at >= $ts)
-    | select((.body | ascii_downcase | gsub("[[:space:]]"; "")) != "@codexreview")
-    | . as $c | select( ($clr[$c.user.login] // "") == "" or $c.created_at > $clr[$c.user.login] )
-    | "OWNER-COMMENT: \((.body | split("\n"))[0])"'
-}
+# NOTE: top-level PR (issue) comments carry NO commit association, so they cannot
+# be reliably bound to the current head. They are treated as ADVISORY: the
+# monitor surfaces NEW ones (owner_comments over the since-window) for attention,
+# but the merge guard does NOT hard-block on them. An owner who wants to hard
+# block should request changes (owner_review_gate) or comment inline on the head.
 
 # Owner top-level PR comments, excluding ONLY a bare "@codex review" trigger.
 # Real feedback that merely contains the phrase (e.g. "fix X, then @codex

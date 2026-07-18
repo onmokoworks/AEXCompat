@@ -61,9 +61,11 @@ while true; do
   if ! issue_comments=$(fetch "issues/$PR/comments"); then continue; fi
   if ! pr_reactions=$(fetch "issues/$PR/reactions"); then continue; fi
 
-  # Only the PRINTED finding list is scoped to SINCE (new findings this cycle);
-  # the verdict timestamps below use full history.
+  # Only the PRINTED finding list and the advisory top-level owner comments are
+  # scoped to SINCE (new this cycle); the verdict timestamps below use full
+  # history.
   new_pr_comments=$(since_filter <<<"$pr_comments")
+  new_issue_comments=$(since_filter <<<"$issue_comments")
   # Reactions are scoped to SINCE too: with the always-trigger policy an auto
   # first-review +1 usually predates the explicit @codex review, and an unscoped
   # read would keep returning that stale advisory, exiting CLEAN-REACTION before
@@ -73,20 +75,21 @@ while true; do
 
   # 1. Owner blockers outrank Codex, so surface them as a TERMINAL event (not
   #    just suppress a clean — that would poll to the 1h timeout when the owner
-  #    feedback predates SINCE and the since-scoped check misses it). This
-  #    mirrors the merge guard's owner gate exactly, so monitor CLEAN <=> guard
+  #    feedback predates SINCE and a since-scoped check misses it). The hard
+  #    blockers mirror the merge guard exactly, so monitor CLEAN <=> guard
   #    accepts: (a) an unresolved CHANGES_REQUESTED (per-reviewer, full history)
-  #    and (b) comments / inline / bodied reviews on the CURRENT head (head_date
-  #    bound), minus this session's own ack replies, minus ones the owner later
-  #    cleared. Emitting on head_date (not SINCE) is what catches owner feedback
-  #    that arrived before this trigger.
+  #    and (b) inline comments / bodied reviews associated with the current head
+  #    SHA (.commit_id == head), minus this session's ack replies, minus cleared
+  #    ones. Plus (advisory) any NEW top-level owner comment this cycle: it has
+  #    no commit association so the guard cannot hard-block on it, but surfacing
+  #    a fresh one lets the operator judge it (it is not re-surfaced once old).
   clearances=$(owner_clearances <<<"$reviews")
   owner_block=$(
     { [ -n "$(owner_review_gate <<<"$reviews")" ] \
         && echo "OWNER-REVIEW CHANGES_REQUESTED (unresolved; owner must approve/dismiss)"
-      owner_inline_after "$head_date" "$ME" "$clearances" <<<"$pr_comments"
-      owner_comments_after "$head_date" "$clearances" <<<"$issue_comments"
-      owner_reviews_after "$head_date" "$clearances" <<<"$reviews"; } | grep -v '^$' || true
+      owner_inline_on_head "$head" "$ME" "$clearances" <<<"$pr_comments"
+      owner_reviews_on_head "$head" "$clearances" <<<"$reviews"
+      owner_comments <<<"$new_issue_comments"; } | grep -v '^$' || true
   )
   if [ -n "$owner_block" ]; then echo "$owner_block"; exit 0; fi
 

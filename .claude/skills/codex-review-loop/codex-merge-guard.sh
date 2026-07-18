@@ -30,14 +30,8 @@ fetch() {
 
 head=$(gh api "repos/$OWNER/$REPO/pulls/$PR" --jq '.head.sha') || {
   echo "REFUSE: cannot read PR head"; exit 1; }
-# Lower bound for owner-feedback-on-current-head: the head commit's date. Owner
-# feedback after the head was pushed is about this head and must block even if
-# it predates the Codex clean.
-head_date=$(gh api "repos/$OWNER/$REPO/commits/$head" --jq '.commit.committer.date') || {
-  echo "REFUSE: cannot read head commit date"; exit 1; }
-# This session's own login, excluded from the owner-feedback check so its acks,
-# summaries, and inline replies (posted under an owner login) do not self-block;
-# a different owner login (the human reviewer) still blocks.
+# This session's own login, so its inline ACK replies (posted under an owner
+# login) do not self-block; a genuine owner reply from any login still blocks.
 ME=$(gh api user --jq '.login') || { echo "REFUSE: cannot read authenticated login"; exit 1; }
 
 pr_comments=$(fetch "pulls/$PR/comments") || { echo "REFUSE: pulls/comments fetch failed"; exit 1; }
@@ -65,22 +59,19 @@ if [ -n "$find_ts" ] && [[ "$find_ts" > "$clean_ts" ]]; then
   echo "REFUSE: newer Codex findings after the clean"; exit 1
 fi
 
-# Owner feedback on the current head: owner_review_gate only sees review STATES.
-# An owner can raise a concern as a top-level PR comment, a fresh inline review
-# comment, or a bodied non-inline review WITHOUT a CHANGES_REQUESTED state, any
-# time after the current head was pushed — including a few seconds BEFORE Codex
-# posts its clean. Bounding by the clean would miss that race, so bound by the
-# head commit date: any such owner feedback on the current head must block
-# (owner comments outrank Codex). Feedback before the head-push was about a
-# superseded state. This session's own login is excluded so its acks do not
-# self-block; a different owner login still blocks.
-# A comment is cleared once its author later approves/dismisses (resolved
-# without a new commit), so an addressed older comment stops blocking.
+# Owner feedback on the current head, beyond the CHANGES_REQUESTED that
+# owner_review_gate covers: an inline comment or a bodied COMMENTED review
+# submitted against the current head SHA (.commit_id == head). SHA association,
+# not timestamps — a comment/review on a superseded commit drops out, and a
+# comment on the current head blocks (owner feedback outranks Codex). This
+# session's inline ACK replies are exempt; a later owner approval/dismissal
+# clears an addressed comment. Top-level PR comments carry no commit association
+# and are advisory only (not hard-blocked here); an owner hard-blocks via a
+# review (owner_review_gate) or an inline comment on the head.
 clearances=$(owner_clearances <<<"$reviews")
 owner_after=$(
-  { owner_inline_after "$head_date" "$ME" "$clearances" <<<"$pr_comments"
-    owner_comments_after "$head_date" "$clearances" <<<"$issue_comments"
-    owner_reviews_after "$head_date" "$clearances" <<<"$reviews"; } | grep -v '^$' || true
+  { owner_inline_on_head "$head" "$ME" "$clearances" <<<"$pr_comments"
+    owner_reviews_on_head "$head" "$clearances" <<<"$reviews"; } | grep -v '^$' || true
 )
 if [ -n "$owner_after" ]; then
   echo "REFUSE: owner raised feedback on the current head; address it first:"
