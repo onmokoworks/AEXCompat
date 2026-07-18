@@ -31,9 +31,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # 3.12 に固定する: 3.14 は OpenEXR の win_amd64 wheel が無く、毎回
+      # ソースビルドで約 2.5 分かかる。windows-clean-clone.yml と同じ版に揃える。
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.14"
+          python-version: "3.12"
           cache: pip
           cache-dependency-path: requirements-dev.txt
 
