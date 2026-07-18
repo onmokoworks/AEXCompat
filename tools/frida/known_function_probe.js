@@ -121,6 +121,12 @@ function collect(reads, slots, ctx) {
 }
 
 function interpretReturn(retval, spec) {
+  if (spec.width === 8) {
+    // Match the 64-bit register path: convert signed/unsigned losslessly and
+    // fail the read if it cannot be represented exactly as a JS Number.
+    const hex = retval.toString();
+    return toSafeNumber(spec.interpret === 'int' ? int64(hex) : uint64(hex));
+  }
   return spec.interpret === 'uint' ? retval.toUInt32() : retval.toInt32();
 }
 
@@ -173,7 +179,13 @@ function attachHook(module, hook) {
         fields: collect(hook.leave_reads, this.slots, { symbol: hook.symbol, phase: 'leave' }),
       };
       if (hook.return) {
-        message.return_value = interpretReturn(retval, hook.return);
+        try {
+          message.return_value = interpretReturn(retval, hook.return);
+        } catch (err) {
+          // Never throw out of the callback; report and omit the return value.
+          send({ type: 'read_error', symbol: hook.symbol, phase: 'leave', name: 'return_value',
+                 message: String(err && err.message ? err.message : err) });
+        }
       }
       send(message);
     },

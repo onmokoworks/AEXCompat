@@ -66,7 +66,8 @@
             "additionalProperties": false
           }
         },
-        "return_as": {"enum": ["int", "uint"]}
+        "return_as": {"enum": ["int", "uint"]},
+        "return_width": {"enum": [4, 8], "description": "return register width in bytes (default 4); 8 uses lossless 64-bit conversion"}
       },
       "additionalProperties": false
     }

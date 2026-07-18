@@ -95,7 +95,20 @@ class ResolveTests(unittest.TestCase):
         self.assertEqual("register", enter["mode"]["source"])
         self.assertEqual(2, enter["mode"]["arg_index"])
         self.assertEqual(4, enter["mode"]["width"])
-        self.assertEqual({"interpret": "int"}, hook["return"])
+        self.assertEqual({"interpret": "int", "width": 4}, hook["return"])
+
+    def test_return_width_8_is_carried(self):
+        spec = copy.deepcopy(self.spec)
+        spec["hooks"][0]["return_width"] = 8
+        plan = resolve_spec(spec, self.offset_map)
+        self.assertEqual({"interpret": "int", "width": 8}, plan["hooks"][0]["return"])
+
+    def test_unsupported_return_width_is_rejected(self):
+        spec = copy.deepcopy(self.spec)
+        spec["hooks"][0]["return_width"] = 2
+        with self.assertRaises(ResolutionError) as ctx:
+            resolve_spec(spec, self.offset_map)
+        self.assertIn("return_width", str(ctx.exception))
 
     def test_missing_offset_field_fails_loud(self):
         spec = copy.deepcopy(self.spec)

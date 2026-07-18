@@ -225,7 +225,12 @@ def resolve_hook(hook: dict[str, Any], offset_map: dict[str, dict[str, int]]) ->
             raise ResolutionError(
                 f"{symbol}: return_as {return_as!r} must be one of {sorted(RETURN_INTERPRETS)}"
             )
-        resolved["return"] = {"interpret": return_as}
+        return_width = hook.get("return_width", 4)
+        if return_width not in REGISTER_WIDTHS:
+            raise ResolutionError(
+                f"{symbol}: return_width must be one of {sorted(REGISTER_WIDTHS)}"
+            )
+        resolved["return"] = {"interpret": return_as, "width": return_width}
     return resolved
 
 
