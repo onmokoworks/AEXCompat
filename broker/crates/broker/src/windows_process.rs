@@ -45,18 +45,24 @@ pub struct ProcessResult {
     pub stderr_truncated: bool,
     /// Why the worker was killed, when that is knowable: "timeout" when the
     /// broker terminated the job on deadline, "memory_limit" when a non-ok
-    /// exit coincides with the process having reached the Job Object memory
-    /// cap (allocations were failing). None otherwise.
+    /// exit coincides with the launched worker's own peak commit having
+    /// reached the Job Object memory cap (allocations were failing). None
+    /// otherwise.
     pub kill_reason: Option<&'static str>,
-    /// Peak committed memory of the worker process, from Job Object
-    /// accounting. None when the query itself failed.
+    /// Peak commit of the launched worker process itself, from
+    /// GetProcessMemoryInfo on its handle. This is the value kill-reason
+    /// detection uses; a descendant blowing the cap does not implicate the
+    /// worker. None when the query itself failed.
+    pub worker_peak_commit_bytes: Option<u64>,
+    /// Peak commit of any single process ever associated with the job
+    /// (worker or descendant), from Job Object accounting.
     pub peak_process_memory_bytes: Option<u64>,
     /// Peak committed memory of the whole job (worker plus descendants).
     pub peak_job_memory_bytes: Option<u64>,
     /// The per-process commit cap the job enforces, for context.
     pub process_memory_limit_bytes: u64,
-    /// True when peak process memory reached the cap, meaning allocations
-    /// beyond it were failing inside the worker.
+    /// True when the worker's own peak commit reached the cap, meaning
+    /// allocations beyond it were failing inside the worker.
     pub memory_limit_reached: bool,
 }
 
@@ -197,6 +203,24 @@ fn query_job_memory_peaks(job: HANDLE) -> (Option<u64>, Option<u64>) {
             Some(info.PeakJobMemoryUsed as u64),
         )
     }
+}
+
+/// Peak commit of one specific process, queryable after exit while a handle
+/// stays open. Unlike the job accounting, this cannot be inflated by
+/// descendants.
+fn query_worker_peak_commit(process: HANDLE) -> Option<u64> {
+    use windows_sys::Win32::System::ProcessStatus::{
+        K32GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS,
+    };
+    let mut counters: PROCESS_MEMORY_COUNTERS = unsafe { zeroed() };
+    let ok = unsafe {
+        K32GetProcessMemoryInfo(
+            process,
+            &mut counters,
+            size_of::<PROCESS_MEMORY_COUNTERS>() as u32,
+        )
+    };
+    (ok != 0).then_some(counters.PeakPagefileUsage as u64)
 }
 
 fn terminate_job_and_wait(job: HANDLE, process: HANDLE, wait_ms: u32) -> io::Result<()> {
@@ -402,13 +426,16 @@ fn run_isolated_impl(
         .join()
         .map_err(|_| io::Error::other("stderr reader panicked"))??;
     let (peak_process_memory_bytes, peak_job_memory_bytes) = query_job_memory_peaks(job.raw());
+    let worker_peak_commit_bytes = query_worker_peak_commit(process_handle.raw());
     let classification = classify_exit(exit_code, timed_out);
     // The hard commit cap rejects the allocation that would cross it, so the
     // recorded peak stops short of the limit by up to one failed request.
     // Treat "peaked within the slack below the cap" as having hit it; this is
     // a heuristic marker, not proof, and it only escalates to a kill reason
-    // when the worker also died.
-    let memory_limit_reached = peak_process_memory_bytes
+    // when the worker also died. The check uses the worker's own peak, not
+    // the job aggregate, so a descendant blowing the cap does not implicate
+    // the worker.
+    let memory_limit_reached = worker_peak_commit_bytes
         .is_some_and(|peak| peak >= PROCESS_MEMORY_LIMIT as u64 - MEMORY_LIMIT_DETECTION_SLACK);
     let kill_reason = if timed_out {
         Some("timeout")
@@ -428,6 +455,7 @@ fn run_isolated_impl(
         stdout_truncated,
         stderr_truncated,
         kill_reason,
+        worker_peak_commit_bytes,
         peak_process_memory_bytes,
         peak_job_memory_bytes,
         process_memory_limit_bytes: PROCESS_MEMORY_LIMIT as u64,

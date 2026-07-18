@@ -288,6 +288,10 @@ fn isolated_worker_diagnostics(
         json!(isolated.memory_limit_reached),
     );
     object.insert(
+        "worker_peak_commit_bytes".into(),
+        json!(isolated.worker_peak_commit_bytes),
+    );
+    object.insert(
         "peak_process_memory_bytes".into(),
         json!(isolated.peak_process_memory_bytes),
     );
@@ -5607,6 +5611,7 @@ mod tests {
             stdout_truncated: false,
             stderr_truncated: false,
             kill_reason: Some("memory_limit"),
+            worker_peak_commit_bytes: Some(529_000_000),
             peak_process_memory_bytes: Some(530_000_000),
             peak_job_memory_bytes: Some(531_000_000),
             process_memory_limit_bytes: 536_870_912,
@@ -5615,6 +5620,7 @@ mod tests {
         let diagnostics = isolated_worker_diagnostics(&isolated, 1_234);
         assert_eq!(diagnostics["kill_reason"], "memory_limit");
         assert_eq!(diagnostics["memory_limit_reached"], true);
+        assert_eq!(diagnostics["worker_peak_commit_bytes"], 529_000_000u64);
         assert_eq!(diagnostics["peak_process_memory_bytes"], 530_000_000u64);
         assert_eq!(diagnostics["peak_job_memory_bytes"], 531_000_000u64);
         assert_eq!(diagnostics["process_memory_limit_bytes"], 536_870_912u64);
@@ -5629,6 +5635,7 @@ mod tests {
             stdout_truncated: false,
             stderr_truncated: false,
             kill_reason: None,
+            worker_peak_commit_bytes: Some(900_000),
             peak_process_memory_bytes: Some(1_000_000),
             peak_job_memory_bytes: Some(1_000_000),
             process_memory_limit_bytes: 536_870_912,
