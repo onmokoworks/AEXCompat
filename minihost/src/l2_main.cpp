@@ -8967,8 +8967,7 @@ int32_t __cdecl acquire_suite(const char* name, int32_t version, const void** su
     record_suite_acquire(name, version);
     return 0;
   }
-#ifdef AEXCOMPAT_RENDER_WORKER
-  if (g_loaded_effect_receipt_context.entry && name &&
+  if (is_render_worker() && g_loaded_effect_receipt_context.entry && name &&
       std::strcmp(name, "AEGP Layer Suite") == 0 && version == 15) {
     g_aegp_layer_suite9.fill(reinterpret_cast<void*>(&aegp_unsupported_suite_call));
     g_aegp_layer_suite9[0] = reinterpret_cast<void*>(&aegp_get_comp_num_layers);
@@ -8982,7 +8981,6 @@ int32_t __cdecl acquire_suite(const char* name, int32_t version, const void** su
     record_suite_acquire(name, version);
     return 0;
   }
-#endif
   if (g_aegp_comp_idle_roundtrip_mode && name &&
       std::strcmp(name, "AEGP Layer Suite") == 0 && version == 11) {
     g_aegp_layer_suite5.fill(reinterpret_cast<void*>(&aegp_unsupported_suite_call));
@@ -9304,13 +9302,12 @@ int32_t __cdecl acquire_suite(const char* name, int32_t version, const void** su
     record_suite_acquire(name, version);
     return 0;
   }
-#ifdef AEXCOMPAT_RENDER_WORKER
-  if (name && std::strcmp(name, "PF AE Adv Item Suite") == 0 && version == 1) {
+  if (is_render_worker() && name &&
+      std::strcmp(name, "PF AE Adv Item Suite") == 0 && version == 1) {
     *suite = &g_adv_item_suite1;
     record_suite_acquire(name, version);
     return 0;
   }
-#endif
   if (name && std::strcmp(name, "PF Pixel Data Suite") == 0 && version == 2) {
     *suite = &g_pixel_data_suite2;
     record_suite_acquire(name, version);
@@ -9555,8 +9552,7 @@ int32_t __cdecl acquire_suite(const char* name, int32_t version, const void** su
     record_suite_acquire(name, version);
     return 0;
   }
-#ifdef AEXCOMPAT_RENDER_WORKER
-  if (g_loaded_effect_receipt_context.entry && name &&
+  if (is_render_worker() && g_loaded_effect_receipt_context.entry && name &&
       std::strcmp(name, "AEGP Render Options Suite") == 0 && version == 4) {
     g_render_options_suite4 = {&render_options_new_from_item, &render_options_duplicate,
         &render_options_dispose, &render_options_set_time, &render_options_get_time,
@@ -9573,11 +9569,9 @@ int32_t __cdecl acquire_suite(const char* name, int32_t version, const void** su
     record_suite_acquire(name, version);
     return 0;
   }
-#endif
   bool allow_render_suite2 = g_aegp_command_roundtrip_mode;
-#ifdef AEXCOMPAT_RENDER_WORKER
-  allow_render_suite2 = allow_render_suite2 || g_loaded_effect_receipt_context.entry != nullptr;
-#endif
+  allow_render_suite2 = allow_render_suite2 ||
+      (is_render_worker() && g_loaded_effect_receipt_context.entry != nullptr);
   if (allow_render_suite2 && name &&
       std::strcmp(name, "AEGP Render Suite") == 0 && version == 2) {
     g_aegp_render_suite2 = {&render_checkout_frame_reject, &checkin_frame,
@@ -12811,8 +12805,6 @@ std::string requested_parameters_json(const RequestedAssignments& requested) {
   output << "]";
   return output.str();
 }
-#if defined(AEXCOMPAT_RENDER_WORKER) || defined(AEXCOMPAT_SMART_WORKER)
-
 // Write one packed-ARGB world as raw RGBA in the byte layout that
 // tools/compare-pixel-oracles.py consumes (rgba8 / rgba16le / rgba32f-le,
 // row-major, no stride padding). Little-endian is the only supported target.
@@ -12920,9 +12912,6 @@ int32_t end_render_lifecycle(EffectEntry effect_entry,
       lifecycle_hooks(context), kRenderLifecycleLayout, input.data(), output.data(),
       params, world, lifecycle, primary_error);
 }
-#endif
-
-#ifdef AEXCOMPAT_RENDER_WORKER
 int32_t classic_render_runtime(EffectEntry entry, std::array<std::byte, kInSize>& input,
                     std::array<std::byte, kOutSize>& command_output,
                     const std::string& case_id, int32_t& width, int32_t& height,
@@ -13343,9 +13332,6 @@ bool exercise_loaded_effect_item_receipt(EffectEntry entry,
       async_receipt_lifetimes_balanced() && render_options_lifetimes_balanced();
   return g_loaded_effect_receipt_fixture_passed;
 }
-#endif
-
-#ifdef AEXCOMPAT_SMART_WORKER
 struct SmartResult {
   int32_t gpu_setup_error{};
   int32_t pre_error{-1};
@@ -13960,7 +13946,6 @@ SmartResult smart_render_once(EffectEntry entry, std::array<std::byte, kInSize>&
   if (!context.selector_started && dispatch_error != 0) request.result.render_error = dispatch_error;
   return request.result;
 }
-#endif
 
 void report(const char* status, int32_t global_error, int32_t params_error,
             int32_t setdown_error, const std::array<std::byte, kOutSize>& output,
