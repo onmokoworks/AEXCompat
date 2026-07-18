@@ -260,7 +260,10 @@ fn decode_sha256(value: &str) -> io::Result<[u8; 32]> {
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    static TEST_DIRECTORY_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
     fn v2_policy() -> ApprovalPolicy {
         ApprovalPolicy {
@@ -296,8 +299,9 @@ mod tests {
             .unwrap()
             .as_nanos();
         let root = std::env::temp_dir().join(format!(
-            "aexcompat-approved-artifact-v2-{}-{nonce}",
-            std::process::id()
+            "aexcompat-approved-artifact-v2-{}-{nonce}-{}",
+            std::process::id(),
+            TEST_DIRECTORY_SEQUENCE.fetch_add(1, Ordering::Relaxed)
         ));
         fs::create_dir_all(&root).unwrap();
         fs::write(
@@ -330,8 +334,9 @@ mod tests {
             .unwrap()
             .as_nanos();
         let root = std::env::temp_dir().join(format!(
-            "aexcompat-approved-artifact-{}-{nonce}",
-            std::process::id()
+            "aexcompat-approved-artifact-{}-{nonce}-{}",
+            std::process::id(),
+            TEST_DIRECTORY_SEQUENCE.fetch_add(1, Ordering::Relaxed)
         ));
         fs::create_dir_all(&root).unwrap();
         let plugin = root.join("fixture.bin");
