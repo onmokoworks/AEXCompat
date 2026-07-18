@@ -1,12 +1,13 @@
 """Fixture test for the codex-review-loop monitor's actor selection.
 
 The `.claude/skills/codex-review-loop/SKILL.md` monitor selects Codex responses
-with the jq predicate `select(.user.login | startswith("chatgpt-codex-connector"))`.
-The GitHub REST surfaces return the login as `chatgpt-codex-connector[bot]` on
-`issues/{PR}/comments` and `pulls/{PR}/reviews`, but other paths (e.g.
-`gh pr view --json author`) return it without the `[bot]` suffix. An exact-match
-predicate would silently detect nothing on the second form and stall the loop,
-so this test pins the prefix match against both forms.
+with an exact two-identity allowlist:
+`select(.user.login == "chatgpt-codex-connector" or .user.login == "chatgpt-codex-connector[bot]")`.
+Both forms occur across GitHub REST surfaces (`issues/{PR}/comments` and
+`pulls/{PR}/reviews` return the `[bot]` suffix; `gh pr view --json author`
+returns it without), so both must be accepted. A `startswith` prefix would also
+accept a spoofed login like `chatgpt-codex-connector-fake`, so this test pins
+the exact allowlist: both real forms are accepted and prefix spoofs rejected.
 """
 
 import json
