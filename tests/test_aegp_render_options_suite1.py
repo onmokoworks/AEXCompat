@@ -8,6 +8,7 @@ import pytest
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "minihost" / "src" / "l2_main.cpp"
+ABI = ROOT / "minihost" / "src" / "worker_suite_abi.hpp"
 
 
 def _worker() -> pathlib.Path | None:
@@ -21,7 +22,7 @@ def _worker() -> pathlib.Path | None:
 
 
 def test_render_options_suite1_has_exact_typed_17_slot_abi():
-    text = SOURCE.read_text(encoding="utf-8")
+    text = ABI.read_text(encoding="utf-8")
     assert "struct AegpRenderOptionsSuite1" in text
     assert "sizeof(AegpRenderOptionsSuite1) == 17 * sizeof(void*)" in text
     expected_offsets = {
@@ -44,7 +45,7 @@ def test_render_options_suite1_has_exact_typed_17_slot_abi():
         "get_matte": 16,
     }
     for member, slot in expected_offsets.items():
-        assert f"offsetof(AegpRenderOptionsSuite1, {member}) == {slot} * sizeof(void*)" in text
+        assert f"AEXCOMPAT_ASSERT_RENDER1_SLOT({member}, {slot})" in text
     assert "std::array<void*, 17> g_render_options_suite1" not in text
     assert "g_render_options_suite1.fill" not in text
 

@@ -4,6 +4,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "minihost" / "src" / "l2_main.cpp"
 ABI_PROBE = ROOT / "instruments" / "abi-layout-probe" / "main.cpp"
+ABI = ROOT / "minihost" / "src" / "worker_suite_abi.hpp"
 
 
 def test_sdk_probe_freezes_all_layer_render_options_suite2_slots():
@@ -33,9 +34,10 @@ def test_sdk_probe_freezes_all_layer_render_options_suite2_slots():
 
 def test_minihost_publishes_typed_suite2_without_changing_suite1():
     text = SOURCE.read_text(encoding="utf-8")
-    assert "sizeof(AegpLayerRenderOptionsSuite1) == 14 * sizeof(void*)" in text
-    assert "sizeof(AegpLayerRenderOptionsSuite2) == 15 * sizeof(void*)" in text
-    assert "offsetof(AegpLayerRenderOptionsSuite2, new_from_downstream_of_effect) == 2 * sizeof(void*)" in text
+    abi = ABI.read_text(encoding="utf-8")
+    assert "sizeof(AegpLayerRenderOptionsSuite1) == 14 * sizeof(void*)" in abi
+    assert "sizeof(AegpLayerRenderOptionsSuite2) == 15 * sizeof(void*)" in abi
+    assert "AEXCOMPAT_ASSERT_LAYER2_SLOT(new_from_downstream_of_effect, 2)" in abi
     assert '"AEGP Layer Render Options Suite") == 0 && version == 2' in text
     assert "&new_from_downstream_of_effect" in text
 
@@ -91,7 +93,7 @@ def test_native_selftest_covers_boundary_hashes_cycle_async_and_ownership():
         "render_checkout_layer_async_reject(downstream",
         "async_hash == downstream_hash",
         "checkin_frame(async_result.receipt)",
-        "g_layer_render_options_created == created_before + 3",
-        "g_layer_render_options_disposed == disposed_before + 3",
+        "layer_created_count() == created_before + 3",
+        "layer_disposed_count() == disposed_before + 3",
     ):
         assert marker in body

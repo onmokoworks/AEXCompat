@@ -35,6 +35,7 @@ def test_schema_and_compiled_abi_are_grounded_in_probe_result():
 def test_source_wiring_matches_inventory():
     report = load_report()
     source = SOURCE.read_text(encoding="utf-8")
+    suite_abi = (ROOT / "minihost" / "src" / "worker_suite_abi.hpp").read_text(encoding="utf-8")
 
     world = report["suites"]["PF_WorldTransformSuite1"]
     for slot in world["slots"]:
@@ -59,8 +60,9 @@ def test_source_wiring_matches_inventory():
 def test_render_options_and_async_receipt_claims_match_current_source():
     report = load_report()
     source = SOURCE.read_text(encoding="utf-8")
+    suite_abi = (ROOT / "minihost" / "src" / "worker_suite_abi.hpp").read_text(encoding="utf-8")
     assert report["suites"]["AEGP_RenderOptionsSuite1"]["status"] == "implemented_and_focused_runtime_tested"
-    assert "static_assert(sizeof(AegpRenderOptionsSuite1) == 17 * sizeof(void*));" in source
+    assert "static_assert(sizeof(AegpRenderOptionsSuite1) == 17 * sizeof(void*));" in suite_abi
     assert "receipt->render_options = *options;" in source
     assert "return publish_item_receipt(options, receipt);" in source
 

@@ -59,6 +59,7 @@
 #include "strict_json.hpp"
 #include "suite_lease_tracker.hpp"
 #include "worker_selector_dispatch.hpp"
+#include "worker_aegp_render_options.hpp"
 #include "worker_handle_runtime.hpp"
 #include "worker_suite_abi.hpp"
 #include "worker_world_safety.hpp"
@@ -84,6 +85,28 @@ using aexcompat::suites::cache_on_load_suite;
 using aexcompat::suites::configure_cache_on_load_suite;
 using aexcompat::gpu_runtime::device_info_registry;
 namespace directx_backend = aexcompat::gpu_runtime::directx_backend;
+using aexcompat::suite_abi::AegpLayerRenderOptionsSuite1;
+using aexcompat::suite_abi::AegpLayerRenderOptionsSuite2;
+using aexcompat::suite_abi::AegpRect;
+using aexcompat::suite_abi::AegpRenderOptionsSuite1;
+using aexcompat::suite_abi::AegpRenderOptionsSuite4;
+using aexcompat::suite_abi::AegpTime;
+using AegpLayerEffectBoundary = aexcompat::render_options::LayerEffectBoundary;
+using AegpLayerRenderOptionsValue = aexcompat::render_options::LayerValue;
+using AegpRenderOptionsValue = aexcompat::render_options::ItemValue;
+using namespace aexcompat::render_options;
+constexpr std::size_t kMaxRenderOptions = 32;
+void* aegp_comp_item_handle();
+bool snapshot_render_options(void* handle, AegpRenderOptionsValue& value) {
+  return snapshot_item(handle, value);
+}
+bool snapshot_layer_render_options(void* handle, AegpLayerRenderOptionsValue& value) {
+  return snapshot_layer(handle, value);
+}
+int32_t insert_layer_render_options(
+    const AegpLayerRenderOptionsValue& value, void** output) {
+  return insert_layer_value(value, output);
+}
 using aexcompat::gpu_runtime::cuda_backend;
 using aexcompat::gpu_runtime::CudaDevicePointer;
 using aexcompat::gpu_runtime::gpu_get_device_count;
@@ -4171,7 +4194,6 @@ std::array<void*, 17> g_drawbot_surface_suite2{};
 std::array<void*, 6> g_drawbot_path_suite1{};
 std::array<void*, 1> g_effect_custom_ui_suite1{};
 std::array<void*, 2> g_effect_custom_ui_suite2{};
-struct AegpTime { int32_t value{}; uint32_t scale{1}; };
 struct AegpMatrix4 { double mat[4][4]{}; };
 static_assert(sizeof(AegpMatrix4) == 16 * sizeof(double));
 int32_t __cdecl convert_effect_to_comp_time(
@@ -4190,182 +4212,91 @@ int32_t __cdecl convert_effect_to_comp_time(
 }
 struct AegpTimeStamp { std::array<uint8_t, 4> bytes{}; };
 static_assert(sizeof(AegpTimeStamp) == 4);
-struct AegpRect { int32_t left, top, right, bottom; };
-enum class AegpLayerEffectBoundary : uint8_t { all, upstream, downstream };
-struct AegpLayerRenderOptionsValue {
-  int32_t owner_plugin_id{1};
-  void* layer{};
-  void* upstream_effect{};
-  AegpLayerEffectBoundary effect_boundary{AegpLayerEffectBoundary::all};
-  AegpTime time{0, 1};
-  AegpTime time_step{1, 30};
-  int32_t world_type{1};
-  int16_t downsample_x{1};
-  int16_t downsample_y{1};
-  int32_t matte{};
-};
-int32_t __cdecl new_layer_render_options(int32_t, void*, void**);
-int32_t __cdecl new_from_upstream_of_effect(int32_t, void*, void**);
-int32_t __cdecl new_from_downstream_of_effect(int32_t, void*, void**);
-int32_t __cdecl duplicate_layer_render_options(int32_t, void*, void**);
-int32_t __cdecl dispose_layer_render_options(void*);
-int32_t __cdecl set_layer_render_time(void*, AegpTime);
-int32_t __cdecl get_layer_render_time(void*, AegpTime*);
-int32_t __cdecl set_layer_render_time_step(void*, AegpTime);
-int32_t __cdecl get_layer_render_time_step(void*, AegpTime*);
-int32_t __cdecl set_layer_render_world_type(void*, int32_t);
-int32_t __cdecl get_layer_render_world_type(void*, int32_t*);
-int32_t __cdecl set_layer_render_downsample(void*, int16_t, int16_t);
-int32_t __cdecl get_layer_render_downsample(void*, int16_t*, int16_t*);
-int32_t __cdecl set_layer_render_matte(void*, int32_t);
-int32_t __cdecl get_layer_render_matte(void*, int32_t*);
 bool layer_effect_boundary_is_live(const AegpLayerRenderOptionsValue&);
-struct AegpLayerRenderOptionsSuite1 {
-  decltype(&new_layer_render_options) new_from_layer;
-  decltype(&new_from_upstream_of_effect) new_from_upstream_of_effect;
-  decltype(&duplicate_layer_render_options) duplicate;
-  decltype(&dispose_layer_render_options) dispose;
-  decltype(&set_layer_render_time) set_time;
-  decltype(&get_layer_render_time) get_time;
-  decltype(&set_layer_render_time_step) set_time_step;
-  decltype(&get_layer_render_time_step) get_time_step;
-  decltype(&set_layer_render_world_type) set_world_type;
-  decltype(&get_layer_render_world_type) get_world_type;
-  decltype(&set_layer_render_downsample) set_downsample;
-  decltype(&get_layer_render_downsample) get_downsample;
-  decltype(&set_layer_render_matte) set_matte;
-  decltype(&get_layer_render_matte) get_matte;
-};
-static_assert(sizeof(AegpLayerRenderOptionsSuite1) == 14 * sizeof(void*));
-static_assert(offsetof(AegpLayerRenderOptionsSuite1, new_from_layer) == 0 * sizeof(void*));
-static_assert(offsetof(AegpLayerRenderOptionsSuite1, get_matte) == 13 * sizeof(void*));
-AegpLayerRenderOptionsSuite1 g_layer_render_options_suite1{};
-struct AegpLayerRenderOptionsSuite2 {
-  decltype(&new_layer_render_options) new_from_layer;
-  decltype(&new_from_upstream_of_effect) new_from_upstream_of_effect;
-  decltype(&new_from_downstream_of_effect) new_from_downstream_of_effect;
-  decltype(&duplicate_layer_render_options) duplicate;
-  decltype(&dispose_layer_render_options) dispose;
-  decltype(&set_layer_render_time) set_time;
-  decltype(&get_layer_render_time) get_time;
-  decltype(&set_layer_render_time_step) set_time_step;
-  decltype(&get_layer_render_time_step) get_time_step;
-  decltype(&set_layer_render_world_type) set_world_type;
-  decltype(&get_layer_render_world_type) get_world_type;
-  decltype(&set_layer_render_downsample) set_downsample;
-  decltype(&get_layer_render_downsample) get_downsample;
-  decltype(&set_layer_render_matte) set_matte;
-  decltype(&get_layer_render_matte) get_matte;
-};
-static_assert(sizeof(AegpLayerRenderOptionsSuite2) == 15 * sizeof(void*));
-static_assert(offsetof(AegpLayerRenderOptionsSuite2, new_from_layer) == 0 * sizeof(void*));
-static_assert(offsetof(AegpLayerRenderOptionsSuite2, new_from_downstream_of_effect) == 2 * sizeof(void*));
-static_assert(offsetof(AegpLayerRenderOptionsSuite2, get_matte) == 14 * sizeof(void*));
-AegpLayerRenderOptionsSuite2 g_layer_render_options_suite2{};
-struct AegpRenderOptionsValue {
-  int32_t owner_plugin_id{1};
-  void* item{};
-  AegpTime time{0, 1};
-  AegpTime time_step{1, 30};
-  int32_t field{};
-  int32_t world_type{1};
-  int16_t downsample_x{1};
-  int16_t downsample_y{1};
-  AegpRect roi{};
-  int32_t matte{};
-  int8_t channel_order{};
-  uint8_t render_guide_layers{};
-  int8_t render_quality{1};
-};
-int32_t __cdecl render_options_new_from_item(int32_t, void*, void**);
-int32_t __cdecl render_options_duplicate(int32_t, void*, void**);
-int32_t __cdecl render_options_dispose(void*);
-int32_t __cdecl render_options_set_time(void*, AegpTime);
-int32_t __cdecl render_options_get_time(void*, AegpTime*);
-int32_t __cdecl render_options_set_time_step(void*, AegpTime);
-int32_t __cdecl render_options_get_time_step(void*, AegpTime*);
-int32_t __cdecl render_options_set_field(void*, int32_t);
-int32_t __cdecl render_options_get_field(void*, int32_t*);
-int32_t __cdecl render_options_set_world_type(void*, int32_t);
-int32_t __cdecl render_options_get_world_type(void*, int32_t*);
-int32_t __cdecl render_options_set_downsample(void*, int16_t, int16_t);
-int32_t __cdecl render_options_get_downsample(void*, int16_t*, int16_t*);
-int32_t __cdecl render_options_set_roi(void*, const AegpRect*);
-int32_t __cdecl render_options_get_roi(void*, AegpRect*);
-int32_t __cdecl render_options_set_matte(void*, int32_t);
-int32_t __cdecl render_options_get_matte(void*, int32_t*);
-struct AegpRenderOptionsSuite1 {
-  decltype(&render_options_new_from_item) new_from_item;
-  decltype(&render_options_duplicate) duplicate;
-  decltype(&render_options_dispose) dispose;
-  decltype(&render_options_set_time) set_time;
-  decltype(&render_options_get_time) get_time;
-  decltype(&render_options_set_time_step) set_time_step;
-  decltype(&render_options_get_time_step) get_time_step;
-  decltype(&render_options_set_field) set_field;
-  decltype(&render_options_get_field) get_field;
-  decltype(&render_options_set_world_type) set_world_type;
-  decltype(&render_options_get_world_type) get_world_type;
-  decltype(&render_options_set_downsample) set_downsample;
-  decltype(&render_options_get_downsample) get_downsample;
-  decltype(&render_options_set_roi) set_roi;
-  decltype(&render_options_get_roi) get_roi;
-  decltype(&render_options_set_matte) set_matte;
-  decltype(&render_options_get_matte) get_matte;
-};
-static_assert(sizeof(AegpRenderOptionsSuite1) == 17 * sizeof(void*));
-static_assert(offsetof(AegpRenderOptionsSuite1, new_from_item) == 0 * sizeof(void*));
-static_assert(offsetof(AegpRenderOptionsSuite1, duplicate) == 1 * sizeof(void*));
-static_assert(offsetof(AegpRenderOptionsSuite1, dispose) == 2 * sizeof(void*));
-static_assert(offsetof(AegpRenderOptionsSuite1, set_time) == 3 * sizeof(void*));
-static_assert(offsetof(AegpRenderOptionsSuite1, get_time) == 4 * sizeof(void*));
-static_assert(offsetof(AegpRenderOptionsSuite1, set_time_step) == 5 * sizeof(void*));
-static_assert(offsetof(AegpRenderOptionsSuite1, get_time_step) == 6 * sizeof(void*));
-static_assert(offsetof(AegpRenderOptionsSuite1, set_field) == 7 * sizeof(void*));
-static_assert(offsetof(AegpRenderOptionsSuite1, get_field) == 8 * sizeof(void*));
-static_assert(offsetof(AegpRenderOptionsSuite1, set_world_type) == 9 * sizeof(void*));
-static_assert(offsetof(AegpRenderOptionsSuite1, get_world_type) == 10 * sizeof(void*));
-static_assert(offsetof(AegpRenderOptionsSuite1, set_downsample) == 11 * sizeof(void*));
-static_assert(offsetof(AegpRenderOptionsSuite1, get_downsample) == 12 * sizeof(void*));
-static_assert(offsetof(AegpRenderOptionsSuite1, set_roi) == 13 * sizeof(void*));
-static_assert(offsetof(AegpRenderOptionsSuite1, get_roi) == 14 * sizeof(void*));
-static_assert(offsetof(AegpRenderOptionsSuite1, set_matte) == 15 * sizeof(void*));
-static_assert(offsetof(AegpRenderOptionsSuite1, get_matte) == 16 * sizeof(void*));
-AegpRenderOptionsSuite1 g_render_options_suite1{};
-int32_t __cdecl render_options_set_channel_order(void*, int8_t);
-int32_t __cdecl render_options_get_channel_order(void*, int8_t*);
-int32_t __cdecl render_options_get_guide_layers(void*, uint8_t*);
-int32_t __cdecl render_options_set_guide_layers(void*, uint8_t);
-int32_t __cdecl render_options_get_quality(void*, int8_t*);
-int32_t __cdecl render_options_set_quality(void*, int8_t);
-struct AegpRenderOptionsSuite4 {
-  decltype(&render_options_new_from_item) new_from_item;
-  decltype(&render_options_duplicate) duplicate;
-  decltype(&render_options_dispose) dispose;
-  decltype(&render_options_set_time) set_time;
-  decltype(&render_options_get_time) get_time;
-  decltype(&render_options_set_time_step) set_time_step;
-  decltype(&render_options_get_time_step) get_time_step;
-  decltype(&render_options_set_field) set_field;
-  decltype(&render_options_get_field) get_field;
-  decltype(&render_options_set_world_type) set_world_type;
-  decltype(&render_options_get_world_type) get_world_type;
-  decltype(&render_options_set_downsample) set_downsample;
-  decltype(&render_options_get_downsample) get_downsample;
-  decltype(&render_options_set_roi) set_roi;
-  decltype(&render_options_get_roi) get_roi;
-  decltype(&render_options_set_matte) set_matte;
-  decltype(&render_options_get_matte) get_matte;
-  decltype(&render_options_set_channel_order) set_channel_order;
-  decltype(&render_options_get_channel_order) get_channel_order;
-  decltype(&render_options_get_guide_layers) get_guide_layers;
-  decltype(&render_options_set_guide_layers) set_guide_layers;
-  decltype(&render_options_get_quality) get_quality;
-  decltype(&render_options_set_quality) set_quality;
-};
-static_assert(sizeof(AegpRenderOptionsSuite4) == 23 * sizeof(void*));
-static_assert(offsetof(AegpRenderOptionsSuite4, set_quality) == 22 * sizeof(void*));
-AegpRenderOptionsSuite4 g_render_options_suite4{};
+static_assert(std::is_same_v<decltype(&new_layer_render_options),
+                             aexcompat::suite_abi::AegpLayerOptionsNew>);
+static_assert(std::is_same_v<decltype(&new_from_upstream_of_effect),
+                             aexcompat::suite_abi::AegpLayerOptionsNew>);
+static_assert(std::is_same_v<decltype(&new_from_downstream_of_effect),
+                             aexcompat::suite_abi::AegpLayerOptionsNew>);
+static_assert(std::is_same_v<decltype(&duplicate_layer_render_options),
+                             aexcompat::suite_abi::AegpLayerOptionsDuplicate>);
+static_assert(std::is_same_v<decltype(&dispose_layer_render_options),
+                             aexcompat::suite_abi::AegpLayerOptionsDispose>);
+static_assert(std::is_same_v<decltype(&set_layer_render_time),
+                             aexcompat::suite_abi::AegpLayerOptionsSetTime>);
+static_assert(std::is_same_v<decltype(&get_layer_render_time),
+                             aexcompat::suite_abi::AegpLayerOptionsGetTime>);
+static_assert(std::is_same_v<decltype(&set_layer_render_time_step),
+                             aexcompat::suite_abi::AegpLayerOptionsSetTime>);
+static_assert(std::is_same_v<decltype(&get_layer_render_time_step),
+                             aexcompat::suite_abi::AegpLayerOptionsGetTime>);
+static_assert(std::is_same_v<decltype(&set_layer_render_world_type),
+                             aexcompat::suite_abi::AegpLayerOptionsSetWorldType>);
+static_assert(std::is_same_v<decltype(&get_layer_render_world_type),
+                             aexcompat::suite_abi::AegpLayerOptionsGetWorldType>);
+static_assert(std::is_same_v<decltype(&set_layer_render_downsample),
+                             aexcompat::suite_abi::AegpLayerOptionsSetDownsample>);
+static_assert(std::is_same_v<decltype(&get_layer_render_downsample),
+                             aexcompat::suite_abi::AegpLayerOptionsGetDownsample>);
+static_assert(std::is_same_v<decltype(&set_layer_render_matte),
+                             aexcompat::suite_abi::AegpLayerOptionsSetMatte>);
+static_assert(std::is_same_v<decltype(&get_layer_render_matte),
+                             aexcompat::suite_abi::AegpLayerOptionsGetMatte>);
+AegpLayerRenderOptionsSuite1& g_layer_render_options_suite1 =
+    aexcompat::suite_abi::aegp_layer_render_options_suite1_table();
+AegpLayerRenderOptionsSuite2& g_layer_render_options_suite2 =
+    aexcompat::suite_abi::aegp_layer_render_options_suite2_table();
+static_assert(std::is_same_v<decltype(&render_options_new_from_item),
+                             aexcompat::suite_abi::AegpRenderOptionsNew>);
+static_assert(std::is_same_v<decltype(&render_options_duplicate),
+                             aexcompat::suite_abi::AegpRenderOptionsDuplicate>);
+static_assert(std::is_same_v<decltype(&render_options_dispose),
+                             aexcompat::suite_abi::AegpRenderOptionsDispose>);
+static_assert(std::is_same_v<decltype(&render_options_set_time),
+                             aexcompat::suite_abi::AegpRenderOptionsSetTime>);
+static_assert(std::is_same_v<decltype(&render_options_get_time),
+                             aexcompat::suite_abi::AegpRenderOptionsGetTime>);
+static_assert(std::is_same_v<decltype(&render_options_set_time_step),
+                             aexcompat::suite_abi::AegpRenderOptionsSetTime>);
+static_assert(std::is_same_v<decltype(&render_options_get_time_step),
+                             aexcompat::suite_abi::AegpRenderOptionsGetTime>);
+static_assert(std::is_same_v<decltype(&render_options_set_field),
+                             aexcompat::suite_abi::AegpRenderOptionsSetI32>);
+static_assert(std::is_same_v<decltype(&render_options_get_field),
+                             aexcompat::suite_abi::AegpRenderOptionsGetI32>);
+static_assert(std::is_same_v<decltype(&render_options_set_world_type),
+                             aexcompat::suite_abi::AegpRenderOptionsSetI32>);
+static_assert(std::is_same_v<decltype(&render_options_get_world_type),
+                             aexcompat::suite_abi::AegpRenderOptionsGetI32>);
+static_assert(std::is_same_v<decltype(&render_options_set_downsample),
+                             aexcompat::suite_abi::AegpRenderOptionsSetDownsample>);
+static_assert(std::is_same_v<decltype(&render_options_get_downsample),
+                             aexcompat::suite_abi::AegpRenderOptionsGetDownsample>);
+static_assert(std::is_same_v<decltype(&render_options_set_roi),
+                             aexcompat::suite_abi::AegpRenderOptionsSetRoi>);
+static_assert(std::is_same_v<decltype(&render_options_get_roi),
+                             aexcompat::suite_abi::AegpRenderOptionsGetRoi>);
+static_assert(std::is_same_v<decltype(&render_options_set_matte),
+                             aexcompat::suite_abi::AegpRenderOptionsSetI32>);
+static_assert(std::is_same_v<decltype(&render_options_get_matte),
+                             aexcompat::suite_abi::AegpRenderOptionsGetI32>);
+static_assert(std::is_same_v<decltype(&render_options_set_channel_order),
+                             aexcompat::suite_abi::AegpRenderOptionsSetI8>);
+static_assert(std::is_same_v<decltype(&render_options_get_channel_order),
+                             aexcompat::suite_abi::AegpRenderOptionsGetI8>);
+static_assert(std::is_same_v<decltype(&render_options_get_guide_layers),
+                             aexcompat::suite_abi::AegpRenderOptionsGetU8>);
+static_assert(std::is_same_v<decltype(&render_options_set_guide_layers),
+                             aexcompat::suite_abi::AegpRenderOptionsSetU8>);
+static_assert(std::is_same_v<decltype(&render_options_get_quality),
+                             aexcompat::suite_abi::AegpRenderOptionsGetI8>);
+static_assert(std::is_same_v<decltype(&render_options_set_quality),
+                             aexcompat::suite_abi::AegpRenderOptionsSetI8>);
+AegpRenderOptionsSuite1& g_render_options_suite1 =
+    aexcompat::suite_abi::aegp_render_options_suite1_table();
+AegpRenderOptionsSuite4& g_render_options_suite4 =
+    aexcompat::suite_abi::aegp_render_options_suite4_table();
 int32_t __cdecl checkout_item_frame_async(void*, uint32_t, void*, void**);
 int32_t __cdecl checkout_layer_frame_async(void*, uint32_t, void*, void**);
 struct AegpRenderAsyncManagerSuite1 {
@@ -4774,6 +4705,7 @@ int32_t __cdecl get_drawing_reference(void* context, void** drawing) {
   return 0;
 }
 int g_async_manager{};
+#if 0  // Moved to worker_aegp_render_options.cpp.
 constexpr std::size_t kMaxLayerRenderOptions = 256;
 std::mutex g_layer_render_options_mutex;
 std::unordered_map<uintptr_t, AegpLayerRenderOptionsValue> g_layer_render_options;
@@ -4783,6 +4715,7 @@ uint32_t g_layer_render_options_disposed{};
 uint32_t g_invalid_layer_render_options_operations{};
 int32_t insert_layer_render_options(const AegpLayerRenderOptionsValue&, void**);
 bool snapshot_layer_render_options(void*, AegpLayerRenderOptionsValue&);
+#endif
 int32_t __cdecl get_context_async_manager(void* input, void* extra, void** manager) {
   if (!input || !extra || !manager) return 4;
   *manager = &g_async_manager;
@@ -5084,9 +5017,10 @@ uint64_t g_world_bytes{};
 
 constexpr std::size_t kMaxAsyncReceipts = 32;
 constexpr uint64_t kMaxAsyncReceiptBytes = 64ULL * 1024 * 1024;
-constexpr std::size_t kMaxRenderOptions = 32;
 constexpr int32_t kSyntheticCompWidth = 17;
 constexpr int32_t kSyntheticCompHeight = 9;
+#if 0  // Moved to worker_aegp_render_options.cpp.
+constexpr std::size_t kMaxRenderOptions = 32;
 std::mutex g_render_options_mutex;
 std::unordered_map<uintptr_t, AegpRenderOptionsValue> g_render_options;
 std::atomic<uint64_t> g_render_options_generation{1};
@@ -5113,6 +5047,7 @@ bool snapshot_render_options(void* handle, AegpRenderOptionsValue& value) {
   value = found->second;
   return true;
 }
+#endif
 
 struct AsyncFrameReceipt {
   LocalEffectWorld world{};
@@ -7596,8 +7531,7 @@ bool verify_aegp_async_receipts() {
 }
 
 bool render_options_lifetimes_balanced() {
-  std::lock_guard<std::mutex> lock(g_render_options_mutex);
-  return g_render_options.empty() && g_render_options_created == g_render_options_disposed;
+  return item_live_count() == 0 && item_created_count() == item_disposed_count();
 }
 
 bool verify_aegp_render_options_suite1() {
@@ -9071,6 +9005,7 @@ int32_t __cdecl aegp_get_comp_bg_color(void* comp, AegpColorVal* color) {
   return 0;
 }
 
+#if 0  // Callback implementations moved to worker_aegp_render_options.cpp.
 int32_t insert_render_options(const AegpRenderOptionsValue& value, void** output) {
   if (!output) return 4;
   *output = nullptr;
@@ -9254,6 +9189,7 @@ int32_t __cdecl render_options_set_quality(void* handle, int8_t value) {
   if (value < 0 || value > 1) { ++g_invalid_render_options_operations; return 4; }
   return mutate_render_options(handle, [&](auto& options) { options.render_quality = value; });
 }
+#endif
 std::array<AegpSceneObject, 3> g_aegp_layers{{
     {0x4c415930}, {0x4c415931}, {0x4c415932}}};
 AegpSceneObject g_aegp_effect{0x45464643};
@@ -10329,6 +10265,7 @@ int32_t __cdecl get_new_effect_for_effect(int32_t plugin_id, void* effect, void*
   ++g_aegp_effect_acquires;
   return 0;
 }
+#if 0  // Callback implementations moved to worker_aegp_render_options.cpp.
 uintptr_t layer_render_options_key(void* handle) {
   return reinterpret_cast<uintptr_t>(handle);
 }
@@ -10484,6 +10421,55 @@ int32_t __cdecl get_layer_render_matte(void* handle, int32_t* value) {
     ++g_invalid_layer_render_options_operations; return 4;
   }
   *value = options.matte; return 0;
+}
+bool __cdecl validate_render_options_item(int32_t plugin_id, void* item) {
+  return plugin_id == 1 && item == &g_aegp_comp_item;
+}
+bool __cdecl initialize_layer_render_options(
+    int32_t plugin_id, void* source, AegpLayerEffectBoundary boundary,
+    AegpLayerRenderOptionsValue* value) {
+  if (plugin_id <= 0 || !value) return false;
+  AegpLayerRenderOptionsValue initialized{};
+  initialized.owner_plugin_id = plugin_id;
+  initialized.effect_boundary = boundary;
+  if (boundary == AegpLayerEffectBoundary::all) {
+    if (aegp_layer_index(source) < 0) return false;
+    initialized.layer = source;
+  } else {
+    const auto* instance = resolve_effect_instance(source, plugin_id);
+    if (!instance) return false;
+    initialized.layer = instance->layer;
+    initialized.upstream_effect = source;
+  }
+  *value = initialized;
+  return true;
+}
+const bool g_render_options_validators_configured = [] {
+  configure_validators(&validate_render_options_item, &initialize_layer_render_options);
+  return true;
+}();
+#endif
+bool __cdecl validate_render_options_item(int32_t plugin_id, void* item) {
+  return plugin_id == 1 && item == &g_aegp_comp_item;
+}
+bool __cdecl initialize_layer_render_options(
+    int32_t plugin_id, void* source, AegpLayerEffectBoundary boundary,
+    AegpLayerRenderOptionsValue* value) {
+  if (plugin_id <= 0 || !value) return false;
+  AegpLayerRenderOptionsValue initialized{};
+  initialized.owner_plugin_id = plugin_id;
+  initialized.effect_boundary = boundary;
+  if (boundary == AegpLayerEffectBoundary::all) {
+    if (aegp_layer_index(source) < 0) return false;
+    initialized.layer = source;
+  } else {
+    const auto* instance = resolve_effect_instance(source, plugin_id);
+    if (!instance) return false;
+    initialized.layer = instance->layer;
+    initialized.upstream_effect = source;
+  }
+  *value = initialized;
+  return true;
 }
 const AegpInstalledEffectRecord* find_installed_effect(int32_t key) {
   for (const auto& effect : kAegpInstalledEffects)
@@ -18721,8 +18707,8 @@ int32_t __cdecl layer_suite2_async_test_callback(
 bool verify_aegp_layer_render_options_suite2() {
   const bool saved_effect_live = g_aegp_effect_live;
   const auto saved_context = g_loaded_effect_receipt_context;
-  const uint32_t created_before = g_layer_render_options_created;
-  const uint32_t disposed_before = g_layer_render_options_disposed;
+  const uint32_t created_before = layer_created_count();
+  const uint32_t disposed_before = layer_disposed_count();
   g_aegp_effect_live = true;
   const auto make_world = [](uint8_t red, uint8_t green, uint8_t blue) {
     std::vector<unsigned char> pixels(4 * 2 * 4);
@@ -18830,8 +18816,8 @@ bool verify_aegp_layer_render_options_suite2() {
   g_loaded_effect_receipt_context = saved_context;
   g_aegp_effect_live = saved_effect_live;
   return ok && async_receipt_lifetimes_balanced() &&
-      g_layer_render_options_created == created_before + 3 &&
-      g_layer_render_options_disposed == disposed_before + 3;
+      layer_created_count() == created_before + 3 &&
+      layer_disposed_count() == disposed_before + 3;
 }
 #endif
 
@@ -19553,6 +19539,7 @@ bool verify_aegp_projector_levels() {
 }
 
 int wmain(int argc, wchar_t **argv) {
+  configure_validators(&validate_render_options_item, &initialize_layer_render_options);
   configure_cache_on_load_suite(&g_effect);
   configure_runtime_module_hash(&sha256);
   configure_selector_dispatch_audit(&capture_module_audit_phase,
@@ -19923,12 +19910,12 @@ int wmain(int argc, wchar_t **argv) {
     const bool passed = verify_aegp_render_options_suite1();
     std::cout << "{\"aegp_render_options_suite1\":\""
               << (passed ? "passed" : "failed")
-              << "\",\"created\":" << g_render_options_created
-              << ",\"disposed\":" << g_render_options_disposed
-              << ",\"live\":" << g_render_options.size()
+              << "\",\"created\":" << item_created_count()
+              << ",\"disposed\":" << item_disposed_count()
+              << ",\"live\":" << item_live_count()
               << ",\"receipts_created\":" << g_async_receipts_created
               << ",\"receipts_checked_in\":" << g_async_receipts_checked_in
-              << ",\"invalid_operations\":" << g_invalid_render_options_operations
+              << ",\"invalid_operations\":" << item_invalid_count()
               << ",\"baseline_argb8\":[" << static_cast<int>(g_render_options_baseline8[0]) << ','
               << static_cast<int>(g_render_options_baseline8[1]) << ',' << static_cast<int>(g_render_options_baseline8[2]) << ',' << static_cast<int>(g_render_options_baseline8[3]) << ']'
               << ",\"time_argb8\":[" << static_cast<int>(g_render_options_time8[0]) << ',' << static_cast<int>(g_render_options_time8[1]) << ',' << static_cast<int>(g_render_options_time8[2]) << ',' << static_cast<int>(g_render_options_time8[3]) << ']'

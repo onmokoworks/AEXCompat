@@ -3,15 +3,17 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "minihost" / "src" / "l2_main.cpp"
+ABI = ROOT / "minihost" / "src" / "worker_suite_abi.hpp"
 
 
 def test_layer_render_options_suite1_has_exact_typed_14_slot_abi():
-    text = SOURCE.read_text(encoding="utf-8")
+    text = ABI.read_text(encoding="utf-8")
     assert "struct AegpLayerRenderOptionsSuite1" in text
     assert "sizeof(AegpLayerRenderOptionsSuite1) == 14 * sizeof(void*)" in text
-    assert "offsetof(AegpLayerRenderOptionsSuite1, new_from_layer) == 0 * sizeof(void*)" in text
-    assert "offsetof(AegpLayerRenderOptionsSuite1, get_matte) == 13 * sizeof(void*)" in text
+    assert "AEXCOMPAT_ASSERT_LAYER1_SLOT(new_from_layer, 0)" in text
+    assert "AEXCOMPAT_ASSERT_LAYER1_SLOT(get_matte, 13)" in text
     assert "std::array<void*, 14> g_layer_render_options_suite1" not in text
+    main = SOURCE.read_text(encoding="utf-8")
     for function in (
         "new_layer_render_options",
         "new_from_upstream_of_effect",
@@ -28,7 +30,7 @@ def test_layer_render_options_suite1_has_exact_typed_14_slot_abi():
         "set_layer_render_matte",
         "get_layer_render_matte",
     ):
-        assert f"&{function}" in text
+        assert f"&{function}" in main
 
 
 def test_layer_render_options_registry_is_bounded_and_aba_resistant():

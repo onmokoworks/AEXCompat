@@ -31,6 +31,7 @@ set(AEXCOMPAT_L2_WORKER_SOURCES
     src/strict_json.cpp
     src/suite_lease_tracker.cpp
     src/worker_selector_dispatch.cpp
+    src/worker_aegp_render_options.cpp
     src/worker_handle_runtime.cpp
     src/worker_suite_abi.cpp
     src/worker_world_safety.cpp)

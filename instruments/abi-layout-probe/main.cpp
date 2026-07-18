@@ -9,6 +9,7 @@
 
 #include <cstddef>
 #include <iostream>
+#include <type_traits>
 
 namespace {
 static_assert(sizeof(void*) != 8 ||
@@ -17,7 +18,28 @@ static_assert(sizeof(void*) != 8 ||
               "AEGP_GetEffectParamUnionByIndex must be x64 slot 3 (offset 24)");
 static_assert(AEGP_InstalledEffectKey_NONE == 0);
 static_assert(sizeof(AEGP_EffectSuite4) == 22 * sizeof(void*));
+static_assert(sizeof(A_Time) == 8);
+static_assert(sizeof(A_LRect) == 16);
+static_assert(sizeof(AEGP_LayerRenderOptionsSuite1) == 14 * sizeof(void*));
 static_assert(sizeof(AEGP_LayerRenderOptionsSuite2) == 15 * sizeof(void*));
+static_assert(sizeof(AEGP_RenderOptionsSuite1) == 17 * sizeof(void*));
+static_assert(sizeof(AEGP_RenderOptionsSuite4) == 23 * sizeof(void*));
+#define ASSERT_SDK_SLOT(Suite, Member, Slot) \
+  static_assert(offsetof(Suite, Member) == (Slot) * sizeof(void*))
+ASSERT_SDK_SLOT(AEGP_LayerRenderOptionsSuite1, AEGP_NewFromLayer, 0);
+ASSERT_SDK_SLOT(AEGP_LayerRenderOptionsSuite1, AEGP_NewFromUpstreamOfEffect, 1);
+ASSERT_SDK_SLOT(AEGP_LayerRenderOptionsSuite1, AEGP_Duplicate, 2);
+ASSERT_SDK_SLOT(AEGP_LayerRenderOptionsSuite1, AEGP_Dispose, 3);
+ASSERT_SDK_SLOT(AEGP_LayerRenderOptionsSuite1, AEGP_SetTime, 4);
+ASSERT_SDK_SLOT(AEGP_LayerRenderOptionsSuite1, AEGP_GetTime, 5);
+ASSERT_SDK_SLOT(AEGP_LayerRenderOptionsSuite1, AEGP_SetTimeStep, 6);
+ASSERT_SDK_SLOT(AEGP_LayerRenderOptionsSuite1, AEGP_GetTimeStep, 7);
+ASSERT_SDK_SLOT(AEGP_LayerRenderOptionsSuite1, AEGP_SetWorldType, 8);
+ASSERT_SDK_SLOT(AEGP_LayerRenderOptionsSuite1, AEGP_GetWorldType, 9);
+ASSERT_SDK_SLOT(AEGP_LayerRenderOptionsSuite1, AEGP_SetDownsampleFactor, 10);
+ASSERT_SDK_SLOT(AEGP_LayerRenderOptionsSuite1, AEGP_GetDownsampleFactor, 11);
+ASSERT_SDK_SLOT(AEGP_LayerRenderOptionsSuite1, AEGP_SetMatteMode, 12);
+ASSERT_SDK_SLOT(AEGP_LayerRenderOptionsSuite1, AEGP_GetMatteMode, 13);
 static_assert(offsetof(AEGP_LayerRenderOptionsSuite2, AEGP_NewFromLayer) ==
               0 * sizeof(void*));
 static_assert(offsetof(AEGP_LayerRenderOptionsSuite2, AEGP_NewFromUpstreamOfEffect) ==
@@ -48,6 +70,34 @@ static_assert(offsetof(AEGP_LayerRenderOptionsSuite2, AEGP_SetMatteMode) ==
               13 * sizeof(void*));
 static_assert(offsetof(AEGP_LayerRenderOptionsSuite2, AEGP_GetMatteMode) ==
               14 * sizeof(void*));
+#define ASSERT_RENDER_BASE(Suite) \
+  ASSERT_SDK_SLOT(Suite, AEGP_NewFromItem, 0); \
+  ASSERT_SDK_SLOT(Suite, AEGP_Duplicate, 1); \
+  ASSERT_SDK_SLOT(Suite, AEGP_Dispose, 2); \
+  ASSERT_SDK_SLOT(Suite, AEGP_SetTime, 3); \
+  ASSERT_SDK_SLOT(Suite, AEGP_GetTime, 4); \
+  ASSERT_SDK_SLOT(Suite, AEGP_SetTimeStep, 5); \
+  ASSERT_SDK_SLOT(Suite, AEGP_GetTimeStep, 6); \
+  ASSERT_SDK_SLOT(Suite, AEGP_SetFieldRender, 7); \
+  ASSERT_SDK_SLOT(Suite, AEGP_GetFieldRender, 8); \
+  ASSERT_SDK_SLOT(Suite, AEGP_SetWorldType, 9); \
+  ASSERT_SDK_SLOT(Suite, AEGP_GetWorldType, 10); \
+  ASSERT_SDK_SLOT(Suite, AEGP_SetDownsampleFactor, 11); \
+  ASSERT_SDK_SLOT(Suite, AEGP_GetDownsampleFactor, 12); \
+  ASSERT_SDK_SLOT(Suite, AEGP_SetRegionOfInterest, 13); \
+  ASSERT_SDK_SLOT(Suite, AEGP_GetRegionOfInterest, 14); \
+  ASSERT_SDK_SLOT(Suite, AEGP_SetMatteMode, 15); \
+  ASSERT_SDK_SLOT(Suite, AEGP_GetMatteMode, 16)
+ASSERT_RENDER_BASE(AEGP_RenderOptionsSuite1);
+ASSERT_RENDER_BASE(AEGP_RenderOptionsSuite4);
+ASSERT_SDK_SLOT(AEGP_RenderOptionsSuite4, AEGP_SetChannelOrder, 17);
+ASSERT_SDK_SLOT(AEGP_RenderOptionsSuite4, AEGP_GetChannelOrder, 18);
+ASSERT_SDK_SLOT(AEGP_RenderOptionsSuite4, AEGP_GetRenderGuideLayers, 19);
+ASSERT_SDK_SLOT(AEGP_RenderOptionsSuite4, AEGP_SetRenderGuideLayers, 20);
+ASSERT_SDK_SLOT(AEGP_RenderOptionsSuite4, AEGP_GetRenderQuality, 21);
+ASSERT_SDK_SLOT(AEGP_RenderOptionsSuite4, AEGP_SetRenderQuality, 22);
+#undef ASSERT_RENDER_BASE
+#undef ASSERT_SDK_SLOT
 static_assert(offsetof(AEGP_EffectSuite4, AEGP_GetNumInstalledEffects) ==
               11 * sizeof(void*));
 static_assert(offsetof(AEGP_EffectSuite4, AEGP_GetNextInstalledEffect) ==
