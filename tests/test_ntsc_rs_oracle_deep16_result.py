@@ -77,6 +77,32 @@ class NtscRsOracleDeep16ResultTests(unittest.TestCase):
         self.assertEqual(fps1["ae_capture"]["fps"], 1)
         self.assertTrue(self.document["ae_fps_invariance"]["observed"])
 
+    def test_mechanism_manifest_is_recomputed_and_holds(self):
+        mechanism = self.document["mechanism"]
+        self.assertEqual(mechanism["verified_by"],
+                         "tools/verify-deep16-mechanism.py")
+        manifest = mechanism["manifest"]
+        self.assertTrue(manifest["holds"])
+        promotion = manifest["host_promotion"]
+        self.assertTrue(promotion["holds"])
+        self.assertEqual(promotion["mismatched_samples"], 0)
+        self.assertGreater(promotion["total_samples"], 0)
+        self.assertTrue(SHA256.match(promotion["smart_input_dump_sha256"]))
+        ae_map = manifest["ae_composed_map"]
+        self.assertTrue(ae_map["holds"])
+        self.assertTrue(ae_map["mapping_deterministic"])
+        self.assertTrue(ae_map["deviation_bounded_by_one"])
+        self.assertTrue(ae_map["roundtrip_round_v16_div_257_exact"])
+        self.assertLessEqual(set(ae_map["deviation_histogram"]),
+                             {"-1", "0", "1"})
+        self.assertEqual(ae_map["distinct_8bit_values_observed"], 256)
+        artifacts = mechanism["artifacts"]
+        self.assertEqual(
+            artifacts["smart_input_dump"],
+            "target/oracle-deep16/host-gradient-smart-input.rgba16le")
+        self.assertEqual(artifacts["noeffect_capture_png"],
+                         "target/oracle-deep16/ae-noeffect-16.png")
+
     def test_recorded_identities_are_well_formed(self):
         self.assertTrue(SHA256.match(self.document["environment"]["plugin_sha256"]))
         self.assertEqual(self.document["environment"]["host_pixel_format"], "argb16")

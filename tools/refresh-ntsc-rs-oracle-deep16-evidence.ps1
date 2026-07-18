@@ -43,6 +43,7 @@ $corpus = (Resolve-Path -LiteralPath $CorpusRoot).Path
 $aexPath = (Resolve-Path -LiteralPath $TestedAex).Path
 $installedAexPath = (Resolve-Path -LiteralPath $InstalledAex).Path
 $harnessPath = (Resolve-Path -LiteralPath $Harness).Path
+$repoRoot = Split-Path -Parent $PSScriptRoot
 $installedLock = [System.IO.File]::Open(
     $installedAexPath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read,
     [System.IO.FileShare]::Read)
@@ -157,7 +158,10 @@ $caseRecords = foreach ($case in $cases) {
         $scratchBase = Join-Path ([System.IO.Path]::GetTempPath()) ("aexcompat-refresh-" + [guid]::NewGuid().ToString('N'))
         $rerenderPng = "$scratchBase.png"
         $rerenderRaw = "$scratchBase.rgba16le"
+        $dumpDir = Join-Path $repoRoot ("target\refresh-dumps-" + [guid]::NewGuid().ToString('N'))
+        New-Item -ItemType Directory -Path $dumpDir | Out-Null
         try {
+            $env:AEXCOMPAT_DUMP_WORLDS_DIR = $dumpDir
             & $harnessPath --render-experimental-smart-16-deep $aexPath $inputPath $rerenderPng | Out-Null
             if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $rerenderPng) -or
                 -not (Test-Path -LiteralPath $rerenderRaw)) {
@@ -169,9 +173,19 @@ $caseRecords = foreach ($case in $cases) {
             if ((Sha256 $rerenderRaw) -ne (Sha256 $hostRaw)) {
                 throw "$($case.host_prefix).rgba16le is not the transport sidecar of the recorded render (re-render differs)"
             }
+            $storedDump = Join-Path $corpus ("{0}-smart-input.rgba16le" -f $case.host_prefix)
+            if (Test-Path -LiteralPath $storedDump) {
+                $freshDump = Join-Path $dumpDir ("000-smart-input-{0}x{1}.rgba16le" -f $case.width, $case.height)
+                if (-not (Test-Path -LiteralPath $freshDump) -or
+                    (Sha256 $freshDump) -ne (Sha256 $storedDump)) {
+                    throw "$($case.host_prefix) smart-input world snapshot does not reproduce"
+                }
+            }
         } finally {
+            Remove-Item 'Env:AEXCOMPAT_DUMP_WORLDS_DIR' -ErrorAction SilentlyContinue
             Remove-Item -LiteralPath $rerenderPng -ErrorAction SilentlyContinue
             Remove-Item -LiteralPath $rerenderRaw -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath $dumpDir -Recurse -Force -ErrorAction SilentlyContinue
         }
         $rerendered[$case.host_prefix] = $true
     }
@@ -211,6 +225,44 @@ $caseRecords = foreach ($case in $cases) {
     }
 }
 
+# Recompute the depth-promotion/export mechanism from retained artifacts.
+# The no-effect control does not load an effect, so its plug-in identity is
+# intentionally irrelevant; its input/depth/AE-version identity is pinned.
+$noeffectPng = Join-Path $corpus 'ae-noeffect-16.png'
+$noeffectResult = Join-Path $corpus 'ae-noeffect-16.result.json'
+$gradientInput = Join-Path $corpus 'input-gradient-1920x1080.png'
+$gradientDump = Join-Path $corpus 'host-gradient-smart-input.rgba16le'
+foreach ($required in @($noeffectPng, $noeffectResult, $gradientDump)) {
+    if (-not (Test-Path -LiteralPath $required)) { throw "missing mechanism artifact: $required" }
+}
+$noeffectCapture = ReadJson $noeffectResult
+if ($noeffectCapture.status -ne 'captured' -or [bool]$noeffectCapture.effect_applied -or
+    [string]$noeffectCapture.input_sha256 -ne (Sha256 $gradientInput) -or
+    [int]$noeffectCapture.bpc -ne 16 -or
+    [string]$noeffectCapture.ae_version -ne $aeVersion) {
+    throw 'no-effect control identity does not match the deep16 corpus'
+}
+$mechanismScratch = Join-Path ([System.IO.Path]::GetTempPath()) `
+    ("aexcompat-deep16-mechanism-" + [guid]::NewGuid().ToString('N') + '.json')
+try {
+    & python (Join-Path $PSScriptRoot 'verify-deep16-mechanism.py') `
+        --input-png $gradientInput --smart-input-dump $gradientDump `
+        --noeffect-png $noeffectPng --out $mechanismScratch | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw 'deep16 mechanism verification failed' }
+    $mechanism = ReadJson $mechanismScratch
+} finally {
+    Remove-Item -LiteralPath $mechanismScratch -ErrorAction SilentlyContinue
+}
+$mechanismRecord = [ordered]@{
+    verified_by = 'tools/verify-deep16-mechanism.py'
+    artifacts = [ordered]@{
+        smart_input_dump = 'target/oracle-deep16/host-gradient-smart-input.rgba16le'
+        noeffect_capture_png = 'target/oracle-deep16/ae-noeffect-16.png'
+        noeffect_capture_fps = [int]$noeffectCapture.fps
+    }
+    manifest = $mechanism
+}
+
 # The two gradient captures differ only in comp fps (24 vs 1, one-frame
 # duration semantics aside); record whether AE produced byte-identical
 # renders, which refutes any fps dependence of the frame-0 oracle.
@@ -246,6 +298,7 @@ $document = [ordered]@{
         observed = $fpsInvariant
         meaning = 'AE 16 bpc captures of the gradient input at comp fps 24 and fps 1 (one-frame duration) are byte-identical'
     }
+    mechanism = $mechanismRecord
     cases = @($caseRecords)
 }
 
