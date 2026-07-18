@@ -45,7 +45,9 @@ def test_world_suite3_is_exact_typed_sdk_layout():
 def test_world_suite3_callbacks_are_cross_tu_calling_convention_checked():
     text = SOURCE.read_text(encoding="utf-8")
     abi = ABI_SOURCE.read_text(encoding="utf-8")
-    assert abi.count("int32_t(__cdecl*)") == 13
+    world_callbacks = abi[abi.index("using AegpWorldNew"):
+                          abi.index("struct AegpWorldSuite3")]
+    assert world_callbacks.count("int32_t(__cdecl*)") == 13
     for callback_type in (
         "AegpWorldNew",
         "AegpWorldDispose",
