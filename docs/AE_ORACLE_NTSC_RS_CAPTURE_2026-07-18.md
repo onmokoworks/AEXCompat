@@ -466,12 +466,17 @@ install as every capture in this note):
    than returned as success. Both that kill and the no-result timeout kill
    are scoped to the launched process tree by PID (`taskkill /T`), never by
    process name, so an unrelated AE session started mid-capture is never
-   touched.
+   touched; a launch that already exited is never killed at all, since its
+   numeric PID could have been reused by an unrelated process.
 
 Changes shipped: `capture-ae-reference.ps1` reads the `AfterFX.exe` file
-version (`FileVersionRaw`; the `FileVersion` string can carry non-numeric
-text) and launches `-m -noui -r` on 25.3+, keeping the UI launch as the
-fallback for older versions (the 25.2 GPU3-abort path). Every
+version from the numeric `File*Part` fields (the `FileVersion` string can
+carry non-numeric text, and the parts need no ETS-provided
+`FileVersionRaw` property; measured on this machine both Windows
+PowerShell 5.1 and pwsh 7 do expose `FileVersionRaw`, so the parts are a
+robustness choice, not a bug fix) and launches `-m -noui -r` on 25.3+,
+keeping the UI launch as the fallback for older versions (the 25.2
+GPU3-abort path). Every
 already-running gate across the AE oracle tools
 (`capture-ae-reference.ps1`, `prepare-ae-oracle-project.ps1`,
 `capture-ae-probe-oracle.ps1`, `capture-ae-exr-oracle.ps1`,

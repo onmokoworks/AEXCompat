@@ -129,10 +129,14 @@ try {
     if (-not (Test-Path -LiteralPath $versionSource)) {
         $versionSource = $afterEffectsPath
     }
-    # FileVersionRaw is the parsed numeric version; the FileVersion string can
-    # carry trailing text (e.g. "10.0.26100.1 (WinBuild...)") that [Version]
-    # cannot parse. A missing version resolves to 0.0, i.e. the UI fallback.
-    $aeFileVersion = (Get-Item -LiteralPath $versionSource).VersionInfo.FileVersionRaw
+    # Build the version from the numeric File*Part fields: the FileVersion
+    # string can carry trailing text (e.g. "10.0.26100.1 (WinBuild...)") that
+    # [Version] cannot parse, and the parts do not depend on the PowerShell
+    # ETS-provided FileVersionRaw property. A file without version info
+    # yields 0.0.0.0, i.e. the UI fallback.
+    $versionInfo = (Get-Item -LiteralPath $versionSource).VersionInfo
+    $aeFileVersion = [Version]::new($versionInfo.FileMajorPart, $versionInfo.FileMinorPart,
+        $versionInfo.FileBuildPart, $versionInfo.FilePrivatePart)
     $arguments = if ($aeFileVersion -ge [Version]'25.3') {
         '-m -noui -r "{0}"' -f $escapedScriptPath
     } else {
@@ -149,7 +153,11 @@ try {
         # while an unrelated AE session started after the startup gate is
         # never touched (a name-based kill could hit it), and the shim
         # itself is the tree root, so no lingering shim can block the gate.
-        & taskkill.exe /PID $process.Id /T /F 2>$null | Out-Null
+        # If the launch already exited on its own there is nothing to kill
+        # and the numeric PID may have been reused - never taskkill it then.
+        if (-not $process.HasExited) {
+            & taskkill.exe /PID $process.Id /T /F 2>$null | Out-Null
+        }
         throw 'After Effects reference capture timed out without a result.'
     }
     # The result JSON is written while After Effects is still quitting, and
@@ -158,7 +166,7 @@ try {
     # trips the next capture's already-running gate. Wait on the launched
     # process itself, so the bound applies only to this capture's identity,
     # and report a quit that outlives it as a failure, not a silent success.
-    if (-not $process.WaitForExit(30000)) {
+    if (-not $process.WaitForExit(30000) -and -not $process.HasExited) {
         & taskkill.exe /PID $process.Id /T /F 2>$null | Out-Null
         throw 'After Effects did not exit after writing the capture result.'
     }

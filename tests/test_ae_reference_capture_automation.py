@@ -29,8 +29,10 @@ def test_reference_capture_contract_is_hash_bound_create_new_and_temporary():
     script = SCRIPT.read_text(encoding="utf-8")
     assert "Get-Process AfterFX,'AfterFX.com',aerender,aerendercore" in runner
     # Kills are scoped to the launched process tree by PID; a name-based
-    # kill could hit an unrelated AE session started after the gate.
+    # kill could hit an unrelated AE session started after the gate, and a
+    # launch that already exited is never killed (its PID may be reused).
     assert "taskkill.exe /PID $process.Id /T /F" in runner
+    assert "if (-not $process.HasExited) {" in runner
     assert "Stop-Process" not in runner
     assert "Installed AEX hash does not match tested AEX" in runner
     assert "OutputPng already exists" in runner
@@ -55,6 +57,9 @@ def test_reference_capture_contract_is_hash_bound_create_new_and_temporary():
     assert "'-m -noui -r \"{0}\"'" in runner
     assert "'-m -r \"{0}\"'" in runner
     assert "[Version]'25.3'" in runner
+    # The version is built from the numeric File*Part fields, which exist on
+    # both .NET runtimes and need no ETS-provided FileVersionRaw property.
+    assert "FileMajorPart" in runner
     assert "CloseOptions.DO_NOT_SAVE_CHANGES" in script
 
 
