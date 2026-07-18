@@ -63,67 +63,56 @@ gh api -X POST repos/{owner}/{repo}/issues/{PR}/comments -f body="@codex review"
 
 ### 2. 応答待ち (Monitor)
 
-Monitor ツールで以下を張る ({owner}/{repo}/{PR}/{since} を置換)。
-1イベントで exit する作りなので、通知が来たら monitor は終了している。
+監視ロジックは同梱スクリプト `codex-review-monitor.sh` に実装されている
+(選択述語は `codex-review-lib.sh`、両方 `tests/test_codex_review_loop_monitor.py`
+で検証)。inline bash を手で貼らず、これを Monitor ツールで `persistent: true`
+で張る (SKILL_DIR は `.claude/skills/codex-review-loop`):
 
 ```bash
-since="{since}"
-while true; do
-  sleep 30
-  # 最優先: repo owner の3面すべて (Codex より先に判定する)。owner の指摘は
-  # inline review コメント / review 本体 / top-level PR コメントのどれにも出る。
-  owner=$(gh api "repos/{owner}/{repo}/pulls/{PR}/comments" --paginate --jq ".[] | select(.created_at > \"$since\") | select(.user.login == \"onmokoworks\" or .user.login == \"naari3\") | \"OWNER-FINDING id=\(.id) \(.path):\(.line // .original_line) \(.body | split(\"\n\")[0])\"" 2>/dev/null || true)
-  owner_rev=$(gh api "repos/{owner}/{repo}/pulls/{PR}/reviews" --paginate --jq ".[] | select(.submitted_at > \"$since\") | select(.user.login == \"onmokoworks\" or .user.login == \"naari3\") | select(.body != \"\") | \"OWNER-REVIEW \(.state): \(.body | split(\"\n\")[0])\"" 2>/dev/null || true)
-  owner_issue=$(gh api "repos/{owner}/{repo}/issues/{PR}/comments" --paginate --jq ".[] | select(.created_at > \"$since\") | select(.user.login == \"onmokoworks\" or .user.login == \"naari3\") | select((.body | ascii_downcase | gsub(\"[[:space:]]\";\"\")) != \"@codexreview\") | \"OWNER-COMMENT: \(.body | split(\"\n\")[0])\"" 2>/dev/null || true)
-  if [ -n "$owner" ] || [ -n "$owner_rev" ] || [ -n "$owner_issue" ]; then
-    [ -n "$owner" ] && echo "$owner"
-    [ -n "$owner_rev" ] && echo "$owner_rev"
-    [ -n "$owner_issue" ] && echo "$owner_issue"
-    break
-  fi
-  clean=$(gh api "repos/{owner}/{repo}/issues/{PR}/comments" --paginate --jq ".[] | select(.created_at > \"$since\") | select((.user.login == \"chatgpt-codex-connector\" or .user.login == \"chatgpt-codex-connector[bot]\")) | select(.body | test(\"Didn.t find any major issues\")) | \"CLEAN: \(.body | split(\"\n\")[0])\"" 2>/dev/null || true)
-  if [ -n "$clean" ]; then echo "$clean"; break; fi
-  review=$(gh api "repos/{owner}/{repo}/pulls/{PR}/reviews" --paginate --jq ".[] | select(.submitted_at > \"$since\") | select((.user.login == \"chatgpt-codex-connector\" or .user.login == \"chatgpt-codex-connector[bot]\")) | \"REVIEW \(.state) at \(.submitted_at)\"" 2>/dev/null || true)
-  if [ -n "$review" ]; then
-    echo "$review"
-    gh api "repos/{owner}/{repo}/pulls/{PR}/comments" --paginate --jq ".[] | select(.created_at > \"$since\") | select((.user.login == \"chatgpt-codex-connector\" or .user.login == \"chatgpt-codex-connector[bot]\")) | \"FINDING id=\(.id) \(.path):\(.line // .original_line) \(.body | split(\"\n\")[0])\"" 2>/dev/null || true
-    break
-  fi
-done
+bash {SKILL_DIR}/codex-review-monitor.sh {owner} {repo} {PR} "{since}"
 ```
 
-`persistent: true` で張り、応答は通常1〜3分で来る。owner コメントは Codex 判定
-より前に評価するので、両者が同時に来ても owner が優先される。
+1イベントで exit する。emit される terminal イベントと意味:
+
+- `OWNER-FINDING` / `OWNER-REVIEW` / `OWNER-COMMENT` — owner の指摘 (最優先)。
+  owner review は **state ベース**で判定する (bodyless な `CHANGES_REQUESTED`
+  も blocker)。純粋な `@codex review` トリガーのみのコメントは除外し、トリガー
+  句を含む実フィードバックは拾う。
+- `CODEX-ERROR` — Codex が "Something went wrong" / "Unknown error" /
+  "To use Codex" を返した = **レビュー未実行**。clean でも finding でもない。
+- `CLEAN: codex clean for head <sha>` — Codex clean が **現在の head SHA に
+  拘束**されている (本文の Reviewed commit が head の prefix)。古い SHA の
+  clean では成立しない。
+- `FINDING ...` — Codex の inline 指摘。
+- `API-ERROR` / `TIMEOUT` — API 失敗 (fail-closed で停止) / 1時間到達。
+  どちらも **merge に進まない**。
 
 ### 3. 分岐
 
-- **OWNER-FINDING / OWNER-COMMENT (repo owner の指摘・コメント)**: 最優先。
+- **OWNER-\* (repo owner の指摘・コメント・変更要求)**: 最優先。
   1. Codex の状態に関係なく、まず owner の指摘に対応する
   2. 各指摘の妥当性を判断し (owner 指摘も盲従はしないが、Codex より重い)、
      妥当なら対応・commit・push、inline コメントには返信
-  3. owner に再確認を促す (`@codex review` の再トリガーとは別に、owner の
-     指摘へ返信して対応済みを明示する)。手順 1 に戻る
-  4. **owner 指摘が未解決の間は merge しない**
+  3. owner の指摘へ返信して対応済みを明示し、手順 1 に戻る (再トリガー)
+  4. **owner の要求が未解決の間は merge しない** (CHANGES_REQUESTED は特に)
+- **CODEX-ERROR / API-ERROR / TIMEOUT**: merge に進まない。ERROR は少し時間を
+  置いて `@codex review` を再トリガー。TIMEOUT は Codex 不調を疑い PR を直接確認。
 - **FINDING (Codex 指摘あり)**:
   1. 各指摘の妥当性を自分で判断する (盲従しない。妥当でなければ理由を付けて返信のみ)
   2. 妥当な指摘に対応し、commit・push
   3. 各 inline コメントに対応内容を返信:
      `gh api -X POST repos/{owner}/{repo}/pulls/{PR}/comments/{comment_id}/replies -f body="対応済み (<sha>)。<内容>"`
   4. 手順 1 に戻る (新しい `since` で再トリガー)
-- **CLEAN (Codex 指摘なし)**: **merge の前に owner レビュー・コメントを必ず確認する**。
-  owner の指摘は3面に出る (inline review コメント / review 本体 / top-level PR
-  コメント)。GitHub では PR も issue なので、top-level コメントは
-  `issues/{PR}/comments` に出る。3面すべてを見る:
+- **CLEAN (Codex 指摘なし)**: **merge は `codex-merge-guard.sh` 経由でのみ行う**。
+  これが (a) owner blocker の不在、(b) 現在の head SHA に拘束された Codex clean
+  を fail-closed で再確認し、(c) `gh pr merge --match-head-commit <head>` で
+  atomic に merge する (確認後に head が進めば merge は失敗する):
   ```bash
-  gh api repos/{owner}/{repo}/pulls/{PR}/comments  --paginate --jq '.[] | select(.user.login=="onmokoworks" or .user.login=="naari3") | "\(.created_at) inline \(.path):\(.line): \(.body | split("\n")[0])"'
-  gh api repos/{owner}/{repo}/pulls/{PR}/reviews   --paginate --jq '.[] | select(.user.login=="onmokoworks" or .user.login=="naari3") | "\(.submitted_at) review \(.state): \(.body | split("\n")[0])"'
-  gh api repos/{owner}/{repo}/issues/{PR}/comments --paginate --jq '.[] | select(.user.login=="onmokoworks" or .user.login=="naari3") | select((.body | ascii_downcase | gsub("[[:space:]]";"")) != "@codexreview") | "\(.created_at) comment: \(.body | split("\n")[0])"'
+  bash {SKILL_DIR}/codex-merge-guard.sh {owner} {repo} {PR}
   ```
-  owner の未対応レビュー / コメントがあれば **merge せず** OWNER-FINDING の
-  手順へ。無ければ最新 commit への clean であることを確認して merge:
-  `gh pr merge {PR} --merge --delete-branch`
-  merge 後は main を pull し、結果を報告する。merge が保護ルール等で失敗した
-  場合は無理に押し通さず、状態を報告してユーザーに委ねる。
+  `REFUSE: ...` が出たら merge せず、示された未解決項目へ戻る。成功したら main を
+  pull し、結果を報告する。手で `gh pr merge` を直接叩かない (head 拘束と
+  owner/clean 再確認を飛ばすため)。
 
 ## Codex の応答パターン (誤判定防止)
 

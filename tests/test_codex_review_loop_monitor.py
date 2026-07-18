@@ -1,47 +1,33 @@
-"""Fixture test for the codex-review-loop monitor's actor selection.
+"""Tests for the codex-review-loop selection predicates.
 
-The `.claude/skills/codex-review-loop/SKILL.md` monitor selects Codex responses
-with an exact two-identity allowlist:
-`select(.user.login == "chatgpt-codex-connector" or .user.login == "chatgpt-codex-connector[bot]")`.
-Both forms occur across GitHub REST surfaces (`issues/{PR}/comments` and
-`pulls/{PR}/reviews` return the `[bot]` suffix; `gh pr view --json author`
-returns it without), so both must be accepted. A `startswith` prefix would also
-accept a spoofed login like `chatgpt-codex-connector-fake`, so this test pins
-the exact allowlist: both real forms are accepted and prefix spoofs rejected.
+These exercise the ACTUAL shell functions in
+`.claude/skills/codex-review-loop/codex-review-lib.sh` (sourced per call), not a
+copy of the jq strings, so changing the skill's logic without updating behavior
+fails here. Requires bash + jq; skips cleanly when either is missing.
 """
 
 import json
 import shutil
 import subprocess
+from pathlib import Path
 
 import pytest
 
-# Must mirror the predicate used in the skill's monitor snippet: an exact
-# allowlist of the two known Codex logins (not a prefix, which would accept a
-# spoofed login like "chatgpt-codex-connector-fake").
-CLEAN_FILTER = (
-    '.[] | select(.user.login == "chatgpt-codex-connector" '
-    'or .user.login == "chatgpt-codex-connector[bot]") '
-    '| select(.body | test("Didn.t find any major issues")) | "CLEAN"'
-)
-
-# Owner-comment exclusion: drop ONLY a bare "@codex review" trigger, keeping
-# real owner feedback even when it contains the trigger phrase. Mirrors the
-# skill's owner_issue predicate.
-OWNER_COMMENT_FILTER = (
-    '.[] | select((.body | ascii_downcase | gsub("[[:space:]]";"")) '
-    '!= "@codexreview") | .body'
-)
+ROOT = Path(__file__).resolve().parents[1]
+LIB = ROOT / ".claude" / "skills" / "codex-review-loop" / "codex-review-lib.sh"
 
 
-def _run_jq(filter_expr: str, payload: list) -> str:
+def _call(func: str, payload: list, *args: str) -> str:
+    bash = shutil.which("bash")
     jq = shutil.which("jq")
-    if jq is None:
-        pytest.skip("jq is not installed")
-    # Decode jq's UTF-8 output explicitly; text=True would use the locale
-    # encoding (cp932 on Japanese Windows) and mangle non-ASCII bodies.
+    if bash is None or jq is None:
+        pytest.skip("bash and jq are required")
+    if not LIB.is_file():
+        pytest.skip(f"{LIB} not found")
+    quoted_args = " ".join(f'"{a}"' for a in args)
+    script = f'. "{LIB.as_posix()}"; {func} {quoted_args}'
     result = subprocess.run(
-        [jq, "-r", filter_expr],
+        [bash, "-c", script],
         input=json.dumps(payload).encode("utf-8"),
         capture_output=True,
         timeout=30,
@@ -50,45 +36,77 @@ def _run_jq(filter_expr: str, payload: list) -> str:
     return result.stdout.decode("utf-8").strip()
 
 
-@pytest.mark.parametrize("login", ["chatgpt-codex-connector", "chatgpt-codex-connector[bot]"])
-def test_clean_detected_for_both_login_forms(login: str) -> None:
-    payload = [{"user": {"login": login}, "body": "Codex Review: Didn't find any major issues. Bravo."}]
-    assert _run_jq(CLEAN_FILTER, payload) == "CLEAN"
+# --- codex_clean_for_head: clean must be bound to the current head SHA --------
 
-
-def test_non_codex_author_is_not_treated_as_clean() -> None:
+def test_clean_requires_matching_head_sha() -> None:
+    head = "6de58c3dbb095c277dca598cb5621d28cbed723a"
     payload = [
-        {"user": {"login": "naari3"}, "body": "Didn't find any major issues"},
-        {"user": {"login": "some-other-bot[bot]"}, "body": "Didn't find any major issues"},
+        {"user": {"login": "chatgpt-codex-connector[bot]"},
+         "body": f"Codex Review: Didn't find any major issues.\nReviewed commit: `{head[:10]}`"}
     ]
-    assert _run_jq(CLEAN_FILTER, payload) == ""
+    assert _call("codex_clean_for_head", payload, head) == "CLEAN"
 
 
-@pytest.mark.parametrize(
-    "login",
-    ["chatgpt-codex-connector-fake", "chatgpt-codex-connector2", "chatgpt-codex-connector[bot]-x"],
-)
-def test_prefix_spoof_login_is_rejected(login: str) -> None:
-    # A login that merely starts with the Codex prefix must not be accepted;
-    # only the two exact identities count.
-    payload = [{"user": {"login": login}, "body": "Didn't find any major issues"}]
-    assert _run_jq(CLEAN_FILTER, payload) == ""
+def test_clean_for_a_stale_sha_is_rejected() -> None:
+    payload = [
+        {"user": {"login": "chatgpt-codex-connector[bot]"},
+         "body": "Didn't find any major issues.\nReviewed commit: `31bef1dfc1`"}
+    ]
+    # Current head differs from the reviewed (stale) commit.
+    assert _call("codex_clean_for_head", payload, "6de58c3dbb095c277dca598cb5621d28cbed723a") == ""
 
 
-def test_codex_without_clean_phrase_is_not_clean() -> None:
-    payload = [{"user": {"login": "chatgpt-codex-connector[bot]"}, "body": "Here are some suggestions."}]
-    assert _run_jq(CLEAN_FILTER, payload) == ""
+@pytest.mark.parametrize("login", ["naari3", "some-bot[bot]", "chatgpt-codex-connector-fake"])
+def test_clean_only_from_exact_codex_identities(login: str) -> None:
+    head = "6de58c3dbb"
+    payload = [{"user": {"login": login}, "body": f"Didn't find any major issues {head}"}]
+    assert _call("codex_clean_for_head", payload, head) == ""
 
 
-@pytest.mark.parametrize("body", ["@codex review", "  @codex review  ", "@Codex Review"])
-def test_bare_trigger_comment_is_excluded(body: str) -> None:
-    assert _run_jq(OWNER_COMMENT_FILTER, [{"body": body}]) == ""
-
+# --- codex_error: error/onboarding messages mean the review did not run -------
 
 @pytest.mark.parametrize(
     "body",
-    ["fix X, then @codex review again", "[P1] これ直して", "please rework the caps"],
+    ["Codex Review: Something went wrong. Try again later.",
+     "Codex Review: Unknown error.",
+     "To use Codex here, create a Codex account and connect to github."],
 )
+def test_codex_error_is_detected(body: str) -> None:
+    payload = [{"user": {"login": "chatgpt-codex-connector[bot]"}, "body": body}]
+    assert _call("codex_error", payload) == "CODEX-ERROR"
+
+
+def test_codex_clean_is_not_an_error() -> None:
+    payload = [{"user": {"login": "chatgpt-codex-connector[bot]"}, "body": "Didn't find any major issues"}]
+    assert _call("codex_error", payload) == ""
+
+
+# --- owner_blocking_reviews: state-based gate, incl. bodyless CHANGES_REQUESTED
+
+def test_bodyless_changes_requested_blocks() -> None:
+    payload = [{"user": {"login": "onmokoworks"}, "state": "CHANGES_REQUESTED", "body": ""}]
+    assert "OWNER-REVIEW CHANGES_REQUESTED" in _call("owner_blocking_reviews", payload)
+
+
+def test_approved_review_does_not_block() -> None:
+    payload = [{"user": {"login": "onmokoworks"}, "state": "APPROVED", "body": "looks good"}]
+    assert _call("owner_blocking_reviews", payload) == ""
+
+
+def test_bodied_commented_review_blocks() -> None:
+    payload = [{"user": {"login": "naari3"}, "state": "COMMENTED", "body": "[P1] fix this"}]
+    assert "OWNER-REVIEW COMMENTED" in _call("owner_blocking_reviews", payload)
+
+
+# --- owner_comments: exclude only a bare @codex review trigger ----------------
+
+@pytest.mark.parametrize("body", ["@codex review", "  @codex review  ", "@Codex Review"])
+def test_bare_trigger_comment_is_excluded(body: str) -> None:
+    payload = [{"user": {"login": "naari3"}, "body": body}]
+    assert _call("owner_comments", payload) == ""
+
+
+@pytest.mark.parametrize("body", ["fix X, then @codex review again", "[P1] これ直して"])
 def test_owner_feedback_is_kept_even_with_trigger_phrase(body: str) -> None:
-    # Real feedback must never be dropped, even if it contains "@codex review".
-    assert _run_jq(OWNER_COMMENT_FILTER, [{"body": body}]) == body
+    payload = [{"user": {"login": "onmokoworks"}, "body": body}]
+    assert _call("owner_comments", payload) == f"OWNER-COMMENT: {body}"
