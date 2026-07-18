@@ -12,11 +12,6 @@ pub struct SecureLaunchResult {
     pub stderr: String,
     pub stdout_truncated: bool,
     pub stderr_truncated: bool,
-    /// The worker identity that was admitted and launched, echoed so callers
-    /// can bind later authorizations (for example a GPU module-audit
-    /// preflight) to the exact binary that produced this result.
-    pub worker_sha256: [u8; 32],
-    pub worker_size: u64,
 }
 
 pub struct SecureLaunchRequest<'a> {
@@ -112,8 +107,6 @@ fn secure_launch_impl(
         stderr: result.stderr,
         stdout_truncated: result.stdout_truncated,
         stderr_truncated: result.stderr_truncated,
-        worker_sha256: worker_expected_sha256,
-        worker_size: worker_expected_size,
     })
 }
 
