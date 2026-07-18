@@ -95,6 +95,13 @@ def intake(events: list[Any], parse_errors: list[str], *, redact: bool) -> tuple
         if redact:
             candidate, count = redact_absolute_paths(candidate)
             redaction_count += count
+        # Boundary gate: native_observation traces carry no provenance and must
+        # never enter the AE-equivalence corpus, even though the shared validator
+        # accepts the host_kind. Keep them out of evidence intake.
+        if isinstance(candidate, dict) and candidate.get("host_kind") == "native_observation":
+            rejection_reasons.append(
+                f"line {index}: native_observation events are not admissible to the AE trace corpus"
+            )
         event_errors = validate_event(candidate)
         rejection_reasons.extend(f"line {index}: {error}" for error in event_errors)
         sanitized.append(candidate)
