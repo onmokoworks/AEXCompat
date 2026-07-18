@@ -14664,7 +14664,6 @@ bool verify_aegp_layer_source_item() {
   return ok;
 }
 
-#ifdef AEXCOMPAT_RENDER_WORKER
 struct LayerSuite2AsyncTestResult {
   std::atomic<bool> done{};
   int32_t error{4};
@@ -14795,7 +14794,6 @@ bool verify_aegp_layer_render_options_suite2() {
       layer_created_count() == created_before + 3 &&
       layer_disposed_count() == disposed_before + 3;
 }
-#endif
 
 bool verify_pf_adv_app_suite_versions() {
   const void* suite1 = nullptr;
@@ -15645,13 +15643,10 @@ int worker_main_impl(int argc, wchar_t **argv) {
                  ",\"pf_interface_slots\":5,\"helper_v1_slots\":1}\n";
     return passed ? 0 : 39;
   }
-#ifdef AEXCOMPAT_RENDER_WORKER
   wchar_t cancel_gate[2]{};
-  g_async_layer_cancel_test_gate =
+  g_async_layer_cancel_test_gate = is_render_worker() &&
       GetEnvironmentVariableW(L"AEXCOMPAT_TEST_ASYNC_CANCEL_GATE", cancel_gate,
-                              2) == 1 &&
-      cancel_gate[0] == L'1';
-#endif
+                              2) == 1 && cancel_gate[0] == L'1';
   SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX);
   if (argc == 2 && std::wstring(argv[1]) == L"--self-test-render-output-safety") {
     const bool passed = verify_render_output_safety();
@@ -15715,8 +15710,7 @@ int worker_main_impl(int argc, wchar_t **argv) {
               << (suite_leases_balanced() ? "true" : "false") << "}\n";
     return passed ? 0 : 1;
   }
-#ifdef AEXCOMPAT_RENDER_WORKER
-  if (argc == 2 &&
+  if (is_render_worker() && argc == 2 &&
       std::wstring(argv[1]) == L"--self-test-aegp-layer-render-options-suite2") {
     const bool passed = verify_aegp_layer_render_options_suite2();
     std::cout << "{\"aegp_layer_render_options_suite2\":\""
@@ -15725,7 +15719,6 @@ int worker_main_impl(int argc, wchar_t **argv) {
               << "\n";
     return passed ? 0 : 1;
   }
-#endif
   if (argc == 2 &&
       std::wstring(argv[1]) == L"--self-test-aegp-keyframe-mutations") {
     const bool passed = verify_aegp_keyframe_suite5_mutations();
@@ -16353,10 +16346,8 @@ int worker_main_impl(int argc, wchar_t **argv) {
     g_user_changed_param_requested = true;
   }
 #endif
-  #if defined(AEXCOMPAT_RENDER_WORKER) || defined(AEXCOMPAT_SMART_WORKER)
   // Every rendered effect instance belongs to a layer, even when that layer has no masks.
-  g_mask_model_enabled = true;
-  #endif
+  if (is_rendering_worker()) g_mask_model_enabled = true;
   std::string expected;
   for (const wchar_t* p = argv[3]; *p; ++p) {
     if (*p > 0x7f) return 2;
@@ -16367,11 +16358,10 @@ int worker_main_impl(int argc, wchar_t **argv) {
   RuntimeAdmissionRequest runtime_request;
   runtime_request.plugin_argument = argv[2];
   runtime_request.expected_sha256 = expected;
-#if !defined(AEXCOMPAT_RENDER_WORKER) && !defined(AEXCOMPAT_SMART_WORKER)
-  runtime_request.authorize_runtime_modules = runtime_module_authorization_mode;
-  if (runtime_module_authorization_mode)
+  if (!is_rendering_worker() && runtime_module_authorization_mode) {
+    runtime_request.authorize_runtime_modules = true;
     runtime_request.authorization_manifest = argv[5];
-#endif
+  }
   aexcompat::TraceWriter trace_writer(
       "minihost", trace_worker_label(),
       std::filesystem::path(argv[2]).filename().string());
