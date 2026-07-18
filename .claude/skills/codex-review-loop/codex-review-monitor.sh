@@ -59,6 +59,12 @@ while true; do
   new_pr_comments=$(since_filter <<<"$pr_comments")
   new_reviews=$(since_filter <<<"$reviews")
   new_issue_comments=$(since_filter <<<"$issue_comments")
+  # Reactions are scoped to SINCE too: with the always-trigger policy an auto
+  # first-review +1 usually predates the explicit @codex review, and an unscoped
+  # read would keep returning that stale advisory, exiting CLEAN-REACTION before
+  # the in-flight text clean lands — and re-triggering would repeat it. Only a
+  # +1 at/after the trigger counts as this cycle's advisory.
+  new_reactions=$(since_filter <<<"$pr_reactions")
 
   # 1. Owner blockers, top priority: inline findings, blocking review states
   #    (incl. bodyless CHANGES_REQUESTED), and non-trigger comments.
@@ -91,7 +97,7 @@ while true; do
   #     the watch does not run to timeout; the operator re-triggers to obtain a
   #     mergeable SHA-bound clean.
   text_clean_ts=$(codex_clean_ts_for_head "$head" <<<"$issue_comments")
-  react_clean_ts=$(codex_reaction_clean_ts "$head_date" <<<"$pr_reactions")
+  react_clean_ts=$(codex_reaction_clean_ts "$head_date" <<<"$new_reactions")
   find_ts=$(codex_finding_max_ts <<<"$pr_comments")
 
   # 2. Findings newer than the newest clean signal (text or reaction) supersede
