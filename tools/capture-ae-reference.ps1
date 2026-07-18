@@ -64,16 +64,6 @@ $installedHash = (Get-FileHash -LiteralPath $installedPath -Algorithm SHA256).Ha
 if ($testedHash -ne $installedHash) {
     throw "Installed AEX hash does not match tested AEX: $installedHash != $testedHash"
 }
-# Stage a private copy of the input and hash that copy: hashing the original
-# would leave a window (before AE imports it, or after the run) in which a
-# rewritten file makes the recorded identity diverge from the bytes AE
-# actually rendered. AE is pointed at the staged copy, so the hash and the
-# rendered bytes are the same file by construction.
-$stagedInput = Join-Path ([System.IO.Path]::GetTempPath()) `
-    ("aexcompat-ae-input-" + [guid]::NewGuid().ToString('N') + [System.IO.Path]::GetExtension($inputPath))
-Copy-Item -LiteralPath $inputPath -Destination $stagedInput
-$inputHash = (Get-FileHash -LiteralPath $stagedInput -Algorithm SHA256).Hash.ToLowerInvariant()
-
 $scriptPath = if ($ScriptPath) {
     (Resolve-Path -LiteralPath $ScriptPath).Path
 } else {
@@ -83,6 +73,18 @@ $resultPath = [System.IO.Path]::ChangeExtension($outputPath, '.result.json')
 if (Test-Path -LiteralPath $resultPath) {
     throw 'Reference result file already exists.'
 }
+
+# Stage a private copy of the input and hash that copy: hashing the original
+# would leave a window (before AE imports it, or after the run) in which a
+# rewritten file makes the recorded identity diverge from the bytes AE
+# actually rendered. AE is pointed at the staged copy, so the hash and the
+# rendered bytes are the same file by construction. This is the last
+# preflight step, so every refusal above leaves nothing behind in the temp
+# directory and the cleanup block below removes the copy on every later path.
+$stagedInput = Join-Path ([System.IO.Path]::GetTempPath()) `
+    ("aexcompat-ae-input-" + [guid]::NewGuid().ToString('N') + [System.IO.Path]::GetExtension($inputPath))
+Copy-Item -LiteralPath $inputPath -Destination $stagedInput
+$inputHash = (Get-FileHash -LiteralPath $stagedInput -Algorithm SHA256).Hash.ToLowerInvariant()
 
 $env:AEXCOMPAT_AE_INPUT = $stagedInput
 $env:AEXCOMPAT_AE_OUTPUT = $outputPath
