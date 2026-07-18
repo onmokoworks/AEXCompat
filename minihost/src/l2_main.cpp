@@ -47,6 +47,7 @@
 
 #include "native_stdout_guard.hpp"
 #include "gpu_device_info_registry.hpp"
+#include "gpu_opencl_backend.hpp"
 #include "parameter_animation_transport.hpp"
 #include "pf_cache_on_load_suite.hpp"
 #include "render_lifecycle.hpp"
@@ -60,6 +61,8 @@
 #include "worker_world_safety.hpp"
 
 namespace {
+
+namespace opencl = aexcompat::gpu_runtime::opencl;
 
 using aexcompat::strict_json::JsonValue;
 using aexcompat::strict_json::StrictJsonParser;
@@ -11201,147 +11204,9 @@ bool end_cuda_context() {
   return valid;
 }
 
-using ClInt = int32_t;
-using ClUInt = uint32_t;
-using ClUlong = uint64_t;
-using ClPlatform = void*;
-using ClDevice = void*;
-using ClContext = void*;
-using ClQueue = void*;
-using ClMem = void*;
-constexpr ClInt kClSuccess = 0;
-constexpr ClUlong kClDeviceTypeGpu = 1u << 2;
-constexpr ClUlong kClMemReadWrite = 1u << 0;
-
-struct OpenClApi {
-  HMODULE module{};
-  ClInt (__stdcall* get_platform_ids)(ClUInt, ClPlatform*, ClUInt*){};
-  ClInt (__stdcall* get_device_ids)(ClPlatform, ClUlong, ClUInt, ClDevice*, ClUInt*){};
-  ClContext (__stdcall* create_context)(const intptr_t*, ClUInt, const ClDevice*,
-                                        void (__stdcall*)(const char*, const void*, std::size_t, void*),
-                                        void*, ClInt*){};
-  ClInt (__stdcall* release_context)(ClContext){};
-  ClQueue (__stdcall* create_queue)(ClContext, ClDevice, ClUlong, ClInt*){};
-  ClInt (__stdcall* release_queue)(ClQueue){};
-  ClMem (__stdcall* create_buffer)(ClContext, ClUlong, std::size_t, void*, ClInt*){};
-  ClInt (__stdcall* release_mem)(ClMem){};
-  ClInt (__stdcall* enqueue_write)(ClQueue, ClMem, ClUInt, std::size_t, std::size_t,
-                                   const void*, ClUInt, const void*, void*){};
-  ClInt (__stdcall* enqueue_read)(ClQueue, ClMem, ClUInt, std::size_t, std::size_t,
-                                  void*, ClUInt, const void*, void*){};
-  ClInt (__stdcall* enqueue_fill)(ClQueue, ClMem, const void*, std::size_t,
-                                  std::size_t, std::size_t, ClUInt, const void*, void*){};
-  ClInt (__stdcall* finish)(ClQueue){};
-  std::array<ClPlatform, kMaxCudaDevices> platforms{};
-  std::array<ClDevice, kMaxCudaDevices> devices{};
-  std::array<ClContext, kMaxCudaDevices> contexts{};
-  std::array<ClQueue, kMaxCudaDevices> queues{};
-  uint32_t device_count{};
-  uint32_t active_device_index{};
-  bool active{};
-};
-OpenClApi g_opencl;
 uint64_t g_opencl_upload_bytes{};
 uint64_t g_opencl_download_bytes{};
 uint32_t g_opencl_sync_failures{};
-uint32_t g_last_opencl_device_count{};
-uint32_t g_last_opencl_device_index{};
-
-template <typename Function>
-bool load_opencl_function(Function& function, const char* name) {
-  function = reinterpret_cast<Function>(GetProcAddress(g_opencl.module, name));
-  return function != nullptr;
-}
-
-bool begin_opencl_context(uint32_t active_device_index) {
-  g_opencl.module = LoadLibraryExW(L"OpenCL.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
-  if (!g_opencl.module ||
-      !load_opencl_function(g_opencl.get_platform_ids, "clGetPlatformIDs") ||
-      !load_opencl_function(g_opencl.get_device_ids, "clGetDeviceIDs") ||
-      !load_opencl_function(g_opencl.create_context, "clCreateContext") ||
-      !load_opencl_function(g_opencl.release_context, "clReleaseContext") ||
-      !load_opencl_function(g_opencl.create_queue, "clCreateCommandQueue") ||
-      !load_opencl_function(g_opencl.release_queue, "clReleaseCommandQueue") ||
-      !load_opencl_function(g_opencl.create_buffer, "clCreateBuffer") ||
-      !load_opencl_function(g_opencl.release_mem, "clReleaseMemObject") ||
-      !load_opencl_function(g_opencl.enqueue_write, "clEnqueueWriteBuffer") ||
-      !load_opencl_function(g_opencl.enqueue_read, "clEnqueueReadBuffer") ||
-      !load_opencl_function(g_opencl.enqueue_fill, "clEnqueueFillBuffer") ||
-      !load_opencl_function(g_opencl.finish, "clFinish")) {
-    if (g_opencl.module) FreeLibrary(g_opencl.module);
-    g_opencl = {};
-    return false;
-  }
-  std::array<ClPlatform, kMaxCudaDevices> platforms{};
-  ClUInt platform_count = 0;
-  if (g_opencl.get_platform_ids(kMaxCudaDevices, platforms.data(), &platform_count) != kClSuccess ||
-      platform_count == 0 || platform_count > kMaxCudaDevices) {
-    FreeLibrary(g_opencl.module); g_opencl = {}; return false;
-  }
-  for (ClUInt platform_index = 0; platform_index < platform_count; ++platform_index) {
-    ClUInt count = 0;
-    const ClInt count_error = g_opencl.get_device_ids(
-        platforms[platform_index], kClDeviceTypeGpu, 0, nullptr, &count);
-    if (count_error != kClSuccess || count == 0) continue;
-    if (count > kMaxCudaDevices - g_opencl.device_count) {
-      FreeLibrary(g_opencl.module); g_opencl = {}; return false;
-    }
-    std::array<ClDevice, kMaxCudaDevices> devices{};
-    if (g_opencl.get_device_ids(platforms[platform_index], kClDeviceTypeGpu, count,
-                                devices.data(), nullptr) != kClSuccess) {
-      FreeLibrary(g_opencl.module); g_opencl = {}; return false;
-    }
-    for (ClUInt index = 0; index < count; ++index) {
-      const uint32_t destination = g_opencl.device_count++;
-      g_opencl.platforms[destination] = platforms[platform_index];
-      g_opencl.devices[destination] = devices[index];
-    }
-  }
-  g_last_opencl_device_count = g_opencl.device_count;
-  g_last_opencl_device_index = active_device_index;
-  if (g_opencl.device_count == 0 || active_device_index >= g_opencl.device_count) {
-    FreeLibrary(g_opencl.module); g_opencl = {}; return false;
-  }
-  for (uint32_t index = 0; index < g_opencl.device_count; ++index) {
-    ClInt error = kClSuccess;
-    g_opencl.contexts[index] = g_opencl.create_context(
-        nullptr, 1, &g_opencl.devices[index], nullptr, nullptr, &error);
-    if (error == kClSuccess && g_opencl.contexts[index])
-      g_opencl.queues[index] = g_opencl.create_queue(
-          g_opencl.contexts[index], g_opencl.devices[index], 0, &error);
-    if (error != kClSuccess || !g_opencl.contexts[index] || !g_opencl.queues[index]) {
-      for (uint32_t cleanup = 0; cleanup <= index; ++cleanup) {
-        if (g_opencl.queues[cleanup]) g_opencl.release_queue(g_opencl.queues[cleanup]);
-        if (g_opencl.contexts[cleanup]) g_opencl.release_context(g_opencl.contexts[cleanup]);
-      }
-      FreeLibrary(g_opencl.module); g_opencl = {}; return false;
-    }
-  }
-  g_opencl.active_device_index = active_device_index;
-  g_opencl.active = true;
-  device_info_registry().set_device_count(g_opencl.device_count);
-  device_info_registry().set_framework(1);
-  for (uint32_t index = 0; index < g_opencl.device_count; ++index) {
-    device_info_registry().set_device(
-        index, g_opencl.platforms[index], g_opencl.devices[index],
-        g_opencl.contexts[index], g_opencl.queues[index]);
-  }
-  return true;
-}
-
-bool end_opencl_context() {
-  bool valid = true;
-  for (uint32_t index = 0; index < g_opencl.device_count; ++index) {
-    if (g_opencl.queues[index])
-      valid = g_opencl.release_queue(g_opencl.queues[index]) == kClSuccess && valid;
-    if (g_opencl.contexts[index])
-      valid = g_opencl.release_context(g_opencl.contexts[index]) == kClSuccess && valid;
-  }
-  if (g_opencl.module) FreeLibrary(g_opencl.module);
-  g_opencl = {};
-  device_info_registry().reset_devices();
-  return valid;
-}
 
 struct DirectXApi {
   HMODULE dxgi_module{};
@@ -11526,7 +11391,7 @@ uint64_t g_invalid_gpu_memory_operations{};
 
 uint32_t active_gpu_device_index() {
   if (g_directx.active) return g_directx.active_device_index;
-  return g_opencl.active ? g_opencl.active_device_index : g_cuda.active_device_index;
+  return opencl::active() ? opencl::active_device_index() : g_cuda.active_device_index;
 }
 
 int32_t __cdecl gpu_acquire_exclusive(void*, uint32_t index) {
@@ -11622,17 +11487,16 @@ int32_t __cdecl gpu_allocate_device_memory(void*, uint32_t index, std::size_t si
     ++g_gpu_allocations_created;
     return 0;
   }
-  if (g_opencl.active) {
+  if (opencl::active()) {
     if (index != active_gpu_device_index() || !memory || size == 0 ||
         size > kMaxGpuAllocationBytes) return 4;
     std::lock_guard<std::mutex> lock(g_gpu_memory_mutex);
     *memory = nullptr;
     if (g_gpu_device_memory.size() + g_gpu_host_memory.size() >= kMaxGpuAllocations ||
         g_gpu_memory_bytes > kMaxGpuAllocationBytes - size) return 4;
-    ClInt error = kClSuccess;
-    *memory = g_opencl.create_buffer(g_opencl.contexts[index], kClMemReadWrite,
-                                     size, nullptr, &error);
-    if (error != kClSuccess || !*memory) return 2;
+    opencl::Int error = opencl::kSuccess;
+    *memory = opencl::create_buffer(index, opencl::kMemReadWrite, size, nullptr, &error);
+    if (error != opencl::kSuccess || !*memory) return 2;
     g_gpu_device_memory.emplace(*memory, size);
     g_gpu_memory_bytes += size;
     ++g_gpu_allocations_created;
@@ -11671,7 +11535,7 @@ int32_t __cdecl gpu_free_device_memory(void*, uint32_t index, void* memory) {
     ++g_gpu_allocations_freed;
     return 0;
   }
-  if (g_opencl.active) {
+  if (opencl::active()) {
     std::lock_guard<std::mutex> lock(g_gpu_memory_mutex);
     const auto found = g_gpu_device_memory.find(memory);
     if (index != active_gpu_device_index() || !memory ||
@@ -11679,7 +11543,7 @@ int32_t __cdecl gpu_free_device_memory(void*, uint32_t index, void* memory) {
       ++g_invalid_gpu_memory_operations;
       return 4;
     }
-    if (g_opencl.release_mem(memory) != kClSuccess) return 4;
+    if (opencl::release_mem(memory) != opencl::kSuccess) return 4;
     g_gpu_memory_bytes -= found->second;
     g_gpu_device_memory.erase(found);
     ++g_gpu_allocations_freed;
@@ -11756,7 +11620,7 @@ int32_t __cdecl gpu_create_world(void*, uint32_t index, int32_t width, int32_t h
                                   uint8_t clear_pixels, void** world) {
   if (index != active_gpu_device_index() || !world || pixel_format != kPixelFormatGpuBgra128 ||
       width <= 0 || height <= 0 || width > 4096 || height > 4096) return 4;
-  if (!g_cuda.pushed && !g_opencl.active && !g_directx.active) {
+  if (!g_cuda.pushed && !opencl::active() && !g_directx.active) {
     auto descriptor = std::make_unique<std::array<std::byte, kEffectWorldSize>>();
     const int32_t error = new_world(nullptr, width, height, clear_pixels != 0,
                                     pixel_format, descriptor->data());
@@ -11778,10 +11642,10 @@ int32_t __cdecl gpu_create_world(void*, uint32_t index, int32_t width, int32_t h
     // Buffers begin in COMMON; the SDK sample relies on buffer state promotion
     // for its raw SRV/UAV views and synchronizes each dispatch on the host queue.
     initialized = true;
-  } else if (g_opencl.active) {
+  } else if (opencl::active()) {
     const unsigned char pattern = clear_pixels ? 0 : 0xCD;
-    initialized = g_opencl.enqueue_fill(g_opencl.queues[index], pixels, &pattern,
-        sizeof(pattern), 0, static_cast<std::size_t>(size64), 0, nullptr, nullptr) == kClSuccess;
+    initialized = opencl::enqueue_fill(index, pixels, &pattern, sizeof(pattern), 0,
+        static_cast<std::size_t>(size64)) == opencl::kSuccess;
   } else {
     const CuDevicePtr device = static_cast<CuDevicePtr>(reinterpret_cast<uintptr_t>(pixels));
     initialized = g_cuda.memset_device(device, clear_pixels ? 0 : 0xCD,
@@ -11850,7 +11714,7 @@ struct CudaRenderTransport {
 
 bool prepare_cuda_render_transport(void* input_world, void* output_world,
                                    CudaRenderTransport& transport) {
-  if ((!g_cuda.pushed && !g_opencl.active && !g_directx.active) ||
+  if ((!g_cuda.pushed && !opencl::active() && !g_directx.active) ||
       !input_world || !output_world) return false;
   transport.input_world = input_world;
   transport.output_world = output_world;
@@ -11900,12 +11764,12 @@ bool prepare_cuda_render_transport(void* input_world, void* output_world,
                                    bgra.data(), input_size, true) &&
         directx_copy_buffer(static_cast<ID3D12Resource*>(transport.output_device),
                             sentinel.data(), output_size, true);
-  } else if (g_opencl.active) {
+  } else if (opencl::active()) {
     const unsigned char pattern = 0xCC;
-    uploaded = g_opencl.enqueue_write(g_opencl.queues[device_index], transport.input_device,
-        1, 0, input_size, bgra.data(), 0, nullptr, nullptr) == kClSuccess &&
-        g_opencl.enqueue_fill(g_opencl.queues[device_index], transport.output_device,
-        &pattern, sizeof(pattern), 0, output_size, 0, nullptr, nullptr) == kClSuccess;
+    uploaded = opencl::enqueue_write(device_index, transport.input_device,
+        1, 0, input_size, bgra.data()) == opencl::kSuccess &&
+        opencl::enqueue_fill(device_index, transport.output_device,
+        &pattern, sizeof(pattern), 0, output_size) == opencl::kSuccess;
   } else {
     const auto input_device = static_cast<CuDevicePtr>(
         reinterpret_cast<uintptr_t>(transport.input_device));
@@ -11921,7 +11785,7 @@ bool prepare_cuda_render_transport(void* input_world, void* output_world,
     return false;
   }
   if (g_directx.active) g_directx_upload_bytes += input_size;
-  else if (g_opencl.active) g_opencl_upload_bytes += input_size;
+  else if (opencl::active()) g_opencl_upload_bytes += input_size;
   else g_cuda_upload_bytes += input_size;
   std::memcpy(static_cast<std::byte*>(input_world) + 24, &transport.input_device,
               sizeof(transport.input_device));
@@ -11933,12 +11797,12 @@ bool prepare_cuda_render_transport(void* input_world, void* output_world,
 bool finish_cuda_render_transport(CudaRenderTransport& transport) {
   if (!transport.input_device || !transport.output_device) return false;
   const uint32_t device_index = active_gpu_device_index();
-  bool valid = g_directx.active || (g_opencl.active
-      ? g_opencl.finish(g_opencl.queues[device_index]) == kClSuccess
+  bool valid = g_directx.active || (opencl::active()
+      ? opencl::finish(device_index) == opencl::kSuccess
       : g_cuda.synchronize() == kCudaSuccess);
   if (!valid) {
     if (g_directx.active) ++g_directx_sync_failures;
-    else if (g_opencl.active) ++g_opencl_sync_failures;
+    else if (opencl::active()) ++g_opencl_sync_failures;
     else ++g_cuda_sync_failures;
   }
   const std::size_t output_size = static_cast<std::size_t>(transport.output_width) *
@@ -11948,9 +11812,9 @@ bool finish_cuda_render_transport(CudaRenderTransport& transport) {
   if (valid && g_directx.active)
     downloaded = directx_copy_buffer(
         static_cast<ID3D12Resource*>(transport.output_device), bgra.data(), output_size, false);
-  else if (valid && g_opencl.active)
-    downloaded = g_opencl.enqueue_read(g_opencl.queues[device_index], transport.output_device,
-        1, 0, output_size, bgra.data(), 0, nullptr, nullptr) == kClSuccess;
+  else if (valid && opencl::active())
+    downloaded = opencl::enqueue_read(device_index, transport.output_device,
+        1, 0, output_size, bgra.data()) == opencl::kSuccess;
   else if (valid) {
     const auto output_device = static_cast<CuDevicePtr>(
         reinterpret_cast<uintptr_t>(transport.output_device));
@@ -11958,7 +11822,7 @@ bool finish_cuda_render_transport(CudaRenderTransport& transport) {
   }
   if (downloaded) {
     if (g_directx.active) g_directx_download_bytes += output_size;
-    else if (g_opencl.active) g_opencl_download_bytes += output_size;
+    else if (opencl::active()) g_opencl_download_bytes += output_size;
     else g_cuda_download_bytes += output_size;
     for (int32_t y = 0; y < transport.output_height; ++y) {
       auto* destination = static_cast<float*>(transport.output_host) +
@@ -18921,7 +18785,7 @@ SmartResult smart_render_once(EffectEntry entry, std::array<std::byte, kInSize>&
   const bool use_directx = gpu_negotiation && gpu_framework == 4;
   if (gpu_negotiation) capture_module_audit();
   const bool gpu_context_started = use_cuda ? begin_cuda_context(gpu_device_index) :
-      (use_opencl ? begin_opencl_context(gpu_device_index) :
+      (use_opencl ? opencl::begin_context(gpu_device_index) :
        (use_directx ? begin_directx_context(gpu_device_index) : true));
   if (gpu_negotiation) {
     write<int32_t>(gpu_setup_input, 0, gpu_framework);
@@ -19071,7 +18935,7 @@ SmartResult smart_render_once(EffectEntry entry, std::array<std::byte, kInSize>&
   if (use_cuda && gpu_context_started && !end_cuda_context() &&
       result.gpu_setdown_error == 0)
     result.gpu_setdown_error = -6;
-  if (use_opencl && gpu_context_started && !end_opencl_context() &&
+  if (use_opencl && gpu_context_started && !opencl::end_context() &&
       result.gpu_setdown_error == 0)
     result.gpu_setdown_error = -6;
   if (use_directx && gpu_context_started && !end_directx_context() &&
@@ -23337,8 +23201,8 @@ int wmain(int argc, wchar_t **argv) {
             << ",\"opencl_upload_bytes\":" << g_opencl_upload_bytes
             << ",\"opencl_download_bytes\":" << g_opencl_download_bytes
             << ",\"opencl_sync_failures\":" << g_opencl_sync_failures
-            << ",\"opencl_device_count\":" << g_last_opencl_device_count
-            << ",\"opencl_device_index\":" << g_last_opencl_device_index
+            << ",\"opencl_device_count\":" << opencl::last_device_count()
+            << ",\"opencl_device_index\":" << opencl::last_device_index()
             << ",\"directx_context_used\":" << (g_directx_context_used ? "true" : "false")
             << ",\"directx_device_count\":" << g_last_directx_device_count
             << ",\"directx_device_index\":" << g_last_directx_device_index
@@ -23597,8 +23461,8 @@ int wmain(int argc, wchar_t **argv) {
             << ",\"opencl_upload_bytes\":" << g_opencl_upload_bytes
             << ",\"opencl_download_bytes\":" << g_opencl_download_bytes
             << ",\"opencl_sync_failures\":" << g_opencl_sync_failures
-            << ",\"opencl_device_count\":" << g_last_opencl_device_count
-            << ",\"opencl_device_index\":" << g_last_opencl_device_index
+            << ",\"opencl_device_count\":" << opencl::last_device_count()
+            << ",\"opencl_device_index\":" << opencl::last_device_index()
             << ",\"directx_context_used\":" << (g_directx_context_used ? "true" : "false")
             << ",\"directx_device_count\":" << g_last_directx_device_count
             << ",\"directx_device_index\":" << g_last_directx_device_index

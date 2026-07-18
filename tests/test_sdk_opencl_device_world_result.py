@@ -54,15 +54,22 @@ def test_opencl_device_world_evidence_records_exact_public_rgba8_conformance():
 
 def test_opencl_boundary_and_fixture_build_markers_are_present():
     source = (ROOT / "minihost" / "src" / "l2_main.cpp").read_text()
+    backend = (ROOT / "minihost" / "src" / "gpu_opencl_backend.cpp").read_text()
     for marker in (
         'LoadLibraryExW(L"OpenCL.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32)',
-        'load_opencl_function(g_opencl.create_buffer, "clCreateBuffer")',
-        'load_opencl_function(g_opencl.enqueue_write, "clEnqueueWriteBuffer")',
-        'load_opencl_function(g_opencl.enqueue_read, "clEnqueueReadBuffer")',
-        'load_opencl_function(g_opencl.finish, "clFinish")',
-        "kClDeviceTypeGpu",
-        "begin_opencl_context",
-        "end_opencl_context",
+        'load_function(g_api.create_buffer, "clCreateBuffer")',
+        'load_function(g_api.enqueue_write, "clEnqueueWriteBuffer")',
+        'load_function(g_api.enqueue_read, "clEnqueueReadBuffer")',
+        'load_function(g_api.finish, "clFinish")',
+        "kDeviceTypeGpu",
+        "begin_context",
+        "end_context",
+        "kMaxGpuDevices",
+        "device_info_registry()",
+    ):
+        assert marker in backend
+
+    for marker in (
         'smart_command == L"--smart-image32-opencl"',
         "g_opencl_upload_bytes += input_size",
         "g_opencl_download_bytes += output_size",
