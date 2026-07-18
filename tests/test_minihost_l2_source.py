@@ -14,6 +14,7 @@ RENDER_HEADER = ROOT / "minihost" / "src" / "render_subsystem.h"
 RENDER_SOURCE = ROOT / "minihost" / "src" / "render_subsystem.cpp"
 REPORT_HEADER = ROOT / "minihost" / "src" / "worker_report.hpp"
 REPORT_SOURCE = ROOT / "minihost" / "src" / "worker_report.cpp"
+RUNTIME_ADMISSION_SOURCE = ROOT / "minihost" / "src" / "worker_runtime_admission.cpp"
 PF_SUITES_INTERNAL = ROOT / "minihost" / "src" / "worker_pf_suites_internal.hpp"
 AEGP_SCENE_SOURCE = ROOT / "minihost" / "src" / "worker_aegp_scene.cpp"
 AEGP_SCENE_IMPL = ROOT / "minihost" / "src" / "worker_aegp_scene_callbacks.hpp"
@@ -26,7 +27,7 @@ def l2_family_source():
     return "\n".join(path.read_text(encoding="utf-8") for path in (
         SOURCE, CLI_DISPATCH_SOURCE, PF_SUITES_HEADER, PF_SUITES_SOURCE,
         AEGP_SCENE_SOURCE, AEGP_SCENE_RUNTIME_HEADER, AEGP_SCENE_RUNTIME_SOURCE,
-        AEGP_SCENE_IMPL, REPORT_HEADER, REPORT_SOURCE
+        AEGP_SCENE_IMPL, REPORT_HEADER, REPORT_SOURCE, RUNTIME_ADMISSION_SOURCE
     ))
 
 
@@ -756,7 +757,7 @@ class MinihostL2SourceTests(unittest.TestCase):
                        "_dup2(g_native_stdout_sink_fd, _fileno(stdout))",
                        "void restore_native_stdout()"):
             self.assertIn(marker, guard)
-        for marker in ("if (!redirect_native_stdout()) { FreeLibrary(module); return 13; }",
+        for marker in ("if (!hooks.redirect_native_stdout())",
                        "restore_native_stdout();"):
             self.assertIn(marker, text)
 
