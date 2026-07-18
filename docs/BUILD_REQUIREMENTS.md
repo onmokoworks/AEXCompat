@@ -55,8 +55,10 @@ python -m pytest -q
   Visual Studio C++ tools 不在時も skip)。一方、probe / fixture を
   `tools/build-*.ps1` 経由で実際にビルドするテスト群は SDK の有無を事前
   チェックせず、SDK 解決の throw で fail する。**SDK なしでは fail が残るのが
-  現状の想定結果** (2026-07-18 の計測で 936 passed / 25 failed / 108 skipped。
-  25 fail はすべて SDK 不在によるビルド系)。
+  現状の想定結果**。fail / skip の件数はテストの増減で変わるため固定値は
+  記載しない。判定基準は件数ではなく「fail がすべて
+  `Set AFTER_EFFECTS_SDK_ROOT to a valid After Effects SDK root` に起因する
+  ビルド系である」こと。それ以外の fail は regression を疑う。
 - **SDK 込み検証**: `AFTER_EFFECTS_SDK_ROOT` と Visual Studio を揃えた構成。
   0 failed が期待結果 (「検証済み構成」の節を参照)。
 - 上記と別軸で、ローカル生成物 (ビルド済み worker、machine-bound receipt 等)
@@ -225,8 +227,9 @@ powershell -File tools\build-pf-adv-time-probe.ps1 -Generator "Visual Studio 17 
 | Visual Studio | 2026 Community (generator / bundled CMake 4.3.1) + 2022 Community (v143 = MSVC 14.44) |
 | After Effects SDK | ae25.2 (20.64bit) |
 
-この構成で `python -m pytest -q` (SDK 環境変数設定済み) が
-970 passed / 96 skipped / 0 failed、`cargo test --workspace` が成功する。
+この構成で `python -m pytest -q` (SDK 環境変数設定済み) が **0 failed**、
+`cargo test --workspace` が成功する。passed / skipped の件数はテストの増減で
+変わるためここには固定値を記載しない (最新の内訳は手元の実行結果を見る)。
 
 ---
 
@@ -241,11 +244,13 @@ Per-component prerequisites on Windows x64:
   jsonschema; the latter two are imported at collection time). Expected
   results differ by entry point. Source-only verification (no SDK):
   SDK-header ABI tests explicitly skip, but the probe / fixture build tests
-  that invoke `tools/build-*.ps1` do not pre-check and fail without the SDK
-  (936 passed / 25 failed / 108 skipped measured on 2026-07-18; all 25
-  failures are SDK-absence build failures and are the expected source-only
-  outcome). SDK-backed verification (SDK plus Visual Studio) expects
-  0 failed. Independently, tests listed in `tests/local_artifact_tests.txt`
+  that invoke `tools/build-*.ps1` do not pre-check and fail without the SDK.
+  This document intentionally does not pin pass / fail / skip counts (they
+  drift as tests are added); the acceptance criterion is that every failure
+  is an SDK-absence build failure (`Set AFTER_EFFECTS_SDK_ROOT ...`) — any
+  other failure suggests a regression. SDK-backed verification (SDK plus
+  Visual Studio) expects 0 failed.
+  Independently, tests listed in `tests/local_artifact_tests.txt`
   always skip by default (`--run-local-artifact-tests` to opt in).
 - **C++ workers (minihost)**: build with the Ninja generator into
   `target\minihost-build\` so the harness and gate scripts find the four
