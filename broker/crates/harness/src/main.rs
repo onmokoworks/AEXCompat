@@ -1814,8 +1814,11 @@ struct HarnessApp {
     reference_preview: Option<egui::TextureHandle>,
     viewer_open: bool,
     viewer_mode: u8,
+    viewer_zoom: f32,
+    viewer_pan: egui::Vec2,
     pixel_comparison: Option<Result<PixelComparison, String>>,
     parameters: Vec<aexcompat_broker::image_render::InteractiveParameter>,
+    parameter_defaults: Vec<aexcompat_broker::image_render::InteractiveParameter>,
     host_context: Option<aexcompat_broker::render_request::HostContext>,
     smart_render: bool,
     pixel_format: aexcompat_broker::image_render::RenderPixelFormat,
@@ -1833,6 +1836,7 @@ struct HarnessApp {
     custom_ui_keycode: u32,
     custom_ui_key_modifiers: u16,
     busy: bool,
+    rendering: bool,
     status: String,
     report: String,
     render_diagnostics: Option<RenderDiagnostics>,
@@ -1845,6 +1849,11 @@ struct HarnessApp {
     missing_suite_aggregate: MissingSuiteAggregate,
     preflight_warnings: Vec<PreflightImportWarning>,
     diagnostic_warning: Option<String>,
+    live_render: bool,
+    pending_parameter_slot: Option<u32>,
+    pending_live_render: bool,
+    live_render_due: Option<Instant>,
+    render_after_parameter_change: bool,
 }
 
 impl HarnessApp {
@@ -1870,8 +1879,11 @@ impl HarnessApp {
             reference_preview: None,
             viewer_open: false,
             viewer_mode: 0,
+            viewer_zoom: 1.0,
+            viewer_pan: egui::Vec2::ZERO,
             pixel_comparison: None,
             parameters: Vec::new(),
+            parameter_defaults: Vec::new(),
             host_context: None,
             smart_render: false,
             pixel_format: aexcompat_broker::image_render::RenderPixelFormat::Argb8,
@@ -1889,6 +1901,7 @@ impl HarnessApp {
             custom_ui_keycode: 0x8000_0041,
             custom_ui_key_modifiers: 0,
             busy: false,
+            rendering: false,
             status: "Select an AEX file. Selection does not execute native code.".into(),
             report: String::new(),
             render_diagnostics: None,
@@ -1901,6 +1914,11 @@ impl HarnessApp {
             missing_suite_aggregate,
             preflight_warnings: Vec::new(),
             diagnostic_warning: None,
+            live_render: true,
+            pending_parameter_slot: None,
+            pending_live_render: false,
+            live_render_due: None,
+            render_after_parameter_change: false,
         }
     }
 
@@ -1942,18 +1960,156 @@ impl HarnessApp {
                     ui.selectable_value(&mut self.viewer_mode, 2, "Compare");
                     ui.separator();
                     ui.label("FHD canvas / aspect-fit");
+                    ui.separator();
+                    ui.monospace(format!("{:.0}%", self.viewer_zoom * 100.0));
+                    if ui.small_button("Fit").clicked() {
+                        self.viewer_zoom = 1.0;
+                        self.viewer_pan = egui::Vec2::ZERO;
+                    }
                 });
                 ui.separator();
                 match self.viewer_mode {
-                    0 => show_viewer_texture(ui, "Input", self.input_preview.as_ref()),
-                    1 => show_viewer_texture(ui, "AEX output", self.preview.as_ref()),
+                    0 => show_viewer_texture(
+                        ui,
+                        "Input",
+                        self.input_preview.as_ref(),
+                        &mut self.viewer_zoom,
+                        &mut self.viewer_pan,
+                    ),
+                    1 => show_viewer_texture(
+                        ui,
+                        "AEX output",
+                        self.preview.as_ref(),
+                        &mut self.viewer_zoom,
+                        &mut self.viewer_pan,
+                    ),
                     _ => ui.columns(2, |columns| {
-                        show_viewer_texture(&mut columns[0], "Input", self.input_preview.as_ref());
-                        show_viewer_texture(&mut columns[1], "AEX output", self.preview.as_ref());
+                        show_viewer_texture(
+                            &mut columns[0],
+                            "Input",
+                            self.input_preview.as_ref(),
+                            &mut self.viewer_zoom,
+                            &mut self.viewer_pan,
+                        );
+                        show_viewer_texture(
+                            &mut columns[1],
+                            "AEX output",
+                            self.preview.as_ref(),
+                            &mut self.viewer_zoom,
+                            &mut self.viewer_pan,
+                        );
                     }),
                 }
             });
         self.viewer_open = open;
+    }
+
+    fn reset_and_choose_aex(&mut self) {
+        self.selection = None;
+        self.session_approved = false;
+        self.approved_dependencies.clear();
+        self.trust_rebuilds = false;
+        self.selection_stale = false;
+        self.diagnostic_history = DiagnosticHistory::default();
+        self.diagnostic_warning = None;
+        self.preflight_warnings.clear();
+        self.parameters.clear();
+        self.parameter_defaults.clear();
+        self.audio_input = None;
+        self.audio_effect_only = false;
+        self.host_context = None;
+        self.choose_aex();
+    }
+
+    fn show_workspace_viewer(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.selectable_value(&mut self.viewer_mode, 0, "INPUT");
+            ui.selectable_value(&mut self.viewer_mode, 1, "AEX OUTPUT");
+            ui.selectable_value(&mut self.viewer_mode, 2, "COMPARE");
+            ui.separator();
+            let label = match self.viewer_mode {
+                0 => self.input_preview.as_ref().map(|texture| texture.size()),
+                1 => self.preview.as_ref().map(|texture| texture.size()),
+                _ => None,
+            };
+            if let Some([width, height]) = label {
+                ui.monospace(format!("{width} x {height}"));
+            } else {
+                ui.weak("FHD workspace / aspect fit");
+            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.small_button("Pop out").clicked() {
+                    self.viewer_open = true;
+                }
+                if ui.small_button("Fit").clicked() {
+                    self.viewer_zoom = 1.0;
+                    self.viewer_pan = egui::Vec2::ZERO;
+                }
+                ui.monospace(format!("{:.0}%", self.viewer_zoom * 100.0));
+                if self.rendering {
+                    ui.weak("Rendering...");
+                    ui.spinner();
+                }
+            });
+        });
+        ui.separator();
+
+        let viewer_height = (ui.available_height() * 0.62).clamp(280.0, 860.0);
+        ui.allocate_ui_with_layout(
+            egui::vec2(ui.available_width(), viewer_height),
+            egui::Layout::top_down(egui::Align::Center),
+            |ui| match self.viewer_mode {
+                0 => show_viewer_texture(
+                    ui,
+                    "Input",
+                    self.input_preview.as_ref(),
+                    &mut self.viewer_zoom,
+                    &mut self.viewer_pan,
+                ),
+                1 if self.preview.is_some() => show_viewer_texture(
+                    ui,
+                    "AEX output",
+                    self.preview.as_ref(),
+                    &mut self.viewer_zoom,
+                    &mut self.viewer_pan,
+                ),
+                1 => {
+                    ui.centered_and_justified(|ui| {
+                        ui.vertical_centered(|ui| {
+                            if self.busy {
+                                ui.spinner();
+                                ui.label("Rendering AEX output...");
+                            } else {
+                                ui.colored_label(
+                                    Color32::from_rgb(225, 155, 65),
+                                    RichText::new("AEX output is not available").strong(),
+                                );
+                                ui.label(&self.status);
+                                if let Some(first_line) = self.report.lines().next() {
+                                    ui.monospace(first_line);
+                                }
+                            }
+                        });
+                    });
+                }
+                _ => ui.columns(2, |columns| {
+                    show_viewer_texture(
+                        &mut columns[0],
+                        "Input",
+                        self.input_preview.as_ref(),
+                        &mut self.viewer_zoom,
+                        &mut self.viewer_pan,
+                    );
+                    show_viewer_texture(
+                        &mut columns[1],
+                        "AEX output",
+                        self.preview.as_ref(),
+                        &mut self.viewer_zoom,
+                        &mut self.viewer_pan,
+                    );
+                }),
+            },
+        );
     }
 
     fn spawn<F>(&mut self, work: F)
@@ -2134,11 +2290,24 @@ impl HarnessApp {
                 self.preview = None;
                 self.pixel_comparison = None;
                 self.status = "Input image loaded. Ready to render.".into();
+                self.start_live_render_if_ready();
             }
             Err(error) => {
                 self.status = "Input image could not be decoded.".into();
                 self.report = error;
             }
+        }
+    }
+
+    fn start_live_render_if_ready(&mut self) {
+        if self.live_render
+            && !self.busy
+            && !self.audio_effect_only
+            && self.selection.is_some()
+            && self.input_image.is_some()
+        {
+            self.quick_render();
+            self.viewer_mode = 1;
         }
     }
 
@@ -2911,6 +3080,7 @@ impl HarnessApp {
             && pixel_format == aexcompat_broker::image_render::RenderPixelFormat::Argb8
             && audio_sidecar.is_none();
         self.status = "Rendering in an isolated worker...".into();
+        self.rendering = true;
         self.spawn_native("render_image", move || {
             let report = if let Some(audio) = audio_sidecar {
                 aexcompat_broker::image_render::render_experimental_image_with_audio_sidecar(
@@ -3224,7 +3394,25 @@ impl HarnessApp {
     }
 
     fn show_effect_controls(&mut self, ui: &mut egui::Ui) {
-        ui.heading(RichText::new("Effect Controls").size(20.0));
+        ui.horizontal(|ui| {
+            ui.heading(RichText::new("Effect Controls").size(20.0));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui
+                    .add_enabled(
+                        !self.busy && !self.parameter_defaults.is_empty(),
+                        egui::Button::new("Reset All"),
+                    )
+                    .clicked()
+                {
+                    self.parameters = self.parameter_defaults.clone();
+                    self.pending_parameter_slot = None;
+                    self.pending_live_render = self.live_render;
+                    self.live_render_due = self
+                        .live_render
+                        .then(|| Instant::now() + std::time::Duration::from_millis(500));
+                }
+            });
+        });
         if let Some(selection) = &self.selection {
             ui.label(
                 selection
@@ -3250,6 +3438,7 @@ impl HarnessApp {
         }
 
         let mut clicked_button = None;
+        let parameter_defaults = self.parameter_defaults.clone();
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
             .show(ui, |ui| {
@@ -3290,7 +3479,32 @@ impl HarnessApp {
                     let previous_layer = parameter.layer_path.clone();
                     let previous_summary = parameter.debug_summary.clone();
                     ui.add_enabled_ui(parameter.enabled && !self.busy, |ui| {
-                        ui.label(RichText::new(&parameter.name).small());
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new(&parameter.name).small());
+                            if let Some(default) = parameter_defaults
+                                .iter()
+                                .find(|default| default.slot == parameter.slot)
+                            {
+                                let changed_from_default = parameter.value != default.value
+                                    || parameter.color != default.color
+                                    || parameter.components != default.components
+                                    || parameter.layer_path != default.layer_path
+                                    || parameter.debug_summary != default.debug_summary;
+                                if ui
+                                    .add_enabled(
+                                        changed_from_default,
+                                        egui::Button::new("Reset").small(),
+                                    )
+                                    .clicked()
+                                {
+                                    parameter.value = default.value;
+                                    parameter.color = default.color;
+                                    parameter.components = default.components;
+                                    parameter.layer_path = default.layer_path.clone();
+                                    parameter.debug_summary = default.debug_summary.clone();
+                                }
+                            }
+                        });
                         if parameter.kind == "layer" {
                             ui.horizontal(|ui| {
                                 if ui.small_button("Choose image").clicked() {
@@ -3380,20 +3594,47 @@ impl HarnessApp {
                             );
                         }
                     });
-                    if parameter.supervised
-                        && (parameter.value != previous_value
-                            || parameter.color != previous_color
-                            || parameter.components != previous_components
-                            || parameter.layer_path != previous_layer
-                            || parameter.debug_summary != previous_summary)
-                    {
-                        clicked_button = Some(parameter.slot);
+                    let changed = parameter.value != previous_value
+                        || parameter.color != previous_color
+                        || parameter.components != previous_components
+                        || parameter.layer_path != previous_layer
+                        || parameter.debug_summary != previous_summary;
+                    if changed {
+                        if parameter.supervised {
+                            self.pending_parameter_slot = Some(parameter.slot);
+                            self.live_render_due =
+                                Some(Instant::now() + std::time::Duration::from_millis(500));
+                        } else if self.live_render {
+                            self.pending_live_render = true;
+                            self.live_render_due =
+                                Some(Instant::now() + std::time::Duration::from_millis(500));
+                        }
                     }
                     ui.add_space(4.0);
                 }
             });
         if let Some(slot) = clicked_button {
+            self.pending_parameter_slot = Some(slot);
+            self.pending_live_render = self.live_render;
+            self.live_render_due = Some(Instant::now() + std::time::Duration::from_millis(500));
+        }
+    }
+
+    fn dispatch_pending_parameter_change(&mut self, ctx: &egui::Context) {
+        let Some(due) = self.live_render_due else {
+            return;
+        };
+        if self.busy || Instant::now() < due {
+            ctx.request_repaint_after(std::time::Duration::from_millis(60));
+            return;
+        }
+        self.live_render_due = None;
+        if let Some(slot) = self.pending_parameter_slot.take() {
+            self.render_after_parameter_change = self.live_render && self.input_image.is_some();
             self.trigger_button(slot);
+        } else if self.pending_live_render && self.live_render && self.input_image.is_some() {
+            self.pending_live_render = false;
+            self.quick_render();
         }
     }
 
@@ -3410,6 +3651,7 @@ impl HarnessApp {
         };
         let task_kind = self.task_kind;
         self.busy = false;
+        self.rendering = false;
         if result.diagnostic_eligible {
             if let (Some(identity), Some(operation)) = (&result.identity, &result.operation) {
                 let summary = diagnostic_summary(result.success, &result.body);
@@ -3498,10 +3740,12 @@ impl HarnessApp {
                 }
             }
         }
-        if task_kind == TaskKind::InspectParameters && result.success {
+        let effect_controls_ready = task_kind == TaskKind::InspectParameters && result.success;
+        if effect_controls_ready {
             if let Ok(report) = serde_json::from_str::<serde_json::Value>(&result.body) {
                 if let Ok(parameters) = serde_json::from_value(report["parameters"].clone()) {
                     self.parameters = parameters;
+                    self.parameter_defaults = self.parameters.clone();
                     self.audio_effect_only = report["worker_diagnostics"]["audio_effect_only"]
                         .as_bool()
                         .unwrap_or(false);
@@ -3520,6 +3764,7 @@ impl HarnessApp {
             self.output_image = Some(output.clone());
             if let Ok(preview) = load_preview(ctx, "output", &output) {
                 self.preview = Some(preview);
+                self.viewer_mode = 1;
             }
             self.refresh_pixel_comparison();
         }
@@ -3531,48 +3776,95 @@ impl HarnessApp {
         self.task_kind = TaskKind::Generic;
         if inspect_selected_aex {
             self.inspect_parameters_async();
+        } else if effect_controls_ready {
+            self.start_live_render_if_ready();
+        } else if self.render_after_parameter_change && result.success {
+            self.render_after_parameter_change = false;
+            self.quick_render();
+        } else {
+            self.render_after_parameter_change = false;
         }
     }
 }
 
 impl eframe::App for HarnessApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        ctx.set_visuals(egui::Visuals::dark());
         self.poll(ctx);
+        self.dispatch_pending_parameter_change(ctx);
         self.check_selected_identity();
         if self.inspect_after_refresh && !self.busy {
             self.inspect_after_refresh = false;
             self.inspect_parameters_async();
         }
         egui::TopBottomPanel::top("header").show(ctx, |ui| {
-            ui.add_space(10.0);
-            ui.heading(RichText::new("AEXCompat Effect Harness").size(25.0));
-            ui.label("Isolated image and audio host for Effect AEX development");
-            ui.add_space(8.0);
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                ui.heading(RichText::new("AEXCompat").size(22.0));
+                ui.weak("EFFECT LAB");
+                ui.separator();
+                ui.label(RichText::new("SOURCE").small().strong());
+                if ui
+                    .add_enabled(!self.busy, egui::Button::new("AEX..."))
+                    .clicked()
+                {
+                    self.reset_and_choose_aex();
+                }
+                if ui
+                    .add_enabled(!self.busy, egui::Button::new("Image..."))
+                    .clicked()
+                {
+                    self.choose_input(ctx);
+                    self.viewer_mode = 0;
+                }
+                ui.separator();
+                ui.label(RichText::new("PREVIEW").small().strong());
+                let can_render =
+                    !self.busy && self.selection.is_some() && self.input_image.is_some();
+                if ui
+                    .add_enabled(can_render, egui::Button::new("Render"))
+                    .clicked()
+                {
+                    self.quick_render();
+                }
+                ui.separator();
+                let live_render_changed =
+                    ui.checkbox(&mut self.live_render, "Auto Update").changed();
+                if live_render_changed && !self.live_render {
+                    self.pending_live_render = false;
+                    if self.pending_parameter_slot.is_none() {
+                        self.live_render_due = None;
+                    }
+                }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if self.busy {
+                        ui.spinner();
+                    }
+                    ui.label(RichText::new(&self.status).small());
+                });
+            });
+            ui.add_space(6.0);
         });
         egui::SidePanel::left("effect_controls")
-            .default_width(320.0)
-            .min_width(240.0)
-            .max_width(520.0)
+            .default_width(340.0)
+            .min_width(260.0)
+            .max_width(460.0)
             .resizable(true)
             .show(ctx, |ui| self.show_effect_controls(ui));
         egui::CentralPanel::default().show(ctx, |ui| {
+            self.show_workspace_viewer(ui);
+            ui.separator();
+            egui::CollapsingHeader::new("Analysis, render settings and diagnostics")
+                .default_open(false)
+                .show(ui, |ui| {
             egui::ScrollArea::vertical()
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
-            if ui.add_enabled(!self.busy, egui::Button::new("1. Select AEX")).clicked() {
-                self.selection = None;
-                self.session_approved = false;
-                self.approved_dependencies.clear();
-                self.trust_rebuilds = false;
-                self.selection_stale = false;
-                self.diagnostic_history = DiagnosticHistory::default();
-                self.diagnostic_warning = None;
-                self.preflight_warnings.clear();
-                self.parameters.clear();
-                self.audio_input = None;
-                self.audio_effect_only = false;
-                self.host_context = None;
-                self.choose_aex();
+            if ui
+                .add_enabled(!self.busy, egui::Button::new("Change AEX source..."))
+                .clicked()
+            {
+                self.reset_and_choose_aex();
             }
             if let Some(selected) = &self.selection {
                 let selected_path = selected.path.display().to_string();
@@ -4118,11 +4410,11 @@ impl eframe::App for HarnessApp {
                     if self.audio_effect_only {
                         ui.colored_label(Color32::from_rgb(30, 120, 170), RichText::new("Audio-only Effect").strong());
                         ui.label("Transport: 44.1 kHz, mono, float32 little-endian raw samples");
-                        if ui.add_enabled(!self.busy, egui::Button::new("3. Select input audio (.f32)")).clicked() { self.choose_audio_input(); }
+                        if ui.add_enabled(!self.busy, egui::Button::new("Change audio source (.f32)...")).clicked() { self.choose_audio_input(); }
                         if let Some(path) = &self.audio_input { ui.monospace(path.display().to_string()); }
                         if ui.add_enabled(!self.busy && self.audio_input.is_some(), egui::Button::new("4. Render and save audio (.f32)...")).clicked() { self.render_audio_and_save(); }
                     } else {
-                        if ui.add_enabled(!self.busy, egui::Button::new("3. Select input image")).clicked() { self.choose_input(ctx); }
+                        if ui.add_enabled(!self.busy, egui::Button::new("Change image source...")).clicked() { self.choose_input(ctx); }
                         if let Some(path) = &self.input_image { ui.monospace(path.display().to_string()); }
                         ui.horizontal(|ui| {
                             if ui.add_enabled(!self.busy, egui::Button::new("Select visual audio sidecar (.f32, optional)")).clicked() { self.choose_audio_input(); }
@@ -4135,7 +4427,7 @@ impl eframe::App for HarnessApp {
                         if ui.add_enabled(!self.busy, egui::Button::new("Select AE reference output (optional)")).clicked() { self.choose_reference(ctx); }
                         if let Some(path) = &self.reference_image { ui.monospace(format!("Reference: {}", path.display())); }
                         ui.horizontal(|ui| {
-                            if ui.add_enabled(!self.busy && self.input_image.is_some(), egui::Button::new("4. Quick render")).clicked() { self.quick_render(); }
+                            if ui.add_enabled(!self.busy && self.input_image.is_some(), egui::Button::new("Render current frame")).clicked() { self.quick_render(); }
                             if ui.add_enabled(!self.busy && self.input_image.is_some(), egui::Button::new("Render and save PNG...")).clicked() { self.render_and_save(); }
                             if ui.add_enabled(!self.busy && self.input_image.is_some(), egui::Button::new("Run 6-case compatibility matrix")).clicked() { self.run_compatibility_matrix(); }
                         });
@@ -4342,6 +4634,7 @@ impl eframe::App for HarnessApp {
                 ui.add(egui::TextEdit::multiline(&mut self.report).font(egui::TextStyle::Monospace).desired_width(f32::INFINITY));
             });
                 });
+                });
         });
         self.show_image_viewer(ctx);
     }
@@ -4379,7 +4672,13 @@ fn show_preview(ui: &mut egui::Ui, label: &str, texture: Option<&egui::TextureHa
     ));
 }
 
-fn show_viewer_texture(ui: &mut egui::Ui, label: &str, texture: Option<&egui::TextureHandle>) {
+fn show_viewer_texture(
+    ui: &mut egui::Ui,
+    label: &str,
+    texture: Option<&egui::TextureHandle>,
+    zoom: &mut f32,
+    pan: &mut egui::Vec2,
+) {
     let Some(texture) = texture else {
         ui.centered_and_justified(|ui| {
             ui.label(format!("{label} is not available"));
@@ -4390,16 +4689,34 @@ fn show_viewer_texture(ui: &mut egui::Ui, label: &str, texture: Option<&egui::Te
     ui.horizontal(|ui| {
         ui.label(RichText::new(label).strong());
         ui.monospace(format!("{} x {}", texture.size()[0], texture.size()[1]));
+        ui.weak("Wheel to zoom / drag to pan");
     });
     let available = ui.available_size().max(egui::vec2(1.0, 1.0));
-    let scale = (available.x / source.x).min(available.y / source.y);
-    let display = source * scale;
-    ui.allocate_ui_with_layout(
-        available,
-        egui::Layout::centered_and_justified(egui::Direction::LeftToRight),
-        |ui| {
-            ui.image((texture.id(), display));
-        },
+    let (viewport, response) = ui.allocate_exact_size(available, egui::Sense::click_and_drag());
+    if response.hovered() {
+        let scroll = ui.input(|input| input.raw_scroll_delta.y);
+        if scroll != 0.0 {
+            let previous_zoom = *zoom;
+            *zoom = (*zoom * (scroll * 0.0025).exp()).clamp(0.25, 8.0);
+            if let Some(pointer) = response.hover_pos() {
+                let pointer_from_center = pointer - viewport.center();
+                *pan = pointer_from_center - (pointer_from_center - *pan) * (*zoom / previous_zoom);
+            }
+        }
+    }
+    if response.dragged_by(egui::PointerButton::Primary)
+        || response.dragged_by(egui::PointerButton::Middle)
+    {
+        *pan += response.drag_delta();
+    }
+    let fit_scale = (available.x / source.x).min(available.y / source.y);
+    let display = source * fit_scale * *zoom;
+    let image_rect = egui::Rect::from_center_size(viewport.center() + *pan, display);
+    ui.painter().with_clip_rect(viewport).image(
+        texture.id(),
+        image_rect,
+        egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)),
+        Color32::WHITE,
     );
 }
 
@@ -5414,7 +5731,9 @@ fn main() -> eframe::Result {
         return Ok(());
     }
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default().with_inner_size([920.0, 720.0]),
+        viewport: egui::ViewportBuilder::default()
+            .with_inner_size([1440.0, 900.0])
+            .with_min_inner_size([960.0, 640.0]),
         ..Default::default()
     };
     eframe::run_native(
