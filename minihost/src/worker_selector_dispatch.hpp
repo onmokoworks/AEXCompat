@@ -8,6 +8,7 @@ namespace aexcompat::worker_runtime {
 using EffectEntry = int32_t(__cdecl*)(int32_t, void*, void*, void**, void*, void*);
 using AuditCapture = void(*)();
 using AuditPassed = bool(*)();
+using SelectorDispatchTrace = void(*)(const char* selector);
 
 struct SelectorDispatchTelemetry {
   uint32_t seh_code{};
@@ -19,6 +20,7 @@ struct SelectorDispatchTelemetry {
 
 void configure_selector_dispatch_audit(AuditCapture capture,
                                        AuditPassed passed) noexcept;
+void configure_selector_dispatch_trace(SelectorDispatchTrace trace) noexcept;
 SelectorDispatchTelemetry& selector_dispatch_telemetry() noexcept;
 const char* effect_selector_name(int32_t command) noexcept;
 int32_t invoke_entry_seh(EffectEntry entry, int32_t command, void* input,

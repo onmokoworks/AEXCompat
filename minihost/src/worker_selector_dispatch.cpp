@@ -11,6 +11,7 @@ namespace {
 constexpr int32_t kAuditFailure = 512;
 AuditCapture g_capture_audit{};
 AuditPassed g_audit_passed{};
+SelectorDispatchTrace g_selector_trace{};
 SelectorDispatchTelemetry g_telemetry;
 
 int capture_seh_exception(EXCEPTION_POINTERS* information) {
@@ -38,6 +39,7 @@ int capture_seh_exception(EXCEPTION_POINTERS* information) {
 int32_t audited_effect_call(EffectEntry entry, int32_t command, void* input,
                             void* output, void** params, void* world, void* extra) {
   if (!entry || !g_capture_audit || !g_audit_passed) return kAuditFailure;
+  if (g_selector_trace) g_selector_trace(effect_selector_name(command));
   const int32_t error = entry(command, input, output, params, world, extra);
   g_capture_audit();
   return g_audit_passed() ? error : kAuditFailure;
@@ -49,6 +51,10 @@ void configure_selector_dispatch_audit(AuditCapture capture,
                                        AuditPassed passed) noexcept {
   g_capture_audit = capture;
   g_audit_passed = passed;
+}
+
+void configure_selector_dispatch_trace(SelectorDispatchTrace trace) noexcept {
+  g_selector_trace = trace;
 }
 
 SelectorDispatchTelemetry& selector_dispatch_telemetry() noexcept {

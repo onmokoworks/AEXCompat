@@ -27,10 +27,14 @@ class ProductionWorkerTraceTests(unittest.TestCase):
 
     def test_selector_and_lease_events_are_recorded_at_ordered_boundaries(self):
         source = (MINIHOST / "src" / "l2_main.cpp").read_text(encoding="utf-8")
-        audited = source[source.index("int32_t audited_effect_call"):
-                         source.index("int32_t invoke_entry_seh")]
+        dispatch = (MINIHOST / "src" / "worker_selector_dispatch.cpp").read_text(
+            encoding="utf-8"
+        )
+        audited = dispatch[dispatch.index("int32_t audited_effect_call"):
+                           dispatch.index("}  // namespace")]
         self.assertLess(
-            audited.index("selector_dispatch"), audited.index("entry(command"))
+            audited.index("g_selector_trace"), audited.index("entry(command"))
+        self.assertIn("g_trace_writer->selector_dispatch(selector)", source)
         acquire = source[source.index("void record_suite_acquire"):
                          source.index("void record_missing_suite")]
         self.assertIn("suite_acquire(name, version, true)", acquire)

@@ -129,6 +129,7 @@ using aexcompat::suite_runtime::SuiteLeaseTracker;
 using aexcompat::worker_runtime::redirect_native_stdout;
 using aexcompat::worker_runtime::restore_native_stdout;
 using aexcompat::worker_runtime::configure_selector_dispatch_audit;
+using aexcompat::worker_runtime::configure_selector_dispatch_trace;
 using aexcompat::worker_runtime::configure_runtime_module_hash;
 using aexcompat::worker_runtime::capture_module_audit;
 using aexcompat::worker_runtime::capture_module_audit_phase;
@@ -281,6 +282,10 @@ auto& g_last_seh_exception_module = selector_dispatch_telemetry().seh_module;
 auto& g_last_seh_selector = selector_dispatch_telemetry().selector;
 auto& g_last_seh_error = selector_dispatch_telemetry().error;
 aexcompat::TraceWriter* g_trace_writer{};
+
+void record_selector_dispatch(const char* selector) {
+  if (g_trace_writer && selector) g_trace_writer->selector_dispatch(selector);
+}
 
 const char* trace_worker_label() {
 #if defined(AEXCOMPAT_RENDER_WORKER)
@@ -15699,6 +15704,7 @@ int wmain(int argc, wchar_t **argv) {
   configure_runtime_module_hash(&sha256);
   configure_selector_dispatch_audit(&capture_module_audit_phase,
                                     &module_audit_passed);
+  configure_selector_dispatch_trace(&record_selector_dispatch);
   if (argc == 2 && std::wstring(argv[1]) == L"--self-test-aegp-projector-levels") {
     const bool passed = verify_aegp_projector_levels();
     std::cout << "{\"projector_levels\":\""
