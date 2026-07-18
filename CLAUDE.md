@@ -9,11 +9,12 @@ and bounded image input/output are now the main implementation path.
 
 - Two execution tiers. The default tier is a crash-contained dev/observation
   worker: separate process, kill-on-close Job Object, and timeout. This is the
-  floor for running any AEX and needs no plug-in hash, approval receipt, or
-  allowlist. It exists so an in-development or unknown AEX can be loaded,
-  dispatched, and observed (Project Direction 1/3) without the evidence
-  apparatus. Failure isolation comes from process + Job Object + timeout, not
-  from identity pinning; hashing the plug-in buys nothing for crash containment.
+  floor for running any AEX and needs no approval receipt, allowlist, or enforced
+  pre-selection hash match. It exists so an in-development or unknown AEX can be
+  loaded, dispatched, and observed (Project Direction 1/3) without the evidence
+  apparatus, and so a rebuilt plug-in re-runs without re-approval. Failure
+  isolation comes from process + Job Object + timeout, not from identity pinning;
+  hashing the plug-in buys nothing for crash containment.
 - The evidence tier adds the authenticated sealed load tree, receipt-pinned
   identity, dependency manifest, and module audit. Treat these as provenance
   for a trustworthy AE-equivalence/regression corpus (Project Direction 4), not
@@ -25,14 +26,24 @@ and bounded image input/output are now the main implementation path.
   crash-containment floor, not an evidence-tier concern.
 - In the evidence tier, do not bypass identity checks, approval receipts, or
   dependency manifests to make an AEX appear compatible.
-- Recording `sha256(aex)` as result metadata is cheap provenance and is fine in
-  the default tier; enforcing that hash as a load precondition belongs to the
-  evidence tier only. Record versus enforce are separate decisions.
-- Implementation gap: production dispatch (`image_render.rs`, the L2 launch
-  transaction) currently has no normal-token fallback and still requires a
-  schema-v2 receipt, so the default tier above is the target policy, not yet the
-  shipped default. Restoring the receipt-free default path is tracked work; do
-  not describe the light path as already available in the shipped host.
+- Record versus enforce are separate decisions. Hashing the bytes that actually
+  loaded and recording that hash in the diagnostic is cheap provenance and stays
+  fine in the default tier; it binds observations to what ran. Enforcing a hash
+  as a load precondition (rejecting launch when the bytes differ from a
+  selected/approved identity, as the shipped `ApprovedImageArtifact.expected_sha256`
+  does) is the evidence-tier gate, and is what the default tier drops so a
+  post-selection rebuild is not treated as a mismatch.
+- Implementation gap: production dispatch has no normal-token fallback; every
+  path goes through the sealed/restricted launch. The identity source differs by
+  path. L2 and the deterministic render/smart profile flows require schema-v2
+  approval receipts. Interactive image dispatch (`image_render.rs` via
+  `dispatch_secure_image`) instead uses per-session approval
+  (`ApprovedImageArtifact` from `selection.sha256`), which enforces a pre-selection
+  hash match and already admits the locally built worker at dispatch time
+  (`docs/EVIDENCE_POLICY_2026-07-18.md` §3), so it is not a schema-v2 receipt.
+  Either way the crash-containment-only default tier is not yet the shipped
+  default; restoring it is tracked work (#36). Do not describe the light path as
+  already available in the shipped host.
 - Keep `imports/` as frozen provenance. Do not redistribute Adobe SDK headers
   or source; the SDK selected by `AFTER_EFFECTS_SDK_ROOT` is an external ABI
   verification and fixture-build input only.
