@@ -75,7 +75,10 @@ $env:AEXCOMPAT_AE_BPC = [string]$Bpc
 $env:AEXCOMPAT_AE_NO_EFFECT = if ($NoEffect) { '1' } else { '0' }
 # Unset means "leave the fresh project's defaults untouched"; the JSX records
 # the observed color state either way and fails closed when a pin does not
-# apply verbatim.
+# apply verbatim. Clear any inherited values first so an ambient environment
+# can never pin the color pipeline when the parameters were omitted.
+Remove-Item Env:AEXCOMPAT_AE_WORKING_SPACE -ErrorAction SilentlyContinue
+Remove-Item Env:AEXCOMPAT_AE_LINEARIZE -ErrorAction SilentlyContinue
 if ($WorkingSpace) { $env:AEXCOMPAT_AE_WORKING_SPACE = $WorkingSpace }
 if ($LinearizeWorkingSpace) { $env:AEXCOMPAT_AE_LINEARIZE = $LinearizeWorkingSpace }
 # The JSX polls for the asynchronous saveFrameToPng output; keep its bound
