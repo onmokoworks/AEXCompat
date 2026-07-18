@@ -18,6 +18,7 @@ set(AEXCOMPAT_L2_WORKER_SOURCES
     src/l2_main.cpp
     src/native_stdout_guard.cpp
     src/parameter_animation_transport.cpp
+    src/pf_cache_on_load_suite.cpp
     src/render_pixel_transport.cpp
     src/strict_json.cpp
     src/suite_lease_tracker.cpp)

@@ -48,6 +48,7 @@
 
 #include "native_stdout_guard.hpp"
 #include "parameter_animation_transport.hpp"
+#include "pf_cache_on_load_suite.hpp"
 #include "render_pixel_transport.hpp"
 #include "strict_json.hpp"
 #include "suite_lease_tracker.hpp"
@@ -68,6 +69,8 @@ using aexcompat::parameter_animation::ParameterAnimationKey;
 using aexcompat::parameter_animation::ParameterTimeline;
 using aexcompat::parameter_animation::load_parameter_animation;
 using aexcompat::parameter_animation::rational_less;
+using aexcompat::suites::cache_on_load_suite;
+using aexcompat::suites::configure_cache_on_load_suite;
 using aexcompat::suite_runtime::SuiteLeaseTracker;
 using aexcompat::worker_runtime::redirect_native_stdout;
 using aexcompat::worker_runtime::restore_native_stdout;
@@ -4651,24 +4654,6 @@ int32_t __cdecl get_effect_sequence_data(void* effect_ref, PfConstHandle* sequen
   return 0;
 }
 PfEffectSequenceDataSuite1 g_effect_sequence_data_suite1{&get_effect_sequence_data};
-using SetNoCacheOnLoad = int32_t(__cdecl*)(void*, int32_t);
-struct PfCacheOnLoadSuite1 {
-  SetNoCacheOnLoad set_no_cache_on_load;
-};
-static_assert(sizeof(PfCacheOnLoadSuite1) == sizeof(void*));
-static_assert(offsetof(PfCacheOnLoadSuite1, set_no_cache_on_load) == 0);
-std::atomic<bool> g_no_cache_on_load{};
-std::atomic<uint64_t> g_no_cache_on_load_updates{};
-int32_t __cdecl set_no_cache_on_load(void* effect_ref, int32_t effect_available) {
-  if (effect_ref != &g_effect || (effect_available != 0 && effect_available != 1))
-    return kPfBadCallbackParam;
-  // The minihost has no persistent startup plug-in cache; retain the policy so
-  // every worker observes the same explicit host decision.
-  g_no_cache_on_load.store(effect_available != 0, std::memory_order_release);
-  g_no_cache_on_load_updates.fetch_add(1, std::memory_order_relaxed);
-  return 0;
-}
-PfCacheOnLoadSuite1 g_cache_on_load_suite1{&set_no_cache_on_load};
 std::array<void*, 7> g_fill_matte_suite2{};
 WorldTransformSuite1 g_world_transform_suite1{};
 std::array<void*, 19> g_ansi_suite1{};
@@ -13103,7 +13088,7 @@ int32_t __cdecl acquire_suite(const char* name, int32_t version, const void** su
     return 0;
   }
   if (name && std::strcmp(name, "PF Cache On Load Suite") == 0 && version == 1) {
-    *suite = &g_cache_on_load_suite1;
+    *suite = &cache_on_load_suite();
     record_suite_acquire(name, version);
     return 0;
   }
@@ -21405,6 +21390,7 @@ bool verify_aegp_projector_levels() {
 }
 
 int wmain(int argc, wchar_t **argv) {
+  configure_cache_on_load_suite(&g_effect);
   if (argc == 2 && std::wstring(argv[1]) == L"--self-test-aegp-projector-levels") {
     const bool passed = verify_aegp_projector_levels();
     std::cout << "{\"projector_levels\":\""
