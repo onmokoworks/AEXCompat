@@ -65,13 +65,16 @@ fi
 # not timestamps — a comment/review on a superseded commit drops out, and a
 # comment on the current head blocks (owner feedback outranks Codex). This
 # session's inline ACK replies are exempt; a later owner approval/dismissal
-# clears an addressed comment. Top-level PR comments carry no commit association
-# and are advisory only (not hard-blocked here); an owner hard-blocks via a
-# review (owner_review_gate) or an inline comment on the head.
+# clears an addressed comment. Top-level PR comments carry no commit
+# association, so they are bound to the accepted clean instead: a non-trigger
+# owner comment at/after that clean cannot have been surfaced by the monitor
+# (it exits on CLEAN), so it blocks here as the last-minute gate; address it
+# and re-trigger for a fresh, newer clean to proceed.
 clearances=$(owner_clearances <<<"$reviews")
 owner_after=$(
   { owner_inline_on_head "$head" "$ME" "$clearances" <<<"$pr_comments"
-    owner_reviews_on_head "$head" "$clearances" <<<"$reviews"; } | grep -v '^$' || true
+    owner_reviews_on_head "$head" "$clearances" <<<"$reviews"
+    owner_comments_after "$clean_ts" "$clearances" <<<"$issue_comments"; } | grep -v '^$' || true
 )
 if [ -n "$owner_after" ]; then
   echo "REFUSE: owner raised feedback on the current head; address it first:"

@@ -209,10 +209,11 @@ owner_reviews_on_head() {
 }
 
 # NOTE: top-level PR (issue) comments carry NO commit association, so they cannot
-# be reliably bound to the current head. They are treated as ADVISORY: the
-# monitor surfaces NEW ones (owner_comments over the since-window) for attention,
-# but the merge guard does NOT hard-block on them. An owner who wants to hard
-# block should request changes (owner_review_gate) or comment inline on the head.
+# be SHA-bound to the current head. The monitor surfaces NEW ones (owner_comments
+# over the since-window) as a terminal event; the merge guard hard-blocks on the
+# post-clean window via owner_comments_after (bound to the accepted clean's
+# timestamp instead of a SHA). Older top-level comments were surfaced by a
+# monitor cycle and handled there.
 
 # Owner top-level PR comments, excluding ONLY a bare "@codex review" trigger.
 # Real feedback that merely contains the phrase (e.g. "fix X, then @codex
@@ -222,4 +223,22 @@ owner_comments() {
     .[] | select([.user.login] | inside($owner))
     | select((.body | ascii_downcase | gsub("[[:space:]]"; "")) != "@codexreview")
     | "OWNER-COMMENT: \((.body | split("\n"))[0])"'
+}
+
+# Merge-gate view of owner TOP-LEVEL comments. They cannot be SHA-bound, so bind
+# them to the accepted clean instead: a non-trigger owner comment at/after the
+# clean the guard is about to merge on cannot have been surfaced by the monitor
+# (it exits the moment it emits CLEAN), so it must block the merge. Inclusive
+# ">=" because GitHub timestamps are second-resolution and the comment can land
+# in the same second as the clean. Resolution is natural: address the comment
+# and re-trigger; the fresh clean's newer timestamp supersedes it. Also cleared
+# if its author later approved/dismissed. Args: $1 = the accepted clean's
+# created_at; $2 = clearances JSON (input: issue-comments array).
+owner_comments_after() {
+  jq -r --arg ts "$1" --argjson clr "$2" --argjson owner "$OWNER_LOGINS" '
+    .[] | select([.user.login] | inside($owner))
+    | select((.body | ascii_downcase | gsub("[[:space:]]"; "")) != "@codexreview")
+    | select(.created_at >= $ts)
+    | . as $c | select( ($clr[$c.user.login] // "") == "" or $c.created_at > $clr[$c.user.login] )
+    | "OWNER-COMMENT id=\(.id): \((.body | split("\n"))[0])"'
 }

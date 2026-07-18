@@ -224,7 +224,8 @@ def test_same_owner_later_approved_clears_own_changes_requested() -> None:
 # head (GitHub does not move that stamp to later commits). No timestamps. Narrow
 # self-ack exemption (only this session's inline replies). A later owner
 # approval/dismissal clears an addressed comment. Top-level PR comments carry no
-# commit association and are advisory (not hard-blocked) — see the monitor.
+# commit association; the merge guard binds them to the accepted clean's
+# timestamp instead (owner_comments_after, below).
 
 HEAD = "6de58c3dbb095c277dca598cb5621d28cbed723a"  # current head SHA
 OLD = "31bef1dfc1aabbccddeeff00112233445566778899"  # a superseded commit SHA
@@ -345,6 +346,47 @@ def test_inline_error_message_is_not_a_finding() -> None:
     assert _call("codex_findings", payload) == ""
     assert _call("codex_error", payload) == "CODEX-ERROR"
     assert _call("codex_finding_max_ts", payload) == ""
+
+
+# --- owner_comments_after: last-minute merge gate for top-level comments -------
+# Top-level comments cannot be SHA-bound, so the guard blocks on any non-trigger
+# owner comment at/after the accepted clean (the monitor exits on CLEAN, so
+# nothing else would surface such a comment before the merge).
+
+CLEAN_TS = "2026-07-18T20:00:00Z"
+
+
+def _toplevel(login, created_at, body):
+    return [{"user": {"login": login}, "id": 77, "created_at": created_at, "body": body}]
+
+
+def test_owner_comment_after_clean_blocks() -> None:
+    payload = _toplevel("onmokoworks", "2026-07-18T20:00:30Z", "wait, one more thing")
+    assert "OWNER-COMMENT" in _call("owner_comments_after", payload, CLEAN_TS, NO_CLEAR)
+
+
+def test_owner_comment_in_same_second_as_clean_blocks() -> None:
+    # Second-resolution timestamps: the race window includes the clean's second.
+    payload = _toplevel("onmokoworks", CLEAN_TS, "hold the merge")
+    assert "OWNER-COMMENT" in _call("owner_comments_after", payload, CLEAN_TS, NO_CLEAR)
+
+
+def test_owner_comment_before_clean_is_ignored() -> None:
+    # An older comment was surfaced by a monitor cycle and handled there; a
+    # fresh clean issued after it supersedes it.
+    payload = _toplevel("onmokoworks", "2026-07-18T19:59:00Z", "earlier note")
+    assert _call("owner_comments_after", payload, CLEAN_TS, NO_CLEAR) == ""
+
+
+def test_bare_trigger_after_clean_is_ignored() -> None:
+    payload = _toplevel("naari3", "2026-07-18T20:00:30Z", "@codex review")
+    assert _call("owner_comments_after", payload, CLEAN_TS, NO_CLEAR) == ""
+
+
+def test_owner_comment_after_clean_cleared_by_later_approval() -> None:
+    clr = json.dumps({"onmokoworks": "2026-07-18T20:05:00Z"})
+    payload = _toplevel("onmokoworks", "2026-07-18T20:00:30Z", "resolved concern")
+    assert _call("owner_comments_after", payload, CLEAN_TS, clr) == ""
 
 
 def test_error_after_clean_does_not_invalidate_a_head_bound_clean() -> None:

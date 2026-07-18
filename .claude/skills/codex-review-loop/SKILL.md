@@ -124,10 +124,14 @@ merge 側 (`codex-merge-guard.sh` が head 拘束 clean なしに merge を拒�
   4. 手順 1 に戻る (新しい `since` で再トリガー)
 - **CLEAN (Codex 指摘なし)**: **merge は `codex-merge-guard.sh` 経由でのみ行う**。
   これが (a) owner blocker の不在 (owner_review_gate の CHANGES_REQUESTED、
-  および **現 head に対する owner フィードバック**の不在。後者は head commit
-  日時以降の owner の top-level コメント・inline finding・bodied review を拾い、
-  clean の直前に来たものも捕捉する。owner_review_gate は review state しか見ない
-  ので、CHANGES_REQUESTED を伴わない owner コメントの race をここで塞ぐ。self-block
+  および **現 head に対する owner フィードバック**の不在。inline finding・bodied
+  review は **SHA association** (`.commit_id == head`) で現 head に拘束して拾う。
+  top-level コメントは commit association を持たないため、代わりに **merge に
+  使う clean の時刻以降**の非トリガー owner コメントを last-minute gate として
+  拾う (monitor は CLEAN を emit した瞬間に exit するので、それ以降のコメントは
+  誰も見ていない。対応して再トリガーすれば新しい clean が上書きして解除される)。
+  owner_review_gate は review state しか見ないので、CHANGES_REQUESTED を伴わない
+  owner コメントの race をここで塞ぐ。self-block
   回避は **authorship** で狭く行う: セッション自身の認証 login (`gh api user`) の
   **inline 返信 (in_reply_to_id) だけ**を除外し、同 login でも top-level コメントや
   非返信 inline は本物の owner フィードバックとして拾う。さらに各 owner の後続
