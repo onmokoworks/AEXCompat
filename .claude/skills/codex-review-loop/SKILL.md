@@ -128,8 +128,10 @@ merge 側 (`codex-merge-guard.sh` が head 拘束 clean なしに merge を拒�
   日時以降の owner の top-level コメント・inline finding・bodied review を拾い、
   clean の直前に来たものも捕捉する。owner_review_gate は review state しか見ない
   ので、CHANGES_REQUESTED を伴わない owner コメントの race をここで塞ぐ。self-block
-  回避はタイムスタンプではなく **authorship** で行う: セッション自身の認証 login
-  (`gh api user`) を除外し、別 login の owner フィードバックは拾う)、(b) 現在の
+  回避は **authorship** で狭く行う: セッション自身の認証 login (`gh api user`) の
+  **inline 返信 (in_reply_to_id) だけ**を除外し、同 login でも top-level コメントや
+  非返信 inline は本物の owner フィードバックとして拾う。さらに各 owner の後続
+  approve/dismiss で解決済みコメントを clear する (per-reviewer))、(b) 現在の
   head SHA に拘束された Codex text clean を fail-closed で再確認し (PR 本体 👍
   だけの reaction clean は受理しない)、(c) `gh pr merge --match-head-commit
   <head>` で atomic に merge する

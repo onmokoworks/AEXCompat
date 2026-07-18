@@ -74,10 +74,13 @@ fi
 # (owner comments outrank Codex). Feedback before the head-push was about a
 # superseded state. This session's own login is excluded so its acks do not
 # self-block; a different owner login still blocks.
+# A comment is cleared once its author later approves/dismisses (resolved
+# without a new commit), so an addressed older comment stops blocking.
+clearances=$(owner_clearances <<<"$reviews")
 owner_after=$(
-  { owner_inline_after "$head_date" "$ME" <<<"$pr_comments"
-    owner_comments_after "$head_date" "$ME" <<<"$issue_comments"
-    owner_reviews_after "$head_date" "$ME" <<<"$reviews"; } | grep -v '^$' || true
+  { owner_inline_after "$head_date" "$ME" "$clearances" <<<"$pr_comments"
+    owner_comments_after "$head_date" "$clearances" <<<"$issue_comments"
+    owner_reviews_after "$head_date" "$clearances" <<<"$reviews"; } | grep -v '^$' || true
 )
 if [ -n "$owner_after" ]; then
   echo "REFUSE: owner raised feedback on the current head; address it first:"

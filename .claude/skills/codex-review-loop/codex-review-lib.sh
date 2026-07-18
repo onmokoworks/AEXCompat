@@ -155,56 +155,71 @@ owner_inline() {
     | "OWNER-FINDING id=\(.id) \(.path):\(.line // .original_line): \((.body | split("\n")[0]))"'
 }
 
-# Merge-gate view of owner activity on the CURRENT head. Args: $1 = lower-bound
-# ts = the head commit's date; $2 = the login to exclude (this session's own
-# authenticated account). The lower bound is the head commit date, NOT the Codex
-# clean: an owner can post feedback after the head is pushed but seconds BEFORE
-# Codex posts its clean, and bounding by the clean would miss it (that feedback
-# is about the current head and must block, since owner comments outrank Codex).
-# Bounding instead by head_date scopes to the current head: feedback before the
-# head-push was about a superseded state. Inclusive (>=): GitHub timestamps are
-# second-resolution, so same-second activity must fail closed. Reply comments
-# (in_reply_to_id set) are INCLUDED so a genuine owner "still not fixed" reply
-# blocks. Self-block is avoided by AUTHORSHIP, not timing: this session's own
-# acks/summaries/replies are posted under $2 and dropped, while a different owner
-# login (the human reviewer) still blocks (input: pull review-comments array).
+# Per-owner clearance timestamps (input: reviews array) → a JSON object
+# {login: latest APPROVED-or-DISMISSED submitted_at}. An owner who raises a plain
+# comment concern and then approves/dismisses WITHOUT a new commit has cleared
+# that concern; the owner_*_after checks use this so a resolved older comment on
+# the same head stops blocking. Per reviewer, matching owner_review_gate: only
+# the SAME owner's later approval clears that owner's comments. Emit with -c.
+owner_clearances() {
+  jq -c --argjson owner "$OWNER_LOGINS" '
+    [ .[]
+      | select([.user.login] | inside($owner))
+      | select(.state == "APPROVED" or .state == "DISMISSED") ]
+    | group_by(.user.login)
+    | map({ key: .[0].user.login, value: ([ .[].submitted_at ] | max) })
+    | from_entries'
+}
+
+# Merge-gate view of owner INLINE feedback on the CURRENT head. Args: $1 =
+# lower-bound ts = the head commit's date; $2 = this session's own login; $3 =
+# clearances JSON from owner_clearances. Lower bound is the head commit date, NOT
+# the Codex clean: an owner can post feedback after the head is pushed but seconds
+# BEFORE Codex's clean, and bounding by the clean would miss it (owner feedback
+# outranks Codex). Feedback before the head-push was about a superseded state.
+# Inclusive (>=): second-resolution timestamps, so same-second activity fails
+# closed. Self-block exemption is NARROW: only this session's own ACK replies
+# (in_reply_to_id set AND authored by $2) are dropped — a genuine owner reply
+# ("still not fixed") from any login, and any NON-reply comment from $2 itself,
+# still block. A comment is cleared if its author later approved/dismissed (its
+# created_at is not after that owner's clearance) (input: pull review-comments).
 owner_inline_after() {
-  jq -r --arg ts "$1" --arg me "$2" --argjson owner "$OWNER_LOGINS" '
+  jq -r --arg ts "$1" --arg me "$2" --argjson clr "$3" --argjson owner "$OWNER_LOGINS" '
     .[] | select([.user.login] | inside($owner))
-    | select(.user.login != $me)
+    | select( (((.in_reply_to_id // null) != null) and .user.login == $me) | not )
     | select(.created_at >= $ts)
+    | . as $c | select( ($clr[$c.user.login] // "") == "" or $c.created_at > $clr[$c.user.login] )
     | "OWNER-INLINE id=\(.id) \(.path):\(.line // .original_line): \((.body | split("\n")[0]))"'
 }
 
-# Owner blocking REVIEWS on the current head. Args: $1 = head commit date lower
-# bound; $2 = login to exclude (input: reviews array). owner_review_gate blocks
-# unresolved CHANGES_REQUESTED over full history, but a repo owner can also
-# submit a non-inline PR review with state COMMENTED and a BODY on the current
-# head; that is a blocker the monitor honors (owner_blocking_reviews) yet neither
-# owner_review_gate nor a clean-bounded check catches. Same blocking predicate as
-# the monitor (CHANGES_REQUESTED, or COMMENTED with a body), scoped inclusively
-# (>=) to the head commit date and excluding this session's own login. Bodyless
+# Owner bodied non-inline REVIEWS on the current head. Args: $1 = head commit
+# date; $2 = clearances JSON (input: reviews array). owner_review_gate already
+# handles CHANGES_REQUESTED (per-reviewer, full history), so this covers the gap
+# it misses: a COMMENTED review WITH a body on the current head. Bodyless
 # COMMENTED reviews (this session's inline-thread replies) carry no body and are
-# also excluded.
+# excluded, so no session-login filter is needed here. Cleared if the reviewer
+# later approved/dismissed.
 owner_reviews_after() {
-  jq -r --arg ts "$1" --arg me "$2" --argjson owner "$OWNER_LOGINS" '
+  jq -r --arg ts "$1" --argjson clr "$2" --argjson owner "$OWNER_LOGINS" '
     .[] | select([.user.login] | inside($owner))
-    | select(.user.login != $me)
     | select((.submitted_at // "") >= $ts)
-    | select(.state == "CHANGES_REQUESTED" or (.state == "COMMENTED" and ((.body // "") | length) > 0))
+    | select(.state == "COMMENTED" and ((.body // "") | length) > 0)
+    | . as $r | select( ($clr[$r.user.login] // "") == "" or $r.submitted_at > $clr[$r.user.login] )
     | "OWNER-REVIEW \(.state): \(((.body // "") | split("\n"))[0])"'
 }
 
 # Owner top-level comments on the current head, excluding a bare trigger. Args:
-# $1 = head commit date lower bound; $2 = login to exclude (input: issue-comments
-# array). Same head-date lower bound, inclusive (>=) same-second fail-closed
-# rule, and session-login exclusion as owner_inline_after.
+# $1 = head commit date; $2 = clearances JSON (input: issue-comments array). No
+# session-login filter: this session posts only bare "@codex review" triggers as
+# top-level comments (already excluded) and does its acks as inline replies, so a
+# top-level comment from ANY owner — including this session's login — is genuine
+# feedback and must block (P1). Cleared if the author later approved/dismissed.
 owner_comments_after() {
-  jq -r --arg ts "$1" --arg me "$2" --argjson owner "$OWNER_LOGINS" '
+  jq -r --arg ts "$1" --argjson clr "$2" --argjson owner "$OWNER_LOGINS" '
     .[] | select([.user.login] | inside($owner))
-    | select(.user.login != $me)
     | select(.created_at >= $ts)
     | select((.body | ascii_downcase | gsub("[[:space:]]"; "")) != "@codexreview")
+    | . as $c | select( ($clr[$c.user.login] // "") == "" or $c.created_at > $clr[$c.user.login] )
     | "OWNER-COMMENT: \((.body | split("\n"))[0])"'
 }
 

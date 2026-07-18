@@ -118,12 +118,14 @@ while true; do
 
   # Owner feedback on the current head blocks a clean (aligns with what the guard
   # accepts; prevents the stale-clean/refuse loop). Bounded by the head commit
-  # date so feedback predating the Codex clean still counts, and excluding this
-  # session's own login so its acks do not self-block.
+  # date so feedback predating the Codex clean still counts; this session's own
+  # ack replies are exempted by authorship; a later owner approval/dismissal
+  # clears an addressed comment (clearances).
+  clearances=$(owner_clearances <<<"$reviews")
   owner_on_head=$(
-    { owner_inline_after "$head_date" "$ME" <<<"$pr_comments"
-      owner_comments_after "$head_date" "$ME" <<<"$issue_comments"
-      owner_reviews_after "$head_date" "$ME" <<<"$reviews"; } | grep -v '^$' || true
+    { owner_inline_after "$head_date" "$ME" "$clearances" <<<"$pr_comments"
+      owner_comments_after "$head_date" "$clearances" <<<"$issue_comments"
+      owner_reviews_after "$head_date" "$clearances" <<<"$reviews"; } | grep -v '^$' || true
   )
 
   # 3. Mergeable CLEAN: a SHA-bound text clean, no newer finding, no owner
