@@ -59,11 +59,46 @@ def test_reference_capture_color_pipeline_pin_is_optional_and_fail_closed():
     assert "linearize_working_space: app.project.linearizeWorkingSpace" in script
 
 
-def test_reference_capture_result_records_verified_input_identities():
-    runner = RUNNER.read_text(encoding="utf-8")
-    # The runner binds the result document to the hashed input image and the
-    # hash-verified AEX so downstream evidence can verify the capture was
-    # produced from the recorded input.
-    assert "-NotePropertyName 'input_sha256'" in runner
-    assert "-NotePropertyName 'tested_aex_sha256'" in runner
-    assert "Set-Content -LiteralPath $resultPath -Encoding utf8" in runner
+def test_reference_capture_result_records_prelaunch_input_identities(tmp_path):
+    # Behavioral check (no After Effects needed): the runner is executed with
+    # a mock AE binary; while the "capture" is in flight the input image is
+    # replaced, and the JSX side effects (result JSON + PNG) are simulated.
+    # The runner must record the hashes taken BEFORE launch - the bytes the
+    # real AE would have rendered - not the replaced file.
+    import hashlib
+    import shutil
+    import subprocess
+    import time
+
+    aex = tmp_path / "fixture.aex"
+    aex.write_bytes(b"fixture-bytes")
+    original_input = b"original-input-bytes"
+    input_image = tmp_path / "input.png"
+    input_image.write_bytes(original_input)
+    mock_ae = tmp_path / "mock-afterfx.exe"
+    shutil.copyfile(Path("C:/Windows/System32/where.exe"), mock_ae)
+    output = tmp_path / "capture.png"
+    result_path = tmp_path / "capture.result.json"
+
+    process = subprocess.Popen(
+        ["powershell", "-NoProfile", "-File", str(RUNNER),
+         "-AfterEffects", str(mock_ae), "-TestedAex", str(aex),
+         "-InstalledAex", str(aex), "-InputImage", str(input_image),
+         "-OutputPng", str(output), "-EffectName", "Fixture",
+         "-TimeoutSeconds", "60"],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    try:
+        time.sleep(5)  # let the runner hash the inputs and enter its poll loop
+        input_image.write_bytes(b"replaced-while-ae-was-running")
+        output.write_bytes(b"png-placeholder")
+        result_path.write_text(
+            '{"schema_version": 1, "status": "captured"}', encoding="utf-8")
+        stdout, stderr = process.communicate(timeout=90)
+    finally:
+        process.kill()
+    assert process.returncode == 0, stderr
+
+    recorded = json.loads(result_path.read_text(encoding="utf-8-sig"))
+    assert recorded["input_sha256"] == hashlib.sha256(original_input).hexdigest()
+    assert recorded["tested_aex_sha256"] == hashlib.sha256(b"fixture-bytes").hexdigest()
+    assert json.loads(stdout)["input_sha256"] == recorded["input_sha256"]
