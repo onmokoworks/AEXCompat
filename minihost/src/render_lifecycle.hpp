@@ -5,7 +5,6 @@
 
 namespace aexcompat::render_lifecycle {
 
-#if defined(AEXCOMPAT_RENDER_WORKER) || defined(AEXCOMPAT_SMART_WORKER)
 struct RenderLifecycle {
   bool sequence_started{};
   bool frame_started{};
@@ -41,6 +40,5 @@ RenderLifecycle begin_render(const Hooks& hooks, const Layout& layout,
 int32_t end_render(const Hooks& hooks, const Layout& layout, void* input,
                    void* output, void** params, void* world,
                    const RenderLifecycle& lifecycle, int32_t primary_error);
-#endif
 
 }  // namespace aexcompat::render_lifecycle

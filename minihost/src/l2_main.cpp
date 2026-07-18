@@ -79,6 +79,18 @@ namespace {
 aexcompat::worker_target::Kind g_worker_target =
     aexcompat::worker_target::Kind::L2;
 
+bool is_render_worker() {
+  return g_worker_target == aexcompat::worker_target::Kind::Render;
+}
+
+bool is_smart_worker() {
+  return g_worker_target == aexcompat::worker_target::Kind::Smart;
+}
+
+bool is_rendering_worker() {
+  return is_render_worker() || is_smart_worker();
+}
+
 namespace opencl = aexcompat::gpu_runtime::opencl;
 
 using aexcompat::strict_json::JsonValue;
@@ -132,9 +144,7 @@ using aexcompat::host_audio::get_audio_data;
 using namespace aexcompat::worker_runtime::handles;
 using aexcompat::render_safety::InputPixelBuffer;
 using aexcompat::render_safety::OutputPixelBuffer;
-#if defined(AEXCOMPAT_RENDER_WORKER) || defined(AEXCOMPAT_SMART_WORKER)
 using aexcompat::render_lifecycle::RenderLifecycle;
-#endif
 using aexcompat::suite_runtime::SuiteLeaseTracker;
 using aexcompat::worker_runtime::redirect_native_stdout;
 using aexcompat::worker_runtime::restore_native_stdout;
@@ -164,11 +174,9 @@ using aexcompat::world_safety::bounded_argb8_world;
 using aexcompat::world_safety::bounded_typed_world;
 using aexcompat::world_safety::kEffectWorldSize;
 using aexcompat::world_safety::resolve_registered_dispatch_world;
-#if defined(AEXCOMPAT_RENDER_WORKER) || defined(AEXCOMPAT_SMART_WORKER)
 using aexcompat::render_pixel_transport::argb_to_rgba8;
 using aexcompat::render_pixel_transport::argb_to_rgba_native;
 using aexcompat::render_pixel_transport::rgba8_to_argb;
-#endif
 
 auto& g_module_audit = module_audit_report();
 
@@ -4505,7 +4513,6 @@ bool assign_opaque_receipt_handles(AsyncFrameReceipt& receipt) {
   return true;
 }
 
-#ifdef AEXCOMPAT_RENDER_WORKER
 struct LoadedEffectReceiptContext {
   EffectEntry entry{};
   std::array<std::byte, kInSize>* input{};
@@ -4660,7 +4667,6 @@ uint32_t g_async_layer_callback_failures{};
 uint32_t g_async_layer_callback_exceptions{};
 bool g_async_layer_cancel_test_gate{};
 void drain_async_layer_requests();
-#endif
 
 // Bounded synthetic-item contract, not an Adobe rendering model. Output pixels sample
 // source (x * downsample_x, y * downsample_y); ROI and fields are evaluated there.
@@ -5122,7 +5128,6 @@ int32_t publish_item_receipt(void* options, void** receipt) {
   return pixel_format ? publish_async_receipt(pixel_format, receipt, &snapshot) : 4;
 }
 
-#ifdef AEXCOMPAT_RENDER_WORKER
 int32_t publish_loaded_layer_receipt_from_context(
     const LoadedEffectReceiptContext& context,
     const AegpLayerRenderOptionsValue& options, void** receipt) {
@@ -5239,16 +5244,13 @@ int32_t publish_loaded_layer_receipt_from_context(
   *receipt = key;
   return 0;
 }
-#endif
 int32_t publish_loaded_layer_receipt(
     const AegpLayerRenderOptionsValue& options, void** receipt) {
-#ifdef AEXCOMPAT_RENDER_WORKER
-  return publish_loaded_layer_receipt_from_context(
-      g_loaded_effect_receipt_context, options, receipt);
-#else
+  if (is_render_worker())
+    return publish_loaded_layer_receipt_from_context(
+        g_loaded_effect_receipt_context, options, receipt);
   if (receipt) *receipt = nullptr;
   return 4;
-#endif
 }
 int32_t __cdecl checkout_item_frame_async(
     void* manager, uint32_t purpose, void* options, void** receipt) {
@@ -5262,10 +5264,8 @@ int32_t __cdecl checkout_layer_frame_async(
   AegpLayerRenderOptionsValue snapshot{};
   if (manager != &g_async_manager || purpose == 0 || !receipt ||
       !snapshot_layer_render_options(options, snapshot)) return 4;
-#ifdef AEXCOMPAT_RENDER_WORKER
-  if (g_loaded_effect_receipt_context.entry)
+  if (is_render_worker() && g_loaded_effect_receipt_context.entry)
     return publish_loaded_layer_receipt(snapshot, receipt);
-#endif
   const int32_t pixel_format = snapshot.world_type == 1 ? kPixelFormatArgb32 :
       (snapshot.world_type == 2 ? kPixelFormatArgb64 : kPixelFormatArgb128);
   return publish_async_receipt(pixel_format, receipt);
@@ -5355,7 +5355,6 @@ int32_t __cdecl render_checkout_layer_v5(
   }
   return publish_loaded_layer_receipt(snapshot, out);
 }
-#ifdef AEXCOMPAT_RENDER_WORKER
 int32_t invoke_async_layer_callback_seh(AegpAsyncFrameReadyCallback callback,
     uint64_t request_id, uint8_t canceled, int32_t error, void* receipt,
     void* refcon, int32_t* callback_error, uint32_t* out_exception_code) {
@@ -5371,11 +5370,10 @@ int32_t invoke_async_layer_callback_seh(AegpAsyncFrameReadyCallback callback,
   }
 }
 
-#endif
 int32_t __cdecl render_checkout_layer_async_reject(
     void* options, AegpAsyncFrameReadyCallback callback, void* refcon, uint64_t* request_id) {
   if (request_id) *request_id = 0;
-#ifdef AEXCOMPAT_RENDER_WORKER
+  if (is_render_worker()) {
   const auto& context = g_loaded_effect_receipt_context;
   AegpLayerRenderOptionsValue snapshot{};
   if (!snapshot_layer_render_options(options, snapshot)) return 4;
@@ -5497,12 +5495,12 @@ int32_t __cdecl render_checkout_layer_async_reject(
   }
   ++g_async_layer_requests_created;
   return 0;
-#else
+  } else {
   return 4;
-#endif
+  }
 }
 int32_t __cdecl render_cancel_async_reject(uint64_t request_id) {
-#ifdef AEXCOMPAT_RENDER_WORKER
+  if (is_render_worker()) {
   std::lock_guard<std::mutex> lock(g_async_layer_request_mutex);
   const auto found = g_async_layer_requests.find(request_id);
   if (found == g_async_layer_requests.end()) return 4;
@@ -5510,12 +5508,11 @@ int32_t __cdecl render_cancel_async_reject(uint64_t request_id) {
   if (!found->second->state.compare_exchange_strong(expected, 2)) return 4;
   found->second->gate_changed.notify_one();
   return 0;
-#else
+  } else {
   return 4;
-#endif
+  }
 }
 
-#ifdef AEXCOMPAT_RENDER_WORKER
 void drain_async_layer_requests() {
   std::vector<std::thread> threads;
   {
@@ -5532,7 +5529,6 @@ bool async_layer_requests_balanced() {
       g_async_layer_requests_created ==
           g_async_layer_requests_completed + g_async_layer_requests_canceled;
 }
-#endif
 int32_t __cdecl render_get_region_reject(void* receipt, void* region) {
   if (!receipt || !region) return 4;
   std::lock_guard<std::mutex> lock(g_world_mutex);

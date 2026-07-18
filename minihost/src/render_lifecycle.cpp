@@ -5,7 +5,6 @@
 
 namespace aexcompat::render_lifecycle {
 
-#if defined(AEXCOMPAT_RENDER_WORKER) || defined(AEXCOMPAT_SMART_WORKER)
 namespace {
 
 void transfer_pointer(void* destination, std::size_t destination_offset,
@@ -107,6 +106,5 @@ int32_t end_render(const Hooks& hooks, const Layout& layout, void* input,
   if (hooks.cleanup_aux) hooks.cleanup_aux(hooks.context);
   return result;
 }
-#endif
 
 }  // namespace aexcompat::render_lifecycle
