@@ -12,7 +12,7 @@
 | Python テスト (`tests/`) | - | Python + `requirements-dev.txt` (一部は下記 SDK / VS も) |
 | C++ worker (`minihost/`) | `aex_l1_worker.exe` / `aex_l2_worker.exe` ほか | CMake + MSVC (After Effects SDK 不要) |
 | probe AEX (`instruments/`) | `pf_*_probe.aex` ほか | CMake + Visual Studio + After Effects SDK |
-| SDK sample fixture (v143 固定分: Grabba / Supervisor 等) | `Grabba.aex` ほか | v143 toolset + MSBuild + After Effects SDK |
+| SDK sample fixture (v143 固定分: Grabba / Supervisor 等) | `Grabba.aex` ほか | v143 toolset + MSBuild + After Effects SDK (Supervisor は VS 2022 Build Tools 既定パス固定) |
 | AE oracle 取得 (`tools/*.jsx`) | 参照画像 / trace | After Effects 25.2 実機 |
 
 ## 共通要件
@@ -111,15 +111,26 @@ broker / harness と gate スクリプト (`tools/refresh-sdk-grabba-evidence.ps
   ただし `Visual Studio 18 2026` generator を使う場合は、その generator を
   認識するより新しい CMake が必要 (bundled 4.3.1 で検証。3.24 は
   `Visual Studio 18 2026` を解決できない)。CMake は Visual Studio bundled の
-  もので足りる。
+  もので足りる。ビルドスクリプトは `-CMake` 未指定時に
+  `tools/resolve-build-cmake.ps1` で VS bundled CMake を自動発見する。
 - SDK sample fixture のうち `.vcxproj` を `PlatformToolset=v143` 固定でビルド
   するもの (`tools/build-sdk-grabba.ps1` / `tools/build-sdk-supervisor.ps1` の
   MSBuild build と、`tools/sdk-fixtures/*-v143.props` を使う fixture 群) は
-  **v143 toolset (MSVC 14.3x/14.4x)** と MSBuild を持つ Visual Studio instance
-  が別途必要。VS 2026 の既定 toolset (14.5x) では代用できないので、VS 2022 を
-  併設するか VS 2026 に v143 コンポーネントを追加する。これは v143 固定の
-  fixture build に限った要件で、cl 直接呼び出しでビルドする fixture
-  (`tools/build-sdk-invert-*.ps1` 等) には適用されない。
+  **v143 toolset (MSVC 14.3x/14.4x)** と MSBuild が別途必要。
+- `build-sdk-grabba.ps1` は `tools/resolve-msvc-tools.ps1` で v143 toolset と
+  MSBuild を持つ VS instance を自動発見する (vswhere と既知パスを探索。
+  `-VisualStudioRoot` で明示指定も可)。VS 2022 のほか、v143 コンポーネントを
+  追加した instance であれば条件を満たせる (VS 2022 Community 14.44 での
+  build 成功を 2026-07-18 に確認)。
+- 一方 `build-sdk-supervisor.ps1` は現時点では vcvars64.bat と MSBuild を
+  `C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools` の固定
+  パスで検証・使用し、上書き引数を持たない。この fixture を build するには
+  **VS 2022 Build Tools (v143 込み) をその既定の場所に導入**する必要がある
+  (固定パス不在の環境で required input missing により fail することを
+  2026-07-18 に確認)。
+- 上記は v143 固定の fixture build に限った要件で、cl 直接呼び出しでビルド
+  する fixture (`tools/build-sdk-invert-*.ps1`) は `-VisualStudio` 引数で
+  VS instance を指定できる (既定はスクリプトごとに異なる)。
 - `tools/refresh-sdk-grabba-evidence.ps1` は minihost を Ninja generator で
   ビルドする。Ninja は vcvars 経由で Visual Studio 付属のものが使われる。
 
@@ -183,9 +194,16 @@ Per-component prerequisites on Windows x64:
   `Visual Studio 18 2026` generator, overridable per script with
   `-Generator` (VS 2026 is the verified default, not a hard requirement).
   `cmake_minimum_required` is 3.20, but the VS 2026 generator needs a newer
-  CMake (bundled 4.3.1 verified). Only the v143-pinned SDK sample fixture
-  builds (Grabba / Supervisor and the `*-v143.props` fixtures) additionally
-  require the v143 toolset (MSVC 14.3x/14.4x) and MSBuild, e.g. a
-  side-by-side VS 2022.
+  CMake (bundled 4.3.1 verified; scripts auto-discover the bundled CMake via
+  `tools/resolve-build-cmake.ps1`, overridable with `-CMake`). Only the
+  v143-pinned SDK sample fixture builds (Grabba / Supervisor and the
+  `*-v143.props` fixtures) additionally require the v143 toolset
+  (MSVC 14.3x/14.4x) and MSBuild. `build-sdk-grabba.ps1` discovers a
+  qualifying VS instance via `tools/resolve-msvc-tools.ps1` (overridable
+  with `-VisualStudioRoot`), while `build-sdk-supervisor.ps1` currently
+  validates hard-coded vcvars64 / MSBuild paths under
+  `C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools` with no
+  override parameter, so that fixture needs VS 2022 Build Tools with v143 at
+  that default location.
 - **Optional**: a matching GPU runtime for GPU render checks, and After
   Effects 25.2 itself for oracle capture only.
