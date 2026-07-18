@@ -1,3 +1,4 @@
+import hashlib
 import importlib.util
 import json
 import struct
@@ -66,6 +67,10 @@ class GenerateOracleRgbaInputTests(unittest.TestCase):
                 report = json.loads(result.stdout)
                 self.assertEqual(report["alpha_mode"], alpha_mode)
                 self.assertEqual(len(report["png_sha256"]), 64)
+                # The machine-portable identity is the decoded RGBA hash,
+                # since the PNG container bytes depend on the local zlib.
+                self.assertEqual(report["decoded_rgba_sha256"],
+                                 hashlib.sha256(bytes(decoded)).hexdigest())
 
     def test_odd_dimensions_are_supported(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -88,7 +93,8 @@ class GenerateOracleRgbaInputTests(unittest.TestCase):
                      "--alpha-mode", "vertical-gradient", "--out", str(out)],
                     capture_output=True, text=True, check=False)
                 self.assertEqual(result.returncode, 0, result.stderr)
-                digests.append(json.loads(result.stdout)["png_sha256"])
+                report = json.loads(result.stdout)
+                digests.append((report["decoded_rgba_sha256"], report["png_sha256"]))
         self.assertEqual(digests[0], digests[1])
 
     def test_existing_output_and_bad_dimensions_are_rejected(self):

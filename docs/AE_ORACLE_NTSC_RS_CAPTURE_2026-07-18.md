@@ -306,20 +306,25 @@ rebuild.
    existing gradient (`bb84e35e...`). Result: 151 of 8,294,400 channel
    samples differ, all +/-1 LSB, alpha exact.
 2. **Alpha-gradient input.** New deterministic RGBA input with a vertical
-   alpha ramp 0..255 (`tools/generate-oracle-rgba-input.py`, SHA-256
-   `c8acdee2...`). 178 differing channel samples, all +/-1 LSB; the alpha
-   channel is exact everywhere, including fully and partially transparent
-   rows.
-3. **Odd dimensions (1919x1077).** Same generator, opaque
-   (`12bf45b4...`). 197 differing channel samples, all +/-1 LSB, alpha
+   alpha ramp 0..255 (`tools/generate-oracle-rgba-input.py`; decoded RGBA
+   SHA-256 `dcee3c8f...`). 178 differing channel samples, all +/-1 LSB;
+   the alpha channel is exact everywhere, including fully and partially
+   transparent rows.
+3. **Odd dimensions (1919x1077).** Same generator, opaque (decoded RGBA
+   `58be1365...`). 197 differing channel samples, all +/-1 LSB, alpha
    exact. No row-stride or edge structure: an incorrect stride would shear
    every row after the first, which would produce large structured errors,
    not boundary-value jitter.
-4. **4K (3840x2160).** Same generator, opaque (`d56a353c...`). 729 of
-   33,177,600 channel samples differ, all +/-1 LSB, alpha exact - the same
-   per-sample rate order as the 1080p samples (~2e-5), consistent with the
-   value-dependent rounding jitter verified earlier, now at 4x the pixel
-   count.
+4. **4K (3840x2160).** Same generator, opaque (decoded RGBA
+   `582719c3...`). 729 of 33,177,600 channel samples differ, all +/-1 LSB,
+   alpha exact - the same per-sample rate order as the 1080p samples
+   (~2e-5), consistent with the value-dependent rounding jitter verified
+   earlier, now at 4x the pixel count.
+
+Generated inputs are identified by their decoded RGBA hash, not the PNG
+file hash: the PNG container bytes depend on the local zlib build, so only
+the decoded pixel stream is machine-portable (the evidence document
+records both).
 
 Claim level: with the four pre-existing samples this makes eight AE-oracle
 equivalence samples for ntsc-rs SmartFX at +/-1 LSB (8-bit precision),

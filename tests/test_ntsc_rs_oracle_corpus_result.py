@@ -59,6 +59,7 @@ class NtscRsOracleCorpusResultTests(unittest.TestCase):
         for case in self.document["cases"]:
             with self.subTest(case=case["name"]):
                 self.assertTrue(SHA256.match(case["input"]["sha256"]))
+                self.assertTrue(SHA256.match(case["input"]["decoded_rgba_sha256"]))
                 self.assertTrue(SHA256.match(case["host"]["output_png_sha256"]))
                 self.assertTrue(SHA256.match(case["ae_capture"]["output_png_sha256"]))
                 self.assertEqual(case["ae_capture"]["frame"], 0)

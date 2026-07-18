@@ -21,6 +21,36 @@ function ReadJson([string]$Path) {
     Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json
 }
 
+function ConvertPngToRaw([string]$PngPath) {
+    # Re-runs the converter into a scratch file and returns its report, so a
+    # recorded host raw can be verified as the conversion of the recorded PNG.
+    $scratch = Join-Path ([System.IO.Path]::GetTempPath()) ("aexcompat-refresh-" + [guid]::NewGuid().ToString('N') + '.rgba')
+    try {
+        $report = & python (Join-Path $PSScriptRoot 'png-to-rgba-raw.py') --png $PngPath --out $scratch | ConvertFrom-Json
+        if ($LASTEXITCODE -ne 0 -or -not $report) {
+            throw "png-to-rgba-raw.py failed for $PngPath"
+        }
+        $report
+    } finally {
+        Remove-Item -LiteralPath $scratch -ErrorAction SilentlyContinue
+    }
+}
+
+function DecodedRgbaSha256([string]$PngPath) {
+    # The PNG container bytes depend on the local zlib, so the portable input
+    # identity is the decoded RGBA hash from ae_png_depth_inspect.
+    $scratch = Join-Path ([System.IO.Path]::GetTempPath()) ("aexcompat-refresh-" + [guid]::NewGuid().ToString('N') + '.json')
+    try {
+        & python (Join-Path $PSScriptRoot 'ae_png_depth_inspect.py') --png $PngPath --out $scratch | Out-Null
+        if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $scratch)) {
+            throw "ae_png_depth_inspect.py failed for $PngPath"
+        }
+        ([string](ReadJson $scratch).decoded_rgba_sha256).ToLowerInvariant()
+    } finally {
+        Remove-Item -LiteralPath $scratch -ErrorAction SilentlyContinue
+    }
+}
+
 $corpus = (Resolve-Path -LiteralPath $CorpusRoot).Path
 $aexPath = (Resolve-Path -LiteralPath $TestedAex).Path
 
@@ -109,6 +139,13 @@ $caseRecords = foreach ($case in $cases) {
     if ($comparison.hashes.render_sha256 -ne (Sha256 $aePng)) {
         throw "comparison for $($case.name) was not produced from ae-$($case.prefix).png"
     }
+    # Bind the compared raw bytes to the recorded host PNG: a stale or
+    # replaced host-*.png must fail here instead of being recorded next to a
+    # comparison that never saw it.
+    $conversion = ConvertPngToRaw $hostPng
+    if ($conversion.raw_sha256 -ne $comparison.hashes.raw_sha256) {
+        throw "host-$($case.prefix).rgba is not the conversion of host-$($case.prefix).png"
+    }
 
     [ordered]@{
         name = $case.name
@@ -116,6 +153,7 @@ $caseRecords = foreach ($case in $cases) {
         input = [ordered]@{
             file = "target/oracle-corpus/$($case.input_file)"
             sha256 = Sha256 $inputPath
+            decoded_rgba_sha256 = DecodedRgbaSha256 $inputPath
             width = $case.width
             height = $case.height
             provenance = $case.input_provenance

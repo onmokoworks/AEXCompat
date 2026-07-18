@@ -19,6 +19,7 @@
       "input": {
         "file": "target/oracle-corpus/input-gradient-1920x1080.png",
         "sha256": "bb84e35ea6bdbfa178d13d6571dbff84aa2b78e57f3dbc9831aa7448c619c97e",
+        "decoded_rgba_sha256": "6a61410bf64979058211863812316b60e8b9c1dc2a6005cda55f1fd776e9920a",
         "width": 1920,
         "height": 1080,
         "provenance": "pre-existing 1920x1080 gradient oracle input (docs/AE_ORACLE_NTSC_RS_CAPTURE_2026-07-18.md)"
@@ -89,6 +90,7 @@
       "input": {
         "file": "target/oracle-corpus/input-alpha-1920x1080.png",
         "sha256": "c8acdee2a7a48aaf401482dc644d97f930186bb5f4acd0a815c7a316aa79df08",
+        "decoded_rgba_sha256": "dcee3c8f96c4100fb2c42b6154f85979ce4027811d9ee50bce104b9cc8ac7077",
         "width": 1920,
         "height": 1080,
         "provenance": "tools/generate-oracle-rgba-input.py --width 1920 --height 1080 --alpha-mode vertical-gradient"
@@ -153,6 +155,7 @@
       "input": {
         "file": "target/oracle-corpus/input-odd-1919x1077.png",
         "sha256": "12bf45b4965ce2ae152e21e6c2c32ea7e25cc77b0d744e403cb8c1639c31edfd",
+        "decoded_rgba_sha256": "58be13650b210860b671351161b59849bd3ba6fb99eb8f5d594434987b77fe54",
         "width": 1919,
         "height": 1077,
         "provenance": "tools/generate-oracle-rgba-input.py --width 1919 --height 1077 --alpha-mode opaque"
@@ -217,6 +220,7 @@
       "input": {
         "file": "target/oracle-corpus/input-4k-3840x2160.png",
         "sha256": "d56a353c07f92dc0cde55e4f5ee5bc3a6d9b3d7620c249cf84b96a08148a34d8",
+        "decoded_rgba_sha256": "582719c37f8a4e99917a3856f1efd25c13a4878e6aae5cfbcd7b0030ebe61012",
         "width": 3840,
         "height": 2160,
         "provenance": "tools/generate-oracle-rgba-input.py --width 3840 --height 2160 --alpha-mode opaque"

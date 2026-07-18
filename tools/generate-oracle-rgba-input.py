@@ -14,6 +14,11 @@ of v * 255 / m, and 0 when m <= 0:
 
 The PNG is written non-interlaced, filter type 0, zlib level 9, so
 `tools/ae_png_depth_inspect.py` can decode it without precision loss.
+
+The PNG container bytes depend on the local zlib build, so the
+machine-portable identity of a generated input is `decoded_rgba_sha256`
+(the SHA-256 of the raw RGBA byte stream), not the file hash; the file
+hash is reported only as the identity of this particular artifact.
 """
 
 from __future__ import annotations
@@ -37,18 +42,17 @@ def scaled(value: int, maximum: int) -> int:
     return (value * 255 * 2 + maximum) // (maximum * 2)
 
 
-def rgba_rows(width: int, height: int, alpha_mode: str) -> bytes:
-    rows = bytearray()
+def rgba_pixels(width: int, height: int, alpha_mode: str) -> bytes:
+    pixels = bytearray()
     for y in range(height):
         green = scaled(y, height - 1)
         alpha = 255 if alpha_mode == "opaque" else scaled(y, height - 1)
-        rows.append(0)  # filter type 0 (None)
         for x in range(width):
-            rows.append(scaled(x, width - 1))
-            rows.append(green)
-            rows.append(scaled(x + y, width + height - 2))
-            rows.append(alpha)
-    return bytes(rows)
+            pixels.append(scaled(x, width - 1))
+            pixels.append(green)
+            pixels.append(scaled(x + y, width + height - 2))
+            pixels.append(alpha)
+    return bytes(pixels)
 
 
 def png_chunk(chunk_type: bytes, payload: bytes) -> bytes:
@@ -60,17 +64,21 @@ def png_chunk(chunk_type: bytes, payload: bytes) -> bytes:
     )
 
 
-def write_png(path: Path, width: int, height: int, alpha_mode: str) -> bytes:
-    decoded = rgba_rows(width, height, alpha_mode)
+def write_png(path: Path, width: int, height: int, alpha_mode: str) -> tuple[bytes, bytes]:
+    decoded = rgba_pixels(width, height, alpha_mode)
+    row_bytes = width * 4
+    filtered = b"".join(
+        b"\0" + decoded[y * row_bytes:(y + 1) * row_bytes] for y in range(height)
+    )
     payload = (
         b"\x89PNG\r\n\x1a\n"
         + png_chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 6, 0, 0, 0))
-        + png_chunk(b"IDAT", zlib.compress(decoded, 9))
+        + png_chunk(b"IDAT", zlib.compress(filtered, 9))
         + png_chunk(b"IEND", b"")
     )
     with path.open("xb") as handle:
         handle.write(payload)
-    return payload
+    return payload, decoded
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -84,7 +92,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"error: dimensions must be 1..{MAX_DIMENSION}", file=sys.stderr)
         return 2
     try:
-        payload = write_png(args.out, args.width, args.height, args.alpha_mode)
+        payload, decoded = write_png(args.out, args.width, args.height, args.alpha_mode)
     except FileExistsError:
         print(f"error: refusing to overwrite {args.out}", file=sys.stderr)
         return 2
@@ -94,6 +102,7 @@ def main(argv: list[str] | None = None) -> int:
         "height": args.height,
         "alpha_mode": args.alpha_mode,
         "png_sha256": hashlib.sha256(payload).hexdigest(),
+        "decoded_rgba_sha256": hashlib.sha256(decoded).hexdigest(),
     }
     json.dump(report, sys.stdout, indent=2, sort_keys=True)
     sys.stdout.write("\n")
