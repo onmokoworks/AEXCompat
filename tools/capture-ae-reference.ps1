@@ -6,6 +6,8 @@ param(
     [Parameter(Mandatory = $true)][string]$OutputPng,
     [Parameter(Mandatory = $true)][string]$EffectName,
     [string]$ScriptPath,
+    [string]$ParamName = '',
+    [string]$ParamValue = '',
     [ValidateRange(0, 10000000)][int]$Frame = 0,
     [ValidateRange(1, 1000)][int]$Fps = 30,
     [ValidateRange(1, 10000001)][int]$DurationFrames = 300,
@@ -19,6 +21,12 @@ if (Get-Process AfterFX,aerender,aerendercore -ErrorAction SilentlyContinue) {
 }
 if ($DurationFrames -le $Frame) {
     throw 'DurationFrames must be greater than Frame.'
+}
+if ($ParamName -and -not ($ParamValue -match '^-?\d+(\.\d+)?$')) {
+    throw 'ParamValue must be a number when ParamName is set.'
+}
+if ($ParamValue -and -not $ParamName) {
+    throw 'ParamName is required when ParamValue is set.'
 }
 
 $afterEffectsPath = (Resolve-Path -LiteralPath $AfterEffects).Path
@@ -72,6 +80,10 @@ $env:AEXCOMPAT_AE_BPC = [string]$Bpc
 # The JSX polls for the asynchronous saveFrameToPng output; keep its bound
 # inside the outer watchdog so the wait can never outlive this script.
 $env:AEXCOMPAT_AE_SAVE_TIMEOUT_MS = [string]($TimeoutSeconds * 1000)
+if ($ParamName) {
+    $env:AEXCOMPAT_AE_PARAM_NAME = $ParamName
+    $env:AEXCOMPAT_AE_PARAM_VALUE = $ParamValue
+}
 try {
     $escapedScriptPath = $scriptPath.Replace('"', '\"')
     $arguments = '-m -noui -r "{0}"' -f $escapedScriptPath
@@ -88,7 +100,7 @@ try {
 } finally {
     'AEXCOMPAT_AE_INPUT','AEXCOMPAT_AE_OUTPUT','AEXCOMPAT_AE_RESULT','AEXCOMPAT_AE_EFFECT',
     'AEXCOMPAT_AE_FRAME','AEXCOMPAT_AE_FPS','AEXCOMPAT_AE_DURATION','AEXCOMPAT_AE_BPC',
-    'AEXCOMPAT_AE_SAVE_TIMEOUT_MS' |
+    'AEXCOMPAT_AE_SAVE_TIMEOUT_MS','AEXCOMPAT_AE_PARAM_NAME','AEXCOMPAT_AE_PARAM_VALUE' |
         ForEach-Object { Remove-Item "Env:$_" -ErrorAction SilentlyContinue }
 }
 
