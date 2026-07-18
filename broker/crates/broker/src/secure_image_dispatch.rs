@@ -43,10 +43,24 @@ pub struct SecureImageDispatch<'a> {
     pub timeout: Duration,
 }
 
+/// The identity of a worker binary as observed by one admission. Dispatch
+/// results echo the identity that was actually launched so callers can bind
+/// later authorizations (for example a GPU module-audit preflight) to it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct WorkerIdentity {
+    pub sha256: [u8; 32],
+    pub size: u64,
+}
+
 pub struct GpuRuntimeAuthorization<'a> {
     pub backend: RuntimeBackend,
     pub session_identity: [u8; 32],
     pub module_report: &'a AuthenticatedGpuModuleReport,
+    /// The worker identity admitted by the preflight dispatch that produced
+    /// the module report (echoed in that dispatch's `SecureLaunchResult`).
+    /// GPU dispatch fails closed if the worker admitted now differs, so the
+    /// audited binary and the launched binary are always the same bytes.
+    pub preflight_worker: WorkerIdentity,
 }
 
 /// GPU-only dispatch boundary. CPU callers continue to use
@@ -61,10 +75,17 @@ pub fn dispatch_secure_gpu_image(
     authorization
         .module_report
         .authorize_dispatch(&authorization.session_identity, authorization.backend)?;
-    dispatch_secure_image(input)
+    dispatch_secure_image_inner(input, Some(authorization.preflight_worker))
 }
 
 pub fn dispatch_secure_image(input: SecureImageDispatch<'_>) -> io::Result<SecureLaunchResult> {
+    dispatch_secure_image_inner(input, None)
+}
+
+fn dispatch_secure_image_inner(
+    input: SecureImageDispatch<'_>,
+    expected_worker: Option<WorkerIdentity>,
+) -> io::Result<SecureLaunchResult> {
     let worker_program = input
         .repository
         .join(input.worker_kind.repository_relative_program());
@@ -77,6 +98,13 @@ pub fn dispatch_secure_image(input: SecureImageDispatch<'_>) -> io::Result<Secur
         .collect::<io::Result<Vec<_>>>()?;
     let tree = SealedLoadTree::create(main, dependencies)?;
     let (worker_sha256, worker_size) = admit_local_worker(&worker_program)?;
+    if let Some(expected) = expected_worker {
+        if expected.sha256 != worker_sha256 || expected.size != worker_size {
+            return Err(invalid(
+                "worker binary changed since the GPU module-audit preflight",
+            ));
+        }
+    }
     let request = SecureLaunchRequest {
         worker_program: &worker_program,
         worker_expected_sha256: worker_sha256,
@@ -261,12 +289,17 @@ mod tests {
             timeout: Duration::from_secs(1),
         };
 
+        let preflight_worker = WorkerIdentity {
+            sha256: [7; 32],
+            size: 123,
+        };
         let cpu = dispatch_secure_gpu_image(
             make_input(),
             GpuRuntimeAuthorization {
                 backend: RuntimeBackend::Cpu,
                 session_identity: [0x11; 32],
                 module_report: &report,
+                preflight_worker,
             },
         )
         .unwrap_err();
@@ -278,6 +311,7 @@ mod tests {
                 backend: RuntimeBackend::Cuda,
                 session_identity: [0x22; 32],
                 module_report: &report,
+                preflight_worker,
             },
         )
         .unwrap_err();
@@ -285,5 +319,50 @@ mod tests {
             wrong_session.to_string(),
             "runtime module report session identity mismatch"
         );
+    }
+
+    #[test]
+    fn gpu_dispatch_rejects_a_worker_changed_since_the_preflight() {
+        let root = std::env::temp_dir().join(format!(
+            "aexcompat-secure-image-dispatch-{:032x}",
+            rand::random::<u128>()
+        ));
+        fs::create_dir(&root).unwrap();
+        let plugin = artifact(&root, "plugin.plugin", b"plugin");
+        let worker = root.join("target/minihost-build/aex_smart_worker.exe");
+        fs::create_dir_all(worker.parent().unwrap()).unwrap();
+        fs::write(&worker, b"current worker bytes").unwrap();
+        let report = AuthenticatedGpuModuleReport::test_only(
+            [0x11; 32],
+            RuntimeBackend::Cuda,
+            SystemTime::now() + Duration::from_secs(60),
+        );
+
+        let error = dispatch_secure_gpu_image(
+            SecureImageDispatch {
+                repository: &root,
+                worker_kind: WorkerKind::Smart,
+                plugin,
+                dependencies: vec![],
+                args_before_plugin: &[],
+                args_after_plugin: &[],
+                timeout: Duration::from_secs(1),
+            },
+            GpuRuntimeAuthorization {
+                backend: RuntimeBackend::Cuda,
+                session_identity: [0x11; 32],
+                module_report: &report,
+                preflight_worker: WorkerIdentity {
+                    sha256: [7; 32],
+                    size: 123,
+                },
+            },
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "worker binary changed since the GPU module-audit preflight"
+        );
+        fs::remove_dir_all(root).unwrap();
     }
 }

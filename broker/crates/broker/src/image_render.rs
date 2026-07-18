@@ -9,7 +9,7 @@ use crate::runtime_module_policy::{
 };
 use crate::secure_image_dispatch::{
     dispatch_secure_gpu_image, dispatch_secure_image, ApprovedImageArtifact,
-    GpuRuntimeAuthorization, SecureImageDispatch, WorkerKind,
+    GpuRuntimeAuthorization, SecureImageDispatch, WorkerIdentity, WorkerKind,
 };
 use image::ImageFormat;
 use serde::{Deserialize, Serialize};
@@ -496,7 +496,11 @@ pub enum RenderGpuBackend {
 }
 
 /// Inputs produced by a GPU module-audit preflight for one render session.
-/// The raw report is authenticated again immediately before worker dispatch.
+/// The raw report is authenticated again immediately before worker dispatch,
+/// and the dispatch is bound to `preflight_worker`: the worker identity the
+/// preflight dispatch echoed in its `SecureLaunchResult`. If the worker on
+/// disk no longer matches, the render fails closed instead of launching a
+/// binary the module report does not describe.
 pub struct GpuRuntimePolicyInput<'a> {
     pub policy: &'a RuntimeModulePolicy,
     pub module_report_json: &'a [u8],
@@ -504,6 +508,7 @@ pub struct GpuRuntimePolicyInput<'a> {
     pub sealed_modules: &'a [ApprovedClassifiedModule],
     pub trusted_modules: &'a [ApprovedClassifiedModule],
     pub system32: &'a Path,
+    pub preflight_worker: WorkerIdentity,
 }
 
 fn runtime_backend(backend: RenderGpuBackend) -> Option<RuntimeBackend> {
@@ -4133,6 +4138,7 @@ fn render_with_artifact(
                 backend,
                 session_identity: policy_input.session_identity,
                 module_report: &report,
+                preflight_worker: policy_input.preflight_worker,
             },
         )?
     } else {

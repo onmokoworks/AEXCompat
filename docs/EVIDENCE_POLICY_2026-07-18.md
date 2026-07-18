@@ -120,6 +120,12 @@ What changed:
   executes must still match those admitted bytes, and a missing, unreadable,
   or empty worker binary still fails closed. Rebuilding a worker no longer
   requires regenerating any committed constant, on any machine.
+- GPU runtime-policy renders are additionally bound to the worker identity
+  admitted by the module-audit preflight (echoed in that dispatch's result):
+  if the worker on disk changes between preflight and render, the render
+  fails closed instead of launching a binary the audited report does not
+  describe. Under the frozen constants this binding was implicit (both runs
+  matched the same constant); it is now explicit.
 
 What this deliberately gives up: a compiled-in constant could reject a worker
 executable that was replaced on disk after the last regeneration. That
