@@ -11,19 +11,26 @@ def render_function() -> str:
     return source[start:source.index("\n#[cfg(test)]", start + 1)]
 
 
-def test_render_workers_use_fixed_preapproved_trust_tuples():
+def test_render_workers_admit_the_local_build_through_dispatch_only():
     source = SOURCE.read_text(encoding="utf-8")
-    for name, constant in (
-        ("generated_l2_worker_trust.rs", "L2_WORKER_TRUST"),
-        ("generated_render_worker_trust.rs", "RENDER_WORKER_TRUST"),
-        ("generated_smart_worker_trust.rs", "SMART_WORKER_TRUST"),
+    dispatch = (SOURCE.parent / "secure_image_dispatch.rs").read_text(encoding="utf-8")
+
+    # Frozen worker trust constants are retired; render/smart/L2 image dispatch
+    # admits the locally built worker at dispatch time instead.
+    assert "WORKER_TRUST" not in source
+    assert 'include!("generated_' not in source
+    for name in (
+        "generated_l2_worker_trust.rs",
+        "generated_render_worker_trust.rs",
+        "generated_smart_worker_trust.rs",
     ):
-        generated = (SOURCE.parent / name).read_text(encoding="utf-8")
-        assert f'include!("{name}")' in source
-        assert f"const {constant}: WorkerTrust" in generated
-        assert "expected_sha256: [" in generated
-        assert "expected_size: " in generated
-        assert "Do not edit by hand" in generated
+        assert not (SOURCE.parent / name).exists()
+
+    # Admission happens exactly once, inside dispatch_secure_image, and the
+    # staged copy must still match the admitted bytes before launch.
+    assert dispatch.count("admit_local_worker(") == 2  # definition + one call
+    assert "local worker binary is missing or unreadable" in dispatch
+    assert "local worker binary is empty" in dispatch
     assert "Sha256::digest(fs::read(&worker" not in render_function()
 
 
