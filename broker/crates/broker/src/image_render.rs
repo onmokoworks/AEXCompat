@@ -344,8 +344,6 @@ fn worker_diagnostics(
     let mut first_failure_stage: Option<String> = None;
     let mut failure_stage: Option<String> = None;
     let mut last_completed_stage: Option<String> = None;
-    let mut missing_suites = Vec::new();
-    let mut seen_missing_suites = BTreeSet::new();
     let mut plugin_kind: Option<&str> = None;
 
     for line in stderr.lines() {
@@ -354,13 +352,6 @@ fn worker_diagnostics(
             "plugin_kind:unknown_no_effect_entrypoint" => Some("unknown_no_effect_entrypoint"),
             _ => None,
         });
-        if missing_suites.len() < MAX_MISSING_SUITES {
-            if let Some((name, version)) = missing_suite_event(line.trim()) {
-                if seen_missing_suites.insert((name.clone(), version)) {
-                    missing_suites.push(json!({"name": name, "version": version}));
-                }
-            }
-        }
         let Some(body) = line.trim().strip_prefix("stage:") else {
             continue;
         };
@@ -421,24 +412,42 @@ fn worker_diagnostics(
         "failure_stage": failure_stage,
         "first_failure_stage": first_failure_stage,
         "last_completed_stage": last_completed_stage,
-        "missing_suites": missing_suites,
+        "missing_suites": [],
         "plugin_kind": plugin_kind,
     })
 }
 
-fn missing_suite_event(line: &str) -> Option<(String, i32)> {
-    let body = line.strip_prefix("stage:suite_acquire_failed name=")?;
-    let (name, version) = body.rsplit_once(" version=")?;
-    if name.is_empty()
-        || name.len() > MAX_SUITE_NAME_LEN
-        || !name
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b' ' | b'.' | b'_' | b'-'))
+fn propagate_missing_suites(diagnostics: &mut Value, worker_report: &Value) {
+    let mut suites = Vec::new();
+    let mut seen = BTreeSet::new();
+    for suite in worker_report["missing_suites"]
+        .as_array()
+        .into_iter()
+        .flatten()
     {
-        return None;
+        if suites.len() >= MAX_MISSING_SUITES {
+            break;
+        }
+        let Some(name) = suite["name"].as_str().filter(|name| {
+            !name.is_empty()
+                && name.len() <= MAX_SUITE_NAME_LEN
+                && name.bytes().all(|byte| {
+                    byte.is_ascii_alphanumeric() || matches!(byte, b' ' | b'.' | b'_' | b'-')
+                })
+        }) else {
+            continue;
+        };
+        let Some(version) = suite["version"]
+            .as_i64()
+            .filter(|version| *version > 0 && *version <= i32::MAX as i64)
+        else {
+            continue;
+        };
+        if seen.insert((name.to_owned(), version)) {
+            suites.push(json!({"name": name, "version": version}));
+        }
     }
-    let version = version.parse::<i32>().ok().filter(|value| *value > 0)?;
-    Some((name.to_owned(), version))
+    diagnostics["missing_suites"] = Value::Array(suites);
 }
 
 fn module_audit_summary(audit: &Value) -> Option<Value> {
@@ -2582,6 +2591,10 @@ fn inspect_experimental_with_diagnostics_and_runtime_policy(
         )?
     };
     let mut diagnostics = isolated_worker_diagnostics(&isolated, started.elapsed().as_millis());
+    let worker_report: Option<Value> = serde_json::from_str(isolated.stdout.trim()).ok();
+    if let Some(report) = &worker_report {
+        propagate_missing_suites(&mut diagnostics, report);
+    }
     if isolated.classification.as_str() != "ok" {
         if let Some(summary) = failed_module_audit_summary(&isolated.stdout) {
             diagnostics["module_audit_failure"] = summary;
@@ -2590,8 +2603,7 @@ fn inspect_experimental_with_diagnostics_and_runtime_policy(
             "AEX parameter inspection worker failed safely: {diagnostics}"
         )));
     }
-    let report: Value = serde_json::from_str(isolated.stdout.trim())
-        .map_err(|_| invalid("inspection worker report is invalid"))?;
+    let report = worker_report.ok_or_else(|| invalid("inspection worker report is invalid"))?;
     if let Some(summary) = report.get("module_audit").and_then(module_audit_summary) {
         diagnostics["module_audit"] = summary;
     }
@@ -4341,6 +4353,9 @@ fn render_with_artifact(
     };
     let mut diagnostics = isolated_worker_diagnostics(&isolated, started.elapsed().as_millis());
     let initial_report: Option<Value> = serde_json::from_str(isolated.stdout.trim()).ok();
+    if let Some(report) = &initial_report {
+        propagate_missing_suites(&mut diagnostics, report);
+    }
     if initial_report
         .as_ref()
         .is_some_and(|report| report.get("output_pixels_valid") == Some(&Value::Bool(false)))
@@ -4408,6 +4423,7 @@ fn render_with_artifact(
                 "CPU fallback worker report unavailable: {diagnostics}"
             ))
         })?;
+        propagate_missing_suites(&mut diagnostics, &retry_report);
         gpu_fallback_used = true;
         retry_report
     } else {
@@ -5556,7 +5572,7 @@ mod tests {
     }
 
     #[test]
-    fn worker_diagnostics_extract_bounded_unique_missing_suites() {
+    fn structured_worker_report_supplies_bounded_unique_missing_suites() {
         let mut trace = String::from(
             "stage:suite_acquire_failed name=PF World Suite version=2\n\
              stage:suite_acquire_failed name=PF World Suite version=2\n\
@@ -5573,7 +5589,18 @@ mod tests {
             "A".repeat(MAX_SUITE_NAME_LEN + 1)
         ));
 
-        let diagnostics = worker_diagnostics(&trace, false, "nonzero_exit", 1, 2);
+        let mut diagnostics = worker_diagnostics(&trace, false, "nonzero_exit", 1, 2);
+        assert!(diagnostics["missing_suites"].as_array().unwrap().is_empty());
+        let mut reported = vec![
+            json!({"name": "PF World Suite", "version": 2}),
+            json!({"name": "PF World Suite", "version": 2}),
+            json!({"name": "C:\\private\\suite", "version": 1}),
+            json!({"name": "Bad Suite", "version": -1}),
+        ];
+        for index in 0..(MAX_MISSING_SUITES + 3) {
+            reported.push(json!({"name": format!("Safe Suite {index}"), "version": 1}));
+        }
+        propagate_missing_suites(&mut diagnostics, &json!({"missing_suites": reported}));
         let suites = diagnostics["missing_suites"].as_array().unwrap();
         assert_eq!(suites.len(), MAX_MISSING_SUITES);
         assert_eq!(suites[0], json!({"name": "PF World Suite", "version": 2}));
