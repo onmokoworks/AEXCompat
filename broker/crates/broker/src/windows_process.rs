@@ -25,8 +25,8 @@ use windows_sys::Win32::System::Threading::{
     CreateEventW, CreateProcessAsUserW, CreateProcessW, DeleteProcThreadAttributeList,
     GetExitCodeProcess, InitializeProcThreadAttributeList, ResumeThread, TerminateProcess,
     UpdateProcThreadAttribute, WaitForSingleObject, CREATE_NO_WINDOW, CREATE_SUSPENDED,
-    EXTENDED_STARTUPINFO_PRESENT, PROCESS_INFORMATION, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
-    STARTF_USESTDHANDLES, STARTUPINFOEXW,
+    CREATE_UNICODE_ENVIRONMENT, EXTENDED_STARTUPINFO_PRESENT, PROCESS_INFORMATION,
+    PROC_THREAD_ATTRIBUTE_HANDLE_LIST, STARTF_USESTDHANDLES, STARTUPINFOEXW,
 };
 
 const CAPTURE_LIMIT: usize = 64 * 1024;
@@ -148,6 +148,38 @@ fn quote(value: &str) -> String {
     quoted
 }
 
+fn child_environment(trace_handle: Option<HANDLE>) -> Vec<u16> {
+    let mut entries: Vec<(String, std::ffi::OsString, std::ffi::OsString)> = std::env::vars_os()
+        .filter_map(|(key, value)| {
+            let normalized = key.to_string_lossy().to_ascii_uppercase();
+            if normalized == "AEX_INSTRUMENT_TRACE_DIR"
+                || normalized == "AEX_INSTRUMENT_TRACE_HANDLE"
+            {
+                None
+            } else {
+                Some((normalized, key, value))
+            }
+        })
+        .collect();
+    if let Some(handle) = trace_handle {
+        entries.push((
+            "AEX_INSTRUMENT_TRACE_HANDLE".into(),
+            "AEX_INSTRUMENT_TRACE_HANDLE".into(),
+            (handle as usize).to_string().into(),
+        ));
+    }
+    entries.sort_by(|left, right| left.0.cmp(&right.0));
+    let mut block = Vec::new();
+    for (_, key, value) in entries {
+        block.extend(key.encode_wide());
+        block.push('=' as u16);
+        block.extend(value.encode_wide());
+        block.push(0);
+    }
+    block.push(0);
+    block
+}
+
 fn reader(handle_value: usize) -> thread::JoinHandle<io::Result<(String, bool)>> {
     thread::spawn(move || {
         let handle = handle_value as HANDLE;
@@ -267,6 +299,7 @@ fn run_isolated_impl(
     timeout: Duration,
     token: Option<(HANDLE, &Path)>,
 ) -> io::Result<ProcessResult> {
+    let trace_file = crate::trace_policy::create_trace_file_for_launch()?;
     let (stdout_read, stdout_write) = pipe()?;
     let (stderr_read, stderr_write) = pipe()?;
     let job = OwnedHandle::new(unsafe { CreateJobObjectW(null(), null()) })?;
@@ -306,14 +339,17 @@ fn run_isolated_impl(
         }
     }
     let _attribute_guard = AttributeGuard(attribute_list);
-    let mut inherited = [stdout_write.raw(), stderr_write.raw()];
+    let mut inherited = vec![stdout_write.raw(), stderr_write.raw()];
+    if let Some(trace_file) = trace_file.as_ref() {
+        inherited.push(trace_file.raw());
+    }
     if unsafe {
         UpdateProcThreadAttribute(
             attribute_list,
             0,
             PROC_THREAD_ATTRIBUTE_HANDLE_LIST as usize,
             inherited.as_mut_ptr().cast(),
-            size_of_val(&inherited),
+            std::mem::size_of_val(inherited.as_slice()),
             null_mut(),
             null_mut(),
         )
@@ -333,6 +369,7 @@ fn run_isolated_impl(
         .chain(Some(0))
         .collect();
     let application_wide: Vec<u16> = program.as_os_str().encode_wide().chain(Some(0)).collect();
+    let mut environment = child_environment(trace_file.as_ref().map(|file| file.raw()));
     let mut startup: STARTUPINFOEXW = unsafe { zeroed() };
     startup.StartupInfo.cb = size_of::<STARTUPINFOEXW>() as u32;
     startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
@@ -341,7 +378,10 @@ fn run_isolated_impl(
     startup.StartupInfo.hStdInput = null_mut();
     startup.lpAttributeList = attribute_list;
     let mut process: PROCESS_INFORMATION = unsafe { zeroed() };
-    let creation_flags = EXTENDED_STARTUPINFO_PRESENT | CREATE_SUSPENDED | CREATE_NO_WINDOW;
+    let creation_flags = EXTENDED_STARTUPINFO_PRESENT
+        | CREATE_SUSPENDED
+        | CREATE_NO_WINDOW
+        | CREATE_UNICODE_ENVIRONMENT;
     let created = unsafe {
         match token {
             Some((token, current_directory)) => {
@@ -358,7 +398,7 @@ fn run_isolated_impl(
                     null(),
                     1,
                     creation_flags,
-                    null(),
+                    environment.as_mut_ptr().cast(),
                     current_directory_wide.as_ptr(),
                     &startup.StartupInfo,
                     &mut process,
@@ -371,7 +411,7 @@ fn run_isolated_impl(
                 null(),
                 1,
                 creation_flags,
-                null(),
+                environment.as_mut_ptr().cast(),
                 null(),
                 &startup.StartupInfo,
                 &mut process,
@@ -395,6 +435,7 @@ fn run_isolated_impl(
     drop(thread_handle);
     drop(stdout_write);
     drop(stderr_write);
+    drop(trace_file);
     let stdout_reader = reader(stdout_read.take() as usize);
     let stderr_reader = reader(stderr_read.take() as usize);
     let wait = unsafe {

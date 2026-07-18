@@ -1,4 +1,5 @@
 import json
+import ctypes
 import os
 import subprocess
 import tempfile
@@ -42,24 +43,64 @@ class ProductionWorkerTraceTests(unittest.TestCase):
         self.assertIn("kMaxEvents", writer)
         self.assertIn("kMaxStringBytes", writer)
         self.assertIn("kMaxPayloadBytes", writer)
-        self.assertIn("value.front() == '/'", writer)
-        self.assertIn("value[i + 2] == '\\\\'", writer)
+        self.assertIn("strict_utf8(value)", writer)
+        self.assertIn("value[i] == '/'", writer)
+        self.assertIn("value[i] == '\\\\' && value[i + 1] == '\\\\'", writer)
+
+    def test_broker_passes_only_a_preopened_trace_handle(self):
+        launcher = (ROOT / "broker" / "crates" / "broker" / "src" / "windows_process.rs").read_text(encoding="utf-8")
+        writer = (ROOT / "instruments" / "common" / "trace_writer.cpp").read_text(encoding="utf-8")
+        self.assertIn("PROC_THREAD_ATTRIBUTE_HANDLE_LIST", launcher)
+        self.assertIn("create_trace_file_for_launch", launcher)
+        self.assertIn("AEX_INSTRUMENT_TRACE_HANDLE", launcher)
+        self.assertNotIn("AEX_INSTRUMENT_TRACE_DIR", writer)
+        self.assertNotIn("CreateFileW", writer)
+
+    @unittest.skipUnless(TRACE_SELFTEST.exists(), "native trace writer selftest has not been built")
+    def test_invalid_inherited_handle_fails_closed(self):
+        env = os.environ.copy()
+        env.pop("AEX_INSTRUMENT_TRACE_DIR", None)
+        env["AEX_INSTRUMENT_TRACE_HANDLE"] = "1"
+        completed = subprocess.run(
+            [str(TRACE_SELFTEST)], capture_output=True, text=True, env=env, check=False
+        )
+        self.assertEqual(completed.returncode, 16)
 
     @unittest.skipUnless(TRACE_SELFTEST.exists(), "native trace writer selftest has not been built")
     def test_native_writer_keeps_bounded_and_ordered_jsonl(self):
         with tempfile.TemporaryDirectory() as tmp:
-            env = os.environ.copy()
-            env["AEX_INSTRUMENT_TRACE_DIR"] = tmp
-            completed = subprocess.run(
-                [str(TRACE_SELFTEST)], capture_output=True, text=True, env=env, check=False
+            path = Path(tmp) / "trace.jsonl"
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            class SecurityAttributes(ctypes.Structure):
+                _fields_ = [
+                    ("nLength", ctypes.c_ulong),
+                    ("lpSecurityDescriptor", ctypes.c_void_p),
+                    ("bInheritHandle", ctypes.c_int),
+                ]
+            security = SecurityAttributes(ctypes.sizeof(SecurityAttributes), None, 1)
+            kernel32.CreateFileW.restype = ctypes.c_void_p
+            handle = kernel32.CreateFileW(
+                str(path), 0x40000000, 0, ctypes.byref(security), 1, 0x80, None
             )
+            self.assertNotIn(handle, (None, ctypes.c_void_p(-1).value))
+            env = os.environ.copy()
+            env.pop("AEX_INSTRUMENT_TRACE_DIR", None)
+            env["AEX_INSTRUMENT_TRACE_HANDLE"] = str(handle)
+            startup = subprocess.STARTUPINFO()
+            startup.lpAttributeList = {"handle_list": [handle]}
+            try:
+                completed = subprocess.run(
+                    [str(TRACE_SELFTEST)], capture_output=True, text=True, env=env,
+                    check=False, close_fds=True, startupinfo=startup,
+                )
+            finally:
+                kernel32.CloseHandle(ctypes.c_void_p(handle))
             self.assertEqual(completed.returncode, 0, completed.stderr)
-            path = Path(completed.stdout.strip())
             events = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
-            self.assertEqual([event["event_kind"] for event in events], [
-                "session_start", "selector_dispatch", "suite_acquire", "world_descriptor",
-                "callback_invoke", "suite_release", "session_end",
-            ])
+            self.assertEqual(events[0]["event_kind"], "session_start")
+            self.assertEqual(events[-1]["event_kind"], "session_end")
+            self.assertEqual([event["event_index"] for event in events], list(range(len(events))))
+            self.assertEqual(sum(event["event_kind"] == "callback_invoke" for event in events), 513)
             self.assertTrue(all(validate_event(event) == [] for event in events))
             self.assertTrue(all("private" not in json.dumps(event) for event in events))
 

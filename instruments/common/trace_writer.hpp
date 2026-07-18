@@ -1,8 +1,7 @@
 #pragma once
 
 #include <cstdint>
-#include <filesystem>
-#include <fstream>
+#include <mutex>
 #include <string>
 
 namespace aexcompat {
@@ -17,7 +16,7 @@ class TraceWriter {
   TraceWriter& operator=(const TraceWriter&) = delete;
 
   bool enabled() const;
-  const std::filesystem::path& path() const;
+  bool requested() const;
   void session_start();
   void selector_dispatch(const std::string& selector);
   void suite_acquire(const std::string& name, std::int64_t version, bool granted);
@@ -33,13 +32,15 @@ class TraceWriter {
   void write_base(const std::string& event_kind, const std::string& payload = {});
   static std::string escape(const std::string& value);
   static bool safe_string(const std::string& value);
+  static bool strict_utf8(const std::string& value);
 
   std::string host_kind_;
   std::string host_version_label_;
   std::string plugin_label_;
   std::uint64_t event_index_ = 0;
-  std::filesystem::path path_;
-  std::ofstream stream_;
+  void* handle_ = nullptr;
+  bool requested_ = false;
+  mutable std::mutex mutex_;
   bool session_started_ = false;
   bool session_ended_ = false;
 };

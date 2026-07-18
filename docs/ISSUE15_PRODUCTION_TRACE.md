@@ -11,6 +11,8 @@
 
 brokerは`AEX_INSTRUMENT_TRACE_DIR`を`target/worker-traces`配下の既存または新規ディレクトリに限定します。相対パス、`..`、root外、symlink/reparse pointはworker起動前に拒否されます。
 
+workerへdirectory pathは渡しません。brokerがlaunchごとにcreate-newしたファイルを最終handle pathで再認証し、そのhandleだけを`PROC_THREAD_ATTRIBUTE_HANDLE_LIST`と専用の子process環境で継承させます。workerは`AEX_INSTRUMENT_TRACE_HANDLE`を使用し、pathの再解決やファイルopenを行いません。handle継承・型検査に失敗した場合はnative load前にfail-closedで終了します。
+
 PowerShellの例:
 
 ```powershell

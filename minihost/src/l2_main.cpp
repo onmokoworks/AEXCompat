@@ -22555,6 +22555,7 @@ int wmain(int argc, wchar_t **argv) {
 #endif
   aexcompat::TraceWriter trace_writer(
       "minihost", trace_worker_label(), plugin_path.filename().string());
+  if (trace_writer.requested() && !trace_writer.enabled()) return 16;
   g_plugin_file_path = plugin_path.wstring();
   SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_SYSTEM32 | LOAD_LIBRARY_SEARCH_USER_DIRS);
   HMODULE module = LoadLibraryExW(plugin_path.c_str(), nullptr,
