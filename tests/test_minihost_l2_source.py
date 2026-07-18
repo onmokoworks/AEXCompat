@@ -354,20 +354,26 @@ class MinihostL2SourceTests(unittest.TestCase):
 
     def test_interactive_render_supports_bounded_deep_pixel_worlds(self):
         text = SOURCE.read_text(encoding="utf-8")
+        pixel_transport = (ROOT / "minihost" / "src" / "render_pixel_transport.cpp").read_text(
+            encoding="utf-8"
+        )
         for marker in (
             'L"--render-image16"',
             'L"--render-image32"',
             'L"--smart-image16"',
             'L"--smart-image32"',
+            "pixel_bytes != 4 && pixel_bytes != 8 && pixel_bytes != 16",
+            "write<int32_t>(world, 16, pixel_bytes == 4 ? 0 : 1)",
+        ):
+            self.assertIn(marker, text)
+        for marker in (
             "rgba8_to_argb",
             "argb_to_rgba8",
             "rgba[3] / 255.0f",
             "* 32768u + 127u",
             "std::clamp(value, 0.0f, 1.0f)",
-            "pixel_bytes != 4 && pixel_bytes != 8 && pixel_bytes != 16",
-            "write<int32_t>(world, 16, pixel_bytes == 4 ? 0 : 1)",
         ):
-            self.assertIn(marker, text)
+            self.assertIn(marker, pixel_transport)
 
     def test_supervised_parameter_dispatch_is_slot_bound_typed_and_explicit(self):
         text = SOURCE.read_text(encoding="utf-8")

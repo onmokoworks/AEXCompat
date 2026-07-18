@@ -17,6 +17,7 @@ target_link_libraries(aex_l1_worker PRIVATE bcrypt)
 set(AEXCOMPAT_L2_WORKER_SOURCES
     src/l2_main.cpp
     src/parameter_animation_transport.cpp
+    src/render_pixel_transport.cpp
     src/strict_json.cpp)
 
 add_executable(aex_l2_worker ${AEXCOMPAT_L2_WORKER_SOURCES})
