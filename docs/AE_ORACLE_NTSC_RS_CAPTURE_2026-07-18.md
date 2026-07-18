@@ -414,3 +414,79 @@ Two side findings from the same session, tracked separately:
   lingering `AfterFX.com` shim (observed orphaned from an earlier
   session) is named `AfterFX.com` and passes the gate. The capture gate
   now also refuses on `AfterFX.com`.
+
+## Follow-up: `-noui` restored for AE 25.3+ captures (2026-07-19, issue #54)
+
+Commit `7085261` removed `-noui` from `tools/capture-ae-reference.ps1`
+because AE 25.2 could abort before JSX execution when `-noui` hit a failed
+GPU3 sanity state, which made every capture raise the AE GUI (and a hung
+JSX left that GUI running indefinitely). Issue #54 asked whether 25.3 still
+needs the UI launch. Measurements on this machine (AE 25.3.1x3, the same
+install as every capture in this note):
+
+1. **`AfterFX.com -m -noui -r <jsx>` executes the JSX on AE 25.3.1 even in
+   the failed-GPU3-sanity state (observation).** This machine is in
+   exactly the state that aborted 25.2: every launch prints
+   `*** GPU Warning: GPU3 failed (previous) sanity test ***` on the
+   wrapper's stderr (alongside an unrelated ORT version notice). A minimal
+   marker JSX (write file, `app.quit()`) still completed in 13.9 s with no
+   visible window (no process ever exposed a main-window title) and no
+   surviving process, recording `app.version 25.3.1x3` and
+   `app.availableGPUAccelTypes` raw enum values `1813,1816`. So 25.3.1
+   demonstrably tolerates under `-noui` the same GPU3 sanity failure that
+   made 25.2 abort before JSX execution. AE 25.2 itself is no longer
+   installed here (only its leftover preferences folder), so the 25.2
+   abort stands unrefuted for 25.2 and the fix branches on version instead
+   of replacing the fallback.
+2. **Two full `-noui` captures reproduce the GUI-path reference
+   byte-for-byte (observation).** `ntsc-rs`, gradient input `bb84e35e...`,
+   frame 0, fps 24, 8 bpc, defaults: both runs produced SHA-256
+   `2cd24acf039b61151438e6d4ddd14f1eef1ee28b66591893c6e1cf0309ac16bf`,
+   identical to this note's original UI-launch reference. The launch mode
+   does not affect the rendered bytes for this configuration.
+3. **A `-noui` launch runs entirely inside the `AfterFX.com` wrapper
+   process (observation).** Sampling the process table at 200 ms intervals
+   during a full capture found only a process literally named
+   `AfterFX.com` - Windows keeps the `.com` extension in the process name
+   (only `.exe` is stripped), and no `AfterFX`-named process ever existed.
+   The previous timeout kill (`Get-Process AfterFX,aerendercore`) and the
+   already-running gates (`Get-Process AfterFX,aerender,aerendercore`)
+   were both blind to it: a hung `-noui` capture would have left AE
+   running, exactly the leftover-GUI failure mode the issue reported for
+   the UI path.
+4. **The runner returns while AE is still quitting (observation).** The
+   result JSON appears before AE finishes shutting down: one run held the
+   PNG handle for under a second afterwards (an immediate `Get-FileHash`
+   failed with a sharing violation and succeeded on retry), and another
+   still showed the `AfterFX.com` process alive right after the runner
+   returned; it exited on its own within seconds. The runner therefore now
+   waits (bounded by the same `-TimeoutSeconds` knob as the capture
+   itself) on the process it launched after the result appears,
+   so callers can hash the PNG and start the next capture immediately; a
+   quit that outlives the bound is killed and reported as a failure rather
+   than returned as success. Both that kill and the no-result timeout kill
+   are scoped to the launched process tree by PID (`taskkill /T`), never by
+   process name, so an unrelated AE session started mid-capture is never
+   touched; a launch that already exited is never killed at all, since its
+   numeric PID could have been reused by an unrelated process.
+
+Changes shipped: `capture-ae-reference.ps1` reads the `AfterFX.exe` file
+version from the numeric `File*Part` fields (the `FileVersion` string can
+carry non-numeric text, and the parts need no ETS-provided
+`FileVersionRaw` property; measured on this machine both Windows
+PowerShell 5.1 and pwsh 7 do expose `FileVersionRaw`, so the parts are a
+robustness choice, not a bug fix) and launches `-m -noui -r` on 25.3+,
+keeping the UI launch as the fallback for older versions (the 25.2
+GPU3-abort path). Every
+already-running gate across the AE oracle tools
+(`capture-ae-reference.ps1`, `prepare-ae-oracle-project.ps1`,
+`capture-ae-probe-oracle.ps1`, `capture-ae-exr-oracle.ps1`,
+`manage-ae-oracle-bundle.ps1`) now includes `AfterFX.com`;
+`capture-ae-reference.ps1` waits on and, on timeout, kills only the
+process tree it launched (by PID), never processes matched by name, and
+`capture-ae-probe-oracle.ps1`'s cleanup no longer kills by name either: it
+reports lingering AE-named processes and lets the probe plug-in removal
+fail explicitly instead.
+`tests/test_ae_reference_capture_automation.py` locks the version branch,
+the gate list, the PID-scoped shutdown, and the survival of an unrelated
+AE-named process that appears mid-capture.

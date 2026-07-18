@@ -12,7 +12,9 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-if (Get-Process AfterFX,aerender,aerendercore -ErrorAction SilentlyContinue) {
+# AfterFX.com keeps its extension in the process name (only .exe is
+# stripped), so a leftover wrapper-hosted session needs an explicit entry.
+if (Get-Process AfterFX,AfterFX.com,aerender,aerendercore -ErrorAction SilentlyContinue) {
     throw 'After Effects rendering is active; refusing to touch an existing user session.'
 }
 
