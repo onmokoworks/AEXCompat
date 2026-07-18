@@ -58,3 +58,48 @@ def test_wrong_raw_size_fails_closed(tmp_path: Path):
 
     with pytest.raises(MODULE.InputError, match="byte count"):
         MODULE.diagnose(source, raw)
+
+
+def test_large_raw_input_is_compared_without_full_file_reads_or_unpack(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    source = tmp_path / "large.png"
+    pixel_count = 256 * 1024
+    pixels = [channel for value in range(pixel_count) for channel in (
+        value & 0xFF,
+        (value * 3) & 0xFF,
+        (value * 7) & 0xFF,
+        255,
+    )]
+    _write_rgba8_png(source, pixels)
+    promoted = ((value * 32768 + 127) // 255 for value in pixels)
+    raw = tmp_path / "smart-input.rgba16le"
+    with raw.open("wb") as handle:
+        for value in promoted:
+            handle.write(struct.pack("<H", value))
+
+    original_read_bytes = Path.read_bytes
+
+    def guarded_read_bytes(path: Path) -> bytes:
+        if path == raw:
+            raise AssertionError("host raw input must not be read in full")
+        return original_read_bytes(path)
+
+    monkeypatch.setattr(Path, "read_bytes", guarded_read_bytes)
+    original_unpack = struct.unpack
+
+    def guarded_unpack(format_string: str, data: bytes):
+        if format_string.startswith("<") and format_string.endswith("H"):
+            raise AssertionError("host samples must not be unpacked in full")
+        return original_unpack(format_string, data)
+
+    monkeypatch.setattr(
+        MODULE.struct,
+        "unpack",
+        guarded_unpack,
+    )
+
+    report = MODULE.diagnose(source, raw)
+
+    assert report["match"] is True
+    assert report["mismatched_channels"] == 0

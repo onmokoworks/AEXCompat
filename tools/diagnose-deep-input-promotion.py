@@ -18,6 +18,7 @@ except ModuleNotFoundError:
 
 
 CHANNELS = ("r", "g", "b", "a")
+RAW_CHUNK_BYTES = 64 * 1024
 
 
 class InputError(ValueError):
@@ -25,7 +26,11 @@ class InputError(ValueError):
 
 
 def _sha256(path: Path) -> str:
-    return hashlib.sha256(path.read_bytes()).hexdigest()
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        while chunk := handle.read(RAW_CHUNK_BYTES):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def diagnose(source_png: Path, host_input: Path) -> dict[str, object]:
@@ -35,34 +40,40 @@ def diagnose(source_png: Path, host_input: Path) -> dict[str, object]:
     if metadata["bit_depth"] != 8:
         raise InputError("source PNG must be RGBA8")
     expected_bytes = width * height * 4 * 2
-    raw = host_input.read_bytes()
-    if len(raw) != expected_bytes:
+    actual_bytes = host_input.stat().st_size
+    if actual_bytes != expected_bytes:
         raise InputError(
-            f"host input byte count is {len(raw)}, expected {expected_bytes}"
+            f"host input byte count is {actual_bytes}, expected {expected_bytes}"
         )
-    actual = struct.unpack(f"<{width * height * 4}H", raw)
 
     mismatches = 0
     maxima = [0, 0, 0, 0]
     first = None
-    for index, (sample8, sample16) in enumerate(zip(rgba, actual)):
-        # AE_Macros.h CONVERT8TO16 with PF_MAX_CHAN16=32768.
-        expected = (sample8 * 32768 + 127) // 255
-        delta = abs(sample16 - expected)
-        channel = index % 4
-        maxima[channel] = max(maxima[channel], delta)
-        if delta:
-            mismatches += 1
-            if first is None:
-                pixel = index // 4
-                first = {
-                    "x": pixel % width,
-                    "y": pixel // width,
-                    "channel": CHANNELS[channel],
-                    "source_rgba8": sample8,
-                    "expected_argb16_value": expected,
-                    "actual_argb16_value": sample16,
-                }
+    raw_hash = hashlib.sha256()
+    index = 0
+    with host_input.open("rb") as handle:
+        while chunk := handle.read(RAW_CHUNK_BYTES):
+            raw_hash.update(chunk)
+            for (sample16,) in struct.iter_unpack("<H", chunk):
+                sample8 = rgba[index]
+                # AE_Macros.h CONVERT8TO16 with PF_MAX_CHAN16=32768.
+                expected = (sample8 * 32768 + 127) // 255
+                delta = abs(sample16 - expected)
+                channel = index % 4
+                maxima[channel] = max(maxima[channel], delta)
+                if delta:
+                    mismatches += 1
+                    if first is None:
+                        pixel = index // 4
+                        first = {
+                            "x": pixel % width,
+                            "y": pixel // width,
+                            "channel": CHANNELS[channel],
+                            "source_rgba8": sample8,
+                            "expected_argb16_value": expected,
+                            "actual_argb16_value": sample16,
+                        }
+                index += 1
 
     return {
         "schema_version": 1,
@@ -76,7 +87,7 @@ def diagnose(source_png: Path, host_input: Path) -> dict[str, object]:
         },
         "hashes": {
             "source_png_sha256": _sha256(source_png),
-            "host_input_raw_sha256": _sha256(host_input),
+            "host_input_raw_sha256": raw_hash.hexdigest(),
         },
         "mismatched_channels": mismatches,
         "max_abs_error": dict(zip(CHANNELS, maxima)),
