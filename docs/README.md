@@ -30,6 +30,10 @@ repository has a short entry point and a durable place for longer plans.
 - `MASKOFFSET_SECOND_FIXTURE_2026-07-13.md`
   - Records the fixed identity, isolated L1/L2 evidence, descriptor promotion,
     and remaining render work for the second owner-authored AEX fixture.
+- `EVIDENCE_POLICY_2026-07-18.md`
+  - Shifts the regression axis from frozen-identity re-assertion to
+    machine-portable behavioral self-tests, while keeping runtime identity
+    pinning, native-execution receipts, and claim stratification.
 
 ## Related Sources
 

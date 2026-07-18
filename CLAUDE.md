@@ -20,6 +20,9 @@ and bounded image input/output are now the main implementation path.
   not crashes or fixture-specific silent success.
 - The worker is crash containment and integrity hardening, not a confidentiality
   sandbox. Do not claim that it prevents user-token filesystem or network access.
+- Prefer machine-portable behavioral self-tests for new compatibility work, and
+  update frozen evidence values or worker trust constants only through the
+  `tools/refresh-*-evidence.ps1` scripts (`docs/EVIDENCE_POLICY_2026-07-18.md`).
 
 ## Canonical Verification
 
