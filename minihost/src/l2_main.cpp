@@ -4344,7 +4344,7 @@ UtilitySuite3 g_utility_suite3{{}, &register_with_aegp};
 PfInterfaceSuite g_pf_interface_suite{&get_effect_layer, &get_new_effect_for_effect,
     &convert_effect_to_comp_time, &get_effect_camera,
     &get_effect_camera_matrix};
-std::array<void*, 16> g_aegp_effect_suite3{};
+std::array<void*, 17> g_aegp_effect_suite3{};
 std::array<void*, 19> g_aegp_stream_suite2{};
 std::array<void*, 14> g_aegp_dynamic_stream_suite2{};
 int32_t __cdecl aegp_get_new_effect_stream_by_index_v2(
@@ -10279,9 +10279,77 @@ struct SwitchPipeProbe {
   ~SwitchPipeProbe() { stop(); }
 };
 bool g_aegp_effect_live = false;
+constexpr std::size_t kAegpEffectInstanceCapacity = 8;
+constexpr std::size_t kAegpEffectLeaseCapacity = 16;
+struct AegpEffectInstance {
+  void* layer{};
+  int32_t installed_key{};
+  uint32_t generation{};
+  bool occupied{};
+};
+struct AegpEffectLease {
+  int32_t owner_plugin_id{};
+  uint32_t instance_index{};
+  uint32_t instance_generation{};
+  uint32_t generation{};
+  bool live{};
+};
+std::array<AegpEffectInstance, kAegpEffectInstanceCapacity> g_aegp_effect_instances{{
+    {&g_aegp_layers[0], 3001, 1, true}}};
+std::array<AegpEffectLease, kAegpEffectLeaseCapacity> g_aegp_effect_leases{};
+uint32_t g_aegp_effect_lease_generation{};
+
+void* effect_lease_handle(std::size_t slot, uint32_t generation) {
+  const uintptr_t value = (static_cast<uintptr_t>(generation) << 8) |
+      (static_cast<uintptr_t>(slot) << 2) | 1;
+  return value > 1 ? reinterpret_cast<void*>(value) : nullptr;
+}
+const AegpEffectInstance* resolve_effect_instance(void* effect, int32_t owner = 0,
+                                                  std::size_t* index = nullptr) {
+  // PF-interface callers historically receive this stable host-owned reference.
+  if (effect == &g_aegp_effect && g_aegp_effect_live) {
+    if (index) *index = 0;
+    return &g_aegp_effect_instances[0];
+  }
+  const uintptr_t value = reinterpret_cast<uintptr_t>(effect);
+  if (!effect || (value & 3) != 1) return nullptr;
+  const std::size_t slot = (value >> 2) & 0x3f;
+  const uint32_t generation = static_cast<uint32_t>(value >> 8);
+  if (slot >= g_aegp_effect_leases.size()) return nullptr;
+  const auto& lease = g_aegp_effect_leases[slot];
+  if (!lease.live || lease.generation != generation ||
+      (owner > 0 && lease.owner_plugin_id != owner) ||
+      lease.instance_index >= g_aegp_effect_instances.size()) return nullptr;
+  const auto& instance = g_aegp_effect_instances[lease.instance_index];
+  if (!instance.occupied || instance.generation != lease.instance_generation) return nullptr;
+  if (index) *index = lease.instance_index;
+  return &instance;
+}
+bool acquire_effect_lease(int32_t plugin_id, std::size_t instance_index, void** output) {
+  if (plugin_id <= 0 || !output || instance_index >= g_aegp_effect_instances.size() ||
+      !g_aegp_effect_instances[instance_index].occupied) return false;
+  for (std::size_t slot = 0; slot < g_aegp_effect_leases.size(); ++slot) {
+    auto& lease = g_aegp_effect_leases[slot];
+    if (lease.live) continue;
+    uint32_t generation = ++g_aegp_effect_lease_generation;
+    if (generation == 0) generation = ++g_aegp_effect_lease_generation;
+    void* handle = effect_lease_handle(slot, generation);
+    if (!handle) return false;
+    lease = {plugin_id, static_cast<uint32_t>(instance_index),
+             g_aegp_effect_instances[instance_index].generation, generation, true};
+    *output = handle;
+    ++g_aegp_effect_acquires;
+    return true;
+  }
+  return false;
+}
+bool any_effect_lease_live() {
+  return std::any_of(g_aegp_effect_leases.begin(), g_aegp_effect_leases.end(),
+                     [](const auto& lease) { return lease.live; });
+}
 bool layer_effect_boundary_is_live(const AegpLayerRenderOptionsValue& options) {
   return options.effect_boundary == AegpLayerEffectBoundary::all ||
-      (options.upstream_effect == &g_aegp_effect && g_aegp_effect_live);
+      resolve_effect_instance(options.upstream_effect, options.owner_plugin_id) != nullptr;
 }
 struct AegpInstalledEffectRecord {
   int32_t key;
@@ -10289,6 +10357,7 @@ struct AegpInstalledEffectRecord {
   const char* match_name;
   const char* category;
 };
+const AegpInstalledEffectRecord* find_installed_effect(int32_t key);
 constexpr int32_t kAegpInstalledEffectKeyNone = 0;
 constexpr std::size_t kAegpMaxEffectCategoryNameSize = 128;
 constexpr std::array<AegpInstalledEffectRecord, 1> kAegpInstalledEffects{{
@@ -10302,12 +10371,16 @@ struct AegpTransformStream {
   bool effect_param{};
   bool live{};
   bool value_live{};
+  uint32_t effect_instance_index{};
+  uint32_t effect_instance_generation{};
 } g_aegp_transform_stream;
 struct AegpLegacyEffectStream {
   AegpSceneObject object{0x53545232};
   int32_t param_index{-1};
   bool live{};
   bool hidden{};
+  uint32_t effect_instance_index{};
+  uint32_t effect_instance_generation{};
 };
 std::array<AegpLegacyEffectStream, 6> g_aegp_legacy_effect_streams{};
 struct AegpStreamValue {
@@ -10653,41 +10726,77 @@ int32_t __cdecl aegp_get_layer_num_effects(void* layer, int32_t* count) {
   const int32_t index = aegp_layer_index(layer);
   if (index < 0 || !count) return 4;
   ++g_aegp_effect_count_calls;
-  *count = index == 0 ? 1 : 0;
+  *count = static_cast<int32_t>(std::count_if(g_aegp_effect_instances.begin(),
+      g_aegp_effect_instances.end(), [layer](const auto& instance) {
+        return instance.occupied && instance.layer == layer;
+      }));
   return 0;
 }
 int32_t __cdecl aegp_get_layer_effect_by_index(
     int32_t plugin_id, void* layer, int32_t index, void** effect) {
-  if (plugin_id <= 0 || layer != &g_aegp_layers[0] || index != 0 || !effect ||
-      g_aegp_effect_live) return 4;
-  g_aegp_effect_live = true;
-  ++g_aegp_effect_acquires;
-  *effect = &g_aegp_effect;
-  return 0;
+  if (plugin_id <= 0 || aegp_layer_index(layer) < 0 || index < 0 || !effect) return 4;
+  int32_t current = 0;
+  for (std::size_t slot = 0; slot < g_aegp_effect_instances.size(); ++slot) {
+    const auto& instance = g_aegp_effect_instances[slot];
+    if (!instance.occupied || instance.layer != layer) continue;
+    if (current++ == index) return acquire_effect_lease(plugin_id, slot, effect) ? 0 : 4;
+  }
+  return 4;
 }
 int32_t __cdecl aegp_get_installed_key_from_layer_effect(void* effect, int32_t* key) {
-  if (effect != &g_aegp_effect || !g_aegp_effect_live || !key) return 4;
+  const auto* instance = resolve_effect_instance(effect);
+  if (!instance || !key) return 4;
   ++g_aegp_effect_metadata_calls;
-  *key = kAegpInstalledEffects[0].key;
+  *key = instance->installed_key;
   return 0;
 }
 int32_t __cdecl aegp_get_effect_flags(void* effect, uint32_t* flags) {
-  if (effect != &g_aegp_effect || !g_aegp_effect_live || !flags) return 4;
+  if (!resolve_effect_instance(effect) || !flags) return 4;
   ++g_aegp_effect_metadata_calls;
   *flags = 1;
   return 0;
 }
 int32_t __cdecl aegp_dispose_effect(void* effect) {
-  if (effect != &g_aegp_effect || !g_aegp_effect_live) return 4;
-  g_aegp_effect_live = false;
+  if (effect == &g_aegp_effect) {
+    if (!g_aegp_effect_live) return 4;
+    g_aegp_effect_live = false;
+    ++g_aegp_effect_disposes;
+    return 0;
+  }
+  const uintptr_t value = reinterpret_cast<uintptr_t>(effect);
+  if ((value & 3) != 1 || !resolve_effect_instance(effect)) return 4;
+  const std::size_t slot = (value >> 2) & 0x3f;
+  g_aegp_effect_leases[slot].live = false;
   ++g_aegp_effect_disposes;
+  return 0;
+}
+int32_t __cdecl aegp_apply_effect(
+    int32_t plugin_id, void* layer, int32_t installed_key, void** effect) {
+  if (plugin_id <= 0 || aegp_layer_index(layer) < 0 || !effect ||
+      !find_installed_effect(installed_key)) return 4;
+  const auto instance_slot = std::find_if(g_aegp_effect_instances.begin(),
+      g_aegp_effect_instances.end(), [](const auto& instance) { return !instance.occupied; });
+  const auto lease_slot = std::find_if(g_aegp_effect_leases.begin(),
+      g_aegp_effect_leases.end(), [](const auto& lease) { return !lease.live; });
+  if (instance_slot == g_aegp_effect_instances.end() ||
+      lease_slot == g_aegp_effect_leases.end()) return 4;
+  const std::size_t instance_index = static_cast<std::size_t>(
+      std::distance(g_aegp_effect_instances.begin(), instance_slot));
+  uint32_t generation = instance_slot->generation + 1;
+  if (generation == 0) generation = 1;
+  *instance_slot = {layer, installed_key, generation, true};
+  if (!acquire_effect_lease(plugin_id, instance_index, effect)) {
+    *instance_slot = {};
+    return 4;
+  }
+  bump_render_project_timestamp();
   return 0;
 }
 int32_t __cdecl get_new_effect_for_effect(int32_t plugin_id, void* effect, void** effect_ref) {
   if (plugin_id <= 0 || effect != &g_effect || !effect_ref || g_aegp_effect_live) return 4;
   g_aegp_effect_live = true;
-  ++g_aegp_effect_acquires;
   *effect_ref = &g_aegp_effect;
+  ++g_aegp_effect_acquires;
   return 0;
 }
 uintptr_t layer_render_options_key(void* handle) {
@@ -10743,12 +10852,13 @@ int32_t __cdecl new_layer_render_options(int32_t plugin_id, void* layer, void** 
 int32_t __cdecl new_from_upstream_of_effect(
     int32_t plugin_id, void* effect, void** output) {
   if (output) *output = nullptr;
-  if (plugin_id <= 0 || effect != &g_aegp_effect || !g_aegp_effect_live || !output) {
+  const auto* instance = resolve_effect_instance(effect, plugin_id);
+  if (plugin_id <= 0 || !instance || !output) {
     ++g_invalid_layer_render_options_operations; return 4;
   }
   AegpLayerRenderOptionsValue value{};
   value.owner_plugin_id = plugin_id;
-  value.layer = &g_aegp_layers[0];
+  value.layer = instance->layer;
   value.upstream_effect = effect;
   value.effect_boundary = AegpLayerEffectBoundary::upstream;
   return insert_layer_render_options(value, output);
@@ -10756,12 +10866,13 @@ int32_t __cdecl new_from_upstream_of_effect(
 int32_t __cdecl new_from_downstream_of_effect(
     int32_t plugin_id, void* effect, void** output) {
   if (output) *output = nullptr;
-  if (plugin_id <= 0 || effect != &g_aegp_effect || !g_aegp_effect_live || !output) {
+  const auto* instance = resolve_effect_instance(effect, plugin_id);
+  if (plugin_id <= 0 || !instance || !output) {
     ++g_invalid_layer_render_options_operations; return 4;
   }
   AegpLayerRenderOptionsValue value{};
   value.owner_plugin_id = plugin_id;
-  value.layer = &g_aegp_layers[0];
+  value.layer = instance->layer;
   value.upstream_effect = effect;
   value.effect_boundary = AegpLayerEffectBoundary::downstream;
   return insert_layer_render_options(value, output);
@@ -10891,7 +11002,7 @@ int32_t __cdecl aegp_get_effect_category(int32_t key, char* category) {
   return 0;
 }
 int32_t __cdecl aegp_get_effect_num_param_streams(void* effect, int32_t* count) {
-  if (effect != &g_aegp_effect || !g_aegp_effect_live || !count) return 4;
+  if (!resolve_effect_instance(effect) || !count) return 4;
   *count = 5;
   return 0;
 }
@@ -10914,13 +11025,17 @@ int32_t __cdecl aegp_get_new_layer_stream(
 }
 int32_t __cdecl aegp_get_new_effect_stream_by_index(
     int32_t plugin_id, void* effect, int32_t index, void** stream) {
-  if (plugin_id <= 0 || effect != &g_aegp_effect || !g_aegp_effect_live ||
+  std::size_t instance_index = 0;
+  const auto* instance = resolve_effect_instance(effect, plugin_id, &instance_index);
+  if (plugin_id <= 0 || !instance ||
       index < 1 || index > 4 || !stream || g_aegp_transform_stream.live) return 4;
   g_aegp_transform_stream.selector = index;
-  g_aegp_transform_stream.layer = &g_aegp_layers[0];
+  g_aegp_transform_stream.layer = instance->layer;
   g_aegp_transform_stream.effect_param = true;
   g_aegp_transform_stream.live = true;
   g_aegp_transform_stream.value_live = false;
+  g_aegp_transform_stream.effect_instance_index = static_cast<uint32_t>(instance_index);
+  g_aegp_transform_stream.effect_instance_generation = instance->generation;
   ++g_aegp_stream_acquires;
   *stream = &g_aegp_transform_stream.object;
   return 0;
@@ -11055,6 +11170,8 @@ int32_t __cdecl aegp_dispose_stream(void* stream) {
   g_aegp_transform_stream.selector = -1;
   g_aegp_transform_stream.layer = nullptr;
   g_aegp_transform_stream.effect_param = false;
+  g_aegp_transform_stream.effect_instance_index = 0;
+  g_aegp_transform_stream.effect_instance_generation = 0;
   ++g_aegp_stream_disposes;
   return 0;
 }
@@ -11077,6 +11194,7 @@ static_assert(sizeof(g_aegp_layer_suite5) == 368);
 static_assert(sizeof(g_aegp_layer_suite8) == 400);
 static_assert(sizeof(g_aegp_layer_suite9) == 424);
 static_assert(sizeof(g_aegp_effect_suite4) == 176);
+static_assert(sizeof(g_aegp_effect_suite3) == 136);
 static_assert(sizeof(g_aegp_stream_suite6) == 184);
 static_assert(sizeof(g_aegp_keyframe_suite5) == 176);
 
@@ -12360,6 +12478,7 @@ int32_t __cdecl acquire_suite(const char* name, int32_t version, const void** su
     g_aegp_effect_suite4[3] = reinterpret_cast<void*>(&aegp_get_effect_param_union_by_index_v3);
     g_aegp_effect_suite4[4] = reinterpret_cast<void*>(&aegp_get_effect_flags);
     g_aegp_effect_suite4[8] = reinterpret_cast<void*>(&aegp_dispose_effect);
+    g_aegp_effect_suite4[9] = reinterpret_cast<void*>(&aegp_apply_effect);
     g_aegp_effect_suite4[11] = reinterpret_cast<void*>(&aegp_get_num_installed_effects);
     g_aegp_effect_suite4[12] = reinterpret_cast<void*>(&aegp_get_next_installed_effect);
     g_aegp_effect_suite4[13] = reinterpret_cast<void*>(&aegp_get_effect_name);
@@ -12770,8 +12889,13 @@ int32_t __cdecl acquire_suite(const char* name, int32_t version, const void** su
   if (name && std::strcmp(name, "AEGP Effect Suite") == 0 &&
       (version == 2 || version == 3)) {
     g_aegp_effect_suite3.fill(reinterpret_cast<void*>(&aegp_unsupported_suite_call));
+    g_aegp_effect_suite3[0] = reinterpret_cast<void*>(&aegp_get_layer_num_effects);
+    g_aegp_effect_suite3[1] = reinterpret_cast<void*>(&aegp_get_layer_effect_by_index);
+    g_aegp_effect_suite3[2] = reinterpret_cast<void*>(&aegp_get_installed_key_from_layer_effect);
     g_aegp_effect_suite3[3] = reinterpret_cast<void*>(&aegp_get_effect_param_union_by_index_v3);
+    g_aegp_effect_suite3[4] = reinterpret_cast<void*>(&aegp_get_effect_flags);
     g_aegp_effect_suite3[8] = reinterpret_cast<void*>(&aegp_dispose_effect);
+    g_aegp_effect_suite3[9] = reinterpret_cast<void*>(&aegp_apply_effect);
     *suite = g_aegp_effect_suite3.data();
     record_suite_acquire(name, version);
     return 0;
@@ -13624,7 +13748,9 @@ int32_t composite_rect_registered(void* effect_ref, LegacyRect* source_rect,
 }
 int32_t __cdecl aegp_get_new_effect_stream_by_index_v2(
     int32_t plugin_id, void* effect, int32_t index, void** stream) {
-  if (plugin_id <= 0 || effect != &g_aegp_effect || !g_aegp_effect_live || !stream ||
+  std::size_t instance_index = 0;
+  const auto* instance = resolve_effect_instance(effect, plugin_id, &instance_index);
+  if (plugin_id <= 0 || !instance || !stream ||
       index <= 0 || index >= static_cast<int32_t>(g_aegp_legacy_effect_streams.size()) ||
       static_cast<std::size_t>(index) >= g_active_ui_param_count) return 4;
   auto& value = g_aegp_legacy_effect_streams[static_cast<std::size_t>(index)];
@@ -13632,6 +13758,8 @@ int32_t __cdecl aegp_get_new_effect_stream_by_index_v2(
   value.param_index = index;
   value.live = true;
   value.hidden = false;
+  value.effect_instance_index = static_cast<uint32_t>(instance_index);
+  value.effect_instance_generation = instance->generation;
   ++g_aegp_stream_acquires;
   *stream = &value.object;
   return 0;
@@ -13647,6 +13775,8 @@ int32_t __cdecl aegp_dispose_stream_v2(void* stream) {
   if (!value) return 4;
   value->live = false;
   value->param_index = -1;
+  value->effect_instance_index = 0;
+  value->effect_instance_generation = 0;
   ++g_aegp_stream_disposes;
   return 0;
 }
@@ -13660,7 +13790,7 @@ int32_t __cdecl aegp_set_dynamic_stream_flag_v2(
 }
 int32_t __cdecl aegp_get_effect_param_union_by_index_v3(
     int32_t plugin_id, void* effect, int32_t index, int32_t* type, void* param_union) {
-  if (plugin_id <= 0 || effect != &g_aegp_effect || !g_aegp_effect_live || !type ||
+  if (plugin_id <= 0 || !resolve_effect_instance(effect, plugin_id) || !type ||
       !param_union || index < 0 || index >= 5) return 4;
   // AEGP effect inspection is independent of PF selector-local parameter
   // buffers. These are definition unions for the bounded synthetic scene,
@@ -20555,7 +20685,109 @@ bool verify_aegp_get_effect_camera() {
   return ok && suite_leases_balanced();
 }
 
+bool verify_aegp_apply_effect() {
+  const auto saved_instances = g_aegp_effect_instances;
+  const auto saved_leases = g_aegp_effect_leases;
+  const bool saved_live = g_aegp_effect_live;
+  const bool saved_mode = g_aegp_comp_idle_roundtrip_mode;
+  const uint32_t timestamp_before = g_render_project_timestamp.load();
+  g_aegp_effect_instances = {};
+  g_aegp_effect_instances[0] = {&g_aegp_layers[0], kAegpInstalledEffects[0].key, 1, true};
+  g_aegp_effect_leases = {};
+  g_aegp_effect_live = false;
+  g_aegp_comp_idle_roundtrip_mode = true;
+
+  const void* suite2 = nullptr;
+  const void* suite3 = nullptr;
+  const void* suite4 = nullptr;
+  bool ok = acquire_suite("AEGP Effect Suite", 2, &suite2) == 0 &&
+      acquire_suite("AEGP Effect Suite", 3, &suite3) == 0 &&
+      acquire_suite("AEGP Effect Suite", 4, &suite4) == 0;
+  if (suite2 && suite3 && suite4) {
+    ok = ok && static_cast<void* const*>(const_cast<void*>(suite2))[9] ==
+                   reinterpret_cast<void*>(&aegp_apply_effect) &&
+        static_cast<void* const*>(const_cast<void*>(suite3))[9] ==
+                   reinterpret_cast<void*>(&aegp_apply_effect) &&
+        static_cast<void* const*>(const_cast<void*>(suite4))[9] ==
+                   reinterpret_cast<void*>(&aegp_apply_effect);
+  }
+
+  int32_t layer0_count = -1;
+  int32_t layer1_count = -1;
+  void* applied = reinterpret_cast<void*>(static_cast<uintptr_t>(0x1234));
+  ok = ok && aegp_get_layer_num_effects(&g_aegp_layers[0], &layer0_count) == 0 &&
+      layer0_count == 1 && aegp_get_layer_num_effects(&g_aegp_layers[1], &layer1_count) == 0 &&
+      layer1_count == 0 && aegp_apply_effect(7, &g_aegp_layers[1],
+          kAegpInstalledEffects[0].key, &applied) == 0 && applied &&
+      applied != reinterpret_cast<void*>(static_cast<uintptr_t>(0x1234));
+  ok = ok && aegp_get_layer_num_effects(&g_aegp_layers[1], &layer1_count) == 0 &&
+      layer1_count == 1;
+
+  void* stream = nullptr;
+  ok = ok && aegp_get_new_effect_stream_by_index(7, applied, 1, &stream) == 0 && stream &&
+      g_aegp_transform_stream.layer == &g_aegp_layers[1] &&
+      g_aegp_transform_stream.effect_instance_index == 1 &&
+      g_aegp_transform_stream.effect_instance_generation ==
+          g_aegp_effect_instances[1].generation &&
+      aegp_dispose_stream(stream) == 0;
+  void* unchanged = reinterpret_cast<void*>(static_cast<uintptr_t>(0x5678));
+  const auto scene_before_failures = g_aegp_effect_instances;
+  const uint32_t timestamp_after_apply = g_render_project_timestamp.load();
+  ok = ok && aegp_get_new_effect_stream_by_index(8, applied, 1, &unchanged) == 4 &&
+      unchanged == reinterpret_cast<void*>(static_cast<uintptr_t>(0x5678)) &&
+      aegp_apply_effect(7, nullptr, kAegpInstalledEffects[0].key, &unchanged) == 4 &&
+      aegp_apply_effect(7, &g_aegp_layers[1], 9999, &unchanged) == 4 &&
+      aegp_apply_effect(7, &g_aegp_layers[1], kAegpInstalledEffects[0].key, nullptr) == 4 &&
+      unchanged == reinterpret_cast<void*>(static_cast<uintptr_t>(0x5678)) &&
+      std::memcmp(g_aegp_effect_instances.data(), scene_before_failures.data(),
+                  sizeof(g_aegp_effect_instances)) == 0 &&
+      g_render_project_timestamp.load() == timestamp_after_apply;
+
+  std::array<void*, kAegpEffectInstanceCapacity - 2> more{};
+  for (std::size_t i = 0; ok && i < more.size(); ++i)
+    ok = aegp_apply_effect(7, &g_aegp_layers[2], kAegpInstalledEffects[0].key,
+                          &more[i]) == 0;
+  unchanged = reinterpret_cast<void*>(static_cast<uintptr_t>(0x9abc));
+  const auto full_scene = g_aegp_effect_instances;
+  ok = ok && aegp_apply_effect(7, &g_aegp_layers[2], kAegpInstalledEffects[0].key,
+                              &unchanged) == 4 &&
+      unchanged == reinterpret_cast<void*>(static_cast<uintptr_t>(0x9abc)) &&
+      std::memcmp(g_aegp_effect_instances.data(), full_scene.data(),
+                  sizeof(g_aegp_effect_instances)) == 0;
+
+  const void* stale = applied;
+  int32_t key = -1;
+  ok = ok && aegp_dispose_effect(applied) == 0 &&
+      aegp_get_installed_key_from_layer_effect(const_cast<void*>(stale), &key) == 4 &&
+      aegp_dispose_effect(const_cast<void*>(stale)) == 4 &&
+      aegp_dispose_effect(&g_aegp_effect) == 4;
+  void* reacquired = nullptr;
+  ok = ok && aegp_get_layer_effect_by_index(7, &g_aegp_layers[1], 0, &reacquired) == 0 &&
+      reacquired != stale && aegp_get_installed_key_from_layer_effect(reacquired, &key) == 0 &&
+      key == kAegpInstalledEffects[0].key && aegp_dispose_effect(reacquired) == 0;
+  for (void* lease : more) if (lease) ok = aegp_dispose_effect(lease) == 0 && ok;
+
+  ok = release_suite("AEGP Effect Suite", 4) == 0 && ok;
+  ok = release_suite("AEGP Effect Suite", 3) == 0 && ok;
+  ok = release_suite("AEGP Effect Suite", 2) == 0 && ok;
+  g_aegp_effect_instances = saved_instances;
+  g_aegp_effect_leases = saved_leases;
+  g_aegp_effect_live = saved_live;
+  g_aegp_comp_idle_roundtrip_mode = saved_mode;
+  return ok && timestamp_before != timestamp_after_apply && suite_leases_balanced();
+}
+
 int wmain(int argc, wchar_t **argv) {
+  if (argc == 2 && std::wstring(argv[1]) == L"--self-test-aegp-apply-effect") {
+    const bool passed = verify_aegp_apply_effect();
+    std::cout << "{\"aegp_apply_effect\":\"" << (passed ? "passed" : "failed")
+              << "\",\"suite_versions\":[2,3,4],\"apply_slot\":9,"
+                 "\"apply_offset_x64\":72,\"table_sizes_x64\":[136,136,176],"
+                 "\"instance_capacity\":" << kAegpEffectInstanceCapacity
+              << ",\"lease_capacity\":" << kAegpEffectLeaseCapacity
+              << ",\"fail_closed\":true}\n";
+    return passed ? 0 : 69;
+  }
   if (argc == 2 && std::wstring(argv[1]) == L"--self-test-aegp-resizer-3d") {
     const bool passed = verify_aegp_resizer_3d_chain();
     std::cout << "{\"aegp_resizer_3d\":\"" << (passed ? "passed" : "failed")
@@ -21606,8 +21838,8 @@ int wmain(int argc, wchar_t **argv) {
     const bool isolated_comp_cache = g_aegp_comp_idle_roundtrip_mode &&
         isolated_aegp_read_cache_is_bounded();
     const bool leases_balanced = live_suite_references == 0 || isolated_item_cache || isolated_comp_cache;
-    const bool effect_lifetimes_balanced =
-        !g_aegp_effect_live && g_aegp_effect_acquires == g_aegp_effect_disposes;
+    const bool effect_lifetimes_balanced = !g_aegp_effect_live &&
+        !any_effect_lease_live() && g_aegp_effect_acquires == g_aegp_effect_disposes;
     const bool stream_lifetimes_balanced = !g_aegp_transform_stream.live &&
         !g_aegp_transform_stream.value_live &&
         g_aegp_stream_acquires == g_aegp_stream_disposes &&

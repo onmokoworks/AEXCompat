@@ -49,6 +49,13 @@ are independently written. External SDK material remains outside `minihost/`;
 only audited numeric/order facts and conformance observations cross the
 instrument boundary.
 
+AEGP Effect Suite v2/v3/v4 follows the same boundary. External SDK headers are
+used only by a temporary conformance translation unit to audit the
+`AEGP_ApplyEffect` signature, slot 9 / x64 offset 72, and table sizes
+136/136/176 bytes. The 17/17/22-entry tables, instance registry, and opaque
+lease representation in `minihost` are independently authored and do not
+include or redistribute Adobe headers.
+
 AEGP Dynamic Stream Suite v4 uses the same cleanroom rule for its 26-entry
 table, grouping/flag values, match-name buffers, and UTF-16 naming boundary.
 The local property-tree and StreamValue declarations are independently

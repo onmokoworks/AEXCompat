@@ -9,7 +9,7 @@
                                     "release_harness":  {
                                                             "path":  "broker/target/release/aexcompat-harness.exe",
                                                             "size_bytes":  9945600,
-                                                            "sha256":  "67e9ac8e731f5a3514e43c85f35095d4a027e00541f2d16a34c679d3213956d4"
+                                                            "sha256":  "0927d2ec34677b3326d210fa482ccf9035891413a03e25134f197238939b378f"
                                                         },
                                     "sdk_shifter_fixture":  {
                                                                 "path":  "target/sdk-fixtures/shifter/Shifter.aex",

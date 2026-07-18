@@ -12,8 +12,8 @@
                                                 },
                                     "worker":  {
                                                    "path":  "target/minihost-build/aex_render_worker.exe",
-                                                   "size_bytes":  788480,
-                                                   "sha256":  "5f97c3d41a7d9149feab14ac5f892f3bcb88a2d3d38dd8694f9b84f0ddefab47"
+                                                   "size_bytes":  796160,
+                                                   "sha256":  "f182e70fa70a4f38c29736994e936dd61c0b46138fc30a570c3ac868b54e1202"
                                                },
                                     "input":  {
                                                   "path":  "target/image-transport/colorgrid-click-input.rgba",

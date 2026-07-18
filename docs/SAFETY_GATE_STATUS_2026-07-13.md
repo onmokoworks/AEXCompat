@@ -185,6 +185,15 @@ MaskOffset rendering under the Job Object boundary. Each run recorded nine
 metadata queries, one duplicate ref, two intentional rejections, intact guards,
 and fully balanced mask/stream/value lifetimes.
 
+AEGP Effect Suite v2/v3/v4 effect application is bounded to eight hosted
+instances and sixteen generation-tagged leases. Apply rejects invalid plug-in
+owners, layers, installed keys, exhausted capacity, stale references, and
+foreign references without publishing a partial instance. Dispose invalidates
+the lease before reuse, and parameter streams retain their parent instance
+identity. The fixed `aegp_apply_effect` self-test passes in the L2, Classic
+render, and SmartFX workers; the refreshed real-AEX render and SmartFX safety
+gates remain passing.
+
 AEGP Keyframe Suite v5 now exposes all 22 callback slots and bounds each mask
 outline stream to 64 time-sorted keyframes and 256 concurrent checked values.
 Keyframe values are independently
