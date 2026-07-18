@@ -1050,6 +1050,18 @@ uint32_t g_checkout_time_scale = 0;
 std::array<int32_t, 4> g_input_checkout_request{-1, -1, -1, -1};
 std::array<int32_t, 4> g_map_checkout_request{-1, -1, -1, -1};
 std::string g_smart_pixel_format = "argb8";
+// Opt-in world snapshot dumps and output checksum detail (issue #19). Both
+// default off; the broker enables them per run with the --dump-worlds-v1 and
+// --output-checksum-detail-v1 argv trailers, and the dump directory is
+// broker-managed. Raw pixel bytes never enter the JSON report; only counts,
+// row CRCs, and channel digests do.
+std::filesystem::path g_dump_worlds_dir;
+uint32_t g_world_dumps_written = 0;
+uint32_t g_world_dumps_skipped = 0;
+uint64_t g_world_dump_bytes = 0;
+bool g_output_checksum_detail = false;
+std::vector<uint32_t> g_output_row_crc32;
+std::array<std::string, 4> g_output_channel_sha256;
 int32_t g_smart_rowbytes = 64;
 bool g_mask_model_enabled = false;
 enum class MaskFault { None, CountError, CountCrash };
@@ -18859,6 +18871,108 @@ void argb_to_rgba_native(void* rgba, const void* source, int32_t pixel_bytes) {
   }
 }
 
+// World snapshot dump caps: a debug run never writes more than 32 snapshots
+// or 1 GiB in total; anything beyond is counted as skipped, not an error.
+constexpr uint32_t kMaxWorldDumps = 32;
+constexpr uint64_t kMaxWorldDumpBytes = 1ull << 30;
+
+const char* world_dump_extension(int32_t pixel_bytes) {
+  return pixel_bytes == 16 ? "rgba32f-le" : (pixel_bytes == 8 ? "rgba16le" : "rgba8");
+}
+
+// Write one packed-ARGB world as raw RGBA in the byte layout that
+// tools/compare-pixel-oracles.py consumes (rgba8 / rgba16le / rgba32f-le,
+// row-major, no stride padding). Little-endian is the only supported target.
+void dump_world_snapshot(const std::string& stage, const unsigned char* packed_argb,
+                         int32_t width, int32_t height, int32_t pixel_bytes) {
+  if (g_dump_worlds_dir.empty() || !packed_argb || width <= 0 || height <= 0) return;
+  const uint64_t bytes = static_cast<uint64_t>(width) * height * pixel_bytes;
+  if (g_world_dumps_written >= kMaxWorldDumps ||
+      bytes > kMaxWorldDumpBytes - g_world_dump_bytes) {
+    ++g_world_dumps_skipped;
+    return;
+  }
+  std::vector<unsigned char> rgba(static_cast<std::size_t>(bytes));
+  const std::size_t pixels = static_cast<std::size_t>(width) * height;
+  for (std::size_t pixel = 0; pixel < pixels; ++pixel)
+    argb_to_rgba_native(rgba.data() + pixel * pixel_bytes,
+                        packed_argb + pixel * pixel_bytes, pixel_bytes);
+  char name[128];
+  std::snprintf(name, sizeof(name), "%03u-%s-%dx%d.%s", g_world_dumps_written,
+                stage.c_str(), width, height, world_dump_extension(pixel_bytes));
+  std::ofstream file(g_dump_worlds_dir / name, std::ios::binary | std::ios::out);
+  if (!file || !file.write(reinterpret_cast<const char*>(rgba.data()), rgba.size())) {
+    ++g_world_dumps_skipped;
+    return;
+  }
+  ++g_world_dumps_written;
+  g_world_dump_bytes += bytes;
+}
+
+uint32_t crc32_ieee(const unsigned char* data, std::size_t size) {
+  static const auto table = [] {
+    std::array<uint32_t, 256> built{};
+    for (uint32_t index = 0; index < 256; ++index) {
+      uint32_t value = index;
+      for (int bit = 0; bit < 8; ++bit)
+        value = (value >> 1) ^ ((value & 1u) ? 0xEDB88320u : 0u);
+      built[index] = value;
+    }
+    return built;
+  }();
+  uint32_t crc = 0xFFFFFFFFu;
+  for (std::size_t index = 0; index < size; ++index)
+    crc = (crc >> 8) ^ table[(crc ^ data[index]) & 0xFFu];
+  return crc ^ 0xFFFFFFFFu;
+}
+
+// Record per-row CRC32 and per-channel SHA-256 of the RGBA-ordered output
+// transport bytes, so a differing region can be narrowed to rows and channels
+// without shipping any pixel content in the report.
+void record_output_checksum_detail(const unsigned char* rgba, int32_t width,
+                                   int32_t height, int32_t pixel_bytes) {
+  if (!g_output_checksum_detail || !rgba || width <= 0 || height <= 0) return;
+  const std::size_t row_bytes = static_cast<std::size_t>(width) * pixel_bytes;
+  g_output_row_crc32.clear();
+  g_output_row_crc32.reserve(static_cast<std::size_t>(height));
+  for (int32_t row = 0; row < height; ++row)
+    g_output_row_crc32.push_back(crc32_ieee(rgba + row * row_bytes, row_bytes));
+  const std::size_t sample_bytes = static_cast<std::size_t>(pixel_bytes) / 4;
+  const std::size_t pixels = static_cast<std::size_t>(width) * height;
+  std::vector<unsigned char> plane(pixels * sample_bytes);
+  for (std::size_t channel = 0; channel < 4; ++channel) {
+    for (std::size_t pixel = 0; pixel < pixels; ++pixel)
+      std::memcpy(plane.data() + pixel * sample_bytes,
+                  rgba + pixel * pixel_bytes + channel * sample_bytes, sample_bytes);
+    g_output_channel_sha256[channel] = sha256_bytes(plane.data(), plane.size());
+  }
+}
+
+// Single insertion point for both image report emitters: dump counters are
+// always present, checksum detail only when the opt-in trailer enabled it.
+std::string world_debug_report_json() {
+  std::ostringstream json;
+  json << ",\"world_dumps_written\":" << g_world_dumps_written
+       << ",\"world_dumps_skipped\":" << g_world_dumps_skipped
+       << ",\"world_dump_bytes\":" << g_world_dump_bytes;
+  if (g_output_checksum_detail) {
+    json << ",\"output_row_crc32\":[";
+    for (std::size_t row = 0; row < g_output_row_crc32.size(); ++row) {
+      if (row) json << ',';
+      char text[12];
+      std::snprintf(text, sizeof(text), "\"%08x\"", g_output_row_crc32[row]);
+      json << text;
+    }
+    json << "],\"output_channel_sha256\":[";
+    for (std::size_t channel = 0; channel < 4; ++channel) {
+      if (channel) json << ',';
+      json << '"' << g_output_channel_sha256[channel] << '"';
+    }
+    json << ']';
+  }
+  return json.str();
+}
+
 struct RenderLifecycle {
   bool sequence_started{};
   bool frame_started{};
@@ -19000,6 +19114,7 @@ int32_t render_once(EffectEntry entry, std::array<std::byte, kInSize>& input,
       std::memcpy(&source[y * rowbytes + x * pixel_bytes], pixel, pixel_bytes);
     }
   }
+  dump_world_snapshot("classic-input", logical_source.data(), width, height, pixel_bytes);
   const bool input_write_advertised =
       (read<uint32_t>(command_output, kOutFlags) & kOutFlagIWriteInputBuffer) != 0;
   if (!source.set_plugin_writable(input_write_advertised)) return -3;
@@ -19078,6 +19193,8 @@ int32_t render_once(EffectEntry entry, std::array<std::byte, kInSize>& input,
       rgba8_to_argb(pixels.data() + (offset / 4) * pixel_bytes,
                     layer.rgba.data() + offset, pixel_bytes);
     }
+    dump_world_snapshot("classic-layer-slot" + std::to_string(layer.slot),
+                        pixels.data(), layer.width, layer.height, pixel_bytes);
     auto& world = hosted_worlds[layer_index];
     write<int32_t>(world, 16, pixel_bytes == 4 ? 0 : 1);
     write<void*>(world, 24, pixels.data()); write<int32_t>(world, 32, layer.width * pixel_bytes);
@@ -19260,11 +19377,13 @@ int32_t render_once(EffectEntry entry, std::array<std::byte, kInSize>& input,
     error = 4;
   }
   if (captured_argb) *captured_argb = logical_output;
+  dump_world_snapshot("classic-output", logical_output.data(), width, height, pixel_bytes);
   if (external_output && error == 0) {
     std::vector<unsigned char> rgba(static_cast<std::size_t>(width) * height * pixel_bytes);
     for (std::size_t pixel = 0; pixel < static_cast<std::size_t>(width) * height; ++pixel)
       argb_to_rgba_native(rgba.data() + pixel * pixel_bytes,
                     logical_output.data() + pixel * pixel_bytes, pixel_bytes);
+    record_output_checksum_detail(rgba.data(), width, height, pixel_bytes);
     std::ofstream file(*external_output, std::ios::binary | std::ios::out);
     if (!file || !file.write(reinterpret_cast<const char*>(rgba.data()), rgba.size())) return -4;
   }
@@ -19516,6 +19635,8 @@ SmartResult smart_render_once(EffectEntry entry, std::array<std::byte, kInSize>&
       rgba8_to_argb(pixels.data() + (offset / 4) * pixel_bytes,
                     layer.rgba.data() + offset, pixel_bytes);
     }
+    dump_world_snapshot("smart-layer-slot" + std::to_string(layer.slot),
+                        pixels.data(), layer.width, layer.height, pixel_bytes);
     auto& world = hosted_worlds[layer_index];
     write<int32_t>(world, 16, pixel_bytes == 4 ? 0 : 1);
     write<void*>(world, 24, pixels.data()); write<int32_t>(world, 32, layer.width * pixel_bytes);
@@ -19592,6 +19713,7 @@ SmartResult smart_render_once(EffectEntry entry, std::array<std::byte, kInSize>&
     std::memcpy(pre_render_source.data() + static_cast<std::size_t>(row) * width * pixel_bytes,
                 source.data() + static_cast<std::size_t>(row) * rowbytes,
                 static_cast<std::size_t>(width) * pixel_bytes);
+  dump_world_snapshot("smart-input", pre_render_source.data(), width, height, pixel_bytes);
   // This immutable provider is published before Smart Pre-Render and remains pinned
   // through Smart Render; output pixels are never used to infer auxiliary planes.
   publish_alpha_coverage_provider(pre_render_source, width, height, pixel_bytes,
@@ -19657,11 +19779,13 @@ SmartResult smart_render_once(EffectEntry entry, std::array<std::byte, kInSize>&
     }
     result.input_hash = sha256_bytes(logical_input.data(), logical_input.size());
     result.output_hash = sha256_bytes(logical_output.data(), logical_output.size());
+    dump_world_snapshot("smart-output", logical_output.data(), width, height, pixel_bytes);
     if (external_output && result.render_error == 0) {
       std::vector<unsigned char> rgba(static_cast<std::size_t>(width) * height * pixel_bytes);
       for (std::size_t pixel = 0; pixel < static_cast<std::size_t>(width) * height; ++pixel)
         argb_to_rgba_native(rgba.data() + pixel * pixel_bytes,
                       logical_output.data() + pixel * pixel_bytes, pixel_bytes);
+      record_output_checksum_detail(rgba.data(), width, height, pixel_bytes);
       std::ofstream file(*external_output, std::ios::binary | std::ios::out);
       if (!file || !file.write(reinterpret_cast<const char*>(rgba.data()), rgba.size()))
         result.render_error = -4;
@@ -19888,6 +20012,8 @@ SmartResult smart_render_once(EffectEntry entry, std::array<std::byte, kInSize>&
                 static_cast<std::size_t>(result.output_width) * pixel_bytes);
   result.input_hash = sha256_bytes(logical_input.data(), logical_input.size());
   result.output_hash = sha256_bytes(logical_output.data(), logical_output.size());
+  dump_world_snapshot("smart-output", logical_output.data(), result.output_width,
+                      result.output_height, pixel_bytes);
   const bool output_untouched = !logical_output.empty() &&
       std::all_of(logical_output.begin(), logical_output.end(),
                   [](unsigned char byte) { return byte == 0xCC; });
@@ -19911,6 +20037,8 @@ SmartResult smart_render_once(EffectEntry entry, std::array<std::byte, kInSize>&
                                       result.output_height; ++pixel)
       argb_to_rgba_native(rgba.data() + pixel * pixel_bytes,
                     logical_output.data() + pixel * pixel_bytes, pixel_bytes);
+    record_output_checksum_detail(rgba.data(), result.output_width,
+                                  result.output_height, pixel_bytes);
     std::ofstream file(*external_output, std::ios::binary | std::ios::out);
     if (!file || !file.write(reinterpret_cast<const char*>(rgba.data()), rgba.size())) result.render_error = -4;
   }
@@ -21862,9 +21990,23 @@ int wmain(int argc, wchar_t **argv) {
 #ifdef AEXCOMPAT_RENDER_WORKER
   int effective_argc = argc;
   bool saw_aux = false, saw_animation = false, saw_coverage = false;
+  bool saw_dump_worlds = false, saw_checksum_detail = false;
   while (effective_argc >= 3) {
     const std::wstring flag(argv[effective_argc - 2]);
-    if (flag == L"--aux-manifest-v1" && !saw_aux) {
+    if (flag == L"--dump-worlds-v1" && !saw_dump_worlds) {
+      g_dump_worlds_dir = std::filesystem::path(argv[effective_argc - 1]);
+      std::error_code dump_dir_error;
+      if (g_dump_worlds_dir.empty() ||
+          !std::filesystem::is_directory(g_dump_worlds_dir, dump_dir_error))
+        return 3;
+      saw_dump_worlds = true;
+      effective_argc -= 2;
+    } else if (flag == L"--output-checksum-detail-v1" && !saw_checksum_detail) {
+      if (std::wstring(argv[effective_argc - 1]) != L"1") return 3;
+      g_output_checksum_detail = true;
+      saw_checksum_detail = true;
+      effective_argc -= 2;
+    } else if (flag == L"--aux-manifest-v1" && !saw_aux) {
       if (!load_aux_manifest(std::filesystem::path(argv[effective_argc - 1]),
                              g_external_aux_set))
         return 3;
@@ -22029,9 +22171,23 @@ int wmain(int argc, wchar_t **argv) {
 #elif defined(AEXCOMPAT_SMART_WORKER)
   int effective_argc = argc;
   bool saw_aux = false, saw_animation = false, saw_coverage = false;
+  bool saw_dump_worlds = false, saw_checksum_detail = false;
   while (effective_argc >= 3) {
     const std::wstring flag(argv[effective_argc - 2]);
-    if (flag == L"--aux-manifest-v1" && !saw_aux) {
+    if (flag == L"--dump-worlds-v1" && !saw_dump_worlds) {
+      g_dump_worlds_dir = std::filesystem::path(argv[effective_argc - 1]);
+      std::error_code dump_dir_error;
+      if (g_dump_worlds_dir.empty() ||
+          !std::filesystem::is_directory(g_dump_worlds_dir, dump_dir_error))
+        return 3;
+      saw_dump_worlds = true;
+      effective_argc -= 2;
+    } else if (flag == L"--output-checksum-detail-v1" && !saw_checksum_detail) {
+      if (std::wstring(argv[effective_argc - 1]) != L"1") return 3;
+      g_output_checksum_detail = true;
+      saw_checksum_detail = true;
+      effective_argc -= 2;
+    } else if (flag == L"--aux-manifest-v1" && !saw_aux) {
       if (!load_aux_manifest(std::filesystem::path(argv[effective_argc - 1]),
                              g_external_aux_set))
         return 3;
@@ -23940,6 +24096,7 @@ int wmain(int argc, wchar_t **argv) {
                 (g_smart_pixel_format == "argb32f" ? 16 : (g_smart_pixel_format == "argb16" ? 8 : 4)))
             << ",\"input_sha256\":\"" << input_hash << "\",\"output_sha256\":\""
             << output_hash << "\",\"guard_bytes_intact\":" << (guards_intact ? "true" : "false")
+            << world_debug_report_json()
             << ",\"custom_ui_click_dispatched\":" << (g_render_click_enabled ? "true" : "false")
             << ",\"custom_ui_click_error\":" << g_render_click_error
             << ",\"custom_ui_click_out_flags\":" << g_render_click_out_flags
@@ -24167,6 +24324,7 @@ int wmain(int argc, wchar_t **argv) {
             << ",\"undefined_tail_bytes_per_row\":0"
             << ",\"input_sha256\":\"" << smart.input_hash << "\",\"output_sha256\":\""
             << smart.output_hash << "\",\"result_rects_valid\":" << (smart.rects_valid ? "true" : "false")
+            << world_debug_report_json()
             << ",\"custom_ui_click_dispatched\":" << (g_render_click_enabled ? "true" : "false")
             << ",\"custom_ui_click_error\":" << g_render_click_error
             << ",\"custom_ui_click_out_flags\":" << g_render_click_out_flags

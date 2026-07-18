@@ -575,6 +575,103 @@ fn native_rgba_to_preview(bytes: &[u8], format: RenderPixelFormat) -> io::Result
     }
 }
 
+/// Opt-in world snapshot dumps and output checksum detail (issue #19). Both
+/// default off and only take effect for broker-dispatched image renders.
+const WORLD_DUMP_DIR_ENV: &str = "AEXCOMPAT_DUMP_WORLDS_DIR";
+const OUTPUT_CHECKSUM_DETAIL_ENV: &str = "AEXCOMPAT_CHECKSUM_DETAIL";
+const WORLD_DUMP_EXTENSIONS: [&str; 3] = [".rgba8", ".rgba16le", ".rgba32f-le"];
+
+struct WorldDumpDir {
+    path: PathBuf,
+    display: String,
+}
+
+fn requested_world_dump_dir(repository: &Path) -> io::Result<Option<WorldDumpDir>> {
+    match std::env::var_os(WORLD_DUMP_DIR_ENV) {
+        Some(value) => resolve_world_dump_dir(repository, Path::new(&value)).map(Some),
+        None => Ok(None),
+    }
+}
+
+/// Fail-closed resolution of the requested dump directory: it must resolve to
+/// a broker-managed location under `<repository>/target/`, must not use
+/// traversal components, and must start empty so stale snapshots can never be
+/// mistaken for this run's output.
+fn resolve_world_dump_dir(repository: &Path, requested: &Path) -> io::Result<WorldDumpDir> {
+    if requested.as_os_str().is_empty() {
+        return Err(invalid("world dump directory must not be empty"));
+    }
+    if requested.components().any(|component| {
+        matches!(
+            component,
+            std::path::Component::CurDir | std::path::Component::ParentDir
+        )
+    }) {
+        return Err(invalid(
+            "world dump directory must not contain traversal components",
+        ));
+    }
+    let resolved = if requested.is_absolute() {
+        requested.to_path_buf()
+    } else {
+        repository.join(requested)
+    };
+    let target_root = repository.join("target");
+    // Lexical pre-check before creating anything, so a rejected request never
+    // leaves a directory outside the broker-managed target tree behind.
+    if !resolved.starts_with(&target_root) {
+        return Err(invalid(
+            "world dump directory must stay under the repository target tree",
+        ));
+    }
+    fs::create_dir_all(&resolved)?;
+    let canonical = resolved.canonicalize()?;
+    let canonical_target = target_root.canonicalize()?;
+    if !canonical.starts_with(&canonical_target) {
+        return Err(invalid(
+            "world dump directory must stay under the repository target tree",
+        ));
+    }
+    if fs::read_dir(&canonical)?.next().is_some() {
+        return Err(invalid("world dump directory must start empty"));
+    }
+    let display = canonical
+        .strip_prefix(canonical_target.parent().unwrap_or(&canonical_target))
+        .map(|relative| relative.to_string_lossy().replace('\\', "/"))
+        .unwrap_or_else(|_| "target/(world-dumps)".into());
+    Ok(WorldDumpDir {
+        path: canonical,
+        display,
+    })
+}
+
+fn output_checksum_detail_requested() -> bool {
+    matches!(
+        std::env::var(OUTPUT_CHECKSUM_DETAIL_ENV),
+        Ok(value) if value == "1" || value.eq_ignore_ascii_case("true")
+    )
+}
+
+/// Delete only the snapshot files this feature owns (NNN-<stage>-WxH.<ext>)
+/// before a retry dispatch, so a fallback run cannot inherit stale dumps.
+fn clear_world_dump_files(directory: &Path) -> io::Result<()> {
+    for entry in fs::read_dir(directory)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        let owned = name.len() > 4
+            && name.as_bytes()[..3].iter().all(u8::is_ascii_digit)
+            && name.as_bytes()[3] == b'-'
+            && WORLD_DUMP_EXTENSIONS
+                .iter()
+                .any(|extension| name.ends_with(extension));
+        if owned && entry.file_type()?.is_file() {
+            fs::remove_file(entry.path())?;
+        }
+    }
+    Ok(())
+}
+
 /// AE 16-bpc white point: ARGB16 transport samples are 0..=32768, not 0..=65535.
 const AE_ARGB16_WHITE: u32 = 32768;
 
@@ -4094,6 +4191,8 @@ fn render_with_artifact(
         &root,
         nonce,
     )?;
+    let world_dump_dir = requested_world_dump_dir(repository)?;
+    let output_checksum_detail = output_checksum_detail_requested();
 
     let worker_kind = if smart {
         WorkerKind::Smart
@@ -4222,6 +4321,15 @@ fn render_with_artifact(
             path.to_string_lossy().into_owned(),
         ]);
     }
+    if let Some(dump) = &world_dump_dir {
+        args_after_plugin.extend([
+            "--dump-worlds-v1".into(),
+            dump.path.to_string_lossy().into_owned(),
+        ]);
+    }
+    if output_checksum_detail {
+        args_after_plugin.extend(["--output-checksum-detail-v1".into(), "1".into()]);
+    }
     let mut args_before_plugin = vec![command.into()];
     let started = Instant::now();
     let initial_dispatch = SecureImageDispatch {
@@ -4316,6 +4424,9 @@ fn render_with_artifact(
             Ok(()) => {}
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}
             Err(error) => return Err(error.into()),
+        }
+        if let Some(dump) = &world_dump_dir {
+            clear_world_dump_files(&dump.path)?;
         }
         args_before_plugin[0] = image_worker_command(
             smart,
@@ -4616,6 +4727,25 @@ fn render_with_artifact(
         );
     }
     report_object.insert("output_raw".into(), json!(output_raw));
+    if let Some(dump) = &world_dump_dir {
+        report_object.insert(
+            "world_dumps".into(),
+            json!({
+                "directory": dump.display,
+                "written": worker_report.get("world_dumps_written"),
+                "skipped": worker_report.get("world_dumps_skipped"),
+                "bytes": worker_report.get("world_dump_bytes"),
+            }),
+        );
+    }
+    if output_checksum_detail {
+        for field in ["output_row_crc32", "output_channel_sha256"] {
+            report_object.insert(
+                field.into(),
+                worker_report.get(field).cloned().unwrap_or(Value::Null),
+            );
+        }
+    }
     for field in [
         "comp_bg_color_success_count",
         "comp_bg_color_rejection_count",
@@ -5289,6 +5419,75 @@ mod tests {
         assert_eq!(RenderPixelFormat::Argb8.bytes_per_pixel(), 4);
         assert_eq!(RenderPixelFormat::Argb16.bytes_per_pixel(), 8);
         assert_eq!(RenderPixelFormat::Argb32f.bytes_per_pixel(), 16);
+    }
+
+    #[test]
+    fn world_dump_dir_is_fail_closed_under_the_target_tree() {
+        let repository = std::env::temp_dir().join(format!(
+            "aexcompat-world-dump-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(repository.join("target")).unwrap();
+
+        let accepted =
+            resolve_world_dump_dir(&repository, Path::new("target/world-dumps")).unwrap();
+        assert!(accepted.path.is_dir());
+        assert_eq!(accepted.display, "target/world-dumps");
+
+        // A non-empty directory is refused so stale snapshots cannot be
+        // mistaken for the coming run's output.
+        fs::write(
+            accepted.path.join("000-classic-input-2x2.rgba8"),
+            [0_u8; 16],
+        )
+        .unwrap();
+        assert!(resolve_world_dump_dir(&repository, Path::new("target/world-dumps")).is_err());
+
+        assert!(resolve_world_dump_dir(&repository, Path::new("")).is_err());
+        assert!(resolve_world_dump_dir(&repository, Path::new("target/../escape")).is_err());
+        assert!(resolve_world_dump_dir(&repository, Path::new("not-target/dumps")).is_err());
+        let outside = std::env::temp_dir().join(format!(
+            "aexcompat-world-dump-outside-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        assert!(resolve_world_dump_dir(&repository, &outside).is_err());
+        assert!(!outside.exists() || fs::remove_dir_all(&outside).is_ok());
+        fs::remove_dir_all(repository).unwrap();
+    }
+
+    #[test]
+    fn world_dump_cleanup_removes_only_owned_snapshot_files() {
+        let directory = std::env::temp_dir().join(format!(
+            "aexcompat-world-dump-clear-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&directory).unwrap();
+        let owned = [
+            "000-classic-input-4x2.rgba8",
+            "001-smart-output-4x2.rgba16le",
+            "002-smart-layer-slot7-4x2.rgba32f-le",
+        ];
+        let foreign = ["notes.txt", "xyz-classic-input-4x2.rgba8", "003-.png"];
+        for name in owned.iter().chain(foreign.iter()) {
+            fs::write(directory.join(name), b"x").unwrap();
+        }
+        clear_world_dump_files(&directory).unwrap();
+        for name in owned {
+            assert!(!directory.join(name).exists(), "{name} should be removed");
+        }
+        for name in foreign {
+            assert!(directory.join(name).exists(), "{name} should survive");
+        }
+        fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]
