@@ -12817,12 +12817,12 @@ std::array<void*, 15> g_gpu_device_suite1{
     reinterpret_cast<void*>(&gpu_get_world_device_index)};
 
 int32_t reject_suite_acquire(const char* name, int32_t version) {
-  const SuiteNameCopy safe_name = copy_suite_name_seh(name);
-  const std::string safe_name_text = suite_name_string(safe_name);
+  const SuiteNameCopy safe_copy = copy_suite_name_seh(name);
+  const std::string safe_name_text = suite_name_string(safe_copy);
   record_missing_suite(safe_name_text, version);
-  if (g_trace_writer && safe_name.readable && !safe_name_text.empty())
+  if (g_trace_writer && safe_copy.readable && !safe_name_text.empty())
     g_trace_writer->suite_acquire(safe_name_text, std::max<int32_t>(version, 0), false);
-  record_suite_acquire_failure(safe_name, version, 1);
+  record_suite_acquire_failure(safe_copy, version, 1);
   std::cerr << "stage:suite_acquire_failed name=" << safe_name_text
             << " version=" << version << "\n" << std::flush;
   return 1;
@@ -12836,7 +12836,7 @@ int32_t __cdecl acquire_suite(const char* plugin_name, int32_t version, const vo
     return 4;
   }
   *suite = nullptr;
-  if (!plugin_name) {
+  if (!plugin_name || !safe_name.readable || !safe_name.terminated) {
     record_suite_acquire_failure(safe_name, version, 4);
     return 4;
   }
@@ -13649,7 +13649,7 @@ int32_t __cdecl release_suite(const char* name, int32_t version) {
   bool released = false;
   {
     std::lock_guard<std::mutex> lock(g_suite_lease_mutex);
-    if (safe_name.readable) {
+    if (safe_name.readable && safe_name.terminated) {
       const auto found = g_suite_leases.find({safe_name_text, version});
       if (found != g_suite_leases.end() && found->second != 0) {
         --found->second;
@@ -13659,7 +13659,7 @@ int32_t __cdecl release_suite(const char* name, int32_t version) {
     }
     record_suite_event_locked(false, safe_name, version, released ? 0 : 1);
   }
-  if (g_trace_writer && safe_name.readable && !safe_name_text.empty())
+  if (g_trace_writer && safe_name.readable && safe_name.terminated && !safe_name_text.empty())
     g_trace_writer->suite_release(safe_name_text, std::max<int32_t>(version, 0), released);
   return released ? 0 : 1;
 }
@@ -21299,6 +21299,28 @@ bool verify_suite_name_copy_guards() {
   unterminated.fill('A');
   suite = reinterpret_cast<const void*>(1);
   ok = ok && acquire_suite(unterminated.data(), 13, &suite) != 0 && suite == nullptr;
+  SYSTEM_INFO system_info{};
+  GetSystemInfo(&system_info);
+  const std::size_t page_size = system_info.dwPageSize;
+  auto* guarded_pages = static_cast<char*>(VirtualAlloc(
+      nullptr, page_size * 2, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE));
+  bool boundary_guard_ok = guarded_pages != nullptr;
+  char* boundary_name = nullptr;
+  if (guarded_pages) {
+    constexpr char supported_name[] = "PF Color Suite";
+    boundary_name = guarded_pages + page_size - (std::size(supported_name) - 1);
+    std::memcpy(boundary_name, supported_name,
+                std::size(supported_name) - 1);
+    DWORD old_protection = 0;
+    boundary_guard_ok = VirtualProtect(
+        guarded_pages + page_size, page_size, PAGE_NOACCESS, &old_protection) != 0;
+    suite = reinterpret_cast<const void*>(1);
+    boundary_guard_ok = boundary_guard_ok &&
+        acquire_suite(boundary_name, 1, &suite) != 0 && suite == nullptr &&
+        release_suite(boundary_name, 1) != 0;
+    VirtualFree(guarded_pages, 0, MEM_RELEASE);
+  }
+  ok = ok && boundary_guard_ok;
   return ok && g_suite_acquires == acquires_before &&
       g_suite_releases == releases_before;
 }
@@ -24656,9 +24678,8 @@ int wmain(int argc, wchar_t **argv) {
             << external_width << ",\"bottom\":" << external_height << "}}"
             << ",\"output_world\":{\"width\":" << smart.output_width << ",\"height\":" << smart.output_height
             << ",\"row_bytes\":" << smart.output_rowbytes << ",\"pixel_format\":\"" << g_smart_pixel_format
-            << "\",\"premultiplication\":\"premultiplied\",\"extent_hint\":{\"left\":" << smart.result_rect[0]
-            << ",\"top\":" << smart.result_rect[1] << ",\"right\":" << smart.result_rect[2]
-            << ",\"bottom\":" << smart.result_rect[3] << "}}"
+            << "\",\"premultiplication\":\"premultiplied\",\"extent_hint\":{\"left\":0,\"top\":0,\"right\":"
+            << smart.output_width << ",\"bottom\":" << smart.output_height << "}}"
             << ",\"bytes_written_per_row\":" << smart.output_rowbytes
             << ",\"undefined_tail_bytes_per_row\":0"
             << ",\"input_sha256\":\"" << smart.input_hash << "\",\"output_sha256\":\""
