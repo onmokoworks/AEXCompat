@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "fixture_id": "sdk-skeleton-control",
+  "plugin": {
+    "aex": {"path": "artifacts/Skeleton.aex", "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "size_bytes": 4096},
+    "dependencies": [
+      {"path": "artifacts/helper.dll", "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "size_bytes": 1024}
+    ]
+  },
+  "input": {"path": "inputs/control.png", "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", "size_bytes": 256},
+  "runner": {"path": "runner/aexcompat-harness.exe", "sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd", "size_bytes": 8192},
+  "requested_depths": ["argb8", "argb16", "argb32f"],
+  "execution": {
+    "time": {"value": 0, "scale": 30},
+    "parameters": [{"index": 1, "type": "slider", "value": 50}],
+    "premultiplication": "premultiplied",
+    "color_management": {"enabled": false, "working_space": null},
+    "linear_light": false,
+    "renderer": "software"
+  },
+  "oracle": {
+    "state": "captured",
+    "identity_match": true,
+    "artifacts": {
+      "argb8": {"path": "oracle/ae-argb8.rgba", "sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee", "size_bytes": 64},
+      "argb16": {"path": "oracle/ae-argb16.rgba", "sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff", "size_bytes": 128},
+      "argb32f": {"path": "oracle/ae-argb32f.rgba", "sha256": "1111111111111111111111111111111111111111111111111111111111111111", "size_bytes": 256}
+    }
+  }
+}
