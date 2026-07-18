@@ -96,6 +96,26 @@
                 throw new Error("effect could not be added by match or display name");
             }
         }
+        // Optional single-parameter override for oracle captures that must
+        // match a host render with a non-default value.
+        var paramName = $.getenv("AEXCOMPAT_AE_PARAM_NAME");
+        var paramApplied = null;
+        if (paramName) {
+            if (!effect) {
+                throw new Error("AEXCOMPAT_AE_PARAM_NAME requires an effect; it cannot be combined with AEXCOMPAT_AE_NO_EFFECT");
+            }
+            var paramValueRaw = $.getenv("AEXCOMPAT_AE_PARAM_VALUE");
+            var paramValue = Number(paramValueRaw);
+            if (paramValueRaw === null || paramValueRaw === "" || isNaN(paramValue)) {
+                throw new Error("AEXCOMPAT_AE_PARAM_VALUE must be a number when AEXCOMPAT_AE_PARAM_NAME is set");
+            }
+            var paramProp = effect.property(paramName);
+            if (!paramProp) {
+                throw new Error("effect parameter not found: " + paramName);
+            }
+            paramProp.setValue(paramValue);
+            paramApplied = { name: paramName, value: paramProp.value };
+        }
         comp.time = frame / fps;
         if (typeof comp.saveFrameToPng !== "function") {
             throw new Error("CompItem.saveFrameToPng is unavailable");
@@ -116,7 +136,7 @@
         if (!outputFile.exists) {
             throw new Error("saveFrameToPng did not produce the PNG within " + saveTimeoutMs + "ms");
         }
-        writeResult({
+        var payload = {
             schema_version: 1,
             status: "captured",
             ae_version: app.version,
@@ -131,7 +151,12 @@
             bpc: depth,
             save_wait_ms: waitedMs,
             output: outputFile.fsName
-        });
+        };
+        if (paramApplied) {
+            payload.param_name = paramApplied.name;
+            payload.param_value = paramApplied.value;
+        }
+        writeResult(payload);
     } catch (error) {
         try {
             writeResult({
