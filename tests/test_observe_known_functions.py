@@ -12,6 +12,9 @@ from tools.observe_known_functions import (
 from tools.trace_contract_validator import validate_session
 
 
+OBS = Path(__file__).resolve().parents[1] / "contracts" / "observation"
+
+
 class BuildWorkerArgvTests(unittest.TestCase):
     def test_prepends_worker_to_render_verb(self):
         argv = build_worker_argv(
@@ -226,6 +229,24 @@ class ProcessLivenessTests(unittest.TestCase):
 
         self.assertTrue(obs._process_alive(OldDevice(), 4321))
         self.assertFalse(obs._process_alive(OldDevice(), 9999))
+
+
+class OutputPreflightTests(unittest.TestCase):
+    def test_run_observation_preflights_output_before_spawn(self):
+        # An invalid --out must fail before any Frida spawn/render. run_observation
+        # resolves the destination first; give it a bad path and confirm it raises
+        # without importing/using frida (which would only happen after preflight).
+        import tools.observe_known_functions as obs
+
+        with self.assertRaises(ObservationError):
+            obs.run_observation(
+                spec_path=OBS / "examples" / "example_hook_set.json",
+                offset_map_path=OBS / "examples" / "example_offset_map.json",
+                module_path="C:/plugins/Gamma.aex",
+                render_args=["--render-image", "a", "b", "v5|", "i", "o", "16", "12", "0", "1", "1", "1"],
+                out_path=Path("../../etc/passwd"),  # escapes the allowed root
+                plugin_label="gamma-classic",
+            )
 
 
 class LiveObservationIntegrationTests(unittest.TestCase):

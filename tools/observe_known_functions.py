@@ -106,10 +106,9 @@ def safe_output_path(out_path: Path) -> Path:
     return resolved
 
 
-def write_session_jsonl(session: dict[str, Any], out_path: Path) -> Path:
-    """Atomically write the trace under the allowed root (temp + os.replace)."""
+def _atomic_write_jsonl(session: dict[str, Any], destination: Path) -> Path:
+    """Atomically write the trace to an already-validated destination."""
 
-    destination = safe_output_path(out_path)
     # allow_nan=False keeps the JSONL strict/portable: NaN/Infinity are already
     # rejected upstream by the validator, but fail closed at serialization too.
     lines = [json.dumps(event, ensure_ascii=False, allow_nan=False) for event in session["events"]]
@@ -126,6 +125,12 @@ def write_session_jsonl(session: dict[str, Any], out_path: Path) -> Path:
             pass
         raise
     return destination
+
+
+def write_session_jsonl(session: dict[str, Any], out_path: Path) -> Path:
+    """Validate the destination and atomically write the trace under the allowed root."""
+
+    return _atomic_write_jsonl(session, safe_output_path(out_path))
 
 
 def build_worker_argv(worker_program: str, render_args: list[str]) -> list[str]:
@@ -242,6 +247,16 @@ def run_observation(
     testable) without the observation runtime.
     """
 
+    # Validate everything frida-independent first (spec, plan, output path) so an
+    # invalid --out or hook set fails before any spawn/render, and without needing
+    # the observation runtime installed.
+    spec = json.loads(spec_path.read_text(encoding="utf-8"))
+    plan = resolve_spec(spec, offset_map_path)
+    expected_hook_count = len(plan["hooks"])
+    module_path = str(Path(module_path).resolve())
+    destination = safe_output_path(out_path)
+    script_source = (Path(__file__).parent / "frida" / "known_function_probe.js").read_text(encoding="utf-8")
+
     try:
         import frida  # noqa: PLC0415  (intentional lazy, observation-only import)
     except ImportError as exc:  # pragma: no cover - runtime-only path
@@ -249,12 +264,6 @@ def run_observation(
             "frida is required for live observation; install it in the observation "
             "environment (it is intentionally not in requirements-dev.txt)"
         ) from exc
-
-    spec = json.loads(spec_path.read_text(encoding="utf-8"))
-    plan = resolve_spec(spec, offset_map_path)
-    expected_hook_count = len(plan["hooks"])
-    module_path = str(Path(module_path).resolve())
-    script_source = (Path(__file__).parent / "frida" / "known_function_probe.js").read_text(encoding="utf-8")
 
     collector = MessageCollector(
         plugin_label=plugin_label,
@@ -322,7 +331,7 @@ def run_observation(
             pass
 
     session = collector.finalize(completed=completed)
-    destination = write_session_jsonl(session, out_path)
+    _atomic_write_jsonl(session, destination)  # destination preflighted before spawn
     # The returned result carries run metadata alongside the schema-clean session
     # (the session dict itself stays validatable; metadata lives on the result).
     result = dict(session)

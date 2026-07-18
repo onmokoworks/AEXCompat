@@ -48,6 +48,20 @@ class HookSpecSchemaTests(unittest.TestCase):
         spec["hooks"][0]["module_rva"] = "0x7FFABC001C40"  # uppercase hex fails the lowercase pattern
         self.assertTrue(list(validator.iter_errors(spec)))
 
+    def test_schema_rejects_backslash_in_field_names(self):
+        # A backslash in a read/scalar name must be rejected by the schema too, so
+        # a schema-valid hook set cannot emit a plan the trace validator rejects.
+        from jsonschema import Draft202012Validator
+
+        validator = Draft202012Validator(self.schema)
+        for mutate in (
+            lambda s: s["hooks"][0]["reads"][0].__setitem__("name", "in\\width"),
+            lambda s: s["hooks"][0]["scalar_args"][0].__setitem__("name", "C:\\secret"),
+        ):
+            spec = load("example_hook_set.json")
+            mutate(spec)
+            self.assertTrue(list(validator.iter_errors(spec)))
+
 
 class ResolveTests(unittest.TestCase):
     def setUp(self):
