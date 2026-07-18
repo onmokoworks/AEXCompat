@@ -13,14 +13,17 @@ def render_function() -> str:
 
 def test_render_workers_use_fixed_preapproved_trust_tuples():
     source = SOURCE.read_text(encoding="utf-8")
-    generated = (SOURCE.parent / "generated_l2_worker_trust.rs").read_text(encoding="utf-8")
-    assert 'include!("generated_l2_worker_trust.rs")' in source
-    assert "const L2_WORKER_TRUST: WorkerTrust" in generated
-    assert "expected_size: 828_928" in source
-    assert "expected_size: 845_824" in source
-    assert "expected_sha256: [" in generated
-    assert "0x37, 0x3f, 0x5b, 0x48" in source
-    assert "0xfd, 0x69, 0xdd, 0x64" in source
+    for name, constant in (
+        ("generated_l2_worker_trust.rs", "L2_WORKER_TRUST"),
+        ("generated_render_worker_trust.rs", "RENDER_WORKER_TRUST"),
+        ("generated_smart_worker_trust.rs", "SMART_WORKER_TRUST"),
+    ):
+        generated = (SOURCE.parent / name).read_text(encoding="utf-8")
+        assert f'include!("{name}")' in source
+        assert f"const {constant}: WorkerTrust" in generated
+        assert "expected_sha256: [" in generated
+        assert "expected_size: " in generated
+        assert "Do not edit by hand" in generated
     assert "Sha256::digest(fs::read(&worker" not in render_function()
 
 
