@@ -10,6 +10,8 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "minihost" / "src" / "l2_main.cpp"
 SCENE_SOURCE = ROOT / "minihost" / "src" / "worker_aegp_scene.cpp"
+SCENE_RUNTIME_HEADER = ROOT / "minihost" / "src" / "worker_aegp_scene_runtime.hpp"
+SCENE_RUNTIME_SOURCE = ROOT / "minihost" / "src" / "worker_aegp_scene_runtime.cpp"
 SCENE_SELFTEST_SOURCE = ROOT / "minihost" / "src" / "worker_aegp_scene_selftests.cpp"
 SCENE_IMPL = ROOT / "minihost" / "src" / "worker_aegp_scene_impl.inc"
 PF_SUITE_SOURCE = ROOT / "minihost" / "src" / "worker_pf_suites.hpp"
@@ -121,8 +123,9 @@ int main() { return 0; }
 
 def test_l2_source_exposes_projector_levels_contract() -> None:
     source = "\n".join(path.read_text(encoding="utf-8") for path in
-                       (SOURCE, SCENE_SOURCE, SCENE_IMPL, SCENE_SELFTEST_SOURCE,
-                        PF_SUITE_SOURCE))
+                       (SOURCE, SCENE_SOURCE, SCENE_RUNTIME_HEADER,
+                        SCENE_RUNTIME_SOURCE, SCENE_IMPL,
+                        SCENE_SELFTEST_SOURCE, PF_SUITE_SOURCE))
     for marker in (
         '"ADBE Easy Levels"',
         '"ADBE Pro Levels"',

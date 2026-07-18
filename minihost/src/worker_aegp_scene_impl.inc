@@ -5,34 +5,13 @@
 
 #include "worker_aegp_scene.hpp"
 
-bool g_aegp_effect_live = false;
-constexpr std::size_t kAegpEffectInstanceCapacity = 8;
-constexpr std::size_t kAegpEffectLeaseCapacity = 16;
-constexpr std::size_t kAegpEffectParameterCapacity = 12;
-struct AegpEffectInstance {
-  void* layer{};
-  int32_t installed_key{};
-  int32_t stack_order{};
-  uint32_t flags{1};
-  uint32_t generation{};
-  bool occupied{};
-  std::array<std::array<double, 4>, kAegpEffectParameterCapacity> parameter_values{{
-      {{42.5, 0.0, 0.0, 0.0}},
-      {{160.0, 90.0, 0.0, 0.0}},
-      {{1.0, 2.0, 3.0, 0.0}},
-      {{0.25, 0.5, 0.75, 1.0}}}};
-};
-struct AegpEffectLease {
-  int32_t owner_plugin_id{};
-  uint32_t instance_index{};
-  uint32_t instance_generation{};
-  uint32_t generation{};
-  bool live{};
-};
-std::array<AegpEffectInstance, kAegpEffectInstanceCapacity> g_aegp_effect_instances{{
-    {&g_aegp_layers[0], 3001, 0, 1, 1, true}}};
-std::array<AegpEffectLease, kAegpEffectLeaseCapacity> g_aegp_effect_leases{};
-uint32_t g_aegp_effect_lease_generation{};
+// State and catalog records live in worker_aegp_scene_runtime.cpp.  This
+// callback fragment intentionally receives aliases below so stale-handle
+// validation keeps operating on the one shared scene instance.
+bool& g_aegp_effect_live = scene_runtime_state().effect_live;
+auto& g_aegp_effect_instances = scene_runtime_state().effect_instances;
+auto& g_aegp_effect_leases = scene_runtime_state().effect_leases;
+uint32_t& g_aegp_effect_lease_generation = scene_runtime_state().effect_lease_generation;
 
 void* effect_lease_handle(std::size_t slot, uint32_t generation) {
   const uintptr_t value = (static_cast<uintptr_t>(generation) << 8) |
@@ -97,73 +76,13 @@ bool layer_effect_boundary_is_live(const AegpLayerRenderOptionsValue& options) {
   return options.effect_boundary == AegpLayerEffectBoundary::all ||
       resolve_effect_instance(options.upstream_effect, options.owner_plugin_id) != nullptr;
 }
-struct AegpInstalledEffectRecord {
-  int32_t key;
-  const char* name;
-  const char* match_name;
-  const char* category;
-  int32_t parameter_count;
-};
-struct AegpEffectParameterRecord {
-  const char* name;
-  int32_t type;
-  std::array<double, 4> default_value;
-  bool writable;
-};
 const AegpInstalledEffectRecord* find_installed_effect(int32_t key);
 const AegpEffectParameterRecord* find_effect_parameter(int32_t key, int32_t index);
 void initialize_effect_parameter_values(AegpEffectInstance& instance);
-constexpr int32_t kAegpInstalledEffectKeyNone = 0;
-constexpr std::size_t kAegpMaxEffectCategoryNameSize = 128;
-constexpr std::array<AegpEffectParameterRecord, 5> kAegpProbeParameters{{
-    {"Input", 9, {}, false}, {"Amount", 5, {{42.5, 0.0, 0.0, 0.0}}, true},
-    {"Center", 4, {{160.0, 90.0, 0.0, 0.0}}, true},
-    {"Vector", 2, {{1.0, 2.0, 3.0, 0.0}}, true},
-    {"Tint", 6, {{0.25, 0.5, 0.75, 1.0}}, true}}};
-constexpr std::array<AegpEffectParameterRecord, 7> kAegpLevelsParameters{{
-    {"Input", 9, {}, false}, {"Channel", 5, {}, true},
-    {"Histogram", 5, {}, false}, {"Reset", 5, {}, false},
-    {"Input Black", 5, {{0.0, 0.0, 0.0, 0.0}}, true},
-    {"Input White", 5, {{1.0, 0.0, 0.0, 0.0}}, true},
-    {"Gamma", 5, {{1.0, 0.0, 0.0, 0.0}}, true}}};
-constexpr std::array<AegpInstalledEffectRecord, 3> kAegpInstalledEffects{{
-    {3001, "AEXCompat Probe", "AEXCompat.Probe", "AEXCompat", 5},
-    {3002, "Levels", "ADBE Easy Levels", "Color Correction", 7},
-    {3003, "Levels (Individual Controls)", "ADBE Pro Levels", "Color Correction", 7}}};
-static_assert(kAegpInstalledEffects[0].key != kAegpInstalledEffectKeyNone);
-static_assert(sizeof("AEXCompat") <= kAegpMaxEffectCategoryNameSize);
-struct AegpTransformStream {
-  AegpSceneObject object{0x5354524d};
-  int32_t selector{-1};
-  void* layer{};
-  bool effect_param{};
-  bool live{};
-  bool value_live{};
-  uint32_t effect_instance_index{};
-  uint32_t effect_instance_generation{};
-  int32_t owner_plugin_id{};
-} g_aegp_transform_stream;
-struct AegpStreamValue;
-struct AegpLegacyEffectStream {
-  int32_t param_index{-1};
-  bool live{};
-  bool hidden{};
-  bool value_live{};
-  AegpStreamValue* checked_out_value{};
-  uint32_t effect_instance_index{};
-  uint32_t effect_instance_generation{};
-  uint32_t generation{};
-  int32_t owner_plugin_id{};
-};
-constexpr std::size_t kAegpLegacyEffectStreamCapacity = 16;
-std::array<AegpLegacyEffectStream, kAegpLegacyEffectStreamCapacity>
-    g_aegp_legacy_effect_streams{};
-uint32_t g_aegp_legacy_effect_stream_generation{};
-struct AegpStreamValue {
-  void* stream{};
-  std::array<std::byte, 32> value{};
-};
-static_assert(sizeof(AegpStreamValue) == 40);
+auto& g_aegp_transform_stream = scene_runtime_state().transform_stream;
+auto& g_aegp_legacy_effect_streams = scene_runtime_state().legacy_effect_streams;
+uint32_t& g_aegp_legacy_effect_stream_generation =
+    scene_runtime_state().legacy_effect_stream_generation;
 
 int32_t __cdecl aegp_get_active_item(void** item) {
   if (!item) return 4;

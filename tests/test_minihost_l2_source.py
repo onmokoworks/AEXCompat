@@ -15,17 +15,35 @@ RENDER_SOURCE = ROOT / "minihost" / "src" / "render_subsystem.cpp"
 PF_SUITES_INTERNAL = ROOT / "minihost" / "src" / "worker_pf_suites_internal.hpp"
 AEGP_SCENE_SOURCE = ROOT / "minihost" / "src" / "worker_aegp_scene.cpp"
 AEGP_SCENE_IMPL = ROOT / "minihost" / "src" / "worker_aegp_scene_impl.inc"
+AEGP_SCENE_RUNTIME_HEADER = ROOT / "minihost" / "src" / "worker_aegp_scene_runtime.hpp"
+AEGP_SCENE_RUNTIME_SOURCE = ROOT / "minihost" / "src" / "worker_aegp_scene_runtime.cpp"
 MINIHOST_CMAKE = ROOT / "minihost" / "CMakeLists.txt"
 
 
 def l2_family_source():
     return "\n".join(path.read_text(encoding="utf-8") for path in (
         SOURCE, CLI_DISPATCH_SOURCE, PF_SUITES_HEADER, PF_SUITES_SOURCE,
-        AEGP_SCENE_SOURCE, AEGP_SCENE_IMPL
+        AEGP_SCENE_SOURCE, AEGP_SCENE_RUNTIME_HEADER, AEGP_SCENE_RUNTIME_SOURCE,
+        AEGP_SCENE_IMPL
     ))
 
 
 class MinihostL2SourceTests(unittest.TestCase):
+    def test_aegp_scene_runtime_owns_shared_types_catalog_and_state(self):
+        header = AEGP_SCENE_RUNTIME_HEADER.read_text(encoding="utf-8")
+        implementation = AEGP_SCENE_RUNTIME_SOURCE.read_text(encoding="utf-8")
+        fragment = AEGP_SCENE_IMPL.read_text(encoding="utf-8")
+
+        self.assertIn("namespace aexcompat::scene_runtime", header)
+        self.assertIn("struct SceneRuntimeState", header)
+        self.assertIn("struct AegpStreamValue", header)
+        self.assertIn("SceneRuntimeState& scene_runtime_state() noexcept", header)
+        self.assertIn("const std::array<AegpInstalledEffectRecord, 3> kAegpInstalledEffects", implementation)
+        self.assertIn("SceneRuntimeState::SceneRuntimeState() noexcept", implementation)
+        self.assertNotIn("struct AegpStreamValue", fragment)
+        self.assertNotIn("struct AegpEffectInstance", fragment)
+        self.assertIn("scene_runtime_state().effect_instances", fragment)
+
     def test_render_dispatch_is_a_real_translation_unit_with_explicit_host_hooks(self):
         header = RENDER_HEADER.read_text(encoding="utf-8")
         implementation = RENDER_SOURCE.read_text(encoding="utf-8")

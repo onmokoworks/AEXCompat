@@ -528,7 +528,11 @@ PfInterfaceSuite g_pf_interface_suite{&get_effect_layer, &get_new_effect_for_eff
 std::array<void*, 17> g_aegp_effect_suite3{};
 std::array<void*, 22> g_aegp_stream_suite2{};
 std::array<void*, 14> g_aegp_dynamic_stream_suite2{};
-struct AegpStreamValue;
+// Stream Suite v2 has a private payload type shared with the AEGP scene
+// runtime. Keep the declaration in its owning header so this ABI table never
+// carries a conflicting local forward declaration.
+#include "worker_aegp_scene_runtime.hpp"
+using AegpStreamValue = aexcompat::scene_runtime::AegpStreamValue;
 int32_t __cdecl aegp_get_new_effect_stream_by_index_v2(
     int32_t plugin_id, void* effect, int32_t index, void** stream);
 int32_t __cdecl aegp_dispose_stream_v2(void* stream);

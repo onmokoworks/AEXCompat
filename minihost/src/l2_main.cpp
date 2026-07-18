@@ -100,6 +100,7 @@ using AegpLayerEffectBoundary = aexcompat::render_options::LayerEffectBoundary;
 using AegpLayerRenderOptionsValue = aexcompat::render_options::LayerValue;
 using AegpRenderOptionsValue = aexcompat::render_options::ItemValue;
 using namespace aexcompat::render_options;
+using namespace aexcompat::scene_runtime;
 constexpr std::size_t kMaxRenderOptions = 32;
 void* aegp_comp_item_handle();
 bool snapshot_render_options(void* handle, AegpRenderOptionsValue& value) {
@@ -570,7 +571,7 @@ uint32_t g_aegp_keyframe_interpolation_calls = 0;
 uint32_t g_aegp_collection_creates = 0;
 uint32_t g_aegp_collection_disposes = 0;
 uint32_t g_aegp_collection_item_reads = 0;
-int32_t g_aegp_scene_frame = 1;
+int32_t& g_aegp_scene_frame = scene_runtime_state().scene_frame;
 int32_t g_aegp_first_observed_frame = -1;
 int32_t g_aegp_last_observed_frame = -1;
 using AegpUpdateMenuHook = int32_t(__cdecl*)(void*, void*, int32_t);
@@ -3831,8 +3832,6 @@ constexpr std::array<uint8_t, 16> kWorkingLinearSrgbGuid = {
     0x7a, 0x5c, 0xe3, 0x0c, 0x9d, 0x4d, 0x4f, 0x9a,
     0x8b, 0x1f, 0x6c, 0x2d, 0x4e, 0x8a, 0x11, 0x02};
 struct AegpItemViewToken { uint32_t tag{0x56494557}; };
-struct AegpSceneObject;
-extern AegpSceneObject g_aegp_comp;
 AegpItemViewToken g_aegp_item_view{};
 std::mutex g_color_settings_mutex;
 std::unordered_map<void*, ColorProfileRecord> g_color_profiles;
@@ -6319,7 +6318,7 @@ int32_t __cdecl color_xform_working_to_view(void* view, void** src, void** dst) 
 }
 int32_t __cdecl color_get_new_working_space_profile(int32_t plugin_id, void* comp, void** profile) {
   if (profile) *profile = nullptr;
-  if (plugin_id != 1 || comp != &g_aegp_comp || !profile) return 4;
+  if (plugin_id != 1 || comp != composition_handle() || !profile) return 4;
   ColorProfileKind kind{};
   std::vector<uint8_t> icc;
   try {
@@ -6401,7 +6400,7 @@ int32_t __cdecl color_is_rgb_profile(void* profile, uint8_t* is_rgb) {
 }
 int32_t __cdecl color_set_working_color_space(int32_t plugin_id, void* comp, void* profile) {
   ColorProfileRecord record{};
-  if (plugin_id != 1 || comp != &g_aegp_comp || !color_settings_snapshot_profile(profile, record))
+  if (plugin_id != 1 || comp != composition_handle() || !color_settings_snapshot_profile(profile, record))
     return 4;
   std::lock_guard<std::mutex> lock(g_color_settings_mutex);
   try {
@@ -8318,10 +8317,9 @@ AegpRegisterSuite g_aegp_register_suite{
     &aegp_register_death_hook, nullptr, nullptr, nullptr, nullptr, nullptr,
     &aegp_register_idle_hook, nullptr, nullptr, nullptr};
 
-struct AegpSceneObject { uint32_t tag{}; };
-AegpSceneObject g_aegp_comp_item{0x4954454d};
-AegpSceneObject g_aegp_comp{0x434f4d50};
-void* aegp_comp_item_handle() { return &g_aegp_comp_item; }
+AegpSceneObject& g_aegp_comp_item = scene_runtime_state().composition_item;
+AegpSceneObject& g_aegp_comp = scene_runtime_state().composition;
+void* aegp_comp_item_handle() { return composition_item_handle(); }
 struct AegpColorVal { double alpha, red, green, blue; };
 static_assert(sizeof(AegpColorVal) == 4 * sizeof(double));
 int32_t __cdecl aegp_get_comp_bg_color(void* comp, AegpColorVal* color) {
@@ -8335,9 +8333,8 @@ int32_t __cdecl aegp_get_comp_bg_color(void* comp, AegpColorVal* color) {
   return 0;
 }
 
-std::array<AegpSceneObject, 3> g_aegp_layers{{
-    {0x4c415930}, {0x4c415931}, {0x4c415932}}};
-AegpSceneObject g_aegp_effect{0x45464643};
+std::array<AegpSceneObject, 3>& g_aegp_layers = scene_runtime_state().layers;
+AegpSceneObject& g_aegp_effect = scene_runtime_state().effect;
 extern std::array<AegpTime, 3> g_aegp_layer_in_points;
 extern std::array<AegpTime, 3> g_aegp_layer_durations;
 int32_t g_aegp_active_camera_layer_index = -1;
