@@ -141,6 +141,16 @@ What is unchanged:
   untouched.
 - Plug-in and dependency admission is still an explicit, pre-dispatch trust
   decision; dispatch never derives plug-in trust from current file contents.
+- GPU runtime-policy preflight reports keep their existing meaning. They are
+  produced by the L2 inspect worker by design and authorize the session
+  identity, backend, and GPU runtime module policy — a machine-environment
+  probe, not a statement about the render worker's bytes (the render and
+  preflight workers are different executables even under receipt pinning).
+  The launched render worker's own modules remain covered by its mandatory
+  module audit. Binding the preflight report to a worker binary identity was
+  attempted and reverted during review, because it would compare the L2
+  inspect worker against the render/smart worker and reject every valid GPU
+  render.
 
 ## 4. What Is Retained
 
