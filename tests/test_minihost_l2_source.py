@@ -50,7 +50,7 @@ class MinihostL2SourceTests(unittest.TestCase):
     def test_l2_provides_bounded_movable_handle_callbacks(self):
         text = SOURCE.read_text(encoding="utf-8")
         for marker in ("kUtilsSize = 552", "kUtilsNewHandle = 160", "new_handle(uint64_t size)",
-                       "64 * 1024 * 1024", "g_handles.count", "dispose_handle"):
+                       "256 * 1024 * 1024", "g_handles.count", "dispose_handle"):
             self.assertIn(marker, text)
         for marker in (
             "uint32_t lock_count{}",
@@ -78,7 +78,7 @@ class MinihostL2SourceTests(unittest.TestCase):
             "static_assert(sizeof(AegpMemorySuite) == 8 * sizeof(void*))",
             "verify_aegp_memory_and_strings_rejection()",
             "kMaxHandleCount = 1024",
-            "kMaxHandleBytes = 64 * 1024 * 1024",
+            "kMaxHandleBytes = 256 * 1024 * 1024",
         ):
             self.assertIn(marker, text)
 
