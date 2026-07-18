@@ -13,18 +13,10 @@ $harness = Join-Path $repoRoot 'broker\target\debug\aexcompat-harness.exe'
 $grabba = Join-Path $repoRoot 'target\sdk-fixtures\grabba\Grabba.aex'
 $reportRoot = Join-Path $repoRoot 'target\final-integration-evidence'
 $evidencePath = Join-Path $repoRoot 'analysis\SDK_GRABBA_AEGP_RUNTIME_RESULT_2026-07-16.json'
-$cmake = (Get-Command cmake -ErrorAction SilentlyContinue).Source
-if (-not $cmake) {
-    $cmake = 'C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe'
-}
-if (-not (Test-Path -LiteralPath $cmake -PathType Leaf)) {
-    throw 'CMake was not found on PATH or in Visual Studio 2022 Build Tools.'
-}
-$vcvars = 'C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat'
+$cmake = & "$PSScriptRoot\resolve-build-cmake.ps1" '' 'Ninja'
 if (-not $env:INCLUDE) {
-    if (-not (Test-Path -LiteralPath $vcvars -PathType Leaf)) {
-        throw 'Visual Studio 2022 vcvars64.bat was not found.'
-    }
+    $vsRoot = & "$PSScriptRoot\resolve-msvc-tools.ps1" ''
+    $vcvars = Join-Path $vsRoot 'VC\Auxiliary\Build\vcvars64.bat'
     cmd.exe /d /c "`"$vcvars`" >nul && set" | ForEach-Object {
         if ($_ -match '^([^=]+)=(.*)$') { Set-Item -LiteralPath "Env:$($matches[1])" -Value $matches[2] }
     }

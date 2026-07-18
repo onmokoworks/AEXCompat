@@ -14,8 +14,7 @@ $tmp = Join-Path $repository "target\tmp"
 New-Item -ItemType Directory -Force -Path $tmp | Out-Null
 $env:TEMP = $tmp; $env:TMP = $tmp; $env:AE_SDK_ROOT = $AfterEffectsSdk
 if (-not (Test-Path (Join-Path $AfterEffectsSdk "Examples\Headers\AE_GeneralPlug.h"))) { throw "After Effects SDK headers were not found" }
-if (-not $CMake) { $CMake = @("C:\Program Files\Microsoft Visual Studio\18\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe", "C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe", "C:\Program Files\CMake\bin\cmake.exe") | Where-Object { Test-Path $_ } | Select-Object -First 1 }
-if (-not $CMake) { throw "cmake.exe was not found" }
+$CMake = & "$PSScriptRoot\resolve-build-cmake.ps1" $CMake $Generator
 & $CMake -S $source -B $build -G $Generator -A $Architecture
 if ($LASTEXITCODE) { throw "configure failed" }
 & $CMake --build $build --config $Configuration --target aegp_render_options_probe

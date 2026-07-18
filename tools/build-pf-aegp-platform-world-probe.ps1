@@ -13,18 +13,7 @@ $source = Join-Path $repository "instruments\pf-aegp-platform-world-probe"
 $build = Join-Path $repository "target\pf-aegp-platform-world-probe-build"
 $header = Join-Path $AfterEffectsSdk "Examples\Headers\AE_GeneralPlug.h"
 if (-not (Test-Path -LiteralPath $header)) { throw "After Effects SDK headers were not found: $header" }
-if (-not $CMake) {
-    $command = Get-Command cmake -ErrorAction SilentlyContinue
-    if ($command) { $CMake = $command.Source }
-    else {
-        $CMake = @(
-            "C:\Program Files\Microsoft Visual Studio\18\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe",
-            "C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe",
-            "C:\Program Files\CMake\bin\cmake.exe"
-        ) | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
-    }
-}
-if (-not $CMake -or -not (Test-Path -LiteralPath $CMake)) { throw "cmake.exe was not found; pass -CMake with its absolute path" }
+$CMake = & "$PSScriptRoot\resolve-build-cmake.ps1" $CMake $Generator
 $env:AE_SDK_ROOT = $AfterEffectsSdk
 & $CMake -S $source -B $build -G $Generator -A $Architecture
 if ($LASTEXITCODE -ne 0) { throw "PF AEGP Platform World probe configure failed" }
