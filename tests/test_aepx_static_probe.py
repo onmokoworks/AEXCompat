@@ -1,6 +1,7 @@
 import importlib.util
 import json
 import sys
+import tempfile
 import time
 import unittest
 from pathlib import Path
@@ -74,10 +75,11 @@ class AepxStaticProbeTests(unittest.TestCase):
         resolved = aepx_static_probe.validate_aepx_input_path(source)
         self.assertEqual(resolved, source.resolve())
 
-        outside = Path("C:/Users/optim") / f"{time.time_ns()}-outside.aepx"
-        outside.write_text("<x/>", encoding="utf-8")
-        with self.assertRaises(ValueError):
-            aepx_static_probe.validate_aepx_input_path(outside)
+        with tempfile.TemporaryDirectory(prefix="aexcompat-outside-") as directory:
+            outside = Path(directory) / f"{time.time_ns()}-outside.aepx"
+            outside.write_text("<x/>", encoding="utf-8")
+            with self.assertRaises(ValueError):
+                aepx_static_probe.validate_aepx_input_path(outside)
 
         payload = aepx_static_probe.build_aepx_probe(source)
         out = LAB_ROOT / "target" / "aepx-static-probe" / f"{time.time_ns()}-aepx.local.json"

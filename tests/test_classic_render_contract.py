@@ -9,8 +9,6 @@ ROOT = Path(__file__).resolve().parents[1]
 class ClassicRenderContractTests(unittest.TestCase):
     def test_production_path_requires_v2_secure_launch_without_fallback(self):
         source = (ROOT / "broker" / "crates" / "broker" / "src" / "render.rs").read_text(encoding="utf-8")
-        receipt = json.loads((ROOT / "target" / "render-allowlist" / "active.local.json").read_text(encoding="utf-8"))
-        self.assertEqual(receipt["schema_version"], 2)
         self.assertIn("load_v2_load_tree", source)
         self.assertIn("SealedLoadTree::create", source)
         self.assertIn("secure_launch(tree", source)

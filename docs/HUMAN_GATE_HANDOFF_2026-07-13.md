@@ -1,5 +1,10 @@
 # Human Gate Handoff (2026-07-13)
 
+> **Historical gate record:** this handoff captures the state before the owner
+> authorized native execution. Its closed-gate statements are superseded by
+> `SAFETY_GATE_STATUS_2026-07-13.md` and the continuing authorization record.
+> Retain it for audit history, not as current execution policy.
+
 This document requests human input. It is not an approval, receipt, legal
 conclusion, ABI decision, or Safety Gate opening declaration. Do not treat
 filled placeholders, test artifacts, or an agent-generated file as evidence of

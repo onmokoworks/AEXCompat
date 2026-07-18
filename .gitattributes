@@ -1,1 +1,2 @@
 tests/fixtures/aepx/*.aepx -text
+imports/**/*.aepx -text

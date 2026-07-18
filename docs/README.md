@@ -16,12 +16,11 @@ repository has a short entry point and a durable place for longer plans.
     H (human-only blockers), D (gate-locked native execution), plus the
     machine-checkable safety-gate checklist (G-1 to G-8).
 - `SAFETY_GATE_STATUS_2026-07-13.md`
-  - Current evidence audit. Records that Phase D remains closed and identifies
-    the required H-1/H-2/H-3 human decisions without treating test artifacts as
-    approval evidence.
+  - Current gate evidence after the owner authorized native execution. It
+    records the satisfied controls and the remaining compatibility boundaries.
 - `HUMAN_GATE_HANDOFF_2026-07-13.md`
-  - Exact H-1/H-2/H-3 questions for the repository owner. It contains no
-    approval or gate-opening declaration.
+  - Historical H-1/H-2/H-3 questions from before authorization. It is retained
+    for audit history and is not current execution policy.
 - `HOST_CORE_BOUNDARY_2026-07-13.md`
   - Separates generic host policy from fixture profiles and defines the evidence
     required before general AEX support can be claimed.

@@ -5,6 +5,13 @@
 設計判断の背景は設計書を参照。本文書は「何を・どの順で・どう検証して作るか」
 だけを規定する。
 
+> **Historical baseline:** this roadmap predates the reviewed native-execution
+> authorization. Phase D and later broker/minihost work are now implemented in
+> part and active. Use `PROJECT_DIRECTION.md`, `COMPATIBILITY_STATUS_2026-07-16.md`,
+> and `SAFETY_GATE_STATUS_2026-07-13.md` for current policy and status. Commands
+> below that use `unittest discover` are historical; the canonical full Python
+> suite is `python -m pytest -q`.
+
 ---
 
 ## 0. 実装エージェントへの共通指示
