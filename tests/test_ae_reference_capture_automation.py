@@ -41,6 +41,7 @@ def test_reference_capture_contract_is_hash_bound_create_new_and_temporary():
     assert "Get-LaunchedProcessTreeIds" in runner
     assert "effect_provenance" in runner
     assert "unique_loaded_provider" in runner
+    assert "output_png_sha256" in runner
     helper = (ROOT / "tools" / "windows-file-identity.ps1").read_text(encoding="utf-8")
     assert "GetFinalPathNameByHandleW" in helper
     assert "GetFileInformationByHandle" in helper
@@ -134,6 +135,7 @@ def test_reference_capture_result_records_prelaunch_input_identities(tmp_path):
     recorded = json.loads(result_path.read_text(encoding="utf-8-sig"))
     assert recorded["input_sha256"] == hashlib.sha256(original_input).hexdigest()
     assert recorded["tested_aex_sha256"] == hashlib.sha256(b"fixture-bytes").hexdigest()
+    assert recorded["output_png_sha256"] == hashlib.sha256(b"png-placeholder").hexdigest()
     assert json.loads(stdout)["input_sha256"] == recorded["input_sha256"]
 
 

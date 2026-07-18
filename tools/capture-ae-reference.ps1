@@ -298,12 +298,14 @@ if ($result.status -ne 'captured') {
 if (-not (Test-Path -LiteralPath $outputPath)) {
     throw 'After Effects reported capture success without creating the PNG.'
 }
+$outputHash = Get-Sha256Hex $outputPath
 # Bind the capture evidence to its verified inputs: both hashes were taken
 # before After Effects launched, so record those identities in the result
 # document (the cross-machine runbook requires the input hash in the returned
 # manifest, and evidence refresh scripts verify against it).
 $result | Add-Member -NotePropertyName 'input_sha256' -NotePropertyValue $inputHash
 $result | Add-Member -NotePropertyName 'tested_aex_sha256' -NotePropertyValue $testedHash.ToLowerInvariant()
+$result | Add-Member -NotePropertyName 'output_png_sha256' -NotePropertyValue $outputHash.ToLowerInvariant()
 $effectProvenance = [ordered]@{
     state = 'unverified'
     reason = 'effect_match_name_not_uniquely_bound_to_loaded_module'

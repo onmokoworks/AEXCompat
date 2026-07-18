@@ -98,6 +98,11 @@ $caseRecords = foreach ($case in $cases) {
     }
 
     $capture = ReadJson $aeResult
+    $actualAePngHash = Sha256 $aePng
+    if ([string]::IsNullOrWhiteSpace([string]$capture.output_png_sha256) -or
+        $actualAePngHash -ne ([string]$capture.output_png_sha256).ToLowerInvariant()) {
+        throw "AE output PNG does not match its capture manifest: $aePng"
+    }
     if ($capture.status -ne 'captured') {
         throw "capture result for $($case.name) is not 'captured'"
     }
@@ -240,6 +245,11 @@ foreach ($required in @($noeffectPng, $noeffectResult, $gradientDump)) {
     if (-not (Test-Path -LiteralPath $required)) { throw "missing mechanism artifact: $required" }
 }
 $noeffectCapture = ReadJson $noeffectResult
+$actualNoeffectHash = Sha256 $noeffectPng
+if ([string]::IsNullOrWhiteSpace([string]$noeffectCapture.output_png_sha256) -or
+    $actualNoeffectHash -ne ([string]$noeffectCapture.output_png_sha256).ToLowerInvariant()) {
+    throw 'no-effect output PNG does not match its capture manifest'
+}
 if ($noeffectCapture.status -ne 'captured' -or [bool]$noeffectCapture.effect_applied -or
     [string]$noeffectCapture.input_sha256 -ne (Sha256 $gradientInput) -or
     [int]$noeffectCapture.bpc -ne 16 -or

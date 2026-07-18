@@ -65,6 +65,14 @@ class NtscRsOracleDeep16ResultTests(unittest.TestCase):
                 self.assertEqual(comparison["hashes"]["render_sha256"],
                                  case["ae_capture"]["output_png_sha256"])
 
+    def test_refresh_binds_every_ae_png_to_its_capture_manifest(self):
+        refresh = (ROOT / "tools" / "refresh-ntsc-rs-oracle-deep16-evidence.ps1").read_text(
+            encoding="utf-8")
+        self.assertIn("$capture.output_png_sha256", refresh)
+        self.assertIn("$noeffectCapture.output_png_sha256", refresh)
+        self.assertIn("AE output PNG does not match its capture manifest", refresh)
+        self.assertIn("no-effect output PNG does not match its capture manifest", refresh)
+
     def test_gradient_cases_share_one_host_render_and_ae_is_fps_invariant(self):
         by_name = {case["name"]: case for case in self.document["cases"]}
         fps24 = by_name["gradient-fps24"]
