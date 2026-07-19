@@ -397,6 +397,7 @@ pub struct RenderSession {
     total_time: i32,
     frame_deadline: Duration,
     invalidation: Option<SessionInvalidation>,
+    last_output_generation: u32,
     frames_ok: u32,
     frames_errored: u32,
     opened: Instant,
@@ -557,6 +558,7 @@ impl RenderSession {
             total_time: request.total_time,
             frame_deadline: request.frame_deadline,
             invalidation: None,
+            last_output_generation: 0,
             frames_ok: 0,
             frames_errored: 0,
             opened: Instant::now(),
@@ -731,6 +733,29 @@ impl RenderSession {
                         POST_TERMINATION_COLLECT_TIMEOUT,
                     ));
                 }
+                // The header invariants hold on every response, not only ok
+                // ones: an error response must leave the broker-owned static
+                // fields and the output generation untouched.
+                if let Err(detail) = self.validate_static_header() {
+                    return Err(self.invalidate(
+                        "frame_invariant_failure",
+                        format!("frame {frame_index} (error response): {detail}"),
+                        true,
+                        POST_TERMINATION_COLLECT_TIMEOUT,
+                    ));
+                }
+                if self.transport.read_header_u32(OUTPUT_GENERATION_OFFSET)
+                    != self.last_output_generation
+                {
+                    return Err(self.invalidate(
+                        "frame_invariant_failure",
+                        format!(
+                            "frame {frame_index} error response advanced the output generation"
+                        ),
+                        true,
+                        POST_TERMINATION_COLLECT_TIMEOUT,
+                    ));
+                }
                 // Frame-local diagnostic (protocol §4.3): the sequence state
                 // is still host-owned, so the session continues; whether to
                 // proceed is the caller's decision.
@@ -778,6 +803,7 @@ impl RenderSession {
                     ));
                 }
                 self.frames_ok += 1;
+                self.last_output_generation = expected_generation;
                 Ok(FrameOutcome {
                     frame_index,
                     status: FrameStatus::Rendered { pixels, checksum },
@@ -865,6 +891,16 @@ impl RenderSession {
         if self.transport.read_header_u32(OUTPUT_GENERATION_OFFSET) != expected_generation {
             return Err("header output generation is stale".into());
         }
+        self.validate_static_header()?;
+        if self.transport.read_header_u32(FRAME_WIDTH_OFFSET) != self.geometry.width
+            || self.transport.read_header_u32(FRAME_HEIGHT_OFFSET) != self.geometry.height
+        {
+            return Err("frame dimension header does not match the session".into());
+        }
+        Ok(())
+    }
+
+    fn validate_static_header(&self) -> Result<(), String> {
         if self.transport.read_header_u32(MAGIC_OFFSET) != HEADER_MAGIC
             || self.transport.read_header_u32(VERSION_OFFSET) != PROTOCOL_VERSION
             || self.transport.read_header_u32(DEPTH_CODE_OFFSET)
@@ -875,11 +911,6 @@ impl RenderSession {
         {
             return Err("static session header was mutated".into());
         }
-        if self.transport.read_header_u32(FRAME_WIDTH_OFFSET) != self.geometry.width
-            || self.transport.read_header_u32(FRAME_HEIGHT_OFFSET) != self.geometry.height
-        {
-            return Err("frame dimension header does not match the session".into());
-        }
         Ok(())
     }
 
@@ -888,7 +919,39 @@ impl RenderSession {
     /// including the worker's final stdout report when one was produced.
     pub fn close(mut self) -> Value {
         if self.invalidation.is_none() && self.process.is_some() {
-            let _ = self.transport.send_message("{\"v\":1,\"type\":\"close\"}");
+            // The exit contract (protocol §7): a normal worker exit happens
+            // only AFTER the broker's close handshake. A worker that is
+            // already gone, an unsolicited queued response, or a failed close
+            // send is an invalidation even when the exit code and the final
+            // report look clean.
+            loop {
+                match self.receiver.try_recv() {
+                    Ok(SessionEvent::ProcessExited) => self.process_exit_observed = true,
+                    Ok(SessionEvent::Message(_)) => {
+                        self.invalidation = Some(SessionInvalidation {
+                            reason: "unsolicited_response",
+                            detail: "a response arrived with no frame in flight before close"
+                                .into(),
+                        });
+                        break;
+                    }
+                    Err(_) => break,
+                }
+            }
+            if self.invalidation.is_none() && self.process_exit_observed {
+                self.invalidation = Some(SessionInvalidation {
+                    reason: "premature_exit",
+                    detail: "the worker exited before the close handshake".into(),
+                });
+            }
+            if self.invalidation.is_none()
+                && !self.transport.send_message("{\"v\":1,\"type\":\"close\"}")
+            {
+                self.invalidation = Some(SessionInvalidation {
+                    reason: "close_send_failed",
+                    detail: "the close message could not be delivered".into(),
+                });
+            }
         }
         self.transport.close_request_pipe();
         self.collect_exit(CLOSE_COLLECT_TIMEOUT);

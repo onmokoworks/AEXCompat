@@ -258,6 +258,17 @@ mod worker {
                 }
                 continue;
             }
+            if behavior == "error_mutates_header" && frame_index == 0 {
+                view.write_u32(MAX_WIDTH_OFFSET, width as u32 + 1);
+                let reply = format!(
+                    "{{\"v\":1,\"type\":\"frame_done\",\"frame_index\":{frame_index},\
+                     \"status\":\"error\",\"render_error\":-40}}"
+                );
+                if !write_message(response, &reply) {
+                    return EXIT_PROTOCOL_VIOLATION;
+                }
+                continue;
+            }
             if scale != time_scale {
                 let reply = format!(
                     "{{\"v\":1,\"type\":\"frame_done\",\"frame_index\":{frame_index},\
@@ -317,6 +328,12 @@ mod worker {
             );
             if !write_message(response, &reply) {
                 return EXIT_PROTOCOL_VIOLATION;
+            }
+            if behavior == "exit_after_frame_0" && frame_index == 0 {
+                // A unilateral exit with a clean-looking report and exit code
+                // 0, violating only the close-handshake contract.
+                println!("{}", final_report(frames));
+                return 0;
             }
         }
         println!("{}", final_report(frames));

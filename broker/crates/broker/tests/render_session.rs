@@ -208,6 +208,39 @@ mod windows_e2e {
     }
 
     #[test]
+    fn error_response_with_a_mutated_header_is_fail_closed() {
+        let _behavior = BehaviorGuard::set(Some("error_mutates_header"));
+        let (repository, plugin, sha) = temp_repository();
+        let mut session = open_session(&repository.0, &plugin, &sha, Duration::from_secs(30));
+        let error = session
+            .render_frame(0, 0, &input_pattern(10))
+            .expect_err("a header mutation must not hide behind an error response");
+        assert!(error.to_string().contains("frame_invariant_failure"), "{error}");
+        assert_eq!(session.close()["invalidated"], true);
+    }
+
+    #[test]
+    fn a_unilateral_worker_exit_breaks_the_close_handshake_contract() {
+        let _behavior = BehaviorGuard::set(Some("exit_after_frame_0"));
+        let (repository, plugin, sha) = temp_repository();
+        let mut session = open_session(&repository.0, &plugin, &sha, Duration::from_secs(30));
+        let outcome = session
+            .render_frame(0, 0, &input_pattern(11))
+            .expect("the frame itself completes");
+        assert!(matches!(outcome.status, FrameStatus::Rendered { .. }));
+        // Give the process-death watcher a moment to observe the exit so the
+        // recorded reason is deterministic.
+        std::thread::sleep(Duration::from_secs(1));
+        // The worker exited 0 with a clean-looking final report, but it never
+        // received close: the session must not read as clean.
+        let close = session.close();
+        assert_eq!(close["invalidated"], true, "close: {close}");
+        assert_eq!(close["invalidated_reason"]["reason"], "premature_exit");
+        assert_eq!(close["session_clean"], false);
+        assert_eq!(close["worker"]["classification"], "ok");
+    }
+
+    #[test]
     fn process_death_is_seen_even_when_a_descendant_holds_the_pipe() {
         let _behavior = BehaviorGuard::set(Some("exit_leaving_descendant"));
         let (repository, plugin, sha) = temp_repository();
