@@ -25,6 +25,18 @@ struct Snapshot {
   uint32_t invalid_keyframe_operations{};
 };
 
+struct CurveVertex {
+  double x{}, y{};
+  double tangent_in_x{}, tangent_in_y{};
+  double tangent_out_x{}, tangent_out_y{};
+};
+
+struct CurveSnapshot {
+  int32_t id{};
+  bool open{};
+  std::vector<CurveVertex> vertices;
+};
+
 // Worker-owned host identities used by the raw AEGP callback ABI.  Keeping
 // these as opaque pointers prevents the mask runtime from depending on l2's
 // concrete host-object layout.
@@ -32,6 +44,7 @@ struct HostContext {
   void* layer{};
   void (*raise_access_violation)(){};
   Snapshot (*snapshot)(){};
+  bool (*snapshot_curve)(void* handle, CurveSnapshot& curve){};
 };
 
 struct Vertex {
@@ -62,5 +75,6 @@ Fault fault();
 void configure_host_context(HostContext context);
 HostContext host_context();
 Snapshot snapshot();
+bool snapshot_curve(void* handle, CurveSnapshot& curve);
 
 }  // namespace aexcompat::mask_runtime

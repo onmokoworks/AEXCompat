@@ -761,6 +761,7 @@ struct HostMask : OutlineData {
   std::array<double, 4> color{1.0, 1.0, 0.0, 0.0};
   std::list<HostKeyframe> keyframes;
 };
+HostMask* find_mask(void* handle);
 enum class DynamicNodeKind {
   MaskOutline, LayerRoot, MaskParade, MaskAtom, MaskFeather, MaskOpacity, MaskExpansion
 };
@@ -890,6 +891,22 @@ aexcompat::mask_runtime::Snapshot mask_runtime_snapshot() {
   return snapshot;
 }
 
+bool snapshot_mask_curve(void* handle, aexcompat::mask_runtime::CurveSnapshot& curve) {
+  HostMask* mask = find_mask(handle);
+  if (!mask || mask->deleted) return false;
+  aexcompat::mask_runtime::CurveSnapshot candidate;
+  candidate.id = mask->id;
+  candidate.open = mask->open;
+  candidate.vertices.reserve(mask->vertices.size());
+  for (const auto& vertex : mask->vertices) {
+    candidate.vertices.push_back({vertex.x, vertex.y, vertex.tangent_in_x,
+                                  vertex.tangent_in_y, vertex.tangent_out_x,
+                                  vertex.tangent_out_y});
+  }
+  curve = std::move(candidate);
+  return true;
+}
+
 std::size_t distinct_vertex_count(const OutlineData& mask) {
   return mask.vertices.size() - static_cast<std::size_t>(!mask.open && !mask.vertices.empty());
 }
@@ -917,7 +934,8 @@ bool pf_path_lifetimes_balanced() {
 
 bool configure_mask_scene(const std::string& scene_id) {
   aexcompat::mask_runtime::configure_host_context(
-      {&g_layer, &raise_mask_access_violation, &mask_runtime_snapshot});
+      {&g_layer, &raise_mask_access_violation, &mask_runtime_snapshot,
+       &snapshot_mask_curve});
   if (!g_stream_refs.empty() || !g_stream_values.empty() ||
       !g_add_keyframe_transactions.empty()) return false;
   aexcompat::mask_runtime::SceneSeed seed;
