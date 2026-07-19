@@ -5091,7 +5091,7 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
         static_cast<int32_t>(g_downsample_y.denominator)},
        {static_cast<int32_t>(g_pixel_aspect_ratio.numerator),
         static_cast<int32_t>(g_pixel_aspect_ratio.denominator)},
-       invocation.external_pixel_bytes, static_cast<int32_t>(g_params.size() + 1),
+       invocation.external_pixel_bytes,
        is_render_worker(), is_rendering_worker(), invocation.audio_mode, g_skip_about},
       {&invoke_entry_seh, &reset_effect_lifetime,
        +[](bool active) { g_global_setup_active = active; },
@@ -5101,7 +5101,8 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
        +[](EffectEntry callback,
            aexcompat::worker_runtime::effect_bootstrap::State& state) {
          observe_arbitrary_defaults(callback, state.input, state.output);
-       }});
+       },
+       +[]() { return static_cast<int32_t>(g_params.size()); }});
   const int32_t global_error = bootstrap.global_error;
   const int32_t about_error = bootstrap.about_error;
   const int32_t params_error = bootstrap.params_error;

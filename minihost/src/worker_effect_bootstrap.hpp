@@ -37,7 +37,6 @@ struct Request {
   std::array<int32_t, 2> downsample_y{};
   std::array<int32_t, 2> pixel_aspect_ratio{};
   int32_t external_pixel_bytes{};
-  int32_t expected_num_params{};
   bool render_worker{};
   bool rendering_worker{};
   bool audio_mode{};
@@ -50,6 +49,11 @@ struct RuntimeHooks {
   void (*set_global_setup_active)(bool){};
   void (*configure_audio_admission)(bool, bool){};
   void (*observe_arbitrary_defaults)(EffectEntry, State&){};
+  // Number of parameter records the host has discovered so far. The count
+  // contract must read this AFTER PARAMS_SETUP, because add_param discovery
+  // grows the records during that selector (issue #177); a launch-time
+  // snapshot rejects every effect that declares parameters dynamically.
+  int32_t (*discovered_parameter_count)(){};
 };
 
 struct Result {

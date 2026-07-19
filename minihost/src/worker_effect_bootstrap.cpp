@@ -105,10 +105,16 @@ Result run(State& state, EffectEntry entry, const AbiHooks& abi,
                      nullptr, nullptr, &result.exception_codes[2]) : -1;
   std::cerr << "stage:params_setup_end error=" << result.params_error << "\n" << std::flush;
   if (result.params_error == 0) hooks.observe_arbitrary_defaults(entry, state);
+  // expected_num_params = static_cast<int32_t>(g_params.size() + 1), read
+  // through the hook only after PARAMS_SETUP returned: add_param discovery
+  // grows the host's records during the selector, so a launch-time snapshot
+  // would reject every effect that declares parameters (issue #177).
+  const int32_t expected_num_params =
+      hooks.discovered_parameter_count ? hooks.discovered_parameter_count() + 1 : 1;
   result.parameter_count_contract_valid = result.params_error == 0 &&
-      read<int32_t>(state.output, 48) == request.expected_num_params;
+      read<int32_t>(state.output, 48) == expected_num_params;
   if (result.parameter_count_contract_valid)
-    write(state.input, 208, request.expected_num_params);
+    write(state.input, 208, expected_num_params);
   return result;
 }
 
