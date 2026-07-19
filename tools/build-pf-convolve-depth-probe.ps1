@@ -1,6 +1,6 @@
 param(
     [string]$AfterEffectsSdk = $env:AFTER_EFFECTS_SDK_ROOT,
-    [string]$Generator = "Visual Studio 18 2026",
+    [string]$Generator = "",
     [string]$Architecture = "x64",
     [string]$CMake = "",
     [ValidateSet("Debug", "Release")]
@@ -13,6 +13,7 @@ $source = Join-Path $repository "instruments\pf-convolve-depth-probe"
 $build = Join-Path $repository "target\pf-convolve-depth-probe-build"
 $header = Join-Path $AfterEffectsSdk "Examples\Headers\AE_EffectCBSuites.h"
 if (-not (Test-Path -LiteralPath $header)) { throw "After Effects SDK headers were not found: $header" }
+$Generator = & "$PSScriptRoot\resolve-cmake-generator.ps1" $Generator
 $CMake = & "$PSScriptRoot\resolve-build-cmake.ps1" $CMake $Generator
 $env:AE_SDK_ROOT = $AfterEffectsSdk
 & $CMake -S $source -B $build -G $Generator -A $Architecture

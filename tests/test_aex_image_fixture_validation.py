@@ -26,9 +26,8 @@ ppm_fixture_tool = load_tool("ppm_fixture_tool")
 def create_ppm(name: str, width: int, height: int, pattern: str) -> Path:
     root = LAB_ROOT / "target" / "ppm-fixtures"
     root.mkdir(parents=True, exist_ok=True)
-    # Windows time.time_ns() is not guaranteed to advance between calls. This
-    # helper is invoked repeatedly with the same name while writes are
-    # intentionally create-new, so a coarse clock can cause a false collision.
+    # Windows' wall-clock resolution can return the same time_ns() value for
+    # consecutive calls, while the fixture writer intentionally uses create-new.
     path = root / f"{uuid.uuid4().hex}-{name}.ppm"
     image = ppm_fixture_tool.generate_image(width, height, pattern)
     ppm_fixture_tool.write_ppm_create_new(path, image)

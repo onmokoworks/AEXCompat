@@ -2,6 +2,12 @@
   "schema_version": 1,
   "title": "ntsc-rs AE oracle: full-precision 16 bpc comparison via deep transport (issue #53)",
   "generated_by": "tools/refresh-ntsc-rs-oracle-deep16-evidence.ps1",
+  "oracle_identity": {
+    "state": "unverified",
+    "reason": "legacy captures do not record the AEX module loaded by the AE process",
+    "exact_claim_allowed": false,
+    "recapture_requirement": "tools/capture-ae-reference.ps1 -RequireLoadedAexIdentity"
+  },
   "environment": {
     "ae_version": "25.3.1x3",
     "plugin_file": "ntsc-rs-ae.aex",
@@ -12,10 +18,49 @@
   },
   "comparison_tool": "tools/compare-pixel-oracles.py",
   "tolerance": 0.000125,
-  "tolerance_meaning": "accepts up to 4 AE 16-bpc transport codes (4/32768 ~= 1.22e-4), ~32x below one 8-bit LSB; observed residue stays within 2 codes and is explained by 8-to-16 input promotion rounding plus the downward AE PNG16 export quantization",
+  "tolerance_meaning": "accepts 4.096 AE 16-bpc transport codes (0.000125), ~31x below one 8-bit LSB; observed residue stays within 2 codes and is consistent with input-promotion and PNG16 export quantization",
   "ae_fps_invariance": {
     "observed": true,
     "meaning": "AE 16 bpc captures of the gradient input at comp fps 24 and fps 1 (one-frame duration) are byte-identical"
+  },
+  "mechanism": {
+    "verified_by": "tools/verify-deep16-mechanism.py",
+    "artifact_availability": "local_only_not_committed",
+    "clean_clone_reproducible": false,
+    "artifacts": {
+      "smart_input_dump": "target/oracle-deep16/host-gradient-smart-input.rgba16le",
+      "noeffect_capture_png": "target/oracle-deep16/ae-noeffect-16.png",
+      "noeffect_capture_fps": 24
+    },
+    "manifest": {
+      "ae_composed_map": {
+        "deviation_bounded_by_one": true,
+        "deviation_histogram": {
+          "-1": 126,
+          "0": 129,
+          "1": 1
+        },
+        "distinct_8bit_values_observed": 256,
+        "formula": "v * 257 + d, d in {-1, 0, +1}",
+        "holds": true,
+        "input_png_sha256": "bb84e35ea6bdbfa178d13d6571dbff84aa2b78e57f3dbc9831aa7448c619c97e",
+        "mapping_deterministic": true,
+        "noeffect_png_sha256": "147a11cc365f1b3681638792e10c27fc99c63197dda8c2c2782b17d1a40a5634",
+        "roundtrip_round_v16_div_257_exact": true
+      },
+      "generated_by": "tools/verify-deep16-mechanism.py",
+      "holds": true,
+      "host_promotion": {
+        "formula": "round(v * 32768 / 255) = (v * 32768 + 127) // 255",
+        "holds": true,
+        "input_decoded_bit_depth": 8,
+        "input_png_sha256": "bb84e35ea6bdbfa178d13d6571dbff84aa2b78e57f3dbc9831aa7448c619c97e",
+        "mismatched_samples": 0,
+        "smart_input_dump_sha256": "a04dfc11c53ef80d2dd180a49efc748450b3770d5c143bb7d72f88ef9de647b6",
+        "total_samples": 8294400
+      },
+      "schema_version": 1
+    }
   },
   "cases": [
     {
@@ -39,7 +84,15 @@
         "fps": 24,
         "bpc": 16,
         "color_pinned": false,
-        "working_space": "None"
+        "working_space": "None",
+        "effect_match_name": "ntsc-rs",
+        "installed_aex_hash_stable_for_session": true,
+        "match_name_scan": {
+          "ae_plugins_root_scanned": true,
+          "aex_files_scanned": 563,
+          "other_files_containing_effect_name": 0,
+          "installed_contains_effect_name": true
+        }
       },
       "comparison": {
         "comparison_boundary": {
@@ -102,7 +155,15 @@
         "fps": 1,
         "bpc": 16,
         "color_pinned": false,
-        "working_space": "None"
+        "working_space": "None",
+        "effect_match_name": "ntsc-rs",
+        "installed_aex_hash_stable_for_session": true,
+        "match_name_scan": {
+          "ae_plugins_root_scanned": true,
+          "aex_files_scanned": 563,
+          "other_files_containing_effect_name": 0,
+          "installed_contains_effect_name": true
+        }
       },
       "comparison": {
         "comparison_boundary": {
@@ -165,7 +226,15 @@
         "fps": 24,
         "bpc": 16,
         "color_pinned": false,
-        "working_space": "None"
+        "working_space": "None",
+        "effect_match_name": "ntsc-rs",
+        "installed_aex_hash_stable_for_session": true,
+        "match_name_scan": {
+          "ae_plugins_root_scanned": true,
+          "aex_files_scanned": 563,
+          "other_files_containing_effect_name": 0,
+          "installed_contains_effect_name": true
+        }
       },
       "comparison": {
         "comparison_boundary": {

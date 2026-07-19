@@ -29,7 +29,11 @@ use windows_sys::Win32::System::Threading::{
     PROC_THREAD_ATTRIBUTE_HANDLE_LIST, STARTF_USESTDHANDLES, STARTUPINFOEXW,
 };
 
-const CAPTURE_LIMIT: usize = 64 * 1024;
+// Native render stdout is one bounded JSON report. Its 65,536 Suite events
+// can occupy more than 16 MiB after escaping 96-byte safely copied names.
+// Keep enough for the worker contract while retaining a hard memory bound.
+pub const STDOUT_CAPTURE_LIMIT: usize = 24 * 1024 * 1024;
+const STDERR_CAPTURE_LIMIT: usize = 64 * 1024;
 const PROCESS_MEMORY_LIMIT: usize = 512 * 1024 * 1024;
 const TERMINATION_GRACE_MS: u32 = 5_000;
 // See memory_limit_reached: the largest single failed allocation the
@@ -180,7 +184,10 @@ fn child_environment(trace_handle: Option<HANDLE>) -> Vec<u16> {
     block
 }
 
-fn reader(handle_value: usize) -> thread::JoinHandle<io::Result<(String, bool)>> {
+fn reader(
+    handle_value: usize,
+    capture_limit: usize,
+) -> thread::JoinHandle<io::Result<(String, bool)>> {
     thread::spawn(move || {
         let handle = handle_value as HANDLE;
         let handle = OwnedHandle::new(handle)?;
@@ -201,13 +208,13 @@ fn reader(handle_value: usize) -> thread::JoinHandle<io::Result<(String, bool)>>
             if ok == 0 || read == 0 {
                 break;
             }
-            let available = CAPTURE_LIMIT.saturating_sub(collected.len());
+            let available = capture_limit.saturating_sub(collected.len());
             let take = available.min(read as usize);
             collected.extend_from_slice(&buffer[..take]);
             truncated |= take < read as usize;
         }
         let text = String::from_utf8_lossy(&collected);
-        let (redacted, redaction_truncated) = redact_windows_paths(&text, CAPTURE_LIMIT);
+        let (redacted, redaction_truncated) = redact_windows_paths(&text, capture_limit);
         Ok((redacted, truncated || redaction_truncated))
     })
 }
@@ -436,8 +443,8 @@ fn run_isolated_impl(
     drop(stdout_write);
     drop(stderr_write);
     drop(trace_file);
-    let stdout_reader = reader(stdout_read.take() as usize);
-    let stderr_reader = reader(stderr_read.take() as usize);
+    let stdout_reader = reader(stdout_read.take() as usize, STDOUT_CAPTURE_LIMIT);
+    let stderr_reader = reader(stderr_read.take() as usize, STDERR_CAPTURE_LIMIT);
     let wait = unsafe {
         WaitForSingleObject(
             process_handle.raw(),

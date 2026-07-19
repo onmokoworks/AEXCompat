@@ -33,10 +33,13 @@ class ProductionWorkerTraceTests(unittest.TestCase):
             audited.index("selector_dispatch"), audited.index("entry(command"))
         acquire = source[source.index("void record_suite_acquire"):
                          source.index("void record_missing_suite")]
-        self.assertIn("suite_acquire(name, version, true)", acquire)
+        self.assertIn("suite_acquire(safe_name_text, version, true)", acquire)
         release = source[source.index("int32_t __cdecl release_suite"):
                          source.index("bool verify_suite_release_without_acquire_rejected")]
-        self.assertIn("suite_release(name, std::max<int32_t>(version, 0), released)", release)
+        self.assertIn(
+            "suite_release(safe_name_text, std::max<int32_t>(version, 0), released)",
+            release,
+        )
 
     def test_writer_contract_is_bounded_and_does_not_emit_private_paths(self):
         writer = (ROOT / "instruments" / "common" / "trace_writer.cpp").read_text(encoding="utf-8")

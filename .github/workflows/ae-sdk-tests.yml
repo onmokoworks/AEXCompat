@@ -1,0 +1,148 @@
+name: AE SDK tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ae-sdk-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+# cargo test と source-only (SDK なし) の pytest は windows-clean-clone.yml が
+# 担当する。この workflow は SDK 込み検証 (--run-sdk-tests) 専用。
+jobs:
+  sdk-backed:
+    name: pytest with AE SDK (windows)
+    runs-on: windows-latest
+    # fork (untrusted) PR では実行しない: SDK asset は collaborator 限定であり、
+    # PR 側コードに asset へ届く token 付きで pytest を走らせない (fail-closed)。
+    # 現状 private repo で same-repo branch PR のみなので挙動は変わらない。
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    timeout-minutes: 120
+    env:
+      SDK_RELEASE_TAG: ci-sdk-ae25.2
+      SDK_ASSET: AfterEffectsSDK-ae25.2-win.zip
+      SDK_SHA256: 23F724D6B9C3E8F66B6C1A449EDA1F4C0B73D5A1C2706734C258EBF00E461F21
+    steps:
+      - uses: actions/checkout@v4
+
+      # 3.12 に固定する: 3.14 は OpenEXR の win_amd64 wheel が無く、毎回
+      # ソースビルドで約 2.5 分かかる。windows-clean-clone.yml と同じ版に揃える。
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+
+      # Gyroflow 方式: SDK zip を取得・展開して AFTER_EFFECTS_SDK_ROOT を通す。
+      # asset は private release (collaborator 限定) にあり、hash mismatch は fail-closed。
+      - name: Fetch After Effects SDK
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $zip = Join-Path $env:RUNNER_TEMP $env:SDK_ASSET
+          gh release download $env:SDK_RELEASE_TAG --repo $env:GITHUB_REPOSITORY --pattern $env:SDK_ASSET --output $zip
+          $hash = (Get-FileHash -Algorithm SHA256 $zip).Hash
+          if ($hash -ne $env:SDK_SHA256) { throw "SDK asset hash mismatch: expected $env:SDK_SHA256, got $hash" }
+          $dest = Join-Path $env:RUNNER_TEMP 'aesdk'
+          Expand-Archive -Path $zip -DestinationPath $dest -Force
+          $root = Join-Path $dest 'AfterEffectsSDK'
+          if (-not (Test-Path (Join-Path $root 'Examples\Headers\AE_Effect.h'))) {
+            throw 'extracted SDK is missing Examples\Headers\AE_Effect.h'
+          }
+          "AFTER_EFFECTS_SDK_ROOT=$root" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Install Python dependencies
+        run: python -m pip install -r requirements-dev.txt
+
+      # built_artifact テスト (#73) 用: minihost workers を Ninja でビルドする。
+      # docs/BUILD_REQUIREMENTS.md の指示どおり target\minihost-build 直下に
+      # フラット配置する (single-config)。
+      - name: Build minihost workers (Ninja)
+        shell: cmd
+        run: |
+          for /f "usebackq delims=" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do set "VSROOT=%%i"
+          if not defined VSROOT exit /b 1
+          call "%VSROOT%\VC\Auxiliary\Build\vcvars64.bat" || exit /b 1
+          cmake -S minihost -B target\minihost-build -G Ninja -DCMAKE_BUILD_TYPE=Release || exit /b 1
+          cmake --build target\minihost-build || exit /b 1
+          dir /b target\minihost-build\aex_*.exe
+
+      # 一部の built_artifact テストは worker を multi-config 時代の固定パス
+      # (minihost-build-v18\[Release]、minihost-timed-layers\Release、
+      # minihost-build\Release) から探すため、同一バイナリを複製して満たす。
+      # これらのテストは frozen hash を照合しないので複製で問題ない。
+      - name: Mirror workers into expected build layouts
+        shell: cmd
+        run: |
+          for %%d in ("target\minihost-build-v18" "target\minihost-build-v18\Release" "target\minihost-build\Release" "target\minihost-timed-layers\Release") do (
+            mkdir %%d 2>nul
+            copy /y target\minihost-build\aex_*.exe %%d\ >nul || exit /b 1
+          )
+
+      # probe テストの入力 fixture (37x23 raw RGBA)。内容は決定論的に生成され、
+      # built_artifact テストは期待値を実行時に自己計算するため内容非依存。
+      - name: Generate probe input fixture
+        shell: cmd
+        run: |
+          mkdir target\gpu-effects 2>nul
+          python tools\generate-oracle-rgba-input.py --width 37 --height 23 --alpha-mode opaque --out target\gpu-effects\opencl-input.png || exit /b 1
+          python tools\png-to-rgba-raw.py --png target\gpu-effects\opencl-input.png --out target\gpu-effects\opencl-input.rgba || exit /b 1
+
+      # built_artifact の probe 実行テストが参照する probe .aex を事前ビルドする。
+      # (一部は同一ファイル内の sdk_required テストでもビルドされるが、事前に
+      # 揃えることでテスト順序への依存をなくす。)
+      - name: Build probe AEX set
+        shell: cmd
+        run: |
+          set "PSModulePath=%ProgramFiles%\WindowsPowerShell\Modules;%SystemRoot%\System32\WindowsPowerShell\v1.0\Modules;%PSModulePath%"
+          for %%s in (
+            build-pf-sampling-probe
+            build-pf-aegp-async-layer-receipt-probe
+            build-pf-aegp-external-cache-roundtrip-probe
+            build-pf-aegp-fast-blur-probe
+            build-pf-aegp-layer-options-probe
+            build-pf-aegp-layer-receipt-probe
+            build-pf-aegp-owned-world-probe
+            build-pf-aegp-platform-world-probe
+            build-pf-aegp-render-options4-tail-probe
+            build-pf-aegp-render-suite5-probe
+            build-pf-convolve-depth-probe
+            build-pf-param-utils-animation-probe
+            build-pf-transfer-mask-probe
+            build-pf-transfer-rect-probe
+            build-pf-transform-affine-probe
+          ) do (
+            powershell -NoProfile -ExecutionPolicy Bypass -File tools\%%s.ps1 || exit /b 1
+          )
+
+      # cmd で実行する: pwsh の step から spawn すると、テストが起動する
+      # powershell.exe (5.1) が pwsh 用の PSModulePath を継承してしまい、
+      # Get-FileHash 等の組み込み cmdlet を解決できなくなる。
+      - name: Run pytest with SDK and built-artifact tests
+        shell: cmd
+        run: |
+          set "PSModulePath=%ProgramFiles%\WindowsPowerShell\Modules;%SystemRoot%\System32\WindowsPowerShell\v1.0\Modules;%PSModulePath%"
+          python -m pytest -q -rs --run-sdk-tests --run-built-artifact-tests --validate-local-artifact-manifest > pytest-output.txt 2>&1
+          set PYTEST_EXIT=%ERRORLEVEL%
+          type pytest-output.txt
+          exit /b %PYTEST_EXIT%
+
+      # AFTER_EFFECTS_SDK_ROOT が通っていれば SDK 由来の skip は 1 件も出ないはず。
+      # 同様に、worker/probe をビルド済みなので built_artifact テストが成果物
+      # 不在の inline skip ("... is not built" 等) で黙って skip されたら fail。
+      - name: Fail if SDK or built-artifact tests were skipped
+        shell: pwsh
+        run: |
+          $leaks = Select-String -Path pytest-output.txt -Pattern 'SKIPPED' |
+            Where-Object { $_.Line -match 'set AFTER_EFFECTS_SDK_ROOT|is not built|are not present' }
+          if ($leaks) {
+            $leaks | ForEach-Object { $_.Line }
+            throw 'SDK or built-artifact tests were skipped even though their prerequisites are provisioned'
+          }

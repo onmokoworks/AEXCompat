@@ -1,11 +1,13 @@
 param(
     [string]$AfterEffectsSdk = $env:AFTER_EFFECTS_SDK_ROOT,
-    [string]$Generator = "Visual Studio 18 2026",
+    [string]$Generator = "",
     [string]$Architecture = "x64",
-    [string]$CMake = "C:\Program Files\Microsoft Visual Studio\18\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe",
+    [string]$CMake = "",
     [ValidateSet("Debug", "Release")][string]$Configuration = "Release"
 )
 $ErrorActionPreference = "Stop"
+$Generator = & "$PSScriptRoot\resolve-cmake-generator.ps1" $Generator
+$CMake = & "$PSScriptRoot\resolve-build-cmake.ps1" $CMake $Generator
 $AfterEffectsSdk = & "$PSScriptRoot\resolve-after-effects-sdk.ps1" $AfterEffectsSdk
 $repository = Split-Path -Parent $PSScriptRoot
 $source = Join-Path $repository "instruments\pf-ae-channel-native-probe"

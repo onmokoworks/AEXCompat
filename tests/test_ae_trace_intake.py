@@ -66,6 +66,22 @@ class AeTraceIntakeTests(unittest.TestCase):
         self.assertFalse(sanitized.exists())
         self.assertTrue(any("absolute path" in reason for reason in report["rejection_reasons"]))
 
+    def test_rejects_native_observation_from_ae_corpus(self):
+        # Observation traces carry no provenance and must not enter the AE corpus.
+        event = {
+            "schema_version": 1,
+            "event_index": 0,
+            "event_kind": "session_start",
+            "host_kind": "native_observation",
+            "host_version_label": "native-observation frida",
+            "plugin_label": "gamma-classic",
+        }
+        code, report, sanitized = self.run_main(self.write_events([event]))
+        self.assertEqual(1, code)
+        self.assertFalse(report["accepted"])
+        self.assertFalse(sanitized.exists())
+        self.assertTrue(any("native_observation" in reason for reason in report["rejection_reasons"]))
+
     def test_redacts_absolute_path_and_accepts(self):
         event = json.loads(SYNTHETIC.read_text(encoding="utf-8").splitlines()[1])
         event["selector"] = "D:\\Private\\selector"

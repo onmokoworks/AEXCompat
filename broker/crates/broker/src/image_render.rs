@@ -250,7 +250,7 @@ fn cleanup_stale_image_transport(root: &Path, now: SystemTime) -> io::Result<()>
     cleanup_stale_image_transport_before(root, now, STALE_IMAGE_TRANSPORT_AGE)
 }
 
-fn decode_bounded_image(path: &Path, role: &str) -> io::Result<image::DynamicImage> {
+pub(crate) fn decode_bounded_image(path: &Path, role: &str) -> io::Result<image::DynamicImage> {
     let mut reader = image::ImageReader::open(path)
         .map_err(|error| invalid(format!("{role} image open failed: {error}")))?
         .with_guessed_format()
@@ -600,6 +600,27 @@ fn runtime_backend(backend: RenderGpuBackend) -> Option<RuntimeBackend> {
         RenderGpuBackend::DirectX => Some(RuntimeBackend::Directx),
         RenderGpuBackend::Cpu => None,
     }
+}
+
+fn is_auto_gpu_preflight_error(error: &io::Error) -> bool {
+    let message = error.to_string().to_ascii_lowercase();
+    [
+        "gpu render requires",
+        "gpu infrastructure",
+        "gpu backend unavailable",
+        "gpu unavailable",
+        "host policy",
+        "runtime module",
+        "gpu dispatch",
+        "restricted token",
+        "sealed tree acl",
+        "trusted worker staging",
+        "restricted process launch",
+        "worker module audit validation",
+        "local worker binary",
+    ]
+    .iter()
+    .any(|needle| message.contains(needle))
 }
 
 impl RenderPixelFormat {
@@ -1384,6 +1405,11 @@ pub fn render_image(
     {
         return Err(invalid("descriptor and approved artifact digests differ"));
     }
+    let payload = encode_worker_payload(
+        &manifest.profile,
+        &apply_defaults(&manifest.profile, &ValidatedAssignments::new()),
+    )
+    .map_err(invalid)?;
     render_with_artifact(
         repository,
         plugin_id,
@@ -1392,7 +1418,7 @@ pub fn render_image(
         approved.timeout_ms,
         input_path,
         output_path,
-        None,
+        Some(payload),
         None,
         None,
         RenderTiming::default(),
@@ -4167,20 +4193,10 @@ fn render_with_artifact(
         timed_secondaries.push((layer.slot, layer.time, layer_width, layer_height, rgba));
     }
 
-    let profile = crate::fixture_profiles::find("scattermap")
-        .ok_or_else(|| invalid("scattermap profile missing"))?;
-    let worker_spec = if smart {
-        profile.smart_worker
-    } else {
-        profile.classic_worker
-    }
-    .ok_or_else(|| invalid("requested image worker missing"))?;
-    let manifest = load_manifest(repository, "scattermap", profile.descriptor_manifest)?;
-    let effective = apply_defaults(&manifest.profile, &ValidatedAssignments::new());
-    let payload = match payload_override {
-        Some(payload) => payload,
-        None => encode_worker_payload(&manifest.profile, &effective).map_err(invalid)?,
-    };
+    // Experimental rendering always receives the generic interactive payload.
+    // Fixture manifests are resolved by fixture-specific public entrypoints,
+    // never by this AEX-agnostic transport path.
+    let payload = payload_override.unwrap_or_else(|| "v2|".to_owned());
 
     let root = repository.join("target/image-transport");
     fs::create_dir_all(&root)?;
@@ -4257,16 +4273,6 @@ fn render_with_artifact(
     } else {
         WorkerKind::Render
     };
-    let trusted_worker_path = if smart {
-        "target/minihost-build/aex_smart_worker.exe"
-    } else {
-        "target/minihost-build/aex_render_worker.exe"
-    };
-    if worker_spec.executable != trusted_worker_path {
-        return Err(invalid(
-            "image worker profile does not match fixed trust policy",
-        ));
-    }
     let plugin = ApprovedImageArtifact {
         path: plugin_path.to_path_buf(),
         expected_sha256: decode_sha256_hex(plugin_sha256)?,
@@ -4407,32 +4413,64 @@ fn render_with_artifact(
         && timed_secondaries.is_empty()
         && audio.is_none()
         && runtime_backend(gpu_backend).is_some();
+    let auto_gpu_cpu_fallback = gpu_backend == RenderGpuBackend::Auto
+        && smart
+        && pixel_format == RenderPixelFormat::Argb32f
+        && gpu_initial_attempt;
+    let mut gpu_fallback_used = false;
+    let mut gpu_fallback_reason: Option<String> = None;
+    let mut gpu_attempt: Option<Value> = None;
     let mut isolated = if gpu_initial_attempt {
-        let policy_input = gpu_runtime_policy.ok_or_else(|| {
-            invalid(
-                "GPU render requires a session-bound authenticated runtime module policy report; use the runtime-policy render API or select CPU",
-            )
-        })?;
-        let backend = runtime_backend(gpu_backend).expect("GPU attempt has a runtime backend");
-        let report = authenticate_gpu_worker_report(
-            policy_input.module_report_json,
-            &policy_input.session_identity,
-            backend,
-            WorkerModuleValidation {
-                policy: policy_input.policy,
-                sealed: policy_input.sealed_modules,
-                trusted: policy_input.trusted_modules,
-                system32: policy_input.system32,
-            },
-        )?;
-        dispatch_secure_gpu_image(
-            initial_dispatch,
-            GpuRuntimeAuthorization {
+        let gpu_result = (|| -> io::Result<_> {
+            let policy_input = gpu_runtime_policy.ok_or_else(|| {
+                invalid(
+                    "GPU render requires a session-bound authenticated runtime module policy report; use the runtime-policy render API or select CPU",
+                )
+            })?;
+            let backend = runtime_backend(gpu_backend).expect("GPU attempt has a runtime backend");
+            let report = authenticate_gpu_worker_report(
+                policy_input.module_report_json,
+                &policy_input.session_identity,
                 backend,
-                session_identity: policy_input.session_identity,
-                module_report: &report,
-            },
-        )?
+                WorkerModuleValidation {
+                    policy: policy_input.policy,
+                    sealed: policy_input.sealed_modules,
+                    trusted: policy_input.trusted_modules,
+                    system32: policy_input.system32,
+                },
+            )?;
+            dispatch_secure_gpu_image(
+                initial_dispatch,
+                GpuRuntimeAuthorization {
+                    backend,
+                    session_identity: policy_input.session_identity,
+                    module_report: &report,
+                },
+            )
+        })();
+        match gpu_result {
+            Ok(result) => result,
+            Err(error) if auto_gpu_cpu_fallback && is_auto_gpu_preflight_error(&error) => {
+                gpu_fallback_used = true;
+                gpu_fallback_reason = Some(error.to_string());
+                gpu_attempt = Some(json!({
+                    "classification": "gpu_preflight_error",
+                    "error": error.to_string(),
+                }));
+                args_before_plugin[0] =
+                    image_worker_command(smart, pixel_format, false, RenderGpuBackend::Cpu)?.into();
+                dispatch_secure_image(SecureImageDispatch {
+                    repository,
+                    worker_kind,
+                    plugin: plugin.clone(),
+                    dependencies: dependencies.clone(),
+                    args_before_plugin: &args_before_plugin,
+                    args_after_plugin: &args_after_plugin,
+                    timeout: Duration::from_millis(timeout_ms),
+                })?
+            }
+            Err(error) => return Err(error),
+        }
     } else {
         dispatch_secure_image(initial_dispatch)?
     };
@@ -4460,9 +4498,8 @@ fn render_with_artifact(
                         || worker_report.get("gpu_device_setup_error") != Some(&json!(0))
                         || worker_report.get("gpu_device_setdown_error") != Some(&json!(0)))
             }));
-    let mut gpu_fallback_used = false;
-    let mut gpu_attempt = None;
     let worker_report = if gpu_attempt_failed {
+        gpu_fallback_reason = Some("GPU worker attempt failed; CPU retry used".into());
         gpu_attempt = Some(json!({
             "worker_classification": isolated.classification.as_str(),
             "worker_diagnostics": diagnostics,
@@ -4471,6 +4508,7 @@ fn render_with_artifact(
             "smart_render_error": initial_report.as_ref().and_then(|report| report.get("smart_render_error")),
             "smart_render_selector_error": initial_report.as_ref().and_then(|report| report.get("smart_render_selector_error")),
             "output_pixels_valid": initial_report.as_ref().and_then(|report| report.get("output_pixels_valid")),
+            "suite_timeline": initial_report.as_ref().and_then(|report| report.get("suite_timeline")),
             "gpu_device_setup_error": initial_report.as_ref().and_then(|report| report.get("gpu_device_setup_error")),
             "gpu_device_setdown_error": initial_report.as_ref().and_then(|report| report.get("gpu_device_setdown_error")),
             "gpu_device_setdown_exception_code": initial_report.as_ref().and_then(|report| report.get("gpu_device_setdown_exception_code")),
@@ -4754,7 +4792,6 @@ fn render_with_artifact(
         "gpu_render_dispatched": worker_report.get("gpu_render_dispatched"),
         "gpu_memory": gpu_memory,
         "gpu_fallback_used": gpu_fallback_used,
-        "gpu_attempt": gpu_attempt,
         "input_sha256": worker_report.get("input_sha256"),
         "output_sha256": worker_report.get("output_sha256"),
         "requested_parameters": worker_report.get("requested_parameters"),
@@ -4766,6 +4803,26 @@ fn render_with_artifact(
     let report_object = report
         .as_object_mut()
         .expect("interactive render report is an object");
+    report_object.insert("gpu_fallback_reason".into(), json!(gpu_fallback_reason));
+    report_object.insert(
+        "gpu_attempt".into(),
+        gpu_attempt.unwrap_or(Value::Null),
+    );
+    for (name, source) in [
+        ("row_bytes", "rowbytes"),
+        ("pixel_format", "pixel_format"),
+        ("premultiplication", "premultiplication"),
+        ("result_rect", "result_rect"),
+        ("max_result_rect", "max_result_rect"),
+        ("input_world", "input_world"),
+        ("output_world", "output_world"),
+        ("suite_timeline", "suite_timeline"),
+    ] {
+        report_object.insert(
+            name.into(),
+            worker_report.get(source).cloned().unwrap_or(Value::Null),
+        );
+    }
     if deep_png_output {
         report_object.insert("output_transport".into(), json!("native_raw+rgba16_png"));
         report_object.insert(
@@ -4919,6 +4976,34 @@ fn render_with_artifact(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bounded_decode_rejects_header_only_images() {
+        let path = std::env::temp_dir().join(format!(
+            "aexcompat-truncated-input-{}-{}.png",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        image::RgbaImage::from_pixel(1, 1, image::Rgba([0, 0, 0, 255]))
+            .save(&path)
+            .unwrap();
+        let complete = fs::read(&path).unwrap();
+        let header_only = (33..complete.len())
+            .find(|&length| {
+                fs::write(&path, &complete[..length]).unwrap();
+                matches!(image::image_dimensions(&path), Ok((1, 1)))
+                    && decode_bounded_image(&path, "input preflight").is_err()
+            })
+            .expect("fixture with readable dimensions and truncated pixels");
+        fs::write(&path, &complete[..header_only]).unwrap();
+
+        assert_eq!(image::image_dimensions(&path).unwrap(), (1, 1));
+        assert!(decode_bounded_image(&path, "input preflight").is_err());
+        fs::remove_file(path).unwrap();
+    }
 
     fn timed_layer(slot: u32, value: i32, scale: u32) -> TimedLayerImage {
         TimedLayerImage {
@@ -5856,6 +5941,28 @@ mod tests {
             Some(RuntimeBackend::Directx)
         );
         assert_eq!(runtime_backend(RenderGpuBackend::Cpu), None);
+    }
+
+    #[test]
+    fn auto_gpu_fallback_is_limited_to_host_preflight_failures() {
+        for message in [
+            "GPU render requires a session-bound authenticated runtime module policy report",
+            "GPU infrastructure is unavailable",
+            "GPU backend unavailable on this host",
+            "host policy rejected GPU dispatch",
+            "runtime module policy is expired",
+            "trusted worker staging failed",
+            "restricted process launch failed",
+        ] {
+            assert!(is_auto_gpu_preflight_error(&io::Error::other(message)));
+        }
+        for message in [
+            "isolated AEX image render failed validation: selector_error=17",
+            "worker crashed during SMART_RENDER",
+            "validated worker output size mismatch",
+        ] {
+            assert!(!is_auto_gpu_preflight_error(&io::Error::other(message)));
+        }
     }
 
     #[test]
