@@ -35,6 +35,11 @@ struct AegpCompatSelftestHooks {
   int32_t (*set_stream_value_v2)(int32_t, void*, scene_runtime::AegpStreamValue*){};
   int32_t (*dispose_stream_value_v2)(scene_runtime::AegpStreamValue*){};
   int32_t (*dispose_stream_v2)(void*){};
+  int32_t (*get_layer_source_item)(void*, void**){};
+  int32_t (*get_item_type)(void*, int16_t*){};
+  void* item_suite{};
+  uint32_t* layer_source_item_calls{};
+  uint32_t* item_type_calls{};
 };
 void configure_aegp_compat_selftests(AegpCompatSelftestHooks hooks);
 bool verify_legacy_effect_compat_suites();
@@ -43,4 +48,5 @@ bool verify_aegp_resizer_3d_chain();
 bool verify_aegp_apply_effect();
 bool verify_aegp_effect_stack();
 bool verify_aegp_projector_levels();
+bool verify_aegp_layer_source_item();
 }
