@@ -65,8 +65,14 @@ server_thread_gate_state() {
   if jq -e '.required_conversation_resolution.enabled == true' <<<"$protection" >/dev/null; then
     return 0
   fi
+  # Rulesets expose the setting as a pull_request rule with
+  # parameters.required_review_thread_resolution (per the REST docs for
+  # "Get rules for a branch"), not as a standalone rule type; accept both.
   if rules_out=$(gh api "repos/$OWNER/$REPO/rules/branches/$base" 2>/dev/null); then
-    jq -e 'any(.[]; .type == "required_review_thread_resolution")' <<<"$rules_out" >/dev/null && return 0
+    jq -e 'any(.[]; .type == "required_review_thread_resolution"
+                 or (.type == "pull_request"
+                     and ((.parameters.required_review_thread_resolution // false) == true)))' \
+      <<<"$rules_out" >/dev/null && return 0
     return 1
   fi
   rules_out=$(gh api "repos/$OWNER/$REPO/rules/branches/$base" 2>&1) && return 1

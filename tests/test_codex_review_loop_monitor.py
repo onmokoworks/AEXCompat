@@ -645,6 +645,9 @@ def test_merge_guard_requires_atomic_server_side_conversation_resolution() -> No
     assert 'branches/$base/protection' in script
     assert 'rules/branches/$base' in script
     assert 'required_review_thread_resolution' in script
+    # Rulesets surface the setting as a pull_request rule parameter, not a
+    # standalone rule type; the guard must accept that shape too.
+    assert "parameters.required_review_thread_resolution" in script
     # Reachable-but-disabled (or unknown failure) still refuses...
     assert "REFUSE: base branch must enable server-side" in script
     # ...but a plan that provably does not sell the feature falls back to the
