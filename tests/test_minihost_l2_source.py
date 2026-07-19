@@ -16,6 +16,7 @@ PF_SAMPLING_SOURCE = ROOT / "minihost" / "src" / "worker_pf_sampling_runtime.cpp
 PF_AE_CHANNEL_RUNTIME_SOURCE = ROOT / "minihost" / "src" / "worker_pf_ae_channel_runtime.cpp"
 PF_PATH_SELFTESTS_SOURCE = ROOT / "minihost" / "src" / "worker_pf_path_selftests.cpp"
 PF_WORLD_TRANSFORM_SOURCE = ROOT / "minihost" / "src" / "worker_pf_world_transform_runtime.cpp"
+HOST_SUITE_CATALOG_SOURCE = ROOT / "minihost" / "src" / "worker_host_suite_catalog.cpp"
 RENDER_HEADER = ROOT / "minihost" / "src" / "render_subsystem.h"
 RENDER_SOURCE = ROOT / "minihost" / "src" / "render_subsystem.cpp"
 REPORT_HEADER = ROOT / "minihost" / "src" / "worker_report.hpp"
@@ -55,6 +56,7 @@ def l2_family_source():
         PF_AE_CHANNEL_RUNTIME_SOURCE,
         PF_PATH_SELFTESTS_SOURCE,
         PF_WORLD_TRANSFORM_SOURCE,
+        HOST_SUITE_CATALOG_SOURCE,
         AEGP_SCENE_SOURCE, AEGP_SCENE_HEADER, AEGP_SCENE_RUNTIME_HEADER,
         AEGP_SCENE_RUNTIME_SOURCE, AEGP_INIT_RUNTIME_HEADER, AEGP_INIT_RUNTIME_SOURCE,
         AEGP_HOST_SELFTESTS_SOURCE,
@@ -533,7 +535,7 @@ class MinihostL2SourceTests(unittest.TestCase):
             "g_world_transform_suite1 = {&composite_rect8, &blend_world, &convolve_world",
             "&copy_world8, &copy_world_hq, &transfer_rect, &transform_world}",
             '{"PF ANSI Suite", 1, nullptr, &provide_ansi1}',
-            "g_ansi_suite1[16] = reinterpret_cast<void*>(&ansi_strcpy)",
+            "c.ansi=c.assembly.ansi",
             "g_mask_model_enabled = true",
         ):
             self.assertIn(marker, text)
