@@ -48,6 +48,8 @@ WORKER_RUNTIME_OWNERS = (
     "minihost/src/worker_mask_suite_tables.hpp",
     "minihost/src/worker_mask_suite_tables.cpp",
     "minihost/src/worker_l2_render_abi.cpp",
+    "minihost/src/worker_classic_report.hpp",
+    "minihost/src/worker_classic_report.cpp",
 )
 
 # 契約名 → owner ファイル群 (repo ルート相対)。
@@ -72,6 +74,8 @@ CONTRACTS = {
         "minihost/src/worker_mask_suite_tables.cpp",
         "minihost/src/worker_l2_render_abi.hpp",
         "minihost/src/worker_l2_render_abi.cpp",
+        "minihost/src/worker_classic_report.hpp",
+        "minihost/src/worker_classic_report.cpp",
         "minihost/src/l2_mode_execution.hpp",
         "minihost/src/l2_mode_execution.cpp",
         "minihost/src/l2_cli_dispatch.cpp",
@@ -129,6 +133,10 @@ CONTRACTS = {
     "l2_render_abi": (
         "minihost/src/worker_l2_render_abi.hpp",
         "minihost/src/worker_l2_render_abi.cpp",
+    ),
+    "classic_report": (
+        "minihost/src/worker_classic_report.hpp",
+        "minihost/src/worker_classic_report.cpp",
     ),
     "aegp_resizer_3d_chain": (
         "minihost/src/l2_main.cpp",

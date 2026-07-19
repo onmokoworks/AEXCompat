@@ -26,7 +26,9 @@ def test_classic_runtime_owns_per_render_state_and_dispatch_boundary():
     assert "g_checkout_layer_definitions.find(index)" in worker
     assert "!classic_context && aexcompat::worker_runtime::classic::dispatch_active()" in worker
     assert "classic_context->record_checkout" in worker
-    assert "classic_diagnostics.shutter_dependency_advertised" in worker
+    # The classic completion report assembly lives in worker_classic_report.
+    assert ("classic_diagnostics.shutter_dependency_advertised"
+            in source_owners.contract_text("classic_report"))
     classic_branch = worker[worker.index("if (classic_context) {"):
                             worker.index("const auto hosted =", worker.index("if (classic_context) {"))]
     assert "copy_definition" in classic_branch

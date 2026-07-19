@@ -82,6 +82,7 @@
 #include "worker_aegp_command_suites.hpp"
 #include "worker_mask_suite_tables.hpp"
 #include "worker_l2_render_abi.hpp"
+#include "worker_classic_report.hpp"
 #include "worker_smart_runtime.hpp"
 #include "worker_smart_execution.hpp"
 #include "worker_smart_setup.hpp"
@@ -6310,101 +6311,68 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
   std::cerr << "stage:global_setdown_end error=" << setdown_error << "\n" << std::flush;
   if (!session.prepare_protocol_report()) return session.finish(14);
   if (is_render_worker()) {
-  const auto classic_diagnostics =
-      aexcompat::worker_runtime::classic::diagnostics();
   restore_native_stdout();
-  aexcompat::worker_render_report::ReportSnapshot report_snapshot(std::cout);
-  aexcompat::worker_render_report::ClassicReport classic_report;
-  classic_report.head = {
-      render_error == 0 && parameter_count_contract_valid && guards_intact &&
-                arbitrary_defaults_disposed && g_invalid_arbitrary_operations == 0 &&
-                handle_lifetimes_balanced() && world_lifetimes_balanced() &&
-                gpu_memory_lifetimes_balanced() &&
-                aexcompat::pf_path_runtime::lifetimes_balanced() &&
-                async_receipt_lifetimes_balanced() &&
-                async_layer_requests_balanced() &&
-                audio_handle_lifetimes_balanced() && audio_telemetry().invalid_operations == 0 &&
-                classic_diagnostics.balanced &&
-                ((!g_render_click_enabled && !g_render_draw_enabled) ||
-                 g_render_ui_context_closed),
-      global_error, params_error, advertised_out_flags, advertised_out_flags2,
-      image_render_supported, nop_render_advertised, input_write_advertised,
-      expand_buffer_advertised, shrink_buffer_advertised,
-      classic_diagnostics.wide_time_allowed, classic_diagnostics.rejected_temporal_checkouts,
-      classic_diagnostics.shutter_dependency_advertised};
-  const auto& audio_report = audio_telemetry();
-  classic_report.audio = {
-      audio_report.usage_advertised, audio_report.checkout_allowed, audio_report.source_available,
-      audio_report.rejected_unadvertised_checkouts, audio_report.rejected_format_requests,
-      audio_report.handle_exhaustions, audio_report.peak_live_handles, audio_report.checkout_calls,
-      audio_report.checkin_calls, audio_report.get_data_calls, audio_report.invalid_operations,
-      audio_report.last_checkout_start_time, audio_report.last_checkout_duration,
-      audio_report.last_checkout_time_scale, audio_report.last_window_start_sample,
-      audio_report.last_window_sample_count, audio_report.last_window_silence_samples,
-      audio_report.last_output_rate, audio_report.last_output_bytes_per_sample,
-      audio_report.last_output_channels, audio_report.last_output_format,
-      audio_report.last_returned_sample_frames, audio_handle_lifetimes_balanced()};
-  classic_report.sequence = {
-      persistent_sequence, persistent_sequence_setup_error, persistent_sequence_setdown_error,
-      persistent_frame_errors, persistent_frame_hashes, flattened_sequence,
-      sequence_flatten_error, sequence_resetup_error, flattened_handle_replaced,
-      resetup_handle_replaced, flattened_handle_host_disposed, copied_flattened_sequence,
-      get_flattened_sequence_data_error, original_sequence_preserved};
-  const int32_t bytes_per_pixel = smart_state().pixel_format == "argb32f" ? 16 :
-      (smart_state().pixel_format == "argb16" ? 8 : 4);
-  classic_report.frame = {
-      setdown_error,
-      escape(std::string(reinterpret_cast<const char*>(output.data() + kOutMessage),
-                         strnlen_s(reinterpret_cast<const char*>(output.data() + kOutMessage), 256))),
-      case_id, smart_state().pixel_format, render_width, render_height, render_rowbytes,
-      render_width * bytes_per_pixel,
-      std::max(0, render_rowbytes - render_width * bytes_per_pixel),
-      input_hash, output_hash, guards_intact, world_debug_report_json()};
-  const aexcompat::worker_render_report::CustomUiSnapshot classic_custom_ui{
-      g_render_click_enabled, g_render_click_error, g_render_click_out_flags,
-      g_render_click_changed_value, g_render_draw_enabled, g_render_draw_error,
-      g_render_draw_out_flags, g_render_ui_lifecycle_errors, g_render_ui_context_closed,
-      g_app_color_picker_calls, g_app_invalidate_rect_calls, g_app_picker_color};
-  const auto i64 = [](auto value) { return static_cast<int64_t>(value); };
-  classic_report.callbacks = {
-      classic_diagnostics.balanced,
-      {i64(classic_diagnostics.checkout_calls), i64(classic_diagnostics.checkin_calls),
-       i64(classic_diagnostics.automatic_checkins), i64(classic_diagnostics.invalid_checkins),
-       i64(classic_diagnostics.last_index), i64(classic_diagnostics.last_time),
-       i64(classic_diagnostics.last_time_step), i64(classic_diagnostics.last_time_scale)},
-      escape(g_options_button_name),
-      {i64(g_options_button_name_calls), i64(channel_count_queries()),
-       i64(g_transform_world_calls), i64(g_last_transform_x), i64(g_last_transform_y),
-       i64(g_last_transform_opacity), i64(g_abort_calls), i64(g_progress_calls),
-       i64(g_register_ui_calls), i64(g_last_progress_current), i64(g_last_progress_total)}};
-  classic_report.threads = {concurrent_render, thread_errors, thread_hashes, thread_guards};
-  classic_report.context = {
-      invocation.request_mode,
-      {static_cast<int32_t>(g_downsample_x.numerator), static_cast<int32_t>(g_downsample_x.denominator)},
-      {static_cast<int32_t>(g_downsample_y.numerator), static_cast<int32_t>(g_downsample_y.denominator)},
-      {static_cast<int32_t>(g_pixel_aspect_ratio.numerator), static_cast<int32_t>(g_pixel_aspect_ratio.denominator)},
-      {g_full_resolution_width > 0 ? g_full_resolution_width : invocation.external_width,
-       g_full_resolution_height > 0 ? g_full_resolution_height : invocation.external_height},
-      {read<int32_t>(input, kInQuality), read<int32_t>(input, kInNumParams),
-       read<int32_t>(input, kInLocalTimeStep), read<int32_t>(input, 244),
-       read<int32_t>(input, 248), read<int32_t>(input, 400)},
-      {read<int32_t>(input, 252), read<int32_t>(input, 256)},
-      {read<int32_t>(input, 392), read<int32_t>(input, 396)},
-      {read<int32_t>(input, 276), read<int32_t>(input, 280)}};
-  const aexcompat::worker_render_report::RequestedParametersSnapshot classic_requested{
-      requested_parameters_json(invocation.requested_parameters),
-      static_cast<int32_t>(requested_value(invocation.requested_parameters, L"amount")),
-      static_cast<int32_t>(requested_value(invocation.requested_parameters, L"direction")),
-      static_cast<int32_t>(requested_value(invocation.requested_parameters, L"seed")),
-      requested_value(invocation.requested_parameters, L"mix"),
-      static_cast<int32_t>(requested_value(invocation.requested_parameters, L"invert_map")),
-      !nop_render_advertised, module_audit_json()};
-  aexcompat::worker_render_report::emit_classic_complete(report_snapshot, {
-      classic_report, classic_custom_ui, capture_classic_subsystems(),
-      capture_gpu_diagnostics(), capture_seh_diagnostics(), classic_requested,
-      aexcompat::worker_runtime::classic::last_selector_dispatched(),
-      depth_supported, render_error});
-  aexcompat::worker_render_report::emit(report_snapshot, std::cout);
+  ClassicCompletionInputs classic_inputs;
+  classic_inputs.render_error = render_error;
+  classic_inputs.global_error = global_error;
+  classic_inputs.params_error = params_error;
+  classic_inputs.setdown_error = setdown_error;
+  classic_inputs.parameter_count_contract_valid = parameter_count_contract_valid;
+  classic_inputs.guards_intact = guards_intact;
+  classic_inputs.arbitrary_defaults_disposed = arbitrary_defaults_disposed;
+  classic_inputs.depth_supported = depth_supported;
+  classic_inputs.advertised_out_flags = advertised_out_flags;
+  classic_inputs.advertised_out_flags2 = advertised_out_flags2;
+  classic_inputs.image_render_supported = image_render_supported;
+  classic_inputs.nop_render_advertised = nop_render_advertised;
+  classic_inputs.input_write_advertised = input_write_advertised;
+  classic_inputs.expand_buffer_advertised = expand_buffer_advertised;
+  classic_inputs.shrink_buffer_advertised = shrink_buffer_advertised;
+  classic_inputs.case_id = case_id;
+  classic_inputs.input_hash = input_hash;
+  classic_inputs.output_hash = output_hash;
+  classic_inputs.render_width = render_width;
+  classic_inputs.render_height = render_height;
+  classic_inputs.render_rowbytes = render_rowbytes;
+  classic_inputs.thread_errors = thread_errors;
+  classic_inputs.thread_hashes = thread_hashes;
+  classic_inputs.thread_guards = thread_guards;
+  classic_inputs.concurrent_render = concurrent_render;
+  classic_inputs.persistent_sequence = persistent_sequence;
+  classic_inputs.persistent_sequence_setup_error = persistent_sequence_setup_error;
+  classic_inputs.persistent_sequence_setdown_error = persistent_sequence_setdown_error;
+  classic_inputs.persistent_frame_errors = persistent_frame_errors;
+  classic_inputs.persistent_frame_hashes = persistent_frame_hashes;
+  classic_inputs.flattened_sequence = flattened_sequence;
+  classic_inputs.sequence_flatten_error = sequence_flatten_error;
+  classic_inputs.sequence_resetup_error = sequence_resetup_error;
+  classic_inputs.flattened_handle_replaced = flattened_handle_replaced;
+  classic_inputs.resetup_handle_replaced = resetup_handle_replaced;
+  classic_inputs.flattened_handle_host_disposed = flattened_handle_host_disposed;
+  classic_inputs.copied_flattened_sequence = copied_flattened_sequence;
+  classic_inputs.get_flattened_sequence_data_error = get_flattened_sequence_data_error;
+  classic_inputs.original_sequence_preserved = original_sequence_preserved;
+  classic_inputs.frame_return_message.assign(
+      reinterpret_cast<const char*>(output.data() + kOutMessage),
+      strnlen_s(reinterpret_cast<const char*>(output.data() + kOutMessage), 256));
+  classic_inputs.request_mode = invocation.request_mode;
+  classic_inputs.requested_parameters = &invocation.requested_parameters;
+  classic_inputs.downsample_x = {static_cast<int32_t>(g_downsample_x.numerator),
+                                 static_cast<int32_t>(g_downsample_x.denominator)};
+  classic_inputs.downsample_y = {static_cast<int32_t>(g_downsample_y.numerator),
+                                 static_cast<int32_t>(g_downsample_y.denominator)};
+  classic_inputs.pixel_aspect_ratio = {static_cast<int32_t>(g_pixel_aspect_ratio.numerator),
+                                       static_cast<int32_t>(g_pixel_aspect_ratio.denominator)};
+  classic_inputs.resolution = {
+      g_full_resolution_width > 0 ? g_full_resolution_width : invocation.external_width,
+      g_full_resolution_height > 0 ? g_full_resolution_height : invocation.external_height};
+  classic_inputs.context_head = {read<int32_t>(input, kInQuality), read<int32_t>(input, kInNumParams),
+      read<int32_t>(input, kInLocalTimeStep), read<int32_t>(input, 244),
+      read<int32_t>(input, 248), read<int32_t>(input, 400)};
+  classic_inputs.context_zoom = {read<int32_t>(input, 252), read<int32_t>(input, 256)};
+  classic_inputs.context_origin = {read<int32_t>(input, 392), read<int32_t>(input, 396)};
+  classic_inputs.context_extent = {read<int32_t>(input, 276), read<int32_t>(input, 280)};
+  emit_classic_completion_report(classic_inputs);
   } else if (is_smart_worker()) {
   restore_native_stdout();
   const auto mask_report = aexcompat::mask_runtime::snapshot();
