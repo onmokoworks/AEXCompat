@@ -114,6 +114,15 @@ mod worker {
         serde_json::json!({
             "status": "render_completed",
             "session_frames": frames,
+            // The clean-close contract fields the broker validates, mirroring
+            // the real worker's final report.
+            "persistent_sequence_setup_error": 0,
+            "persistent_sequence_setdown_error": 0,
+            "guard_bytes_intact": true,
+            "suite_leases_balanced": true,
+            "handle_lifetimes_balanced": true,
+            "world_lifetimes_balanced": true,
+            "param_checkouts_balanced": true,
             "module_audit": {
                 "schema": 1,
                 "status": "passed",

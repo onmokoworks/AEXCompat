@@ -622,11 +622,15 @@ impl RenderSession {
                 ));
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => {
+                // The channel also closes when the reader rejected a framing
+                // violation from a still-running worker, so terminate the job
+                // rather than waiting a full collection timeout on it; a
+                // worker that already exited keeps its own exit code.
                 return Err(self.invalidate(
                     "worker_exited",
                     format!("the worker closed the response channel before frame {frame_index}"),
-                    false,
-                    CLOSE_COLLECT_TIMEOUT,
+                    true,
+                    POST_TERMINATION_COLLECT_TIMEOUT,
                 ));
             }
         };
@@ -819,7 +823,7 @@ impl RenderSession {
                 Some(CollectedExit { result: Some(result), .. })
                     if result.classification == crate::ExitClassification::Ok
             )
-            && final_report.is_some();
+            && final_report.as_ref().is_some_and(final_report_clean);
         json!({
             "stage": "render_session_close",
             "plugin_sha256": self.plugin_sha256,
@@ -838,6 +842,20 @@ impl RenderSession {
             "session_clean": session_clean,
         })
     }
+}
+
+/// A clean session close requires the final report to agree, not just the
+/// exit code: the persistent sequence must have set up and torn down without
+/// error, guards must be intact, and every ownership ledger must balance.
+/// Missing keys fail closed.
+fn final_report_clean(report: &Value) -> bool {
+    report.get("persistent_sequence_setup_error") == Some(&json!(0))
+        && report.get("persistent_sequence_setdown_error") == Some(&json!(0))
+        && report.get("guard_bytes_intact") == Some(&Value::Bool(true))
+        && report.get("suite_leases_balanced") == Some(&Value::Bool(true))
+        && report.get("handle_lifetimes_balanced") == Some(&Value::Bool(true))
+        && report.get("world_lifetimes_balanced") == Some(&Value::Bool(true))
+        && report.get("param_checkouts_balanced") == Some(&Value::Bool(true))
 }
 
 #[derive(Deserialize)]
@@ -1075,6 +1093,38 @@ mod tests {
         assert!(error_shape.output.is_none());
         assert!(error_shape.generation.is_none());
         assert_eq!(error_shape.render_error, -40);
+    }
+
+    #[test]
+    fn final_report_clean_fails_closed_on_missing_or_dirty_fields() {
+        let clean = serde_json::json!({
+            "persistent_sequence_setup_error": 0,
+            "persistent_sequence_setdown_error": 0,
+            "guard_bytes_intact": true,
+            "suite_leases_balanced": true,
+            "handle_lifetimes_balanced": true,
+            "world_lifetimes_balanced": true,
+            "param_checkouts_balanced": true,
+        });
+        assert!(final_report_clean(&clean));
+        for (key, dirty) in [
+            ("persistent_sequence_setup_error", serde_json::json!(25)),
+            ("persistent_sequence_setdown_error", serde_json::json!(-1)),
+            ("guard_bytes_intact", serde_json::json!(false)),
+            ("suite_leases_balanced", serde_json::json!(false)),
+            ("handle_lifetimes_balanced", serde_json::json!(false)),
+            ("world_lifetimes_balanced", serde_json::json!(false)),
+            ("param_checkouts_balanced", serde_json::json!(false)),
+        ] {
+            let mut report = clean.clone();
+            report[key] = dirty;
+            assert!(!final_report_clean(&report), "{key} must fail closed");
+            let mut missing = clean.clone();
+            missing.as_object_mut().unwrap().remove(key);
+            assert!(!final_report_clean(&missing), "missing {key} must fail closed");
+        }
+        // A parseable but unrelated report (an older worker) is not clean.
+        assert!(!final_report_clean(&serde_json::json!({"status": "ok"})));
     }
 
     #[test]
