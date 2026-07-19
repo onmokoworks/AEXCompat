@@ -420,6 +420,17 @@ void append_smart_faults(ReportSnapshot& report, const SmartReport::Faults& v) {
       << ",\"invalid_aegp_memory_operations\":" << v.aegp_memory[4];
 }
 
+void append_smart_session(ReportSnapshot& report, const SmartReport::Session& v) {
+  report.stream()
+      << ",\"session_mode\":true"
+      << ",\"session_frames_attempted\":" << v.frames_attempted
+      << ",\"session_sequence_setup_error\":" << v.sequence_setup_error
+      << ",\"session_sequence_setdown_error\":" << v.sequence_setdown_error
+      << ",\"session_render_error\":" << v.render_error
+      << ",\"session_protocol_violation\":" << (v.protocol_violation ? "true" : "false")
+      << ",\"session_invariant_failure\":" << (v.invariant_failure ? "true" : "false");
+}
+
 void append_gpu_diagnostics(ReportSnapshot& report, const GpuDiagnosticsSnapshot& value) {
   report.stream()
       << ",\"gpu_memory_lifetimes_balanced\":" << (value.memory_lifetimes_balanced ? "true" : "false")

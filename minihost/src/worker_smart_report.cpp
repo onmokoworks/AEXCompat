@@ -73,10 +73,9 @@ void emit_smart_completion_report(const SmartCompletionInputs& in) {
   const auto mask_report = aexcompat::mask_runtime::snapshot();
   report::ReportSnapshot report_snapshot(std::cout);
   const auto& host_telemetry = aexcompat::worker_runtime::smart::host_telemetry();
-  const bool smart_completed = smart.pre_error == 0 && smart.render_error == 0 &&
-                in.parameter_count_contract_valid && smart.rects_valid &&
+  const bool host_state_clean =
+                in.parameter_count_contract_valid &&
                 in.arbitrary_defaults_disposed && arbitrary.invalid_operations == 0 &&
-                smart.gpu_setup_error == 0 && smart.gpu_setdown_error == 0 &&
                 smart.guards_intact &&
                 worker_runtime::handles::handle_lifetimes_balanced() &&
                 aexcompat::world_registry::lifetimes_balanced() &&
@@ -85,6 +84,15 @@ void emit_smart_completion_report(const SmartCompletionInputs& in) {
                 param_checkouts_balanced() &&
                 ((!g_render_click_enabled && !g_render_draw_enabled) ||
                  g_render_ui_context_closed);
+  // Session completion is the session mechanics verdict (hoisted setup and
+  // setdown clean, no protocol/invariant break): frame-local errors were
+  // already reported through frame_done and the broker owned the continue
+  // decision, so the last frame's selector errors do not fail a clean close.
+  const bool smart_completed = in.session_mode
+      ? in.session_render_error == 0 && host_state_clean
+      : smart.pre_error == 0 && smart.render_error == 0 && smart.rects_valid &&
+                smart.gpu_setup_error == 0 && smart.gpu_setdown_error == 0 &&
+                host_state_clean;
   report::begin_smart(report_snapshot, {
       smart_completed,
       {in.global_error, in.params_error, in.advertised_out_flags, in.advertised_out_flags2},
@@ -119,6 +127,11 @@ void emit_smart_completion_report(const SmartCompletionInputs& in) {
           (smart.runtime->pixel_format == "argb16" ? 8 : 4),
       smart.input_hash,
       smart.output_hash, smart.rects_valid, world_debug_report_json()});
+  if (in.session_mode)
+    report::append_smart_session(report_snapshot, {
+        in.session_frames_attempted, in.session_sequence_setup_error,
+        in.session_sequence_setdown_error, in.session_render_error,
+        in.session_protocol_violation, in.session_invariant_failure});
   report::append_custom_ui(report_snapshot, {
       g_render_click_enabled, g_render_click_error, g_render_click_out_flags,
       g_render_click_changed_value, g_render_draw_enabled, g_render_draw_error,

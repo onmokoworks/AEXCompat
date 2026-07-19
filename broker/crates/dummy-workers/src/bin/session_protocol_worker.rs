@@ -111,18 +111,31 @@ mod worker {
         }
     }
 
-    fn final_report(frames: u32) -> String {
+    fn final_report(frames: u32, smart: bool) -> String {
         // The broker validates a module audit on a clean exit exactly like the
         // one-shot path; this fixture reports its own honest minimal audit.
-        serde_json::json!({
+        // The session-mechanics keys follow the worker flavor: the classic
+        // report reuses its persistent-sequence fields while the smart report
+        // carries dedicated session_* fields (protocol v1.1).
+        let mechanics = if smart {
+            serde_json::json!({
+                "session_mode": true,
+                "session_frames_attempted": frames,
+                "session_render_error": 0,
+                "session_sequence_setup_error": 0,
+                "session_sequence_setdown_error": 0,
+            })
+        } else {
+            serde_json::json!({
+                "render_error": 0,
+                "persistent_sequence_setup_error": 0,
+                "persistent_sequence_setdown_error": 0,
+            })
+        };
+        let mut report = serde_json::json!({
             "status": "render_completed",
-            "render_error": 0,
             "global_setdown_error": 0,
             "session_frames": frames,
-            // The clean-close contract fields the broker validates, mirroring
-            // the real worker's final report.
-            "persistent_sequence_setup_error": 0,
-            "persistent_sequence_setdown_error": 0,
             "guard_bytes_intact": true,
             "suite_leases_balanced": true,
             "handle_lifetimes_balanced": true,
@@ -152,8 +165,12 @@ mod worker {
                     "system32": ["kernel32.dll"]
                 }
             }
-        })
-        .to_string()
+        });
+        report
+            .as_object_mut()
+            .unwrap()
+            .extend(mechanics.as_object().unwrap().clone());
+        report.to_string()
     }
 
     pub fn run() -> i32 {
@@ -267,7 +284,10 @@ mod worker {
             .as_deref()
             .map(|trailer| trailer["session-layers:v1|".len()..].split(';').count() as u32)
             .unwrap_or(0);
-        if effective != 10 || args[1] != "--render-session-v1" {
+        // The smart session command selects the smart final-report contract
+        // (protocol v1.1); the transport behavior is identical.
+        let smart = args[1] == "--smart-session-v1";
+        if effective != 10 || (args[1] != "--render-session-v1" && !smart) {
             return 2;
         }
         let (Ok(width), Ok(height), Ok(time_scale)) = (
@@ -477,11 +497,11 @@ mod worker {
             if behavior == "exit_after_frame_0" && frame_index == 0 {
                 // A unilateral exit with a clean-looking report and exit code
                 // 0, violating only the close-handshake contract.
-                println!("{}", final_report(frames));
+                println!("{}", final_report(frames, smart));
                 return 0;
             }
         }
-        println!("{}", final_report(frames));
+        println!("{}", final_report(frames, smart));
         0
     }
 }

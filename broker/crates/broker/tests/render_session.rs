@@ -10,7 +10,7 @@
 #[cfg(windows)]
 mod windows_e2e {
     use aexcompat_broker::image_render::{
-        InteractiveParameter, ParameterAnimation, RenderPixelFormat,
+        InteractiveParameter, ParameterAnimation, RenderGpuBackend, RenderPixelFormat,
     };
     use aexcompat_broker::render_session::{
         run_video_batch, FrameStatus, RenderSession, SessionLayer, SessionOpenRequest,
@@ -85,7 +85,11 @@ mod windows_e2e {
         ));
         let worker_dir = root.join("target/minihost-build");
         std::fs::create_dir_all(&worker_dir).unwrap();
-        std::fs::copy(fixture, worker_dir.join("aex_render_worker.exe")).unwrap();
+        std::fs::copy(&fixture, worker_dir.join("aex_render_worker.exe")).unwrap();
+        // The smart session dispatches the smart worker binary; the fixture
+        // serves both roles and keys its final-report contract off the
+        // session command word.
+        std::fs::copy(&fixture, worker_dir.join("aex_smart_worker.exe")).unwrap();
         let plugin = root.join("plugin.plugin");
         let plugin_bytes = b"render session dummy plugin";
         std::fs::write(&plugin, plugin_bytes).unwrap();
@@ -121,6 +125,9 @@ mod windows_e2e {
             total_time: 300,
             time_scale: 30,
             frame_deadline,
+            smart: false,
+            gpu_backend: RenderGpuBackend::Cpu,
+            gpu_runtime_policy: None,
         })
         .expect("open render session")
     }
@@ -129,6 +136,131 @@ mod windows_e2e {
         (0..WIDTH * HEIGHT * 4)
             .map(|index| seed.wrapping_add(index as u8))
             .collect()
+    }
+
+    #[test]
+    fn smart_session_dispatches_the_smart_worker_and_closes_clean() {
+        let _behavior = BehaviorGuard::set(None);
+        let (repository, plugin, sha) = temp_repository();
+        let mut session = RenderSession::open(SessionOpenRequest {
+            repository: &repository.0,
+            plugin_path: &plugin,
+            plugin_sha256: &sha,
+            parameters: None,
+            parameter_animation: None,
+            aux_manifest: None,
+            world_dump_dir: None,
+            output_checksum_detail: false,
+            mask_trailer: None,
+            spatial_trailer: None,
+            render_environment_trailer: None,
+            layers: &[],
+            alpha_as_coverage_params: &[],
+            dependencies: Vec::new(),
+            width: WIDTH,
+            height: HEIGHT,
+            pixel_format: RenderPixelFormat::Argb8,
+            time_step: 1,
+            total_time: 300,
+            time_scale: 30,
+            frame_deadline: Duration::from_secs(30),
+            smart: true,
+            gpu_backend: RenderGpuBackend::Cpu,
+            gpu_runtime_policy: None,
+        })
+        .expect("open smart render session");
+        let outcome = session
+            .render_frame(0, 0, &input_pattern(17))
+            .expect("smart session frame renders");
+        assert!(matches!(outcome.status, FrameStatus::Rendered { .. }));
+        let close = session.close();
+        assert_eq!(close["render_path"], "smart", "close: {close}");
+        assert_eq!(close["session_clean"], true, "close: {close}");
+        // The smart clean verdict comes from the smart report's dedicated
+        // session_* fields, not the classic persistent-sequence keys.
+        assert_eq!(close["final_report"]["session_mode"], true);
+        assert_eq!(close["final_report"]["session_render_error"], 0);
+    }
+
+    #[test]
+    fn smart_session_with_an_explicit_gpu_backend_requires_a_policy() {
+        let _behavior = BehaviorGuard::set(None);
+        let (repository, plugin, sha) = temp_repository();
+        let error = RenderSession::open(SessionOpenRequest {
+            repository: &repository.0,
+            plugin_path: &plugin,
+            plugin_sha256: &sha,
+            parameters: None,
+            parameter_animation: None,
+            aux_manifest: None,
+            world_dump_dir: None,
+            output_checksum_detail: false,
+            mask_trailer: None,
+            spatial_trailer: None,
+            render_environment_trailer: None,
+            layers: &[],
+            alpha_as_coverage_params: &[],
+            dependencies: Vec::new(),
+            width: WIDTH,
+            height: HEIGHT,
+            pixel_format: RenderPixelFormat::Argb32f,
+            time_step: 1,
+            total_time: 300,
+            time_scale: 30,
+            frame_deadline: Duration::from_secs(30),
+            smart: true,
+            gpu_backend: RenderGpuBackend::DirectX,
+            gpu_runtime_policy: None,
+        })
+        .map(|_| ())
+        .expect_err("an explicit GPU backend without a policy must fail closed");
+        assert!(
+            error.to_string().contains("runtime module policy"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn smart_auto_backend_without_a_policy_degrades_to_the_cpu_session() {
+        let _behavior = BehaviorGuard::set(None);
+        let (repository, plugin, sha) = temp_repository();
+        // Auto + no policy opens the CPU smart session command; the fixture
+        // rejects every command word except the two CPU session commands, so
+        // reaching a rendered frame proves no GPU command was attempted.
+        // (Argb8 keeps the fixture's depth-8 transport contract.)
+        let mut session = RenderSession::open(SessionOpenRequest {
+            repository: &repository.0,
+            plugin_path: &plugin,
+            plugin_sha256: &sha,
+            parameters: None,
+            parameter_animation: None,
+            aux_manifest: None,
+            world_dump_dir: None,
+            output_checksum_detail: false,
+            mask_trailer: None,
+            spatial_trailer: None,
+            render_environment_trailer: None,
+            layers: &[],
+            alpha_as_coverage_params: &[],
+            dependencies: Vec::new(),
+            width: WIDTH,
+            height: HEIGHT,
+            pixel_format: RenderPixelFormat::Argb8,
+            time_step: 1,
+            total_time: 300,
+            time_scale: 30,
+            frame_deadline: Duration::from_secs(30),
+            smart: true,
+            gpu_backend: RenderGpuBackend::Auto,
+            gpu_runtime_policy: None,
+        })
+        .expect("open smart render session with the auto backend");
+        let outcome = session
+            .render_frame(0, 0, &input_pattern(23))
+            .expect("smart auto session frame renders");
+        assert!(matches!(outcome.status, FrameStatus::Rendered { .. }));
+        let close = session.close();
+        assert_eq!(close["session_clean"], true, "close: {close}");
     }
 
     fn float_parameter(slot: u32) -> InteractiveParameter {
@@ -219,6 +351,9 @@ mod windows_e2e {
             total_time: 300,
             time_scale: 30,
             frame_deadline: Duration::from_secs(30),
+            smart: false,
+            gpu_backend: RenderGpuBackend::Cpu,
+            gpu_runtime_policy: None,
         })
         .expect("open render session with secondary layers");
         let outcome = session
@@ -283,6 +418,9 @@ mod windows_e2e {
             total_time: 300,
             time_scale: 30,
             frame_deadline: Duration::from_secs(30),
+            smart: false,
+            gpu_backend: RenderGpuBackend::Cpu,
+            gpu_runtime_policy: None,
         })
         .expect("open render session with timed layers");
         let outcome = session
@@ -337,6 +475,9 @@ mod windows_e2e {
             total_time: 300,
             time_scale: 30,
             frame_deadline: Duration::from_secs(30),
+            smart: false,
+            gpu_backend: RenderGpuBackend::Cpu,
+            gpu_runtime_policy: None,
         })
         .map(|_| ())
         .expect_err("open must reject a same-slot same-time timed collision");
@@ -393,6 +534,9 @@ mod windows_e2e {
             total_time: 300,
             time_scale: 30,
             frame_deadline: Duration::from_secs(30),
+            smart: false,
+            gpu_backend: RenderGpuBackend::Cpu,
+            gpu_runtime_policy: None,
         })
         .expect("open must admit a same-slot static and timed mix");
         let outcome = session
@@ -447,6 +591,9 @@ mod windows_e2e {
             total_time: 300,
             time_scale: 30,
             frame_deadline: Duration::from_secs(30),
+            smart: false,
+            gpu_backend: RenderGpuBackend::Cpu,
+            gpu_runtime_policy: None,
         })
         .map(|_| ())
         .expect_err("open must reject two static layers at one slot");
@@ -486,6 +633,9 @@ mod windows_e2e {
             total_time: 300,
             time_scale: 30,
             frame_deadline: Duration::from_secs(30),
+            smart: false,
+            gpu_backend: RenderGpuBackend::Cpu,
+            gpu_runtime_policy: None,
         })
         .expect("open with alpha-as-coverage slots");
         let outcome = session
@@ -524,6 +674,9 @@ mod windows_e2e {
             total_time: 300,
             time_scale: 30,
             frame_deadline: Duration::from_secs(30),
+            smart: false,
+            gpu_backend: RenderGpuBackend::Cpu,
+            gpu_runtime_policy: None,
         })
         .map(|_| ())
         .expect_err("open must reject an out-of-range alpha-as-coverage slot");
@@ -567,6 +720,9 @@ mod windows_e2e {
             total_time: 300,
             time_scale: 30,
             frame_deadline: Duration::from_secs(30),
+            smart: false,
+            gpu_backend: RenderGpuBackend::Cpu,
+            gpu_runtime_policy: None,
         })
         .map(|_| ())
         .expect_err("mismatched layer pixels fail fast at open");
@@ -606,6 +762,9 @@ mod windows_e2e {
             total_time: 300,
             time_scale: 30,
             frame_deadline: Duration::from_secs(30),
+            smart: false,
+            gpu_backend: RenderGpuBackend::Cpu,
+            gpu_runtime_policy: None,
         })
         .map(|_| ())
         .expect_err("a zero layer slot fails fast at open");
@@ -640,6 +799,9 @@ mod windows_e2e {
             total_time: 300,
             time_scale: 30,
             frame_deadline: Duration::from_secs(30),
+            smart: false,
+            gpu_backend: RenderGpuBackend::Cpu,
+            gpu_runtime_policy: None,
         })
         .expect("open render session with parameter animation");
         assert_eq!(
@@ -703,6 +865,9 @@ mod windows_e2e {
             total_time: 300,
             time_scale: 30,
             frame_deadline: Duration::from_secs(30),
+            smart: false,
+            gpu_backend: RenderGpuBackend::Cpu,
+            gpu_runtime_policy: None,
         })
         .expect("arbitrary_data parameters bind arbitrary animation timelines");
         let outcome = session
@@ -782,6 +947,9 @@ mod windows_e2e {
             total_time: 300,
             time_scale: 30,
             frame_deadline: Duration::from_secs(30),
+            smart: false,
+            gpu_backend: RenderGpuBackend::Cpu,
+            gpu_runtime_policy: None,
         })
         .expect("open render session with auxiliary options");
         let outcome = session
@@ -820,6 +988,9 @@ mod windows_e2e {
             total_time: 300,
             time_scale: 30,
             frame_deadline: Duration::from_secs(30),
+            smart: false,
+            gpu_backend: RenderGpuBackend::Cpu,
+            gpu_runtime_policy: None,
         })
         .map(|_| ())
         .expect_err("a reused dump directory fails fast at open");
@@ -853,6 +1024,9 @@ mod windows_e2e {
             total_time: 300,
             time_scale: 30,
             frame_deadline: Duration::from_secs(30),
+            smart: false,
+            gpu_backend: RenderGpuBackend::Cpu,
+            gpu_runtime_policy: None,
         })
         .map(|_| ())
         .expect_err("a dump directory outside the managed tree fails fast at open");
@@ -886,6 +1060,9 @@ mod windows_e2e {
             total_time: 300,
             time_scale: 30,
             frame_deadline: Duration::from_secs(30),
+            smart: false,
+            gpu_backend: RenderGpuBackend::Cpu,
+            gpu_runtime_policy: None,
         })
         .map(|_| ())
         .expect_err("an animation without a matching parameter fails before launch");

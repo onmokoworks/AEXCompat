@@ -241,12 +241,23 @@ struct SmartReport {
     std::array<int64_t, 15> operations{};
     std::array<int64_t, 5> aegp_memory{};
   } faults;
+  // Resident smart session summary (protocol v1.1); appended only for
+  // session-mode invocations.
+  struct Session {
+    int32_t frames_attempted{};
+    int32_t sequence_setup_error{};
+    int32_t sequence_setdown_error{};
+    int32_t render_error{};
+    bool protocol_violation{};
+    bool invariant_failure{};
+  } session;
 };
 
 void begin_smart(ReportSnapshot& report, const SmartReport::Head& snapshot);
 void append_smart_context(ReportSnapshot& report, const SmartReport::Context& snapshot);
 void append_smart_lifetimes(ReportSnapshot& report, const SmartReport::Lifetimes& snapshot);
 void append_smart_faults(ReportSnapshot& report, const SmartReport::Faults& snapshot);
+void append_smart_session(ReportSnapshot& report, const SmartReport::Session& snapshot);
 
 struct GpuDiagnosticsSnapshot {
   bool memory_lifetimes_balanced{};

@@ -52,14 +52,20 @@ def _align(value):
 
 
 class SessionTransport:
-    """Broker-side half of the session transport, built with ctypes."""
+    """Broker-side half of the session transport, built with ctypes.
 
-    def __init__(self):
+    ``depth_code``/``output_pixel_bytes`` parameterize the output slot for the
+    deeper session commands (16 -> 8 bytes/px, 32 -> 16 bytes/px); the input
+    slot is RGBA8 at every depth, like the one-shot raw transport.
+    """
+
+    def __init__(self, depth_code=8, output_pixel_bytes=4):
         kernel32 = ctypes.windll.kernel32
         self.kernel32 = kernel32
         self.input_offset = HEADER_BYTES
         self.output_offset = HEADER_BYTES + _align(WIDTH * HEIGHT * 4)
-        self.section_bytes = self.output_offset + _align(WIDTH * HEIGHT * 4)
+        self.section_bytes = self.output_offset + _align(
+            WIDTH * HEIGHT * output_pixel_bytes)
 
         class SECURITY_ATTRIBUTES(ctypes.Structure):
             _fields_ = [
@@ -105,7 +111,7 @@ class SessionTransport:
 
         self.write_header(MAGIC_OFFSET, HEADER_MAGIC)
         self.write_header(VERSION_OFFSET, PROTOCOL_VERSION)
-        self.write_header(DEPTH_CODE_OFFSET, 8)
+        self.write_header(DEPTH_CODE_OFFSET, depth_code)
         self.write_header(MAX_WIDTH_OFFSET, WIDTH)
         self.write_header(MAX_HEIGHT_OFFSET, HEIGHT)
         self.write_header(LAYER_SLOT_COUNT_OFFSET, 0)

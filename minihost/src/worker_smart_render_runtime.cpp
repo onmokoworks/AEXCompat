@@ -47,7 +47,7 @@ bool execute(const Request& request, const Hooks& hooks,
        request.output_world, request.lifecycle, request.source, request.guarded,
        *request.destination, request.external_output, request.width,
        request.height, request.rowbytes, request.pixel_bytes,
-       &dispatch_state.pre_output},
+       &dispatch_state.pre_output, request.session},
       hooks.finalize, result);
 }
 

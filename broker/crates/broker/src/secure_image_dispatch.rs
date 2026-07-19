@@ -64,6 +64,25 @@ pub fn dispatch_secure_gpu_image(
     dispatch_secure_image(input)
 }
 
+/// GPU-only session dispatch boundary, mirroring `dispatch_secure_gpu_image`
+/// for resident sessions: the authenticated runtime module report authorizes
+/// the backend before the session worker launches. CPU session callers
+/// continue to use `dispatch_secure_image_session` without a policy.
+#[cfg(windows)]
+pub fn dispatch_secure_gpu_image_session(
+    input: SecureImageDispatch<'_>,
+    authorization: GpuRuntimeAuthorization<'_>,
+    session: &crate::windows_process::SessionChildHandles,
+) -> io::Result<crate::secure_launch::SecureSessionProcess> {
+    if authorization.backend == RuntimeBackend::Cpu {
+        return Err(invalid("GPU dispatch cannot use the CPU backend"));
+    }
+    authorization
+        .module_report
+        .authorize_dispatch(&authorization.session_identity, authorization.backend)?;
+    dispatch_secure_image_session(input, session)
+}
+
 /// Session variant of `dispatch_secure_image`: the same admission pipeline
 /// (sealed plugin tree, dependency authentication, local worker admission),
 /// but the worker keeps running with the inherited session transport.
