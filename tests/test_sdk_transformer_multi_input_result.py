@@ -39,7 +39,7 @@ def test_transformer_callbacks_match_the_frozen_effect_abi():
 
     assert "write(input, 24, &abort_render);" in source
     assert "write(input, 32, &report_progress);" in source
-    assert 'std::strcmp(name, "PF World Suite") == 0 && version == 1' in source
+    assert '{"PF World Suite", 1, g_world_suite1.data()}' in source
     assert "g_params[slot - 1].layer_default == -1" in source
     assert "transfer_mode < 0 || transfer_mode > 38" in source
     assert "rgb_only > 1" in source

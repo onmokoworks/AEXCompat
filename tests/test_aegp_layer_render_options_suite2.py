@@ -39,7 +39,8 @@ def test_minihost_publishes_typed_suite2_without_changing_suite1():
     assert "sizeof(AegpLayerRenderOptionsSuite1) == 14 * sizeof(void*)" in abi
     assert "sizeof(AegpLayerRenderOptionsSuite2) == 15 * sizeof(void*)" in abi
     assert "AEXCOMPAT_ASSERT_LAYER2_SLOT(new_from_downstream_of_effect, 2)" in abi
-    assert '"AEGP Layer Render Options Suite") == 0 && version == 2' in text
+    assert '{"AEGP Layer Render Options Suite", 2, nullptr' in text
+    assert "&provide_layer_render_options2" in text
     assert "&new_from_downstream_of_effect" in text
 
 

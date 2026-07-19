@@ -19,7 +19,7 @@ def _worker():
 
 def test_param_utils_suite3_has_the_frozen_typed_nine_slot_abi():
     source = SOURCE.read_text(encoding="utf-8")
-    assert 'std::strcmp(name, "PF Param Utils Suite") == 0 && version == 3' in source
+    assert '{"PF Param Utils Suite", 3, &g_param_utils_suite}' in source
     assert "struct ParamUtilsSuite3" in source
     assert "sizeof(ParamUtilsSuite3) == 9 * sizeof(void*)" in source
     assert "offsetof(ParamUtilsSuite3, PF_UpdateParamUI) == 0 * sizeof(void*)" in source

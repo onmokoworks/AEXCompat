@@ -27,6 +27,10 @@ struct StaticSuite {
   const char* name{};
   int32_t version{};
   const void* suite{};
+  const void* (*factory)(void* context){};
+  void* factory_context{};
+  bool (*available)(void* context){};
+  void* availability_context{};
 };
 
 struct StaticProviderCatalog {

@@ -37,9 +37,13 @@ SuiteResolveResult resolve_static_provider(void* context, const char* name,
     const StaticSuite& candidate = catalog.suites[index];
     if (candidate.name && candidate.version == version &&
         std::strcmp(candidate.name, name) == 0) {
-      *suite = candidate.suite;
-      return candidate.suite ? SuiteResolveResult::acquired
-                             : SuiteResolveResult::rejected_bad_param;
+      if (candidate.available &&
+          !candidate.available(candidate.availability_context))
+        return SuiteResolveResult::not_found;
+      *suite = candidate.factory
+          ? candidate.factory(candidate.factory_context) : candidate.suite;
+      return *suite ? SuiteResolveResult::acquired
+                    : SuiteResolveResult::rejected_bad_param;
     }
   }
   return SuiteResolveResult::not_found;

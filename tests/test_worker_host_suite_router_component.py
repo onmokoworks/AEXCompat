@@ -56,4 +56,23 @@ def test_component_pf_and_aegp_families_are_injected_ahead_of_legacy_route():
 def test_static_provider_matches_exact_name_and_version_only():
     assert "candidate.version == version" in SOURCE
     assert "std::strcmp(candidate.name, name) == 0" in SOURCE
-    assert "candidate.suite ? SuiteResolveResult::acquired" in SOURCE
+    assert "return *suite ? SuiteResolveResult::acquired" in SOURCE
+
+
+def test_factory_and_availability_hooks_preserve_conditional_suite_routes():
+    assert "candidate.available(candidate.availability_context)" in SOURCE
+    assert "candidate.factory(candidate.factory_context)" in SOURCE
+    assert "return SuiteResolveResult::not_found" in SOURCE
+    for family in (
+        "AEGP World Suite",
+        "AEGP Render Options Suite",
+        "AEGP Layer Render Options Suite",
+        "AEGP Render Suite",
+        "AEGP Layer Mask Suite",
+        "AEGP Stream Suite",
+        "AEGP Keyframe Suite",
+    ):
+        assert family in MAIN[MAIN.index("int32_t __cdecl acquire_suite"):]
+    assert "render_options4_provider_available" in MAIN
+    assert "render_suite2_provider_available" in MAIN
+    assert "mask_suite_provider_available" in MAIN

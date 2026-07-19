@@ -6546,6 +6546,111 @@ bool finish_cuda_render_transport(CudaRenderTransport& transport) {
   return gpu_transport::finish_render_transport(transport);
 }
 
+bool mask_suite_provider_available(void*) { return g_mask_model_enabled; }
+
+bool render_options4_provider_available(void*) {
+  return is_render_worker() && g_loaded_effect_receipt_context.entry;
+}
+
+bool render_suite2_provider_available(void*) {
+  return g_aegp_command_roundtrip_mode ||
+      (is_render_worker() && g_loaded_effect_receipt_context.entry != nullptr);
+}
+
+const void* provide_aegp_world_suite3(void*) {
+  auto& suite = aexcompat::suite_abi::aegp_world_suite3_table();
+  suite = {&aegp_world_new_owned, &aegp_world_dispose,
+      &aegp_world_get_type, &aegp_world_get_size, &aegp_world_get_rowbytes,
+      &aegp_world_get_base_addr8, &aegp_world_get_base_addr16,
+      &aegp_world_get_base_addr32, &aegp_world_fill_pf_world,
+      &aegp_world_fast_blur, &aegp_world_new_platform,
+      &aegp_world_dispose_platform, &aegp_world_reference_platform};
+  return &suite;
+}
+
+const void* provide_layer_render_options1(void*) {
+  g_layer_render_options_suite1 = {&new_layer_render_options,
+      &new_from_upstream_of_effect, &duplicate_layer_render_options,
+      &dispose_layer_render_options, &set_layer_render_time, &get_layer_render_time,
+      &set_layer_render_time_step, &get_layer_render_time_step,
+      &set_layer_render_world_type, &get_layer_render_world_type,
+      &set_layer_render_downsample, &get_layer_render_downsample,
+      &set_layer_render_matte, &get_layer_render_matte};
+  return &g_layer_render_options_suite1;
+}
+
+const void* provide_layer_render_options2(void*) {
+  g_layer_render_options_suite2 = {&new_layer_render_options,
+      &new_from_upstream_of_effect, &new_from_downstream_of_effect,
+      &duplicate_layer_render_options, &dispose_layer_render_options,
+      &set_layer_render_time, &get_layer_render_time,
+      &set_layer_render_time_step, &get_layer_render_time_step,
+      &set_layer_render_world_type, &get_layer_render_world_type,
+      &set_layer_render_downsample, &get_layer_render_downsample,
+      &set_layer_render_matte, &get_layer_render_matte};
+  return &g_layer_render_options_suite2;
+}
+
+const void* provide_render_options1(void*) {
+  g_render_options_suite1 = {&render_options_new_from_item, &render_options_duplicate,
+      &render_options_dispose, &render_options_set_time, &render_options_get_time,
+      &render_options_set_time_step, &render_options_get_time_step,
+      &render_options_set_field, &render_options_get_field,
+      &render_options_set_world_type, &render_options_get_world_type,
+      &render_options_set_downsample, &render_options_get_downsample,
+      &render_options_set_roi, &render_options_get_roi,
+      &render_options_set_matte, &render_options_get_matte};
+  return &g_render_options_suite1;
+}
+
+const void* provide_render_options4(void*) {
+  g_render_options_suite4 = {&render_options_new_from_item, &render_options_duplicate,
+      &render_options_dispose, &render_options_set_time, &render_options_get_time,
+      &render_options_set_time_step, &render_options_get_time_step,
+      &render_options_set_field, &render_options_get_field,
+      &render_options_set_world_type, &render_options_get_world_type,
+      &render_options_set_downsample, &render_options_get_downsample,
+      &render_options_set_roi, &render_options_get_roi,
+      &render_options_set_matte, &render_options_get_matte,
+      &render_options_set_channel_order, &render_options_get_channel_order,
+      &render_options_get_guide_layers, &render_options_set_guide_layers,
+      &render_options_get_quality, &render_options_set_quality};
+  return &g_render_options_suite4;
+}
+
+const void* provide_render_suite2(void*) {
+  g_aegp_render_suite2 = {&render_checkout_frame_reject, &checkin_frame,
+      &get_receipt_world, &render_get_region_reject, &render_sufficient_reject,
+      &render_sound_reject, &render_timestamp_reject, &render_changed_reject,
+      &render_worthwhile_reject, &render_checkin_rendered};
+  return &g_aegp_render_suite2;
+}
+
+const void* provide_render_suite5(void*) {
+  g_aegp_render_suite4 = {&render_checkout_frame_reject, &render_checkout_layer_reject,
+      &checkin_frame, &get_receipt_world, &render_get_region_reject,
+      &render_sufficient_reject, &render_sound_reject, &render_timestamp_reject,
+      &render_changed_reject, &render_worthwhile_reject,
+      &render_checkin_rendered, &render_guid_reject};
+  return &g_aegp_render_suite4;
+}
+
+const void* provide_render_suite8(void*) {
+  g_aegp_render_suite5 = {&render_checkout_frame_reject, &render_checkout_layer_v5,
+      &render_checkout_layer_async_reject, &render_cancel_async_reject,
+      &checkin_frame, &get_receipt_world, &render_get_region_reject,
+      &render_sufficient_reject, &render_sound_reject, &render_timestamp_reject,
+      &render_changed_reject, &render_worthwhile_reject,
+      &render_checkin_rendered, &render_guid_reject};
+  return &g_aegp_render_suite5;
+}
+
+const void* provide_render_async_manager1(void*) {
+  g_render_async_manager_suite1 = {
+      &checkout_item_frame_async, &checkout_layer_frame_async};
+  return &g_render_async_manager_suite1;
+}
+
 SuiteResolveResult resolve_scene_suite_provider(
     void*, const char* name, int32_t version, const void** suite) {
   if (scene_context()) {
@@ -6749,46 +6854,6 @@ SuiteResolveResult resolve_legacy_host_suite(
     *suite = &g_adv_item_suite1;
     return SuiteResolveResult::acquired;
   }
-  if (name && std::strcmp(name, "PF Pixel Data Suite") == 0 && version == 2) {
-    *suite = &g_pixel_data_suite2;
-    return SuiteResolveResult::acquired;
-  }
-  if (name && std::strcmp(name, "PF Pixel Data Suite") == 0 && version == 1) {
-    *suite = &g_pixel_data_suite1;
-    return SuiteResolveResult::acquired;
-  }
-  if (name && std::strcmp(name, "PF World Suite") == 0 && version == 2) {
-    *suite = &g_world_suite;
-    return SuiteResolveResult::acquired;
-  }
-  if (name && std::strcmp(name, "PF World Suite") == 0 && version == 1) {
-    *suite = g_world_suite1.data();
-    return SuiteResolveResult::acquired;
-  }
-  if (name && std::strcmp(name, "PF Pixel Format Suite") == 0 && version == 2) {
-    *suite = &g_pixel_format_suite;
-    return SuiteResolveResult::acquired;
-  }
-  if (name && std::strcmp(name, "PF PointParamSuite") == 0 && version == 1) {
-    *suite = &g_point_param_suite;
-    return SuiteResolveResult::acquired;
-  }
-  if (name && std::strcmp(name, "PF AngleParamSuite") == 0 && version == 1) {
-    *suite = &g_angle_param_suite;
-    return SuiteResolveResult::acquired;
-  }
-  if (name && std::strcmp(name, "PF ColorParamSuite") == 0 && version == 1) {
-    *suite = &g_color_param_suite1;
-    return SuiteResolveResult::acquired;
-  }
-  if (name && std::strcmp(name, "PF Param Utils Suite") == 0 && version == 3) {
-    *suite = &g_param_utils_suite;
-    return SuiteResolveResult::acquired;
-  }
-  if (name && std::strcmp(name, "PF Param Utils Suite") == 0 && version == 2) {
-    *suite = &g_param_utils_suite1;
-    return SuiteResolveResult::acquired;
-  }
   if (name && std::strcmp(name, "PF Color Settings Suite") == 0 && version == 7) {
     g_color_settings_suite6 = {&color_get_blending_tables, &color_does_view_have_xform,
         &color_xform_working_to_view, &color_get_new_working_space_profile,
@@ -6801,11 +6866,6 @@ SuiteResolveResult resolve_legacy_host_suite(
         &color_is_colorspace_aware_effects_enabled, &color_get_lut_interpolation_method,
         &color_get_graphics_white_luminance, &color_get_working_colorspace_id};
     *suite = &g_color_settings_suite6;
-    return SuiteResolveResult::acquired;
-  }
-  if (g_mask_model_enabled && name && std::strcmp(name, "AEGP Mask Suite") == 0 &&
-      version == 1) {
-    *suite = &g_pf_mask_suite1;
     return SuiteResolveResult::acquired;
   }
   if (name && std::strcmp(name, "PF Iterate8 Suite") == 0 &&
@@ -6881,133 +6941,13 @@ SuiteResolveResult resolve_legacy_host_suite(
     *suite = g_aegp_dynamic_stream_suite2.data();
     return SuiteResolveResult::acquired;
   }
-  if (name && std::strcmp(name, "AEGP PF Interface Suite") == 0 && version == 1) {
-    *suite = &g_pf_interface_suite;
-    return SuiteResolveResult::acquired;
-  }
-  if (name && std::strcmp(name, "AEGP Layer Render Options Suite") == 0 && version == 1) {
-    g_layer_render_options_suite1 = {&new_layer_render_options,
-        &new_from_upstream_of_effect, &duplicate_layer_render_options,
-        &dispose_layer_render_options, &set_layer_render_time, &get_layer_render_time,
-        &set_layer_render_time_step, &get_layer_render_time_step,
-        &set_layer_render_world_type, &get_layer_render_world_type,
-        &set_layer_render_downsample, &get_layer_render_downsample,
-        &set_layer_render_matte, &get_layer_render_matte};
-    *suite = &g_layer_render_options_suite1;
-    return SuiteResolveResult::acquired;
-  }
-  if (name && std::strcmp(name, "AEGP Render Options Suite") == 0 && version == 1) {
-    g_render_options_suite1 = {&render_options_new_from_item, &render_options_duplicate,
-        &render_options_dispose, &render_options_set_time, &render_options_get_time,
-        &render_options_set_time_step, &render_options_get_time_step,
-        &render_options_set_field, &render_options_get_field,
-        &render_options_set_world_type, &render_options_get_world_type,
-        &render_options_set_downsample, &render_options_get_downsample,
-        &render_options_set_roi, &render_options_get_roi,
-        &render_options_set_matte, &render_options_get_matte};
-    *suite = &g_render_options_suite1;
-    return SuiteResolveResult::acquired;
-  }
-  if (name && std::strcmp(name, "AEGP Layer Render Options Suite") == 0 && version == 2) {
-    g_layer_render_options_suite2 = {&new_layer_render_options,
-        &new_from_upstream_of_effect, &new_from_downstream_of_effect,
-        &duplicate_layer_render_options, &dispose_layer_render_options,
-        &set_layer_render_time, &get_layer_render_time,
-        &set_layer_render_time_step, &get_layer_render_time_step,
-        &set_layer_render_world_type, &get_layer_render_world_type,
-        &set_layer_render_downsample, &get_layer_render_downsample,
-        &set_layer_render_matte, &get_layer_render_matte};
-    *suite = &g_layer_render_options_suite2;
-    return SuiteResolveResult::acquired;
-  }
-  if (is_render_worker() && g_loaded_effect_receipt_context.entry && name &&
-      std::strcmp(name, "AEGP Render Options Suite") == 0 && version == 4) {
-    g_render_options_suite4 = {&render_options_new_from_item, &render_options_duplicate,
-        &render_options_dispose, &render_options_set_time, &render_options_get_time,
-        &render_options_set_time_step, &render_options_get_time_step,
-        &render_options_set_field, &render_options_get_field,
-        &render_options_set_world_type, &render_options_get_world_type,
-        &render_options_set_downsample, &render_options_get_downsample,
-        &render_options_set_roi, &render_options_get_roi,
-        &render_options_set_matte, &render_options_get_matte,
-        &render_options_set_channel_order, &render_options_get_channel_order,
-        &render_options_get_guide_layers, &render_options_set_guide_layers,
-        &render_options_get_quality, &render_options_set_quality};
-    *suite = &g_render_options_suite4;
-    return SuiteResolveResult::acquired;
-  }
-  bool allow_render_suite2 = g_aegp_command_roundtrip_mode;
-  allow_render_suite2 = allow_render_suite2 ||
-      (is_render_worker() && g_loaded_effect_receipt_context.entry != nullptr);
-  if (allow_render_suite2 && name &&
-      std::strcmp(name, "AEGP Render Suite") == 0 && version == 2) {
-    g_aegp_render_suite2 = {&render_checkout_frame_reject, &checkin_frame,
-        &get_receipt_world, &render_get_region_reject, &render_sufficient_reject,
-        &render_sound_reject, &render_timestamp_reject, &render_changed_reject,
-        &render_worthwhile_reject, &render_checkin_rendered};
-    *suite = &g_aegp_render_suite2;
-    return SuiteResolveResult::acquired;
-  }
   if (name && std::strcmp(name, "PF Effect Custom UI Suite") == 0 && version == 2) {
     g_effect_custom_ui_suite2[0] = reinterpret_cast<void*>(&get_drawing_reference);
     g_effect_custom_ui_suite2[1] = reinterpret_cast<void*>(&get_context_async_manager);
     *suite = g_effect_custom_ui_suite2.data();
     return SuiteResolveResult::acquired;
   }
-  if (name && std::strcmp(name, "AEGP Render Asyc Manager Suite") == 0 && version == 1) {
-    g_render_async_manager_suite1 = {&checkout_item_frame_async, &checkout_layer_frame_async};
-    *suite = &g_render_async_manager_suite1;
-    return SuiteResolveResult::acquired;
-  }
-  if (name && std::strcmp(name, "AEGP Render Suite") == 0 && version == 5) {
-    g_aegp_render_suite4 = {&render_checkout_frame_reject, &render_checkout_layer_reject,
-        &checkin_frame, &get_receipt_world, &render_get_region_reject,
-        &render_sufficient_reject, &render_sound_reject, &render_timestamp_reject,
-        &render_changed_reject, &render_worthwhile_reject,
-        &render_checkin_rendered, &render_guid_reject};
-    *suite = &g_aegp_render_suite4;
-    return SuiteResolveResult::acquired;
-  }
-  if (name && std::strcmp(name, "AEGP Render Suite") == 0 && version == 8) {
-    g_aegp_render_suite5 = {&render_checkout_frame_reject, &render_checkout_layer_v5,
-        &render_checkout_layer_async_reject, &render_cancel_async_reject,
-        &checkin_frame, &get_receipt_world, &render_get_region_reject,
-        &render_sufficient_reject, &render_sound_reject, &render_timestamp_reject,
-        &render_changed_reject, &render_worthwhile_reject,
-        &render_checkin_rendered, &render_guid_reject};
-    *suite = &g_aegp_render_suite5;
-    return SuiteResolveResult::acquired;
-  }
-  if (name && std::strcmp(name, "AEGP World Suite") == 0 && version == 3) {
-    auto& world_suite3 = aexcompat::suite_abi::aegp_world_suite3_table();
-    world_suite3 = {&aegp_world_new_owned, &aegp_world_dispose,
-        &aegp_world_get_type, &aegp_world_get_size, &aegp_world_get_rowbytes,
-        &aegp_world_get_base_addr8, &aegp_world_get_base_addr16,
-        &aegp_world_get_base_addr32, &aegp_world_fill_pf_world,
-        &aegp_world_fast_blur, &aegp_world_new_platform,
-        &aegp_world_dispose_platform, &aegp_world_reference_platform};
-    *suite = &world_suite3;
-    return SuiteResolveResult::acquired;
-  }
-  if (!g_mask_model_enabled || !name) return SuiteResolveResult::not_found;
-  if (std::strcmp(name, "AEGP PF Interface Suite") == 0 && version == 1)
-    *suite = &g_pf_interface_suite;
-  else if (std::strcmp(name, "AEGP Layer Mask Suite") == 0 && version == 6)
-    *suite = &g_mask_suite5;
-  else if (std::strcmp(name, "AEGP Layer Mask Suite") == 0 && version == 7)
-    *suite = &g_mask_suite;
-  else if (std::strcmp(name, "AEGP Stream Suite") == 0 && version == 11)
-    *suite = &g_stream_suite;
-  else if (std::strcmp(name, "AEGP Keyframe Suite") == 0 && version == 5)
-    *suite = &g_keyframe_suite;
-  else if (std::strcmp(name, "AEGP Dynamic Stream Suite") == 0 && version == 5)
-    *suite = &g_dynamic_stream_suite;
-  else if (std::strcmp(name, "AEGP Mask Outline Suite") == 0 && version == 5)
-    *suite = &g_mask_outline_suite;
-  else {
-    return SuiteResolveResult::not_found;
-  }
-  return SuiteResolveResult::acquired;
+  return SuiteResolveResult::not_found;
 }
 
 int32_t __cdecl acquire_suite(const char* name, int32_t version,
@@ -7028,6 +6968,45 @@ int32_t __cdecl acquire_suite(const char* name, int32_t version,
       {"AEGP Memory Suite", 1, &g_aegp_memory_suite},
       {"AEGP Utility Suite", 7, &g_utility_suite3},
       {"AEGP Utility Suite", 13, &g_utility_suite},
+      {"PF Pixel Data Suite", 1, &g_pixel_data_suite1},
+      {"PF Pixel Data Suite", 2, &g_pixel_data_suite2},
+      {"PF World Suite", 1, g_world_suite1.data()},
+      {"PF World Suite", 2, &g_world_suite},
+      {"PF Pixel Format Suite", 2, &g_pixel_format_suite},
+      {"PF PointParamSuite", 1, &g_point_param_suite},
+      {"PF AngleParamSuite", 1, &g_angle_param_suite},
+      {"PF ColorParamSuite", 1, &g_color_param_suite1},
+      {"PF Param Utils Suite", 2, &g_param_utils_suite1},
+      {"PF Param Utils Suite", 3, &g_param_utils_suite},
+      {"AEGP PF Interface Suite", 1, &g_pf_interface_suite},
+      {"AEGP World Suite", 3, nullptr, &provide_aegp_world_suite3},
+      {"AEGP Layer Render Options Suite", 1, nullptr,
+       &provide_layer_render_options1},
+      {"AEGP Layer Render Options Suite", 2, nullptr,
+       &provide_layer_render_options2},
+      {"AEGP Render Options Suite", 1, nullptr, &provide_render_options1},
+      {"AEGP Render Options Suite", 4, nullptr, &provide_render_options4,
+       nullptr, &render_options4_provider_available},
+      {"AEGP Render Suite", 2, nullptr, &provide_render_suite2, nullptr,
+       &render_suite2_provider_available},
+      {"AEGP Render Suite", 5, nullptr, &provide_render_suite5},
+      {"AEGP Render Suite", 8, nullptr, &provide_render_suite8},
+      {"AEGP Render Asyc Manager Suite", 1, nullptr,
+       &provide_render_async_manager1},
+      {"AEGP Mask Suite", 1, &g_pf_mask_suite1, nullptr, nullptr,
+       &mask_suite_provider_available},
+      {"AEGP Layer Mask Suite", 6, &g_mask_suite5, nullptr, nullptr,
+       &mask_suite_provider_available},
+      {"AEGP Layer Mask Suite", 7, &g_mask_suite, nullptr, nullptr,
+       &mask_suite_provider_available},
+      {"AEGP Stream Suite", 11, &g_stream_suite, nullptr, nullptr,
+       &mask_suite_provider_available},
+      {"AEGP Keyframe Suite", 5, &g_keyframe_suite, nullptr, nullptr,
+       &mask_suite_provider_available},
+      {"AEGP Dynamic Stream Suite", 5, &g_dynamic_stream_suite,
+       nullptr, nullptr, &mask_suite_provider_available},
+      {"AEGP Mask Outline Suite", 5, &g_mask_outline_suite,
+       nullptr, nullptr, &mask_suite_provider_available},
   };
   StaticProviderCatalog component_catalog{
       component_suites, std::size(component_suites)};

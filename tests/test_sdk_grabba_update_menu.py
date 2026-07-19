@@ -46,9 +46,10 @@ def test_render_suite2_has_dedicated_sdk_layout_for_grabba():
     assert "offsetof(AegpRenderSuite2, checkin_rendered) == 9 * sizeof(void*)" in source
     assert "using AegpRenderCancelV1" in source
     assert "const int32_t cancel_error = check_cancel(cancel_refcon, &cancelled)" in source
-    assert "bool allow_render_suite2 = g_aegp_command_roundtrip_mode" in source
+    assert "bool render_suite2_provider_available(void*)" in source
+    assert "return g_aegp_command_roundtrip_mode ||" in source
     assert "g_loaded_effect_receipt_context.entry != nullptr" in source
-    assert 'std::strcmp(name, "AEGP Render Suite") == 0 && version == 2' in source
+    assert '{"AEGP Render Suite", 2, nullptr, &provide_render_suite2' in source
     assert "g_aegp_render_suite2 = {&render_checkout_frame_reject, &checkin_frame" in source
 
 

@@ -78,7 +78,7 @@ def test_render_options_and_async_receipt_claims_match_current_source():
     assert "snapshot.world_type == 1 ? kPixelFormatArgb32" in checkout
     assert "snapshot.world_type == 2 ? kPixelFormatArgb64 : kPixelFormatArgb128" in checkout
     assert "return publish_async_receipt(pixel_format, receipt);" in checkout
-    assert 'std::strcmp(name, "AEGP Render Suite") == 0 && version == 5' in source
+    assert '{"AEGP Render Suite", 5, nullptr, &provide_render_suite5}' in source
     assert "&checkin_frame, &get_receipt_world" in source
     assert "aexcompat::world_registry::unregister_borrowed_view(" in source
 
