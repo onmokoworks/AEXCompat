@@ -7,6 +7,11 @@
 #include <vector>
 
 namespace aexcompat::worker_runtime::ui_event_execution {
+
+CustomUiTelemetry& custom_ui_telemetry() {
+  static CustomUiTelemetry telemetry;
+  return telemetry;
+}
 namespace {
 constexpr int32_t kEvent = 15;
 

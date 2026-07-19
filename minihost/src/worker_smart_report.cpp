@@ -11,6 +11,8 @@
 #include "worker_parameter_execution.hpp"
 #include "worker_pf_pixel_format_registry.hpp"
 #include "worker_render_report.hpp"
+#include "worker_smart_runtime.hpp"
+#include "worker_ui_event_execution.hpp"
 #include "worker_world_registry.hpp"
 
 #include <atomic>
@@ -22,18 +24,22 @@ namespace aexcompat::l2_detail {
 
 // Worker-entry owned custom-UI/telemetry state and helpers; the definitions
 // stay in l2_main with the dispatch that mutates them.
-extern bool g_render_click_enabled;
-extern bool g_render_draw_enabled;
-extern int32_t g_render_click_error;
-extern int32_t g_render_click_out_flags;
-extern bool g_render_click_changed_value;
-extern int32_t g_render_draw_error;
-extern int32_t g_render_draw_out_flags;
-extern std::array<int32_t, 4> g_render_ui_lifecycle_errors;
-extern bool g_render_ui_context_closed;
-extern uint32_t g_app_color_picker_calls;
-extern uint32_t g_app_invalidate_rect_calls;
-extern std::array<float, 4> g_app_picker_color;
+namespace {
+auto& g_smart_ui_telemetry =
+    aexcompat::worker_runtime::ui_event_execution::custom_ui_telemetry();
+auto& g_render_click_enabled = g_smart_ui_telemetry.render_click_enabled;
+auto& g_render_draw_enabled = g_smart_ui_telemetry.render_draw_enabled;
+auto& g_render_click_error = g_smart_ui_telemetry.render_click_error;
+auto& g_render_click_out_flags = g_smart_ui_telemetry.render_click_out_flags;
+auto& g_render_click_changed_value = g_smart_ui_telemetry.render_click_changed_value;
+auto& g_render_draw_error = g_smart_ui_telemetry.render_draw_error;
+auto& g_render_draw_out_flags = g_smart_ui_telemetry.render_draw_out_flags;
+auto& g_render_ui_lifecycle_errors = g_smart_ui_telemetry.render_ui_lifecycle_errors;
+auto& g_render_ui_context_closed = g_smart_ui_telemetry.render_ui_context_closed;
+auto& g_app_color_picker_calls = g_smart_ui_telemetry.app_color_picker_calls;
+auto& g_app_invalidate_rect_calls = g_smart_ui_telemetry.app_invalidate_rect_calls;
+auto& g_app_picker_color = g_smart_ui_telemetry.app_picker_color;
+}  // namespace
 // Mirrors l2_main's frozen guid mix-in transport bound; the report publishes
 // it beside the observed sizes.
 constexpr uint32_t kMaxGuidMixInBytes = 1024 * 1024;
