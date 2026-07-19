@@ -226,6 +226,75 @@ mod windows_e2e {
             std::fs::read(&ctx_b).unwrap(),
             "context PNG bytes differ between the routes"
         );
+
+        // A non-empty mask scene (issue #98 W1-3b) travels through the session
+        // launch argv as the v2| trailer and must match on both routes.
+        let mask_context: HostContext = serde_json::from_value(serde_json::json!({
+            "mask_scene": {
+                "masks": [{
+                    "open": false,
+                    "vertices": [
+                        {"x": 4.0, "y": 4.0},
+                        {"x": 40.0, "y": 8.0},
+                        {"x": 20.0, "y": 28.0},
+                    ],
+                }],
+            },
+        }))
+        .expect("mask host context fixture");
+        let mask_before = RENDER_SESSION_WRAPPER_RENDERS.load(Ordering::SeqCst);
+        let mask_a = scratch.join("mask-a.png");
+        let mask_report_a = render_experimental_image_at_time_with_format_and_context(
+            &root,
+            &aex,
+            &sha,
+            &input,
+            &mask_a,
+            &[],
+            RenderTiming::default(),
+            false,
+            RenderPixelFormat::Argb8,
+            Some(&mask_context),
+        )
+        .expect("session-route mask render");
+        assert!(
+            RENDER_SESSION_WRAPPER_RENDERS.load(Ordering::SeqCst) > mask_before,
+            "the session wrapper did not carry the mask render"
+        );
+        unsafe { std::env::set_var(DISABLE_SESSION_WRAPPER_ENV, "1") };
+        let mask_b = scratch.join("mask-b.png");
+        let mask_report_b = render_experimental_image_at_time_with_format_and_context(
+            &root,
+            &aex,
+            &sha,
+            &input,
+            &mask_b,
+            &[],
+            RenderTiming::default(),
+            false,
+            RenderPixelFormat::Argb8,
+            Some(&mask_context),
+        )
+        .expect("one-shot mask render");
+        unsafe { std::env::remove_var(DISABLE_SESSION_WRAPPER_ENV) };
+        let mut mask_flat_a = mask_report_a.as_object().expect("mask A").clone();
+        let mut mask_flat_b = mask_report_b.as_object().expect("mask B").clone();
+        for key in volatile {
+            mask_flat_a.remove(key);
+            mask_flat_b.remove(key);
+        }
+        for (key, value_a) in &mask_flat_a {
+            assert_eq!(
+                Some(value_a),
+                mask_flat_b.get(key),
+                "mask report field {key} differs between the routes"
+            );
+        }
+        assert_eq!(
+            std::fs::read(&mask_a).unwrap(),
+            std::fs::read(&mask_b).unwrap(),
+            "mask PNG bytes differ between the routes"
+        );
         let _ = std::fs::remove_dir_all(&scratch);
     }
 }
