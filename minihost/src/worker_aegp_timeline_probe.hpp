@@ -113,4 +113,40 @@ struct KeyframePipeProbe {
   ~KeyframePipeProbe();
 };
 
+struct SeekPipeProbe {
+  HANDLE pipe{INVALID_HANDLE_VALUE};
+  std::thread reader;
+  std::atomic_bool connected{false};
+  std::atomic_bool request_sent{false};
+  std::atomic_bool ack_received{false};
+  std::atomic_bool ack_valid{false};
+  bool start();
+  void stop();
+  ~SeekPipeProbe();
+};
+
+struct TrimPipeProbe {
+  HANDLE pipe{INVALID_HANDLE_VALUE};
+  std::thread reader;
+  std::atomic_bool connected{false};
+  std::atomic_bool request_sent{false};
+  std::atomic_bool ack_received{false};
+  std::atomic_bool ack_valid{false};
+  bool start();
+  void stop();
+  ~TrimPipeProbe();
+};
+
+struct SwitchPipeProbe {
+  HANDLE pipe{INVALID_HANDLE_VALUE};
+  std::thread reader;
+  std::atomic_bool connected{false};
+  std::atomic_bool request_sent{false};
+  std::atomic_bool ack_received{false};
+  std::atomic_bool ack_valid{false};
+  bool start();
+  void stop();
+  ~SwitchPipeProbe();
+};
+
 }  // namespace aexcompat::worker_runtime::aegp_timeline
