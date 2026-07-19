@@ -263,8 +263,45 @@ mod windows_e2e {
     fn auxiliary_options_ride_the_session_argv_tail() {
         let _behavior = BehaviorGuard::set(None);
         let (repository, plugin, sha) = temp_repository();
+        // A manifest the real worker's loader would accept: one depth channel
+        // whose f32le sidecar exists next to it with a matching hash. The
+        // fixture enforces the top-level gate (schema/nonce/non-empty
+        // channels); the deep per-channel validation stays with the real
+        // worker's own transport tests.
+        let sidecar = repository.0.join("aux-1-0-0.f32le");
+        let payload: Vec<u8> = [0.0f32, 0.25, 1.0, 2.0]
+            .iter()
+            .flat_map(|value| value.to_le_bytes())
+            .collect();
+        std::fs::write(&sidecar, &payload).unwrap();
         let manifest = repository.0.join("aux-manifest.json");
-        std::fs::write(&manifest, b"{}").unwrap();
+        std::fs::write(
+            &manifest,
+            serde_json::json!({
+                "schema": "aux-manifest-v1",
+                "nonce": "1",
+                "channels": [{
+                    "param_index": 0,
+                    "type": 0x4450_5448,
+                    "name": "Depth",
+                    "data_type": "f32le",
+                    "dimension": 1,
+                    "width": 2,
+                    "height": 2,
+                    "samples": [{
+                        "time": 0,
+                        "time_scale": 30,
+                        "path": sidecar.to_string_lossy(),
+                        "sampling": "hold",
+                        "interpretation": "depth",
+                        "expected_byte_length": payload.len(),
+                        "sha256": format!("{:x}", Sha256::digest(&payload)),
+                    }],
+                }],
+            })
+            .to_string(),
+        )
+        .unwrap();
         let dump_dir = repository.0.join("world-dumps");
         std::fs::create_dir_all(&dump_dir).unwrap();
         // The fixture worker validates each pair like the real worker's

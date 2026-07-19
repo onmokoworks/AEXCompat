@@ -183,11 +183,47 @@ mod worker {
                         return 3;
                     }
                 }
-                // The real worker's auxiliary gates: an existing manifest
-                // file, an existing dump directory, and the literal "1".
+                // The real worker's auxiliary gates: a strictly shaped
+                // manifest, an existing dump directory, and the literal "1".
+                // The manifest check mirrors load_aux_manifest's top-level
+                // contract (absolute existing file, bounded size, exactly
+                // {schema, nonce, channels} with the v1 schema string and a
+                // digit nonce); per-channel sidecar validation stays with the
+                // real worker.
                 "--aux-manifest-v1" => {
                     let manifest = std::path::Path::new(value);
                     if !manifest.is_absolute() || !manifest.is_file() {
+                        return 3;
+                    }
+                    let Ok(bytes) = std::fs::read(manifest) else {
+                        return 3;
+                    };
+                    if bytes.is_empty() || bytes.len() > 1024 * 1024 {
+                        return 3;
+                    }
+                    let Ok(document) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+                        return 3;
+                    };
+                    let Some(object) = document.as_object() else {
+                        return 3;
+                    };
+                    let schema_ok = object.get("schema").and_then(|v| v.as_str())
+                        == Some("aux-manifest-v1");
+                    let nonce_ok = object
+                        .get("nonce")
+                        .and_then(|v| v.as_str())
+                        .is_some_and(|nonce| {
+                            !nonce.is_empty() && nonce.bytes().all(|b| b.is_ascii_digit())
+                        });
+                    let channels_ok = object
+                        .get("channels")
+                        .and_then(serde_json::Value::as_array)
+                        // The real gate rejects an empty channel list.
+                        .is_some_and(|channels| {
+                            !channels.is_empty()
+                                && channels.iter().all(serde_json::Value::is_object)
+                        });
+                    if object.len() != 3 || !schema_ok || !nonce_ok || !channels_ok {
                         return 3;
                     }
                 }
