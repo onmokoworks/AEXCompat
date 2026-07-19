@@ -346,8 +346,9 @@ pub struct SessionOpenRequest<'a> {
     pub render_environment_trailer: Option<String>,
     /// Secondary layers, static for the whole session (issue #98 W1-4). The
     /// pixels ride the shared layer slots; the slot/geometry metadata rides
-    /// the `session-layers:v1|` launch trailer.
-    pub layers: Vec<SessionLayer>,
+    /// the `session-layers:v1|` launch trailer. Borrowed so open copies the
+    /// bytes straight into the section without a second heap copy.
+    pub layers: &'a [SessionLayer],
     pub dependencies: Vec<ApprovedImageArtifact>,
     pub width: u32,
     pub height: u32,
@@ -516,7 +517,7 @@ impl RenderSession {
         // Each layer's RGBA must fit its slot (input-slot shaped) and slots
         // must be unique, before any transport work.
         let mut seen_layer_slots = std::collections::HashSet::new();
-        for layer in &request.layers {
+        for layer in request.layers {
             if !seen_layer_slots.insert(layer.slot) {
                 return Err(invalid("render session layer slots must be unique"));
             }
@@ -1395,7 +1396,7 @@ pub fn run_video_batch(
         mask_trailer: None,
         spatial_trailer: None,
         render_environment_trailer: None,
-        layers: Vec::new(),
+        layers: &[],
         dependencies: Vec::new(),
         width,
         height,
@@ -1618,7 +1619,7 @@ mod tests {
                 mask_trailer: None,
                 spatial_trailer: None,
                 render_environment_trailer: None,
-                layers: Vec::new(),
+                layers: &[],
                 dependencies: Vec::new(),
                 width: 8,
                 height: 4,

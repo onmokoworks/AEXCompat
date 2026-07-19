@@ -4904,7 +4904,7 @@ fn render_classic_via_length_one_session(
         aux_manifest: None,
         world_dump_dir: world_dump_dir.as_ref().map(|dump| dump.path.as_path()),
         output_checksum_detail,
-        layers: request.layers.clone(),
+        layers: &request.layers,
         mask_trailer: request.mask_trailer.clone(),
         spatial_trailer: request.spatial_trailer.clone(),
         render_environment_trailer: request.render_environment_trailer.clone(),
