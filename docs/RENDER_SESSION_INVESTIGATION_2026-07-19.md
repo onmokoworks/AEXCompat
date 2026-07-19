@@ -548,3 +548,45 @@ canonical な基準 (= 既存の one-shot 挙動、AE 等価の真値) に合わ
 - これで goal 条件1 (W1-3 context + alpha-as-coverage が session を通り適格
   条件に入る) が充足。残る one-shot 専用は audio / custom UI (#201 で確定) と
   aux channels (session transport 未対応、別途)。
+## 追記 (2026-07-20): W3 SmartFX セッション v1.1 の実装
+
+観察と実装記録 (issue #98 W3、プロトコル文書 §9.1 が正本):
+
+- **観察 (worker 構造)**: smart 経路の SEQUENCE は `begin_render_lifecycle`
+  が張っており、`smart_render_runtime` 自体に manage_sequence は無かった。
+  拡張は「begin/end を frame-only lifecycle に差し替える」1 点に集約でき、
+  `smart_execution::SessionFrame` (manage_sequence 相当 + 出力 ARGB 捕捉 +
+  guard 判定) を 1 ポインタで通した。one-shot 経路は SessionFrame=nullptr
+  で挙動不変。
+- **実装 (worker)**: classic の `run_render_session` をフレームループ共通部
+  (`run_session_frame_loop`) と renderer コールバックに分離し、smart 版
+  (`run_smart_render_session`) は `smart_render_once(session)` を
+  per-frame で呼ぶ。SEQUENCE_SETUP の遅延ホイスト (-47) と §4 のメッセージ
+  仕様・fail-closed 判定は classic と完全共通。フレーム局所エラーは
+  one-shot の優先順位 (GPU setup → PreRender → render → GPU setdown) で
+  frame_done.render_error に畳む。寸法契約は classic と同じ「全フレーム =
+  launch 寸法」で、SmartFX の partial/empty result も -44 で無効化する
+  (部分レンダー受容はレイヤースロットと同時期の拡張)。
+- **実装 (report/exit)**: smart 最終レポートに session_* フィールドを追加
+  (`append_smart_session`)、session の clean 判定はセッション機構のみで
+  決める (最終フレームの selector エラーで clean close を落とさない)。
+  exit 23/24 契約を smart worker にも配線。broker `final_report_clean` は
+  classic/smart でキー集合を分けて fail-closed。
+- **実装 (broker)**: `SessionOpenRequest` に smart / gpu_backend /
+  gpu_runtime_policy。GPU 起動は one-shot と同じ認証列を
+  `dispatch_secure_gpu_image_session` として通す。セッションは飛行中
+  リトライ不可のため Auto の CPU fallback は open 時に畳む (Auto+policy
+  なし→CPU コマンド、明示 GPU+policy なし→open で拒否)。
+- **検証**: worker 直接駆動の behavioral self-test 5 本
+  (tests/test_smart_session_worker.py、pf_smart_geometry_probe) と broker
+  統合テスト (fixture、smart close 契約 + GPU policy 拒否 + Auto 縮退) が
+  pass。cargo workspace / pytest 全体も pass (既存の環境依存 ERROR 2 件
+  (vswhere 応答空) は main でも再現し無関係)。
+- **観察 (E2E 阻害、#185 に切り出し)**: 実 worker での smart batch E2E
+  (render-video-batch smart:true) はこのマシンでは module audit 失敗で
+  不成立。原因は W3 ではなく、smart dispatch が CPU レンダーでも
+  `begin_backend_context(3)` (CUDA) を無条件初期化し、NVIDIA driver store
+  DLL が audit の unknown (2 件) になる既存問題。sealed 経路の one-shot
+  smart (`render_experimental_image_at_time_with_format(smart=true)`) でも
+  同一失敗を確認済み (＝W3 回帰ではない)。classic batch は同一 sandbox で
+  成功。audit なしの直接駆動では smart session は全シナリオ成功。

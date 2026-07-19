@@ -671,7 +671,9 @@ SmartResult smart_render_runtime(EffectEntry entry, std::array<std::byte, kInSiz
                               const std::vector<ExternalLayerInput>* external_layers = nullptr,
                               int32_t external_current_time = 0, int32_t external_time_step = 1,
                               int32_t external_total_time = 1, uint32_t external_time_scale = 1,
-                              int32_t external_pixel_bytes = 4) {
+                              int32_t external_pixel_bytes = 4,
+                              aexcompat::worker_runtime::smart_execution::SessionFrame* session =
+                                  nullptr) {
   SmartRuntimeSession smart_session;
   reset_smart_host_telemetry();
   SmartResult result;
@@ -703,6 +705,18 @@ SmartResult smart_render_runtime(EffectEntry entry, std::array<std::byte, kInSiz
   OutputPixelBuffer guarded(static_cast<std::size_t>(rowbytes) * height);
   auto* destination = guarded.data();
   result.guards_intact = true;
+  // A session frame needs the sentinel verdict on every exit path, including
+  // early refusals after this point; the one-shot report keeps its existing
+  // finalize-only semantics, so this probe writes to the session record, not
+  // to result.guards_intact.
+  struct SessionGuardProbe {
+    aexcompat::worker_runtime::smart_execution::SessionFrame* session;
+    OutputPixelBuffer& guarded;
+    ~SessionGuardProbe() {
+      if (session) session->guards_intact = guarded.sentinels_intact();
+    }
+  } session_guard_probe{session, guarded};
+  if (session) session->output_buffer_allocated = true;
   std::array<std::byte, 120> input_world{}, output_world{};
   std::array<std::byte, 120> input_checkout_view{}, map_checkout_view{};
   DispatchWorldFormatScope dispatch_worlds;
@@ -747,32 +761,37 @@ SmartResult smart_render_runtime(EffectEntry entry, std::array<std::byte, kInSiz
   // through Smart Render; output pixels are never used to infer auxiliary planes.
   publish_alpha_coverage_provider(pre_render_source, width, height, pixel_bytes,
                                   external_current_time, external_time_scale);
-  const RenderLifecycle lifecycle = begin_render_lifecycle(
+  // Session frames run under a hoisted SEQUENCE owned by the session loop
+  // (protocol v1.1): only the FRAME pair is managed here, mirroring the
+  // classic render_once(manage_sequence=false) boundary.
+  const auto begin_lifecycle = session ? &begin_frame_lifecycle : &begin_render_lifecycle;
+  const auto end_lifecycle = session ? &end_frame_lifecycle : &end_render_lifecycle;
+  const RenderLifecycle lifecycle = begin_lifecycle(
       entry, input, command_output, params.data(), output_world.data());
   if (lifecycle.setup_error != 0) {
     result.pre_error = lifecycle.setup_error;
-    result.render_error = end_render_lifecycle(entry, input, command_output, params.data(),
-                                                output_world.data(), lifecycle,
-                                                lifecycle.setup_error);
+    result.render_error = end_lifecycle(entry, input, command_output, params.data(),
+                                        output_world.data(), lifecycle,
+                                        lifecycle.setup_error);
     return result;
   }
   if (!dispatch_render_click(entry, input, command_output, definitions)) {
     result.pre_error = -5;
-    result.render_error = end_render_lifecycle(entry, input, command_output, params.data(),
-                                                output_world.data(), lifecycle, -5);
+    result.render_error = end_lifecycle(entry, input, command_output, params.data(),
+                                        output_world.data(), lifecycle, -5);
     return result;
   }
   if (!interpolate_arbitrary_values(entry, input, command_output, definitions) ||
       !roundtrip_arbitrary_values(entry, input, command_output, definitions)) {
     result.pre_error = -5;
-    result.render_error = end_render_lifecycle(entry, input, command_output, params.data(),
-                                                output_world.data(), lifecycle, -5);
+    result.render_error = end_lifecycle(entry, input, command_output, params.data(),
+                                        output_world.data(), lifecycle, -5);
     return result;
   }
   if (!dispatch_conditional_ui_selectors(entry, input, command_output, params.data())) {
     result.pre_error = -5;
-    result.render_error = end_render_lifecycle(entry, input, command_output, params.data(),
-                                                output_world.data(), lifecycle, -5);
+    result.render_error = end_lifecycle(entry, input, command_output, params.data(),
+                                        output_world.data(), lifecycle, -5);
     return result;
   }
   const uint32_t dynamic_out_flags = read<uint32_t>(command_output, kOutFlags);
@@ -789,8 +808,8 @@ SmartResult smart_render_runtime(EffectEntry entry, std::array<std::byte, kInSiz
       std::memcpy(destination + y * rowbytes, source.data() + y * rowbytes,
                   width * pixel_bytes);
     result.pre_error = 0;
-    result.render_error = end_render_lifecycle(entry, input, command_output, params.data(),
-                                                output_world.data(), lifecycle, 0);
+    result.render_error = end_lifecycle(entry, input, command_output, params.data(),
+                                        output_world.data(), lifecycle, 0);
     result.rects_valid = true;
     result.roi_contract_valid = true;
     result.output_width = width;
@@ -810,6 +829,7 @@ SmartResult smart_render_runtime(EffectEntry entry, std::array<std::byte, kInSiz
     result.input_hash = sha256_bytes(logical_input.data(), logical_input.size());
     result.output_hash = sha256_bytes(logical_output.data(), logical_output.size());
     dump_world_snapshot("smart-output", logical_output.data(), width, height, pixel_bytes);
+    if (session && session->captured_argb) *session->captured_argb = logical_output;
     if (external_output && result.render_error == 0) {
       std::vector<unsigned char> rgba(static_cast<std::size_t>(width) * height * pixel_bytes);
       for (std::size_t pixel = 0; pixel < static_cast<std::size_t>(width) * height; ++pixel)
@@ -831,12 +851,12 @@ SmartResult smart_render_runtime(EffectEntry entry, std::array<std::byte, kInSiz
           {entry, &input, &command_output, &plan, &parameter_state, &input_world,
            &output_world, &dispatch_worlds, &source, &guarded, &destination,
            &lifecycle, external_output, dispatch_pixel_format, width, height,
-           rowbytes, pixel_bytes},
+           rowbytes, pixel_bytes, session},
           {&dispatch_render_draw,
            {&guarded_effect_call, &capture_module_audit,
             reinterpret_cast<void*>(&guid_mix_in_ptr),
             &automatic_checkin_pre_render_params},
-           {&close_render_ui_context, &end_render_lifecycle, &dump_world_snapshot,
+           {&close_render_ui_context, end_lifecycle, &dump_world_snapshot,
             &record_output_checksum_detail, &sha256_bytes,
             +[] { return g_render_ui_context_active; }}}, result))
     return result;
@@ -858,12 +878,14 @@ SmartResult smart_render_once(EffectEntry entry, std::array<std::byte, kInSize>&
                               int32_t external_current_time = 0, int32_t external_time_step = 1,
                               int32_t external_total_time = 1,
                               uint32_t external_time_scale = 1,
-                              int32_t external_pixel_bytes = 4) {
+                              int32_t external_pixel_bytes = 4,
+                              aexcompat::worker_runtime::smart_execution::SessionFrame* session =
+                                  nullptr) {
   return aexcompat::worker_runtime::smart_execution::render_once(
       entry, input, output, case_id, requested, external_rgba, external_output,
       external_width, external_height, external_layers, external_current_time,
       external_time_step, external_total_time, external_time_scale,
-      external_pixel_bytes);
+      external_pixel_bytes, session);
 }
 
 #undef entry

@@ -144,6 +144,29 @@ WorkerMode classify_worker_mode(
     return mode;
   }
 
+  {
+    // SmartFX resident session commands (protocol v1.1). Positional contract
+    // matches the classic session commands above; the ARGB32f depth carries
+    // the GPU backend selection in the command word, mirroring the one-shot
+    // --smart-image32[-cpu|-opencl|-directx] family.
+    const bool session_cpu = equals(command, L"--smart-session32-cpu-v1");
+    const bool session_opencl = equals(command, L"--smart-session32-opencl-v1");
+    const bool session_directx = equals(command, L"--smart-session32-directx-v1");
+    const bool session16 = equals(command, L"--smart-session16-v1");
+    const bool session32 = equals(command, L"--smart-session32-v1") ||
+        session_cpu || session_opencl || session_directx;
+    mode.render_session_mode = effective_argc == 10 &&
+        (equals(command, L"--smart-session-v1") || session16 || session32);
+    if (mode.render_session_mode) {
+      mode.external_pixel_bytes = session32 ? 16 : (session16 ? 8 : 4);
+      mode.force_cpu = session_cpu;
+      mode.opencl = session_opencl;
+      mode.directx = session_directx;
+      mode.request_mode = true;
+      mode.command_accepted = true;
+      return mode;
+    }
+  }
   mode.force_cpu = equals(command, L"--smart-image32-cpu") ||
       equals(command, L"--smart-image32-cpu-layer");
   mode.opencl = equals(command, L"--smart-image32-opencl");

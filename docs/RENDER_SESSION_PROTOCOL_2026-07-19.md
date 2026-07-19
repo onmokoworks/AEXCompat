@@ -20,11 +20,12 @@ v1 のスコープ:
 - tier は default tier (crash containment)。hash の記録は現行どおり行うが、
   セッションであることによる追加の enforce はしない。
 
-v1 のスコープ外 (プロトコルは拡張点を予約する):
+v1.1 (issue #98 W3) で追加されたスコープ:
 
-- SmartFX セッション。`smart_render_runtime` に `manage_sequence` 相当が
-  無く (`l2_main.cpp:4998` で常に SEQUENCE を張る)、worker 側の追加工事が
-  要る。メッセージ仕様は selector 非依存なので v1.1 で worker 側のみ拡張。
+- SmartFX セッション (§9.1)。メッセージ仕様 (§4) は selector 非依存のまま
+  変更なしで、worker 側のフレームループと broker 側の起動配線のみの拡張。
+
+v1 のスコープ外 (プロトコルは拡張点を予約する):
 - per-frame の動的パラメーター割当 (#107 GUI ライブ操作、AviUtl2 ブリッジが
   要求)。`render_frame` メッセージの追加フィールドとして予約 (§4.2)。
 - SEQUENCE_RESETUP の発行。レンダー専用文脈での実発行頻度は AE 実機観測
@@ -156,6 +157,13 @@ one-shot との差分:
 - 深度はコマンド語で表現する (one-shot の `--render-image` /
   `--render-image16` / `--render-image32` に倣い、`--render-session-v1` /
   `--render-session16-v1` / `--render-session32-v1`)。
+- SmartFX セッション (v1.1) は smart worker (`aex_smart_worker.exe`) の
+  コマンド語で、位置引数の契約は同一: `--smart-session-v1` /
+  `--smart-session16-v1` / `--smart-session32-v1`。ARGB32f は one-shot の
+  `--smart-image32[-cpu|-opencl|-directx]` に倣い GPU backend をコマンド語で
+  固定する: `--smart-session32-cpu-v1` / `--smart-session32-opencl-v1` /
+  `--smart-session32-directx-v1` (無印は CUDA/自動交渉)。backend は launch で
+  確定し、セッション中に変わらない。
 
 ## 4. 制御チャネル: メッセージ仕様
 
@@ -431,3 +439,48 @@ worker 側の実装マッピング (worker 側調査より):
 `param_epoch`)、per-frame パラメーター (v2)、SmartFX checkout スロット割当
 (v1.1) はいずれもメッセージの追加フィールド + worker 側拡張で入る設計に
 してあり、v1 実装をブロックしない。
+
+### 9.1 v1.1: SmartFX セッション (issue #98 W3)
+
+§4 のメッセージ仕様・§6 の共有メモリレイアウト・§7 の安全境界は一切変更
+しない。変わるのはフレームの中身と起動配線のみ。
+
+- **worker lifecycle (§5 の smart 版)**: 共有のフレームループ
+  (`run_session_frame_loop`) が SEQUENCE_SETUP を classic と同じ契約で遅延
+  ホイストし (最初にレンダー到達した `render_frame` の時刻を in_data に
+  seed して発行、失敗は -47 で継続不可)、各フレームは FRAME_SETUP →
+  SMART_PRE_RENDER → SMART_RENDER (GPU 交渉時は GPU_DEVICE_SETUP /
+  SMART_RENDER_GPU / GPU_DEVICE_SETDOWN を内包) → FRAME_SETDOWN を
+  `smart_render_once(session)` として実行する
+  (`begin_frame_lifecycle` / `end_frame_lifecycle` に差し替え、one-shot の
+  `begin_render_lifecycle` 経路は不変)。GPU デバイスの setup/setdown は
+  one-shot と同じくフレーム内で完結する (コンテキストのフレーム間保持は
+  将来の最適化であり、v1.1 は one-shot と同観測を優先する)。
+- **frame_done の意味論**: フレーム局所エラーは one-shot の優先順位
+  (GPU setup → PreRender → render/finalize → GPU setdown) で 1 つの
+  `render_error` に畳む。ROI/rect 系の診断 (result_rect、
+  extra_pixels_contract_violation 等) はフレームを落とさず最終レポート側に
+  残る。**全フレーム = launch 寸法の契約 (§3) は smart でも同一**で、
+  partial / empty result_rect を含む寸法逸脱は -44 (dimension mismatch) の
+  セッション無効化になる。部分レンダーの受容はレイヤースロット・リング
+  バッファと同じ将来拡張。
+- **最終レポート (§4.4 の smart 版)**: smart worker の one-shot 型レポート
+  (`stage:"smartfx_render"`) に session 集計フィールドを追加する:
+  `session_mode` / `session_frames_attempted` /
+  `session_sequence_setup_error` / `session_sequence_setdown_error` /
+  `session_render_error` / `session_protocol_violation` /
+  `session_invariant_failure`。smart 数値フィールド (pre_render_error 等) は
+  最終フレームの値で、クリーン判定には使わない (フレーム局所エラー後の
+  clean close は classic と同じく成功)。broker の clean 判定
+  (`final_report_clean`) は classic では従来キー、smart では session_* キーを
+  fail-closed に要求する。exit code 23/24 の契約は共通。
+- **broker 配線**: `SessionOpenRequest` に `smart` / `gpu_backend` /
+  `gpu_runtime_policy` を追加。GPU 起動 (smart × ARGB32f × runtime backend
+  あり) は one-shot と同じ認証列 (`authenticate_gpu_worker_report` →
+  `authorize_dispatch`) を `dispatch_secure_gpu_image_session` として通す。
+  セッションは飛行中のリトライができないため、one-shot の Auto GPU
+  preflight フォールバックは open 時点に畳む: Auto かつ policy 無しは CPU
+  コマンドで開き、Auto かつ policy ありは CUDA (CPU リトライなし)、明示
+  GPU backend かつ policy 無しは open で fail-closed。`render-video-batch`
+  は `smart` / `gpu_backend` を受けるが policy 配線を持たないため GPU
+  backend は CPU 縮退 (Auto) か拒否 (明示) になる。

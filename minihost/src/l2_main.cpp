@@ -1910,6 +1910,10 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
   bool original_sequence_preserved = false;
   int32_t render_error = -1;
   SmartResult smart{};
+  int32_t smart_session_frames_attempted = 0;
+  int32_t smart_session_sequence_setup_error = -1;
+  int32_t smart_session_sequence_setdown_error = -1;
+  int32_t smart_session_render_error = -1;
   bool lifetime_fault_observed = false;
   bool suite_fault_observed = false;
   bool handle_fault_observed = false;
@@ -1963,6 +1967,12 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
     case_id = dispatch.case_id;
     smart = dispatch.smart;
     lifetime_fault_observed = dispatch.lifetime_fault_observed;
+    session_protocol_violation = dispatch.session_protocol_violation;
+    session_invariant_failure = dispatch.session_invariant_failure;
+    smart_session_frames_attempted = dispatch.session_frames_attempted;
+    smart_session_sequence_setup_error = dispatch.session_sequence_setup_error;
+    smart_session_sequence_setdown_error = dispatch.session_sequence_setdown_error;
+    smart_session_render_error = dispatch.session_render_error;
   }
   if (is_render_worker()) drain_async_layer_requests();
   const bool arbitrary_defaults_disposed = dispose_arbitrary_defaults(entry, input, output);
@@ -2095,6 +2105,13 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
   smart_inputs.nop_render_advertised = nop_render_advertised;
   smart_inputs.input_write_advertised = input_write_advertised;
   smart_inputs.request_mode = invocation.request_mode;
+  smart_inputs.session_mode = invocation.render_session_mode;
+  smart_inputs.session_frames_attempted = smart_session_frames_attempted;
+  smart_inputs.session_sequence_setup_error = smart_session_sequence_setup_error;
+  smart_inputs.session_sequence_setdown_error = smart_session_sequence_setdown_error;
+  smart_inputs.session_render_error = smart_session_render_error;
+  smart_inputs.session_protocol_violation = session_protocol_violation;
+  smart_inputs.session_invariant_failure = session_invariant_failure;
   smart_inputs.case_id = case_id;
   smart_inputs.external_size = {invocation.external_width, invocation.external_height};
   smart_inputs.requested_parameters = &invocation.requested_parameters;
@@ -2136,6 +2153,25 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
        g_render_ui_context_closed) ? 0 : 21);
   }
   if (is_smart_worker()) {
+    // The smart session shares the render worker's dedicated fail-closed exit
+    // codes: protocol violations (23) and host-protection invariant failures
+    // (24) stay distinguishable from ordinary smart failures (22).
+    if (session_protocol_violation) return session.finish(23);
+    if (session_invariant_failure) return session.finish(24);
+    if (invocation.render_session_mode) {
+      // Frame-local selector errors were reported through frame_done and the
+      // broker owned the continue decision; only session mechanics and host
+      // state cleanliness decide the exit.
+      return session.finish(global_error == 0 && params_error == 0 && parameter_count_contract_valid &&
+        image_render_supported && depth_supported && smart_render_supported &&
+        smart_session_render_error == 0 && smart.guards_intact &&
+        handle_lifetimes_balanced() && world_lifetimes_balanced() &&
+        gpu_memory_lifetimes_balanced() &&
+        audio_handle_lifetimes_balanced() && audio_telemetry().invalid_operations == 0 &&
+        param_checkouts_balanced() &&
+        ((!g_render_click_enabled && !g_render_draw_enabled) ||
+         g_render_ui_context_closed) ? 0 : 22);
+    }
     return session.finish(global_error == 0 && params_error == 0 && parameter_count_contract_valid &&
       image_render_supported && depth_supported && smart.pre_error == 0 && smart.render_error == 0 &&
       smart.gpu_setup_error == 0 && smart.gpu_setdown_error == 0 &&

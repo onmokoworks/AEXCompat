@@ -44,6 +44,10 @@ bool finalize(const Request& r, const Hooks& h, smart_execution::Result& result)
                                   r.pixel_bytes, logical_output)) return false;
   result.input_hash = h.sha256(logical_input.data(), logical_input.size());
   result.output_hash = h.sha256(logical_output.data(), logical_output.size());
+  // Session frames transfer the packed ARGB output through the shared-memory
+  // slot instead of a file; the session loop converts and validates it.
+  if (r.session && r.session->captured_argb)
+    *r.session->captured_argb = logical_output;
   h.dump_world("smart-output", logical_output.data(), result.output_width,
                result.output_height, r.pixel_bytes);
   const bool untouched = !logical_output.empty() &&

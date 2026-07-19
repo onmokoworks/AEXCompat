@@ -25,6 +25,7 @@ struct Request {
   int32_t height{};
   int32_t rowbytes{};
   int32_t pixel_bytes{};
+  smart_execution::SessionFrame* session{};
 };
 
 struct Hooks {

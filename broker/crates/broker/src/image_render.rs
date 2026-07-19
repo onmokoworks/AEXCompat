@@ -604,7 +604,7 @@ pub struct GpuRuntimePolicyInput<'a> {
     pub system32: &'a Path,
 }
 
-fn runtime_backend(backend: RenderGpuBackend) -> Option<RuntimeBackend> {
+pub(crate) fn runtime_backend(backend: RenderGpuBackend) -> Option<RuntimeBackend> {
     match backend {
         RenderGpuBackend::Auto | RenderGpuBackend::Cuda => Some(RuntimeBackend::Cuda),
         RenderGpuBackend::OpenCl => Some(RuntimeBackend::Opencl),
@@ -4933,6 +4933,9 @@ fn render_classic_via_length_one_session(
         total_time: request.timing.total_time,
         time_scale: request.timing.time_scale,
         frame_deadline: Duration::from_millis(request.timeout_ms),
+        smart: false,
+        gpu_backend: RenderGpuBackend::Cpu,
+        gpu_runtime_policy: None,
     }) {
         Ok(session) => session,
         Err(_) => return SessionWrapperOutcome::Fallback,

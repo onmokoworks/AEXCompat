@@ -15,11 +15,14 @@
 use crate::image_render::{
     decode_bounded_image, decode_sha256_hex, encode_interactive_payload,
     isolated_worker_diagnostics, native_rgba_to_preview, parameter_animation_sidecar_json,
-    validate_animation_bindings, InteractiveParameter, ParameterAnimation, RenderPixelFormat,
-    INTERACTIVE_RENDER_TIMEOUT_MS, MAX_DIMENSION, MAX_PIXELS, MAX_RGBA_TRANSPORT_BYTES,
+    runtime_backend, validate_animation_bindings, GpuRuntimePolicyInput, InteractiveParameter,
+    ParameterAnimation, RenderGpuBackend, RenderPixelFormat, INTERACTIVE_RENDER_TIMEOUT_MS,
+    MAX_DIMENSION, MAX_PIXELS, MAX_RGBA_TRANSPORT_BYTES,
 };
+use crate::runtime_module_policy::{authenticate_gpu_worker_report, WorkerModuleValidation};
 use crate::secure_image_dispatch::{
-    dispatch_secure_image_session, ApprovedImageArtifact, SecureImageDispatch, WorkerKind,
+    dispatch_secure_gpu_image_session, dispatch_secure_image_session, ApprovedImageArtifact,
+    GpuRuntimeAuthorization, SecureImageDispatch, WorkerKind,
 };
 use crate::secure_launch::{SecureLaunchResult, SecureSessionProcess};
 use crate::windows_process::SessionChildHandles;
@@ -103,11 +106,43 @@ fn depth_code(pixel_format: RenderPixelFormat) -> u32 {
     }
 }
 
-fn session_command(pixel_format: RenderPixelFormat) -> &'static str {
-    match pixel_format {
-        RenderPixelFormat::Argb8 => "--render-session-v1",
-        RenderPixelFormat::Argb16 => "--render-session16-v1",
-        RenderPixelFormat::Argb32f => "--render-session32-v1",
+/// Maps the session flavor to the worker command word (protocol §3, v1.1).
+/// SmartFX ARGB32f carries the GPU backend in the command word, mirroring the
+/// one-shot `--smart-image32[-cpu|-opencl|-directx]` family; every other
+/// depth is CPU-only, and classic sessions reject explicit GPU backends.
+fn session_command(
+    pixel_format: RenderPixelFormat,
+    smart: bool,
+    gpu_backend: RenderGpuBackend,
+) -> io::Result<&'static str> {
+    if !smart {
+        return match gpu_backend {
+            RenderGpuBackend::Auto | RenderGpuBackend::Cpu => Ok(match pixel_format {
+                RenderPixelFormat::Argb8 => "--render-session-v1",
+                RenderPixelFormat::Argb16 => "--render-session16-v1",
+                RenderPixelFormat::Argb32f => "--render-session32-v1",
+            }),
+            _ => Err(invalid("GPU backends require a SmartFX ARGB32f session")),
+        };
+    }
+    match (pixel_format, gpu_backend) {
+        (RenderPixelFormat::Argb32f, RenderGpuBackend::Auto | RenderGpuBackend::Cuda) => {
+            Ok("--smart-session32-v1")
+        }
+        (RenderPixelFormat::Argb32f, RenderGpuBackend::OpenCl) => Ok("--smart-session32-opencl-v1"),
+        (RenderPixelFormat::Argb32f, RenderGpuBackend::DirectX) => {
+            Ok("--smart-session32-directx-v1")
+        }
+        (RenderPixelFormat::Argb32f, RenderGpuBackend::Cpu) => Ok("--smart-session32-cpu-v1"),
+        (RenderPixelFormat::Argb8, RenderGpuBackend::Auto | RenderGpuBackend::Cpu) => {
+            Ok("--smart-session-v1")
+        }
+        (RenderPixelFormat::Argb16, RenderGpuBackend::Auto | RenderGpuBackend::Cpu) => {
+            Ok("--smart-session16-v1")
+        }
+        _ => Err(invalid(
+            "an explicit GPU backend requires a SmartFX ARGB32f session",
+        )),
     }
 }
 
@@ -365,6 +400,18 @@ pub struct SessionOpenRequest<'a> {
     /// Per-frame watchdog deadline; the job is terminated when a frame's
     /// response does not arrive in time (protocol §7).
     pub frame_deadline: Duration,
+    /// Selects the SmartFX resident session (protocol v1.1): the smart worker
+    /// runs PreRender→SmartRender per frame under the hoisted sequence.
+    pub smart: bool,
+    /// GPU backend for smart ARGB32f sessions, carried in the command word
+    /// like the one-shot smart dispatch. `Auto` without a runtime policy
+    /// degrades to the CPU command (a session cannot retry mid-flight, so the
+    /// one-shot's preflight fallback happens at open instead); an explicit
+    /// GPU backend without a policy fails closed.
+    pub gpu_backend: RenderGpuBackend,
+    /// Session-bound authenticated runtime module policy inputs, required for
+    /// every GPU-backed launch, exactly like the one-shot GPU path.
+    pub gpu_runtime_policy: Option<GpuRuntimePolicyInput<'a>>,
 }
 
 /// A secondary layer whose RGBA8 pixels occupy one shared layer slot for the
@@ -479,6 +526,9 @@ pub struct RenderSession {
     frames_errored: u32,
     opened: Instant,
     plugin_sha256: String,
+    /// SmartFX session (protocol v1.1); selects the smart worker's final
+    /// report contract when validating a clean close.
+    smart: bool,
     /// Keeps the animation sidecar alive for the whole session; the worker
     /// reads it once at launch, but leaving transport files behind on drop
     /// would leak into target/image-transport.
@@ -577,6 +627,46 @@ impl RenderSession {
         if geometry.section_bytes() as u64 > SECTION_HARD_CAP_BYTES {
             return Err(invalid("render session section exceeds the hard cap"));
         }
+        if !request.smart && request.gpu_runtime_policy.is_some() {
+            return Err(invalid(
+                "a runtime module policy only applies to SmartFX GPU sessions",
+            ));
+        }
+        // v1.1 smart sessions carry no layer slots and no static context
+        // trailers; the worker's smart session contract is the bare 10-slot
+        // argv, so reject the combination here instead of as an opaque
+        // worker command rejection.
+        if request.smart
+            && (!request.layers.is_empty()
+                || request.mask_trailer.is_some()
+                || request.spatial_trailer.is_some()
+                || request.render_environment_trailer.is_some())
+        {
+            return Err(invalid(
+                "smart sessions do not carry layers or static context trailers yet",
+            ));
+        }
+        // A session cannot retry mid-flight, so the one-shot's Auto GPU
+        // preflight fallback collapses to open time: Auto without a policy is
+        // a CPU session, Auto with a policy is a CUDA session with no CPU
+        // retry, and an explicit GPU backend without a policy fails closed
+        // here before any transport work.
+        let gpu_capable = request.smart && request.pixel_format == RenderPixelFormat::Argb32f;
+        let effective_backend = if gpu_capable
+            && request.gpu_backend == RenderGpuBackend::Auto
+            && request.gpu_runtime_policy.is_none()
+        {
+            RenderGpuBackend::Cpu
+        } else {
+            request.gpu_backend
+        };
+        let gpu_attempt = gpu_capable && runtime_backend(effective_backend).is_some();
+        if gpu_attempt && request.gpu_runtime_policy.is_none() {
+            return Err(invalid(
+                "GPU render requires a session-bound authenticated runtime module policy report; supply gpu_runtime_policy or select the CPU backend",
+            ));
+        }
+        let command = session_command(request.pixel_format, request.smart, effective_backend)?;
         let payload = encode_interactive_payload(request.parameters.unwrap_or_default())?;
         // The sidecar mirrors the one-shot transport: validated bindings,
         // JSON under <repository>/target/image-transport (the only directory
@@ -658,7 +748,7 @@ impl RenderSession {
             expected_sha256: decode_sha256_hex(request.plugin_sha256)?,
             expected_size: fs::metadata(request.plugin_path)?.len(),
         };
-        let args_before_plugin = vec![session_command(request.pixel_format).to_owned()];
+        let args_before_plugin = vec![command.to_owned()];
         let mut args_after_plugin = vec![
             request.plugin_sha256.to_ascii_lowercase(),
             payload,
@@ -756,22 +846,53 @@ impl RenderSession {
                 sidecar.0.to_string_lossy().into_owned(),
             ]);
         }
-        let process = dispatch_secure_image_session(
-            SecureImageDispatch {
-                repository: request.repository,
-                worker_kind: WorkerKind::Render,
-                plugin,
-                dependencies: request.dependencies,
-                args_before_plugin: &args_before_plugin,
-                args_after_plugin: &args_after_plugin,
-                timeout: request.frame_deadline,
+        let dispatch = SecureImageDispatch {
+            repository: request.repository,
+            worker_kind: if request.smart {
+                WorkerKind::Smart
+            } else {
+                WorkerKind::Render
             },
-            &SessionChildHandles {
-                request_read: request_read.raw(),
-                response_write: response_write.raw(),
-                section: transport.section.raw(),
-            },
-        )?;
+            plugin,
+            dependencies: request.dependencies,
+            args_before_plugin: &args_before_plugin,
+            args_after_plugin: &args_after_plugin,
+            timeout: request.frame_deadline,
+        };
+        let child_handles = SessionChildHandles {
+            request_read: request_read.raw(),
+            response_write: response_write.raw(),
+            section: transport.section.raw(),
+        };
+        let process = if gpu_attempt {
+            let policy_input = request
+                .gpu_runtime_policy
+                .expect("gpu attempt was validated to carry a policy at open");
+            let backend =
+                runtime_backend(effective_backend).expect("GPU attempt has a runtime backend");
+            let report = authenticate_gpu_worker_report(
+                policy_input.module_report_json,
+                &policy_input.session_identity,
+                backend,
+                WorkerModuleValidation {
+                    policy: policy_input.policy,
+                    sealed: policy_input.sealed_modules,
+                    trusted: policy_input.trusted_modules,
+                    system32: policy_input.system32,
+                },
+            )?;
+            dispatch_secure_gpu_image_session(
+                dispatch,
+                GpuRuntimeAuthorization {
+                    backend,
+                    session_identity: policy_input.session_identity,
+                    module_report: &report,
+                },
+                &child_handles,
+            )?
+        } else {
+            dispatch_secure_image_session(dispatch, &child_handles)?
+        };
         // The worker inherited its copies; dropping the broker's child-side
         // ends turns a worker exit into pipe EOF instead of a hang.
         drop(request_read);
@@ -840,6 +961,7 @@ impl RenderSession {
             frames_errored: 0,
             opened: Instant::now(),
             plugin_sha256: request.plugin_sha256.to_ascii_lowercase(),
+            smart: request.smart,
             _animation_sidecar: animation_sidecar,
         })
     }
@@ -1325,9 +1447,12 @@ impl RenderSession {
                 Some(CollectedExit { result: Some(result), .. })
                     if result.classification == crate::ExitClassification::Ok
             )
-            && final_report.as_ref().is_some_and(final_report_clean);
+            && final_report
+                .as_ref()
+                .is_some_and(|report| final_report_clean(report, self.smart));
         json!({
             "stage": "render_session_close",
+            "render_path": if self.smart { "smart" } else { "classic" },
             "plugin_sha256": self.plugin_sha256,
             "pixel_format": self.geometry.pixel_format.report_name(),
             "width": self.geometry.width,
@@ -1347,20 +1472,32 @@ impl RenderSession {
 }
 
 /// A clean session close requires the final report to agree, not just the
-/// exit code: the persistent sequence must have set up and torn down without
+/// exit code: the hoisted sequence must have set up and torn down without
 /// error, guards must be intact, and every ownership ledger must balance.
-/// Missing keys fail closed.
-fn final_report_clean(report: &Value) -> bool {
-    report.get("status") == Some(&json!("render_completed"))
-        && report.get("render_error") == Some(&json!(0))
+/// Missing keys fail closed. The classic and smart workers report session
+/// mechanics under different keys (the classic report reuses its
+/// persistent-sequence fields; the smart report carries dedicated session_*
+/// fields, protocol v1.1).
+fn final_report_clean(report: &Value, smart: bool) -> bool {
+    let shared = report.get("status") == Some(&json!("render_completed"))
         && report.get("global_setdown_error") == Some(&json!(0))
-        && report.get("persistent_sequence_setup_error") == Some(&json!(0))
-        && report.get("persistent_sequence_setdown_error") == Some(&json!(0))
         && report.get("guard_bytes_intact") == Some(&Value::Bool(true))
         && report.get("suite_leases_balanced") == Some(&Value::Bool(true))
         && report.get("handle_lifetimes_balanced") == Some(&Value::Bool(true))
         && report.get("world_lifetimes_balanced") == Some(&Value::Bool(true))
-        && report.get("param_checkouts_balanced") == Some(&Value::Bool(true))
+        && report.get("param_checkouts_balanced") == Some(&Value::Bool(true));
+    if smart {
+        shared
+            && report.get("session_mode") == Some(&Value::Bool(true))
+            && report.get("session_render_error") == Some(&json!(0))
+            && report.get("session_sequence_setup_error") == Some(&json!(0))
+            && report.get("session_sequence_setdown_error") == Some(&json!(0))
+    } else {
+        shared
+            && report.get("render_error") == Some(&json!(0))
+            && report.get("persistent_sequence_setup_error") == Some(&json!(0))
+            && report.get("persistent_sequence_setdown_error") == Some(&json!(0))
+    }
 }
 
 #[derive(Deserialize)]
@@ -1404,6 +1541,14 @@ struct VideoBatchRequest {
     /// W1-4c. Published once at launch and read on every frame.
     #[serde(default)]
     alpha_as_coverage_params: Vec<u32>,
+    /// Runs the batch through a SmartFX session (protocol v1.1).
+    #[serde(default)]
+    smart: bool,
+    /// GPU backend for smart ARGB32f batches. The batch CLI carries no
+    /// runtime module policy, so `auto` degrades to the CPU command at open
+    /// and the explicit GPU backends fail closed there.
+    #[serde(default)]
+    gpu_backend: RenderGpuBackend,
 }
 
 fn default_time_scale() -> u32 {
@@ -1486,6 +1631,9 @@ pub fn run_video_batch(
         total_time,
         time_scale: request.time_scale,
         frame_deadline,
+        smart: request.smart,
+        gpu_backend: request.gpu_backend,
+        gpu_runtime_policy: None,
     })?;
 
     let raw_extension = request.pixel_format.raw_extension();
@@ -1571,7 +1719,7 @@ pub fn run_video_batch(
         "schema_version": 1,
         "stage": "render_video_batch",
         "plugin_sha256": plugin_sha256,
-        "render_path": "classic",
+        "render_path": if request.smart { "smart" } else { "classic" },
         "pixel_format": request.pixel_format.report_name(),
         "width": width,
         "height": height,
@@ -1647,7 +1795,7 @@ mod tests {
             "world_lifetimes_balanced": true,
             "param_checkouts_balanced": true,
         });
-        assert!(final_report_clean(&clean));
+        assert!(final_report_clean(&clean, false));
         for (key, dirty) in [
             // A protocol-violation or invariant-failure session loop ends
             // render_failed with render_error -1 even when the ledgers
@@ -1668,13 +1816,59 @@ mod tests {
         ] {
             let mut report = clean.clone();
             report[key] = dirty;
-            assert!(!final_report_clean(&report), "{key} must fail closed");
+            assert!(!final_report_clean(&report, false), "{key} must fail closed");
             let mut missing = clean.clone();
             missing.as_object_mut().unwrap().remove(key);
-            assert!(!final_report_clean(&missing), "missing {key} must fail closed");
+            assert!(
+                !final_report_clean(&missing, false),
+                "missing {key} must fail closed"
+            );
         }
         // A parseable but unrelated report (an older worker) is not clean.
-        assert!(!final_report_clean(&serde_json::json!({"status": "ok"})));
+        assert!(!final_report_clean(&serde_json::json!({"status": "ok"}), false));
+    }
+
+    #[test]
+    fn smart_final_report_clean_requires_the_session_fields() {
+        let clean = serde_json::json!({
+            "status": "render_completed",
+            "global_setdown_error": 0,
+            "guard_bytes_intact": true,
+            "suite_leases_balanced": true,
+            "handle_lifetimes_balanced": true,
+            "world_lifetimes_balanced": true,
+            "param_checkouts_balanced": true,
+            "session_mode": true,
+            "session_render_error": 0,
+            "session_sequence_setup_error": 0,
+            "session_sequence_setdown_error": 0,
+        });
+        assert!(final_report_clean(&clean, true));
+        // The classic gate must not accept a smart report and vice versa:
+        // each worker's session mechanics live under different keys, and a
+        // missing key fails closed.
+        assert!(!final_report_clean(&clean, false));
+        for (key, dirty) in [
+            ("session_mode", serde_json::json!(false)),
+            // A clean close after frame-local errors keeps
+            // session_render_error 0; -1 means the session mechanics broke.
+            ("session_render_error", serde_json::json!(-1)),
+            ("session_sequence_setup_error", serde_json::json!(25)),
+            ("session_sequence_setdown_error", serde_json::json!(-1)),
+            // The last rendered frame's selector errors do not gate a clean
+            // close, but the shared host-state keys still do.
+            ("guard_bytes_intact", serde_json::json!(false)),
+        ] {
+            let mut report = clean.clone();
+            report[key] = dirty;
+            assert!(!final_report_clean(&report, true), "{key} must fail closed");
+            let mut missing = clean.clone();
+            missing.as_object_mut().unwrap().remove(key);
+            assert!(
+                !final_report_clean(&missing, true),
+                "missing {key} must fail closed"
+            );
+        }
     }
 
     #[test]
@@ -1710,6 +1904,9 @@ mod tests {
                 total_time,
                 time_scale,
                 frame_deadline: Duration::from_secs(1),
+                smart: false,
+                gpu_backend: RenderGpuBackend::Cpu,
+                gpu_runtime_policy: None,
             });
             let Err(error) = result else {
                 panic!("invalid timing must be rejected before launch");
@@ -1737,14 +1934,58 @@ mod tests {
         assert_eq!(depth_code(RenderPixelFormat::Argb8), 8);
         assert_eq!(depth_code(RenderPixelFormat::Argb16), 16);
         assert_eq!(depth_code(RenderPixelFormat::Argb32f), 32);
-        assert_eq!(session_command(RenderPixelFormat::Argb8), "--render-session-v1");
+        for (pixel_format, expected) in [
+            (RenderPixelFormat::Argb8, "--render-session-v1"),
+            (RenderPixelFormat::Argb16, "--render-session16-v1"),
+            (RenderPixelFormat::Argb32f, "--render-session32-v1"),
+        ] {
+            assert_eq!(
+                session_command(pixel_format, false, RenderGpuBackend::Cpu).unwrap(),
+                expected
+            );
+            assert_eq!(
+                session_command(pixel_format, false, RenderGpuBackend::Auto).unwrap(),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn smart_session_commands_carry_the_gpu_backend() {
+        for (backend, expected) in [
+            (RenderGpuBackend::Auto, "--smart-session32-v1"),
+            (RenderGpuBackend::Cuda, "--smart-session32-v1"),
+            (RenderGpuBackend::OpenCl, "--smart-session32-opencl-v1"),
+            (RenderGpuBackend::DirectX, "--smart-session32-directx-v1"),
+            (RenderGpuBackend::Cpu, "--smart-session32-cpu-v1"),
+        ] {
+            assert_eq!(
+                session_command(RenderPixelFormat::Argb32f, true, backend).unwrap(),
+                expected
+            );
+        }
         assert_eq!(
-            session_command(RenderPixelFormat::Argb16),
-            "--render-session16-v1"
+            session_command(RenderPixelFormat::Argb8, true, RenderGpuBackend::Auto).unwrap(),
+            "--smart-session-v1"
         );
         assert_eq!(
-            session_command(RenderPixelFormat::Argb32f),
-            "--render-session32-v1"
+            session_command(RenderPixelFormat::Argb16, true, RenderGpuBackend::Cpu).unwrap(),
+            "--smart-session16-v1"
         );
+        // Explicit GPU backends exist only for SmartFX ARGB32f; every other
+        // combination fails closed instead of silently degrading.
+        for (pixel_format, smart) in [
+            (RenderPixelFormat::Argb8, true),
+            (RenderPixelFormat::Argb16, true),
+            (RenderPixelFormat::Argb32f, false),
+        ] {
+            for backend in [
+                RenderGpuBackend::Cuda,
+                RenderGpuBackend::OpenCl,
+                RenderGpuBackend::DirectX,
+            ] {
+                assert!(session_command(pixel_format, smart, backend).is_err());
+            }
+        }
     }
 }
