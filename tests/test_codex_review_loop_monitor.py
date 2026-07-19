@@ -318,17 +318,32 @@ def test_owner_inline_after_approval_still_blocks() -> None:
 
 def test_unresolved_graphql_owner_thread_blocks() -> None:
     payload = [{"isResolved": False, "comments": [_inline("onmokoworks")]}]
-    assert "OWNER-INLINE id=9" in _call("owner_threads_unresolved", payload)
+    assert "OWNER-INLINE id=9" in _call("owner_threads_unresolved", payload, NO_CLEAR)
 
 
 def test_resolved_graphql_owner_thread_does_not_block() -> None:
     payload = [{"isResolved": True, "comments": [_inline("onmokoworks")]}]
-    assert _call("owner_threads_unresolved", payload) == ""
+    assert _call("owner_threads_unresolved", payload, NO_CLEAR) == ""
 
 
 def test_unresolved_codex_only_thread_is_not_an_owner_blocker() -> None:
     payload = [{"isResolved": False, "comments": [_inline("chatgpt-codex-connector")]}]
-    assert _call("owner_threads_unresolved", payload) == ""
+    assert _call("owner_threads_unresolved", payload, NO_CLEAR) == ""
+
+
+def test_unresolved_thread_cleared_by_authors_later_approval() -> None:
+    # The author's later approval clears their inline feedback even while the
+    # GitHub thread stays unresolved (the approver may skip the resolve click).
+    clr = json.dumps({"onmokoworks": "2026-07-18T19:30:00Z"})
+    payload = [{"isResolved": False, "comments": [_inline("onmokoworks")]}]
+    assert _call("owner_threads_unresolved", payload, clr) == ""
+
+
+def test_unresolved_thread_after_approval_still_blocks() -> None:
+    clr = json.dumps({"onmokoworks": "2026-07-18T19:30:00Z"})
+    payload = [{"isResolved": False,
+                "comments": [_inline("onmokoworks", created_at="2026-07-18T19:40:00Z")]}]
+    assert "OWNER-INLINE" in _call("owner_threads_unresolved", payload, clr)
 
 
 ACK = "2026-07-18T19:26:49Z"  # the session's newest non-trigger ack comment
@@ -454,7 +469,7 @@ def test_truncated_unresolved_thread_fails_closed() -> None:
                 "comments": [{"id": 1, "user": {"login": "chatgpt-codex-connector[bot]"},
                               "path": "x.sh", "line": 3, "created_at": "2026-07-18T19:20:00Z",
                               "body": "some finding"}]}]
-    assert "fail closed" in _call("owner_threads_unresolved", payload)
+    assert "fail closed" in _call("owner_threads_unresolved", payload, NO_CLEAR)
 
 
 def test_truncated_resolved_thread_does_not_block() -> None:
@@ -464,7 +479,18 @@ def test_truncated_resolved_thread_does_not_block() -> None:
                 "comments": [{"id": 1, "user": {"login": "onmokoworks"},
                               "path": "x.sh", "line": 3, "created_at": "2026-07-18T19:20:00Z",
                               "body": "addressed"}]}]
-    assert _call("owner_threads_unresolved", payload) == ""
+    assert _call("owner_threads_unresolved", payload, NO_CLEAR) == ""
+
+
+def test_truncated_unresolved_thread_ignores_clearances() -> None:
+    # The hidden feedback's author is unknown, so no clearance can vouch for a
+    # truncated unresolved thread.
+    clr = json.dumps({"onmokoworks": "2026-07-18T23:00:00Z", "naari3": "2026-07-18T23:00:00Z"})
+    payload = [{"isResolved": False, "truncated": True,
+                "comments": [{"id": 1, "user": {"login": "chatgpt-codex-connector[bot]"},
+                              "path": "x.sh", "line": 3, "created_at": "2026-07-18T19:20:00Z",
+                              "body": "some finding"}]}]
+    assert "fail closed" in _call("owner_threads_unresolved", payload, clr)
 
 
 def test_session_ack_comment_does_not_block() -> None:

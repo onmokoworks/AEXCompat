@@ -217,19 +217,28 @@ owner_inline_unresolved() {
 # Authoritative owner inline gate (input: normalized GraphQL reviewThreads).
 # GitHub exposes thread resolution only through GraphQL; REST reply history is
 # insufficient because a reply does not necessarily resolve a review thread.
-# A thread blocks exactly while isResolved=false and it contains owner feedback.
+# Args: $1 = clearances JSON. A thread blocks while isResolved=false and it
+# contains owner feedback whose last author has no later approval/dismissal
+# (the clearance path of the resolution model), or while its comment page is
+# truncated (fail closed, no clearance exemption — hidden author unknown).
 owner_threads_unresolved() {
-  jq -r --argjson owner "$OWNER_LOGINS" '
+  jq -r --argjson clr "$1" --argjson owner "$OWNER_LOGINS" '
     .[] | select(.isResolved | not)
     | [ .comments[] | select([.user.login] | inside($owner)) ] as $owner_msgs
     # An unresolved thread whose comment page overflowed (nested
     # comments(first:100) has another page) may hold owner feedback beyond the
-    # fetched window, so it fails closed regardless of what was fetched.
+    # fetched window, so it fails closed regardless of what was fetched — and
+    # regardless of clearances, since the hidden feedback'\''s author is unknown.
     | select( (.truncated // false) or (($owner_msgs | length) > 0) )
-    | ( if ($owner_msgs | length) > 0 then ($owner_msgs | last) else (.comments | last) end ) as $c
     | if ($owner_msgs | length) > 0
-      then "OWNER-INLINE id=\($c.id) \($c.path):\($c.line // $c.original_line): \(($c.body | split("\n")[0]))"
-      else "OWNER-INLINE id=\($c.id) \($c.path):\($c.line // $c.original_line): (thread comments truncated at 100; fail closed)"
+      then ( ($owner_msgs | last) as $c
+        # Per the resolution model, the author'\''s own later approval/dismissal
+        # clears their inline feedback even while the GitHub thread stays
+        # unresolved (isResolved needs a manual click the approver may skip).
+        | select( ($clr[$c.user.login] // "") == "" or $c.created_at > $clr[$c.user.login] )
+        | "OWNER-INLINE id=\($c.id) \($c.path):\($c.line // $c.original_line): \(($c.body | split("\n")[0]))" )
+      else ( (.comments | last) as $c
+        | "OWNER-INLINE id=\($c.id) \($c.path):\($c.line // $c.original_line): (thread comments truncated at 100; fail closed)" )
       end'
 }
 
