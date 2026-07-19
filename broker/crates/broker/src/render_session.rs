@@ -382,6 +382,10 @@ struct CollectedExit {
 /// the receive timeout itself.
 enum SessionEvent {
     Message(Vec<u8>),
+    /// The reader rejected the response framing (zero/oversized length or a
+    /// truncated body). Explicit because the watcher keeps the channel open,
+    /// so a disconnect can no longer signal this.
+    ReaderViolation,
     ProcessExited,
 }
 
@@ -394,6 +398,7 @@ enum FrameWait {
     Message(Vec<u8>),
     Deadline,
     WorkerGone,
+    FramingViolation,
 }
 
 pub struct RenderSession {
@@ -526,19 +531,23 @@ impl RenderSession {
             loop {
                 let mut prefix = [0u8; 4];
                 if !read_exact_handle(handle, &mut prefix) {
+                    // EOF before a frame starts is the normal end of the
+                    // stream (worker exit); the process watcher reports it.
                     return;
                 }
                 let length = u32::from_le_bytes(prefix) as usize;
                 if length == 0 || length > MAX_MESSAGE_BYTES {
-                    // Framing violation: stop forwarding; the disconnect is
-                    // observed as a dead response channel and the session is
-                    // invalidated fail-closed.
+                    let _ = reader_sender.send(SessionEvent::ReaderViolation);
                     return;
                 }
                 let mut body = vec![0u8; length];
-                if !read_exact_handle(handle, &mut body)
-                    || reader_sender.send(SessionEvent::Message(body)).is_err()
-                {
+                if !read_exact_handle(handle, &mut body) {
+                    // A truncated body after a valid prefix is a framing
+                    // violation, not a clean end of stream.
+                    let _ = reader_sender.send(SessionEvent::ReaderViolation);
+                    return;
+                }
+                if reader_sender.send(SessionEvent::Message(body)).is_err() {
                     return;
                 }
             }
@@ -638,6 +647,14 @@ impl RenderSession {
         loop {
             match self.receiver.try_recv() {
                 Ok(SessionEvent::ProcessExited) => self.process_exit_observed = true,
+                Ok(SessionEvent::ReaderViolation) => {
+                    return Err(self.invalidate(
+                        "response_framing_violation",
+                        format!("the worker broke the response framing before {frame_index}"),
+                        true,
+                        POST_TERMINATION_COLLECT_TIMEOUT,
+                    ));
+                }
                 Ok(SessionEvent::Message(_)) => {
                     return Err(self.invalidate(
                         "unsolicited_response",
@@ -666,6 +683,16 @@ impl RenderSession {
         let expected_generation = frame_index
             .checked_add(1)
             .ok_or_else(|| invalid("frame index overflows the generation counter"))?;
+        // frame_index is a serial: reusing or rewinding it would recompute a
+        // generation the output slot may already hold, letting a stale
+        // frame_done pass the generation checks with old pixels. Reject the
+        // dispatch (caller error; the session itself stays usable).
+        if expected_generation <= self.last_output_generation {
+            return Err(invalid(format!(
+                "frame index {frame_index} does not advance the last completed generation {}",
+                self.last_output_generation
+            )));
+        }
         self.transport.write_input_slot(rgba);
         self.transport
             .write_header_u32(INPUT_GENERATION_OFFSET, expected_generation);
@@ -696,15 +723,23 @@ impl RenderSession {
                 ));
             }
             FrameWait::WorkerGone => {
-                // Reached on process death (watcher), on reader disconnect
-                // (worker exit closing the pipe), or on a framing violation
-                // the reader rejected from a still-running worker. Terminate
-                // the job in every case so descendants and a live-but-broken
-                // worker are reaped promptly; an already-exited worker keeps
-                // its own exit code.
+                // Reached on process death (watcher) or on reader disconnect
+                // (worker exit closing the pipe). Terminate the job so
+                // descendants are reaped promptly; an already-exited worker
+                // keeps its own exit code.
                 return Err(self.invalidate(
                     "worker_exited",
                     format!("the worker was gone before frame {frame_index} completed"),
+                    true,
+                    POST_TERMINATION_COLLECT_TIMEOUT,
+                ));
+            }
+            FrameWait::FramingViolation => {
+                return Err(self.invalidate(
+                    "response_framing_violation",
+                    format!(
+                        "the worker broke the response framing during frame {frame_index}"
+                    ),
                     true,
                     POST_TERMINATION_COLLECT_TIMEOUT,
                 ));
@@ -865,6 +900,7 @@ impl RenderSession {
             }
             match self.receiver.recv_timeout(remaining) {
                 Ok(SessionEvent::Message(body)) => return FrameWait::Message(body),
+                Ok(SessionEvent::ReaderViolation) => return FrameWait::FramingViolation,
                 Ok(SessionEvent::ProcessExited) => self.process_exit_observed = true,
                 Err(mpsc::RecvTimeoutError::Timeout) => {
                     return if self.process_exit_observed {
@@ -954,6 +990,13 @@ impl RenderSession {
             loop {
                 match self.receiver.try_recv() {
                     Ok(SessionEvent::ProcessExited) => self.process_exit_observed = true,
+                    Ok(SessionEvent::ReaderViolation) => {
+                        self.invalidation = Some(SessionInvalidation {
+                            reason: "response_framing_violation",
+                            detail: "the worker broke the response framing before close".into(),
+                        });
+                        break;
+                    }
                     Ok(SessionEvent::Message(_)) => {
                         self.invalidation = Some(SessionInvalidation {
                             reason: "unsolicited_response",

@@ -232,6 +232,16 @@ mod worker {
                     std::thread::sleep(std::time::Duration::from_secs(3600));
                 },
                 "crash_frame" => std::process::exit(0xC000_0005_u32 as i32),
+                "bad_framing_frame_0" => {
+                    // A zero-length prefix from a worker that then stays
+                    // alive: only an explicit reader-violation event can
+                    // surface this before the frame deadline.
+                    let zero = [0u8; 4];
+                    let _ = write_all(response, &zero);
+                    loop {
+                        std::thread::sleep(std::time::Duration::from_secs(3600));
+                    }
+                }
                 "exit_leaving_descendant" => {
                     // Rust spawns with bInheritHandles=TRUE, so the sleeping
                     // child keeps the inherited (still inheritable) session

@@ -223,6 +223,57 @@ mod windows_e2e {
     }
 
     #[test]
+    fn a_framing_violation_from_a_live_worker_invalidates_promptly() {
+        let _behavior = BehaviorGuard::set(Some("bad_framing_frame_0"));
+        let (repository, plugin, sha) = temp_repository();
+        let mut session = open_session(&repository.0, &plugin, &sha, Duration::from_secs(30));
+        let started = std::time::Instant::now();
+        let error = session
+            .render_frame(0, 0, &input_pattern(13))
+            .expect_err("broken framing must invalidate the session");
+        assert!(
+            error.to_string().contains("response_framing_violation"),
+            "{error}"
+        );
+        // The worker stays alive after the bad prefix, so only the explicit
+        // reader event (not the deadline, not process death) can be this fast.
+        assert!(
+            started.elapsed() < Duration::from_secs(15),
+            "invalidation took {:?}",
+            started.elapsed()
+        );
+        assert_eq!(session.close()["invalidated"], true);
+    }
+
+    #[test]
+    fn reused_frame_indices_are_rejected_without_killing_the_session() {
+        let _behavior = BehaviorGuard::set(None);
+        let (repository, plugin, sha) = temp_repository();
+        let mut session = open_session(&repository.0, &plugin, &sha, Duration::from_secs(30));
+        let outcome = session
+            .render_frame(0, 0, &input_pattern(14))
+            .expect("frame 0 renders");
+        assert!(matches!(outcome.status, FrameStatus::Rendered { .. }));
+        // Replaying frame 0 would recompute generation 1, which the output
+        // slot already holds: a stale frame_done could then pass as fresh.
+        let error = session
+            .render_frame(0, 0, &input_pattern(15))
+            .expect_err("a reused frame index must be rejected");
+        assert!(
+            error.to_string().contains("does not advance"),
+            "{error}"
+        );
+        // The rejection is caller-local: the session keeps rendering.
+        let outcome = session
+            .render_frame(1, 1, &input_pattern(16))
+            .expect("frame 1 renders after the rejected dispatch");
+        assert!(matches!(outcome.status, FrameStatus::Rendered { .. }));
+        let close = session.close();
+        assert_eq!(close["invalidated"], false);
+        assert_eq!(close["session_clean"], true, "close: {close}");
+    }
+
+    #[test]
     fn error_response_with_a_mutated_header_is_fail_closed() {
         let _behavior = BehaviorGuard::set(Some("error_mutates_header"));
         let (repository, plugin, sha) = temp_repository();
