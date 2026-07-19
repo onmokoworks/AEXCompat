@@ -136,6 +136,6 @@ def test_sidecar_is_confined_to_broker_owned_transport_and_trailers_are_peeled()
     finally:
         outside.unlink(missing_ok=True)
     source = worker_source()
-    assert 'flag == L"--aux-manifest-v1"' in source
-    assert 'flag == L"--parameter-animation-v1"' in source
+    assert 'equals(flag, L"--aux-manifest-v1")' in source
+    assert 'equals(flag, L"--parameter-animation-v1")' in source
     assert source.count("while (effective_argc >= 3)") == 1
