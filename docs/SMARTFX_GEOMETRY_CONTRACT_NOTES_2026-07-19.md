@@ -285,3 +285,28 @@ geometry フィールド群 (`empty_result_rect` / `returns_extra_pixels` /
 `result_within_request` / `extra_pixels_contract_violation` /
 `smart_render_selector_dispatched` / `input_checkout_result_rect`) を broker
 report に転記する。非ゼロ寸法や非 0 byte 出力を伴う empty 主張は fail-closed。
+
+## 2026-07-19 PR3 implementation record (geometry probe + 実 AEX 診断)
+
+観察/実装 (branch `issue8-smartfx-geometry-probe-v2`, PR #86 merge 後の main 起点):
+
+- 新規 SDK ビルド probe `instruments/pf-smart-geometry-probe`。mode は host が
+  汎用に渡す render time (`current_time % 4`) で選択し、host 側に probe 固有
+  分岐は無い:
+  - mode 0: probe 自身の Smart Pre-Render 内で checkout 交差契約を検証
+    (full/sub-rect/oversized/disjoint の各 request への応答を assert;
+    pre_render_error==0 が全チェック通過を意味する)
+  - mode 1: `RETURNS_EXTRA_PIXELS` + result > request (violation なし)
+  - mode 2: flag なしの同じ超過 → `extra_pixels_contract_violation`
+  - mode 3: 空 result → selector スキップ
+- `tests/test_pf_smart_geometry_probe.py` (built-artifact gate): 4 mode の
+  期待値表 + ARGB8/16/32F で geometry フィールドが同一であることを検証
+  (issue #8 の「深度間同一契約」完了条件の behavioral 検証)。
+- `tools/refresh-smartfx-geometry-evidence.ps1` が probe 12 run + 独立実 AEX
+  3 run を実行し `analysis/SMARTFX_GEOMETRY_CONTRACT_RESULT_2026-07-19.json`
+  を生成。検証テストは local-artifact gate
+  (`tests/test_smartfx_geometry_contract_result.py`)。
+- 観察 (ntsc-rs-ae 0.9.4, 64x48 full-frame, 3 深度): checkout request は
+  full-frame をそのまま転送し交差応答も full-frame、result ==
+  max_result == full、**`RETURNS_EXTRA_PIXELS` を宣言している**、violation
+  なし、3 深度で geometry 完全一致。専用分岐なしで契約経路を通過した。
