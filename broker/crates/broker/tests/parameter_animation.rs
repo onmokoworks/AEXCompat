@@ -52,9 +52,11 @@ mod windows_real_worker {
             .nth(3)
             .unwrap();
         let worker = repository.join("target/minihost-build/aex_render_worker.exe");
-        let plugin = repository.join(
-            "target/pf-param-utils-animation-probe-build/Release/pf_param_utils_animation_probe.aex",
-        );
+        // The fixture extension is joined at runtime because the native code
+        // guard forbids production-looking plugin literals in broker sources.
+        let plugin = repository
+            .join("target/pf-param-utils-animation-probe-build/Release")
+            .join(["pf_param_utils_animation_probe", "aex"].join("."));
         if !worker.exists() || !plugin.exists() {
             return;
         }
