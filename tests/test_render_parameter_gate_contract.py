@@ -4,11 +4,9 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-
-
-def worker_source():
-    return ((ROOT / "minihost" / "src" / "l2_main.cpp").read_text(encoding="utf-8") + "\n" +
-            (ROOT / "minihost" / "src" / "l2_cli_dispatch.cpp").read_text(encoding="utf-8"))
+WORKER = ROOT / "minihost" / "src" / "l2_main.cpp"
+CLI_DISPATCH = ROOT / "minihost" / "src" / "l2_cli_dispatch.cpp"
+RUNTIME_ADMISSION = ROOT / "minihost" / "src" / "worker_runtime_admission.cpp"
 
 
 class RenderParameterGateContractTests(unittest.TestCase):
@@ -73,8 +71,11 @@ class RenderParameterGateContractTests(unittest.TestCase):
         self.assertIn('"native_process_started": {"const": true}', text)
 
     def test_worker_revalidates_and_echoes_bound_values(self):
-        source = worker_source()
-        for marker in ('L"--render-request"', "parse_parameter_payload", "valid_parameter_id",
+        worker = WORKER.read_text(encoding="utf-8")
+        cli_dispatch = CLI_DISPATCH.read_text(encoding="utf-8")
+        for marker in ('L"--render-request"', 'L"--smart-mask-context-request"'):
+            self.assertIn(marker, cli_dispatch)
+        for marker in ("parse_parameter_payload", "valid_parameter_id",
                        'encoded.compare(0, 3, L"v2|")', "encoded.size() > 16384",
                        'encoded.compare(0, 3, L"v3|")', 'kind_text == L"argb8"',
                        'kind_text == L"arbhex"',
@@ -84,10 +85,17 @@ class RenderParameterGateContractTests(unittest.TestCase):
                        "requested_parameters_json", "requested_parameters",
                        "requested_amount", "requested_direction", "requested_seed",
                        "requested_mix", "requested_invert_map", "std::setprecision(17)",
-                       'L"--smart-mask-context-request"', "parse_mask_context_payload",
-                       "encoded.size() > 8192", "total_vertices > 128"):
-            self.assertIn(marker, source)
-        self.assertLess(source.index("if (request_mode &&"), source.index("if (!sha256(argv[2]"))
+                       "parse_mask_context_payload", "encoded.size() > 8192",
+                       "total_vertices > 128"):
+            self.assertIn(marker, worker)
+        # Payload rejection remains in the L2 render path, while the sealed
+        # plugin hash moved into the common runtime-admission component.
+        self.assertLess(worker.index("if (request_mode &&"),
+                        worker.index("admit_runtime(runtime_hooks, runtime_request, runtime_context)"))
+        admission = RUNTIME_ADMISSION.read_text(encoding="utf-8")
+        self.assertIn("hooks.hash_file(request.plugin_argument", admission)
+        self.assertLess(admission.index("hooks.hash_file(request.plugin_argument"),
+                        admission.index("LoadLibraryExW(plugin_path.c_str()"))
 
     def test_parameterized_smartfx_contract_requires_both_selectors_and_rects(self):
         schema = json.loads((ROOT / "contracts/aex/parameterized_smartfx_render_report.schema.json").read_text(encoding="utf-8"))

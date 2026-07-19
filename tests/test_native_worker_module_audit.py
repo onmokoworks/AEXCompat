@@ -35,7 +35,11 @@ def test_module_enumeration_is_bounded_and_incomplete_results_fail_closed():
     assert re.search(r"module_length == 0.*?canonical_path\(module_buffer\.data\(\), module_path\)",
                      SOURCE, re.DOTALL)
     assert 'snapshot.status = snapshot.unknown_count == 0 ? "passed" : "failed"' in SOURCE
-    assert MAIN.count("module_audit_failed") >= 2
+    # The post-load rejection moved with the admission runtime.  L2 still
+    # owns the later pre-unload rejection for the ordinary render path.
+    assert '\\"status\\":\\"module_audit_failed\\"' in ADMISSION
+    assert "FreeLibrary(module);" in ADMISSION
+    assert MAIN.count("module_audit_failed") >= 1
 
 
 def test_only_worker_plugin_root_and_system32_are_allowed():
