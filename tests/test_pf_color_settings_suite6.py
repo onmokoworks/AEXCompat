@@ -11,6 +11,7 @@ ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "minihost" / "src" / "l2_main.cpp"
 COLOR_HEADER = ROOT / "minihost" / "src" / "worker_color_settings_runtime.hpp"
 COLOR_SOURCE = ROOT / "minihost" / "src" / "worker_color_settings_runtime.cpp"
+COLOR_SELFTEST_SOURCE = ROOT / "minihost" / "src" / "worker_color_settings_selftests.cpp"
 MEMBERS = [
     "get_blending_tables", "does_view_have_xform", "xform_working_to_view",
     "get_new_working_space_profile", "get_new_profile_from_icc",
@@ -25,7 +26,17 @@ MEMBERS = [
 
 def source_text():
     return "\n".join(path.read_text(encoding="utf-8") for path in
-                     (SOURCE, COLOR_HEADER, COLOR_SOURCE))
+                     (SOURCE, COLOR_HEADER, COLOR_SOURCE, COLOR_SELFTEST_SOURCE))
+
+
+def test_color_settings_selftest_is_a_true_translation_unit():
+    worker_source = SOURCE.read_text(encoding="utf-8")
+    selftest_source = COLOR_SELFTEST_SOURCE.read_text(encoding="utf-8")
+    marker = "bool verify_pf_color_settings_suite6()"
+    assert marker in selftest_source
+    assert marker not in worker_source
+    assert "struct Hooks" in (ROOT / "minihost" / "src" /
+                              "worker_color_settings_selftests.hpp").read_text(encoding="utf-8")
 
 
 def worker(name):
