@@ -89,6 +89,7 @@
 #include "worker_aegp_compat_selftests.hpp"
 #include "worker_aegp_scene_runtime.hpp"
 #include "worker_classic_runtime.hpp"
+#include "worker_classic_execution.hpp"
 #include "worker_color_settings_runtime.hpp"
 #include "worker_handle_runtime.hpp"
 #include "worker_host_suite_router.hpp"
@@ -4988,38 +4989,31 @@ int32_t classic_render_runtime(EffectEntry entry, std::array<std::byte, kInSize>
         : end_frame_lifecycle(entry, input, command_output, params.data(),
                               output_world.data(), lifecycle, error);
   }
-  std::vector<unsigned char> logical_output;
-  if (!aexcompat::render::copy_packed_world(destination, rowbytes, width, height,
-                                             pixel_bytes, logical_output)) return -3;
-  output_hash = sha256_bytes(logical_output.data(), logical_output.size());
-  if (error == 0 && !aexcompat::aegp_staged_item_runtime::publish_world(aegp_comp_item_handle(),
-          {external_current_time, external_time_scale},
-          {external_time_step, external_time_scale},
-          static_cast<int8_t>(read<int32_t>(input, kInQuality) == 0 ? 0 : 1), 0,
-          dispatch_pixel_format, width, height, width * pixel_bytes,
-          logical_output.data())) {
-    error = 4;
-  }
-  if (captured_argb) *captured_argb = logical_output;
-  dump_world_snapshot("classic-output", logical_output.data(), width, height, pixel_bytes);
-  if (external_output && error == 0) {
-    std::vector<unsigned char> rgba(static_cast<std::size_t>(width) * height * pixel_bytes);
-    for (std::size_t pixel = 0; pixel < static_cast<std::size_t>(width) * height; ++pixel)
-      argb_to_rgba_native(rgba.data() + pixel * pixel_bytes,
-                    logical_output.data() + pixel * pixel_bytes, pixel_bytes);
-    record_output_checksum_detail(rgba.data(), width, height, pixel_bytes);
-    std::ofstream file(*external_output, std::ios::binary | std::ios::out);
-    if (!file || !file.write(reinterpret_cast<const char*>(rgba.data()), rgba.size())) return -4;
-  }
-  const bool padding_intact = rowbytes == width * 4 || [&] {
-    for (int32_t y = 0; y < height; ++y)
-      for (int32_t x = width * pixel_bytes; x < rowbytes; ++x)
-        if (destination[y * rowbytes + x] != 0xCC) return false;
-    return true;
-  }();
-  guards_intact = padding_intact && guarded.sentinels_intact();
-  smart_state().pixel_format = pixel_bytes == 16 ? "argb32f" :
-      (pixel_bytes == 8 ? "argb16" : "argb8");
+  aexcompat::worker_runtime::classic_execution::Context final_context{
+      destination, rowbytes, width, height, pixel_bytes, error,
+      external_current_time, external_time_step, external_time_scale,
+      read<int32_t>(input, kInQuality), dispatch_pixel_format, &output_hash,
+      &guards_intact, captured_argb, external_output, guarded.sentinels_intact()};
+  error = aexcompat::worker_runtime::classic_execution::finalize(final_context, {
+      +[](const unsigned char* data, int32_t rowbytes, int32_t width, int32_t height,
+          int32_t bytes, std::vector<unsigned char>& output) {
+        return aexcompat::render::copy_packed_world(data, rowbytes, width, height, bytes, output);
+      }, &sha256_bytes,
+      +[](AegpTime time, AegpTime step, int8_t quality, int32_t format,
+          int32_t width, int32_t height, const void* pixels) {
+        return aexcompat::aegp_staged_item_runtime::publish_world(aegp_comp_item_handle(),
+            time, step, quality, 0, format, width, height,
+            width * (format == kPixelFormatArgb32 ? 4 :
+                (format == kPixelFormatArgb64 ? 8 : 16)), pixels);
+      },
+      +[](const void* pixels, int32_t width, int32_t height, int32_t bytes) {
+        dump_world_snapshot("classic-output",
+            static_cast<const unsigned char*>(pixels), width, height, bytes);
+      },
+      +[](unsigned char* destination, const unsigned char* source, int32_t bytes) {
+        argb_to_rgba_native(destination, source, bytes);
+      }, &record_output_checksum_detail,
+      +[](const char* format) { smart_state().pixel_format = format; }});
   if (!close_render_ui_context(entry, input, command_output, definitions)) return -5;
   return error;
 }
