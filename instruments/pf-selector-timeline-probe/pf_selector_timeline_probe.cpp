@@ -422,6 +422,19 @@ extern "C" DllExport PF_Err EffectMain(PF_Cmd cmd, PF_InData* in_data,
       out_data->sequence_data = nullptr;
       return PF_Err_NONE;
     }
+    case PF_Cmd_SEQUENCE_FLATTEN: {
+      // The counter block is plain data, so it is its own flat form; count
+      // the flatten and hand the same handle back.
+      update_counters(in_data, [](SequenceCounters* counters) {
+        counters->flatten_count += 1;
+      });
+      out_data->sequence_data = static_cast<PF_Handle>(in_data->sequence_data);
+      bool counters_valid = false;
+      const SequenceCounters counters = snapshot_counters(in_data, &counters_valid);
+      log_event(cmd, in_data, counters_valid ? &counters : nullptr, 0.0, false,
+                nullptr);
+      return PF_Err_NONE;
+    }
     case PF_Cmd_FRAME_SETUP:
     case PF_Cmd_FRAME_SETDOWN: {
       update_counters(in_data, [cmd](SequenceCounters* counters) {

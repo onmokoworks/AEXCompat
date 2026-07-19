@@ -72,17 +72,47 @@ function Wait-BoundedExit([System.Diagnostics.Process]$process, [int]$seconds, [
     $process.WaitForExit()
 }
 
+# PIDs owned by this capture: the launchers it started plus every AE-named
+# process whose parent chain reaches one of them. Only these may ever be
+# terminated in cleanup; an AE session a user starts mid-run stays untouched.
+$script:capturePids = @{}
+
+function Register-CaptureDescendants {
+    $processes = Get-CimInstance Win32_Process -Filter (
+        "Name='AfterFX.exe' OR Name='AfterFX.com' OR Name='aerender.exe' OR Name='aerendercore.exe'"
+    ) -ErrorAction SilentlyContinue
+    $grew = $true
+    while ($grew) {
+        $grew = $false
+        foreach ($process in $processes) {
+            if (-not $script:capturePids.ContainsKey([int]$process.ProcessId) -and
+                $script:capturePids.ContainsKey([int]$process.ParentProcessId)) {
+                $script:capturePids[[int]$process.ProcessId] = $true
+                $grew = $true
+            }
+        }
+    }
+}
+
 # AfterFX.com and aerender both hand work to a separate render-engine process
 # that outlives the launcher; the probe DLL stays loaded until it exits. Waits
-# for every AE-named process to disappear before the next phase or cleanup.
+# for every AE-named process to disappear before the next phase or cleanup,
+# recording this capture's descendants along the way.
 function Wait-AeProcessesGone([int]$seconds, [string]$label) {
     $deadline = (Get-Date).AddSeconds($seconds)
     while (Get-Process AfterFX,AfterFX.com,aerender,aerendercore -ErrorAction SilentlyContinue) {
+        Register-CaptureDescendants
         if ((Get-Date) -gt $deadline) {
             throw "$label engine processes did not exit within $seconds seconds."
         }
         Start-Sleep -Milliseconds 500
     }
+}
+
+# Start-Process joins -ArgumentList into one string, so any element that can
+# contain spaces must be pre-quoted to stay a single argv entry.
+function Quote-Argument([string]$value) {
+    '"{0}"' -f $value
 }
 
 try {
@@ -106,8 +136,10 @@ try {
     $env:AEXCOMPAT_SELT_RESULT = $prepareResult
     $env:AEXCOMPAT_SELECTOR_TIMELINE_LOG = $logPath
     $jsx = Join-Path $PSScriptRoot 'ae-selector-timeline-project.jsx'
-    $prepare = Start-Process -FilePath $scriptHost -ArgumentList @('-m', '-noui', '-r', $jsx) `
+    $prepare = Start-Process -FilePath $scriptHost `
+        -ArgumentList @('-m', '-noui', '-r', (Quote-Argument $jsx)) `
         -PassThru -WindowStyle Hidden
+    $script:capturePids[[int]$prepare.Id] = $true
     Wait-BoundedExit $prepare $TimeoutSeconds 'Project preparation'
     Wait-AeProcessesGone $TimeoutSeconds 'Project preparation'
     if (-not (Test-Path -LiteralPath $prepareResult)) {
@@ -122,9 +154,11 @@ try {
     # the probe as frames render.
     $renderStdout = Join-Path $runRoot 'aerender.stdout.log'
     $renderStderr = Join-Path $runRoot 'aerender.stderr.log'
-    $render = Start-Process -FilePath $aerender -ArgumentList @('-project', $projectPath) `
+    $render = Start-Process -FilePath $aerender `
+        -ArgumentList @('-project', (Quote-Argument $projectPath)) `
         -PassThru -WindowStyle Hidden -RedirectStandardOutput $renderStdout `
         -RedirectStandardError $renderStderr
+    $script:capturePids[[int]$render.Id] = $true
     Wait-BoundedExit $render $TimeoutSeconds 'aerender'
     Wait-AeProcessesGone $TimeoutSeconds 'aerender'
     if ($render.ExitCode -ne 0) {
@@ -160,22 +194,30 @@ try {
         'AEXCOMPAT_SELECTOR_TIMELINE_LOG')) {
         Remove-Item "Env:$name" -ErrorAction SilentlyContinue
     }
-    # The startup gate refused to run while any AE-named process existed, so
-    # an AE-named process alive here is from this capture (a render engine
-    # that outlived its launcher, or a timed-out phase). Give it a bounded
-    # grace to exit, then terminate it: leaving it alive would keep the
-    # probe DLL loaded and strand the temporary install below.
+    # Give this capture's engines a bounded grace to exit, then terminate
+    # them: leaving one alive would keep the probe DLL loaded and strand the
+    # temporary install below. Termination is restricted to the PIDs whose
+    # parent chain reaches a launcher this capture started (registered while
+    # waiting); an AE session someone started mid-run is reported, not killed.
     $graceDeadline = (Get-Date).AddSeconds(30)
     while ((Get-Process AfterFX,AfterFX.com,aerender,aerendercore -ErrorAction SilentlyContinue) -and
         ((Get-Date) -lt $graceDeadline)) {
+        Register-CaptureDescendants
         Start-Sleep -Milliseconds 500
     }
-    $lingering = Get-Process AfterFX,AfterFX.com,aerender,aerendercore -ErrorAction SilentlyContinue
-    if ($lingering) {
-        Write-Warning ('Terminating AE engine processes left over from this capture: ' +
-            (($lingering | ForEach-Object { "$($_.ProcessName):$($_.Id)" }) -join ', '))
-        $lingering | Stop-Process -Force -ErrorAction SilentlyContinue
-        $lingering | ForEach-Object { try { $_.WaitForExit(10000) | Out-Null } catch {} }
+    Register-CaptureDescendants
+    $lingering = @(Get-Process AfterFX,AfterFX.com,aerender,aerendercore -ErrorAction SilentlyContinue)
+    $owned = @($lingering | Where-Object { $script:capturePids.ContainsKey([int]$_.Id) })
+    $foreign = @($lingering | Where-Object { -not $script:capturePids.ContainsKey([int]$_.Id) })
+    if ($owned) {
+        Write-Warning ('Terminating AE engine processes launched by this capture: ' +
+            (($owned | ForEach-Object { "$($_.ProcessName):$($_.Id)" }) -join ', '))
+        $owned | Stop-Process -Force -ErrorAction SilentlyContinue
+        $owned | ForEach-Object { try { $_.WaitForExit(10000) | Out-Null } catch {} }
+    }
+    if ($foreign) {
+        Write-Warning ('Not terminating AE-named processes this capture cannot prove it owns: ' +
+            (($foreign | ForEach-Object { "$($_.ProcessName):$($_.Id)" }) -join ', '))
     }
     if (Test-Path -LiteralPath $installRoot) {
         $resolvedRoot = (Resolve-Path -LiteralPath $installRoot).Path
