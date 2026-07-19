@@ -424,6 +424,10 @@ impl RenderSession {
         if request.time_step <= 0
             || request.total_time <= 0
             || request.time_scale == 0
+            // The worker parses the per-frame current_time.scale as signed
+            // 32-bit, so a larger launch time_scale could never render a
+            // frame; reject it here instead of failing at the first frame.
+            || request.time_scale > i32::MAX as u32
             || request.frame_deadline.is_zero()
         {
             return Err(invalid("render session timing is invalid"));
@@ -1382,6 +1386,36 @@ mod tests {
         }
         // A parseable but unrelated report (an older worker) is not clean.
         assert!(!final_report_clean(&serde_json::json!({"status": "ok"})));
+    }
+
+    #[test]
+    fn open_rejects_timing_the_worker_could_never_render() {
+        // Timing is validated before any file or transport work, so fake
+        // paths never get touched when the timing is invalid.
+        for (time_step, total_time, time_scale) in [
+            (0, 300, 30),
+            (1, 0, 30),
+            (1, 300, 0),
+            // The worker parses per-frame scales as signed 32-bit.
+            (1, 300, i32::MAX as u32 + 1),
+        ] {
+            let error = RenderSession::open(SessionOpenRequest {
+                repository: Path::new("missing-repository"),
+                plugin_path: Path::new("missing-plugin.aex"),
+                plugin_sha256: &"0".repeat(64),
+                parameters: None,
+                dependencies: Vec::new(),
+                width: 8,
+                height: 4,
+                pixel_format: RenderPixelFormat::Argb8,
+                time_step,
+                total_time,
+                time_scale,
+                frame_deadline: Duration::from_secs(1),
+            })
+            .expect_err("invalid timing must be rejected before launch");
+            assert_eq!(error.to_string(), "render session timing is invalid");
+        }
     }
 
     #[test]
