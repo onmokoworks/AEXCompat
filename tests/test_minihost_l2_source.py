@@ -41,6 +41,7 @@ AEGP_ASYNC_LAYER_RUNTIME = ROOT / "minihost" / "src" / "worker_aegp_async_layer_
 MASK_RUNTIME_HEADER = ROOT / "minihost" / "src" / "worker_mask_runtime.hpp"
 MASK_RUNTIME_SOURCE = ROOT / "minihost" / "src" / "worker_mask_runtime.cpp"
 MASK_RUNTIME_CALLBACKS = ROOT / "minihost" / "src" / "worker_mask_runtime_callbacks.cpp"
+MASK_SELFTESTS_SOURCE = ROOT / "minihost" / "src" / "worker_mask_selftests.cpp"
 MINIHOST_CMAKE = ROOT / "minihost" / "CMakeLists.txt"
 
 
@@ -54,6 +55,7 @@ def l2_family_source():
         AEGP_SCENE_SOURCE, AEGP_SCENE_HEADER, AEGP_SCENE_RUNTIME_HEADER,
         AEGP_SCENE_RUNTIME_SOURCE, AEGP_INIT_RUNTIME_HEADER, AEGP_INIT_RUNTIME_SOURCE,
         MASK_RUNTIME_HEADER, MASK_RUNTIME_SOURCE, MASK_RUNTIME_CALLBACKS,
+        MASK_SELFTESTS_SOURCE,
         HANDLE_RUNTIME_HEADER, HANDLE_RUNTIME_SOURCE,
         REPORT_HEADER, REPORT_SOURCE,
         RUNTIME_ADMISSION_SOURCE, CLASSIC_RUNTIME_HEADER, CLASSIC_RUNTIME_SOURCE,
@@ -73,6 +75,23 @@ class MinihostL2SourceTests(unittest.TestCase):
             self.assertIn(marker, runtime)
         self.assertNotIn("struct AsyncLayerRequest", worker)
         self.assertNotIn("g_async_layer_requests", worker)
+
+    def test_mask_hardening_selftests_are_a_true_translation_unit(self):
+        worker = SOURCE.read_text(encoding="utf-8")
+        implementation = MASK_SELFTESTS_SOURCE.read_text(encoding="utf-8")
+        cmake = MINIHOST_CMAKE.read_text(encoding="utf-8")
+        self.assertIn("src/worker_mask_selftests.cpp", cmake)
+        for name in (
+            "verify_keyframe_ownership_rejection",
+            "verify_dynamic_stream_tree_rejection",
+            "verify_mask_double_dispose_rejected",
+            "verify_stream_dispose_with_live_value_rejected",
+            "verify_stream_metadata_and_ownership_rejection",
+            "verify_outline_mutation_rejection",
+            "verify_mask_attribute_and_ownership_rejection",
+        ):
+            self.assertIn(f"bool {name}()", implementation)
+            self.assertNotIn(f"bool {name}()", worker)
 
     def test_pf_sampling_runtime_owns_callbacks_state_and_selftest(self):
         suites = PF_SUITES_SOURCE.read_text(encoding="utf-8")

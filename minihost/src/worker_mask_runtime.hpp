@@ -23,6 +23,11 @@ struct Snapshot {
   uint32_t invalid_outline_operations{};
   uint32_t keyframe_mutations{};
   uint32_t invalid_keyframe_operations{};
+  uint32_t stream_metadata_queries{};
+  uint32_t stream_duplicates{};
+  uint32_t invalid_stream_operations{};
+  uint32_t dynamic_stream_mutations{};
+  uint32_t invalid_dynamic_stream_operations{};
 };
 
 struct CurveVertex {
@@ -45,6 +50,7 @@ struct HostContext {
   void (*raise_access_violation)(){};
   Snapshot (*snapshot)(){};
   bool (*snapshot_curve)(void* handle, CurveSnapshot& curve){};
+  bool (*lifetimes_balanced)(){};
 };
 
 struct Vertex {
