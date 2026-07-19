@@ -5,6 +5,8 @@ ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "minihost" / "src" / "l2_main.cpp"
 ABI = ROOT / "minihost" / "src" / "worker_suite_abi.hpp"
 REGISTRY = ROOT / "minihost" / "src" / "worker_aegp_render_options.cpp"
+RENDER_RUNTIME = ROOT / "minihost" / "src" / "worker_aegp_staged_item_runtime.cpp"
+ASYNC_RUNTIME = ROOT / "minihost" / "src" / "worker_aegp_async_layer_runtime.cpp"
 
 
 def test_layer_render_options_suite1_has_exact_typed_14_slot_abi():
@@ -48,9 +50,12 @@ def test_layer_render_options_registry_is_bounded_and_aba_resistant():
 
 
 def test_layer_render_paths_snapshot_each_independent_handle():
-    text = SOURCE.read_text(encoding="utf-8")
-    assert text.count("snapshot_layer_render_options(options, snapshot)") >= 4
-    assert "request->world_type = snapshot.world_type" in text
+    text = (SOURCE.read_text(encoding="utf-8") + RENDER_RUNTIME.read_text(encoding="utf-8") +
+            ASYNC_RUNTIME.read_text(encoding="utf-8"))
+    assert text.count("snapshot_layer_render_options(options, snapshot)") >= 3
+    assert "g_hooks.snapshot_options(options, snapshot)" in text
+    assert "request->options = snapshot" in text
+    assert "snapshot.world_type == 1 ? 4" in text
     assert "publish_loaded_layer_receipt(snapshot, out)" in text
     assert "g_layer_render_world_type" not in text
     assert "g_layer_render_options_live" not in text

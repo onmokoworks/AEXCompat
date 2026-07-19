@@ -11,12 +11,14 @@ SCENE_SELFTEST_IMPL = ROOT / "minihost" / "src" / "worker_aegp_scene_selftests_i
 SCENE_HEADER = ROOT / "minihost" / "src" / "worker_aegp_scene.hpp"
 SCENE_RUNTIME_HEADER = ROOT / "minihost" / "src" / "worker_aegp_scene_runtime.hpp"
 PF_SUITE_SOURCE = ROOT / "minihost" / "src" / "worker_pf_suites_internal.hpp"
+PF_STATE_SOURCE = ROOT / "minihost" / "src" / "worker_pf_state_runtime.cpp"
 
 
 def scene_source() -> str:
     return "\n".join(path.read_text(encoding="utf-8") for path in
                      (SOURCE, SCENE_HEADER, SCENE_RUNTIME_HEADER,
-                      SCENE_SELFTEST_SOURCE, SCENE_SELFTEST_IMPL, PF_SUITE_SOURCE))
+                      SCENE_SELFTEST_SOURCE, SCENE_SELFTEST_IMPL, PF_SUITE_SOURCE,
+                      PF_STATE_SOURCE))
 BUILD = ROOT / "target" / "minihost-build"
 
 
@@ -62,7 +64,7 @@ def test_camera_matrix_is_atomic_bounded_and_deterministic():
 
 def test_camera_lookup_is_fail_closed_and_preserves_output_on_error():
     source = scene_source()
-    assert "effect != &g_effect || !g_pf_state_effect_live" in source
+    assert "effect != &g_effect || !effect_is_live()" in source
     assert "!valid_comp_time(*comp_time)" in source
     assert "if (index >= g_aegp_layers.size()) return 4;" in source
     assert "if (layer_active_at_time(index, *comp_time)) result = &g_aegp_layers[index];" in source

@@ -8,6 +8,14 @@ HEADER = (ROOT / "minihost" / "src" / "worker_render_receipts.hpp").read_text(
 SOURCE = (ROOT / "minihost" / "src" / "worker_render_receipts.cpp").read_text(
     encoding="utf-8")
 CMAKE = (ROOT / "minihost" / "CMakeLists.txt").read_text(encoding="utf-8")
+REGISTRATION_SOURCES = MAIN + "\n" + "\n".join(
+    (ROOT / "minihost" / "src" / name).read_text(encoding="utf-8")
+    for name in (
+        "worker_aegp_staged_item_runtime.cpp",
+        "worker_aegp_external_render_runtime.cpp",
+        "worker_aegp_async_layer_runtime.cpp",
+    )
+)
 
 
 def test_receipt_registry_is_a_compiled_owner_with_one_registration_path():
@@ -16,7 +24,7 @@ def test_receipt_registry_is_a_compiled_owner_with_one_registration_path():
     assert "struct ReceiptDraft" in HEADER
     assert "std::unordered_map<void*, std::unique_ptr<Receipt>> g_receipts" in SOURCE
     assert "g_receipts" not in MAIN
-    assert MAIN.count("render_receipts::register_receipt(") == 4
+    assert REGISTRATION_SOURCES.count("render_receipts::register_receipt(") == 4
 
 
 def test_registry_never_calls_world_registry_while_holding_receipt_mutex():

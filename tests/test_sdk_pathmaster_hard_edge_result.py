@@ -10,6 +10,8 @@ WORKER_SOURCES = (
     ROOT / "minihost" / "src" / "worker_pf_suites_internal.hpp",
     ROOT / "minihost" / "src" / "worker_l2_suite_abi.hpp",
     ROOT / "minihost" / "src" / "worker_pf_path_runtime.cpp",
+    ROOT / "minihost" / "src" / "worker_pf_path_selftests.cpp",
+    ROOT / "minihost" / "src" / "worker_pf_world_transform_runtime.cpp",
 )
 BROKER = ROOT / "broker" / "crates" / "broker" / "src" / "image_render.rs"
 

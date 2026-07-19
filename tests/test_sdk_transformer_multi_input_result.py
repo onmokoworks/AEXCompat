@@ -7,6 +7,7 @@ RESULT = ROOT / "analysis" / "SDK_TRANSFORMER_MULTI_INPUT_RESULT_2026-07-15.json
 SOURCES = (
     ROOT / "minihost" / "src" / "l2_main.cpp",
     ROOT / "minihost" / "src" / "worker_pf_suites.cpp",
+    ROOT / "minihost" / "src" / "worker_pf_world_transform_runtime.cpp",
 )
 
 

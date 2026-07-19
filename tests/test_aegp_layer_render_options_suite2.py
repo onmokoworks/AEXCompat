@@ -6,6 +6,9 @@ SOURCE = ROOT / "minihost" / "src" / "l2_main.cpp"
 ABI_PROBE = ROOT / "instruments" / "abi-layout-probe" / "main.cpp"
 ABI = ROOT / "minihost" / "src" / "worker_suite_abi.hpp"
 REGISTRY = ROOT / "minihost" / "src" / "worker_aegp_render_options.cpp"
+STAGED_RUNTIME = ROOT / "minihost" / "src" / "worker_aegp_staged_item_runtime.cpp"
+EXTERNAL_RUNTIME = ROOT / "minihost" / "src" / "worker_aegp_external_render_runtime.cpp"
+ASYNC_RUNTIME = ROOT / "minihost" / "src" / "worker_aegp_async_layer_runtime.cpp"
 
 
 def test_sdk_probe_freezes_all_layer_render_options_suite2_slots():
@@ -76,10 +79,13 @@ def test_effect_boundaries_accept_only_finalized_staged_downstream():
 
 
 def test_sync_and_async_paths_share_the_same_pixel_publisher():
-    text = SOURCE.read_text(encoding="utf-8")
+    text = (SOURCE.read_text(encoding="utf-8") +
+            STAGED_RUNTIME.read_text(encoding="utf-8") +
+            EXTERNAL_RUNTIME.read_text(encoding="utf-8") +
+            ASYNC_RUNTIME.read_text(encoding="utf-8"))
     assert text.count("publish_loaded_layer_receipt(snapshot, out)") >= 2
     assert "request->options = snapshot" in text
-    assert "context, request->options, &receipt" in text
+    assert "g_hooks.publish(request->source, request->options, &receipt)" in text
     assert "context.downstream_finalized = true" in text
 
 

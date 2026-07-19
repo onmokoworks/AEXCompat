@@ -8,6 +8,8 @@ SOURCE = ROOT / "minihost" / "src" / "l2_main.cpp"
 WORLD_SAFETY_SOURCE = ROOT / "minihost" / "src" / "worker_world_safety.cpp"
 PF_SUITES_SOURCE = ROOT / "minihost" / "src" / "worker_pf_suites.cpp"
 PF_SAMPLING_SOURCE = ROOT / "minihost" / "src" / "worker_pf_sampling_runtime.cpp"
+PF_WORLD_TRANSFORM_SOURCE = ROOT / "minihost" / "src" / "worker_pf_world_transform_runtime.cpp"
+HOST_CATALOG_SOURCE = ROOT / "minihost" / "src" / "worker_host_suite_catalog.cpp"
 RESULT = ROOT / "analysis" / "GENERAL_EFFECT_SUITE_AVAILABILITY_RESULT_2026-07-16.json"
 
 
@@ -24,12 +26,14 @@ SUITES = {
 
 def component_catalog_source(source: str) -> str:
     start = source.index("const StaticSuite component_suites[]")
-    end = source.index("StaticProviderCatalog component_catalog", start)
+    end = source.index("return configure_host_suite_catalog", start)
     return source[start:end]
 
 
 def test_general_effect_suites_are_available_without_mask_mode_and_are_version_exact():
-    source = SOURCE.read_text(encoding="utf-8")
+    source = (SOURCE.read_text(encoding="utf-8") + HOST_CATALOG_SOURCE.read_text(encoding="utf-8") +
+              PF_SAMPLING_SOURCE.read_text(encoding="utf-8") +
+              PF_WORLD_TRANSFORM_SOURCE.read_text(encoding="utf-8"))
     catalog = component_catalog_source(source)
 
     for name, (version, function_markers) in SUITES.items():
@@ -38,13 +42,13 @@ def test_general_effect_suites_are_available_without_mask_mode_and_are_version_e
         for marker in function_markers:
             assert f"&{marker}" in source
 
-    assert "StaticProviderCatalog component_catalog" in source
-    assert "resolve_static_provider, &component_catalog" in source
-    assert "acquire_host_suite(catalog, name, version, suite" in source
+    assert "configure_host_suite_catalog(" in source
+    assert "catalog.providers[1] = {&resolve_static_provider" in source
+    assert "acquire_host_suite(catalog.provider_catalog, name, version, suite" in source
 
 
 def test_general_effect_suite_functions_keep_existing_safety_bounds():
-    source = SOURCE.read_text(encoding="utf-8") + PF_SUITES_SOURCE.read_text(encoding="utf-8") + PF_SAMPLING_SOURCE.read_text(encoding="utf-8") + WORLD_SAFETY_SOURCE.read_text(encoding="utf-8")
+    source = SOURCE.read_text(encoding="utf-8") + PF_SUITES_SOURCE.read_text(encoding="utf-8") + PF_SAMPLING_SOURCE.read_text(encoding="utf-8") + PF_WORLD_TRANSFORM_SOURCE.read_text(encoding="utf-8") + WORLD_SAFETY_SOURCE.read_text(encoding="utf-8")
 
     for marker in (
         "int32_t __cdecl subpixel_sample16(",

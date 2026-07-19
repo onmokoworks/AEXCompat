@@ -11,6 +11,8 @@ WORLD_SAFETY_SOURCE = ROOT / "minihost" / "src" / "worker_world_safety.cpp"
 WORLD_SAFETY_HEADER = ROOT / "minihost" / "src" / "worker_world_safety.hpp"
 WORLD_REGISTRY_SOURCE = ROOT / "minihost" / "src" / "worker_world_registry.cpp"
 WORLD_REGISTRY_HEADER = ROOT / "minihost" / "src" / "worker_world_registry.hpp"
+WORLD_TRANSFORM_RUNTIME = ROOT / "minihost" / "src" / "worker_pf_world_transform_runtime.cpp"
+EXTERNAL_RENDER_RUNTIME = ROOT / "minihost" / "src" / "worker_aegp_external_render_runtime.cpp"
 
 
 def _worker() -> Path | None:
@@ -106,12 +108,13 @@ def test_aegp_world_and_platform_ownership_live_in_registry_not_l2():
     receipts = (ROOT / "minihost" / "src" / "worker_render_receipts.cpp").read_text(
         encoding="utf-8")
     assert "ReceiptDraft" in main
-    assert "struct ExternalRenderedFrame" in main
+    external = EXTERNAL_RENDER_RUNTIME.read_text(encoding="utf-8")
+    assert "struct ExternalRenderedFrame" in external
     assert "g_receipts" not in main
     assert "g_receipts" in receipts
-    assert "g_external_render_cache" in main
+    assert "std::vector<ExternalRenderedFrame> g_cache" in external
     assert "ReceiptDraft" not in source
-    assert "g_external_render_cache" not in source
+    assert "ExternalRenderedFrame" not in source
 
 
 def test_effect_world_abi_and_bounds_live_in_world_safety_component():
@@ -128,7 +131,7 @@ def test_effect_world_abi_and_bounds_live_in_world_safety_component():
 
 
 def test_classic_and_smart_dispatch_register_host_worlds_and_resizes():
-    text = SOURCE.read_text(encoding="utf-8")
+    text = SOURCE.read_text(encoding="utf-8") + WORLD_TRANSFORM_RUNTIME.read_text(encoding="utf-8")
     render = RENDER_SOURCE.read_text(encoding="utf-8")
     assert text.count("DispatchWorldFormatScope dispatch_worlds;") >= 3
     assert text.count("register_world(output_world.data(), dispatch_pixel_format)") >= 4
