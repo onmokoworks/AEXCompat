@@ -1,5 +1,6 @@
 import hashlib
 import json
+import struct
 import subprocess
 import sys
 from pathlib import Path
@@ -147,6 +148,54 @@ def test_failure_leaves_bounded_diagnostic_bundle(tmp_path):
     assert detail["depths"]["argb8"]["stderr"]["truncated"] is True
     assert len(detail["depths"]["argb8"]["stderr"]["text"].encode()) <= 65536
     assert report["results"][0]["suite_timeline"] is None
+
+
+@pytest.mark.parametrize("size,truncated", [(65535, False), (65536, False), (65537, True)])
+def test_stderr_truncation_observes_exact_64k_boundary(tmp_path, size, truncated):
+    manifest, adapter = fixture(tmp_path)
+    adapter.write_text(
+        f"import sys; sys.stderr.buffer.write(b'x'*{size}); raise SystemExit(3)\n",
+        encoding="utf-8",
+    )
+    output = tmp_path / "bundle"
+    assert invoke(manifest, output, adapter).returncode == 0
+    detail = json.loads((output / "diagnostics" / "run.json").read_text())
+    stderr = detail["depths"]["argb8"]["stderr"]
+    assert stderr["bytes_kept"] == min(size, 65536)
+    assert stderr["truncated"] is truncated
+
+
+@pytest.mark.parametrize(
+    "mode,samples",
+    [
+        ("premultiplied", bytes((50, 25, 13, 128))),
+        ("opaque", bytes((100, 50, 25, 255))),
+    ],
+)
+@pytest.mark.parametrize("depth", ["argb8", "argb16", "argb32f"])
+def test_synthesized_raw_input_applies_declared_alpha_mode(tmp_path, mode, samples, depth):
+    manifest_path, adapter = fixture(tmp_path)
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["requested_depths"] = [depth]
+    manifest["execution"]["premultiplication"] = mode
+    image = manifest_path.parent / manifest["input"]["path"]
+    Image.new("RGBA", (1, 1), (100, 50, 25, 128)).save(image)
+    manifest["input"] = identity(image, manifest["input"]["path"])
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    adapter.write_text("raise SystemExit(3)\n", encoding="utf-8")
+
+    output = tmp_path / "bundle"
+    assert invoke(manifest_path, output, adapter).returncode == 0
+    report = json.loads((output / "report.json").read_text())
+    result = report["results"][0]
+    if depth == "argb8":
+        expected = samples
+    elif depth == "argb16":
+        expected = b"".join(struct.pack("<H", (sample * 32768 + 127) // 255) for sample in samples)
+    else:
+        expected = b"".join(struct.pack("<f", sample / 255.0) for sample in samples)
+    assert (output / result["raw_input"]["path"]).read_bytes() == expected
+    assert result["input_world"]["premultiplication"] == mode
 
 
 def test_structured_nonzero_failure_preserves_protocol_and_missing_suites(tmp_path):

@@ -24477,18 +24477,18 @@ int wmain(int argc, wchar_t **argv) {
             << "\""
             << ",\"case_id\":\"" << case_id << "\",\"pixel_format\":\"" << g_smart_pixel_format << "\",\"width\":"
             << render_width << ",\"height\":" << render_height << ",\"rowbytes\":" << render_rowbytes
-            << ",\"premultiplication\":\"premultiplied\""
+            << ",\"premultiplication\":\"" << escape(g_conformance_premultiplication) << "\""
             << ",\"result_rect\":[0,0," << render_width << "," << render_height << "]"
             << ",\"max_result_rect\":[0,0," << render_width << "," << render_height << "]"
             << ",\"input_world\":{\"width\":" << external_width << ",\"height\":" << external_height
             << ",\"row_bytes\":" << external_width *
                 (g_smart_pixel_format == "argb32f" ? 16 : (g_smart_pixel_format == "argb16" ? 8 : 4))
             << ",\"pixel_format\":\"" << g_smart_pixel_format
-            << "\",\"premultiplication\":\"premultiplied\",\"extent_hint\":{\"left\":0,\"top\":0,\"right\":"
+            << "\",\"premultiplication\":\"" << escape(g_conformance_premultiplication) << "\",\"extent_hint\":{\"left\":0,\"top\":0,\"right\":"
             << external_width << ",\"bottom\":" << external_height << "}}"
             << ",\"output_world\":{\"width\":" << render_width << ",\"height\":" << render_height
             << ",\"row_bytes\":" << render_rowbytes << ",\"pixel_format\":\"" << g_smart_pixel_format
-            << "\",\"premultiplication\":\"premultiplied\",\"extent_hint\":{\"left\":0,\"top\":0,\"right\":"
+            << "\",\"premultiplication\":\"" << escape(g_conformance_premultiplication) << "\",\"extent_hint\":{\"left\":0,\"top\":0,\"right\":"
             << render_width << ",\"bottom\":" << render_height << "}}"
             << ",\"bytes_written_per_row\":" << render_width *
                 (g_smart_pixel_format == "argb32f" ? 16 : (g_smart_pixel_format == "argb16" ? 8 : 4))
@@ -24723,7 +24723,7 @@ int wmain(int argc, wchar_t **argv) {
             << ",\"case_id\":\"" << case_id << "\",\"pixel_format\":\"" << g_smart_pixel_format << "\",\"width\":"
             << smart.output_width << ",\"height\":" << smart.output_height << ",\"rowbytes\":"
             << smart.output_rowbytes
-            << ",\"premultiplication\":\"premultiplied\""
+            << ",\"premultiplication\":\"" << escape(g_conformance_premultiplication) << "\""
             << ",\"result_rect\":[" << smart.result_rect[0] << "," << smart.result_rect[1] << ","
             << smart.result_rect[2] << "," << smart.result_rect[3] << "]"
             << ",\"max_result_rect\":[" << smart.max_result_rect[0] << "," << smart.max_result_rect[1] << ","
@@ -24732,11 +24732,11 @@ int wmain(int argc, wchar_t **argv) {
             << ",\"row_bytes\":" << external_width *
                 (g_smart_pixel_format == "argb32f" ? 16 : (g_smart_pixel_format == "argb16" ? 8 : 4))
             << ",\"pixel_format\":\"" << g_smart_pixel_format
-            << "\",\"premultiplication\":\"premultiplied\",\"extent_hint\":{\"left\":0,\"top\":0,\"right\":"
+            << "\",\"premultiplication\":\"" << escape(g_conformance_premultiplication) << "\",\"extent_hint\":{\"left\":0,\"top\":0,\"right\":"
             << external_width << ",\"bottom\":" << external_height << "}}"
             << ",\"output_world\":{\"width\":" << smart.output_width << ",\"height\":" << smart.output_height
             << ",\"row_bytes\":" << smart.output_rowbytes << ",\"pixel_format\":\"" << g_smart_pixel_format
-            << "\",\"premultiplication\":\"premultiplied\",\"extent_hint\":{\"left\":0,\"top\":0,\"right\":"
+            << "\",\"premultiplication\":\"" << escape(g_conformance_premultiplication) << "\",\"extent_hint\":{\"left\":0,\"top\":0,\"right\":"
             << smart.output_width << ",\"bottom\":" << smart.output_height << "}}"
             << ",\"bytes_written_per_row\":" << smart.output_rowbytes
             << ",\"undefined_tail_bytes_per_row\":0"

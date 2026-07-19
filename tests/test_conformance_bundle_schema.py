@@ -169,6 +169,15 @@ class ConformanceBundleSchemaTests(unittest.TestCase):
             with self.assertRaises(BundleValidationError):
                 validate_bundle(self.manifest, report, self.bundle_root)
 
+    def test_semantic_validator_rejects_world_premultiplication_mismatch(self):
+        report = self.valid_report()
+        report["results"][0]["input_world"]["premultiplication"] = "straight"
+        self.report_validator.validate(report)
+        with self.assertRaisesRegex(
+            BundleValidationError, "premultiplication does not match manifest"
+        ):
+            validate_bundle(self.manifest, report, self.bundle_root)
+
     def test_semantic_validator_rejects_exact_with_different_hashes(self):
         report = self.valid_report()
         report["results"][0]["oracle"]["actual_sha256"] = "3" * 64

@@ -252,7 +252,7 @@ def _artifacts(manifest: dict, report: dict):
             yield f"result {index} raw_output", result["raw_output"]
 
 
-def _validate_world(result: dict, errors: list[str]) -> None:
+def _validate_world(result: dict, premultiplication: str, errors: list[str]) -> None:
     depth = result["depth"]
     for key in ("input_world", "world"):
         world = result[key]
@@ -260,6 +260,8 @@ def _validate_world(result: dict, errors: list[str]) -> None:
             continue
         if world["pixel_format"] != depth:
             errors.append(f"{depth} {key} pixel_format does not match depth")
+        if world["premultiplication"] != premultiplication:
+            errors.append(f"{depth} {key} premultiplication does not match manifest")
         minimum_row_bytes = world["width"] * _PIXEL_BYTES[world["pixel_format"]]
         if world["row_bytes"] < minimum_row_bytes:
             errors.append(f"{depth} {key} row_bytes is smaller than one pixel row")
@@ -321,7 +323,7 @@ def validate_bundle(manifest: dict, report: dict, bundle_root: Path) -> None:
     if manifest["oracle"]["state"] == "captured" and set(oracle_artifacts) != set(requested):
         errors.append("manifest oracle depths do not exactly match requested_depths")
     for result in report["results"]:
-        _validate_world(result, errors)
+        _validate_world(result, manifest["execution"]["premultiplication"], errors)
         oracle = result["oracle"]
         if oracle["identity_match"] != manifest_oracle_identity:
             errors.append(f"{result['depth']} oracle identity_match does not match manifest")

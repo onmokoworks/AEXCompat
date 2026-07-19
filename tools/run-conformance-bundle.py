@@ -208,11 +208,22 @@ def world(width: int, height: int, depth: str, premultiplication: str) -> dict[s
     }
 
 
-def write_native_input(source: Path, destination: Path, depth: str) -> tuple[int, int]:
+def write_native_input(
+    source: Path, destination: Path, depth: str, premultiplication: str = "straight"
+) -> tuple[int, int]:
     with Image.open(source) as image:
         rgba = image.convert("RGBA")
         width, height = rgba.size
-        samples = rgba.tobytes()
+        samples = bytearray(rgba.tobytes())
+    for offset in range(0, len(samples), 4):
+        alpha = samples[offset + 3]
+        if premultiplication == "premultiplied":
+            for channel in range(3):
+                samples[offset + channel] = (samples[offset + channel] * alpha + 127) // 255
+        elif premultiplication == "opaque":
+            samples[offset + 3] = 255
+        elif premultiplication != "straight":
+            raise ValueError(f"unsupported premultiplication: {premultiplication}")
     destination.parent.mkdir(parents=True, exist_ok=True)
     if depth == "argb8":
         destination.write_bytes(samples)
@@ -357,11 +368,12 @@ def _stream_to_bounded_file(
                 chunk = stream.read(64 * 1024)
                 if not chunk:
                     break
+                remaining = max(0, limit - kept)
                 if kept < limit:
-                    retained = chunk[: limit - kept]
+                    retained = chunk[:remaining]
                     output.write(retained)
                     kept += len(retained)
-                if len(chunk) > max(0, limit - kept):
+                if len(chunk) > remaining:
                     state["truncated"] = True
     except (OSError, ValueError) as error:
         state["error"] = str(error)
@@ -597,6 +609,7 @@ def attach_raw_artifacts(
     output: Path,
     dump_dir: Path,
     bundle_root: Path,
+    premultiplication: str,
 ) -> None:
     raw_root = bundle_root / "raw" / depth
     raw_root.mkdir(parents=True, exist_ok=True)
@@ -606,7 +619,7 @@ def attach_raw_artifacts(
     if input_candidates:
         shutil.copyfile(input_candidates[-1], raw_input)
     else:
-        write_native_input(source_input, raw_input, depth)
+        write_native_input(source_input, raw_input, depth, premultiplication)
     result["raw_input"] = artifact_for(raw_input, bundle_root)
 
     if result["classification"] != "ok":
@@ -808,6 +821,7 @@ def main() -> int:
                 output,
                 dump_dir,
                 output_root,
+                manifest["execution"]["premultiplication"],
             )
             if dump_dir.exists():
                 shutil.move(str(dump_dir), str(outputs / f"{depth}-worlds"))
