@@ -1,4 +1,5 @@
 #include "worker_fixed_selftest_routing.hpp"
+#include "worker_aegp_scene_runtime.hpp"
 
 #include "worker_aegp_compat_selftests.hpp"
 #include "worker_aegp_utility_suite.hpp"
@@ -14,9 +15,7 @@
 #include <string_view>
 #include <system_error>
 
-namespace aexcompat::l2_detail {
-extern uint32_t g_aegp_effect_param_union_calls;
-}
+
 
 namespace aexcompat::worker_runtime::fixed_selftests {
 namespace {
@@ -87,7 +86,7 @@ int selftest_effect_param_union(int, wchar_t**) {
   std::cout << "{\"aegp_effect_param_union_suite4\":\""
             << (passed ? "passed" : "failed")
             << "\",\"successful_calls\":"
-            << aexcompat::l2_detail::g_aegp_effect_param_union_calls << "}\n";
+            << aexcompat::scene_runtime::scene_runtime_state().effect_param_union_calls << "}\n";
   return passed ? 0 : 1;
 }
 

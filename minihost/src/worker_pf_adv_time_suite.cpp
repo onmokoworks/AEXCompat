@@ -8,6 +8,11 @@
 #include <type_traits>
 
 namespace aexcompat::worker_runtime::pf_adv_time {
+
+ItemTelemetry& item_telemetry() {
+  static ItemTelemetry telemetry;
+  return telemetry;
+}
 namespace {
 
 struct AdvTimeDisplayPrefVersion3 { char display_mode; int32_t framemax; int32_t frames_per_foot; char frames_start; uint8_t nondrop30; uint8_t honor_source_timecode; uint8_t use_feet_frames; };

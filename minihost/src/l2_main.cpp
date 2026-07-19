@@ -512,22 +512,24 @@ auto& g_aegp_idle_mode = g_aegp_init_runtime.idle_mode;
 bool& g_aegp_command_roundtrip_mode = scene_runtime_state().command_roundtrip_mode;
 bool& g_aegp_active_idle_roundtrip_mode = scene_runtime_state().active_idle_roundtrip_mode;
 bool& g_aegp_comp_idle_roundtrip_mode = scene_runtime_state().comp_idle_roundtrip_mode;
-bool g_aegp_keyframe_roundtrip_mode = false;
-bool g_aegp_seek_roundtrip_mode = false;
-bool g_aegp_trim_roundtrip_mode = false;
-bool g_aegp_switch_roundtrip_mode = false;
-bool g_skip_about = false;
-uint32_t g_aegp_commands_created = 0;
-uint32_t g_aegp_menu_commands_inserted = 0;
+// AEGP command/menu bookkeeping and the event-mode latches moved to their
+// owner, aexcompat::worker_runtime::aegp_init::state() (issue #126 Phase D).
+auto& g_aegp_keyframe_roundtrip_mode = g_aegp_init_runtime.keyframe_roundtrip_mode;
+auto& g_aegp_seek_roundtrip_mode = g_aegp_init_runtime.seek_roundtrip_mode;
+auto& g_aegp_trim_roundtrip_mode = g_aegp_init_runtime.trim_roundtrip_mode;
+auto& g_aegp_switch_roundtrip_mode = g_aegp_init_runtime.switch_roundtrip_mode;
+auto& g_skip_about = g_aegp_init_runtime.skip_about;
+auto& g_aegp_commands_created = g_aegp_init_runtime.commands_created;
+auto& g_aegp_menu_commands_inserted = g_aegp_init_runtime.menu_commands_inserted;
 auto& g_aegp_command_hooks = g_aegp_init_runtime.command_hooks;
 auto& g_aegp_update_menu_hooks = g_aegp_init_runtime.update_menu_hooks;
 auto& g_aegp_idle_hooks = g_aegp_init_runtime.idle_hooks;
 auto& g_aegp_death_hooks = g_aegp_init_runtime.death_hooks;
-int32_t g_next_aegp_command = 10000;
-uint32_t g_aegp_command_enable_calls = 0;
-uint32_t g_aegp_command_check_calls = 0;
-uint32_t g_aegp_command_checked_true_calls = 0;
-uint32_t g_aegp_command_checked_false_calls = 0;
+auto& g_next_aegp_command = g_aegp_init_runtime.next_command;
+auto& g_aegp_command_enable_calls = g_aegp_init_runtime.command_enable_calls;
+auto& g_aegp_command_check_calls = g_aegp_init_runtime.command_check_calls;
+auto& g_aegp_command_checked_true_calls = g_aegp_init_runtime.command_checked_true_calls;
+auto& g_aegp_command_checked_false_calls = g_aegp_init_runtime.command_checked_false_calls;
 uint32_t& g_aegp_item_current_time_calls = scene_runtime_state().item_current_time_calls;
 uint32_t& g_aegp_item_set_current_time_calls = scene_runtime_state().item_set_current_time_calls;
 int32_t& g_aegp_item_last_set_time_value = scene_runtime_state().item_last_set_time_value;
@@ -557,7 +559,7 @@ uint32_t& g_aegp_stream_value_disposes = scene_runtime_state().stream_value_disp
 uint32_t& g_aegp_stream_sampled_selector_mask = scene_runtime_state().stream_sampled_selector_mask;
 uint32_t& g_aegp_effect_param_name_calls = scene_runtime_state().effect_param_name_calls;
 uint32_t& g_aegp_effect_param_value_calls = scene_runtime_state().effect_param_value_calls;
-uint32_t g_aegp_effect_param_union_calls = 0;
+uint32_t& g_aegp_effect_param_union_calls = scene_runtime_state().effect_param_union_calls;
 uint32_t& g_aegp_keyframe_count_calls = scene_runtime_state().keyframe_count_calls;
 uint32_t& g_aegp_keyframed_stream_reports = scene_runtime_state().keyframed_stream_reports;
 uint32_t& g_aegp_keyframe_time_calls = scene_runtime_state().keyframe_time_calls;
@@ -577,7 +579,7 @@ using AegpUpdateMenuRegistration =
 auto& g_aegp_idle_registrations = g_aegp_init_runtime.idle_registrations;
 auto& g_aegp_death_registrations = g_aegp_init_runtime.death_registrations;
 auto& g_aegp_command_registrations = g_aegp_init_runtime.command_registrations;
-std::vector<int32_t> g_aegp_inserted_commands;
+auto& g_aegp_inserted_commands = g_aegp_init_runtime.inserted_commands;
 auto& g_checkout_layer_definitions = g_parameter_runtime.checkout.definitions;
 auto& g_param_checkout_mutex = g_parameter_runtime.checkout.mutex;
 auto& g_live_param_checkouts = g_parameter_runtime.checkout.live;
@@ -1423,8 +1425,10 @@ bool claim_opaque_generation(std::atomic<uint64_t>& counter, uint64_t& generatio
 }
 
 using LayerRenderContext = aexcompat::aegp_layer_render_runtime::Context;
-std::atomic<uint64_t> g_pf_adv_item_touches{};
-std::atomic<uint64_t> g_pf_adv_item_rerenders{};
+auto& g_pf_adv_item_touches =
+    aexcompat::worker_runtime::pf_adv_time::item_telemetry().touches;
+auto& g_pf_adv_item_rerenders =
+    aexcompat::worker_runtime::pf_adv_time::item_telemetry().rerenders;
 
 int32_t checked_adv_item_move(int32_t direction, int32_t steps, int32_t step,
                               int32_t& time) {

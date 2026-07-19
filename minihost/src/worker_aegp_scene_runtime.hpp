@@ -139,6 +139,7 @@ struct SceneRuntimeState {
   uint32_t stream_sampled_selector_mask{};
   uint32_t effect_param_name_calls{};
   uint32_t effect_param_value_calls{};
+  uint32_t effect_param_union_calls{};
   uint32_t keyframe_count_calls{};
   uint32_t keyframed_stream_reports{};
   uint32_t keyframe_time_calls{};

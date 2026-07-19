@@ -32,6 +32,23 @@ struct State {
   std::vector<UpdateMenuRegistration> update_menu_registrations;
   std::vector<IdleRegistration> idle_registrations;
   std::vector<DeathRegistration> death_registrations;
+  // AEGP command/menu bookkeeping and the event-mode latches worker_main
+  // derives from the invocation (issue #126 Phase D). The AEGP suite
+  // callbacks in worker_main write them and the aegp_init completion report
+  // reads them back. Lifetime: process-lifetime, never torn down.
+  bool keyframe_roundtrip_mode{};
+  bool seek_roundtrip_mode{};
+  bool trim_roundtrip_mode{};
+  bool switch_roundtrip_mode{};
+  bool skip_about{};
+  uint32_t commands_created{};
+  uint32_t menu_commands_inserted{};
+  int32_t next_command{10000};
+  uint32_t command_enable_calls{};
+  uint32_t command_check_calls{};
+  uint32_t command_checked_true_calls{};
+  uint32_t command_checked_false_calls{};
+  std::vector<int32_t> inserted_commands;
 };
 
 struct EventResult {
