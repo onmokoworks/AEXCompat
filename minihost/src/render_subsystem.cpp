@@ -385,6 +385,11 @@ std::string world_debug_report_json(const RenderTelemetry& telemetry) {
   return json.str();
 }
 
+RenderContextState& render_context_state() {
+  static RenderContextState state;
+  return state;
+}
+
 TelemetryState& telemetry_state() {
   static TelemetryState state;
   return state;

@@ -586,7 +586,6 @@ auto& g_automatic_param_checkins = g_parameter_runtime.checkout.automatic_checki
 auto& g_invalid_param_checkins = g_parameter_runtime.checkout.invalid_checkins;
 auto& g_rejected_temporal_param_checkouts = g_parameter_runtime.checkout.rejected_temporal;
 auto& g_wide_time_checkout_allowed = g_parameter_runtime.checkout.wide_time_allowed;
-bool g_classic_shutter_dependency_advertised = false;
 auto& g_checkout_current_time = g_parameter_runtime.checkout.current_time;
 auto& g_checkout_current_time_scale = g_parameter_runtime.checkout.current_time_scale;
 auto& g_last_param_checkout_index = g_parameter_runtime.checkout.last_index;
@@ -653,18 +652,21 @@ bool same_rational_time(int32_t left, uint32_t left_scale,
 // aexcompat::render::telemetry_state() (issue #126 Phase D).
 // Mask scene identity (model enabled + scene id) moved to its owner
 // aexcompat::mask_runtime (issue #126 Phase D).
-struct SpatialRatio { int32_t numerator{1}; uint32_t denominator{1}; };
-SpatialRatio g_downsample_x;
-SpatialRatio g_downsample_y;
-SpatialRatio g_pixel_aspect_ratio;
-int32_t g_full_resolution_width{};
-int32_t g_full_resolution_height{};
-int32_t g_pre_effect_source_origin_x{};
-int32_t g_pre_effect_source_origin_y{};
-int32_t g_render_quality{1};
-int32_t g_render_field{};
-int32_t g_shutter_angle{};
-int32_t g_shutter_phase{};
+// Spatial/quality render context storage moved to its owner,
+// aexcompat::render::render_context_state() (issue #126 Phase D); these
+// references keep the established g_* spellings at the use sites.
+auto& g_render_context_state = aexcompat::render::render_context_state();
+auto& g_downsample_x = g_render_context_state.downsample_x;
+auto& g_downsample_y = g_render_context_state.downsample_y;
+auto& g_pixel_aspect_ratio = g_render_context_state.pixel_aspect_ratio;
+auto& g_full_resolution_width = g_render_context_state.full_resolution_width;
+auto& g_full_resolution_height = g_render_context_state.full_resolution_height;
+auto& g_pre_effect_source_origin_x = g_render_context_state.pre_effect_source_origin_x;
+auto& g_pre_effect_source_origin_y = g_render_context_state.pre_effect_source_origin_y;
+auto& g_render_quality = g_render_context_state.render_quality;
+auto& g_render_field = g_render_context_state.render_field;
+auto& g_shutter_angle = g_render_context_state.shutter_angle;
+auto& g_shutter_phase = g_render_context_state.shutter_phase;
 
 static_assert(sizeof(MaskFeather) == 40);
 static_assert(offsetof(MaskFeather, segment_s) == 8);
