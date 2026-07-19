@@ -49,3 +49,8 @@ path, parameter name, or parameter value. It aggregates missing Suites by the
 number of distinct AEX SHA-256 identities under a stable hashed Suite id, never by retry/case count, so it can
 be attached to a general compatibility Issue without redistributing or naming
 a proprietary plug-in.
+
+Each grouped public replay uses `--case-list <PRIVATE_CASE_LIST>`. Create that
+private JSON array from the matching `gap-map.json` `case_ids` entry; the runner
+then selects every occurrence in the group and rejects empty, duplicate,
+malformed, or unknown case ids. The exact case list remains private-local.
