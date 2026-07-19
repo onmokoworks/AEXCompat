@@ -73,6 +73,8 @@ def test_l2_source_writes_full_checkout_result() -> None:
         "std::memcpy(bytes + 44, reference_size, sizeof(reference_size));",
         'L"--self-test-pf-pre-checkout-result"',
         'L"--self-test-smart-runtime-concurrency"',
+        'L"--self-test-smart-result-skipped"',
+        "std::make_shared<aexcompat::worker_runtime::smart::Snapshot>()",
     ):
         assert marker in source + runtime_source
     for marker in (

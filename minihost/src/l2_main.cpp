@@ -12414,7 +12414,8 @@ bool exercise_loaded_effect_item_receipt(EffectEntry entry,
   return g_loaded_effect_receipt_fixture_passed;
 }
 struct SmartResult {
-  std::shared_ptr<const aexcompat::worker_runtime::smart::Snapshot> runtime;
+  std::shared_ptr<const aexcompat::worker_runtime::smart::Snapshot> runtime{
+      std::make_shared<aexcompat::worker_runtime::smart::Snapshot>()};
   int32_t gpu_setup_error{};
   int32_t pre_error{-1};
   int32_t selector_error{-1};
@@ -14933,6 +14934,15 @@ int worker_main_impl(int argc, wchar_t **argv) {
   if (argc == 2 && std::wstring(argv[1]) == L"--self-test-smart-runtime-concurrency") {
     const bool passed = aexcompat::worker_runtime::smart::concurrency_self_test();
     std::cout << "{\"smart_runtime_concurrency\":\""
+              << (passed ? "passed" : "failed") << "\"}\n";
+    return passed ? 0 : 1;
+  }
+  if (argc == 2 && std::wstring(argv[1]) == L"--self-test-smart-result-skipped") {
+    const SmartResult skipped{};
+    const bool passed = skipped.runtime && skipped.runtime->pixel_format.empty() &&
+        skipped.runtime->input_checkout_request[0] == -1 &&
+        skipped.runtime->map_checkout_request[0] == -1;
+    std::cout << "{\"smart_result_skipped\":\""
               << (passed ? "passed" : "failed") << "\"}\n";
     return passed ? 0 : 1;
   }
