@@ -12,10 +12,11 @@ pub const MAX_MINIDUMP_FILES: u64 = 16;
 pub const MINIDUMP_POLICY_LOCK_TIMEOUT_MS: u64 = 5_000;
 
 struct MinidumpDirectory {
+    #[allow(dead_code)] // retained for diagnostics and path-policy tests; I/O is guard-relative
     path: PathBuf,
     display: String,
     #[cfg(windows)]
-    guard: DirectoryGuard,
+    guard: std::sync::Arc<DirectoryGuard>,
 }
 
 fn invalid(message: impl Into<String>) -> io::Error {
@@ -121,44 +122,30 @@ fn resolve_directory(repository: &Path, requested: &Path) -> io::Result<Minidump
 }
 
 #[cfg(windows)]
-struct DirectoryGuard(windows_sys::Win32::Foundation::HANDLE);
+struct DirectoryGuard(usize);
 
 #[cfg(windows)]
 impl DirectoryGuard {
-    fn try_clone(&self) -> io::Result<Self> {
-        use windows_sys::Win32::Foundation::{DuplicateHandle, DUPLICATE_SAME_ACCESS, HANDLE};
-        use windows_sys::Win32::System::Threading::GetCurrentProcess;
-
-        let process = unsafe { GetCurrentProcess() };
-        let mut duplicate: HANDLE = std::ptr::null_mut();
-        if unsafe {
-            DuplicateHandle(
-                process,
-                self.0,
-                process,
-                &mut duplicate,
-                0,
-                0,
-                DUPLICATE_SAME_ACCESS,
-            )
-        } == 0
-        {
-            return Err(io::Error::last_os_error());
-        }
-        Ok(Self(duplicate))
+    fn raw(&self) -> windows_sys::Win32::Foundation::HANDLE {
+        self.0 as windows_sys::Win32::Foundation::HANDLE
     }
 }
 
 #[cfg(windows)]
 impl Drop for DirectoryGuard {
     fn drop(&mut self) {
-        unsafe { windows_sys::Win32::Foundation::CloseHandle(self.0) };
+        unsafe {
+            windows_sys::Win32::Foundation::CloseHandle(
+                self.0 as windows_sys::Win32::Foundation::HANDLE,
+            )
+        };
     }
 }
 
 #[cfg(windows)]
-fn harden_directory_acl(directory: &Path) -> io::Result<DirectoryGuard> {
+fn harden_directory_acl(directory: &Path) -> io::Result<std::sync::Arc<DirectoryGuard>> {
     use std::os::windows::ffi::OsStrExt;
+    use std::sync::Arc;
     use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
     use windows_sys::Win32::Security::{
         SetKernelObjectSecurity, DACL_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION,
@@ -166,15 +153,16 @@ fn harden_directory_acl(directory: &Path) -> io::Result<DirectoryGuard> {
     use windows_sys::Win32::Storage::FileSystem::{
         CreateFileW, GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION,
         FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS,
-        FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES, OPEN_EXISTING, READ_CONTROL, WRITE_DAC,
+        FILE_FLAG_OPEN_REPARSE_POINT, FILE_LIST_DIRECTORY, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE,
+        FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING, READ_CONTROL, WRITE_DAC,
     };
 
     let wide: Vec<u16> = directory.as_os_str().encode_wide().chain(Some(0)).collect();
     let handle = unsafe {
         CreateFileW(
             wide.as_ptr(),
-            READ_CONTROL | WRITE_DAC | FILE_READ_ATTRIBUTES,
-            0,
+            READ_CONTROL | WRITE_DAC | FILE_READ_ATTRIBUTES | FILE_LIST_DIRECTORY,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
             std::ptr::null(),
             OPEN_EXISTING,
             FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
@@ -219,12 +207,234 @@ fn harden_directory_acl(directory: &Path) -> io::Result<DirectoryGuard> {
         {
             return Err(io::Error::last_os_error());
         }
-        Ok(DirectoryGuard(handle))
+        Ok(Arc::new(DirectoryGuard(handle as usize)))
     })();
     if result.is_err() {
         unsafe { CloseHandle(handle) };
     }
     result
+}
+
+#[cfg(windows)]
+#[repr(C)]
+struct NtUnicodeString {
+    length: u16,
+    maximum_length: u16,
+    buffer: *mut u16,
+}
+
+#[cfg(windows)]
+#[repr(C)]
+struct NtObjectAttributes {
+    length: u32,
+    root_directory: windows_sys::Win32::Foundation::HANDLE,
+    object_name: *mut NtUnicodeString,
+    attributes: u32,
+    security_descriptor: windows_sys::Win32::Security::PSECURITY_DESCRIPTOR,
+    security_quality_of_service: *mut std::ffi::c_void,
+}
+
+#[cfg(windows)]
+#[repr(C)]
+union NtIoStatusValue {
+    status: i32,
+    pointer: *mut std::ffi::c_void,
+}
+
+#[cfg(windows)]
+#[repr(C)]
+struct NtIoStatusBlock {
+    value: NtIoStatusValue,
+    information: usize,
+}
+
+#[cfg(windows)]
+#[link(name = "ntdll")]
+extern "system" {
+    fn NtCreateFile(
+        file_handle: *mut windows_sys::Win32::Foundation::HANDLE,
+        desired_access: u32,
+        object_attributes: *mut NtObjectAttributes,
+        io_status_block: *mut NtIoStatusBlock,
+        allocation_size: *const i64,
+        file_attributes: u32,
+        share_access: u32,
+        create_disposition: u32,
+        create_options: u32,
+        ea_buffer: *const std::ffi::c_void,
+        ea_length: u32,
+    ) -> i32;
+    fn NtQueryDirectoryFile(
+        file_handle: windows_sys::Win32::Foundation::HANDLE,
+        event: windows_sys::Win32::Foundation::HANDLE,
+        apc_routine: *const std::ffi::c_void,
+        apc_context: *const std::ffi::c_void,
+        io_status_block: *mut NtIoStatusBlock,
+        file_information: *mut std::ffi::c_void,
+        length: u32,
+        file_information_class: u32,
+        return_single_entry: u8,
+        file_name: *const NtUnicodeString,
+        restart_scan: u8,
+    ) -> i32;
+    fn NtSetInformationFile(
+        file_handle: windows_sys::Win32::Foundation::HANDLE,
+        io_status_block: *mut NtIoStatusBlock,
+        file_information: *mut std::ffi::c_void,
+        length: u32,
+        file_information_class: u32,
+    ) -> i32;
+    fn RtlNtStatusToDosError(status: i32) -> u32;
+}
+
+#[cfg(windows)]
+fn nt_error(status: i32) -> io::Error {
+    io::Error::from_raw_os_error(unsafe { RtlNtStatusToDosError(status) } as i32)
+}
+
+#[cfg(windows)]
+fn open_relative(
+    directory: &DirectoryGuard,
+    name: &std::ffi::OsStr,
+    desired_access: u32,
+    share_access: u32,
+    disposition: u32,
+    options: u32,
+    attributes: u32,
+    security_descriptor: windows_sys::Win32::Security::PSECURITY_DESCRIPTOR,
+) -> io::Result<windows_sys::Win32::Foundation::HANDLE> {
+    use std::os::windows::ffi::OsStrExt;
+
+    let mut name: Vec<u16> = name.encode_wide().collect();
+    let byte_len = name
+        .len()
+        .checked_mul(std::mem::size_of::<u16>())
+        .filter(|length| *length <= u16::MAX as usize)
+        .ok_or_else(|| invalid("minidump relative name is too long"))? as u16;
+    let mut unicode = NtUnicodeString {
+        length: byte_len,
+        maximum_length: byte_len,
+        buffer: name.as_mut_ptr(),
+    };
+    let mut object = NtObjectAttributes {
+        length: std::mem::size_of::<NtObjectAttributes>() as u32,
+        root_directory: directory.raw(),
+        object_name: &mut unicode,
+        // OBJ_CASE_INSENSITIVE | OBJ_DONT_REPARSE
+        attributes: 0x40 | 0x1000,
+        security_descriptor,
+        security_quality_of_service: std::ptr::null_mut(),
+    };
+    let mut io_status = NtIoStatusBlock {
+        value: NtIoStatusValue { status: 0 },
+        information: 0,
+    };
+    let mut handle = std::ptr::null_mut();
+    let status = unsafe {
+        NtCreateFile(
+            &mut handle,
+            desired_access,
+            &mut object,
+            &mut io_status,
+            std::ptr::null(),
+            attributes,
+            share_access,
+            disposition,
+            options,
+            std::ptr::null(),
+            0,
+        )
+    };
+    if status < 0 {
+        Err(nt_error(status))
+    } else {
+        Ok(handle)
+    }
+}
+
+#[cfg(windows)]
+struct DirectoryEntry {
+    name: std::ffi::OsString,
+    size: u64,
+    attributes: u32,
+}
+
+#[cfg(windows)]
+fn directory_entries(directory: &DirectoryGuard) -> io::Result<Vec<DirectoryEntry>> {
+    use std::os::windows::ffi::OsStringExt;
+
+    const FILE_ID_BOTH_DIRECTORY_INFORMATION: u32 = 37;
+    const STATUS_NO_MORE_FILES: i32 = 0x80000006u32 as i32;
+    const NAME_OFFSET: usize = 104;
+    let mut result = Vec::new();
+    let mut restart = 1u8;
+    loop {
+        let mut buffer = vec![0u8; 64 * 1024];
+        let mut io_status = NtIoStatusBlock {
+            value: NtIoStatusValue { status: 0 },
+            information: 0,
+        };
+        let status = unsafe {
+            NtQueryDirectoryFile(
+                directory.raw(),
+                std::ptr::null_mut(),
+                std::ptr::null(),
+                std::ptr::null(),
+                &mut io_status,
+                buffer.as_mut_ptr().cast(),
+                buffer.len() as u32,
+                FILE_ID_BOTH_DIRECTORY_INFORMATION,
+                0,
+                std::ptr::null(),
+                restart,
+            )
+        };
+        restart = 0;
+        if status == STATUS_NO_MORE_FILES {
+            break;
+        }
+        if status < 0 {
+            return Err(nt_error(status));
+        }
+        let used = io_status.information.min(buffer.len());
+        let mut offset = 0usize;
+        loop {
+            if offset
+                .checked_add(NAME_OFFSET)
+                .map_or(true, |end| end > used)
+            {
+                return Err(invalid("malformed minidump directory enumeration"));
+            }
+            let read_u32 = |at: usize| u32::from_ne_bytes(buffer[at..at + 4].try_into().unwrap());
+            let read_i64 = |at: usize| i64::from_ne_bytes(buffer[at..at + 8].try_into().unwrap());
+            let next = read_u32(offset) as usize;
+            let name_bytes = read_u32(offset + 60) as usize;
+            if name_bytes % 2 != 0
+                || offset
+                    .checked_add(NAME_OFFSET + name_bytes)
+                    .map_or(true, |end| end > used)
+            {
+                return Err(invalid("malformed minidump directory entry name"));
+            }
+            let words: Vec<u16> = buffer[offset + NAME_OFFSET..offset + NAME_OFFSET + name_bytes]
+                .chunks_exact(2)
+                .map(|bytes| u16::from_ne_bytes([bytes[0], bytes[1]]))
+                .collect();
+            result.push(DirectoryEntry {
+                name: std::ffi::OsString::from_wide(&words),
+                size: read_i64(offset + 40).max(0) as u64,
+                attributes: read_u32(offset + 56),
+            });
+            if next == 0 {
+                break;
+            }
+            if next < NAME_OFFSET || offset.checked_add(next).map_or(true, |end| end >= used) {
+                return Err(invalid("malformed minidump directory entry chain"));
+            }
+            offset += next;
+        }
+    }
+    Ok(result)
 }
 
 #[cfg(not(windows))]
@@ -247,8 +457,8 @@ pub(crate) struct MinidumpLaunchFile {
     dump_handle: windows_sys::Win32::Foundation::HANDLE,
     worker_handle: windows_sys::Win32::Foundation::HANDLE,
     ack_handle: windows_sys::Win32::Foundation::HANDLE,
-    final_path: PathBuf,
-    _directory_guard: DirectoryGuard,
+    final_name: std::ffi::OsString,
+    _directory_guard: std::sync::Arc<DirectoryGuard>,
     cancel_reader: std::sync::Arc<std::sync::atomic::AtomicBool>,
     reader: Option<std::thread::JoinHandle<MinidumpCapture>>,
 }
@@ -292,14 +502,13 @@ impl Drop for MinidumpLaunchFile {
             .and_then(|reader| reader.join().ok())
             .unwrap_or_default();
         let publish = capture.bytes > 0 && !capture.overflow && !capture.write_failed;
-        let published = publish
-            && rename_file_by_handle(self.dump_handle, &self.final_path).is_ok()
-            && authenticate_file_handle(
-                self.dump_handle,
-                self.final_path.parent().unwrap_or(Path::new(".")),
-                false,
-            )
-            .is_ok();
+        let rename_result = if publish {
+            rename_file_by_handle(self.dump_handle, &self._directory_guard, &self.final_name)
+        } else {
+            Err(invalid("empty or rejected minidump capture"))
+        };
+        let published =
+            rename_result.is_ok() && authenticate_plain_file(self.dump_handle, false).is_ok();
         if !published {
             // Delete the object through the still-authenticated handle. The
             // handle points at either the reservation or its renamed final
@@ -355,9 +564,8 @@ fn final_path(handle: windows_sys::Win32::Foundation::HANDLE) -> io::Result<Path
 }
 
 #[cfg(windows)]
-fn authenticate_file_handle(
+fn authenticate_plain_file(
     handle: windows_sys::Win32::Foundation::HANDLE,
-    directory: &Path,
     require_inherit: bool,
 ) -> io::Result<()> {
     use windows_sys::Win32::Foundation::{GetHandleInformation, HANDLE_FLAG_INHERIT};
@@ -365,17 +573,6 @@ fn authenticate_file_handle(
         GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_REPARSE_POINT,
     };
 
-    let final_path = final_path(handle)?;
-    let final_parent = final_path
-        .parent()
-        .ok_or_else(|| invalid("minidump file final path has no parent"))?;
-    if !strip_extended_prefix(final_parent)
-        .as_os_str()
-        .to_string_lossy()
-        .eq_ignore_ascii_case(&strip_extended_prefix(directory).to_string_lossy())
-    {
-        return Err(invalid("minidump file escaped broker-owned directory"));
-    }
     let mut flags = 0;
     if unsafe { GetHandleInformation(handle, &mut flags) } == 0
         || (require_inherit && flags & HANDLE_FLAG_INHERIT == 0)
@@ -385,12 +582,17 @@ fn authenticate_file_handle(
         ));
     }
     let mut information: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
-    if unsafe { GetFileInformationByHandle(handle, &mut information) } == 0
-        || information.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0
+    if unsafe { GetFileInformationByHandle(handle, &mut information) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if information.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0
         || information.nNumberOfLinks != 1
     {
         return Err(invalid(
-            "minidump file handle is reparse-backed or multiply linked",
+            format!(
+                "minidump file handle is reparse-backed or multiply linked (attributes={:#x}, links={})",
+                information.dwFileAttributes, information.nNumberOfLinks
+            ),
         ));
     }
     Ok(())
@@ -443,6 +645,26 @@ fn protected_file_security() -> io::Result<(
         bInheritHandle: 0,
     };
     Ok((attributes, guard))
+}
+
+#[cfg(windows)]
+fn harden_file_acl(handle: windows_sys::Win32::Foundation::HANDLE) -> io::Result<()> {
+    use windows_sys::Win32::Security::{
+        SetKernelObjectSecurity, DACL_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION,
+    };
+
+    let (_, descriptor) = protected_file_security()?;
+    if unsafe {
+        SetKernelObjectSecurity(
+            handle,
+            DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+            descriptor.0,
+        )
+    } == 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
 }
 
 #[cfg(windows)]
@@ -547,14 +769,13 @@ fn copy_minidump_pipe(
 #[cfg(windows)]
 fn rename_file_by_handle(
     handle: windows_sys::Win32::Foundation::HANDLE,
-    destination: &Path,
+    directory: &DirectoryGuard,
+    destination: &std::ffi::OsStr,
 ) -> io::Result<()> {
     use std::os::windows::ffi::OsStrExt;
-    use windows_sys::Win32::Storage::FileSystem::{
-        FileRenameInfo, SetFileInformationByHandle, FILE_RENAME_INFO,
-    };
+    use windows_sys::Win32::Storage::FileSystem::FILE_RENAME_INFO;
 
-    let name: Vec<u16> = destination.as_os_str().encode_wide().collect();
+    let name: Vec<u16> = destination.encode_wide().collect();
     let header = std::mem::size_of::<FILE_RENAME_INFO>();
     let bytes = header
         .checked_add(name.len().saturating_sub(1) * std::mem::size_of::<u16>())
@@ -563,11 +784,22 @@ fn rename_file_by_handle(
     let info = storage.as_mut_ptr().cast::<FILE_RENAME_INFO>();
     unsafe {
         (*info).Anonymous.ReplaceIfExists = 0;
-        (*info).RootDirectory = std::ptr::null_mut();
+        (*info).RootDirectory = directory.raw();
         (*info).FileNameLength = (name.len() * std::mem::size_of::<u16>()) as u32;
         std::ptr::copy_nonoverlapping(name.as_ptr(), (*info).FileName.as_mut_ptr(), name.len());
-        if SetFileInformationByHandle(handle, FileRenameInfo, info.cast(), bytes as u32) == 0 {
-            return Err(io::Error::last_os_error());
+        let mut io_status = NtIoStatusBlock {
+            value: NtIoStatusValue { status: 0 },
+            information: 0,
+        };
+        let status = NtSetInformationFile(
+            handle,
+            &mut io_status,
+            info.cast(),
+            bytes as u32,
+            10, // FileRenameInformation
+        );
+        if status < 0 {
+            return Err(nt_error(status));
         }
     }
     Ok(())
@@ -605,7 +837,7 @@ impl Drop for PolicyLock {
 }
 
 #[cfg(windows)]
-fn acquire_policy_lock(directory: &Path) -> io::Result<PolicyLock> {
+fn acquire_policy_lock(directory: &DirectoryGuard) -> io::Result<PolicyLock> {
     acquire_policy_lock_with_timeout(
         directory,
         std::time::Duration::from_millis(MINIDUMP_POLICY_LOCK_TIMEOUT_MS),
@@ -614,51 +846,37 @@ fn acquire_policy_lock(directory: &Path) -> io::Result<PolicyLock> {
 
 #[cfg(windows)]
 fn acquire_policy_lock_with_timeout(
-    directory: &Path,
+    directory: &DirectoryGuard,
     timeout: std::time::Duration,
 ) -> io::Result<PolicyLock> {
-    use std::os::windows::ffi::OsStrExt;
     use std::thread::sleep;
     use std::time::{Duration, Instant};
-    use windows_sys::Win32::Foundation::{
-        ERROR_SHARING_VIOLATION, GENERIC_READ, GENERIC_WRITE, INVALID_HANDLE_VALUE,
-    };
-    use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
-    use windows_sys::Win32::Storage::FileSystem::{
-        CreateFileW, DELETE, FILE_ATTRIBUTE_HIDDEN, FILE_FLAG_DELETE_ON_CLOSE,
-        FILE_FLAG_OPEN_REPARSE_POINT, OPEN_ALWAYS,
-    };
+    use windows_sys::Win32::Foundation::{ERROR_SHARING_VIOLATION, GENERIC_READ, GENERIC_WRITE};
+    use windows_sys::Win32::Storage::FileSystem::{DELETE, FILE_ATTRIBUTE_HIDDEN};
 
-    let path = directory.join("aexcompat-minidump.lock");
-    let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
-    let security = SECURITY_ATTRIBUTES {
-        nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
-        lpSecurityDescriptor: std::ptr::null_mut(),
-        bInheritHandle: 0,
-    };
     let deadline = Instant::now() + timeout;
     loop {
-        let handle = unsafe {
-            CreateFileW(
-                wide.as_ptr(),
-                GENERIC_READ | GENERIC_WRITE | DELETE,
-                0,
-                &security,
-                OPEN_ALWAYS,
-                FILE_ATTRIBUTE_HIDDEN | FILE_FLAG_DELETE_ON_CLOSE | FILE_FLAG_OPEN_REPARSE_POINT,
-                std::ptr::null_mut(),
-            )
-        };
-        if handle != INVALID_HANDLE_VALUE {
-            if let Err(error) = authenticate_file_handle(handle, directory, false) {
-                unsafe { windows_sys::Win32::Foundation::CloseHandle(handle) };
-                return Err(error);
+        // FILE_OPEN_IF, FILE_NON_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT |
+        // FILE_DELETE_ON_CLOSE | FILE_OPEN_REPARSE_POINT.
+        match open_relative(
+            directory,
+            std::ffi::OsStr::new("aexcompat-minidump.lock"),
+            GENERIC_READ | GENERIC_WRITE | DELETE | 0x0010_0000,
+            0,
+            3,
+            0x40 | 0x20 | 0x1000 | 0x0020_0000,
+            FILE_ATTRIBUTE_HIDDEN,
+            std::ptr::null_mut(),
+        ) {
+            Ok(handle) => {
+                if let Err(error) = authenticate_plain_file(handle, false) {
+                    unsafe { windows_sys::Win32::Foundation::CloseHandle(handle) };
+                    return Err(error);
+                }
+                return Ok(PolicyLock(handle));
             }
-            return Ok(PolicyLock(handle));
-        }
-        let error = io::Error::last_os_error();
-        if error.raw_os_error() != Some(ERROR_SHARING_VIOLATION as i32) {
-            return Err(error);
+            Err(error) if error.raw_os_error() == Some(ERROR_SHARING_VIOLATION as i32) => {}
+            Err(error) => return Err(error),
         }
         if Instant::now() >= deadline {
             return Err(io::Error::new(
@@ -670,6 +888,7 @@ fn acquire_policy_lock_with_timeout(
     }
 }
 
+#[cfg(not(windows))]
 fn enforce_budget(directory: &Path) -> io::Result<()> {
     let mut files = 0u64;
     let mut bytes = 0u64;
@@ -703,48 +922,79 @@ fn enforce_budget(directory: &Path) -> io::Result<()> {
 }
 
 #[cfg(windows)]
-fn remove_stale_reservations(directory: &Path) -> io::Result<()> {
-    use std::os::windows::ffi::OsStrExt;
-    use windows_sys::Win32::Foundation::{
-        CloseHandle, ERROR_SHARING_VIOLATION, INVALID_HANDLE_VALUE,
-    };
+fn enforce_budget(directory: &DirectoryGuard) -> io::Result<()> {
+    use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_DIRECTORY;
+
+    let mut files = 0u64;
+    let mut bytes = 0u64;
+    let mut in_flight = 0u64;
+    for entry in directory_entries(directory)? {
+        if entry.attributes & FILE_ATTRIBUTE_DIRECTORY != 0 {
+            continue;
+        }
+        let name = entry.name.to_string_lossy();
+        if !name.starts_with("crash-") {
+            continue;
+        }
+        if name.ends_with(".dmp") {
+            files = files.saturating_add(1);
+            bytes = bytes.saturating_add(entry.size);
+        } else if name.ends_with(".dmp.part") {
+            files = files.saturating_add(1);
+            in_flight = in_flight.saturating_add(1);
+        }
+    }
+    if files >= MAX_MINIDUMP_FILES
+        || bytes > MAX_MINIDUMP_TOTAL_BYTES
+        || bytes
+            .saturating_add(in_flight.saturating_mul(MAX_MINIDUMP_FILE_BYTES))
+            .saturating_add(MAX_MINIDUMP_FILE_BYTES)
+            > MAX_MINIDUMP_TOTAL_BYTES
+    {
+        return Err(invalid("minidump directory capacity policy exceeded"));
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn remove_stale_reservations(directory: &DirectoryGuard) -> io::Result<()> {
+    use windows_sys::Win32::Foundation::{CloseHandle, ERROR_SHARING_VIOLATION};
     use windows_sys::Win32::Storage::FileSystem::{
-        CreateFileW, DELETE, FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES, OPEN_EXISTING,
+        DELETE, FILE_ATTRIBUTE_DIRECTORY, FILE_READ_ATTRIBUTES,
     };
 
-    for entry in fs::read_dir(directory)? {
-        let entry = entry?;
-        let name = entry.file_name();
-        let name = name.to_string_lossy();
+    for entry in directory_entries(directory)? {
+        if entry.attributes & FILE_ATTRIBUTE_DIRECTORY != 0 {
+            continue;
+        }
+        let name_os = entry.name;
+        let name = name_os.to_string_lossy();
         if !name.starts_with("crash-") || !name.ends_with(".dmp.part") {
             continue;
         }
-        let path = entry.path();
-        let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
-        let handle = unsafe {
-            CreateFileW(
-                wide.as_ptr(),
-                FILE_READ_ATTRIBUTES | DELETE,
-                0,
-                std::ptr::null(),
-                OPEN_EXISTING,
-                FILE_FLAG_OPEN_REPARSE_POINT,
-                std::ptr::null_mut(),
-            )
-        };
-        if handle == INVALID_HANDLE_VALUE {
-            let error = io::Error::last_os_error();
-            if error.raw_os_error() == Some(ERROR_SHARING_VIOLATION as i32) {
+        match open_relative(
+            directory,
+            &name_os,
+            FILE_READ_ATTRIBUTES | DELETE | 0x0010_0000,
+            0,
+            1,
+            0x40 | 0x20 | 0x0020_0000,
+            0,
+            std::ptr::null_mut(),
+        ) {
+            Err(error) if error.raw_os_error() == Some(ERROR_SHARING_VIOLATION as i32) => {
                 // An active reservation is held with share mode zero. Leave
                 // it in the in-flight budget.
                 continue;
             }
-            return Err(error);
+            Err(error) => return Err(error),
+            Ok(handle) => {
+                let result = authenticate_plain_file(handle, false)
+                    .and_then(|_| mark_delete_by_handle(handle));
+                unsafe { CloseHandle(handle) };
+                result?;
+            }
         }
-        let result = authenticate_file_handle(handle, directory, false)
-            .and_then(|_| mark_delete_by_handle(handle));
-        unsafe { CloseHandle(handle) };
-        result?;
     }
     Ok(())
 }
@@ -763,52 +1013,58 @@ pub(crate) fn create_minidump_file_for_launch(
 fn create_minidump_file_in_directory(
     directory: &MinidumpDirectory,
 ) -> io::Result<MinidumpLaunchFile> {
-    use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::Foundation::{
-        CloseHandle, SetHandleInformation, HANDLE, HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE,
+        CloseHandle, SetHandleInformation, HANDLE, HANDLE_FLAG_INHERIT,
     };
     use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
     use windows_sys::Win32::Storage::FileSystem::{
-        CreateFileW, CREATE_NEW, DELETE, FILE_ATTRIBUTE_NORMAL, FILE_GENERIC_WRITE,
+        DELETE, FILE_ATTRIBUTE_NORMAL, FILE_GENERIC_WRITE, FILE_READ_ATTRIBUTES, WRITE_DAC,
     };
     use windows_sys::Win32::System::Pipes::CreatePipe;
 
     // This lock covers only the budget scan and CREATE_NEW reservation. The
     // reservation handle itself remains alive until the worker exits.
-    let _policy_lock = acquire_policy_lock(&directory.path)?;
-    let directory_guard = directory.guard.try_clone()?;
-    remove_stale_reservations(&directory.path)?;
-    if let Err(error) = enforce_budget(&directory.path) {
+    let directory_guard = std::sync::Arc::clone(&directory.guard);
+    let _policy_lock = acquire_policy_lock(&directory_guard)?;
+    remove_stale_reservations(&directory_guard)?;
+    if let Err(error) = enforce_budget(&directory_guard) {
         return Err(error);
     }
-    let reservation_path = directory
-        .path
-        .join(format!("crash-{:032x}.dmp.part", rand::random::<u128>()));
-    let final_path = reservation_path.with_extension("dmp");
-    let wide: Vec<u16> = reservation_path
-        .as_os_str()
-        .encode_wide()
-        .chain(Some(0))
-        .collect();
-    let (mut security, _security_descriptor) = protected_file_security()?;
-    let dump_handle = unsafe {
-        CreateFileW(
-            wide.as_ptr(),
-            FILE_GENERIC_WRITE | DELETE,
-            0,
-            &mut security,
-            CREATE_NEW,
-            FILE_ATTRIBUTE_NORMAL,
-            std::ptr::null_mut(),
+    let nonce = format!("crash-{:032x}", rand::random::<u128>());
+    let reservation_name = std::ffi::OsString::from(format!("{nonce}.dmp.part"));
+    let final_name = std::ffi::OsString::from(format!("{nonce}.dmp"));
+    let (_, security_descriptor) = protected_file_security()?;
+    let dump_handle = open_relative(
+        &directory_guard,
+        &reservation_name,
+        FILE_GENERIC_WRITE | FILE_READ_ATTRIBUTES | DELETE | WRITE_DAC | 0x0010_0000,
+        0,
+        2,
+        0x40 | 0x20 | 0x0020_0000,
+        FILE_ATTRIBUTE_NORMAL,
+        security_descriptor.0,
+    )
+    .map_err(|error| {
+        io::Error::new(
+            error.kind(),
+            format!("relative reservation create: {error}"),
         )
-    };
-    if dump_handle == INVALID_HANDLE_VALUE {
-        return Err(io::Error::last_os_error());
-    }
-    if let Err(error) = authenticate_file_handle(dump_handle, &directory.path, false) {
+    })?;
+    if let Err(error) = harden_file_acl(dump_handle) {
         let _ = mark_delete_by_handle(dump_handle);
         unsafe { CloseHandle(dump_handle) };
-        return Err(error);
+        return Err(io::Error::new(
+            error.kind(),
+            format!("relative reservation ACL: {error}"),
+        ));
+    }
+    if let Err(error) = authenticate_plain_file(dump_handle, false) {
+        let _ = mark_delete_by_handle(dump_handle);
+        unsafe { CloseHandle(dump_handle) };
+        return Err(io::Error::new(
+            error.kind(),
+            format!("relative reservation authentication: {error}"),
+        ));
     }
     let mut dump_read: HANDLE = std::ptr::null_mut();
     let mut dump_write: HANDLE = std::ptr::null_mut();
@@ -857,7 +1113,7 @@ fn create_minidump_file_in_directory(
         dump_handle,
         worker_handle: dump_write,
         ack_handle: ack_read,
-        final_path,
+        final_name,
         _directory_guard: directory_guard,
         cancel_reader,
         reader: Some(reader),
@@ -879,6 +1135,18 @@ mod tests {
         repository
     }
 
+    #[cfg(windows)]
+    fn enforce_budget_path(path: &Path) -> io::Result<()> {
+        let canonical = fs::canonicalize(path)?;
+        let guard = harden_directory_acl(&canonical)?;
+        enforce_budget(&guard)
+    }
+
+    #[cfg(not(windows))]
+    fn enforce_budget_path(path: &Path) -> io::Result<()> {
+        enforce_budget(path)
+    }
+
     #[test]
     fn directory_resolution_stays_under_target() {
         let repository = test_repository();
@@ -887,6 +1155,17 @@ mod tests {
         assert!(resolved
             .path
             .starts_with(fs::canonicalize(repository.join("target")).expect("canonical target")));
+        let concurrent = resolve_directory(&repository, Path::new("target/crash-dumps"))
+            .expect("concurrent directory guards should coexist");
+        assert_eq!(concurrent.path, resolved.path);
+        #[cfg(windows)]
+        {
+            let renamed = repository.join("target/renamed-crash-dumps");
+            fs::rename(&resolved.path, &renamed).expect("guard permits cross-process coexistence");
+            let reservation = create_minidump_file_in_directory(&resolved)
+                .expect("handle-relative launch survives directory rename");
+            drop(reservation);
+        }
         assert!(resolve_directory(&repository, Path::new("../outside")).is_err());
         assert!(resolve_directory(&repository, Path::new("target/../outside")).is_err());
         let _ = fs::remove_dir_all(repository);
@@ -898,13 +1177,13 @@ mod tests {
         let directory = repository.join("target/crash-dumps");
         fs::create_dir_all(&directory).expect("create dump directory");
         fs::write(directory.join("crash-existing.dmp"), [0u8; 1]).expect("write dump");
-        enforce_budget(&directory).expect("one small dump should fit");
+        enforce_budget_path(&directory).expect("one small dump should fit");
         fs::write(
             directory.join("crash-full.dmp"),
             vec![0u8; (MAX_MINIDUMP_TOTAL_BYTES - MAX_MINIDUMP_FILE_BYTES) as usize],
         )
         .expect("write near-cap dump");
-        assert!(enforce_budget(&directory).is_err());
+        assert!(enforce_budget_path(&directory).is_err());
         let _ = fs::remove_dir_all(repository);
     }
 
@@ -916,7 +1195,7 @@ mod tests {
         for index in 0..MAX_MINIDUMP_FILES {
             fs::write(directory.join(format!("crash-{index}.dmp")), [0u8; 1]).expect("write dump");
         }
-        assert!(enforce_budget(&directory).is_err());
+        assert!(enforce_budget_path(&directory).is_err());
         let _ = fs::remove_dir_all(repository);
     }
 
@@ -929,9 +1208,9 @@ mod tests {
             fs::write(directory.join(format!("crash-{index}.dmp.part")), [])
                 .expect("write reservation");
         }
-        enforce_budget(&directory).expect("three maximum reservations should fit");
+        enforce_budget_path(&directory).expect("three maximum reservations should fit");
         fs::write(directory.join("crash-3.dmp.part"), []).expect("write reservation");
-        assert!(enforce_budget(&directory).is_err());
+        assert!(enforce_budget_path(&directory).is_err());
         let _ = fs::remove_dir_all(repository);
     }
 
@@ -998,7 +1277,7 @@ mod tests {
         let (repository, directory) = test_windows_directory();
         let mut reservation =
             create_minidump_file_in_directory(&directory).expect("create reservation");
-        let final_path = reservation.final_path.clone();
+        let final_path = directory.path.join(&reservation.final_name);
         let bytes = b"MDMP-test";
         let mut written = 0u32;
         assert_ne!(
@@ -1064,10 +1343,10 @@ mod tests {
         use std::time::Duration;
 
         let (repository, directory) = test_windows_directory();
-        let first = acquire_policy_lock(&directory.path).expect("first lock");
-        let path = directory.path.clone();
+        let first = acquire_policy_lock(&directory.guard).expect("first lock");
+        let guard = std::sync::Arc::clone(&directory.guard);
         let contender = thread::spawn(move || {
-            let lock = acquire_policy_lock(&path).expect("contender should wait");
+            let lock = acquire_policy_lock(&guard).expect("contender should wait");
             drop(lock);
         });
         thread::sleep(Duration::from_millis(100));
@@ -1081,14 +1360,62 @@ mod tests {
     #[test]
     fn policy_lock_timeout_has_an_explicit_error_kind() {
         let (repository, directory) = test_windows_directory();
-        let first = acquire_policy_lock(&directory.path).expect("first lock");
-        let error =
-            acquire_policy_lock_with_timeout(&directory.path, std::time::Duration::from_millis(50))
-                .err()
-                .expect("held policy lock should time out");
+        let first = acquire_policy_lock(&directory.guard).expect("first lock");
+        let error = acquire_policy_lock_with_timeout(
+            &directory.guard,
+            std::time::Duration::from_millis(50),
+        )
+        .err()
+        .expect("held policy lock should time out");
         assert_eq!(error.kind(), io::ErrorKind::TimedOut);
         drop(first);
         drop(directory);
+        let _ = fs::remove_dir_all(repository);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn directory_guards_coexist_across_processes() {
+        use std::process::Command;
+        use std::thread;
+        use std::time::{Duration, Instant};
+
+        const CHILD_REPOSITORY: &str = "AEXCOMPAT_TEST_GUARD_REPOSITORY";
+        const CHILD_READY: &str = "AEXCOMPAT_TEST_GUARD_READY";
+        if let (Some(repository), Some(ready)) =
+            (env::var_os(CHILD_REPOSITORY), env::var_os(CHILD_READY))
+        {
+            let repository = PathBuf::from(repository);
+            let directory = resolve_directory(&repository, Path::new("target/crash-dumps"))
+                .expect("child guard");
+            fs::write(ready, []).expect("signal child guard");
+            thread::sleep(Duration::from_secs(3));
+            drop(directory);
+            return;
+        }
+
+        let repository = test_repository();
+        let ready = repository.join("guard-ready");
+        let mut child = Command::new(std::env::current_exe().expect("test executable"))
+            .arg("--exact")
+            .arg("minidump_policy::tests::directory_guards_coexist_across_processes")
+            .arg("--nocapture")
+            .env(CHILD_REPOSITORY, &repository)
+            .env(CHILD_READY, &ready)
+            .spawn()
+            .expect("spawn guard child");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !ready.exists() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(ready.exists(), "child guard did not become ready");
+        let directory = resolve_directory(&repository, Path::new("target/crash-dumps"))
+            .expect("parent guard must coexist with child guard");
+        let reservation = create_minidump_file_in_directory(&directory)
+            .expect("parent capture must work while child guard is alive");
+        drop(reservation);
+        drop(directory);
+        assert!(child.wait().expect("wait guard child").success());
         let _ = fs::remove_dir_all(repository);
     }
 }

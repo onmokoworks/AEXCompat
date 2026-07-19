@@ -15,7 +15,7 @@ broker\target\release\aexcompat-harness.exe --render-experimental-smart `
 
 The broker resolves the value below the repository `target/` tree, rejects
 `.`/`..` traversal and reparse-point components, and creates one `CREATE_NEW`
-file for the launch. It then authenticates the file's final path and keeps the
+file for the launch. It authenticates the anchor-relative file handle and keeps the
 file handle broker-private. The worker receives only an explicit pipe transport
 through the same `PROC_THREAD_ATTRIBUTE_HANDLE_LIST` mechanism used by the
 trace channel; a broker reader copies at most 64 MiB into the authenticated
@@ -26,6 +26,11 @@ The managed dump directory and each reservation file use a protected DACL
 granting full access only to LocalSystem and the object owner, because a dump
 can contain arbitrary process memory. Publication renames the still-open authenticated handle from
 `.dmp.part` to `.dmp`; no close-then-path-rename window exists.
+The broker anchors the dump directory with an authenticated directory handle.
+Policy locking, budget enumeration, stale cleanup, reservation creation, and
+publication all resolve names relative to that handle. Concurrent broker
+processes can hold independent anchors, and a directory rename during capture
+cannot redirect publication into a replacement at the old path.
 
 The broker policy bounds both dimensions of local storage:
 
