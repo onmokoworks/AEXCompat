@@ -72,6 +72,8 @@ WORKER_RUNTIME_OWNERS = (
     "minihost/src/worker_host_suite_wiring.cpp",
     "minihost/src/worker_l2_shared_helpers.cpp",
     "minihost/src/worker_l2_payload_parsers.cpp",
+    "minihost/src/worker_early_mode_bridge.hpp",
+    "minihost/src/worker_early_mode_bridge.cpp",
 )
 
 # 契約名 → owner ファイル群 (repo ルート相対)。
@@ -146,6 +148,8 @@ CONTRACTS = {
         "minihost/src/worker_host_suite_wiring.cpp",
         "minihost/src/worker_l2_shared_helpers.cpp",
         "minihost/src/worker_l2_payload_parsers.cpp",
+        "minihost/src/worker_early_mode_bridge.hpp",
+        "minihost/src/worker_early_mode_bridge.cpp",
         "minihost/src/worker_aegp_timeline_probe.hpp",
         "minihost/src/worker_aegp_timeline_probe.cpp",
         "minihost/src/worker_aegp_host_selftests.cpp",
