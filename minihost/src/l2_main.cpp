@@ -66,6 +66,7 @@
 #include "worker_session.hpp"
 #include "worker_selftest_dispatch.hpp"
 #include "worker_smart_runtime.hpp"
+#include "worker_smart_execution.hpp"
 #include "worker_mask_runtime.hpp"
 #include "worker_mask_selftests.hpp"
 #include "worker_pf_path_runtime.hpp"
@@ -5257,32 +5258,7 @@ bool exercise_loaded_effect_item_receipt(EffectEntry entry,
       async_receipt_lifetimes_balanced() && render_options_lifetimes_balanced();
   return g_loaded_effect_receipt_fixture_passed;
 }
-struct SmartResult {
-  std::shared_ptr<const aexcompat::worker_runtime::smart::Snapshot> runtime{
-      std::make_shared<aexcompat::worker_runtime::smart::Snapshot>()};
-  int32_t gpu_setup_error{};
-  int32_t pre_error{-1};
-  int32_t selector_error{-1};
-  int32_t render_error{-1};
-  int32_t gpu_setdown_error{};
-  uint32_t gpu_setdown_exception_code{};
-  std::string input_hash;
-  std::string output_hash;
-  bool rects_valid{};
-  bool guards_intact{};
-  bool output_pixels_valid{};
-  bool gpu_render_possible{};
-  bool gpu_render_dispatched{};
-  int32_t checkout_time{};
-  int32_t checkout_time_step{};
-  uint32_t checkout_time_scale{};
-  bool roi_contract_valid{};
-  std::array<int32_t, 4> result_rect{};
-  std::array<int32_t, 4> max_result_rect{};
-  int32_t output_width{};
-  int32_t output_height{};
-  int32_t output_rowbytes{};
-};
+using SmartResult = aexcompat::worker_runtime::smart_execution::Result;
 
 SmartResult smart_render_runtime(EffectEntry entry, std::array<std::byte, kInSize>& input,
                               std::array<std::byte, kOutSize>& command_output,
@@ -5814,52 +5790,9 @@ SmartResult smart_render_runtime(EffectEntry entry, std::array<std::byte, kInSiz
   return result;
 }
 
-struct SmartRenderRequest {
-  EffectEntry entry;
-  std::array<std::byte, kInSize>& input;
-  std::array<std::byte, kOutSize>& output;
-  const std::string& case_id;
-  const RequestedAssignments* requested;
-  const std::vector<unsigned char>* external_rgba;
-  const std::filesystem::path* external_output;
-  int32_t external_width;
-  int32_t external_height;
-  const std::vector<ExternalLayerInput>* external_layers;
-  int32_t external_current_time;
-  int32_t external_time_step;
-  int32_t external_total_time;
-  uint32_t external_time_scale;
-  int32_t external_pixel_bytes;
-  SmartResult result;
-};
-
-bool smart_render_dependencies_ready(void* opaque) {
-  const auto& request = *static_cast<SmartRenderRequest*>(opaque);
-  // SmartFX requires both a non-null entry point and valid rational time before
-  // PF_Cmd_SMART_PRE_RENDER / CPU-or-GPU SMART_RENDER can be admitted.
-  return request.entry && request.external_time_scale != 0 &&
-      request.external_time_step > 0 && request.external_total_time >= request.external_current_time;
-}
-
-int smart_render_guarded_effect_main(void* opaque) {
-  auto& request = *static_cast<SmartRenderRequest*>(opaque);
-  request.result = smart_render_runtime(request.entry, request.input, request.output,
-      request.case_id, request.requested, request.external_rgba, request.external_output,
-      request.external_width, request.external_height, request.external_layers,
-      request.external_current_time, request.external_time_step, request.external_total_time,
-      request.external_time_scale, request.external_pixel_bytes);
-  // GPU setup / pre-render / selector errors preserve their own precise field;
-  // render_error is the lifecycle's primary result for shared error priority.
-  if (request.result.gpu_setup_error != 0) return request.result.gpu_setup_error;
-  if (request.result.pre_error != 0) return request.result.pre_error;
-  return request.result.render_error;
-}
-
-int smart_render_cleanup(void*) {
-  // smart_render_runtime performs GPU setdown, pre-render data cleanup,
-  // automatic parameter checkins, suite releases, and world cleanup itself.
-  return 0;
-}
+const bool g_smart_execution_configured =
+    aexcompat::worker_runtime::smart_execution::configure({
+        &smart_render_runtime, +[] { return g_module_audit.required; }});
 
 SmartResult smart_render_once(EffectEntry entry, std::array<std::byte, kInSize>& input,
                               std::array<std::byte, kOutSize>& output,
@@ -5873,19 +5806,11 @@ SmartResult smart_render_once(EffectEntry entry, std::array<std::byte, kInSize>&
                               int32_t external_total_time = 1,
                               uint32_t external_time_scale = 1,
                               int32_t external_pixel_bytes = 4) {
-  SmartRenderRequest request{entry, input, output, case_id, requested, external_rgba,
-      external_output, external_width, external_height, external_layers, external_current_time,
-      external_time_step, external_total_time, external_time_scale, external_pixel_bytes, {}};
-  aexcompat::render::RenderContext context{
-      aexcompat::render::RenderKind::SmartPreRenderAndRender, &request,
-      {&smart_render_guarded_effect_main, &smart_render_cleanup,
-       &smart_render_dependencies_ready},
-      g_module_audit.required};
-  const int dispatch_error = aexcompat::render::dispatch(context);
-  // Never mask the detailed native result. The generic result only supplies a
-  // pre-admission failure when no selector executed.
-  if (!context.selector_started && dispatch_error != 0) request.result.render_error = dispatch_error;
-  return request.result;
+  return aexcompat::worker_runtime::smart_execution::render_once(
+      entry, input, output, case_id, requested, external_rgba, external_output,
+      external_width, external_height, external_layers, external_current_time,
+      external_time_step, external_total_time, external_time_scale,
+      external_pixel_bytes);
 }
 
 void report(const char* status, int32_t global_error, int32_t params_error,

@@ -103,7 +103,7 @@ def test_observed_modules_are_bounded_deduplicated_and_unknowns_are_sticky():
 def test_gpu_boundaries_capture_before_begin_selector_setdown_and_end():
     smart = MAIN[
         MAIN.index("SmartResult smart_render_runtime"):
-        MAIN.index("int smart_render_guarded_effect_main")
+        MAIN.index("const bool g_smart_execution_configured")
     ]
     assert smart.count("if (gpu_negotiation) capture_module_audit();") >= 3
     setdown = smart.index('stage:gpu_device_setdown_begin')
