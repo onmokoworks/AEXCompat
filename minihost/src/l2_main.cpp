@@ -119,7 +119,9 @@
 #include "worker_pf_ae_channel_runtime.hpp"
 #include "worker_pf_state_runtime.hpp"
 #include "worker_report.hpp"
+#include "worker_render_session.hpp"
 #include "worker_request_parser.hpp"
+#include "strict_json.hpp"
 #include "worker_invocation_orchestration.hpp"
 #include "worker_render_report.hpp"
 #include "worker_render_receipts.hpp"
@@ -4860,6 +4862,227 @@ int32_t render_once(EffectEntry entry, std::array<std::byte, kInSize>& input,
   return aexcompat::worker_runtime::classic::dispatch(context);
 }
 
+// Resident render session frame loop (docs/RENDER_SESSION_PROTOCOL_2026-07-19.md).
+// SEQUENCE_SETUP is hoisted once around render_once(manage_sequence=false)
+// following the persistent_sequence precedent; pixels move through the
+// inherited anonymous section (copy-through slots, the plug-in never sees the
+// mapping) and control messages over the inherited pipe pair with strict
+// exact-key validation.
+struct RenderSessionOutcome {
+  int32_t setup_error{-1};
+  int32_t setdown_error{-1};
+  int32_t last_frame_error{0};
+  int32_t frames_attempted{0};
+  bool protocol_violation{false};
+  bool invariant_failure{false};
+  int32_t width{0};
+  int32_t height{0};
+  int32_t rowbytes{0};
+  std::string input_hash;
+  std::string output_hash;
+  bool guards_intact{true};
+  int32_t render_error{-1};
+};
+
+RenderSessionOutcome run_render_session(
+    EffectEntry entry, std::array<std::byte, kInSize>& input,
+    std::array<std::byte, kOutSize>& output, const RequestedAssignments* requested,
+    int32_t max_width, int32_t max_height, int32_t time_step, int32_t total_time,
+    uint32_t time_scale, int32_t pixel_bytes) {
+  using aexcompat::strict_json::JsonValue;
+  using aexcompat::strict_json::StrictJsonParser;
+  using aexcompat::strict_json::json_exact_keys;
+  using aexcompat::strict_json::json_i32;
+  using aexcompat::strict_json::json_member;
+  using aexcompat::strict_json::json_string;
+  namespace wrs = aexcompat::worker_render_session;
+  constexpr int32_t kSessionTimeScaleMismatch = -40;
+  constexpr int32_t kSessionGenerationMismatch = -41;
+  constexpr int32_t kSessionOutputCaptureError = -42;
+  constexpr int32_t kSessionGuardViolation = -43;
+
+  RenderSessionOutcome outcome;
+  const wrs::SessionGeometry geometry{max_width, max_height, pixel_bytes, 0};
+  wrs::SessionChannels channels;
+  if (!channels.open_from_environment(geometry) ||
+      !channels.static_header_matches(geometry)) {
+    outcome.protocol_violation = true;
+    return outcome;
+  }
+  outcome.setup_error =
+      invoke_sequence_selector(entry, kSequenceSetup, input.data(), output.data());
+  if (outcome.setup_error != 0) return outcome;
+  write<void*>(input, kInSequenceData, read<void*>(output, kOutSequenceData));
+
+  const std::size_t input_offset = wrs::input_slot_offset();
+  const std::size_t output_offset = wrs::output_slot_offset(geometry);
+  const char* pixel_format = pixel_bytes == 16 ? "argb32f" :
+      (pixel_bytes == 8 ? "argb16" : "argb8");
+  std::vector<unsigned char> frame_rgba(wrs::input_slot_bytes(geometry));
+  std::vector<unsigned char> captured;
+  std::string message;
+  while (channels.read_message(message)) {
+    JsonValue root;
+    if (!StrictJsonParser(std::move(message)).parse(root) ||
+        !std::holds_alternative<JsonValue::Object>(root.value)) {
+      outcome.protocol_violation = true;
+      break;
+    }
+    const auto& object = std::get<JsonValue::Object>(root.value);
+    std::string type;
+    int32_t version{};
+    if (!json_string(object, "type", type) || !json_i32(object, "v", version) ||
+        version != static_cast<int32_t>(wrs::kProtocolVersion)) {
+      outcome.protocol_violation = true;
+      break;
+    }
+    if (type == "close") {
+      if (!json_exact_keys(object, {"v", "type"})) outcome.protocol_violation = true;
+      break;
+    }
+    int32_t frame_index{};
+    const auto* time_value = json_member(object, "current_time");
+    if (type != "render_frame" ||
+        !json_exact_keys(object, {"v", "type", "frame_index", "current_time"}) ||
+        !json_i32(object, "frame_index", frame_index) || frame_index < 0 ||
+        !time_value || !std::holds_alternative<JsonValue::Object>(time_value->value)) {
+      outcome.protocol_violation = true;
+      break;
+    }
+    const auto& time_object = std::get<JsonValue::Object>(time_value->value);
+    int32_t current_time{};
+    int32_t current_scale{};
+    if (!json_exact_keys(time_object, {"value", "scale"}) ||
+        !json_i32(time_object, "value", current_time) ||
+        !json_i32(time_object, "scale", current_scale) || current_scale <= 0) {
+      outcome.protocol_violation = true;
+      break;
+    }
+    const uint32_t expected_generation = static_cast<uint32_t>(frame_index) + 1;
+    // Error responses carry no output or generation: a frame rejected before
+    // or during rendering never updates the output slot, so there is no slot
+    // metadata to report (protocol §4.3).
+    const auto respond_error = [&](int32_t frame_error) {
+      std::string reply = "{\"v\":1,\"type\":\"frame_done\",\"frame_index\":" +
+          std::to_string(frame_index) + ",\"status\":\"error\",\"render_error\":" +
+          std::to_string(frame_error) + "}";
+      return channels.write_message(reply);
+    };
+    const auto respond_ok = [&](int32_t frame_width, int32_t frame_height,
+                                int32_t frame_rowbytes, const std::string& checksum) {
+      std::string reply;
+      reply.reserve(256);
+      reply += "{\"v\":1,\"type\":\"frame_done\",\"frame_index\":";
+      reply += std::to_string(frame_index);
+      reply += ",\"status\":\"ok\",\"output\":{\"width\":";
+      reply += std::to_string(frame_width);
+      reply += ",\"height\":";
+      reply += std::to_string(frame_height);
+      reply += ",\"rowbytes\":";
+      reply += std::to_string(frame_rowbytes);
+      reply += ",\"pixel_format\":\"";
+      reply += pixel_format;
+      reply += "\",\"checksum\":\"";
+      reply += checksum;
+      reply += "\",\"guards_intact\":true},\"render_error\":0,\"generation\":";
+      reply += std::to_string(expected_generation);
+      reply += "}";
+      return channels.write_message(reply);
+    };
+    if (static_cast<uint32_t>(current_scale) != time_scale) {
+      // Frame-local diagnostic: the session continues, the broker decides.
+      outcome.last_frame_error = kSessionTimeScaleMismatch;
+      if (!respond_error(kSessionTimeScaleMismatch)) {
+        outcome.protocol_violation = true;
+        break;
+      }
+      continue;
+    }
+    if (channels.read_header_u32(wrs::kHeaderInputGenerationOffset) !=
+            expected_generation ||
+        !channels.static_header_matches(geometry)) {
+      // Stale slot or mutated header: host-protection invariant, fail closed.
+      respond_error(kSessionGenerationMismatch);
+      outcome.invariant_failure = true;
+      break;
+    }
+    std::memcpy(frame_rgba.data(), channels.view() + input_offset, frame_rgba.size());
+    outcome.frames_attempted += 1;
+    int32_t frame_width = 0, frame_height = 0, frame_rowbytes = 0;
+    std::string frame_input_hash, frame_output_hash;
+    bool frame_guards = false;
+    captured.clear();
+    const int32_t frame_error = render_once(
+        entry, input, output, "request", frame_width, frame_height, frame_rowbytes,
+        frame_input_hash, frame_output_hash, frame_guards, requested, &frame_rgba,
+        nullptr, max_width, max_height, nullptr, current_time, time_step, total_time,
+        time_scale, pixel_bytes, false, &captured);
+    outcome.width = frame_width;
+    outcome.height = frame_height;
+    outcome.rowbytes = frame_rowbytes;
+    outcome.input_hash = frame_input_hash;
+    outcome.output_hash = frame_output_hash;
+    if (frame_error != 0) {
+      // Frame-local compatibility diagnostic; the sequence state is still
+      // owned by the host, so the session may continue.
+      outcome.last_frame_error = frame_error;
+      if (!respond_error(frame_error)) {
+        outcome.protocol_violation = true;
+        break;
+      }
+      continue;
+    }
+    // A guard violation on a frame that rendered is corruption evidence: the
+    // plug-in wrote outside its guarded private buffer. Host-protection
+    // invariant, fail closed.
+    if (!frame_guards) {
+      outcome.guards_intact = false;
+      outcome.last_frame_error = kSessionGuardViolation;
+      respond_error(kSessionGuardViolation);
+      outcome.invariant_failure = true;
+      break;
+    }
+    const std::size_t expected_pixels =
+        static_cast<std::size_t>(frame_width) * frame_height;
+    if (captured.size() != expected_pixels * pixel_bytes ||
+        output_offset + captured.size() > wrs::expected_section_bytes(geometry)) {
+      outcome.last_frame_error = kSessionOutputCaptureError;
+      respond_error(kSessionOutputCaptureError);
+      outcome.invariant_failure = true;
+      break;
+    }
+    unsigned char* slot = channels.view() + output_offset;
+    for (std::size_t pixel = 0; pixel < expected_pixels; ++pixel)
+      argb_to_rgba_native(slot + pixel * pixel_bytes,
+                          captured.data() + pixel * pixel_bytes, pixel_bytes);
+    channels.write_header_u32(wrs::kHeaderFrameWidthOffset,
+                              static_cast<uint32_t>(frame_width));
+    channels.write_header_u32(wrs::kHeaderFrameHeightOffset,
+                              static_cast<uint32_t>(frame_height));
+    channels.write_header_u32(wrs::kHeaderOutputGenerationOffset,
+                              expected_generation);
+    // The frame checksum covers the transferred slot bytes, the exact bytes
+    // the broker reads; the final report's output_hash keeps the one-shot
+    // internal-ARGB definition (protocol §4.3).
+    const std::string slot_checksum = sha256_bytes(slot, captured.size());
+    outcome.last_frame_error = 0;
+    if (!respond_ok(frame_width, frame_height, frame_rowbytes, slot_checksum)) {
+      outcome.protocol_violation = true;
+      break;
+    }
+  }
+  outcome.setdown_error =
+      invoke_sequence_selector(entry, kSequenceSetdown, input.data(), output.data());
+  write<void*>(input, kInSequenceData, nullptr);
+  outcome.render_error =
+      outcome.setup_error == 0 && outcome.setdown_error == 0 &&
+              !outcome.protocol_violation && !outcome.invariant_failure &&
+              outcome.last_frame_error == 0
+          ? 0
+          : -1;
+  return outcome;
+}
+
 bool exercise_loaded_effect_item_receipt(EffectEntry entry,
     std::array<std::byte, kInSize>& input, std::array<std::byte, kOutSize>& output) {
   aexcompat::aegp_layer_render_runtime::context() = {
@@ -6181,6 +6404,7 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
   auto& smart_directx = invocation.smart_directx;
   auto& smart_image_mode = invocation.smart_image_mode;
   auto& smart_layered_image_mode = invocation.smart_layered_image_mode;
+  auto& render_session_mode = invocation.render_session_mode;
   auto& external_pixel_bytes = invocation.external_pixel_bytes;
   auto& transport_argc = invocation.transport_argc;
   auto& image_click_argc = invocation.image_click_argc;
@@ -7101,6 +7325,8 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
   std::array<bool, 2> thread_guards{false, false};
   bool concurrent_render = false;
   bool persistent_sequence = false;
+  bool session_protocol_violation = false;
+  bool session_invariant_failure = false;
   bool flattened_sequence = false;
   bool copied_flattened_sequence = false;
   int32_t persistent_sequence_setup_error = -1;
@@ -7286,6 +7512,23 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
     render_error = thread_errors[0] == 0 && thread_errors[1] == 0 &&
         widths[0] == widths[1] && heights[0] == heights[1] && rowbytes[0] == rowbytes[1] &&
         input_hashes[0] == input_hashes[1] && thread_hashes[0] == thread_hashes[1] ? 0 : -1;
+  } else if (params_error == 0 && image_render_supported && depth_supported &&
+             render_session_mode) {
+    const auto session_outcome = run_render_session(
+        entry, input, output, &requested_parameters, external_width,
+        external_height, external_time_step, external_total_time,
+        external_time_scale, external_pixel_bytes);
+    persistent_sequence_setup_error = session_outcome.setup_error;
+    persistent_sequence_setdown_error = session_outcome.setdown_error;
+    render_width = session_outcome.width;
+    render_height = session_outcome.height;
+    render_rowbytes = session_outcome.rowbytes;
+    input_hash = session_outcome.input_hash;
+    output_hash = session_outcome.output_hash;
+    guards_intact = session_outcome.guards_intact;
+    session_protocol_violation = session_outcome.protocol_violation;
+    session_invariant_failure = session_outcome.invariant_failure;
+    render_error = session_outcome.render_error;
   } else if (params_error == 0 && image_render_supported && depth_supported) {
     render_error = render_once(entry, input, output, case_id, render_width, render_height,
                                render_rowbytes, input_hash, output_hash, guards_intact,
@@ -7584,6 +7827,11 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
          global_error, params_error, setdown_error, output, about_message, lifecycle_errors, lifecycle_data_null);
   }
   if (is_render_worker()) {
+    // Session fail-closed self-termination paths keep dedicated exit codes so
+    // the broker can distinguish protocol violations (23) and host-protection
+    // invariant failures (24) from ordinary render failures (21).
+    if (session_protocol_violation) return session.finish(23);
+    if (session_invariant_failure) return session.finish(24);
     return session.finish(global_error == 0 && params_error == 0 && parameter_count_contract_valid &&
       image_render_supported && depth_supported && render_error == 0 && guards_intact &&
       handle_lifetimes_balanced() && world_lifetimes_balanced() &&

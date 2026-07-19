@@ -70,6 +70,17 @@ ParseResult parse(Kind kind, int argc, wchar_t** argv, const Hooks& hooks) {
       if (!load_audio(argv[13], result.invocation.audio_samples,
                       result.invocation.audio_rate, result.invocation.audio)) throw 1;
     }
+    if (mode.render_session_mode) {
+      auto& invocation = result.invocation;
+      invocation.width = std::stoi(argv[5]); invocation.height = std::stoi(argv[6]);
+      invocation.time_step = std::stoi(argv[7]);
+      invocation.total_time = std::stoi(argv[8]);
+      invocation.time_scale = std::stoul(argv[9]);
+      if (invocation.width <= 0 || invocation.height <= 0 ||
+          invocation.width > 4096 || invocation.height > 4096 ||
+          invocation.time_step <= 0 || invocation.total_time <= 0 ||
+          invocation.time_scale == 0) throw 1;
+    }
     if (mode.image_mode) {
       auto& invocation = result.invocation;
       invocation.width = std::stoi(argv[7]); invocation.height = std::stoi(argv[8]);
