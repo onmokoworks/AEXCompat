@@ -36,7 +36,7 @@ def test_opencl_loader_and_context_ownership_are_isolated_and_bounded():
 
 def test_opencl_transport_is_isolated_while_orchestration_stays_in_worker_owners():
     source = SOURCE.read_text(encoding="utf-8")
-    orchestration = MAIN.read_text(encoding="utf-8") + SMART_DISPATCH.read_text(encoding="utf-8")
+    orchestration = source_owners.worker_text() + SMART_DISPATCH.read_text(encoding="utf-8")
     cmake = CMAKE.read_text(encoding="utf-8")
 
     transport = TRANSPORT.read_text(encoding="utf-8")

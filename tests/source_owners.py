@@ -52,6 +52,8 @@ WORKER_RUNTIME_OWNERS = (
     "minihost/src/worker_classic_report.cpp",
     "minihost/src/worker_smart_report.hpp",
     "minihost/src/worker_smart_report.cpp",
+    "minihost/src/worker_invocation_orchestration.hpp",
+    "minihost/src/worker_invocation_orchestration.cpp",
 )
 
 # 契約名 → owner ファイル群 (repo ルート相対)。
@@ -80,6 +82,8 @@ CONTRACTS = {
         "minihost/src/worker_classic_report.cpp",
         "minihost/src/worker_smart_report.hpp",
         "minihost/src/worker_smart_report.cpp",
+        "minihost/src/worker_invocation_orchestration.hpp",
+        "minihost/src/worker_invocation_orchestration.cpp",
         "minihost/src/l2_mode_execution.hpp",
         "minihost/src/l2_mode_execution.cpp",
         "minihost/src/l2_cli_dispatch.cpp",

@@ -1,10 +1,33 @@
 #pragma once
 #include "worker_parameter_runtime.hpp"
 #include "worker_request_parser.hpp"
+#include "worker_smart_execution.hpp"
 #include <array>
 #include <cstdint>
 #include <filesystem>
+#include <string>
 #include <vector>
+
+namespace aexcompat::l2_detail {
+// Outcome of worker_main's resident render-session frame loop
+// (docs/RENDER_SESSION_PROTOCOL_2026-07-19.md). Defined here so the final
+// dispatch owner can call l2_main's run_render_session across TUs; the
+// protocol implementation stays in l2_main.
+struct RenderSessionOutcome {
+  int32_t setup_error{-1};
+  int32_t setdown_error{-1};
+  int32_t frames_attempted{0};
+  bool protocol_violation{false};
+  bool invariant_failure{false};
+  int32_t width{0};
+  int32_t height{0};
+  int32_t rowbytes{0};
+  std::string input_hash;
+  std::string output_hash;
+  bool guards_intact{true};
+  int32_t render_error{-1};
+};
+}  // namespace aexcompat::l2_detail
 namespace aexcompat::worker_runtime::invocation {
 using parameters::RequestedAssignments;
 struct InvocationState {
@@ -125,5 +148,66 @@ struct L2ModeHooks {
 int parse_l2_modes(int argc, wchar_t** argv, InvocationState&, const L2ModeHooks&);
 void apply_render(const request_parser::WorkerInvocation&, InvocationState&, const ApplyHooks&);
 void apply_smart(const request_parser::WorkerInvocation&, InvocationState&, const ApplyHooks&);
+
+// Final render/smart dispatch seam (issue #125 C6). worker_main_impl hands
+// case selection and the render invocation chain to this owner; the
+// l2_main-private renderers it drives (render_once, run_render_session,
+// smart_render_once, invoke_sequence_selector) stay defined in l2_main and
+// are reached through cross-TU declarations, so selector order, error
+// priority, and stderr stage traces are unchanged.
+struct FinalDispatchRequest {
+  parameter_execution::EffectEntry entry{};
+  parameter_execution::BufferIn* input{};
+  parameter_execution::BufferOut* output{};
+  const InvocationState* invocation{};
+  wchar_t** argv{};
+  int32_t params_error{};
+  bool image_render_supported{};
+  bool depth_supported{};
+  bool smart_render_supported{};
+};
+
+struct ClassicFinalDispatchResult {
+  // Non-ASCII case argument; worker_main_impl exits with code 2 unchanged.
+  bool case_id_rejected{};
+  std::string case_id;
+  std::string input_hash;
+  std::string output_hash;
+  bool guards_intact{};
+  int32_t render_width{};
+  int32_t render_height{};
+  int32_t render_rowbytes{};
+  std::array<int32_t, 2> thread_errors{-1, -1};
+  std::array<std::string, 2> thread_hashes{};
+  std::array<bool, 2> thread_guards{false, false};
+  bool concurrent_render{};
+  bool persistent_sequence{};
+  bool session_protocol_violation{};
+  bool session_invariant_failure{};
+  bool flattened_sequence{};
+  bool copied_flattened_sequence{};
+  int32_t persistent_sequence_setup_error{-1};
+  int32_t persistent_sequence_setdown_error{-1};
+  std::array<int32_t, 2> persistent_frame_errors{-1, -1};
+  std::array<std::string, 2> persistent_frame_hashes{};
+  int32_t sequence_flatten_error{-1};
+  int32_t sequence_resetup_error{-1};
+  bool flattened_handle_replaced{};
+  bool resetup_handle_replaced{};
+  bool flattened_handle_host_disposed{};
+  int32_t get_flattened_sequence_data_error{-1};
+  bool original_sequence_preserved{};
+  int32_t render_error{-1};
+};
+
+struct SmartFinalDispatchResult {
+  bool case_id_rejected{};
+  std::string case_id;
+  smart_execution::Result smart;
+  bool lifetime_fault_observed{};
+};
+
+ClassicFinalDispatchResult run_classic_final_dispatch(const FinalDispatchRequest&);
+SmartFinalDispatchResult run_smart_final_dispatch(const FinalDispatchRequest&);
 }  // namespace aexcompat::worker_runtime::invocation
 

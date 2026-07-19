@@ -4261,22 +4261,9 @@ int32_t render_once(EffectEntry entry, std::array<std::byte, kInSize>& input,
 // following the persistent_sequence precedent; pixels move through the
 // inherited anonymous section (copy-through slots, the plug-in never sees the
 // mapping) and control messages over the inherited pipe pair with strict
-// exact-key validation.
-struct RenderSessionOutcome {
-  int32_t setup_error{-1};
-  int32_t setdown_error{-1};
-  int32_t frames_attempted{0};
-  bool protocol_violation{false};
-  bool invariant_failure{false};
-  int32_t width{0};
-  int32_t height{0};
-  int32_t rowbytes{0};
-  std::string input_hash;
-  std::string output_hash;
-  bool guards_intact{true};
-  int32_t render_error{-1};
-};
-
+// exact-key validation. RenderSessionOutcome is defined in
+// worker_invocation_orchestration.hpp so the final dispatch owner can call
+// this across TUs.
 RenderSessionOutcome run_render_session(
     EffectEntry entry, std::array<std::byte, kInSize>& input,
     std::array<std::byte, kOutSize>& output, const RequestedAssignments* requested,
@@ -6070,222 +6057,46 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
   bool aegp_memory_fault_observed = false;
 
   if (is_render_worker()) {
-  aexcompat::worker_runtime::classic::reset_selector_diagnostic();
-  case_id = invocation.request_mode ? "request" : "";
-  if (!invocation.request_mode) {
-    for (const wchar_t* p = argv[4]; *p; ++p) {
-      if (*p > 0x7f) return session.finish(2);
-      case_id.push_back(static_cast<char>(*p));
-    }
-  }
-  concurrent_render = case_id == "threaded_default";
-  persistent_sequence = case_id == "persistent_sequence";
-  flattened_sequence = case_id == "flattened_sequence";
-  copied_flattened_sequence = case_id == "copied_flattened_sequence";
-  std::cerr << "stage:render_begin\n" << std::flush;
-  render_error = !image_render_supported ? -7 : (depth_supported ? -1 : -6);
-  if (params_error == 0 && image_render_supported && depth_supported && copied_flattened_sequence) {
-    g_mask_model_enabled = true;
-    configure_mask_scene("rectangle");
-    std::cerr << "stage:sequence_setup_begin\n" << std::flush;
-    persistent_sequence_setup_error = invoke_sequence_selector(
-        entry, kSequenceSetup, input.data(), output.data());
-    std::cerr << "stage:sequence_setup_end error=" << persistent_sequence_setup_error
-              << "\n" << std::flush;
-    void* original_handle = read<void*>(output, kOutSequenceData);
-    write<void*>(input, kInSequenceData, original_handle);
-    std::cerr << "stage:get_flattened_sequence_data_begin\n" << std::flush;
-    get_flattened_sequence_data_error = persistent_sequence_setup_error == 0
-        ? entry(kGetFlattenedSequenceData, input.data(), output.data(), nullptr, nullptr, nullptr) : -1;
-    std::cerr << "stage:get_flattened_sequence_data_end error="
-              << get_flattened_sequence_data_error << "\n" << std::flush;
-    void* flattened_copy = read<void*>(output, kOutSequenceData);
-    original_sequence_preserved = get_flattened_sequence_data_error == 0 &&
-        original_handle && flattened_copy && original_handle != flattened_copy &&
-        host_handle_is_live(original_handle) && host_handle_is_live(flattened_copy);
-    if (original_sequence_preserved) {
-      dispose_handle(reinterpret_cast<void**>(flattened_copy));
-      flattened_handle_host_disposed = !host_handle_is_live(flattened_copy);
-      write<void*>(input, kInSequenceData, original_handle);
-      write<void*>(output, kOutSequenceData, original_handle);
-    }
-    bool frame_guards = false;
-    persistent_frame_errors[0] = original_sequence_preserved && flattened_handle_host_disposed
-        ? render_once(entry, input, output, "default", render_width, render_height,
-                      render_rowbytes, input_hash, persistent_frame_hashes[0], frame_guards,
-                      nullptr, nullptr, nullptr, 0, 0, nullptr, 0, 1, 1, 1, 4, false)
-        : -1;
-    guards_intact = frame_guards;
-    std::cerr << "stage:sequence_setdown_begin\n" << std::flush;
-    persistent_sequence_setdown_error = persistent_frame_errors[0] == 0
-        ? invoke_sequence_selector(entry, kSequenceSetdown, input.data(), output.data()) : -1;
-    std::cerr << "stage:sequence_setdown_end error=" << persistent_sequence_setdown_error
-              << "\n" << std::flush;
-    write<void*>(input, kInSequenceData, nullptr);
-    output_hash = persistent_frame_hashes[0];
-    render_error = persistent_sequence_setup_error == 0 &&
-        get_flattened_sequence_data_error == 0 && original_sequence_preserved &&
-        flattened_handle_host_disposed && persistent_frame_errors[0] == 0 &&
-        persistent_sequence_setdown_error == 0 ? 0 : -1;
-  } else if (params_error == 0 && image_render_supported && depth_supported && flattened_sequence) {
-    g_mask_model_enabled = true;
-    configure_mask_scene("rectangle");
-    std::cerr << "stage:sequence_setup_begin\n" << std::flush;
-    persistent_sequence_setup_error = invoke_sequence_selector(
-        entry, kSequenceSetup, input.data(), output.data());
-    std::cerr << "stage:sequence_setup_end error=" << persistent_sequence_setup_error
-              << "\n" << std::flush;
-    void* unflattened_handle = read<void*>(output, kOutSequenceData);
-    write<void*>(input, kInSequenceData, unflattened_handle);
-    std::cerr << "stage:sequence_flatten_begin\n" << std::flush;
-    sequence_flatten_error = persistent_sequence_setup_error == 0
-        ? entry(kSequenceFlatten, input.data(), output.data(), nullptr, nullptr, nullptr) : -1;
-    std::cerr << "stage:sequence_flatten_end error=" << sequence_flatten_error
-              << "\n" << std::flush;
-    void* flattened_handle = read<void*>(output, kOutSequenceData);
-    flattened_handle_replaced = sequence_flatten_error == 0 && flattened_handle &&
-        flattened_handle != unflattened_handle && !host_handle_is_live(unflattened_handle);
-    write<void*>(input, kInSequenceData, flattened_handle);
-    std::cerr << "stage:sequence_resetup_begin\n" << std::flush;
-    sequence_resetup_error = flattened_handle_replaced
-        ? invoke_sequence_selector(entry, kSequenceResetup, input.data(), output.data()) : -1;
-    std::cerr << "stage:sequence_resetup_end error=" << sequence_resetup_error
-              << "\n" << std::flush;
-    void* resetup_handle = read<void*>(output, kOutSequenceData);
-    resetup_handle_replaced = sequence_resetup_error == 0 && resetup_handle &&
-        resetup_handle != flattened_handle && host_handle_is_live(flattened_handle) &&
-        host_handle_is_live(resetup_handle);
-    if (resetup_handle_replaced) {
-      dispose_handle(reinterpret_cast<void**>(flattened_handle));
-      flattened_handle_host_disposed = !host_handle_is_live(flattened_handle);
-      write<void*>(input, kInSequenceData, resetup_handle);
-    }
-    bool frame_guards = false;
-    persistent_frame_errors[0] = resetup_handle_replaced && flattened_handle_host_disposed
-        ? render_once(entry, input, output, "default", render_width, render_height,
-                      render_rowbytes, input_hash, persistent_frame_hashes[0], frame_guards,
-                      nullptr, nullptr, nullptr, 0, 0, nullptr, 0, 1, 1, 1, 4, false)
-        : -1;
-    guards_intact = frame_guards;
-    std::cerr << "stage:sequence_setdown_begin\n" << std::flush;
-    persistent_sequence_setdown_error = persistent_frame_errors[0] == 0
-        ? invoke_sequence_selector(entry, kSequenceSetdown, input.data(), output.data()) : -1;
-    std::cerr << "stage:sequence_setdown_end error=" << persistent_sequence_setdown_error
-              << "\n" << std::flush;
-    write<void*>(input, kInSequenceData, nullptr);
-    output_hash = persistent_frame_hashes[0];
-    render_error = persistent_sequence_setup_error == 0 && sequence_flatten_error == 0 &&
-        sequence_resetup_error == 0 && flattened_handle_replaced &&
-        resetup_handle_replaced && flattened_handle_host_disposed &&
-        persistent_frame_errors[0] == 0 && persistent_sequence_setdown_error == 0 ? 0 : -1;
-  } else if (params_error == 0 && image_render_supported && depth_supported && persistent_sequence) {
-    std::cerr << "stage:sequence_setup_begin\n" << std::flush;
-    persistent_sequence_setup_error = invoke_sequence_selector(
-        entry, kSequenceSetup, input.data(), output.data());
-    std::cerr << "stage:sequence_setup_end error=" << persistent_sequence_setup_error
-              << "\n" << std::flush;
-    write<void*>(input, kInSequenceData, read<void*>(output, kOutSequenceData));
-    for (int frame = 0; frame < 2 && persistent_sequence_setup_error == 0; ++frame) {
-      int32_t frame_width = 0, frame_height = 0, frame_rowbytes = 0;
-      std::string frame_input_hash;
-      bool frame_guards = false;
-      persistent_frame_errors[frame] = render_once(
-          entry, input, output, "default", frame_width, frame_height, frame_rowbytes,
-          frame_input_hash, persistent_frame_hashes[frame], frame_guards,
-          nullptr, nullptr, nullptr, 0, 0, nullptr, frame, 1, 2, 1, 4, false);
-      if (frame == 0) {
-        render_width = frame_width; render_height = frame_height;
-        render_rowbytes = frame_rowbytes; input_hash = frame_input_hash;
-      }
-      guards_intact = frame == 0 ? frame_guards : guards_intact && frame_guards;
-    }
-    std::cerr << "stage:sequence_setdown_begin\n" << std::flush;
-    persistent_sequence_setdown_error = persistent_sequence_setup_error == 0
-        ? invoke_sequence_selector(entry, kSequenceSetdown, input.data(), output.data()) : -1;
-    std::cerr << "stage:sequence_setdown_end error=" << persistent_sequence_setdown_error
-              << "\n" << std::flush;
-    write<void*>(input, kInSequenceData, nullptr);
-    output_hash = persistent_frame_hashes[1];
-    render_error = persistent_sequence_setup_error == 0 &&
-        persistent_frame_errors[0] == 0 && persistent_frame_errors[1] == 0 &&
-        persistent_sequence_setdown_error == 0 ? 0 : -1;
-  } else if (params_error == 0 && image_render_supported && depth_supported && concurrent_render) {
-    std::array<int32_t, 2> widths{}, heights{}, rowbytes{};
-    std::array<std::string, 2> input_hashes{};
-    auto run_thread = [&](std::size_t index) {
-      auto thread_input = input;
-      auto thread_output = output;
-      thread_errors[index] = render_once(entry, thread_input, thread_output, "default",
-          widths[index], heights[index], rowbytes[index], input_hashes[index],
-          thread_hashes[index], thread_guards[index], nullptr);
-    };
-    std::thread first(run_thread, 0); std::thread second(run_thread, 1);
-    first.join(); second.join();
-    render_width = widths[0]; render_height = heights[0]; render_rowbytes = rowbytes[0];
-    input_hash = input_hashes[0]; output_hash = thread_hashes[0];
-    guards_intact = thread_guards[0] && thread_guards[1];
-    render_error = thread_errors[0] == 0 && thread_errors[1] == 0 &&
-        widths[0] == widths[1] && heights[0] == heights[1] && rowbytes[0] == rowbytes[1] &&
-        input_hashes[0] == input_hashes[1] && thread_hashes[0] == thread_hashes[1] ? 0 : -1;
-  } else if (params_error == 0 && image_render_supported && depth_supported &&
-             invocation.render_session_mode) {
-    const auto session_outcome = run_render_session(
-        entry, input, output, &invocation.requested_parameters, invocation.external_width,
-        invocation.external_height, invocation.external_time_step, invocation.external_total_time,
-        invocation.external_time_scale, invocation.external_pixel_bytes);
-    persistent_sequence_setup_error = session_outcome.setup_error;
-    persistent_sequence_setdown_error = session_outcome.setdown_error;
-    render_width = session_outcome.width;
-    render_height = session_outcome.height;
-    render_rowbytes = session_outcome.rowbytes;
-    input_hash = session_outcome.input_hash;
-    output_hash = session_outcome.output_hash;
-    guards_intact = session_outcome.guards_intact;
-    session_protocol_violation = session_outcome.protocol_violation;
-    session_invariant_failure = session_outcome.invariant_failure;
-    render_error = session_outcome.render_error;
-  } else if (params_error == 0 && image_render_supported && depth_supported) {
-    render_error = render_once(entry, input, output, case_id, render_width, render_height,
-                               render_rowbytes, input_hash, output_hash, guards_intact,
-                               invocation.request_mode ? &invocation.requested_parameters : nullptr,
-                               invocation.image_mode ? &invocation.external_rgba : nullptr,
-                               invocation.image_mode ? &invocation.external_output : nullptr,
-                               invocation.external_width, invocation.external_height,
-                               invocation.layered_image_mode ? &invocation.external_layers : nullptr,
-                               invocation.external_current_time, invocation.external_time_step,
-                               invocation.external_total_time, invocation.external_time_scale,
-                               invocation.external_pixel_bytes);
-  }
-  std::cerr << "stage:render_end error=" << render_error << "\n" << std::flush;
+    const auto dispatch = aexcompat::worker_runtime::invocation::run_classic_final_dispatch(
+        {entry, &input, &output, &invocation, argv, params_error,
+         image_render_supported, depth_supported, smart_render_supported});
+    if (dispatch.case_id_rejected) return session.finish(2);
+    case_id = dispatch.case_id;
+    input_hash = dispatch.input_hash;
+    output_hash = dispatch.output_hash;
+    guards_intact = dispatch.guards_intact;
+    render_width = dispatch.render_width;
+    render_height = dispatch.render_height;
+    render_rowbytes = dispatch.render_rowbytes;
+    thread_errors = dispatch.thread_errors;
+    thread_hashes = dispatch.thread_hashes;
+    thread_guards = dispatch.thread_guards;
+    concurrent_render = dispatch.concurrent_render;
+    persistent_sequence = dispatch.persistent_sequence;
+    session_protocol_violation = dispatch.session_protocol_violation;
+    session_invariant_failure = dispatch.session_invariant_failure;
+    flattened_sequence = dispatch.flattened_sequence;
+    copied_flattened_sequence = dispatch.copied_flattened_sequence;
+    persistent_sequence_setup_error = dispatch.persistent_sequence_setup_error;
+    persistent_sequence_setdown_error = dispatch.persistent_sequence_setdown_error;
+    persistent_frame_errors = dispatch.persistent_frame_errors;
+    persistent_frame_hashes = dispatch.persistent_frame_hashes;
+    sequence_flatten_error = dispatch.sequence_flatten_error;
+    sequence_resetup_error = dispatch.sequence_resetup_error;
+    flattened_handle_replaced = dispatch.flattened_handle_replaced;
+    resetup_handle_replaced = dispatch.resetup_handle_replaced;
+    flattened_handle_host_disposed = dispatch.flattened_handle_host_disposed;
+    get_flattened_sequence_data_error = dispatch.get_flattened_sequence_data_error;
+    original_sequence_preserved = dispatch.original_sequence_preserved;
+    render_error = dispatch.render_error;
   } else if (is_smart_worker()) {
-  case_id = invocation.request_mode ? (invocation.smart_force_cpu ? "request_cpu" :
-      (invocation.smart_opencl ? "gpu_opencl_float32" :
-       (invocation.smart_directx ? "gpu_directx_float32" : "request"))) : "";
-  if (!invocation.request_mode)
-    for (const wchar_t* p = argv[4]; *p; ++p) {
-      if (*p > 0x7f) return session.finish(2);
-      case_id.push_back(static_cast<char>(*p));
-    }
-  std::cerr << "stage:smart_render_begin\n" << std::flush;
-  smart = params_error == 0 && image_render_supported && depth_supported &&
-      smart_render_supported
-      ? smart_render_once(entry, input, output, case_id,
-                          invocation.request_mode ? &invocation.requested_parameters : nullptr,
-                          invocation.smart_image_mode ? &invocation.external_rgba : nullptr,
-                          invocation.smart_image_mode ? &invocation.external_output : nullptr,
-                          invocation.external_width, invocation.external_height,
-                          invocation.smart_layered_image_mode ? &invocation.external_layers : nullptr,
-                          invocation.external_current_time, invocation.external_time_step,
-                          invocation.external_total_time, invocation.external_time_scale,
-                          invocation.external_pixel_bytes)
-      : SmartResult{};
-  lifetime_fault_observed = invocation.mask_double_dispose_mode
-      ? verify_mask_double_dispose_rejected()
-      : invocation.stream_live_value_dispose_mode
-          ? verify_stream_dispose_with_live_value_rejected()
-          : false;
-  std::cerr << "stage:smart_render_end pre_error=" << smart.pre_error
-            << " render_error=" << smart.render_error << "\n" << std::flush;
+    const auto dispatch = aexcompat::worker_runtime::invocation::run_smart_final_dispatch(
+        {entry, &input, &output, &invocation, argv, params_error,
+         image_render_supported, depth_supported, smart_render_supported});
+    if (dispatch.case_id_rejected) return session.finish(2);
+    case_id = dispatch.case_id;
+    smart = dispatch.smart;
+    lifetime_fault_observed = dispatch.lifetime_fault_observed;
   }
   if (is_render_worker()) drain_async_layer_requests();
   const bool arbitrary_defaults_disposed = dispose_arbitrary_defaults(entry, input, output);
