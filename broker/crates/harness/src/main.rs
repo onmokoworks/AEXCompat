@@ -1753,6 +1753,37 @@ fn json_after_marker(text: &str, marker: &str) -> Option<serde_json::Value> {
         .ok()
 }
 
+fn typed_failure_document(message: &str) -> Option<serde_json::Value> {
+    let diagnostics = json_after_marker(message, "diagnostics=")
+        .or_else(|| json_after_marker(message, "worker report unavailable: "))?;
+    let report = json_after_marker(message, "report=");
+    let mut document = report
+        .and_then(|value| value.as_object().cloned())
+        .unwrap_or_default();
+    for field in [
+        "classification",
+        "failure_stage",
+        "exit_code",
+        "elapsed_ms",
+        "missing_suites",
+        "suite_timeline",
+    ] {
+        if let Some(value) = diagnostics.get(field) {
+            document.insert(field.to_owned(), value.clone());
+        }
+    }
+    Some(serde_json::Value::Object(document))
+}
+
+fn emit_typed_failure(message: &str) {
+    if let Some(document) = typed_failure_document(message)
+        && let Ok(encoded) = serde_json::to_string(&document)
+    {
+        println!("{encoded}");
+    }
+    eprintln!("{message}");
+}
+
 fn failure_diagnostics(message: &str) -> Option<FailureDiagnostics> {
     let diagnostics = json_after_marker(message, "diagnostics=")
         .or_else(|| json_after_marker(message, "worker report unavailable: "))?;
@@ -5145,7 +5176,7 @@ fn main() -> eframe::Result {
             dependencies.clone(),
         )
         .unwrap_or_else(|error| {
-            eprintln!("{error}");
+            emit_typed_failure(&error.to_string());
             std::process::exit(1);
         });
         let timing = typed_request_timing(&document).unwrap_or_else(|error| {
@@ -5188,7 +5219,7 @@ fn main() -> eframe::Result {
         match report {
             Ok(value) => println!("{}", serde_json::to_string_pretty(&value).unwrap()),
             Err(error) => {
-                eprintln!("{error}");
+                emit_typed_failure(&error.to_string());
                 std::process::exit(1);
             }
         }
@@ -6762,6 +6793,20 @@ mod tests {
         assert_eq!(diagnostics.selector_error, Some(25));
         assert_eq!(diagnostics.stages.len(), 2);
         assert!(diagnostics.stages[1].contains("25"));
+    }
+
+    #[test]
+    fn typed_failure_document_preserves_structured_native_evidence() {
+        let message = concat!(
+            r#"failed: diagnostics={"classification":"nonzero_exit","failure_stage":"render","exit_code":7,"missing_suites":[{"name":"PF World Suite","version":2}],"suite_timeline":[{"sequence":1,"operation":"acquire","name":"PF World Suite","version":2,"result":25}]}, report="#,
+            r#"{"render_error":25,"smart_render_supported":true,"depth_supported":true}"#,
+        );
+        let document = typed_failure_document(message).expect("structured failure");
+        assert_eq!(document["classification"], "nonzero_exit");
+        assert_eq!(document["failure_stage"], "render");
+        assert_eq!(document["render_error"], 25);
+        assert_eq!(document["missing_suites"][0]["name"], "PF World Suite");
+        assert_eq!(document["suite_timeline"][0]["result"], 25);
     }
 
     #[test]
