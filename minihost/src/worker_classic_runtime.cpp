@@ -3,6 +3,7 @@
 #include "render_subsystem.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cstring>
 #include <utility>
 
@@ -10,7 +11,7 @@ namespace aexcompat::worker_runtime::classic {
 namespace {
 
 thread_local Context* g_active_context{};
-thread_local bool g_last_selector_dispatched{};
+std::atomic_bool g_last_selector_dispatched{};
 
 bool same_rational_time(int32_t left, uint32_t left_scale,
                         int32_t right, uint32_t right_scale) {
@@ -71,21 +72,56 @@ bool Context::has_timed_slot(int32_t slot) const {
       [slot](const TimedLayerDefinition& layer) { return layer.slot == slot; });
 }
 
+void Context::set_definition(int32_t slot,
+                             const ParameterDefinition& definition) {
+  definitions_[slot] = definition;
+}
+
+bool Context::copy_definition(int32_t slot, void* destination,
+                              std::size_t destination_size) const {
+  if (!destination || destination_size < kParameterDefinitionSize) return false;
+  const auto found = definitions_.find(slot);
+  if (found == definitions_.end()) return false;
+  std::memcpy(destination, found->second.data(), found->second.size());
+  return true;
+}
+
+void Context::set_fallback_definition(
+    int32_t slot, const ParameterDefinition& definition) {
+  fallback_definitions_[slot] = definition;
+}
+
+bool Context::copy_fallback_definition(
+    int32_t slot, void* destination, std::size_t destination_size) const {
+  if (!destination || destination_size < kParameterDefinitionSize) return false;
+  const auto found = fallback_definitions_.find(slot);
+  if (found == fallback_definitions_.end()) return false;
+  std::memcpy(destination, found->second.data(), found->second.size());
+  return true;
+}
+
+void Context::mark_selector_dispatched() noexcept {
+  selector_dispatched_ = true;
+  g_last_selector_dispatched.store(true, std::memory_order_relaxed);
+}
+
 Context* active_context() noexcept { return g_active_context; }
-bool last_selector_dispatched() noexcept { return g_last_selector_dispatched; }
+bool last_selector_dispatched() noexcept {
+  return g_last_selector_dispatched.load(std::memory_order_relaxed);
+}
+void reset_selector_diagnostic() noexcept {
+  g_last_selector_dispatched.store(false, std::memory_order_relaxed);
+}
 
 int dispatch(const Request& request) {
   if (!request.hooks.render || !request.hooks.dependencies_ready) return -1;
   Context context;
-  g_last_selector_dispatched = false;
   aexcompat::render::RenderContext render_context{
       aexcompat::render::RenderKind::Classic,
       const_cast<Request*>(&request),
       {&invoke_render, &invoke_cleanup, &dependencies_ready},
       request.module_audit_required};
-  const int result = aexcompat::render::dispatch(render_context);
-  g_last_selector_dispatched = context.selector_dispatched();
-  return result;
+  return aexcompat::render::dispatch(render_context);
 }
 
 }  // namespace aexcompat::worker_runtime::classic

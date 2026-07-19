@@ -616,8 +616,6 @@ struct AegpCommandRegistration {
 };
 std::vector<AegpCommandRegistration> g_aegp_command_registrations;
 std::vector<int32_t> g_aegp_inserted_commands;
-std::array<std::byte, kParamSize> g_checkout_definition{};
-std::atomic_bool g_checkout_map_available{false};
 std::map<int32_t, std::array<std::byte, kParamSize>> g_checkout_layer_definitions;
 std::mutex g_param_checkout_mutex;
 std::unordered_map<void*, uint32_t> g_live_param_checkouts;
@@ -8990,36 +8988,33 @@ int32_t __cdecl checkout_param(void*, int32_t index, int32_t what_time, int32_t 
     return 4;
   }
   auto* classic_context = aexcompat::worker_runtime::classic::active_context();
+  const auto record_checkout = [&] {
+    std::lock_guard<std::mutex> lock(g_param_checkout_mutex);
+    ++g_live_param_checkouts[definition];
+    ++g_param_checkout_calls;
+    g_last_param_checkout_index = index;
+    g_last_param_checkout_time = what_time;
+    g_last_param_checkout_time_step = time_step;
+    g_last_param_checkout_time_scale = time_scale;
+  };
   if (classic_context && classic_context->copy_timed_layer(
           index, what_time, time_scale, definition, kParamSize)) {
-    std::lock_guard<std::mutex> lock(g_param_checkout_mutex);
-    ++g_live_param_checkouts[definition]; ++g_param_checkout_calls;
-    g_last_param_checkout_index = index; g_last_param_checkout_time = what_time;
-    g_last_param_checkout_time_step = time_step; g_last_param_checkout_time_scale = time_scale;
+    record_checkout();
     return 0;
   }
   if (classic_context && classic_context->has_timed_slot(index)) return 4;
+  if (classic_context) {
+    if (classic_context->copy_definition(index, definition, kParamSize) ||
+        classic_context->copy_fallback_definition(index, definition, kParamSize)) {
+      record_checkout();
+      return 0;
+    }
+    return 4;
+  }
   const auto hosted = g_checkout_layer_definitions.find(index);
   if (hosted != g_checkout_layer_definitions.end()) {
     std::memcpy(definition, hosted->second.data(), hosted->second.size());
-    std::lock_guard<std::mutex> lock(g_param_checkout_mutex);
-    ++g_live_param_checkouts[definition];
-    ++g_param_checkout_calls;
-    g_last_param_checkout_index = index;
-    g_last_param_checkout_time = what_time;
-    g_last_param_checkout_time_step = time_step;
-    g_last_param_checkout_time_scale = time_scale;
-    return 0;
-  }
-  if (g_checkout_map_available && index == g_secondary_layer_slot) {
-    std::memcpy(definition, g_checkout_definition.data(), g_checkout_definition.size());
-    std::lock_guard<std::mutex> lock(g_param_checkout_mutex);
-    ++g_live_param_checkouts[definition];
-    ++g_param_checkout_calls;
-    g_last_param_checkout_index = index;
-    g_last_param_checkout_time = what_time;
-    g_last_param_checkout_time_step = time_step;
-    g_last_param_checkout_time_scale = time_scale;
+    record_checkout();
     return 0;
   }
   return 4;
@@ -12040,10 +12035,11 @@ int32_t classic_render_runtime(EffectEntry entry, std::array<std::byte, kInSize>
   if (connected_map) {
     if (!aexcompat::render::prepare_connected_map_world(case_id, width, height, map_world) ||
         !dispatch_worlds.register_world(map_world.world.data(), kPixelFormatArgb32)) return -3;
-    g_checkout_definition.fill(std::byte{});
-    write<int32_t>(g_checkout_definition, 12, 0);
-    std::memcpy(g_checkout_definition.data() + 56, map_world.world.data(), map_world.world.size());
-    g_checkout_map_available = true;
+    aexcompat::worker_runtime::classic::ParameterDefinition checkout_definition{};
+    write<int32_t>(checkout_definition, 12, 0);
+    std::memcpy(checkout_definition.data() + 56, map_world.world.data(), map_world.world.size());
+    classic_context->set_fallback_definition(g_secondary_layer_slot,
+                                             checkout_definition);
   }
 
   std::vector<std::array<std::byte, kParamSize>> definitions(g_params.size() + 1);
@@ -12062,7 +12058,6 @@ int32_t classic_render_runtime(EffectEntry entry, std::array<std::byte, kInSize>
   for (std::size_t slot = 1; slot < definitions.size(); ++slot)
     if (g_params[slot - 1].type == 0 && g_params[slot - 1].layer_default == -1)
       std::memcpy(definitions[slot].data() + 56, input_world.data(), input_world.size());
-  g_checkout_layer_definitions.clear();
   if (external_layers) for (std::size_t layer_index = 0; layer_index < external_layers->size(); ++layer_index) {
     const auto& layer = (*external_layers)[layer_index];
     if (layer.slot <= 0 || static_cast<std::size_t>(layer.slot) >= definitions.size() ||
@@ -12091,8 +12086,6 @@ int32_t classic_render_runtime(EffectEntry entry, std::array<std::byte, kInSize>
       if (!classic_context->add_timed_layer(
               {layer.slot, layer.time, layer.time_scale, checkout})) return -3;
     }
-    else
-      g_checkout_layer_definitions.emplace(layer.slot, checkout);
   }
   if (requested) {
     if (!apply_requested_assignments(definitions, *requested)) return -3;
@@ -12107,14 +12100,8 @@ int32_t classic_render_runtime(EffectEntry entry, std::array<std::byte, kInSize>
   if (!apply_parameter_animation(definitions, external_current_time, external_time_scale)) return -3;
   if (!apply_arbitrary_parameter_animation(entry, input, command_output, definitions,
                                             external_current_time, external_time_scale)) return -3;
-  g_checkout_layer_definitions.clear();
   for (std::size_t slot = 0; slot < definitions.size(); ++slot)
-    g_checkout_layer_definitions.emplace(static_cast<int32_t>(slot), definitions[slot]);
-  struct CheckoutDefinitionsScope {
-    ~CheckoutDefinitionsScope() {
-      g_checkout_layer_definitions.clear();
-    }
-  } checkout_definitions_scope;
+    classic_context->set_definition(static_cast<int32_t>(slot), definitions[slot]);
   {
     std::lock_guard<std::mutex> lock(g_param_checkout_mutex);
     g_live_param_checkouts.clear();
@@ -12237,8 +12224,6 @@ int32_t classic_render_runtime(EffectEntry entry, std::array<std::byte, kInSize>
         : end_frame_lifecycle(entry, input, command_output, params.data(),
                               output_world.data(), lifecycle, error);
   }
-  g_checkout_map_available = false;
-  g_checkout_layer_definitions.clear();
   std::vector<unsigned char> logical_output;
   if (!aexcompat::render::copy_packed_world(destination, rowbytes, width, height,
                                              pixel_bytes, logical_output)) return -3;
@@ -16762,6 +16747,7 @@ int worker_main_impl(int argc, wchar_t **argv) {
   bool aegp_memory_fault_observed = false;
 
   if (is_render_worker()) {
+  aexcompat::worker_runtime::classic::reset_selector_diagnostic();
   case_id = request_mode ? "request" : "";
   if (!request_mode) {
     for (const wchar_t* p = argv[4]; *p; ++p) {

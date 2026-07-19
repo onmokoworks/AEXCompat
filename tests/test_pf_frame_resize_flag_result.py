@@ -36,7 +36,7 @@ class PfFrameResizeFlagResultTest(unittest.TestCase):
         resize = worker.index("width = requested_width;", validate)
         self.assertLess(validate, resize)
         self.assertIn("classic_context->mark_selector_dispatched()", worker)
-        self.assertIn("g_last_selector_dispatched = context.selector_dispatched()",
+        self.assertIn("g_last_selector_dispatched.store(true",
                       CLASSIC_RUNTIME.read_text(encoding="utf-8"))
         fixture = (ROOT / "instruments" / "pf-frame-resize-probe" / "pf_frame_resize_probe.cpp").read_text()
         self.assertIn("PF_Cmd_FRAME_SETUP", fixture)

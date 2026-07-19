@@ -227,7 +227,8 @@ class MinihostL2SourceTests(unittest.TestCase):
         self.assertIn("enum class Kind { L2, Render, Smart }", target)
         self.assertEqual(cmake.count("src/l2_main.cpp"), 1)
         self.assertIn("add_library(aex_worker_runtime_core OBJECT", cmake)
-        self.assertEqual(cmake.count("$<TARGET_OBJECTS:aex_worker_runtime_core>"), 3)
+        self.assertEqual(cmake.count("$<TARGET_OBJECTS:aex_worker_runtime_core>"), 4)
+        self.assertIn("add_executable(worker_classic_runtime_selftest", cmake)
         for kind, entry in entries.items():
             self.assertIn("aexcompat::worker_target::run", entry)
             self.assertIn(f"worker_target::Kind::{kind}", entry)

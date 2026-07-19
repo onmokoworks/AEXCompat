@@ -3,6 +3,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <map>
 #include <vector>
 
 namespace aexcompat::worker_runtime::classic {
@@ -29,17 +30,27 @@ class Context final {
   bool copy_timed_layer(int32_t slot, int32_t time, uint32_t time_scale,
                         void* destination, std::size_t destination_size) const;
   bool has_timed_slot(int32_t slot) const;
-  void mark_selector_dispatched() noexcept { selector_dispatched_ = true; }
+  void set_definition(int32_t slot, const ParameterDefinition& definition);
+  bool copy_definition(int32_t slot, void* destination,
+                       std::size_t destination_size) const;
+  void set_fallback_definition(int32_t slot,
+                               const ParameterDefinition& definition);
+  bool copy_fallback_definition(int32_t slot, void* destination,
+                                std::size_t destination_size) const;
+  void mark_selector_dispatched() noexcept;
   bool selector_dispatched() const noexcept { return selector_dispatched_; }
 
  private:
   Context* previous_{};
   std::vector<TimedLayerDefinition> timed_layers_;
+  std::map<int32_t, ParameterDefinition> definitions_;
+  std::map<int32_t, ParameterDefinition> fallback_definitions_;
   bool selector_dispatched_{};
 };
 
 Context* active_context() noexcept;
 bool last_selector_dispatched() noexcept;
+void reset_selector_diagnostic() noexcept;
 
 struct Hooks {
   int (*render)(void*){};
