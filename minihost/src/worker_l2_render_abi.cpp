@@ -9,7 +9,9 @@
 #include "worker_aegp_scene.hpp"
 #include "worker_aegp_staged_item_runtime.hpp"
 #include "worker_handle_runtime.hpp"
+#include "worker_pf_adv_time_suite.hpp"
 #include "worker_render_receipts.hpp"
+#include "worker_world_safety.hpp"
 #include "worker_world_registry.hpp"
 
 #include <cstdint>
@@ -26,6 +28,9 @@ bool is_render_worker();
 void* aegp_comp_item_handle();
 bool snapshot_render_options(void* handle, AegpRenderOptionsValue& value);
 bool snapshot_layer_render_options(void* handle, AegpLayerRenderOptionsValue& value);
+void bump_render_project_timestamp();
+using aexcompat::world_safety::DispatchWorldFormat;
+using aexcompat::world_safety::resolve_registered_dispatch_world;
 
 namespace {
 using aexcompat::render_receipts::ReceiptSnapshot;
@@ -246,6 +251,81 @@ int32_t __cdecl render_guid_reject(void* receipt, void** out) {
   }
   std::memcpy(bytes, guid.data(), guid.size());
   return unlock_aegp_mem_handle(*out);
+}
+
+auto& g_pf_adv_item_touches =
+    aexcompat::worker_runtime::pf_adv_time::item_telemetry().touches;
+auto& g_pf_adv_item_rerenders =
+    aexcompat::worker_runtime::pf_adv_time::item_telemetry().rerenders;
+
+int32_t checked_adv_item_move(int32_t direction, int32_t steps, int32_t step,
+                              int32_t& time) {
+  if ((direction != 0 && direction != 1) || steps < 0 || step <= 0) return 4;
+  const int64_t distance = static_cast<int64_t>(steps) * step;
+  const int64_t moved = static_cast<int64_t>(time) + (direction == 0 ? distance : -distance);
+  if (moved < INT32_MIN || moved > INT32_MAX) return 4;
+  time = static_cast<int32_t>(moved);
+  return 0;
+}
+
+bool active_adv_item_context(void* in_data) {
+  const auto& context = aexcompat::aegp_layer_render_runtime::context();
+  return context.entry && context.input && in_data == context.input;
+}
+
+bool active_adv_item_world(const void* world, DispatchWorldFormat& result) {
+  return resolve_registered_dispatch_world(world, result);
+}
+
+int32_t __cdecl adv_item_move_time_step(void* in_data, void* world,
+                                        int32_t direction, int32_t steps) {
+  auto& context = aexcompat::aegp_layer_render_runtime::context();
+  DispatchWorldFormat effect_world{};
+  if (!active_adv_item_context(in_data) || !active_adv_item_world(world, effect_world) ||
+      !effect_world.data || effect_world.width <= 0 || effect_world.height <= 0 ||
+      effect_world.rowbytes <= 0 || context.pixel_bytes <= 0 ||
+      effect_world.width > INT32_MAX / context.pixel_bytes ||
+      effect_world.rowbytes < effect_world.width * context.pixel_bytes) return 4;
+  int32_t moved = context.current_time;
+  if (checked_adv_item_move(direction, steps, context.time_step, moved) != 0) return 4;
+  context.active_item_time = moved;
+  context.active_item_time_valid = true;
+  return 0;
+}
+
+int32_t __cdecl adv_item_move_time_step_active(int32_t direction, int32_t steps) {
+  auto& context = aexcompat::aegp_layer_render_runtime::context();
+  if (!context.entry || context.time_step <= 0) return 4;
+  int32_t moved = context.active_item_time_valid ? context.active_item_time : context.current_time;
+  if (checked_adv_item_move(direction, steps, context.time_step, moved) != 0) return 4;
+  context.active_item_time = moved;
+  context.active_item_time_valid = true;
+  return 0;
+}
+
+int32_t __cdecl adv_item_touch_active() {
+  if (!aexcompat::aegp_layer_render_runtime::context().entry) return 4;
+  ++g_pf_adv_item_touches;
+  bump_render_project_timestamp();
+  return 0;
+}
+
+int32_t __cdecl adv_item_force_rerender(void* in_data, void* world) {
+  DispatchWorldFormat effect_world{};
+  if (!active_adv_item_context(in_data) || !active_adv_item_world(world, effect_world) ||
+      !effect_world.data || effect_world.width <= 0 || effect_world.height <= 0 ||
+      effect_world.rowbytes <= 0) return 4;
+  ++g_pf_adv_item_rerenders;
+  bump_render_project_timestamp();
+  return 0;
+}
+
+int32_t __cdecl adv_item_effect_is_active(void* context_handle, uint8_t* enabled) {
+  if (enabled) *enabled = 0;
+  if (!context_handle || !enabled || !aexcompat::aegp_layer_render_runtime::context().entry) return 4;
+  // UI context handles are opaque. A live render owns no UI context, so headless mode
+  // can only report disabled without dereferencing an untrusted or stale handle.
+  return 0;
 }
 
 PfAdvItemSuite1 g_adv_item_suite1{&adv_item_move_time_step,
