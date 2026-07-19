@@ -10,6 +10,8 @@ SOURCES = (
     ROOT / "minihost" / "src" / "worker_pf_suites.cpp",
     ROOT / "minihost" / "src" / "worker_l2_suite_abi.hpp",
     ROOT / "minihost" / "src" / "worker_pf_suites_internal.hpp",
+    ROOT / "minihost" / "src" / "worker_pf_ae_channel_runtime.hpp",
+    ROOT / "minihost" / "src" / "worker_pf_ae_channel_runtime.cpp",
 )
 
 
