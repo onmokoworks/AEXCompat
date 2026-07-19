@@ -110,6 +110,7 @@
 #include "worker_aegp_init_orchestration.hpp"
 #include "worker_aegp_init_report.hpp"
 #include "worker_ui_event_report.hpp"
+#include "worker_audio_execution.hpp"
 #include "worker_entry_bootstrap.hpp"
 #include "worker_effect_bootstrap.hpp"
 #include "worker_aegp_timeline_probe.hpp"
@@ -5557,143 +5558,15 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
     return session.finish(early_result);
   }
   if (is_render_worker() && invocation.audio_mode) {
-    constexpr std::size_t kAudioGuardSamples = 8;
-    constexpr float kAudioGuardValue = 1234567.0f;
-    std::vector<std::array<std::byte, kParamSize>> audio_definitions(g_params.size() + 1);
-    initialize_parameter_definitions(audio_definitions);
-    const bool assignments_applied =
-        apply_requested_assignments(audio_definitions, invocation.requested_parameters);
-    std::vector<std::array<std::byte, kParamSize>> audio_values(audio_definitions.size() * 2);
-    for (std::size_t index = 0; index < audio_definitions.size(); ++index) {
-      audio_values[index] = audio_definitions[index];
-      audio_values[index + audio_definitions.size()] = audio_definitions[index];
-    }
-    std::vector<void*> audio_params(audio_values.size());
-    for (std::size_t index = 0; index < audio_values.size(); ++index)
-      audio_params[index] = audio_values[index].data();
-
-    write<int32_t>(input, 336, 0);
-    write<int32_t>(input, 340, invocation.external_audio_samples);
-    write<int32_t>(input, 344, invocation.external_audio_samples);
-    write<uint32_t>(input, kInTimeScale, 44100);
-    write<double>(input, 352, 44100.0);
-    write<int16_t>(input, 360, 1);
-    write<int16_t>(input, 362, 2);
-    write<int16_t>(input, 364, 4);
-    write<int32_t>(input, 368, invocation.external_audio_samples);
-    write<void*>(input, 376, invocation.external_audio.data());
-    aexcompat::host_audio::runtime().set_source(&invocation.external_audio, invocation.external_audio_samples);
-
-    std::cerr << "stage:audio_setup_begin\n" << std::flush;
-    const int32_t audio_setup_error = assignments_applied
-        ? entry(kAudioSetup, input.data(), output.data(), audio_params.data(), nullptr, nullptr)
-        : -1;
-    std::cerr << "stage:audio_setup_end error=" << audio_setup_error << "\n" << std::flush;
-    const int32_t output_start = read<int32_t>(output, 356);
-    const int32_t output_samples = read<int32_t>(output, 360);
-    const bool setup_range_valid = output_start >= 0 && output_samples >= 0 &&
-        output_start <= invocation.external_audio_samples &&
-        output_samples <= invocation.external_audio_samples - output_start;
-
-    std::vector<float> guarded_output(
-        kAudioGuardSamples + static_cast<std::size_t>(invocation.external_audio_samples) +
-        kAudioGuardSamples, kAudioGuardValue);
-    auto* audio_destination = guarded_output.data() + kAudioGuardSamples;
-    if (setup_range_valid) {
-      std::fill_n(audio_destination, invocation.external_audio_samples, 0.0f);
-      write<double>(output, 368, 44100.0);
-      write<int16_t>(output, 376, 1);
-      write<int16_t>(output, 378, 2);
-      write<int16_t>(output, 380, 4);
-      write<int32_t>(output, 384, output_samples);
-      write<void*>(output, 392, audio_destination);
-    }
-    std::cerr << "stage:audio_render_begin\n" << std::flush;
-    const int32_t audio_render_error = audio_setup_error == 0 && setup_range_valid
-        ? entry(kAudioRender, input.data(), output.data(), audio_params.data(), nullptr, nullptr)
-        : -1;
-    std::cerr << "stage:audio_render_end error=" << audio_render_error << "\n" << std::flush;
-    std::cerr << "stage:audio_setdown_begin\n" << std::flush;
-    const int32_t audio_setdown_error = audio_setup_error == 0
-        ? entry(kAudioSetdown, input.data(), output.data(), audio_params.data(), nullptr, nullptr)
-        : -1;
-    std::cerr << "stage:audio_setdown_end error=" << audio_setdown_error << "\n" << std::flush;
-
-    const bool guards_intact = std::all_of(guarded_output.begin(),
-        guarded_output.begin() + kAudioGuardSamples,
-        [=](float value) { return value == kAudioGuardValue; }) &&
-        std::all_of(guarded_output.end() - kAudioGuardSamples, guarded_output.end(),
-        [=](float value) { return value == kAudioGuardValue; });
-    const bool samples_finite = setup_range_valid && std::all_of(
-        audio_destination, audio_destination + output_samples,
-        [](float value) { return std::isfinite(value); });
-    const bool audio_lifetimes_balanced = audio_handle_lifetimes_balanced();
-    const bool arbitrary_defaults_disposed = dispose_arbitrary_defaults(entry, input, output);
-    std::cerr << "stage:global_setdown_begin\n" << std::flush;
-    const int32_t audio_global_setdown_error = global_error == 0
-        ? invoke_global_setdown(entry, input.data(), output.data()) : -1;
-    std::cerr << "stage:global_setdown_end error=" << audio_global_setdown_error
-              << "\n" << std::flush;
-    const bool passed = global_error == 0 && params_error == 0 && assignments_applied &&
-        audio_setup_error == 0 && audio_render_error == 0 && audio_setdown_error == 0 &&
-        setup_range_valid && guards_intact && samples_finite && audio_lifetimes_balanced &&
-        audio_telemetry().invalid_operations == 0 && arbitrary_defaults_disposed &&
-        handle_lifetimes_balanced() && audio_global_setdown_error == 0;
-    bool output_created = false;
-    if (passed) {
-      HANDLE file = CreateFileW(invocation.external_audio_output.c_str(), GENERIC_WRITE, 0, nullptr,
-                                CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
-      if (file != INVALID_HANDLE_VALUE) {
-        const DWORD bytes = static_cast<DWORD>(output_samples * sizeof(float));
-        DWORD written = 0;
-        output_created = WriteFile(file, audio_destination, bytes, &written, nullptr) &&
-            written == bytes && FlushFileBuffers(file);
-        CloseHandle(file);
-        if (!output_created) DeleteFileW(invocation.external_audio_output.c_str());
-      }
-    }
+    const AudioModeRequest audio_request{
+        entry, &input, &output, global_error, params_error,
+        invocation.external_audio_samples, &invocation.external_audio,
+        &invocation.external_audio_output, &invocation.requested_parameters};
+    const auto audio_outcome = run_audio_mode(audio_request);
     if (!session.prepare_protocol_report()) return session.finish(14);
     restore_native_stdout();
-    std::cout << "{\"schema_version\":1,\"stage\":\"audio_render\",\"status\":\""
-              << (passed && output_created ? "render_completed" : "render_failed")
-              << "\",\"global_setup_error\":" << global_error
-              << ",\"params_setup_error\":" << params_error
-              << ",\"audio_setup_error\":" << audio_setup_error
-              << ",\"audio_render_error\":" << audio_render_error
-              << ",\"audio_setdown_error\":" << audio_setdown_error
-              << ",\"global_setdown_error\":" << audio_global_setdown_error
-              << ",\"sample_rate\":44100,\"channels\":1,\"sample_format\":\"float32\""
-              << ",\"input_samples\":" << invocation.external_audio_samples
-              << ",\"output_start_sample\":" << output_start
-              << ",\"output_samples\":" << output_samples
-              << ",\"setup_range_valid\":" << (setup_range_valid ? "true" : "false")
-              << ",\"guard_bytes_intact\":" << (guards_intact ? "true" : "false")
-              << ",\"samples_finite\":" << (samples_finite ? "true" : "false")
-              << ",\"audio_checkout_calls\":" << audio_telemetry().checkout_calls
-              << ",\"audio_usage_advertised\":" << (audio_telemetry().usage_advertised ? "true" : "false")
-              << ",\"audio_checkout_allowed\":" << (audio_telemetry().checkout_allowed ? "true" : "false")
-              << ",\"rejected_unadvertised_audio_checkouts\":" << audio_telemetry().rejected_unadvertised_checkouts
-              << ",\"rejected_audio_format_requests\":" << audio_telemetry().rejected_format_requests
-              << ",\"audio_handle_exhaustions\":" << audio_telemetry().handle_exhaustions
-              << ",\"peak_live_audio_handles\":" << audio_telemetry().peak_live_handles
-              << ",\"audio_checkin_calls\":" << audio_telemetry().checkin_calls
-              << ",\"audio_get_data_calls\":" << audio_telemetry().get_data_calls
-              << ",\"invalid_audio_operations\":" << audio_telemetry().invalid_operations
-              << ",\"last_audio_checkout_start_time\":" << audio_telemetry().last_checkout_start_time
-              << ",\"last_audio_checkout_duration\":" << audio_telemetry().last_checkout_duration
-              << ",\"last_audio_checkout_time_scale\":" << audio_telemetry().last_checkout_time_scale
-              << ",\"last_audio_window_start_sample\":" << audio_telemetry().last_window_start_sample
-              << ",\"last_audio_window_sample_count\":" << audio_telemetry().last_window_sample_count
-              << ",\"last_audio_window_silence_samples\":" << audio_telemetry().last_window_silence_samples
-              << ",\"last_audio_output_rate_fixed\":" << audio_telemetry().last_output_rate
-              << ",\"last_audio_output_bytes_per_sample\":" << audio_telemetry().last_output_bytes_per_sample
-              << ",\"last_audio_output_channels\":" << audio_telemetry().last_output_channels
-              << ",\"last_audio_output_format\":" << audio_telemetry().last_output_format
-              << ",\"last_audio_returned_sample_frames\":" << audio_telemetry().last_returned_sample_frames
-              << ",\"audio_lifetimes_balanced\":"
-              << (audio_lifetimes_balanced ? "true" : "false")
-              << ",\"output_created\":" << (output_created ? "true" : "false") << "}\n";
-    return session.finish(passed && output_created ? 0 : 20);
+    emit_audio_render_report(audio_request, audio_outcome);
+    return session.finish(audio_outcome.passed && audio_outcome.output_created ? 0 : 20);
   }
   std::array<int32_t, 5> lifecycle_errors{-1, -1, -1, -1, -1};
   bool lifecycle_data_null = false;
