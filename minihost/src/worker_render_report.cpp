@@ -1,5 +1,17 @@
 #include "worker_render_report.hpp"
 
+#include "gpu_directx_backend.hpp"
+#include "gpu_memory_world_transport.hpp"
+#include "gpu_opencl_backend.hpp"
+#include "worker_aegp_async_layer_runtime.hpp"
+#include "worker_handle_runtime.hpp"
+#include "worker_parameter_runtime.hpp"
+#include "worker_pf_path_runtime.hpp"
+#include "worker_render_receipts.hpp"
+#include "worker_selector_dispatch.hpp"
+#include "worker_world_registry.hpp"
+
+#include <cstddef>
 #include <ostream>
 #include <iomanip>
 
@@ -507,6 +519,103 @@ void append_classic_subsystems(
 
 void emit(const ReportSnapshot& snapshot, std::ostream& output) {
   output << snapshot.json();
+}
+
+}  // namespace aexcompat::worker_render_report
+
+// Suite registry accounting and the JSON escape helper stay owned by the
+// worker entry; the diagnostics builders below read them through these
+// cross-TU declarations.
+namespace aexcompat::l2_detail {
+std::string escape(const std::string&);
+uint32_t suite_acquire_count();
+uint32_t suite_release_count();
+std::size_t live_suite_lease_count();
+uint32_t live_suite_reference_count();
+bool suite_leases_balanced();
+std::string missing_suites_report_json();
+std::string suite_timeline_report_json();
+std::string live_suite_lease_summary();
+}  // namespace aexcompat::l2_detail
+
+namespace aexcompat::worker_render_report {
+
+namespace gpu_transport = aexcompat::gpu_runtime::memory_world_transport;
+namespace opencl = aexcompat::gpu_runtime::opencl;
+namespace directx_backend = aexcompat::gpu_runtime::directx_backend;
+
+GpuDiagnosticsSnapshot capture_gpu_diagnostics() {
+  const auto& directx = directx_backend::diagnostics();
+  const auto i64 = [](auto value) { return static_cast<int64_t>(value); };
+  return {
+      gpu_transport::gpu_memory_lifetimes_balanced(), gpu_transport::cuda_upload_bytes > 0,
+      {i64(gpu_transport::cuda_upload_bytes), i64(gpu_transport::cuda_download_bytes),
+       i64(gpu_transport::cuda_sync_failures),
+       i64(gpu_transport::last_cuda_device_count), i64(gpu_transport::last_cuda_device_index)},
+      gpu_transport::opencl_upload_bytes > 0,
+      {i64(gpu_transport::opencl_upload_bytes), i64(gpu_transport::opencl_download_bytes),
+       i64(gpu_transport::opencl_sync_failures),
+       i64(opencl::last_device_count()), i64(opencl::last_device_index())},
+      directx.context_used,
+      {i64(directx.device_count), i64(directx.device_index), i64(directx.upload_bytes),
+       i64(directx.download_bytes), i64(directx.sync_failures)},
+      {i64(gpu_transport::allocations_created), i64(gpu_transport::allocations_freed),
+       i64(gpu_transport::live_allocation_count()), i64(gpu_transport::live_memory_bytes()),
+       i64(gpu_transport::exclusive_access_depth()),
+       i64(gpu_transport::invalid_memory_operations)}};
+}
+
+SehDiagnosticsSnapshot capture_seh_diagnostics() {
+  auto& telemetry = worker_runtime::selector_dispatch_telemetry();
+  return {telemetry.seh_code, telemetry.seh_address,
+          l2_detail::escape(telemetry.seh_module), l2_detail::escape(telemetry.selector),
+          telemetry.error};
+}
+
+ClassicSubsystemDiagnostics capture_classic_subsystems() {
+  const auto i64 = [](auto value) { return static_cast<int64_t>(value); };
+  const auto& handle_stats = worker_runtime::handles::statistics();
+  const auto& world_stats = aexcompat::world_registry::statistics();
+  const auto& receipt_stats = aexcompat::render_receipts::statistics();
+  const auto path = aexcompat::pf_path_runtime::snapshot();
+  const auto& arbitrary = worker_runtime::parameters::state().arbitrary;
+  return {
+      l2_detail::suite_leases_balanced(),
+      {i64(l2_detail::suite_acquire_count()), i64(l2_detail::suite_release_count()),
+       i64(l2_detail::live_suite_lease_count()),
+       i64(l2_detail::live_suite_reference_count())},
+      l2_detail::missing_suites_report_json() + l2_detail::suite_timeline_report_json(),
+      l2_detail::live_suite_lease_summary(),
+      worker_runtime::handles::handle_lifetimes_balanced(),
+      aexcompat::pf_path_runtime::lifetimes_balanced(),
+      {i64(path.checkout_calls), i64(path.checkin_calls), i64(path.mask_calls),
+       i64(path.preps_created), i64(path.preps_disposed),
+       i64(path.invalid_operations), i64(path.reject_reason), i64(path.live_preps)},
+      {path.last_feather_x, path.last_feather_y}, path.last_opacity,
+      i64(path.last_quality),
+      {i64(path.last_bounds[0]), i64(path.last_bounds[1]),
+       i64(path.last_bounds[2]), i64(path.last_bounds[3])},
+      {i64(handle_stats.created), i64(handle_stats.disposed)},
+      {i64(arbitrary.copy_calls), i64(arbitrary.dispose_calls), i64(arbitrary.print_calls),
+       i64(arbitrary.print_failures), i64(arbitrary.roundtrip_calls),
+       i64(arbitrary.roundtrip_failures), i64(arbitrary.scan_calls),
+       i64(arbitrary.scan_failures), i64(arbitrary.compare_disagreements),
+       i64(arbitrary.new_calls), i64(arbitrary.interpolation_calls),
+       i64(arbitrary.interpolation_failures), i64(arbitrary.invalid_operations), 0, 0},
+      arbitrary.last_interpolation_amount,
+      aexcompat::world_registry::lifetimes_balanced(),
+      {i64(world_stats.created), i64(world_stats.disposed)},
+      aexcompat::render_receipts::lifetimes_balanced(),
+      {i64(receipt_stats.created), i64(receipt_stats.checked_in), i64(receipt_stats.live_count),
+       i64(receipt_stats.live_bytes), i64(receipt_stats.invalid_operations)},
+      aexcompat::aegp_async_layer::balanced(),
+      {i64(aexcompat::aegp_async_layer::diagnostics().created),
+       i64(aexcompat::aegp_async_layer::diagnostics().completed),
+       i64(aexcompat::aegp_async_layer::diagnostics().canceled),
+       i64(aexcompat::aegp_async_layer::diagnostics().callback_failures),
+       i64(aexcompat::aegp_async_layer::diagnostics().callback_exceptions),
+       i64(aexcompat::aegp_async_layer::diagnostics().live),
+       i64(aexcompat::aegp_async_layer::diagnostics().reserved_bytes)}};
 }
 
 }  // namespace aexcompat::worker_render_report
