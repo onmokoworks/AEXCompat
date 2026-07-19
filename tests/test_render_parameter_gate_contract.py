@@ -77,7 +77,9 @@ class RenderParameterGateContractTests(unittest.TestCase):
 
     def test_worker_revalidates_and_echoes_bound_values(self):
         worker = WORKER.read_text(encoding="utf-8")
-        worker_family = worker + ENTRY_ADMISSION.read_text(encoding="utf-8") + RENDER_REPORT.read_text(encoding="utf-8") + PARAMETER_EXECUTION.read_text(encoding="utf-8")
+        worker_family = (worker +
+            (source_owners.SRC / "worker_l2_payload_parsers.cpp").read_text(encoding="utf-8") +
+            ENTRY_ADMISSION.read_text(encoding="utf-8") + RENDER_REPORT.read_text(encoding="utf-8") + PARAMETER_EXECUTION.read_text(encoding="utf-8"))
         cli_dispatch = CLI_DISPATCH.read_text(encoding="utf-8")
         for marker in ('L"--render-request"', 'L"--smart-mask-context-request"'):
             self.assertIn(marker, cli_dispatch)
