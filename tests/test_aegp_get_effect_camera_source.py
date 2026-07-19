@@ -13,13 +13,16 @@ SCENE_HEADER = ROOT / "minihost" / "src" / "worker_aegp_scene.hpp"
 SCENE_RUNTIME_HEADER = ROOT / "minihost" / "src" / "worker_aegp_scene_runtime.hpp"
 PF_SUITE_SOURCE = ROOT / "minihost" / "src" / "worker_pf_suites_internal.hpp"
 PF_STATE_SOURCE = ROOT / "minihost" / "src" / "worker_pf_state_runtime.cpp"
+PF_INTERFACE_SUITE_HEADER = ROOT / "minihost" / "src" / "worker_aegp_pf_interface_suite.hpp"
+PF_INTERFACE_SUITE_SOURCE = ROOT / "minihost" / "src" / "worker_aegp_pf_interface_suite.cpp"
 
 
 def scene_source() -> str:
     return "\n".join(path.read_text(encoding="utf-8") for path in
                      (SOURCE, SCENE_HEADER, SCENE_RUNTIME_HEADER,
                       SCENE_SELFTEST_SOURCE, SCENE_SELFTEST_IMPL, PF_SUITE_SOURCE,
-                      PF_STATE_SOURCE))
+                      PF_STATE_SOURCE, PF_INTERFACE_SUITE_HEADER,
+                      PF_INTERFACE_SUITE_SOURCE))
 BUILD = ROOT / "target" / "minihost-build"
 
 

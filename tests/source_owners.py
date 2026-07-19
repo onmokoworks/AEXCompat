@@ -38,6 +38,10 @@ WORKER_RUNTIME_OWNERS = (
     "minihost/src/worker_pf_pixel_format_registry.cpp",
     "minihost/src/worker_pf_param_suites.hpp",
     "minihost/src/worker_pf_param_suites.cpp",
+    "minihost/src/worker_aegp_pf_interface_suite.hpp",
+    "minihost/src/worker_aegp_pf_interface_suite.cpp",
+    "minihost/src/worker_aegp_command_suites.hpp",
+    "minihost/src/worker_aegp_command_suites.cpp",
 )
 
 # 契約名 → owner ファイル群 (repo ルート相対)。
@@ -54,6 +58,10 @@ CONTRACTS = {
         "minihost/src/worker_pf_pixel_format_registry.cpp",
         "minihost/src/worker_pf_param_suites.hpp",
         "minihost/src/worker_pf_param_suites.cpp",
+        "minihost/src/worker_aegp_pf_interface_suite.hpp",
+        "minihost/src/worker_aegp_pf_interface_suite.cpp",
+        "minihost/src/worker_aegp_command_suites.hpp",
+        "minihost/src/worker_aegp_command_suites.cpp",
         "minihost/src/l2_mode_execution.hpp",
         "minihost/src/l2_mode_execution.cpp",
         "minihost/src/l2_cli_dispatch.cpp",
@@ -114,6 +122,10 @@ CONTRACTS = {
         "minihost/src/worker_aegp_compat_selftests.cpp",
     ),
     "legacy_effect_compat": (
+        # The PF Interface owner precedes l2_main so definition-anchored
+        # rindex slices keep resolving into the production bodies.
+        "minihost/src/worker_aegp_pf_interface_suite.hpp",
+        "minihost/src/worker_aegp_pf_interface_suite.cpp",
         "minihost/src/l2_main.cpp",
         "minihost/src/worker_aegp_scene.cpp",
         "minihost/src/worker_aegp_scene.hpp",
