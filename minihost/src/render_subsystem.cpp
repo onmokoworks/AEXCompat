@@ -385,4 +385,9 @@ std::string world_debug_report_json(const RenderTelemetry& telemetry) {
   return json.str();
 }
 
+TelemetryState& telemetry_state() {
+  static TelemetryState state;
+  return state;
+}
+
 }  // namespace aexcompat::render
