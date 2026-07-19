@@ -12,6 +12,7 @@ SOURCE = (ROOT / "minihost" / "src" / "worker_suite_registry.cpp").read_text(
 ROUTER = (ROOT / "minihost/src/worker_host_suite_router.cpp").read_text(
     encoding="utf-8"
 )
+CATALOG = (ROOT / "minihost/src/worker_host_suite_catalog.cpp").read_text(encoding="utf-8")
 CMAKE = (ROOT / "minihost" / "CMakeLists.txt").read_text(encoding="utf-8")
 NATIVE = (ROOT / "tests" / "native" / "worker_suite_registry_selftest.cpp").read_text(
     encoding="utf-8"
@@ -26,9 +27,10 @@ def test_registry_is_a_genuine_compiled_owner_and_abi_wrappers_remain_in_main():
     assert "SuiteResolveResult resolve_legacy_host_suite(" not in MAIN
     acquire = MAIN[MAIN.rindex("int32_t __cdecl acquire_suite(") :]
     acquire = acquire[: acquire.index("int32_t __cdecl release_suite(")]
-    assert "acquire_host_suite(" in acquire
+    assert "acquire_catalog_suite(" in acquire
+    assert "acquire_host_suite(" in CATALOG
     assert "suite_registry().acquire(" in ROUTER
-    assert "ProviderCatalog catalog{providers, std::size(providers), nullptr, nullptr}" in acquire
+    assert "ProviderCatalog provider_catalog" in CATALOG
     assert "g_trace_writer" in acquire
     basic = MAIN[MAIN.index("struct BasicSuite") : MAIN.index("int32_t invoke_sequence_selector")]
     assert "decltype(&acquire_suite) acquire" in basic
@@ -65,8 +67,8 @@ def test_scene_precedence_and_live_tls_conditional_exposure_stay_in_resolver():
     assert "return g_mask_model_enabled" in MAIN
     assert "record_suite_acquire" not in resolver
     assert "reject_suite_acquire" not in resolver
-    acquire = MAIN[MAIN.rindex("int32_t __cdecl acquire_suite(") :]
-    assert acquire.index("resolve_scene_suite_provider") < acquire.index(
+    acquire = MAIN[MAIN.index("const StaticSuite component_suites[]") :]
+    assert acquire.index("resolve_scene_suite_provider") < CATALOG.index(
         "resolve_static_provider"
     )
     assert "resolve_legacy_host_suite" not in acquire

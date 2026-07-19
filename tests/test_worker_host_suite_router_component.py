@@ -10,6 +10,7 @@ SOURCE = (ROOT / "minihost/src/worker_host_suite_router.cpp").read_text(
     encoding="utf-8"
 )
 CMAKE = (ROOT / "minihost/CMakeLists.txt").read_text(encoding="utf-8")
+CATALOG = (ROOT / "minihost/src/worker_host_suite_catalog.cpp").read_text(encoding="utf-8")
 
 
 def test_host_suite_router_owns_registry_acquire_and_release_boundary():
@@ -21,7 +22,8 @@ def test_host_suite_router_owns_registry_acquire_and_release_boundary():
     assert "suite_registry().release" in SOURCE
     acquire = MAIN[MAIN.rindex("int32_t __cdecl acquire_suite"):]
     acquire = acquire[: acquire.index("int32_t __cdecl release_suite")]
-    assert "acquire_host_suite(" in acquire
+    assert "acquire_catalog_suite(" in acquire
+    assert "acquire_host_suite(" in CATALOG
     assert "suite_registry().acquire" not in acquire
 
 
@@ -36,7 +38,7 @@ def test_provider_priority_and_terminal_errors_are_explicit():
 
 
 def test_component_pf_and_aegp_families_are_injected_without_legacy_route():
-    acquire = MAIN[MAIN.rindex("int32_t __cdecl acquire_suite"):]
+    acquire = MAIN[MAIN.index("const StaticSuite component_suites[]"):]
     for suite in (
         "AE Plugin Helper Suite",
         "PF Cache On Load Suite",
@@ -46,12 +48,12 @@ def test_component_pf_and_aegp_families_are_injected_without_legacy_route():
     ):
         assert suite in acquire
     assert "resolve_scene_suite_provider" in acquire
-    assert "resolve_static_provider" in acquire
-    assert acquire.index("resolve_scene_suite_provider") < acquire.index(
-        "resolve_static_provider"
-    )
+    assert "resolve_static_provider" in CATALOG
+    assert "providers[0] = configuration.scene_provider" in CATALOG
+    assert "providers[1] = {&resolve_static_provider" in CATALOG
     assert "resolve_legacy_host_suite" not in MAIN
-    assert "ProviderCatalog catalog{providers, std::size(providers), nullptr, nullptr}" in acquire
+    assert "configure_host_suite_catalog" in acquire
+    assert "ProviderCatalog provider_catalog" in CATALOG
 
 
 def test_static_provider_matches_exact_name_and_version_only():
@@ -84,4 +86,5 @@ def test_l2_has_no_legacy_name_version_routing_chain():
     routing = routing[: routing.index("int32_t __cdecl release_suite(")]
     assert "resolve_legacy_host_suite" not in routing
     assert "std::strcmp(name" not in routing
-    assert "ProviderCatalog catalog{providers, std::size(providers), nullptr, nullptr}" in routing
+    assert "configure_host_suite_catalog" in routing
+    assert "ProviderCatalog provider_catalog" in CATALOG

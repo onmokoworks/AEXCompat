@@ -7,6 +7,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "minihost" / "src" / "l2_main.cpp"
 ABI_SOURCE = ROOT / "minihost" / "src" / "worker_suite_abi.hpp"
 ABI_OWNER = ROOT / "minihost" / "src" / "worker_suite_abi.cpp"
+CATALOG_OWNER = ROOT / "minihost" / "src" / "worker_host_suite_catalog.cpp"
 
 
 def _worker() -> pathlib.Path | None:
@@ -23,11 +24,13 @@ def test_world_suite3_is_exact_typed_sdk_layout():
     text = SOURCE.read_text(encoding="utf-8")
     abi = ABI_SOURCE.read_text(encoding="utf-8")
     owner = ABI_OWNER.read_text(encoding="utf-8")
+    catalog = CATALOG_OWNER.read_text(encoding="utf-8")
     assert "struct AegpWorldSuite3" in abi
     assert "static_assert(sizeof(AegpWorldSuite3) == 13 * sizeof(void*));" in abi
     assert "offsetof(AegpWorldSuite3, reference_platform_world) == 12 * sizeof(void*)" in abi
     assert "AegpWorldSuite3 g_aegp_world_suite3" in owner
-    assert "aegp_world_suite3_table()" in text
+    assert "std::array<void*, 13> aegp_world" in catalog
+    assert "provide_aegp_world_suite3" in catalog
     assert "std::array<void*, 13> g_aegp_world_suite3" not in text
     assert "g_aegp_world_suite3.fill" not in text
     for callback in (

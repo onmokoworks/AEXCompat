@@ -94,11 +94,11 @@ def test_worker_v1_v2_tables_are_independent_non_null_fail_closed_and_balanced()
 
 
 def test_source_keeps_v1_storage_and_acquisition_separate_from_v2():
-    source = "\n".join(path.read_text(encoding="utf-8") for path in (ROOT / "minihost/src/l2_main.cpp", PF_SUITES_ABI))
-    assert "std::array<void*, 10> g_adv_app_suite1" in source
-    assert "std::array<void*, 11> g_adv_app_suite2" in source
-    assert "return g_adv_app_suite1.data();" in source
-    assert "return g_adv_app_suite2.data();" in source
+    source = "\n".join(path.read_text(encoding="utf-8") for path in (ROOT / "minihost/src/l2_main.cpp", PF_SUITES_ABI, ROOT / "minihost/src/worker_host_suite_catalog.cpp"))
+    assert "std::array<void*, 10> adv_app1" in source
+    assert "std::array<void*, 11> adv_app2" in source
+    assert "c.adv_app1.data()" in source
+    assert "c.adv_app2.data()" in source
     assert '{"PF AE Adv App Suite", 1, nullptr, &provide_adv_app1}' in source
     assert '{"PF AE Adv App Suite", 2, nullptr, &provide_adv_app2}' in source
     assert "suite1 != suite2" in source

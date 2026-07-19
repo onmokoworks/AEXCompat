@@ -85,6 +85,7 @@
 #include "worker_color_settings_runtime.hpp"
 #include "worker_handle_runtime.hpp"
 #include "worker_host_suite_router.hpp"
+#include "worker_host_suite_catalog.hpp"
 #include "worker_suite_abi.hpp"
 #include "worker_suite_registry.hpp"
 #include "worker_world_registry.hpp"
@@ -1101,7 +1102,6 @@ UtilitySuite3 g_utility_suite3{{}, &register_with_aegp, &get_main_hwnd, {}};
 PfInterfaceSuite g_pf_interface_suite{&get_effect_layer, &get_new_effect_for_effect,
     &convert_effect_to_comp_time, &get_effect_camera,
     &get_effect_camera_matrix};
-std::array<void*, 14> g_aegp_dynamic_stream_suite2{};
 using AegpStreamValue = aexcompat::scene_runtime::AegpStreamValue;
 int32_t __cdecl aegp_get_new_effect_stream_by_index_v2(
     int32_t plugin_id, void* effect, int32_t index, void** stream);
@@ -1121,24 +1121,10 @@ int32_t __cdecl aegp_get_effect_param_union_by_index_v3(
 PfMaskSuite1 g_pf_mask_suite1{
     reinterpret_cast<decltype(PfMaskSuite1::mask_world_with_path)>(
         &aexcompat::pf_path_runtime::mask_world_with_path)};
-std::array<void*, 4> g_pf_path_query_suite1{};
-std::array<void*, 11> g_pf_path_data_suite1{};
-std::array<void*, 19> g_ansi_suite1{};
-std::array<void*, 1> g_effect_ui_suite1{};
 // PF_AdvAppSuite1 is frozen at ten callbacks; keep its storage independent
 // from the eleven-slot v2 table so versioned suite identity cannot alias.
-std::array<void*, 10> g_adv_app_suite1{};
-std::array<void*, 11> g_adv_app_suite2{};
-static_assert(sizeof(g_adv_app_suite1) == 10 * sizeof(void*));
-static_assert(sizeof(g_adv_app_suite2) == 11 * sizeof(void*));
 struct PfAdvItemSuite1;
 extern PfAdvItemSuite1 g_adv_item_suite1;
-std::array<void*, 2> g_drawbot_draw_suite1{};
-std::array<void*, 13> g_drawbot_supplier_suite1{};
-std::array<void*, 17> g_drawbot_surface_suite2{};
-std::array<void*, 6> g_drawbot_path_suite1{};
-std::array<void*, 1> g_effect_custom_ui_suite1{};
-std::array<void*, 2> g_effect_custom_ui_suite2{};
 int32_t __cdecl convert_effect_to_comp_time(
     void* effect, int32_t what_time, uint32_t time_scale, AegpTime* comp_time) {
   if (effect != &g_effect || time_scale == 0 || !comp_time) return 4;
@@ -1185,10 +1171,6 @@ static_assert(std::is_same_v<decltype(&set_layer_render_matte),
                              aexcompat::suite_abi::AegpLayerOptionsSetMatte>);
 static_assert(std::is_same_v<decltype(&get_layer_render_matte),
                              aexcompat::suite_abi::AegpLayerOptionsGetMatte>);
-AegpLayerRenderOptionsSuite1& g_layer_render_options_suite1 =
-    aexcompat::suite_abi::aegp_layer_render_options_suite1_table();
-AegpLayerRenderOptionsSuite2& g_layer_render_options_suite2 =
-    aexcompat::suite_abi::aegp_layer_render_options_suite2_table();
 static_assert(std::is_same_v<decltype(&render_options_new_from_item),
                              aexcompat::suite_abi::AegpRenderOptionsNew>);
 static_assert(std::is_same_v<decltype(&render_options_duplicate),
@@ -1235,10 +1217,6 @@ static_assert(std::is_same_v<decltype(&render_options_get_quality),
                              aexcompat::suite_abi::AegpRenderOptionsGetI8>);
 static_assert(std::is_same_v<decltype(&render_options_set_quality),
                              aexcompat::suite_abi::AegpRenderOptionsSetI8>);
-AegpRenderOptionsSuite1& g_render_options_suite1 =
-    aexcompat::suite_abi::aegp_render_options_suite1_table();
-AegpRenderOptionsSuite4& g_render_options_suite4 =
-    aexcompat::suite_abi::aegp_render_options_suite4_table();
 int32_t __cdecl checkout_item_frame_async(void*, uint32_t, void*, void**);
 int32_t __cdecl checkout_layer_frame_async(void*, uint32_t, void*, void**);
 struct AegpRenderAsyncManagerSuite1 {
@@ -1248,7 +1226,6 @@ struct AegpRenderAsyncManagerSuite1 {
 static_assert(sizeof(AegpRenderAsyncManagerSuite1) == 2 * sizeof(void*));
 static_assert(offsetof(AegpRenderAsyncManagerSuite1, checkout_item_frame) == 0 * sizeof(void*));
 static_assert(offsetof(AegpRenderAsyncManagerSuite1, checkout_layer_frame) == 1 * sizeof(void*));
-AegpRenderAsyncManagerSuite1 g_render_async_manager_suite1{};
 
 using AegpRenderCancelV1 = int32_t(__cdecl*)(void*, uint8_t*);
 using AegpAsyncFrameReadyCallback =
@@ -1296,7 +1273,6 @@ static_assert(offsetof(AegpRenderSuite4, changed) == 8 * sizeof(void*));
 static_assert(offsetof(AegpRenderSuite4, worthwhile) == 9 * sizeof(void*));
 static_assert(offsetof(AegpRenderSuite4, checkin_rendered) == 10 * sizeof(void*));
 static_assert(offsetof(AegpRenderSuite4, guid) == 11 * sizeof(void*));
-AegpRenderSuite4 g_aegp_render_suite4{};
 struct AegpRenderSuite5 {
   decltype(&render_checkout_frame_reject) render_frame;
   decltype(&render_checkout_layer_v5) render_layer;
@@ -1321,7 +1297,6 @@ static_assert(offsetof(AegpRenderSuite5, cancel_async) == 3 * sizeof(void*));
 static_assert(offsetof(AegpRenderSuite5, checkin) == 4 * sizeof(void*));
 static_assert(offsetof(AegpRenderSuite5, get_world) == 5 * sizeof(void*));
 static_assert(offsetof(AegpRenderSuite5, guid) == 13 * sizeof(void*));
-AegpRenderSuite5 g_aegp_render_suite5{};
 struct AegpRenderSuite2 {
   decltype(&render_checkout_frame_reject) render_frame;
   decltype(&checkin_frame) checkin;
@@ -1345,7 +1320,6 @@ static_assert(offsetof(AegpRenderSuite2, timestamp) == 6 * sizeof(void*));
 static_assert(offsetof(AegpRenderSuite2, changed) == 7 * sizeof(void*));
 static_assert(offsetof(AegpRenderSuite2, worthwhile) == 8 * sizeof(void*));
 static_assert(offsetof(AegpRenderSuite2, checkin_rendered) == 9 * sizeof(void*));
-AegpRenderSuite2 g_aegp_render_suite2{};
 static_assert(std::is_same_v<decltype(&aegp_world_new_owned),
                              aexcompat::suite_abi::AegpWorldNew>);
 static_assert(std::is_same_v<decltype(&aegp_world_dispose),
@@ -1373,10 +1347,6 @@ static_assert(std::is_same_v<decltype(&aegp_world_dispose_platform),
 static_assert(std::is_same_v<decltype(&aegp_world_reference_platform),
                              aexcompat::suite_abi::AegpWorldReferencePlatform>);
 
-std::array<void*, 8> g_effect_overlay_theme_suite1{};
-std::array<void*, 11> g_app_suite4{};
-std::array<void*, 12> g_app_suite5{};
-std::array<void*, 15> g_app_suite6{};
 struct DrawbotOpaque { uint32_t tag; };
 DrawbotOpaque g_drawbot_draw{0x44524157};
 DrawbotOpaque g_drawbot_supplier{0x53555050};
@@ -1637,7 +1607,6 @@ int32_t __cdecl ui_transform_point_simple(void*, void* context, int32_t* point) 
 }
 
 
-std::array<void*, 1> g_duck_suite1{};
 MaskSuite g_mask_suite{&get_layer_num_masks, &get_layer_mask_by_index, &dispose_mask,
     &get_mask_invert, &set_mask_invert, &get_mask_mode, &set_mask_mode,
     &get_mask_motion_blur, &set_mask_motion_blur,
@@ -3828,100 +3797,6 @@ bool render_suite2_provider_available(void*) {
       (is_render_worker() && g_loaded_effect_receipt_context.entry != nullptr);
 }
 
-const void* provide_aegp_world_suite3(void*) {
-  auto& suite = aexcompat::suite_abi::aegp_world_suite3_table();
-  suite = {&aegp_world_new_owned, &aegp_world_dispose,
-      &aegp_world_get_type, &aegp_world_get_size, &aegp_world_get_rowbytes,
-      &aegp_world_get_base_addr8, &aegp_world_get_base_addr16,
-      &aegp_world_get_base_addr32, &aegp_world_fill_pf_world,
-      &aegp_world_fast_blur, &aegp_world_new_platform,
-      &aegp_world_dispose_platform, &aegp_world_reference_platform};
-  return &suite;
-}
-
-const void* provide_layer_render_options1(void*) {
-  g_layer_render_options_suite1 = {&new_layer_render_options,
-      &new_from_upstream_of_effect, &duplicate_layer_render_options,
-      &dispose_layer_render_options, &set_layer_render_time, &get_layer_render_time,
-      &set_layer_render_time_step, &get_layer_render_time_step,
-      &set_layer_render_world_type, &get_layer_render_world_type,
-      &set_layer_render_downsample, &get_layer_render_downsample,
-      &set_layer_render_matte, &get_layer_render_matte};
-  return &g_layer_render_options_suite1;
-}
-
-const void* provide_layer_render_options2(void*) {
-  g_layer_render_options_suite2 = {&new_layer_render_options,
-      &new_from_upstream_of_effect, &new_from_downstream_of_effect,
-      &duplicate_layer_render_options, &dispose_layer_render_options,
-      &set_layer_render_time, &get_layer_render_time,
-      &set_layer_render_time_step, &get_layer_render_time_step,
-      &set_layer_render_world_type, &get_layer_render_world_type,
-      &set_layer_render_downsample, &get_layer_render_downsample,
-      &set_layer_render_matte, &get_layer_render_matte};
-  return &g_layer_render_options_suite2;
-}
-
-const void* provide_render_options1(void*) {
-  g_render_options_suite1 = {&render_options_new_from_item, &render_options_duplicate,
-      &render_options_dispose, &render_options_set_time, &render_options_get_time,
-      &render_options_set_time_step, &render_options_get_time_step,
-      &render_options_set_field, &render_options_get_field,
-      &render_options_set_world_type, &render_options_get_world_type,
-      &render_options_set_downsample, &render_options_get_downsample,
-      &render_options_set_roi, &render_options_get_roi,
-      &render_options_set_matte, &render_options_get_matte};
-  return &g_render_options_suite1;
-}
-
-const void* provide_render_options4(void*) {
-  g_render_options_suite4 = {&render_options_new_from_item, &render_options_duplicate,
-      &render_options_dispose, &render_options_set_time, &render_options_get_time,
-      &render_options_set_time_step, &render_options_get_time_step,
-      &render_options_set_field, &render_options_get_field,
-      &render_options_set_world_type, &render_options_get_world_type,
-      &render_options_set_downsample, &render_options_get_downsample,
-      &render_options_set_roi, &render_options_get_roi,
-      &render_options_set_matte, &render_options_get_matte,
-      &render_options_set_channel_order, &render_options_get_channel_order,
-      &render_options_get_guide_layers, &render_options_set_guide_layers,
-      &render_options_get_quality, &render_options_set_quality};
-  return &g_render_options_suite4;
-}
-
-const void* provide_render_suite2(void*) {
-  g_aegp_render_suite2 = {&render_checkout_frame_reject, &checkin_frame,
-      &get_receipt_world, &render_get_region_reject, &render_sufficient_reject,
-      &render_sound_reject, &render_timestamp_reject, &render_changed_reject,
-      &render_worthwhile_reject, &render_checkin_rendered};
-  return &g_aegp_render_suite2;
-}
-
-const void* provide_render_suite5(void*) {
-  g_aegp_render_suite4 = {&render_checkout_frame_reject, &render_checkout_layer_reject,
-      &checkin_frame, &get_receipt_world, &render_get_region_reject,
-      &render_sufficient_reject, &render_sound_reject, &render_timestamp_reject,
-      &render_changed_reject, &render_worthwhile_reject,
-      &render_checkin_rendered, &render_guid_reject};
-  return &g_aegp_render_suite4;
-}
-
-const void* provide_render_suite8(void*) {
-  g_aegp_render_suite5 = {&render_checkout_frame_reject, &render_checkout_layer_v5,
-      &render_checkout_layer_async_reject, &render_cancel_async_reject,
-      &checkin_frame, &get_receipt_world, &render_get_region_reject,
-      &render_sufficient_reject, &render_sound_reject, &render_timestamp_reject,
-      &render_changed_reject, &render_worthwhile_reject,
-      &render_checkin_rendered, &render_guid_reject};
-  return &g_aegp_render_suite5;
-}
-
-const void* provide_render_async_manager1(void*) {
-  g_render_async_manager_suite1 = {
-      &checkout_item_frame_async, &checkout_layer_frame_async};
-  return &g_render_async_manager_suite1;
-}
-
 bool aegp_init_suite_provider_available(void*) { return g_aegp_init_mode; }
 bool render_worker_suite_provider_available(void*) { return is_render_worker(); }
 
@@ -3929,142 +3804,6 @@ const void* provide_batch_sampling1(void*) {
   g_batch_sampling_suite1 = {&begin_sampling8, &end_sampling8,
       &unsupported_batch_sample_func, &unsupported_batch_sample_func};
   return &g_batch_sampling_suite1;
-}
-const void* provide_path_query1(void*) {
-  g_pf_path_query_suite1 = {
-      reinterpret_cast<void*>(&aexcompat::pf_path_runtime::num_paths),
-      reinterpret_cast<void*>(&aexcompat::pf_path_runtime::path_info),
-      reinterpret_cast<void*>(&aexcompat::pf_path_runtime::checkout_path),
-      reinterpret_cast<void*>(&aexcompat::pf_path_runtime::checkin_path)};
-  return g_pf_path_query_suite1.data();
-}
-const void* provide_path_data1(void*) {
-  g_pf_path_data_suite1.fill(reinterpret_cast<void*>(&aegp_unsupported_suite_call));
-  void* callbacks[] = {
-      reinterpret_cast<void*>(&aexcompat::pf_path_runtime::path_is_open),
-      reinterpret_cast<void*>(&aexcompat::pf_path_runtime::path_num_segments),
-      reinterpret_cast<void*>(&aexcompat::pf_path_runtime::path_vertex_info),
-      reinterpret_cast<void*>(&aexcompat::pf_path_runtime::path_prepare_seg_length),
-      reinterpret_cast<void*>(&aexcompat::pf_path_runtime::path_get_seg_length),
-      reinterpret_cast<void*>(&aexcompat::pf_path_runtime::path_eval_seg_length),
-      reinterpret_cast<void*>(&aexcompat::pf_path_runtime::path_eval_seg_length_deriv1),
-      reinterpret_cast<void*>(&aexcompat::pf_path_runtime::path_cleanup_seg_length),
-      reinterpret_cast<void*>(&aexcompat::pf_path_runtime::path_is_inverted),
-      reinterpret_cast<void*>(&aexcompat::pf_path_runtime::path_get_mask_mode),
-      reinterpret_cast<void*>(&aexcompat::pf_path_runtime::path_get_name)};
-  std::copy(std::begin(callbacks), std::end(callbacks), g_pf_path_data_suite1.begin());
-  return g_pf_path_data_suite1.data();
-}
-const void* provide_duck1(void*) {
-  g_duck_suite1[0] = reinterpret_cast<void*>(&duck_quack); return g_duck_suite1.data();
-}
-const void* provide_effect_ui1(void*) {
-  g_effect_ui_suite1[0] = reinterpret_cast<void*>(&set_options_button_name);
-  return g_effect_ui_suite1.data();
-}
-const void* provide_adv_app1(void*) {
-  g_adv_app_suite1.fill(reinterpret_cast<void*>(&aegp_unsupported_suite_call));
-  g_adv_app_suite1[6] = reinterpret_cast<void*>(&adv_app_info_text);
-  g_adv_app_suite1[8] = reinterpret_cast<void*>(&adv_app_info_text3);
-  return g_adv_app_suite1.data();
-}
-const void* provide_adv_app2(void*) {
-  g_adv_app_suite2.fill(reinterpret_cast<void*>(&aegp_unsupported_suite_call));
-  g_adv_app_suite2[6] = reinterpret_cast<void*>(&adv_app_info_text);
-  g_adv_app_suite2[8] = reinterpret_cast<void*>(&adv_app_info_text3);
-  return g_adv_app_suite2.data();
-}
-const void* provide_drawbot_draw1(void*) {
-  g_drawbot_draw_suite1 = {reinterpret_cast<void*>(&drawbot_get_supplier),
-                           reinterpret_cast<void*>(&drawbot_get_surface)};
-  return g_drawbot_draw_suite1.data();
-}
-const void* provide_drawbot_supplier1(void*) {
-  g_drawbot_supplier_suite1.fill(reinterpret_cast<void*>(&aegp_unsupported_suite_call));
-  g_drawbot_supplier_suite1[0] = reinterpret_cast<void*>(&drawbot_new_pen);
-  g_drawbot_supplier_suite1[1] = reinterpret_cast<void*>(&drawbot_new_brush);
-  g_drawbot_supplier_suite1[6] = reinterpret_cast<void*>(&drawbot_new_path);
-  g_drawbot_supplier_suite1[12] = reinterpret_cast<void*>(&drawbot_release_object);
-  return g_drawbot_supplier_suite1.data();
-}
-const void* provide_drawbot_surface2(void*) {
-  g_drawbot_surface_suite2.fill(reinterpret_cast<void*>(&aegp_unsupported_suite_call));
-  g_drawbot_surface_suite2[2] = reinterpret_cast<void*>(&drawbot_paint_rect);
-  g_drawbot_surface_suite2[3] = reinterpret_cast<void*>(&drawbot_fill_path);
-  g_drawbot_surface_suite2[4] = reinterpret_cast<void*>(&drawbot_stroke_path);
-  return g_drawbot_surface_suite2.data();
-}
-const void* provide_drawbot_path1(void*) {
-  g_drawbot_path_suite1.fill(reinterpret_cast<void*>(&aegp_unsupported_suite_call));
-  g_drawbot_path_suite1[0] = reinterpret_cast<void*>(&drawbot_path_point);
-  g_drawbot_path_suite1[1] = reinterpret_cast<void*>(&drawbot_path_point);
-  g_drawbot_path_suite1[3] = reinterpret_cast<void*>(&drawbot_add_rect);
-  return g_drawbot_path_suite1.data();
-}
-const void* provide_custom_ui1(void*) {
-  g_effect_custom_ui_suite1[0] = reinterpret_cast<void*>(&get_drawing_reference);
-  return g_effect_custom_ui_suite1.data();
-}
-const void* provide_custom_ui2(void*) {
-  g_effect_custom_ui_suite2[0] = reinterpret_cast<void*>(&get_drawing_reference);
-  g_effect_custom_ui_suite2[1] = reinterpret_cast<void*>(&get_context_async_manager);
-  return g_effect_custom_ui_suite2.data();
-}
-const void* provide_overlay_theme1(void*) {
-  g_effect_overlay_theme_suite1.fill(reinterpret_cast<void*>(&aegp_unsupported_suite_call));
-  g_effect_overlay_theme_suite1[0] = reinterpret_cast<void*>(&overlay_foreground);
-  g_effect_overlay_theme_suite1[5] = reinterpret_cast<void*>(&overlay_stroke_path);
-  return g_effect_overlay_theme_suite1.data();
-}
-
-template <typename Suite>
-const void* populate_app_suite(Suite& suite, bool language, bool progress) {
-  suite.fill(reinterpret_cast<void*>(&aegp_unsupported_suite_call));
-  std::size_t slot = 0;
-  suite[slot++] = reinterpret_cast<void*>(&app_get_background_color);
-  suite[slot++] = reinterpret_cast<void*>(&app_get_color);
-  if (language) suite[slot++] = reinterpret_cast<void*>(&app_get_language);
-  suite[slot++] = reinterpret_cast<void*>(&app_get_personal_info);
-  suite[slot++] = reinterpret_cast<void*>(&app_get_font_style);
-  suite[slot++] = reinterpret_cast<void*>(&app_set_cursor);
-  suite[slot++] = reinterpret_cast<void*>(&app_is_render_engine);
-  suite[slot++] = reinterpret_cast<void*>(&app_color_picker);
-  suite[slot++] = reinterpret_cast<void*>(&app_get_mouse);
-  suite[slot++] = reinterpret_cast<void*>(&app_invalidate_rect);
-  suite[slot++] = reinterpret_cast<void*>(&app_convert_local_to_global);
-  suite[slot++] = reinterpret_cast<void*>(&app_get_color_at_global_point);
-  if (progress) {
-    suite[slot++] = reinterpret_cast<void*>(&app_create_progress_dialog);
-    suite[slot++] = reinterpret_cast<void*>(&app_update_progress_dialog);
-    suite[slot++] = reinterpret_cast<void*>(&app_dispose_progress_dialog);
-  }
-  return suite.data();
-}
-const void* provide_app_suite4(void*) { return populate_app_suite(g_app_suite4, false, false); }
-const void* provide_app_suite5(void*) { return populate_app_suite(g_app_suite5, true, false); }
-const void* provide_app_suite6(void*) { return populate_app_suite(g_app_suite6, true, true); }
-
-const void* provide_ansi1(void*) {
-  g_ansi_suite1[0] = reinterpret_cast<void*>(&ansi_atan);
-  g_ansi_suite1[1] = reinterpret_cast<void*>(&ansi_atan2);
-  g_ansi_suite1[2] = reinterpret_cast<void*>(&ansi_ceil);
-  g_ansi_suite1[3] = reinterpret_cast<void*>(&ansi_cos);
-  g_ansi_suite1[4] = reinterpret_cast<void*>(&ansi_exp);
-  g_ansi_suite1[5] = reinterpret_cast<void*>(&ansi_fabs);
-  g_ansi_suite1[6] = reinterpret_cast<void*>(&ansi_floor);
-  g_ansi_suite1[7] = reinterpret_cast<void*>(&ansi_fmod);
-  g_ansi_suite1[8] = reinterpret_cast<void*>(&ansi_hypot);
-  g_ansi_suite1[9] = reinterpret_cast<void*>(&ansi_log);
-  g_ansi_suite1[10] = reinterpret_cast<void*>(&ansi_log10);
-  g_ansi_suite1[11] = reinterpret_cast<void*>(&ansi_pow);
-  g_ansi_suite1[12] = reinterpret_cast<void*>(&ansi_sin);
-  g_ansi_suite1[13] = reinterpret_cast<void*>(&ansi_sqrt);
-  g_ansi_suite1[14] = reinterpret_cast<void*>(&ansi_tan);
-  g_ansi_suite1[15] = reinterpret_cast<void*>(&ansi_sprintf);
-  g_ansi_suite1[16] = reinterpret_cast<void*>(&ansi_strcpy);
-  g_ansi_suite1[17] = reinterpret_cast<void*>(&ansi_asin);
-  g_ansi_suite1[18] = reinterpret_cast<void*>(&ansi_acos);
-  return g_ansi_suite1.data();
 }
 const void* provide_color_settings7(void*) {
   configure_host_hooks({&composition_handle, &acquire_suite, &release_suite});
@@ -4091,12 +3830,6 @@ const void* provide_sampling_float(void*) {
   g_sampling_float_suite1[1] = reinterpret_cast<void*>(&subpixel_sample_float);
   g_sampling_float_suite1[2] = reinterpret_cast<void*>(&area_sample_float); return g_sampling_float_suite1.data();
 }
-const void* provide_dynamic_stream2(void*) {
-  g_aegp_dynamic_stream_suite2.fill(reinterpret_cast<void*>(&aegp_unsupported_suite_call));
-  g_aegp_dynamic_stream_suite2[5] = reinterpret_cast<void*>(&aegp_set_dynamic_stream_flag_v2);
-  return g_aegp_dynamic_stream_suite2.data();
-}
-
 SuiteResolveResult resolve_scene_suite_provider(
     void*, const char* name, int32_t version, const void** suite) {
   if (scene_context()) {
@@ -4111,9 +3844,80 @@ SuiteResolveResult resolve_scene_suite_provider(
   return SuiteResolveResult::not_found;
 }
 
-int32_t __cdecl acquire_suite(const char* name, int32_t version,
-                              const void** suite) {
+bool configure_component_suite_catalog() {
   using namespace aexcompat::worker_runtime::host_suites;
+  const AssemblyHooks assembly{
+      reinterpret_cast<void*>(&aegp_unsupported_suite_call),
+      {reinterpret_cast<void*>(&aexcompat::pf_path_runtime::num_paths),
+       reinterpret_cast<void*>(&aexcompat::pf_path_runtime::path_info),
+       reinterpret_cast<void*>(&aexcompat::pf_path_runtime::checkout_path),
+       reinterpret_cast<void*>(&aexcompat::pf_path_runtime::checkin_path)},
+      {reinterpret_cast<void*>(&aexcompat::pf_path_runtime::path_is_open),
+       reinterpret_cast<void*>(&aexcompat::pf_path_runtime::path_num_segments),
+       reinterpret_cast<void*>(&aexcompat::pf_path_runtime::path_vertex_info),
+       reinterpret_cast<void*>(&aexcompat::pf_path_runtime::path_prepare_seg_length),
+       reinterpret_cast<void*>(&aexcompat::pf_path_runtime::path_get_seg_length),
+       reinterpret_cast<void*>(&aexcompat::pf_path_runtime::path_eval_seg_length),
+       reinterpret_cast<void*>(&aexcompat::pf_path_runtime::path_eval_seg_length_deriv1),
+       reinterpret_cast<void*>(&aexcompat::pf_path_runtime::path_cleanup_seg_length),
+       reinterpret_cast<void*>(&aexcompat::pf_path_runtime::path_is_inverted),
+       reinterpret_cast<void*>(&aexcompat::pf_path_runtime::path_get_mask_mode),
+       reinterpret_cast<void*>(&aexcompat::pf_path_runtime::path_get_name)},
+      reinterpret_cast<void*>(&duck_quack),
+      reinterpret_cast<void*>(&set_options_button_name),
+      reinterpret_cast<void*>(&adv_app_info_text),
+      reinterpret_cast<void*>(&adv_app_info_text3),
+      {reinterpret_cast<void*>(&drawbot_get_supplier),
+       reinterpret_cast<void*>(&drawbot_get_surface)},
+      reinterpret_cast<void*>(&drawbot_new_pen),
+      reinterpret_cast<void*>(&drawbot_new_brush),
+      reinterpret_cast<void*>(&drawbot_new_path),
+      reinterpret_cast<void*>(&drawbot_release_object),
+      reinterpret_cast<void*>(&drawbot_paint_rect),
+      reinterpret_cast<void*>(&drawbot_fill_path),
+      reinterpret_cast<void*>(&drawbot_stroke_path),
+      reinterpret_cast<void*>(&drawbot_path_point),
+      reinterpret_cast<void*>(&drawbot_add_rect),
+      reinterpret_cast<void*>(&get_drawing_reference),
+      reinterpret_cast<void*>(&get_context_async_manager),
+      reinterpret_cast<void*>(&overlay_foreground),
+      reinterpret_cast<void*>(&overlay_stroke_path),
+      {reinterpret_cast<void*>(&app_get_background_color),
+       reinterpret_cast<void*>(&app_get_color),
+       reinterpret_cast<void*>(&app_get_language),
+       reinterpret_cast<void*>(&app_get_personal_info),
+       reinterpret_cast<void*>(&app_get_font_style),
+       reinterpret_cast<void*>(&app_set_cursor),
+       reinterpret_cast<void*>(&app_is_render_engine),
+       reinterpret_cast<void*>(&app_color_picker),
+       reinterpret_cast<void*>(&app_get_mouse),
+       reinterpret_cast<void*>(&app_invalidate_rect),
+       reinterpret_cast<void*>(&app_convert_local_to_global),
+       reinterpret_cast<void*>(&app_get_color_at_global_point),
+       reinterpret_cast<void*>(&app_create_progress_dialog),
+       reinterpret_cast<void*>(&app_update_progress_dialog),
+       reinterpret_cast<void*>(&app_dispose_progress_dialog)},
+      {reinterpret_cast<void*>(&ansi_atan), reinterpret_cast<void*>(&ansi_atan2),
+       reinterpret_cast<void*>(&ansi_ceil), reinterpret_cast<void*>(&ansi_cos),
+       reinterpret_cast<void*>(&ansi_exp), reinterpret_cast<void*>(&ansi_fabs),
+       reinterpret_cast<void*>(&ansi_floor), reinterpret_cast<void*>(&ansi_fmod),
+       reinterpret_cast<void*>(&ansi_hypot), reinterpret_cast<void*>(&ansi_log),
+       reinterpret_cast<void*>(&ansi_log10), reinterpret_cast<void*>(&ansi_pow),
+       reinterpret_cast<void*>(&ansi_sin), reinterpret_cast<void*>(&ansi_sqrt),
+       reinterpret_cast<void*>(&ansi_tan), reinterpret_cast<void*>(&ansi_sprintf),
+       reinterpret_cast<void*>(&ansi_strcpy), reinterpret_cast<void*>(&ansi_asin),
+       reinterpret_cast<void*>(&ansi_acos)},
+      reinterpret_cast<void*>(&aegp_set_dynamic_stream_flag_v2),
+      {reinterpret_cast<void*>(&aegp_world_new_owned), reinterpret_cast<void*>(&aegp_world_dispose), reinterpret_cast<void*>(&aegp_world_get_type), reinterpret_cast<void*>(&aegp_world_get_size), reinterpret_cast<void*>(&aegp_world_get_rowbytes), reinterpret_cast<void*>(&aegp_world_get_base_addr8), reinterpret_cast<void*>(&aegp_world_get_base_addr16), reinterpret_cast<void*>(&aegp_world_get_base_addr32), reinterpret_cast<void*>(&aegp_world_fill_pf_world), reinterpret_cast<void*>(&aegp_world_fast_blur), reinterpret_cast<void*>(&aegp_world_new_platform), reinterpret_cast<void*>(&aegp_world_dispose_platform), reinterpret_cast<void*>(&aegp_world_reference_platform)},
+      {reinterpret_cast<void*>(&new_layer_render_options), reinterpret_cast<void*>(&new_from_upstream_of_effect), reinterpret_cast<void*>(&duplicate_layer_render_options), reinterpret_cast<void*>(&dispose_layer_render_options), reinterpret_cast<void*>(&set_layer_render_time), reinterpret_cast<void*>(&get_layer_render_time), reinterpret_cast<void*>(&set_layer_render_time_step), reinterpret_cast<void*>(&get_layer_render_time_step), reinterpret_cast<void*>(&set_layer_render_world_type), reinterpret_cast<void*>(&get_layer_render_world_type), reinterpret_cast<void*>(&set_layer_render_downsample), reinterpret_cast<void*>(&get_layer_render_downsample), reinterpret_cast<void*>(&set_layer_render_matte), reinterpret_cast<void*>(&get_layer_render_matte)},
+      {reinterpret_cast<void*>(&new_layer_render_options), reinterpret_cast<void*>(&new_from_upstream_of_effect), reinterpret_cast<void*>(&new_from_downstream_of_effect), reinterpret_cast<void*>(&duplicate_layer_render_options), reinterpret_cast<void*>(&dispose_layer_render_options), reinterpret_cast<void*>(&set_layer_render_time), reinterpret_cast<void*>(&get_layer_render_time), reinterpret_cast<void*>(&set_layer_render_time_step), reinterpret_cast<void*>(&get_layer_render_time_step), reinterpret_cast<void*>(&set_layer_render_world_type), reinterpret_cast<void*>(&get_layer_render_world_type), reinterpret_cast<void*>(&set_layer_render_downsample), reinterpret_cast<void*>(&get_layer_render_downsample), reinterpret_cast<void*>(&set_layer_render_matte), reinterpret_cast<void*>(&get_layer_render_matte)},
+      {reinterpret_cast<void*>(&render_options_new_from_item), reinterpret_cast<void*>(&render_options_duplicate), reinterpret_cast<void*>(&render_options_dispose), reinterpret_cast<void*>(&render_options_set_time), reinterpret_cast<void*>(&render_options_get_time), reinterpret_cast<void*>(&render_options_set_time_step), reinterpret_cast<void*>(&render_options_get_time_step), reinterpret_cast<void*>(&render_options_set_field), reinterpret_cast<void*>(&render_options_get_field), reinterpret_cast<void*>(&render_options_set_world_type), reinterpret_cast<void*>(&render_options_get_world_type), reinterpret_cast<void*>(&render_options_set_downsample), reinterpret_cast<void*>(&render_options_get_downsample), reinterpret_cast<void*>(&render_options_set_roi), reinterpret_cast<void*>(&render_options_get_roi), reinterpret_cast<void*>(&render_options_set_matte), reinterpret_cast<void*>(&render_options_get_matte)},
+      {reinterpret_cast<void*>(&render_options_new_from_item), reinterpret_cast<void*>(&render_options_duplicate), reinterpret_cast<void*>(&render_options_dispose), reinterpret_cast<void*>(&render_options_set_time), reinterpret_cast<void*>(&render_options_get_time), reinterpret_cast<void*>(&render_options_set_time_step), reinterpret_cast<void*>(&render_options_get_time_step), reinterpret_cast<void*>(&render_options_set_field), reinterpret_cast<void*>(&render_options_get_field), reinterpret_cast<void*>(&render_options_set_world_type), reinterpret_cast<void*>(&render_options_get_world_type), reinterpret_cast<void*>(&render_options_set_downsample), reinterpret_cast<void*>(&render_options_get_downsample), reinterpret_cast<void*>(&render_options_set_roi), reinterpret_cast<void*>(&render_options_get_roi), reinterpret_cast<void*>(&render_options_set_matte), reinterpret_cast<void*>(&render_options_get_matte), reinterpret_cast<void*>(&render_options_set_channel_order), reinterpret_cast<void*>(&render_options_get_channel_order), reinterpret_cast<void*>(&render_options_get_guide_layers), reinterpret_cast<void*>(&render_options_set_guide_layers), reinterpret_cast<void*>(&render_options_get_quality), reinterpret_cast<void*>(&render_options_set_quality)},
+      {reinterpret_cast<void*>(&render_checkout_frame_reject), reinterpret_cast<void*>(&checkin_frame), reinterpret_cast<void*>(&get_receipt_world), reinterpret_cast<void*>(&render_get_region_reject), reinterpret_cast<void*>(&render_sufficient_reject), reinterpret_cast<void*>(&render_sound_reject), reinterpret_cast<void*>(&render_timestamp_reject), reinterpret_cast<void*>(&render_changed_reject), reinterpret_cast<void*>(&render_worthwhile_reject), reinterpret_cast<void*>(&render_checkin_rendered)},
+      {reinterpret_cast<void*>(&render_checkout_frame_reject), reinterpret_cast<void*>(&render_checkout_layer_reject), reinterpret_cast<void*>(&checkin_frame), reinterpret_cast<void*>(&get_receipt_world), reinterpret_cast<void*>(&render_get_region_reject), reinterpret_cast<void*>(&render_sufficient_reject), reinterpret_cast<void*>(&render_sound_reject), reinterpret_cast<void*>(&render_timestamp_reject), reinterpret_cast<void*>(&render_changed_reject), reinterpret_cast<void*>(&render_worthwhile_reject), reinterpret_cast<void*>(&render_checkin_rendered), reinterpret_cast<void*>(&render_guid_reject)},
+      {reinterpret_cast<void*>(&render_checkout_frame_reject), reinterpret_cast<void*>(&render_checkout_layer_v5), reinterpret_cast<void*>(&render_checkout_layer_async_reject), reinterpret_cast<void*>(&render_cancel_async_reject), reinterpret_cast<void*>(&checkin_frame), reinterpret_cast<void*>(&get_receipt_world), reinterpret_cast<void*>(&render_get_region_reject), reinterpret_cast<void*>(&render_sufficient_reject), reinterpret_cast<void*>(&render_sound_reject), reinterpret_cast<void*>(&render_timestamp_reject), reinterpret_cast<void*>(&render_changed_reject), reinterpret_cast<void*>(&render_worthwhile_reject), reinterpret_cast<void*>(&render_checkin_rendered), reinterpret_cast<void*>(&render_guid_reject)},
+      {reinterpret_cast<void*>(&checkout_item_frame_async), reinterpret_cast<void*>(&checkout_layer_frame_async)}};
+  if (!configure_suite_assembly(assembly)) return false;
   const StaticSuite component_suites[] = {
       {"AE Plugin Helper Suite", 1, aexcompat::pf_helper::suite1()},
       {"AE Plugin Helper Suite2", 2, aexcompat::pf_helper::suite2()},
@@ -4218,18 +4022,23 @@ int32_t __cdecl acquire_suite(const char* name, int32_t version,
        &aexcompat::pf_world_transform::provide_fill_matte2},
       {"AEGP Dynamic Stream Suite", 2, nullptr, &provide_dynamic_stream2},
   };
-  StaticProviderCatalog component_catalog{
-      component_suites, std::size(component_suites)};
-  const Provider providers[] = {
-      {&resolve_scene_suite_provider, nullptr},
-      {&resolve_static_provider, &component_catalog},
-  };
-  const ProviderCatalog catalog{providers, std::size(providers), nullptr, nullptr};
-  return acquire_host_suite(catalog, name, version, suite, g_trace_writer);
+  return configure_host_suite_catalog(
+      {component_suites, std::size(component_suites),
+       {&resolve_scene_suite_provider, nullptr}});
 }
 
+int32_t __cdecl acquire_suite(const char* name, int32_t version,
+                              const void** suite) {
+  using namespace aexcompat::worker_runtime::host_suites;
+  static const bool configured = configure_component_suite_catalog();
+  if (!configured) {
+    if (suite) *suite = nullptr;
+    return 4;
+  }
+  return acquire_catalog_suite(name, version, suite, g_trace_writer);
+}
 int32_t __cdecl release_suite(const char* name, int32_t version) {
-  return aexcompat::worker_runtime::host_suites::release_host_suite(
+  return aexcompat::worker_runtime::host_suites::release_catalog_suite(
       name, version, g_trace_writer);
 }
 
@@ -7977,7 +7786,7 @@ bool verify_aegp_layer_render_options_suite2() {
 
   const void* acquired = nullptr;
   bool ok = acquire_suite("AEGP Layer Render Options Suite", 2, &acquired) == 0 &&
-      acquired == &g_layer_render_options_suite2;
+      acquired == aexcompat::worker_runtime::host_suites::layer_render_options_suite(2);
   void* upstream = nullptr;
   ok = ok && new_from_upstream_of_effect(1, &g_aegp_effect, &upstream) == 0 && upstream &&
       set_layer_render_downsample(upstream, 2, 2) == 0 &&
@@ -8064,12 +7873,13 @@ bool verify_pf_adv_app_suite_versions() {
       acquire_suite("PF AE Adv App Suite", 2, &suite2) == 0;
   auto* slots1 = static_cast<void* const*>(suite1);
   auto* slots2 = static_cast<void* const*>(suite2);
-  ok = ok && suite1 == g_adv_app_suite1.data() && suite2 == g_adv_app_suite2.data() &&
+  ok = ok && suite1 == aexcompat::worker_runtime::host_suites::adv_app_suite(1) &&
+       suite2 == aexcompat::worker_runtime::host_suites::adv_app_suite(2) &&
       suite1 != suite2 && slots1 && slots2;
   if (slots1 && slots2) {
-    ok = ok && std::all_of(slots1, slots1 + g_adv_app_suite1.size(),
+    ok = ok && std::all_of(slots1, slots1 + 10,
                            [](void* callback) { return callback != nullptr; }) &&
-        std::all_of(slots2, slots2 + g_adv_app_suite2.size(),
+        std::all_of(slots2, slots2 + 11,
                     [](void* callback) { return callback != nullptr; });
     using UnsupportedProjectOperation = int32_t(__cdecl*)();
     using UnsupportedInfoColor = int32_t(__cdecl*)(uint32_t);
