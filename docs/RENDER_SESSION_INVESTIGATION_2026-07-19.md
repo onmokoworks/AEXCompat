@@ -370,3 +370,64 @@ aerender で全フレームレンダーして sidecar を回収する。環境: 
   ないと思われる (メッセージフィールド追加で足りる)。
 - 非順次アクセス (シーク・逆再生) はセッション仕様が既に「順序仮定なし」で
   あり、AE 実機の分配挙動 (順不同) と整合。
+
+### 段階1-3 (one-shot の長さ1セッション wrapper 化) の実現可能性調査 (観察、2026-07-19 追記)
+
+PR-C (#116) merge 後のコードに対して、段階1-3「既存 one-shot 経路の
+『長さ 1 セッション』wrapper 化 (挙動不変)」が成立するかを調査した。
+
+- `SessionOpenRequest` (render_session.rs:307-322) が受けられる構成は
+  plugin + parameters (payload) + 寸法 + 深度 + timing + dependencies のみ。
+  one-shot の argv trailer 群のうち secondary/timed layer、audio sidecar、
+  mask/spatial/render-environment context、custom UI action (click/draw)、
+  alpha-as-coverage、aux manifest、parameter animation、world dump、
+  output-checksum-detail、GPU backend/runtime policy はいずれも渡せない
+  (parameter animation は worker のセッションモード側は対応済みで、broker
+  側だけが欠けている → issue #132)。SmartFX も worker_kind が Render 固定で
+  非対応 (プロトコル v1 のスコープどおり)。
+- 戻り値スキーマが非互換。one-shot 公開エントリは worker report を平坦化
+  した `interactive_image_render` Value を返し、harness GUI はそのうち
+  `render_path` / `worker_classification` / `worker_diagnostics.stage_events`
+  / `gpu_*` を診断表示に消費する (harness/src/main.rs:1729-1758,
+  4506-4542)。`RenderSession::close` の Value は別スキーマ
+  (`render_session_close` + `final_report`) でこれらを提供しない。
+- 検証コードは共有されていない。#116 は image_render.rs に可視性変更のみを
+  加え、per-frame 検証はセッション側 (`validate_ok_frame` 等) の独立実装。
+  検証対象自体も異なる (one-shot = 出力ファイル、セッション = 共有メモリ
+  header/slot)。
+
+### 段階1-3 の方針再提案: 段階分割によるゴール到達計画 (提案、訂正 2026-07-19)
+
+(訂正: 当初この節は「見送り」を提案したが、段階1-3 のゴール自体は維持し、
+一発の挙動不変置換ではなく段階分割で到達する計画に改める。)
+
+観察から、「今すぐ一発で挙動不変置換」は成立しないが、ギャップはすべて
+埋められる種類のものである。以下の段階で到達する:
+
+- **W1: セッションの静的構成受容を one-shot と同等にする** (独立小 PR 群)
+  - parameter animation (#132): worker 対応済み、`SessionOpenRequest` +
+    sidecar + argv 付与のみ。最小。
+  - aux manifest / alpha-as-coverage / dump-worlds / checksum-detail:
+    auxiliary option 群は worker のセッション argv が既に受容している
+    (`strip_auxiliary_options` はセッションでも走る)。broker 側 open に
+    足すだけ。最小。
+  - mask / spatial / render-environment context: セッション argv (固定
+    argc=10) の拡張 + プロトコル文書 §3 改訂 + broker 側。中。
+  - layer スロット: プロトコル §6 にレイアウト定義済み。worker の受容 +
+    per-frame スロット転送 + broker 側。中〜大。
+- **W2: wrapper 本体** (classic CPU 経路の切替)。worker のセッション最終
+  レポートは one-shot と同じ ClassicReport 出力コードを使っているため、
+  `final_report` + `frame_done` から `interactive_image_render` Value を
+  合成する変換層は既存転記ロジックの流用で作れる。「挙動不変」の定義は
+  「report バイト一致」ではなく公開契約不変 (harness が消費するフィールド
+  + PNG バイト + pass/fail 判定) に置き直す (owner 合意事項)。custom UI
+  (click/draw) と audio は当面 one-shot fallback に残す。
+- **W3: SmartFX/GPU セッション (v1.1)**: `smart_render_runtime` の
+  manage_sequence 相当 + broker の WorkerKind::Smart/GPU policy。W1/W2 と
+  並行可。
+- **W4: one-shot argv モードの縮退・削除**: 契約テストをセッション経由に
+  移行してから。
+
+クリティカルパスは W1 (context/layer) → W2。W1 の「最小」2 件は即着手
+可能。custom UI のセッション化は #107 の per-frame parameters (v2) と
+同時期に扱う。
