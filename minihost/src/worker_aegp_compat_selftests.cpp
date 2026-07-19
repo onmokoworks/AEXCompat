@@ -95,6 +95,46 @@ bool verify_legacy_effect_compat_suites() {
   return ok;
 }
 
+bool verify_aegp_layer_source_item() {
+  if (!g_hooks.get_layer_source_item || !g_hooks.get_item_type ||
+      !g_hooks.comp_item || !g_hooks.item_suite ||
+      !g_hooks.layer_source_item_calls || !g_hooks.item_type_calls) return false;
+  const uint32_t calls_before = *g_hooks.layer_source_item_calls;
+  void* item = reinterpret_cast<void*>(static_cast<uintptr_t>(0x1234));
+  bool ok = g_hooks.get_layer_source_item(g_hooks.pf_layer, &item) == 0 &&
+            item == g_hooks.comp_item;
+  for (auto& layer : g_aegp_layers) {
+    item = nullptr;
+    ok = ok && g_hooks.get_layer_source_item(&layer, &item) == 0 &&
+         item == g_hooks.comp_item;
+  }
+  scene_runtime::AegpSceneObject foreign{0x464f5245};
+  item = reinterpret_cast<void*>(static_cast<uintptr_t>(0x1234));
+  ok = ok && g_hooks.get_layer_source_item(&foreign, &item) == 4 &&
+       item == reinterpret_cast<void*>(static_cast<uintptr_t>(0x1234)) &&
+       g_hooks.get_layer_source_item(nullptr, &item) == 4 &&
+       item == reinterpret_cast<void*>(static_cast<uintptr_t>(0x1234)) &&
+       g_hooks.get_layer_source_item(g_hooks.pf_layer, nullptr) == 4 &&
+       *g_hooks.layer_source_item_calls == calls_before + 4;
+  const uint32_t item_type_calls_before = *g_hooks.item_type_calls;
+  const bool saved_comp_idle_mode = g_aegp_comp_idle_roundtrip_mode;
+  g_aegp_comp_idle_roundtrip_mode = true;
+  const void* acquired{};
+  ok = ok && compat_acquire_suite("AEGP Item Suite", 14, &acquired) == 0 &&
+       acquired == g_hooks.item_suite;
+  int16_t item_type = -1;
+  ok = ok && g_hooks.get_item_type(g_hooks.comp_item, &item_type) == 0 &&
+       item_type == 2;
+  scene_runtime::AegpSceneObject foreign_item{0x464f5249};
+  item_type = 0x1234;
+  ok = ok && g_hooks.get_item_type(&foreign_item, &item_type) == 4 &&
+       item_type == 0x1234 && g_hooks.get_item_type(nullptr, &item_type) == 4 &&
+       item_type == 0x1234 && g_hooks.get_item_type(g_hooks.comp_item, nullptr) == 4 &&
+       *g_hooks.item_type_calls == item_type_calls_before + 1;
+  g_aegp_comp_idle_roundtrip_mode = saved_comp_idle_mode;
+  return ok;
+}
+
 bool verify_camera_case(bool smart_case) {
   if (!g_hooks.get_camera || !g_hooks.set_camera_index || !g_hooks.camera_index ||
       !g_hooks.layer_at || !g_hooks.layer_index) return false;

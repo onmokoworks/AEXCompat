@@ -5434,45 +5434,6 @@ bool verify_aegp_installed_effect_catalog_suite4() {
   return ok;
 }
 
-bool verify_aegp_layer_source_item() {
-  const uint32_t calls_before = g_aegp_layer_source_item_calls;
-  void* item = reinterpret_cast<void*>(static_cast<uintptr_t>(0x1234));
-  bool ok = aegp_get_layer_source_item(&g_layer, &item) == 0 &&
-            item == aegp_comp_item_handle();
-  for (auto& layer : g_aegp_layers) {
-    item = nullptr;
-    ok = ok && aegp_get_layer_source_item(&layer, &item) == 0 &&
-         item == aegp_comp_item_handle();
-  }
-  AegpSceneObject foreign{0x464f5245};
-  item = reinterpret_cast<void*>(static_cast<uintptr_t>(0x1234));
-  ok = ok && aegp_get_layer_source_item(&foreign, &item) == 4 &&
-       item == reinterpret_cast<void*>(static_cast<uintptr_t>(0x1234)) &&
-       aegp_get_layer_source_item(nullptr, &item) == 4 &&
-       item == reinterpret_cast<void*>(static_cast<uintptr_t>(0x1234)) &&
-       aegp_get_layer_source_item(&g_layer, nullptr) == 4 &&
-       g_aegp_layer_source_item_calls == calls_before + 4;
-  const uint32_t item_type_calls_before = g_aegp_item_type_calls;
-  const bool saved_comp_idle_mode = g_aegp_comp_idle_roundtrip_mode;
-  g_aegp_comp_idle_roundtrip_mode = true;
-  const void* acquired{};
-  ok = ok && acquire_suite("AEGP Item Suite", 14, &acquired) == 0 &&
-       acquired == &g_aegp_item_suite && g_aegp_item_suite.get_item_type != nullptr;
-  int16_t item_type = -1;
-  ok = ok && g_aegp_item_suite.get_item_type(&g_aegp_comp_item, &item_type) == 0 &&
-       item_type == 2;
-  AegpSceneObject foreign_item{0x464f5249};
-  item_type = 0x1234;
-  ok = ok && g_aegp_item_suite.get_item_type(&foreign_item, &item_type) == 4 &&
-       item_type == 0x1234 &&
-       g_aegp_item_suite.get_item_type(nullptr, &item_type) == 4 &&
-       item_type == 0x1234 &&
-       g_aegp_item_suite.get_item_type(&g_aegp_comp_item, nullptr) == 4 &&
-       g_aegp_item_type_calls == item_type_calls_before + 1;
-  g_aegp_comp_idle_roundtrip_mode = saved_comp_idle_mode;
-  return ok;
-}
-
 struct LayerSuite2AsyncTestResult {
   std::atomic<bool> done{};
   int32_t error{4};
@@ -7703,6 +7664,7 @@ int aexcompat::worker_target::run(Kind kind, int argc, wchar_t** argv) {
   return worker_main_impl(argc, argv);
 }
 const bool g_aegp_compat_selftests_configured = [] {
+  // g_aegp_item_type_calls == item_type_calls_before + 1
   aexcompat::l2_detail::configure_aegp_compat_selftests(
       {&acquire_suite, &release_suite,
        g_aegp_comp_suite10.data(), &g_pf_interface_suite,
@@ -7729,7 +7691,10 @@ const bool g_aegp_compat_selftests_configured = [] {
        &g_active_ui_param_count, &aegp_get_new_effect_stream_by_index_v2,
        &aegp_get_stream_name_v2, &aegp_get_stream_type_v2,
        &aegp_get_new_stream_value_v2, &aegp_set_stream_value_v2,
-       &aegp_dispose_stream_value_v2, &aegp_dispose_stream_v2});
+       &aegp_dispose_stream_value_v2, &aegp_dispose_stream_v2,
+       &aegp_get_layer_source_item, &aegp_get_item_type,
+       &g_aegp_item_suite,
+       &g_aegp_layer_source_item_calls, &g_aegp_item_type_calls});
   return true;
 }();
 const bool g_color_settings_selftests_configured = [] {
