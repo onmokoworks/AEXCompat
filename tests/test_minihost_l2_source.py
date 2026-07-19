@@ -42,6 +42,7 @@ AEGP_RENDER_SELFTEST_HEADER = ROOT / "minihost" / "src" / "worker_aegp_render_se
 AEGP_RENDER_SELFTEST_SOURCE = ROOT / "minihost" / "src" / "worker_aegp_render_selftests.cpp"
 AEGP_ASYNC_LAYER_RUNTIME = ROOT / "minihost" / "src" / "worker_aegp_async_layer_runtime.cpp"
 AEGP_HOST_SELFTESTS_SOURCE = ROOT / "minihost" / "src" / "worker_aegp_host_selftests.cpp"
+AEGP_COMPAT_SELFTESTS_SOURCE = ROOT / "minihost" / "src" / "worker_aegp_compat_selftests.cpp"
 MASK_RUNTIME_HEADER = ROOT / "minihost" / "src" / "worker_mask_runtime.hpp"
 MASK_RUNTIME_SOURCE = ROOT / "minihost" / "src" / "worker_mask_runtime.cpp"
 MASK_RUNTIME_CALLBACKS = ROOT / "minihost" / "src" / "worker_mask_runtime_callbacks.cpp"
@@ -62,6 +63,7 @@ def l2_family_source():
         AEGP_SCENE_SOURCE, AEGP_SCENE_HEADER, AEGP_SCENE_RUNTIME_HEADER,
         AEGP_SCENE_RUNTIME_SOURCE, AEGP_INIT_RUNTIME_HEADER, AEGP_INIT_RUNTIME_SOURCE,
         AEGP_HOST_SELFTESTS_SOURCE,
+        AEGP_COMPAT_SELFTESTS_SOURCE,
         MASK_RUNTIME_HEADER, MASK_RUNTIME_SOURCE, MASK_RUNTIME_CALLBACKS,
         MASK_SELFTESTS_SOURCE,
         HANDLE_RUNTIME_HEADER, HANDLE_RUNTIME_SOURCE,
@@ -73,6 +75,16 @@ def l2_family_source():
 
 
 class MinihostL2SourceTests(unittest.TestCase):
+    def test_aegp_compat_selftests_are_a_true_translation_unit(self):
+        worker = SOURCE.read_text(encoding="utf-8")
+        implementation = AEGP_COMPAT_SELFTESTS_SOURCE.read_text(encoding="utf-8")
+        self.assertIn("src/worker_aegp_compat_selftests.cpp", MINIHOST_CMAKE.read_text(encoding="utf-8"))
+        for name in ("verify_legacy_effect_compat_suites",
+                     "verify_aegp_get_effect_camera",
+                     "verify_aegp_resizer_3d_chain"):
+            self.assertIn(f"bool {name}()", implementation)
+            self.assertNotIn(f"bool {name}()", worker)
+
     def test_aegp_host_selftests_are_a_true_translation_unit(self):
         worker = SOURCE.read_text(encoding="utf-8")
         implementation = AEGP_HOST_SELFTESTS_SOURCE.read_text(encoding="utf-8")

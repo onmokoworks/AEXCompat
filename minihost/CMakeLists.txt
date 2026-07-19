@@ -61,6 +61,7 @@ set(AEXCOMPAT_WORKER_RUNTIME_CORE_SOURCES
     src/worker_aegp_scene_runtime.cpp
     src/worker_aegp_scene_selftests.cpp
     src/worker_aegp_host_selftests.cpp
+    src/worker_aegp_compat_selftests.cpp
     src/worker_classic_runtime.cpp
     src/worker_color_settings_runtime.cpp
     src/worker_handle_runtime.cpp
