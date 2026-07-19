@@ -25,6 +25,7 @@ def test_classic_runtime_owns_per_render_state_and_dispatch_boundary():
     assert "g_checkout_layer_definitions.find(index)" in worker
     assert "!classic_context && aexcompat::worker_runtime::classic::dispatch_active()" in worker
     assert "classic_context->record_checkout" in worker
+    assert "classic_diagnostics.shutter_dependency_advertised" in worker
     classic_branch = worker[worker.index("if (classic_context) {"):
                             worker.index("const auto hosted =", worker.index("if (classic_context) {"))]
     assert "copy_definition" in classic_branch

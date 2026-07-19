@@ -34,7 +34,7 @@ int main() {
   auto run = [&](int32_t own_slot, int32_t foreign_slot, std::byte marker,
                  bool dispatch_selector) {
     Context context;
-    context.configure_checkout_time(own_slot, 24, false);
+    context.configure_checkout_time(own_slot, 24, false, dispatch_selector);
     ParameterDefinition definition{};
     definition[0] = marker;
     context.set_definition(own_slot, definition);
@@ -67,5 +67,6 @@ int main() {
   return isolated.load(std::memory_order_relaxed) && off_thread_failed_closed &&
       result.checkout_calls == 2 && result.checkin_calls == 2 &&
       result.rejected_temporal_checkouts == 2 && result.balanced &&
+      result.shutter_dependency_advertised &&
       last_selector_dispatched() ? 0 : 3;
 }

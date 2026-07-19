@@ -52,6 +52,9 @@ Context::~Context() {
     std::lock_guard<std::mutex> lock(g_diagnostics_mutex);
     g_diagnostics.wide_time_allowed =
         g_diagnostics.wide_time_allowed || diagnostics_.wide_time_allowed;
+    g_diagnostics.shutter_dependency_advertised =
+        g_diagnostics.shutter_dependency_advertised ||
+        diagnostics_.shutter_dependency_advertised;
     g_diagnostics.rejected_temporal_checkouts += diagnostics_.rejected_temporal_checkouts;
     g_diagnostics.checkout_calls += diagnostics_.checkout_calls;
     g_diagnostics.checkin_calls += diagnostics_.checkin_calls;
@@ -124,11 +127,14 @@ bool Context::copy_fallback_definition(
 }
 
 void Context::configure_checkout_time(int32_t current_time, uint32_t time_scale,
-                                      bool wide_time_allowed) noexcept {
+                                      bool wide_time_allowed,
+                                      bool shutter_dependency_advertised) noexcept {
   current_time_ = current_time;
   current_time_scale_ = time_scale;
   wide_time_allowed_ = wide_time_allowed;
   diagnostics_.wide_time_allowed = wide_time_allowed;
+  diagnostics_.shutter_dependency_advertised =
+      shutter_dependency_advertised;
 }
 
 bool Context::checkout_time_allowed(int32_t time, uint32_t time_scale) noexcept {

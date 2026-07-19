@@ -12161,11 +12161,11 @@ int32_t classic_render_runtime(EffectEntry entry, std::array<std::byte, kInSize>
       (effective_out_flags & kOutFlagWideTimeInput) != 0 ||
       ((effective_out_flags2 & kOutFlag2AutomaticWideTimeInput) != 0 &&
        (effective_out_flags2 & kOutFlag2SupportsSmartRender) == 0);
-  g_classic_shutter_dependency_advertised =
+  const bool classic_shutter_dependency_advertised =
       (effective_out_flags & kOutFlagIUseShutterAngle) != 0;
   classic_context->configure_checkout_time(
       read<int32_t>(input, kInCurrentTime), read<uint32_t>(input, kInTimeScale),
-      classic_wide_time_allowed);
+      classic_wide_time_allowed, classic_shutter_dependency_advertised);
   input_hash = sha256_bytes(logical_source.data(), logical_source.size());
   const bool nop_render =
       (read<uint32_t>(command_output, kOutFlags) & kOutFlagNopRender) != 0;
@@ -17014,7 +17014,8 @@ int worker_main_impl(int argc, wchar_t **argv) {
             << ",\"input_buffer_writable\":" << (input_write_advertised ? "true" : "false")
             << ",\"wide_time_checkout_allowed\":" << (classic_diagnostics.wide_time_allowed ? "true" : "false")
             << ",\"rejected_temporal_param_checkouts\":" << classic_diagnostics.rejected_temporal_checkouts
-            << ",\"shutter_dependency_advertised\":" << (g_classic_shutter_dependency_advertised ? "true" : "false")
+            << ",\"shutter_dependency_advertised\":"
+            << (classic_diagnostics.shutter_dependency_advertised ? "true" : "false")
             << ",\"audio_usage_advertised\":" << (audio_telemetry().usage_advertised ? "true" : "false")
             << ",\"audio_checkout_allowed\":" << (audio_telemetry().checkout_allowed ? "true" : "false")
             << ",\"audio_source_available\":" << (audio_telemetry().source_available ? "true" : "false")

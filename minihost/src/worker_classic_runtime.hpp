@@ -21,6 +21,7 @@ struct TimedLayerDefinition {
 
 struct Diagnostics {
   bool wide_time_allowed{};
+  bool shutter_dependency_advertised{};
   uint32_t rejected_temporal_checkouts{};
   uint32_t checkout_calls{};
   uint32_t checkin_calls{};
@@ -53,7 +54,8 @@ class Context final {
   bool copy_fallback_definition(int32_t slot, void* destination,
                                 std::size_t destination_size) const;
   void configure_checkout_time(int32_t current_time, uint32_t time_scale,
-                               bool wide_time_allowed) noexcept;
+                               bool wide_time_allowed,
+                               bool shutter_dependency_advertised) noexcept;
   bool checkout_time_allowed(int32_t time, uint32_t time_scale) noexcept;
   void record_checkout(void* definition, int32_t index, int32_t time,
                        int32_t time_step, uint32_t time_scale);
