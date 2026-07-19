@@ -3,11 +3,11 @@ use serde_json::Value;
 use std::io;
 
 const MAX_MISSING_SUITES: usize = 16;
-// A schema-valid native report can contain 65,536 bounded Suite events. Keep
-// failure parsing bounded, but large enough to retain that report instead of
-// truncating its JSON and degrading selector failures to `nonzero_exit`.
+// A native report can contain 65,536 Suite events with 96-byte safely copied
+// names. Keep failure parsing bounded, but large enough to retain even the
+// escaped worker-bounded report instead of degrading failures to `nonzero_exit`.
 const MAX_ERROR_TEXT_BYTES: usize = 32 * 1024 * 1024;
-const MAX_ERROR_JSON_BYTES: usize = 16 * 1024 * 1024;
+const MAX_ERROR_JSON_BYTES: usize = 24 * 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -1156,6 +1156,23 @@ mod tests {
         assert_eq!(failure.classification, Classification::SelectorError);
         assert_eq!(failure.selector_error, Some(25));
         assert_eq!(failure.suite_timeline.len(), 600);
+    }
+
+    #[test]
+    fn preserves_worker_bounded_failure_reports_larger_than_16_mib() {
+        let report = format!(
+            "{{\"render_error\":25,\"bounded_worker_payload\":\"{}\"}}",
+            "x".repeat(17 * 1024 * 1024)
+        );
+        let message = format!(
+            "worker failed safely: diagnostics={{\"classification\":\"nonzero_exit\"}}, report={report}"
+        );
+        assert!(report.len() > 16 * 1024 * 1024);
+        assert!(report.len() < MAX_ERROR_JSON_BYTES);
+
+        let failure = runtime_failure_from_io(RenderPath::Classic, &io::Error::other(message));
+        assert_eq!(failure.classification, Classification::SelectorError);
+        assert_eq!(failure.selector_error, Some(25));
     }
 
     #[test]
