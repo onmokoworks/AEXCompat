@@ -47,6 +47,8 @@ AEGP_COMPAT_SELFTESTS_SOURCE = ROOT / "minihost" / "src" / "worker_aegp_compat_s
 INVOCATION_ORCHESTRATION_HEADER = ROOT / "minihost" / "src" / "worker_invocation_orchestration.hpp"
 SMART_EXECUTION_SOURCE = ROOT / "minihost" / "src" / "worker_smart_execution.cpp"
 SMART_SETUP_SOURCE = ROOT / "minihost" / "src" / "worker_smart_setup.cpp"
+SMART_FINALIZE_SOURCE = ROOT / "minihost" / "src" / "worker_smart_finalize.cpp"
+CLASSIC_EXECUTION_SOURCE = ROOT / "minihost" / "src" / "worker_classic_execution.cpp"
 AEGP_COMPAT_SELFTEST_HEADER = ROOT / "minihost" / "src" / "worker_aegp_compat_selftests.hpp"
 MASK_RUNTIME_HEADER = ROOT / "minihost" / "src" / "worker_mask_runtime.hpp"
 MASK_RUNTIME_SOURCE = ROOT / "minihost" / "src" / "worker_mask_runtime.cpp"
@@ -67,6 +69,8 @@ def l2_family_source():
         HOST_SUITE_CATALOG_SOURCE,
         PARAMETER_EXECUTION_SOURCE,
         SMART_SETUP_SOURCE,
+        SMART_FINALIZE_SOURCE,
+        CLASSIC_EXECUTION_SOURCE,
         AEGP_SCENE_SOURCE, AEGP_SCENE_HEADER, AEGP_SCENE_RUNTIME_HEADER,
         AEGP_SCENE_RUNTIME_SOURCE, AEGP_INIT_RUNTIME_HEADER, AEGP_INIT_RUNTIME_SOURCE,
         AEGP_HOST_SELFTESTS_SOURCE,
