@@ -34,6 +34,15 @@ function Identity([string]$Path) {
 $workerPath = (Resolve-Path -LiteralPath $Worker).Path
 $probePath = (Resolve-Path -LiteralPath $Probe).Path
 $aexPath = (Resolve-Path -LiteralPath $TestedAex).Path
+# Evidence must never carry machine-absolute paths. The tested AEX is
+# caller-supplied and may live anywhere; require a copy under the repo (for
+# example target\<name>.aex) so its recorded identity stays repo-relative.
+$repoPrefix = (Get-Item -LiteralPath $root).FullName + [IO.Path]::DirectorySeparatorChar
+foreach ($artifact in @($workerPath, $probePath, $aexPath)) {
+    if (-not $artifact.StartsWith($repoPrefix, [StringComparison]::OrdinalIgnoreCase)) {
+        throw "artifact lies outside the repository and would freeze an absolute path: $artifact (copy it under the repo, e.g. target\, first)"
+    }
+}
 $probeHash = (Get-FileHash -LiteralPath $probePath -Algorithm SHA256).Hash.ToLowerInvariant()
 $aexHash = (Get-FileHash -LiteralPath $aexPath -Algorithm SHA256).Hash.ToLowerInvariant()
 
