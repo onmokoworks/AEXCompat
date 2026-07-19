@@ -44,6 +44,11 @@ DEPTH_COMMANDS = {
 }
 PIXEL_BYTES = {"argb8": 4, "argb16": 8, "argb32f": 16}
 RAW_SUFFIX = {"argb8": "rgba8", "argb16": "rgba16le", "argb32f": "rgba32f-le"}
+NATIVE_WORKERS = (
+    "target/minihost-build/aex_l2_worker.exe",
+    "target/minihost-build/aex_render_worker.exe",
+    "target/minihost-build/aex_smart_worker.exe",
+)
 
 
 def load_json(path: Path) -> Any:
@@ -179,6 +184,19 @@ def artifact_for(path: Path, root: Path) -> dict[str, Any]:
     }
 
 
+def copy_native_workers(bundle_root: Path) -> list[dict[str, Any]]:
+    identities = []
+    for relative in NATIVE_WORKERS:
+        source = ROOT / Path(*relative.split("/"))
+        identity = artifact_for(source, ROOT)
+        destination = bundle_root / Path(*relative.split("/"))
+        if destination.exists():
+            raise ValueError(f"native worker destination collides with an artifact: {relative}")
+        copy_verified_artifact(ROOT, identity, destination)
+        identities.append(identity)
+    return identities
+
+
 def world(width: int, height: int, depth: str, premultiplication: str) -> dict[str, Any]:
     return {
         "width": width,
@@ -237,7 +255,7 @@ def normalize_harness_report(
         return failed_result(depth, input_world, "invalid_output")
     try:
         actual_input_world = value["input_world"]
-        actual_world = value["world"]
+        actual_world = value["output_world"]
         width = int(actual_world["width"])
         height = int(actual_world["height"])
     except (KeyError, TypeError, ValueError):
@@ -304,7 +322,7 @@ def normalize_structured_failure(
     actual_input_world = value.get("input_world")
     if not isinstance(actual_input_world, dict):
         actual_input_world = input_world
-    actual_world = value.get("world")
+    actual_world = value.get("output_world")
     if not isinstance(actual_world, dict):
         actual_world = None
     result = {
@@ -446,7 +464,9 @@ def run_process(
 def _parameter_assignment(parameter: dict[str, Any]) -> dict[str, Any]:
     value = parameter["value"]
     assignment: dict[str, Any] = {"slot": parameter["index"]}
-    if isinstance(value, (int, float)) and not isinstance(value, bool):
+    if isinstance(value, bool):
+        assignment["value"] = 1 if value else 0
+    elif isinstance(value, (int, float)):
         assignment["value"] = value
     elif isinstance(value, str):
         assignment["text"] = value
@@ -472,6 +492,7 @@ def write_request_sidecar(manifest: dict[str, Any], depth: str, destination: Pat
         "schema_version": 1,
         "timing": {"frame": time_value, "time_scale": time_scale, "time_step": 1},
         "assignments": [_parameter_assignment(item) for item in manifest["execution"]["parameters"]],
+        "dependencies": manifest["plugin"]["dependencies"],
         "render_settings": {
             "premultiplication": manifest["execution"]["premultiplication"],
             "color_management": manifest["execution"]["color_management"],
@@ -539,7 +560,8 @@ def run_depth(
         "cwd": "<repo>",
     }
     environment = dict(os.environ)
-    environment["AEXCOMPAT_DUMP_WORLDS_DIR"] = dump_dir.relative_to(ROOT).as_posix()
+    environment["AEXCOMPAT_REPOSITORY_ROOT"] = str(bundle_root)
+    environment["AEXCOMPAT_DUMP_WORLDS_DIR"] = dump_dir.relative_to(bundle_root).as_posix()
     environment["AEXCOMPAT_CHECKSUM_DETAIL"] = "1"
     returncode, stdout, stderr, timed_out, stream_detail = run_process(command, ROOT, environment)
     detail.update(stream_detail)
@@ -635,7 +657,14 @@ def attach_oracle(
     oracle_state: str,
     manifest_identity_match: bool,
 ) -> None:
-    if oracle_state != "captured" or result["classification"] != "ok" or result["raw_output"] is None:
+    if oracle_state != "captured":
+        return
+    result["oracle"] = {
+        "state": "not_captured",
+        "identity_match": manifest_identity_match,
+        "exact": False,
+    }
+    if result["classification"] != "ok" or result["raw_output"] is None:
         return
     oracle_path = bundle_root / oracle_manifest["path"]
     actual_path = bundle_root / result["raw_output"]["path"]
@@ -730,6 +759,7 @@ def main() -> int:
         stage = "copy_pinned_artifacts"
         for item in by_path.values():
             copy_verified_artifact(source_root, item, output_root / item["path"])
+        worker_identities = copy_native_workers(output_root) if args.adapter_command is None else []
         (output_root / "manifest.json").write_text(
             json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8"
         )
@@ -749,7 +779,7 @@ def main() -> int:
             request_path = requests / f"{depth}.json"
             write_request_sidecar(manifest, depth, request_path)
             output = outputs / f"{depth}.png"
-            dump_dir = ROOT / "target" / f"conformance-{manifest['fixture_id']}-{os.getpid()}-{depth}"
+            dump_dir = output_root / "target" / f"conformance-{manifest['fixture_id']}-{os.getpid()}-{depth}"
             if dump_dir.exists():
                 shutil.rmtree(dump_dir)
             input_world = world(
@@ -804,6 +834,7 @@ def main() -> int:
                 "dependencies": manifest["plugin"]["dependencies"],
                 "input": manifest["input"],
                 "runner": manifest["runner"],
+                "workers": worker_identities,
             },
             "parameters": [
                 {

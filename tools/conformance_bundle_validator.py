@@ -242,6 +242,8 @@ def _artifacts(manifest: dict, report: dict):
         yield f"manifest dependency {index}", artifact
     yield "manifest input", manifest["input"]
     yield "manifest runner", manifest["runner"]
+    for index, artifact in enumerate(report["identities"]["workers"]):
+        yield f"native worker {index}", artifact
     for depth, artifact in manifest["oracle"].get("artifacts", {}).items():
         yield f"manifest oracle {depth}", artifact
     for index, result in enumerate(report["results"]):
@@ -304,7 +306,7 @@ def validate_bundle(manifest: dict, report: dict, bundle_root: Path) -> None:
     }
     if report["fixture_id"] != manifest["fixture_id"]:
         errors.append("report fixture_id does not match manifest")
-    if report["identities"] != expected_identities:
+    if any(report["identities"].get(key) != value for key, value in expected_identities.items()):
         errors.append("report identities do not match manifest")
 
     requested = manifest["requested_depths"]

@@ -1064,7 +1064,12 @@ fn apply_typed_assignments(
     if root.keys().any(|key| {
         !matches!(
             key.as_str(),
-            "schema_version" | "assignments" | "timing" | "host_context" | "render_settings"
+            "schema_version"
+                | "assignments"
+                | "timing"
+                | "host_context"
+                | "render_settings"
+                | "dependencies"
         )
     }) || root
         .get("schema_version")
@@ -1262,9 +1267,13 @@ struct ConformanceRenderSettingsGuard {
 impl ConformanceRenderSettingsGuard {
     fn install(encoded: Option<&str>) -> Result<Self, String> {
         let previous = std::env::var_os(CONFORMANCE_RENDER_SETTINGS_ENV);
-        match encoded {
-            Some(value) => std::env::set_var(CONFORMANCE_RENDER_SETTINGS_ENV, value),
-            None => std::env::remove_var(CONFORMANCE_RENDER_SETTINGS_ENV),
+        // SAFETY: this guard is installed only by the synchronous CLI path before
+        // any render worker thread is spawned, and remains alive until that work joins.
+        unsafe {
+            match encoded {
+                Some(value) => std::env::set_var(CONFORMANCE_RENDER_SETTINGS_ENV, value),
+                None => std::env::remove_var(CONFORMANCE_RENDER_SETTINGS_ENV),
+            }
         }
         Ok(Self { previous })
     }
@@ -1272,11 +1281,97 @@ impl ConformanceRenderSettingsGuard {
 
 impl Drop for ConformanceRenderSettingsGuard {
     fn drop(&mut self) {
-        match &self.previous {
-            Some(value) => std::env::set_var(CONFORMANCE_RENDER_SETTINGS_ENV, value),
-            None => std::env::remove_var(CONFORMANCE_RENDER_SETTINGS_ENV),
+        // SAFETY: the synchronous CLI render has completed before this guard drops,
+        // so no worker thread can concurrently access or mutate the process environment.
+        unsafe {
+            match &self.previous {
+                Some(value) => std::env::set_var(CONFORMANCE_RENDER_SETTINGS_ENV, value),
+                None => std::env::remove_var(CONFORMANCE_RENDER_SETTINGS_ENV),
+            }
         }
     }
+}
+
+fn typed_request_dependencies(
+    document: &serde_json::Value,
+    request_path: &Path,
+) -> Result<Vec<aexcompat_broker::secure_image_dispatch::ApprovedImageArtifact>, String> {
+    let Some(items) = document.get("dependencies") else {
+        return Ok(Vec::new());
+    };
+    let items = items
+        .as_array()
+        .filter(|items| items.len() <= 64)
+        .ok_or_else(|| "dependencies must be an array of at most 64 artifacts".to_owned())?;
+    let bundle_root = request_path
+        .parent()
+        .and_then(Path::parent)
+        .ok_or_else(|| "request path has no bundle root".to_owned())?
+        .canonicalize()
+        .map_err(|error| format!("bundle root could not be resolved: {error}"))?;
+    let mut dependencies = Vec::with_capacity(items.len());
+    let mut basenames = std::collections::HashSet::new();
+    for item in items {
+        let item = item
+            .as_object()
+            .ok_or_else(|| "dependency identity must be an object".to_owned())?;
+        if item.keys().any(|key| !matches!(key.as_str(), "path" | "sha256" | "size_bytes"))
+        {
+            return Err("dependency identity contains an unknown field".into());
+        }
+        let relative = item
+            .get("path")
+            .and_then(serde_json::Value::as_str)
+            .filter(|value| !value.is_empty() && value.len() <= 240 && !value.contains('\\'))
+            .ok_or_else(|| "dependency path is invalid".to_owned())?;
+        let relative_path = Path::new(relative);
+        if relative_path.is_absolute()
+            || relative_path
+                .components()
+                .any(|component| !matches!(component, std::path::Component::Normal(_)))
+        {
+            return Err("dependency path must be bundle-relative without traversal".into());
+        }
+        let path = bundle_root
+            .join(relative_path)
+            .canonicalize()
+            .map_err(|error| format!("dependency path could not be resolved: {error}"))?;
+        if !path.starts_with(&bundle_root) || !path.is_file() {
+            return Err("dependency path escapes the bundle or is not a file".into());
+        }
+        let basename = path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .ok_or_else(|| "dependency basename is not Unicode".to_owned())?
+            .to_ascii_lowercase();
+        if !basenames.insert(basename) {
+            return Err("dependency basenames must be case-insensitively unique".into());
+        }
+        let expected_size = item
+            .get("size_bytes")
+            .and_then(serde_json::Value::as_u64)
+            .filter(|size| *size <= 1024 * 1024 * 1024 * 1024)
+            .ok_or_else(|| "dependency size_bytes is invalid".to_owned())?;
+        let actual_size = fs::metadata(&path)
+            .map_err(|error| format!("dependency metadata failed: {error}"))?
+            .len();
+        if actual_size != expected_size {
+            return Err("dependency size changed after bundle verification".into());
+        }
+        let expected_sha256 = item
+            .get("sha256")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| "dependency sha256 is missing".to_owned())
+            .and_then(decode_sha256)?;
+        dependencies.push(
+            aexcompat_broker::secure_image_dispatch::ApprovedImageArtifact {
+                path,
+                expected_sha256,
+                expected_size,
+            },
+        );
+    }
+    Ok(dependencies)
 }
 
 fn typed_request_timing(
@@ -4807,7 +4902,26 @@ fn show_viewer_texture(
     );
 }
 
-fn repository_root() -> PathBuf {
+fn repository_root(args: &[std::ffi::OsString]) -> PathBuf {
+    let typed_conformance_request = args.get(1).is_some_and(|command| {
+        matches!(
+            command.to_string_lossy().as_ref(),
+            "--render-experimental-request"
+                | "--render-experimental-smart-request"
+                | "--render-experimental-request-16"
+                | "--render-experimental-smart-request-16"
+                | "--render-experimental-request-32"
+                | "--render-experimental-smart-request-32-cpu"
+        )
+    });
+    if typed_conformance_request
+        && let Some(path) = std::env::var_os("AEXCOMPAT_REPOSITORY_ROOT")
+    {
+        let path = PathBuf::from(path);
+        if path.is_absolute() && path.is_dir() {
+            return path;
+        }
+    }
     std::env::current_exe()
         .ok()
         .and_then(|path| {
@@ -4826,8 +4940,8 @@ fn repository_root() -> PathBuf {
 }
 
 fn main() -> eframe::Result {
-    let repository = repository_root();
     let args: Vec<_> = std::env::args_os().collect();
+    let repository = repository_root(&args);
     if args.len() == 4 && args[1] == "--compare-images" {
         match compare_images(Path::new(&args[2]), Path::new(&args[3])) {
             Ok(comparison) => {
@@ -4994,7 +5108,7 @@ fn main() -> eframe::Result {
                 | "--render-experimental-smart-request-32-cpu"
         )
     {
-        use aexcompat_broker::image_render::RenderPixelFormat;
+        use aexcompat_broker::image_render::{RenderGpuBackend, RenderPixelFormat};
         let command = args[1].to_string_lossy();
         let smart = command.contains("-smart-");
         let pixel_format = if command.contains("-16") {
@@ -5018,11 +5132,22 @@ fn main() -> eframe::Result {
                 eprintln!("assignment document is not valid JSON: {error}");
                 std::process::exit(1);
             });
+        let dependencies = typed_request_dependencies(&document, request_path).unwrap_or_else(|error| {
+            eprintln!("{error}");
+            std::process::exit(1);
+        });
         let plugin = Path::new(&args[2]);
         let hash = format!("{:X}", Sha256::digest(fs::read(plugin).unwrap()));
-        let mut parameters =
-            aexcompat_broker::image_render::inspect_experimental(&repository, plugin, &hash)
-                .unwrap_or_default();
+        let mut parameters = aexcompat_broker::image_render::inspect_experimental_with_approved_dependencies(
+            &repository,
+            plugin,
+            &hash,
+            dependencies.clone(),
+        )
+        .unwrap_or_else(|error| {
+            eprintln!("{error}");
+            std::process::exit(1);
+        });
         let timing = typed_request_timing(&document).unwrap_or_else(|error| {
             eprintln!("{error}");
             std::process::exit(1);
@@ -5041,7 +5166,7 @@ fn main() -> eframe::Result {
             eprintln!("{error}");
             std::process::exit(1);
         }
-        let report = aexcompat_broker::image_render::render_experimental_image_at_time_with_format_and_context(
+        let report = aexcompat_broker::image_render::render_experimental_image_with_approved_dependencies(
             &repository,
             plugin,
             &hash,
@@ -5052,6 +5177,13 @@ fn main() -> eframe::Result {
             smart,
             pixel_format,
             host_context.as_ref(),
+            None,
+            if command.ends_with("-32-cpu") {
+                RenderGpuBackend::Cpu
+            } else {
+                RenderGpuBackend::Auto
+            },
+            dependencies,
         );
         match report {
             Ok(value) => println!("{}", serde_json::to_string_pretty(&value).unwrap()),
@@ -6436,6 +6568,39 @@ mod tests {
         ] {
             assert!(typed_request_timing(&invalid_timing).is_err());
         }
+    }
+
+    #[test]
+    fn typed_dependencies_are_bundle_bound_and_identity_pinned() {
+        let root = temporary_directory("typed-dependencies");
+        let requests = root.join("requests");
+        let artifacts = root.join("artifacts");
+        fs::create_dir_all(&requests).unwrap();
+        fs::create_dir_all(&artifacts).unwrap();
+        let dependency = artifacts.join("helper.dll");
+        fs::write(&dependency, b"dependency").unwrap();
+        let digest = format!("{:x}", Sha256::digest(b"dependency"));
+        let document = serde_json::json!({
+            "dependencies": [{
+                "path": "artifacts/helper.dll",
+                "sha256": digest,
+                "size_bytes": 10
+            }]
+        });
+        let approved = typed_request_dependencies(&document, &requests.join("argb8.json")).unwrap();
+        assert_eq!(approved.len(), 1);
+        assert_eq!(approved[0].path, dependency.canonicalize().unwrap());
+        assert_eq!(approved[0].expected_size, 10);
+
+        let escaped = serde_json::json!({
+            "dependencies": [{
+                "path": "../outside.dll",
+                "sha256": format!("{:064x}", 0),
+                "size_bytes": 0
+            }]
+        });
+        assert!(typed_request_dependencies(&escaped, &requests.join("argb8.json")).is_err());
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

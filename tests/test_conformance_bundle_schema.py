@@ -133,7 +133,7 @@ class ConformanceBundleSchemaTests(unittest.TestCase):
             })
         return {
             "schema_version": 1, "fixture_id": self.manifest["fixture_id"],
-            "identities": copy.deepcopy({"aex": self.manifest["plugin"]["aex"], "dependencies": self.manifest["plugin"]["dependencies"], "input": self.manifest["input"], "runner": self.manifest["runner"]}),
+            "identities": copy.deepcopy({"aex": self.manifest["plugin"]["aex"], "dependencies": self.manifest["plugin"]["dependencies"], "input": self.manifest["input"], "runner": self.manifest["runner"], "workers": []}),
             "parameters": [{"index": 1, "type": "slider", "initial_value": 50, "host_range": {"minimum": 0, "maximum": 100}, "user_range": {"minimum": 0, "maximum": 100}}],
             "results": results,
         }

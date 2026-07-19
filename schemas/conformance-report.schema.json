@@ -12,12 +12,13 @@
     "schema_version": {"const": 1},
     "fixture_id": {"type": "string", "pattern": "^[a-z][a-z0-9_-]{0,63}$"},
     "identities": {
-      "type": "object", "additionalProperties": false, "required": ["aex", "dependencies", "input", "runner"],
+      "type": "object", "additionalProperties": false, "required": ["aex", "dependencies", "input", "runner", "workers"],
       "properties": {
         "aex": {"$ref": "conformance-manifest.schema.json#/$defs/artifact"},
         "dependencies": {"type": "array", "maxItems": 64, "uniqueItems": true, "items": {"$ref": "conformance-manifest.schema.json#/$defs/artifact"}},
         "input": {"$ref": "conformance-manifest.schema.json#/$defs/artifact"},
-        "runner": {"$ref": "conformance-manifest.schema.json#/$defs/artifact"}
+        "runner": {"$ref": "conformance-manifest.schema.json#/$defs/artifact"},
+        "workers": {"type": "array", "maxItems": 3, "uniqueItems": true, "items": {"$ref": "conformance-manifest.schema.json#/$defs/artifact"}}
       }
     },
     "parameters": {"type": "array", "maxItems": 1024, "items": {"$ref": "#/$defs/parameter_metadata"}},
@@ -84,7 +85,7 @@
       },
       "allOf": [
         {"if": {"properties": {"exact": {"const": true}}, "required": ["exact"]}, "then": {"required": ["expected_sha256", "actual_sha256", "mismatched_pixels"], "properties": {"state": {"const": "captured"}, "identity_match": {"const": true}, "mismatched_pixels": {"const": 0}}}},
-        {"if": {"properties": {"state": {"const": "captured"}}, "required": ["state"]}, "then": {"required": ["expected_sha256", "actual_sha256", "mismatched_pixels"]}, "else": {"properties": {"identity_match": {"const": false}, "exact": {"const": false}}, "not": {"anyOf": [{"required": ["expected_sha256"]}, {"required": ["actual_sha256"]}, {"required": ["mismatched_pixels"]}] }}},
+        {"if": {"properties": {"state": {"const": "captured"}}, "required": ["state"]}, "then": {"required": ["expected_sha256", "actual_sha256", "mismatched_pixels"]}, "else": {"properties": {"exact": {"const": false}}, "not": {"anyOf": [{"required": ["expected_sha256"]}, {"required": ["actual_sha256"]}, {"required": ["mismatched_pixels"]}] }}},
         {"if": {"properties": {"identity_match": {"const": false}}, "required": ["identity_match"]}, "then": {"properties": {"exact": {"const": false}}}}
       ]
     },

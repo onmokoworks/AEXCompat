@@ -222,6 +222,63 @@ def test_request_sidecar_records_execution_and_redacted_full_argv(tmp_path):
     assert str(manifest.parent) not in json.dumps(run)
 
 
+def test_request_sidecar_transports_dependencies_and_boolean_values(tmp_path):
+    manifest_path, adapter = fixture(tmp_path)
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    dependency = manifest_path.parent / "artifacts" / "helper.dll"
+    dependency.write_bytes(b"pinned dependency")
+    manifest["plugin"]["dependencies"] = [identity(dependency, "artifacts/helper.dll")]
+    manifest["execution"]["parameters"] = [
+        {"index": 1, "type": "checkbox", "value": True},
+        {"index": 2, "type": "checkbox", "value": False},
+    ]
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    output = tmp_path / "bundle"
+    assert invoke(manifest_path, output, adapter).returncode == 0
+    request = json.loads((output / "requests" / "argb8.json").read_text())
+    assert request["dependencies"] == manifest["plugin"]["dependencies"]
+    assert request["assignments"] == [{"slot": 1, "value": 1}, {"slot": 2, "value": 0}]
+
+
+@pytest.mark.parametrize("value", [None, [1, None], [True, False]])
+def test_manifest_rejects_parameter_values_without_a_typed_transport(tmp_path, value):
+    manifest_path, adapter = fixture(tmp_path)
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["execution"]["parameters"] = [{"index": 1, "type": "unsupported", "value": value}]
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    output = tmp_path / "bundle"
+    assert invoke(manifest_path, output, adapter).returncode != 0
+    failure = json.loads((output / "diagnostics" / "failure.json").read_text())
+    assert failure["stage"] == "validate_manifest"
+
+
+def test_failed_render_retains_captured_oracle_identity(tmp_path):
+    manifest_path, adapter = fixture(tmp_path)
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    oracle_root = manifest_path.parent / "oracle"
+    oracle_root.mkdir()
+    oracle = oracle_root / "argb8.raw"
+    oracle.write_bytes(b"o" * 16)
+    manifest["requested_depths"] = ["argb8"]
+    manifest["oracle"] = {
+        "state": "captured",
+        "identity_match": True,
+        "artifacts": {"argb8": identity(oracle, "oracle/argb8.raw")},
+    }
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    adapter.write_text("raise SystemExit(3)\n", encoding="utf-8")
+    output = tmp_path / "bundle"
+    completed = invoke(manifest_path, output, adapter)
+    assert completed.returncode == 0, completed.stderr
+    report = json.loads((output / "report.json").read_text())
+    report_validator().validate(report)
+    assert report["results"][0]["oracle"] == {
+        "state": "not_captured",
+        "identity_match": True,
+        "exact": False,
+    }
+
+
 def test_validator_failure_persists_failure_evidence_without_report(tmp_path):
     manifest, adapter = fixture(tmp_path)
     adapter.write_text(
@@ -281,6 +338,9 @@ def test_harness_exposes_depth_variants_of_typed_request_cli():
         assert flag in source
     assert "let pixel_format = if command.contains(\"-16\")" in source
     assert "typed_request_render_settings" in source
+    assert "typed_request_dependencies" in source
+    assert "inspect_experimental_with_approved_dependencies" in source
+    assert "AEXCOMPAT_REPOSITORY_ROOT" in source
 
 
 def test_native_render_settings_uses_checked_ascii_narrowing():

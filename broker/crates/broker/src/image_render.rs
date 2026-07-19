@@ -2668,8 +2668,25 @@ pub fn inspect_experimental_with_diagnostics(
         repository,
         plugin_path,
         approved_sha256,
+        Vec::new(),
         None,
     )
+}
+
+pub fn inspect_experimental_with_approved_dependencies(
+    repository: &Path,
+    plugin_path: &Path,
+    approved_sha256: &str,
+    dependencies: Vec<ApprovedImageArtifact>,
+) -> io::Result<Vec<InteractiveParameter>> {
+    inspect_experimental_with_diagnostics_and_runtime_policy(
+        repository,
+        plugin_path,
+        approved_sha256,
+        dependencies,
+        None,
+    )
+    .map(|(parameters, _)| parameters)
 }
 
 pub fn inspect_experimental_with_runtime_policy(
@@ -2688,6 +2705,7 @@ pub fn inspect_experimental_with_runtime_policy(
         repository,
         plugin_path,
         approved_sha256,
+        Vec::new(),
         Some((policy, backend)),
     )
 }
@@ -2696,6 +2714,7 @@ fn inspect_experimental_with_diagnostics_and_runtime_policy(
     repository: &Path,
     plugin_path: &Path,
     approved_sha256: &str,
+    mut dependencies: Vec<ApprovedImageArtifact>,
     runtime_policy: Option<(&RuntimeModulePolicy, RuntimeBackend)>,
 ) -> io::Result<(Vec<InteractiveParameter>, Value)> {
     let actual = format!("{:X}", Sha256::digest(fs::read(plugin_path)?));
@@ -2714,13 +2733,16 @@ fn inspect_experimental_with_diagnostics_and_runtime_policy(
         args_after_plugin.push(authorization.basename.clone());
     }
     let started = Instant::now();
-    let isolated = if let Some(authorization) = &authorization {
+    if let Some(authorization) = &authorization {
+        dependencies.push(authorization.artifact.clone());
+    }
+    let isolated = if !dependencies.is_empty() {
         dispatch_approved_image_with_dependencies(
             repository,
             WorkerKind::L2,
             plugin_path,
             approved_sha256,
-            vec![authorization.artifact.clone()],
+            dependencies,
             &args_before_plugin,
             &args_after_plugin,
             Duration::from_millis(5_000),

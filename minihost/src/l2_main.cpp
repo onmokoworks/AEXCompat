@@ -21936,19 +21936,6 @@ std::string conformance_render_settings_report_json() {
       escape(g_conformance_renderer) + "\"}";
 }
 
-std::string conformance_world_report_json(int32_t width, int32_t height,
-                                          int32_t row_bytes,
-                                          const std::string& pixel_format) {
-  std::ostringstream json;
-  json << "{\"width\":" << width << ",\"height\":" << height
-       << ",\"row_bytes\":" << row_bytes << ",\"pixel_format\":\""
-       << escape(pixel_format) << "\",\"premultiplication\":\""
-       << escape(g_conformance_premultiplication)
-       << "\",\"extent_hint\":{\"left\":0,\"top\":0,\"right\":"
-       << width << ",\"bottom\":" << height << "}}";
-  return json.str();
-}
-
 int wmain(int argc, wchar_t **argv) {
   if (argc == 2 && std::wstring(argv[1]) == L"--self-test-aegp-projector-levels") {
     const bool passed = verify_aegp_projector_levels();
@@ -24662,14 +24649,7 @@ int wmain(int argc, wchar_t **argv) {
             << ",\"pre_effect_source_origin\":[" << read<int32_t>(input, 392) << "," << read<int32_t>(input, 396) << "]"
             << ",\"output_origin\":[" << read<int32_t>(input, 276) << "," << read<int32_t>(input, 280) << "]"
             << ",\"requested_parameters\":" << requested_parameters_json(requested_parameters)
-            << ",\"input_world\":" << conformance_world_report_json(
-                external_width, external_height,
-                external_width * external_pixel_bytes, g_smart_pixel_format)
-            << ",\"world\":" << conformance_world_report_json(
-                external_width, external_height,
-                external_width * external_pixel_bytes, g_smart_pixel_format)
             << conformance_render_settings_report_json()
-            << suite_timeline_report_json()
             << ",\"requested_amount\":" << static_cast<int32_t>(requested_value(requested_parameters, L"amount"))
             << ",\"requested_direction\":" << static_cast<int32_t>(requested_value(requested_parameters, L"direction"))
             << ",\"requested_seed\":" << static_cast<int32_t>(requested_value(requested_parameters, L"seed"))

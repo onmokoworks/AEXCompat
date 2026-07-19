@@ -27,3 +27,16 @@ All artifacts use bundle-relative POSIX paths, lowercase SHA-256, and byte size.
 - `schemas/conformance-report.schema.json`: normalized depth results
 - `tools/conformance_bundle_validator.py`: schema, cross-document, and artifact validator
 - `tests/fixtures/conformance/basic-manifest.json`: valid synthetic example
+
+## One-command runner
+
+Run `python tools/run-conformance-bundle.py --manifest <fixture>/manifest.json --out <new-bundle>`.
+The destination must not already exist. A native run copies the pinned AEX, declared DLLs,
+input, harness, and the three native workers into the new bundle before dispatch. The report's
+`identities.workers` entries bind the exact L2, classic-render, and SmartFX worker bytes used by
+the run; validation reopens and hashes those bundle-local artifacts. Adapter-backed tests record
+an empty worker list because no native worker is executed.
+
+Parameter values are limited to the typed sidecar transport: finite JSON numbers, strings,
+booleans (encoded as checkbox-compatible 0/1 scalars), or numeric component arrays. Null and
+mixed-type arrays are rejected by the manifest schema before any AEX inspection begins.
