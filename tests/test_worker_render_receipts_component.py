@@ -15,6 +15,7 @@ REGISTRATION_SOURCES = MAIN + "\n" + "\n".join(
         "worker_aegp_external_render_runtime.cpp",
         "worker_aegp_async_layer_runtime.cpp",
         "worker_aegp_layer_render_runtime.cpp",
+        "worker_aegp_item_render_runtime.cpp",
     )
 )
 
