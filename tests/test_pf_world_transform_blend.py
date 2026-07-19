@@ -1,5 +1,6 @@
 import subprocess
 from pathlib import Path
+import source_owners
 
 ROOT = Path(__file__).resolve().parents[1]
 RUNTIME = ROOT / "minihost/src/worker_pf_world_transform_runtime.cpp"
@@ -13,7 +14,7 @@ def test_blend_runtime_is_alias_safe():
 
 def test_blend_uses_registered_formats_and_snapshots_both_sources():
     source = RUNTIME.read_text(encoding="utf-8")
-    worker = (ROOT / "minihost/src/l2_main.cpp").read_text(encoding="utf-8")
+    worker = source_owners.worker_text()
     assert "first_info.pixel_format != second_info.pixel_format" in source
     assert "first_copy.resize" in source and "second_copy.resize" in source
     assert "--self-test-world-transform-blend" in worker

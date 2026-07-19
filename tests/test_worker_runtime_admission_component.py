@@ -1,11 +1,9 @@
 from pathlib import Path
+import source_owners
 
 
 ROOT = Path(__file__).resolve().parents[1]
-MAIN = "\n".join(
-    (ROOT / "minihost" / "src" / name).read_text(encoding="utf-8")
-    for name in ("l2_main.cpp", "worker_entry_admission.cpp")
-)
+MAIN = source_owners.contract_text("worker_runtime_admission")
 HEADER = (ROOT / "minihost" / "src" / "worker_runtime_admission.hpp").read_text(
     encoding="utf-8"
 )

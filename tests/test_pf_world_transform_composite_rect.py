@@ -2,17 +2,11 @@ import json
 import os
 import subprocess
 from pathlib import Path
+import source_owners
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SOURCES = (
-    ROOT / "minihost" / "src" / "l2_main.cpp",
-    ROOT / "minihost" / "src" / "worker_l2_suite_abi.hpp",
-    ROOT / "minihost" / "src" / "worker_pf_suites.cpp",
-    ROOT / "minihost" / "src" / "worker_pf_world_transform_runtime.cpp",
-)
-
-
+SOURCES = source_owners.contract_files("pf_world_transform_composite_rect")
 def source_text() -> str:
     return "\n".join(path.read_text(encoding="utf-8") for path in SOURCES)
 
@@ -55,10 +49,12 @@ def test_world_transform_and_fill_ownership_is_outside_legacy_aggregates():
     runtime = (ROOT / "minihost" / "src" / "worker_pf_world_transform_runtime.cpp").read_text(
         encoding="utf-8"
     )
+    # 否定 assert 用の固定集合。成長する contract にはしない (owner 追記で
+    # "not in legacy" が偽陽性の fail になるため)。
     legacy = "\n".join(
         path.read_text(encoding="utf-8")
         for path in (
-            ROOT / "minihost" / "src" / "l2_main.cpp",
+            source_owners.L2_MAIN,
             ROOT / "minihost" / "src" / "worker_pf_suites.cpp",
         )
     )

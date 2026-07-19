@@ -1,13 +1,14 @@
 import json
 import unittest
 from pathlib import Path
+import source_owners
 
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
 def worker_source():
-    return ((ROOT / "minihost/src/l2_main.cpp").read_text(encoding="utf-8") + "\n" +
+    return (source_owners.worker_text() + "\n" +
             (ROOT / "minihost/src/l2_cli_dispatch.cpp").read_text(encoding="utf-8") + "\n" +
             (ROOT / "minihost/src/worker_mask_runtime.cpp").read_text(encoding="utf-8") + "\n" +
             (ROOT / "minihost/src/worker_mask_runtime.hpp").read_text(encoding="utf-8") + "\n" +

@@ -1,10 +1,11 @@
 import json
 from pathlib import Path
+import source_owners
 
 
 ROOT = Path(__file__).resolve().parents[1]
 RESULT = ROOT / "analysis" / "SDK_RENDER_PATH_NEGOTIATION_RESULT_2026-07-15.json"
-MINIHOST = ROOT / "minihost" / "src" / "l2_main.cpp"
+MINIHOST = source_owners.L2_MAIN
 RENDER_REPORT = ROOT / "minihost" / "src" / "worker_render_report.cpp"
 HARNESS = ROOT / "broker" / "crates" / "harness" / "src" / "main.rs"
 
@@ -40,7 +41,7 @@ def test_smart_positive_control_still_completes_all_depths_and_paths():
 
 
 def test_worker_and_harness_enforce_the_render_path_gate():
-    minihost = MINIHOST.read_text(encoding="utf-8")
+    minihost = source_owners.worker_text()
     report = RENDER_REPORT.read_text(encoding="utf-8")
     harness = HARNESS.read_text(encoding="utf-8")
 

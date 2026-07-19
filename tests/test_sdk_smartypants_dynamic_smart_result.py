@@ -1,12 +1,11 @@
 import json
 from pathlib import Path
+import source_owners
 
 
 ROOT = Path(__file__).resolve().parents[1]
 RESULT = ROOT / "analysis" / "SDK_SMARTYPANTS_DYNAMIC_SMART_RESULT_2026-07-15.json"
-SOURCE = ROOT / "minihost" / "src" / "l2_main.cpp"
-
-
+SOURCE = source_owners.L2_MAIN
 def test_smartypants_dynamic_flags_have_a_valid_time_and_checkout_context():
     result = json.loads(RESULT.read_text(encoding="utf-8"))
     lifecycle = result["lifecycle"]
@@ -41,7 +40,7 @@ def test_smartypants_rgb_invert_is_exact_at_all_supported_cpu_depths():
 
 
 def test_conditional_selectors_run_after_render_time_is_initialized():
-    source = SOURCE.read_text(encoding="utf-8")
+    source = source_owners.worker_text()
 
     assert "constexpr std::size_t kInCurrentTime = 224" in source
     assert "constexpr std::size_t kInTimeStep = 228" in source
@@ -55,7 +54,7 @@ def test_conditional_selectors_run_after_render_time_is_initialized():
 
 
 def test_l2_current_parameters_are_available_to_checkout_callbacks():
-    source = SOURCE.read_text(encoding="utf-8")
+    source = source_owners.worker_text()
 
     assert "LifecycleCheckoutDefinitionsScope" in source
     assert "g_checkout_layer_definitions[static_cast<int32_t>(i)] = lifecycle_definitions[i]" in source

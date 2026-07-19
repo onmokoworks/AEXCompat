@@ -1,6 +1,7 @@
 import json
 import subprocess
 from pathlib import Path
+import source_owners
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -15,7 +16,7 @@ def _worker():
 
 
 def test_transfer_mask_self_test_is_exposed_by_source():
-    source = (ROOT / "minihost/src/l2_main.cpp").read_text(encoding="utf-8")
+    source = source_owners.worker_text()
     assert "verify_world_transform_transfer_mask" in source
     assert "--self-test-world-transform-transfer-mask" in source
 

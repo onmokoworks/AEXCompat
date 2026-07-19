@@ -1,11 +1,10 @@
 import json
 from pathlib import Path
+import source_owners
 
 
 ROOT = Path(__file__).resolve().parents[1]
-WORKER = ROOT / "minihost/src/l2_main.cpp"
-
-
+WORKER = source_owners.L2_MAIN
 def test_real_aex_parameter_count_contract_result():
     result = json.loads(
         (ROOT / "analysis/REAL_AEX_PARAMETER_COUNT_CONTRACT_RESULT_2026-07-15.json").read_text(
@@ -21,7 +20,7 @@ def test_real_aex_parameter_count_contract_result():
         assert case["in_data_num_params"] == case["explicit_parameter_count"] + 1
     assert result["invariants"]["broker_matches_interactive_descriptor_count"]
     assert result["invariants"]["classic_and_smartfx_share_count_contract"]
-    worker = WORKER.read_text(encoding="utf-8")
+    worker = source_owners.worker_text()
     assert "read<int32_t>(output, kOutNumParams) == expected_num_params" in worker
     assert "is_rendering_worker() && request_mode" in worker
     assert "params_error != 0 || !parameter_count_contract_valid" in worker

@@ -1,10 +1,11 @@
 import json
 from pathlib import Path
+import source_owners
 
 
 ROOT = Path(__file__).resolve().parents[1]
 RESULT = ROOT / "analysis" / "SDK_PATHMASTER_SEQUENCE_FLATTEN_RESULT_2026-07-15.json"
-WORKER = ROOT / "minihost" / "src" / "l2_main.cpp"
+WORKER = source_owners.L2_MAIN
 BROKER = ROOT / "broker" / "crates" / "broker" / "src" / "image_render.rs"
 HARNESS = ROOT / "broker" / "crates" / "harness" / "src" / "main.rs"
 PROBE = ROOT / "instruments" / "abi-layout-probe" / "main.cpp"
@@ -45,7 +46,7 @@ def test_resetup_data_is_usable_by_a_real_path_render():
 
 def test_flatten_selector_is_abi_bound_isolated_and_exposed_to_the_harness():
     evidence = result()
-    worker = WORKER.read_text(encoding="utf-8")
+    worker = source_owners.worker_text()
     broker = BROKER.read_text(encoding="utf-8")
     harness = HARNESS.read_text(encoding="utf-8")
     probe = PROBE.read_text(encoding="utf-8")

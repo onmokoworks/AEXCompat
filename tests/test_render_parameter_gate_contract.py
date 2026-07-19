@@ -1,10 +1,11 @@
 import json
 import unittest
 from pathlib import Path
+import source_owners
 
 
 ROOT = Path(__file__).resolve().parents[1]
-WORKER = ROOT / "minihost" / "src" / "l2_main.cpp"
+WORKER = source_owners.L2_MAIN
 CLI_DISPATCH = ROOT / "minihost" / "src" / "l2_cli_dispatch.cpp"
 RUNTIME_ADMISSION = ROOT / "minihost" / "src" / "worker_runtime_admission.cpp"
 ENTRY_ADMISSION = ROOT / "minihost" / "src" / "worker_entry_admission.cpp"

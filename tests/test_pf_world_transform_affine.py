@@ -1,5 +1,6 @@
 import subprocess
 from pathlib import Path
+import source_owners
 
 ROOT = Path(__file__).resolve().parents[1]
 RUNTIME = ROOT / "minihost" / "src" / "worker_pf_world_transform_runtime.cpp"
@@ -13,7 +14,7 @@ def test_affine_runtime_covers_both_directions_and_scale():
 
 def test_affine_source_has_inverse_mapping_and_alpha_aware_hq():
     source = RUNTIME.read_text(encoding="utf-8")
-    worker = (ROOT / "minihost" / "src" / "l2_main.cpp").read_text(encoding="utf-8")
+    worker = source_owners.worker_text()
     assert "destination_to_source" in source
     assert "source_to_destination && std::abs(determinant)" in source
     assert "sampled[channel] /= sampled[0] / maximum" in source

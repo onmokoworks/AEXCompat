@@ -1,10 +1,11 @@
 from pathlib import Path
+import source_owners
 
 
 ROOT = Path(__file__).resolve().parents[1]
 HEADER = ROOT / "minihost" / "src" / "worker_classic_runtime.hpp"
 SOURCE = ROOT / "minihost" / "src" / "worker_classic_runtime.cpp"
-WORKER = ROOT / "minihost" / "src" / "l2_main.cpp"
+WORKER = source_owners.L2_MAIN
 CMAKE = ROOT / "minihost" / "CMakeLists.txt"
 
 

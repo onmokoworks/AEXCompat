@@ -5,14 +5,11 @@ import tempfile
 from pathlib import Path
 
 import pytest
+import source_owners
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SOURCES = (
-    ROOT / "minihost" / "src" / "l2_main.cpp",
-    ROOT / "minihost" / "src" / "worker_aegp_scene.cpp",
-    ROOT / "minihost" / "src" / "worker_aegp_compat_selftests.cpp",
-)
+SOURCES = source_owners.contract_files("aegp_resizer_3d_chain")
 BUILD = ROOT / "target" / "minihost-build"
 SDK_ROOT = os.environ.get("AFTER_EFFECTS_SDK_ROOT")
 HEADERS = Path(SDK_ROOT) / "Examples" / "Headers" if SDK_ROOT else None

@@ -1,10 +1,11 @@
 import json
 from pathlib import Path
+import source_owners
 
 
 ROOT = Path(__file__).resolve().parents[1]
 EVIDENCE = ROOT / "analysis" / "ONMK_PARTICLELAB_SUITE_LEASE_COMPAT_RESULT_2026-07-15.json"
-SOURCE = ROOT / "minihost" / "src" / "l2_main.cpp"
+SOURCE = source_owners.L2_MAIN
 BROKER = ROOT / "broker" / "crates" / "broker" / "src" / "image_render.rs"
 
 
@@ -25,7 +26,7 @@ def test_ownership_and_guard_failures_remain_hard_failures():
     assert observation["handle_lifetimes_balanced"] is True
     assert observation["world_lifetimes_balanced"] is True
     assert observation["param_checkouts_balanced"] is True
-    source = SOURCE.read_text(encoding="utf-8")
+    source = source_owners.worker_text()
     assert "smart.guards_intact && handle_lifetimes_balanced()" in source
     assert "world_lifetimes_balanced() &&" in source
     assert "param_checkouts_balanced() &&" in source

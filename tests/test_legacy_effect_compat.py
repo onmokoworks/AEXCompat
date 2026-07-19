@@ -4,20 +4,11 @@ import tempfile
 from pathlib import Path
 
 import pytest
+import source_owners
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SOURCES = (
-    ROOT / "minihost" / "src" / "l2_main.cpp",
-    ROOT / "minihost" / "src" / "worker_aegp_scene.cpp",
-    ROOT / "minihost" / "src" / "worker_aegp_scene.hpp",
-    ROOT / "minihost" / "src" / "worker_pf_suites.cpp",
-    ROOT / "minihost" / "src" / "worker_pf_suites_internal.hpp",
-    ROOT / "minihost" / "src" / "worker_selftest_dispatch.cpp",
-    ROOT / "minihost" / "src" / "worker_pf_helper_runtime.cpp",
-    ROOT / "minihost" / "src" / "worker_pf_helper_runtime.hpp",
-    ROOT / "minihost" / "src" / "worker_host_suite_router.cpp",
-)
+SOURCES = source_owners.contract_files("legacy_effect_compat")
 SUITE_ABI = ROOT / "minihost" / "src" / "worker_suite_abi.hpp"
 
 

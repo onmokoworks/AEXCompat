@@ -1,0 +1,259 @@
+"""契約名 → owner ファイル群の一元マニフェスト (issue #127)。
+
+source-text test が読むソースの解決をここに集約する。TU 抽出で実装の
+owner が移動したときは、このファイルの該当契約 (WORKER_RUNTIME_OWNERS
+または CONTRACTS の 1 エントリ) に新しい owner を 1 行追加するだけで
+テスト側の追従が完了する。テスト本体の assert 内容 (マーカー文字列や
+ABI static_assert の確認) はこのファイルの変更では変わらない。
+
+使い分け:
+
+- ``worker_text()``: l2_main.cpp とその抽出先 (WORKER_RUNTIME_OWNERS) の
+  連結テキスト。「worker 実装のどこかが契約を満たす」ことを検証する
+  肯定 assert 用。抽出で実装が移動しても owner を追記すれば追従できる。
+- ``L2_MAIN``: l2_main.cpp そのもののパス。「l2_main にはもう無い」ことを
+  検証する否定 assert や、entry/admission/dispatch 固有の契約用。
+  否定 assert を持つテストを worker_text() に切り替えてはならない
+  (owner 追記で否定側が偽陽性の fail になるため)。
+- ``contract_text(name)`` / ``contract_files(name)``: 特定領域の
+  owner ファイル集合を名前で解決する。集約読みしていたテストはこちら。
+"""
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+SRC = ROOT / "minihost" / "src"
+
+L2_MAIN = SRC / "l2_main.cpp"
+
+# l2_main.cpp から抽出された実装の owner 群。TU 抽出のたびにここへ追記する。
+WORKER_RUNTIME_OWNERS = (
+    "minihost/src/l2_main.cpp",
+)
+
+# 契約名 → owner ファイル群 (repo ルート相対)。
+CONTRACTS = {
+    "l2_family": (
+        "minihost/src/l2_main.cpp",
+        "minihost/src/l2_mode_execution.hpp",
+        "minihost/src/l2_mode_execution.cpp",
+        "minihost/src/l2_cli_dispatch.cpp",
+        "minihost/src/worker_l2_suite_abi.hpp",
+        "minihost/src/worker_pf_suites_internal.hpp",
+        "minihost/src/worker_pf_suites.cpp",
+        "minihost/src/worker_pf_sampling_runtime.cpp",
+        "minihost/src/worker_pf_ae_channel_runtime.cpp",
+        "minihost/src/worker_pf_path_selftests.cpp",
+        "minihost/src/worker_pf_world_transform_runtime.cpp",
+        "minihost/src/worker_pf_ansi_runtime.cpp",
+        "minihost/src/worker_host_suite_catalog.cpp",
+        "minihost/src/worker_parameter_execution.cpp",
+        "minihost/src/worker_ui_event_execution.cpp",
+        "minihost/src/worker_entry_bootstrap.cpp",
+        "minihost/src/worker_smart_runtime.cpp",
+        "minihost/src/worker_smart_setup.cpp",
+        "minihost/src/worker_smart_dispatch.cpp",
+        "minihost/src/worker_smart_finalize.cpp",
+        "minihost/src/worker_smart_render_runtime.cpp",
+        "minihost/src/worker_classic_execution.cpp",
+        "minihost/src/worker_aegp_scene.cpp",
+        "minihost/src/worker_aegp_scene.hpp",
+        "minihost/src/worker_aegp_scene_runtime.hpp",
+        "minihost/src/worker_aegp_scene_runtime.cpp",
+        "minihost/src/worker_aegp_init_runtime.hpp",
+        "minihost/src/worker_aegp_init_runtime.cpp",
+        "minihost/src/worker_aegp_init_execution.hpp",
+        "minihost/src/worker_aegp_init_execution.cpp",
+        "minihost/src/worker_aegp_timeline_probe.hpp",
+        "minihost/src/worker_aegp_timeline_probe.cpp",
+        "minihost/src/worker_aegp_host_selftests.cpp",
+        "minihost/src/worker_aegp_compat_selftests.cpp",
+        "minihost/src/worker_mask_runtime.hpp",
+        "minihost/src/worker_mask_runtime.cpp",
+        "minihost/src/worker_mask_runtime_callbacks.cpp",
+        "minihost/src/worker_mask_selftests.cpp",
+        "minihost/src/worker_handle_runtime.hpp",
+        "minihost/src/worker_handle_runtime.cpp",
+        "minihost/src/worker_report.hpp",
+        "minihost/src/worker_report.cpp",
+        "minihost/src/worker_runtime_admission.cpp",
+        "minihost/src/worker_classic_runtime.hpp",
+        "minihost/src/worker_classic_runtime.cpp",
+        "minihost/src/worker_selftest_dispatch.cpp",
+        "minihost/src/worker_fixed_selftest_routing.cpp",
+        "minihost/src/worker_parameter_selftest_routing.cpp",
+        "minihost/src/worker_request_parser.hpp",
+        "minihost/src/worker_request_parser.cpp",
+        "minihost/src/worker_invocation_orchestration.hpp",
+        "minihost/src/worker_invocation_orchestration.cpp",
+        "minihost/src/worker_render_report.hpp",
+        "minihost/src/worker_render_report.cpp",
+    ),
+    "aegp_resizer_3d_chain": (
+        "minihost/src/l2_main.cpp",
+        "minihost/src/worker_aegp_scene.cpp",
+        "minihost/src/worker_aegp_compat_selftests.cpp",
+    ),
+    "legacy_effect_compat": (
+        "minihost/src/l2_main.cpp",
+        "minihost/src/worker_aegp_scene.cpp",
+        "minihost/src/worker_aegp_scene.hpp",
+        "minihost/src/worker_pf_suites.cpp",
+        "minihost/src/worker_pf_suites_internal.hpp",
+        "minihost/src/worker_selftest_dispatch.cpp",
+        "minihost/src/worker_pf_helper_runtime.cpp",
+        "minihost/src/worker_pf_helper_runtime.hpp",
+        "minihost/src/worker_host_suite_router.cpp",
+    ),
+    "pf_ae_adv_item_suite": (
+        "minihost/src/l2_main.cpp",
+        "minihost/src/worker_pf_suites.cpp",
+        "minihost/src/worker_pf_suites_internal.hpp",
+        "minihost/src/worker_world_safety.cpp",
+    ),
+    "pf_ae_channel_suite": (
+        "minihost/src/l2_main.cpp",
+        "minihost/src/worker_pf_suites.cpp",
+        "minihost/src/worker_l2_suite_abi.hpp",
+        "minihost/src/worker_pf_suites_internal.hpp",
+        "minihost/src/worker_pf_ae_channel_runtime.hpp",
+        "minihost/src/worker_pf_ae_channel_runtime.cpp",
+    ),
+    "pf_ansi_suite": (
+        "minihost/src/l2_main.cpp",
+        "minihost/src/worker_l2_suite_abi.hpp",
+        "minihost/src/worker_host_suite_catalog.hpp",
+        "minihost/src/worker_pf_ansi_runtime.cpp",
+    ),
+    "pf_color_suite": (
+        "minihost/src/l2_main.cpp",
+        "minihost/src/worker_pf_suites.cpp",
+        "minihost/src/worker_pf_suites_internal.hpp",
+        "minihost/src/worker_pf_color_selftests.cpp",
+    ),
+    "pf_effect_sequence_data_suite": (
+        "minihost/src/l2_main.cpp",
+        "minihost/src/worker_pf_suites_internal.hpp",
+        "minihost/src/worker_pf_suites.cpp",
+        "minihost/src/worker_pf_state_runtime.hpp",
+        "minihost/src/worker_pf_state_runtime.cpp",
+    ),
+    "pf_fill_matte_legacy_callbacks": (
+        "minihost/src/l2_main.cpp",
+        "minihost/src/worker_pf_suites.cpp",
+        "minihost/src/worker_l2_suite_abi.hpp",
+        "minihost/src/worker_pf_suites_internal.hpp",
+        "minihost/src/worker_pf_world_transform_runtime.cpp",
+    ),
+    "pf_helper_suite2": (
+        "minihost/src/l2_main.cpp",
+        "minihost/src/worker_l2_suite_abi.hpp",
+        "minihost/src/worker_pf_helper_runtime.cpp",
+        "minihost/src/worker_pf_helper_runtime.hpp",
+        "minihost/src/worker_host_suite_router.cpp",
+        "minihost/src/worker_ui_event_execution.cpp",
+    ),
+    "pf_world_transform_composite_rect": (
+        "minihost/src/l2_main.cpp",
+        "minihost/src/worker_l2_suite_abi.hpp",
+        "minihost/src/worker_pf_suites.cpp",
+        "minihost/src/worker_pf_world_transform_runtime.cpp",
+    ),
+    "sdk_backwards_audio_result": (
+        "minihost/src/l2_main.cpp",
+        "minihost/src/l2_cli_dispatch.cpp",
+        "minihost/src/host_audio_runtime.hpp",
+        "minihost/src/host_audio_runtime.cpp",
+    ),
+    "sdk_grabba_update_menu": (
+        "minihost/src/l2_main.cpp",
+        "minihost/src/worker_aegp_scene.cpp",
+        "minihost/src/worker_aegp_scene.hpp",
+        "minihost/src/worker_aegp_layer_render_runtime.cpp",
+    ),
+    "sdk_pathmaster_hard_edge_result": (
+        "minihost/src/l2_main.cpp",
+        "minihost/src/worker_pf_suites.cpp",
+        "minihost/src/worker_pf_suites_internal.hpp",
+        "minihost/src/worker_l2_suite_abi.hpp",
+        "minihost/src/worker_pf_path_runtime.cpp",
+        "minihost/src/worker_pf_path_selftests.cpp",
+        "minihost/src/worker_pf_world_transform_runtime.cpp",
+    ),
+    "sdk_shifter_transform_sampling_result": (
+        "minihost/src/l2_main.cpp",
+        "minihost/src/worker_pf_suites.cpp",
+        "minihost/src/worker_render_report.cpp",
+        "minihost/src/worker_pf_sampling_runtime.cpp",
+    ),
+    "sdk_transformer_multi_input_result": (
+        "minihost/src/l2_main.cpp",
+        "minihost/src/worker_pf_suites.cpp",
+        "minihost/src/worker_pf_world_transform_runtime.cpp",
+    ),
+    "smartfx_geometry_flags": (
+        "minihost/src/l2_main.cpp",
+        "minihost/src/render_subsystem.h",
+        "minihost/src/render_subsystem.cpp",
+        "minihost/src/worker_smart_dispatch.cpp",
+        "minihost/src/worker_smart_finalize.cpp",
+        "minihost/src/worker_render_report.cpp",
+    ),
+    "native_depth_image_transport": (
+        "minihost/src/l2_main.cpp",
+        "minihost/src/render_subsystem.cpp",
+        "minihost/src/worker_smart_finalize.cpp",
+    ),
+    "pf_adv_app_suite": (
+        "minihost/src/l2_main.cpp",
+        "minihost/src/worker_l2_suite_abi.hpp",
+        "minihost/src/worker_host_suite_catalog.cpp",
+        "minihost/src/worker_host_guard_selftests.cpp",
+    ),
+    "pf_ae_channel_transport": (
+        "minihost/src/l2_main.cpp",
+        "minihost/src/worker_pf_ae_channel_runtime.cpp",
+    ),
+    "smartfx_suite_fault": (
+        "minihost/src/l2_main.cpp",
+        "minihost/src/l2_cli_dispatch.cpp",
+        "minihost/src/worker_mask_runtime.hpp",
+        "minihost/src/worker_mask_runtime.cpp",
+    ),
+    "custom_ui_lifecycle": (
+        "minihost/src/l2_main.cpp",
+        "minihost/src/worker_invocation_orchestration.cpp",
+        "minihost/src/worker_ui_event_execution.cpp",
+    ),
+    "path_parameter_assignment": (
+        "minihost/src/l2_main.cpp",
+        "minihost/src/worker_parameter_execution.cpp",
+    ),
+    "runtime_module_authorization": (
+        "minihost/src/l2_main.cpp",
+        "minihost/src/worker_invocation_orchestration.cpp",
+        "minihost/src/worker_entry_admission.cpp",
+        "minihost/src/worker_entry_bootstrap.cpp",
+    ),
+    "worker_runtime_admission": (
+        "minihost/src/l2_main.cpp",
+        "minihost/src/worker_entry_admission.cpp",
+    ),
+}
+
+
+def contract_files(name):
+    return tuple(ROOT / relative for relative in CONTRACTS[name])
+
+
+def contract_text(name):
+    return "\n".join(
+        path.read_text(encoding="utf-8") for path in contract_files(name))
+
+
+def worker_files():
+    return tuple(ROOT / relative for relative in WORKER_RUNTIME_OWNERS)
+
+
+def worker_text():
+    return "\n".join(
+        path.read_text(encoding="utf-8") for path in worker_files())

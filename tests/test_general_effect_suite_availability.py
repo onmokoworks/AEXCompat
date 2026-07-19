@@ -1,10 +1,11 @@
 import json
 import re
 from pathlib import Path
+import source_owners
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SOURCE = ROOT / "minihost" / "src" / "l2_main.cpp"
+SOURCE = source_owners.L2_MAIN
 WORLD_SAFETY_SOURCE = ROOT / "minihost" / "src" / "worker_world_safety.cpp"
 PF_SUITES_SOURCE = ROOT / "minihost" / "src" / "worker_pf_suites.cpp"
 PF_SAMPLING_SOURCE = ROOT / "minihost" / "src" / "worker_pf_sampling_runtime.cpp"
@@ -31,7 +32,7 @@ def component_catalog_source(source: str) -> str:
 
 
 def test_general_effect_suites_are_available_without_mask_mode_and_are_version_exact():
-    source = (SOURCE.read_text(encoding="utf-8") + HOST_CATALOG_SOURCE.read_text(encoding="utf-8") +
+    source = (source_owners.worker_text() + HOST_CATALOG_SOURCE.read_text(encoding="utf-8") +
               PF_SAMPLING_SOURCE.read_text(encoding="utf-8") +
               PF_WORLD_TRANSFORM_SOURCE.read_text(encoding="utf-8"))
     catalog = component_catalog_source(source)
@@ -48,7 +49,7 @@ def test_general_effect_suites_are_available_without_mask_mode_and_are_version_e
 
 
 def test_general_effect_suite_functions_keep_existing_safety_bounds():
-    source = SOURCE.read_text(encoding="utf-8") + PF_SUITES_SOURCE.read_text(encoding="utf-8") + PF_SAMPLING_SOURCE.read_text(encoding="utf-8") + PF_WORLD_TRANSFORM_SOURCE.read_text(encoding="utf-8") + WORLD_SAFETY_SOURCE.read_text(encoding="utf-8")
+    source = source_owners.worker_text() + PF_SUITES_SOURCE.read_text(encoding="utf-8") + PF_SAMPLING_SOURCE.read_text(encoding="utf-8") + PF_WORLD_TRANSFORM_SOURCE.read_text(encoding="utf-8") + WORLD_SAFETY_SOURCE.read_text(encoding="utf-8")
 
     for marker in (
         "int32_t __cdecl subpixel_sample16(",

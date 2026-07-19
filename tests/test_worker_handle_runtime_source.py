@@ -1,8 +1,9 @@
 from pathlib import Path
+import source_owners
 
 
 ROOT = Path(__file__).resolve().parents[1]
-MAIN = (ROOT / "minihost/src/l2_main.cpp").read_text(encoding="utf-8")
+MAIN = source_owners.L2_MAIN.read_text(encoding="utf-8")
 HEADER = (ROOT / "minihost/src/worker_handle_runtime.hpp").read_text(encoding="utf-8")
 SOURCE = (ROOT / "minihost/src/worker_handle_runtime.cpp").read_text(encoding="utf-8")
 CMAKE = (ROOT / "minihost/CMakeLists.txt").read_text(encoding="utf-8")

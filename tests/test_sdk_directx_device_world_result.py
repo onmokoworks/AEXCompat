@@ -1,5 +1,6 @@
 import json
 from pathlib import Path
+import source_owners
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -59,7 +60,7 @@ def test_directx_device_world_evidence_records_exact_public_rgba8_conformance():
 
 
 def test_directx_implementation_build_and_readme_markers_are_present():
-    main = (ROOT / "minihost" / "src" / "l2_main.cpp").read_text()
+    main = source_owners.worker_text()
     main += "\n" + (ROOT / "minihost" / "src" / "l2_cli_dispatch.cpp").read_text()
     main += "\n" + (ROOT / "minihost" / "src" / "gpu_memory_world_transport.cpp").read_text()
     main += "\n" + (ROOT / "minihost" / "src" / "worker_render_report.cpp").read_text()

@@ -1,17 +1,11 @@
 import json
 from pathlib import Path
+import source_owners
 
 
 ROOT = Path(__file__).resolve().parents[1]
 RESULT = ROOT / "analysis" / "SDK_SHIFTER_TRANSFORM_SAMPLING_RESULT_2026-07-15.json"
-SOURCES = (
-    ROOT / "minihost" / "src" / "l2_main.cpp",
-    ROOT / "minihost" / "src" / "worker_pf_suites.cpp",
-    ROOT / "minihost" / "src" / "worker_render_report.cpp",
-    ROOT / "minihost" / "src" / "worker_pf_sampling_runtime.cpp",
-)
-
-
+SOURCES = source_owners.contract_files("sdk_shifter_transform_sampling_result")
 def test_shifter_covers_classic_transform_and_smart_sampling_at_all_depths():
     result = json.loads(RESULT.read_text(encoding="utf-8"))
     classic = result["classic"]

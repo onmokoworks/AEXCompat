@@ -5,10 +5,11 @@ import tempfile
 from pathlib import Path
 
 import pytest
+import source_owners
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SOURCE = ROOT / "minihost" / "src" / "l2_main.cpp"
+SOURCE = source_owners.L2_MAIN
 SCENE_SOURCE = ROOT / "minihost" / "src" / "worker_aegp_scene.cpp"
 SCENE_RUNTIME_HEADER = ROOT / "minihost" / "src" / "worker_aegp_scene_runtime.hpp"
 SCENE_RUNTIME_SOURCE = ROOT / "minihost" / "src" / "worker_aegp_scene_runtime.cpp"

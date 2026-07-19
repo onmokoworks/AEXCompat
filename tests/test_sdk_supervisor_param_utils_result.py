@@ -1,6 +1,7 @@
 import hashlib
 import json
 from pathlib import Path
+import source_owners
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -59,7 +60,7 @@ def test_supervisor_e2e_completes_lifecycle_state_ui_and_render_contracts():
 
 
 def test_supervisor_lifecycle_precedes_conditional_ui_in_l2_and_render_paths():
-    source = (ROOT / "minihost/src/l2_main.cpp").read_text(encoding="utf-8")
+    source = source_owners.worker_text()
     l2_sequence = source.index('std::cerr << "stage:sequence_setup_begin', source.index("lifecycle_errors"))
     l2_ui = source.index("dispatch_conditional_ui_selectors", l2_sequence)
     assert l2_sequence < l2_ui

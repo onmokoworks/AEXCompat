@@ -2,10 +2,11 @@ import json
 import os
 import subprocess
 from pathlib import Path
+import source_owners
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SOURCE = ROOT / "minihost" / "src" / "l2_main.cpp"
+SOURCE = source_owners.L2_MAIN
 RENDER_SOURCE = ROOT / "minihost" / "src" / "render_subsystem.cpp"
 WORLD_SAFETY_SOURCE = ROOT / "minihost" / "src" / "worker_world_safety.cpp"
 WORLD_SAFETY_HEADER = ROOT / "minihost" / "src" / "worker_world_safety.hpp"

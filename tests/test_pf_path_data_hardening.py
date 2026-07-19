@@ -1,12 +1,13 @@
 import json
 import subprocess
 from pathlib import Path
+import source_owners
 
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "minihost" / "src" / "worker_pf_path_runtime.cpp"
 SELFTEST_SOURCE = ROOT / "minihost" / "src" / "worker_pf_path_selftests.cpp"
-L2_SOURCE = ROOT / "minihost" / "src" / "l2_main.cpp"
+L2_SOURCE = source_owners.L2_MAIN
 CMAKE = ROOT / "minihost" / "CMakeLists.txt"
 
 

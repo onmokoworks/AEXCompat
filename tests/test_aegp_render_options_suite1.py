@@ -4,10 +4,11 @@ import pathlib
 import subprocess
 
 import pytest
+import source_owners
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-SOURCE = ROOT / "minihost" / "src" / "l2_main.cpp"
+SOURCE = source_owners.L2_MAIN
 ABI = ROOT / "minihost" / "src" / "worker_suite_abi.hpp"
 REGISTRY = ROOT / "minihost" / "src" / "worker_aegp_render_options.cpp"
 STAGED_RUNTIME = ROOT / "minihost" / "src" / "worker_aegp_staged_item_runtime.cpp"

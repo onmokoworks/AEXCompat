@@ -5,10 +5,11 @@ import shutil
 import subprocess
 import zlib
 from pathlib import Path
+import source_owners
 
 
 ROOT = Path(__file__).resolve().parents[1]
-WORKER_SOURCE = ROOT / "minihost" / "src" / "l2_main.cpp"
+WORKER_SOURCE = source_owners.L2_MAIN
 DISPATCH_SOURCE = ROOT / "minihost" / "src" / "l2_cli_dispatch.cpp"
 RENDER_SOURCE = ROOT / "minihost" / "src" / "render_subsystem.cpp"
 BROKER_SOURCE = ROOT / "broker" / "crates" / "broker" / "src" / "image_render.rs"
@@ -18,7 +19,7 @@ INPUT = ROOT / "target" / "ae-oracle-colorgrid-input.png"
 
 
 def test_world_dump_and_checksum_detail_are_opt_in_and_fail_closed():
-    worker = (WORKER_SOURCE.read_text(encoding="utf-8") + "\n" +
+    worker = (source_owners.worker_text() + "\n" +
               DISPATCH_SOURCE.read_text(encoding="utf-8") + "\n" +
               RENDER_SOURCE.read_text(encoding="utf-8"))
     # Opt-in trailers, default off, with hard caps on count and total bytes.

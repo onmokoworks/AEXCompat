@@ -1,8 +1,9 @@
 from pathlib import Path
+import source_owners
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SOURCE = (ROOT / "minihost" / "src" / "l2_main.cpp").read_text(encoding="utf-8")
+SOURCE = source_owners.worker_text()
 SCENE_SOURCE = (ROOT / "minihost" / "src" / "worker_aegp_scene.cpp").read_text(
     encoding="utf-8"
 )

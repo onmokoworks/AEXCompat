@@ -1,12 +1,13 @@
 import json
 import subprocess
 from pathlib import Path
+import source_owners
 
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "tools" / "build-pf-suite-abi-probe.ps1"
 RESULT = ROOT / "target" / "pf-suite-abi-probe-build" / "pf-suite-abi.json"
-MINIHOST = ROOT / "minihost" / "src" / "l2_main.cpp"
+MINIHOST = source_owners.L2_MAIN
 SUITE_ABI = ROOT / "minihost" / "src" / "worker_suite_abi.hpp"
 
 
@@ -90,7 +91,7 @@ def test_pf_suite_abi_probe_records_receipt_suite_member_names():
 
 
 def test_minihost_publishes_the_compiled_sdk_slot_counts():
-    source = MINIHOST.read_text(encoding="utf-8")
+    source = source_owners.worker_text()
     suite_abi = SUITE_ABI.read_text(encoding="utf-8")
     assert "static_assert(sizeof(AegpRenderOptionsSuite1) == 17 * sizeof(void*));" in suite_abi
     assert "AEXCOMPAT_ASSERT_RENDER1_SLOT(get_matte, 16)" in suite_abi

@@ -1,6 +1,7 @@
 import json
 import unittest
 from pathlib import Path
+import source_owners
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -27,15 +28,7 @@ class SmartFxSuiteFaultContractTests(unittest.TestCase):
         self.assertTrue(schema["properties"]["broker_survived"]["const"])
 
     def test_fault_modes_are_fixed_and_profile_gated(self):
-        worker = "\n".join(
-            path.read_text(encoding="utf-8")
-            for path in (
-                ROOT / "minihost/src/l2_main.cpp",
-                ROOT / "minihost/src/l2_cli_dispatch.cpp",
-                ROOT / "minihost/src/worker_mask_runtime.hpp",
-                ROOT / "minihost/src/worker_mask_runtime.cpp",
-            )
-        )
+        worker = source_owners.contract_text("smartfx_suite_fault")
         route = (ROOT / "broker/crates/broker/src/render_request.rs").read_text(
             encoding="utf-8"
         )

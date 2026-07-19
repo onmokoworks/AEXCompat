@@ -1,8 +1,9 @@
 from pathlib import Path
+import source_owners
 
 
 ROOT = Path(__file__).resolve().parents[1]
-MAIN = (ROOT / "minihost" / "src" / "l2_main.cpp").read_text(encoding="utf-8")
+MAIN = source_owners.L2_MAIN.read_text(encoding="utf-8")
 COMPONENT = (ROOT / "minihost" / "src" / "runtime_module_audit.cpp").read_text(
     encoding="utf-8"
 )

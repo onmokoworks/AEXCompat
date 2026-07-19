@@ -1,10 +1,11 @@
 from pathlib import Path
+import source_owners
 
 
 ROOT = Path(__file__).resolve().parents[1]
 HEADER = ROOT / "minihost" / "src" / "gpu_memory_world_transport.hpp"
 SOURCE = ROOT / "minihost" / "src" / "gpu_memory_world_transport.cpp"
-MAIN = ROOT / "minihost" / "src" / "l2_main.cpp"
+MAIN = source_owners.L2_MAIN
 CMAKE = ROOT / "minihost" / "CMakeLists.txt"
 
 

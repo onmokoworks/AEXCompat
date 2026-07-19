@@ -1,10 +1,11 @@
 import json
 import subprocess
 from pathlib import Path
+import source_owners
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SOURCE = ROOT / "minihost" / "src" / "l2_main.cpp"
+SOURCE = source_owners.L2_MAIN
 OWNER_SOURCES = (
     SOURCE,
     ROOT / "minihost" / "src" / "worker_smart_runtime.cpp",

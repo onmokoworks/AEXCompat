@@ -1,10 +1,11 @@
 import json
 from pathlib import Path
+import source_owners
 
 
 ROOT = Path(__file__).resolve().parents[1]
 RESULT = ROOT / "analysis" / "SDK_CHECKOUT_OPTIONS_DIALOG_RESULT_2026-07-15.json"
-WORKER = ROOT / "minihost" / "src" / "l2_main.cpp"
+WORKER = source_owners.L2_MAIN
 MODE_EXECUTION = ROOT / "minihost" / "src" / "l2_mode_execution.cpp"
 BROKER = ROOT / "broker" / "crates" / "broker" / "src" / "image_render.rs"
 HARNESS = ROOT / "broker" / "crates" / "harness" / "src" / "main.rs"
@@ -36,7 +37,7 @@ def test_unadvertised_effect_is_refused_without_selector_dispatch():
 
 def test_dialog_boundary_is_abi_bound_isolated_and_exposed():
     evidence = result()
-    worker = WORKER.read_text(encoding="utf-8")
+    worker = source_owners.worker_text()
     mode_execution = MODE_EXECUTION.read_text(encoding="utf-8")
     broker = BROKER.read_text(encoding="utf-8")
     harness = HARNESS.read_text(encoding="utf-8")

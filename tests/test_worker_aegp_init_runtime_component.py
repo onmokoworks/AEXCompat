@@ -1,12 +1,11 @@
 from pathlib import Path
+import source_owners
 
 
 ROOT = Path(__file__).resolve().parents[1]
 HEADER = ROOT / "minihost/src/worker_aegp_init_runtime.hpp"
 SOURCE = ROOT / "minihost/src/worker_aegp_init_runtime.cpp"
-MAIN = ROOT / "minihost/src/l2_main.cpp"
-
-
+MAIN = source_owners.L2_MAIN
 def test_aegp_init_runtime_owns_hook_dtos_registration_and_event_runners():
     header = HEADER.read_text(encoding="utf-8")
     source = SOURCE.read_text(encoding="utf-8")

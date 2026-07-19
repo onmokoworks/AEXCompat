@@ -2,15 +2,10 @@ import os
 import re
 import subprocess
 from pathlib import Path
+import source_owners
 
 ROOT = Path(__file__).resolve().parents[1]
-SOURCES = (
-    ROOT / "minihost" / "src" / "l2_main.cpp",
-    ROOT / "minihost" / "src" / "worker_pf_suites.cpp",
-    ROOT / "minihost" / "src" / "worker_pf_suites_internal.hpp",
-    ROOT / "minihost" / "src" / "worker_pf_color_selftests.cpp",
-)
-
+SOURCES = source_owners.contract_files("pf_color_suite")
 def source_text():
     return "\n".join(path.read_text(encoding="utf-8") for path in SOURCES)
 

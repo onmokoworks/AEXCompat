@@ -1,9 +1,10 @@
 from pathlib import Path
 import re
+import source_owners
 
 
 ROOT = Path(__file__).resolve().parents[1]
-MAIN = (ROOT / "minihost" / "src" / "l2_main.cpp").read_text(encoding="utf-8")
+MAIN = source_owners.L2_MAIN.read_text(encoding="utf-8")
 ENTRY_BOOTSTRAP = (ROOT / "minihost" / "src" / "worker_entry_bootstrap.cpp").read_text(
     encoding="utf-8"
 )

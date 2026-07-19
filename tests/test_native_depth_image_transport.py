@@ -1,15 +1,9 @@
 from pathlib import Path
 
+import source_owners
 
 ROOT = Path(__file__).resolve().parents[1]
-SOURCE = "\n".join(
-    path.read_text(encoding="utf-8")
-    for path in (
-        ROOT / "minihost/src/l2_main.cpp",
-        ROOT / "minihost/src/render_subsystem.cpp",
-        ROOT / "minihost/src/worker_smart_finalize.cpp",
-    )
-)
+SOURCE = source_owners.contract_text("native_depth_image_transport")
 PIXEL_TRANSPORT = (ROOT / "minihost/src/render_pixel_transport.cpp").read_text(
     encoding="utf-8"
 )

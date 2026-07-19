@@ -2,10 +2,11 @@ import json
 import os
 import subprocess
 from pathlib import Path
+import source_owners
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SOURCE = ROOT / "minihost/src/l2_main.cpp"
+SOURCE = source_owners.L2_MAIN
 DISPATCH_SOURCE = ROOT / "minihost/src/l2_cli_dispatch.cpp"
 EXECUTION_SOURCE = ROOT / "minihost/src/worker_parameter_execution.cpp"
 SELFTEST_SOURCE = ROOT / "minihost/src/worker_parameter_selftests.cpp"

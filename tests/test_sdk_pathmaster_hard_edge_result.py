@@ -1,18 +1,11 @@
 import json
 from pathlib import Path
+import source_owners
 
 
 ROOT = Path(__file__).resolve().parents[1]
 RESULT = ROOT / "analysis" / "SDK_PATHMASTER_HARD_EDGE_RESULT_2026-07-15.json"
-WORKER_SOURCES = (
-    ROOT / "minihost" / "src" / "l2_main.cpp",
-    ROOT / "minihost" / "src" / "worker_pf_suites.cpp",
-    ROOT / "minihost" / "src" / "worker_pf_suites_internal.hpp",
-    ROOT / "minihost" / "src" / "worker_l2_suite_abi.hpp",
-    ROOT / "minihost" / "src" / "worker_pf_path_runtime.cpp",
-    ROOT / "minihost" / "src" / "worker_pf_path_selftests.cpp",
-    ROOT / "minihost" / "src" / "worker_pf_world_transform_runtime.cpp",
-)
+WORKER_SOURCES = source_owners.contract_files("sdk_pathmaster_hard_edge_result")
 BROKER = ROOT / "broker" / "crates" / "broker" / "src" / "image_render.rs"
 
 

@@ -1,10 +1,11 @@
 import json
 from pathlib import Path
+import source_owners
 
 
 ROOT = Path(__file__).resolve().parents[1]
 RESULT = ROOT / "analysis" / "PF_INPUT_BUFFER_WRITE_RESULT_2026-07-15.json"
-WORKER = ROOT / "minihost" / "src" / "l2_main.cpp"
+WORKER = source_owners.L2_MAIN
 PIXEL_BUFFER = ROOT / "minihost" / "src" / "render_pixel_buffer.cpp"
 BROKER = ROOT / "broker" / "crates" / "broker" / "src" / "image_render.rs"
 HARNESS = ROOT / "broker" / "crates" / "harness" / "src" / "main.rs"
@@ -65,7 +66,7 @@ def test_smartfx_unadvertised_write_is_isolated_after_pre_render():
 
 def test_input_write_boundary_is_cleanroom_abi_bound_and_exposed():
     evidence = result()
-    worker = WORKER.read_text(encoding="utf-8")
+    worker = source_owners.worker_text()
     pixel_buffer = PIXEL_BUFFER.read_text(encoding="utf-8")
     broker = BROKER.read_text(encoding="utf-8")
     harness = HARNESS.read_text(encoding="utf-8")

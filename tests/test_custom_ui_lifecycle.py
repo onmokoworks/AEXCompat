@@ -1,18 +1,12 @@
 from pathlib import Path
+import source_owners
 
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
 def test_minihost_dispatches_a_bounded_custom_ui_lifecycle() -> None:
-    source = "\n".join(
-        (ROOT / "minihost" / "src" / name).read_text(encoding="utf-8")
-        for name in (
-            "l2_main.cpp",
-            "worker_invocation_orchestration.cpp",
-            "worker_ui_event_execution.cpp",
-        )
-    )
+    source = source_owners.contract_text("custom_ui_lifecycle")
 
     assert 'L"--l2-ui-lifecycle"' in source
     assert "std::array<int32_t, 5>{0, 1, 7, 5, 6}" in source

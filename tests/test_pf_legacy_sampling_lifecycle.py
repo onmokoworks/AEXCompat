@@ -1,9 +1,10 @@
 from pathlib import Path
+import source_owners
 
 
 ROOT = Path(__file__).resolve().parents[1]
 PF_SUITES = ROOT / "minihost" / "src" / "worker_pf_suites.cpp"
-SOURCE = ROOT / "minihost" / "src" / "l2_main.cpp"
+SOURCE = source_owners.L2_MAIN
 SAMPLING_RUNTIME = ROOT / "minihost" / "src" / "worker_pf_sampling_runtime.cpp"
 
 

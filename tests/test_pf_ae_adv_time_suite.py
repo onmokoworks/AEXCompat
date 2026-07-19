@@ -1,13 +1,14 @@
 from pathlib import Path
+import source_owners
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SOURCE = ROOT / "minihost" / "src" / "l2_main.cpp"
+SOURCE = source_owners.L2_MAIN
 ADV_TIME_SOURCE = ROOT / "minihost" / "src" / "worker_pf_adv_time_suite.cpp"
 
 
 def source() -> str:
-    return SOURCE.read_text(encoding="utf-8") + ADV_TIME_SOURCE.read_text(encoding="utf-8")
+    return source_owners.worker_text() + ADV_TIME_SOURCE.read_text(encoding="utf-8")
 
 
 def test_adv_time_versions_have_exact_public_name_and_independent_typed_tables():
