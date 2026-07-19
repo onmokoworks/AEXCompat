@@ -9,7 +9,8 @@
 #[cfg(windows)]
 mod windows_e2e {
     use aexcompat_broker::image_render::{
-        render_experimental_image, DISABLE_SESSION_WRAPPER_ENV, RENDER_SESSION_WRAPPER_RENDERS,
+        render_experimental_image, render_experimental_image_at_time, RenderTiming,
+        DISABLE_SESSION_WRAPPER_ENV, RENDER_SESSION_WRAPPER_RENDERS,
     };
     use sha2::{Digest, Sha256};
     use std::path::{Path, PathBuf};
@@ -101,6 +102,49 @@ mod windows_e2e {
             std::fs::read(&output_a).unwrap(),
             std::fs::read(&output_b).unwrap(),
             "PNG bytes differ between the session and one-shot routes"
+        );
+
+        // A nonzero render time exercises the deferred SEQUENCE_SETUP
+        // seeding: effects reading in_data->current_time during setup must
+        // observe the requested time on both routes.
+        let timing = RenderTiming {
+            current_time: 7,
+            time_step: 1,
+            total_time: 300,
+            time_scale: 30,
+        };
+        let timed_before = RENDER_SESSION_WRAPPER_RENDERS.load(Ordering::SeqCst);
+        let timed_a = scratch.join("timed-a.png");
+        let timed_report_a =
+            render_experimental_image_at_time(&root, &aex, &sha, &input, &timed_a, &[], timing)
+                .expect("session-route timed render");
+        assert!(
+            RENDER_SESSION_WRAPPER_RENDERS.load(Ordering::SeqCst) > timed_before,
+            "the session wrapper did not carry the timed render"
+        );
+        unsafe { std::env::set_var(DISABLE_SESSION_WRAPPER_ENV, "1") };
+        let timed_b = scratch.join("timed-b.png");
+        let timed_report_b =
+            render_experimental_image_at_time(&root, &aex, &sha, &input, &timed_b, &[], timing)
+                .expect("one-shot timed render");
+        unsafe { std::env::remove_var(DISABLE_SESSION_WRAPPER_ENV) };
+        let mut timed_flat_a = timed_report_a.as_object().expect("timed A").clone();
+        let mut timed_flat_b = timed_report_b.as_object().expect("timed B").clone();
+        for key in volatile {
+            timed_flat_a.remove(key);
+            timed_flat_b.remove(key);
+        }
+        for (key, value_a) in &timed_flat_a {
+            assert_eq!(
+                Some(value_a),
+                timed_flat_b.get(key),
+                "timed report field {key} differs between the routes"
+            );
+        }
+        assert_eq!(
+            std::fs::read(&timed_a).unwrap(),
+            std::fs::read(&timed_b).unwrap(),
+            "timed PNG bytes differ between the routes"
         );
         let _ = std::fs::remove_dir_all(&scratch);
     }

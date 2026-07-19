@@ -194,8 +194,11 @@ suite イベント (現行の bounded 記録)、lifecycle セレクタの発行�
 
 ```
 launch → admit_worker_entry → AEX ロード → GLOBAL_SETUP → ABOUT →
-PARAMS_SETUP (effect_bootstrap::run) → SEQUENCE_SETUP (1 回、
-invoke_sequence_selector と同経路で publish_effect_sequence) →
+PARAMS_SETUP (effect_bootstrap::run) → SEQUENCE_SETUP (1 回。発行は最初に
+レンダーに到達した render_frame の受信時で、in_data にはそのフレームの
+current_time を seed する — one-shot が SEQUENCE_SETUP 前に要求時刻を seed
+するのと同じ観測になる。invoke_sequence_selector と同経路で
+publish_effect_sequence) →
   loop {
     render_frame 受信 → 入力スロット読取・検証 →
     apply_parameter_animation(current_time, time_scale) →

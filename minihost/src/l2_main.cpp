@@ -4286,12 +4286,12 @@ RenderSessionOutcome run_render_session(
     outcome.protocol_violation = true;
     return outcome;
   }
-  // Effects may initialize persistent sequence state from in_data during
-  // SEQUENCE_SETUP, so the hoisted setup needs the same time and geometry
-  // fields the one-shot path seeds right before its render lifecycle
-  // (classic_render_runtime); the session equivalent is the launch
-  // configuration with time zero.
-  write<int32_t>(input, 224, 0);
+  // Static in_data geometry and timing fields for the whole session. The
+  // per-frame current_time is seeded when SEQUENCE_SETUP actually runs:
+  // setup is deferred to the first rendered frame so effects that
+  // initialize persistent sequence state from in_data->current_time observe
+  // that frame's time, exactly like the one-shot render lifecycle seeds the
+  // requested time before SEQUENCE_SETUP.
   write<int32_t>(input, 228, time_step);
   write<int32_t>(input, 232, total_time);
   write<int32_t>(input, 236, time_step);
@@ -4300,14 +4300,8 @@ RenderSessionOutcome run_render_session(
   write<int32_t>(input, 256, max_height);
   const int32_t session_extent[4] = {0, 0, max_width, max_height};
   std::memcpy(input.data() + 260, session_extent, sizeof(session_extent));
-  outcome.setup_error =
-      invoke_sequence_selector(entry, kSequenceSetup, input.data(), output.data());
-  if (outcome.setup_error != 0) return outcome;
-  // Mirrors begin_render for the hoisted sequence: an --aux-manifest-v1
-  // manifest becomes visible to the channel suite once SEQUENCE_SETUP
-  // succeeds, and stays active for every session frame.
-  activate_external_aux();
-  write<void*>(input, kInSequenceData, read<void*>(output, kOutSequenceData));
+  bool sequence_attempted = false;
+  bool sequence_started = false;
 
   const std::size_t input_offset = wrs::input_slot_offset();
   const std::size_t output_offset = wrs::output_slot_offset(geometry);
@@ -4418,6 +4412,25 @@ RenderSessionOutcome run_render_session(
     }
     std::memcpy(frame_rgba.data(), channels.view() + input_offset, frame_rgba.size());
     outcome.frames_attempted += 1;
+    if (!sequence_started) {
+      write<int32_t>(input, 224, current_time);
+      sequence_attempted = true;
+      outcome.setup_error = invoke_sequence_selector(entry, kSequenceSetup,
+                                                     input.data(), output.data());
+      if (outcome.setup_error != 0) {
+        // The session cannot render anything; report the frame as failed and
+        // stop accepting work (the one-shot equivalent is a failed render
+        // lifecycle surfacing through validation).
+        respond_error(outcome.setup_error);
+        break;
+      }
+      sequence_started = true;
+      // Mirrors begin_render for the hoisted sequence: an --aux-manifest-v1
+      // manifest becomes visible to the channel suite once SEQUENCE_SETUP
+      // succeeds, and stays active for every session frame.
+      activate_external_aux();
+      write<void*>(input, kInSequenceData, read<void*>(output, kOutSequenceData));
+    }
     int32_t frame_width = 0, frame_height = 0, frame_rowbytes = 0;
     std::string frame_input_hash, frame_output_hash;
     // Initialized true so it means "finalize observed corruption" when false:
@@ -4507,9 +4520,17 @@ RenderSessionOutcome run_render_session(
       break;
     }
   }
-  outcome.setdown_error =
-      invoke_sequence_selector(entry, kSequenceSetdown, input.data(), output.data());
-  write<void*>(input, kInSequenceData, nullptr);
+  if (sequence_started) {
+    outcome.setdown_error =
+        invoke_sequence_selector(entry, kSequenceSetdown, input.data(), output.data());
+    write<void*>(input, kInSequenceData, nullptr);
+  } else if (!sequence_attempted) {
+    // No frame ever reached rendering, so there is no sequence to tear
+    // down; an empty session is vacuously clean. (An attempted-but-failed
+    // setup keeps its error and the missing setdown fails the session.)
+    outcome.setup_error = 0;
+    outcome.setdown_error = 0;
+  }
   aexcompat::pf_ae_channel::reclaim_layer_channels();
   deactivate_external_aux();
   clear_native_aux_provider();

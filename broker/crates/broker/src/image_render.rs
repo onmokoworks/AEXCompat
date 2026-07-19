@@ -4880,6 +4880,15 @@ fn render_classic_via_length_one_session(
         Ok(session) => session,
         Err(_) => return SessionWrapperOutcome::Fallback,
     };
+    // The session attempt may dump snapshots before failing, and the one-shot
+    // rerun's resolver requires a fresh directory; clear our own snapshot
+    // files before falling back, the same way the GPU retry path does.
+    let fallback_with_clean_dumps = |dump: &Option<WorldDumpDir>| {
+        if let Some(dump) = dump {
+            let _ = clear_world_dump_files(&dump.path);
+        }
+        SessionWrapperOutcome::Fallback
+    };
     let outcome = match session.render_frame(0, request.timing.current_time, request.rgba) {
         Ok(outcome) => outcome,
         // Invalidation (crash, deadline, dimension or guard invariant): the
@@ -4887,18 +4896,18 @@ fn render_classic_via_length_one_session(
         // effect that legally resizes its output.
         Err(_) => {
             let _ = session.close();
-            return SessionWrapperOutcome::Fallback;
+            return fallback_with_clean_dumps(&world_dump_dir);
         }
     };
     let close = session.close();
     if close.get("session_clean") != Some(&Value::Bool(true))
         || close.get("invalidated") != Some(&Value::Bool(false))
     {
-        return SessionWrapperOutcome::Fallback;
+        return fallback_with_clean_dumps(&world_dump_dir);
     }
     let Some(final_report) = close.get("final_report").filter(|value| value.is_object()).cloned()
     else {
-        return SessionWrapperOutcome::Fallback;
+        return fallback_with_clean_dumps(&world_dump_dir);
     };
     let classification = close["worker"]["classification"]
         .as_str()
