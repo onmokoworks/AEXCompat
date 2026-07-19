@@ -4909,6 +4909,20 @@ RenderSessionOutcome run_render_session(
     outcome.protocol_violation = true;
     return outcome;
   }
+  // Effects may initialize persistent sequence state from in_data during
+  // SEQUENCE_SETUP, so the hoisted setup needs the same time and geometry
+  // fields the one-shot path seeds right before its render lifecycle
+  // (classic_render_runtime); the session equivalent is the launch
+  // configuration with time zero.
+  write<int32_t>(input, 224, 0);
+  write<int32_t>(input, 228, time_step);
+  write<int32_t>(input, 232, total_time);
+  write<int32_t>(input, 236, time_step);
+  write<uint32_t>(input, 240, time_scale);
+  write<int32_t>(input, 252, max_width);
+  write<int32_t>(input, 256, max_height);
+  const int32_t session_extent[4] = {0, 0, max_width, max_height};
+  std::memcpy(input.data() + 260, session_extent, sizeof(session_extent));
   outcome.setup_error =
       invoke_sequence_selector(entry, kSequenceSetup, input.data(), output.data());
   if (outcome.setup_error != 0) return outcome;
@@ -5020,7 +5034,10 @@ RenderSessionOutcome run_render_session(
     outcome.frames_attempted += 1;
     int32_t frame_width = 0, frame_height = 0, frame_rowbytes = 0;
     std::string frame_input_hash, frame_output_hash;
-    bool frame_guards = false;
+    // Initialized true so it means "finalize observed corruption" when false:
+    // render_once's early host-side failures return before touching it, while
+    // every path that allocates the guarded buffer overwrites it.
+    bool frame_guards = true;
     captured.clear();
     const int32_t frame_error = render_once(
         entry, input, output, "request", frame_width, frame_height, frame_rowbytes,
@@ -5036,6 +5053,15 @@ RenderSessionOutcome run_render_session(
     outcome.rowbytes = frame_rowbytes;
     outcome.input_hash = frame_input_hash;
     outcome.output_hash = frame_output_hash;
+    // Corruption evidence outranks the render error: a plug-in that wrote
+    // outside its guarded private buffer invalidates the session even when it
+    // also reported a nonzero error. Host-protection invariant, fail closed.
+    if (!frame_guards) {
+      outcome.guards_intact = false;
+      respond_error(kSessionGuardViolation);
+      outcome.invariant_failure = true;
+      break;
+    }
     if (frame_error != 0) {
       // Frame-local compatibility diagnostic; the sequence state is still
       // owned by the host, so the session may continue.
@@ -5044,15 +5070,6 @@ RenderSessionOutcome run_render_session(
         break;
       }
       continue;
-    }
-    // A guard violation on a frame that rendered is corruption evidence: the
-    // plug-in wrote outside its guarded private buffer. Host-protection
-    // invariant, fail closed.
-    if (!frame_guards) {
-      outcome.guards_intact = false;
-      respond_error(kSessionGuardViolation);
-      outcome.invariant_failure = true;
-      break;
     }
     // v1 fixes every frame to the launch max dimensions (protocol §3); an
     // expand/shrink-output effect changing them would publish dimensions the
