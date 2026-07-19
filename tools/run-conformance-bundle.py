@@ -555,15 +555,29 @@ def run_process(
         }
 
 
-def _parameter_assignment(parameter: dict[str, Any]) -> dict[str, Any]:
+def _parameter_assignment(
+    parameter: dict[str, Any], bundle_root: Path, pinned_paths: dict[str, str]
+) -> dict[str, Any]:
     value = parameter["value"]
     assignment: dict[str, Any] = {"slot": parameter["index"]}
+    parameter_type = parameter["type"].casefold().replace(" ", "_")
     if isinstance(value, bool):
         assignment["value"] = 1 if value else 0
     elif isinstance(value, (int, float)):
         assignment["value"] = value
     elif isinstance(value, str):
-        assignment["text"] = value
+        if parameter_type == "layer":
+            normalized = value.replace("\\", "/")
+            canonical = pinned_paths.get(normalized.casefold())
+            if canonical is None:
+                raise ValueError(
+                    f"layer parameter {parameter['index']} must reference a pinned bundle artifact"
+                )
+            assignment["layer"] = str(
+                bundle_root.joinpath(*canonical.split("/")).absolute()
+            )
+        else:
+            assignment["text"] = value
     elif isinstance(value, list) and all(isinstance(item, (int, float)) and not isinstance(item, bool) for item in value):
         if "color" in parameter["type"].casefold() and len(value) == 4:
             assignment["color"] = value
@@ -582,10 +596,25 @@ def write_request_sidecar(manifest: dict[str, Any], depth: str, destination: Pat
         raise ValueError("execution.time.value is outside the harness timing range")
     if not 1 <= time_scale <= 1_000_000:
         raise ValueError("execution.time.scale is outside the harness timing range")
+    bundle_root = destination.parent.parent
+    artifacts = [
+        manifest["plugin"]["aex"],
+        *manifest["plugin"]["dependencies"],
+        manifest["input"],
+        manifest["runner"],
+        *manifest.get("oracle", {}).get("artifacts", {}).values(),
+    ]
+    pinned_paths = {
+        artifact["path"].replace("\\", "/").casefold(): artifact["path"]
+        for artifact in artifacts
+    }
     request = {
         "schema_version": 1,
         "timing": {"frame": time_value, "time_scale": time_scale, "time_step": 1},
-        "assignments": [_parameter_assignment(item) for item in manifest["execution"]["parameters"]],
+        "assignments": [
+            _parameter_assignment(item, bundle_root, pinned_paths)
+            for item in manifest["execution"]["parameters"]
+        ],
         "dependencies": manifest["plugin"]["dependencies"],
         "render_settings": {
             "premultiplication": manifest["execution"]["premultiplication"],

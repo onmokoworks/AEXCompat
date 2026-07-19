@@ -460,6 +460,57 @@ def test_manifest_rejects_overflowed_nested_json_number(tmp_path):
     assert "non-finite JSON number" in failure["error"]["text"]
 
 
+def test_layer_parameter_uses_absolute_pinned_bundle_transport(tmp_path):
+    manifest_path, adapter = fixture(tmp_path)
+    del adapter
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["execution"]["parameters"] = [
+        {"index": 4, "type": "layer", "value": manifest["input"]["path"]}
+    ]
+    destination = tmp_path / "bundle" / "requests" / "argb8.json"
+    runner = load_runner_module()
+    runner.write_request_sidecar(manifest, "argb8", destination)
+    request = json.loads(destination.read_text(encoding="utf-8"))
+    assert request["assignments"] == [
+        {
+            "slot": 4,
+            "layer": str(
+                (tmp_path / "bundle").joinpath(*manifest["input"]["path"].split("/")).absolute()
+            ),
+        }
+    ]
+
+
+def test_layer_parameter_rejects_unpinned_bundle_path(tmp_path):
+    manifest_path, adapter = fixture(tmp_path)
+    del adapter
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["execution"]["parameters"] = [
+        {"index": 4, "type": "layer", "value": "inputs/unpinned.png"}
+    ]
+    runner = load_runner_module()
+    with pytest.raises(ValueError, match="must reference a pinned bundle artifact"):
+        runner.write_request_sidecar(
+            manifest, "argb8", tmp_path / "bundle" / "requests" / "argb8.json"
+        )
+
+
+def test_arbitrary_data_string_retains_text_transport(tmp_path):
+    manifest_path, adapter = fixture(tmp_path)
+    del adapter
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["execution"]["parameters"] = [
+        {"index": 7, "type": "arbitrary_data", "value": "opaque payload"}
+    ]
+    destination = tmp_path / "bundle" / "requests" / "argb8.json"
+    runner = load_runner_module()
+    runner.write_request_sidecar(manifest, "argb8", destination)
+    request = json.loads(destination.read_text(encoding="utf-8"))
+    assert request["assignments"] == [
+        {"slot": 7, "text": "opaque payload"}
+    ]
+
+
 @pytest.mark.parametrize(
     "expected_bytes,actual_bytes,mismatched",
     [
