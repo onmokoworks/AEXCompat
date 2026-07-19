@@ -57,8 +57,14 @@ before any plug-in load or execution. It then starts a dedicated writer thread
 before dispatch. The SEH filter
 copies the exception record and context into broker-owned storage, signals that
 thread, and waits up to two seconds. `MiniDumpWriteDump` is never called from
-the faulting thread. The writer uses the inherited pipe and waits for the
-broker's bounded-copy acknowledgement.
+the faulting thread. Before plug-in load, the worker commits a fixed 64 MiB
+alternate-I/O buffer. `IoStartCallback` disables DbgHelp's normal seekable-file
+I/O, and each `IoWriteAllCallback` copies its explicit offset and length into
+that buffer with checked arithmetic and the same 64 MiB cap. DbgHelp never
+receives the non-seekable pipe as its file sink. After `IoFinishCallback` and a
+successful `MiniDumpWriteDump` return, the writer streams the completed,
+correctly ordered image through the inherited pipe and waits for the broker's
+bounded-copy acknowledgement.
 Only after `MiniDumpWriteDump` returns success does the worker append a fixed
 completion marker to the transport. The broker withholds that marker-sized
 suffix until EOF and publishes only when the marker is present and the bounded

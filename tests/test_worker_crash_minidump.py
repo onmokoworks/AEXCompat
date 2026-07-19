@@ -109,8 +109,27 @@ def test_guarded_crash_writes_a_minidump(worker: Path, tmp_path: Path) -> None:
     assert report["dump_bytes"] > 0
 
     assert dump_path.is_file()
-    # Minidump files begin with the "MDMP" signature.
-    assert dump_path.read_bytes()[:4] == b"MDMP"
+    dump = dump_path.read_bytes()
+    # Validate the seek-sensitive header and stream directory, not merely the
+    # signature. DbgHelp emits directory entries at explicit offsets through
+    # the alternate-I/O callback before the worker streams the completed image.
+    assert dump[:4] == b"MDMP"
+    assert len(dump) >= 32
+    stream_count, directory_rva = struct.unpack_from("<II", dump, 8)
+    assert 0 < stream_count <= 64
+    assert 32 <= directory_rva <= len(dump)
+    assert stream_count * 12 <= len(dump) - directory_rva
+    stream_types = set()
+    for index in range(stream_count):
+        stream_type, data_size, data_rva = struct.unpack_from(
+            "<III", dump, directory_rva + index * 12
+        )
+        stream_types.add(stream_type)
+        if data_size:
+            assert 32 <= data_rva <= len(dump)
+            assert data_size <= len(dump) - data_rva
+    # ExceptionStream is required when exception information was supplied.
+    assert 6 in stream_types
     assert dump_path.stat().st_size == report["dump_bytes"]
 
 

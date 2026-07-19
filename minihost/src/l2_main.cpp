@@ -668,9 +668,15 @@ EXCEPTION_RECORD g_minidump_exception_record{};
 CONTEXT g_minidump_context{};
 EXCEPTION_POINTERS g_minidump_exception_pointers{};
 DWORD g_minidump_thread_id{};
+unsigned char* g_minidump_buffer{};
 
-struct MinidumpLimitContext {
-  uint64_t max_bytes{kMaxMinidumpFileBytes};
+struct MinidumpBufferContext {
+  unsigned char* buffer{};
+  uint64_t capacity{};
+  uint64_t extent{};
+  bool started{false};
+  bool finished{false};
+  bool failed{false};
 };
 
 using MiniDumpWriteDumpFn = BOOL(WINAPI*)(HANDLE, DWORD, HANDLE,
@@ -694,15 +700,59 @@ bool preload_minidump_writer() {
 BOOL CALLBACK minidump_limit_callback(
     PVOID parameter, const PMINIDUMP_CALLBACK_INPUT input,
     PMINIDUMP_CALLBACK_OUTPUT output) {
-  if (!parameter || !input || !output) return TRUE;
+  if (!parameter || !input || !output) return FALSE;
+  auto* sink = static_cast<MinidumpBufferContext*>(parameter);
+  if (input->CallbackType == IoStartCallback) {
+    sink->started = true;
+    // S_FALSE opts out of DbgHelp's normal hFile writes. All payload writes
+    // arrive through IoWriteAllCallback with their authoritative offsets.
+    output->Status = S_FALSE;
+    return TRUE;
+  }
   if (input->CallbackType == IoWriteAllCallback) {
     const auto& io = input->Io;
-    const auto* limit = static_cast<const MinidumpLimitContext*>(parameter);
-    if (io.Offset > limit->max_bytes ||
-        io.BufferBytes > limit->max_bytes - io.Offset)
+    if (!sink->started || !sink->buffer ||
+        io.Offset > sink->capacity ||
+        io.BufferBytes > sink->capacity - io.Offset ||
+        (io.BufferBytes != 0 && !io.Buffer)) {
+      sink->failed = true;
+      output->Status = E_FAIL;
       return FALSE;
+    }
+    if (io.BufferBytes != 0)
+      std::memcpy(sink->buffer + static_cast<std::size_t>(io.Offset),
+                  io.Buffer, io.BufferBytes);
+    sink->extent = std::max(
+        sink->extent, io.Offset + static_cast<uint64_t>(io.BufferBytes));
+    output->Status = S_OK;
+    return TRUE;
+  }
+  if (input->CallbackType == IoFinishCallback) {
+    sink->finished = true;
+    output->Status = sink->failed ? E_FAIL : S_OK;
+    return sink->failed ? FALSE : TRUE;
   }
   return TRUE;
+}
+
+bool write_minidump_transport(const unsigned char* bytes, uint64_t size) {
+  if (!g_minidump_handle || !bytes || size == 0 ||
+      size > kMaxMinidumpFileBytes) return false;
+  uint64_t offset = 0;
+  while (offset < size) {
+    const DWORD requested = static_cast<DWORD>(
+        std::min<uint64_t>(size - offset, 64 * 1024));
+    DWORD written = 0;
+    if (!WriteFile(g_minidump_handle, bytes + offset, requested, &written,
+                   nullptr) || written == 0)
+      return false;
+    offset += written;
+  }
+  DWORD marker_bytes = 0;
+  return WriteFile(g_minidump_handle, kMinidumpCompletionMarker.data(),
+                   static_cast<DWORD>(kMinidumpCompletionMarker.size()),
+                   &marker_bytes, nullptr) &&
+         marker_bytes == kMinidumpCompletionMarker.size();
 }
 
 struct MinidumpBrokerAck {
@@ -749,27 +799,19 @@ void write_minidump_on_dedicated_thread() {
   exception_info.ThreadId = g_minidump_thread_id;
   exception_info.ExceptionPointers = &g_minidump_exception_pointers;
   exception_info.ClientPointers = FALSE;
-  MinidumpLimitContext limit;
+  MinidumpBufferContext sink{g_minidump_buffer,
+                             kMaxMinidumpFileBytes};
   MINIDUMP_CALLBACK_INFORMATION callback_info{};
-  callback_info.CallbackParam = &limit;
+  callback_info.CallbackParam = &sink;
   callback_info.CallbackRoutine = minidump_limit_callback;
   const BOOL written = g_minidump_write_dump(
-      GetCurrentProcess(), GetCurrentProcessId(), g_minidump_handle,
+      GetCurrentProcess(), GetCurrentProcessId(), INVALID_HANDLE_VALUE,
       MiniDumpNormal, &exception_info, nullptr, &callback_info);
   const DWORD error = GetLastError();
-  if (written) {
-    DWORD completion_bytes = 0;
-    if (!WriteFile(g_minidump_handle, kMinidumpCompletionMarker.data(),
-                   static_cast<DWORD>(kMinidumpCompletionMarker.size()),
-                   &completion_bytes, nullptr) ||
-        completion_bytes != kMinidumpCompletionMarker.size()) {
-      // Without the complete marker the broker deliberately rejects and
-      // deletes the non-authoritative prefix.
-      SetLastError(ERROR_WRITE_FAULT);
-    }
-  }
+  const bool transported = written && sink.started && sink.finished &&
+      !sink.failed && write_minidump_transport(sink.buffer, sink.extent);
   const MinidumpBrokerAck broker = finish_minidump_transport();
-  if (written && broker.valid && !broker.rejected && broker.bytes > 0 &&
+  if (transported && broker.valid && !broker.rejected && broker.bytes > 0 &&
       broker.bytes <= kMaxMinidumpFileBytes) {
     std::fprintf(stderr, "stage:minidump_written bytes=%lld\n",
                  static_cast<long long>(broker.bytes));
@@ -892,8 +934,24 @@ bool configure_minidump_from_inherited_handle() {
     std::fprintf(stderr, "stage:minidump_failed reason=handle_invalid\n");
     return false;
   }
+  // Reserve and commit the complete bounded alternate-I/O sink before any
+  // plug-in code runs. The crash callback performs no allocation and never
+  // gives DbgHelp or the plug-in a seekable broker-owned file handle.
+  g_minidump_buffer = static_cast<unsigned char*>(VirtualAlloc(
+      nullptr, static_cast<SIZE_T>(kMaxMinidumpFileBytes),
+      MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE));
+  if (!g_minidump_buffer) {
+    CloseHandle(handle);
+    CloseHandle(ack_handle);
+    SetEnvironmentVariableW(L"AEXCOMPAT_MINIDUMP_HANDLE", nullptr);
+    SetEnvironmentVariableW(L"AEXCOMPAT_MINIDUMP_ACK_HANDLE", nullptr);
+    std::fprintf(stderr, "stage:minidump_failed reason=writer_unavailable\n");
+    return false;
+  }
   preload_minidump_writer();
   if (!start_minidump_writer(handle, ack_handle)) {
+    VirtualFree(g_minidump_buffer, 0, MEM_RELEASE);
+    g_minidump_buffer = nullptr;
     CloseHandle(handle);
     CloseHandle(ack_handle);
     SetEnvironmentVariableW(L"AEXCOMPAT_MINIDUMP_HANDLE", nullptr);
