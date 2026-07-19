@@ -43,6 +43,7 @@ set(AEXCOMPAT_WORKER_RUNTIME_CORE_SOURCES
     src/worker_smart_runtime.cpp
     src/worker_mask_runtime.cpp
     src/worker_aegp_render_options.cpp
+    src/worker_aegp_init_runtime.cpp
     src/worker_aegp_scene.cpp
     src/worker_aegp_scene_runtime.cpp
     src/worker_aegp_scene_selftests.cpp
@@ -96,3 +97,12 @@ target_compile_definitions(worker_classic_runtime_selftest PRIVATE
 target_include_directories(worker_classic_runtime_selftest PRIVATE src)
 target_link_libraries(worker_classic_runtime_selftest PRIVATE
   bcrypt aexcompat_trace_writer)
+
+add_executable(worker_aegp_init_runtime_selftest
+  ../tests/native/worker_aegp_init_runtime_selftest.cpp
+  src/worker_aegp_init_runtime.cpp
+)
+target_compile_features(worker_aegp_init_runtime_selftest PRIVATE cxx_std_17)
+target_compile_definitions(worker_aegp_init_runtime_selftest PRIVATE
+  UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+target_include_directories(worker_aegp_init_runtime_selftest PRIVATE src)

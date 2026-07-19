@@ -69,6 +69,7 @@
 #include "worker_smart_runtime.hpp"
 #include "worker_mask_runtime.hpp"
 #include "worker_aegp_render_options.hpp"
+#include "worker_aegp_init_runtime.hpp"
 #include "worker_aegp_scene.hpp"
 #include "worker_aegp_scene_runtime.hpp"
 #include "worker_classic_runtime.hpp"
@@ -514,9 +515,10 @@ auto& g_update_param_ui_calls = g_parameter_runtime.ui.update_calls;
 auto& g_user_changed_param_requested = g_parameter_runtime.ui.user_changed_requested;
 auto& g_user_changed_param_slot = g_parameter_runtime.ui.user_changed_slot;
 auto& g_user_changed_param_error = g_parameter_runtime.ui.user_changed_error;
-bool g_aegp_init_mode = false;
+auto& g_aegp_init_runtime = aexcompat::worker_runtime::aegp_init::state();
+auto& g_aegp_init_mode = g_aegp_init_runtime.init_mode;
 bool& g_aegp_update_menu_mode = scene_runtime_state().update_menu_mode;
-bool g_aegp_idle_mode = false;
+auto& g_aegp_idle_mode = g_aegp_init_runtime.idle_mode;
 bool& g_aegp_command_roundtrip_mode = scene_runtime_state().command_roundtrip_mode;
 bool& g_aegp_active_idle_roundtrip_mode = scene_runtime_state().active_idle_roundtrip_mode;
 bool& g_aegp_comp_idle_roundtrip_mode = scene_runtime_state().comp_idle_roundtrip_mode;
@@ -527,10 +529,10 @@ bool g_aegp_switch_roundtrip_mode = false;
 bool g_skip_about = false;
 uint32_t g_aegp_commands_created = 0;
 uint32_t g_aegp_menu_commands_inserted = 0;
-uint32_t g_aegp_command_hooks = 0;
-uint32_t g_aegp_update_menu_hooks = 0;
-uint32_t g_aegp_idle_hooks = 0;
-uint32_t g_aegp_death_hooks = 0;
+auto& g_aegp_command_hooks = g_aegp_init_runtime.command_hooks;
+auto& g_aegp_update_menu_hooks = g_aegp_init_runtime.update_menu_hooks;
+auto& g_aegp_idle_hooks = g_aegp_init_runtime.idle_hooks;
+auto& g_aegp_death_hooks = g_aegp_init_runtime.death_hooks;
 int32_t g_next_aegp_command = 10000;
 uint32_t g_aegp_command_enable_calls = 0;
 uint32_t g_aegp_command_check_calls = 0;
@@ -577,20 +579,14 @@ uint32_t& g_aegp_collection_item_reads = scene_runtime_state().collection_item_r
 int32_t& g_aegp_scene_frame = scene_runtime_state().scene_frame;
 int32_t& g_aegp_first_observed_frame = scene_runtime_state().first_observed_frame;
 int32_t& g_aegp_last_observed_frame = scene_runtime_state().last_observed_frame;
-using AegpUpdateMenuHook = int32_t(__cdecl*)(void*, void*, int32_t);
-struct AegpUpdateMenuRegistration { AegpUpdateMenuHook hook{}; void* refcon{}; };
-std::vector<AegpUpdateMenuRegistration> g_aegp_update_menu_registrations;
-using AegpIdleHook = int32_t(__cdecl*)(void*, void*, int32_t*);
-struct AegpIdleRegistration { AegpIdleHook hook{}; void* refcon{}; };
-std::vector<AegpIdleRegistration> g_aegp_idle_registrations;
-using AegpDeathHook = int32_t(__cdecl*)(void*, void*);
-struct AegpDeathRegistration { AegpDeathHook hook{}; void* refcon{}; };
-std::vector<AegpDeathRegistration> g_aegp_death_registrations;
-using AegpCommandHook = int32_t(__cdecl*)(void*, void*, int32_t, uint32_t, uint8_t, uint8_t*);
-struct AegpCommandRegistration {
-  uint32_t priority{}; int32_t command{}; AegpCommandHook hook{}; void* refcon{};
-};
-std::vector<AegpCommandRegistration> g_aegp_command_registrations;
+auto& g_aegp_update_menu_registrations = g_aegp_init_runtime.update_menu_registrations;
+using AegpCommandRegistration =
+    aexcompat::worker_runtime::aegp_init::CommandRegistration;
+using AegpUpdateMenuRegistration =
+    aexcompat::worker_runtime::aegp_init::UpdateMenuRegistration;
+auto& g_aegp_idle_registrations = g_aegp_init_runtime.idle_registrations;
+auto& g_aegp_death_registrations = g_aegp_init_runtime.death_registrations;
+auto& g_aegp_command_registrations = g_aegp_init_runtime.command_registrations;
 std::vector<int32_t> g_aegp_inserted_commands;
 auto& g_checkout_layer_definitions = g_parameter_runtime.checkout.definitions;
 auto& g_param_checkout_mutex = g_parameter_runtime.checkout.mutex;
@@ -6819,31 +6815,18 @@ AegpCommandSuite g_aegp_command_suite{
 
 int32_t __cdecl aegp_register_command_hook(int32_t plugin_id, int32_t priority,
                                            int32_t command, void* hook, void* refcon) {
-  if (plugin_id <= 0 || !hook || (priority != 1 && priority != 2) ||
-      command < 0 || g_aegp_command_registrations.size() >= 64) return 4;
-  g_aegp_command_registrations.push_back({static_cast<uint32_t>(priority), command,
-      reinterpret_cast<AegpCommandHook>(hook), refcon});
-  ++g_aegp_command_hooks;
-  return 0;
+  return aexcompat::worker_runtime::aegp_init::register_command_hook(
+      plugin_id, priority, command, hook, refcon);
 }
 int32_t __cdecl aegp_register_update_menu_hook(int32_t plugin_id, void* hook, void* refcon) {
-  if (plugin_id <= 0 || !hook || g_aegp_update_menu_registrations.size() >= 64) return 4;
-  g_aegp_update_menu_registrations.push_back(
-      {reinterpret_cast<AegpUpdateMenuHook>(hook), refcon});
-  ++g_aegp_update_menu_hooks;
-  return 0;
+  return aexcompat::worker_runtime::aegp_init::register_update_menu_hook(
+      plugin_id, hook, refcon);
 }
 int32_t __cdecl aegp_register_death_hook(int32_t plugin_id, void* hook, void* refcon) {
-  if (plugin_id <= 0 || !hook || g_aegp_death_registrations.size() >= 64) return 4;
-  g_aegp_death_registrations.push_back({reinterpret_cast<AegpDeathHook>(hook), refcon});
-  ++g_aegp_death_hooks;
-  return 0;
+  return aexcompat::worker_runtime::aegp_init::register_death_hook(plugin_id, hook, refcon);
 }
 int32_t __cdecl aegp_register_idle_hook(int32_t plugin_id, void* hook, void* refcon) {
-  if (plugin_id <= 0 || !hook || g_aegp_idle_registrations.size() >= 64) return 4;
-  g_aegp_idle_registrations.push_back({reinterpret_cast<AegpIdleHook>(hook), refcon});
-  ++g_aegp_idle_hooks;
-  return 0;
+  return aexcompat::worker_runtime::aegp_init::register_idle_hook(plugin_id, hook, refcon);
 }
 struct AegpRegisterSuite {
   decltype(&aegp_register_command_hook) register_command_hook;
@@ -14731,28 +14714,16 @@ int worker_main_impl(int argc, wchar_t **argv) {
     TrimPipeProbe trim_probe;
     SwitchPipeProbe switch_probe;
     if (init_error == 0 && g_aegp_update_menu_mode) {
-      if (g_aegp_update_menu_registrations.empty()) event_error = 4;
-      for (const auto& registration : g_aegp_update_menu_registrations) {
-        const int32_t error = registration.hook(
-            global_refcon, registration.refcon, 0);
-        ++hooks_invoked;
-        if (error != 0 && event_error == 0) event_error = error;
-      }
+      const auto event = aexcompat::worker_runtime::aegp_init::dispatch_update_menu(
+          global_refcon, 0);
+      hooks_invoked += event.invoked;
+      if (event.error != 0 && event_error == 0) event_error = event.error;
     }
     if (init_error == 0 && g_aegp_idle_mode) {
-      if (g_aegp_idle_registrations.empty()) event_error = 4;
-      for (const auto& registration : g_aegp_idle_registrations) {
-        int32_t requested_sleep = 0;
-        const int32_t error = registration.hook(
-            global_refcon, registration.refcon, &requested_sleep);
-        ++hooks_invoked;
-        if (error != 0 && event_error == 0) event_error = error;
-        if (requested_sleep < 0 || requested_sleep > 3600) {
-          if (event_error == 0) event_error = 4;
-        } else if (idle_max_sleep < 0 || requested_sleep < idle_max_sleep) {
-          idle_max_sleep = requested_sleep;
-        }
-      }
+      const auto event = aexcompat::worker_runtime::aegp_init::dispatch_idle(global_refcon);
+      hooks_invoked += event.invoked;
+      idle_max_sleep = event.idle_max_sleep;
+      if (event.error != 0 && event_error == 0) event_error = event.error;
     }
     if (init_error == 0 && g_aegp_command_roundtrip_mode) {
       if (g_aegp_inserted_commands.empty() || g_aegp_command_registrations.empty()) {
@@ -14760,21 +14731,11 @@ int worker_main_impl(int argc, wchar_t **argv) {
       } else {
         const int32_t command = g_aegp_inserted_commands.front();
         for (int pass = 0; pass < 2; ++pass) {
-          uint8_t already_handled = 0;
-          for (const auto& registration : g_aegp_command_registrations) {
-            if (registration.command != 0 && registration.command != command) continue;
-            uint8_t handled = 0;
-            const int32_t error = registration.hook(global_refcon, registration.refcon,
-                command, registration.priority, already_handled, &handled);
-            ++command_hooks_invoked;
-            if (error != 0 && event_error == 0) event_error = error;
-            if (handled > 1 && event_error == 0) event_error = 4;
-            if (handled) {
-              ++command_handled_count;
-              already_handled = 1;
-            }
-          }
-          if (!already_handled && event_error == 0) event_error = 4;
+          const auto event = aexcompat::worker_runtime::aegp_init::dispatch_command(
+              global_refcon, command, 0, 0);
+          command_hooks_invoked += event.invoked;
+          command_handled_count += event.handled_count;
+          if (event.error != 0 && event_error == 0) event_error = event.error;
         }
       }
     }
@@ -14900,11 +14861,9 @@ int worker_main_impl(int argc, wchar_t **argv) {
       }
     }
     if (init_error == 0) {
-      for (const auto& registration : g_aegp_death_registrations) {
-        const int32_t error = registration.hook(global_refcon, registration.refcon);
-        ++death_hooks_invoked;
-        if (error != 0 && death_error == 0) death_error = error;
-      }
+      const auto event = aexcompat::worker_runtime::aegp_init::dispatch_death(global_refcon);
+      death_hooks_invoked += event.invoked;
+      if (event.error != 0 && death_error == 0) death_error = event.error;
     }
     // Capture the event-complete and terminal loaded-module sets before the
     // AEGP is unloaded so secure broker launches can validate this early path.

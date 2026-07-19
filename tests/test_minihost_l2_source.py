@@ -25,6 +25,8 @@ AEGP_SCENE_SOURCE = ROOT / "minihost" / "src" / "worker_aegp_scene.cpp"
 AEGP_SCENE_HEADER = ROOT / "minihost" / "src" / "worker_aegp_scene.hpp"
 AEGP_SCENE_RUNTIME_HEADER = ROOT / "minihost" / "src" / "worker_aegp_scene_runtime.hpp"
 AEGP_SCENE_RUNTIME_SOURCE = ROOT / "minihost" / "src" / "worker_aegp_scene_runtime.cpp"
+AEGP_INIT_RUNTIME_HEADER = ROOT / "minihost" / "src" / "worker_aegp_init_runtime.hpp"
+AEGP_INIT_RUNTIME_SOURCE = ROOT / "minihost" / "src" / "worker_aegp_init_runtime.cpp"
 MINIHOST_CMAKE = ROOT / "minihost" / "CMakeLists.txt"
 
 
@@ -33,7 +35,8 @@ def l2_family_source():
         SOURCE, MODE_EXECUTION_HEADER, MODE_EXECUTION_SOURCE,
         CLI_DISPATCH_SOURCE, PF_SUITES_ABI, PF_SUITES_INTERNAL, PF_SUITES_SOURCE,
         AEGP_SCENE_SOURCE, AEGP_SCENE_HEADER, AEGP_SCENE_RUNTIME_HEADER,
-        AEGP_SCENE_RUNTIME_SOURCE, REPORT_HEADER, REPORT_SOURCE,
+        AEGP_SCENE_RUNTIME_SOURCE, AEGP_INIT_RUNTIME_HEADER, AEGP_INIT_RUNTIME_SOURCE,
+        REPORT_HEADER, REPORT_SOURCE,
         RUNTIME_ADMISSION_SOURCE, CLASSIC_RUNTIME_HEADER, CLASSIC_RUNTIME_SOURCE,
         SELFTEST_DISPATCH_SOURCE
     ))
@@ -641,16 +644,16 @@ class MinihostL2SourceTests(unittest.TestCase):
 
     def test_aegp_update_menu_event_owns_and_invokes_registered_hooks(self):
         text = l2_family_source()
-        for marker in ('L"--aegp-update-menu"', "AegpUpdateMenuRegistration",
-                       "g_aegp_update_menu_registrations.size() >= 64",
+        for marker in ('L"--aegp-update-menu"', "UpdateMenuRegistration",
+                       "g_state.update_menu_registrations.size() >= kMaxHooks",
                        "registration.hook(", "global_refcon, registration.refcon, 0)",
                        '"event_requested\\\":\\\""', '"update_menu"'):
             self.assertIn(marker, text)
 
     def test_aegp_idle_event_is_single_tick_bounded_and_owned(self):
         text = l2_family_source()
-        for marker in ('L"--aegp-idle"', "AegpIdleRegistration",
-                       "g_aegp_idle_registrations.size() >= 64",
+        for marker in ('L"--aegp-idle"', "IdleRegistration",
+                       "g_state.idle_registrations.size() >= kMaxHooks",
                        "requested_sleep < 0 || requested_sleep > 3600",
                        "registration.refcon, &requested_sleep"):
             self.assertIn(marker, text)
@@ -660,18 +663,18 @@ class MinihostL2SourceTests(unittest.TestCase):
         session = (ROOT / "minihost" / "src" / "worker_session.cpp").read_text(
             encoding="utf-8"
         )
-        for marker in ("AegpDeathRegistration", "g_aegp_death_registrations.size() >= 64",
+        for marker in ("DeathRegistration", "g_state.death_registrations.size() >= kMaxHooks",
                        "registration.hook(global_refcon, registration.refcon)",
                        '"death_hooks_invoked\\\":"', '"death_error\\\":"'):
             self.assertIn(marker, text)
-        death_call = text.index("registration.hook(global_refcon, registration.refcon)")
+        death_call = text.index("aegp_init::dispatch_death(global_refcon)")
         shutdown = text.index("session.shutdown_before_report()", death_call)
         self.assertLess(death_call, shutdown)
         self.assertIn("FreeLibrary(module_);", session)
 
     def test_aegp_command_roundtrip_tracks_filter_priority_and_handled(self):
         text = l2_family_source()
-        for marker in ('L"--aegp-command-roundtrip"', "AegpCommandRegistration",
+        for marker in ('L"--aegp-command-roundtrip"', "CommandRegistration",
                        "priority != 1 && priority != 2", "registration.command != 0",
                        "registration.command != command", "already_handled, &handled",
                        "handled > 1", "command_handled_count"):
