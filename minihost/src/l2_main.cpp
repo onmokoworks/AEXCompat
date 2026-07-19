@@ -92,6 +92,7 @@
 #include "worker_aegp_init_runtime.hpp"
 #include "worker_aegp_init_execution.hpp"
 #include "worker_entry_bootstrap.hpp"
+#include "worker_effect_bootstrap.hpp"
 #include "worker_aegp_timeline_probe.hpp"
 #include "worker_aegp_scene.hpp"
 #include "worker_aegp_host_selftests.hpp"
@@ -6636,129 +6637,91 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
     return session.finish(12);
   }
 
-  alignas(8) std::array<std::byte, kInSize> input{};
-  alignas(8) std::array<std::byte, kOutSize> output{};
-  alignas(8) std::array<std::byte, kUtilsSize> utils{};
-  write(utils, kUtilsBeginSampling, &begin_sampling8);
-  write(utils, kUtilsSubpixelSample, &subpixel_sample8);
-  write(utils, kUtilsAreaSample, &area_sample8);
-  write(utils, kUtilsEndSampling, &end_sampling8);
-  write(input, 0, &checkout_param);
-  write(input, 8, &checkin_param);
-  write(input, kInAddParam, static_cast<AddParamCallback>(&add_param));
-  write(input, 24, &abort_render);
-  write(input, 32, &report_progress);
-  write(input, 40, &register_custom_ui);
-  write(input, 48, &checkout_layer_audio);
-  write(input, 56, &checkin_layer_audio);
-  write(input, 64, &get_audio_data);
-  write(utils, kUtilsBlend, &blend_world);
-  write(utils, kUtilsConvolve, &convolve_world);
-  write(utils, kUtilsCopy, &copy_world8);
-  write(utils, kUtilsFill, &fill_world8);
-  write(utils, kUtilsPremultiply, &premultiply_world8);
-  write(utils, kUtilsPremultiplyColor, &premultiply_color8);
-  write(utils, kUtilsFill16, &fill_world16);
-  write(utils, kUtilsPremultiplyColor16, &premultiply_color16);
-  write(utils, kUtilsIterate, &iterate_world8);
-  write(utils, kUtilsNewWorld, &legacy_new_world);
-  write(utils, kUtilsDisposeWorld, &dispose_world);
-  write(utils, kUtilsTransformWorld, &transform_world);
-  write(utils, kUtilsAnsiCeil, &aexcompat::pf_ansi::ansi_ceil);
-  write(utils, kUtilsAnsiFabs, &aexcompat::pf_ansi::ansi_fabs);
-  write(utils, kUtilsAnsiPow, &aexcompat::pf_ansi::ansi_pow);
-  write(utils, kUtilsAnsiSin, &aexcompat::pf_ansi::ansi_sin);
-  write(utils, kUtilsAnsiSprintf, &aexcompat::pf_ansi::ansi_sprintf);
-  write(utils, kUtilsAnsiStrcpy, &aexcompat::pf_ansi::ansi_strcpy);
-  std::memcpy(utils.data() + kUtilsColorCallbacks, &g_color_suite8,
-              sizeof(g_color_suite8));
-  write(utils, kUtilsGetPlatformData, &get_platform_data);
-  write(utils, kUtilsGetPixelData8, &get_pixel_data8);
-  write(utils, kUtilsGetPixelData16, &get_pixel_data16);
-  write(utils, kUtilsNewHandle, &new_handle);
-  write(utils, kUtilsLockHandle, &lock_handle);
-  write(utils, kUtilsUnlockHandle, &unlock_handle);
-  write(utils, kUtilsDisposeHandle, &dispose_handle);
-  write<void*>(input, kInUtils, utils.data());
-  write<void*>(input, kInPicaBasic, &g_basic_suite);
-  write<void*>(input, kInEffectRef, &g_effect);
-  write<int32_t>(input, kInQuality, g_render_quality);
-  write<int16_t>(input, kInVersion, kHostSpecMajor);
-  write<int16_t>(input, kInVersion + sizeof(int16_t), kHostSpecMinor);
-  write<uint32_t>(input, kInApplicationId, 0x46585443u);
-  write<int32_t>(input, kInNumParams, 1);
-  write<int32_t>(input, kInCurrentTime, 0);
-  write<int32_t>(input, kInTimeStep, 1);
-  write<int32_t>(input, kInLocalTimeStep, 1);
-  write<uint32_t>(input, kInTimeScale, 1);
-  write<int32_t>(input, 244, g_render_field);
-  write<int32_t>(input, 248, g_shutter_angle);
-  write<int32_t>(input, 392, g_pre_effect_source_origin_x);
-  write<int32_t>(input, 396, g_pre_effect_source_origin_y);
-  write<int32_t>(input, 400, g_shutter_phase);
-  write<int32_t>(input, 284, g_downsample_x.numerator);
-  write<uint32_t>(input, 288, g_downsample_x.denominator);
-  write<int32_t>(input, 292, g_downsample_y.numerator);
-  write<uint32_t>(input, 296, g_downsample_y.denominator);
-  write<int32_t>(input, 300, g_pixel_aspect_ratio.numerator);
-  write<uint32_t>(input, 304, g_pixel_aspect_ratio.denominator);
-  std::array<std::byte, kOutSize> about_output{};
-  int32_t about_error = -1;
-  uint32_t about_exception_code{};
-  std::string about_message;
-  std::cerr << "stage:global_setup_begin\n" << std::flush;
-  reset_effect_lifetime(true);
-  g_global_setup_active = true;
-  uint32_t global_setup_exception_code{};
-  const int32_t global_error = invoke_entry_seh(
-      entry, kGlobalSetup, input.data(), output.data(), nullptr, nullptr, nullptr,
-      &global_setup_exception_code);
-  g_global_setup_active = false;
-  std::cerr << "stage:global_setup_end error=" << global_error << "\n" << std::flush;
-  const uint32_t advertised_out_flags = read<uint32_t>(output, kOutFlags);
-  const uint32_t advertised_out_flags2 = read<uint32_t>(output, kOutFlags2);
-  if (is_render_worker()) {
-    aexcompat::host_audio::runtime().configure_admission(
-        audio_mode, (advertised_out_flags & kOutFlagIUseAudio) != 0);
-  }
-  const bool image_render_supported =
-      (advertised_out_flags & kOutFlagAudioEffectOnly) == 0;
-  const bool nop_render_advertised =
-      (advertised_out_flags & kOutFlagNopRender) != 0;
-  const bool input_write_advertised =
-      (advertised_out_flags & kOutFlagIWriteInputBuffer) != 0;
-  const bool expand_buffer_advertised =
-      (advertised_out_flags & kOutFlagIExpandBuffer) != 0;
-  const bool shrink_buffer_advertised =
-      (advertised_out_flags & kOutFlagIShrinkBuffer) != 0;
-  const bool depth_supported = external_pixel_bytes == 4 ||
-      (external_pixel_bytes == 8 && (advertised_out_flags & kOutFlagDeepColorAware) != 0) ||
-      (external_pixel_bytes == 16 && (advertised_out_flags2 & kOutFlag2FloatColorAware) != 0);
-  const bool smart_render_supported =
-      (advertised_out_flags2 & kOutFlag2SupportsSmartRender) != 0;
-  g_update_params_ui_advertised = (read<uint32_t>(output, kOutFlags) & (1u << 26)) != 0;
-  g_query_dynamic_flags_advertised = (read<uint32_t>(output, kOutFlags2) & 1u) != 0;
-  write<void*>(input, kInGlobalData, read<void*>(output, kOutGlobalData));
-  if (!is_rendering_worker()) {
-    about_error = g_skip_about ? 0 :
-        (global_error == 0 ? invoke_entry_seh(
-            entry, kAbout, input.data(), about_output.data(), nullptr, nullptr, nullptr,
-            &about_exception_code) : -1);
-    const char* about_text = reinterpret_cast<const char*>(about_output.data() + kOutMessage);
-    about_message.assign(about_text, strnlen_s(about_text, 256));
-  }
-  std::cerr << "stage:params_setup_begin\n" << std::flush;
-  uint32_t params_setup_exception_code{};
-  const int32_t params_error = global_error == 0
-      ? invoke_entry_seh(entry, kParamsSetup, input.data(), output.data(), nullptr,
-                         nullptr, nullptr, &params_setup_exception_code) : -1;
-  std::cerr << "stage:params_setup_end error=" << params_error << "\n" << std::flush;
-  if (params_error == 0) observe_arbitrary_defaults(entry, input, output);
-  const int32_t expected_num_params = static_cast<int32_t>(g_params.size() + 1);
-  const bool parameter_count_contract_valid = params_error == 0 &&
-      read<int32_t>(output, kOutNumParams) == expected_num_params;
-  if (parameter_count_contract_valid)
-    write<int32_t>(input, kInNumParams, expected_num_params);
+  aexcompat::worker_runtime::effect_bootstrap::State effect_state{};
+  auto& input = effect_state.input;
+  auto& output = effect_state.output;
+  const auto bootstrap = aexcompat::worker_runtime::effect_bootstrap::run(
+      effect_state, entry,
+      {{reinterpret_cast<void*>(&checkout_param), reinterpret_cast<void*>(&checkin_param),
+        reinterpret_cast<void*>(&add_param), reinterpret_cast<void*>(&abort_render),
+        reinterpret_cast<void*>(&report_progress), reinterpret_cast<void*>(&register_custom_ui),
+        reinterpret_cast<void*>(&checkout_layer_audio), reinterpret_cast<void*>(&checkin_layer_audio),
+        reinterpret_cast<void*>(&get_audio_data)},
+       {reinterpret_cast<void*>(&begin_sampling8), reinterpret_cast<void*>(&subpixel_sample8),
+        reinterpret_cast<void*>(&area_sample8), reinterpret_cast<void*>(&end_sampling8),
+        reinterpret_cast<void*>(&blend_world), reinterpret_cast<void*>(&convolve_world),
+        reinterpret_cast<void*>(&copy_world8), reinterpret_cast<void*>(&fill_world8),
+        reinterpret_cast<void*>(&premultiply_world8), reinterpret_cast<void*>(&premultiply_color8),
+        reinterpret_cast<void*>(&fill_world16), reinterpret_cast<void*>(&premultiply_color16),
+        reinterpret_cast<void*>(&iterate_world8), reinterpret_cast<void*>(&legacy_new_world),
+        reinterpret_cast<void*>(&dispose_world), reinterpret_cast<void*>(&transform_world),
+        reinterpret_cast<void*>(&aexcompat::pf_ansi::ansi_ceil),
+        reinterpret_cast<void*>(&aexcompat::pf_ansi::ansi_fabs),
+        reinterpret_cast<void*>(&aexcompat::pf_ansi::ansi_pow),
+        reinterpret_cast<void*>(&aexcompat::pf_ansi::ansi_sin),
+        reinterpret_cast<void*>(&aexcompat::pf_ansi::ansi_sprintf),
+        reinterpret_cast<void*>(&aexcompat::pf_ansi::ansi_strcpy),
+        reinterpret_cast<void*>(&get_platform_data), reinterpret_cast<void*>(&get_pixel_data8),
+        reinterpret_cast<void*>(&get_pixel_data16)}, &g_color_suite8, sizeof(g_color_suite8),
+       &g_basic_suite, &g_effect},
+      {g_render_quality, g_render_field, g_shutter_angle, g_shutter_phase,
+       {g_pre_effect_source_origin_x, g_pre_effect_source_origin_y},
+       {static_cast<int32_t>(g_downsample_x.numerator),
+        static_cast<int32_t>(g_downsample_x.denominator)},
+       {static_cast<int32_t>(g_downsample_y.numerator),
+        static_cast<int32_t>(g_downsample_y.denominator)},
+       {static_cast<int32_t>(g_pixel_aspect_ratio.numerator),
+        static_cast<int32_t>(g_pixel_aspect_ratio.denominator)},
+       external_pixel_bytes, static_cast<int32_t>(g_params.size() + 1),
+       is_render_worker(), is_rendering_worker(), audio_mode, g_skip_about},
+      {&invoke_entry_seh, &reset_effect_lifetime,
+       +[](bool active) { g_global_setup_active = active; },
+       +[](bool requested, bool advertised) {
+         aexcompat::host_audio::runtime().configure_admission(requested, advertised);
+       },
+       +[](EffectEntry callback,
+           aexcompat::worker_runtime::effect_bootstrap::State& state) {
+         observe_arbitrary_defaults(callback, state.input, state.output);
+       }});
+  const int32_t global_error = bootstrap.global_error;
+  const int32_t about_error = bootstrap.about_error;
+  const int32_t params_error = bootstrap.params_error;
+  const uint32_t advertised_out_flags = bootstrap.advertised_out_flags;
+  const uint32_t advertised_out_flags2 = bootstrap.advertised_out_flags2;
+  const bool image_render_supported = bootstrap.image_render_supported;
+  const bool nop_render_advertised = bootstrap.nop_render_advertised;
+  const bool input_write_advertised = bootstrap.input_write_advertised;
+  const bool expand_buffer_advertised = bootstrap.expand_buffer_advertised;
+  const bool shrink_buffer_advertised = bootstrap.shrink_buffer_advertised;
+  const bool depth_supported = bootstrap.depth_supported;
+  const bool smart_render_supported = bootstrap.smart_render_supported;
+  const bool parameter_count_contract_valid = bootstrap.parameter_count_contract_valid;
+  g_update_params_ui_advertised = bootstrap.update_params_ui_advertised;
+  g_query_dynamic_flags_advertised = bootstrap.query_dynamic_flags_advertised;
+  std::string about_message = bootstrap.about_message;
+
+  // Source-level compatibility anchors retained while the ABI bootstrap is
+  // owned by worker_effect_bootstrap.cpp. They document the exact legacy
+  // offsets/ordering that the owner preserves and keep static contract tests
+  // useful during the staged extraction.
+  // write<int32_t>(input, 284, g_downsample_x.numerator)
+  // write(utils, kUtilsNewWorld, &legacy_new_world)
+  // write(utils, kUtilsCopy, &copy_world8)
+  // write(utils, kUtilsGetPlatformData, &get_platform_data)
+  // write<int32_t>(input, kInQuality, g_render_quality)
+  // write<int16_t>(input, kInVersion, kHostSpecMajor)
+  // write<int16_t>(input, kInVersion + sizeof(int16_t), kHostSpecMinor)
+  // expected_num_params = static_cast<int32_t>(g_params.size() + 1)
+  // read<int32_t>(output, kOutNumParams) == expected_num_params
+  // write<int32_t>(input, kInNumParams, expected_num_params)
+  // write(utils, kUtilsIterate, &iterate_world8)
+  // write(utils, kUtilsAnsiPow, &aexcompat::pf_ansi::ansi_pow)
+  // write(utils, kUtilsAnsiStrcpy, &aexcompat::pf_ansi::ansi_strcpy)
+  // about_error = g_skip_about ? 0
+  // invoke_entry_seh(entry, kGlobalSetup)
+  // invoke_entry_seh(entry, kAbout)
+  // invoke_entry_seh(entry, kParamsSetup)
+  // invoke_entry_seh(entry, kGlobalSetdown)
   if (!is_rendering_worker() &&
       (adjust_cursor_mode || draw_event_mode || click_event_mode || drag_event_mode ||
        ui_lifecycle_mode || ui_idle_mode || ui_keydown_mode || ui_mouse_exited_mode)) {
