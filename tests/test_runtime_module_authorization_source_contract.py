@@ -4,7 +4,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 MAIN = "\n".join(
     (ROOT / "minihost" / "src" / name).read_text(encoding="utf-8")
-    for name in ("l2_main.cpp", "worker_invocation_orchestration.cpp")
+    for name in ("l2_main.cpp", "worker_invocation_orchestration.cpp",
+                 "worker_entry_admission.cpp")
 )
 ADMISSION = (ROOT / "minihost" / "src" / "worker_runtime_admission.cpp").read_text(
     encoding="utf-8"
@@ -57,7 +58,7 @@ def test_optional_argument_is_l2_params_only_and_exactly_positioned():
 
 def test_hash_dependency_is_configured_before_authorization_and_fails_closed():
     configure = MAIN.index("configure_runtime_module_hash(&sha256)")
-    admission = MAIN.index("admit_runtime(runtime_hooks, runtime_request, runtime_context)")
+    admission = MAIN.index("admit_worker_entry(")
     assert configure < admission
     assert "RuntimeHostHooks runtime_hooks{&sha256" in MAIN
     assert "if (!g_file_sha256 || manifest_name.empty()" in SOURCE

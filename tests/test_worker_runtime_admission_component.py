@@ -2,7 +2,10 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-MAIN = (ROOT / "minihost" / "src" / "l2_main.cpp").read_text(encoding="utf-8")
+MAIN = "\n".join(
+    (ROOT / "minihost" / "src" / name).read_text(encoding="utf-8")
+    for name in ("l2_main.cpp", "worker_entry_admission.cpp")
+)
 HEADER = (ROOT / "minihost" / "src" / "worker_runtime_admission.hpp").read_text(
     encoding="utf-8"
 )
@@ -18,7 +21,7 @@ def test_admission_is_a_common_worker_runtime_component_with_explicit_boundary()
     assert "struct RuntimeContext" in HEADER
     assert "RuntimeFileHash hash_file" in HEADER
     assert "RuntimeStdoutRedirect redirect_native_stdout" in HEADER
-    assert "admit_runtime(runtime_hooks, runtime_request, runtime_context)" in MAIN
+    assert "admit_worker_entry(" in MAIN
     assert "LoadLibraryExW(plugin_path.c_str()" not in MAIN
 
 

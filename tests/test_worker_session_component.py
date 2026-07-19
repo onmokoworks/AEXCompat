@@ -19,7 +19,7 @@ CMAKE = (ROOT / "minihost" / "CMakeLists.txt").read_text(encoding="utf-8")
 def test_session_is_the_single_post_admission_module_owner():
     assert CMAKE.count("src/worker_session.cpp") == 1
     assert '#include "worker_session.hpp"' in MAIN
-    assert "WorkerSession session(runtime_context, &trace_writer, &g_trace_writer)" in MAIN
+    assert "WorkerSession session(runtime_context, trace_writer.get(), &g_trace_writer)" in MAIN
     assert "FreeLibrary(module)" not in MAIN
     assert MAIN.count("session.finish(") >= 10
     assert "FreeLibrary(module_);" in SOURCE

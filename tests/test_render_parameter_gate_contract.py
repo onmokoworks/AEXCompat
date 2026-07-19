@@ -7,6 +7,7 @@ ROOT = Path(__file__).resolve().parents[1]
 WORKER = ROOT / "minihost" / "src" / "l2_main.cpp"
 CLI_DISPATCH = ROOT / "minihost" / "src" / "l2_cli_dispatch.cpp"
 RUNTIME_ADMISSION = ROOT / "minihost" / "src" / "worker_runtime_admission.cpp"
+ENTRY_ADMISSION = ROOT / "minihost" / "src" / "worker_entry_admission.cpp"
 REQUEST_PARSER = ROOT / "minihost" / "src" / "worker_request_parser.cpp"
 RENDER_REPORT = ROOT / "minihost" / "src" / "worker_render_report.cpp"
 PARAMETER_EXECUTION = ROOT / "minihost" / "src" / "worker_parameter_execution.cpp"
@@ -75,7 +76,7 @@ class RenderParameterGateContractTests(unittest.TestCase):
 
     def test_worker_revalidates_and_echoes_bound_values(self):
         worker = WORKER.read_text(encoding="utf-8")
-        worker_family = worker + RENDER_REPORT.read_text(encoding="utf-8") + PARAMETER_EXECUTION.read_text(encoding="utf-8")
+        worker_family = worker + ENTRY_ADMISSION.read_text(encoding="utf-8") + RENDER_REPORT.read_text(encoding="utf-8") + PARAMETER_EXECUTION.read_text(encoding="utf-8")
         cli_dispatch = CLI_DISPATCH.read_text(encoding="utf-8")
         for marker in ('L"--render-request"', 'L"--smart-mask-context-request"'):
             self.assertIn(marker, cli_dispatch)
@@ -97,7 +98,7 @@ class RenderParameterGateContractTests(unittest.TestCase):
         parser = REQUEST_PARSER.read_text(encoding="utf-8")
         self.assertIn("hooks.parse_parameters(argv[4]", parser)
         self.assertLess(worker.index("request_parser::parse("),
-                        worker.index("admit_runtime(runtime_hooks, runtime_request, runtime_context)"))
+                        worker_family.index("admit_worker_entry("))
         admission = RUNTIME_ADMISSION.read_text(encoding="utf-8")
         self.assertIn("hooks.hash_file(request.plugin_argument", admission)
         self.assertLess(admission.index("hooks.hash_file(request.plugin_argument"),
