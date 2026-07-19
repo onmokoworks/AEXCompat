@@ -4,6 +4,7 @@
 #include <DbgHelp.h>
 
 #include <atomic>
+#include <array>
 #include <cstdio>
 #include <cwchar>
 
@@ -37,6 +38,37 @@ std::filesystem::path current_process_dump_path() {
 }
 
 bool attempted() { return g_minidump_attempted.load(); }
+
+void classify_seh_exception(EXCEPTION_POINTERS* information,
+                            SehDiagnosticsSink diagnostics) {
+  diagnostics.code = information && information->ExceptionRecord
+      ? information->ExceptionRecord->ExceptionCode : 0;
+  const void* address = information && information->ExceptionRecord
+      ? information->ExceptionRecord->ExceptionAddress : nullptr;
+  diagnostics.address = reinterpret_cast<uint64_t>(address);
+  diagnostics.module.clear();
+  HMODULE module{};
+  if (address && GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+          GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+          reinterpret_cast<LPCWSTR>(address), &module)) {
+    std::array<wchar_t, MAX_PATH> path{};
+    if (GetModuleFileNameW(module, path.data(),
+                           static_cast<DWORD>(path.size())) > 0) {
+      const std::wstring filename =
+          std::filesystem::path(path.data()).filename().wstring();
+      for (wchar_t ch : filename)
+        diagnostics.module.push_back(ch >= 0x20 && ch <= 0x7e
+            ? static_cast<char>(ch) : '?');
+    }
+  }
+}
+
+int capture_seh_exception(EXCEPTION_POINTERS* information,
+                          SehDiagnosticsSink diagnostics) {
+  write_crash_minidump(information);
+  classify_seh_exception(information, diagnostics);
+  return EXCEPTION_EXECUTE_HANDLER;
+}
 
 void write_crash_minidump(EXCEPTION_POINTERS* information) {
   if (g_minidump_dir.empty() || !information) return;

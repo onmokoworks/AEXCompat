@@ -2,9 +2,7 @@
 
 #include <windows.h>
 
-#include <array>
-#include <filesystem>
-
+#include "worker_minidump_runtime.hpp"
 namespace aexcompat::worker_runtime {
 namespace {
 
@@ -15,24 +13,9 @@ SelectorDispatchTrace g_selector_trace{};
 SelectorDispatchTelemetry g_telemetry;
 
 int capture_seh_exception(EXCEPTION_POINTERS* information) {
-  g_telemetry.seh_code = information && information->ExceptionRecord
-      ? information->ExceptionRecord->ExceptionCode : 0;
-  const void* address = information && information->ExceptionRecord
-      ? information->ExceptionRecord->ExceptionAddress : nullptr;
-  g_telemetry.seh_address = reinterpret_cast<uint64_t>(address);
-  g_telemetry.seh_module.clear();
-  HMODULE module{};
-  if (address && GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
-          GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-          reinterpret_cast<LPCWSTR>(address), &module)) {
-    std::array<wchar_t, MAX_PATH> path{};
-    if (GetModuleFileNameW(module, path.data(), static_cast<DWORD>(path.size())) > 0) {
-      const std::wstring filename = std::filesystem::path(path.data()).filename().wstring();
-      for (wchar_t ch : filename)
-        g_telemetry.seh_module.push_back(ch >= 0x20 && ch <= 0x7e
-            ? static_cast<char>(ch) : '?');
-    }
-  }
+  minidump::classify_seh_exception(
+      information, {g_telemetry.seh_code, g_telemetry.seh_address,
+                    g_telemetry.seh_module});
   return EXCEPTION_EXECUTE_HANDLER;
 }
 

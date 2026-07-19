@@ -9,6 +9,9 @@ HEADER = (ROOT / "minihost/src/worker_minidump_runtime.hpp").read_text(
 SOURCE = (ROOT / "minihost/src/worker_minidump_runtime.cpp").read_text(
     encoding="utf-8"
 )
+SELECTOR = (ROOT / "minihost/src/worker_selector_dispatch.cpp").read_text(
+    encoding="utf-8"
+)
 CMAKE = (ROOT / "minihost/CMakeLists.txt").read_text(encoding="utf-8")
 
 
@@ -18,7 +21,7 @@ def test_minidump_writer_is_a_common_worker_runtime_component():
     assert "g_minidump_dir" not in MAIN
     assert "g_minidump_attempted" not in MAIN
     assert "MiniDumpWriteDump" not in MAIN
-    assert "write_crash_minidump(information)" in MAIN
+    assert "minidump::capture_seh_exception(" in MAIN
     assert "configure_directory(" in MAIN
     assert "SetUnhandledExceptionFilter(" in MAIN
 
@@ -47,3 +50,24 @@ def test_minidump_configuration_remains_opt_in_and_directory_only():
     assert "std::filesystem::is_directory(directory, error)" in configure
     assert "g_minidump_dir = directory" in configure
     assert configure.index("is_directory") < configure.index("g_minidump_dir =")
+
+
+def test_seh_classification_uses_an_explicit_diagnostics_sink():
+    assert "struct SehDiagnosticsSink" in HEADER
+    assert "uint32_t& code" in HEADER
+    assert "uint64_t& address" in HEADER
+    assert "std::string& module" in HEADER
+    assert "void classify_seh_exception" in SOURCE
+    assert "GetModuleHandleExW(" in SOURCE
+    assert "GetModuleFileNameW(" in SOURCE
+    assert "GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT" in SOURCE
+    assert "diagnostics.module.push_back" in SOURCE
+    assert "GetModuleHandleExW(" not in MAIN
+    assert "GetModuleFileNameW(" not in MAIN
+
+
+def test_l2_and_selector_filters_delegate_without_owning_classification():
+    assert "minidump::capture_seh_exception(" in MAIN
+    assert "minidump::classify_seh_exception(" in SELECTOR
+    assert "GetModuleHandleExW(" not in SELECTOR
+    assert "GetModuleFileNameW(" not in SELECTOR

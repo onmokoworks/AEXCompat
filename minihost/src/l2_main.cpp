@@ -364,27 +364,9 @@ const char* trace_worker_label() {
 }
 
 int capture_seh_exception(EXCEPTION_POINTERS* information) {
-  aexcompat::worker_runtime::minidump::write_crash_minidump(information);
-  g_last_seh_exception_code = information && information->ExceptionRecord
-      ? information->ExceptionRecord->ExceptionCode : 0;
-  const void* address = information && information->ExceptionRecord
-      ? information->ExceptionRecord->ExceptionAddress : nullptr;
-  g_last_seh_exception_address = reinterpret_cast<uint64_t>(address);
-  g_last_seh_exception_module.clear();
-  HMODULE module{};
-  if (address && GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
-          GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-          reinterpret_cast<LPCWSTR>(address), &module)) {
-    std::array<wchar_t, MAX_PATH> path{};
-    if (GetModuleFileNameW(module, path.data(), static_cast<DWORD>(path.size())) > 0) {
-      std::filesystem::path module_path(path.data());
-      const std::wstring filename = module_path.filename().wstring();
-      for (wchar_t ch : filename)
-        g_last_seh_exception_module.push_back(ch >= 0x20 && ch <= 0x7e
-            ? static_cast<char>(ch) : '?');
-    }
-  }
-  return EXCEPTION_EXECUTE_HANDLER;
+  return aexcompat::worker_runtime::minidump::capture_seh_exception(
+      information, {g_last_seh_exception_code, g_last_seh_exception_address,
+                    g_last_seh_exception_module});
 }
 
 // Raises a real access violation under the production __except filter so the
