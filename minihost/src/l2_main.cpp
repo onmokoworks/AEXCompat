@@ -1957,6 +1957,19 @@ bool valid_checked_pf_path(HostMask* path) {
       g_pf_path_checkouts.find(path) != g_pf_path_checkouts.end();
 }
 
+bool snapshot_checked_pf_path(void* path,
+    aexcompat::mask_runtime::CurveSnapshot& snapshot) {
+  auto* checked = static_cast<HostMask*>(path);
+  return valid_checked_pf_path(checked) &&
+      aexcompat::mask_runtime::snapshot_curve(&checked->mask, snapshot);
+}
+
+std::size_t distinct_vertex_count(
+    const aexcompat::mask_runtime::CurveSnapshot& path) {
+  return path.vertices.size() -
+      static_cast<std::size_t>(!path.open && !path.vertices.empty());
+}
+
 int32_t __cdecl pf_num_paths(void* effect_ref, int32_t* count) {
   if (!effect_ref || !count) return 4;
   *count = static_cast<int32_t>(ordered_active_masks().size());
@@ -2001,26 +2014,26 @@ int32_t __cdecl pf_checkin_path(void* effect_ref, int32_t unique_id, int32_t cha
 }
 
 int32_t __cdecl pf_path_is_open(void* effect_ref, void* path, int8_t* open) {
-  auto* mask = static_cast<HostMask*>(path);
-  if (!effect_ref || !open || !valid_checked_pf_path(mask)) return 4;
-  *open = mask->open ? 1 : 0;
+  aexcompat::mask_runtime::CurveSnapshot curve;
+  if (!effect_ref || !open || !snapshot_checked_pf_path(path, curve)) return 4;
+  *open = curve.open ? 1 : 0;
   return 0;
 }
 
 int32_t __cdecl pf_path_num_segments(void* effect_ref, void* path, int32_t* count) {
-  auto* mask = static_cast<HostMask*>(path);
-  if (!effect_ref || !count || !valid_checked_pf_path(mask)) return 4;
-  const std::size_t vertices = distinct_vertex_count(*mask);
-  *count = static_cast<int32_t>(mask->open && vertices > 0 ? vertices - 1 : vertices);
+  aexcompat::mask_runtime::CurveSnapshot curve;
+  if (!effect_ref || !count || !snapshot_checked_pf_path(path, curve)) return 4;
+  const std::size_t vertices = distinct_vertex_count(curve);
+  *count = static_cast<int32_t>(curve.open && vertices > 0 ? vertices - 1 : vertices);
   return 0;
 }
 
 int32_t __cdecl pf_path_vertex_info(void* effect_ref, void* path, int32_t index,
                                     PfPathVertex* vertex) {
-  auto* mask = static_cast<HostMask*>(path);
-  if (!effect_ref || !vertex || !valid_checked_pf_path(mask) || index < 0 ||
-      static_cast<std::size_t>(index) >= mask->vertices.size()) return 4;
-  const auto& source = mask->vertices[static_cast<std::size_t>(index)];
+  aexcompat::mask_runtime::CurveSnapshot curve;
+  if (!effect_ref || !vertex || !snapshot_checked_pf_path(path, curve) || index < 0 ||
+      static_cast<std::size_t>(index) >= curve.vertices.size()) return 4;
+  const auto& source = curve.vertices[static_cast<std::size_t>(index)];
   *vertex = {source.x, source.y, source.tangent_in_x, source.tangent_in_y,
              source.tangent_out_x, source.tangent_out_y};
   return 0;
@@ -2055,13 +2068,17 @@ std::array<double, 2> eval_pf_cubic(const HostMask& path, int32_t segment, doubl
 
 bool populate_pf_segment_prep(PfPathSegPrep& prep, HostMask* path, int32_t segment,
                               int32_t frequency) {
-  if (!valid_checked_pf_path(path) || segment < 0 ||
-      segment >= pf_path_segment_count(*path) || frequency < 1 || frequency > 1024) return false;
+  aexcompat::mask_runtime::CurveSnapshot curve;
+  if (!snapshot_checked_pf_path(path, curve) || segment < 0 || frequency < 1 ||
+      frequency > 1024) return false;
+  const auto vertex_count = distinct_vertex_count(curve);
+  const auto segment_count = static_cast<int32_t>(
+      curve.open && vertex_count > 0 ? vertex_count - 1 : vertex_count);
+  if (segment >= segment_count) return false;
   prep.path = path;
   prep.segment = segment;
-  const auto count = distinct_vertex_count(*path);
-  const auto& a = path->vertices[static_cast<std::size_t>(segment)];
-  const auto& b = path->vertices[(static_cast<std::size_t>(segment) + 1) % count];
+  const auto& a = curve.vertices[static_cast<std::size_t>(segment)];
+  const auto& b = curve.vertices[(static_cast<std::size_t>(segment) + 1) % vertex_count];
   prep.controls = {{{a.x, a.y}, {a.x + a.tangent_out_x, a.y + a.tangent_out_y},
                     {b.x + b.tangent_in_x, b.y + b.tangent_in_y}, {b.x, b.y}}};
   for (const auto& point : prep.controls)
