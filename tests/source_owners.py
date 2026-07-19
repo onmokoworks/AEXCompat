@@ -328,6 +328,7 @@ CONTRACTS = {
         "minihost/src/l2_cli_dispatch.cpp",
         "minihost/src/worker_mask_runtime.hpp",
         "minihost/src/worker_mask_runtime.cpp",
+        "minihost/src/worker_mask_runtime_callbacks.cpp",
     ),
     "custom_ui_lifecycle": (
         "minihost/src/l2_main.cpp",
