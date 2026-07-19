@@ -76,10 +76,14 @@ ParseResult parse(Kind kind, int argc, wchar_t** argv, const Hooks& hooks) {
       invocation.time_step = std::stoi(argv[7]);
       invocation.total_time = std::stoi(argv[8]);
       invocation.time_scale = std::stoul(argv[9]);
+      // The per-frame protocol carries current_time.scale as a signed 32-bit
+      // value, so a launch scale above INT32_MAX could never be matched by
+      // any frame; keep the launch and frame contracts on the same domain.
       if (invocation.width <= 0 || invocation.height <= 0 ||
           invocation.width > 4096 || invocation.height > 4096 ||
           invocation.time_step <= 0 || invocation.total_time <= 0 ||
-          invocation.time_scale == 0) throw 1;
+          invocation.time_scale == 0 ||
+          invocation.time_scale > 0x7FFFFFFFu) throw 1;
     }
     if (mode.image_mode) {
       auto& invocation = result.invocation;

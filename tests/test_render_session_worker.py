@@ -383,3 +383,15 @@ def test_session_launch_without_channels_fails_closed():
          str(WIDTH), str(HEIGHT), "1", "300", str(TIME_SCALE)],
         cwd=ROOT, capture_output=True, text=True, timeout=60)
     assert result.returncode == EXIT_PROTOCOL_VIOLATION
+
+
+def test_session_launch_rejects_time_scale_above_int32():
+    _require_artifacts()
+    aex_sha = hashlib.sha256(AEX.read_bytes()).hexdigest()
+    # The per-frame protocol carries scales as signed 32-bit, so a launch
+    # scale above INT32_MAX could never be matched by any frame.
+    result = subprocess.run(
+        [str(WORKER), "--render-session-v1", str(AEX), aex_sha, "v5|",
+         str(WIDTH), str(HEIGHT), "1", "300", str(2**31)],
+        cwd=ROOT, capture_output=True, text=True, timeout=60)
+    assert result.returncode == 3
