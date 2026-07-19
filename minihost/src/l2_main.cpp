@@ -5245,92 +5245,6 @@ int worker_main_impl(int argc, wchar_t **argv) {
   }
 aexcompat::worker_runtime::invocation::InvocationState invocation;
 
-  auto& request_mode = invocation.request_mode;
-  auto& audio_mode = invocation.audio_mode;
-  auto& image_audio_mode = invocation.image_audio_mode;
-  auto& image_mode = invocation.image_mode;
-  auto& layered_image_mode = invocation.layered_image_mode;
-  auto& smart_force_cpu = invocation.smart_force_cpu;
-  auto& smart_opencl = invocation.smart_opencl;
-  auto& smart_directx = invocation.smart_directx;
-  auto& smart_image_mode = invocation.smart_image_mode;
-  auto& smart_layered_image_mode = invocation.smart_layered_image_mode;
-  auto& render_session_mode = invocation.render_session_mode;
-  auto& external_pixel_bytes = invocation.external_pixel_bytes;
-  auto& transport_argc = invocation.transport_argc;
-  auto& image_click_argc = invocation.image_click_argc;
-  auto& image_environment_argc = invocation.image_environment_argc;
-  auto& image_trailer_argc = invocation.image_trailer_argc;
-  auto& image_argc = invocation.image_argc;
-  auto& smart_image_click_argc = invocation.smart_image_click_argc;
-  auto& smart_image_environment_argc = invocation.smart_image_environment_argc;
-  auto& smart_image_trailer_argc = invocation.smart_image_trailer_argc;
-  auto& smart_image_argc = invocation.smart_image_argc;
-  auto& image_click_context = invocation.image_click_context;
-  auto& image_draw_context = invocation.image_draw_context;
-  auto& image_render_environment = invocation.image_render_environment;
-  auto& image_spatial_context = invocation.image_spatial_context;
-  auto& image_mask_context = invocation.image_mask_context;
-  auto& smart_image_click_context = invocation.smart_image_click_context;
-  auto& smart_image_draw_context = invocation.smart_image_draw_context;
-  auto& smart_image_render_environment = invocation.smart_image_render_environment;
-  auto& smart_image_spatial_context = invocation.smart_image_spatial_context;
-  auto& smart_image_mask_context = invocation.smart_image_mask_context;
-  auto& mask_request_mode = invocation.mask_request_mode;
-  auto& mask_scene_request_mode = invocation.mask_scene_request_mode;
-  auto& mask_context_request_mode = invocation.mask_context_request_mode;
-  auto& mask_count_error_mode = invocation.mask_count_error_mode;
-  auto& mask_count_crash_mode = invocation.mask_count_crash_mode;
-  auto& mask_double_dispose_mode = invocation.mask_double_dispose_mode;
-  auto& stream_live_value_dispose_mode = invocation.stream_live_value_dispose_mode;
-  auto& stream_metadata_ownership_mode = invocation.stream_metadata_ownership_mode;
-  auto& keyframe_ownership_mode = invocation.keyframe_ownership_mode;
-  auto& dynamic_stream_tree_mode = invocation.dynamic_stream_tree_mode;
-  auto& aegp_memory_strings_mode = invocation.aegp_memory_strings_mode;
-  auto& suite_release_without_acquire_mode = invocation.suite_release_without_acquire_mode;
-  auto& handle_resize_while_locked_mode = invocation.handle_resize_while_locked_mode;
-  auto& world_double_dispose_mode = invocation.world_double_dispose_mode;
-  auto& world_allocation_limit_mode = invocation.world_allocation_limit_mode;
-  auto& pixel_format_registry_mode = invocation.pixel_format_registry_mode;
-  auto& outline_mutation_mode = invocation.outline_mutation_mode;
-  auto& mask_attribute_mode = invocation.mask_attribute_mode;
-  auto& user_changed_mode = invocation.user_changed_mode;
-  auto& params_only_mode = invocation.params_only_mode;
-  auto& runtime_module_authorization_mode = invocation.runtime_module_authorization_mode;
-  auto& external_dependencies_mode = invocation.external_dependencies_mode;
-  auto& do_dialog_mode = invocation.do_dialog_mode;
-  auto& auto_dialog_mode = invocation.auto_dialog_mode;
-  auto& adjust_cursor_mode = invocation.adjust_cursor_mode;
-  auto& draw_event_mode = invocation.draw_event_mode;
-  auto& click_event_mode = invocation.click_event_mode;
-  auto& drag_event_mode = invocation.drag_event_mode;
-  auto& ui_lifecycle_mode = invocation.ui_lifecycle_mode;
-  auto& ui_idle_mode = invocation.ui_idle_mode;
-  auto& ui_keydown_mode = invocation.ui_keydown_mode;
-  auto& ui_mouse_exited_mode = invocation.ui_mouse_exited_mode;
-  auto& ui_event_assignment_mode = invocation.ui_event_assignment_mode;
-  auto& requested_parameters = invocation.requested_parameters;
-  auto& ui_event_assignments = invocation.ui_event_assignments;
-  auto& external_rgba = invocation.external_rgba;
-  auto& external_layers = invocation.external_layers;
-  auto& external_output = invocation.external_output;
-  auto& external_audio = invocation.external_audio;
-  auto& external_audio_output = invocation.external_audio_output;
-  auto& external_width = invocation.external_width;
-  auto& external_height = invocation.external_height;
-  auto& external_current_time = invocation.external_current_time;
-  auto& external_time_step = invocation.external_time_step;
-  auto& external_total_time = invocation.external_total_time;
-  auto& external_time_scale = invocation.external_time_scale;
-  auto& external_audio_samples = invocation.external_audio_samples;
-  auto& external_audio_rate = invocation.external_audio_rate;
-  auto& click_x = invocation.click_x;
-  auto& click_y = invocation.click_y;
-  auto& drag_end_x = invocation.drag_end_x;
-  auto& drag_end_y = invocation.drag_end_y;
-  auto& drag_steps = invocation.drag_steps;
-  auto& keydown_code = invocation.keydown_code;
-  auto& keydown_modifiers = invocation.keydown_modifiers;
 
   const auto parse_requested_payload = +[](const wchar_t* text, void* context) {
     return parse_parameter_payload(text, *static_cast<RequestedAssignments*>(context));
@@ -5359,7 +5273,7 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
         load_l2_aux_manifest, parse_l2_alpha_coverage, load_l2_parameter_animation},
        &parse_layer_transport_key, &parse_mask_context_payload,
        &parse_spatial_context_payload, &parse_render_environment_payload,
-       &requested_parameters, parse_requested_payload, &configure_mask_scene});
+       &invocation.requested_parameters, parse_requested_payload, &configure_mask_scene});
     if (parsed.error != 0) return parsed.error;
     aexcompat::worker_runtime::invocation::apply_render(
         parsed.invocation, invocation, invocation_hooks);
@@ -5370,7 +5284,7 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
           load_l2_aux_manifest, parse_l2_alpha_coverage, load_l2_parameter_animation},
          &parse_layer_transport_key, &parse_mask_context_payload,
          &parse_spatial_context_payload, &parse_render_environment_payload,
-         &requested_parameters, parse_requested_payload, &configure_mask_scene});
+         &invocation.requested_parameters, parse_requested_payload, &configure_mask_scene});
     if (parsed.error != 0) return parsed.error;
     aexcompat::worker_runtime::invocation::apply_smart(
         parsed.invocation, invocation, invocation_hooks);
@@ -5401,8 +5315,8 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
                                  &restore_native_stdout};
   RuntimeAdmissionRequest runtime_request;
   const int request_error = aexcompat::worker_runtime::prepare_runtime_request(
-      argv[2], argv[3], !is_rendering_worker() && runtime_module_authorization_mode,
-      runtime_module_authorization_mode ? argv[5] : nullptr, runtime_request);
+      argv[2], argv[3], !is_rendering_worker() && invocation.runtime_module_authorization_mode,
+      invocation.runtime_module_authorization_mode ? argv[5] : nullptr, runtime_request);
   if (request_error != 0) return request_error;
   std::unique_ptr<aexcompat::TraceWriter> trace_writer;
   RuntimeContext runtime_context;
@@ -5661,8 +5575,8 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
         static_cast<int32_t>(g_downsample_y.denominator)},
        {static_cast<int32_t>(g_pixel_aspect_ratio.numerator),
         static_cast<int32_t>(g_pixel_aspect_ratio.denominator)},
-       external_pixel_bytes, static_cast<int32_t>(g_params.size() + 1),
-       is_render_worker(), is_rendering_worker(), audio_mode, g_skip_about},
+       invocation.external_pixel_bytes, static_cast<int32_t>(g_params.size() + 1),
+       is_render_worker(), is_rendering_worker(), invocation.audio_mode, g_skip_about},
       {&invoke_entry_seh, &reset_effect_lifetime,
        +[](bool active) { g_global_setup_active = active; },
        +[](bool requested, bool advertised) {
@@ -5712,8 +5626,8 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
   // write(utils, kUtilsEndSampling, &end_sampling8)
   // write(input, 24, &abort_render);
   // write(input, 32, &report_progress);
-  // external_pixel_bytes == 8 &&
-  // external_pixel_bytes == 16 &&
+  // invocation.external_pixel_bytes == 8 &&
+  // invocation.external_pixel_bytes == 16 &&
   // params_error == 0 && image_render_supported && depth_supported
   // (1u << 26)
   // write<int32_t>(input, 248, g_shutter_angle)
@@ -5724,8 +5638,8 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
   // invoke_entry_seh(entry, kParamsSetup)
   // invoke_entry_seh(entry, kGlobalSetdown)
   if (!is_rendering_worker() &&
-      (adjust_cursor_mode || draw_event_mode || click_event_mode || drag_event_mode ||
-       ui_lifecycle_mode || ui_idle_mode || ui_keydown_mode || ui_mouse_exited_mode)) {
+      (invocation.adjust_cursor_mode || invocation.draw_event_mode || invocation.click_event_mode || invocation.drag_event_mode ||
+       invocation.ui_lifecycle_mode || invocation.ui_idle_mode || invocation.ui_keydown_mode || invocation.ui_mouse_exited_mode)) {
     int32_t event_error = -1;
     int32_t cursor = 0;
     int32_t event_out_flags = 0;
@@ -5733,32 +5647,32 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
     const bool registered_effect_ui = (g_custom_ui_registration.events & 4u) != 0;
     const bool registered_layer_ui = (g_custom_ui_registration.events & 2u) != 0;
     const bool registered_comp_ui = (g_custom_ui_registration.events & 1u) != 0;
-    if (ui_mouse_exited_mode && !registered_layer_ui && !registered_comp_ui) {
+    if (invocation.ui_mouse_exited_mode && !registered_layer_ui && !registered_comp_ui) {
       dispose_arbitrary_defaults(entry, input, output);
       if (global_error == 0)
         invoke_global_setdown(entry, input.data(), output.data());
       return session.finish(19);
     }
-    const char* event_target = drag_event_mode || ui_mouse_exited_mode ||
+    const char* event_target = invocation.drag_event_mode || invocation.ui_mouse_exited_mode ||
         (!registered_effect_ui && registered_layer_ui)
         ? "layer" : (!registered_effect_ui && !registered_layer_ui &&
                      registered_comp_ui ? "comp" : "effect_controls");
-    if (ui_mouse_exited_mode && !registered_layer_ui) event_target = "comp";
+    if (invocation.ui_mouse_exited_mode && !registered_layer_ui) event_target = "comp";
     bool arbitrary_values_disposed = false;
     std::array<int32_t, 5> lifecycle_errors{-1, -1, -1, -1, -1};
     std::array<uintptr_t, 4> plugin_state_before_close{};
     bool lifecycle_context_stable = true;
     bool lifecycle_host_state_cleared = false;
-    bool event_assignments_applied = !ui_event_assignment_mode;
+    bool event_assignments_applied = !invocation.ui_event_assignment_mode;
     g_ui_context.window_type = std::strcmp(event_target, "layer") == 0 ? 1 :
         (std::strcmp(event_target, "comp") == 0 ? 0 : 2);
     aexcompat::worker_runtime::ui_event_execution::Result ui_result;
     const bool ui_dispatched = aexcompat::worker_runtime::ui_event_execution::dispatch(
         {entry, &input, &output, params_error, parameter_count_contract_valid,
-         &ui_event_assignments, ui_event_assignment_mode, adjust_cursor_mode,
-         draw_event_mode, click_event_mode, drag_event_mode, ui_lifecycle_mode,
-         ui_idle_mode, ui_keydown_mode, ui_mouse_exited_mode, click_x, click_y,
-         drag_end_x, drag_end_y, drag_steps, keydown_code, keydown_modifiers,
+         &invocation.ui_event_assignments, invocation.ui_event_assignment_mode, invocation.adjust_cursor_mode,
+         invocation.draw_event_mode, invocation.click_event_mode, invocation.drag_event_mode, invocation.ui_lifecycle_mode,
+         invocation.ui_idle_mode, invocation.ui_keydown_mode, invocation.ui_mouse_exited_mode, invocation.click_x, invocation.click_y,
+         invocation.drag_end_x, invocation.drag_end_y, invocation.drag_steps, invocation.keydown_code, invocation.keydown_modifiers,
          g_ui_context.window_type, &g_ui_context_pointer, &g_ui_context,
          g_ui_context.plugin_state.data(), reinterpret_cast<void*>(&ui_transform_point),
          reinterpret_cast<void*>(&ui_transform_point_simple)},
@@ -5794,14 +5708,14 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
         ? invoke_global_setdown(entry, input.data(), output.data()) : -1;
     if (!session.prepare_protocol_report()) return session.finish(14);
     restore_native_stdout();
-    const bool event_contract = (ui_lifecycle_mode || ui_idle_mode || ui_keydown_mode ||
-        ui_mouse_exited_mode)
+    const bool event_contract = (invocation.ui_lifecycle_mode || invocation.ui_idle_mode || invocation.ui_keydown_mode ||
+        invocation.ui_mouse_exited_mode)
         ? std::all_of(lifecycle_errors.begin(),
               lifecycle_errors.begin() +
-                  ((ui_idle_mode || ui_keydown_mode || ui_mouse_exited_mode) ? 5 : 4),
+                  ((invocation.ui_idle_mode || invocation.ui_keydown_mode || invocation.ui_mouse_exited_mode) ? 5 : 4),
               [](int32_t error) { return error == 0; }) &&
             lifecycle_context_stable && lifecycle_host_state_cleared
-        : draw_event_mode
+        : invocation.draw_event_mode
         ? event_error == 0 && (event_out_flags & 1) != 0 &&
             (g_drawbot_paint_rect_calls + g_drawbot_fill_path_calls +
              g_drawbot_stroke_path_calls + g_overlay_stroke_path_calls) > 0 &&
@@ -5811,10 +5725,10 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
                     [](float value) { return std::isfinite(value) && value >= 0 && value <= 1; }); }) &&
             g_drawbot_objects_created == g_drawbot_objects_released && g_drawbot_objects.empty() &&
             g_drawbot_invalid_operations == 0
-        : drag_event_mode
+        : invocation.drag_event_mode
             ? event_error == 0 && g_ui_drag_requested &&
-                g_ui_drag_calls == static_cast<uint32_t>(drag_steps) && g_ui_drag_terminated
-            : click_event_mode
+                g_ui_drag_calls == static_cast<uint32_t>(invocation.drag_steps) && g_ui_drag_terminated
+            : invocation.click_event_mode
             ? event_error == 0 && (event_out_flags & 9) == 9 &&
                 g_app_color_picker_calls == 1 && g_app_invalidate_rect_calls == 1
             : event_error == 0 && cursor == 13;
@@ -5822,13 +5736,13 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
               << (event_contract && event_sequence_setdown_error == 0 &&
                   defaults_disposed && handle_lifetimes_balanced()
                   ? "event_completed" : "event_failed")
-              << "\",\"event_type\":\"" << (ui_mouse_exited_mode ? "ui_mouse_exited" :
-                  (ui_keydown_mode ? "ui_keydown" :
-                  (ui_idle_mode ? "ui_idle" :
-                  (ui_lifecycle_mode ? "ui_lifecycle" :
-                  (draw_event_mode ? "draw" :
-                  (drag_event_mode ? "drag_sequence" :
-                   (click_event_mode ? "do_click" : "adjust_cursor")))))))
+              << "\",\"event_type\":\"" << (invocation.ui_mouse_exited_mode ? "ui_mouse_exited" :
+                  (invocation.ui_keydown_mode ? "ui_keydown" :
+                  (invocation.ui_idle_mode ? "ui_idle" :
+                  (invocation.ui_lifecycle_mode ? "ui_lifecycle" :
+                  (invocation.draw_event_mode ? "draw" :
+                  (invocation.drag_event_mode ? "drag_sequence" :
+                   (invocation.click_event_mode ? "do_click" : "adjust_cursor")))))))
               << "\",\"event_target\":\"" << event_target
               << "\",\"event_error\":" << event_error
               << ",\"cursor\":" << cursor << ",\"event_out_flags\":" << event_out_flags
@@ -5880,21 +5794,21 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
               << plugin_state_before_close[3] << ']'
               << ",\"lifecycle_host_state_cleared\":"
               << (lifecycle_host_state_cleared ? "true" : "false")
-              << ",\"keydown_code\":" << keydown_code
-              << ",\"keydown_modifiers\":" << keydown_modifiers
+              << ",\"keydown_code\":" << invocation.keydown_code
+              << ",\"keydown_modifiers\":" << invocation.keydown_modifiers
               << ",\"event_assignments_applied\":"
               << (event_assignments_applied ? "true" : "false")
               << ",\"sequence_setdown_error\":" << event_sequence_setdown_error
               << ",\"requested_parameters\":"
-              << requested_parameters_json(ui_event_assignments)
+              << requested_parameters_json(invocation.ui_event_assignments)
               << ",\"global_setdown_error\":" << event_setdown_error << "}\n";
     return session.finish(event_contract && event_sequence_setdown_error == 0 &&
         defaults_disposed && handle_lifetimes_balanced() && event_setdown_error == 0
             ? 0 : 20);
   }
-  if (is_rendering_worker() && request_mode &&
+  if (is_rendering_worker() && invocation.request_mode &&
       (params_error != 0 || !parameter_count_contract_valid ||
-                       !validate_requested_assignments(requested_parameters) ||
+                       !validate_requested_assignments(invocation.requested_parameters) ||
                        !validate_external_aux_parameters())) {
     dispose_arbitrary_defaults(entry, input, output);
     if (global_error == 0)
@@ -5902,22 +5816,22 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
     return session.finish(3);
   }
   const auto early_mode = aexcompat::l2mode::select_early_mode(
-      auto_dialog_mode, do_dialog_mode, external_dependencies_mode, params_only_mode);
+      invocation.auto_dialog_mode, invocation.do_dialog_mode, invocation.external_dependencies_mode, invocation.params_only_mode);
   if (!is_rendering_worker() && early_mode != aexcompat::l2mode::EarlyMode::None) {
     EarlyModeBridge bridge{entry, &input, &output, &session, &about_message};
     const int early_result = aexcompat::l2mode::run_early_mode(
         {early_mode, &bridge, early_mode_hooks(), global_error, params_error,
          parameter_count_contract_valid,
-         external_dependencies_mode ? argv[4] : nullptr});
+         invocation.external_dependencies_mode ? argv[4] : nullptr});
     return session.finish(early_result);
   }
-  if (is_render_worker() && audio_mode) {
+  if (is_render_worker() && invocation.audio_mode) {
     constexpr std::size_t kAudioGuardSamples = 8;
     constexpr float kAudioGuardValue = 1234567.0f;
     std::vector<std::array<std::byte, kParamSize>> audio_definitions(g_params.size() + 1);
     initialize_parameter_definitions(audio_definitions);
     const bool assignments_applied =
-        apply_requested_assignments(audio_definitions, requested_parameters);
+        apply_requested_assignments(audio_definitions, invocation.requested_parameters);
     std::vector<std::array<std::byte, kParamSize>> audio_values(audio_definitions.size() * 2);
     for (std::size_t index = 0; index < audio_definitions.size(); ++index) {
       audio_values[index] = audio_definitions[index];
@@ -5928,16 +5842,16 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
       audio_params[index] = audio_values[index].data();
 
     write<int32_t>(input, 336, 0);
-    write<int32_t>(input, 340, external_audio_samples);
-    write<int32_t>(input, 344, external_audio_samples);
+    write<int32_t>(input, 340, invocation.external_audio_samples);
+    write<int32_t>(input, 344, invocation.external_audio_samples);
     write<uint32_t>(input, kInTimeScale, 44100);
     write<double>(input, 352, 44100.0);
     write<int16_t>(input, 360, 1);
     write<int16_t>(input, 362, 2);
     write<int16_t>(input, 364, 4);
-    write<int32_t>(input, 368, external_audio_samples);
-    write<void*>(input, 376, external_audio.data());
-    aexcompat::host_audio::runtime().set_source(&external_audio, external_audio_samples);
+    write<int32_t>(input, 368, invocation.external_audio_samples);
+    write<void*>(input, 376, invocation.external_audio.data());
+    aexcompat::host_audio::runtime().set_source(&invocation.external_audio, invocation.external_audio_samples);
 
     std::cerr << "stage:audio_setup_begin\n" << std::flush;
     const int32_t audio_setup_error = assignments_applied
@@ -5947,15 +5861,15 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
     const int32_t output_start = read<int32_t>(output, 356);
     const int32_t output_samples = read<int32_t>(output, 360);
     const bool setup_range_valid = output_start >= 0 && output_samples >= 0 &&
-        output_start <= external_audio_samples &&
-        output_samples <= external_audio_samples - output_start;
+        output_start <= invocation.external_audio_samples &&
+        output_samples <= invocation.external_audio_samples - output_start;
 
     std::vector<float> guarded_output(
-        kAudioGuardSamples + static_cast<std::size_t>(external_audio_samples) +
+        kAudioGuardSamples + static_cast<std::size_t>(invocation.external_audio_samples) +
         kAudioGuardSamples, kAudioGuardValue);
     auto* audio_destination = guarded_output.data() + kAudioGuardSamples;
     if (setup_range_valid) {
-      std::fill_n(audio_destination, external_audio_samples, 0.0f);
+      std::fill_n(audio_destination, invocation.external_audio_samples, 0.0f);
       write<double>(output, 368, 44100.0);
       write<int16_t>(output, 376, 1);
       write<int16_t>(output, 378, 2);
@@ -5996,7 +5910,7 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
         handle_lifetimes_balanced() && audio_global_setdown_error == 0;
     bool output_created = false;
     if (passed) {
-      HANDLE file = CreateFileW(external_audio_output.c_str(), GENERIC_WRITE, 0, nullptr,
+      HANDLE file = CreateFileW(invocation.external_audio_output.c_str(), GENERIC_WRITE, 0, nullptr,
                                 CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
       if (file != INVALID_HANDLE_VALUE) {
         const DWORD bytes = static_cast<DWORD>(output_samples * sizeof(float));
@@ -6004,7 +5918,7 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
         output_created = WriteFile(file, audio_destination, bytes, &written, nullptr) &&
             written == bytes && FlushFileBuffers(file);
         CloseHandle(file);
-        if (!output_created) DeleteFileW(external_audio_output.c_str());
+        if (!output_created) DeleteFileW(invocation.external_audio_output.c_str());
       }
     }
     if (!session.prepare_protocol_report()) return session.finish(14);
@@ -6018,7 +5932,7 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
               << ",\"audio_setdown_error\":" << audio_setdown_error
               << ",\"global_setdown_error\":" << audio_global_setdown_error
               << ",\"sample_rate\":44100,\"channels\":1,\"sample_format\":\"float32\""
-              << ",\"input_samples\":" << external_audio_samples
+              << ",\"input_samples\":" << invocation.external_audio_samples
               << ",\"output_start_sample\":" << output_start
               << ",\"output_samples\":" << output_samples
               << ",\"setup_range_valid\":" << (setup_range_valid ? "true" : "false")
@@ -6207,8 +6121,8 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
 
   if (is_render_worker()) {
   aexcompat::worker_runtime::classic::reset_selector_diagnostic();
-  case_id = request_mode ? "request" : "";
-  if (!request_mode) {
+  case_id = invocation.request_mode ? "request" : "";
+  if (!invocation.request_mode) {
     for (const wchar_t* p = argv[4]; *p; ++p) {
       if (*p > 0x7f) return session.finish(2);
       case_id.push_back(static_cast<char>(*p));
@@ -6364,11 +6278,11 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
         widths[0] == widths[1] && heights[0] == heights[1] && rowbytes[0] == rowbytes[1] &&
         input_hashes[0] == input_hashes[1] && thread_hashes[0] == thread_hashes[1] ? 0 : -1;
   } else if (params_error == 0 && image_render_supported && depth_supported &&
-             render_session_mode) {
+             invocation.render_session_mode) {
     const auto session_outcome = run_render_session(
-        entry, input, output, &requested_parameters, external_width,
-        external_height, external_time_step, external_total_time,
-        external_time_scale, external_pixel_bytes);
+        entry, input, output, &invocation.requested_parameters, invocation.external_width,
+        invocation.external_height, invocation.external_time_step, invocation.external_total_time,
+        invocation.external_time_scale, invocation.external_pixel_bytes);
     persistent_sequence_setup_error = session_outcome.setup_error;
     persistent_sequence_setdown_error = session_outcome.setdown_error;
     render_width = session_outcome.width;
@@ -6383,21 +6297,21 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
   } else if (params_error == 0 && image_render_supported && depth_supported) {
     render_error = render_once(entry, input, output, case_id, render_width, render_height,
                                render_rowbytes, input_hash, output_hash, guards_intact,
-                               request_mode ? &requested_parameters : nullptr,
-                               image_mode ? &external_rgba : nullptr,
-                               image_mode ? &external_output : nullptr,
-                               external_width, external_height,
-                               layered_image_mode ? &external_layers : nullptr,
-                               external_current_time, external_time_step,
-                               external_total_time, external_time_scale,
-                               external_pixel_bytes);
+                               invocation.request_mode ? &invocation.requested_parameters : nullptr,
+                               invocation.image_mode ? &invocation.external_rgba : nullptr,
+                               invocation.image_mode ? &invocation.external_output : nullptr,
+                               invocation.external_width, invocation.external_height,
+                               invocation.layered_image_mode ? &invocation.external_layers : nullptr,
+                               invocation.external_current_time, invocation.external_time_step,
+                               invocation.external_total_time, invocation.external_time_scale,
+                               invocation.external_pixel_bytes);
   }
   std::cerr << "stage:render_end error=" << render_error << "\n" << std::flush;
   } else if (is_smart_worker()) {
-  case_id = request_mode ? (smart_force_cpu ? "request_cpu" :
-      (smart_opencl ? "gpu_opencl_float32" :
-       (smart_directx ? "gpu_directx_float32" : "request"))) : "";
-  if (!request_mode)
+  case_id = invocation.request_mode ? (invocation.smart_force_cpu ? "request_cpu" :
+      (invocation.smart_opencl ? "gpu_opencl_float32" :
+       (invocation.smart_directx ? "gpu_directx_float32" : "request"))) : "";
+  if (!invocation.request_mode)
     for (const wchar_t* p = argv[4]; *p; ++p) {
       if (*p > 0x7f) return session.finish(2);
       case_id.push_back(static_cast<char>(*p));
@@ -6406,18 +6320,18 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
   smart = params_error == 0 && image_render_supported && depth_supported &&
       smart_render_supported
       ? smart_render_once(entry, input, output, case_id,
-                          request_mode ? &requested_parameters : nullptr,
-                          smart_image_mode ? &external_rgba : nullptr,
-                          smart_image_mode ? &external_output : nullptr,
-                          external_width, external_height,
-                          smart_layered_image_mode ? &external_layers : nullptr,
-                          external_current_time, external_time_step,
-                          external_total_time, external_time_scale,
-                          external_pixel_bytes)
+                          invocation.request_mode ? &invocation.requested_parameters : nullptr,
+                          invocation.smart_image_mode ? &invocation.external_rgba : nullptr,
+                          invocation.smart_image_mode ? &invocation.external_output : nullptr,
+                          invocation.external_width, invocation.external_height,
+                          invocation.smart_layered_image_mode ? &invocation.external_layers : nullptr,
+                          invocation.external_current_time, invocation.external_time_step,
+                          invocation.external_total_time, invocation.external_time_scale,
+                          invocation.external_pixel_bytes)
       : SmartResult{};
-  lifetime_fault_observed = mask_double_dispose_mode
+  lifetime_fault_observed = invocation.mask_double_dispose_mode
       ? verify_mask_double_dispose_rejected()
-      : stream_live_value_dispose_mode
+      : invocation.stream_live_value_dispose_mode
           ? verify_stream_dispose_with_live_value_rejected()
           : false;
   std::cerr << "stage:smart_render_end pre_error=" << smart.pre_error
@@ -6428,27 +6342,27 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
   std::cerr << "stage:global_setdown_begin\n" << std::flush;
   const int32_t setdown_error = global_error == 0
       ? invoke_global_setdown(entry, input.data(), output.data()) : -1;
-  if (is_smart_worker() && suite_release_without_acquire_mode)
+  if (is_smart_worker() && invocation.suite_release_without_acquire_mode)
     suite_fault_observed = verify_suite_release_without_acquire_rejected();
-  if (is_smart_worker() && handle_resize_while_locked_mode)
+  if (is_smart_worker() && invocation.handle_resize_while_locked_mode)
     handle_fault_observed = verify_handle_resize_while_locked_rejected();
-  if (is_smart_worker() && world_double_dispose_mode)
+  if (is_smart_worker() && invocation.world_double_dispose_mode)
     world_fault_observed = verify_world_double_dispose_rejected();
-  if (is_smart_worker() && world_allocation_limit_mode)
+  if (is_smart_worker() && invocation.world_allocation_limit_mode)
     world_fault_observed = verify_world_allocation_limit_rejected();
-  if (is_smart_worker() && pixel_format_registry_mode)
+  if (is_smart_worker() && invocation.pixel_format_registry_mode)
     pixel_format_fault_observed = verify_pixel_format_registry_rejection();
-  if (is_smart_worker() && outline_mutation_mode)
+  if (is_smart_worker() && invocation.outline_mutation_mode)
     outline_fault_observed = verify_outline_mutation_rejection();
-  if (is_smart_worker() && mask_attribute_mode)
+  if (is_smart_worker() && invocation.mask_attribute_mode)
     mask_attribute_fault_observed = verify_mask_attribute_and_ownership_rejection();
-  if (is_smart_worker() && stream_metadata_ownership_mode)
+  if (is_smart_worker() && invocation.stream_metadata_ownership_mode)
     stream_metadata_fault_observed = verify_stream_metadata_and_ownership_rejection();
-  if (is_smart_worker() && keyframe_ownership_mode)
+  if (is_smart_worker() && invocation.keyframe_ownership_mode)
     keyframe_fault_observed = verify_keyframe_ownership_rejection();
-  if (is_smart_worker() && dynamic_stream_tree_mode)
+  if (is_smart_worker() && invocation.dynamic_stream_tree_mode)
     dynamic_stream_fault_observed = verify_dynamic_stream_tree_rejection();
-  if (is_smart_worker() && aegp_memory_strings_mode)
+  if (is_smart_worker() && invocation.aegp_memory_strings_mode)
     aegp_memory_fault_observed = verify_aegp_memory_and_strings_rejection();
   std::cerr << "stage:global_setdown_end error=" << setdown_error << "\n" << std::flush;
   if (!session.prepare_protocol_report()) return session.finish(14);
@@ -6522,12 +6436,12 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
        i64(g_register_ui_calls), i64(g_last_progress_current), i64(g_last_progress_total)}};
   classic_report.threads = {concurrent_render, thread_errors, thread_hashes, thread_guards};
   classic_report.context = {
-      request_mode,
+      invocation.request_mode,
       {static_cast<int32_t>(g_downsample_x.numerator), static_cast<int32_t>(g_downsample_x.denominator)},
       {static_cast<int32_t>(g_downsample_y.numerator), static_cast<int32_t>(g_downsample_y.denominator)},
       {static_cast<int32_t>(g_pixel_aspect_ratio.numerator), static_cast<int32_t>(g_pixel_aspect_ratio.denominator)},
-      {g_full_resolution_width > 0 ? g_full_resolution_width : external_width,
-       g_full_resolution_height > 0 ? g_full_resolution_height : external_height},
+      {g_full_resolution_width > 0 ? g_full_resolution_width : invocation.external_width,
+       g_full_resolution_height > 0 ? g_full_resolution_height : invocation.external_height},
       {read<int32_t>(input, kInQuality), read<int32_t>(input, kInNumParams),
        read<int32_t>(input, kInLocalTimeStep), read<int32_t>(input, 244),
        read<int32_t>(input, 248), read<int32_t>(input, 400)},
@@ -6535,12 +6449,12 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
       {read<int32_t>(input, 392), read<int32_t>(input, 396)},
       {read<int32_t>(input, 276), read<int32_t>(input, 280)}};
   const aexcompat::worker_render_report::RequestedParametersSnapshot classic_requested{
-      requested_parameters_json(requested_parameters),
-      static_cast<int32_t>(requested_value(requested_parameters, L"amount")),
-      static_cast<int32_t>(requested_value(requested_parameters, L"direction")),
-      static_cast<int32_t>(requested_value(requested_parameters, L"seed")),
-      requested_value(requested_parameters, L"mix"),
-      static_cast<int32_t>(requested_value(requested_parameters, L"invert_map")),
+      requested_parameters_json(invocation.requested_parameters),
+      static_cast<int32_t>(requested_value(invocation.requested_parameters, L"amount")),
+      static_cast<int32_t>(requested_value(invocation.requested_parameters, L"direction")),
+      static_cast<int32_t>(requested_value(invocation.requested_parameters, L"seed")),
+      requested_value(invocation.requested_parameters, L"mix"),
+      static_cast<int32_t>(requested_value(invocation.requested_parameters, L"invert_map")),
       !nop_render_advertised, module_audit_json()};
   aexcompat::worker_render_report::emit_classic_complete(report_snapshot, {
       classic_report, classic_custom_ui, capture_classic_subsystems(),
@@ -6590,7 +6504,7 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
       smart.empty_result_rect, smart.output_extent_hint,
       setdown_error, case_id, smart.runtime->pixel_format,
       {smart.output_width, smart.output_height, smart.output_rowbytes},
-      {external_width, external_height},
+      {invocation.external_width, invocation.external_height},
       smart.runtime->pixel_format == "argb32f" ? 16 :
           (smart.runtime->pixel_format == "argb16" ? 8 : 4),
       smart.input_hash,
@@ -6604,12 +6518,12 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
       smart.result_rect, smart.max_result_rect,
       {smart.guards_intact, smart.output_pixels_valid, param_checkouts_balanced()},
       {g_param_checkout_calls, g_param_checkin_calls, g_automatic_param_checkins,
-       g_invalid_param_checkins}, request_mode,
+       g_invalid_param_checkins}, invocation.request_mode,
       {static_cast<int32_t>(g_downsample_x.numerator), static_cast<int32_t>(g_downsample_x.denominator)},
       {static_cast<int32_t>(g_downsample_y.numerator), static_cast<int32_t>(g_downsample_y.denominator)},
       {static_cast<int32_t>(g_pixel_aspect_ratio.numerator), static_cast<int32_t>(g_pixel_aspect_ratio.denominator)},
-      {g_full_resolution_width > 0 ? g_full_resolution_width : external_width,
-       g_full_resolution_height > 0 ? g_full_resolution_height : external_height},
+      {g_full_resolution_width > 0 ? g_full_resolution_width : invocation.external_width,
+       g_full_resolution_height > 0 ? g_full_resolution_height : invocation.external_height},
       {read<int32_t>(input, kInQuality), read<int32_t>(input, kInNumParams),
        read<int32_t>(input, kInLocalTimeStep), read<int32_t>(input, 244),
        read<int32_t>(input, 248), read<int32_t>(input, 400)},
@@ -6665,12 +6579,12 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
       {static_cast<int64_t>(aegp_memory_stats.created), static_cast<int64_t>(aegp_memory_stats.freed), static_cast<int64_t>(aegp_memory_stats.live_count),
        static_cast<int64_t>(aegp_memory_stats.live_bytes), static_cast<int64_t>(aegp_memory_stats.invalid_operations)}});
   aexcompat::worker_render_report::finish_requested_parameters(report_snapshot, {
-      requested_parameters_json(requested_parameters),
-      static_cast<int32_t>(requested_value(requested_parameters, L"amount")),
-      static_cast<int32_t>(requested_value(requested_parameters, L"direction")),
-      static_cast<int32_t>(requested_value(requested_parameters, L"seed")),
-      requested_value(requested_parameters, L"mix"),
-      static_cast<int32_t>(requested_value(requested_parameters, L"invert_map")),
+      requested_parameters_json(invocation.requested_parameters),
+      static_cast<int32_t>(requested_value(invocation.requested_parameters, L"amount")),
+      static_cast<int32_t>(requested_value(invocation.requested_parameters, L"direction")),
+      static_cast<int32_t>(requested_value(invocation.requested_parameters, L"seed")),
+      requested_value(invocation.requested_parameters, L"mix"),
+      static_cast<int32_t>(requested_value(invocation.requested_parameters, L"invert_map")),
       !nop_render_advertised, module_audit_json()});
   aexcompat::worker_render_report::emit(report_snapshot, std::cout);
   } else {
