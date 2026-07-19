@@ -39,6 +39,8 @@ AEGP_SCENE_RUNTIME_HEADER = ROOT / "minihost" / "src" / "worker_aegp_scene_runti
 AEGP_SCENE_RUNTIME_SOURCE = ROOT / "minihost" / "src" / "worker_aegp_scene_runtime.cpp"
 AEGP_INIT_RUNTIME_HEADER = ROOT / "minihost" / "src" / "worker_aegp_init_runtime.hpp"
 AEGP_INIT_RUNTIME_SOURCE = ROOT / "minihost" / "src" / "worker_aegp_init_runtime.cpp"
+AEGP_TIMELINE_PROBE_HEADER = ROOT / "minihost" / "src" / "worker_aegp_timeline_probe.hpp"
+AEGP_TIMELINE_PROBE_SOURCE = ROOT / "minihost" / "src" / "worker_aegp_timeline_probe.cpp"
 AEGP_RENDER_SELFTEST_HEADER = ROOT / "minihost" / "src" / "worker_aegp_render_selftests.hpp"
 AEGP_RENDER_SELFTEST_SOURCE = ROOT / "minihost" / "src" / "worker_aegp_render_selftests.cpp"
 AEGP_ASYNC_LAYER_RUNTIME = ROOT / "minihost" / "src" / "worker_aegp_async_layer_runtime.cpp"
@@ -76,6 +78,7 @@ def l2_family_source():
         CLASSIC_EXECUTION_SOURCE,
         AEGP_SCENE_SOURCE, AEGP_SCENE_HEADER, AEGP_SCENE_RUNTIME_HEADER,
         AEGP_SCENE_RUNTIME_SOURCE, AEGP_INIT_RUNTIME_HEADER, AEGP_INIT_RUNTIME_SOURCE,
+        AEGP_TIMELINE_PROBE_HEADER, AEGP_TIMELINE_PROBE_SOURCE,
         AEGP_HOST_SELFTESTS_SOURCE,
         AEGP_COMPAT_SELFTESTS_SOURCE,
         MASK_RUNTIME_HEADER, MASK_RUNTIME_SOURCE, MASK_RUNTIME_CALLBACKS,
