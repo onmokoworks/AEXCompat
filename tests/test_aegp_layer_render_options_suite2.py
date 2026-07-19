@@ -8,6 +8,7 @@ ABI = ROOT / "minihost" / "src" / "worker_suite_abi.hpp"
 REGISTRY = ROOT / "minihost" / "src" / "worker_aegp_render_options.cpp"
 LAYER_RUNTIME = ROOT / "minihost" / "src" / "worker_aegp_layer_render_runtime.cpp"
 ASYNC_RUNTIME = ROOT / "minihost" / "src" / "worker_aegp_async_layer_runtime.cpp"
+RENDER_SELFTESTS = ROOT / "minihost" / "src" / "worker_aegp_render_selftests.cpp"
 
 
 def test_sdk_probe_freezes_all_layer_render_options_suite2_slots():
@@ -93,9 +94,11 @@ def test_sync_and_async_paths_share_the_same_pixel_publisher():
 
 
 def test_native_selftest_covers_boundary_hashes_cycle_async_and_ownership():
-    text = SOURCE.read_text(encoding="utf-8")
+    # The self-test body lives in its owner translation unit.
+    text = RENDER_SELFTESTS.read_text(encoding="utf-8")
+    assert "bool verify_aegp_layer_render_options_suite2()" not in SOURCE.read_text(
+        encoding="utf-8")
     body = text[text.index("bool verify_aegp_layer_render_options_suite2()") :]
-    body = body[: body.index("int worker_main_impl(")]
     for marker in (
         "upstream_hash != all_hash",
         "upstream_hash != downstream_hash",

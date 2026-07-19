@@ -144,6 +144,7 @@ void apply_render(const request_parser::WorkerInvocation& source,
   target.image_argc = mode.image_argc;
   target.layered_image_mode = mode.layered_image_mode;
   target.image_mode = mode.image_mode;
+  target.render_session_mode = mode.render_session_mode;
   target.request_mode = mode.request_mode;
   target.external_audio = source.audio;
   target.external_audio_output = source.audio_output;

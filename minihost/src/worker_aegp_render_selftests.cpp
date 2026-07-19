@@ -1,7 +1,11 @@
 #include "worker_aegp_render_selftests.hpp"
 #include "worker_aegp_render_options.hpp"
+#include "worker_aegp_layer_render_runtime.hpp"
+#include "worker_aegp_scene.hpp"
+#include "worker_aegp_scene_runtime.hpp"
 #include "worker_aegp_staged_item_runtime.hpp"
 #include "worker_aegp_item_render_runtime.hpp"
+#include "worker_host_suite_catalog.hpp"
 #include "worker_render_receipts.hpp"
 #include "worker_world_registry.hpp"
 #include <algorithm>
@@ -11,6 +15,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <string>
 #include <thread>
 #include <vector>
 
@@ -401,6 +406,150 @@ bool verify_aegp_item_staged_worlds() {
 
   if (!verify_item_render_cycle_contract(options)) return false;
   return render_options_lifetimes_balanced() && async_receipt_lifetimes_balanced();
+}
+
+int32_t acquire_suite(const char*, int32_t, const void**);
+using AegpAsyncFrameReadyCallback =
+    int32_t(__cdecl*)(uint64_t, uint8_t, int32_t, void*, void*);
+int32_t __cdecl render_checkout_layer_v5(void*, AegpRenderCancelV1, void*, void**);
+int32_t __cdecl render_checkout_layer_async_reject(
+    void*, AegpAsyncFrameReadyCallback, void*, uint64_t*);
+void drain_async_layer_requests();
+std::string sha256_bytes(const unsigned char*, std::size_t);
+#define g_aegp_effect scene_runtime::scene_runtime_state().effect
+#define g_aegp_layers scene_runtime::scene_runtime_state().layers
+using LayerRenderContext = aexcompat::aegp_layer_render_runtime::Context;
+using worker_runtime::EffectEntry;
+
+struct LayerSuite2AsyncTestResult {
+  std::atomic<bool> done{};
+  int32_t error{4};
+  void* receipt{};
+};
+int32_t __cdecl layer_suite2_async_test_callback(
+    uint64_t, uint8_t canceled, int32_t error, void* receipt, void* refcon) {
+  auto* result = static_cast<LayerSuite2AsyncTestResult*>(refcon);
+  if (!result) return 4;
+  result->error = canceled ? 4 : error;
+  result->receipt = receipt;
+  result->done.store(true);
+  return 0;
+}
+
+bool verify_aegp_layer_render_options_suite2() {
+  const bool saved_effect_live = g_aegp_effect_live;
+  const auto saved_context = aexcompat::aegp_layer_render_runtime::context();
+  const uint32_t created_before = layer_created_count();
+  const uint32_t disposed_before = layer_disposed_count();
+  g_aegp_effect_live = true;
+  const auto make_world = [](uint8_t red, uint8_t green, uint8_t blue) {
+    std::vector<unsigned char> pixels(4 * 2 * 4);
+    for (std::size_t pixel = 0; pixel < pixels.size() / 4; ++pixel) {
+      pixels[pixel * 4 + 0] = 128;
+      pixels[pixel * 4 + 1] = red;
+      pixels[pixel * 4 + 2] = green;
+      pixels[pixel * 4 + 3] = blue;
+    }
+    return pixels;
+  };
+  auto source = make_world(100, 50, 25);
+  auto all_effects = make_world(40, 120, 30);
+  auto downstream_pixels = make_world(20, 60, 140);
+  LayerRenderContext context{};
+  context.entry = reinterpret_cast<EffectEntry>(&verify_aegp_layer_render_options_suite2);
+  context.current_time = 0;
+  context.time_scale = 1;
+  context.time_step = 1;
+  context.total_time = 1;
+  context.pixel_bytes = 4;
+  context.source_argb = &source;
+  context.source_width = 4;
+  context.source_height = 2;
+  context.all_effects_argb = &all_effects;
+  context.all_effects_width = 4;
+  context.all_effects_height = 2;
+  context.all_effects_pixel_bytes = 4;
+  context.all_effects_finalized = true;
+  aexcompat::aegp_layer_render_runtime::context() = context;
+
+  const void* acquired = nullptr;
+  bool ok = acquire_suite("AEGP Layer Render Options Suite", 2, &acquired) == 0 &&
+      acquired == aexcompat::worker_runtime::host_suites::layer_render_options_suite(2);
+  void* upstream = nullptr;
+  ok = ok && new_from_upstream_of_effect(1, &g_aegp_effect, &upstream) == 0 && upstream &&
+      set_layer_render_downsample(upstream, 2, 2) == 0 &&
+      set_layer_render_world_type(upstream, 2) == 0 &&
+      set_layer_render_matte(upstream, 1) == 0;
+  auto checkout_hash = [&](void* options, std::string& hash) {
+    void* receipt = nullptr;
+    void** world = nullptr;
+    int32_t type = 0, width = 0, height = 0;
+    void* pixels = nullptr;
+    const bool checked_out = render_checkout_layer_v5(
+        options, nullptr, nullptr, &receipt) == 0 && receipt &&
+        get_receipt_world(receipt, &world) == 0 && world &&
+        aegp_world_get_type(world, &type) == 0 && type == 2 &&
+        aegp_world_get_size(world, &width, &height) == 0 && width == 2 && height == 1 &&
+        aegp_world_get_base_addr16(world, &pixels) == 0 && pixels;
+    if (checked_out) hash = sha256_bytes(static_cast<const unsigned char*>(pixels),
+        static_cast<std::size_t>(width) * height * 8);
+    return checked_out && checkin_frame(receipt) == 0;
+  };
+  std::string upstream_hash, all_hash, downstream_hash, async_hash;
+  ok = ok && checkout_hash(upstream, upstream_hash);
+
+  void* all = nullptr;
+  ok = ok && new_layer_render_options(1, &g_aegp_layers[0], &all) == 0 && all &&
+      set_layer_render_downsample(all, 2, 2) == 0 &&
+      set_layer_render_world_type(all, 2) == 0 &&
+      set_layer_render_matte(all, 1) == 0 && checkout_hash(all, all_hash);
+
+  void* downstream = nullptr;
+  ok = ok && new_from_downstream_of_effect(1, &g_aegp_effect, &downstream) == 0 && downstream;
+  void* rejected = reinterpret_cast<void*>(1);
+  ok = ok && render_checkout_layer_v5(downstream, nullptr, nullptr, &rejected) != 0 &&
+      rejected == nullptr;
+  aexcompat::aegp_layer_render_runtime::context().downstream_argb = &downstream_pixels;
+  aexcompat::aegp_layer_render_runtime::context().downstream_width = 4;
+  aexcompat::aegp_layer_render_runtime::context().downstream_height = 2;
+  aexcompat::aegp_layer_render_runtime::context().downstream_pixel_bytes = 4;
+  aexcompat::aegp_layer_render_runtime::context().downstream_finalized = true;
+  ok = ok && set_layer_render_downsample(downstream, 2, 2) == 0 &&
+      set_layer_render_world_type(downstream, 2) == 0 &&
+      set_layer_render_matte(downstream, 1) == 0 &&
+      checkout_hash(downstream, downstream_hash) &&
+      upstream_hash != all_hash && upstream_hash != downstream_hash &&
+      all_hash != downstream_hash;
+
+  LayerSuite2AsyncTestResult async_result{};
+  uint64_t request_id = 0;
+  ok = ok && render_checkout_layer_async_reject(downstream,
+      &layer_suite2_async_test_callback, &async_result, &request_id) == 0 && request_id != 0;
+  drain_async_layer_requests();
+  void** async_world = nullptr;
+  void* async_pixels = nullptr;
+  int32_t async_width = 0, async_height = 0;
+  ok = ok && async_result.done.load() && async_result.error == 0 && async_result.receipt &&
+      get_receipt_world(async_result.receipt, &async_world) == 0 && async_world &&
+      aegp_world_get_size(async_world, &async_width, &async_height) == 0 &&
+      aegp_world_get_base_addr16(async_world, &async_pixels) == 0 && async_pixels;
+  if (async_pixels)
+    async_hash = sha256_bytes(static_cast<const unsigned char*>(async_pixels),
+        static_cast<std::size_t>(async_width) * async_height * 8);
+  ok = ok && async_hash == downstream_hash &&
+      checkin_frame(async_result.receipt) == 0;
+  g_aegp_effect_live = false;
+  rejected = reinterpret_cast<void*>(1);
+  ok = ok && render_checkout_layer_v5(upstream, nullptr, nullptr, &rejected) != 0 &&
+      rejected == nullptr;
+  ok = ok && dispose_layer_render_options(upstream) == 0 &&
+      dispose_layer_render_options(all) == 0 &&
+      dispose_layer_render_options(downstream) == 0;
+  aexcompat::aegp_layer_render_runtime::context() = saved_context;
+  g_aegp_effect_live = saved_effect_live;
+  return ok && async_receipt_lifetimes_balanced() &&
+      layer_created_count() == created_before + 3 &&
+      layer_disposed_count() == disposed_before + 3;
 }
 
 }  // namespace aexcompat::l2_detail

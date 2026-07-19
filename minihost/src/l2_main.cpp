@@ -55,6 +55,7 @@
 #include "worker_parameter_runtime.hpp"
 #include "worker_parameter_selftests.hpp"
 #include "worker_parameter_selftest_routing.hpp"
+#include "worker_pf_color_selftests.hpp"
 #include "worker_parameter_execution.hpp"
 #include "worker_ui_event_execution.hpp"
 #include "pf_cache_on_load_suite.hpp"
@@ -70,6 +71,7 @@
 #include "worker_session.hpp"
 #include "worker_selftest_dispatch.hpp"
 #include "worker_fixed_selftest_routing.hpp"
+#include "worker_custom_selftest_routing.hpp"
 #include "worker_smart_runtime.hpp"
 #include "worker_smart_execution.hpp"
 #include "worker_smart_setup.hpp"
@@ -119,7 +121,9 @@
 #include "worker_pf_ae_channel_runtime.hpp"
 #include "worker_pf_state_runtime.hpp"
 #include "worker_report.hpp"
+#include "worker_render_session.hpp"
 #include "worker_request_parser.hpp"
+#include "strict_json.hpp"
 #include "worker_invocation_orchestration.hpp"
 #include "worker_render_report.hpp"
 #include "worker_render_receipts.hpp"
@@ -4514,6 +4518,10 @@ struct ClassicRenderDispatchOwner {
   int32_t external_width; int32_t external_height;
   aexcompat::worker_runtime::classic::Context& classic_context;
   std::vector<unsigned char>& logical_source;
+  // When set, records that the host itself rejected or failed the plug-in's
+  // requested output resize, so callers can tell host-side output validation
+  // failures apart from selector errors sharing the same numeric codes.
+  bool* output_validation_failed{};
 
   int32_t run(int32_t error) {
     return aexcompat::worker_runtime::classic_execution::dispatch_render(this, error, hooks());
@@ -4531,17 +4539,21 @@ struct ClassicRenderDispatchOwner {
     return value;
   }
   int32_t prepare_output() {
+    const auto fail = [this](int32_t error) {
+      if (output_validation_failed) *output_validation_failed = true;
+      return error;
+    };
     const int32_t next_width = read<int32_t>(output, kOutWidth);
     const int32_t next_height = read<int32_t>(output, kOutHeight);
     if (!aexcompat::render::validate_output_extent(width, height, next_width, next_height,
-            read<uint32_t>(output, kOutFlags))) return 4;
+            read<uint32_t>(output, kOutFlags))) return fail(4);
     if (next_width <= 0 || next_height <= 0) return 0;
     width = next_width; height = next_height; rowbytes = width * pixel_bytes;
-    if (!guarded.reset(static_cast<std::size_t>(rowbytes) * height)) return -3;
+    if (!guarded.reset(static_cast<std::size_t>(rowbytes) * height)) return fail(-3);
     destination = guarded.data();
     if (!aexcompat::render::prepare_world_layout(world,
-            {pixel_bytes == 4 ? 0 : 1, pixel_bytes, width, height, rowbytes}, destination)) return -3;
-    if (!worlds.register_world(world.data(), pixel_format)) return 4;
+            {pixel_bytes == 4 ? 0 : 1, pixel_bytes, width, height, rowbytes}, destination)) return fail(-3);
+    if (!worlds.register_world(world.data(), pixel_format)) return fail(4);
     write<int32_t>(input, 276, read<int32_t>(output, kOutOrigin));
     write<int32_t>(input, 280, read<int32_t>(output, kOutOrigin + 4));
     return 0;
@@ -4575,7 +4587,8 @@ int32_t classic_render_runtime(EffectEntry entry, std::array<std::byte, kInSize>
                     int32_t external_total_time = 1, uint32_t external_time_scale = 1,
                     int32_t external_pixel_bytes = 4,
                     bool manage_sequence = true,
-                    std::vector<unsigned char>* captured_argb = nullptr) {
+                    std::vector<unsigned char>* captured_argb = nullptr,
+                    bool* output_validation_failed = nullptr) {
   auto* classic_context = aexcompat::worker_runtime::classic::active_context();
   if (!classic_context) return -1;
   aexcompat::render::ImageRequest image_request;
@@ -4748,7 +4761,8 @@ int32_t classic_render_runtime(EffectEntry entry, std::array<std::byte, kInSize>
         guarded, dispatch_worlds, definitions, params, width, height, rowbytes, destination,
         pixel_bytes, dispatch_pixel_format, external_current_time, external_time_step,
         external_total_time, external_time_scale, case_id, requested, external_rgba,
-        external_layers, external_width, external_height, *classic_context, logical_source};
+        external_layers, external_width, external_height, *classic_context, logical_source,
+        output_validation_failed};
     error = dispatch_owner.run(error);
     lifecycle.error = error;
     error = lifecycle_owner.finish(lifecycle);
@@ -4809,6 +4823,7 @@ struct ClassicRenderRequest {
   int32_t external_pixel_bytes;
   bool manage_sequence;
   std::vector<unsigned char>* captured_argb;
+  bool* output_validation_failed;
 };
 
 bool classic_render_dependencies_ready(void* opaque) {
@@ -4825,7 +4840,7 @@ int classic_render_guarded_effect_main(void* opaque) {
       request.external_width, request.external_height, request.external_layers,
       request.external_current_time, request.external_time_step, request.external_total_time,
       request.external_time_scale, request.external_pixel_bytes, request.manage_sequence,
-      request.captured_argb);
+      request.captured_argb, request.output_validation_failed);
 }
 
 int classic_render_cleanup(void*) {
@@ -4846,18 +4861,301 @@ int32_t render_once(EffectEntry entry, std::array<std::byte, kInSize>& input,
                     int32_t external_current_time = 0, int32_t external_time_step = 1,
                     int32_t external_total_time = 1, uint32_t external_time_scale = 1,
                     int32_t external_pixel_bytes = 4, bool manage_sequence = true,
-                    std::vector<unsigned char>* captured_argb = nullptr) {
+                    std::vector<unsigned char>* captured_argb = nullptr,
+                    bool* output_validation_failed = nullptr) {
   ClassicRenderRequest request{entry, input, output, case_id, width, height, rowbytes,
       input_hash, output_hash, guards_intact, requested, external_rgba, external_output,
       external_width, external_height, external_layers, external_current_time,
       external_time_step, external_total_time, external_time_scale, external_pixel_bytes,
-      manage_sequence, captured_argb};
+      manage_sequence, captured_argb, output_validation_failed};
   aexcompat::worker_runtime::classic::Request context{
       &request,
       {&classic_render_guarded_effect_main, &classic_render_cleanup,
        &classic_render_dependencies_ready},
       g_module_audit.required};
   return aexcompat::worker_runtime::classic::dispatch(context);
+}
+
+// Resident render session frame loop (docs/RENDER_SESSION_PROTOCOL_2026-07-19.md).
+// SEQUENCE_SETUP is hoisted once around render_once(manage_sequence=false)
+// following the persistent_sequence precedent; pixels move through the
+// inherited anonymous section (copy-through slots, the plug-in never sees the
+// mapping) and control messages over the inherited pipe pair with strict
+// exact-key validation.
+struct RenderSessionOutcome {
+  int32_t setup_error{-1};
+  int32_t setdown_error{-1};
+  int32_t frames_attempted{0};
+  bool protocol_violation{false};
+  bool invariant_failure{false};
+  int32_t width{0};
+  int32_t height{0};
+  int32_t rowbytes{0};
+  std::string input_hash;
+  std::string output_hash;
+  bool guards_intact{true};
+  int32_t render_error{-1};
+};
+
+RenderSessionOutcome run_render_session(
+    EffectEntry entry, std::array<std::byte, kInSize>& input,
+    std::array<std::byte, kOutSize>& output, const RequestedAssignments* requested,
+    int32_t max_width, int32_t max_height, int32_t time_step, int32_t total_time,
+    uint32_t time_scale, int32_t pixel_bytes) {
+  using aexcompat::strict_json::JsonValue;
+  using aexcompat::strict_json::StrictJsonParser;
+  using aexcompat::strict_json::json_exact_keys;
+  using aexcompat::strict_json::json_i32;
+  using aexcompat::strict_json::json_member;
+  using aexcompat::strict_json::json_string;
+  namespace wrs = aexcompat::worker_render_session;
+  constexpr int32_t kSessionTimeScaleMismatch = -40;
+  constexpr int32_t kSessionGenerationMismatch = -41;
+  constexpr int32_t kSessionOutputCaptureError = -42;
+  constexpr int32_t kSessionGuardViolation = -43;
+  constexpr int32_t kSessionDimensionMismatch = -44;
+  constexpr int32_t kSessionOutputValidationError = -45;
+  constexpr int32_t kSessionTimeOutOfRange = -46;
+
+  RenderSessionOutcome outcome;
+  const wrs::SessionGeometry geometry{max_width, max_height, pixel_bytes, 0};
+  wrs::SessionChannels channels;
+  if (!channels.open_from_environment(geometry) ||
+      !channels.static_header_matches(geometry)) {
+    outcome.protocol_violation = true;
+    return outcome;
+  }
+  // Effects may initialize persistent sequence state from in_data during
+  // SEQUENCE_SETUP, so the hoisted setup needs the same time and geometry
+  // fields the one-shot path seeds right before its render lifecycle
+  // (classic_render_runtime); the session equivalent is the launch
+  // configuration with time zero.
+  write<int32_t>(input, 224, 0);
+  write<int32_t>(input, 228, time_step);
+  write<int32_t>(input, 232, total_time);
+  write<int32_t>(input, 236, time_step);
+  write<uint32_t>(input, 240, time_scale);
+  write<int32_t>(input, 252, max_width);
+  write<int32_t>(input, 256, max_height);
+  const int32_t session_extent[4] = {0, 0, max_width, max_height};
+  std::memcpy(input.data() + 260, session_extent, sizeof(session_extent));
+  outcome.setup_error =
+      invoke_sequence_selector(entry, kSequenceSetup, input.data(), output.data());
+  if (outcome.setup_error != 0) return outcome;
+  // Mirrors begin_render for the hoisted sequence: an --aux-manifest-v1
+  // manifest becomes visible to the channel suite once SEQUENCE_SETUP
+  // succeeds, and stays active for every session frame.
+  activate_external_aux();
+  write<void*>(input, kInSequenceData, read<void*>(output, kOutSequenceData));
+
+  const std::size_t input_offset = wrs::input_slot_offset();
+  const std::size_t output_offset = wrs::output_slot_offset(geometry);
+  const char* pixel_format = pixel_bytes == 16 ? "argb32f" :
+      (pixel_bytes == 8 ? "argb16" : "argb8");
+  std::vector<unsigned char> frame_rgba(wrs::input_slot_bytes(geometry));
+  std::vector<unsigned char> captured;
+  std::string message;
+  for (;;) {
+    const auto read_result = channels.read_message(message);
+    if (read_result == wrs::SessionChannels::ReadResult::Eof) break;
+    if (read_result != wrs::SessionChannels::ReadResult::Message) {
+      // Malformed framing is invalid control input, not a close signal.
+      outcome.protocol_violation = true;
+      break;
+    }
+    JsonValue root;
+    if (!StrictJsonParser(std::move(message)).parse(root) ||
+        !std::holds_alternative<JsonValue::Object>(root.value)) {
+      outcome.protocol_violation = true;
+      break;
+    }
+    const auto& object = std::get<JsonValue::Object>(root.value);
+    std::string type;
+    int32_t version{};
+    if (!json_string(object, "type", type) || !json_i32(object, "v", version) ||
+        version != static_cast<int32_t>(wrs::kProtocolVersion)) {
+      outcome.protocol_violation = true;
+      break;
+    }
+    if (type == "close") {
+      if (!json_exact_keys(object, {"v", "type"})) outcome.protocol_violation = true;
+      break;
+    }
+    int32_t frame_index{};
+    const auto* time_value = json_member(object, "current_time");
+    if (type != "render_frame" ||
+        !json_exact_keys(object, {"v", "type", "frame_index", "current_time"}) ||
+        !json_i32(object, "frame_index", frame_index) || frame_index < 0 ||
+        !time_value || !std::holds_alternative<JsonValue::Object>(time_value->value)) {
+      outcome.protocol_violation = true;
+      break;
+    }
+    const auto& time_object = std::get<JsonValue::Object>(time_value->value);
+    int32_t current_time{};
+    int32_t current_scale{};
+    if (!json_exact_keys(time_object, {"value", "scale"}) ||
+        !json_i32(time_object, "value", current_time) ||
+        !json_i32(time_object, "scale", current_scale) || current_scale <= 0) {
+      outcome.protocol_violation = true;
+      break;
+    }
+    const uint32_t expected_generation = static_cast<uint32_t>(frame_index) + 1;
+    // Error responses carry no output or generation: a frame rejected before
+    // or during rendering never updates the output slot, so there is no slot
+    // metadata to report (protocol §4.3).
+    const auto respond_error = [&](int32_t frame_error) {
+      std::string reply = "{\"v\":1,\"type\":\"frame_done\",\"frame_index\":" +
+          std::to_string(frame_index) + ",\"status\":\"error\",\"render_error\":" +
+          std::to_string(frame_error) + "}";
+      return channels.write_message(reply);
+    };
+    const auto respond_ok = [&](int32_t frame_width, int32_t frame_height,
+                                int32_t frame_rowbytes, const std::string& checksum) {
+      std::string reply;
+      reply.reserve(256);
+      reply += "{\"v\":1,\"type\":\"frame_done\",\"frame_index\":";
+      reply += std::to_string(frame_index);
+      reply += ",\"status\":\"ok\",\"output\":{\"width\":";
+      reply += std::to_string(frame_width);
+      reply += ",\"height\":";
+      reply += std::to_string(frame_height);
+      reply += ",\"rowbytes\":";
+      reply += std::to_string(frame_rowbytes);
+      reply += ",\"pixel_format\":\"";
+      reply += pixel_format;
+      reply += "\",\"checksum\":\"";
+      reply += checksum;
+      reply += "\",\"guards_intact\":true},\"render_error\":0,\"generation\":";
+      reply += std::to_string(expected_generation);
+      reply += "}";
+      return channels.write_message(reply);
+    };
+    if (static_cast<uint32_t>(current_scale) != time_scale) {
+      // Frame-local diagnostic: the session continues, the broker decides.
+      if (!respond_error(kSessionTimeScaleMismatch)) {
+        outcome.protocol_violation = true;
+        break;
+      }
+      continue;
+    }
+    if (current_time < 0 || current_time > total_time) {
+      // Same range contract the one-shot parser enforces on its launch time:
+      // frames outside the declared timeline are rejected before rendering.
+      if (!respond_error(kSessionTimeOutOfRange)) {
+        outcome.protocol_violation = true;
+        break;
+      }
+      continue;
+    }
+    if (channels.read_header_u32(wrs::kHeaderInputGenerationOffset) !=
+            expected_generation ||
+        !channels.static_header_matches(geometry)) {
+      // Stale slot or mutated header: host-protection invariant, fail closed.
+      respond_error(kSessionGenerationMismatch);
+      outcome.invariant_failure = true;
+      break;
+    }
+    std::memcpy(frame_rgba.data(), channels.view() + input_offset, frame_rgba.size());
+    outcome.frames_attempted += 1;
+    int32_t frame_width = 0, frame_height = 0, frame_rowbytes = 0;
+    std::string frame_input_hash, frame_output_hash;
+    // Initialized true so it means "finalize observed corruption" when false:
+    // render_once's early host-side failures return before touching it, while
+    // every path that allocates the guarded buffer overwrites it.
+    bool frame_guards = true;
+    bool output_validation_failed = false;
+    captured.clear();
+    const int32_t frame_error = render_once(
+        entry, input, output, "request", frame_width, frame_height, frame_rowbytes,
+        frame_input_hash, frame_output_hash, frame_guards, requested, &frame_rgba,
+        nullptr, max_width, max_height, nullptr, current_time, time_step, total_time,
+        time_scale, pixel_bytes, false, &captured, &output_validation_failed);
+    // Aux channel chunks are host-owned and cannot outlive one frame's render
+    // lifecycle (end_render's cleanup for the one-shot path); the manifest
+    // itself stays active across frames.
+    aexcompat::pf_ae_channel::reclaim_layer_channels();
+    outcome.width = frame_width;
+    outcome.height = frame_height;
+    outcome.rowbytes = frame_rowbytes;
+    outcome.input_hash = frame_input_hash;
+    outcome.output_hash = frame_output_hash;
+    // Corruption evidence outranks the render error: a plug-in that wrote
+    // outside its guarded private buffer invalidates the session even when it
+    // also reported a nonzero error. Host-protection invariant, fail closed.
+    if (!frame_guards) {
+      outcome.guards_intact = false;
+      respond_error(kSessionGuardViolation);
+      outcome.invariant_failure = true;
+      break;
+    }
+    // Host-side output validation failures (rejected or failed resize) share
+    // numeric codes with selector errors, so the dispatch owner reports them
+    // out of band; they are output-bounds invariant failures, not frame-local
+    // diagnostics (protocol §4.3).
+    if (output_validation_failed) {
+      respond_error(kSessionOutputValidationError);
+      outcome.invariant_failure = true;
+      break;
+    }
+    if (frame_error != 0) {
+      // Frame-local compatibility diagnostic; the sequence state is still
+      // owned by the host, so the session may continue.
+      if (!respond_error(frame_error)) {
+        outcome.protocol_violation = true;
+        break;
+      }
+      continue;
+    }
+    // v1 fixes every frame to the launch max dimensions (protocol §3); an
+    // expand/shrink-output effect changing them would publish dimensions the
+    // broker cannot trust against the slot layout. Fail closed.
+    if (frame_width != max_width || frame_height != max_height) {
+      respond_error(kSessionDimensionMismatch);
+      outcome.invariant_failure = true;
+      break;
+    }
+    const std::size_t expected_pixels =
+        static_cast<std::size_t>(frame_width) * frame_height;
+    if (captured.size() != expected_pixels * pixel_bytes ||
+        output_offset + captured.size() > wrs::expected_section_bytes(geometry)) {
+      respond_error(kSessionOutputCaptureError);
+      outcome.invariant_failure = true;
+      break;
+    }
+    unsigned char* slot = channels.view() + output_offset;
+    for (std::size_t pixel = 0; pixel < expected_pixels; ++pixel)
+      argb_to_rgba_native(slot + pixel * pixel_bytes,
+                          captured.data() + pixel * pixel_bytes, pixel_bytes);
+    channels.write_header_u32(wrs::kHeaderFrameWidthOffset,
+                              static_cast<uint32_t>(frame_width));
+    channels.write_header_u32(wrs::kHeaderFrameHeightOffset,
+                              static_cast<uint32_t>(frame_height));
+    channels.write_header_u32(wrs::kHeaderOutputGenerationOffset,
+                              expected_generation);
+    // The frame checksum covers the transferred slot bytes, the exact bytes
+    // the broker reads; the final report's output_hash keeps the one-shot
+    // internal-ARGB definition (protocol §4.3).
+    const std::string slot_checksum = sha256_bytes(slot, captured.size());
+    if (!respond_ok(frame_width, frame_height, frame_rowbytes, slot_checksum)) {
+      outcome.protocol_violation = true;
+      break;
+    }
+  }
+  outcome.setdown_error =
+      invoke_sequence_selector(entry, kSequenceSetdown, input.data(), output.data());
+  write<void*>(input, kInSequenceData, nullptr);
+  aexcompat::pf_ae_channel::reclaim_layer_channels();
+  deactivate_external_aux();
+  clear_native_aux_provider();
+  // Frame-local errors were already reported through frame_done and the
+  // broker owned the continue/stop decision, so a clean close after them is
+  // still a successful session; only session mechanics count here.
+  outcome.render_error =
+      outcome.setup_error == 0 && outcome.setdown_error == 0 &&
+              !outcome.protocol_violation && !outcome.invariant_failure
+          ? 0
+          : -1;
+  return outcome;
 }
 
 bool exercise_loaded_effect_item_receipt(EffectEntry entry,
@@ -5237,336 +5535,18 @@ const aexcompat::l2mode::Hooks& early_mode_hooks() {
 
 using namespace aexcompat::l2_detail;
 
-bool verify_pf_color_suite() {
-  const void* acquired8{}; const void* acquired16{}; const void* acquired_float{};
-  const bool acquired = acquire_suite("PF Color Suite", 1, &acquired8) == 0 &&
-      acquire_suite("PF Color16 Suite", 1, &acquired16) == 0 &&
-      acquire_suite("PF ColorFloat Suite", 1, &acquired_float) == 0 &&
-      acquired8 == &g_color_suite8 && acquired16 == &g_color_suite16 &&
-      acquired_float == &g_color_suite_float;
-  PfPixel8 red8{77, 255, 0, 0}, round8{91, 0, 0, 0};
-  PfFixed hls[3]{}, yiq[3]{};
-  int32_t lum8{}, hue8{}, light8{}, sat8{};
-  bool ok = acquired && g_color_suite8.RGBtoHLS(nullptr, &red8, hls) == 0 &&
-      hls[0] == 0 && hls[1] == pf_color_to_fixed(0.5) && hls[2] == pf_color_to_fixed(1.0) &&
-      g_color_suite8.HLStoRGB(nullptr, hls, &round8) == 0 && round8.alpha == 91 &&
-      round8.red == 255 && round8.green <= 1 && round8.blue <= 1 &&
-      g_color_suite8.RGBtoYIQ(nullptr, &red8, yiq) == 0 &&
-      g_color_suite8.Luminance(nullptr, &red8, &lum8) == 0 &&
-      g_color_suite8.Hue(nullptr, &red8, &hue8) == 0 &&
-      g_color_suite8.Lightness(nullptr, &red8, &light8) == 0 &&
-      g_color_suite8.Saturation(nullptr, &red8, &sat8) == 0 &&
-      lum8 == 7622 && hue8 == 0 && light8 == 128 && sat8 == 255;
-  PfPixel16 green16{1234, 0, 32768, 0}, round16{4321, 0, 0, 0};
-  ok = ok && g_color_suite16.RGBtoHLS(nullptr, &green16, hls) == 0 &&
-      hls[0] == pf_color_to_fixed(120.0) &&
-      g_color_suite16.HLStoRGB(nullptr, hls, &round16) == 0 && round16.alpha == 4321 &&
-      round16.green >= 32767 && round16.red <= 1 && round16.blue <= 1;
-  int32_t hue16{};
-  ok = ok && g_color_suite16.Hue(nullptr, &green16, &hue16) == 0 && hue16 == 85;
-  PfPixelFloat hdr{2.0f, 1.5f, 2.0f, -1.0f};
-  float lumf{};
-  ok = ok && g_color_suite_float.RGBtoYIQ(nullptr, &hdr, yiq) == 0 &&
-      yiq[0] > 65536 && g_color_suite_float.Luminance(nullptr, &hdr, &lumf) == 0 &&
-      lumf > 1.0f;
-  PfPixelFloat invalid{1.0f, std::numeric_limits<float>::infinity(), 0.0f, 0.0f};
-  PfFixed sentinel[3]{11, 22, 33};
-  ok = ok && g_color_suite_float.RGBtoHLS(nullptr, &invalid, sentinel) == kPfBadCallbackParam &&
-      sentinel[0] == 11 && sentinel[1] == 22 && sentinel[2] == 33 &&
-      g_color_suite8.RGBtoHLS(nullptr, nullptr, sentinel) == kPfBadCallbackParam &&
-      g_color_suite8.RGBtoHLS(nullptr, &red8, nullptr) == kPfBadCallbackParam;
-  ok = release_suite("PF ColorFloat Suite", 1) == 0 &&
-      release_suite("PF Color16 Suite", 1) == 0 &&
-      release_suite("PF Color Suite", 1) == 0 && ok;
-  return ok;
-}
-
-bool verify_pf_color_param_suite() {
-  const auto saved_params = g_params;
-  g_params.clear();
-  auto add_color = [](int32_t disk_id, std::array<unsigned char, 4> current8,
-                      std::array<unsigned char, 4> default8,
-                      std::array<float, 4> current_float,
-                      std::array<float, 4> default_float) {
-    ParamRecord record{};
-    record.index = static_cast<int32_t>(g_params.size() + 1);
-    record.disk_id = disk_id;
-    record.type = 5;
-    record.has_color = true;
-    record.current_color = current8;
-    record.default_color = default8;
-    record.current_float_color = current_float;
-    record.default_float_color = default_float;
-    g_params.push_back(record);
-  };
-  add_color(101, {255, 64, 128, 192}, {128, 10, 20, 30},
-            {1.0f, 64.0f / 255.0f, 128.0f / 255.0f, 192.0f / 255.0f},
-            {128.0f / 255.0f, 10.0f / 255.0f, 20.0f / 255.0f, 30.0f / 255.0f});
-  add_color(102, {255, 17, 33, 65}, {255, 1, 2, 3},
-            {1.0f, 4097.0f / 32768.0f, 8193.0f / 32768.0f, 16385.0f / 32768.0f},
-            {1.0f, 1.0f / 32768.0f, 2.0f / 32768.0f, 3.0f / 32768.0f});
-  add_color(103, {255, 200, 100, 50}, {255, 40, 50, 60},
-            {0.75f, 1.5f, -0.25f, 2.0f}, {1.0f, 0.1f, 0.2f, 0.3f});
-
-  const void* acquired = nullptr;
-  bool ok = acquire_suite("PF ColorParamSuite", 1, &acquired) == 0 &&
-      acquired == &g_color_param_suite1;
-  auto definition = [](const ParamRecord& record, bool current) {
-    std::array<std::byte, kParamSize> bytes{};
-    write<int32_t>(bytes, 0, record.disk_id);
-    write<int32_t>(bytes, kParamType, record.type);
-    const auto& color = current ? record.current_color : record.default_color;
-    std::memcpy(bytes.data() + 56, color.data(), color.size());
-    return bytes;
-  };
-  PfColorParamPixelFloat out{};
-  auto current8 = definition(g_params[0], true);
-  auto default8 = definition(g_params[0], false);
-  ok = ok && floating_point_from_color(&g_effect, current8.data(), &out) == 0 &&
-      out.alpha == 1.0f && out.red == 64.0f / 255.0f &&
-      out.green == 128.0f / 255.0f && out.blue == 192.0f / 255.0f &&
-      floating_point_from_color(&g_effect, default8.data(), &out) == 0 &&
-      out.alpha == 128.0f / 255.0f && out.red == 10.0f / 255.0f;
-  auto current16 = definition(g_params[1], true);
-  ok = ok && floating_point_from_color(&g_effect, current16.data(), &out) == 0 &&
-      out.red == 4097.0f / 32768.0f && out.green == 8193.0f / 32768.0f &&
-      out.blue == 16385.0f / 32768.0f;
-  auto current_float = definition(g_params[2], true);
-  ok = ok && floating_point_from_color(&g_effect, current_float.data(), &out) == 0 &&
-      out.alpha == 0.75f && out.red == 1.5f && out.green == -0.25f && out.blue == 2.0f;
-
-  const PfColorParamPixelFloat sentinel{9.0f, 8.0f, 7.0f, 6.0f};
-  out = sentinel;
-  auto invalid_index = current8;
-  write<int32_t>(invalid_index, 0, 9999);
-  auto invalid_type = current8;
-  write<int32_t>(invalid_type, kParamType, 6);
-  ok = ok && floating_point_from_color(nullptr, current8.data(), &out) == kPfBadCallbackParam &&
-      floating_point_from_color(&g_effect, nullptr, &out) == kPfBadCallbackParam &&
-      floating_point_from_color(&g_effect, current8.data(), nullptr) == kPfBadCallbackParam &&
-      floating_point_from_color(&g_effect, invalid_index.data(), &out) == kPfInvalidIndex &&
-      floating_point_from_color(&g_effect, invalid_type.data(), &out) ==
-          kPfUnrecognizedParamType && std::memcmp(&out, &sentinel, sizeof(out)) == 0;
-  ok = release_suite("PF ColorParamSuite", 1) == 0 && ok;
-  g_params = saved_params;
-  return ok;
-}
+// verify_pf_color_suite / verify_pf_color_param_suite live in
+// worker_pf_color_selftests.cpp; host state reaches them through the
+// configure() hooks installed below.
 
 
 
-bool verify_aegp_effect_param_union_suite4() {
-  const bool saved_live = g_aegp_effect_live;
-  g_aegp_effect_live = true;
-  std::array<std::byte, kParamSize - 56> value{};
-  std::array<std::byte, kParamSize - 56> sentinel{};
-  sentinel.fill(std::byte{0x5a});
-  int32_t type = -1;
-  bool ok = aegp_get_effect_param_union_by_index_v3(
-                1, &g_aegp_effect, 0, &type, value.data()) == 0 &&
-            type == 0 &&
-            std::all_of(value.begin(), value.end(),
-                        [](std::byte byte) { return byte == std::byte{0}; });
-  value = sentinel;
-  type = -1;
-  ok = ok && aegp_get_effect_param_union_by_index_v3(
-                 1, &g_aegp_effect, 1, &type, value.data()) == 0 &&
-       type == 1;
-  for (const int32_t index : {-1, 5}) {
-    value = sentinel;
-    type = 0x12345678;
-    ok = ok && aegp_get_effect_param_union_by_index_v3(
-                   1, &g_aegp_effect, index, &type, value.data()) == 4 &&
-         type == 0x12345678 && value == sentinel;
-  }
-  value = sentinel;
-  type = 0x12345678;
-  ok = ok && aegp_get_effect_param_union_by_index_v3(
-                 1, &g_aegp_effect, 0, nullptr, value.data()) == 4 &&
-       value == sentinel &&
-       aegp_get_effect_param_union_by_index_v3(
-           1, &g_aegp_effect, 0, &type, nullptr) == 4 &&
-       type == 0x12345678;
-  g_aegp_effect_live = false;
-  ok = ok && aegp_get_effect_param_union_by_index_v3(
-                 1, &g_aegp_effect, 0, &type, value.data()) == 4;
-  g_aegp_effect_live = saved_live;
-  return ok;
-}
+// verify_aegp_effect_param_union_suite4 /
+// verify_aegp_installed_effect_catalog_suite4 live in
+// worker_aegp_compat_selftests.cpp behind configure_aegp_compat_selftests.
 
-bool verify_aegp_installed_effect_catalog_suite4() {
-  const bool saved_comp_idle_mode = g_aegp_comp_idle_roundtrip_mode;
-  g_aegp_comp_idle_roundtrip_mode = true;
-  const void* acquired = nullptr;
-  bool ok = acquire_suite("AEGP Effect Suite", 4, &acquired) == 0 &&
-            acquired == g_aegp_effect_suite4.data();
-  int32_t count = -1;
-  ok = ok && aegp_get_num_installed_effects(&count) == 0 &&
-       count == static_cast<int32_t>(kAegpInstalledEffects.size());
-  count = 0x12345678;
-  ok = ok && aegp_get_num_installed_effects(nullptr) == 4 && count == 0x12345678;
-
-  int32_t key = -1;
-  ok = ok && aegp_get_next_installed_effect(kAegpInstalledEffectKeyNone, &key) == 0 &&
-       key == kAegpInstalledEffects[0].key;
-  const int32_t installed_key = key;
-  for (std::size_t index = 1; index < kAegpInstalledEffects.size(); ++index)
-    ok = ok && aegp_get_next_installed_effect(key, &key) == 0 &&
-         key == kAegpInstalledEffects[index].key;
-  ok = ok && aegp_get_next_installed_effect(key, &key) == 0 &&
-       key == kAegpInstalledEffectKeyNone;
-  key = 0x12345678;
-  ok = ok && aegp_get_next_installed_effect(9999, &key) == 4 &&
-       key == 0x12345678 &&
-       aegp_get_next_installed_effect(kAegpInstalledEffectKeyNone, nullptr) == 4;
-
-  std::array<char, kAegpMaxEffectCategoryNameSize> name{};
-  std::array<char, kAegpMaxEffectCategoryNameSize> match_name{};
-  std::array<char, kAegpMaxEffectCategoryNameSize> category{};
-  ok = ok && aegp_get_effect_name(installed_key, name.data()) == 0 &&
-       std::strcmp(name.data(), kAegpInstalledEffects[0].name) == 0 &&
-       aegp_get_effect_match_name(installed_key, match_name.data()) == 0 &&
-       std::strcmp(match_name.data(), kAegpInstalledEffects[0].match_name) == 0 &&
-       aegp_get_effect_category(installed_key, category.data()) == 0 &&
-       std::strcmp(category.data(), kAegpInstalledEffects[0].category) == 0 &&
-       category[std::strlen(kAegpInstalledEffects[0].category)] == '\0';
-  category.fill('Z');
-  ok = ok && aegp_get_effect_category(9999, category.data()) == 4 &&
-       std::all_of(category.begin(), category.end(), [](char value) { return value == 'Z'; }) &&
-       aegp_get_effect_category(installed_key, nullptr) == 4;
-  g_aegp_comp_idle_roundtrip_mode = saved_comp_idle_mode;
-  return ok;
-}
-
-struct LayerSuite2AsyncTestResult {
-  std::atomic<bool> done{};
-  int32_t error{4};
-  void* receipt{};
-};
-int32_t __cdecl layer_suite2_async_test_callback(
-    uint64_t, uint8_t canceled, int32_t error, void* receipt, void* refcon) {
-  auto* result = static_cast<LayerSuite2AsyncTestResult*>(refcon);
-  if (!result) return 4;
-  result->error = canceled ? 4 : error;
-  result->receipt = receipt;
-  result->done.store(true);
-  return 0;
-}
-
-bool verify_aegp_layer_render_options_suite2() {
-  const bool saved_effect_live = g_aegp_effect_live;
-  const auto saved_context = aexcompat::aegp_layer_render_runtime::context();
-  const uint32_t created_before = layer_created_count();
-  const uint32_t disposed_before = layer_disposed_count();
-  g_aegp_effect_live = true;
-  const auto make_world = [](uint8_t red, uint8_t green, uint8_t blue) {
-    std::vector<unsigned char> pixels(4 * 2 * 4);
-    for (std::size_t pixel = 0; pixel < pixels.size() / 4; ++pixel) {
-      pixels[pixel * 4 + 0] = 128;
-      pixels[pixel * 4 + 1] = red;
-      pixels[pixel * 4 + 2] = green;
-      pixels[pixel * 4 + 3] = blue;
-    }
-    return pixels;
-  };
-  auto source = make_world(100, 50, 25);
-  auto all_effects = make_world(40, 120, 30);
-  auto downstream_pixels = make_world(20, 60, 140);
-  LayerRenderContext context{};
-  context.entry = reinterpret_cast<EffectEntry>(&verify_aegp_layer_render_options_suite2);
-  context.current_time = 0;
-  context.time_scale = 1;
-  context.time_step = 1;
-  context.total_time = 1;
-  context.pixel_bytes = 4;
-  context.source_argb = &source;
-  context.source_width = 4;
-  context.source_height = 2;
-  context.all_effects_argb = &all_effects;
-  context.all_effects_width = 4;
-  context.all_effects_height = 2;
-  context.all_effects_pixel_bytes = 4;
-  context.all_effects_finalized = true;
-  aexcompat::aegp_layer_render_runtime::context() = context;
-
-  const void* acquired = nullptr;
-  bool ok = acquire_suite("AEGP Layer Render Options Suite", 2, &acquired) == 0 &&
-      acquired == aexcompat::worker_runtime::host_suites::layer_render_options_suite(2);
-  void* upstream = nullptr;
-  ok = ok && new_from_upstream_of_effect(1, &g_aegp_effect, &upstream) == 0 && upstream &&
-      set_layer_render_downsample(upstream, 2, 2) == 0 &&
-      set_layer_render_world_type(upstream, 2) == 0 &&
-      set_layer_render_matte(upstream, 1) == 0;
-  auto checkout_hash = [&](void* options, std::string& hash) {
-    void* receipt = nullptr;
-    void** world = nullptr;
-    int32_t type = 0, width = 0, height = 0;
-    void* pixels = nullptr;
-    const bool checked_out = render_checkout_layer_v5(
-        options, nullptr, nullptr, &receipt) == 0 && receipt &&
-        get_receipt_world(receipt, &world) == 0 && world &&
-        aegp_world_get_type(world, &type) == 0 && type == 2 &&
-        aegp_world_get_size(world, &width, &height) == 0 && width == 2 && height == 1 &&
-        aegp_world_get_base_addr16(world, &pixels) == 0 && pixels;
-    if (checked_out) hash = sha256_bytes(static_cast<const unsigned char*>(pixels),
-        static_cast<std::size_t>(width) * height * 8);
-    return checked_out && checkin_frame(receipt) == 0;
-  };
-  std::string upstream_hash, all_hash, downstream_hash, async_hash;
-  ok = ok && checkout_hash(upstream, upstream_hash);
-
-  void* all = nullptr;
-  ok = ok && new_layer_render_options(1, &g_aegp_layers[0], &all) == 0 && all &&
-      set_layer_render_downsample(all, 2, 2) == 0 &&
-      set_layer_render_world_type(all, 2) == 0 &&
-      set_layer_render_matte(all, 1) == 0 && checkout_hash(all, all_hash);
-
-  void* downstream = nullptr;
-  ok = ok && new_from_downstream_of_effect(1, &g_aegp_effect, &downstream) == 0 && downstream;
-  void* rejected = reinterpret_cast<void*>(1);
-  ok = ok && render_checkout_layer_v5(downstream, nullptr, nullptr, &rejected) != 0 &&
-      rejected == nullptr;
-  aexcompat::aegp_layer_render_runtime::context().downstream_argb = &downstream_pixels;
-  aexcompat::aegp_layer_render_runtime::context().downstream_width = 4;
-  aexcompat::aegp_layer_render_runtime::context().downstream_height = 2;
-  aexcompat::aegp_layer_render_runtime::context().downstream_pixel_bytes = 4;
-  aexcompat::aegp_layer_render_runtime::context().downstream_finalized = true;
-  ok = ok && set_layer_render_downsample(downstream, 2, 2) == 0 &&
-      set_layer_render_world_type(downstream, 2) == 0 &&
-      set_layer_render_matte(downstream, 1) == 0 &&
-      checkout_hash(downstream, downstream_hash) &&
-      upstream_hash != all_hash && upstream_hash != downstream_hash &&
-      all_hash != downstream_hash;
-
-  LayerSuite2AsyncTestResult async_result{};
-  uint64_t request_id = 0;
-  ok = ok && render_checkout_layer_async_reject(downstream,
-      &layer_suite2_async_test_callback, &async_result, &request_id) == 0 && request_id != 0;
-  drain_async_layer_requests();
-  void** async_world = nullptr;
-  void* async_pixels = nullptr;
-  int32_t async_width = 0, async_height = 0;
-  ok = ok && async_result.done.load() && async_result.error == 0 && async_result.receipt &&
-      get_receipt_world(async_result.receipt, &async_world) == 0 && async_world &&
-      aegp_world_get_size(async_world, &async_width, &async_height) == 0 &&
-      aegp_world_get_base_addr16(async_world, &async_pixels) == 0 && async_pixels;
-  if (async_pixels)
-    async_hash = sha256_bytes(static_cast<const unsigned char*>(async_pixels),
-        static_cast<std::size_t>(async_width) * async_height * 8);
-  ok = ok && async_hash == downstream_hash &&
-      checkin_frame(async_result.receipt) == 0;
-  g_aegp_effect_live = false;
-  rejected = reinterpret_cast<void*>(1);
-  ok = ok && render_checkout_layer_v5(upstream, nullptr, nullptr, &rejected) != 0 &&
-      rejected == nullptr;
-  ok = ok && dispose_layer_render_options(upstream) == 0 &&
-      dispose_layer_render_options(all) == 0 &&
-      dispose_layer_render_options(downstream) == 0;
-  aexcompat::aegp_layer_render_runtime::context() = saved_context;
-  g_aegp_effect_live = saved_effect_live;
-  return ok && async_receipt_lifetimes_balanced() &&
-      layer_created_count() == created_before + 3 &&
-      layer_disposed_count() == disposed_before + 3;
-}
+// verify_aegp_layer_render_options_suite2 and its async callback live in
+// worker_aegp_render_selftests.cpp.
 
 bool verify_pf_adv_app_suite_versions() {
   const void* suite1 = nullptr;
@@ -5834,6 +5814,13 @@ int selftest_effect_param_union(int, wchar_t**) {
   return passed ? 0 : 1;
 }
 
+bool run_pf_path_data_hardening_selftest() {
+  return verify_pf_path_data_hardening(
+      {&g_effect, &enumerate_pf_paths, &snapshot_pf_path, &bounded_pf_path_world},
+      {&g_layer, &raise_mask_access_violation, &mask_runtime_snapshot,
+       &snapshot_mask_curve, &mask_lifetimes_balanced, &install_synthetic_mask_scene});
+}
+
 int worker_main_impl(int argc, wchar_t **argv) {
   SceneSuiteFactoryHooks scene_factory{};
   scene_factory.render_scene_enabled = &scene_render_receipt_enabled;
@@ -5980,8 +5967,10 @@ int worker_main_impl(int argc, wchar_t **argv) {
               skipped.runtime->map_checkout_request[0] == -1;
         },
         &verify_pixel_data_suites, &verify_legacy_fill_matte_callbacks,
-        &verify_pf_ae_channel_suite, &verify_pf_color_suite,
-        &verify_pf_color_param_suite, &verify_iterate_suites,
+        &verify_pf_ae_channel_suite,
+        &aexcompat::pf_color_selftests::verify_pf_color_suite,
+        &aexcompat::pf_color_selftests::verify_pf_color_param_suite,
+        &verify_iterate_suites,
         &verify_world_transform_composite_rect, &verify_world_transform_affine,
         &verify_world_transform_blend, &verify_world_transform_transfer_mask,
         +[] { return verify_aegp_world_suite3() && verify_aegp_world_mfr_safety(); },
@@ -6005,157 +5994,23 @@ int worker_main_impl(int argc, wchar_t **argv) {
     std::cout << parameter_selftest.output;
     return parameter_selftest.exit_code;
   }
-  if (argc == 2 &&
-      std::wstring(argv[1]) == L"--self-test-aegp-layer-source-item") {
-    const bool passed = verify_aegp_layer_source_item();
-    std::cout << "{\"aegp_layer_source_item\":\""
-              << (passed ? "passed" : "failed")
-              << "\",\"successful_calls\":" << g_aegp_layer_source_item_calls
-              << ",\"item_type_calls\":" << g_aegp_item_type_calls
-              << "}\n";
-    return passed ? 0 : 1;
-  }
-  if (argc == 2 && std::wstring(argv[1]) == L"--self-test-pf-path-data-hardening") {
-    const bool passed = verify_pf_path_data_hardening(
-        {&g_effect, &enumerate_pf_paths, &snapshot_pf_path, &bounded_pf_path_world},
-        {&g_layer, &raise_mask_access_violation, &mask_runtime_snapshot,
-         &snapshot_mask_curve, &mask_lifetimes_balanced, &install_synthetic_mask_scene});
-    const auto path_report = aexcompat::pf_path_runtime::snapshot();
-    std::cout << "{\"pf_path_data_hardening\":\"" << (passed ? "passed" : "failed")
-              << "\",\"created\":" << path_report.preps_created
-              << ",\"disposed\":" << path_report.preps_disposed
-              << ",\"live\":" << path_report.live_preps
-              << ",\"balanced\":" << (aexcompat::pf_path_runtime::lifetimes_balanced() ? "true" : "false")
-              << "}\n";
-    return passed ? 0 : 1;
-  }
-  if (argc == 2 && std::wstring(argv[1]) == L"--self-test-pf-world-registry") {
-    const bool double_dispose = verify_world_double_dispose_rejected();
-    const bool allocation_limit = verify_world_allocation_limit_rejected();
-    const bool snapshot_atomic = verify_owned_world_snapshot_is_atomic();
-    const bool concurrent_snapshot =
-        verify_owned_world_snapshot_concurrent_dispose();
-    const auto world_stats = aexcompat::world_registry::statistics();
-    const bool passed = double_dispose && allocation_limit && snapshot_atomic &&
-        concurrent_snapshot &&
-        world_lifetimes_balanced() && world_stats.live_count == 0 &&
-        world_stats.live_bytes == 0;
-    std::cout << "{\"pf_world_registry\":\""
-              << (passed ? "passed" : "failed")
-              << "\",\"double_dispose_rejected\":"
-              << (double_dispose ? "true" : "false")
-              << ",\"allocation_limit_rejected\":"
-              << (allocation_limit ? "true" : "false")
-              << ",\"owned_snapshot_atomic\":"
-              << (snapshot_atomic ? "true" : "false")
-              << ",\"concurrent_snapshot_dispose\":"
-              << (concurrent_snapshot ? "true" : "false")
-              << ",\"live_count\":" << world_stats.live_count
-              << ",\"live_bytes\":" << world_stats.live_bytes << "}\n";
-    return passed ? 0 : 1;
-  }
-  if (argc == 4 && std::wstring(argv[1]) == L"--self-test-pf-ae-channel-transport" &&
-      std::wstring(argv[2]) == L"--aux-manifest-v1") {
-    const bool passed = verify_pf_ae_channel_transport(argv[3]);
-    const auto channel_transport = transport_statistics();
-    std::cout << "{\"pf_ae_channel_transport\":\""
-              << (passed ? "passed" : "failed")
-              << "\",\"row_bytes\":" << channel_transport.row_bytes
-              << ",\"origin\":[" << channel_transport.origin_x << ','
-              << channel_transport.origin_y << "]"
-              << ",\"duration\":" << channel_transport.duration << "}\n";
-    return passed ? 0 : 3;
-  }
-  if (argc == 2 && std::wstring(argv[1]) == L"--self-test-pf-color-settings-suite6") {
-    const bool passed =
-        aexcompat::color_settings::selftests::verify_pf_color_settings_suite6();
-    const auto& srgb_icc = color_settings_builtin_srgb_icc();
-    const auto& linear_icc = color_settings_builtin_linear_icc();
-    const auto color_stats = color_settings_statistics();
-    uint32_t memory_created = 0;
-    uint32_t memory_freed = 0;
-    uint64_t memory_residual = 0;
-    const auto memory_stats = aegp_memory_statistics();
-    memory_created = memory_stats.created;
-    memory_freed = memory_stats.freed;
-    memory_residual = memory_stats.live_bytes;
-    std::cout << "{\"pf_color_settings_suite6\":\"" << (passed ? "passed" : "failed")
-              << "\",\"profiles_created\":" << color_stats.profiles_created
-              << ",\"profiles_disposed\":" << color_stats.profiles_disposed
-              << ",\"profiles_live\":" << color_stats.profiles_live
-              << ",\"invalid_operations\":" << color_stats.invalid_operations
-              << ",\"xform_calls\":" << color_stats.xform_calls
-              << ",\"memory_created\":" << memory_created
-              << ",\"memory_freed\":" << memory_freed
-              << ",\"memory_residual_bytes\":" << memory_residual
-              << ",\"memory_balanced\":" << (aegp_memory_balanced() ? "true" : "false")
-              << ",\"srgb_icc_bytes\":" << srgb_icc.size()
-              << ",\"srgb_icc_sha256\":\"" << sha256_bytes(srgb_icc.data(), srgb_icc.size())
-              << "\",\"linear_icc_bytes\":" << linear_icc.size()
-              << ",\"linear_icc_sha256\":\"" << sha256_bytes(linear_icc.data(), linear_icc.size())
-              << "\",\"linear_icc_hex\":\"" << hex_bytes(linear_icc.data(), linear_icc.size())
-              << "\",\"ocio_enabled\":false}\n";
-    return passed ? 0 : 1;
-  }
-  if (argc == 2 &&
-      std::wstring(argv[1]) == L"--self-test-pf-effect-sequence-data-suite") {
-    const bool passed = verify_pf_effect_sequence_data_suite1();
-    std::cout << "{\"pf_effect_sequence_data_suite1\":\""
-              << (passed ? "passed" : "failed")
-              << "\",\"borrowed_handle\":true,\"mfr_concurrent_reads\":2048"
-              << ",\"live_sequences\":"
-              << live_effect_sequence_count()
-              << ",\"publications\":" << effect_sequence_publications()
-              << ",\"invalidations\":" << effect_sequence_invalidations() << "}\n";
-    return passed ? 0 : 36;
-  }
-  if (argc == 2 && std::wstring(argv[1]) == L"--self-test-aegp-async-receipt") {
-    const bool passed = verify_aegp_async_receipts();
-    std::cout << "{\"aegp_async_receipt\":\"" << (passed ? "passed" : "failed")
-              << "\",\"created\":" << aexcompat::render_receipts::statistics().created
-              << ",\"checked_in\":" << aexcompat::render_receipts::statistics().checked_in
-              << ",\"live\":" << aexcompat::render_receipts::statistics().live_count
-              << ",\"live_bytes\":" << aexcompat::render_receipts::statistics().live_bytes
-              << ",\"invalid_operations\":"
-              << aexcompat::render_receipts::statistics().invalid_operations
-              << "}\n";
-    return passed ? 0 : 1;
-  }
-  if (argc == 2 && std::wstring(argv[1]) == L"--self-test-aegp-render-options-suite1") {
-    const bool passed = verify_aegp_render_options_suite1();
-    std::cout << "{\"aegp_render_options_suite1\":\""
-              << (passed ? "passed" : "failed")
-              << "\",\"created\":" << item_created_count()
-              << ",\"disposed\":" << item_disposed_count()
-              << ",\"live\":" << item_live_count()
-              << ",\"receipts_created\":" << aexcompat::render_receipts::statistics().created
-              << ",\"receipts_checked_in\":" << aexcompat::render_receipts::statistics().checked_in
-              << ",\"invalid_operations\":" << item_invalid_count()
-              << ",\"baseline_argb8\":[" << static_cast<int>(g_render_options_baseline8[0]) << ','
-              << static_cast<int>(g_render_options_baseline8[1]) << ',' << static_cast<int>(g_render_options_baseline8[2]) << ',' << static_cast<int>(g_render_options_baseline8[3]) << ']'
-              << ",\"time_argb8\":[" << static_cast<int>(g_render_options_time8[0]) << ',' << static_cast<int>(g_render_options_time8[1]) << ',' << static_cast<int>(g_render_options_time8[2]) << ',' << static_cast<int>(g_render_options_time8[3]) << ']'
-              << ",\"downsample_argb8\":[" << static_cast<int>(g_render_options_downsample8[0]) << ',' << static_cast<int>(g_render_options_downsample8[1]) << ',' << static_cast<int>(g_render_options_downsample8[2]) << ',' << static_cast<int>(g_render_options_downsample8[3]) << ']'
-              << ",\"roi_outside_argb8\":[0,0,0,0],\"field_excluded_argb8\":[0,0,0,0]"
-              << ",\"roi_inside_argb8\":[" << static_cast<int>(g_render_options_roi_inside8[0]) << ',' << static_cast<int>(g_render_options_roi_inside8[1]) << ',' << static_cast<int>(g_render_options_roi_inside8[2]) << ',' << static_cast<int>(g_render_options_roi_inside8[3]) << ']'
-              << ",\"matte_argb8\":[" << static_cast<int>(g_render_options_matte8[0]) << ',' << static_cast<int>(g_render_options_matte8[1]) << ',' << static_cast<int>(g_render_options_matte8[2]) << ',' << static_cast<int>(g_render_options_matte8[3]) << ']'
-              << ",\"argb16\":[" << g_render_options_argb16[0] << ',' << g_render_options_argb16[1] << ',' << g_render_options_argb16[2] << ',' << g_render_options_argb16[3] << ']'
-              << std::setprecision(17) << ",\"argb32f\":[" << g_render_options_argb32f[0] << ',' << g_render_options_argb32f[1] << ',' << g_render_options_argb32f[2] << ',' << g_render_options_argb32f[3] << ']'
-              << "}\n";
-    return passed ? 0 : 1;
-  }
-  if (argc == 2 &&
-      std::wstring(argv[1]) == L"--self-test-aegp-item-staged-worlds") {
-    const bool passed = verify_aegp_item_staged_worlds();
-    const auto staged = aexcompat::aegp_staged_item_runtime::diagnostics();
-    std::cout << "{\"aegp_item_staged_worlds\":\""
-              << (passed ? "passed" : "failed")
-              << "\",\"immutable_stage\":true,\"reentrant_render_used\":false"
-              << ",\"published\":" << staged.published
-              << ",\"cache_hits\":" << staged.cache_hits
-              << ",\"cache_misses\":" << staged.cache_misses
-              << ",\"cycles_rejected\":" << staged.cycles_rejected
-              << "}\n";
-    return passed ? 0 : 1;
+  const auto custom_selftest =
+      aexcompat::worker_runtime::custom_selftests::dispatch(
+          {argc, argv},
+          {&run_pf_path_data_hardening_selftest,
+           &verify_world_double_dispose_rejected,
+           &verify_world_allocation_limit_rejected,
+           &verify_owned_world_snapshot_is_atomic,
+           &verify_owned_world_snapshot_concurrent_dispose,
+           &verify_pf_effect_sequence_data_suite1,
+           &verify_aegp_async_receipts, &sha256_bytes, &hex_bytes,
+           &g_render_options_baseline8, &g_render_options_time8,
+           &g_render_options_downsample8, &g_render_options_roi_inside8,
+           &g_render_options_matte8, &g_render_options_argb16,
+           &g_render_options_argb32f});
+  if (custom_selftest.handled) {
+    std::cout << custom_selftest.output;
+    return custom_selftest.exit_code;
   }
   // Consume an optional trailing --minidump-v1 <dir> pair for every worker
   // kind (render, smart, and the L2 inspection/params paths below) before any
@@ -6181,6 +6036,7 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
   auto& smart_directx = invocation.smart_directx;
   auto& smart_image_mode = invocation.smart_image_mode;
   auto& smart_layered_image_mode = invocation.smart_layered_image_mode;
+  auto& render_session_mode = invocation.render_session_mode;
   auto& external_pixel_bytes = invocation.external_pixel_bytes;
   auto& transport_argc = invocation.transport_argc;
   auto& image_click_argc = invocation.image_click_argc;
@@ -7101,6 +6957,8 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
   std::array<bool, 2> thread_guards{false, false};
   bool concurrent_render = false;
   bool persistent_sequence = false;
+  bool session_protocol_violation = false;
+  bool session_invariant_failure = false;
   bool flattened_sequence = false;
   bool copied_flattened_sequence = false;
   int32_t persistent_sequence_setup_error = -1;
@@ -7286,6 +7144,23 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
     render_error = thread_errors[0] == 0 && thread_errors[1] == 0 &&
         widths[0] == widths[1] && heights[0] == heights[1] && rowbytes[0] == rowbytes[1] &&
         input_hashes[0] == input_hashes[1] && thread_hashes[0] == thread_hashes[1] ? 0 : -1;
+  } else if (params_error == 0 && image_render_supported && depth_supported &&
+             render_session_mode) {
+    const auto session_outcome = run_render_session(
+        entry, input, output, &requested_parameters, external_width,
+        external_height, external_time_step, external_total_time,
+        external_time_scale, external_pixel_bytes);
+    persistent_sequence_setup_error = session_outcome.setup_error;
+    persistent_sequence_setdown_error = session_outcome.setdown_error;
+    render_width = session_outcome.width;
+    render_height = session_outcome.height;
+    render_rowbytes = session_outcome.rowbytes;
+    input_hash = session_outcome.input_hash;
+    output_hash = session_outcome.output_hash;
+    guards_intact = session_outcome.guards_intact;
+    session_protocol_violation = session_outcome.protocol_violation;
+    session_invariant_failure = session_outcome.invariant_failure;
+    render_error = session_outcome.render_error;
   } else if (params_error == 0 && image_render_supported && depth_supported) {
     render_error = render_once(entry, input, output, case_id, render_width, render_height,
                                render_rowbytes, input_hash, output_hash, guards_intact,
@@ -7584,6 +7459,11 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
          global_error, params_error, setdown_error, output, about_message, lifecycle_errors, lifecycle_data_null);
   }
   if (is_render_worker()) {
+    // Session fail-closed self-termination paths keep dedicated exit codes so
+    // the broker can distinguish protocol violations (23) and host-protection
+    // invariant failures (24) from ordinary render failures (21).
+    if (session_protocol_violation) return session.finish(23);
+    if (session_invariant_failure) return session.finish(24);
     return session.finish(global_error == 0 && params_error == 0 && parameter_count_contract_valid &&
       image_render_supported && depth_supported && render_error == 0 && guards_intact &&
       handle_lifetimes_balanced() && world_lifetimes_balanced() &&
@@ -7647,7 +7527,8 @@ const bool g_aegp_compat_selftests_configured = [] {
        &aegp_dispose_stream_value_v2, &aegp_dispose_stream_v2,
        &aegp_get_layer_source_item, &aegp_get_item_type,
        &g_aegp_item_suite,
-       &g_aegp_layer_source_item_calls, &g_aegp_item_type_calls});
+       &g_aegp_layer_source_item_calls, &g_aegp_item_type_calls,
+       &aegp_get_effect_param_union_by_index_v3});
   return true;
 }();
 const bool g_color_settings_selftests_configured = [] {
@@ -7666,5 +7547,17 @@ const bool g_parameter_selftests_configured = [] {
       &has_param_changed_obsolete,
       &have_inputs_changed_over_time_span_obsolete,
       &apply_parameter_animation});
+  return true;
+}();
+const bool g_pf_color_selftests_configured = [] {
+  aexcompat::pf_color_selftests::configure(
+      {&acquire_suite, &release_suite, &g_effect, &g_color_param_suite1,
+       &g_params,
+       +[](void* effect_ref, const void* definition,
+           aexcompat::pf_color_selftests::PixelFloat* output) -> int32_t {
+         return floating_point_from_color(
+             effect_ref, definition,
+             reinterpret_cast<PfColorParamPixelFloat*>(output));
+       }});
   return true;
 }();

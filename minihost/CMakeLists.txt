@@ -29,6 +29,7 @@ set(AEXCOMPAT_WORKER_RUNTIME_CORE_SOURCES
     src/worker_parameter_runtime.cpp
     src/worker_parameter_selftests.cpp
     src/worker_parameter_selftest_routing.cpp
+    src/worker_pf_color_selftests.cpp
     src/worker_parameter_execution.cpp
     src/worker_ui_event_execution.cpp
     src/pf_cache_on_load_suite.cpp
@@ -46,6 +47,7 @@ set(AEXCOMPAT_WORKER_RUNTIME_CORE_SOURCES
     src/worker_session.cpp
     src/worker_selftest_dispatch.cpp
     src/worker_fixed_selftest_routing.cpp
+    src/worker_custom_selftest_routing.cpp
     src/worker_smart_runtime.cpp
     src/worker_smart_execution.cpp
     src/worker_smart_setup.cpp
@@ -94,6 +96,7 @@ set(AEXCOMPAT_WORKER_RUNTIME_CORE_SOURCES
     src/worker_pf_state_runtime.cpp
     src/worker_report.cpp
     src/worker_request_parser.cpp
+    src/worker_render_session.cpp
     src/worker_invocation_orchestration.cpp
     src/worker_render_report.cpp
     src/worker_render_receipts.cpp

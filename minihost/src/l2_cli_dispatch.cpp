@@ -67,6 +67,19 @@ WorkerMode classify_worker_mode(
   const wchar_t* command = argc > 1 ? argv[1] : L"";
 
   if (kind == WorkerKind::Render) {
+    const bool session16 = equals(command, L"--render-session16-v1");
+    const bool session32 = equals(command, L"--render-session32-v1");
+    // Session launches carry no input/output paths and no current_time:
+    // [command, plugin, sha256, payload, max_width, max_height, time_step,
+    //  total_time, time_scale] (docs/RENDER_SESSION_PROTOCOL_2026-07-19.md §3).
+    mode.render_session_mode = effective_argc == 10 &&
+        (equals(command, L"--render-session-v1") || session16 || session32);
+    if (mode.render_session_mode) {
+      mode.external_pixel_bytes = session32 ? 16 : (session16 ? 8 : 4);
+      mode.request_mode = true;
+      mode.command_accepted = true;
+      return mode;
+    }
     const bool image16 = equals(command, L"--render-image16") ||
         equals(command, L"--render-image16-layer");
     const bool image32 = equals(command, L"--render-image32") ||

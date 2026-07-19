@@ -32,6 +32,8 @@ SELFTEST_DISPATCH_SOURCE = ROOT / "minihost" / "src" / "worker_selftest_dispatch
 FIXED_SELFTEST_ROUTING_SOURCE = ROOT / "minihost" / "src" / "worker_fixed_selftest_routing.cpp"
 PARAMETER_SELFTEST_ROUTING_SOURCE = (ROOT / "minihost" / "src" /
                                      "worker_parameter_selftest_routing.cpp")
+CUSTOM_SELFTEST_ROUTING_SOURCE = (ROOT / "minihost" / "src" /
+                                  "worker_custom_selftest_routing.cpp")
 REQUEST_PARSER_HEADER = ROOT / "minihost" / "src" / "worker_request_parser.hpp"
 REQUEST_PARSER_SOURCE = ROOT / "minihost" / "src" / "worker_request_parser.cpp"
 RENDER_REPORT_HEADER = ROOT / "minihost" / "src" / "worker_render_report.hpp"
@@ -145,6 +147,32 @@ class MinihostL2SourceTests(unittest.TestCase):
             self.assertIn(marker, routing)
             self.assertNotIn(marker, worker)
 
+    def test_custom_selftest_routes_are_a_true_translation_unit(self):
+        worker = SOURCE.read_text(encoding="utf-8")
+        routing = CUSTOM_SELFTEST_ROUTING_SOURCE.read_text(encoding="utf-8")
+        header = (ROOT / "minihost" / "src" /
+                  "worker_custom_selftest_routing.hpp").read_text(encoding="utf-8")
+        cmake = MINIHOST_CMAKE.read_text(encoding="utf-8")
+        self.assertIn("src/worker_custom_selftest_routing.cpp", cmake)
+        for marker in ("struct Request", "struct Hooks", "struct Result"):
+            self.assertIn(marker, header)
+        for marker in ('L"--self-test-aegp-layer-source-item"',
+                       'L"--self-test-pf-path-data-hardening"',
+                       'L"--self-test-pf-world-registry"',
+                       'L"--self-test-pf-ae-channel-transport"',
+                       'L"--self-test-pf-color-settings-suite6"',
+                       'L"--self-test-pf-effect-sequence-data-suite"',
+                       'L"--self-test-aegp-async-receipt"',
+                       'L"--self-test-aegp-render-options-suite1"',
+                       'L"--self-test-aegp-item-staged-worlds"',
+                       'pf_world_registry',
+                       'aegp_item_staged_worlds'):
+            self.assertIn(marker, routing)
+            self.assertNotIn(marker, worker)
+        # Host-private verification bodies stay behind explicit hooks.
+        self.assertIn("run_pf_path_data_hardening_selftest", worker)
+        self.assertNotIn("verify_pf_path_data_hardening(", routing)
+
     def test_aegp_compat_selftests_are_a_true_translation_unit(self):
         worker = SOURCE.read_text(encoding="utf-8")
         implementation = AEGP_COMPAT_SELFTESTS_SOURCE.read_text(encoding="utf-8")
@@ -154,7 +182,9 @@ class MinihostL2SourceTests(unittest.TestCase):
                      "verify_aegp_resizer_3d_chain",
                      "verify_aegp_apply_effect",
                      "verify_aegp_effect_stack",
-                     "verify_aegp_projector_levels"):
+                     "verify_aegp_projector_levels",
+                     "verify_aegp_effect_param_union_suite4",
+                     "verify_aegp_installed_effect_catalog_suite4"):
             self.assertIn(f"bool {name}()", implementation)
             self.assertNotIn(f"bool {name}()", worker)
         for name in ("run_verify_legacy_effect_compat_suites",

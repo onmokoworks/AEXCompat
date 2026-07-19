@@ -36,6 +36,7 @@ struct WorkerMode {
   bool audio_mode{};
   bool image_audio_mode{};
   bool image_mode{};
+  bool render_session_mode{};
   bool layered_image_mode{};
   bool image_click_context{};
   bool image_draw_context{};
