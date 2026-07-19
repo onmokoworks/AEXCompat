@@ -67,6 +67,7 @@
 #include "worker_session.hpp"
 #include "worker_selftest_dispatch.hpp"
 #include "worker_smart_runtime.hpp"
+#include "worker_mask_runtime.hpp"
 #include "worker_aegp_render_options.hpp"
 #include "worker_aegp_scene.hpp"
 #include "worker_aegp_scene_runtime.hpp"
@@ -678,8 +679,6 @@ bool g_output_checksum_detail = false;
 std::vector<uint32_t> g_output_row_crc32;
 std::array<std::string, 4> g_output_channel_sha256;
 bool g_mask_model_enabled = false;
-enum class MaskFault { None, CountError, CountCrash };
-MaskFault g_mask_fault = MaskFault::None;
 std::string g_mask_scene_id = "none";
 struct SpatialRatio { int32_t numerator{1}; uint32_t denominator{1}; };
 SpatialRatio g_downsample_x;
@@ -944,30 +943,28 @@ bool pf_path_lifetimes_balanced() {
 bool configure_mask_scene(const std::string& scene_id) {
   if (!g_stream_refs.empty() || !g_stream_values.empty() ||
       !g_add_keyframe_transactions.empty()) return false;
+  aexcompat::mask_runtime::SceneSeed seed;
+  if (!aexcompat::mask_runtime::build_scene_seed(scene_id, seed)) return false;
   g_mask_scene.clear();
   g_mask_scene.reserve(kMaxHostMasks);
   g_mask_lifetime = {};
-  g_mask_scene_id = scene_id;
-  const auto rectangle = [](double left, double top, double right, double bottom) {
+  g_mask_scene_id = seed.id;
+  for (auto& source : seed.masks) {
     HostMask mask;
     mask.id = g_next_mask_id++;
     mask.outline_stream_id = g_next_stream_id++;
     mask.feather_stream_id = g_next_stream_id++;
     mask.opacity_stream_id = g_next_stream_id++;
     mask.expansion_stream_id = g_next_stream_id++;
-    mask.vertices = {{left, top, 0, 0, 0, 0}, {right, top, 0, 0, 0, 0},
-                     {right, bottom, 0, 0, 0, 0}, {left, bottom, 0, 0, 0, 0},
-                     {left, top, 0, 0, 0, 0}};
-    return mask;
-  };
-  if (scene_id == "rectangle") g_mask_scene.push_back(rectangle(4, 3, 12, 9));
-  else if (scene_id == "translated_rectangle") g_mask_scene.push_back(rectangle(2, 2, 10, 8));
-  else if (scene_id == "two_rectangles") {
-    g_mask_scene.push_back(rectangle(1, 1, 7, 6));
-    g_mask_scene.push_back(rectangle(9, 5, 15, 11));
-  } else if (scene_id != "empty") return false;
-  int32_t order = 0;
-  for (auto& mask : g_mask_scene) mask.dynamic_order = order++;
+    mask.open = source.open;
+    mask.dynamic_order = source.dynamic_order;
+    mask.vertices.reserve(source.vertices.size());
+    for (const auto& vertex : source.vertices) {
+      mask.vertices.push_back({vertex.x, vertex.y, vertex.tangent_in_x,
+          vertex.tangent_in_y, vertex.tangent_out_x, vertex.tangent_out_y});
+    }
+    g_mask_scene.push_back(std::move(mask));
+  }
   return true;
 }
 
@@ -1185,10 +1182,10 @@ int32_t __cdecl get_effect_camera_matrix(void* effect, const AegpTime* comp_time
 
 int32_t __cdecl get_layer_num_masks(void* layer, int32_t* count) {
   if (layer != &g_layer || !count) return 4;
-  if (g_mask_fault == MaskFault::CountCrash) {
+  if (aexcompat::mask_runtime::fault() == aexcompat::mask_runtime::Fault::CountCrash) {
     RaiseException(EXCEPTION_ACCESS_VIOLATION, 0, 0, nullptr);
   }
-  if (g_mask_fault == MaskFault::CountError) return 4;
+  if (aexcompat::mask_runtime::fault() == aexcompat::mask_runtime::Fault::CountError) return 4;
   *count = static_cast<int32_t>(std::count_if(g_mask_scene.begin(), g_mask_scene.end(),
       [](const auto& mask) { return !mask.deleted; }));
   return 0;
@@ -15410,8 +15407,10 @@ int worker_main_impl(int argc, wchar_t **argv) {
   request_mode = worker_mode.request_mode;
   if (!worker_mode.command_accepted) return 2;
   g_mask_model_enabled = worker_mode.mask_model_enabled;
-  g_mask_fault = mask_count_error_mode ? MaskFault::CountError :
-      mask_count_crash_mode ? MaskFault::CountCrash : MaskFault::None;
+  aexcompat::mask_runtime::set_fault(mask_count_error_mode
+      ? aexcompat::mask_runtime::Fault::CountError
+      : mask_count_crash_mode ? aexcompat::mask_runtime::Fault::CountCrash
+                              : aexcompat::mask_runtime::Fault::None);
   if (request_mode && !parse_parameter_payload(argv[4], requested_parameters)) return 3;
   if (smart_image_mode) {
     try { external_width = std::stoi(argv[7]); external_height = std::stoi(argv[8]); } catch (...) { return 3; }
