@@ -162,7 +162,20 @@ mod worker {
             std::thread::sleep(std::time::Duration::from_secs(120));
             return 0;
         }
-        if args.len() != 10 || args[1] != "--render-session-v1" {
+        // Trailing auxiliary option pairs mirror the real worker's
+        // strip_auxiliary_options contract: peel them off the tail, and for
+        // --parameter-animation-v1 require the sidecar file to actually exist
+        // so a broker that passes the flag without writing the sidecar fails.
+        let mut effective = args.len();
+        while effective >= 12 && args[effective - 2].starts_with("--") {
+            if args[effective - 2] == "--parameter-animation-v1"
+                && !std::path::Path::new(&args[effective - 1]).is_file()
+            {
+                return 3;
+            }
+            effective -= 2;
+        }
+        if effective != 10 || args[1] != "--render-session-v1" {
             return 2;
         }
         let (Ok(width), Ok(height), Ok(time_scale)) = (

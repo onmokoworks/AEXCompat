@@ -1111,7 +1111,7 @@ pub fn parameter_animation_sidecar_json(animations: &[ParameterAnimation]) -> io
     Ok(bytes)
 }
 
-fn validate_animation_bindings(
+pub(crate) fn validate_animation_bindings(
     parameters: &[InteractiveParameter],
     animations: &[ParameterAnimation],
 ) -> io::Result<()> {
