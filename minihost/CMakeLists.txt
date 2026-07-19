@@ -96,6 +96,7 @@ set(AEXCOMPAT_WORKER_RUNTIME_CORE_SOURCES
     src/worker_pf_state_runtime.cpp
     src/worker_report.cpp
     src/worker_request_parser.cpp
+    src/worker_render_session.cpp
     src/worker_invocation_orchestration.cpp
     src/worker_render_report.cpp
     src/worker_render_receipts.cpp
