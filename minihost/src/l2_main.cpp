@@ -4966,52 +4966,61 @@ int32_t classic_render_runtime(EffectEntry entry, std::array<std::byte, kInSize>
     error = aexcompat::worker_runtime::classic_execution::finish_lifecycle(
         &lifecycle_host, lifecycle, lifecycle_hooks, false);
   } else {
-    if (error == 0 && lifecycle_hooks.draw && !lifecycle_hooks.draw(&lifecycle_host))
-      error = -5;
-    if (error == 0) {
-      const int32_t requested_width = read<int32_t>(command_output, kOutWidth);
-      const int32_t requested_height = read<int32_t>(command_output, kOutHeight);
-      if (!aexcompat::render::validate_output_extent(
-              width, height, requested_width, requested_height,
-              read<uint32_t>(command_output, kOutFlags))) {
-        error = 4;
-      } else if (requested_width > 0 && requested_height > 0) {
-        {
-          width = requested_width;
-          height = requested_height;
-          rowbytes = width * pixel_bytes;
-          if (!guarded.reset(static_cast<std::size_t>(rowbytes) * height)) return -3;
-          destination = guarded.data();
-          if (!aexcompat::render::prepare_world_layout(
-                  output_world, {pixel_bytes == 4 ? 0 : 1, pixel_bytes, width, height, rowbytes},
-                  destination)) return -3;
-          if (!dispatch_worlds.register_world(output_world.data(), dispatch_pixel_format))
-            error = 4;
-          write<int32_t>(input, 276, read<int32_t>(command_output, kOutOrigin));
-          write<int32_t>(input, 280, read<int32_t>(command_output, kOutOrigin + 4));
-        }
-      }
-    }
-    if (error == 0) {
-      struct LayerRenderContextScope {
-        LayerRenderContext previous;
-        explicit LayerRenderContextScope(LayerRenderContext context)
-            : previous(aexcompat::aegp_layer_render_runtime::replace_context(
-                  std::move(context))) {}
-        ~LayerRenderContextScope() {
-          aexcompat::aegp_layer_render_runtime::replace_context(std::move(previous));
-        }
-      } receipt_context_scope({entry, &input, &command_output, external_current_time,
-          static_cast<int32_t>(external_time_scale), case_id, requested, external_rgba,
-          external_layers, external_width, external_height, external_time_step,
-          external_total_time, pixel_bytes, &logical_source, width, height});
-      classic_context->mark_selector_dispatched();
-      error = entry(kRender, input.data(), command_output.data(), params.data(),
-                    output_world.data(), nullptr);
-    }
-    if (g_render_ui_context_active &&
-        !close_render_ui_context(entry, input, command_output, definitions) && error == 0)
-      error = -5;
+    struct ClassicDispatchHost {
+      EffectEntry entry; std::array<std::byte, kInSize>* input;
+      std::array<std::byte, kOutSize>* output; decltype(output_world)* world;
+      decltype(guarded)* guarded; decltype(dispatch_worlds)* worlds;
+      std::vector<std::array<std::byte, kParamSize>>* definitions;
+      std::vector<void*>* params; int32_t *width, *height, *rowbytes;
+      unsigned char** destination; int32_t pixel_bytes, pixel_format;
+      int32_t current_time, time_step, total_time; uint32_t time_scale;
+      const std::string* case_id; const RequestedAssignments* requested;
+      const std::vector<unsigned char>* external_rgba;
+      const std::vector<ExternalLayerInput>* external_layers;
+      int32_t external_width, external_height;
+      decltype(classic_context) classic_context;
+      std::vector<unsigned char>* logical_source;
+    } dispatch_host{entry, &input, &command_output, &output_world, &guarded,
+        &dispatch_worlds, &definitions, &params, &width, &height, &rowbytes,
+        &destination, pixel_bytes, dispatch_pixel_format, external_current_time,
+        external_time_step, external_total_time, external_time_scale, &case_id,
+        requested, external_rgba, external_layers, external_width, external_height,
+        classic_context, &logical_source};
+    error = aexcompat::worker_runtime::classic_execution::dispatch_render(
+        &dispatch_host, error, {
+          +[](void* opaque) { auto& h = *static_cast<ClassicDispatchHost*>(opaque);
+            return dispatch_render_draw(h.entry, *h.input, *h.output, *h.definitions); },
+          +[](void* opaque) { auto& h = *static_cast<ClassicDispatchHost*>(opaque);
+            const int32_t w = read<int32_t>(*h.output, kOutWidth);
+            const int32_t height = read<int32_t>(*h.output, kOutHeight);
+            if (!aexcompat::render::validate_output_extent(*h.width, *h.height, w, height,
+                    read<uint32_t>(*h.output, kOutFlags))) return 4;
+            if (w <= 0 || height <= 0) return 0;
+            *h.width = w; *h.height = height; *h.rowbytes = w * h.pixel_bytes;
+            if (!h.guarded->reset(static_cast<std::size_t>(*h.rowbytes) * height)) return -3;
+            *h.destination = h.guarded->data();
+            if (!aexcompat::render::prepare_world_layout(*h.world,
+                    {h.pixel_bytes == 4 ? 0 : 1, h.pixel_bytes, w, height, *h.rowbytes},
+                    *h.destination)) return -3;
+            if (!h.worlds->register_world(h.world->data(), h.pixel_format)) return 4;
+            write<int32_t>(*h.input, 276, read<int32_t>(*h.output, kOutOrigin));
+            write<int32_t>(*h.input, 280, read<int32_t>(*h.output, kOutOrigin + 4));
+            return 0; },
+          +[](void* opaque) { auto& h = *static_cast<ClassicDispatchHost*>(opaque);
+            struct Scope { LayerRenderContext previous; Scope(LayerRenderContext next)
+                : previous(aexcompat::aegp_layer_render_runtime::replace_context(std::move(next))) {}
+              ~Scope() { aexcompat::aegp_layer_render_runtime::replace_context(std::move(previous)); }}
+            scope({h.entry, h.input, h.output, h.current_time,
+              static_cast<int32_t>(h.time_scale), *h.case_id, h.requested, h.external_rgba,
+              h.external_layers, h.external_width, h.external_height, h.time_step,
+              h.total_time, h.pixel_bytes, h.logical_source, *h.width, *h.height});
+            h.classic_context->mark_selector_dispatched();
+            const auto callback = h.entry;
+            return callback(kRender, h.input->data(), h.output->data(), h.params->data(),
+                           h.world->data(), nullptr); },
+          +[](void* opaque) { auto& h = *static_cast<ClassicDispatchHost*>(opaque);
+            return !g_render_ui_context_active ||
+                close_render_ui_context(h.entry, *h.input, *h.output, *h.definitions); }});
     lifecycle.error = error;
     error = aexcompat::worker_runtime::classic_execution::finish_lifecycle(
         &lifecycle_host, lifecycle, lifecycle_hooks, false);

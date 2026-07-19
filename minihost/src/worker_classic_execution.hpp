@@ -19,6 +19,13 @@ struct LifecycleResult { void* lifecycle{}; int32_t error{}; };
 LifecycleResult begin_lifecycle(void* host, const LifecycleHooks& hooks);
 int32_t finish_lifecycle(void* host, LifecycleResult& state,
                          const LifecycleHooks& hooks, bool draw);
+struct RenderHooks {
+  bool (*draw)(void* host);
+  int32_t (*prepare_output)(void* host);
+  int32_t (*dispatch_selector)(void* host);
+  bool (*close_ui)(void* host);
+};
+int32_t dispatch_render(void* host, int32_t error, const RenderHooks& hooks);
 struct Hooks {
   bool (*copy_packed)(const unsigned char*, int32_t, int32_t, int32_t, int32_t,
                       std::vector<unsigned char>&);

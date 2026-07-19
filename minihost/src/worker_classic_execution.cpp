@@ -29,6 +29,15 @@ int32_t finish_lifecycle(void* host, LifecycleResult& state,
   return state.error;
 }
 
+int32_t dispatch_render(void* host, int32_t error, const RenderHooks& h) {
+  if (!host || !h.prepare_output || !h.dispatch_selector || !h.close_ui) return -5;
+  if (error == 0 && h.draw && !h.draw(host)) error = -5;
+  if (error == 0) error = h.prepare_output(host);
+  if (error == 0) error = h.dispatch_selector(host);
+  if (!h.close_ui(host) && error == 0) error = -5;
+  return error;
+}
+
 int finalize(Context& c, const Hooks& h) {
   std::vector<unsigned char> logical;
   if (!h.copy_packed || !h.hash || !h.copy_packed(c.destination, c.rowbytes, c.width,
