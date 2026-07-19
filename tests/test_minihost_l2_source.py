@@ -39,6 +39,7 @@ AEGP_INIT_RUNTIME_SOURCE = ROOT / "minihost" / "src" / "worker_aegp_init_runtime
 AEGP_RENDER_SELFTEST_HEADER = ROOT / "minihost" / "src" / "worker_aegp_render_selftests.hpp"
 AEGP_RENDER_SELFTEST_SOURCE = ROOT / "minihost" / "src" / "worker_aegp_render_selftests.cpp"
 AEGP_ASYNC_LAYER_RUNTIME = ROOT / "minihost" / "src" / "worker_aegp_async_layer_runtime.cpp"
+AEGP_HOST_SELFTESTS_SOURCE = ROOT / "minihost" / "src" / "worker_aegp_host_selftests.cpp"
 MASK_RUNTIME_HEADER = ROOT / "minihost" / "src" / "worker_mask_runtime.hpp"
 MASK_RUNTIME_SOURCE = ROOT / "minihost" / "src" / "worker_mask_runtime.cpp"
 MASK_RUNTIME_CALLBACKS = ROOT / "minihost" / "src" / "worker_mask_runtime_callbacks.cpp"
@@ -56,6 +57,7 @@ def l2_family_source():
         PF_WORLD_TRANSFORM_SOURCE,
         AEGP_SCENE_SOURCE, AEGP_SCENE_HEADER, AEGP_SCENE_RUNTIME_HEADER,
         AEGP_SCENE_RUNTIME_SOURCE, AEGP_INIT_RUNTIME_HEADER, AEGP_INIT_RUNTIME_SOURCE,
+        AEGP_HOST_SELFTESTS_SOURCE,
         MASK_RUNTIME_HEADER, MASK_RUNTIME_SOURCE, MASK_RUNTIME_CALLBACKS,
         MASK_SELFTESTS_SOURCE,
         HANDLE_RUNTIME_HEADER, HANDLE_RUNTIME_SOURCE,
@@ -67,6 +69,19 @@ def l2_family_source():
 
 
 class MinihostL2SourceTests(unittest.TestCase):
+    def test_aegp_host_selftests_are_a_true_translation_unit(self):
+        worker = SOURCE.read_text(encoding="utf-8")
+        implementation = AEGP_HOST_SELFTESTS_SOURCE.read_text(encoding="utf-8")
+        self.assertIn("src/worker_aegp_host_selftests.cpp", MINIHOST_CMAKE.read_text(encoding="utf-8"))
+        for name in (
+            "verify_pre_checkout_result_contract",
+            "verify_handle_resize_while_locked_rejected",
+            "verify_aegp_memory_and_strings_rejection",
+            "verify_aegp_keyframe_suite5_mutations",
+        ):
+            self.assertIn(f"bool {name}(", implementation)
+            self.assertNotIn(f"bool {name}(", worker)
+
     def test_aegp_async_layer_queue_owns_state_and_threads(self):
         worker = SOURCE.read_text(encoding="utf-8")
         runtime = AEGP_ASYNC_LAYER_RUNTIME.read_text(encoding="utf-8")
@@ -433,7 +448,7 @@ class MinihostL2SourceTests(unittest.TestCase):
             self.assertIn(assignment, compact)
         for marker in (
             'L"--self-test-aegp-keyframe-mutations"',
-            "verify_aegp_keyframe_suite5_mutations()",
+            "verify_aegp_keyframe_suite5_mutations(",
             "verify_keyframe_ownership_rejection()",
             "g_stream_refs.empty()", "g_stream_values.empty()",
             "g_add_keyframe_transactions.empty()", "mask_lifetimes_balanced()",

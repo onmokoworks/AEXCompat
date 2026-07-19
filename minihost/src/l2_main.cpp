@@ -80,6 +80,7 @@
 #include "worker_aegp_world_selftests.hpp"
 #include "worker_aegp_init_runtime.hpp"
 #include "worker_aegp_scene.hpp"
+#include "worker_aegp_host_selftests.hpp"
 #include "worker_aegp_scene_runtime.hpp"
 #include "worker_classic_runtime.hpp"
 #include "worker_color_settings_runtime.hpp"
@@ -899,76 +900,8 @@ int32_t __cdecl guid_mix_in_ptr(void* effect_ref, uint32_t size, const void* byt
   return result;
 }
 
-bool verify_pre_checkout_result_case(int32_t expected_par_numerator,
-                                     int32_t expected_par_denominator,
-                                     int32_t expected_reference_width,
-                                     int32_t expected_reference_height) {
-  std::array<std::byte, kCheckoutResultBytes> result{};
-  result.fill(std::byte{0xCD});
-  const int32_t status = pre_checkout_layer(
-      nullptr, 0, 0, nullptr, g_checkout_current_time, 1,
-      g_checkout_current_time_scale, result.data());
-  if (status != 0) return false;
-  int32_t rect[4];
-  std::memcpy(rect, result.data(), sizeof(rect));
-  if (rect[0] != 0 || rect[1] != 0 || rect[2] != 640 || rect[3] != 360) return false;
-  std::memcpy(rect, result.data() + 16, sizeof(rect));
-  if (rect[0] != 0 || rect[1] != 0 || rect[2] != 640 || rect[3] != 360) return false;
-  int32_t par[2];
-  std::memcpy(par, result.data() + 32, sizeof(par));
-  if (par[0] != expected_par_numerator || par[1] != expected_par_denominator) return false;
-  int32_t reference_size[2];
-  std::memcpy(reference_size, result.data() + 44, sizeof(reference_size));
-  if (reference_size[0] != expected_reference_width ||
-      reference_size[1] != expected_reference_height) return false;
-  for (std::size_t offset = 40; offset < 44; ++offset) {
-    if (result[offset] != std::byte{0}) return false;
-  }
-  for (std::size_t offset = 52; offset < kCheckoutResultBytes; ++offset) {
-    if (result[offset] != std::byte{0}) return false;
-  }
-  return true;
-}
 
-bool verify_pre_checkout_result_contract() {
-  SmartRuntimeSession smart_session;
-  const int32_t saved_width = smart_state().width;
-  const int32_t saved_height = smart_state().height;
-  const SpatialRatio saved_par = g_pixel_aspect_ratio;
-  const int32_t saved_full_width = g_full_resolution_width;
-  const int32_t saved_full_height = g_full_resolution_height;
-  smart_state().width = 640;
-  smart_state().height = 360;
-  smart_state().current_time = g_checkout_current_time;
-  smart_state().current_time_scale = g_checkout_current_time_scale;
-  smart_state().pixel_aspect_numerator = 1;
-  smart_state().pixel_aspect_denominator = 1;
-  smart_state().full_resolution_width = 0;
-  smart_state().full_resolution_height = 0;
-  bool passed = verify_pre_checkout_result_case(1, 1, 640, 360);
-  smart_state().pixel_aspect_numerator = 10;
-  smart_state().pixel_aspect_denominator = 11;
-  smart_state().full_resolution_width = 1280;
-  smart_state().full_resolution_height = 720;
-  passed = verify_pre_checkout_result_case(10, 11, 1280, 720) && passed;
-  smart_state().width = saved_width;
-  smart_state().height = saved_height;
-  g_pixel_aspect_ratio = saved_par;
-  g_full_resolution_width = saved_full_width;
-  g_full_resolution_height = saved_full_height;
-  return passed;
-}
 
-bool verify_handle_resize_while_locked_rejected() {
-  const uint32_t invalid_before = statistics().invalid_operations;
-  void** handle = new_handle(16);
-  if (!handle || !lock_handle(handle)) return false;
-  const int32_t resize_error = resize_handle(32, &handle);
-  unlock_handle(handle);
-  dispose_handle(handle);
-  return resize_error != 0 && statistics().invalid_operations == invalid_before + 1 &&
-      handle_lifetimes_balanced();
-}
 
 int32_t __cdecl register_with_aegp(void*, const char*, int32_t* plugin_id) {
   if (!plugin_id) return 4;
@@ -1005,46 +938,6 @@ int32_t __cdecl get_effect_camera_matrix(void* effect, const AegpTime* comp_time
 
 
 
-bool verify_aegp_memory_and_strings_rejection() {
-  const auto original_scene = g_mask_scene;
-  const auto memory_before = aegp_memory_statistics();
-  void* memory = nullptr; void* data = nullptr; uint32_t size{}; int32_t count{}, total{};
-  bool passed = new_aegp_mem_handle(1, "fault probe", 32, 1, &memory) == 0 &&
-      lock_aegp_mem_handle(memory, &data) == 0 && data &&
-      std::all_of(static_cast<std::byte*>(data), static_cast<std::byte*>(data) + 32,
-          [](std::byte value) { return value == std::byte{}; }) &&
-      lock_aegp_mem_handle(memory, &data) == 0 &&
-      resize_aegp_mem_handle("locked", 64, memory) != 0 &&
-      unlock_aegp_mem_handle(memory) == 0 && unlock_aegp_mem_handle(memory) == 0 &&
-      resize_aegp_mem_handle("resized", 64, memory) == 0 &&
-      get_aegp_mem_handle_size(memory, &size) == 0 && size == 64 &&
-      get_aegp_mem_stats(1, &count, &total) == 0 && count == 1 && total == 64 &&
-      free_aegp_mem_handle(memory) == 0;
-  void* mask = nullptr; void* stream = nullptr; void* name = nullptr; void* expression = nullptr;
-  passed = passed && get_layer_mask_by_index(&g_layer, 0, &mask) == 0 &&
-      get_new_mask_stream(1, mask, 400, &stream) == 0 &&
-      unsupported_stream_name(1, stream, 1, &name) == 0 &&
-      lock_aegp_mem_handle(name, &data) == 0 && data &&
-      std::u16string(static_cast<const char16_t*>(data)) == u"Mask Path" &&
-      unlock_aegp_mem_handle(name) == 0 && free_aegp_mem_handle(name) == 0;
-  const uint16_t source[]{'t','i','m','e','*','2',0}; uint8_t enabled{};
-  passed = passed && unsupported_set_expression(1, stream, source) == 0 &&
-      get_expression_state(1, stream, &enabled) == 0 && enabled == 1 &&
-      unsupported_get_expression(1, stream, &expression) == 0 &&
-      lock_aegp_mem_handle(expression, &data) == 0 && data &&
-      std::u16string(static_cast<const char16_t*>(data)) == u"time*2" &&
-      unlock_aegp_mem_handle(expression) == 0 && free_aegp_mem_handle(expression) == 0 &&
-      reject_expression_state(1, stream, 0) == 0 &&
-      get_expression_state(1, stream, &enabled) == 0 && enabled == 0 &&
-      dispose_stream(stream) == 0 && dispose_mask(mask) == 0;
-  const bool balanced = mask_lifetimes_balanced() && aegp_memory_balanced();
-  g_mask_scene = original_scene; g_mask_scene.reserve(kMaxHostMasks);
-  const auto memory_after = aegp_memory_statistics();
-  return passed && balanced &&
-      memory_after.invalid_operations == memory_before.invalid_operations + 1 &&
-      memory_after.created == memory_before.created + 3 &&
-      memory_after.freed == memory_before.freed + 3;
-}
 
 
 
@@ -1639,40 +1532,19 @@ KeyframeSuite g_keyframe_suite{&get_stream_num_keyframes, &get_keyframe_time,
     &start_add_keyframes, &add_keyframes, &set_add_keyframe,
     &end_add_keyframes, &get_keyframe_label, &set_keyframe_label};
 
-bool verify_aegp_keyframe_suite5_mutations() {
-  const bool abi_wiring =
-      g_keyframe_suite.get_stream_num_keyframes == &get_stream_num_keyframes &&
-      g_keyframe_suite.get_keyframe_time == &get_keyframe_time &&
-      g_keyframe_suite.insert_keyframe == &insert_keyframe &&
-      g_keyframe_suite.delete_keyframe == &delete_keyframe &&
-      g_keyframe_suite.get_new_keyframe_value == &get_new_keyframe_value &&
-      g_keyframe_suite.set_keyframe_value == &set_keyframe_value &&
-      g_keyframe_suite.get_stream_value_dimensionality == &get_stream_value_dimensionality &&
-      g_keyframe_suite.get_stream_temporal_dimensionality ==
-          &get_stream_temporal_dimensionality &&
-      g_keyframe_suite.get_new_keyframe_spatial_tangents ==
-          &get_new_keyframe_spatial_tangents &&
-      g_keyframe_suite.set_keyframe_spatial_tangents == &set_keyframe_spatial_tangents &&
-      g_keyframe_suite.get_keyframe_temporal_ease == &get_keyframe_temporal_ease &&
-      g_keyframe_suite.set_keyframe_temporal_ease == &set_keyframe_temporal_ease &&
-      g_keyframe_suite.get_keyframe_flags == &get_keyframe_flags &&
-      g_keyframe_suite.set_keyframe_flag == &set_keyframe_flag &&
-      g_keyframe_suite.get_keyframe_interpolation == &get_keyframe_interpolation &&
-      g_keyframe_suite.set_keyframe_interpolation == &set_keyframe_interpolation &&
-      g_keyframe_suite.start_add_keyframes == &start_add_keyframes &&
-      g_keyframe_suite.add_keyframes == &add_keyframes &&
-      g_keyframe_suite.set_add_keyframe == &set_add_keyframe &&
-      g_keyframe_suite.end_add_keyframes == &end_add_keyframes &&
-      g_keyframe_suite.get_keyframe_label_color_index == &get_keyframe_label &&
-      g_keyframe_suite.set_keyframe_label_color_index == &set_keyframe_label;
-  if (!abi_wiring || !configure_mask_scene("rectangle")) return false;
-  const bool passed = verify_keyframe_ownership_rejection() &&
-      g_stream_refs.empty() && g_stream_values.empty() &&
-      g_add_keyframe_transactions.empty() && mask_lifetimes_balanced();
-  g_mask_scene.clear();
-  g_mask_scene_id = "none";
-  return passed;
+bool keyframe_suite5_abi_wiring_valid() {
+  const KeyframeSuite expected{&get_stream_num_keyframes, &get_keyframe_time,
+      &insert_keyframe, &delete_keyframe, &get_new_keyframe_value,
+      &set_keyframe_value, &get_stream_value_dimensionality,
+      &get_stream_temporal_dimensionality, &get_new_keyframe_spatial_tangents,
+      &set_keyframe_spatial_tangents, &get_keyframe_temporal_ease,
+      &set_keyframe_temporal_ease, &get_keyframe_flags, &set_keyframe_flag,
+      &get_keyframe_interpolation, &set_keyframe_interpolation,
+      &start_add_keyframes, &add_keyframes, &set_add_keyframe,
+      &end_add_keyframes, &get_keyframe_label, &set_keyframe_label};
+  return std::memcmp(&g_keyframe_suite, &expected, sizeof(expected)) == 0;
 }
+
 DynamicStreamSuite g_dynamic_stream_suite{&get_new_dynamic_stream_for_layer,
     &get_new_dynamic_stream_for_mask, &get_dynamic_stream_depth,
     &get_dynamic_stream_grouping_type, &get_num_streams_in_group,
@@ -8857,7 +8729,8 @@ int worker_main_impl(int argc, wchar_t **argv) {
   }
   if (argc == 2 &&
       std::wstring(argv[1]) == L"--self-test-aegp-keyframe-mutations") {
-    const bool passed = verify_aegp_keyframe_suite5_mutations();
+    const bool passed = verify_aegp_keyframe_suite5_mutations(
+        keyframe_suite5_abi_wiring_valid());
     std::cout << "{\"aegp_keyframe_mutations\":\""
               << (passed ? "passed" : "failed")
               << "\",\"mutations\":" << g_keyframe_mutations
