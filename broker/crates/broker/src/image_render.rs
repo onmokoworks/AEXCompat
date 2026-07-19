@@ -4213,6 +4213,52 @@ fn render_with_artifact(
     // never by this AEX-agnostic transport path.
     let payload = payload_override.unwrap_or_else(|| "v2|".to_owned());
 
+    // Issue #98 stage W2: plain classic CPU renders route through a resident
+    // length-1 render session so the one-shot argv transport can eventually
+    // retire. Anything the session transport cannot carry yet keeps the
+    // one-shot dispatch below, as does any session-infrastructure failure
+    // (the one-shot re-run then reports through the original path). Gate
+    // failures inside the session path are final: they are the same
+    // fail-closed validation the one-shot path applies.
+    if !smart
+        && host_context.is_none()
+        && secondaries.is_empty()
+        && timed_secondaries.is_empty()
+        && audio.is_none()
+        && custom_ui_action.is_none()
+        && gpu_backend == RenderGpuBackend::Auto
+        && payload == encode_interactive_payload(interactive_parameters.unwrap_or_default())?
+        && std::env::var_os(DISABLE_SESSION_WRAPPER_ENV).is_none()
+    {
+        match render_classic_via_length_one_session(&SessionWrapperRequest {
+            repository,
+            plugin_id,
+            plugin_path,
+            plugin_sha256,
+            timeout_ms,
+            output_path,
+            preserved_output: preserved_output.as_deref(),
+            interactive_parameters,
+            parameter_animation,
+            timing,
+            pixel_format,
+            deep_png_output,
+            dependencies: &dependencies,
+            rgba: &rgba,
+            width,
+            height,
+            spatial,
+            expected_quality,
+            expected_field,
+            expected_shutter_angle,
+            expected_shutter_phase,
+        }) {
+            SessionWrapperOutcome::Report(report) => return Ok(report),
+            SessionWrapperOutcome::Failure(error) => return Err(error),
+            SessionWrapperOutcome::Fallback => {}
+        }
+    }
+
     let root = repository.join("target/image-transport");
     fs::create_dir_all(&root)?;
     cleanup_stale_image_transport(&root, SystemTime::now())?;
@@ -4745,6 +4791,233 @@ fn render_with_artifact(
     Ok(build_interactive_image_report(&worker_report, facts))
 }
 
+
+/// Escape hatch for A/B verification against the one-shot argv transport;
+/// the equivalence test renders both ways and diffs the public reports.
+pub const DISABLE_SESSION_WRAPPER_ENV: &str = "AEXCOMPAT_DISABLE_RENDER_SESSION_WRAPPER";
+
+/// Diagnostic counter for tests: incremented whenever a render is carried by
+/// the length-1 session wrapper instead of the one-shot argv transport.
+pub static RENDER_SESSION_WRAPPER_RENDERS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+struct SessionWrapperRequest<'a> {
+    repository: &'a Path,
+    plugin_id: &'a str,
+    plugin_path: &'a Path,
+    plugin_sha256: &'a str,
+    timeout_ms: u64,
+    output_path: &'a Path,
+    preserved_output: Option<&'a Path>,
+    interactive_parameters: Option<&'a [InteractiveParameter]>,
+    parameter_animation: Option<&'a [ParameterAnimation]>,
+    timing: RenderTiming,
+    pixel_format: RenderPixelFormat,
+    deep_png_output: bool,
+    dependencies: &'a [ApprovedImageArtifact],
+    rgba: &'a [u8],
+    width: u32,
+    height: u32,
+    spatial: crate::render_request::SpatialContext,
+    expected_quality: i32,
+    expected_field: i32,
+    expected_shutter_angle: i32,
+    expected_shutter_phase: i32,
+}
+
+enum SessionWrapperOutcome {
+    /// The session rendered and validated the frame; this is the public
+    /// report, identical in shape to the one-shot flattening.
+    Report(Value),
+    /// The session ran but the shared fail-closed validation rejected the
+    /// worker's output; the one-shot path would have failed identically, so
+    /// this is final rather than a fallback.
+    Failure(io::Error),
+    /// The session infrastructure could not carry the render (open failure,
+    /// worker crash or invalidation, malformed close summary); the caller
+    /// re-runs the one-shot transport, which reports its own outcome.
+    Fallback,
+}
+
+#[cfg(not(windows))]
+fn render_classic_via_length_one_session(_: &SessionWrapperRequest<'_>) -> SessionWrapperOutcome {
+    SessionWrapperOutcome::Fallback
+}
+
+#[cfg(windows)]
+fn render_classic_via_length_one_session(
+    request: &SessionWrapperRequest<'_>,
+) -> SessionWrapperOutcome {
+    use crate::render_session::{FrameStatus, RenderSession, SessionOpenRequest};
+
+    let world_dump_dir = match requested_world_dump_dir(request.repository) {
+        Ok(value) => value,
+        Err(error) => return SessionWrapperOutcome::Failure(error),
+    };
+    let minidump_dir = match requested_minidump_dir(request.repository) {
+        Ok(value) => value,
+        Err(error) => return SessionWrapperOutcome::Failure(error),
+    };
+    let output_checksum_detail = output_checksum_detail_requested();
+    let mut session = match RenderSession::open(SessionOpenRequest {
+        repository: request.repository,
+        plugin_path: request.plugin_path,
+        plugin_sha256: request.plugin_sha256,
+        parameters: request.interactive_parameters,
+        parameter_animation: request.parameter_animation,
+        aux_manifest: None,
+        world_dump_dir: world_dump_dir.as_ref().map(|dump| dump.path.as_path()),
+        output_checksum_detail,
+        dependencies: request.dependencies.to_vec(),
+        width: request.width,
+        height: request.height,
+        pixel_format: request.pixel_format,
+        time_step: request.timing.time_step,
+        total_time: request.timing.total_time,
+        time_scale: request.timing.time_scale,
+        frame_deadline: Duration::from_millis(request.timeout_ms),
+    }) {
+        Ok(session) => session,
+        Err(_) => return SessionWrapperOutcome::Fallback,
+    };
+    let outcome = match session.render_frame(0, request.timing.current_time, request.rgba) {
+        Ok(outcome) => outcome,
+        // Invalidation (crash, deadline, dimension or guard invariant): the
+        // one-shot transport may still carry this render, for example for an
+        // effect that legally resizes its output.
+        Err(_) => {
+            let _ = session.close();
+            return SessionWrapperOutcome::Fallback;
+        }
+    };
+    let close = session.close();
+    if close.get("session_clean") != Some(&Value::Bool(true))
+        || close.get("invalidated") != Some(&Value::Bool(false))
+    {
+        return SessionWrapperOutcome::Fallback;
+    }
+    let Some(final_report) = close.get("final_report").filter(|value| value.is_object()).cloned()
+    else {
+        return SessionWrapperOutcome::Fallback;
+    };
+    let classification = close["worker"]["classification"]
+        .as_str()
+        .unwrap_or("unknown")
+        .to_owned();
+    let diagnostics = close["worker"]["diagnostics"].clone();
+    let gate = validate_interactive_worker_report(
+        &final_report,
+        &diagnostics,
+        &InteractiveGateFacts {
+            smart: false,
+            pixel_format: request.pixel_format,
+            spatial: request.spatial,
+            expected_quality: request.expected_quality,
+            expected_field: request.expected_field,
+            expected_shutter_angle: request.expected_shutter_angle,
+            expected_shutter_phase: request.expected_shutter_phase,
+            custom_ui_action: None,
+            audio_present: false,
+            interactive_parameters: request.interactive_parameters,
+            classification: &classification,
+            time_step: request.timing.time_step,
+            input_width: request.width,
+            input_height: request.height,
+        },
+    );
+    let (output_origin_ok, parameter_count_ok, spatial_ok) = match gate {
+        Ok(values) => values,
+        Err(error) => return SessionWrapperOutcome::Failure(error),
+    };
+    let pixels = match outcome.status {
+        FrameStatus::Rendered { pixels, .. } => pixels,
+        FrameStatus::FrameError { render_error } => {
+            // The gate above rejects any final report carrying a render
+            // error, so this arm is defensive only.
+            return SessionWrapperOutcome::Failure(invalid(format!(
+                "session frame reported error {render_error} past a clean final report"
+            )));
+        }
+    };
+    if let Some(path) = request.preserved_output {
+        if let Some(parent) = path.parent() {
+            if let Err(error) = fs::create_dir_all(parent) {
+                return SessionWrapperOutcome::Failure(error);
+            }
+        }
+        let written = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)
+            .and_then(|mut file| file.write_all(&pixels));
+        if let Err(error) = written {
+            return SessionWrapperOutcome::Failure(error);
+        }
+    }
+    if let Some(parent) = request.output_path.parent() {
+        if let Err(error) = fs::create_dir_all(parent) {
+            return SessionWrapperOutcome::Failure(error);
+        }
+    }
+    let mut deep_overrange_samples = None;
+    let png_written = if request.deep_png_output {
+        rgba16_transport_to_png16(&pixels).and_then(|(samples, overrange)| {
+            deep_overrange_samples = Some(overrange);
+            let image = image::ImageBuffer::<image::Rgba<u16>, Vec<u16>>::from_raw(
+                request.width,
+                request.height,
+                samples,
+            )
+            .ok_or_else(|| invalid("worker output dimensions are invalid"))?;
+            image
+                .save_with_format(request.output_path, ImageFormat::Png)
+                .map_err(|error| invalid(format!("output PNG save failed: {error}")))
+        })
+    } else {
+        native_rgba_to_preview(&pixels, request.pixel_format).and_then(|preview| {
+            let image = image::RgbaImage::from_raw(request.width, request.height, preview)
+                .ok_or_else(|| invalid("worker output dimensions are invalid"))?;
+            image
+                .save_with_format(request.output_path, ImageFormat::Png)
+                .map_err(|error| invalid(format!("output PNG save failed: {error}")))
+        })
+    };
+    if let Err(error) = png_written {
+        return SessionWrapperOutcome::Failure(error);
+    }
+    let facts = InteractiveImageReportFacts {
+        plugin_id: request.plugin_id.to_owned(),
+        smart: false,
+        pixel_format: request.pixel_format,
+        rendered_width: request.width,
+        rendered_height: request.height,
+        input_width: request.width,
+        input_height: request.height,
+        output_png: request.output_path.to_path_buf(),
+        timing: request.timing,
+        worker_classification: classification,
+        diagnostics,
+        gpu_fallback_used: false,
+        gpu_fallback_reason: None,
+        gpu_attempt: None,
+        secondary_layers: json!([] as [Value; 0]),
+        empty_smart_result: false,
+        output_raw: request
+            .preserved_output
+            .map(|path| path.to_string_lossy().into_owned()),
+        deep_png_output: request.deep_png_output,
+        deep_overrange_samples,
+        world_dump_display: world_dump_dir.as_ref().map(|dump| dump.display.clone()),
+        minidump_display: minidump_dir.as_ref().map(|dump| dump.display.clone()),
+        output_checksum_detail,
+        output_origin_ok,
+        parameter_count_ok,
+        spatial_ok,
+        audio_input_sha256: None,
+    };
+    RENDER_SESSION_WRAPPER_RENDERS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    SessionWrapperOutcome::Report(build_interactive_image_report(&final_report, facts))
+}
 
 /// Host-side expectations the isolated worker report is validated against.
 /// Extracted from `render_with_artifact` so a length-1 render session can run
