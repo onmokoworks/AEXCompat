@@ -38,7 +38,7 @@ def test_sdk_probe_freezes_all_layer_render_options_suite2_slots():
 
 
 def test_minihost_publishes_typed_suite2_without_changing_suite1():
-    text = SOURCE.read_text(encoding="utf-8")
+    text = SOURCE.read_text(encoding="utf-8") + (source_owners.SRC / "worker_host_suite_wiring.cpp").read_text(encoding="utf-8")
     abi = ABI.read_text(encoding="utf-8")
     assert "sizeof(AegpLayerRenderOptionsSuite1) == 14 * sizeof(void*)" in abi
     assert "sizeof(AegpLayerRenderOptionsSuite2) == 15 * sizeof(void*)" in abi

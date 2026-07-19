@@ -47,7 +47,8 @@ def test_pf_pixel_data_suite_v1_v2_match_sdk_abi():
 
 def test_pf_pixel_data_suite_versions_are_acquirable_by_sdk_name():
     # The suite catalog entries stay in l2_main.
-    text = source_owners.L2_MAIN.read_text(encoding="utf-8")
+    text = (source_owners.L2_MAIN.read_text(encoding="utf-8") +
+            (source_owners.SRC / "worker_host_suite_wiring.cpp").read_text(encoding="utf-8"))
     for version in (1, 2):
         assert f'{{"PF Pixel Data Suite", {version}, &g_pixel_data_suite{version}}}' in text
 
