@@ -669,11 +669,14 @@ CONTEXT g_minidump_context{};
 EXCEPTION_POINTERS g_minidump_exception_pointers{};
 DWORD g_minidump_thread_id{};
 unsigned char* g_minidump_buffer{};
+uint64_t g_minidump_page_size{};
 
 struct MinidumpBufferContext {
   unsigned char* buffer{};
   uint64_t capacity{};
   uint64_t extent{};
+  uint64_t committed{};
+  uint64_t page_size{};
   bool started{false};
   bool finished{false};
   bool failed{false};
@@ -719,9 +722,26 @@ BOOL CALLBACK minidump_limit_callback(
       output->Status = E_FAIL;
       return FALSE;
     }
-    if (io.BufferBytes != 0)
+    if (io.BufferBytes != 0) {
+      const uint64_t end = io.Offset + static_cast<uint64_t>(io.BufferBytes);
+      const uint64_t commit_end =
+          (end + sink->page_size - 1) / sink->page_size * sink->page_size;
+      if (commit_end > sink->committed) {
+        const SIZE_T commit_bytes = static_cast<SIZE_T>(
+            commit_end - sink->committed);
+        void* const committed = VirtualAlloc(
+            sink->buffer + sink->committed, commit_bytes, MEM_COMMIT,
+            PAGE_READWRITE);
+        if (committed != sink->buffer + sink->committed) {
+          sink->failed = true;
+          output->Status = E_OUTOFMEMORY;
+          return FALSE;
+        }
+        sink->committed = commit_end;
+      }
       std::memcpy(sink->buffer + static_cast<std::size_t>(io.Offset),
                   io.Buffer, io.BufferBytes);
+    }
     sink->extent = std::max(
         sink->extent, io.Offset + static_cast<uint64_t>(io.BufferBytes));
     output->Status = S_OK;
@@ -799,8 +819,9 @@ void write_minidump_on_dedicated_thread() {
   exception_info.ThreadId = g_minidump_thread_id;
   exception_info.ExceptionPointers = &g_minidump_exception_pointers;
   exception_info.ClientPointers = FALSE;
-  MinidumpBufferContext sink{g_minidump_buffer,
-                             kMaxMinidumpFileBytes};
+  MinidumpBufferContext sink{
+      g_minidump_buffer, kMaxMinidumpFileBytes, 0, 0,
+      g_minidump_page_size};
   MINIDUMP_CALLBACK_INFORMATION callback_info{};
   callback_info.CallbackParam = &sink;
   callback_info.CallbackRoutine = minidump_limit_callback;
@@ -934,12 +955,26 @@ bool configure_minidump_from_inherited_handle() {
     std::fprintf(stderr, "stage:minidump_failed reason=handle_invalid\n");
     return false;
   }
-  // Reserve and commit the complete bounded alternate-I/O sink before any
-  // plug-in code runs. The crash callback performs no allocation and never
-  // gives DbgHelp or the plug-in a seekable broker-owned file handle.
+  // Reserve address space for the bounded alternate-I/O sink before any
+  // plug-in code runs, but do not consume the worker's 512 MiB commit budget.
+  // The crash-only callback commits pages on demand through the maximum
+  // validated write offset. DbgHelp and the plug-in still receive no seekable
+  // broker-owned file handle.
+  SYSTEM_INFO system_info{};
+  GetSystemInfo(&system_info);
+  g_minidump_page_size = system_info.dwPageSize;
+  if (g_minidump_page_size == 0 ||
+      kMaxMinidumpFileBytes % g_minidump_page_size != 0) {
+    CloseHandle(handle);
+    CloseHandle(ack_handle);
+    SetEnvironmentVariableW(L"AEXCOMPAT_MINIDUMP_HANDLE", nullptr);
+    SetEnvironmentVariableW(L"AEXCOMPAT_MINIDUMP_ACK_HANDLE", nullptr);
+    std::fprintf(stderr, "stage:minidump_failed reason=writer_unavailable\n");
+    return false;
+  }
   g_minidump_buffer = static_cast<unsigned char*>(VirtualAlloc(
       nullptr, static_cast<SIZE_T>(kMaxMinidumpFileBytes),
-      MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE));
+      MEM_RESERVE, PAGE_READWRITE));
   if (!g_minidump_buffer) {
     CloseHandle(handle);
     CloseHandle(ack_handle);

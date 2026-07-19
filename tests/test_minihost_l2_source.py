@@ -843,7 +843,9 @@ class MinihostL2SourceTests(unittest.TestCase):
             "io.BufferBytes > sink->capacity - io.Offset",
             "INVALID_HANDLE_VALUE",
             "write_minidump_transport",
-            "MEM_RESERVE | MEM_COMMIT",
+            "commit_end - sink->committed",
+            "MEM_COMMIT",
+            "MEM_RESERVE, PAGE_READWRITE",
             "LOAD_LIBRARY_SEARCH_SYSTEM32",
             "AEXCOMPAT_MINIDUMP_HANDLE",
             "AEXCOMPAT_MINIDUMP_ACK_HANDLE",
@@ -855,6 +857,11 @@ class MinihostL2SourceTests(unittest.TestCase):
             self.assertIn(marker, text)
         self.assertNotIn("--minidump-v1", text)
         self.assertNotIn("CreateFileW(dump_path", text)
+        minidump = text[
+            text.index("// Opt-in crash minidumps"):
+            text.index("// Best-effort coverage for crashes")
+        ]
+        self.assertNotIn("MEM_RESERVE | MEM_COMMIT", minidump)
 
     def test_crash_minidump_claims_transport_before_global_handle_access(self):
         text = SOURCE.read_text(encoding="utf-8")

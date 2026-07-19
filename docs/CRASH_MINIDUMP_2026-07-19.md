@@ -57,8 +57,11 @@ before any plug-in load or execution. It then starts a dedicated writer thread
 before dispatch. The SEH filter
 copies the exception record and context into broker-owned storage, signals that
 thread, and waits up to two seconds. `MiniDumpWriteDump` is never called from
-the faulting thread. Before plug-in load, the worker commits a fixed 64 MiB
-alternate-I/O buffer. `IoStartCallback` disables DbgHelp's normal seekable-file
+the faulting thread. Before plug-in load, the worker reserves 64 MiB of address
+space without committing it, so enabling diagnostics does not reduce the
+512 MiB worker commit budget available to a normal render. After a crash,
+validated pages are committed on demand only through the highest DbgHelp write
+offset. `IoStartCallback` disables DbgHelp's normal seekable-file
 I/O, and each `IoWriteAllCallback` copies its explicit offset and length into
 that buffer with checked arithmetic and the same 64 MiB cap. DbgHelp never
 receives the non-seekable pipe as its file sink. After `IoFinishCallback` and a
