@@ -838,7 +838,7 @@ class MinihostL2SourceTests(unittest.TestCase):
         text = l2_family_source()
         for marker in ('L"--aegp-update-menu"', "UpdateMenuRegistration",
                        "g_state.update_menu_registrations.size() >= kMaxHooks",
-                       "registration.hook(", "global_refcon, registration.refcon, 0)",
+                       "registration.hook(", "active_window_type);",
                        '"event_requested\\\":\\\""', '"update_menu"'):
             self.assertIn(marker, text)
 
@@ -868,7 +868,8 @@ class MinihostL2SourceTests(unittest.TestCase):
         text = l2_family_source()
         for marker in ('L"--aegp-command-roundtrip"', "CommandRegistration",
                        "priority != 1 && priority != 2", "registration.command != 0",
-                       "registration.command != command", "already_handled, &handled",
+                       "registration.command != command",
+                       "command, registration.priority, handled, &hook_handled",
                        "handled > 1", "command_handled_count"):
             self.assertIn(marker, text)
 
