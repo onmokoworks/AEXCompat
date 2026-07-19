@@ -313,4 +313,11 @@ void append_classic_subsystems(
 
 void emit(const ReportSnapshot& snapshot, std::ostream& output);
 
+// Diagnostics builders: assemble the report snapshots from the component
+// owners (gpu transport/backends, suite registry accounting, handle/world/
+// receipt registries, path runtime, async layer runtime, SEH telemetry).
+GpuDiagnosticsSnapshot capture_gpu_diagnostics();
+SehDiagnosticsSnapshot capture_seh_diagnostics();
+ClassicSubsystemDiagnostics capture_classic_subsystems();
+
 }  // namespace aexcompat::worker_render_report

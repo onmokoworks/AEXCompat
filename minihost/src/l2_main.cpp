@@ -4969,68 +4969,11 @@ bool __cdecl scene_render_receipt_enabled() {
   return is_render_worker() && aexcompat::aegp_layer_render_runtime::active();
 }
 
-aexcompat::worker_render_report::GpuDiagnosticsSnapshot capture_gpu_diagnostics() {
-  const auto& directx = directx_backend::diagnostics();
-  const auto i64 = [](auto value) { return static_cast<int64_t>(value); };
-  return {
-      gpu_memory_lifetimes_balanced(), g_cuda_upload_bytes > 0,
-      {i64(g_cuda_upload_bytes), i64(g_cuda_download_bytes), i64(g_cuda_sync_failures),
-       i64(g_last_cuda_device_count), i64(g_last_cuda_device_index)},
-      g_opencl_upload_bytes > 0,
-      {i64(g_opencl_upload_bytes), i64(g_opencl_download_bytes), i64(g_opencl_sync_failures),
-       i64(opencl::last_device_count()), i64(opencl::last_device_index())},
-      directx.context_used,
-      {i64(directx.device_count), i64(directx.device_index), i64(directx.upload_bytes),
-       i64(directx.download_bytes), i64(directx.sync_failures)},
-      {i64(g_gpu_allocations_created), i64(g_gpu_allocations_freed),
-       i64(gpu_transport::live_allocation_count()), i64(gpu_transport::live_memory_bytes()),
-       i64(gpu_transport::exclusive_access_depth()), i64(g_invalid_gpu_memory_operations)}};
-}
-
-aexcompat::worker_render_report::SehDiagnosticsSnapshot capture_seh_diagnostics() {
-  return {g_last_seh_exception_code, g_last_seh_exception_address,
-          escape(g_last_seh_exception_module), escape(g_last_seh_selector), g_last_seh_error};
-}
-
-aexcompat::worker_render_report::ClassicSubsystemDiagnostics capture_classic_subsystems() {
-  const auto i64 = [](auto value) { return static_cast<int64_t>(value); };
-  const auto& handle_stats = statistics();
-  const auto& world_stats = aexcompat::world_registry::statistics();
-  const auto& receipt_stats = aexcompat::render_receipts::statistics();
-  const auto path = aexcompat::pf_path_runtime::snapshot();
-  return {
-      suite_leases_balanced(),
-      {i64(suite_acquire_count()), i64(suite_release_count()), i64(live_suite_lease_count()),
-       i64(live_suite_reference_count())},
-      missing_suites_report_json() + suite_timeline_report_json(), live_suite_lease_summary(), handle_lifetimes_balanced(),
-      aexcompat::pf_path_runtime::lifetimes_balanced(),
-      {i64(path.checkout_calls), i64(path.checkin_calls), i64(path.mask_calls),
-       i64(path.preps_created), i64(path.preps_disposed),
-       i64(path.invalid_operations), i64(path.reject_reason), i64(path.live_preps)},
-      {path.last_feather_x, path.last_feather_y}, path.last_opacity,
-      i64(path.last_quality),
-      {i64(path.last_bounds[0]), i64(path.last_bounds[1]),
-       i64(path.last_bounds[2]), i64(path.last_bounds[3])},
-      {i64(handle_stats.created), i64(handle_stats.disposed)},
-      {i64(g_arbitrary_copy_calls), i64(g_arbitrary_dispose_calls), i64(g_arbitrary_print_calls),
-       i64(g_arbitrary_print_failures), i64(g_arbitrary_roundtrip_calls),
-       i64(g_arbitrary_roundtrip_failures), i64(g_arbitrary_scan_calls),
-       i64(g_arbitrary_scan_failures), i64(g_arbitrary_compare_disagreements),
-       i64(g_arbitrary_new_calls), i64(g_arbitrary_interpolation_calls),
-       i64(g_arbitrary_interpolation_failures), i64(g_invalid_arbitrary_operations), 0, 0},
-      g_last_arbitrary_interpolation_amount, world_lifetimes_balanced(),
-      {i64(world_stats.created), i64(world_stats.disposed)}, async_receipt_lifetimes_balanced(),
-      {i64(receipt_stats.created), i64(receipt_stats.checked_in), i64(receipt_stats.live_count),
-       i64(receipt_stats.live_bytes), i64(receipt_stats.invalid_operations)},
-      async_layer_requests_balanced(),
-      {i64(aexcompat::aegp_async_layer::diagnostics().created),
-       i64(aexcompat::aegp_async_layer::diagnostics().completed),
-       i64(aexcompat::aegp_async_layer::diagnostics().canceled),
-       i64(aexcompat::aegp_async_layer::diagnostics().callback_failures),
-       i64(aexcompat::aegp_async_layer::diagnostics().callback_exceptions),
-       i64(aexcompat::aegp_async_layer::diagnostics().live),
-       i64(aexcompat::aegp_async_layer::diagnostics().reserved_bytes)}};
-}
+// The report diagnostics builders (gpu/SEH/classic subsystems) live in
+// worker_render_report.cpp with the snapshot types they populate.
+using aexcompat::worker_render_report::capture_gpu_diagnostics;
+using aexcompat::worker_render_report::capture_seh_diagnostics;
+using aexcompat::worker_render_report::capture_classic_subsystems;
 
 // The six former host selftest wrappers and their JSON now live in
 // worker_fixed_selftest_routing.cpp beside the command catalog.
