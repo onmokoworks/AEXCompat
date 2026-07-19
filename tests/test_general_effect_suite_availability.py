@@ -22,8 +22,8 @@ SUITES = {
 
 
 def acquire_suite_source(source: str) -> str:
-    start = source.index("int32_t __cdecl acquire_suite(")
-    end = source.index("int32_t __cdecl release_suite(", start)
+    start = source.index("SuiteResolveResult resolve_suite(")
+    end = source.index("int32_t __cdecl acquire_suite(", start)
     return source[start:end]
 
 
@@ -47,8 +47,7 @@ def test_general_effect_suites_are_available_without_mask_mode_and_are_version_e
         assert "g_mask_model_enabled" not in branch
         assert f"version == {version}" in branch
         assert "*suite =" in branch
-        assert "record_suite_acquire(name, version)" in branch
-        assert "return 0;" in branch
+        assert "return SuiteResolveResult::acquired;" in branch
         for marker in function_markers:
             assert f"&{marker}" in branch
 
@@ -57,8 +56,7 @@ def test_general_effect_suites_are_available_without_mask_mode_and_are_version_e
         )
         assert versions == [str(version)], f"{name} must not accept an uncontracted version"
 
-    assert "return reject_suite_acquire(name, version);" in acquire
-    assert "*suite = nullptr;" in acquire
+    assert "return SuiteResolveResult::not_found;" in acquire
 
 
 def test_general_effect_suite_functions_keep_existing_safety_bounds():

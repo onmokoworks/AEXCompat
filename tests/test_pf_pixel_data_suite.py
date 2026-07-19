@@ -48,7 +48,7 @@ def test_pf_pixel_data_suite_versions_are_acquirable_by_sdk_name():
         assert re.search(
             rf'"PF Pixel Data Suite"\) == 0 && version == {version}\) \{{\s*'
             rf'\*suite = &g_pixel_data_suite{version};\s*'
-            r"record_suite_acquire\(name, version\);",
+            r"return SuiteResolveResult::acquired;",
             text,
         )
 

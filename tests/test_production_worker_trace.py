@@ -43,12 +43,14 @@ class ProductionWorkerTraceTests(unittest.TestCase):
         self.assertLess(
             audited.index("g_selector_trace"), audited.index("entry(command"))
         self.assertIn("g_trace_writer->selector_dispatch(selector)", source)
-        acquire = source[source.index("void record_suite_acquire"):
-                         source.index("void record_missing_suite")]
-        self.assertIn("suite_acquire(name, version, true)", acquire)
-        release = source[source.index("int32_t __cdecl release_suite"):
-                         source.index("bool verify_suite_release_without_acquire_rejected")]
-        self.assertIn("suite_release(name, std::max<int32_t>(version, 0), released)", release)
+        registry = (MINIHOST / "src" / "worker_suite_registry.cpp").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("trace_writer->suite_acquire(name, version, true)", registry)
+        self.assertIn(
+            "trace_writer->suite_release(name, std::max<int32_t>(version, 0), released)",
+            registry,
+        )
 
     def test_writer_contract_is_bounded_and_does_not_emit_private_paths(self):
         writer = (ROOT / "instruments" / "common" / "trace_writer.cpp").read_text(encoding="utf-8")

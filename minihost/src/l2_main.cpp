@@ -61,7 +61,6 @@
 #include "render_subsystem.h"
 #include "runtime_module_audit.hpp"
 #include "strict_json.hpp"
-#include "suite_lease_tracker.hpp"
 #include "worker_selector_dispatch.hpp"
 #include "worker_runtime_admission.hpp"
 #include "worker_session.hpp"
@@ -70,6 +69,7 @@
 #include "worker_aegp_scene_runtime.hpp"
 #include "worker_handle_runtime.hpp"
 #include "worker_suite_abi.hpp"
+#include "worker_suite_registry.hpp"
 #include "worker_world_registry.hpp"
 #include "worker_world_safety.hpp"
 #include "worker_pf_suites_internal.hpp"
@@ -147,7 +147,6 @@ using namespace aexcompat::worker_runtime::handles;
 using aexcompat::render_safety::InputPixelBuffer;
 using aexcompat::render_safety::OutputPixelBuffer;
 using aexcompat::render_lifecycle::RenderLifecycle;
-using aexcompat::suite_runtime::SuiteLeaseTracker;
 using aexcompat::worker_runtime::redirect_native_stdout;
 using aexcompat::worker_runtime::restore_native_stdout;
 using aexcompat::worker_runtime::configure_selector_dispatch_audit;
@@ -166,6 +165,8 @@ using aexcompat::worker_runtime::selector_dispatch_telemetry;
 using aexcompat::worker_runtime::RuntimeAdmissionRequest;
 using aexcompat::worker_runtime::RuntimeContext;
 using aexcompat::worker_runtime::RuntimeHostHooks;
+using aexcompat::worker_runtime::SuiteResolveResult;
+using aexcompat::worker_runtime::suite_registry;
 using aexcompat::worker_runtime::WorkerSession;
 using aexcompat::worker_runtime::admit_runtime;
 using aexcompat::world_safety::DispatchWorldFormat;
@@ -7839,60 +7840,24 @@ bool verify_owned_world_snapshot_concurrent_dispose() {
   return true;
 }
 
-SuiteLeaseTracker g_suite_lease_tracker;
-std::mutex g_missing_suites_mutex;
-constexpr std::size_t kMaxMissingSuites = 16;
-std::vector<std::pair<std::string, int32_t>> g_missing_suites;
-std::string escape(const std::string& input);
-
-void record_suite_acquire(const char* name, int32_t version) {
-  g_suite_lease_tracker.acquire(name, version);
-  if (g_trace_writer && name) g_trace_writer->suite_acquire(name, version, true);
-}
-
-void record_missing_suite(const std::string& name, int32_t version) {
-  const bool valid_name = !name.empty() && name.size() <= 96 &&
-      std::all_of(name.begin(), name.end(), [](unsigned char character) {
-        return std::isalnum(character) || character == ' ' || character == '.' ||
-            character == '_' || character == '-';
-      });
-  if (!valid_name || version <= 0) return;
-  std::lock_guard<std::mutex> lock(g_missing_suites_mutex);
-  const auto entry = std::make_pair(name, version);
-  if (std::find(g_missing_suites.begin(), g_missing_suites.end(), entry) ==
-          g_missing_suites.end() &&
-      g_missing_suites.size() < kMaxMissingSuites) {
-    g_missing_suites.push_back(entry);
-  }
-}
-
 std::string missing_suites_report_json() {
-  std::lock_guard<std::mutex> lock(g_missing_suites_mutex);
-  std::ostringstream json;
-  json << ",\"missing_suites\":[";
-  for (std::size_t index = 0; index < g_missing_suites.size(); ++index) {
-    if (index != 0) json << ',';
-    json << "{\"name\":\"" << escape(g_missing_suites[index].first)
-         << "\",\"version\":" << g_missing_suites[index].second << '}';
-  }
-  json << ']';
-  return json.str();
+  return suite_registry().missing_suites_report_json();
 }
 
 bool suite_leases_balanced() {
-  return g_suite_lease_tracker.balanced();
+  return suite_registry().balanced();
 }
 
 std::size_t live_suite_lease_count() {
-  return g_suite_lease_tracker.live_lease_count();
+  return suite_registry().live_lease_count();
 }
 
 uint32_t live_suite_reference_count() {
-  return g_suite_lease_tracker.live_reference_count();
+  return suite_registry().live_reference_count();
 }
 
-uint32_t suite_acquire_count() { return g_suite_lease_tracker.acquire_count(); }
-uint32_t suite_release_count() { return g_suite_lease_tracker.release_count(); }
+uint32_t suite_acquire_count() { return suite_registry().acquire_count(); }
+uint32_t suite_release_count() { return suite_registry().release_count(); }
 
 int32_t __cdecl aegp_get_unique_command(int32_t* command) {
   if (!command || g_aegp_commands_created >= 64) return 4;
@@ -8447,11 +8412,11 @@ bool __cdecl scene_initialize_layer_render_options(
 }
 
 std::string live_suite_lease_summary() {
-  return g_suite_lease_tracker.live_summary();
+  return suite_registry().live_summary();
 }
 
 bool isolated_aegp_read_cache_is_bounded() {
-  const auto snapshot = g_suite_lease_tracker.snapshot();
+  const auto snapshot = suite_registry().snapshot();
   uint32_t total = 0;
   for (const auto& [key, count] : snapshot.live_leases) {
     const bool allowed =
@@ -8521,59 +8486,40 @@ bool finish_cuda_render_transport(CudaRenderTransport& transport) {
   return gpu_transport::finish_render_transport(transport);
 }
 
-int32_t reject_suite_acquire(const char* name, int32_t version) {
-  std::string safe_name;
-  if (name) for (std::size_t index = 0; name[index] && index < 96; ++index) {
-    const unsigned char character = static_cast<unsigned char>(name[index]);
-    safe_name.push_back(character >= 0x20 && character <= 0x7e ? name[index] : '?');
-  }
-  record_missing_suite(safe_name, version);
-  if (g_trace_writer && !safe_name.empty())
-    g_trace_writer->suite_acquire(safe_name, std::max<int32_t>(version, 0), false);
-  std::cerr << "stage:suite_acquire_failed name=" << safe_name
-            << " version=" << version << "\n" << std::flush;
-  return 1;
-}
-
-int32_t __cdecl acquire_suite(const char* name, int32_t version, const void** suite) {
-  if (!suite) return 4;
-  *suite = nullptr;
-  if (!name) return 4;
+SuiteResolveResult resolve_suite(void*, const char* name, int32_t version,
+                                 const void** suite) {
   if (scene_context()) {
     const SceneSuiteAcquireResult scene_result =
         scene_acquire_suite(name, version, suite);
     if (scene_result == SceneSuiteAcquireResult::acquired) {
-      record_suite_acquire(name, version);
-      return 0;
+      return SuiteResolveResult::acquired;
     }
-    if (scene_result == SceneSuiteAcquireResult::rejected) return 4;
+    if (scene_result == SceneSuiteAcquireResult::rejected)
+      return SuiteResolveResult::rejected_bad_param;
   }
   if (version == 1 && std::strcmp(name, "AE Plugin Helper Suite") == 0) {
     *suite = g_pf_helper_suite1.data();
-    record_suite_acquire(name, version);
-    return 0;
+    return SuiteResolveResult::acquired;
   }
   if (name && version == 2 && std::strcmp(name, "AE Plugin Helper Suite2") == 0) {
     *suite = g_pf_helper_suite2.data();
-    record_suite_acquire(name, version);
-    return 0;
+    return SuiteResolveResult::acquired;
   }
   if (name && version == 1 && std::strcmp(name, "PF Color Suite") == 0) {
-    *suite = &g_color_suite8; record_suite_acquire(name, version); return 0;
+    *suite = &g_color_suite8; return SuiteResolveResult::acquired;
   }
   if (name && version == 1 && std::strcmp(name, "PF Color16 Suite") == 0) {
-    *suite = &g_color_suite16; record_suite_acquire(name, version); return 0;
+    *suite = &g_color_suite16; return SuiteResolveResult::acquired;
   }
   if (name && version == 1 && std::strcmp(name, "PF ColorFloat Suite") == 0) {
-    *suite = &g_color_suite_float; record_suite_acquire(name, version); return 0;
+    *suite = &g_color_suite_float; return SuiteResolveResult::acquired;
   }
   if (name && version == 1 && std::strcmp(name, "PF Batch Sampling Suite") == 0) {
     g_batch_sampling_suite1 = {&begin_sampling8, &end_sampling8,
                                &unsupported_batch_sample_func,
                                &unsupported_batch_sample_func};
     *suite = &g_batch_sampling_suite1;
-    record_suite_acquire(name, version);
-    return 0;
+    return SuiteResolveResult::acquired;
   }
   if (g_mask_model_enabled && name && std::strcmp(name, "PF Path Query Suite") == 0 && version == 1) {
     g_pf_path_query_suite1 = {
@@ -8582,8 +8528,7 @@ int32_t __cdecl acquire_suite(const char* name, int32_t version, const void** su
         reinterpret_cast<void*>(&pf_checkout_path),
         reinterpret_cast<void*>(&pf_checkin_path)};
     *suite = g_pf_path_query_suite1.data();
-    record_suite_acquire(name, version);
-    return 0;
+    return SuiteResolveResult::acquired;
   }
   if (g_mask_model_enabled && name && std::strcmp(name, "PF Path Data Suite") == 0 && version == 1) {
     g_pf_path_data_suite1.fill(reinterpret_cast<void*>(&aegp_unsupported_suite_call));
@@ -8599,52 +8544,45 @@ int32_t __cdecl acquire_suite(const char* name, int32_t version, const void** su
     g_pf_path_data_suite1[9] = reinterpret_cast<void*>(&pf_path_get_mask_mode);
     g_pf_path_data_suite1[10] = reinterpret_cast<void*>(&pf_path_get_name);
     *suite = g_pf_path_data_suite1.data();
-    record_suite_acquire(name, version);
-    return 0;
+    return SuiteResolveResult::acquired;
   }
   if (name && std::strcmp(name, "AEGP Duck Suite") == 0 && version == 1) {
     g_duck_suite1[0] = reinterpret_cast<void*>(&duck_quack);
     *suite = g_duck_suite1.data();
-    record_suite_acquire(name, version);
-    return 0;
+    return SuiteResolveResult::acquired;
   }
   if (g_aegp_init_mode && name && std::strcmp(name, "AEGP Command Suite") == 0 && version == 1) {
     *suite = &g_aegp_command_suite;
-    record_suite_acquire(name, version);
-    return 0;
+    return SuiteResolveResult::acquired;
   }
   if (g_aegp_init_mode && name && std::strcmp(name, "AEGP Register Suite") == 0 && version == 6) {
     *suite = &g_aegp_register_suite;
-    record_suite_acquire(name, version);
-    return 0;
+    return SuiteResolveResult::acquired;
   }
 
   if (name && std::strcmp(name, "PF Effect UI Suite") == 0 && version == 1) {
     g_effect_ui_suite1[0] = reinterpret_cast<void*>(&set_options_button_name);
     *suite = g_effect_ui_suite1.data();
-    record_suite_acquire(name, version);
-    return 0;
+    return SuiteResolveResult::acquired;
   }
   if (name && std::strcmp(name, "PF AE Adv App Suite") == 0 && version == 1) {
     g_adv_app_suite1.fill(reinterpret_cast<void*>(&aegp_unsupported_suite_call));
     g_adv_app_suite1[6] = reinterpret_cast<void*>(&adv_app_info_text);
     g_adv_app_suite1[8] = reinterpret_cast<void*>(&adv_app_info_text3);
     *suite = g_adv_app_suite1.data();
-    record_suite_acquire(name, version);
-    return 0;
+    return SuiteResolveResult::acquired;
   }
   if (name && std::strcmp(name, "PF AE Adv App Suite") == 0 && version == 2) {
     g_adv_app_suite2.fill(reinterpret_cast<void*>(&aegp_unsupported_suite_call));
     g_adv_app_suite2[6] = reinterpret_cast<void*>(&adv_app_info_text);
     g_adv_app_suite2[8] = reinterpret_cast<void*>(&adv_app_info_text3);
     *suite = g_adv_app_suite2.data();
-    record_suite_acquire(name, version);
-    return 0;
+    return SuiteResolveResult::acquired;
   }
   if (name && std::strcmp(name, "DRAWBOT Draw Suite") == 0 && version == 1) {
     g_drawbot_draw_suite1 = {reinterpret_cast<void*>(&drawbot_get_supplier),
                              reinterpret_cast<void*>(&drawbot_get_surface)};
-    *suite = g_drawbot_draw_suite1.data(); record_suite_acquire(name, version); return 0;
+    *suite = g_drawbot_draw_suite1.data(); return SuiteResolveResult::acquired;
   }
   if (name && std::strcmp(name, "DRAWBOT Supplier Suite") == 0 && version == 1) {
     g_drawbot_supplier_suite1.fill(reinterpret_cast<void*>(&aegp_unsupported_suite_call));
@@ -8652,31 +8590,31 @@ int32_t __cdecl acquire_suite(const char* name, int32_t version, const void** su
     g_drawbot_supplier_suite1[1] = reinterpret_cast<void*>(&drawbot_new_brush);
     g_drawbot_supplier_suite1[6] = reinterpret_cast<void*>(&drawbot_new_path);
     g_drawbot_supplier_suite1[12] = reinterpret_cast<void*>(&drawbot_release_object);
-    *suite = g_drawbot_supplier_suite1.data(); record_suite_acquire(name, version); return 0;
+    *suite = g_drawbot_supplier_suite1.data(); return SuiteResolveResult::acquired;
   }
   if (name && std::strcmp(name, "DRAWBOT Surface Suite") == 0 && version == 2) {
     g_drawbot_surface_suite2.fill(reinterpret_cast<void*>(&aegp_unsupported_suite_call));
     g_drawbot_surface_suite2[2] = reinterpret_cast<void*>(&drawbot_paint_rect);
     g_drawbot_surface_suite2[3] = reinterpret_cast<void*>(&drawbot_fill_path);
     g_drawbot_surface_suite2[4] = reinterpret_cast<void*>(&drawbot_stroke_path);
-    *suite = g_drawbot_surface_suite2.data(); record_suite_acquire(name, version); return 0;
+    *suite = g_drawbot_surface_suite2.data(); return SuiteResolveResult::acquired;
   }
   if (name && std::strcmp(name, "DRAWBOT Path Suite") == 0 && version == 1) {
     g_drawbot_path_suite1.fill(reinterpret_cast<void*>(&aegp_unsupported_suite_call));
     g_drawbot_path_suite1[0] = reinterpret_cast<void*>(&drawbot_path_point);
     g_drawbot_path_suite1[1] = reinterpret_cast<void*>(&drawbot_path_point);
     g_drawbot_path_suite1[3] = reinterpret_cast<void*>(&drawbot_add_rect);
-    *suite = g_drawbot_path_suite1.data(); record_suite_acquire(name, version); return 0;
+    *suite = g_drawbot_path_suite1.data(); return SuiteResolveResult::acquired;
   }
   if (name && std::strcmp(name, "PF Effect Custom UI Suite") == 0 && version == 1) {
     g_effect_custom_ui_suite1[0] = reinterpret_cast<void*>(&get_drawing_reference);
-    *suite = g_effect_custom_ui_suite1.data(); record_suite_acquire(name, version); return 0;
+    *suite = g_effect_custom_ui_suite1.data(); return SuiteResolveResult::acquired;
   }
   if (name && std::strcmp(name, "PF Effect Custom UI Overlay Theme Suite") == 0 && version == 1) {
     g_effect_overlay_theme_suite1.fill(reinterpret_cast<void*>(&aegp_unsupported_suite_call));
     g_effect_overlay_theme_suite1[0] = reinterpret_cast<void*>(&overlay_foreground);
     g_effect_overlay_theme_suite1[5] = reinterpret_cast<void*>(&overlay_stroke_path);
-    *suite = g_effect_overlay_theme_suite1.data(); record_suite_acquire(name, version); return 0;
+    *suite = g_effect_overlay_theme_suite1.data(); return SuiteResolveResult::acquired;
   }
   if (name && std::strcmp(name, "PF AE App Suite") == 0 &&
       (version == 6 || version == 7 || version == 1)) {
@@ -8708,32 +8646,27 @@ int32_t __cdecl acquire_suite(const char* name, int32_t version, const void** su
     } else {
       populate_app_suite(g_app_suite6, true, true); *suite = g_app_suite6.data();
     }
-    record_suite_acquire(name, version); return 0;
+    return SuiteResolveResult::acquired;
   }
   if (name && std::strcmp(name, "PF AE Channel Suite") == 0 && version == 1) {
     *suite = &g_channel_suite1;
-    record_suite_acquire(name, version);
-    return 0;
+    return SuiteResolveResult::acquired;
   }
   if (name && std::strcmp(name, "PF Effect Sequence Data Suite") == 0 && version == 1) {
     *suite = &g_effect_sequence_data_suite1;
-    record_suite_acquire(name, version);
-    return 0;
+    return SuiteResolveResult::acquired;
   }
   if (name && std::strcmp(name, "PF Cache On Load Suite") == 0 && version == 1) {
     *suite = &cache_on_load_suite();
-    record_suite_acquire(name, version);
-    return 0;
+    return SuiteResolveResult::acquired;
   }
   if (name && std::strcmp(name, "PF Handle Suite") == 0 && version == 2) {
     *suite = &g_handle_suite;
-    record_suite_acquire(name, version);
-    return 0;
+    return SuiteResolveResult::acquired;
   }
   if (name && std::strcmp(name, "PF GPU Device Suite") == 0 && version == 1) {
     *suite = g_gpu_device_suite1.data();
-    record_suite_acquire(name, version);
-    return 0;
+    return SuiteResolveResult::acquired;
   }
   if (name && std::strcmp(name, "PF ANSI Suite") == 0 && version == 1) {
     g_ansi_suite1[0] = reinterpret_cast<void*>(&ansi_atan);
@@ -8756,89 +8689,72 @@ int32_t __cdecl acquire_suite(const char* name, int32_t version, const void** su
     g_ansi_suite1[17] = reinterpret_cast<void*>(&ansi_asin);
     g_ansi_suite1[18] = reinterpret_cast<void*>(&ansi_acos);
     *suite = g_ansi_suite1.data();
-    record_suite_acquire(name, version);
-    return 0;
+    return SuiteResolveResult::acquired;
   }
   if (name && std::strcmp(name, "PF AE Adv Time Suite") == 0 && version == 1) {
     *suite = &g_adv_time_suite1;
-    record_suite_acquire(name, version);
-    return 0;
+    return SuiteResolveResult::acquired;
   }
   if (name && std::strcmp(name, "PF AE Adv Time Suite") == 0 && version == 2) {
     *suite = &g_adv_time_suite2;
-    record_suite_acquire(name, version);
-    return 0;
+    return SuiteResolveResult::acquired;
   }
   if (name && std::strcmp(name, "PF AE Adv Time Suite") == 0 && version == 3) {
     *suite = &g_adv_time_suite3;
-    record_suite_acquire(name, version);
-    return 0;
+    return SuiteResolveResult::acquired;
   }
   if (name && std::strcmp(name, "PF AE Adv Time Suite") == 0 && version == 4) {
     *suite = &g_adv_time_suite4;
-    record_suite_acquire(name, version);
-    return 0;
+    return SuiteResolveResult::acquired;
   }
   if (is_render_worker() && name &&
       std::strcmp(name, "PF AE Adv Item Suite") == 0 && version == 1) {
     *suite = &g_adv_item_suite1;
-    record_suite_acquire(name, version);
-    return 0;
+    return SuiteResolveResult::acquired;
   }
   if (name && std::strcmp(name, "PF Pixel Data Suite") == 0 && version == 2) {
     *suite = &g_pixel_data_suite2;
-    record_suite_acquire(name, version);
-    return 0;
+    return SuiteResolveResult::acquired;
   }
   if (name && std::strcmp(name, "PF Pixel Data Suite") == 0 && version == 1) {
     *suite = &g_pixel_data_suite1;
-    record_suite_acquire(name, version);
-    return 0;
+    return SuiteResolveResult::acquired;
   }
   if (name && std::strcmp(name, "PF World Suite") == 0 && version == 2) {
     *suite = &g_world_suite;
-    record_suite_acquire(name, version);
-    return 0;
+    return SuiteResolveResult::acquired;
   }
   if (name && std::strcmp(name, "PF World Suite") == 0 && version == 1) {
     *suite = g_world_suite1.data();
-    record_suite_acquire(name, version);
-    return 0;
+    return SuiteResolveResult::acquired;
   }
   if (name && std::strcmp(name, "PF Pixel Format Suite") == 0 && version == 2) {
     *suite = &g_pixel_format_suite;
-    record_suite_acquire(name, version);
-    return 0;
+    return SuiteResolveResult::acquired;
   }
   if (name && std::strcmp(name, "PF PointParamSuite") == 0 && version == 1) {
     *suite = &g_point_param_suite;
-    record_suite_acquire(name, version);
-    return 0;
+    return SuiteResolveResult::acquired;
   }
   if (name && std::strcmp(name, "PF AngleParamSuite") == 0 && version == 1) {
     *suite = &g_angle_param_suite;
-    record_suite_acquire(name, version);
-    return 0;
+    return SuiteResolveResult::acquired;
   }
   if (name && std::strcmp(name, "PF ColorParamSuite") == 0 && version == 1) {
     *suite = &g_color_param_suite1;
-    record_suite_acquire(name, version);
-    return 0;
+    return SuiteResolveResult::acquired;
   }
   if (name && std::strcmp(name, "PF Param Utils Suite") == 0 && version == 3) {
     *suite = &g_param_utils_suite;
-    record_suite_acquire(name, version);
-    return 0;
+    return SuiteResolveResult::acquired;
   }
   if (name && std::strcmp(name, "PF Param Utils Suite") == 0 && version == 2) {
     *suite = &g_param_utils_suite1;
-    record_suite_acquire(name, version);
-    return 0;
+    return SuiteResolveResult::acquired;
   }
   if (name && std::strcmp(name, "AEGP Memory Suite") == 0 && version == 1) {
     *suite = &g_aegp_memory_suite;
-    record_suite_acquire(name, version);
-    return 0;
+    return SuiteResolveResult::acquired;
   }
   if (name && std::strcmp(name, "PF Color Settings Suite") == 0 && version == 7) {
     g_color_settings_suite6 = {&color_get_blending_tables, &color_does_view_have_xform,
@@ -8852,33 +8768,28 @@ int32_t __cdecl acquire_suite(const char* name, int32_t version, const void** su
         &color_is_colorspace_aware_effects_enabled, &color_get_lut_interpolation_method,
         &color_get_graphics_white_luminance, &color_get_working_colorspace_id};
     *suite = &g_color_settings_suite6;
-    record_suite_acquire(name, version);
-    return 0;
+    return SuiteResolveResult::acquired;
   }
   if (g_mask_model_enabled && name && std::strcmp(name, "AEGP Mask Suite") == 0 &&
       version == 1) {
     *suite = &g_pf_mask_suite1;
-    record_suite_acquire(name, version);
-    return 0;
+    return SuiteResolveResult::acquired;
   }
   if (name && std::strcmp(name, "PF Iterate8 Suite") == 0 &&
       (version == 1 || version == 2)) {
     g_iterate8_suite2.iterate = reinterpret_cast<void*>(&iterate_world8);
     *suite = &g_iterate8_suite2;
-    record_suite_acquire(name, version);
-    return 0;
+    return SuiteResolveResult::acquired;
   }
   if (name && std::strcmp(name, "PF iterate16 Suite") == 0 &&
       (version == 1 || version == 2)) {
     *suite = &g_iterate16_suite2;
-    record_suite_acquire(name, version);
-    return 0;
+    return SuiteResolveResult::acquired;
   }
   if (name && std::strcmp(name, "PF iterateFloat Suite") == 0 &&
       (version == 1 || version == 2)) {
     *suite = &g_iterate_float_suite2;
-    record_suite_acquire(name, version);
-    return 0;
+    return SuiteResolveResult::acquired;
   }
   if (name && std::strcmp(name, "PF Sampling8 Suite") == 0 && version == 1) {
     g_sampling8_suite1.fill(reinterpret_cast<void*>(&aegp_unsupported_suite_call));
@@ -8886,8 +8797,7 @@ int32_t __cdecl acquire_suite(const char* name, int32_t version, const void** su
     g_sampling8_suite1[1] = reinterpret_cast<void*>(&subpixel_sample8);
     g_sampling8_suite1[2] = reinterpret_cast<void*>(&area_sample8);
     *suite = g_sampling8_suite1.data();
-    record_suite_acquire(name, version);
-    return 0;
+    return SuiteResolveResult::acquired;
   }
   if (name && std::strcmp(name, "PF Sampling16 Suite") == 0 &&
       version == 1) {
@@ -8896,8 +8806,7 @@ int32_t __cdecl acquire_suite(const char* name, int32_t version, const void** su
     g_sampling16_suite1[1] = reinterpret_cast<void*>(&subpixel_sample16);
     g_sampling16_suite1[2] = reinterpret_cast<void*>(&area_sample16);
     *suite = g_sampling16_suite1.data();
-    record_suite_acquire(name, version);
-    return 0;
+    return SuiteResolveResult::acquired;
   }
   if (name && std::strcmp(name, "PF SamplingFloat Suite") == 0 &&
       version == 1) {
@@ -8906,8 +8815,7 @@ int32_t __cdecl acquire_suite(const char* name, int32_t version, const void** su
     g_sampling_float_suite1[1] = reinterpret_cast<void*>(&subpixel_sample_float);
     g_sampling_float_suite1[2] = reinterpret_cast<void*>(&area_sample_float);
     *suite = g_sampling_float_suite1.data();
-    record_suite_acquire(name, version);
-    return 0;
+    return SuiteResolveResult::acquired;
   }
   if (name && std::strcmp(name, "PF World Transform Suite") == 0 &&
       version == 1) {
@@ -8919,8 +8827,7 @@ int32_t __cdecl acquire_suite(const char* name, int32_t version, const void** su
     g_world_transform_suite1.transfer_rect = &transfer_rect;
     g_world_transform_suite1.transform_world = &transform_world;
     *suite = &g_world_transform_suite1;
-    record_suite_acquire(name, version);
-    return 0;
+    return SuiteResolveResult::acquired;
   }
   if (name && std::strcmp(name, "PF Fill Matte Suite") == 0 &&
       version == 2) {
@@ -8933,30 +8840,25 @@ int32_t __cdecl acquire_suite(const char* name, int32_t version, const void** su
     g_fill_matte_suite2[5] = reinterpret_cast<void*>(&premultiply_color16);
     g_fill_matte_suite2[6] = reinterpret_cast<void*>(&premultiply_color_float);
     *suite = g_fill_matte_suite2.data();
-    record_suite_acquire(name, version);
-    return 0;
+    return SuiteResolveResult::acquired;
   }
   if (name && std::strcmp(name, "AEGP Utility Suite") == 0 && version == 7) {
     *suite = &g_utility_suite3;
-    record_suite_acquire(name, version);
-    return 0;
+    return SuiteResolveResult::acquired;
   }
   if (name && std::strcmp(name, "AEGP Utility Suite") == 0 && version == 13) {
     *suite = &g_utility_suite;
-    record_suite_acquire(name, version);
-    return 0;
+    return SuiteResolveResult::acquired;
   }
   if (name && std::strcmp(name, "AEGP Dynamic Stream Suite") == 0 && version == 2) {
     g_aegp_dynamic_stream_suite2.fill(reinterpret_cast<void*>(&aegp_unsupported_suite_call));
     g_aegp_dynamic_stream_suite2[5] = reinterpret_cast<void*>(&aegp_set_dynamic_stream_flag_v2);
     *suite = g_aegp_dynamic_stream_suite2.data();
-    record_suite_acquire(name, version);
-    return 0;
+    return SuiteResolveResult::acquired;
   }
   if (name && std::strcmp(name, "AEGP PF Interface Suite") == 0 && version == 1) {
     *suite = &g_pf_interface_suite;
-    record_suite_acquire(name, version);
-    return 0;
+    return SuiteResolveResult::acquired;
   }
   if (name && std::strcmp(name, "AEGP Layer Render Options Suite") == 0 && version == 1) {
     g_layer_render_options_suite1 = {&new_layer_render_options,
@@ -8967,8 +8869,7 @@ int32_t __cdecl acquire_suite(const char* name, int32_t version, const void** su
         &set_layer_render_downsample, &get_layer_render_downsample,
         &set_layer_render_matte, &get_layer_render_matte};
     *suite = &g_layer_render_options_suite1;
-    record_suite_acquire(name, version);
-    return 0;
+    return SuiteResolveResult::acquired;
   }
   if (name && std::strcmp(name, "AEGP Render Options Suite") == 0 && version == 1) {
     g_render_options_suite1 = {&render_options_new_from_item, &render_options_duplicate,
@@ -8980,8 +8881,7 @@ int32_t __cdecl acquire_suite(const char* name, int32_t version, const void** su
         &render_options_set_roi, &render_options_get_roi,
         &render_options_set_matte, &render_options_get_matte};
     *suite = &g_render_options_suite1;
-    record_suite_acquire(name, version);
-    return 0;
+    return SuiteResolveResult::acquired;
   }
   if (name && std::strcmp(name, "AEGP Layer Render Options Suite") == 0 && version == 2) {
     g_layer_render_options_suite2 = {&new_layer_render_options,
@@ -8993,8 +8893,7 @@ int32_t __cdecl acquire_suite(const char* name, int32_t version, const void** su
         &set_layer_render_downsample, &get_layer_render_downsample,
         &set_layer_render_matte, &get_layer_render_matte};
     *suite = &g_layer_render_options_suite2;
-    record_suite_acquire(name, version);
-    return 0;
+    return SuiteResolveResult::acquired;
   }
   if (is_render_worker() && g_loaded_effect_receipt_context.entry && name &&
       std::strcmp(name, "AEGP Render Options Suite") == 0 && version == 4) {
@@ -9010,8 +8909,7 @@ int32_t __cdecl acquire_suite(const char* name, int32_t version, const void** su
         &render_options_get_guide_layers, &render_options_set_guide_layers,
         &render_options_get_quality, &render_options_set_quality};
     *suite = &g_render_options_suite4;
-    record_suite_acquire(name, version);
-    return 0;
+    return SuiteResolveResult::acquired;
   }
   bool allow_render_suite2 = g_aegp_command_roundtrip_mode;
   allow_render_suite2 = allow_render_suite2 ||
@@ -9023,21 +8921,18 @@ int32_t __cdecl acquire_suite(const char* name, int32_t version, const void** su
         &render_sound_reject, &render_timestamp_reject, &render_changed_reject,
         &render_worthwhile_reject, &render_checkin_rendered};
     *suite = &g_aegp_render_suite2;
-    record_suite_acquire(name, version);
-    return 0;
+    return SuiteResolveResult::acquired;
   }
   if (name && std::strcmp(name, "PF Effect Custom UI Suite") == 0 && version == 2) {
     g_effect_custom_ui_suite2[0] = reinterpret_cast<void*>(&get_drawing_reference);
     g_effect_custom_ui_suite2[1] = reinterpret_cast<void*>(&get_context_async_manager);
     *suite = g_effect_custom_ui_suite2.data();
-    record_suite_acquire(name, version);
-    return 0;
+    return SuiteResolveResult::acquired;
   }
   if (name && std::strcmp(name, "AEGP Render Asyc Manager Suite") == 0 && version == 1) {
     g_render_async_manager_suite1 = {&checkout_item_frame_async, &checkout_layer_frame_async};
     *suite = &g_render_async_manager_suite1;
-    record_suite_acquire(name, version);
-    return 0;
+    return SuiteResolveResult::acquired;
   }
   if (name && std::strcmp(name, "AEGP Render Suite") == 0 && version == 5) {
     g_aegp_render_suite4 = {&render_checkout_frame_reject, &render_checkout_layer_reject,
@@ -9046,8 +8941,7 @@ int32_t __cdecl acquire_suite(const char* name, int32_t version, const void** su
         &render_changed_reject, &render_worthwhile_reject,
         &render_checkin_rendered, &render_guid_reject};
     *suite = &g_aegp_render_suite4;
-    record_suite_acquire(name, version);
-    return 0;
+    return SuiteResolveResult::acquired;
   }
   if (name && std::strcmp(name, "AEGP Render Suite") == 0 && version == 8) {
     g_aegp_render_suite5 = {&render_checkout_frame_reject, &render_checkout_layer_v5,
@@ -9057,8 +8951,7 @@ int32_t __cdecl acquire_suite(const char* name, int32_t version, const void** su
         &render_changed_reject, &render_worthwhile_reject,
         &render_checkin_rendered, &render_guid_reject};
     *suite = &g_aegp_render_suite5;
-    record_suite_acquire(name, version);
-    return 0;
+    return SuiteResolveResult::acquired;
   }
   if (name && std::strcmp(name, "AEGP World Suite") == 0 && version == 3) {
     auto& world_suite3 = aexcompat::suite_abi::aegp_world_suite3_table();
@@ -9069,10 +8962,9 @@ int32_t __cdecl acquire_suite(const char* name, int32_t version, const void** su
         &aegp_world_fast_blur, &aegp_world_new_platform,
         &aegp_world_dispose_platform, &aegp_world_reference_platform};
     *suite = &world_suite3;
-    record_suite_acquire(name, version);
-    return 0;
+    return SuiteResolveResult::acquired;
   }
-  if (!g_mask_model_enabled || !name) return reject_suite_acquire(name, version);
+  if (!g_mask_model_enabled || !name) return SuiteResolveResult::not_found;
   if (std::strcmp(name, "AEGP PF Interface Suite") == 0 && version == 1)
     *suite = &g_pf_interface_suite;
   else if (std::strcmp(name, "AEGP Layer Mask Suite") == 0 && version == 6)
@@ -9088,17 +8980,19 @@ int32_t __cdecl acquire_suite(const char* name, int32_t version, const void** su
   else if (std::strcmp(name, "AEGP Mask Outline Suite") == 0 && version == 5)
     *suite = &g_mask_outline_suite;
   else {
-    return reject_suite_acquire(name, version);
+    return SuiteResolveResult::not_found;
   }
-  record_suite_acquire(name, version);
-  return 0;
+  return SuiteResolveResult::acquired;
+}
+
+int32_t __cdecl acquire_suite(const char* name, int32_t version,
+                              const void** suite) {
+  return suite_registry().acquire(name, version, suite, &resolve_suite, nullptr,
+                                  g_trace_writer);
 }
 
 int32_t __cdecl release_suite(const char* name, int32_t version) {
-  const bool released = g_suite_lease_tracker.release(name, version);
-  if (g_trace_writer && name)
-    g_trace_writer->suite_release(name, std::max<int32_t>(version, 0), released);
-  return released ? 0 : 1;
+  return suite_registry().release(name, version, g_trace_writer);
 }
 
 bool verify_suite_release_without_acquire_rejected() {
