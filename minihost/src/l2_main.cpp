@@ -68,6 +68,7 @@
 #include "worker_selftest_dispatch.hpp"
 #include "worker_smart_runtime.hpp"
 #include "worker_mask_runtime.hpp"
+#include "worker_pf_helper_runtime.hpp"
 #include "worker_aegp_render_options.hpp"
 #include "worker_aegp_init_runtime.hpp"
 #include "worker_aegp_scene.hpp"
@@ -824,54 +825,8 @@ constexpr std::size_t kMaxPfPathSegmentPreps = 256;
 constexpr int32_t kPfOutOfMemory = 4;
 constexpr int32_t kPfBadCallbackParam = 516;
 constexpr int32_t kPfSuiteToolNone = 0;
-constexpr int32_t kPfExtendedSuiteToolMin = 0;
-constexpr int32_t kPfExtendedSuiteToolMax = 44;  // PF_ExtendedSuiteTool_CYLINDER
-constexpr std::size_t kPfHelperUiContextCount = 3;
-
-std::atomic<int32_t> g_pf_helper_effect_tool{kPfExtendedSuiteToolMin};
-std::array<std::atomic<int32_t>, kPfHelperUiContextCount> g_pf_helper_ui_tools{};
-thread_local int32_t g_pf_helper_ui_context = -1;
 bool g_render_ui_context_active{};
-
-std::atomic<int32_t>& current_pf_helper_tool() {
-  if (g_pf_helper_ui_context >= 0 &&
-      g_pf_helper_ui_context < static_cast<int32_t>(g_pf_helper_ui_tools.size()))
-    return g_pf_helper_ui_tools[static_cast<std::size_t>(g_pf_helper_ui_context)];
-  return g_pf_helper_effect_tool;
-}
-
-int32_t __cdecl pf_parse_clipboard() {
-  // The headless worker has no authoritative AE clipboard/UI service to parse.
-  return kPfBadCallbackParam;
-}
-
-int32_t __cdecl pf_set_current_extended_tool(int32_t tool) {
-  if (!g_render_ui_context_active || g_pf_helper_ui_context < 0 ||
-      g_pf_helper_ui_context >= static_cast<int32_t>(g_pf_helper_ui_tools.size()))
-    return kPfBadCallbackParam;
-  if (tool < kPfExtendedSuiteToolMin || tool > kPfExtendedSuiteToolMax)
-    return kPfBadCallbackParam;
-  current_pf_helper_tool().store(tool, std::memory_order_release);
-  return 0;
-}
-
-int32_t __cdecl pf_get_current_extended_tool(int32_t* tool) {
-  if (!tool) return kPfBadCallbackParam;
-  *tool = current_pf_helper_tool().load(std::memory_order_acquire);
-  return 0;
-}
-
-int32_t __cdecl pf_get_current_tool(int32_t* tool) {
-  if (!tool) return kPfBadCallbackParam;
-  *tool = kPfSuiteToolNone;
-  return 0;
-}
-
-void reset_pf_helper_tools() {
-  g_pf_helper_effect_tool.store(kPfExtendedSuiteToolMin, std::memory_order_release);
-  for (auto& tool : g_pf_helper_ui_tools)
-    tool.store(kPfExtendedSuiteToolMin, std::memory_order_release);
-}
+using aexcompat::pf_helper::reset;
 std::list<HostStreamRef> g_stream_refs;
 std::unordered_map<StreamValue*, CheckedStreamValue> g_stream_values;
 struct MaskLifetimeCounts {
@@ -2463,13 +2418,6 @@ std::array<void*, 11> g_pf_path_data_suite1{};
 WorldTransformSuite1 g_world_transform_suite1{};
 std::array<void*, 19> g_ansi_suite1{};
 std::array<void*, 1> g_effect_ui_suite1{};
-std::array<void*, 3> g_pf_helper_suite2{
-    reinterpret_cast<void*>(&pf_parse_clipboard),
-    reinterpret_cast<void*>(&pf_set_current_extended_tool),
-    reinterpret_cast<void*>(&pf_get_current_extended_tool)};
-std::array<void*, 1> g_pf_helper_suite1{
-    reinterpret_cast<void*>(&pf_get_current_tool)};
-static_assert(sizeof(g_pf_helper_suite1) == sizeof(void*));
 // PF_AdvAppSuite1 is frozen at ten callbacks; keep its storage independent
 // from the eleven-slot v2 table so versioned suite identity cannot alias.
 std::array<void*, 10> g_adv_app_suite1{};
@@ -2856,15 +2804,11 @@ HostUiContext g_ui_context;
 HostUiContext* g_ui_context_pointer = &g_ui_context;
 struct PfHelperUiContextScope {
   explicit PfHelperUiContextScope(int32_t context)
-      : previous(g_pf_helper_ui_context), previous_active(g_render_ui_context_active) {
-    g_pf_helper_ui_context = context >= 0 && context < 3 ? context : -1;
-    g_render_ui_context_active = g_pf_helper_ui_context >= 0;
+      : runtime_scope(context), previous_active(g_render_ui_context_active) {
+    g_render_ui_context_active = context >= 0 && context < 3;
   }
-  ~PfHelperUiContextScope() {
-    g_render_ui_context_active = previous_active;
-    g_pf_helper_ui_context = previous;
-  }
-  int32_t previous;
+  ~PfHelperUiContextScope() { g_render_ui_context_active = previous_active; }
+  aexcompat::pf_helper::UiContextScope runtime_scope;
   bool previous_active;
 };
 uint32_t g_ui_drag_calls{};
@@ -6149,7 +6093,7 @@ int32_t invoke_global_setdown(EffectEntry entry, void* input, void* output) {
   const int32_t error = invoke_entry_seh(entry, kGlobalSetdown, input, output, nullptr,
                                          nullptr, nullptr, &exception_code);
   reset_pf_state_effect_lifetime(&g_effect, false);
-  reset_pf_helper_tools();
+  aexcompat::pf_helper::reset();
   return error;
 }
 
@@ -7199,11 +7143,11 @@ SuiteResolveResult resolve_suite(void*, const char* name, int32_t version,
       return SuiteResolveResult::rejected_bad_param;
   }
   if (version == 1 && std::strcmp(name, "AE Plugin Helper Suite") == 0) {
-    *suite = g_pf_helper_suite1.data();
+    *suite = aexcompat::pf_helper::suite1();
     return SuiteResolveResult::acquired;
   }
   if (name && version == 2 && std::strcmp(name, "AE Plugin Helper Suite2") == 0) {
-    *suite = g_pf_helper_suite2.data();
+    *suite = aexcompat::pf_helper::suite2();
     return SuiteResolveResult::acquired;
   }
   if (name && version == 1 && std::strcmp(name, "PF Color Suite") == 0) {
@@ -12929,12 +12873,13 @@ bool verify_legacy_effect_compat_suites() {
   const void* comp_suite = nullptr;
   const void* interface_suite = nullptr;
   const void* helper_suite = nullptr;
-  bool ok = acquire_suite("AEGP Comp Suite", 21, &comp_suite) == 0 &&
+  bool ok = aexcompat::pf_helper::selftest() &&
+      acquire_suite("AEGP Comp Suite", 21, &comp_suite) == 0 &&
       comp_suite == g_aegp_comp_suite10.data() &&
       acquire_suite("AEGP PF Interface Suite", 1, &interface_suite) == 0 &&
       interface_suite == &g_pf_interface_suite &&
       acquire_suite("AE Plugin Helper Suite", 1, &helper_suite) == 0 &&
-      helper_suite == g_pf_helper_suite1.data();
+      helper_suite == aexcompat::pf_helper::suite1();
 
   AegpColorVal color{-1.0, -2.0, -3.0, -4.0};
   const AegpColorVal color_sentinel = color;
@@ -12962,12 +12907,12 @@ bool verify_legacy_effect_compat_suites() {
       time.scale == (std::numeric_limits<uint32_t>::max)() &&
       convert_effect_to_comp_time(&g_effect, 0, 1, nullptr) != 0;
 
-  g_pf_helper_effect_tool.store(14, std::memory_order_release);
+  aexcompat::pf_helper::set_effect_tool_for_test(14);
   int32_t tool = -1;
-  ok = ok && pf_get_current_tool(&tool) == 0 && tool == kPfSuiteToolNone &&
-      pf_get_current_tool(nullptr) == kPfBadCallbackParam &&
-      g_pf_helper_effect_tool.load(std::memory_order_acquire) == 14;
-  reset_pf_helper_tools();
+  ok = ok && aexcompat::pf_helper::get_current_tool(&tool) == 0 && tool == kPfSuiteToolNone &&
+      aexcompat::pf_helper::get_current_tool(nullptr) == kPfBadCallbackParam &&
+      aexcompat::pf_helper::effect_tool_for_test() == 14;
+  aexcompat::pf_helper::reset();
 
   ok = release_suite("AE Plugin Helper Suite", 1) == 0 && ok;
   ok = release_suite("AEGP PF Interface Suite", 1) == 0 && ok;
@@ -15031,8 +14976,8 @@ int worker_main_impl(int argc, wchar_t **argv) {
           }
         }
         for (auto& state : g_ui_context.plugin_state) state = 0;
-        g_pf_helper_ui_tools[static_cast<std::size_t>(g_ui_context.window_type)].store(
-            kPfExtendedSuiteToolMin, std::memory_order_release);
+        aexcompat::pf_helper::set_context_tool(
+            g_ui_context.window_type, aexcompat::pf_helper::kExtendedToolMin);
         lifecycle_host_state_cleared = std::all_of(std::begin(g_ui_context.plugin_state),
             std::end(g_ui_context.plugin_state), [](auto state) { return state == 0; });
       }

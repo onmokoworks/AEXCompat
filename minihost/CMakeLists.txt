@@ -41,7 +41,8 @@ set(AEXCOMPAT_WORKER_RUNTIME_CORE_SOURCES
     src/worker_session.cpp
     src/worker_selftest_dispatch.cpp
     src/worker_smart_runtime.cpp
-    src/worker_mask_runtime.cpp
+  src/worker_mask_runtime.cpp
+  src/worker_pf_helper_runtime.cpp
     src/worker_aegp_render_options.cpp
     src/worker_aegp_init_runtime.cpp
     src/worker_aegp_scene.cpp

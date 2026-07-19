@@ -14,6 +14,8 @@ SOURCES = (
     ROOT / "minihost" / "src" / "worker_pf_suites.cpp",
     ROOT / "minihost" / "src" / "worker_pf_suites_internal.hpp",
     ROOT / "minihost" / "src" / "worker_selftest_dispatch.cpp",
+    ROOT / "minihost" / "src" / "worker_pf_helper_runtime.cpp",
+    ROOT / "minihost" / "src" / "worker_pf_helper_runtime.hpp",
 )
 SUITE_ABI = ROOT / "minihost" / "src" / "worker_suite_abi.hpp"
 
@@ -87,7 +89,7 @@ def test_minihost_publishes_typed_fail_closed_legacy_effect_suites() -> None:
         'named("AEGP Comp Suite") && version == 21',
         "offsetof(PfInterfaceSuite, convert_effect_to_comp_time) == 2 * sizeof(void*)",
         "&convert_effect_to_comp_time",
-        "std::array<void*, 1> g_pf_helper_suite1",
+        "using Suite1 = std::array<void*, 1>",
         'std::strcmp(name, "AE Plugin Helper Suite") == 0',
         "--self-test-legacy-effect-compat",
     ):
@@ -107,10 +109,10 @@ def test_minihost_publishes_typed_fail_closed_legacy_effect_suites() -> None:
 
 def test_helper_v1_has_independent_lease_and_headless_none_policy() -> None:
     text = source_text()
-    helper = text[text.index("int32_t __cdecl pf_get_current_tool") :]
+    helper = text[text.index("int32_t __cdecl get_current_tool") :]
     helper = helper[: helper.index("\n}")]
-    assert "if (!tool) return kPfBadCallbackParam;" in helper
-    assert "*tool = kPfSuiteToolNone;" in helper
-    assert "current_pf_helper_tool" not in helper
-    assert "g_pf_helper_suite1.data()" in text
-    assert "g_pf_helper_suite2.data()" in text
+    assert "if (!tool) return kBadCallbackParam;" in helper
+    assert "*tool = kToolNone;" in helper
+    assert "current_tool().load" not in helper
+    assert "aexcompat::pf_helper::suite1()" in text
+    assert "aexcompat::pf_helper::suite2()" in text
