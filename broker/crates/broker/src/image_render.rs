@@ -4568,118 +4568,26 @@ fn render_with_artifact(
         initial_report
             .ok_or_else(|| invalid(format!("worker report unavailable: {diagnostics}")))?
     };
-    let selector_ok = if smart {
-        worker_report.get("pre_render_error") == Some(&json!(0))
-            && worker_report.get("smart_render_error") == Some(&json!(0))
-            && worker_report.get("gpu_device_setup_error") == Some(&json!(0))
-            && worker_report.get("gpu_device_setdown_error") == Some(&json!(0))
-            && worker_report.get("gpu_memory_lifetimes_balanced") == Some(&Value::Bool(true))
-            && worker_report.get("result_rects_valid") == Some(&Value::Bool(true))
-            && worker_report.get("output_pixels_valid") == Some(&Value::Bool(true))
-    } else {
-        worker_report.get("render_error") == Some(&json!(0))
-            && worker_report.get("gpu_memory_lifetimes_balanced") == Some(&Value::Bool(true))
-            && worker_report.get("pf_path_lifetimes_balanced") == Some(&Value::Bool(true))
-    };
-    let pixel_format_ok =
-        worker_report.get("pixel_format") == Some(&json!(pixel_format.report_name()));
-    let output_origin_ok = worker_report
-        .get("output_origin")
-        .and_then(Value::as_array)
-        .is_some_and(|values| {
-            values.len() == 2
-                && values.iter().all(|value| {
-                    value
-                        .as_i64()
-                        .is_some_and(|value| i32::try_from(value).is_ok())
-                })
-        });
-    let parameter_count_ok = worker_report
-        .get("in_data_num_params")
-        .and_then(Value::as_u64)
-        .is_some_and(|count| {
-            (1..=u64::from(MAX_PARAMETERS) + 1).contains(&count)
-                && interactive_parameters
-                    .is_none_or(|parameters| count == parameters.len() as u64 + 1)
-        });
-    let spatial_ok = worker_report.get("downsample_x")
-        == Some(&json!([
-            spatial.downsample_x.numerator,
-            spatial.downsample_x.denominator
-        ]))
-        && worker_report.get("downsample_y")
-            == Some(&json!([
-                spatial.downsample_y.numerator,
-                spatial.downsample_y.denominator
-            ]))
-        && worker_report.get("pixel_aspect_ratio")
-            == Some(&json!([
-                spatial.pixel_aspect_ratio.numerator,
-                spatial.pixel_aspect_ratio.denominator
-            ]))
-        && worker_report.get("full_resolution_dimensions")
-            == Some(&json!([
-                spatial.full_resolution_width.unwrap_or(width),
-                spatial.full_resolution_height.unwrap_or(height)
-            ]))
-        && worker_report.get("in_data_dimensions")
-            == Some(&json!([
-                spatial.full_resolution_width.unwrap_or(width),
-                spatial.full_resolution_height.unwrap_or(height)
-            ]))
-        && worker_report.get("pre_effect_source_origin")
-            == Some(&json!([
-                spatial.pre_effect_source_origin_x.unwrap_or(0),
-                spatial.pre_effect_source_origin_y.unwrap_or(0)
-            ]))
-        && worker_report.get("quality") == Some(&json!(expected_quality))
-        && worker_report.get("local_time_step") == Some(&json!(timing.time_step))
-        && worker_report.get("field") == Some(&json!(expected_field))
-        && worker_report.get("shutter_angle_fixed") == Some(&json!(expected_shutter_angle))
-        && worker_report.get("shutter_phase_fixed") == Some(&json!(expected_shutter_phase));
-    let custom_ui_action_ok = match custom_ui_action {
-        None => true,
-        Some(RenderUiAction::Click { .. }) => {
-            worker_report.get("custom_ui_click_dispatched") == Some(&json!(true))
-                && worker_report.get("custom_ui_click_error") == Some(&json!(0))
-                && worker_report
-                    .get("custom_ui_click_out_flags")
-                    .and_then(Value::as_u64)
-                    .is_some_and(|flags| flags & 9 == 9)
-                && worker_report.get("custom_ui_click_changed_value") == Some(&json!(true))
-                && worker_report.get("app_color_picker_calls") == Some(&json!(1))
-                && worker_report.get("app_invalidate_rect_calls") == Some(&json!(1))
-                && worker_report.get("custom_ui_lifecycle_errors") == Some(&json!([0, 0, 0, 0]))
-                && worker_report.get("custom_ui_context_closed") == Some(&json!(true))
-        }
-        Some(RenderUiAction::Draw) => {
-            worker_report.get("custom_ui_draw_dispatched") == Some(&json!(true))
-                && worker_report.get("custom_ui_draw_error") == Some(&json!(0))
-                && worker_report
-                    .get("custom_ui_draw_out_flags")
-                    .and_then(Value::as_u64)
-                    .is_some_and(|flags| flags & 1 == 1)
-                && worker_report.get("custom_ui_lifecycle_errors") == Some(&json!([0, 0, 0, 0]))
-                && worker_report.get("custom_ui_context_closed") == Some(&json!(true))
-        }
-    };
-    let worker_passed = isolated.classification.as_str() == "ok"
-        && selector_ok
-        && pixel_format_ok
-        && custom_ui_action_ok
-        && audio.as_ref().is_none_or(|_| {
-            worker_report.get("audio_usage_advertised") == Some(&json!(true))
-                && worker_report.get("audio_checkout_allowed") == Some(&json!(true))
-                && worker_report.get("audio_source_available") == Some(&json!(true))
-                && worker_report.get("audio_lifetimes_balanced") == Some(&json!(true))
-                && worker_report.get("invalid_audio_operations") == Some(&json!(0))
-        })
-        && worker_report.get("guard_bytes_intact") == Some(&Value::Bool(true));
-    if !worker_passed {
-        return Err(invalid(format!(
-            "isolated AEX image render failed validation: diagnostics={diagnostics}, report={worker_report}"
-        )));
-    }
+    let (output_origin_ok, parameter_count_ok, spatial_ok) = validate_interactive_worker_report(
+        &worker_report,
+        &diagnostics,
+        &InteractiveGateFacts {
+            smart,
+            pixel_format,
+            spatial,
+            expected_quality,
+            expected_field,
+            expected_shutter_angle,
+            expected_shutter_phase,
+            custom_ui_action: custom_ui_action.as_ref(),
+            audio_present: audio.is_some(),
+            interactive_parameters,
+            classification: isolated.classification.as_str(),
+            time_step: timing.time_step,
+            input_width: width,
+            input_height: height,
+        },
+    )?;
     let rendered_width = worker_report
         .get("width")
         .and_then(Value::as_u64)
@@ -4837,6 +4745,149 @@ fn render_with_artifact(
     Ok(build_interactive_image_report(&worker_report, facts))
 }
 
+
+/// Host-side expectations the isolated worker report is validated against.
+/// Extracted from `render_with_artifact` so a length-1 render session can run
+/// the identical gate over its final report (issue #98 stage W2).
+pub(crate) struct InteractiveGateFacts<'a> {
+    pub(crate) smart: bool,
+    pub(crate) pixel_format: RenderPixelFormat,
+    pub(crate) spatial: crate::render_request::SpatialContext,
+    pub(crate) expected_quality: i32,
+    pub(crate) expected_field: i32,
+    pub(crate) expected_shutter_angle: i32,
+    pub(crate) expected_shutter_phase: i32,
+    pub(crate) custom_ui_action: Option<&'a RenderUiAction>,
+    pub(crate) audio_present: bool,
+    pub(crate) interactive_parameters: Option<&'a [InteractiveParameter]>,
+    pub(crate) classification: &'a str,
+    pub(crate) time_step: i32,
+    pub(crate) input_width: u32,
+    pub(crate) input_height: u32,
+}
+
+/// Fails closed exactly like the inline gate did; on success returns the
+/// diagnostic contract booleans (output origin, parameter count, spatial)
+/// that the public report carries as warnings rather than failures.
+pub(crate) fn validate_interactive_worker_report(
+    worker_report: &Value,
+    diagnostics: &Value,
+    facts: &InteractiveGateFacts<'_>,
+) -> io::Result<(bool, bool, bool)> {
+    let selector_ok = if facts.smart {
+        worker_report.get("pre_render_error") == Some(&json!(0))
+            && worker_report.get("smart_render_error") == Some(&json!(0))
+            && worker_report.get("gpu_device_setup_error") == Some(&json!(0))
+            && worker_report.get("gpu_device_setdown_error") == Some(&json!(0))
+            && worker_report.get("gpu_memory_lifetimes_balanced") == Some(&Value::Bool(true))
+            && worker_report.get("result_rects_valid") == Some(&Value::Bool(true))
+            && worker_report.get("output_pixels_valid") == Some(&Value::Bool(true))
+    } else {
+        worker_report.get("render_error") == Some(&json!(0))
+            && worker_report.get("gpu_memory_lifetimes_balanced") == Some(&Value::Bool(true))
+            && worker_report.get("pf_path_lifetimes_balanced") == Some(&Value::Bool(true))
+    };
+    let pixel_format_ok =
+        worker_report.get("pixel_format") == Some(&json!(facts.pixel_format.report_name()));
+    let output_origin_ok = worker_report
+        .get("output_origin")
+        .and_then(Value::as_array)
+        .is_some_and(|values| {
+            values.len() == 2
+                && values.iter().all(|value| {
+                    value
+                        .as_i64()
+                        .is_some_and(|value| i32::try_from(value).is_ok())
+                })
+        });
+    let parameter_count_ok = worker_report
+        .get("in_data_num_params")
+        .and_then(Value::as_u64)
+        .is_some_and(|count| {
+            (1..=u64::from(MAX_PARAMETERS) + 1).contains(&count)
+                && facts
+                    .interactive_parameters
+                    .is_none_or(|parameters| count == parameters.len() as u64 + 1)
+        });
+    let spatial_ok = worker_report.get("downsample_x")
+        == Some(&json!([
+            facts.spatial.downsample_x.numerator,
+            facts.spatial.downsample_x.denominator
+        ]))
+        && worker_report.get("downsample_y")
+            == Some(&json!([
+                facts.spatial.downsample_y.numerator,
+                facts.spatial.downsample_y.denominator
+            ]))
+        && worker_report.get("pixel_aspect_ratio")
+            == Some(&json!([
+                facts.spatial.pixel_aspect_ratio.numerator,
+                facts.spatial.pixel_aspect_ratio.denominator
+            ]))
+        && worker_report.get("full_resolution_dimensions")
+            == Some(&json!([
+                facts.spatial.full_resolution_width.unwrap_or(facts.input_width),
+                facts.spatial.full_resolution_height.unwrap_or(facts.input_height)
+            ]))
+        && worker_report.get("in_data_dimensions")
+            == Some(&json!([
+                facts.spatial.full_resolution_width.unwrap_or(facts.input_width),
+                facts.spatial.full_resolution_height.unwrap_or(facts.input_height)
+            ]))
+        && worker_report.get("pre_effect_source_origin")
+            == Some(&json!([
+                facts.spatial.pre_effect_source_origin_x.unwrap_or(0),
+                facts.spatial.pre_effect_source_origin_y.unwrap_or(0)
+            ]))
+        && worker_report.get("quality") == Some(&json!(facts.expected_quality))
+        && worker_report.get("local_time_step") == Some(&json!(facts.time_step))
+        && worker_report.get("field") == Some(&json!(facts.expected_field))
+        && worker_report.get("shutter_angle_fixed") == Some(&json!(facts.expected_shutter_angle))
+        && worker_report.get("shutter_phase_fixed") == Some(&json!(facts.expected_shutter_phase));
+    let custom_ui_action_ok = match facts.custom_ui_action {
+        None => true,
+        Some(RenderUiAction::Click { .. }) => {
+            worker_report.get("custom_ui_click_dispatched") == Some(&json!(true))
+                && worker_report.get("custom_ui_click_error") == Some(&json!(0))
+                && worker_report
+                    .get("custom_ui_click_out_flags")
+                    .and_then(Value::as_u64)
+                    .is_some_and(|flags| flags & 9 == 9)
+                && worker_report.get("custom_ui_click_changed_value") == Some(&json!(true))
+                && worker_report.get("app_color_picker_calls") == Some(&json!(1))
+                && worker_report.get("app_invalidate_rect_calls") == Some(&json!(1))
+                && worker_report.get("custom_ui_lifecycle_errors") == Some(&json!([0, 0, 0, 0]))
+                && worker_report.get("custom_ui_context_closed") == Some(&json!(true))
+        }
+        Some(RenderUiAction::Draw) => {
+            worker_report.get("custom_ui_draw_dispatched") == Some(&json!(true))
+                && worker_report.get("custom_ui_draw_error") == Some(&json!(0))
+                && worker_report
+                    .get("custom_ui_draw_out_flags")
+                    .and_then(Value::as_u64)
+                    .is_some_and(|flags| flags & 1 == 1)
+                && worker_report.get("custom_ui_lifecycle_errors") == Some(&json!([0, 0, 0, 0]))
+                && worker_report.get("custom_ui_context_closed") == Some(&json!(true))
+        }
+    };
+    let worker_passed = facts.classification == "ok"
+        && selector_ok
+        && pixel_format_ok
+        && custom_ui_action_ok
+        && (!facts.audio_present
+            || (worker_report.get("audio_usage_advertised") == Some(&json!(true))
+                && worker_report.get("audio_checkout_allowed") == Some(&json!(true))
+                && worker_report.get("audio_source_available") == Some(&json!(true))
+                && worker_report.get("audio_lifetimes_balanced") == Some(&json!(true))
+                && worker_report.get("invalid_audio_operations") == Some(&json!(0))))
+        && worker_report.get("guard_bytes_intact") == Some(&Value::Bool(true));
+    if !worker_passed {
+        return Err(invalid(format!(
+            "isolated AEX image render failed validation: diagnostics={diagnostics}, report={worker_report}"
+        )));
+    }
+    Ok((output_origin_ok, parameter_count_ok, spatial_ok))
+}
 /// Everything the flattened `interactive_image_render` report carries beyond
 /// the worker report itself. Kept separate from `render_with_artifact` so a
 /// length-1 render session can synthesize the same public report shape from
