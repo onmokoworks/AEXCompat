@@ -31,7 +31,9 @@ def test_parameter_selftests_are_a_true_translation_unit():
 
 
 def test_param_utils_suite3_has_the_frozen_typed_nine_slot_abi():
-    source = SOURCE.read_text(encoding="utf-8")
+    # The ABI struct/table live in the worker-runtime owner set; the catalog
+    # entry keeps resolving through l2_main, which the owner set includes.
+    source = source_owners.worker_text()
     assert '{"PF Param Utils Suite", 3, &g_param_utils_suite}' in source
     assert "struct ParamUtilsSuite3" in source
     assert "sizeof(ParamUtilsSuite3) == 9 * sizeof(void*)" in source
