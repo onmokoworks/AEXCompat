@@ -172,6 +172,23 @@ struct RenderTelemetry {
   TelemetryHooks hooks{};
 };
 
+// Owned storage behind the worker's RenderTelemetry bundles (issue #126
+// Phase D): the world-dump destination and counters plus the opt-in output
+// checksum detail. Writers are worker_main's dump/checksum-detail CLI
+// callbacks and the render pipeline through the pointer bundle; the image
+// report emitters read it back via world_debug_report_json. Lifetime:
+// process-lifetime, empty/zero defaults, never torn down.
+struct TelemetryState {
+  std::filesystem::path dump_worlds_dir;
+  uint32_t world_dumps_written{};
+  uint32_t world_dumps_skipped{};
+  uint64_t world_dump_bytes{};
+  bool output_checksum_detail{};
+  std::vector<uint32_t> output_row_crc32;
+  std::array<std::string, 4> output_channel_sha256;
+};
+TelemetryState& telemetry_state();
+
 void dump_world_snapshot(RenderTelemetry& telemetry, const std::string& stage,
                          const unsigned char* packed_argb, int32_t width,
                          int32_t height, int32_t pixel_bytes);

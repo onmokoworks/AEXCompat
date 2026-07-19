@@ -649,13 +649,8 @@ bool same_rational_time(int32_t left, uint32_t left_scale,
 // --output-checksum-detail-v1 argv trailers, and the dump directory is
 // broker-managed. Raw pixel bytes never enter the JSON report; only counts,
 // row CRCs, and channel digests do.
-std::filesystem::path g_dump_worlds_dir;
-uint32_t g_world_dumps_written = 0;
-uint32_t g_world_dumps_skipped = 0;
-uint64_t g_world_dump_bytes = 0;
-bool g_output_checksum_detail = false;
-std::vector<uint32_t> g_output_row_crc32;
-std::array<std::string, 4> g_output_channel_sha256;
+// World-dump and output-checksum telemetry storage moved to its owner
+// aexcompat::render::telemetry_state() (issue #126 Phase D).
 // Mask scene identity (model enabled + scene id) moved to its owner
 // aexcompat::mask_runtime (issue #126 Phase D).
 struct SpatialRatio { int32_t numerator{1}; uint32_t denominator{1}; };
@@ -1393,8 +1388,6 @@ int32_t __cdecl ui_transform_point_simple(void*, void* context, int32_t* point) 
   return 0;
 }
 
-
-std::mutex g_world_mutex;
 
 constexpr int32_t kSyntheticCompWidth = 17;
 constexpr int32_t kSyntheticCompHeight = 9;
@@ -3717,10 +3710,11 @@ const bool g_parameter_execution_configured = configure_hooks({
 // row-major, no stride padding). Little-endian is the only supported target.
 void dump_world_snapshot(const std::string& stage, const unsigned char* packed_argb,
                          int32_t width, int32_t height, int32_t pixel_bytes) {
+  auto& state = aexcompat::render::telemetry_state();
   aexcompat::render::RenderTelemetry telemetry{
-      &g_dump_worlds_dir, &g_world_dumps_written, &g_world_dumps_skipped,
-      &g_world_dump_bytes, g_output_checksum_detail, &g_output_row_crc32,
-      &g_output_channel_sha256, {&argb_to_rgba_native, &sha256_bytes}};
+      &state.dump_worlds_dir, &state.world_dumps_written, &state.world_dumps_skipped,
+      &state.world_dump_bytes, state.output_checksum_detail, &state.output_row_crc32,
+      &state.output_channel_sha256, {&argb_to_rgba_native, &sha256_bytes}};
   aexcompat::render::dump_world_snapshot(telemetry, stage, packed_argb, width,
                                           height, pixel_bytes);
 }
@@ -3730,10 +3724,11 @@ void dump_world_snapshot(const std::string& stage, const unsigned char* packed_a
 // without shipping any pixel content in the report.
 void record_output_checksum_detail(const unsigned char* rgba, int32_t width,
                                    int32_t height, int32_t pixel_bytes) {
+  auto& state = aexcompat::render::telemetry_state();
   aexcompat::render::RenderTelemetry telemetry{
-      &g_dump_worlds_dir, &g_world_dumps_written, &g_world_dumps_skipped,
-      &g_world_dump_bytes, g_output_checksum_detail, &g_output_row_crc32,
-      &g_output_channel_sha256, {&argb_to_rgba_native, &sha256_bytes}};
+      &state.dump_worlds_dir, &state.world_dumps_written, &state.world_dumps_skipped,
+      &state.world_dump_bytes, state.output_checksum_detail, &state.output_row_crc32,
+      &state.output_channel_sha256, {&argb_to_rgba_native, &sha256_bytes}};
   aexcompat::render::record_output_checksum_detail(telemetry, rgba, width,
                                                     height, pixel_bytes);
 }
@@ -3741,10 +3736,11 @@ void record_output_checksum_detail(const unsigned char* rgba, int32_t width,
 // Single insertion point for both image report emitters: dump counters are
 // always present, checksum detail only when the opt-in trailer enabled it.
 std::string world_debug_report_json() {
+  auto& state = aexcompat::render::telemetry_state();
   const aexcompat::render::RenderTelemetry telemetry{
-      &g_dump_worlds_dir, &g_world_dumps_written, &g_world_dumps_skipped,
-      &g_world_dump_bytes, g_output_checksum_detail, &g_output_row_crc32,
-      &g_output_channel_sha256, {&argb_to_rgba_native, &sha256_bytes}};
+      &state.dump_worlds_dir, &state.world_dumps_written, &state.world_dumps_skipped,
+      &state.world_dump_bytes, state.output_checksum_detail, &state.output_row_crc32,
+      &state.output_channel_sha256, {&argb_to_rgba_native, &sha256_bytes}};
   return aexcompat::render::world_debug_report_json(telemetry);
 }
 
@@ -4930,13 +4926,14 @@ using namespace aexcompat::l2_detail;
 
 
 bool set_l2_dump_worlds_dir(void*, const wchar_t* value) {
-  g_dump_worlds_dir = std::filesystem::path(value ? value : L"");
+  auto& state = aexcompat::render::telemetry_state();
+  state.dump_worlds_dir = std::filesystem::path(value ? value : L"");
   std::error_code error;
-  return !g_dump_worlds_dir.empty() && std::filesystem::is_directory(g_dump_worlds_dir, error);
+  return !state.dump_worlds_dir.empty() && std::filesystem::is_directory(state.dump_worlds_dir, error);
 }
 
 bool enable_l2_checksum_detail(void*) {
-  g_output_checksum_detail = true;
+  aexcompat::render::telemetry_state().output_checksum_detail = true;
   return true;
 }
 
