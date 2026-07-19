@@ -52,7 +52,7 @@ def test_layer_render_options_registry_is_bounded_and_aba_resistant():
 
 
 def test_layer_render_paths_snapshot_each_independent_handle():
-    host = SOURCE.read_text(encoding="utf-8")
+    host = source_owners.contract_text("aegp_receipt_callbacks")
     layer = LAYER_RUNTIME.read_text(encoding="utf-8")
     async_runtime = ASYNC_RUNTIME.read_text(encoding="utf-8")
     assert host.count("snapshot_layer_render_options(options, snapshot)") >= 3

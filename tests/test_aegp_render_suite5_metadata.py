@@ -54,7 +54,8 @@ def test_receipt_guid_is_stable_owned_memory_and_rejects_stale_receipts():
     text = source_owners.worker_text()
     declaration = text.index("int32_t __cdecl render_guid_reject(")
     start = text.index("int32_t __cdecl render_guid_reject(", declaration + 1)
-    body = text[start:text.index("bool world_lifetimes_balanced();", start)]
+    guid_end = text.index("return unlock_aegp_mem_handle(*out);", start)
+    body = text[start:guid_end + len("return unlock_aegp_mem_handle(*out);")]
     for marker in (
         "render_receipts::snapshot(receipt, snapshot)",
         "snapshot.guid",
