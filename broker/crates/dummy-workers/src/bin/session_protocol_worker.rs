@@ -171,15 +171,73 @@ mod worker {
         // reject fails these tests too.
         let mut effective = args.len();
         while effective >= 12 && args[effective - 2].starts_with("--") {
-            if args[effective - 2] == "--parameter-animation-v1" {
-                let sidecar = std::path::Path::new(&args[effective - 1]);
-                let pinned = std::env::current_dir()
-                    .ok()
-                    .and_then(|cwd| cwd.join("target/image-transport").canonicalize().ok());
-                let parent = sidecar.parent().and_then(|parent| parent.canonicalize().ok());
-                if !sidecar.is_file() || pinned.is_none() || pinned != parent {
-                    return 3;
+            let value = &args[effective - 1];
+            match args[effective - 2].as_str() {
+                "--parameter-animation-v1" => {
+                    let sidecar = std::path::Path::new(value);
+                    let pinned = std::env::current_dir()
+                        .ok()
+                        .and_then(|cwd| cwd.join("target/image-transport").canonicalize().ok());
+                    let parent = sidecar.parent().and_then(|parent| parent.canonicalize().ok());
+                    if !sidecar.is_file() || pinned.is_none() || pinned != parent {
+                        return 3;
+                    }
                 }
+                // The real worker's auxiliary gates: a strictly shaped
+                // manifest, an existing dump directory, and the literal "1".
+                // The manifest check mirrors load_aux_manifest's top-level
+                // contract (absolute existing file, bounded size, exactly
+                // {schema, nonce, channels} with the v1 schema string and a
+                // digit nonce); per-channel sidecar validation stays with the
+                // real worker.
+                "--aux-manifest-v1" => {
+                    let manifest = std::path::Path::new(value);
+                    if !manifest.is_absolute() || !manifest.is_file() {
+                        return 3;
+                    }
+                    let Ok(bytes) = std::fs::read(manifest) else {
+                        return 3;
+                    };
+                    if bytes.is_empty() || bytes.len() > 1024 * 1024 {
+                        return 3;
+                    }
+                    let Ok(document) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+                        return 3;
+                    };
+                    let Some(object) = document.as_object() else {
+                        return 3;
+                    };
+                    let schema_ok = object.get("schema").and_then(|v| v.as_str())
+                        == Some("aux-manifest-v1");
+                    let nonce_ok = object
+                        .get("nonce")
+                        .and_then(|v| v.as_str())
+                        .is_some_and(|nonce| {
+                            !nonce.is_empty() && nonce.bytes().all(|b| b.is_ascii_digit())
+                        });
+                    let channels_ok = object
+                        .get("channels")
+                        .and_then(serde_json::Value::as_array)
+                        // The real gate rejects an empty channel list.
+                        .is_some_and(|channels| {
+                            !channels.is_empty()
+                                && channels.iter().all(serde_json::Value::is_object)
+                        });
+                    if object.len() != 3 || !schema_ok || !nonce_ok || !channels_ok {
+                        return 3;
+                    }
+                }
+                "--dump-worlds-v1" => {
+                    if !std::path::Path::new(value).is_dir() {
+                        return 3;
+                    }
+                }
+                "--output-checksum-detail-v1" => {
+                    if value != "1" {
+                        return 3;
+                    }
+                }
+                _ => {}
             }
             effective -= 2;
         }

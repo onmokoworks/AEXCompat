@@ -105,6 +105,9 @@ mod windows_e2e {
             plugin_sha256: sha,
             parameters: None,
             parameter_animation: None,
+            aux_manifest: None,
+            world_dump_dir: None,
+            output_checksum_detail: false,
             dependencies: Vec::new(),
             width: WIDTH,
             height: HEIGHT,
@@ -178,6 +181,9 @@ mod windows_e2e {
             plugin_sha256: &sha,
             parameters: Some(&parameters),
             parameter_animation: Some(&animations),
+            aux_manifest: None,
+            world_dump_dir: None,
+            output_checksum_detail: false,
             dependencies: Vec::new(),
             width: WIDTH,
             height: HEIGHT,
@@ -233,6 +239,9 @@ mod windows_e2e {
             plugin_sha256: &sha,
             parameters: Some(&parameters),
             parameter_animation: Some(&animations),
+            aux_manifest: None,
+            world_dump_dir: None,
+            output_checksum_detail: false,
             dependencies: Vec::new(),
             width: WIDTH,
             height: HEIGHT,
@@ -251,6 +260,138 @@ mod windows_e2e {
     }
 
     #[test]
+    fn auxiliary_options_ride_the_session_argv_tail() {
+        let _behavior = BehaviorGuard::set(None);
+        let (repository, plugin, sha) = temp_repository();
+        // A manifest the real worker's loader would accept: one depth channel
+        // whose f32le sidecar exists next to it with a matching hash. The
+        // fixture enforces the top-level gate (schema/nonce/non-empty
+        // channels); the deep per-channel validation stays with the real
+        // worker's own transport tests.
+        let sidecar = repository.0.join("aux-1-0-0.f32le");
+        let payload: Vec<u8> = [0.0f32, 0.25, 1.0, 2.0]
+            .iter()
+            .flat_map(|value| value.to_le_bytes())
+            .collect();
+        std::fs::write(&sidecar, &payload).unwrap();
+        let manifest = repository.0.join("aux-manifest.json");
+        std::fs::write(
+            &manifest,
+            serde_json::json!({
+                "schema": "aux-manifest-v1",
+                "nonce": "1",
+                "channels": [{
+                    "param_index": 0,
+                    "type": 0x4450_5448,
+                    "name": "Depth",
+                    "data_type": "f32le",
+                    "dimension": 1,
+                    "width": 2,
+                    "height": 2,
+                    "samples": [{
+                        "time": 0,
+                        "time_scale": 30,
+                        "path": sidecar.to_string_lossy(),
+                        "sampling": "hold",
+                        "interpretation": "depth",
+                        "expected_byte_length": payload.len(),
+                        "sha256": format!("{:x}", Sha256::digest(&payload)),
+                    }],
+                }],
+            })
+            .to_string(),
+        )
+        .unwrap();
+        // Under the broker-managed dump boundary; the resolver creates it.
+        let dump_dir = repository.0.join("target/world-dumps");
+        // The fixture worker validates each pair like the real worker's
+        // auxiliary gates (existing file / existing directory / literal "1"),
+        // so a mangled pair would kill the session before the first frame.
+        let mut session = RenderSession::open(SessionOpenRequest {
+            repository: &repository.0,
+            plugin_path: &plugin,
+            plugin_sha256: &sha,
+            parameters: None,
+            parameter_animation: None,
+            aux_manifest: Some(&manifest),
+            world_dump_dir: Some(&dump_dir),
+            output_checksum_detail: true,
+            dependencies: Vec::new(),
+            width: WIDTH,
+            height: HEIGHT,
+            pixel_format: RenderPixelFormat::Argb8,
+            time_step: 1,
+            total_time: 300,
+            time_scale: 30,
+            frame_deadline: Duration::from_secs(30),
+        })
+        .expect("open render session with auxiliary options");
+        let outcome = session
+            .render_frame(0, 0, &input_pattern(7))
+            .expect("frame renders with auxiliary options attached");
+        assert!(matches!(outcome.status, FrameStatus::Rendered { .. }));
+        assert_eq!(session.close()["session_clean"], true);
+    }
+
+    #[test]
+    fn open_rejects_a_non_empty_world_dump_directory() {
+        let _behavior = BehaviorGuard::set(None);
+        let (repository, plugin, sha) = temp_repository();
+        let reused = repository.0.join("target/reused-dumps");
+        std::fs::create_dir_all(&reused).unwrap();
+        std::fs::write(reused.join("000-stale.bin"), b"stale").unwrap();
+        let error = RenderSession::open(SessionOpenRequest {
+            repository: &repository.0,
+            plugin_path: &plugin,
+            plugin_sha256: &sha,
+            parameters: None,
+            parameter_animation: None,
+            aux_manifest: None,
+            world_dump_dir: Some(&reused),
+            output_checksum_detail: false,
+            dependencies: Vec::new(),
+            width: WIDTH,
+            height: HEIGHT,
+            pixel_format: RenderPixelFormat::Argb8,
+            time_step: 1,
+            total_time: 300,
+            time_scale: 30,
+            frame_deadline: Duration::from_secs(30),
+        })
+        .map(|_| ())
+        .expect_err("a reused dump directory fails fast at open");
+        assert!(error.to_string().contains("empty"), "{error}");
+    }
+
+    #[test]
+    fn open_rejects_a_world_dump_directory_outside_the_target_tree() {
+        let _behavior = BehaviorGuard::set(None);
+        let (repository, plugin, sha) = temp_repository();
+        let missing = repository.0.join("outside-dumps");
+        let error = RenderSession::open(SessionOpenRequest {
+            repository: &repository.0,
+            plugin_path: &plugin,
+            plugin_sha256: &sha,
+            parameters: None,
+            parameter_animation: None,
+            aux_manifest: None,
+            world_dump_dir: Some(&missing),
+            output_checksum_detail: false,
+            dependencies: Vec::new(),
+            width: WIDTH,
+            height: HEIGHT,
+            pixel_format: RenderPixelFormat::Argb8,
+            time_step: 1,
+            total_time: 300,
+            time_scale: 30,
+            frame_deadline: Duration::from_secs(30),
+        })
+        .map(|_| ())
+        .expect_err("a dump directory outside the managed tree fails fast at open");
+        assert!(error.to_string().contains("target tree"), "{error}");
+    }
+
+    #[test]
     fn open_rejects_animation_bound_to_an_unknown_slot() {
         let _behavior = BehaviorGuard::set(None);
         let (repository, plugin, sha) = temp_repository();
@@ -261,6 +402,9 @@ mod windows_e2e {
             plugin_sha256: &sha,
             parameters: None,
             parameter_animation: Some(&animations),
+            aux_manifest: None,
+            world_dump_dir: None,
+            output_checksum_detail: false,
             dependencies: Vec::new(),
             width: WIDTH,
             height: HEIGHT,
@@ -551,6 +695,10 @@ mod windows_e2e {
         let (repository, plugin, _sha) = temp_repository();
         let inputs = write_input_frames(&repository.0, 3);
         let output_directory = repository.0.join("batch-out");
+        // Auxiliary observation options flow from the batch request into the
+        // session argv tail; the fixture worker validates each pair, so a
+        // dropped or mangled option would kill the batch.
+        let dump_dir = repository.0.join("target/batch-dumps");
         let request_path = repository.0.join("request.json");
         std::fs::write(
             &request_path,
@@ -559,6 +707,8 @@ mod windows_e2e {
                 "plugin": plugin.to_string_lossy(),
                 "input_frames": inputs,
                 "output_directory": output_directory.to_string_lossy(),
+                "world_dump_dir": dump_dir.to_string_lossy(),
+                "output_checksum_detail": true,
             }))
             .unwrap(),
         )

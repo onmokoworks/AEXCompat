@@ -7,6 +7,8 @@ self-computed expectations only, so a fresh build on any machine satisfies
 it.
 """
 import json
+import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -70,12 +72,19 @@ def test_video_batch_renders_a_sequence_through_one_resident_worker(tmp_path: Pa
         frames.append(str(clone))
 
     output_directory = tmp_path / "out"
+    # World dumps must stay under the broker-managed <repository>/target
+    # boundary; the resolver creates the directory and requires it fresh.
+    dump_directory = ROOT / "target" / f"world-dumps-batch-test-{os.getpid()}"
+    if dump_directory.exists():
+        shutil.rmtree(dump_directory)
     request = tmp_path / "request.json"
     request.write_text(json.dumps({
         "schema_version": 1,
         "plugin": str(AEX),
         "input_frames": frames,
         "output_directory": str(output_directory),
+        "world_dump_dir": str(dump_directory),
+        "output_checksum_detail": True,
     }), encoding="utf-8")
     report_path = tmp_path / "report.json"
     completed = subprocess.run(
@@ -108,3 +117,12 @@ def test_video_batch_renders_a_sequence_through_one_resident_worker(tmp_path: Pa
     # transferred outputs; the checksums are the worker's slot hashes.
     checksums = {frame["checksum"] for frame in report["frames"]}
     assert len(checksums) == 1
+    # The auxiliary observation options reached the real worker: world
+    # snapshots landed in the requested dump directory and the final report
+    # carries the opt-in checksum detail for the transferred output.
+    try:
+        assert any(dump_directory.iterdir()), "world dump directory received snapshots"
+    finally:
+        shutil.rmtree(dump_directory, ignore_errors=True)
+    assert final["output_row_crc32"], "checksum detail rows recorded"
+    assert final["output_channel_sha256"], "checksum detail channels recorded"

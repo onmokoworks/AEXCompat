@@ -700,8 +700,8 @@ const WORLD_DUMP_DIR_ENV: &str = "AEXCOMPAT_DUMP_WORLDS_DIR";
 const OUTPUT_CHECKSUM_DETAIL_ENV: &str = "AEXCOMPAT_CHECKSUM_DETAIL";
 const WORLD_DUMP_EXTENSIONS: [&str; 3] = [".rgba8", ".rgba16le", ".rgba32f-le"];
 
-struct WorldDumpDir {
-    path: PathBuf,
+pub(crate) struct WorldDumpDir {
+    pub(crate) path: PathBuf,
     display: String,
 }
 
@@ -757,7 +757,7 @@ fn resolve_world_dump_dir(repository: &Path, requested: &Path) -> io::Result<Wor
     resolve_managed_dump_dir(repository, requested, true)
 }
 
-fn resolve_managed_dump_dir(
+pub(crate) fn resolve_managed_dump_dir(
     repository: &Path,
     requested: &Path,
     require_empty: bool,
