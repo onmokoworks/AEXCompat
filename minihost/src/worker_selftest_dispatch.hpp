@@ -1,7 +1,9 @@
 #pragma once
 
 #include <cstdint>
+#include <cstddef>
 #include <optional>
+#include <string_view>
 
 namespace aexcompat::worker_runtime::selftest {
 
@@ -21,5 +23,18 @@ struct AegpHooks {
 // exact process exit code for the caller to pass through WorkerSession.
 std::optional<int> dispatch_aegp(int argc, wchar_t** argv,
                                  const AegpHooks& hooks);
+
+struct SimpleCommand {
+  std::wstring_view command;
+  std::string_view result_key;
+  bool (*run)(){};
+  int failure_exit{1};
+  // Valid JSON object members including a leading comma, or empty.
+  std::string_view metadata_json;
+};
+
+std::optional<int> dispatch_simple(int argc, wchar_t** argv,
+                                   const SimpleCommand* commands,
+                                   std::size_t command_count);
 
 }  // namespace aexcompat::worker_runtime::selftest

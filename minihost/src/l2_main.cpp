@@ -14742,14 +14742,47 @@ int worker_main_impl(int argc, wchar_t **argv) {
               << (suite_leases_balanced() ? "true" : "false") << "}\n";
     return passed ? 0 : 1;
   }
-  if (is_render_worker() && argc == 2 &&
-      std::wstring(argv[1]) == L"--self-test-aegp-layer-render-options-suite2") {
-    const bool passed = verify_aegp_layer_render_options_suite2();
-    std::cout << "{\"aegp_layer_render_options_suite2\":\""
+  if (argc == 2 &&
+      std::wstring(argv[1]) == L"--self-test-aegp-effect-param-union-suite4") {
+    const bool passed = verify_aegp_effect_param_union_suite4();
+    std::cout << "{\"aegp_effect_param_union_suite4\":\""
               << (passed ? "passed" : "failed")
-              << "\",\"downstream_cycle_rejected\":true}"
-              << "\n";
+              << "\",\"successful_calls\":" << g_aegp_effect_param_union_calls
+              << "}\n";
     return passed ? 0 : 1;
+  }
+  const std::array<aexcompat::worker_runtime::selftest::SimpleCommand, 20> simple_selftests{{
+      {L"--self-test-aegp-installed-effect-catalog", "aegp_installed_effect_catalog", &verify_aegp_installed_effect_catalog_suite4},
+      {L"--self-test-parameter-animation", "parameter_animation_transport", &verify_parameter_animation_transport},
+      {L"--self-test-pf-param-utils-suite", "pf_param_utils_suite3", &verify_pf_param_utils_suite3},
+      {L"--self-test-pf-pre-checkout-result", "pf_pre_checkout_result", &verify_pre_checkout_result_contract},
+      {L"--self-test-smart-runtime-concurrency", "smart_runtime_concurrency", &aexcompat::worker_runtime::smart::concurrency_self_test},
+      {L"--self-test-smart-result-skipped", "smart_result_skipped", +[] {
+         const SmartResult skipped{};
+         return skipped.runtime && skipped.runtime->pixel_format.empty() &&
+             skipped.runtime->input_checkout_request[0] == -1 &&
+             skipped.runtime->map_checkout_request[0] == -1;
+       }},
+      {L"--self-test-pf-pixel-data", "pf_pixel_data_suite", &verify_pixel_data_suites},
+      {L"--self-test-pf-fill-matte-legacy", "pf_fill_matte_legacy_callbacks", &verify_legacy_fill_matte_callbacks},
+      {L"--self-test-pf-ae-channel-suite", "pf_ae_channel_suite", &verify_pf_ae_channel_suite},
+      {L"--self-test-pf-color-suite", "pf_color_suite", &verify_pf_color_suite},
+      {L"--self-test-pf-color-param-suite", "pf_color_param_suite", &verify_pf_color_param_suite},
+      {L"--self-test-pf-iterate", "pf_iterate_suite", &verify_iterate_suites},
+      {L"--self-test-world-transform-composite", "world_transform_composite_rect", &verify_world_transform_composite_rect},
+      {L"--self-test-world-transform-affine", "world_transform_affine", &verify_world_transform_affine},
+      {L"--self-test-world-transform-blend", "world_transform_blend", &verify_world_transform_blend},
+      {L"--self-test-world-transform-transfer-mask", "world_transform_transfer_mask", &verify_world_transform_transfer_mask},
+      {L"--self-test-aegp-world-suite3", "aegp_world_suite3", +[] { return verify_aegp_world_suite3() && verify_aegp_world_mfr_safety(); }},
+      {L"--self-test-pf-batch-sampling-suite", "pf_batch_sampling_suite", &verify_pf_batch_sampling_suite, 35, ",\"opaque_callable_exposed\":false"},
+      {L"--self-test-pf-ae-channel-native-provider", "pf_ae_channel_native_provider", &verify_pf_ae_channel_native_provider, 37, ",\"coverage_depths\":[8,16,32],\"mfr_checkouts\":2048,\"fabricated_planes\":false"},
+      {L"--self-test-aegp-layer-render-options-suite2", "aegp_layer_render_options_suite2", +[] { return is_render_worker() && verify_aegp_layer_render_options_suite2(); }, 1, ",\"downstream_cycle_rejected\":true"},
+  }};
+  if (!(argc == 2 && std::wstring(argv[1]) ==
+            L"--self-test-aegp-layer-render-options-suite2" && !is_render_worker())) {
+    if (const auto selftest_exit = aexcompat::worker_runtime::selftest::dispatch_simple(
+            argc, argv, simple_selftests.data(), simple_selftests.size()))
+      return *selftest_exit;
   }
   if (argc == 2 &&
       std::wstring(argv[1]) == L"--self-test-aegp-keyframe-mutations") {
@@ -14772,29 +14805,6 @@ int worker_main_impl(int argc, wchar_t **argv) {
               << "}\n";
     return passed ? 0 : 1;
   }
-  if (argc == 2 &&
-      std::wstring(argv[1]) == L"--self-test-aegp-effect-param-union-suite4") {
-    const bool passed = verify_aegp_effect_param_union_suite4();
-    std::cout << "{\"aegp_effect_param_union_suite4\":\""
-              << (passed ? "passed" : "failed")
-              << "\",\"successful_calls\":" << g_aegp_effect_param_union_calls
-              << "}\n";
-    return passed ? 0 : 1;
-  }
-  if (argc == 2 &&
-      std::wstring(argv[1]) == L"--self-test-aegp-installed-effect-catalog") {
-    const bool passed = verify_aegp_installed_effect_catalog_suite4();
-    std::cout << "{\"aegp_installed_effect_catalog\":\""
-              << (passed ? "passed" : "failed") << "\"}\n";
-    return passed ? 0 : 1;
-  }
-  if (argc == 2 &&
-      std::wstring(argv[1]) == L"--self-test-parameter-animation") {
-    const bool passed = verify_parameter_animation_transport();
-    std::cout << "{\"parameter_animation_transport\":\""
-              << (passed ? "passed" : "failed") << "\"}\n";
-    return passed ? 0 : 1;
-  }
   if (argc == 3 && std::wstring(argv[1]) == L"--self-test-parameter-animation-sidecar") {
     std::vector<ParameterTimeline> timelines;
     const bool passed =
@@ -14804,12 +14814,6 @@ int worker_main_impl(int argc, wchar_t **argv) {
               << "\",\"timelines\":" << timelines.size() << "}\n";
     return passed ? 0 : 3;
   }
-  if (argc == 2 && std::wstring(argv[1]) == L"--self-test-pf-param-utils-suite") {
-    const bool passed = verify_pf_param_utils_suite3();
-    std::cout << "{\"pf_param_utils_suite3\":\"" << (passed ? "passed" : "failed")
-              << "\"}\n";
-    return passed ? 0 : 1;
-  }
   if (argc == 2 && std::wstring(argv[1]) == L"--self-test-pf-path-data-hardening") {
     const bool passed = verify_pf_path_data_hardening();
     std::cout << "{\"pf_path_data_hardening\":\"" << (passed ? "passed" : "failed")
@@ -14818,33 +14822,6 @@ int worker_main_impl(int argc, wchar_t **argv) {
               << ",\"live\":" << g_pf_path_segment_preps.size()
               << ",\"balanced\":" << (pf_path_lifetimes_balanced() ? "true" : "false")
               << "}\n";
-    return passed ? 0 : 1;
-  }
-  if (argc == 2 && std::wstring(argv[1]) == L"--self-test-pf-pre-checkout-result") {
-    const bool passed = verify_pre_checkout_result_contract();
-    std::cout << "{\"pf_pre_checkout_result\":\""
-              << (passed ? "passed" : "failed") << "\"}\n";
-    return passed ? 0 : 1;
-  }
-  if (argc == 2 && std::wstring(argv[1]) == L"--self-test-smart-runtime-concurrency") {
-    const bool passed = aexcompat::worker_runtime::smart::concurrency_self_test();
-    std::cout << "{\"smart_runtime_concurrency\":\""
-              << (passed ? "passed" : "failed") << "\"}\n";
-    return passed ? 0 : 1;
-  }
-  if (argc == 2 && std::wstring(argv[1]) == L"--self-test-smart-result-skipped") {
-    const SmartResult skipped{};
-    const bool passed = skipped.runtime && skipped.runtime->pixel_format.empty() &&
-        skipped.runtime->input_checkout_request[0] == -1 &&
-        skipped.runtime->map_checkout_request[0] == -1;
-    std::cout << "{\"smart_result_skipped\":\""
-              << (passed ? "passed" : "failed") << "\"}\n";
-    return passed ? 0 : 1;
-  }
-  if (argc == 2 && std::wstring(argv[1]) == L"--self-test-pf-pixel-data") {
-    const bool passed = verify_pixel_data_suites();
-    std::cout << "{\"pf_pixel_data_suite\":\""
-              << (passed ? "passed" : "failed") << "\"}\n";
     return passed ? 0 : 1;
   }
   if (argc == 2 && std::wstring(argv[1]) == L"--self-test-pf-world-registry") {
@@ -14870,18 +14847,6 @@ int worker_main_impl(int argc, wchar_t **argv) {
               << (concurrent_snapshot ? "true" : "false")
               << ",\"live_count\":" << world_stats.live_count
               << ",\"live_bytes\":" << world_stats.live_bytes << "}\n";
-    return passed ? 0 : 1;
-  }
-  if (argc == 2 && std::wstring(argv[1]) == L"--self-test-pf-fill-matte-legacy") {
-    const bool passed = verify_legacy_fill_matte_callbacks();
-    std::cout << "{\"pf_fill_matte_legacy_callbacks\":\""
-              << (passed ? "passed" : "failed") << "\"}\n";
-    return passed ? 0 : 1;
-  }
-  if (argc == 2 && std::wstring(argv[1]) == L"--self-test-pf-ae-channel-suite") {
-    const bool passed = verify_pf_ae_channel_suite();
-    std::cout << "{\"pf_ae_channel_suite\":\""
-              << (passed ? "passed" : "failed") << "\"}\n";
     return passed ? 0 : 1;
   }
   if (argc == 4 && std::wstring(argv[1]) == L"--self-test-pf-ae-channel-transport" &&
@@ -14929,27 +14894,6 @@ int worker_main_impl(int argc, wchar_t **argv) {
               << "\",\"ocio_enabled\":false}\n";
     return passed ? 0 : 1;
   }
-  if (argc == 2 && std::wstring(argv[1]) == L"--self-test-pf-color-suite") {
-    const bool passed = verify_pf_color_suite();
-    std::cout << "{\"pf_color_suite\":\"" << (passed ? "passed" : "failed")
-              << "\"}\n";
-    return passed ? 0 : 1;
-  }
-  if (argc == 2 && std::wstring(argv[1]) == L"--self-test-pf-batch-sampling-suite") {
-    const bool passed = verify_pf_batch_sampling_suite();
-    std::cout << "{\"pf_batch_sampling_suite\":\""
-              << (passed ? "passed" : "failed")
-              << "\",\"opaque_callable_exposed\":false}\n";
-    return passed ? 0 : 35;
-  }
-  if (argc == 2 && std::wstring(argv[1]) == L"--self-test-pf-ae-channel-native-provider") {
-    const bool passed = verify_pf_ae_channel_native_provider();
-    std::cout << "{\"pf_ae_channel_native_provider\":\""
-              << (passed ? "passed" : "failed")
-              << "\",\"coverage_depths\":[8,16,32],\"mfr_checkouts\":2048"
-              << ",\"fabricated_planes\":false}\n";
-    return passed ? 0 : 37;
-  }
   if (argc == 2 &&
       std::wstring(argv[1]) == L"--self-test-pf-effect-sequence-data-suite") {
     const bool passed = verify_pf_effect_sequence_data_suite1();
@@ -14961,49 +14905,6 @@ int worker_main_impl(int argc, wchar_t **argv) {
               << ",\"publications\":" << effect_sequence_publications()
               << ",\"invalidations\":" << effect_sequence_invalidations() << "}\n";
     return passed ? 0 : 36;
-  }
-  if (argc == 2 && std::wstring(argv[1]) == L"--self-test-pf-color-param-suite") {
-    const bool passed = verify_pf_color_param_suite();
-    std::cout << "{\"pf_color_param_suite\":\"" << (passed ? "passed" : "failed")
-              << "\"}\n";
-    return passed ? 0 : 1;
-  }
-  if (argc == 2 && std::wstring(argv[1]) == L"--self-test-pf-iterate") {
-    const bool passed = verify_iterate_suites();
-    std::cout << "{\"pf_iterate_suite\":\"" << (passed ? "passed" : "failed")
-              << "\"}\n";
-    return passed ? 0 : 1;
-  }
-  if (argc == 2 && std::wstring(argv[1]) == L"--self-test-world-transform-composite") {
-    const bool passed = verify_world_transform_composite_rect();
-    std::cout << "{\"world_transform_composite_rect\":\""
-              << (passed ? "passed" : "failed") << "\"}\n";
-    return passed ? 0 : 1;
-  }
-  if (argc == 2 && std::wstring(argv[1]) == L"--self-test-world-transform-affine") {
-    const bool passed = verify_world_transform_affine();
-    std::cout << "{\"world_transform_affine\":\"" << (passed ? "passed" : "failed")
-              << "\"}\n";
-    return passed ? 0 : 1;
-  }
-  if (argc == 2 && std::wstring(argv[1]) == L"--self-test-world-transform-blend") {
-    const bool passed = verify_world_transform_blend();
-    std::cout << "{\"world_transform_blend\":\"" << (passed ? "passed" : "failed")
-              << "\"}\n";
-    return passed ? 0 : 1;
-  }
-  if (argc == 2 && std::wstring(argv[1]) == L"--self-test-world-transform-transfer-mask") {
-    const bool passed = verify_world_transform_transfer_mask();
-    std::cout << "{\"world_transform_transfer_mask\":\""
-              << (passed ? "passed" : "failed") << "\"}\n";
-    return passed ? 0 : 1;
-  }
-  if (argc == 2 && std::wstring(argv[1]) == L"--self-test-aegp-world-suite3") {
-    const bool passed = verify_aegp_world_suite3() &&
-        verify_aegp_world_mfr_safety();
-    std::cout << "{\"aegp_world_suite3\":\""
-              << (passed ? "passed" : "failed") << "\"}\n";
-    return passed ? 0 : 1;
   }
   if (argc == 2 && std::wstring(argv[1]) == L"--self-test-aegp-async-receipt") {
     const bool passed = verify_aegp_async_receipts();

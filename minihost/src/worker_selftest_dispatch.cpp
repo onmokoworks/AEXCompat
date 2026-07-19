@@ -43,4 +43,22 @@ std::optional<int> dispatch_aegp(int argc, wchar_t** argv,
   return passed ? 0 : failure;
 }
 
+std::optional<int> dispatch_simple(int argc, wchar_t** argv,
+                                   const SimpleCommand* commands,
+                                   std::size_t command_count) {
+  if (argc != 2 || !argv || !argv[1] || !commands) return std::nullopt;
+  const std::wstring_view requested(argv[1]);
+  for (std::size_t index = 0; index < command_count; ++index) {
+    const auto& command = commands[index];
+    if (requested != command.command) continue;
+    if (!command.run) return command.failure_exit;
+    const bool passed = command.run();
+    std::cout << "{\"" << command.result_key << "\":\""
+              << (passed ? "passed" : "failed") << "\""
+              << command.metadata_json << "}\n";
+    return passed ? 0 : command.failure_exit;
+  }
+  return std::nullopt;
+}
+
 }  // namespace aexcompat::worker_runtime::selftest

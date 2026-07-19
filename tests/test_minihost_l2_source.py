@@ -19,6 +19,7 @@ REPORT_SOURCE = ROOT / "minihost" / "src" / "worker_report.cpp"
 RUNTIME_ADMISSION_SOURCE = ROOT / "minihost" / "src" / "worker_runtime_admission.cpp"
 CLASSIC_RUNTIME_HEADER = ROOT / "minihost" / "src" / "worker_classic_runtime.hpp"
 CLASSIC_RUNTIME_SOURCE = ROOT / "minihost" / "src" / "worker_classic_runtime.cpp"
+SELFTEST_DISPATCH_SOURCE = ROOT / "minihost" / "src" / "worker_selftest_dispatch.cpp"
 PF_SUITES_INTERNAL = ROOT / "minihost" / "src" / "worker_pf_suites_internal.hpp"
 AEGP_SCENE_SOURCE = ROOT / "minihost" / "src" / "worker_aegp_scene.cpp"
 AEGP_SCENE_HEADER = ROOT / "minihost" / "src" / "worker_aegp_scene.hpp"
@@ -33,7 +34,8 @@ def l2_family_source():
         CLI_DISPATCH_SOURCE, PF_SUITES_ABI, PF_SUITES_INTERNAL, PF_SUITES_SOURCE,
         AEGP_SCENE_SOURCE, AEGP_SCENE_HEADER, AEGP_SCENE_RUNTIME_HEADER,
         AEGP_SCENE_RUNTIME_SOURCE, REPORT_HEADER, REPORT_SOURCE,
-        RUNTIME_ADMISSION_SOURCE, CLASSIC_RUNTIME_HEADER, CLASSIC_RUNTIME_SOURCE
+        RUNTIME_ADMISSION_SOURCE, CLASSIC_RUNTIME_HEADER, CLASSIC_RUNTIME_SOURCE,
+        SELFTEST_DISPATCH_SOURCE
     ))
 
 
@@ -176,7 +178,7 @@ class MinihostL2SourceTests(unittest.TestCase):
             "&begin_sampling8, &end_sampling8", "unsupported_batch_sample_func",
             "*batch = nullptr", "verify_pf_batch_sampling_suite",
             "--self-test-pf-batch-sampling-suite",
-            '"opaque_callable_exposed\\\":false}',
+            '"opaque_callable_exposed\\\":false',
         ):
             self.assertIn(marker, text)
 
