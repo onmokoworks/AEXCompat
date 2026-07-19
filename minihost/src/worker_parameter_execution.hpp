@@ -20,6 +20,8 @@ struct Hooks {
   int32_t (*invoke_entry)(EffectEntry, int32_t, void*, void*, void**, void*,
                           void*, uint32_t*){};
   bool (*handle_is_live)(const void*){};
+  std::size_t (*active_mask_count)(){};
+  bool (*active_mask_id)(std::size_t, int32_t*){};
 };
 
 bool configure_hooks(const Hooks& hooks) noexcept;
@@ -35,6 +37,13 @@ void observe_arbitrary_defaults(EffectEntry, BufferIn&, BufferOut&);
 void probe_arbitrary_scan(EffectEntry, BufferIn&, BufferOut&, Definitions&);
 bool interpolate_arbitrary_values(EffectEntry, BufferIn&, BufferOut&, Definitions&);
 bool roundtrip_arbitrary_values(EffectEntry, BufferIn&, BufferOut&, Definitions&);
+bool validate_requested_assignments(const parameters::RequestedAssignments&);
+void initialize_parameter_definitions(Definitions&);
+bool apply_requested_assignments(Definitions&,
+                                 const parameters::RequestedAssignments&);
+double requested_value(const parameters::RequestedAssignments&, const wchar_t*);
+std::string requested_parameters_json(
+    const parameters::RequestedAssignments&);
 
 struct ArbitraryValuesScope {
   EffectEntry entry{};

@@ -9,6 +9,7 @@ CLI_DISPATCH = ROOT / "minihost" / "src" / "l2_cli_dispatch.cpp"
 RUNTIME_ADMISSION = ROOT / "minihost" / "src" / "worker_runtime_admission.cpp"
 REQUEST_PARSER = ROOT / "minihost" / "src" / "worker_request_parser.cpp"
 RENDER_REPORT = ROOT / "minihost" / "src" / "worker_render_report.cpp"
+PARAMETER_EXECUTION = ROOT / "minihost" / "src" / "worker_parameter_execution.cpp"
 
 
 class RenderParameterGateContractTests(unittest.TestCase):
@@ -74,7 +75,7 @@ class RenderParameterGateContractTests(unittest.TestCase):
 
     def test_worker_revalidates_and_echoes_bound_values(self):
         worker = WORKER.read_text(encoding="utf-8")
-        worker_family = worker + RENDER_REPORT.read_text(encoding="utf-8")
+        worker_family = worker + RENDER_REPORT.read_text(encoding="utf-8") + PARAMETER_EXECUTION.read_text(encoding="utf-8")
         cli_dispatch = CLI_DISPATCH.read_text(encoding="utf-8")
         for marker in ('L"--render-request"', 'L"--smart-mask-context-request"'):
             self.assertIn(marker, cli_dispatch)
@@ -84,7 +85,7 @@ class RenderParameterGateContractTests(unittest.TestCase):
                        'kind_text == L"arbhex"',
                        "validate_requested_assignments", "apply_requested_assignments",
                        "initialize_parameter_definitions",
-                       "g_params[static_cast<std::size_t>(assignment.index - 1)]",
+                       "runtime().records[static_cast<std::size_t>(assignment.index - 1)]",
                        "requested_parameters_json", "requested_parameters",
                        "requested_amount", "requested_direction", "requested_seed",
                        "requested_mix", "requested_invert_map", "std::setprecision(17)",

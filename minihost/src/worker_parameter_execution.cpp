@@ -4,6 +4,8 @@
 #include <cmath>
 #include <cstring>
 #include <limits>
+#include <iomanip>
+#include <sstream>
 #include <vector>
 
 namespace aexcompat::worker_runtime::parameter_execution {
@@ -19,7 +21,7 @@ template <typename T, std::size_t N> T read(const std::array<std::byte, N>& b, s
 template <typename T, std::size_t N> void write(std::array<std::byte, N>& b, std::size_t o, const T& v) { std::memcpy(b.data()+o, &v, sizeof(v)); }
 }  // namespace
 
-bool configure_hooks(const Hooks& value) noexcept { if (!value.invoke_entry || !value.handle_is_live) return false; g_hooks=value; return true; }
+bool configure_hooks(const Hooks& value) noexcept { if (!value.invoke_entry || !value.handle_is_live || !value.active_mask_count || !value.active_mask_id) return false; g_hooks=value; return true; }
 
 bool initialize_arbitrary_values(EffectEntry entry,
     std::array<std::byte, kInputSize>& input,
@@ -618,6 +620,161 @@ bool roundtrip_arbitrary_values(EffectEntry entry,
   return true;
 }
 
+
+
+bool validate_requested_assignments(const parameters::RequestedAssignments& requested) {
+  for (const auto& assignment : requested) {
+    if (assignment.index < 1 || static_cast<std::size_t>(assignment.index) > runtime().records.size()) return false;
+    const auto& descriptor = runtime().records[static_cast<std::size_t>(assignment.index - 1)];
+    const bool integer_compatible = descriptor.type == 1 || descriptor.type == 4 ||
+        descriptor.type == 7 || descriptor.type == 12;
+    const bool float_compatible = descriptor.type == 2 || descriptor.type == 10;
+    const bool color_compatible = descriptor.type == 5;
+    const bool angle_compatible = descriptor.type == 3;
+    const bool point_compatible = descriptor.type == 6;
+    const bool point3d_compatible = descriptor.type == 18;
+    const bool arbitrary_compatible = descriptor.type == 11;
+    if ((assignment.kind == parameters::RequestedKind::Integer && !integer_compatible) ||
+        (assignment.kind == parameters::RequestedKind::Float && !float_compatible) ||
+        (assignment.kind == parameters::RequestedKind::Color && !color_compatible) ||
+        (assignment.kind == parameters::RequestedKind::Angle && !angle_compatible) ||
+        (assignment.kind == parameters::RequestedKind::Point && !point_compatible) ||
+        (assignment.kind == parameters::RequestedKind::Point3D && !point3d_compatible) ||
+        (assignment.kind == parameters::RequestedKind::ArbitraryText && !arbitrary_compatible) ||
+        (descriptor.type == 12 && (assignment.value < 0 ||
+         assignment.value > static_cast<double>(hooks().active_mask_count()) ||
+         std::trunc(assignment.value) != assignment.value)) ||
+        ((assignment.kind == parameters::RequestedKind::Integer || assignment.kind == parameters::RequestedKind::Float) && descriptor.type != 12 && (!descriptor.has_numeric ||
+         assignment.value < descriptor.valid_min || assignment.value > descriptor.valid_max))) return false;
+  }
+  return true;
+}
+
+void initialize_parameter_definitions(
+    std::vector<std::array<std::byte, parameters::kDefinitionSize>>& definitions) {
+  for (std::size_t i = 0; i < runtime().records.size(); ++i) {
+    definitions[i + 1] = runtime().records[i].raw;
+    if (runtime().records[i].type == 0)
+      std::memset(definitions[i + 1].data() + 56, 0, 40);
+    else if (runtime().records[i].type == 1 || runtime().records[i].type == 7)
+      write<int32_t>(definitions[i + 1], 56, static_cast<int32_t>(runtime().records[i].default_value));
+    else if (runtime().records[i].type == 4)
+      write<int32_t>(definitions[i + 1], 56, runtime().records[i].default_value != 0 ? 1 : 0);
+    else if (runtime().records[i].type == 2)
+      write<int32_t>(definitions[i + 1], 56,
+          static_cast<int32_t>(std::round(runtime().records[i].default_value * 65536.0)));
+    else if (runtime().records[i].type == 10)
+      write<double>(definitions[i + 1], 56, runtime().records[i].default_value);
+    else if (runtime().records[i].type == 3)
+      write<int32_t>(definitions[i + 1], 56, static_cast<int32_t>(std::round(runtime().records[i].default_components[0] * 65536.0)));
+    else if (runtime().records[i].type == 6) {
+      write<int32_t>(definitions[i + 1], 56, static_cast<int32_t>(std::round(runtime().records[i].default_components[0] * 65536.0)));
+      write<int32_t>(definitions[i + 1], 60, static_cast<int32_t>(std::round(runtime().records[i].default_components[1] * 65536.0)));
+    } else if (runtime().records[i].type == 18)
+      for (int component = 0; component < 3; ++component)
+        write<double>(definitions[i + 1], 56 + component * 8, runtime().records[i].default_components[component]);
+    else if (runtime().records[i].type == 12) {
+      const int32_t index = static_cast<int32_t>(runtime().records[i].default_value);
+      int32_t mask_id = 0;
+      if (index > 0) hooks().active_mask_id(static_cast<std::size_t>(index - 1), &mask_id);
+      write<int32_t>(definitions[i + 1], 56, mask_id);
+    }
+  }
+}
+
+bool apply_requested_assignments(
+    std::vector<std::array<std::byte, parameters::kDefinitionSize>>& definitions,
+    const parameters::RequestedAssignments& requested) {
+  if (!validate_requested_assignments(requested)) return false;
+  for (const auto& assignment : requested) {
+    const auto slot = static_cast<std::size_t>(assignment.index);
+    const auto type = runtime().records[slot - 1].type;
+    if (type == 11 && assignment.kind == parameters::RequestedKind::ArbitraryText) continue;
+    if (type == 1 || type == 4 || type == 7)
+      write<int32_t>(definitions[slot], 56, static_cast<int32_t>(assignment.value));
+    else if (type == 12) {
+      const int32_t index = static_cast<int32_t>(assignment.value);
+      int32_t mask_id = 0;
+      if (index > 0 && !hooks().active_mask_id(static_cast<std::size_t>(index - 1), &mask_id)) return false;
+      write<int32_t>(definitions[slot], 56, mask_id);
+    }
+    else if (type == 2) {
+      const double fixed = assignment.value * 65536.0;
+      if (!std::isfinite(fixed) || fixed < INT32_MIN || fixed > INT32_MAX) return false;
+      write<int32_t>(definitions[slot], 56, static_cast<int32_t>(std::round(fixed)));
+    } else if (type == 10)
+      write<double>(definitions[slot], 56, assignment.value);
+    else if (type == 5) {
+      std::memcpy(definitions[slot].data() + 56, assignment.color.data(), assignment.color.size());
+      runtime().records[slot - 1].current_color = assignment.color;
+      for (std::size_t channel = 0; channel < 4; ++channel)
+        runtime().records[slot - 1].current_float_color[channel] = assignment.color[channel] / 255.0f;
+    }
+    else if (type == 3)
+      write<int32_t>(definitions[slot], 56, static_cast<int32_t>(std::round(assignment.components[0] * 65536.0)));
+    else if (type == 6) {
+      write<int32_t>(definitions[slot], 56, static_cast<int32_t>(std::round(assignment.components[0] * 65536.0)));
+      write<int32_t>(definitions[slot], 60, static_cast<int32_t>(std::round(assignment.components[1] * 65536.0)));
+    } else if (type == 18)
+      for (int component = 0; component < 3; ++component)
+        write<double>(definitions[slot], 56 + component * 8, assignment.components[component]);
+    else
+      return false;
+  }
+  return true;
+}
+
+double requested_value(const parameters::RequestedAssignments& requested, const wchar_t* id) {
+  const auto found = std::find_if(requested.begin(), requested.end(), [id](const auto& assignment) {
+    return assignment.id == id;
+  });
+  return found == requested.end() || found->kind == parameters::RequestedKind::Color ? 0.0 : found->value;
+}
+
+std::string requested_parameters_json(const parameters::RequestedAssignments& requested) {
+  std::ostringstream output;
+  output << "[";
+  for (std::size_t i = 0; i < requested.size(); ++i) {
+    if (i != 0) output << ",";
+    const auto& assignment = requested[i];
+    std::string id;
+    id.reserve(assignment.id.size());
+    for (const wchar_t character : assignment.id) id.push_back(static_cast<char>(character));
+    output << "{\"id\":\"" << id << "\",\"slot\":" << assignment.index
+           << ",\"kind\":\""
+           << (assignment.kind == parameters::RequestedKind::Integer ? "integer" :
+               assignment.kind == parameters::RequestedKind::Float ? "float" :
+               assignment.kind == parameters::RequestedKind::Color ? "color" :
+               assignment.kind == parameters::RequestedKind::Angle ? "angle" :
+               assignment.kind == parameters::RequestedKind::Point ? "point" :
+               assignment.kind == parameters::RequestedKind::Point3D ? "point3d" : "arbitrary_text")
+           << "\",\"value\":";
+    if (assignment.kind == parameters::RequestedKind::Integer)
+      output << static_cast<int32_t>(assignment.value);
+    else if (assignment.kind == parameters::RequestedKind::Float)
+      output << std::setprecision(17) << assignment.value;
+    else if (assignment.kind == parameters::RequestedKind::Color)
+      output << "{\"alpha\":" << static_cast<unsigned>(assignment.color[0])
+             << ",\"red\":" << static_cast<unsigned>(assignment.color[1])
+             << ",\"green\":" << static_cast<unsigned>(assignment.color[2])
+             << ",\"blue\":" << static_cast<unsigned>(assignment.color[3]) << "}";
+    else if (assignment.kind == parameters::RequestedKind::ArbitraryText)
+      output << "{\"bytes\":" << assignment.text.size() << "}";
+    else {
+      const int count = assignment.kind == parameters::RequestedKind::Point3D ? 3 :
+          (assignment.kind == parameters::RequestedKind::Point ? 2 : 1);
+      output << "[";
+      for (int component = 0; component < count; ++component) {
+        if (component) output << ",";
+        output << std::setprecision(17) << assignment.components[component];
+      }
+      output << "]";
+    }
+    output << "}";
+  }
+  output << "]";
+  return output.str();
+}
 
 
 }  // namespace aexcompat::worker_runtime::parameter_execution
