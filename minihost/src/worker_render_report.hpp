@@ -130,6 +130,23 @@ struct ClassicReport {
     std::array<std::string, 2> hashes{};
     std::array<bool, 2> guards_intact{};
   } threads;
+  struct Callbacks {
+    bool param_checkouts_balanced{};
+    std::array<int64_t, 8> param{};
+    std::string escaped_options_button_name;
+    std::array<int64_t, 11> host{};
+  } callbacks;
+  struct Context {
+    bool request_mode{};
+    std::array<int32_t, 2> downsample_x{};
+    std::array<int32_t, 2> downsample_y{};
+    std::array<int32_t, 2> pixel_aspect_ratio{};
+    std::array<int32_t, 2> full_resolution_dimensions{};
+    std::array<int32_t, 6> scalar_metadata{};
+    std::array<int32_t, 2> input_dimensions{};
+    std::array<int32_t, 2> pre_effect_source_origin{};
+    std::array<int32_t, 2> output_origin{};
+  } context;
 };
 
 void begin_classic(ReportSnapshot& report, const ClassicReport::Head& snapshot);
@@ -137,6 +154,8 @@ void append_classic_sequence(ReportSnapshot& report, const ClassicReport::Sequen
 void append_classic_audio(ReportSnapshot& report, const ClassicReport::Audio& snapshot);
 void append_classic_frame(ReportSnapshot& report, const ClassicReport::Frame& snapshot);
 void append_classic_threads(ReportSnapshot& report, const ClassicReport::Threads& snapshot);
+void append_classic_callbacks(ReportSnapshot& report, const ClassicReport::Callbacks& snapshot);
+void append_classic_context(ReportSnapshot& report, const ClassicReport::Context& snapshot);
 
 struct GpuDiagnosticsSnapshot {
   bool memory_lifetimes_balanced{};

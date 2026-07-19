@@ -14994,46 +14994,35 @@ int worker_main_impl(int argc, wchar_t **argv) {
       report_snapshot, capture_classic_subsystems());
   aexcompat::worker_render_report::append_gpu_diagnostics(report_snapshot, capture_gpu_diagnostics());
   aexcompat::worker_render_report::append_seh_diagnostics(report_snapshot, capture_seh_diagnostics());
-  report_snapshot.stream()
-            << ",\"param_checkouts_balanced\":" << (classic_diagnostics.balanced ? "true" : "false")
-            << ",\"param_checkout_calls\":" << classic_diagnostics.checkout_calls
-            << ",\"param_checkin_calls\":" << classic_diagnostics.checkin_calls
-            << ",\"automatic_param_checkins\":" << classic_diagnostics.automatic_checkins
-            << ",\"invalid_param_checkins\":" << classic_diagnostics.invalid_checkins
-            << ",\"last_param_checkout_index\":" << classic_diagnostics.last_index
-            << ",\"last_param_checkout_time\":" << classic_diagnostics.last_time
-            << ",\"last_param_checkout_time_step\":" << classic_diagnostics.last_time_step
-            << ",\"last_param_checkout_time_scale\":" << classic_diagnostics.last_time_scale
-            << ",\"options_button_name\":\"" << escape(g_options_button_name) << "\""
-            << ",\"options_button_name_calls\":" << g_options_button_name_calls
-            << ",\"channel_count_queries\":" << g_channel_count_queries.load()
-            << ",\"transform_world_calls\":" << g_transform_world_calls
-            << ",\"last_transform_x\":" << g_last_transform_x
-            << ",\"last_transform_y\":" << g_last_transform_y
-            << ",\"last_transform_opacity\":" << static_cast<unsigned>(g_last_transform_opacity)
-            << ",\"abort_calls\":" << g_abort_calls
-            << ",\"progress_calls\":" << g_progress_calls
-            << ",\"register_ui_calls\":" << g_register_ui_calls
-            << ",\"last_progress_current\":" << g_last_progress_current
-            << ",\"last_progress_total\":" << g_last_progress_total;
+  const auto i64 = [](auto value) { return static_cast<int64_t>(value); };
+  classic_report.callbacks = {
+      classic_diagnostics.balanced,
+      {i64(classic_diagnostics.checkout_calls), i64(classic_diagnostics.checkin_calls),
+       i64(classic_diagnostics.automatic_checkins), i64(classic_diagnostics.invalid_checkins),
+       i64(classic_diagnostics.last_index), i64(classic_diagnostics.last_time),
+       i64(classic_diagnostics.last_time_step), i64(classic_diagnostics.last_time_scale)},
+      escape(g_options_button_name),
+      {i64(g_options_button_name_calls), i64(g_channel_count_queries.load()),
+       i64(g_transform_world_calls), i64(g_last_transform_x), i64(g_last_transform_y),
+       i64(g_last_transform_opacity), i64(g_abort_calls), i64(g_progress_calls),
+       i64(g_register_ui_calls), i64(g_last_progress_current), i64(g_last_progress_total)}};
+  aexcompat::worker_render_report::append_classic_callbacks(report_snapshot, classic_report.callbacks);
   classic_report.threads = {concurrent_render, thread_errors, thread_hashes, thread_guards};
   aexcompat::worker_render_report::append_classic_threads(report_snapshot, classic_report.threads);
-  report_snapshot.stream()
-            << ",\"request_mode\":" << (request_mode ? "true" : "false")
-            << ",\"downsample_x\":[" << g_downsample_x.numerator << "," << g_downsample_x.denominator << "]"
-            << ",\"downsample_y\":[" << g_downsample_y.numerator << "," << g_downsample_y.denominator << "]"
-            << ",\"pixel_aspect_ratio\":[" << g_pixel_aspect_ratio.numerator << "," << g_pixel_aspect_ratio.denominator << "]"
-            << ",\"full_resolution_dimensions\":[" << (g_full_resolution_width > 0 ? g_full_resolution_width : external_width)
-            << "," << (g_full_resolution_height > 0 ? g_full_resolution_height : external_height) << "]"
-            << ",\"quality\":" << read<int32_t>(input, kInQuality)
-            << ",\"in_data_num_params\":" << read<int32_t>(input, kInNumParams)
-            << ",\"local_time_step\":" << read<int32_t>(input, kInLocalTimeStep)
-            << ",\"field\":" << read<int32_t>(input, 244)
-            << ",\"shutter_angle_fixed\":" << read<int32_t>(input, 248)
-            << ",\"shutter_phase_fixed\":" << read<int32_t>(input, 400)
-            << ",\"in_data_dimensions\":[" << read<int32_t>(input, 252) << "," << read<int32_t>(input, 256) << "]"
-            << ",\"pre_effect_source_origin\":[" << read<int32_t>(input, 392) << "," << read<int32_t>(input, 396) << "]"
-            << ",\"output_origin\":[" << read<int32_t>(input, 276) << "," << read<int32_t>(input, 280) << "]";
+  classic_report.context = {
+      request_mode,
+      {static_cast<int32_t>(g_downsample_x.numerator), static_cast<int32_t>(g_downsample_x.denominator)},
+      {static_cast<int32_t>(g_downsample_y.numerator), static_cast<int32_t>(g_downsample_y.denominator)},
+      {static_cast<int32_t>(g_pixel_aspect_ratio.numerator), static_cast<int32_t>(g_pixel_aspect_ratio.denominator)},
+      {g_full_resolution_width > 0 ? g_full_resolution_width : external_width,
+       g_full_resolution_height > 0 ? g_full_resolution_height : external_height},
+      {read<int32_t>(input, kInQuality), read<int32_t>(input, kInNumParams),
+       read<int32_t>(input, kInLocalTimeStep), read<int32_t>(input, 244),
+       read<int32_t>(input, 248), read<int32_t>(input, 400)},
+      {read<int32_t>(input, 252), read<int32_t>(input, 256)},
+      {read<int32_t>(input, 392), read<int32_t>(input, 396)},
+      {read<int32_t>(input, 276), read<int32_t>(input, 280)}};
+  aexcompat::worker_render_report::append_classic_context(report_snapshot, classic_report.context);
   aexcompat::worker_render_report::finish_requested_parameters(report_snapshot, {
       requested_parameters_json(requested_parameters),
       static_cast<int32_t>(requested_value(requested_parameters, L"amount")),

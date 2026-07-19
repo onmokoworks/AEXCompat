@@ -131,6 +131,51 @@ void append_classic_threads(ReportSnapshot& report, const ClassicReport::Threads
       << ",\"thread_2_guards_intact\":" << (value.guards_intact[1] ? "true" : "false");
 }
 
+void append_classic_callbacks(ReportSnapshot& report, const ClassicReport::Callbacks& value) {
+  report.stream()
+      << ",\"param_checkouts_balanced\":" << (value.param_checkouts_balanced ? "true" : "false")
+      << ",\"param_checkout_calls\":" << value.param[0]
+      << ",\"param_checkin_calls\":" << value.param[1]
+      << ",\"automatic_param_checkins\":" << value.param[2]
+      << ",\"invalid_param_checkins\":" << value.param[3]
+      << ",\"last_param_checkout_index\":" << value.param[4]
+      << ",\"last_param_checkout_time\":" << value.param[5]
+      << ",\"last_param_checkout_time_step\":" << value.param[6]
+      << ",\"last_param_checkout_time_scale\":" << value.param[7]
+      << ",\"options_button_name\":\"" << value.escaped_options_button_name << '"'
+      << ",\"options_button_name_calls\":" << value.host[0]
+      << ",\"channel_count_queries\":" << value.host[1]
+      << ",\"transform_world_calls\":" << value.host[2]
+      << ",\"last_transform_x\":" << value.host[3]
+      << ",\"last_transform_y\":" << value.host[4]
+      << ",\"last_transform_opacity\":" << value.host[5]
+      << ",\"abort_calls\":" << value.host[6]
+      << ",\"progress_calls\":" << value.host[7]
+      << ",\"register_ui_calls\":" << value.host[8]
+      << ",\"last_progress_current\":" << value.host[9]
+      << ",\"last_progress_total\":" << value.host[10];
+}
+
+void append_classic_context(ReportSnapshot& report, const ClassicReport::Context& value) {
+  report.stream()
+      << ",\"request_mode\":" << (value.request_mode ? "true" : "false")
+      << ",\"downsample_x\":[" << value.downsample_x[0] << ',' << value.downsample_x[1] << ']'
+      << ",\"downsample_y\":[" << value.downsample_y[0] << ',' << value.downsample_y[1] << ']'
+      << ",\"pixel_aspect_ratio\":[" << value.pixel_aspect_ratio[0] << ',' << value.pixel_aspect_ratio[1] << ']'
+      << ",\"full_resolution_dimensions\":[" << value.full_resolution_dimensions[0] << ','
+      << value.full_resolution_dimensions[1] << ']'
+      << ",\"quality\":" << value.scalar_metadata[0]
+      << ",\"in_data_num_params\":" << value.scalar_metadata[1]
+      << ",\"local_time_step\":" << value.scalar_metadata[2]
+      << ",\"field\":" << value.scalar_metadata[3]
+      << ",\"shutter_angle_fixed\":" << value.scalar_metadata[4]
+      << ",\"shutter_phase_fixed\":" << value.scalar_metadata[5]
+      << ",\"in_data_dimensions\":[" << value.input_dimensions[0] << ',' << value.input_dimensions[1] << ']'
+      << ",\"pre_effect_source_origin\":[" << value.pre_effect_source_origin[0] << ','
+      << value.pre_effect_source_origin[1] << ']'
+      << ",\"output_origin\":[" << value.output_origin[0] << ',' << value.output_origin[1] << ']';
+}
+
 void append_gpu_diagnostics(ReportSnapshot& report, const GpuDiagnosticsSnapshot& value) {
   report.stream()
       << ",\"gpu_memory_lifetimes_balanced\":" << (value.memory_lifetimes_balanced ? "true" : "false")
