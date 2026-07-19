@@ -150,7 +150,14 @@ pub fn collect_runtime_results<B: RuntimeCollectorBackend>(
     let requested_depths = depths.iter().take(3).copied().collect::<Vec<_>>();
     let input_worlds = requested_depths
         .iter()
-        .map(|&depth| backend.input_world(depth))
+        .map(|&depth| {
+            let world = backend.input_world(depth)?;
+            validate_world_metadata(&world)?;
+            if world.pixel_format != depth {
+                return Err(RuntimeFailure::new(Classification::HostValidationError));
+            }
+            Ok(world)
+        })
         .collect::<Result<Vec<_>, _>>()?;
     let inspection = backend.inspect();
     let inspection_failure = inspection.as_ref().err().cloned();
@@ -349,7 +356,26 @@ fn parse_world(value: Option<&Value>) -> Result<WorldMetadata, RuntimeFailure> {
     let Some(extent_hint) = parse_rect(object.get("extent_hint")) else {
         return Err(RuntimeFailure::new(Classification::HostValidationError));
     };
-    let bytes_per_pixel = match pixel_format {
+    if width > u32::MAX as u64 || height > u32::MAX as u64 {
+        return Err(RuntimeFailure::new(Classification::HostValidationError));
+    }
+    let world = WorldMetadata {
+        width: width as u32,
+        height: height as u32,
+        row_bytes,
+        pixel_format,
+        premultiplication,
+        extent_hint,
+    };
+    validate_world_metadata(&world)?;
+    Ok(world)
+}
+
+fn validate_world_metadata(world: &WorldMetadata) -> Result<(), RuntimeFailure> {
+    let width = u64::from(world.width);
+    let height = u64::from(world.height);
+    let extent_hint = &world.extent_hint;
+    let bytes_per_pixel = match world.pixel_format {
         PixelDepth::Argb8 => 4,
         PixelDepth::Argb16 => 8,
         PixelDepth::Argb32f => 16,
@@ -358,8 +384,8 @@ fn parse_world(value: Option<&Value>) -> Result<WorldMetadata, RuntimeFailure> {
         || height == 0
         || width > MAX_WORLD_DIMENSION
         || height > MAX_WORLD_DIMENSION
-        || row_bytes > MAX_WORLD_ROW_BYTES
-        || row_bytes < width.saturating_mul(bytes_per_pixel)
+        || world.row_bytes > MAX_WORLD_ROW_BYTES
+        || world.row_bytes < width.saturating_mul(bytes_per_pixel)
         || extent_hint.left < 0
         || extent_hint.top < 0
         || extent_hint.right <= extent_hint.left
@@ -369,14 +395,7 @@ fn parse_world(value: Option<&Value>) -> Result<WorldMetadata, RuntimeFailure> {
     {
         return Err(RuntimeFailure::new(Classification::HostValidationError));
     }
-    Ok(WorldMetadata {
-        width: width as u32,
-        height: height as u32,
-        row_bytes,
-        pixel_format,
-        premultiplication,
-        extent_hint,
-    })
+    Ok(())
 }
 
 fn suite_timeline(report: &Value) -> Vec<SuiteEvent> {
@@ -862,6 +881,32 @@ mod tests {
         }
     }
 
+    struct InvalidPreflightWorldBackend {
+        world: WorldMetadata,
+        inspect_called: Cell<bool>,
+        render_called: Cell<bool>,
+    }
+
+    impl RuntimeCollectorBackend for InvalidPreflightWorldBackend {
+        fn inspect(&mut self) -> Result<Value, RuntimeFailure> {
+            self.inspect_called.set(true);
+            Err(RuntimeFailure::new(Classification::Crashed))
+        }
+
+        fn input_world(&self, _depth: PixelDepth) -> Result<WorldMetadata, RuntimeFailure> {
+            Ok(self.world.clone())
+        }
+
+        fn render(
+            &mut self,
+            _path: RenderPath,
+            _depth: PixelDepth,
+        ) -> Result<Value, RuntimeFailure> {
+            self.render_called.set(true);
+            unreachable!("invalid preflight metadata must fail before native rendering")
+        }
+    }
+
     fn successful_report(depth: PixelDepth) -> Value {
         let (pixel_format, row_bytes) = match depth {
             PixelDepth::Argb8 => ("argb8", 8),
@@ -909,6 +954,51 @@ mod tests {
                     .classification,
                 Classification::HostValidationError
             );
+        }
+    }
+
+    #[test]
+    fn typed_preflight_world_is_validated_before_inspection_or_failure_results() {
+        let valid = WorldMetadata {
+            width: 2,
+            height: 3,
+            row_bytes: 8,
+            pixel_format: PixelDepth::Argb8,
+            premultiplication: Premultiplication::Premultiplied,
+            extent_hint: Rect {
+                left: 0,
+                top: 0,
+                right: 2,
+                bottom: 3,
+            },
+        };
+        let mut invalid_worlds = Vec::new();
+        for mutate in [
+            |world: &mut WorldMetadata| world.width = 65_536,
+            |world: &mut WorldMetadata| world.row_bytes = MAX_WORLD_ROW_BYTES + 1,
+            |world: &mut WorldMetadata| world.extent_hint.right = 3,
+            |world: &mut WorldMetadata| world.pixel_format = PixelDepth::Argb16,
+        ] {
+            let mut world = valid.clone();
+            mutate(&mut world);
+            invalid_worlds.push(world);
+        }
+
+        for world in invalid_worlds {
+            let mut backend = InvalidPreflightWorldBackend {
+                world,
+                inspect_called: Cell::new(false),
+                render_called: Cell::new(false),
+            };
+            let failure = collect_runtime_results(
+                &mut backend,
+                &[RenderPath::Classic],
+                &[PixelDepth::Argb8],
+            )
+            .unwrap_err();
+            assert_eq!(failure.classification, Classification::HostValidationError);
+            assert!(!backend.inspect_called.get());
+            assert!(!backend.render_called.get());
         }
     }
 
