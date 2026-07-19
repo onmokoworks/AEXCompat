@@ -162,7 +162,28 @@ mod worker {
             std::thread::sleep(std::time::Duration::from_secs(120));
             return 0;
         }
-        if args.len() != 10 || args[1] != "--render-session-v1" {
+        // Trailing auxiliary option pairs mirror the real worker's
+        // strip_auxiliary_options contract: peel them off the tail, and for
+        // --parameter-animation-v1 enforce the native loader's pin — the
+        // sidecar must exist AND its parent must canonicalize to the worker's
+        // cwd + target/image-transport (parameter_animation_transport.cpp) —
+        // so a broker writing the sidecar somewhere the real worker would
+        // reject fails these tests too.
+        let mut effective = args.len();
+        while effective >= 12 && args[effective - 2].starts_with("--") {
+            if args[effective - 2] == "--parameter-animation-v1" {
+                let sidecar = std::path::Path::new(&args[effective - 1]);
+                let pinned = std::env::current_dir()
+                    .ok()
+                    .and_then(|cwd| cwd.join("target/image-transport").canonicalize().ok());
+                let parent = sidecar.parent().and_then(|parent| parent.canonicalize().ok());
+                if !sidecar.is_file() || pinned.is_none() || pinned != parent {
+                    return 3;
+                }
+            }
+            effective -= 2;
+        }
+        if effective != 10 || args[1] != "--render-session-v1" {
             return 2;
         }
         let (Ok(width), Ok(height), Ok(time_scale)) = (

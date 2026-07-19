@@ -14,7 +14,8 @@
 
 use crate::image_render::{
     decode_bounded_image, decode_sha256_hex, encode_interactive_payload,
-    isolated_worker_diagnostics, native_rgba_to_preview, InteractiveParameter, RenderPixelFormat,
+    isolated_worker_diagnostics, native_rgba_to_preview, parameter_animation_sidecar_json,
+    validate_animation_bindings, InteractiveParameter, ParameterAnimation, RenderPixelFormat,
     INTERACTIVE_RENDER_TIMEOUT_MS, MAX_DIMENSION, MAX_PIXELS, MAX_RGBA_TRANSPORT_BYTES,
 };
 use crate::secure_image_dispatch::{
@@ -32,7 +33,7 @@ use std::path::{Path, PathBuf};
 use std::ptr::{null, null_mut};
 use std::sync::mpsc;
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use windows_sys::Win32::Foundation::{
     CloseHandle, SetHandleInformation, HANDLE, HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE,
 };
@@ -309,6 +310,10 @@ pub struct SessionOpenRequest<'a> {
     pub plugin_path: &'a Path,
     pub plugin_sha256: &'a str,
     pub parameters: Option<&'a [InteractiveParameter]>,
+    /// Parameter animation timeline evaluated by the worker at each frame's
+    /// current_time (issue #132). Bindings are validated against `parameters`
+    /// before launch, exactly like the one-shot entry.
+    pub parameter_animation: Option<&'a [ParameterAnimation]>,
     pub dependencies: Vec<ApprovedImageArtifact>,
     pub width: u32,
     pub height: u32,
@@ -417,6 +422,18 @@ pub struct RenderSession {
     frames_errored: u32,
     opened: Instant,
     plugin_sha256: String,
+    /// Keeps the animation sidecar alive for the whole session; the worker
+    /// reads it once at launch, but leaving transport files behind on drop
+    /// would leak into target/image-transport.
+    _animation_sidecar: Option<AnimationSidecar>,
+}
+
+struct AnimationSidecar(PathBuf);
+
+impl Drop for AnimationSidecar {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.0);
+    }
 }
 
 impl RenderSession {
@@ -451,6 +468,33 @@ impl RenderSession {
             return Err(invalid("render session section exceeds the hard cap"));
         }
         let payload = encode_interactive_payload(request.parameters.unwrap_or_default())?;
+        // The sidecar mirrors the one-shot transport: validated bindings,
+        // JSON under <repository>/target/image-transport (the only directory
+        // the worker's strict sidecar loader accepts), removed when the
+        // session ends.
+        let animation_sidecar = match request
+            .parameter_animation
+            .filter(|animations| !animations.is_empty())
+        {
+            Some(animations) => {
+                validate_animation_bindings(request.parameters.unwrap_or_default(), animations)?;
+                let bytes = parameter_animation_sidecar_json(animations)?;
+                let root = request.repository.join("target/image-transport");
+                fs::create_dir_all(&root)?;
+                let nonce = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map_err(|error| invalid(error.to_string()))?
+                    .as_nanos();
+                let path = root.join(format!("parameter-animation-session-{nonce}.json"));
+                OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(&path)?
+                    .write_all(&bytes)?;
+                Some(AnimationSidecar(path))
+            }
+            None => None,
+        };
 
         let (request_read, request_write) = inheritable_pipe(false)?;
         let (response_read, response_write) = inheritable_pipe(true)?;
@@ -493,7 +537,7 @@ impl RenderSession {
             expected_size: fs::metadata(request.plugin_path)?.len(),
         };
         let args_before_plugin = vec![session_command(request.pixel_format).to_owned()];
-        let args_after_plugin = vec![
+        let mut args_after_plugin = vec![
             request.plugin_sha256.to_ascii_lowercase(),
             payload,
             request.width.to_string(),
@@ -502,6 +546,14 @@ impl RenderSession {
             request.total_time.to_string(),
             request.time_scale.to_string(),
         ];
+        if let Some(sidecar) = &animation_sidecar {
+            // Auxiliary option pairs ride argv's tail; the worker peels them
+            // before the positional session contract (strip_auxiliary_options).
+            args_after_plugin.extend([
+                "--parameter-animation-v1".to_owned(),
+                sidecar.0.to_string_lossy().into_owned(),
+            ]);
+        }
         let process = dispatch_secure_image_session(
             SecureImageDispatch {
                 repository: request.repository,
@@ -586,6 +638,7 @@ impl RenderSession {
             frames_errored: 0,
             opened: Instant::now(),
             plugin_sha256: request.plugin_sha256.to_ascii_lowercase(),
+            _animation_sidecar: animation_sidecar,
         })
     }
 
@@ -1126,6 +1179,13 @@ struct VideoBatchRequest {
     /// in records the error and keeps rendering the remaining frames.
     #[serde(default)]
     continue_on_frame_error: bool,
+    /// Interactive parameter declarations, required to bind
+    /// `parameter_animation` slots (issue #132).
+    #[serde(default)]
+    parameters: Vec<InteractiveParameter>,
+    /// Timeline evaluated by the worker at each frame's current_time.
+    #[serde(default)]
+    parameter_animation: Vec<ParameterAnimation>,
 }
 
 fn default_time_scale() -> u32 {
@@ -1189,7 +1249,9 @@ pub fn run_video_batch(
         repository,
         plugin_path: &plugin_path,
         plugin_sha256: &plugin_sha256,
-        parameters: None,
+        parameters: (!request.parameters.is_empty()).then_some(request.parameters.as_slice()),
+        parameter_animation: (!request.parameter_animation.is_empty())
+            .then_some(request.parameter_animation.as_slice()),
         dependencies: Vec::new(),
         width,
         height,
@@ -1404,6 +1466,7 @@ mod tests {
                 plugin_path: Path::new("missing-plugin.aex"),
                 plugin_sha256: &"0".repeat(64),
                 parameters: None,
+                parameter_animation: None,
                 dependencies: Vec::new(),
                 width: 8,
                 height: 4,

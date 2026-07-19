@@ -9,7 +9,9 @@
 
 #[cfg(windows)]
 mod windows_e2e {
-    use aexcompat_broker::image_render::RenderPixelFormat;
+    use aexcompat_broker::image_render::{
+        InteractiveParameter, ParameterAnimation, RenderPixelFormat,
+    };
     use aexcompat_broker::render_session::{
         run_video_batch, FrameStatus, RenderSession, SessionOpenRequest,
     };
@@ -102,6 +104,7 @@ mod windows_e2e {
             plugin_path: plugin,
             plugin_sha256: sha,
             parameters: None,
+            parameter_animation: None,
             dependencies: Vec::new(),
             width: WIDTH,
             height: HEIGHT,
@@ -118,6 +121,163 @@ mod windows_e2e {
         (0..WIDTH * HEIGHT * 4)
             .map(|index| seed.wrapping_add(index as u8))
             .collect()
+    }
+
+    fn float_parameter(slot: u32) -> InteractiveParameter {
+        serde_json::from_value(serde_json::json!({
+            "slot": slot, "name": "amount", "kind": "float",
+            "minimum": 0.0, "maximum": 100.0, "value": 1.0,
+            "choices": [], "color": [0, 0, 0, 0], "components": [0.0, 0.0, 0.0],
+            "component_count": 0, "layer_path": null,
+            "enabled": true, "visible": true, "supervised": false,
+        }))
+        .expect("interactive parameter fixture")
+    }
+
+    fn scalar_animation(slot: u32) -> ParameterAnimation {
+        serde_json::from_value(serde_json::json!({
+            "slot": slot,
+            "keys": [
+                {"time": {"value": 0, "scale": 30}, "interpolation": "linear",
+                 "value": {"type": "scalar", "value": 1.0}},
+                {"time": {"value": 60, "scale": 30}, "interpolation": "linear",
+                 "value": {"type": "scalar", "value": 50.0}},
+            ],
+        }))
+        .expect("parameter animation fixture")
+    }
+
+    fn session_sidecars(repository: &Path) -> Vec<PathBuf> {
+        std::fs::read_dir(repository.join("target/image-transport"))
+            .map(|entries| {
+                entries
+                    .filter_map(Result::ok)
+                    .map(|entry| entry.path())
+                    .filter(|path| {
+                        path.file_name()
+                            .map(|name| {
+                                name.to_string_lossy()
+                                    .starts_with("parameter-animation-session-")
+                            })
+                            .unwrap_or(false)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn animation_sidecar_rides_the_session_and_is_cleaned_up() {
+        let _behavior = BehaviorGuard::set(None);
+        let (repository, plugin, sha) = temp_repository();
+        let parameters = [float_parameter(1)];
+        let animations = [scalar_animation(1)];
+        let mut session = RenderSession::open(SessionOpenRequest {
+            repository: &repository.0,
+            plugin_path: &plugin,
+            plugin_sha256: &sha,
+            parameters: Some(&parameters),
+            parameter_animation: Some(&animations),
+            dependencies: Vec::new(),
+            width: WIDTH,
+            height: HEIGHT,
+            pixel_format: RenderPixelFormat::Argb8,
+            time_step: 1,
+            total_time: 300,
+            time_scale: 30,
+            frame_deadline: Duration::from_secs(30),
+        })
+        .expect("open render session with parameter animation");
+        assert_eq!(
+            session_sidecars(&repository.0).len(),
+            1,
+            "the sidecar exists for the session lifetime"
+        );
+        let outcome = session
+            .render_frame(0, 0, &input_pattern(9))
+            .expect("frame renders with an animation sidecar attached");
+        assert!(matches!(outcome.status, FrameStatus::Rendered { .. }));
+        let close = session.close();
+        assert_eq!(close["session_clean"], true, "close: {close}");
+        assert_eq!(
+            session_sidecars(&repository.0).len(),
+            0,
+            "the sidecar is removed when the session ends"
+        );
+    }
+
+    #[test]
+    fn arbitrary_data_parameters_accept_arbitrary_animation() {
+        let _behavior = BehaviorGuard::set(None);
+        let (repository, plugin, sha) = temp_repository();
+        let parameters: [InteractiveParameter; 1] = [serde_json::from_value(serde_json::json!({
+            "slot": 1, "name": "state", "kind": "arbitrary_data",
+            "minimum": 0.0, "maximum": 0.0, "value": 0.0,
+            "choices": [], "color": [0, 0, 0, 0], "components": [0.0, 0.0, 0.0],
+            "component_count": 0, "layer_path": null,
+            "enabled": true, "visible": true, "supervised": false,
+            "debug_summary": "state",
+        }))
+        .expect("arbitrary parameter fixture")];
+        let animations: [ParameterAnimation; 1] = [serde_json::from_value(serde_json::json!({
+            "slot": 1,
+            "keys": [
+                {"time": {"value": 0, "scale": 30}, "interpolation": "hold",
+                 "value": {"type": "arbitrary", "value": [1, 2, 3]}},
+            ],
+        }))
+        .expect("arbitrary animation fixture")];
+        let mut session = RenderSession::open(SessionOpenRequest {
+            repository: &repository.0,
+            plugin_path: &plugin,
+            plugin_sha256: &sha,
+            parameters: Some(&parameters),
+            parameter_animation: Some(&animations),
+            dependencies: Vec::new(),
+            width: WIDTH,
+            height: HEIGHT,
+            pixel_format: RenderPixelFormat::Argb8,
+            time_step: 1,
+            total_time: 300,
+            time_scale: 30,
+            frame_deadline: Duration::from_secs(30),
+        })
+        .expect("arbitrary_data parameters bind arbitrary animation timelines");
+        let outcome = session
+            .render_frame(0, 0, &input_pattern(3))
+            .expect("frame renders");
+        assert!(matches!(outcome.status, FrameStatus::Rendered { .. }));
+        assert_eq!(session.close()["session_clean"], true);
+    }
+
+    #[test]
+    fn open_rejects_animation_bound_to_an_unknown_slot() {
+        let _behavior = BehaviorGuard::set(None);
+        let (repository, plugin, sha) = temp_repository();
+        let animations = [scalar_animation(2)];
+        let error = RenderSession::open(SessionOpenRequest {
+            repository: &repository.0,
+            plugin_path: &plugin,
+            plugin_sha256: &sha,
+            parameters: None,
+            parameter_animation: Some(&animations),
+            dependencies: Vec::new(),
+            width: WIDTH,
+            height: HEIGHT,
+            pixel_format: RenderPixelFormat::Argb8,
+            time_step: 1,
+            total_time: 300,
+            time_scale: 30,
+            frame_deadline: Duration::from_secs(30),
+        })
+        .map(|_| ())
+        .expect_err("an animation without a matching parameter fails before launch");
+        assert!(error.to_string().contains("unknown slot"), "{error}");
+        assert_eq!(
+            session_sidecars(&repository.0).len(),
+            0,
+            "a rejected open writes no sidecar"
+        );
     }
 
     #[test]

@@ -267,11 +267,16 @@ pub fn secure_launch_session(
         &worker_sid,
     )
     .map_err(|error| stage_error("trusted worker staging", error))?;
+    // Session workers run with the repository as their working directory: the
+    // native parameter-animation loader only accepts sidecars whose parent is
+    // current_path()/target/image-transport, the same broker-owned transport
+    // directory the one-shot input raws already live in. A staging-root cwd
+    // makes that pin unsatisfiable and every session sidecar rejected.
     let launched = crate::windows_process::launch_isolated_session_with_restricted_token(
         worker_stage.worker_path(),
         &args,
         &token,
-        worker_stage.root(),
+        request.repository,
         session,
     )
     .map_err(|error| stage_error("restricted session launch", error))?;
