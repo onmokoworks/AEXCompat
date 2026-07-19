@@ -29,6 +29,7 @@ RUNTIME_ADMISSION_SOURCE = ROOT / "minihost" / "src" / "worker_runtime_admission
 CLASSIC_RUNTIME_HEADER = ROOT / "minihost" / "src" / "worker_classic_runtime.hpp"
 CLASSIC_RUNTIME_SOURCE = ROOT / "minihost" / "src" / "worker_classic_runtime.cpp"
 SELFTEST_DISPATCH_SOURCE = ROOT / "minihost" / "src" / "worker_selftest_dispatch.cpp"
+FIXED_SELFTEST_ROUTING_SOURCE = ROOT / "minihost" / "src" / "worker_fixed_selftest_routing.cpp"
 REQUEST_PARSER_HEADER = ROOT / "minihost" / "src" / "worker_request_parser.hpp"
 REQUEST_PARSER_SOURCE = ROOT / "minihost" / "src" / "worker_request_parser.cpp"
 RENDER_REPORT_HEADER = ROOT / "minihost" / "src" / "worker_render_report.hpp"
@@ -95,13 +96,36 @@ def l2_family_source():
         HANDLE_RUNTIME_HEADER, HANDLE_RUNTIME_SOURCE,
         REPORT_HEADER, REPORT_SOURCE,
         RUNTIME_ADMISSION_SOURCE, CLASSIC_RUNTIME_HEADER, CLASSIC_RUNTIME_SOURCE,
-        SELFTEST_DISPATCH_SOURCE, REQUEST_PARSER_HEADER, REQUEST_PARSER_SOURCE,
+        SELFTEST_DISPATCH_SOURCE, FIXED_SELFTEST_ROUTING_SOURCE,
+        REQUEST_PARSER_HEADER, REQUEST_PARSER_SOURCE,
         INVOCATION_ORCHESTRATION_HEADER, INVOCATION_ORCHESTRATION_SOURCE,
         RENDER_REPORT_HEADER, RENDER_REPORT_SOURCE
     ))
 
 
 class MinihostL2SourceTests(unittest.TestCase):
+    def test_fixed_selftest_catalog_is_a_true_translation_unit(self):
+        worker = SOURCE.read_text(encoding="utf-8")
+        routing = FIXED_SELFTEST_ROUTING_SOURCE.read_text(encoding="utf-8")
+        cmake = MINIHOST_CMAKE.read_text(encoding="utf-8")
+        self.assertIn("src/worker_fixed_selftest_routing.cpp", cmake)
+        self.assertIn("struct Request", (ROOT / "minihost" / "src" /
+                                          "worker_fixed_selftest_routing.hpp").read_text(encoding="utf-8"))
+        self.assertIn("struct Hooks", (ROOT / "minihost" / "src" /
+                                        "worker_fixed_selftest_routing.hpp").read_text(encoding="utf-8"))
+        self.assertIn("struct Result", (ROOT / "minihost" / "src" /
+                                         "worker_fixed_selftest_routing.hpp").read_text(encoding="utf-8"))
+        for marker in (
+            'L"--self-test-render-output-safety"',
+            'L"--self-test-pf-pre-checkout-result"',
+            'L"--self-test-aegp-layer-render-options-suite2"',
+            '\"opaque_callable_exposed\\\":false',
+            '\"fabricated_planes\\\":false',
+            '\"downstream_cycle_rejected\\\":true',
+        ):
+            self.assertIn(marker, routing)
+            self.assertNotIn(marker, worker)
+
     def test_aegp_compat_selftests_are_a_true_translation_unit(self):
         worker = SOURCE.read_text(encoding="utf-8")
         implementation = AEGP_COMPAT_SELFTESTS_SOURCE.read_text(encoding="utf-8")
