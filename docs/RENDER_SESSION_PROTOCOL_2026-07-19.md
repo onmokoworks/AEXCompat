@@ -143,8 +143,8 @@ u32 LE の長さ接頭辞 + UTF-8 JSON 本文。1 メッセージ上限 64 KiB (
 {"v":1,"type":"frame_done","frame_index":0,"status":"ok",
  "output":{"width":1920,"height":1080,"rowbytes":7680,
            "pixel_format":"argb8","checksum":"<sha256>",
-           "pixels_valid":true,"guards_intact":true},
- "selector_errors":{"frame_setup":0,"render":0,"frame_setdown":0},
+           "guards_intact":true},
+ "render_error":0,
  "generation":1}
 ```
 
@@ -204,15 +204,27 @@ invoke_sequence_selector と同経路で publish_effect_sequence) →
 
 ```
 offset 0        : SessionHeader (1 ページ 4096B)
-offset 4096     : 入力スロット   (max_width * max_height * bpp)
-align 4096      : 出力スロット   (同上)
-align 4096      : レイヤースロット × n (launch の layer 数、各同上)
+offset 4096     : 入力スロット   (max_width * max_height * 4)
+align 4096      : 出力スロット   (max_width * max_height * bpp)
+align 4096      : レイヤースロット × n (launch の layer 数、各 max_width * max_height * 4)
 ```
 
-- bpp は深度で決まる (8bpc=4B/px、16bpc=8B/px、32f=16B/px)。転送形式は
-  one-shot の raw transport と同じ packed RGBA 系 (worker 内部で ARGB へ
-  変換する `build_argb_input` を流用)。
+- 入力・レイヤースロットは RGBA8 (4B/px) 固定。one-shot の入力 raw
+  transport と同一 (`load_rgba` は深度によらず w*h*4 を要求し、深度昇格は
+  worker 内部の `rgba8_to_argb` が行う。深い入力転送は #57 系の既存課題で、
+  セッションで新設しない)。出力スロットのみ深度で bpp が決まる
+  (8bpc=4B/px、16bpc=8B/px、32f=16B/px。one-shot の出力 raw と同一)。
 - rowbytes = width * bpp の密詰め (one-shot raw ファイルと同じ)。
+- **スロットは転送専用で、plugin にスロットへのポインタは渡らない**:
+  worker は入力スロットを worker 私有バッファへコピーしてから
+  PF_EffectWorld を構築し、レンダー先も現行 one-shot と同じ guard 付き
+  私有バッファ (`OutputPixelBuffer` の sentinel + NOACCESS ページ、
+  `render_pixel_buffer.cpp`) を使う。完成フレームを host コードが
+  スロットへ長さ固定でコピーする。plugin の out-of-bounds 書き込みは
+  私有バッファの guard で検出され (per-frame `guards_intact`)、mapping 内の
+  隣接スロットやヘッダには届かない。section 内に guard 領域を置く必要が
+  生じるのは plugin に直接スロットを描かせる zero-copy 構成 (v2 検討) で
+  あり、v1 では採らない。
 - 上限: `max_width`/`max_height` は one-shot と同じ
   `validate_image_buffer_layout` の上限 (`MAX_DIMENSION=4096`,
   `MAX_PIXELS=16M`) に従う。section 全体は 32f フル構成でも
@@ -319,6 +331,8 @@ worker 側の実装マッピング (worker 側調査より):
 2. **PR-B**: worker `--render-session-v1` モード + フレームループ +
   機械可搬な behavioral self-test (Python から worker を直接駆動し、
   パイプ/共有メモリ契約と selector 発行列・sequence data 継続を検証)。
+  実装はレイヤースロット 0 本の構成から始める (プロトコルは n 本を許すが、
+  worker はレイヤー付き session 構成を明示的に拒否する。追加は v1.1)。
 3. **PR-C**: broker `RenderSession` + バッチ動画レンダー CLI (PNG 連番) +
   broker 統合テスト (worker 実プロセス、per-frame 検証・watchdog・
   クラッシュ無効化の異常系込み)。
