@@ -251,11 +251,15 @@ fn normalize_success(
     }
     // A SmartFX run that legally answered an empty result_rect produced no
     // output world at all; zero dimensions are that contract's fulfillment,
-    // not an invalid output. The input world still has to authenticate.
+    // not an invalid output. The input world still has to authenticate, and
+    // the reported hash must be exactly the digest of zero bytes: there is no
+    // raw output artifact left to cross-check it against later.
     if path == RenderPath::Smartfx
         && report.get("empty_result_rect").and_then(Value::as_bool) == Some(true)
     {
-        if width != 0 || height != 0 {
+        const EMPTY_SHA256: &str =
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+        if width != 0 || height != 0 || !output_sha256.eq_ignore_ascii_case(EMPTY_SHA256) {
             return Err(with_suite_timeline(
                 RuntimeFailure::new(Classification::InvalidOutput),
                 &timeline,
@@ -1123,6 +1127,22 @@ mod tests {
         };
         let result =
             collect_runtime_results(&mut backend, &[RenderPath::Classic], &[PixelDepth::Argb8])
+                .unwrap();
+        assert_eq!(result[0].classification, Classification::InvalidOutput);
+
+        // A hash other than the empty-byte digest cannot be cross-checked
+        // against any raw output and is rejected.
+        let mut wrong_digest = successful_report(PixelDepth::Argb8);
+        wrong_digest["width"] = json!(0);
+        wrong_digest["height"] = json!(0);
+        wrong_digest["empty_result_rect"] = json!(true);
+        wrong_digest["output_sha256"] = json!("ab".repeat(32));
+        let mut backend = FakeBackend {
+            inspect: Ok(json!({})),
+            renders: VecDeque::from([Ok(wrong_digest)]),
+        };
+        let result =
+            collect_runtime_results(&mut backend, &[RenderPath::Smartfx], &[PixelDepth::Argb8])
                 .unwrap();
         assert_eq!(result[0].classification, Classification::InvalidOutput);
     }
