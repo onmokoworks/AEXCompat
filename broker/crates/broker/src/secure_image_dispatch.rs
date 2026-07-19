@@ -64,6 +64,42 @@ pub fn dispatch_secure_gpu_image(
     dispatch_secure_image(input)
 }
 
+/// Session variant of `dispatch_secure_image`: the same admission pipeline
+/// (sealed plugin tree, dependency authentication, local worker admission),
+/// but the worker keeps running with the inherited session transport.
+/// `input.timeout` is unused here: a session is bounded per frame by the
+/// caller's deadline, not per launch.
+#[cfg(windows)]
+pub fn dispatch_secure_image_session(
+    input: SecureImageDispatch<'_>,
+    session: &crate::windows_process::SessionChildHandles,
+) -> io::Result<crate::secure_launch::SecureSessionProcess> {
+    crate::trace_policy::validate_broker_trace_directory(input.repository)?;
+    let worker_program = input
+        .repository
+        .join(input.worker_kind.repository_relative_program());
+    let main = load_entry(input.plugin)?;
+    let plugin_basename = main.relative_basename.clone();
+    let dependencies = input
+        .dependencies
+        .into_iter()
+        .map(load_entry)
+        .collect::<io::Result<Vec<_>>>()?;
+    let tree = SealedLoadTree::create(main, dependencies)?;
+    let (worker_sha256, worker_size) = admit_local_worker(&worker_program)?;
+    let request = SecureLaunchRequest {
+        worker_program: &worker_program,
+        worker_expected_sha256: worker_sha256,
+        worker_expected_size: worker_size,
+        plugin_basename: &plugin_basename,
+        args_before_plugin: input.args_before_plugin,
+        args_after_plugin: input.args_after_plugin,
+        repository: input.repository,
+        require_module_audit: true,
+    };
+    crate::secure_launch::secure_launch_session(tree, request, session)
+}
+
 pub fn dispatch_secure_image(input: SecureImageDispatch<'_>) -> io::Result<SecureLaunchResult> {
     crate::trace_policy::validate_broker_trace_directory(input.repository)?;
     let worker_program = input

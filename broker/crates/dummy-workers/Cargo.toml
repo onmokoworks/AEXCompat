@@ -7,6 +7,8 @@ license.workspace = true
 [dependencies]
 windows-sys.workspace = true
 aexcompat-broker = { path = "../broker" }
+serde_json = "1"
+sha2 = "0.10"
 
 [[bin]]
 name = "dummy_exit0"
@@ -35,3 +37,7 @@ path = "src/sealed_acl_probe.rs"
 [[bin]]
 name = "session_shm_probe"
 path = "src/bin/session_shm_probe.rs"
+
+[[bin]]
+name = "session_protocol_worker"
+path = "src/bin/session_protocol_worker.rs"

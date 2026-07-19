@@ -152,12 +152,31 @@ fn quote(value: &str) -> String {
     quoted
 }
 
-fn child_environment(trace_handle: Option<HANDLE>) -> Vec<u16> {
+/// Environment variables that advertise inherited render-session handle
+/// numbers to the worker (docs/RENDER_SESSION_PROTOCOL_2026-07-19.md §2).
+pub const SESSION_REQUEST_HANDLE_VARIABLE: &str = "AEXCOMPAT_RENDER_SESSION_REQUEST_HANDLE";
+pub const SESSION_RESPONSE_HANDLE_VARIABLE: &str = "AEXCOMPAT_RENDER_SESSION_RESPONSE_HANDLE";
+pub const SESSION_SECTION_HANDLE_VARIABLE: &str = "AEXCOMPAT_RENDER_SESSION_SECTION_HANDLE";
+
+/// Child-side transport handles for a resident render session launch. All
+/// three must already be inheritable; the caller keeps ownership and closes
+/// its copies after the launch. The worker receives only these numbers via
+/// the session environment variables and never opens a path for transport.
+pub struct SessionChildHandles {
+    pub request_read: HANDLE,
+    pub response_write: HANDLE,
+    pub section: HANDLE,
+}
+
+fn child_environment(trace_handle: Option<HANDLE>, session: Option<&SessionChildHandles>) -> Vec<u16> {
     let mut entries: Vec<(String, std::ffi::OsString, std::ffi::OsString)> = std::env::vars_os()
         .filter_map(|(key, value)| {
             let normalized = key.to_string_lossy().to_ascii_uppercase();
             if normalized == "AEX_INSTRUMENT_TRACE_DIR"
                 || normalized == "AEX_INSTRUMENT_TRACE_HANDLE"
+                || normalized == SESSION_REQUEST_HANDLE_VARIABLE
+                || normalized == SESSION_RESPONSE_HANDLE_VARIABLE
+                || normalized == SESSION_SECTION_HANDLE_VARIABLE
             {
                 None
             } else {
@@ -171,6 +190,19 @@ fn child_environment(trace_handle: Option<HANDLE>) -> Vec<u16> {
             "AEX_INSTRUMENT_TRACE_HANDLE".into(),
             (handle as usize).to_string().into(),
         ));
+    }
+    if let Some(session) = session {
+        for (name, handle) in [
+            (SESSION_REQUEST_HANDLE_VARIABLE, session.request_read),
+            (SESSION_RESPONSE_HANDLE_VARIABLE, session.response_write),
+            (SESSION_SECTION_HANDLE_VARIABLE, session.section),
+        ] {
+            entries.push((
+                name.into(),
+                name.into(),
+                (handle as usize).to_string().into(),
+            ));
+        }
     }
     entries.sort_by(|left, right| left.0.cmp(&right.0));
     let mut block = Vec::new();
@@ -306,6 +338,132 @@ fn run_isolated_impl(
     timeout: Duration,
     token: Option<(HANDLE, &Path)>,
 ) -> io::Result<ProcessResult> {
+    launch_isolated_impl(program, args, token, None)?.wait_and_collect(timeout)
+}
+
+/// A resumed isolated worker whose exit has not been awaited yet. One-shot
+/// dispatch awaits it immediately (`run_isolated_impl`); a render session
+/// keeps it alive across the frame loop and collects it at close. Dropping
+/// this without collecting terminates the worker through the job's
+/// kill-on-close limit.
+pub struct LaunchedIsolatedProcess {
+    process: OwnedHandle,
+    job: OwnedHandle,
+    stdout_reader: thread::JoinHandle<io::Result<(String, bool)>>,
+    stderr_reader: thread::JoinHandle<io::Result<(String, bool)>>,
+}
+
+impl LaunchedIsolatedProcess {
+    /// Terminates the whole job now (session watchdog path) and waits for the
+    /// worker process to disappear. Collection still happens via
+    /// `wait_and_collect`, which then returns immediately.
+    pub fn terminate_job(&self) -> io::Result<()> {
+        terminate_job_and_wait(self.job.raw(), self.process.raw(), TERMINATION_GRACE_MS)
+    }
+
+    /// Waits up to `timeout` for the worker to exit (terminating the job on
+    /// deadline, exactly like the one-shot path), then collects output and
+    /// job accounting into a `ProcessResult`.
+    pub fn wait_and_collect(self, timeout: Duration) -> io::Result<ProcessResult> {
+        let LaunchedIsolatedProcess {
+            process: process_handle,
+            job,
+            stdout_reader,
+            stderr_reader,
+        } = self;
+        let wait = unsafe {
+            WaitForSingleObject(
+                process_handle.raw(),
+                timeout.as_millis().min(u32::MAX as u128) as u32,
+            )
+        };
+        let timed_out = wait == WAIT_TIMEOUT;
+        if timed_out {
+            terminate_job_and_wait(job.raw(), process_handle.raw(), TERMINATION_GRACE_MS)?;
+        } else if wait != WAIT_OBJECT_0 {
+            return Err(io::Error::last_os_error());
+        }
+        let mut exit_code = 0;
+        if unsafe { GetExitCodeProcess(process_handle.raw(), &mut exit_code) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // A plug-in or GPU driver may leave descendants holding inherited pipe
+        // handles. End the job before joining readers so capture cannot wait
+        // for an unrelated descendant after the worker itself has exited.
+        if !timed_out && unsafe { TerminateJobObject(job.raw(), exit_code) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let (stdout, stdout_truncated) = stdout_reader
+            .join()
+            .map_err(|_| io::Error::other("stdout reader panicked"))??;
+        let (stderr, stderr_truncated) = stderr_reader
+            .join()
+            .map_err(|_| io::Error::other("stderr reader panicked"))??;
+        let (peak_process_memory_bytes, peak_job_memory_bytes) = query_job_memory_peaks(job.raw());
+        let worker_peak_commit_bytes = query_worker_peak_commit(process_handle.raw());
+        let classification = classify_exit(exit_code, timed_out);
+        // The hard commit cap rejects the allocation that would cross it, so the
+        // recorded peak stops short of the limit by up to one failed request.
+        // Treat "peaked within the slack below the cap" as having hit it; this is
+        // a heuristic marker, not proof, and it only escalates to a kill reason
+        // when the worker also died. The check uses the worker's own peak, not
+        // the job aggregate, so a descendant blowing the cap does not implicate
+        // the worker.
+        let memory_limit_reached = worker_peak_commit_bytes
+            .is_some_and(|peak| peak >= PROCESS_MEMORY_LIMIT as u64 - MEMORY_LIMIT_DETECTION_SLACK);
+        let kill_reason = if timed_out {
+            Some("timeout")
+        } else if classification != ExitClassification::Ok && memory_limit_reached {
+            // The job's hard commit cap makes allocations fail rather than
+            // killing the process, so a non-ok exit at the cap is the observable
+            // form of an out-of-memory death.
+            Some("memory_limit")
+        } else {
+            None
+        };
+        Ok(ProcessResult {
+            classification,
+            exit_code,
+            stdout,
+            stderr,
+            stdout_truncated,
+            stderr_truncated,
+            kill_reason,
+            worker_peak_commit_bytes,
+            peak_process_memory_bytes,
+            peak_job_memory_bytes,
+            process_memory_limit_bytes: PROCESS_MEMORY_LIMIT as u64,
+            memory_limit_reached,
+        })
+    }
+}
+
+/// Session launch: same isolation shape as `run_isolated_with_restricted_token`
+/// (restricted token, kill-on-close Job Object, memory cap, handle-list
+/// inheritance), plus the three session transport handles inherited and
+/// advertised via environment variables. The caller drives the frame loop and
+/// collects the exit through the returned `LaunchedIsolatedProcess`.
+pub fn launch_isolated_session_with_restricted_token(
+    program: &Path,
+    args: &[String],
+    token: &RestrictedWorkerToken,
+    current_directory: &Path,
+    session: &SessionChildHandles,
+) -> io::Result<LaunchedIsolatedProcess> {
+    launch_isolated_impl(
+        program,
+        args,
+        Some((token.as_raw_handle(), current_directory)),
+        Some(session),
+    )
+}
+
+fn launch_isolated_impl(
+    program: &Path,
+    args: &[String],
+    token: Option<(HANDLE, &Path)>,
+    session: Option<&SessionChildHandles>,
+) -> io::Result<LaunchedIsolatedProcess> {
     let trace_file = crate::trace_policy::create_trace_file_for_launch()?;
     let (stdout_read, stdout_write) = pipe()?;
     let (stderr_read, stderr_write) = pipe()?;
@@ -350,6 +508,13 @@ fn run_isolated_impl(
     if let Some(trace_file) = trace_file.as_ref() {
         inherited.push(trace_file.raw());
     }
+    if let Some(session) = session {
+        inherited.extend([
+            session.request_read,
+            session.response_write,
+            session.section,
+        ]);
+    }
     if unsafe {
         UpdateProcThreadAttribute(
             attribute_list,
@@ -376,7 +541,7 @@ fn run_isolated_impl(
         .chain(Some(0))
         .collect();
     let application_wide: Vec<u16> = program.as_os_str().encode_wide().chain(Some(0)).collect();
-    let mut environment = child_environment(trace_file.as_ref().map(|file| file.raw()));
+    let mut environment = child_environment(trace_file.as_ref().map(|file| file.raw()), session);
     let mut startup: STARTUPINFOEXW = unsafe { zeroed() };
     startup.StartupInfo.cb = size_of::<STARTUPINFOEXW>() as u32;
     startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
@@ -445,69 +610,11 @@ fn run_isolated_impl(
     drop(trace_file);
     let stdout_reader = reader(stdout_read.take() as usize, STDOUT_CAPTURE_LIMIT);
     let stderr_reader = reader(stderr_read.take() as usize, STDERR_CAPTURE_LIMIT);
-    let wait = unsafe {
-        WaitForSingleObject(
-            process_handle.raw(),
-            timeout.as_millis().min(u32::MAX as u128) as u32,
-        )
-    };
-    let timed_out = wait == WAIT_TIMEOUT;
-    if timed_out {
-        terminate_job_and_wait(job.raw(), process_handle.raw(), TERMINATION_GRACE_MS)?;
-    } else if wait != WAIT_OBJECT_0 {
-        return Err(io::Error::last_os_error());
-    }
-    let mut exit_code = 0;
-    if unsafe { GetExitCodeProcess(process_handle.raw(), &mut exit_code) } == 0 {
-        return Err(io::Error::last_os_error());
-    }
-    // A plug-in or GPU driver may leave descendants holding inherited pipe
-    // handles. End the job before joining readers so capture cannot wait for
-    // an unrelated descendant after the worker itself has exited.
-    if !timed_out && unsafe { TerminateJobObject(job.raw(), exit_code) } == 0 {
-        return Err(io::Error::last_os_error());
-    }
-    let (stdout, stdout_truncated) = stdout_reader
-        .join()
-        .map_err(|_| io::Error::other("stdout reader panicked"))??;
-    let (stderr, stderr_truncated) = stderr_reader
-        .join()
-        .map_err(|_| io::Error::other("stderr reader panicked"))??;
-    let (peak_process_memory_bytes, peak_job_memory_bytes) = query_job_memory_peaks(job.raw());
-    let worker_peak_commit_bytes = query_worker_peak_commit(process_handle.raw());
-    let classification = classify_exit(exit_code, timed_out);
-    // The hard commit cap rejects the allocation that would cross it, so the
-    // recorded peak stops short of the limit by up to one failed request.
-    // Treat "peaked within the slack below the cap" as having hit it; this is
-    // a heuristic marker, not proof, and it only escalates to a kill reason
-    // when the worker also died. The check uses the worker's own peak, not
-    // the job aggregate, so a descendant blowing the cap does not implicate
-    // the worker.
-    let memory_limit_reached = worker_peak_commit_bytes
-        .is_some_and(|peak| peak >= PROCESS_MEMORY_LIMIT as u64 - MEMORY_LIMIT_DETECTION_SLACK);
-    let kill_reason = if timed_out {
-        Some("timeout")
-    } else if classification != ExitClassification::Ok && memory_limit_reached {
-        // The job's hard commit cap makes allocations fail rather than
-        // killing the process, so a non-ok exit at the cap is the observable
-        // form of an out-of-memory death.
-        Some("memory_limit")
-    } else {
-        None
-    };
-    Ok(ProcessResult {
-        classification,
-        exit_code,
-        stdout,
-        stderr,
-        stdout_truncated,
-        stderr_truncated,
-        kill_reason,
-        worker_peak_commit_bytes,
-        peak_process_memory_bytes,
-        peak_job_memory_bytes,
-        process_memory_limit_bytes: PROCESS_MEMORY_LIMIT as u64,
-        memory_limit_reached,
+    Ok(LaunchedIsolatedProcess {
+        process: process_handle,
+        job,
+        stdout_reader,
+        stderr_reader,
     })
 }
 

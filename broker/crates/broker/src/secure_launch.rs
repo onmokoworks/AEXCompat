@@ -51,15 +51,7 @@ fn minidump_dispatch_args(_repository: &Path) -> io::Result<Vec<String>> {
     Ok(Vec::new())
 }
 
-/// Launches a trusted external worker with an authenticated sealed plugin.
-///
-/// The tree is owned by this call so its verified file handles and protected
-/// root remain alive until the isolated process has exited.
-pub fn secure_launch(
-    tree: SealedLoadTree,
-    request: SecureLaunchRequest<'_>,
-    timeout: Duration,
-) -> io::Result<SecureLaunchResult> {
+fn build_launch_args(tree: &SealedLoadTree, request: &SecureLaunchRequest<'_>) -> io::Result<Vec<String>> {
     let plugin_path = tree.plugin_path(request.plugin_basename)?;
     let minidump_args = minidump_dispatch_args(request.repository)?;
     let mut args = Vec::with_capacity(
@@ -74,6 +66,19 @@ pub fn secure_launch(
     // Tail position is required: the worker consumes the trailing
     // --minidump-v1 <dir> pair before its argc-exact mode dispatch.
     args.extend(minidump_args);
+    Ok(args)
+}
+
+/// Launches a trusted external worker with an authenticated sealed plugin.
+///
+/// The tree is owned by this call so its verified file handles and protected
+/// root remain alive until the isolated process has exited.
+pub fn secure_launch(
+    tree: SealedLoadTree,
+    request: SecureLaunchRequest<'_>,
+    timeout: Duration,
+) -> io::Result<SecureLaunchResult> {
+    let args = build_launch_args(&tree, &request)?;
     secure_launch_impl(
         tree,
         request.worker_program,
@@ -148,6 +153,118 @@ fn secure_launch_impl(
         peak_job_memory_bytes: result.peak_job_memory_bytes,
         process_memory_limit_bytes: result.process_memory_limit_bytes,
         memory_limit_reached: result.memory_limit_reached,
+    })
+}
+
+/// A sealed worker launched for a resident render session. Every trust
+/// artifact whose lifetime the one-shot path scoped to a single dispatch
+/// (sealed tree with its verified handles and ACL, staged worker copy,
+/// restricted token) is held here for the whole session; dropping without
+/// `finish` terminates the worker through the job's kill-on-close limit.
+#[cfg(windows)]
+pub struct SecureSessionProcess {
+    launched: Option<crate::windows_process::LaunchedIsolatedProcess>,
+    require_module_audit: bool,
+    _tree: SealedLoadTree,
+    _stage: crate::trusted_worker_stage::TrustedWorkerStage,
+    _token: crate::restricted_worker_token::RestrictedWorkerToken,
+}
+
+#[cfg(windows)]
+impl SecureSessionProcess {
+    /// Terminates the whole job now (frame-deadline watchdog path). The
+    /// collected result still comes from a later `finish` call.
+    pub fn terminate_job(&self) -> io::Result<()> {
+        self.launched
+            .as_ref()
+            .expect("session process not collected")
+            .terminate_job()
+    }
+
+    /// Waits up to `timeout` for the worker to exit and collects stdout,
+    /// stderr, and job accounting. Applies the same module-audit validation
+    /// as the one-shot `secure_launch` when the exit classified as ok.
+    pub fn finish(mut self, timeout: Duration) -> io::Result<SecureLaunchResult> {
+        let result = self
+            .launched
+            .take()
+            .expect("session process already collected")
+            .wait_and_collect(timeout)
+            .map_err(|error| stage_error("session worker collection", error))?;
+        if self.require_module_audit && result.classification == ExitClassification::Ok {
+            crate::worker_module_audit::validate_required_worker_audit(
+                &result.stdout,
+                result.stdout_truncated,
+            )
+            .map_err(|error| stage_error("worker module audit validation", error))?;
+        }
+        Ok(SecureLaunchResult {
+            classification: result.classification,
+            exit_code: result.exit_code,
+            stdout: result.stdout,
+            stderr: result.stderr,
+            stdout_truncated: result.stdout_truncated,
+            stderr_truncated: result.stderr_truncated,
+            kill_reason: result.kill_reason,
+            worker_peak_commit_bytes: result.worker_peak_commit_bytes,
+            peak_process_memory_bytes: result.peak_process_memory_bytes,
+            peak_job_memory_bytes: result.peak_job_memory_bytes,
+            process_memory_limit_bytes: result.process_memory_limit_bytes,
+            memory_limit_reached: result.memory_limit_reached,
+        })
+    }
+}
+
+/// Session variant of `secure_launch`: identical trust pipeline (restricted
+/// token, sealed tree ACL, trusted worker staging), but the worker is left
+/// running with the inherited session transport and returned to the caller
+/// instead of being awaited.
+#[cfg(windows)]
+pub fn secure_launch_session(
+    tree: SealedLoadTree,
+    request: SecureLaunchRequest<'_>,
+    session: &crate::windows_process::SessionChildHandles,
+) -> io::Result<SecureSessionProcess> {
+    use crate::restricted_worker_acl::{protect_sealed_load_tree, RestrictedWorkerSid};
+    use crate::restricted_worker_token::create_restricted_worker_token;
+    use crate::trusted_worker_stage::TrustedWorkerStage;
+
+    let args = build_launch_args(&tree, &request)?;
+    let worker_sid = RestrictedWorkerSid::generate();
+    let token = create_restricted_worker_token(&worker_sid)
+        .map_err(|error| stage_error("restricted token creation", error))?;
+    if !token
+        .contains_restricting_sid(&worker_sid)
+        .map_err(|error| stage_error("restricted token verification", error))?
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "restricted token does not contain the generated worker SID",
+        ));
+    }
+    protect_sealed_load_tree(tree.root(), tree.manifest_basenames(), &worker_sid)
+        .map_err(|error| stage_error("sealed tree ACL application", error))?;
+    let worker_stage = TrustedWorkerStage::create(
+        request.worker_program,
+        request.worker_expected_sha256,
+        request.worker_expected_size,
+        &worker_sid,
+    )
+    .map_err(|error| stage_error("trusted worker staging", error))?;
+    let launched = crate::windows_process::launch_isolated_session_with_restricted_token(
+        worker_stage.worker_path(),
+        &args,
+        &token,
+        worker_stage.root(),
+        session,
+    )
+    .map_err(|error| stage_error("restricted session launch", error))?;
+    Ok(SecureSessionProcess {
+        launched: Some(launched),
+        require_module_audit: request.require_module_audit,
+        _tree: tree,
+        _stage: worker_stage,
+        _token: token,
     })
 }
 
