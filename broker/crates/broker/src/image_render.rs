@@ -4791,15 +4791,6 @@ fn render_with_artifact(
                 .map_err(|error| invalid(format!("output PNG save failed: {error}")))?;
         }
     }
-    let gpu_memory = json!({
-        "lifetimes_balanced": worker_report.get("gpu_memory_lifetimes_balanced"),
-        "allocations_created": worker_report.get("gpu_allocations_created"),
-        "allocations_freed": worker_report.get("gpu_allocations_freed"),
-        "live_allocation_count": worker_report.get("live_gpu_allocation_count"),
-        "live_bytes": worker_report.get("live_gpu_memory_bytes"),
-        "exclusive_access_depth": worker_report.get("gpu_exclusive_access_depth"),
-        "invalid_operations": worker_report.get("invalid_gpu_memory_operations"),
-    });
     // The empty branch never writes the preserved raw sidecar, so pointing
     // the report at that path would name a file that does not exist.
     let output_raw = if empty_smart_result {
@@ -4809,17 +4800,101 @@ fn render_with_artifact(
             .as_ref()
             .map(|path| path.to_string_lossy().into_owned())
     };
+    let facts = InteractiveImageReportFacts {
+        plugin_id: plugin_id.to_owned(),
+        smart,
+        pixel_format,
+        rendered_width,
+        rendered_height,
+        input_width: width,
+        input_height: height,
+        output_png: output_path.to_path_buf(),
+        timing,
+        worker_classification: isolated.classification.as_str().to_owned(),
+        diagnostics,
+        gpu_fallback_used,
+        gpu_fallback_reason,
+        gpu_attempt,
+        secondary_layers: json!(secondaries
+            .iter()
+            .map(|item| json!({"slot": item.0, "width": item.1, "height": item.2}))
+            .collect::<Vec<_>>()),
+        empty_smart_result,
+        output_raw,
+        deep_png_output,
+        deep_overrange_samples,
+        world_dump_display: world_dump_dir.as_ref().map(|dump| dump.display.clone()),
+        minidump_display: minidump_dir.as_ref().map(|dump| dump.display.clone()),
+        output_checksum_detail,
+        output_origin_ok,
+        parameter_count_ok,
+        spatial_ok,
+        audio_input_sha256: audio
+            .as_ref()
+            .map(|bytes| format!("{:x}", Sha256::digest(bytes))),
+    };
+    drop(cleanup);
+    Ok(build_interactive_image_report(&worker_report, facts))
+}
+
+/// Everything the flattened `interactive_image_render` report carries beyond
+/// the worker report itself. Kept separate from `render_with_artifact` so a
+/// length-1 render session can synthesize the same public report shape from
+/// its final report (issue #98 stage W2); the flattening below is the single
+/// source of truth for that schema.
+pub(crate) struct InteractiveImageReportFacts {
+    pub(crate) plugin_id: String,
+    pub(crate) smart: bool,
+    pub(crate) pixel_format: RenderPixelFormat,
+    pub(crate) rendered_width: u32,
+    pub(crate) rendered_height: u32,
+    pub(crate) input_width: u32,
+    pub(crate) input_height: u32,
+    pub(crate) output_png: PathBuf,
+    pub(crate) timing: RenderTiming,
+    pub(crate) worker_classification: String,
+    pub(crate) diagnostics: Value,
+    pub(crate) gpu_fallback_used: bool,
+    pub(crate) gpu_fallback_reason: Option<String>,
+    pub(crate) gpu_attempt: Option<Value>,
+    pub(crate) secondary_layers: Value,
+    pub(crate) empty_smart_result: bool,
+    pub(crate) output_raw: Option<String>,
+    pub(crate) deep_png_output: bool,
+    pub(crate) deep_overrange_samples: Option<u64>,
+    pub(crate) world_dump_display: Option<String>,
+    pub(crate) minidump_display: Option<String>,
+    pub(crate) output_checksum_detail: bool,
+    pub(crate) output_origin_ok: bool,
+    pub(crate) parameter_count_ok: bool,
+    pub(crate) spatial_ok: bool,
+    pub(crate) audio_input_sha256: Option<String>,
+}
+
+pub(crate) fn build_interactive_image_report(
+    worker_report: &Value,
+    facts: InteractiveImageReportFacts,
+) -> Value {
+    let gpu_memory = json!({
+        "lifetimes_balanced": worker_report.get("gpu_memory_lifetimes_balanced"),
+        "allocations_created": worker_report.get("gpu_allocations_created"),
+        "allocations_freed": worker_report.get("gpu_allocations_freed"),
+        "live_allocation_count": worker_report.get("live_gpu_allocation_count"),
+        "live_bytes": worker_report.get("live_gpu_memory_bytes"),
+        "exclusive_access_depth": worker_report.get("gpu_exclusive_access_depth"),
+        "invalid_operations": worker_report.get("invalid_gpu_memory_operations"),
+    });
     let mut report = json!({
-        "schema_version": 1, "stage": "interactive_image_render", "plugin_id": plugin_id,
-        "render_path": if smart { "smartfx" } else { "classic" },
-        "pixel_format": pixel_format.report_name(),
-        "width": rendered_width, "height": rendered_height,
-        "input_width": width, "input_height": height,
-        "output_transport": "rgba8_png", "output_png": output_path,
-        "current_time": timing.current_time, "time_step": timing.time_step,
-        "total_time": timing.total_time, "time_scale": timing.time_scale,
-        "worker_classification": isolated.classification.as_str(),
-        "worker_diagnostics": diagnostics,
+        "schema_version": 1, "stage": "interactive_image_render", "plugin_id": facts.plugin_id,
+        "render_path": if facts.smart { "smartfx" } else { "classic" },
+        "pixel_format": facts.pixel_format.report_name(),
+        "width": facts.rendered_width, "height": facts.rendered_height,
+        "input_width": facts.input_width, "input_height": facts.input_height,
+        "output_transport": "rgba8_png", "output_png": facts.output_png,
+        "current_time": facts.timing.current_time, "time_step": facts.timing.time_step,
+        "total_time": facts.timing.total_time, "time_scale": facts.timing.time_scale,
+        "worker_classification": facts.worker_classification,
+        "worker_diagnostics": facts.diagnostics,
         "suite_leases_balanced": worker_report.get("suite_leases_balanced"),
         "suite_lease_warning": worker_report.get("suite_lease_warning"),
         "suite_acquires": worker_report.get("suite_acquires"),
@@ -4834,22 +4909,23 @@ fn render_with_artifact(
         "gpu_render_possible": worker_report.get("gpu_render_possible"),
         "gpu_render_dispatched": worker_report.get("gpu_render_dispatched"),
         "gpu_memory": gpu_memory,
-        "gpu_fallback_used": gpu_fallback_used,
+        "gpu_fallback_used": facts.gpu_fallback_used,
         "input_sha256": worker_report.get("input_sha256"),
         "output_sha256": worker_report.get("output_sha256"),
         "requested_parameters": worker_report.get("requested_parameters"),
-        "secondary_layers": secondaries.iter().map(|item| json!({
-            "slot": item.0, "width": item.1, "height": item.2
-        })).collect::<Vec<_>>(),
+        "secondary_layers": facts.secondary_layers,
         "guard_bytes_intact": true, "passed": true
     });
     let report_object = report
         .as_object_mut()
         .expect("interactive render report is an object");
-    report_object.insert("gpu_fallback_reason".into(), json!(gpu_fallback_reason));
+    report_object.insert(
+        "gpu_fallback_reason".into(),
+        json!(facts.gpu_fallback_reason),
+    );
     report_object.insert(
         "gpu_attempt".into(),
-        gpu_attempt.unwrap_or(Value::Null),
+        facts.gpu_attempt.unwrap_or(Value::Null),
     );
     for (name, source) in [
         ("row_bytes", "rowbytes"),
@@ -4872,38 +4948,38 @@ fn render_with_artifact(
             worker_report.get(source).cloned().unwrap_or(Value::Null),
         );
     }
-    if empty_smart_result {
+    if facts.empty_smart_result {
         // Nothing was rendered, so there is no PNG to point at.
         report_object.insert("output_png".into(), Value::Null);
     }
-    if deep_png_output {
+    if facts.deep_png_output {
         report_object.insert("output_transport".into(), json!("native_raw+rgba16_png"));
         report_object.insert(
             "output_overrange_samples".into(),
-            json!(deep_overrange_samples),
+            json!(facts.deep_overrange_samples),
         );
-    } else if pixel_format != RenderPixelFormat::Argb8 {
+    } else if facts.pixel_format != RenderPixelFormat::Argb8 {
         report_object.insert(
             "output_transport".into(),
             json!("native_raw+rgba8_png_preview"),
         );
     }
-    report_object.insert("output_raw".into(), json!(output_raw));
-    if let Some(dump) = &world_dump_dir {
+    report_object.insert("output_raw".into(), json!(facts.output_raw));
+    if let Some(display) = &facts.world_dump_display {
         report_object.insert(
             "world_dumps".into(),
             json!({
-                "directory": dump.display,
+                "directory": display,
                 "written": worker_report.get("world_dumps_written"),
                 "skipped": worker_report.get("world_dumps_skipped"),
                 "bytes": worker_report.get("world_dump_bytes"),
             }),
         );
     }
-    if let Some(dump) = &minidump_dir {
-        report_object.insert("minidump_directory".into(), json!(dump.display));
+    if let Some(display) = &facts.minidump_display {
+        report_object.insert("minidump_directory".into(), json!(display));
     }
-    if output_checksum_detail {
+    if facts.output_checksum_detail {
         for field in ["output_row_crc32", "output_channel_sha256"] {
             report_object.insert(
                 field.into(),
@@ -4927,22 +5003,22 @@ fn render_with_artifact(
             worker_report.get(field).cloned().unwrap_or(Value::Null),
         );
     }
-    report_object.insert("output_origin_contract_ok".into(), json!(output_origin_ok));
+    report_object.insert(
+        "output_origin_contract_ok".into(),
+        json!(facts.output_origin_ok),
+    );
     report_object.insert(
         "parameter_count_contract_ok".into(),
-        json!(parameter_count_ok),
+        json!(facts.parameter_count_ok),
     );
-    report_object.insert("spatial_contract_ok".into(), json!(spatial_ok));
+    report_object.insert("spatial_contract_ok".into(), json!(facts.spatial_ok));
     report_object.insert(
         "host_contract_warning".into(),
-        json!(!(output_origin_ok && parameter_count_ok && spatial_ok)),
+        json!(!(facts.output_origin_ok && facts.parameter_count_ok && facts.spatial_ok)),
     );
-    if let Some(bytes) = &audio {
+    if let Some(audio_sha) = &facts.audio_input_sha256 {
         report_object.insert("audio_sidecar_transport".into(), json!("mono_f32le_44100"));
-        report_object.insert(
-            "audio_sidecar_input_sha256".into(),
-            json!(format!("{:x}", Sha256::digest(bytes))),
-        );
+        report_object.insert("audio_sidecar_input_sha256".into(), json!(audio_sha));
         for field in [
             "audio_usage_advertised",
             "audio_checkout_allowed",
@@ -5022,8 +5098,7 @@ fn render_with_artifact(
     ] {
         report_object.insert(field.into(), worker_report[field].clone());
     }
-    drop(cleanup);
-    Ok(report)
+    report
 }
 
 #[cfg(test)]
