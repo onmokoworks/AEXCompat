@@ -961,6 +961,18 @@ impl RenderSession {
                     Err(_) => break,
                 }
             }
+            // The watcher event is asynchronous, so also check the process
+            // handle synchronously: a descendant can keep the request pipe
+            // writable after the worker died, letting the close write succeed
+            // against a worker that never received it.
+            if self.process_exit_observed
+                || self
+                    .process
+                    .as_ref()
+                    .is_some_and(SecureSessionProcess::has_exited)
+            {
+                self.process_exit_observed = true;
+            }
             if self.invalidation.is_none() && self.process_exit_observed {
                 self.invalidation = Some(SessionInvalidation {
                     reason: "premature_exit",

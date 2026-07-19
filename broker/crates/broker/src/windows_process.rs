@@ -361,6 +361,15 @@ impl LaunchedIsolatedProcess {
         terminate_job_and_wait(self.job.raw(), self.process.raw(), TERMINATION_GRACE_MS)
     }
 
+    /// Synchronous liveness check on the worker process itself, for the
+    /// session close handshake: the async watcher event may not have been
+    /// delivered yet when close() needs to know whether the worker already
+    /// exited (a descendant can keep the request pipe writable after the
+    /// worker died, so a successful close write proves nothing).
+    pub fn has_exited(&self) -> bool {
+        unsafe { WaitForSingleObject(self.process.raw(), 0) == WAIT_OBJECT_0 }
+    }
+
     /// A duplicated handle to the worker process itself, for a session's
     /// process-death watcher (protocol §7: the frame wait observes the
     /// response channel, the deadline, AND process death — a descendant

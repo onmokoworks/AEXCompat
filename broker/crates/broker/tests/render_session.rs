@@ -243,9 +243,10 @@ mod windows_e2e {
             .render_frame(0, 0, &input_pattern(11))
             .expect("the frame itself completes");
         assert!(matches!(outcome.status, FrameStatus::Rendered { .. }));
-        // Give the process-death watcher a moment to observe the exit so the
-        // recorded reason is deterministic.
-        std::thread::sleep(Duration::from_secs(1));
+        // Let the worker's exit complete; close() then detects it through the
+        // synchronous process-handle check even if the async watcher event
+        // has not been delivered yet.
+        std::thread::sleep(Duration::from_millis(500));
         // The worker exited 0 with a clean-looking final report, but it never
         // received close: the session must not read as clean.
         let close = session.close();
