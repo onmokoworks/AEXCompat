@@ -28,12 +28,16 @@ L2_MAIN = SRC / "l2_main.cpp"
 # l2_main.cpp から抽出された実装の owner 群。TU 抽出のたびにここへ追記する。
 WORKER_RUNTIME_OWNERS = (
     "minihost/src/l2_main.cpp",
+    "minihost/src/worker_aegp_utility_suite.hpp",
+    "minihost/src/worker_aegp_utility_suite.cpp",
 )
 
 # 契約名 → owner ファイル群 (repo ルート相対)。
 CONTRACTS = {
     "l2_family": (
         "minihost/src/l2_main.cpp",
+        "minihost/src/worker_aegp_utility_suite.hpp",
+        "minihost/src/worker_aegp_utility_suite.cpp",
         "minihost/src/l2_mode_execution.hpp",
         "minihost/src/l2_mode_execution.cpp",
         "minihost/src/l2_cli_dispatch.cpp",
