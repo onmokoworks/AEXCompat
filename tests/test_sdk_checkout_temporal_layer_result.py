@@ -1,12 +1,11 @@
 import json
 from pathlib import Path
+import source_owners
 
 
 ROOT = Path(__file__).resolve().parents[1]
 RESULT = ROOT / "analysis" / "SDK_CHECKOUT_TEMPORAL_LAYER_RESULT_2026-07-15.json"
-SOURCE = ROOT / "minihost" / "src" / "l2_main.cpp"
-
-
+SOURCE = source_owners.L2_MAIN
 def test_checkout_fixture_observes_temporal_layer_composition():
     result = json.loads(RESULT.read_text(encoding="utf-8"))
     render = result["render"]
@@ -27,7 +26,7 @@ def test_checkout_fixture_observes_temporal_layer_composition():
 
 
 def test_checkout_host_surface_remains_bounded_and_observable():
-    source = SOURCE.read_text(encoding="utf-8")
+    source = source_owners.worker_text()
 
     for marker in (
         '"PF Effect UI Suite"',

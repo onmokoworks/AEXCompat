@@ -73,6 +73,13 @@ and bounded image input/output are now the main implementation path.
 - Prefer machine-portable behavioral self-tests for new compatibility work, and
   update frozen evidence values in `analysis/` only through the
   `tools/refresh-*-evidence.ps1` scripts (`docs/EVIDENCE_POLICY_2026-07-18.md`).
+- Source-text tests resolve which files they read through
+  `tests/source_owners.py` (issue #127). When a TU extraction moves an
+  implementation out of `l2_main.cpp`, append the new owner file to
+  `WORKER_RUNTIME_OWNERS` or the relevant `CONTRACTS` entry there instead of
+  editing individual tests; never weaken assert markers to make a move pass.
+  Negative assertions ("no longer in l2_main") must keep reading the exact
+  file (`L2_MAIN`), not a growable contract.
 - Image dispatch admits the locally built worker at dispatch time (no frozen
   trust constants; see the section 3 amendment in
   `docs/EVIDENCE_POLICY_2026-07-18.md`). In the evidence tier, receipt-pinned

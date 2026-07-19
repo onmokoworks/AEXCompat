@@ -1,5 +1,6 @@
 import json
 from pathlib import Path
+import source_owners
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -27,7 +28,7 @@ def test_wide_time_evidence_covers_sdk_positive_and_cleanroom_negative():
 
 
 def test_worker_gates_non_current_time_as_rational_values():
-    source = (ROOT / "minihost" / "src" / "l2_main.cpp").read_text()
+    source = source_owners.worker_text()
     runtime = (ROOT / "minihost" / "src" / "worker_smart_runtime.cpp").read_text()
     assert "static_cast<int64_t>(what_time) * runtime.current_time_scale" in runtime
     assert "!current_time && !runtime.wide_time_checkout_allowed" in runtime

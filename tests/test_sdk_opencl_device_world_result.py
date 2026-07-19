@@ -1,5 +1,6 @@
 import json
 from pathlib import Path
+import source_owners
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -53,7 +54,7 @@ def test_opencl_device_world_evidence_records_exact_public_rgba8_conformance():
 
 
 def test_opencl_boundary_and_fixture_build_markers_are_present():
-    source = (ROOT / "minihost" / "src" / "l2_main.cpp").read_text()
+    source = source_owners.worker_text()
     source += "\n" + (ROOT / "minihost" / "src" / "l2_cli_dispatch.cpp").read_text()
     transport = (ROOT / "minihost" / "src" / "gpu_memory_world_transport.cpp").read_text()
     backend = (ROOT / "minihost" / "src" / "gpu_opencl_backend.cpp").read_text()

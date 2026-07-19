@@ -1,10 +1,11 @@
 import unittest
 from pathlib import Path
+import source_owners
 
 
 ROOT = Path(__file__).resolve().parents[1]
 RESULT = ROOT / "analysis" / "SCATTERMAP_SMARTFX_ROI_RESULT_2026-07-13.md"
-WORKER = ROOT / "minihost" / "src" / "l2_main.cpp"
+WORKER = source_owners.L2_MAIN
 SMART_RUNTIME = ROOT / "minihost" / "src" / "worker_smart_runtime.cpp"
 SMART_SETUP = ROOT / "minihost" / "src" / "worker_smart_setup.cpp"
 SMART_DISPATCH = ROOT / "minihost" / "src" / "worker_smart_dispatch.cpp"
@@ -27,7 +28,7 @@ class SmartFxRoiResultTests(unittest.TestCase):
             self.assertIn(expected, result)
 
     def test_worker_and_broker_enforce_roi_observation(self):
-        worker = WORKER.read_text(encoding="utf-8")
+        worker = source_owners.worker_text()
         runtime = SMART_RUNTIME.read_text(encoding="utf-8")
         setup = SMART_SETUP.read_text(encoding="utf-8")
         dispatch = SMART_DISPATCH.read_text(encoding="utf-8")

@@ -1,11 +1,12 @@
 from pathlib import Path
+import source_owners
 
 
 ROOT = Path(__file__).resolve().parents[1]
 HEADER = ROOT / "minihost" / "src" / "gpu_device_info_registry.hpp"
 SOURCE = ROOT / "minihost" / "src" / "gpu_device_info_registry.cpp"
 CUDA = ROOT / "minihost" / "src" / "gpu_cuda_backend.cpp"
-MAIN = ROOT / "minihost" / "src" / "l2_main.cpp"
+MAIN = source_owners.L2_MAIN
 OPENCL = ROOT / "minihost" / "src" / "gpu_opencl_backend.cpp"
 DIRECTX = ROOT / "minihost" / "src" / "gpu_directx_backend.cpp"
 

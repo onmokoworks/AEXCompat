@@ -5,6 +5,7 @@ import os
 import struct
 import subprocess
 from pathlib import Path
+import source_owners
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -108,10 +109,7 @@ def test_aux_manifest_rejects_nonfinite_and_sidecar_outside_manifest_folder(tmp_
 
 
 def test_source_declares_transport_contract_and_handle_ownership():
-    source = "\n".join(path.read_text(encoding="utf-8") for path in (
-        ROOT / "minihost/src/l2_main.cpp",
-        ROOT / "minihost/src/worker_pf_ae_channel_runtime.cpp",
-    ))
+    source = source_owners.contract_text("pf_ae_channel_transport")
     assert '"expected_byte_length","sha256"' in source
     assert 'sampling!="exact"&&sampling!="hold"' in source
     assert "canon.parent_path()!=canonical.parent_path()" in source

@@ -2,10 +2,11 @@ import os
 from pathlib import Path
 
 import pytest
+import source_owners
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SOURCE = ROOT / "minihost/src/l2_main.cpp"
+SOURCE = source_owners.L2_MAIN
 COMPONENT = ROOT / "minihost/src/pf_cache_on_load_suite.cpp"
 SDK_ROOT = os.environ.get("AFTER_EFFECTS_SDK_ROOT")
 SDK_HEADER = Path(SDK_ROOT) / "Examples" / "Headers" / "AE_CacheOnLoadSuite.h" if SDK_ROOT else None
@@ -18,7 +19,7 @@ def _sdk_header() -> Path:
 
 
 def test_cache_on_load_v1_exact_name_version_and_one_slot_abi():
-    text = SOURCE.read_text(encoding="utf-8")
+    text = source_owners.worker_text()
     component = COMPONENT.read_text(encoding="utf-8")
     header = _sdk_header().read_text(encoding="utf-8")
     assert '#define kPFCacheOnLoadSuite\t\t\t"PF Cache On Load Suite"' in header

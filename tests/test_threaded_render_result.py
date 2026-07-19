@@ -1,10 +1,11 @@
 import unittest
 from pathlib import Path
+import source_owners
 
 
 ROOT = Path(__file__).resolve().parents[1]
 RESULT = ROOT / "analysis" / "SCATTERMAP_THREADED_RENDER_RESULT_2026-07-13.md"
-WORKER = ROOT / "minihost" / "src" / "l2_main.cpp"
+WORKER = source_owners.L2_MAIN
 CLASSIC_RUNTIME = ROOT / "minihost" / "src" / "worker_classic_runtime.cpp"
 BROKER = ROOT / "broker" / "crates" / "broker" / "src" / "render.rs"
 
@@ -23,7 +24,7 @@ class ThreadedRenderResultTests(unittest.TestCase):
             self.assertIn(expected, text)
 
     def test_worker_and_broker_enforce_both_threads(self):
-        worker = WORKER.read_text(encoding="utf-8")
+        worker = source_owners.worker_text()
         runtime = CLASSIC_RUNTIME.read_text(encoding="utf-8")
         broker = BROKER.read_text(encoding="utf-8")
         self.assertIn('case_id == "threaded_default"', worker)

@@ -1,17 +1,11 @@
 import json
 import subprocess
 from pathlib import Path
+import source_owners
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SOURCES = (
-    ROOT / "minihost" / "src" / "l2_main.cpp",
-    ROOT / "minihost" / "src" / "render_subsystem.h",
-    ROOT / "minihost" / "src" / "render_subsystem.cpp",
-    ROOT / "minihost" / "src" / "worker_smart_dispatch.cpp",
-    ROOT / "minihost" / "src" / "worker_smart_finalize.cpp",
-    ROOT / "minihost" / "src" / "worker_render_report.cpp",
-)
+SOURCES = source_owners.contract_files("smartfx_geometry_flags")
 BUILD = ROOT / "target" / "minihost-build"
 
 

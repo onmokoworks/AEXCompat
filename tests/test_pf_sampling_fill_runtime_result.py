@@ -2,11 +2,12 @@ import json
 import hashlib
 import math
 from pathlib import Path
+import source_owners
 
 
 ROOT = Path(__file__).resolve().parents[1]
 RESULT = ROOT / "analysis" / "PF_SAMPLING_FILL_RUNTIME_RESULT_2026-07-16.json"
-WORKER = ROOT / "minihost" / "src" / "l2_main.cpp"
+WORKER = source_owners.L2_MAIN
 WORLD_TRANSFORM = ROOT / "minihost" / "src" / "worker_pf_world_transform_runtime.cpp"
 
 
@@ -135,7 +136,7 @@ def test_fill_color_depth_matrix_has_independent_numeric_oracle():
 
 
 def test_sampling_area_callbacks_occupy_the_frozen_suite_slots():
-    worker = WORKER.read_text(encoding="utf-8")
+    worker = source_owners.worker_text()
     expected = {
         "g_sampling8_suite1[2]": "area_sample8",
         "g_sampling16_suite1[2]": "area_sample16",

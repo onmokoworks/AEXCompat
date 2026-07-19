@@ -1,10 +1,11 @@
 import json
 from pathlib import Path
+import source_owners
 
 
 ROOT = Path(__file__).resolve().parents[1]
 RESULT = ROOT / "analysis" / "REAL_AEX_EFFECT_DEBUG_MATRIX_RESULT_2026-07-15.json"
-WORKER = ROOT / "minihost" / "src" / "l2_main.cpp"
+WORKER = source_owners.L2_MAIN
 REPORT = ROOT / "minihost" / "src" / "worker_render_report.cpp"
 HARNESS = ROOT / "broker" / "crates" / "harness" / "src" / "main.rs"
 
@@ -34,7 +35,7 @@ def test_real_aex_matrix_distinguishes_supported_renders_from_depth_negotiation(
 
 
 def test_worker_gates_deep_worlds_on_the_observed_ae_capability_bits():
-    source = WORKER.read_text(encoding="utf-8") + REPORT.read_text(encoding="utf-8")
+    source = source_owners.worker_text() + REPORT.read_text(encoding="utf-8")
 
     assert "kOutFlagDeepColorAware = 1u << 25" in source
     assert "kOutFlag2FloatColorAware = 1u << 12" in source

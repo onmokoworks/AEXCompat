@@ -1,11 +1,12 @@
 import json
 from pathlib import Path
+import source_owners
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
 def worker_source():
-    return ((ROOT / "minihost" / "src" / "l2_main.cpp").read_text() + "\n" +
+    return (source_owners.worker_text() + "\n" +
             (ROOT / "minihost" / "src" / "l2_cli_dispatch.cpp").read_text() + "\n" +
             (ROOT / "minihost" / "src" / "host_audio_runtime.hpp").read_text() + "\n" +
             (ROOT / "minihost" / "src" / "host_audio_runtime.cpp").read_text())

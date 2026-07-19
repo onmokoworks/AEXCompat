@@ -1,16 +1,11 @@
 import json
 import subprocess
 from pathlib import Path
+import source_owners
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SOURCES = (
-    ROOT / "minihost" / "src" / "l2_main.cpp",
-    ROOT / "minihost" / "src" / "worker_pf_suites_internal.hpp",
-    ROOT / "minihost" / "src" / "worker_pf_suites.cpp",
-    ROOT / "minihost" / "src" / "worker_pf_state_runtime.hpp",
-    ROOT / "minihost" / "src" / "worker_pf_state_runtime.cpp",
-)
+SOURCES = source_owners.contract_files("pf_effect_sequence_data_suite")
 SCRIPT = ROOT / "tools" / "build-pf-effect-sequence-data-abi-probe.ps1"
 REPORT = ROOT / "target" / "pf-effect-sequence-data-abi-probe-build" / "pf-effect-sequence-data-abi.json"
 

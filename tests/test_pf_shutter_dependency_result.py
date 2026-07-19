@@ -1,5 +1,6 @@
 import json
 from pathlib import Path
+import source_owners
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -22,7 +23,7 @@ def test_shutter_transport_is_independent_from_dependency_advertisement():
 
 
 def test_worker_uses_effective_dynamic_flag_without_gating_fields():
-    source = (ROOT / "minihost" / "src" / "l2_main.cpp").read_text()
+    source = source_owners.worker_text()
     assert "kOutFlagIUseShutterAngle" in source
     assert "dynamic_out_flags & kOutFlagIUseShutterAngle" in source
     assert 'write<int32_t>(input, 248, g_shutter_angle)' in source

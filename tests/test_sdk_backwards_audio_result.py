@@ -1,15 +1,11 @@
 import json
 from pathlib import Path
+import source_owners
 
 
 ROOT = Path(__file__).resolve().parents[1]
 RESULT = ROOT / "analysis" / "SDK_BACKWARDS_AUDIO_RESULT_2026-07-15.json"
-WORKER_SOURCES = (
-    ROOT / "minihost" / "src" / "l2_main.cpp",
-    ROOT / "minihost" / "src" / "l2_cli_dispatch.cpp",
-    ROOT / "minihost" / "src" / "host_audio_runtime.hpp",
-    ROOT / "minihost" / "src" / "host_audio_runtime.cpp",
-)
+WORKER_SOURCES = source_owners.contract_files("sdk_backwards_audio_result")
 BROKER = ROOT / "broker" / "crates" / "broker" / "src" / "image_render.rs"
 HARNESS = ROOT / "broker" / "crates" / "harness" / "src" / "main.rs"
 PROBE = ROOT / "instruments" / "abi-layout-probe" / "main.cpp"

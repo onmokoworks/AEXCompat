@@ -4,11 +4,12 @@ from pathlib import Path
 import hashlib
 import json
 import subprocess
+import source_owners
 
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "instruments/pf-aegp-async-cancel-probe/pf_aegp_async_cancel_probe.cpp"
-HOST = ROOT / "minihost/src/l2_main.cpp"
+HOST = source_owners.L2_MAIN
 ASYNC_RUNTIME = ROOT / "minihost/src/worker_aegp_async_layer_runtime.cpp"
 
 

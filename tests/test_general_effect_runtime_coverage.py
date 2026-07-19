@@ -1,11 +1,12 @@
 import hashlib
 import json
 from pathlib import Path
+import source_owners
 
 
 ROOT = Path(__file__).resolve().parents[1]
 REPORT = ROOT / "analysis" / "GENERAL_EFFECT_RUNTIME_COVERAGE_2026-07-16.json"
-SOURCE = ROOT / "minihost" / "src" / "l2_main.cpp"
+SOURCE = source_owners.L2_MAIN
 WORLD_TRANSFORM = ROOT / "minihost" / "src" / "worker_pf_world_transform_runtime.cpp"
 ABI = ROOT / "target" / "pf-suite-abi-probe-build" / "pf-suite-abi.json"
 
@@ -35,7 +36,7 @@ def test_schema_and_compiled_abi_are_grounded_in_probe_result():
 
 def test_source_wiring_matches_inventory():
     report = load_report()
-    source = SOURCE.read_text(encoding="utf-8")
+    source = source_owners.worker_text()
     world_source = WORLD_TRANSFORM.read_text(encoding="utf-8")
     compact_source = " ".join((source + world_source).split())
     suite_abi = (ROOT / "minihost" / "src" / "worker_suite_abi.hpp").read_text(encoding="utf-8")
@@ -73,7 +74,7 @@ def test_source_wiring_matches_inventory():
 
 def test_render_options_and_async_receipt_claims_match_current_source():
     report = load_report()
-    source = SOURCE.read_text(encoding="utf-8")
+    source = source_owners.worker_text()
     item_runtime = (ROOT / "minihost" / "src" /
                     "worker_aegp_item_render_runtime.cpp").read_text(encoding="utf-8")
     ownership_source = source + (ROOT / "minihost" / "src" / "worker_render_receipts.cpp").read_text(

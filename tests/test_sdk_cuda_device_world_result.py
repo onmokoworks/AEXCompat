@@ -1,5 +1,6 @@
 import json
 from pathlib import Path
+import source_owners
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -26,7 +27,7 @@ def test_cuda_device_world_matches_cpu_public_pixels_and_balances_ownership():
 
 def test_cuda_driver_boundary_is_dynamic_bounded_and_channel_explicit():
     source = (ROOT / "minihost" / "src" / "gpu_memory_world_transport.cpp").read_text()
-    worker = (ROOT / "minihost" / "src" / "l2_main.cpp").read_text()
+    worker = source_owners.worker_text()
     backend = (ROOT / "minihost" / "src" / "gpu_cuda_backend.cpp").read_text()
     for marker in (
         'LoadLibraryExW(L"nvcuda.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32)',

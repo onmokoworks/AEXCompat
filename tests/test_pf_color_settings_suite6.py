@@ -6,9 +6,10 @@ import subprocess
 from pathlib import Path
 
 import pytest
+import source_owners
 
 ROOT = Path(__file__).resolve().parents[1]
-SOURCE = ROOT / "minihost" / "src" / "l2_main.cpp"
+SOURCE = source_owners.L2_MAIN
 COLOR_HEADER = ROOT / "minihost" / "src" / "worker_color_settings_runtime.hpp"
 COLOR_SOURCE = ROOT / "minihost" / "src" / "worker_color_settings_runtime.cpp"
 COLOR_SELFTEST_SOURCE = ROOT / "minihost" / "src" / "worker_color_settings_selftests.cpp"

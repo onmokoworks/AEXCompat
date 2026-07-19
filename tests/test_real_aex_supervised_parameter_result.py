@@ -1,14 +1,13 @@
 import json
 from pathlib import Path
+import source_owners
 
 
 ROOT = Path(__file__).resolve().parents[1]
 RESULT = ROOT / "analysis" / "REAL_AEX_SUPERVISED_PARAMETER_RESULT_2026-07-15.json"
 HARNESS = ROOT / "broker" / "crates" / "harness" / "src" / "main.rs"
 BROKER = ROOT / "broker" / "crates" / "broker" / "src" / "image_render.rs"
-WORKER = ROOT / "minihost" / "src" / "l2_main.cpp"
-
-
+WORKER = source_owners.L2_MAIN
 def test_particlelab_standard_supervised_parameter_receives_current_value():
     result = json.loads(RESULT.read_text(encoding="utf-8"))
     assert result["observed_supervised_parameters"]["standard_parameter_count"] == 7

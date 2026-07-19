@@ -4,10 +4,11 @@ import subprocess
 from pathlib import Path
 
 import pytest
+import source_owners
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SOURCE = ROOT / "minihost/src/l2_main.cpp"
+SOURCE = source_owners.L2_MAIN
 STATE_SOURCE = ROOT / "minihost/src/worker_pf_state_runtime.cpp"
 SELFTEST_SOURCE = ROOT / "minihost/src/worker_parameter_selftests.cpp"
 SDK_ROOT = os.environ.get("AFTER_EFFECTS_SDK_ROOT")

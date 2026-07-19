@@ -1,11 +1,12 @@
 from pathlib import Path
+import source_owners
 
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
 def test_production_worker_reports_bounded_missing_suites():
-    source = (ROOT / "minihost" / "src" / "l2_main.cpp").read_text(encoding="utf-8")
+    source = source_owners.L2_MAIN.read_text(encoding="utf-8")
     report = (ROOT / "minihost" / "src" / "worker_render_report.cpp").read_text(
         encoding="utf-8"
     )

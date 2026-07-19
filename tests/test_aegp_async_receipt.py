@@ -2,10 +2,11 @@ import json
 import os
 import pathlib
 import subprocess
+import source_owners
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-SOURCE = ROOT / "minihost" / "src" / "l2_main.cpp"
+SOURCE = source_owners.L2_MAIN
 RECEIPTS = ROOT / "minihost" / "src" / "worker_render_receipts.cpp"
 WORLD_SELFTESTS = ROOT / "minihost" / "src" / "worker_aegp_world_selftests.cpp"
 

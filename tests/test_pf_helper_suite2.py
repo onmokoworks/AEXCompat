@@ -1,17 +1,9 @@
 from pathlib import Path
+import source_owners
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SOURCES = (
-    ROOT / "minihost" / "src" / "l2_main.cpp",
-    ROOT / "minihost" / "src" / "worker_l2_suite_abi.hpp",
-    ROOT / "minihost" / "src" / "worker_pf_helper_runtime.cpp",
-    ROOT / "minihost" / "src" / "worker_pf_helper_runtime.hpp",
-    ROOT / "minihost" / "src" / "worker_host_suite_router.cpp",
-    ROOT / "minihost" / "src" / "worker_ui_event_execution.cpp",
-)
-
-
+SOURCES = source_owners.contract_files("pf_helper_suite2")
 def source() -> str:
     return "\n".join(path.read_text(encoding="utf-8") for path in SOURCES)
 

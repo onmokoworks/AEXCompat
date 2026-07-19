@@ -5,10 +5,11 @@ import tempfile
 from pathlib import Path
 
 import pytest
+import source_owners
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SOURCE = ROOT / "minihost" / "src" / "l2_main.cpp"
+SOURCE = source_owners.L2_MAIN
 SMART_RUNTIME_SOURCE = ROOT / "minihost" / "src" / "worker_smart_runtime.cpp"
 SMART_RUNTIME_HEADER = ROOT / "minihost" / "src" / "worker_smart_runtime.hpp"
 SMART_EXECUTION_HEADER = ROOT / "minihost" / "src" / "worker_smart_execution.hpp"

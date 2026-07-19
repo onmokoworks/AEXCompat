@@ -1,10 +1,11 @@
 import json
 from pathlib import Path
+import source_owners
 
 
 ROOT = Path(__file__).resolve().parents[1]
 RESULT = ROOT / "analysis" / "SDK_MEDIANPRO_SMART_FILTER_RESULT_2026-07-15.json"
-SOURCE = ROOT / "minihost" / "src" / "l2_main.cpp"
+SOURCE = source_owners.L2_MAIN
 PARAMETER_RUNTIME = ROOT / "minihost" / "src" / "worker_parameter_runtime.hpp"
 
 
@@ -30,7 +31,7 @@ def test_medianpro_smart_cpu_image_io_contract():
 
 
 def test_reused_paramdef_addresses_are_reference_counted_until_auto_checkin():
-    source = SOURCE.read_text(encoding="utf-8")
+    source = source_owners.worker_text()
     runtime = PARAMETER_RUNTIME.read_text(encoding="utf-8")
 
     assert "std::unordered_map<void*, uint32_t> live" in runtime

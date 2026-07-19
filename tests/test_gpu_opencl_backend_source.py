@@ -1,10 +1,11 @@
 from pathlib import Path
+import source_owners
 
 
 ROOT = Path(__file__).resolve().parents[1]
 HEADER = ROOT / "minihost" / "src" / "gpu_opencl_backend.hpp"
 SOURCE = ROOT / "minihost" / "src" / "gpu_opencl_backend.cpp"
-MAIN = ROOT / "minihost" / "src" / "l2_main.cpp"
+MAIN = source_owners.L2_MAIN
 SMART_DISPATCH = ROOT / "minihost" / "src" / "worker_smart_dispatch.cpp"
 CMAKE = ROOT / "minihost" / "CMakeLists.txt"
 TRANSPORT = ROOT / "minihost" / "src" / "gpu_memory_world_transport.cpp"

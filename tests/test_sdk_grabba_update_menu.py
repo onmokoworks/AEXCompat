@@ -1,17 +1,11 @@
 import json
 import pathlib
 import subprocess
+import source_owners
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-SOURCES = (
-    ROOT / "minihost" / "src" / "l2_main.cpp",
-    ROOT / "minihost" / "src" / "worker_aegp_scene.cpp",
-    ROOT / "minihost" / "src" / "worker_aegp_scene.hpp",
-    ROOT / "minihost" / "src" / "worker_aegp_layer_render_runtime.cpp",
-)
-
-
+SOURCES = source_owners.contract_files("sdk_grabba_update_menu")
 def source_text() -> str:
     return "\n".join(path.read_text(encoding="utf-8") for path in SOURCES)
 HARNESS = ROOT / "broker" / "target" / "debug" / "aexcompat-harness.exe"

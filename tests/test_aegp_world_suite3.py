@@ -1,10 +1,11 @@
 import os
 import pathlib
 import subprocess
+import source_owners
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-SOURCE = ROOT / "minihost" / "src" / "l2_main.cpp"
+SOURCE = source_owners.L2_MAIN
 ABI_SOURCE = ROOT / "minihost" / "src" / "worker_suite_abi.hpp"
 ABI_OWNER = ROOT / "minihost" / "src" / "worker_suite_abi.cpp"
 CATALOG_OWNER = ROOT / "minihost" / "src" / "worker_host_suite_catalog.cpp"

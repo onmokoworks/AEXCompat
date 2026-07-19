@@ -1,10 +1,11 @@
 import json
 import unittest
 from pathlib import Path
+import source_owners
 
 ROOT = Path(__file__).resolve().parents[1]
 RENDER = ROOT / "minihost" / "src" / "render_subsystem.cpp"
-WORKER = ROOT / "minihost" / "src" / "l2_main.cpp"
+WORKER = source_owners.L2_MAIN
 CLASSIC_RUNTIME = ROOT / "minihost" / "src" / "worker_classic_runtime.cpp"
 
 
@@ -23,7 +24,7 @@ class PfFrameResizeFlagResultTest(unittest.TestCase):
 
     def test_worker_enforces_flags_before_render(self):
         render = RENDER.read_text(encoding="utf-8")
-        worker = WORKER.read_text(encoding="utf-8")
+        worker = source_owners.worker_text()
         # Request-shaping is shared by Classic and SmartFX; L2 only invokes
         # the extracted validator before replacing the guarded output world.
         validator = render[render.index("bool validate_output_extent("):
