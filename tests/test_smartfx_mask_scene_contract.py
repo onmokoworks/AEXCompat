@@ -10,7 +10,8 @@ def worker_source():
     return ((ROOT / "minihost/src/l2_main.cpp").read_text(encoding="utf-8") + "\n" +
             (ROOT / "minihost/src/l2_cli_dispatch.cpp").read_text(encoding="utf-8") + "\n" +
             (ROOT / "minihost/src/worker_mask_runtime.cpp").read_text(encoding="utf-8") + "\n" +
-            (ROOT / "minihost/src/worker_mask_runtime.hpp").read_text(encoding="utf-8"))
+            (ROOT / "minihost/src/worker_mask_runtime.hpp").read_text(encoding="utf-8") + "\n" +
+            (ROOT / "minihost/src/worker_mask_runtime_callbacks.inc").read_text(encoding="utf-8"))
 
 
 class SmartFxMaskSceneContractTests(unittest.TestCase):
