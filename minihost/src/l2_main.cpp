@@ -88,6 +88,7 @@
 #include "worker_aegp_item_render_runtime.hpp"
 #include "worker_aegp_world_selftests.hpp"
 #include "worker_aegp_init_runtime.hpp"
+#include "worker_aegp_init_execution.hpp"
 #include "worker_aegp_timeline_probe.hpp"
 #include "worker_aegp_scene.hpp"
 #include "worker_aegp_host_selftests.hpp"
@@ -6433,115 +6434,41 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
         if (events.error != 0 && event_error == 0) event_error = events.error;
       }
     }
-    if (init_error == 0 &&
-        (g_aegp_active_idle_roundtrip_mode || g_aegp_comp_idle_roundtrip_mode)) {
-      if (g_aegp_inserted_commands.empty() || g_aegp_command_registrations.empty() ||
-          g_aegp_idle_registrations.empty() ||
-          (g_aegp_comp_idle_roundtrip_mode && g_aegp_update_menu_registrations.empty())) {
-        event_error = 4;
-      } else {
-        if (g_aegp_keyframe_roundtrip_mode && !keyframe_probe.start()) event_error = 4;
-        if (g_aegp_seek_roundtrip_mode && !seek_probe.start()) event_error = 4;
-        if (g_aegp_trim_roundtrip_mode && !trim_probe.start()) event_error = 4;
-        if (g_aegp_switch_roundtrip_mode && !switch_probe.start()) event_error = 4;
-        const int32_t command = g_aegp_inserted_commands.front();
-        const auto dispatch_command = [&]() {
-          const auto event = aexcompat::worker_runtime::aegp_init::dispatch_command(
-              global_refcon, command, 0, 0);
-          command_hooks_invoked += event.invoked;
-          command_handled_count += event.handled_count;
-          if (event.error != 0 && event_error == 0) event_error = event.error;
-        };
-        dispatch_command();
-        const auto dispatch_update_menu = [&]() {
-          const auto event = aexcompat::worker_runtime::aegp_init::dispatch_update_menu(
-              global_refcon, 0);
-          menu_hooks_invoked += event.invoked;
-          if (event.error != 0 && event_error == 0) event_error = event.error;
-        };
-        const int32_t idle_tick_count = g_aegp_comp_idle_roundtrip_mode ? 3 : 1;
-        for (int32_t tick = 0; tick < idle_tick_count; ++tick) {
-          if (g_aegp_comp_idle_roundtrip_mode &&
-              !(g_aegp_seek_roundtrip_mode && tick > 1)) g_aegp_scene_frame = tick + 1;
-          if (g_aegp_comp_idle_roundtrip_mode) dispatch_update_menu();
-          if (g_aegp_keyframe_roundtrip_mode || g_aegp_seek_roundtrip_mode ||
-              g_aegp_trim_roundtrip_mode || g_aegp_switch_roundtrip_mode) Sleep(30);
-          for (const auto& registration : g_aegp_idle_registrations) {
-            int32_t requested_sleep = 0;
-            const int32_t error = registration.hook(
-                global_refcon, registration.refcon, &requested_sleep);
-            ++hooks_invoked;
-            if (error != 0 && event_error == 0) event_error = error;
-            if (requested_sleep < 0 || requested_sleep > 3600) {
-              if (event_error == 0) event_error = 4;
-            } else if (idle_max_sleep < 0 || requested_sleep < idle_max_sleep) {
-              idle_max_sleep = requested_sleep;
-            }
-          }
-          if (g_aegp_keyframe_roundtrip_mode && tick == 0) {
-            for (int attempt = 0; attempt < 250 && !keyframe_probe.request_sent; ++attempt)
-              Sleep(10);
-            if (!keyframe_probe.request_sent && event_error == 0) event_error = 4;
-          }
-          if (g_aegp_seek_roundtrip_mode && tick == 0) {
-            for (int attempt = 0; attempt < 250 && !seek_probe.request_sent; ++attempt)
-              Sleep(10);
-            if (!seek_probe.request_sent && event_error == 0) event_error = 4;
-          }
-          if (g_aegp_trim_roundtrip_mode && tick == 0) {
-            for (int attempt = 0; attempt < 250 && !trim_probe.request_sent; ++attempt)
-              Sleep(10);
-            if (!trim_probe.request_sent && event_error == 0) event_error = 4;
-          }
-          if (g_aegp_switch_roundtrip_mode && tick == 0) {
-            for (int attempt = 0; attempt < 250 && !switch_probe.request_sent; ++attempt)
-              Sleep(10);
-            if (!switch_probe.request_sent && event_error == 0) event_error = 4;
-          }
-        }
-        if (g_aegp_keyframe_roundtrip_mode) {
-          for (int attempt = 0; attempt < 100 && !keyframe_probe.response_received; ++attempt)
-            Sleep(10);
-          keyframe_probe.stop();
-          if ((!keyframe_probe.response_received || !keyframe_probe.response_valid ||
-               g_aegp_keyframe_time_calls != 2 || g_aegp_keyframe_value_calls != 2 ||
-               g_aegp_keyframe_interpolation_calls != 2) && event_error == 0) event_error = 4;
-        }
-        if (g_aegp_seek_roundtrip_mode) {
-          for (int attempt = 0; attempt < 100 && !seek_probe.ack_received; ++attempt)
-            Sleep(10);
-          seek_probe.stop();
-          if ((!seek_probe.ack_received || !seek_probe.ack_valid ||
-               g_aegp_item_set_current_time_calls != 1 ||
-               g_aegp_item_last_set_time_value != 75 ||
-               g_aegp_item_last_set_time_scale != 30 ||
-               g_aegp_scene_frame != 75) && event_error == 0) event_error = 4;
-        }
-        if (g_aegp_trim_roundtrip_mode) {
-          for (int attempt = 0; attempt < 100 && !trim_probe.ack_received; ++attempt)
-            Sleep(10);
-          trim_probe.stop();
-          const auto& in_point = g_aegp_layer_in_points[0];
-          const auto& duration = g_aegp_layer_durations[0];
-          if ((!trim_probe.ack_received || !trim_probe.ack_valid ||
-               g_aegp_layer_trim_set_calls != 1 || in_point.value != 30 ||
-               in_point.scale != 30 || duration.value != 210 || duration.scale != 30) &&
-              event_error == 0) event_error = 4;
-        }
-        if (g_aegp_switch_roundtrip_mode) {
-          for (int attempt = 0; attempt < 100 && !switch_probe.ack_received; ++attempt)
-            Sleep(10);
-          switch_probe.stop();
-          if ((!switch_probe.ack_received || !switch_probe.ack_valid ||
-               g_aegp_layer_flag_set_calls != 4 || g_aegp_layer_flags[0] != 0x00004026u ||
-               g_aegp_layer_flags[1] != 0x00000005u ||
-               g_aegp_layer_flags[2] != 0x00000005u) && event_error == 0) event_error = 4;
-        }
-        // Disconnect external probes before OFF so target reader threads can join.
-        // Always toggle OFF before unload so plug-in worker threads are joined.
-        dispatch_command();
-        if (g_aegp_comp_idle_roundtrip_mode) dispatch_update_menu();
-      }
+    aexcompat::worker_runtime::aegp_init::RoundtripResult roundtrip{};
+    if (init_error == 0) {
+      roundtrip = aexcompat::worker_runtime::aegp_init::run_roundtrips(
+          {global_refcon, &g_aegp_inserted_commands, &g_aegp_scene_frame,
+           &keyframe_probe, &seek_probe, &trim_probe, &switch_probe,
+           {g_aegp_active_idle_roundtrip_mode, g_aegp_comp_idle_roundtrip_mode,
+            g_aegp_keyframe_roundtrip_mode, g_aegp_seek_roundtrip_mode,
+            g_aegp_trim_roundtrip_mode, g_aegp_switch_roundtrip_mode}},
+          {nullptr,
+           +[](void*) { return g_aegp_keyframe_time_calls == 2 &&
+               g_aegp_keyframe_value_calls == 2 &&
+               g_aegp_keyframe_interpolation_calls == 2; },
+           +[](void*) { return g_aegp_item_set_current_time_calls == 1 &&
+               g_aegp_item_last_set_time_value == 75 &&
+               g_aegp_item_last_set_time_scale == 30 && g_aegp_scene_frame == 75; },
+           +[](void*) {
+             const auto& in_point = g_aegp_layer_in_points[0];
+             const auto& duration = g_aegp_layer_durations[0];
+             return g_aegp_layer_trim_set_calls == 1 && in_point.value == 30 &&
+                 in_point.scale == 30 && duration.value == 210 && duration.scale == 30;
+           },
+           +[](void*) { return g_aegp_layer_flag_set_calls == 4 &&
+               g_aegp_layer_flags[0] == 0x00004026u &&
+               g_aegp_layer_flags[1] == 0x00000005u &&
+               g_aegp_layer_flags[2] == 0x00000005u; }});
+    }
+    if (init_error == 0) {
+      if (roundtrip.error != 0 && event_error == 0) event_error = roundtrip.error;
+      hooks_invoked += roundtrip.hooks_invoked;
+      menu_hooks_invoked += roundtrip.menu_hooks_invoked;
+      command_hooks_invoked += roundtrip.command_hooks_invoked;
+      command_handled_count += roundtrip.command_handled_count;
+      if (roundtrip.idle_max_sleep >= 0 &&
+          (idle_max_sleep < 0 || roundtrip.idle_max_sleep < idle_max_sleep))
+        idle_max_sleep = roundtrip.idle_max_sleep;
     }
     if (init_error == 0) {
       const auto event = aexcompat::worker_runtime::aegp_init::dispatch_death(global_refcon);
