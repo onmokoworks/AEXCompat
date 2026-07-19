@@ -72,6 +72,7 @@
 #include "worker_mask_runtime_internal.hpp"
 #include "worker_aegp_render_options.hpp"
 #include "worker_aegp_render_selftests.hpp"
+#include "worker_aegp_async_layer_runtime.hpp"
 #include "worker_aegp_world_selftests.hpp"
 #include "worker_aegp_init_runtime.hpp"
 #include "worker_aegp_scene.hpp"
@@ -2393,35 +2394,6 @@ PfAdvItemSuite1 g_adv_item_suite1{&adv_item_move_time_step,
 bool g_loaded_effect_receipt_fixture_passed{};
 bool g_loaded_effect_receipt_unsupported_rejected{};
 bool g_loaded_effect_receipt_stale_world_rejected{};
-struct AsyncLayerRequest {
-  uint64_t id{};
-  EffectEntry entry{};
-  AegpAsyncFrameReadyCallback callback{};
-  void* refcon{};
-  int32_t world_type{1};
-  AegpLayerRenderOptionsValue options{};
-  int32_t pixel_bytes{4};
-  int32_t width{};
-  int32_t height{};
-  int32_t current_time{};
-  int32_t time_scale{1};
-  std::vector<unsigned char> pixels;
-  std::atomic<int32_t> state{0};  // 0 queued, 1 completing, 2 canceled, 3 done
-  std::mutex gate_mutex;
-  std::condition_variable gate_changed;
-};
-std::mutex g_async_layer_request_mutex;
-std::unordered_map<uint64_t, std::shared_ptr<AsyncLayerRequest>> g_async_layer_requests;
-std::vector<std::thread> g_async_layer_threads;
-uint64_t g_next_async_layer_request_id{1};
-uint64_t g_async_layer_reserved_bytes{};
-bool g_async_layer_accepting{true};
-uint32_t g_async_layer_requests_created{};
-uint32_t g_async_layer_requests_completed{};
-uint32_t g_async_layer_requests_canceled{};
-uint32_t g_async_layer_callback_failures{};
-uint32_t g_async_layer_callback_exceptions{};
-bool g_async_layer_cancel_test_gate{};
 void drain_async_layer_requests();
 
 // Bounded synthetic-item contract, not an Adobe rendering model. Output pixels sample
@@ -3001,180 +2973,72 @@ int32_t __cdecl render_checkout_layer_v5(
   }
   return publish_loaded_layer_receipt(snapshot, out);
 }
+bool capture_async_layer_source(
+    const AegpLayerRenderOptionsValue& options,
+    aexcompat::aegp_async_layer::SourceSnapshot& output) {
+  const auto& context = g_loaded_effect_receipt_context;
+  const bool downstream = options.effect_boundary == AegpLayerEffectBoundary::downstream;
+  const bool all = options.effect_boundary == AegpLayerEffectBoundary::all &&
+      context.all_effects_finalized;
+  const auto* pixels = downstream ? context.downstream_argb :
+      (all ? context.all_effects_argb : context.source_argb);
+  const int32_t width = downstream ? context.downstream_width :
+      (all ? context.all_effects_width : context.source_width);
+  const int32_t height = downstream ? context.downstream_height :
+      (all ? context.all_effects_height : context.source_height);
+  const int32_t pixel_bytes = downstream ? context.downstream_pixel_bytes :
+      (all ? context.all_effects_pixel_bytes : context.pixel_bytes);
+  if (!context.entry || !pixels || (downstream && !context.downstream_finalized) ||
+      width <= 0 || height <= 0 || pixel_bytes <= 0) return false;
+  output.entry = reinterpret_cast<void*>(context.entry);
+  output.pixel_bytes = pixel_bytes; output.width = width; output.height = height;
+  output.current_time = context.current_time; output.time_scale = context.time_scale;
+  output.pixels = *pixels;
+  return true;
+}
+int32_t publish_async_layer_source(
+    const aexcompat::aegp_async_layer::SourceSnapshot& source,
+    const AegpLayerRenderOptionsValue& options, void** receipt) {
+  LoadedEffectReceiptContext context{};
+  context.entry = reinterpret_cast<EffectEntry>(source.entry);
+  context.pixel_bytes = source.pixel_bytes; context.source_argb = &source.pixels;
+  context.source_width = source.width; context.source_height = source.height;
+  context.current_time = source.current_time; context.time_scale = source.time_scale;
+  if (options.effect_boundary == AegpLayerEffectBoundary::downstream) {
+    context.downstream_argb = &source.pixels; context.downstream_width = source.width;
+    context.downstream_height = source.height; context.downstream_pixel_bytes = source.pixel_bytes;
+    context.downstream_finalized = true;
+  } else if (options.effect_boundary == AegpLayerEffectBoundary::all) {
+    context.all_effects_argb = &source.pixels; context.all_effects_width = source.width;
+    context.all_effects_height = source.height; context.all_effects_pixel_bytes = source.pixel_bytes;
+    context.all_effects_finalized = true;
+  }
+  return publish_loaded_layer_receipt_from_context(context, options, receipt);
+}
 int32_t invoke_async_layer_callback_seh(AegpAsyncFrameReadyCallback callback,
     uint64_t request_id, uint8_t canceled, int32_t error, void* receipt,
-    void* refcon, int32_t* callback_error, uint32_t* out_exception_code) {
-  if (!callback || !callback_error || !out_exception_code) return 4;
-  *callback_error = 4;
-  *out_exception_code = 0;
-  __try {
-    *callback_error = callback(request_id, canceled, error, receipt, refcon);
-    return 0;
-  } __except(EXCEPTION_EXECUTE_HANDLER) {
-    *out_exception_code = GetExceptionCode();
-    return 4;
-  }
+    void* refcon, int32_t* callback_error, uint32_t* exception_code) {
+  if (!callback || !callback_error || !exception_code) return 4;
+  *callback_error = 4; *exception_code = 0;
+  __try { *callback_error = callback(request_id, canceled, error, receipt, refcon); return 0; }
+  __except(EXCEPTION_EXECUTE_HANDLER) { *exception_code = 0xffffffffu; return 4; }
 }
-
 int32_t __cdecl render_checkout_layer_async_reject(
-    void* options, AegpAsyncFrameReadyCallback callback, void* refcon, uint64_t* request_id) {
-  if (request_id) *request_id = 0;
-  if (is_render_worker()) {
-  const auto& context = g_loaded_effect_receipt_context;
-  AegpLayerRenderOptionsValue snapshot{};
-  if (!snapshot_layer_render_options(options, snapshot)) return 4;
-  const bool wants_downstream =
-      snapshot.effect_boundary == AegpLayerEffectBoundary::downstream;
-  const bool wants_all_staged = snapshot.effect_boundary == AegpLayerEffectBoundary::all &&
-      context.all_effects_finalized;
-  const auto* selected_pixels = wants_downstream ? context.downstream_argb :
-      (wants_all_staged ? context.all_effects_argb : context.source_argb);
-  const int32_t selected_width = wants_downstream ? context.downstream_width :
-      (wants_all_staged ? context.all_effects_width : context.source_width);
-  const int32_t selected_height = wants_downstream ? context.downstream_height :
-      (wants_all_staged ? context.all_effects_height : context.source_height);
-  const int32_t selected_pixel_bytes = wants_downstream ? context.downstream_pixel_bytes :
-      (wants_all_staged ? context.all_effects_pixel_bytes : context.pixel_bytes);
-  const int32_t pixel_bytes = snapshot.world_type == 1 ? 4 :
-      (snapshot.world_type == 2 ? 8 : (snapshot.world_type == 3 ? 16 : 0));
-  if (!request_id || !callback || !context.entry || !selected_pixels ||
-      (wants_downstream && !context.downstream_finalized) ||
-      !pixel_bytes || selected_width <= 0 || selected_height <= 0) return 4;
-  const uint64_t source_bytes = static_cast<uint64_t>(selected_width) *
-      selected_height * selected_pixel_bytes;
-  const uint64_t output_bytes = static_cast<uint64_t>(
-      (selected_width + snapshot.downsample_x - 1) / snapshot.downsample_x) *
-      ((selected_height + snapshot.downsample_y - 1) / snapshot.downsample_y) *
-      pixel_bytes;
-  const uint64_t bytes = (std::max)(source_bytes, output_bytes);
-  if (source_bytes == 0 || bytes > kMaxReceiptBytes ||
-      selected_pixels->size() != source_bytes) return 4;
-  std::shared_ptr<AsyncLayerRequest> request;
-  try {
-    request = std::make_shared<AsyncLayerRequest>();
-    request->entry = context.entry;
-    request->callback = callback;
-    request->refcon = refcon;
-    request->world_type = snapshot.world_type;
-    request->options = snapshot;
-    request->pixel_bytes = selected_pixel_bytes;
-    request->width = selected_width;
-    request->height = selected_height;
-    request->current_time = context.current_time;
-    request->time_scale = context.time_scale;
-    request->pixels = *selected_pixels;
-  } catch (const std::bad_alloc&) {
-    return 4;
-  }
-  std::lock_guard<std::mutex> lock(g_async_layer_request_mutex);
-  if (!g_async_layer_accepting || g_async_layer_requests.size() >= 32 ||
-      g_async_layer_reserved_bytes > kMaxReceiptBytes - bytes) return 4;
-  request->id = g_next_async_layer_request_id++;
-  if (request->id == 0) return 4;
-  g_async_layer_reserved_bytes += bytes;
-  try {
-    g_async_layer_requests.emplace(request->id, request);
-    *request_id = request->id;
-    g_async_layer_threads.emplace_back([request, bytes] {
-      if (g_async_layer_cancel_test_gate) {
-        std::unique_lock<std::mutex> gate_lock(request->gate_mutex);
-        request->gate_changed.wait_for(gate_lock, std::chrono::seconds(5),
-            [&] { return request->state.load() != 0; });
-      }
-      int32_t expected = 0;
-      const bool completion_won = request->state.compare_exchange_strong(expected, 1);
-      void* receipt = nullptr;
-      int32_t error = 0;
-      uint8_t canceled = 0;
-      if (completion_won) {
-        LoadedEffectReceiptContext context{};
-        context.entry = request->entry;
-        context.pixel_bytes = request->pixel_bytes;
-        context.source_argb = &request->pixels;
-        context.source_width = request->width;
-        context.source_height = request->height;
-        context.current_time = request->current_time;
-        context.time_scale = request->time_scale;
-        if (request->options.effect_boundary == AegpLayerEffectBoundary::downstream) {
-          context.downstream_argb = &request->pixels;
-          context.downstream_width = request->width;
-          context.downstream_height = request->height;
-          context.downstream_pixel_bytes = request->pixel_bytes;
-          context.downstream_finalized = true;
-        } else if (request->options.effect_boundary == AegpLayerEffectBoundary::all) {
-          context.all_effects_argb = &request->pixels;
-          context.all_effects_width = request->width;
-          context.all_effects_height = request->height;
-          context.all_effects_pixel_bytes = request->pixel_bytes;
-          context.all_effects_finalized = true;
-        }
-        error = publish_loaded_layer_receipt_from_context(
-            context, request->options, &receipt);
-      } else {
-        canceled = 1;
-      }
-      int32_t callback_error = 0;
-      uint32_t callback_exception = 0;
-      const int32_t invoke_error = invoke_async_layer_callback_seh(
-          request->callback, request->id, canceled, error, receipt, request->refcon,
-          &callback_error, &callback_exception);
-      if (invoke_error != 0 || callback_error != 0) checkin_frame_if_live(receipt);
-      request->state.store(3);
-      std::lock_guard<std::mutex> completed_lock(g_async_layer_request_mutex);
-      g_async_layer_reserved_bytes -= bytes;
-      if (canceled) ++g_async_layer_requests_canceled;
-      else ++g_async_layer_requests_completed;
-      if (invoke_error != 0 || callback_error != 0) ++g_async_layer_callback_failures;
-      if (callback_exception != 0) ++g_async_layer_callback_exceptions;
-      g_async_layer_requests.erase(request->id);
-    });
-  } catch (const std::system_error&) {
-    g_async_layer_requests.erase(request->id);
-    g_async_layer_reserved_bytes -= bytes;
-    *request_id = 0;
-    return 4;
-  } catch (const std::bad_alloc&) {
-    g_async_layer_requests.erase(request->id);
-    g_async_layer_reserved_bytes -= bytes;
-    *request_id = 0;
-    return 4;
-  }
-  ++g_async_layer_requests_created;
-  return 0;
-  } else {
-  return 4;
-  }
+    void* options, AegpAsyncFrameReadyCallback callback, void* refcon, uint64_t* id) {
+  return aexcompat::aegp_async_layer::checkout(options, callback, refcon, id);
 }
-int32_t __cdecl render_cancel_async_reject(uint64_t request_id) {
-  if (is_render_worker()) {
-  std::lock_guard<std::mutex> lock(g_async_layer_request_mutex);
-  const auto found = g_async_layer_requests.find(request_id);
-  if (found == g_async_layer_requests.end()) return 4;
-  int32_t expected = 0;
-  if (!found->second->state.compare_exchange_strong(expected, 2)) return 4;
-  found->second->gate_changed.notify_one();
-  return 0;
-  } else {
-  return 4;
-  }
+int32_t __cdecl render_cancel_async_reject(uint64_t id) {
+  return aexcompat::aegp_async_layer::cancel(id);
 }
-
-void drain_async_layer_requests() {
-  std::vector<std::thread> threads;
-  {
-    std::lock_guard<std::mutex> lock(g_async_layer_request_mutex);
-    g_async_layer_accepting = false;
-    threads.swap(g_async_layer_threads);
-  }
-  for (auto& thread : threads)
-    if (thread.joinable()) thread.join();
-}
-bool async_layer_requests_balanced() {
-  std::lock_guard<std::mutex> lock(g_async_layer_request_mutex);
-  return g_async_layer_requests.empty() && g_async_layer_reserved_bytes == 0 &&
-      g_async_layer_requests_created ==
-          g_async_layer_requests_completed + g_async_layer_requests_canceled;
-}
+void drain_async_layer_requests() { aexcompat::aegp_async_layer::drain(); }
+bool async_layer_requests_balanced() { return aexcompat::aegp_async_layer::balanced(); }
+const bool g_async_layer_runtime_configured = [] {
+  aexcompat::aegp_async_layer::configure({&is_render_worker,
+      &snapshot_layer_render_options, &capture_async_layer_source,
+      &publish_async_layer_source, &checkin_frame_if_live,
+      &invoke_async_layer_callback_seh});
+  return true;
+}();
 int32_t __cdecl render_get_region_reject(void* receipt, void* region) {
   if (!receipt || !region) return 4;
   ReceiptSnapshot snapshot{};
@@ -9790,10 +9654,13 @@ aexcompat::worker_render_report::ClassicSubsystemDiagnostics capture_classic_sub
       {i64(receipt_stats.created), i64(receipt_stats.checked_in), i64(receipt_stats.live_count),
        i64(receipt_stats.live_bytes), i64(receipt_stats.invalid_operations)},
       async_layer_requests_balanced(),
-      {i64(g_async_layer_requests_created), i64(g_async_layer_requests_completed),
-       i64(g_async_layer_requests_canceled), i64(g_async_layer_callback_failures),
-       i64(g_async_layer_callback_exceptions), i64(g_async_layer_requests.size()),
-       i64(g_async_layer_reserved_bytes)}};
+      {i64(aexcompat::aegp_async_layer::diagnostics().created),
+       i64(aexcompat::aegp_async_layer::diagnostics().completed),
+       i64(aexcompat::aegp_async_layer::diagnostics().canceled),
+       i64(aexcompat::aegp_async_layer::diagnostics().callback_failures),
+       i64(aexcompat::aegp_async_layer::diagnostics().callback_exceptions),
+       i64(aexcompat::aegp_async_layer::diagnostics().live),
+       i64(aexcompat::aegp_async_layer::diagnostics().reserved_bytes)}};
 }
 
 int worker_main_impl(int argc, wchar_t **argv) {
@@ -9921,9 +9788,9 @@ int worker_main_impl(int argc, wchar_t **argv) {
               argc, argv, aegp_selftests))
     return *selftest_exit;
   wchar_t cancel_gate[2]{};
-  g_async_layer_cancel_test_gate = is_render_worker() &&
+  aexcompat::aegp_async_layer::set_cancel_test_gate(is_render_worker() &&
       GetEnvironmentVariableW(L"AEXCOMPAT_TEST_ASYNC_CANCEL_GATE", cancel_gate,
-                              2) == 1 && cancel_gate[0] == L'1';
+                              2) == 1 && cancel_gate[0] == L'1');
   SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX);
   if (argc == 2 && std::wstring(argv[1]) == L"--self-test-render-output-safety") {
     const bool passed = verify_render_output_safety();

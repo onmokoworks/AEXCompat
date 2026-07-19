@@ -37,6 +37,7 @@ AEGP_INIT_RUNTIME_HEADER = ROOT / "minihost" / "src" / "worker_aegp_init_runtime
 AEGP_INIT_RUNTIME_SOURCE = ROOT / "minihost" / "src" / "worker_aegp_init_runtime.cpp"
 AEGP_RENDER_SELFTEST_HEADER = ROOT / "minihost" / "src" / "worker_aegp_render_selftests.hpp"
 AEGP_RENDER_SELFTEST_SOURCE = ROOT / "minihost" / "src" / "worker_aegp_render_selftests.cpp"
+AEGP_ASYNC_LAYER_RUNTIME = ROOT / "minihost" / "src" / "worker_aegp_async_layer_runtime.cpp"
 MASK_RUNTIME_HEADER = ROOT / "minihost" / "src" / "worker_mask_runtime.hpp"
 MASK_RUNTIME_SOURCE = ROOT / "minihost" / "src" / "worker_mask_runtime.cpp"
 MASK_RUNTIME_CALLBACKS = ROOT / "minihost" / "src" / "worker_mask_runtime_callbacks.cpp"
@@ -62,6 +63,17 @@ def l2_family_source():
 
 
 class MinihostL2SourceTests(unittest.TestCase):
+    def test_aegp_async_layer_queue_owns_state_and_threads(self):
+        worker = SOURCE.read_text(encoding="utf-8")
+        runtime = AEGP_ASYNC_LAYER_RUNTIME.read_text(encoding="utf-8")
+        cmake = MINIHOST_CMAKE.read_text(encoding="utf-8")
+        self.assertIn("src/worker_aegp_async_layer_runtime.cpp", cmake)
+        for marker in ("struct Request", "g_requests", "g_threads", "g_reserved_bytes",
+                       "int32_t checkout(", "int32_t cancel(", "void drain()"):
+            self.assertIn(marker, runtime)
+        self.assertNotIn("struct AsyncLayerRequest", worker)
+        self.assertNotIn("g_async_layer_requests", worker)
+
     def test_pf_sampling_runtime_owns_callbacks_state_and_selftest(self):
         suites = PF_SUITES_SOURCE.read_text(encoding="utf-8")
         sampling = PF_SAMPLING_SOURCE.read_text(encoding="utf-8")
