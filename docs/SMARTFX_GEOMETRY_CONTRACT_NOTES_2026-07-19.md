@@ -256,3 +256,20 @@ invalid-geometry 拒否でも true になっていた。
 単一述語で selector 呼び出し・GPU transport・報告を駆動する。SmartResult に
 `selector_dispatched` (実際に entry を呼んだ時のみ true) を追加し、report は
 それを出す。既存 frozen evidence への影響は NOP case の false のみで不変。
+
+## 2026-07-19 訂正: conformance に empty_result 分類を実装 (PR #86 Codex 再指摘 → issue #88)
+
+観察 (Codex review round 3): worker 側で合法化した空 result を broker の
+conformance 経路が `invalid_output` に分類したままでは end-to-end で成立
+しない、との再指摘。issue #88 への deferral では通らないため #88 を claim
+して同 PR で実装。
+
+実装: `Classification::EmptyResult` ("empty_result") を追加。
+`normalize_success` は smartfx report の `empty_result_rect==true` かつ
+width==height==0 のとき input world の認証後に EmptyResult
+(world: null, selector completed error 0, 空バイトの output_sha256) を返す。
+非ゼロ寸法 + empty marker の不整合は invalid_output のまま、classic 経路に
+empty 許容は無い。schema には classification enum への追加と
+empty_result 用の allOf 制約 (world/raw_output null, smartfx, error 0) を追加。
+validator (`tools/conformance_bundle_validator.py`) は classification != "ok"
+を pixel 検証スキップとして扱うため変更不要。
