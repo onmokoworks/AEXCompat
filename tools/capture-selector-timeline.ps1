@@ -157,6 +157,13 @@ try {
         throw "Project preparation failed: $($prepared | ConvertTo-Json -Depth 4)"
     }
 
+    # The project-preparation session already appended its own selector
+    # events; the render must grow the log beyond this mark, or the captured
+    # evidence would silently be preparation-only.
+    $preRenderLogLines = if (Test-Path -LiteralPath $logPath) {
+        @(Get-Content -LiteralPath $logPath).Count
+    } else { 0 }
+
     # Phase B: render every frame through aerender; the selector log grows in
     # the probe as frames render.
     $renderStdout = Join-Path $runRoot 'aerender.stdout.log'
@@ -173,6 +180,9 @@ try {
     }
     if (-not (Test-Path -LiteralPath $logPath)) {
         throw 'aerender completed but the probe wrote no selector log.'
+    }
+    if (@(Get-Content -LiteralPath $logPath).Count -le $preRenderLogLines) {
+        throw 'aerender completed but appended no selector events; the render engine never invoked the probe.'
     }
 
     $events = Get-Content -LiteralPath $logPath | ForEach-Object { $_ | ConvertFrom-Json }
