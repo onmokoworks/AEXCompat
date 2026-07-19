@@ -85,7 +85,7 @@ owner_review_gate() {
     | any(
         ( [ .[] | select(.state == "CHANGES_REQUESTED") | .submitted_at ] | max // "" ) as $cr
         | ( [ .[] | select(.state == "APPROVED" or .state == "DISMISSED") | .submitted_at ] | max // "" ) as $clear
-        | $cr != "" and ($clear == "" or $cr > $clear)
+        | $cr != "" and ($clear == "" or $cr >= $clear)
       )
     | if . then "BLOCK" else "" end'
 }
@@ -226,7 +226,7 @@ owner_inline_unresolved() {
           | .created_at ] | max // "" ) as $ack
     | ($msgs | max_by(.created_at)) as $last
     | select($last.created_at >= $ack)
-    | $last | select( ($clr[.user.login] // "") == "" or .created_at > $clr[.user.login] )
+    | $last | select( ($clr[.user.login] // "") == "" or .created_at >= $clr[.user.login] )
     | "OWNER-INLINE id=\(.id) \(.path):\(.line // .original_line): \((.body | split("\n")[0]))"'
 }
 
@@ -253,7 +253,7 @@ owner_threads_unresolved() {
     # the gate remains fail-closed.
     | [ $owner_msgs[]
         | select(($clr[.user.login] // "") == ""
-                 or .created_at > $clr[.user.login]) ] as $blocking
+                 or .created_at >= $clr[.user.login]) ] as $blocking
     | select( ((.truncated // false) and (($owner_msgs | length) == 0))
               or (($blocking | length) > 0) )
     | ( if ($blocking | length) > 0 then ($blocking | last) else (.comments | last) end ) as $c
@@ -289,7 +289,7 @@ owner_reviews_unresolved() {
     .[] | select([.user.login] | inside($owner))
     | select(.state == "COMMENTED" and ((.body // "") | length) > 0)
     | select(.submitted_at >= $ack)
-    | . as $r | select( ($clr[$r.user.login] // "") == "" or $r.submitted_at > $clr[$r.user.login] )
+    | . as $r | select( ($clr[$r.user.login] // "") == "" or $r.submitted_at >= $clr[$r.user.login] )
     | "OWNER-REVIEW \(.state): \(((.body // "") | split("\n"))[0])"'
 }
 
@@ -314,6 +314,6 @@ owner_comments_unresolved() {
     | select([.user.login] | inside($owner))
     | select(isack | not)
     | select(.created_at >= $ack)
-    | . as $c | select( ($clr[$c.user.login] // "") == "" or $c.created_at > $clr[$c.user.login] )
+    | . as $c | select( ($clr[$c.user.login] // "") == "" or $c.created_at >= $clr[$c.user.login] )
     | "OWNER-COMMENT id=\(.id): \((.body | split("\n"))[0])"'
 }

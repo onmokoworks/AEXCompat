@@ -244,6 +244,15 @@ def test_same_owner_later_approved_clears_own_changes_requested() -> None:
     assert _call("owner_review_gate", payload) == ""
 
 
+def test_same_second_approval_does_not_clear_changes_requested() -> None:
+    ts = "2026-07-18T19:30:00Z"
+    payload = [
+        {"user": {"login": "onmokoworks"}, "state": "CHANGES_REQUESTED", "submitted_at": ts},
+        {"user": {"login": "onmokoworks"}, "state": "APPROVED", "submitted_at": ts},
+    ]
+    assert _call("owner_review_gate", payload) == "BLOCK"
+
+
 # --- owner feedback on the current head, by SHA association --------------------
 # owner_inline_unresolved(me, clearances); owner_reviews_unresolved(clearances,
 # ack_ts); owner_comments_unresolved(me, clearances); me_ack_ts(me). Explicit
@@ -326,6 +335,13 @@ def test_owner_inline_after_approval_still_blocks() -> None:
     assert "OWNER-INLINE" in _call("owner_inline_unresolved", payload, ME, clr)
 
 
+def test_owner_inline_same_second_as_approval_blocks() -> None:
+    ts = "2026-07-18T19:30:00Z"
+    assert "OWNER-INLINE" in _call(
+        "owner_inline_unresolved", [_inline("onmokoworks", created_at=ts)], ME,
+        json.dumps({"onmokoworks": ts}))
+
+
 def test_unresolved_graphql_owner_thread_blocks() -> None:
     payload = [{"isResolved": False, "comments": [_inline("onmokoworks")]}]
     assert "OWNER-INLINE id=9" in _call("owner_threads_unresolved", payload, ME, NO_CLEAR)
@@ -397,6 +413,14 @@ def test_graphql_owner_reply_after_approval_reblocks() -> None:
     assert "OWNER-INLINE" in _call("owner_threads_unresolved", payload, ME, clr)
 
 
+def test_graphql_owner_feedback_same_second_as_approval_blocks() -> None:
+    ts = "2026-07-18T19:30:00Z"
+    payload = [{"isResolved": False, "comments": [
+        _inline("onmokoworks", created_at=ts)]}]
+    assert "OWNER-INLINE" in _call(
+        "owner_threads_unresolved", payload, ME, json.dumps({"onmokoworks": ts}))
+
+
 ACK = "2026-07-18T19:26:49Z"  # the session's newest non-trigger ack comment
 
 
@@ -437,6 +461,14 @@ def test_owner_bodied_review_cleared_by_later_approval() -> None:
     payload = [{"user": {"login": "onmokoworks"}, "state": "COMMENTED",
                 "submitted_at": "2026-07-18T19:30:00Z", "body": "[P1] concern"}]
     assert _call("owner_reviews_unresolved", payload, clr, ACK) == ""
+
+
+def test_owner_bodied_review_same_second_as_approval_blocks() -> None:
+    ts = "2026-07-18T19:40:00Z"
+    payload = [{"user": {"login": "onmokoworks"}, "state": "COMMENTED",
+                "submitted_at": ts, "body": "[P1] tied concern"}]
+    assert "OWNER-REVIEW" in _call(
+        "owner_reviews_unresolved", payload, json.dumps({"onmokoworks": ts}), ACK)
 
 
 # --- owner_clearances ----------------------------------------------------------
@@ -561,6 +593,13 @@ def test_owner_comment_cleared_by_later_approval() -> None:
     clr = json.dumps({"onmokoworks": "2026-07-18T12:00:00Z"})
     payload = [_toplevel("onmokoworks", "2026-07-18T10:00:00Z", "resolved concern")]
     assert _call("owner_comments_unresolved", payload, ME, clr) == ""
+
+
+def test_owner_comment_same_second_as_approval_blocks() -> None:
+    ts = "2026-07-18T12:00:00Z"
+    payload = [_toplevel("onmokoworks", ts, "tied concern")]
+    assert "OWNER-COMMENT" in _call(
+        "owner_comments_unresolved", payload, ME, json.dumps({"onmokoworks": ts}))
 
 
 def test_both_review_thread_connections_are_paginated() -> None:
