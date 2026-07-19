@@ -19,6 +19,7 @@ PF_WORLD_TRANSFORM_SOURCE = ROOT / "minihost" / "src" / "worker_pf_world_transfo
 PF_ANSI_RUNTIME_SOURCE = ROOT / "minihost" / "src" / "worker_pf_ansi_runtime.cpp"
 HOST_SUITE_CATALOG_SOURCE = ROOT / "minihost" / "src" / "worker_host_suite_catalog.cpp"
 PARAMETER_EXECUTION_SOURCE = ROOT / "minihost" / "src" / "worker_parameter_execution.cpp"
+UI_EVENT_EXECUTION_SOURCE = ROOT / "minihost" / "src" / "worker_ui_event_execution.cpp"
 RENDER_HEADER = ROOT / "minihost" / "src" / "render_subsystem.h"
 RENDER_SOURCE = ROOT / "minihost" / "src" / "render_subsystem.cpp"
 REPORT_HEADER = ROOT / "minihost" / "src" / "worker_report.hpp"
@@ -75,6 +76,7 @@ def l2_family_source():
         PF_ANSI_RUNTIME_SOURCE,
         HOST_SUITE_CATALOG_SOURCE,
         PARAMETER_EXECUTION_SOURCE,
+        UI_EVENT_EXECUTION_SOURCE,
         SMART_RUNTIME_SOURCE, SMART_SETUP_SOURCE, SMART_DISPATCH_SOURCE,
         SMART_FINALIZE_SOURCE,
         CLASSIC_EXECUTION_SOURCE,
@@ -1195,7 +1197,7 @@ class MinihostL2SourceTests(unittest.TestCase):
             'L"--l2-drag-event"',
             "target.drag_steps < 1 || target.drag_steps > 32",
             "write<int32_t>(extra, 8, 3)",
-            "write<uint8_t>(extra, 73, step == drag_steps ? 1 : 0)",
+            "write<uint8_t>(extra, 73, step == r.drag_steps ? 1 : 0)",
             "g_ui_drag_requested",
             "g_ui_drag_terminated",
             "ui_transform_point_simple",
@@ -1211,7 +1213,7 @@ class MinihostL2SourceTests(unittest.TestCase):
             "drawbot_path_point",
             "registered_layer_ui",
             "event_target = drag_event_mode || ui_mouse_exited_mode ||",
-            "g_ui_context.window_type != 2",
+            "r.window_type != 2",
         ):
             self.assertIn(marker, text)
 
