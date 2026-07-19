@@ -1,6 +1,7 @@
 #pragma once
 
 #include <array>
+#include <atomic>
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -79,6 +80,24 @@ struct Snapshot {
 };
 
 State& state();
+
+// Smart host telemetry (issue #126 Phase D): comp-bg-color and GUID mix-in
+// counters recorded by worker_main's AEGP callbacks during smart pre-render
+// and read back by the smart completion report. Atomics because the GUID
+// mix-in callback may run on plug-in render threads. Lifetime:
+// process-lifetime storage; worker_main resets it once per smart render via
+// reset_smart_host_telemetry() before smart_pre_render.
+struct HostTelemetry {
+  std::atomic<uint32_t> comp_bg_color_successes{};
+  std::atomic<uint32_t> comp_bg_color_rejections{};
+  std::atomic<uint32_t> guid_mix_in_calls{};
+  std::atomic<uint32_t> guid_mix_in_successes{};
+  std::atomic<uint32_t> guid_mix_in_rejections{};
+  std::atomic<uint32_t> guid_mix_in_last_size{};
+  std::atomic<uint32_t> guid_mix_in_max_size{};
+  std::atomic<int32_t> guid_mix_in_last_result{};
+};
+HostTelemetry& host_telemetry();
 int32_t __cdecl width();
 int32_t __cdecl height();
 

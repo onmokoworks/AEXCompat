@@ -54,6 +54,8 @@ WORKER_RUNTIME_OWNERS = (
     "minihost/src/worker_smart_report.cpp",
     "minihost/src/worker_invocation_orchestration.hpp",
     "minihost/src/worker_invocation_orchestration.cpp",
+    "minihost/src/worker_smart_runtime.hpp",
+    "minihost/src/worker_smart_runtime.cpp",
 )
 
 # 契約名 → owner ファイル群 (repo ルート相対)。

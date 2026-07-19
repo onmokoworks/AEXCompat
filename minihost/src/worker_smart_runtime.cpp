@@ -91,6 +91,11 @@ void State::clear_transient() {
   gpu_render_dispatched = false;
 }
 
+HostTelemetry& host_telemetry() {
+  static HostTelemetry telemetry;
+  return telemetry;
+}
+
 State& state() { return g_active_state ? *g_active_state : g_default_state; }
 int32_t __cdecl width() { return g_active_state ? g_active_state->width : 0; }
 int32_t __cdecl height() { return g_active_state ? g_active_state->height : 0; }

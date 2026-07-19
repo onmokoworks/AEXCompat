@@ -905,37 +905,33 @@ void write_rect(void* destination, int32_t width, int32_t height) {
 constexpr size_t kCheckoutResultBytes = 76;
 
 constexpr uint32_t kMaxGuidMixInBytes = 1024 * 1024;
-std::atomic<uint32_t> g_comp_bg_color_successes{};
-std::atomic<uint32_t> g_comp_bg_color_rejections{};
-std::atomic<uint32_t> g_guid_mix_in_calls{};
-std::atomic<uint32_t> g_guid_mix_in_successes{};
-std::atomic<uint32_t> g_guid_mix_in_rejections{};
-std::atomic<uint32_t> g_guid_mix_in_last_size{};
-std::atomic<uint32_t> g_guid_mix_in_max_size{};
-std::atomic<int32_t> g_guid_mix_in_last_result{};
+// The comp-bg-color / GUID mix-in counters moved to their owner,
+// aexcompat::worker_runtime::smart::host_telemetry() (issue #126 Phase D).
 
 void reset_smart_host_telemetry() {
-  g_comp_bg_color_successes.store(0, std::memory_order_relaxed);
-  g_comp_bg_color_rejections.store(0, std::memory_order_relaxed);
-  g_guid_mix_in_calls.store(0, std::memory_order_relaxed);
-  g_guid_mix_in_successes.store(0, std::memory_order_relaxed);
-  g_guid_mix_in_rejections.store(0, std::memory_order_relaxed);
-  g_guid_mix_in_last_size.store(0, std::memory_order_relaxed);
-  g_guid_mix_in_max_size.store(0, std::memory_order_relaxed);
-  g_guid_mix_in_last_result.store(0, std::memory_order_relaxed);
+  auto& telemetry = aexcompat::worker_runtime::smart::host_telemetry();
+  telemetry.comp_bg_color_successes.store(0, std::memory_order_relaxed);
+  telemetry.comp_bg_color_rejections.store(0, std::memory_order_relaxed);
+  telemetry.guid_mix_in_calls.store(0, std::memory_order_relaxed);
+  telemetry.guid_mix_in_successes.store(0, std::memory_order_relaxed);
+  telemetry.guid_mix_in_rejections.store(0, std::memory_order_relaxed);
+  telemetry.guid_mix_in_last_size.store(0, std::memory_order_relaxed);
+  telemetry.guid_mix_in_max_size.store(0, std::memory_order_relaxed);
+  telemetry.guid_mix_in_last_result.store(0, std::memory_order_relaxed);
 }
 
 int32_t __cdecl guid_mix_in_ptr(void* effect_ref, uint32_t size, const void* bytes) {
-  g_guid_mix_in_calls.fetch_add(1, std::memory_order_relaxed);
-  g_guid_mix_in_last_size.store(size, std::memory_order_relaxed);
-  uint32_t observed = g_guid_mix_in_max_size.load(std::memory_order_relaxed);
-  while (observed < size && !g_guid_mix_in_max_size.compare_exchange_weak(
+  auto& telemetry = aexcompat::worker_runtime::smart::host_telemetry();
+  telemetry.guid_mix_in_calls.fetch_add(1, std::memory_order_relaxed);
+  telemetry.guid_mix_in_last_size.store(size, std::memory_order_relaxed);
+  uint32_t observed = telemetry.guid_mix_in_max_size.load(std::memory_order_relaxed);
+  while (observed < size && !telemetry.guid_mix_in_max_size.compare_exchange_weak(
       observed, size, std::memory_order_relaxed)) {}
   const int32_t result = effect_ref == &g_effect && bytes && size > 0 &&
       size <= kMaxGuidMixInBytes ? 0 : 4;
-  (result == 0 ? g_guid_mix_in_successes : g_guid_mix_in_rejections)
+  (result == 0 ? telemetry.guid_mix_in_successes : telemetry.guid_mix_in_rejections)
       .fetch_add(1, std::memory_order_relaxed);
-  g_guid_mix_in_last_result.store(result, std::memory_order_relaxed);
+  telemetry.guid_mix_in_last_result.store(result, std::memory_order_relaxed);
   return result;
 }
 
@@ -2265,12 +2261,14 @@ struct AegpColorVal { double alpha, red, green, blue; };
 static_assert(sizeof(AegpColorVal) == 4 * sizeof(double));
 int32_t __cdecl aegp_get_comp_bg_color(void* comp, AegpColorVal* color) {
   if (comp != &g_aegp_comp || !color) {
-    g_comp_bg_color_rejections.fetch_add(1, std::memory_order_relaxed);
+    aexcompat::worker_runtime::smart::host_telemetry()
+        .comp_bg_color_rejections.fetch_add(1, std::memory_order_relaxed);
     return 4;
   }
   const AegpColorVal headless_color{1.0, 0.0, 0.0, 0.0};
   *color = headless_color;
-  g_comp_bg_color_successes.fetch_add(1, std::memory_order_relaxed);
+  aexcompat::worker_runtime::smart::host_telemetry()
+      .comp_bg_color_successes.fetch_add(1, std::memory_order_relaxed);
   return 0;
 }
 

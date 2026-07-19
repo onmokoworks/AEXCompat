@@ -34,14 +34,6 @@ extern bool g_render_ui_context_closed;
 extern uint32_t g_app_color_picker_calls;
 extern uint32_t g_app_invalidate_rect_calls;
 extern std::array<float, 4> g_app_picker_color;
-extern std::atomic<uint32_t> g_comp_bg_color_successes;
-extern std::atomic<uint32_t> g_comp_bg_color_rejections;
-extern std::atomic<uint32_t> g_guid_mix_in_calls;
-extern std::atomic<uint32_t> g_guid_mix_in_successes;
-extern std::atomic<uint32_t> g_guid_mix_in_rejections;
-extern std::atomic<uint32_t> g_guid_mix_in_last_size;
-extern std::atomic<uint32_t> g_guid_mix_in_max_size;
-extern std::atomic<int32_t> g_guid_mix_in_last_result;
 // Mirrors l2_main's frozen guid mix-in transport bound; the report publishes
 // it beside the observed sizes.
 constexpr uint32_t kMaxGuidMixInBytes = 1024 * 1024;
@@ -74,6 +66,7 @@ void emit_smart_completion_report(const SmartCompletionInputs& in) {
   const auto& checkout = worker_runtime::parameters::state().checkout;
   const auto mask_report = aexcompat::mask_runtime::snapshot();
   report::ReportSnapshot report_snapshot(std::cout);
+  const auto& host_telemetry = aexcompat::worker_runtime::smart::host_telemetry();
   const bool smart_completed = smart.pre_error == 0 && smart.render_error == 0 &&
                 in.parameter_count_contract_valid && smart.rects_valid &&
                 in.arbitrary_defaults_disposed && arbitrary.invalid_operations == 0 &&
@@ -94,14 +87,14 @@ void emit_smart_completion_report(const SmartCompletionInputs& in) {
       {smart.runtime->wide_time_checkout_allowed, smart.runtime->shutter_dependency_advertised,
        !in.nop_render_advertised, smart.selector_dispatched, false},
       smart.runtime->rejected_temporal_checkouts,
-      {g_comp_bg_color_successes.load(std::memory_order_relaxed),
-       g_comp_bg_color_rejections.load(std::memory_order_relaxed),
-       g_guid_mix_in_calls.load(std::memory_order_relaxed),
-       g_guid_mix_in_successes.load(std::memory_order_relaxed),
-       g_guid_mix_in_rejections.load(std::memory_order_relaxed),
-       g_guid_mix_in_last_size.load(std::memory_order_relaxed),
-       g_guid_mix_in_max_size.load(std::memory_order_relaxed), kMaxGuidMixInBytes,
-       g_guid_mix_in_last_result.load(std::memory_order_relaxed)},
+      {host_telemetry.comp_bg_color_successes.load(std::memory_order_relaxed),
+       host_telemetry.comp_bg_color_rejections.load(std::memory_order_relaxed),
+       host_telemetry.guid_mix_in_calls.load(std::memory_order_relaxed),
+       host_telemetry.guid_mix_in_successes.load(std::memory_order_relaxed),
+       host_telemetry.guid_mix_in_rejections.load(std::memory_order_relaxed),
+       host_telemetry.guid_mix_in_last_size.load(std::memory_order_relaxed),
+       host_telemetry.guid_mix_in_max_size.load(std::memory_order_relaxed), kMaxGuidMixInBytes,
+       host_telemetry.guid_mix_in_last_result.load(std::memory_order_relaxed)},
       in.depth_supported,
       {smart.pre_error, smart.render_error, smart.selector_error, smart.gpu_setup_error,
        smart.gpu_setdown_error, smart.gpu_setdown_exception_code},
