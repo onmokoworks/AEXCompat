@@ -105,6 +105,9 @@ mod windows_e2e {
             plugin_sha256: sha,
             parameters: None,
             parameter_animation: None,
+            aux_manifest: None,
+            world_dump_dir: None,
+            output_checksum_detail: false,
             dependencies: Vec::new(),
             width: WIDTH,
             height: HEIGHT,
@@ -178,6 +181,9 @@ mod windows_e2e {
             plugin_sha256: &sha,
             parameters: Some(&parameters),
             parameter_animation: Some(&animations),
+            aux_manifest: None,
+            world_dump_dir: None,
+            output_checksum_detail: false,
             dependencies: Vec::new(),
             width: WIDTH,
             height: HEIGHT,
@@ -233,6 +239,9 @@ mod windows_e2e {
             plugin_sha256: &sha,
             parameters: Some(&parameters),
             parameter_animation: Some(&animations),
+            aux_manifest: None,
+            world_dump_dir: None,
+            output_checksum_detail: false,
             dependencies: Vec::new(),
             width: WIDTH,
             height: HEIGHT,
@@ -251,6 +260,71 @@ mod windows_e2e {
     }
 
     #[test]
+    fn auxiliary_options_ride_the_session_argv_tail() {
+        let _behavior = BehaviorGuard::set(None);
+        let (repository, plugin, sha) = temp_repository();
+        let manifest = repository.0.join("aux-manifest.json");
+        std::fs::write(&manifest, b"{}").unwrap();
+        let dump_dir = repository.0.join("world-dumps");
+        std::fs::create_dir_all(&dump_dir).unwrap();
+        // The fixture worker validates each pair like the real worker's
+        // auxiliary gates (existing file / existing directory / literal "1"),
+        // so a mangled pair would kill the session before the first frame.
+        let mut session = RenderSession::open(SessionOpenRequest {
+            repository: &repository.0,
+            plugin_path: &plugin,
+            plugin_sha256: &sha,
+            parameters: None,
+            parameter_animation: None,
+            aux_manifest: Some(&manifest),
+            world_dump_dir: Some(&dump_dir),
+            output_checksum_detail: true,
+            dependencies: Vec::new(),
+            width: WIDTH,
+            height: HEIGHT,
+            pixel_format: RenderPixelFormat::Argb8,
+            time_step: 1,
+            total_time: 300,
+            time_scale: 30,
+            frame_deadline: Duration::from_secs(30),
+        })
+        .expect("open render session with auxiliary options");
+        let outcome = session
+            .render_frame(0, 0, &input_pattern(7))
+            .expect("frame renders with auxiliary options attached");
+        assert!(matches!(outcome.status, FrameStatus::Rendered { .. }));
+        assert_eq!(session.close()["session_clean"], true);
+    }
+
+    #[test]
+    fn open_rejects_a_missing_world_dump_directory() {
+        let _behavior = BehaviorGuard::set(None);
+        let (repository, plugin, sha) = temp_repository();
+        let missing = repository.0.join("missing-dumps");
+        let error = RenderSession::open(SessionOpenRequest {
+            repository: &repository.0,
+            plugin_path: &plugin,
+            plugin_sha256: &sha,
+            parameters: None,
+            parameter_animation: None,
+            aux_manifest: None,
+            world_dump_dir: Some(&missing),
+            output_checksum_detail: false,
+            dependencies: Vec::new(),
+            width: WIDTH,
+            height: HEIGHT,
+            pixel_format: RenderPixelFormat::Argb8,
+            time_step: 1,
+            total_time: 300,
+            time_scale: 30,
+            frame_deadline: Duration::from_secs(30),
+        })
+        .map(|_| ())
+        .expect_err("a missing dump directory fails fast at open");
+        assert!(error.to_string().contains("dump directory"), "{error}");
+    }
+
+    #[test]
     fn open_rejects_animation_bound_to_an_unknown_slot() {
         let _behavior = BehaviorGuard::set(None);
         let (repository, plugin, sha) = temp_repository();
@@ -261,6 +335,9 @@ mod windows_e2e {
             plugin_sha256: &sha,
             parameters: None,
             parameter_animation: Some(&animations),
+            aux_manifest: None,
+            world_dump_dir: None,
+            output_checksum_detail: false,
             dependencies: Vec::new(),
             width: WIDTH,
             height: HEIGHT,

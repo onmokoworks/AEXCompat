@@ -314,6 +314,15 @@ pub struct SessionOpenRequest<'a> {
     /// current_time (issue #132). Bindings are validated against `parameters`
     /// before launch, exactly like the one-shot entry.
     pub parameter_animation: Option<&'a [ParameterAnimation]>,
+    /// External aux channel manifest (`--aux-manifest-v1`), strictly parsed
+    /// by the worker; must be an absolute path to an existing file.
+    pub aux_manifest: Option<&'a Path>,
+    /// World snapshot dump directory (`--dump-worlds-v1`); must be an
+    /// absolute path to an existing directory.
+    pub world_dump_dir: Option<&'a Path>,
+    /// Enables the worker's per-output checksum detail records
+    /// (`--output-checksum-detail-v1`).
+    pub output_checksum_detail: bool,
     pub dependencies: Vec<ApprovedImageArtifact>,
     pub width: u32,
     pub height: u32,
@@ -546,9 +555,35 @@ impl RenderSession {
             request.total_time.to_string(),
             request.time_scale.to_string(),
         ];
+        // Auxiliary option pairs ride argv's tail; the worker peels them
+        // before the positional session contract (strip_auxiliary_options)
+        // and validates each strictly. The broker pre-checks the path shapes
+        // so a misconfigured request fails fast at open instead of as an
+        // opaque worker exit on the first frame.
+        if let Some(manifest) = request.aux_manifest {
+            if !manifest.is_absolute() || !manifest.is_file() {
+                return Err(invalid("aux manifest must be an absolute path to a file"));
+            }
+            args_after_plugin.extend([
+                "--aux-manifest-v1".to_owned(),
+                manifest.to_string_lossy().into_owned(),
+            ]);
+        }
+        if let Some(dump) = request.world_dump_dir {
+            if !dump.is_absolute() || !dump.is_dir() {
+                return Err(invalid(
+                    "world dump directory must be an absolute path to a directory",
+                ));
+            }
+            args_after_plugin.extend([
+                "--dump-worlds-v1".to_owned(),
+                dump.to_string_lossy().into_owned(),
+            ]);
+        }
+        if request.output_checksum_detail {
+            args_after_plugin.extend(["--output-checksum-detail-v1".to_owned(), "1".to_owned()]);
+        }
         if let Some(sidecar) = &animation_sidecar {
-            // Auxiliary option pairs ride argv's tail; the worker peels them
-            // before the positional session contract (strip_auxiliary_options).
             args_after_plugin.extend([
                 "--parameter-animation-v1".to_owned(),
                 sidecar.0.to_string_lossy().into_owned(),
@@ -1252,6 +1287,9 @@ pub fn run_video_batch(
         parameters: (!request.parameters.is_empty()).then_some(request.parameters.as_slice()),
         parameter_animation: (!request.parameter_animation.is_empty())
             .then_some(request.parameter_animation.as_slice()),
+        aux_manifest: None,
+        world_dump_dir: None,
+        output_checksum_detail: false,
         dependencies: Vec::new(),
         width,
         height,
@@ -1467,6 +1505,9 @@ mod tests {
                 plugin_sha256: &"0".repeat(64),
                 parameters: None,
                 parameter_animation: None,
+                aux_manifest: None,
+                world_dump_dir: None,
+                output_checksum_detail: false,
                 dependencies: Vec::new(),
                 width: 8,
                 height: 4,

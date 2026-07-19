@@ -171,15 +171,37 @@ mod worker {
         // reject fails these tests too.
         let mut effective = args.len();
         while effective >= 12 && args[effective - 2].starts_with("--") {
-            if args[effective - 2] == "--parameter-animation-v1" {
-                let sidecar = std::path::Path::new(&args[effective - 1]);
-                let pinned = std::env::current_dir()
-                    .ok()
-                    .and_then(|cwd| cwd.join("target/image-transport").canonicalize().ok());
-                let parent = sidecar.parent().and_then(|parent| parent.canonicalize().ok());
-                if !sidecar.is_file() || pinned.is_none() || pinned != parent {
-                    return 3;
+            let value = &args[effective - 1];
+            match args[effective - 2].as_str() {
+                "--parameter-animation-v1" => {
+                    let sidecar = std::path::Path::new(value);
+                    let pinned = std::env::current_dir()
+                        .ok()
+                        .and_then(|cwd| cwd.join("target/image-transport").canonicalize().ok());
+                    let parent = sidecar.parent().and_then(|parent| parent.canonicalize().ok());
+                    if !sidecar.is_file() || pinned.is_none() || pinned != parent {
+                        return 3;
+                    }
                 }
+                // The real worker's auxiliary gates: an existing manifest
+                // file, an existing dump directory, and the literal "1".
+                "--aux-manifest-v1" => {
+                    let manifest = std::path::Path::new(value);
+                    if !manifest.is_absolute() || !manifest.is_file() {
+                        return 3;
+                    }
+                }
+                "--dump-worlds-v1" => {
+                    if !std::path::Path::new(value).is_dir() {
+                        return 3;
+                    }
+                }
+                "--output-checksum-detail-v1" => {
+                    if value != "1" {
+                        return 3;
+                    }
+                }
+                _ => {}
             }
             effective -= 2;
         }
