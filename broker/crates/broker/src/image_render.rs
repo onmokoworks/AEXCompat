@@ -4255,6 +4255,9 @@ fn render_with_artifact(
         ));
     }
     let conformance_render_settings = conformance_render_settings_transport()?;
+    let conformance_premultiplication = conformance_render_settings
+        .as_deref()
+        .map(|settings| settings.split('|').nth(1).expect("validated settings mode"));
     let decoded = decode_bounded_image(input_path, "input")?;
     let (width, height) = (decoded.width(), decoded.height());
     if width == 0
@@ -4266,8 +4269,7 @@ fn render_with_artifact(
         return Err(invalid("input dimensions exceed the ARGB8 harness limit"));
     }
     let mut rgba = decoded.into_rgba8().into_raw();
-    if let Some(settings) = &conformance_render_settings {
-        let mode = settings.split('|').nth(1).expect("validated settings mode");
+    if let Some(mode) = conformance_premultiplication {
         apply_conformance_premultiplication(&mut rgba, mode);
     }
     crate::render_request::validate_image_buffer_layout(
@@ -4311,7 +4313,10 @@ fn render_with_artifact(
         {
             return Err(invalid("secondary image exceeds the layer transport limit"));
         }
-        let layer_rgba = decoded.into_rgba8().into_raw();
+        let mut layer_rgba = decoded.into_rgba8().into_raw();
+        if let Some(mode) = conformance_premultiplication {
+            apply_conformance_premultiplication(&mut layer_rgba, mode);
+        }
         crate::render_request::validate_image_buffer_layout(
             u64::from(layer_width),
             u64::from(layer_height),
@@ -4341,7 +4346,10 @@ fn render_with_artifact(
     for layer in timed_layers {
         let decoded = decode_bounded_image(&layer.image_path, "timed secondary")?;
         let (layer_width, layer_height) = (decoded.width(), decoded.height());
-        let rgba = decoded.into_rgba8().into_raw();
+        let mut rgba = decoded.into_rgba8().into_raw();
+        if let Some(mode) = conformance_premultiplication {
+            apply_conformance_premultiplication(&mut rgba, mode);
+        }
         crate::render_request::validate_image_buffer_layout(
             u64::from(layer_width),
             u64::from(layer_height),
@@ -5141,6 +5149,28 @@ fn render_with_artifact(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn conformance_alpha_mode_transforms_rgba_transports_consistently() {
+        let source = [200, 100, 50, 128, 9, 8, 7, 0];
+        for mode in ["straight", "premultiplied", "opaque"] {
+            let mut primary = source;
+            let mut secondary = source;
+            let mut timed_secondary = source;
+            apply_conformance_premultiplication(&mut primary, mode);
+            apply_conformance_premultiplication(&mut secondary, mode);
+            apply_conformance_premultiplication(&mut timed_secondary, mode);
+            assert_eq!(secondary, primary);
+            assert_eq!(timed_secondary, primary);
+        }
+
+        let mut premultiplied = source;
+        apply_conformance_premultiplication(&mut premultiplied, "premultiplied");
+        assert_eq!(premultiplied, [100, 50, 25, 128, 0, 0, 0, 0]);
+        let mut opaque = source;
+        apply_conformance_premultiplication(&mut opaque, "opaque");
+        assert_eq!(opaque, [200, 100, 50, 255, 9, 8, 7, 255]);
+    }
 
     #[test]
     fn bounded_decode_rejects_header_only_images() {

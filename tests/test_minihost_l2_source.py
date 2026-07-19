@@ -7,6 +7,13 @@ SOURCE = ROOT / "minihost" / "src" / "l2_main.cpp"
 
 
 class MinihostL2SourceTests(unittest.TestCase):
+    def test_legacy_render_alpha_default_remains_premultiplied(self):
+        text = SOURCE.read_text(encoding="utf-8")
+        self.assertIn(
+            'std::string g_conformance_premultiplication = "premultiplied";',
+            text,
+        )
+
     def test_batch_sampling_suite_is_typed_and_fail_closed(self):
         text = (ROOT / "minihost" / "src" / "l2_main.cpp").read_text(encoding="utf-8")
         for marker in (

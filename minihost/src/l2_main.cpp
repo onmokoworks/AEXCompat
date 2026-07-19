@@ -1165,7 +1165,10 @@ uint64_t g_world_dump_bytes = 0;
 bool g_output_checksum_detail = false;
 std::vector<uint32_t> g_output_row_crc32;
 std::array<std::string, 4> g_output_channel_sha256;
-std::string g_conformance_premultiplication = "straight";
+// Legacy callers do not install conformance render settings and already
+// preflight their input worlds as premultiplied. Keep that contract unless an
+// explicit --conformance-render-settings-v1 trailer overrides it.
+std::string g_conformance_premultiplication = "premultiplied";
 std::string g_conformance_renderer = "software";
 bool g_conformance_render_settings_seen = false;
 int32_t g_smart_rowbytes = 64;
