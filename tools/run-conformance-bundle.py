@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 import shutil
 import stat
@@ -38,7 +39,20 @@ def strict_json_loads(text: str) -> Any:
     def reject_constant(value: str) -> None:
         raise ValueError(f"non-finite JSON number is not permitted: {value}")
 
-    return json.loads(text, parse_constant=reject_constant)
+    value = json.loads(text, parse_constant=reject_constant)
+
+    def reject_overflowed_numbers(item: Any) -> None:
+        if isinstance(item, float) and not math.isfinite(item):
+            raise ValueError(f"non-finite JSON number is not permitted: {item}")
+        if isinstance(item, dict):
+            for child in item.values():
+                reject_overflowed_numbers(child)
+        elif isinstance(item, list):
+            for child in item:
+                reject_overflowed_numbers(child)
+
+    reject_overflowed_numbers(value)
+    return value
 
 
 MAX_PROTOCOL_BYTES = int(
@@ -730,20 +744,38 @@ def attach_raw_artifacts(
 def _mismatched_pixels(expected: Path, actual: Path, depth: str) -> int:
     expected_size = expected.stat().st_size
     actual_size = actual.stat().st_size
-    if expected_size != actual_size or expected_size % PIXEL_BYTES[depth] != 0:
-        return 1
-    mismatched = 0
+    pixel_bytes = PIXEL_BYTES[depth]
+    common_complete_bytes = (min(expected_size, actual_size) // pixel_bytes) * pixel_bytes
+    smaller_has_partial_pixel = min(expected_size, actual_size) % pixel_bytes != 0
+    expected_pixels = (expected_size + pixel_bytes - 1) // pixel_bytes
+    actual_pixels = (actual_size + pixel_bytes - 1) // pixel_bytes
+    mismatched = min(
+        0xFFFFFFFF,
+        int(smaller_has_partial_pixel) + abs(expected_pixels - actual_pixels),
+    )
     with expected.open("rb") as left, actual.open("rb") as right:
-        while True:
-            left_chunk = left.read(1024 * 1024)
-            right_chunk = right.read(1024 * 1024)
-            if not left_chunk and not right_chunk:
-                break
-            pixel_bytes = PIXEL_BYTES[depth]
+        remaining = common_complete_bytes
+        while remaining:
+            chunk_size = min(1024 * 1024, remaining)
+            left_chunk = _read_exact_comparison_chunk(left, chunk_size, "oracle")
+            right_chunk = _read_exact_comparison_chunk(right, chunk_size, "render output")
             for offset in range(0, len(left_chunk), pixel_bytes):
                 if left_chunk[offset : offset + pixel_bytes] != right_chunk[offset : offset + pixel_bytes]:
                     mismatched = min(0xFFFFFFFF, mismatched + 1)
+            remaining -= len(left_chunk)
     return mismatched
+
+
+def _read_exact_comparison_chunk(stream: Any, size: int, label: str) -> bytes:
+    chunks = []
+    remaining = size
+    while remaining:
+        chunk = stream.read(remaining)
+        if not chunk:
+            raise ValueError(f"{label} changed size during pixel comparison")
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    return b"".join(chunks)
 
 
 def attach_oracle(

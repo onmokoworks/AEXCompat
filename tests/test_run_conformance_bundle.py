@@ -1,5 +1,6 @@
 import hashlib
 import importlib.util
+import io
 import json
 import struct
 import subprocess
@@ -444,6 +445,45 @@ def test_manifest_rejects_non_finite_json_numbers(tmp_path, constant):
     failure = json.loads((output / "diagnostics" / "failure.json").read_text())
     assert failure["stage"] == "load_manifest"
     assert "non-finite JSON number" in failure["error"]["text"]
+
+
+def test_manifest_rejects_overflowed_nested_json_number(tmp_path):
+    manifest, adapter = fixture(tmp_path)
+    text = manifest.read_text(encoding="utf-8")
+    manifest.write_text(text.replace('"value": 50', '"value": [1, 1e400]'), encoding="utf-8")
+    output = tmp_path / "bundle"
+    completed = invoke(manifest, output, adapter)
+    assert completed.returncode != 0
+    assert not (output / "report.json").exists()
+    failure = json.loads((output / "diagnostics" / "failure.json").read_text())
+    assert failure["stage"] == "load_manifest"
+    assert "non-finite JSON number" in failure["error"]["text"]
+
+
+@pytest.mark.parametrize(
+    "expected_bytes,actual_bytes,mismatched",
+    [
+        (b"a" * 16, b"a" * 8, 2),
+        (b"a" * 16, b"b" * 4 + b"a" * 4, 3),
+        (b"a" * 3, b"a" * 4, 1),
+        (b"a" * 3, b"a" * 3, 1),
+    ],
+)
+def test_oracle_mismatch_counts_missing_extra_and_partial_pixels(
+    tmp_path, expected_bytes, actual_bytes, mismatched
+):
+    runner = load_runner_module()
+    expected = tmp_path / "expected.raw"
+    actual = tmp_path / "actual.raw"
+    expected.write_bytes(expected_bytes)
+    actual.write_bytes(actual_bytes)
+    assert runner._mismatched_pixels(expected, actual, "argb8") == mismatched
+
+
+def test_oracle_comparison_short_read_fails_without_looping():
+    runner = load_runner_module()
+    with pytest.raises(ValueError, match="changed size during pixel comparison"):
+        runner._read_exact_comparison_chunk(io.BytesIO(b"abc"), 4, "oracle")
 
 
 @pytest.mark.parametrize("size,truncated", [(65535, False), (65536, False), (65537, True)])
