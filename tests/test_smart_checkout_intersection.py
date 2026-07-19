@@ -8,6 +8,7 @@ ROOT = Path(__file__).resolve().parents[1]
 SOURCE = source_owners.L2_MAIN
 OWNER_SOURCES = (
     SOURCE,
+    ROOT / "minihost" / "src" / "worker_entry_wiring.cpp",
     ROOT / "minihost" / "src" / "worker_smart_runtime.cpp",
     ROOT / "minihost" / "src" / "worker_smart_setup.cpp",
     ROOT / "minihost" / "src" / "worker_smart_dispatch.cpp",
