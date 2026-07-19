@@ -6698,95 +6698,25 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
     aexcompat::worker_runtime::invocation::apply_smart(
         parsed.invocation, invocation, invocation_hooks);
   } else {
-  user_changed_mode = (argc == 5 || argc == 6) &&
-      std::wstring(argv[1]) == L"--user-changed";
-  g_aegp_update_menu_mode = argc == 4 && std::wstring(argv[1]) == L"--aegp-update-menu";
-  g_aegp_idle_mode = argc == 4 && std::wstring(argv[1]) == L"--aegp-idle";
-  g_aegp_command_roundtrip_mode = argc == 4 &&
-      std::wstring(argv[1]) == L"--aegp-command-roundtrip";
-  g_aegp_active_idle_roundtrip_mode = argc == 4 &&
-      std::wstring(argv[1]) == L"--aegp-active-idle-roundtrip";
-  g_aegp_keyframe_roundtrip_mode = argc == 4 &&
-      std::wstring(argv[1]) == L"--aegp-keyframe-roundtrip";
-  g_aegp_seek_roundtrip_mode = argc == 4 &&
-      std::wstring(argv[1]) == L"--aegp-seek-roundtrip";
-  g_aegp_trim_roundtrip_mode = argc == 4 &&
-      std::wstring(argv[1]) == L"--aegp-trim-roundtrip";
-  g_aegp_switch_roundtrip_mode = argc == 4 &&
-      std::wstring(argv[1]) == L"--aegp-switch-roundtrip";
-  g_aegp_comp_idle_roundtrip_mode = argc == 4 &&
-      (std::wstring(argv[1]) == L"--aegp-comp-idle-roundtrip" ||
-       g_aegp_keyframe_roundtrip_mode || g_aegp_seek_roundtrip_mode ||
-       g_aegp_trim_roundtrip_mode || g_aegp_switch_roundtrip_mode);
-  g_aegp_init_mode = (argc == 4 && std::wstring(argv[1]) == L"--aegp-init") ||
-      g_aegp_update_menu_mode || g_aegp_idle_mode || g_aegp_command_roundtrip_mode ||
-      g_aegp_active_idle_roundtrip_mode || g_aegp_comp_idle_roundtrip_mode;
-  params_only_mode = (argc == 4 || argc == 6) &&
-      std::wstring(argv[1]) == L"--l2-params-only";
-  runtime_module_authorization_mode = params_only_mode && argc == 6 &&
-      std::wstring(argv[4]) == L"--runtime-module-authorization-v1";
-  external_dependencies_mode = argc == 5 &&
-      std::wstring(argv[1]) == L"--l2-external-dependencies";
-  do_dialog_mode = argc == 4 &&
-      std::wstring(argv[1]) == L"--l2-do-dialog";
-  auto_dialog_mode = argc == 4 &&
-      std::wstring(argv[1]) == L"--l2-auto-dialog";
-  adjust_cursor_mode = (argc == 4 || argc == 5) &&
-      std::wstring(argv[1]) == L"--l2-adjust-cursor";
-  draw_event_mode = (argc == 4 || argc == 5) &&
-      std::wstring(argv[1]) == L"--l2-draw-event";
-  click_event_mode = (argc == 5 || argc == 6) &&
-      std::wstring(argv[1]) == L"--l2-click-event";
-  drag_event_mode = (argc == 5 || argc == 6) &&
-      std::wstring(argv[1]) == L"--l2-drag-event";
-  ui_lifecycle_mode = (argc == 4 || argc == 5) &&
-      std::wstring(argv[1]) == L"--l2-ui-lifecycle";
-  ui_idle_mode = (argc == 4 || argc == 5) &&
-      std::wstring(argv[1]) == L"--l2-ui-idle";
-  ui_keydown_mode = (argc == 5 || argc == 6) &&
-      std::wstring(argv[1]) == L"--l2-ui-keydown";
-  ui_mouse_exited_mode = (argc == 4 || argc == 5) &&
-      std::wstring(argv[1]) == L"--l2-ui-mouse-exited";
-  ui_event_assignment_mode =
-      ((adjust_cursor_mode || draw_event_mode || ui_lifecycle_mode || ui_idle_mode ||
-        ui_mouse_exited_mode) && argc == 5) ||
-      ((click_event_mode || drag_event_mode || ui_keydown_mode) && argc == 6);
-  if (ui_event_assignment_mode &&
-      !parse_parameter_payload(argv[argc - 1], ui_event_assignments)) return 3;
-  if (click_event_mode) {
-    float red{}, green{}, blue{}, alpha{};
-    if (swscanf_s(argv[4], L"%d,%d,%f,%f,%f,%f", &click_x, &click_y,
-                  &red, &green, &blue, &alpha) != 6 ||
-        click_x < 0 || click_x > 8192 || click_y < 0 || click_y > 8192 ||
-        !std::isfinite(red) || !std::isfinite(green) || !std::isfinite(blue) ||
-        !std::isfinite(alpha) || red < 0 || red > 1 || green < 0 || green > 1 ||
-        blue < 0 || blue > 1 || alpha < 0 || alpha > 1) return 3;
-    g_app_picker_color = {red, green, blue, alpha};
-  }
-  if (drag_event_mode &&
-      (swscanf_s(argv[4], L"%d,%d,%d,%d,%d", &click_x, &click_y,
-                 &drag_end_x, &drag_end_y, &drag_steps) != 5 ||
-       click_x < 0 || click_x > 8192 || click_y < 0 || click_y > 8192 ||
-       drag_end_x < 0 || drag_end_x > 8192 || drag_end_y < 0 || drag_end_y > 8192 ||
-       drag_steps < 1 || drag_steps > 32)) return 3;
-  if (ui_keydown_mode &&
-      (swscanf_s(argv[4], L"%d,%d,%u,%u", &click_x, &click_y,
-                 &keydown_code, &keydown_modifiers) != 4 ||
-       click_x < 0 || click_x > 8192 || click_y < 0 || click_y > 8192 ||
-       (keydown_code & 0x3fff0000u) != 0 || keydown_modifiers > 0xffffu)) return 3;
-  g_skip_about = (argc == 4 && std::wstring(argv[1]) == L"--l2-no-about") ||
-      params_only_mode || external_dependencies_mode || do_dialog_mode || auto_dialog_mode || adjust_cursor_mode || draw_event_mode || click_event_mode ||
-      drag_event_mode || ui_lifecycle_mode || ui_idle_mode || ui_keydown_mode ||
-      ui_mouse_exited_mode;
-  if (!user_changed_mode && !g_aegp_init_mode && !g_skip_about &&
-      (argc != 4 || std::wstring(argv[1]) != L"--l2")) return 2;
-  if (params_only_mode && argc == 6 && !runtime_module_authorization_mode) return 2;
-  if (user_changed_mode) {
-    try { g_user_changed_param_slot = std::stoi(argv[4]); } catch (...) { return 3; }
-    if (g_user_changed_param_slot <= 0 || g_user_changed_param_slot > static_cast<int32_t>(kMaxParams)) return 3;
-    if (argc == 6 && !parse_parameter_payload(argv[5], g_user_changed_parameters)) return 3;
-    g_user_changed_param_requested = true;
-  }
+    const auto mode_error = aexcompat::worker_runtime::invocation::parse_l2_modes(
+        argc, argv, invocation,
+        {parse_parameter_payload, kMaxParams});
+    if (mode_error != 0) return mode_error;
+    g_aegp_update_menu_mode = invocation.aegp_update_menu_mode;
+    g_aegp_idle_mode = invocation.aegp_idle_mode;
+    g_aegp_command_roundtrip_mode = invocation.aegp_command_roundtrip_mode;
+    g_aegp_active_idle_roundtrip_mode = invocation.aegp_active_idle_roundtrip_mode;
+    g_aegp_keyframe_roundtrip_mode = invocation.aegp_keyframe_roundtrip_mode;
+    g_aegp_seek_roundtrip_mode = invocation.aegp_seek_roundtrip_mode;
+    g_aegp_trim_roundtrip_mode = invocation.aegp_trim_roundtrip_mode;
+    g_aegp_switch_roundtrip_mode = invocation.aegp_switch_roundtrip_mode;
+    g_aegp_comp_idle_roundtrip_mode = invocation.aegp_comp_idle_roundtrip_mode;
+    g_aegp_init_mode = invocation.aegp_init_mode;
+    g_skip_about = invocation.skip_about_mode;
+    g_app_picker_color = invocation.picker_color;
+    g_user_changed_param_slot = invocation.user_changed_param_slot;
+    g_user_changed_param_requested = invocation.user_changed_param_requested;
+    g_user_changed_parameters = std::move(invocation.user_changed_parameters);
   }
   // Every rendered effect instance belongs to a layer, even when that layer has no masks.
   if (is_rendering_worker()) g_mask_model_enabled = true;

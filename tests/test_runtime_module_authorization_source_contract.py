@@ -2,7 +2,10 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-MAIN = (ROOT / "minihost" / "src" / "l2_main.cpp").read_text(encoding="utf-8")
+MAIN = "\n".join(
+    (ROOT / "minihost" / "src" / name).read_text(encoding="utf-8")
+    for name in ("l2_main.cpp", "worker_invocation_orchestration.cpp")
+)
 ADMISSION = (ROOT / "minihost" / "src" / "worker_runtime_admission.cpp").read_text(
     encoding="utf-8"
 )
@@ -49,7 +52,7 @@ def test_only_normally_unknown_modules_can_use_exact_policy_identity():
 def test_optional_argument_is_l2_params_only_and_exactly_positioned():
     assert "(argc == 4 || argc == 6)" in MAIN
     assert 'std::wstring(argv[4]) == L"--runtime-module-authorization-v1"' in MAIN
-    assert "params_only_mode && argc == 6 && !runtime_module_authorization_mode" in MAIN
+    assert "target.params_only_mode && argc == 6 && !target.runtime_module_authorization_mode" in MAIN
 
 
 def test_hash_dependency_is_configured_before_authorization_and_fails_closed():

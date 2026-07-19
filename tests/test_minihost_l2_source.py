@@ -45,6 +45,7 @@ AEGP_ASYNC_LAYER_RUNTIME = ROOT / "minihost" / "src" / "worker_aegp_async_layer_
 AEGP_HOST_SELFTESTS_SOURCE = ROOT / "minihost" / "src" / "worker_aegp_host_selftests.cpp"
 AEGP_COMPAT_SELFTESTS_SOURCE = ROOT / "minihost" / "src" / "worker_aegp_compat_selftests.cpp"
 INVOCATION_ORCHESTRATION_HEADER = ROOT / "minihost" / "src" / "worker_invocation_orchestration.hpp"
+INVOCATION_ORCHESTRATION_SOURCE = ROOT / "minihost" / "src" / "worker_invocation_orchestration.cpp"
 SMART_EXECUTION_SOURCE = ROOT / "minihost" / "src" / "worker_smart_execution.cpp"
 SMART_RUNTIME_SOURCE = ROOT / "minihost" / "src" / "worker_smart_runtime.cpp"
 SMART_SETUP_SOURCE = ROOT / "minihost" / "src" / "worker_smart_setup.cpp"
@@ -83,6 +84,7 @@ def l2_family_source():
         REPORT_HEADER, REPORT_SOURCE,
         RUNTIME_ADMISSION_SOURCE, CLASSIC_RUNTIME_HEADER, CLASSIC_RUNTIME_SOURCE,
         SELFTEST_DISPATCH_SOURCE, REQUEST_PARSER_HEADER, REQUEST_PARSER_SOURCE,
+        INVOCATION_ORCHESTRATION_HEADER, INVOCATION_ORCHESTRATION_SOURCE,
         RENDER_REPORT_HEADER, RENDER_REPORT_SOURCE
     ))
 
@@ -788,7 +790,7 @@ class MinihostL2SourceTests(unittest.TestCase):
         text = l2_family_source()
         for marker in ('L"--user-changed"', "kUserChangedParam = 13",
                        "g_params[offset].flags & (1u << 6)",
-                       "parse_parameter_payload(argv[5], g_user_changed_parameters)",
+                       "parse_parameter_payload(argv[5], target.user_changed_parameters)",
                        "apply_requested_assignments(lifecycle_definitions, g_user_changed_parameters)",
                        "write<int32_t>(changed_extra, 0, g_user_changed_param_slot)",
                        "g_user_changed_param_error = entry(kUserChangedParam"):
@@ -1180,7 +1182,7 @@ class MinihostL2SourceTests(unittest.TestCase):
         text = l2_family_source()
         for marker in (
             'L"--l2-drag-event"',
-            "drag_steps < 1 || drag_steps > 32",
+            "target.drag_steps < 1 || target.drag_steps > 32",
             "write<int32_t>(extra, 8, 3)",
             "write<uint8_t>(extra, 73, step == drag_steps ? 1 : 0)",
             "g_ui_drag_requested",
@@ -1259,8 +1261,8 @@ class MinihostL2SourceTests(unittest.TestCase):
 
     def test_params_only_discovery_does_not_require_about(self):
         text = l2_family_source()
-        self.assertIn("g_skip_about =", text)
-        self.assertIn("params_only_mode || external_dependencies_mode", text)
+        self.assertIn("g_skip_about = invocation.skip_about_mode", text)
+        self.assertIn("target.params_only_mode || target.external_dependencies_mode", text)
         self.assertIn("about_error = g_skip_about ? 0", text)
 
 

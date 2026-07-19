@@ -71,6 +71,21 @@ struct InvocationState {
     bool ui_keydown_mode{};
     bool ui_mouse_exited_mode{};
     bool ui_event_assignment_mode{};
+    bool aegp_update_menu_mode{};
+    bool aegp_idle_mode{};
+    bool aegp_command_roundtrip_mode{};
+    bool aegp_active_idle_roundtrip_mode{};
+    bool aegp_keyframe_roundtrip_mode{};
+    bool aegp_seek_roundtrip_mode{};
+    bool aegp_trim_roundtrip_mode{};
+    bool aegp_switch_roundtrip_mode{};
+    bool aegp_comp_idle_roundtrip_mode{};
+    bool aegp_init_mode{};
+    bool skip_about_mode{};
+    bool user_changed_param_requested{};
+    int32_t user_changed_param_slot{-1};
+    std::array<float, 4> picker_color{1.0f, 0.25f, 0.75f, 0.5f};
+    RequestedAssignments user_changed_parameters;
     RequestedAssignments requested_parameters;
     RequestedAssignments ui_event_assignments;
     std::vector<unsigned char> external_rgba;
@@ -102,6 +117,11 @@ struct ApplyHooks {
   void (*set_mask_fault)(bool, bool){};
   void (*set_audio_source)(std::vector<float>*, int32_t){};
 };
+struct L2ModeHooks {
+  bool (*parse_parameter_payload)(const wchar_t*, RequestedAssignments&){};
+  std::size_t max_params{};
+};
+int parse_l2_modes(int argc, wchar_t** argv, InvocationState&, const L2ModeHooks&);
 void apply_render(const request_parser::WorkerInvocation&, InvocationState&, const ApplyHooks&);
 void apply_smart(const request_parser::WorkerInvocation&, InvocationState&, const ApplyHooks&);
 }  // namespace aexcompat::worker_runtime::invocation
