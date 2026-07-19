@@ -4,6 +4,9 @@ import re
 
 ROOT = Path(__file__).resolve().parents[1]
 MAIN = (ROOT / "minihost" / "src" / "l2_main.cpp").read_text(encoding="utf-8")
+ENTRY_BOOTSTRAP = (ROOT / "minihost" / "src" / "worker_entry_bootstrap.cpp").read_text(
+    encoding="utf-8"
+)
 RENDER_REPORT = (ROOT / "minihost" / "src" / "worker_render_report.cpp").read_text(
     encoding="utf-8"
 )
@@ -92,7 +95,7 @@ def test_all_effectmain_calls_share_the_cumulative_audit_boundary():
     assert "result = audited_effect_call(entry, command" in DISPATCH
     assert "set_suite_timeline_selector(previous_suite_selector)" in DISPATCH
     assert "return invoke_entry_seh(entry, command" in DISPATCH
-    assert "configure_selector_dispatch_audit(&capture_module_audit_phase" in MAIN
+    assert "configure_selector_dispatch_audit(hooks.audit_capture" in ENTRY_BOOTSTRAP
     assert "#define entry(...) guarded_effect_call(entry, __VA_ARGS__)" in MAIN
 
 

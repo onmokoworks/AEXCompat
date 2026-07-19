@@ -8,6 +8,7 @@ SOURCES = (
     ROOT / "minihost" / "src" / "worker_pf_helper_runtime.cpp",
     ROOT / "minihost" / "src" / "worker_pf_helper_runtime.hpp",
     ROOT / "minihost" / "src" / "worker_host_suite_router.cpp",
+    ROOT / "minihost" / "src" / "worker_ui_event_execution.cpp",
 )
 
 
@@ -68,7 +69,7 @@ def test_tool_state_is_thread_safe_context_bounded_and_reset_on_teardown() -> No
     assert "std::atomic<int32_t> g_effect_tool" in text
     assert "std::array<std::atomic<int32_t>, kUiContextCount>" in text
     assert "thread_local int32_t g_ui_context = -1;" in text
-    assert "PfHelperUiContextScope helper_ui_scope(g_ui_context.window_type);" in text
+    assert "UiScope ui_scope(hooks, r.window_type);" in text
     assert "g_ui_context = context >= 0" in text
     assert "g_ui_context_active = g_ui_context >= 0;" in text
     assert "set_context_tool(" in text

@@ -55,6 +55,7 @@
 #include "worker_parameter_runtime.hpp"
 #include "worker_parameter_selftests.hpp"
 #include "worker_parameter_execution.hpp"
+#include "worker_ui_event_execution.hpp"
 #include "pf_cache_on_load_suite.hpp"
 #include "render_lifecycle.hpp"
 #include "render_pixel_buffer.hpp"
@@ -72,6 +73,7 @@
 #include "worker_smart_setup.hpp"
 #include "worker_smart_dispatch.hpp"
 #include "worker_smart_finalize.hpp"
+#include "worker_smart_render_runtime.hpp"
 #include "worker_mask_runtime.hpp"
 #include "worker_mask_selftests.hpp"
 #include "worker_pf_path_runtime.hpp"
@@ -89,6 +91,7 @@
 #include "worker_aegp_world_selftests.hpp"
 #include "worker_aegp_init_runtime.hpp"
 #include "worker_aegp_init_execution.hpp"
+#include "worker_entry_bootstrap.hpp"
 #include "worker_aegp_timeline_probe.hpp"
 #include "worker_aegp_scene.hpp"
 #include "worker_aegp_host_selftests.hpp"
@@ -1311,6 +1314,19 @@ struct PfHelperUiContextScope {
   aexcompat::pf_helper::UiContextScope runtime_scope;
   bool previous_active;
 };
+void* enter_custom_ui_context(int32_t context) {
+  return new (std::nothrow) PfHelperUiContextScope(context);
+}
+void leave_custom_ui_context(void* scope) {
+  delete static_cast<PfHelperUiContextScope*>(scope);
+}
+bool custom_ui_context_stable() {
+  return g_ui_context_pointer == &g_ui_context;
+}
+void set_custom_ui_context_tool(int32_t context) {
+  aexcompat::pf_helper::set_context_tool(
+      context, aexcompat::pf_helper::kExtendedToolMin);
+}
 uint32_t g_ui_drag_calls{};
 bool g_ui_drag_requested{};
 bool g_ui_drag_terminated{};
@@ -4920,7 +4936,6 @@ SmartResult smart_render_runtime(EffectEntry entry, std::array<std::byte, kInSiz
   const uint32_t gpu_device_index = plan.gpu_device_index;
   const bool gpu_negotiation = plan.gpu_negotiation;
   const bool missing_input = plan.missing_input;
-  const bool crash_null_output = plan.crash_null_output;
   const bool temporal_context = plan.temporal_context;
   const bool partial_output_request = plan.partial_output_request;
   const bool float32 = plan.float32;
@@ -5057,35 +5072,18 @@ SmartResult smart_render_runtime(EffectEntry entry, std::array<std::byte, kInSiz
       result.render_error = -5;
     return result;
   }
-  if (crash_null_output)
-    entry(kFrameSetup, input.data(), command_output.data(), params.data(), nullptr, nullptr);
-
-  if (!dispatch_render_draw(entry, input, command_output, definitions)) {
-    result.pre_error = -5;
-    if (g_render_ui_context_active)
-      close_render_ui_context(entry, input, command_output, definitions);
-    result.render_error = end_render_lifecycle(entry, input, command_output, params.data(),
-                                                output_world.data(), lifecycle, -5);
-    return result;
-  }
-
-  aexcompat::worker_runtime::smart_dispatch::State dispatch_state;
-  if (!aexcompat::worker_runtime::smart_dispatch::dispatch(
+  if (!aexcompat::worker_runtime::smart_render_runtime::execute(
           {entry, &input, &command_output, &plan, &parameter_state, &input_world,
-           &output_world, &dispatch_worlds, &guarded, &destination,
-           dispatch_pixel_format},
-          {&guarded_effect_call, &capture_module_audit,
-           reinterpret_cast<void*>(&guid_mix_in_ptr),
-           &automatic_checkin_pre_render_params},
-          result, dispatch_state))
-    return result;
-  if (!aexcompat::worker_runtime::smart_finalize::finalize(
-          {entry, &input, &command_output, &parameter_state, &output_world,
-           &lifecycle, &source, &guarded, destination, external_output, width,
-           height, rowbytes, pixel_bytes, &dispatch_state.pre_output},
-          {&close_render_ui_context, &end_render_lifecycle, &dump_world_snapshot,
-           &record_output_checksum_detail, &sha256_bytes,
-           +[] { return g_render_ui_context_active; }}, result))
+           &output_world, &dispatch_worlds, &source, &guarded, &destination,
+           &lifecycle, external_output, dispatch_pixel_format, width, height,
+           rowbytes, pixel_bytes},
+          {&dispatch_render_draw,
+           {&guarded_effect_call, &capture_module_audit,
+            reinterpret_cast<void*>(&guid_mix_in_ptr),
+            &automatic_checkin_pre_render_params},
+           {&close_render_ui_context, &end_render_lifecycle, &dump_world_snapshot,
+            &record_output_checksum_detail, &sha256_bytes,
+            +[] { return g_render_ui_context_active; }}}, result))
     return result;
   return result;
 }
@@ -5872,19 +5870,6 @@ int selftest_effect_param_union(int, wchar_t**) {
 }
 
 int worker_main_impl(int argc, wchar_t **argv) {
-  aexcompat::pf_state_runtime::configure_host_hooks({
-      []() -> void* { return &g_effect; },
-      [](int32_t index, bool allow_groups) -> bool {
-        return valid_param_utils_index(index, allow_groups);
-      },
-      &capture_pf_parameter_state});
-  configure_host_hooks({
-      []() -> void* { return &g_effect; },
-      []() -> std::size_t { return g_params.size(); },
-      [](std::size_t index) -> bool {
-        return index < g_params.size() && g_params[index].type == 0;
-      },
-      &sha256});
   SceneSuiteFactoryHooks scene_factory{};
   scene_factory.render_scene_enabled = &scene_render_receipt_enabled;
   scene_factory.comp_bg_color = reinterpret_cast<void*>(&aegp_get_comp_bg_color);
@@ -5937,12 +5922,6 @@ int worker_main_impl(int argc, wchar_t **argv) {
       &g_full_resolution_width, &g_full_resolution_height,
       &aexcompat::worker_runtime::smart::width,
       &aexcompat::worker_runtime::smart::height};
-  if (!configure_scene_context(scene_host) || !scene_translation_unit_linked() ||
-      !configure_scene_runtime_context(scene_runtime_host) ||
-      !scene_runtime_translation_unit_linked() ||
-      !scene_selftests_translation_unit_linked()) return 23;
-  configure_validators(&validate_render_options_item, &initialize_layer_render_options);
-  configure_cache_on_load_suite(&g_effect);
   const PfHostContext pf_host_context{
       {
           [](void* world, int32_t pixel_bytes, unsigned char*& pixels,
@@ -5966,9 +5945,27 @@ int worker_main_impl(int argc, wchar_t **argv) {
       &g_effect,
       &g_batch_sampling_suite1,
   };
-  configure_pf_host_context(pf_host_context);
-  if (!pf_host_context_configured()) return 72;
-  aexcompat::pf_world_transform::configure({
+  aexcompat::worker_runtime::entry_bootstrap::Hooks bootstrap_hooks{};
+  bootstrap_hooks.pf_state = {
+      []() -> void* { return &g_effect; },
+      [](int32_t index, bool allow_groups) -> bool {
+        return valid_param_utils_index(index, allow_groups);
+      },
+      &capture_pf_parameter_state};
+  bootstrap_hooks.pf_ae_channel = {
+      []() -> void* { return &g_effect; },
+      []() -> std::size_t { return g_params.size(); },
+      [](std::size_t index) -> bool {
+        return index < g_params.size() && g_params[index].type == 0;
+      },
+      &sha256};
+  bootstrap_hooks.scene = scene_host;
+  bootstrap_hooks.scene_runtime = scene_runtime_host;
+  bootstrap_hooks.validate_item = &validate_render_options_item;
+  bootstrap_hooks.initialize_layer = &initialize_layer_render_options;
+  bootstrap_hooks.effect_ref = &g_effect;
+  bootstrap_hooks.pf = pf_host_context;
+  bootstrap_hooks.world_transform = {
       {pf_host_context.hooks.resolve_world,
        pf_host_context.hooks.resolve_dispatch_world_format,
        pf_host_context.hooks.pixel_format,
@@ -5976,16 +5973,16 @@ int worker_main_impl(int argc, wchar_t **argv) {
        &bounded_argb8_world,
        reinterpret_cast<void*>(&aegp_unsupported_suite_call)},
       {&g_transform_world_calls, &g_last_transform_x, &g_last_transform_y,
-       &g_last_transform_opacity}});
-  if (!aexcompat::pf_world_transform::configured()) return 74;
-  if (!aexcompat::worker_runtime::pf_adv_time::configure_verification_hooks(
-          {&acquire_suite, &release_suite, &suite_acquire_count,
-           &suite_release_count, &suite_leases_balanced}))
-    return 73;
-  configure_runtime_module_hash(&sha256);
-  configure_selector_dispatch_audit(&capture_module_audit_phase,
-                                    &module_audit_passed);
-  configure_selector_dispatch_trace(&record_selector_dispatch);
+       &g_last_transform_opacity}};
+  bootstrap_hooks.adv_time = {&acquire_suite, &release_suite, &suite_acquire_count,
+                              &suite_release_count, &suite_leases_balanced};
+  bootstrap_hooks.hash = &sha256;
+  bootstrap_hooks.audit_capture = &capture_module_audit_phase;
+  bootstrap_hooks.audit_passed = &module_audit_passed;
+  bootstrap_hooks.trace = &record_selector_dispatch;
+  const auto bootstrap_error =
+      aexcompat::worker_runtime::entry_bootstrap::configure(bootstrap_hooks);
+  if (bootstrap_error != 0) return bootstrap_error;
   const aexcompat::worker_runtime::selftest::AegpHooks aegp_selftests{
       &verify_aegp_projector_levels, &verify_aegp_effect_stack,
       &verify_aegp_apply_effect, &verify_aegp_resizer_3d_chain,
@@ -6789,132 +6786,33 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
     bool lifecycle_context_stable = true;
     bool lifecycle_host_state_cleared = false;
     bool event_assignments_applied = !ui_event_assignment_mode;
-    {
-      std::vector<std::array<std::byte, kParamSize>> definitions(g_params.size() + 1);
-      initialize_parameter_definitions(definitions);
-      const bool initialized = params_error == 0 && parameter_count_contract_valid &&
-          initialize_arbitrary_values(entry, input, output, definitions);
-      ArbitraryValuesScope arbitrary_scope{initialized ? entry : nullptr, &input, &output,
-                                            &definitions};
-      event_assignments_applied = initialized &&
-          (!ui_event_assignment_mode ||
-           (validate_requested_assignments(ui_event_assignments) &&
-            apply_requested_assignments(definitions, ui_event_assignments)));
-      std::vector<void*> params(definitions.size());
-      for (std::size_t i = 0; i < definitions.size(); ++i) params[i] = definitions[i].data();
-      std::array<std::byte, 208> extra{};
-      g_ui_context.window_type = std::strcmp(event_target, "layer") == 0 ? 1 :
-          (std::strcmp(event_target, "comp") == 0 ? 0 : 2);
-      PfHelperUiContextScope helper_ui_scope(g_ui_context.window_type);
-      write<void*>(extra, 0, &g_ui_context_pointer);
-      write<int32_t>(extra, 8, (ui_lifecycle_mode || ui_idle_mode || ui_keydown_mode ||
-          ui_mouse_exited_mode) ? 0 : (draw_event_mode ? 4 :
-          ((click_event_mode || drag_event_mode) ? 2 : 9)));
-      if (draw_event_mode) {
-        write_rect(extra.data() + 16, 203, 203);
-        write<int32_t>(extra, 32, 32);
-      } else if (click_event_mode || drag_event_mode) {
-        write<uint32_t>(extra, 16, 1);
-        write<int32_t>(extra, 20, click_y);
-        write<int32_t>(extra, 24, click_x);
-        write<int32_t>(extra, 28, 1);
-        write<int32_t>(extra, 32, 0);
-      } else {
-        write<int32_t>(extra, 16, 101);
-        write<int32_t>(extra, 20, 101);
-        write<int32_t>(extra, 24, 0);
-        write<int32_t>(extra, 28, 0);
-      }
-      if (g_ui_context.window_type == 2) {
-        write<int32_t>(extra, 80, 1);
-        write<int32_t>(extra, 84, 2);
-        write_rect(extra.data() + 88, 203, 203);
-      } else {
-        write_rect(extra.data() + 80, 200, 200);
-      }
-      if (g_ui_context.window_type != 2) {
-        write<int32_t>(input, 252, 200);
-        write<int32_t>(input, 256, 200);
-        write<void*>(extra, 128, &g_ui_context);
-        write<void*>(extra, 136, &ui_transform_point);
-        write<void*>(extra, 144, &ui_transform_point);
-        write<void*>(extra, 168, &ui_transform_point_simple);
-        write<void*>(extra, 176, &ui_transform_point_simple);
-      }
-      write_rect(extra.data() + 88, 203, 203);
-      uint32_t exception_code = 0;
-      event_error = event_assignments_applied
-          ? invoke_entry_seh(entry, kEvent, input.data(), output.data(), params.data(), nullptr,
-                             extra.data(), &exception_code)
-          : -1;
-      if (exception_code != 0) event_error = 512;
-      if ((ui_lifecycle_mode || ui_idle_mode || ui_keydown_mode || ui_mouse_exited_mode) &&
-          event_assignments_applied) {
-        lifecycle_errors[0] = event_error;
-        const std::array<int32_t, 5> lifecycle_events = ui_idle_mode
-            ? std::array<int32_t, 5>{0, 1, 7, 5, 6}
-            : (ui_keydown_mode ? std::array<int32_t, 5>{0, 1, 10, 5, 6}
-              : (ui_mouse_exited_mode ? std::array<int32_t, 5>{0, 1, 11, 5, 6}
-                               : std::array<int32_t, 5>{0, 1, 5, 6, -1}));
-        const int lifecycle_event_count =
-            (ui_idle_mode || ui_keydown_mode || ui_mouse_exited_mode) ? 5 : 4;
-        for (int lifecycle_index = 1; lifecycle_index < lifecycle_event_count; ++lifecycle_index) {
-          lifecycle_context_stable = lifecycle_context_stable &&
-              read<void*>(extra, 0) == &g_ui_context_pointer &&
-              g_ui_context_pointer == &g_ui_context;
-          if (lifecycle_index == lifecycle_event_count - 1) {
-            for (std::size_t slot = 0; slot < plugin_state_before_close.size(); ++slot)
-              plugin_state_before_close[slot] =
-                  static_cast<uintptr_t>(g_ui_context.plugin_state[slot]);
-          }
-          write<int32_t>(extra, 8, lifecycle_events[lifecycle_index]);
-          if (ui_keydown_mode && lifecycle_index == 2) {
-            write<uint32_t>(extra, 16, 1);
-            write<int32_t>(extra, 20, click_y);
-            write<int32_t>(extra, 24, click_x);
-            write<uint32_t>(extra, 28, keydown_code);
-            write<uint32_t>(extra, 32, keydown_modifiers);
-          }
-          exception_code = 0;
-          lifecycle_errors[lifecycle_index] = invoke_entry_seh(entry, kEvent, input.data(),
-              output.data(), params.data(), nullptr, extra.data(), &exception_code);
-          if (exception_code != 0) lifecycle_errors[lifecycle_index] = 512;
-        }
-        event_error = 0;
-        for (const int32_t lifecycle_error : lifecycle_errors) {
-          if (lifecycle_error != 0) {
-            event_error = lifecycle_error;
-            break;
-          }
-        }
-        for (auto& state : g_ui_context.plugin_state) state = 0;
-        aexcompat::pf_helper::set_context_tool(
-            g_ui_context.window_type, aexcompat::pf_helper::kExtendedToolMin);
-        lifecycle_host_state_cleared = std::all_of(std::begin(g_ui_context.plugin_state),
-            std::end(g_ui_context.plugin_state), [](auto state) { return state == 0; });
-      }
-      if (drag_event_mode && event_error == 0) {
-        g_ui_drag_requested = read<uint8_t>(extra, 72) != 0;
-        for (int32_t step = 1; g_ui_drag_requested && step <= drag_steps; ++step) {
-          write<int32_t>(extra, 8, 3);
-          write<int32_t>(extra, 20, click_y + (drag_end_y - click_y) * step / drag_steps);
-          write<int32_t>(extra, 24, click_x + (drag_end_x - click_x) * step / drag_steps);
-          write<uint8_t>(extra, 73, step == drag_steps ? 1 : 0);
-          write<int32_t>(extra, 204, 0);
-          exception_code = 0;
-          event_error = invoke_entry_seh(entry, kEvent, input.data(), output.data(),
-              params.data(), nullptr, extra.data(), &exception_code);
-          ++g_ui_drag_calls;
-          if (exception_code != 0) { event_error = 512; break; }
-        }
-        g_ui_drag_terminated = g_ui_drag_calls == static_cast<uint32_t>(drag_steps) &&
-            read<uint8_t>(extra, 72) == 0 && read<uint8_t>(extra, 73) != 0;
-      }
-      cursor = adjust_cursor_mode ? read<int32_t>(extra, 28) : 0;
-      event_out_flags = read<int32_t>(extra, 204);
-      changed_value = definitions.size() > 1 &&
-          (read<uint32_t>(definitions[1], 0) & 1u) != 0;
-    }
+    g_ui_context.window_type = std::strcmp(event_target, "layer") == 0 ? 1 :
+        (std::strcmp(event_target, "comp") == 0 ? 0 : 2);
+    aexcompat::worker_runtime::ui_event_execution::Result ui_result;
+    const bool ui_dispatched = aexcompat::worker_runtime::ui_event_execution::dispatch(
+        {entry, &input, &output, params_error, parameter_count_contract_valid,
+         &ui_event_assignments, ui_event_assignment_mode, adjust_cursor_mode,
+         draw_event_mode, click_event_mode, drag_event_mode, ui_lifecycle_mode,
+         ui_idle_mode, ui_keydown_mode, ui_mouse_exited_mode, click_x, click_y,
+         drag_end_x, drag_end_y, drag_steps, keydown_code, keydown_modifiers,
+         g_ui_context.window_type, &g_ui_context_pointer, &g_ui_context,
+         g_ui_context.plugin_state.data(), reinterpret_cast<void*>(&ui_transform_point),
+         reinterpret_cast<void*>(&ui_transform_point_simple)},
+        {&invoke_entry_seh, &enter_custom_ui_context, &leave_custom_ui_context,
+         &custom_ui_context_stable, &set_custom_ui_context_tool},
+        ui_result);
+    event_error = ui_dispatched ? ui_result.event_error : -1;
+    cursor = ui_result.cursor;
+    event_out_flags = ui_result.event_out_flags;
+    changed_value = ui_result.changed_value;
+    lifecycle_errors = ui_result.lifecycle_errors;
+    plugin_state_before_close = ui_result.plugin_state_before_close;
+    lifecycle_context_stable = ui_result.lifecycle_context_stable;
+    lifecycle_host_state_cleared = ui_result.lifecycle_host_state_cleared;
+    event_assignments_applied = ui_result.event_assignments_applied;
+    g_ui_drag_requested = ui_result.drag_requested;
+    g_ui_drag_calls = ui_result.drag_calls;
+    g_ui_drag_terminated = ui_result.drag_terminated;
     int32_t event_sequence_setdown_error = 0;
     if (void* sequence_data = read<void*>(output, kOutSequenceData)) {
       write<void*>(input, kInSequenceData, sequence_data);

@@ -7,7 +7,11 @@ ROOT = Path(__file__).resolve().parents[1]
 def test_minihost_dispatches_a_bounded_custom_ui_lifecycle() -> None:
     source = "\n".join(
         (ROOT / "minihost" / "src" / name).read_text(encoding="utf-8")
-        for name in ("l2_main.cpp", "worker_invocation_orchestration.cpp")
+        for name in (
+            "l2_main.cpp",
+            "worker_invocation_orchestration.cpp",
+            "worker_ui_event_execution.cpp",
+        )
     )
 
     assert 'L"--l2-ui-lifecycle"' in source

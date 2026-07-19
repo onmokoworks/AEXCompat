@@ -5,6 +5,9 @@ ROOT = Path(__file__).resolve().parents[1]
 MAIN = (ROOT / "minihost/src/l2_main.cpp").read_text(encoding="utf-8")
 HEADER = (ROOT / "minihost/src/worker_smart_execution.hpp").read_text(encoding="utf-8")
 SOURCE = (ROOT / "minihost/src/worker_smart_execution.cpp").read_text(encoding="utf-8")
+RENDER_RUNTIME = (ROOT / "minihost/src/worker_smart_render_runtime.cpp").read_text(
+    encoding="utf-8"
+)
 CMAKE = (ROOT / "minihost/CMakeLists.txt").read_text(encoding="utf-8")
 
 
@@ -16,6 +19,10 @@ def test_smart_dispatch_orchestration_has_a_compiled_owner():
     assert "render::dispatch(context)" in SOURCE
     assert "struct SmartRenderRequest" not in MAIN
     assert "smart_execution::render_once(" in MAIN
+    assert CMAKE.count("src/worker_smart_render_runtime.cpp") == 1
+    assert "smart_render_runtime::execute(" in MAIN
+    assert "smart_dispatch::dispatch(" in RENDER_RUNTIME
+    assert "smart_finalize::finalize(" in RENDER_RUNTIME
 
 
 def test_smart_admission_and_error_priority_are_preserved():

@@ -3,6 +3,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 MAIN = (ROOT / "minihost/src/l2_main.cpp").read_text(encoding="utf-8")
 SOURCE = (ROOT / "minihost/src/worker_smart_finalize.cpp").read_text(encoding="utf-8")
+RUNTIME = (ROOT / "minihost/src/worker_smart_render_runtime.cpp").read_text(encoding="utf-8")
 CMAKE = (ROOT / "minihost/CMakeLists.txt").read_text(encoding="utf-8")
 
 
@@ -14,7 +15,7 @@ def test_smart_finalize_cleanup_has_a_compiled_owner():
     assert "state.hosted_layers.clear()" in SOURCE
     assert "render::copy_packed_world" in SOURCE
     assert "render::finite_float_world" in SOURCE
-    assert "smart_finalize::finalize(" in MAIN
+    assert "smart_finalize::finalize(" in RUNTIME
 
 
 def test_finalize_preserves_output_validation_and_error_priority():

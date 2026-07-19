@@ -19,6 +19,8 @@ PF_WORLD_TRANSFORM_SOURCE = ROOT / "minihost" / "src" / "worker_pf_world_transfo
 PF_ANSI_RUNTIME_SOURCE = ROOT / "minihost" / "src" / "worker_pf_ansi_runtime.cpp"
 HOST_SUITE_CATALOG_SOURCE = ROOT / "minihost" / "src" / "worker_host_suite_catalog.cpp"
 PARAMETER_EXECUTION_SOURCE = ROOT / "minihost" / "src" / "worker_parameter_execution.cpp"
+UI_EVENT_EXECUTION_SOURCE = ROOT / "minihost" / "src" / "worker_ui_event_execution.cpp"
+ENTRY_BOOTSTRAP_SOURCE = ROOT / "minihost" / "src" / "worker_entry_bootstrap.cpp"
 RENDER_HEADER = ROOT / "minihost" / "src" / "render_subsystem.h"
 RENDER_SOURCE = ROOT / "minihost" / "src" / "render_subsystem.cpp"
 REPORT_HEADER = ROOT / "minihost" / "src" / "worker_report.hpp"
@@ -55,6 +57,7 @@ SMART_RUNTIME_SOURCE = ROOT / "minihost" / "src" / "worker_smart_runtime.cpp"
 SMART_SETUP_SOURCE = ROOT / "minihost" / "src" / "worker_smart_setup.cpp"
 SMART_DISPATCH_SOURCE = ROOT / "minihost" / "src" / "worker_smart_dispatch.cpp"
 SMART_FINALIZE_SOURCE = ROOT / "minihost" / "src" / "worker_smart_finalize.cpp"
+SMART_RENDER_RUNTIME_SOURCE = ROOT / "minihost" / "src" / "worker_smart_render_runtime.cpp"
 CLASSIC_EXECUTION_SOURCE = ROOT / "minihost" / "src" / "worker_classic_execution.cpp"
 AEGP_COMPAT_SELFTEST_HEADER = ROOT / "minihost" / "src" / "worker_aegp_compat_selftests.hpp"
 MASK_RUNTIME_HEADER = ROOT / "minihost" / "src" / "worker_mask_runtime.hpp"
@@ -75,8 +78,11 @@ def l2_family_source():
         PF_ANSI_RUNTIME_SOURCE,
         HOST_SUITE_CATALOG_SOURCE,
         PARAMETER_EXECUTION_SOURCE,
+        UI_EVENT_EXECUTION_SOURCE,
+        ENTRY_BOOTSTRAP_SOURCE,
         SMART_RUNTIME_SOURCE, SMART_SETUP_SOURCE, SMART_DISPATCH_SOURCE,
         SMART_FINALIZE_SOURCE,
+        SMART_RENDER_RUNTIME_SOURCE,
         CLASSIC_EXECUTION_SOURCE,
         AEGP_SCENE_SOURCE, AEGP_SCENE_HEADER, AEGP_SCENE_RUNTIME_HEADER,
         AEGP_SCENE_RUNTIME_SOURCE, AEGP_INIT_RUNTIME_HEADER, AEGP_INIT_RUNTIME_SOURCE,
@@ -343,8 +349,9 @@ class MinihostL2SourceTests(unittest.TestCase):
         self.assertIn("struct Telemetry", transform)
         self.assertIn("struct Context", transform)
         self.assertIn("bounded_argb8_world", transform)
-        self.assertIn("configure_pf_host_context(pf_host_context)", l2)
-        self.assertIn("pf_host_context_configured()", l2)
+        bootstrap = ENTRY_BOOTSTRAP_SOURCE.read_text(encoding="utf-8")
+        self.assertIn("configure_pf_host_context(hooks.pf)", bootstrap)
+        self.assertIn("pf_host_context_configured()", bootstrap)
 
     def test_batch_sampling_suite_is_typed_and_fail_closed(self):
         text = l2_family_source()
@@ -1168,7 +1175,7 @@ class MinihostL2SourceTests(unittest.TestCase):
         for marker in (
             'L"draw:v1"',
             "g_render_draw_enabled",
-            "dispatch_render_draw(entry, input, command_output, definitions)",
+            "hooks.dispatch_render_draw",
             "custom_ui_draw_dispatched",
             "custom_ui_draw_error",
             "custom_ui_draw_out_flags",
@@ -1195,7 +1202,7 @@ class MinihostL2SourceTests(unittest.TestCase):
             'L"--l2-drag-event"',
             "target.drag_steps < 1 || target.drag_steps > 32",
             "write<int32_t>(extra, 8, 3)",
-            "write<uint8_t>(extra, 73, step == drag_steps ? 1 : 0)",
+            "write<uint8_t>(extra, 73, step == r.drag_steps ? 1 : 0)",
             "g_ui_drag_requested",
             "g_ui_drag_terminated",
             "ui_transform_point_simple",
@@ -1211,7 +1218,7 @@ class MinihostL2SourceTests(unittest.TestCase):
             "drawbot_path_point",
             "registered_layer_ui",
             "event_target = drag_event_mode || ui_mouse_exited_mode ||",
-            "g_ui_context.window_type != 2",
+            "r.window_type != 2",
         ):
             self.assertIn(marker, text)
 
