@@ -275,6 +275,27 @@ def test_session_survives_a_frame_local_time_scale_mismatch():
             process.communicate(timeout=30)
 
 
+def test_session_rejects_frames_outside_the_declared_timeline():
+    _require_artifacts()
+    transport = SessionTransport()
+    process = _spawn(transport)
+    try:
+        transport.write_input(63, 1)
+        transport.send(render_frame_message(0, -1))
+        done = transport.receive()
+        assert done["status"] == "error"
+        assert done["render_error"] == -46
+        transport.send(render_frame_message(0, 0))
+        assert transport.receive()["status"] == "ok"
+        transport.send({"v": 1, "type": "close"})
+        code, _, stderr = _finish(process)
+        assert code == 0, (code, stderr[-500:])
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.communicate(timeout=30)
+
+
 def test_session_close_after_frame_local_error_exits_cleanly():
     _require_artifacts()
     transport = SessionTransport()

@@ -4913,6 +4913,7 @@ RenderSessionOutcome run_render_session(
   constexpr int32_t kSessionGuardViolation = -43;
   constexpr int32_t kSessionDimensionMismatch = -44;
   constexpr int32_t kSessionOutputValidationError = -45;
+  constexpr int32_t kSessionTimeOutOfRange = -46;
 
   RenderSessionOutcome outcome;
   const wrs::SessionGeometry geometry{max_width, max_height, pixel_bytes, 0};
@@ -5030,6 +5031,15 @@ RenderSessionOutcome run_render_session(
     if (static_cast<uint32_t>(current_scale) != time_scale) {
       // Frame-local diagnostic: the session continues, the broker decides.
       if (!respond_error(kSessionTimeScaleMismatch)) {
+        outcome.protocol_violation = true;
+        break;
+      }
+      continue;
+    }
+    if (current_time < 0 || current_time > total_time) {
+      // Same range contract the one-shot parser enforces on its launch time:
+      // frames outside the declared timeline are rejected before rendering.
+      if (!respond_error(kSessionTimeOutOfRange)) {
         outcome.protocol_violation = true;
         break;
       }
