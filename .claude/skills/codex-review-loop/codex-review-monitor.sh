@@ -145,9 +145,7 @@ while true; do
   if [ -n "$react_clean_ts" ] && { [ -z "$newest_clean" ] || [[ "$react_clean_ts" > "$newest_clean" ]]; }; then
     newest_clean=$react_clean_ts
   fi
-  # >= (not >): a finding in the same second as the clean cannot be ordered
-  # against it (second-resolution timestamps) — treat it as superseding.
-  if [ -n "$find_ts" ] && { [ -z "$newest_clean" ] || [[ ! "$find_ts" < "$newest_clean" ]]; }; then
+  if [ -n "$(codex_finding_supersedes_clean "$find_ts" "$newest_clean")" ]; then
     findings=$(codex_findings <<<"$new_pr_comments" | grep -v '^$' || true)
     if [ -n "$findings" ]; then echo "$findings"; exit 0; fi
   fi
@@ -158,13 +156,13 @@ while true; do
 
   # 3. Mergeable CLEAN: a SHA-bound text clean, no newer finding. This is exactly
   #    what the guard will accept (owner gate already passed in step 1).
-  if [ -n "$text_clean_ts" ] && { [ -z "$find_ts" ] || [[ "$find_ts" < "$text_clean_ts" ]]; }; then
+  if [ -n "$text_clean_ts" ] && [ -z "$(codex_finding_supersedes_clean "$find_ts" "$text_clean_ts")" ]; then
     echo "CLEAN: codex clean for head ${head:0:10}"; exit 0
   fi
 
   # 4. Reaction-only advisory: Codex +1 on the PR body, not SHA-bound. Not
   #    mergeable by the guard; the operator must re-trigger for a text clean.
-  if [ -n "$react_clean_ts" ] && { [ -z "$find_ts" ] || [[ "$find_ts" < "$react_clean_ts" ]]; }; then
+  if [ -n "$react_clean_ts" ] && [ -z "$(codex_finding_supersedes_clean "$find_ts" "$react_clean_ts")" ]; then
     echo "CLEAN-REACTION: codex +1 on PR body for head ${head:0:10} (no SHA-bound text clean; re-trigger @codex review for a mergeable verdict)"; exit 0
   fi
 done

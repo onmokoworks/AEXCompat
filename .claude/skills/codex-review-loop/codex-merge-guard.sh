@@ -70,11 +70,8 @@ clean_ts=$(codex_clean_ts_for_head "$head" <<<"$issue_comments")
 if [ -z "$clean_ts" ]; then
   echo "REFUSE: no SHA-bound Codex clean for current head ${head:0:10} (a +1 reaction alone is not mergeable; re-trigger @codex review)"; exit 1
 fi
-# >= (not >): timestamps are second-resolution, so a finding in the same
-# second as the clean cannot be ordered against it — fail closed and require
-# a fresh clean.
 find_ts=$(codex_finding_max_ts <<<"$pr_comments")
-if [ -n "$find_ts" ] && [[ ! "$find_ts" < "$clean_ts" ]]; then
+if [ -n "$(codex_finding_supersedes_clean "$find_ts" "$clean_ts")" ]; then
   echo "REFUSE: Codex findings at or after the clean"; exit 1
 fi
 
