@@ -1,4 +1,5 @@
 from pathlib import Path
+import re
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -22,6 +23,12 @@ def test_session_is_the_single_post_admission_module_owner():
     assert "FreeLibrary(module)" not in MAIN
     assert MAIN.count("session.finish(") >= 10
     assert "FreeLibrary(module_);" in SOURCE
+
+
+def test_post_acquisition_returns_finalize_through_the_session():
+    owned = MAIN[MAIN.index("WorkerSession session("):
+                 MAIN.index("int aexcompat::worker_target::run")]
+    assert re.search(r"\breturn\s+\d+\s*;", owned) is None
 
 
 def test_terminal_cleanup_order_is_explicit_and_idempotent():

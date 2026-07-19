@@ -17422,7 +17422,7 @@ int worker_main_impl(int argc, wchar_t **argv) {
   case_id = request_mode ? "request" : "";
   if (!request_mode) {
     for (const wchar_t* p = argv[4]; *p; ++p) {
-      if (*p > 0x7f) return 2;
+      if (*p > 0x7f) return session.finish(2);
       case_id.push_back(static_cast<char>(*p));
     }
   }
@@ -17593,7 +17593,10 @@ int worker_main_impl(int argc, wchar_t **argv) {
       (smart_opencl ? "gpu_opencl_float32" :
        (smart_directx ? "gpu_directx_float32" : "request"))) : "";
   if (!request_mode)
-    for (const wchar_t* p = argv[4]; *p; ++p) { if (*p > 0x7f) return 2; case_id.push_back(static_cast<char>(*p)); }
+    for (const wchar_t* p = argv[4]; *p; ++p) {
+      if (*p > 0x7f) return session.finish(2);
+      case_id.push_back(static_cast<char>(*p));
+    }
   std::cerr << "stage:smart_render_begin\n" << std::flush;
   smart = params_error == 0 && image_render_supported && depth_supported &&
       smart_render_supported
