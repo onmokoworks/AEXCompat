@@ -1398,15 +1398,9 @@ std::mutex g_world_mutex;
 
 constexpr int32_t kSyntheticCompWidth = 17;
 constexpr int32_t kSyntheticCompHeight = 9;
-std::array<uint8_t, 4> g_render_options_baseline8{};
-std::array<uint8_t, 4> g_render_options_time8{};
-std::array<uint8_t, 4> g_render_options_downsample8{};
-std::array<uint8_t, 4> g_render_options_roi_outside8{};
-std::array<uint8_t, 4> g_render_options_roi_inside8{};
-std::array<uint8_t, 4> g_render_options_field_excluded8{};
-std::array<uint8_t, 4> g_render_options_matte8{};
-std::array<uint16_t, 4> g_render_options_argb16{};
-std::array<float, 4> g_render_options_argb32f{};
+// The g_render_options_* probe fixtures moved to their writer,
+// worker_aegp_render_selftests.cpp (issue #126 Phase D); the declarations in
+// its header keep the custom-selftest hook wiring below resolving.
 bool g_synthetic_receipt_test_mode{};
 int32_t __cdecl app_get_personal_info(char* info) {
   if (!info) return 4;
