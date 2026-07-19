@@ -1151,11 +1151,8 @@ auto& g_drawbot_fill_colors = g_custom_ui_telemetry.drawbot_fill_colors;
 // Receipt test-mode storage moved to aexcompat::render_receipts::
 // receipt_test_state() (issue #126 Phase D).
 auto& g_async_manager = aexcompat::render_receipts::receipt_test_state().async_manager;
-int32_t __cdecl get_context_async_manager(void* input, void* extra, void** manager) {
-  if (!input || !extra || !manager) return 4;
-  *manager = &g_async_manager;
-  return 0;
-}
+// get_context_async_manager moved to worker_l2_render_abi.cpp (issue #170).
+int32_t __cdecl get_context_async_manager(void* input, void* extra, void** manager);
 
 
 constexpr int32_t kSyntheticCompWidth = 17;
@@ -2034,105 +2031,6 @@ bool close_render_ui_context(EffectEntry entry, std::array<std::byte, kInSize>& 
   return g_render_ui_context_closed;
 }
 
-int32_t __cdecl add_param(void*, int32_t index, void* definition) {
-  if (!definition || g_params.size() >= kMaxParams) return 4;
-  std::array<std::byte, kParamSize> bytes{};
-  std::memcpy(bytes.data(), definition, bytes.size());
-  const char* name = reinterpret_cast<const char*>(bytes.data() + kParamName);
-  const auto length = strnlen_s(name, kParamNameSize);
-  const int32_t host_index = index < 0 ? static_cast<int32_t>(g_params.size() + 1) : index;
-  if (host_index <= 0 || host_index > static_cast<int32_t>(kMaxParams) ||
-      std::any_of(g_params.begin(), g_params.end(),
-                  [host_index](const auto& param) { return param.index == host_index; })) return 4;
-  ParamRecord record{host_index, read<int32_t>(bytes, 0), read<int32_t>(bytes, kParamType),
-                     read<uint32_t>(bytes, kParamFlags), std::string(name, length)};
-  constexpr std::size_t u = 56;
-  if (record.type == 1) {
-    record.has_numeric = true;
-    record.valid_min = read<int32_t>(bytes, u + 68);
-    record.valid_max = read<int32_t>(bytes, u + 72);
-    record.slider_min = read<int32_t>(bytes, u + 76);
-    record.slider_max = read<int32_t>(bytes, u + 80);
-    record.default_value = read<int32_t>(bytes, u + 84);
-  } else if (record.type == 2) {
-    record.has_numeric = true;
-    record.has_current = true;
-    record.current_value = read<int32_t>(bytes, u) / 65536.0;
-    record.valid_min = read<int32_t>(bytes, u + 68) / 65536.0;
-    record.valid_max = read<int32_t>(bytes, u + 72) / 65536.0;
-    record.slider_min = read<int32_t>(bytes, u + 76) / 65536.0;
-    record.slider_max = read<int32_t>(bytes, u + 80) / 65536.0;
-    record.default_value = read<int32_t>(bytes, u + 84) / 65536.0;
-    record.precision = read<int16_t>(bytes, u + 88);
-  } else if (record.type == 7) {
-    record.has_numeric = true;
-    record.valid_min = 1;
-    record.valid_max = read<int16_t>(bytes, u + 4);
-    record.slider_min = record.valid_min;
-    record.slider_max = record.valid_max;
-    record.default_value = read<int16_t>(bytes, u + 6);
-    const char* choices = read<const char*>(bytes, u + 8);
-    if (choices) record.choices.assign(choices, strnlen_s(choices, 4096));
-  } else if (record.type == 4) {
-    record.has_numeric = true;
-    record.has_current = true;
-    record.valid_min = 0;
-    record.valid_max = 1;
-    record.slider_min = 0;
-    record.slider_max = 1;
-    record.default_value = read<uint8_t>(bytes, u + 4) ? 1 : 0;
-    record.current_value = read<int32_t>(bytes, u) != 0 ? 1 : 0;
-    const char* label = read<const char*>(bytes, u + 8);
-    if (label) record.label.assign(label, strnlen_s(label, 4096));
-  } else if (record.type == 0) {
-    record.layer_default = read<int32_t>(bytes, u + 116);
-  } else if (record.type == 12) {
-    record.has_numeric = true;
-    record.valid_min = 0;
-    record.valid_max = 1024;
-    record.slider_min = 0;
-    record.slider_max = 1024;
-    record.default_value = read<int32_t>(bytes, u + 8);
-  } else if (record.type == 10) {
-    record.has_numeric = true;
-    record.valid_min = read<float>(bytes, u + 48);
-    record.valid_max = read<float>(bytes, u + 52);
-    record.slider_min = read<float>(bytes, u + 56);
-    record.slider_max = read<float>(bytes, u + 60);
-    record.default_value = read<float>(bytes, u + 64);
-    record.precision = read<int16_t>(bytes, u + 68);
-  } else if (record.type == 5) {
-    record.has_color = true;
-    std::memcpy(record.current_color.data(), bytes.data() + u, record.current_color.size());
-    std::memcpy(record.default_color.data(), bytes.data() + u + 4, record.default_color.size());
-    for (std::size_t channel = 0; channel < 4; ++channel) {
-      record.current_float_color[channel] = record.current_color[channel] / 255.0f;
-      record.default_float_color[channel] = record.default_color[channel] / 255.0f;
-    }
-  } else if (record.type == 3) {
-    record.component_count = 1;
-    record.current_components[0] = read<int32_t>(bytes, u) / 65536.0;
-    record.default_components[0] = read<int32_t>(bytes, u + 4) / 65536.0;
-  } else if (record.type == 6) {
-    record.component_count = 2;
-    record.current_components[0] = read<int32_t>(bytes, u) / 65536.0;
-    record.current_components[1] = read<int32_t>(bytes, u + 4) / 65536.0;
-    record.default_components[0] = read<int32_t>(bytes, u + 12) / 65536.0;
-    record.default_components[1] = read<int32_t>(bytes, u + 16) / 65536.0;
-  } else if (record.type == 18) {
-    record.component_count = 3;
-    for (int component = 0; component < 3; ++component) {
-      record.current_components[component] = read<double>(bytes, u + component * 8);
-      record.default_components[component] = read<double>(bytes, u + 24 + component * 8);
-    }
-  } else if (record.type == 15) {
-    const char* label = read<const char*>(bytes, u + 8);
-    if (label) record.label.assign(label, strnlen_s(label, 4096));
-  }
-  record.raw = bytes;
-  g_params.push_back(std::move(record));
-  return 0;
-}
 
 
 // The legacy AEGP effect stream (v2) and effect-param-union (v3) callbacks
@@ -2158,78 +2056,15 @@ int32_t __cdecl get_platform_data(void* effect_ref, int32_t which, void* data) {
 
 // The PF parameter checkout/checkin callbacks and their balance accounting
 // moved to their owner, worker_param_checkout_runtime.cpp (issue #170).
-int32_t __cdecl set_options_button_name(void* effect_ref, const char* name) {
-  if (!effect_ref || !name) return 4;
-  const std::size_t length = strnlen_s(name, 256);
-  if (length == 256) return 4;
-  g_options_button_name.assign(name, length);
-  ++g_options_button_name_calls;
-  return 0;
-}
 
 bool sha256(const std::filesystem::path& path, std::string& result);
-int32_t __cdecl duck_quack(uint16_t times) {
-  if (times > 64) return 4;
-  g_duck_quacks += times;
-  return 0;
-}
+int32_t __cdecl add_param(void*, int32_t index, void* definition);
+// The classic host callbacks (duck_quack/abort_render/report_progress), the
+// custom-UI registration/adv-app-info callbacks, add_param, and
+// set_options_button_name moved to their owners (issue #170):
+// worker_classic_runtime.cpp, worker_drawbot_runtime.cpp, and
+// worker_parameter_execution.cpp.
 
-int32_t __cdecl abort_render(void* effect_ref) {
-  if (!effect_ref) return 4;
-  ++g_abort_calls;
-  return 0;
-}
-
-int32_t __cdecl report_progress(void* effect_ref, int32_t current, int32_t total) {
-  if (!effect_ref || total <= 0 || current < 0 || current > total) return 4;
-  ++g_progress_calls;
-  g_last_progress_current = current;
-  g_last_progress_total = total;
-  return 0;
-}
-
-int32_t __cdecl register_custom_ui(void* effect_ref, const void* custom_ui_info) {
-  if (effect_ref != &g_effect || !custom_ui_info) return 4;
-  std::array<std::byte, 44> bytes{};
-  std::memcpy(bytes.data(), custom_ui_info, bytes.size());
-  CustomUiRegistration registration{
-      read<uint32_t>(bytes, 4), read<int32_t>(bytes, 8), read<int32_t>(bytes, 12),
-      read<int32_t>(bytes, 16), read<int32_t>(bytes, 20), read<int32_t>(bytes, 24),
-      read<int32_t>(bytes, 28), read<int32_t>(bytes, 32), read<int32_t>(bytes, 36),
-      read<int32_t>(bytes, 40)};
-  const auto valid_dimension = [](int32_t value) { return value >= 0 && value <= 8192; };
-  if ((registration.events & ~15u) != 0 ||
-      !valid_dimension(registration.comp_width) ||
-      !valid_dimension(registration.comp_height) ||
-      !valid_dimension(registration.layer_width) ||
-      !valid_dimension(registration.layer_height) ||
-      !valid_dimension(registration.preview_width) ||
-      !valid_dimension(registration.preview_height)) {
-    ++g_invalid_custom_ui_registrations;
-    return 4;
-  }
-  g_custom_ui_registration = registration;
-  ++g_register_ui_calls;
-  return 0;
-}
-
-int32_t __cdecl adv_app_info_text(const char* first, const char* second) {
-  if (!first || !second || strnlen_s(first, 256) == 256 || strnlen_s(second, 256) == 256)
-    return 4;
-  g_last_adv_app_info_text = std::string(first) + " | " + second;
-  ++g_adv_app_info_text_calls;
-  return 0;
-}
-
-int32_t __cdecl adv_app_info_text3(const char* first, const char* second,
-                                   const char* third) {
-  if (!first || !second || (third && strnlen_s(third, 256) == 256) ||
-      strnlen_s(first, 256) == 256 || strnlen_s(second, 256) == 256) return 4;
-  g_last_adv_app_info_text = std::string(first) + " | " + second;
-  if (third) g_last_adv_app_info_text += std::string(" | ") + third;
-  ++g_adv_app_info_text_calls;
-  return 0;
-}
 
 bool dispatch_conditional_ui_selectors(EffectEntry entry,
                                        std::array<std::byte, kInSize>& input,

@@ -778,3 +778,140 @@ std::string requested_parameters_json(const parameters::RequestedAssignments& re
 
 
 }  // namespace aexcompat::worker_runtime::parameter_execution
+
+// The PF add_param discovery callback and the options-button-name callback
+// moved from worker_main (issue #170); parameter records and UI state
+// already live in worker_runtime::parameters::state().
+namespace aexcompat::l2_detail {
+extern "C" int32_t __cdecl set_options_button_name(void*, const char*);
+namespace {
+constexpr std::size_t kMaxParams = 1024;
+constexpr std::size_t kParamSize =
+    aexcompat::worker_runtime::parameters::kDefinitionSize;
+constexpr std::size_t kParamType = 12;
+constexpr std::size_t kParamName = 16;
+constexpr std::size_t kParamNameSize = 32;
+constexpr std::size_t kParamFlags = 48;
+using aexcompat::worker_runtime::parameters::ParamRecord;
+auto& g_param_state = aexcompat::worker_runtime::parameters::state();
+auto& g_params = g_param_state.records;
+auto& g_options_button_name = g_param_state.ui.options_button_name;
+auto& g_options_button_name_calls = g_param_state.ui.options_button_name_calls;
+template <typename T, std::size_t N>
+T read(const std::array<std::byte, N>& bytes, std::size_t offset) {
+  T value{};
+  std::memcpy(&value, bytes.data() + offset, sizeof(value));
+  return value;
+}
+}  // namespace
+
+int32_t __cdecl add_param(void*, int32_t index, void* definition) {
+  if (!definition || g_params.size() >= kMaxParams) return 4;
+  std::array<std::byte, kParamSize> bytes{};
+  std::memcpy(bytes.data(), definition, bytes.size());
+  const char* name = reinterpret_cast<const char*>(bytes.data() + kParamName);
+  const auto length = strnlen_s(name, kParamNameSize);
+  const int32_t host_index = index < 0 ? static_cast<int32_t>(g_params.size() + 1) : index;
+  if (host_index <= 0 || host_index > static_cast<int32_t>(kMaxParams) ||
+      std::any_of(g_params.begin(), g_params.end(),
+                  [host_index](const auto& param) { return param.index == host_index; })) return 4;
+  ParamRecord record{host_index, read<int32_t>(bytes, 0), read<int32_t>(bytes, kParamType),
+                     read<uint32_t>(bytes, kParamFlags), std::string(name, length)};
+  constexpr std::size_t u = 56;
+  if (record.type == 1) {
+    record.has_numeric = true;
+    record.valid_min = read<int32_t>(bytes, u + 68);
+    record.valid_max = read<int32_t>(bytes, u + 72);
+    record.slider_min = read<int32_t>(bytes, u + 76);
+    record.slider_max = read<int32_t>(bytes, u + 80);
+    record.default_value = read<int32_t>(bytes, u + 84);
+  } else if (record.type == 2) {
+    record.has_numeric = true;
+    record.has_current = true;
+    record.current_value = read<int32_t>(bytes, u) / 65536.0;
+    record.valid_min = read<int32_t>(bytes, u + 68) / 65536.0;
+    record.valid_max = read<int32_t>(bytes, u + 72) / 65536.0;
+    record.slider_min = read<int32_t>(bytes, u + 76) / 65536.0;
+    record.slider_max = read<int32_t>(bytes, u + 80) / 65536.0;
+    record.default_value = read<int32_t>(bytes, u + 84) / 65536.0;
+    record.precision = read<int16_t>(bytes, u + 88);
+  } else if (record.type == 7) {
+    record.has_numeric = true;
+    record.valid_min = 1;
+    record.valid_max = read<int16_t>(bytes, u + 4);
+    record.slider_min = record.valid_min;
+    record.slider_max = record.valid_max;
+    record.default_value = read<int16_t>(bytes, u + 6);
+    const char* choices = read<const char*>(bytes, u + 8);
+    if (choices) record.choices.assign(choices, strnlen_s(choices, 4096));
+  } else if (record.type == 4) {
+    record.has_numeric = true;
+    record.has_current = true;
+    record.valid_min = 0;
+    record.valid_max = 1;
+    record.slider_min = 0;
+    record.slider_max = 1;
+    record.default_value = read<uint8_t>(bytes, u + 4) ? 1 : 0;
+    record.current_value = read<int32_t>(bytes, u) != 0 ? 1 : 0;
+    const char* label = read<const char*>(bytes, u + 8);
+    if (label) record.label.assign(label, strnlen_s(label, 4096));
+  } else if (record.type == 0) {
+    record.layer_default = read<int32_t>(bytes, u + 116);
+  } else if (record.type == 12) {
+    record.has_numeric = true;
+    record.valid_min = 0;
+    record.valid_max = 1024;
+    record.slider_min = 0;
+    record.slider_max = 1024;
+    record.default_value = read<int32_t>(bytes, u + 8);
+  } else if (record.type == 10) {
+    record.has_numeric = true;
+    record.valid_min = read<float>(bytes, u + 48);
+    record.valid_max = read<float>(bytes, u + 52);
+    record.slider_min = read<float>(bytes, u + 56);
+    record.slider_max = read<float>(bytes, u + 60);
+    record.default_value = read<float>(bytes, u + 64);
+    record.precision = read<int16_t>(bytes, u + 68);
+  } else if (record.type == 5) {
+    record.has_color = true;
+    std::memcpy(record.current_color.data(), bytes.data() + u, record.current_color.size());
+    std::memcpy(record.default_color.data(), bytes.data() + u + 4, record.default_color.size());
+    for (std::size_t channel = 0; channel < 4; ++channel) {
+      record.current_float_color[channel] = record.current_color[channel] / 255.0f;
+      record.default_float_color[channel] = record.default_color[channel] / 255.0f;
+    }
+  } else if (record.type == 3) {
+    record.component_count = 1;
+    record.current_components[0] = read<int32_t>(bytes, u) / 65536.0;
+    record.default_components[0] = read<int32_t>(bytes, u + 4) / 65536.0;
+  } else if (record.type == 6) {
+    record.component_count = 2;
+    record.current_components[0] = read<int32_t>(bytes, u) / 65536.0;
+    record.current_components[1] = read<int32_t>(bytes, u + 4) / 65536.0;
+    record.default_components[0] = read<int32_t>(bytes, u + 12) / 65536.0;
+    record.default_components[1] = read<int32_t>(bytes, u + 16) / 65536.0;
+  } else if (record.type == 18) {
+    record.component_count = 3;
+    for (int component = 0; component < 3; ++component) {
+      record.current_components[component] = read<double>(bytes, u + component * 8);
+      record.default_components[component] = read<double>(bytes, u + 24 + component * 8);
+    }
+  } else if (record.type == 15) {
+    const char* label = read<const char*>(bytes, u + 8);
+    if (label) record.label.assign(label, strnlen_s(label, 4096));
+  }
+  record.raw = bytes;
+  g_params.push_back(std::move(record));
+  return 0;
+}
+
+int32_t __cdecl set_options_button_name(void* effect_ref, const char* name) {
+  if (!effect_ref || !name) return 4;
+  const std::size_t length = strnlen_s(name, 256);
+  if (length == 256) return 4;
+  g_options_button_name.assign(name, length);
+  ++g_options_button_name_calls;
+  return 0;
+}
+
+}  // namespace aexcompat::l2_detail
