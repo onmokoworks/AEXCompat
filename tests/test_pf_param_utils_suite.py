@@ -6,6 +6,7 @@ import source_owners
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = source_owners.L2_MAIN
+PARAM_SUITES = ROOT / "minihost" / "src" / "worker_pf_param_suites.cpp"
 PF_STATE_RUNTIME = ROOT / "minihost" / "src" / "worker_pf_state_runtime.cpp"
 SELFTEST_SOURCE = ROOT / "minihost" / "src" / "worker_parameter_selftests.cpp"
 
@@ -48,7 +49,7 @@ def test_param_utils_suite3_has_the_frozen_typed_nine_slot_abi():
 
 def test_param_utils_suite3_integrates_state_and_constant_keyframe_models():
     source = "\n".join(path.read_text(encoding="utf-8") for path in
-                       (SOURCE, PF_STATE_RUNTIME, SELFTEST_SOURCE))
+                       (SOURCE, PARAM_SUITES, PF_STATE_RUNTIME, SELFTEST_SOURCE))
     for marker in (
         "canonical_param_state_snapshot",
         "g_pf_state_registry.emplace",
