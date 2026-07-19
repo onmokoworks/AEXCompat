@@ -47,6 +47,24 @@ class MinihostL2SourceTests(unittest.TestCase):
         self.assertIn('L"--l2"', text)
         self.assertIn("guard_bytes_intact", text)
 
+    def test_suite_timeline_is_structured_and_selector_bound(self):
+        text = SOURCE.read_text(encoding="utf-8")
+        for marker in (
+            "struct SuiteTimelineEvent",
+            "kMaxSuiteTimeline = 65536",
+            "record_suite_event_locked",
+            "suite_timeline_report_json",
+            '\\"suite_timeline\\"',
+            "g_suite_selector = effect_selector_name(command)",
+            "record_suite_event_locked(true, safe_name, version, 0)",
+            "record_suite_acquire_failure(safe_copy, version, 1)",
+            "record_suite_event_locked(false, safe_name, version, released ? 0 : 1)",
+            "copy_suite_name_seh",
+            "std::array<char, kMaxSuiteName + 8> unterminated",
+            "--self-test-suite-name-guards",
+        ):
+            self.assertIn(marker, text)
+
     def test_l2_provides_bounded_movable_handle_callbacks(self):
         text = SOURCE.read_text(encoding="utf-8")
         for marker in ("kUtilsSize = 552", "kUtilsNewHandle = 160", "new_handle(uint64_t size)",
@@ -284,7 +302,9 @@ class MinihostL2SourceTests(unittest.TestCase):
         for marker in ("rect_width <= 4096", "rect_height <= 4096",
                        "rect_width * rect_height <= 16'777'216",
                        "write<int32_t>(input, 276", "write<int32_t>(input, 280",
-                       "result.output_width", "result.output_height"):
+                       "result.output_width", "result.output_height",
+                       "extent_hint\\\":{\\\"left\\\":0,\\\"top\\\":0,\\\"right\\\":",
+                       "smart.output_width << \",\\\"bottom\\\":\" << smart.output_height"):
             self.assertIn(marker, text)
 
     def test_classic_render_defaults_extent_hint_to_the_full_input_world(self):

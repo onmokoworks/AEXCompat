@@ -64,7 +64,7 @@ def test_all_effectmain_calls_share_the_cumulative_audit_boundary():
                      SOURCE.index("struct ParamRecord")]
     assert "capture_module_audit_phase();" in wrapper
     assert "module_audit_passed() ? error : 512" in wrapper
-    assert "return audited_effect_call(entry, command" in wrapper
+    assert "result = audited_effect_call(entry, command" in wrapper
     assert "return invoke_entry_seh(entry, command" in wrapper
     assert "#define entry(...) guarded_effect_call(entry, __VA_ARGS__)" in wrapper
 

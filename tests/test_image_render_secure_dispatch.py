@@ -48,7 +48,9 @@ def test_gpu_initial_dispatch_is_policy_bound_and_cpu_retry_remains_policy_free(
     assert "dispatch_secure_gpu_image(" in body
     assert "authenticate_gpu_worker_report(" in body
     assert "dispatch_secure_image(initial_dispatch)?" in body
-    assert body.count("dispatch_secure_image(SecureImageDispatch") == 1
+    # Auto SmartFX may use one secure CPU dispatch for a GPU preflight
+    # fallback and another for a worker-reported GPU failure retry.
+    assert body.count("dispatch_secure_image(SecureImageDispatch") == 2
     assert "args_before_plugin[0] = image_worker_command(" in body
     assert "RenderGpuBackend::Cpu," in body
     assert "run_isolated" not in body
