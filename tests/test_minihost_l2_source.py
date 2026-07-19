@@ -22,6 +22,8 @@ CLASSIC_RUNTIME_SOURCE = ROOT / "minihost" / "src" / "worker_classic_runtime.cpp
 SELFTEST_DISPATCH_SOURCE = ROOT / "minihost" / "src" / "worker_selftest_dispatch.cpp"
 REQUEST_PARSER_HEADER = ROOT / "minihost" / "src" / "worker_request_parser.hpp"
 REQUEST_PARSER_SOURCE = ROOT / "minihost" / "src" / "worker_request_parser.cpp"
+RENDER_REPORT_HEADER = ROOT / "minihost" / "src" / "worker_render_report.hpp"
+RENDER_REPORT_SOURCE = ROOT / "minihost" / "src" / "worker_render_report.cpp"
 PF_SUITES_INTERNAL = ROOT / "minihost" / "src" / "worker_pf_suites_internal.hpp"
 AEGP_SCENE_SOURCE = ROOT / "minihost" / "src" / "worker_aegp_scene.cpp"
 AEGP_SCENE_HEADER = ROOT / "minihost" / "src" / "worker_aegp_scene.hpp"
@@ -62,6 +64,20 @@ class MinihostL2SourceTests(unittest.TestCase):
             self.assertIn(marker, parser)
         self.assertNotIn("std::ifstream layer_file", worker)
         self.assertNotIn("std::ifstream file(argv[5]", worker)
+
+    def test_render_reports_are_snapshotted_before_stdout(self):
+        worker = SOURCE.read_text(encoding="utf-8")
+        header = RENDER_REPORT_HEADER.read_text(encoding="utf-8")
+        implementation = RENDER_REPORT_SOURCE.read_text(encoding="utf-8")
+        cmake = MINIHOST_CMAKE.read_text(encoding="utf-8")
+
+        self.assertIn("src/worker_render_report.cpp", cmake)
+        self.assertIn("class ReportSnapshot", header)
+        self.assertIn("stream_.copyfmt(formatting_source)", implementation)
+        self.assertEqual(worker.count("worker_render_report::ReportSnapshot"), 2)
+        self.assertEqual(worker.count("worker_render_report::emit(report_snapshot"), 2)
+        self.assertNotIn('std::cout << "{\\\"schema_version\\\":1,\\\"stage\\\":\\\"classic_render', worker)
+        self.assertNotIn('std::cout << "{\\\"schema_version\\\":1,\\\"stage\\\":\\\"smartfx_render', worker)
 
     def test_aegp_scene_runtime_owns_shared_types_catalog_and_state(self):
         header = AEGP_SCENE_RUNTIME_HEADER.read_text(encoding="utf-8")

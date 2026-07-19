@@ -56,6 +56,7 @@ set(AEXCOMPAT_WORKER_RUNTIME_CORE_SOURCES
     src/worker_pf_adv_time_suite.cpp
     src/worker_report.cpp
     src/worker_request_parser.cpp
+    src/worker_render_report.cpp
     src/worker_render_receipts.cpp
     src/worker_suite_abi.cpp
     src/worker_world_registry.cpp

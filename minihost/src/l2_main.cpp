@@ -83,6 +83,7 @@
 #include "worker_pf_adv_time_suite.hpp"
 #include "worker_report.hpp"
 #include "worker_request_parser.hpp"
+#include "worker_render_report.hpp"
 #include "worker_render_receipts.hpp"
 #include "worker_target.hpp"
 
@@ -15372,7 +15373,8 @@ int worker_main_impl(int argc, wchar_t **argv) {
   const auto classic_diagnostics =
       aexcompat::worker_runtime::classic::diagnostics();
   restore_native_stdout();
-  std::cout << "{\"schema_version\":1,\"stage\":\"classic_render\",\"status\":\""
+  aexcompat::worker_render_report::ReportSnapshot report_snapshot(std::cout);
+  report_snapshot.stream() << "{\"schema_version\":1,\"stage\":\"classic_render\",\"status\":\""
             << (render_error == 0 && parameter_count_contract_valid && guards_intact &&
                 arbitrary_defaults_disposed && g_invalid_arbitrary_operations == 0 &&
                 handle_lifetimes_balanced() && world_lifetimes_balanced() &&
@@ -15623,10 +15625,12 @@ int worker_main_impl(int argc, wchar_t **argv) {
             << ",\"requested_invert_map\":" << static_cast<int32_t>(requested_value(requested_parameters, L"invert_map"))
             << ",\"render_performed\":" << (nop_render_advertised ? "false" : "true")
             << ",\"module_audit\":" << module_audit_json() << "}\n";
+  aexcompat::worker_render_report::emit(report_snapshot, std::cout);
   } else if (is_smart_worker()) {
   restore_native_stdout();
   const auto mask_report = aexcompat::mask_runtime::snapshot();
-  std::cout << "{\"schema_version\":1,\"stage\":\"smartfx_render\",\"status\":\""
+  aexcompat::worker_render_report::ReportSnapshot report_snapshot(std::cout);
+  report_snapshot.stream() << "{\"schema_version\":1,\"stage\":\"smartfx_render\",\"status\":\""
             << (smart.pre_error == 0 && smart.render_error == 0 &&
                 parameter_count_contract_valid && smart.rects_valid &&
                 arbitrary_defaults_disposed && g_invalid_arbitrary_operations == 0 &&
@@ -15859,6 +15863,7 @@ int worker_main_impl(int argc, wchar_t **argv) {
             << ",\"requested_invert_map\":" << static_cast<int32_t>(requested_value(requested_parameters, L"invert_map"))
             << ",\"render_performed\":" << (nop_render_advertised ? "false" : "true")
             << ",\"module_audit\":" << module_audit_json() << "}\n";
+  aexcompat::worker_render_report::emit(report_snapshot, std::cout);
   } else {
   report(global_error == 0 && params_error == 0 ? "selectors_completed" : "selector_error",
          global_error, params_error, setdown_error, output, about_message, lifecycle_errors, lifecycle_data_null);
