@@ -2410,6 +2410,127 @@ std::optional<int> dispatch_worker_selftests(int argc, wchar_t** argv) {
   return std::nullopt;
 }
 
+// L2 parameter-lifecycle probe (issue #171): the non-rendering inspection
+// path's sequence/frame selector walk, user-changed-param dispatch, and
+// conditional-UI pass, extracted verbatim from worker_main_impl. Returns an
+// exit code when the requested assignments are rejected (global setdown has
+// already run), std::nullopt otherwise.
+std::optional<int> run_l2_parameter_lifecycle(EffectEntry entry,
+    std::array<std::byte, kInSize>& input, std::array<std::byte, kOutSize>& output,
+    int32_t global_error, int32_t params_error,
+    std::array<int32_t, 5>& lifecycle_errors, bool& lifecycle_data_null,
+    bool& user_changed_ok, bool& conditional_ui_ok) {
+  std::vector<std::array<std::byte, kParamSize>> lifecycle_definitions(g_params.size() + 1);
+  std::array<unsigned char, 4> lifecycle_pixel{255, 0, 0, 0};
+  std::array<std::byte, 120> lifecycle_world{};
+  write<void*>(lifecycle_world, 24, lifecycle_pixel.data());
+  write<int32_t>(lifecycle_world, 32, 4); write<int32_t>(lifecycle_world, 36, 1);
+  write<int32_t>(lifecycle_world, 40, 1); write_rect(lifecycle_world.data() + 44, 1, 1);
+  std::memcpy(lifecycle_definitions[0].data() + 56, lifecycle_world.data(), lifecycle_world.size());
+  for (std::size_t i = 0; i < g_params.size(); ++i) {
+    lifecycle_definitions[i + 1] = g_params[i].raw;
+    if (g_params[i].type == 1 || g_params[i].type == 7)
+      write<int32_t>(lifecycle_definitions[i + 1], 56, static_cast<int32_t>(g_params[i].default_value));
+    else if (g_params[i].type == 4)
+      write<int32_t>(lifecycle_definitions[i + 1], 56, g_params[i].default_value != 0 ? 1 : 0);
+    else if (g_params[i].type == 2)
+      write<int32_t>(lifecycle_definitions[i + 1], 56,
+          static_cast<int32_t>(std::round(g_params[i].default_value * 65536.0)));
+    else if (g_params[i].type == 10)
+      write<double>(lifecycle_definitions[i + 1], 56, g_params[i].default_value);
+    else if (g_params[i].type == 3)
+      write<int32_t>(lifecycle_definitions[i + 1], 56,
+          static_cast<int32_t>(std::round(g_params[i].default_components[0] * 65536.0)));
+    else if (g_params[i].type == 6) {
+      write<int32_t>(lifecycle_definitions[i + 1], 56,
+          static_cast<int32_t>(std::round(g_params[i].default_components[0] * 65536.0)));
+      write<int32_t>(lifecycle_definitions[i + 1], 60,
+          static_cast<int32_t>(std::round(g_params[i].default_components[1] * 65536.0)));
+    } else if (g_params[i].type == 18) {
+      for (int component = 0; component < 3; ++component)
+        write<double>(lifecycle_definitions[i + 1], 56 + component * 8,
+            g_params[i].default_components[component]);
+    }
+  }
+  if (g_user_changed_param_requested &&
+      !apply_requested_assignments(lifecycle_definitions, g_user_changed_parameters)) {
+    if (global_error == 0)
+      invoke_global_setdown(entry, input.data(), output.data());
+    return 3;
+  }
+  std::vector<void*> lifecycle_params(lifecycle_definitions.size());
+  for (std::size_t i = 0; i < lifecycle_definitions.size(); ++i)
+    lifecycle_params[i] = lifecycle_definitions[i].data();
+  struct LifecycleCheckoutDefinitionsScope {
+    ~LifecycleCheckoutDefinitionsScope() {
+      g_checkout_layer_definitions.clear();
+      std::lock_guard<std::mutex> lock(g_param_checkout_mutex);
+      g_live_param_checkouts.clear();
+    }
+  } lifecycle_checkout_definitions_scope;
+  g_checkout_layer_definitions.clear();
+  for (std::size_t i = 0; i < lifecycle_definitions.size(); ++i)
+    g_checkout_layer_definitions[static_cast<int32_t>(i)] = lifecycle_definitions[i];
+  {
+    std::lock_guard<std::mutex> lock(g_param_checkout_mutex);
+    g_live_param_checkouts.clear();
+    g_param_checkout_calls = g_param_checkin_calls = g_invalid_param_checkins = 0;
+    g_automatic_param_checkins = 0;
+  }
+  std::cerr << "stage:sequence_setup_begin\n" << std::flush;
+  lifecycle_errors[0] = params_error == 0
+      ? invoke_sequence_selector(entry, kSequenceSetup, input.data(), output.data())
+      : -1;
+  std::cerr << "stage:sequence_setup_end error=" << lifecycle_errors[0] << "\n" << std::flush;
+  write<void*>(input, kInSequenceData, read<void*>(output, kOutSequenceData));
+  if (lifecycle_errors[0] == 0 && g_user_changed_param_requested) {
+    const auto offset = static_cast<std::size_t>(g_user_changed_param_slot - 1);
+    if (offset >= g_params.size() || (g_params[offset].flags & (1u << 6)) == 0) {
+      g_user_changed_param_error = 4;
+    } else {
+      std::array<std::byte, 4> changed_extra{};
+      write<int32_t>(changed_extra, 0, g_user_changed_param_slot);
+      g_user_changed_param_active = true;
+      g_active_ui_params = lifecycle_params.data();
+      g_active_ui_param_count = lifecycle_params.size();
+      g_user_changed_param_error = entry(kUserChangedParam, input.data(), output.data(),
+          lifecycle_params.data(), nullptr, changed_extra.data());
+      g_active_ui_params = nullptr;
+      g_active_ui_param_count = 0;
+      g_user_changed_param_active = false;
+    }
+  }
+  user_changed_ok = lifecycle_errors[0] == 0 &&
+      (!g_user_changed_param_requested || g_user_changed_param_error == 0);
+  conditional_ui_ok = user_changed_ok && dispatch_conditional_ui_selectors(
+      entry, input, output, lifecycle_params.data());
+  if (conditional_ui_ok) {
+    for (std::size_t i = 0; i < g_params.size(); ++i)
+      g_params[i].raw = lifecycle_definitions[i + 1];
+  }
+  std::cerr << "stage:sequence_resetup_begin\n" << std::flush;
+  lifecycle_errors[1] = lifecycle_errors[0] == 0
+      ? invoke_sequence_selector(entry, kSequenceResetup, input.data(), output.data()) : -1;
+  std::cerr << "stage:sequence_resetup_end error=" << lifecycle_errors[1] << "\n" << std::flush;
+  write<void*>(input, kInSequenceData, read<void*>(output, kOutSequenceData));
+  std::cerr << "stage:frame_setup_begin\n" << std::flush;
+  lifecycle_errors[2] = lifecycle_errors[1] == 0 ? entry(kFrameSetup, input.data(), output.data(), lifecycle_params.data(), lifecycle_world.data(), nullptr) : -1;
+  std::cerr << "stage:frame_setup_end error=" << lifecycle_errors[2] << "\n" << std::flush;
+  write<void*>(input, kInFrameData, read<void*>(output, kOutFrameData));
+  std::cerr << "stage:frame_setdown_begin\n" << std::flush;
+  lifecycle_errors[3] = lifecycle_errors[2] == 0 ? entry(kFrameSetdown, input.data(), output.data(), lifecycle_params.data(), lifecycle_world.data(), nullptr) : -1;
+  std::cerr << "stage:frame_setdown_end error=" << lifecycle_errors[3] << "\n" << std::flush;
+  if (lifecycle_errors[3] == 0) write<void*>(output, kOutFrameData, nullptr);
+  std::cerr << "stage:sequence_setdown_begin\n" << std::flush;
+  lifecycle_errors[4] = lifecycle_errors[3] == 0
+      ? invoke_sequence_selector(entry, kSequenceSetdown, input.data(), output.data()) : -1;
+  std::cerr << "stage:sequence_setdown_end error=" << lifecycle_errors[4] << "\n" << std::flush;
+  if (lifecycle_errors[4] == 0) write<void*>(output, kOutSequenceData, nullptr);
+  lifecycle_data_null = read<void*>(output, kOutSequenceData) == nullptr &&
+      read<void*>(output, kOutFrameData) == nullptr;
+  return std::nullopt;
+}
+
 int worker_main_impl(int argc, wchar_t **argv) {
   if (const int bootstrap_error = configure_worker_entry_bootstrap())
     return bootstrap_error;
@@ -2804,114 +2925,10 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
   bool user_changed_ok = false;
   bool conditional_ui_ok = false;
   if (!is_rendering_worker()) {
-  std::vector<std::array<std::byte, kParamSize>> lifecycle_definitions(g_params.size() + 1);
-  std::array<unsigned char, 4> lifecycle_pixel{255, 0, 0, 0};
-  std::array<std::byte, 120> lifecycle_world{};
-  write<void*>(lifecycle_world, 24, lifecycle_pixel.data());
-  write<int32_t>(lifecycle_world, 32, 4); write<int32_t>(lifecycle_world, 36, 1);
-  write<int32_t>(lifecycle_world, 40, 1); write_rect(lifecycle_world.data() + 44, 1, 1);
-  std::memcpy(lifecycle_definitions[0].data() + 56, lifecycle_world.data(), lifecycle_world.size());
-  for (std::size_t i = 0; i < g_params.size(); ++i) {
-    lifecycle_definitions[i + 1] = g_params[i].raw;
-    if (g_params[i].type == 1 || g_params[i].type == 7)
-      write<int32_t>(lifecycle_definitions[i + 1], 56, static_cast<int32_t>(g_params[i].default_value));
-    else if (g_params[i].type == 4)
-      write<int32_t>(lifecycle_definitions[i + 1], 56, g_params[i].default_value != 0 ? 1 : 0);
-    else if (g_params[i].type == 2)
-      write<int32_t>(lifecycle_definitions[i + 1], 56,
-          static_cast<int32_t>(std::round(g_params[i].default_value * 65536.0)));
-    else if (g_params[i].type == 10)
-      write<double>(lifecycle_definitions[i + 1], 56, g_params[i].default_value);
-    else if (g_params[i].type == 3)
-      write<int32_t>(lifecycle_definitions[i + 1], 56,
-          static_cast<int32_t>(std::round(g_params[i].default_components[0] * 65536.0)));
-    else if (g_params[i].type == 6) {
-      write<int32_t>(lifecycle_definitions[i + 1], 56,
-          static_cast<int32_t>(std::round(g_params[i].default_components[0] * 65536.0)));
-      write<int32_t>(lifecycle_definitions[i + 1], 60,
-          static_cast<int32_t>(std::round(g_params[i].default_components[1] * 65536.0)));
-    } else if (g_params[i].type == 18) {
-      for (int component = 0; component < 3; ++component)
-        write<double>(lifecycle_definitions[i + 1], 56 + component * 8,
-            g_params[i].default_components[component]);
-    }
-  }
-  if (g_user_changed_param_requested &&
-      !apply_requested_assignments(lifecycle_definitions, g_user_changed_parameters)) {
-    if (global_error == 0)
-      invoke_global_setdown(entry, input.data(), output.data());
-    return session.finish(3);
-  }
-  std::vector<void*> lifecycle_params(lifecycle_definitions.size());
-  for (std::size_t i = 0; i < lifecycle_definitions.size(); ++i)
-    lifecycle_params[i] = lifecycle_definitions[i].data();
-  struct LifecycleCheckoutDefinitionsScope {
-    ~LifecycleCheckoutDefinitionsScope() {
-      g_checkout_layer_definitions.clear();
-      std::lock_guard<std::mutex> lock(g_param_checkout_mutex);
-      g_live_param_checkouts.clear();
-    }
-  } lifecycle_checkout_definitions_scope;
-  g_checkout_layer_definitions.clear();
-  for (std::size_t i = 0; i < lifecycle_definitions.size(); ++i)
-    g_checkout_layer_definitions[static_cast<int32_t>(i)] = lifecycle_definitions[i];
-  {
-    std::lock_guard<std::mutex> lock(g_param_checkout_mutex);
-    g_live_param_checkouts.clear();
-    g_param_checkout_calls = g_param_checkin_calls = g_invalid_param_checkins = 0;
-    g_automatic_param_checkins = 0;
-  }
-  std::cerr << "stage:sequence_setup_begin\n" << std::flush;
-  lifecycle_errors[0] = params_error == 0
-      ? invoke_sequence_selector(entry, kSequenceSetup, input.data(), output.data())
-      : -1;
-  std::cerr << "stage:sequence_setup_end error=" << lifecycle_errors[0] << "\n" << std::flush;
-  write<void*>(input, kInSequenceData, read<void*>(output, kOutSequenceData));
-  if (lifecycle_errors[0] == 0 && g_user_changed_param_requested) {
-    const auto offset = static_cast<std::size_t>(g_user_changed_param_slot - 1);
-    if (offset >= g_params.size() || (g_params[offset].flags & (1u << 6)) == 0) {
-      g_user_changed_param_error = 4;
-    } else {
-      std::array<std::byte, 4> changed_extra{};
-      write<int32_t>(changed_extra, 0, g_user_changed_param_slot);
-      g_user_changed_param_active = true;
-      g_active_ui_params = lifecycle_params.data();
-      g_active_ui_param_count = lifecycle_params.size();
-      g_user_changed_param_error = entry(kUserChangedParam, input.data(), output.data(),
-          lifecycle_params.data(), nullptr, changed_extra.data());
-      g_active_ui_params = nullptr;
-      g_active_ui_param_count = 0;
-      g_user_changed_param_active = false;
-    }
-  }
-  user_changed_ok = lifecycle_errors[0] == 0 &&
-      (!g_user_changed_param_requested || g_user_changed_param_error == 0);
-  conditional_ui_ok = user_changed_ok && dispatch_conditional_ui_selectors(
-      entry, input, output, lifecycle_params.data());
-  if (conditional_ui_ok) {
-    for (std::size_t i = 0; i < g_params.size(); ++i)
-      g_params[i].raw = lifecycle_definitions[i + 1];
-  }
-  std::cerr << "stage:sequence_resetup_begin\n" << std::flush;
-  lifecycle_errors[1] = lifecycle_errors[0] == 0
-      ? invoke_sequence_selector(entry, kSequenceResetup, input.data(), output.data()) : -1;
-  std::cerr << "stage:sequence_resetup_end error=" << lifecycle_errors[1] << "\n" << std::flush;
-  write<void*>(input, kInSequenceData, read<void*>(output, kOutSequenceData));
-  std::cerr << "stage:frame_setup_begin\n" << std::flush;
-  lifecycle_errors[2] = lifecycle_errors[1] == 0 ? entry(kFrameSetup, input.data(), output.data(), lifecycle_params.data(), lifecycle_world.data(), nullptr) : -1;
-  std::cerr << "stage:frame_setup_end error=" << lifecycle_errors[2] << "\n" << std::flush;
-  write<void*>(input, kInFrameData, read<void*>(output, kOutFrameData));
-  std::cerr << "stage:frame_setdown_begin\n" << std::flush;
-  lifecycle_errors[3] = lifecycle_errors[2] == 0 ? entry(kFrameSetdown, input.data(), output.data(), lifecycle_params.data(), lifecycle_world.data(), nullptr) : -1;
-  std::cerr << "stage:frame_setdown_end error=" << lifecycle_errors[3] << "\n" << std::flush;
-  if (lifecycle_errors[3] == 0) write<void*>(output, kOutFrameData, nullptr);
-  std::cerr << "stage:sequence_setdown_begin\n" << std::flush;
-  lifecycle_errors[4] = lifecycle_errors[3] == 0
-      ? invoke_sequence_selector(entry, kSequenceSetdown, input.data(), output.data()) : -1;
-  std::cerr << "stage:sequence_setdown_end error=" << lifecycle_errors[4] << "\n" << std::flush;
-  if (lifecycle_errors[4] == 0) write<void*>(output, kOutSequenceData, nullptr);
-  lifecycle_data_null = read<void*>(output, kOutSequenceData) == nullptr &&
-      read<void*>(output, kOutFrameData) == nullptr;
+    if (const auto lifecycle_exit = run_l2_parameter_lifecycle(
+            entry, input, output, global_error, params_error, lifecycle_errors,
+            lifecycle_data_null, user_changed_ok, conditional_ui_ok))
+      return session.finish(*lifecycle_exit);
   }
   std::string case_id;
   std::string input_hash;
@@ -3001,28 +3018,39 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
   std::cerr << "stage:global_setdown_begin\n" << std::flush;
   const int32_t setdown_error = global_error == 0
       ? invoke_global_setdown(entry, input.data(), output.data()) : -1;
-  if (is_smart_worker() && invocation.suite_release_without_acquire_mode)
-    suite_fault_observed = verify_suite_release_without_acquire_rejected();
-  if (is_smart_worker() && invocation.handle_resize_while_locked_mode)
-    handle_fault_observed = verify_handle_resize_while_locked_rejected();
-  if (is_smart_worker() && invocation.world_double_dispose_mode)
-    world_fault_observed = verify_world_double_dispose_rejected();
-  if (is_smart_worker() && invocation.world_allocation_limit_mode)
-    world_fault_observed = verify_world_allocation_limit_rejected();
-  if (is_smart_worker() && invocation.pixel_format_registry_mode)
-    pixel_format_fault_observed = verify_pixel_format_registry_rejection();
-  if (is_smart_worker() && invocation.outline_mutation_mode)
-    outline_fault_observed = verify_outline_mutation_rejection();
-  if (is_smart_worker() && invocation.mask_attribute_mode)
-    mask_attribute_fault_observed = verify_mask_attribute_and_ownership_rejection();
-  if (is_smart_worker() && invocation.stream_metadata_ownership_mode)
-    stream_metadata_fault_observed = verify_stream_metadata_and_ownership_rejection();
-  if (is_smart_worker() && invocation.keyframe_ownership_mode)
-    keyframe_fault_observed = verify_keyframe_ownership_rejection();
-  if (is_smart_worker() && invocation.dynamic_stream_tree_mode)
-    dynamic_stream_fault_observed = verify_dynamic_stream_tree_rejection();
-  if (is_smart_worker() && invocation.aegp_memory_strings_mode)
-    aegp_memory_fault_observed = verify_aegp_memory_and_strings_rejection();
+  // Smart-worker fault-injection probes as a handler table (issue #171):
+  // each requested mode runs its verifier in the same order as before.
+  const struct SmartFaultProbe {
+    bool requested;
+    bool (*verify)();
+    bool* observed;
+  } smart_fault_probes[] = {
+      {invocation.suite_release_without_acquire_mode,
+       &verify_suite_release_without_acquire_rejected, &suite_fault_observed},
+      {invocation.handle_resize_while_locked_mode,
+       &verify_handle_resize_while_locked_rejected, &handle_fault_observed},
+      {invocation.world_double_dispose_mode,
+       &verify_world_double_dispose_rejected, &world_fault_observed},
+      {invocation.world_allocation_limit_mode,
+       &verify_world_allocation_limit_rejected, &world_fault_observed},
+      {invocation.pixel_format_registry_mode,
+       &verify_pixel_format_registry_rejection, &pixel_format_fault_observed},
+      {invocation.outline_mutation_mode,
+       &verify_outline_mutation_rejection, &outline_fault_observed},
+      {invocation.mask_attribute_mode,
+       &verify_mask_attribute_and_ownership_rejection, &mask_attribute_fault_observed},
+      {invocation.stream_metadata_ownership_mode,
+       &verify_stream_metadata_and_ownership_rejection, &stream_metadata_fault_observed},
+      {invocation.keyframe_ownership_mode,
+       &verify_keyframe_ownership_rejection, &keyframe_fault_observed},
+      {invocation.dynamic_stream_tree_mode,
+       &verify_dynamic_stream_tree_rejection, &dynamic_stream_fault_observed},
+      {invocation.aegp_memory_strings_mode,
+       &verify_aegp_memory_and_strings_rejection, &aegp_memory_fault_observed},
+  };
+  if (is_smart_worker())
+    for (const auto& probe : smart_fault_probes)
+      if (probe.requested) *probe.observed = probe.verify();
   std::cerr << "stage:global_setdown_end error=" << setdown_error << "\n" << std::flush;
   if (!session.prepare_protocol_report()) return session.finish(14);
   if (is_render_worker()) {
