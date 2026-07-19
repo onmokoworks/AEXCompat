@@ -156,6 +156,11 @@ u32 LE の長さ接頭辞 + UTF-8 JSON 本文。1 メッセージ上限 64 KiB (
 - `status`: `"ok"` | `"error"`。`"error"` のうち**フレーム局所の互換性診断**
   (selector 非 0、`render_error` 非 0、時刻 scale 不一致) のみセッション
   継続可能で、続行判断は broker 側 (バッチ CLI は既定で中断)。
+- **SEQUENCE_SETUP の失敗も継続不可**: 遅延発行された SETUP が非 0 を返した
+  セッションは何もレンダーできないため、専用コード (-47) の error 応答を
+  最後に受理を停止する。broker はこれをフレーム局所診断として再利用させず
+  セッションを無効化する (plug-in 自身の setup エラー値は最終レポートの
+  `persistent_sequence_setup_error` が運ぶ)。
 - **host-protection invariant の失敗は継続不可**: `guards_intact` false、
   出力 bounds/寸法検証の失敗、generation 不一致、ヘッダ改変の検出は
   フレーム局所エラーではなくセッション無効化。worker は該当 frame_done を
@@ -194,8 +199,11 @@ suite イベント (現行の bounded 記録)、lifecycle セレクタの発行�
 
 ```
 launch → admit_worker_entry → AEX ロード → GLOBAL_SETUP → ABOUT →
-PARAMS_SETUP (effect_bootstrap::run) → SEQUENCE_SETUP (1 回、
-invoke_sequence_selector と同経路で publish_effect_sequence) →
+PARAMS_SETUP (effect_bootstrap::run) → SEQUENCE_SETUP (1 回。発行は最初に
+レンダーに到達した render_frame の受信時で、in_data にはそのフレームの
+current_time を seed する — one-shot が SEQUENCE_SETUP 前に要求時刻を seed
+するのと同じ観測になる。invoke_sequence_selector と同経路で
+publish_effect_sequence) →
   loop {
     render_frame 受信 → 入力スロット読取・検証 →
     apply_parameter_animation(current_time, time_scale) →

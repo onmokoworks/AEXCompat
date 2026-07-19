@@ -59,12 +59,14 @@ pub const EXIT_INVARIANT_FAILURE: u32 = 24;
 
 /// The worker's reserved session error codes that accompany a host-protection
 /// invariant failure (`l2_main.cpp` `kSessionGenerationMismatch` ..
-/// `kSessionOutputValidationError`). The worker exits fail-closed right after
-/// sending such a response, so the broker must invalidate the session rather
-/// than surface them as reusable frame-local diagnostics. Time-scale (-40)
-/// and time-range (-46) rejections stay frame-local by the worker's contract.
+/// `kSessionOutputValidationError`) or a failed deferred SEQUENCE_SETUP
+/// (`kSessionSequenceSetupFailed`, -47: the session can never render). The
+/// worker exits fail-closed right after sending such a response, so the
+/// broker must invalidate the session rather than surface them as reusable
+/// frame-local diagnostics. Time-scale (-40) and time-range (-46) rejections
+/// stay frame-local by the worker's contract.
 fn is_fatal_session_error(render_error: i64) -> bool {
-    matches!(render_error, -45..=-41)
+    matches!(render_error, -47 | -45..=-41)
 }
 
 const MAGIC_OFFSET: usize = 0;
@@ -1538,8 +1540,9 @@ mod tests {
 
     #[test]
     fn fatal_session_error_codes_match_the_worker_contract() {
-        // kSessionGenerationMismatch .. kSessionOutputValidationError.
-        for code in [-41, -42, -43, -44, -45] {
+        // kSessionGenerationMismatch .. kSessionOutputValidationError, plus
+        // the deferred-setup failure (-47).
+        for code in [-41, -42, -43, -44, -45, -47] {
             assert!(is_fatal_session_error(code), "{code} is session-fatal");
         }
         // Time-scale (-40) and time-range (-46) rejections are frame-local,
