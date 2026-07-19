@@ -10,8 +10,12 @@ set -uo pipefail
 CODEX_LOGINS='["chatgpt-codex-connector","chatgpt-codex-connector[bot]"]'
 OWNER_LOGINS='["onmokoworks","naari3"]'
 # Bodies Codex emits when a review did not actually run (rate-limit, auth,
-# transient error). Not a finding and not clean.
-CODEX_ERROR_RE='Something went wrong|Unknown error|To use Codex here'
+# transient error). Anchored to the START of the body (the observed messages
+# open with "Codex Review: Something went wrong ..." — with "Unknown error" in
+# a fence below — or "To use Codex here, ..."): a real finding that merely
+# QUOTES one of these phrases (this repo's own files contain them) must stay a
+# finding, or a stale same-head clean would outlive it in the monitor/guard.
+CODEX_ERROR_RE='^[[:space:]]*(Codex Review: (Something went wrong|Unknown error)|To use Codex here)'
 
 # CLEAN only when a Codex issue-comment says "Didn't find any major issues" AND
 # its "Reviewed commit" SHA is a prefix of the given (full) head SHA. Codex

@@ -118,6 +118,20 @@ def test_codex_clean_is_not_an_error() -> None:
     assert _call("codex_error", payload) == ""
 
 
+def test_finding_quoting_an_error_phrase_stays_a_finding() -> None:
+    # The error check is anchored to the start of the body: a genuine finding
+    # that merely QUOTES an error phrase (this repo's own files contain
+    # `Unknown error` / `Something went wrong`) must stay a finding, or a stale
+    # same-head clean would outlive it in the monitor and the merge guard.
+    body = ("**P2 Badge  Narrow Codex error filtering**\n\nWhen a review body "
+            "contains `Unknown error` or `Something went wrong`, ...")
+    payload = [{"user": {"login": "chatgpt-codex-connector[bot]"}, "id": 5,
+                "path": "x.sh", "line": 14, "created_at": "2026-07-18T23:17:48Z", "body": body}]
+    assert _call("codex_error", payload) == ""
+    assert "FINDING id=5" in _call("codex_findings", payload)
+    assert _call("codex_finding_max_ts", payload) == "2026-07-18T23:17:48Z"
+
+
 # --- owner_blocking_reviews: state-based gate, incl. bodyless CHANGES_REQUESTED
 
 def test_bodyless_changes_requested_blocks() -> None:
