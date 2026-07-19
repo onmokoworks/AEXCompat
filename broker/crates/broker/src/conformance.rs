@@ -461,10 +461,16 @@ fn classify_report(path: RenderPath, report: &Value) -> Option<RuntimeFailure> {
             retry_classic: true,
         });
     }
+    let nonzero_error = |key| {
+        report
+            .get(key)
+            .and_then(Value::as_i64)
+            .filter(|error| *error != 0)
+    };
     let selector_error = selector_error(report, path)
-        .or_else(|| report.get("pre_render_error").and_then(Value::as_i64))
-        .or_else(|| report.get("smart_render_error").and_then(Value::as_i64))
-        .filter(|error| *error != 0);
+        .filter(|error| *error != 0)
+        .or_else(|| nonzero_error("pre_render_error"))
+        .or_else(|| nonzero_error("smart_render_error"));
     if selector_error.is_some() {
         return Some(RuntimeFailure {
             classification: Classification::SelectorError,
@@ -1003,6 +1009,23 @@ mod tests {
         assert_eq!(failure.classification, Classification::SelectorError);
         assert_eq!(failure.selector_error, Some(25));
         assert!(!failure.retry_classic);
+    }
+
+    #[test]
+    fn smartfx_uses_first_nonzero_selector_error() {
+        for (field, code) in [("pre_render_error", 25), ("smart_render_error", 516)] {
+            let mut report = json!({
+                "smart_render_selector_error": 0,
+                "pre_render_error": 0,
+                "smart_render_error": 0,
+                "output_pixels_valid": false
+            });
+            report[field] = json!(code);
+
+            let failure = classify_report(RenderPath::Smartfx, &report).expect("classification");
+            assert_eq!(failure.classification, Classification::SelectorError);
+            assert_eq!(failure.selector_error, Some(code));
+        }
     }
 
     #[test]
