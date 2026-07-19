@@ -1,5 +1,7 @@
 import hashlib
 import json
+import math
+import struct
 import subprocess
 import unittest
 from pathlib import Path
@@ -81,24 +83,73 @@ if __name__ == "__main__":
     unittest.main()
 
 
-def _expected_output(raw, width, height):
+def _float32(value):
+    return struct.unpack("<f", struct.pack("<f", value))[0]
+
+
+def _lround(value):
+    lower = math.floor(value)
+    return int(lower) + (1 if value - lower >= 0.5 else 0)
+
+
+def _expected_output(raw, width, height, format_name):
+    # Mirrors the worker exactly: rgba8_to_argb promotion into the input world,
+    # then nearest/subpixel/area sampling in double, then the per-depth store
+    # (lround with clamp for integer worlds, a float cast for the float world).
+    maximum = {"argb8": 255.0, "argb16": 32768.0, "argb32f": 1.0}[format_name]
+    float_world = format_name == "argb32f"
+
+    def promote(value):
+        if format_name == "argb16":
+            return float((value * 32768 + 127) // 255)
+        if float_world:
+            return _float32(value / 255.0)
+        return float(value)
+
     def pixel(x, y):
         if x < 0 or y < 0 or x >= width or y >= height:
-            return (0, 0, 0, 0)
+            return (0.0, 0.0, 0.0, 0.0)
         offset = (y * width + x) * 4
-        return tuple(raw[offset:offset + 4])
+        return tuple(promote(value) for value in raw[offset:offset + 4])
+
+    def quantize(values):
+        if float_world:
+            return tuple(_float32(value) for value in values)
+        return tuple(min(max(_lround(value), 0), int(maximum))
+                     for value in values)
 
     x, y = width // 2, height // 2
-    neighbors = [pixel(x, y), pixel(x + 1, y),
-                 pixel(x, y + 1), pixel(x + 1, y + 1)]
-    subpixel = tuple(round(sum(p[c] for p in neighbors) / 4) for c in range(4))
-    alpha_sum = sum(p[3] for p in neighbors)
-    area = tuple(round(sum(p[c] * p[3] for p in neighbors) / alpha_sum)
-                 for c in range(3)) + (round(alpha_sum / 4),)
-    samples = [pixel(x, y), pixel(x + 1, y + 1), subpixel, area,
-               pixel(0, y), (0, 0, 0, 0)]
-    return bytes(channel for row in range(height) for column in range(width)
-                 for channel in samples[column % len(samples)])
+
+    def subpixel():
+        values = []
+        for channel in range(4):
+            value = 0.0
+            for dy in (0, 1):
+                for dx in (0, 1):
+                    value += pixel(x + dx, y + dy)[channel] * 0.25
+            values.append(value)
+        return quantize(values)
+
+    def area():
+        weighted_alpha = 0.0
+        weighted_color = [0.0, 0.0, 0.0]
+        for dy in (0, 1):
+            for dx in (0, 1):
+                sample = pixel(x + dx, y + dy)
+                alpha = sample[3] / maximum
+                weighted_alpha += 0.25 * alpha
+                for channel in range(3):
+                    weighted_color[channel] += 0.25 * alpha * sample[channel]
+        colors = [weighted_color[channel] / weighted_alpha
+                  if weighted_alpha > 0.0 else 0.0 for channel in range(3)]
+        return quantize(colors + [weighted_alpha / 1.0 * maximum])
+
+    samples = [quantize(pixel(x, y)), quantize(pixel(x + 1, y + 1)),
+               subpixel(), area(), quantize(pixel(0, y)),
+               quantize((0.0, 0.0, 0.0, 0.0))]
+    layout = {"argb8": "<4B", "argb16": "<4H", "argb32f": "<4f"}[format_name]
+    return b"".join(struct.pack(layout, *samples[column % len(samples)])
+                    for row in range(height) for column in range(width))
 
 
 @pytest.mark.parametrize(("mode", "format_name"), (
@@ -121,4 +172,5 @@ def test_real_probe_depth_matrix_has_numeric_oracle(tmp_path, mode, format_name)
     assert report["suite_leases_balanced"] is True
     assert report["guard_bytes_intact"] is True
     assert report["last_seh_exception_code"] == 0
-    assert output.read_bytes() == _expected_output(INPUT.read_bytes(), 37, 23)
+    assert output.read_bytes() == _expected_output(
+        INPUT.read_bytes(), 37, 23, format_name)

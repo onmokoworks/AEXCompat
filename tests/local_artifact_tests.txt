@@ -36,10 +36,4 @@ tests/test_sdk_grabba_update_menu.py::test_official_sdk_grabba_update_menu_dispa
 tests/test_sdk_grabba_update_menu.py::test_official_sdk_grabba_idle_and_command_hooks_dispatch_successfully
 tests/test_sdk_supervisor_param_utils_result.py::test_real_supervisor_artifact_and_param_utils_selftest_are_authenticated
 tests/test_world_snapshot_dump_cli.py::test_world_dumps_and_row_channel_checksums_match_the_raw_output
-# 16/32bpc probe expectations are stale against the deep raw output of the
-# current worker (issue #74); keep them out of built_artifact until fixed.
-tests/test_pf_sampling_probe.py::test_real_probe_depth_matrix_has_numeric_oracle[--render-image16-argb16]
-tests/test_pf_sampling_probe.py::test_real_probe_depth_matrix_has_numeric_oracle[--render-image32-argb32f]
-tests/test_pf_aegp_layer_receipt_probe.py::test_real_probe_checks_out_typed_upstream_pixels_during_ordinary_render[--render-image16-16]
-tests/test_pf_aegp_layer_receipt_probe.py::test_real_probe_checks_out_typed_upstream_pixels_during_ordinary_render[--render-image32-32]
 tests/test_observe_known_functions.py::LiveObservationIntegrationTests::test_run_observation_end_to_end
