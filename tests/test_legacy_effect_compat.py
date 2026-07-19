@@ -13,6 +13,7 @@ SOURCES = (
     ROOT / "minihost" / "src" / "worker_aegp_scene.hpp",
     ROOT / "minihost" / "src" / "worker_pf_suites.cpp",
     ROOT / "minihost" / "src" / "worker_pf_suites_internal.hpp",
+    ROOT / "minihost" / "src" / "worker_selftest_dispatch.cpp",
 )
 SUITE_ABI = ROOT / "minihost" / "src" / "worker_suite_abi.hpp"
 

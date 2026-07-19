@@ -65,6 +65,7 @@
 #include "worker_selector_dispatch.hpp"
 #include "worker_runtime_admission.hpp"
 #include "worker_session.hpp"
+#include "worker_selftest_dispatch.hpp"
 #include "worker_smart_runtime.hpp"
 #include "worker_aegp_render_options.hpp"
 #include "worker_aegp_scene.hpp"
@@ -14668,63 +14669,15 @@ int worker_main_impl(int argc, wchar_t **argv) {
   configure_selector_dispatch_audit(&capture_module_audit_phase,
                                     &module_audit_passed);
   configure_selector_dispatch_trace(&record_selector_dispatch);
-  if (argc == 2 && std::wstring(argv[1]) == L"--self-test-aegp-projector-levels") {
-    const bool passed = verify_aegp_projector_levels();
-    std::cout << "{\"projector_levels\":\""
-              << (passed ? "passed" : "failed")
-              << "\",\"catalog\":[\"ADBE Easy Levels\",\"ADBE Pro Levels\"],"
-                 "\"stream_suite\":{\"version\":7,\"slots\":22,\"size_x64\":176},"
-                 "\"index_zero_input\":true,\"simultaneous_stream_refs\":true,"
-                 "\"parameters\":[\"Input\",\"Input Black\",\"Input White\"],"
-                 "\"value_roundtrip\":true,\"reverse_dispose\":true,"
-                 "\"fail_closed\":true}\n";
-    return passed ? 0 : 71;
-  }
-  if (argc == 2 && std::wstring(argv[1]) == L"--self-test-aegp-effect-stack") {
-    const bool passed = verify_aegp_effect_stack();
-    std::cout << "{\"stack_mutation\":\"" << (passed ? "passed" : "failed")
-              << "\",\"suite_versions\":[2,3,4],\"slots\":{"
-                 "\"set_flags\":5,\"reorder\":6,\"delete\":10,"
-                 "\"duplicate\":16},\"fail_closed\":true}\n";
-    return passed ? 0 : 70;
-  }
-  if (argc == 2 && std::wstring(argv[1]) == L"--self-test-aegp-apply-effect") {
-    const bool passed = verify_aegp_apply_effect();
-    std::cout << "{\"aegp_apply_effect\":\"" << (passed ? "passed" : "failed")
-              << "\",\"suite_versions\":[2,3,4],\"apply_slot\":9,"
-                 "\"apply_offset_x64\":72,\"table_sizes_x64\":[136,136,176],"
-                 "\"instance_capacity\":" << kAegpEffectInstanceCapacity
-              << ",\"lease_capacity\":" << kAegpEffectLeaseCapacity
-              << ",\"fail_closed\":true}\n";
-    return passed ? 0 : 69;
-  }
-  if (argc == 2 && std::wstring(argv[1]) == L"--self-test-aegp-resizer-3d") {
-    const bool passed = verify_aegp_resizer_3d_chain();
-    std::cout << "{\"aegp_resizer_3d\":\"" << (passed ? "passed" : "failed")
-              << "\",\"layer_slot\":38,\"layer_offset_x64\":304,"
-                 "\"stream_slot\":16,\"stream_offset_x64\":128,"
-                 "\"comp_slot\":1,\"comp_offset_x64\":8,"
-                 "\"item_slot\":16,\"item_offset_x64\":128,"
-                 "\"zoom\":1920,\"dimensions\":[1920,1080]}\n";
-    return passed ? 0 : 68;
-  }
-  if (argc == 2 && std::wstring(argv[1]) == L"--self-test-aegp-get-effect-camera") {
-    const bool passed = verify_aegp_get_effect_camera();
-    std::cout << "{\"aegp_get_effect_camera\":\""
-              << (passed ? "passed" : "failed")
-              << "\",\"camera_slot\":3,\"camera_offset_x64\":24,"
-                 "\"matrix_slot\":4,\"matrix_offset_x64\":32,"
-                 "\"classic\":\"tested\",\"smart\":\"tested\"}\n";
-    return passed ? 0 : 67;
-  }
-  if (argc == 2 && std::wstring(argv[1]) == L"--self-test-legacy-effect-compat") {
-    const bool passed = verify_legacy_effect_compat_suites();
-    std::cout << "{\"legacy_effect_compat\":\""
-              << (passed ? "passed" : "failed")
-              << "\",\"comp_suite_version\":21,\"comp_slots\":41"
-                 ",\"pf_interface_slots\":5,\"helper_v1_slots\":1}\n";
-    return passed ? 0 : 39;
-  }
+  const aexcompat::worker_runtime::selftest::AegpHooks aegp_selftests{
+      &verify_aegp_projector_levels, &verify_aegp_effect_stack,
+      &verify_aegp_apply_effect, &verify_aegp_resizer_3d_chain,
+      &verify_aegp_get_effect_camera, &verify_legacy_effect_compat_suites,
+      kAegpEffectInstanceCapacity, kAegpEffectLeaseCapacity};
+  if (const auto selftest_exit =
+          aexcompat::worker_runtime::selftest::dispatch_aegp(
+              argc, argv, aegp_selftests))
+    return *selftest_exit;
   wchar_t cancel_gate[2]{};
   g_async_layer_cancel_test_gate = is_render_worker() &&
       GetEnvironmentVariableW(L"AEXCOMPAT_TEST_ASYNC_CANCEL_GATE", cancel_gate,
