@@ -3,6 +3,7 @@ import json
 import sys
 import time
 import unittest
+import uuid
 from pathlib import Path
 
 
@@ -25,7 +26,9 @@ ppm_fixture_tool = load_tool("ppm_fixture_tool")
 def create_ppm(name: str, width: int, height: int, pattern: str) -> Path:
     root = LAB_ROOT / "target" / "ppm-fixtures"
     root.mkdir(parents=True, exist_ok=True)
-    path = root / f"{time.time_ns()}-{name}.ppm"
+    # Windows' wall-clock resolution can return the same time_ns() value for
+    # consecutive calls, while the fixture writer intentionally uses create-new.
+    path = root / f"{uuid.uuid4().hex}-{name}.ppm"
     image = ppm_fixture_tool.generate_image(width, height, pattern)
     ppm_fixture_tool.write_ppm_create_new(path, image)
     return path

@@ -3,8 +3,11 @@ use serde_json::Value;
 use std::io;
 
 const MAX_MISSING_SUITES: usize = 16;
-const MAX_ERROR_TEXT_BYTES: usize = 64 * 1024;
-const MAX_ERROR_JSON_BYTES: usize = 32 * 1024;
+// A schema-valid native report can contain 65,536 bounded Suite events. Keep
+// failure parsing bounded, but large enough to retain that report instead of
+// truncating its JSON and degrading selector failures to `nonzero_exit`.
+const MAX_ERROR_TEXT_BYTES: usize = 32 * 1024 * 1024;
+const MAX_ERROR_JSON_BYTES: usize = 16 * 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -1101,6 +1104,35 @@ mod tests {
             collect_runtime_results(&mut backend, &[RenderPath::Classic], &[PixelDepth::Argb8]);
         assert_eq!(result[0].classification, Classification::MissingSuite);
         assert_eq!(result[0].suite_timeline.len(), 1);
+    }
+
+    #[test]
+    fn preserves_failure_reports_larger_than_32_kib() {
+        let timeline = (0..600)
+            .map(|sequence| {
+                json!({
+                    "sequence": sequence,
+                    "action": "acquire",
+                    "name": "PF Very Long Synthetic Conformance Suite Name For Failure Report",
+                    "version": 2,
+                    "selector": "PF Very Long Synthetic Selector Name For Failure Report",
+                    "result": 0
+                })
+            })
+            .collect::<Vec<_>>();
+        let report = json!({
+            "render_error": 25,
+            "suite_timeline": timeline
+        });
+        let message = format!(
+            "worker failed safely: diagnostics={{\"classification\":\"nonzero_exit\"}}, report={report}"
+        );
+        assert!(message.len() > 32 * 1024);
+
+        let failure = runtime_failure_from_io(RenderPath::Classic, &io::Error::other(message));
+        assert_eq!(failure.classification, Classification::SelectorError);
+        assert_eq!(failure.selector_error, Some(25));
+        assert_eq!(failure.suite_timeline.len(), 600);
     }
 
     #[test]
