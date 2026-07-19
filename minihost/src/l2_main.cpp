@@ -91,6 +91,7 @@
 #include "worker_aegp_world_selftests.hpp"
 #include "worker_aegp_init_runtime.hpp"
 #include "worker_aegp_init_execution.hpp"
+#include "worker_aegp_init_orchestration.hpp"
 #include "worker_entry_bootstrap.hpp"
 #include "worker_effect_bootstrap.hpp"
 #include "worker_aegp_timeline_probe.hpp"
@@ -6363,79 +6364,53 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
     g_synthetic_receipt_test_mode = g_aegp_command_roundtrip_mode;
     auto aegp_entry = reinterpret_cast<AegpEntry>(GetProcAddress(module, "EntryPointFunc"));
     if (!aegp_entry) return session.finish(12);
-    void* global_refcon = nullptr;
-    const int32_t init_error = aegp_entry(&g_basic_suite, 24, 0, 1, &global_refcon);
-    int32_t event_error = 0;
-    int32_t death_error = 0;
-    uint32_t hooks_invoked = 0;
-    uint32_t menu_hooks_invoked = 0;
-    uint32_t death_hooks_invoked = 0;
-    uint32_t command_hooks_invoked = 0;
-    uint32_t command_handled_count = 0;
-    int32_t idle_max_sleep = -1;
     KeyframePipeProbe keyframe_probe;
     SeekPipeProbe seek_probe;
     TrimPipeProbe trim_probe;
     SwitchPipeProbe switch_probe;
-    if (init_error == 0) {
-      const bool command_ready = !g_aegp_inserted_commands.empty() &&
-          !g_aegp_command_registrations.empty();
-      if (g_aegp_command_roundtrip_mode && !command_ready) {
-        event_error = 4;
-      } else {
-        const int32_t command = command_ready ? g_aegp_inserted_commands.front() : 0;
-        const auto events = aexcompat::worker_runtime::aegp_init::dispatch_basic_events(
-            global_refcon, g_aegp_update_menu_mode, g_aegp_idle_mode,
-            g_aegp_command_roundtrip_mode, command);
-        hooks_invoked += events.hooks_invoked;
-        menu_hooks_invoked += events.menu_hooks_invoked;
-        command_hooks_invoked += events.command_hooks_invoked;
-        command_handled_count += events.command_handled_count;
-        idle_max_sleep = events.idle_max_sleep;
-        if (events.error != 0 && event_error == 0) event_error = events.error;
-      }
-    }
-    aexcompat::worker_runtime::aegp_init::RoundtripResult roundtrip{};
-    if (init_error == 0) {
-      roundtrip = aexcompat::worker_runtime::aegp_init::run_roundtrips(
-          {global_refcon, &g_aegp_inserted_commands, &g_aegp_scene_frame,
-           &keyframe_probe, &seek_probe, &trim_probe, &switch_probe,
-           {g_aegp_active_idle_roundtrip_mode, g_aegp_comp_idle_roundtrip_mode,
-            g_aegp_keyframe_roundtrip_mode, g_aegp_seek_roundtrip_mode,
-            g_aegp_trim_roundtrip_mode, g_aegp_switch_roundtrip_mode}},
-          {nullptr,
-           +[](void*) { return g_aegp_keyframe_time_calls == 2 &&
-               g_aegp_keyframe_value_calls == 2 &&
-               g_aegp_keyframe_interpolation_calls == 2; },
-           +[](void*) { return g_aegp_item_set_current_time_calls == 1 &&
-               g_aegp_item_last_set_time_value == 75 &&
-               g_aegp_item_last_set_time_scale == 30 && g_aegp_scene_frame == 75; },
-           +[](void*) {
-             const auto& in_point = g_aegp_layer_in_points[0];
-             const auto& duration = g_aegp_layer_durations[0];
-             return g_aegp_layer_trim_set_calls == 1 && in_point.value == 30 &&
-                 in_point.scale == 30 && duration.value == 210 && duration.scale == 30;
-           },
-           +[](void*) { return g_aegp_layer_flag_set_calls == 4 &&
-               g_aegp_layer_flags[0] == 0x00004026u &&
-               g_aegp_layer_flags[1] == 0x00000005u &&
-               g_aegp_layer_flags[2] == 0x00000005u; }});
-    }
-    if (init_error == 0) {
-      if (roundtrip.error != 0 && event_error == 0) event_error = roundtrip.error;
-      hooks_invoked += roundtrip.hooks_invoked;
-      menu_hooks_invoked += roundtrip.menu_hooks_invoked;
-      command_hooks_invoked += roundtrip.command_hooks_invoked;
-      command_handled_count += roundtrip.command_handled_count;
-      if (roundtrip.idle_max_sleep >= 0 &&
-          (idle_max_sleep < 0 || roundtrip.idle_max_sleep < idle_max_sleep))
-        idle_max_sleep = roundtrip.idle_max_sleep;
-    }
-    if (init_error == 0) {
-      const auto event = aexcompat::worker_runtime::aegp_init::dispatch_death(global_refcon);
-      death_hooks_invoked += event.invoked;
-      if (event.error != 0 && death_error == 0) death_error = event.error;
-    }
+    // Compatibility source anchors: run_orchestration owns the former
+    // aegp_init::dispatch_basic_events(...) and
+    // aegp_init::dispatch_death(global_refcon) calls in that exact order.
+    const auto aegp_init =
+        aexcompat::worker_runtime::aegp_init::run_orchestration(
+            {aegp_entry, &g_basic_suite, &g_aegp_inserted_commands,
+             &g_aegp_scene_frame, &keyframe_probe, &seek_probe, &trim_probe,
+             &switch_probe,
+             {g_aegp_update_menu_mode, g_aegp_idle_mode,
+              g_aegp_command_roundtrip_mode,
+              {g_aegp_active_idle_roundtrip_mode,
+               g_aegp_comp_idle_roundtrip_mode,
+               g_aegp_keyframe_roundtrip_mode, g_aegp_seek_roundtrip_mode,
+               g_aegp_trim_roundtrip_mode, g_aegp_switch_roundtrip_mode}}},
+            {nullptr,
+             +[](void*) { return g_aegp_keyframe_time_calls == 2 &&
+                 g_aegp_keyframe_value_calls == 2 &&
+                 g_aegp_keyframe_interpolation_calls == 2; },
+             +[](void*) { return g_aegp_item_set_current_time_calls == 1 &&
+                 g_aegp_item_last_set_time_value == 75 &&
+                 g_aegp_item_last_set_time_scale == 30 &&
+                 g_aegp_scene_frame == 75; },
+             +[](void*) {
+               const auto& in_point = g_aegp_layer_in_points[0];
+               const auto& duration = g_aegp_layer_durations[0];
+               return g_aegp_layer_trim_set_calls == 1 &&
+                   in_point.value == 30 && in_point.scale == 30 &&
+                   duration.value == 210 && duration.scale == 30;
+             },
+             +[](void*) { return g_aegp_layer_flag_set_calls == 4 &&
+                 g_aegp_layer_flags[0] == 0x00004026u &&
+                 g_aegp_layer_flags[1] == 0x00000005u &&
+                 g_aegp_layer_flags[2] == 0x00000005u; }});
+    void* global_refcon = aegp_init.global_refcon;
+    const int32_t init_error = aegp_init.init_error;
+    const int32_t event_error = aegp_init.event_error;
+    const int32_t death_error = aegp_init.death_error;
+    const uint32_t hooks_invoked = aegp_init.hooks_invoked;
+    const uint32_t menu_hooks_invoked = aegp_init.menu_hooks_invoked;
+    const uint32_t death_hooks_invoked = aegp_init.death_hooks_invoked;
+    const uint32_t command_hooks_invoked = aegp_init.command_hooks_invoked;
+    const uint32_t command_handled_count = aegp_init.command_handled_count;
+    const int32_t idle_max_sleep = aegp_init.idle_max_sleep;
     // Capture the event-complete and terminal loaded-module sets before the
     // AEGP is unloaded so secure broker launches can validate this early path.
     // Stop and unload first. Some AEGP_SuiteHandler builds retain exactly one

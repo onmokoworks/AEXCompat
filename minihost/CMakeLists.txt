@@ -67,6 +67,7 @@ set(AEXCOMPAT_WORKER_RUNTIME_CORE_SOURCES
     src/worker_aegp_world_selftests.cpp
     src/worker_aegp_init_runtime.cpp
     src/worker_aegp_init_execution.cpp
+    src/worker_aegp_init_orchestration.cpp
     src/worker_entry_bootstrap.cpp
     src/worker_effect_bootstrap.cpp
     src/worker_aegp_timeline_probe.cpp
