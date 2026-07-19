@@ -700,217 +700,26 @@ OutlineData* sampled_outline(HostStreamRef* stream, const HostTime* time,
 OpaqueHostObject g_effect{0x45464658};
 OpaqueHostObject g_layer{0x4c415952};
 
-void raise_mask_access_violation() {
-  RaiseException(EXCEPTION_ACCESS_VIOLATION, 0, 0, nullptr);
-}
+// The mask scene helpers and configure_mask_scene moved to their state
+// owner, worker_mask_runtime_callbacks.cpp (issue #170); worker_main keeps
+// resolving them through these declarations.
+void raise_mask_access_violation();
+aexcompat::mask_runtime::Snapshot mask_runtime_snapshot();
+bool snapshot_mask_curve(void* handle, aexcompat::mask_runtime::CurveSnapshot& curve);
+bool install_synthetic_mask_scene(
+    const std::vector<aexcompat::mask_runtime::CurveSnapshot>& curves);
+std::vector<aexcompat::pf_path_runtime::PathInfo> enumerate_pf_paths();
+bool snapshot_pf_path(void* handle, aexcompat::mask_runtime::CurveSnapshot& curve);
+bool bounded_pf_path_world(void* world, aexcompat::pf_path_runtime::WorldView& view);
+bool mask_lifetimes_balanced();
+bool configure_mask_scene(const std::string& scene_id);
+std::size_t mask_open_count();
+std::size_t mask_tangent_vertex_count();
 constexpr int32_t kPfBadCallbackParam = 516;
 constexpr int32_t kPfSuiteToolNone = 0;
 auto& g_render_ui_context_active = g_custom_ui_telemetry.render_ui_context_active;
 using aexcompat::pf_helper::reset;
 
-aexcompat::mask_runtime::Snapshot mask_runtime_snapshot() {
-  aexcompat::mask_runtime::Snapshot snapshot;
-  snapshot.active_masks = static_cast<uint32_t>(std::count_if(
-      g_mask_scene.begin(), g_mask_scene.end(), [](const auto& mask) { return !mask.deleted; }));
-  snapshot.masks_acquired = g_mask_lifetime.masks_acquired;
-  snapshot.masks_disposed = g_mask_lifetime.masks_disposed;
-  snapshot.streams_acquired = g_mask_lifetime.streams_acquired;
-  snapshot.streams_disposed = g_mask_lifetime.streams_disposed;
-  snapshot.values_acquired = g_mask_lifetime.values_acquired;
-  snapshot.values_disposed = g_mask_lifetime.values_disposed;
-  snapshot.mask_mutations = g_mask_mutations;
-  snapshot.invalid_mask_operations = g_invalid_mask_operations;
-  snapshot.outline_mutations = g_outline_mutations;
-  snapshot.invalid_outline_operations = g_invalid_outline_operations;
-  snapshot.keyframe_mutations = g_keyframe_mutations;
-  snapshot.invalid_keyframe_operations = g_invalid_keyframe_operations;
-  snapshot.stream_metadata_queries = g_stream_metadata_queries;
-  snapshot.stream_duplicates = g_stream_duplicates;
-  snapshot.invalid_stream_operations = g_invalid_stream_operations;
-  snapshot.dynamic_stream_mutations = g_dynamic_stream_mutations;
-  snapshot.invalid_dynamic_stream_operations = g_invalid_dynamic_stream_operations;
-  return snapshot;
-}
-
-bool snapshot_mask_curve(void* handle, aexcompat::mask_runtime::CurveSnapshot& curve) {
-  HostMask* mask = find_mask(handle);
-  if (!mask || mask->deleted) return false;
-  aexcompat::mask_runtime::CurveSnapshot candidate;
-  candidate.id = mask->id;
-  candidate.open = mask->open;
-  candidate.vertices.reserve(mask->vertices.size());
-  for (const auto& vertex : mask->vertices) {
-    candidate.vertices.push_back({vertex.x, vertex.y, vertex.tangent_in_x,
-                                  vertex.tangent_in_y, vertex.tangent_out_x,
-                                  vertex.tangent_out_y});
-  }
-  curve = std::move(candidate);
-  return true;
-}
-
-bool install_synthetic_mask_scene(
-    const std::vector<aexcompat::mask_runtime::CurveSnapshot>& curves) {
-  if (!g_stream_refs.empty() || !g_stream_values.empty() || !g_add_keyframe_transactions.empty())
-    return false;
-  g_mask_scene.clear();
-  g_mask_scene.reserve(kMaxHostMasks);
-  if (curves.size() > kMaxHostMasks) return false;
-  for (const auto& curve : curves) {
-    HostMask mask;
-    mask.id = curve.id;
-    mask.open = curve.open;
-    mask.vertices.reserve(curve.vertices.size());
-    for (const auto& vertex : curve.vertices)
-      mask.vertices.push_back({vertex.x, vertex.y, vertex.tangent_in_x,
-          vertex.tangent_in_y, vertex.tangent_out_x, vertex.tangent_out_y});
-    g_mask_scene.push_back(std::move(mask));
-  }
-  return true;
-}
-
-std::vector<HostMask*> ordered_active_masks();
-std::vector<aexcompat::pf_path_runtime::PathInfo> enumerate_pf_paths() {
-  std::vector<aexcompat::pf_path_runtime::PathInfo> result;
-  for (auto* mask : ordered_active_masks())
-    result.push_back({mask, mask->id, mask->dynamic_order, mask->open,
-                      mask->invert, mask->mode});
-  return result;
-}
-
-bool snapshot_pf_path(void* handle, aexcompat::mask_runtime::CurveSnapshot& curve) {
-  auto* mask = static_cast<HostMask*>(handle);
-  if (!mask || mask->deleted) return false;
-  aexcompat::mask_runtime::CurveSnapshot candidate;
-  candidate.id = mask->id;
-  candidate.open = mask->open;
-  candidate.vertices.reserve(mask->vertices.size());
-  for (const auto& vertex : mask->vertices)
-    candidate.vertices.push_back({vertex.x, vertex.y, vertex.tangent_in_x,
-        vertex.tangent_in_y, vertex.tangent_out_x, vertex.tangent_out_y});
-  curve = std::move(candidate);
-  return true;
-}
-
-bool bounded_pf_path_world(void* world,
-    aexcompat::pf_path_runtime::WorldView& view) {
-  if (!world) return false;
-  int32_t flags{};
-  std::memcpy(&flags, static_cast<std::byte*>(world) + 16, sizeof(flags));
-  view.pixel_bytes = (flags & 1) != 0 ? 8 : 4;
-  return bounded_typed_world(world, view.pixel_bytes, view.pixels, view.rowbytes,
-                             view.width, view.height);
-}
-
-std::size_t distinct_vertex_count(const OutlineData& mask) {
-  return mask.vertices.size() - static_cast<std::size_t>(!mask.open && !mask.vertices.empty());
-}
-
-void sync_closed_vertex(OutlineData& mask) {
-  if (!mask.open && !mask.vertices.empty()) mask.vertices.back() = mask.vertices.front();
-}
-
-bool mask_lifetimes_balanced() {
-  return g_mask_lifetime.masks_acquired == g_mask_lifetime.masks_disposed &&
-      g_mask_lifetime.streams_acquired == g_mask_lifetime.streams_disposed &&
-      g_mask_lifetime.values_acquired == g_mask_lifetime.values_disposed &&
-      g_stream_refs.empty() && g_stream_values.empty() && g_add_keyframe_transactions.empty() &&
-      std::none_of(g_mask_scene.begin(), g_mask_scene.end(), [](const auto& mask) {
-        return mask.mask_live || mask.stream_live || mask.value_live;
-      });
-}
-
-bool configure_mask_scene(const std::string& scene_id) {
-  aexcompat::mask_runtime::configure_host_context(
-      {&g_layer, &raise_mask_access_violation, &mask_runtime_snapshot,
-       &snapshot_mask_curve, &mask_lifetimes_balanced, &install_synthetic_mask_scene});
-  aexcompat::pf_path_runtime::configure(
-      {&g_effect, &enumerate_pf_paths, &snapshot_pf_path, &bounded_pf_path_world});
-  if (!g_stream_refs.empty() || !g_stream_values.empty() ||
-      !g_add_keyframe_transactions.empty()) return false;
-  aexcompat::mask_runtime::SceneSeed seed;
-  if (!aexcompat::mask_runtime::build_scene_seed(scene_id, seed)) return false;
-  g_mask_scene.clear();
-  g_mask_scene.reserve(kMaxHostMasks);
-  g_mask_lifetime = {};
-  aexcompat::mask_runtime::set_mask_scene_id(seed.id);
-  for (auto& source : seed.masks) {
-    HostMask mask;
-    mask.id = g_next_mask_id++;
-    mask.outline_stream_id = g_next_stream_id++;
-    mask.feather_stream_id = g_next_stream_id++;
-    mask.opacity_stream_id = g_next_stream_id++;
-    mask.expansion_stream_id = g_next_stream_id++;
-    mask.open = source.open;
-    mask.dynamic_order = source.dynamic_order;
-    mask.vertices.reserve(source.vertices.size());
-    for (const auto& vertex : source.vertices) {
-      mask.vertices.push_back({vertex.x, vertex.y, vertex.tangent_in_x,
-          vertex.tangent_in_y, vertex.tangent_out_x, vertex.tangent_out_y});
-    }
-    g_mask_scene.push_back(std::move(mask));
-  }
-  return true;
-}
-
-std::vector<HostMask*> ordered_active_masks() {
-  std::vector<HostMask*> masks;
-  for (auto& mask : g_mask_scene) if (!mask.deleted) masks.push_back(&mask);
-  std::sort(masks.begin(), masks.end(), [](const HostMask* left, const HostMask* right) {
-    return left->dynamic_order < right->dynamic_order;
-  });
-  return masks;
-}
-
-HostMask* find_mask(void* handle) {
-  const auto found = std::find_if(g_mask_scene.begin(), g_mask_scene.end(),
-      [handle](auto& mask) { return handle == &mask.mask; });
-  return found == g_mask_scene.end() ? nullptr : &*found;
-}
-HostStreamRef* find_stream(void* handle) {
-  const auto found = std::find_if(g_stream_refs.begin(), g_stream_refs.end(),
-      [handle](auto& stream) { return handle == &stream.opaque; });
-  return found == g_stream_refs.end() ? nullptr : &*found;
-}
-OutlineData* find_outline(void* handle) {
-  const auto found = std::find_if(g_mask_scene.begin(), g_mask_scene.end(),
-      [handle](auto& mask) { return handle == &mask.outline; });
-  if (found != g_mask_scene.end()) return &*found;
-  for (auto& mask : g_mask_scene) {
-    const auto key = std::find_if(mask.keyframes.begin(), mask.keyframes.end(),
-        [handle](auto& item) { return handle == &item.outline; });
-    if (key != mask.keyframes.end()) return &*key;
-  }
-  for (auto& item : g_stream_values) {
-    if (item.second.outline && handle == &item.second.outline->outline)
-      return item.second.outline;
-  }
-  return nullptr;
-}
-
-std::size_t mask_open_count() {
-  return static_cast<std::size_t>(std::count_if(g_mask_scene.begin(), g_mask_scene.end(),
-      [](const auto& mask) { return !mask.deleted && mask.open; }));
-}
-
-std::size_t active_mask_count() {
-  return static_cast<std::size_t>(std::count_if(g_mask_scene.begin(), g_mask_scene.end(),
-      [](const auto& mask) { return !mask.deleted; }));
-}
-
-std::size_t mask_tangent_vertex_count() {
-  std::size_t count = 0;
-  for (const auto& mask : g_mask_scene) {
-    if (mask.deleted) continue;
-    const auto end = !mask.open && !mask.vertices.empty()
-        ? mask.vertices.end() - 1 : mask.vertices.end();
-    count += static_cast<std::size_t>(std::count_if(mask.vertices.begin(), end,
-        [](const auto& vertex) {
-          return vertex.tangent_in_x != 0 || vertex.tangent_in_y != 0 ||
-                 vertex.tangent_out_x != 0 || vertex.tangent_out_y != 0;
-        }));
-  }
-  return count;
-}
 
 void write_rect(void* destination, int32_t width, int32_t height) {
   auto* bytes = static_cast<std::byte*>(destination);
