@@ -77,6 +77,9 @@ def test_render_options_and_async_receipt_claims_match_current_source():
     ownership_source = source + (ROOT / "minihost" / "src" / "worker_render_receipts.cpp").read_text(
         encoding="utf-8"
     )
+    ownership_source += (ROOT / "minihost" / "src" / "worker_world_registry.cpp").read_text(
+        encoding="utf-8"
+    )
     suite_abi = (ROOT / "minihost" / "src" / "worker_suite_abi.hpp").read_text(encoding="utf-8")
     assert report["suites"]["AEGP_RenderOptionsSuite1"]["status"] == "implemented_and_focused_runtime_tested"
     assert "static_assert(sizeof(AegpRenderOptionsSuite1) == 17 * sizeof(void*));" in suite_abi

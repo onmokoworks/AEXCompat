@@ -24,7 +24,7 @@ def test_registry_is_a_genuine_compiled_owner_and_abi_wrappers_remain_in_main():
     assert core_sources.count("src/worker_suite_registry.cpp") == 1
     assert '#include "worker_suite_registry.hpp"' in MAIN
     assert "SuiteResolveResult resolve_legacy_host_suite(" not in MAIN
-    acquire = MAIN[MAIN.index("int32_t __cdecl acquire_suite(") :]
+    acquire = MAIN[MAIN.rindex("int32_t __cdecl acquire_suite(") :]
     acquire = acquire[: acquire.index("int32_t __cdecl release_suite(")]
     assert "acquire_host_suite(" in acquire
     assert "suite_registry().acquire(" in ROUTER
@@ -53,7 +53,7 @@ def test_registry_owns_success_reject_unknown_and_release_protocols():
 
 def test_scene_precedence_and_live_tls_conditional_exposure_stay_in_resolver():
     resolver = MAIN[MAIN.index("SuiteResolveResult resolve_scene_suite_provider(") :
-                    MAIN.index("int32_t __cdecl acquire_suite(")]
+                    MAIN.rindex("int32_t __cdecl acquire_suite(")]
     scene = resolver.index("if (scene_context())")
     assert "SceneSuiteAcquireResult::rejected" in resolver
     assert "return SuiteResolveResult::rejected_bad_param" in resolver
@@ -65,7 +65,7 @@ def test_scene_precedence_and_live_tls_conditional_exposure_stay_in_resolver():
     assert "return g_mask_model_enabled" in MAIN
     assert "record_suite_acquire" not in resolver
     assert "reject_suite_acquire" not in resolver
-    acquire = MAIN[MAIN.index("int32_t __cdecl acquire_suite(") :]
+    acquire = MAIN[MAIN.rindex("int32_t __cdecl acquire_suite(") :]
     assert acquire.index("resolve_scene_suite_provider") < acquire.index(
         "resolve_static_provider"
     )

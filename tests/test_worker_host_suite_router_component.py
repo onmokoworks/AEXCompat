@@ -19,7 +19,7 @@ def test_host_suite_router_owns_registry_acquire_and_release_boundary():
     assert "int32_t release_host_suite" in HEADER
     assert "suite_registry().acquire" in SOURCE
     assert "suite_registry().release" in SOURCE
-    acquire = MAIN[MAIN.index("int32_t __cdecl acquire_suite"):]
+    acquire = MAIN[MAIN.rindex("int32_t __cdecl acquire_suite"):]
     acquire = acquire[: acquire.index("int32_t __cdecl release_suite")]
     assert "acquire_host_suite(" in acquire
     assert "suite_registry().acquire" not in acquire
@@ -36,7 +36,7 @@ def test_provider_priority_and_terminal_errors_are_explicit():
 
 
 def test_component_pf_and_aegp_families_are_injected_without_legacy_route():
-    acquire = MAIN[MAIN.index("int32_t __cdecl acquire_suite"):]
+    acquire = MAIN[MAIN.rindex("int32_t __cdecl acquire_suite"):]
     for suite in (
         "AE Plugin Helper Suite",
         "PF Cache On Load Suite",

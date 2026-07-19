@@ -8,6 +8,7 @@ SOURCES = (
     ROOT / "minihost" / "src" / "l2_main.cpp",
     ROOT / "minihost" / "src" / "worker_pf_suites.cpp",
     ROOT / "minihost" / "src" / "worker_render_report.cpp",
+    ROOT / "minihost" / "src" / "worker_pf_sampling_runtime.cpp",
 )
 
 
