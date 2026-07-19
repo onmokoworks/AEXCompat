@@ -214,7 +214,7 @@ class MinihostL2SourceTests(unittest.TestCase):
         text = l2_family_source()
         for marker in (
             "struct PfBatchSamplingSuite1", "4 * sizeof(void*)",
-            'strcmp(name, "PF Batch Sampling Suite") == 0',
+            '{"PF Batch Sampling Suite", 1, nullptr, &provide_batch_sampling1}',
             "&begin_sampling8, &end_sampling8", "unsupported_batch_sample_func",
             "*batch = nullptr", "verify_pf_batch_sampling_suite",
             "--self-test-pf-batch-sampling-suite",
@@ -320,9 +320,9 @@ class MinihostL2SourceTests(unittest.TestCase):
 
     def test_l2_pica_is_default_deny_except_bounded_parameter_suites(self):
         text = l2_family_source()
-        self.assertIn('std::strcmp(name, "PF Handle Suite")', text)
-        self.assertIn('std::strcmp(name, "PF PointParamSuite")', text)
-        self.assertIn('std::strcmp(name, "PF AngleParamSuite")', text)
+        self.assertIn('{"PF Handle Suite", 2, &g_handle_suite}', text)
+        self.assertIn('{"PF PointParamSuite", 1, &g_point_param_suite}', text)
+        self.assertIn('{"PF AngleParamSuite", 1, &g_angle_param_suite}', text)
         self.assertIn("floating_point_from_point", text)
         self.assertIn("floating_point_from_angle", text)
         self.assertIn("version == 2", text)
@@ -438,13 +438,13 @@ class MinihostL2SourceTests(unittest.TestCase):
             "struct PfMaskSuite1",
             "struct Iterate8Suite2",
             "struct WorldTransformSuite1",
-            'std::strcmp(name, "AEGP Mask Suite") == 0',
-            'std::strcmp(name, "PF Iterate8 Suite") == 0',
-            'std::strcmp(name, "PF World Transform Suite") == 0',
+            '{"AEGP Mask Suite", 1, &g_pf_mask_suite1',
+            '{"PF Iterate8 Suite", 1, nullptr, &provide_iterate8}',
+            '{"PF World Transform Suite", 1, nullptr, &provide_world_transform1}',
             "g_iterate8_suite2.iterate = reinterpret_cast<void*>(&iterate_world8)",
-            "g_world_transform_suite1.composite_rect = &composite_rect8",
-            "g_world_transform_suite1.copy = &copy_world8",
-            'std::strcmp(name, "PF ANSI Suite") == 0 && version == 1',
+            "g_world_transform_suite1 = {&composite_rect8, &blend_world, &convolve_world",
+            "&copy_world8, &copy_world_hq, &transfer_rect, &transform_world}",
+            '{"PF ANSI Suite", 1, nullptr, &provide_ansi1}',
             "g_ansi_suite1[16] = reinterpret_cast<void*>(&ansi_strcpy)",
             "g_mask_model_enabled = true",
         ):
@@ -453,8 +453,8 @@ class MinihostL2SourceTests(unittest.TestCase):
     def test_smart_render_exposes_bounded_deep_iterate_suites(self):
         text = l2_family_source() + WORLD_SAFETY_SOURCE.read_text(encoding="utf-8")
         for marker in (
-            'std::strcmp(name, "PF iterate16 Suite") == 0',
-            'std::strcmp(name, "PF iterateFloat Suite") == 0',
+            '{"PF iterate16 Suite", 1, &g_iterate16_suite2}',
+            '{"PF iterateFloat Suite", 1, &g_iterate_float_suite2}',
             "progress_final, 8, source_world",
             "progress_final, 16, source_world",
             "rowbytes >= width * pixel_bytes",
@@ -469,7 +469,7 @@ class MinihostL2SourceTests(unittest.TestCase):
             "constexpr std::size_t kOutWidth = 80",
             "constexpr std::size_t kOutOrigin = 88",
             "struct LegacyRect { int32_t left, top, right, bottom; }",
-            'std::strcmp(name, "PF Fill Matte Suite") == 0',
+            '{"PF Fill Matte Suite", 2, nullptr, &provide_fill_matte2}',
             "fill_world_typed(16, color, area, world)",
             "const int32_t requested_width = read<int32_t>(command_output, kOutWidth)",
             "aexcompat::render::validate_output_extent",
@@ -486,7 +486,7 @@ class MinihostL2SourceTests(unittest.TestCase):
             "constexpr std::size_t kUtilsBlend = 48",
             "constexpr std::size_t kUtilsConvolve = 56",
             "constexpr std::size_t kUtilsNewWorld = 112",
-            "g_world_transform_suite1.convolve = &convolve_world",
+            "g_world_transform_suite1 = {&composite_rect8, &blend_world, &convolve_world",
             "kernel_size > 15",
             "constexpr uint32_t kReplicateBorders = 1u << 6",
             "snapshot.resize(static_cast<std::size_t>(source_bytes))",
@@ -651,8 +651,8 @@ class MinihostL2SourceTests(unittest.TestCase):
     def test_aegp_initialization_has_a_distinct_default_deny_abi(self):
         text = l2_family_source()
         for marker in ('L"--aegp-init"', 'GetProcAddress(module, "EntryPointFunc")',
-                       'std::strcmp(name, "AEGP Command Suite") == 0 && version == 1',
-                       'std::strcmp(name, "AEGP Register Suite") == 0 && version == 6',
+                       '{"AEGP Command Suite", 1, &g_aegp_command_suite',
+                       '{"AEGP Register Suite", 6, &g_aegp_register_suite',
                        '"hooks_invoked\\\":"',
                        'live_suite_references == 0 || isolated_item_cache',
                        'live_suite_summary == "AEGP Item Suite@14=1"'):
