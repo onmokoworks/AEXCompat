@@ -51,7 +51,7 @@ def test_render_suite2_has_dedicated_sdk_layout_for_grabba():
     assert "return g_aegp_command_roundtrip_mode ||" in source
     assert "aegp_layer_render_runtime::active()" in source
     assert '{"AEGP Render Suite", 2, nullptr, &provide_render_suite2' in source
-    assert "g_aegp_render_suite2 = {&render_checkout_frame_reject, &checkin_frame" in source
+    assert "{reinterpret_cast<void*>(&render_checkout_frame_reject), reinterpret_cast<void*>(&checkin_frame)" in source
 
 
 def test_official_sdk_grabba_update_menu_dispatches_successfully():

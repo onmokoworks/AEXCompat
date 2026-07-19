@@ -43,6 +43,7 @@ AEGP_RENDER_SELFTEST_SOURCE = ROOT / "minihost" / "src" / "worker_aegp_render_se
 AEGP_ASYNC_LAYER_RUNTIME = ROOT / "minihost" / "src" / "worker_aegp_async_layer_runtime.cpp"
 AEGP_HOST_SELFTESTS_SOURCE = ROOT / "minihost" / "src" / "worker_aegp_host_selftests.cpp"
 AEGP_COMPAT_SELFTESTS_SOURCE = ROOT / "minihost" / "src" / "worker_aegp_compat_selftests.cpp"
+INVOCATION_ORCHESTRATION_HEADER = ROOT / "minihost" / "src" / "worker_invocation_orchestration.hpp"
 MASK_RUNTIME_HEADER = ROOT / "minihost" / "src" / "worker_mask_runtime.hpp"
 MASK_RUNTIME_SOURCE = ROOT / "minihost" / "src" / "worker_mask_runtime.cpp"
 MASK_RUNTIME_CALLBACKS = ROOT / "minihost" / "src" / "worker_mask_runtime_callbacks.cpp"
@@ -367,7 +368,7 @@ class MinihostL2SourceTests(unittest.TestCase):
         self.assertNotIn("AEXCOMPAT_SMART_WORKER", main)
         self.assertNotIn("AEXCOMPAT_RENDER_WORKER", cmake)
         self.assertNotIn("AEXCOMPAT_SMART_WORKER", cmake)
-        self.assertIn("struct InvocationState", main)
+        self.assertIn("struct InvocationState", INVOCATION_ORCHESTRATION_HEADER.read_text(encoding="utf-8"))
         self.assertIn("if (is_render_worker())", main)
         self.assertIn("else if (is_smart_worker())", main)
         self.assertIn("enum class Kind { L2, Render, Smart }", target)
