@@ -125,7 +125,12 @@ ParseResult parse(Kind kind, int argc, wchar_t** argv, const Hooks& hooks) {
               std::any_of(invocation.layers.begin(), invocation.layers.end(),
                   [&](const auto& existing) {
                     if (existing.slot != layer.slot) return false;
-                    if (!existing.timed || !layer.timed) return !existing.timed && !layer.timed;
+                    // A slot may host more than one entry only when every
+                    // entry is timed at a distinct rational time; a static
+                    // member makes the slot ambiguous per frame, so any
+                    // same-slot pair with a static member fails closed, the
+                    // same rule RenderSession::open enforces broker-side.
+                    if (!existing.timed || !layer.timed) return true;
                     return same_time(existing, layer);
                   }))
             throw 1;

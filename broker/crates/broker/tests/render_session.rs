@@ -343,6 +343,60 @@ mod windows_e2e {
     }
 
     #[test]
+    fn open_rejects_a_static_and_timed_layer_at_the_same_slot() {
+        let _behavior = BehaviorGuard::set(None);
+        let (repository, plugin, sha) = temp_repository();
+        // A static entry and a timed entry share slot 4. A static layer
+        // renders on every frame, so the timed frame would admit both and the
+        // slot is ambiguous; open must fail closed, the same rule the worker
+        // parser applies to a hand-built argv.
+        let layers = vec![
+            SessionLayer {
+                slot: 4,
+                width: WIDTH,
+                height: HEIGHT,
+                rgba: vec![4u8; (WIDTH * HEIGHT * 4) as usize],
+                timed: None,
+            },
+            SessionLayer {
+                slot: 4,
+                width: WIDTH,
+                height: HEIGHT,
+                rgba: vec![4u8; (WIDTH * HEIGHT * 4) as usize],
+                timed: Some((0, 30)),
+            },
+        ];
+        let error = RenderSession::open(SessionOpenRequest {
+            repository: &repository.0,
+            plugin_path: &plugin,
+            plugin_sha256: &sha,
+            parameters: None,
+            parameter_animation: None,
+            aux_manifest: None,
+            world_dump_dir: None,
+            output_checksum_detail: false,
+            mask_trailer: None,
+            spatial_trailer: None,
+            render_environment_trailer: None,
+            layers: &layers,
+            dependencies: Vec::new(),
+            width: WIDTH,
+            height: HEIGHT,
+            pixel_format: RenderPixelFormat::Argb8,
+            time_step: 1,
+            total_time: 300,
+            time_scale: 30,
+            frame_deadline: Duration::from_secs(30),
+        })
+        .map(|_| ())
+        .expect_err("open must reject a same-slot static and timed mix");
+        assert!(
+            error.to_string().contains("unique"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
     fn open_rejects_layer_pixels_that_do_not_fit_the_slot() {
         let _behavior = BehaviorGuard::set(None);
         let (repository, plugin, sha) = temp_repository();
