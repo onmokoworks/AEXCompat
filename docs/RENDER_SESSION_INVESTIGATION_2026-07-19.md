@@ -503,3 +503,48 @@ PR-C (#116) merge 後のコードに対して、段階1-3「既存 one-shot 経�
 教訓: 「両ルートの整合」を取る方向は2つあり (両方拒否 / 両方許可)、
 canonical な基準 (= 既存の one-shot 挙動、AE 等価の真値) に合わせる方を
 選ぶべきだった。1回目の指摘に literal に従って拒否側に倒したのが誤り。
+
+## 追記 (W1-4c: alpha-as-coverage をセッションで運ぶ)
+
+観察 (実装):
+
+- alpha-as-coverage は one-shot で auxiliary option
+  `--alpha-as-coverage-v1 <slot,...>` として送られる
+  (`image_render.rs`)。worker (Render entry) は one-shot と共有の auxiliary
+  フック `parse_l2_alpha_coverage` (`l2_main.cpp:2457`) でこれを parse し、
+  `parse_alpha_coverage_params` がグローバル `g_alpha_as_coverage_params` に
+  格納、classic render runtime が毎フレーム
+  `publish_alpha_coverage_provider` で読む。
+- auxiliary option は `classify_worker_mode` の前に
+  `strip_auxiliary_options` で tail から剥がされる
+  (`l2_cli_dispatch.cpp:76-77` のコメント)。session mode も同じ経路を通る
+  ため、**worker 側の変更は不要**。設定は launch 時一度・全フレーム再利用で、
+  session ライフタイムに一致。
+- broker のみ変更: `SessionOpenRequest.alpha_as_coverage_params: &[u32]` を
+  追加、open で one-shot と同一検証 (sort・重複禁止・slot <= 1024) 後に
+  `--alpha-as-coverage-v1` を emit。`VideoBatchRequest` にも
+  `alpha_as_coverage_params` を追加 (CLI 経路も対応)。wrapper の
+  `session_representable_context` から `alpha_as_coverage_params.is_empty()`
+  を除去し (aux_channels のみ残す)、host_context の slot を
+  `SessionWrapperRequest` 経由で open に渡す。
+
+観察 (検証):
+
+- broker 統合テスト `render_session` 30 件パス。追加した
+  `alpha_as_coverage_params_travel_the_session_launch` (open + fixture
+  render 成功) と `open_rejects_an_out_of_range_alpha_as_coverage_slot`
+  (slot 1025 を open が拒否) を含む。
+- 実 worker + pf_sampling_probe の wrapper A/B (`render_session_wrapper`)
+  に alpha-as-coverage ペア (`alpha_as_coverage_params:[0]`) を追加、
+  session/one-shot の report 全フィールド + PNG byte 一致を確認。C++ 変更が
+  ないため worker 再ビルド不要 (#204 マージ済み main と同一バイナリ)。
+
+仮説 (残作業):
+
+- pf_sampling_probe は alpha-coverage provider を消費しないため、byte 差
+  としての意味的効果は現れない。alpha-coverage を実際に読む effect での
+  検証は #195 の probe fixture 系の作業。それでも「両ルートが同一オプションを
+  同一 worker に送る」等価性は wrapper A/B で確認済み。
+- これで goal 条件1 (W1-3 context + alpha-as-coverage が session を通り適格
+  条件に入る) が充足。残る one-shot 専用は audio / custom UI (#201 で確定) と
+  aux channels (session transport 未対応、別途)。

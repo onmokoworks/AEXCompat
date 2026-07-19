@@ -90,6 +90,7 @@ aex_render_worker.exe --render-session-v1 <plugin> <plugin_sha256> <payload>
     <max_width> <max_height> <time_step> <total_time> <time_scale>
     [session-layers:v1|<slot,w,h[,time,scale];...>]
     [v2|<mask context>] [spatial:v*|<...>] [render:v1|<...>]
+    [--alpha-as-coverage-v1 <slot,slot,...>]
     [--aux-manifest-v1 <path>] [--parameter-animation-v1 <path>]
     [--dump-worlds-v1 <dir>] [--output-checksum-detail-v1 1] [--minidump-v1 <dir>]
 ```
@@ -101,10 +102,16 @@ auxiliary option が tail)。worker は auxiliary option を tail から剥が�
 セッション契約に還元する。W1-3 では mask (`v2|`)、spatial (`spatial:v1/v2/v3`)、
 render-environment (`render:v1|`) を broker が送出する (host_context がある
 ときは one-shot と同じく mask trailer を常に送る、空 mask scene でも "v2|")。
-alpha-as-coverage と aux channels は layer 作業 (W1-4) と同 PR。値域・検証は
-one-shot と同一 (parse_mask_context_payload / parse_spatial_context_payload
-/ parse_render_environment_payload)。full-resolution 寸法を宣言する spatial は
-遅延 SEQUENCE_SETUP と全フレームの in_data に反映される。
+W1-4c では alpha-as-coverage の parameter slot 群を `--alpha-as-coverage-v1
+<slot,...>` auxiliary option で送る。worker (Render entry) は one-shot と共有の
+auxiliary フック (`parse_l2_alpha_coverage`) でこれを parse し、launch 時に一度
+alpha-coverage provider をグローバルへ publish する。classic render runtime が
+毎フレームこれを読むため、session の「一度設定して全フレーム再利用」ライフタイムに
+一致し、worker 側の変更は不要。broker open は one-shot と同一の値域検証 (sort・重複
+禁止・slot <= 1024) を launch 前に行う。aux channels のみ後続 (session transport
+未対応)。値域・検証は one-shot と同一 (parse_mask_context_payload /
+parse_spatial_context_payload / parse_render_environment_payload)。full-resolution
+寸法を宣言する spatial は遅延 SEQUENCE_SETUP と全フレームの in_data に反映される。
 
 W1-4 では secondary layer を `session-layers:v1|slot,w,h;...` trailer
 (context trailer より前) で運ぶ。各 layer の RGBA8 ピクセルは §6 のレイヤー
@@ -126,10 +133,14 @@ current_time に対し one-shot と同じ有理時刻一致 (`same_time` / `same
 `secondary_layers` 診断フィールドは one-shot と揃えるため static layer のみ列挙し、
 timed layer は含めない (両ルートで同一集合になる)。
 
-alpha-as-coverage は後続で、実 AEX での layer 消費 (static/timed 双方) の等価性
-検証は layer parameter を宣言する probe fixture を要する (#195)。それまでは
-fixture worker (`session_protocol_worker`) 経由の統合テストで trailer 往復と
-スロット配置を検証する。
+実 AEX での layer 消費 (static/timed 双方) の等価性検証は layer parameter を
+宣言する probe fixture を要する (#195)。それまでは fixture worker
+(`session_protocol_worker`) 経由の統合テストで trailer 往復とスロット配置を
+検証する。alpha-as-coverage (W1-4c) は auxiliary option で運ばれ、実 worker +
+pf_sampling_probe による wrapper A/B (byte 一致) で session/one-shot 等価を
+直接検証済み (provider の意味的効果は probe が alpha-coverage を消費しないため
+byte 差としては現れないが、両ルートが同一オプションを同一 worker に送ることの
+等価性は確認できる)。
 
 one-shot との差分:
 

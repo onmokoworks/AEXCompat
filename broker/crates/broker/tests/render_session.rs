@@ -111,6 +111,7 @@ mod windows_e2e {
             mask_trailer: None,
             spatial_trailer: None,
             render_environment_trailer: None,
+            alpha_as_coverage_params: &[],
             layers: &[],
             dependencies: Vec::new(),
             width: WIDTH,
@@ -208,6 +209,7 @@ mod windows_e2e {
             mask_trailer: None,
             spatial_trailer: None,
             render_environment_trailer: None,
+            alpha_as_coverage_params: &[],
             layers: &layers,
             dependencies: Vec::new(),
             width: WIDTH,
@@ -271,6 +273,7 @@ mod windows_e2e {
             mask_trailer: None,
             spatial_trailer: None,
             render_environment_trailer: None,
+            alpha_as_coverage_params: &[],
             layers: &layers,
             dependencies: Vec::new(),
             width: WIDTH,
@@ -324,6 +327,7 @@ mod windows_e2e {
             mask_trailer: None,
             spatial_trailer: None,
             render_environment_trailer: None,
+            alpha_as_coverage_params: &[],
             layers: &layers,
             dependencies: Vec::new(),
             width: WIDTH,
@@ -379,6 +383,7 @@ mod windows_e2e {
             mask_trailer: None,
             spatial_trailer: None,
             render_environment_trailer: None,
+            alpha_as_coverage_params: &[],
             layers: &layers,
             dependencies: Vec::new(),
             width: WIDTH,
@@ -432,6 +437,7 @@ mod windows_e2e {
             mask_trailer: None,
             spatial_trailer: None,
             render_environment_trailer: None,
+            alpha_as_coverage_params: &[],
             layers: &layers,
             dependencies: Vec::new(),
             width: WIDTH,
@@ -446,6 +452,83 @@ mod windows_e2e {
         .expect_err("open must reject two static layers at one slot");
         assert!(
             error.to_string().contains("unique"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn alpha_as_coverage_params_travel_the_session_launch() {
+        let _behavior = BehaviorGuard::set(None);
+        let (repository, plugin, sha) = temp_repository();
+        // The slots ride the `--alpha-as-coverage-v1` auxiliary option, which
+        // the worker peels from argv's tail before the session contract; the
+        // fixture strips the pair and still resolves the 10-slot contract, so
+        // open succeeds and frames render (issue #98 W1-4c).
+        let mut session = RenderSession::open(SessionOpenRequest {
+            repository: &repository.0,
+            plugin_path: &plugin,
+            plugin_sha256: &sha,
+            parameters: None,
+            parameter_animation: None,
+            aux_manifest: None,
+            world_dump_dir: None,
+            output_checksum_detail: false,
+            mask_trailer: None,
+            spatial_trailer: None,
+            render_environment_trailer: None,
+            alpha_as_coverage_params: &[0, 3],
+            layers: &[],
+            dependencies: Vec::new(),
+            width: WIDTH,
+            height: HEIGHT,
+            pixel_format: RenderPixelFormat::Argb8,
+            time_step: 1,
+            total_time: 300,
+            time_scale: 30,
+            frame_deadline: Duration::from_secs(30),
+        })
+        .expect("open with alpha-as-coverage slots");
+        let outcome = session
+            .render_frame(0, 0, &input_pattern(6))
+            .expect("frame renders with alpha-as-coverage slots");
+        assert!(matches!(outcome.status, FrameStatus::Rendered { .. }));
+        let close = session.close();
+        assert_eq!(close["session_clean"], true, "close: {close}");
+    }
+
+    #[test]
+    fn open_rejects_an_out_of_range_alpha_as_coverage_slot() {
+        let _behavior = BehaviorGuard::set(None);
+        let (repository, plugin, sha) = temp_repository();
+        // Same bound the one-shot path enforces (slot <= 1024); open must fail
+        // fast rather than launch a worker that rejects the option.
+        let error = RenderSession::open(SessionOpenRequest {
+            repository: &repository.0,
+            plugin_path: &plugin,
+            plugin_sha256: &sha,
+            parameters: None,
+            parameter_animation: None,
+            aux_manifest: None,
+            world_dump_dir: None,
+            output_checksum_detail: false,
+            mask_trailer: None,
+            spatial_trailer: None,
+            render_environment_trailer: None,
+            alpha_as_coverage_params: &[1025],
+            layers: &[],
+            dependencies: Vec::new(),
+            width: WIDTH,
+            height: HEIGHT,
+            pixel_format: RenderPixelFormat::Argb8,
+            time_step: 1,
+            total_time: 300,
+            time_scale: 30,
+            frame_deadline: Duration::from_secs(30),
+        })
+        .map(|_| ())
+        .expect_err("open must reject an out-of-range alpha-as-coverage slot");
+        assert!(
+            error.to_string().contains("alpha-as-coverage"),
             "unexpected error: {error}"
         );
     }
@@ -474,6 +557,7 @@ mod windows_e2e {
             mask_trailer: None,
             spatial_trailer: None,
             render_environment_trailer: None,
+            alpha_as_coverage_params: &[],
             layers: &layers,
             dependencies: Vec::new(),
             width: WIDTH,
@@ -512,6 +596,7 @@ mod windows_e2e {
             mask_trailer: None,
             spatial_trailer: None,
             render_environment_trailer: None,
+            alpha_as_coverage_params: &[],
             layers: &layers,
             dependencies: Vec::new(),
             width: WIDTH,
@@ -545,6 +630,7 @@ mod windows_e2e {
             mask_trailer: None,
             spatial_trailer: None,
             render_environment_trailer: None,
+            alpha_as_coverage_params: &[],
             layers: &[],
             dependencies: Vec::new(),
             width: WIDTH,
@@ -607,6 +693,7 @@ mod windows_e2e {
             mask_trailer: None,
             spatial_trailer: None,
             render_environment_trailer: None,
+            alpha_as_coverage_params: &[],
             layers: &[],
             dependencies: Vec::new(),
             width: WIDTH,
@@ -685,6 +772,7 @@ mod windows_e2e {
             mask_trailer: None,
             spatial_trailer: None,
             render_environment_trailer: None,
+            alpha_as_coverage_params: &[],
             layers: &[],
             dependencies: Vec::new(),
             width: WIDTH,
@@ -722,6 +810,7 @@ mod windows_e2e {
             mask_trailer: None,
             spatial_trailer: None,
             render_environment_trailer: None,
+            alpha_as_coverage_params: &[],
             layers: &[],
             dependencies: Vec::new(),
             width: WIDTH,
@@ -754,6 +843,7 @@ mod windows_e2e {
             mask_trailer: None,
             spatial_trailer: None,
             render_environment_trailer: None,
+            alpha_as_coverage_params: &[],
             layers: &[],
             dependencies: Vec::new(),
             width: WIDTH,
@@ -786,6 +876,7 @@ mod windows_e2e {
             mask_trailer: None,
             spatial_trailer: None,
             render_environment_trailer: None,
+            alpha_as_coverage_params: &[],
             layers: &[],
             dependencies: Vec::new(),
             width: WIDTH,

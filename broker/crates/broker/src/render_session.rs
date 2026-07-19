@@ -344,6 +344,12 @@ pub struct SessionOpenRequest<'a> {
     /// Static render-environment trailer (`render:v1|`), already encoded by
     /// `encode_render_environment`.
     pub render_environment_trailer: Option<String>,
+    /// Alpha-as-coverage parameter slots (`--alpha-as-coverage-v1`), issue #98
+    /// W1-4c. The worker publishes the alpha-coverage provider once at launch
+    /// (a global the classic render runtime reads on every frame), matching the
+    /// session's set-once lifetime, so only the slot list travels. Empty means
+    /// the option is not emitted.
+    pub alpha_as_coverage_params: &'a [u32],
     /// Secondary layers, static for the whole session (issue #98 W1-4). The
     /// pixels ride the shared layer slots; the slot/geometry metadata rides
     /// the `session-layers:v1|` launch trailer. Borrowed so open copies the
@@ -699,6 +705,27 @@ impl RenderSession {
         // and validates each strictly. The broker pre-checks the path shapes
         // so a misconfigured request fails fast at open instead of as an
         // opaque worker exit on the first frame.
+        if !request.alpha_as_coverage_params.is_empty() {
+            // Same validation and encoding as the one-shot path
+            // (image_render.rs): sorted, unique, slot <= 1024. The worker's
+            // shared auxiliary hook parses this identically for the session and
+            // one-shot Render entries.
+            let mut slots = request.alpha_as_coverage_params.to_vec();
+            slots.sort_unstable();
+            if slots.windows(2).any(|pair| pair[0] == pair[1])
+                || slots.iter().any(|slot| *slot > 1024)
+            {
+                return Err(invalid("alpha-as-coverage parameter slots are invalid"));
+            }
+            args_after_plugin.extend([
+                "--alpha-as-coverage-v1".to_owned(),
+                slots
+                    .iter()
+                    .map(u32::to_string)
+                    .collect::<Vec<_>>()
+                    .join(","),
+            ]);
+        }
         if let Some(manifest) = request.aux_manifest {
             if !manifest.is_absolute() || !manifest.is_file() {
                 return Err(invalid("aux manifest must be an absolute path to a file"));
@@ -1373,6 +1400,10 @@ struct VideoBatchRequest {
     /// Enables the worker's per-output checksum detail records.
     #[serde(default)]
     output_checksum_detail: bool,
+    /// Alpha-as-coverage parameter slots (`--alpha-as-coverage-v1`), issue #98
+    /// W1-4c. Published once at launch and read on every frame.
+    #[serde(default)]
+    alpha_as_coverage_params: Vec<u32>,
 }
 
 fn default_time_scale() -> u32 {
@@ -1445,6 +1476,7 @@ pub fn run_video_batch(
         mask_trailer: None,
         spatial_trailer: None,
         render_environment_trailer: None,
+        alpha_as_coverage_params: &request.alpha_as_coverage_params,
         layers: &[],
         dependencies: Vec::new(),
         width,
@@ -1668,6 +1700,7 @@ mod tests {
                 mask_trailer: None,
                 spatial_trailer: None,
                 render_environment_trailer: None,
+                alpha_as_coverage_params: &[],
                 layers: &[],
                 dependencies: Vec::new(),
                 width: 8,
