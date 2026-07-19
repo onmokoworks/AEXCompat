@@ -18,8 +18,10 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-# Repo の dev 依存 (Pillow / OpenEXR) は uv 管理の .venv にあるため、Python
-# ツールは uv run 経由で起動する (CWD に依存しないよう --project で固定)。
+# The repo dev dependencies (Pillow / OpenEXR) live in the uv-managed .venv,
+# so Python tools run through uv run (pinned via --project, CWD-independent).
+# ASCII-only on purpose: tests execute this under Windows PowerShell 5.1,
+# which reads BOM-less files as ANSI and corrupts multibyte comments.
 $uvProject = Split-Path -Parent $PSScriptRoot
 if ($Width -le 0 -or $Height -le 0) { throw 'Width and Height must be positive.' }
 
