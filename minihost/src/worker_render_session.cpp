@@ -22,9 +22,9 @@ bool variable_present(const wchar_t* name) {
          GetLastError() != ERROR_ENVVAR_NOT_FOUND;
 }
 
-// Same shape as the AEX_INSTRUMENT_TRACE_HANDLE precedent
-// (instruments/common/trace_writer.cpp): decimal handle number, strict tail,
-// zero rejected, then a type check on the resulting handle.
+// Same shape as the AEX_INSTRUMENT_TRACE_HANDLE precedent in the shared
+// trace writer: decimal handle number, strict tail, zero rejected, then a
+// type check on the resulting handle.
 HANDLE handle_from_variable(const wchar_t* name) {
   wchar_t buffer[32];
   const DWORD length = GetEnvironmentVariableW(name, buffer, 32);
