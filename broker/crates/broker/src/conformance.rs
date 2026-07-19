@@ -1114,6 +1114,16 @@ mod tests {
     }
 
     #[test]
+    fn redacted_path_does_not_hide_compact_worker_report() {
+        let message = r#"worker failed at C:\private\worker.exe,diagnostics={"classification":"nonzero_exit"},report={"render_error":25}"#;
+        let (redacted, truncated) = crate::redact_windows_paths(message, 4096);
+        assert!(!truncated);
+        let failure = runtime_failure_from_io(RenderPath::Classic, &io::Error::other(redacted));
+        assert_eq!(failure.classification, Classification::SelectorError);
+        assert_eq!(failure.selector_error, Some(25));
+    }
+
+    #[test]
     fn smartfx_uses_first_nonzero_selector_error() {
         for (field, code) in [("pre_render_error", 25), ("smart_render_error", 516)] {
             let mut report = json!({

@@ -97,7 +97,10 @@ pub fn redact_windows_paths(text: &str, limit: usize) -> (String, bool) {
                     if preceding_backslashes % 2 == 0 {
                         break;
                     }
-                } else if !inside_json_string && chars[index].is_whitespace() {
+                } else if !inside_json_string
+                    && (chars[index].is_whitespace()
+                        || matches!(chars[index], '"' | ',' | '}' | ']'))
+                {
                     break;
                 }
                 index += 1;
@@ -167,5 +170,16 @@ mod tests {
         assert!(!redacted.contains("private"));
         assert!(!redacted.contains("secret"));
         assert!(!redacted.contains("tail"));
+    }
+
+    #[test]
+    fn redaction_preserves_compact_diagnostic_markers_after_paths() {
+        let input = r#"worker failed at C:\private\worker.exe,diagnostics={"classification":"nonzero_exit"},report={"render_error":25}"#;
+        let (redacted, truncated) = redact_windows_paths(input, 1024);
+        assert!(!truncated);
+        assert_eq!(
+            redacted,
+            r#"worker failed at <redacted-path>,diagnostics={"classification":"nonzero_exit"},report={"render_error":25}"#
+        );
     }
 }
