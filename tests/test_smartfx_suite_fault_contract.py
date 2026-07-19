@@ -27,7 +27,15 @@ class SmartFxSuiteFaultContractTests(unittest.TestCase):
         self.assertTrue(schema["properties"]["broker_survived"]["const"])
 
     def test_fault_modes_are_fixed_and_profile_gated(self):
-        worker = (ROOT / "minihost/src/l2_main.cpp").read_text(encoding="utf-8")
+        worker = "\n".join(
+            path.read_text(encoding="utf-8")
+            for path in (
+                ROOT / "minihost/src/l2_main.cpp",
+                ROOT / "minihost/src/l2_cli_dispatch.cpp",
+                ROOT / "minihost/src/worker_mask_runtime.hpp",
+                ROOT / "minihost/src/worker_mask_runtime.cpp",
+            )
+        )
         route = (ROOT / "broker/crates/broker/src/render_request.rs").read_text(
             encoding="utf-8"
         )
@@ -43,8 +51,8 @@ class SmartFxSuiteFaultContractTests(unittest.TestCase):
             'L"--smart-aegp-memory-strings-request"',
             'L"--smart-suite-release-without-acquire-request"',
             'L"--smart-handle-resize-while-locked-request"',
-            "MaskFault::CountError",
-            "MaskFault::CountCrash",
+            "Fault::CountError",
+            "Fault::CountCrash",
             "RaiseException(EXCEPTION_ACCESS_VIOLATION",
             "SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX)",
             "live_suite_reference_count()",

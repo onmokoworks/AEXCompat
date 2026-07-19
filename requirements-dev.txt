@@ -1,4 +1,0 @@
-pytest>=8.0,<10
-Pillow>=10.0,<13
-jsonschema>=4.0,<5
-OpenEXR>=3.3,<4

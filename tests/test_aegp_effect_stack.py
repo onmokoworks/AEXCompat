@@ -9,6 +9,10 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "minihost" / "src" / "l2_main.cpp"
+SCENE_SOURCE = ROOT / "minihost" / "src" / "worker_aegp_scene.cpp"
+SCENE_SELFTEST_SOURCE = ROOT / "minihost" / "src" / "worker_aegp_scene_selftests.cpp"
+PF_SUITE_SOURCE = ROOT / "minihost" / "src" / "worker_pf_suites_internal.hpp"
+SELFTEST_DISPATCH_SOURCE = ROOT / "minihost" / "src" / "worker_selftest_dispatch.cpp"
 BUILD = ROOT / "target" / "minihost-build"
 SDK_ROOT = os.environ.get("AFTER_EFFECTS_SDK_ROOT")
 HEADERS = Path(SDK_ROOT) / "Examples" / "Headers" if SDK_ROOT else None
@@ -111,7 +115,9 @@ int main() { return 0; }
 
 
 def test_l2_source_exposes_effect_stack_contract() -> None:
-    source = SOURCE.read_text(encoding="utf-8")
+    source = "\n".join(path.read_text(encoding="utf-8") for path in
+                       (SOURCE, SCENE_SOURCE, SCENE_SELFTEST_SOURCE,
+                           PF_SUITE_SOURCE, SELFTEST_DISPATCH_SOURCE))
     for marker in (
         "int32_t __cdecl aegp_set_effect_flags(",
         "int32_t __cdecl aegp_reorder_effect(",
@@ -126,7 +132,9 @@ def test_l2_source_exposes_effect_stack_contract() -> None:
         "g_aegp_effect_suite4[10] = reinterpret_cast<void*>(&aegp_delete_layer_effect)",
         "g_aegp_effect_suite4[16] = reinterpret_cast<void*>(&aegp_duplicate_effect)",
         "std::array<void*, 22> g_aegp_stream_suite2{}",
-        "g_aegp_stream_suite2[15] = reinterpret_cast<void*>(&aegp_set_stream_value_v2)",
+        "scene_factory.legacy_stream_callbacks = {{",
+        "reinterpret_cast<void*>(&aegp_set_stream_value_v2)",
+        "g_aegp_stream_suite2[15] = factory.legacy_stream_callbacks[6]",
         'L"--self-test-aegp-effect-stack"',
     ):
         assert marker in source

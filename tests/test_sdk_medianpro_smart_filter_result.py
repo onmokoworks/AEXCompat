@@ -5,6 +5,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 RESULT = ROOT / "analysis" / "SDK_MEDIANPRO_SMART_FILTER_RESULT_2026-07-15.json"
 SOURCE = ROOT / "minihost" / "src" / "l2_main.cpp"
+PARAMETER_RUNTIME = ROOT / "minihost" / "src" / "worker_parameter_runtime.hpp"
 
 
 def test_medianpro_smart_cpu_image_io_contract():
@@ -30,8 +31,10 @@ def test_medianpro_smart_cpu_image_io_contract():
 
 def test_reused_paramdef_addresses_are_reference_counted_until_auto_checkin():
     source = SOURCE.read_text(encoding="utf-8")
+    runtime = PARAMETER_RUNTIME.read_text(encoding="utf-8")
 
-    assert "std::unordered_map<void*, uint32_t> g_live_param_checkouts" in source
+    assert "std::unordered_map<void*, uint32_t> live" in runtime
+    assert "g_live_param_checkouts = g_parameter_runtime.checkout.live" in source
     assert "++g_live_param_checkouts[definition]" in source
     assert "checkout_count += checkout.second" in source
 

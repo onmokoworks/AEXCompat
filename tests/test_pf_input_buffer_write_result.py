@@ -5,6 +5,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 RESULT = ROOT / "analysis" / "PF_INPUT_BUFFER_WRITE_RESULT_2026-07-15.json"
 WORKER = ROOT / "minihost" / "src" / "l2_main.cpp"
+PIXEL_BUFFER = ROOT / "minihost" / "src" / "render_pixel_buffer.cpp"
 BROKER = ROOT / "broker" / "crates" / "broker" / "src" / "image_render.rs"
 HARNESS = ROOT / "broker" / "crates" / "harness" / "src" / "main.rs"
 FIXTURE = ROOT / "instruments" / "pf-input-write-probe" / "pf_input_write_probe.cpp"
@@ -65,13 +66,14 @@ def test_smartfx_unadvertised_write_is_isolated_after_pre_render():
 def test_input_write_boundary_is_cleanroom_abi_bound_and_exposed():
     evidence = result()
     worker = WORKER.read_text(encoding="utf-8")
+    pixel_buffer = PIXEL_BUFFER.read_text(encoding="utf-8")
     broker = BROKER.read_text(encoding="utf-8")
     harness = HARNESS.read_text(encoding="utf-8")
     fixture = FIXTURE.read_text(encoding="utf-8")
     assert evidence["abi"]["i_write_input_buffer_flag"] == 2048
     assert "PF_OutFlag_I_WRITE_INPUT_BUFFER" in fixture
-    assert "class InputPixelBuffer" in worker
-    assert "PAGE_READONLY" in worker and "PAGE_READWRITE" in worker
+    assert "InputPixelBuffer::set_plugin_writable" in pixel_buffer
+    assert "PAGE_READONLY" in pixel_buffer and "PAGE_READWRITE" in pixel_buffer
     assert "kOutFlagIWriteInputBuffer = 1u << 11" in worker
     assert "pub fn probe_experimental_input_buffer_write" in broker
     assert "pub fn probe_experimental_smart_input_buffer_write" in broker

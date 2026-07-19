@@ -4,10 +4,14 @@ import subprocess
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-SOURCE = ROOT / "minihost" / "src" / "l2_main.cpp"
+SOURCES = (
+    ROOT / "minihost" / "src" / "l2_main.cpp",
+    ROOT / "minihost" / "src" / "worker_pf_suites.cpp",
+    ROOT / "minihost" / "src" / "worker_pf_suites_internal.hpp",
+)
 
 def source_text():
-    return SOURCE.read_text(encoding="utf-8")
+    return "\n".join(path.read_text(encoding="utf-8") for path in SOURCES)
 
 def worker():
     configured = os.environ.get("AEXCOMPAT_RENDER_WORKER")
@@ -26,8 +30,7 @@ def test_color_suites_are_typed_frozen_v1_abis():
     for name, instance in (("PF Color Suite", "g_color_suite8"),
                            ("PF Color16 Suite", "g_color_suite16"),
                            ("PF ColorFloat Suite", "g_color_suite_float")):
-        assert f'std::strcmp(name, "{name}") == 0' in text
-        assert f"*suite = &{instance}" in text
+        assert f'{{"{name}", 1, &{instance}}}' in text
 
 def test_legacy_block_ends_where_platform_data_begins():
     text = source_text()
@@ -40,7 +43,7 @@ def test_legacy_block_ends_where_platform_data_begins():
 
 def test_color_contract_is_fail_closed_hdr_capable_and_alpha_preserving():
     text = source_text()
-    assert "if (!finite3(c.r, c.g, c.b)) return kPfBadCallbackParam" in text
+    assert "if (!finite3(c.r, c.g, c.b)) return kPfErrBadCallbackParam" in text
     assert "PfFixed result[3]" in text and "std::memcpy(out, result, sizeof(result))" in text
     traits = text[text.index("template <> struct ColorPixelTraits<PfPixelFloat>"):
                   text.index("template <class Pixel> int32_t __cdecl color_rgb_to_hls")]

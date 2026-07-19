@@ -18,13 +18,13 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: broker
-      - uses: actions/setup-python@v5
+      # Python 版は .python-version (3.12) に従う。
+      # setup-uv は v8 から floating major tag (@v8) を出していないので full tag で pin する。
+      - uses: astral-sh/setup-uv@v8.3.2
         with:
-          python-version: "3.12"
-          cache: pip
-          cache-dependency-path: requirements-dev.txt
+          enable-cache: true
       - name: Install Python test dependencies
-        run: python -m pip install -r requirements-dev.txt
+        run: uv sync --locked
       - name: Check Rust workspace
         working-directory: broker
         run: cargo check --workspace --locked
@@ -38,6 +38,6 @@ jobs:
           --skip external_worker_reads_sealed_plugin_and_tree_is_cleaned_after_exit
           --skip timeout_kills_worker_and_cleans_sealed_and_staged_trees
       - name: Validate Python collection and local-artifact manifest
-        run: python -m pytest --collect-only -q --validate-local-artifact-manifest
+        run: uv run python -m pytest --collect-only -q --validate-local-artifact-manifest
       - name: Run source-reproducible Python tests
-        run: python -m pytest -q
+        run: uv run python -m pytest -q

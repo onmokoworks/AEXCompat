@@ -9,6 +9,9 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "minihost" / "src" / "l2_main.cpp"
+COLOR_HEADER = ROOT / "minihost" / "src" / "worker_color_settings_runtime.hpp"
+COLOR_SOURCE = ROOT / "minihost" / "src" / "worker_color_settings_runtime.cpp"
+COLOR_SELFTEST_SOURCE = ROOT / "minihost" / "src" / "worker_color_settings_selftests.cpp"
 MEMBERS = [
     "get_blending_tables", "does_view_have_xform", "xform_working_to_view",
     "get_new_working_space_profile", "get_new_profile_from_icc",
@@ -22,7 +25,18 @@ MEMBERS = [
 
 
 def source_text():
-    return SOURCE.read_text(encoding="utf-8")
+    return "\n".join(path.read_text(encoding="utf-8") for path in
+                     (SOURCE, COLOR_HEADER, COLOR_SOURCE, COLOR_SELFTEST_SOURCE))
+
+
+def test_color_settings_selftest_is_a_true_translation_unit():
+    worker_source = SOURCE.read_text(encoding="utf-8")
+    selftest_source = COLOR_SELFTEST_SOURCE.read_text(encoding="utf-8")
+    marker = "bool verify_pf_color_settings_suite6()"
+    assert marker in selftest_source
+    assert marker not in worker_source
+    assert "struct Hooks" in (ROOT / "minihost" / "src" /
+                              "worker_color_settings_selftests.hpp").read_text(encoding="utf-8")
 
 
 def worker(name):
@@ -42,8 +56,8 @@ def test_color_settings_suite6_has_exact_typed_20_slot_abi():
     assert "sizeof(AegpColorSettingsSuite6) == 20 * sizeof(void*)" in text
     for slot, member in enumerate(MEMBERS):
         assert f"offsetof(AegpColorSettingsSuite6, {member}) == {slot} * sizeof(void*)" in text
-    assert 'std::strcmp(name, "PF Color Settings Suite") == 0 && version == 7' in text
-    assert "*suite = &g_color_settings_suite6" in text
+    assert '{"PF Color Settings Suite", 7, nullptr, &provide_color_settings7}' in text
+    assert "return &g_color_settings_suite6" in text
     assert "color_settings_validate_icc" in text
     assert "color_settings_builtin_srgb_icc" in text
     assert "color_settings_builtin_linear_icc" in text

@@ -2,12 +2,20 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SOURCE = (ROOT / "minihost" / "src" / "l2_main.cpp").read_text(encoding="utf-8")
+MAIN = "\n".join(
+    (ROOT / "minihost" / "src" / name).read_text(encoding="utf-8")
+    for name in ("l2_main.cpp", "worker_invocation_orchestration.cpp")
+)
+ADMISSION = (ROOT / "minihost" / "src" / "worker_runtime_admission.cpp").read_text(
+    encoding="utf-8"
+)
+SOURCE = (ROOT / "minihost" / "src" / "runtime_module_audit.cpp").read_text(
+    encoding="utf-8"
+)
 
 
 def test_manifest_is_strictly_parsed_before_plugin_load():
-    parser = SOURCE[SOURCE.index("bool parse_runtime_module_authorization"):
-                    SOURCE.index("struct ModuleAuditSnapshot")]
+    parser = SOURCE[SOURCE.index("bool parse_runtime_module_authorization"):]
     for marker in (
         "'A','E','X','R','M','A','1',0", "purpose != 1", "backend < 1 || backend > 4",
         "expiry <= now", "nonzero_session", "count > 128", "path_units > 32767",
@@ -15,8 +23,8 @@ def test_manifest_is_strictly_parsed_before_plugin_load():
         "actual_size != declared_size", "actual_hash != declared_hash",
     ):
         assert marker in parser
-    parse_call = SOURCE.index("parse_runtime_module_authorization(plugin_path, argv[5])")
-    load = SOURCE.index("HMODULE module = LoadLibraryExW(plugin_path.c_str()", parse_call)
+    parse_call = ADMISSION.index("parse_runtime_module_authorization(plugin_path,")
+    load = ADMISSION.index("HMODULE module = LoadLibraryExW(plugin_path.c_str()", parse_call)
     assert parse_call < load
 
 
@@ -42,6 +50,15 @@ def test_only_normally_unknown_modules_can_use_exact_policy_identity():
 
 
 def test_optional_argument_is_l2_params_only_and_exactly_positioned():
-    assert "(argc == 4 || argc == 6)" in SOURCE
-    assert 'std::wstring(argv[4]) == L"--runtime-module-authorization-v1"' in SOURCE
-    assert "params_only_mode && argc == 6 && !runtime_module_authorization_mode" in SOURCE
+    assert "(argc == 4 || argc == 6)" in MAIN
+    assert 'std::wstring(argv[4]) == L"--runtime-module-authorization-v1"' in MAIN
+    assert "target.params_only_mode && argc == 6 && !target.runtime_module_authorization_mode" in MAIN
+
+
+def test_hash_dependency_is_configured_before_authorization_and_fails_closed():
+    configure = MAIN.index("configure_runtime_module_hash(&sha256)")
+    admission = MAIN.index("admit_runtime(runtime_hooks, runtime_request, runtime_context)")
+    assert configure < admission
+    assert "RuntimeHostHooks runtime_hooks{&sha256" in MAIN
+    assert "if (!g_file_sha256 || manifest_name.empty()" in SOURCE
+    assert "found == g_authorized_runtime_modules.end() || !g_file_sha256" in SOURCE

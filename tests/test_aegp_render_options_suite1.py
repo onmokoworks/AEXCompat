@@ -8,6 +8,11 @@ import pytest
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "minihost" / "src" / "l2_main.cpp"
+ABI = ROOT / "minihost" / "src" / "worker_suite_abi.hpp"
+REGISTRY = ROOT / "minihost" / "src" / "worker_aegp_render_options.cpp"
+STAGED_RUNTIME = ROOT / "minihost" / "src" / "worker_aegp_staged_item_runtime.cpp"
+RENDER_SELFTESTS = ROOT / "minihost" / "src" / "worker_aegp_render_selftests.cpp"
+ITEM_RUNTIME = ROOT / "minihost" / "src" / "worker_aegp_item_render_runtime.cpp"
 
 
 def _worker() -> pathlib.Path | None:
@@ -21,7 +26,7 @@ def _worker() -> pathlib.Path | None:
 
 
 def test_render_options_suite1_has_exact_typed_17_slot_abi():
-    text = SOURCE.read_text(encoding="utf-8")
+    text = ABI.read_text(encoding="utf-8")
     assert "struct AegpRenderOptionsSuite1" in text
     assert "sizeof(AegpRenderOptionsSuite1) == 17 * sizeof(void*)" in text
     expected_offsets = {
@@ -44,37 +49,51 @@ def test_render_options_suite1_has_exact_typed_17_slot_abi():
         "get_matte": 16,
     }
     for member, slot in expected_offsets.items():
-        assert f"offsetof(AegpRenderOptionsSuite1, {member}) == {slot} * sizeof(void*)" in text
+        assert f"AEXCOMPAT_ASSERT_RENDER1_SLOT({member}, {slot})" in text
     assert "std::array<void*, 17> g_render_options_suite1" not in text
     assert "g_render_options_suite1.fill" not in text
 
 
 def test_registry_is_bounded_aba_resistant_and_receipts_snapshot_options():
-    text = SOURCE.read_text(encoding="utf-8")
+    text = (SOURCE.read_text(encoding="utf-8") +
+            STAGED_RUNTIME.read_text(encoding="utf-8") +
+            ITEM_RUNTIME.read_text(encoding="utf-8") +
+            RENDER_SELFTESTS.read_text(encoding="utf-8"))
+    registry = REGISTRY.read_text(encoding="utf-8")
     for marker in (
-        "kMaxRenderOptions = 32",
-        "std::atomic<uint64_t> g_render_options_generation{1}",
-        "generation << 1",
-        "std::unordered_map<uintptr_t, AegpRenderOptionsValue> g_render_options",
         "receipt->render_options = *options",
         "snapshot.matte == 2",
         "kSyntheticCompWidth + options->downsample_x - 1",
         "kSyntheticCompHeight + options->downsample_y - 1",
-        "synthetic_item_pixel",
+        "synthetic_pixel",
         "x * options.downsample_x",
         "source_x >= source_roi.left",
         "converted[channel] = static_cast<uint16_t>(pixel[channel]) * 257u",
         "converted[channel] = static_cast<float>(pixel[channel]) / 255.0f",
     ):
         assert marker in text
+    for marker in (
+        "kMaxItemOptions = 32",
+        "std::atomic<uint64_t> g_item_generation{1}",
+        "next_handle(g_item_generation, 1, 1)",
+        "std::unordered_map<uintptr_t, ItemValue> g_items",
+        "g_items.size() >= kMaxItemOptions",
+    ):
+        assert marker in registry
 
 
 def test_item_async_and_render_suite_slot_zero_publish_ready_receipts():
     text = SOURCE.read_text(encoding="utf-8")
-    assert "return publish_item_receipt(options, receipt);" in text
-    assert "return publish_item_receipt(options, out);" in text
-    assert "&render_checkout_frame_reject, &render_checkout_layer_reject" in text
-    assert "&checkin_frame, &get_receipt_world" in text
+    runtime = ITEM_RUNTIME.read_text(encoding="utf-8")
+    assert "aegp_item_render_runtime::publish_receipt(options, receipt)" in text
+    assert "aegp_item_render_runtime::checkout(" in text
+    assert "return g_hooks.publish_staged(options, out);" in runtime
+    assert "g_hooks.publish_cached(snapshot, out, &cache_hit)" in runtime
+    assert "render_checkout_frame_reject" in text
+    assert "render_checkout_layer_reject" in text
+    assert "checkin_frame" in text
+    assert "get_receipt_world" in text
+    assert "std::array<uint8_t, 4> synthetic_pixel" not in text
 
 
 def test_render_options_runtime_matrix(tmp_path):

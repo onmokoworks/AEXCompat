@@ -6,6 +6,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 REPORT = ROOT / "analysis" / "GENERAL_EFFECT_RUNTIME_COVERAGE_2026-07-16.json"
 SOURCE = ROOT / "minihost" / "src" / "l2_main.cpp"
+WORLD_TRANSFORM = ROOT / "minihost" / "src" / "worker_pf_world_transform_runtime.cpp"
 ABI = ROOT / "target" / "pf-suite-abi-probe-build" / "pf-suite-abi.json"
 
 
@@ -35,14 +36,22 @@ def test_schema_and_compiled_abi_are_grounded_in_probe_result():
 def test_source_wiring_matches_inventory():
     report = load_report()
     source = SOURCE.read_text(encoding="utf-8")
+    world_source = WORLD_TRANSFORM.read_text(encoding="utf-8")
+    compact_source = " ".join((source + world_source).split())
+    suite_abi = (ROOT / "minihost" / "src" / "worker_suite_abi.hpp").read_text(encoding="utf-8")
 
     world = report["suites"]["PF_WorldTransformSuite1"]
-    for slot in world["slots"]:
-        assert f"g_world_transform_suite1.{slot['name']} = &{slot['callback']};" in source
+    world_callbacks = ", ".join(f"&{slot['callback']}" for slot in world["slots"])
+    assert f"g_world_transform_suite1 = {{{world_callbacks}" in compact_source
 
     path = report["suites"]["PF_PathDataSuite1"]
     for index, callback in zip(path["implemented_slots"], path["callbacks"]):
-        assert f"g_pf_path_data_suite1[{index}] = reinterpret_cast<void*>(&{callback});" in source
+        runtime_callback = callback.removeprefix("pf_")
+        assert index < len(path["callbacks"])
+        assert (
+            f"reinterpret_cast<void*>(&aexcompat::pf_path_runtime::{runtime_callback})"
+            in source
+        )
 
     sampling = report["suites"]["PF_SamplingSuites1"]["callbacks"]
     table_names = {"8": "g_sampling8_suite1", "16": "g_sampling16_suite1", "float": "g_sampling_float_suite1"}
@@ -51,18 +60,33 @@ def test_source_wiring_matches_inventory():
             assert f"{table_names[depth]}[{index}] = reinterpret_cast<void*>(&{callback});" in source
 
     fill_ranges = report["suites"]["PF_FillMatteSuite2"]["slots"]
+    fill_callbacks = []
     for group in fill_ranges:
         for index, callback in zip(range(group["range"][0], group["range"][1] + 1), group["callbacks"]):
-            assert f"g_fill_matte_suite2[{index}] = reinterpret_cast<void*>(&{callback});" in source
+            assert index == len(fill_callbacks)
+            fill_callbacks.append(callback)
+    callback_table = ", ".join(
+            f"reinterpret_cast<void*>(&{callback})" for callback in fill_callbacks
+    )
+    assert f"void* callbacks[] = {{{callback_table}" in compact_source
 
 
 def test_render_options_and_async_receipt_claims_match_current_source():
     report = load_report()
     source = SOURCE.read_text(encoding="utf-8")
+    item_runtime = (ROOT / "minihost" / "src" /
+                    "worker_aegp_item_render_runtime.cpp").read_text(encoding="utf-8")
+    ownership_source = source + (ROOT / "minihost" / "src" / "worker_render_receipts.cpp").read_text(
+        encoding="utf-8"
+    )
+    ownership_source += (ROOT / "minihost" / "src" / "worker_world_registry.cpp").read_text(
+        encoding="utf-8"
+    )
+    suite_abi = (ROOT / "minihost" / "src" / "worker_suite_abi.hpp").read_text(encoding="utf-8")
     assert report["suites"]["AEGP_RenderOptionsSuite1"]["status"] == "implemented_and_focused_runtime_tested"
-    assert "static_assert(sizeof(AegpRenderOptionsSuite1) == 17 * sizeof(void*));" in source
-    assert "receipt->render_options = *options;" in source
-    assert "return publish_item_receipt(options, receipt);" in source
+    assert "static_assert(sizeof(AegpRenderOptionsSuite1) == 17 * sizeof(void*));" in suite_abi
+    assert "receipt->render_options = *options;" in item_runtime
+    assert "aegp_item_render_runtime::publish_receipt(options, receipt)" in source
 
     async_state = report["suites"]["AEGP_WorldSuite3"]["async_receipt_integration"]
     assert async_state["status"] == "implemented_for_layer_argb8_argb16_argb32f_and_focused_runtime_tested"
@@ -75,10 +99,10 @@ def test_render_options_and_async_receipt_claims_match_current_source():
     assert "snapshot_layer_render_options(options, snapshot)" in checkout
     assert "snapshot.world_type == 1 ? kPixelFormatArgb32" in checkout
     assert "snapshot.world_type == 2 ? kPixelFormatArgb64 : kPixelFormatArgb128" in checkout
-    assert "return publish_async_receipt(pixel_format, receipt);" in checkout
-    assert 'std::strcmp(name, "AEGP Render Suite") == 0 && version == 5' in source
-    assert "&checkin_frame, &get_receipt_world" in source
-    assert "g_aegp_world_views.erase(found->second->world_handle);" in source
+    assert "aegp_item_render_runtime::publish_synthetic(" in checkout
+    assert '{"AEGP Render Suite", 5, nullptr, &provide_render_suite5}' in source
+    assert "&checkin_frame" in source and "&get_receipt_world" in source
+    assert "world_registry::unregister_borrowed_view(" in ownership_source
 
     assert report["suites"]["AEGP_WorldSuite3"]["slots"][1]["range"] == [2, 8]
     for callback in (

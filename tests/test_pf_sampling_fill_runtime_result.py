@@ -7,6 +7,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 RESULT = ROOT / "analysis" / "PF_SAMPLING_FILL_RUNTIME_RESULT_2026-07-16.json"
 WORKER = ROOT / "minihost" / "src" / "l2_main.cpp"
+WORLD_TRANSFORM = ROOT / "minihost" / "src" / "worker_pf_world_transform_runtime.cpp"
 
 
 def result():
@@ -147,7 +148,7 @@ def test_sampling_area_callbacks_occupy_the_frozen_suite_slots():
 
 
 def test_fill_premultiply_callbacks_occupy_the_frozen_suite_slots():
-    worker = WORKER.read_text(encoding="utf-8")
+    worker = WORLD_TRANSFORM.read_text(encoding="utf-8")
     callbacks = [
         "premultiply_world8",
         "premultiply_color8",
@@ -157,8 +158,15 @@ def test_fill_premultiply_callbacks_occupy_the_frozen_suite_slots():
     contract = result()["source_contract"]
     assert contract["fill_premultiply_callbacks"] == callbacks
     assert contract["fill_premultiply_suite_slots"] == [3, 4, 5, 6]
-    for slot, callback in zip(contract["fill_premultiply_suite_slots"], callbacks):
-        assert f"g_fill_matte_suite2[{slot}] = reinterpret_cast<void*>(&{callback});" in worker
+    provider = worker.index("const void* provide_fill_matte2(")
+    aggregate = worker[worker.index("void* callbacks[] = {", provider) : worker.index(
+        "std::copy(std::begin(callbacks)", provider
+    )]
+    for callback in callbacks:
+        assert f"reinterpret_cast<void*>(&{callback})" in aggregate
+    assert aggregate.index("&premultiply_world8") < aggregate.index("&premultiply_color8")
+    assert aggregate.index("&premultiply_color8") < aggregate.index("&premultiply_color16")
+    assert aggregate.index("&premultiply_color16") < aggregate.index("&premultiply_color_float")
 
 
 def test_evidence_is_runtime_success_with_ae_pixel_oracle_pending():

@@ -23,9 +23,9 @@ def test_arbitrary_scan_requires_a_new_owned_handle():
 
 
 def test_scan_probe_compares_and_disposes_plugin_handles():
-    source = (ROOT / "minihost" / "src" / "l2_main.cpp").read_text()
+    source = (ROOT / "minihost" / "src" / "worker_parameter_execution.cpp").read_text()
     assert "probe_arbitrary_scan" in source
-    assert "host_handle_is_live(scanned) && scanned != source" in source
+    assert "hooks().handle_is_live(scanned) && scanned != source" in source
     assert "comparison == 0" in source
-    assert "g_arbitrary_scan_calls" in source
-    assert "g_arbitrary_scan_failures" in source
+    assert "runtime().arbitrary.scan_calls" in source
+    assert "runtime().arbitrary.scan_failures" in source

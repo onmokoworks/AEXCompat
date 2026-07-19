@@ -6,7 +6,15 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "minihost/src/l2_main.cpp"
+DISPATCH_SOURCE = ROOT / "minihost/src/l2_cli_dispatch.cpp"
+EXECUTION_SOURCE = ROOT / "minihost/src/worker_parameter_execution.cpp"
+SELFTEST_SOURCE = ROOT / "minihost/src/worker_parameter_selftests.cpp"
 TRANSPORT = ROOT / "target/image-transport"
+
+
+def worker_source():
+    return "\n".join(path.read_text(encoding="utf-8") for path in
+                     (SOURCE, DISPATCH_SOURCE, EXECUTION_SOURCE, SELFTEST_SOURCE))
 
 
 def _workers():
@@ -58,7 +66,7 @@ def test_native_timeline_evaluation_and_param_utils():
 
 
 def test_param_utils_direction_state_and_checkout_safety_are_wired():
-    source = SOURCE.read_text(encoding="utf-8")
+    source = worker_source()
     assert "const bool greater = direction == 0 || direction == 0x1000" in source
     assert "const bool inclusive = direction == 0x1000 || direction == 0x1001" in source
     assert "timeline->keys.size() - 1 - offset" in source
@@ -101,7 +109,7 @@ def test_arbitrary_sidecar_is_bounded_and_strict():
 
 
 def test_arbitrary_runtime_uses_adjacent_keys_and_owned_handles():
-    source = SOURCE.read_text(encoding="utf-8")
+    source = worker_source()
     assert "(now - left) / (right_time - left)" in source
     assert "write<void*>(extra, 16, owned[selected])" in source
     assert "write<void*>(extra, 24, owned[right])" in source
@@ -127,7 +135,7 @@ def test_sidecar_is_confined_to_broker_owned_transport_and_trailers_are_peeled()
         assert completed.returncode == 3
     finally:
         outside.unlink(missing_ok=True)
-    source = SOURCE.read_text(encoding="utf-8")
-    assert 'flag == L"--aux-manifest-v1"' in source
-    assert 'flag == L"--parameter-animation-v1"' in source
-    assert source.count("while (effective_argc >= 3)") == 2
+    source = worker_source()
+    assert 'equals(flag, L"--aux-manifest-v1")' in source
+    assert 'equals(flag, L"--parameter-animation-v1")' in source
+    assert source.count("while (effective_argc >= 3)") == 1

@@ -17,6 +17,12 @@ param(
 . (Join-Path $PSScriptRoot 'sha256.ps1')
 
 $ErrorActionPreference = 'Stop'
+
+# The repo dev dependencies (Pillow / OpenEXR) live in the uv-managed .venv,
+# so Python tools run through uv run (pinned via --project, CWD-independent).
+# ASCII-only on purpose: tests execute this under Windows PowerShell 5.1,
+# which reads BOM-less files as ANSI and corrupts multibyte comments.
+$uvProject = Split-Path -Parent $PSScriptRoot
 if ($Width -le 0 -or $Height -le 0) { throw 'Width and Height must be positive.' }
 
 $afterEffectsPath = (Resolve-Path -LiteralPath $AfterEffects).Path
@@ -81,7 +87,7 @@ if ($process.ExitCode -ne 0 -or -not (Test-Path -LiteralPath $exr -PathType Leaf
     throw "aerender failed to produce the EXR (exit code $($process.ExitCode))."
 }
 
-& python (Join-Path $PSScriptRoot 'compare-pixel-oracles.py') `
+& uv run --project $uvProject python (Join-Path $PSScriptRoot 'compare-pixel-oracles.py') `
     --raw $rawPath --render $exr --width $Width --height $Height `
     --raw-format rgba32f-le --tolerance $Tolerance --out $comparison
 $comparisonExit = $LASTEXITCODE

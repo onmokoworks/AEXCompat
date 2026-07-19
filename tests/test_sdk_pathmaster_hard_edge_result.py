@@ -4,7 +4,15 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 RESULT = ROOT / "analysis" / "SDK_PATHMASTER_HARD_EDGE_RESULT_2026-07-15.json"
-WORKER = ROOT / "minihost" / "src" / "l2_main.cpp"
+WORKER_SOURCES = (
+    ROOT / "minihost" / "src" / "l2_main.cpp",
+    ROOT / "minihost" / "src" / "worker_pf_suites.cpp",
+    ROOT / "minihost" / "src" / "worker_pf_suites_internal.hpp",
+    ROOT / "minihost" / "src" / "worker_l2_suite_abi.hpp",
+    ROOT / "minihost" / "src" / "worker_pf_path_runtime.cpp",
+    ROOT / "minihost" / "src" / "worker_pf_path_selftests.cpp",
+    ROOT / "minihost" / "src" / "worker_pf_world_transform_runtime.cpp",
+)
 BROKER = ROOT / "broker" / "crates" / "broker" / "src" / "image_render.rs"
 
 
@@ -43,20 +51,20 @@ def test_pf_path_checkout_mask_and_lifecycle_ownership_are_balanced():
 
 
 def test_worker_and_broker_keep_the_path_boundary_explicit_and_observable():
-    worker = WORKER.read_text(encoding="utf-8")
+    worker = "\n".join(path.read_text(encoding="utf-8") for path in WORKER_SOURCES)
     broker = BROKER.read_text(encoding="utf-8")
 
     for marker in (
-        'std::strcmp(name, "PF Path Query Suite") == 0',
-        'std::strcmp(name, "PF Path Data Suite") == 0',
+        '{"PF Path Query Suite", 1, nullptr, &provide_path_query1',
+        '{"PF Path Data Suite", 1, nullptr, &provide_path_data1',
         "struct MaskSuite5",
-        "version == 6",
-        "write_rect(world.data() + 44, width, height)",
+        '{"AEGP Layer Mask Suite", 6',
+        "write_rect(lifecycle_world.data() + 44, 1, 1)",
         "transfer_mode < 0 || transfer_mode > 38",
-        "flatten_pf_path",
-        "pf_path_distance",
-        "kMaxOutlineVertices * 16",
-        "pf_path_lifetimes_balanced()",
+        "bool flatten(",
+        "double edge_distance(",
+        "out.size()<=64*16",
+        "pf_path_runtime::lifetimes_balanced()",
     ):
         assert marker in worker
     for marker in (

@@ -4,6 +4,10 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "minihost" / "src" / "l2_main.cpp"
 ABI_PROBE = ROOT / "instruments" / "abi-layout-probe" / "main.cpp"
+ABI = ROOT / "minihost" / "src" / "worker_suite_abi.hpp"
+REGISTRY = ROOT / "minihost" / "src" / "worker_aegp_render_options.cpp"
+LAYER_RUNTIME = ROOT / "minihost" / "src" / "worker_aegp_layer_render_runtime.cpp"
+ASYNC_RUNTIME = ROOT / "minihost" / "src" / "worker_aegp_async_layer_runtime.cpp"
 
 
 def test_sdk_probe_freezes_all_layer_render_options_suite2_slots():
@@ -33,17 +37,19 @@ def test_sdk_probe_freezes_all_layer_render_options_suite2_slots():
 
 def test_minihost_publishes_typed_suite2_without_changing_suite1():
     text = SOURCE.read_text(encoding="utf-8")
-    assert "sizeof(AegpLayerRenderOptionsSuite1) == 14 * sizeof(void*)" in text
-    assert "sizeof(AegpLayerRenderOptionsSuite2) == 15 * sizeof(void*)" in text
-    assert "offsetof(AegpLayerRenderOptionsSuite2, new_from_downstream_of_effect) == 2 * sizeof(void*)" in text
-    assert '"AEGP Layer Render Options Suite") == 0 && version == 2' in text
+    abi = ABI.read_text(encoding="utf-8")
+    assert "sizeof(AegpLayerRenderOptionsSuite1) == 14 * sizeof(void*)" in abi
+    assert "sizeof(AegpLayerRenderOptionsSuite2) == 15 * sizeof(void*)" in abi
+    assert "AEXCOMPAT_ASSERT_LAYER2_SLOT(new_from_downstream_of_effect, 2)" in abi
+    assert '{"AEGP Layer Render Options Suite", 2, nullptr' in text
+    assert "&provide_layer_render_options2" in text
     assert "&new_from_downstream_of_effect" in text
 
 
 def test_layer_checkout_applies_options_to_real_source_pixels():
-    text = SOURCE.read_text(encoding="utf-8")
-    body = text[text.index("int32_t publish_loaded_layer_receipt_from_context(") :]
-    body = body[: body.index("int32_t publish_loaded_layer_receipt(")]
+    text = LAYER_RUNTIME.read_text(encoding="utf-8")
+    body = text[text.index("int32_t publish_from_context(") :]
+    body = body[: body.index("int32_t publish(", 1)]
     for marker in (
         "options.time.value",
         "options.time_step.value <= 0",
@@ -56,32 +62,40 @@ def test_layer_checkout_applies_options_to_real_source_pixels():
         "std::memcpy(destination, channels.data(), sizeof(channels))",
     ):
         assert marker in body
+    host = SOURCE.read_text(encoding="utf-8")
+    assert "thread_local Context g_context" in text
+    assert "publish_from_context(" not in host
+    assert "struct LoadedEffectReceiptContext {" not in host
 
 
 def test_effect_boundaries_accept_only_finalized_staged_downstream():
-    text = SOURCE.read_text(encoding="utf-8")
-    assert "AegpLayerEffectBoundary::upstream" in text
-    assert "AegpLayerEffectBoundary::downstream" in text
-    assert "layer_effect_boundary_is_live(options)" in text
+    text = LAYER_RUNTIME.read_text(encoding="utf-8")
+    registry = REGISTRY.read_text(encoding="utf-8")
+    assert "LayerEffectBoundary::upstream" in registry
+    assert "LayerEffectBoundary::downstream" in registry
+    assert "g_hooks.effect_boundary_live(options)" in text
     assert "context.downstream_finalized" in text
     assert "wants_downstream && !context.downstream_finalized" in text
     assert "context.downstream_argb" in text
     assert "context.all_effects_finalized" in text
-    assert "g_layer_render_options.size() >= kMaxLayerRenderOptions" in text
+    assert "g_layers.size() >= kMaxLayerOptions" in registry
 
 
 def test_sync_and_async_paths_share_the_same_pixel_publisher():
-    text = SOURCE.read_text(encoding="utf-8")
-    assert text.count("publish_loaded_layer_receipt(snapshot, out)") >= 2
-    assert "request->options = snapshot" in text
-    assert "context, request->options, &receipt" in text
-    assert "context.downstream_finalized = true" in text
+    host = SOURCE.read_text(encoding="utf-8")
+    layer = LAYER_RUNTIME.read_text(encoding="utf-8")
+    async_runtime = ASYNC_RUNTIME.read_text(encoding="utf-8")
+    assert host.count("publish_loaded_layer_receipt(snapshot, out)") >= 2
+    assert "request->options = snapshot" in async_runtime
+    assert "g_hooks.publish(request->source, request->options, &receipt)" in async_runtime
+    assert "context.downstream_finalized = true" in layer
+    assert "return publish_from_context(context, options, receipt)" in layer
 
 
 def test_native_selftest_covers_boundary_hashes_cycle_async_and_ownership():
     text = SOURCE.read_text(encoding="utf-8")
     body = text[text.index("bool verify_aegp_layer_render_options_suite2()") :]
-    body = body[: body.index("int wmain(")]
+    body = body[: body.index("int worker_main_impl(")]
     for marker in (
         "upstream_hash != all_hash",
         "upstream_hash != downstream_hash",
@@ -91,7 +105,7 @@ def test_native_selftest_covers_boundary_hashes_cycle_async_and_ownership():
         "render_checkout_layer_async_reject(downstream",
         "async_hash == downstream_hash",
         "checkin_frame(async_result.receipt)",
-        "g_layer_render_options_created == created_before + 3",
-        "g_layer_render_options_disposed == disposed_before + 3",
+        "layer_created_count() == created_before + 3",
+        "layer_disposed_count() == disposed_before + 3",
     ):
         assert marker in body

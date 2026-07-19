@@ -19,11 +19,11 @@ def _worker():
 
 def test_color_param_suite_is_exact_typed_frozen_v1_abi():
     text = SOURCE.read_text(encoding="utf-8")
-    assert 'std::strcmp(name, "PF ColorParamSuite") == 0 && version == 1' in text
+    assert '{"PF ColorParamSuite", 1, &g_color_param_suite1}' in text
     assert "struct PfColorParamSuite1" in text
     assert "sizeof(PfColorParamSuite1) == 1 * sizeof(void*)" in text
     assert "offsetof(PfColorParamSuite1, PF_GetFloatingPointColorFromColorDef) ==" in text
-    assert "*suite = &g_color_param_suite1" in text
+    assert '{"PF ColorParamSuite", 1, &g_color_param_suite1}' in text
     assert 'release_suite("PF ColorParamSuite", 1)' in text
 
 

@@ -87,7 +87,7 @@ def test_plan_only_records_no_effect_control_commands(tmp_path):
 
 def test_capture_mode_executes_the_declared_comparison_contract():
     assert "function Invoke-OracleComparison" in RUNNER_SOURCE
-    assert "& python (Join-Path $PSScriptRoot 'compare-pixel-oracles.py')" in RUNNER_SOURCE
+    assert "& uv run --project $uvProject python (Join-Path $PSScriptRoot 'compare-pixel-oracles.py')" in RUNNER_SOURCE
     assert "Pixel oracle comparison failed with exit code" in RUNNER_SOURCE
     assert "AE oracle output exceeded the configured comparison tolerance" in RUNNER_SOURCE
 

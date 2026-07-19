@@ -31,13 +31,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # 3.12 に固定する: 3.14 は OpenEXR の win_amd64 wheel が無く、毎回
-      # ソースビルドで約 2.5 分かかる。windows-clean-clone.yml と同じ版に揃える。
-      - uses: actions/setup-python@v5
+      # Python 版は .python-version (3.12) に従う。3.14 は OpenEXR の
+      # win_amd64 wheel が無く、毎回ソースビルドで約 2.5 分かかるため上げない。
+      # setup-uv は v8 から floating major tag (@v8) を出していないので full tag で pin する。
+      - uses: astral-sh/setup-uv@v8.3.2
         with:
-          python-version: "3.12"
-          cache: pip
-          cache-dependency-path: requirements-dev.txt
+          enable-cache: true
 
       # Gyroflow 方式: SDK zip を取得・展開して AFTER_EFFECTS_SDK_ROOT を通す。
       # asset は private release (collaborator 限定) にあり、hash mismatch は fail-closed。
@@ -59,7 +58,7 @@ jobs:
           "AFTER_EFFECTS_SDK_ROOT=$root" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
       - name: Install Python dependencies
-        run: python -m pip install -r requirements-dev.txt
+        run: uv sync --locked
 
       # built_artifact テスト (#73) 用: minihost workers を Ninja でビルドする。
       # docs/BUILD_REQUIREMENTS.md の指示どおり target\minihost-build 直下に
@@ -92,8 +91,8 @@ jobs:
         shell: cmd
         run: |
           mkdir target\gpu-effects 2>nul
-          python tools\generate-oracle-rgba-input.py --width 37 --height 23 --alpha-mode opaque --out target\gpu-effects\opencl-input.png || exit /b 1
-          python tools\png-to-rgba-raw.py --png target\gpu-effects\opencl-input.png --out target\gpu-effects\opencl-input.rgba || exit /b 1
+          uv run python tools\generate-oracle-rgba-input.py --width 37 --height 23 --alpha-mode opaque --out target\gpu-effects\opencl-input.png || exit /b 1
+          uv run python tools\png-to-rgba-raw.py --png target\gpu-effects\opencl-input.png --out target\gpu-effects\opencl-input.rgba || exit /b 1
 
       # built_artifact の probe 実行テストが参照する probe .aex を事前ビルドする。
       # (一部は同一ファイル内の sdk_required テストでもビルドされるが、事前に
@@ -129,7 +128,7 @@ jobs:
         shell: cmd
         run: |
           set "PSModulePath=%ProgramFiles%\WindowsPowerShell\Modules;%SystemRoot%\System32\WindowsPowerShell\v1.0\Modules;%PSModulePath%"
-          python -m pytest -q -rs --run-sdk-tests --run-built-artifact-tests --validate-local-artifact-manifest > pytest-output.txt 2>&1
+          uv run python -m pytest -q -rs --run-sdk-tests --run-built-artifact-tests --validate-local-artifact-manifest > pytest-output.txt 2>&1
           set PYTEST_EXIT=%ERRORLEVEL%
           type pytest-output.txt
           exit /b %PYTEST_EXIT%

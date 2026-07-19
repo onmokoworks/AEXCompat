@@ -24,6 +24,12 @@ param(
 . (Join-Path $PSScriptRoot 'sha256.ps1')
 
 $ErrorActionPreference = 'Stop'
+
+# The repo dev dependencies (Pillow / OpenEXR) live in the uv-managed .venv,
+# so Python tools run through uv run (pinned via --project, CWD-independent).
+# ASCII-only on purpose: tests execute this under Windows PowerShell 5.1,
+# which reads BOM-less files as ANSI and corrupts multibyte comments.
+$uvProject = Split-Path -Parent $PSScriptRoot
 $probePath = (Resolve-Path -LiteralPath $ProbeAex).Path
 $probeHash = Get-Sha256Hex $probePath
 $afterEffectsPath = (Resolve-Path -LiteralPath $AfterEffects).Path
@@ -53,7 +59,7 @@ function Invoke-OracleComparison {
     if (Test-Path -LiteralPath $reportPath) {
         throw "Refusing to overwrite comparison report: $reportPath"
     }
-    & python (Join-Path $PSScriptRoot 'compare-pixel-oracles.py') `
+    & uv run --project $uvProject python (Join-Path $PSScriptRoot 'compare-pixel-oracles.py') `
         --raw $rawPath --render ([System.IO.Path]::GetFullPath($Render)) `
         --width $Width --height $Height --raw-format $RawFormat `
         --tolerance $Tolerance --out $reportPath
@@ -98,7 +104,7 @@ if ($PlanOnly) {
     )
     if ($CaptureScript) { $capture += @('-CaptureScript', (Resolve-Path -LiteralPath $CaptureScript).Path) }
     $compare = @(
-        'python', (Join-Path $PSScriptRoot 'compare-pixel-oracles.py'),
+        'uv', 'run', '--project', $uvProject, 'python', (Join-Path $PSScriptRoot 'compare-pixel-oracles.py'),
         '--raw', $rawPath, '--render', $outputPath,
         '--width', [string]$Width, '--height', [string]$Height,
         '--raw-format', $RawFormat, '--tolerance', [string]$Tolerance,
@@ -118,7 +124,7 @@ if ($PlanOnly) {
     } else { $null }
     $controlCompare = if ($controlOutputPath) {
         @(
-            'python', (Join-Path $PSScriptRoot 'compare-pixel-oracles.py'),
+            'uv', 'run', '--project', $uvProject, 'python', (Join-Path $PSScriptRoot 'compare-pixel-oracles.py'),
             '--raw', $controlRawPath, '--render', $controlOutputPath,
             '--width', [string]$Width, '--height', [string]$Height,
             '--raw-format', $RawFormat, '--tolerance', [string]$Tolerance,

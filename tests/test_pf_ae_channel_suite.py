@@ -5,11 +5,18 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SOURCE = ROOT / "minihost" / "src" / "l2_main.cpp"
+SOURCES = (
+    ROOT / "minihost" / "src" / "l2_main.cpp",
+    ROOT / "minihost" / "src" / "worker_pf_suites.cpp",
+    ROOT / "minihost" / "src" / "worker_l2_suite_abi.hpp",
+    ROOT / "minihost" / "src" / "worker_pf_suites_internal.hpp",
+    ROOT / "minihost" / "src" / "worker_pf_ae_channel_runtime.hpp",
+    ROOT / "minihost" / "src" / "worker_pf_ae_channel_runtime.cpp",
+)
 
 
 def source_text():
-    return SOURCE.read_text(encoding="utf-8")
+    return "\n".join(path.read_text(encoding="utf-8") for path in SOURCES)
 
 
 def worker():
@@ -33,7 +40,7 @@ def test_channel_suite1_is_typed_and_matches_the_frozen_sdk_abi():
         r"&get_layer_channel_typed, &checkout_layer_channel, &checkin_layer_channel\}",
         text,
     )
-    assert '*suite = &g_channel_suite1;' in text
+    assert '{"PF AE Channel Suite", 1, &g_channel_suite1}' in text
 
 
 def test_channel_struct_layout_errors_and_found_contract_are_explicit():
