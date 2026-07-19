@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "entries": [
+    {"id":"ntsc-rs","supplier":"ntsc-rs project","sha256":"e59c5b46b4a18dc56c037513254020d48049042f43dfc09daab46721ba1276ae","size_bytes":1869312,"source":"https://github.com/valadaptive/ntsc-rs","license":"GPL-3.0-or-later","redistribution":"allowed","local_only":true},
+    {"id":"olm-colorkeep","supplier":"OpenToonz/OLM","sha256":"6d3718868c6c876c3bb370b19cb2bb3c4f89a3a479c29f03ae0d032a5d043b86","size_bytes":27648,"source":"https://github.com/opentoonz/olm-plugins","license":"BSD-3-Clause source; installed binary redistribution not asserted","redistribution":"unknown","local_only":true},
+    {"id":"olm-blur","supplier":"OpenToonz/OLM","sha256":"f0611785e7b14ac4fcfc75f23b8862beb4539eee52d25d472556849535e96e5b","size_bytes":63488,"source":"https://github.com/opentoonz/olm-plugins","license":"BSD-3-Clause source; installed binary redistribution not asserted","redistribution":"unknown","local_only":true},
+    {"id":"rowbyte-dataglitch","supplier":"Rowbyte","sha256":"b1a3f1a701bbef337cb1db32fce64c8bae3929b5737a1f77dfff808bcd5adf80","size_bytes":2455552,"source":"https://rowbyte.com/data-glitch/","license":"Commercial proprietary license","redistribution":"prohibited","local_only":true},
+    {"id":"rowbyte-fastbokeh","supplier":"Rowbyte","sha256":"56ecf83510cca0d29b295d2a9950d0a394088ba8a3eba5877572f010307809a8","size_bytes":2127360,"source":"https://rowbyte.com/fast-bokeh/","license":"Commercial proprietary license","redistribution":"prohibited","local_only":true}
+  ]
+}

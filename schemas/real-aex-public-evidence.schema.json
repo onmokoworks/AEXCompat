@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://aexcompat.local/schemas/real-aex-public-evidence.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "gap_id", "occurrence_count", "render_path", "depth", "time", "parameter_shape", "classification", "stage", "error_code", "missing_suites", "host_identities"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "gap_id": {"type": "string", "pattern": "^gap-[0-9]{6}$"},
+    "occurrence_count": {"type": "integer", "minimum": 1},
+    "render_path": {"enum": ["classic", "smartfx"]},
+    "depth": {"enum": ["argb8", "argb16", "argb32f"]},
+    "time": {"$ref": "#/$defs/time"},
+    "parameter_shape": {"$ref": "#/$defs/shape"},
+    "classification": {"enum": ["loader_error", "selector_error", "missing_suite", "host_validation_error", "crashed", "timeout"]},
+    "stage": {"enum": ["loader", "selector", "suite", "host_validation", "process"]},
+    "error_code": {"type": ["integer", "null"]},
+    "missing_suites": {"type": "array", "maxItems": 16, "items": {"$ref": "#/$defs/suite"}},
+    "host_identities": {
+      "type": "object", "additionalProperties": false, "required": ["input", "runner", "workers"],
+      "properties": {
+        "input": {"$ref": "#/$defs/input_identity"},
+        "runner": {"$ref": "#/$defs/runner_identity"},
+        "workers": {"type": "array", "minItems": 3, "maxItems": 3, "uniqueItems": true, "items": {"$ref": "#/$defs/worker_identity"}}
+      }
+    }
+  },
+  "$defs": {
+    "sha": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "identity_base": {"type": "object", "additionalProperties": false, "required": ["role", "sha256", "size_bytes"], "properties": {"role": {"type": "string"}, "sha256": {"$ref": "#/$defs/sha"}, "size_bytes": {"type": "integer", "minimum": 0}}},
+    "input_identity": {"allOf": [{"$ref": "#/$defs/identity_base"}, {"properties": {"role": {"const": "input"}}}]},
+    "runner_identity": {"allOf": [{"$ref": "#/$defs/identity_base"}, {"properties": {"role": {"const": "runner"}}}]},
+    "worker_identity": {"allOf": [{"$ref": "#/$defs/identity_base"}, {"properties": {"role": {"pattern": "^worker-00[0-2]$"}}}]},
+    "time": {"type": "object", "additionalProperties": false, "required": ["value", "scale"], "properties": {"value": {"type": "integer"}, "scale": {"type": "integer", "minimum": 1}}},
+    "shape": {"type": "array", "maxItems": 1024, "items": {"type": "object", "additionalProperties": false, "required": ["index", "type"], "properties": {"index": {"type": "integer", "minimum": 0, "maximum": 65535}, "type": {"enum": ["angle", "checkbox", "color", "float", "integer", "layer", "point", "popup", "slider"]}}}},
+    "suite": {"type": "object", "additionalProperties": false, "required": ["suite_id", "version"], "properties": {"suite_id": {"type": "string", "pattern": "^suite-[0-9a-f]{20}$"}, "version": {"type": "integer", "minimum": 1, "maximum": 65535}, "canonical_name": {"enum": ["PF World Suite", "PF Iterate8 Suite", "PF iterate16 Suite", "PF iterateFloat Suite", "PF Pixel Data Suite", "PF World Transform Suite", "PF Fill Matte Suite", "PF Path Data Suite", "PF Path Query Suite", "PF Sampling8 Suite", "PF Sampling16 Suite", "PF SamplingFloat Suite", "PF Param Utils Suite", "PF Effect UI Suite", "PF AE Channel Suite", "AEGP Item Suite", "AEGP Comp Suite", "AEGP Layer Suite", "AEGP Effect Suite", "AEGP Stream Suite", "AEGP Render Suite"]}}}
+  }
+}
