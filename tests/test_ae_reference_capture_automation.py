@@ -91,6 +91,20 @@ def test_reference_capture_color_pipeline_pin_is_optional_and_fail_closed():
     assert "linearize_working_space: app.project.linearizeWorkingSpace" in script
 
 
+def test_reference_capture_lock_and_identity_failures_share_cleanup_scope():
+    runner = RUNNER.read_text(encoding="utf-8")
+    cleanup_try = runner.index("$installedLock = $null\n$process = $null\n$captureFailed = $true\ntry {")
+    lock_open = runner.index("$installedLock = [System.IO.File]::Open(")
+    identity_validation = runner.index("$lockedIdentity = Get-LockedFileIdentity $installedLock")
+    cleanup_finally = runner.index("} finally {", identity_validation)
+
+    # Both operations can throw after the staged input and environment contract
+    # exist, so they must be enclosed by the same cleanup try/finally as launch.
+    assert cleanup_try < lock_open < identity_validation < cleanup_finally
+    assert "if ($captureFailed -and $null -ne $installedLock) { $installedLock.Dispose() }" in runner
+    assert "Remove-Item -LiteralPath $stagedInput -ErrorAction SilentlyContinue" in runner
+
+
 @pytest.mark.skipif(
     sys.platform != "win32" or shutil.which("powershell") is None,
     reason="mock capture run requires Windows PowerShell and a Windows executable")

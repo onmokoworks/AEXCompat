@@ -150,30 +150,28 @@ if ($ParamName) {
     # capture cannot pick up a stale override from the calling environment.
     Remove-Item 'Env:AEXCOMPAT_AE_PARAM_NAME','Env:AEXCOMPAT_AE_PARAM_VALUE' -ErrorAction SilentlyContinue
 }
-# Lock immediately before launch, after every other preflight/staging step.
-# Denying write/delete sharing binds the hash to the file AE can map and
-# prevents replacement until the launched process has finished or is killed.
-$installedLock = [System.IO.File]::Open(
-    $installedPath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read,
-    [System.IO.FileShare]::Read)
-try {
-$lockedIdentity = Get-LockedFileIdentity $installedLock
-$lockedInstalledHash = $lockedIdentity.sha256
-} catch {
-    $installedLock.Dispose()
-    throw
-}
-$installedLock.Position = 0
-if ($lockedInstalledHash -ne $testedHash) {
-    $installedLock.Dispose()
-    throw "Installed AEX changed before launch: $lockedInstalledHash != $testedHash"
-}
-$installedHash = $lockedInstalledHash
-$lockedFinalPath = $lockedIdentity.final_path
-$lockedFileId = $lockedIdentity.file_id
+$installedLock = $null
 $process = $null
 $captureFailed = $true
 try {
+    # Lock immediately before launch, after every other preflight/staging step.
+    # Denying write/delete sharing binds the hash to the file AE can map and
+    # prevents replacement until the launched process has finished or is killed.
+    # Keep this inside the cleanup scope because lock/identity failures happen
+    # after staging and exporting the JSX environment contract.
+    $installedLock = [System.IO.File]::Open(
+        $installedPath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read,
+        [System.IO.FileShare]::Read)
+    $lockedIdentity = Get-LockedFileIdentity $installedLock
+    $lockedInstalledHash = $lockedIdentity.sha256
+    $installedLock.Position = 0
+    if ($lockedInstalledHash -ne $testedHash) {
+        throw "Installed AEX changed before launch: $lockedInstalledHash != $testedHash"
+    }
+    $installedHash = $lockedInstalledHash
+    $lockedFinalPath = $lockedIdentity.final_path
+    $lockedFileId = $lockedIdentity.file_id
+
     $escapedScriptPath = $scriptPath.Replace('"', '\"')
     # AE 25.2 can abort before JSX execution when -noui hits a failed GPU3
     # sanity state; there the UI launch still runs the script and the JSX
@@ -287,7 +285,7 @@ try {
     'AEXCOMPAT_AE_PARAM_NAME','AEXCOMPAT_AE_PARAM_VALUE' |
         ForEach-Object { Remove-Item "Env:$_" -ErrorAction SilentlyContinue }
     Remove-Item -LiteralPath $stagedInput -ErrorAction SilentlyContinue
-    if ($captureFailed) { $installedLock.Dispose() }
+    if ($captureFailed -and $null -ne $installedLock) { $installedLock.Dispose() }
 }
 
 try {
