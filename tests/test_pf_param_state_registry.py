@@ -6,10 +6,12 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "minihost" / "src" / "l2_main.cpp"
 STATE_SOURCE = ROOT / "minihost" / "src" / "worker_pf_state_runtime.cpp"
+SELFTEST_SOURCE = ROOT / "minihost" / "src" / "worker_parameter_selftests.cpp"
 
 
 def source_text():
-    return STATE_SOURCE.read_text(encoding="utf-8") + "\n" + SOURCE.read_text(encoding="utf-8")
+    return "\n".join(path.read_text(encoding="utf-8") for path in
+                     (STATE_SOURCE, SOURCE, SELFTEST_SOURCE))
 
 
 def _workers():

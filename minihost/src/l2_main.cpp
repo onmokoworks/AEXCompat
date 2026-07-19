@@ -53,6 +53,7 @@
 #include "l2_mode_execution.hpp"
 #include "parameter_animation_transport.hpp"
 #include "worker_parameter_runtime.hpp"
+#include "worker_parameter_selftests.hpp"
 #include "worker_parameter_execution.hpp"
 #include "pf_cache_on_load_suite.hpp"
 #include "render_lifecycle.hpp"
@@ -117,6 +118,9 @@
 // translation units can own callback state without including implementation
 // fragments into this file.
 namespace aexcompat::l2_detail {
+
+using aexcompat::parameter_selftests::verify_parameter_animation_transport;
+using aexcompat::parameter_selftests::verify_pf_param_utils_suite3;
 
 using namespace aexcompat::pf_ae_channel;
 using namespace aexcompat::pf_state_runtime;
@@ -5802,183 +5806,7 @@ bool verify_pf_color_param_suite() {
   return ok;
 }
 
-bool verify_pf_param_utils_suite3() {
-  const auto saved_params = g_params;
-  g_params.clear();
-  ParamRecord param{};
-  param.index = 1;
-  param.disk_id = 7001;
-  param.type = 1;
-  write<int32_t>(param.raw, 0, param.disk_id);
-  write<int32_t>(param.raw, kParamType, param.type);
-  write<int32_t>(param.raw, 56, 42);
-  g_params.push_back(param);
-  reset_effect_lifetime(true);
 
-  auto active = param.raw;
-  auto local = active;
-  write<uint32_t>(local, kParamUiFlags, (1u << 5));
-  write<int16_t>(local, 8, 123);
-  write<int16_t>(local, 10, 45);
-  write<uint32_t>(local, kParamFlags, (1u << 5));
-  std::memcpy(local.data() + kParamName, "Updated", 8);
-  void* active_params[2]{nullptr, active.data()};
-  g_active_ui_params = active_params;
-  g_active_ui_param_count = 2;
-  g_update_params_ui_active = true;
-
-  const void* acquired{};
-  PfState first{}, second{}, changed{};
-  PfTime start{12, 24}, duration{1, 24};
-  uint8_t same = 0, identical = 0, found = 1;
-  int32_t count = 0, key_index = 9, key_time = 9;
-  uint32_t key_scale = 0;
-  bool ok = acquire_suite("PF Param Utils Suite", 3, &acquired) == 0 &&
-      acquired == &g_param_utils_suite &&
-      std::all_of(reinterpret_cast<void* const*>(&g_param_utils_suite),
-                  reinterpret_cast<void* const*>(&g_param_utils_suite) + 9,
-                  [](const void* slot) { return slot != nullptr; }) &&
-      update_param_ui(&g_effect, 1, local.data()) == 0 &&
-      read<uint32_t>(active, kParamUiFlags) == (1u << 5) &&
-      read<int16_t>(active, 8) == 123 && read<int16_t>(active, 10) == 45 &&
-      read<uint32_t>(active, kParamFlags) == (1u << 5) &&
-      std::strcmp(reinterpret_cast<const char*>(active.data() + kParamName), "Updated") == 0 &&
-      get_current_param_state(&g_effect, 1, &start, &duration, &first) == 0 &&
-      get_current_param_state(&g_effect, 1, &start, &duration, &second) == 0 &&
-      are_param_states_identical(&g_effect, &first, &second, &same) == 0 && same == 1;
-  const void* acquired_v1{};
-  PfState obsolete_state{};
-  uint8_t obsolete_changed = 0;
-  ok = ok && acquire_suite("PF Param Utils Suite", 2, &acquired_v1) == 0 &&
-      acquired_v1 == &g_param_utils_suite1 && acquired_v1 != acquired &&
-      std::all_of(reinterpret_cast<void* const*>(&g_param_utils_suite1),
-                  reinterpret_cast<void* const*>(&g_param_utils_suite1) + 10,
-                  [](const void* slot) { return slot != nullptr; }) &&
-      g_param_utils_suite1.PF_GetCurrentStateObsolete(&g_effect, &obsolete_state) == 0 &&
-      g_param_utils_suite1.PF_HasParamChangedObsolete(
-          &g_effect, &obsolete_state, 999, &obsolete_changed) == 0 &&
-      obsolete_changed == 1;
-  obsolete_changed = 0;
-  ok = ok && g_param_utils_suite1.PF_HaveInputsChangedOverTimeSpanObsolete(
-                 &g_effect, &obsolete_state, &start, &duration, &obsolete_changed) == 0 &&
-      obsolete_changed == 1;
-  PfState foreign_state{{9, 8, 7, 6}};
-  obsolete_changed = 0x5a;
-  ok = ok && g_param_utils_suite1.PF_HasParamChangedObsolete(
-                 &g_effect, &foreign_state, 1, &obsolete_changed) == kPfBadCallbackParam &&
-      obsolete_changed == 0x5a &&
-      g_param_utils_suite1.PF_HaveInputsChangedOverTimeSpanObsolete(
-          nullptr, &obsolete_state, nullptr, nullptr, &obsolete_changed) ==
-          kPfBadCallbackParam && obsolete_changed == 0x5a &&
-      release_suite("PF Param Utils Suite", 2) == 0;
-  write<int32_t>(g_params[0].raw, 56, 43);
-  ok = ok && get_current_param_state(&g_effect, 1, &start, &duration, &changed) == 0 &&
-      are_param_states_identical(&g_effect, &first, &changed, &same) == 0 && same == 0 &&
-      is_identical_param_checkout(&g_effect, 1, 0, 1, 24, 10, 1, 24, &identical) == 0 &&
-      identical == 1 &&
-      find_param_keyframe_time(&g_effect, 1, 0, 24, 0, &found, &key_index,
-                               &key_time, &key_scale) == 0 &&
-      found == 0 && key_index == -1 && key_time == 0 && key_scale == 24 &&
-      get_param_keyframe_count(&g_effect, 1, &count) == 0 && count == -1 &&
-      checkout_param_keyframe(&g_effect, 1, 0, nullptr, nullptr, g_params[0].raw.data()) ==
-          kPfInvalidIndex &&
-      checkin_param_keyframe(&g_effect, g_params[0].raw.data()) == kPfInvalidIndex &&
-      param_key_index_to_time(&g_effect, 1, 0, &key_time, &key_scale) == kPfInvalidIndex;
-  PfState sentinel{{1, 2, 3, 4}};
-  changed = sentinel;
-  ok = ok && get_current_param_state(nullptr, 1, nullptr, nullptr, &changed) ==
-          kPfBadCallbackParam &&
-      std::memcmp(&changed, &sentinel, sizeof(changed)) == 0 &&
-      get_current_param_state(&g_effect, 999, nullptr, nullptr, &changed) ==
-          kPfBadCallbackParam &&
-      are_param_states_identical(&g_effect, nullptr, &first, &same) == kPfBadCallbackParam;
-
-  PfState zero{}, random{}, bit_flip = first;
-  BCryptGenRandom(nullptr, reinterpret_cast<PUCHAR>(&random), sizeof(random),
-                  BCRYPT_USE_SYSTEM_PREFERRED_RNG);
-  reinterpret_cast<unsigned char*>(&bit_flip)[7] ^= 0x40;
-  same = 0x5a;
-  ok = ok && are_param_states_identical(&g_effect, &zero, &first, &same) ==
-          kPfBadCallbackParam && same == 0x5a &&
-      are_param_states_identical(&g_effect, &random, &first, &same) ==
-          kPfBadCallbackParam && same == 0x5a &&
-      are_param_states_identical(&g_effect, &bit_flip, &first, &same) ==
-          kPfBadCallbackParam && same == 0x5a;
-  ok = ok && corrupt_state_owner_for_test(first, &g_layer);
-  ok = ok && are_param_states_identical(&g_effect, &first, &second, &same) ==
-          kPfBadCallbackParam && same == 0x5a;
-  reset_effect_lifetime(true);
-  ok = ok && are_param_states_identical(&g_effect, &first, &second, &same) ==
-          kPfBadCallbackParam && same == 0x5a;
-  fill_registry_to_capacity_for_test(&g_effect, 1);
-  changed = sentinel;
-  ok = ok && get_current_param_state(&g_effect, 1, nullptr, nullptr, &changed) ==
-          kPfBadCallbackParam && std::memcmp(&changed, &sentinel, sizeof(changed)) == 0;
-  reset_effect_lifetime(false);
-  ok = ok && live_state_count() == 0 &&
-      get_current_param_state(&g_effect, 1, nullptr, nullptr, &changed) ==
-          kPfBadCallbackParam && release_suite("PF Param Utils Suite", 3) == 0;
-  g_update_params_ui_active = false;
-  g_active_ui_params = nullptr;
-  g_active_ui_param_count = 0;
-  g_params = saved_params;
-  return ok;
-}
-
-bool verify_parameter_animation_transport() {
-  const auto saved_params = g_params;
-  const auto saved_timelines = g_parameter_timelines;
-  g_params.clear();
-  g_parameter_timelines.clear();
-  ParamRecord param{};
-  param.index = 1;
-  param.disk_id = 9001;
-  param.type = 10;
-  write<int32_t>(param.raw, 0, param.disk_id);
-  write<int32_t>(param.raw, kParamType, param.type);
-  g_params.push_back(param);
-  ParameterTimeline timeline;
-  timeline.slot = 1;
-  AnimationKey a{};
-  a.time = 0;
-  a.scale = 24;
-  a.kind = AnimationValueKind::Scalar;
-  a.scalar = 10.0;
-  AnimationKey b = a;
-  b.time = 24;
-  b.scalar = 20.0;
-  AnimationKey c = b;
-  c.time = 48;
-  c.scalar = 40.0;
-  b.hold = true;
-  timeline.keys = {a, b, c};
-  g_parameter_timelines.push_back(timeline);
-  std::vector<std::array<std::byte, kParamSize>> definitions(2);
-  definitions[1] = param.raw;
-  uint8_t identical = 1, found = 0;
-  int32_t count = 0, index = -1, time = 0;
-  uint32_t scale = 0;
-  bool ok = apply_parameter_animation(definitions, 12, 24) &&
-            std::abs(read<double>(definitions[1], 56) - 15.0) < 1e-12 &&
-            apply_parameter_animation(definitions, 36, 24) &&
-            std::abs(read<double>(definitions[1], 56) - 20.0) < 1e-12 &&
-            get_param_keyframe_count(&g_effect, 1, &count) == 0 && count == 3 &&
-            find_param_keyframe_time(&g_effect, 1, 12, 24, 0, &found, &index,
-                                     &time, &scale) == 0 &&
-            found == 1 && index == 1 && time == 24 && scale == 24 &&
-            param_key_index_to_time(&g_effect, 1, 2, &time, &scale) == 0 &&
-            time == 48 && scale == 24 &&
-            is_identical_param_checkout(&g_effect, 1, 24, 1, 24, 36, 1, 24,
-                                        &identical) == 0 &&
-            identical == 1 &&
-            is_identical_param_checkout(&g_effect, 1, 0, 1, 24, 12, 1, 24,
-                                        &identical) == 0 &&
-            identical == 0;
-  g_params = saved_params;
-  g_parameter_timelines = saved_timelines;
-  g_keyframe_checkout_ledger.clear();
-  return ok;
-}
 
 bool verify_aegp_effect_param_union_suite4() {
   const bool saved_live = g_aegp_effect_live;
@@ -8662,5 +8490,18 @@ const bool g_aegp_compat_selftests_configured = [] {
 const bool g_color_settings_selftests_configured = [] {
   aexcompat::color_settings::selftests::configure(
       {&acquire_suite, &release_suite, &g_aegp_comp});
+  return true;
+}();
+const bool g_parameter_selftests_configured = [] {
+  aexcompat::parameter_selftests::configure({
+      &acquire_suite, &release_suite, &g_effect, &g_layer,
+      &g_param_utils_suite1, &g_param_utils_suite,
+      &update_param_ui, &is_identical_param_checkout,
+      &find_param_keyframe_time, &get_param_keyframe_count,
+      &checkout_param_keyframe, &checkin_param_keyframe,
+      &param_key_index_to_time, &get_current_param_state_obsolete,
+      &has_param_changed_obsolete,
+      &have_inputs_changed_over_time_span_obsolete,
+      &apply_parameter_animation});
   return true;
 }();

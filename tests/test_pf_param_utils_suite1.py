@@ -9,6 +9,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "minihost/src/l2_main.cpp"
 STATE_SOURCE = ROOT / "minihost/src/worker_pf_state_runtime.cpp"
+SELFTEST_SOURCE = ROOT / "minihost/src/worker_parameter_selftests.cpp"
 SDK_ROOT = os.environ.get("AFTER_EFFECTS_SDK_ROOT")
 SDK = Path(SDK_ROOT) / "Examples" / "Headers" / "AE_EffectSuitesOld.h" if SDK_ROOT else None
 
@@ -45,7 +46,8 @@ def test_sdk_freezes_param_utils_suite1_at_acquisition_version_2_with_ten_slots(
 
 
 def test_suite1_has_a_distinct_typed_old_abi_and_all_ten_contract_slots():
-    source = SOURCE.read_text(encoding="utf-8") + "\n" + STATE_SOURCE.read_text(encoding="utf-8")
+    source = "\n".join(path.read_text(encoding="utf-8") for path in
+                       (SOURCE, STATE_SOURCE, SELFTEST_SOURCE))
     assert '{"PF Param Utils Suite", 2, &g_param_utils_suite1}' in source
     assert "struct ParamUtilsSuite1" in source
     assert "sizeof(ParamUtilsSuite1) == 10 * sizeof(void*)" in source
