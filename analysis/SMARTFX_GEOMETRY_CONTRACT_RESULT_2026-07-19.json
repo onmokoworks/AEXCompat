@@ -15,12 +15,12 @@
                       "probe":  {
                                     "path":  "target/pf-smart-geometry-probe-build/Release/pf_smart_geometry_probe.aex",
                                     "size_bytes":  12800,
-                                    "sha256":  "d3cd92c28a88798f224079650ce33b3237967de97759e2b55a16ee40e88504e9"
+                                    "sha256":  "38c6f1307bc9ce9f603cd3a5c43b465c7c8631c990c92a15e1da7d1c39f302c8"
                                 },
                       "probe_source":  {
                                            "path":  "instruments/pf-smart-geometry-probe/pf_smart_geometry_probe.cpp",
-                                           "size_bytes":  6794,
-                                           "sha256":  "49eb08ad05a93ada93d52e47dbb49a079d8966ae3fe013334588640b26962a56"
+                                           "size_bytes":  7066,
+                                           "sha256":  "0a7172341561c26349ee15f01a07c321c682cf7ca14a303045a2bee8c451c718"
                                        },
                       "tested_aex":  {
                                          "path":  "target/ntsc-rs-ae.aex",

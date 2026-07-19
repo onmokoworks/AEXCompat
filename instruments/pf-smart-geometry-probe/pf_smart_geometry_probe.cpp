@@ -61,17 +61,22 @@ PF_Err SmartPreRender(PF_InData* in_data, PF_PreRenderExtra* extra) {
       if (!SameRect(checkout.result_rect, sub.left, sub.top, sub.right, sub.bottom) ||
           !SameRect(checkout.max_result_rect, 0, 0, width, height))
         return PF_Err_INTERNAL_STRUCT_DAMAGED;
-      // An oversized request clamps to the layer extent.
+      // An oversized request clamps to the layer extent; max_result_rect must
+      // not vary with the request.
       const PF_LRect oversized{-10, -10, width + 10, height + 10};
       err = CheckoutInput(in_data, extra, oversized, &checkout);
       if (err) return err;
-      if (!SameRect(checkout.result_rect, 0, 0, width, height))
+      if (!SameRect(checkout.result_rect, 0, 0, width, height) ||
+          !SameRect(checkout.max_result_rect, 0, 0, width, height))
         return PF_Err_INTERNAL_STRUCT_DAMAGED;
-      // A disjoint request is answered with a legally empty rect.
+      // A disjoint request is answered with a legally empty rect while
+      // max_result_rect still reports the full layer extent.
       const PF_LRect disjoint{width + 5, height + 5, width + 6, height + 6};
       err = CheckoutInput(in_data, extra, disjoint, &checkout);
       if (err) return err;
-      if (!RectEmpty(checkout.result_rect)) return PF_Err_INTERNAL_STRUCT_DAMAGED;
+      if (!RectEmpty(checkout.result_rect) ||
+          !SameRect(checkout.max_result_rect, 0, 0, width, height))
+        return PF_Err_INTERNAL_STRUCT_DAMAGED;
       // The final full checkout is the one that backs the render.
       err = CheckoutInput(in_data, extra, full, &checkout);
       if (err) return err;
