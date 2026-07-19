@@ -5,7 +5,7 @@ ROOT = Path(__file__).resolve().parents[1]
 MAIN = "\n".join(
     (ROOT / "minihost" / "src" / name).read_text(encoding="utf-8")
     for name in ("l2_main.cpp", "worker_invocation_orchestration.cpp",
-                 "worker_entry_admission.cpp")
+                 "worker_entry_admission.cpp", "worker_entry_bootstrap.cpp")
 )
 ADMISSION = (ROOT / "minihost" / "src" / "worker_runtime_admission.cpp").read_text(
     encoding="utf-8"
@@ -57,7 +57,7 @@ def test_optional_argument_is_l2_params_only_and_exactly_positioned():
 
 
 def test_hash_dependency_is_configured_before_authorization_and_fails_closed():
-    configure = MAIN.index("configure_runtime_module_hash(&sha256)")
+    configure = MAIN.index("entry_bootstrap::configure(bootstrap_hooks)")
     admission = MAIN.index("admit_worker_entry(")
     assert configure < admission
     assert "RuntimeHostHooks runtime_hooks{&sha256" in MAIN

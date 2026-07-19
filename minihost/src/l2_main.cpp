@@ -5870,19 +5870,6 @@ int selftest_effect_param_union(int, wchar_t**) {
 }
 
 int worker_main_impl(int argc, wchar_t **argv) {
-  aexcompat::pf_state_runtime::configure_host_hooks({
-      []() -> void* { return &g_effect; },
-      [](int32_t index, bool allow_groups) -> bool {
-        return valid_param_utils_index(index, allow_groups);
-      },
-      &capture_pf_parameter_state});
-  configure_host_hooks({
-      []() -> void* { return &g_effect; },
-      []() -> std::size_t { return g_params.size(); },
-      [](std::size_t index) -> bool {
-        return index < g_params.size() && g_params[index].type == 0;
-      },
-      &sha256});
   SceneSuiteFactoryHooks scene_factory{};
   scene_factory.render_scene_enabled = &scene_render_receipt_enabled;
   scene_factory.comp_bg_color = reinterpret_cast<void*>(&aegp_get_comp_bg_color);
@@ -5935,12 +5922,6 @@ int worker_main_impl(int argc, wchar_t **argv) {
       &g_full_resolution_width, &g_full_resolution_height,
       &aexcompat::worker_runtime::smart::width,
       &aexcompat::worker_runtime::smart::height};
-  if (!configure_scene_context(scene_host) || !scene_translation_unit_linked() ||
-      !configure_scene_runtime_context(scene_runtime_host) ||
-      !scene_runtime_translation_unit_linked() ||
-      !scene_selftests_translation_unit_linked()) return 23;
-  configure_validators(&validate_render_options_item, &initialize_layer_render_options);
-  configure_cache_on_load_suite(&g_effect);
   const PfHostContext pf_host_context{
       {
           [](void* world, int32_t pixel_bytes, unsigned char*& pixels,
@@ -5964,9 +5945,27 @@ int worker_main_impl(int argc, wchar_t **argv) {
       &g_effect,
       &g_batch_sampling_suite1,
   };
-  configure_pf_host_context(pf_host_context);
-  if (!pf_host_context_configured()) return 72;
-  aexcompat::pf_world_transform::configure({
+  aexcompat::worker_runtime::entry_bootstrap::Hooks bootstrap_hooks{};
+  bootstrap_hooks.pf_state = {
+      []() -> void* { return &g_effect; },
+      [](int32_t index, bool allow_groups) -> bool {
+        return valid_param_utils_index(index, allow_groups);
+      },
+      &capture_pf_parameter_state};
+  bootstrap_hooks.pf_ae_channel = {
+      []() -> void* { return &g_effect; },
+      []() -> std::size_t { return g_params.size(); },
+      [](std::size_t index) -> bool {
+        return index < g_params.size() && g_params[index].type == 0;
+      },
+      &sha256};
+  bootstrap_hooks.scene = scene_host;
+  bootstrap_hooks.scene_runtime = scene_runtime_host;
+  bootstrap_hooks.validate_item = &validate_render_options_item;
+  bootstrap_hooks.initialize_layer = &initialize_layer_render_options;
+  bootstrap_hooks.effect_ref = &g_effect;
+  bootstrap_hooks.pf = pf_host_context;
+  bootstrap_hooks.world_transform = {
       {pf_host_context.hooks.resolve_world,
        pf_host_context.hooks.resolve_dispatch_world_format,
        pf_host_context.hooks.pixel_format,
@@ -5974,16 +5973,16 @@ int worker_main_impl(int argc, wchar_t **argv) {
        &bounded_argb8_world,
        reinterpret_cast<void*>(&aegp_unsupported_suite_call)},
       {&g_transform_world_calls, &g_last_transform_x, &g_last_transform_y,
-       &g_last_transform_opacity}});
-  if (!aexcompat::pf_world_transform::configured()) return 74;
-  if (!aexcompat::worker_runtime::pf_adv_time::configure_verification_hooks(
-          {&acquire_suite, &release_suite, &suite_acquire_count,
-           &suite_release_count, &suite_leases_balanced}))
-    return 73;
-  configure_runtime_module_hash(&sha256);
-  configure_selector_dispatch_audit(&capture_module_audit_phase,
-                                    &module_audit_passed);
-  configure_selector_dispatch_trace(&record_selector_dispatch);
+       &g_last_transform_opacity}};
+  bootstrap_hooks.adv_time = {&acquire_suite, &release_suite, &suite_acquire_count,
+                              &suite_release_count, &suite_leases_balanced};
+  bootstrap_hooks.hash = &sha256;
+  bootstrap_hooks.audit_capture = &capture_module_audit_phase;
+  bootstrap_hooks.audit_passed = &module_audit_passed;
+  bootstrap_hooks.trace = &record_selector_dispatch;
+  const auto bootstrap_error =
+      aexcompat::worker_runtime::entry_bootstrap::configure(bootstrap_hooks);
+  if (bootstrap_error != 0) return bootstrap_error;
   const aexcompat::worker_runtime::selftest::AegpHooks aegp_selftests{
       &verify_aegp_projector_levels, &verify_aegp_effect_stack,
       &verify_aegp_apply_effect, &verify_aegp_resizer_3d_chain,
