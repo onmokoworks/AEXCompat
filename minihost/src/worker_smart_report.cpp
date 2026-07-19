@@ -8,10 +8,11 @@
 #include "worker_handle_runtime.hpp"
 #include "worker_mask_runtime.hpp"
 #include "worker_mask_runtime_internal.hpp"
-#include "worker_custom_ui_state.hpp"
 #include "worker_parameter_execution.hpp"
 #include "worker_pf_pixel_format_registry.hpp"
 #include "worker_render_report.hpp"
+#include "worker_smart_runtime.hpp"
+#include "worker_ui_event_execution.hpp"
 #include "worker_world_registry.hpp"
 
 #include <atomic>
@@ -24,18 +25,20 @@ namespace aexcompat::l2_detail {
 // Worker-entry owned custom-UI/telemetry state and helpers; the definitions
 // stay in l2_main with the dispatch that mutates them.
 namespace {
-auto& g_render_click_enabled = worker_runtime::custom_ui::state().render_click_enabled;
-auto& g_render_draw_enabled = worker_runtime::custom_ui::state().render_draw_enabled;
-auto& g_render_click_error = worker_runtime::custom_ui::state().render_click_error;
-auto& g_render_click_out_flags = worker_runtime::custom_ui::state().render_click_out_flags;
-auto& g_render_click_changed_value = worker_runtime::custom_ui::state().render_click_changed_value;
-auto& g_render_draw_error = worker_runtime::custom_ui::state().render_draw_error;
-auto& g_render_draw_out_flags = worker_runtime::custom_ui::state().render_draw_out_flags;
-auto& g_render_ui_lifecycle_errors = worker_runtime::custom_ui::state().render_ui_lifecycle_errors;
-auto& g_render_ui_context_closed = worker_runtime::custom_ui::state().render_ui_context_closed;
-auto& g_app_color_picker_calls = worker_runtime::custom_ui::state().app_color_picker_calls;
-auto& g_app_invalidate_rect_calls = worker_runtime::custom_ui::state().app_invalidate_rect_calls;
-auto& g_app_picker_color = worker_runtime::custom_ui::state().app_picker_color;
+auto& g_smart_ui_telemetry =
+    aexcompat::worker_runtime::ui_event_execution::custom_ui_telemetry();
+auto& g_render_click_enabled = g_smart_ui_telemetry.render_click_enabled;
+auto& g_render_draw_enabled = g_smart_ui_telemetry.render_draw_enabled;
+auto& g_render_click_error = g_smart_ui_telemetry.render_click_error;
+auto& g_render_click_out_flags = g_smart_ui_telemetry.render_click_out_flags;
+auto& g_render_click_changed_value = g_smart_ui_telemetry.render_click_changed_value;
+auto& g_render_draw_error = g_smart_ui_telemetry.render_draw_error;
+auto& g_render_draw_out_flags = g_smart_ui_telemetry.render_draw_out_flags;
+auto& g_render_ui_lifecycle_errors = g_smart_ui_telemetry.render_ui_lifecycle_errors;
+auto& g_render_ui_context_closed = g_smart_ui_telemetry.render_ui_context_closed;
+auto& g_app_color_picker_calls = g_smart_ui_telemetry.app_color_picker_calls;
+auto& g_app_invalidate_rect_calls = g_smart_ui_telemetry.app_invalidate_rect_calls;
+auto& g_app_picker_color = g_smart_ui_telemetry.app_picker_color;
 }  // namespace
 // Mirrors l2_main's frozen guid mix-in transport bound; the report publishes
 // it beside the observed sizes.
