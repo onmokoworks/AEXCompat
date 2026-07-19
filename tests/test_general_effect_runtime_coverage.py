@@ -80,7 +80,7 @@ def test_render_options_and_async_receipt_claims_match_current_source():
     assert "return publish_async_receipt(pixel_format, receipt);" in checkout
     assert 'std::strcmp(name, "AEGP Render Suite") == 0 && version == 5' in source
     assert "&checkin_frame, &get_receipt_world" in source
-    assert "g_aegp_world_views.erase(found->second->world_handle);" in source
+    assert "aexcompat::world_registry::unregister_borrowed_view(" in source
 
     assert report["suites"]["AEGP_WorldSuite3"]["slots"][1]["range"] == [2, 8]
     for callback in (
