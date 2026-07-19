@@ -459,9 +459,10 @@ class MinihostL2SourceTests(unittest.TestCase):
             self.assertIn(marker, text)
 
     def test_secondary_layer_transport_is_multi_slot_bound(self):
-        text = l2_family_source()
+        text = l2_family_source() + (ROOT / "minihost" / "src" /
+                                     "worker_smart_runtime.cpp").read_text(encoding="utf-8")
         for marker in ('L"--render-image-layer"', 'L"--smart-image-layer"',
-                       "g_checkout_layer_definitions", "g_smart_hosted_layers",
+                       "g_checkout_layer_definitions", "smart_state().hosted_layers",
                        "existing.slot != layer.slot", "g_params[layer.slot - 1].type != 0",
                        "(mode.image_argc - 13) / 4 <= 64",
                        'L"v1|%d|%d|%u%n"', "same_rational_time",

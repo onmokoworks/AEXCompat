@@ -181,8 +181,8 @@ struct SceneRuntimeContext {
   void* composition{};
   int32_t* full_resolution_width{};
   int32_t* full_resolution_height{};
-  int32_t* smart_width{};
-  int32_t* smart_height{};
+  int32_t (__cdecl *smart_width)(){};
+  int32_t (__cdecl *smart_height)(){};
 };
 
 bool configure_scene_runtime_context(const SceneRuntimeContext& context) noexcept;

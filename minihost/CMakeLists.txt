@@ -38,6 +38,7 @@ set(AEXCOMPAT_WORKER_RUNTIME_CORE_SOURCES
     src/worker_suite_registry.cpp
     src/worker_runtime_admission.cpp
     src/worker_session.cpp
+    src/worker_smart_runtime.cpp
     src/worker_aegp_render_options.cpp
     src/worker_aegp_scene.cpp
     src/worker_aegp_scene_runtime.cpp

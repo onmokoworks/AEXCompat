@@ -64,6 +64,7 @@
 #include "worker_selector_dispatch.hpp"
 #include "worker_runtime_admission.hpp"
 #include "worker_session.hpp"
+#include "worker_smart_runtime.hpp"
 #include "worker_aegp_render_options.hpp"
 #include "worker_aegp_scene.hpp"
 #include "worker_aegp_scene_runtime.hpp"
@@ -169,6 +170,11 @@ using aexcompat::worker_runtime::RuntimeHostHooks;
 using aexcompat::worker_runtime::SuiteResolveResult;
 using aexcompat::worker_runtime::suite_registry;
 using aexcompat::worker_runtime::WorkerSession;
+using SmartRuntimeSession = aexcompat::worker_runtime::smart::Session;
+using aexcompat::worker_runtime::smart::checkout_output;
+using aexcompat::worker_runtime::smart::checkout_pixels;
+using aexcompat::worker_runtime::smart::checkin_pixels;
+using aexcompat::worker_runtime::smart::pre_checkout_layer;
 using aexcompat::worker_runtime::admit_runtime;
 using aexcompat::render_receipts::ReceiptDraft;
 using aexcompat::render_receipts::ReceiptSnapshot;
@@ -210,6 +216,8 @@ using aexcompat::render_pixel_transport::argb_to_rgba_native;
 using aexcompat::render_pixel_transport::rgba8_to_argb;
 
 auto& g_module_audit = module_audit_report();
+
+auto& smart_state() { return aexcompat::worker_runtime::smart::state(); }
 
 void bump_render_project_timestamp();
 constexpr std::size_t kInSize = 408;
@@ -655,24 +663,9 @@ uint32_t g_adv_app_info_text_calls{};
 std::string g_last_adv_app_info_text;
 int32_t g_last_progress_current = 0;
 int32_t g_last_progress_total = 0;
-void* g_smart_input_world = nullptr;
-void* g_smart_output_world = nullptr;
 bool g_gpu_world_mode = false;
 void* g_cuda_context_for_info = nullptr;
-void* g_smart_map_world = nullptr;
 int32_t g_secondary_layer_slot = 6;
-int32_t g_secondary_checkout_id = -1;
-struct SmartHostedLayer {
-  int32_t slot{};
-  int32_t time{};
-  uint32_t time_scale{};
-  bool timed{};
-  int32_t width{};
-  int32_t height{};
-  int32_t checkout_id{-1};
-  void* world{};
-};
-std::vector<SmartHostedLayer> g_smart_hosted_layers;
 struct ExternalLayerInput {
   int32_t slot{};
   int32_t time{};
@@ -709,16 +702,6 @@ bool same_rational_time(int32_t left, uint32_t left_scale,
   return static_cast<int64_t>(left) * right_scale ==
       static_cast<int64_t>(right) * left_scale;
 }
-int32_t g_smart_width = 16;
-int32_t g_smart_height = 12;
-int32_t g_smart_map_width = 0;
-int32_t g_smart_map_height = 0;
-int32_t g_checkout_time = 0;
-int32_t g_checkout_time_step = 0;
-uint32_t g_checkout_time_scale = 0;
-std::array<int32_t, 4> g_input_checkout_request{-1, -1, -1, -1};
-std::array<int32_t, 4> g_map_checkout_request{-1, -1, -1, -1};
-std::string g_smart_pixel_format = "argb8";
 // Opt-in world snapshot dumps and output checksum detail (issue #19). Both
 // default off; the broker enables them per run with the --dump-worlds-v1 and
 // --output-checksum-detail-v1 argv trailers, and the dump directory is
@@ -731,7 +714,6 @@ uint64_t g_world_dump_bytes = 0;
 bool g_output_checksum_detail = false;
 std::vector<uint32_t> g_output_row_crc32;
 std::array<std::string, 4> g_output_channel_sha256;
-int32_t g_smart_rowbytes = 64;
 bool g_mask_model_enabled = false;
 enum class MaskFault { None, CountError, CountCrash };
 MaskFault g_mask_fault = MaskFault::None;
@@ -1100,19 +1082,6 @@ void write_rect(void* destination, int32_t width, int32_t height) {
 // size when a spatial context supplies a full resolution.
 constexpr size_t kCheckoutResultBytes = 76;
 
-void write_checkout_result(void* destination, int32_t width, int32_t height,
-                           int32_t reference_width, int32_t reference_height) {
-  auto* bytes = static_cast<std::byte*>(destination);
-  std::memset(bytes, 0, kCheckoutResultBytes);
-  write_rect(bytes, width, height);
-  write_rect(bytes + 16, width, height);
-  const int32_t par[2] = {g_pixel_aspect_ratio.numerator,
-                          static_cast<int32_t>(g_pixel_aspect_ratio.denominator)};
-  std::memcpy(bytes + 32, par, sizeof(par));
-  const int32_t reference_size[2] = {reference_width, reference_height};
-  std::memcpy(bytes + 44, reference_size, sizeof(reference_size));
-}
-
 constexpr uint32_t kMaxGuidMixInBytes = 1024 * 1024;
 std::atomic<uint32_t> g_comp_bg_color_successes{};
 std::atomic<uint32_t> g_comp_bg_color_rejections{};
@@ -1148,62 +1117,6 @@ int32_t __cdecl guid_mix_in_ptr(void* effect_ref, uint32_t size, const void* byt
   return result;
 }
 
-int32_t __cdecl pre_checkout_layer(void*, int32_t index, int32_t checkout_id,
-                                   const void* request, int32_t what_time, int32_t time_step, uint32_t time_scale,
-                                   void* result) {
-  if (time_step <= 0 || time_scale == 0) return 4;
-  const bool current_time = static_cast<int64_t>(what_time) * g_checkout_current_time_scale ==
-      static_cast<int64_t>(g_checkout_current_time) * time_scale;
-  if (!current_time && !g_wide_time_checkout_allowed) {
-    ++g_rejected_temporal_param_checkouts;
-    return 4;
-  }
-  auto hosted = std::find_if(g_smart_hosted_layers.begin(), g_smart_hosted_layers.end(),
-      [index, what_time, time_scale](const auto& layer) {
-        return layer.slot == index && layer.timed &&
-            same_rational_time(layer.time, layer.time_scale, what_time, time_scale);
-      });
-  if (hosted == g_smart_hosted_layers.end())
-    hosted = std::find_if(g_smart_hosted_layers.begin(), g_smart_hosted_layers.end(),
-        [index](const auto& layer) { return layer.slot == index && !layer.timed; });
-  const bool timed_slot = std::any_of(g_smart_hosted_layers.begin(), g_smart_hosted_layers.end(),
-      [index](const auto& layer) { return layer.slot == index && layer.timed; });
-  if (hosted != g_smart_hosted_layers.end()) {
-    if (request) std::memcpy(g_map_checkout_request.data(), request, sizeof(g_map_checkout_request));
-    hosted->checkout_id = checkout_id;
-    if (!result) return 4;
-    write_checkout_result(result, hosted->width, hosted->height,
-                          hosted->width, hosted->height);
-    return 0;
-  }
-  if (timed_slot) return 4;
-  if (request && index == 0 && checkout_id == 0)
-    std::memcpy(g_input_checkout_request.data(), request, sizeof(g_input_checkout_request));
-  if (request && index == g_secondary_layer_slot) {
-    std::memcpy(g_map_checkout_request.data(), request, sizeof(g_map_checkout_request));
-    g_secondary_checkout_id = checkout_id;
-  }
-  if (index == 0 && checkout_id == 0) {
-    g_checkout_time = what_time; g_checkout_time_step = time_step; g_checkout_time_scale = time_scale;
-  }
-  if (!result) return 4;
-  if (index == 0 && checkout_id == 0) {
-    const int32_t reference_width =
-        g_full_resolution_width > 0 ? g_full_resolution_width : g_smart_width;
-    const int32_t reference_height =
-        g_full_resolution_height > 0 ? g_full_resolution_height : g_smart_height;
-    write_checkout_result(result, g_smart_width, g_smart_height,
-                          reference_width, reference_height);
-    return 0;
-  }
-  if (index == g_secondary_layer_slot && g_smart_map_world) {
-    g_secondary_checkout_id = checkout_id;
-    write_checkout_result(result, g_smart_map_width, g_smart_map_height,
-                          g_smart_map_width, g_smart_map_height);
-    return 0;
-  }
-  return 4;
-}
 bool verify_pre_checkout_result_case(int32_t expected_par_numerator,
                                      int32_t expected_par_denominator,
                                      int32_t expected_reference_width,
@@ -1236,13 +1149,13 @@ bool verify_pre_checkout_result_case(int32_t expected_par_numerator,
 }
 
 bool verify_pre_checkout_result_contract() {
-  const int32_t saved_width = g_smart_width;
-  const int32_t saved_height = g_smart_height;
+  const int32_t saved_width = smart_state().width;
+  const int32_t saved_height = smart_state().height;
   const SpatialRatio saved_par = g_pixel_aspect_ratio;
   const int32_t saved_full_width = g_full_resolution_width;
   const int32_t saved_full_height = g_full_resolution_height;
-  g_smart_width = 640;
-  g_smart_height = 360;
+  smart_state().width = 640;
+  smart_state().height = 360;
   g_pixel_aspect_ratio = {1, 1};
   g_full_resolution_width = 0;
   g_full_resolution_height = 0;
@@ -1251,33 +1164,14 @@ bool verify_pre_checkout_result_contract() {
   g_full_resolution_width = 1280;
   g_full_resolution_height = 720;
   passed = verify_pre_checkout_result_case(10, 11, 1280, 720) && passed;
-  g_smart_width = saved_width;
-  g_smart_height = saved_height;
+  smart_state().width = saved_width;
+  smart_state().height = saved_height;
   g_pixel_aspect_ratio = saved_par;
   g_full_resolution_width = saved_full_width;
   g_full_resolution_height = saved_full_height;
   return passed;
 }
 
-int32_t __cdecl smart_checkout_pixels(void*, int32_t checkout_id, void** world) {
-  if (!world) return 4;
-  const auto hosted = std::find_if(g_smart_hosted_layers.begin(), g_smart_hosted_layers.end(),
-      [checkout_id](const auto& layer) { return layer.checkout_id == checkout_id; });
-  if (hosted != g_smart_hosted_layers.end() && hosted->world) {
-    *world = hosted->world;
-    return 0;
-  }
-  if (checkout_id == 0 && g_smart_input_world) *world = g_smart_input_world;
-  else if (checkout_id == g_secondary_checkout_id && g_smart_map_world) *world = g_smart_map_world;
-  else return 4;
-  return 0;
-}
-int32_t __cdecl smart_checkin_pixels(void*, int32_t) { return 0; }
-int32_t __cdecl smart_checkout_output(void*, void** world) {
-  if (!world || !g_smart_output_world) return 4;
-  *world = g_smart_output_world;
-  return 0;
-}
 bool verify_handle_resize_while_locked_rejected() {
   const uint32_t invalid_before = statistics().invalid_operations;
   void** handle = new_handle(16);
@@ -7860,9 +7754,9 @@ int32_t __cdecl get_effect_camera_matrix(void* effect, const AegpTime* comp_time
       !camera_matrix || !distance_to_image_plane || !image_plane_width ||
       !image_plane_height || !valid_comp_time(*comp_time)) return 4;
   const int32_t width = g_full_resolution_width > 0
-      ? g_full_resolution_width : g_smart_width;
+      ? g_full_resolution_width : smart_state().width;
   const int32_t height = g_full_resolution_height > 0
-      ? g_full_resolution_height : g_smart_height;
+      ? g_full_resolution_height : smart_state().height;
   if (width <= 0 || height <= 0 || width > INT16_MAX || height > INT16_MAX)
     return 4;
 
@@ -8296,7 +8190,8 @@ auto& g_gpu_allocations_freed = gpu_transport::allocations_freed;
 auto& g_invalid_gpu_memory_operations = gpu_transport::invalid_memory_operations;
 
 bool host_recognizes_smart_gpu_world(void* world) {
-  return world && (world == g_smart_input_world || world == g_smart_output_world);
+  return world &&
+      (world == smart_state().input_world || world == smart_state().output_world);
 }
 
 const bool g_gpu_transport_configured = [] {
@@ -12119,7 +12014,8 @@ int32_t classic_render_runtime(EffectEntry entry, std::array<std::byte, kInSize>
   width = image_request.width;
   height = image_request.height;
   const int32_t pixel_bytes = image_request.pixel_bytes;
-  g_smart_pixel_format = pixel_bytes == 16 ? "argb32f" : (pixel_bytes == 8 ? "argb16" : "argb8");
+  smart_state().pixel_format = pixel_bytes == 16 ? "argb32f" :
+      (pixel_bytes == 8 ? "argb16" : "argb8");
   rowbytes = image_request.rowbytes;
   const aexcompat::render::ParameterProfile parameter_profile =
       aexcompat::render::prepare_parameter_profile(case_id);
@@ -12382,7 +12278,8 @@ int32_t classic_render_runtime(EffectEntry entry, std::array<std::byte, kInSize>
     return true;
   }();
   guards_intact = padding_intact && guarded.sentinels_intact();
-  g_smart_pixel_format = pixel_bytes == 16 ? "argb32f" : (pixel_bytes == 8 ? "argb16" : "argb8");
+  smart_state().pixel_format = pixel_bytes == 16 ? "argb32f" :
+      (pixel_bytes == 8 ? "argb16" : "argb8");
   if (!close_render_ui_context(entry, input, command_output, definitions)) return -5;
   return error;
 }
@@ -12549,6 +12446,7 @@ SmartResult smart_render_runtime(EffectEntry entry, std::array<std::byte, kInSiz
                               int32_t external_current_time = 0, int32_t external_time_step = 1,
                               int32_t external_total_time = 1, uint32_t external_time_scale = 1,
                               int32_t external_pixel_bytes = 4) {
+  SmartRuntimeSession smart_session;
   reset_smart_host_telemetry();
   SmartResult result;
   const uint32_t effective_out_flags = read<uint32_t>(command_output, kOutFlags);
@@ -12647,9 +12545,9 @@ SmartResult smart_render_runtime(EffectEntry entry, std::array<std::byte, kInSiz
   if (connected_map) {
     if (!aexcompat::render::prepare_connected_map_world(case_id, width, height, map_world) ||
         !dispatch_worlds.register_world(map_world.world.data(), kPixelFormatArgb32)) return result;
-    g_smart_map_width = map_world.width;
-    g_smart_map_height = map_world.height;
-    g_smart_map_world = map_world.world.data();
+    smart_state().map_width = map_world.width;
+    smart_state().map_height = map_world.height;
+    smart_state().map_world = map_world.world.data();
   }
 
   std::vector<std::array<std::byte, kParamSize>> definitions(g_params.size() + 1);
@@ -12668,7 +12566,7 @@ SmartResult smart_render_runtime(EffectEntry entry, std::array<std::byte, kInSiz
   for (std::size_t slot = 1; slot < definitions.size(); ++slot)
     if (g_params[slot - 1].type == 0 && g_params[slot - 1].layer_default == -1)
       std::memcpy(definitions[slot].data() + 56, input_world.data(), input_world.size());
-  g_smart_hosted_layers.clear();
+  smart_state().hosted_layers.clear();
   if (external_layers) for (std::size_t layer_index = 0; layer_index < external_layers->size(); ++layer_index) {
     const auto& layer = (*external_layers)[layer_index];
     if (layer.slot <= 0 || static_cast<std::size_t>(layer.slot) >= definitions.size() ||
@@ -12692,7 +12590,7 @@ SmartResult smart_render_runtime(EffectEntry entry, std::array<std::byte, kInSiz
     if (!layer.timed || same_rational_time(layer.time, layer.time_scale,
             requested_time, requested_scale))
       std::memcpy(definitions[layer.slot].data() + 56, world.data(), world.size());
-    g_smart_hosted_layers.push_back({layer.slot, layer.time, layer.time_scale, layer.timed,
+    smart_state().hosted_layers.push_back({layer.slot, layer.time, layer.time_scale, layer.timed,
         layer.width, layer.height, -1, world.data()});
   }
   if (requested) {
@@ -12752,7 +12650,9 @@ SmartResult smart_render_runtime(EffectEntry entry, std::array<std::byte, kInSiz
         close_render_ui_context(entry, input, output, definitions);
     }
   } render_ui_context_scope{entry, input, command_output, definitions};
-  g_checkout_time = 0; g_checkout_time_step = 0; g_checkout_time_scale = 0;
+  smart_state().checkout_time = 0;
+  smart_state().checkout_time_step = 0;
+  smart_state().checkout_time_scale = 0;
   std::vector<unsigned char> pre_render_source(
       static_cast<std::size_t>(width) * height * pixel_bytes);
   for (int32_t row = 0; row < height; ++row)
@@ -12895,10 +12795,14 @@ SmartResult smart_render_runtime(EffectEntry entry, std::array<std::byte, kInSiz
   write<void*>(pre_callbacks, 8, reinterpret_cast<void*>(&guid_mix_in_ptr));
   write<void*>(pre_extra, 0, pre_input.data()); write<void*>(pre_extra, 8, pre_output.data());
   write<void*>(pre_extra, 16, pre_callbacks.data());
-  g_input_checkout_request.fill(-1); g_map_checkout_request.fill(-1);
-  g_secondary_checkout_id = -1;
-  g_smart_width = width; g_smart_height = height; g_smart_rowbytes = rowbytes;
-  g_smart_pixel_format = float32 ? "argb32f" : (deep16 ? "argb16" : "argb8");
+  smart_state().input_checkout_request.fill(-1);
+  smart_state().map_checkout_request.fill(-1);
+  smart_state().secondary_checkout_id = -1;
+  smart_state().width = width;
+  smart_state().height = height;
+  smart_state().rowbytes = rowbytes;
+  smart_state().pixel_format = float32 ? "argb32f" :
+      (deep16 ? "argb16" : "argb8");
   std::cerr << "stage:smart_pre_render_begin\n" << std::flush;
   result.pre_error = (!gpu_negotiation || result.gpu_setup_error == 0)
       ? entry(kSmartPreRender, input.data(), command_output.data(), params.data(),
@@ -12932,11 +12836,13 @@ SmartResult smart_render_runtime(EffectEntry entry, std::array<std::byte, kInSiz
     result.output_rowbytes = smart_bounds.rowbytes;
   }
   result.roi_contract_valid = !partial_output_request ||
-      (g_input_checkout_request == expected_request && g_map_checkout_request == expected_request &&
+      (smart_state().input_checkout_request == expected_request &&
+       smart_state().map_checkout_request == expected_request &&
        result_rect == expected_request && max_result_rect == expected_request);
   result.gpu_render_possible = (read<uint16_t>(pre_output, 34) & 0x2u) != 0;
-  result.checkout_time = g_checkout_time; result.checkout_time_step = g_checkout_time_step;
-  result.checkout_time_scale = g_checkout_time_scale;
+  result.checkout_time = smart_state().checkout_time;
+  result.checkout_time_step = smart_state().checkout_time_step;
+  result.checkout_time_scale = smart_state().checkout_time_scale;
 
   std::array<std::byte, 72> smart_input{}; std::array<std::byte, 24> callbacks{};
   std::array<std::byte, 16> smart_extra{};
@@ -12947,12 +12853,12 @@ SmartResult smart_render_runtime(EffectEntry entry, std::array<std::byte, kInSiz
     write<int32_t>(smart_input, 64, gpu_framework);
     write<uint32_t>(smart_input, 68, gpu_device_index);
   }
-  write<void*>(callbacks, 0, reinterpret_cast<void*>(&smart_checkout_pixels));
-  write<void*>(callbacks, 8, reinterpret_cast<void*>(&smart_checkin_pixels));
-  write<void*>(callbacks, 16, reinterpret_cast<void*>(&smart_checkout_output));
+  write<void*>(callbacks, 0, reinterpret_cast<void*>(&checkout_pixels));
+  write<void*>(callbacks, 8, reinterpret_cast<void*>(&checkin_pixels));
+  write<void*>(callbacks, 16, reinterpret_cast<void*>(&checkout_output));
   write<void*>(smart_extra, 0, smart_input.data()); write<void*>(smart_extra, 8, callbacks.data());
-  g_smart_input_world = missing_input ? nullptr : input_world.data();
-  g_smart_output_world = output_world.data();
+  smart_state().input_world = missing_input ? nullptr : input_world.data();
+  smart_state().output_world = output_world.data();
   if (gpu_negotiation) {
     if ((!missing_input && !dispatch_worlds.register_world(input_world.data(), kPixelFormatGpuBgra128)) ||
         !dispatch_worlds.register_world(output_world.data(), kPixelFormatGpuBgra128))
@@ -12963,7 +12869,8 @@ SmartResult smart_render_runtime(EffectEntry entry, std::array<std::byte, kInSiz
   CudaRenderTransport cuda_transport;
   const bool cuda_transport_ready = !result.gpu_render_dispatched ||
       (!use_cuda && !use_opencl && !use_directx) ||
-      prepare_cuda_render_transport(g_smart_input_world, g_smart_output_world,
+      prepare_cuda_render_transport(smart_state().input_world,
+                                    smart_state().output_world,
                                     cuda_transport);
   std::cerr << "stage:" << (result.gpu_render_dispatched ? "smart_render_gpu" : "smart_render_cpu")
             << "_begin\n" << std::flush;
@@ -13018,9 +12925,11 @@ SmartResult smart_render_runtime(EffectEntry entry, std::array<std::byte, kInSiz
   result.render_error = end_render_lifecycle(entry, input, command_output, params.data(),
                                               output_world.data(), lifecycle,
                                               result.render_error);
-  g_smart_input_world = nullptr; g_smart_output_world = nullptr; g_smart_map_world = nullptr;
+  smart_state().input_world = nullptr;
+  smart_state().output_world = nullptr;
+  smart_state().map_world = nullptr;
   g_gpu_world_mode = false;
-  g_smart_hosted_layers.clear();
+  smart_state().hosted_layers.clear();
   std::vector<unsigned char> logical_input;
   std::vector<unsigned char> logical_output;
   if (!aexcompat::render::copy_packed_world(source.data(), rowbytes, width, height,
@@ -14757,17 +14666,27 @@ int worker_main_impl(int argc, wchar_t **argv) {
   scene_factory.keyframe_callbacks[20] = reinterpret_cast<void*>(&get_keyframe_label);
   scene_factory.keyframe_callbacks[21] = reinterpret_cast<void*>(&set_keyframe_label);
 
+  const aexcompat::worker_runtime::smart::HostHooks smart_host_hooks{
+      &g_wide_time_checkout_allowed, &g_checkout_current_time,
+      &g_checkout_current_time_scale, &g_rejected_temporal_param_checkouts,
+      &g_secondary_layer_slot, &g_full_resolution_width,
+      &g_full_resolution_height, &g_pixel_aspect_ratio.numerator,
+      &g_pixel_aspect_ratio.denominator};
+  if (!aexcompat::worker_runtime::smart::configure_host_hooks(smart_host_hooks))
+    return 75;
   const SceneContext scene_host{
       {&bump_render_project_timestamp, &validate_render_options_item,
        &scene_initialize_layer_render_options, &suite_leases_balanced,
        &make_utf16_handle, &free_aegp_mem_handle, scene_factory},
       &g_aegp_comp_item, &g_aegp_comp, &g_layer, &g_effect,
       &g_full_resolution_width,
-      &g_full_resolution_height, &g_smart_width, &g_smart_height};
+      &g_full_resolution_height, &aexcompat::worker_runtime::smart::width,
+      &aexcompat::worker_runtime::smart::height};
   const SceneRuntimeContext scene_runtime_host{
       {&suite_leases_balanced}, &g_aegp_comp_item, &g_aegp_comp,
       &g_full_resolution_width, &g_full_resolution_height,
-      &g_smart_width, &g_smart_height};
+      &aexcompat::worker_runtime::smart::width,
+      &aexcompat::worker_runtime::smart::height};
   if (!configure_scene_context(scene_host) || !scene_translation_unit_linked() ||
       !configure_scene_runtime_context(scene_runtime_host) ||
       !scene_runtime_translation_unit_linked() ||
@@ -14783,12 +14702,12 @@ int worker_main_impl(int argc, wchar_t **argv) {
           [](const void* world, DispatchWorldFormat& result) -> bool {
             return resolve_dispatch_world_format(world, result);
           },
-          []() -> const char* { return g_smart_pixel_format.c_str(); },
+          []() -> const char* { return smart_state().pixel_format.c_str(); },
           [](const char* value) -> bool {
             if (!value || (std::strcmp(value, "argb8") != 0 &&
                            std::strcmp(value, "argb16") != 0 &&
                            std::strcmp(value, "argb32f") != 0)) return false;
-            g_smart_pixel_format = value;
+            smart_state().pixel_format = value;
             return true;
           },
           &acquire_suite,
@@ -17150,12 +17069,14 @@ int worker_main_impl(int argc, wchar_t **argv) {
                 reinterpret_cast<const char*>(output.data() + kOutMessage),
                 strnlen_s(reinterpret_cast<const char*>(output.data() + kOutMessage), 256)))
             << "\""
-            << ",\"case_id\":\"" << case_id << "\",\"pixel_format\":\"" << g_smart_pixel_format << "\",\"width\":"
+            << ",\"case_id\":\"" << case_id << "\",\"pixel_format\":\"" << smart_state().pixel_format << "\",\"width\":"
             << render_width << ",\"height\":" << render_height << ",\"rowbytes\":" << render_rowbytes
             << ",\"bytes_written_per_row\":" << render_width *
-                (g_smart_pixel_format == "argb32f" ? 16 : (g_smart_pixel_format == "argb16" ? 8 : 4))
+                (smart_state().pixel_format == "argb32f" ? 16 :
+                 (smart_state().pixel_format == "argb16" ? 8 : 4))
             << ",\"undefined_tail_bytes_per_row\":" << std::max(0, render_rowbytes - render_width *
-                (g_smart_pixel_format == "argb32f" ? 16 : (g_smart_pixel_format == "argb16" ? 8 : 4)))
+                (smart_state().pixel_format == "argb32f" ? 16 :
+                 (smart_state().pixel_format == "argb16" ? 8 : 4)))
             << ",\"input_sha256\":\"" << input_hash << "\",\"output_sha256\":\""
             << output_hash << "\",\"guard_bytes_intact\":" << (guards_intact ? "true" : "false")
             << world_debug_report_json()
@@ -17376,12 +17297,12 @@ int worker_main_impl(int argc, wchar_t **argv) {
             << ",\"checkout_time_step\":" << smart.checkout_time_step
             << ",\"checkout_time_scale\":" << smart.checkout_time_scale
             << ",\"roi_contract_valid\":" << (smart.roi_contract_valid ? "true" : "false")
-            << ",\"input_checkout_request\":[" << g_input_checkout_request[0] << "," << g_input_checkout_request[1]
-            << "," << g_input_checkout_request[2] << "," << g_input_checkout_request[3] << "]"
-            << ",\"map_checkout_request\":[" << g_map_checkout_request[0] << "," << g_map_checkout_request[1]
-            << "," << g_map_checkout_request[2] << "," << g_map_checkout_request[3] << "]"
+            << ",\"input_checkout_request\":[" << smart_state().input_checkout_request[0] << "," << smart_state().input_checkout_request[1]
+            << "," << smart_state().input_checkout_request[2] << "," << smart_state().input_checkout_request[3] << "]"
+            << ",\"map_checkout_request\":[" << smart_state().map_checkout_request[0] << "," << smart_state().map_checkout_request[1]
+            << "," << smart_state().map_checkout_request[2] << "," << smart_state().map_checkout_request[3] << "]"
             << ",\"global_setdown_error\":" << setdown_error
-            << ",\"case_id\":\"" << case_id << "\",\"pixel_format\":\"" << g_smart_pixel_format << "\",\"width\":"
+            << ",\"case_id\":\"" << case_id << "\",\"pixel_format\":\"" << smart_state().pixel_format << "\",\"width\":"
             << smart.output_width << ",\"height\":" << smart.output_height << ",\"rowbytes\":"
             << smart.output_rowbytes
             << ",\"bytes_written_per_row\":" << smart.output_rowbytes

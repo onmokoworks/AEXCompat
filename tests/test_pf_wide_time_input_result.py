@@ -28,9 +28,10 @@ def test_wide_time_evidence_covers_sdk_positive_and_cleanroom_negative():
 
 def test_worker_gates_non_current_time_as_rational_values():
     source = (ROOT / "minihost" / "src" / "l2_main.cpp").read_text()
-    assert "static_cast<int64_t>(what_time) * g_checkout_current_time_scale" in source
-    assert "!current_time && !g_wide_time_checkout_allowed" in source
+    runtime = (ROOT / "minihost" / "src" / "worker_smart_runtime.cpp").read_text()
+    assert "static_cast<int64_t>(what_time) * *g_hooks.checkout_current_time_scale" in runtime
+    assert "!current_time && !*g_hooks.wide_time_checkout_allowed" in runtime
     assert "kOutFlag2AutomaticWideTimeInput" in source
-    assert "int32_t __cdecl pre_checkout_layer" in source
+    assert "int32_t __cdecl pre_checkout_layer" in runtime
     fixture = (ROOT / "instruments" / "pf-wide-time-probe" / "pf_wide_time_probe.cpp").read_text()
     assert "in_data->current_time + in_data->time_step" in fixture
