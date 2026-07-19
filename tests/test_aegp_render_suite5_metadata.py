@@ -47,7 +47,7 @@ def test_receipt_guid_is_stable_owned_memory_and_rejects_stale_receipts():
     text = SOURCE.read_text(encoding="utf-8")
     declaration = text.index("int32_t __cdecl render_guid_reject(")
     start = text.index("int32_t __cdecl render_guid_reject(", declaration + 1)
-    body = text[start:text.index("int32_t aegp_world_type_from_format", start)]
+    body = text[start:text.index("uint32_t color_settings_read_be32", start)]
     for marker in (
         "g_async_receipts.find(receipt)",
         "guid = found->second->guid",

@@ -4,6 +4,9 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <memory>
+#include <mutex>
+#include <vector>
 
 namespace aexcompat::world_registry {
 
@@ -23,6 +26,37 @@ struct Statistics {
 struct OwnedWorldSnapshot {
   world_safety::LocalEffectWorld world{};
   int32_t pixel_format{};
+};
+
+struct PlatformWorldBacking {
+  world_safety::LocalEffectWorld world{};
+  std::vector<std::byte> pixels;
+  int32_t pixel_format{};
+  uint64_t accounted_bytes{};
+  bool counted_owned{};
+  std::mutex pixels_mutex;
+};
+
+struct AegpStatistics {
+  uint64_t platform_created{};
+  uint64_t platform_disposed{};
+  uint64_t platform_adopted{};
+  uint64_t references_created{};
+  uint64_t references_disposed{};
+  uint64_t owned_created{};
+  uint64_t owned_disposed{};
+  std::size_t live_references{};
+  std::size_t live_owned{};
+  std::size_t live_owned_backings{};
+  std::size_t live_platforms{};
+  uint64_t live_bytes{};
+};
+
+struct AegpWorldSnapshot {
+  world_safety::LocalEffectWorld world{};
+  int32_t pixel_format{};
+  bool disposable{};
+  std::shared_ptr<PlatformWorldBacking> backing_pin;
 };
 
 int32_t __cdecl new_world(void*, int32_t width, int32_t height,
@@ -47,5 +81,33 @@ Statistics statistics();
 
 using RecognizesSmartWorld = bool (*)(void*);
 void configure_gpu_fallback_bridge(RecognizesSmartWorld recognizes_smart_world);
+
+int32_t aegp_world_type_from_format(int32_t pixel_format);
+bool register_borrowed_view(void** handle, void* pf_world, int32_t pixel_format,
+                            bool borrowed = true);
+bool unregister_borrowed_view(void** handle);
+bool snapshot_aegp_world(void** handle, AegpWorldSnapshot& snapshot);
+bool snapshot_platform_world(void* handle,
+                             std::shared_ptr<PlatformWorldBacking>& backing);
+bool adopt_platform_world(void* handle,
+                          std::shared_ptr<PlatformWorldBacking>& backing);
+AegpStatistics aegp_statistics();
+bool aegp_lifetimes_balanced();
+
+int32_t __cdecl aegp_world_new_owned(int32_t, int32_t, int32_t, int32_t,
+                                     void***);
+int32_t __cdecl aegp_world_dispose(void**);
+int32_t __cdecl aegp_world_get_type(void**, int32_t*);
+int32_t __cdecl aegp_world_get_size(void**, int32_t*, int32_t*);
+int32_t __cdecl aegp_world_get_rowbytes(void**, uint32_t*);
+int32_t __cdecl aegp_world_get_base_addr8(void**, void**);
+int32_t __cdecl aegp_world_get_base_addr16(void**, void**);
+int32_t __cdecl aegp_world_get_base_addr32(void**, void**);
+int32_t __cdecl aegp_world_fill_pf_world(void**, void*);
+int32_t __cdecl aegp_world_fast_blur(double, uint32_t, int32_t, void**);
+int32_t __cdecl aegp_world_new_platform(int32_t, int32_t, int32_t, int32_t,
+                                        void**);
+int32_t __cdecl aegp_world_dispose_platform(void*);
+int32_t __cdecl aegp_world_reference_platform(int32_t, void*, void***);
 
 }  // namespace aexcompat::world_registry

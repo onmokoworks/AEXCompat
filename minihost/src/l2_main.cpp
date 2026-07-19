@@ -185,6 +185,21 @@ using aexcompat::world_registry::kPixelFormatGpuBgra128;
 using aexcompat::world_registry::legacy_new_world;
 using aexcompat::world_registry::new_world;
 using aexcompat::world_registry::resolve_dispatch_world_format;
+using aexcompat::world_registry::PlatformWorldBacking;
+using aexcompat::world_registry::aegp_world_dispose;
+using aexcompat::world_registry::aegp_world_dispose_platform;
+using aexcompat::world_registry::aegp_world_fast_blur;
+using aexcompat::world_registry::aegp_world_fill_pf_world;
+using aexcompat::world_registry::aegp_world_get_base_addr8;
+using aexcompat::world_registry::aegp_world_get_base_addr16;
+using aexcompat::world_registry::aegp_world_get_base_addr32;
+using aexcompat::world_registry::aegp_world_get_rowbytes;
+using aexcompat::world_registry::aegp_world_get_size;
+using aexcompat::world_registry::aegp_world_get_type;
+using aexcompat::world_registry::aegp_world_new_owned;
+using aexcompat::world_registry::aegp_world_new_platform;
+using aexcompat::world_registry::aegp_world_reference_platform;
+using aexcompat::world_registry::aegp_world_type_from_format;
 using aexcompat::render_pixel_transport::argb_to_rgba8;
 using aexcompat::render_pixel_transport::argb_to_rgba_native;
 using aexcompat::render_pixel_transport::rgba8_to_argb;
@@ -3801,19 +3816,6 @@ static_assert(offsetof(AegpRenderSuite2, changed) == 7 * sizeof(void*));
 static_assert(offsetof(AegpRenderSuite2, worthwhile) == 8 * sizeof(void*));
 static_assert(offsetof(AegpRenderSuite2, checkin_rendered) == 9 * sizeof(void*));
 AegpRenderSuite2 g_aegp_render_suite2{};
-int32_t __cdecl aegp_world_new_owned(int32_t, int32_t, int32_t, int32_t, void***);
-int32_t __cdecl aegp_world_dispose(void**);
-int32_t __cdecl aegp_world_get_type(void**, int32_t*);
-int32_t __cdecl aegp_world_get_size(void**, int32_t*, int32_t*);
-int32_t __cdecl aegp_world_get_rowbytes(void**, uint32_t*);
-int32_t __cdecl aegp_world_get_base_addr8(void**, void**);
-int32_t __cdecl aegp_world_get_base_addr16(void**, void**);
-int32_t __cdecl aegp_world_get_base_addr32(void**, void**);
-int32_t __cdecl aegp_world_fill_pf_world(void**, void*);
-int32_t __cdecl aegp_world_fast_blur(double, uint32_t, int32_t, void**);
-int32_t __cdecl aegp_world_new_platform(int32_t, int32_t, int32_t, int32_t, void**);
-int32_t __cdecl aegp_world_dispose_platform(void*);
-int32_t __cdecl aegp_world_reference_platform(int32_t, void*, void***);
 static_assert(std::is_same_v<decltype(&aegp_world_new_owned),
                              aexcompat::suite_abi::AegpWorldNew>);
 static_assert(std::is_same_v<decltype(&aegp_world_dispose),
@@ -4306,43 +4308,6 @@ MaskOutlineSuite g_mask_outline_suite{&is_mask_outline_open, &set_mask_outline_o
                                       &create_mask_outline_feather,
                                       &delete_mask_outline_feather};
 
-std::atomic<uint64_t> g_platform_world_bytes{};
-struct PlatformWorldBacking {
-  LocalEffectWorld world{};
-  std::vector<std::byte> pixels;
-  int32_t pixel_format{};
-  uint64_t accounted_bytes{};
-  std::mutex pixels_mutex;
-};
-struct AegpWorldView {
-  void* pf_world{};
-  int32_t pixel_format{};
-  bool borrowed{};
-  bool disposable{};
-  bool owned_aegp{};
-  std::shared_ptr<PlatformWorldBacking> platform_backing;
-};
-std::unordered_map<void**, AegpWorldView> g_aegp_world_views;
-struct PlatformWorldEntry {
-  std::shared_ptr<PlatformWorldBacking> backing;
-};
-std::unordered_map<void*, PlatformWorldEntry> g_platform_worlds;
-std::atomic<uint64_t> g_platform_world_generation{1};
-std::atomic<uint64_t> g_platform_reference_generation{1};
-std::atomic<uint64_t> g_owned_aegp_world_generation{1};
-uint64_t g_platform_worlds_created{};
-uint64_t g_platform_worlds_disposed{};
-uint64_t g_platform_worlds_adopted{};
-uint64_t g_platform_references_created{};
-uint64_t g_platform_references_disposed{};
-std::size_t g_live_platform_references{};
-uint64_t g_owned_aegp_worlds_created{};
-uint64_t g_owned_aegp_worlds_disposed{};
-std::size_t g_live_owned_aegp_worlds{};
-constexpr std::size_t kMaxPlatformWorlds = 32;
-constexpr std::size_t kMaxPlatformReferences = 64;
-constexpr std::size_t kMaxOwnedAegpWorlds = 64;
-constexpr uint64_t kMaxPlatformWorldBytes = 64ULL * 1024 * 1024;
 std::mutex g_world_mutex;
 
 constexpr std::size_t kMaxAsyncReceipts = 32;
@@ -4707,8 +4672,6 @@ void populate_synthetic_item_pixels(AsyncFrameReceipt& receipt, int32_t type,
   }
 }
 
-int32_t aegp_world_type_from_format(int32_t pixel_format);
-
 int32_t publish_async_receipt(int32_t pixel_format, void** output,
                               const AegpRenderOptionsValue* options = nullptr) {
   if (!output) return 4;
@@ -4763,17 +4726,17 @@ int32_t publish_async_receipt(int32_t pixel_format, void** output,
   std::lock_guard<std::mutex> lock(g_world_mutex);
   if (g_async_receipts.size() >= kMaxAsyncReceipts ||
       g_async_receipt_bytes > kMaxAsyncReceiptBytes - bytes) return 4;
-  const auto inserted_view = g_aegp_world_views.emplace(
-      receipt->world_handle, AegpWorldView{&receipt->world, pixel_format, true});
-  if (!inserted_view.second) return 4;
+  void** registered_world_handle = receipt->world_handle;
+  if (!aexcompat::world_registry::register_borrowed_view(
+          registered_world_handle, &receipt->world, pixel_format)) return 4;
   try {
     const auto inserted_receipt = g_async_receipts.emplace(key, std::move(receipt));
     if (!inserted_receipt.second) {
-      g_aegp_world_views.erase(inserted_view.first);
+      aexcompat::world_registry::unregister_borrowed_view(registered_world_handle);
       return 4;
     }
   } catch (const std::bad_alloc&) {
-    g_aegp_world_views.erase(inserted_view.first);
+    aexcompat::world_registry::unregister_borrowed_view(registered_world_handle);
     return 4;
   }
   g_async_receipt_bytes += bytes;
@@ -4844,15 +4807,17 @@ int32_t publish_external_cached_receipt(const AegpRenderOptionsValue& options,
       g_render_timestamp_exhausted.load() ||
       g_async_receipts.size() >= kMaxAsyncReceipts ||
       g_async_receipt_bytes > kMaxAsyncReceiptBytes - bytes) return 4;
-  const auto inserted_view = g_aegp_world_views.emplace(
-      receipt->world_handle, AegpWorldView{&receipt->world, backing->pixel_format, true});
-  if (!inserted_view.second) return 4;
+  void** registered_world_handle = receipt->world_handle;
+  if (!aexcompat::world_registry::register_borrowed_view(
+          registered_world_handle, &receipt->world, backing->pixel_format)) return 4;
   try {
     if (!g_async_receipts.emplace(key, std::move(receipt)).second) {
-      g_aegp_world_views.erase(inserted_view.first); return 4;
+      aexcompat::world_registry::unregister_borrowed_view(registered_world_handle);
+      return 4;
     }
   } catch (...) {
-    g_aegp_world_views.erase(inserted_view.first); return 4;
+    aexcompat::world_registry::unregister_borrowed_view(registered_world_handle);
+    return 4;
   }
   g_async_receipt_bytes += bytes;
   ++g_async_receipts_created;
@@ -5070,16 +5035,16 @@ int32_t register_item_receipt(std::unique_ptr<AsyncFrameReceipt> receipt, void**
   std::lock_guard<std::mutex> lock(g_world_mutex);
   if (g_async_receipts.size() >= kMaxAsyncReceipts || bytes > kMaxAsyncReceiptBytes ||
       g_async_receipt_bytes > kMaxAsyncReceiptBytes - bytes) return 4;
-  const auto view = g_aegp_world_views.emplace(receipt->world_handle,
-      AegpWorldView{&receipt->world, receipt->pixel_format, true});
-  if (!view.second) return 4;
+  void** registered_world_handle = receipt->world_handle;
+  if (!aexcompat::world_registry::register_borrowed_view(
+          registered_world_handle, &receipt->world, receipt->pixel_format)) return 4;
   try {
     if (!g_async_receipts.emplace(key, std::move(receipt)).second) {
-      g_aegp_world_views.erase(view.first);
+      aexcompat::world_registry::unregister_borrowed_view(registered_world_handle);
       return 4;
     }
   } catch (...) {
-    g_aegp_world_views.erase(view.first);
+    aexcompat::world_registry::unregister_borrowed_view(registered_world_handle);
     return 4;
   }
   g_async_receipt_bytes += bytes;
@@ -5211,18 +5176,17 @@ int32_t publish_loaded_layer_receipt_from_context(
   std::lock_guard<std::mutex> lock(g_world_mutex);
   if (g_async_receipts.size() >= kMaxAsyncReceipts ||
       g_async_receipt_bytes > kMaxAsyncReceiptBytes - bytes) return 4;
-  const auto inserted_view = g_aegp_world_views.emplace(
-      loaded_receipt->world_handle,
-      AegpWorldView{&loaded_receipt->world, pixel_format, true});
-  if (!inserted_view.second) return 4;
+  void** registered_world_handle = loaded_receipt->world_handle;
+  if (!aexcompat::world_registry::register_borrowed_view(
+          registered_world_handle, &loaded_receipt->world, pixel_format)) return 4;
   try {
     const auto inserted_receipt = g_async_receipts.emplace(key, std::move(loaded_receipt));
     if (!inserted_receipt.second) {
-      g_aegp_world_views.erase(inserted_view.first);
+      aexcompat::world_registry::unregister_borrowed_view(registered_world_handle);
       return 4;
     }
   } catch (const std::bad_alloc&) {
-    g_aegp_world_views.erase(inserted_view.first);
+    aexcompat::world_registry::unregister_borrowed_view(registered_world_handle);
     return 4;
   }
   g_async_receipt_bytes += bytes;
@@ -5277,7 +5241,11 @@ int32_t __cdecl checkin_frame(void* receipt) {
     return 4;
   }
   const uint64_t bytes = found->second->pixels.size();
-  g_aegp_world_views.erase(found->second->world_handle);
+  if (!aexcompat::world_registry::unregister_borrowed_view(
+          found->second->world_handle)) {
+    ++g_invalid_async_receipt_operations;
+    return 4;
+  }
   g_async_receipts.erase(found);
   g_async_receipt_bytes -= bytes;
   ++g_async_receipts_checked_in;
@@ -5290,7 +5258,8 @@ bool checkin_frame_if_live(void* receipt) {
   const auto found = g_async_receipts.find(receipt);
   if (found == g_async_receipts.end()) return false;
   const uint64_t bytes = found->second->pixels.size();
-  g_aegp_world_views.erase(found->second->world_handle);
+  if (!aexcompat::world_registry::unregister_borrowed_view(
+          found->second->world_handle)) return false;
   g_async_receipts.erase(found);
   g_async_receipt_bytes -= bytes;
   ++g_async_receipts_checked_in;
@@ -5609,12 +5578,12 @@ int32_t __cdecl render_checkin_rendered(void* options, const void* timestamp,
   std::lock_guard<std::mutex> lock(g_world_mutex);
   if (observed != g_render_project_timestamp.load() || g_render_timestamp_exhausted.load())
     return 4;
-  const auto platform = g_platform_worlds.find(image);
-  if (!image || platform == g_platform_worlds.end() || !platform->second.backing ||
-      aegp_world_type_from_format(platform->second.backing->pixel_format) != snapshot.world_type)
+  std::shared_ptr<PlatformWorldBacking> backing;
+  if (!aexcompat::world_registry::snapshot_platform_world(image, backing) ||
+      aegp_world_type_from_format(backing->pixel_format) != snapshot.world_type)
     return 4;
-  const int32_t width = platform->second.backing->world.width;
-  const int32_t height = platform->second.backing->world.height;
+  const int32_t width = backing->world.width;
+  const int32_t height = backing->world.height;
   AegpRect rendered_region{0, 0, width, height};
   if (snapshot.roi.left != 0 || snapshot.roi.top != 0 ||
       snapshot.roi.right != 0 || snapshot.roi.bottom != 0) {
@@ -5633,20 +5602,25 @@ int32_t __cdecl render_checkin_rendered(void* options, const void* timestamp,
       [&](const auto& frame) {
         return frame.timestamp == observed && same_render_options(frame.options, snapshot);
       });
-  if (cached != g_external_render_cache.end()) {
-    *cached = ExternalRenderedFrame{
-        snapshot, rendered_region, observed, ticks_to_render, platform->second.backing};
-  } else if (g_external_render_cache.size() >= kMaxExternalRenderCache) {
-    g_external_render_cache.front() = ExternalRenderedFrame{
-        snapshot, rendered_region, observed, ticks_to_render, platform->second.backing};
-  } else {
+  if (cached == g_external_render_cache.end() &&
+      g_external_render_cache.size() < kMaxExternalRenderCache) {
     try {
-      g_external_render_cache.push_back(ExternalRenderedFrame{
-          snapshot, rendered_region, observed, ticks_to_render, platform->second.backing});
+      g_external_render_cache.reserve(g_external_render_cache.size() + 1);
     } catch (...) { return 4; }
+    cached = g_external_render_cache.end();
   }
-  g_platform_worlds.erase(platform);
-  ++g_platform_worlds_adopted;
+  std::shared_ptr<PlatformWorldBacking> adopted;
+  if (!aexcompat::world_registry::adopt_platform_world(image, adopted) ||
+      adopted != backing) return 4;
+  const ExternalRenderedFrame frame{
+      snapshot, rendered_region, observed, ticks_to_render, std::move(adopted)};
+  if (cached != g_external_render_cache.end()) {
+    *cached = frame;
+  } else if (g_external_render_cache.size() >= kMaxExternalRenderCache) {
+    g_external_render_cache.front() = frame;
+  } else {
+    g_external_render_cache.push_back(frame);
+  }
   ++g_external_frames_checked_in;
   return 0;
 }
@@ -5669,124 +5643,6 @@ int32_t __cdecl render_guid_reject(void* receipt, void** out) {
   std::memcpy(bytes, guid.data(), guid.size());
   return unlock_aegp_mem_handle(*out);
 }
-
-int32_t aegp_world_type_from_format(int32_t pixel_format) {
-  if (pixel_format == kPixelFormatArgb32) return 1;
-  if (pixel_format == kPixelFormatArgb64) return 2;
-  if (pixel_format == kPixelFormatArgb128 || pixel_format == kPixelFormatGpuBgra128) return 3;
-  return 0;
-}
-
-bool get_aegp_world_view(void** handle, AegpWorldView* view, LocalEffectWorld* world) {
-  if (!handle || !view || !world) return false;
-  std::lock_guard<std::mutex> lock(g_world_mutex);
-  const auto found = g_aegp_world_views.find(handle);
-  if (found == g_aegp_world_views.end() || !found->second.pf_world) return false;
-  if (!found->second.borrowed && (!*handle || *handle != found->second.pf_world)) return false;
-  *view = found->second;
-  if (!found->second.borrowed) {
-    aexcompat::world_registry::OwnedWorldSnapshot snapshot{};
-    if (!aexcompat::world_registry::snapshot_owned_world(
-            found->second.pf_world, snapshot) ||
-        snapshot.pixel_format != found->second.pixel_format) return false;
-    *world = snapshot.world;
-  } else {
-    std::memcpy(world, found->second.pf_world, sizeof(*world));
-  }
-  if (!world->data || world->width <= 0 || world->height <= 0 || world->rowbytes <= 0) return false;
-  const int32_t type = aegp_world_type_from_format(found->second.pixel_format);
-  const int32_t bytes_per_pixel = type == 1 ? 4 : (type == 2 ? 8 : (type == 3 ? 16 : 0));
-  const int64_t minimum_rowbytes = static_cast<int64_t>(world->width) * bytes_per_pixel;
-  if (!bytes_per_pixel || minimum_rowbytes > (std::numeric_limits<int32_t>::max)() ||
-      world->rowbytes < minimum_rowbytes) return false;
-  return true;
-}
-
-int32_t __cdecl aegp_world_new_owned(int32_t plugin_id, int32_t type, int32_t width,
-                                     int32_t height, void*** output) {
-  if (output) *output = nullptr;
-  const int32_t pixel_format = type == 1 ? kPixelFormatArgb32 :
-      (type == 2 ? kPixelFormatArgb64 : (type == 3 ? kPixelFormatArgb128 : 0));
-  const uint64_t bytes_per_pixel = type == 1 ? 4 : (type == 2 ? 8 : (type == 3 ? 16 : 0));
-  if (plugin_id != 1 || !output || !pixel_format || width <= 0 || height <= 0) return 4;
-  const uint64_t rowbytes = static_cast<uint64_t>(width) * bytes_per_pixel;
-  const uint64_t size = rowbytes * static_cast<uint64_t>(height);
-  if (rowbytes > static_cast<uint64_t>((std::numeric_limits<int32_t>::max)()) ||
-      size == 0 || size > kMaxPlatformWorldBytes) return 4;
-  uint64_t generation = 0;
-  if (!claim_opaque_generation(g_owned_aegp_world_generation, generation)) return 4;
-  const auto handle = reinterpret_cast<void**>(static_cast<uintptr_t>((generation << 3) | 5));
-  std::lock_guard<std::mutex> lock(g_world_mutex);
-  if (g_live_owned_aegp_worlds >= kMaxOwnedAegpWorlds ||
-      g_platform_world_bytes.load() > kMaxPlatformWorldBytes - size) return 4;
-  std::shared_ptr<PlatformWorldBacking> backing;
-  try {
-    auto* raw = new PlatformWorldBacking();
-    backing = std::shared_ptr<PlatformWorldBacking>(raw, [](PlatformWorldBacking* value) {
-      if (value->accounted_bytes) g_platform_world_bytes.fetch_sub(value->accounted_bytes);
-      delete value;
-    });
-    backing->pixels.resize(static_cast<std::size_t>(size));
-    std::memset(backing->pixels.data(), 0, backing->pixels.size());
-    backing->pixel_format = pixel_format;
-    backing->world.world_flags = 2 | (type == 1 ? 0 : 1);
-    backing->world.data = backing->pixels.data();
-    backing->world.rowbytes = static_cast<int32_t>(rowbytes);
-    backing->world.width = width;
-    backing->world.height = height;
-    backing->world.extent_hint = {0, 0, width, height};
-    backing->world.pix_aspect_ratio = {1, 1};
-    g_platform_world_bytes.fetch_add(size);
-    backing->accounted_bytes = size;
-    if (!g_aegp_world_views.emplace(handle, AegpWorldView{
-        &backing->world, pixel_format, true, true, true, backing}).second) return 4;
-  } catch (...) { return 4; }
-  ++g_live_owned_aegp_worlds;
-  ++g_owned_aegp_worlds_created;
-  *output = handle;
-  return 0;
-}
-int32_t __cdecl aegp_world_dispose(void** handle) {
-  if (!handle) return 4;
-  std::lock_guard<std::mutex> lock(g_world_mutex);
-  const auto found = g_aegp_world_views.find(handle);
-  if (found == g_aegp_world_views.end() || !found->second.disposable) return 4;
-  const bool owned = found->second.owned_aegp;
-  g_aegp_world_views.erase(found);
-  if (owned) {
-    --g_live_owned_aegp_worlds;
-    ++g_owned_aegp_worlds_disposed;
-  } else {
-    --g_live_platform_references;
-    ++g_platform_references_disposed;
-  }
-  return 0;
-}
-int32_t __cdecl aegp_world_get_type(void** handle, int32_t* type) {
-  AegpWorldView view{}; LocalEffectWorld world{};
-  if (!type || !get_aegp_world_view(handle, &view, &world)) return 4;
-  *type = aegp_world_type_from_format(view.pixel_format);
-  return *type ? 0 : 4;
-}
-int32_t __cdecl aegp_world_get_size(void** handle, int32_t* width, int32_t* height) {
-  AegpWorldView view{}; LocalEffectWorld world{};
-  if (!width || !height || !get_aegp_world_view(handle, &view, &world)) return 4;
-  *width = world.width; *height = world.height; return 0;
-}
-int32_t __cdecl aegp_world_get_rowbytes(void** handle, uint32_t* rowbytes) {
-  AegpWorldView view{}; LocalEffectWorld world{};
-  if (!rowbytes || !get_aegp_world_view(handle, &view, &world)) return 4;
-  *rowbytes = static_cast<uint32_t>(world.rowbytes); return 0;
-}
-int32_t aegp_world_get_base_addr(void** handle, int32_t required_type, void** base) {
-  AegpWorldView view{}; LocalEffectWorld world{};
-  if (!base || !get_aegp_world_view(handle, &view, &world) ||
-      aegp_world_type_from_format(view.pixel_format) != required_type) return 4;
-  *base = world.data; return 0;
-}
-int32_t __cdecl aegp_world_get_base_addr8(void** h, void** p) { return aegp_world_get_base_addr(h, 1, p); }
-int32_t __cdecl aegp_world_get_base_addr16(void** h, void** p) { return aegp_world_get_base_addr(h, 2, p); }
-int32_t __cdecl aegp_world_get_base_addr32(void** h, void** p) { return aegp_world_get_base_addr(h, 3, p); }
 
 uint32_t color_settings_read_be32(const uint8_t* bytes) {
   return (static_cast<uint32_t>(bytes[0]) << 24) |
@@ -6239,10 +6095,12 @@ int32_t __cdecl color_xform_working_to_view(void* view, void** src, void** dst) 
   if (!src || !dst) return 4;
   // AEGP_WorldH is an opaque handle token in this host, not a client-dereferenceable pointer.
   if (view != &g_aegp_item_view) { ++g_invalid_color_profile_operations; return 4; }
-  AegpWorldView src_view{}, dst_view{};
-  LocalEffectWorld src_world{}, dst_world{};
-  if (!get_aegp_world_view(src, &src_view, &src_world) || !get_aegp_world_view(dst, &dst_view, &dst_world))
+  aexcompat::world_registry::AegpWorldSnapshot src_view{}, dst_view{};
+  if (!aexcompat::world_registry::snapshot_aegp_world(src, src_view) ||
+      !aexcompat::world_registry::snapshot_aegp_world(dst, dst_view))
     return 4;
+  const LocalEffectWorld& src_world = src_view.world;
+  const LocalEffectWorld& dst_world = dst_view.world;
   const int32_t src_type = aegp_world_type_from_format(src_view.pixel_format);
   const int32_t dst_type = aegp_world_type_from_format(dst_view.pixel_format);
   if (!src_type || src_type != dst_type || src_world.width != dst_world.width ||
@@ -6253,6 +6111,21 @@ int32_t __cdecl color_xform_working_to_view(void* view, void** src, void** dst) 
       src_world.rowbytes < minimum_rowbytes || dst_world.rowbytes < minimum_rowbytes) return 4;
   const uint64_t pixel_bytes = static_cast<uint64_t>(src_world.height) * src_world.rowbytes;
   if (pixel_bytes > 128ULL * 1024 * 1024) return 4;
+  std::unique_lock<std::mutex> src_pixels;
+  std::unique_lock<std::mutex> dst_pixels;
+  if (src_view.backing_pin && src_view.backing_pin == dst_view.backing_pin) {
+    src_pixels = std::unique_lock<std::mutex>(src_view.backing_pin->pixels_mutex);
+  } else if (src_view.backing_pin && dst_view.backing_pin) {
+    src_pixels = std::unique_lock<std::mutex>(
+        src_view.backing_pin->pixels_mutex, std::defer_lock);
+    dst_pixels = std::unique_lock<std::mutex>(
+        dst_view.backing_pin->pixels_mutex, std::defer_lock);
+    std::lock(src_pixels, dst_pixels);
+  } else if (src_view.backing_pin) {
+    src_pixels = std::unique_lock<std::mutex>(src_view.backing_pin->pixels_mutex);
+  } else if (dst_view.backing_pin) {
+    dst_pixels = std::unique_lock<std::mutex>(dst_view.backing_pin->pixels_mutex);
+  }
   ColorProfileKind working_kind{};
   {
     std::lock_guard<std::mutex> lock(g_color_settings_mutex);
@@ -6430,180 +6303,6 @@ int32_t __cdecl color_get_working_colorspace_id(int32_t plugin_id, AegpGuidValue
   return 0;
 }
 
-int32_t __cdecl aegp_world_fill_pf_world(void** handle, void* output) {
-  AegpWorldView view{}; LocalEffectWorld world{};
-  if (!output || !get_aegp_world_view(handle, &view, &world)) return 4;
-  std::memcpy(output, &world, sizeof(world)); return 0;
-}
-int32_t __cdecl aegp_world_fast_blur(double radius, uint32_t mode_flags,
-                                     int32_t quality, void** handle) {
-  AegpWorldView view{};
-  LocalEffectWorld world{};
-  if (!std::isfinite(radius) || radius < 0.0 || radius > 1024.0 ||
-      (mode_flags & ~1U) != 0 || (quality != 0 && quality != 1) ||
-      !get_aegp_world_view(handle, &view, &world) || !view.disposable ||
-      !view.platform_backing) return 4;
-  if (radius == 0.0) return 0;
-  std::lock_guard<std::mutex> pixels_lock(view.platform_backing->pixels_mutex);
-  const int32_t type = aegp_world_type_from_format(view.pixel_format);
-  const uint64_t pixel_count = static_cast<uint64_t>(world.width) * world.height;
-  constexpr uint64_t kMaxBlurScratchBytes = 128ULL * 1024 * 1024;
-  if (!type || pixel_count == 0 || pixel_count > kMaxBlurScratchBytes / (4 * sizeof(float)))
-    return 4;
-  const int32_t kernel_radius = static_cast<int32_t>(std::ceil(radius));
-  std::vector<float> weights;
-  std::vector<float> horizontal;
-  try {
-    weights.resize(static_cast<std::size_t>(kernel_radius) + 1);
-    horizontal.resize(static_cast<std::size_t>(pixel_count) * 4);
-  } catch (...) { return 4; }
-  float total_weight = 0.0f;
-  for (int32_t offset = 0; offset <= kernel_radius; ++offset) {
-    const float weight = quality == 0 ? 1.0f :
-        static_cast<float>((std::max)(0.0, radius + 1.0 - offset));
-    weights[static_cast<std::size_t>(offset)] = weight;
-    total_weight += offset == 0 ? weight : 2.0f * weight;
-  }
-  if (!(total_weight > 0.0f)) return 4;
-  const bool straight_alpha = (mode_flags & 1U) != 0;
-  const auto read_pixel = [&](int32_t x, int32_t y, float* channels) {
-    const auto* row = static_cast<const std::byte*>(world.data) +
-        static_cast<std::size_t>(y) * world.rowbytes;
-    if (type == 1) {
-      const auto* p = reinterpret_cast<const uint8_t*>(row) + x * 4;
-      for (int c = 0; c < 4; ++c) channels[c] = p[c] / 255.0f;
-    } else if (type == 2) {
-      const auto* p = reinterpret_cast<const uint16_t*>(row) + x * 4;
-      for (int c = 0; c < 4; ++c) channels[c] = p[c] / 32768.0f;
-    } else {
-      std::memcpy(channels, row + static_cast<std::size_t>(x) * 16, 16);
-    }
-    if (straight_alpha) {
-      channels[1] *= channels[0]; channels[2] *= channels[0]; channels[3] *= channels[0];
-    }
-  };
-  for (int32_t y = 0; y < world.height; ++y) {
-    for (int32_t x = 0; x < world.width; ++x) {
-      float sum[4]{};
-      for (int32_t offset = -kernel_radius; offset <= kernel_radius; ++offset) {
-        const float weight = weights[static_cast<std::size_t>(std::abs(offset))];
-        const int32_t sample_x = (std::clamp)(x + offset, 0, world.width - 1);
-        float sample[4]{}; read_pixel(sample_x, y, sample);
-        for (int c = 0; c < 4; ++c) sum[c] += sample[c] * weight;
-      }
-      float* out = horizontal.data() +
-          (static_cast<std::size_t>(y) * world.width + x) * 4;
-      for (int c = 0; c < 4; ++c) out[c] = sum[c] / total_weight;
-    }
-  }
-  for (int32_t y = 0; y < world.height; ++y) {
-    auto* row = static_cast<std::byte*>(world.data) + static_cast<std::size_t>(y) * world.rowbytes;
-    for (int32_t x = 0; x < world.width; ++x) {
-      float sum[4]{};
-      for (int32_t offset = -kernel_radius; offset <= kernel_radius; ++offset) {
-        const float weight = weights[static_cast<std::size_t>(std::abs(offset))];
-        const int32_t sample_y = (std::clamp)(y + offset, 0, world.height - 1);
-        const float* sample = horizontal.data() +
-            (static_cast<std::size_t>(sample_y) * world.width + x) * 4;
-        for (int c = 0; c < 4; ++c) sum[c] += sample[c] * weight;
-      }
-      for (float& channel : sum) channel /= total_weight;
-      if (straight_alpha) {
-        if (sum[0] > 0.0f) {
-          sum[1] /= sum[0]; sum[2] /= sum[0]; sum[3] /= sum[0];
-        } else sum[1] = sum[2] = sum[3] = 0.0f;
-      }
-      if (type == 1) {
-        auto* p = reinterpret_cast<uint8_t*>(row) + x * 4;
-        for (int c = 0; c < 4; ++c) p[c] = static_cast<uint8_t>(std::lround(
-            (std::clamp)(sum[c], 0.0f, 1.0f) * 255.0f));
-      } else if (type == 2) {
-        auto* p = reinterpret_cast<uint16_t*>(row) + x * 4;
-        for (int c = 0; c < 4; ++c) p[c] = static_cast<uint16_t>(std::lround(
-            (std::clamp)(sum[c], 0.0f, 1.0f) * 32768.0f));
-      } else {
-        std::memcpy(row + static_cast<std::size_t>(x) * 16, sum, 16);
-      }
-    }
-  }
-  return 0;
-}
-int32_t __cdecl aegp_world_new_platform(int32_t plugin_id, int32_t type, int32_t width,
-                                        int32_t height, void** output) {
-  if (output) *output = nullptr;
-  const int32_t pixel_format = type == 1 ? kPixelFormatArgb32 :
-      (type == 2 ? kPixelFormatArgb64 : (type == 3 ? kPixelFormatArgb128 : 0));
-  const uint64_t bytes_per_pixel = type == 1 ? 4 : (type == 2 ? 8 : (type == 3 ? 16 : 0));
-  if (plugin_id != 1 || !output || !pixel_format || width <= 0 || height <= 0) return 4;
-  const uint64_t rowbytes = static_cast<uint64_t>(width) * bytes_per_pixel;
-  const uint64_t size = rowbytes * static_cast<uint64_t>(height);
-  if (rowbytes > static_cast<uint64_t>((std::numeric_limits<int32_t>::max)()) ||
-      size == 0 || size > kMaxPlatformWorldBytes) return 4;
-  uint64_t generation = 0;
-  if (!claim_opaque_generation(g_platform_world_generation, generation)) return 4;
-  const auto handle = reinterpret_cast<void*>(static_cast<uintptr_t>((generation << 3) | 2));
-  std::lock_guard<std::mutex> lock(g_world_mutex);
-  if (g_platform_worlds.size() >= kMaxPlatformWorlds ||
-      g_platform_world_bytes.load() > kMaxPlatformWorldBytes - size) return 4;
-  std::shared_ptr<PlatformWorldBacking> backing;
-  try {
-    auto* raw = new PlatformWorldBacking();
-    backing = std::shared_ptr<PlatformWorldBacking>(raw, [](PlatformWorldBacking* value) {
-      if (value->accounted_bytes) g_platform_world_bytes.fetch_sub(value->accounted_bytes);
-      delete value;
-    });
-    backing->pixels.resize(static_cast<std::size_t>(size));
-  } catch (const std::bad_alloc&) { return 1; }
-  std::memset(backing->pixels.data(), 0, backing->pixels.size());
-  backing->pixel_format = pixel_format;
-  backing->world.world_flags = 2 | (type == 1 ? 0 : 1);
-  backing->world.data = backing->pixels.data();
-  backing->world.rowbytes = static_cast<int32_t>(rowbytes);
-  backing->world.width = width;
-  backing->world.height = height;
-  backing->world.extent_hint = {0, 0, width, height};
-  backing->world.pix_aspect_ratio = {1, 1};
-  g_platform_world_bytes.fetch_add(size);
-  backing->accounted_bytes = size;
-  try {
-    if (!g_platform_worlds.emplace(handle, PlatformWorldEntry{backing}).second) return 4;
-  } catch (...) { return 4; }
-  ++g_platform_worlds_created;
-  *output = handle;
-  return 0;
-}
-int32_t __cdecl aegp_world_dispose_platform(void* handle) {
-  std::lock_guard<std::mutex> lock(g_world_mutex);
-  const auto found = g_platform_worlds.find(handle);
-  if (!handle || found == g_platform_worlds.end()) return 4;
-  g_platform_worlds.erase(found);
-  ++g_platform_worlds_disposed;
-  return 0;
-}
-int32_t __cdecl aegp_world_reference_platform(int32_t plugin_id, void* platform,
-                                               void*** output) {
-  if (output) *output = nullptr;
-  if (plugin_id != 1 || !output) return 4;
-  uint64_t generation = 0;
-  if (!claim_opaque_generation(g_platform_reference_generation, generation)) return 4;
-  const auto handle = reinterpret_cast<void**>(static_cast<uintptr_t>((generation << 3) | 7));
-  std::lock_guard<std::mutex> lock(g_world_mutex);
-  const auto found = g_platform_worlds.find(platform);
-  if (!platform || found == g_platform_worlds.end() ||
-      g_live_platform_references >= kMaxPlatformReferences)
-    return 4;
-  const auto& backing = found->second.backing;
-  try {
-    const auto inserted = g_aegp_world_views.emplace(handle, AegpWorldView{
-        &backing->world, backing->pixel_format, true, true, false, backing});
-    if (!inserted.second) return 4;
-  } catch (...) { return 4; }
-  ++g_live_platform_references;
-  ++g_platform_references_created;
-  *output = handle;
-  return 0;
-}
-
 bool world_lifetimes_balanced();
 
 bool verify_aegp_world_suite3() {
@@ -6620,10 +6319,8 @@ bool verify_aegp_world_suite3() {
     if (new_world(nullptr, 7, 5, 1, formats[index], storage.data()) != 0) return false;
     void* token = storage.data();
     void** handle = &token;
-    {
-      std::lock_guard<std::mutex> lock(g_world_mutex);
-      g_aegp_world_views.emplace(handle, AegpWorldView{storage.data(), formats[index], false});
-    }
+    if (!aexcompat::world_registry::register_borrowed_view(
+            handle, storage.data(), formats[index], false)) return false;
     int32_t type = 0, width = 0, height = 0;
     uint32_t rowbytes = 0;
     void* pixels = nullptr;
@@ -6645,10 +6342,7 @@ bool verify_aegp_world_suite3() {
     std::memcpy(&world, storage.data(), sizeof(world));
     const bool addresses_ok = correct_addr == 0 && pixels == world.data && wrong_addr != 0 &&
         wrong_pixels == reinterpret_cast<void*>(1);
-    {
-      std::lock_guard<std::mutex> lock(g_world_mutex);
-      g_aegp_world_views.erase(handle);
-    }
+    if (!aexcompat::world_registry::unregister_borrowed_view(handle)) return false;
     const bool stale_rejected = aegp_world_get_type(handle, &type) != 0;
     if (dispose_world(nullptr, storage.data()) != 0 || !metadata_ok || !addresses_ok ||
         !stale_rejected) return false;
@@ -6664,17 +6358,12 @@ bool verify_aegp_world_suite3() {
   world->height = 2;
   void* token = borrowed.data();
   void** handle = &token;
-  {
-    std::lock_guard<std::mutex> lock(g_world_mutex);
-    g_aegp_world_views.emplace(handle, AegpWorldView{borrowed.data(), kPixelFormatArgb32, true});
-  }
+  if (!aexcompat::world_registry::register_borrowed_view(
+          handle, borrowed.data(), kPixelFormatArgb32)) return false;
   int32_t width = 0, height = 0;
   const bool borrowed_live = aegp_world_get_size(handle, &width, &height) == 0 &&
       width == 2 && height == 2 && aegp_world_dispose(handle) != 0;
-  {
-    std::lock_guard<std::mutex> lock(g_world_mutex);
-    g_aegp_world_views.erase(handle);
-  }
+  if (!aexcompat::world_registry::unregister_borrowed_view(handle)) return false;
   if (!borrowed_live || aegp_world_get_size(handle, &width, &height) == 0) return false;
 
   for (int32_t type = 1; type <= 3; ++type) {
@@ -6759,12 +6448,63 @@ bool verify_aegp_world_suite3() {
       render_checkin_rendered(options, &timestamp, 1, platform) == 0 ||
       aegp_world_dispose_platform(platform) != 0 || render_options_dispose(options) != 0)
     return false;
-  return world_lifetimes_balanced() && g_platform_worlds.empty() &&
-      g_external_render_cache.empty() && g_platform_world_bytes.load() == 0 &&
-      g_platform_worlds_created == g_platform_worlds_disposed + g_platform_worlds_adopted &&
-      g_platform_references_created == g_platform_references_disposed &&
-      g_owned_aegp_worlds_created == g_owned_aegp_worlds_disposed &&
-      g_live_owned_aegp_worlds == 0;
+  return world_lifetimes_balanced() && g_external_render_cache.empty() &&
+      aexcompat::world_registry::aegp_lifetimes_balanced();
+}
+
+bool verify_aegp_world_mfr_safety() {
+  void** world = nullptr;
+  if (aegp_world_new_owned(1, 1, 16, 16, &world) != 0 || !world) return false;
+  std::atomic_bool start{false};
+  std::atomic_bool invalid{false};
+  std::vector<std::thread> readers;
+  try {
+    for (int worker = 0; worker < 4; ++worker) {
+      readers.emplace_back([&] {
+        while (!start.load(std::memory_order_acquire)) std::this_thread::yield();
+        for (int iteration = 0; iteration < 256; ++iteration) {
+          int32_t type = 0, width = 0, height = 0;
+          uint32_t rowbytes = 0;
+          if (aegp_world_get_type(world, &type) != 0 || type != 1 ||
+              aegp_world_get_size(world, &width, &height) != 0 ||
+              width != 16 || height != 16 ||
+              aegp_world_get_rowbytes(world, &rowbytes) != 0 || rowbytes != 64)
+            invalid.store(true, std::memory_order_release);
+        }
+      });
+    }
+  } catch (...) {
+    start.store(true, std::memory_order_release);
+    for (auto& reader : readers) reader.join();
+    aegp_world_dispose(world);
+    return false;
+  }
+  start.store(true, std::memory_order_release);
+  for (int iteration = 0; iteration < 16; ++iteration) {
+    if (aegp_world_fast_blur(0.25, 0, iteration & 1, world) != 0)
+      invalid.store(true, std::memory_order_release);
+  }
+  for (auto& reader : readers) reader.join();
+  if (invalid.load(std::memory_order_acquire) ||
+      aegp_world_dispose(world) != 0 ||
+      !aexcompat::world_registry::aegp_lifetimes_balanced()) return false;
+
+  std::array<aexcompat::world_registry::AegpWorldSnapshot, 64> pins{};
+  for (auto& pin : pins) {
+    void** pinned_world = nullptr;
+    if (aegp_world_new_owned(1, 1, 1, 1, &pinned_world) != 0 ||
+        !aexcompat::world_registry::snapshot_aegp_world(pinned_world, pin) ||
+        !pin.backing_pin || aegp_world_dispose(pinned_world) != 0) return false;
+  }
+  void** rejected = reinterpret_cast<void**>(1);
+  if (aegp_world_new_owned(1, 1, 1, 1, &rejected) == 0 || rejected != nullptr)
+    return false;
+  pins[0] = {};
+  void** admitted = nullptr;
+  if (aegp_world_new_owned(1, 1, 1, 1, &admitted) != 0 || !admitted ||
+      aegp_world_dispose(admitted) != 0) return false;
+  pins = {};
+  return aexcompat::world_registry::aegp_lifetimes_balanced();
 }
 
 bool async_receipt_lifetimes_balanced() {
@@ -15694,7 +15434,8 @@ int worker_main_impl(int argc, wchar_t **argv) {
     return passed ? 0 : 1;
   }
   if (argc == 2 && std::wstring(argv[1]) == L"--self-test-aegp-world-suite3") {
-    const bool passed = verify_aegp_world_suite3();
+    const bool passed = verify_aegp_world_suite3() &&
+        verify_aegp_world_mfr_safety();
     std::cout << "{\"aegp_world_suite3\":\""
               << (passed ? "passed" : "failed") << "\"}\n";
     return passed ? 0 : 1;

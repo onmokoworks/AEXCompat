@@ -58,9 +58,55 @@ def test_pf_owned_world_registry_is_a_genuine_bounded_component():
     assert "g_owned_worlds" not in main
     assert "int32_t __cdecl new_world(" not in main
     assert "configure_host_world_fallback" not in main
-    assert "g_aegp_world_views" not in source
-    assert "g_platform_worlds" not in source
+    assert "g_aegp_world_views" not in main
+    assert "g_platform_worlds" not in main
+    assert "std::unordered_map<void**, AegpWorldView> g_aegp_views" in source
+    assert "std::unordered_map<void*, PlatformWorldEntry> g_platform_worlds" in source
     assert "g_async_receipts" not in source
+
+
+def test_owned_snapshot_and_aegp_backing_lock_boundaries_are_explicit():
+    source = WORLD_REGISTRY_SOURCE.read_text(encoding="utf-8")
+    snapshot = source[source.index("bool snapshot_owned_world("):
+                      source.index("int32_t aegp_world_type_from_format(")]
+    assert snapshot.index("std::lock_guard<std::mutex> lock(g_mutex)") < snapshot.index(
+        "std::memcpy(&descriptor, world, sizeof(descriptor))")
+    assert snapshot.index("std::memcpy(&descriptor, world, sizeof(descriptor))") < snapshot.index(
+        "descriptor.data != found->second.pixels")
+    blur = source[source.index("int32_t __cdecl aegp_world_fast_blur("):
+                  source.index("int32_t __cdecl aegp_world_new_platform(")]
+    assert blur.index("snapshot_aegp_view(handle, view, world)") < blur.index(
+        "pixels_lock(view.platform_backing->pixels_mutex)")
+    assert "registry mutex while waiting for mutable pixel access" in blur
+    assert "g_live_owned_aegp_backings.fetch_sub(1)" in source
+    assert "g_live_owned_aegp_backings.load() >= kMaxOwnedAegpWorlds" in source
+
+
+def test_aegp_world_and_platform_ownership_live_in_registry_not_l2():
+    header = WORLD_REGISTRY_HEADER.read_text(encoding="utf-8")
+    source = WORLD_REGISTRY_SOURCE.read_text(encoding="utf-8")
+    main = SOURCE.read_text(encoding="utf-8")
+    for callback in (
+        "aegp_world_new_owned", "aegp_world_dispose", "aegp_world_get_type",
+        "aegp_world_get_size", "aegp_world_get_rowbytes",
+        "aegp_world_get_base_addr8", "aegp_world_fill_pf_world",
+        "aegp_world_fast_blur", "aegp_world_new_platform",
+        "aegp_world_dispose_platform", "aegp_world_reference_platform",
+    ):
+        assert f"int32_t __cdecl {callback}(" in source
+        assert f"int32_t __cdecl {callback}(" not in main
+    for api in (
+        "register_borrowed_view", "unregister_borrowed_view",
+        "snapshot_aegp_world", "snapshot_platform_world",
+        "adopt_platform_world", "aegp_lifetimes_balanced",
+    ):
+        assert api in header + source
+    assert "struct AsyncFrameReceipt" in main
+    assert "struct ExternalRenderedFrame" in main
+    assert "g_async_receipts" in main
+    assert "g_external_render_cache" in main
+    assert "struct AsyncFrameReceipt" not in source
+    assert "g_external_render_cache" not in source
 
 
 def test_effect_world_abi_and_bounds_live_in_world_safety_component():
