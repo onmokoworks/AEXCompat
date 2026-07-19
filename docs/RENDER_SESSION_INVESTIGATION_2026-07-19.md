@@ -396,17 +396,38 @@ PR-C (#116) merge 後のコードに対して、段階1-3「既存 one-shot 経�
   検証対象自体も異なる (one-shot = 出力ファイル、セッション = 共有メモリ
   header/slot)。
 
-### 段階1-3 の方針再提案 (提案)
+### 段階1-3 の方針再提案: 段階分割によるゴール到達計画 (提案、訂正 2026-07-19)
 
-観察から、「挙動不変の wrapper 化」は現状の RenderSession v1 に対して
-成立しない (対応できない構成が広く、戻り値契約も非互換)。加えて #107 で
-GUI はセッションを直接使う計画のため、one-shot を wrapper 化して二重保守を
-解消するという当初の動機自体が弱くなっている (worker 側のフレームループは
-`render_once` を再利用しており、worker 内の二重保守は argv パースとループ
-外殻のみ)。
+(訂正: 当初この節は「見送り」を提案したが、段階1-3 のゴール自体は維持し、
+一発の挙動不変置換ではなく段階分割で到達する計画に改める。)
 
-提案: 段階1-3 は現時点では実施しない。再検討の条件は (a) セッションが
-one-shot の静的構成 (最低限 parameter animation #132、layer、各 context)
-を受けられるようになり、かつ (b) one-shot 経路の二重保守が実際の変更で
-問題になった時点。それまで one-shot はセッションが扱えない構成 (custom UI
-probe、audio、SmartFX GPU 等) の専用経路として維持する。
+観察から、「今すぐ一発で挙動不変置換」は成立しないが、ギャップはすべて
+埋められる種類のものである。以下の段階で到達する:
+
+- **W1: セッションの静的構成受容を one-shot と同等にする** (独立小 PR 群)
+  - parameter animation (#132): worker 対応済み、`SessionOpenRequest` +
+    sidecar + argv 付与のみ。最小。
+  - aux manifest / alpha-as-coverage / dump-worlds / checksum-detail:
+    auxiliary option 群は worker のセッション argv が既に受容している
+    (`strip_auxiliary_options` はセッションでも走る)。broker 側 open に
+    足すだけ。最小。
+  - mask / spatial / render-environment context: セッション argv (固定
+    argc=10) の拡張 + プロトコル文書 §3 改訂 + broker 側。中。
+  - layer スロット: プロトコル §6 にレイアウト定義済み。worker の受容 +
+    per-frame スロット転送 + broker 側。中〜大。
+- **W2: wrapper 本体** (classic CPU 経路の切替)。worker のセッション最終
+  レポートは one-shot と同じ ClassicReport 出力コードを使っているため、
+  `final_report` + `frame_done` から `interactive_image_render` Value を
+  合成する変換層は既存転記ロジックの流用で作れる。「挙動不変」の定義は
+  「report バイト一致」ではなく公開契約不変 (harness が消費するフィールド
+  + PNG バイト + pass/fail 判定) に置き直す (owner 合意事項)。custom UI
+  (click/draw) と audio は当面 one-shot fallback に残す。
+- **W3: SmartFX/GPU セッション (v1.1)**: `smart_render_runtime` の
+  manage_sequence 相当 + broker の WorkerKind::Smart/GPU policy。W1/W2 と
+  並行可。
+- **W4: one-shot argv モードの縮退・削除**: 契約テストをセッション経由に
+  移行してから。
+
+クリティカルパスは W1 (context/layer) → W2。W1 の「最小」2 件は即着手
+可能。custom UI のセッション化は #107 の per-frame parameters (v2) と
+同時期に扱う。
