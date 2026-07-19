@@ -13,6 +13,7 @@ HANDLE_RUNTIME_HEADER = ROOT / "minihost" / "src" / "worker_handle_runtime.hpp"
 PF_SUITES_ABI = ROOT / "minihost" / "src" / "worker_l2_suite_abi.hpp"
 PF_SUITES_SOURCE = ROOT / "minihost" / "src" / "worker_pf_suites.cpp"
 PF_SAMPLING_SOURCE = ROOT / "minihost" / "src" / "worker_pf_sampling_runtime.cpp"
+PF_AE_CHANNEL_RUNTIME_SOURCE = ROOT / "minihost" / "src" / "worker_pf_ae_channel_runtime.cpp"
 RENDER_HEADER = ROOT / "minihost" / "src" / "render_subsystem.h"
 RENDER_SOURCE = ROOT / "minihost" / "src" / "render_subsystem.cpp"
 REPORT_HEADER = ROOT / "minihost" / "src" / "worker_report.hpp"
@@ -45,6 +46,7 @@ def l2_family_source():
         SOURCE, MODE_EXECUTION_HEADER, MODE_EXECUTION_SOURCE,
         CLI_DISPATCH_SOURCE, PF_SUITES_ABI, PF_SUITES_INTERNAL, PF_SUITES_SOURCE,
         PF_SAMPLING_SOURCE,
+        PF_AE_CHANNEL_RUNTIME_SOURCE,
         AEGP_SCENE_SOURCE, AEGP_SCENE_HEADER, AEGP_SCENE_RUNTIME_HEADER,
         AEGP_SCENE_RUNTIME_SOURCE, AEGP_INIT_RUNTIME_HEADER, AEGP_INIT_RUNTIME_SOURCE,
         MASK_RUNTIME_HEADER, MASK_RUNTIME_SOURCE, MASK_RUNTIME_CALLBACKS,

@@ -87,6 +87,7 @@
 #include "worker_pf_suites_internal.hpp"
 #include "worker_pf_adv_time_suite.hpp"
 #include "worker_pf_ae_channel_runtime.hpp"
+#include "worker_pf_state_runtime.hpp"
 #include "worker_report.hpp"
 #include "worker_request_parser.hpp"
 #include "worker_render_report.hpp"
@@ -99,6 +100,7 @@
 namespace aexcompat::l2_detail {
 
 using namespace aexcompat::pf_ae_channel;
+using namespace aexcompat::pf_state_runtime;
 
 using namespace aexcompat::color_settings;
 
@@ -3703,8 +3705,6 @@ int32_t __cdecl update_param_ui(void* effect_ref, int32_t index, const void* def
   ++g_update_param_ui_calls;
   return 0;
 }
-struct PfState { int32_t reserved[4]; };
-struct PfTime { int32_t value; uint32_t scale; };
 
 bool valid_param_utils_index(int32_t index, bool allow_groups = false) {
   if (allow_groups && index >= -4 && index <= -1) return true;
@@ -3818,171 +3818,56 @@ bool apply_parameter_animation(
   return true;
 }
 
-using PfStateToken = std::array<unsigned char, sizeof(PfState)>;
-struct PfStateTokenHash {
-  std::size_t operator()(const PfStateToken& token) const noexcept {
-    std::size_t value = 0;
-    std::memcpy(&value, token.data(), (std::min)(sizeof(value), token.size()));
-    return value;
-  }
-};
-struct PfStateRegistryEntry {
-  void* owner{};
-  uint64_t generation{};
-  int32_t param_index{};
-  bool has_range{};
-  PfTime start{};
-  PfTime duration{};
-  std::vector<unsigned char> canonical_snapshot;
-};
-constexpr std::size_t kMaxPfStateRegistryEntries = 4096;
-std::mutex g_pf_state_registry_mutex;
-uint32_t g_pf_get_current_state_calls{};
-uint32_t g_pf_are_states_identical_calls{};
-std::unordered_map<PfStateToken, PfStateRegistryEntry, PfStateTokenHash>
-    g_pf_state_registry;
-uint64_t g_pf_state_effect_generation = 1;
-bool g_pf_state_effect_live = true;
-
 template <typename T>
-void append_param_state_bytes(std::vector<unsigned char>& snapshot, const T& value) {
+void append_pf_state_bytes(std::vector<unsigned char>& snapshot, const T& value) {
   const auto* bytes = reinterpret_cast<const unsigned char*>(&value);
   snapshot.insert(snapshot.end(), bytes, bytes + sizeof(value));
 }
 
-bool canonical_param_state_snapshot(int32_t index, const PfTime* start,
-                                    const PfTime* duration,
-                                    std::vector<unsigned char>& snapshot) {
+bool capture_pf_parameter_state(int32_t index,
+                                std::vector<unsigned char>& snapshot) {
   try {
-    snapshot.clear();
-    append_param_state_bytes(snapshot, index);
-    const uint8_t has_range = start ? 1 : 0;
-    append_param_state_bytes(snapshot, has_range);
-    if (start) {
-      append_param_state_bytes(snapshot, *start);
-      append_param_state_bytes(snapshot, *duration);
+    for (const auto& param : g_params) {
+      if (index >= 0 && param.index != index) continue;
+      if (index == -3 && param.type == 0) continue;
+      append_pf_state_bytes(snapshot, param.disk_id);
+      append_pf_state_bytes(snapshot, param.type);
+      const auto* raw = reinterpret_cast<const unsigned char*>(param.raw.data());
+      snapshot.insert(snapshot.end(), raw, raw + param.raw.size());
     }
-  for (const auto &param : g_params) {
-    if (index >= 0 && param.index != index)
-      continue;
-    if (index == -3 && param.type == 0)
-      continue;
-    append_param_state_bytes(snapshot, param.disk_id);
-    append_param_state_bytes(snapshot, param.type);
-    const auto* raw = reinterpret_cast<const unsigned char*>(param.raw.data());
-    snapshot.insert(snapshot.end(), raw, raw + param.raw.size());
-  }
-  for (const auto &timeline : g_parameter_timelines) {
-    if (index >= 0 && timeline.slot != index)
-      continue;
-    append_param_state_bytes(snapshot, timeline.slot);
-    const std::size_t key_count = timeline.keys.size();
-    append_param_state_bytes(snapshot, key_count);
-    for (const auto &key : timeline.keys) {
-      append_param_state_bytes(snapshot, key.time);
-      append_param_state_bytes(snapshot, key.scale);
-      append_param_state_bytes(snapshot, key.hold);
-      append_param_state_bytes(snapshot, key.kind);
-      append_param_state_bytes(snapshot, key.scalar);
-      snapshot.insert(snapshot.end(), key.color.begin(), key.color.end());
-      const auto* components = reinterpret_cast<const unsigned char*>(key.components.data());
-      snapshot.insert(snapshot.end(), components,
-                      components + sizeof(double) * key.components.size());
-      append_param_state_bytes(snapshot, key.component_count);
+    for (const auto& timeline : g_parameter_timelines) {
+      if (index >= 0 && timeline.slot != index) continue;
+      append_pf_state_bytes(snapshot, timeline.slot);
+      const std::size_t key_count = timeline.keys.size();
+      append_pf_state_bytes(snapshot, key_count);
+      for (const auto& key : timeline.keys) {
+        append_pf_state_bytes(snapshot, key.time);
+        append_pf_state_bytes(snapshot, key.scale);
+        append_pf_state_bytes(snapshot, key.hold);
+        append_pf_state_bytes(snapshot, key.kind);
+        append_pf_state_bytes(snapshot, key.scalar);
+        snapshot.insert(snapshot.end(), key.color.begin(), key.color.end());
+        const auto* components =
+            reinterpret_cast<const unsigned char*>(key.components.data());
+        snapshot.insert(snapshot.end(), components,
+                        components + sizeof(double) * key.components.size());
+        append_pf_state_bytes(snapshot, key.component_count);
+      }
     }
-  }
   } catch (const std::bad_alloc&) {
-    snapshot.clear();
     return false;
   }
   return true;
 }
 
-void purge_pf_state_registry_locked(void* owner) {
-  for (auto it = g_pf_state_registry.begin(); it != g_pf_state_registry.end();) {
-    if (!owner || it->second.owner == owner) it = g_pf_state_registry.erase(it);
-    else ++it;
-  }
-}
-
-void reset_pf_state_effect_lifetime(void* owner, bool live) {
-  std::lock_guard<std::mutex> lock(g_pf_state_registry_mutex);
-  purge_pf_state_registry_locked(nullptr);
-  if (++g_pf_state_effect_generation == 0) ++g_pf_state_effect_generation;
-  g_pf_state_effect_live = live;
-}
-
 int32_t invoke_global_setdown(EffectEntry entry, void* input, void* output) {
   uint32_t exception_code{};
-  const int32_t error = invoke_entry_seh(entry, kGlobalSetdown, input, output, nullptr,
-                                         nullptr, nullptr, &exception_code);
-  reset_pf_state_effect_lifetime(&g_effect, false);
+  const int32_t error = invoke_entry_seh(entry, kGlobalSetdown, input, output,
+                                         nullptr, nullptr, nullptr,
+                                         &exception_code);
+  on_global_setdown();
   aexcompat::pf_helper::reset();
   return error;
-}
-
-int32_t __cdecl get_current_param_state(void *effect_ref, int32_t index,
-                                        const PfTime *start,
-                                        const PfTime *duration,
-                                        PfState *state) {
-  if (effect_ref != &g_effect || !state ||
-      !valid_param_utils_index(index, true) || ((!start) != (!duration)) ||
-      (start && (start->scale == 0 || duration->scale == 0)))
-    return kPfBadCallbackParam;
-  std::lock_guard<std::mutex> lock(g_pf_state_registry_mutex);
-  if (!g_pf_state_effect_live || g_pf_state_registry.size() >= kMaxPfStateRegistryEntries)
-    return kPfBadCallbackParam;
-  PfStateRegistryEntry entry{effect_ref, g_pf_state_effect_generation, index,
-                             start != nullptr, start ? *start : PfTime{},
-                             duration ? *duration : PfTime{}, {}};
-  if (!canonical_param_state_snapshot(index, start, duration,
-                                      entry.canonical_snapshot))
-    return kPfBadCallbackParam;
-  PfStateToken token{};
-  do {
-    if (BCryptGenRandom(nullptr, token.data(), static_cast<ULONG>(token.size()),
-                        BCRYPT_USE_SYSTEM_PREFERRED_RNG) < 0)
-      return kPfBadCallbackParam;
-  } while (std::all_of(token.begin(), token.end(), [](unsigned char byte) { return byte == 0; }) ||
-           g_pf_state_registry.find(token) != g_pf_state_registry.end());
-  try {
-    g_pf_state_registry.emplace(token, std::move(entry));
-  } catch (const std::bad_alloc&) {
-    return kPfBadCallbackParam;
-  }
-  std::memcpy(state, token.data(), token.size());
-  ++g_pf_get_current_state_calls;
-  return 0;
-}
-
-int32_t __cdecl are_param_states_identical(void *effect_ref,
-                                           const PfState *first,
-                                           const PfState *second,
-                                           uint8_t *same) {
-  if (effect_ref != &g_effect || !first || !second || !same)
-    return kPfBadCallbackParam;
-  PfStateToken first_token{}, second_token{};
-  std::memcpy(first_token.data(), first, first_token.size());
-  std::memcpy(second_token.data(), second, second_token.size());
-  std::lock_guard<std::mutex> lock(g_pf_state_registry_mutex);
-  const auto left = g_pf_state_registry.find(first_token);
-  const auto right = g_pf_state_registry.find(second_token);
-  if (!g_pf_state_effect_live || left == g_pf_state_registry.end() ||
-      right == g_pf_state_registry.end() || left->second.owner != effect_ref ||
-      right->second.owner != effect_ref ||
-      left->second.generation != g_pf_state_effect_generation ||
-      right->second.generation != g_pf_state_effect_generation)
-    return kPfBadCallbackParam;
-  *same = left->second.param_index == right->second.param_index &&
-          left->second.has_range == right->second.has_range &&
-          (!left->second.has_range ||
-           (left->second.start.value == right->second.start.value &&
-            left->second.start.scale == right->second.start.scale &&
-            left->second.duration.value == right->second.duration.value &&
-            left->second.duration.scale == right->second.duration.scale)) &&
-           left->second.canonical_snapshot == right->second.canonical_snapshot ? 1 : 0;
-  ++g_pf_are_states_identical_calls;
-  return 0;
 }
 
 int32_t __cdecl is_identical_param_checkout(void *effect_ref, int32_t index,
@@ -4119,40 +4004,6 @@ int32_t __cdecl param_key_index_to_time(void* effect_ref, int32_t index, int32_t
     return kPfInvalidIndex;
   *key_time = timeline->keys[key_index].time;
   *key_scale = timeline->keys[key_index].scale;
-  return 0;
-}
-
-bool valid_obsolete_param_state(void* effect_ref, const PfState* state) {
-  if (effect_ref != &g_effect || !state) return false;
-  PfStateToken token{};
-  std::memcpy(token.data(), state, token.size());
-  std::lock_guard<std::mutex> lock(g_pf_state_registry_mutex);
-  const auto found = g_pf_state_registry.find(token);
-  return g_pf_state_effect_live && found != g_pf_state_registry.end() &&
-      found->second.owner == effect_ref &&
-      found->second.generation == g_pf_state_effect_generation;
-}
-
-int32_t __cdecl get_current_param_state_obsolete(void* effect_ref, PfState* state) {
-  return get_current_param_state(effect_ref, -1, nullptr, nullptr, state);
-}
-
-int32_t __cdecl has_param_changed_obsolete(void* effect_ref, const PfState* state,
-                                           int32_t, uint8_t* changed) {
-  if (!changed || !valid_obsolete_param_state(effect_ref, state))
-    return kPfBadCallbackParam;
-  *changed = 1;
-  return 0;
-}
-
-int32_t __cdecl have_inputs_changed_over_time_span_obsolete(
-    void* effect_ref, const PfState* state, const PfTime* start,
-    const PfTime* duration, uint8_t* changed) {
-  if (!changed || ((!start) != (!duration)) ||
-      (start && (start->scale == 0 || duration->scale == 0)) ||
-      !valid_obsolete_param_state(effect_ref, state))
-    return kPfBadCallbackParam;
-  *changed = 1;
   return 0;
 }
 
@@ -4466,7 +4317,7 @@ bool layer_active_at_time(std::size_t index, const AegpTime& time) {
 
 int32_t __cdecl get_effect_camera(
     void* effect, const AegpTime* comp_time, void** camera_layer) {
-  if (effect != &g_effect || !g_pf_state_effect_live || !comp_time || !camera_layer ||
+  if (effect != &g_effect || !effect_is_live() || !comp_time || !camera_layer ||
       !valid_comp_time(*comp_time)) return 4;
   void* result = nullptr;
   if (g_aegp_active_camera_layer_index >= 0) {
@@ -4481,7 +4332,7 @@ int32_t __cdecl get_effect_camera(
 int32_t __cdecl get_effect_camera_matrix(void* effect, const AegpTime* comp_time,
     AegpMatrix4* camera_matrix, double* distance_to_image_plane,
     int16_t* image_plane_width, int16_t* image_plane_height) {
-  if (effect != &g_effect || !g_pf_state_effect_live || !comp_time ||
+  if (effect != &g_effect || !effect_is_live() || !comp_time ||
       !camera_matrix || !distance_to_image_plane || !image_plane_width ||
       !image_plane_height || !valid_comp_time(*comp_time)) return 4;
   const int32_t width = g_full_resolution_width > 0
@@ -8849,7 +8700,9 @@ void report(const char* status, int32_t global_error, int32_t params_error,
   c.update_params_ui_advertised = g_update_params_ui_advertised; c.query_dynamic_flags_advertised = g_query_dynamic_flags_advertised;
   c.conditional_ui_selectors_dispatched = g_conditional_ui_selectors_dispatched; c.update_params_ui_error = g_update_params_ui_error;
   c.query_dynamic_flags_error = g_query_dynamic_flags_error; c.update_param_ui_calls = g_update_param_ui_calls;
-  c.pf_get_current_state_calls = g_pf_get_current_state_calls; c.pf_are_states_identical_calls = g_pf_are_states_identical_calls;
+  const auto pf_state_stats = aexcompat::pf_state_runtime::pf_state_statistics();
+  c.pf_get_current_state_calls = pf_state_stats.get_current_state_calls;
+  c.pf_are_states_identical_calls = pf_state_stats.are_states_identical_calls;
   c.suite_leases_balanced = suite_leases_balanced(); c.user_changed_param_requested = g_user_changed_param_requested;
   c.user_changed_param_slot = g_user_changed_param_slot; c.user_changed_param_error = g_user_changed_param_error;
   c.user_changed_parameters_json = requested_parameters_json(g_user_changed_parameters);
@@ -9237,7 +9090,7 @@ bool verify_pf_param_utils_suite3() {
   write<int32_t>(param.raw, kParamType, param.type);
   write<int32_t>(param.raw, 56, 42);
   g_params.push_back(param);
-  reset_pf_state_effect_lifetime(&g_effect, true);
+  reset_effect_lifetime(true);
 
   auto active = param.raw;
   auto local = active;
@@ -9328,35 +9181,18 @@ bool verify_pf_param_utils_suite3() {
           kPfBadCallbackParam && same == 0x5a &&
       are_param_states_identical(&g_effect, &bit_flip, &first, &same) ==
           kPfBadCallbackParam && same == 0x5a;
-  {
-    std::lock_guard<std::mutex> lock(g_pf_state_registry_mutex);
-    PfStateToken token{};
-    std::memcpy(token.data(), &first, token.size());
-    const auto found_entry = g_pf_state_registry.find(token);
-    ok = ok && found_entry != g_pf_state_registry.end();
-    if (found_entry != g_pf_state_registry.end()) found_entry->second.owner = &g_layer;
-  }
+  ok = ok && corrupt_state_owner_for_test(first, &g_layer);
   ok = ok && are_param_states_identical(&g_effect, &first, &second, &same) ==
           kPfBadCallbackParam && same == 0x5a;
-  reset_pf_state_effect_lifetime(&g_effect, true);
+  reset_effect_lifetime(true);
   ok = ok && are_param_states_identical(&g_effect, &first, &second, &same) ==
           kPfBadCallbackParam && same == 0x5a;
-  {
-    std::lock_guard<std::mutex> lock(g_pf_state_registry_mutex);
-    PfStateRegistryEntry filler{&g_effect, g_pf_state_effect_generation, 1,
-                                false, {}, {}, {}};
-    for (std::size_t i = 0; i < kMaxPfStateRegistryEntries; ++i) {
-      PfStateToken token{};
-      std::memcpy(token.data(), &i, sizeof(i));
-      token.back() = 0xa5;
-      g_pf_state_registry.emplace(token, filler);
-    }
-  }
+  fill_registry_to_capacity_for_test(&g_effect, 1);
   changed = sentinel;
   ok = ok && get_current_param_state(&g_effect, 1, nullptr, nullptr, &changed) ==
           kPfBadCallbackParam && std::memcmp(&changed, &sentinel, sizeof(changed)) == 0;
-  reset_pf_state_effect_lifetime(&g_effect, false);
-  ok = ok && g_pf_state_registry.empty() &&
+  reset_effect_lifetime(false);
+  ok = ok && live_state_count() == 0 &&
       get_current_param_state(&g_effect, 1, nullptr, nullptr, &changed) ==
           kPfBadCallbackParam && release_suite("PF Param Utils Suite", 3) == 0;
   g_update_params_ui_active = false;
@@ -9826,10 +9662,10 @@ bool verify_legacy_effect_compat_suites() {
 
 bool verify_aegp_get_effect_camera_case(bool smart_case) {
   const int32_t saved_camera_index = g_aegp_active_camera_layer_index;
-  const bool saved_effect_live = g_pf_state_effect_live;
+  const bool saved_effect_live = effect_is_live();
   const auto saved_in_points = g_aegp_layer_in_points;
   const auto saved_durations = g_aegp_layer_durations;
-  reset_pf_state_effect_lifetime(&g_effect, true);
+  reset_effect_lifetime(true);
   g_aegp_active_camera_layer_index = -1;
 
   const AegpTime active_time{smart_case ? 45 : 15, 30};
@@ -9859,21 +9695,21 @@ bool verify_aegp_get_effect_camera_case(bool smart_case) {
   ok = ok && get_effect_camera(&g_effect, &after_out, &camera) == 0 && camera == nullptr &&
       get_effect_camera(&g_effect, &active_time, nullptr) != 0;
   camera = unchanged;
-  reset_pf_state_effect_lifetime(&g_effect, false);
+  reset_effect_lifetime(false);
   ok = ok && get_effect_camera(&g_effect, &active_time, &camera) != 0 && camera == unchanged;
 
   g_aegp_active_camera_layer_index = saved_camera_index;
   g_aegp_layer_in_points = saved_in_points;
   g_aegp_layer_durations = saved_durations;
-  reset_pf_state_effect_lifetime(&g_effect, saved_effect_live);
+  reset_effect_lifetime(saved_effect_live);
   return ok;
 }
 
 bool verify_aegp_get_effect_camera_matrix_case(bool smart_case) {
-  const bool saved_effect_live = g_pf_state_effect_live;
+  const bool saved_effect_live = effect_is_live();
   const int32_t saved_width = g_full_resolution_width;
   const int32_t saved_height = g_full_resolution_height;
-  reset_pf_state_effect_lifetime(&g_effect, true);
+  reset_effect_lifetime(true);
   g_full_resolution_width = smart_case ? 1920 : 640;
   g_full_resolution_height = smart_case ? 1080 : 480;
   const AegpTime time{smart_case ? 45 : 15, 30};
@@ -9899,13 +9735,13 @@ bool verify_aegp_get_effect_camera_matrix_case(bool smart_case) {
       distance == -2.0 && width == -2 && height == -2 &&
       get_effect_camera_matrix(&g_effect, &invalid_time, &matrix, &distance,
       &width, &height) != 0 && std::memcmp(&matrix, &sentinel, sizeof(matrix)) == 0;
-  reset_pf_state_effect_lifetime(&g_effect, false);
+  reset_effect_lifetime(false);
   ok = ok && get_effect_camera_matrix(&g_effect, &time, &matrix, &distance,
       &width, &height) != 0 && std::memcmp(&matrix, &sentinel, sizeof(matrix)) == 0;
 
   g_full_resolution_width = saved_width;
   g_full_resolution_height = saved_height;
-  reset_pf_state_effect_lifetime(&g_effect, saved_effect_live);
+  reset_effect_lifetime(saved_effect_live);
   return ok;
 }
 
@@ -10427,6 +10263,12 @@ aexcompat::worker_render_report::ClassicSubsystemDiagnostics capture_classic_sub
 }
 
 int worker_main_impl(int argc, wchar_t **argv) {
+  aexcompat::pf_state_runtime::configure_host_hooks({
+      []() -> void* { return &g_effect; },
+      [](int32_t index, bool allow_groups) -> bool {
+        return valid_param_utils_index(index, allow_groups);
+      },
+      &capture_pf_parameter_state});
   configure_host_hooks({
       []() -> void* { return &g_effect; },
       []() -> std::size_t { return g_params.size(); },
@@ -11619,7 +11461,7 @@ int worker_main_impl(int argc, wchar_t **argv) {
   uint32_t about_exception_code{};
   std::string about_message;
   std::cerr << "stage:global_setup_begin\n" << std::flush;
-  reset_pf_state_effect_lifetime(&g_effect, true);
+  reset_effect_lifetime(true);
   g_global_setup_active = true;
   uint32_t global_setup_exception_code{};
   const int32_t global_error = invoke_entry_seh(

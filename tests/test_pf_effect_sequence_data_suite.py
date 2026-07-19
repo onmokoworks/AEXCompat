@@ -8,6 +8,8 @@ SOURCES = (
     ROOT / "minihost" / "src" / "l2_main.cpp",
     ROOT / "minihost" / "src" / "worker_pf_suites_internal.hpp",
     ROOT / "minihost" / "src" / "worker_pf_suites.cpp",
+    ROOT / "minihost" / "src" / "worker_pf_state_runtime.hpp",
+    ROOT / "minihost" / "src" / "worker_pf_state_runtime.cpp",
 )
 SCRIPT = ROOT / "tools" / "build-pf-effect-sequence-data-abi-probe.ps1"
 REPORT = ROOT / "target" / "pf-effect-sequence-data-abi-probe-build" / "pf-effect-sequence-data-abi.json"

@@ -8,6 +8,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "minihost/src/l2_main.cpp"
+STATE_SOURCE = ROOT / "minihost/src/worker_pf_state_runtime.cpp"
 SDK_ROOT = os.environ.get("AFTER_EFFECTS_SDK_ROOT")
 SDK = Path(SDK_ROOT) / "Examples" / "Headers" / "AE_EffectSuitesOld.h" if SDK_ROOT else None
 
@@ -44,7 +45,7 @@ def test_sdk_freezes_param_utils_suite1_at_acquisition_version_2_with_ten_slots(
 
 
 def test_suite1_has_a_distinct_typed_old_abi_and_all_ten_contract_slots():
-    source = SOURCE.read_text(encoding="utf-8")
+    source = SOURCE.read_text(encoding="utf-8") + "\n" + STATE_SOURCE.read_text(encoding="utf-8")
     assert '{"PF Param Utils Suite", 2, &g_param_utils_suite1}' in source
     assert "struct ParamUtilsSuite1" in source
     assert "sizeof(ParamUtilsSuite1) == 10 * sizeof(void*)" in source
@@ -59,8 +60,8 @@ def test_suite1_has_a_distinct_typed_old_abi_and_all_ten_contract_slots():
     ]
     assert re.findall(r"&(\w+)", initializer) == expected
     assert "*changed = 1;" in source
-    assert "valid_obsolete_param_state(effect_ref, state)" in source
-    assert "found->second.owner == effect_ref" in source
+    assert "valid_obsolete_param_state(owner, state)" in source
+    assert "found->second.owner == owner" in source
 
 
 def test_suite1_and_suite3_native_contracts_pass_together():

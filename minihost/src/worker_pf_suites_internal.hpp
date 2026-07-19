@@ -216,15 +216,3 @@ struct PfBatchSamplingSuite1 {
 extern PfBatchSamplingSuite1 g_batch_sampling_suite1;
 
 extern std::array<void*, 7> g_fill_matte_suite2;
-
-using PfConstHandle = const void* const*;
-using GetEffectSequenceData = int32_t(__cdecl*)(void*, PfConstHandle*);
-struct PfEffectSequenceDataSuite1 {
-  GetEffectSequenceData get_effect_sequence_data;
-};
-extern PfEffectSequenceDataSuite1 g_effect_sequence_data_suite1;
-void invalidate_effect_sequence(void* effect_ref);
-bool publish_effect_sequence(void* effect_ref, void* sequence_handle);
-uint64_t effect_sequence_publications();
-uint64_t effect_sequence_invalidations();
-std::size_t live_effect_sequence_count();

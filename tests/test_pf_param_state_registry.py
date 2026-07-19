@@ -5,6 +5,11 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "minihost" / "src" / "l2_main.cpp"
+STATE_SOURCE = ROOT / "minihost" / "src" / "worker_pf_state_runtime.cpp"
+
+
+def source_text():
+    return STATE_SOURCE.read_text(encoding="utf-8") + "\n" + SOURCE.read_text(encoding="utf-8")
 
 
 def _workers():
@@ -20,7 +25,7 @@ def _workers():
 
 
 def test_pf_state_is_an_opaque_bounded_registry_token():
-    source = SOURCE.read_text(encoding="utf-8")
+    source = source_text()
     for marker in (
         "BCryptGenRandom(nullptr, token.data()",
         "BCRYPT_USE_SYSTEM_PREFERRED_RNG",
@@ -30,7 +35,7 @@ def test_pf_state_is_an_opaque_bounded_registry_token():
         "g_pf_state_effect_generation",
         "g_pf_state_effect_live",
         "purge_pf_state_registry_locked(nullptr)",
-        "reset_pf_state_effect_lifetime(&g_effect, true)",
+        "reset_effect_lifetime(true)",
         "invoke_global_setdown(entry",
     ):
         assert marker in source
@@ -42,13 +47,13 @@ def test_pf_state_is_an_opaque_bounded_registry_token():
 
 
 def test_pf_state_comparison_fails_closed_and_preserves_outputs():
-    source = SOURCE.read_text(encoding="utf-8")
+    source = source_text()
     comparison = source.split("int32_t __cdecl are_param_states_identical", 1)[1].split(
-        "int32_t __cdecl is_identical_param_checkout", 1
+        "int32_t __cdecl get_current_param_state_obsolete", 1
     )[0]
     assert "g_pf_state_registry.find(first_token)" in comparison
     assert "g_pf_state_registry.find(second_token)" in comparison
-    assert "left->second.owner != effect_ref" in comparison
+    assert "left->second.owner != owner" in comparison
     assert "left->second.generation != g_pf_state_effect_generation" in comparison
     assert "!g_pf_state_effect_live" in comparison
     assert comparison.index("return kPfBadCallbackParam") < comparison.index("*same =")
