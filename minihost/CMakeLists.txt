@@ -45,6 +45,7 @@ set(AEXCOMPAT_WORKER_RUNTIME_CORE_SOURCES
     src/worker_smart_runtime.cpp
     src/worker_smart_execution.cpp
     src/worker_smart_setup.cpp
+    src/worker_smart_dispatch.cpp
     src/worker_smart_finalize.cpp
     src/worker_mask_runtime.cpp
     src/worker_mask_selftests.cpp

@@ -69,6 +69,7 @@
 #include "worker_smart_runtime.hpp"
 #include "worker_smart_execution.hpp"
 #include "worker_smart_setup.hpp"
+#include "worker_smart_dispatch.hpp"
 #include "worker_smart_finalize.hpp"
 #include "worker_mask_runtime.hpp"
 #include "worker_mask_selftests.hpp"
@@ -5399,159 +5400,20 @@ SmartResult smart_render_runtime(EffectEntry entry, std::array<std::byte, kInSiz
     return result;
   }
 
-  std::array<std::byte, 8> gpu_setup_input{}, gpu_setup_output{};
-  std::array<std::byte, 16> gpu_setup_extra{};
-  const int32_t gpu_framework = (fixture_gpu_negotiation || directx_gpu_negotiation) ? 4 :
-      (opencl_gpu_negotiation ? 1 : 3);
-  const bool use_cuda = gpu_negotiation && gpu_framework == 3;
-  const bool use_opencl = gpu_negotiation && gpu_framework == 1;
-  const bool use_directx = gpu_negotiation && gpu_framework == 4;
-  if (gpu_negotiation) capture_module_audit();
-  const bool gpu_context_started = gpu_transport::begin_backend_context(
-      gpu_framework, gpu_device_index);
-  if (gpu_negotiation) {
-    write<int32_t>(gpu_setup_input, 0, gpu_framework);
-    write<uint32_t>(gpu_setup_input, 4, gpu_device_index);
-    write<void*>(gpu_setup_extra, 0, gpu_setup_input.data()); write<void*>(gpu_setup_extra, 8, gpu_setup_output.data());
-    std::cerr << "stage:gpu_device_setup_begin\n" << std::flush;
-    result.gpu_setup_error = gpu_context_started
-        ? entry(kGpuDeviceSetup, input.data(), command_output.data(), params.data(),
-                nullptr, gpu_setup_extra.data())
-        : -6;
-    std::cerr << "stage:gpu_device_setup_end error=" << result.gpu_setup_error << "\n" << std::flush;
-  }
-
-  std::array<std::byte, 64> pre_input{}; std::array<std::byte, 56> pre_output{};
-  std::array<std::byte, 16> pre_callbacks{}; std::array<std::byte, 24> pre_extra{};
-  const std::array<int32_t, 4> expected_request = partial_output_request
-      ? std::array<int32_t, 4>{3, 2, 11, 8}
-      : std::array<int32_t, 4>{0, 0, width, height};
-  std::memcpy(pre_input.data(), expected_request.data(), sizeof(expected_request));
-  write<int16_t>(pre_input, 44, float32 ? 32 : (deep16 ? 16 : 8));
-  if (gpu_negotiation) {
-    write<void*>(pre_input, 48, read<void*>(gpu_setup_output, 0));
-    write<int32_t>(pre_input, 56, gpu_framework);
-    write<uint32_t>(pre_input, 60, gpu_device_index);
-  }
-  write<void*>(pre_callbacks, 0, reinterpret_cast<void*>(&pre_checkout_layer));
-  write<void*>(pre_callbacks, 8, reinterpret_cast<void*>(&guid_mix_in_ptr));
-  write<void*>(pre_extra, 0, pre_input.data()); write<void*>(pre_extra, 8, pre_output.data());
-  write<void*>(pre_extra, 16, pre_callbacks.data());
-  smart_state().input_checkout_request.fill(-1);
-  smart_state().map_checkout_request.fill(-1);
-  smart_state().secondary_checkout_id = -1;
-  smart_state().width = width;
-  smart_state().height = height;
-  smart_state().rowbytes = rowbytes;
-  smart_state().pixel_format = float32 ? "argb32f" :
-      (deep16 ? "argb16" : "argb8");
-  std::cerr << "stage:smart_pre_render_begin\n" << std::flush;
-  result.pre_error = (!gpu_negotiation || result.gpu_setup_error == 0)
-      ? entry(kSmartPreRender, input.data(), command_output.data(), params.data(),
-              nullptr, pre_extra.data())
-      : -1;
-  std::cerr << "stage:smart_pre_render_end error=" << result.pre_error << "\n" << std::flush;
-  automatic_checkin_pre_render_params();
-  const aexcompat::render::SmartOutputBounds smart_bounds =
-      aexcompat::render::prepare_smart_output_bounds(pre_output.data(), pre_output.size(),
-                                                      pixel_bytes);
-  const auto& result_rect = smart_bounds.result_rect;
-  const auto& max_result_rect = smart_bounds.max_result_rect;
-  result.result_rect = result_rect;
-  result.max_result_rect = max_result_rect;
-  result.rects_valid = result.pre_error == 0 && smart_bounds.valid;
-  if (result.rects_valid) {
-    if (!guarded.reset(static_cast<std::size_t>(smart_bounds.rowbytes) * smart_bounds.height)) {
-      result.rects_valid = false;
-      result.pre_error = -3;
-    }
-    destination = guarded.data();
-    if (!aexcompat::render::prepare_world_layout(
-            output_world, {(deep16 || float32) ? 1 : 0, pixel_bytes, smart_bounds.width,
-                           smart_bounds.height, smart_bounds.rowbytes}, destination) ||
-        !dispatch_worlds.register_world(output_world.data(), dispatch_pixel_format))
-      result.rects_valid = false;
-    write<int32_t>(input, 276, -max_result_rect[0]);
-    write<int32_t>(input, 280, -max_result_rect[1]);
-    result.output_width = smart_bounds.width;
-    result.output_height = smart_bounds.height;
-    result.output_rowbytes = smart_bounds.rowbytes;
-  }
-  result.roi_contract_valid = !partial_output_request ||
-      (smart_state().input_checkout_request == expected_request &&
-       smart_state().map_checkout_request == expected_request &&
-       result_rect == expected_request && max_result_rect == expected_request);
-  result.gpu_render_possible = (read<uint16_t>(pre_output, 34) & 0x2u) != 0;
-  result.checkout_time = smart_state().checkout_time;
-  result.checkout_time_step = smart_state().checkout_time_step;
-  result.checkout_time_scale = smart_state().checkout_time_scale;
-
-  std::array<std::byte, 72> smart_input{}; std::array<std::byte, 24> callbacks{};
-  std::array<std::byte, 16> smart_extra{};
-  // PF_PreRenderOutput::pre_render_data -> PF_SmartRenderInput::pre_render_data.
-  write<void*>(smart_input, 48, read<void*>(pre_output, 40));
-  if (gpu_negotiation) {
-    write<void*>(smart_input, 56, read<void*>(gpu_setup_output, 0));
-    write<int32_t>(smart_input, 64, gpu_framework);
-    write<uint32_t>(smart_input, 68, gpu_device_index);
-  }
-  write<void*>(callbacks, 0, reinterpret_cast<void*>(&checkout_pixels));
-  write<void*>(callbacks, 8, reinterpret_cast<void*>(&checkin_pixels));
-  write<void*>(callbacks, 16, reinterpret_cast<void*>(&checkout_output));
-  write<void*>(smart_extra, 0, smart_input.data()); write<void*>(smart_extra, 8, callbacks.data());
-  smart_state().input_world = missing_input ? nullptr : input_world.data();
-  smart_state().output_world = output_world.data();
-  if (gpu_negotiation) {
-    if ((!missing_input && !dispatch_worlds.register_world(input_world.data(), kPixelFormatGpuBgra128)) ||
-        !dispatch_worlds.register_world(output_world.data(), kPixelFormatGpuBgra128))
-      result.pre_error = 4;
-  }
-  const int32_t render_selector = gpu_negotiation && result.gpu_render_possible ? kSmartRenderGpu : kSmartRender;
-  result.gpu_render_dispatched = render_selector == kSmartRenderGpu;
-  CudaRenderTransport cuda_transport;
-  const bool cuda_transport_ready = !result.gpu_render_dispatched ||
-      (!use_cuda && !use_opencl && !use_directx) ||
-      prepare_cuda_render_transport(smart_state().input_world,
-                                    smart_state().output_world,
-                                    cuda_transport);
-  std::cerr << "stage:" << (result.gpu_render_dispatched ? "smart_render_gpu" : "smart_render_cpu")
-            << "_begin\n" << std::flush;
-  if (result.pre_error == 0 && cuda_transport_ready) {
-    if (gpu_negotiation) capture_module_audit();
-    result.selector_error = entry(render_selector, input.data(), command_output.data(),
-                                  params.data(), nullptr, smart_extra.data());
-    result.render_error = result.selector_error;
-  } else {
-    result.render_error = result.pre_error == 0 ? -6 : -1;
-  }
-  if (result.gpu_render_dispatched && (use_cuda || use_opencl || use_directx) &&
-      cuda_transport_ready &&
-      !finish_cuda_render_transport(cuda_transport) && result.render_error == 0)
-    result.render_error = -6;
-  std::cerr << "stage:" << (result.gpu_render_dispatched ? "smart_render_gpu" : "smart_render_cpu")
-            << "_end error=" << result.render_error << "\n" << std::flush;
-  if (gpu_negotiation && result.gpu_setup_error == 0) {
-    std::array<std::byte, 16> setdown_input{}; std::array<std::byte, 8> setdown_extra{};
-    write<void*>(setdown_input, 0, read<void*>(gpu_setup_output, 0));
-    write<int32_t>(setdown_input, 8, gpu_framework);
-    write<uint32_t>(setdown_input, 12, gpu_device_index);
-    write<void*>(setdown_extra, 0, setdown_input.data());
-    capture_module_audit();
-    std::cerr << "stage:gpu_device_setdown_begin\n" << std::flush;
-    result.gpu_setdown_error = invoke_entry_seh(
-        entry, kGpuDeviceSetdown, input.data(), command_output.data(), params.data(),
-        nullptr, setdown_extra.data(), &result.gpu_setdown_exception_code);
-    std::cerr << "stage:gpu_device_setdown_end error=" << result.gpu_setdown_error << "\n" << std::flush;
-  }
-  if (gpu_negotiation) capture_module_audit();
-  if (gpu_negotiation && gpu_context_started &&
-      !gpu_transport::end_backend_context(gpu_framework) &&
-      result.gpu_setdown_error == 0)
-    result.gpu_setdown_error = -6;
+  aexcompat::worker_runtime::smart_dispatch::State dispatch_state;
+  if (!aexcompat::worker_runtime::smart_dispatch::dispatch(
+          {entry, &input, &command_output, &plan, &parameter_state, &input_world,
+           &output_world, &dispatch_worlds, &guarded, &destination,
+           dispatch_pixel_format},
+          {&guarded_effect_call, &capture_module_audit,
+           reinterpret_cast<void*>(&guid_mix_in_ptr),
+           &automatic_checkin_pre_render_params},
+          result, dispatch_state))
+    return result;
   if (!aexcompat::worker_runtime::smart_finalize::finalize(
           {entry, &input, &command_output, &parameter_state, &output_world,
            &lifecycle, &source, &guarded, destination, external_output, width,
-           height, rowbytes, pixel_bytes, &pre_output},
+           height, rowbytes, pixel_bytes, &dispatch_state.pre_output},
           {&close_render_ui_context, &end_render_lifecycle, &dump_world_snapshot,
            &record_output_checksum_detail, &sha256_bytes,
            +[] { return g_render_ui_context_active; }}, result))
