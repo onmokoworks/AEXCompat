@@ -20053,13 +20053,16 @@ SmartResult smart_render_once(EffectEntry entry, std::array<std::byte, kInSize>&
   // Checkout view: same pixels and dimensions as the base input world, but
   // its extent_hint is rewritten by pre_checkout_layer to the intersected
   // checkout answer, so the shared base world never carries checkout state.
+  // Views are deliberately NOT registered as dispatch worlds: they alias the
+  // base world's data/dimensions, so a second registration would make the
+  // copied-struct fallback in resolve_dispatch_world_format ambiguous. An
+  // unregistered view resolves through that fallback to the base entry.
   std::array<std::byte, 120> input_checkout_view = input_world;
   const int32_t dispatch_pixel_format = float32 ? kPixelFormatArgb128 :
       (deep16 ? kPixelFormatArgb64 : kPixelFormatArgb32);
   DispatchWorldFormatScope dispatch_worlds;
   if (!dispatch_worlds.register_world(input_world.data(), dispatch_pixel_format) ||
-      !dispatch_worlds.register_world(output_world.data(), dispatch_pixel_format) ||
-      !dispatch_worlds.register_world(input_checkout_view.data(), dispatch_pixel_format)) return result;
+      !dispatch_worlds.register_world(output_world.data(), dispatch_pixel_format)) return result;
 
   std::vector<unsigned char> map_pixels; std::array<std::byte, 120> map_world{};
   std::array<std::byte, 120> map_checkout_view{};
@@ -20077,7 +20080,6 @@ SmartResult smart_render_once(EffectEntry entry, std::array<std::byte, kInSize>&
     write_rect(map_world.data() + 44, g_smart_map_width, g_smart_map_height);
     if (!dispatch_worlds.register_world(map_world.data(), kPixelFormatArgb32)) return result;
     map_checkout_view = map_world;
-    if (!dispatch_worlds.register_world(map_checkout_view.data(), kPixelFormatArgb32)) return result;
     g_smart_map_world = map_world.data();
   }
 
@@ -20121,7 +20123,6 @@ SmartResult smart_render_once(EffectEntry entry, std::array<std::byte, kInSize>&
     if (!dispatch_worlds.register_world(world.data(), dispatch_pixel_format)) return result;
     auto& view = hosted_checkout_views[layer_index];
     view = world;
-    if (!dispatch_worlds.register_world(view.data(), dispatch_pixel_format)) return result;
     const int32_t requested_time = temporal_context ? 42 : external_current_time;
     const uint32_t requested_scale = temporal_context ? 24 : external_time_scale;
     if (!layer.timed || same_rational_time(layer.time, layer.time_scale,

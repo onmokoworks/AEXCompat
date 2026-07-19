@@ -167,3 +167,18 @@ base world を返す (従来動作)。view の GpuBgra128 登録も撤回。空�
 pixel denial は GPU mode でも維持。extent_hint による checkout 答えの伝達は
 CPU 経路の契約とし、GPU 経路の geometry 伝達は PR2 以降で transport の
 promote と併せて扱う。
+
+## 2026-07-19 訂正: view は dispatch world として登録しない (PR #83 Codex P2)
+
+観察 (Codex review finding): `resolve_dispatch_world_format` の copied-struct
+fallback は (data, rowbytes, width, height) の内容一致で登録済み world を探し、
+**別 world pointer で2件一致すると ambiguous として error 4 を返す**
+(l2_main.cpp の fallback ループ、`unique->world != entry.world` 判定)。view は
+base とまったく同じ data/寸法を持つため、view を別エントリとして登録すると、
+効果が world struct を値コピーして suite (Pixel Data / World Transform) に渡す
+既存の正当な経路が全て ambiguous 化して壊れる。
+
+訂正: view (input/map/hosted とも) は登録しない。未登録の view が suite に
+渡された場合は exact-pointer lookup を外れて content fallback に落ち、base
+エントリに一意解決される — これは copied-struct fallback の設計どおりの経路
+であり、view はまさに base のコピーなので正しい形式に解決される。
