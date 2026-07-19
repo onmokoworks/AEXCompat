@@ -283,6 +283,15 @@ def test_owner_reply_after_ack_reblocks() -> None:
     assert "OWNER-INLINE id=12" in out
 
 
+def test_same_second_owner_message_and_reply_blocks() -> None:
+    # Second-resolution race, matching the review/top-level paths: a reply in
+    # the same second as the owner's message may not have seen it; fail closed.
+    payload = [_inline("onmokoworks"),
+               _inline(ME, id=11, in_reply_to_id=9,
+                       created_at="2026-07-18T19:20:00Z", body="対応済み")]
+    assert "OWNER-INLINE" in _call("owner_inline_unresolved", payload, ME, NO_CLEAR)
+
+
 def test_session_own_reply_alone_does_not_block() -> None:
     # A thread that contains only this session's ack reply has no owner message.
     payload = [_inline(ME, in_reply_to_id=8, body="対応済み")]

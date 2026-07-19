@@ -195,9 +195,11 @@ owner_clearances() {
 # review-comments array). Args: $1 = this session's login; $2 = clearances JSON.
 # A thread is keyed by its root (.in_reply_to_id // .id). Owner messages exclude
 # ONLY $me's replies (the ack channel); a non-reply inline comment from $me is
-# genuine feedback. The thread blocks iff its last owner message is newer than
-# $me's last reply in that thread and the author has no later approval/dismissal.
-# An owner replying again after an ack ("still not fixed") re-blocks.
+# genuine feedback. The thread blocks iff its last owner message is at or after
+# $me's last reply in that thread (>= — GitHub timestamps are second-resolution,
+# so a same-second owner message may not have been seen by the reply and fails
+# closed, matching the review/top-level paths) and the author has no later
+# approval/dismissal. An owner replying again after an ack re-blocks.
 owner_inline_unresolved() {
   jq -r --arg me "$1" --argjson clr "$2" --argjson owner "$OWNER_LOGINS" '
     group_by(.in_reply_to_id // .id)[]
@@ -207,7 +209,7 @@ owner_inline_unresolved() {
     | ( [ .[] | select(.user.login == $me and (.in_reply_to_id // null) != null)
           | .created_at ] | max // "" ) as $ack
     | ($msgs | max_by(.created_at)) as $last
-    | select($last.created_at > $ack)
+    | select($last.created_at >= $ack)
     | $last | select( ($clr[.user.login] // "") == "" or .created_at > $clr[.user.login] )
     | "OWNER-INLINE id=\(.id) \(.path):\(.line // .original_line): \((.body | split("\n")[0]))"'
 }
