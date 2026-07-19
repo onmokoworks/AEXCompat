@@ -6,9 +6,13 @@ import source_owners
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SOURCE = source_owners.L2_MAIN
+
+
 def source_text():
-    return SOURCE.read_text(encoding="utf-8")
+    # Suite structs, tables, and callbacks live in the worker-runtime owner
+    # set; the "not in" checks below are scoped to regex slices of specific
+    # functions, so the growable contract stays safe here.
+    return source_owners.worker_text()
 
 
 def worker():
@@ -42,7 +46,8 @@ def test_pf_pixel_data_suite_v1_v2_match_sdk_abi():
 
 
 def test_pf_pixel_data_suite_versions_are_acquirable_by_sdk_name():
-    text = source_text()
+    # The suite catalog entries stay in l2_main.
+    text = source_owners.L2_MAIN.read_text(encoding="utf-8")
     for version in (1, 2):
         assert f'{{"PF Pixel Data Suite", {version}, &g_pixel_data_suite{version}}}' in text
 
@@ -76,7 +81,7 @@ def test_pf_pixel_data_depths_use_registry_and_fail_closed():
 def test_pf_pixel_data_gpu_does_not_accept_cpu_float_worlds_by_alias():
     text = source_text()
     gpu = re.search(
-        r"int32_t __cdecl get_pixel_data_float_gpu\(.*?\n\}", text, re.DOTALL
+        r"int32_t __cdecl get_pixel_data_float_gpu\([^)]*\) \{.*?\n\}", text, re.DOTALL
     ).group(0)
     assert "kPixelFormatGpuBgra128" in gpu
     assert "kPixelFormatArgb128" not in gpu

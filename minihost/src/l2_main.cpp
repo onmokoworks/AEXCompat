@@ -74,6 +74,7 @@
 #include "worker_custom_selftest_routing.hpp"
 #include "worker_host_guard_selftests.hpp"
 #include "worker_aegp_utility_suite.hpp"
+#include "worker_pf_pixel_data_suite.hpp"
 #include "worker_smart_runtime.hpp"
 #include "worker_smart_execution.hpp"
 #include "worker_smart_setup.hpp"
@@ -1989,135 +1990,9 @@ bool world_lifetimes_balanced() {
   return aexcompat::world_registry::lifetimes_balanced();
 }
 
-int32_t get_typed_pixel_data(void* world, void* pixels0, void** output,
-                             int32_t required_format, int32_t pixel_bytes) {
-  if (!output) return 4;
-  *output = nullptr;
-  if (!world) return 4;
-  DispatchWorldFormat resolved{};
-  if (!resolve_dispatch_world_format(world, resolved)) return 4;
-  const int32_t format = resolved.pixel_format;
-  const int32_t rowbytes = resolved.rowbytes;
-  const int32_t width = resolved.width;
-  const int32_t height = resolved.height;
-  if (format != required_format) return 0;
-  if (pixel_bytes <= 0 || width <= 0 || height <= 0 ||
-      width > 4096 || height > 4096 ||
-      rowbytes == (std::numeric_limits<int32_t>::min)() ||
-      std::abs(rowbytes) < width * pixel_bytes) return 4;
-  void* data = pixels0 ? pixels0 : resolved.data;
-  if (!data) return 4;
-  *output = data;
-  return 0;
-}
+// The PF Pixel Data suites and their verify live in
+// worker_pf_pixel_data_suite.cpp.
 
-int32_t __cdecl get_pixel_data8(void* world, void* pixels0, void** output) {
-  return get_typed_pixel_data(world, pixels0, output, kPixelFormatArgb32, 4);
-}
-
-int32_t __cdecl get_pixel_data16(void* world, void* pixels0, void** output) {
-  return get_typed_pixel_data(world, pixels0, output, kPixelFormatArgb64, 8);
-}
-
-int32_t __cdecl get_pixel_data_float(void* world, void* pixels0, void** output) {
-  return get_typed_pixel_data(world, pixels0, output, kPixelFormatArgb128, 16);
-}
-
-int32_t __cdecl get_pixel_data_float_gpu(void* world, void** output) {
-  return get_typed_pixel_data(world, nullptr, output, kPixelFormatGpuBgra128, 16);
-}
-
-struct PixelDataSuite1 {
-  decltype(&get_pixel_data8) get_pixel_data8;
-  decltype(&get_pixel_data16) get_pixel_data16;
-  decltype(&get_pixel_data_float) get_pixel_data_float;
-};
-
-struct PixelDataSuite2 {
-  decltype(&get_pixel_data8) get_pixel_data8;
-  decltype(&get_pixel_data16) get_pixel_data16;
-  decltype(&get_pixel_data_float) get_pixel_data_float;
-  decltype(&get_pixel_data_float_gpu) get_pixel_data_float_gpu;
-};
-
-static_assert(sizeof(PixelDataSuite1) == 3 * sizeof(void*));
-static_assert(offsetof(PixelDataSuite1, get_pixel_data8) == 0 * sizeof(void*));
-static_assert(offsetof(PixelDataSuite1, get_pixel_data16) == 1 * sizeof(void*));
-static_assert(offsetof(PixelDataSuite1, get_pixel_data_float) == 2 * sizeof(void*));
-static_assert(sizeof(PixelDataSuite2) == 4 * sizeof(void*));
-static_assert(offsetof(PixelDataSuite2, get_pixel_data_float_gpu) == 3 * sizeof(void*));
-
-PixelDataSuite1 g_pixel_data_suite1{
-    &get_pixel_data8, &get_pixel_data16, &get_pixel_data_float};
-PixelDataSuite2 g_pixel_data_suite2{
-    &get_pixel_data8, &get_pixel_data16, &get_pixel_data_float,
-    &get_pixel_data_float_gpu};
-
-bool verify_pixel_data_suites() {
-  const std::array<int32_t, 4> formats{
-      kPixelFormatArgb32, kPixelFormatArgb64, kPixelFormatArgb128,
-      kPixelFormatGpuBgra128};
-  std::array<std::array<std::byte, kEffectWorldSize>, 4> worlds{};
-  std::array<void*, 4> world_pixels{};
-  bool valid = true;
-  std::size_t created = 0;
-  for (; created < formats.size(); ++created) {
-    if (new_world(nullptr, 3, 2, 1, formats[created], worlds[created].data()) != 0) {
-      valid = false;
-      break;
-    }
-    std::memcpy(&world_pixels[created], worlds[created].data() + 24,
-                sizeof(world_pixels[created]));
-  }
-  if (created == formats.size()) {
-    void* output = reinterpret_cast<void*>(1);
-    valid = g_pixel_data_suite1.get_pixel_data8(
-                worlds[0].data(), nullptr, &output) == 0 &&
-            output == world_pixels[0] && valid;
-    output = reinterpret_cast<void*>(1);
-    valid = g_pixel_data_suite1.get_pixel_data16(
-                worlds[1].data(), nullptr, &output) == 0 &&
-            output == world_pixels[1] && valid;
-    output = reinterpret_cast<void*>(1);
-    valid = g_pixel_data_suite1.get_pixel_data_float(
-                worlds[2].data(), nullptr, &output) == 0 &&
-            output == world_pixels[2] && valid;
-    output = reinterpret_cast<void*>(1);
-    valid = g_pixel_data_suite2.get_pixel_data_float_gpu(
-                worlds[3].data(), &output) == 0 &&
-            output == world_pixels[3] && valid;
-
-    std::array<std::byte, 16> alternate_pixels{};
-    output = nullptr;
-    valid = g_pixel_data_suite2.get_pixel_data8(
-                worlds[0].data(), alternate_pixels.data(), &output) == 0 &&
-            output == alternate_pixels.data() && valid;
-    output = reinterpret_cast<void*>(1);
-    valid = g_pixel_data_suite2.get_pixel_data_float(
-                worlds[3].data(), nullptr, &output) == 0 &&
-            output == nullptr && valid;
-    output = reinterpret_cast<void*>(1);
-    valid = g_pixel_data_suite2.get_pixel_data_float_gpu(
-                worlds[2].data(), &output) == 0 &&
-            output == nullptr && valid;
-
-    std::array<std::byte, kEffectWorldSize> unregistered = worlds[0];
-    void* unknown_pixels = alternate_pixels.data();
-    std::memcpy(unregistered.data() + 24, &unknown_pixels, sizeof(unknown_pixels));
-    output = reinterpret_cast<void*>(1);
-    valid = g_pixel_data_suite1.get_pixel_data8(
-                unregistered.data(), nullptr, &output) != 0 &&
-            output == nullptr && valid;
-    output = reinterpret_cast<void*>(1);
-    valid = g_pixel_data_suite1.get_pixel_data8(nullptr, nullptr, &output) != 0 &&
-            output == nullptr && valid;
-  }
-  while (created > 0) {
-    --created;
-    valid = dispose_world(nullptr, worlds[created].data()) == 0 && valid;
-  }
-  return valid && world_lifetimes_balanced();
-}
 
 struct WorldSuite {
   decltype(&new_world) new_world;
