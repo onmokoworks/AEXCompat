@@ -268,6 +268,9 @@ worker_runtime::smart_execution::Result smart_render_once(
 std::string sha256_bytes(const unsigned char* data, std::size_t size);
 void record_output_checksum_detail(const unsigned char* rgba, int32_t width,
                                    int32_t height, int32_t pixel_bytes);
+// Launch-payload parser reused verbatim for the v:2 per-frame `parameters`
+// field (protocol §4.2.1): the message rides the exact argv encoding.
+bool parse_parameter_payload(const wchar_t* text, RequestedAssignments& output);
 
 namespace {
 // Spatial-context full-resolution override read through its render-subsystem
@@ -310,11 +313,13 @@ struct SessionFrameOutput {
 // persistent_sequence precedent; pixels move through the inherited anonymous
 // section (copy-through slots, the plug-in never sees the mapping) and control
 // messages over the inherited pipe pair with strict exact-key validation.
-// render_frame(current_time, frame_rgba, captured, frame_layers) runs one
-// frame under the hoisted sequence and returns the SessionFrameOutput above
-// with the packed ARGB output in `captured`. RenderSessionOutcome is defined
-// in worker_invocation_orchestration.hpp so the final dispatch owner can call
-// the wrappers below across TUs.
+// render_frame(current_time, frame_rgba, captured, frame_layers,
+// frame_override) runs one frame under the hoisted sequence and returns the
+// SessionFrameOutput above with the packed ARGB output in `captured`.
+// frame_override is a v:2 per-frame parameter set (protocol §4.2.1) or null;
+// the wrappers fall back to their launch payload when it is null.
+// RenderSessionOutcome is defined in worker_invocation_orchestration.hpp so
+// the final dispatch owner can call the wrappers below across TUs.
 template <typename FrameFn>
 RenderSessionOutcome run_session_frame_loop(
     EffectEntry entry, std::array<std::byte, kInSize>& input,
@@ -421,18 +426,26 @@ RenderSessionOutcome run_session_frame_loop(
     std::string type;
     int32_t version{};
     if (!json_string(object, "type", type) || !json_i32(object, "v", version) ||
-        version != static_cast<int32_t>(wrs::kProtocolVersion)) {
+        (version != static_cast<int32_t>(wrs::kProtocolVersion) &&
+         version != static_cast<int32_t>(wrs::kRenderFrameParametersVersion))) {
       outcome.protocol_violation = true;
       break;
     }
     if (type == "close") {
-      if (!json_exact_keys(object, {"v", "type"})) outcome.protocol_violation = true;
+      if (version != static_cast<int32_t>(wrs::kProtocolVersion) ||
+          !json_exact_keys(object, {"v", "type"}))
+        outcome.protocol_violation = true;
       break;
     }
     int32_t frame_index{};
     const auto* time_value = json_member(object, "current_time");
-    if (type != "render_frame" ||
-        !json_exact_keys(object, {"v", "type", "frame_index", "current_time"}) ||
+    const bool with_parameters =
+        version == static_cast<int32_t>(wrs::kRenderFrameParametersVersion);
+    const bool exact_keys = with_parameters
+        ? json_exact_keys(object,
+                          {"v", "type", "frame_index", "current_time", "parameters"})
+        : json_exact_keys(object, {"v", "type", "frame_index", "current_time"});
+    if (type != "render_frame" || !exact_keys ||
         !json_i32(object, "frame_index", frame_index) || frame_index < 0 ||
         !time_value || !std::holds_alternative<JsonValue::Object>(time_value->value)) {
       outcome.protocol_violation = true;
@@ -446,6 +459,34 @@ RenderSessionOutcome run_session_frame_loop(
         !json_i32(time_object, "scale", current_scale) || current_scale <= 0) {
       outcome.protocol_violation = true;
       break;
+    }
+    // v:2 replaces the launch payload's assignments for this frame only
+    // (protocol §4.2.1). The payload rides the message in the argv encoding,
+    // ASCII only; a payload the broker's pre-send validation would have
+    // rejected is a protocol violation, not a frame-local diagnostic. The
+    // loop only produces the override; the launch payload itself stays with
+    // the flavor wrappers, which fall back to it when this is null.
+    RequestedAssignments frame_assignments;
+    const RequestedAssignments* frame_override = nullptr;
+    if (with_parameters) {
+      std::string parameters_text;
+      std::wstring widened;
+      bool widened_ok = json_string(object, "parameters", parameters_text);
+      if (widened_ok) {
+        widened.reserve(parameters_text.size());
+        for (const unsigned char byte : parameters_text) {
+          if (byte < 0x20 || byte > 0x7E) {
+            widened_ok = false;
+            break;
+          }
+          widened.push_back(static_cast<wchar_t>(byte));
+        }
+      }
+      if (!widened_ok || !parse_parameter_payload(widened.c_str(), frame_assignments)) {
+        outcome.protocol_violation = true;
+        break;
+      }
+      frame_override = &frame_assignments;
     }
     const uint32_t expected_generation = static_cast<uint32_t>(frame_index) + 1;
     // Error responses carry no output or generation: a frame rejected before
@@ -527,7 +568,7 @@ RenderSessionOutcome run_session_frame_loop(
     }
     captured.clear();
     const SessionFrameOutput frame =
-        render_frame(current_time, frame_rgba, captured, frame_layers);
+        render_frame(current_time, frame_rgba, captured, frame_layers, frame_override);
     // Aux channel chunks are host-owned and cannot outlive one frame's render
     // lifecycle (end_render's cleanup for the one-shot path); the manifest
     // itself stays active across frames.
@@ -642,7 +683,8 @@ RenderSessionOutcome run_render_session(
       time_scale, pixel_bytes, external_layers,
       [&](int32_t current_time, const std::vector<unsigned char>& frame_rgba,
           std::vector<unsigned char>& captured,
-          const std::vector<ExternalLayerInput>* frame_layers) {
+          const std::vector<ExternalLayerInput>* frame_layers,
+          const RequestedAssignments* frame_override) {
         SessionFrameOutput frame;
         // Initialized true so it means "finalize observed corruption" when
         // false: render_once's early host-side failures return before touching
@@ -652,7 +694,8 @@ RenderSessionOutcome run_render_session(
         frame.frame_error = render_once(
             entry, input, output, "request", frame.width, frame.height,
             frame.rowbytes, frame.input_hash, frame.output_hash, frame_guards,
-            requested, &frame_rgba, nullptr, max_width, max_height, frame_layers,
+            frame_override ? frame_override : requested, &frame_rgba, nullptr,
+            max_width, max_height, frame_layers,
             current_time, time_step, total_time, time_scale, pixel_bytes, false,
             &captured, &output_validation_failed);
         frame.guard_violation = !frame_guards;
@@ -680,11 +723,13 @@ SmartRenderSessionOutcome run_smart_render_session(
       time_scale, pixel_bytes, nullptr,
       [&](int32_t current_time, const std::vector<unsigned char>& frame_rgba,
           std::vector<unsigned char>& captured,
-          const std::vector<ExternalLayerInput>*) {
+          const std::vector<ExternalLayerInput>*,
+          const RequestedAssignments* frame_override) {
         SessionFrameOutput frame;
         worker_runtime::smart_execution::SessionFrame session_frame{&captured};
         const worker_runtime::smart_execution::Result frame_result = smart_render_once(
-            entry, input, output, case_id, requested, &frame_rgba, nullptr,
+            entry, input, output, case_id, frame_override ? frame_override : requested,
+            &frame_rgba, nullptr,
             max_width, max_height, nullptr, current_time, time_step, total_time,
             time_scale, pixel_bytes, &session_frame);
         outcome.last = frame_result;

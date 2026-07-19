@@ -261,7 +261,10 @@ fn cleanup_stale_image_transport(root: &Path, now: SystemTime) -> io::Result<()>
     cleanup_stale_image_transport_before(root, now, STALE_IMAGE_TRANSPORT_AGE)
 }
 
-pub(crate) fn decode_bounded_image(path: &Path, role: &str) -> io::Result<image::DynamicImage> {
+/// Decodes an input image while enforcing the transport bounds. Public so the
+/// harness's resident-session adapter can decode its cached input through the
+/// same fail-closed limits the one-shot entries apply.
+pub fn decode_bounded_image(path: &Path, role: &str) -> io::Result<image::DynamicImage> {
     let mut reader = image::ImageReader::open(path)
         .map_err(|error| invalid(format!("{role} image open failed: {error}")))?
         .with_guessed_format()
@@ -3913,7 +3916,10 @@ pub fn dispatch_experimental_aegp_switch_roundtrip(
     Ok(report)
 }
 
-pub(crate) fn encode_interactive_payload(parameters: &[InteractiveParameter]) -> io::Result<String> {
+/// Encodes interactive parameters into the worker payload transport form
+/// (`v2|`..`v5|`). Public so integration tests can compute the exact payload
+/// a session frame carries; production callers stay inside the crate.
+pub fn encode_interactive_payload(parameters: &[InteractiveParameter]) -> io::Result<String> {
     let parameters = parameters
         .iter()
         .filter(|item| {
@@ -5100,6 +5106,210 @@ fn render_classic_via_length_one_session(
     };
     RENDER_SESSION_WRAPPER_RENDERS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     SessionWrapperOutcome::Report(build_interactive_image_report(&final_report, facts))
+}
+
+/// Static configuration for a resident interactive render session
+/// (issue #107): one sealed worker process carries many live renders, and
+/// per-frame parameter values ride the v:2 `render_frame` message. Everything
+/// here is fixed for the session's lifetime; a change (dimensions, depth,
+/// timing, the declared parameter set, the plug-in itself) means close and
+/// open a new session.
+#[cfg(windows)]
+pub struct InteractiveSessionOpen<'a> {
+    pub repository: &'a Path,
+    pub plugin_id: &'a str,
+    pub plugin_path: &'a Path,
+    pub plugin_sha256: &'a str,
+    /// Declared parameter set; launch values double as the fallback for
+    /// frames rendered without a per-frame update.
+    pub parameters: Option<&'a [InteractiveParameter]>,
+    pub dependencies: Vec<ApprovedImageArtifact>,
+    pub width: u32,
+    pub height: u32,
+    pub pixel_format: RenderPixelFormat,
+    pub time_step: i32,
+    pub total_time: i32,
+    pub time_scale: u32,
+    /// Per-frame watchdog deadline in milliseconds.
+    pub timeout_ms: u64,
+}
+
+/// A resident render session producing `interactive_image_render`-shaped
+/// per-frame reports for the harness. This is the default (crash-containment)
+/// tier: the plug-in hash binds the observation and no receipt applies. The
+/// per-frame host-protection validation lives in [`crate::render_session`];
+/// the evidence-grade final-report gate runs once at [`Self::close`].
+#[cfg(windows)]
+pub struct InteractiveRenderSession {
+    session: crate::render_session::RenderSession,
+    plugin_id: String,
+    pixel_format: RenderPixelFormat,
+    width: u32,
+    height: u32,
+    time_step: i32,
+    total_time: i32,
+    time_scale: u32,
+    frame_serial: u32,
+    frames_ok: u32,
+    frames_errored: u32,
+}
+
+#[cfg(windows)]
+impl InteractiveRenderSession {
+    pub fn open(request: InteractiveSessionOpen<'_>) -> io::Result<Self> {
+        let session = crate::render_session::RenderSession::open(
+            crate::render_session::SessionOpenRequest {
+                repository: request.repository,
+                plugin_path: request.plugin_path,
+                plugin_sha256: request.plugin_sha256,
+                parameters: request.parameters,
+                parameter_animation: None,
+                aux_manifest: None,
+                world_dump_dir: None,
+                output_checksum_detail: false,
+                mask_trailer: None,
+                spatial_trailer: None,
+                render_environment_trailer: None,
+                dependencies: request.dependencies,
+                width: request.width,
+                height: request.height,
+                pixel_format: request.pixel_format,
+                time_step: request.time_step,
+                total_time: request.total_time,
+                time_scale: request.time_scale,
+                frame_deadline: Duration::from_millis(request.timeout_ms),
+            },
+        )?;
+        Ok(Self {
+            session,
+            plugin_id: request.plugin_id.to_owned(),
+            pixel_format: request.pixel_format,
+            width: request.width,
+            height: request.height,
+            time_step: request.time_step,
+            total_time: request.total_time,
+            time_scale: request.time_scale,
+            frame_serial: 0,
+            frames_ok: 0,
+            frames_errored: 0,
+        })
+    }
+
+    /// True once the underlying session refused further frames fail-closed;
+    /// an `Err` from [`Self::render`] without this flag was a rejected
+    /// request (bad input size, out-of-range time or parameters) and the
+    /// session keeps rendering.
+    pub fn invalidated(&self) -> bool {
+        self.session.invalidation().is_some()
+    }
+
+    /// Renders one frame at `current_time`. `parameters` carries the values
+    /// for exactly this frame (protocol §4.2.1); `None` reuses the launch
+    /// values. On success the output PNG (8-bit preview, matching the
+    /// one-shot interactive entry) and the depth-preserving raw sidecar are
+    /// written and the returned report carries `passed: true`; a frame-local
+    /// compatibility error returns `passed: false` with the session intact.
+    pub fn render(
+        &mut self,
+        rgba: &[u8],
+        current_time: i32,
+        parameters: Option<&[InteractiveParameter]>,
+        output_path: &Path,
+    ) -> io::Result<Value> {
+        use crate::render_session::FrameStatus;
+        let started = Instant::now();
+        let frame_index = self.frame_serial;
+        let outcome = self.session.render_frame_with_parameters(
+            frame_index,
+            current_time,
+            rgba,
+            parameters,
+        )?;
+        let render_ms = started.elapsed().as_millis() as u64;
+        let session_facts = |frames_ok: u32, frames_errored: u32| {
+            json!({
+                "frame_index": frame_index,
+                "frames_ok": frames_ok,
+                "frames_errored": frames_errored,
+                "parameter_update": parameters.is_some(),
+                "render_ms": render_ms,
+            })
+        };
+        match outcome.status {
+            FrameStatus::Rendered { pixels, checksum } => {
+                self.frame_serial += 1;
+                self.frames_ok += 1;
+                let preserved = self
+                    .pixel_format
+                    .raw_extension()
+                    .map(|extension| output_path.with_extension(extension));
+                if let Some(parent) = output_path.parent() {
+                    fs::create_dir_all(parent)?;
+                }
+                if let Some(raw_path) = &preserved {
+                    OpenOptions::new()
+                        .write(true)
+                        .create_new(true)
+                        .open(raw_path)?
+                        .write_all(&pixels)?;
+                }
+                let preview = native_rgba_to_preview(&pixels, self.pixel_format)?;
+                let image = image::RgbaImage::from_raw(self.width, self.height, preview)
+                    .ok_or_else(|| invalid("session output dimensions are invalid"))?;
+                image
+                    .save_with_format(output_path, ImageFormat::Png)
+                    .map_err(|error| invalid(format!("output PNG save failed: {error}")))?;
+                Ok(json!({
+                    "schema_version": 1,
+                    "stage": "interactive_image_render",
+                    "plugin_id": self.plugin_id,
+                    "render_path": "classic",
+                    "pixel_format": self.pixel_format.report_name(),
+                    "width": self.width,
+                    "height": self.height,
+                    "input_width": self.width,
+                    "input_height": self.height,
+                    "output_transport": "rgba8_png",
+                    "output_png": output_path,
+                    "output_raw": preserved,
+                    // The slot-transfer checksum (protocol §4.3), not the
+                    // one-shot internal-ARGB output_hash definition.
+                    "output_slot_sha256": checksum,
+                    "current_time": current_time,
+                    "time_step": self.time_step,
+                    "total_time": self.total_time,
+                    "time_scale": self.time_scale,
+                    // The worker is still alive, so there is no exit
+                    // classification to report; the honest value names the
+                    // resident path instead of faking an exit state.
+                    "worker_classification": "resident_session",
+                    "resident_session": session_facts(self.frames_ok, self.frames_errored),
+                    "passed": true,
+                }))
+            }
+            FrameStatus::FrameError { render_error } => {
+                self.frames_errored += 1;
+                Ok(json!({
+                    "schema_version": 1,
+                    "stage": "interactive_image_render",
+                    "plugin_id": self.plugin_id,
+                    "render_path": "classic",
+                    "pixel_format": self.pixel_format.report_name(),
+                    "current_time": current_time,
+                    "worker_classification": "resident_session",
+                    "resident_session": session_facts(self.frames_ok, self.frames_errored),
+                    "render_error": render_error,
+                    "passed": false,
+                }))
+            }
+        }
+    }
+
+    /// Ends the session and returns the close summary, including the final
+    /// report and the `session_clean` verdict (`render_session.rs`).
+    pub fn close(self) -> Value {
+        self.session.close()
+    }
 }
 
 /// Host-side expectations the isolated worker report is validated against.
