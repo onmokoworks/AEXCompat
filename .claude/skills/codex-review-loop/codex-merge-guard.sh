@@ -32,12 +32,12 @@ fetch_review_threads() {
   local out query comment_query encoded thread id resolved comments result='[]'
   query='query($owner:String!,$repo:String!,$pr:Int!,$endCursor:String){repository(owner:$owner,name:$repo){pullRequest(number:$pr){reviewThreads(first:100,after:$endCursor){nodes{id isResolved}pageInfo{hasNextPage endCursor}}}}}'
   out=$(gh api graphql --paginate -F owner="$OWNER" -F repo="$REPO" -F pr="$PR" -f query="$query") || return 1
-  comment_query='query($id:ID!,$endCursor:String){node(id:$id){... on PullRequestReviewThread{comments(first:100,after:$endCursor){nodes{databaseId author{login} body createdAt path line originalLine}pageInfo{hasNextPage endCursor}}}}}'
+  comment_query='query($id:ID!,$endCursor:String){node(id:$id){... on PullRequestReviewThread{comments(first:100,after:$endCursor){nodes{databaseId author{login} body createdAt path line originalLine replyTo{databaseId}}pageInfo{hasNextPage endCursor}}}}}'
   for encoded in $(jq -r -s '[.[].data.repository.pullRequest.reviewThreads.nodes[]] | .[] | @base64' <<<"$out"); do
     thread=$(printf '%s' "$encoded" | base64 --decode) || return 1
     id=$(jq -r '.id' <<<"$thread"); resolved=$(jq -r '.isResolved' <<<"$thread")
     comments=$(gh api graphql --paginate -F id="$id" -f query="$comment_query") || return 1
-    comments=$(jq -s '[.[].data.node.comments.nodes[] | {id:.databaseId,user:{login:.author.login},body,created_at:.createdAt,path,line,original_line:.originalLine}]' <<<"$comments") || return 1
+    comments=$(jq -s '[.[].data.node.comments.nodes[] | {id:.databaseId,user:{login:.author.login},body,created_at:.createdAt,path,line,original_line:.originalLine,in_reply_to_id:(.replyTo.databaseId // null)}]' <<<"$comments") || return 1
     result=$(jq -c --argjson resolved "$resolved" --argjson comments "$comments" '. + [{isResolved:$resolved,comments:$comments}]' <<<"$result") || return 1
   done
   printf '%s\n' "$result"
@@ -87,7 +87,7 @@ fi
 clearances=$(owner_clearances <<<"$reviews")
 ack_ts=$(me_ack_ts "$ME" <<<"$issue_comments")
 owner_after=$(
-  { owner_threads_unresolved "$clearances" <<<"$review_threads"
+  { owner_threads_unresolved "$ME" "$clearances" <<<"$review_threads"
     owner_reviews_unresolved "$clearances" "$ack_ts" <<<"$reviews"
     owner_comments_unresolved "$ME" "$clearances" <<<"$issue_comments"; } | grep -v '^$' || true
 )

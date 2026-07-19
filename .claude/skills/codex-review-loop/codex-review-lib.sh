@@ -229,9 +229,13 @@ owner_inline_unresolved() {
 # insufficient because a reply does not necessarily resolve a review thread.
 # A thread blocks exactly while isResolved=false and it contains owner feedback.
 owner_threads_unresolved() {
-  jq -r --argjson clr "$1" --argjson owner "$OWNER_LOGINS" '
+  jq -r --arg me "$1" --argjson clr "$2" --argjson owner "$OWNER_LOGINS" '
     .[] | select(.isResolved | not)
-    | [ .comments[] | select([.user.login] | inside($owner)) ] as $owner_msgs
+    # The authenticated session may itself be an owner. Exempt only its
+    # threaded remediation replies; an independent/root comment from the same
+    # login remains genuine owner feedback and must block.
+    | [ .comments[] | select([.user.login] | inside($owner))
+        | select((.user.login == $me and (.in_reply_to_id // null) != null) | not) ] as $owner_msgs
     # An unresolved thread whose comment page overflowed (nested
     # comments(first:100) has another page) may hold owner feedback beyond the
     # fetched window, so it fails closed regardless of what was fetched.

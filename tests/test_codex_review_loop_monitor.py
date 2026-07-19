@@ -328,31 +328,51 @@ def test_owner_inline_after_approval_still_blocks() -> None:
 
 def test_unresolved_graphql_owner_thread_blocks() -> None:
     payload = [{"isResolved": False, "comments": [_inline("onmokoworks")]}]
-    assert "OWNER-INLINE id=9" in _call("owner_threads_unresolved", payload, NO_CLEAR)
+    assert "OWNER-INLINE id=9" in _call("owner_threads_unresolved", payload, ME, NO_CLEAR)
 
 
 def test_resolved_graphql_owner_thread_does_not_block() -> None:
     payload = [{"isResolved": True, "comments": [_inline("onmokoworks")]}]
-    assert _call("owner_threads_unresolved", payload, NO_CLEAR) == ""
+    assert _call("owner_threads_unresolved", payload, ME, NO_CLEAR) == ""
 
 
 def test_unresolved_codex_only_thread_is_not_an_owner_blocker() -> None:
     payload = [{"isResolved": False, "comments": [_inline("chatgpt-codex-connector")]}]
-    assert _call("owner_threads_unresolved", payload, NO_CLEAR) == ""
+    assert _call("owner_threads_unresolved", payload, ME, NO_CLEAR) == ""
+
+
+def test_session_reply_on_codex_only_thread_is_not_owner_feedback() -> None:
+    payload = [{"isResolved": False, "comments": [
+        _inline("chatgpt-codex-connector", id=8),
+        _inline(ME, id=9, in_reply_to_id=8, body="対応済み")]}]
+    assert _call("owner_threads_unresolved", payload, ME, NO_CLEAR) == ""
+
+
+def test_session_root_comment_still_blocks_as_owner_feedback() -> None:
+    payload = [{"isResolved": False, "comments": [_inline(ME, id=9)]}]
+    assert "OWNER-INLINE id=9" in _call("owner_threads_unresolved", payload, ME, NO_CLEAR)
+
+
+def test_mixed_thread_keeps_other_owner_reply_blocking() -> None:
+    payload = [{"isResolved": False, "comments": [
+        _inline("chatgpt-codex-connector", id=8),
+        _inline(ME, id=9, in_reply_to_id=8, body="対応済み"),
+        _inline("onmokoworks", id=10, in_reply_to_id=8, body="still broken")]}]
+    assert "OWNER-INLINE id=10" in _call("owner_threads_unresolved", payload, ME, NO_CLEAR)
 
 
 def test_graphql_owner_thread_cleared_by_later_same_owner_approval() -> None:
     payload = [{"isResolved": False, "comments": [
         _inline("onmokoworks", created_at="2026-07-18T19:20:00Z")]}]
     clr = json.dumps({"onmokoworks": "2026-07-18T19:30:00Z"})
-    assert _call("owner_threads_unresolved", payload, clr) == ""
+    assert _call("owner_threads_unresolved", payload, ME, clr) == ""
 
 
 def test_graphql_owner_thread_not_cleared_by_other_owner_approval() -> None:
     payload = [{"isResolved": False, "comments": [
         _inline("onmokoworks", created_at="2026-07-18T19:20:00Z")]}]
     clr = json.dumps({"naari3": "2026-07-18T19:30:00Z"})
-    assert "OWNER-INLINE" in _call("owner_threads_unresolved", payload, clr)
+    assert "OWNER-INLINE" in _call("owner_threads_unresolved", payload, ME, clr)
 
 
 def test_each_owner_must_clear_their_own_thread_feedback() -> None:
@@ -360,14 +380,14 @@ def test_each_owner_must_clear_their_own_thread_feedback() -> None:
         _inline("onmokoworks", created_at="2026-07-18T19:20:00Z"),
         _inline("naari3", id=10, created_at="2026-07-18T19:21:00Z")]}]
     clr = json.dumps({"naari3": "2026-07-18T19:30:00Z"})
-    assert "OWNER-INLINE id=9" in _call("owner_threads_unresolved", payload, clr)
+    assert "OWNER-INLINE id=9" in _call("owner_threads_unresolved", payload, ME, clr)
 
 
 def test_graphql_owner_reply_after_approval_reblocks() -> None:
     payload = [{"isResolved": False, "comments": [
         _inline("onmokoworks", created_at="2026-07-18T19:40:00Z")]}]
     clr = json.dumps({"onmokoworks": "2026-07-18T19:30:00Z"})
-    assert "OWNER-INLINE" in _call("owner_threads_unresolved", payload, clr)
+    assert "OWNER-INLINE" in _call("owner_threads_unresolved", payload, ME, clr)
 
 
 ACK = "2026-07-18T19:26:49Z"  # the session's newest non-trigger ack comment
@@ -493,7 +513,7 @@ def test_truncated_unresolved_thread_fails_closed() -> None:
                 "comments": [{"id": 1, "user": {"login": "chatgpt-codex-connector[bot]"},
                               "path": "x.sh", "line": 3, "created_at": "2026-07-18T19:20:00Z",
                               "body": "some finding"}]}]
-    assert "fail closed" in _call("owner_threads_unresolved", payload, NO_CLEAR)
+    assert "fail closed" in _call("owner_threads_unresolved", payload, ME, NO_CLEAR)
 
 
 def test_truncated_resolved_thread_does_not_block() -> None:
@@ -503,7 +523,7 @@ def test_truncated_resolved_thread_does_not_block() -> None:
                 "comments": [{"id": 1, "user": {"login": "onmokoworks"},
                               "path": "x.sh", "line": 3, "created_at": "2026-07-18T19:20:00Z",
                               "body": "addressed"}]}]
-    assert _call("owner_threads_unresolved", payload, NO_CLEAR) == ""
+    assert _call("owner_threads_unresolved", payload, ME, NO_CLEAR) == ""
 
 
 def test_session_ack_comment_does_not_block() -> None:
@@ -537,6 +557,8 @@ def test_both_review_thread_connections_are_paginated() -> None:
         assert "nodes{id isResolved}" in script
         assert "node(id:$id)" in script
         assert "comments(first:100,after:$endCursor)" in script
+        assert "replyTo{databaseId}" in script
+        assert "in_reply_to_id:(.replyTo.databaseId // null)" in script
         assert script.count("gh api graphql --paginate") >= 2
 
 
