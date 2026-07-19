@@ -14,7 +14,7 @@ def test_minihost_dispatches_a_bounded_custom_ui_lifecycle() -> None:
     assert '\\"plugin_state_before_close\\"' in source
     assert '\\"lifecycle_host_state_cleared\\"' in source
     assert "event_assignments_applied" in source
-    assert "requested_parameters_json(ui_event_assignments)" in source
+    assert "requested_parameters_json(invocation.ui_event_assignments)" in source
 
 
 def test_broker_validates_the_complete_lifecycle_contract() -> None:

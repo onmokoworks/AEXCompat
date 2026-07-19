@@ -1259,7 +1259,7 @@ class MinihostL2SourceTests(unittest.TestCase):
             "overlay_stroke_path",
             "drawbot_path_point",
             "registered_layer_ui",
-            "event_target = drag_event_mode || ui_mouse_exited_mode ||",
+            "event_target = invocation.drag_event_mode || invocation.ui_mouse_exited_mode ||",
             "r.window_type != 2",
         ):
             self.assertIn(marker, text)
