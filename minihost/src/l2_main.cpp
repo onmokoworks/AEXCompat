@@ -4871,7 +4871,6 @@ int32_t render_once(EffectEntry entry, std::array<std::byte, kInSize>& input,
 struct RenderSessionOutcome {
   int32_t setup_error{-1};
   int32_t setdown_error{-1};
-  int32_t last_frame_error{0};
   int32_t frames_attempted{0};
   bool protocol_violation{false};
   bool invariant_failure{false};
@@ -4900,6 +4899,7 @@ RenderSessionOutcome run_render_session(
   constexpr int32_t kSessionGenerationMismatch = -41;
   constexpr int32_t kSessionOutputCaptureError = -42;
   constexpr int32_t kSessionGuardViolation = -43;
+  constexpr int32_t kSessionDimensionMismatch = -44;
 
   RenderSessionOutcome outcome;
   const wrs::SessionGeometry geometry{max_width, max_height, pixel_bytes, 0};
@@ -4998,7 +4998,6 @@ RenderSessionOutcome run_render_session(
     };
     if (static_cast<uint32_t>(current_scale) != time_scale) {
       // Frame-local diagnostic: the session continues, the broker decides.
-      outcome.last_frame_error = kSessionTimeScaleMismatch;
       if (!respond_error(kSessionTimeScaleMismatch)) {
         outcome.protocol_violation = true;
         break;
@@ -5032,7 +5031,6 @@ RenderSessionOutcome run_render_session(
     if (frame_error != 0) {
       // Frame-local compatibility diagnostic; the sequence state is still
       // owned by the host, so the session may continue.
-      outcome.last_frame_error = frame_error;
       if (!respond_error(frame_error)) {
         outcome.protocol_violation = true;
         break;
@@ -5044,8 +5042,15 @@ RenderSessionOutcome run_render_session(
     // invariant, fail closed.
     if (!frame_guards) {
       outcome.guards_intact = false;
-      outcome.last_frame_error = kSessionGuardViolation;
       respond_error(kSessionGuardViolation);
+      outcome.invariant_failure = true;
+      break;
+    }
+    // v1 fixes every frame to the launch max dimensions (protocol §3); an
+    // expand/shrink-output effect changing them would publish dimensions the
+    // broker cannot trust against the slot layout. Fail closed.
+    if (frame_width != max_width || frame_height != max_height) {
+      respond_error(kSessionDimensionMismatch);
       outcome.invariant_failure = true;
       break;
     }
@@ -5053,7 +5058,6 @@ RenderSessionOutcome run_render_session(
         static_cast<std::size_t>(frame_width) * frame_height;
     if (captured.size() != expected_pixels * pixel_bytes ||
         output_offset + captured.size() > wrs::expected_section_bytes(geometry)) {
-      outcome.last_frame_error = kSessionOutputCaptureError;
       respond_error(kSessionOutputCaptureError);
       outcome.invariant_failure = true;
       break;
@@ -5072,7 +5076,6 @@ RenderSessionOutcome run_render_session(
     // the broker reads; the final report's output_hash keeps the one-shot
     // internal-ARGB definition (protocol §4.3).
     const std::string slot_checksum = sha256_bytes(slot, captured.size());
-    outcome.last_frame_error = 0;
     if (!respond_ok(frame_width, frame_height, frame_rowbytes, slot_checksum)) {
       outcome.protocol_violation = true;
       break;
@@ -5081,10 +5084,12 @@ RenderSessionOutcome run_render_session(
   outcome.setdown_error =
       invoke_sequence_selector(entry, kSequenceSetdown, input.data(), output.data());
   write<void*>(input, kInSequenceData, nullptr);
+  // Frame-local errors were already reported through frame_done and the
+  // broker owned the continue/stop decision, so a clean close after them is
+  // still a successful session; only session mechanics count here.
   outcome.render_error =
       outcome.setup_error == 0 && outcome.setdown_error == 0 &&
-              !outcome.protocol_violation && !outcome.invariant_failure &&
-              outcome.last_frame_error == 0
+              !outcome.protocol_violation && !outcome.invariant_failure
           ? 0
           : -1;
   return outcome;

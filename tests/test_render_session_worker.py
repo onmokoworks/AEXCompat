@@ -275,6 +275,25 @@ def test_session_survives_a_frame_local_time_scale_mismatch():
             process.communicate(timeout=30)
 
 
+def test_session_close_after_frame_local_error_exits_cleanly():
+    _require_artifacts()
+    transport = SessionTransport()
+    process = _spawn(transport)
+    try:
+        transport.write_input(21, 1)
+        transport.send(render_frame_message(0, 0, scale=TIME_SCALE + 1))
+        assert transport.receive()["status"] == "error"
+        # The error was already reported via frame_done and stopping is the
+        # broker's decision, so a clean close is a successful session.
+        transport.send({"v": 1, "type": "close"})
+        code, _, stderr = _finish(process)
+        assert code == 0, (code, stderr[-500:])
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.communicate(timeout=30)
+
+
 def test_session_fails_closed_on_stale_input_generation():
     _require_artifacts()
     transport = SessionTransport()
