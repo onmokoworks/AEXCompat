@@ -575,6 +575,12 @@ impl RenderSession {
                     "world dump directory must be an absolute path to a directory",
                 ));
             }
+            // Same rule as the one-shot dump resolver: snapshots are never
+            // cleared by the worker, so a reused directory would leave stale
+            // dumps from an earlier run beside the current session's output.
+            if fs::read_dir(dump)?.next().is_some() {
+                return Err(invalid("world dump directory must be empty"));
+            }
             args_after_plugin.extend([
                 "--dump-worlds-v1".to_owned(),
                 dump.to_string_lossy().into_owned(),

@@ -334,6 +334,36 @@ mod windows_e2e {
     }
 
     #[test]
+    fn open_rejects_a_non_empty_world_dump_directory() {
+        let _behavior = BehaviorGuard::set(None);
+        let (repository, plugin, sha) = temp_repository();
+        let reused = repository.0.join("reused-dumps");
+        std::fs::create_dir_all(&reused).unwrap();
+        std::fs::write(reused.join("000-stale.bin"), b"stale").unwrap();
+        let error = RenderSession::open(SessionOpenRequest {
+            repository: &repository.0,
+            plugin_path: &plugin,
+            plugin_sha256: &sha,
+            parameters: None,
+            parameter_animation: None,
+            aux_manifest: None,
+            world_dump_dir: Some(&reused),
+            output_checksum_detail: false,
+            dependencies: Vec::new(),
+            width: WIDTH,
+            height: HEIGHT,
+            pixel_format: RenderPixelFormat::Argb8,
+            time_step: 1,
+            total_time: 300,
+            time_scale: 30,
+            frame_deadline: Duration::from_secs(30),
+        })
+        .map(|_| ())
+        .expect_err("a reused dump directory fails fast at open");
+        assert!(error.to_string().contains("empty"), "{error}");
+    }
+
+    #[test]
     fn open_rejects_a_missing_world_dump_directory() {
         let _behavior = BehaviorGuard::set(None);
         let (repository, plugin, sha) = temp_repository();
