@@ -88,8 +88,21 @@ worker 側パースは `trace_writer.cpp:16-28` の型)。worker はパス文字
 ```
 aex_render_worker.exe --render-session-v1 <plugin> <plugin_sha256> <payload>
     <max_width> <max_height> <time_step> <total_time> <time_scale>
-    [layer 4つ組...] [--parameter-animation-v1 <path>] [--minidump-v1 <dir>]
+    [v2|<mask context>] [spatial:v*|<...>] [render:v1|<...>]
+    [--aux-manifest-v1 <path>] [--parameter-animation-v1 <path>]
+    [--dump-worlds-v1 <dir>] [--output-checksum-detail-v1 1] [--minidump-v1 <dir>]
 ```
+
+静的コンテキスト trailer は one-shot と同じ位置引数順 (mask → spatial →
+render) で、auxiliary option ペアより前 (argv 上ではコンテキストが先、
+auxiliary option が tail)。worker は auxiliary option を tail から剥がした
+後、render → spatial → mask の順に位置引数末尾から剥がして 10 スロットの
+セッション契約に還元する。W1-3 では spatial (`spatial:v1/v2/v3`) と
+render-environment (`render:v1|`) を broker が送出する。mask context
+(`v2|`) は worker が受理できる形にしてあるが broker 側の送出は layer 作業
+(W1-4) と同 PR。値域・検証は one-shot と同一 (parse_spatial_context_payload
+/ parse_render_environment_payload)。full-resolution 寸法を宣言する spatial は
+遅延 SEQUENCE_SETUP と全フレームの in_data に反映される。
 
 one-shot との差分:
 

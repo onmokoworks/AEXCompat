@@ -9,9 +9,11 @@
 #[cfg(windows)]
 mod windows_e2e {
     use aexcompat_broker::image_render::{
-        render_experimental_image, render_experimental_image_at_time, RenderTiming,
+        render_experimental_image, render_experimental_image_at_time,
+        render_experimental_image_at_time_with_format_and_context, RenderPixelFormat, RenderTiming,
         DISABLE_SESSION_WRAPPER_ENV, RENDER_SESSION_WRAPPER_RENDERS,
     };
+    use aexcompat_broker::render_request::HostContext;
     use sha2::{Digest, Sha256};
     use std::path::{Path, PathBuf};
     use std::sync::atomic::Ordering;
@@ -145,6 +147,84 @@ mod windows_e2e {
             std::fs::read(&timed_a).unwrap(),
             std::fs::read(&timed_b).unwrap(),
             "timed PNG bytes differ between the routes"
+        );
+
+        // A spatial + render-environment host context (issue #98 W1-3) must
+        // travel through the session launch argv and produce the identical
+        // report on both routes. A mask-free, aux-free, coverage-free context
+        // stays session-representable.
+        let context: HostContext = serde_json::from_value(serde_json::json!({
+            "mask_scene": {"masks": []},
+            "spatial": {
+                "downsample_x": {"numerator": 1, "denominator": 2},
+                "downsample_y": {"numerator": 1, "denominator": 2},
+                "pixel_aspect_ratio": {"numerator": 1, "denominator": 1},
+                "full_resolution_width": 128,
+                "full_resolution_height": 64,
+            },
+            "render_environment": {
+                "quality": "low",
+                "field": "upper",
+                "shutter_angle": 0.5,
+                "shutter_phase": -0.25,
+            },
+        }))
+        .expect("host context fixture");
+        let ctx_before = RENDER_SESSION_WRAPPER_RENDERS.load(Ordering::SeqCst);
+        let ctx_a = scratch.join("ctx-a.png");
+        let ctx_report_a = render_experimental_image_at_time_with_format_and_context(
+            &root,
+            &aex,
+            &sha,
+            &input,
+            &ctx_a,
+            &[],
+            RenderTiming::default(),
+            false,
+            RenderPixelFormat::Argb8,
+            Some(&context),
+        )
+        .expect("session-route context render");
+        assert!(
+            RENDER_SESSION_WRAPPER_RENDERS.load(Ordering::SeqCst) > ctx_before,
+            "the session wrapper did not carry the context render"
+        );
+        unsafe { std::env::set_var(DISABLE_SESSION_WRAPPER_ENV, "1") };
+        let ctx_b = scratch.join("ctx-b.png");
+        let ctx_report_b = render_experimental_image_at_time_with_format_and_context(
+            &root,
+            &aex,
+            &sha,
+            &input,
+            &ctx_b,
+            &[],
+            RenderTiming::default(),
+            false,
+            RenderPixelFormat::Argb8,
+            Some(&context),
+        )
+        .expect("one-shot context render");
+        unsafe { std::env::remove_var(DISABLE_SESSION_WRAPPER_ENV) };
+        let mut ctx_flat_a = ctx_report_a.as_object().expect("context A").clone();
+        let mut ctx_flat_b = ctx_report_b.as_object().expect("context B").clone();
+        for key in volatile {
+            ctx_flat_a.remove(key);
+            ctx_flat_b.remove(key);
+        }
+        // The spatial and render-environment contract fields must be present
+        // and equal: this is the whole point of carrying the context.
+        assert_eq!(ctx_flat_a.get("spatial_contract_ok"), Some(&serde_json::json!(true)));
+        for (key, value_a) in &ctx_flat_a {
+            assert_eq!(
+                Some(value_a),
+                ctx_flat_b.get(key),
+                "context report field {key} differs between the routes"
+            );
+        }
+        assert_eq!(
+            std::fs::read(&ctx_a).unwrap(),
+            std::fs::read(&ctx_b).unwrap(),
+            "context PNG bytes differ between the routes"
         );
         let _ = std::fs::remove_dir_all(&scratch);
     }
