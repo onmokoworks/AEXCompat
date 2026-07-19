@@ -87,6 +87,10 @@ pub fn redact_windows_paths(text: &str, limit: usize) -> (String, bool) {
                 "<redacted-path>"
             });
             index += 3;
+            // Validate at most one marker-shaped suffix per path. This keeps
+            // hostile punctuation-heavy diagnostics linear in the capture
+            // bound while still preserving the broker's compact envelope.
+            let mut structured_marker_checked = false;
             while index < chars.len() {
                 if inside_json_string && chars[index] == '"' {
                     let preceding_backslashes = chars[..index]
@@ -97,11 +101,26 @@ pub fn redact_windows_paths(text: &str, limit: usize) -> (String, bool) {
                     if preceding_backslashes % 2 == 0 {
                         break;
                     }
-                } else if !inside_json_string
-                    && (chars[index].is_whitespace()
-                        || matches!(chars[index], '"' | ',' | '}' | ']'))
-                {
-                    break;
+                } else if !inside_json_string {
+                    if chars[index].is_whitespace() || chars[index] == '"' {
+                        break;
+                    }
+                    if !structured_marker_checked && chars[index] == ',' {
+                        let marker_shaped = [",diagnostics=", ",report="]
+                            .iter()
+                            .any(|marker| {
+                                let mut actual = chars[index..].iter();
+                                marker
+                                    .chars()
+                                    .all(|expected| actual.next() == Some(&expected))
+                            });
+                        if marker_shaped {
+                            structured_marker_checked = true;
+                            if validated_structured_marker(&chars, index) {
+                                break;
+                            }
+                        }
+                    }
                 }
                 index += 1;
             }
@@ -129,6 +148,30 @@ pub fn redact_windows_paths(text: &str, limit: usize) -> (String, bool) {
         output.truncate(boundary);
     }
     (output, truncated || redaction_truncated)
+}
+
+fn validated_structured_marker(chars: &[char], index: usize) -> bool {
+    if chars.get(index) != Some(&',') {
+        return false;
+    }
+    for marker in [",diagnostics=", ",report="] {
+        let marker = marker.chars().collect::<Vec<_>>();
+        if !chars[index..].starts_with(&marker) {
+            continue;
+        }
+        if chars.get(index + marker.len()) != Some(&'{') {
+            return false;
+        }
+        let json = chars[index + marker.len()..].iter().collect::<String>();
+        if serde_json::Deserializer::from_str(&json)
+            .into_iter::<serde_json::Value>()
+            .next()
+            .is_some_and(|result| result.is_ok())
+        {
+            return true;
+        }
+    }
+    false
 }
 
 #[cfg(test)]
@@ -181,5 +224,29 @@ mod tests {
             redacted,
             r#"worker failed at <redacted-path>,diagnostics={"classification":"nonzero_exit"},report={"render_error":25}"#
         );
+    }
+
+    #[test]
+    fn redaction_consumes_legal_punctuation_in_unquoted_windows_paths() {
+        for path in [
+            r"C:\private\customer,secret.txt",
+            r"C:\private\customer}secret.txt",
+            r"C:\private\customer]secret.txt",
+        ] {
+            let input = format!("worker failed at {path}");
+            let (redacted, truncated) = redact_windows_paths(&input, 1024);
+            assert!(!truncated);
+            assert_eq!(redacted, "worker failed at <redacted-path>");
+            assert!(!redacted.contains("secret"));
+        }
+    }
+
+    #[test]
+    fn marker_like_path_suffix_is_redacted_unless_it_contains_json() {
+        let input = r#"worker failed at C:\private\customer,report=secret.txt"#;
+        let (redacted, truncated) = redact_windows_paths(input, 1024);
+        assert!(!truncated);
+        assert_eq!(redacted, "worker failed at <redacted-path>");
+        assert!(!redacted.contains("secret"));
     }
 }
