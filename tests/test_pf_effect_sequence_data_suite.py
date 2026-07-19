@@ -30,6 +30,7 @@ def test_minihost_uses_bounded_borrowed_unflattened_registry():
     assert "publish_effect_sequence" in source
     assert "invalidate_effect_sequence" in source
     assert "invoke_sequence_selector" in source
+    assert "bool verify_suite1" in source
     assert "selector == kSequenceSetup || selector == kSequenceResetup" in source
     assert "selector == kSequenceSetdown" in source
     assert "kSequenceFlatten" not in source[source.index("int32_t invoke_sequence_selector"):source.index("template <typename T")]

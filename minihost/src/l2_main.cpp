@@ -131,6 +131,7 @@
 #include "worker_pf_adv_time_suite.hpp"
 #include "worker_pf_ansi_runtime.hpp"
 #include "worker_pf_ae_channel_runtime.hpp"
+#include "worker_pf_effect_sequence_selftests.hpp"
 #include "worker_pf_state_runtime.hpp"
 #include "worker_report.hpp"
 #include "worker_render_session.hpp"
@@ -3384,52 +3385,9 @@ std::string sha256_bytes(const unsigned char* data, std::size_t size) {
 }
 
 bool verify_pf_effect_sequence_data_suite1() {
-  invalidate_effect_sequence(&g_effect);
-  const void* acquired{};
-  PfConstHandle observed = reinterpret_cast<PfConstHandle>(1);
-  int payload = 0x53455131;
-  void* handle_value = &payload;
-  void** handle = &handle_value;
-  OpaqueHostObject foreign{0x4652474e};
-  bool ok = acquire_suite("PF Effect Sequence Data Suite", 1, &acquired) == 0 &&
-      acquired == &g_effect_sequence_data_suite1 &&
-      g_effect_sequence_data_suite1.get_effect_sequence_data(&g_effect, &observed) ==
-          kPfBadCallbackParam && observed == nullptr &&
-      publish_effect_sequence(&g_effect, handle) &&
-      g_effect_sequence_data_suite1.get_effect_sequence_data(&g_effect, &observed) == 0 &&
-      observed == reinterpret_cast<PfConstHandle>(handle) && *observed == &payload;
-  std::atomic<bool> concurrent_ok{true};
-  std::vector<std::thread> readers;
-  for (int thread_index = 0; thread_index < 8; ++thread_index) {
-    readers.emplace_back([&] {
-      for (int iteration = 0; iteration < 256; ++iteration) {
-        PfConstHandle concurrent_observed{};
-        if (g_effect_sequence_data_suite1.get_effect_sequence_data(
-                &g_effect, &concurrent_observed) != 0 ||
-            concurrent_observed != reinterpret_cast<PfConstHandle>(handle) ||
-            *concurrent_observed != &payload) {
-          concurrent_ok.store(false, std::memory_order_relaxed);
-          break;
-        }
-      }
-    });
-  }
-  for (auto& reader : readers) reader.join();
-  ok = ok && concurrent_ok.load(std::memory_order_relaxed);
-  PfConstHandle foreign_observed = reinterpret_cast<PfConstHandle>(1);
-  ok = ok && g_effect_sequence_data_suite1.get_effect_sequence_data(
-                    &foreign, &foreign_observed) == kPfBadCallbackParam &&
-      foreign_observed == nullptr &&
-      g_effect_sequence_data_suite1.get_effect_sequence_data(nullptr, &observed) ==
-          kPfBadCallbackParam &&
-      g_effect_sequence_data_suite1.get_effect_sequence_data(&g_effect, nullptr) ==
-          kPfBadCallbackParam;
-  invalidate_effect_sequence(&g_effect);
-  observed = reinterpret_cast<PfConstHandle>(1);
-  ok = ok && g_effect_sequence_data_suite1.get_effect_sequence_data(&g_effect, &observed) ==
-                    kPfBadCallbackParam && observed == nullptr &&
-      release_suite("PF Effect Sequence Data Suite", 1) == 0;
-  return ok;
+  return aexcompat::pf_effect_sequence_selftests::verify_suite1(
+      &g_effect, {&acquire_suite, &release_suite,
+                  &g_effect_sequence_data_suite1, kPfBadCallbackParam});
 }
 
 std::string hex_bytes(const unsigned char* data, std::size_t size) {
