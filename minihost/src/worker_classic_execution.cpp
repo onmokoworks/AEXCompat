@@ -1,6 +1,34 @@
 #include "worker_classic_execution.hpp"
 #include <fstream>
 namespace aexcompat::worker_runtime::classic_execution {
+LifecycleResult begin_lifecycle(void* host, const LifecycleHooks& h) {
+  LifecycleResult result{};
+  if (!host || !h.begin || !h.end || !h.dispose_lifecycle) {
+    result.error = -5;
+    return result;
+  }
+  result.lifecycle = h.begin(host);
+  if (!result.lifecycle) { result.error = -5; return result; }
+  auto apply = [&](bool (*operation)(void*)) {
+    if (result.error == 0 && operation && !operation(host)) result.error = -5;
+  };
+  apply(h.click);
+  apply(h.interpolate);
+  apply(h.roundtrip);
+  apply(h.conditional_ui);
+  return result;
+}
+
+int32_t finish_lifecycle(void* host, LifecycleResult& state,
+                         const LifecycleHooks& h, bool draw) {
+  if (!state.lifecycle || !h.end || !h.dispose_lifecycle) return state.error;
+  if (draw && state.error == 0 && h.draw && !h.draw(host)) state.error = -5;
+  state.error = h.end(host, state.lifecycle, state.error);
+  h.dispose_lifecycle(state.lifecycle);
+  state.lifecycle = nullptr;
+  return state.error;
+}
+
 int finalize(Context& c, const Hooks& h) {
   std::vector<unsigned char> logical;
   if (!h.copy_packed || !h.hash || !h.copy_packed(c.destination, c.rowbytes, c.width,

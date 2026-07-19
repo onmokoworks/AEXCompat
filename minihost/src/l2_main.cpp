@@ -4904,14 +4904,44 @@ int32_t classic_render_runtime(EffectEntry entry, std::array<std::byte, kInSize>
   } render_ui_context_scope{entry, input, command_output, definitions};
   publish_alpha_coverage_provider(logical_source, width, height, pixel_bytes,
                                   external_current_time, external_time_scale);
-  const RenderLifecycle lifecycle = manage_sequence
-      ? begin_render_lifecycle(entry, input, command_output, params.data(), output_world.data())
-      : begin_frame_lifecycle(entry, input, command_output, params.data(), output_world.data());
-  int32_t error = lifecycle.setup_error;
-  if (error == 0 && !dispatch_render_click(entry, input, command_output, definitions)) error = -5;
-  if (error == 0 && !interpolate_arbitrary_values(entry, input, command_output, definitions)) error = -5;
-  if (error == 0 && !roundtrip_arbitrary_values(entry, input, command_output, definitions)) error = -5;
-  if (error == 0 && !dispatch_conditional_ui_selectors(entry, input, command_output, params.data())) error = -5;
+  struct ClassicLifecycleHost {
+    EffectEntry entry; std::array<std::byte, kInSize>* input;
+    std::array<std::byte, kOutSize>* output;
+    std::vector<std::array<std::byte, kParamSize>>* definitions;
+    std::vector<void*>* params; void* world;
+    bool manage_sequence;
+  } lifecycle_host{entry, &input, &command_output, &definitions, &params,
+                   &output_world, manage_sequence};
+  const aexcompat::worker_runtime::classic_execution::LifecycleHooks lifecycle_hooks{
+      +[](void* opaque) -> void* {
+        auto& h = *static_cast<ClassicLifecycleHost*>(opaque);
+        const auto value = h.manage_sequence
+            ? begin_render_lifecycle(h.entry, *h.input, *h.output,
+                  h.params->data(), static_cast<std::array<std::byte, kEffectWorldSize>*>(h.world)->data())
+            : begin_frame_lifecycle(h.entry, *h.input, *h.output,
+                  h.params->data(), static_cast<std::array<std::byte, kEffectWorldSize>*>(h.world)->data());
+        return new (std::nothrow) RenderLifecycle(value);
+      },
+      +[](void* opaque) { auto& h = *static_cast<ClassicLifecycleHost*>(opaque);
+        return dispatch_render_click(h.entry, *h.input, *h.output, *h.definitions); },
+      +[](void* opaque) { auto& h = *static_cast<ClassicLifecycleHost*>(opaque);
+        return interpolate_arbitrary_values(h.entry, *h.input, *h.output, *h.definitions); },
+      +[](void* opaque) { auto& h = *static_cast<ClassicLifecycleHost*>(opaque);
+        return roundtrip_arbitrary_values(h.entry, *h.input, *h.output, *h.definitions); },
+      +[](void* opaque) { auto& h = *static_cast<ClassicLifecycleHost*>(opaque);
+        return dispatch_conditional_ui_selectors(h.entry, *h.input, *h.output, h.params->data()); },
+      +[](void* opaque) { auto& h = *static_cast<ClassicLifecycleHost*>(opaque);
+        return dispatch_render_draw(h.entry, *h.input, *h.output, *h.definitions); },
+      +[](void* opaque, void* lifecycle, int32_t error) { auto& h = *static_cast<ClassicLifecycleHost*>(opaque);
+        return h.manage_sequence
+            ? end_render_lifecycle(h.entry, *h.input, *h.output, h.params->data(),
+                  static_cast<std::array<std::byte, kEffectWorldSize>*>(h.world)->data(), *static_cast<RenderLifecycle*>(lifecycle), error)
+            : end_frame_lifecycle(h.entry, *h.input, *h.output, h.params->data(),
+                  static_cast<std::array<std::byte, kEffectWorldSize>*>(h.world)->data(), *static_cast<RenderLifecycle*>(lifecycle), error); },
+      +[](void* lifecycle) { delete static_cast<RenderLifecycle*>(lifecycle); }};
+  auto lifecycle = aexcompat::worker_runtime::classic_execution::begin_lifecycle(
+      &lifecycle_host, lifecycle_hooks);
+  int32_t error = lifecycle.error;
   const uint32_t effective_out_flags = read<uint32_t>(command_output, kOutFlags);
   const uint32_t effective_out_flags2 = read<uint32_t>(command_output, kOutFlags2);
   const bool classic_wide_time_allowed =
@@ -4933,11 +4963,10 @@ int32_t classic_render_runtime(EffectEntry entry, std::array<std::byte, kInSize>
                     logical_source.data() + y * width * pixel_bytes,
                     width * pixel_bytes);
     }
-    error = manage_sequence
-        ? end_render_lifecycle(entry, input, command_output, params.data(), output_world.data(), lifecycle, error)
-        : end_frame_lifecycle(entry, input, command_output, params.data(), output_world.data(), lifecycle, error);
+    error = aexcompat::worker_runtime::classic_execution::finish_lifecycle(
+        &lifecycle_host, lifecycle, lifecycle_hooks, false);
   } else {
-    if (error == 0 && !dispatch_render_draw(entry, input, command_output, definitions))
+    if (error == 0 && lifecycle_hooks.draw && !lifecycle_hooks.draw(&lifecycle_host))
       error = -5;
     if (error == 0) {
       const int32_t requested_width = read<int32_t>(command_output, kOutWidth);
@@ -4983,11 +5012,9 @@ int32_t classic_render_runtime(EffectEntry entry, std::array<std::byte, kInSize>
     if (g_render_ui_context_active &&
         !close_render_ui_context(entry, input, command_output, definitions) && error == 0)
       error = -5;
-    error = manage_sequence
-        ? end_render_lifecycle(entry, input, command_output, params.data(),
-                               output_world.data(), lifecycle, error)
-        : end_frame_lifecycle(entry, input, command_output, params.data(),
-                              output_world.data(), lifecycle, error);
+    lifecycle.error = error;
+    error = aexcompat::worker_runtime::classic_execution::finish_lifecycle(
+        &lifecycle_host, lifecycle, lifecycle_hooks, false);
   }
   aexcompat::worker_runtime::classic_execution::Context final_context{
       destination, rowbytes, width, height, pixel_bytes, error,

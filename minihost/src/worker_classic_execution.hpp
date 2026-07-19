@@ -5,6 +5,20 @@
 #include <string>
 #include <vector>
 namespace aexcompat::worker_runtime::classic_execution {
+struct LifecycleHooks {
+  void* (*begin)(void* host);
+  bool (*click)(void* host);
+  bool (*interpolate)(void* host);
+  bool (*roundtrip)(void* host);
+  bool (*conditional_ui)(void* host);
+  bool (*draw)(void* host);
+  int32_t (*end)(void* host, void* lifecycle, int32_t error);
+  void (*dispose_lifecycle)(void* lifecycle);
+};
+struct LifecycleResult { void* lifecycle{}; int32_t error{}; };
+LifecycleResult begin_lifecycle(void* host, const LifecycleHooks& hooks);
+int32_t finish_lifecycle(void* host, LifecycleResult& state,
+                         const LifecycleHooks& hooks, bool draw);
 struct Hooks {
   bool (*copy_packed)(const unsigned char*, int32_t, int32_t, int32_t, int32_t,
                       std::vector<unsigned char>&);
