@@ -152,3 +152,18 @@ rewritten.
   the fixtures are not known to read. To be confirmed by the broker gates
   before merge; if a frozen SHA shifts, that is evidence the fixture reads
   `extent_hint` and belongs in this log as a correction.
+
+## 2026-07-19 訂正: GPU mode では view を返さない (PR #83 Codex P1)
+
+観察 (Codex review finding, PR #83): GPU Smart Render では
+`prepare_cuda_render_transport` が **base の** input/output world の data
+pointer を device 割り当てに書き換え、`is_active_gpu_world` は base
+input/output world と GPU-created world しか受理しない。初版実装のように GPU
+mode でも checkout view を返すと、plug-in は stale な host pointer を持つ
+非 active world を受け取り、GPU Device Suite 呼び出しが失敗する。
+
+訂正: `smart_checkout_pixels` は `g_gpu_world_mode` の間は view を返さず
+base world を返す (従来動作)。view の GpuBgra128 登録も撤回。空応答の
+pixel denial は GPU mode でも維持。extent_hint による checkout 答えの伝達は
+CPU 経路の契約とし、GPU 経路の geometry 伝達は PR2 以降で transport の
+promote と併せて扱う。
