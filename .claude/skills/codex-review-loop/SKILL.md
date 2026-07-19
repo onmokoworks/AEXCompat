@@ -108,7 +108,8 @@ merge 側 (`codex-merge-guard.sh` が head 拘束 clean なしに merge を拒�
   2. 各指摘の妥当性を判断し (owner 指摘も盲従はしないが、Codex より重い)、
      妥当なら対応・commit・push、inline コメントには返信
   3. owner の指摘へ返信して対応済みを明示し、手順 1 に戻る (再トリガー)。
-     inline 指摘はスレッドへの返信が解決シグナル。top-level コメント・bodied
+     inline 指摘は返信後に GitHub review thread を resolve する。guard は
+     GraphQL `reviewThreads.isResolved` を解決状態の正とする。top-level コメント・bodied
      review への対応完了は、本文に **`[ack]` マーカーを含む** top-level
      コメントで明示する (マーカーなしのステータス報告は解決として扱われない)
   4. **owner の要求が未解決の間は merge しない** (CHANGES_REQUESTED は特に)
@@ -130,8 +131,8 @@ merge 側 (`codex-merge-guard.sh` が head 拘束 clean なしに merge を拒�
   および **未解決の owner フィードバック**の不在。解決は**明示シグナルのみ**:
   push しても inline コメントの `.commit_id` は旧 commit に残るだけなので
   「commit が進んだ」ことは対応済みを意味せず、後続の Codex clean も owner
-  フィードバックを解決しない。inline はスレッド単位で「owner の最後の発言より
-  後にセッションの返信があるか」で判定 (owner が ack 後に再返信すれば再 block)。
+  フィードバックを解決しない。inline は GraphQL の review thread 単位で
+  `isResolved == false` を block する (REST の返信時刻から解決を推測しない)。
   bodied COMMENTED review と top-level コメントは返信スレッドを持たないため、
   「セッションのより新しい **`[ack]` マーカー付き** top-level コメント」で解決
   する (マーカーなしのステータス報告は ack にならない。ループ開始前から存在する

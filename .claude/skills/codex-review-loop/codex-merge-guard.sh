@@ -28,13 +28,21 @@ fetch() {
   jq -s '.' <<<"$out"
 }
 
+fetch_review_threads() {
+  local out query
+  query='query($owner:String!,$repo:String!,$pr:Int!,$endCursor:String){repository(owner:$owner,name:$repo){pullRequest(number:$pr){reviewThreads(first:100,after:$endCursor){nodes{isResolved comments(first:100){nodes{databaseId author{login} body createdAt path line originalLine}}}pageInfo{hasNextPage endCursor}}}}}'
+  out=$(gh api graphql --paginate -F owner="$OWNER" -F repo="$REPO" -F pr="$PR" -f query="$query") || return 1
+  jq -s '[.[].data.repository.pullRequest.reviewThreads.nodes[] | {isResolved,comments:[.comments.nodes[]|{id:.databaseId,user:{login:.author.login},body,created_at:.createdAt,path,line,original_line:.originalLine}]}]' <<<"$out"
+}
+
 head=$(gh api "repos/$OWNER/$REPO/pulls/$PR" --jq '.head.sha') || {
   echo "REFUSE: cannot read PR head"; exit 1; }
 # This session's own login, so its inline ACK replies (posted under an owner
-# login) do not self-block; a genuine owner reply from any login still blocks.
+# login) can be identified; GraphQL thread state remains authoritative inline.
 ME=$(gh api user --jq '.login') || { echo "REFUSE: cannot read authenticated login"; exit 1; }
 
 pr_comments=$(fetch "pulls/$PR/comments") || { echo "REFUSE: pulls/comments fetch failed"; exit 1; }
+review_threads=$(fetch_review_threads) || { echo "REFUSE: reviewThreads fetch failed"; exit 1; }
 reviews=$(fetch "pulls/$PR/reviews") || { echo "REFUSE: pulls/reviews fetch failed"; exit 1; }
 issue_comments=$(fetch "issues/$PR/comments") || { echo "REFUSE: issues/comments fetch failed"; exit 1; }
 
@@ -62,8 +70,8 @@ fi
 # Unresolved owner feedback, beyond the CHANGES_REQUESTED that
 # owner_review_gate covers. No implicit supersession: neither a later push nor
 # a later Codex clean resolves owner feedback (see the resolution model in
-# codex-review-lib.sh). Inline threads block until this session replied after
-# the owner's last message in the thread; bodied COMMENTED reviews and
+# codex-review-lib.sh). Inline threads block until GitHub reports isResolved;
+# bodied COMMENTED reviews and
 # top-level comments (no reply threading) block until a later non-trigger
 # top-level ack comment by this session; each is also cleared by its author's
 # later approval/dismissal. This covers feedback that predates this loop
@@ -71,7 +79,7 @@ fi
 clearances=$(owner_clearances <<<"$reviews")
 ack_ts=$(me_ack_ts "$ME" <<<"$issue_comments")
 owner_after=$(
-  { owner_inline_unresolved "$ME" "$clearances" <<<"$pr_comments"
+  { owner_threads_unresolved <<<"$review_threads"
     owner_reviews_unresolved "$clearances" "$ack_ts" <<<"$reviews"
     owner_comments_unresolved "$ME" "$clearances" <<<"$issue_comments"; } | grep -v '^$' || true
 )

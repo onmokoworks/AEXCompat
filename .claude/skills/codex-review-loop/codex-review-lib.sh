@@ -212,6 +212,19 @@ owner_inline_unresolved() {
     | "OWNER-INLINE id=\(.id) \(.path):\(.line // .original_line): \((.body | split("\n")[0]))"'
 }
 
+# Authoritative owner inline gate (input: normalized GraphQL reviewThreads).
+# GitHub exposes thread resolution only through GraphQL; REST reply history is
+# insufficient because a reply does not necessarily resolve a review thread.
+# A thread blocks exactly while isResolved=false and it contains owner feedback.
+owner_threads_unresolved() {
+  jq -r --argjson owner "$OWNER_LOGINS" '
+    .[] | select(.isResolved | not)
+    | [ .comments[] | select([.user.login] | inside($owner)) ] as $owner_msgs
+    | select(($owner_msgs | length) > 0)
+    | ($owner_msgs | last)
+    | "OWNER-INLINE id=\(.id) \(.path):\(.line // .original_line): \((.body | split("\n")[0]))"'
+}
+
 # Timestamp of $me's newest EXPLICIT ack comment, or "" (input: issue-comments
 # array). An ack is a top-level comment by $me containing the literal marker
 # "[ack]" (case-insensitive). Requiring the marker keeps ordinary status

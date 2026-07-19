@@ -307,6 +307,21 @@ def test_owner_inline_after_approval_still_blocks() -> None:
     assert "OWNER-INLINE" in _call("owner_inline_unresolved", payload, ME, clr)
 
 
+def test_unresolved_graphql_owner_thread_blocks() -> None:
+    payload = [{"isResolved": False, "comments": [_inline("onmokoworks")]}]
+    assert "OWNER-INLINE id=9" in _call("owner_threads_unresolved", payload)
+
+
+def test_resolved_graphql_owner_thread_does_not_block() -> None:
+    payload = [{"isResolved": True, "comments": [_inline("onmokoworks")]}]
+    assert _call("owner_threads_unresolved", payload) == ""
+
+
+def test_unresolved_codex_only_thread_is_not_an_owner_blocker() -> None:
+    payload = [{"isResolved": False, "comments": [_inline("chatgpt-codex-connector")]}]
+    assert _call("owner_threads_unresolved", payload) == ""
+
+
 ACK = "2026-07-18T19:26:49Z"  # the session's newest non-trigger ack comment
 
 

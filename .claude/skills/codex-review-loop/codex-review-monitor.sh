@@ -37,6 +37,15 @@ fetch() {
   jq -s '.' <<<"$out"
 }
 
+# GraphQL is required for PullRequestReviewThread.isResolved. gh --paginate
+# follows pageInfo.endCursor because the query declares $endCursor.
+fetch_review_threads() {
+  local out query
+  query='query($owner:String!,$repo:String!,$pr:Int!,$endCursor:String){repository(owner:$owner,name:$repo){pullRequest(number:$pr){reviewThreads(first:100,after:$endCursor){nodes{isResolved comments(first:100){nodes{databaseId author{login} body createdAt path line originalLine}}}pageInfo{hasNextPage endCursor}}}}}'
+  out=$(gh api graphql --paginate -F owner="$OWNER" -F repo="$REPO" -F pr="$PR" -f query="$query" 2>/dev/null) || return 1
+  jq -s '[.[].data.repository.pullRequest.reviewThreads.nodes[] | {isResolved,comments:[.comments.nodes[]|{id:.databaseId,user:{login:.author.login},body,created_at:.createdAt,path,line,original_line:.originalLine}]}]' <<<"$out"
+}
+
 # Inclusive lower bound: GitHub timestamps are second-resolution, so an event
 # in the same second as the trigger would be dropped by strict ">". Used only
 # for the printed finding list and the reaction advisory; owner feedback is
@@ -59,6 +68,7 @@ while true; do
   # the commit landed on the branch (push/rebase), the right proxy here.
   if ! head_date=$(gh api "repos/$OWNER/$REPO/commits/$head" --jq '.commit.committer.date' 2>/dev/null); then continue; fi
   if ! pr_comments=$(fetch "pulls/$PR/comments"); then continue; fi
+  if ! review_threads=$(fetch_review_threads); then continue; fi
   if ! reviews=$(fetch "pulls/$PR/reviews"); then continue; fi
   if ! issue_comments=$(fetch "issues/$PR/comments"); then continue; fi
   if ! pr_reactions=$(fetch "issues/$PR/reactions"); then continue; fi
@@ -79,7 +89,7 @@ while true; do
   #    blockers mirror the merge guard exactly, so monitor CLEAN <=> guard
   #    accepts: (a) an unresolved CHANGES_REQUESTED (per-reviewer, full
   #    history) and (b) unresolved owner feedback under the explicit-resolution
-  #    model (codex-review-lib.sh): inline threads where the owner spoke last,
+  #    model (codex-review-lib.sh): GraphQL review threads with isResolved=false,
   #    and bodied COMMENTED reviews / top-level comments with no later ack
   #    comment by this session — regardless of which commit or when; a push or
   #    a fresh clean never implicitly resolves owner feedback.
@@ -88,7 +98,7 @@ while true; do
   owner_block=$(
     { [ -n "$(owner_review_gate <<<"$reviews")" ] \
         && echo "OWNER-REVIEW CHANGES_REQUESTED (unresolved; owner must approve/dismiss)"
-      owner_inline_unresolved "$ME" "$clearances" <<<"$pr_comments"
+      owner_threads_unresolved <<<"$review_threads"
       owner_reviews_unresolved "$clearances" "$ack_ts" <<<"$reviews"
       owner_comments_unresolved "$ME" "$clearances" <<<"$issue_comments"; } | grep -v '^$' || true
   )
