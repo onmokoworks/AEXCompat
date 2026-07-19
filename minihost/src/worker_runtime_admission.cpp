@@ -65,4 +65,24 @@ int admit_runtime(const RuntimeHostHooks& hooks,
   return 0;
 }
 
+int prepare_runtime_request(const wchar_t* plugin_argument,
+                            const wchar_t* expected_sha256,
+                            bool authorize_runtime_modules,
+                            const wchar_t* authorization_manifest,
+                            RuntimeAdmissionRequest& request) {
+  if (!plugin_argument || !expected_sha256) return 2;
+  request = {};
+  request.plugin_argument = plugin_argument;
+  for (const wchar_t* character = expected_sha256; *character; ++character) {
+    if (*character > 0x7f) return 2;
+    request.expected_sha256.push_back(static_cast<char>(*character));
+  }
+  if (authorize_runtime_modules) {
+    if (!authorization_manifest) return 2;
+    request.authorize_runtime_modules = true;
+    request.authorization_manifest = authorization_manifest;
+  }
+  return 0;
+}
+
 }  // namespace aexcompat::worker_runtime

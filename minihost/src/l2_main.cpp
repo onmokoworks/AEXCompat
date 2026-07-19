@@ -6380,20 +6380,13 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
   }
   // Every rendered effect instance belongs to a layer, even when that layer has no masks.
   if (is_rendering_worker()) g_mask_model_enabled = true;
-  std::string expected;
-  for (const wchar_t* p = argv[3]; *p; ++p) {
-    if (*p > 0x7f) return 2;
-    expected.push_back(static_cast<char>(*p));
-  }
   RuntimeHostHooks runtime_hooks{&sha256, &redirect_native_stdout,
                                  &restore_native_stdout};
   RuntimeAdmissionRequest runtime_request;
-  runtime_request.plugin_argument = argv[2];
-  runtime_request.expected_sha256 = expected;
-  if (!is_rendering_worker() && runtime_module_authorization_mode) {
-    runtime_request.authorize_runtime_modules = true;
-    runtime_request.authorization_manifest = argv[5];
-  }
+  const int request_error = aexcompat::worker_runtime::prepare_runtime_request(
+      argv[2], argv[3], !is_rendering_worker() && runtime_module_authorization_mode,
+      runtime_module_authorization_mode ? argv[5] : nullptr, runtime_request);
+  if (request_error != 0) return request_error;
   aexcompat::TraceWriter trace_writer(
       "minihost", trace_worker_label(),
       std::filesystem::path(argv[2]).filename().string());

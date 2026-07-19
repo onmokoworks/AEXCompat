@@ -40,4 +40,13 @@ int admit_runtime(const RuntimeHostHooks& hooks,
                   const RuntimeAdmissionRequest& request,
                   RuntimeContext& context);
 
+// Builds the bounded request consumed by admission without loading the
+// plug-in. Returns the historical malformed-argument code for non-ASCII
+// identity text so callers cannot accidentally widen the security boundary.
+int prepare_runtime_request(const wchar_t* plugin_argument,
+                            const wchar_t* expected_sha256,
+                            bool authorize_runtime_modules,
+                            const wchar_t* authorization_manifest,
+                            RuntimeAdmissionRequest& request);
+
 }  // namespace aexcompat::worker_runtime
