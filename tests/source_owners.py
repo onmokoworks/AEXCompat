@@ -42,6 +42,8 @@ WORKER_RUNTIME_OWNERS = (
     "minihost/src/worker_aegp_pf_interface_suite.cpp",
     "minihost/src/worker_aegp_command_suites.hpp",
     "minihost/src/worker_aegp_command_suites.cpp",
+    "minihost/src/worker_mask_suite_tables.hpp",
+    "minihost/src/worker_mask_suite_tables.cpp",
 )
 
 # 契約名 → owner ファイル群 (repo ルート相対)。
@@ -62,6 +64,8 @@ CONTRACTS = {
         "minihost/src/worker_aegp_pf_interface_suite.cpp",
         "minihost/src/worker_aegp_command_suites.hpp",
         "minihost/src/worker_aegp_command_suites.cpp",
+        "minihost/src/worker_mask_suite_tables.hpp",
+        "minihost/src/worker_mask_suite_tables.cpp",
         "minihost/src/l2_mode_execution.hpp",
         "minihost/src/l2_mode_execution.cpp",
         "minihost/src/l2_cli_dispatch.cpp",
