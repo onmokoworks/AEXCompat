@@ -1063,7 +1063,7 @@ class MinihostL2SourceTests(unittest.TestCase):
         self.assertIn("void* unsupported[7]{}", text)
         self.assertIn("UtilitySuite3 g_utility_suite3", text)
         self.assertIn(
-            'std::strcmp(name, "AEGP Utility Suite") == 0 && version == 7', text
+            '{"AEGP Utility Suite", 7, &g_utility_suite3}', text
         )
 
     def test_discovery_selectors_share_the_seh_boundary_and_report_selector(self):

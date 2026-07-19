@@ -23,7 +23,7 @@ def test_cache_on_load_v1_exact_name_version_and_one_slot_abi():
     header = _sdk_header().read_text(encoding="utf-8")
     assert '#define kPFCacheOnLoadSuite\t\t\t"PF Cache On Load Suite"' in header
     assert "kPFCacheOnLoadSuiteVersion1\t1" in header
-    assert 'std::strcmp(name, "PF Cache On Load Suite") == 0 && version == 1' in text
+    assert '{"PF Cache On Load Suite", 1, &cache_on_load_suite()}' in text
     assert "sizeof(PfCacheOnLoadSuite1) == sizeof(void*)" in component
     assert "offsetof(PfCacheOnLoadSuite1, set_no_cache_on_load) == 0" in component
 

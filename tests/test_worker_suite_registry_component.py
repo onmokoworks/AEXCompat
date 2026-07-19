@@ -9,6 +9,9 @@ HEADER = (ROOT / "minihost" / "src" / "worker_suite_registry.hpp").read_text(
 SOURCE = (ROOT / "minihost" / "src" / "worker_suite_registry.cpp").read_text(
     encoding="utf-8"
 )
+ROUTER = (ROOT / "minihost/src/worker_host_suite_router.cpp").read_text(
+    encoding="utf-8"
+)
 CMAKE = (ROOT / "minihost" / "CMakeLists.txt").read_text(encoding="utf-8")
 NATIVE = (ROOT / "tests" / "native" / "worker_suite_registry_selftest.cpp").read_text(
     encoding="utf-8"
@@ -20,11 +23,12 @@ def test_registry_is_a_genuine_compiled_owner_and_abi_wrappers_remain_in_main():
                          CMAKE.index("add_library(aex_worker_runtime_core")]
     assert core_sources.count("src/worker_suite_registry.cpp") == 1
     assert '#include "worker_suite_registry.hpp"' in MAIN
-    assert "SuiteResolveResult resolve_suite(" in MAIN
+    assert "SuiteResolveResult resolve_legacy_host_suite(" in MAIN
     acquire = MAIN[MAIN.index("int32_t __cdecl acquire_suite(") :]
     acquire = acquire[: acquire.index("int32_t __cdecl release_suite(")]
-    assert "suite_registry().acquire(" in acquire
-    assert "&resolve_suite" in acquire
+    assert "acquire_host_suite(" in acquire
+    assert "suite_registry().acquire(" in ROUTER
+    assert "&resolve_legacy_host_suite" in acquire
     assert "g_trace_writer" in acquire
     basic = MAIN[MAIN.index("struct BasicSuite") : MAIN.index("int32_t invoke_sequence_selector")]
     assert "decltype(&acquire_suite) acquire" in basic
@@ -48,11 +52,9 @@ def test_registry_owns_success_reject_unknown_and_release_protocols():
 
 
 def test_scene_precedence_and_live_tls_conditional_exposure_stay_in_resolver():
-    resolver = MAIN[MAIN.index("SuiteResolveResult resolve_suite(") :
+    resolver = MAIN[MAIN.index("SuiteResolveResult resolve_scene_suite_provider(") :
                     MAIN.index("int32_t __cdecl acquire_suite(")]
     scene = resolver.index("if (scene_context())")
-    first_provider = resolver.index('std::strcmp(name, "AE Plugin Helper Suite")')
-    assert scene < first_provider
     assert "SceneSuiteAcquireResult::rejected" in resolver
     assert "return SuiteResolveResult::rejected_bad_param" in resolver
     assert "is_render_worker() && g_loaded_effect_receipt_context.entry" in resolver
@@ -60,6 +62,10 @@ def test_scene_precedence_and_live_tls_conditional_exposure_stay_in_resolver():
     assert "g_mask_model_enabled" in resolver
     assert "record_suite_acquire" not in resolver
     assert "reject_suite_acquire" not in resolver
+    acquire = MAIN[MAIN.index("int32_t __cdecl acquire_suite(") :]
+    assert acquire.index("resolve_scene_suite_provider") < acquire.index(
+        "resolve_static_provider"
+    ) < acquire.index("resolve_legacy_host_suite")
 
 
 def test_missing_suite_diagnostics_remain_bounded_sanitized_and_fail_closed():

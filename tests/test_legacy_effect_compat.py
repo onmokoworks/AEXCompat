@@ -16,6 +16,7 @@ SOURCES = (
     ROOT / "minihost" / "src" / "worker_selftest_dispatch.cpp",
     ROOT / "minihost" / "src" / "worker_pf_helper_runtime.cpp",
     ROOT / "minihost" / "src" / "worker_pf_helper_runtime.hpp",
+    ROOT / "minihost" / "src" / "worker_host_suite_router.cpp",
 )
 SUITE_ABI = ROOT / "minihost" / "src" / "worker_suite_abi.hpp"
 
@@ -90,7 +91,7 @@ def test_minihost_publishes_typed_fail_closed_legacy_effect_suites() -> None:
         "offsetof(PfInterfaceSuite, convert_effect_to_comp_time) == 2 * sizeof(void*)",
         "&convert_effect_to_comp_time",
         "using Suite1 = std::array<void*, 1>",
-        'std::strcmp(name, "AE Plugin Helper Suite") == 0',
+        '{"AE Plugin Helper Suite", 1, aexcompat::pf_helper::suite1()}',
         "--self-test-legacy-effect-compat",
     ):
         assert marker in text

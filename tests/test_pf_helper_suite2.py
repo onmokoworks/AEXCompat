@@ -16,8 +16,7 @@ def source() -> str:
 
 def test_helper_suite2_uses_the_sdk_name_version_and_three_slot_abi() -> None:
     text = source()
-    assert 'std::strcmp(name, "AE Plugin Helper Suite2") == 0' in text
-    assert "name && version == 2" in text
+    assert '{"AE Plugin Helper Suite2", 2, aexcompat::pf_helper::suite2()}' in text
     declaration = text[text.index("using Suite2 = std::array<void*, 3>") :]
     slots = [
         "&parse_clipboard",
@@ -27,7 +26,7 @@ def test_helper_suite2_uses_the_sdk_name_version_and_three_slot_abi() -> None:
     assert [declaration.index(slot) for slot in slots] == sorted(
         declaration.index(slot) for slot in slots
     )
-    assert "*suite = aexcompat::pf_helper::suite2();" in text
+    assert "resolve_static_provider" in text
 
 
 def test_headless_clipboard_parse_is_explicitly_fail_closed() -> None:

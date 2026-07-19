@@ -75,6 +75,7 @@
 #include "worker_aegp_scene_runtime.hpp"
 #include "worker_classic_runtime.hpp"
 #include "worker_handle_runtime.hpp"
+#include "worker_host_suite_router.hpp"
 #include "worker_suite_abi.hpp"
 #include "worker_suite_registry.hpp"
 #include "worker_world_registry.hpp"
@@ -6972,8 +6973,8 @@ bool finish_cuda_render_transport(CudaRenderTransport& transport) {
   return gpu_transport::finish_render_transport(transport);
 }
 
-SuiteResolveResult resolve_suite(void*, const char* name, int32_t version,
-                                 const void** suite) {
+SuiteResolveResult resolve_scene_suite_provider(
+    void*, const char* name, int32_t version, const void** suite) {
   if (scene_context()) {
     const SceneSuiteAcquireResult scene_result =
         scene_acquire_suite(name, version, suite);
@@ -6983,14 +6984,11 @@ SuiteResolveResult resolve_suite(void*, const char* name, int32_t version,
     if (scene_result == SceneSuiteAcquireResult::rejected)
       return SuiteResolveResult::rejected_bad_param;
   }
-  if (version == 1 && std::strcmp(name, "AE Plugin Helper Suite") == 0) {
-    *suite = aexcompat::pf_helper::suite1();
-    return SuiteResolveResult::acquired;
-  }
-  if (name && version == 2 && std::strcmp(name, "AE Plugin Helper Suite2") == 0) {
-    *suite = aexcompat::pf_helper::suite2();
-    return SuiteResolveResult::acquired;
-  }
+  return SuiteResolveResult::not_found;
+}
+
+SuiteResolveResult resolve_legacy_host_suite(
+    void*, const char* name, int32_t version, const void** suite) {
   if (name && version == 1 && std::strcmp(name, "PF Color Suite") == 0) {
     *suite = &g_color_suite8; return SuiteResolveResult::acquired;
   }
@@ -7142,10 +7140,6 @@ SuiteResolveResult resolve_suite(void*, const char* name, int32_t version,
     *suite = &g_effect_sequence_data_suite1;
     return SuiteResolveResult::acquired;
   }
-  if (name && std::strcmp(name, "PF Cache On Load Suite") == 0 && version == 1) {
-    *suite = &cache_on_load_suite();
-    return SuiteResolveResult::acquired;
-  }
   if (name && std::strcmp(name, "PF Handle Suite") == 0 && version == 2) {
     *suite = &g_handle_suite;
     return SuiteResolveResult::acquired;
@@ -7175,22 +7169,6 @@ SuiteResolveResult resolve_suite(void*, const char* name, int32_t version,
     g_ansi_suite1[17] = reinterpret_cast<void*>(&ansi_asin);
     g_ansi_suite1[18] = reinterpret_cast<void*>(&ansi_acos);
     *suite = g_ansi_suite1.data();
-    return SuiteResolveResult::acquired;
-  }
-  if (name && std::strcmp(name, "PF AE Adv Time Suite") == 0 && version == 1) {
-    *suite = aexcompat::worker_runtime::pf_adv_time::suite(1);
-    return SuiteResolveResult::acquired;
-  }
-  if (name && std::strcmp(name, "PF AE Adv Time Suite") == 0 && version == 2) {
-    *suite = aexcompat::worker_runtime::pf_adv_time::suite(2);
-    return SuiteResolveResult::acquired;
-  }
-  if (name && std::strcmp(name, "PF AE Adv Time Suite") == 0 && version == 3) {
-    *suite = aexcompat::worker_runtime::pf_adv_time::suite(3);
-    return SuiteResolveResult::acquired;
-  }
-  if (name && std::strcmp(name, "PF AE Adv Time Suite") == 0 && version == 4) {
-    *suite = aexcompat::worker_runtime::pf_adv_time::suite(4);
     return SuiteResolveResult::acquired;
   }
   if (is_render_worker() && name &&
@@ -7236,10 +7214,6 @@ SuiteResolveResult resolve_suite(void*, const char* name, int32_t version,
   }
   if (name && std::strcmp(name, "PF Param Utils Suite") == 0 && version == 2) {
     *suite = &g_param_utils_suite1;
-    return SuiteResolveResult::acquired;
-  }
-  if (name && std::strcmp(name, "AEGP Memory Suite") == 0 && version == 1) {
-    *suite = &g_aegp_memory_suite;
     return SuiteResolveResult::acquired;
   }
   if (name && std::strcmp(name, "PF Color Settings Suite") == 0 && version == 7) {
@@ -7326,14 +7300,6 @@ SuiteResolveResult resolve_suite(void*, const char* name, int32_t version,
     g_fill_matte_suite2[5] = reinterpret_cast<void*>(&premultiply_color16);
     g_fill_matte_suite2[6] = reinterpret_cast<void*>(&premultiply_color_float);
     *suite = g_fill_matte_suite2.data();
-    return SuiteResolveResult::acquired;
-  }
-  if (name && std::strcmp(name, "AEGP Utility Suite") == 0 && version == 7) {
-    *suite = &g_utility_suite3;
-    return SuiteResolveResult::acquired;
-  }
-  if (name && std::strcmp(name, "AEGP Utility Suite") == 0 && version == 13) {
-    *suite = &g_utility_suite;
     return SuiteResolveResult::acquired;
   }
   if (name && std::strcmp(name, "AEGP Dynamic Stream Suite") == 0 && version == 2) {
@@ -7473,12 +7439,37 @@ SuiteResolveResult resolve_suite(void*, const char* name, int32_t version,
 
 int32_t __cdecl acquire_suite(const char* name, int32_t version,
                               const void** suite) {
-  return suite_registry().acquire(name, version, suite, &resolve_suite, nullptr,
-                                  g_trace_writer);
+  using namespace aexcompat::worker_runtime::host_suites;
+  const StaticSuite component_suites[] = {
+      {"AE Plugin Helper Suite", 1, aexcompat::pf_helper::suite1()},
+      {"AE Plugin Helper Suite2", 2, aexcompat::pf_helper::suite2()},
+      {"PF Cache On Load Suite", 1, &cache_on_load_suite()},
+      {"PF AE Adv Time Suite", 1,
+       aexcompat::worker_runtime::pf_adv_time::suite(1)},
+      {"PF AE Adv Time Suite", 2,
+       aexcompat::worker_runtime::pf_adv_time::suite(2)},
+      {"PF AE Adv Time Suite", 3,
+       aexcompat::worker_runtime::pf_adv_time::suite(3)},
+      {"PF AE Adv Time Suite", 4,
+       aexcompat::worker_runtime::pf_adv_time::suite(4)},
+      {"AEGP Memory Suite", 1, &g_aegp_memory_suite},
+      {"AEGP Utility Suite", 7, &g_utility_suite3},
+      {"AEGP Utility Suite", 13, &g_utility_suite},
+  };
+  StaticProviderCatalog component_catalog{
+      component_suites, std::size(component_suites)};
+  const Provider providers[] = {
+      {&resolve_scene_suite_provider, nullptr},
+      {&resolve_static_provider, &component_catalog},
+  };
+  const ProviderCatalog catalog{providers, std::size(providers),
+                                &resolve_legacy_host_suite, nullptr};
+  return acquire_host_suite(catalog, name, version, suite, g_trace_writer);
 }
 
 int32_t __cdecl release_suite(const char* name, int32_t version) {
-  return suite_registry().release(name, version, g_trace_writer);
+  return aexcompat::worker_runtime::host_suites::release_host_suite(
+      name, version, g_trace_writer);
 }
 
 bool verify_suite_release_without_acquire_rejected() {

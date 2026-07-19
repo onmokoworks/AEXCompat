@@ -13,7 +13,7 @@ def source() -> str:
 def test_adv_time_versions_have_exact_public_name_and_independent_typed_tables():
     text = source()
     for version in range(1, 5):
-        assert f'std::strcmp(name, "PF AE Adv Time Suite") == 0 && version == {version}' in text
+        assert f'{{"PF AE Adv Time Suite", {version},' in text
         assert f"AdvTimeSuite{version} g_adv_time_suite{version}" in text
     assert "static_assert(sizeof(AdvTimeSuite1) == 4 * sizeof(void*))" in text
     assert "static_assert(sizeof(AdvTimeSuite2) == 4 * sizeof(void*))" in text
