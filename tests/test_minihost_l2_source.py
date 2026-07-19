@@ -157,9 +157,37 @@ class MinihostL2SourceTests(unittest.TestCase):
         self.assertNotIn("PF_Cmd_RENDER", text)
         self.assertNotIn("AE_Effect.h", text)
 
-    def test_render_code_is_compile_time_separated(self):
+    def test_worker_profiles_share_one_macro_neutral_runtime_core(self):
         text = l2_family_source()
-        self.assertIn("#ifdef AEXCOMPAT_RENDER_WORKER", text)
+        main = SOURCE.read_text(encoding="utf-8")
+        cmake = MINIHOST_CMAKE.read_text(encoding="utf-8")
+        target = (ROOT / "minihost" / "src" / "worker_target.hpp").read_text(
+            encoding="utf-8"
+        )
+        entries = {
+            kind: (ROOT / "minihost" / "src" / name).read_text(encoding="utf-8")
+            for kind, name in (
+                ("L2", "worker_l2_entry.cpp"),
+                ("Render", "worker_render_entry.cpp"),
+                ("Smart", "worker_smart_entry.cpp"),
+            )
+        }
+
+        self.assertNotIn("AEXCOMPAT_RENDER_WORKER", main)
+        self.assertNotIn("AEXCOMPAT_SMART_WORKER", main)
+        self.assertNotIn("AEXCOMPAT_RENDER_WORKER", cmake)
+        self.assertNotIn("AEXCOMPAT_SMART_WORKER", cmake)
+        self.assertIn("struct InvocationState", main)
+        self.assertIn("if (is_render_worker())", main)
+        self.assertIn("else if (is_smart_worker())", main)
+        self.assertIn("enum class Kind { L2, Render, Smart }", target)
+        self.assertEqual(cmake.count("src/l2_main.cpp"), 1)
+        self.assertIn("add_library(aex_worker_runtime_core OBJECT", cmake)
+        self.assertEqual(cmake.count("$<TARGET_OBJECTS:aex_worker_runtime_core>"), 3)
+        for kind, entry in entries.items():
+            self.assertIn("aexcompat::worker_target::run", entry)
+            self.assertIn(f"worker_target::Kind::{kind}", entry)
+            self.assertNotIn('#include "l2_main.cpp"', entry)
         self.assertIn('L"--render"', text)
         self.assertIn('L"--l2"', text)
         self.assertIn("guard_bytes_intact", text)

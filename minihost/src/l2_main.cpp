@@ -50,9 +50,7 @@
 #include "gpu_directx_backend.hpp"
 #include "gpu_opencl_backend.hpp"
 #include "gpu_memory_world_transport.hpp"
-#include "host_audio_runtime.hpp"
 #include "l2_cli_dispatch.h"
-#include "l2_mode_execution.hpp"
 #include "parameter_animation_transport.hpp"
 #include "pf_cache_on_load_suite.hpp"
 #include "render_lifecycle.hpp"
@@ -138,9 +136,6 @@ using aexcompat::gpu_runtime::CudaDevicePointer;
 using aexcompat::gpu_runtime::gpu_get_device_count;
 using aexcompat::gpu_runtime::gpu_get_device_info;
 using aexcompat::gpu_runtime::kMaxGpuDevices;
-using aexcompat::host_audio::checkout_layer_audio;
-using aexcompat::host_audio::checkin_layer_audio;
-using aexcompat::host_audio::get_audio_data;
 using namespace aexcompat::worker_runtime::handles;
 using aexcompat::render_safety::InputPixelBuffer;
 using aexcompat::render_safety::OutputPixelBuffer;
@@ -478,11 +473,50 @@ uint32_t g_arbitrary_interpolation_calls{};
 uint32_t g_arbitrary_interpolation_failures{};
 double g_last_arbitrary_interpolation_amount{};
 std::wstring g_plugin_file_path;
-const aexcompat::host_audio::Telemetry& audio_telemetry() {
-  return aexcompat::host_audio::runtime().telemetry();
+struct HostLayerAudio {
+  std::vector<unsigned char> samples;
+  bool checked_out{};
+  uint32_t rate{};
+  int32_t sample_frames{};
+  int32_t bytes_per_sample{};
+  int32_t channels{};
+  int32_t format{};
+};
+std::vector<float>* g_audio_source{};
+int32_t g_audio_source_sample_count{};
+constexpr std::size_t kMaxLayerAudioHandles = 16;
+std::array<HostLayerAudio, kMaxLayerAudioHandles> g_layer_audio_handles{};
+uint32_t g_audio_checkout_calls{};
+uint32_t g_audio_checkin_calls{};
+uint32_t g_audio_get_data_calls{};
+uint32_t g_invalid_audio_operations{};
+bool g_audio_checkout_allowed = false;
+bool g_audio_usage_advertised = false;
+uint32_t g_rejected_unadvertised_audio_checkouts = 0;
+uint32_t g_rejected_audio_format_requests = 0;
+uint32_t g_audio_handle_exhaustions = 0;
+int32_t g_last_audio_checkout_start_time{};
+int32_t g_last_audio_checkout_duration{};
+uint32_t g_last_audio_checkout_time_scale{};
+int64_t g_last_audio_window_start_sample{};
+int32_t g_last_audio_window_sample_count{};
+int32_t g_last_audio_window_silence_samples{};
+uint32_t g_last_audio_output_rate{};
+int32_t g_last_audio_output_bytes_per_sample{};
+int32_t g_last_audio_output_channels{};
+int32_t g_last_audio_output_format{};
+int32_t g_last_audio_returned_sample_frames{};
+uint32_t g_peak_live_audio_handles{};
+
+uint32_t live_audio_handle_count() {
+  return static_cast<uint32_t>(std::count_if(g_layer_audio_handles.begin(),
+      g_layer_audio_handles.end(), [](const HostLayerAudio& handle) {
+        return handle.checked_out;
+      }));
 }
+
 bool audio_handle_lifetimes_balanced() {
-  return aexcompat::host_audio::runtime().lifetimes_balanced();
+  return live_audio_handle_count() == 0 && g_audio_checkout_calls == g_audio_checkin_calls;
 }
 bool g_update_params_ui_advertised = false;
 bool g_query_dynamic_flags_advertised = false;
@@ -9959,6 +9993,149 @@ int32_t __cdecl checkout_param(void*, int32_t index, int32_t what_time, int32_t 
   return 4;
 }
 
+int32_t __cdecl checkout_layer_audio(void* effect_ref, int32_t index, int32_t start_time,
+                                     int32_t duration, uint32_t time_scale,
+                                     uint32_t rate, int32_t bytes_per_sample,
+                                     int32_t num_channels, int32_t format, void** audio) {
+  if (!g_audio_checkout_allowed) {
+    ++g_rejected_unadvertised_audio_checkouts;
+    ++g_invalid_audio_operations;
+    return 4;
+  }
+  if (!effect_ref || !audio || *audio || !g_audio_source || index != 0 ||
+      duration < 0 || time_scale == 0) {
+    ++g_invalid_audio_operations;
+    return 4;
+  }
+  if (rate < (1000u << 16) || rate > (65535u << 16) ||
+      (num_channels != 1 && num_channels != 2) ||
+      (bytes_per_sample != 1 && bytes_per_sample != 2 && bytes_per_sample != 4) ||
+      (format != 0 && format != 1 && format != 2) ||
+      (format == 2 && bytes_per_sample != 4)) {
+    ++g_rejected_audio_format_requests;
+    return 4;
+  }
+  auto handle_it = std::find_if(g_layer_audio_handles.begin(), g_layer_audio_handles.end(),
+      [](const HostLayerAudio& handle) { return !handle.checked_out; });
+  if (handle_it == g_layer_audio_handles.end()) {
+    ++g_audio_handle_exhaustions;
+    return 4;
+  }
+  HostLayerAudio& layer_audio = *handle_it;
+  constexpr int64_t kMaxCheckoutSamples = 10'000'000;
+  const double requested_rate = static_cast<double>(rate) / 65536.0;
+  const auto floor_samples = [=](int64_t time) {
+    return static_cast<int64_t>(std::floor(
+        static_cast<double>(time) * requested_rate / time_scale));
+  };
+  const auto ceil_samples = [=](int64_t time) {
+    return static_cast<int64_t>(std::ceil(
+        static_cast<double>(time) * requested_rate / time_scale));
+  };
+  const int64_t end_time = static_cast<int64_t>(start_time) + duration;
+  const int64_t window_start = floor_samples(start_time);
+  const int64_t window_end = ceil_samples(end_time);
+  const int64_t window_count = window_end - window_start;
+  if (window_count < 0 || window_count > kMaxCheckoutSamples) {
+    ++g_invalid_audio_operations;
+    return 4;
+  }
+
+  const int64_t returned_frames = window_count + 1;
+  const uint64_t byte_count = static_cast<uint64_t>(returned_frames) * num_channels * bytes_per_sample;
+  if (byte_count > static_cast<uint64_t>(kMaxCheckoutSamples + 1) * 2 * 4) {
+    ++g_invalid_audio_operations;
+    return 4;
+  }
+  layer_audio.samples.assign(static_cast<std::size_t>(byte_count), 0);
+  auto encode_sample = [&](std::size_t offset, float value) {
+    value = std::clamp(value, -1.0f, 1.0f);
+    if (format == 2) {
+      std::memcpy(layer_audio.samples.data() + offset, &value, 4);
+    } else if (format == 1) {
+      if (bytes_per_sample == 1) { const int8_t v = static_cast<int8_t>(std::lround(value * 127.0)); std::memcpy(layer_audio.samples.data() + offset, &v, 1); }
+      else if (bytes_per_sample == 2) { const int16_t v = static_cast<int16_t>(std::lround(value * 32767.0)); std::memcpy(layer_audio.samples.data() + offset, &v, 2); }
+      else { const int32_t v = static_cast<int32_t>(std::llround(value * 2147483647.0)); std::memcpy(layer_audio.samples.data() + offset, &v, 4); }
+    } else {
+      if (bytes_per_sample == 1) { const uint8_t v = static_cast<uint8_t>(std::lround((value + 1.0) * 127.5)); std::memcpy(layer_audio.samples.data() + offset, &v, 1); }
+      else if (bytes_per_sample == 2) { const uint16_t v = static_cast<uint16_t>(std::lround((value + 1.0) * 32767.5)); std::memcpy(layer_audio.samples.data() + offset, &v, 2); }
+      else { const uint32_t v = static_cast<uint32_t>(std::llround((value + 1.0) * 2147483647.5)); std::memcpy(layer_audio.samples.data() + offset, &v, 4); }
+    }
+  };
+  int64_t silence_frames = 0;
+  for (int64_t frame = 0; frame < returned_frames; ++frame) {
+    const bool sentinel_frame = frame == window_count;
+    const double source_position = static_cast<double>(window_start + frame) * 44100.0 / requested_rate;
+    float value = 0.0f;
+    if (!sentinel_frame && source_position >= 0.0 && source_position < g_audio_source_sample_count) {
+      const auto left = static_cast<int64_t>(std::floor(source_position));
+      const auto right = std::min<int64_t>(left + 1, g_audio_source_sample_count - 1);
+      const double fraction = source_position - left;
+      value = static_cast<float>((*g_audio_source)[left] * (1.0 - fraction) +
+                                 (*g_audio_source)[right] * fraction);
+    } else if (!sentinel_frame) {
+      ++silence_frames;
+    }
+    for (int32_t channel = 0; channel < num_channels; ++channel)
+      encode_sample(static_cast<std::size_t>((frame * num_channels + channel) * bytes_per_sample), value);
+  }
+  layer_audio.checked_out = true;
+  layer_audio.rate = rate;
+  layer_audio.sample_frames = static_cast<int32_t>(returned_frames);
+  layer_audio.bytes_per_sample = bytes_per_sample;
+  layer_audio.channels = num_channels;
+  layer_audio.format = format;
+  g_last_audio_checkout_start_time = start_time;
+  g_last_audio_checkout_duration = duration;
+  g_last_audio_checkout_time_scale = time_scale;
+  g_last_audio_window_start_sample = window_start;
+  g_last_audio_window_sample_count = static_cast<int32_t>(window_count);
+  g_last_audio_window_silence_samples = static_cast<int32_t>(silence_frames);
+  g_last_audio_output_rate = rate;
+  g_last_audio_output_bytes_per_sample = bytes_per_sample;
+  g_last_audio_output_channels = num_channels;
+  g_last_audio_output_format = format;
+  g_last_audio_returned_sample_frames = static_cast<int32_t>(returned_frames);
+  *audio = &layer_audio;
+  ++g_audio_checkout_calls;
+  g_peak_live_audio_handles = std::max(g_peak_live_audio_handles, live_audio_handle_count());
+  return 0;
+}
+
+int32_t __cdecl checkin_layer_audio(void* effect_ref, void* audio) {
+  auto handle_it = std::find_if(g_layer_audio_handles.begin(), g_layer_audio_handles.end(),
+      [=](const HostLayerAudio& handle) { return audio == &handle; });
+  if (!effect_ref || handle_it == g_layer_audio_handles.end() || !handle_it->checked_out) {
+    ++g_invalid_audio_operations;
+    return 4;
+  }
+  handle_it->checked_out = false;
+  handle_it->samples.clear();
+  ++g_audio_checkin_calls;
+  return 0;
+}
+
+int32_t __cdecl get_audio_data(void* effect_ref, void* audio, void** data,
+                               int32_t* num_samples, uint32_t* rate,
+                               int32_t* bytes_per_sample, int32_t* num_channels,
+                               int32_t* format) {
+  auto handle_it = std::find_if(g_layer_audio_handles.begin(), g_layer_audio_handles.end(),
+      [=](const HostLayerAudio& handle) { return audio == &handle; });
+  if (!effect_ref || handle_it == g_layer_audio_handles.end() || !handle_it->checked_out ||
+      handle_it->samples.size() > 80'000'008) {
+    ++g_invalid_audio_operations;
+    return 4;
+  }
+  if (data) *data = handle_it->samples.empty() ? nullptr : handle_it->samples.data();
+  if (num_samples) *num_samples = handle_it->sample_frames;
+  if (rate) *rate = handle_it->rate;
+  if (bytes_per_sample) *bytes_per_sample = handle_it->bytes_per_sample;
+  if (num_channels) *num_channels = handle_it->channels;
+  if (format) *format = handle_it->format;
+  ++g_audio_get_data_calls;
+  return 0;
+}
+
 constexpr int32_t kPfErrBadCallbackParam = 516;
 
 uint8_t composite_divide_255(uint32_t numerator) {
@@ -13980,82 +14157,6 @@ void report(const char* status, int32_t global_error, int32_t params_error,
   std::cout << aexcompat::worker_report::serialize_l2_report(c);
 }
 
-struct EarlyModeBridge {
-  EffectEntry entry{};
-  std::array<std::byte, kInSize>* input{};
-  std::array<std::byte, kOutSize>* output{};
-  HMODULE module{};
-  const std::string* about_message{};
-};
-uint32_t early_mode_out_flags(void* opaque) {
-  const auto& b = *static_cast<EarlyModeBridge*>(opaque);
-  return read<uint32_t>(*b.output, kOutFlags);
-}
-void early_mode_copy_sequence_data_to_input(void* opaque) {
-  const auto& b = *static_cast<EarlyModeBridge*>(opaque);
-  write<void**>(*b.input, kInSequenceData, read<void**>(*b.output, kOutSequenceData));
-}
-int32_t early_mode_sequence_setup(void* opaque, uint32_t* exception) {
-  const auto& b = *static_cast<EarlyModeBridge*>(opaque);
-  return invoke_sequence_selector(b.entry, kSequenceSetup, b.input->data(), b.output->data(), exception);
-}
-int32_t early_mode_sequence_setdown(void* opaque, uint32_t* exception) {
-  const auto& b = *static_cast<EarlyModeBridge*>(opaque);
-  return invoke_sequence_selector(b.entry, kSequenceSetdown, b.input->data(), b.output->data(), exception);
-}
-int32_t early_mode_do_dialog(void* opaque, uint32_t* exception) {
-  const auto& b = *static_cast<EarlyModeBridge*>(opaque);
-  return invoke_entry_seh(b.entry, kDoDialog, b.input->data(), b.output->data(),
-                          nullptr, nullptr, nullptr, exception);
-}
-int32_t early_mode_global_setdown(void* opaque) {
-  const auto& b = *static_cast<EarlyModeBridge*>(opaque);
-  return invoke_global_setdown(b.entry, b.input->data(), b.output->data());
-}
-std::string early_mode_return_message(void* opaque) {
-  const auto& b = *static_cast<EarlyModeBridge*>(opaque);
-  const char* message = reinterpret_cast<const char*>(b.output->data() + kOutMessage);
-  return {message, strnlen_s(message, kOutSize - kOutMessage)};
-}
-bool early_mode_handle_lifetimes_balanced(void*) { return handle_lifetimes_balanced(); }
-void early_mode_restore_stdout(void*) { restore_native_stdout(); }
-void early_mode_unload_module(void* opaque) {
-  FreeLibrary(static_cast<EarlyModeBridge*>(opaque)->module);
-}
-void* early_mode_external_dependencies(void* opaque, int32_t check_type,
-                                       int32_t* error, uint32_t* exception) {
-  const auto& b = *static_cast<EarlyModeBridge*>(opaque);
-  std::array<std::byte, 16> extra{};
-  write<int32_t>(extra, 0, check_type);
-  *error = invoke_entry_seh(b.entry, kGetExternalDependencies, b.input->data(), b.output->data(),
-                            nullptr, nullptr, extra.data(), exception);
-  return read<void**>(extra, 8);
-}
-bool early_mode_handle_is_live(void*, void* handle) { return host_handle_is_live(static_cast<void**>(handle)); }
-uint64_t early_mode_handle_size(void*, void* handle) { return handle_size(static_cast<void**>(handle)); }
-void* early_mode_lock_handle(void*, void* handle) { return lock_handle(static_cast<void**>(handle)); }
-void early_mode_unlock_handle(void*, void* handle) { unlock_handle(static_cast<void**>(handle)); }
-void early_mode_dispose_handle(void*, void* handle) { dispose_handle(static_cast<void**>(handle)); }
-aexcompat::l2mode::HandleStatistics early_mode_handle_statistics(void*) {
-  const auto s = statistics(); return {s.created, s.disposed};
-}
-bool early_mode_dispose_arbitrary_defaults(void* opaque) {
-  const auto& b = *static_cast<EarlyModeBridge*>(opaque);
-  return dispose_arbitrary_defaults(b.entry, *b.input, *b.output);
-}
-bool early_mode_module_audit_required(void*) { return g_module_audit.required; }
-bool early_mode_capture_pre_unload_audit_passed(void*) {
-  g_module_audit.pre_unload = capture_module_audit();
-  return g_module_audit.pre_unload.status == "passed";
-}
-std::string early_mode_module_audit_json(void*) { return module_audit_json(); }
-void early_mode_report_parameters(void* opaque, const char* status, int32_t global_error,
-                                  int32_t params_error, int32_t setdown_error) {
-  const auto& b = *static_cast<EarlyModeBridge*>(opaque);
-  report(status, global_error, params_error, setdown_error, *b.output, *b.about_message,
-         {-1, -1, -1, -1, -1}, true);
-}
-
 bool verify_pf_color_settings_suite6() {
   g_working_color_space_kind = ColorProfileKind::Srgb;
   g_working_color_space_icc.clear();
@@ -15991,7 +16092,181 @@ int worker_main_impl(int argc, wchar_t **argv) {
     SetUnhandledExceptionFilter(top_level_crash_filter);
     argc -= 2;
   }
-#ifdef AEXCOMPAT_RENDER_WORKER
+  struct InvocationState {
+    bool request_mode{};
+    bool audio_mode{};
+    bool image_audio_mode{};
+    bool image_mode{};
+    bool layered_image_mode{};
+    bool smart_force_cpu{};
+    bool smart_opencl{};
+    bool smart_directx{};
+    bool smart_image_mode{};
+    bool smart_layered_image_mode{};
+    int32_t external_pixel_bytes{4};
+    int transport_argc{};
+    int image_click_argc{};
+    int image_environment_argc{};
+    int image_trailer_argc{};
+    int image_argc{};
+    int smart_image_click_argc{};
+    int smart_image_environment_argc{};
+    int smart_image_trailer_argc{};
+    int smart_image_argc{};
+    bool image_click_context{};
+    bool image_draw_context{};
+    bool image_render_environment{};
+    bool image_spatial_context{};
+    bool image_mask_context{};
+    bool smart_image_click_context{};
+    bool smart_image_draw_context{};
+    bool smart_image_render_environment{};
+    bool smart_image_spatial_context{};
+    bool smart_image_mask_context{};
+    bool mask_request_mode{};
+    bool mask_scene_request_mode{};
+    bool mask_context_request_mode{};
+    bool mask_count_error_mode{};
+    bool mask_count_crash_mode{};
+    bool mask_double_dispose_mode{};
+    bool stream_live_value_dispose_mode{};
+    bool stream_metadata_ownership_mode{};
+    bool keyframe_ownership_mode{};
+    bool dynamic_stream_tree_mode{};
+    bool aegp_memory_strings_mode{};
+    bool suite_release_without_acquire_mode{};
+    bool handle_resize_while_locked_mode{};
+    bool world_double_dispose_mode{};
+    bool world_allocation_limit_mode{};
+    bool pixel_format_registry_mode{};
+    bool outline_mutation_mode{};
+    bool mask_attribute_mode{};
+    bool user_changed_mode{};
+    bool params_only_mode{};
+    bool runtime_module_authorization_mode{};
+    bool external_dependencies_mode{};
+    bool do_dialog_mode{};
+    bool auto_dialog_mode{};
+    bool adjust_cursor_mode{};
+    bool draw_event_mode{};
+    bool click_event_mode{};
+    bool drag_event_mode{};
+    bool ui_lifecycle_mode{};
+    bool ui_idle_mode{};
+    bool ui_keydown_mode{};
+    bool ui_mouse_exited_mode{};
+    bool ui_event_assignment_mode{};
+    RequestedAssignments requested_parameters;
+    RequestedAssignments ui_event_assignments;
+    std::vector<unsigned char> external_rgba;
+    std::vector<ExternalLayerInput> external_layers;
+    std::filesystem::path external_output;
+    std::vector<float> external_audio;
+    std::filesystem::path external_audio_output;
+    int32_t external_width{};
+    int32_t external_height{};
+    int32_t external_current_time{};
+    int32_t external_time_step{1};
+    int32_t external_total_time{1};
+    uint32_t external_time_scale{1};
+    int32_t external_audio_samples{};
+    int32_t external_audio_rate{};
+    int32_t click_x{101};
+    int32_t click_y{101};
+    int32_t drag_end_x{101};
+    int32_t drag_end_y{101};
+    int32_t drag_steps{};
+    uint32_t keydown_code{};
+    uint32_t keydown_modifiers{};
+  } invocation;
+
+  auto& request_mode = invocation.request_mode;
+  auto& audio_mode = invocation.audio_mode;
+  auto& image_audio_mode = invocation.image_audio_mode;
+  auto& image_mode = invocation.image_mode;
+  auto& layered_image_mode = invocation.layered_image_mode;
+  auto& smart_force_cpu = invocation.smart_force_cpu;
+  auto& smart_opencl = invocation.smart_opencl;
+  auto& smart_directx = invocation.smart_directx;
+  auto& smart_image_mode = invocation.smart_image_mode;
+  auto& smart_layered_image_mode = invocation.smart_layered_image_mode;
+  auto& external_pixel_bytes = invocation.external_pixel_bytes;
+  auto& transport_argc = invocation.transport_argc;
+  auto& image_click_argc = invocation.image_click_argc;
+  auto& image_environment_argc = invocation.image_environment_argc;
+  auto& image_trailer_argc = invocation.image_trailer_argc;
+  auto& image_argc = invocation.image_argc;
+  auto& smart_image_click_argc = invocation.smart_image_click_argc;
+  auto& smart_image_environment_argc = invocation.smart_image_environment_argc;
+  auto& smart_image_trailer_argc = invocation.smart_image_trailer_argc;
+  auto& smart_image_argc = invocation.smart_image_argc;
+  auto& image_click_context = invocation.image_click_context;
+  auto& image_draw_context = invocation.image_draw_context;
+  auto& image_render_environment = invocation.image_render_environment;
+  auto& image_spatial_context = invocation.image_spatial_context;
+  auto& image_mask_context = invocation.image_mask_context;
+  auto& smart_image_click_context = invocation.smart_image_click_context;
+  auto& smart_image_draw_context = invocation.smart_image_draw_context;
+  auto& smart_image_render_environment = invocation.smart_image_render_environment;
+  auto& smart_image_spatial_context = invocation.smart_image_spatial_context;
+  auto& smart_image_mask_context = invocation.smart_image_mask_context;
+  auto& mask_request_mode = invocation.mask_request_mode;
+  auto& mask_scene_request_mode = invocation.mask_scene_request_mode;
+  auto& mask_context_request_mode = invocation.mask_context_request_mode;
+  auto& mask_count_error_mode = invocation.mask_count_error_mode;
+  auto& mask_count_crash_mode = invocation.mask_count_crash_mode;
+  auto& mask_double_dispose_mode = invocation.mask_double_dispose_mode;
+  auto& stream_live_value_dispose_mode = invocation.stream_live_value_dispose_mode;
+  auto& stream_metadata_ownership_mode = invocation.stream_metadata_ownership_mode;
+  auto& keyframe_ownership_mode = invocation.keyframe_ownership_mode;
+  auto& dynamic_stream_tree_mode = invocation.dynamic_stream_tree_mode;
+  auto& aegp_memory_strings_mode = invocation.aegp_memory_strings_mode;
+  auto& suite_release_without_acquire_mode = invocation.suite_release_without_acquire_mode;
+  auto& handle_resize_while_locked_mode = invocation.handle_resize_while_locked_mode;
+  auto& world_double_dispose_mode = invocation.world_double_dispose_mode;
+  auto& world_allocation_limit_mode = invocation.world_allocation_limit_mode;
+  auto& pixel_format_registry_mode = invocation.pixel_format_registry_mode;
+  auto& outline_mutation_mode = invocation.outline_mutation_mode;
+  auto& mask_attribute_mode = invocation.mask_attribute_mode;
+  auto& user_changed_mode = invocation.user_changed_mode;
+  auto& params_only_mode = invocation.params_only_mode;
+  auto& runtime_module_authorization_mode = invocation.runtime_module_authorization_mode;
+  auto& external_dependencies_mode = invocation.external_dependencies_mode;
+  auto& do_dialog_mode = invocation.do_dialog_mode;
+  auto& auto_dialog_mode = invocation.auto_dialog_mode;
+  auto& adjust_cursor_mode = invocation.adjust_cursor_mode;
+  auto& draw_event_mode = invocation.draw_event_mode;
+  auto& click_event_mode = invocation.click_event_mode;
+  auto& drag_event_mode = invocation.drag_event_mode;
+  auto& ui_lifecycle_mode = invocation.ui_lifecycle_mode;
+  auto& ui_idle_mode = invocation.ui_idle_mode;
+  auto& ui_keydown_mode = invocation.ui_keydown_mode;
+  auto& ui_mouse_exited_mode = invocation.ui_mouse_exited_mode;
+  auto& ui_event_assignment_mode = invocation.ui_event_assignment_mode;
+  auto& requested_parameters = invocation.requested_parameters;
+  auto& ui_event_assignments = invocation.ui_event_assignments;
+  auto& external_rgba = invocation.external_rgba;
+  auto& external_layers = invocation.external_layers;
+  auto& external_output = invocation.external_output;
+  auto& external_audio = invocation.external_audio;
+  auto& external_audio_output = invocation.external_audio_output;
+  auto& external_width = invocation.external_width;
+  auto& external_height = invocation.external_height;
+  auto& external_current_time = invocation.external_current_time;
+  auto& external_time_step = invocation.external_time_step;
+  auto& external_total_time = invocation.external_total_time;
+  auto& external_time_scale = invocation.external_time_scale;
+  auto& external_audio_samples = invocation.external_audio_samples;
+  auto& external_audio_rate = invocation.external_audio_rate;
+  auto& click_x = invocation.click_x;
+  auto& click_y = invocation.click_y;
+  auto& drag_end_x = invocation.drag_end_x;
+  auto& drag_end_y = invocation.drag_end_y;
+  auto& drag_steps = invocation.drag_steps;
+  auto& keydown_code = invocation.keydown_code;
+  auto& keydown_modifiers = invocation.keydown_modifiers;
+
+  if (is_render_worker()) {
   const aexcompat::l2cli::AuxiliaryOptionHooks auxiliary_hooks{
       nullptr, set_l2_dump_worlds_dir, enable_l2_checksum_detail,
       load_l2_aux_manifest, parse_l2_alpha_coverage, load_l2_parameter_animation};
@@ -16001,35 +16276,24 @@ int worker_main_impl(int argc, wchar_t **argv) {
   const int effective_argc = auxiliary_options.effective_argc;
   const auto worker_mode = aexcompat::l2cli::classify_worker_mode(
       aexcompat::l2cli::WorkerKind::Render, argc, argv, effective_argc);
-  const bool audio_mode = worker_mode.audio_mode;
-  const bool image_audio_mode = worker_mode.image_audio_mode;
-  const int32_t external_pixel_bytes = worker_mode.external_pixel_bytes;
-  const int transport_argc = worker_mode.transport_argc;
-  const bool image_click_context = worker_mode.image_click_context;
-  const bool image_draw_context = worker_mode.image_draw_context;
-  const int image_click_argc = worker_mode.image_click_argc;
-  const bool image_render_environment = worker_mode.image_render_environment;
-  const int image_environment_argc = worker_mode.image_environment_argc;
-  const bool image_spatial_context = worker_mode.image_spatial_context;
-  const int image_trailer_argc = worker_mode.image_trailer_argc;
-  const bool image_mask_context = worker_mode.image_mask_context;
-  const int image_argc = worker_mode.image_argc;
-  const bool layered_image_mode = worker_mode.layered_image_mode;
-  const bool image_mode = worker_mode.image_mode;
-  const bool request_mode = worker_mode.request_mode;
+  audio_mode = worker_mode.audio_mode;
+  image_audio_mode = worker_mode.image_audio_mode;
+  external_pixel_bytes = worker_mode.external_pixel_bytes;
+  transport_argc = worker_mode.transport_argc;
+  image_click_context = worker_mode.image_click_context;
+  image_draw_context = worker_mode.image_draw_context;
+  image_click_argc = worker_mode.image_click_argc;
+  image_render_environment = worker_mode.image_render_environment;
+  image_environment_argc = worker_mode.image_environment_argc;
+  image_spatial_context = worker_mode.image_spatial_context;
+  image_trailer_argc = worker_mode.image_trailer_argc;
+  image_mask_context = worker_mode.image_mask_context;
+  image_argc = worker_mode.image_argc;
+  layered_image_mode = worker_mode.layered_image_mode;
+  image_mode = worker_mode.image_mode;
+  request_mode = worker_mode.request_mode;
   if (!worker_mode.command_accepted) return 2;
-  RequestedAssignments requested_parameters;
   if (request_mode && !parse_parameter_payload(argv[4], requested_parameters)) return 3;
-  std::vector<unsigned char> external_rgba;
-  std::vector<ExternalLayerInput> external_layers;
-  std::filesystem::path external_output;
-  int32_t external_width = 0, external_height = 0;
-  int32_t external_current_time = 0, external_time_step = 1, external_total_time = 1;
-  uint32_t external_time_scale = 1;
-  std::vector<float> external_audio;
-  std::filesystem::path external_audio_output;
-  int32_t external_audio_samples = 0;
-  int32_t external_audio_rate = 0;
   if (audio_mode) {
     try {
       external_audio_samples = std::stoi(argv[7]);
@@ -16063,7 +16327,8 @@ int worker_main_impl(int argc, wchar_t **argv) {
     if (!file.read(reinterpret_cast<char*>(external_audio.data()), byte_count) ||
         std::any_of(external_audio.begin(), external_audio.end() - 1,
                     [](float value) { return !std::isfinite(value); })) return 3;
-    aexcompat::host_audio::runtime().set_source(&external_audio, external_audio_samples);
+    g_audio_source = &external_audio;
+    g_audio_source_sample_count = external_audio_samples;
   }
   if (image_mode) {
     try { external_width = std::stoi(argv[7]); external_height = std::stoi(argv[8]); } catch (...) { return 3; }
@@ -16124,7 +16389,7 @@ int worker_main_impl(int argc, wchar_t **argv) {
     if (image_draw_context)
       g_render_draw_enabled = true;
   }
-#elif defined(AEXCOMPAT_SMART_WORKER)
+  } else if (is_smart_worker()) {
   const aexcompat::l2cli::AuxiliaryOptionHooks auxiliary_hooks{
       nullptr, set_l2_dump_worlds_dir, enable_l2_checksum_detail,
       load_l2_aux_manifest, parse_l2_alpha_coverage, load_l2_parameter_animation};
@@ -16134,52 +16399,45 @@ int worker_main_impl(int argc, wchar_t **argv) {
   const int effective_argc = auxiliary_options.effective_argc;
   const auto worker_mode = aexcompat::l2cli::classify_worker_mode(
       aexcompat::l2cli::WorkerKind::Smart, argc, argv, effective_argc);
-  const bool smart_force_cpu = worker_mode.force_cpu;
-  const bool smart_opencl = worker_mode.opencl;
-  const bool smart_directx = worker_mode.directx;
-  const int32_t external_pixel_bytes = worker_mode.external_pixel_bytes;
-  const bool smart_image_click_context = worker_mode.image_click_context;
-  const bool smart_image_draw_context = worker_mode.image_draw_context;
-  const int smart_image_click_argc = worker_mode.image_click_argc;
-  const bool smart_image_render_environment = worker_mode.image_render_environment;
-  const int smart_image_environment_argc = worker_mode.image_environment_argc;
-  const bool smart_image_spatial_context = worker_mode.image_spatial_context;
-  const int smart_image_trailer_argc = worker_mode.image_trailer_argc;
-  const bool smart_image_mask_context = worker_mode.image_mask_context;
-  const int smart_image_argc = worker_mode.image_argc;
-  const bool smart_layered_image_mode = worker_mode.layered_image_mode;
-  const bool smart_image_mode = worker_mode.image_mode;
-  const bool mask_request_mode = worker_mode.mask_request_mode;
-  const bool mask_scene_request_mode = worker_mode.mask_scene_request_mode;
-  const bool mask_context_request_mode = worker_mode.mask_context_request_mode;
-  const bool mask_count_error_mode = worker_mode.mask_count_error_mode;
-  const bool mask_count_crash_mode = worker_mode.mask_count_crash_mode;
-  const bool mask_double_dispose_mode = worker_mode.mask_double_dispose_mode;
-  const bool stream_live_value_dispose_mode = worker_mode.stream_live_value_dispose_mode;
-  const bool stream_metadata_ownership_mode = worker_mode.stream_metadata_ownership_mode;
-  const bool keyframe_ownership_mode = worker_mode.keyframe_ownership_mode;
-  const bool dynamic_stream_tree_mode = worker_mode.dynamic_stream_tree_mode;
-  const bool aegp_memory_strings_mode = worker_mode.aegp_memory_strings_mode;
-  const bool suite_release_without_acquire_mode = worker_mode.suite_release_without_acquire_mode;
-  const bool handle_resize_while_locked_mode = worker_mode.handle_resize_while_locked_mode;
-  const bool world_double_dispose_mode = worker_mode.world_double_dispose_mode;
-  const bool world_allocation_limit_mode = worker_mode.world_allocation_limit_mode;
-  const bool pixel_format_registry_mode = worker_mode.pixel_format_registry_mode;
-  const bool outline_mutation_mode = worker_mode.outline_mutation_mode;
-  const bool mask_attribute_mode = worker_mode.mask_attribute_mode;
-  const bool request_mode = worker_mode.request_mode;
+  smart_force_cpu = worker_mode.force_cpu;
+  smart_opencl = worker_mode.opencl;
+  smart_directx = worker_mode.directx;
+  external_pixel_bytes = worker_mode.external_pixel_bytes;
+  smart_image_click_context = worker_mode.image_click_context;
+  smart_image_draw_context = worker_mode.image_draw_context;
+  smart_image_click_argc = worker_mode.image_click_argc;
+  smart_image_render_environment = worker_mode.image_render_environment;
+  smart_image_environment_argc = worker_mode.image_environment_argc;
+  smart_image_spatial_context = worker_mode.image_spatial_context;
+  smart_image_trailer_argc = worker_mode.image_trailer_argc;
+  smart_image_mask_context = worker_mode.image_mask_context;
+  smart_image_argc = worker_mode.image_argc;
+  smart_layered_image_mode = worker_mode.layered_image_mode;
+  smart_image_mode = worker_mode.image_mode;
+  mask_request_mode = worker_mode.mask_request_mode;
+  mask_scene_request_mode = worker_mode.mask_scene_request_mode;
+  mask_context_request_mode = worker_mode.mask_context_request_mode;
+  mask_count_error_mode = worker_mode.mask_count_error_mode;
+  mask_count_crash_mode = worker_mode.mask_count_crash_mode;
+  mask_double_dispose_mode = worker_mode.mask_double_dispose_mode;
+  stream_live_value_dispose_mode = worker_mode.stream_live_value_dispose_mode;
+  stream_metadata_ownership_mode = worker_mode.stream_metadata_ownership_mode;
+  keyframe_ownership_mode = worker_mode.keyframe_ownership_mode;
+  dynamic_stream_tree_mode = worker_mode.dynamic_stream_tree_mode;
+  aegp_memory_strings_mode = worker_mode.aegp_memory_strings_mode;
+  suite_release_without_acquire_mode = worker_mode.suite_release_without_acquire_mode;
+  handle_resize_while_locked_mode = worker_mode.handle_resize_while_locked_mode;
+  world_double_dispose_mode = worker_mode.world_double_dispose_mode;
+  world_allocation_limit_mode = worker_mode.world_allocation_limit_mode;
+  pixel_format_registry_mode = worker_mode.pixel_format_registry_mode;
+  outline_mutation_mode = worker_mode.outline_mutation_mode;
+  mask_attribute_mode = worker_mode.mask_attribute_mode;
+  request_mode = worker_mode.request_mode;
   if (!worker_mode.command_accepted) return 2;
   g_mask_model_enabled = worker_mode.mask_model_enabled;
   g_mask_fault = mask_count_error_mode ? MaskFault::CountError :
       mask_count_crash_mode ? MaskFault::CountCrash : MaskFault::None;
-  RequestedAssignments requested_parameters;
   if (request_mode && !parse_parameter_payload(argv[4], requested_parameters)) return 3;
-  std::vector<unsigned char> external_rgba;
-  std::vector<ExternalLayerInput> external_layers;
-  std::filesystem::path external_output;
-  int32_t external_width = 0, external_height = 0;
-  int32_t external_current_time = 0, external_time_step = 1, external_total_time = 1;
-  uint32_t external_time_scale = 1;
   if (smart_image_mode) {
     try { external_width = std::stoi(argv[7]); external_height = std::stoi(argv[8]); } catch (...) { return 3; }
     if (external_width <= 0 || external_height <= 0 || external_width > 4096 || external_height > 4096) return 3;
@@ -16251,8 +16509,8 @@ int worker_main_impl(int argc, wchar_t **argv) {
     }
     if (!mask_context_request_mode && !configure_mask_scene(scene_id)) return 3;
   }
-#else
-  const bool user_changed_mode = (argc == 5 || argc == 6) &&
+  } else {
+  user_changed_mode = (argc == 5 || argc == 6) &&
       std::wstring(argv[1]) == L"--user-changed";
   g_aegp_update_menu_mode = argc == 4 && std::wstring(argv[1]) == L"--aegp-update-menu";
   g_aegp_idle_mode = argc == 4 && std::wstring(argv[1]) == L"--aegp-idle";
@@ -16275,42 +16533,38 @@ int worker_main_impl(int argc, wchar_t **argv) {
   g_aegp_init_mode = (argc == 4 && std::wstring(argv[1]) == L"--aegp-init") ||
       g_aegp_update_menu_mode || g_aegp_idle_mode || g_aegp_command_roundtrip_mode ||
       g_aegp_active_idle_roundtrip_mode || g_aegp_comp_idle_roundtrip_mode;
-  const bool params_only_mode = (argc == 4 || argc == 6) &&
+  params_only_mode = (argc == 4 || argc == 6) &&
       std::wstring(argv[1]) == L"--l2-params-only";
-  const bool runtime_module_authorization_mode = params_only_mode && argc == 6 &&
+  runtime_module_authorization_mode = params_only_mode && argc == 6 &&
       std::wstring(argv[4]) == L"--runtime-module-authorization-v1";
-  const bool external_dependencies_mode = argc == 5 &&
+  external_dependencies_mode = argc == 5 &&
       std::wstring(argv[1]) == L"--l2-external-dependencies";
-  const bool do_dialog_mode = argc == 4 &&
+  do_dialog_mode = argc == 4 &&
       std::wstring(argv[1]) == L"--l2-do-dialog";
-  const bool auto_dialog_mode = argc == 4 &&
+  auto_dialog_mode = argc == 4 &&
       std::wstring(argv[1]) == L"--l2-auto-dialog";
-  const bool adjust_cursor_mode = (argc == 4 || argc == 5) &&
+  adjust_cursor_mode = (argc == 4 || argc == 5) &&
       std::wstring(argv[1]) == L"--l2-adjust-cursor";
-  const bool draw_event_mode = (argc == 4 || argc == 5) &&
+  draw_event_mode = (argc == 4 || argc == 5) &&
       std::wstring(argv[1]) == L"--l2-draw-event";
-  const bool click_event_mode = (argc == 5 || argc == 6) &&
+  click_event_mode = (argc == 5 || argc == 6) &&
       std::wstring(argv[1]) == L"--l2-click-event";
-  const bool drag_event_mode = (argc == 5 || argc == 6) &&
+  drag_event_mode = (argc == 5 || argc == 6) &&
       std::wstring(argv[1]) == L"--l2-drag-event";
-  const bool ui_lifecycle_mode = (argc == 4 || argc == 5) &&
+  ui_lifecycle_mode = (argc == 4 || argc == 5) &&
       std::wstring(argv[1]) == L"--l2-ui-lifecycle";
-  const bool ui_idle_mode = (argc == 4 || argc == 5) &&
+  ui_idle_mode = (argc == 4 || argc == 5) &&
       std::wstring(argv[1]) == L"--l2-ui-idle";
-  const bool ui_keydown_mode = (argc == 5 || argc == 6) &&
+  ui_keydown_mode = (argc == 5 || argc == 6) &&
       std::wstring(argv[1]) == L"--l2-ui-keydown";
-  const bool ui_mouse_exited_mode = (argc == 4 || argc == 5) &&
+  ui_mouse_exited_mode = (argc == 4 || argc == 5) &&
       std::wstring(argv[1]) == L"--l2-ui-mouse-exited";
-  const bool ui_event_assignment_mode =
+  ui_event_assignment_mode =
       ((adjust_cursor_mode || draw_event_mode || ui_lifecycle_mode || ui_idle_mode ||
         ui_mouse_exited_mode) && argc == 5) ||
       ((click_event_mode || drag_event_mode || ui_keydown_mode) && argc == 6);
-  RequestedAssignments ui_event_assignments;
   if (ui_event_assignment_mode &&
       !parse_parameter_payload(argv[argc - 1], ui_event_assignments)) return 3;
-  int32_t click_x = 101, click_y = 101;
-  int32_t drag_end_x = 101, drag_end_y = 101, drag_steps = 0;
-  uint32_t keydown_code = 0, keydown_modifiers = 0;
   if (click_event_mode) {
     float red{}, green{}, blue{}, alpha{};
     if (swscanf_s(argv[4], L"%d,%d,%f,%f,%f,%f", &click_x, &click_y,
@@ -16345,7 +16599,7 @@ int worker_main_impl(int argc, wchar_t **argv) {
     if (argc == 6 && !parse_parameter_payload(argv[5], g_user_changed_parameters)) return 3;
     g_user_changed_param_requested = true;
   }
-#endif
+  }
   // Every rendered effect instance belongs to a layer, even when that layer has no masks.
   if (is_rendering_worker()) g_mask_model_enabled = true;
   std::string expected;
@@ -16802,12 +17056,10 @@ int worker_main_impl(int argc, wchar_t **argv) {
   write<uint32_t>(input, 296, g_downsample_y.denominator);
   write<int32_t>(input, 300, g_pixel_aspect_ratio.numerator);
   write<uint32_t>(input, 304, g_pixel_aspect_ratio.denominator);
-#if !defined(AEXCOMPAT_RENDER_WORKER) && !defined(AEXCOMPAT_SMART_WORKER)
   std::array<std::byte, kOutSize> about_output{};
   int32_t about_error = -1;
   uint32_t about_exception_code{};
   std::string about_message;
-#endif
   std::cerr << "stage:global_setup_begin\n" << std::flush;
   reset_pf_state_effect_lifetime(&g_effect, true);
   g_global_setup_active = true;
@@ -16819,11 +17071,12 @@ int worker_main_impl(int argc, wchar_t **argv) {
   std::cerr << "stage:global_setup_end error=" << global_error << "\n" << std::flush;
   const uint32_t advertised_out_flags = read<uint32_t>(output, kOutFlags);
   const uint32_t advertised_out_flags2 = read<uint32_t>(output, kOutFlags2);
-#ifdef AEXCOMPAT_RENDER_WORKER
-  aexcompat::host_audio::runtime().configure_admission(
-      audio_mode, (advertised_out_flags & kOutFlagIUseAudio) != 0);
-#endif
-#if defined(AEXCOMPAT_RENDER_WORKER) || defined(AEXCOMPAT_SMART_WORKER)
+  if (is_render_worker()) {
+    g_audio_usage_advertised =
+        (advertised_out_flags & kOutFlagIUseAudio) != 0;
+    g_audio_checkout_allowed = audio_mode || g_audio_usage_advertised;
+    g_rejected_unadvertised_audio_checkouts = 0;
+  }
   const bool image_render_supported =
       (advertised_out_flags & kOutFlagAudioEffectOnly) == 0;
   const bool nop_render_advertised =
@@ -16837,22 +17090,19 @@ int worker_main_impl(int argc, wchar_t **argv) {
   const bool depth_supported = external_pixel_bytes == 4 ||
       (external_pixel_bytes == 8 && (advertised_out_flags & kOutFlagDeepColorAware) != 0) ||
       (external_pixel_bytes == 16 && (advertised_out_flags2 & kOutFlag2FloatColorAware) != 0);
-#endif
-#if defined(AEXCOMPAT_SMART_WORKER)
   const bool smart_render_supported =
       (advertised_out_flags2 & kOutFlag2SupportsSmartRender) != 0;
-#endif
   g_update_params_ui_advertised = (read<uint32_t>(output, kOutFlags) & (1u << 26)) != 0;
   g_query_dynamic_flags_advertised = (read<uint32_t>(output, kOutFlags2) & 1u) != 0;
   write<void*>(input, kInGlobalData, read<void*>(output, kOutGlobalData));
-#if !defined(AEXCOMPAT_RENDER_WORKER) && !defined(AEXCOMPAT_SMART_WORKER)
-  about_error = g_skip_about ? 0 :
-      (global_error == 0 ? invoke_entry_seh(
-          entry, kAbout, input.data(), about_output.data(), nullptr, nullptr, nullptr,
-          &about_exception_code) : -1);
-  const char* about_text = reinterpret_cast<const char*>(about_output.data() + kOutMessage);
-  about_message.assign(about_text, strnlen_s(about_text, 256));
-#endif
+  if (!is_rendering_worker()) {
+    about_error = g_skip_about ? 0 :
+        (global_error == 0 ? invoke_entry_seh(
+            entry, kAbout, input.data(), about_output.data(), nullptr, nullptr, nullptr,
+            &about_exception_code) : -1);
+    const char* about_text = reinterpret_cast<const char*>(about_output.data() + kOutMessage);
+    about_message.assign(about_text, strnlen_s(about_text, 256));
+  }
   std::cerr << "stage:params_setup_begin\n" << std::flush;
   uint32_t params_setup_exception_code{};
   const int32_t params_error = global_error == 0
@@ -16865,9 +17115,9 @@ int worker_main_impl(int argc, wchar_t **argv) {
       read<int32_t>(output, kOutNumParams) == expected_num_params;
   if (parameter_count_contract_valid)
     write<int32_t>(input, kInNumParams, expected_num_params);
-#if !defined(AEXCOMPAT_RENDER_WORKER) && !defined(AEXCOMPAT_SMART_WORKER)
-  if (adjust_cursor_mode || draw_event_mode || click_event_mode || drag_event_mode ||
-      ui_lifecycle_mode || ui_idle_mode || ui_keydown_mode || ui_mouse_exited_mode) {
+  if (!is_rendering_worker() &&
+      (adjust_cursor_mode || draw_event_mode || click_event_mode || drag_event_mode ||
+       ui_lifecycle_mode || ui_idle_mode || ui_keydown_mode || ui_mouse_exited_mode)) {
     int32_t event_error = -1;
     int32_t cursor = 0;
     int32_t event_out_flags = 0;
@@ -17133,9 +17383,8 @@ int worker_main_impl(int argc, wchar_t **argv) {
     return event_contract && event_sequence_setdown_error == 0 && defaults_disposed &&
         handle_lifetimes_balanced() && event_setdown_error == 0 ? 0 : 20;
   }
-#endif
-#if defined(AEXCOMPAT_RENDER_WORKER) || defined(AEXCOMPAT_SMART_WORKER)
-  if (request_mode && (params_error != 0 || !parameter_count_contract_valid ||
+  if (is_rendering_worker() && request_mode &&
+      (params_error != 0 || !parameter_count_contract_valid ||
                        !validate_requested_assignments(requested_parameters) ||
                        !validate_external_aux_parameters())) {
     dispose_arbitrary_defaults(entry, input, output);
@@ -17144,33 +17393,211 @@ int worker_main_impl(int argc, wchar_t **argv) {
     FreeLibrary(module);
     return 3;
   }
-#endif
-#if !defined(AEXCOMPAT_RENDER_WORKER) && !defined(AEXCOMPAT_SMART_WORKER)
-  aexcompat::l2mode::EarlyMode early_mode = aexcompat::l2mode::EarlyMode::None;
-  if (auto_dialog_mode) early_mode = aexcompat::l2mode::EarlyMode::AutomaticDialog;
-  else if (do_dialog_mode) early_mode = aexcompat::l2mode::EarlyMode::DoDialog;
-  else if (external_dependencies_mode) early_mode = aexcompat::l2mode::EarlyMode::ExternalDependencies;
-  else if (params_only_mode) early_mode = aexcompat::l2mode::EarlyMode::ParametersOnly;
-  if (early_mode != aexcompat::l2mode::EarlyMode::None) {
-    EarlyModeBridge bridge{entry, &input, &output, module, &about_message};
-    const aexcompat::l2mode::Hooks hooks{
-        early_mode_out_flags, early_mode_copy_sequence_data_to_input,
-        early_mode_sequence_setup, early_mode_sequence_setdown, early_mode_do_dialog,
-        early_mode_global_setdown, early_mode_return_message, early_mode_handle_lifetimes_balanced,
-        early_mode_restore_stdout, early_mode_unload_module, early_mode_external_dependencies,
-        early_mode_handle_is_live, early_mode_handle_size, early_mode_lock_handle,
-        early_mode_unlock_handle, early_mode_dispose_handle, early_mode_handle_statistics,
-        early_mode_dispose_arbitrary_defaults, early_mode_module_audit_required,
-        early_mode_capture_pre_unload_audit_passed, early_mode_module_audit_json,
-        early_mode_report_parameters};
-    return aexcompat::l2mode::run_early_mode(
-        {early_mode, &bridge, hooks, global_error, params_error,
-         parameter_count_contract_valid,
-         external_dependencies_mode ? argv[4] : nullptr});
+  if (!is_rendering_worker() && auto_dialog_mode) {
+    const uint32_t global_flags = read<uint32_t>(output, kOutFlags);
+    const bool dialog_capability_advertised = (global_flags & kOutFlagIDoDialog) != 0;
+    uint32_t sequence_exception_code = 0;
+    std::cerr << "stage:sequence_setup_begin\n" << std::flush;
+    const int32_t auto_sequence_error = params_error == 0
+        ? invoke_sequence_selector(entry, kSequenceSetup, input.data(), output.data(),
+                                   &sequence_exception_code) : -1;
+    std::cerr << "stage:sequence_setup_end error=" << auto_sequence_error << "\n" << std::flush;
+    void** sequence_handle = read<void**>(output, kOutSequenceData);
+    write<void**>(input, kInSequenceData, sequence_handle);
+    const uint32_t sequence_flags = read<uint32_t>(output, kOutFlags);
+    const bool automatic_dialog_requested =
+        (sequence_flags & kOutFlagSendDoDialog) != 0;
+    const bool dispatch_allowed = dialog_capability_advertised &&
+        automatic_dialog_requested && auto_sequence_error == 0;
+    uint32_t dialog_exception_code = 0;
+    int32_t automatic_dialog_error = -1;
+    if (dispatch_allowed) {
+      std::cerr << "stage:do_dialog_begin\n" << std::flush;
+      automatic_dialog_error = invoke_entry_seh(entry, kDoDialog, input.data(), output.data(),
+                                                nullptr, nullptr, nullptr,
+                                                &dialog_exception_code);
+      std::cerr << "stage:do_dialog_end error=" << automatic_dialog_error << "\n" << std::flush;
+    }
+    const char* message = reinterpret_cast<const char*>(output.data() + kOutMessage);
+    const std::size_t message_length = strnlen_s(message, kOutSize - kOutMessage);
+    const std::string dialog_message(message, message_length);
+    uint32_t setdown_exception_code = 0;
+    std::cerr << "stage:sequence_setdown_begin\n" << std::flush;
+    const int32_t auto_sequence_setdown_error = auto_sequence_error == 0
+        ? invoke_sequence_selector(entry, kSequenceSetdown, input.data(), output.data(),
+                                   &setdown_exception_code) : -1;
+    std::cerr << "stage:sequence_setdown_end error=" << auto_sequence_setdown_error
+              << "\n" << std::flush;
+    std::cerr << "stage:global_setdown_begin\n" << std::flush;
+    const int32_t auto_global_setdown_error = global_error == 0
+        ? invoke_global_setdown(entry, input.data(), output.data()) : -1;
+    std::cerr << "stage:global_setdown_end error=" << auto_global_setdown_error
+              << "\n" << std::flush;
+    const bool contract_valid = dispatch_allowed && sequence_exception_code == 0 &&
+        automatic_dialog_error == 0 && dialog_exception_code == 0 &&
+        auto_sequence_setdown_error == 0 && setdown_exception_code == 0 &&
+        auto_global_setdown_error == 0 && handle_lifetimes_balanced();
+    restore_native_stdout();
+    std::cout << "{\"schema_version\":1,\"stage\":\"automatic_dialog\",\"status\":\""
+              << (contract_valid ? "automatic_dialog_completed" :
+                  (automatic_dialog_requested ? "automatic_dialog_error" :
+                   "automatic_dialog_not_requested"))
+              << "\",\"dialog_capability_advertised\":"
+              << (dialog_capability_advertised ? "true" : "false")
+              << ",\"automatic_dialog_requested\":"
+              << (automatic_dialog_requested ? "true" : "false")
+              << ",\"selector_dispatched\":" << (dispatch_allowed ? "true" : "false")
+              << ",\"sequence_setup_error\":" << auto_sequence_error
+              << ",\"sequence_setup_exception_code\":" << sequence_exception_code
+              << ",\"dialog_error\":" << automatic_dialog_error
+              << ",\"dialog_exception_code\":" << dialog_exception_code
+              << ",\"return_message\":\"" << escape(dialog_message) << "\""
+              << ",\"sequence_setdown_error\":" << auto_sequence_setdown_error
+              << ",\"sequence_setdown_exception_code\":" << setdown_exception_code
+              << ",\"handle_lifetimes_balanced\":"
+              << (handle_lifetimes_balanced() ? "true" : "false")
+              << ",\"global_setdown_error\":" << auto_global_setdown_error << "}\n";
+    FreeLibrary(module);
+    return contract_valid ? 0 : (automatic_dialog_requested ? 20 : 21);
   }
-#endif
-#ifdef AEXCOMPAT_RENDER_WORKER
-  if (audio_mode) {
+  if (do_dialog_mode) {
+    const uint32_t advertised_flags = read<uint32_t>(output, kOutFlags);
+    const bool dialog_advertised = (advertised_flags & kOutFlagIDoDialog) != 0;
+    uint32_t dialog_exception_code = 0;
+    int32_t dialog_error = -1;
+    if (params_error == 0 && dialog_advertised) {
+      std::cerr << "stage:do_dialog_begin\n" << std::flush;
+      dialog_error = invoke_entry_seh(entry, kDoDialog, input.data(), output.data(),
+                                      nullptr, nullptr, nullptr,
+                                      &dialog_exception_code);
+      std::cerr << "stage:do_dialog_end error=" << dialog_error << "\n" << std::flush;
+    }
+    const uint32_t returned_flags = read<uint32_t>(output, kOutFlags);
+    const char* message = reinterpret_cast<const char*>(output.data() + kOutMessage);
+    const std::size_t message_length = strnlen_s(message, kOutSize - kOutMessage);
+    const std::string dialog_message(message, message_length);
+    std::cerr << "stage:global_setdown_begin\n" << std::flush;
+    const int32_t dialog_setdown_error = global_error == 0
+        ? invoke_global_setdown(entry, input.data(), output.data()) : -1;
+    std::cerr << "stage:global_setdown_end error=" << dialog_setdown_error << "\n" << std::flush;
+    const bool contract_valid = params_error == 0 && dialog_advertised &&
+        dialog_error == 0 && dialog_exception_code == 0 && dialog_setdown_error == 0 &&
+        handle_lifetimes_balanced();
+    restore_native_stdout();
+    std::cout << "{\"schema_version\":1,\"stage\":\"do_dialog\",\"status\":\""
+              << (contract_valid ? "dialog_completed" :
+                  (dialog_advertised ? "dialog_error" : "dialog_not_advertised"))
+              << "\",\"dialog_advertised\":" << (dialog_advertised ? "true" : "false")
+              << ",\"selector_dispatched\":" << (dialog_advertised ? "true" : "false")
+              << ",\"selector_error\":" << dialog_error
+              << ",\"exception_code\":" << dialog_exception_code
+              << ",\"display_error_message\":"
+              << ((returned_flags & kOutFlagDisplayErrorMessage) ? "true" : "false")
+              << ",\"return_message\":\"" << escape(dialog_message) << "\""
+              << ",\"handle_lifetimes_balanced\":"
+              << (handle_lifetimes_balanced() ? "true" : "false")
+              << ",\"global_setdown_error\":" << dialog_setdown_error << "}\n";
+    FreeLibrary(module);
+    return contract_valid ? 0 : (dialog_advertised ? 20 : 21);
+  }
+  if (external_dependencies_mode) {
+    int32_t check_type = -1;
+    try { check_type = std::stoi(argv[4]); } catch (...) { check_type = -1; }
+    if (check_type < 0 || check_type > 2) {
+      if (global_error == 0)
+        invoke_global_setdown(entry, input.data(), output.data());
+      FreeLibrary(module);
+      return 3;
+    }
+    std::array<std::byte, 16> dependency_extra{};
+    write<int32_t>(dependency_extra, 0, check_type);
+    uint32_t dependency_exception_code = 0;
+    std::cerr << "stage:get_external_dependencies_begin\n" << std::flush;
+    const int32_t dependency_error = params_error == 0
+        ? invoke_entry_seh(entry, kGetExternalDependencies, input.data(), output.data(),
+                           nullptr, nullptr, dependency_extra.data(),
+                           &dependency_exception_code) : -1;
+    std::cerr << "stage:get_external_dependencies_end error=" << dependency_error
+              << "\n" << std::flush;
+    void** dependency_handle = read<void**>(dependency_extra, 8);
+    constexpr uint64_t kMaxDependencyBytes = 64 * 1024;
+    uint64_t dependency_bytes = 0;
+    bool dependency_nul_terminated = dependency_handle == nullptr;
+    bool dependency_handle_valid = dependency_handle == nullptr;
+    std::string dependency_text;
+    if (dependency_handle) {
+      dependency_handle_valid = host_handle_is_live(dependency_handle);
+      dependency_bytes = dependency_handle_valid ? handle_size(dependency_handle) : 0;
+      if (dependency_bytes > 0 && dependency_bytes <= kMaxDependencyBytes) {
+        const char* text = static_cast<const char*>(lock_handle(dependency_handle));
+        if (text) {
+          const void* terminator = std::memchr(text, '\0', static_cast<std::size_t>(dependency_bytes));
+          dependency_nul_terminated = terminator != nullptr;
+          if (terminator)
+            dependency_text.assign(text, static_cast<const char*>(terminator));
+          unlock_handle(dependency_handle);
+        }
+      }
+      dispose_handle(dependency_handle);
+    }
+    const bool dependency_handle_disposed = !dependency_handle ||
+        !host_handle_is_live(dependency_handle);
+    std::cerr << "stage:global_setdown_begin\n" << std::flush;
+    const int32_t dependency_setdown_error = global_error == 0
+        ? invoke_global_setdown(entry, input.data(), output.data()) : -1;
+    std::cerr << "stage:global_setdown_end error=" << dependency_setdown_error
+              << "\n" << std::flush;
+    restore_native_stdout();
+    std::cout << "{\"schema_version\":1,\"stage\":\"external_dependencies\",\"status\":\""
+              << (dependency_error == 0 && dependency_handle_valid &&
+                  dependency_nul_terminated && dependency_handle_disposed &&
+                  dependency_setdown_error == 0 && handle_lifetimes_balanced()
+                  ? "dependencies_inspected" : "dependency_error")
+              << "\",\"check_type\":" << check_type
+              << ",\"selector_error\":" << dependency_error
+              << ",\"exception_code\":" << dependency_exception_code
+              << ",\"dependency_text\":\"" << escape(dependency_text) << "\""
+              << ",\"dependency_bytes\":" << dependency_bytes
+              << ",\"handle_returned\":" << (dependency_handle ? "true" : "false")
+              << ",\"handle_valid\":" << (dependency_handle_valid ? "true" : "false")
+              << ",\"nul_terminated\":" << (dependency_nul_terminated ? "true" : "false")
+              << ",\"handle_host_disposed\":" << (dependency_handle_disposed ? "true" : "false")
+              << ",\"handles_created\":" << statistics().created
+              << ",\"handles_disposed\":" << statistics().disposed
+              << ",\"handle_lifetimes_balanced\":"
+              << (handle_lifetimes_balanced() ? "true" : "false")
+              << ",\"global_setdown_error\":" << dependency_setdown_error << "}\n";
+    FreeLibrary(module);
+    return dependency_error == 0 && dependency_handle_valid && dependency_nul_terminated &&
+        dependency_handle_disposed && dependency_setdown_error == 0 &&
+        handle_lifetimes_balanced() ? 0 : 20;
+  }
+  if (params_only_mode) {
+    const bool arbitrary_defaults_disposed = dispose_arbitrary_defaults(entry, input, output);
+    std::cerr << "stage:global_setdown_begin\n" << std::flush;
+    const int32_t params_setdown_error = global_error == 0
+        ? invoke_global_setdown(entry, input.data(), output.data()) : -1;
+    std::cerr << "stage:global_setdown_end error=" << params_setdown_error << "\n" << std::flush;
+    const std::array<int32_t, 5> skipped_lifecycle{-1, -1, -1, -1, -1};
+    if (g_module_audit.required)
+      g_module_audit.pre_unload = capture_module_audit();
+    if (g_module_audit.required && g_module_audit.pre_unload.status != "passed") {
+      restore_native_stdout();
+      std::cout << "{\"schema_version\":1,\"stage\":\"module_audit\","
+                   "\"status\":\"module_audit_failed\",\"module_audit\":"
+                << module_audit_json() << "}\n";
+      FreeLibrary(module);
+      return 14;
+    }
+    report(global_error == 0 && params_error == 0 && parameter_count_contract_valid ?
+               "parameters_inspected" : "selector_error",
+           global_error, params_error, params_setdown_error, output, about_message,
+           skipped_lifecycle, true);
+    FreeLibrary(module);
+    return global_error == 0 && params_error == 0 && parameter_count_contract_valid && arbitrary_defaults_disposed &&
+        params_setdown_error == 0 ? 0 : 20;
+  }
+  if (is_render_worker() && audio_mode) {
     constexpr std::size_t kAudioGuardSamples = 8;
     constexpr float kAudioGuardValue = 1234567.0f;
     std::vector<std::array<std::byte, kParamSize>> audio_definitions(g_params.size() + 1);
@@ -17196,7 +17623,8 @@ int worker_main_impl(int argc, wchar_t **argv) {
     write<int16_t>(input, 364, 4);
     write<int32_t>(input, 368, external_audio_samples);
     write<void*>(input, 376, external_audio.data());
-    aexcompat::host_audio::runtime().set_source(&external_audio, external_audio_samples);
+    g_audio_source = &external_audio;
+    g_audio_source_sample_count = external_audio_samples;
 
     std::cerr << "stage:audio_setup_begin\n" << std::flush;
     const int32_t audio_setup_error = assignments_applied
@@ -17251,7 +17679,7 @@ int worker_main_impl(int argc, wchar_t **argv) {
     const bool passed = global_error == 0 && params_error == 0 && assignments_applied &&
         audio_setup_error == 0 && audio_render_error == 0 && audio_setdown_error == 0 &&
         setup_range_valid && guards_intact && samples_finite && audio_lifetimes_balanced &&
-        audio_telemetry().invalid_operations == 0 && arbitrary_defaults_disposed &&
+        g_invalid_audio_operations == 0 && arbitrary_defaults_disposed &&
         handle_lifetimes_balanced() && audio_global_setdown_error == 0;
     bool output_created = false;
     if (passed) {
@@ -17282,35 +17710,38 @@ int worker_main_impl(int argc, wchar_t **argv) {
               << ",\"setup_range_valid\":" << (setup_range_valid ? "true" : "false")
               << ",\"guard_bytes_intact\":" << (guards_intact ? "true" : "false")
               << ",\"samples_finite\":" << (samples_finite ? "true" : "false")
-              << ",\"audio_checkout_calls\":" << audio_telemetry().checkout_calls
-              << ",\"audio_usage_advertised\":" << (audio_telemetry().usage_advertised ? "true" : "false")
-              << ",\"audio_checkout_allowed\":" << (audio_telemetry().checkout_allowed ? "true" : "false")
-              << ",\"rejected_unadvertised_audio_checkouts\":" << audio_telemetry().rejected_unadvertised_checkouts
-              << ",\"rejected_audio_format_requests\":" << audio_telemetry().rejected_format_requests
-              << ",\"audio_handle_exhaustions\":" << audio_telemetry().handle_exhaustions
-              << ",\"peak_live_audio_handles\":" << audio_telemetry().peak_live_handles
-              << ",\"audio_checkin_calls\":" << audio_telemetry().checkin_calls
-              << ",\"audio_get_data_calls\":" << audio_telemetry().get_data_calls
-              << ",\"invalid_audio_operations\":" << audio_telemetry().invalid_operations
-              << ",\"last_audio_checkout_start_time\":" << audio_telemetry().last_checkout_start_time
-              << ",\"last_audio_checkout_duration\":" << audio_telemetry().last_checkout_duration
-              << ",\"last_audio_checkout_time_scale\":" << audio_telemetry().last_checkout_time_scale
-              << ",\"last_audio_window_start_sample\":" << audio_telemetry().last_window_start_sample
-              << ",\"last_audio_window_sample_count\":" << audio_telemetry().last_window_sample_count
-              << ",\"last_audio_window_silence_samples\":" << audio_telemetry().last_window_silence_samples
-              << ",\"last_audio_output_rate_fixed\":" << audio_telemetry().last_output_rate
-              << ",\"last_audio_output_bytes_per_sample\":" << audio_telemetry().last_output_bytes_per_sample
-              << ",\"last_audio_output_channels\":" << audio_telemetry().last_output_channels
-              << ",\"last_audio_output_format\":" << audio_telemetry().last_output_format
-              << ",\"last_audio_returned_sample_frames\":" << audio_telemetry().last_returned_sample_frames
+              << ",\"audio_checkout_calls\":" << g_audio_checkout_calls
+              << ",\"audio_usage_advertised\":" << (g_audio_usage_advertised ? "true" : "false")
+              << ",\"audio_checkout_allowed\":" << (g_audio_checkout_allowed ? "true" : "false")
+              << ",\"rejected_unadvertised_audio_checkouts\":" << g_rejected_unadvertised_audio_checkouts
+              << ",\"rejected_audio_format_requests\":" << g_rejected_audio_format_requests
+              << ",\"audio_handle_exhaustions\":" << g_audio_handle_exhaustions
+              << ",\"peak_live_audio_handles\":" << g_peak_live_audio_handles
+              << ",\"audio_checkin_calls\":" << g_audio_checkin_calls
+              << ",\"audio_get_data_calls\":" << g_audio_get_data_calls
+              << ",\"invalid_audio_operations\":" << g_invalid_audio_operations
+              << ",\"last_audio_checkout_start_time\":" << g_last_audio_checkout_start_time
+              << ",\"last_audio_checkout_duration\":" << g_last_audio_checkout_duration
+              << ",\"last_audio_checkout_time_scale\":" << g_last_audio_checkout_time_scale
+              << ",\"last_audio_window_start_sample\":" << g_last_audio_window_start_sample
+              << ",\"last_audio_window_sample_count\":" << g_last_audio_window_sample_count
+              << ",\"last_audio_window_silence_samples\":" << g_last_audio_window_silence_samples
+              << ",\"last_audio_output_rate_fixed\":" << g_last_audio_output_rate
+              << ",\"last_audio_output_bytes_per_sample\":" << g_last_audio_output_bytes_per_sample
+              << ",\"last_audio_output_channels\":" << g_last_audio_output_channels
+              << ",\"last_audio_output_format\":" << g_last_audio_output_format
+              << ",\"last_audio_returned_sample_frames\":" << g_last_audio_returned_sample_frames
               << ",\"audio_lifetimes_balanced\":"
               << (audio_lifetimes_balanced ? "true" : "false")
               << ",\"output_created\":" << (output_created ? "true" : "false") << "}\n";
     FreeLibrary(module);
     return passed && output_created ? 0 : 20;
   }
-#endif
-#if !defined(AEXCOMPAT_RENDER_WORKER) && !defined(AEXCOMPAT_SMART_WORKER)
+  std::array<int32_t, 5> lifecycle_errors{-1, -1, -1, -1, -1};
+  bool lifecycle_data_null = false;
+  bool user_changed_ok = false;
+  bool conditional_ui_ok = false;
+  if (!is_rendering_worker()) {
   std::vector<std::array<std::byte, kParamSize>> lifecycle_definitions(g_params.size() + 1);
   std::array<unsigned char, 4> lifecycle_pixel{255, 0, 0, 0};
   std::array<std::byte, 120> lifecycle_world{};
@@ -17369,7 +17800,6 @@ int worker_main_impl(int argc, wchar_t **argv) {
     g_param_checkout_calls = g_param_checkin_calls = g_invalid_param_checkins = 0;
     g_automatic_param_checkins = 0;
   }
-  std::array<int32_t, 5> lifecycle_errors{-1, -1, -1, -1, -1};
   std::cerr << "stage:sequence_setup_begin\n" << std::flush;
   lifecycle_errors[0] = params_error == 0
       ? invoke_sequence_selector(entry, kSequenceSetup, input.data(), output.data())
@@ -17393,9 +17823,9 @@ int worker_main_impl(int argc, wchar_t **argv) {
       g_user_changed_param_active = false;
     }
   }
-  const bool user_changed_ok = lifecycle_errors[0] == 0 &&
+  user_changed_ok = lifecycle_errors[0] == 0 &&
       (!g_user_changed_param_requested || g_user_changed_param_error == 0);
-  const bool conditional_ui_ok = user_changed_ok && dispatch_conditional_ui_selectors(
+  conditional_ui_ok = user_changed_ok && dispatch_conditional_ui_selectors(
       entry, input, output, lifecycle_params.data());
   if (conditional_ui_ok) {
     for (std::size_t i = 0; i < g_params.size(); ++i)
@@ -17419,26 +17849,23 @@ int worker_main_impl(int argc, wchar_t **argv) {
       ? invoke_sequence_selector(entry, kSequenceSetdown, input.data(), output.data()) : -1;
   std::cerr << "stage:sequence_setdown_end error=" << lifecycle_errors[4] << "\n" << std::flush;
   if (lifecycle_errors[4] == 0) write<void*>(output, kOutSequenceData, nullptr);
-  const bool lifecycle_data_null = read<void*>(output, kOutSequenceData) == nullptr && read<void*>(output, kOutFrameData) == nullptr;
-#endif
-#ifdef AEXCOMPAT_RENDER_WORKER
-  std::string case_id = request_mode ? "request" : "";
-  if (!request_mode) {
-    for (const wchar_t* p = argv[4]; *p; ++p) {
-      if (*p > 0x7f) return 2;
-      case_id.push_back(static_cast<char>(*p));
-    }
+  lifecycle_data_null = read<void*>(output, kOutSequenceData) == nullptr &&
+      read<void*>(output, kOutFrameData) == nullptr;
   }
-  std::string input_hash, output_hash;
+  std::string case_id;
+  std::string input_hash;
+  std::string output_hash;
   bool guards_intact = false;
-  int32_t render_width = 0, render_height = 0, render_rowbytes = 0;
+  int32_t render_width = 0;
+  int32_t render_height = 0;
+  int32_t render_rowbytes = 0;
   std::array<int32_t, 2> thread_errors{-1, -1};
   std::array<std::string, 2> thread_hashes{};
   std::array<bool, 2> thread_guards{false, false};
-  const bool concurrent_render = case_id == "threaded_default";
-  const bool persistent_sequence = case_id == "persistent_sequence";
-  const bool flattened_sequence = case_id == "flattened_sequence";
-  const bool copied_flattened_sequence = case_id == "copied_flattened_sequence";
+  bool concurrent_render = false;
+  bool persistent_sequence = false;
+  bool flattened_sequence = false;
+  bool copied_flattened_sequence = false;
   int32_t persistent_sequence_setup_error = -1;
   int32_t persistent_sequence_setdown_error = -1;
   std::array<int32_t, 2> persistent_frame_errors{-1, -1};
@@ -17450,8 +17877,34 @@ int worker_main_impl(int argc, wchar_t **argv) {
   bool flattened_handle_host_disposed = false;
   int32_t get_flattened_sequence_data_error = -1;
   bool original_sequence_preserved = false;
+  int32_t render_error = -1;
+  SmartResult smart{};
+  bool lifetime_fault_observed = false;
+  bool suite_fault_observed = false;
+  bool handle_fault_observed = false;
+  bool world_fault_observed = false;
+  bool pixel_format_fault_observed = false;
+  bool outline_fault_observed = false;
+  bool mask_attribute_fault_observed = false;
+  bool stream_metadata_fault_observed = false;
+  bool keyframe_fault_observed = false;
+  bool dynamic_stream_fault_observed = false;
+  bool aegp_memory_fault_observed = false;
+
+  if (is_render_worker()) {
+  case_id = request_mode ? "request" : "";
+  if (!request_mode) {
+    for (const wchar_t* p = argv[4]; *p; ++p) {
+      if (*p > 0x7f) return 2;
+      case_id.push_back(static_cast<char>(*p));
+    }
+  }
+  concurrent_render = case_id == "threaded_default";
+  persistent_sequence = case_id == "persistent_sequence";
+  flattened_sequence = case_id == "flattened_sequence";
+  copied_flattened_sequence = case_id == "copied_flattened_sequence";
   std::cerr << "stage:render_begin\n" << std::flush;
-  int32_t render_error = !image_render_supported ? -7 : (depth_supported ? -1 : -6);
+  render_error = !image_render_supported ? -7 : (depth_supported ? -1 : -6);
   if (params_error == 0 && image_render_supported && depth_supported && copied_flattened_sequence) {
     g_mask_model_enabled = true;
     configure_mask_scene("rectangle");
@@ -17608,14 +18061,14 @@ int worker_main_impl(int argc, wchar_t **argv) {
                                external_pixel_bytes);
   }
   std::cerr << "stage:render_end error=" << render_error << "\n" << std::flush;
-#elif defined(AEXCOMPAT_SMART_WORKER)
-  std::string case_id = request_mode ? (smart_force_cpu ? "request_cpu" :
+  } else if (is_smart_worker()) {
+  case_id = request_mode ? (smart_force_cpu ? "request_cpu" :
       (smart_opencl ? "gpu_opencl_float32" :
        (smart_directx ? "gpu_directx_float32" : "request"))) : "";
   if (!request_mode)
     for (const wchar_t* p = argv[4]; *p; ++p) { if (*p > 0x7f) return 2; case_id.push_back(static_cast<char>(*p)); }
   std::cerr << "stage:smart_render_begin\n" << std::flush;
-  const SmartResult smart = params_error == 0 && image_render_supported && depth_supported &&
+  smart = params_error == 0 && image_render_supported && depth_supported &&
       smart_render_supported
       ? smart_render_once(entry, input, output, case_id,
                           request_mode ? &requested_parameters : nullptr,
@@ -17627,55 +18080,41 @@ int worker_main_impl(int argc, wchar_t **argv) {
                           external_total_time, external_time_scale,
                           external_pixel_bytes)
       : SmartResult{};
-  const bool lifetime_fault_observed = mask_double_dispose_mode
+  lifetime_fault_observed = mask_double_dispose_mode
       ? verify_mask_double_dispose_rejected()
       : stream_live_value_dispose_mode
           ? verify_stream_dispose_with_live_value_rejected()
           : false;
-  bool suite_fault_observed = false;
-  bool handle_fault_observed = false;
-  bool world_fault_observed = false;
-  bool pixel_format_fault_observed = false;
-  bool outline_fault_observed = false;
-  bool mask_attribute_fault_observed = false;
-  bool stream_metadata_fault_observed = false;
-  bool keyframe_fault_observed = false;
-  bool dynamic_stream_fault_observed = false;
-  bool aegp_memory_fault_observed = false;
   std::cerr << "stage:smart_render_end pre_error=" << smart.pre_error
             << " render_error=" << smart.render_error << "\n" << std::flush;
-#endif
-#ifdef AEXCOMPAT_RENDER_WORKER
-  drain_async_layer_requests();
-#endif
+  }
+  if (is_render_worker()) drain_async_layer_requests();
   const bool arbitrary_defaults_disposed = dispose_arbitrary_defaults(entry, input, output);
   std::cerr << "stage:global_setdown_begin\n" << std::flush;
   const int32_t setdown_error = global_error == 0
       ? invoke_global_setdown(entry, input.data(), output.data()) : -1;
-  #ifdef AEXCOMPAT_SMART_WORKER
-  if (suite_release_without_acquire_mode)
+  if (is_smart_worker() && suite_release_without_acquire_mode)
     suite_fault_observed = verify_suite_release_without_acquire_rejected();
-  if (handle_resize_while_locked_mode)
+  if (is_smart_worker() && handle_resize_while_locked_mode)
     handle_fault_observed = verify_handle_resize_while_locked_rejected();
-  if (world_double_dispose_mode)
+  if (is_smart_worker() && world_double_dispose_mode)
     world_fault_observed = verify_world_double_dispose_rejected();
-  if (world_allocation_limit_mode)
+  if (is_smart_worker() && world_allocation_limit_mode)
     world_fault_observed = verify_world_allocation_limit_rejected();
-  if (pixel_format_registry_mode)
+  if (is_smart_worker() && pixel_format_registry_mode)
     pixel_format_fault_observed = verify_pixel_format_registry_rejection();
-  if (outline_mutation_mode)
+  if (is_smart_worker() && outline_mutation_mode)
     outline_fault_observed = verify_outline_mutation_rejection();
-  if (mask_attribute_mode)
+  if (is_smart_worker() && mask_attribute_mode)
     mask_attribute_fault_observed = verify_mask_attribute_and_ownership_rejection();
-  if (stream_metadata_ownership_mode)
+  if (is_smart_worker() && stream_metadata_ownership_mode)
     stream_metadata_fault_observed = verify_stream_metadata_and_ownership_rejection();
-  if (keyframe_ownership_mode)
+  if (is_smart_worker() && keyframe_ownership_mode)
     keyframe_fault_observed = verify_keyframe_ownership_rejection();
-  if (dynamic_stream_tree_mode)
+  if (is_smart_worker() && dynamic_stream_tree_mode)
     dynamic_stream_fault_observed = verify_dynamic_stream_tree_rejection();
-  if (aegp_memory_strings_mode)
+  if (is_smart_worker() && aegp_memory_strings_mode)
     aegp_memory_fault_observed = verify_aegp_memory_and_strings_rejection();
-  #endif
   std::cerr << "stage:global_setdown_end error=" << setdown_error << "\n" << std::flush;
   if (g_module_audit.required)
     g_module_audit.pre_unload = capture_module_audit();
@@ -17687,7 +18126,7 @@ int worker_main_impl(int argc, wchar_t **argv) {
     FreeLibrary(module);
     return 14;
   }
-#ifdef AEXCOMPAT_RENDER_WORKER
+  if (is_render_worker()) {
   restore_native_stdout();
   std::cout << "{\"schema_version\":1,\"stage\":\"classic_render\",\"status\":\""
             << (render_error == 0 && parameter_count_contract_valid && guards_intact &&
@@ -17697,7 +18136,7 @@ int worker_main_impl(int argc, wchar_t **argv) {
                 pf_path_lifetimes_balanced() &&
                 async_receipt_lifetimes_balanced() &&
                 async_layer_requests_balanced() &&
-                audio_handle_lifetimes_balanced() && audio_telemetry().invalid_operations == 0 &&
+                audio_handle_lifetimes_balanced() && g_invalid_audio_operations == 0 &&
                 param_checkouts_balanced() &&
                 ((!g_render_click_enabled && !g_render_draw_enabled) ||
                  g_render_ui_context_closed)
@@ -17715,28 +18154,28 @@ int worker_main_impl(int argc, wchar_t **argv) {
             << ",\"wide_time_checkout_allowed\":" << (g_wide_time_checkout_allowed ? "true" : "false")
             << ",\"rejected_temporal_param_checkouts\":" << g_rejected_temporal_param_checkouts
             << ",\"shutter_dependency_advertised\":" << (g_shutter_dependency_advertised ? "true" : "false")
-            << ",\"audio_usage_advertised\":" << (audio_telemetry().usage_advertised ? "true" : "false")
-            << ",\"audio_checkout_allowed\":" << (audio_telemetry().checkout_allowed ? "true" : "false")
-            << ",\"audio_source_available\":" << (audio_telemetry().source_available ? "true" : "false")
-            << ",\"rejected_unadvertised_audio_checkouts\":" << audio_telemetry().rejected_unadvertised_checkouts
-            << ",\"rejected_audio_format_requests\":" << audio_telemetry().rejected_format_requests
-            << ",\"audio_handle_exhaustions\":" << audio_telemetry().handle_exhaustions
-            << ",\"peak_live_audio_handles\":" << audio_telemetry().peak_live_handles
-            << ",\"audio_checkout_calls\":" << audio_telemetry().checkout_calls
-            << ",\"audio_checkin_calls\":" << audio_telemetry().checkin_calls
-            << ",\"audio_get_data_calls\":" << audio_telemetry().get_data_calls
-            << ",\"invalid_audio_operations\":" << audio_telemetry().invalid_operations
-            << ",\"last_audio_checkout_start_time\":" << audio_telemetry().last_checkout_start_time
-            << ",\"last_audio_checkout_duration\":" << audio_telemetry().last_checkout_duration
-            << ",\"last_audio_checkout_time_scale\":" << audio_telemetry().last_checkout_time_scale
-            << ",\"last_audio_window_start_sample\":" << audio_telemetry().last_window_start_sample
-            << ",\"last_audio_window_sample_count\":" << audio_telemetry().last_window_sample_count
-            << ",\"last_audio_window_silence_samples\":" << audio_telemetry().last_window_silence_samples
-            << ",\"last_audio_output_rate_fixed\":" << audio_telemetry().last_output_rate
-            << ",\"last_audio_output_bytes_per_sample\":" << audio_telemetry().last_output_bytes_per_sample
-            << ",\"last_audio_output_channels\":" << audio_telemetry().last_output_channels
-            << ",\"last_audio_output_format\":" << audio_telemetry().last_output_format
-            << ",\"last_audio_returned_sample_frames\":" << audio_telemetry().last_returned_sample_frames
+            << ",\"audio_usage_advertised\":" << (g_audio_usage_advertised ? "true" : "false")
+            << ",\"audio_checkout_allowed\":" << (g_audio_checkout_allowed ? "true" : "false")
+            << ",\"audio_source_available\":" << (g_audio_source ? "true" : "false")
+            << ",\"rejected_unadvertised_audio_checkouts\":" << g_rejected_unadvertised_audio_checkouts
+            << ",\"rejected_audio_format_requests\":" << g_rejected_audio_format_requests
+            << ",\"audio_handle_exhaustions\":" << g_audio_handle_exhaustions
+            << ",\"peak_live_audio_handles\":" << g_peak_live_audio_handles
+            << ",\"audio_checkout_calls\":" << g_audio_checkout_calls
+            << ",\"audio_checkin_calls\":" << g_audio_checkin_calls
+            << ",\"audio_get_data_calls\":" << g_audio_get_data_calls
+            << ",\"invalid_audio_operations\":" << g_invalid_audio_operations
+            << ",\"last_audio_checkout_start_time\":" << g_last_audio_checkout_start_time
+            << ",\"last_audio_checkout_duration\":" << g_last_audio_checkout_duration
+            << ",\"last_audio_checkout_time_scale\":" << g_last_audio_checkout_time_scale
+            << ",\"last_audio_window_start_sample\":" << g_last_audio_window_start_sample
+            << ",\"last_audio_window_sample_count\":" << g_last_audio_window_sample_count
+            << ",\"last_audio_window_silence_samples\":" << g_last_audio_window_silence_samples
+            << ",\"last_audio_output_rate_fixed\":" << g_last_audio_output_rate
+            << ",\"last_audio_output_bytes_per_sample\":" << g_last_audio_output_bytes_per_sample
+            << ",\"last_audio_output_channels\":" << g_last_audio_output_channels
+            << ",\"last_audio_output_format\":" << g_last_audio_output_format
+            << ",\"last_audio_returned_sample_frames\":" << g_last_audio_returned_sample_frames
             << ",\"audio_lifetimes_balanced\":"
             << (audio_handle_lifetimes_balanced() ? "true" : "false")
             << ",\"render_selector_dispatched\":"
@@ -17935,7 +18374,7 @@ int worker_main_impl(int argc, wchar_t **argv) {
             << ",\"requested_invert_map\":" << static_cast<int32_t>(requested_value(requested_parameters, L"invert_map"))
             << ",\"render_performed\":" << (nop_render_advertised ? "false" : "true")
             << ",\"module_audit\":" << module_audit_json() << "}\n";
-#elif defined(AEXCOMPAT_SMART_WORKER)
+  } else if (is_smart_worker()) {
   restore_native_stdout();
   std::cout << "{\"schema_version\":1,\"stage\":\"smartfx_render\",\"status\":\""
             << (smart.pre_error == 0 && smart.render_error == 0 &&
@@ -17944,7 +18383,7 @@ int worker_main_impl(int argc, wchar_t **argv) {
                 smart.gpu_setup_error == 0 && smart.gpu_setdown_error == 0 &&
                 smart.guards_intact && handle_lifetimes_balanced() &&
                 world_lifetimes_balanced() && gpu_memory_lifetimes_balanced() &&
-                audio_handle_lifetimes_balanced() && audio_telemetry().invalid_operations == 0 &&
+                audio_handle_lifetimes_balanced() && g_invalid_audio_operations == 0 &&
                 param_checkouts_balanced() &&
                 ((!g_render_click_enabled && !g_render_draw_enabled) ||
                  g_render_ui_context_closed)
@@ -18169,42 +18608,42 @@ int worker_main_impl(int argc, wchar_t **argv) {
             << ",\"requested_invert_map\":" << static_cast<int32_t>(requested_value(requested_parameters, L"invert_map"))
             << ",\"render_performed\":" << (nop_render_advertised ? "false" : "true")
             << ",\"module_audit\":" << module_audit_json() << "}\n";
-#else
+  } else {
   report(global_error == 0 && params_error == 0 ? "selectors_completed" : "selector_error",
          global_error, params_error, setdown_error, output, about_message, lifecycle_errors, lifecycle_data_null);
-#endif
+  }
   if (g_trace_writer) {
     g_trace_writer->session_end();
     g_trace_writer = nullptr;
   }
   FreeLibrary(module);
-#ifdef AEXCOMPAT_RENDER_WORKER
-  return global_error == 0 && params_error == 0 && parameter_count_contract_valid &&
+  if (is_render_worker()) {
+    return global_error == 0 && params_error == 0 && parameter_count_contract_valid &&
       image_render_supported && depth_supported && render_error == 0 && guards_intact &&
       handle_lifetimes_balanced() && world_lifetimes_balanced() &&
       async_receipt_lifetimes_balanced() &&
       async_layer_requests_balanced() &&
       gpu_memory_lifetimes_balanced() &&
-      audio_handle_lifetimes_balanced() && audio_telemetry().invalid_operations == 0 &&
+      audio_handle_lifetimes_balanced() && g_invalid_audio_operations == 0 &&
       param_checkouts_balanced() &&
       ((!g_render_click_enabled && !g_render_draw_enabled) ||
        g_render_ui_context_closed) ? 0 : 21;
-#elif defined(AEXCOMPAT_SMART_WORKER)
-  return global_error == 0 && params_error == 0 && parameter_count_contract_valid &&
+  }
+  if (is_smart_worker()) {
+    return global_error == 0 && params_error == 0 && parameter_count_contract_valid &&
       image_render_supported && depth_supported && smart.pre_error == 0 && smart.render_error == 0 &&
       smart.gpu_setup_error == 0 && smart.gpu_setdown_error == 0 &&
       smart.rects_valid && smart.guards_intact &&
       handle_lifetimes_balanced() && world_lifetimes_balanced() &&
       gpu_memory_lifetimes_balanced() &&
-      audio_handle_lifetimes_balanced() && audio_telemetry().invalid_operations == 0 &&
+      audio_handle_lifetimes_balanced() && g_invalid_audio_operations == 0 &&
       param_checkouts_balanced() &&
       ((!g_render_click_enabled && !g_render_draw_enabled) ||
        g_render_ui_context_closed) ? 0 : 22;
-#else
+  }
   return global_error == 0 && params_error == 0 && parameter_count_contract_valid &&
       user_changed_ok && conditional_ui_ok && about_error == 0 && lifecycle_data_null &&
       std::all_of(lifecycle_errors.begin(), lifecycle_errors.end(), [](auto error) { return error == 0; }) ? 0 : 20;
-#endif
 }
 
 int aexcompat::worker_target::run(Kind kind, int argc, wchar_t** argv) {
