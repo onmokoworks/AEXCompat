@@ -35,9 +35,9 @@ def test_cuda_device_enumeration_is_bounded_and_worlds_keep_their_ordinal():
     ):
         assert marker in backend
     for marker in (
-        "g_gpu_created_worlds.emplace(*world, index)",
-        "gpu_free_device_memory(nullptr, device_index, pixels)",
-        "? active_gpu_device_index() : owned->second",
+        "g_created_worlds.emplace(*world, index)",
+        "gpu_free_device_memory(nullptr, index, pixels)",
+        "owned == g_created_worlds.end() ? active_gpu_device_index() : owned->second",
     ):
         assert marker in source
 

@@ -53,7 +53,7 @@ def test_classic_and_smart_dispatch_register_host_worlds_and_resizes():
     text = SOURCE.read_text(encoding="utf-8")
     assert text.count("DispatchWorldFormatScope dispatch_worlds;") >= 3
     assert text.count("register_world(output_world.data(), dispatch_pixel_format)") >= 4
-    assert "register_world(map_world.data(), kPixelFormatArgb32)" in text
+    assert "register_world(map_world.world.data(), kPixelFormatArgb32)" in text
     assert "register_world(world.data(), dispatch_pixel_format)" in text
     assert "register_world(output_world.data(), kPixelFormatGpuBgra128)" in text
 

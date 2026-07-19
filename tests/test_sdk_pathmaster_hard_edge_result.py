@@ -55,7 +55,7 @@ def test_worker_and_broker_keep_the_path_boundary_explicit_and_observable():
         'std::strcmp(name, "PF Path Data Suite") == 0',
         "struct MaskSuite5",
         "version == 6",
-        "write_rect(world.data() + 44, width, height)",
+        "write_rect(lifecycle_world.data() + 44, 1, 1)",
         "transfer_mode < 0 || transfer_mode > 38",
         "flatten_pf_path",
         "pf_path_distance",

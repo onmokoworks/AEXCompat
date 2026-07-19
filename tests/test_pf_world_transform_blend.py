@@ -12,9 +12,10 @@ def test_blend_runtime_is_alias_safe():
 
 def test_blend_uses_registered_formats_and_snapshots_both_sources():
     source = (ROOT / "minihost/src/worker_pf_suites.cpp").read_text(encoding="utf-8")
+    worker = (ROOT / "minihost/src/l2_main.cpp").read_text(encoding="utf-8")
     assert "first_info.pixel_format != second_info.pixel_format" in source
     assert "first_copy.resize" in source and "second_copy.resize" in source
-    assert "--self-test-world-transform-blend" in source
+    assert "--self-test-world-transform-blend" in worker
 
 def test_transfer_rect_implements_sdk_blend_mode_families():
     source = (ROOT / "minihost/src/worker_pf_suites.cpp").read_text(encoding="utf-8")
