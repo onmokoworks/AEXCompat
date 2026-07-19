@@ -109,6 +109,7 @@
 #include "worker_aegp_init_execution.hpp"
 #include "worker_aegp_init_orchestration.hpp"
 #include "worker_aegp_init_report.hpp"
+#include "worker_ui_event_report.hpp"
 #include "worker_entry_bootstrap.hpp"
 #include "worker_effect_bootstrap.hpp"
 #include "worker_aegp_timeline_probe.hpp"
@@ -5517,103 +5518,19 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
         ? invoke_global_setdown(entry, input.data(), output.data()) : -1;
     if (!session.prepare_protocol_report()) return session.finish(14);
     restore_native_stdout();
-    const bool event_contract = (invocation.ui_lifecycle_mode || invocation.ui_idle_mode || invocation.ui_keydown_mode ||
-        invocation.ui_mouse_exited_mode)
-        ? std::all_of(lifecycle_errors.begin(),
-              lifecycle_errors.begin() +
-                  ((invocation.ui_idle_mode || invocation.ui_keydown_mode || invocation.ui_mouse_exited_mode) ? 5 : 4),
-              [](int32_t error) { return error == 0; }) &&
-            lifecycle_context_stable && lifecycle_host_state_cleared
-        : invocation.draw_event_mode
-        ? event_error == 0 && (event_out_flags & 1) != 0 &&
-            (g_drawbot_paint_rect_calls + g_drawbot_fill_path_calls +
-             g_drawbot_stroke_path_calls + g_overlay_stroke_path_calls) > 0 &&
-            g_drawbot_fill_colors.size() == g_drawbot_fill_path_calls &&
-            std::all_of(g_drawbot_fill_colors.begin(), g_drawbot_fill_colors.end(),
-                [](const auto& color) { return std::all_of(color.begin(), color.end(),
-                    [](float value) { return std::isfinite(value) && value >= 0 && value <= 1; }); }) &&
-            g_drawbot_objects_created == g_drawbot_objects_released && g_drawbot_objects.empty() &&
-            g_drawbot_invalid_operations == 0
-        : invocation.drag_event_mode
-            ? event_error == 0 && g_ui_drag_requested &&
-                g_ui_drag_calls == static_cast<uint32_t>(invocation.drag_steps) && g_ui_drag_terminated
-            : invocation.click_event_mode
-            ? event_error == 0 && (event_out_flags & 9) == 9 &&
-                g_app_color_picker_calls == 1 && g_app_invalidate_rect_calls == 1
-            : event_error == 0 && cursor == 13;
-    std::cout << "{\"schema_version\":1,\"stage\":\"custom_ui_event\",\"status\":\""
-              << (event_contract && event_sequence_setdown_error == 0 &&
-                  defaults_disposed && handle_lifetimes_balanced()
-                  ? "event_completed" : "event_failed")
-              << "\",\"event_type\":\"" << (invocation.ui_mouse_exited_mode ? "ui_mouse_exited" :
-                  (invocation.ui_keydown_mode ? "ui_keydown" :
-                  (invocation.ui_idle_mode ? "ui_idle" :
-                  (invocation.ui_lifecycle_mode ? "ui_lifecycle" :
-                  (invocation.draw_event_mode ? "draw" :
-                  (invocation.drag_event_mode ? "drag_sequence" :
-                   (invocation.click_event_mode ? "do_click" : "adjust_cursor")))))))
-              << "\",\"event_target\":\"" << event_target
-              << "\",\"event_error\":" << event_error
-              << ",\"cursor\":" << cursor << ",\"event_out_flags\":" << event_out_flags
-              << ",\"adv_app_info_text_calls\":" << g_adv_app_info_text_calls
-              << ",\"adv_app_info_text\":\"" << escape(g_last_adv_app_info_text)
-              << "\",\"arbitrary_values_disposed\":"
-              << (arbitrary_values_disposed ? "true" : "false")
-              << ",\"handle_lifetimes_balanced\":"
-              << (handle_lifetimes_balanced() ? "true" : "false")
-              << ",\"suite_leases_balanced\":"
-              << (suite_leases_balanced() ? "true" : "false")
-              << ",\"drawbot_paint_rect_calls\":" << g_drawbot_paint_rect_calls
-              << ",\"drawbot_fill_path_calls\":" << g_drawbot_fill_path_calls
-              << ",\"drawbot_stroke_path_calls\":" << g_drawbot_stroke_path_calls
-              << ",\"overlay_stroke_path_calls\":" << g_overlay_stroke_path_calls
-              << ",\"drawbot_objects_created\":" << g_drawbot_objects_created
-              << ",\"drawbot_objects_released\":" << g_drawbot_objects_released
-              << ",\"drawbot_invalid_operations\":" << g_drawbot_invalid_operations
-              << ",\"drawbot_fill_color_count\":" << g_drawbot_fill_colors.size()
-              << ",\"drawbot_first_fill_color\":["
-              << (g_drawbot_fill_colors.empty() ? 0.0f : g_drawbot_fill_colors[0][0]) << ','
-              << (g_drawbot_fill_colors.empty() ? 0.0f : g_drawbot_fill_colors[0][1]) << ','
-              << (g_drawbot_fill_colors.empty() ? 0.0f : g_drawbot_fill_colors[0][2]) << ','
-              << (g_drawbot_fill_colors.empty() ? 0.0f : g_drawbot_fill_colors[0][3]) << ']'
-              << ",\"drawbot_get_drawing_ref_calls\":" << g_drawbot_get_drawing_ref_calls
-              << ",\"drawbot_get_supplier_calls\":" << g_drawbot_get_supplier_calls
-              << ",\"drawbot_get_surface_calls\":" << g_drawbot_get_surface_calls
-              << ",\"app_get_background_color_calls\":" << g_app_get_background_color_calls
-              << ",\"app_color_picker_calls\":" << g_app_color_picker_calls
-              << ",\"app_invalidate_rect_calls\":" << g_app_invalidate_rect_calls
-              << ",\"picker_color_rgba\":[" << g_app_picker_color[0] << ','
-              << g_app_picker_color[1] << ',' << g_app_picker_color[2] << ','
-              << g_app_picker_color[3] << ']'
-              << ",\"invalidated_rect\":[" << g_app_invalidated_rect[0] << ','
-              << g_app_invalidated_rect[1] << ',' << g_app_invalidated_rect[2] << ','
-              << g_app_invalidated_rect[3] << ']'
-              << ",\"changed_value\":" << (changed_value ? "true" : "false")
-              << ",\"drag_requested\":" << (g_ui_drag_requested ? "true" : "false")
-              << ",\"drag_calls\":" << g_ui_drag_calls
-              << ",\"drag_terminated\":" << (g_ui_drag_terminated ? "true" : "false")
-              << ",\"coordinate_transform_calls\":" << g_ui_coordinate_transform_calls
-              << ",\"lifecycle_errors\":[" << lifecycle_errors[0] << ','
-              << lifecycle_errors[1] << ',' << lifecycle_errors[2] << ','
-              << lifecycle_errors[3] << ',' << lifecycle_errors[4] << ']'
-              << ",\"lifecycle_context_stable\":"
-              << (lifecycle_context_stable ? "true" : "false")
-              << ",\"plugin_state_before_close\":[" << plugin_state_before_close[0] << ','
-              << plugin_state_before_close[1] << ',' << plugin_state_before_close[2] << ','
-              << plugin_state_before_close[3] << ']'
-              << ",\"lifecycle_host_state_cleared\":"
-              << (lifecycle_host_state_cleared ? "true" : "false")
-              << ",\"keydown_code\":" << invocation.keydown_code
-              << ",\"keydown_modifiers\":" << invocation.keydown_modifiers
-              << ",\"event_assignments_applied\":"
-              << (event_assignments_applied ? "true" : "false")
-              << ",\"sequence_setdown_error\":" << event_sequence_setdown_error
-              << ",\"requested_parameters\":"
-              << requested_parameters_json(invocation.ui_event_assignments)
-              << ",\"global_setdown_error\":" << event_setdown_error << "}\n";
-    return session.finish(event_contract && event_sequence_setdown_error == 0 &&
-        defaults_disposed && handle_lifetimes_balanced() && event_setdown_error == 0
-            ? 0 : 20);
+    const bool ui_event_passed = emit_ui_event_completion_report(
+        {invocation.ui_lifecycle_mode, invocation.ui_idle_mode,
+         invocation.ui_keydown_mode, invocation.ui_mouse_exited_mode,
+         invocation.draw_event_mode, invocation.drag_event_mode,
+         invocation.click_event_mode, invocation.drag_steps,
+         invocation.keydown_code, invocation.keydown_modifiers, event_target,
+         event_error, cursor, event_out_flags, changed_value, lifecycle_errors,
+         plugin_state_before_close, lifecycle_context_stable,
+         lifecycle_host_state_cleared, event_assignments_applied,
+         arbitrary_values_disposed, defaults_disposed, g_drawbot_objects.empty(),
+         event_sequence_setdown_error, event_setdown_error,
+         requested_parameters_json(invocation.ui_event_assignments)});
+    return session.finish(ui_event_passed ? 0 : 20);
   }
   if (is_rendering_worker() && invocation.request_mode &&
       (params_error != 0 || !parameter_count_contract_valid ||
