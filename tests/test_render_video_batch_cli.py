@@ -118,8 +118,11 @@ def test_video_batch_renders_a_sequence_through_one_resident_worker(tmp_path: Pa
     checksums = {frame["checksum"] for frame in report["frames"]}
     assert len(checksums) == 1
     # The auxiliary observation options reached the real worker: world
-    # snapshots landed in the requested dump directory.
+    # snapshots landed in the requested dump directory and the final report
+    # carries the opt-in checksum detail for the transferred output.
     try:
         assert any(dump_directory.iterdir()), "world dump directory received snapshots"
     finally:
         shutil.rmtree(dump_directory, ignore_errors=True)
+    assert final["output_row_crc32"], "checksum detail rows recorded"
+    assert final["output_channel_sha256"], "checksum detail channels recorded"

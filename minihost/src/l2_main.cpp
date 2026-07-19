@@ -4504,6 +4504,11 @@ RenderSessionOutcome run_render_session(
     for (std::size_t pixel = 0; pixel < expected_pixels; ++pixel)
       argb_to_rgba_native(slot + pixel * pixel_bytes,
                           captured.data() + pixel * pixel_bytes, pixel_bytes);
+    // Mirrors the one-shot finalize checksum hook (gated on the opt-in aux
+    // option): detail is computed from the same transferred RGBA bytes the
+    // broker reads. The final report carries the last rendered frame's
+    // detail; frame_done stays the per-frame truth.
+    record_output_checksum_detail(slot, frame_width, frame_height, pixel_bytes);
     channels.write_header_u32(wrs::kHeaderFrameWidthOffset,
                               static_cast<uint32_t>(frame_width));
     channels.write_header_u32(wrs::kHeaderFrameHeightOffset,
