@@ -31,6 +31,8 @@ AEGP_SCENE_RUNTIME_HEADER = ROOT / "minihost" / "src" / "worker_aegp_scene_runti
 AEGP_SCENE_RUNTIME_SOURCE = ROOT / "minihost" / "src" / "worker_aegp_scene_runtime.cpp"
 AEGP_INIT_RUNTIME_HEADER = ROOT / "minihost" / "src" / "worker_aegp_init_runtime.hpp"
 AEGP_INIT_RUNTIME_SOURCE = ROOT / "minihost" / "src" / "worker_aegp_init_runtime.cpp"
+AEGP_RENDER_SELFTEST_HEADER = ROOT / "minihost" / "src" / "worker_aegp_render_selftests.hpp"
+AEGP_RENDER_SELFTEST_SOURCE = ROOT / "minihost" / "src" / "worker_aegp_render_selftests.cpp"
 MASK_RUNTIME_HEADER = ROOT / "minihost" / "src" / "worker_mask_runtime.hpp"
 MASK_RUNTIME_SOURCE = ROOT / "minihost" / "src" / "worker_mask_runtime.cpp"
 MASK_RUNTIME_CALLBACKS = ROOT / "minihost" / "src" / "worker_mask_runtime_callbacks.cpp"
@@ -53,6 +55,22 @@ def l2_family_source():
 
 
 class MinihostL2SourceTests(unittest.TestCase):
+    def test_aegp_render_selftests_are_a_true_translation_unit(self):
+        worker = SOURCE.read_text(encoding="utf-8")
+        header = AEGP_RENDER_SELFTEST_HEADER.read_text(encoding="utf-8")
+        implementation = AEGP_RENDER_SELFTEST_SOURCE.read_text(encoding="utf-8")
+        cmake = MINIHOST_CMAKE.read_text(encoding="utf-8")
+
+        self.assertIn("src/worker_aegp_render_selftests.cpp", cmake)
+        self.assertIn("verify_aegp_render_options_suite1", header)
+        self.assertIn("verify_aegp_item_staged_worlds", header)
+        self.assertIn("bool verify_aegp_render_options_suite1()", implementation)
+        self.assertIn("bool verify_aegp_item_staged_worlds()", implementation)
+        self.assertIn("clear_staged_item_worlds_for_test", implementation)
+        self.assertIn("verify_item_render_cycle_contract", implementation)
+        self.assertNotIn("bool verify_aegp_render_options_suite1()", worker)
+        self.assertNotIn("bool verify_aegp_item_staged_worlds()", worker)
+
     def test_render_worker_request_validation_is_extracted(self):
         worker = SOURCE.read_text(encoding="utf-8")
         parser = REQUEST_PARSER_SOURCE.read_text(encoding="utf-8")
