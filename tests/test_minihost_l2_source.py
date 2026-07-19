@@ -35,6 +35,7 @@ PARAMETER_SELFTEST_ROUTING_SOURCE = (ROOT / "minihost" / "src" /
                                      "worker_parameter_selftest_routing.cpp")
 CUSTOM_SELFTEST_ROUTING_SOURCE = (ROOT / "minihost" / "src" /
                                   "worker_custom_selftest_routing.cpp")
+CLASSIC_REPORT_SOURCE = ROOT / "minihost" / "src" / "worker_classic_report.cpp"
 REQUEST_PARSER_HEADER = ROOT / "minihost" / "src" / "worker_request_parser.hpp"
 REQUEST_PARSER_SOURCE = ROOT / "minihost" / "src" / "worker_request_parser.cpp"
 RENDER_REPORT_HEADER = ROOT / "minihost" / "src" / "worker_render_report.hpp"
@@ -256,8 +257,13 @@ class MinihostL2SourceTests(unittest.TestCase):
         self.assertIn("src/worker_render_report.cpp", cmake)
         self.assertIn("class ReportSnapshot", header)
         self.assertIn("stream_.copyfmt(formatting_source)", implementation)
-        self.assertEqual(worker.count("worker_render_report::ReportSnapshot"), 2)
-        self.assertEqual(worker.count("worker_render_report::emit(report_snapshot"), 2)
+        # The classic snapshot construction and emit moved to the
+        # worker_classic_report owner; the smart path stays in l2_main.
+        self.assertEqual(worker.count("worker_render_report::ReportSnapshot"), 1)
+        self.assertEqual(worker.count("worker_render_report::emit(report_snapshot"), 1)
+        classic_report = CLASSIC_REPORT_SOURCE.read_text(encoding="utf-8")
+        self.assertEqual(classic_report.count("report::ReportSnapshot"), 1)
+        self.assertEqual(classic_report.count("report::emit(report_snapshot"), 1)
         self.assertNotIn('std::cout << "{\\\"schema_version\\\":1,\\\"stage\\\":\\\"classic_render', worker)
         self.assertNotIn('std::cout << "{\\\"schema_version\\\":1,\\\"stage\\\":\\\"smartfx_render', worker)
 
