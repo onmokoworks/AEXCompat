@@ -60,7 +60,7 @@ def test_post_unload_report_path_stops_trace_before_unload_and_stdout_restore():
     assert shutdown.index("capture_terminal_audit()") < shutdown.index("stop_trace()")
     assert shutdown.index("stop_trace()") < shutdown.index("unload_module()")
     assert shutdown.index("unload_module()") < shutdown.index("restore_stdout()")
-    death = MAIN.index("registration.hook(global_refcon, registration.refcon)")
+    death = MAIN.index("aegp_init::dispatch_death(global_refcon)")
     assert death < MAIN.index("session.shutdown_before_report()", death)
     assert "return session.finish_integrated_report(passed ? 0 : 23)" in MAIN
     integrated = SOURCE[SOURCE.index("int WorkerSession::finish_integrated_report"):
