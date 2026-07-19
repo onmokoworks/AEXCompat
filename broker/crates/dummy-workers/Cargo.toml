@@ -31,3 +31,7 @@ path = "src/bin/dummy_large_stdout.rs"
 [[bin]]
 name = "sealed_acl_probe"
 path = "src/sealed_acl_probe.rs"
+
+[[bin]]
+name = "session_shm_probe"
+path = "src/bin/session_shm_probe.rs"

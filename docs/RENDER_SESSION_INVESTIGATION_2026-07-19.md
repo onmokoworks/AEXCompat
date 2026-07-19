@@ -212,3 +212,52 @@ global-sequence-frame-data / multi-frame-rendering-in-ae)。
 - 項目7・3 の机上調査は完了。AE 実機観測 (項目1・2) の焦点は、机上で
   確定できなかった「実際の selector 発行頻度」(RESETUP がレンダー専用
   文脈でいつ来るか、パラメーター変更時の実挙動) に絞れる。
+
+### 項目5: 実証 spike の結果 (観察、2026-07-19 追記)
+
+上記「未着手」のうち項目5 の実証 spike を完了した (訂正: 項目5 は以降
+未着手ではない)。実装は `broker/crates/broker/tests/render_session_shm_spike.rs`
+(broker 側) と `broker/crates/dummy-workers/src/bin/session_shm_probe.rs`
+(worker 側 fixture)。launch は `run_isolated_impl` と同型
+(CreateProcessAsUserW + PROC_THREAD_ATTRIBUTE_HANDLE_LIST + Job assign 後
+resume)、restricted token + `protect_sealed_load_tree` 済みディレクトリから
+起動。数値は開発機の参考値で frozen evidence ではない。
+
+構成: 無名 file mapping (pagefile 裏、SEC_COMMIT) 256MiB、Job
+`ProcessMemoryLimit` 128MiB (意図的に section より小さくした)、上限超の
+private VirtualAlloc probe 192MiB、auto-reset event 対で ping-pong 2000 回。
+
+- **継承 handle だけで map 可能**: restricted token の worker が、名前や
+  パス、ACL を介さず継承 handle のみで `MapViewOfFile(FILE_MAP_ALL_ACCESS)`
+  に成功。双方向の読み書きも成立 (broker のパターンを worker が検証し、
+  worker の ACK・レポートを broker が回収)。handle 番号の伝達は環境変数
+  (trace handle と同型) で機能した。
+- **共有 view は ProcessMemoryLimit に課金されない**: worker が 256MiB の
+  view 全ページを write touch しても、worker の private commit
+  (PagefileUsage) は 712KiB → 1228KiB (増分 ~0.5MiB)。Job の
+  `PeakProcessMemoryUsed` も 1296KiB。cap 128MiB < view 256MiB の構成で
+  worker は正常終了した。同時に、上限超 192MiB の private `VirtualAlloc` は
+  失敗しており、cap 自体はこのプロセスに実効している (「課金されない」観測
+  の証拠力を担保)。working set には共有ページが乗る (touch 後 ~261MiB)。
+- **親 (broker) 側にも section 全量は課金されない**: section 作成 + view +
+  パターン書き込みで親の private commit 増分は ~0.5MiB。SEC_COMMIT の commit
+  charge はシステム commit に乗り、どちらのプロセスの
+  ProcessMemoryLimit 予算も消費しない。
+- **イベント往復レイテンシ**: 2000 回の ping-pong で median 16.6μs、
+  min 2.1μs、max 429.2μs。
+- **worker 終了後の回収**: broker は自分の view を保持していれば worker の
+  exit 後にレポートを読める (今回レポート回収は exit 後に実施)。
+
+### 項目5: 実証結果の設計への含意 (仮説)
+
+- 共有メモリスロットは Job のメモリ上限と独立に予算化できる。FHD 8.3MiB ×
+  数十スロットでも 512MiB cap を圧迫しない。`memory_limit_reached` 検知
+  (worker 自身の PeakPagefileUsage ベース) も共有 view では誤検知しない
+  と思われる。
+- per-frame の同期コスト (往復 数十μs) は warm レンダー 123.5ms に対して
+  誤差。in-process ロード不採用判断の再検討条件 (同期コストが支配項になる
+  場合) は、この観測からは満たされる見込みが薄い。
+- worker がクラッシュしても broker 側 view から部分結果・診断を回収できる
+  余地がある。セッションプロトコルの異常系設計に使えると思われる。
+- 段階1 の制御チャネル設計 (HANDLE_LIST + 環境変数での handle 番号伝達 +
+  専用イベント/パイプ) はこの spike の形をそのまま昇格させれば足りる。
