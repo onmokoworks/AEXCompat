@@ -1,0 +1,660 @@
+{
+    "title":  "SmartFX geometry contract: probe modes and independent real AEX (issue #8)",
+    "generated_by":  "tools/refresh-smartfx-geometry-evidence.ps1",
+    "artifacts":  {
+                      "source":  {
+                                     "path":  "minihost/src/l2_main.cpp",
+                                     "size_bytes":  417735,
+                                     "sha256":  "9bd347b4100331033a95dff76aa8ade491afa11693dfcb8abf4c330ccecd49e3"
+                                 },
+                      "worker":  {
+                                     "path":  "target/minihost-build/aex_smart_worker.exe",
+                                     "size_bytes":  1074688,
+                                     "sha256":  "8d72ef56a16542d87d4f3a46c9ad3f5d68bae94f7ac748f445cb4f4137443335"
+                                 },
+                      "probe":  {
+                                    "path":  "target/pf-smart-geometry-probe-build/Release/pf_smart_geometry_probe.aex",
+                                    "size_bytes":  12800,
+                                    "sha256":  "38c6f1307bc9ce9f603cd3a5c43b465c7c8631c990c92a15e1da7d1c39f302c8"
+                                },
+                      "probe_source":  {
+                                           "path":  "instruments/pf-smart-geometry-probe/pf_smart_geometry_probe.cpp",
+                                           "size_bytes":  7066,
+                                           "sha256":  "0a7172341561c26349ee15f01a07c321c682cf7ca14a303045a2bee8c451c718"
+                                       },
+                      "tested_aex":  {
+                                         "path":  "target/ntsc-rs-ae.aex",
+                                         "size_bytes":  1118720,
+                                         "sha256":  "ad129f8029914a09346de0d1ed60ee5d5a7ad5d3df4a17782260ef2421fd354a"
+                                     }
+                  },
+    "probe_runs":  [
+                       {
+                           "command":  "--smart-image",
+                           "render_time":  0,
+                           "result_rect":  [
+                                               0,
+                                               0,
+                                               16,
+                                               12
+                                           ],
+                           "max_result_rect":  [
+                                                   0,
+                                                   0,
+                                                   16,
+                                                   12
+                                               ],
+                           "returns_extra_pixels":  false,
+                           "result_within_request":  true,
+                           "extra_pixels_contract_violation":  false,
+                           "empty_result_rect":  false,
+                           "smart_render_selector_dispatched":  true,
+                           "input_checkout_request":  [
+                                                          0,
+                                                          0,
+                                                          16,
+                                                          12
+                                                      ],
+                           "input_checkout_result_rect":  [
+                                                              0,
+                                                              0,
+                                                              16,
+                                                              12
+                                                          ],
+                           "malformed_checkout_request_count":  0,
+                           "empty_checkout_pixel_denial_count":  0,
+                           "width":  16,
+                           "height":  12,
+                           "pre_render_error":  0,
+                           "smart_render_error":  0,
+                           "result_rects_valid":  true,
+                           "pixel_format":  "argb8"
+                       },
+                       {
+                           "command":  "--smart-image",
+                           "render_time":  1,
+                           "result_rect":  [
+                                               -2,
+                                               -2,
+                                               18,
+                                               14
+                                           ],
+                           "max_result_rect":  [
+                                                   -2,
+                                                   -2,
+                                                   18,
+                                                   14
+                                               ],
+                           "returns_extra_pixels":  true,
+                           "result_within_request":  false,
+                           "extra_pixels_contract_violation":  false,
+                           "empty_result_rect":  false,
+                           "smart_render_selector_dispatched":  true,
+                           "input_checkout_request":  [
+                                                          0,
+                                                          0,
+                                                          16,
+                                                          12
+                                                      ],
+                           "input_checkout_result_rect":  [
+                                                              0,
+                                                              0,
+                                                              16,
+                                                              12
+                                                          ],
+                           "malformed_checkout_request_count":  0,
+                           "empty_checkout_pixel_denial_count":  0,
+                           "width":  20,
+                           "height":  16,
+                           "pre_render_error":  0,
+                           "smart_render_error":  0,
+                           "result_rects_valid":  true,
+                           "pixel_format":  "argb8"
+                       },
+                       {
+                           "command":  "--smart-image",
+                           "render_time":  2,
+                           "result_rect":  [
+                                               -2,
+                                               -2,
+                                               18,
+                                               14
+                                           ],
+                           "max_result_rect":  [
+                                                   -2,
+                                                   -2,
+                                                   18,
+                                                   14
+                                               ],
+                           "returns_extra_pixels":  false,
+                           "result_within_request":  false,
+                           "extra_pixels_contract_violation":  true,
+                           "empty_result_rect":  false,
+                           "smart_render_selector_dispatched":  true,
+                           "input_checkout_request":  [
+                                                          0,
+                                                          0,
+                                                          16,
+                                                          12
+                                                      ],
+                           "input_checkout_result_rect":  [
+                                                              0,
+                                                              0,
+                                                              16,
+                                                              12
+                                                          ],
+                           "malformed_checkout_request_count":  0,
+                           "empty_checkout_pixel_denial_count":  0,
+                           "width":  20,
+                           "height":  16,
+                           "pre_render_error":  0,
+                           "smart_render_error":  0,
+                           "result_rects_valid":  true,
+                           "pixel_format":  "argb8"
+                       },
+                       {
+                           "command":  "--smart-image",
+                           "render_time":  3,
+                           "result_rect":  [
+                                               0,
+                                               0,
+                                               0,
+                                               0
+                                           ],
+                           "max_result_rect":  [
+                                                   0,
+                                                   0,
+                                                   16,
+                                                   12
+                                               ],
+                           "returns_extra_pixels":  false,
+                           "result_within_request":  true,
+                           "extra_pixels_contract_violation":  false,
+                           "empty_result_rect":  true,
+                           "smart_render_selector_dispatched":  false,
+                           "input_checkout_request":  [
+                                                          0,
+                                                          0,
+                                                          16,
+                                                          12
+                                                      ],
+                           "input_checkout_result_rect":  [
+                                                              0,
+                                                              0,
+                                                              16,
+                                                              12
+                                                          ],
+                           "malformed_checkout_request_count":  0,
+                           "empty_checkout_pixel_denial_count":  0,
+                           "width":  0,
+                           "height":  0,
+                           "pre_render_error":  0,
+                           "smart_render_error":  0,
+                           "result_rects_valid":  true,
+                           "pixel_format":  "argb8"
+                       },
+                       {
+                           "command":  "--smart-image16",
+                           "render_time":  0,
+                           "result_rect":  [
+                                               0,
+                                               0,
+                                               16,
+                                               12
+                                           ],
+                           "max_result_rect":  [
+                                                   0,
+                                                   0,
+                                                   16,
+                                                   12
+                                               ],
+                           "returns_extra_pixels":  false,
+                           "result_within_request":  true,
+                           "extra_pixels_contract_violation":  false,
+                           "empty_result_rect":  false,
+                           "smart_render_selector_dispatched":  true,
+                           "input_checkout_request":  [
+                                                          0,
+                                                          0,
+                                                          16,
+                                                          12
+                                                      ],
+                           "input_checkout_result_rect":  [
+                                                              0,
+                                                              0,
+                                                              16,
+                                                              12
+                                                          ],
+                           "malformed_checkout_request_count":  0,
+                           "empty_checkout_pixel_denial_count":  0,
+                           "width":  16,
+                           "height":  12,
+                           "pre_render_error":  0,
+                           "smart_render_error":  0,
+                           "result_rects_valid":  true,
+                           "pixel_format":  "argb16"
+                       },
+                       {
+                           "command":  "--smart-image16",
+                           "render_time":  1,
+                           "result_rect":  [
+                                               -2,
+                                               -2,
+                                               18,
+                                               14
+                                           ],
+                           "max_result_rect":  [
+                                                   -2,
+                                                   -2,
+                                                   18,
+                                                   14
+                                               ],
+                           "returns_extra_pixels":  true,
+                           "result_within_request":  false,
+                           "extra_pixels_contract_violation":  false,
+                           "empty_result_rect":  false,
+                           "smart_render_selector_dispatched":  true,
+                           "input_checkout_request":  [
+                                                          0,
+                                                          0,
+                                                          16,
+                                                          12
+                                                      ],
+                           "input_checkout_result_rect":  [
+                                                              0,
+                                                              0,
+                                                              16,
+                                                              12
+                                                          ],
+                           "malformed_checkout_request_count":  0,
+                           "empty_checkout_pixel_denial_count":  0,
+                           "width":  20,
+                           "height":  16,
+                           "pre_render_error":  0,
+                           "smart_render_error":  0,
+                           "result_rects_valid":  true,
+                           "pixel_format":  "argb16"
+                       },
+                       {
+                           "command":  "--smart-image16",
+                           "render_time":  2,
+                           "result_rect":  [
+                                               -2,
+                                               -2,
+                                               18,
+                                               14
+                                           ],
+                           "max_result_rect":  [
+                                                   -2,
+                                                   -2,
+                                                   18,
+                                                   14
+                                               ],
+                           "returns_extra_pixels":  false,
+                           "result_within_request":  false,
+                           "extra_pixels_contract_violation":  true,
+                           "empty_result_rect":  false,
+                           "smart_render_selector_dispatched":  true,
+                           "input_checkout_request":  [
+                                                          0,
+                                                          0,
+                                                          16,
+                                                          12
+                                                      ],
+                           "input_checkout_result_rect":  [
+                                                              0,
+                                                              0,
+                                                              16,
+                                                              12
+                                                          ],
+                           "malformed_checkout_request_count":  0,
+                           "empty_checkout_pixel_denial_count":  0,
+                           "width":  20,
+                           "height":  16,
+                           "pre_render_error":  0,
+                           "smart_render_error":  0,
+                           "result_rects_valid":  true,
+                           "pixel_format":  "argb16"
+                       },
+                       {
+                           "command":  "--smart-image16",
+                           "render_time":  3,
+                           "result_rect":  [
+                                               0,
+                                               0,
+                                               0,
+                                               0
+                                           ],
+                           "max_result_rect":  [
+                                                   0,
+                                                   0,
+                                                   16,
+                                                   12
+                                               ],
+                           "returns_extra_pixels":  false,
+                           "result_within_request":  true,
+                           "extra_pixels_contract_violation":  false,
+                           "empty_result_rect":  true,
+                           "smart_render_selector_dispatched":  false,
+                           "input_checkout_request":  [
+                                                          0,
+                                                          0,
+                                                          16,
+                                                          12
+                                                      ],
+                           "input_checkout_result_rect":  [
+                                                              0,
+                                                              0,
+                                                              16,
+                                                              12
+                                                          ],
+                           "malformed_checkout_request_count":  0,
+                           "empty_checkout_pixel_denial_count":  0,
+                           "width":  0,
+                           "height":  0,
+                           "pre_render_error":  0,
+                           "smart_render_error":  0,
+                           "result_rects_valid":  true,
+                           "pixel_format":  "argb16"
+                       },
+                       {
+                           "command":  "--smart-image32",
+                           "render_time":  0,
+                           "result_rect":  [
+                                               0,
+                                               0,
+                                               16,
+                                               12
+                                           ],
+                           "max_result_rect":  [
+                                                   0,
+                                                   0,
+                                                   16,
+                                                   12
+                                               ],
+                           "returns_extra_pixels":  false,
+                           "result_within_request":  true,
+                           "extra_pixels_contract_violation":  false,
+                           "empty_result_rect":  false,
+                           "smart_render_selector_dispatched":  true,
+                           "input_checkout_request":  [
+                                                          0,
+                                                          0,
+                                                          16,
+                                                          12
+                                                      ],
+                           "input_checkout_result_rect":  [
+                                                              0,
+                                                              0,
+                                                              16,
+                                                              12
+                                                          ],
+                           "malformed_checkout_request_count":  0,
+                           "empty_checkout_pixel_denial_count":  0,
+                           "width":  16,
+                           "height":  12,
+                           "pre_render_error":  0,
+                           "smart_render_error":  0,
+                           "result_rects_valid":  true,
+                           "pixel_format":  "argb32f"
+                       },
+                       {
+                           "command":  "--smart-image32",
+                           "render_time":  1,
+                           "result_rect":  [
+                                               -2,
+                                               -2,
+                                               18,
+                                               14
+                                           ],
+                           "max_result_rect":  [
+                                                   -2,
+                                                   -2,
+                                                   18,
+                                                   14
+                                               ],
+                           "returns_extra_pixels":  true,
+                           "result_within_request":  false,
+                           "extra_pixels_contract_violation":  false,
+                           "empty_result_rect":  false,
+                           "smart_render_selector_dispatched":  true,
+                           "input_checkout_request":  [
+                                                          0,
+                                                          0,
+                                                          16,
+                                                          12
+                                                      ],
+                           "input_checkout_result_rect":  [
+                                                              0,
+                                                              0,
+                                                              16,
+                                                              12
+                                                          ],
+                           "malformed_checkout_request_count":  0,
+                           "empty_checkout_pixel_denial_count":  0,
+                           "width":  20,
+                           "height":  16,
+                           "pre_render_error":  0,
+                           "smart_render_error":  0,
+                           "result_rects_valid":  true,
+                           "pixel_format":  "argb32f"
+                       },
+                       {
+                           "command":  "--smart-image32",
+                           "render_time":  2,
+                           "result_rect":  [
+                                               -2,
+                                               -2,
+                                               18,
+                                               14
+                                           ],
+                           "max_result_rect":  [
+                                                   -2,
+                                                   -2,
+                                                   18,
+                                                   14
+                                               ],
+                           "returns_extra_pixels":  false,
+                           "result_within_request":  false,
+                           "extra_pixels_contract_violation":  true,
+                           "empty_result_rect":  false,
+                           "smart_render_selector_dispatched":  true,
+                           "input_checkout_request":  [
+                                                          0,
+                                                          0,
+                                                          16,
+                                                          12
+                                                      ],
+                           "input_checkout_result_rect":  [
+                                                              0,
+                                                              0,
+                                                              16,
+                                                              12
+                                                          ],
+                           "malformed_checkout_request_count":  0,
+                           "empty_checkout_pixel_denial_count":  0,
+                           "width":  20,
+                           "height":  16,
+                           "pre_render_error":  0,
+                           "smart_render_error":  0,
+                           "result_rects_valid":  true,
+                           "pixel_format":  "argb32f"
+                       },
+                       {
+                           "command":  "--smart-image32",
+                           "render_time":  3,
+                           "result_rect":  [
+                                               0,
+                                               0,
+                                               0,
+                                               0
+                                           ],
+                           "max_result_rect":  [
+                                                   0,
+                                                   0,
+                                                   16,
+                                                   12
+                                               ],
+                           "returns_extra_pixels":  false,
+                           "result_within_request":  true,
+                           "extra_pixels_contract_violation":  false,
+                           "empty_result_rect":  true,
+                           "smart_render_selector_dispatched":  false,
+                           "input_checkout_request":  [
+                                                          0,
+                                                          0,
+                                                          16,
+                                                          12
+                                                      ],
+                           "input_checkout_result_rect":  [
+                                                              0,
+                                                              0,
+                                                              16,
+                                                              12
+                                                          ],
+                           "malformed_checkout_request_count":  0,
+                           "empty_checkout_pixel_denial_count":  0,
+                           "width":  0,
+                           "height":  0,
+                           "pre_render_error":  0,
+                           "smart_render_error":  0,
+                           "result_rects_valid":  true,
+                           "pixel_format":  "argb32f"
+                       }
+                   ],
+    "real_aex_runs":  [
+                          {
+                              "command":  "--smart-image",
+                              "render_time":  0,
+                              "result_rect":  [
+                                                  0,
+                                                  0,
+                                                  64,
+                                                  48
+                                              ],
+                              "max_result_rect":  [
+                                                      0,
+                                                      0,
+                                                      64,
+                                                      48
+                                                  ],
+                              "returns_extra_pixels":  true,
+                              "result_within_request":  true,
+                              "extra_pixels_contract_violation":  false,
+                              "empty_result_rect":  false,
+                              "smart_render_selector_dispatched":  true,
+                              "input_checkout_request":  [
+                                                             0,
+                                                             0,
+                                                             64,
+                                                             48
+                                                         ],
+                              "input_checkout_result_rect":  [
+                                                                 0,
+                                                                 0,
+                                                                 64,
+                                                                 48
+                                                             ],
+                              "malformed_checkout_request_count":  0,
+                              "empty_checkout_pixel_denial_count":  0,
+                              "width":  64,
+                              "height":  48,
+                              "pre_render_error":  0,
+                              "smart_render_error":  0,
+                              "result_rects_valid":  true,
+                              "pixel_format":  "argb8"
+                          },
+                          {
+                              "command":  "--smart-image16",
+                              "render_time":  0,
+                              "result_rect":  [
+                                                  0,
+                                                  0,
+                                                  64,
+                                                  48
+                                              ],
+                              "max_result_rect":  [
+                                                      0,
+                                                      0,
+                                                      64,
+                                                      48
+                                                  ],
+                              "returns_extra_pixels":  true,
+                              "result_within_request":  true,
+                              "extra_pixels_contract_violation":  false,
+                              "empty_result_rect":  false,
+                              "smart_render_selector_dispatched":  true,
+                              "input_checkout_request":  [
+                                                             0,
+                                                             0,
+                                                             64,
+                                                             48
+                                                         ],
+                              "input_checkout_result_rect":  [
+                                                                 0,
+                                                                 0,
+                                                                 64,
+                                                                 48
+                                                             ],
+                              "malformed_checkout_request_count":  0,
+                              "empty_checkout_pixel_denial_count":  0,
+                              "width":  64,
+                              "height":  48,
+                              "pre_render_error":  0,
+                              "smart_render_error":  0,
+                              "result_rects_valid":  true,
+                              "pixel_format":  "argb16"
+                          },
+                          {
+                              "command":  "--smart-image32",
+                              "render_time":  0,
+                              "result_rect":  [
+                                                  0,
+                                                  0,
+                                                  64,
+                                                  48
+                                              ],
+                              "max_result_rect":  [
+                                                      0,
+                                                      0,
+                                                      64,
+                                                      48
+                                                  ],
+                              "returns_extra_pixels":  true,
+                              "result_within_request":  true,
+                              "extra_pixels_contract_violation":  false,
+                              "empty_result_rect":  false,
+                              "smart_render_selector_dispatched":  true,
+                              "input_checkout_request":  [
+                                                             0,
+                                                             0,
+                                                             64,
+                                                             48
+                                                         ],
+                              "input_checkout_result_rect":  [
+                                                                 0,
+                                                                 0,
+                                                                 64,
+                                                                 48
+                                                             ],
+                              "malformed_checkout_request_count":  0,
+                              "empty_checkout_pixel_denial_count":  0,
+                              "width":  64,
+                              "height":  48,
+                              "pre_render_error":  0,
+                              "smart_render_error":  0,
+                              "result_rects_valid":  true,
+                              "pixel_format":  "argb32f"
+                          }
+                      ],
+    "assertions":  {
+                       "probe_all_runs_completed":  true,
+                       "probe_geometry_identical_across_depths":  true,
+                       "probe_extra_pixels_flag_admits_overrun":  true,
+                       "probe_flagless_overrun_is_flagged":  true,
+                       "probe_empty_result_skips_selector":  true,
+                       "real_aex_geometry_identical_across_depths":  true,
+                       "real_aex_all_runs_completed":  true,
+                       "ae_process_touched":  false
+                   }
+}

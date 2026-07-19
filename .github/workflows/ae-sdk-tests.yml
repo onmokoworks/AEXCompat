@@ -114,6 +114,7 @@ jobs:
             build-pf-aegp-render-suite5-probe
             build-pf-convolve-depth-probe
             build-pf-param-utils-animation-probe
+            build-pf-smart-geometry-probe
             build-pf-transfer-mask-probe
             build-pf-transfer-rect-probe
             build-pf-transform-affine-probe
