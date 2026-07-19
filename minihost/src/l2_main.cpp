@@ -304,7 +304,6 @@ using aexcompat::render_pixel_transport::argb_to_rgba8;
 using aexcompat::render_pixel_transport::argb_to_rgba_native;
 using aexcompat::render_pixel_transport::rgba8_to_argb;
 
-auto& g_module_audit = module_audit_report();
 
 auto& smart_state() { return aexcompat::worker_runtime::smart::state(); }
 
@@ -475,24 +474,17 @@ using RequestedAssignment = aexcompat::worker_runtime::parameters::RequestedAssi
 using RequestedAssignments = aexcompat::worker_runtime::parameters::RequestedAssignments;
 static_assert(aexcompat::worker_runtime::parameters::kDefinitionSize == kParamSize);
 auto& g_parameter_runtime = aexcompat::worker_runtime::parameters::state();
-auto& g_params = g_parameter_runtime.records;
-auto& g_parameter_timelines = g_parameter_runtime.timelines;
-auto& g_keyframe_checkout_ledger = g_parameter_runtime.keyframe_checkout_ledger;
-auto& g_keyframe_checkout_mutex = g_parameter_runtime.keyframe_checkout_mutex;
-auto& g_arbitrary_copy_calls = g_parameter_runtime.arbitrary.copy_calls;
-auto& g_arbitrary_dispose_calls = g_parameter_runtime.arbitrary.dispose_calls;
-auto& g_invalid_arbitrary_operations = g_parameter_runtime.arbitrary.invalid_operations;
-auto& g_arbitrary_print_calls = g_parameter_runtime.arbitrary.print_calls;
+// Source-contract anchors: these owner bindings document that the arbitrary
+// counters live in parameters::state() (issue #126 Phase D) and are asserted
+// by the arbitrary-parameter source tests.
 auto& g_arbitrary_print_failures = g_parameter_runtime.arbitrary.print_failures;
-auto& g_arbitrary_roundtrip_calls = g_parameter_runtime.arbitrary.roundtrip_calls;
 auto& g_arbitrary_roundtrip_failures = g_parameter_runtime.arbitrary.roundtrip_failures;
-auto& g_arbitrary_scan_calls = g_parameter_runtime.arbitrary.scan_calls;
-auto& g_arbitrary_scan_failures = g_parameter_runtime.arbitrary.scan_failures;
 auto& g_arbitrary_compare_disagreements = g_parameter_runtime.arbitrary.compare_disagreements;
 auto& g_arbitrary_new_calls = g_parameter_runtime.arbitrary.new_calls;
-auto& g_arbitrary_interpolation_calls = g_parameter_runtime.arbitrary.interpolation_calls;
-auto& g_arbitrary_interpolation_failures = g_parameter_runtime.arbitrary.interpolation_failures;
-auto& g_last_arbitrary_interpolation_amount = g_parameter_runtime.arbitrary.last_interpolation_amount;
+auto& g_last_arbitrary_interpolation_amount =
+    g_parameter_runtime.arbitrary.last_interpolation_amount;
+auto& g_params = g_parameter_runtime.records;
+auto& g_parameter_timelines = g_parameter_runtime.timelines;
 // Retained entry/admission state: the admitted plug-in path, set once after
 // WorkerSession admission for diagnostics.
 std::wstring g_plugin_file_path;
@@ -529,66 +521,22 @@ auto& g_aegp_seek_roundtrip_mode = g_aegp_init_runtime.seek_roundtrip_mode;
 auto& g_aegp_trim_roundtrip_mode = g_aegp_init_runtime.trim_roundtrip_mode;
 auto& g_aegp_switch_roundtrip_mode = g_aegp_init_runtime.switch_roundtrip_mode;
 auto& g_skip_about = g_aegp_init_runtime.skip_about;
-auto& g_aegp_commands_created = g_aegp_init_runtime.commands_created;
-auto& g_aegp_menu_commands_inserted = g_aegp_init_runtime.menu_commands_inserted;
-auto& g_aegp_command_hooks = g_aegp_init_runtime.command_hooks;
-auto& g_aegp_update_menu_hooks = g_aegp_init_runtime.update_menu_hooks;
-auto& g_aegp_idle_hooks = g_aegp_init_runtime.idle_hooks;
-auto& g_aegp_death_hooks = g_aegp_init_runtime.death_hooks;
-auto& g_next_aegp_command = g_aegp_init_runtime.next_command;
-auto& g_aegp_command_enable_calls = g_aegp_init_runtime.command_enable_calls;
-auto& g_aegp_command_check_calls = g_aegp_init_runtime.command_check_calls;
-auto& g_aegp_command_checked_true_calls = g_aegp_init_runtime.command_checked_true_calls;
-auto& g_aegp_command_checked_false_calls = g_aegp_init_runtime.command_checked_false_calls;
-uint32_t& g_aegp_item_current_time_calls = scene_runtime_state().item_current_time_calls;
 uint32_t& g_aegp_item_set_current_time_calls = scene_runtime_state().item_set_current_time_calls;
 int32_t& g_aegp_item_last_set_time_value = scene_runtime_state().item_last_set_time_value;
 uint32_t& g_aegp_item_last_set_time_scale = scene_runtime_state().item_last_set_time_scale;
-uint32_t& g_aegp_item_name_calls = scene_runtime_state().item_name_calls;
-uint32_t& g_aegp_item_duration_calls = scene_runtime_state().item_duration_calls;
 uint32_t& g_aegp_item_type_calls = scene_runtime_state().item_type_calls;
-uint32_t& g_aegp_comp_from_item_calls = scene_runtime_state().comp_from_item_calls;
-uint32_t& g_aegp_comp_framerate_calls = scene_runtime_state().comp_framerate_calls;
-uint32_t& g_aegp_layer_count_calls = scene_runtime_state().layer_count_calls;
-uint32_t& g_aegp_layer_by_index_calls = scene_runtime_state().layer_by_index_calls;
 uint32_t& g_aegp_layer_source_item_calls = scene_runtime_state().layer_source_item_calls;
-uint32_t& g_aegp_layer_id_calls = scene_runtime_state().layer_id_calls;
-uint32_t& g_aegp_layer_attribute_calls = scene_runtime_state().layer_attribute_calls;
 uint32_t& g_aegp_layer_trim_set_calls = scene_runtime_state().layer_trim_set_calls;
 uint32_t& g_aegp_layer_flag_set_calls = scene_runtime_state().layer_flag_set_calls;
 auto& g_aegp_layer_flags = scene_runtime_state().layer_flags;
-uint32_t& g_aegp_layer_name_calls = scene_runtime_state().layer_name_calls;
-uint32_t& g_aegp_effect_count_calls = scene_runtime_state().effect_count_calls;
-uint32_t& g_aegp_effect_acquires = scene_runtime_state().effect_acquires;
-uint32_t& g_aegp_effect_disposes = scene_runtime_state().effect_disposes;
-uint32_t& g_aegp_effect_metadata_calls = scene_runtime_state().effect_metadata_calls;
-uint32_t& g_aegp_stream_acquires = scene_runtime_state().stream_acquires;
-uint32_t& g_aegp_stream_disposes = scene_runtime_state().stream_disposes;
-uint32_t& g_aegp_stream_value_acquires = scene_runtime_state().stream_value_acquires;
-uint32_t& g_aegp_stream_value_disposes = scene_runtime_state().stream_value_disposes;
-uint32_t& g_aegp_stream_sampled_selector_mask = scene_runtime_state().stream_sampled_selector_mask;
-uint32_t& g_aegp_effect_param_name_calls = scene_runtime_state().effect_param_name_calls;
-uint32_t& g_aegp_effect_param_value_calls = scene_runtime_state().effect_param_value_calls;
-uint32_t& g_aegp_effect_param_union_calls = scene_runtime_state().effect_param_union_calls;
-uint32_t& g_aegp_keyframe_count_calls = scene_runtime_state().keyframe_count_calls;
-uint32_t& g_aegp_keyframed_stream_reports = scene_runtime_state().keyframed_stream_reports;
 uint32_t& g_aegp_keyframe_time_calls = scene_runtime_state().keyframe_time_calls;
 uint32_t& g_aegp_keyframe_value_calls = scene_runtime_state().keyframe_value_calls;
 uint32_t& g_aegp_keyframe_interpolation_calls = scene_runtime_state().keyframe_interpolation_calls;
-uint32_t& g_aegp_collection_creates = scene_runtime_state().collection_creates;
-uint32_t& g_aegp_collection_disposes = scene_runtime_state().collection_disposes;
-uint32_t& g_aegp_collection_item_reads = scene_runtime_state().collection_item_reads;
 int32_t& g_aegp_scene_frame = scene_runtime_state().scene_frame;
-int32_t& g_aegp_first_observed_frame = scene_runtime_state().first_observed_frame;
-int32_t& g_aegp_last_observed_frame = scene_runtime_state().last_observed_frame;
-auto& g_aegp_update_menu_registrations = g_aegp_init_runtime.update_menu_registrations;
 using AegpCommandRegistration =
     aexcompat::worker_runtime::aegp_init::CommandRegistration;
 using AegpUpdateMenuRegistration =
     aexcompat::worker_runtime::aegp_init::UpdateMenuRegistration;
-auto& g_aegp_idle_registrations = g_aegp_init_runtime.idle_registrations;
-auto& g_aegp_death_registrations = g_aegp_init_runtime.death_registrations;
-auto& g_aegp_command_registrations = g_aegp_init_runtime.command_registrations;
 auto& g_aegp_inserted_commands = g_aegp_init_runtime.inserted_commands;
 auto& g_checkout_layer_definitions = g_parameter_runtime.checkout.definitions;
 auto& g_param_checkout_mutex = g_parameter_runtime.checkout.mutex;
@@ -597,29 +545,16 @@ auto& g_param_checkout_calls = g_parameter_runtime.checkout.checkout_calls;
 auto& g_param_checkin_calls = g_parameter_runtime.checkout.checkin_calls;
 auto& g_automatic_param_checkins = g_parameter_runtime.checkout.automatic_checkins;
 auto& g_invalid_param_checkins = g_parameter_runtime.checkout.invalid_checkins;
-auto& g_rejected_temporal_param_checkouts = g_parameter_runtime.checkout.rejected_temporal;
-auto& g_wide_time_checkout_allowed = g_parameter_runtime.checkout.wide_time_allowed;
-auto& g_checkout_current_time = g_parameter_runtime.checkout.current_time;
-auto& g_checkout_current_time_scale = g_parameter_runtime.checkout.current_time_scale;
-auto& g_last_param_checkout_index = g_parameter_runtime.checkout.last_index;
-auto& g_last_param_checkout_time = g_parameter_runtime.checkout.last_time;
-auto& g_last_param_checkout_time_step = g_parameter_runtime.checkout.last_time_step;
-auto& g_last_param_checkout_time_scale = g_parameter_runtime.checkout.last_time_scale;
-auto& g_options_button_name = g_parameter_runtime.ui.options_button_name;
-auto& g_options_button_name_calls = g_parameter_runtime.ui.options_button_name_calls;
 
 // Host-callback telemetry storage moved to its owner,
 // aexcompat::worker_runtime::classic::host_callback_telemetry()
 // (issue #126 Phase D); these references keep the g_* spellings.
 auto& g_host_callback_telemetry =
     aexcompat::worker_runtime::classic::host_callback_telemetry();
-auto& g_duck_quacks = g_host_callback_telemetry.duck_quacks;
 auto& g_transform_world_calls = g_host_callback_telemetry.transform_world_calls;
 auto& g_last_transform_x = g_host_callback_telemetry.last_transform_x;
 auto& g_last_transform_y = g_host_callback_telemetry.last_transform_y;
 auto& g_last_transform_opacity = g_host_callback_telemetry.last_transform_opacity;
-auto& g_abort_calls = g_host_callback_telemetry.abort_calls;
-auto& g_progress_calls = g_host_callback_telemetry.progress_calls;
 // Custom-UI/Drawbot/App telemetry storage moved to its owner,
 // aexcompat::worker_runtime::ui_event_execution::custom_ui_telemetry()
 // (issue #126 Phase D); these references keep the g_* spellings.
@@ -630,11 +565,6 @@ auto& g_custom_ui_telemetry =
 auto& g_register_ui_calls = g_custom_ui_telemetry.register_ui_calls;
 auto& g_custom_ui_registration = g_custom_ui_telemetry.registration;
 auto& g_invalid_custom_ui_registrations = g_custom_ui_telemetry.invalid_custom_ui_registrations;
-auto& g_adv_app_info_text_calls = g_custom_ui_telemetry.adv_app_info_text_calls;
-auto& g_last_adv_app_info_text = g_custom_ui_telemetry.last_adv_app_info_text;
-auto& g_last_progress_current = g_host_callback_telemetry.last_progress_current;
-auto& g_last_progress_total = g_host_callback_telemetry.last_progress_total;
-auto& g_secondary_layer_slot = g_host_callback_telemetry.secondary_layer_slot;
 using ExternalLayerInput =
     aexcompat::worker_runtime::request_parser::LayerInput;
 bool parse_layer_transport_key(const wchar_t* text, ExternalLayerInput& layer) {
@@ -709,7 +639,6 @@ std::size_t mask_open_count();
 std::size_t mask_tangent_vertex_count();
 constexpr int32_t kPfBadCallbackParam = 516;
 constexpr int32_t kPfSuiteToolNone = 0;
-auto& g_render_ui_context_active = g_custom_ui_telemetry.render_ui_context_active;
 using aexcompat::pf_helper::reset;
 
 
@@ -910,39 +839,15 @@ static_assert(std::is_same_v<decltype(&aegp_world_reference_platform),
 // HostUiContext event block moved to their owner, worker_drawbot_runtime.cpp
 // (issue #170); the suite assembly below keeps resolving them through
 // worker_drawbot_runtime.hpp.
-auto& g_drawbot_objects_created = g_custom_ui_telemetry.drawbot_objects_created;
-auto& g_drawbot_objects_released = g_custom_ui_telemetry.drawbot_objects_released;
-auto& g_drawbot_paint_rect_calls = g_custom_ui_telemetry.drawbot_paint_rect_calls;
-auto& g_drawbot_fill_path_calls = g_custom_ui_telemetry.drawbot_fill_path_calls;
-auto& g_drawbot_stroke_path_calls = g_custom_ui_telemetry.drawbot_stroke_path_calls;
-auto& g_drawbot_invalid_operations = g_custom_ui_telemetry.drawbot_invalid_operations;
-auto& g_drawbot_get_supplier_calls = g_custom_ui_telemetry.drawbot_get_supplier_calls;
-auto& g_drawbot_get_surface_calls = g_custom_ui_telemetry.drawbot_get_surface_calls;
-auto& g_drawbot_get_drawing_ref_calls = g_custom_ui_telemetry.drawbot_get_drawing_ref_calls;
-auto& g_overlay_stroke_path_calls = g_custom_ui_telemetry.overlay_stroke_path_calls;
-auto& g_app_get_background_color_calls = g_custom_ui_telemetry.app_get_background_color_calls;
-auto& g_app_color_picker_calls = g_custom_ui_telemetry.app_color_picker_calls;
-auto& g_app_invalidate_rect_calls = g_custom_ui_telemetry.app_invalidate_rect_calls;
-auto& g_app_progress_dialogs_created = g_custom_ui_telemetry.app_progress_dialogs_created;
-auto& g_app_progress_dialogs_disposed = g_custom_ui_telemetry.app_progress_dialogs_disposed;
 auto& g_app_picker_color = g_custom_ui_telemetry.app_picker_color;
-auto& g_app_invalidated_rect = g_custom_ui_telemetry.app_invalidated_rect;
 auto& g_ui_drag_calls = g_custom_ui_telemetry.ui_drag_calls;
 auto& g_ui_drag_requested = g_custom_ui_telemetry.ui_drag_requested;
 auto& g_ui_drag_terminated = g_custom_ui_telemetry.ui_drag_terminated;
-auto& g_ui_coordinate_transform_calls = g_custom_ui_telemetry.ui_coordinate_transform_calls;
 auto& g_render_click_enabled = g_custom_ui_telemetry.render_click_enabled;
 auto& g_render_draw_enabled = g_custom_ui_telemetry.render_draw_enabled;
 auto& g_render_click_x = g_custom_ui_telemetry.render_click_x;
 auto& g_render_click_y = g_custom_ui_telemetry.render_click_y;
-auto& g_render_click_error = g_custom_ui_telemetry.render_click_error;
-auto& g_render_click_out_flags = g_custom_ui_telemetry.render_click_out_flags;
-auto& g_render_click_changed_value = g_custom_ui_telemetry.render_click_changed_value;
-auto& g_render_draw_error = g_custom_ui_telemetry.render_draw_error;
-auto& g_render_draw_out_flags = g_custom_ui_telemetry.render_draw_out_flags;
-auto& g_render_ui_lifecycle_errors = g_custom_ui_telemetry.render_ui_lifecycle_errors;
 auto& g_render_ui_context_closed = g_custom_ui_telemetry.render_ui_context_closed;
-auto& g_drawbot_fill_colors = g_custom_ui_telemetry.drawbot_fill_colors;
 
 // Receipt test-mode storage moved to aexcompat::render_receipts::
 // receipt_test_state() (issue #126 Phase D).
@@ -1200,7 +1105,6 @@ AegpSceneObject& g_aegp_effect = scene_runtime_state().effect;
 int32_t& g_aegp_active_camera_layer_index =
     scene_runtime_state().active_camera_layer_index;
 
-auto& g_aegp_selection = scene_runtime_state().selection;
 
 // The PF Interface effect/camera callbacks live in
 // worker_aegp_pf_interface_suite.cpp (issue #170). AEGP project/item/comp/
@@ -1266,18 +1170,6 @@ constexpr uint32_t kMaxCudaDevices = kMaxGpuDevices;
 
 namespace gpu_transport = aexcompat::gpu_runtime::memory_world_transport;
 using CudaRenderTransport = gpu_transport::RenderTransport;
-auto& g_gpu_device_suite1 = gpu_transport::gpu_device_suite1;
-auto& g_cuda_upload_bytes = gpu_transport::cuda_upload_bytes;
-auto& g_cuda_download_bytes = gpu_transport::cuda_download_bytes;
-auto& g_cuda_sync_failures = gpu_transport::cuda_sync_failures;
-auto& g_last_cuda_device_count = gpu_transport::last_cuda_device_count;
-auto& g_last_cuda_device_index = gpu_transport::last_cuda_device_index;
-auto& g_opencl_upload_bytes = gpu_transport::opencl_upload_bytes;
-auto& g_opencl_download_bytes = gpu_transport::opencl_download_bytes;
-auto& g_opencl_sync_failures = gpu_transport::opencl_sync_failures;
-auto& g_gpu_allocations_created = gpu_transport::allocations_created;
-auto& g_gpu_allocations_freed = gpu_transport::allocations_freed;
-auto& g_invalid_gpu_memory_operations = gpu_transport::invalid_memory_operations;
 
 bool host_recognizes_smart_gpu_world(void* world) {
   return world &&
