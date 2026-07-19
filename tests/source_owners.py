@@ -60,6 +60,8 @@ WORKER_RUNTIME_OWNERS = (
     "minihost/src/worker_aegp_init_report.cpp",
     "minihost/src/worker_ui_event_report.hpp",
     "minihost/src/worker_ui_event_report.cpp",
+    "minihost/src/worker_audio_execution.hpp",
+    "minihost/src/worker_audio_execution.cpp",
 )
 
 # 契約名 → owner ファイル群 (repo ルート相対)。
@@ -122,6 +124,8 @@ CONTRACTS = {
         "minihost/src/worker_aegp_init_report.cpp",
         "minihost/src/worker_ui_event_report.hpp",
         "minihost/src/worker_ui_event_report.cpp",
+        "minihost/src/worker_audio_execution.hpp",
+        "minihost/src/worker_audio_execution.cpp",
         "minihost/src/worker_aegp_timeline_probe.hpp",
         "minihost/src/worker_aegp_timeline_probe.cpp",
         "minihost/src/worker_aegp_host_selftests.cpp",
@@ -238,6 +242,7 @@ CONTRACTS = {
         "minihost/src/l2_cli_dispatch.cpp",
         "minihost/src/host_audio_runtime.hpp",
         "minihost/src/host_audio_runtime.cpp",
+        "minihost/src/worker_audio_execution.cpp",
     ),
     "sdk_grabba_update_menu": (
         "minihost/src/l2_main.cpp",
