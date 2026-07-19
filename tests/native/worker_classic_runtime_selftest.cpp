@@ -34,6 +34,7 @@ int main() {
   auto run = [&](int32_t own_slot, int32_t foreign_slot, std::byte marker,
                  bool dispatch_selector) {
     Context context;
+    context.configure_checkout_time(own_slot, 24, false);
     ParameterDefinition definition{};
     definition[0] = marker;
     context.set_definition(own_slot, definition);
@@ -42,7 +43,12 @@ int main() {
     ParameterDefinition local{};
     if (!context.copy_definition(own_slot, local.data(), local.size()) ||
         local[0] != marker ||
-        context.copy_definition(foreign_slot, local.data(), local.size()))
+        context.copy_definition(foreign_slot, local.data(), local.size()) ||
+        !context.checkout_time_allowed(own_slot, 24) ||
+        context.checkout_time_allowed(foreign_slot, 24))
+      isolated.store(false, std::memory_order_relaxed);
+    context.record_checkout(local.data(), own_slot, own_slot, 1, 24);
+    if (context.checkin(local.data()) != 0 || !context.checkouts_balanced())
       isolated.store(false, std::memory_order_relaxed);
     if (dispatch_selector) context.mark_selector_dispatched();
   };
@@ -52,6 +58,14 @@ int main() {
   go.store(true, std::memory_order_release);
   first.join();
   second.join();
-  return isolated.load(std::memory_order_relaxed) &&
+  bool off_thread_failed_closed{};
+  std::thread off_thread([&] {
+    off_thread_failed_closed = active_context() == nullptr && dispatch_active();
+  });
+  off_thread.join();
+  const auto result = diagnostics();
+  return isolated.load(std::memory_order_relaxed) && off_thread_failed_closed &&
+      result.checkout_calls == 2 && result.checkin_calls == 2 &&
+      result.rejected_temporal_checkouts == 2 && result.balanced &&
       last_selector_dispatched() ? 0 : 3;
 }

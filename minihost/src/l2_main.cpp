@@ -8981,14 +8981,23 @@ int32_t __cdecl add_param(void*, int32_t index, void* definition) {
 int32_t __cdecl checkout_param(void*, int32_t index, int32_t what_time, int32_t time_step,
                                uint32_t time_scale, void* definition) {
   if (!definition || time_step <= 0 || time_scale == 0) return 4;
-  const bool current_time = static_cast<int64_t>(what_time) * g_checkout_current_time_scale ==
-      static_cast<int64_t>(g_checkout_current_time) * time_scale;
-  if (!current_time && !g_wide_time_checkout_allowed) {
-    ++g_rejected_temporal_param_checkouts;
-    return 4;
-  }
   auto* classic_context = aexcompat::worker_runtime::classic::active_context();
+  if (!classic_context && aexcompat::worker_runtime::classic::dispatch_active()) return 4;
+  if (classic_context && !classic_context->checkout_time_allowed(what_time, time_scale))
+    return 4;
+  if (!classic_context) {
+    const bool current_time = static_cast<int64_t>(what_time) * g_checkout_current_time_scale ==
+        static_cast<int64_t>(g_checkout_current_time) * time_scale;
+    if (!current_time && !g_wide_time_checkout_allowed) {
+      ++g_rejected_temporal_param_checkouts;
+      return 4;
+    }
+  }
   const auto record_checkout = [&] {
+    if (classic_context) {
+      classic_context->record_checkout(definition, index, what_time, time_step, time_scale);
+      return;
+    }
     std::lock_guard<std::mutex> lock(g_param_checkout_mutex);
     ++g_live_param_checkouts[definition];
     ++g_param_checkout_calls;
@@ -9893,6 +9902,9 @@ int32_t __cdecl get_platform_data(void* effect_ref, int32_t which, void* data) {
 }
 
 int32_t __cdecl checkin_param(void*, void* definition) {
+  if (auto* context = aexcompat::worker_runtime::classic::active_context())
+    return context->checkin(definition);
+  if (aexcompat::worker_runtime::classic::dispatch_active()) return 4;
   std::lock_guard<std::mutex> lock(g_param_checkout_mutex);
   if (!definition || g_live_param_checkouts.empty()) {
     ++g_invalid_param_checkins;
@@ -9908,12 +9920,18 @@ int32_t __cdecl checkin_param(void*, void* definition) {
 }
 
 bool param_checkouts_balanced() {
+  if (auto* context = aexcompat::worker_runtime::classic::active_context())
+    return context->checkouts_balanced();
   std::lock_guard<std::mutex> lock(g_param_checkout_mutex);
   return g_live_param_checkouts.empty() && g_param_checkout_calls == g_param_checkin_calls &&
       g_invalid_param_checkins == 0;
 }
 
 void automatic_checkin_pre_render_params() {
+  if (auto* context = aexcompat::worker_runtime::classic::active_context()) {
+    context->automatic_checkin();
+    return;
+  }
   std::lock_guard<std::mutex> lock(g_param_checkout_mutex);
   uint32_t checkout_count = 0;
   for (const auto& checkout : g_live_param_checkouts) checkout_count += checkout.second;
@@ -12102,15 +12120,6 @@ int32_t classic_render_runtime(EffectEntry entry, std::array<std::byte, kInSize>
                                             external_current_time, external_time_scale)) return -3;
   for (std::size_t slot = 0; slot < definitions.size(); ++slot)
     classic_context->set_definition(static_cast<int32_t>(slot), definitions[slot]);
-  {
-    std::lock_guard<std::mutex> lock(g_param_checkout_mutex);
-    g_live_param_checkouts.clear();
-    g_param_checkout_calls = g_param_checkin_calls = g_invalid_param_checkins = 0;
-    g_automatic_param_checkins = 0;
-    g_last_param_checkout_index = -1;
-    g_last_param_checkout_time = g_last_param_checkout_time_step = 0;
-    g_last_param_checkout_time_scale = 0;
-  }
   std::vector<void*> params(definitions.size());
   for (std::size_t i = 0; i < definitions.size(); ++i) params[i] = definitions[i].data();
   write<int32_t>(input, 224, external_current_time);
@@ -12148,15 +12157,15 @@ int32_t classic_render_runtime(EffectEntry entry, std::array<std::byte, kInSize>
   if (error == 0 && !dispatch_conditional_ui_selectors(entry, input, command_output, params.data())) error = -5;
   const uint32_t effective_out_flags = read<uint32_t>(command_output, kOutFlags);
   const uint32_t effective_out_flags2 = read<uint32_t>(command_output, kOutFlags2);
-  g_wide_time_checkout_allowed =
+  const bool classic_wide_time_allowed =
       (effective_out_flags & kOutFlagWideTimeInput) != 0 ||
       ((effective_out_flags2 & kOutFlag2AutomaticWideTimeInput) != 0 &&
        (effective_out_flags2 & kOutFlag2SupportsSmartRender) == 0);
   g_classic_shutter_dependency_advertised =
       (effective_out_flags & kOutFlagIUseShutterAngle) != 0;
-  g_checkout_current_time = read<int32_t>(input, kInCurrentTime);
-  g_checkout_current_time_scale = read<uint32_t>(input, kInTimeScale);
-  g_rejected_temporal_param_checkouts = 0;
+  classic_context->configure_checkout_time(
+      read<int32_t>(input, kInCurrentTime), read<uint32_t>(input, kInTimeScale),
+      classic_wide_time_allowed);
   input_hash = sha256_bytes(logical_source.data(), logical_source.size());
   const bool nop_render =
       (read<uint32_t>(command_output, kOutFlags) & kOutFlagNopRender) != 0;
@@ -16977,6 +16986,8 @@ int worker_main_impl(int argc, wchar_t **argv) {
   std::cerr << "stage:global_setdown_end error=" << setdown_error << "\n" << std::flush;
   if (!session.prepare_protocol_report()) return session.finish(14);
   if (is_render_worker()) {
+  const auto classic_diagnostics =
+      aexcompat::worker_runtime::classic::diagnostics();
   restore_native_stdout();
   std::cout << "{\"schema_version\":1,\"stage\":\"classic_render\",\"status\":\""
             << (render_error == 0 && parameter_count_contract_valid && guards_intact &&
@@ -16987,7 +16998,7 @@ int worker_main_impl(int argc, wchar_t **argv) {
                 async_receipt_lifetimes_balanced() &&
                 async_layer_requests_balanced() &&
                 audio_handle_lifetimes_balanced() && audio_telemetry().invalid_operations == 0 &&
-                param_checkouts_balanced() &&
+                classic_diagnostics.balanced &&
                 ((!g_render_click_enabled && !g_render_draw_enabled) ||
                  g_render_ui_context_closed)
                 ? "render_completed" : "render_failed")
@@ -17001,8 +17012,8 @@ int worker_main_impl(int argc, wchar_t **argv) {
             << ",\"expand_buffer_advertised\":" << (expand_buffer_advertised ? "true" : "false")
             << ",\"shrink_buffer_advertised\":" << (shrink_buffer_advertised ? "true" : "false")
             << ",\"input_buffer_writable\":" << (input_write_advertised ? "true" : "false")
-            << ",\"wide_time_checkout_allowed\":" << (g_wide_time_checkout_allowed ? "true" : "false")
-            << ",\"rejected_temporal_param_checkouts\":" << g_rejected_temporal_param_checkouts
+            << ",\"wide_time_checkout_allowed\":" << (classic_diagnostics.wide_time_allowed ? "true" : "false")
+            << ",\"rejected_temporal_param_checkouts\":" << classic_diagnostics.rejected_temporal_checkouts
             << ",\"shutter_dependency_advertised\":" << (g_classic_shutter_dependency_advertised ? "true" : "false")
             << ",\"audio_usage_advertised\":" << (audio_telemetry().usage_advertised ? "true" : "false")
             << ",\"audio_checkout_allowed\":" << (audio_telemetry().checkout_allowed ? "true" : "false")
@@ -17177,15 +17188,15 @@ int worker_main_impl(int argc, wchar_t **argv) {
             << ",\"last_seh_exception_module\":\"" << escape(g_last_seh_exception_module) << "\""
             << ",\"last_seh_selector\":\"" << escape(g_last_seh_selector) << "\""
             << ",\"last_seh_error\":" << g_last_seh_error
-            << ",\"param_checkouts_balanced\":" << (param_checkouts_balanced() ? "true" : "false")
-            << ",\"param_checkout_calls\":" << g_param_checkout_calls
-            << ",\"param_checkin_calls\":" << g_param_checkin_calls
-            << ",\"automatic_param_checkins\":" << g_automatic_param_checkins
-            << ",\"invalid_param_checkins\":" << g_invalid_param_checkins
-            << ",\"last_param_checkout_index\":" << g_last_param_checkout_index
-            << ",\"last_param_checkout_time\":" << g_last_param_checkout_time
-            << ",\"last_param_checkout_time_step\":" << g_last_param_checkout_time_step
-            << ",\"last_param_checkout_time_scale\":" << g_last_param_checkout_time_scale
+            << ",\"param_checkouts_balanced\":" << (classic_diagnostics.balanced ? "true" : "false")
+            << ",\"param_checkout_calls\":" << classic_diagnostics.checkout_calls
+            << ",\"param_checkin_calls\":" << classic_diagnostics.checkin_calls
+            << ",\"automatic_param_checkins\":" << classic_diagnostics.automatic_checkins
+            << ",\"invalid_param_checkins\":" << classic_diagnostics.invalid_checkins
+            << ",\"last_param_checkout_index\":" << classic_diagnostics.last_index
+            << ",\"last_param_checkout_time\":" << classic_diagnostics.last_time
+            << ",\"last_param_checkout_time_step\":" << classic_diagnostics.last_time_step
+            << ",\"last_param_checkout_time_scale\":" << classic_diagnostics.last_time_scale
             << ",\"options_button_name\":\"" << escape(g_options_button_name) << "\""
             << ",\"options_button_name_calls\":" << g_options_button_name_calls
             << ",\"channel_count_queries\":" << g_channel_count_queries.load()

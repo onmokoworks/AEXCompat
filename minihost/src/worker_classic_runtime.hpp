@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <map>
+#include <unordered_map>
 #include <vector>
 
 namespace aexcompat::worker_runtime::classic {
@@ -16,6 +17,20 @@ struct TimedLayerDefinition {
   int32_t time{};
   uint32_t time_scale{};
   ParameterDefinition definition{};
+};
+
+struct Diagnostics {
+  bool wide_time_allowed{};
+  uint32_t rejected_temporal_checkouts{};
+  uint32_t checkout_calls{};
+  uint32_t checkin_calls{};
+  uint32_t automatic_checkins{};
+  uint32_t invalid_checkins{};
+  int32_t last_index{-1};
+  int32_t last_time{};
+  int32_t last_time_step{};
+  uint32_t last_time_scale{};
+  bool balanced{true};
 };
 
 class Context final {
@@ -37,6 +52,14 @@ class Context final {
                                const ParameterDefinition& definition);
   bool copy_fallback_definition(int32_t slot, void* destination,
                                 std::size_t destination_size) const;
+  void configure_checkout_time(int32_t current_time, uint32_t time_scale,
+                               bool wide_time_allowed) noexcept;
+  bool checkout_time_allowed(int32_t time, uint32_t time_scale) noexcept;
+  void record_checkout(void* definition, int32_t index, int32_t time,
+                       int32_t time_step, uint32_t time_scale);
+  int32_t checkin(void* definition);
+  bool checkouts_balanced() const noexcept;
+  void automatic_checkin();
   void mark_selector_dispatched() noexcept;
   bool selector_dispatched() const noexcept { return selector_dispatched_; }
 
@@ -45,12 +68,19 @@ class Context final {
   std::vector<TimedLayerDefinition> timed_layers_;
   std::map<int32_t, ParameterDefinition> definitions_;
   std::map<int32_t, ParameterDefinition> fallback_definitions_;
+  std::unordered_map<void*, uint32_t> live_checkouts_;
+  Diagnostics diagnostics_{};
+  int32_t current_time_{};
+  uint32_t current_time_scale_{1};
+  bool wide_time_allowed_{};
   bool selector_dispatched_{};
 };
 
 Context* active_context() noexcept;
 bool last_selector_dispatched() noexcept;
 void reset_selector_diagnostic() noexcept;
+bool dispatch_active() noexcept;
+Diagnostics diagnostics() noexcept;
 
 struct Hooks {
   int (*render)(void*){};
