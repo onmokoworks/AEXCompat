@@ -5,7 +5,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 SOURCES = (
     ROOT / "minihost" / "src" / "l2_main.cpp",
-    ROOT / "minihost" / "src" / "worker_pf_suites.hpp",
+    ROOT / "minihost" / "src" / "worker_l2_suite_abi.hpp",
 )
 
 

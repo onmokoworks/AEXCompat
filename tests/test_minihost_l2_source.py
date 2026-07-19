@@ -10,7 +10,7 @@ CLI_DISPATCH_SOURCE = ROOT / "minihost" / "src" / "l2_cli_dispatch.cpp"
 WORLD_SAFETY_SOURCE = ROOT / "minihost" / "src" / "worker_world_safety.cpp"
 HANDLE_RUNTIME_SOURCE = ROOT / "minihost" / "src" / "worker_handle_runtime.cpp"
 HANDLE_RUNTIME_HEADER = ROOT / "minihost" / "src" / "worker_handle_runtime.hpp"
-PF_SUITES_HEADER = ROOT / "minihost" / "src" / "worker_pf_suites.hpp"
+PF_SUITES_ABI = ROOT / "minihost" / "src" / "worker_l2_suite_abi.hpp"
 PF_SUITES_SOURCE = ROOT / "minihost" / "src" / "worker_pf_suites.cpp"
 RENDER_HEADER = ROOT / "minihost" / "src" / "render_subsystem.h"
 RENDER_SOURCE = ROOT / "minihost" / "src" / "render_subsystem.cpp"
@@ -28,7 +28,7 @@ MINIHOST_CMAKE = ROOT / "minihost" / "CMakeLists.txt"
 def l2_family_source():
     return "\n".join(path.read_text(encoding="utf-8") for path in (
         SOURCE, MODE_EXECUTION_HEADER, MODE_EXECUTION_SOURCE,
-        CLI_DISPATCH_SOURCE, PF_SUITES_HEADER, PF_SUITES_SOURCE,
+        CLI_DISPATCH_SOURCE, PF_SUITES_ABI, PF_SUITES_INTERNAL, PF_SUITES_SOURCE,
         AEGP_SCENE_SOURCE, AEGP_SCENE_HEADER, AEGP_SCENE_RUNTIME_HEADER,
         AEGP_SCENE_RUNTIME_SOURCE, REPORT_HEADER, REPORT_SOURCE,
         RUNTIME_ADMISSION_SOURCE
@@ -76,6 +76,21 @@ class MinihostL2SourceTests(unittest.TestCase):
         for source in (ROOT / "minihost" / "src").glob("*.cpp"):
             self.assertNotIn('#include "l2_main.cpp"',
                              source.read_text(encoding="utf-8"))
+
+    def test_pf_suites_are_a_compiled_translation_unit_not_a_textual_shortcut(self):
+        cmake = MINIHOST_CMAKE.read_text(encoding="utf-8")
+        worker = SOURCE.read_text(encoding="utf-8")
+        implementation = PF_SUITES_SOURCE.read_text(encoding="utf-8")
+        declarations = PF_SUITES_INTERNAL.read_text(encoding="utf-8")
+
+        self.assertFalse((ROOT / "minihost" / "src" /
+                          "worker_pf_suites.hpp").exists())
+        self.assertEqual(cmake.count("src/worker_pf_suites.cpp"), 1)
+        self.assertNotIn('#include "worker_pf_suites.cpp"', worker)
+        self.assertNotIn("AEXCOMPAT_PF_SUITE_IMPLEMENTATION", worker + implementation)
+        self.assertIn("struct PfHostContext", declarations)
+        self.assertIn("void configure_pf_host_context", implementation)
+        self.assertIn("worker_l2_suite_abi.hpp", worker)
 
     def test_render_dispatch_is_a_real_translation_unit_with_explicit_host_hooks(self):
         header = RENDER_HEADER.read_text(encoding="utf-8")

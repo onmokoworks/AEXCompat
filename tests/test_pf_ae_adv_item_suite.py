@@ -6,7 +6,7 @@ ROOT = Path(__file__).resolve().parents[1]
 SOURCES = (
     ROOT / "minihost/src/l2_main.cpp",
     ROOT / "minihost/src/worker_pf_suites.cpp",
-    ROOT / "minihost/src/worker_pf_suites.hpp",
+    ROOT / "minihost/src/worker_pf_suites_internal.hpp",
     ROOT / "minihost/src/worker_world_safety.cpp",
 )
 PROBE = ROOT / "instruments/pf-ae-adv-item-probe/pf_ae_adv_item_probe.cpp"

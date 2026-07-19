@@ -7,7 +7,7 @@ ROOT = Path(__file__).resolve().parents[1]
 SOURCES = (
     ROOT / "minihost" / "src" / "l2_main.cpp",
     ROOT / "minihost" / "src" / "worker_pf_suites.cpp",
-    ROOT / "minihost" / "src" / "worker_pf_suites.hpp",
+    ROOT / "minihost" / "src" / "worker_pf_suites_internal.hpp",
 )
 
 def source_text():
@@ -44,7 +44,7 @@ def test_legacy_block_ends_where_platform_data_begins():
 
 def test_color_contract_is_fail_closed_hdr_capable_and_alpha_preserving():
     text = source_text()
-    assert "if (!finite3(c.r, c.g, c.b)) return kPfBadCallbackParam" in text
+    assert "if (!finite3(c.r, c.g, c.b)) return kPfErrBadCallbackParam" in text
     assert "PfFixed result[3]" in text and "std::memcpy(out, result, sizeof(result))" in text
     traits = text[text.index("template <> struct ColorPixelTraits<PfPixelFloat>"):
                   text.index("template <class Pixel> int32_t __cdecl color_rgb_to_hls")]

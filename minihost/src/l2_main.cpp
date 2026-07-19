@@ -287,6 +287,7 @@ constexpr std::size_t kUtilsLockHandle = 168;
 constexpr std::size_t kUtilsUnlockHandle = 176;
 constexpr std::size_t kUtilsDisposeHandle = 184;
 constexpr std::size_t kUtilsGetPlatformData = 432;
+static_assert(kUtilsColorCallbacks + sizeof(PfColorCallbacks8) == kUtilsGetPlatformData);
 constexpr std::size_t kUtilsFill16 = 488;
 constexpr std::size_t kUtilsPremultiplyColor16 = 496;
 constexpr std::size_t kUtilsGetPixelData8 = 528;
@@ -3016,13 +3017,6 @@ HostMask* pf_path_by_id(int32_t unique_id) {
 
 using PfPathPoint = std::array<double, 2>;
 using PfPathCubic = std::array<PfPathPoint, 4>;
-PfPathPoint eval_pf_cubic(const PfPathCubic& c, double t);
-PfPathPoint deriv_pf_cubic(const PfPathCubic& c, double t);
-double pf_path_point_distance(const PfPathPoint& a, const PfPathPoint& b);
-void append_adaptive_pf_cubic(const PfPathCubic& c, double t0, double t1,
-                              double tolerance, int depth,
-                              std::vector<double>& parameters,
-                              std::vector<PfPathPoint>& points);
 
 std::array<double, 2> eval_pf_cubic(const HostMask& path, int32_t segment, double t) {
   const auto count = distinct_vertex_count(path);
@@ -3050,21 +3044,21 @@ bool populate_pf_segment_prep(PfPathSegPrep& prep, HostMask* path, int32_t segme
                     {b.x + b.tangent_in_x, b.y + b.tangent_in_y}, {b.x, b.y}}};
   for (const auto& point : prep.controls)
     if (!std::isfinite(point[0]) || !std::isfinite(point[1])) return false;
-  const double control_polygon = pf_path_point_distance(prep.controls[0], prep.controls[1]) +
-      pf_path_point_distance(prep.controls[1], prep.controls[2]) +
-      pf_path_point_distance(prep.controls[2], prep.controls[3]);
+  const double control_polygon = ::pf_path_point_distance(prep.controls[0], prep.controls[1]) +
+      ::pf_path_point_distance(prep.controls[1], prep.controls[2]) +
+      ::pf_path_point_distance(prep.controls[2], prep.controls[3]);
   const double tolerance = std::max(1e-9, std::max(1.0, control_polygon) *
       1e-7 / std::sqrt(static_cast<double>(frequency)));
   prep.parameters.push_back(0.0);
   prep.points.push_back(prep.controls[0]);
-  append_adaptive_pf_cubic(prep.controls, 0.0, 1.0, tolerance, 0,
-                           prep.parameters, prep.points);
+  ::append_adaptive_pf_cubic(prep.controls, 0.0, 1.0, tolerance, 0,
+                             prep.parameters, prep.points);
   if (prep.points.size() < 2 || prep.parameters.size() != prep.points.size()) return false;
   prep.cumulative_lengths.reserve(prep.points.size());
   prep.cumulative_lengths.push_back(0.0);
   for (std::size_t sample = 1; sample < prep.points.size(); ++sample) {
     prep.cumulative_lengths.push_back(prep.cumulative_lengths.back() +
-        pf_path_point_distance(prep.points[sample - 1], prep.points[sample]));
+        ::pf_path_point_distance(prep.points[sample - 1], prep.points[sample]));
   }
   return prep.cumulative_lengths.size() == prep.points.size() &&
       std::isfinite(prep.cumulative_lengths.back());
@@ -3141,11 +3135,11 @@ bool evaluate_pf_segment_length(PfPathSegPrep& prep, double length,
   const double fraction = span == 0.0 ? 0.0 : (length - start) / span;
   const double t = prep.parameters[left] +
       (prep.parameters[right] - prep.parameters[left]) * fraction;
-  const auto point = eval_pf_cubic(prep.controls, t);
+  const auto point = ::eval_pf_cubic(prep.controls, t);
   *x = point[0];
   *y = point[1];
   if (dx && dy) {
-    const auto derivative = deriv_pf_cubic(prep.controls, t);
+    const auto derivative = ::deriv_pf_cubic(prep.controls, t);
     const double magnitude = std::hypot(derivative[0], derivative[1]);
     // Cusps and degenerate segments have a defined zero arc-length derivative.
     *dx = magnitude > 0.0 ? derivative[0] / magnitude : 0.0;
@@ -3341,7 +3335,48 @@ int32_t __cdecl pf_path_get_name(void* effect_ref, int32_t unique_id, char* name
 int32_t __cdecl pf_mask_world_with_path(void* effect_ref, void** path, double feather_x,
                                         double feather_y, int32_t invert, double opacity,
                                         int32_t quality, void* world, LegacyRect* bounds);
-#include "worker_pf_suites.hpp"
+#include "worker_l2_suite_abi.hpp"
+
+UtilitySuite g_utility_suite{{}, &register_with_aegp, &get_main_hwnd, {}};
+UtilitySuite3 g_utility_suite3{{}, &register_with_aegp, &get_main_hwnd, {}};
+PfInterfaceSuite g_pf_interface_suite{&get_effect_layer, &get_new_effect_for_effect,
+    &convert_effect_to_comp_time, &get_effect_camera,
+    &get_effect_camera_matrix};
+std::array<void*, 14> g_aegp_dynamic_stream_suite2{};
+using AegpStreamValue = aexcompat::scene_runtime::AegpStreamValue;
+int32_t __cdecl aegp_get_new_effect_stream_by_index_v2(
+    int32_t plugin_id, void* effect, int32_t index, void** stream);
+int32_t __cdecl aegp_dispose_stream_v2(void* stream);
+int32_t __cdecl aegp_get_stream_name_v2(void* stream, uint8_t force_english, char* name);
+int32_t __cdecl aegp_get_stream_type_v2(void* stream, int32_t* type);
+int32_t __cdecl aegp_get_new_stream_value_v2(
+    int32_t plugin_id, void* stream, int32_t time_mode, const AegpTime* time,
+    uint8_t pre_expression, AegpStreamValue* output);
+int32_t __cdecl aegp_dispose_stream_value_v2(AegpStreamValue* output);
+int32_t __cdecl aegp_set_stream_value_v2(
+    int32_t plugin_id, void* stream, AegpStreamValue* input);
+int32_t __cdecl aegp_set_dynamic_stream_flag_v2(
+    void* stream, uint32_t one_flag, uint8_t undoable, uint8_t set);
+int32_t __cdecl aegp_get_effect_param_union_by_index_v3(
+    int32_t plugin_id, void* effect, int32_t index, int32_t* type, void* param_union);
+PfMaskSuite1 g_pf_mask_suite1{&pf_mask_world_with_path};
+std::array<void*, 4> g_pf_path_query_suite1{};
+std::array<void*, 11> g_pf_path_data_suite1{};
+WorldTransformSuite1 g_world_transform_suite1{};
+std::array<void*, 19> g_ansi_suite1{};
+std::array<void*, 1> g_effect_ui_suite1{};
+std::array<void*, 3> g_pf_helper_suite2{
+    reinterpret_cast<void*>(&pf_parse_clipboard),
+    reinterpret_cast<void*>(&pf_set_current_extended_tool),
+    reinterpret_cast<void*>(&pf_get_current_extended_tool)};
+std::array<void*, 1> g_pf_helper_suite1{
+    reinterpret_cast<void*>(&pf_get_current_tool)};
+static_assert(sizeof(g_pf_helper_suite1) == sizeof(void*));
+// PF_AdvAppSuite1 is frozen at ten callbacks; keep its storage independent
+// from the eleven-slot v2 table so versioned suite identity cannot alias.
+std::array<void*, 10> g_adv_app_suite1{};
+std::array<void*, 11> g_adv_app_suite2{};
+static_assert(sizeof(g_adv_app_suite1) == 10 * sizeof(void*));
 static_assert(sizeof(g_adv_app_suite2) == 11 * sizeof(void*));
 struct AdvTimeDisplayPrefVersion3 {
   char display_mode;
@@ -13992,7 +14027,7 @@ bool verify_pf_color_suite() {
   PfFixed hls[3]{}, yiq[3]{};
   int32_t lum8{}, hue8{}, light8{}, sat8{};
   bool ok = acquired && g_color_suite8.RGBtoHLS(nullptr, &red8, hls) == 0 &&
-      hls[0] == 0 && hls[1] == color_to_fixed(0.5) && hls[2] == color_to_fixed(1.0) &&
+      hls[0] == 0 && hls[1] == pf_color_to_fixed(0.5) && hls[2] == pf_color_to_fixed(1.0) &&
       g_color_suite8.HLStoRGB(nullptr, hls, &round8) == 0 && round8.alpha == 91 &&
       round8.red == 255 && round8.green <= 1 && round8.blue <= 1 &&
       g_color_suite8.RGBtoYIQ(nullptr, &red8, yiq) == 0 &&
@@ -14003,7 +14038,7 @@ bool verify_pf_color_suite() {
       lum8 == 7622 && hue8 == 0 && light8 == 128 && sat8 == 255;
   PfPixel16 green16{1234, 0, 32768, 0}, round16{4321, 0, 0, 0};
   ok = ok && g_color_suite16.RGBtoHLS(nullptr, &green16, hls) == 0 &&
-      hls[0] == color_to_fixed(120.0) &&
+      hls[0] == pf_color_to_fixed(120.0) &&
       g_color_suite16.HLStoRGB(nullptr, hls, &round16) == 0 && round16.alpha == 4321 &&
       round16.green >= 32767 && round16.red <= 1 && round16.blue <= 1;
   int32_t hue16{};
@@ -15679,9 +15714,9 @@ int worker_main_impl(int argc, wchar_t **argv) {
               << (passed ? "passed" : "failed")
               << "\",\"borrowed_handle\":true,\"mfr_concurrent_reads\":2048"
               << ",\"live_sequences\":"
-              << g_live_effect_sequences.size()
-              << ",\"publications\":" << g_effect_sequence_publications
-              << ",\"invalidations\":" << g_effect_sequence_invalidations << "}\n";
+              << live_effect_sequence_count()
+              << ",\"publications\":" << effect_sequence_publications()
+              << ",\"invalidations\":" << effect_sequence_invalidations() << "}\n";
     return passed ? 0 : 36;
   }
   if (argc == 2 && std::wstring(argv[1]) == L"--self-test-pf-color-param-suite") {

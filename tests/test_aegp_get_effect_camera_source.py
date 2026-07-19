@@ -10,7 +10,7 @@ SCENE_SELFTEST_SOURCE = ROOT / "minihost" / "src" / "worker_aegp_scene_selftests
 SCENE_SELFTEST_IMPL = ROOT / "minihost" / "src" / "worker_aegp_scene_selftests_impl.inc"
 SCENE_HEADER = ROOT / "minihost" / "src" / "worker_aegp_scene.hpp"
 SCENE_RUNTIME_HEADER = ROOT / "minihost" / "src" / "worker_aegp_scene_runtime.hpp"
-PF_SUITE_SOURCE = ROOT / "minihost" / "src" / "worker_pf_suites.hpp"
+PF_SUITE_SOURCE = ROOT / "minihost" / "src" / "worker_pf_suites_internal.hpp"
 
 
 def scene_source() -> str:

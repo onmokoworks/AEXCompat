@@ -1,4 +1,3 @@
-#define AEXCOMPAT_PF_SUITE_IMPLEMENTATION 1
 #include "worker_pf_suites_internal.hpp"
 #include "worker_world_safety.hpp"
 
@@ -14,6 +13,7 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <type_traits>
 #include <unordered_map>
 #include <vector>
 
@@ -97,18 +97,366 @@ void write(std::array<std::byte, N>& bytes, std::size_t offset, T value) {
   std::memcpy(bytes.data() + offset, &value, sizeof(value));
 }
 
-struct PfBatchSamplingSuite1 {
-  int32_t (__cdecl *begin_sampling)(void*, int32_t, uint32_t, void*);
-  int32_t (__cdecl *end_sampling)(void*, int32_t, uint32_t, void*);
-  int32_t (__cdecl *get_batch_func)(void*, int32_t, uint32_t, const void*, void**);
-  int32_t (__cdecl *get_batch_func16)(void*, int32_t, uint32_t, const void*, void**);
+}  // namespace
+
+namespace {
+
+struct ColorValues { double r, g, b; };
+struct HlsValues { double h, l, s; };
+
+bool finite3(double a, double b, double c) {
+  return std::isfinite(a) && std::isfinite(b) && std::isfinite(c);
+}
+
+double color_from_fixed(PfFixed value) {
+  return static_cast<double>(value) / 65536.0;
+}
+
+HlsValues rgb_to_hls_values(const ColorValues& c) {
+  const double hi = (std::max)({c.r, c.g, c.b});
+  const double lo = (std::min)({c.r, c.g, c.b});
+  const double l = (hi + lo) * 0.5;
+  if (hi == lo) return {0.0, l, 0.0};
+  const double d = hi - lo;
+  const double denominator = l <= 0.5 ? hi + lo : 2.0 - hi - lo;
+  const double s = denominator == 0.0 ? 0.0 : d / denominator;
+  double h = c.r == hi ? (c.g - c.b) / d
+           : c.g == hi ? 2.0 + (c.b - c.r) / d
+                        : 4.0 + (c.r - c.g) / d;
+  h /= 6.0;
+  h -= std::floor(h);
+  return {h, l, s};
+}
+
+double hls_component(double p, double q, double t) {
+  t -= std::floor(t);
+  if (t < 1.0 / 6.0) return p + (q - p) * 6.0 * t;
+  if (t < 0.5) return q;
+  if (t < 2.0 / 3.0) return p + (q - p) * (2.0 / 3.0 - t) * 6.0;
+  return p;
+}
+
+ColorValues hls_to_rgb_values(const HlsValues& hls) {
+  if (hls.s == 0.0) return {hls.l, hls.l, hls.l};
+  const double q = hls.l < 0.5 ? hls.l * (1.0 + hls.s)
+                               : hls.l + hls.s - hls.l * hls.s;
+  const double p = 2.0 * hls.l - q;
+  return {hls_component(p, q, hls.h + 1.0 / 3.0), hls_component(p, q, hls.h),
+          hls_component(p, q, hls.h - 1.0 / 3.0)};
+}
+
+ColorValues rgb_to_yiq_values(const ColorValues& c) {
+  return {0.2989 * c.r + 0.5866 * c.g + 0.1144 * c.b,
+          0.5959 * c.r - 0.2741 * c.g - 0.3218 * c.b,
+          0.2113 * c.r - 0.5227 * c.g + 0.3113 * c.b};
+}
+
+ColorValues yiq_to_rgb_values(const ColorValues& c) {
+  return {c.r + 0.9562 * c.g + 0.6210 * c.b,
+          c.r - 0.2717 * c.g - 0.6485 * c.b,
+          c.r - 1.1053 * c.g + 1.7020 * c.b};
+}
+
+template <class Pixel> struct ColorPixelTraits;
+template <> struct ColorPixelTraits<PfPixel8> {
+  static ColorValues read(const PfPixel8& p) {
+    return {p.red / 255.0, p.green / 255.0, p.blue / 255.0};
+  }
+  static void write(PfPixel8& p, const ColorValues& c) {
+    auto channel = [](double value) {
+      return static_cast<uint8_t>(std::lround(
+          (std::max)(0.0, (std::min)(1.0, value)) * 255.0));
+    };
+    p.red = channel(c.r); p.green = channel(c.g); p.blue = channel(c.b);
+  }
+  static constexpr double scale = 255.0;
 };
-static_assert(sizeof(PfBatchSamplingSuite1) == 4 * sizeof(void*));
-PfBatchSamplingSuite1 g_pf_batch_sampling_suite1{
-    &begin_sampling8, &end_sampling8, &unsupported_batch_sample_func,
-    &unsupported_batch_sample_func};
+template <> struct ColorPixelTraits<PfPixel16> {
+  static ColorValues read(const PfPixel16& p) {
+    return {p.red / 32768.0, p.green / 32768.0, p.blue / 32768.0};
+  }
+  static void write(PfPixel16& p, const ColorValues& c) {
+    auto channel = [](double value) {
+      return static_cast<uint16_t>(std::lround(
+          (std::max)(0.0, (std::min)(1.0, value)) * 32768.0));
+    };
+    p.red = channel(c.r); p.green = channel(c.g); p.blue = channel(c.b);
+  }
+  static constexpr double scale = 32768.0;
+};
+template <> struct ColorPixelTraits<PfPixelFloat> {
+  static ColorValues read(const PfPixelFloat& p) { return {p.red, p.green, p.blue}; }
+  static void write(PfPixelFloat& p, const ColorValues& c) {
+    p.red = static_cast<float>(c.r);
+    p.green = static_cast<float>(c.g);
+    p.blue = static_cast<float>(c.b);
+  }
+  static constexpr double scale = 1.0;
+};
+
+template <class Pixel> int32_t __cdecl color_rgb_to_hls(
+    void*, Pixel* rgb, PfFixedTriple out) {
+  if (!rgb || !out) return kPfErrBadCallbackParam;
+  const ColorValues c = ColorPixelTraits<Pixel>::read(*rgb);
+  if (!finite3(c.r, c.g, c.b)) return kPfErrBadCallbackParam;
+  const HlsValues hls = rgb_to_hls_values(c);
+  if (!finite3(hls.h, hls.l, hls.s)) return kPfErrBadCallbackParam;
+  PfFixed result[3]{pf_color_to_fixed(hls.h * 360.0), pf_color_to_fixed(hls.l),
+                    pf_color_to_fixed(hls.s)};
+  std::memcpy(out, result, sizeof(result));
+  return 0;
+}
+
+template <class Pixel> int32_t __cdecl color_hls_to_rgb(
+    void*, PfFixedTriple in, Pixel* rgb) {
+  if (!in || !rgb) return kPfErrBadCallbackParam;
+  const HlsValues hls{color_from_fixed(in[0]) / 360.0, color_from_fixed(in[1]),
+                      color_from_fixed(in[2])};
+  const ColorValues c = hls_to_rgb_values(hls);
+  if (!finite3(c.r, c.g, c.b)) return kPfErrBadCallbackParam;
+  ColorPixelTraits<Pixel>::write(*rgb, c);
+  return 0;
+}
+
+template <class Pixel> int32_t __cdecl color_rgb_to_yiq(
+    void*, Pixel* rgb, PfFixedTriple out) {
+  if (!rgb || !out) return kPfErrBadCallbackParam;
+  const ColorValues c = ColorPixelTraits<Pixel>::read(*rgb);
+  if (!finite3(c.r, c.g, c.b)) return kPfErrBadCallbackParam;
+  const ColorValues yiq = rgb_to_yiq_values(c);
+  PfFixed result[3]{pf_color_to_fixed(yiq.r), pf_color_to_fixed(yiq.g),
+                    pf_color_to_fixed(yiq.b)};
+  std::memcpy(out, result, sizeof(result));
+  return 0;
+}
+
+template <class Pixel> int32_t __cdecl color_yiq_to_rgb(
+    void*, PfFixedTriple in, Pixel* rgb) {
+  if (!in || !rgb) return kPfErrBadCallbackParam;
+  const ColorValues yiq{color_from_fixed(in[0]), color_from_fixed(in[1]),
+                        color_from_fixed(in[2])};
+  const ColorValues c = yiq_to_rgb_values(yiq);
+  if (!finite3(c.r, c.g, c.b)) return kPfErrBadCallbackParam;
+  ColorPixelTraits<Pixel>::write(*rgb, c);
+  return 0;
+}
+
+template <class Pixel, class Scalar, int Which>
+int32_t __cdecl color_scalar(void*, Pixel* rgb, Scalar* out) {
+  if (!rgb || !out) return kPfErrBadCallbackParam;
+  const ColorValues c = ColorPixelTraits<Pixel>::read(*rgb);
+  if (!finite3(c.r, c.g, c.b)) return kPfErrBadCallbackParam;
+  const HlsValues hls = rgb_to_hls_values(c);
+  const double value = Which == 0 ? rgb_to_yiq_values(c).r
+                     : Which == 1 ? hls.h : Which == 2 ? hls.l : hls.s;
+  if (!std::isfinite(value)) return kPfErrBadCallbackParam;
+  if constexpr (std::is_same_v<Scalar, float>) {
+    *out = static_cast<float>(Which == 1 ? value * 360.0 : value);
+  } else {
+    const double scale = Which == 0 ? 100.0 * ColorPixelTraits<Pixel>::scale
+                         : Which == 1 ? 255.0 : ColorPixelTraits<Pixel>::scale;
+    *out = static_cast<int32_t>(std::lround(value * scale));
+  }
+  return 0;
+}
 
 }  // namespace
+
+PfFixed pf_color_to_fixed(double value) {
+  const double scaled = value * 65536.0;
+  if (scaled >= static_cast<double>(INT32_MAX)) return INT32_MAX;
+  if (scaled <= static_cast<double>(INT32_MIN)) return INT32_MIN;
+  // This follows the SDK macro; unobserved AE tie behavior is not asserted here.
+  return static_cast<PfFixed>(scaled + (scaled < 0.0 ? -0.5 : 0.5));
+}
+
+#define PF_COLOR_SUITE(P, S) {&color_rgb_to_hls<P>, &color_hls_to_rgb<P>, \
+  &color_rgb_to_yiq<P>, &color_yiq_to_rgb<P>, &color_scalar<P, S, 0>, \
+  &color_scalar<P, S, 1>, &color_scalar<P, S, 2>, &color_scalar<P, S, 3>}
+PfColorCallbacks8 g_color_suite8 = PF_COLOR_SUITE(PfPixel8, int32_t);
+PfColorCallbacks16 g_color_suite16 = PF_COLOR_SUITE(PfPixel16, int32_t);
+PfColorCallbacksFloat g_color_suite_float = PF_COLOR_SUITE(PfPixelFloat, float);
+#undef PF_COLOR_SUITE
+
+static_assert(sizeof(PfColorCallbacks8) == 8 * sizeof(void*));
+static_assert(sizeof(PfColorCallbacks16) == 8 * sizeof(void*));
+static_assert(sizeof(PfColorCallbacksFloat) == 8 * sizeof(void*));
+static_assert(offsetof(PfColorCallbacks8, RGBtoHLS) == 0 * sizeof(void*));
+static_assert(offsetof(PfColorCallbacks8, Saturation) == 7 * sizeof(void*));
+
+PfPathPoint eval_pf_cubic(const PfPathCubic& c, double t) {
+  auto lerp = [](const PfPathPoint& a, const PfPathPoint& b, double amount) {
+    return PfPathPoint{a[0] + (b[0] - a[0]) * amount,
+                       a[1] + (b[1] - a[1]) * amount};
+  };
+  const auto a = lerp(c[0], c[1], t);
+  const auto b = lerp(c[1], c[2], t);
+  const auto d = lerp(c[2], c[3], t);
+  return lerp(lerp(a, b, t), lerp(b, d, t), t);
+}
+
+PfPathPoint deriv_pf_cubic(const PfPathCubic& c, double t) {
+  const double u = 1.0 - t;
+  return {3.0 * (u * u * (c[1][0] - c[0][0]) +
+                       2.0 * u * t * (c[2][0] - c[1][0]) +
+                       t * t * (c[3][0] - c[2][0])),
+          3.0 * (u * u * (c[1][1] - c[0][1]) +
+                       2.0 * u * t * (c[2][1] - c[1][1]) +
+                       t * t * (c[3][1] - c[2][1]))};
+}
+
+double pf_path_point_distance(const PfPathPoint& a, const PfPathPoint& b) {
+  return std::hypot(b[0] - a[0], b[1] - a[1]);
+}
+
+void append_adaptive_pf_cubic(const PfPathCubic& c, double t0, double t1,
+                              double tolerance, int depth,
+                              std::vector<double>& parameters,
+                              std::vector<PfPathPoint>& points) {
+  constexpr int kMaxDepth = 20;
+  constexpr std::size_t kMaxPoints = 65537;
+  const double chord = pf_path_point_distance(c[0], c[3]);
+  const double polygon = pf_path_point_distance(c[0], c[1]) +
+      pf_path_point_distance(c[1], c[2]) + pf_path_point_distance(c[2], c[3]);
+  if (depth >= kMaxDepth || points.size() >= kMaxPoints ||
+      polygon - chord <= tolerance) {
+    parameters.push_back(t1);
+    points.push_back(c[3]);
+    return;
+  }
+  auto lerp = [](const PfPathPoint& a, const PfPathPoint& b) {
+    return PfPathPoint{(a[0] + b[0]) * 0.5, (a[1] + b[1]) * 0.5};
+  };
+  const auto p01 = lerp(c[0], c[1]);
+  const auto p12 = lerp(c[1], c[2]);
+  const auto p23 = lerp(c[2], c[3]);
+  const auto p012 = lerp(p01, p12);
+  const auto p123 = lerp(p12, p23);
+  const auto midpoint = lerp(p012, p123);
+  const double tm = (t0 + t1) * 0.5;
+  append_adaptive_pf_cubic({c[0], p01, p012, midpoint}, t0, tm,
+                           tolerance * 0.5, depth + 1, parameters, points);
+  append_adaptive_pf_cubic({midpoint, p123, p23, c[3]}, tm, t1,
+                           tolerance * 0.5, depth + 1, parameters, points);
+}
+
+Iterate8Suite2 g_iterate8_suite2{reinterpret_cast<void*>(&iterate_world8), &iterate_origin8, &iterate_lut8,
+    &iterate_origin_non_clip8, &iterate_generic};
+Iterate16Suite2 g_iterate16_suite2{&iterate_world16, &iterate_origin16,
+    &iterate_origin_non_clip16};
+IterateFloatSuite2 g_iterate_float_suite2{&iterate_world_float, &iterate_origin_float,
+    &iterate_origin_non_clip_float};
+std::array<void*, 3> g_sampling8_suite1{
+    reinterpret_cast<void*>(&nearest_sample8),
+    reinterpret_cast<void*>(&subpixel_sample8),
+    reinterpret_cast<void*>(&area_sample8)};
+std::array<void*, 3> g_sampling16_suite1{
+    reinterpret_cast<void*>(&nearest_sample16),
+    reinterpret_cast<void*>(&subpixel_sample16),
+    reinterpret_cast<void*>(&area_sample16)};
+std::array<void*, 3> g_sampling_float_suite1{
+    reinterpret_cast<void*>(&nearest_sample_float),
+    reinterpret_cast<void*>(&subpixel_sample_float),
+    reinterpret_cast<void*>(&area_sample_float)};
+PfBatchSamplingSuite1 g_batch_sampling_suite1{
+    &begin_sampling8, &end_sampling8, &unsupported_batch_sample_func,
+    &unsupported_batch_sample_func};
+std::array<void*, 7> g_fill_matte_suite2{
+    reinterpret_cast<void*>(&fill_world8),
+    reinterpret_cast<void*>(&fill_world16),
+    reinterpret_cast<void*>(&fill_world_float),
+    reinterpret_cast<void*>(&premultiply_world8),
+    reinterpret_cast<void*>(&premultiply_color8),
+    reinterpret_cast<void*>(&premultiply_color16),
+    reinterpret_cast<void*>(&premultiply_color_float)};
+
+static_assert(sizeof(Iterate8Suite2) == 5 * sizeof(void*));
+static_assert(offsetof(Iterate8Suite2, iterate_lut) == 2 * sizeof(void*));
+static_assert(offsetof(Iterate8Suite2, iterate_generic) == 4 * sizeof(void*));
+static_assert(sizeof(Iterate16Suite2) == 3 * sizeof(void*));
+static_assert(sizeof(IterateFloatSuite2) == 3 * sizeof(void*));
+static_assert(sizeof(PfBatchSamplingSuite1) == 4 * sizeof(void*));
+static_assert(offsetof(PfBatchSamplingSuite1, get_batch_func) == 2 * sizeof(void*));
+
+namespace {
+
+constexpr std::size_t kMaxLiveEffectSequences = 64;
+struct LiveEffectSequence {
+  void* effect_ref{};
+  PfConstHandle sequence_handle{};
+  uint64_t generation{};
+};
+std::mutex g_effect_sequence_mutex;
+std::vector<LiveEffectSequence> g_live_effect_sequences;
+uint64_t g_effect_sequence_generation{};
+uint64_t g_effect_sequence_publication_count{};
+uint64_t g_effect_sequence_invalidation_count{};
+
+int32_t __cdecl get_effect_sequence_data(
+    void* effect_ref, PfConstHandle* sequence_handle) {
+  if (!sequence_handle) return kPfErrBadCallbackParam;
+  *sequence_handle = nullptr;
+  if (!effect_ref) return kPfErrBadCallbackParam;
+  std::lock_guard<std::mutex> lock(g_effect_sequence_mutex);
+  const auto found = std::find_if(
+      g_live_effect_sequences.begin(), g_live_effect_sequences.end(),
+      [effect_ref](const auto& entry) { return entry.effect_ref == effect_ref; });
+  if (found == g_live_effect_sequences.end() || !found->sequence_handle)
+    return kPfErrBadCallbackParam;
+  *sequence_handle = found->sequence_handle;
+  return 0;
+}
+
+}  // namespace
+
+PfEffectSequenceDataSuite1 g_effect_sequence_data_suite1{
+    &get_effect_sequence_data};
+static_assert(sizeof(PfEffectSequenceDataSuite1) == sizeof(void*));
+
+void invalidate_effect_sequence(void* effect_ref) {
+  std::lock_guard<std::mutex> lock(g_effect_sequence_mutex);
+  const auto old_size = g_live_effect_sequences.size();
+  g_live_effect_sequences.erase(
+      std::remove_if(g_live_effect_sequences.begin(), g_live_effect_sequences.end(),
+          [effect_ref](const auto& entry) { return entry.effect_ref == effect_ref; }),
+      g_live_effect_sequences.end());
+  if (g_live_effect_sequences.size() != old_size)
+    ++g_effect_sequence_invalidation_count;
+}
+
+bool publish_effect_sequence(void* effect_ref, void* sequence_handle) {
+  if (!effect_ref || !sequence_handle) return false;
+  std::lock_guard<std::mutex> lock(g_effect_sequence_mutex);
+  auto found = std::find_if(
+      g_live_effect_sequences.begin(), g_live_effect_sequences.end(),
+      [effect_ref](const auto& entry) { return entry.effect_ref == effect_ref; });
+  if (found == g_live_effect_sequences.end()) {
+    if (g_live_effect_sequences.size() >= kMaxLiveEffectSequences) return false;
+    g_live_effect_sequences.push_back(
+        {effect_ref, reinterpret_cast<PfConstHandle>(sequence_handle),
+         ++g_effect_sequence_generation});
+  } else {
+    found->sequence_handle = reinterpret_cast<PfConstHandle>(sequence_handle);
+    found->generation = ++g_effect_sequence_generation;
+  }
+  ++g_effect_sequence_publication_count;
+  return true;
+}
+
+uint64_t effect_sequence_publications() {
+  std::lock_guard<std::mutex> lock(g_effect_sequence_mutex);
+  return g_effect_sequence_publication_count;
+}
+
+uint64_t effect_sequence_invalidations() {
+  std::lock_guard<std::mutex> lock(g_effect_sequence_mutex);
+  return g_effect_sequence_invalidation_count;
+}
+
+std::size_t live_effect_sequence_count() {
+  std::lock_guard<std::mutex> lock(g_effect_sequence_mutex);
+  return g_live_effect_sequences.size();
+}
 
 void configure_pf_host_context(const PfHostContext& context) {
   g_pf_host = context;
@@ -1906,7 +2254,7 @@ bool verify_pf_batch_sampling_suite() {
   void* source_world = world.data();
   std::memcpy(params.data() + 16, &source_world, sizeof(source_world));
 
-  auto& suite = g_pf_batch_sampling_suite1;
+  auto& suite = g_batch_sampling_suite1;
   bool passed = suite.begin_sampling(g_pf_host.effect_ref, 1, 0x12, params.data()) == 0 &&
       suite.begin_sampling(g_pf_host.effect_ref, 1, 0x12, params.data()) == kPfBadCallbackParam &&
       suite.end_sampling(g_pf_host.effect_ref, 0, 0x12, params.data()) == kPfBadCallbackParam &&

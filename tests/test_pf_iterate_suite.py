@@ -6,7 +6,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 PF_SUITES = ROOT / "minihost" / "src" / "worker_pf_suites.cpp"
-PF_SUITES_ABI = ROOT / "minihost" / "src" / "worker_pf_suites.hpp"
+PF_SUITES_ABI = ROOT / "minihost" / "src" / "worker_pf_suites_internal.hpp"
 SOURCE = ROOT / "minihost" / "src" / "l2_main.cpp"
 
 

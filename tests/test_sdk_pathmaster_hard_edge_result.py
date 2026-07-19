@@ -7,7 +7,8 @@ RESULT = ROOT / "analysis" / "SDK_PATHMASTER_HARD_EDGE_RESULT_2026-07-15.json"
 WORKER_SOURCES = (
     ROOT / "minihost" / "src" / "l2_main.cpp",
     ROOT / "minihost" / "src" / "worker_pf_suites.cpp",
-    ROOT / "minihost" / "src" / "worker_pf_suites.hpp",
+    ROOT / "minihost" / "src" / "worker_pf_suites_internal.hpp",
+    ROOT / "minihost" / "src" / "worker_l2_suite_abi.hpp",
 )
 BROKER = ROOT / "broker" / "crates" / "broker" / "src" / "image_render.rs"
 
