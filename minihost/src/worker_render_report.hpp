@@ -52,6 +52,50 @@ struct RequestedParametersSnapshot {
 void finish_requested_parameters(
     ReportSnapshot& report, const RequestedParametersSnapshot& snapshot);
 
+struct ClassicReport {
+  struct Head {
+    bool completed{};
+    int32_t global_setup_error{};
+    int32_t params_setup_error{};
+    uint32_t advertised_out_flags{};
+    uint32_t advertised_out_flags2{};
+    bool image_render_supported{};
+    bool nop_render_advertised{};
+    bool input_write_advertised{};
+    bool expand_buffer_advertised{};
+    bool shrink_buffer_advertised{};
+    bool wide_time_checkout_allowed{};
+    uint64_t rejected_temporal_param_checkouts{};
+    bool shutter_dependency_advertised{};
+  } head;
+  struct Sequence {
+    bool persistent{};
+    int32_t setup_error{};
+    int32_t setdown_error{};
+    std::array<int32_t, 2> frame_errors{};
+    std::array<std::string, 2> frame_hashes{};
+    bool flattened{};
+    int32_t flatten_error{};
+    int32_t resetup_error{};
+    bool flattened_handle_replaced{};
+    bool resetup_handle_replaced{};
+    bool flattened_handle_host_disposed{};
+    bool copied_flattened{};
+    int32_t get_flattened_error{};
+    bool original_preserved{};
+  } sequence;
+  struct Threads {
+    bool concurrent{};
+    std::array<int32_t, 2> errors{};
+    std::array<std::string, 2> hashes{};
+    std::array<bool, 2> guards_intact{};
+  } threads;
+};
+
+void begin_classic(ReportSnapshot& report, const ClassicReport::Head& snapshot);
+void append_classic_sequence(ReportSnapshot& report, const ClassicReport::Sequence& snapshot);
+void append_classic_threads(ReportSnapshot& report, const ClassicReport::Threads& snapshot);
+
 void emit(const ReportSnapshot& snapshot, std::ostream& output);
 
 }  // namespace aexcompat::worker_render_report

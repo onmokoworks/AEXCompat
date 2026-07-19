@@ -42,6 +42,54 @@ void finish_requested_parameters(
       << ",\"module_audit\":" << value.module_audit_json << "}\n";
 }
 
+void begin_classic(ReportSnapshot& report, const ClassicReport::Head& value) {
+  report.stream()
+      << "{\"schema_version\":1,\"stage\":\"classic_render\",\"status\":\""
+      << (value.completed ? "render_completed" : "render_failed")
+      << "\",\"global_setup_error\":" << value.global_setup_error
+      << ",\"params_setup_error\":" << value.params_setup_error
+      << ",\"advertised_out_flags\":" << value.advertised_out_flags
+      << ",\"advertised_out_flags2\":" << value.advertised_out_flags2
+      << ",\"image_render_supported\":" << (value.image_render_supported ? "true" : "false")
+      << ",\"nop_render_advertised\":" << (value.nop_render_advertised ? "true" : "false")
+      << ",\"input_write_advertised\":" << (value.input_write_advertised ? "true" : "false")
+      << ",\"expand_buffer_advertised\":" << (value.expand_buffer_advertised ? "true" : "false")
+      << ",\"shrink_buffer_advertised\":" << (value.shrink_buffer_advertised ? "true" : "false")
+      << ",\"input_buffer_writable\":" << (value.input_write_advertised ? "true" : "false")
+      << ",\"wide_time_checkout_allowed\":" << (value.wide_time_checkout_allowed ? "true" : "false")
+      << ",\"rejected_temporal_param_checkouts\":" << value.rejected_temporal_param_checkouts
+      << ",\"shutter_dependency_advertised\":" << (value.shutter_dependency_advertised ? "true" : "false");
+}
+
+void append_classic_sequence(ReportSnapshot& report, const ClassicReport::Sequence& value) {
+  report.stream()
+      << ",\"persistent_sequence\":" << (value.persistent ? "true" : "false")
+      << ",\"persistent_sequence_setup_error\":" << value.setup_error
+      << ",\"persistent_sequence_setdown_error\":" << value.setdown_error
+      << ",\"persistent_frame_errors\":[" << value.frame_errors[0] << ',' << value.frame_errors[1] << ']'
+      << ",\"persistent_frame_hashes\":[\"" << value.frame_hashes[0] << "\",\"" << value.frame_hashes[1] << "\"]"
+      << ",\"flattened_sequence\":" << (value.flattened ? "true" : "false")
+      << ",\"sequence_flatten_error\":" << value.flatten_error
+      << ",\"sequence_resetup_error\":" << value.resetup_error
+      << ",\"flattened_handle_replaced\":" << (value.flattened_handle_replaced ? "true" : "false")
+      << ",\"resetup_handle_replaced\":" << (value.resetup_handle_replaced ? "true" : "false")
+      << ",\"flattened_handle_host_disposed\":" << (value.flattened_handle_host_disposed ? "true" : "false")
+      << ",\"copied_flattened_sequence\":" << (value.copied_flattened ? "true" : "false")
+      << ",\"get_flattened_sequence_data_error\":" << value.get_flattened_error
+      << ",\"original_sequence_preserved\":" << (value.original_preserved ? "true" : "false");
+}
+
+void append_classic_threads(ReportSnapshot& report, const ClassicReport::Threads& value) {
+  report.stream()
+      << ",\"concurrent_render\":" << (value.concurrent ? "true" : "false")
+      << ",\"thread_1_error\":" << value.errors[0]
+      << ",\"thread_2_error\":" << value.errors[1]
+      << ",\"thread_1_sha256\":\"" << value.hashes[0] << '"'
+      << ",\"thread_2_sha256\":\"" << value.hashes[1] << '"'
+      << ",\"thread_1_guards_intact\":" << (value.guards_intact[0] ? "true" : "false")
+      << ",\"thread_2_guards_intact\":" << (value.guards_intact[1] ? "true" : "false");
+}
+
 void emit(const ReportSnapshot& snapshot, std::ostream& output) {
   output << snapshot.json();
 }

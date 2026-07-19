@@ -14938,8 +14938,9 @@ int worker_main_impl(int argc, wchar_t **argv) {
       aexcompat::worker_runtime::classic::diagnostics();
   restore_native_stdout();
   aexcompat::worker_render_report::ReportSnapshot report_snapshot(std::cout);
-  report_snapshot.stream() << "{\"schema_version\":1,\"stage\":\"classic_render\",\"status\":\""
-            << (render_error == 0 && parameter_count_contract_valid && guards_intact &&
+  aexcompat::worker_render_report::ClassicReport classic_report;
+  classic_report.head = {
+      render_error == 0 && parameter_count_contract_valid && guards_intact &&
                 arbitrary_defaults_disposed && g_invalid_arbitrary_operations == 0 &&
                 handle_lifetimes_balanced() && world_lifetimes_balanced() &&
                 gpu_memory_lifetimes_balanced() &&
@@ -14949,22 +14950,14 @@ int worker_main_impl(int argc, wchar_t **argv) {
                 audio_handle_lifetimes_balanced() && audio_telemetry().invalid_operations == 0 &&
                 classic_diagnostics.balanced &&
                 ((!g_render_click_enabled && !g_render_draw_enabled) ||
-                 g_render_ui_context_closed)
-                ? "render_completed" : "render_failed")
-            << "\",\"global_setup_error\":" << global_error
-            << ",\"params_setup_error\":" << params_error
-            << ",\"advertised_out_flags\":" << advertised_out_flags
-            << ",\"advertised_out_flags2\":" << advertised_out_flags2
-            << ",\"image_render_supported\":" << (image_render_supported ? "true" : "false")
-            << ",\"nop_render_advertised\":" << (nop_render_advertised ? "true" : "false")
-            << ",\"input_write_advertised\":" << (input_write_advertised ? "true" : "false")
-            << ",\"expand_buffer_advertised\":" << (expand_buffer_advertised ? "true" : "false")
-            << ",\"shrink_buffer_advertised\":" << (shrink_buffer_advertised ? "true" : "false")
-            << ",\"input_buffer_writable\":" << (input_write_advertised ? "true" : "false")
-            << ",\"wide_time_checkout_allowed\":" << (classic_diagnostics.wide_time_allowed ? "true" : "false")
-            << ",\"rejected_temporal_param_checkouts\":" << classic_diagnostics.rejected_temporal_checkouts
-            << ",\"shutter_dependency_advertised\":"
-            << (classic_diagnostics.shutter_dependency_advertised ? "true" : "false")
+                 g_render_ui_context_closed),
+      global_error, params_error, advertised_out_flags, advertised_out_flags2,
+      image_render_supported, nop_render_advertised, input_write_advertised,
+      expand_buffer_advertised, shrink_buffer_advertised,
+      classic_diagnostics.wide_time_allowed, classic_diagnostics.rejected_temporal_checkouts,
+      classic_diagnostics.shutter_dependency_advertised};
+  aexcompat::worker_render_report::begin_classic(report_snapshot, classic_report.head);
+  report_snapshot.stream()
             << ",\"audio_usage_advertised\":" << (audio_telemetry().usage_advertised ? "true" : "false")
             << ",\"audio_checkout_allowed\":" << (audio_telemetry().checkout_allowed ? "true" : "false")
             << ",\"audio_source_available\":" << (audio_telemetry().source_available ? "true" : "false")
@@ -14993,27 +14986,15 @@ int worker_main_impl(int argc, wchar_t **argv) {
             << (aexcompat::worker_runtime::classic::last_selector_dispatched()
                     ? "true" : "false")
             << ",\"depth_supported\":" << (depth_supported ? "true" : "false")
-            << ",\"render_error\":" << render_error
-            << ",\"persistent_sequence\":" << (persistent_sequence ? "true" : "false")
-            << ",\"persistent_sequence_setup_error\":" << persistent_sequence_setup_error
-            << ",\"persistent_sequence_setdown_error\":" << persistent_sequence_setdown_error
-            << ",\"persistent_frame_errors\":[" << persistent_frame_errors[0] << ','
-            << persistent_frame_errors[1] << ']'
-            << ",\"persistent_frame_hashes\":[\"" << persistent_frame_hashes[0]
-            << "\",\"" << persistent_frame_hashes[1] << "\"]"
-            << ",\"flattened_sequence\":" << (flattened_sequence ? "true" : "false")
-            << ",\"sequence_flatten_error\":" << sequence_flatten_error
-            << ",\"sequence_resetup_error\":" << sequence_resetup_error
-            << ",\"flattened_handle_replaced\":" << (flattened_handle_replaced ? "true" : "false")
-            << ",\"resetup_handle_replaced\":" << (resetup_handle_replaced ? "true" : "false")
-            << ",\"flattened_handle_host_disposed\":"
-            << (flattened_handle_host_disposed ? "true" : "false")
-            << ",\"copied_flattened_sequence\":"
-            << (copied_flattened_sequence ? "true" : "false")
-            << ",\"get_flattened_sequence_data_error\":"
-            << get_flattened_sequence_data_error
-            << ",\"original_sequence_preserved\":"
-            << (original_sequence_preserved ? "true" : "false")
+            << ",\"render_error\":" << render_error;
+  classic_report.sequence = {
+      persistent_sequence, persistent_sequence_setup_error, persistent_sequence_setdown_error,
+      persistent_frame_errors, persistent_frame_hashes, flattened_sequence,
+      sequence_flatten_error, sequence_resetup_error, flattened_handle_replaced,
+      resetup_handle_replaced, flattened_handle_host_disposed, copied_flattened_sequence,
+      get_flattened_sequence_data_error, original_sequence_preserved};
+  aexcompat::worker_render_report::append_classic_sequence(report_snapshot, classic_report.sequence);
+  report_snapshot.stream()
             << ",\"global_setdown_error\":" << setdown_error
             << ",\"return_message\":\"" << escape(std::string(
                 reinterpret_cast<const char*>(output.data() + kOutMessage),
@@ -15146,14 +15127,10 @@ int worker_main_impl(int argc, wchar_t **argv) {
             << ",\"progress_calls\":" << g_progress_calls
             << ",\"register_ui_calls\":" << g_register_ui_calls
             << ",\"last_progress_current\":" << g_last_progress_current
-            << ",\"last_progress_total\":" << g_last_progress_total
-            << ",\"concurrent_render\":" << (concurrent_render ? "true" : "false")
-            << ",\"thread_1_error\":" << thread_errors[0]
-            << ",\"thread_2_error\":" << thread_errors[1]
-            << ",\"thread_1_sha256\":\"" << thread_hashes[0] << "\""
-            << ",\"thread_2_sha256\":\"" << thread_hashes[1] << "\""
-            << ",\"thread_1_guards_intact\":" << (thread_guards[0] ? "true" : "false")
-            << ",\"thread_2_guards_intact\":" << (thread_guards[1] ? "true" : "false")
+            << ",\"last_progress_total\":" << g_last_progress_total;
+  classic_report.threads = {concurrent_render, thread_errors, thread_hashes, thread_guards};
+  aexcompat::worker_render_report::append_classic_threads(report_snapshot, classic_report.threads);
+  report_snapshot.stream()
             << ",\"request_mode\":" << (request_mode ? "true" : "false")
             << ",\"downsample_x\":[" << g_downsample_x.numerator << "," << g_downsample_x.denominator << "]"
             << ",\"downsample_y\":[" << g_downsample_y.numerator << "," << g_downsample_y.denominator << "]"
