@@ -33,9 +33,10 @@ def test_registry_is_a_genuine_compiled_owner_and_abi_wrappers_remain_in_main():
     assert "suite_registry().acquire(" in ROUTER
     assert "ProviderCatalog provider_catalog" in CATALOG
     assert "g_trace_writer" in acquire
-    basic = MAIN[MAIN.index("struct BasicSuite") : MAIN.index("int32_t invoke_sequence_selector")]
-    assert "decltype(&acquire_suite) acquire" in basic
-    assert "BasicSuite g_basic_suite{&acquire_suite, &release_suite}" in basic
+    # The BasicSuite ABI slab lives in its owner TU.
+    render_abi = source_owners.contract_text("l2_render_abi")
+    assert "decltype(&acquire_suite) acquire" in render_abi
+    assert "BasicSuite g_basic_suite{&acquire_suite, &release_suite}" in render_abi
 
 
 def test_registry_owns_success_reject_unknown_and_release_protocols():
