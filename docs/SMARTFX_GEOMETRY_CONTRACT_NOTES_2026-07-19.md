@@ -310,3 +310,25 @@ report に転記する。非ゼロ寸法や非 0 byte 出力を伴う empty 主�
   full-frame をそのまま転送し交差応答も full-frame、result ==
   max_result == full、**`RETURNS_EXTRA_PIXELS` を宣言している**、violation
   なし、3 深度で geometry 完全一致。専用分岐なしで契約経路を通過した。
+
+## AE 実機観測: output world sizing 基準 (issue #102、2026-07-19 追記)
+
+保留していた「AE が output world を result_rect / max_result_rect の
+どちらで sizing するか」を実機で観測した。
+
+- 手段: `instruments/pf-selector-timeline-probe` (smart flavor) の
+  Probe Mode 1。Smart Pre-Render で `result_rect = [8,4,632,356]`
+  (inset)、`max_result_rect = [0,0,640,360]` (full) を返答し、
+  SMART_RENDER で `checkout_output` が返す world を記録する。
+  `tools/capture-selector-timeline.ps1` + aerender、AE 25.3.1x3、8bpc。
+- **観察: AE の output world は 624x352、origin_x=8, origin_y=4、
+  rowbytes=2496 (=624*4)。すなわち result_rect の寸法で確保され、origin が
+  result_rect の左上を指す。max_result_rect (640x360) 基準ではない。**
+- 観測は 8bpc・単一ケースの結果で、深度依存の可能性には未観測の留保を
+  残す (ただし depth 依存にする理由は AE 側に見当たらない)。
+
+含意: host (`minihost` smart pipeline) の現行 `max_result_rect` 基準の
+output world 確保は AE と異なる。result_rect ≠ max_result_rect を返す
+plugin では、AE 上と host 上で output world の寸法・origin が食い違う。
+sizing の追随変更 (result_rect 基準 + origin 設定) は issue #102 の
+残作業として、SmartFX geometry evidence の refresh と併せて別 PR で行う。
