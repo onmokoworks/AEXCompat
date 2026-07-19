@@ -16,7 +16,7 @@ TRANSPORT = ROOT / "target/image-transport"
 
 def worker_source():
     return "\n".join(path.read_text(encoding="utf-8") for path in
-                     (SOURCE, DISPATCH_SOURCE, EXECUTION_SOURCE, PARAM_SUITES, SELFTEST_SOURCE))
+                     (SOURCE, source_owners.SRC / "worker_l2_shared_helpers.cpp", DISPATCH_SOURCE, EXECUTION_SOURCE, PARAM_SUITES, SELFTEST_SOURCE))
 
 
 def _workers():

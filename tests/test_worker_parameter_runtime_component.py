@@ -12,7 +12,8 @@ CMAKE = ROOT / "minihost" / "CMakeLists.txt"
 def test_parameter_runtime_owns_descriptors_ui_arbitrary_and_checkout_state():
     header = HEADER.read_text(encoding="utf-8")
     source = SOURCE.read_text(encoding="utf-8")
-    main = MAIN.read_text(encoding="utf-8")
+    main = (MAIN.read_text(encoding="utf-8") +
+            (source_owners.SRC / "worker_l2_shared_helpers.cpp").read_text(encoding="utf-8"))
     for marker in (
         "struct ParamRecord",
         "struct RequestedAssignment",
@@ -32,7 +33,8 @@ def test_parameter_runtime_owns_descriptors_ui_arbitrary_and_checkout_state():
 
 def test_parameter_definition_abi_and_animation_timeline_stay_bound():
     header = HEADER.read_text(encoding="utf-8")
-    main = MAIN.read_text(encoding="utf-8")
+    main = (MAIN.read_text(encoding="utf-8") +
+            (source_owners.SRC / "worker_l2_shared_helpers.cpp").read_text(encoding="utf-8"))
     assert "kDefinitionSize = 176" in header
     assert "parameter_animation::ParameterTimeline" in header
     assert "kDefinitionSize == kParamSize" in main

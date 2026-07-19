@@ -70,6 +70,7 @@ WORKER_RUNTIME_OWNERS = (
     "minihost/src/worker_param_checkout_runtime.cpp",
     "minihost/src/worker_classic_render_runtime.cpp",
     "minihost/src/worker_host_suite_wiring.cpp",
+    "minihost/src/worker_l2_shared_helpers.cpp",
 )
 
 # 契約名 → owner ファイル群 (repo ルート相対)。
@@ -142,6 +143,7 @@ CONTRACTS = {
         "minihost/src/worker_param_checkout_runtime.cpp",
         "minihost/src/worker_classic_render_runtime.cpp",
         "minihost/src/worker_host_suite_wiring.cpp",
+        "minihost/src/worker_l2_shared_helpers.cpp",
         "minihost/src/worker_aegp_timeline_probe.hpp",
         "minihost/src/worker_aegp_timeline_probe.cpp",
         "minihost/src/worker_aegp_host_selftests.cpp",
@@ -230,6 +232,7 @@ CONTRACTS = {
     ),
     "pf_effect_sequence_data_suite": (
         "minihost/src/l2_main.cpp",
+        "minihost/src/worker_l2_shared_helpers.cpp",
         "minihost/src/worker_pf_suites_internal.hpp",
         "minihost/src/worker_pf_suites.cpp",
         "minihost/src/worker_pf_state_runtime.hpp",
@@ -246,6 +249,9 @@ CONTRACTS = {
         "minihost/src/worker_pf_world_transform_runtime.cpp",
     ),
     "pf_helper_suite2": (
+        # The helpers owner precedes l2_main so the definition-anchored
+        # invoke_global_setdown slice resolves into the production body.
+        "minihost/src/worker_l2_shared_helpers.cpp",
         "minihost/src/l2_main.cpp",
         "minihost/src/worker_host_suite_wiring.cpp",
         "minihost/src/worker_l2_suite_abi.hpp",
