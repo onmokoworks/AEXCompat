@@ -698,8 +698,9 @@ pub mod windows {
         }
 
         fn input_world(&self, depth: PixelDepth) -> Result<WorldMetadata, RuntimeFailure> {
-            let image = image::image_dimensions(self.input_path)
+            let image = image_render::decode_bounded_image(self.input_path, "input preflight")
                 .map_err(|_| RuntimeFailure::new(Classification::HostValidationError))?;
+            let image = (image.width(), image.height());
             let bytes_per_pixel = match depth {
                 PixelDepth::Argb8 => 4,
                 PixelDepth::Argb16 => 8,

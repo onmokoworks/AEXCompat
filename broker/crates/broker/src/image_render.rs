@@ -250,7 +250,7 @@ fn cleanup_stale_image_transport(root: &Path, now: SystemTime) -> io::Result<()>
     cleanup_stale_image_transport_before(root, now, STALE_IMAGE_TRANSPORT_AGE)
 }
 
-fn decode_bounded_image(path: &Path, role: &str) -> io::Result<image::DynamicImage> {
+pub(crate) fn decode_bounded_image(path: &Path, role: &str) -> io::Result<image::DynamicImage> {
     let mut reader = image::ImageReader::open(path)
         .map_err(|error| invalid(format!("{role} image open failed: {error}")))?
         .with_guessed_format()
@@ -4976,6 +4976,34 @@ fn render_with_artifact(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bounded_decode_rejects_header_only_images() {
+        let path = std::env::temp_dir().join(format!(
+            "aexcompat-truncated-input-{}-{}.png",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        image::RgbaImage::from_pixel(1, 1, image::Rgba([0, 0, 0, 255]))
+            .save(&path)
+            .unwrap();
+        let complete = fs::read(&path).unwrap();
+        let header_only = (33..complete.len())
+            .find(|&length| {
+                fs::write(&path, &complete[..length]).unwrap();
+                matches!(image::image_dimensions(&path), Ok((1, 1)))
+                    && decode_bounded_image(&path, "input preflight").is_err()
+            })
+            .expect("fixture with readable dimensions and truncated pixels");
+        fs::write(&path, &complete[..header_only]).unwrap();
+
+        assert_eq!(image::image_dimensions(&path).unwrap(), (1, 1));
+        assert!(decode_bounded_image(&path, "input preflight").is_err());
+        fs::remove_file(path).unwrap();
+    }
 
     fn timed_layer(slot: u32, value: i32, scale: u32) -> TimedLayerImage {
         TimedLayerImage {
