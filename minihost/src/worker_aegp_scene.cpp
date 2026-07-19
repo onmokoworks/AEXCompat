@@ -7,6 +7,7 @@
 #include <climits>
 #include <cmath>
 #include <cstring>
+#include <iterator>
 
 using aexcompat::scene_runtime::scene_runtime_state;
 
@@ -1198,3 +1199,178 @@ SceneSuiteAcquireResult scene_acquire_suite(
 
   return SceneSuiteAcquireResult::not_handled;
 }
+
+// Legacy AEGP effect stream (v2) and effect-param-union (v3) callbacks moved
+// from worker_main (issue #170); their slot storage already lives in
+// scene_runtime_state(), and worker_main's suite tables keep resolving them
+// through its own cross-TU declarations.
+namespace aexcompat::l2_detail {
+
+// bump_render_project_timestamp resolves through this TU's scene-context
+// hook macro to the same worker-entry bump the callbacks used before.
+
+namespace {
+constexpr std::size_t kParamSize = 176;
+auto& g_aegp_stream_acquires = scene_runtime_state().stream_acquires;
+auto& g_aegp_stream_disposes = scene_runtime_state().stream_disposes;
+auto& g_aegp_stream_value_acquires = scene_runtime_state().stream_value_acquires;
+auto& g_aegp_stream_value_disposes = scene_runtime_state().stream_value_disposes;
+auto& g_aegp_effect_param_union_calls = scene_runtime_state().effect_param_union_calls;
+}  // namespace
+
+constexpr int32_t kPfErrBadCallbackParam = 516;
+
+int32_t __cdecl aegp_get_new_effect_stream_by_index_v2(
+    int32_t plugin_id, void* effect, int32_t index, void** stream) {
+  std::size_t instance_index = 0;
+  const auto* instance = resolve_effect_instance(effect, plugin_id, &instance_index);
+  const auto* parameter = instance
+      ? find_effect_parameter(instance->installed_key, index) : nullptr;
+  if (plugin_id <= 0 || !instance || !stream || !parameter) return 4;
+  const auto free_slot = std::find_if(g_aegp_legacy_effect_streams.begin(),
+      g_aegp_legacy_effect_streams.end(), [](const auto& value) { return !value.live; });
+  if (free_slot == g_aegp_legacy_effect_streams.end()) return 4;
+  auto& value = *free_slot;
+  const std::size_t slot = static_cast<std::size_t>(
+      std::distance(g_aegp_legacy_effect_streams.begin(), free_slot));
+  uint32_t generation = ++g_aegp_legacy_effect_stream_generation;
+  if (generation == 0) generation = ++g_aegp_legacy_effect_stream_generation;
+  const uintptr_t encoded = (static_cast<uintptr_t>(generation) << 8) |
+      (static_cast<uintptr_t>(slot) << 2) | 3;
+  if (encoded <= 3) return 4;
+  value.param_index = index;
+  value.live = true;
+  value.hidden = false;
+  value.value_live = false;
+  value.effect_instance_index = static_cast<uint32_t>(instance_index);
+  value.effect_instance_generation = instance->generation;
+  value.generation = generation;
+  value.owner_plugin_id = plugin_id;
+  ++g_aegp_stream_acquires;
+  *stream = reinterpret_cast<void*>(encoded);
+  return 0;
+}
+AegpLegacyEffectStream* legacy_effect_stream(void* stream) {
+  const uintptr_t encoded = reinterpret_cast<uintptr_t>(stream);
+  if (!stream || (encoded & 3) != 3) return nullptr;
+  const std::size_t slot = (encoded >> 2) & 0x3f;
+  const uint32_t generation = static_cast<uint32_t>(encoded >> 8);
+  if (slot >= g_aegp_legacy_effect_streams.size()) return nullptr;
+  auto& value = g_aegp_legacy_effect_streams[slot];
+  return value.live && value.generation == generation ? &value : nullptr;
+}
+bool legacy_effect_stream_parent_live(const AegpLegacyEffectStream& stream) {
+  if (stream.effect_instance_index >= g_aegp_effect_instances.size()) return false;
+  const auto& instance = g_aegp_effect_instances[stream.effect_instance_index];
+  return instance.occupied && instance.generation == stream.effect_instance_generation;
+}
+int32_t __cdecl aegp_get_stream_name_v2(void* stream, uint8_t, char* name) {
+  auto* value = legacy_effect_stream(stream);
+  if (!value || !legacy_effect_stream_parent_live(*value) || !name) return 4;
+  const auto& instance = g_aegp_effect_instances[value->effect_instance_index];
+  const auto* parameter = find_effect_parameter(instance.installed_key, value->param_index);
+  if (!parameter) return 4;
+  std::strcpy(name, parameter->name);
+  return 0;
+}
+int32_t __cdecl aegp_get_stream_type_v2(void* stream, int32_t* type) {
+  auto* value = legacy_effect_stream(stream);
+  if (!value || !legacy_effect_stream_parent_live(*value) || !type) return 4;
+  const auto& instance = g_aegp_effect_instances[value->effect_instance_index];
+  const auto* parameter = find_effect_parameter(instance.installed_key, value->param_index);
+  if (!parameter) return 4;
+  *type = parameter->type;
+  return 0;
+}
+int32_t __cdecl aegp_get_new_stream_value_v2(
+    int32_t plugin_id, void* stream, int32_t, const AegpTime* time,
+    uint8_t, AegpStreamValue* output) {
+  auto* value = legacy_effect_stream(stream);
+  if (!value || !legacy_effect_stream_parent_live(*value) ||
+      plugin_id != value->owner_plugin_id || value->value_live || !time ||
+      time->scale == 0 || !output)
+    return 4;
+  const auto& instance = g_aegp_effect_instances[value->effect_instance_index];
+  const auto* parameter = find_effect_parameter(instance.installed_key, value->param_index);
+  if (!parameter) return 4;
+  output->stream = stream;
+  output->value.fill(std::byte{});
+  if (value->param_index == 0) {
+    std::memcpy(output->value.data(), &instance.layer, sizeof(instance.layer));
+  } else {
+    std::memcpy(output->value.data(),
+                instance.parameter_values[static_cast<std::size_t>(value->param_index - 1)].data(),
+                sizeof(instance.parameter_values[0]));
+  }
+  value->value_live = true;
+  value->checked_out_value = output;
+  ++g_aegp_stream_value_acquires;
+  return 0;
+}
+int32_t __cdecl aegp_dispose_stream_value_v2(AegpStreamValue* output) {
+  if (!output) return 4;
+  auto* stream = legacy_effect_stream(output->stream);
+  if (!stream || !stream->value_live || stream->checked_out_value != output) return 4;
+  output->stream = nullptr;
+  stream->value_live = false;
+  stream->checked_out_value = nullptr;
+  ++g_aegp_stream_value_disposes;
+  return 0;
+}
+int32_t __cdecl aegp_set_stream_value_v2(
+    int32_t plugin_id, void* stream, AegpStreamValue* input) {
+  auto* value = legacy_effect_stream(stream);
+  if (!value || !legacy_effect_stream_parent_live(*value) ||
+      plugin_id != value->owner_plugin_id || !value->value_live || !input ||
+      input->stream != stream || value->checked_out_value != input)
+    return 4;
+  const auto& current = g_aegp_effect_instances[value->effect_instance_index];
+  const auto* parameter = find_effect_parameter(current.installed_key, value->param_index);
+  if (!parameter || value->param_index == 0 || !parameter->writable) return 4;
+  std::array<double, 4> candidate{};
+  std::memcpy(candidate.data(), input->value.data(), sizeof(candidate));
+  for (std::size_t index = 0; index < candidate.size(); ++index)
+    if (!std::isfinite(candidate[static_cast<std::size_t>(index)])) return 4;
+  auto& instance = g_aegp_effect_instances[value->effect_instance_index];
+  instance.parameter_values[static_cast<std::size_t>(value->param_index - 1)] = candidate;
+  bump_render_project_timestamp();
+  return 0;
+}
+int32_t __cdecl aegp_dispose_stream_v2(void* stream) {
+  auto* value = legacy_effect_stream(stream);
+  if (!value || value->value_live) return 4;
+  value->live = false;
+  value->param_index = -1;
+  value->effect_instance_index = 0;
+  value->effect_instance_generation = 0;
+  value->checked_out_value = nullptr;
+  value->owner_plugin_id = 0;
+  ++g_aegp_stream_disposes;
+  return 0;
+}
+int32_t __cdecl aegp_set_dynamic_stream_flag_v2(
+    void* stream, uint32_t one_flag, uint8_t undoable, uint8_t set) {
+  auto* value = legacy_effect_stream(stream);
+  constexpr uint32_t kHidden = 1u << 1;
+  if (!value || !legacy_effect_stream_parent_live(*value) ||
+      one_flag != kHidden || undoable > 1 || set > 1) return 4;
+  value->hidden = set != 0;
+  return 0;
+}
+int32_t __cdecl aegp_get_effect_param_union_by_index_v3(
+    int32_t plugin_id, void* effect, int32_t index, int32_t* type, void* param_union) {
+  if (plugin_id <= 0 || !resolve_effect_instance(effect, plugin_id) || !type ||
+      !param_union || index < 0 || index >= 5) return 4;
+  // AEGP effect inspection is independent of PF selector-local parameter
+  // buffers. These are definition unions for the bounded synthetic scene,
+  // never current values (which belong to the Stream Suite).
+  static constexpr std::array<int32_t, 5> kTypes{0, 1, 4, 5, 10};
+  static constexpr std::array<std::array<std::byte, kParamSize - 56>, 5> kUnions{};
+  *type = kTypes[static_cast<std::size_t>(index)];
+  std::memcpy(param_union, kUnions[static_cast<std::size_t>(index)].data(),
+              kUnions[static_cast<std::size_t>(index)].size());
+  ++g_aegp_effect_param_union_calls;
+  return 0;
+}
+
+}  // namespace aexcompat::l2_detail
