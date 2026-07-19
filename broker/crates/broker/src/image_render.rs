@@ -4220,12 +4220,14 @@ fn render_with_artifact(
     // (the one-shot re-run then reports through the original path). Gate
     // failures inside the session path are final: they are the same
     // fail-closed validation the one-shot path applies.
-    // The session transport carries mask, spatial, and render-environment
-    // context (W1-3), but not yet aux channels or alpha-as-coverage; a host
-    // context using those stays on the one-shot path.
-    let session_representable_context = host_context.is_none_or(|context| {
-        context.aux_channels.is_empty() && context.alpha_as_coverage_params.is_empty()
-    });
+    // The session transport carries mask, spatial, render-environment context
+    // (W1-3) and alpha-as-coverage parameter slots (W1-4c, published once at
+    // launch), but not yet aux channels; a host context using aux channels
+    // stays on the one-shot path.
+    let session_representable_context =
+        host_context.is_none_or(|context| context.aux_channels.is_empty());
+    let alpha_as_coverage_params: &[u32] =
+        host_context.map_or(&[], |context| context.alpha_as_coverage_params.as_slice());
     if !smart
         && session_representable_context
         && audio.is_none()
@@ -4284,6 +4286,7 @@ fn render_with_artifact(
             mask_trailer,
             spatial_trailer,
             render_environment_trailer,
+            alpha_as_coverage_params,
             timing,
             pixel_format,
             deep_png_output,
@@ -4859,6 +4862,7 @@ struct SessionWrapperRequest<'a> {
     mask_trailer: Option<String>,
     spatial_trailer: Option<String>,
     render_environment_trailer: Option<String>,
+    alpha_as_coverage_params: &'a [u32],
     timing: RenderTiming,
     pixel_format: RenderPixelFormat,
     deep_png_output: bool,
@@ -4920,6 +4924,7 @@ fn render_classic_via_length_one_session(
         mask_trailer: request.mask_trailer.clone(),
         spatial_trailer: request.spatial_trailer.clone(),
         render_environment_trailer: request.render_environment_trailer.clone(),
+        alpha_as_coverage_params: request.alpha_as_coverage_params,
         dependencies: request.dependencies.to_vec(),
         width: request.width,
         height: request.height,

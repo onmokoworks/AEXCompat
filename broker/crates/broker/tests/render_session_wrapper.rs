@@ -295,6 +295,69 @@ mod windows_e2e {
             std::fs::read(&mask_b).unwrap(),
             "mask PNG bytes differ between the routes"
         );
+        // An alpha-as-coverage host context (issue #98 W1-4c) rides the
+        // session launch argv as the `--alpha-as-coverage-v1` auxiliary option
+        // (published once at launch), and must match the one-shot route
+        // field-for-field and byte-for-byte. The eligibility gate no longer
+        // forces such a context onto the one-shot path.
+        let coverage_context: HostContext = serde_json::from_value(serde_json::json!({
+            "mask_scene": {"masks": []},
+            "alpha_as_coverage_params": [0],
+        }))
+        .expect("alpha-as-coverage host context fixture");
+        let cov_before = RENDER_SESSION_WRAPPER_RENDERS.load(Ordering::SeqCst);
+        let cov_a = scratch.join("cov-a.png");
+        let cov_report_a = render_experimental_image_at_time_with_format_and_context(
+            &root,
+            &aex,
+            &sha,
+            &input,
+            &cov_a,
+            &[],
+            RenderTiming::default(),
+            false,
+            RenderPixelFormat::Argb8,
+            Some(&coverage_context),
+        )
+        .expect("session-route alpha-as-coverage render");
+        assert!(
+            RENDER_SESSION_WRAPPER_RENDERS.load(Ordering::SeqCst) > cov_before,
+            "the session wrapper did not carry the alpha-as-coverage render"
+        );
+        unsafe { std::env::set_var(DISABLE_SESSION_WRAPPER_ENV, "1") };
+        let cov_b = scratch.join("cov-b.png");
+        let cov_report_b = render_experimental_image_at_time_with_format_and_context(
+            &root,
+            &aex,
+            &sha,
+            &input,
+            &cov_b,
+            &[],
+            RenderTiming::default(),
+            false,
+            RenderPixelFormat::Argb8,
+            Some(&coverage_context),
+        )
+        .expect("one-shot alpha-as-coverage render");
+        unsafe { std::env::remove_var(DISABLE_SESSION_WRAPPER_ENV) };
+        let mut cov_flat_a = cov_report_a.as_object().expect("coverage A").clone();
+        let mut cov_flat_b = cov_report_b.as_object().expect("coverage B").clone();
+        for key in volatile {
+            cov_flat_a.remove(key);
+            cov_flat_b.remove(key);
+        }
+        for (key, value_a) in &cov_flat_a {
+            assert_eq!(
+                Some(value_a),
+                cov_flat_b.get(key),
+                "alpha-as-coverage report field {key} differs between the routes"
+            );
+        }
+        assert_eq!(
+            std::fs::read(&cov_a).unwrap(),
+            std::fs::read(&cov_b).unwrap(),
+            "alpha-as-coverage PNG bytes differ between the routes"
+        );
         // Secondary layer A/B equivalence needs an AEX declaring a layer
         // parameter, which pf_sampling_probe does not; the session layer
         // transport is covered by the render_session fixture integration test,
