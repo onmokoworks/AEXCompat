@@ -55,6 +55,7 @@
 #include "worker_parameter_runtime.hpp"
 #include "worker_parameter_selftests.hpp"
 #include "worker_parameter_selftest_routing.hpp"
+#include "worker_pf_color_selftests.hpp"
 #include "worker_parameter_execution.hpp"
 #include "worker_ui_event_execution.hpp"
 #include "pf_cache_on_load_suite.hpp"
@@ -5238,120 +5239,9 @@ const aexcompat::l2mode::Hooks& early_mode_hooks() {
 
 using namespace aexcompat::l2_detail;
 
-bool verify_pf_color_suite() {
-  const void* acquired8{}; const void* acquired16{}; const void* acquired_float{};
-  const bool acquired = acquire_suite("PF Color Suite", 1, &acquired8) == 0 &&
-      acquire_suite("PF Color16 Suite", 1, &acquired16) == 0 &&
-      acquire_suite("PF ColorFloat Suite", 1, &acquired_float) == 0 &&
-      acquired8 == &g_color_suite8 && acquired16 == &g_color_suite16 &&
-      acquired_float == &g_color_suite_float;
-  PfPixel8 red8{77, 255, 0, 0}, round8{91, 0, 0, 0};
-  PfFixed hls[3]{}, yiq[3]{};
-  int32_t lum8{}, hue8{}, light8{}, sat8{};
-  bool ok = acquired && g_color_suite8.RGBtoHLS(nullptr, &red8, hls) == 0 &&
-      hls[0] == 0 && hls[1] == pf_color_to_fixed(0.5) && hls[2] == pf_color_to_fixed(1.0) &&
-      g_color_suite8.HLStoRGB(nullptr, hls, &round8) == 0 && round8.alpha == 91 &&
-      round8.red == 255 && round8.green <= 1 && round8.blue <= 1 &&
-      g_color_suite8.RGBtoYIQ(nullptr, &red8, yiq) == 0 &&
-      g_color_suite8.Luminance(nullptr, &red8, &lum8) == 0 &&
-      g_color_suite8.Hue(nullptr, &red8, &hue8) == 0 &&
-      g_color_suite8.Lightness(nullptr, &red8, &light8) == 0 &&
-      g_color_suite8.Saturation(nullptr, &red8, &sat8) == 0 &&
-      lum8 == 7622 && hue8 == 0 && light8 == 128 && sat8 == 255;
-  PfPixel16 green16{1234, 0, 32768, 0}, round16{4321, 0, 0, 0};
-  ok = ok && g_color_suite16.RGBtoHLS(nullptr, &green16, hls) == 0 &&
-      hls[0] == pf_color_to_fixed(120.0) &&
-      g_color_suite16.HLStoRGB(nullptr, hls, &round16) == 0 && round16.alpha == 4321 &&
-      round16.green >= 32767 && round16.red <= 1 && round16.blue <= 1;
-  int32_t hue16{};
-  ok = ok && g_color_suite16.Hue(nullptr, &green16, &hue16) == 0 && hue16 == 85;
-  PfPixelFloat hdr{2.0f, 1.5f, 2.0f, -1.0f};
-  float lumf{};
-  ok = ok && g_color_suite_float.RGBtoYIQ(nullptr, &hdr, yiq) == 0 &&
-      yiq[0] > 65536 && g_color_suite_float.Luminance(nullptr, &hdr, &lumf) == 0 &&
-      lumf > 1.0f;
-  PfPixelFloat invalid{1.0f, std::numeric_limits<float>::infinity(), 0.0f, 0.0f};
-  PfFixed sentinel[3]{11, 22, 33};
-  ok = ok && g_color_suite_float.RGBtoHLS(nullptr, &invalid, sentinel) == kPfBadCallbackParam &&
-      sentinel[0] == 11 && sentinel[1] == 22 && sentinel[2] == 33 &&
-      g_color_suite8.RGBtoHLS(nullptr, nullptr, sentinel) == kPfBadCallbackParam &&
-      g_color_suite8.RGBtoHLS(nullptr, &red8, nullptr) == kPfBadCallbackParam;
-  ok = release_suite("PF ColorFloat Suite", 1) == 0 &&
-      release_suite("PF Color16 Suite", 1) == 0 &&
-      release_suite("PF Color Suite", 1) == 0 && ok;
-  return ok;
-}
-
-bool verify_pf_color_param_suite() {
-  const auto saved_params = g_params;
-  g_params.clear();
-  auto add_color = [](int32_t disk_id, std::array<unsigned char, 4> current8,
-                      std::array<unsigned char, 4> default8,
-                      std::array<float, 4> current_float,
-                      std::array<float, 4> default_float) {
-    ParamRecord record{};
-    record.index = static_cast<int32_t>(g_params.size() + 1);
-    record.disk_id = disk_id;
-    record.type = 5;
-    record.has_color = true;
-    record.current_color = current8;
-    record.default_color = default8;
-    record.current_float_color = current_float;
-    record.default_float_color = default_float;
-    g_params.push_back(record);
-  };
-  add_color(101, {255, 64, 128, 192}, {128, 10, 20, 30},
-            {1.0f, 64.0f / 255.0f, 128.0f / 255.0f, 192.0f / 255.0f},
-            {128.0f / 255.0f, 10.0f / 255.0f, 20.0f / 255.0f, 30.0f / 255.0f});
-  add_color(102, {255, 17, 33, 65}, {255, 1, 2, 3},
-            {1.0f, 4097.0f / 32768.0f, 8193.0f / 32768.0f, 16385.0f / 32768.0f},
-            {1.0f, 1.0f / 32768.0f, 2.0f / 32768.0f, 3.0f / 32768.0f});
-  add_color(103, {255, 200, 100, 50}, {255, 40, 50, 60},
-            {0.75f, 1.5f, -0.25f, 2.0f}, {1.0f, 0.1f, 0.2f, 0.3f});
-
-  const void* acquired = nullptr;
-  bool ok = acquire_suite("PF ColorParamSuite", 1, &acquired) == 0 &&
-      acquired == &g_color_param_suite1;
-  auto definition = [](const ParamRecord& record, bool current) {
-    std::array<std::byte, kParamSize> bytes{};
-    write<int32_t>(bytes, 0, record.disk_id);
-    write<int32_t>(bytes, kParamType, record.type);
-    const auto& color = current ? record.current_color : record.default_color;
-    std::memcpy(bytes.data() + 56, color.data(), color.size());
-    return bytes;
-  };
-  PfColorParamPixelFloat out{};
-  auto current8 = definition(g_params[0], true);
-  auto default8 = definition(g_params[0], false);
-  ok = ok && floating_point_from_color(&g_effect, current8.data(), &out) == 0 &&
-      out.alpha == 1.0f && out.red == 64.0f / 255.0f &&
-      out.green == 128.0f / 255.0f && out.blue == 192.0f / 255.0f &&
-      floating_point_from_color(&g_effect, default8.data(), &out) == 0 &&
-      out.alpha == 128.0f / 255.0f && out.red == 10.0f / 255.0f;
-  auto current16 = definition(g_params[1], true);
-  ok = ok && floating_point_from_color(&g_effect, current16.data(), &out) == 0 &&
-      out.red == 4097.0f / 32768.0f && out.green == 8193.0f / 32768.0f &&
-      out.blue == 16385.0f / 32768.0f;
-  auto current_float = definition(g_params[2], true);
-  ok = ok && floating_point_from_color(&g_effect, current_float.data(), &out) == 0 &&
-      out.alpha == 0.75f && out.red == 1.5f && out.green == -0.25f && out.blue == 2.0f;
-
-  const PfColorParamPixelFloat sentinel{9.0f, 8.0f, 7.0f, 6.0f};
-  out = sentinel;
-  auto invalid_index = current8;
-  write<int32_t>(invalid_index, 0, 9999);
-  auto invalid_type = current8;
-  write<int32_t>(invalid_type, kParamType, 6);
-  ok = ok && floating_point_from_color(nullptr, current8.data(), &out) == kPfBadCallbackParam &&
-      floating_point_from_color(&g_effect, nullptr, &out) == kPfBadCallbackParam &&
-      floating_point_from_color(&g_effect, current8.data(), nullptr) == kPfBadCallbackParam &&
-      floating_point_from_color(&g_effect, invalid_index.data(), &out) == kPfInvalidIndex &&
-      floating_point_from_color(&g_effect, invalid_type.data(), &out) ==
-          kPfUnrecognizedParamType && std::memcmp(&out, &sentinel, sizeof(out)) == 0;
-  ok = release_suite("PF ColorParamSuite", 1) == 0 && ok;
-  g_params = saved_params;
-  return ok;
-}
+// verify_pf_color_suite / verify_pf_color_param_suite live in
+// worker_pf_color_selftests.cpp; host state reaches them through the
+// configure() hooks installed below.
 
 
 
@@ -5988,8 +5878,10 @@ int worker_main_impl(int argc, wchar_t **argv) {
               skipped.runtime->map_checkout_request[0] == -1;
         },
         &verify_pixel_data_suites, &verify_legacy_fill_matte_callbacks,
-        &verify_pf_ae_channel_suite, &verify_pf_color_suite,
-        &verify_pf_color_param_suite, &verify_iterate_suites,
+        &verify_pf_ae_channel_suite,
+        &aexcompat::pf_color_selftests::verify_pf_color_suite,
+        &aexcompat::pf_color_selftests::verify_pf_color_param_suite,
+        &verify_iterate_suites,
         &verify_world_transform_composite_rect, &verify_world_transform_affine,
         &verify_world_transform_blend, &verify_world_transform_transfer_mask,
         +[] { return verify_aegp_world_suite3() && verify_aegp_world_mfr_safety(); },
@@ -7540,5 +7432,17 @@ const bool g_parameter_selftests_configured = [] {
       &has_param_changed_obsolete,
       &have_inputs_changed_over_time_span_obsolete,
       &apply_parameter_animation});
+  return true;
+}();
+const bool g_pf_color_selftests_configured = [] {
+  aexcompat::pf_color_selftests::configure(
+      {&acquire_suite, &release_suite, &g_effect, &g_color_param_suite1,
+       &g_params,
+       +[](void* effect_ref, const void* definition,
+           aexcompat::pf_color_selftests::PixelFloat* output) -> int32_t {
+         return floating_point_from_color(
+             effect_ref, definition,
+             reinterpret_cast<PfColorParamPixelFloat*>(output));
+       }});
   return true;
 }();

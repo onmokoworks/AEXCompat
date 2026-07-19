@@ -29,6 +29,7 @@ set(AEXCOMPAT_WORKER_RUNTIME_CORE_SOURCES
     src/worker_parameter_runtime.cpp
     src/worker_parameter_selftests.cpp
     src/worker_parameter_selftest_routing.cpp
+    src/worker_pf_color_selftests.cpp
     src/worker_parameter_execution.cpp
     src/worker_ui_event_execution.cpp
     src/pf_cache_on_load_suite.cpp
