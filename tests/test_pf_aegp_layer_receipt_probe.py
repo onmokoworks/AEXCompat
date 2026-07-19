@@ -1,6 +1,6 @@
 import hashlib
 import json
-import math
+import struct
 import subprocess
 from pathlib import Path
 
@@ -47,32 +47,39 @@ def test_probe_unwinds_all_owned_resources():
     assert "rowbytes < static_cast<A_u_long>(width) * pixel_size" in source
 
 
+def _float32(value):
+    return struct.unpack("<f", struct.pack("<f", value))[0]
+
+
 def _expected_output(source, width, depth):
-    expected = bytearray(len(source))
+    # The worker writes the output world at its native depth (rgba16le /
+    # float32le), so mirror the promotion it applies to the checked-out
+    # upstream world (rgba8_to_argb) and the probe's per-depth transform.
+    expected = bytearray()
     for pixel in range(width * (len(source) // (width * 4))):
         x, y = pixel % width, pixel // width
         red, green, blue, alpha = source[pixel * 4:pixel * 4 + 4]
         if depth == 8:
-            transformed = (green ^ (x & 0xff), blue ^ (y & 0xff),
-                           red ^ ((x + y) & 0xff), alpha)
+            expected += bytes((green ^ (x & 0xff), blue ^ (y & 0xff),
+                               red ^ ((x + y) & 0xff), alpha))
         elif depth == 16:
             to_16 = lambda value: (value * 32768 + 127) // 255
-            to_8 = lambda value: (min(value, 32768) * 255 + 16384) // 32768
-            transformed = (
-                to_8(to_16(green) ^ (x & 0xffff)),
-                to_8(to_16(blue) ^ (y & 0xffff)),
-                to_8(to_16(red) ^ ((x + y) & 0xffff)),
-                alpha,
+            expected += struct.pack(
+                "<4H",
+                to_16(green) ^ (x & 0xffff),
+                to_16(blue) ^ (y & 0xffff),
+                to_16(red) ^ ((x + y) & 0xffff),
+                to_16(alpha),
             )
         else:
-            to_8 = lambda value: math.floor(min(max(value, 0.0), 1.0) * 255.0 + 0.5)
-            transformed = (
-                to_8(green / 255.0 + x / 65536.0),
-                to_8(blue / 255.0 + y / 65536.0),
-                to_8(red / 255.0 + (x + y) / 65536.0),
-                alpha,
+            to_float = lambda value: _float32(value / 255.0)
+            expected += struct.pack(
+                "<4f",
+                _float32(to_float(green) + x / 65536.0),
+                _float32(to_float(blue) + y / 65536.0),
+                _float32(to_float(red) + (x + y) / 65536.0),
+                to_float(alpha),
             )
-        expected[pixel * 4:pixel * 4 + 4] = bytes(transformed)
     return expected
 
 
