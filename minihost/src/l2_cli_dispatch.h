@@ -37,6 +37,9 @@ struct WorkerMode {
   bool image_audio_mode{};
   bool image_mode{};
   bool render_session_mode{};
+  // Session secondary-layer trailer (`session-layers:v1|`) present; when set,
+  // it is the positional argument at index `image_argc - 1` (issue #98 W1-4).
+  bool session_layers{};
   bool layered_image_mode{};
   bool image_click_context{};
   bool image_draw_context{};

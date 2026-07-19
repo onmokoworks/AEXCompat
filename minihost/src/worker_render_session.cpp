@@ -103,6 +103,11 @@ std::size_t output_slot_offset(const SessionGeometry& geometry) {
   return kHeaderBytes + align_slot(input_slot_bytes(geometry));
 }
 
+std::size_t layer_slot_offset(const SessionGeometry& geometry, int32_t index) {
+  return output_slot_offset(geometry) + align_slot(output_slot_bytes(geometry)) +
+         static_cast<std::size_t>(index) * align_slot(input_slot_bytes(geometry));
+}
+
 std::size_t expected_section_bytes(const SessionGeometry& geometry) {
   return output_slot_offset(geometry) + align_slot(output_slot_bytes(geometry)) +
          static_cast<std::size_t>(geometry.layer_slot_count) *
@@ -284,7 +289,8 @@ RenderSessionOutcome run_render_session(
     EffectEntry entry, std::array<std::byte, kInSize>& input,
     std::array<std::byte, kOutSize>& output, const RequestedAssignments* requested,
     int32_t max_width, int32_t max_height, int32_t time_step, int32_t total_time,
-    uint32_t time_scale, int32_t pixel_bytes) {
+    uint32_t time_scale, int32_t pixel_bytes,
+    const std::vector<ExternalLayerInput>* external_layers) {
   using aexcompat::strict_json::JsonValue;
   using aexcompat::strict_json::StrictJsonParser;
   using aexcompat::strict_json::json_exact_keys;
@@ -305,13 +311,38 @@ RenderSessionOutcome run_render_session(
   constexpr int32_t kSessionSequenceSetupFailed = -47;
 
   RenderSessionOutcome outcome;
-  const wrs::SessionGeometry geometry{max_width, max_height, pixel_bytes, 0};
+  const int32_t layer_slot_count =
+      external_layers ? static_cast<int32_t>(external_layers->size()) : 0;
+  const wrs::SessionGeometry geometry{max_width, max_height, pixel_bytes,
+                                      layer_slot_count};
   wrs::SessionChannels channels;
   if (!channels.open_from_environment(geometry) ||
       !channels.static_header_matches(geometry)) {
     outcome.protocol_violation = true;
     return outcome;
   }
+  // Layers are static for the whole session: copy each layer's RGBA out of
+  // its shared slot once, into a worker-private vector the render loop reuses
+  // (the plug-in never sees the mapping). A layer whose declared geometry
+  // overflows its slot is a fail-closed launch error.
+  std::vector<ExternalLayerInput> session_layers;
+  if (external_layers) {
+    session_layers = *external_layers;
+    for (int32_t index = 0; index < layer_slot_count; ++index) {
+      auto& layer = session_layers[index];
+      const std::size_t bytes =
+          static_cast<std::size_t>(layer.width) * layer.height * 4;
+      if (bytes == 0 || bytes > wrs::input_slot_bytes(geometry)) {
+        outcome.protocol_violation = true;
+        return outcome;
+      }
+      layer.rgba.resize(bytes);
+      std::memcpy(layer.rgba.data(),
+                  channels.view() + wrs::layer_slot_offset(geometry, index), bytes);
+    }
+  }
+  const std::vector<ExternalLayerInput>* frame_layers =
+      session_layers.empty() ? nullptr : &session_layers;
   // Static in_data geometry and timing fields for the whole session. The
   // per-frame current_time is seeded when SEQUENCE_SETUP actually runs:
   // setup is deferred to the first rendered frame so effects that
@@ -474,7 +505,7 @@ RenderSessionOutcome run_render_session(
     const int32_t frame_error = render_once(
         entry, input, output, "request", frame_width, frame_height, frame_rowbytes,
         frame_input_hash, frame_output_hash, frame_guards, requested, &frame_rgba,
-        nullptr, max_width, max_height, nullptr, current_time, time_step, total_time,
+        nullptr, max_width, max_height, frame_layers, current_time, time_step, total_time,
         time_scale, pixel_bytes, false, &captured, &output_validation_failed);
     // Aux channel chunks are host-owned and cannot outlive one frame's render
     // lifecycle (end_render's cleanup for the one-shot path); the manifest

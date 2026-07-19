@@ -265,7 +265,8 @@ RenderSessionOutcome run_render_session(
     EffectEntry entry, std::array<std::byte, kInSize>& input,
     std::array<std::byte, kOutSize>& output, const RequestedAssignments* requested,
     int32_t max_width, int32_t max_height, int32_t time_step, int32_t total_time,
-    uint32_t time_scale, int32_t pixel_bytes);
+    uint32_t time_scale, int32_t pixel_bytes,
+    const std::vector<ExternalLayerInput>* external_layers);
 
 template <typename T, std::size_t N>
 T read(const std::array<std::byte, N>& bytes, std::size_t offset) {
@@ -485,7 +486,8 @@ ClassicFinalDispatchResult run_classic_final_dispatch(const FinalDispatchRequest
     const auto session_outcome = run_render_session(
         entry, input, output, &invocation.requested_parameters, invocation.external_width,
         invocation.external_height, invocation.external_time_step, invocation.external_total_time,
-        invocation.external_time_scale, invocation.external_pixel_bytes);
+        invocation.external_time_scale, invocation.external_pixel_bytes,
+        invocation.external_layers.empty() ? nullptr : &invocation.external_layers);
     persistent_sequence_setup_error = session_outcome.setup_error;
     persistent_sequence_setdown_error = session_outcome.setdown_error;
     render_width = session_outcome.width;

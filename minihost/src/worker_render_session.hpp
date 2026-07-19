@@ -44,6 +44,10 @@ std::size_t input_slot_bytes(const SessionGeometry& geometry);
 std::size_t output_slot_bytes(const SessionGeometry& geometry);
 std::size_t input_slot_offset();
 std::size_t output_slot_offset(const SessionGeometry& geometry);
+// Layer slot `index` (0-based) follows the output slot; each is an RGBA8
+// input-shaped slot (issue #98 W1-4). The caller bounds `index` by
+// `layer_slot_count`.
+std::size_t layer_slot_offset(const SessionGeometry& geometry, int32_t index);
 std::size_t expected_section_bytes(const SessionGeometry& geometry);
 
 // True when any of the session transport environment variables is set. Used

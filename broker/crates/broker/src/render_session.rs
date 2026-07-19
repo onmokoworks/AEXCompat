@@ -290,6 +290,7 @@ struct SessionGeometry {
     width: u32,
     height: u32,
     pixel_format: RenderPixelFormat,
+    layer_slot_count: u32,
 }
 
 impl SessionGeometry {
@@ -302,8 +303,15 @@ impl SessionGeometry {
     fn output_slot_offset(&self) -> usize {
         HEADER_BYTES + align_slot(self.input_slot_bytes())
     }
+    fn layer_slot_offset(&self, index: u32) -> usize {
+        self.output_slot_offset()
+            + align_slot(self.output_slot_bytes())
+            + index as usize * align_slot(self.input_slot_bytes())
+    }
     fn section_bytes(&self) -> usize {
-        self.output_slot_offset() + align_slot(self.output_slot_bytes())
+        self.output_slot_offset()
+            + align_slot(self.output_slot_bytes())
+            + self.layer_slot_count as usize * align_slot(self.input_slot_bytes())
     }
 }
 
@@ -336,6 +344,10 @@ pub struct SessionOpenRequest<'a> {
     /// Static render-environment trailer (`render:v1|`), already encoded by
     /// `encode_render_environment`.
     pub render_environment_trailer: Option<String>,
+    /// Secondary layers, static for the whole session (issue #98 W1-4). The
+    /// pixels ride the shared layer slots; the slot/geometry metadata rides
+    /// the `session-layers:v1|` launch trailer.
+    pub layers: Vec<SessionLayer>,
     pub dependencies: Vec<ApprovedImageArtifact>,
     pub width: u32,
     pub height: u32,
@@ -346,6 +358,17 @@ pub struct SessionOpenRequest<'a> {
     /// Per-frame watchdog deadline; the job is terminated when a frame's
     /// response does not arrive in time (protocol §7).
     pub frame_deadline: Duration,
+}
+
+/// A secondary layer whose RGBA8 pixels occupy one shared layer slot for the
+/// whole session. Width/height are the layer's own geometry, bounded by the
+/// input slot.
+#[derive(Clone)]
+pub struct SessionLayer {
+    pub slot: u32,
+    pub width: u32,
+    pub height: u32,
+    pub rgba: Vec<u8>,
 }
 
 #[derive(Debug)]
@@ -481,11 +504,27 @@ impl RenderSession {
             MAX_PIXELS,
             MAX_RGBA_TRANSPORT_BYTES,
         )?;
+        if request.layers.len() > 64 {
+            return Err(invalid("render session layer count exceeds 64"));
+        }
         let geometry = SessionGeometry {
             width: request.width,
             height: request.height,
             pixel_format: request.pixel_format,
+            layer_slot_count: request.layers.len() as u32,
         };
+        // Each layer's RGBA must fit its slot (input-slot shaped) and slots
+        // must be unique, before any transport work.
+        let mut seen_layer_slots = std::collections::HashSet::new();
+        for layer in &request.layers {
+            if !seen_layer_slots.insert(layer.slot) {
+                return Err(invalid("render session layer slots must be unique"));
+            }
+            let expected = layer.width as usize * layer.height as usize * 4;
+            if layer.rgba.len() != expected || expected > geometry.input_slot_bytes() {
+                return Err(invalid("render session layer pixels do not fit the slot"));
+            }
+        }
         if geometry.section_bytes() as u64 > SECTION_HARD_CAP_BYTES {
             return Err(invalid("render session section exceeds the hard cap"));
         }
@@ -547,11 +586,23 @@ impl RenderSession {
         transport.write_header_u32(DEPTH_CODE_OFFSET, depth_code(request.pixel_format));
         transport.write_header_u32(MAX_WIDTH_OFFSET, request.width);
         transport.write_header_u32(MAX_HEIGHT_OFFSET, request.height);
-        transport.write_header_u32(LAYER_SLOT_COUNT_OFFSET, 0);
+        transport.write_header_u32(LAYER_SLOT_COUNT_OFFSET, geometry.layer_slot_count);
         transport.write_header_u32(INPUT_GENERATION_OFFSET, 0);
         transport.write_header_u32(OUTPUT_GENERATION_OFFSET, 0);
         transport.write_header_u32(FRAME_WIDTH_OFFSET, request.width);
         transport.write_header_u32(FRAME_HEIGHT_OFFSET, request.height);
+        // Layers are static: copy each into its slot once; the worker reads
+        // them at open and reuses them for every frame.
+        for (index, layer) in request.layers.iter().enumerate() {
+            let offset = geometry.layer_slot_offset(index as u32);
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    layer.rgba.as_ptr(),
+                    transport.view.add(offset),
+                    layer.rgba.len(),
+                );
+            }
+        }
 
         let plugin = ApprovedImageArtifact {
             path: request.plugin_path.to_path_buf(),
@@ -568,6 +619,19 @@ impl RenderSession {
             request.total_time.to_string(),
             request.time_scale.to_string(),
         ];
+        // The secondary-layer trailer sits ahead of the context trailers in
+        // the positional tail (issue #98 W1-4). Its pixels already reached the
+        // shared slots above; only the slot/geometry metadata travels here.
+        if !request.layers.is_empty() {
+            let mut encoded = String::from("session-layers:v1|");
+            for (index, layer) in request.layers.iter().enumerate() {
+                if index != 0 {
+                    encoded.push(';');
+                }
+                encoded.push_str(&format!("{},{},{}", layer.slot, layer.width, layer.height));
+            }
+            args_after_plugin.push(encoded);
+        }
         // Static context trailers ride the positional tail in the one-shot
         // order (mask, spatial, render), ahead of the auxiliary option pairs
         // the worker peels first.
@@ -1088,7 +1152,8 @@ impl RenderSession {
                 != depth_code(self.geometry.pixel_format)
             || self.transport.read_header_u32(MAX_WIDTH_OFFSET) != self.geometry.width
             || self.transport.read_header_u32(MAX_HEIGHT_OFFSET) != self.geometry.height
-            || self.transport.read_header_u32(LAYER_SLOT_COUNT_OFFSET) != 0
+            || self.transport.read_header_u32(LAYER_SLOT_COUNT_OFFSET)
+                != self.geometry.layer_slot_count
         {
             return Err("static session header was mutated".into());
         }
@@ -1330,6 +1395,7 @@ pub fn run_video_batch(
         mask_trailer: None,
         spatial_trailer: None,
         render_environment_trailer: None,
+        layers: Vec::new(),
         dependencies: Vec::new(),
         width,
         height,
@@ -1452,6 +1518,7 @@ mod tests {
             width: 33,
             height: 17,
             pixel_format: RenderPixelFormat::Argb16,
+            layer_slot_count: 0,
         };
         assert_eq!(geometry.input_slot_bytes(), 33 * 17 * 4); // 2244
         assert_eq!(geometry.output_slot_bytes(), 33 * 17 * 8); // 4488
@@ -1551,6 +1618,7 @@ mod tests {
                 mask_trailer: None,
                 spatial_trailer: None,
                 render_environment_trailer: None,
+                layers: Vec::new(),
                 dependencies: Vec::new(),
                 width: 8,
                 height: 4,
