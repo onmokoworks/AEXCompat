@@ -12,6 +12,7 @@ HANDLE_RUNTIME_SOURCE = ROOT / "minihost" / "src" / "worker_handle_runtime.cpp"
 HANDLE_RUNTIME_HEADER = ROOT / "minihost" / "src" / "worker_handle_runtime.hpp"
 PF_SUITES_ABI = ROOT / "minihost" / "src" / "worker_l2_suite_abi.hpp"
 PF_SUITES_SOURCE = ROOT / "minihost" / "src" / "worker_pf_suites.cpp"
+PF_SAMPLING_SOURCE = ROOT / "minihost" / "src" / "worker_pf_sampling_runtime.cpp"
 RENDER_HEADER = ROOT / "minihost" / "src" / "render_subsystem.h"
 RENDER_SOURCE = ROOT / "minihost" / "src" / "render_subsystem.cpp"
 REPORT_HEADER = ROOT / "minihost" / "src" / "worker_report.hpp"
@@ -43,6 +44,7 @@ def l2_family_source():
     return "\n".join(path.read_text(encoding="utf-8") for path in (
         SOURCE, MODE_EXECUTION_HEADER, MODE_EXECUTION_SOURCE,
         CLI_DISPATCH_SOURCE, PF_SUITES_ABI, PF_SUITES_INTERNAL, PF_SUITES_SOURCE,
+        PF_SAMPLING_SOURCE,
         AEGP_SCENE_SOURCE, AEGP_SCENE_HEADER, AEGP_SCENE_RUNTIME_HEADER,
         AEGP_SCENE_RUNTIME_SOURCE, AEGP_INIT_RUNTIME_HEADER, AEGP_INIT_RUNTIME_SOURCE,
         MASK_RUNTIME_HEADER, MASK_RUNTIME_SOURCE, MASK_RUNTIME_CALLBACKS,
@@ -55,6 +57,18 @@ def l2_family_source():
 
 
 class MinihostL2SourceTests(unittest.TestCase):
+    def test_pf_sampling_runtime_owns_callbacks_state_and_selftest(self):
+        suites = PF_SUITES_SOURCE.read_text(encoding="utf-8")
+        sampling = PF_SAMPLING_SOURCE.read_text(encoding="utf-8")
+        cmake = MINIHOST_CMAKE.read_text(encoding="utf-8")
+        self.assertIn("src/worker_pf_sampling_runtime.cpp", cmake)
+        for marker in ("subpixel_sample_typed", "nearest_sample_typed",
+                       "area_sample_typed", "g_legacy_sampling_sessions",
+                       "verify_pf_batch_sampling_suite"):
+            self.assertIn(marker, sampling)
+            self.assertNotIn(marker, suites)
+        self.assertIn("configure_pf_sampling_runtime", suites)
+
     def test_aegp_render_selftests_are_a_true_translation_unit(self):
         worker = SOURCE.read_text(encoding="utf-8")
         header = AEGP_RENDER_SELFTEST_HEADER.read_text(encoding="utf-8")
