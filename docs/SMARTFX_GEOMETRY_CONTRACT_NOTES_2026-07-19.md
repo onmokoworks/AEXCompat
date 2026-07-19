@@ -243,3 +243,16 @@ world は promote されないのに、view が抑止されて交差契約が失
 2. dispatch 条件に `result.rects_valid` を追加。invalid geometry は selector
    を dispatch せず `render_error=-6` で明示的に失敗する (空 result の合法
    スキップは別分岐で維持)。
+
+## 2026-07-19 訂正: dispatch 判定の単一述語化 (PR #86 Codex P2 round 2)
+
+観察 (Codex review findings): (1) `gpu_render_dispatched` が empty しか除外
+しておらず、rects_valid=false の skip 時にも GPU transport を prepare/finish
+して `gpu_render_dispatched=true` を報告していた。(2) report の
+`smart_render_selector_dispatched` が NOP 判定のみで駆動され、empty skip や
+invalid-geometry 拒否でも true になっていた。
+
+訂正: `will_dispatch = pre_error==0 && rects_valid && !empty_result_rect` の
+単一述語で selector 呼び出し・GPU transport・報告を駆動する。SmartResult に
+`selector_dispatched` (実際に entry を呼んだ時のみ true) を追加し、report は
+それを出す。既存 frozen evidence への影響は NOP case の false のみで不変。

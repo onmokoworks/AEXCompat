@@ -19987,6 +19987,10 @@ struct SmartResult {
   int32_t output_width{};
   int32_t output_height{};
   int32_t output_rowbytes{};
+  // True only when the Smart Render selector was actually invoked; a NOP
+  // passthrough, an empty-result skip, and an invalid-geometry refusal all
+  // leave it false so the report reflects the real dispatch decision.
+  bool selector_dispatched{};
   // PF_RenderOutputFlag_RETURNS_EXTRA_PIXELS (pre_output flags bit 0x1): the
   // SDK admits result_rect > output_request.rect only when this is set.
   bool returns_extra_pixels{};
@@ -20482,7 +20486,12 @@ SmartResult smart_render_once(EffectEntry entry, std::array<std::byte, kInSize>&
       result.pre_error = 4;
   }
   const int32_t render_selector = gpu_negotiation && result.gpu_render_possible ? kSmartRenderGpu : kSmartRender;
-  result.gpu_render_dispatched = render_selector == kSmartRenderGpu && !result.empty_result_rect;
+  // One predicate drives the selector call, the GPU transport, and the
+  // dispatch reporting, so a skipped render (empty result or rejected
+  // geometry) never prepares device transport or claims a GPU dispatch.
+  const bool will_dispatch = result.pre_error == 0 && result.rects_valid &&
+      !result.empty_result_rect;
+  result.gpu_render_dispatched = render_selector == kSmartRenderGpu && will_dispatch;
   g_smart_gpu_render_dispatched = result.gpu_render_dispatched;
   CudaRenderTransport cuda_transport;
   const bool cuda_transport_ready = !result.gpu_render_dispatched ||
@@ -20494,8 +20503,9 @@ SmartResult smart_render_once(EffectEntry entry, std::array<std::byte, kInSize>&
   if (result.empty_result_rect && result.pre_error == 0) {
     // A legally empty result_rect renders nothing; the selector is skipped.
     result.render_error = 0;
-  } else if (result.pre_error == 0 && cuda_transport_ready && result.rects_valid) {
+  } else if (will_dispatch && cuda_transport_ready) {
     if (gpu_negotiation) capture_module_audit();
+    result.selector_dispatched = true;
     result.selector_error = entry(render_selector, input.data(), command_output.data(),
                                   params.data(), nullptr, smart_extra.data());
     result.render_error = result.selector_error;
@@ -24970,7 +24980,7 @@ int wmain(int argc, wchar_t **argv) {
             << ",\"rejected_temporal_param_checkouts\":" << g_rejected_temporal_param_checkouts
             << ",\"shutter_dependency_advertised\":" << (g_shutter_dependency_advertised ? "true" : "false")
             << ",\"smart_pre_render_dispatched\":" << (nop_render_advertised ? "false" : "true")
-            << ",\"smart_render_selector_dispatched\":" << (nop_render_advertised ? "false" : "true")
+            << ",\"smart_render_selector_dispatched\":" << (smart.selector_dispatched ? "true" : "false")
             << ",\"comp_bg_color_success_count\":"
             << g_comp_bg_color_successes.load(std::memory_order_relaxed)
             << ",\"comp_bg_color_rejection_count\":"
