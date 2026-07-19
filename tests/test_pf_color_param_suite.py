@@ -6,6 +6,7 @@ import source_owners
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = source_owners.L2_MAIN
+PARAM_SUITES = ROOT / "minihost" / "src" / "worker_pf_param_suites.cpp"
 SELFTEST_SOURCE = ROOT / "minihost" / "src" / "worker_pf_color_selftests.cpp"
 
 
@@ -33,7 +34,7 @@ def test_color_param_suite_is_exact_typed_frozen_v1_abi():
 
 
 def test_color_param_contract_is_stateful_depth_aware_and_fail_closed():
-    text = SOURCE.read_text(encoding="utf-8")
+    text = SOURCE.read_text(encoding="utf-8") + PARAM_SUITES.read_text(encoding="utf-8")
     # The production callback contract stays in l2_main.
     for marker in (
         "current_float_color",
