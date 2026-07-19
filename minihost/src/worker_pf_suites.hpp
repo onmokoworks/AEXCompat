@@ -525,8 +525,6 @@ UtilitySuite3 g_utility_suite3{{}, &register_with_aegp, &get_main_hwnd, {}};
 PfInterfaceSuite g_pf_interface_suite{&get_effect_layer, &get_new_effect_for_effect,
     &convert_effect_to_comp_time, &get_effect_camera,
     &get_effect_camera_matrix};
-std::array<void*, 17> g_aegp_effect_suite3{};
-std::array<void*, 22> g_aegp_stream_suite2{};
 std::array<void*, 14> g_aegp_dynamic_stream_suite2{};
 // Stream Suite v2 has a private payload type shared with the AEGP scene
 // runtime. Keep the declaration in its owning header so this ABI table never

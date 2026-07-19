@@ -8,12 +8,15 @@ SOURCE = ROOT / "minihost" / "src" / "l2_main.cpp"
 CMAKE_SOURCE = ROOT / "minihost" / "CMakeLists.txt"
 SCENE_SELFTEST_SOURCE = ROOT / "minihost" / "src" / "worker_aegp_scene_selftests.cpp"
 SCENE_SELFTEST_IMPL = ROOT / "minihost" / "src" / "worker_aegp_scene_selftests_impl.inc"
+SCENE_HEADER = ROOT / "minihost" / "src" / "worker_aegp_scene.hpp"
+SCENE_RUNTIME_HEADER = ROOT / "minihost" / "src" / "worker_aegp_scene_runtime.hpp"
 PF_SUITE_SOURCE = ROOT / "minihost" / "src" / "worker_pf_suites.hpp"
 
 
 def scene_source() -> str:
     return "\n".join(path.read_text(encoding="utf-8") for path in
-                     (SOURCE, SCENE_SELFTEST_SOURCE, SCENE_SELFTEST_IMPL, PF_SUITE_SOURCE))
+                     (SOURCE, SCENE_HEADER, SCENE_RUNTIME_HEADER,
+                      SCENE_SELFTEST_SOURCE, SCENE_SELFTEST_IMPL, PF_SUITE_SOURCE))
 BUILD = ROOT / "target" / "minihost-build"
 
 
@@ -64,7 +67,7 @@ def test_camera_lookup_is_fail_closed_and_preserves_output_on_error():
     assert "if (index >= g_aegp_layers.size()) return 4;" in source
     assert "if (layer_active_at_time(index, *comp_time)) result = &g_aegp_layers[index];" in source
     body = source[source.index("int32_t __cdecl get_effect_camera(\n    void* effect, const AegpTime* comp_time, void** camera_layer) {") :]
-    body = body[: body.index("struct AegpSelectionCollection")]
+    body = body[: body.index("int32_t __cdecl get_effect_camera_matrix")]
     assert body.index("if (effect !=") < body.index("*camera_layer = result")
     assert "*camera_layer = nullptr" not in body
     assert "get_effect_camera(&g_effect, &before_in, &camera) == 0 && camera == nullptr" in source

@@ -11,7 +11,6 @@ ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "minihost" / "src" / "l2_main.cpp"
 SCENE_SOURCE = ROOT / "minihost" / "src" / "worker_aegp_scene.cpp"
 SCENE_SELFTEST_SOURCE = ROOT / "minihost" / "src" / "worker_aegp_scene_selftests.cpp"
-SCENE_IMPL = ROOT / "minihost" / "src" / "worker_aegp_scene_impl.inc"
 PF_SUITE_SOURCE = ROOT / "minihost" / "src" / "worker_pf_suites.hpp"
 BUILD = ROOT / "target" / "minihost-build"
 SDK_ROOT = os.environ.get("AFTER_EFFECTS_SDK_ROOT")
@@ -116,7 +115,7 @@ int main() { return 0; }
 
 def test_l2_source_exposes_effect_stack_contract() -> None:
     source = "\n".join(path.read_text(encoding="utf-8") for path in
-                       (SOURCE, SCENE_SOURCE, SCENE_IMPL, SCENE_SELFTEST_SOURCE,
+                       (SOURCE, SCENE_SOURCE, SCENE_SELFTEST_SOURCE,
                         PF_SUITE_SOURCE))
     for marker in (
         "int32_t __cdecl aegp_set_effect_flags(",
@@ -132,7 +131,9 @@ def test_l2_source_exposes_effect_stack_contract() -> None:
         "g_aegp_effect_suite4[10] = reinterpret_cast<void*>(&aegp_delete_layer_effect)",
         "g_aegp_effect_suite4[16] = reinterpret_cast<void*>(&aegp_duplicate_effect)",
         "std::array<void*, 22> g_aegp_stream_suite2{}",
-        "g_aegp_stream_suite2[15] = reinterpret_cast<void*>(&aegp_set_stream_value_v2)",
+        "scene_factory.legacy_stream_callbacks = {{",
+        "reinterpret_cast<void*>(&aegp_set_stream_value_v2)",
+        "g_aegp_stream_suite2[15] = factory.legacy_stream_callbacks[6]",
         'L"--self-test-aegp-effect-stack"',
     ):
         assert marker in source

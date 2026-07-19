@@ -13,7 +13,6 @@ SCENE_SOURCE = ROOT / "minihost" / "src" / "worker_aegp_scene.cpp"
 SCENE_RUNTIME_HEADER = ROOT / "minihost" / "src" / "worker_aegp_scene_runtime.hpp"
 SCENE_RUNTIME_SOURCE = ROOT / "minihost" / "src" / "worker_aegp_scene_runtime.cpp"
 SCENE_SELFTEST_SOURCE = ROOT / "minihost" / "src" / "worker_aegp_scene_selftests.cpp"
-SCENE_IMPL = ROOT / "minihost" / "src" / "worker_aegp_scene_impl.inc"
 PF_SUITE_SOURCE = ROOT / "minihost" / "src" / "worker_pf_suites.hpp"
 BUILD = ROOT / "target" / "minihost-build"
 SDK_ROOT = os.environ.get("AFTER_EFFECTS_SDK_ROOT")
@@ -124,7 +123,7 @@ int main() { return 0; }
 def test_l2_source_exposes_projector_levels_contract() -> None:
     source = "\n".join(path.read_text(encoding="utf-8") for path in
                        (SOURCE, SCENE_SOURCE, SCENE_RUNTIME_HEADER,
-                        SCENE_RUNTIME_SOURCE, SCENE_IMPL,
+                        SCENE_RUNTIME_SOURCE,
                         SCENE_SELFTEST_SOURCE, PF_SUITE_SOURCE))
     for marker in (
         '"ADBE Easy Levels"',
@@ -133,13 +132,16 @@ def test_l2_source_exposes_projector_levels_contract() -> None:
         '"Input White"',
         "std::array<void*, 22> g_aegp_stream_suite2{}",
         "g_aegp_stream_suite2[4] = reinterpret_cast<void*>(&aegp_get_effect_num_param_streams_v2)",
-        "g_aegp_stream_suite2[5] = reinterpret_cast<void*>(&aegp_get_new_effect_stream_by_index_v2)",
-        "g_aegp_stream_suite2[7] = reinterpret_cast<void*>(&aegp_dispose_stream_v2)",
-        "g_aegp_stream_suite2[8] = reinterpret_cast<void*>(&aegp_get_stream_name_v2)",
-        "g_aegp_stream_suite2[12] = reinterpret_cast<void*>(&aegp_get_stream_type_v2)",
-        "g_aegp_stream_suite2[13] = reinterpret_cast<void*>(&aegp_get_new_stream_value_v2)",
-        "g_aegp_stream_suite2[14] = reinterpret_cast<void*>(&aegp_dispose_stream_value_v2)",
-        "g_aegp_stream_suite2[15] = reinterpret_cast<void*>(&aegp_set_stream_value_v2)",
+        "scene_factory.legacy_stream_callbacks = {{",
+        "reinterpret_cast<void*>(&aegp_get_new_effect_stream_by_index_v2)",
+        "reinterpret_cast<void*>(&aegp_dispose_stream_v2)",
+        "reinterpret_cast<void*>(&aegp_get_stream_name_v2)",
+        "reinterpret_cast<void*>(&aegp_get_stream_type_v2)",
+        "reinterpret_cast<void*>(&aegp_get_new_stream_value_v2)",
+        "reinterpret_cast<void*>(&aegp_dispose_stream_value_v2)",
+        "reinterpret_cast<void*>(&aegp_set_stream_value_v2)",
+        "g_aegp_stream_suite2[5] = factory.legacy_stream_callbacks[0]",
+        "g_aegp_stream_suite2[15] = factory.legacy_stream_callbacks[6]",
         'L"--self-test-aegp-projector-levels"',
     ):
         assert marker in source

@@ -4,6 +4,8 @@
 #include <cstddef>
 #include <cstdint>
 
+#include "worker_suite_abi.hpp"
+
 namespace aexcompat::scene_runtime {
 
 struct AegpSceneObject { uint32_t tag{}; };
@@ -80,6 +82,11 @@ struct AegpLegacyEffectStream {
   int32_t owner_plugin_id{};
 };
 
+struct AegpSelectionCollection {
+  uint32_t tag{0x434f4c4c};
+  bool live{};
+};
+
 // All synthetic-scene identity and lease state has one owning translation
 // unit. Callbacks obtain it through this accessor; no SDK-shaped handle is
 // ever reconstituted from a second scene copy.
@@ -98,6 +105,56 @@ struct SceneRuntimeState {
   std::array<AegpLegacyEffectStream, kAegpLegacyEffectStreamCapacity>
       legacy_effect_streams{};
   uint32_t legacy_effect_stream_generation{};
+
+  bool update_menu_mode{};
+  bool command_roundtrip_mode{};
+  bool active_idle_roundtrip_mode{};
+  bool comp_idle_roundtrip_mode{};
+  uint32_t item_current_time_calls{};
+  uint32_t item_set_current_time_calls{};
+  int32_t item_last_set_time_value{-1};
+  uint32_t item_last_set_time_scale{};
+  uint32_t item_name_calls{};
+  uint32_t item_duration_calls{};
+  uint32_t item_type_calls{};
+  uint32_t comp_from_item_calls{};
+  uint32_t comp_framerate_calls{};
+  uint32_t layer_count_calls{};
+  uint32_t layer_by_index_calls{};
+  uint32_t layer_source_item_calls{};
+  uint32_t layer_id_calls{};
+  uint32_t layer_attribute_calls{};
+  uint32_t layer_trim_set_calls{};
+  uint32_t layer_flag_set_calls{};
+  std::array<uint32_t, 3> layer_flags{{0x00000005u, 0x00000005u, 0x00000005u}};
+  uint32_t layer_name_calls{};
+  uint32_t effect_count_calls{};
+  uint32_t effect_acquires{};
+  uint32_t effect_disposes{};
+  uint32_t effect_metadata_calls{};
+  uint32_t stream_acquires{};
+  uint32_t stream_disposes{};
+  uint32_t stream_value_acquires{};
+  uint32_t stream_value_disposes{};
+  uint32_t stream_sampled_selector_mask{};
+  uint32_t effect_param_name_calls{};
+  uint32_t effect_param_value_calls{};
+  uint32_t keyframe_count_calls{};
+  uint32_t keyframed_stream_reports{};
+  uint32_t keyframe_time_calls{};
+  uint32_t keyframe_value_calls{};
+  uint32_t keyframe_interpolation_calls{};
+  uint32_t collection_creates{};
+  uint32_t collection_disposes{};
+  uint32_t collection_item_reads{};
+  int32_t first_observed_frame{-1};
+  int32_t last_observed_frame{-1};
+  std::array<aexcompat::suite_abi::AegpTime, 3> layer_in_points{{
+      {0, 30}, {0, 30}, {0, 30}}};
+  std::array<aexcompat::suite_abi::AegpTime, 3> layer_durations{{
+      {300, 30}, {300, 30}, {300, 30}}};
+  int32_t active_camera_layer_index{-1};
+  AegpSelectionCollection selection{};
 
   SceneRuntimeState() noexcept;
 };

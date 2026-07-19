@@ -9,7 +9,8 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 SOURCES = (
     ROOT / "minihost" / "src" / "l2_main.cpp",
-    ROOT / "minihost" / "src" / "worker_aegp_scene_impl.inc",
+    ROOT / "minihost" / "src" / "worker_aegp_scene.cpp",
+    ROOT / "minihost" / "src" / "worker_aegp_scene.hpp",
     ROOT / "minihost" / "src" / "worker_pf_suites.cpp",
     ROOT / "minihost" / "src" / "worker_pf_suites.hpp",
 )
@@ -80,8 +81,9 @@ def test_minihost_publishes_typed_fail_closed_legacy_effect_suites() -> None:
     text = source_text()
     for marker in (
         "std::array<void*, 41> g_aegp_comp_suite10",
-        "g_aegp_comp_suite10[4] = reinterpret_cast<void*>(&aegp_get_comp_bg_color)",
-        'std::strcmp(name, "AEGP Comp Suite") == 0 && version == 21',
+        "scene_factory.comp_bg_color = reinterpret_cast<void*>(&aegp_get_comp_bg_color)",
+        "g_aegp_comp_suite10[4] = factory.comp_bg_color",
+        'named("AEGP Comp Suite") && version == 21',
         "offsetof(PfInterfaceSuite, convert_effect_to_comp_time) == 2 * sizeof(void*)",
         "&convert_effect_to_comp_time",
         "std::array<void*, 1> g_pf_helper_suite1",

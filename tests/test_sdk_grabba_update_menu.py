@@ -6,7 +6,8 @@ import subprocess
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 SOURCES = (
     ROOT / "minihost" / "src" / "l2_main.cpp",
-    ROOT / "minihost" / "src" / "worker_aegp_scene_impl.inc",
+    ROOT / "minihost" / "src" / "worker_aegp_scene.cpp",
+    ROOT / "minihost" / "src" / "worker_aegp_scene.hpp",
 )
 
 
@@ -70,13 +71,15 @@ def test_official_sdk_grabba_update_menu_dispatches_successfully():
 
 def test_legacy_item_suite6_is_available_to_grabba_command_and_idle_roundtrips():
     source = source_text()
+    branch_start = source.index("version == 10")
+    branch = source[branch_start : branch_start + 900]
     for mode in (
-        "g_aegp_update_menu_mode",
-        "g_aegp_command_roundtrip_mode",
-        "g_aegp_active_idle_roundtrip_mode",
-        "g_aegp_comp_idle_roundtrip_mode",
+        "state().update_menu_mode",
+        "state().command_roundtrip_mode",
+        "state().active_idle_roundtrip_mode",
+        "state().comp_idle_roundtrip_mode",
     ):
-        assert mode in source[source.index("version == 10") - 300 : source.index("version == 10")]
+        assert mode in branch
 
 
 def _dispatch(command: str) -> dict:

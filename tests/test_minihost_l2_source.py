@@ -19,7 +19,7 @@ REPORT_SOURCE = ROOT / "minihost" / "src" / "worker_report.cpp"
 RUNTIME_ADMISSION_SOURCE = ROOT / "minihost" / "src" / "worker_runtime_admission.cpp"
 PF_SUITES_INTERNAL = ROOT / "minihost" / "src" / "worker_pf_suites_internal.hpp"
 AEGP_SCENE_SOURCE = ROOT / "minihost" / "src" / "worker_aegp_scene.cpp"
-AEGP_SCENE_IMPL = ROOT / "minihost" / "src" / "worker_aegp_scene_impl.inc"
+AEGP_SCENE_HEADER = ROOT / "minihost" / "src" / "worker_aegp_scene.hpp"
 AEGP_SCENE_RUNTIME_HEADER = ROOT / "minihost" / "src" / "worker_aegp_scene_runtime.hpp"
 AEGP_SCENE_RUNTIME_SOURCE = ROOT / "minihost" / "src" / "worker_aegp_scene_runtime.cpp"
 MINIHOST_CMAKE = ROOT / "minihost" / "CMakeLists.txt"
@@ -29,8 +29,9 @@ def l2_family_source():
     return "\n".join(path.read_text(encoding="utf-8") for path in (
         SOURCE, MODE_EXECUTION_HEADER, MODE_EXECUTION_SOURCE,
         CLI_DISPATCH_SOURCE, PF_SUITES_HEADER, PF_SUITES_SOURCE,
-        AEGP_SCENE_SOURCE, AEGP_SCENE_RUNTIME_HEADER, AEGP_SCENE_RUNTIME_SOURCE,
-        AEGP_SCENE_IMPL, REPORT_HEADER, REPORT_SOURCE, RUNTIME_ADMISSION_SOURCE
+        AEGP_SCENE_SOURCE, AEGP_SCENE_HEADER, AEGP_SCENE_RUNTIME_HEADER,
+        AEGP_SCENE_RUNTIME_SOURCE, REPORT_HEADER, REPORT_SOURCE,
+        RUNTIME_ADMISSION_SOURCE
     ))
 
 
@@ -38,7 +39,7 @@ class MinihostL2SourceTests(unittest.TestCase):
     def test_aegp_scene_runtime_owns_shared_types_catalog_and_state(self):
         header = AEGP_SCENE_RUNTIME_HEADER.read_text(encoding="utf-8")
         implementation = AEGP_SCENE_RUNTIME_SOURCE.read_text(encoding="utf-8")
-        fragment = AEGP_SCENE_IMPL.read_text(encoding="utf-8")
+        scene = AEGP_SCENE_SOURCE.read_text(encoding="utf-8")
 
         self.assertIn("namespace aexcompat::scene_runtime", header)
         self.assertIn("struct SceneRuntimeState", header)
@@ -46,9 +47,35 @@ class MinihostL2SourceTests(unittest.TestCase):
         self.assertIn("SceneRuntimeState& scene_runtime_state() noexcept", header)
         self.assertIn("const std::array<AegpInstalledEffectRecord, 3> kAegpInstalledEffects", implementation)
         self.assertIn("SceneRuntimeState::SceneRuntimeState() noexcept", implementation)
-        self.assertNotIn("struct AegpStreamValue", fragment)
-        self.assertNotIn("struct AegpEffectInstance", fragment)
-        self.assertIn("scene_runtime_state().effect_instances", fragment)
+        self.assertNotIn("struct AegpStreamValue", scene)
+        self.assertNotIn("struct AegpEffectInstance", scene)
+        self.assertIn("scene_runtime_state().effect_instances", scene)
+
+    def test_aegp_scene_is_a_compiled_translation_unit_not_a_textual_shortcut(self):
+        cmake = MINIHOST_CMAKE.read_text(encoding="utf-8")
+        worker = SOURCE.read_text(encoding="utf-8")
+        scene = AEGP_SCENE_SOURCE.read_text(encoding="utf-8")
+
+        self.assertFalse((ROOT / "minihost" / "src" /
+                          "worker_aegp_scene_impl.inc").exists())
+        self.assertEqual(cmake.count("src/l2_main.cpp"), 1)
+        self.assertEqual(cmake.count("src/worker_aegp_scene.cpp"), 1)
+        self.assertNotIn('#include "worker_aegp_scene_impl.inc"', worker)
+        self.assertNotIn('#include "l2_main.cpp"', scene)
+        self.assertIn("SceneSuiteAcquireResult scene_acquire_suite(", scene)
+        self.assertNotIn("int32_t __cdecl aegp_get_active_item(", worker)
+        # Stream and Keyframe also have mask-model suites that intentionally
+        # remain in l2_main.cpp. The synthetic scene-owned suite families must
+        # be handled exclusively by scene_acquire_suite().
+        for family in ("Item", "Comp", "Layer", "Collection", "Effect"):
+            self.assertNotIn(
+                f'std::strcmp(name, "AEGP {family} Suite")',
+                worker[worker.index("int32_t __cdecl acquire_suite("):
+                       worker.index("int32_t __cdecl release_suite(")],
+            )
+        for source in (ROOT / "minihost" / "src").glob("*.cpp"):
+            self.assertNotIn('#include "l2_main.cpp"',
+                             source.read_text(encoding="utf-8"))
 
     def test_render_dispatch_is_a_real_translation_unit_with_explicit_host_hooks(self):
         header = RENDER_HEADER.read_text(encoding="utf-8")
@@ -244,6 +271,8 @@ class MinihostL2SourceTests(unittest.TestCase):
 
     def test_aegp_keyframe_suite5_wires_all_mutations(self):
         text = l2_family_source()
+        compact = " ".join(text.split())
+        scene_owned = {0, 1, 4, 14}
         for slot, function in (
             (0, "aegp_get_stream_num_keyframes"), (1, "aegp_get_keyframe_time"),
             (2, "insert_keyframe"), (3, "delete_keyframe"),
@@ -261,10 +290,14 @@ class MinihostL2SourceTests(unittest.TestCase):
             (19, "end_add_keyframes"), (20, "get_keyframe_label"),
             (21, "set_keyframe_label"),
         ):
-            self.assertIn(
-                f"g_aegp_keyframe_suite5[{slot}] = reinterpret_cast<void*>(&{function})",
-                text,
+            assignment = (
+                f"g_aegp_keyframe_suite5[{slot}] = "
+                f"reinterpret_cast<void*>(&{function})"
+                if slot in scene_owned else
+                f"scene_factory.keyframe_callbacks[{slot}] = "
+                f"reinterpret_cast<void*>(&{function})"
             )
+            self.assertIn(assignment, compact)
         for marker in (
             'L"--self-test-aegp-keyframe-mutations"',
             "verify_aegp_keyframe_suite5_mutations()",
@@ -695,9 +728,10 @@ class MinihostL2SourceTests(unittest.TestCase):
                        "aegp_get_keyframe_time", "aegp_get_new_keyframe_value",
                        "aegp_get_keyframe_interpolation",
                        '"keyframe_time_calls\\\":"', '"keyframe_value_calls\\\":"',
-                       "g_aegp_layer_flags{{0x00000005u, 0x00000005u, 0x00000005u}}",
+                       "layer_flags{{0x00000005u, 0x00000005u, 0x00000005u}}",
                        "*transfer = {0, 0, 0}",
-                       "g_aegp_layer_durations{{{300, 30}, {300, 30}, {300, 30}}}",
+                       "layer_durations{{",
+                       "{300, 30}, {300, 30}, {300, 30}",
                        '"layer_attribute_calls\\\":"',
                        "g_aegp_scene_frame = tick + 1",
                        '"scene_first_observed_frame\\\":"',
