@@ -36,6 +36,7 @@ set(AEXCOMPAT_WORKER_RUNTIME_CORE_SOURCES
     src/suite_lease_tracker.cpp
     src/worker_selector_dispatch.cpp
     src/worker_runtime_admission.cpp
+    src/worker_session.cpp
     src/worker_aegp_render_options.cpp
     src/worker_aegp_scene.cpp
     src/worker_aegp_scene_runtime.cpp

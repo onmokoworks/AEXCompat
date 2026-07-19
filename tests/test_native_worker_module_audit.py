@@ -16,6 +16,9 @@ HEADER = (ROOT / "minihost" / "src" / "runtime_module_audit.hpp").read_text(
 DISPATCH = (ROOT / "minihost" / "src" / "worker_selector_dispatch.cpp").read_text(
     encoding="utf-8"
 )
+SESSION = (ROOT / "minihost" / "src" / "worker_session.cpp").read_text(
+    encoding="utf-8"
+)
 
 
 def test_sealed_workers_audit_immediately_after_load_before_symbol_lookup():
@@ -35,11 +38,11 @@ def test_module_enumeration_is_bounded_and_incomplete_results_fail_closed():
     assert re.search(r"module_length == 0.*?canonical_path\(module_buffer\.data\(\), module_path\)",
                      SOURCE, re.DOTALL)
     assert 'snapshot.status = snapshot.unknown_count == 0 ? "passed" : "failed"' in SOURCE
-    # The post-load rejection moved with the admission runtime.  L2 still
-    # owns the later pre-unload rejection for the ordinary render path.
+    # Admission rejects the initial snapshot before ownership transfer. The
+    # session owns every terminal snapshot and later cleanup path.
     assert '\\"status\\":\\"module_audit_failed\\"' in ADMISSION
     assert "FreeLibrary(module);" in ADMISSION
-    assert MAIN.count("module_audit_failed") >= 1
+    assert "module_audit_failed" in SESSION
 
 
 def test_only_worker_plugin_root_and_system32_are_allowed():
@@ -66,8 +69,8 @@ def test_report_exposes_schema_snapshots_counts_and_basenames_not_paths():
 
 
 def test_pre_unload_audit_precedes_final_free_and_direct_workers_remain_optional():
-    final_audit = MAIN.rindex("g_module_audit.pre_unload = capture_module_audit()")
-    final_free = MAIN.rindex("FreeLibrary(module)")
+    final_audit = SESSION.index("audit.pre_unload = capture_module_audit()")
+    final_free = SESSION.index("FreeLibrary(module_)")
     assert final_audit < final_free
     assert 'std::string status{"not_required"}' in HEADER
     assert ': "not_required")' in SOURCE

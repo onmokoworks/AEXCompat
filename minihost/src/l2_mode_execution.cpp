@@ -57,7 +57,7 @@ int automatic_dialog(const Request& r) {
       dialog_exception == 0 && sequence_setdown_error == 0 &&
       sequence_setdown_exception == 0 && setdown_error == 0 &&
       r.hooks.handle_lifetimes_balanced(r.context);
-  r.hooks.restore_stdout(r.context);
+  if (!r.hooks.prepare_protocol_report(r.context)) return 14;
   std::cout << "{\"schema_version\":1,\"stage\":\"automatic_dialog\",\"status\":\""
             << (valid ? "automatic_dialog_completed" :
                 (requested ? "automatic_dialog_error" : "automatic_dialog_not_requested"))
@@ -74,7 +74,6 @@ int automatic_dialog(const Request& r) {
             << ",\"handle_lifetimes_balanced\":"
             << (r.hooks.handle_lifetimes_balanced(r.context) ? "true" : "false")
             << ",\"global_setdown_error\":" << setdown_error << "}\n";
-  r.hooks.unload_module(r.context);
   return valid ? 0 : (requested ? 20 : 21);
 }
 
@@ -93,7 +92,7 @@ int do_dialog(const Request& r) {
   stage("global_setdown", "end", setdown_error, true);
   const bool valid = r.params_error == 0 && advertised && error == 0 && exception == 0 &&
       setdown_error == 0 && r.hooks.handle_lifetimes_balanced(r.context);
-  r.hooks.restore_stdout(r.context);
+  if (!r.hooks.prepare_protocol_report(r.context)) return 14;
   std::cout << "{\"schema_version\":1,\"stage\":\"do_dialog\",\"status\":\""
             << (valid ? "dialog_completed" : (advertised ? "dialog_error" : "dialog_not_advertised"))
             << "\",\"dialog_advertised\":" << (advertised ? "true" : "false")
@@ -105,7 +104,6 @@ int do_dialog(const Request& r) {
             << ",\"handle_lifetimes_balanced\":"
             << (r.hooks.handle_lifetimes_balanced(r.context) ? "true" : "false")
             << ",\"global_setdown_error\":" << setdown_error << "}\n";
-  r.hooks.unload_module(r.context);
   return valid ? 0 : (advertised ? 20 : 21);
 }
 
@@ -114,7 +112,7 @@ int external_dependencies(const Request& r) {
   try { check_type = std::stoi(r.external_dependency_check_type); } catch (...) {}
   if (check_type < 0 || check_type > 2) {
     if (r.global_error == 0) r.hooks.global_setdown(r.context);
-    r.hooks.unload_module(r.context); return 3;
+    return 3;
   }
   int32_t selector_error = -1; uint32_t exception = 0;
   stage("get_external_dependencies", "begin");
@@ -143,7 +141,7 @@ int external_dependencies(const Request& r) {
   const HandleStatistics stats = r.hooks.handle_statistics(r.context);
   const bool valid = selector_error == 0 && handle_valid && nul_terminated && disposed &&
       setdown_error == 0 && r.hooks.handle_lifetimes_balanced(r.context);
-  r.hooks.restore_stdout(r.context);
+  if (!r.hooks.prepare_protocol_report(r.context)) return 14;
   std::cout << "{\"schema_version\":1,\"stage\":\"external_dependencies\",\"status\":\""
             << (valid ? "dependencies_inspected" : "dependency_error")
             << "\",\"check_type\":" << check_type << ",\"selector_error\":" << selector_error
@@ -157,24 +155,18 @@ int external_dependencies(const Request& r) {
             << ",\"handle_lifetimes_balanced\":"
             << (r.hooks.handle_lifetimes_balanced(r.context) ? "true" : "false")
             << ",\"global_setdown_error\":" << setdown_error << "}\n";
-  r.hooks.unload_module(r.context); return valid ? 0 : 20;
+  return valid ? 0 : 20;
 }
 
 int parameters_only(const Request& r) {
   const bool defaults_disposed = r.hooks.dispose_arbitrary_defaults(r.context);
   stage("global_setdown", "begin"); const int32_t setdown_error = global_setdown(r);
   stage("global_setdown", "end", setdown_error, true);
-  if (r.hooks.module_audit_required(r.context) && !r.hooks.capture_pre_unload_audit_passed(r.context)) {
-    r.hooks.restore_stdout(r.context);
-    std::cout << "{\"schema_version\":1,\"stage\":\"module_audit\",\"status\":\"module_audit_failed\",\"module_audit\":"
-              << r.hooks.module_audit_json(r.context) << "}\n";
-    r.hooks.unload_module(r.context); return 14;
-  }
+  if (!r.hooks.prepare_protocol_report(r.context)) return 14;
   r.hooks.report_parameters(r.context,
       r.global_error == 0 && r.params_error == 0 && r.parameter_count_contract_valid
           ? "parameters_inspected" : "selector_error",
       r.global_error, r.params_error, setdown_error);
-  r.hooks.unload_module(r.context);
   return r.global_error == 0 && r.params_error == 0 && r.parameter_count_contract_valid &&
       defaults_disposed && setdown_error == 0 ? 0 : 20;
 }

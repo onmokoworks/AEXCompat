@@ -31,6 +31,7 @@ struct RuntimeContext {
   std::filesystem::path plugin_path;
   HMODULE module{};
   bool stdout_redirected{};
+  RuntimeStdoutRestore restore_native_stdout{};
 };
 
 // Returns the historical worker exit code on rejection. On success module

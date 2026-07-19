@@ -61,6 +61,7 @@ int admit_runtime(const RuntimeHostHooks& hooks,
   context.plugin_path = plugin_path;
   context.module = module;
   context.stdout_redirected = true;
+  context.restore_native_stdout = hooks.restore_native_stdout;
   return 0;
 }
 

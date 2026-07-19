@@ -64,6 +64,7 @@
 #include "suite_lease_tracker.hpp"
 #include "worker_selector_dispatch.hpp"
 #include "worker_runtime_admission.hpp"
+#include "worker_session.hpp"
 #include "worker_aegp_render_options.hpp"
 #include "worker_aegp_scene.hpp"
 #include "worker_aegp_scene_runtime.hpp"
@@ -164,6 +165,7 @@ using aexcompat::worker_runtime::selector_dispatch_telemetry;
 using aexcompat::worker_runtime::RuntimeAdmissionRequest;
 using aexcompat::worker_runtime::RuntimeContext;
 using aexcompat::worker_runtime::RuntimeHostHooks;
+using aexcompat::worker_runtime::WorkerSession;
 using aexcompat::worker_runtime::admit_runtime;
 using aexcompat::world_safety::DispatchWorldFormat;
 using aexcompat::world_safety::DispatchWorldFormatScope;
@@ -13768,7 +13770,7 @@ struct EarlyModeBridge {
   EffectEntry entry{};
   std::array<std::byte, kInSize>* input{};
   std::array<std::byte, kOutSize>* output{};
-  HMODULE module{};
+  WorkerSession* session{};
   const std::string* about_message{};
 };
 uint32_t early_mode_out_flags(void* opaque) {
@@ -13802,9 +13804,8 @@ std::string early_mode_return_message(void* opaque) {
   return {message, strnlen_s(message, kOutSize - kOutMessage)};
 }
 bool early_mode_handle_lifetimes_balanced(void*) { return handle_lifetimes_balanced(); }
-void early_mode_restore_stdout(void*) { restore_native_stdout(); }
-void early_mode_unload_module(void* opaque) {
-  FreeLibrary(static_cast<EarlyModeBridge*>(opaque)->module);
+bool early_mode_prepare_protocol_report(void* opaque) {
+  return static_cast<EarlyModeBridge*>(opaque)->session->prepare_protocol_report();
 }
 void* early_mode_external_dependencies(void* opaque, int32_t check_type,
                                        int32_t* error, uint32_t* exception) {
@@ -13827,12 +13828,6 @@ bool early_mode_dispose_arbitrary_defaults(void* opaque) {
   const auto& b = *static_cast<EarlyModeBridge*>(opaque);
   return dispose_arbitrary_defaults(b.entry, *b.input, *b.output);
 }
-bool early_mode_module_audit_required(void*) { return g_module_audit.required; }
-bool early_mode_capture_pre_unload_audit_passed(void*) {
-  g_module_audit.pre_unload = capture_module_audit();
-  return g_module_audit.pre_unload.status == "passed";
-}
-std::string early_mode_module_audit_json(void*) { return module_audit_json(); }
 void early_mode_report_parameters(void* opaque, const char* status, int32_t global_error,
                                   int32_t params_error, int32_t setdown_error) {
   const auto& b = *static_cast<EarlyModeBridge*>(opaque);
@@ -16350,16 +16345,13 @@ int worker_main_impl(int argc, wchar_t **argv) {
   RuntimeContext runtime_context;
   const int admission_error = admit_runtime(runtime_hooks, runtime_request, runtime_context);
   if (admission_error != 0) return admission_error;
-  g_plugin_file_path = runtime_context.plugin_path.wstring();
-  HMODULE module = runtime_context.module;
-  if (trace_writer.enabled()) {
-    g_trace_writer = &trace_writer;
-    trace_writer.session_start();
-  }
+  WorkerSession session(runtime_context, &trace_writer, &g_trace_writer);
+  g_plugin_file_path = session.plugin_path().wstring();
+  HMODULE module = session.module();
   if (g_aegp_init_mode) {
     g_synthetic_receipt_test_mode = g_aegp_command_roundtrip_mode;
     auto aegp_entry = reinterpret_cast<AegpEntry>(GetProcAddress(module, "EntryPointFunc"));
-    if (!aegp_entry) { FreeLibrary(module); return 12; }
+    if (!aegp_entry) return session.finish(12);
     void* global_refcon = nullptr;
     const int32_t init_error = aegp_entry(&g_basic_suite, 24, 0, 1, &global_refcon);
     int32_t event_error = 0;
@@ -16552,16 +16544,12 @@ int worker_main_impl(int argc, wchar_t **argv) {
     }
     // Capture the event-complete and terminal loaded-module sets before the
     // AEGP is unloaded so secure broker launches can validate this early path.
-    capture_module_audit_phase();
-    if (g_module_audit.required)
-      g_module_audit.pre_unload = capture_module_audit();
-    const bool module_audit_ok = module_audit_passed();
     // Stop and unload first. Some AEGP_SuiteHandler builds retain exactly one
     // Item Suite cache until process teardown; the isolated worker owns that
     // final reclamation, but every other outstanding lease remains a failure.
-    FreeLibrary(module);
+    capture_module_audit_phase();
+    const bool module_audit_ok = session.shutdown_before_report();
     module = nullptr;
-    restore_native_stdout();
     const uint32_t live_suite_references = live_suite_reference_count();
     const std::string live_suite_summary = live_suite_lease_summary();
     const bool isolated_item_cache = g_aegp_active_idle_roundtrip_mode &&
@@ -16705,7 +16693,7 @@ int worker_main_impl(int argc, wchar_t **argv) {
               << ",\"render_performed\":"
               << (g_async_receipts_created > 0 ? "true" : "false")
               << ",\"module_audit\":" << module_audit_json() << "}\n";
-    return passed ? 0 : 23;
+    return session.finish_integrated_report(passed ? 0 : 23);
   }
   auto entry = reinterpret_cast<EffectEntry>(GetProcAddress(module, "EffectMain"));
   if (!entry) {
@@ -16713,8 +16701,7 @@ int worker_main_impl(int argc, wchar_t **argv) {
     std::cerr << "plugin_kind:"
               << (has_aegp_entry ? "aegp_candidate" : "unknown_no_effect_entrypoint")
               << "\n" << std::flush;
-    FreeLibrary(module);
-    return 12;
+    return session.finish(12);
   }
 
   alignas(8) std::array<std::byte, kInSize> input{};
@@ -16854,8 +16841,7 @@ int worker_main_impl(int argc, wchar_t **argv) {
       dispose_arbitrary_defaults(entry, input, output);
       if (global_error == 0)
         invoke_global_setdown(entry, input.data(), output.data());
-      FreeLibrary(module);
-      return 19;
+      return session.finish(19);
     }
     const char* event_target = drag_event_mode || ui_mouse_exited_mode ||
         (!registered_effect_ui && registered_layer_ui)
@@ -17009,6 +16995,7 @@ int worker_main_impl(int argc, wchar_t **argv) {
     const bool defaults_disposed = dispose_arbitrary_defaults(entry, input, output);
     const int32_t event_setdown_error = global_error == 0
         ? invoke_global_setdown(entry, input.data(), output.data()) : -1;
+    if (!session.prepare_protocol_report()) return session.finish(14);
     restore_native_stdout();
     const bool event_contract = (ui_lifecycle_mode || ui_idle_mode || ui_keydown_mode ||
         ui_mouse_exited_mode)
@@ -17104,9 +17091,9 @@ int worker_main_impl(int argc, wchar_t **argv) {
               << ",\"requested_parameters\":"
               << requested_parameters_json(ui_event_assignments)
               << ",\"global_setdown_error\":" << event_setdown_error << "}\n";
-    FreeLibrary(module);
-    return event_contract && event_sequence_setdown_error == 0 && defaults_disposed &&
-        handle_lifetimes_balanced() && event_setdown_error == 0 ? 0 : 20;
+    return session.finish(event_contract && event_sequence_setdown_error == 0 &&
+        defaults_disposed && handle_lifetimes_balanced() && event_setdown_error == 0
+            ? 0 : 20);
   }
   if (is_rendering_worker() && request_mode &&
       (params_error != 0 || !parameter_count_contract_valid ||
@@ -17115,8 +17102,7 @@ int worker_main_impl(int argc, wchar_t **argv) {
     dispose_arbitrary_defaults(entry, input, output);
     if (global_error == 0)
       invoke_global_setdown(entry, input.data(), output.data());
-    FreeLibrary(module);
-    return 3;
+    return session.finish(3);
   }
   aexcompat::l2mode::EarlyMode early_mode = aexcompat::l2mode::EarlyMode::None;
   if (auto_dialog_mode) early_mode = aexcompat::l2mode::EarlyMode::AutomaticDialog;
@@ -17124,21 +17110,20 @@ int worker_main_impl(int argc, wchar_t **argv) {
   else if (external_dependencies_mode) early_mode = aexcompat::l2mode::EarlyMode::ExternalDependencies;
   else if (params_only_mode) early_mode = aexcompat::l2mode::EarlyMode::ParametersOnly;
   if (!is_rendering_worker() && early_mode != aexcompat::l2mode::EarlyMode::None) {
-    EarlyModeBridge bridge{entry, &input, &output, module, &about_message};
+    EarlyModeBridge bridge{entry, &input, &output, &session, &about_message};
     const aexcompat::l2mode::Hooks hooks{
         early_mode_out_flags, early_mode_copy_sequence_data_to_input,
         early_mode_sequence_setup, early_mode_sequence_setdown, early_mode_do_dialog,
         early_mode_global_setdown, early_mode_return_message, early_mode_handle_lifetimes_balanced,
-        early_mode_restore_stdout, early_mode_unload_module, early_mode_external_dependencies,
+        early_mode_prepare_protocol_report, early_mode_external_dependencies,
         early_mode_handle_is_live, early_mode_handle_size, early_mode_lock_handle,
         early_mode_unlock_handle, early_mode_dispose_handle, early_mode_handle_statistics,
-        early_mode_dispose_arbitrary_defaults, early_mode_module_audit_required,
-        early_mode_capture_pre_unload_audit_passed, early_mode_module_audit_json,
-        early_mode_report_parameters};
-    return aexcompat::l2mode::run_early_mode(
+        early_mode_dispose_arbitrary_defaults, early_mode_report_parameters};
+    const int early_result = aexcompat::l2mode::run_early_mode(
         {early_mode, &bridge, hooks, global_error, params_error,
          parameter_count_contract_valid,
          external_dependencies_mode ? argv[4] : nullptr});
+    return session.finish(early_result);
 
   }
   if (is_render_worker() && audio_mode) {
@@ -17237,6 +17222,7 @@ int worker_main_impl(int argc, wchar_t **argv) {
         if (!output_created) DeleteFileW(external_audio_output.c_str());
       }
     }
+    if (!session.prepare_protocol_report()) return session.finish(14);
     restore_native_stdout();
     std::cout << "{\"schema_version\":1,\"stage\":\"audio_render\",\"status\":\""
               << (passed && output_created ? "render_completed" : "render_failed")
@@ -17277,8 +17263,7 @@ int worker_main_impl(int argc, wchar_t **argv) {
               << ",\"audio_lifetimes_balanced\":"
               << (audio_lifetimes_balanced ? "true" : "false")
               << ",\"output_created\":" << (output_created ? "true" : "false") << "}\n";
-    FreeLibrary(module);
-    return passed && output_created ? 0 : 20;
+    return session.finish(passed && output_created ? 0 : 20);
   }
   std::array<int32_t, 5> lifecycle_errors{-1, -1, -1, -1, -1};
   bool lifecycle_data_null = false;
@@ -17321,8 +17306,7 @@ int worker_main_impl(int argc, wchar_t **argv) {
       !apply_requested_assignments(lifecycle_definitions, g_user_changed_parameters)) {
     if (global_error == 0)
       invoke_global_setdown(entry, input.data(), output.data());
-    FreeLibrary(module);
-    return 3;
+    return session.finish(3);
   }
   std::vector<void*> lifecycle_params(lifecycle_definitions.size());
   for (std::size_t i = 0; i < lifecycle_definitions.size(); ++i)
@@ -17659,16 +17643,7 @@ int worker_main_impl(int argc, wchar_t **argv) {
   if (is_smart_worker() && aegp_memory_strings_mode)
     aegp_memory_fault_observed = verify_aegp_memory_and_strings_rejection();
   std::cerr << "stage:global_setdown_end error=" << setdown_error << "\n" << std::flush;
-  if (g_module_audit.required)
-    g_module_audit.pre_unload = capture_module_audit();
-  if (g_module_audit.required && g_module_audit.pre_unload.status != "passed") {
-    restore_native_stdout();
-    std::cout << "{\"schema_version\":1,\"stage\":\"module_audit\","
-                 "\"status\":\"module_audit_failed\",\"module_audit\":"
-              << module_audit_json() << "}\n";
-    FreeLibrary(module);
-    return 14;
-  }
+  if (!session.prepare_protocol_report()) return session.finish(14);
   if (is_render_worker()) {
   restore_native_stdout();
   std::cout << "{\"schema_version\":1,\"stage\":\"classic_render\",\"status\":\""
@@ -18155,13 +18130,8 @@ int worker_main_impl(int argc, wchar_t **argv) {
   report(global_error == 0 && params_error == 0 ? "selectors_completed" : "selector_error",
          global_error, params_error, setdown_error, output, about_message, lifecycle_errors, lifecycle_data_null);
   }
-  if (g_trace_writer) {
-    g_trace_writer->session_end();
-    g_trace_writer = nullptr;
-  }
-  FreeLibrary(module);
   if (is_render_worker()) {
-    return global_error == 0 && params_error == 0 && parameter_count_contract_valid &&
+    return session.finish(global_error == 0 && params_error == 0 && parameter_count_contract_valid &&
       image_render_supported && depth_supported && render_error == 0 && guards_intact &&
       handle_lifetimes_balanced() && world_lifetimes_balanced() &&
       async_receipt_lifetimes_balanced() &&
@@ -18170,10 +18140,10 @@ int worker_main_impl(int argc, wchar_t **argv) {
       audio_handle_lifetimes_balanced() && audio_telemetry().invalid_operations == 0 &&
       param_checkouts_balanced() &&
       ((!g_render_click_enabled && !g_render_draw_enabled) ||
-       g_render_ui_context_closed) ? 0 : 21;
+       g_render_ui_context_closed) ? 0 : 21);
   }
   if (is_smart_worker()) {
-    return global_error == 0 && params_error == 0 && parameter_count_contract_valid &&
+    return session.finish(global_error == 0 && params_error == 0 && parameter_count_contract_valid &&
       image_render_supported && depth_supported && smart.pre_error == 0 && smart.render_error == 0 &&
       smart.gpu_setup_error == 0 && smart.gpu_setdown_error == 0 &&
       smart.rects_valid && smart.guards_intact &&
@@ -18182,11 +18152,11 @@ int worker_main_impl(int argc, wchar_t **argv) {
       audio_handle_lifetimes_balanced() && audio_telemetry().invalid_operations == 0 &&
       param_checkouts_balanced() &&
       ((!g_render_click_enabled && !g_render_draw_enabled) ||
-       g_render_ui_context_closed) ? 0 : 22;
+       g_render_ui_context_closed) ? 0 : 22);
   }
-  return global_error == 0 && params_error == 0 && parameter_count_contract_valid &&
+  return session.finish(global_error == 0 && params_error == 0 && parameter_count_contract_valid &&
       user_changed_ok && conditional_ui_ok && about_error == 0 && lifecycle_data_null &&
-      std::all_of(lifecycle_errors.begin(), lifecycle_errors.end(), [](auto error) { return error == 0; }) ? 0 : 20;
+      std::all_of(lifecycle_errors.begin(), lifecycle_errors.end(), [](auto error) { return error == 0; }) ? 0 : 20);
 }
 
 int aexcompat::worker_target::run(Kind kind, int argc, wchar_t** argv) {

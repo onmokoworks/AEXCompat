@@ -651,12 +651,17 @@ class MinihostL2SourceTests(unittest.TestCase):
 
     def test_aegp_death_hooks_are_owned_before_module_unload(self):
         text = l2_family_source()
+        session = (ROOT / "minihost" / "src" / "worker_session.cpp").read_text(
+            encoding="utf-8"
+        )
         for marker in ("AegpDeathRegistration", "g_aegp_death_registrations.size() >= 64",
                        "registration.hook(global_refcon, registration.refcon)",
                        '"death_hooks_invoked\\\":"', '"death_error\\\":"'):
             self.assertIn(marker, text)
         death_call = text.index("registration.hook(global_refcon, registration.refcon)")
-        self.assertLess(death_call, text.index("FreeLibrary(module);", death_call))
+        shutdown = text.index("session.shutdown_before_report()", death_call)
+        self.assertLess(death_call, shutdown)
+        self.assertIn("FreeLibrary(module_);", session)
 
     def test_aegp_command_roundtrip_tracks_filter_priority_and_handled(self):
         text = l2_family_source()
