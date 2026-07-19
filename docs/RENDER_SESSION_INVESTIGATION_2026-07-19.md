@@ -1,0 +1,209 @@
+# issue #98 段階0 調査ノート: 常駐workerレンダリングセッション
+
+時系列追記。観察 (事実) と仮説 (推論) を分けて記録する。項目番号は
+issue #98 本文「段階 0」の調査項目に対応する。
+
+## 2026-07-19
+
+### 項目5: 継承 HANDLE + file mapping の机上調査 (観察)
+
+- `broker/crates/broker/src/windows_process.rs` の `run_isolated_impl` は既に
+  `PROC_THREAD_ATTRIBUTE_HANDLE_LIST` で継承 handle を明示指定している
+  (stdout/stderr パイプ write 端 + opt-in の trace file handle、
+  `windows_process.rs:349`)。`bInheritHandles=1` だが handle list で継承対象を
+  絞る構造。
+- trace file handle の worker への伝達は環境変数
+  `AEX_INSTRUMENT_TRACE_HANDLE` に handle 番号を書く方式
+  (`windows_process.rs:155` `child_environment`)。broker が作成した handle を
+  番号で伝える前例はここにある。
+- restricted token 経路 (`CreateProcessAsUserW`) と通常経路 (`CreateProcessW`)
+  のどちらも同じ attribute list / 継承機構を通る。Job Object は
+  `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_PROCESS_MEMORY` 付き。
+- `hStdInput` は null (`windows_process.rs:385`)。worker への入力パイプは現状
+  存在しない。また stdout は worker の JSON レポート出力に使用中。
+- 現行 merged コードの minidump 転送は `--minidump-v1 <dir>` のパス渡し
+  (`l2_main.cpp:22304` で worker が `is_directory` を再検証)。CLAUDE.md に
+  ある「#66 の broker 作成継承 dump handle」はこの worktree の HEAD
+  (origin/main a9ed8a2) では未確認。要追跡。
+
+### 項目5: 設計への含意 (仮説)
+
+- フレームループの制御チャネルを stdin/stdout に載せる案は、stdout が既に
+  最終 JSON レポート専用である点と衝突する。制御チャネルは専用の継承パイプ
+  handle (HANDLE_LIST + 環境変数番号伝達、trace file と同型) にする方が
+  既存構造と整合すると思われる。
+- 無名 file mapping (`CreateFileMapping(INVALID_HANDLE_VALUE, ...)`) は名前も
+  パスも持たないため、restricted token の ACL に依存せず継承 handle だけで
+  worker から `MapViewOfFile` できる可能性が高い。spike で要実証。
+- Job Object の `ProcessMemoryLimit` はプロセスの private commit を制限する
+  もので、共有 section の view が worker 側の課金にどう乗るかは未確認。
+  FHD 数スロット分 (数十MB) が上限に食い込まないか spike で要確認。
+
+### 項目4: 現行 one-shot 経路の性能ベースライン (観察)
+
+計測方法: `aex_render_worker.exe` を直接起動 (broker の sealed staging・
+hash 検証・PNG エンコードは含まない)。fixture は `pf_sampling_probe.aex`、
+`--render-image` (8bpc)、N=12、warm。`tools/bench_oneshot_render.py` にて。
+機材はこの開発機 (Windows 11)。数値は機材・AV スキャン状態依存の参考値で、
+frozen evidence ではない。
+
+| 計測 | median | min | max |
+|---|---|---|---|
+| プロセス起動フロア (即 exit 2) | 254.7ms | 26.7ms | 308.7ms |
+| 37x23 レンダー一式 | 38.6ms | 35.6ms | 571.5ms |
+| 1920x1080 レンダー一式 | 123.5ms | 76.4ms | 164.6ms |
+
+- worker exe の SHA-256 は 0.55ms/回 (868KB)、probe AEX は 0.02ms/回 (18KB)。
+  broker は dispatch ごとに worker exe を hash する (`admit_local_worker`) が、
+  このサイズでは支配項ではない。
+- 入力 raw 書き込みは FHD 8.3MB で 11.1ms。
+- 起動フロアの median 254ms は最初に計測した (cold) 系列で、後続の
+  37x23 系列 (median 38.6ms、起動込み) と矛盾する。ばらつきの原因は
+  ウイルススキャン等の初回実行効果と思われる (仮説)。warm 状態の
+  プロセス起動+AEXロード+lifecycle 固定費は 35〜40ms 程度と読むのが妥当。
+
+### 項目4: 含意 (仮説)
+
+- warm でも FHD 1フレーム 123ms ≒ 8fps が worker 直叩きの上限で、broker の
+  staging・検証・PNG 変換を足すと実効はさらに落ちる。25fps (40ms/frame) には
+  one-shot 構造のままでは固定費だけで届かない。常駐セッション + 共有メモリ化
+  の動機を数値で裏付けた。
+- レンダー本体 (probe の per-pixel sampling) と転送の内訳分離は未実施。
+  セッション実装後の比較では同一 fixture・同一寸法で before/after を取る。
+
+### 項目7: AviUtl2 フィルタプラグイン API の制約 (観察)
+
+一次情報: 公式SDK zip (2026/7/18 版、MIT License) を展開し `filter2.h` /
+`plugin2.h` / `cache2.h` / `output2.h` / 同梱ドキュメントを直接確認した。
+配布元は「AviUtlのお部屋」
+<https://spring-fragrance.mints.ne.jp/aviutl/> (SDK:
+`aviutl2_sdk.zip`)。非公式ミラー
+<https://github.com/aviutl2/aviutl2_sdk_mirror> は公式 zip と一致確認済み。
+
+- フィルタプラグイン (.auf2) API は公開済み。`GetFilterPluginTable()` が
+  `FILTER_PLUGIN_TABLE` (設定項目 + `func_proc_video` / `func_proc_audio`)
+  を返す方式。API はほぼ毎週拡張されており流動的。
+- 画像バッファは packed のみ (planar 形式は存在しない):
+  - 基本経路 `get_image_data` / `set_image_data` は 8bit RGBA 密詰め
+    (stride 引数なし)。
+  - pitch 指定の拡張経路 `get/set_image_resource_data` があり、取得側は
+    RGBA (R8G8B8A8_UNORM) / PA64 (R16G16B16A16_UNORM) / HF64
+    (R16G16B16A16_FLOAT)。内部フォーマットは HF64 = fp16 RGBA 乗算済みα
+    (`output2.h` コメント)。書き込み側は加えて BGRA / BGR / YUY2 / YC48。
+  - `get_image_texture2d()` で `ID3D11Texture2D*` も取得可 (フィルタ処理
+    終了までのみ有効)。
+- 呼び出しモデル: `func_proc_video` は同期コールバック。false 返却で以降の
+  フィルタ・出力が中断。画像と音声は別スレッドと明記。設定値はホストが
+  呼び出し直前にグローバル構造体へ書き込む方式。毎呼び出しで `OBJECT_INFO`
+  (frame 番号、総フレーム数、effect_id、レイヤー等) が渡る。
+- フレーム順序保証の記載なし。`cache2.h` のサンプルはエフェクト毎・フレーム
+  番号毎のキャッシュ構成で、同一フレームの再要求・ランダムアクセス前提の
+  設計。プレビュー/出力の区別はフィルタ API 自体には無い
+  (`plugin2.h` の `get_edit_state()` 側にはある)。
+- ホストの合成済みフレームキャッシュを読む API は無い。ソース素材の任意
+  フレームは `CACHE_HANDLE::get_video_file_cache` で取得可。汎用プラグイン
+  (.aux2) 側の `rendering_scene_video(frame, callback)` で現在シーンの任意
+  フレームを非同期レンダリング依頼できる (出力中は失敗)。
+- 解像度上限のヘッダ記載なし。音声は PCM float32 2ch。
+
+### 項目7: 設計への含意 (仮説)
+
+- **ブリッジは非順次前提が必須**: フレームが時間順に来る保証がなく同一
+  フレーム再要求もあるため、AviUtl2 消費者はセッション仕様の非順次
+  アクセス扱い (項目3 の `NON_SEQUENTIAL_RENDER` 意味論) に直接依存する。
+  時間依存 AEX をランダムアクセス下でどう扱うかが設計課題として確定的に
+  効いてくる。
+- **同期呼び出しなのでフレームあたりレイテンシがそのまま UX**: ホストの
+  レンダリングは応答までブロックする。常駐セッションの per-frame 往復を
+  低く抑える設計 (共有メモリ + イベント) の妥当性を裏付ける。
+- **深度変換が必要**: AviUtl2 の 16bit は PA64 (full-range unorm、乗算済みα)、
+  AE の 16bpc は 0..32768 white point かつ straight α が基本。HF64 (fp16
+  乗算済み) ⇔ AE 32f straight の変換含め、α前乗算の解除/再適用と値域変換を
+  ブリッジ層で規定する必要がある。
+- 設定値グローバル書き込み方式から、同一プラグインの video 呼び出しが並列
+  多重化されることは無いと思われる (video/audio 間の競合修正が更新履歴に
+  ある点が傍証)。セッションは effect_id 単位で 1 本ずつ持てば足りる見込み。
+- ユーザーが当初言及した「平面画像データ」について: AviUtl2 の転送形式は
+  packed のみで planar は存在しなかった。ブリッジの転送スロットは packed
+  RGBA 系 (8bit / PA64 / HF64) を前提にできる。
+
+### 設計判断: 消費者プロセス (AviUtl2 等) への in-process AEX ロードは採用しない (合意 2026-07-19)
+
+検討の経緯: AviUtl2 のプロセスに AEX を直接ロードする形式を検討し、
+却下した。理由:
+
+1. **crash containment の喪失**: AEX のクラッシュ・ハング・ヒープ破壊が
+   ホストアプリ (編集中のユーザープロジェクト) を道連れにする。ハングは
+   in-process スレッドでは安全に停止できない。crash containment は常時オン
+   の床 (Project Direction 5) であり、これを外す形式は採らない。
+2. **性能利得が小さい**: one-shot 経路の遅さの支配項はプロセス起動 + AEX
+   ロード固定費 (warm 35〜40ms) とファイル I/O であり、常駐セッション +
+   共有メモリで両方消える。セッション化後に残るプロセス間コストはイベント
+   同期 (数十μs級) + コピー (FHD memcpy 1〜2ms、設計次第でゼロ) 程度で、
+   レンダー本体に対して誤差の範囲 (仮説、セッション実装後の実測で検証)。
+3. **付随コスト**: 消費者ホストのスレッドモデルへ AEX lifecycle 期待を直接
+   合わせる必要が生じる。minihost ホスト核のライブラリ化と二重保守が要る。
+   worker 境界が無いと診断の再現性・信頼性が落ちる。
+
+再検討の条件: セッション + 共有メモリ実装後の実測で、同期コストが支配項に
+なると示された場合に限り、明示オプトインの高速パスとして再検討する。
+
+### 項目3: レンダー順序契約と sequence data 意味論 (観察)
+
+一次情報: ローカル SDK 25.2 ヘッダ (`AE_Effect.h` / `AE_EffectSuites.h` /
+`AE_EffectSuitesOld.h` / `AE_GeneralPlug.h`) と docsforadobe ガイド
+(<https://ae-plugins.docsforadobe.dev/> の PF_OutData / command-selectors /
+global-sequence-frame-data / multi-frame-rendering-in-ae)。
+
+- **訂正**: issue #98 本文と設計ドラフト v1 に記載した
+  `PF_OutFlag_NON_SEQUENTIAL_RENDER` という flag は **Effect SDK に存在
+  しない** (SDK 25.2 全ヘッダ検索・docsforadobe とも該当なし)。名前が似た
+  ものは AEIO (メディア入出力) 側の `nonSequentialOk` /
+  `AEIO_MFlag_CAN_ADD_FRAMES_NON_LINEAR` で、Effect API とは別物。
+- Effect API には**レンダー順序を宣言・保証する仕組み自体がない**。random
+  access が契約上の前提で、順序依存 (シミュレーション系) プラグインへの
+  公式指針は「sequence_data に自前キャッシュを持ち、任意フレーム要求時に
+  `PF_HaveInputsChangedOverTimeSpan` (旧) / `PF_GetCurrentState` +
+  `PF_AreStatesIdentical` (現行) でキャッシュを検証して履歴を再構成する」
+  というプラグイン側義務 (`AE_EffectSuitesOld.h` 40-56 行)。
+- ホストのフレーム単位の義務は FRAME_SETUP → RENDER → FRAME_SETDOWN と、
+  時刻フィールド (current_time / time_step / time_scale / total_time) の
+  正確な供給。time_step は可変フレームレート時の SEQUENCE_SETUP で 0 に
+  なり得るが FRAME 系では常に正値。
+- sequence lifecycle の発行タイミングは全てホスト都合のイベント駆動
+  (保存・複製・スレッド配布・読込)。レンダー専用セッションの最小構成は
+  SETUP (UI 相当文脈で 1 回) → [RESETUP、入力 NULL 許容、
+  `PF_InFlag_PROJECT_IS_RENDER_ONLY` ヒント付き] → フレームループ →
+  SETDOWN。FLATTEN は保存/複製時のみで、発行しない運用も契約違反ではない
+  (ただし flatten 経路を通さないと NEEDS_FLATTENING 系のバグは観察できない)。
+- 時間方向 flag: `PF_OutFlag_WIDE_TIME_INPUT` (時間外 checkout に応じる
+  義務、AE10 以降は非推奨) / `PF_OutFlag2_AUTOMATIC_WIDE_TIME_INPUT`
+  (SmartFX 専用、ホストに checkout 追跡と時間選択的キャッシュ無効化の
+  義務) / `PF_OutFlag_NON_PARAM_VARY` (時刻自体が入力になる宣言)。
+- MFR (`PF_OutFlag2_SUPPORTS_THREADED_RENDERING`): レンダー中
+  `in_data->sequence_data` は **NULL** になり、const 読みは
+  `PF_EffectSequenceDataSuite1` 経由。書き込みは
+  `MUTABLE_RENDER_SEQUENCE_DATA_SLOWER` の複製 + 定期破棄パスのみ。
+- 非 MFR Classic では RENDER 中の sequence_data 書き換えは禁止されて
+  いない (handle はホストがロックして渡す)。次フレームへ同じ handle を
+  引き回すのが AE 単一スレッド Classic と同じ挙動。
+
+### 項目3: 設計への含意 (仮説)
+
+- 未決事項「非順次アクセス (シーク・逆再生) の扱い」への回答が出た:
+  **セッション仕様は「任意時刻の render_frame を受ける」で AE と等価**。
+  順序保証をプロトコルに入れる必要はなく、入れても AE より寛容になる
+  だけ。AviUtl2 側のランダムアクセス前提 (項目7) ともそのまま整合する。
+- 順序依存プラグインの互換性問題は flag では検出できない。checkout の
+  時刻引数と RENDER 中の sequence_data 書き換えを診断に記録する観察
+  アプローチが適切と思われる。
+- MFR flag を立てるプラグインに sequence_data を渡し続けると AE 実機と
+  観察が食い違う可能性が高い。「MFR 宣言時は render 中 NULL + suite 経由
+  const 読みを再現するか」をセッション v1 の設計課題に追加する。
+
+### 未着手 (このセッションで継続中)
+
+- 項目1・2・6 (AE 実機観測、SmartFX checkout) と項目5 の実証 spike は未着手。
+- 項目7・3 の机上調査は完了。AE 実機観測 (項目1・2) の焦点は、机上で
+  確定できなかった「実際の selector 発行頻度」(RESETUP がレンダー専用
+  文脈でいつ来るか、パラメーター変更時の実挙動) に絞れる。
