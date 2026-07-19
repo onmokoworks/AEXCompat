@@ -24,10 +24,10 @@
 
 ## 2. 一件一worktree・一件一PR
 
-1. `origin/main` または明示された依存PRの最新headから、`AEXCompat-issue<N>-<slug>` worktreeと `codex/issue<N>-<slug>` branchを作る。
-2. 主worktreeでは実装・commit・rebaseをしない。
+1. 通常は現在のmain/作業branchで作業してよい。ただし無関係な未コミット変更がある、危険なrebase/buildを伴う、別作業との同時実行が必要、またはユーザーが指定した場合は、`AEXCompat-issue<N>-<slug>` worktreeと `codex/issue<N>-<slug>` branchへ隔離する。
+2. 既存のユーザー変更をrevert、reset、checkout、clean、上書きしない。
 3. 一つのIssueに対する変更、テスト、docsを一つのPRにまとめる。無関係なリファクタや別Issueの修正を混ぜない。
-4. PR本文は `Closes #N`（または依存を壊さない場合の `Refs #N`）を使い、`\n` という文字列を本文生成に渡さない。改行は実改行で書く。
+4. claimしたIssueを実装したPRは必ず `Closes #N` とする。`Refs #M` は依存Issue・関連Issueにだけ使い、claim対象の代用にしない。PR本文は `\n` という文字列を本文生成に渡さず、実改行で書く。
 5. stacked PRは、依存PRがmergeされるまで新しいstackを増やさない。不要な古いworktreeを作らない。
 
 ## 3. 実装と検証の順序
@@ -48,7 +48,17 @@
 4. CI失敗を修正する場合は、まずログとannotationで根因を確認し、承認された小さな修正だけを行う。
 5. merge後に次のIssueへ進む。merge前の別Issue着手は禁止。
 
-## 5. 進捗報告の形式
+## 5. 定期的な棚卸し
+
+1. 次のタイミングで、read-onlyでopen Issue/PRを再取得する。
+   - 作業セッション開始時
+   - 次のIssueをclaimする直前
+   - PRのmerge/close後
+   - 同じ作業が3ターン以上続いたとき、または外部blockerが変化したとき
+2. 棚卸しでは、`active claim`、`open PR`、`blocked`、`unclaimed` を分類する。既存claimや関連PRが見つかったIssueを新たに着手しない。
+3. 棚卸し結果は現在の対象Issueに影響する差分だけ報告し、一覧を理由に作業範囲を広げない。
+
+## 6. 進捗報告の形式
 
 各ターンの報告は短く、次の順序にする。
 
@@ -60,9 +70,8 @@
 
 作業を止めるときは、変更なし・未commit・未push・claim状態を明記する。ユーザーが方針変更を示したら、実装を続けず、まずこの規則に従って作業台帳を整理する。
 
-## 6. 現在の既知の扱い
+## 7. リポジトリ固有状態の扱い
 
-- 主worktreeの未コミット変更はユーザー作業として保全する。
-- #52/#76/#87 はstackedまたは外部CI gateの影響があるため、依存が解消するまで新規作業を増やさない。
-- #18/#66 と #98/#158 は既存claim/既存PRのレーンであり、重複claimしない。
-- 新しい対象は、Issueのclaimを確認してから一件だけ選ぶ。
+- Issue番号、PR番号、branch名、blocked理由などの時限情報をこのファイルに固定しない。
+- 現在の正本は、棚卸し時点のGitHub状態とユーザーが指定した対象である。
+- 主worktreeの既存未コミット変更を保全する必要がある場合は、開始時のstatusで確認し、必要なら隔離worktreeを選ぶ。
