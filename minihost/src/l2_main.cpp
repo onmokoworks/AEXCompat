@@ -12825,6 +12825,42 @@ aexcompat::worker_render_report::SehDiagnosticsSnapshot capture_seh_diagnostics(
           escape(g_last_seh_exception_module), escape(g_last_seh_selector), g_last_seh_error};
 }
 
+aexcompat::worker_render_report::ClassicSubsystemDiagnostics capture_classic_subsystems() {
+  const auto i64 = [](auto value) { return static_cast<int64_t>(value); };
+  const auto& handle_stats = statistics();
+  const auto& world_stats = aexcompat::world_registry::statistics();
+  const auto& receipt_stats = aexcompat::render_receipts::statistics();
+  return {
+      suite_leases_balanced(),
+      {i64(suite_acquire_count()), i64(suite_release_count()), i64(live_suite_lease_count()),
+       i64(live_suite_reference_count())},
+      missing_suites_report_json(), live_suite_lease_summary(), handle_lifetimes_balanced(),
+      pf_path_lifetimes_balanced(),
+      {i64(g_pf_path_checkout_calls), i64(g_pf_path_checkin_calls), i64(g_pf_path_mask_calls),
+       i64(g_pf_path_preps_created), i64(g_pf_path_preps_disposed),
+       i64(g_invalid_pf_path_operations), i64(g_pf_path_reject_reason), 0},
+      {static_cast<double>(g_pf_path_last_feather_x), static_cast<double>(g_pf_path_last_feather_y)},
+      static_cast<double>(g_pf_path_last_opacity), i64(g_pf_path_last_quality),
+      {i64(g_pf_path_last_bounds[0]), i64(g_pf_path_last_bounds[1]),
+       i64(g_pf_path_last_bounds[2]), i64(g_pf_path_last_bounds[3])},
+      {i64(handle_stats.created), i64(handle_stats.disposed)},
+      {i64(g_arbitrary_copy_calls), i64(g_arbitrary_dispose_calls), i64(g_arbitrary_print_calls),
+       i64(g_arbitrary_print_failures), i64(g_arbitrary_roundtrip_calls),
+       i64(g_arbitrary_roundtrip_failures), i64(g_arbitrary_scan_calls),
+       i64(g_arbitrary_scan_failures), i64(g_arbitrary_compare_disagreements),
+       i64(g_arbitrary_new_calls), i64(g_arbitrary_interpolation_calls),
+       i64(g_arbitrary_interpolation_failures), i64(g_invalid_arbitrary_operations), 0, 0},
+      g_last_arbitrary_interpolation_amount, world_lifetimes_balanced(),
+      {i64(world_stats.created), i64(world_stats.disposed)}, async_receipt_lifetimes_balanced(),
+      {i64(receipt_stats.created), i64(receipt_stats.checked_in), i64(receipt_stats.live_count),
+       i64(receipt_stats.live_bytes), i64(receipt_stats.invalid_operations)},
+      async_layer_requests_balanced(),
+      {i64(g_async_layer_requests_created), i64(g_async_layer_requests_completed),
+       i64(g_async_layer_requests_canceled), i64(g_async_layer_callback_failures),
+       i64(g_async_layer_callback_exceptions), i64(g_async_layer_requests.size()),
+       i64(g_async_layer_reserved_bytes)}};
+}
+
 int worker_main_impl(int argc, wchar_t **argv) {
   SceneSuiteFactoryHooks scene_factory{};
   scene_factory.render_scene_enabled = &scene_render_receipt_enabled;
@@ -14953,67 +14989,9 @@ int worker_main_impl(int argc, wchar_t **argv) {
       g_render_draw_out_flags, g_render_ui_lifecycle_errors, g_render_ui_context_closed,
       g_app_color_picker_calls, g_app_invalidate_rect_calls, g_app_picker_color});
   report_snapshot.stream()
-            << ",\"suite_leases_balanced\":" << (suite_leases_balanced() ? "true" : "false")
-            << ",\"suite_lease_warning\":" << (!suite_leases_balanced() ? "true" : "false")
-            << ",\"suite_acquires\":" << suite_acquire_count()
-            << ",\"suite_releases\":" << suite_release_count()
-            << missing_suites_report_json()
-            << ",\"live_suite_lease_count\":" << live_suite_lease_count()
-            << ",\"live_suite_reference_count\":" << live_suite_reference_count()
-            << ",\"live_suite_leases\":\"" << live_suite_lease_summary() << "\""
-            << ",\"handle_lifetimes_balanced\":" << (handle_lifetimes_balanced() ? "true" : "false")
-            << ",\"pf_path_lifetimes_balanced\":" << (pf_path_lifetimes_balanced() ? "true" : "false")
-            << ",\"pf_path_checkout_calls\":" << g_pf_path_checkout_calls
-            << ",\"pf_path_checkin_calls\":" << g_pf_path_checkin_calls
-            << ",\"pf_path_mask_calls\":" << g_pf_path_mask_calls
-            << ",\"pf_path_preps_created\":" << g_pf_path_preps_created
-            << ",\"pf_path_preps_disposed\":" << g_pf_path_preps_disposed
-            << ",\"invalid_pf_path_operations\":" << g_invalid_pf_path_operations
-            << ",\"pf_path_reject_reason\":" << g_pf_path_reject_reason
-            << ",\"pf_path_last_feather\":[" << g_pf_path_last_feather_x << ','
-            << g_pf_path_last_feather_y << ']'
-            << ",\"pf_path_last_opacity\":" << g_pf_path_last_opacity
-            << ",\"pf_path_last_quality\":" << g_pf_path_last_quality
-            << ",\"pf_path_last_bounds\":[" << g_pf_path_last_bounds[0] << ','
-            << g_pf_path_last_bounds[1] << ',' << g_pf_path_last_bounds[2] << ','
-            << g_pf_path_last_bounds[3] << ']'
-            << ",\"handles_created\":" << statistics().created
-            << ",\"handles_disposed\":" << statistics().disposed
-            << ",\"arbitrary_copy_calls\":" << g_arbitrary_copy_calls
-            << ",\"arbitrary_dispose_calls\":" << g_arbitrary_dispose_calls
-            << ",\"arbitrary_print_calls\":" << g_arbitrary_print_calls
-            << ",\"arbitrary_print_failures\":" << g_arbitrary_print_failures
-            << ",\"arbitrary_roundtrip_calls\":" << g_arbitrary_roundtrip_calls
-            << ",\"arbitrary_roundtrip_failures\":" << g_arbitrary_roundtrip_failures
-            << ",\"arbitrary_scan_calls\":" << g_arbitrary_scan_calls
-            << ",\"arbitrary_scan_failures\":" << g_arbitrary_scan_failures
-            << ",\"arbitrary_compare_disagreements\":" << g_arbitrary_compare_disagreements
-            << ",\"arbitrary_new_calls\":" << g_arbitrary_new_calls
-            << ",\"arbitrary_interpolation_calls\":" << g_arbitrary_interpolation_calls
-            << ",\"arbitrary_interpolation_failures\":" << g_arbitrary_interpolation_failures
-            << ",\"arbitrary_interpolation_amount\":" << g_last_arbitrary_interpolation_amount
-            << ",\"invalid_arbitrary_operations\":" << g_invalid_arbitrary_operations
-            << ",\"world_lifetimes_balanced\":" << (world_lifetimes_balanced() ? "true" : "false")
-            << ",\"worlds_created\":" << aexcompat::world_registry::statistics().created
-            << ",\"worlds_disposed\":" << aexcompat::world_registry::statistics().disposed
-            << ",\"receipt_lifetimes_balanced\":"
-            << (async_receipt_lifetimes_balanced() ? "true" : "false")
-            << ",\"receipts_created\":" << aexcompat::render_receipts::statistics().created
-            << ",\"receipts_checked_in\":" << aexcompat::render_receipts::statistics().checked_in
-            << ",\"live_receipts\":" << aexcompat::render_receipts::statistics().live_count
-            << ",\"live_receipt_bytes\":" << aexcompat::render_receipts::statistics().live_bytes
-            << ",\"invalid_receipt_operations\":"
-            << aexcompat::render_receipts::statistics().invalid_operations
-            << ",\"async_layer_requests_balanced\":"
-            << (async_layer_requests_balanced() ? "true" : "false")
-            << ",\"async_layer_requests_created\":" << g_async_layer_requests_created
-            << ",\"async_layer_requests_completed\":" << g_async_layer_requests_completed
-            << ",\"async_layer_requests_canceled\":" << g_async_layer_requests_canceled
-            << ",\"async_layer_callback_failures\":" << g_async_layer_callback_failures
-            << ",\"async_layer_callback_exceptions\":" << g_async_layer_callback_exceptions
-            << ",\"live_async_layer_requests\":" << g_async_layer_requests.size()
-            << ",\"async_layer_reserved_bytes\":" << g_async_layer_reserved_bytes
             ;
+  aexcompat::worker_render_report::append_classic_subsystems(
+      report_snapshot, capture_classic_subsystems());
   aexcompat::worker_render_report::append_gpu_diagnostics(report_snapshot, capture_gpu_diagnostics());
   aexcompat::worker_render_report::append_seh_diagnostics(report_snapshot, capture_seh_diagnostics());
   report_snapshot.stream()

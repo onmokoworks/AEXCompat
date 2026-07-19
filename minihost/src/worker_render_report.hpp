@@ -161,6 +161,32 @@ struct SehDiagnosticsSnapshot {
 
 void append_seh_diagnostics(ReportSnapshot& report, const SehDiagnosticsSnapshot& snapshot);
 
+struct ClassicSubsystemDiagnostics {
+  bool suite_balanced{};
+  std::array<int64_t, 4> suite_counts{};  // acquires, releases, live leases, references
+  std::string missing_suites_json;
+  std::string live_suite_leases;
+  bool handle_balanced{};
+  bool path_balanced{};
+  std::array<int64_t, 8> path_counts{};
+  std::array<double, 2> path_feather{};
+  double path_opacity{};
+  int64_t path_quality{};
+  std::array<int64_t, 4> path_bounds{};
+  std::array<int64_t, 2> handles{};
+  std::array<int64_t, 15> arbitrary{};
+  double arbitrary_interpolation_amount{};
+  bool world_balanced{};
+  std::array<int64_t, 2> worlds{};
+  bool receipt_balanced{};
+  std::array<int64_t, 5> receipts{};
+  bool async_balanced{};
+  std::array<int64_t, 7> async{};
+};
+
+void append_classic_subsystems(
+    ReportSnapshot& report, const ClassicSubsystemDiagnostics& snapshot);
+
 void emit(const ReportSnapshot& snapshot, std::ostream& output);
 
 }  // namespace aexcompat::worker_render_report

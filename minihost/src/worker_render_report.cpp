@@ -169,6 +169,65 @@ void append_seh_diagnostics(ReportSnapshot& report, const SehDiagnosticsSnapshot
       << ",\"last_seh_error\":" << value.error;
 }
 
+void append_classic_subsystems(
+    ReportSnapshot& report, const ClassicSubsystemDiagnostics& value) {
+  report.stream()
+      << ",\"suite_leases_balanced\":" << (value.suite_balanced ? "true" : "false")
+      << ",\"suite_lease_warning\":" << (!value.suite_balanced ? "true" : "false")
+      << ",\"suite_acquires\":" << value.suite_counts[0]
+      << ",\"suite_releases\":" << value.suite_counts[1] << value.missing_suites_json
+      << ",\"live_suite_lease_count\":" << value.suite_counts[2]
+      << ",\"live_suite_reference_count\":" << value.suite_counts[3]
+      << ",\"live_suite_leases\":\"" << value.live_suite_leases << '"'
+      << ",\"handle_lifetimes_balanced\":" << (value.handle_balanced ? "true" : "false")
+      << ",\"pf_path_lifetimes_balanced\":" << (value.path_balanced ? "true" : "false")
+      << ",\"pf_path_checkout_calls\":" << value.path_counts[0]
+      << ",\"pf_path_checkin_calls\":" << value.path_counts[1]
+      << ",\"pf_path_mask_calls\":" << value.path_counts[2]
+      << ",\"pf_path_preps_created\":" << value.path_counts[3]
+      << ",\"pf_path_preps_disposed\":" << value.path_counts[4]
+      << ",\"invalid_pf_path_operations\":" << value.path_counts[5]
+      << ",\"pf_path_reject_reason\":" << value.path_counts[6]
+      << ",\"pf_path_last_feather\":[" << value.path_feather[0] << ',' << value.path_feather[1] << ']'
+      << ",\"pf_path_last_opacity\":" << value.path_opacity
+      << ",\"pf_path_last_quality\":" << value.path_quality
+      << ",\"pf_path_last_bounds\":[" << value.path_bounds[0] << ',' << value.path_bounds[1]
+      << ',' << value.path_bounds[2] << ',' << value.path_bounds[3] << ']'
+      << ",\"handles_created\":" << value.handles[0]
+      << ",\"handles_disposed\":" << value.handles[1]
+      << ",\"arbitrary_copy_calls\":" << value.arbitrary[0]
+      << ",\"arbitrary_dispose_calls\":" << value.arbitrary[1]
+      << ",\"arbitrary_print_calls\":" << value.arbitrary[2]
+      << ",\"arbitrary_print_failures\":" << value.arbitrary[3]
+      << ",\"arbitrary_roundtrip_calls\":" << value.arbitrary[4]
+      << ",\"arbitrary_roundtrip_failures\":" << value.arbitrary[5]
+      << ",\"arbitrary_scan_calls\":" << value.arbitrary[6]
+      << ",\"arbitrary_scan_failures\":" << value.arbitrary[7]
+      << ",\"arbitrary_compare_disagreements\":" << value.arbitrary[8]
+      << ",\"arbitrary_new_calls\":" << value.arbitrary[9]
+      << ",\"arbitrary_interpolation_calls\":" << value.arbitrary[10]
+      << ",\"arbitrary_interpolation_failures\":" << value.arbitrary[11]
+      << ",\"arbitrary_interpolation_amount\":" << value.arbitrary_interpolation_amount
+      << ",\"invalid_arbitrary_operations\":" << value.arbitrary[12]
+      << ",\"world_lifetimes_balanced\":" << (value.world_balanced ? "true" : "false")
+      << ",\"worlds_created\":" << value.worlds[0]
+      << ",\"worlds_disposed\":" << value.worlds[1]
+      << ",\"receipt_lifetimes_balanced\":" << (value.receipt_balanced ? "true" : "false")
+      << ",\"receipts_created\":" << value.receipts[0]
+      << ",\"receipts_checked_in\":" << value.receipts[1]
+      << ",\"live_receipts\":" << value.receipts[2]
+      << ",\"live_receipt_bytes\":" << value.receipts[3]
+      << ",\"invalid_receipt_operations\":" << value.receipts[4]
+      << ",\"async_layer_requests_balanced\":" << (value.async_balanced ? "true" : "false")
+      << ",\"async_layer_requests_created\":" << value.async[0]
+      << ",\"async_layer_requests_completed\":" << value.async[1]
+      << ",\"async_layer_requests_canceled\":" << value.async[2]
+      << ",\"async_layer_callback_failures\":" << value.async[3]
+      << ",\"async_layer_callback_exceptions\":" << value.async[4]
+      << ",\"live_async_layer_requests\":" << value.async[5]
+      << ",\"async_layer_reserved_bytes\":" << value.async[6];
+}
+
 void emit(const ReportSnapshot& snapshot, std::ostream& output) {
   output << snapshot.json();
 }
