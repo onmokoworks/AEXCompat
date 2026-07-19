@@ -1,7 +1,9 @@
 #include "worker_aegp_render_selftests.hpp"
 #include "worker_aegp_render_options.hpp"
+#include "worker_aegp_staged_item_runtime.hpp"
 #include "worker_render_receipts.hpp"
 #include "worker_world_registry.hpp"
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <cmath>
@@ -41,11 +43,21 @@ int32_t __cdecl render_get_region_reject(void*, void*);
 using AegpRenderCancelV1 = int32_t(__cdecl*)(void*, uint8_t*);
 int32_t __cdecl render_checkout_frame_reject(void*, AegpRenderCancelV1, void*, void**);
 int32_t publish_item_receipt(void*, void**);
-bool publish_staged_item_world(void*, AegpTime, AegpTime, int8_t, uint8_t,
-                               int32_t, int32_t, int32_t, int32_t, const void*);
-void write_staged_channel(std::byte*, int32_t, int, float);
 void clear_staged_item_worlds_for_test();
 bool verify_item_render_cycle_contract(void*);
+
+void write_staged_test_channel(std::byte* pixel, int32_t pixel_bytes,
+                               int channel, float value) {
+  value = std::clamp(value, 0.0f, 1.0f);
+  if (pixel_bytes == 4)
+    reinterpret_cast<uint8_t*>(pixel)[channel] =
+        static_cast<uint8_t>(std::lround(value * 255.0f));
+  else if (pixel_bytes == 8)
+    reinterpret_cast<uint16_t*>(pixel)[channel] =
+        static_cast<uint16_t>(std::lround(value * 32768.0f));
+  else
+    std::memcpy(pixel + channel * sizeof(float), &value, sizeof(value));
+}
 
 bool verify_aegp_render_options_suite1() {
   struct SyntheticReceiptScope {
@@ -264,7 +276,7 @@ bool verify_aegp_item_staged_worlds() {
       std::byte* pixel = pixels.data() + (static_cast<std::size_t>(y) * width + x) *
           pixel_bytes;
       for (int channel = 0; channel < 4; ++channel)
-        write_staged_channel(pixel, pixel_bytes, channel, value[channel]);
+        write_staged_test_channel(pixel, pixel_bytes, channel, value[channel]);
     }
     return pixels;
   };
@@ -273,7 +285,7 @@ bool verify_aegp_item_staged_worlds() {
   for (int32_t depth = 0; depth < 3; ++depth) {
     const int32_t pixel_bytes = 4 << depth;
     const auto pixels = fixture(pixel_bytes);
-    if (!publish_staged_item_world(aegp_comp_item_handle(), time, step, 1, 0,
+    if (!aexcompat::aegp_staged_item_runtime::publish_world(aegp_comp_item_handle(), time, step, 1, 0,
             formats[depth], width, height, width * pixel_bytes, pixels.data())) return false;
   }
   void* options = nullptr;
@@ -369,7 +381,7 @@ bool verify_aegp_item_staged_worlds() {
     return false;
 
   auto pixels8 = fixture(4);
-  if (!publish_staged_item_world(aegp_comp_item_handle(), time, step, 1, 0,
+  if (!aexcompat::aegp_staged_item_runtime::publish_world(aegp_comp_item_handle(), time, step, 1, 0,
           kPixelFormatArgb32, width, height, width * 4, pixels8.data())) return false;
   void* rejected = reinterpret_cast<void*>(1);
   if (render_options_set_quality(options, 0) != 0 ||

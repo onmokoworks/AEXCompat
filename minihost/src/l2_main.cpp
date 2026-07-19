@@ -74,6 +74,7 @@
 #include "worker_aegp_render_options.hpp"
 #include "worker_aegp_render_selftests.hpp"
 #include "worker_aegp_async_layer_runtime.hpp"
+#include "worker_aegp_staged_item_runtime.hpp"
 #include "worker_aegp_world_selftests.hpp"
 #include "worker_aegp_init_runtime.hpp"
 #include "worker_aegp_scene.hpp"
@@ -1845,34 +1846,6 @@ std::array<float, 4> g_render_options_argb32f{};
 bool g_synthetic_receipt_test_mode{};
 std::atomic<uint32_t> g_render_project_timestamp{1};
 std::atomic<bool> g_render_timestamp_exhausted{};
-struct StagedItemWorld {
-  void* item{};
-  AegpTime time{};
-  AegpTime time_step{};
-  int8_t quality{1};
-  uint8_t guide_layers{};
-  int32_t pixel_format{};
-  int32_t width{};
-  int32_t height{};
-  int32_t rowbytes{};
-  uint32_t project_generation{};
-  uint64_t stage_generation{};
-  std::shared_ptr<const std::vector<std::byte>> backing;
-};
-constexpr std::size_t kMaxStagedItemWorlds = 32;
-std::mutex g_staged_item_world_mutex;
-std::vector<StagedItemWorld> g_staged_item_worlds;
-std::atomic<uint64_t> g_staged_item_generation{1};
-struct ItemRenderStackKey {
-  void* item{};
-  AegpTime time{};
-  uint32_t project_generation{};
-};
-thread_local std::vector<ItemRenderStackKey> g_item_render_stack;
-uint32_t g_staged_item_worlds_published{};
-uint32_t g_staged_item_world_cache_hits{};
-uint32_t g_staged_item_world_cache_misses{};
-uint32_t g_staged_item_world_cycles_rejected{};
 struct ExternalRenderedFrame {
   AegpRenderOptionsValue options{};
   AegpRect rendered_region{};
@@ -1912,19 +1885,13 @@ void bump_render_project_timestamp() {
       g_render_timestamp_exhausted.store(true);
       std::lock_guard<std::mutex> lock(g_world_mutex);
       g_external_render_cache.clear();
-      {
-        std::lock_guard<std::mutex> stage_lock(g_staged_item_world_mutex);
-        g_staged_item_worlds.clear();
-      }
+      aexcompat::aegp_staged_item_runtime::clear();
       return;
     }
     if (g_render_project_timestamp.compare_exchange_weak(current, next)) {
       std::lock_guard<std::mutex> lock(g_world_mutex);
       g_external_render_cache.clear();
-      {
-        std::lock_guard<std::mutex> stage_lock(g_staged_item_world_mutex);
-        g_staged_item_worlds.clear();
-      }
+      aexcompat::aegp_staged_item_runtime::clear();
       return;
     }
   }
@@ -2239,235 +2206,20 @@ int32_t publish_external_cached_receipt(const AegpRenderOptionsValue& options,
   return 0;
 }
 
-int32_t item_world_pixel_bytes(int32_t pixel_format) {
-  if (pixel_format == kPixelFormatArgb32) return 4;
-  if (pixel_format == kPixelFormatArgb64) return 8;
-  if (pixel_format == kPixelFormatArgb128) return 16;
-  return 0;
+uint32_t staged_item_project_generation() {
+  return g_render_project_timestamp.load();
 }
-
-bool same_stage_rational(const AegpTime& left, const AegpTime& right) {
-  return left.scale != 0 && right.scale != 0 &&
-      static_cast<int64_t>(left.value) * right.scale ==
-      static_cast<int64_t>(right.value) * left.scale;
+bool staged_item_synthetic_receipts_enabled() {
+  return g_synthetic_receipt_test_mode;
 }
-
-bool publish_staged_item_world(void* item, AegpTime time, AegpTime time_step,
-    int8_t quality, uint8_t guide_layers, int32_t pixel_format, int32_t width,
-    int32_t height, int32_t rowbytes, const void* pixels) {
-  const int32_t pixel_bytes = item_world_pixel_bytes(pixel_format);
-  const uint64_t tight_rowbytes = static_cast<uint64_t>(width) * pixel_bytes;
-  const uint64_t tight_bytes = tight_rowbytes * height;
-  if (!item || time.scale == 0 || time_step.scale == 0 || time_step.value <= 0 ||
-      quality < 0 || quality > 1 || guide_layers > 1 || !pixel_bytes || width <= 0 ||
-      height <= 0 || width > 4096 || height > 4096 || rowbytes < tight_rowbytes ||
-      !pixels || tight_bytes == 0 || tight_bytes > kMaxReceiptBytes) return false;
-  std::shared_ptr<std::vector<std::byte>> backing;
-  try {
-    backing = std::make_shared<std::vector<std::byte>>(static_cast<std::size_t>(tight_bytes));
-    for (int32_t y = 0; y < height; ++y)
-      std::memcpy(backing->data() + static_cast<std::size_t>(y) * tight_rowbytes,
-          static_cast<const std::byte*>(pixels) + static_cast<std::size_t>(y) * rowbytes,
-          static_cast<std::size_t>(tight_rowbytes));
-  } catch (...) { return false; }
-  const uint32_t project_generation = g_render_project_timestamp.load();
-  const uint64_t stage_generation = g_staged_item_generation.fetch_add(1);
-  if (project_generation == 0 || stage_generation == 0) return false;
-  StagedItemWorld stage{item, time, time_step, quality, guide_layers, pixel_format,
-      width, height, static_cast<int32_t>(tight_rowbytes), project_generation,
-      stage_generation, std::move(backing)};
-  std::lock_guard<std::mutex> lock(g_staged_item_world_mutex);
-  auto same_key = [&](const StagedItemWorld& value) {
-    return value.item == item && same_stage_rational(value.time, time) &&
-        same_stage_rational(value.time_step, time_step) && value.quality == quality &&
-        value.guide_layers == guide_layers && value.pixel_format == pixel_format &&
-        value.width == width && value.height == height && value.rowbytes == tight_rowbytes &&
-        value.project_generation == project_generation;
-  };
-  const auto existing = std::find_if(g_staged_item_worlds.begin(),
-      g_staged_item_worlds.end(), same_key);
-  if (existing != g_staged_item_worlds.end()) *existing = std::move(stage);
-  else if (g_staged_item_worlds.size() == kMaxStagedItemWorlds) {
-    const auto oldest = std::min_element(g_staged_item_worlds.begin(),
-        g_staged_item_worlds.end(), [](const auto& left, const auto& right) {
-          return left.stage_generation < right.stage_generation;
-        });
-    *oldest = std::move(stage);
-  } else {
-    try { g_staged_item_worlds.push_back(std::move(stage)); }
-    catch (...) { return false; }
-  }
-  ++g_staged_item_worlds_published;
+const bool g_staged_item_runtime_configured = [] {
+  aexcompat::aegp_staged_item_runtime::configure({
+      &staged_item_project_generation, &staged_item_synthetic_receipts_enabled,
+      &publish_async_receipt});
   return true;
-}
-
-bool snapshot_staged_item_world(const AegpRenderOptionsValue& options,
-                                StagedItemWorld& stage) {
-  const int32_t pixel_format = options.world_type == 1 ? kPixelFormatArgb32 :
-      (options.world_type == 2 ? kPixelFormatArgb64 :
-       (options.world_type == 3 ? kPixelFormatArgb128 : 0));
-  const uint32_t generation = g_render_project_timestamp.load();
-  std::lock_guard<std::mutex> lock(g_staged_item_world_mutex);
-  const auto found = std::find_if(g_staged_item_worlds.rbegin(),
-      g_staged_item_worlds.rend(), [&](const StagedItemWorld& value) {
-        return value.item == options.item && same_stage_rational(value.time, options.time) &&
-            same_stage_rational(value.time_step, options.time_step) &&
-            value.quality == options.render_quality &&
-            value.guide_layers == options.render_guide_layers &&
-            value.pixel_format == pixel_format && value.project_generation == generation;
-      });
-  if (found == g_staged_item_worlds.rend() || !found->backing) {
-    ++g_staged_item_world_cache_misses;
-    return false;
-  }
-  stage = *found;
-  ++g_staged_item_world_cache_hits;
-  return true;
-}
-
-bool item_stack_contains(const ItemRenderStackKey& key) {
-  return std::any_of(g_item_render_stack.begin(), g_item_render_stack.end(),
-      [&](const auto& active) {
-        return active.item == key.item && active.project_generation == key.project_generation &&
-            same_stage_rational(active.time, key.time);
-      });
-}
-
-struct ItemRenderStackScope {
-  bool entered{};
-  explicit ItemRenderStackScope(ItemRenderStackKey key) {
-    if (item_stack_contains(key)) return;
-    g_item_render_stack.push_back(key);
-    entered = true;
-  }
-  ~ItemRenderStackScope() { if (entered) g_item_render_stack.pop_back(); }
-};
-
-float read_staged_channel(const std::byte* pixel, int32_t pixel_bytes, int channel) {
-  if (pixel_bytes == 4)
-    return static_cast<float>(reinterpret_cast<const uint8_t*>(pixel)[channel]) / 255.0f;
-  if (pixel_bytes == 8)
-    return static_cast<float>(reinterpret_cast<const uint16_t*>(pixel)[channel]) / 32768.0f;
-  float value = 0.0f;
-  std::memcpy(&value, pixel + channel * sizeof(float), sizeof(value));
-  return std::isfinite(value) ? value : 0.0f;
-}
-
-void write_staged_channel(std::byte* pixel, int32_t pixel_bytes, int channel, float value) {
-  value = std::clamp(value, 0.0f, 1.0f);
-  if (pixel_bytes == 4)
-    reinterpret_cast<uint8_t*>(pixel)[channel] =
-        static_cast<uint8_t>(std::lround(value * 255.0f));
-  else if (pixel_bytes == 8)
-    reinterpret_cast<uint16_t*>(pixel)[channel] =
-        static_cast<uint16_t>(std::lround(value * 32768.0f));
-  else
-    std::memcpy(pixel + channel * sizeof(float), &value, sizeof(value));
-}
-
-int32_t transform_staged_item_world(const StagedItemWorld& stage,
-    const AegpRenderOptionsValue& options, std::unique_ptr<ReceiptDraft>& receipt) {
-  const int32_t pixel_bytes = item_world_pixel_bytes(stage.pixel_format);
-  if (!stage.backing || !pixel_bytes || options.downsample_x <= 0 ||
-      options.downsample_y <= 0 || options.field < 0 || options.field > 2 ||
-      options.matte < 0 || options.matte > 2 || options.channel_order < 0 ||
-      options.channel_order > 1) return 4;
-  const uint64_t source_bytes = static_cast<uint64_t>(stage.rowbytes) * stage.height;
-  if (stage.width <= 0 || stage.height <= 0 || stage.rowbytes < stage.width * pixel_bytes ||
-      source_bytes != stage.backing->size()) return 4;
-  const int32_t width = (stage.width + options.downsample_x - 1) / options.downsample_x;
-  const int32_t height = (stage.height + options.downsample_y - 1) / options.downsample_y;
-  const uint64_t bytes = static_cast<uint64_t>(width) * height * pixel_bytes;
-  if (bytes == 0 || bytes > kMaxReceiptBytes) return 4;
-  try {
-    receipt = std::make_unique<ReceiptDraft>();
-    receipt->pixels.resize(static_cast<std::size_t>(bytes));
-  } catch (...) { return 4; }
-  receipt->staged_source_pin = stage.backing;
-  const bool zero_roi = options.roi.left == 0 && options.roi.top == 0 &&
-      options.roi.right == 0 && options.roi.bottom == 0;
-  const AegpRect roi = zero_roi ? AegpRect{0, 0, stage.width, stage.height} :
-      AegpRect{(std::max)(0, options.roi.left), (std::max)(0, options.roi.top),
-          (std::min)(stage.width, options.roi.right),
-          (std::min)(stage.height, options.roi.bottom)};
-  const float background = 0x3030 / 65535.0f;
-  for (int32_t y = 0; y < height; ++y) {
-    const int32_t source_y = y * options.downsample_y;
-    for (int32_t x = 0; x < width; ++x) {
-      const int32_t source_x = x * options.downsample_x;
-      const bool in_roi = source_x >= roi.left && source_x < roi.right &&
-          source_y >= roi.top && source_y < roi.bottom;
-      const bool in_field = options.field == 0 ||
-          (options.field == 1 && (source_y & 1) == 0) ||
-          (options.field == 2 && (source_y & 1) != 0);
-      if (!in_roi || !in_field) continue;
-      const std::byte* source = stage.backing->data() +
-          static_cast<std::size_t>(source_y) * stage.rowbytes +
-          static_cast<std::size_t>(source_x) * pixel_bytes;
-      std::array<float, 4> argb{};
-      for (int c = 0; c < 4; ++c) argb[c] = read_staged_channel(source, pixel_bytes, c);
-      if (options.matte == 1)
-        for (int c = 1; c < 4; ++c) argb[c] *= argb[0];
-      else if (options.matte == 2)
-        for (int c = 1; c < 4; ++c)
-          argb[c] = argb[c] * argb[0] + background * (1.0f - argb[0]);
-      const std::array<float, 4> packed = options.channel_order == 0 ? argb :
-          std::array<float, 4>{{argb[3], argb[2], argb[1], argb[0]}};
-      std::byte* destination = receipt->pixels.data() +
-          (static_cast<std::size_t>(y) * width + x) * pixel_bytes;
-      for (int c = 0; c < 4; ++c)
-        write_staged_channel(destination, pixel_bytes, c, packed[c]);
-    }
-  }
-  const auto ceil_div = [](int32_t value, int32_t divisor) {
-    return value <= 0 ? 0 : (value + divisor - 1) / divisor;
-  };
-  receipt->pixel_format = stage.pixel_format;
-  receipt->has_render_options = true;
-  receipt->render_options = options;
-  receipt->rendered_region = {ceil_div(roi.left, options.downsample_x),
-      ceil_div(roi.top, options.downsample_y), ceil_div(roi.right, options.downsample_x),
-      ceil_div(roi.bottom, options.downsample_y)};
-  receipt->render_timestamp = stage.project_generation;
-  receipt->world.data = receipt->pixels.data();
-  receipt->world.rowbytes = width * pixel_bytes;
-  receipt->world.world_flags = pixel_bytes == 4 ? 0 : 1;
-  receipt->world.width = width;
-  receipt->world.height = height;
-  receipt->world.extent_hint = {0, 0, width, height};
-  receipt->world.pix_aspect_ratio = {1, 1};
-  return 0;
-}
-
-int32_t register_item_receipt(std::unique_ptr<ReceiptDraft> receipt, void** output) {
-  return aexcompat::render_receipts::register_receipt(
-      std::move(receipt), output);
-}
-
+}();
 int32_t publish_item_receipt(void* options, void** receipt) {
-  if (receipt) *receipt = nullptr;
-  if (!receipt) return 4;
-  AegpRenderOptionsValue snapshot{};
-  if (!snapshot_render_options(options, snapshot)) return 4;
-  const ItemRenderStackKey stack_key{
-      snapshot.item, snapshot.time, g_render_project_timestamp.load()};
-  if (item_stack_contains(stack_key)) {
-    ++g_staged_item_world_cycles_rejected;
-    return 4;
-  }
-  ItemRenderStackScope stack_scope(stack_key);
-  if (!stack_scope.entered) return 4;
-  StagedItemWorld stage{};
-  if (snapshot_staged_item_world(snapshot, stage)) {
-    std::unique_ptr<ReceiptDraft> staged_receipt;
-    if (transform_staged_item_world(stage, snapshot, staged_receipt) != 0) return 4;
-    return register_item_receipt(std::move(staged_receipt), receipt);
-  }
-  if (!g_synthetic_receipt_test_mode || snapshot.matte == 2) return 4;
-  const int32_t pixel_format = snapshot.world_type == 1 ? kPixelFormatArgb32 :
-      (snapshot.world_type == 2 ? kPixelFormatArgb64 :
-       (snapshot.world_type == 3 ? kPixelFormatArgb128 : 0));
-  return pixel_format ? publish_async_receipt(pixel_format, receipt, &snapshot) : 4;
+  return aexcompat::aegp_staged_item_runtime::publish_receipt(options, receipt);
 }
 
 int32_t publish_loaded_layer_receipt_from_context(
@@ -2932,26 +2684,16 @@ bool render_options_lifetimes_balanced() {
 }
 
 void clear_staged_item_worlds_for_test() {
-  std::lock_guard<std::mutex> lock(g_staged_item_world_mutex);
-  g_staged_item_worlds.clear();
+  aexcompat::aegp_staged_item_runtime::clear();
 }
 
 bool verify_item_render_cycle_contract(void* options) {
   const AegpTime time{5, 24};
-  void* rejected = reinterpret_cast<void*>(1);
-  const ItemRenderStackKey direct{aegp_comp_item_handle(), time,
-      g_render_project_timestamp.load()};
-  {
-    ItemRenderStackScope outer(direct);
-    if (!outer.entered || render_checkout_frame_reject(
-            options, nullptr, nullptr, &rejected) == 0 || rejected) return false;
-    ItemRenderStackScope nested_other({reinterpret_cast<void*>(0x7770), time,
-        g_render_project_timestamp.load()});
-    if (!nested_other.entered || !item_stack_contains(direct)) return false;
-  }
+  if (!aexcompat::aegp_staged_item_runtime::verify_recursion_guard(
+          aegp_comp_item_handle(), time, options, &render_checkout_frame_reject)) return false;
   const uint32_t old_generation = g_render_project_timestamp.load();
   bump_render_project_timestamp();
-  rejected = reinterpret_cast<void*>(1);
+  void* rejected = reinterpret_cast<void*>(1);
   return g_render_project_timestamp.load() != old_generation &&
       render_checkout_frame_reject(options, nullptr, nullptr, &rejected) != 0 && !rejected &&
       render_options_dispose(options) == 0;
@@ -6973,7 +6715,7 @@ int32_t classic_render_runtime(EffectEntry entry, std::array<std::byte, kInSize>
   if (!aexcompat::render::copy_packed_world(destination, rowbytes, width, height,
                                              pixel_bytes, logical_output)) return -3;
   output_hash = sha256_bytes(logical_output.data(), logical_output.size());
-  if (error == 0 && !publish_staged_item_world(aegp_comp_item_handle(),
+  if (error == 0 && !aexcompat::aegp_staged_item_runtime::publish_world(aegp_comp_item_handle(),
           {external_current_time, external_time_scale},
           {external_time_step, external_time_scale},
           static_cast<int8_t>(read<int32_t>(input, kInQuality) == 0 ? 0 : 1), 0,
@@ -7095,7 +6837,7 @@ bool exercise_loaded_effect_item_receipt(EffectEntry entry,
     final_stage[pixel * 4 + 2] = static_cast<uint8_t>(pixel * 29);
     final_stage[pixel * 4 + 3] = static_cast<uint8_t>(pixel * 43);
   }
-  const bool stage_published = publish_staged_item_world(aegp_comp_item_handle(),
+  const bool stage_published = aexcompat::aegp_staged_item_runtime::publish_world(aegp_comp_item_handle(),
       {read<int32_t>(input, kInCurrentTime),
        read<uint32_t>(input, kInTimeScale)},
       {1, 30}, 1, 0, kPixelFormatArgb32, 16, 12, 16 * 4, final_stage.data());
@@ -9734,13 +9476,14 @@ int worker_main_impl(int argc, wchar_t **argv) {
   if (argc == 2 &&
       std::wstring(argv[1]) == L"--self-test-aegp-item-staged-worlds") {
     const bool passed = verify_aegp_item_staged_worlds();
+    const auto staged = aexcompat::aegp_staged_item_runtime::diagnostics();
     std::cout << "{\"aegp_item_staged_worlds\":\""
               << (passed ? "passed" : "failed")
               << "\",\"immutable_stage\":true,\"reentrant_render_used\":false"
-              << ",\"published\":" << g_staged_item_worlds_published
-              << ",\"cache_hits\":" << g_staged_item_world_cache_hits
-              << ",\"cache_misses\":" << g_staged_item_world_cache_misses
-              << ",\"cycles_rejected\":" << g_staged_item_world_cycles_rejected
+              << ",\"published\":" << staged.published
+              << ",\"cache_hits\":" << staged.cache_hits
+              << ",\"cache_misses\":" << staged.cache_misses
+              << ",\"cycles_rejected\":" << staged.cycles_rejected
               << "}\n";
     return passed ? 0 : 1;
   }
