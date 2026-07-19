@@ -1105,6 +1105,12 @@ struct SmartHostedLayer {
   int32_t height{};
   int32_t checkout_id{-1};
   void* world{};
+  // The intersected answer written to PF_CheckoutResult for this layer's
+  // checkout; {-1,-1,-1,-1} until the layer is checked out.
+  std::array<int32_t, 4> checkout_rect{-1, -1, -1, -1};
+  // Per-checkout world block (same pixels, extent_hint = checkout_rect)
+  // handed out by checkout_layer_pixels instead of the shared base world.
+  void* view_world{};
 };
 std::vector<SmartHostedLayer> g_smart_hosted_layers;
 struct ExternalLayerInput {
@@ -1152,6 +1158,22 @@ int32_t g_checkout_time_step = 0;
 uint32_t g_checkout_time_scale = 0;
 std::array<int32_t, 4> g_input_checkout_request{-1, -1, -1, -1};
 std::array<int32_t, 4> g_map_checkout_request{-1, -1, -1, -1};
+// The checkout answer is the intersection of the plug-in's request rect with
+// the layer extent (SDK PF_CheckoutResult.result_rect: "the rectangle
+// actually available from this request (can be empty)"). The raw request
+// stays recorded above; these hold the intersected result_rect actually
+// written back, {-1,-1,-1,-1} until the layer is checked out.
+std::array<int32_t, 4> g_input_checkout_result_rect{-1, -1, -1, -1};
+std::array<int32_t, 4> g_map_checkout_result_rect{-1, -1, -1, -1};
+uint32_t g_malformed_checkout_requests = 0;
+uint32_t g_empty_checkout_pixel_denials = 0;
+void* g_input_checkout_view_world = nullptr;
+void* g_map_checkout_view_world = nullptr;
+// True only while a kSmartRenderGpu dispatch is in flight, i.e. when the GPU
+// transport has promoted the base input/output worlds in place. A GPU
+// negotiation that falls back to a CPU kSmartRender keeps this false so the
+// checkout views (and the intersection contract) stay in force.
+bool g_smart_gpu_render_dispatched = false;
 std::string g_smart_pixel_format = "argb8";
 // Opt-in world snapshot dumps and output checksum detail (issue #19). Both
 // default off; the broker enables them per run with the --dump-worlds-v1 and
@@ -1534,17 +1556,56 @@ void write_rect(void* destination, int32_t width, int32_t height) {
 // size when a spatial context supplies a full resolution.
 constexpr size_t kCheckoutResultBytes = 76;
 
-void write_checkout_result(void* destination, int32_t width, int32_t height,
-                           int32_t reference_width, int32_t reference_height) {
+void write_checkout_result_rects(void* destination,
+                                 const std::array<int32_t, 4>& result_rect,
+                                 const std::array<int32_t, 4>& max_result_rect,
+                                 int32_t reference_width, int32_t reference_height) {
   auto* bytes = static_cast<std::byte*>(destination);
   std::memset(bytes, 0, kCheckoutResultBytes);
-  write_rect(bytes, width, height);
-  write_rect(bytes + 16, width, height);
+  std::memcpy(bytes, result_rect.data(), sizeof(result_rect));
+  std::memcpy(bytes + 16, max_result_rect.data(), sizeof(max_result_rect));
   const int32_t par[2] = {g_pixel_aspect_ratio.numerator,
                           static_cast<int32_t>(g_pixel_aspect_ratio.denominator)};
   std::memcpy(bytes + 32, par, sizeof(par));
   const int32_t reference_size[2] = {reference_width, reference_height};
   std::memcpy(bytes + 44, reference_size, sizeof(reference_size));
+}
+
+// PF_RenderRequest begins with the request PF_LRect. A null request pointer is
+// treated as "everything available": the ABI admits it and the pre-checkout
+// self-test exercises that path. An inverted rect is malformed and rejected;
+// any non-inverted rect (including an empty or fully out-of-range one) is a
+// legal request that intersects with the layer extent, because plug-ins
+// legitimately pass huge "give me all you have" rects.
+enum class CheckoutRequestState { Full, Rect, Malformed };
+
+CheckoutRequestState parse_checkout_request(const void* request,
+                                            std::array<int32_t, 4>& rect) {
+  if (!request) return CheckoutRequestState::Full;
+  std::memcpy(rect.data(), request, sizeof(rect));
+  if (rect[2] < rect[0] || rect[3] < rect[1]) return CheckoutRequestState::Malformed;
+  return CheckoutRequestState::Rect;
+}
+
+bool empty_checkout_rect(const std::array<int32_t, 4>& rect) {
+  return rect[0] == rect[2] || rect[1] == rect[3];
+}
+
+std::array<int32_t, 4> intersect_checkout_rect(const std::array<int32_t, 4>& rect,
+                                               int32_t width, int32_t height) {
+  const std::array<int32_t, 4> clipped{
+      std::max(rect[0], 0), std::max(rect[1], 0),
+      std::min(rect[2], width), std::min(rect[3], height)};
+  if (clipped[0] >= clipped[2] || clipped[1] >= clipped[3]) return {0, 0, 0, 0};
+  return clipped;
+}
+
+// Checkout view worlds keep full-layer dimensions (world coordinates stay
+// layer coordinates; PF_EffectWorld has no origin field) and communicate the
+// checked-out sub-region through extent_hint at offset 44.
+void write_world_extent_hint(void* world, const std::array<int32_t, 4>& rect) {
+  if (!world) return;
+  std::memcpy(static_cast<std::byte*>(world) + 44, rect.data(), sizeof(rect));
 }
 
 constexpr uint32_t kMaxGuidMixInBytes = 1024 * 1024;
@@ -1602,12 +1663,26 @@ int32_t __cdecl pre_checkout_layer(void*, int32_t index, int32_t checkout_id,
         [index](const auto& layer) { return layer.slot == index && !layer.timed; });
   const bool timed_slot = std::any_of(g_smart_hosted_layers.begin(), g_smart_hosted_layers.end(),
       [index](const auto& layer) { return layer.slot == index && layer.timed; });
+  std::array<int32_t, 4> request_rect{};
+  const CheckoutRequestState request_state = parse_checkout_request(request, request_rect);
+  if (request_state == CheckoutRequestState::Malformed) {
+    ++g_malformed_checkout_requests;
+    return 4;
+  }
+  const auto answer_rect = [&](int32_t width, int32_t height) {
+    return request_state == CheckoutRequestState::Rect
+        ? intersect_checkout_rect(request_rect, width, height)
+        : std::array<int32_t, 4>{0, 0, width, height};
+  };
   if (hosted != g_smart_hosted_layers.end()) {
     if (request) std::memcpy(g_map_checkout_request.data(), request, sizeof(g_map_checkout_request));
     hosted->checkout_id = checkout_id;
     if (!result) return 4;
-    write_checkout_result(result, hosted->width, hosted->height,
-                          hosted->width, hosted->height);
+    hosted->checkout_rect = answer_rect(hosted->width, hosted->height);
+    write_world_extent_hint(hosted->view_world, hosted->checkout_rect);
+    write_checkout_result_rects(result, hosted->checkout_rect,
+                                {0, 0, hosted->width, hosted->height},
+                                hosted->width, hosted->height);
     return 0;
   }
   if (timed_slot) return 4;
@@ -1626,14 +1701,20 @@ int32_t __cdecl pre_checkout_layer(void*, int32_t index, int32_t checkout_id,
         g_full_resolution_width > 0 ? g_full_resolution_width : g_smart_width;
     const int32_t reference_height =
         g_full_resolution_height > 0 ? g_full_resolution_height : g_smart_height;
-    write_checkout_result(result, g_smart_width, g_smart_height,
-                          reference_width, reference_height);
+    g_input_checkout_result_rect = answer_rect(g_smart_width, g_smart_height);
+    write_world_extent_hint(g_input_checkout_view_world, g_input_checkout_result_rect);
+    write_checkout_result_rects(result, g_input_checkout_result_rect,
+                                {0, 0, g_smart_width, g_smart_height},
+                                reference_width, reference_height);
     return 0;
   }
   if (index == g_secondary_layer_slot && g_smart_map_world) {
     g_secondary_checkout_id = checkout_id;
-    write_checkout_result(result, g_smart_map_width, g_smart_map_height,
-                          g_smart_map_width, g_smart_map_height);
+    g_map_checkout_result_rect = answer_rect(g_smart_map_width, g_smart_map_height);
+    write_world_extent_hint(g_map_checkout_view_world, g_map_checkout_result_rect);
+    write_checkout_result_rects(result, g_map_checkout_result_rect,
+                                {0, 0, g_smart_map_width, g_smart_map_height},
+                                g_smart_map_width, g_smart_map_height);
     return 0;
   }
   return 4;
@@ -1693,17 +1774,51 @@ bool verify_pre_checkout_result_contract() {
   return passed;
 }
 
+// A checkout whose intersected result_rect came back empty promised no
+// pixels, so a later checkout_layer_pixels on it is refused fail-closed. The
+// {-1,-1,-1,-1} sentinel (no pre-render checkout recorded) keeps the historic
+// permissive full-world answer so render-only dispatch paths stay observable.
+bool checkout_promised_no_pixels(const std::array<int32_t, 4>& rect) {
+  const std::array<int32_t, 4> sentinel{-1, -1, -1, -1};
+  return rect != sentinel && empty_checkout_rect(rect);
+}
+
 int32_t __cdecl smart_checkout_pixels(void*, int32_t checkout_id, void** world) {
   if (!world) return 4;
+  // A dispatched GPU Smart Render promotes the base input/output worlds in
+  // place (the CUDA transport rewrites their data pointers to device
+  // allocations, and is_active_gpu_world admits only those base worlds). A
+  // checkout view would hand the plug-in a stale host pointer the GPU Device
+  // Suite rejects, so during an actual kSmartRenderGpu dispatch the base
+  // world is returned as before. A GPU negotiation that fell back to a CPU
+  // kSmartRender never promotes the worlds, so views (and the intersection
+  // contract) stay active there; the empty-answer denial holds on every path.
+  const bool use_views = !g_smart_gpu_render_dispatched;
   const auto hosted = std::find_if(g_smart_hosted_layers.begin(), g_smart_hosted_layers.end(),
       [checkout_id](const auto& layer) { return layer.checkout_id == checkout_id; });
   if (hosted != g_smart_hosted_layers.end() && hosted->world) {
-    *world = hosted->world;
+    if (checkout_promised_no_pixels(hosted->checkout_rect)) {
+      ++g_empty_checkout_pixel_denials;
+      return 4;
+    }
+    *world = use_views && hosted->view_world ? hosted->view_world : hosted->world;
     return 0;
   }
-  if (checkout_id == 0 && g_smart_input_world) *world = g_smart_input_world;
-  else if (checkout_id == g_secondary_checkout_id && g_smart_map_world) *world = g_smart_map_world;
-  else return 4;
+  if (checkout_id == 0 && g_smart_input_world) {
+    if (checkout_promised_no_pixels(g_input_checkout_result_rect)) {
+      ++g_empty_checkout_pixel_denials;
+      return 4;
+    }
+    *world = use_views && g_input_checkout_view_world ? g_input_checkout_view_world
+                                                      : g_smart_input_world;
+  } else if (checkout_id == g_secondary_checkout_id && g_smart_map_world) {
+    if (checkout_promised_no_pixels(g_map_checkout_result_rect)) {
+      ++g_empty_checkout_pixel_denials;
+      return 4;
+    }
+    *world = use_views && g_map_checkout_view_world ? g_map_checkout_view_world
+                                                    : g_smart_map_world;
+  } else return 4;
   return 0;
 }
 int32_t __cdecl smart_checkin_pixels(void*, int32_t) { return 0; }
@@ -1711,6 +1826,121 @@ int32_t __cdecl smart_checkout_output(void*, void** world) {
   if (!world || !g_smart_output_world) return 4;
   *world = g_smart_output_world;
   return 0;
+}
+
+bool verify_checkout_intersection_case(const std::array<int32_t, 4>* request_rect,
+                                       int32_t expected_status,
+                                       const std::array<int32_t, 4>& expected_result) {
+  // PF_RenderRequest is rect(16) + field(4) + channel_mask(4) + boolean(1) +
+  // unused[3] + reserved[4] = 44 bytes; only the leading rect matters here.
+  std::array<std::byte, 44> request{};
+  if (request_rect) std::memcpy(request.data(), request_rect->data(), sizeof(*request_rect));
+  std::array<std::byte, kCheckoutResultBytes> result{};
+  result.fill(std::byte{0xCD});
+  g_input_checkout_result_rect = {-1, -1, -1, -1};
+  const int32_t status = pre_checkout_layer(
+      nullptr, 0, 0, request_rect ? request.data() : nullptr,
+      g_checkout_current_time, 1, g_checkout_current_time_scale, result.data());
+  if (status != expected_status) return false;
+  if (expected_status != 0) return true;
+  std::array<int32_t, 4> rect{};
+  std::memcpy(rect.data(), result.data(), sizeof(rect));
+  if (rect != expected_result) return false;
+  std::memcpy(rect.data(), result.data() + 16, sizeof(rect));
+  const std::array<int32_t, 4> full_extent{0, 0, g_smart_width, g_smart_height};
+  if (rect != full_extent) return false;
+  return g_input_checkout_result_rect == expected_result;
+}
+
+bool verify_checkout_request_intersection_contract() {
+  const int32_t saved_width = g_smart_width;
+  const int32_t saved_height = g_smart_height;
+  const SpatialRatio saved_par = g_pixel_aspect_ratio;
+  const int32_t saved_full_width = g_full_resolution_width;
+  const int32_t saved_full_height = g_full_resolution_height;
+  const auto saved_request = g_input_checkout_request;
+  const auto saved_result_rect = g_input_checkout_result_rect;
+  const auto saved_hosted_layers = g_smart_hosted_layers;
+  void* const saved_input_world = g_smart_input_world;
+  void* const saved_input_view = g_input_checkout_view_world;
+  g_smart_width = 640;
+  g_smart_height = 360;
+  g_pixel_aspect_ratio = {1, 1};
+  g_full_resolution_width = 0;
+  g_full_resolution_height = 0;
+  g_smart_input_world = nullptr;
+  g_input_checkout_view_world = nullptr;
+  const std::array<int32_t, 4> sub_rect{10, 20, 100, 200};
+  const std::array<int32_t, 4> oversized{-50, -50, 10000, 10000};
+  const std::array<int32_t, 4> disjoint{700, 400, 800, 500};
+  const std::array<int32_t, 4> degenerate{5, 3, 5, 300};
+  const std::array<int32_t, 4> inverted{100, 0, 10, 50};
+  bool passed = verify_checkout_intersection_case(nullptr, 0, {0, 0, 640, 360});
+  passed = verify_checkout_intersection_case(&sub_rect, 0, sub_rect) && passed;
+  passed = verify_checkout_intersection_case(&oversized, 0, {0, 0, 640, 360}) && passed;
+  passed = verify_checkout_intersection_case(&disjoint, 0, {0, 0, 0, 0}) && passed;
+  passed = verify_checkout_intersection_case(&degenerate, 0, {0, 0, 0, 0}) && passed;
+  const uint32_t malformed_before = g_malformed_checkout_requests;
+  passed = verify_checkout_intersection_case(&inverted, 4, {}) && passed;
+  passed = g_malformed_checkout_requests == malformed_before + 1 && passed;
+  // A hosted layer intersects against its own extent, not the input's.
+  std::array<std::byte, 120> hosted_world{};
+  g_smart_hosted_layers.clear();
+  g_smart_hosted_layers.push_back({3, 0, 1, false, 50, 40, -1, hosted_world.data()});
+  std::array<std::byte, 44> hosted_request{};
+  const std::array<int32_t, 4> hosted_rect{10, 10, 60, 60};
+  std::memcpy(hosted_request.data(), hosted_rect.data(), sizeof(hosted_rect));
+  std::array<std::byte, kCheckoutResultBytes> hosted_result{};
+  passed = pre_checkout_layer(nullptr, 3, 7, hosted_request.data(),
+                              g_checkout_current_time, 1, g_checkout_current_time_scale,
+                              hosted_result.data()) == 0 && passed;
+  std::array<int32_t, 4> answered{};
+  std::memcpy(answered.data(), hosted_result.data(), sizeof(answered));
+  passed = answered == std::array<int32_t, 4>{10, 10, 50, 40} && passed;
+  std::memcpy(answered.data(), hosted_result.data() + 16, sizeof(answered));
+  passed = answered == std::array<int32_t, 4>{0, 0, 50, 40} && passed;
+  passed = !g_smart_hosted_layers.empty() &&
+      g_smart_hosted_layers.front().checkout_rect == std::array<int32_t, 4>{10, 10, 50, 40} &&
+      passed;
+  // An empty checkout answer refuses to hand out pixels; the no-checkout
+  // sentinel keeps the permissive full-world answer.
+  std::array<std::byte, 120> dummy_world{};
+  g_smart_hosted_layers.clear();
+  g_smart_input_world = dummy_world.data();
+  g_input_checkout_result_rect = {0, 0, 0, 0};
+  const uint32_t denials_before = g_empty_checkout_pixel_denials;
+  void* checked_out = nullptr;
+  passed = smart_checkout_pixels(nullptr, 0, &checked_out) == 4 &&
+      checked_out == nullptr &&
+      g_empty_checkout_pixel_denials == denials_before + 1 && passed;
+  g_input_checkout_result_rect = {-1, -1, -1, -1};
+  passed = smart_checkout_pixels(nullptr, 0, &checked_out) == 0 &&
+      checked_out == dummy_world.data() && passed;
+  // During a dispatched GPU render the base world (promoted in place by the
+  // CUDA transport) is returned; a CPU render — including a GPU negotiation
+  // that fell back to CPU — keeps returning the checkout view.
+  std::array<std::byte, 120> dummy_view{};
+  const bool saved_gpu_dispatched = g_smart_gpu_render_dispatched;
+  g_input_checkout_view_world = dummy_view.data();
+  g_input_checkout_result_rect = {0, 0, 8, 8};
+  g_smart_gpu_render_dispatched = false;
+  passed = smart_checkout_pixels(nullptr, 0, &checked_out) == 0 &&
+      checked_out == dummy_view.data() && passed;
+  g_smart_gpu_render_dispatched = true;
+  passed = smart_checkout_pixels(nullptr, 0, &checked_out) == 0 &&
+      checked_out == dummy_world.data() && passed;
+  g_smart_gpu_render_dispatched = saved_gpu_dispatched;
+  g_smart_width = saved_width;
+  g_smart_height = saved_height;
+  g_pixel_aspect_ratio = saved_par;
+  g_full_resolution_width = saved_full_width;
+  g_full_resolution_height = saved_full_height;
+  g_input_checkout_request = saved_request;
+  g_input_checkout_result_rect = saved_result_rect;
+  g_smart_hosted_layers = saved_hosted_layers;
+  g_smart_input_world = saved_input_world;
+  g_input_checkout_view_world = saved_input_view;
+  return passed;
 }
 struct HandleRecord {
   void* data{};
@@ -19725,6 +19955,13 @@ SmartResult smart_render_once(EffectEntry entry, std::array<std::byte, kInSize>&
                               int32_t external_total_time = 1, uint32_t external_time_scale = 1,
                               int32_t external_pixel_bytes = 4) {
   reset_smart_host_telemetry();
+  g_input_checkout_result_rect.fill(-1);
+  g_map_checkout_result_rect.fill(-1);
+  g_malformed_checkout_requests = 0;
+  g_empty_checkout_pixel_denials = 0;
+  g_input_checkout_view_world = nullptr;
+  g_map_checkout_view_world = nullptr;
+  g_smart_gpu_render_dispatched = false;
   SmartResult result;
   const uint32_t effective_out_flags = read<uint32_t>(command_output, kOutFlags);
   const uint32_t effective_out_flags2 = read<uint32_t>(command_output, kOutFlags2);
@@ -19822,6 +20059,14 @@ SmartResult smart_render_once(EffectEntry entry, std::array<std::byte, kInSize>&
     write_rect(world.data() + 44, width, height);
   };
   setup_world(input_world, source.data()); setup_world(output_world, destination);
+  // Checkout view: same pixels and dimensions as the base input world, but
+  // its extent_hint is rewritten by pre_checkout_layer to the intersected
+  // checkout answer, so the shared base world never carries checkout state.
+  // Views are deliberately NOT registered as dispatch worlds: they alias the
+  // base world's data/dimensions, so a second registration would make the
+  // copied-struct fallback in resolve_dispatch_world_format ambiguous. An
+  // unregistered view resolves through that fallback to the base entry.
+  std::array<std::byte, 120> input_checkout_view = input_world;
   const int32_t dispatch_pixel_format = float32 ? kPixelFormatArgb128 :
       (deep16 ? kPixelFormatArgb64 : kPixelFormatArgb32);
   DispatchWorldFormatScope dispatch_worlds;
@@ -19829,6 +20074,7 @@ SmartResult smart_render_once(EffectEntry entry, std::array<std::byte, kInSize>&
       !dispatch_worlds.register_world(output_world.data(), dispatch_pixel_format)) return result;
 
   std::vector<unsigned char> map_pixels; std::array<std::byte, 120> map_world{};
+  std::array<std::byte, 120> map_checkout_view{};
   if (connected_map) {
     g_smart_map_width = case_id == "connected_map" ? 5 : width;
     g_smart_map_height = case_id == "connected_map" ? 3 : height;
@@ -19842,15 +20088,18 @@ SmartResult smart_render_once(EffectEntry entry, std::array<std::byte, kInSize>&
     write<int32_t>(map_world, 36, g_smart_map_width); write<int32_t>(map_world, 40, g_smart_map_height);
     write_rect(map_world.data() + 44, g_smart_map_width, g_smart_map_height);
     if (!dispatch_worlds.register_world(map_world.data(), kPixelFormatArgb32)) return result;
+    map_checkout_view = map_world;
     g_smart_map_world = map_world.data();
   }
 
   std::vector<std::array<std::byte, kParamSize>> definitions(g_params.size() + 1);
   std::vector<std::vector<unsigned char>> hosted_pixels;
   std::vector<std::array<std::byte, 120>> hosted_worlds;
+  std::vector<std::array<std::byte, 120>> hosted_checkout_views;
   if (external_layers) {
     hosted_pixels.resize(external_layers->size());
     hosted_worlds.resize(external_layers->size());
+    hosted_checkout_views.resize(external_layers->size());
   }
   std::memcpy(definitions[0].data() + 56, input_world.data(), input_world.size());
   initialize_parameter_definitions(definitions);
@@ -19881,13 +20130,15 @@ SmartResult smart_render_once(EffectEntry entry, std::array<std::byte, kInSize>&
     write<int32_t>(world, 36, layer.width); write<int32_t>(world, 40, layer.height);
     write_rect(world.data() + 44, layer.width, layer.height);
     if (!dispatch_worlds.register_world(world.data(), dispatch_pixel_format)) return result;
+    auto& view = hosted_checkout_views[layer_index];
+    view = world;
     const int32_t requested_time = temporal_context ? 42 : external_current_time;
     const uint32_t requested_scale = temporal_context ? 24 : external_time_scale;
     if (!layer.timed || same_rational_time(layer.time, layer.time_scale,
             requested_time, requested_scale))
       std::memcpy(definitions[layer.slot].data() + 56, world.data(), world.size());
     g_smart_hosted_layers.push_back({layer.slot, layer.time, layer.time_scale, layer.timed,
-        layer.width, layer.height, -1, world.data()});
+        layer.width, layer.height, -1, world.data(), {-1, -1, -1, -1}, view.data()});
   }
   if (requested) {
     if (!apply_requested_assignments(definitions, *requested)) return result;
@@ -20089,6 +20340,8 @@ SmartResult smart_render_once(EffectEntry entry, std::array<std::byte, kInSize>&
   write<void*>(pre_extra, 16, pre_callbacks.data());
   g_input_checkout_request.fill(-1); g_map_checkout_request.fill(-1);
   g_secondary_checkout_id = -1;
+  g_input_checkout_view_world = input_checkout_view.data();
+  g_map_checkout_view_world = connected_map ? map_checkout_view.data() : nullptr;
   g_smart_width = width; g_smart_height = height; g_smart_rowbytes = rowbytes;
   g_smart_pixel_format = float32 ? "argb32f" : (deep16 ? "argb16" : "argb8");
   std::cerr << "stage:smart_pre_render_begin\n" << std::flush;
@@ -20169,6 +20422,7 @@ SmartResult smart_render_once(EffectEntry entry, std::array<std::byte, kInSize>&
   }
   const int32_t render_selector = gpu_negotiation && result.gpu_render_possible ? kSmartRenderGpu : kSmartRender;
   result.gpu_render_dispatched = render_selector == kSmartRenderGpu;
+  g_smart_gpu_render_dispatched = result.gpu_render_dispatched;
   CudaRenderTransport cuda_transport;
   const bool cuda_transport_ready = !result.gpu_render_dispatched ||
       (!use_cuda && !use_opencl && !use_directx) ||
@@ -20236,7 +20490,9 @@ SmartResult smart_render_once(EffectEntry entry, std::array<std::byte, kInSize>&
                                               output_world.data(), lifecycle,
                                               result.render_error);
   g_smart_input_world = nullptr; g_smart_output_world = nullptr; g_smart_map_world = nullptr;
+  g_input_checkout_view_world = nullptr; g_map_checkout_view_world = nullptr;
   g_gpu_world_mode = false;
+  g_smart_gpu_render_dispatched = false;
   g_smart_hosted_layers.clear();
   std::vector<unsigned char> logical_input(width * height * pixel_bytes);
   std::vector<unsigned char> logical_output(
@@ -22108,6 +22364,12 @@ int wmain(int argc, wchar_t **argv) {
   if (argc == 2 && std::wstring(argv[1]) == L"--self-test-pf-pre-checkout-result") {
     const bool passed = verify_pre_checkout_result_contract();
     std::cout << "{\"pf_pre_checkout_result\":\""
+              << (passed ? "passed" : "failed") << "\"}\n";
+    return passed ? 0 : 1;
+  }
+  if (argc == 2 && std::wstring(argv[1]) == L"--self-test-pf-checkout-intersection") {
+    const bool passed = verify_checkout_request_intersection_contract();
+    std::cout << "{\"pf_checkout_intersection\":\""
               << (passed ? "passed" : "failed") << "\"}\n";
     return passed ? 0 : 1;
   }
@@ -24661,6 +24923,14 @@ int wmain(int argc, wchar_t **argv) {
             << "," << g_input_checkout_request[2] << "," << g_input_checkout_request[3] << "]"
             << ",\"map_checkout_request\":[" << g_map_checkout_request[0] << "," << g_map_checkout_request[1]
             << "," << g_map_checkout_request[2] << "," << g_map_checkout_request[3] << "]"
+            << ",\"input_checkout_result_rect\":[" << g_input_checkout_result_rect[0] << ","
+            << g_input_checkout_result_rect[1] << "," << g_input_checkout_result_rect[2] << ","
+            << g_input_checkout_result_rect[3] << "]"
+            << ",\"map_checkout_result_rect\":[" << g_map_checkout_result_rect[0] << ","
+            << g_map_checkout_result_rect[1] << "," << g_map_checkout_result_rect[2] << ","
+            << g_map_checkout_result_rect[3] << "]"
+            << ",\"malformed_checkout_request_count\":" << g_malformed_checkout_requests
+            << ",\"empty_checkout_pixel_denial_count\":" << g_empty_checkout_pixel_denials
             << ",\"global_setdown_error\":" << setdown_error
             << ",\"case_id\":\"" << case_id << "\",\"pixel_format\":\"" << g_smart_pixel_format << "\",\"width\":"
             << smart.output_width << ",\"height\":" << smart.output_height << ",\"rowbytes\":"
