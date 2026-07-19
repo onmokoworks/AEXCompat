@@ -84,6 +84,14 @@ ParseResult parse(Kind kind, int argc, wchar_t** argv, const Hooks& hooks) {
           invocation.time_step <= 0 || invocation.total_time <= 0 ||
           invocation.time_scale == 0 ||
           invocation.time_scale > 0x7FFFFFFFu) throw 1;
+      // Static context trailers, one-shot order and hooks (the classifier
+      // stored each trailer's index in the matching *_argc field).
+      if (mode.image_mask_context && (!hooks.parse_mask_context ||
+          !hooks.parse_mask_context(argv[mode.image_argc]))) throw 1;
+      if (mode.image_spatial_context && (!hooks.parse_spatial_context ||
+          !hooks.parse_spatial_context(argv[mode.image_trailer_argc]))) throw 1;
+      if (mode.image_render_environment && (!hooks.parse_render_environment ||
+          !hooks.parse_render_environment(argv[mode.image_environment_argc]))) throw 1;
     }
     if (mode.image_mode) {
       auto& invocation = result.invocation;

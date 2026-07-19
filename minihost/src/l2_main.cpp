@@ -4288,8 +4288,13 @@ RenderSessionOutcome run_render_session(
   write<int32_t>(input, 232, total_time);
   write<int32_t>(input, 236, time_step);
   write<uint32_t>(input, 240, time_scale);
-  write<int32_t>(input, 252, max_width);
-  write<int32_t>(input, 256, max_height);
+  // Same full-resolution override the per-frame render applies: a spatial
+  // context can declare the true composition size, and the deferred
+  // SEQUENCE_SETUP must observe it exactly like the one-shot lifecycle.
+  write<int32_t>(input, 252,
+                 g_full_resolution_width > 0 ? g_full_resolution_width : max_width);
+  write<int32_t>(input, 256,
+                 g_full_resolution_height > 0 ? g_full_resolution_height : max_height);
   const int32_t session_extent[4] = {0, 0, max_width, max_height};
   std::memcpy(input.data() + 260, session_extent, sizeof(session_extent));
   bool sequence_attempted = false;

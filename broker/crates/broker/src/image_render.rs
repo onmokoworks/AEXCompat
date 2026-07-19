@@ -4220,8 +4220,16 @@ fn render_with_artifact(
     // (the one-shot re-run then reports through the original path). Gate
     // failures inside the session path are final: they are the same
     // fail-closed validation the one-shot path applies.
+    // The session transport carries spatial and render-environment context
+    // (W1-3), but not yet mask geometry, aux channels, or alpha-as-coverage;
+    // a host context using those stays on the one-shot path.
+    let session_representable_context = host_context.is_none_or(|context| {
+        context.mask_scene.masks.is_empty()
+            && context.aux_channels.is_empty()
+            && context.alpha_as_coverage_params.is_empty()
+    });
     if !smart
-        && host_context.is_none()
+        && session_representable_context
         && secondaries.is_empty()
         && timed_secondaries.is_empty()
         && audio.is_none()
@@ -4230,6 +4238,14 @@ fn render_with_artifact(
         && payload == encode_interactive_payload(interactive_parameters.unwrap_or_default())?
         && std::env::var_os(DISABLE_SESSION_WRAPPER_ENV).is_none()
     {
+        let spatial_trailer = match host_context {
+            Some(context) => crate::render_request::encode_spatial_context(context)?,
+            None => None,
+        };
+        let render_environment_trailer = match host_context {
+            Some(context) => crate::render_request::encode_render_environment(context)?,
+            None => None,
+        };
         match render_classic_via_length_one_session(&SessionWrapperRequest {
             repository,
             plugin_id,
@@ -4240,6 +4256,8 @@ fn render_with_artifact(
             preserved_output: preserved_output.as_deref(),
             interactive_parameters,
             parameter_animation,
+            spatial_trailer,
+            render_environment_trailer,
             timing,
             pixel_format,
             deep_png_output,
@@ -4811,6 +4829,8 @@ struct SessionWrapperRequest<'a> {
     preserved_output: Option<&'a Path>,
     interactive_parameters: Option<&'a [InteractiveParameter]>,
     parameter_animation: Option<&'a [ParameterAnimation]>,
+    spatial_trailer: Option<String>,
+    render_environment_trailer: Option<String>,
     timing: RenderTiming,
     pixel_format: RenderPixelFormat,
     deep_png_output: bool,
@@ -4868,6 +4888,8 @@ fn render_classic_via_length_one_session(
         aux_manifest: None,
         world_dump_dir: world_dump_dir.as_ref().map(|dump| dump.path.as_path()),
         output_checksum_detail,
+        spatial_trailer: request.spatial_trailer.clone(),
+        render_environment_trailer: request.render_environment_trailer.clone(),
         dependencies: request.dependencies.to_vec(),
         width: request.width,
         height: request.height,

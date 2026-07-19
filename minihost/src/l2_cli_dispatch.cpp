@@ -71,14 +71,32 @@ WorkerMode classify_worker_mode(
     const bool session32 = equals(command, L"--render-session32-v1");
     // Session launches carry no input/output paths and no current_time:
     // [command, plugin, sha256, payload, max_width, max_height, time_step,
-    //  total_time, time_scale] (docs/RENDER_SESSION_PROTOCOL_2026-07-19.md §3).
-    mode.render_session_mode = effective_argc == 10 &&
-        (equals(command, L"--render-session-v1") || session16 || session32);
-    if (mode.render_session_mode) {
-      mode.external_pixel_bytes = session32 ? 16 : (session16 ? 8 : 4);
-      mode.request_mode = true;
-      mode.command_accepted = true;
-      return mode;
+    //  total_time, time_scale] plus the optional static context trailers in
+    // the one-shot order [mask v2|][spatial:v*][render:v1|]
+    // (docs/RENDER_SESSION_PROTOCOL_2026-07-19.md §3). Auxiliary option
+    // pairs were already stripped from the tail.
+    if (equals(command, L"--render-session-v1") || session16 || session32) {
+      mode.image_render_environment = effective_argc >= 11 &&
+          starts_with(argv[effective_argc - 1], L"render:v1|");
+      mode.image_environment_argc = effective_argc -
+          (mode.image_render_environment ? 1 : 0);
+      mode.image_spatial_context = mode.image_environment_argc >= 11 &&
+          starts_with(argv[mode.image_environment_argc - 1], L"spatial:v");
+      mode.image_trailer_argc = mode.image_environment_argc -
+          (mode.image_spatial_context ? 1 : 0);
+      mode.image_mask_context = mode.image_trailer_argc >= 11 &&
+          starts_with(argv[mode.image_trailer_argc - 1], L"v2|");
+      mode.image_argc = mode.image_trailer_argc - (mode.image_mask_context ? 1 : 0);
+      mode.render_session_mode = mode.image_argc == 10;
+      if (mode.render_session_mode) {
+        mode.external_pixel_bytes = session32 ? 16 : (session16 ? 8 : 4);
+        mode.request_mode = true;
+        mode.command_accepted = true;
+        return mode;
+      }
+      // A session command whose shape does not resolve to the contract is
+      // rejected outright rather than reinterpreted as another mode.
+      return WorkerMode{};
     }
     const bool image16 = equals(command, L"--render-image16") ||
         equals(command, L"--render-image16-layer");
