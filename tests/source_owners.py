@@ -62,6 +62,8 @@ WORKER_RUNTIME_OWNERS = (
     "minihost/src/worker_ui_event_report.cpp",
     "minihost/src/worker_audio_execution.hpp",
     "minihost/src/worker_audio_execution.cpp",
+    "minihost/src/worker_render_session.hpp",
+    "minihost/src/worker_render_session.cpp",
 )
 
 # 契約名 → owner ファイル群 (repo ルート相対)。
@@ -126,6 +128,8 @@ CONTRACTS = {
         "minihost/src/worker_ui_event_report.cpp",
         "minihost/src/worker_audio_execution.hpp",
         "minihost/src/worker_audio_execution.cpp",
+        "minihost/src/worker_render_session.hpp",
+        "minihost/src/worker_render_session.cpp",
         "minihost/src/worker_aegp_timeline_probe.hpp",
         "minihost/src/worker_aegp_timeline_probe.cpp",
         "minihost/src/worker_aegp_host_selftests.cpp",
@@ -284,6 +288,7 @@ CONTRACTS = {
         "minihost/src/l2_main.cpp",
         "minihost/src/render_subsystem.cpp",
         "minihost/src/worker_smart_finalize.cpp",
+        "minihost/src/worker_render_session.cpp",
     ),
     "pf_adv_app_suite": (
         "minihost/src/l2_main.cpp",
