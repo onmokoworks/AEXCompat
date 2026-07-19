@@ -4749,6 +4749,126 @@ int32_t end_render_lifecycle(EffectEntry effect_entry,
       lifecycle_hooks(context), kRenderLifecycleLayout, input.data(), output.data(),
       params, world, lifecycle, primary_error);
 }
+
+// Owns the references that must remain alive from lifecycle begin through end.
+// The opaque hook ABI never outlives this stack owner.
+struct ClassicLifecycleOwner {
+  EffectEntry entry;
+  std::array<std::byte, kInSize>& input;
+  std::array<std::byte, kOutSize>& output;
+  std::vector<std::array<std::byte, kParamSize>>& definitions;
+  std::vector<void*>& params;
+  std::array<std::byte, kEffectWorldSize>& world;
+  bool manage_sequence;
+
+  aexcompat::worker_runtime::classic_execution::LifecycleResult begin() {
+    return aexcompat::worker_runtime::classic_execution::begin_lifecycle(this, hooks());
+  }
+  int32_t finish(aexcompat::worker_runtime::classic_execution::LifecycleResult& state,
+                 bool draw = false) {
+    return aexcompat::worker_runtime::classic_execution::finish_lifecycle(
+        this, state, hooks(), draw);
+  }
+
+ private:
+  static const aexcompat::worker_runtime::classic_execution::LifecycleHooks& hooks() {
+    static const aexcompat::worker_runtime::classic_execution::LifecycleHooks value{
+        +[](void* opaque) -> void* {
+          auto& h = *static_cast<ClassicLifecycleOwner*>(opaque);
+          const auto lifecycle = h.manage_sequence
+              ? begin_render_lifecycle(h.entry, h.input, h.output, h.params.data(), h.world.data())
+              : begin_frame_lifecycle(h.entry, h.input, h.output, h.params.data(), h.world.data());
+          return new (std::nothrow) RenderLifecycle(lifecycle);
+        },
+        +[](void* opaque) { auto& h = *static_cast<ClassicLifecycleOwner*>(opaque);
+          return dispatch_render_click(h.entry, h.input, h.output, h.definitions); },
+        +[](void* opaque) { auto& h = *static_cast<ClassicLifecycleOwner*>(opaque);
+          return interpolate_arbitrary_values(h.entry, h.input, h.output, h.definitions); },
+        +[](void* opaque) { auto& h = *static_cast<ClassicLifecycleOwner*>(opaque);
+          return roundtrip_arbitrary_values(h.entry, h.input, h.output, h.definitions); },
+        +[](void* opaque) { auto& h = *static_cast<ClassicLifecycleOwner*>(opaque);
+          return dispatch_conditional_ui_selectors(h.entry, h.input, h.output, h.params.data()); },
+        +[](void* opaque) { auto& h = *static_cast<ClassicLifecycleOwner*>(opaque);
+          return dispatch_render_draw(h.entry, h.input, h.output, h.definitions); },
+        +[](void* opaque, void* lifecycle, int32_t error) { auto& h = *static_cast<ClassicLifecycleOwner*>(opaque);
+          return h.manage_sequence
+              ? end_render_lifecycle(h.entry, h.input, h.output, h.params.data(), h.world.data(),
+                    *static_cast<RenderLifecycle*>(lifecycle), error)
+              : end_frame_lifecycle(h.entry, h.input, h.output, h.params.data(), h.world.data(),
+                    *static_cast<RenderLifecycle*>(lifecycle), error); },
+        +[](void* lifecycle) { delete static_cast<RenderLifecycle*>(lifecycle); }};
+    return value;
+  }
+};
+
+// Owns render-dispatch state. Buffer resize mutates all related world references
+// atomically; LayerRenderContext is scoped strictly to the kRender callback.
+struct ClassicRenderDispatchOwner {
+  EffectEntry entry;
+  std::array<std::byte, kInSize>& input;
+  std::array<std::byte, kOutSize>& output;
+  std::array<std::byte, kEffectWorldSize>& world;
+  OutputPixelBuffer& guarded;
+  DispatchWorldFormatScope& worlds;
+  std::vector<std::array<std::byte, kParamSize>>& definitions;
+  std::vector<void*>& params;
+  int32_t& width; int32_t& height; int32_t& rowbytes;
+  unsigned char*& destination;
+  int32_t pixel_bytes; int32_t pixel_format;
+  int32_t current_time; int32_t time_step; int32_t total_time; uint32_t time_scale;
+  const std::string& case_id; const RequestedAssignments* requested;
+  const std::vector<unsigned char>* external_rgba;
+  const std::vector<ExternalLayerInput>* external_layers;
+  int32_t external_width; int32_t external_height;
+  aexcompat::worker_runtime::classic::Context& classic_context;
+  std::vector<unsigned char>& logical_source;
+
+  int32_t run(int32_t error) {
+    return aexcompat::worker_runtime::classic_execution::dispatch_render(this, error, hooks());
+  }
+
+ private:
+  static const aexcompat::worker_runtime::classic_execution::RenderHooks& hooks() {
+    static const aexcompat::worker_runtime::classic_execution::RenderHooks value{
+        +[](void* opaque) { auto& h = *static_cast<ClassicRenderDispatchOwner*>(opaque);
+          return dispatch_render_draw(h.entry, h.input, h.output, h.definitions); },
+        +[](void* opaque) { return static_cast<ClassicRenderDispatchOwner*>(opaque)->prepare_output(); },
+        +[](void* opaque) { return static_cast<ClassicRenderDispatchOwner*>(opaque)->dispatch_selector(); },
+        +[](void* opaque) { auto& h = *static_cast<ClassicRenderDispatchOwner*>(opaque);
+          return !g_render_ui_context_active || close_render_ui_context(h.entry, h.input, h.output, h.definitions); }};
+    return value;
+  }
+  int32_t prepare_output() {
+    const int32_t next_width = read<int32_t>(output, kOutWidth);
+    const int32_t next_height = read<int32_t>(output, kOutHeight);
+    if (!aexcompat::render::validate_output_extent(width, height, next_width, next_height,
+            read<uint32_t>(output, kOutFlags))) return 4;
+    if (next_width <= 0 || next_height <= 0) return 0;
+    width = next_width; height = next_height; rowbytes = width * pixel_bytes;
+    if (!guarded.reset(static_cast<std::size_t>(rowbytes) * height)) return -3;
+    destination = guarded.data();
+    if (!aexcompat::render::prepare_world_layout(world,
+            {pixel_bytes == 4 ? 0 : 1, pixel_bytes, width, height, rowbytes}, destination)) return -3;
+    if (!worlds.register_world(world.data(), pixel_format)) return 4;
+    write<int32_t>(input, 276, read<int32_t>(output, kOutOrigin));
+    write<int32_t>(input, 280, read<int32_t>(output, kOutOrigin + 4));
+    return 0;
+  }
+  int32_t dispatch_selector() {
+    struct LayerContextScope {
+      LayerRenderContext previous;
+      explicit LayerContextScope(LayerRenderContext next)
+          : previous(aexcompat::aegp_layer_render_runtime::replace_context(std::move(next))) {}
+      ~LayerContextScope() {
+        aexcompat::aegp_layer_render_runtime::replace_context(std::move(previous));
+      }
+    } scope({entry, &input, &output, current_time, static_cast<int32_t>(time_scale), case_id,
+        requested, external_rgba, external_layers, external_width, external_height,
+        time_step, total_time, pixel_bytes, &logical_source, width, height});
+    classic_context.mark_selector_dispatched();
+    return entry(kRender, input.data(), output.data(), params.data(), world.data(), nullptr);
+  }
+};
 int32_t classic_render_runtime(EffectEntry entry, std::array<std::byte, kInSize>& input,
                     std::array<std::byte, kOutSize>& command_output,
                     const std::string& case_id, int32_t& width, int32_t& height,
@@ -4905,43 +5025,9 @@ int32_t classic_render_runtime(EffectEntry entry, std::array<std::byte, kInSize>
   } render_ui_context_scope{entry, input, command_output, definitions};
   publish_alpha_coverage_provider(logical_source, width, height, pixel_bytes,
                                   external_current_time, external_time_scale);
-  struct ClassicLifecycleHost {
-    EffectEntry entry; std::array<std::byte, kInSize>* input;
-    std::array<std::byte, kOutSize>* output;
-    std::vector<std::array<std::byte, kParamSize>>* definitions;
-    std::vector<void*>* params; void* world;
-    bool manage_sequence;
-  } lifecycle_host{entry, &input, &command_output, &definitions, &params,
-                   &output_world, manage_sequence};
-  const aexcompat::worker_runtime::classic_execution::LifecycleHooks lifecycle_hooks{
-      +[](void* opaque) -> void* {
-        auto& h = *static_cast<ClassicLifecycleHost*>(opaque);
-        const auto value = h.manage_sequence
-            ? begin_render_lifecycle(h.entry, *h.input, *h.output,
-                  h.params->data(), static_cast<std::array<std::byte, kEffectWorldSize>*>(h.world)->data())
-            : begin_frame_lifecycle(h.entry, *h.input, *h.output,
-                  h.params->data(), static_cast<std::array<std::byte, kEffectWorldSize>*>(h.world)->data());
-        return new (std::nothrow) RenderLifecycle(value);
-      },
-      +[](void* opaque) { auto& h = *static_cast<ClassicLifecycleHost*>(opaque);
-        return dispatch_render_click(h.entry, *h.input, *h.output, *h.definitions); },
-      +[](void* opaque) { auto& h = *static_cast<ClassicLifecycleHost*>(opaque);
-        return interpolate_arbitrary_values(h.entry, *h.input, *h.output, *h.definitions); },
-      +[](void* opaque) { auto& h = *static_cast<ClassicLifecycleHost*>(opaque);
-        return roundtrip_arbitrary_values(h.entry, *h.input, *h.output, *h.definitions); },
-      +[](void* opaque) { auto& h = *static_cast<ClassicLifecycleHost*>(opaque);
-        return dispatch_conditional_ui_selectors(h.entry, *h.input, *h.output, h.params->data()); },
-      +[](void* opaque) { auto& h = *static_cast<ClassicLifecycleHost*>(opaque);
-        return dispatch_render_draw(h.entry, *h.input, *h.output, *h.definitions); },
-      +[](void* opaque, void* lifecycle, int32_t error) { auto& h = *static_cast<ClassicLifecycleHost*>(opaque);
-        return h.manage_sequence
-            ? end_render_lifecycle(h.entry, *h.input, *h.output, h.params->data(),
-                  static_cast<std::array<std::byte, kEffectWorldSize>*>(h.world)->data(), *static_cast<RenderLifecycle*>(lifecycle), error)
-            : end_frame_lifecycle(h.entry, *h.input, *h.output, h.params->data(),
-                  static_cast<std::array<std::byte, kEffectWorldSize>*>(h.world)->data(), *static_cast<RenderLifecycle*>(lifecycle), error); },
-      +[](void* lifecycle) { delete static_cast<RenderLifecycle*>(lifecycle); }};
-  auto lifecycle = aexcompat::worker_runtime::classic_execution::begin_lifecycle(
-      &lifecycle_host, lifecycle_hooks);
+  ClassicLifecycleOwner lifecycle_owner{entry, input, command_output, definitions, params,
+                                        output_world, manage_sequence};
+  auto lifecycle = lifecycle_owner.begin();
   int32_t error = lifecycle.error;
   const uint32_t effective_out_flags = read<uint32_t>(command_output, kOutFlags);
   const uint32_t effective_out_flags2 = read<uint32_t>(command_output, kOutFlags2);
@@ -4964,67 +5050,16 @@ int32_t classic_render_runtime(EffectEntry entry, std::array<std::byte, kInSize>
                     logical_source.data() + y * width * pixel_bytes,
                     width * pixel_bytes);
     }
-    error = aexcompat::worker_runtime::classic_execution::finish_lifecycle(
-        &lifecycle_host, lifecycle, lifecycle_hooks, false);
+    error = lifecycle_owner.finish(lifecycle);
   } else {
-    struct ClassicDispatchHost {
-      EffectEntry entry; std::array<std::byte, kInSize>* input;
-      std::array<std::byte, kOutSize>* output; decltype(output_world)* world;
-      decltype(guarded)* guarded; decltype(dispatch_worlds)* worlds;
-      std::vector<std::array<std::byte, kParamSize>>* definitions;
-      std::vector<void*>* params; int32_t *width, *height, *rowbytes;
-      unsigned char** destination; int32_t pixel_bytes, pixel_format;
-      int32_t current_time, time_step, total_time; uint32_t time_scale;
-      const std::string* case_id; const RequestedAssignments* requested;
-      const std::vector<unsigned char>* external_rgba;
-      const std::vector<ExternalLayerInput>* external_layers;
-      int32_t external_width, external_height;
-      decltype(classic_context) classic_context;
-      std::vector<unsigned char>* logical_source;
-    } dispatch_host{entry, &input, &command_output, &output_world, &guarded,
-        &dispatch_worlds, &definitions, &params, &width, &height, &rowbytes,
-        &destination, pixel_bytes, dispatch_pixel_format, external_current_time,
-        external_time_step, external_total_time, external_time_scale, &case_id,
-        requested, external_rgba, external_layers, external_width, external_height,
-        classic_context, &logical_source};
-    error = aexcompat::worker_runtime::classic_execution::dispatch_render(
-        &dispatch_host, error, {
-          +[](void* opaque) { auto& h = *static_cast<ClassicDispatchHost*>(opaque);
-            return dispatch_render_draw(h.entry, *h.input, *h.output, *h.definitions); },
-          +[](void* opaque) { auto& h = *static_cast<ClassicDispatchHost*>(opaque);
-            const int32_t w = read<int32_t>(*h.output, kOutWidth);
-            const int32_t height = read<int32_t>(*h.output, kOutHeight);
-            if (!aexcompat::render::validate_output_extent(*h.width, *h.height, w, height,
-                    read<uint32_t>(*h.output, kOutFlags))) return 4;
-            if (w <= 0 || height <= 0) return 0;
-            *h.width = w; *h.height = height; *h.rowbytes = w * h.pixel_bytes;
-            if (!h.guarded->reset(static_cast<std::size_t>(*h.rowbytes) * height)) return -3;
-            *h.destination = h.guarded->data();
-            if (!aexcompat::render::prepare_world_layout(*h.world,
-                    {h.pixel_bytes == 4 ? 0 : 1, h.pixel_bytes, w, height, *h.rowbytes},
-                    *h.destination)) return -3;
-            if (!h.worlds->register_world(h.world->data(), h.pixel_format)) return 4;
-            write<int32_t>(*h.input, 276, read<int32_t>(*h.output, kOutOrigin));
-            write<int32_t>(*h.input, 280, read<int32_t>(*h.output, kOutOrigin + 4));
-            return 0; },
-          +[](void* opaque) { auto& h = *static_cast<ClassicDispatchHost*>(opaque);
-            struct Scope { LayerRenderContext previous; Scope(LayerRenderContext next)
-                : previous(aexcompat::aegp_layer_render_runtime::replace_context(std::move(next))) {}
-              ~Scope() { aexcompat::aegp_layer_render_runtime::replace_context(std::move(previous)); }}
-            scope({h.entry, h.input, h.output, h.current_time,
-              static_cast<int32_t>(h.time_scale), *h.case_id, h.requested, h.external_rgba,
-              h.external_layers, h.external_width, h.external_height, h.time_step,
-              h.total_time, h.pixel_bytes, h.logical_source, *h.width, *h.height});
-            h.classic_context->mark_selector_dispatched();
-            const auto callback = h.entry;
-            return callback(kRender, h.input->data(), h.output->data(), h.params->data(),
-                           h.world->data(), nullptr); },
-          +[](void* opaque) { auto& h = *static_cast<ClassicDispatchHost*>(opaque);
-            return !g_render_ui_context_active ||
-                close_render_ui_context(h.entry, *h.input, *h.output, *h.definitions); }});
+    ClassicRenderDispatchOwner dispatch_owner{entry, input, command_output, output_world,
+        guarded, dispatch_worlds, definitions, params, width, height, rowbytes, destination,
+        pixel_bytes, dispatch_pixel_format, external_current_time, external_time_step,
+        external_total_time, external_time_scale, case_id, requested, external_rgba,
+        external_layers, external_width, external_height, *classic_context, logical_source};
+    error = dispatch_owner.run(error);
     lifecycle.error = error;
-    error = aexcompat::worker_runtime::classic_execution::finish_lifecycle(
-        &lifecycle_host, lifecycle, lifecycle_hooks, false);
+    error = lifecycle_owner.finish(lifecycle);
   }
   aexcompat::worker_runtime::classic_execution::Context final_context{
       destination, rowbytes, width, height, pixel_bytes, error,
