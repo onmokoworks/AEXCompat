@@ -222,9 +222,15 @@ owner_threads_unresolved() {
   jq -r --argjson owner "$OWNER_LOGINS" '
     .[] | select(.isResolved | not)
     | [ .comments[] | select([.user.login] | inside($owner)) ] as $owner_msgs
-    | select(($owner_msgs | length) > 0)
-    | ($owner_msgs | last)
-    | "OWNER-INLINE id=\(.id) \(.path):\(.line // .original_line): \((.body | split("\n")[0]))"'
+    # An unresolved thread whose comment page overflowed (nested
+    # comments(first:100) has another page) may hold owner feedback beyond the
+    # fetched window, so it fails closed regardless of what was fetched.
+    | select( (.truncated // false) or (($owner_msgs | length) > 0) )
+    | ( if ($owner_msgs | length) > 0 then ($owner_msgs | last) else (.comments | last) end ) as $c
+    | if ($owner_msgs | length) > 0
+      then "OWNER-INLINE id=\($c.id) \($c.path):\($c.line // $c.original_line): \(($c.body | split("\n")[0]))"
+      else "OWNER-INLINE id=\($c.id) \($c.path):\($c.line // $c.original_line): (thread comments truncated at 100; fail closed)"
+      end'
 }
 
 # Timestamp of $me's newest EXPLICIT ack comment, or "" (input: issue-comments

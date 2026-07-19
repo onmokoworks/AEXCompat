@@ -446,6 +446,27 @@ def test_session_status_comment_is_not_an_ack() -> None:
     assert "OWNER-COMMENT" in _call("owner_comments_unresolved", payload, ME, NO_CLEAR)
 
 
+def test_truncated_unresolved_thread_fails_closed() -> None:
+    # An unresolved thread whose nested comments(first:100) page overflowed may
+    # hide owner feedback beyond the fetched window; it must block even when
+    # the fetched comments are all non-owner.
+    payload = [{"isResolved": False, "truncated": True,
+                "comments": [{"id": 1, "user": {"login": "chatgpt-codex-connector[bot]"},
+                              "path": "x.sh", "line": 3, "created_at": "2026-07-18T19:20:00Z",
+                              "body": "some finding"}]}]
+    assert "fail closed" in _call("owner_threads_unresolved", payload)
+
+
+def test_truncated_resolved_thread_does_not_block() -> None:
+    # isResolved is thread-level and authoritative; truncation is irrelevant
+    # once the thread is resolved.
+    payload = [{"isResolved": True, "truncated": True,
+                "comments": [{"id": 1, "user": {"login": "onmokoworks"},
+                              "path": "x.sh", "line": 3, "created_at": "2026-07-18T19:20:00Z",
+                              "body": "addressed"}]}]
+    assert _call("owner_threads_unresolved", payload) == ""
+
+
 def test_session_ack_comment_does_not_block() -> None:
     # The [ack] comment is the resolution signal itself, never a blocker.
     payload = [_toplevel(ME, "2026-07-18T11:00:00Z", "[ack] all owner feedback addressed")]

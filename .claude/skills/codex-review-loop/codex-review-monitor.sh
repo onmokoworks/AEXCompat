@@ -41,9 +41,9 @@ fetch() {
 # follows pageInfo.endCursor because the query declares $endCursor.
 fetch_review_threads() {
   local out query
-  query='query($owner:String!,$repo:String!,$pr:Int!,$endCursor:String){repository(owner:$owner,name:$repo){pullRequest(number:$pr){reviewThreads(first:100,after:$endCursor){nodes{isResolved comments(first:100){nodes{databaseId author{login} body createdAt path line originalLine}}}pageInfo{hasNextPage endCursor}}}}}'
+  query='query($owner:String!,$repo:String!,$pr:Int!,$endCursor:String){repository(owner:$owner,name:$repo){pullRequest(number:$pr){reviewThreads(first:100,after:$endCursor){nodes{isResolved comments(first:100){nodes{databaseId author{login} body createdAt path line originalLine}pageInfo{hasNextPage}}}pageInfo{hasNextPage endCursor}}}}}'
   out=$(gh api graphql --paginate -F owner="$OWNER" -F repo="$REPO" -F pr="$PR" -f query="$query" 2>/dev/null) || return 1
-  jq -s '[.[].data.repository.pullRequest.reviewThreads.nodes[] | {isResolved,comments:[.comments.nodes[]|{id:.databaseId,user:{login:.author.login},body,created_at:.createdAt,path,line,original_line:.originalLine}]}]' <<<"$out"
+  jq -s '[.[].data.repository.pullRequest.reviewThreads.nodes[] | {isResolved,truncated:.comments.pageInfo.hasNextPage,comments:[.comments.nodes[]|{id:.databaseId,user:{login:.author.login},body,created_at:.createdAt,path,line,original_line:.originalLine}]}]' <<<"$out"
 }
 
 # Inclusive lower bound: GitHub timestamps are second-resolution, so an event
