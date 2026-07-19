@@ -102,6 +102,7 @@
         "raw_output": {"oneOf": [{"$ref": "conformance-manifest.schema.json#/$defs/artifact"}, {"type": "null"}]},
         "output_sha256": {"oneOf": [{"$ref": "#/$defs/sha256"}, {"type": "null"}]},
         "suite_timeline": {"oneOf": [{"type": "array", "maxItems": 65536, "items": {"$ref": "#/$defs/suite_event"}}, {"type": "null"}]},
+        "plugin_kind": {"enum": ["aegp_candidate", "unknown_no_effect_entrypoint"]},
         "missing_suites": {"type": "array", "maxItems": 16, "uniqueItems": true, "items": {"type": "object", "additionalProperties": false, "required": ["name", "version"], "properties": {"name": {"type": "string", "pattern": "^[A-Za-z][A-Za-z0-9 _-]{0,62}[A-Za-z0-9]$"}, "version": {"type": "integer", "minimum": 1, "maximum": 65535}}}},
         "oracle": {"$ref": "#/$defs/oracle"}
       },

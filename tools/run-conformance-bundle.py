@@ -32,8 +32,17 @@ ROOT = Path(__file__).resolve().parents[1]
 SCHEMAS = ROOT / "schemas"
 MAX_DIAGNOSTIC_BYTES = 64 * 1024
 MAX_REQUEST_BYTES = 64 * 1024
+
+
+def strict_json_loads(text: str) -> Any:
+    def reject_constant(value: str) -> None:
+        raise ValueError(f"non-finite JSON number is not permitted: {value}")
+
+    return json.loads(text, parse_constant=reject_constant)
+
+
 MAX_PROTOCOL_BYTES = int(
-    json.loads((SCHEMAS / "conformance-report.schema.json").read_text(encoding="utf-8"))[
+    strict_json_loads((SCHEMAS / "conformance-report.schema.json").read_text(encoding="utf-8"))[
         "x-protocol-max-bytes"
     ]
 )
@@ -52,7 +61,21 @@ NATIVE_WORKERS = (
 
 
 def load_json(path: Path) -> Any:
-    return json.loads(path.read_text(encoding="utf-8"))
+    return strict_json_loads(path.read_text(encoding="utf-8"))
+
+
+def meaningful_selector_error(value: dict[str, Any]) -> int | None:
+    for field in (
+        "pre_render_error",
+        "smart_render_error",
+        "render_error",
+        "smart_render_selector_error",
+        "selector_error",
+    ):
+        candidate = value.get(field)
+        if isinstance(candidate, int) and not isinstance(candidate, bool) and candidate not in (0, -1):
+            return candidate
+    return None
 
 
 def validator(name: str) -> Draft202012Validator:
@@ -317,7 +340,7 @@ def normalize_structured_failure(
             and value["worker_diagnostics"].get("missing_suites")
         ):
             classification = "missing_suite"
-        elif value.get("smart_render_selector_error") not in (None, 0):
+        elif meaningful_selector_error(value) is not None:
             classification = "selector_error"
         elif value.get("depth_supported") is False or value.get("smart_render_supported") is False:
             classification = "unsupported"
@@ -328,7 +351,7 @@ def normalize_structured_failure(
         selector = {
             "render_path": "smartfx",
             "completed": False,
-            "error_code": value.get("smart_render_selector_error"),
+            "error_code": meaningful_selector_error(value),
         }
     actual_input_world = value.get("input_world")
     if not isinstance(actual_input_world, dict):
@@ -348,6 +371,8 @@ def normalize_structured_failure(
         "suite_timeline": value.get("suite_timeline") if isinstance(value.get("suite_timeline"), list) else None,
         "oracle": {"state": "not_captured", "identity_match": False, "exact": False},
     }
+    if value.get("plugin_kind") in {"aegp_candidate", "unknown_no_effect_entrypoint"}:
+        result["plugin_kind"] = value["plugin_kind"]
     missing = value.get("missing_suites")
     if not missing and isinstance(value.get("worker_diagnostics"), dict):
         missing = value["worker_diagnostics"].get("missing_suites")
@@ -583,8 +608,8 @@ def run_depth(
     if timed_out:
         return failed_result(depth, input_world, "timeout_killed"), detail
     try:
-        value = json.loads(stdout)
-    except json.JSONDecodeError:
+        value = strict_json_loads(stdout)
+    except (json.JSONDecodeError, ValueError):
         if returncode != 0:
             return failed_result(depth, input_world), detail
         return failed_result(depth, input_world, "invalid_output"), detail

@@ -150,6 +150,45 @@ def test_failure_leaves_bounded_diagnostic_bundle(tmp_path):
     assert report["results"][0]["suite_timeline"] is None
 
 
+def test_structured_failure_uses_meaningful_pre_render_error_over_sentinel(tmp_path):
+    manifest, adapter = fixture(tmp_path)
+    adapter.write_text(
+        "import json; print(json.dumps({'smart_render_selector_error':-1,'pre_render_error':25,'smart_render_error':-1})); raise SystemExit(3)\n",
+        encoding="utf-8",
+    )
+    output = tmp_path / "bundle"
+    assert invoke(manifest, output, adapter).returncode == 0
+    report = json.loads((output / "report.json").read_text())
+    assert {item["classification"] for item in report["results"]} == {"selector_error"}
+    assert {item["selector"]["error_code"] for item in report["results"]} == {25}
+
+
+def test_structured_inspection_failure_preserves_bounded_plugin_kind(tmp_path):
+    manifest, adapter = fixture(tmp_path)
+    adapter.write_text(
+        "import json; print(json.dumps({'classification':'nonzero_exit','exit_code':12,'plugin_kind':'unknown_no_effect_entrypoint'})); raise SystemExit(1)\n",
+        encoding="utf-8",
+    )
+    output = tmp_path / "bundle"
+    assert invoke(manifest, output, adapter).returncode == 0
+    report = json.loads((output / "report.json").read_text())
+    assert {item["plugin_kind"] for item in report["results"]} == {"unknown_no_effect_entrypoint"}
+
+
+@pytest.mark.parametrize("constant", ["NaN", "Infinity", "-Infinity"])
+def test_manifest_rejects_non_finite_json_numbers(tmp_path, constant):
+    manifest, adapter = fixture(tmp_path)
+    text = manifest.read_text(encoding="utf-8")
+    manifest.write_text(text.replace('"value": 50', f'"value": {constant}'), encoding="utf-8")
+    output = tmp_path / "bundle"
+    completed = invoke(manifest, output, adapter)
+    assert completed.returncode != 0
+    assert not (output / "report.json").exists()
+    failure = json.loads((output / "diagnostics" / "failure.json").read_text())
+    assert failure["stage"] == "load_manifest"
+    assert "non-finite JSON number" in failure["error"]["text"]
+
+
 @pytest.mark.parametrize("size,truncated", [(65535, False), (65536, False), (65537, True)])
 def test_stderr_truncation_observes_exact_64k_boundary(tmp_path, size, truncated):
     manifest, adapter = fixture(tmp_path)

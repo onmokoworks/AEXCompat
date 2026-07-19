@@ -1755,7 +1755,8 @@ fn json_after_marker(text: &str, marker: &str) -> Option<serde_json::Value> {
 
 fn typed_failure_document(message: &str) -> Option<serde_json::Value> {
     let diagnostics = json_after_marker(message, "diagnostics=")
-        .or_else(|| json_after_marker(message, "worker report unavailable: "))?;
+        .or_else(|| json_after_marker(message, "worker report unavailable: "))
+        .or_else(|| json_after_marker(message, "AEX parameter inspection worker failed safely: "))?;
     let report = json_after_marker(message, "report=");
     let mut document = report
         .and_then(|value| value.as_object().cloned())
@@ -1765,6 +1766,7 @@ fn typed_failure_document(message: &str) -> Option<serde_json::Value> {
         "failure_stage",
         "exit_code",
         "elapsed_ms",
+        "plugin_kind",
         "missing_suites",
         "suite_timeline",
     ] {
@@ -6807,6 +6809,20 @@ mod tests {
         assert_eq!(document["render_error"], 25);
         assert_eq!(document["missing_suites"][0]["name"], "PF World Suite");
         assert_eq!(document["suite_timeline"][0]["result"], 25);
+    }
+
+    #[test]
+    fn typed_failure_document_preserves_inspection_worker_evidence() {
+        let message = concat!(
+            "AEX parameter inspection worker failed safely: ",
+            r#"{"classification":"crashed","failure_stage":"parameter_inspection","exit_code":3221225477,"plugin_kind":"unknown_no_effect_entrypoint","missing_suites":[{"name":"PF Handle Suite","version":1}]}"#,
+        );
+        let document = typed_failure_document(message).expect("structured inspection failure");
+        assert_eq!(document["classification"], "crashed");
+        assert_eq!(document["failure_stage"], "parameter_inspection");
+        assert_eq!(document["exit_code"], 3221225477u64);
+        assert_eq!(document["plugin_kind"], "unknown_no_effect_entrypoint");
+        assert_eq!(document["missing_suites"][0]["name"], "PF Handle Suite");
     }
 
     #[test]
