@@ -50,6 +50,11 @@ ParseResult parse(Kind kind, int argc, wchar_t** argv, const Hooks& hooks) {
       argc, argv, auxiliary.effective_argc);
   const auto& mode = result.invocation.mode;
   if (!mode.command_accepted) { result.error = 2; return result; }
+  if (mode.request_mode && (!hooks.parse_parameters ||
+      !hooks.parse_parameters(argv[4], hooks.parameter_context))) {
+    result.error = 3;
+    return result;
+  }
   try {
     if (mode.audio_mode) {
       result.invocation.audio_samples = std::stoi(argv[7]);
@@ -107,6 +112,20 @@ ParseResult parse(Kind kind, int argc, wchar_t** argv, const Hooks& hooks) {
               return !std::isfinite(value) || value < 0 || value > 1;
             })) throw 1;
       }
+    }
+    if (kind == Kind::Smart && mode.mask_model_enabled) {
+      std::string scene_id = "rectangle";
+      if (mode.mask_context_request_mode) {
+        if (!hooks.parse_mask_context || !hooks.parse_mask_context(argv[5])) throw 1;
+      } else if (mode.mask_scene_request_mode) {
+        scene_id.clear();
+        for (const wchar_t* character = argv[5]; *character; ++character) {
+          if (*character > 0x7f) throw 1;
+          scene_id.push_back(static_cast<char>(*character));
+        }
+      }
+      if (!mode.mask_context_request_mode && (!hooks.configure_mask_scene ||
+          !hooks.configure_mask_scene(scene_id))) throw 1;
     }
   } catch (...) { result.error = 3; }
   return result;

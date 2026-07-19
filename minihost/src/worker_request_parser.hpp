@@ -5,6 +5,7 @@
 #include <array>
 #include <cstdint>
 #include <filesystem>
+#include <string>
 #include <vector>
 
 namespace aexcompat::worker_runtime::request_parser {
@@ -27,6 +28,9 @@ struct Hooks {
   bool (*parse_mask_context)(const wchar_t*){};
   bool (*parse_spatial_context)(const wchar_t*){};
   bool (*parse_render_environment)(const wchar_t*){};
+  void* parameter_context{};
+  bool (*parse_parameters)(const wchar_t*, void*){};
+  bool (*configure_mask_scene)(const std::string&){};
 };
 
 struct WorkerInvocation {

@@ -7,6 +7,7 @@ ROOT = Path(__file__).resolve().parents[1]
 WORKER = ROOT / "minihost" / "src" / "l2_main.cpp"
 CLI_DISPATCH = ROOT / "minihost" / "src" / "l2_cli_dispatch.cpp"
 RUNTIME_ADMISSION = ROOT / "minihost" / "src" / "worker_runtime_admission.cpp"
+REQUEST_PARSER = ROOT / "minihost" / "src" / "worker_request_parser.cpp"
 
 
 class RenderParameterGateContractTests(unittest.TestCase):
@@ -88,9 +89,11 @@ class RenderParameterGateContractTests(unittest.TestCase):
                        "parse_mask_context_payload", "encoded.size() > 8192",
                        "total_vertices > 128"):
             self.assertIn(marker, worker)
-        # Payload rejection remains in the L2 render path, while the sealed
-        # plugin hash moved into the common runtime-admission component.
-        self.assertLess(worker.index("if (request_mode &&"),
+        # Payload rejection is delegated through the request parser before
+        # worker runtime admission can load the plug-in.
+        parser = REQUEST_PARSER.read_text(encoding="utf-8")
+        self.assertIn("hooks.parse_parameters(argv[4]", parser)
+        self.assertLess(worker.index("request_parser::parse("),
                         worker.index("admit_runtime(runtime_hooks, runtime_request, runtime_context)"))
         admission = RUNTIME_ADMISSION.read_text(encoding="utf-8")
         self.assertIn("hooks.hash_file(request.plugin_argument", admission)

@@ -14018,13 +14018,18 @@ int worker_main_impl(int argc, wchar_t **argv) {
   auto& keydown_code = invocation.keydown_code;
   auto& keydown_modifiers = invocation.keydown_modifiers;
 
+  const auto parse_requested_payload = +[](const wchar_t* text, void* context) {
+    return parse_parameter_payload(text, *static_cast<RequestedAssignments*>(context));
+  };
+
   if (is_render_worker()) {
     const auto parsed = aexcompat::worker_runtime::request_parser::parse(
       aexcompat::worker_runtime::request_parser::Kind::Render, argc, argv,
       {{nullptr, set_l2_dump_worlds_dir, enable_l2_checksum_detail,
         load_l2_aux_manifest, parse_l2_alpha_coverage, load_l2_parameter_animation},
        &parse_layer_transport_key, &parse_mask_context_payload,
-       &parse_spatial_context_payload, &parse_render_environment_payload});
+       &parse_spatial_context_payload, &parse_render_environment_payload,
+       &requested_parameters, parse_requested_payload, &configure_mask_scene});
     if (parsed.error != 0) return parsed.error;
     const auto& worker_mode = parsed.invocation.mode;
   audio_mode = worker_mode.audio_mode; image_audio_mode = worker_mode.image_audio_mode;
@@ -14047,7 +14052,6 @@ int worker_main_impl(int argc, wchar_t **argv) {
     g_app_picker_color = parsed.invocation.picker_color; g_render_click_enabled = true;
   }
   if (worker_mode.image_draw_context) g_render_draw_enabled = true;
-  if (request_mode && !parse_parameter_payload(argv[4], requested_parameters)) return 3;
     if (image_audio_mode)
       aexcompat::host_audio::runtime().set_source(&external_audio, external_audio_samples);
   } else if (is_smart_worker()) {
@@ -14056,7 +14060,8 @@ int worker_main_impl(int argc, wchar_t **argv) {
         {{nullptr, set_l2_dump_worlds_dir, enable_l2_checksum_detail,
           load_l2_aux_manifest, parse_l2_alpha_coverage, load_l2_parameter_animation},
          &parse_layer_transport_key, &parse_mask_context_payload,
-         &parse_spatial_context_payload, &parse_render_environment_payload});
+         &parse_spatial_context_payload, &parse_render_environment_payload,
+         &requested_parameters, parse_requested_payload, &configure_mask_scene});
     if (parsed.error != 0) return parsed.error;
     const auto& worker_mode = parsed.invocation.mode;
   smart_force_cpu = worker_mode.force_cpu;
@@ -14114,20 +14119,6 @@ int worker_main_impl(int argc, wchar_t **argv) {
       g_render_click_enabled = true;
     }
     if (smart_image_draw_context) g_render_draw_enabled = true;
-    if (request_mode && !parse_parameter_payload(argv[4], requested_parameters)) return 3;
-  if (g_mask_model_enabled) {
-    std::string scene_id = "rectangle";
-    if (mask_context_request_mode) {
-      if (!parse_mask_context_payload(argv[5])) return 3;
-    } else if (mask_scene_request_mode) {
-      scene_id.clear();
-      for (const wchar_t* p = argv[5]; *p; ++p) {
-        if (*p > 0x7f) return 3;
-        scene_id.push_back(static_cast<char>(*p));
-      }
-    }
-    if (!mask_context_request_mode && !configure_mask_scene(scene_id)) return 3;
-  }
   } else {
   user_changed_mode = (argc == 5 || argc == 6) &&
       std::wstring(argv[1]) == L"--user-changed";
