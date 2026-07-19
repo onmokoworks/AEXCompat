@@ -1221,6 +1221,17 @@ struct VideoBatchRequest {
     /// Timeline evaluated by the worker at each frame's current_time.
     #[serde(default)]
     parameter_animation: Vec<ParameterAnimation>,
+    /// Absolute path to an external aux channel manifest
+    /// (`--aux-manifest-v1`).
+    #[serde(default)]
+    aux_manifest: Option<String>,
+    /// Absolute path to an existing directory receiving world snapshots
+    /// (`--dump-worlds-v1`).
+    #[serde(default)]
+    world_dump_dir: Option<String>,
+    /// Enables the worker's per-output checksum detail records.
+    #[serde(default)]
+    output_checksum_detail: bool,
 }
 
 fn default_time_scale() -> u32 {
@@ -1287,9 +1298,9 @@ pub fn run_video_batch(
         parameters: (!request.parameters.is_empty()).then_some(request.parameters.as_slice()),
         parameter_animation: (!request.parameter_animation.is_empty())
             .then_some(request.parameter_animation.as_slice()),
-        aux_manifest: None,
-        world_dump_dir: None,
-        output_checksum_detail: false,
+        aux_manifest: request.aux_manifest.as_deref().map(Path::new),
+        world_dump_dir: request.world_dump_dir.as_deref().map(Path::new),
+        output_checksum_detail: request.output_checksum_detail,
         dependencies: Vec::new(),
         width,
         height,

@@ -665,6 +665,11 @@ mod windows_e2e {
         let (repository, plugin, _sha) = temp_repository();
         let inputs = write_input_frames(&repository.0, 3);
         let output_directory = repository.0.join("batch-out");
+        // Auxiliary observation options flow from the batch request into the
+        // session argv tail; the fixture worker validates each pair, so a
+        // dropped or mangled option would kill the batch.
+        let dump_dir = repository.0.join("batch-dumps");
+        std::fs::create_dir_all(&dump_dir).unwrap();
         let request_path = repository.0.join("request.json");
         std::fs::write(
             &request_path,
@@ -673,6 +678,8 @@ mod windows_e2e {
                 "plugin": plugin.to_string_lossy(),
                 "input_frames": inputs,
                 "output_directory": output_directory.to_string_lossy(),
+                "world_dump_dir": dump_dir.to_string_lossy(),
+                "output_checksum_detail": true,
             }))
             .unwrap(),
         )
