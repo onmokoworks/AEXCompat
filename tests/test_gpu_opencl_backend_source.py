@@ -5,6 +5,7 @@ ROOT = Path(__file__).resolve().parents[1]
 HEADER = ROOT / "minihost" / "src" / "gpu_opencl_backend.hpp"
 SOURCE = ROOT / "minihost" / "src" / "gpu_opencl_backend.cpp"
 MAIN = ROOT / "minihost" / "src" / "l2_main.cpp"
+SMART_DISPATCH = ROOT / "minihost" / "src" / "worker_smart_dispatch.cpp"
 CMAKE = ROOT / "minihost" / "CMakeLists.txt"
 TRANSPORT = ROOT / "minihost" / "src" / "gpu_memory_world_transport.cpp"
 
@@ -12,7 +13,7 @@ TRANSPORT = ROOT / "minihost" / "src" / "gpu_memory_world_transport.cpp"
 def test_opencl_loader_and_context_ownership_are_isolated_and_bounded():
     header = HEADER.read_text(encoding="utf-8")
     source = SOURCE.read_text(encoding="utf-8")
-    main = MAIN.read_text(encoding="utf-8")
+    main = MAIN.read_text(encoding="utf-8") + SMART_DISPATCH.read_text(encoding="utf-8")
 
     assert 'LoadLibraryExW(L"OpenCL.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32)' in source
     assert "std::array<Platform, kMaxGpuDevices>" in source
@@ -32,18 +33,18 @@ def test_opencl_loader_and_context_ownership_are_isolated_and_bounded():
     assert "LoadLibraryExW(L\"OpenCL.dll\"" not in main
 
 
-def test_opencl_transport_is_isolated_while_orchestration_stays_in_l2_main():
+def test_opencl_transport_is_isolated_while_orchestration_stays_in_worker_owners():
     source = SOURCE.read_text(encoding="utf-8")
-    main = MAIN.read_text(encoding="utf-8")
+    orchestration = MAIN.read_text(encoding="utf-8") + SMART_DISPATCH.read_text(encoding="utf-8")
     cmake = CMAKE.read_text(encoding="utf-8")
 
     transport = TRANSPORT.read_text(encoding="utf-8")
     for marker in (
         "CudaRenderTransport",
         "smart_opencl",
-        "gpu_transport::begin_backend_context",
+        "begin_backend_context",
     ):
-        assert marker in main
+        assert marker in orchestration
     for marker in ("g_device_memory", "opencl_upload_bytes += input_size",
                    "opencl_download_bytes += output_size"):
         assert marker in transport

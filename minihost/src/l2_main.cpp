@@ -2761,6 +2761,10 @@ std::string missing_suites_report_json() {
   return suite_registry().missing_suites_report_json();
 }
 
+std::string suite_timeline_report_json() {
+  return suite_registry().suite_timeline_report_json();
+}
+
 bool suite_leases_balanced() {
   return suite_registry().balanced();
 }
@@ -6107,7 +6111,7 @@ aexcompat::worker_render_report::ClassicSubsystemDiagnostics capture_classic_sub
       suite_leases_balanced(),
       {i64(suite_acquire_count()), i64(suite_release_count()), i64(live_suite_lease_count()),
        i64(live_suite_reference_count())},
-      missing_suites_report_json(), live_suite_lease_summary(), handle_lifetimes_balanced(),
+      missing_suites_report_json() + suite_timeline_report_json(), live_suite_lease_summary(), handle_lifetimes_balanced(),
       aexcompat::pf_path_runtime::lifetimes_balanced(),
       {i64(path.checkout_calls), i64(path.checkin_calls), i64(path.mask_calls),
        i64(path.preps_created), i64(path.preps_disposed),
@@ -8243,7 +8247,7 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
       mask_report.streams_acquired, mask_report.streams_disposed, mask_report.values_acquired,
       mask_report.values_disposed}, lifetime_fault_observed, suite_leases_balanced(),
       {static_cast<int64_t>(suite_acquire_count()), static_cast<int64_t>(suite_release_count()), static_cast<int64_t>(live_suite_lease_count()),
-       static_cast<int64_t>(live_suite_reference_count())}, missing_suites_report_json(), live_suite_lease_summary(),
+       static_cast<int64_t>(live_suite_reference_count())}, missing_suites_report_json() + suite_timeline_report_json(), live_suite_lease_summary(),
       suite_fault_observed, handle_lifetimes_balanced(),
       {handle_stats.created, handle_stats.disposed},
       {g_arbitrary_copy_calls, g_arbitrary_dispose_calls, g_arbitrary_print_calls,

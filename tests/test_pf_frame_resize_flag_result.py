@@ -33,9 +33,9 @@ class PfFrameResizeFlagResultTest(unittest.TestCase):
         self.assertIn("(output_flags & kExpandBuffer) != 0", validator)
         self.assertIn("(output_flags & kShrinkBuffer) != 0", validator)
         validate = worker.index("aexcompat::render::validate_output_extent(")
-        resize = worker.index("width = requested_width;", validate)
+        resize = worker.index("width = next_width;", validate)
         self.assertLess(validate, resize)
-        self.assertIn("classic_context->mark_selector_dispatched()", worker)
+        self.assertIn("classic_context.mark_selector_dispatched()", worker)
         self.assertIn("g_last_selector_dispatched.store(true",
                       CLASSIC_RUNTIME.read_text(encoding="utf-8"))
         fixture = (ROOT / "instruments" / "pf-frame-resize-probe" / "pf_frame_resize_probe.cpp").read_text()

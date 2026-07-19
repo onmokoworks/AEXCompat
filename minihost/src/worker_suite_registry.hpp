@@ -40,6 +40,7 @@ class SuiteRegistry final {
   std::string live_summary() const;
   suite_runtime::SuiteLeaseSnapshot snapshot() const;
   std::string missing_suites_report_json() const;
+  std::string suite_timeline_report_json() const;
 
  private:
   static std::string safe_missing_name(const char* name);
@@ -50,8 +51,19 @@ class SuiteRegistry final {
   suite_runtime::SuiteLeaseTracker lease_tracker_;
   mutable std::mutex missing_suites_mutex_;
   std::vector<std::pair<std::string, int32_t>> missing_suites_;
+  struct SuiteTimelineEvent {
+    uint32_t sequence{};
+    bool acquire{};
+    std::string name;
+    int32_t version{};
+    std::string selector;
+    int32_t result{};
+  };
+  mutable std::mutex timeline_mutex_;
+  std::vector<SuiteTimelineEvent> suite_timeline_;
 };
 
 SuiteRegistry& suite_registry();
+const char* set_suite_timeline_selector(const char* selector) noexcept;
 
 }  // namespace aexcompat::worker_runtime

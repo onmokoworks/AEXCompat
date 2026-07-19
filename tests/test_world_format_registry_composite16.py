@@ -131,17 +131,23 @@ def test_effect_world_abi_and_bounds_live_in_world_safety_component():
 
 
 def test_classic_and_smart_dispatch_register_host_worlds_and_resizes():
-    text = SOURCE.read_text(encoding="utf-8") + WORLD_TRANSFORM_RUNTIME.read_text(encoding="utf-8")
+    smart_dispatch = (ROOT / "minihost" / "src" / "worker_smart_dispatch.cpp").read_text(
+        encoding="utf-8"
+    )
+    text = (SOURCE.read_text(encoding="utf-8") +
+            WORLD_TRANSFORM_RUNTIME.read_text(encoding="utf-8") + smart_dispatch)
     render = RENDER_SOURCE.read_text(encoding="utf-8")
     assert text.count("DispatchWorldFormatScope dispatch_worlds;") >= 3
-    assert text.count("register_world(output_world.data(), dispatch_pixel_format)") >= 4
+    assert text.count("register_world(output_world.data(), dispatch_pixel_format)") >= 1
+    assert smart_dispatch.count("register_world(request.output_world->data(),") >= 2
     # Connected-map storage moved into the render subsystem; L2 retains only
     # the per-dispatch registration of that owned world.
     assert "bool prepare_connected_map_world" in render
     assert "prepare_world_layout(map.world" in render
     assert "register_world(map_world.world.data(), kPixelFormatArgb32)" in text
     assert "register_world(world.data(), dispatch_pixel_format)" in text
-    assert "register_world(output_world.data(), kPixelFormatGpuBgra128)" in text
+    assert "register_world(request.output_world->data()," in smart_dispatch
+    assert "world_registry::kPixelFormatGpuBgra128" in smart_dispatch
 
 
 def test_composite16_runtime_provenance_and_concurrency_matrix():

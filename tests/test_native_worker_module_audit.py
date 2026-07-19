@@ -89,7 +89,8 @@ def test_pre_unload_audit_precedes_final_free_and_direct_workers_remain_optional
 def test_all_effectmain_calls_share_the_cumulative_audit_boundary():
     assert "g_capture_audit();" in DISPATCH
     assert "g_audit_passed() ? error : kAuditFailure" in DISPATCH
-    assert "return audited_effect_call(entry, command" in DISPATCH
+    assert "result = audited_effect_call(entry, command" in DISPATCH
+    assert "set_suite_timeline_selector(previous_suite_selector)" in DISPATCH
     assert "return invoke_entry_seh(entry, command" in DISPATCH
     assert "configure_selector_dispatch_audit(&capture_module_audit_phase" in MAIN
     assert "#define entry(...) guarded_effect_call(entry, __VA_ARGS__)" in MAIN

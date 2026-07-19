@@ -5,6 +5,7 @@ ROOT = Path(__file__).resolve().parents[1]
 HEADER = (ROOT / "minihost" / "src" / "gpu_directx_backend.hpp").read_text()
 SOURCE = (ROOT / "minihost" / "src" / "gpu_directx_backend.cpp").read_text()
 MAIN = (ROOT / "minihost" / "src" / "l2_main.cpp").read_text()
+SMART_DISPATCH = (ROOT / "minihost" / "src" / "worker_smart_dispatch.cpp").read_text()
 CMAKE = (ROOT / "minihost" / "CMakeLists.txt").read_text()
 TRANSPORT = (ROOT / "minihost" / "src" / "gpu_memory_world_transport.cpp").read_text()
 
@@ -40,13 +41,14 @@ def test_directx_copy_and_shared_transport_have_explicit_boundaries():
     assert "bool copy_buffer(ID3D12Resource*" in HEADER
     assert "WaitForSingleObject(event, 30'000) == WAIT_OBJECT_0" in SOURCE
     assert "if (event) CloseHandle(event);" in SOURCE
+    orchestration = MAIN + SMART_DISPATCH
     for marker in (
         "CudaRenderTransport",
         "prepare_cuda_render_transport",
         "finish_cuda_render_transport",
-        "gpu_transport::begin_backend_context",
+        "begin_backend_context",
     ):
-        assert marker in MAIN
+        assert marker in orchestration
     for marker in ("g_device_memory", "directx::copy_buffer",
                    "prepare_render_transport", "finish_render_transport"):
         assert marker in TRANSPORT

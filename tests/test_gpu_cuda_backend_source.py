@@ -5,6 +5,7 @@ ROOT = Path(__file__).resolve().parents[1]
 HEADER = ROOT / "minihost" / "src" / "gpu_cuda_backend.hpp"
 SOURCE = ROOT / "minihost" / "src" / "gpu_cuda_backend.cpp"
 MAIN = ROOT / "minihost" / "src" / "l2_main.cpp"
+SMART_DISPATCH = ROOT / "minihost" / "src" / "worker_smart_dispatch.cpp"
 TRANSPORT = ROOT / "minihost" / "src" / "gpu_memory_world_transport.cpp"
 CMAKE = ROOT / "minihost" / "CMakeLists.txt"
 
@@ -44,20 +45,23 @@ def test_cuda_pop_release_and_registry_cleanup_preserve_ownership_order():
     assert "--state->retained_count" in end
 
 
-def test_smart_gpu_stage_and_module_audit_semantics_remain_in_main():
-    main = MAIN.read_text(encoding="utf-8")
-    setup_audit = main.index("if (gpu_negotiation) capture_module_audit();")
-    setup_stage = main.index('"stage:gpu_device_setup_begin')
-    render_stage = main.index('"stage:" << (result.gpu_render_dispatched')
-    setdown_audit = main.index("capture_module_audit();", render_stage)
-    setdown_stage = main.index('"stage:gpu_device_setdown_begin', setdown_audit)
-    cleanup_audit = main.index("if (gpu_negotiation) capture_module_audit();", setdown_stage)
-    cleanup = main.index("end_backend_context(gpu_framework)", cleanup_audit)
+def test_smart_gpu_stage_and_module_audit_semantics_remain_in_orchestration():
+    orchestration = SMART_DISPATCH.read_text(encoding="utf-8")
+    setup_audit = orchestration.index("if (plan.gpu_negotiation) hooks.capture_module_audit();")
+    setup_stage = orchestration.index('"stage:gpu_device_setup_begin')
+    render_stage = orchestration.index('"stage:"\n            << (result.gpu_render_dispatched')
+    setdown_audit = orchestration.index("hooks.capture_module_audit();", render_stage)
+    setdown_stage = orchestration.index('"stage:gpu_device_setdown_begin', setdown_audit)
+    cleanup_audit = orchestration.index(
+        "if (plan.gpu_negotiation) hooks.capture_module_audit();", setdown_stage
+    )
+    cleanup = orchestration.index("end_backend_context(gpu_framework)", cleanup_audit)
     assert setup_audit < setup_stage < render_stage < setdown_audit < setdown_stage
     assert setdown_stage < cleanup_audit < cleanup
 
     transport = TRANSPORT.read_text(encoding="utf-8")
     assert "g_device_memory" in transport
+    main = MAIN.read_text(encoding="utf-8")
     assert "CudaRenderTransport" in main
     assert "prepare_cuda_render_transport" in main
     assert "prepare_render_transport" in transport

@@ -46,7 +46,9 @@ AEGP_HOST_SELFTESTS_SOURCE = ROOT / "minihost" / "src" / "worker_aegp_host_selft
 AEGP_COMPAT_SELFTESTS_SOURCE = ROOT / "minihost" / "src" / "worker_aegp_compat_selftests.cpp"
 INVOCATION_ORCHESTRATION_HEADER = ROOT / "minihost" / "src" / "worker_invocation_orchestration.hpp"
 SMART_EXECUTION_SOURCE = ROOT / "minihost" / "src" / "worker_smart_execution.cpp"
+SMART_RUNTIME_SOURCE = ROOT / "minihost" / "src" / "worker_smart_runtime.cpp"
 SMART_SETUP_SOURCE = ROOT / "minihost" / "src" / "worker_smart_setup.cpp"
+SMART_DISPATCH_SOURCE = ROOT / "minihost" / "src" / "worker_smart_dispatch.cpp"
 SMART_FINALIZE_SOURCE = ROOT / "minihost" / "src" / "worker_smart_finalize.cpp"
 CLASSIC_EXECUTION_SOURCE = ROOT / "minihost" / "src" / "worker_classic_execution.cpp"
 AEGP_COMPAT_SELFTEST_HEADER = ROOT / "minihost" / "src" / "worker_aegp_compat_selftests.hpp"
@@ -68,7 +70,7 @@ def l2_family_source():
         PF_ANSI_RUNTIME_SOURCE,
         HOST_SUITE_CATALOG_SOURCE,
         PARAMETER_EXECUTION_SOURCE,
-        SMART_SETUP_SOURCE,
+        SMART_RUNTIME_SOURCE, SMART_SETUP_SOURCE, SMART_DISPATCH_SOURCE,
         SMART_FINALIZE_SOURCE,
         CLASSIC_EXECUTION_SOURCE,
         AEGP_SCENE_SOURCE, AEGP_SCENE_HEADER, AEGP_SCENE_RUNTIME_HEADER,
@@ -263,7 +265,7 @@ class MinihostL2SourceTests(unittest.TestCase):
         header = RENDER_HEADER.read_text(encoding="utf-8")
         implementation = RENDER_SOURCE.read_text(encoding="utf-8")
         cmake = (ROOT / "minihost" / "CMakeLists.txt").read_text(encoding="utf-8")
-        worker = SOURCE.read_text(encoding="utf-8") + SMART_EXECUTION_SOURCE.read_text(encoding="utf-8")
+        worker = l2_family_source() + SMART_EXECUTION_SOURCE.read_text(encoding="utf-8")
 
         self.assertIn("struct HostHooks", header)
         self.assertIn("struct RenderContext", header)
@@ -287,7 +289,7 @@ class MinihostL2SourceTests(unittest.TestCase):
             "copy_packed_world", "finite_float_world", "prepare_connected_map_world",
         ):
             self.assertIn(marker, implementation)
-            self.assertIn(f"aexcompat::render::{marker}", worker)
+            self.assertIn(marker, worker)
         self.assertNotIn('#include "l2_main.cpp"', implementation)
         self.assertNotIn("#if 0", implementation)
         self.assertIn("src/render_subsystem.cpp", cmake)
@@ -406,20 +408,25 @@ class MinihostL2SourceTests(unittest.TestCase):
         self.assertIn("guard_bytes_intact", text)
 
     def test_suite_timeline_is_structured_and_selector_bound(self):
-        text = SOURCE.read_text(encoding="utf-8")
+        registry = (ROOT / "minihost" / "src" / "worker_suite_registry.cpp").read_text(
+            encoding="utf-8")
+        registry += (ROOT / "minihost" / "src" / "worker_suite_registry.hpp").read_text(
+            encoding="utf-8")
+        dispatch = (ROOT / "minihost" / "src" / "worker_selector_dispatch.cpp").read_text(
+            encoding="utf-8")
+        guards = (ROOT / "tests" / "native" / "worker_suite_registry_selftest.cpp").read_text(
+            encoding="utf-8")
+        text = SOURCE.read_text(encoding="utf-8") + registry + dispatch + guards
         for marker in (
             "struct SuiteTimelineEvent",
             "kMaxSuiteTimeline = 65536",
-            "record_suite_event_locked",
             "suite_timeline_report_json",
             '\\"suite_timeline\\"',
-            "g_suite_selector = effect_selector_name(command)",
-            "record_suite_event_locked(true, safe_name, version, 0)",
-            "record_suite_acquire_failure(safe_copy, version, 1)",
-            "record_suite_event_locked(false, safe_name, version, released ? 0 : 1)",
-            "copy_suite_name_seh",
-            "std::array<char, kMaxSuiteName + 8> unterminated",
-            "--self-test-suite-name-guards",
+            "set_suite_timeline_selector(effect_selector_name(command))",
+            "g_suite_selector ? g_suite_selector : \"HOST\"",
+            "copy_bounded_suite_name",
+            "char* unterminated",
+            "rejected_without_resolving(registry, unterminated)",
         ):
             self.assertIn(marker, text)
 
@@ -615,7 +622,7 @@ class MinihostL2SourceTests(unittest.TestCase):
             "struct LegacyRect { int32_t left, top, right, bottom; }",
             "&aexcompat::pf_world_transform::provide_fill_matte2",
             "fill_world_typed(16, color, area, world)",
-            "const int32_t requested_width = read<int32_t>(command_output, kOutWidth)",
+            "const int32_t next_width = read<int32_t>(output, kOutWidth)",
             "aexcompat::render::validate_output_extent",
             "write<int32_t>(input, 284, g_downsample_x.numerator)",
             'encoded.compare(0, 11, L"spatial:v1|")',
@@ -651,7 +658,7 @@ class MinihostL2SourceTests(unittest.TestCase):
         text = l2_family_source() + (ROOT / "minihost" / "src" /
                                      "worker_smart_runtime.cpp").read_text(encoding="utf-8")
         for marker in ('L"--render-image-layer"', 'L"--smart-image-layer"',
-                       "g_checkout_layer_definitions", "smart_state().hosted_layers",
+                       "g_checkout_layer_definitions", "runtime.hosted_layers",
                        "existing.slot != layer.slot", "g_params[layer.slot - 1].type != 0",
                        "(mode.image_argc - 13) / 4 <= 64",
                        'L"v1|%d|%d|%u%n"', "same_rational_time",
@@ -668,11 +675,11 @@ class MinihostL2SourceTests(unittest.TestCase):
     def test_smartfx_expanded_extent_is_bounded_and_origin_aware(self):
         text = l2_family_source()
         bounds = RENDER_SOURCE.read_text(encoding="utf-8")
-        for marker in ("aexcompat::render::prepare_smart_output_bounds",
+        for marker in ("render::prepare_smart_output_bounds",
                        "write<int32_t>(input, 276", "write<int32_t>(input, 280",
                        "result.output_width", "result.output_height",
                        "extent_hint\\\":{\\\"left\\\":0,\\\"top\\\":0,\\\"right\\\":",
-                       "smart.output_width << \",\\\"bottom\\\":\" << smart.output_height"):
+                       "v.dimensions[0] << \",\\\"bottom\\\":\" << v.dimensions[1]"):
             self.assertIn(marker, text)
         for marker in ("width <= 4096", "height <= 4096",
                        "width * height <= 16'777'216"):
@@ -711,9 +718,9 @@ class MinihostL2SourceTests(unittest.TestCase):
 
     def test_frame_setup_origin_uses_two_signed_32_bit_components(self):
         text = l2_family_source()
-        self.assertIn("read<int32_t>(command_output, kOutOrigin)", text)
-        self.assertIn("read<int32_t>(command_output, kOutOrigin + 4)", text)
-        self.assertNotIn("read<int16_t>(command_output, kOutOrigin)", text)
+        self.assertIn("read<int32_t>(output, kOutOrigin)", text)
+        self.assertIn("read<int32_t>(output, kOutOrigin + 4)", text)
+        self.assertNotIn("read<int16_t>(output, kOutOrigin)", text)
 
     def test_params_setup_count_is_forwarded_and_sanity_checked(self):
         text = l2_family_source()
@@ -733,7 +740,7 @@ class MinihostL2SourceTests(unittest.TestCase):
         )
         for marker in (
             "RenderLifecycle begin_render_lifecycle",
-            "classic_context->mark_selector_dispatched();\n      error = entry(kRender",
+            "classic_context.mark_selector_dispatched();\n    return entry(kRender",
             "end_render_lifecycle(entry, input, command_output, params.data()",
         ):
             self.assertIn(marker, text)
@@ -821,9 +828,9 @@ class MinihostL2SourceTests(unittest.TestCase):
             "defaults_disposed && setdown_error == 0 ? 0 : 20",
         ):
             self.assertIn(marker, text)
-        params_only = text.index("if (params_only_mode)")
-        lifecycle = text.index("stage:sequence_setup_begin", params_only)
-        self.assertLess(params_only, lifecycle)
+        early_dispatch = text.index("early_mode != aexcompat::l2mode::EarlyMode::None")
+        lifecycle = text.index("stage:sequence_setup_begin", early_dispatch)
+        self.assertLess(early_dispatch, lifecycle)
 
     def test_aegp_update_menu_event_owns_and_invokes_registered_hooks(self):
         text = l2_family_source()

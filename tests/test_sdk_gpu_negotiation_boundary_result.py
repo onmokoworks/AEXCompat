@@ -5,6 +5,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 EVIDENCE = ROOT / "analysis" / "SDK_GPU_NEGOTIATION_BOUNDARY_RESULT_2026-07-15.json"
 SOURCE = ROOT / "minihost" / "src" / "l2_main.cpp"
+SMART_DISPATCH = ROOT / "minihost" / "src" / "worker_smart_dispatch.cpp"
+SMART_FINALIZE = ROOT / "minihost" / "src" / "worker_smart_finalize.cpp"
 TRANSPORT = ROOT / "minihost" / "src" / "gpu_memory_world_transport.cpp"
 BROKER = ROOT / "broker" / "crates" / "broker" / "src" / "image_render.rs"
 
@@ -31,7 +33,10 @@ def test_gpu_negotiation_rejects_unwritten_output_without_setdown_fault():
 
 
 def test_gpu_abi_and_suite_table_are_explicit():
-    source = SOURCE.read_text(encoding="utf-8")
+    source = "".join(
+        path.read_text(encoding="utf-8")
+        for path in (SOURCE, SMART_DISPATCH, SMART_FINALIZE)
+    )
     for marker in (
         "write<int16_t>(pre_input, 44",
         "write<void*>(pre_input, 48",
@@ -43,7 +48,7 @@ def test_gpu_abi_and_suite_table_are_explicit():
         "write<int32_t>(setdown_input, 8, gpu_framework)",
         '{"PF GPU Device Suite", 1, g_gpu_device_suite1.data()}',
         "kPixelFormatGpuBgra128",
-        "result.output_pixels_valid = !logical_output.empty() && !output_untouched && output_finite",
+        "result.output_pixels_valid = !logical_output.empty() && !untouched && finite",
     ):
         assert marker in source
     transport = TRANSPORT.read_text(encoding="utf-8")
@@ -52,7 +57,7 @@ def test_gpu_abi_and_suite_table_are_explicit():
 
 
 def test_gpu_cleanup_error_is_a_hard_failure_and_forwarded():
-    source = SOURCE.read_text(encoding="utf-8")
+    source = SOURCE.read_text(encoding="utf-8") + SMART_FINALIZE.read_text(encoding="utf-8")
     broker = BROKER.read_text(encoding="utf-8")
     assert "invoke_entry_seh" in source
     assert "smart.gpu_setup_error == 0 && smart.gpu_setdown_error == 0" in source

@@ -8,6 +8,7 @@
 #include <array>
 #include <cctype>
 #include <iostream>
+#include <iomanip>
 #include <sstream>
 
 namespace aexcompat::worker_runtime {
@@ -15,25 +16,58 @@ namespace {
 
 constexpr std::size_t kMaxMissingSuites = 16;
 constexpr std::size_t kMaxSuiteNameBytes = 96;
+constexpr std::size_t kMaxSuiteTimeline = 65536;
+thread_local const char* g_suite_selector = "HOST";
 
-bool copy_bounded_suite_name(
-    const char* source,
-    std::array<char, kMaxSuiteNameBytes + 1>& destination) noexcept {
-  if (!source) return false;
+struct SuiteNameCopy {
+  std::array<char, kMaxSuiteNameBytes + 1> text{};
+  std::size_t length{};
+  bool readable{};
+  bool terminated{};
+};
+
+SuiteNameCopy copy_bounded_suite_name(const char* source) noexcept {
+  SuiteNameCopy copy;
+  if (!source) return copy;
   __try {
-    for (std::size_t index = 0; index <= kMaxSuiteNameBytes; ++index) {
-      const char character = source[index];
+    for (; copy.length < kMaxSuiteNameBytes; ++copy.length) {
+      const unsigned char character = static_cast<unsigned char>(source[copy.length]);
       if (character == '\0') {
-        destination[index] = '\0';
-        return true;
+        copy.terminated = true;
+        break;
       }
-      if (index == kMaxSuiteNameBytes) return false;
-      destination[index] = character;
+      copy.text[copy.length] = character >= 0x20 && character <= 0x7e
+          ? static_cast<char>(character) : '?';
     }
+    copy.readable = true;
   } __except (EXCEPTION_EXECUTE_HANDLER) {
-    return false;
+    copy.readable = false;
   }
-  return false;
+  copy.text[copy.length] = '\0';
+  return copy;
+}
+
+std::string escape_json(const std::string& input) {
+  std::ostringstream escaped;
+  for (const unsigned char character : input) {
+    switch (character) {
+      case '\\': escaped << "\\\\"; break;
+      case '"': escaped << "\\\""; break;
+      case '\b': escaped << "\\b"; break;
+      case '\f': escaped << "\\f"; break;
+      case '\n': escaped << "\\n"; break;
+      case '\r': escaped << "\\r"; break;
+      case '\t': escaped << "\\t"; break;
+      default:
+        if (character < 0x20) {
+          escaped << "\\u00" << std::hex << std::setw(2) << std::setfill('0')
+                  << static_cast<int>(character) << std::dec;
+        } else {
+          escaped << static_cast<char>(character);
+        }
+    }
+  }
+  return escaped.str();
 }
 
 }  // namespace
@@ -42,36 +76,59 @@ int32_t SuiteRegistry::acquire(const char* name, int32_t version,
                                const void** suite, SuiteResolver resolver,
                                void* resolver_context,
                                TraceWriter* trace_writer) {
-  if (!suite) return 4;
+  const SuiteNameCopy owned_name = copy_bounded_suite_name(name);
+  const auto record = [&](int32_t result) {
+    std::lock_guard<std::mutex> lock(timeline_mutex_);
+    if (suite_timeline_.size() >= kMaxSuiteTimeline) return;
+    suite_timeline_.push_back({static_cast<uint32_t>(suite_timeline_.size()), true,
+        std::string(owned_name.text.data(), owned_name.length), version,
+        g_suite_selector ? g_suite_selector : "HOST", result});
+  };
+  if (!suite) { record(4); return 4; }
   *suite = nullptr;
-  if (!name || !resolver) return 4;
-  std::array<char, kMaxSuiteNameBytes + 1> owned_name{};
-  if (!copy_bounded_suite_name(name, owned_name)) return 4;
-  const char* const safe_name = owned_name.data();
+  if (!name || !resolver || !owned_name.readable || !owned_name.terminated) {
+    record(4);
+    return 4;
+  }
+  const char* const safe_name = owned_name.text.data();
 
   switch (resolver(resolver_context, safe_name, version, suite)) {
     case SuiteResolveResult::acquired:
       lease_tracker_.acquire(safe_name, version);
       if (trace_writer) trace_writer->suite_acquire(safe_name, version, true);
+      record(0);
       return 0;
     case SuiteResolveResult::rejected_bad_param:
       *suite = nullptr;
+      record(4);
       return 4;
     case SuiteResolveResult::not_found:
       *suite = nullptr;
-      return reject_unknown(safe_name, version, trace_writer);
+      {
+        const int32_t result = reject_unknown(safe_name, version, trace_writer);
+        record(result);
+        return result;
+      }
   }
   *suite = nullptr;
+  record(4);
   return 4;
 }
 
 int32_t SuiteRegistry::release(const char* name, int32_t version,
                                TraceWriter* trace_writer) {
-  std::array<char, kMaxSuiteNameBytes + 1> owned_name{};
-  if (!copy_bounded_suite_name(name, owned_name)) return 1;
-  const char* const safe_name = owned_name.data();
-  const bool released = lease_tracker_.release(safe_name, version);
-  if (trace_writer)
+  const SuiteNameCopy owned_name = copy_bounded_suite_name(name);
+  const char* const safe_name = owned_name.text.data();
+  const bool valid_name = owned_name.readable && owned_name.terminated;
+  const bool released = valid_name && lease_tracker_.release(safe_name, version);
+  {
+    std::lock_guard<std::mutex> lock(timeline_mutex_);
+    if (suite_timeline_.size() < kMaxSuiteTimeline)
+      suite_timeline_.push_back({static_cast<uint32_t>(suite_timeline_.size()), false,
+          std::string(owned_name.text.data(), owned_name.length), version,
+          g_suite_selector ? g_suite_selector : "HOST", released ? 0 : 1});
+  }
+  if (trace_writer && valid_name && owned_name.length != 0)
     trace_writer->suite_release(safe_name, std::max<int32_t>(version, 0), released);
   return released ? 0 : 1;
 }
@@ -151,9 +208,33 @@ std::string SuiteRegistry::missing_suites_report_json() const {
   return json.str();
 }
 
+std::string SuiteRegistry::suite_timeline_report_json() const {
+  std::lock_guard<std::mutex> lock(timeline_mutex_);
+  std::ostringstream json;
+  json << ",\"suite_timeline\":[";
+  for (std::size_t index = 0; index < suite_timeline_.size(); ++index) {
+    if (index != 0) json << ',';
+    const auto& event = suite_timeline_[index];
+    json << "{\"sequence\":" << event.sequence
+         << ",\"action\":\"" << (event.acquire ? "acquire" : "release")
+         << "\",\"name\":\"" << escape_json(event.name)
+         << "\",\"version\":" << event.version
+         << ",\"selector\":\"" << escape_json(event.selector)
+         << "\",\"result\":" << event.result << '}';
+  }
+  json << ']';
+  return json.str();
+}
+
 SuiteRegistry& suite_registry() {
   static SuiteRegistry registry;
   return registry;
+}
+
+const char* set_suite_timeline_selector(const char* selector) noexcept {
+  const char* previous = g_suite_selector;
+  g_suite_selector = selector;
+  return previous;
 }
 
 }  // namespace aexcompat::worker_runtime

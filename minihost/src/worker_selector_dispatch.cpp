@@ -3,6 +3,7 @@
 #include <windows.h>
 
 #include "worker_minidump_runtime.hpp"
+#include "worker_suite_registry.hpp"
 namespace aexcompat::worker_runtime {
 namespace {
 
@@ -82,15 +83,20 @@ int32_t invoke_entry_seh(EffectEntry entry, int32_t command, void* input,
                          uint32_t* out_exception_code) {
   if (!out_exception_code) return kAuditFailure;
   *out_exception_code = 0;
+  const char* previous_suite_selector =
+      set_suite_timeline_selector(effect_selector_name(command));
+  int32_t result = 0;
   __try {
-    return audited_effect_call(entry, command, input, output, params, world, extra);
+    result = audited_effect_call(entry, command, input, output, params, world, extra);
   } __except(capture_seh_exception(GetExceptionInformation())) {
     *out_exception_code = GetExceptionCode();
     g_telemetry.selector = effect_selector_name(command);
     g_telemetry.error = kAuditFailure;
     if (g_capture_audit) g_capture_audit();
-    return kAuditFailure;
+    result = kAuditFailure;
   }
+  set_suite_timeline_selector(previous_suite_selector);
+  return result;
 }
 
 int32_t guarded_effect_call(EffectEntry entry, int32_t command, void* input,

@@ -40,15 +40,15 @@ def test_registry_is_a_genuine_compiled_owner_and_abi_wrappers_remain_in_main():
 def test_registry_owns_success_reject_unknown_and_release_protocols():
     acquire = SOURCE[SOURCE.index("int32_t SuiteRegistry::acquire") :
                      SOURCE.index("int32_t SuiteRegistry::release")]
-    assert "if (!suite) return 4" in acquire
+    assert "if (!suite) { record(4); return 4; }" in acquire
     assert "*suite = nullptr" in acquire
-    assert "if (!name || !resolver) return 4" in acquire
+    assert "!name || !resolver || !owned_name.readable || !owned_name.terminated" in acquire
     assert "case SuiteResolveResult::acquired" in acquire
     assert "lease_tracker_.acquire(safe_name, version)" in acquire
     assert "suite_acquire(safe_name, version, true)" in acquire
     assert "case SuiteResolveResult::rejected_bad_param" in acquire
     assert "case SuiteResolveResult::not_found" in acquire
-    assert "return reject_unknown(safe_name, version, trace_writer)" in acquire
+    assert "reject_unknown(safe_name, version, trace_writer)" in acquire
     assert "lease_tracker_.release(safe_name, version)" in SOURCE
     assert "return released ? 0 : 1" in SOURCE
 
@@ -86,14 +86,14 @@ def test_missing_suite_diagnostics_remain_bounded_sanitized_and_fail_closed():
 
 
 def test_raw_plugin_name_is_copied_once_before_resolver_lease_or_trace_use():
-    boundary = SOURCE[SOURCE.index("bool copy_bounded_suite_name") :
+    boundary = SOURCE[SOURCE.index("SuiteNameCopy copy_bounded_suite_name") :
                       SOURCE.index("}  // namespace")]
-    assert "index <= kMaxSuiteNameBytes" in boundary
+    assert "copy.length < kMaxSuiteNameBytes" in boundary
     assert "__try" in boundary
     assert "__except (EXCEPTION_EXECUTE_HANDLER)" in boundary
     acquire = SOURCE[SOURCE.index("int32_t SuiteRegistry::acquire") :
                      SOURCE.index("int32_t SuiteRegistry::release")]
-    copied = acquire.index("copy_bounded_suite_name(name, owned_name)")
+    copied = acquire.index("owned_name = copy_bounded_suite_name(name)")
     resolved = acquire.index("resolver(resolver_context, safe_name")
     tracked = acquire.index("lease_tracker_.acquire(safe_name")
     traced = acquire.index("suite_acquire(safe_name")
@@ -102,7 +102,7 @@ def test_raw_plugin_name_is_copied_once_before_resolver_lease_or_trace_use():
     assert "lease_tracker_.acquire(name" not in acquire
     release = SOURCE[SOURCE.index("int32_t SuiteRegistry::release") :
                      SOURCE.index("std::string SuiteRegistry::safe_missing_name")]
-    assert "copy_bounded_suite_name(name, owned_name)" in release
+    assert "owned_name = copy_bounded_suite_name(name)" in release
     assert "lease_tracker_.release(safe_name" in release
 
 
