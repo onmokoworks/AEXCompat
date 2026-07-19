@@ -22,7 +22,7 @@ def _worker() -> pathlib.Path | None:
 
 
 def test_async_and_render_suites_have_typed_frozen_abi():
-    text = SOURCE.read_text(encoding="utf-8")
+    text = source_owners.worker_text()
     assert "struct AegpRenderAsyncManagerSuite1" in text
     assert "sizeof(AegpRenderAsyncManagerSuite1) == 2 * sizeof(void*)" in text
     assert "struct AegpRenderSuite4" in text

@@ -26,7 +26,10 @@ SRC = ROOT / "minihost" / "src"
 L2_MAIN = SRC / "l2_main.cpp"
 
 # l2_main.cpp から抽出された実装の owner 群。TU 抽出のたびにここへ追記する。
+# 宣言→定義の出現順を前提にする slice (index の 2 回目参照など) が
+# あるため、宣言だけを持つ ABI header は l2_main より前に置く。
 WORKER_RUNTIME_OWNERS = (
+    "minihost/src/worker_l2_render_abi.hpp",
     "minihost/src/l2_main.cpp",
     "minihost/src/worker_aegp_utility_suite.hpp",
     "minihost/src/worker_aegp_utility_suite.cpp",
@@ -44,6 +47,7 @@ WORKER_RUNTIME_OWNERS = (
     "minihost/src/worker_aegp_command_suites.cpp",
     "minihost/src/worker_mask_suite_tables.hpp",
     "minihost/src/worker_mask_suite_tables.cpp",
+    "minihost/src/worker_l2_render_abi.cpp",
 )
 
 # 契約名 → owner ファイル群 (repo ルート相対)。
@@ -66,6 +70,8 @@ CONTRACTS = {
         "minihost/src/worker_aegp_command_suites.cpp",
         "minihost/src/worker_mask_suite_tables.hpp",
         "minihost/src/worker_mask_suite_tables.cpp",
+        "minihost/src/worker_l2_render_abi.hpp",
+        "minihost/src/worker_l2_render_abi.cpp",
         "minihost/src/l2_mode_execution.hpp",
         "minihost/src/l2_mode_execution.cpp",
         "minihost/src/l2_cli_dispatch.cpp",
@@ -120,6 +126,10 @@ CONTRACTS = {
         "minihost/src/worker_render_report.hpp",
         "minihost/src/worker_render_report.cpp",
     ),
+    "l2_render_abi": (
+        "minihost/src/worker_l2_render_abi.hpp",
+        "minihost/src/worker_l2_render_abi.cpp",
+    ),
     "aegp_resizer_3d_chain": (
         "minihost/src/l2_main.cpp",
         "minihost/src/worker_aegp_scene.cpp",
@@ -142,6 +152,8 @@ CONTRACTS = {
     ),
     "pf_ae_adv_item_suite": (
         "minihost/src/l2_main.cpp",
+        "minihost/src/worker_l2_render_abi.hpp",
+        "minihost/src/worker_l2_render_abi.cpp",
         "minihost/src/worker_pf_suites.cpp",
         "minihost/src/worker_pf_suites_internal.hpp",
         "minihost/src/worker_world_safety.cpp",
@@ -202,6 +214,7 @@ CONTRACTS = {
     ),
     "sdk_grabba_update_menu": (
         "minihost/src/l2_main.cpp",
+        "minihost/src/worker_l2_render_abi.hpp",
         "minihost/src/worker_aegp_scene.cpp",
         "minihost/src/worker_aegp_scene.hpp",
         "minihost/src/worker_aegp_layer_render_runtime.cpp",

@@ -9,7 +9,7 @@ EXTERNAL_RUNTIME = ROOT / "minihost" / "src" / "worker_aegp_external_render_runt
 
 
 def test_render_suite5_metadata_uses_exact_frozen_abi():
-    text = SOURCE.read_text(encoding="utf-8")
+    text = source_owners.worker_text()
     assert "struct AegpTimeStamp" in text
     assert "sizeof(AegpTimeStamp) == 4" in text
     assert "sizeof(AegpRenderSuite5) == 14 * sizeof(void*)" in text
@@ -17,7 +17,7 @@ def test_render_suite5_metadata_uses_exact_frozen_abi():
 
 
 def test_render_sufficiency_requires_equivalent_options_and_roi_coverage():
-    text = SOURCE.read_text(encoding="utf-8")
+    text = source_owners.worker_text()
     declaration = text.index("int32_t __cdecl render_sufficient_reject(")
     start = text.index("int32_t __cdecl render_sufficient_reject(", declaration + 1)
     body = text[start:text.index("int32_t __cdecl render_sound_reject", start)]
@@ -51,7 +51,7 @@ def test_timestamp_change_and_worthwhile_queries_share_one_project_epoch():
 
 
 def test_receipt_guid_is_stable_owned_memory_and_rejects_stale_receipts():
-    text = SOURCE.read_text(encoding="utf-8")
+    text = source_owners.worker_text()
     declaration = text.index("int32_t __cdecl render_guid_reject(")
     start = text.index("int32_t __cdecl render_guid_reject(", declaration + 1)
     body = text[start:text.index("bool world_lifetimes_balanced();", start)]
