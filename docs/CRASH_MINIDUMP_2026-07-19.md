@@ -59,6 +59,12 @@ copies the exception record and context into broker-owned storage, signals that
 thread, and waits up to two seconds. `MiniDumpWriteDump` is never called from
 the faulting thread. The writer uses the inherited pipe and waits for the
 broker's bounded-copy acknowledgement.
+Only after `MiniDumpWriteDump` returns success does the worker append a fixed
+completion marker to the transport. The broker withholds that marker-sized
+suffix until EOF and publishes only when the marker is present and the bounded
+copy completed without error. A timeout, worker termination, or DbgHelp failure
+after writing a non-empty prefix therefore deletes the `.dmp.part` by handle
+instead of publishing a corrupt `.dmp`.
 The broker reader stops immediately on overflow and uses a cancellable polling
 loop, so a worker that duplicates or retains its pipe writer cannot block
 broker teardown indefinitely.
@@ -89,4 +95,5 @@ opt-in and verifies that no writer was attempted. Both modes are covered for
 all three worker executables by `tests/test_worker_crash_minidump.py` when the
 minihost binaries are built. Broker unit tests also cover cleanup of more than
 the file-count cap worth of successful empty reservations, concurrent policy
-lock queueing, and explicit lock timeout classification.
+lock queueing, explicit lock timeout classification, and rejection of a
+non-empty capture that lacks the producer completion marker.

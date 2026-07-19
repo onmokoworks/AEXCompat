@@ -647,12 +647,15 @@ const char* effect_selector_name(int32_t command) {
   }
 }
 
-// Opt-in crash minidumps (issue #18) use a broker-created, inherited file
-// handle. The worker never receives a directory path and never re-opens a
-// dump path. DbgHelp runs on a pre-started dedicated thread because calling it
-// from the faulting SEH thread can deadlock in an unstable process.
+// Opt-in crash minidumps (issue #18) use a broker-created inherited pipe. The
+// worker never receives a directory path or dump-file handle. DbgHelp runs on
+// a pre-started dedicated thread because calling it from the faulting SEH
+// thread can deadlock in an unstable process.
 constexpr uint64_t kMaxMinidumpFileBytes = 64ull * 1024ull * 1024ull;
 constexpr DWORD kMinidumpWriterWaitMs = 2'000;
+constexpr std::array<unsigned char, 16> kMinidumpCompletionMarker{
+    'A', 'E', 'X', 'D', 'U', 'M', 'P', '-',
+    'C', 'O', 'M', 'P', 'L', 'E', 'T', 'E'};
 HANDLE g_minidump_handle{};
 HANDLE g_minidump_ack_handle{};
 HANDLE g_minidump_request_event{};
@@ -749,6 +752,17 @@ void write_minidump_on_dedicated_thread() {
       GetCurrentProcess(), GetCurrentProcessId(), g_minidump_handle,
       MiniDumpNormal, &exception_info, nullptr, &callback_info);
   const DWORD error = GetLastError();
+  if (written) {
+    DWORD completion_bytes = 0;
+    if (!WriteFile(g_minidump_handle, kMinidumpCompletionMarker.data(),
+                   static_cast<DWORD>(kMinidumpCompletionMarker.size()),
+                   &completion_bytes, nullptr) ||
+        completion_bytes != kMinidumpCompletionMarker.size()) {
+      // Without the complete marker the broker deliberately rejects and
+      // deletes the non-authoritative prefix.
+      SetLastError(ERROR_WRITE_FAULT);
+    }
+  }
   const MinidumpBrokerAck broker = finish_minidump_transport();
   if (written && broker.valid && !broker.rejected && broker.bytes > 0 &&
       broker.bytes <= kMaxMinidumpFileBytes) {

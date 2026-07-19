@@ -35,18 +35,25 @@ def test_guarded_crash_writes_a_minidump(worker: Path, tmp_path: Path) -> None:
     def broker_copy() -> None:
         total = 0
         overflow = False
+        completion_marker = b"AEXDUMP-COMPLETE"
+        pending = bytearray()
         try:
             with dump_path.open("wb") as output:
                 while True:
                     chunk = os.read(dump_read, 64 * 1024)
                     if not chunk:
                         break
+                    pending.extend(chunk)
+                    flush_count = max(0, len(pending) - len(completion_marker))
                     remaining = (64 * 1024 * 1024) - total
-                    if len(chunk) > remaining:
+                    if flush_count > remaining:
                         overflow = True
                         continue
-                    output.write(chunk)
-                    total += len(chunk)
+                    output.write(pending[:flush_count])
+                    del pending[:flush_count]
+                    total += flush_count
+                if pending != completion_marker:
+                    overflow = True
             try:
                 os.write(ack_write, struct.pack("<QB", total, int(overflow)))
             except OSError:

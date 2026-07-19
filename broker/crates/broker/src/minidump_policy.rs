@@ -501,7 +501,10 @@ impl Drop for MinidumpLaunchFile {
             .take()
             .and_then(|reader| reader.join().ok())
             .unwrap_or_default();
-        let publish = capture.bytes > 0 && !capture.overflow && !capture.write_failed;
+        let publish = capture.bytes > 0
+            && capture.producer_complete
+            && !capture.overflow
+            && !capture.write_failed;
         let rename_result = if publish {
             rename_file_by_handle(self.dump_handle, &self._directory_guard, &self.final_name)
         } else {
@@ -527,9 +530,13 @@ impl Drop for MinidumpLaunchFile {
 #[derive(Default)]
 struct MinidumpCapture {
     bytes: u64,
+    producer_complete: bool,
     overflow: bool,
     write_failed: bool,
 }
+
+#[cfg(windows)]
+const MINIDUMP_COMPLETION_MARKER: &[u8; 16] = b"AEXDUMP-COMPLETE";
 
 #[cfg(windows)]
 fn strip_extended_prefix(path: &Path) -> PathBuf {
@@ -682,6 +689,12 @@ fn copy_minidump_pipe(
     let dump_handle = dump_value as HANDLE;
     let ack_handle = ack_value as HANDLE;
     let mut capture = MinidumpCapture::default();
+    // Keep the last marker-sized suffix out of the dump file until EOF.  A
+    // nonempty prefix is not proof that MiniDumpWriteDump succeeded: DbgHelp
+    // can fail after emitting bytes, and a dying worker can close the pipe at
+    // any point.  Only the writer appends this marker after a successful
+    // MiniDumpWriteDump return.
+    let mut pending = Vec::<u8>::with_capacity(64 * 1024 + MINIDUMP_COMPLETION_MARKER.len());
     loop {
         let mut available = 0u32;
         let peeked = unsafe {
@@ -720,20 +733,24 @@ fn copy_minidump_pipe(
             break;
         }
         let count = read as usize;
-        if capture.bytes > MAX_MINIDUMP_FILE_BYTES - count as u64 {
+        pending.extend_from_slice(&buffer[..count]);
+        let flush_count = pending
+            .len()
+            .saturating_sub(MINIDUMP_COMPLETION_MARKER.len());
+        if capture.bytes > MAX_MINIDUMP_FILE_BYTES - flush_count as u64 {
             capture.overflow = true;
             // Closing the read side makes an over-budget producer fail fast;
             // draining attacker-controlled bytes would only burn broker CPU.
             break;
         }
         let mut offset = 0usize;
-        while offset < count {
+        while offset < flush_count {
             let mut written = 0u32;
             let ok = unsafe {
                 WriteFile(
                     dump_handle,
-                    buffer[offset..count].as_ptr(),
-                    (count - offset) as u32,
+                    pending[offset..flush_count].as_ptr(),
+                    (flush_count - offset) as u32,
                     &mut written,
                     std::ptr::null_mut(),
                 )
@@ -744,13 +761,18 @@ fn copy_minidump_pipe(
             }
             offset += written as usize;
         }
-        if !capture.write_failed {
-            capture.bytes += count as u64;
+        if capture.write_failed {
+            break;
         }
+        capture.bytes += flush_count as u64;
+        pending.drain(..flush_count);
     }
+    capture.producer_complete = !capture.overflow
+        && !capture.write_failed
+        && pending.as_slice() == MINIDUMP_COMPLETION_MARKER;
     let mut ack = [0u8; 9];
     ack[..8].copy_from_slice(&capture.bytes.to_le_bytes());
-    ack[8] = u8::from(capture.overflow || capture.write_failed);
+    ack[8] = u8::from(!capture.producer_complete || capture.overflow || capture.write_failed);
     let mut sent = 0u32;
     unsafe {
         WriteFile(
@@ -851,7 +873,9 @@ fn acquire_policy_lock_with_timeout(
 ) -> io::Result<PolicyLock> {
     use std::thread::sleep;
     use std::time::{Duration, Instant};
-    use windows_sys::Win32::Foundation::{ERROR_SHARING_VIOLATION, GENERIC_READ, GENERIC_WRITE};
+    use windows_sys::Win32::Foundation::{
+        ERROR_ACCESS_DENIED, ERROR_SHARING_VIOLATION, GENERIC_READ, GENERIC_WRITE,
+    };
     use windows_sys::Win32::Storage::FileSystem::{DELETE, FILE_ATTRIBUTE_HIDDEN};
 
     let deadline = Instant::now() + timeout;
@@ -875,7 +899,13 @@ fn acquire_policy_lock_with_timeout(
                 }
                 return Ok(PolicyLock(handle));
             }
-            Err(error) if error.raw_os_error() == Some(ERROR_SHARING_VIOLATION as i32) => {}
+            Err(error)
+                if matches!(
+                    error.raw_os_error(),
+                    Some(code)
+                        if code == ERROR_SHARING_VIOLATION as i32
+                            || code == ERROR_ACCESS_DENIED as i32
+                ) => {}
             Err(error) => return Err(error),
         }
         if Instant::now() >= deadline {
@@ -1279,23 +1309,67 @@ mod tests {
             create_minidump_file_in_directory(&directory).expect("create reservation");
         let final_path = directory.path.join(&reservation.final_name);
         let bytes = b"MDMP-test";
+        let transport: Vec<u8> = bytes
+            .iter()
+            .copied()
+            .chain(MINIDUMP_COMPLETION_MARKER.iter().copied())
+            .collect();
         let mut written = 0u32;
         assert_ne!(
             unsafe {
                 WriteFile(
                     reservation.raw(),
-                    bytes.as_ptr(),
-                    bytes.len() as u32,
+                    transport.as_ptr(),
+                    transport.len() as u32,
                     &mut written,
                     std::ptr::null_mut(),
                 )
             },
             0
         );
-        assert_eq!(written as usize, bytes.len());
+        assert_eq!(written as usize, transport.len());
         reservation.close_worker_handles();
         drop(reservation);
         assert_eq!(fs::read(&final_path).expect("published dump"), bytes);
+        drop(directory);
+        let _ = fs::remove_dir_all(repository);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn partial_capture_without_completion_marker_is_deleted() {
+        use windows_sys::Win32::Storage::FileSystem::WriteFile;
+
+        let (repository, directory) = test_windows_directory();
+        let mut reservation =
+            create_minidump_file_in_directory(&directory).expect("create reservation");
+        let final_path = directory.path.join(&reservation.final_name);
+        let partial = b"MDMP-incomplete-prefix";
+        let mut written = 0u32;
+        assert_ne!(
+            unsafe {
+                WriteFile(
+                    reservation.raw(),
+                    partial.as_ptr(),
+                    partial.len() as u32,
+                    &mut written,
+                    std::ptr::null_mut(),
+                )
+            },
+            0
+        );
+        assert_eq!(written as usize, partial.len());
+        reservation.close_worker_handles();
+        drop(reservation);
+        assert!(!final_path.exists());
+        assert_eq!(
+            fs::read_dir(&directory.path)
+                .expect("read dump directory")
+                .filter_map(Result::ok)
+                .filter(|entry| entry.file_name().to_string_lossy().starts_with("crash-"))
+                .count(),
+            0
+        );
         drop(directory);
         let _ = fs::remove_dir_all(repository);
     }
