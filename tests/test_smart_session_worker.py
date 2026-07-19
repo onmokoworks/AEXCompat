@@ -162,6 +162,34 @@ def test_smart_session_deep32_cpu_command_renders_a_float_frame():
             process.communicate(timeout=30)
 
 
+def test_smart_session_frames_observe_their_own_current_time():
+    _require_artifacts()
+    transport = SessionTransport()
+    process = _spawn(transport)
+    try:
+        # Frame 0 renders the full-frame scenario at time 0. Frame 1 moves to
+        # time 1, whose probe scenario publishes a larger-than-session result:
+        # reaching -44 on frame 1 requires the probe to have read the NEW
+        # current_time from in_data (the smart runtime reseeds in_data's
+        # timing fields on every frame, before FRAME_SETUP). A stale first
+        # frame's time would keep the full-frame scenario and answer ok.
+        transport.write_input(11, 1)
+        transport.send(render_frame_message(0, 0))
+        first = transport.receive()
+        assert first["status"] == "ok", first
+        transport.write_input(50, 2)
+        transport.send(render_frame_message(1, EXTRA_PIXELS_TIME))
+        second = transport.receive()
+        assert second["status"] == "error"
+        assert second["render_error"] == -44
+        code, _, stderr = _finish(process)
+        assert code == EXIT_INVARIANT_FAILURE, (code, stderr[-500:])
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.communicate(timeout=30)
+
+
 def test_smart_session_survives_a_frame_local_time_scale_mismatch():
     _require_artifacts()
     transport = SessionTransport()
