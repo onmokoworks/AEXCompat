@@ -634,6 +634,18 @@ def test_merge_guard_refetches_every_owner_surface_immediately_before_merge() ->
     assert "codex_finding_max_ts" in window
 
 
+def test_merge_guard_requires_atomic_server_side_conversation_resolution() -> None:
+    root = Path(__file__).resolve().parents[1] / ".claude" / "skills" / "codex-review-loop"
+    script = (root / "codex-merge-guard.sh").read_text(encoding="utf-8")
+    final = script.index("# FINAL OWNER SNAPSHOT")
+    server_gate = script.index("if ! require_server_thread_gate", final)
+    merge = script.index("gh pr merge", server_gate)
+    assert final < server_gate < merge
+    assert ".required_conversation_resolution.enabled == true" in script
+    assert 'branches/$base/protection' in script
+    assert "REFUSE: base branch must enable server-side" in script
+
+
 def test_me_ack_ts_requires_the_marker() -> None:
     payload = [_toplevel(ME, "2026-07-18T11:00:00Z", "[ACK] 対応完了"),
                _toplevel(ME, "2026-07-18T12:00:00Z", "@codex review", id=78),

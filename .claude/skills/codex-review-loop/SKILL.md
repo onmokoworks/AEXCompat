@@ -12,6 +12,15 @@ description: >-
 
 # Codex Review Loop
 
+## Mandatory server-side merge rule
+
+The base branch MUST enable GitHub's **Require conversation resolution before
+merging** rule (`required_conversation_resolution.enabled=true`) through branch
+protection or a ruleset. Inline review comments do not change the head SHA, so
+no client-side fetch-then-merge sequence can enforce the never-merge invariant
+atomically. `codex-merge-guard.sh` fails closed when this rule cannot be proven,
+including when the repository plan or token cannot read branch protection.
+
 PR を Codex にレビューさせ、指摘ゼロになるまで対応を繰り返すループ。
 
 ## 最優先ルール: repo owner のコメント

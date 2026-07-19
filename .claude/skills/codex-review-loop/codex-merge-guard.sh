@@ -43,6 +43,18 @@ fetch_review_threads() {
   printf '%s\n' "$result"
 }
 
+# Client-side snapshots cannot atomically exclude an inline owner comment that
+# lands between the final fetch and merge. GitHub's required conversation
+# resolution rule is evaluated by the server in the merge transaction and is
+# therefore a mandatory safety prerequisite. Fail closed if the repository
+# plan/token cannot read protection or the rule is disabled.
+require_server_thread_gate() {
+  local base protection
+  base=$(gh api "repos/$OWNER/$REPO/pulls/$PR" --jq '.base.ref') || return 1
+  protection=$(gh api "repos/$OWNER/$REPO/branches/$base/protection") || return 1
+  jq -e '.required_conversation_resolution.enabled == true' <<<"$protection" >/dev/null
+}
+
 head=$(gh api "repos/$OWNER/$REPO/pulls/$PR" --jq '.head.sha') || {
   echo "REFUSE: cannot read PR head"; exit 1; }
 # This session's own login, so its inline ACK replies (posted under an owner
@@ -129,5 +141,13 @@ if [ -z "$clean_ts" ] || [ -n "$(codex_finding_supersedes_clean "$find_ts" "$cle
   echo "REFUSE: final Codex snapshot is not clean for current head ${head:0:10}"; exit 1
 fi
 
-# Atomic head check closes the remaining commit race after the final snapshot.
+# The server-side rule closes the inline-review race that no client snapshot
+# can close. If unavailable, preserving the never-merge invariant means this
+# guard must refuse rather than pretend the polling window is atomic.
+if ! require_server_thread_gate; then
+  echo "REFUSE: base branch must enable server-side required conversation resolution (branch protection/ruleset); current plan, token, or setting cannot prove it"; exit 1
+fi
+
+# Atomic head check closes the remaining commit race after the final snapshot;
+# server-side conversation resolution independently closes the review race.
 gh pr merge "$PR" --repo "$OWNER/$REPO" --merge --delete-branch --match-head-commit "$head"
