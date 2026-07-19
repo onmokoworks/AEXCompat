@@ -9,6 +9,8 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "minihost" / "src" / "l2_main.cpp"
+COLOR_HEADER = ROOT / "minihost" / "src" / "worker_color_settings_runtime.hpp"
+COLOR_SOURCE = ROOT / "minihost" / "src" / "worker_color_settings_runtime.cpp"
 MEMBERS = [
     "get_blending_tables", "does_view_have_xform", "xform_working_to_view",
     "get_new_working_space_profile", "get_new_profile_from_icc",
@@ -22,7 +24,8 @@ MEMBERS = [
 
 
 def source_text():
-    return SOURCE.read_text(encoding="utf-8")
+    return "\n".join(path.read_text(encoding="utf-8") for path in
+                     (SOURCE, COLOR_HEADER, COLOR_SOURCE))
 
 
 def worker(name):
