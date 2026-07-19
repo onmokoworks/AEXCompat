@@ -251,10 +251,10 @@ def test_same_owner_later_approved_clears_own_changes_requested() -> None:
 # Inline threads resolve when the session replied after the owner's last
 # message; bodied reviews and top-level comments resolve via a later non-trigger
 # top-level ack comment by the session; anything resolves via its author's
-# later approval/dismissal.
+# later approval.
 
 ME = "naari3"                                        # this session's login
-NO_CLEAR = "{}"                                      # no owner has approved/dismissed
+NO_CLEAR = "{}"                                      # no owner has approved
 
 
 def _inline(login, **kw):
@@ -279,14 +279,14 @@ def test_owner_inline_survives_a_push_until_replied() -> None:
 
 def test_owner_inline_resolved_by_later_session_reply() -> None:
     payload = [_inline("onmokoworks"),
-               _inline(ME, id=11, in_reply_to_id=9, created_at="2026-07-18T19:25:00Z", body="対応済み")]
+               _inline(ME, id=11, in_reply_to_id=9, created_at="2026-07-18T19:25:00Z", body="[ack] 対応済み")]
     assert _call("owner_inline_unresolved", payload, ME, NO_CLEAR) == ""
 
 
 def test_owner_reply_after_ack_reblocks() -> None:
     # The owner speaking last in the thread ("still not fixed") re-blocks.
     payload = [_inline("onmokoworks"),
-               _inline(ME, id=11, in_reply_to_id=9, created_at="2026-07-18T19:25:00Z", body="対応済み"),
+               _inline(ME, id=11, in_reply_to_id=9, created_at="2026-07-18T19:25:00Z", body="[ack] 対応済み"),
                _inline("onmokoworks", id=12, in_reply_to_id=9,
                        created_at="2026-07-18T19:30:00Z", body="still not fixed")]
     out = _call("owner_inline_unresolved", payload, ME, NO_CLEAR)
@@ -298,13 +298,13 @@ def test_same_second_owner_message_and_reply_blocks() -> None:
     # the same second as the owner's message may not have seen it; fail closed.
     payload = [_inline("onmokoworks"),
                _inline(ME, id=11, in_reply_to_id=9,
-                       created_at="2026-07-18T19:20:00Z", body="対応済み")]
+                       created_at="2026-07-18T19:20:00Z", body="[ack] 対応済み")]
     assert "OWNER-INLINE" in _call("owner_inline_unresolved", payload, ME, NO_CLEAR)
 
 
 def test_session_own_reply_alone_does_not_block() -> None:
     # A thread that contains only this session's ack reply has no owner message.
-    payload = [_inline(ME, in_reply_to_id=8, body="対応済み")]
+    payload = [_inline(ME, in_reply_to_id=8, body="[ack] 対応済み")]
     assert _call("owner_inline_unresolved", payload, ME, NO_CLEAR) == ""
 
 
@@ -344,7 +344,7 @@ def test_unresolved_codex_only_thread_is_not_an_owner_blocker() -> None:
 def test_session_reply_on_codex_only_thread_is_not_owner_feedback() -> None:
     payload = [{"isResolved": False, "comments": [
         _inline("chatgpt-codex-connector", id=8),
-        _inline(ME, id=9, in_reply_to_id=8, body="対応済み")]}]
+        _inline(ME, id=9, in_reply_to_id=8, body="[ack] 対応済み")]}]
     assert _call("owner_threads_unresolved", payload, ME, NO_CLEAR) == ""
 
 
@@ -353,10 +353,17 @@ def test_session_root_comment_still_blocks_as_owner_feedback() -> None:
     assert "OWNER-INLINE id=9" in _call("owner_threads_unresolved", payload, ME, NO_CLEAR)
 
 
+def test_session_unmarked_reply_still_blocks_as_owner_feedback() -> None:
+    payload = [{"isResolved": False, "comments": [
+        _inline("chatgpt-codex-connector", id=8),
+        _inline(ME, id=9, in_reply_to_id=8, body="still broken")]}]
+    assert "OWNER-INLINE id=9" in _call("owner_threads_unresolved", payload, ME, NO_CLEAR)
+
+
 def test_mixed_thread_keeps_other_owner_reply_blocking() -> None:
     payload = [{"isResolved": False, "comments": [
         _inline("chatgpt-codex-connector", id=8),
-        _inline(ME, id=9, in_reply_to_id=8, body="対応済み"),
+        _inline(ME, id=9, in_reply_to_id=8, body="[ack] 対応済み"),
         _inline("onmokoworks", id=10, in_reply_to_id=8, body="still broken")]}]
     assert "OWNER-INLINE id=10" in _call("owner_threads_unresolved", payload, ME, NO_CLEAR)
 
@@ -443,6 +450,15 @@ def test_owner_clearances_reports_latest_approval_per_login() -> None:
     assert out == {"onmokoworks": "2026-07-18T19:30:00Z"}
 
 
+def test_dismissed_review_is_not_a_timestamped_clearance() -> None:
+    # GitHub REST preserves the original submitted_at after dismissal; it does
+    # not expose when the dismissal happened, so using it could under-clear or
+    # misorder later feedback.
+    payload = [{"user": {"login": "onmokoworks"}, "state": "DISMISSED",
+                "submitted_at": "2026-07-18T19:10:00Z"}]
+    assert json.loads(_call("owner_clearances", payload)) == {}
+
+
 def test_one_owner_approval_does_not_clear_another_owners_inline() -> None:
     # Per-reviewer: naari3's approval must not clear onmokoworks's comment.
     clr = json.dumps({"naari3": "2026-07-18T19:30:00Z"})
@@ -462,7 +478,7 @@ def test_inline_error_message_is_not_a_finding() -> None:
 
 # --- owner_comments_unresolved / me_ack_ts: top-level explicit resolution -----
 # Top-level comments have no reply threading; they resolve only via a later
-# non-trigger ack comment by the session or their author's approval/dismissal.
+# non-trigger ack comment by the session or their author's approval.
 # A pre-existing unaddressed owner comment fails closed — a fresh Codex clean
 # never supersedes it (finding on 39a1c5f).
 

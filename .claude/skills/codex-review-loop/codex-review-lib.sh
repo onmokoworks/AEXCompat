@@ -170,8 +170,8 @@ owner_inline() {
 }
 
 # Per-owner clearance timestamps (input: reviews array) → a JSON object
-# {login: latest APPROVED-or-DISMISSED submitted_at}. An owner who raises a plain
-# comment concern and then approves/dismisses WITHOUT a new commit has cleared
+# {login: latest APPROVED submitted_at}. An owner who raises a plain
+# comment concern and then approves WITHOUT a new commit has cleared
 # that concern; the owner_*_after checks use this so a resolved older comment on
 # the same head stops blocking. Per reviewer, matching owner_review_gate: only
 # the SAME owner's later approval clears that owner's comments. Emit with -c.
@@ -179,7 +179,10 @@ owner_clearances() {
   jq -c --argjson owner "$OWNER_LOGINS" '
     [ .[]
       | select([.user.login] | inside($owner))
-      | select(.state == "APPROVED" or .state == "DISMISSED") ]
+      # REST exposes only the original submission time for DISMISSED reviews,
+      # not the later dismissal time, so dismissal cannot safely timestamp a
+      # clearance. It still clears CHANGES_REQUESTED by current state above.
+      | select(.state == "APPROVED") ]
     | group_by(.user.login)
     | map({ key: .[0].user.login, value: ([ .[].submitted_at ] | max) })
     | from_entries'
@@ -192,11 +195,11 @@ owner_clearances() {
 # feedback. Feedback blocks until an EXPLICIT signal:
 #   - inline: this session ($me) replied in that thread AFTER the owner's last
 #     message (the loop's "対応済み" reply), or the author later
-#     approved/dismissed;
+#     approved;
 #   - bodied COMMENTED reviews / top-level comments (no reply threading): a
 #     later top-level comment by $me containing the explicit "[ack]" marker
 #     (an ordinary status comment is NOT an ack), or the author's later
-#     approval/dismissal. Only $me's [ack] comments are exempt from blocking
+#     approval. Only $me's [ack] comments are exempt from blocking
 #     (they are the resolution signal); $me's marker-less comments block like
 #     any owner's, so a human comment from the session's own login is never
 #     dropped.
@@ -204,19 +207,22 @@ owner_clearances() {
 # Owner INLINE feedback with no later resolution, thread-scoped (input: pull
 # review-comments array). Args: $1 = this session's login; $2 = clearances JSON.
 # A thread is keyed by its root (.in_reply_to_id // .id). Owner messages exclude
-# ONLY $me's replies (the ack channel); a non-reply inline comment from $me is
+# ONLY $me's [ack] replies (the ack channel); an unmarked reply or non-reply
+# inline comment from $me is
 # genuine feedback. The thread blocks iff its last owner message is at or after
 # $me's last reply in that thread (>= — GitHub timestamps are second-resolution,
 # so a same-second owner message may not have been seen by the reply and fails
 # closed, matching the review/top-level paths) and the author has no later
-# approval/dismissal. An owner replying again after an ack re-blocks.
+# approval. An owner replying again after an ack re-blocks.
 owner_inline_unresolved() {
   jq -r --arg me "$1" --argjson clr "$2" --argjson owner "$OWNER_LOGINS" '
     group_by(.in_reply_to_id // .id)[]
     | ( [ .[] | select([.user.login] | inside($owner))
-          | select( (((.in_reply_to_id // null) != null) and .user.login == $me) | not ) ] ) as $msgs
+          | select( (((.in_reply_to_id // null) != null) and .user.login == $me
+                      and ((.body // "") | ascii_downcase | contains("[ack]"))) | not ) ] ) as $msgs
     | select(($msgs | length) > 0)
-    | ( [ .[] | select(.user.login == $me and (.in_reply_to_id // null) != null)
+    | ( [ .[] | select(.user.login == $me and (.in_reply_to_id // null) != null
+                        and ((.body // "") | ascii_downcase | contains("[ack]")))
           | .created_at ] | max // "" ) as $ack
     | ($msgs | max_by(.created_at)) as $last
     | select($last.created_at >= $ack)
@@ -235,12 +241,14 @@ owner_threads_unresolved() {
     # threaded remediation replies; an independent/root comment from the same
     # login remains genuine owner feedback and must block.
     | [ .comments[] | select([.user.login] | inside($owner))
-        | select((.user.login == $me and (.in_reply_to_id // null) != null) | not) ] as $owner_msgs
+        | select((.user.login == $me
+                  and (.in_reply_to_id // null) != null
+                  and ((.body // "") | ascii_downcase | contains("[ack]"))) | not) ] as $owner_msgs
     # An unresolved thread whose comment page overflowed (nested
     # comments(first:100) has another page) may hold owner feedback beyond the
     # fetched window, so it fails closed regardless of what was fetched.
     | select( (.truncated // false) or (($owner_msgs | length) > 0) )
-    # A later approval/dismissal clears only feedback from that same owner. When
+    # A later approval clears only feedback from that same owner. When
     # comments were truncated and no owner is visible, identity is unknown and
     # the gate remains fail-closed.
     | [ $owner_msgs[]
@@ -274,7 +282,7 @@ me_ack_ts() {
 # owner_review_gate already handles CHANGES_REQUESTED; this covers the bodied
 # COMMENTED review it misses. Reviews have no reply threading, so resolution is
 # a later explicit ack (>= blocks a same-second race, fail-closed) or the
-# reviewer's later approval/dismissal. Bodyless COMMENTED reviews (this
+# reviewer's later approval. Bodyless COMMENTED reviews (this
 # session's inline-thread replies) are excluded.
 owner_reviews_unresolved() {
   jq -r --argjson clr "$1" --arg ack "$2" --argjson owner "$OWNER_LOGINS" '
@@ -293,7 +301,7 @@ owner_reviews_unresolved() {
 # owner-authenticated token a human "merge不可" from the same login must not
 # be dropped, and the loop's own status comments simply get cleared by its
 # final [ack]. A comment blocks while there is no LATER [ack] by $me (>=
-# blocks a same-second race, fail-closed) and no later approval/dismissal by
+# blocks a same-second race, fail-closed) and no later approval by
 # its author — including comments that predate this loop invocation entirely:
 # a pre-existing unaddressed owner comment must fail closed, not be superseded
 # by a fresh Codex clean.

@@ -124,7 +124,7 @@ merge 側 (`codex-merge-guard.sh` が head 拘束 clean なしに merge を拒�
   1. 各指摘の妥当性を自分で判断する (盲従しない。妥当でなければ理由を付けて返信のみ)
   2. 妥当な指摘に対応し、commit・push
   3. 各 inline コメントに対応内容を返信:
-     `gh api -X POST repos/{owner}/{repo}/pulls/{PR}/comments/{comment_id}/replies -f body="対応済み (<sha>)。<内容>"`
+     `gh api -X POST repos/{owner}/{repo}/pulls/{PR}/comments/{comment_id}/replies -f body="[ack] 対応済み (<sha>)。<内容>"`
   4. 手順 1 に戻る (新しい `since` で再トリガー)
 - **CLEAN (Codex 指摘なし)**: **merge は `codex-merge-guard.sh` 経由でのみ行う**。
   これが (a) owner blocker の不在 (owner_review_gate の CHANGES_REQUESTED、
@@ -137,8 +137,9 @@ merge 側 (`codex-merge-guard.sh` が head 拘束 clean なしに merge を拒�
   「セッションのより新しい **`[ack]` マーカー付き** top-level コメント」で解決
   する (マーカーなしのステータス報告は ack にならない。ループ開始前から存在する
   未対応 owner コメントも fail-closed に block する)。いずれも
-  作者自身の後続 approve/dismiss でも clear される (per-reviewer)。self-block
-  回避は最小限: セッション自身の認証 login (`gh api user`) の inline 返信と
+  作者自身の後続 approve でも clear される (per-reviewer)。dismiss は API 上で
+  実際の dismissal 時刻を取得できないため、時刻ベース clearance には使わない。self-block
+  回避は最小限: セッション自身の認証 login (`gh api user`) の **`[ack]` 付き** inline 返信と
   **`[ack]` マーカー付き top-level コメント (解決シグナルそのもの) だけ**を
   blocker から除外し、同 login でもマーカーなし top-level コメント・非返信
   inline・bodied review は本物のフィードバックとして拾う (owner 認証トークンで

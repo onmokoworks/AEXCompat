@@ -82,7 +82,7 @@ fi
 # bodied COMMENTED reviews and
 # top-level comments (no reply threading) block until a later non-trigger
 # top-level ack comment by this session; each is also cleared by its author's
-# later approval/dismissal. This covers feedback that predates this loop
+# later approval. This covers feedback that predates this loop
 # invocation entirely — a pre-existing unaddressed owner comment fails closed.
 clearances=$(owner_clearances <<<"$reviews")
 ack_ts=$(me_ack_ts "$ME" <<<"$issue_comments")
