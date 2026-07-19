@@ -361,6 +361,32 @@ impl LaunchedIsolatedProcess {
         terminate_job_and_wait(self.job.raw(), self.process.raw(), TERMINATION_GRACE_MS)
     }
 
+    /// A duplicated handle to the worker process itself, for a session's
+    /// process-death watcher (protocol §7: the frame wait observes the
+    /// response channel, the deadline, AND process death — a descendant
+    /// holding the inherited response pipe must not mask a dead worker).
+    /// The caller owns the duplicate and must close it.
+    pub fn duplicated_process_handle(&self) -> io::Result<usize> {
+        use windows_sys::Win32::Foundation::{DuplicateHandle, DUPLICATE_SAME_ACCESS};
+        use windows_sys::Win32::System::Threading::GetCurrentProcess;
+        let mut duplicated: HANDLE = null_mut();
+        let ok = unsafe {
+            DuplicateHandle(
+                GetCurrentProcess(),
+                self.process.raw(),
+                GetCurrentProcess(),
+                &mut duplicated,
+                0,
+                0,
+                DUPLICATE_SAME_ACCESS,
+            )
+        };
+        if ok == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(duplicated as usize)
+    }
+
     /// Waits up to `timeout` for the worker to exit (terminating the job on
     /// deadline, exactly like the one-shot path), then collects output and
     /// job accounting into a `ProcessResult`.

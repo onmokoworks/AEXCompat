@@ -9,6 +9,9 @@
 //!
 //! - `hang_frame`: never answers the first `render_frame` (watchdog target).
 //! - `crash_frame`: dies with an access-violation exit code mid-frame.
+//! - `exit_leaving_descendant`: spawns a sleeping child that inherits the
+//!   session handles, then exits; pipe EOF never fires, only the process
+//!   watcher can see the death (protocol §7 three-way wait).
 //! - `stale_generation`: answers with a stale generation and no header update.
 //! - `mutate_header`: rewrites a broker-owned static header field.
 //! - `bad_checksum`: reports a checksum that does not match the slot bytes.
@@ -153,6 +156,10 @@ mod worker {
 
     pub fn run() -> i32 {
         let args: Vec<String> = std::env::args().collect();
+        if args.len() == 2 && args[1] == "--sleep-child" {
+            std::thread::sleep(std::time::Duration::from_secs(120));
+            return 0;
+        }
         if args.len() != 10 || args[1] != "--render-session-v1" {
             return 2;
         }
@@ -223,6 +230,22 @@ mod worker {
                     std::thread::sleep(std::time::Duration::from_secs(3600));
                 },
                 "crash_frame" => std::process::exit(0xC000_0005_u32 as i32),
+                "exit_leaving_descendant" => {
+                    // Rust spawns with bInheritHandles=TRUE, so the sleeping
+                    // child keeps the inherited (still inheritable) session
+                    // pipe handles open across this process's death.
+                    let exe = std::env::current_exe().expect("own path");
+                    let child = std::process::Command::new(exe)
+                        .arg("--sleep-child")
+                        .stdout(std::process::Stdio::null())
+                        .stderr(std::process::Stdio::null())
+                        .spawn();
+                    if child.is_ok() {
+                        std::thread::sleep(std::time::Duration::from_millis(200));
+                        std::process::exit(9);
+                    }
+                    return EXIT_PROTOCOL_VIOLATION;
+                }
                 _ => {}
             }
             if behavior == "error_frame_0" && frame_index == 0 {

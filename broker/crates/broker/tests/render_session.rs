@@ -208,6 +208,30 @@ mod windows_e2e {
     }
 
     #[test]
+    fn process_death_is_seen_even_when_a_descendant_holds_the_pipe() {
+        let _behavior = BehaviorGuard::set(Some("exit_leaving_descendant"));
+        let (repository, plugin, sha) = temp_repository();
+        let mut session = open_session(&repository.0, &plugin, &sha, Duration::from_secs(30));
+        let started = std::time::Instant::now();
+        let error = session
+            .render_frame(0, 0, &input_pattern(9))
+            .expect_err("a dead worker must invalidate the session");
+        // The sleeping descendant keeps the response pipe open, so only the
+        // process watcher can observe the death; it must beat the 30s frame
+        // deadline by a wide margin.
+        assert!(error.to_string().contains("worker_exited"), "{error}");
+        assert!(
+            started.elapsed() < Duration::from_secs(15),
+            "invalidation took {:?}, the frame deadline masked the process death",
+            started.elapsed()
+        );
+        let close = session.close();
+        assert_eq!(close["invalidated"], true);
+        assert_eq!(close["invalidated_reason"]["reason"], "worker_exited");
+        assert_eq!(close["worker"]["classification"], "nonzero_exit");
+    }
+
+    #[test]
     fn stale_generation_and_missing_header_update_are_fail_closed() {
         let _behavior = BehaviorGuard::set(Some("stale_generation"));
         let (repository, plugin, sha) = temp_repository();

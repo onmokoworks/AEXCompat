@@ -367,11 +367,31 @@ struct CollectedExit {
     error: Option<String>,
 }
 
+/// Frame-wait events (protocol §7's three-way wait): a control message from
+/// the reader thread, or the process-death watcher firing. The deadline is
+/// the receive timeout itself.
+enum SessionEvent {
+    Message(Vec<u8>),
+    ProcessExited,
+}
+
+/// How long a frame wait keeps draining after the process-death watcher
+/// fires, so a frame_done the worker wrote just before dying (already in the
+/// pipe buffer) is still honored instead of racing the watcher.
+const PROCESS_EXIT_DRAIN: Duration = Duration::from_millis(500);
+
+enum FrameWait {
+    Message(Vec<u8>),
+    Deadline,
+    WorkerGone,
+}
+
 pub struct RenderSession {
     process: Option<SecureSessionProcess>,
     collected: Option<CollectedExit>,
     transport: SessionTransport,
-    receiver: mpsc::Receiver<Vec<u8>>,
+    receiver: mpsc::Receiver<SessionEvent>,
+    process_exit_observed: bool,
     geometry: SessionGeometry,
     time_scale: u32,
     total_time: i32,
@@ -483,8 +503,9 @@ impl RenderSession {
         drop(request_read);
         drop(response_write);
 
-        let (sender, receiver) = mpsc::channel::<Vec<u8>>();
+        let (sender, receiver) = mpsc::channel::<SessionEvent>();
         let response_handle = response_read.take() as usize;
+        let reader_sender = sender.clone();
         thread::spawn(move || {
             let handle = response_handle as HANDLE;
             let _owner = match OwnedHandle::new(handle) {
@@ -504,10 +525,25 @@ impl RenderSession {
                     return;
                 }
                 let mut body = vec![0u8; length];
-                if !read_exact_handle(handle, &mut body) || sender.send(body).is_err() {
+                if !read_exact_handle(handle, &mut body)
+                    || reader_sender.send(SessionEvent::Message(body)).is_err()
+                {
                     return;
                 }
             }
+        });
+        // Process-death watcher (protocol §7): pipe EOF alone cannot signal a
+        // dead worker when a descendant keeps the inherited response pipe
+        // handle open, so the frame wait also observes the process handle.
+        let watched_process = process.duplicated_process_handle()?;
+        thread::spawn(move || {
+            use windows_sys::Win32::System::Threading::{WaitForSingleObject, INFINITE};
+            let handle = watched_process as HANDLE;
+            unsafe {
+                WaitForSingleObject(handle, INFINITE);
+                CloseHandle(handle);
+            }
+            let _ = sender.send(SessionEvent::ProcessExited);
         });
 
         Ok(RenderSession {
@@ -515,6 +551,7 @@ impl RenderSession {
             collected: None,
             transport,
             receiver,
+            process_exit_observed: false,
             geometry,
             time_scale: request.time_scale,
             total_time: request.total_time,
@@ -583,6 +620,31 @@ impl RenderSession {
                 invalidation.reason, invalidation.detail
             )));
         }
+        // Between frames, a queued process-death event fails the frame before
+        // any slot write; a queued message with no frame in flight is a
+        // protocol violation.
+        loop {
+            match self.receiver.try_recv() {
+                Ok(SessionEvent::ProcessExited) => self.process_exit_observed = true,
+                Ok(SessionEvent::Message(_)) => {
+                    return Err(self.invalidate(
+                        "unsolicited_response",
+                        format!("a response arrived with no frame in flight before {frame_index}"),
+                        true,
+                        POST_TERMINATION_COLLECT_TIMEOUT,
+                    ));
+                }
+                Err(_) => break,
+            }
+        }
+        if self.process_exit_observed {
+            return Err(self.invalidate(
+                "worker_exited",
+                format!("the worker exited before frame {frame_index} was dispatched"),
+                true,
+                POST_TERMINATION_COLLECT_TIMEOUT,
+            ));
+        }
         if rgba.len() != self.geometry.input_slot_bytes() {
             return Err(invalid("input frame byte count does not match the session"));
         }
@@ -608,9 +670,9 @@ impl RenderSession {
                 POST_TERMINATION_COLLECT_TIMEOUT,
             ));
         }
-        let body = match self.receiver.recv_timeout(self.frame_deadline) {
-            Ok(body) => body,
-            Err(mpsc::RecvTimeoutError::Timeout) => {
+        let body = match self.await_frame_response() {
+            FrameWait::Message(body) => body,
+            FrameWait::Deadline => {
                 return Err(self.invalidate(
                     "frame_deadline",
                     format!(
@@ -621,14 +683,16 @@ impl RenderSession {
                     POST_TERMINATION_COLLECT_TIMEOUT,
                 ));
             }
-            Err(mpsc::RecvTimeoutError::Disconnected) => {
-                // The channel also closes when the reader rejected a framing
-                // violation from a still-running worker, so terminate the job
-                // rather than waiting a full collection timeout on it; a
-                // worker that already exited keeps its own exit code.
+            FrameWait::WorkerGone => {
+                // Reached on process death (watcher), on reader disconnect
+                // (worker exit closing the pipe), or on a framing violation
+                // the reader rejected from a still-running worker. Terminate
+                // the job in every case so descendants and a live-but-broken
+                // worker are reaped promptly; an already-exited worker keeps
+                // its own exit code.
                 return Err(self.invalidate(
                     "worker_exited",
-                    format!("the worker closed the response channel before frame {frame_index}"),
+                    format!("the worker was gone before frame {frame_index} completed"),
                     true,
                     POST_TERMINATION_COLLECT_TIMEOUT,
                 ));
@@ -725,6 +789,39 @@ impl RenderSession {
                 true,
                 POST_TERMINATION_COLLECT_TIMEOUT,
             )),
+        }
+    }
+
+    /// Protocol §7's three-way frame wait: the response channel, the process
+    /// handle (via the watcher event), and the deadline. After a process-death
+    /// event, a short drain still honors a frame_done the worker flushed
+    /// before dying rather than racing the watcher.
+    fn await_frame_response(&mut self) -> FrameWait {
+        let deadline = Instant::now() + self.frame_deadline;
+        loop {
+            let mut remaining = deadline.saturating_duration_since(Instant::now());
+            if self.process_exit_observed {
+                remaining = remaining.min(PROCESS_EXIT_DRAIN);
+            }
+            if remaining.is_zero() {
+                return if self.process_exit_observed {
+                    FrameWait::WorkerGone
+                } else {
+                    FrameWait::Deadline
+                };
+            }
+            match self.receiver.recv_timeout(remaining) {
+                Ok(SessionEvent::Message(body)) => return FrameWait::Message(body),
+                Ok(SessionEvent::ProcessExited) => self.process_exit_observed = true,
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    return if self.process_exit_observed {
+                        FrameWait::WorkerGone
+                    } else {
+                        FrameWait::Deadline
+                    };
+                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => return FrameWait::WorkerGone,
+            }
         }
     }
 

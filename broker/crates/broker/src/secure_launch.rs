@@ -181,6 +181,14 @@ impl SecureSessionProcess {
             .terminate_job()
     }
 
+    /// See `LaunchedIsolatedProcess::duplicated_process_handle`.
+    pub fn duplicated_process_handle(&self) -> io::Result<usize> {
+        self.launched
+            .as_ref()
+            .expect("session process not collected")
+            .duplicated_process_handle()
+    }
+
     /// Waits up to `timeout` for the worker to exit and collects stdout,
     /// stderr, and job accounting. Applies the same module-audit validation
     /// as the one-shot `secure_launch` when the exit classified as ok.
