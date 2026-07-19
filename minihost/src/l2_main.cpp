@@ -2579,9 +2579,10 @@ int configure_worker_entry_bootstrap() {
   return aexcompat::worker_runtime::entry_bootstrap::configure(bootstrap_hooks);
 }
 
-int worker_main_impl(int argc, wchar_t **argv) {
-  if (const int bootstrap_error = configure_worker_entry_bootstrap())
-    return bootstrap_error;
+// Self-test command dispatch for the worker entry (issue #171): the four
+// selftest catalogs and their hook wiring register here; worker_main_impl
+// only consumes the optional exit code.
+std::optional<int> dispatch_worker_selftests(int argc, wchar_t** argv) {
   const aexcompat::worker_runtime::selftest::AegpHooks aegp_selftests{
       &verify_aegp_projector_levels, &verify_aegp_effect_stack,
       &verify_aegp_apply_effect, &verify_aegp_resizer_3d_chain,
@@ -2657,6 +2658,14 @@ int worker_main_impl(int argc, wchar_t **argv) {
     std::cout << custom_selftest.output;
     return custom_selftest.exit_code;
   }
+  return std::nullopt;
+}
+
+int worker_main_impl(int argc, wchar_t **argv) {
+  if (const int bootstrap_error = configure_worker_entry_bootstrap())
+    return bootstrap_error;
+  if (const auto selftest_exit = dispatch_worker_selftests(argc, argv))
+    return *selftest_exit;
   // Consume an optional trailing --minidump-v1 <dir> pair for every worker
   // kind (render, smart, and the L2 inspection/params paths below) before any
   // kind-specific, argc-exact dispatch runs. Reducing argc hides the pair from
