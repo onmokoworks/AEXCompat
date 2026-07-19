@@ -50,6 +50,7 @@ set(AEXCOMPAT_WORKER_RUNTIME_CORE_SOURCES
     src/worker_classic_runtime.cpp
     src/worker_handle_runtime.cpp
     src/worker_pf_suites.cpp
+    src/worker_pf_adv_time_suite.cpp
     src/worker_report.cpp
     src/worker_render_receipts.cpp
     src/worker_suite_abi.cpp
