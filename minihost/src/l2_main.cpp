@@ -4516,6 +4516,10 @@ struct ClassicRenderDispatchOwner {
   int32_t external_width; int32_t external_height;
   aexcompat::worker_runtime::classic::Context& classic_context;
   std::vector<unsigned char>& logical_source;
+  // When set, records that the host itself rejected or failed the plug-in's
+  // requested output resize, so callers can tell host-side output validation
+  // failures apart from selector errors sharing the same numeric codes.
+  bool* output_validation_failed{};
 
   int32_t run(int32_t error) {
     return aexcompat::worker_runtime::classic_execution::dispatch_render(this, error, hooks());
@@ -4533,17 +4537,21 @@ struct ClassicRenderDispatchOwner {
     return value;
   }
   int32_t prepare_output() {
+    const auto fail = [this](int32_t error) {
+      if (output_validation_failed) *output_validation_failed = true;
+      return error;
+    };
     const int32_t next_width = read<int32_t>(output, kOutWidth);
     const int32_t next_height = read<int32_t>(output, kOutHeight);
     if (!aexcompat::render::validate_output_extent(width, height, next_width, next_height,
-            read<uint32_t>(output, kOutFlags))) return 4;
+            read<uint32_t>(output, kOutFlags))) return fail(4);
     if (next_width <= 0 || next_height <= 0) return 0;
     width = next_width; height = next_height; rowbytes = width * pixel_bytes;
-    if (!guarded.reset(static_cast<std::size_t>(rowbytes) * height)) return -3;
+    if (!guarded.reset(static_cast<std::size_t>(rowbytes) * height)) return fail(-3);
     destination = guarded.data();
     if (!aexcompat::render::prepare_world_layout(world,
-            {pixel_bytes == 4 ? 0 : 1, pixel_bytes, width, height, rowbytes}, destination)) return -3;
-    if (!worlds.register_world(world.data(), pixel_format)) return 4;
+            {pixel_bytes == 4 ? 0 : 1, pixel_bytes, width, height, rowbytes}, destination)) return fail(-3);
+    if (!worlds.register_world(world.data(), pixel_format)) return fail(4);
     write<int32_t>(input, 276, read<int32_t>(output, kOutOrigin));
     write<int32_t>(input, 280, read<int32_t>(output, kOutOrigin + 4));
     return 0;
@@ -4577,7 +4585,8 @@ int32_t classic_render_runtime(EffectEntry entry, std::array<std::byte, kInSize>
                     int32_t external_total_time = 1, uint32_t external_time_scale = 1,
                     int32_t external_pixel_bytes = 4,
                     bool manage_sequence = true,
-                    std::vector<unsigned char>* captured_argb = nullptr) {
+                    std::vector<unsigned char>* captured_argb = nullptr,
+                    bool* output_validation_failed = nullptr) {
   auto* classic_context = aexcompat::worker_runtime::classic::active_context();
   if (!classic_context) return -1;
   aexcompat::render::ImageRequest image_request;
@@ -4750,7 +4759,8 @@ int32_t classic_render_runtime(EffectEntry entry, std::array<std::byte, kInSize>
         guarded, dispatch_worlds, definitions, params, width, height, rowbytes, destination,
         pixel_bytes, dispatch_pixel_format, external_current_time, external_time_step,
         external_total_time, external_time_scale, case_id, requested, external_rgba,
-        external_layers, external_width, external_height, *classic_context, logical_source};
+        external_layers, external_width, external_height, *classic_context, logical_source,
+        output_validation_failed};
     error = dispatch_owner.run(error);
     lifecycle.error = error;
     error = lifecycle_owner.finish(lifecycle);
@@ -4811,6 +4821,7 @@ struct ClassicRenderRequest {
   int32_t external_pixel_bytes;
   bool manage_sequence;
   std::vector<unsigned char>* captured_argb;
+  bool* output_validation_failed;
 };
 
 bool classic_render_dependencies_ready(void* opaque) {
@@ -4827,7 +4838,7 @@ int classic_render_guarded_effect_main(void* opaque) {
       request.external_width, request.external_height, request.external_layers,
       request.external_current_time, request.external_time_step, request.external_total_time,
       request.external_time_scale, request.external_pixel_bytes, request.manage_sequence,
-      request.captured_argb);
+      request.captured_argb, request.output_validation_failed);
 }
 
 int classic_render_cleanup(void*) {
@@ -4848,12 +4859,13 @@ int32_t render_once(EffectEntry entry, std::array<std::byte, kInSize>& input,
                     int32_t external_current_time = 0, int32_t external_time_step = 1,
                     int32_t external_total_time = 1, uint32_t external_time_scale = 1,
                     int32_t external_pixel_bytes = 4, bool manage_sequence = true,
-                    std::vector<unsigned char>* captured_argb = nullptr) {
+                    std::vector<unsigned char>* captured_argb = nullptr,
+                    bool* output_validation_failed = nullptr) {
   ClassicRenderRequest request{entry, input, output, case_id, width, height, rowbytes,
       input_hash, output_hash, guards_intact, requested, external_rgba, external_output,
       external_width, external_height, external_layers, external_current_time,
       external_time_step, external_total_time, external_time_scale, external_pixel_bytes,
-      manage_sequence, captured_argb};
+      manage_sequence, captured_argb, output_validation_failed};
   aexcompat::worker_runtime::classic::Request context{
       &request,
       {&classic_render_guarded_effect_main, &classic_render_cleanup,
@@ -4900,6 +4912,7 @@ RenderSessionOutcome run_render_session(
   constexpr int32_t kSessionOutputCaptureError = -42;
   constexpr int32_t kSessionGuardViolation = -43;
   constexpr int32_t kSessionDimensionMismatch = -44;
+  constexpr int32_t kSessionOutputValidationError = -45;
 
   RenderSessionOutcome outcome;
   const wrs::SessionGeometry geometry{max_width, max_height, pixel_bytes, 0};
@@ -5038,12 +5051,13 @@ RenderSessionOutcome run_render_session(
     // render_once's early host-side failures return before touching it, while
     // every path that allocates the guarded buffer overwrites it.
     bool frame_guards = true;
+    bool output_validation_failed = false;
     captured.clear();
     const int32_t frame_error = render_once(
         entry, input, output, "request", frame_width, frame_height, frame_rowbytes,
         frame_input_hash, frame_output_hash, frame_guards, requested, &frame_rgba,
         nullptr, max_width, max_height, nullptr, current_time, time_step, total_time,
-        time_scale, pixel_bytes, false, &captured);
+        time_scale, pixel_bytes, false, &captured, &output_validation_failed);
     // Aux channel chunks are host-owned and cannot outlive one frame's render
     // lifecycle (end_render's cleanup for the one-shot path); the manifest
     // itself stays active across frames.
@@ -5059,6 +5073,15 @@ RenderSessionOutcome run_render_session(
     if (!frame_guards) {
       outcome.guards_intact = false;
       respond_error(kSessionGuardViolation);
+      outcome.invariant_failure = true;
+      break;
+    }
+    // Host-side output validation failures (rejected or failed resize) share
+    // numeric codes with selector errors, so the dispatch owner reports them
+    // out of band; they are output-bounds invariant failures, not frame-local
+    // diagnostics (protocol §4.3).
+    if (output_validation_failed) {
+      respond_error(kSessionOutputValidationError);
       outcome.invariant_failure = true;
       break;
     }
