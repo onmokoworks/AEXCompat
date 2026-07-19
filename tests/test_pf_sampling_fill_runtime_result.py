@@ -7,6 +7,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 RESULT = ROOT / "analysis" / "PF_SAMPLING_FILL_RUNTIME_RESULT_2026-07-16.json"
 WORKER = ROOT / "minihost" / "src" / "l2_main.cpp"
+WORLD_TRANSFORM = ROOT / "minihost" / "src" / "worker_pf_world_transform_runtime.cpp"
 
 
 def result():
@@ -147,7 +148,7 @@ def test_sampling_area_callbacks_occupy_the_frozen_suite_slots():
 
 
 def test_fill_premultiply_callbacks_occupy_the_frozen_suite_slots():
-    worker = WORKER.read_text(encoding="utf-8")
+    worker = WORLD_TRANSFORM.read_text(encoding="utf-8")
     callbacks = [
         "premultiply_world8",
         "premultiply_color8",

@@ -14,8 +14,6 @@ int32_t __cdecl report_progress(void*, int32_t, int32_t);
 int32_t __cdecl register_custom_ui(void*, const void*);
 int32_t __cdecl adv_app_info_text(const char*, const char*);
 int32_t __cdecl adv_app_info_text3(const char*, const char*, const char*);
-int32_t __cdecl composite_rect8(void*, LegacyRect*, int32_t, void*, int32_t, int32_t,
-                                int32_t, int32_t, void*);
 }
 double __cdecl ansi_atan(double);
 double __cdecl ansi_atan2(double, double);
@@ -43,24 +41,6 @@ double __cdecl ansi_acos(double);
 struct PfMaskSuite1 {
   decltype(&pf_mask_world_with_path) mask_world_with_path;
 };
-
-struct WorldTransformSuite1 {
-  decltype(&composite_rect8) composite_rect;
-  decltype(&blend_world) blend;
-  decltype(&convolve_world) convolve;
-  decltype(&copy_world8) copy;
-  decltype(&copy_world_hq) copy_hq;
-  decltype(&transfer_rect) transfer_rect;
-  decltype(&transform_world) transform_world;
-};
-static_assert(sizeof(WorldTransformSuite1) == 7 * sizeof(void*));
-static_assert(offsetof(WorldTransformSuite1, composite_rect) == 0 * sizeof(void*));
-static_assert(offsetof(WorldTransformSuite1, blend) == 1 * sizeof(void*));
-static_assert(offsetof(WorldTransformSuite1, convolve) == 2 * sizeof(void*));
-static_assert(offsetof(WorldTransformSuite1, copy) == 3 * sizeof(void*));
-static_assert(offsetof(WorldTransformSuite1, copy_hq) == 4 * sizeof(void*));
-static_assert(offsetof(WorldTransformSuite1, transfer_rect) == 5 * sizeof(void*));
-static_assert(offsetof(WorldTransformSuite1, transform_world) == 6 * sizeof(void*));
 
 struct MaskSuite {
   decltype(&get_layer_num_masks) get_layer_num_masks;

@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "worker_world_safety.hpp"
+#include "worker_pf_world_transform_runtime.hpp"
 
 constexpr int32_t kPfInvalidIndex = 513;
 constexpr int32_t kPfUnrecognizedParamType = 514;
@@ -13,8 +14,6 @@ constexpr int32_t kPfUnrecognizedParamType = 514;
 // The PF suite implementation is deliberately compiled separately from the
 // worker.  It only receives host state through this table; callbacks must
 // fail closed until the worker installs a context for the current process.
-struct LegacyRect { int32_t left, top, right, bottom; };
-
 struct LocalEffectWorld {
   void* reserved0{};
   void* reserved1{};
@@ -36,13 +35,6 @@ struct LocalEffectWorld {
 };
 static_assert(sizeof(LocalEffectWorld) == 120);
 
-struct PfTransformTelemetry {
-  uint32_t* calls{};
-  int32_t* last_x{};
-  int32_t* last_y{};
-  uint8_t* last_opacity{};
-};
-
 struct PfHostHooks {
   bool (__cdecl *resolve_world)(void* world, int32_t pixel_bytes,
                                 unsigned char*& pixels, int32_t& rowbytes,
@@ -60,7 +52,6 @@ struct PfHostContext {
   PfHostHooks hooks{};
   void* effect_ref{};
   void* batch_sampling_suite{};
-  PfTransformTelemetry transform_telemetry{};
 };
 
 void configure_pf_host_context(const PfHostContext& context);
@@ -74,8 +65,6 @@ using IterateAbortCallback = int32_t(__cdecl*)(void*);
 using IterateProgressCallback = int32_t(__cdecl*)(void*, int32_t, int32_t);
 
 extern "C" {
-int32_t __cdecl copy_world8(void*, void*, void*, const LegacyRect*, const LegacyRect*);
-int32_t __cdecl copy_world_hq(void*, void*, void*, const LegacyRect*, const LegacyRect*);
 int32_t __cdecl iterate_world8(void*, int32_t, int32_t, void*, const LegacyRect*, void*,
                                IteratePixel8, void*);
 int32_t __cdecl iterate_world16(void*, int32_t, int32_t, void*, const LegacyRect*, void*,
@@ -110,28 +99,29 @@ int32_t __cdecl begin_sampling8(void*, int32_t, uint32_t, void*);
 int32_t __cdecl end_sampling8(void*, int32_t, uint32_t, void*);
 int32_t __cdecl unsupported_batch_sample_func(void*, int32_t, uint32_t,
                                                const void*, void**);
-int32_t __cdecl fill_world8(void*, const void*, const LegacyRect*, void*);
-int32_t __cdecl fill_world16(void*, const void*, const LegacyRect*, void*);
-int32_t __cdecl fill_world_float(void*, const void*, const LegacyRect*, void*);
-int32_t __cdecl premultiply_world8(void*, int32_t, void*);
-int32_t __cdecl premultiply_color8(void*, void*, const void*, int32_t, void*);
-int32_t __cdecl premultiply_color16(void*, void*, const void*, int32_t, void*);
-int32_t __cdecl premultiply_color_float(void*, void*, const void*, int32_t, void*);
-int32_t __cdecl convolve_world(void*, void*, const LegacyRect*, uint32_t, int32_t,
-                               void*, void*, void*, void*, void*);
-int32_t __cdecl blend_world(void*, const void*, const void*, int32_t, void*);
-int32_t __cdecl transform_world(void*, int32_t, uint32_t, int32_t, const void*,
-                                const void*, const void*, const void*, int32_t, uint8_t,
-                                const LegacyRect*, void*);
-int32_t __cdecl transfer_rect(void*, int32_t, uint32_t, int32_t, const LegacyRect*,
-                              const void*, const void*, const void*, int32_t, int32_t, void*);
-bool verify_legacy_fill_matte_callbacks();
-bool verify_world_transform_blend();
-bool verify_world_transform_affine();
-bool verify_world_transform_transfer_mask();
 bool verify_iterate_suites();
 bool verify_pf_batch_sampling_suite();
 }
+
+using aexcompat::pf_world_transform::blend_world;
+using aexcompat::pf_world_transform::composite_rect8;
+using aexcompat::pf_world_transform::convolve_world;
+using aexcompat::pf_world_transform::copy_world8;
+using aexcompat::pf_world_transform::copy_world_hq;
+using aexcompat::pf_world_transform::fill_world8;
+using aexcompat::pf_world_transform::fill_world16;
+using aexcompat::pf_world_transform::fill_world_float;
+using aexcompat::pf_world_transform::premultiply_world8;
+using aexcompat::pf_world_transform::premultiply_color8;
+using aexcompat::pf_world_transform::premultiply_color16;
+using aexcompat::pf_world_transform::premultiply_color_float;
+using aexcompat::pf_world_transform::transfer_rect;
+using aexcompat::pf_world_transform::transform_world;
+using aexcompat::pf_world_transform::verify_legacy_fill_matte_callbacks;
+using aexcompat::pf_world_transform::verify_world_transform_affine;
+using aexcompat::pf_world_transform::verify_world_transform_blend;
+using aexcompat::pf_world_transform::verify_world_transform_composite_rect;
+using aexcompat::pf_world_transform::verify_world_transform_transfer_mask;
 
 
 using PfPathPoint = std::array<double, 2>;
@@ -215,4 +205,3 @@ struct PfBatchSamplingSuite1 {
 };
 extern PfBatchSamplingSuite1 g_batch_sampling_suite1;
 
-extern std::array<void*, 7> g_fill_matte_suite2;

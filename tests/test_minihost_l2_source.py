@@ -14,6 +14,7 @@ PF_SUITES_ABI = ROOT / "minihost" / "src" / "worker_l2_suite_abi.hpp"
 PF_SUITES_SOURCE = ROOT / "minihost" / "src" / "worker_pf_suites.cpp"
 PF_SAMPLING_SOURCE = ROOT / "minihost" / "src" / "worker_pf_sampling_runtime.cpp"
 PF_AE_CHANNEL_RUNTIME_SOURCE = ROOT / "minihost" / "src" / "worker_pf_ae_channel_runtime.cpp"
+PF_WORLD_TRANSFORM_SOURCE = ROOT / "minihost" / "src" / "worker_pf_world_transform_runtime.cpp"
 RENDER_HEADER = ROOT / "minihost" / "src" / "render_subsystem.h"
 RENDER_SOURCE = ROOT / "minihost" / "src" / "render_subsystem.cpp"
 REPORT_HEADER = ROOT / "minihost" / "src" / "worker_report.hpp"
@@ -27,6 +28,7 @@ REQUEST_PARSER_SOURCE = ROOT / "minihost" / "src" / "worker_request_parser.cpp"
 RENDER_REPORT_HEADER = ROOT / "minihost" / "src" / "worker_render_report.hpp"
 RENDER_REPORT_SOURCE = ROOT / "minihost" / "src" / "worker_render_report.cpp"
 PF_SUITES_INTERNAL = ROOT / "minihost" / "src" / "worker_pf_suites_internal.hpp"
+PF_WORLD_TRANSFORM_HEADER = ROOT / "minihost" / "src" / "worker_pf_world_transform_runtime.hpp"
 AEGP_SCENE_SOURCE = ROOT / "minihost" / "src" / "worker_aegp_scene.cpp"
 AEGP_SCENE_HEADER = ROOT / "minihost" / "src" / "worker_aegp_scene.hpp"
 AEGP_SCENE_RUNTIME_HEADER = ROOT / "minihost" / "src" / "worker_aegp_scene_runtime.hpp"
@@ -47,6 +49,7 @@ def l2_family_source():
         CLI_DISPATCH_SOURCE, PF_SUITES_ABI, PF_SUITES_INTERNAL, PF_SUITES_SOURCE,
         PF_SAMPLING_SOURCE,
         PF_AE_CHANNEL_RUNTIME_SOURCE,
+        PF_WORLD_TRANSFORM_SOURCE,
         AEGP_SCENE_SOURCE, AEGP_SCENE_HEADER, AEGP_SCENE_RUNTIME_HEADER,
         AEGP_SCENE_RUNTIME_SOURCE, AEGP_INIT_RUNTIME_HEADER, AEGP_INIT_RUNTIME_SOURCE,
         MASK_RUNTIME_HEADER, MASK_RUNTIME_SOURCE, MASK_RUNTIME_CALLBACKS,
@@ -231,6 +234,7 @@ class MinihostL2SourceTests(unittest.TestCase):
         l2 = SOURCE.read_text(encoding="utf-8")
         cmake = MINIHOST_CMAKE.read_text(encoding="utf-8")
         internal = PF_SUITES_INTERNAL.read_text(encoding="utf-8")
+        transform = PF_WORLD_TRANSFORM_HEADER.read_text(encoding="utf-8")
 
         self.assertNotIn('#include "worker_pf_suites.cpp"', l2)
         self.assertEqual(cmake.count("src/worker_pf_suites.cpp"), 1)
@@ -240,7 +244,9 @@ class MinihostL2SourceTests(unittest.TestCase):
         self.assertIn("resolve_dispatch_world_format", internal)
         self.assertIn("acquire_suite", internal)
         self.assertIn("release_suite", internal)
-        self.assertIn("PfTransformTelemetry", internal)
+        self.assertIn("struct Telemetry", transform)
+        self.assertIn("struct Context", transform)
+        self.assertIn("bounded_argb8_world", transform)
         self.assertIn("configure_pf_host_context(pf_host_context)", l2)
         self.assertIn("pf_host_context_configured()", l2)
 
@@ -474,7 +480,7 @@ class MinihostL2SourceTests(unittest.TestCase):
             "struct WorldTransformSuite1",
             '{"AEGP Mask Suite", 1, &g_pf_mask_suite1',
             '{"PF Iterate8 Suite", 1, nullptr, &provide_iterate8}',
-            '{"PF World Transform Suite", 1, nullptr, &provide_world_transform1}',
+            "&aexcompat::pf_world_transform::provide_world_transform1",
             "g_iterate8_suite2.iterate = reinterpret_cast<void*>(&iterate_world8)",
             "g_world_transform_suite1 = {&composite_rect8, &blend_world, &convolve_world",
             "&copy_world8, &copy_world_hq, &transfer_rect, &transform_world}",
@@ -503,7 +509,7 @@ class MinihostL2SourceTests(unittest.TestCase):
             "constexpr std::size_t kOutWidth = 80",
             "constexpr std::size_t kOutOrigin = 88",
             "struct LegacyRect { int32_t left, top, right, bottom; }",
-            '{"PF Fill Matte Suite", 2, nullptr, &provide_fill_matte2}',
+            "&aexcompat::pf_world_transform::provide_fill_matte2",
             "fill_world_typed(16, color, area, world)",
             "const int32_t requested_width = read<int32_t>(command_output, kOutWidth)",
             "aexcompat::render::validate_output_extent",

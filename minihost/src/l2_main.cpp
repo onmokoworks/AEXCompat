@@ -85,6 +85,7 @@
 #include "worker_world_registry.hpp"
 #include "worker_world_safety.hpp"
 #include "worker_pf_suites_internal.hpp"
+#include "worker_pf_world_transform_runtime.hpp"
 #include "worker_pf_adv_time_suite.hpp"
 #include "worker_pf_ae_channel_runtime.hpp"
 #include "worker_pf_state_runtime.hpp"
@@ -1548,7 +1549,6 @@ PfMaskSuite1 g_pf_mask_suite1{
         &aexcompat::pf_path_runtime::mask_world_with_path)};
 std::array<void*, 4> g_pf_path_query_suite1{};
 std::array<void*, 11> g_pf_path_data_suite1{};
-WorldTransformSuite1 g_world_transform_suite1{};
 std::array<void*, 19> g_ansi_suite1{};
 std::array<void*, 1> g_effect_ui_suite1{};
 // PF_AdvAppSuite1 is frozen at ten callbacks; keep its storage independent
@@ -5080,20 +5080,6 @@ const void* provide_sampling_float(void*) {
   g_sampling_float_suite1[1] = reinterpret_cast<void*>(&subpixel_sample_float);
   g_sampling_float_suite1[2] = reinterpret_cast<void*>(&area_sample_float); return g_sampling_float_suite1.data();
 }
-const void* provide_world_transform1(void*) {
-  g_world_transform_suite1 = {&composite_rect8, &blend_world, &convolve_world,
-      &copy_world8, &copy_world_hq, &transfer_rect, &transform_world};
-  return &g_world_transform_suite1;
-}
-const void* provide_fill_matte2(void*) {
-  g_fill_matte_suite2.fill(reinterpret_cast<void*>(&aegp_unsupported_suite_call));
-  void* callbacks[] = {reinterpret_cast<void*>(&fill_world8), reinterpret_cast<void*>(&fill_world16),
-      reinterpret_cast<void*>(&fill_world_float), reinterpret_cast<void*>(&premultiply_world8),
-      reinterpret_cast<void*>(&premultiply_color8), reinterpret_cast<void*>(&premultiply_color16),
-      reinterpret_cast<void*>(&premultiply_color_float)};
-  std::copy(std::begin(callbacks), std::end(callbacks), g_fill_matte_suite2.begin());
-  return g_fill_matte_suite2.data();
-}
 const void* provide_dynamic_stream2(void*) {
   g_aegp_dynamic_stream_suite2.fill(reinterpret_cast<void*>(&aegp_unsupported_suite_call));
   g_aegp_dynamic_stream_suite2[5] = reinterpret_cast<void*>(&aegp_set_dynamic_stream_flag_v2);
@@ -5215,8 +5201,10 @@ int32_t __cdecl acquire_suite(const char* name, int32_t version,
       {"PF Sampling8 Suite", 1, nullptr, &provide_sampling8},
       {"PF Sampling16 Suite", 1, nullptr, &provide_sampling16},
       {"PF SamplingFloat Suite", 1, nullptr, &provide_sampling_float},
-      {"PF World Transform Suite", 1, nullptr, &provide_world_transform1},
-      {"PF Fill Matte Suite", 2, nullptr, &provide_fill_matte2},
+      {"PF World Transform Suite", 1, nullptr,
+       &aexcompat::pf_world_transform::provide_world_transform1},
+      {"PF Fill Matte Suite", 2, nullptr,
+       &aexcompat::pf_world_transform::provide_fill_matte2},
       {"AEGP Dynamic Stream Suite", 2, nullptr, &provide_dynamic_stream2},
   };
   StaticProviderCatalog component_catalog{
@@ -5539,214 +5527,6 @@ int32_t __cdecl checkout_param(void*, int32_t index, int32_t what_time, int32_t 
 
 constexpr int32_t kPfErrBadCallbackParam = 516;
 
-uint8_t composite_divide_255(uint32_t numerator) {
-  return static_cast<uint8_t>(std::min<uint32_t>(255, (numerator + 127) / 255));
-}
-
-uint8_t composite_divide_65025(uint64_t numerator) {
-  return static_cast<uint8_t>(std::min<uint64_t>(255, (numerator + 32'512) / 65'025));
-}
-
-int32_t __cdecl composite_rect8_legacy(void* effect_ref, LegacyRect* source_rect,
-                                int32_t source_opacity, void* source_world,
-                                int32_t destination_x, int32_t destination_y,
-                                int32_t field, int32_t transfer_mode,
-                                void* destination_world) {
-  constexpr int32_t kFieldFrame = 0;
-  constexpr int32_t kFieldUpper = 1;
-  constexpr int32_t kFieldLower = 2;
-  constexpr int32_t kTransferCopy = 0;
-  constexpr int32_t kTransferBehind = 1;
-  constexpr int32_t kTransferInFront = 2;
-  if (!effect_ref || !source_rect || source_opacity < 0 || source_opacity > 255 ||
-      (field != kFieldFrame && field != kFieldUpper && field != kFieldLower) ||
-      (transfer_mode != kTransferCopy && transfer_mode != kTransferBehind &&
-       transfer_mode != kTransferInFront)) {
-    return kPfErrBadCallbackParam;
-  }
-
-  unsigned char *source{}, *destination{};
-  int32_t source_rowbytes{}, source_width{}, source_height{};
-  int32_t destination_rowbytes{}, destination_width{}, destination_height{};
-  if (!bounded_argb8_world(source_world, source, source_rowbytes, source_width, source_height) ||
-      !bounded_argb8_world(destination_world, destination, destination_rowbytes,
-                           destination_width, destination_height)) {
-    return kPfErrBadCallbackParam;
-  }
-  if (source_rect->right < source_rect->left || source_rect->bottom < source_rect->top) {
-    return kPfErrBadCallbackParam;
-  }
-
-  // Map the requested source rectangle's upper-left to the destination, then clip in 64-bit.
-  const int64_t source_left = std::max<int64_t>(source_rect->left, 0);
-  const int64_t source_top = std::max<int64_t>(source_rect->top, 0);
-  const int64_t source_right = std::min<int64_t>(source_rect->right, source_width);
-  const int64_t source_bottom = std::min<int64_t>(source_rect->bottom, source_height);
-  const int64_t destination_left = static_cast<int64_t>(destination_x) +
-      source_left - source_rect->left;
-  const int64_t destination_top = static_cast<int64_t>(destination_y) +
-      source_top - source_rect->top;
-  const int64_t clipped_destination_left = std::max<int64_t>(destination_left, 0);
-  const int64_t clipped_destination_top = std::max<int64_t>(destination_top, 0);
-  const int64_t clipped_destination_right = std::min<int64_t>(
-      destination_left + (source_right - source_left), destination_width);
-  const int64_t clipped_destination_bottom = std::min<int64_t>(
-      destination_top + (source_bottom - source_top), destination_height);
-  if (source_right <= source_left || source_bottom <= source_top ||
-      clipped_destination_right <= clipped_destination_left ||
-      clipped_destination_bottom <= clipped_destination_top || source_opacity == 0) {
-    return 0;
-  }
-
-  const int64_t clipped_source_left = source_left + clipped_destination_left - destination_left;
-  const int64_t clipped_source_top = source_top + clipped_destination_top - destination_top;
-  const std::size_t width = static_cast<std::size_t>(
-      clipped_destination_right - clipped_destination_left);
-  const std::size_t height = static_cast<std::size_t>(
-      clipped_destination_bottom - clipped_destination_top);
-  if (width > 4096 || height > 4096 || width > SIZE_MAX / 4 ||
-      height > SIZE_MAX / (width * 4)) {
-    return kPfErrBadCallbackParam;
-  }
-
-  std::vector<unsigned char> snapshot;
-  try {
-    snapshot.resize(width * height * 4);
-  } catch (const std::bad_alloc&) {
-    return 4;
-  }
-  for (std::size_t row = 0; row < height; ++row) {
-    std::memcpy(snapshot.data() + row * width * 4,
-                source + static_cast<std::size_t>(clipped_source_top + row) * source_rowbytes +
-                    static_cast<std::size_t>(clipped_source_left) * 4,
-                width * 4);
-  }
-
-  const uint32_t opacity = static_cast<uint32_t>(source_opacity);
-  for (std::size_t row = 0; row < height; ++row) {
-    const int64_t output_y = clipped_destination_top + static_cast<int64_t>(row);
-    if ((field == kFieldUpper && (output_y & 1) != 0) ||
-        (field == kFieldLower && (output_y & 1) == 0)) {
-      continue;
-    }
-    for (std::size_t column = 0; column < width; ++column) {
-      const auto* input = snapshot.data() + (row * width + column) * 4;
-      auto* output = destination + static_cast<std::size_t>(output_y) * destination_rowbytes +
-          static_cast<std::size_t>(clipped_destination_left + column) * 4;
-      if (transfer_mode == kTransferCopy) {
-        for (int channel = 0; channel < 4; ++channel) {
-          output[channel] = composite_divide_255(
-              static_cast<uint32_t>(input[channel]) * opacity +
-              static_cast<uint32_t>(output[channel]) * (255 - opacity));
-        }
-      } else if (transfer_mode == kTransferInFront) {
-        const uint32_t destination_weight = 65'025 - input[0] * opacity;
-        for (int channel = 0; channel < 4; ++channel) {
-          output[channel] = composite_divide_65025(
-              static_cast<uint64_t>(input[channel]) * opacity * 255 +
-              static_cast<uint64_t>(output[channel]) * destination_weight);
-        }
-      } else {
-        const uint32_t source_weight = opacity * (255 - output[0]);
-        for (int channel = 0; channel < 4; ++channel) {
-          output[channel] = composite_divide_65025(
-              static_cast<uint64_t>(output[channel]) * 65'025 +
-              static_cast<uint64_t>(input[channel]) * source_weight);
-        }
-      }
-    }
-  }
-  return 0;
-}
-
-template <typename Channel, uint32_t Maximum>
-int32_t composite_rect_registered(void* effect_ref, LegacyRect* source_rect,
-                                  int32_t source_opacity, void* source_world,
-                                  int32_t destination_x, int32_t destination_y,
-                                  int32_t field, int32_t transfer_mode,
-                                  void* destination_world) {
-  if (!effect_ref || !source_rect || source_opacity < 0 || source_opacity > 255 ||
-      field < 0 || field > 2 || transfer_mode < 0 || transfer_mode > 2 ||
-      source_rect->right < source_rect->left || source_rect->bottom < source_rect->top)
-    return kPfErrBadCallbackParam;
-  DispatchWorldFormat source_info{}, destination_info{};
-  if (!resolve_dispatch_world_format(source_world, source_info) ||
-      !resolve_dispatch_world_format(destination_world, destination_info) ||
-      source_info.pixel_format != destination_info.pixel_format ||
-      source_info.width > 4096 || source_info.height > 4096 ||
-      destination_info.width > 4096 || destination_info.height > 4096 ||
-      source_info.rowbytes < static_cast<int64_t>(source_info.width) * sizeof(Channel) * 4 ||
-      destination_info.rowbytes <
-          static_cast<int64_t>(destination_info.width) * sizeof(Channel) * 4)
-    return kPfErrBadCallbackParam;
-
-  const int64_t sl = std::max<int64_t>(source_rect->left, 0);
-  const int64_t st = std::max<int64_t>(source_rect->top, 0);
-  const int64_t sr = std::min<int64_t>(source_rect->right, source_info.width);
-  const int64_t sb = std::min<int64_t>(source_rect->bottom, source_info.height);
-  const int64_t dl = static_cast<int64_t>(destination_x) + sl - source_rect->left;
-  const int64_t dt = static_cast<int64_t>(destination_y) + st - source_rect->top;
-  const int64_t cdl = std::max<int64_t>(dl, 0);
-  const int64_t cdt = std::max<int64_t>(dt, 0);
-  const int64_t cdr = std::min<int64_t>(dl + sr - sl, destination_info.width);
-  const int64_t cdb = std::min<int64_t>(dt + sb - st, destination_info.height);
-  if (sr <= sl || sb <= st || cdr <= cdl || cdb <= cdt || source_opacity == 0) return 0;
-  const int64_t csl = sl + cdl - dl;
-  const int64_t cst = st + cdt - dt;
-  const std::size_t width = static_cast<std::size_t>(cdr - cdl);
-  const std::size_t height = static_cast<std::size_t>(cdb - cdt);
-  if (width > SIZE_MAX / height || width * height > 16'777'216) return kPfErrBadCallbackParam;
-
-  using Pixel = std::array<Channel, 4>;
-  std::vector<Pixel> snapshot;
-  try { snapshot.resize(width * height); } catch (const std::bad_alloc&) { return 4; }
-  const auto* source = static_cast<const unsigned char*>(source_info.data);
-  auto* destination = static_cast<unsigned char*>(destination_info.data);
-  for (std::size_t row = 0; row < height; ++row)
-    std::memcpy(snapshot.data() + row * width,
-                source + static_cast<std::size_t>(cst + row) * source_info.rowbytes +
-                    static_cast<std::size_t>(csl) * sizeof(Pixel),
-                width * sizeof(Pixel));
-
-  const uint64_t opacity = static_cast<uint64_t>(source_opacity);
-  const uint64_t denominator = static_cast<uint64_t>(Maximum) * 255;
-  auto rounded = [](uint64_t numerator, uint64_t divisor) -> Channel {
-    return static_cast<Channel>(std::min<uint64_t>(Maximum, (numerator + divisor / 2) / divisor));
-  };
-  for (std::size_t row = 0; row < height; ++row) {
-    const int64_t output_y = cdt + static_cast<int64_t>(row);
-    if ((field == 1 && (output_y & 1)) || (field == 2 && !(output_y & 1))) continue;
-    for (std::size_t column = 0; column < width; ++column) {
-      const Pixel& input = snapshot[row * width + column];
-      auto* output = reinterpret_cast<Pixel*>(destination +
-          static_cast<std::size_t>(output_y) * destination_info.rowbytes +
-          static_cast<std::size_t>(cdl + column) * sizeof(Pixel));
-      const uint64_t destination_alpha = (*output)[0];
-      for (std::size_t channel = 0; channel < 4; ++channel) {
-        uint64_t numerator{};
-        uint64_t divisor{};
-        if (transfer_mode == 0) {
-          numerator = static_cast<uint64_t>(input[channel]) * opacity +
-              static_cast<uint64_t>((*output)[channel]) * (255 - opacity);
-          divisor = 255;
-        } else if (transfer_mode == 2) {
-          const uint64_t destination_weight = denominator -
-              static_cast<uint64_t>(input[0]) * opacity;
-          numerator = static_cast<uint64_t>(input[channel]) * opacity * Maximum +
-              static_cast<uint64_t>((*output)[channel]) * destination_weight;
-          divisor = denominator;
-        } else {
-          const uint64_t source_weight = opacity * (Maximum - destination_alpha);
-          numerator = static_cast<uint64_t>((*output)[channel]) * denominator +
-              static_cast<uint64_t>(input[channel]) * source_weight;
-          divisor = denominator;
-        }
-        (*output)[channel] = rounded(numerator, divisor);
-      }
-    }
-  }
-  return 0;
-}
 int32_t __cdecl aegp_get_new_effect_stream_by_index_v2(
     int32_t plugin_id, void* effect, int32_t index, void** stream) {
   std::size_t instance_index = 0;
@@ -5898,252 +5678,6 @@ int32_t __cdecl aegp_get_effect_param_union_by_index_v3(
               kUnions[static_cast<std::size_t>(index)].size());
   ++g_aegp_effect_param_union_calls;
   return 0;
-}
-
-int32_t composite_rect_float(void* effect_ref, LegacyRect* source_rect,
-                             int32_t source_opacity, void* source_world,
-                             int32_t destination_x, int32_t destination_y,
-                             int32_t field, int32_t transfer_mode,
-                             void* destination_world) {
-  if (!effect_ref || !source_rect || source_opacity < 0 || source_opacity > 255 ||
-      field < 0 || field > 2 || transfer_mode < 0 || transfer_mode > 2)
-    return kPfErrBadCallbackParam;
-  DispatchWorldFormat source_info{}, destination_info{};
-  if (!resolve_dispatch_world_format(source_world, source_info) ||
-      !resolve_dispatch_world_format(destination_world, destination_info) ||
-      source_info.pixel_format != kPixelFormatArgb128 ||
-      destination_info.pixel_format != kPixelFormatArgb128 ||
-      source_info.rowbytes < static_cast<int64_t>(source_info.width) * 16 ||
-      destination_info.rowbytes < static_cast<int64_t>(destination_info.width) * 16)
-    return kPfErrBadCallbackParam;
-  const int64_t sl=(std::max<int64_t>)(source_rect->left,0), st=(std::max<int64_t>)(source_rect->top,0),
-      sr=(std::min<int64_t>)(source_rect->right,source_info.width), sb=(std::min<int64_t>)(source_rect->bottom,source_info.height);
-  const int64_t dl=destination_x+sl-source_rect->left, dt=destination_y+st-source_rect->top;
-  const int64_t cdl=(std::max<int64_t>)(dl,0), cdt=(std::max<int64_t>)(dt,0),
-      cdr=(std::min<int64_t>)(dl+sr-sl,destination_info.width), cdb=(std::min<int64_t>)(dt+sb-st,destination_info.height);
-  if(sr<=sl||sb<=st||cdr<=cdl||cdb<=cdt||source_opacity==0) return 0;
-  const int64_t csl=sl+cdl-dl,cst=st+cdt-dt;
-  const std::size_t width=static_cast<std::size_t>(cdr-cdl),height=static_cast<std::size_t>(cdb-cdt);
-  if(width>SIZE_MAX/height||width*height>16'777'216) return kPfErrBadCallbackParam;
-  using Pixel=std::array<float,4>; std::vector<Pixel> snapshot;
-  try{snapshot.resize(width*height);}catch(...){return kPfErrBadCallbackParam;}
-  const auto* source=static_cast<const unsigned char*>(source_info.data); auto* destination=static_cast<unsigned char*>(destination_info.data);
-  for(std::size_t row=0;row<height;++row) std::memcpy(snapshot.data()+row*width,
-      source+static_cast<std::size_t>(cst+row)*source_info.rowbytes+static_cast<std::size_t>(csl)*sizeof(Pixel),width*sizeof(Pixel));
-  const double opacity=source_opacity/255.0;
-  for(std::size_t row=0;row<height;++row){const int64_t output_y=cdt+static_cast<int64_t>(row);
-    if((field==1&&(output_y&1))||(field==2&&!(output_y&1)))continue;
-    for(std::size_t column=0;column<width;++column){const Pixel& input=snapshot[row*width+column];
-      auto* output=reinterpret_cast<Pixel*>(destination+static_cast<std::size_t>(output_y)*destination_info.rowbytes+static_cast<std::size_t>(cdl+column)*sizeof(Pixel));
-      const double destination_alpha=(*output)[0];
-      for(int channel=0;channel<4;++channel){
-        if(transfer_mode==0)(*output)[channel]=static_cast<float>(input[channel]*opacity+(*output)[channel]*(1.0-opacity));
-        else if(transfer_mode==2)(*output)[channel]=static_cast<float>(input[channel]*opacity+(*output)[channel]*(1.0-input[0]*opacity));
-        else (*output)[channel]=static_cast<float>((*output)[channel]+input[channel]*opacity*(1.0-destination_alpha));
-      }
-    }
-  }
-  return 0;
-}
-
-int32_t __cdecl composite_rect8(void* effect_ref, LegacyRect* source_rect,
-                                int32_t source_opacity, void* source_world,
-                                int32_t destination_x, int32_t destination_y,
-                                int32_t field, int32_t transfer_mode,
-                                void* destination_world) {
-  DispatchWorldFormat source_info{}, destination_info{};
-  if (!resolve_dispatch_world_format(source_world, source_info) ||
-      !resolve_dispatch_world_format(destination_world, destination_info) ||
-      source_info.pixel_format != destination_info.pixel_format)
-    return kPfErrBadCallbackParam;
-  if (source_info.pixel_format == kPixelFormatArgb32)
-    return composite_rect_registered<uint8_t, 255>(effect_ref, source_rect, source_opacity,
-        source_world, destination_x, destination_y, field, transfer_mode, destination_world);
-  if (source_info.pixel_format == kPixelFormatArgb64)
-    return composite_rect_registered<uint16_t, 32768>(effect_ref, source_rect, source_opacity,
-        source_world, destination_x, destination_y, field, transfer_mode, destination_world);
-  if (source_info.pixel_format == kPixelFormatArgb128)
-    return composite_rect_float(effect_ref, source_rect, source_opacity, source_world,
-        destination_x, destination_y, field, transfer_mode, destination_world);
-  return kPfErrBadCallbackParam;
-}
-
-bool verify_world_transform_composite_rect() {
-  DispatchWorldFormatScope dispatch_worlds;
-  auto make_world = [&](std::array<std::byte, 64>& world, unsigned char* pixels,
-                       int32_t rowbytes, int32_t width, int32_t height) {
-    world.fill(std::byte{});
-    std::memcpy(world.data() + 24, &pixels, sizeof(pixels));
-    std::memcpy(world.data() + 32, &rowbytes, sizeof(rowbytes));
-    std::memcpy(world.data() + 36, &width, sizeof(width));
-    std::memcpy(world.data() + 40, &height, sizeof(height));
-    dispatch_worlds.register_world(world.data(), kPixelFormatArgb32);
-  };
-  auto run_pixel_case = [&](int32_t mode, const std::array<uint8_t, 4>& expected) {
-    std::array<unsigned char, 4> source{128, 64, 32, 16};
-    std::array<unsigned char, 4> destination{64, 20, 10, 5};
-    std::array<std::byte, 64> source_world{}, destination_world{};
-    make_world(source_world, source.data(), 4, 1, 1);
-    make_world(destination_world, destination.data(), 4, 1, 1);
-    LegacyRect rect{0, 0, 1, 1};
-    return composite_rect8(&source_world, &rect, 128, &source_world, 0, 0, 0, mode,
-                           &destination_world) == 0 && destination == expected;
-  };
-  if (!run_pixel_case(0, {96, 42, 21, 11}) ||
-      !run_pixel_case(1, {112, 44, 22, 11}) ||
-      !run_pixel_case(2, {112, 47, 24, 12})) {
-    std::cerr << "composite diagnostic: pixel matrix\n";
-    return false;
-  }
-
-  constexpr int32_t rowbytes = 16;
-  std::array<unsigned char, rowbytes * 3 + 16> source_guarded{};
-  std::array<unsigned char, rowbytes * 3 + 16> destination_guarded{};
-  source_guarded.fill(0xA5);
-  destination_guarded.fill(0xCC);
-  auto* source = source_guarded.data() + 8;
-  auto* destination = destination_guarded.data() + 8;
-  for (int y = 0; y < 3; ++y) {
-    for (int x = 0; x < 3; ++x) {
-      const std::array<unsigned char, 4> pixel{
-          255, static_cast<unsigned char>(10 + y * 3 + x), 0, 0};
-      std::memcpy(source + y * rowbytes + x * 4, pixel.data(), 4);
-    }
-  }
-  std::array<std::byte, 64> source_world{}, destination_world{};
-  make_world(source_world, source, rowbytes, 3, 3);
-  make_world(destination_world, destination, rowbytes, 3, 3);
-  LegacyRect rect{0, 0, 3, 3};
-  if (composite_rect8(&source_world, &rect, 255, &source_world, -1, 0, 1, 0,
-                      &destination_world) != 0) {
-    std::cerr << "composite diagnostic: clipped upper field call\n";
-    return false;
-  }
-  // Clipping drops source column zero; upper field updates destination rows 0 and 2 only.
-  if (destination[1] != 11 || destination[5] != 12 || destination[rowbytes] != 0xCC ||
-      destination[2 * rowbytes + 1] != 17 || destination[2 * rowbytes + 5] != 18) {
-    std::cerr << "composite diagnostic: clipped upper field values\n";
-    return false;
-  }
-  for (int y = 0; y < 3; ++y) {
-    for (int x = 12; x < rowbytes; ++x) {
-      if (destination[y * rowbytes + x] != 0xCC) return false;
-    }
-  }
-  std::memset(destination, 0xCC, rowbytes * 3);
-  if (composite_rect8(&source_world, &rect, 255, &source_world, 0, 0, 2, 0,
-                      &destination_world) != 0 || destination[0] != 0xCC ||
-      destination[rowbytes] != 255 || destination[rowbytes + 1] != 13 ||
-      destination[2 * rowbytes] != 0xCC) {
-    std::cerr << "composite diagnostic: lower field\n";
-    return false;
-  }
-  if (!std::all_of(source_guarded.begin(), source_guarded.begin() + 8,
-                   [](unsigned char value) { return value == 0xA5; }) ||
-      !std::all_of(source_guarded.end() - 8, source_guarded.end(),
-                   [](unsigned char value) { return value == 0xA5; }) ||
-      !std::all_of(destination_guarded.begin(), destination_guarded.begin() + 8,
-                   [](unsigned char value) { return value == 0xCC; }) ||
-      !std::all_of(destination_guarded.end() - 8, destination_guarded.end(),
-                   [](unsigned char value) { return value == 0xCC; })) {
-    std::cerr << "composite diagnostic: guards\n";
-    return false;
-  }
-
-  std::array<unsigned char, 12> alias_pixels{255, 1, 0, 0, 255, 2, 0, 0, 255, 3, 0, 0};
-  std::array<std::byte, 64> alias_world{};
-  make_world(alias_world, alias_pixels.data(), 12, 3, 1);
-  LegacyRect alias_rect{0, 0, 2, 1};
-  if (composite_rect8(&alias_world, &alias_rect, 255, &alias_world, 1, 0, 0, 0,
-                      &alias_world) != 0 || alias_pixels[5] != 1 || alias_pixels[9] != 2) {
-    std::cerr << "composite diagnostic: alias\n";
-    return false;
-  }
-  if (composite_rect8(nullptr, &alias_rect, 255, &alias_world, 0, 0, 0, 0,
-                      &alias_world) != kPfErrBadCallbackParam ||
-      composite_rect8(&alias_world, nullptr, 255, &alias_world, 0, 0, 0, 0,
-                      &alias_world) != kPfErrBadCallbackParam ||
-      composite_rect8(&alias_world, &alias_rect, 256, &alias_world, 0, 0, 0, 0,
-                      &alias_world) != kPfErrBadCallbackParam ||
-      composite_rect8(&alias_world, &alias_rect, 255, &alias_world, 0, 0, 3, 0,
-                      &alias_world) != kPfErrBadCallbackParam) {
-    std::cerr << "composite diagnostic: invalid arguments\n";
-    return false;
-  }
-
-  // A padded ARGB16 row can resemble 32F by width; provenance must win over layout.
-  std::array<uint16_t, 12> source16{32768, 0, 32768, 1, 32768, 32768, 0, 32767};
-  std::array<uint16_t, 12> destination16{};
-  std::array<std::byte, 64> registered16{}, shallow16{}, output16{};
-  auto make16 = [](auto& world, void* data) {
-    world.fill(std::byte{});
-    const int32_t flags = 1, rowbytes = 24, width = 2, height = 1;
-    std::memcpy(world.data() + 16, &flags, sizeof(flags));
-    std::memcpy(world.data() + 24, &data, sizeof(data));
-    std::memcpy(world.data() + 32, &rowbytes, sizeof(rowbytes));
-    std::memcpy(world.data() + 36, &width, sizeof(width));
-    std::memcpy(world.data() + 40, &height, sizeof(height));
-  };
-  make16(registered16, source16.data());
-  shallow16 = registered16;
-  make16(output16, destination16.data());
-  if (!dispatch_worlds.register_world(registered16.data(), kPixelFormatArgb64) ||
-      !dispatch_worlds.register_world(output16.data(), kPixelFormatArgb64)) {
-    std::cerr << "composite diagnostic: register 16\n";
-    return false;
-  }
-  LegacyRect rect16{0, 0, 2, 1};
-  if (composite_rect8(registered16.data(), &rect16, 255, shallow16.data(), 0, 0, 0, 0,
-      output16.data()) != 0 ||
-      !std::equal(source16.begin(), source16.begin() + 8, destination16.begin())) {
-    std::cerr << "composite diagnostic: copy 16\n";
-    return false;
-  }
-
-  std::atomic_bool thread16{false}, thread32{false};
-  std::thread deep_thread([&] {
-    DispatchWorldFormatScope scope;
-    scope.register_world(registered16.data(), kPixelFormatArgb64);
-    scope.register_world(output16.data(), kPixelFormatArgb64);
-    thread16 = composite_rect8(registered16.data(), &rect16, 255, registered16.data(),
-                               0, 0, 0, 0, output16.data()) == 0;
-  });
-  std::thread float_thread([&] {
-    DispatchWorldFormatScope scope;
-    scope.register_world(registered16.data(), kPixelFormatArgb128);
-    scope.register_world(output16.data(), kPixelFormatArgb128);
-    thread32 = composite_rect8(registered16.data(), &rect16, 255, registered16.data(),
-                               0, 0, 0, 0, output16.data()) == kPfErrBadCallbackParam;
-  });
-  deep_thread.join();
-  float_thread.join();
-  if (!thread16 || !thread32) {
-    std::cerr << "composite diagnostic: concurrency " << thread16 << ',' << thread32 << '\n';
-    return false;
-  }
-  std::array<float, 8> source32{{0.5f,2.0f,-0.5f,4.0f, 1.0f,8.0f,0.25f,-2.0f}};
-  std::array<float, 8> destination32{};
-  LocalEffectWorld source_world32{}, destination_world32{};
-  source_world32.data=source32.data(); source_world32.rowbytes=32;
-  source_world32.width=2; source_world32.height=1;
-  destination_world32.data=destination32.data(); destination_world32.rowbytes=32;
-  destination_world32.width=2; destination_world32.height=1;
-  const bool source32_registered =
-      dispatch_worlds.register_world(&source_world32, kPixelFormatArgb128);
-  const bool destination32_registered =
-      dispatch_worlds.register_world(&destination_world32, kPixelFormatArgb128);
-  const int32_t composite32_result = composite_rect8(
-      &source_world32, &rect16, 255, &source_world32, 0, 0, 0, 0, &destination_world32);
-  if (!source32_registered || !destination32_registered || composite32_result != 0 ||
-      destination32 != source32) {
-    std::cerr << "float composite diagnostic: source_registered=" << source32_registered
-              << ", destination_registered=" << destination32_registered
-              << ", result=" << composite32_result;
-    for (float value : destination32) std::cerr << ',' << value;
-    std::cerr << '\n';
-    return false;
-  }
-  return true;
 }
 
 template <typename Operation>
@@ -10356,11 +9890,19 @@ int worker_main_impl(int argc, wchar_t **argv) {
       },
       &g_effect,
       &g_batch_sampling_suite1,
-      {&g_transform_world_calls, &g_last_transform_x, &g_last_transform_y,
-       &g_last_transform_opacity},
   };
   configure_pf_host_context(pf_host_context);
   if (!pf_host_context_configured()) return 72;
+  aexcompat::pf_world_transform::configure({
+      {pf_host_context.hooks.resolve_world,
+       pf_host_context.hooks.resolve_dispatch_world_format,
+       pf_host_context.hooks.pixel_format,
+       pf_host_context.hooks.set_pixel_format,
+       &bounded_argb8_world,
+       reinterpret_cast<void*>(&aegp_unsupported_suite_call)},
+      {&g_transform_world_calls, &g_last_transform_x, &g_last_transform_y,
+       &g_last_transform_opacity}});
+  if (!aexcompat::pf_world_transform::configured()) return 74;
   if (!aexcompat::worker_runtime::pf_adv_time::configure_verification_hooks(
           {&acquire_suite, &release_suite, &suite_acquire_count,
            &suite_release_count, &suite_leases_balanced}))

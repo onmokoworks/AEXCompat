@@ -6,6 +6,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 REPORT = ROOT / "analysis" / "GENERAL_EFFECT_RUNTIME_COVERAGE_2026-07-16.json"
 SOURCE = ROOT / "minihost" / "src" / "l2_main.cpp"
+WORLD_TRANSFORM = ROOT / "minihost" / "src" / "worker_pf_world_transform_runtime.cpp"
 ABI = ROOT / "target" / "pf-suite-abi-probe-build" / "pf-suite-abi.json"
 
 
@@ -35,7 +36,8 @@ def test_schema_and_compiled_abi_are_grounded_in_probe_result():
 def test_source_wiring_matches_inventory():
     report = load_report()
     source = SOURCE.read_text(encoding="utf-8")
-    compact_source = " ".join(source.split())
+    world_source = WORLD_TRANSFORM.read_text(encoding="utf-8")
+    compact_source = " ".join((source + world_source).split())
     suite_abi = (ROOT / "minihost" / "src" / "worker_suite_abi.hpp").read_text(encoding="utf-8")
 
     world = report["suites"]["PF_WorldTransformSuite1"]
@@ -64,7 +66,7 @@ def test_source_wiring_matches_inventory():
             assert index == len(fill_callbacks)
             fill_callbacks.append(callback)
     callback_table = ", ".join(
-        f"reinterpret_cast<void*>(&{callback})" for callback in fill_callbacks
+            f"reinterpret_cast<void*>(&{callback})" for callback in fill_callbacks
     )
     assert f"void* callbacks[] = {{{callback_table}" in compact_source
 
@@ -72,6 +74,9 @@ def test_source_wiring_matches_inventory():
 def test_render_options_and_async_receipt_claims_match_current_source():
     report = load_report()
     source = SOURCE.read_text(encoding="utf-8")
+    ownership_source = source + (ROOT / "minihost" / "src" / "worker_render_receipts.cpp").read_text(
+        encoding="utf-8"
+    )
     suite_abi = (ROOT / "minihost" / "src" / "worker_suite_abi.hpp").read_text(encoding="utf-8")
     assert report["suites"]["AEGP_RenderOptionsSuite1"]["status"] == "implemented_and_focused_runtime_tested"
     assert "static_assert(sizeof(AegpRenderOptionsSuite1) == 17 * sizeof(void*));" in suite_abi
@@ -92,7 +97,7 @@ def test_render_options_and_async_receipt_claims_match_current_source():
     assert "return publish_async_receipt(pixel_format, receipt);" in checkout
     assert '{"AEGP Render Suite", 5, nullptr, &provide_render_suite5}' in source
     assert "&checkin_frame, &get_receipt_world" in source
-    assert "aexcompat::world_registry::unregister_borrowed_view(" in source
+    assert "world_registry::unregister_borrowed_view(" in ownership_source
 
     assert report["suites"]["AEGP_WorldSuite3"]["slots"][1]["range"] == [2, 8]
     for callback in (

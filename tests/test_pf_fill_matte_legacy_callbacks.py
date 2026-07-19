@@ -11,6 +11,7 @@ SOURCES = (
     ROOT / "minihost" / "src" / "worker_pf_suites.cpp",
     ROOT / "minihost" / "src" / "worker_l2_suite_abi.hpp",
     ROOT / "minihost" / "src" / "worker_pf_suites_internal.hpp",
+    ROOT / "minihost" / "src" / "worker_pf_world_transform_runtime.cpp",
 )
 
 
@@ -48,7 +49,7 @@ def test_legacy_fill_callbacks_match_sdk_slots_and_reuse_suite_v2_implementation
         text, re.DOTALL,
     )
     assert "std::copy(std::begin(callbacks), std::end(callbacks), g_fill_matte_suite2.begin())" in text
-    assert '{"PF Fill Matte Suite", 2, nullptr, &provide_fill_matte2}' in text
+    assert "&aexcompat::pf_world_transform::provide_fill_matte2" in text
     assert "wire_legacy_fill_matte_callbacks(utils);" in text
 
 
