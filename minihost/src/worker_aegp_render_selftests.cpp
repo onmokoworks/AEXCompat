@@ -32,12 +32,17 @@ constexpr int32_t kSyntheticCompWidth = 17;
 constexpr int32_t kSyntheticCompHeight = 9;
 extern bool g_synthetic_receipt_test_mode;
 extern int g_async_manager;
-extern std::array<uint8_t, 4> g_render_options_baseline8, g_render_options_time8,
-    g_render_options_downsample8, g_render_options_roi_outside8,
-    g_render_options_roi_inside8, g_render_options_field_excluded8,
-    g_render_options_matte8;
-extern std::array<uint16_t, 4> g_render_options_argb16;
-extern std::array<float, 4> g_render_options_argb32f;
+// Definitions of the probe fixtures declared in the header: this TU owns
+// them because its render probes are the only writers.
+std::array<uint8_t, 4> g_render_options_baseline8{};
+std::array<uint8_t, 4> g_render_options_time8{};
+std::array<uint8_t, 4> g_render_options_downsample8{};
+std::array<uint8_t, 4> g_render_options_roi_outside8{};
+std::array<uint8_t, 4> g_render_options_roi_inside8{};
+std::array<uint8_t, 4> g_render_options_field_excluded8{};
+std::array<uint8_t, 4> g_render_options_matte8{};
+std::array<uint16_t, 4> g_render_options_argb16{};
+std::array<float, 4> g_render_options_argb32f{};
 bool render_options_lifetimes_balanced();
 bool async_receipt_lifetimes_balanced();
 void* aegp_comp_item_handle();
