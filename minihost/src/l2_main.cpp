@@ -68,6 +68,7 @@
 #include "worker_smart_runtime.hpp"
 #include "worker_smart_execution.hpp"
 #include "worker_smart_setup.hpp"
+#include "worker_smart_finalize.hpp"
 #include "worker_mask_runtime.hpp"
 #include "worker_mask_selftests.hpp"
 #include "worker_pf_path_runtime.hpp"
@@ -5507,58 +5508,14 @@ SmartResult smart_render_runtime(EffectEntry entry, std::array<std::byte, kInSiz
       !gpu_transport::end_backend_context(gpu_framework) &&
       result.gpu_setdown_error == 0)
     result.gpu_setdown_error = -6;
-  void* pre_render_data = read<void*>(pre_output, 40);
-  if (auto delete_pre_render_data = read<void(__cdecl*)(void*)>(pre_output, 48)) {
-    // A supplied callback owns cleanup even if it faults; host fallback would double-free.
-    invoke_smart_pre_render_cleanup_seh(delete_pre_render_data, pre_render_data);
-  } else if (pre_render_data) {
-    const bool host_owned = host_handle_is_live(pre_render_data);
-    if (host_owned) {
-      dispose_handle(reinterpret_cast<void**>(pre_render_data));
-      record_automatic_pre_render_disposal();
-    }
-  }
-  if (g_render_ui_context_active &&
-      !close_render_ui_context(entry, input, command_output, definitions) &&
-      result.render_error == 0)
-    result.render_error = -5;
-  result.render_error = end_render_lifecycle(entry, input, command_output, params.data(),
-                                              output_world.data(), lifecycle,
-                                              result.render_error);
-  smart_state().input_world = nullptr;
-  smart_state().output_world = nullptr;
-  smart_state().map_world = nullptr;
-  smart_state().hosted_layers.clear();
-  std::vector<unsigned char> logical_input;
-  std::vector<unsigned char> logical_output;
-  if (!aexcompat::render::copy_packed_world(source.data(), rowbytes, width, height,
-                                             pixel_bytes, logical_input) ||
-      !aexcompat::render::copy_packed_world(destination, result.output_rowbytes,
-                                             result.output_width, result.output_height,
-                                             pixel_bytes, logical_output)) return result;
-  result.input_hash = sha256_bytes(logical_input.data(), logical_input.size());
-  result.output_hash = sha256_bytes(logical_output.data(), logical_output.size());
-  dump_world_snapshot("smart-output", logical_output.data(), result.output_width,
-                      result.output_height, pixel_bytes);
-  const bool output_untouched = !logical_output.empty() &&
-      std::all_of(logical_output.begin(), logical_output.end(),
-                  [](unsigned char byte) { return byte == 0xCC; });
-  const bool output_finite = !float32 || aexcompat::render::finite_float_world(logical_output);
-  result.output_pixels_valid = !logical_output.empty() && !output_untouched && output_finite;
-  if (result.render_error == 0 && !result.output_pixels_valid) result.render_error = -6;
-  if (external_output && result.render_error == 0) {
-    std::vector<unsigned char> rgba(static_cast<std::size_t>(result.output_width) *
-                                    result.output_height * pixel_bytes);
-    for (std::size_t pixel = 0; pixel < static_cast<std::size_t>(result.output_width) *
-                                      result.output_height; ++pixel)
-      argb_to_rgba_native(rgba.data() + pixel * pixel_bytes,
-                    logical_output.data() + pixel * pixel_bytes, pixel_bytes);
-    record_output_checksum_detail(rgba.data(), result.output_width,
-                                  result.output_height, pixel_bytes);
-    std::ofstream file(*external_output, std::ios::binary | std::ios::out);
-    if (!file || !file.write(reinterpret_cast<const char*>(rgba.data()), rgba.size())) result.render_error = -4;
-  }
-  result.guards_intact = guarded.sentinels_intact();
+  if (!aexcompat::worker_runtime::smart_finalize::finalize(
+          {entry, &input, &command_output, &parameter_state, &output_world,
+           &lifecycle, &source, &guarded, destination, external_output, width,
+           height, rowbytes, pixel_bytes, &pre_output},
+          {&close_render_ui_context, &end_render_lifecycle, &dump_world_snapshot,
+           &record_output_checksum_detail, &sha256_bytes,
+           +[] { return g_render_ui_context_active; }}, result))
+    return result;
   return result;
 }
 
