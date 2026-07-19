@@ -26,6 +26,7 @@ struct WorldView {
 };
 
 struct HostHooks {
+  void* effect_ref{};
   std::vector<PathInfo> (*enumerate)(){};
   bool (*snapshot)(void*, mask_runtime::CurveSnapshot&){};
   bool (*bounded_world)(void*, WorldView&){};
@@ -53,6 +54,7 @@ static_assert(sizeof(LegacyRect) == 16);
 static_assert(sizeof(PathVertex) == 48);
 
 void configure(HostHooks hooks);
+HostHooks host_hooks();
 void reset();
 Snapshot snapshot();
 bool lifetimes_balanced();

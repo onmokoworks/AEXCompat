@@ -51,6 +51,7 @@ struct HostContext {
   Snapshot (*snapshot)(){};
   bool (*snapshot_curve)(void* handle, CurveSnapshot& curve){};
   bool (*lifetimes_balanced)(){};
+  bool (*install_synthetic_scene)(const std::vector<CurveSnapshot>& curves){};
 };
 
 struct Vertex {

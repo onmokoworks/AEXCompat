@@ -132,6 +132,7 @@ double edge_distance(const std::vector<RasterPoint>& p,double x,double y,double 
 } // namespace
 
 void configure(HostHooks hooks){g_hooks=hooks;}
+HostHooks host_hooks(){return g_hooks;}
 void reset(){std::lock_guard lock(g_mutex);g_checkouts.clear();g_preps.clear();g_report={};}
 Snapshot snapshot(){std::lock_guard lock(g_mutex);auto result=g_report;result.live_preps=static_cast<uint32_t>(g_preps.size());return result;}
 bool lifetimes_balanced(){std::lock_guard lock(g_mutex);return g_report.checkout_calls==g_report.checkin_calls&&g_checkouts.empty()&&g_report.preps_created==g_report.preps_disposed&&g_preps.empty();}

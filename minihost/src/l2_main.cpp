@@ -68,6 +68,7 @@
 #include "worker_mask_runtime.hpp"
 #include "worker_mask_selftests.hpp"
 #include "worker_pf_path_runtime.hpp"
+#include "worker_pf_path_selftests.hpp"
 #include "worker_minidump_runtime.hpp"
 #include "worker_pf_helper_runtime.hpp"
 #include "worker_mask_runtime_internal.hpp"
@@ -683,6 +684,26 @@ bool snapshot_mask_curve(void* handle, aexcompat::mask_runtime::CurveSnapshot& c
   return true;
 }
 
+bool install_synthetic_mask_scene(
+    const std::vector<aexcompat::mask_runtime::CurveSnapshot>& curves) {
+  if (!g_stream_refs.empty() || !g_stream_values.empty() || !g_add_keyframe_transactions.empty())
+    return false;
+  g_mask_scene.clear();
+  g_mask_scene.reserve(kMaxHostMasks);
+  if (curves.size() > kMaxHostMasks) return false;
+  for (const auto& curve : curves) {
+    HostMask mask;
+    mask.id = curve.id;
+    mask.open = curve.open;
+    mask.vertices.reserve(curve.vertices.size());
+    for (const auto& vertex : curve.vertices)
+      mask.vertices.push_back({vertex.x, vertex.y, vertex.tangent_in_x,
+          vertex.tangent_in_y, vertex.tangent_out_x, vertex.tangent_out_y});
+    g_mask_scene.push_back(std::move(mask));
+  }
+  return true;
+}
+
 std::vector<HostMask*> ordered_active_masks();
 std::vector<aexcompat::pf_path_runtime::PathInfo> enumerate_pf_paths() {
   std::vector<aexcompat::pf_path_runtime::PathInfo> result;
@@ -737,9 +758,9 @@ bool mask_lifetimes_balanced() {
 bool configure_mask_scene(const std::string& scene_id) {
   aexcompat::mask_runtime::configure_host_context(
       {&g_layer, &raise_mask_access_violation, &mask_runtime_snapshot,
-       &snapshot_mask_curve, &mask_lifetimes_balanced});
+       &snapshot_mask_curve, &mask_lifetimes_balanced, &install_synthetic_mask_scene});
   aexcompat::pf_path_runtime::configure(
-      {&enumerate_pf_paths, &snapshot_pf_path, &bounded_pf_path_world});
+      {&g_effect, &enumerate_pf_paths, &snapshot_pf_path, &bounded_pf_path_world});
   if (!g_stream_refs.empty() || !g_stream_values.empty() ||
       !g_add_keyframe_transactions.empty()) return false;
   aexcompat::mask_runtime::SceneSeed seed;
@@ -1068,129 +1089,6 @@ static_assert(offsetof(PfInterfaceSuite, get_effect_camera) == 24);
 static_assert(offsetof(PfInterfaceSuite, get_effect_camera_matrix) == 32);
 int32_t __cdecl unsupported_path_mask() { return 4; }
 struct LegacyRect { int32_t left, top, right, bottom; };
-bool verify_pf_path_data_hardening() {
-  aexcompat::pf_path_runtime::configure(
-      {&enumerate_pf_paths, &snapshot_pf_path, &bounded_pf_path_world});
-  g_mask_scene.clear();
-  g_mask_scene.reserve(kMaxHostMasks);
-  aexcompat::pf_path_runtime::reset();
-
-  const auto add_mask = [](int32_t id, bool open, std::vector<MaskVertex> vertices) {
-    HostMask mask;
-    mask.id = id;
-    mask.open = open;
-    mask.vertices = std::move(vertices);
-    g_mask_scene.push_back(std::move(mask));
-  };
-  const MaskVertex vertex{1, 2, 0, 0, 0, 0};
-  add_mask(1, true, {});
-  add_mask(2, false, {});
-  add_mask(3, true, {vertex});
-  add_mask(4, false, {vertex, vertex});
-
-  for (auto& mask : g_mask_scene) {
-    void* path = nullptr;
-    int32_t segments = -1;
-    void* prep = nullptr;
-    if (aexcompat::pf_path_runtime::checkout_path(&g_effect, mask.id, 0, 1, 1, &path) != 0 ||
-        aexcompat::pf_path_runtime::path_num_segments(&g_effect, path, &segments) != 0 || segments < 0 ||
-        (mask.id != 4 && segments != 0) || (mask.id == 4 && segments != 1) ||
-        (segments == 0 && aexcompat::pf_path_runtime::path_prepare_seg_length(
-            &g_effect, path, 0, 1, &prep) == 0) || prep != nullptr ||
-        aexcompat::pf_path_runtime::checkin_path(&g_effect, mask.id, 0, path) != 0)
-      return false;
-  }
-
-  g_mask_scene.clear();
-  HostMask rectangle;
-  rectangle.id = 5;
-  rectangle.open = false;
-  rectangle.vertices = {{0, 0, 0, 0, 0, 0}, {4, 0, 0, 0, 0, 0},
-                        {4, 4, 0, 0, 0, 0}, {0, 0, 0, 0, 0, 0}};
-  g_mask_scene.push_back(std::move(rectangle));
-  HostMask foreign;
-  foreign.id = 6;
-  foreign.open = true;
-  foreign.vertices = {{0, 0, 0, 0, 1, 0}, {1, 0, -1, 0, 0, 0}};
-  g_mask_scene.push_back(std::move(foreign));
-  HostMask* mask = &g_mask_scene.front();
-  HostMask* foreign_mask = &g_mask_scene.back();
-  void* path = nullptr;
-  void* foreign_path = nullptr;
-  void* prep = nullptr;
-  if (aexcompat::pf_path_runtime::checkout_path(&g_effect, mask->id, 0, 1, 1, &path) != 0 ||
-      aexcompat::pf_path_runtime::checkout_path(&g_effect, foreign_mask->id, 0, 1, 1, &foreign_path) != 0 ||
-      aexcompat::pf_path_runtime::path_prepare_seg_length(&g_effect, path, 0, 4, &prep) != 0)
-    return false;
-  void* live_prep = prep;
-  void* stale_prep = prep;
-  double length = 0;
-  if (aexcompat::pf_path_runtime::path_cleanup_seg_length(&g_effect, path, 1, &prep) == 0 || prep != live_prep ||
-      aexcompat::pf_path_runtime::path_cleanup_seg_length(&g_effect, foreign_path, 0, &prep) == 0 || prep != live_prep ||
-      aexcompat::pf_path_runtime::checkin_path(&g_effect, foreign_mask->id, 0, foreign_path) != 0 ||
-      aexcompat::pf_path_runtime::checkin_path(&g_effect, mask->id, 0, path) != 0 ||
-      aexcompat::pf_path_runtime::path_get_seg_length(&g_effect, path, 0, &prep, &length) == 0 ||
-      aexcompat::pf_path_runtime::path_cleanup_seg_length(&g_effect, path, 0, &prep) != 0 || prep != nullptr ||
-      aexcompat::pf_path_runtime::path_cleanup_seg_length(&g_effect, path, 0, &stale_prep) == 0 ||
-      stale_prep != live_prep)
-    return false;
-
-  const auto verify_curve = [](int32_t id, bool open, std::vector<MaskVertex> vertices,
-                               double expected_length, double length_tolerance,
-                               double expected_mid_x, double expected_mid_y,
-                               double position_tolerance, bool expect_zero_derivative) {
-    g_mask_scene.clear();
-    HostMask curve;
-    curve.id = id;
-    curve.open = open;
-    curve.vertices = std::move(vertices);
-    if (!open) curve.vertices.push_back(curve.vertices.front());
-    g_mask_scene.push_back(std::move(curve));
-    void* curve_path = nullptr;
-    void* curve_prep = nullptr;
-    if (aexcompat::pf_path_runtime::checkout_path(&g_effect, id, 0, 1, 1, &curve_path) != 0 ||
-        aexcompat::pf_path_runtime::path_prepare_seg_length(&g_effect, curve_path, 0, 1, &curve_prep) != 0)
-      return false;
-    double curve_length = 0.0, x = 0.0, y = 0.0, dx = 0.0, dy = 0.0;
-    const bool evaluated =
-        aexcompat::pf_path_runtime::path_get_seg_length(&g_effect, curve_path, 0, &curve_prep, &curve_length) == 0 &&
-        std::abs(curve_length - expected_length) <= length_tolerance &&
-        aexcompat::pf_path_runtime::path_eval_seg_length_deriv1(&g_effect, curve_path, &curve_prep, 0,
-            curve_length * 0.5, &x, &y, &dx, &dy) == 0 &&
-        std::abs(x - expected_mid_x) <= position_tolerance &&
-        std::abs(y - expected_mid_y) <= position_tolerance &&
-        (expect_zero_derivative ? std::hypot(dx, dy) == 0.0
-                                : std::abs(std::hypot(dx, dy) - 1.0) <= 1e-10) &&
-        aexcompat::pf_path_runtime::path_eval_seg_length(&g_effect, curve_path, &curve_prep, 0,
-            -1.0, &x, &y) != 0 &&
-        aexcompat::pf_path_runtime::path_eval_seg_length(&g_effect, curve_path, &curve_prep, 0,
-            curve_length + 1.0, &x, &y) != 0;
-    const bool cleaned =
-        aexcompat::pf_path_runtime::path_cleanup_seg_length(&g_effect, curve_path, 0, &curve_prep) == 0 &&
-        curve_prep == nullptr && aexcompat::pf_path_runtime::checkin_path(&g_effect, id, 0, curve_path) == 0;
-    return evaluated && cleaned;
-  };
-
-  constexpr double kappa = 0.5522847498307936;
-  if (!verify_curve(10, true,
-          {{0, 0, 0, 0, 0, 0}, {4, 0, 0, 0, 0, 0}},
-          4.0, 1e-10, 2.0, 0.0, 1e-8, false) ||
-      !verify_curve(11, true,
-          {{1, 0, 0, 0, 0, kappa}, {0, 1, kappa, 0, 0, 0}},
-          1.5707963267948966, 3e-4, 0.7071067811865476,
-          0.7071067811865476, 3e-5, false) ||
-      !verify_curve(12, true,
-          {{0, 0, 0, 0, 3, 6}, {6, 0, -3, -6, 0, 0}},
-          9.537946844777451, 2e-3, 3.0, 0.0, 2e-4, false) ||
-      !verify_curve(13, true,
-          {{2, 3, 0, 0, 0, 0}, {2, 3, 0, 0, 0, 0}},
-          0.0, 0.0, 2.0, 3.0, 0.0, true) ||
-      !verify_curve(14, false,
-          {{0, 0, 0, 0, 0, 0}, {1, 0, 0, 0, 0, 0}},
-          1.0, 1e-10, 0.5, 0.0, 1e-8, false))
-    return false;
-  return aexcompat::pf_path_runtime::lifetimes_balanced();
-}
 
 int32_t __cdecl pf_mask_world_with_path(void* effect_ref, void** path, double feather_x,
                                         double feather_y, int32_t invert, double opacity,
@@ -9350,7 +9248,10 @@ int worker_main_impl(int argc, wchar_t **argv) {
     return passed ? 0 : 3;
   }
   if (argc == 2 && std::wstring(argv[1]) == L"--self-test-pf-path-data-hardening") {
-    const bool passed = verify_pf_path_data_hardening();
+    const bool passed = verify_pf_path_data_hardening(
+        {&g_effect, &enumerate_pf_paths, &snapshot_pf_path, &bounded_pf_path_world},
+        {&g_layer, &raise_mask_access_violation, &mask_runtime_snapshot,
+         &snapshot_mask_curve, &mask_lifetimes_balanced, &install_synthetic_mask_scene});
     const auto path_report = aexcompat::pf_path_runtime::snapshot();
     std::cout << "{\"pf_path_data_hardening\":\"" << (passed ? "passed" : "failed")
               << "\",\"created\":" << path_report.preps_created

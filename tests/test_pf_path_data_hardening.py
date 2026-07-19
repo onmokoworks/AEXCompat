@@ -5,6 +5,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "minihost" / "src" / "worker_pf_path_runtime.cpp"
+SELFTEST_SOURCE = ROOT / "minihost" / "src" / "worker_pf_path_selftests.cpp"
+L2_SOURCE = ROOT / "minihost" / "src" / "l2_main.cpp"
+CMAKE = ROOT / "minihost" / "CMakeLists.txt"
 
 
 def _worker() -> Path:
@@ -26,6 +29,15 @@ def test_path_hardening_is_fail_closed_in_source():
     assert "catch(const std::bad_alloc&)" in source
     assert "kBad" in cleanup
     assert "lock(g_mutex)" in cleanup
+
+
+def test_path_hardening_selftest_is_a_true_translation_unit():
+    implementation = SELFTEST_SOURCE.read_text(encoding="utf-8")
+    worker = L2_SOURCE.read_text(encoding="utf-8")
+    assert "bool verify_pf_path_data_hardening(" in implementation
+    assert "bool verify_pf_path_data_hardening(" not in worker
+    assert "src/worker_pf_path_selftests.cpp" in CMAKE.read_text(encoding="utf-8")
+    assert "install_synthetic_scene" in implementation
 
 
 def test_path_hardening_runtime_self_test():

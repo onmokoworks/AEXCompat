@@ -12,6 +12,7 @@ std::atomic<void (*)()> g_raise_access_violation{nullptr};
 std::atomic<Snapshot (*)()> g_snapshot{nullptr};
 std::atomic<bool (*)(void*, CurveSnapshot&)> g_snapshot_curve{nullptr};
 std::atomic<bool (*)()> g_lifetimes_balanced{nullptr};
+std::atomic<bool (*)(const std::vector<CurveSnapshot>&)> g_install_synthetic_scene{nullptr};
 
 MaskSeed rectangle(double left, double top, double right, double bottom) {
   MaskSeed mask;
@@ -35,6 +36,7 @@ void configure_host_context(HostContext context) {
   g_snapshot.store(context.snapshot, std::memory_order_release);
   g_snapshot_curve.store(context.snapshot_curve, std::memory_order_release);
   g_lifetimes_balanced.store(context.lifetimes_balanced, std::memory_order_release);
+  g_install_synthetic_scene.store(context.install_synthetic_scene, std::memory_order_release);
 }
 
 HostContext host_context() {
@@ -42,7 +44,8 @@ HostContext host_context() {
           g_raise_access_violation.load(std::memory_order_acquire),
           g_snapshot.load(std::memory_order_acquire),
           g_snapshot_curve.load(std::memory_order_acquire),
-          g_lifetimes_balanced.load(std::memory_order_acquire)};
+          g_lifetimes_balanced.load(std::memory_order_acquire),
+          g_install_synthetic_scene.load(std::memory_order_acquire)};
 }
 
 bool snapshot_curve(void* handle, CurveSnapshot& curve) {
