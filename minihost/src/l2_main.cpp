@@ -14936,31 +14936,20 @@ int worker_main_impl(int argc, wchar_t **argv) {
       classic_diagnostics.wide_time_allowed, classic_diagnostics.rejected_temporal_checkouts,
       classic_diagnostics.shutter_dependency_advertised};
   aexcompat::worker_render_report::begin_classic(report_snapshot, classic_report.head);
+  const auto& audio_report = audio_telemetry();
+  classic_report.audio = {
+      audio_report.usage_advertised, audio_report.checkout_allowed, audio_report.source_available,
+      audio_report.rejected_unadvertised_checkouts, audio_report.rejected_format_requests,
+      audio_report.handle_exhaustions, audio_report.peak_live_handles, audio_report.checkout_calls,
+      audio_report.checkin_calls, audio_report.get_data_calls, audio_report.invalid_operations,
+      audio_report.last_checkout_start_time, audio_report.last_checkout_duration,
+      audio_report.last_checkout_time_scale, audio_report.last_window_start_sample,
+      audio_report.last_window_sample_count, audio_report.last_window_silence_samples,
+      audio_report.last_output_rate, audio_report.last_output_bytes_per_sample,
+      audio_report.last_output_channels, audio_report.last_output_format,
+      audio_report.last_returned_sample_frames, audio_handle_lifetimes_balanced()};
+  aexcompat::worker_render_report::append_classic_audio(report_snapshot, classic_report.audio);
   report_snapshot.stream()
-            << ",\"audio_usage_advertised\":" << (audio_telemetry().usage_advertised ? "true" : "false")
-            << ",\"audio_checkout_allowed\":" << (audio_telemetry().checkout_allowed ? "true" : "false")
-            << ",\"audio_source_available\":" << (audio_telemetry().source_available ? "true" : "false")
-            << ",\"rejected_unadvertised_audio_checkouts\":" << audio_telemetry().rejected_unadvertised_checkouts
-            << ",\"rejected_audio_format_requests\":" << audio_telemetry().rejected_format_requests
-            << ",\"audio_handle_exhaustions\":" << audio_telemetry().handle_exhaustions
-            << ",\"peak_live_audio_handles\":" << audio_telemetry().peak_live_handles
-            << ",\"audio_checkout_calls\":" << audio_telemetry().checkout_calls
-            << ",\"audio_checkin_calls\":" << audio_telemetry().checkin_calls
-            << ",\"audio_get_data_calls\":" << audio_telemetry().get_data_calls
-            << ",\"invalid_audio_operations\":" << audio_telemetry().invalid_operations
-            << ",\"last_audio_checkout_start_time\":" << audio_telemetry().last_checkout_start_time
-            << ",\"last_audio_checkout_duration\":" << audio_telemetry().last_checkout_duration
-            << ",\"last_audio_checkout_time_scale\":" << audio_telemetry().last_checkout_time_scale
-            << ",\"last_audio_window_start_sample\":" << audio_telemetry().last_window_start_sample
-            << ",\"last_audio_window_sample_count\":" << audio_telemetry().last_window_sample_count
-            << ",\"last_audio_window_silence_samples\":" << audio_telemetry().last_window_silence_samples
-            << ",\"last_audio_output_rate_fixed\":" << audio_telemetry().last_output_rate
-            << ",\"last_audio_output_bytes_per_sample\":" << audio_telemetry().last_output_bytes_per_sample
-            << ",\"last_audio_output_channels\":" << audio_telemetry().last_output_channels
-            << ",\"last_audio_output_format\":" << audio_telemetry().last_output_format
-            << ",\"last_audio_returned_sample_frames\":" << audio_telemetry().last_returned_sample_frames
-            << ",\"audio_lifetimes_balanced\":"
-            << (audio_handle_lifetimes_balanced() ? "true" : "false")
             << ",\"render_selector_dispatched\":"
             << (aexcompat::worker_runtime::classic::last_selector_dispatched()
                     ? "true" : "false")
@@ -14973,23 +14962,17 @@ int worker_main_impl(int argc, wchar_t **argv) {
       resetup_handle_replaced, flattened_handle_host_disposed, copied_flattened_sequence,
       get_flattened_sequence_data_error, original_sequence_preserved};
   aexcompat::worker_render_report::append_classic_sequence(report_snapshot, classic_report.sequence);
-  report_snapshot.stream()
-            << ",\"global_setdown_error\":" << setdown_error
-            << ",\"return_message\":\"" << escape(std::string(
-                reinterpret_cast<const char*>(output.data() + kOutMessage),
-                strnlen_s(reinterpret_cast<const char*>(output.data() + kOutMessage), 256)))
-            << "\""
-            << ",\"case_id\":\"" << case_id << "\",\"pixel_format\":\"" << smart_state().pixel_format << "\",\"width\":"
-            << render_width << ",\"height\":" << render_height << ",\"rowbytes\":" << render_rowbytes
-            << ",\"bytes_written_per_row\":" << render_width *
-                (smart_state().pixel_format == "argb32f" ? 16 :
-                 (smart_state().pixel_format == "argb16" ? 8 : 4))
-            << ",\"undefined_tail_bytes_per_row\":" << std::max(0, render_rowbytes - render_width *
-                (smart_state().pixel_format == "argb32f" ? 16 :
-                 (smart_state().pixel_format == "argb16" ? 8 : 4)))
-            << ",\"input_sha256\":\"" << input_hash << "\",\"output_sha256\":\""
-            << output_hash << "\",\"guard_bytes_intact\":" << (guards_intact ? "true" : "false")
-            << world_debug_report_json();
+  const int32_t bytes_per_pixel = smart_state().pixel_format == "argb32f" ? 16 :
+      (smart_state().pixel_format == "argb16" ? 8 : 4);
+  classic_report.frame = {
+      setdown_error,
+      escape(std::string(reinterpret_cast<const char*>(output.data() + kOutMessage),
+                         strnlen_s(reinterpret_cast<const char*>(output.data() + kOutMessage), 256))),
+      case_id, smart_state().pixel_format, render_width, render_height, render_rowbytes,
+      render_width * bytes_per_pixel,
+      std::max(0, render_rowbytes - render_width * bytes_per_pixel),
+      input_hash, output_hash, guards_intact, world_debug_report_json()};
+  aexcompat::worker_render_report::append_classic_frame(report_snapshot, classic_report.frame);
   aexcompat::worker_render_report::append_custom_ui(report_snapshot, {
       g_render_click_enabled, g_render_click_error, g_render_click_out_flags,
       g_render_click_changed_value, g_render_draw_enabled, g_render_draw_error,

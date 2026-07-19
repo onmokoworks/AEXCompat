@@ -79,6 +79,47 @@ void append_classic_sequence(ReportSnapshot& report, const ClassicReport::Sequen
       << ",\"original_sequence_preserved\":" << (value.original_preserved ? "true" : "false");
 }
 
+void append_classic_audio(ReportSnapshot& report, const ClassicReport::Audio& value) {
+  report.stream()
+      << ",\"audio_usage_advertised\":" << (value.usage_advertised ? "true" : "false")
+      << ",\"audio_checkout_allowed\":" << (value.checkout_allowed ? "true" : "false")
+      << ",\"audio_source_available\":" << (value.source_available ? "true" : "false")
+      << ",\"rejected_unadvertised_audio_checkouts\":" << value.rejected_unadvertised_checkouts
+      << ",\"rejected_audio_format_requests\":" << value.rejected_format_requests
+      << ",\"audio_handle_exhaustions\":" << value.handle_exhaustions
+      << ",\"peak_live_audio_handles\":" << value.peak_live_handles
+      << ",\"audio_checkout_calls\":" << value.checkout_calls
+      << ",\"audio_checkin_calls\":" << value.checkin_calls
+      << ",\"audio_get_data_calls\":" << value.get_data_calls
+      << ",\"invalid_audio_operations\":" << value.invalid_operations
+      << ",\"last_audio_checkout_start_time\":" << value.last_checkout_start_time
+      << ",\"last_audio_checkout_duration\":" << value.last_checkout_duration
+      << ",\"last_audio_checkout_time_scale\":" << value.last_checkout_time_scale
+      << ",\"last_audio_window_start_sample\":" << value.last_window_start_sample
+      << ",\"last_audio_window_sample_count\":" << value.last_window_sample_count
+      << ",\"last_audio_window_silence_samples\":" << value.last_window_silence_samples
+      << ",\"last_audio_output_rate_fixed\":" << value.last_output_rate
+      << ",\"last_audio_output_bytes_per_sample\":" << value.last_output_bytes_per_sample
+      << ",\"last_audio_output_channels\":" << value.last_output_channels
+      << ",\"last_audio_output_format\":" << value.last_output_format
+      << ",\"last_audio_returned_sample_frames\":" << value.last_returned_sample_frames
+      << ",\"audio_lifetimes_balanced\":" << (value.lifetimes_balanced ? "true" : "false");
+}
+
+void append_classic_frame(ReportSnapshot& report, const ClassicReport::Frame& value) {
+  report.stream()
+      << ",\"global_setdown_error\":" << value.global_setdown_error
+      << ",\"return_message\":\"" << value.escaped_return_message << '"'
+      << ",\"case_id\":\"" << value.case_id << "\",\"pixel_format\":\"" << value.pixel_format
+      << "\",\"width\":" << value.width << ",\"height\":" << value.height
+      << ",\"rowbytes\":" << value.rowbytes
+      << ",\"bytes_written_per_row\":" << value.bytes_written_per_row
+      << ",\"undefined_tail_bytes_per_row\":" << value.undefined_tail_bytes_per_row
+      << ",\"input_sha256\":\"" << value.input_sha256 << "\",\"output_sha256\":\""
+      << value.output_sha256 << "\",\"guard_bytes_intact\":"
+      << (value.guard_bytes_intact ? "true" : "false") << value.world_debug_json;
+}
+
 void append_classic_threads(ReportSnapshot& report, const ClassicReport::Threads& value) {
   report.stream()
       << ",\"concurrent_render\":" << (value.concurrent ? "true" : "false")
