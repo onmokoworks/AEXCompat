@@ -27,6 +27,9 @@ AEGP_SCENE_RUNTIME_HEADER = ROOT / "minihost" / "src" / "worker_aegp_scene_runti
 AEGP_SCENE_RUNTIME_SOURCE = ROOT / "minihost" / "src" / "worker_aegp_scene_runtime.cpp"
 AEGP_INIT_RUNTIME_HEADER = ROOT / "minihost" / "src" / "worker_aegp_init_runtime.hpp"
 AEGP_INIT_RUNTIME_SOURCE = ROOT / "minihost" / "src" / "worker_aegp_init_runtime.cpp"
+MASK_RUNTIME_HEADER = ROOT / "minihost" / "src" / "worker_mask_runtime.hpp"
+MASK_RUNTIME_SOURCE = ROOT / "minihost" / "src" / "worker_mask_runtime.cpp"
+MASK_RUNTIME_CALLBACKS = ROOT / "minihost" / "src" / "worker_mask_runtime_callbacks.inc"
 MINIHOST_CMAKE = ROOT / "minihost" / "CMakeLists.txt"
 
 
@@ -36,6 +39,8 @@ def l2_family_source():
         CLI_DISPATCH_SOURCE, PF_SUITES_ABI, PF_SUITES_INTERNAL, PF_SUITES_SOURCE,
         AEGP_SCENE_SOURCE, AEGP_SCENE_HEADER, AEGP_SCENE_RUNTIME_HEADER,
         AEGP_SCENE_RUNTIME_SOURCE, AEGP_INIT_RUNTIME_HEADER, AEGP_INIT_RUNTIME_SOURCE,
+        MASK_RUNTIME_HEADER, MASK_RUNTIME_SOURCE, MASK_RUNTIME_CALLBACKS,
+        HANDLE_RUNTIME_HEADER, HANDLE_RUNTIME_SOURCE,
         REPORT_HEADER, REPORT_SOURCE,
         RUNTIME_ADMISSION_SOURCE, CLASSIC_RUNTIME_HEADER, CLASSIC_RUNTIME_SOURCE,
         SELFTEST_DISPATCH_SOURCE
