@@ -370,3 +370,43 @@ aerender で全フレームレンダーして sidecar を回収する。環境: 
   ないと思われる (メッセージフィールド追加で足りる)。
 - 非順次アクセス (シーク・逆再生) はセッション仕様が既に「順序仮定なし」で
   あり、AE 実機の分配挙動 (順不同) と整合。
+
+### 段階1-3 (one-shot の長さ1セッション wrapper 化) の実現可能性調査 (観察、2026-07-19 追記)
+
+PR-C (#116) merge 後のコードに対して、段階1-3「既存 one-shot 経路の
+『長さ 1 セッション』wrapper 化 (挙動不変)」が成立するかを調査した。
+
+- `SessionOpenRequest` (render_session.rs:307-322) が受けられる構成は
+  plugin + parameters (payload) + 寸法 + 深度 + timing + dependencies のみ。
+  one-shot の argv trailer 群のうち secondary/timed layer、audio sidecar、
+  mask/spatial/render-environment context、custom UI action (click/draw)、
+  alpha-as-coverage、aux manifest、parameter animation、world dump、
+  output-checksum-detail、GPU backend/runtime policy はいずれも渡せない
+  (parameter animation は worker のセッションモード側は対応済みで、broker
+  側だけが欠けている → issue #132)。SmartFX も worker_kind が Render 固定で
+  非対応 (プロトコル v1 のスコープどおり)。
+- 戻り値スキーマが非互換。one-shot 公開エントリは worker report を平坦化
+  した `interactive_image_render` Value を返し、harness GUI はそのうち
+  `render_path` / `worker_classification` / `worker_diagnostics.stage_events`
+  / `gpu_*` を診断表示に消費する (harness/src/main.rs:1729-1758,
+  4506-4542)。`RenderSession::close` の Value は別スキーマ
+  (`render_session_close` + `final_report`) でこれらを提供しない。
+- 検証コードは共有されていない。#116 は image_render.rs に可視性変更のみを
+  加え、per-frame 検証はセッション側 (`validate_ok_frame` 等) の独立実装。
+  検証対象自体も異なる (one-shot = 出力ファイル、セッション = 共有メモリ
+  header/slot)。
+
+### 段階1-3 の方針再提案 (提案)
+
+観察から、「挙動不変の wrapper 化」は現状の RenderSession v1 に対して
+成立しない (対応できない構成が広く、戻り値契約も非互換)。加えて #107 で
+GUI はセッションを直接使う計画のため、one-shot を wrapper 化して二重保守を
+解消するという当初の動機自体が弱くなっている (worker 側のフレームループは
+`render_once` を再利用しており、worker 内の二重保守は argv パースとループ
+外殻のみ)。
+
+提案: 段階1-3 は現時点では実施しない。再検討の条件は (a) セッションが
+one-shot の静的構成 (最低限 parameter animation #132、layer、各 context)
+を受けられるようになり、かつ (b) one-shot 経路の二重保守が実際の変更で
+問題になった時点。それまで one-shot はセッションが扱えない構成 (custom UI
+probe、audio、SmartFX GPU 等) の専用経路として維持する。
