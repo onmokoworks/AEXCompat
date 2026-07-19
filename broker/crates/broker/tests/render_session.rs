@@ -302,8 +302,8 @@ mod windows_e2e {
             .to_string(),
         )
         .unwrap();
-        let dump_dir = repository.0.join("world-dumps");
-        std::fs::create_dir_all(&dump_dir).unwrap();
+        // Under the broker-managed dump boundary; the resolver creates it.
+        let dump_dir = repository.0.join("target/world-dumps");
         // The fixture worker validates each pair like the real worker's
         // auxiliary gates (existing file / existing directory / literal "1"),
         // so a mangled pair would kill the session before the first frame.
@@ -337,7 +337,7 @@ mod windows_e2e {
     fn open_rejects_a_non_empty_world_dump_directory() {
         let _behavior = BehaviorGuard::set(None);
         let (repository, plugin, sha) = temp_repository();
-        let reused = repository.0.join("reused-dumps");
+        let reused = repository.0.join("target/reused-dumps");
         std::fs::create_dir_all(&reused).unwrap();
         std::fs::write(reused.join("000-stale.bin"), b"stale").unwrap();
         let error = RenderSession::open(SessionOpenRequest {
@@ -364,10 +364,10 @@ mod windows_e2e {
     }
 
     #[test]
-    fn open_rejects_a_missing_world_dump_directory() {
+    fn open_rejects_a_world_dump_directory_outside_the_target_tree() {
         let _behavior = BehaviorGuard::set(None);
         let (repository, plugin, sha) = temp_repository();
-        let missing = repository.0.join("missing-dumps");
+        let missing = repository.0.join("outside-dumps");
         let error = RenderSession::open(SessionOpenRequest {
             repository: &repository.0,
             plugin_path: &plugin,
@@ -387,8 +387,8 @@ mod windows_e2e {
             frame_deadline: Duration::from_secs(30),
         })
         .map(|_| ())
-        .expect_err("a missing dump directory fails fast at open");
-        assert!(error.to_string().contains("dump directory"), "{error}");
+        .expect_err("a dump directory outside the managed tree fails fast at open");
+        assert!(error.to_string().contains("target tree"), "{error}");
     }
 
     #[test]
@@ -698,8 +698,7 @@ mod windows_e2e {
         // Auxiliary observation options flow from the batch request into the
         // session argv tail; the fixture worker validates each pair, so a
         // dropped or mangled option would kill the batch.
-        let dump_dir = repository.0.join("batch-dumps");
-        std::fs::create_dir_all(&dump_dir).unwrap();
+        let dump_dir = repository.0.join("target/batch-dumps");
         let request_path = repository.0.join("request.json");
         std::fs::write(
             &request_path,

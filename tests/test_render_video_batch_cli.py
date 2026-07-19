@@ -7,6 +7,8 @@ self-computed expectations only, so a fresh build on any machine satisfies
 it.
 """
 import json
+import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -70,8 +72,11 @@ def test_video_batch_renders_a_sequence_through_one_resident_worker(tmp_path: Pa
         frames.append(str(clone))
 
     output_directory = tmp_path / "out"
-    dump_directory = tmp_path / "world-dumps"
-    dump_directory.mkdir()
+    # World dumps must stay under the broker-managed <repository>/target
+    # boundary; the resolver creates the directory and requires it fresh.
+    dump_directory = ROOT / "target" / f"world-dumps-batch-test-{os.getpid()}"
+    if dump_directory.exists():
+        shutil.rmtree(dump_directory)
     request = tmp_path / "request.json"
     request.write_text(json.dumps({
         "schema_version": 1,
@@ -114,4 +119,7 @@ def test_video_batch_renders_a_sequence_through_one_resident_worker(tmp_path: Pa
     assert len(checksums) == 1
     # The auxiliary observation options reached the real worker: world
     # snapshots landed in the requested dump directory.
-    assert any(dump_directory.iterdir()), "world dump directory received snapshots"
+    try:
+        assert any(dump_directory.iterdir()), "world dump directory received snapshots"
+    finally:
+        shutil.rmtree(dump_directory, ignore_errors=True)

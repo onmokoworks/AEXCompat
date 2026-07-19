@@ -569,21 +569,16 @@ impl RenderSession {
                 manifest.to_string_lossy().into_owned(),
             ]);
         }
-        if let Some(dump) = request.world_dump_dir {
-            if !dump.is_absolute() || !dump.is_dir() {
-                return Err(invalid(
-                    "world dump directory must be an absolute path to a directory",
-                ));
-            }
-            // Same rule as the one-shot dump resolver: snapshots are never
-            // cleared by the worker, so a reused directory would leave stale
-            // dumps from an earlier run beside the current session's output.
-            if fs::read_dir(dump)?.next().is_some() {
-                return Err(invalid("world dump directory must be empty"));
-            }
+        if let Some(requested) = request.world_dump_dir {
+            // The one-shot managed dump resolver enforces the broker's dump
+            // boundary (canonically under <repository>/target) and the
+            // fresh-directory rule, since the worker never clears snapshots
+            // it does not overwrite.
+            let dump =
+                crate::image_render::resolve_managed_dump_dir(request.repository, requested, true)?;
             args_after_plugin.extend([
                 "--dump-worlds-v1".to_owned(),
-                dump.to_string_lossy().into_owned(),
+                dump.path.to_string_lossy().into_owned(),
             ]);
         }
         if request.output_checksum_detail {
