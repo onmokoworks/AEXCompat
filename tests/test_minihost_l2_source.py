@@ -848,6 +848,25 @@ class MinihostL2SourceTests(unittest.TestCase):
         self.assertNotIn("--minidump-v1", text)
         self.assertNotIn("CreateFileW(dump_path", text)
 
+    def test_crash_minidump_claims_transport_before_global_handle_access(self):
+        text = SOURCE.read_text(encoding="utf-8")
+        request = text[
+            text.index("void request_crash_minidump("):
+            text.index("HANDLE inherited_minidump_handle(")
+        ]
+        ready = request.index("g_minidump_ready.load(std::memory_order_acquire)")
+        claim = request.index(
+            "g_minidump_attempted.exchange(true, std::memory_order_acq_rel)"
+        )
+        handle_access = request.index(
+            "if (!g_minidump_handle || !g_minidump_request_event)"
+        )
+        self.assertLess(ready, claim)
+        self.assertLess(claim, handle_access)
+        self.assertIn(
+            "g_minidump_ready.store(false, std::memory_order_release)", text
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

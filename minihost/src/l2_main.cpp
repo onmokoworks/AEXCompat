@@ -660,6 +660,7 @@ HANDLE g_minidump_handle{};
 HANDLE g_minidump_ack_handle{};
 HANDLE g_minidump_request_event{};
 HANDLE g_minidump_complete_event{};
+std::atomic<bool> g_minidump_ready{false};
 std::atomic<bool> g_minidump_attempted{false};
 std::atomic<uint64_t> g_minidump_written_bytes{0};
 std::atomic<bool> g_minidump_broker_rejected{false};
@@ -711,6 +712,10 @@ struct MinidumpBrokerAck {
 };
 
 MinidumpBrokerAck finish_minidump_transport() {
+  // Prevent a new faulting thread from claiming the transport before the
+  // writer mutates the global handles. A thread that observed the previous
+  // ready state still has to win g_minidump_attempted before reading them.
+  g_minidump_ready.store(false, std::memory_order_release);
   if (g_minidump_handle) {
     CloseHandle(g_minidump_handle);
     g_minidump_handle = nullptr;
@@ -809,12 +814,18 @@ bool start_minidump_writer(HANDLE handle, HANDLE ack_handle) {
     return false;
   }
   CloseHandle(thread);
+  g_minidump_ready.store(true, std::memory_order_release);
   return true;
 }
 
 void request_crash_minidump(EXCEPTION_POINTERS* information) {
-  if (!g_minidump_handle || !information || !g_minidump_request_event) return;
-  if (g_minidump_attempted.exchange(true)) return;
+  if (!information ||
+      !g_minidump_ready.load(std::memory_order_acquire)) return;
+  // Claim the one-shot transport before reading any mutable global handle.
+  // The writer may close/null those handles only after this claimant signals
+  // it; every concurrent fault returns here without touching them.
+  if (g_minidump_attempted.exchange(true, std::memory_order_acq_rel)) return;
+  if (!g_minidump_handle || !g_minidump_request_event) return;
   if (information->ExceptionRecord)
     g_minidump_exception_record = *information->ExceptionRecord;
   else
