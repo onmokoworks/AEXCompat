@@ -101,6 +101,7 @@ set(AEXCOMPAT_WORKER_RUNTIME_CORE_SOURCES
     src/worker_host_suite_catalog.cpp
     src/worker_pf_suites.cpp
     src/worker_pf_sampling_runtime.cpp
+    src/worker_pf_effect_sequence_selftests.cpp
     src/worker_pf_world_transform_runtime.cpp
     src/worker_pf_adv_time_suite.cpp
     src/worker_pf_ansi_runtime.cpp

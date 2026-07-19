@@ -200,6 +200,8 @@ CONTRACTS = {
         "minihost/src/worker_pf_suites.cpp",
         "minihost/src/worker_pf_state_runtime.hpp",
         "minihost/src/worker_pf_state_runtime.cpp",
+        "minihost/src/worker_pf_effect_sequence_selftests.hpp",
+        "minihost/src/worker_pf_effect_sequence_selftests.cpp",
     ),
     "pf_fill_matte_legacy_callbacks": (
         "minihost/src/l2_main.cpp",
