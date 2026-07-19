@@ -102,6 +102,7 @@
 #include "worker_pf_state_runtime.hpp"
 #include "worker_report.hpp"
 #include "worker_request_parser.hpp"
+#include "worker_invocation_orchestration.hpp"
 #include "worker_render_report.hpp"
 #include "worker_render_receipts.hpp"
 #include "worker_target.hpp"
@@ -7330,93 +7331,7 @@ int worker_main_impl(int argc, wchar_t **argv) {
         aexcompat::worker_runtime::minidump::top_level_crash_filter);
     argc -= 2;
   }
-  struct InvocationState {
-    bool request_mode{};
-    bool audio_mode{};
-    bool image_audio_mode{};
-    bool image_mode{};
-    bool layered_image_mode{};
-    bool smart_force_cpu{};
-    bool smart_opencl{};
-    bool smart_directx{};
-    bool smart_image_mode{};
-    bool smart_layered_image_mode{};
-    int32_t external_pixel_bytes{4};
-    int transport_argc{};
-    int image_click_argc{};
-    int image_environment_argc{};
-    int image_trailer_argc{};
-    int image_argc{};
-    int smart_image_click_argc{};
-    int smart_image_environment_argc{};
-    int smart_image_trailer_argc{};
-    int smart_image_argc{};
-    bool image_click_context{};
-    bool image_draw_context{};
-    bool image_render_environment{};
-    bool image_spatial_context{};
-    bool image_mask_context{};
-    bool smart_image_click_context{};
-    bool smart_image_draw_context{};
-    bool smart_image_render_environment{};
-    bool smart_image_spatial_context{};
-    bool smart_image_mask_context{};
-    bool mask_request_mode{};
-    bool mask_scene_request_mode{};
-    bool mask_context_request_mode{};
-    bool mask_count_error_mode{};
-    bool mask_count_crash_mode{};
-    bool mask_double_dispose_mode{};
-    bool stream_live_value_dispose_mode{};
-    bool stream_metadata_ownership_mode{};
-    bool keyframe_ownership_mode{};
-    bool dynamic_stream_tree_mode{};
-    bool aegp_memory_strings_mode{};
-    bool suite_release_without_acquire_mode{};
-    bool handle_resize_while_locked_mode{};
-    bool world_double_dispose_mode{};
-    bool world_allocation_limit_mode{};
-    bool pixel_format_registry_mode{};
-    bool outline_mutation_mode{};
-    bool mask_attribute_mode{};
-    bool user_changed_mode{};
-    bool params_only_mode{};
-    bool runtime_module_authorization_mode{};
-    bool external_dependencies_mode{};
-    bool do_dialog_mode{};
-    bool auto_dialog_mode{};
-    bool adjust_cursor_mode{};
-    bool draw_event_mode{};
-    bool click_event_mode{};
-    bool drag_event_mode{};
-    bool ui_lifecycle_mode{};
-    bool ui_idle_mode{};
-    bool ui_keydown_mode{};
-    bool ui_mouse_exited_mode{};
-    bool ui_event_assignment_mode{};
-    RequestedAssignments requested_parameters;
-    RequestedAssignments ui_event_assignments;
-    std::vector<unsigned char> external_rgba;
-    std::vector<ExternalLayerInput> external_layers;
-    std::filesystem::path external_output;
-    std::vector<float> external_audio;
-    std::filesystem::path external_audio_output;
-    int32_t external_width{};
-    int32_t external_height{};
-    int32_t external_current_time{};
-    int32_t external_time_step{1};
-    int32_t external_total_time{1};
-    uint32_t external_time_scale{1};
-    int32_t external_audio_samples{};
-    int32_t external_audio_rate{};
-    int32_t click_x{101};
-    int32_t click_y{101};
-    int32_t drag_end_x{101};
-    int32_t drag_end_y{101};
-    int32_t drag_steps{};
-    uint32_t keydown_code{};
-    uint32_t keydown_modifiers{};
-  } invocation;
+aexcompat::worker_runtime::invocation::InvocationState invocation;
 
   auto& request_mode = invocation.request_mode;
   auto& audio_mode = invocation.audio_mode;
@@ -7507,6 +7422,22 @@ int worker_main_impl(int argc, wchar_t **argv) {
   const auto parse_requested_payload = +[](const wchar_t* text, void* context) {
     return parse_parameter_payload(text, *static_cast<RequestedAssignments*>(context));
   };
+  const aexcompat::worker_runtime::invocation::ApplyHooks invocation_hooks{
+      +[](int32_t x, int32_t y, const std::array<float, 4>& color) {
+        g_render_click_x = x; g_render_click_y = y;
+        g_app_picker_color = color; g_render_click_enabled = true;
+      },
+      +[] { g_render_draw_enabled = true; },
+      +[](bool enabled) { g_mask_model_enabled = enabled; },
+      +[](bool count_error, bool count_crash) {
+        aexcompat::mask_runtime::set_fault(count_error
+            ? aexcompat::mask_runtime::Fault::CountError
+            : count_crash ? aexcompat::mask_runtime::Fault::CountCrash
+                          : aexcompat::mask_runtime::Fault::None);
+      },
+      +[](std::vector<float>* audio, int32_t samples) {
+        aexcompat::host_audio::runtime().set_source(audio, samples);
+      }};
 
   if (is_render_worker()) {
     const auto parsed = aexcompat::worker_runtime::request_parser::parse(
@@ -7517,29 +7448,8 @@ int worker_main_impl(int argc, wchar_t **argv) {
        &parse_spatial_context_payload, &parse_render_environment_payload,
        &requested_parameters, parse_requested_payload, &configure_mask_scene});
     if (parsed.error != 0) return parsed.error;
-    const auto& worker_mode = parsed.invocation.mode;
-  audio_mode = worker_mode.audio_mode; image_audio_mode = worker_mode.image_audio_mode;
-  external_pixel_bytes = worker_mode.external_pixel_bytes; transport_argc = worker_mode.transport_argc;
-  image_click_context = worker_mode.image_click_context; image_draw_context = worker_mode.image_draw_context;
-  image_click_argc = worker_mode.image_click_argc; image_render_environment = worker_mode.image_render_environment;
-  image_environment_argc = worker_mode.image_environment_argc; image_spatial_context = worker_mode.image_spatial_context;
-  image_trailer_argc = worker_mode.image_trailer_argc; image_mask_context = worker_mode.image_mask_context;
-  image_argc = worker_mode.image_argc; layered_image_mode = worker_mode.layered_image_mode;
-  image_mode = worker_mode.image_mode; request_mode = worker_mode.request_mode;
-  external_rgba = parsed.invocation.rgba; external_layers = parsed.invocation.layers;
-  external_output = parsed.invocation.output; external_audio = parsed.invocation.audio;
-  external_audio_output = parsed.invocation.audio_output;
-  external_width = parsed.invocation.width; external_height = parsed.invocation.height;
-  external_current_time = parsed.invocation.current_time; external_time_step = parsed.invocation.time_step;
-  external_total_time = parsed.invocation.total_time; external_time_scale = parsed.invocation.time_scale;
-  external_audio_samples = parsed.invocation.audio_samples; external_audio_rate = parsed.invocation.audio_rate;
-  if (worker_mode.image_click_context) {
-    g_render_click_x = parsed.invocation.click_x; g_render_click_y = parsed.invocation.click_y;
-    g_app_picker_color = parsed.invocation.picker_color; g_render_click_enabled = true;
-  }
-  if (worker_mode.image_draw_context) g_render_draw_enabled = true;
-    if (image_audio_mode)
-      aexcompat::host_audio::runtime().set_source(&external_audio, external_audio_samples);
+    aexcompat::worker_runtime::invocation::apply_render(
+        parsed.invocation, invocation, invocation_hooks);
   } else if (is_smart_worker()) {
     const auto parsed = aexcompat::worker_runtime::request_parser::parse(
         aexcompat::worker_runtime::request_parser::Kind::Smart, argc, argv,
@@ -7549,62 +7459,8 @@ int worker_main_impl(int argc, wchar_t **argv) {
          &parse_spatial_context_payload, &parse_render_environment_payload,
          &requested_parameters, parse_requested_payload, &configure_mask_scene});
     if (parsed.error != 0) return parsed.error;
-    const auto& worker_mode = parsed.invocation.mode;
-  smart_force_cpu = worker_mode.force_cpu;
-  smart_opencl = worker_mode.opencl;
-  smart_directx = worker_mode.directx;
-  external_pixel_bytes = worker_mode.external_pixel_bytes;
-  smart_image_click_context = worker_mode.image_click_context;
-  smart_image_draw_context = worker_mode.image_draw_context;
-  smart_image_click_argc = worker_mode.image_click_argc;
-  smart_image_render_environment = worker_mode.image_render_environment;
-  smart_image_environment_argc = worker_mode.image_environment_argc;
-  smart_image_spatial_context = worker_mode.image_spatial_context;
-  smart_image_trailer_argc = worker_mode.image_trailer_argc;
-  smart_image_mask_context = worker_mode.image_mask_context;
-  smart_image_argc = worker_mode.image_argc;
-  smart_layered_image_mode = worker_mode.layered_image_mode;
-  smart_image_mode = worker_mode.image_mode;
-  mask_request_mode = worker_mode.mask_request_mode;
-  mask_scene_request_mode = worker_mode.mask_scene_request_mode;
-  mask_context_request_mode = worker_mode.mask_context_request_mode;
-  mask_count_error_mode = worker_mode.mask_count_error_mode;
-  mask_count_crash_mode = worker_mode.mask_count_crash_mode;
-  mask_double_dispose_mode = worker_mode.mask_double_dispose_mode;
-  stream_live_value_dispose_mode = worker_mode.stream_live_value_dispose_mode;
-  stream_metadata_ownership_mode = worker_mode.stream_metadata_ownership_mode;
-  keyframe_ownership_mode = worker_mode.keyframe_ownership_mode;
-  dynamic_stream_tree_mode = worker_mode.dynamic_stream_tree_mode;
-  aegp_memory_strings_mode = worker_mode.aegp_memory_strings_mode;
-  suite_release_without_acquire_mode = worker_mode.suite_release_without_acquire_mode;
-  handle_resize_while_locked_mode = worker_mode.handle_resize_while_locked_mode;
-  world_double_dispose_mode = worker_mode.world_double_dispose_mode;
-  world_allocation_limit_mode = worker_mode.world_allocation_limit_mode;
-  pixel_format_registry_mode = worker_mode.pixel_format_registry_mode;
-  outline_mutation_mode = worker_mode.outline_mutation_mode;
-  mask_attribute_mode = worker_mode.mask_attribute_mode;
-  request_mode = worker_mode.request_mode;
-  g_mask_model_enabled = worker_mode.mask_model_enabled;
-  aexcompat::mask_runtime::set_fault(mask_count_error_mode
-      ? aexcompat::mask_runtime::Fault::CountError
-      : mask_count_crash_mode ? aexcompat::mask_runtime::Fault::CountCrash
-                              : aexcompat::mask_runtime::Fault::None);
-    external_rgba = parsed.invocation.rgba;
-    external_layers = parsed.invocation.layers;
-    external_output = parsed.invocation.output;
-    external_width = parsed.invocation.width;
-    external_height = parsed.invocation.height;
-    external_current_time = parsed.invocation.current_time;
-    external_time_step = parsed.invocation.time_step;
-    external_total_time = parsed.invocation.total_time;
-    external_time_scale = parsed.invocation.time_scale;
-    if (smart_image_click_context) {
-      g_render_click_x = parsed.invocation.click_x;
-      g_render_click_y = parsed.invocation.click_y;
-      g_app_picker_color = parsed.invocation.picker_color;
-      g_render_click_enabled = true;
-    }
-    if (smart_image_draw_context) g_render_draw_enabled = true;
+    aexcompat::worker_runtime::invocation::apply_smart(
+        parsed.invocation, invocation, invocation_hooks);
   } else {
   user_changed_mode = (argc == 5 || argc == 6) &&
       std::wstring(argv[1]) == L"--user-changed";
