@@ -74,6 +74,7 @@
 #include "worker_world_safety.hpp"
 #include "worker_pf_suites_internal.hpp"
 #include "worker_report.hpp"
+#include "worker_render_receipts.hpp"
 #include "worker_target.hpp"
 
 namespace {
@@ -169,6 +170,9 @@ using aexcompat::worker_runtime::SuiteResolveResult;
 using aexcompat::worker_runtime::suite_registry;
 using aexcompat::worker_runtime::WorkerSession;
 using aexcompat::worker_runtime::admit_runtime;
+using aexcompat::render_receipts::ReceiptDraft;
+using aexcompat::render_receipts::ReceiptSnapshot;
+using aexcompat::render_receipts::kMaxReceiptBytes;
 using aexcompat::world_safety::DispatchWorldFormat;
 using aexcompat::world_safety::DispatchWorldFormatScope;
 using aexcompat::world_safety::LocalEffectWorld;
@@ -4311,32 +4315,8 @@ MaskOutlineSuite g_mask_outline_suite{&is_mask_outline_open, &set_mask_outline_o
 
 std::mutex g_world_mutex;
 
-constexpr std::size_t kMaxAsyncReceipts = 32;
-constexpr uint64_t kMaxAsyncReceiptBytes = 64ULL * 1024 * 1024;
 constexpr int32_t kSyntheticCompWidth = 17;
 constexpr int32_t kSyntheticCompHeight = 9;
-
-struct AsyncFrameReceipt {
-  LocalEffectWorld world{};
-  std::vector<std::byte> pixels;
-  // Keep the immutable host stage alive until the plugin checks this receipt in.
-  std::shared_ptr<const std::vector<std::byte>> staged_source_pin;
-  void* receipt_handle{};
-  void** world_handle{};
-  int32_t pixel_format{};
-  bool has_render_options{};
-  AegpRenderOptionsValue render_options{};
-  AegpRect rendered_region{};
-  uint32_t render_timestamp{};
-  std::array<uint8_t, 16> guid{};
-};
-std::unordered_map<void*, std::unique_ptr<AsyncFrameReceipt>> g_async_receipts;
-std::atomic<uint64_t> g_receipt_handle_generation{1};
-std::atomic<uint64_t> g_borrowed_world_handle_generation{1};
-uint64_t g_async_receipt_bytes{};
-uint32_t g_async_receipts_created{};
-uint32_t g_async_receipts_checked_in{};
-uint32_t g_invalid_async_receipt_operations{};
 std::array<uint8_t, 4> g_render_options_baseline8{};
 std::array<uint8_t, 4> g_render_options_time8{};
 std::array<uint8_t, 4> g_render_options_downsample8{};
@@ -4445,24 +4425,6 @@ bool claim_opaque_generation(std::atomic<uint64_t>& counter, uint64_t& generatio
       return true;
     }
   }
-}
-
-bool assign_opaque_receipt_handles(AsyncFrameReceipt& receipt) {
-  uint64_t receipt_generation = 0, world_generation = 0;
-  if (!claim_opaque_generation(g_receipt_handle_generation, receipt_generation) ||
-      !claim_opaque_generation(g_borrowed_world_handle_generation, world_generation)) return false;
-  // These tokens are opaque and never dereferenced or reused.
-  receipt.receipt_handle = reinterpret_cast<void*>(
-      static_cast<uintptr_t>((receipt_generation << 3) | 4));
-  receipt.world_handle = reinterpret_cast<void**>(
-      static_cast<uintptr_t>((world_generation << 3) | 6));
-  std::memcpy(receipt.guid.data(), &receipt_generation,
-              (std::min)(sizeof(receipt_generation), receipt.guid.size()));
-  std::memcpy(receipt.guid.data() + 8, &world_generation,
-              (std::min)(sizeof(world_generation), receipt.guid.size() - 8));
-  receipt.guid[6] = static_cast<uint8_t>((receipt.guid[6] & 0x0f) | 0x40);
-  receipt.guid[8] = static_cast<uint8_t>((receipt.guid[8] & 0x3f) | 0x80);
-  return true;
 }
 
 struct LoadedEffectReceiptContext {
@@ -4633,7 +4595,7 @@ std::array<uint8_t, 4> synthetic_item_pixel(const AegpRenderOptionsValue& option
            static_cast<uint8_t>(source_x * 5 + source_y * 13 + time * 7)}};
 }
 
-void populate_synthetic_item_pixels(AsyncFrameReceipt& receipt, int32_t type,
+void populate_synthetic_item_pixels(ReceiptDraft& receipt, int32_t type,
                                     int32_t width, int32_t height) {
   const auto& options = receipt.render_options;
   const AegpRect source_roi = options.roi.left == 0 && options.roi.top == 0 &&
@@ -4684,10 +4646,10 @@ int32_t publish_async_receipt(int32_t pixel_format, void** output,
   const int32_t height = options
       ? (kSyntheticCompHeight + options->downsample_y - 1) / options->downsample_y : 4;
   const uint64_t bytes = static_cast<uint64_t>(width) * height * bytes_per_pixel;
-  if (!bytes_per_pixel || bytes > kMaxAsyncReceiptBytes) return 4;
-  std::unique_ptr<AsyncFrameReceipt> receipt;
+  if (!bytes_per_pixel || bytes > kMaxReceiptBytes) return 4;
+  std::unique_ptr<ReceiptDraft> receipt;
   try {
-    receipt = std::make_unique<AsyncFrameReceipt>();
+    receipt = std::make_unique<ReceiptDraft>();
     receipt->pixels.resize(static_cast<std::size_t>(bytes));
   } catch (const std::bad_alloc&) {
     return 4;
@@ -4722,28 +4684,8 @@ int32_t publish_async_receipt(int32_t pixel_format, void** output,
   receipt->world.extent_hint = {0, 0, width, height};
   receipt->world.pix_aspect_ratio = {1, 1};
   if (options) populate_synthetic_item_pixels(*receipt, type, width, height);
-  if (!assign_opaque_receipt_handles(*receipt)) return 4;
-  void* key = receipt->receipt_handle;
-  std::lock_guard<std::mutex> lock(g_world_mutex);
-  if (g_async_receipts.size() >= kMaxAsyncReceipts ||
-      g_async_receipt_bytes > kMaxAsyncReceiptBytes - bytes) return 4;
-  void** registered_world_handle = receipt->world_handle;
-  if (!aexcompat::world_registry::register_borrowed_view(
-          registered_world_handle, &receipt->world, pixel_format)) return 4;
-  try {
-    const auto inserted_receipt = g_async_receipts.emplace(key, std::move(receipt));
-    if (!inserted_receipt.second) {
-      aexcompat::world_registry::unregister_borrowed_view(registered_world_handle);
-      return 4;
-    }
-  } catch (const std::bad_alloc&) {
-    aexcompat::world_registry::unregister_borrowed_view(registered_world_handle);
-    return 4;
-  }
-  g_async_receipt_bytes += bytes;
-  ++g_async_receipts_created;
-  *output = key;
-  return 0;
+  return aexcompat::render_receipts::register_receipt(
+      std::move(receipt), output);
 }
 
 int32_t publish_external_cached_receipt(const AegpRenderOptionsValue& options,
@@ -4774,10 +4716,10 @@ int32_t publish_external_cached_receipt(const AegpRenderOptionsValue& options,
   const uint64_t tight_rowbytes = static_cast<uint64_t>(backing->world.width) * pixel_bytes;
   const uint64_t bytes = tight_rowbytes * backing->world.height;
   if (!pixel_bytes || backing->world.rowbytes < tight_rowbytes ||
-      bytes == 0 || bytes > kMaxAsyncReceiptBytes) return 4;
-  std::unique_ptr<AsyncFrameReceipt> receipt;
+      bytes == 0 || bytes > kMaxReceiptBytes) return 4;
+  std::unique_ptr<ReceiptDraft> receipt;
   try {
-    receipt = std::make_unique<AsyncFrameReceipt>();
+    receipt = std::make_unique<ReceiptDraft>();
     receipt->pixels.resize(static_cast<std::size_t>(bytes));
     std::lock_guard<std::mutex> pixels_lock(backing->pixels_mutex);
     for (int32_t y = 0; y < backing->world.height; ++y) {
@@ -4801,28 +4743,11 @@ int32_t publish_external_cached_receipt(const AegpRenderOptionsValue& options,
   receipt->world.height = backing->world.height;
   receipt->world.extent_hint = {0, 0, backing->world.width, backing->world.height};
   receipt->world.pix_aspect_ratio = {1, 1};
-  if (!assign_opaque_receipt_handles(*receipt)) return 4;
-  void* key = receipt->receipt_handle;
   std::lock_guard<std::mutex> lock(g_world_mutex);
   if (current_timestamp != g_render_project_timestamp.load() ||
-      g_render_timestamp_exhausted.load() ||
-      g_async_receipts.size() >= kMaxAsyncReceipts ||
-      g_async_receipt_bytes > kMaxAsyncReceiptBytes - bytes) return 4;
-  void** registered_world_handle = receipt->world_handle;
-  if (!aexcompat::world_registry::register_borrowed_view(
-          registered_world_handle, &receipt->world, backing->pixel_format)) return 4;
-  try {
-    if (!g_async_receipts.emplace(key, std::move(receipt)).second) {
-      aexcompat::world_registry::unregister_borrowed_view(registered_world_handle);
-      return 4;
-    }
-  } catch (...) {
-    aexcompat::world_registry::unregister_borrowed_view(registered_world_handle);
-    return 4;
-  }
-  g_async_receipt_bytes += bytes;
-  ++g_async_receipts_created;
-  *output = key;
+      g_render_timestamp_exhausted.load()) return 4;
+  if (aexcompat::render_receipts::register_receipt(
+          std::move(receipt), output) != 0) return 4;
   *cache_hit = true;
   return 0;
 }
@@ -4849,7 +4774,7 @@ bool publish_staged_item_world(void* item, AegpTime time, AegpTime time_step,
   if (!item || time.scale == 0 || time_step.scale == 0 || time_step.value <= 0 ||
       quality < 0 || quality > 1 || guide_layers > 1 || !pixel_bytes || width <= 0 ||
       height <= 0 || width > 4096 || height > 4096 || rowbytes < tight_rowbytes ||
-      !pixels || tight_bytes == 0 || tight_bytes > kMaxAsyncReceiptBytes) return false;
+      !pixels || tight_bytes == 0 || tight_bytes > kMaxReceiptBytes) return false;
   std::shared_ptr<std::vector<std::byte>> backing;
   try {
     backing = std::make_shared<std::vector<std::byte>>(static_cast<std::size_t>(tight_bytes));
@@ -4954,7 +4879,7 @@ void write_staged_channel(std::byte* pixel, int32_t pixel_bytes, int channel, fl
 }
 
 int32_t transform_staged_item_world(const StagedItemWorld& stage,
-    const AegpRenderOptionsValue& options, std::unique_ptr<AsyncFrameReceipt>& receipt) {
+    const AegpRenderOptionsValue& options, std::unique_ptr<ReceiptDraft>& receipt) {
   const int32_t pixel_bytes = item_world_pixel_bytes(stage.pixel_format);
   if (!stage.backing || !pixel_bytes || options.downsample_x <= 0 ||
       options.downsample_y <= 0 || options.field < 0 || options.field > 2 ||
@@ -4966,9 +4891,9 @@ int32_t transform_staged_item_world(const StagedItemWorld& stage,
   const int32_t width = (stage.width + options.downsample_x - 1) / options.downsample_x;
   const int32_t height = (stage.height + options.downsample_y - 1) / options.downsample_y;
   const uint64_t bytes = static_cast<uint64_t>(width) * height * pixel_bytes;
-  if (bytes == 0 || bytes > kMaxAsyncReceiptBytes) return 4;
+  if (bytes == 0 || bytes > kMaxReceiptBytes) return 4;
   try {
-    receipt = std::make_unique<AsyncFrameReceipt>();
+    receipt = std::make_unique<ReceiptDraft>();
     receipt->pixels.resize(static_cast<std::size_t>(bytes));
   } catch (...) { return 4; }
   receipt->staged_source_pin = stage.backing;
@@ -5027,31 +4952,9 @@ int32_t transform_staged_item_world(const StagedItemWorld& stage,
   return 0;
 }
 
-int32_t register_item_receipt(std::unique_ptr<AsyncFrameReceipt> receipt, void** output) {
-  if (output) *output = nullptr;
-  if (!output || !receipt || !receipt->world.data) return 4;
-  const uint64_t bytes = receipt->pixels.size();
-  if (!assign_opaque_receipt_handles(*receipt)) return 4;
-  void* key = receipt->receipt_handle;
-  std::lock_guard<std::mutex> lock(g_world_mutex);
-  if (g_async_receipts.size() >= kMaxAsyncReceipts || bytes > kMaxAsyncReceiptBytes ||
-      g_async_receipt_bytes > kMaxAsyncReceiptBytes - bytes) return 4;
-  void** registered_world_handle = receipt->world_handle;
-  if (!aexcompat::world_registry::register_borrowed_view(
-          registered_world_handle, &receipt->world, receipt->pixel_format)) return 4;
-  try {
-    if (!g_async_receipts.emplace(key, std::move(receipt)).second) {
-      aexcompat::world_registry::unregister_borrowed_view(registered_world_handle);
-      return 4;
-    }
-  } catch (...) {
-    aexcompat::world_registry::unregister_borrowed_view(registered_world_handle);
-    return 4;
-  }
-  g_async_receipt_bytes += bytes;
-  ++g_async_receipts_created;
-  *output = key;
-  return 0;
+int32_t register_item_receipt(std::unique_ptr<ReceiptDraft> receipt, void** output) {
+  return aexcompat::render_receipts::register_receipt(
+      std::move(receipt), output);
 }
 
 int32_t publish_item_receipt(void* options, void** receipt) {
@@ -5069,7 +4972,7 @@ int32_t publish_item_receipt(void* options, void** receipt) {
   if (!stack_scope.entered) return 4;
   StagedItemWorld stage{};
   if (snapshot_staged_item_world(snapshot, stage)) {
-    std::unique_ptr<AsyncFrameReceipt> staged_receipt;
+    std::unique_ptr<ReceiptDraft> staged_receipt;
     if (transform_staged_item_world(stage, snapshot, staged_receipt) != 0) return 4;
     return register_item_receipt(std::move(staged_receipt), receipt);
   }
@@ -5121,10 +5024,10 @@ int32_t publish_loaded_layer_receipt_from_context(
   const uint64_t bytes = static_cast<uint64_t>(width) * height * pixel_bytes;
   if ((source_pixel_bytes != 4 && source_pixel_bytes != 8 && source_pixel_bytes != 16) ||
       selected_pixels->size() != source_bytes || bytes == 0 ||
-      bytes > kMaxAsyncReceiptBytes) return 4;
-  std::unique_ptr<AsyncFrameReceipt> loaded_receipt;
+      bytes > kMaxReceiptBytes) return 4;
+  std::unique_ptr<ReceiptDraft> loaded_receipt;
   try {
-    loaded_receipt = std::make_unique<AsyncFrameReceipt>();
+    loaded_receipt = std::make_unique<ReceiptDraft>();
     loaded_receipt->pixels.resize(static_cast<std::size_t>(bytes));
     for (int32_t y = 0; y < height; ++y) {
       const int32_t source_y = y * options.downsample_y;
@@ -5172,28 +5075,8 @@ int32_t publish_loaded_layer_receipt_from_context(
   loaded_receipt->world.height = height;
   loaded_receipt->world.extent_hint = {0, 0, width, height};
   loaded_receipt->world.pix_aspect_ratio = {1, 1};
-  if (!assign_opaque_receipt_handles(*loaded_receipt)) return 4;
-  void* key = loaded_receipt->receipt_handle;
-  std::lock_guard<std::mutex> lock(g_world_mutex);
-  if (g_async_receipts.size() >= kMaxAsyncReceipts ||
-      g_async_receipt_bytes > kMaxAsyncReceiptBytes - bytes) return 4;
-  void** registered_world_handle = loaded_receipt->world_handle;
-  if (!aexcompat::world_registry::register_borrowed_view(
-          registered_world_handle, &loaded_receipt->world, pixel_format)) return 4;
-  try {
-    const auto inserted_receipt = g_async_receipts.emplace(key, std::move(loaded_receipt));
-    if (!inserted_receipt.second) {
-      aexcompat::world_registry::unregister_borrowed_view(registered_world_handle);
-      return 4;
-    }
-  } catch (const std::bad_alloc&) {
-    aexcompat::world_registry::unregister_borrowed_view(registered_world_handle);
-    return 4;
-  }
-  g_async_receipt_bytes += bytes;
-  ++g_async_receipts_created;
-  *receipt = key;
-  return 0;
+  return aexcompat::render_receipts::register_receipt(
+      std::move(loaded_receipt), receipt);
 }
 int32_t publish_loaded_layer_receipt(
     const AegpLayerRenderOptionsValue& options, void** receipt) {
@@ -5222,49 +5105,14 @@ int32_t __cdecl checkout_layer_frame_async(
   return publish_async_receipt(pixel_format, receipt);
 }
 int32_t __cdecl get_receipt_world(void* receipt, void*** world) {
-  if (world) *world = nullptr;
-  if (!receipt || !world) return 4;
-  std::lock_guard<std::mutex> lock(g_world_mutex);
-  const auto found = g_async_receipts.find(receipt);
-  if (found == g_async_receipts.end() || !found->second->world_handle) {
-    ++g_invalid_async_receipt_operations;
-    return 4;
-  }
-  *world = found->second->world_handle;
-  return 0;
+  return aexcompat::render_receipts::get_world(receipt, world);
 }
 int32_t __cdecl checkin_frame(void* receipt) {
-  if (!receipt) return 4;
-  std::lock_guard<std::mutex> lock(g_world_mutex);
-  const auto found = g_async_receipts.find(receipt);
-  if (found == g_async_receipts.end()) {
-    ++g_invalid_async_receipt_operations;
-    return 4;
-  }
-  const uint64_t bytes = found->second->pixels.size();
-  if (!aexcompat::world_registry::unregister_borrowed_view(
-          found->second->world_handle)) {
-    ++g_invalid_async_receipt_operations;
-    return 4;
-  }
-  g_async_receipts.erase(found);
-  g_async_receipt_bytes -= bytes;
-  ++g_async_receipts_checked_in;
-  return 0;
+  return aexcompat::render_receipts::checkin(receipt);
 }
 
 bool checkin_frame_if_live(void* receipt) {
-  if (!receipt) return false;
-  std::lock_guard<std::mutex> lock(g_world_mutex);
-  const auto found = g_async_receipts.find(receipt);
-  if (found == g_async_receipts.end()) return false;
-  const uint64_t bytes = found->second->pixels.size();
-  if (!aexcompat::world_registry::unregister_borrowed_view(
-          found->second->world_handle)) return false;
-  g_async_receipts.erase(found);
-  g_async_receipt_bytes -= bytes;
-  ++g_async_receipts_checked_in;
-  return true;
+  return aexcompat::render_receipts::checkin_if_live(receipt);
 }
 
 int32_t __cdecl render_checkout_frame_reject(
@@ -5357,7 +5205,7 @@ int32_t __cdecl render_checkout_layer_async_reject(
       ((selected_height + snapshot.downsample_y - 1) / snapshot.downsample_y) *
       pixel_bytes;
   const uint64_t bytes = (std::max)(source_bytes, output_bytes);
-  if (source_bytes == 0 || bytes > kMaxAsyncReceiptBytes ||
+  if (source_bytes == 0 || bytes > kMaxReceiptBytes ||
       selected_pixels->size() != source_bytes) return 4;
   std::shared_ptr<AsyncLayerRequest> request;
   try {
@@ -5378,7 +5226,7 @@ int32_t __cdecl render_checkout_layer_async_reject(
   }
   std::lock_guard<std::mutex> lock(g_async_layer_request_mutex);
   if (!g_async_layer_accepting || g_async_layer_requests.size() >= 32 ||
-      g_async_layer_reserved_bytes > kMaxAsyncReceiptBytes - bytes) return 4;
+      g_async_layer_reserved_bytes > kMaxReceiptBytes - bytes) return 4;
   request->id = g_next_async_layer_request_id++;
   if (request->id == 0) return 4;
   g_async_layer_reserved_bytes += bytes;
@@ -5487,10 +5335,9 @@ bool async_layer_requests_balanced() {
 }
 int32_t __cdecl render_get_region_reject(void* receipt, void* region) {
   if (!receipt || !region) return 4;
-  std::lock_guard<std::mutex> lock(g_world_mutex);
-  const auto found = g_async_receipts.find(receipt);
-  if (found == g_async_receipts.end()) return 4;
-  std::memcpy(region, &found->second->rendered_region, sizeof(AegpRect));
+  ReceiptSnapshot snapshot{};
+  if (!aexcompat::render_receipts::snapshot(receipt, snapshot)) return 4;
+  std::memcpy(region, &snapshot.rendered_region, sizeof(AegpRect));
   return 0;
 }
 int32_t __cdecl render_sufficient_reject(void* rendered, void* proposed, uint8_t* out) {
@@ -5628,13 +5475,9 @@ int32_t __cdecl render_checkin_rendered(void* options, const void* timestamp,
 int32_t __cdecl render_guid_reject(void* receipt, void** out) {
   if (out) *out = nullptr;
   if (!receipt || !out) return 4;
-  std::array<uint8_t, 16> guid{};
-  {
-    std::lock_guard<std::mutex> lock(g_world_mutex);
-    const auto found = g_async_receipts.find(receipt);
-    if (found == g_async_receipts.end()) return 4;
-    guid = found->second->guid;
-  }
+  ReceiptSnapshot snapshot{};
+  if (!aexcompat::render_receipts::snapshot(receipt, snapshot)) return 4;
+  const auto& guid = snapshot.guid;
   if (new_aegp_mem_handle(1, "render receipt guid", static_cast<uint32_t>(guid.size()),
                           1, out) != 0) return 4;
   void* bytes = nullptr;
@@ -6509,9 +6352,7 @@ bool verify_aegp_world_mfr_safety() {
 }
 
 bool async_receipt_lifetimes_balanced() {
-  std::lock_guard<std::mutex> lock(g_world_mutex);
-  return g_async_receipts.empty() && g_async_receipt_bytes == 0 &&
-      g_async_receipts_created == g_async_receipts_checked_in;
+  return aexcompat::render_receipts::lifetimes_balanced();
 }
 
 bool verify_aegp_async_receipts() {
@@ -6574,7 +6415,7 @@ bool verify_aegp_render_options_suite1() {
   if (!render_options_lifetimes_balanced() || !async_receipt_lifetimes_balanced()) return false;
   const auto render_probe = [](AegpRenderOptionsValue options, int32_t type,
                                int32_t sample_x, int32_t sample_y, void* output) {
-    AsyncFrameReceipt probe{};
+    ReceiptDraft probe{};
     probe.render_options = options;
     probe.rendered_region = options.roi.right == 0
         ? AegpRect{0, 0, kSyntheticCompWidth, kSyntheticCompHeight} : options.roi;
@@ -6673,19 +6514,19 @@ bool verify_aegp_render_options_suite1() {
   void** world = nullptr;
   int32_t width = 0, height = 0, type = 0;
   AegpRect rendered{};
-  bool snapshot_ok = false;
-  {
-    std::lock_guard<std::mutex> lock(g_world_mutex);
-    const auto found = g_async_receipts.find(receipt);
-    snapshot_ok = found != g_async_receipts.end() && found->second->has_render_options &&
-        found->second->render_options.time.value == -5 &&
-        found->second->render_options.time_step.value == 2 &&
-        found->second->render_options.field == 2 && found->second->render_options.matte == 1 &&
-        found->second->render_options.channel_order == 1 &&
-        found->second->render_options.render_guide_layers == 1 &&
-        found->second->render_options.render_quality == 0 &&
-        found->second->rendered_region.left == 1 && found->second->rendered_region.top == 1;
-  }
+  ReceiptSnapshot receipt_snapshot{};
+  const bool snapshot_ok =
+      aexcompat::render_receipts::snapshot(receipt, receipt_snapshot) &&
+      receipt_snapshot.has_render_options &&
+      receipt_snapshot.render_options.time.value == -5 &&
+      receipt_snapshot.render_options.time_step.value == 2 &&
+      receipt_snapshot.render_options.field == 2 &&
+      receipt_snapshot.render_options.matte == 1 &&
+      receipt_snapshot.render_options.channel_order == 1 &&
+      receipt_snapshot.render_options.render_guide_layers == 1 &&
+      receipt_snapshot.render_options.render_quality == 0 &&
+      receipt_snapshot.rendered_region.left == 1 &&
+      receipt_snapshot.rendered_region.top == 1;
   if (!snapshot_ok || get_receipt_world(receipt, &world) != 0 ||
       aegp_world_get_type(world, &type) != 0 || type != 2 ||
       aegp_world_get_size(world, &width, &height) != 0 || width != 6 || height != 5 ||
@@ -15337,11 +15178,12 @@ int worker_main_impl(int argc, wchar_t **argv) {
   if (argc == 2 && std::wstring(argv[1]) == L"--self-test-aegp-async-receipt") {
     const bool passed = verify_aegp_async_receipts();
     std::cout << "{\"aegp_async_receipt\":\"" << (passed ? "passed" : "failed")
-              << "\",\"created\":" << g_async_receipts_created
-              << ",\"checked_in\":" << g_async_receipts_checked_in
-              << ",\"live\":" << g_async_receipts.size()
-              << ",\"live_bytes\":" << g_async_receipt_bytes
-              << ",\"invalid_operations\":" << g_invalid_async_receipt_operations
+              << "\",\"created\":" << aexcompat::render_receipts::statistics().created
+              << ",\"checked_in\":" << aexcompat::render_receipts::statistics().checked_in
+              << ",\"live\":" << aexcompat::render_receipts::statistics().live_count
+              << ",\"live_bytes\":" << aexcompat::render_receipts::statistics().live_bytes
+              << ",\"invalid_operations\":"
+              << aexcompat::render_receipts::statistics().invalid_operations
               << "}\n";
     return passed ? 0 : 1;
   }
@@ -15352,8 +15194,8 @@ int worker_main_impl(int argc, wchar_t **argv) {
               << "\",\"created\":" << item_created_count()
               << ",\"disposed\":" << item_disposed_count()
               << ",\"live\":" << item_live_count()
-              << ",\"receipts_created\":" << g_async_receipts_created
-              << ",\"receipts_checked_in\":" << g_async_receipts_checked_in
+              << ",\"receipts_created\":" << aexcompat::render_receipts::statistics().created
+              << ",\"receipts_checked_in\":" << aexcompat::render_receipts::statistics().checked_in
               << ",\"invalid_operations\":" << item_invalid_count()
               << ",\"baseline_argb8\":[" << static_cast<int>(g_render_options_baseline8[0]) << ','
               << static_cast<int>(g_render_options_baseline8[1]) << ',' << static_cast<int>(g_render_options_baseline8[2]) << ',' << static_cast<int>(g_render_options_baseline8[3]) << ']'
@@ -16265,11 +16107,11 @@ int worker_main_impl(int argc, wchar_t **argv) {
               << ",\"suite_cache_reclaimed_at_process_exit\":"
               << ((isolated_item_cache || isolated_comp_cache) ? "true" : "false")
               << ",\"suite_leases_balanced\":" << (leases_balanced ? "true" : "false")
-              << ",\"receipts_created\":" << g_async_receipts_created
-              << ",\"receipts_checked_in\":" << g_async_receipts_checked_in
-              << ",\"live_receipts\":" << g_async_receipts.size()
+              << ",\"receipts_created\":" << aexcompat::render_receipts::statistics().created
+              << ",\"receipts_checked_in\":" << aexcompat::render_receipts::statistics().checked_in
+              << ",\"live_receipts\":" << aexcompat::render_receipts::statistics().live_count
               << ",\"render_performed\":"
-              << (g_async_receipts_created > 0 ? "true" : "false")
+              << (aexcompat::render_receipts::statistics().created > 0 ? "true" : "false")
               << ",\"module_audit\":" << module_audit_json() << "}\n";
     return session.finish_integrated_report(passed ? 0 : 23);
   }
@@ -17378,11 +17220,12 @@ int worker_main_impl(int argc, wchar_t **argv) {
             << ",\"worlds_disposed\":" << aexcompat::world_registry::statistics().disposed
             << ",\"receipt_lifetimes_balanced\":"
             << (async_receipt_lifetimes_balanced() ? "true" : "false")
-            << ",\"receipts_created\":" << g_async_receipts_created
-            << ",\"receipts_checked_in\":" << g_async_receipts_checked_in
-            << ",\"live_receipts\":" << g_async_receipts.size()
-            << ",\"live_receipt_bytes\":" << g_async_receipt_bytes
-            << ",\"invalid_receipt_operations\":" << g_invalid_async_receipt_operations
+            << ",\"receipts_created\":" << aexcompat::render_receipts::statistics().created
+            << ",\"receipts_checked_in\":" << aexcompat::render_receipts::statistics().checked_in
+            << ",\"live_receipts\":" << aexcompat::render_receipts::statistics().live_count
+            << ",\"live_receipt_bytes\":" << aexcompat::render_receipts::statistics().live_bytes
+            << ",\"invalid_receipt_operations\":"
+            << aexcompat::render_receipts::statistics().invalid_operations
             << ",\"async_layer_requests_balanced\":"
             << (async_layer_requests_balanced() ? "true" : "false")
             << ",\"async_layer_requests_created\":" << g_async_layer_requests_created

@@ -3,6 +3,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "minihost" / "src" / "l2_main.cpp"
+RECEIPTS = ROOT / "minihost" / "src" / "worker_render_receipts.cpp"
 
 
 def test_render_suite5_metadata_uses_exact_frozen_abi():
@@ -49,8 +50,8 @@ def test_receipt_guid_is_stable_owned_memory_and_rejects_stale_receipts():
     start = text.index("int32_t __cdecl render_guid_reject(", declaration + 1)
     body = text[start:text.index("uint32_t color_settings_read_be32", start)]
     for marker in (
-        "g_async_receipts.find(receipt)",
-        "guid = found->second->guid",
+        "render_receipts::snapshot(receipt, snapshot)",
+        "snapshot.guid",
         'new_aegp_mem_handle(1, "render receipt guid"',
         "lock_aegp_mem_handle(*out, &bytes)",
         "unlock_aegp_mem_handle(*out)",

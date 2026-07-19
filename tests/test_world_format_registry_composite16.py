@@ -101,11 +101,14 @@ def test_aegp_world_and_platform_ownership_live_in_registry_not_l2():
         "adopt_platform_world", "aegp_lifetimes_balanced",
     ):
         assert api in header + source
-    assert "struct AsyncFrameReceipt" in main
+    receipts = (ROOT / "minihost" / "src" / "worker_render_receipts.cpp").read_text(
+        encoding="utf-8")
+    assert "ReceiptDraft" in main
     assert "struct ExternalRenderedFrame" in main
-    assert "g_async_receipts" in main
+    assert "g_receipts" not in main
+    assert "g_receipts" in receipts
     assert "g_external_render_cache" in main
-    assert "struct AsyncFrameReceipt" not in source
+    assert "ReceiptDraft" not in source
     assert "g_external_render_cache" not in source
 
 

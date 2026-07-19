@@ -6,6 +6,7 @@ import subprocess
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "minihost" / "src" / "l2_main.cpp"
+RECEIPTS = ROOT / "minihost" / "src" / "worker_render_receipts.cpp"
 
 
 def _worker() -> pathlib.Path | None:
@@ -30,28 +31,28 @@ def test_async_and_render_suites_have_typed_frozen_abi():
 
 
 def test_receipt_registry_is_bounded_and_invalidates_borrowed_world_first():
-    text = SOURCE.read_text(encoding="utf-8")
+    text = RECEIPTS.read_text(encoding="utf-8")
     for marker in (
-        "kMaxAsyncReceipts = 32",
-        "kMaxAsyncReceiptBytes = 64ULL * 1024 * 1024",
-        "std::unordered_map<void*, std::unique_ptr<AsyncFrameReceipt>> g_async_receipts",
-        "aexcompat::world_registry::unregister_borrowed_view(",
-        "g_async_receipts.erase(found);",
-        "g_async_receipt_bytes -= bytes;",
+        "g_receipts.size() < kMaxReceiptCount",
+        "g_live_bytes <= kMaxReceiptBytes - bytes",
+        "std::unordered_map<void*, std::unique_ptr<Receipt>> g_receipts",
+        "world_registry::unregister_borrowed_view(",
+        "receipt = g_receipts.extract(found);",
+        "g_live_bytes -= receipt.mapped()->draft->pixels.size();",
     ):
         assert marker in text
-    checkin = text[text.index("int32_t __cdecl checkin_frame(void* receipt)"):
-                   text.index("bool checkin_frame_if_live(void* receipt)")]
-    assert checkin.index("unregister_borrowed_view(") < checkin.index(
-        "g_async_receipts.erase(found);")
+    checkin = text[text.index("int32_t checkin(void* handle)"):
+                   text.index("bool checkin_if_live(void* handle)")]
+    assert checkin.index("g_receipts.extract(found)") < checkin.index(
+        "unregister_borrowed_view(")
 
 
 def test_receipt_and_borrowed_world_handles_are_opaque_and_never_reused():
-    text = SOURCE.read_text(encoding="utf-8")
+    text = RECEIPTS.read_text(encoding="utf-8") + SOURCE.read_text(encoding="utf-8")
     for marker in (
-        "g_receipt_handle_generation{1}",
-        "g_borrowed_world_handle_generation{1}",
-        "assign_opaque_receipt_handles",
+        "g_receipt_generation{1}",
+        "g_world_generation{1}",
+        "assign_handles",
         "receipt_generation << 3",
         "world_generation << 3",
         "receipt_handles.insert(receipt).second",
