@@ -11,6 +11,7 @@ ROOT = Path(__file__).resolve().parents[1]
 SOURCES = (
     ROOT / "minihost" / "src" / "l2_main.cpp",
     ROOT / "minihost" / "src" / "worker_aegp_scene.cpp",
+    ROOT / "minihost" / "src" / "worker_aegp_compat_selftests.cpp",
 )
 BUILD = ROOT / "target" / "minihost-build"
 SDK_ROOT = os.environ.get("AFTER_EFFECTS_SDK_ROOT")

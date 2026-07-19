@@ -86,7 +86,10 @@ class MinihostL2SourceTests(unittest.TestCase):
         self.assertIn("src/worker_aegp_compat_selftests.cpp", MINIHOST_CMAKE.read_text(encoding="utf-8"))
         for name in ("verify_legacy_effect_compat_suites",
                      "verify_aegp_get_effect_camera",
-                     "verify_aegp_resizer_3d_chain"):
+                     "verify_aegp_resizer_3d_chain",
+                     "verify_aegp_apply_effect",
+                     "verify_aegp_effect_stack",
+                     "verify_aegp_projector_levels"):
             self.assertIn(f"bool {name}()", implementation)
             self.assertNotIn(f"bool {name}()", worker)
         for name in ("run_verify_legacy_effect_compat_suites",

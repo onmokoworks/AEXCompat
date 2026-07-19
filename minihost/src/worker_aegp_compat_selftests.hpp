@@ -3,10 +3,6 @@
 namespace aexcompat::l2_detail {
 struct AegpCompatColor { double alpha, red, green, blue; };
 struct AegpCompatSelftestHooks {
-  bool (*resizer_3d)(){};
-  bool (*apply_effect)(){};
-  bool (*effect_stack)(){};
-  bool (*projector_levels)(){};
   int32_t (*acquire_suite)(const char*, int32_t, const void**){};
   int32_t (*release_suite)(const char*, int32_t){};
   const void* comp_suite{};
@@ -28,6 +24,17 @@ struct AegpCompatSelftestHooks {
   void (*set_dimensions)(int32_t, int32_t){};
   void (*get_dimensions)(int32_t*, int32_t*){};
   bool (*suite_leases_balanced)(){};
+  void* pf_layer{};
+  bool* comp_idle_roundtrip_mode{};
+  std::size_t* active_ui_param_count{};
+  int32_t (*get_new_effect_stream_v2)(int32_t, void*, int32_t, void**){};
+  int32_t (*get_stream_name_v2)(void*, uint8_t, char*){};
+  int32_t (*get_stream_type_v2)(void*, int32_t*){};
+  int32_t (*get_new_stream_value_v2)(int32_t, void*, int32_t,
+      const suite_abi::AegpTime*, uint8_t, scene_runtime::AegpStreamValue*){};
+  int32_t (*set_stream_value_v2)(int32_t, void*, scene_runtime::AegpStreamValue*){};
+  int32_t (*dispose_stream_value_v2)(scene_runtime::AegpStreamValue*){};
+  int32_t (*dispose_stream_v2)(void*){};
 };
 void configure_aegp_compat_selftests(AegpCompatSelftestHooks hooks);
 bool verify_legacy_effect_compat_suites();
