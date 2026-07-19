@@ -1,0 +1,7 @@
+{
+  "schema_version": 1,
+  "render_paths": ["classic", "smartfx"],
+  "depths": ["argb8", "argb16", "argb32f"],
+  "times": [{"value": 0, "scale": 1}, {"value": 1, "scale": 1}],
+  "parameter_sets": [[], [{"index": 1, "type": "slider", "value": 0.5}]]
+}

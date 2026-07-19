@@ -1,4 +1,6 @@
 target/
+corpus/local-locator.json
+target/real-aex-corpus/
 build/
 dist/
 out/
