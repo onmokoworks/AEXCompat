@@ -72,6 +72,11 @@ def make_suite(width: int = 5, height: int = 4) -> dict:
 
 
 class AexImageFixtureValidationTests(unittest.TestCase):
+    def test_fixture_paths_are_unique_even_for_repeated_names(self):
+        first = create_ppm("same-name", 2, 2, "checker")
+        second = create_ppm("same-name", 2, 2, "checker")
+        self.assertNotEqual(first, second)
+
     def test_validation_passes_generated_ppm_suite_and_records_hashes(self):
         report = aex_image_fixture_validation.build_validation_report(make_suite(), Path("suite.json"))
         self.assertEqual(report["report_kind"], "aex_image_fixture_validation")
