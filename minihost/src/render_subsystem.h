@@ -161,6 +161,29 @@ struct TelemetryHooks {
   std::string (*sha256_bytes)(const unsigned char*, std::size_t){};
 };
 
+// Spatial/quality render context parsed from the CLI spatial-context and
+// render-environment payloads (issue #126 Phase D): downsample ratios, pixel
+// aspect ratio, full-resolution override, pre-effect source origin, and the
+// quality/field/shutter values written into the effect input block.
+// worker_main's payload parsers write it and the effect bootstrap, dispatch,
+// and completion reports read it (partly through pointer bundles). Lifetime:
+// process-lifetime, defaults quality=1 / identity ratios, never torn down.
+struct SpatialRatio { int32_t numerator{1}; uint32_t denominator{1}; };
+struct RenderContextState {
+  SpatialRatio downsample_x;
+  SpatialRatio downsample_y;
+  SpatialRatio pixel_aspect_ratio;
+  int32_t full_resolution_width{};
+  int32_t full_resolution_height{};
+  int32_t pre_effect_source_origin_x{};
+  int32_t pre_effect_source_origin_y{};
+  int32_t render_quality{1};
+  int32_t render_field{};
+  int32_t shutter_angle{};
+  int32_t shutter_phase{};
+};
+RenderContextState& render_context_state();
+
 struct RenderTelemetry {
   const std::filesystem::path* dump_directory{};
   uint32_t* dumps_written{};
