@@ -461,16 +461,19 @@ fn classify_report(path: RenderPath, report: &Value) -> Option<RuntimeFailure> {
             retry_classic: true,
         });
     }
-    let nonzero_error = |key| {
+    // The native SmartResult initializes undispatched selector stages to -1.
+    // Preserve other negative host errors (for example transport error -6),
+    // but never let that sentinel mask a later stage's reported error.
+    let reported_error = |key| {
         report
             .get(key)
             .and_then(Value::as_i64)
-            .filter(|error| *error != 0)
+            .filter(|error| *error != 0 && *error != -1)
     };
     let selector_error = selector_error(report, path)
-        .filter(|error| *error != 0)
-        .or_else(|| nonzero_error("pre_render_error"))
-        .or_else(|| nonzero_error("smart_render_error"));
+        .filter(|error| *error != 0 && *error != -1)
+        .or_else(|| reported_error("pre_render_error"))
+        .or_else(|| reported_error("smart_render_error"));
     if selector_error.is_some() {
         return Some(RuntimeFailure {
             classification: Classification::SelectorError,
@@ -1025,6 +1028,24 @@ mod tests {
             let failure = classify_report(RenderPath::Smartfx, &report).expect("classification");
             assert_eq!(failure.classification, Classification::SelectorError);
             assert_eq!(failure.selector_error, Some(code));
+        }
+    }
+
+    #[test]
+    fn smartfx_skips_native_not_dispatched_sentinels() {
+        for (pre_render_error, smart_render_error, expected) in
+            [(25, -1, 25), (-1, -6, -6)]
+        {
+            let report = json!({
+                "smart_render_selector_error": -1,
+                "pre_render_error": pre_render_error,
+                "smart_render_error": smart_render_error,
+                "output_pixels_valid": false
+            });
+
+            let failure = classify_report(RenderPath::Smartfx, &report).expect("classification");
+            assert_eq!(failure.classification, Classification::SelectorError);
+            assert_eq!(failure.selector_error, Some(expected));
         }
     }
 
