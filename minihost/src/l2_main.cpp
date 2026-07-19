@@ -54,6 +54,7 @@
 #include "l2_cli_dispatch.h"
 #include "l2_mode_execution.hpp"
 #include "parameter_animation_transport.hpp"
+#include "worker_parameter_runtime.hpp"
 #include "pf_cache_on_load_suite.hpp"
 #include "render_lifecycle.hpp"
 #include "render_pixel_buffer.hpp"
@@ -464,60 +465,33 @@ uint32_t selftest_trigger_guarded_crash() {
 // Keep every direct EffectMain selector call on the same audited boundary.
 #define entry(...) guarded_effect_call(entry, __VA_ARGS__)
 
-struct ParamRecord {
-  int32_t index{};
-  int32_t disk_id{};
-  int32_t type{};
-  uint32_t flags{};
-  std::string name;
-  bool has_numeric{};
-  double valid_min{};
-  double valid_max{};
-  double slider_min{};
-  double slider_max{};
-  double default_value{};
-  double current_value{};
-  bool has_current{};
-  bool has_color{};
-  std::array<unsigned char, 4> default_color{};
-  std::array<unsigned char, 4> current_color{};
-  std::array<float, 4> default_float_color{};
-  std::array<float, 4> current_float_color{};
-  std::array<double, 3> default_components{};
-  std::array<double, 3> current_components{};
-  int32_t component_count{};
-  int32_t precision{-1};
-  std::string choices;
-  std::string label;
-  std::string arbitrary_summary;
-  int32_t layer_default{};
-  std::array<std::byte, kParamSize> raw{};
-};
-std::vector<ParamRecord> g_params;
-std::vector<ParameterTimeline> g_parameter_timelines;
-std::unordered_map<void *, std::array<std::byte, kParamSize>>
-    g_keyframe_checkout_ledger;
-std::mutex g_keyframe_checkout_mutex;
+using ParamRecord = aexcompat::worker_runtime::parameters::ParamRecord;
+using RequestedKind = aexcompat::worker_runtime::parameters::RequestedKind;
+using RequestedAssignment = aexcompat::worker_runtime::parameters::RequestedAssignment;
+using RequestedAssignments = aexcompat::worker_runtime::parameters::RequestedAssignments;
+static_assert(aexcompat::worker_runtime::parameters::kDefinitionSize == kParamSize);
+auto& g_parameter_runtime = aexcompat::worker_runtime::parameters::state();
+auto& g_params = g_parameter_runtime.records;
+auto& g_parameter_timelines = g_parameter_runtime.timelines;
+auto& g_keyframe_checkout_ledger = g_parameter_runtime.keyframe_checkout_ledger;
+auto& g_keyframe_checkout_mutex = g_parameter_runtime.keyframe_checkout_mutex;
 const ParameterTimeline *parameter_timeline(int32_t slot) {
-  const auto it =
-      std::find_if(g_parameter_timelines.begin(), g_parameter_timelines.end(),
-                   [slot](const auto &t) { return t.slot == slot; });
-  return it == g_parameter_timelines.end() ? nullptr : &*it;
+  return aexcompat::worker_runtime::parameters::timeline(slot);
 }
-uint32_t g_arbitrary_copy_calls{};
-uint32_t g_arbitrary_dispose_calls{};
-uint32_t g_invalid_arbitrary_operations{};
-uint32_t g_arbitrary_print_calls{};
-uint32_t g_arbitrary_print_failures{};
-uint32_t g_arbitrary_roundtrip_calls{};
-uint32_t g_arbitrary_roundtrip_failures{};
-uint32_t g_arbitrary_scan_calls{};
-uint32_t g_arbitrary_scan_failures{};
-uint32_t g_arbitrary_compare_disagreements{};
-uint32_t g_arbitrary_new_calls{};
-uint32_t g_arbitrary_interpolation_calls{};
-uint32_t g_arbitrary_interpolation_failures{};
-double g_last_arbitrary_interpolation_amount{};
+auto& g_arbitrary_copy_calls = g_parameter_runtime.arbitrary.copy_calls;
+auto& g_arbitrary_dispose_calls = g_parameter_runtime.arbitrary.dispose_calls;
+auto& g_invalid_arbitrary_operations = g_parameter_runtime.arbitrary.invalid_operations;
+auto& g_arbitrary_print_calls = g_parameter_runtime.arbitrary.print_calls;
+auto& g_arbitrary_print_failures = g_parameter_runtime.arbitrary.print_failures;
+auto& g_arbitrary_roundtrip_calls = g_parameter_runtime.arbitrary.roundtrip_calls;
+auto& g_arbitrary_roundtrip_failures = g_parameter_runtime.arbitrary.roundtrip_failures;
+auto& g_arbitrary_scan_calls = g_parameter_runtime.arbitrary.scan_calls;
+auto& g_arbitrary_scan_failures = g_parameter_runtime.arbitrary.scan_failures;
+auto& g_arbitrary_compare_disagreements = g_parameter_runtime.arbitrary.compare_disagreements;
+auto& g_arbitrary_new_calls = g_parameter_runtime.arbitrary.new_calls;
+auto& g_arbitrary_interpolation_calls = g_parameter_runtime.arbitrary.interpolation_calls;
+auto& g_arbitrary_interpolation_failures = g_parameter_runtime.arbitrary.interpolation_failures;
+auto& g_last_arbitrary_interpolation_amount = g_parameter_runtime.arbitrary.last_interpolation_amount;
 std::wstring g_plugin_file_path;
 const aexcompat::host_audio::Telemetry& audio_telemetry() {
   return aexcompat::host_audio::runtime().telemetry();
@@ -525,19 +499,19 @@ const aexcompat::host_audio::Telemetry& audio_telemetry() {
 bool audio_handle_lifetimes_balanced() {
   return aexcompat::host_audio::runtime().lifetimes_balanced();
 }
-bool g_update_params_ui_advertised = false;
-bool g_query_dynamic_flags_advertised = false;
-bool g_conditional_ui_selectors_dispatched = false;
-int32_t g_update_params_ui_error = -1;
-int32_t g_query_dynamic_flags_error = -1;
-void** g_active_ui_params = nullptr;
-std::size_t g_active_ui_param_count = 0;
-bool g_update_params_ui_active = false;
-bool g_user_changed_param_active = false;
-uint32_t g_update_param_ui_calls = 0;
-bool g_user_changed_param_requested = false;
-int32_t g_user_changed_param_slot = -1;
-int32_t g_user_changed_param_error = -1;
+auto& g_update_params_ui_advertised = g_parameter_runtime.ui.update_advertised;
+auto& g_query_dynamic_flags_advertised = g_parameter_runtime.ui.dynamic_flags_advertised;
+auto& g_conditional_ui_selectors_dispatched = g_parameter_runtime.ui.conditional_selectors_dispatched;
+auto& g_update_params_ui_error = g_parameter_runtime.ui.update_error;
+auto& g_query_dynamic_flags_error = g_parameter_runtime.ui.dynamic_flags_error;
+auto& g_active_ui_params = g_parameter_runtime.ui.active_params;
+auto& g_active_ui_param_count = g_parameter_runtime.ui.active_param_count;
+auto& g_update_params_ui_active = g_parameter_runtime.ui.update_active;
+auto& g_user_changed_param_active = g_parameter_runtime.ui.user_changed_active;
+auto& g_update_param_ui_calls = g_parameter_runtime.ui.update_calls;
+auto& g_user_changed_param_requested = g_parameter_runtime.ui.user_changed_requested;
+auto& g_user_changed_param_slot = g_parameter_runtime.ui.user_changed_slot;
+auto& g_user_changed_param_error = g_parameter_runtime.ui.user_changed_error;
 bool g_aegp_init_mode = false;
 bool& g_aegp_update_menu_mode = scene_runtime_state().update_menu_mode;
 bool g_aegp_idle_mode = false;
@@ -616,24 +590,24 @@ struct AegpCommandRegistration {
 };
 std::vector<AegpCommandRegistration> g_aegp_command_registrations;
 std::vector<int32_t> g_aegp_inserted_commands;
-std::map<int32_t, std::array<std::byte, kParamSize>> g_checkout_layer_definitions;
-std::mutex g_param_checkout_mutex;
-std::unordered_map<void*, uint32_t> g_live_param_checkouts;
-uint32_t g_param_checkout_calls = 0;
-uint32_t g_param_checkin_calls = 0;
-uint32_t g_automatic_param_checkins = 0;
-uint32_t g_invalid_param_checkins = 0;
-uint32_t g_rejected_temporal_param_checkouts = 0;
-bool g_wide_time_checkout_allowed = false;
+auto& g_checkout_layer_definitions = g_parameter_runtime.checkout.definitions;
+auto& g_param_checkout_mutex = g_parameter_runtime.checkout.mutex;
+auto& g_live_param_checkouts = g_parameter_runtime.checkout.live;
+auto& g_param_checkout_calls = g_parameter_runtime.checkout.checkout_calls;
+auto& g_param_checkin_calls = g_parameter_runtime.checkout.checkin_calls;
+auto& g_automatic_param_checkins = g_parameter_runtime.checkout.automatic_checkins;
+auto& g_invalid_param_checkins = g_parameter_runtime.checkout.invalid_checkins;
+auto& g_rejected_temporal_param_checkouts = g_parameter_runtime.checkout.rejected_temporal;
+auto& g_wide_time_checkout_allowed = g_parameter_runtime.checkout.wide_time_allowed;
 bool g_classic_shutter_dependency_advertised = false;
-int32_t g_checkout_current_time = 0;
-uint32_t g_checkout_current_time_scale = 1;
-int32_t g_last_param_checkout_index = -1;
-int32_t g_last_param_checkout_time = 0;
-int32_t g_last_param_checkout_time_step = 0;
-uint32_t g_last_param_checkout_time_scale = 0;
-std::string g_options_button_name;
-uint32_t g_options_button_name_calls = 0;
+auto& g_checkout_current_time = g_parameter_runtime.checkout.current_time;
+auto& g_checkout_current_time_scale = g_parameter_runtime.checkout.current_time_scale;
+auto& g_last_param_checkout_index = g_parameter_runtime.checkout.last_index;
+auto& g_last_param_checkout_time = g_parameter_runtime.checkout.last_time;
+auto& g_last_param_checkout_time_step = g_parameter_runtime.checkout.last_time_step;
+auto& g_last_param_checkout_time_scale = g_parameter_runtime.checkout.last_time_scale;
+auto& g_options_button_name = g_parameter_runtime.ui.options_button_name;
+auto& g_options_button_name_calls = g_parameter_runtime.ui.options_button_name_calls;
 std::atomic<uint32_t> g_channel_count_queries{0};
 uint32_t g_duck_quacks = 0;
 uint32_t g_transform_world_calls = 0;
@@ -10855,18 +10829,7 @@ std::string hex_bytes(const unsigned char* data, std::size_t size) {
   return text.str();
 }
 
-enum class RequestedKind { Integer, Float, Color, Angle, Point, Point3D, ArbitraryText };
-struct RequestedAssignment {
-  std::wstring id;
-  int32_t index{};
-  RequestedKind kind{};
-  double value{};
-  std::array<unsigned char, 4> color{};
-  std::array<double, 3> components{};
-  std::string text;
-};
-using RequestedAssignments = std::vector<RequestedAssignment>;
-RequestedAssignments g_user_changed_parameters;
+auto& g_user_changed_parameters = g_parameter_runtime.user_changed_parameters;
 
 bool parse_i32_arg(const wchar_t* text, int32_t minimum, int32_t maximum, int32_t& output) {
   if (!text || !*text) return false;
