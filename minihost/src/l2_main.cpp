@@ -68,6 +68,7 @@
 #include "worker_mask_runtime.hpp"
 #include "worker_minidump_runtime.hpp"
 #include "worker_pf_helper_runtime.hpp"
+#include "worker_mask_runtime_internal.hpp"
 #include "worker_aegp_render_options.hpp"
 #include "worker_aegp_init_runtime.hpp"
 #include "worker_aegp_scene.hpp"
@@ -85,7 +86,10 @@
 #include "worker_render_receipts.hpp"
 #include "worker_target.hpp"
 
-namespace {
+// Internal worker implementation uses a named namespace so subsystem
+// translation units can own callback state without including implementation
+// fragments into this file.
+namespace aexcompat::l2_detail {
 
 aexcompat::worker_target::Kind g_worker_target =
     aexcompat::worker_target::Kind::L2;
@@ -599,104 +603,13 @@ int32_t g_render_field{};
 int32_t g_shutter_angle{};
 int32_t g_shutter_phase{};
 
-struct OpaqueHostObject { uint32_t tag; };
-struct MaskVertex {
-  double x, y;
-  double tangent_in_x, tangent_in_y;
-  double tangent_out_x, tangent_out_y;
-};
-struct MaskFeather {
-  int32_t segment{};
-  double segment_s{};
-  double radius{};
-  float ui_corner_angle{};
-  float tension{};
-  uint8_t interp{};
-  uint8_t type{};
-};
 static_assert(sizeof(MaskFeather) == 40);
 static_assert(offsetof(MaskFeather, segment_s) == 8);
 static_assert(offsetof(MaskFeather, radius) == 16);
 static_assert(offsetof(MaskFeather, interp) == 32);
 static_assert(offsetof(MaskFeather, type) == 33);
-struct OutlineData {
-  OpaqueHostObject outline{0x4f55544c};
-  bool open{};
-  std::vector<MaskVertex> vertices;
-  std::vector<MaskFeather> feathers;
-};
-struct HostTime { int32_t value{}; uint32_t scale{1}; };
 static_assert(sizeof(HostTime) == 8);
-struct KeyframeEase { double speed; double influence; };
-constexpr int16_t kHostTemporalDimensions = 1;
-struct HostKeyframe : OutlineData {
-  HostTime time{};
-  int32_t flags{};
-  int32_t in_interpolation{1};
-  int32_t out_interpolation{1};
-  int32_t label{};
-  OutlineData spatial_in;
-  OutlineData spatial_out;
-  std::array<KeyframeEase, kHostTemporalDimensions> temporal_in{};
-  std::array<KeyframeEase, kHostTemporalDimensions> temporal_out{};
-};
-struct HostMask : OutlineData {
-  OpaqueHostObject mask{0x4d41534b};
-  bool mask_live{};
-  bool stream_live{};
-  bool value_live{};
-  bool deleted{};
-  bool invert{};
-  bool locked{};
-  bool roto_bezier{};
-  uint8_t motion_blur{};
-  uint8_t feather_falloff{};
-  int32_t mode{1};
-  int32_t id{};
-  int32_t outline_stream_id{};
-  int32_t feather_stream_id{};
-  int32_t opacity_stream_id{};
-  int32_t expansion_stream_id{};
-  int32_t dynamic_order{};
-  double opacity{100.0};
-  std::array<double, 2> feather{};
-  double expansion{};
-  std::u16string dynamic_name{u"Mask"};
-  std::array<uint32_t, 5> dynamic_flags{};
-  bool dynamic_modified{};
-  std::array<std::u16string, 4> expressions;
-  std::array<bool, 4> expression_enabled{};
-  std::array<double, 4> color{1.0, 1.0, 0.0, 0.0};
-  std::list<HostKeyframe> keyframes;
-};
-HostMask* find_mask(void* handle);
-enum class DynamicNodeKind {
-  MaskOutline, LayerRoot, MaskParade, MaskAtom, MaskFeather, MaskOpacity, MaskExpansion
-};
-struct HostStreamRef {
-  OpaqueHostObject opaque{0x5354524d};
-  HostMask* mask{};
-  int32_t selector{};
-  int32_t unique_id{};
-  uint32_t live_values{};
-  DynamicNodeKind kind{DynamicNodeKind::MaskOutline};
-};
-struct StreamValue {
-  void* stream;
-  union {
-    void* value;
-    double one_d;
-    double two_d[2];
-    std::byte raw_value[32];
-  };
-};
 static_assert(sizeof(StreamValue) == 40);
-struct CheckedStreamValue {
-  HostStreamRef* stream{};
-  OutlineData* outline{};
-  HostKeyframe* source_keyframe{};
-  std::unique_ptr<OutlineData> owned_outline;
-};
 OutlineData* sampled_outline(HostStreamRef* stream, const HostTime* time,
                              std::unique_ptr<OutlineData>& owned);
 bool dynamic_leaf(DynamicNodeKind kind);
@@ -709,7 +622,6 @@ OpaqueHostObject g_layer{0x4c415952};
 void raise_mask_access_violation() {
   RaiseException(EXCEPTION_ACCESS_VIOLATION, 0, 0, nullptr);
 }
-std::vector<HostMask> g_mask_scene;
 std::unordered_map<HostMask*, uint32_t> g_pf_path_checkouts;
 uint32_t g_pf_path_checkout_calls{};
 uint32_t g_pf_path_checkin_calls{};
@@ -740,45 +652,6 @@ constexpr int32_t kPfBadCallbackParam = 516;
 constexpr int32_t kPfSuiteToolNone = 0;
 bool g_render_ui_context_active{};
 using aexcompat::pf_helper::reset;
-std::list<HostStreamRef> g_stream_refs;
-std::unordered_map<StreamValue*, CheckedStreamValue> g_stream_values;
-struct MaskLifetimeCounts {
-  uint32_t masks_acquired{};
-  uint32_t masks_disposed{};
-  uint32_t streams_acquired{};
-  uint32_t streams_disposed{};
-  uint32_t values_acquired{};
-  uint32_t values_disposed{};
-};
-MaskLifetimeCounts g_mask_lifetime;
-uint32_t g_invalid_outline_operations{};
-uint32_t g_outline_mutations{};
-uint32_t g_mask_mutations{};
-uint32_t g_invalid_mask_operations{};
-uint32_t g_invalid_stream_operations{};
-uint32_t g_stream_metadata_queries{};
-uint32_t g_stream_duplicates{};
-uint32_t g_keyframe_mutations{};
-uint32_t g_invalid_keyframe_operations{};
-uint32_t g_dynamic_stream_queries{};
-uint32_t g_dynamic_stream_mutations{};
-uint32_t g_invalid_dynamic_stream_operations{};
-uint32_t g_layer_dynamic_flags{};
-uint32_t g_mask_parade_dynamic_flags{};
-int32_t g_next_mask_id{1};
-int32_t g_next_stream_id{1};
-constexpr std::size_t kMaxHostMasks = 8;
-constexpr std::size_t kMaxOutlineVertices = 64;
-constexpr std::size_t kMaxOutlineFeathers = 64;
-constexpr std::size_t kMaxKeyframesPerStream = 64;
-constexpr std::size_t kMaxCheckedStreamValues = 256;
-
-struct AddKeyframesTransaction {
-  OpaqueHostObject opaque{0x41444b46};
-  HostStreamRef* stream{};
-  std::vector<HostKeyframe> staged;
-};
-std::list<AddKeyframesTransaction> g_add_keyframe_transactions;
 
 aexcompat::mask_runtime::Snapshot mask_runtime_snapshot() {
   aexcompat::mask_runtime::Snapshot snapshot;
@@ -1083,7 +956,6 @@ int32_t __cdecl get_effect_camera_matrix(void* effect, const AegpTime* comp_time
     AegpMatrix4* camera_matrix, double* distance_to_image_plane,
     int16_t* image_plane_width, int16_t* image_plane_height);
 
-#include "worker_mask_runtime_callbacks.inc"
 bool verify_keyframe_ownership_rejection() {
   const uint32_t invalid_before = g_invalid_keyframe_operations;
   const uint32_t mutations_before = g_keyframe_mutations;
@@ -12173,7 +12045,9 @@ bool verify_pf_color_settings_suite6() {
       release_suite("PF Color Settings Suite", 7) == 0;
 }
 
-}  // namespace
+}  // namespace aexcompat::l2_detail
+
+using namespace aexcompat::l2_detail;
 
 bool verify_pf_color_suite() {
   const void* acquired8{}; const void* acquired16{}; const void* acquired_float{};
@@ -15751,6 +15625,7 @@ int worker_main_impl(int argc, wchar_t **argv) {
             << ",\"module_audit\":" << module_audit_json() << "}\n";
   } else if (is_smart_worker()) {
   restore_native_stdout();
+  const auto mask_report = aexcompat::mask_runtime::snapshot();
   std::cout << "{\"schema_version\":1,\"stage\":\"smartfx_render\",\"status\":\""
             << (smart.pre_error == 0 && smart.render_error == 0 &&
                 parameter_count_contract_valid && smart.rects_valid &&
@@ -15865,16 +15740,16 @@ int worker_main_impl(int argc, wchar_t **argv) {
             << ",\"pre_effect_source_origin\":[" << read<int32_t>(input, 392) << "," << read<int32_t>(input, 396) << "]"
             << ",\"output_origin\":[" << read<int32_t>(input, 276) << "," << read<int32_t>(input, 280) << "]"
             << ",\"mask_scene_id\":\"" << g_mask_scene_id << "\""
-            << ",\"mask_count\":" << active_mask_count()
+            << ",\"mask_count\":" << mask_report.active_masks
             << ",\"mask_open_count\":" << mask_open_count()
             << ",\"mask_tangent_vertex_count\":" << mask_tangent_vertex_count()
             << ",\"mask_lifetimes_balanced\":" << (mask_lifetimes_balanced() ? "true" : "false")
-            << ",\"mask_handles_acquired\":" << g_mask_lifetime.masks_acquired
-            << ",\"mask_handles_disposed\":" << g_mask_lifetime.masks_disposed
-            << ",\"stream_handles_acquired\":" << g_mask_lifetime.streams_acquired
-            << ",\"stream_handles_disposed\":" << g_mask_lifetime.streams_disposed
-            << ",\"stream_values_acquired\":" << g_mask_lifetime.values_acquired
-            << ",\"stream_values_disposed\":" << g_mask_lifetime.values_disposed
+            << ",\"mask_handles_acquired\":" << mask_report.masks_acquired
+            << ",\"mask_handles_disposed\":" << mask_report.masks_disposed
+            << ",\"stream_handles_acquired\":" << mask_report.streams_acquired
+            << ",\"stream_handles_disposed\":" << mask_report.streams_disposed
+            << ",\"stream_values_acquired\":" << mask_report.values_acquired
+            << ",\"stream_values_disposed\":" << mask_report.values_disposed
             << ",\"lifetime_fault_observed\":" << (lifetime_fault_observed ? "true" : "false")
             << ",\"suite_leases_balanced\":" << (suite_leases_balanced() ? "true" : "false")
             << ",\"suite_lease_warning\":" << (!suite_leases_balanced() ? "true" : "false")
@@ -15954,18 +15829,18 @@ int worker_main_impl(int argc, wchar_t **argv) {
             << ",\"supported_pixel_format_count\":" << g_supported_pixel_formats.size()
             << ",\"invalid_pixel_format_operations\":" << g_invalid_pixel_format_operations
             << ",\"outline_fault_observed\":" << (outline_fault_observed ? "true" : "false")
-            << ",\"outline_mutations\":" << g_outline_mutations
-            << ",\"invalid_outline_operations\":" << g_invalid_outline_operations
+            << ",\"outline_mutations\":" << mask_report.outline_mutations
+            << ",\"invalid_outline_operations\":" << mask_report.invalid_outline_operations
             << ",\"mask_attribute_fault_observed\":" << (mask_attribute_fault_observed ? "true" : "false")
-            << ",\"mask_mutations\":" << g_mask_mutations
-            << ",\"invalid_mask_operations\":" << g_invalid_mask_operations
+            << ",\"mask_mutations\":" << mask_report.mask_mutations
+            << ",\"invalid_mask_operations\":" << mask_report.invalid_mask_operations
             << ",\"stream_metadata_fault_observed\":" << (stream_metadata_fault_observed ? "true" : "false")
             << ",\"stream_metadata_queries\":" << g_stream_metadata_queries
             << ",\"stream_duplicates\":" << g_stream_duplicates
             << ",\"invalid_stream_operations\":" << g_invalid_stream_operations
             << ",\"keyframe_fault_observed\":" << (keyframe_fault_observed ? "true" : "false")
-            << ",\"keyframe_mutations\":" << g_keyframe_mutations
-            << ",\"invalid_keyframe_operations\":" << g_invalid_keyframe_operations
+            << ",\"keyframe_mutations\":" << mask_report.keyframe_mutations
+            << ",\"invalid_keyframe_operations\":" << mask_report.invalid_keyframe_operations
             << ",\"dynamic_stream_fault_observed\":" << (dynamic_stream_fault_observed ? "true" : "false")
             << ",\"dynamic_stream_queries\":" << g_dynamic_stream_queries
             << ",\"dynamic_stream_mutations\":" << g_dynamic_stream_mutations
@@ -16018,6 +15893,6 @@ int worker_main_impl(int argc, wchar_t **argv) {
 }
 
 int aexcompat::worker_target::run(Kind kind, int argc, wchar_t** argv) {
-  g_worker_target = kind;
+  l2_detail::g_worker_target = kind;
   return worker_main_impl(argc, argv);
 }

@@ -1,3 +1,28 @@
+#include "worker_mask_runtime.hpp"
+#include "worker_mask_runtime_internal.hpp"
+#include "worker_handle_runtime.hpp"
+
+#include <algorithm>
+#include <cstring>
+#include <new>
+
+namespace aexcompat::l2_detail {
+
+using aexcompat::worker_runtime::handles::make_utf16_handle;
+
+std::vector<HostMask> g_mask_scene;
+std::list<HostStreamRef> g_stream_refs;
+std::unordered_map<StreamValue*, CheckedStreamValue> g_stream_values;
+MaskLifetimeCounts g_mask_lifetime;
+uint32_t g_invalid_outline_operations{}, g_outline_mutations{}, g_mask_mutations{},
+    g_invalid_mask_operations{}, g_invalid_stream_operations{}, g_stream_metadata_queries{},
+    g_stream_duplicates{}, g_keyframe_mutations{}, g_invalid_keyframe_operations{},
+    g_dynamic_stream_queries{}, g_dynamic_stream_mutations{},
+    g_invalid_dynamic_stream_operations{}, g_layer_dynamic_flags{},
+    g_mask_parade_dynamic_flags{};
+int32_t g_next_mask_id{1}, g_next_stream_id{1};
+std::list<AddKeyframesTransaction> g_add_keyframe_transactions;
+
 int32_t __cdecl get_layer_num_masks(void* layer, int32_t* count) {
   const auto host = aexcompat::mask_runtime::host_context();
   if (layer != host.layer || !count) return 4;
@@ -790,4 +815,6 @@ int32_t __cdecl set_keyframe_label(void* stream, int32_t index, int32_t label) {
   if (!key || label < 0 || label > 16) { ++g_invalid_keyframe_operations; return 4; }
   key->label = label; ++g_keyframe_mutations; return 0;
 }
+
+}  // namespace aexcompat::l2_detail
 
