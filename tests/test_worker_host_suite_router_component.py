@@ -3,7 +3,8 @@ import source_owners
 
 
 ROOT = Path(__file__).resolve().parents[1]
-MAIN = source_owners.L2_MAIN.read_text(encoding="utf-8")
+MAIN = (source_owners.L2_MAIN.read_text(encoding="utf-8") +
+        (source_owners.SRC / "worker_host_suite_wiring.cpp").read_text(encoding="utf-8"))
 HEADER = (ROOT / "minihost/src/worker_host_suite_router.hpp").read_text(
     encoding="utf-8"
 )

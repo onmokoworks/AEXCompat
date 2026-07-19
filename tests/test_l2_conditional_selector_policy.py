@@ -12,7 +12,8 @@ RESULT = ROOT / "analysis" / "SCATTERMAP_L2_RESULT_2026-07-13.md"
 
 class L2ConditionalSelectorPolicyTests(unittest.TestCase):
     def test_worker_derives_selector_policy_from_advertised_flags(self):
-        worker = WORKER.read_text(encoding="utf-8")
+        worker = (WORKER.read_text(encoding="utf-8") +
+                  (source_owners.SRC / "worker_host_suite_wiring.cpp").read_text(encoding="utf-8"))
         self.assertIn("update_params_ui_advertised", worker)
         self.assertIn("query_dynamic_flags_advertised", worker)
         self.assertIn("(1u << 26)", worker)

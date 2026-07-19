@@ -27,11 +27,11 @@ MEMBERS = [
 
 def source_text():
     return "\n".join(path.read_text(encoding="utf-8") for path in
-                     (SOURCE, COLOR_HEADER, COLOR_SOURCE, COLOR_SELFTEST_SOURCE))
+                     (SOURCE, source_owners.SRC / "worker_host_suite_wiring.cpp", COLOR_HEADER, COLOR_SOURCE, COLOR_SELFTEST_SOURCE))
 
 
 def test_color_settings_selftest_is_a_true_translation_unit():
-    worker_source = SOURCE.read_text(encoding="utf-8")
+    worker_source = SOURCE.read_text(encoding="utf-8") + (source_owners.SRC / "worker_host_suite_wiring.cpp").read_text(encoding="utf-8")
     selftest_source = COLOR_SELFTEST_SOURCE.read_text(encoding="utf-8")
     marker = "bool verify_pf_color_settings_suite6()"
     assert marker in selftest_source
