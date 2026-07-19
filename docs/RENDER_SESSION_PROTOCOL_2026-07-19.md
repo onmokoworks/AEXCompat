@@ -88,6 +88,7 @@ worker 側パースは `trace_writer.cpp:16-28` の型)。worker はパス文字
 ```
 aex_render_worker.exe --render-session-v1 <plugin> <plugin_sha256> <payload>
     <max_width> <max_height> <time_step> <total_time> <time_scale>
+    [session-layers:v1|<slot,w,h;...>]
     [v2|<mask context>] [spatial:v*|<...>] [render:v1|<...>]
     [--aux-manifest-v1 <path>] [--parameter-animation-v1 <path>]
     [--dump-worlds-v1 <dir>] [--output-checksum-detail-v1 1] [--minidump-v1 <dir>]
@@ -104,6 +105,14 @@ alpha-as-coverage と aux channels は layer 作業 (W1-4) と同 PR。値域・
 one-shot と同一 (parse_mask_context_payload / parse_spatial_context_payload
 / parse_render_environment_payload)。full-resolution 寸法を宣言する spatial は
 遅延 SEQUENCE_SETUP と全フレームの in_data に反映される。
+
+W1-4 では secondary layer を `session-layers:v1|slot,w,h;...` trailer
+(context trailer より前) で運ぶ。各 layer の RGBA8 ピクセルは §6 のレイヤー
+スロット (出力スロットの後、各 max_width*max_height*4) に static 配置され、
+worker は open 時に一度読んで全フレームで使い回す。header の
+`layer_slot_count` は broker が書き、両者が検証する。timed layer と
+alpha-as-coverage は後続 (v1.1) で、実 AEX での layer 消費の等価性検証は
+layer parameter を宣言する probe fixture を要する (別スコープ)。
 
 one-shot との差分:
 

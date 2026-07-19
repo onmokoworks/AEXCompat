@@ -295,6 +295,10 @@ mod windows_e2e {
             std::fs::read(&mask_b).unwrap(),
             "mask PNG bytes differ between the routes"
         );
+        // Secondary layer A/B equivalence needs an AEX declaring a layer
+        // parameter, which pf_sampling_probe does not; the session layer
+        // transport is covered by the render_session fixture integration test,
+        // and the real-AEX equivalence is tracked separately.
         let _ = std::fs::remove_dir_all(&scratch);
     }
 }

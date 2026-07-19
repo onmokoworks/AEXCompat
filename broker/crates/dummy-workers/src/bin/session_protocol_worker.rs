@@ -256,6 +256,17 @@ mod worker {
         if effective >= 11 && args[effective - 1].starts_with("v2|") {
             effective -= 1;
         }
+        // The secondary-layer trailer sits ahead of the context trailers;
+        // keep it to validate the header's layer_slot_count and the slots.
+        let mut layer_trailer: Option<String> = None;
+        if effective >= 11 && args[effective - 1].starts_with("session-layers:v1|") {
+            layer_trailer = Some(args[effective - 1].clone());
+            effective -= 1;
+        }
+        let expected_layer_count = layer_trailer
+            .as_deref()
+            .map(|trailer| trailer["session-layers:v1|".len()..].split(';').count() as u32)
+            .unwrap_or(0);
         if effective != 10 || args[1] != "--render-session-v1" {
             return 2;
         }
@@ -284,7 +295,7 @@ mod worker {
             || view.read_u32(DEPTH_CODE_OFFSET) != 8
             || view.read_u32(MAX_WIDTH_OFFSET) != width as u32
             || view.read_u32(MAX_HEIGHT_OFFSET) != height as u32
-            || view.read_u32(LAYER_SLOT_COUNT_OFFSET) != 0
+            || view.read_u32(LAYER_SLOT_COUNT_OFFSET) != expected_layer_count
         {
             return EXIT_PROTOCOL_VIOLATION;
         }
@@ -292,6 +303,24 @@ mod worker {
         let aligned = |bytes: usize| bytes.div_ceil(SLOT_ALIGNMENT) * SLOT_ALIGNMENT;
         let input_offset = HEADER_BYTES;
         let output_offset = HEADER_BYTES + aligned(slot_bytes);
+
+        // The integration test fills each layer's slot with its slot number as
+        // a byte, so reading the first byte of each layer slot proves the
+        // metadata reached the right slot with the right pixels (issue #98 W1-4).
+        if let Some(trailer) = &layer_trailer {
+            let layer_base = output_offset + aligned(slot_bytes);
+            for (index, entry) in trailer["session-layers:v1|".len()..].split(';').enumerate() {
+                let Some(slot) = entry.split(',').next().and_then(|s| s.parse::<u32>().ok())
+                else {
+                    return EXIT_PROTOCOL_VIOLATION;
+                };
+                let offset = layer_base + index * aligned(slot_bytes);
+                let byte = unsafe { view.0.add(offset).read() };
+                if byte != slot as u8 {
+                    return EXIT_PROTOCOL_VIOLATION;
+                }
+            }
+        }
 
         let mut frames = 0u32;
         loop {

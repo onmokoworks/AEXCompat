@@ -4228,7 +4228,6 @@ fn render_with_artifact(
     });
     if !smart
         && session_representable_context
-        && secondaries.is_empty()
         && timed_secondaries.is_empty()
         && audio.is_none()
         && custom_ui_action.is_none()
@@ -4236,6 +4235,15 @@ fn render_with_artifact(
         && payload == encode_interactive_payload(interactive_parameters.unwrap_or_default())?
         && std::env::var_os(DISABLE_SESSION_WRAPPER_ENV).is_none()
     {
+        let session_layers = secondaries
+            .iter()
+            .map(|(slot, width, height, rgba)| crate::render_session::SessionLayer {
+                slot: *slot,
+                width: *width,
+                height: *height,
+                rgba: rgba.clone(),
+            })
+            .collect::<Vec<_>>();
         // A host context always sends the mask trailer (the one-shot path does
         // too, even for an empty mask scene), keeping the argv shapes identical.
         let mask_trailer = match host_context {
@@ -4260,6 +4268,7 @@ fn render_with_artifact(
             preserved_output: preserved_output.as_deref(),
             interactive_parameters,
             parameter_animation,
+            layers: session_layers,
             mask_trailer,
             spatial_trailer,
             render_environment_trailer,
@@ -4834,6 +4843,7 @@ struct SessionWrapperRequest<'a> {
     preserved_output: Option<&'a Path>,
     interactive_parameters: Option<&'a [InteractiveParameter]>,
     parameter_animation: Option<&'a [ParameterAnimation]>,
+    layers: Vec<crate::render_session::SessionLayer>,
     mask_trailer: Option<String>,
     spatial_trailer: Option<String>,
     render_environment_trailer: Option<String>,
@@ -4894,6 +4904,7 @@ fn render_classic_via_length_one_session(
         aux_manifest: None,
         world_dump_dir: world_dump_dir.as_ref().map(|dump| dump.path.as_path()),
         output_checksum_detail,
+        layers: &request.layers,
         mask_trailer: request.mask_trailer.clone(),
         spatial_trailer: request.spatial_trailer.clone(),
         render_environment_trailer: request.render_environment_trailer.clone(),
@@ -5038,7 +5049,17 @@ fn render_classic_via_length_one_session(
         gpu_fallback_used: false,
         gpu_fallback_reason: None,
         gpu_attempt: None,
-        secondary_layers: json!([] as [Value; 0]),
+        // Same shape as the one-shot path so a layered session render reports
+        // its layers instead of falsely claiming none (issue #98 W1-4).
+        secondary_layers: json!(request
+            .layers
+            .iter()
+            .map(|layer| json!({
+                "slot": layer.slot,
+                "width": layer.width,
+                "height": layer.height,
+            }))
+            .collect::<Vec<_>>()),
         empty_smart_result: false,
         output_raw: request
             .preserved_output

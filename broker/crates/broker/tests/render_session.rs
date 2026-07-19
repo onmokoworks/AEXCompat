@@ -13,7 +13,7 @@ mod windows_e2e {
         InteractiveParameter, ParameterAnimation, RenderPixelFormat,
     };
     use aexcompat_broker::render_session::{
-        run_video_batch, FrameStatus, RenderSession, SessionOpenRequest,
+        run_video_batch, FrameStatus, RenderSession, SessionLayer, SessionOpenRequest,
     };
     use sha2::{Digest, Sha256};
     use std::path::{Path, PathBuf};
@@ -111,6 +111,7 @@ mod windows_e2e {
             mask_trailer: None,
             spatial_trailer: None,
             render_environment_trailer: None,
+            layers: &[],
             dependencies: Vec::new(),
             width: WIDTH,
             height: HEIGHT,
@@ -173,6 +174,133 @@ mod windows_e2e {
     }
 
     #[test]
+    fn secondary_layers_reach_their_shared_slots() {
+        let _behavior = BehaviorGuard::set(None);
+        let (repository, plugin, sha) = temp_repository();
+        // Each layer's slot is filled with its slot number as a byte; the
+        // fixture reads the first byte of each layer slot and rejects the
+        // session unless the metadata and pixels landed in the right slot.
+        let layers = vec![
+            SessionLayer {
+                slot: 3,
+                width: WIDTH,
+                height: HEIGHT,
+                rgba: vec![3u8; (WIDTH * HEIGHT * 4) as usize],
+            },
+            SessionLayer {
+                slot: 7,
+                width: WIDTH,
+                height: HEIGHT,
+                rgba: vec![7u8; (WIDTH * HEIGHT * 4) as usize],
+            },
+        ];
+        let mut session = RenderSession::open(SessionOpenRequest {
+            repository: &repository.0,
+            plugin_path: &plugin,
+            plugin_sha256: &sha,
+            parameters: None,
+            parameter_animation: None,
+            aux_manifest: None,
+            world_dump_dir: None,
+            output_checksum_detail: false,
+            mask_trailer: None,
+            spatial_trailer: None,
+            render_environment_trailer: None,
+            layers: &layers,
+            dependencies: Vec::new(),
+            width: WIDTH,
+            height: HEIGHT,
+            pixel_format: RenderPixelFormat::Argb8,
+            time_step: 1,
+            total_time: 300,
+            time_scale: 30,
+            frame_deadline: Duration::from_secs(30),
+        })
+        .expect("open render session with secondary layers");
+        let outcome = session
+            .render_frame(0, 0, &input_pattern(5))
+            .expect("frame renders with layers in their slots");
+        assert!(matches!(outcome.status, FrameStatus::Rendered { .. }));
+        let close = session.close();
+        assert_eq!(close["session_clean"], true, "close: {close}");
+    }
+
+    #[test]
+    fn open_rejects_layer_pixels_that_do_not_fit_the_slot() {
+        let _behavior = BehaviorGuard::set(None);
+        let (repository, plugin, sha) = temp_repository();
+        let layers = vec![SessionLayer {
+            slot: 3,
+            width: WIDTH,
+            height: HEIGHT,
+            // One byte short of the declared geometry.
+            rgba: vec![3u8; (WIDTH * HEIGHT * 4 - 1) as usize],
+        }];
+        let error = RenderSession::open(SessionOpenRequest {
+            repository: &repository.0,
+            plugin_path: &plugin,
+            plugin_sha256: &sha,
+            parameters: None,
+            parameter_animation: None,
+            aux_manifest: None,
+            world_dump_dir: None,
+            output_checksum_detail: false,
+            mask_trailer: None,
+            spatial_trailer: None,
+            render_environment_trailer: None,
+            layers: &layers,
+            dependencies: Vec::new(),
+            width: WIDTH,
+            height: HEIGHT,
+            pixel_format: RenderPixelFormat::Argb8,
+            time_step: 1,
+            total_time: 300,
+            time_scale: 30,
+            frame_deadline: Duration::from_secs(30),
+        })
+        .map(|_| ())
+        .expect_err("mismatched layer pixels fail fast at open");
+        assert!(error.to_string().contains("do not fit"), "{error}");
+    }
+
+    #[test]
+    fn open_rejects_a_zero_layer_slot() {
+        let _behavior = BehaviorGuard::set(None);
+        let (repository, plugin, sha) = temp_repository();
+        let layers = vec![SessionLayer {
+            slot: 0,
+            width: WIDTH,
+            height: HEIGHT,
+            rgba: vec![0u8; (WIDTH * HEIGHT * 4) as usize],
+        }];
+        let error = RenderSession::open(SessionOpenRequest {
+            repository: &repository.0,
+            plugin_path: &plugin,
+            plugin_sha256: &sha,
+            parameters: None,
+            parameter_animation: None,
+            aux_manifest: None,
+            world_dump_dir: None,
+            output_checksum_detail: false,
+            mask_trailer: None,
+            spatial_trailer: None,
+            render_environment_trailer: None,
+            layers: &layers,
+            dependencies: Vec::new(),
+            width: WIDTH,
+            height: HEIGHT,
+            pixel_format: RenderPixelFormat::Argb8,
+            time_step: 1,
+            total_time: 300,
+            time_scale: 30,
+            frame_deadline: Duration::from_secs(30),
+        })
+        .map(|_| ())
+        .expect_err("a zero layer slot fails fast at open");
+        assert!(error.to_string().contains("slot or dimensions"), "{error}");
+    }
+
+    #[test]
     fn animation_sidecar_rides_the_session_and_is_cleaned_up() {
         let _behavior = BehaviorGuard::set(None);
         let (repository, plugin, sha) = temp_repository();
@@ -190,6 +318,7 @@ mod windows_e2e {
             mask_trailer: None,
             spatial_trailer: None,
             render_environment_trailer: None,
+            layers: &[],
             dependencies: Vec::new(),
             width: WIDTH,
             height: HEIGHT,
@@ -251,6 +380,7 @@ mod windows_e2e {
             mask_trailer: None,
             spatial_trailer: None,
             render_environment_trailer: None,
+            layers: &[],
             dependencies: Vec::new(),
             width: WIDTH,
             height: HEIGHT,
@@ -328,6 +458,7 @@ mod windows_e2e {
             mask_trailer: None,
             spatial_trailer: None,
             render_environment_trailer: None,
+            layers: &[],
             dependencies: Vec::new(),
             width: WIDTH,
             height: HEIGHT,
@@ -364,6 +495,7 @@ mod windows_e2e {
             mask_trailer: None,
             spatial_trailer: None,
             render_environment_trailer: None,
+            layers: &[],
             dependencies: Vec::new(),
             width: WIDTH,
             height: HEIGHT,
@@ -395,6 +527,7 @@ mod windows_e2e {
             mask_trailer: None,
             spatial_trailer: None,
             render_environment_trailer: None,
+            layers: &[],
             dependencies: Vec::new(),
             width: WIDTH,
             height: HEIGHT,
@@ -426,6 +559,7 @@ mod windows_e2e {
             mask_trailer: None,
             spatial_trailer: None,
             render_environment_trailer: None,
+            layers: &[],
             dependencies: Vec::new(),
             width: WIDTH,
             height: HEIGHT,
