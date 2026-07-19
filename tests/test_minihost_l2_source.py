@@ -662,7 +662,7 @@ class MinihostL2SourceTests(unittest.TestCase):
             "&copy_world8, &copy_world_hq, &transfer_rect, &transform_world}",
             '{"PF ANSI Suite", 1, nullptr, &provide_ansi1}',
             "c.ansi=c.assembly.ansi",
-            "g_mask_model_enabled = true",
+            "mask_runtime::set_model_enabled(true)",
         ):
             self.assertIn(marker, text)
 

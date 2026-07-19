@@ -42,7 +42,6 @@ extern std::atomic<uint32_t> g_guid_mix_in_rejections;
 extern std::atomic<uint32_t> g_guid_mix_in_last_size;
 extern std::atomic<uint32_t> g_guid_mix_in_max_size;
 extern std::atomic<int32_t> g_guid_mix_in_last_result;
-extern std::string g_mask_scene_id;
 // Mirrors l2_main's frozen guid mix-in transport bound; the report publishes
 // it beside the observed sizes.
 constexpr uint32_t kMaxGuidMixInBytes = 1024 * 1024;
@@ -143,7 +142,7 @@ void emit_smart_completion_report(const SmartCompletionInputs& in) {
   const auto handle_stats = worker_runtime::handles::statistics();
   const auto world_stats = aexcompat::world_registry::statistics();
   report::append_smart_lifetimes(report_snapshot, {
-      g_mask_scene_id, {static_cast<int64_t>(mask_report.active_masks), static_cast<int64_t>(mask_open_count()), static_cast<int64_t>(mask_tangent_vertex_count())},
+      aexcompat::mask_runtime::mask_scene_id(), {static_cast<int64_t>(mask_report.active_masks), static_cast<int64_t>(mask_open_count()), static_cast<int64_t>(mask_tangent_vertex_count())},
       mask_lifetimes_balanced(), {mask_report.masks_acquired, mask_report.masks_disposed,
       mask_report.streams_acquired, mask_report.streams_disposed, mask_report.values_acquired,
       mask_report.values_disposed}, in.lifetime_fault_observed, suite_leases_balanced(),

@@ -85,7 +85,7 @@ class SmartFxMaskSceneContractTests(unittest.TestCase):
             'encoded.compare(0, 3, L"v2|")',
             "mask.open = item[0] == L'1'",
             "mask_tangent_vertex_count",
-            'g_mask_scene_id = "request_v4"',
+            'aexcompat::mask_runtime::set_mask_scene_id("request_v4")',
         ):
             self.assertIn(marker, worker)
 

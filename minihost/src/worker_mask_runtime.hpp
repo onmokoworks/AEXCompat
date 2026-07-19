@@ -79,6 +79,18 @@ struct SceneSeed {
 bool build_scene_seed(const std::string& scene_id, SceneSeed& seed);
 void set_fault(Fault fault);
 Fault fault();
+
+// Mask scene identity, owned here (issue #126 Phase D): whether the host mask
+// model is enabled for the current invocation and which scene seed is
+// installed. Writers are worker_main (invocation apply hook, rendering-worker
+// default, configure_mask_scene, the request_v4 mask-context path), the final
+// dispatch owner, and the utility-suite selftest save/restore; readers are the
+// mask suite provider gate and the smart completion report. Lifetime:
+// process-lifetime, defaults enabled=false / id "none", never torn down.
+bool model_enabled();
+void set_model_enabled(bool enabled);
+std::string mask_scene_id();
+void set_mask_scene_id(const std::string& id);
 void configure_host_context(HostContext context);
 HostContext host_context();
 Snapshot snapshot();

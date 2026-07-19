@@ -66,7 +66,7 @@ def test_scene_precedence_and_live_tls_conditional_exposure_stay_in_resolver():
     assert "render_options4_provider_available" in MAIN
     assert "render_suite2_provider_available" in MAIN
     assert "mask_suite_provider_available" in MAIN
-    assert "return g_mask_model_enabled" in MAIN
+    assert "return aexcompat::mask_runtime::model_enabled()" in MAIN
     assert "record_suite_acquire" not in resolver
     assert "reject_suite_acquire" not in resolver
     acquire = MAIN[MAIN.index("const StaticSuite component_suites[]") :]

@@ -656,8 +656,8 @@ uint64_t g_world_dump_bytes = 0;
 bool g_output_checksum_detail = false;
 std::vector<uint32_t> g_output_row_crc32;
 std::array<std::string, 4> g_output_channel_sha256;
-bool g_mask_model_enabled = false;
-std::string g_mask_scene_id = "none";
+// Mask scene identity (model enabled + scene id) moved to its owner
+// aexcompat::mask_runtime (issue #126 Phase D).
 struct SpatialRatio { int32_t numerator{1}; uint32_t denominator{1}; };
 SpatialRatio g_downsample_x;
 SpatialRatio g_downsample_y;
@@ -815,7 +815,7 @@ bool configure_mask_scene(const std::string& scene_id) {
   g_mask_scene.clear();
   g_mask_scene.reserve(kMaxHostMasks);
   g_mask_lifetime = {};
-  g_mask_scene_id = seed.id;
+  aexcompat::mask_runtime::set_mask_scene_id(seed.id);
   for (auto& source : seed.masks) {
     HostMask mask;
     mask.id = g_next_mask_id++;
@@ -2459,7 +2459,7 @@ bool finish_cuda_render_transport(CudaRenderTransport& transport) {
   return gpu_transport::finish_render_transport(transport);
 }
 
-bool mask_suite_provider_available(void*) { return g_mask_model_enabled; }
+bool mask_suite_provider_available(void*) { return aexcompat::mask_runtime::model_enabled(); }
 
 bool render_options4_provider_available(void*) {
   return is_render_worker() && aexcompat::aegp_layer_render_runtime::active();
@@ -3472,7 +3472,7 @@ bool parse_mask_context_payload(const wchar_t* text) {
   if (payload.empty()) {
     g_mask_scene.clear();
     g_mask_lifetime = {};
-    g_mask_scene_id = "request_v4";
+    aexcompat::mask_runtime::set_mask_scene_id("request_v4");
     return true;
   }
   std::size_t mask_offset = 0;
@@ -3527,7 +3527,7 @@ bool parse_mask_context_payload(const wchar_t* text) {
   g_mask_scene = std::move(masks);
   g_mask_scene.reserve(kMaxHostMasks);
   g_mask_lifetime = {};
-  g_mask_scene_id = "request_v4";
+  aexcompat::mask_runtime::set_mask_scene_id("request_v4");
   return true;
 }
 
@@ -5186,7 +5186,7 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
         g_app_picker_color = color; g_render_click_enabled = true;
       },
       +[] { g_render_draw_enabled = true; },
-      +[](bool enabled) { g_mask_model_enabled = enabled; },
+      +[](bool enabled) { aexcompat::mask_runtime::set_model_enabled(enabled); },
       +[](bool count_error, bool count_crash) {
         aexcompat::mask_runtime::set_fault(count_error
             ? aexcompat::mask_runtime::Fault::CountError
@@ -5241,7 +5241,7 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
     g_user_changed_parameters = std::move(invocation.user_changed_parameters);
   }
   // Every rendered effect instance belongs to a layer, even when that layer has no masks.
-  if (is_rendering_worker()) g_mask_model_enabled = true;
+  if (is_rendering_worker()) aexcompat::mask_runtime::set_model_enabled(true);
   RuntimeHostHooks runtime_hooks{&sha256, &redirect_native_stdout,
                                  &restore_native_stdout};
   RuntimeAdmissionRequest runtime_request;

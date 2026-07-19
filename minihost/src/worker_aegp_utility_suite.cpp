@@ -1,4 +1,5 @@
 #include "worker_aegp_utility_suite.hpp"
+#include "worker_mask_runtime.hpp"
 
 #include <algorithm>
 #include <cstring>
@@ -14,7 +15,6 @@ uint32_t suite_acquire_count();
 uint32_t suite_release_count();
 uint32_t live_suite_reference_count();
 bool suite_leases_balanced();
-extern bool g_mask_model_enabled;
 
 namespace {
 uint32_t g_main_hwnd_queries{};
@@ -49,15 +49,15 @@ bool verify_suite_entry_guards_and_utility13() {
       acquire_suite("AEGP Utility Suite", 13, nullptr) != 0 &&
       release_suite(nullptr, 13) != 0 && suite_acquire_count() == acquires_before &&
       suite_release_count() == releases_before && live_suite_reference_count() == live_before;
-  const bool saved_mask_model_enabled = g_mask_model_enabled;
-  g_mask_model_enabled = false;
+  const bool saved_mask_model_enabled = aexcompat::mask_runtime::model_enabled();
+  aexcompat::mask_runtime::set_model_enabled(false);
   const void* utility13 = nullptr;
   const void* rejected12 = reinterpret_cast<const void*>(1);
   const void* rejected14 = reinterpret_cast<const void*>(1);
   ok = acquire_suite("AEGP Utility Suite", 13, &utility13) == 0 &&
       acquire_suite("AEGP Utility Suite", 12, &rejected12) != 0 && rejected12 == nullptr &&
       acquire_suite("AEGP Utility Suite", 14, &rejected14) != 0 && rejected14 == nullptr && ok;
-  g_mask_model_enabled = saved_mask_model_enabled;
+  aexcompat::mask_runtime::set_model_enabled(saved_mask_model_enabled);
   const auto* utility = static_cast<const UtilitySuite*>(utility13);
   HWND main_window = reinterpret_cast<HWND>(static_cast<uintptr_t>(0xCDCDCDCD));
   ok = ok && utility13 == &g_utility_suite && utility13 != &g_utility_suite3 && utility &&

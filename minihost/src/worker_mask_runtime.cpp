@@ -7,6 +7,10 @@ namespace aexcompat::mask_runtime {
 namespace {
 
 std::atomic<Fault> g_fault{Fault::None};
+// Scene identity state behind model_enabled()/scene_id(); single worker
+// thread writes it during invocation setup, so no synchronization is needed.
+bool g_model_enabled = false;
+std::string g_scene_id = "none";
 std::atomic<void*> g_layer{nullptr};
 std::atomic<void (*)()> g_raise_access_violation{nullptr};
 std::atomic<Snapshot (*)()> g_snapshot{nullptr};
@@ -29,6 +33,14 @@ MaskSeed rectangle(double left, double top, double right, double bottom) {
 void set_fault(Fault fault) { g_fault.store(fault, std::memory_order_release); }
 
 Fault fault() { return g_fault.load(std::memory_order_acquire); }
+
+bool model_enabled() { return g_model_enabled; }
+
+void set_model_enabled(bool enabled) { g_model_enabled = enabled; }
+
+std::string mask_scene_id() { return g_scene_id; }
+
+void set_mask_scene_id(const std::string& id) { g_scene_id = id; }
 
 void configure_host_context(HostContext context) {
   g_layer.store(context.layer, std::memory_order_release);
