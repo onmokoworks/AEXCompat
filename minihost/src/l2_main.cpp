@@ -9376,139 +9376,6 @@ bool run_verify_aegp_projector_levels() {
   g_aegp_comp_idle_roundtrip_mode = saved_mode;
   return ok;
 }
-bool run_verify_legacy_effect_compat_suites() {
-  const void* comp_suite = nullptr;
-  const void* interface_suite = nullptr;
-  const void* helper_suite = nullptr;
-  bool ok = aexcompat::pf_helper::selftest() &&
-      acquire_suite("AEGP Comp Suite", 21, &comp_suite) == 0 &&
-      comp_suite == g_aegp_comp_suite10.data() &&
-      acquire_suite("AEGP PF Interface Suite", 1, &interface_suite) == 0 &&
-      interface_suite == &g_pf_interface_suite &&
-      acquire_suite("AE Plugin Helper Suite", 1, &helper_suite) == 0 &&
-      helper_suite == aexcompat::pf_helper::suite1();
-
-  AegpColorVal color{-1.0, -2.0, -3.0, -4.0};
-  const AegpColorVal color_sentinel = color;
-  ok = ok && aegp_get_comp_bg_color(&g_aegp_comp, &color) == 0 &&
-      color.alpha == 1.0 && color.red == 0.0 && color.green == 0.0 && color.blue == 0.0;
-  color = color_sentinel;
-  ok = ok && aegp_get_comp_bg_color(nullptr, &color) != 0 &&
-      std::memcmp(&color, &color_sentinel, sizeof(color)) == 0 &&
-      aegp_get_comp_bg_color(&g_aegp_comp_item, &color) != 0 &&
-      std::memcmp(&color, &color_sentinel, sizeof(color)) == 0 &&
-      aegp_get_comp_bg_color(&g_aegp_comp, nullptr) != 0;
-
-  AegpTime time{77, 99};
-  const AegpTime time_sentinel = time;
-  ok = ok && convert_effect_to_comp_time(&g_effect, -17, 24000, &time) == 0 &&
-      time.value == -17 && time.scale == 24000;
-  time = time_sentinel;
-  ok = ok && convert_effect_to_comp_time(nullptr, 1, 30, &time) != 0 &&
-      time.value == time_sentinel.value && time.scale == time_sentinel.scale &&
-      convert_effect_to_comp_time(&g_effect, 1, 0, &time) != 0 &&
-      time.value == time_sentinel.value && time.scale == time_sentinel.scale &&
-      convert_effect_to_comp_time(&g_effect, (std::numeric_limits<int32_t>::min)(),
-                                  (std::numeric_limits<uint32_t>::max)(), &time) == 0 &&
-      time.value == (std::numeric_limits<int32_t>::min)() &&
-      time.scale == (std::numeric_limits<uint32_t>::max)() &&
-      convert_effect_to_comp_time(&g_effect, 0, 1, nullptr) != 0;
-
-  aexcompat::pf_helper::set_effect_tool_for_test(14);
-  int32_t tool = -1;
-  ok = ok && aexcompat::pf_helper::get_current_tool(&tool) == 0 && tool == kPfSuiteToolNone &&
-      aexcompat::pf_helper::get_current_tool(nullptr) == kPfBadCallbackParam &&
-      aexcompat::pf_helper::effect_tool_for_test() == 14;
-  aexcompat::pf_helper::reset();
-
-  ok = release_suite("AE Plugin Helper Suite", 1) == 0 && ok;
-  ok = release_suite("AEGP PF Interface Suite", 1) == 0 && ok;
-  ok = release_suite("AEGP Comp Suite", 21) == 0 && ok;
-  return ok;
-}
-bool run_verify_aegp_get_effect_camera_case(bool smart_case) {
-  const int32_t saved_camera_index = g_aegp_active_camera_layer_index;
-  const bool saved_effect_live = effect_is_live();
-  const auto saved_in_points = g_aegp_layer_in_points;
-  const auto saved_durations = g_aegp_layer_durations;
-  reset_effect_lifetime(true);
-  g_aegp_active_camera_layer_index = -1;
-
-  const AegpTime active_time{smart_case ? 45 : 15, 30};
-  void* camera = reinterpret_cast<void*>(static_cast<uintptr_t>(0x1234));
-  bool ok = get_effect_camera(&g_effect, &active_time, &camera) == 0 && camera == nullptr;
-
-  g_aegp_active_camera_layer_index = 2;
-  g_aegp_layer_in_points[2] = {smart_case ? 30 : 10, 30};
-  g_aegp_layer_durations[2] = {60, 30};
-  camera = nullptr;
-  ok = ok && get_effect_camera(&g_effect, &active_time, &camera) == 0 &&
-      camera == &g_aegp_layers[2] && aegp_layer_index(camera) == 2;
-
-  const auto unchanged = reinterpret_cast<void*>(static_cast<uintptr_t>(0x5678));
-  camera = unchanged;
-  AegpTime invalid_scale{active_time.value, 0};
-  AegpTime before_in{smart_case ? 29 : 9, 30};
-  AegpTime after_out{smart_case ? 90 : 70, 30};
-  OpaqueHostObject foreign_effect{0x464f5247};
-  ok = ok && get_effect_camera(nullptr, &active_time, &camera) != 0 && camera == unchanged &&
-      get_effect_camera(&foreign_effect, &active_time, &camera) != 0 && camera == unchanged &&
-      get_effect_camera(&g_effect, nullptr, &camera) != 0 && camera == unchanged &&
-      get_effect_camera(&g_effect, &invalid_scale, &camera) != 0 && camera == unchanged;
-  camera = unchanged;
-  ok = ok && get_effect_camera(&g_effect, &before_in, &camera) == 0 && camera == nullptr;
-  camera = unchanged;
-  ok = ok && get_effect_camera(&g_effect, &after_out, &camera) == 0 && camera == nullptr &&
-      get_effect_camera(&g_effect, &active_time, nullptr) != 0;
-  camera = unchanged;
-  reset_effect_lifetime(false);
-  ok = ok && get_effect_camera(&g_effect, &active_time, &camera) != 0 && camera == unchanged;
-
-  g_aegp_active_camera_layer_index = saved_camera_index;
-  g_aegp_layer_in_points = saved_in_points;
-  g_aegp_layer_durations = saved_durations;
-  reset_effect_lifetime(saved_effect_live);
-  return ok;
-}
-bool run_verify_aegp_get_effect_camera_matrix_case(bool smart_case) {
-  const bool saved_effect_live = effect_is_live();
-  const int32_t saved_width = g_full_resolution_width;
-  const int32_t saved_height = g_full_resolution_height;
-  reset_effect_lifetime(true);
-  g_full_resolution_width = smart_case ? 1920 : 640;
-  g_full_resolution_height = smart_case ? 1080 : 480;
-  const AegpTime time{smart_case ? 45 : 15, 30};
-  AegpMatrix4 matrix{};
-  double distance = -1.0;
-  int16_t width = -1, height = -1;
-  bool ok = get_effect_camera_matrix(&g_effect, &time, &matrix, &distance,
-      &width, &height) == 0 && distance == g_full_resolution_width &&
-      width == g_full_resolution_width && height == g_full_resolution_height;
-  for (std::size_t row = 0; row < 4; ++row) {
-    for (std::size_t column = 0; column < 4; ++column) {
-      ok = ok && matrix.mat[row][column] == (row == column ? 1.0 : 0.0);
-    }
-  }
-
-  AegpMatrix4 sentinel{};
-  std::memset(&sentinel, 0x5a, sizeof(sentinel));
-  matrix = sentinel;
-  distance = -2.0; width = -2; height = -2;
-  AegpTime invalid_time{time.value, 0};
-  ok = ok && get_effect_camera_matrix(nullptr, &time, &matrix, &distance,
-      &width, &height) != 0 && std::memcmp(&matrix, &sentinel, sizeof(matrix)) == 0 &&
-      distance == -2.0 && width == -2 && height == -2 &&
-      get_effect_camera_matrix(&g_effect, &invalid_time, &matrix, &distance,
-      &width, &height) != 0 && std::memcmp(&matrix, &sentinel, sizeof(matrix)) == 0;
-  reset_effect_lifetime(false);
-  ok = ok && get_effect_camera_matrix(&g_effect, &time, &matrix, &distance,
-      &width, &height) != 0 && std::memcmp(&matrix, &sentinel, sizeof(matrix)) == 0;
-
-  g_full_resolution_width = saved_width;
-  g_full_resolution_height = saved_height;
-  reset_effect_lifetime(saved_effect_live);
-  return ok;
-}
 bool run_verify_aegp_resizer_3d_chain() {
   const void* layer_suite = nullptr;
   const void* stream_suite = nullptr;
@@ -9588,27 +9455,33 @@ bool run_verify_aegp_resizer_3d_chain() {
   g_aegp_layer_durations = saved_durations;
   return ok && suite_leases_balanced();
 }
-bool run_verify_aegp_get_effect_camera() {
-  const void* suite = nullptr;
-  bool ok = acquire_suite("AEGP PF Interface Suite", 1, &suite) == 0 &&
-      suite == &g_pf_interface_suite &&
-      g_pf_interface_suite.get_effect_camera == &get_effect_camera &&
-      g_pf_interface_suite.get_effect_camera_matrix == &get_effect_camera_matrix &&
-      run_verify_aegp_get_effect_camera_case(false) &&
-      run_verify_aegp_get_effect_camera_case(true) &&
-      run_verify_aegp_get_effect_camera_matrix_case(false) &&
-      run_verify_aegp_get_effect_camera_matrix_case(true);
-  ok = release_suite("AEGP PF Interface Suite", 1) == 0 && ok;
-  return ok && suite_leases_balanced();
-}
-
 const bool g_aegp_compat_selftests_configured = [] {
   aexcompat::l2_detail::configure_aegp_compat_selftests(
-      {&run_verify_legacy_effect_compat_suites,
-       &run_verify_aegp_get_effect_camera,
-       &run_verify_aegp_resizer_3d_chain,
+      {&run_verify_aegp_resizer_3d_chain,
        &run_verify_aegp_apply_effect,
        &run_verify_aegp_effect_stack,
-       &run_verify_aegp_projector_levels});
+       &run_verify_aegp_projector_levels,
+       &acquire_suite, &release_suite,
+       g_aegp_comp_suite10.data(), &g_pf_interface_suite,
+       aexcompat::pf_helper::suite1(), &g_aegp_comp, &g_aegp_comp_item, &g_effect,
+       +[](void* comp, aexcompat::l2_detail::AegpCompatColor* color) {
+         return aegp_get_comp_bg_color(comp, reinterpret_cast<AegpColorVal*>(color));
+       },
+       &convert_effect_to_comp_time, &get_effect_camera, &get_effect_camera_matrix,
+       +[](int32_t index) { g_aegp_active_camera_layer_index = index; },
+       +[] { return g_aegp_active_camera_layer_index; },
+       +[](int32_t index) -> void* {
+         return index >= 0 && index < static_cast<int32_t>(g_aegp_layers.size())
+             ? &g_aegp_layers[static_cast<std::size_t>(index)] : nullptr;
+       },
+       &aegp_layer_index,
+       +[](int32_t width, int32_t height) {
+         g_full_resolution_width = width; g_full_resolution_height = height;
+       },
+       +[](int32_t* width, int32_t* height) {
+         if (width) *width = g_full_resolution_width;
+         if (height) *height = g_full_resolution_height;
+       },
+       &suite_leases_balanced});
   return true;
 }();

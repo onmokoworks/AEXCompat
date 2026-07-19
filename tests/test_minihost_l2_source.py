@@ -44,6 +44,7 @@ AEGP_ASYNC_LAYER_RUNTIME = ROOT / "minihost" / "src" / "worker_aegp_async_layer_
 AEGP_HOST_SELFTESTS_SOURCE = ROOT / "minihost" / "src" / "worker_aegp_host_selftests.cpp"
 AEGP_COMPAT_SELFTESTS_SOURCE = ROOT / "minihost" / "src" / "worker_aegp_compat_selftests.cpp"
 INVOCATION_ORCHESTRATION_HEADER = ROOT / "minihost" / "src" / "worker_invocation_orchestration.hpp"
+AEGP_COMPAT_SELFTEST_HEADER = ROOT / "minihost" / "src" / "worker_aegp_compat_selftests.hpp"
 MASK_RUNTIME_HEADER = ROOT / "minihost" / "src" / "worker_mask_runtime.hpp"
 MASK_RUNTIME_SOURCE = ROOT / "minihost" / "src" / "worker_mask_runtime.cpp"
 MASK_RUNTIME_CALLBACKS = ROOT / "minihost" / "src" / "worker_mask_runtime_callbacks.cpp"
@@ -85,6 +86,14 @@ class MinihostL2SourceTests(unittest.TestCase):
                      "verify_aegp_resizer_3d_chain"):
             self.assertIn(f"bool {name}()", implementation)
             self.assertNotIn(f"bool {name}()", worker)
+        for name in ("run_verify_legacy_effect_compat_suites",
+                     "run_verify_aegp_get_effect_camera_case",
+                     "run_verify_aegp_get_effect_camera_matrix_case",
+                     "run_verify_aegp_get_effect_camera"):
+            self.assertNotIn(name, worker)
+        self.assertIn("bool verify_camera_case(bool smart_case)", implementation)
+        self.assertIn("bool verify_matrix_case(bool smart_case)", implementation)
+        self.assertIn("struct AegpCompatSelftestHooks", AEGP_COMPAT_SELFTEST_HEADER.read_text(encoding="utf-8"))
 
     def test_aegp_host_selftests_are_a_true_translation_unit(self):
         worker = SOURCE.read_text(encoding="utf-8")
