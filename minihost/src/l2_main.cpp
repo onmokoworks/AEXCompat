@@ -73,6 +73,7 @@
 #include "worker_fixed_selftest_routing.hpp"
 #include "worker_custom_selftest_routing.hpp"
 #include "worker_host_guard_selftests.hpp"
+#include "worker_aegp_utility_suite.hpp"
 #include "worker_smart_runtime.hpp"
 #include "worker_smart_execution.hpp"
 #include "worker_smart_setup.hpp"
@@ -936,24 +937,7 @@ int32_t __cdecl guid_mix_in_ptr(void* effect_ref, uint32_t size, const void* byt
 
 
 
-int32_t __cdecl register_with_aegp(void*, const char*, int32_t* plugin_id) {
-  if (!plugin_id) return 4;
-  *plugin_id = 1;
-  return 0;
-}
-
-uint32_t g_main_hwnd_queries{};
-
-// AE always fills the caller-owned HWND storage. The headless worker has no
-// application window, so the desktop window is published as the deterministic
-// dialog parent instead of leaving the caller's buffer uninitialized.
-int32_t __cdecl get_main_hwnd(void* main_hwnd) {
-  if (!main_hwnd) return 4;
-  ++g_main_hwnd_queries;
-  const HWND desktop = GetDesktopWindow();
-  std::memcpy(main_hwnd, &desktop, sizeof(desktop));
-  return 0;
-}
+// register_with_aegp / get_main_hwnd live in worker_aegp_utility_suite.cpp.
 
 int32_t __cdecl get_effect_layer(void* effect, void** layer) {
   if (effect != &g_effect || !layer) return 4;
@@ -978,31 +962,6 @@ int32_t __cdecl get_effect_camera_matrix(void* effect, const AegpTime* comp_time
 
 
 
-struct UtilitySuite {
-  // Function pointer positions mirror the reviewed Adobe suite versions.
-  // AEGP_UtilitySuite6 (acquisition version 13) publishes 33 slots; only
-  // RegisterWithAEGP (slot 9) and GetMainHWND (slot 10) are supported, the
-  // rest stay null so out-of-range reads fail closed instead of leaving the
-  // table shorter than the ABI the effect compiled against.
-  void* unsupported[9]{};
-  decltype(&register_with_aegp) register_with_aegp;
-  decltype(&get_main_hwnd) get_main_hwnd;
-  void* unsupported_tail[22]{};
-};
-static_assert(sizeof(UtilitySuite) == 33 * sizeof(void*));
-static_assert(offsetof(UtilitySuite, register_with_aegp) == 9 * sizeof(void*));
-static_assert(offsetof(UtilitySuite, get_main_hwnd) == 10 * sizeof(void*));
-struct UtilitySuite3 {
-  // AEGP_UtilitySuite3 (acquisition version 7) publishes 25 slots with
-  // RegisterWithAEGP at slot 7 and GetMainHWND at slot 8.
-  void* unsupported[7]{};
-  decltype(&register_with_aegp) register_with_aegp;
-  decltype(&get_main_hwnd) get_main_hwnd;
-  void* unsupported_tail[16]{};
-};
-static_assert(sizeof(UtilitySuite3) == 25 * sizeof(void*));
-static_assert(offsetof(UtilitySuite3, register_with_aegp) == 7 * sizeof(void*));
-static_assert(offsetof(UtilitySuite3, get_main_hwnd) == 8 * sizeof(void*));
 struct PfInterfaceSuite {
   decltype(&get_effect_layer) get_effect_layer;
   decltype(&get_new_effect_for_effect) get_new_effect_for_effect;
@@ -1023,8 +982,6 @@ int32_t __cdecl pf_mask_world_with_path(void* effect_ref, void** path, double fe
                                         int32_t quality, void* world, LegacyRect* bounds);
 #include "worker_l2_suite_abi.hpp"
 
-UtilitySuite g_utility_suite{{}, &register_with_aegp, &get_main_hwnd, {}};
-UtilitySuite3 g_utility_suite3{{}, &register_with_aegp, &get_main_hwnd, {}};
 PfInterfaceSuite g_pf_interface_suite{&get_effect_layer, &get_new_effect_for_effect,
     &convert_effect_to_comp_time, &get_effect_camera,
     &get_effect_camera_matrix};
@@ -5552,40 +5509,8 @@ using namespace aexcompat::l2_detail;
 // verify_pf_adv_app_suite_versions / verify_render_output_safety live in
 // worker_host_guard_selftests.cpp behind its configure() hooks.
 
-bool verify_suite_entry_guards_and_utility13() {
-  const uint32_t acquires_before = suite_acquire_count();
-  const uint32_t releases_before = suite_release_count();
-  const uint32_t live_before = live_suite_reference_count();
-  const void* acquired = reinterpret_cast<const void*>(1);
-  bool ok = acquire_suite(nullptr, 13, &acquired) != 0 && acquired == nullptr &&
-      acquire_suite("AEGP Utility Suite", 13, nullptr) != 0 &&
-      release_suite(nullptr, 13) != 0 && suite_acquire_count() == acquires_before &&
-      suite_release_count() == releases_before && live_suite_reference_count() == live_before;
-  const bool saved_mask_model_enabled = g_mask_model_enabled;
-  g_mask_model_enabled = false;
-  const void* utility13 = nullptr;
-  const void* rejected12 = reinterpret_cast<const void*>(1);
-  const void* rejected14 = reinterpret_cast<const void*>(1);
-  ok = acquire_suite("AEGP Utility Suite", 13, &utility13) == 0 &&
-      acquire_suite("AEGP Utility Suite", 12, &rejected12) != 0 && rejected12 == nullptr &&
-      acquire_suite("AEGP Utility Suite", 14, &rejected14) != 0 && rejected14 == nullptr && ok;
-  g_mask_model_enabled = saved_mask_model_enabled;
-  const auto* utility = static_cast<const UtilitySuite*>(utility13);
-  HWND main_window = reinterpret_cast<HWND>(static_cast<uintptr_t>(0xCDCDCDCD));
-  ok = ok && utility13 == &g_utility_suite && utility13 != &g_utility_suite3 && utility &&
-      std::all_of(std::begin(utility->unsupported), std::end(utility->unsupported),
-                  [](void* callback) { return callback == nullptr; }) &&
-      std::all_of(std::begin(utility->unsupported_tail), std::end(utility->unsupported_tail),
-                  [](void* callback) { return callback == nullptr; }) &&
-      utility->register_with_aegp == &register_with_aegp &&
-      utility->get_main_hwnd == &get_main_hwnd &&
-      utility->get_main_hwnd(nullptr) != 0 &&
-      utility->get_main_hwnd(&main_window) == 0 &&
-      main_window == GetDesktopWindow() &&
-      release_suite("AEGP Utility Suite", 13) == 0;
-  return ok && suite_acquire_count() == acquires_before + 1 &&
-      suite_release_count() == releases_before + 1 && suite_leases_balanced();
-}
+// verify_suite_entry_guards_and_utility13 lives in
+// worker_aegp_utility_suite.cpp with the UtilitySuite ABI it validates.
 
 
 
