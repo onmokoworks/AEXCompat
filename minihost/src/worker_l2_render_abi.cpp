@@ -328,6 +328,12 @@ int32_t __cdecl adv_item_effect_is_active(void* context_handle, uint8_t* enabled
   return 0;
 }
 
+int32_t __cdecl get_context_async_manager(void* input, void* extra, void** manager) {
+  if (!input || !extra || !manager) return 4;
+  *manager = &g_async_manager;
+  return 0;
+}
+
 PfAdvItemSuite1 g_adv_item_suite1{&adv_item_move_time_step,
     &adv_item_move_time_step_active, &adv_item_touch_active,
     &adv_item_force_rerender, &adv_item_effect_is_active};

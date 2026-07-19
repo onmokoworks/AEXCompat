@@ -1,5 +1,6 @@
 #include "worker_drawbot_runtime.hpp"
 
+#include "worker_mask_runtime_internal.hpp"
 #include "worker_pf_helper_runtime.hpp"
 #include "worker_ui_event_execution.hpp"
 
@@ -286,6 +287,74 @@ int32_t __cdecl app_get_personal_info(char* info) {
   std::memcpy(info, "AEXCompat", sizeof("AEXCompat"));
   std::memcpy(info + 64, "onmokoworks", sizeof("onmokoworks"));
   std::memcpy(info + 128, "SDK fixture", sizeof("SDK fixture"));
+  return 0;
+}
+
+// Custom-UI registration and AdvApp info-text callbacks moved from
+// worker_main (issue #170); the effect identity stays in l2_main and the
+// callbacks keep the C linkage worker_l2_suite_abi.hpp froze.
+extern "C" {
+int32_t __cdecl register_custom_ui(void*, const void*);
+int32_t __cdecl adv_app_info_text(const char*, const char*);
+int32_t __cdecl adv_app_info_text3(const char*, const char*, const char*);
+}
+using CustomUiRegistration =
+    aexcompat::worker_runtime::ui_event_execution::CustomUiRegistration;
+extern OpaqueHostObject g_effect;
+namespace {
+auto& g_custom_ui_registration = g_custom_ui_telemetry.registration;
+auto& g_invalid_custom_ui_registrations = g_custom_ui_telemetry.invalid_custom_ui_registrations;
+auto& g_register_ui_calls = g_custom_ui_telemetry.register_ui_calls;
+auto& g_adv_app_info_text_calls = g_custom_ui_telemetry.adv_app_info_text_calls;
+auto& g_last_adv_app_info_text = g_custom_ui_telemetry.last_adv_app_info_text;
+template <typename T, std::size_t N>
+T read(const std::array<std::byte, N>& bytes, std::size_t offset) {
+  T value{};
+  std::memcpy(&value, bytes.data() + offset, sizeof(value));
+  return value;
+}
+}  // namespace
+
+int32_t __cdecl register_custom_ui(void* effect_ref, const void* custom_ui_info) {
+  if (effect_ref != &g_effect || !custom_ui_info) return 4;
+  std::array<std::byte, 44> bytes{};
+  std::memcpy(bytes.data(), custom_ui_info, bytes.size());
+  CustomUiRegistration registration{
+      read<uint32_t>(bytes, 4), read<int32_t>(bytes, 8), read<int32_t>(bytes, 12),
+      read<int32_t>(bytes, 16), read<int32_t>(bytes, 20), read<int32_t>(bytes, 24),
+      read<int32_t>(bytes, 28), read<int32_t>(bytes, 32), read<int32_t>(bytes, 36),
+      read<int32_t>(bytes, 40)};
+  const auto valid_dimension = [](int32_t value) { return value >= 0 && value <= 8192; };
+  if ((registration.events & ~15u) != 0 ||
+      !valid_dimension(registration.comp_width) ||
+      !valid_dimension(registration.comp_height) ||
+      !valid_dimension(registration.layer_width) ||
+      !valid_dimension(registration.layer_height) ||
+      !valid_dimension(registration.preview_width) ||
+      !valid_dimension(registration.preview_height)) {
+    ++g_invalid_custom_ui_registrations;
+    return 4;
+  }
+  g_custom_ui_registration = registration;
+  ++g_register_ui_calls;
+  return 0;
+}
+
+int32_t __cdecl adv_app_info_text(const char* first, const char* second) {
+  if (!first || !second || strnlen_s(first, 256) == 256 || strnlen_s(second, 256) == 256)
+    return 4;
+  g_last_adv_app_info_text = std::string(first) + " | " + second;
+  ++g_adv_app_info_text_calls;
+  return 0;
+}
+
+int32_t __cdecl adv_app_info_text3(const char* first, const char* second,
+                                   const char* third) {
+  if (!first || !second || (third && strnlen_s(third, 256) == 256) ||
+      strnlen_s(first, 256) == 256 || strnlen_s(second, 256) == 256) return 4;
+  g_last_adv_app_info_text = std::string(first) + " | " + second;
+  if (third) g_last_adv_app_info_text += std::string(" | ") + third;
+  ++g_adv_app_info_text_calls;
   return 0;
 }
 
