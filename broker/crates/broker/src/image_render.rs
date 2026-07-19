@@ -4679,80 +4679,102 @@ fn render_with_artifact(
         .get("rowbytes")
         .and_then(Value::as_u64)
         .ok_or_else(|| invalid("worker output rowbytes is invalid"))?;
-    crate::render_request::validate_image_buffer_layout(
-        u64::from(rendered_width),
-        u64::from(rendered_height),
-        rendered_rowbytes,
-        pixel_format.bytes_per_pixel(),
-        None,
-        u64::from(MAX_DIMENSION),
-        MAX_PIXELS,
-        MAX_INTERNAL_IMAGE_BYTES,
-    )?;
-    let expected_bytes_u64 = crate::render_request::validate_image_buffer_layout(
-        u64::from(rendered_width),
-        u64::from(rendered_height),
-        u64::from(rendered_width) * pixel_format.bytes_per_pixel(),
-        pixel_format.bytes_per_pixel(),
-        None,
-        u64::from(MAX_DIMENSION),
-        MAX_PIXELS,
-        MAX_INTERNAL_IMAGE_BYTES,
-    )?;
-    let expected_bytes = usize::try_from(expected_bytes_u64)
-        .map_err(|_| invalid("worker output size does not fit this broker"))?;
-    let actual_bytes = fs::metadata(&output_raw)
-        .map_err(|error| invalid(format!("validated worker output unavailable: {error}")))?
-        .len();
-    if actual_bytes != expected_bytes_u64 {
-        return Err(invalid(format!(
-            "validated worker output size mismatch: expected={expected_bytes_u64}, actual={actual_bytes}, diagnostics={diagnostics}"
-        )));
-    }
-    let rendered = fs::read(&output_raw).map_err(|error| {
-        invalid(format!(
-            "validated worker output unavailable: error={error}, diagnostics={diagnostics}, report={worker_report}"
-        ))
-    })?;
-    if rendered.len() != expected_bytes {
-        return Err(invalid(format!(
-            "validated worker output size mismatch: expected={expected_bytes}, actual={}, diagnostics={diagnostics}",
-            rendered.len()
-        )));
-    }
-    if let Some(path) = &preserved_output {
-        if let Some(parent) = path.parent() {
+    // A SmartFX run that legally answered an empty result_rect renders
+    // nothing: zero dimensions and a zero-byte raw output are that contract's
+    // fulfillment, and no PNG can represent them, so the pixel pipeline is
+    // skipped while the report still carries the empty-geometry fields.
+    let empty_smart_result =
+        smart && worker_report.get("empty_result_rect") == Some(&Value::Bool(true));
+    let mut deep_overrange_samples = None;
+    if empty_smart_result {
+        if rendered_width != 0 || rendered_height != 0 || rendered_rowbytes != 0 {
+            return Err(invalid(format!(
+                "empty SmartFX result reported nonzero output geometry: {rendered_width}x{rendered_height} rowbytes={rendered_rowbytes}"
+            )));
+        }
+        let actual_bytes = fs::metadata(&output_raw)
+            .map_err(|error| invalid(format!("validated worker output unavailable: {error}")))?
+            .len();
+        if actual_bytes != 0 {
+            return Err(invalid(format!(
+                "empty SmartFX result produced {actual_bytes} output bytes"
+            )));
+        }
+    } else {
+        crate::render_request::validate_image_buffer_layout(
+            u64::from(rendered_width),
+            u64::from(rendered_height),
+            rendered_rowbytes,
+            pixel_format.bytes_per_pixel(),
+            None,
+            u64::from(MAX_DIMENSION),
+            MAX_PIXELS,
+            MAX_INTERNAL_IMAGE_BYTES,
+        )?;
+        let expected_bytes_u64 = crate::render_request::validate_image_buffer_layout(
+            u64::from(rendered_width),
+            u64::from(rendered_height),
+            u64::from(rendered_width) * pixel_format.bytes_per_pixel(),
+            pixel_format.bytes_per_pixel(),
+            None,
+            u64::from(MAX_DIMENSION),
+            MAX_PIXELS,
+            MAX_INTERNAL_IMAGE_BYTES,
+        )?;
+        let expected_bytes = usize::try_from(expected_bytes_u64)
+            .map_err(|_| invalid("worker output size does not fit this broker"))?;
+        let actual_bytes = fs::metadata(&output_raw)
+            .map_err(|error| invalid(format!("validated worker output unavailable: {error}")))?
+            .len();
+        if actual_bytes != expected_bytes_u64 {
+            return Err(invalid(format!(
+                "validated worker output size mismatch: expected={expected_bytes_u64}, actual={actual_bytes}, diagnostics={diagnostics}"
+            )));
+        }
+        let rendered = fs::read(&output_raw).map_err(|error| {
+            invalid(format!(
+                "validated worker output unavailable: error={error}, diagnostics={diagnostics}, report={worker_report}"
+            ))
+        })?;
+        if rendered.len() != expected_bytes {
+            return Err(invalid(format!(
+                "validated worker output size mismatch: expected={expected_bytes}, actual={}, diagnostics={diagnostics}",
+                rendered.len()
+            )));
+        }
+        if let Some(path) = &preserved_output {
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(path)?
+                .write_all(&rendered)?;
+        }
+        if let Some(parent) = output_path.parent() {
             fs::create_dir_all(parent)?;
         }
-        OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(path)?
-            .write_all(&rendered)?;
-    }
-    if let Some(parent) = output_path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let mut deep_overrange_samples = None;
-    if deep_png_output {
-        let (samples, overrange_samples) = rgba16_transport_to_png16(&rendered)?;
-        deep_overrange_samples = Some(overrange_samples);
-        let image = image::ImageBuffer::<image::Rgba<u16>, Vec<u16>>::from_raw(
-            rendered_width,
-            rendered_height,
-            samples,
-        )
-        .ok_or_else(|| invalid("worker output dimensions are invalid"))?;
-        image
-            .save_with_format(output_path, ImageFormat::Png)
-            .map_err(|error| invalid(format!("output PNG save failed: {error}")))?;
-    } else {
-        let preview = native_rgba_to_preview(&rendered, pixel_format)?;
-        let image = image::RgbaImage::from_raw(rendered_width, rendered_height, preview)
+        if deep_png_output {
+            let (samples, overrange_samples) = rgba16_transport_to_png16(&rendered)?;
+            deep_overrange_samples = Some(overrange_samples);
+            let image = image::ImageBuffer::<image::Rgba<u16>, Vec<u16>>::from_raw(
+                rendered_width,
+                rendered_height,
+                samples,
+            )
             .ok_or_else(|| invalid("worker output dimensions are invalid"))?;
-        image
-            .save_with_format(output_path, ImageFormat::Png)
-            .map_err(|error| invalid(format!("output PNG save failed: {error}")))?;
+            image
+                .save_with_format(output_path, ImageFormat::Png)
+                .map_err(|error| invalid(format!("output PNG save failed: {error}")))?;
+        } else {
+            let preview = native_rgba_to_preview(&rendered, pixel_format)?;
+            let image = image::RgbaImage::from_raw(rendered_width, rendered_height, preview)
+                .ok_or_else(|| invalid("worker output dimensions are invalid"))?;
+            image
+                .save_with_format(output_path, ImageFormat::Png)
+                .map_err(|error| invalid(format!("output PNG save failed: {error}")))?;
+        }
     }
     let gpu_memory = json!({
         "lifetimes_balanced": worker_report.get("gpu_memory_lifetimes_balanced"),
@@ -4817,11 +4839,21 @@ fn render_with_artifact(
         ("input_world", "input_world"),
         ("output_world", "output_world"),
         ("suite_timeline", "suite_timeline"),
+        ("empty_result_rect", "empty_result_rect"),
+        ("returns_extra_pixels", "returns_extra_pixels"),
+        ("result_within_request", "result_within_request"),
+        ("extra_pixels_contract_violation", "extra_pixels_contract_violation"),
+        ("smart_render_selector_dispatched", "smart_render_selector_dispatched"),
+        ("input_checkout_result_rect", "input_checkout_result_rect"),
     ] {
         report_object.insert(
             name.into(),
             worker_report.get(source).cloned().unwrap_or(Value::Null),
         );
+    }
+    if empty_smart_result {
+        // Nothing was rendered, so there is no PNG to point at.
+        report_object.insert("output_png".into(), Value::Null);
     }
     if deep_png_output {
         report_object.insert("output_transport".into(), json!("native_raw+rgba16_png"));

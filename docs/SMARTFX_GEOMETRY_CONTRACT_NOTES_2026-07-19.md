@@ -273,3 +273,15 @@ empty 許容は無い。schema には classification enum への追加と
 empty_result 用の allOf 制約 (world/raw_output null, smartfx, error 0) を追加。
 validator (`tools/conformance_bundle_validator.py`) は classification != "ok"
 を pixel 検証スキップとして扱うため変更不要。
+
+追記 (Codex round 4 P1): 実 dispatch (`image_render.rs`
+`render_experimental_image_at_time_with_format` 系) は worker report の
+width/height を `validate_image_buffer_layout` (0 拒否) に通し、broker report
+の転記フィールドに `empty_result_rect` が無かったため、実経路では空 result
+が conformance の EmptyResult 分岐に到達できなかった。訂正: smartfx report が
+`empty_result_rect==true` の場合は寸法 0 / raw 0 byte を検証した上で pixel
+経路 (buffer 検証・raw 読出し・PNG 出力) をスキップし、`output_png: null` と
+geometry フィールド群 (`empty_result_rect` / `returns_extra_pixels` /
+`result_within_request` / `extra_pixels_contract_violation` /
+`smart_render_selector_dispatched` / `input_checkout_result_rect`) を broker
+report に転記する。非ゼロ寸法や非 0 byte 出力を伴う empty 主張は fail-closed。
