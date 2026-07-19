@@ -1207,82 +1207,9 @@ bool claim_opaque_generation(std::atomic<uint64_t>& counter, uint64_t& generatio
 }
 
 using LayerRenderContext = aexcompat::aegp_layer_render_runtime::Context;
-auto& g_pf_adv_item_touches =
-    aexcompat::worker_runtime::pf_adv_time::item_telemetry().touches;
-auto& g_pf_adv_item_rerenders =
-    aexcompat::worker_runtime::pf_adv_time::item_telemetry().rerenders;
 
-int32_t checked_adv_item_move(int32_t direction, int32_t steps, int32_t step,
-                              int32_t& time) {
-  if ((direction != 0 && direction != 1) || steps < 0 || step <= 0) return 4;
-  const int64_t distance = static_cast<int64_t>(steps) * step;
-  const int64_t moved = static_cast<int64_t>(time) + (direction == 0 ? distance : -distance);
-  if (moved < INT32_MIN || moved > INT32_MAX) return 4;
-  time = static_cast<int32_t>(moved);
-  return 0;
-}
-
-bool active_adv_item_context(void* in_data) {
-  const auto& context = aexcompat::aegp_layer_render_runtime::context();
-  return context.entry && context.input && in_data == context.input;
-}
-
-bool active_adv_item_world(const void* world, DispatchWorldFormat& result) {
-  return resolve_registered_dispatch_world(world, result);
-}
-
-int32_t __cdecl adv_item_move_time_step(void* in_data, void* world,
-                                        int32_t direction, int32_t steps) {
-  auto& context = aexcompat::aegp_layer_render_runtime::context();
-  DispatchWorldFormat effect_world{};
-  if (!active_adv_item_context(in_data) || !active_adv_item_world(world, effect_world) ||
-      !effect_world.data || effect_world.width <= 0 || effect_world.height <= 0 ||
-      effect_world.rowbytes <= 0 || context.pixel_bytes <= 0 ||
-      effect_world.width > INT32_MAX / context.pixel_bytes ||
-      effect_world.rowbytes < effect_world.width * context.pixel_bytes) return 4;
-  int32_t moved = context.current_time;
-  if (checked_adv_item_move(direction, steps, context.time_step, moved) != 0) return 4;
-  context.active_item_time = moved;
-  context.active_item_time_valid = true;
-  return 0;
-}
-
-int32_t __cdecl adv_item_move_time_step_active(int32_t direction, int32_t steps) {
-  auto& context = aexcompat::aegp_layer_render_runtime::context();
-  if (!context.entry || context.time_step <= 0) return 4;
-  int32_t moved = context.active_item_time_valid ? context.active_item_time : context.current_time;
-  if (checked_adv_item_move(direction, steps, context.time_step, moved) != 0) return 4;
-  context.active_item_time = moved;
-  context.active_item_time_valid = true;
-  return 0;
-}
-
-int32_t __cdecl adv_item_touch_active() {
-  if (!aexcompat::aegp_layer_render_runtime::context().entry) return 4;
-  ++g_pf_adv_item_touches;
-  bump_render_project_timestamp();
-  return 0;
-}
-
-int32_t __cdecl adv_item_force_rerender(void* in_data, void* world) {
-  DispatchWorldFormat effect_world{};
-  if (!active_adv_item_context(in_data) || !active_adv_item_world(world, effect_world) ||
-      !effect_world.data || effect_world.width <= 0 || effect_world.height <= 0 ||
-      effect_world.rowbytes <= 0) return 4;
-  ++g_pf_adv_item_rerenders;
-  bump_render_project_timestamp();
-  return 0;
-}
-
-int32_t __cdecl adv_item_effect_is_active(void* context_handle, uint8_t* enabled) {
-  if (enabled) *enabled = 0;
-  if (!context_handle || !enabled || !aexcompat::aegp_layer_render_runtime::context().entry) return 4;
-  // UI context handles are opaque. A live render owns no UI context, so headless mode
-  // can only report disabled without dereferencing an untrusted or stale handle.
-  return 0;
-}
-
-// The PF AE Adv Item Suite ABI and table live in worker_l2_render_abi.{hpp,cpp}.
+// The PF AE Adv Item Suite callbacks, ABI, and table live in
+// worker_l2_render_abi.{hpp,cpp} (issue #170).
 auto& g_loaded_effect_receipt_fixture_passed =
     aexcompat::render_receipts::receipt_test_state().loaded_effect_receipt_fixture_passed;
 auto& g_loaded_effect_receipt_unsupported_rejected =
@@ -1804,54 +1731,8 @@ uint32_t live_suite_reference_count() {
 uint32_t suite_acquire_count() { return suite_registry().acquire_count(); }
 uint32_t suite_release_count() { return suite_registry().release_count(); }
 
-int32_t __cdecl aegp_get_unique_command(int32_t* command) {
-  if (!command || g_aegp_commands_created >= 64) return 4;
-  *command = g_next_aegp_command++;
-  ++g_aegp_commands_created;
-  return 0;
-}
-int32_t __cdecl aegp_insert_menu_command(int32_t command, const char* name,
-                                         int32_t menu, int32_t) {
-  if (command < 10000 || !name || strnlen_s(name, 1024) == 0 || menu < 0 || menu > 16 ||
-      g_aegp_menu_commands_inserted >= 64) return 4;
-  ++g_aegp_menu_commands_inserted;
-  g_aegp_inserted_commands.push_back(command);
-  return 0;
-}
-int32_t __cdecl aegp_remove_menu_command(int32_t) { return 0; }
-int32_t __cdecl aegp_set_menu_command_name(int32_t, const char* name) {
-  return name && strnlen_s(name, 1024) > 0 ? 0 : 4;
-}
-int32_t __cdecl aegp_command_state(int32_t command) {
-  if (command < 10000) return 4;
-  ++g_aegp_command_enable_calls;
-  return 0;
-}
-int32_t __cdecl aegp_check_menu_command(int32_t command, uint8_t checked) {
-  if (command < 10000) return 4;
-  ++g_aegp_command_check_calls;
-  if (checked) ++g_aegp_command_checked_true_calls;
-  else ++g_aegp_command_checked_false_calls;
-  return 0;
-}
-// The AEGP Command Suite table lives in worker_aegp_command_suites.cpp.
-
-int32_t __cdecl aegp_register_command_hook(int32_t plugin_id, int32_t priority,
-                                           int32_t command, void* hook, void* refcon) {
-  return aexcompat::worker_runtime::aegp_init::register_command_hook(
-      plugin_id, priority, command, hook, refcon);
-}
-int32_t __cdecl aegp_register_update_menu_hook(int32_t plugin_id, void* hook, void* refcon) {
-  return aexcompat::worker_runtime::aegp_init::register_update_menu_hook(
-      plugin_id, hook, refcon);
-}
-int32_t __cdecl aegp_register_death_hook(int32_t plugin_id, void* hook, void* refcon) {
-  return aexcompat::worker_runtime::aegp_init::register_death_hook(plugin_id, hook, refcon);
-}
-int32_t __cdecl aegp_register_idle_hook(int32_t plugin_id, void* hook, void* refcon) {
-  return aexcompat::worker_runtime::aegp_init::register_idle_hook(plugin_id, hook, refcon);
-}
-// The AEGP Register Suite table lives in worker_aegp_command_suites.cpp.
+// The AEGP Command/Register Suite callbacks and tables live in
+// worker_aegp_command_suites.cpp (issue #170).
 
 AegpSceneObject& g_aegp_comp_item = scene_runtime_state().composition_item;
 AegpSceneObject& g_aegp_comp = scene_runtime_state().composition;
