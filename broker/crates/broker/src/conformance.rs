@@ -8,6 +8,10 @@ const MAX_MISSING_SUITES: usize = 16;
 // escaped worker-bounded report instead of degrading failures to `nonzero_exit`.
 const MAX_ERROR_TEXT_BYTES: usize = 32 * 1024 * 1024;
 const MAX_ERROR_JSON_BYTES: usize = 24 * 1024 * 1024;
+// Keep normalized worlds inside conformance-report.schema.json.  Successful
+// runtime evidence must never become a bundle that its own schema rejects.
+const MAX_WORLD_DIMENSION: u64 = 65_535;
+const MAX_WORLD_ROW_BYTES: u64 = 1_073_741_824;
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -352,8 +356,9 @@ fn parse_world(value: Option<&Value>) -> Result<WorldMetadata, RuntimeFailure> {
     };
     if width == 0
         || height == 0
-        || width > u32::MAX as u64
-        || height > u32::MAX as u64
+        || width > MAX_WORLD_DIMENSION
+        || height > MAX_WORLD_DIMENSION
+        || row_bytes > MAX_WORLD_ROW_BYTES
         || row_bytes < width.saturating_mul(bytes_per_pixel)
         || extent_hint.left < 0
         || extent_hint.top < 0
@@ -582,9 +587,18 @@ fn runtime_failure_from_values(
     diagnostics: Option<&Value>,
     report: Option<&Value>,
 ) -> RuntimeFailure {
-    let mut failure = report
-        .and_then(|value| classify_report(path, value))
-        .or_else(|| diagnostics.and_then(|value| classify_report(path, value)))
+    // Process isolation is the authority for termination.  A native report is
+    // often partially available after SEH and can contain render_error=512 or
+    // output_pixels_valid=false; neither may downgrade a crash or timeout to a
+    // selector/output failure.
+    let process_termination = diagnostics.and_then(process_termination_failure);
+    let terminal_process_failure = process_termination.is_some();
+    let mut failure = process_termination
+        .or_else(|| {
+            report
+                .and_then(|value| classify_report(path, value))
+                .or_else(|| diagnostics.and_then(|value| classify_report(path, value)))
+        })
         .unwrap_or_else(|| RuntimeFailure::new(Classification::NonzeroExit));
     let report_timeline = report.map(suite_timeline).unwrap_or_default();
     let diagnostics_timeline = diagnostics.map(suite_timeline).unwrap_or_default();
@@ -599,11 +613,27 @@ fn runtime_failure_from_values(
     }
     sanitize_missing_suites(&mut suites);
     if !suites.is_empty() {
-        failure.classification = Classification::MissingSuite;
+        if !terminal_process_failure {
+            failure.classification = Classification::MissingSuite;
+        }
         failure.missing_suites = suites;
         failure.retry_classic = false;
     }
     failure
+}
+
+fn process_termination_failure(value: &Value) -> Option<RuntimeFailure> {
+    match value
+        .get("worker_classification")
+        .or_else(|| value.get("classification"))
+        .and_then(Value::as_str)
+    {
+        Some("crashed") => Some(RuntimeFailure::new(Classification::Crashed)),
+        Some("timeout") | Some("timeout_killed") => {
+            Some(RuntimeFailure::new(Classification::TimeoutKilled))
+        }
+        _ => None,
+    }
 }
 
 pub fn runtime_failure_from_io(path: RenderPath, error: &io::Error) -> RuntimeFailure {
@@ -855,6 +885,34 @@ mod tests {
     }
 
     #[test]
+    fn world_metadata_enforces_conformance_schema_boundaries() {
+        let world = |width, height, row_bytes| {
+            json!({
+                "width": width,
+                "height": height,
+                "row_bytes": row_bytes,
+                "pixel_format": "argb8",
+                "premultiplication": "premultiplied",
+                "extent_hint": {"left": 0, "top": 0, "right": width, "bottom": height}
+            })
+        };
+
+        assert!(parse_world(Some(&world(65_535, 65_535, 1_073_741_824))).is_ok());
+        for invalid_world in [
+            world(65_536, 1, 65_536 * 4),
+            world(1, 65_536, 4),
+            world(1, 1, 1_073_741_825),
+        ] {
+            assert_eq!(
+                parse_world(Some(&invalid_world))
+                    .unwrap_err()
+                    .classification,
+                Classification::HostValidationError
+            );
+        }
+    }
+
+    #[test]
     fn normalizes_success_and_world_metadata() {
         let mut backend = FakeBackend {
             inspect: Ok(json!({})),
@@ -910,12 +968,9 @@ mod tests {
                 inspect: Ok(json!({})),
                 renders: VecDeque::from([Ok(report)]),
             };
-            let results = collect_runtime_results(
-                &mut backend,
-                &[RenderPath::Classic],
-                &[PixelDepth::Argb8],
-            )
-            .unwrap();
+            let results =
+                collect_runtime_results(&mut backend, &[RenderPath::Classic], &[PixelDepth::Argb8])
+                    .unwrap();
             assert_eq!(
                 results[0].classification,
                 Classification::HostValidationError
@@ -991,13 +1046,54 @@ mod tests {
         });
         let error = io::Error::other(format!("worker failed safely: {diagnostics}"));
         let failure = runtime_failure_from_io(RenderPath::Classic, &error);
-        assert_eq!(failure.classification, Classification::MissingSuite);
-        assert_eq!(failure.selector_error, Some(9));
+        assert_eq!(failure.classification, Classification::TimeoutKilled);
+        assert_eq!(failure.selector_error, None);
         assert_eq!(failure.missing_suites.len(), 1);
 
         let error = io::Error::other(format!("worker failed: {diagnostics}, report=ignored"));
         let failure = runtime_failure_from_io(RenderPath::Classic, &error);
-        assert_eq!(failure.classification, Classification::MissingSuite);
+        assert_eq!(failure.classification, Classification::TimeoutKilled);
+        assert_eq!(failure.missing_suites.len(), 1);
+    }
+
+    #[test]
+    fn process_termination_overrides_partial_native_report_failures() {
+        let timeline = json!([{
+            "sequence": 0,
+            "action": "acquire",
+            "name": "PF World Suite",
+            "version": 2,
+            "selector": "PF Render",
+            "result": 0
+        }]);
+        for (process_classification, expected) in [
+            ("crashed", Classification::Crashed),
+            ("timeout_killed", Classification::TimeoutKilled),
+        ] {
+            for partial_report in [
+                json!({
+                    "render_error": 512,
+                    "suite_timeline": timeline.clone(),
+                    "missing_suites": [{"name": "PF World Suite", "version": 2}]
+                }),
+                json!({
+                    "output_pixels_valid": false,
+                    "suite_timeline": timeline.clone(),
+                    "missing_suites": [{"name": "PF World Suite", "version": 2}]
+                }),
+            ] {
+                let diagnostics = json!({"classification": process_classification});
+                let failure = runtime_failure_from_values(
+                    RenderPath::Classic,
+                    Some(&diagnostics),
+                    Some(&partial_report),
+                );
+                assert_eq!(failure.classification, expected);
+                assert_eq!(failure.missing_suites.len(), 1);
+                assert_eq!(failure.suite_timeline.len(), 1);
+                assert!(!failure.retry_classic);
+            }
+        }
     }
 
     #[test]
@@ -1142,9 +1238,7 @@ mod tests {
 
     #[test]
     fn smartfx_skips_native_not_dispatched_sentinels() {
-        for (pre_render_error, smart_render_error, expected) in
-            [(25, -1, 25), (-1, -6, -6)]
-        {
+        for (pre_render_error, smart_render_error, expected) in [(25, -1, 25), (-1, -6, -6)] {
             let report = json!({
                 "smart_render_selector_error": -1,
                 "pre_render_error": pre_render_error,
