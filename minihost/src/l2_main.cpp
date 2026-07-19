@@ -70,6 +70,7 @@
 #include "worker_session.hpp"
 #include "worker_selftest_dispatch.hpp"
 #include "worker_fixed_selftest_routing.hpp"
+#include "worker_custom_selftest_routing.hpp"
 #include "worker_smart_runtime.hpp"
 #include "worker_smart_execution.hpp"
 #include "worker_smart_setup.hpp"
@@ -5834,6 +5835,13 @@ int selftest_effect_param_union(int, wchar_t**) {
   return passed ? 0 : 1;
 }
 
+bool run_pf_path_data_hardening_selftest() {
+  return verify_pf_path_data_hardening(
+      {&g_effect, &enumerate_pf_paths, &snapshot_pf_path, &bounded_pf_path_world},
+      {&g_layer, &raise_mask_access_violation, &mask_runtime_snapshot,
+       &snapshot_mask_curve, &mask_lifetimes_balanced, &install_synthetic_mask_scene});
+}
+
 int worker_main_impl(int argc, wchar_t **argv) {
   SceneSuiteFactoryHooks scene_factory{};
   scene_factory.render_scene_enabled = &scene_render_receipt_enabled;
@@ -6005,157 +6013,23 @@ int worker_main_impl(int argc, wchar_t **argv) {
     std::cout << parameter_selftest.output;
     return parameter_selftest.exit_code;
   }
-  if (argc == 2 &&
-      std::wstring(argv[1]) == L"--self-test-aegp-layer-source-item") {
-    const bool passed = verify_aegp_layer_source_item();
-    std::cout << "{\"aegp_layer_source_item\":\""
-              << (passed ? "passed" : "failed")
-              << "\",\"successful_calls\":" << g_aegp_layer_source_item_calls
-              << ",\"item_type_calls\":" << g_aegp_item_type_calls
-              << "}\n";
-    return passed ? 0 : 1;
-  }
-  if (argc == 2 && std::wstring(argv[1]) == L"--self-test-pf-path-data-hardening") {
-    const bool passed = verify_pf_path_data_hardening(
-        {&g_effect, &enumerate_pf_paths, &snapshot_pf_path, &bounded_pf_path_world},
-        {&g_layer, &raise_mask_access_violation, &mask_runtime_snapshot,
-         &snapshot_mask_curve, &mask_lifetimes_balanced, &install_synthetic_mask_scene});
-    const auto path_report = aexcompat::pf_path_runtime::snapshot();
-    std::cout << "{\"pf_path_data_hardening\":\"" << (passed ? "passed" : "failed")
-              << "\",\"created\":" << path_report.preps_created
-              << ",\"disposed\":" << path_report.preps_disposed
-              << ",\"live\":" << path_report.live_preps
-              << ",\"balanced\":" << (aexcompat::pf_path_runtime::lifetimes_balanced() ? "true" : "false")
-              << "}\n";
-    return passed ? 0 : 1;
-  }
-  if (argc == 2 && std::wstring(argv[1]) == L"--self-test-pf-world-registry") {
-    const bool double_dispose = verify_world_double_dispose_rejected();
-    const bool allocation_limit = verify_world_allocation_limit_rejected();
-    const bool snapshot_atomic = verify_owned_world_snapshot_is_atomic();
-    const bool concurrent_snapshot =
-        verify_owned_world_snapshot_concurrent_dispose();
-    const auto world_stats = aexcompat::world_registry::statistics();
-    const bool passed = double_dispose && allocation_limit && snapshot_atomic &&
-        concurrent_snapshot &&
-        world_lifetimes_balanced() && world_stats.live_count == 0 &&
-        world_stats.live_bytes == 0;
-    std::cout << "{\"pf_world_registry\":\""
-              << (passed ? "passed" : "failed")
-              << "\",\"double_dispose_rejected\":"
-              << (double_dispose ? "true" : "false")
-              << ",\"allocation_limit_rejected\":"
-              << (allocation_limit ? "true" : "false")
-              << ",\"owned_snapshot_atomic\":"
-              << (snapshot_atomic ? "true" : "false")
-              << ",\"concurrent_snapshot_dispose\":"
-              << (concurrent_snapshot ? "true" : "false")
-              << ",\"live_count\":" << world_stats.live_count
-              << ",\"live_bytes\":" << world_stats.live_bytes << "}\n";
-    return passed ? 0 : 1;
-  }
-  if (argc == 4 && std::wstring(argv[1]) == L"--self-test-pf-ae-channel-transport" &&
-      std::wstring(argv[2]) == L"--aux-manifest-v1") {
-    const bool passed = verify_pf_ae_channel_transport(argv[3]);
-    const auto channel_transport = transport_statistics();
-    std::cout << "{\"pf_ae_channel_transport\":\""
-              << (passed ? "passed" : "failed")
-              << "\",\"row_bytes\":" << channel_transport.row_bytes
-              << ",\"origin\":[" << channel_transport.origin_x << ','
-              << channel_transport.origin_y << "]"
-              << ",\"duration\":" << channel_transport.duration << "}\n";
-    return passed ? 0 : 3;
-  }
-  if (argc == 2 && std::wstring(argv[1]) == L"--self-test-pf-color-settings-suite6") {
-    const bool passed =
-        aexcompat::color_settings::selftests::verify_pf_color_settings_suite6();
-    const auto& srgb_icc = color_settings_builtin_srgb_icc();
-    const auto& linear_icc = color_settings_builtin_linear_icc();
-    const auto color_stats = color_settings_statistics();
-    uint32_t memory_created = 0;
-    uint32_t memory_freed = 0;
-    uint64_t memory_residual = 0;
-    const auto memory_stats = aegp_memory_statistics();
-    memory_created = memory_stats.created;
-    memory_freed = memory_stats.freed;
-    memory_residual = memory_stats.live_bytes;
-    std::cout << "{\"pf_color_settings_suite6\":\"" << (passed ? "passed" : "failed")
-              << "\",\"profiles_created\":" << color_stats.profiles_created
-              << ",\"profiles_disposed\":" << color_stats.profiles_disposed
-              << ",\"profiles_live\":" << color_stats.profiles_live
-              << ",\"invalid_operations\":" << color_stats.invalid_operations
-              << ",\"xform_calls\":" << color_stats.xform_calls
-              << ",\"memory_created\":" << memory_created
-              << ",\"memory_freed\":" << memory_freed
-              << ",\"memory_residual_bytes\":" << memory_residual
-              << ",\"memory_balanced\":" << (aegp_memory_balanced() ? "true" : "false")
-              << ",\"srgb_icc_bytes\":" << srgb_icc.size()
-              << ",\"srgb_icc_sha256\":\"" << sha256_bytes(srgb_icc.data(), srgb_icc.size())
-              << "\",\"linear_icc_bytes\":" << linear_icc.size()
-              << ",\"linear_icc_sha256\":\"" << sha256_bytes(linear_icc.data(), linear_icc.size())
-              << "\",\"linear_icc_hex\":\"" << hex_bytes(linear_icc.data(), linear_icc.size())
-              << "\",\"ocio_enabled\":false}\n";
-    return passed ? 0 : 1;
-  }
-  if (argc == 2 &&
-      std::wstring(argv[1]) == L"--self-test-pf-effect-sequence-data-suite") {
-    const bool passed = verify_pf_effect_sequence_data_suite1();
-    std::cout << "{\"pf_effect_sequence_data_suite1\":\""
-              << (passed ? "passed" : "failed")
-              << "\",\"borrowed_handle\":true,\"mfr_concurrent_reads\":2048"
-              << ",\"live_sequences\":"
-              << live_effect_sequence_count()
-              << ",\"publications\":" << effect_sequence_publications()
-              << ",\"invalidations\":" << effect_sequence_invalidations() << "}\n";
-    return passed ? 0 : 36;
-  }
-  if (argc == 2 && std::wstring(argv[1]) == L"--self-test-aegp-async-receipt") {
-    const bool passed = verify_aegp_async_receipts();
-    std::cout << "{\"aegp_async_receipt\":\"" << (passed ? "passed" : "failed")
-              << "\",\"created\":" << aexcompat::render_receipts::statistics().created
-              << ",\"checked_in\":" << aexcompat::render_receipts::statistics().checked_in
-              << ",\"live\":" << aexcompat::render_receipts::statistics().live_count
-              << ",\"live_bytes\":" << aexcompat::render_receipts::statistics().live_bytes
-              << ",\"invalid_operations\":"
-              << aexcompat::render_receipts::statistics().invalid_operations
-              << "}\n";
-    return passed ? 0 : 1;
-  }
-  if (argc == 2 && std::wstring(argv[1]) == L"--self-test-aegp-render-options-suite1") {
-    const bool passed = verify_aegp_render_options_suite1();
-    std::cout << "{\"aegp_render_options_suite1\":\""
-              << (passed ? "passed" : "failed")
-              << "\",\"created\":" << item_created_count()
-              << ",\"disposed\":" << item_disposed_count()
-              << ",\"live\":" << item_live_count()
-              << ",\"receipts_created\":" << aexcompat::render_receipts::statistics().created
-              << ",\"receipts_checked_in\":" << aexcompat::render_receipts::statistics().checked_in
-              << ",\"invalid_operations\":" << item_invalid_count()
-              << ",\"baseline_argb8\":[" << static_cast<int>(g_render_options_baseline8[0]) << ','
-              << static_cast<int>(g_render_options_baseline8[1]) << ',' << static_cast<int>(g_render_options_baseline8[2]) << ',' << static_cast<int>(g_render_options_baseline8[3]) << ']'
-              << ",\"time_argb8\":[" << static_cast<int>(g_render_options_time8[0]) << ',' << static_cast<int>(g_render_options_time8[1]) << ',' << static_cast<int>(g_render_options_time8[2]) << ',' << static_cast<int>(g_render_options_time8[3]) << ']'
-              << ",\"downsample_argb8\":[" << static_cast<int>(g_render_options_downsample8[0]) << ',' << static_cast<int>(g_render_options_downsample8[1]) << ',' << static_cast<int>(g_render_options_downsample8[2]) << ',' << static_cast<int>(g_render_options_downsample8[3]) << ']'
-              << ",\"roi_outside_argb8\":[0,0,0,0],\"field_excluded_argb8\":[0,0,0,0]"
-              << ",\"roi_inside_argb8\":[" << static_cast<int>(g_render_options_roi_inside8[0]) << ',' << static_cast<int>(g_render_options_roi_inside8[1]) << ',' << static_cast<int>(g_render_options_roi_inside8[2]) << ',' << static_cast<int>(g_render_options_roi_inside8[3]) << ']'
-              << ",\"matte_argb8\":[" << static_cast<int>(g_render_options_matte8[0]) << ',' << static_cast<int>(g_render_options_matte8[1]) << ',' << static_cast<int>(g_render_options_matte8[2]) << ',' << static_cast<int>(g_render_options_matte8[3]) << ']'
-              << ",\"argb16\":[" << g_render_options_argb16[0] << ',' << g_render_options_argb16[1] << ',' << g_render_options_argb16[2] << ',' << g_render_options_argb16[3] << ']'
-              << std::setprecision(17) << ",\"argb32f\":[" << g_render_options_argb32f[0] << ',' << g_render_options_argb32f[1] << ',' << g_render_options_argb32f[2] << ',' << g_render_options_argb32f[3] << ']'
-              << "}\n";
-    return passed ? 0 : 1;
-  }
-  if (argc == 2 &&
-      std::wstring(argv[1]) == L"--self-test-aegp-item-staged-worlds") {
-    const bool passed = verify_aegp_item_staged_worlds();
-    const auto staged = aexcompat::aegp_staged_item_runtime::diagnostics();
-    std::cout << "{\"aegp_item_staged_worlds\":\""
-              << (passed ? "passed" : "failed")
-              << "\",\"immutable_stage\":true,\"reentrant_render_used\":false"
-              << ",\"published\":" << staged.published
-              << ",\"cache_hits\":" << staged.cache_hits
-              << ",\"cache_misses\":" << staged.cache_misses
-              << ",\"cycles_rejected\":" << staged.cycles_rejected
-              << "}\n";
-    return passed ? 0 : 1;
+  const auto custom_selftest =
+      aexcompat::worker_runtime::custom_selftests::dispatch(
+          {argc, argv},
+          {&run_pf_path_data_hardening_selftest,
+           &verify_world_double_dispose_rejected,
+           &verify_world_allocation_limit_rejected,
+           &verify_owned_world_snapshot_is_atomic,
+           &verify_owned_world_snapshot_concurrent_dispose,
+           &verify_pf_effect_sequence_data_suite1,
+           &verify_aegp_async_receipts, &sha256_bytes, &hex_bytes,
+           &g_render_options_baseline8, &g_render_options_time8,
+           &g_render_options_downsample8, &g_render_options_roi_inside8,
+           &g_render_options_matte8, &g_render_options_argb16,
+           &g_render_options_argb32f});
+  if (custom_selftest.handled) {
+    std::cout << custom_selftest.output;
+    return custom_selftest.exit_code;
   }
   // Consume an optional trailing --minidump-v1 <dir> pair for every worker
   // kind (render, smart, and the L2 inspection/params paths below) before any
