@@ -3,14 +3,20 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SOURCE = ROOT / "minihost/src/l2_main.cpp"
+SOURCES = (
+    ROOT / "minihost/src/l2_main.cpp",
+    ROOT / "minihost/src/worker_pf_suites.cpp",
+    ROOT / "minihost/src/worker_pf_suites_internal.hpp",
+    ROOT / "minihost/src/worker_world_safety.cpp",
+)
 PROBE = ROOT / "instruments/pf-ae-adv-item-probe/pf_ae_adv_item_probe.cpp"
 BUILD = ROOT / "tools/build-pf-ae-adv-item-probe.ps1"
 
 
 def test_adv_item_v1_exact_name_version_abi_and_slot_order():
-    text = SOURCE.read_text(encoding="utf-8")
-    assert 'std::strcmp(name, "PF AE Adv Item Suite") == 0 && version == 1' in text
+    text = "\n".join(path.read_text(encoding="utf-8") for path in SOURCES)
+    assert '{"PF AE Adv Item Suite", 1, &g_adv_item_suite1' in text
+    assert "&render_worker_suite_provider_available" in text
     assert "sizeof(PfAdvItemSuite1) == 5 * sizeof(void*)" in text
     slots = ["move_time_step", "move_time_step_active_item", "touch_active_item",
              "force_rerender", "effect_is_active_or_enabled"]
@@ -19,7 +25,7 @@ def test_adv_item_v1_exact_name_version_abi_and_slot_order():
 
 
 def test_adv_item_callbacks_are_fail_closed_and_headless_policy_is_explicit():
-    text = SOURCE.read_text(encoding="utf-8")
+    text = "\n".join(path.read_text(encoding="utf-8") for path in SOURCES)
     for marker in ("direction != 0 && direction != 1", "steps < 0", "INT32_MIN",
                    "INT32_MAX", "active_adv_item_context(in_data)",
                    "active_adv_item_world(world, effect_world)", "!effect_world.data",

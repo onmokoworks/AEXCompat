@@ -3,6 +3,9 @@ import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+RENDER = ROOT / "minihost" / "src" / "render_subsystem.cpp"
+WORKER = ROOT / "minihost" / "src" / "l2_main.cpp"
+CLASSIC_RUNTIME = ROOT / "minihost" / "src" / "worker_classic_runtime.cpp"
 
 
 class PfFrameResizeFlagResultTest(unittest.TestCase):
@@ -19,10 +22,22 @@ class PfFrameResizeFlagResultTest(unittest.TestCase):
             self.assertTrue(cases[name]["guard_bytes_intact"])
 
     def test_worker_enforces_flags_before_render(self):
-        source = (ROOT / "minihost" / "src" / "l2_main.cpp").read_text()
-        self.assertIn("expands && (resize_flags & kOutFlagIExpandBuffer) == 0", source)
-        self.assertIn("shrinks && (resize_flags & kOutFlagIShrinkBuffer) == 0", source)
-        self.assertIn("g_classic_render_selector_dispatched = true", source)
+        render = RENDER.read_text(encoding="utf-8")
+        worker = WORKER.read_text(encoding="utf-8")
+        # Request-shaping is shared by Classic and SmartFX; L2 only invokes
+        # the extracted validator before replacing the guarded output world.
+        validator = render[render.index("bool validate_output_extent("):
+                           render.index("SmartOutputBounds prepare_smart_output_bounds")]
+        self.assertIn("const bool expands", validator)
+        self.assertIn("const bool shrinks", validator)
+        self.assertIn("(output_flags & kExpandBuffer) != 0", validator)
+        self.assertIn("(output_flags & kShrinkBuffer) != 0", validator)
+        validate = worker.index("aexcompat::render::validate_output_extent(")
+        resize = worker.index("width = next_width;", validate)
+        self.assertLess(validate, resize)
+        self.assertIn("classic_context.mark_selector_dispatched()", worker)
+        self.assertIn("g_last_selector_dispatched.store(true",
+                      CLASSIC_RUNTIME.read_text(encoding="utf-8"))
         fixture = (ROOT / "instruments" / "pf-frame-resize-probe" / "pf_frame_resize_probe.cpp").read_text()
         self.assertIn("PF_Cmd_FRAME_SETUP", fixture)
         self.assertIn("PF_Err_INTERNAL_STRUCT_DAMAGED", fixture)

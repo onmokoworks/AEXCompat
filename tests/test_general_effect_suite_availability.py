@@ -5,6 +5,11 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "minihost" / "src" / "l2_main.cpp"
+WORLD_SAFETY_SOURCE = ROOT / "minihost" / "src" / "worker_world_safety.cpp"
+PF_SUITES_SOURCE = ROOT / "minihost" / "src" / "worker_pf_suites.cpp"
+PF_SAMPLING_SOURCE = ROOT / "minihost" / "src" / "worker_pf_sampling_runtime.cpp"
+PF_WORLD_TRANSFORM_SOURCE = ROOT / "minihost" / "src" / "worker_pf_world_transform_runtime.cpp"
+HOST_CATALOG_SOURCE = ROOT / "minihost" / "src" / "worker_host_suite_catalog.cpp"
 RESULT = ROOT / "analysis" / "GENERAL_EFFECT_SUITE_AVAILABILITY_RESULT_2026-07-16.json"
 
 
@@ -19,48 +24,31 @@ SUITES = {
 }
 
 
-def acquire_suite_source(source: str) -> str:
-    start = source.index("int32_t __cdecl acquire_suite(")
-    end = source.index("int32_t __cdecl release_suite(", start)
+def component_catalog_source(source: str) -> str:
+    start = source.index("const StaticSuite component_suites[]")
+    end = source.index("return configure_host_suite_catalog", start)
     return source[start:end]
 
 
-def suite_branch(acquire: str, name: str, version: int) -> str:
-    pattern = re.compile(
-        rf'if \((?P<condition>[^{{]*std::strcmp\(name, "{re.escape(name)}"\) == 0[^{{]*)\) '
-        rf'\{{(?P<body>.*?)\n  \}}',
-        re.DOTALL,
-    )
-    matches = [match for match in pattern.finditer(acquire) if f"version == {version}" in match["condition"]]
-    assert len(matches) == 1, f"expected one {name} v{version} acquire branch"
-    return matches[0]["condition"] + matches[0]["body"]
-
-
 def test_general_effect_suites_are_available_without_mask_mode_and_are_version_exact():
-    source = SOURCE.read_text(encoding="utf-8")
-    acquire = acquire_suite_source(source)
+    source = (SOURCE.read_text(encoding="utf-8") + HOST_CATALOG_SOURCE.read_text(encoding="utf-8") +
+              PF_SAMPLING_SOURCE.read_text(encoding="utf-8") +
+              PF_WORLD_TRANSFORM_SOURCE.read_text(encoding="utf-8"))
+    catalog = component_catalog_source(source)
 
     for name, (version, function_markers) in SUITES.items():
-        branch = suite_branch(acquire, name, version)
-        assert "g_mask_model_enabled" not in branch
-        assert f"version == {version}" in branch
-        assert "*suite =" in branch
-        assert "record_suite_acquire(name, version)" in branch
-        assert "return 0;" in branch
+        entries = re.findall(rf'\{{"{re.escape(name)}",\s*(\d+),[^\n]*', catalog)
+        assert entries == [str(version)], f"{name} must have one exact-version provider"
         for marker in function_markers:
-            assert f"&{marker}" in branch
+            assert f"&{marker}" in source
 
-        versions = re.findall(
-            rf'std::strcmp\(name, "{re.escape(name)}"\) == 0[^{{]*version == (\d+)', acquire
-        )
-        assert versions == [str(version)], f"{name} must not accept an uncontracted version"
-
-    assert "return reject_suite_acquire(name, version);" in acquire
-    assert "*suite = nullptr;" in acquire
+    assert "configure_host_suite_catalog(" in source
+    assert "catalog.providers[1] = {&resolve_static_provider" in source
+    assert "acquire_host_suite(catalog.provider_catalog, name, version, suite" in source
 
 
 def test_general_effect_suite_functions_keep_existing_safety_bounds():
-    source = SOURCE.read_text(encoding="utf-8")
+    source = SOURCE.read_text(encoding="utf-8") + PF_SUITES_SOURCE.read_text(encoding="utf-8") + PF_SAMPLING_SOURCE.read_text(encoding="utf-8") + PF_WORLD_TRANSFORM_SOURCE.read_text(encoding="utf-8") + WORLD_SAFETY_SOURCE.read_text(encoding="utf-8")
 
     for marker in (
         "int32_t __cdecl subpixel_sample16(",

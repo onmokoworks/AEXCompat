@@ -23,4 +23,5 @@ def test_real_aex_parameter_count_contract_result():
     assert result["invariants"]["classic_and_smartfx_share_count_contract"]
     worker = WORKER.read_text(encoding="utf-8")
     assert "read<int32_t>(output, kOutNumParams) == expected_num_params" in worker
-    assert "request_mode && (params_error != 0 || !parameter_count_contract_valid" in worker
+    assert "is_rendering_worker() && request_mode" in worker
+    assert "params_error != 0 || !parameter_count_contract_valid" in worker

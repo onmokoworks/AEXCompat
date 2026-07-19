@@ -45,12 +45,7 @@ def test_pf_pixel_data_suite_v1_v2_match_sdk_abi():
 def test_pf_pixel_data_suite_versions_are_acquirable_by_sdk_name():
     text = source_text()
     for version in (1, 2):
-        assert re.search(
-            rf'"PF Pixel Data Suite"\) == 0 && version == {version}\) \{{\s*'
-            rf'\*suite = &g_pixel_data_suite{version};\s*'
-            r"record_suite_acquire\(name, version\);",
-            text,
-        )
+        assert f'{{"PF Pixel Data Suite", {version}, &g_pixel_data_suite{version}}}' in text
 
 
 def test_pf_pixel_data_depths_use_registry_and_fail_closed():

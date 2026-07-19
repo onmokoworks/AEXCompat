@@ -25,21 +25,26 @@ def test_cuda_device_world_matches_cpu_public_pixels_and_balances_ownership():
 
 
 def test_cuda_driver_boundary_is_dynamic_bounded_and_channel_explicit():
-    source = (ROOT / "minihost" / "src" / "l2_main.cpp").read_text()
+    source = (ROOT / "minihost" / "src" / "gpu_memory_world_transport.cpp").read_text()
+    worker = (ROOT / "minihost" / "src" / "l2_main.cpp").read_text()
+    backend = (ROOT / "minihost" / "src" / "gpu_cuda_backend.cpp").read_text()
     for marker in (
         'LoadLibraryExW(L"nvcuda.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32)',
-        'load_cuda_function(g_cuda.mem_alloc, "cuMemAlloc_v2")',
-        'load_cuda_function(g_cuda.copy_host_to_device, "cuMemcpyHtoD_v2")',
-        'load_cuda_function(g_cuda.copy_device_to_host, "cuMemcpyDtoH_v2")',
-        'load_cuda_function(g_cuda.host_alloc, "cuMemHostAlloc")',
-        'load_cuda_function(g_cuda.host_free, "cuMemFreeHost")',
+        'load_function(state->module, state->mem_alloc, "cuMemAlloc_v2")',
+        'load_function(state->module, state->copy_host_to_device, "cuMemcpyHtoD_v2")',
+        'load_function(state->module, state->copy_device_to_host, "cuMemcpyDtoH_v2")',
+        'load_function(state->module, state->host_alloc, "cuMemHostAlloc")',
+        'load_function(state->module, state->host_free, "cuMemFreeHost")',
+    ):
+        assert marker in backend
+    for marker in (
         "kMaxGpuAllocationBytes = 256u * 1024u * 1024u",
         "destination[x * 4] = source[x * 4 + 3]",
         "destination[x * 4 + 3] = source[x * 4]",
-        "finish_cuda_render_transport",
         "end_cuda_context",
     ):
         assert marker in source
+    assert "finish_cuda_render_transport" in worker
 
     build = (ROOT / "tools" / "build-sdk-invert-cuda.ps1").read_text()
     assert "SDK_Invert_ProcAmp_Kernel.cu" in build

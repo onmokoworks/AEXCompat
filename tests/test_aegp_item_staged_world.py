@@ -6,6 +6,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "minihost" / "src" / "l2_main.cpp"
+RUNTIME = ROOT / "minihost" / "src" / "worker_aegp_staged_item_runtime.cpp"
+HEADER = ROOT / "minihost" / "src" / "worker_aegp_staged_item_runtime.hpp"
 
 
 def _worker() -> Path | None:
@@ -19,30 +21,34 @@ def _worker() -> Path | None:
 
 
 def test_item_checkout_uses_immutable_host_stage_not_reentrant_render():
-    text = SOURCE.read_text(encoding="utf-8")
+    host = SOURCE.read_text(encoding="utf-8")
+    text = RUNTIME.read_text(encoding="utf-8")
     for marker in (
         "struct StagedItemWorld",
-        "publish_staged_item_world(",
-        "snapshot_staged_item_world(",
-        "transform_staged_item_world(",
-        "register_item_receipt(",
+        "bool publish_world(",
+        "bool snapshot_world(",
+        "int32_t transform(",
+        "render_receipts::register_receipt(",
         "staged_source_pin",
-        "thread_local std::vector<ItemRenderStackKey> g_item_render_stack",
-        "snapshot_staged_item_world(snapshot, stage)",
-        "publish_staged_item_world(aegp_comp_item_handle()",
+        "thread_local std::vector<ItemRenderStackKey> g_render_stack",
+        "snapshot_world(snapshot, stage)",
     ):
         assert marker in text
-    assert "render_loaded_effect_item_receipt(" not in text
-    assert "g_loaded_effect_receipt_mutex" not in text
-    assert "g_loaded_effect_receipt_active" not in text
+    for marker in ("struct StagedItemWorld", "ItemRenderStackKey", "snapshot_world(",
+                   "int32_t transform("):
+        assert marker not in host
+    assert "render_loaded_effect_item_receipt(" not in host
+    assert "g_loaded_effect_receipt_mutex" not in host
+    assert "g_loaded_effect_receipt_active" not in host
+    assert "struct Hooks" in HEADER.read_text(encoding="utf-8")
 
 
 def test_stage_key_covers_render_identity_and_generation():
-    text = SOURCE.read_text(encoding="utf-8")
+    text = RUNTIME.read_text(encoding="utf-8")
     for marker in (
         "value.item == options.item",
-        "same_stage_rational(value.time, options.time)",
-        "same_stage_rational(value.time_step, options.time_step)",
+        "same_rational(value.time, options.time)",
+        "same_rational(value.time_step, options.time_step)",
         "value.quality == options.render_quality",
         "value.guide_layers == options.render_guide_layers",
         "value.pixel_format == pixel_format",

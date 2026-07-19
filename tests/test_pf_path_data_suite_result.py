@@ -4,7 +4,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 RESULT = ROOT / "analysis" / "PF_PATH_DATA_SUITE_RESULT_2026-07-15.json"
-WORKER = ROOT / "minihost" / "src" / "l2_main.cpp"
+WORKER = ROOT / "minihost" / "src" / "worker_pf_path_runtime.hpp"
 PROBE = ROOT / "instruments" / "pf-path-data-probe" / "pf_path_data_probe.cpp"
 
 
@@ -42,7 +42,7 @@ def test_windows_pf_boolean_callbacks_write_exactly_one_byte():
     probe = PROBE.read_text(encoding="utf-8")
 
     assert result["abi_fix"]["pf_boolean_windows_size_bytes"] == 1
-    assert "pf_path_is_open(void* effect_ref, void* path, int8_t* open)" in worker
-    assert "pf_path_is_inverted(void* effect_ref, int32_t unique_id, int8_t* inverted)" in worker
+    assert "path_is_open(void*, void*, int8_t*)" in worker
+    assert "path_is_inverted(void*, int32_t, int8_t*)" in worker
     for callback in result["api_contract"]["callbacks_exercised"]:
         assert callback in probe

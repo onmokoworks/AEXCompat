@@ -6,6 +6,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "minihost/src/l2_main.cpp"
+CHANNEL_RUNTIME = ROOT / "minihost/src/worker_pf_ae_channel_runtime.cpp"
 
 
 def worker():
@@ -19,7 +20,7 @@ def worker():
 
 
 def test_native_provider_keeps_plane_metadata_and_never_infers_noncoverage_planes():
-    source = SOURCE.read_text(encoding="utf-8")
+    source = SOURCE.read_text(encoding="utf-8") + CHANNEL_RUNTIME.read_text(encoding="utf-8")
     for contract in (
         "signed_row_bytes",
         "origin_x",

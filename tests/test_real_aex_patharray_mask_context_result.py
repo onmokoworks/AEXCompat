@@ -7,6 +7,7 @@ RESULT = ROOT / "analysis" / "REAL_AEX_PATHARRAY_MASK_CONTEXT_RESULT_2026-07-15.
 HARNESS = ROOT / "broker" / "crates" / "harness" / "src" / "main.rs"
 BROKER = ROOT / "broker" / "crates" / "broker" / "src" / "image_render.rs"
 WORKER = ROOT / "minihost" / "src" / "l2_main.cpp"
+REQUEST_PARSER = ROOT / "minihost" / "src" / "worker_request_parser.cpp"
 
 
 def test_patharray_mask_context_turns_smartfx_passthrough_into_effect_output():
@@ -32,11 +33,11 @@ def test_generic_mask_transport_reuses_bounded_cleanroom_context():
     assert result["negative_control"]["native_worker_started"] is False
     harness = HARNESS.read_text(encoding="utf-8")
     broker = BROKER.read_text(encoding="utf-8")
-    worker = WORKER.read_text(encoding="utf-8")
+    worker = WORKER.read_text(encoding="utf-8") + REQUEST_PARSER.read_text(encoding="utf-8")
     assert "fn typed_request_host_context(" in harness
     assert "render_experimental_image_at_time_with_format_and_context" in harness
     assert "host_context: Option<&crate::render_request::HostContext>" in broker
     assert "encode_mask_context(context)?" in broker
     assert "image_mask_context" in worker
-    assert "parse_mask_context_payload(argv[image_trailer_argc - 1])" in worker
-    assert "parse_mask_context_payload(argv[smart_image_trailer_argc - 1])" in worker
+    assert "hooks.parse_mask_context(argv[trailer_argc - 1])" in worker
+    assert "hooks.parse_mask_context(argv[5])" in worker

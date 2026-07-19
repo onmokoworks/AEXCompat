@@ -9,6 +9,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 WORKER_SOURCE = ROOT / "minihost" / "src" / "l2_main.cpp"
+DISPATCH_SOURCE = ROOT / "minihost" / "src" / "l2_cli_dispatch.cpp"
+RENDER_SOURCE = ROOT / "minihost" / "src" / "render_subsystem.cpp"
 BROKER_SOURCE = ROOT / "broker" / "crates" / "broker" / "src" / "image_render.rs"
 HARNESS = ROOT / "broker" / "target" / "release" / "aexcompat-harness.exe"
 FIXTURE = ROOT / "target" / "sdk-fixtures" / "shifter" / "Shifter.aex"
@@ -16,16 +18,19 @@ INPUT = ROOT / "target" / "ae-oracle-colorgrid-input.png"
 
 
 def test_world_dump_and_checksum_detail_are_opt_in_and_fail_closed():
-    worker = WORKER_SOURCE.read_text(encoding="utf-8")
+    worker = (WORKER_SOURCE.read_text(encoding="utf-8") + "\n" +
+              DISPATCH_SOURCE.read_text(encoding="utf-8") + "\n" +
+              RENDER_SOURCE.read_text(encoding="utf-8"))
     # Opt-in trailers, default off, with hard caps on count and total bytes.
-    assert 'flag == L"--dump-worlds-v1"' in worker
-    assert 'flag == L"--output-checksum-detail-v1"' in worker
+    assert 'equals(flag, L"--dump-worlds-v1")' in worker
+    assert 'equals(flag, L"--output-checksum-detail-v1")' in worker
     assert "constexpr uint32_t kMaxWorldDumps = 32;" in worker
     assert "constexpr uint64_t kMaxWorldDumpBytes = 1ull << 30;" in worker
     # Dump names carry stage and dimensions in the raw formats the comparison
     # tool consumes directly.
     assert '"%03u-%s-%dx%d.%s"' in worker
-    assert '"rgba32f-le" : (pixel_bytes == 8 ? "rgba16le" : "rgba8")' in worker
+    for extension in ('"rgba32f-le"', '"rgba16le"', '"rgba8"'):
+        assert extension in worker
 
     broker = BROKER_SOURCE.read_text(encoding="utf-8")
     assert '"AEXCOMPAT_DUMP_WORLDS_DIR"' in broker

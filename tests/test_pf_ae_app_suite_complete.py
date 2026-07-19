@@ -3,21 +3,24 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "minihost" / "src" / "l2_main.cpp"
+CATALOG = ROOT / "minihost" / "src" / "worker_host_suite_catalog.cpp"
 
 
 def source() -> str:
-    return SOURCE.read_text(encoding="utf-8")
+    return SOURCE.read_text(encoding="utf-8") + CATALOG.read_text(encoding="utf-8")
 
 
 def test_app_suite_versions_use_sdk_slot_counts_and_acquire_versions():
     text = source()
-    assert "std::array<void*, 11> g_app_suite4" in text
-    assert "std::array<void*, 12> g_app_suite5" in text
-    assert "std::array<void*, 15> g_app_suite6" in text
-    assert "(version == 6 || version == 7 || version == 1)" in text
-    assert "populate_app_suite(g_app_suite4, false, false)" in text
-    assert "populate_app_suite(g_app_suite5, true, false)" in text
-    assert "populate_app_suite(g_app_suite6, true, true)" in text
+    assert "std::array<void*, 11> app4" in text
+    assert "std::array<void*, 12> app5" in text
+    assert "std::array<void*, 15> app6" in text
+    assert '{"PF AE App Suite", 6, nullptr, &provide_app_suite4}' in text
+    assert '{"PF AE App Suite", 7, nullptr, &provide_app_suite5}' in text
+    assert '{"PF AE App Suite", 1, nullptr, &provide_app_suite6}' in text
+    assert "populate_app(c.app4,false,false)" in text
+    assert "populate_app(c.app5,true,false)" in text
+    assert "populate_app(c.app6,true,true)" in text
 
 
 def test_all_sdk_slots_have_explicit_host_semantics():

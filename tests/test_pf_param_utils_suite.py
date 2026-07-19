@@ -5,6 +5,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "minihost" / "src" / "l2_main.cpp"
+PF_STATE_RUNTIME = ROOT / "minihost" / "src" / "worker_pf_state_runtime.cpp"
+SELFTEST_SOURCE = ROOT / "minihost" / "src" / "worker_parameter_selftests.cpp"
 
 
 def _worker():
@@ -17,9 +19,19 @@ def _worker():
     return next((path for path in candidates if path and path.is_file()), None)
 
 
+def test_parameter_selftests_are_a_true_translation_unit():
+    worker = SOURCE.read_text(encoding="utf-8")
+    implementation = SELFTEST_SOURCE.read_text(encoding="utf-8")
+    for name in ("verify_pf_param_utils_suite3",
+                 "verify_parameter_animation_transport"):
+        marker = f"bool {name}()"
+        assert marker in implementation
+        assert marker not in worker
+
+
 def test_param_utils_suite3_has_the_frozen_typed_nine_slot_abi():
     source = SOURCE.read_text(encoding="utf-8")
-    assert 'std::strcmp(name, "PF Param Utils Suite") == 0 && version == 3' in source
+    assert '{"PF Param Utils Suite", 3, &g_param_utils_suite}' in source
     assert "struct ParamUtilsSuite3" in source
     assert "sizeof(ParamUtilsSuite3) == 9 * sizeof(void*)" in source
     assert "offsetof(ParamUtilsSuite3, PF_UpdateParamUI) == 0 * sizeof(void*)" in source
@@ -32,13 +44,14 @@ def test_param_utils_suite3_has_the_frozen_typed_nine_slot_abi():
 
 
 def test_param_utils_suite3_integrates_state_and_constant_keyframe_models():
-    source = SOURCE.read_text(encoding="utf-8")
+    source = "\n".join(path.read_text(encoding="utf-8") for path in
+                       (SOURCE, PF_STATE_RUNTIME, SELFTEST_SOURCE))
     for marker in (
         "canonical_param_state_snapshot",
         "g_pf_state_registry.emplace",
         "constexpr uint32_t kMutableUiFlags",
         "target + kParamName",
-        "update_param_ui(&g_effect, 1, local.data()) == 0",
+            "update_param_ui(g_hooks.effect, 1, local.data()) == 0",
         "effect_ref != &g_effect",
         "g_pf_state_registry.find(first_token)",
         "*count = -1",

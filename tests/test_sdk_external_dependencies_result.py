@@ -5,6 +5,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 RESULT = ROOT / "analysis" / "SDK_EXTERNAL_DEPENDENCIES_RESULT_2026-07-15.json"
 WORKER = ROOT / "minihost" / "src" / "l2_main.cpp"
+MODE_EXECUTION = ROOT / "minihost" / "src" / "l2_mode_execution.cpp"
 BROKER = ROOT / "broker" / "crates" / "broker" / "src" / "image_render.rs"
 HARNESS = ROOT / "broker" / "crates" / "harness" / "src" / "main.rs"
 PROBE = ROOT / "instruments" / "abi-layout-probe" / "main.cpp"
@@ -41,6 +42,7 @@ def test_null_missing_dependency_handle_is_a_valid_empty_result():
 def test_external_dependency_boundary_is_abi_bound_isolated_and_exposed():
     evidence = result()
     worker = WORKER.read_text(encoding="utf-8")
+    mode_execution = MODE_EXECUTION.read_text(encoding="utf-8")
     broker = BROKER.read_text(encoding="utf-8")
     harness = HARNESS.read_text(encoding="utf-8")
     probe = PROBE.read_text(encoding="utf-8")
@@ -49,8 +51,8 @@ def test_external_dependency_boundary_is_abi_bound_isolated_and_exposed():
     assert "PF_ExtDependenciesExtra::dependencies_strH" in probe
     assert "PF_Cmd_GET_EXTERNAL_DEPENDENCIES" in probe
     assert "constexpr int32_t kGetExternalDependencies = 16;" in worker
-    assert "kMaxDependencyBytes = 64 * 1024" in worker
-    assert "invoke_entry_seh(entry, kGetExternalDependencies" in worker
+    assert "kMaxDependencyBytes = 64 * 1024" in mode_execution
+    assert "invoke_entry_seh(b.entry, kGetExternalDependencies" in worker
     assert "pub fn inspect_experimental_external_dependencies" in broker
     assert '"get_external_dependencies"' in broker
     assert 'args[1] == "--inspect-experimental-dependencies"' in harness

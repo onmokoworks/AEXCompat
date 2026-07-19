@@ -9,6 +9,7 @@ SCRIPT = ROOT / "tools" / "build-pf-transfer-rect-probe.ps1"
 WORKER = ROOT / "target" / "minihost-build" / "aex_render_worker.exe"
 PROBE = ROOT / "target" / "pf-transfer-rect-probe-build" / "Release" / "pf_transfer_rect_probe.aex"
 INPUT = ROOT / "target" / "gpu-effects" / "opencl-input.rgba"
+RUNTIME = ROOT / "minihost" / "src" / "worker_pf_world_transform_runtime.cpp"
 
 def test_probe_builds_against_transfer_rect_slot5():
     subprocess.run(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(SCRIPT)],
@@ -24,7 +25,7 @@ def test_probe_contains_exact_partial_alpha_vectors():
     assert "PF_MF_Alpha_STRAIGHT" in source
 
 def test_host_accepts_all_public_sdk_transfer_modes_and_rejects_reserved_values():
-    source = (ROOT / "minihost/src/l2_main.cpp").read_text(encoding="utf-8")
+    source = RUNTIME.read_text(encoding="utf-8")
     assert "transfer_mode < 0 || transfer_mode > 38" in source
     assert "random_seed" in source
     assert "hash & 0x00ffffffu" in source

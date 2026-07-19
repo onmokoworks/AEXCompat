@@ -5,6 +5,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 RESULT = ROOT / "analysis" / "SDK_RENDER_PATH_NEGOTIATION_RESULT_2026-07-15.json"
 MINIHOST = ROOT / "minihost" / "src" / "l2_main.cpp"
+RENDER_REPORT = ROOT / "minihost" / "src" / "worker_render_report.cpp"
 HARNESS = ROOT / "broker" / "crates" / "harness" / "src" / "main.rs"
 
 
@@ -40,6 +41,7 @@ def test_smart_positive_control_still_completes_all_depths_and_paths():
 
 def test_worker_and_harness_enforce_the_render_path_gate():
     minihost = MINIHOST.read_text(encoding="utf-8")
+    report = RENDER_REPORT.read_text(encoding="utf-8")
     harness = HARNESS.read_text(encoding="utf-8")
 
     assert "constexpr uint32_t kOutFlag2SupportsSmartRender = 1u << 10;" in minihost
@@ -47,7 +49,7 @@ def test_worker_and_harness_enforce_the_render_path_gate():
         "params_error == 0 && image_render_supported && depth_supported &&" in minihost
         and "smart_render_supported" in minihost
     )
-    assert '\\"smart_render_supported\\"' in minihost
+    assert '\\"smart_render_supported\\"' in report
     assert '"unsupported_render_path"' in harness
     assert 'Some("render_path_negotiation".to_owned())' in harness
     assert "unsupported_render_path || unsupported_depth" in harness

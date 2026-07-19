@@ -59,7 +59,11 @@ def test_directx_device_world_evidence_records_exact_public_rgba8_conformance():
 
 
 def test_directx_implementation_build_and_readme_markers_are_present():
-    source = (ROOT / "minihost" / "src" / "l2_main.cpp").read_text()
+    main = (ROOT / "minihost" / "src" / "l2_main.cpp").read_text()
+    main += "\n" + (ROOT / "minihost" / "src" / "l2_cli_dispatch.cpp").read_text()
+    main += "\n" + (ROOT / "minihost" / "src" / "gpu_memory_world_transport.cpp").read_text()
+    main += "\n" + (ROOT / "minihost" / "src" / "worker_render_report.cpp").read_text()
+    source = (ROOT / "minihost" / "src" / "gpu_directx_backend.cpp").read_text()
     for marker in (
         'LoadLibraryExW(L"dxgi.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32)',
         'LoadLibraryExW(L"d3d12.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32)',
@@ -67,15 +71,19 @@ def test_directx_implementation_build_and_readme_markers_are_present():
         'GetProcAddress(g_directx.d3d12_module, "D3D12CreateDevice")',
         "(description.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) == 0",
         "D3D12_COMMAND_LIST_TYPE_COMPUTE",
-        "begin_directx_context",
-        "end_directx_context",
-        'smart_command == L"--smart-image32-directx"',
+    ):
+        assert marker in source
+
+    for marker in (
+        "directx::begin_context",
+        "directx::end_context",
+        'equals(command, L"--smart-image32-directx")',
         '\\"directx_device_count\\":',
         '\\"directx_device_index\\":',
         '\\"gpu_allocations_created\\":',
         '\\"live_gpu_allocation_count\\":',
     ):
-        assert marker in source
+        assert marker in main
 
     build = (ROOT / "tools" / "build-sdk-invert-directx.ps1").read_text()
     for marker in (

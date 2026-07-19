@@ -4,13 +4,22 @@ import subprocess
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-SOURCE = ROOT / "minihost" / "src" / "l2_main.cpp"
+SOURCES = (
+    ROOT / "minihost" / "src" / "l2_main.cpp",
+    ROOT / "minihost" / "src" / "worker_aegp_scene.cpp",
+    ROOT / "minihost" / "src" / "worker_aegp_scene.hpp",
+    ROOT / "minihost" / "src" / "worker_aegp_layer_render_runtime.cpp",
+)
+
+
+def source_text() -> str:
+    return "\n".join(path.read_text(encoding="utf-8") for path in SOURCES)
 HARNESS = ROOT / "broker" / "target" / "debug" / "aexcompat-harness.exe"
 GRABBA = ROOT / "target" / "sdk-fixtures" / "grabba" / "Grabba.aex"
 
 
 def test_legacy_item_suite6_layout_matches_sdk_slots():
-    source = SOURCE.read_text(encoding="utf-8")
+    source = source_text()
 
     assert "struct AegpLegacyItemSuite6" in source
     assert "offsetof(AegpLegacyItemSuite6, get_active_item) == 16" in source
@@ -23,7 +32,7 @@ def test_legacy_item_suite6_layout_matches_sdk_slots():
 
 
 def test_render_suite2_has_dedicated_sdk_layout_for_grabba():
-    source = SOURCE.read_text(encoding="utf-8")
+    source = source_text()
     assert "struct AegpRenderSuite2" in source
     assert "sizeof(AegpRenderSuite2) == 10 * sizeof(void*)" in source
     assert "offsetof(AegpRenderSuite2, render_frame) == 0 * sizeof(void*)" in source
@@ -38,9 +47,11 @@ def test_render_suite2_has_dedicated_sdk_layout_for_grabba():
     assert "offsetof(AegpRenderSuite2, checkin_rendered) == 9 * sizeof(void*)" in source
     assert "using AegpRenderCancelV1" in source
     assert "const int32_t cancel_error = check_cancel(cancel_refcon, &cancelled)" in source
-    assert "allow_render_suite2 || g_loaded_effect_receipt_context.entry != nullptr" in source
-    assert 'std::strcmp(name, "AEGP Render Suite") == 0 && version == 2' in source
-    assert "g_aegp_render_suite2 = {&render_checkout_frame_reject, &checkin_frame" in source
+    assert "bool render_suite2_provider_available(void*)" in source
+    assert "return g_aegp_command_roundtrip_mode ||" in source
+    assert "aegp_layer_render_runtime::active()" in source
+    assert '{"AEGP Render Suite", 2, nullptr, &provide_render_suite2' in source
+    assert "{reinterpret_cast<void*>(&render_checkout_frame_reject), reinterpret_cast<void*>(&checkin_frame)" in source
 
 
 def test_official_sdk_grabba_update_menu_dispatches_successfully():
@@ -62,14 +73,16 @@ def test_official_sdk_grabba_update_menu_dispatches_successfully():
 
 
 def test_legacy_item_suite6_is_available_to_grabba_command_and_idle_roundtrips():
-    source = SOURCE.read_text(encoding="utf-8")
+    source = source_text()
+    branch_start = source.index("version == 10")
+    branch = source[branch_start : branch_start + 900]
     for mode in (
-        "g_aegp_update_menu_mode",
-        "g_aegp_command_roundtrip_mode",
-        "g_aegp_active_idle_roundtrip_mode",
-        "g_aegp_comp_idle_roundtrip_mode",
+        "state().update_menu_mode",
+        "state().command_roundtrip_mode",
+        "state().active_idle_roundtrip_mode",
+        "state().comp_idle_roundtrip_mode",
     ):
-        assert mode in source[source.index("version == 10") - 300 : source.index("version == 10")]
+        assert mode in branch
 
 
 def _dispatch(command: str) -> dict:

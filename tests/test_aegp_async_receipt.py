@@ -6,6 +6,8 @@ import subprocess
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "minihost" / "src" / "l2_main.cpp"
+RECEIPTS = ROOT / "minihost" / "src" / "worker_render_receipts.cpp"
+WORLD_SELFTESTS = ROOT / "minihost" / "src" / "worker_aegp_world_selftests.cpp"
 
 
 def _worker() -> pathlib.Path | None:
@@ -24,30 +26,37 @@ def test_async_and_render_suites_have_typed_frozen_abi():
     assert "sizeof(AegpRenderAsyncManagerSuite1) == 2 * sizeof(void*)" in text
     assert "struct AegpRenderSuite4" in text
     assert "sizeof(AegpRenderSuite4) == 12 * sizeof(void*)" in text
-    assert 'std::strcmp(name, "AEGP Render Suite") == 0 && version == 5' in text
-    assert "&checkin_frame, &get_receipt_world" in text
+    assert '{"AEGP Render Suite", 5, nullptr, &provide_render_suite5}' in text
+    assert "&checkin_frame" in text and "&get_receipt_world" in text
     assert "g_render_async_manager_suite1.fill" not in text
 
 
 def test_receipt_registry_is_bounded_and_invalidates_borrowed_world_first():
-    text = SOURCE.read_text(encoding="utf-8")
+    text = RECEIPTS.read_text(encoding="utf-8")
     for marker in (
-        "kMaxAsyncReceipts = 32",
-        "kMaxAsyncReceiptBytes = 64ULL * 1024 * 1024",
-        "std::unordered_map<void*, std::unique_ptr<AsyncFrameReceipt>> g_async_receipts",
-        "g_aegp_world_views.erase(found->second->world_handle);",
-        "g_async_receipts.erase(found);",
-        "g_async_receipt_bytes -= bytes;",
+        "g_receipts.size() < kMaxReceiptCount",
+        "g_live_bytes + g_reserved_bytes <= kMaxReceiptBytes - bytes",
+        "std::unordered_map<void*, std::unique_ptr<Receipt>> g_receipts",
+        "world_registry::unregister_borrowed_view(",
+        "receipt = g_receipts.extract(found);",
+        "g_live_bytes -= receipt.mapped()->draft->pixels.size();",
     ):
         assert marker in text
+    checkin = text[text.index("int32_t checkin(void* handle)"):
+                   text.index("bool checkin_if_live(void* handle)")]
+    assert checkin.index("g_receipts.extract(found)") < checkin.index(
+        "unregister_borrowed_view(")
 
 
 def test_receipt_and_borrowed_world_handles_are_opaque_and_never_reused():
-    text = SOURCE.read_text(encoding="utf-8")
+    text = "".join(
+        path.read_text(encoding="utf-8")
+        for path in (RECEIPTS, SOURCE, WORLD_SELFTESTS)
+    )
     for marker in (
-        "g_receipt_handle_generation{1}",
-        "g_borrowed_world_handle_generation{1}",
-        "assign_opaque_receipt_handles",
+        "g_receipt_generation{1}",
+        "g_world_generation{1}",
+        "assign_handles",
         "receipt_generation << 3",
         "world_generation << 3",
         "receipt_handles.insert(receipt).second",

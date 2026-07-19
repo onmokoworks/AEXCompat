@@ -5,6 +5,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 RESULT = ROOT / "analysis" / "SDK_CHECKOUT_OPTIONS_DIALOG_RESULT_2026-07-15.json"
 WORKER = ROOT / "minihost" / "src" / "l2_main.cpp"
+MODE_EXECUTION = ROOT / "minihost" / "src" / "l2_mode_execution.cpp"
 BROKER = ROOT / "broker" / "crates" / "broker" / "src" / "image_render.rs"
 HARNESS = ROOT / "broker" / "crates" / "harness" / "src" / "main.rs"
 
@@ -36,6 +37,7 @@ def test_unadvertised_effect_is_refused_without_selector_dispatch():
 def test_dialog_boundary_is_abi_bound_isolated_and_exposed():
     evidence = result()
     worker = WORKER.read_text(encoding="utf-8")
+    mode_execution = MODE_EXECUTION.read_text(encoding="utf-8")
     broker = BROKER.read_text(encoding="utf-8")
     harness = HARNESS.read_text(encoding="utf-8")
     assert evidence["abi"] == {
@@ -44,8 +46,8 @@ def test_dialog_boundary_is_abi_bound_isolated_and_exposed():
         "display_error_message_flag": 256,
     }
     assert "constexpr int32_t kDoDialog = 9;" in worker
-    assert "dialog_advertised" in worker
-    assert "invoke_entry_seh(entry, kDoDialog" in worker
+    assert "dialog_advertised" in mode_execution
+    assert "invoke_entry_seh(b.entry, kDoDialog" in worker
     assert "pub fn probe_experimental_options_dialog" in broker
     assert '"do_dialog"' in broker
     assert 'args[1] == "--probe-experimental-options-dialog"' in harness
