@@ -3,6 +3,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = (ROOT / "minihost" / "src" / "l2_main.cpp").read_text(encoding="utf-8")
+SCENE_SOURCE = (ROOT / "minihost" / "src" / "worker_aegp_scene.cpp").read_text(
+    encoding="utf-8"
+)
 
 
 def test_smart_pre_render_exposes_bounded_thread_safe_guid_mix_callback():
@@ -15,8 +18,9 @@ def test_smart_pre_render_exposes_bounded_thread_safe_guid_mix_callback():
 
 
 def test_comp_suite_v10_slot_four_records_successes_and_rejections():
-    assert 'std::strcmp(name, "AEGP Comp Suite") == 0 && version == 21' in SOURCE
-    assert "g_aegp_comp_suite10[4] = reinterpret_cast<void*>(&aegp_get_comp_bg_color)" in SOURCE
+    assert 'named("AEGP Comp Suite") && version == 21' in SCENE_SOURCE
+    assert "g_aegp_comp_suite10[4] = factory.comp_bg_color" in SCENE_SOURCE
+    assert "scene_factory.comp_bg_color" in SOURCE
     callback = SOURCE[SOURCE.index("int32_t __cdecl aegp_get_comp_bg_color") :]
     callback = callback[: callback.index("\n}")]
     assert "g_comp_bg_color_rejections.fetch_add" in callback
