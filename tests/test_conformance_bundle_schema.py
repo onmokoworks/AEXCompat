@@ -143,6 +143,25 @@ class ConformanceBundleSchemaTests(unittest.TestCase):
         self.report_validator.validate(report)
         validate_bundle(self.manifest, report, self.bundle_root)
 
+    def test_semantic_validator_rejects_oracle_state_that_differs_from_manifest(self):
+        for manifest_state, reported_state in (
+            ("not_requested", "not_captured"),
+            ("not_captured", "not_requested"),
+        ):
+            manifest = copy.deepcopy(self.manifest)
+            manifest["oracle"] = {"state": manifest_state, "identity_match": False}
+            report = self.valid_report()
+            report["results"] = [report["results"][0]]
+            manifest["requested_depths"] = [report["results"][0]["depth"]]
+            result = report["results"][0]
+            result["oracle"] = {
+                "state": reported_state,
+                "identity_match": False,
+                "exact": False,
+            }
+            with self.assertRaisesRegex(BundleValidationError, "oracle state does not match"):
+                validate_bundle(manifest, report, self.bundle_root)
+
     def test_missing_suite_evidence_is_exclusive_to_its_classification(self):
         report = self.valid_report()
         report["results"][0]["missing_suites"] = [

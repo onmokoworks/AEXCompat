@@ -715,6 +715,31 @@ def test_failed_render_retains_captured_oracle_identity(tmp_path):
     }
 
 
+@pytest.mark.parametrize("adapter_succeeds", [True, False])
+def test_not_requested_oracle_state_is_retained_for_every_render_outcome(
+    tmp_path, adapter_succeeds
+):
+    manifest_path, adapter = fixture(tmp_path)
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["requested_depths"] = ["argb8"]
+    manifest["oracle"] = {"state": "not_requested", "identity_match": False}
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    if not adapter_succeeds:
+        adapter.write_text("raise SystemExit(3)\n", encoding="utf-8")
+
+    output = tmp_path / "bundle"
+    completed = invoke(manifest_path, output, adapter)
+
+    assert completed.returncode == 0, completed.stderr
+    report = json.loads((output / "report.json").read_text())
+    report_validator().validate(report)
+    assert report["results"][0]["oracle"] == {
+        "state": "not_requested",
+        "identity_match": False,
+        "exact": False,
+    }
+
+
 def test_validator_failure_persists_failure_evidence_without_report(tmp_path):
     manifest, adapter = fixture(tmp_path)
     adapter.write_text(

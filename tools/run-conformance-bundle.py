@@ -810,12 +810,17 @@ def _read_exact_comparison_chunk(stream: Any, size: int, label: str) -> bytes:
 def attach_oracle(
     result: dict[str, Any],
     depth: str,
-    oracle_manifest: dict[str, Any],
+    oracle_manifest: dict[str, Any] | None,
     bundle_root: Path,
     oracle_state: str,
     manifest_identity_match: bool,
 ) -> None:
     if oracle_state != "captured":
+        result["oracle"] = {
+            "state": oracle_state,
+            "identity_match": manifest_identity_match,
+            "exact": False,
+        }
         return
     result["oracle"] = {
         "state": "not_captured",
@@ -824,6 +829,8 @@ def attach_oracle(
     }
     if result["classification"] != "ok" or result["raw_output"] is None:
         return
+    if oracle_manifest is None:
+        raise ValueError(f"captured oracle is missing for {depth}")
     oracle_path = bundle_root / oracle_manifest["path"]
     actual_path = bundle_root / result["raw_output"]["path"]
     expected_hash = oracle_manifest["sha256"]
@@ -986,15 +993,14 @@ def main() -> int:
             )
             if dump_dir.exists():
                 shutil.move(str(dump_dir), str(outputs / f"{depth}-worlds"))
-            if manifest["oracle"]["state"] == "captured":
-                attach_oracle(
-                    result,
-                    depth,
-                    oracle_artifacts[depth],
-                    output_root,
-                    manifest["oracle"]["state"],
-                    manifest["oracle"]["identity_match"],
-                )
+            attach_oracle(
+                result,
+                depth,
+                oracle_artifacts.get(depth),
+                output_root,
+                manifest["oracle"]["state"],
+                manifest["oracle"]["identity_match"],
+            )
             detail["request"] = artifact_for(request_path, output_root)
             results.append(result)
             depth_diagnostics[depth] = detail
