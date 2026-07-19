@@ -131,7 +131,7 @@ impl RuntimeFailure {
 
 pub trait RuntimeCollectorBackend {
     fn inspect(&mut self) -> Result<Value, RuntimeFailure>;
-    fn input_world(&self, depth: PixelDepth) -> Option<WorldMetadata>;
+    fn input_world(&self, depth: PixelDepth) -> Result<WorldMetadata, RuntimeFailure>;
     fn render(&mut self, path: RenderPath, depth: PixelDepth) -> Result<Value, RuntimeFailure>;
 }
 
@@ -139,18 +139,25 @@ pub fn collect_runtime_results<B: RuntimeCollectorBackend>(
     backend: &mut B,
     paths: &[RenderPath],
     depths: &[PixelDepth],
-) -> Vec<DepthResult> {
+) -> Result<Vec<DepthResult>, RuntimeFailure> {
+    // input_world is required by every depth_result in the report schema.
+    // Decode every requested depth before inspection or rendering so a bad
+    // input fails the run without producing schema-invalid partial evidence.
+    let requested_depths = depths.iter().take(3).copied().collect::<Vec<_>>();
+    let input_worlds = requested_depths
+        .iter()
+        .map(|&depth| backend.input_world(depth))
+        .collect::<Result<Vec<_>, _>>()?;
     let inspection = backend.inspect();
     let inspection_failure = inspection.as_ref().err().cloned();
     let mut results = Vec::with_capacity(depths.len());
     let first_path = paths.first().copied().unwrap_or(RenderPath::Classic);
-    for &depth in depths.iter().take(3) {
-        let input_world = backend.input_world(depth);
+    for (depth, input_world) in requested_depths.into_iter().zip(input_worlds) {
         if let Some(failure) = &inspection_failure {
             results.push(failed_result_with_input(
                 first_path,
                 depth,
-                input_world,
+                Some(input_world),
                 failure.clone(),
             ));
             continue;
@@ -158,13 +165,13 @@ pub fn collect_runtime_results<B: RuntimeCollectorBackend>(
         let mut selected = failed_result_with_input(
             first_path,
             depth,
-            input_world.clone(),
+            Some(input_world.clone()),
             RuntimeFailure::new(Classification::Unsupported),
         );
         for &path in paths {
             let outcome = backend.render(path, depth);
             let (result, retry_classic) =
-                normalize_outcome(path, depth, input_world.clone(), outcome);
+                normalize_outcome(path, depth, Some(input_world.clone()), outcome);
             selected = result;
             if !retry_classic {
                 break;
@@ -172,7 +179,7 @@ pub fn collect_runtime_results<B: RuntimeCollectorBackend>(
         }
         results.push(selected);
     }
-    results
+    Ok(results)
 }
 
 fn normalize_outcome(
@@ -690,14 +697,15 @@ pub mod windows {
             Ok(diagnostics)
         }
 
-        fn input_world(&self, depth: PixelDepth) -> Option<WorldMetadata> {
-            let image = image::image_dimensions(self.input_path).ok()?;
+        fn input_world(&self, depth: PixelDepth) -> Result<WorldMetadata, RuntimeFailure> {
+            let image = image::image_dimensions(self.input_path)
+                .map_err(|_| RuntimeFailure::new(Classification::HostValidationError))?;
             let bytes_per_pixel = match depth {
                 PixelDepth::Argb8 => 4,
                 PixelDepth::Argb16 => 8,
                 PixelDepth::Argb32f => 16,
             };
-            Some(WorldMetadata {
+            Ok(WorldMetadata {
                 width: image.0,
                 height: image.1,
                 row_bytes: u64::from(image.0).saturating_mul(bytes_per_pixel),
@@ -754,6 +762,7 @@ pub mod windows {
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::cell::Cell;
     use std::collections::VecDeque;
 
     struct FakeBackend {
@@ -766,8 +775,8 @@ mod tests {
             self.inspect.clone()
         }
 
-        fn input_world(&self, depth: PixelDepth) -> Option<WorldMetadata> {
-            Some(WorldMetadata {
+        fn input_world(&self, depth: PixelDepth) -> Result<WorldMetadata, RuntimeFailure> {
+            Ok(WorldMetadata {
                 width: 2,
                 height: 3,
                 row_bytes: match depth {
@@ -792,6 +801,31 @@ mod tests {
             _depth: PixelDepth,
         ) -> Result<Value, RuntimeFailure> {
             self.renders.pop_front().expect("render outcome")
+        }
+    }
+
+    struct UndecodableInputBackend {
+        inspect_called: Cell<bool>,
+        render_called: Cell<bool>,
+    }
+
+    impl RuntimeCollectorBackend for UndecodableInputBackend {
+        fn inspect(&mut self) -> Result<Value, RuntimeFailure> {
+            self.inspect_called.set(true);
+            Ok(json!({}))
+        }
+
+        fn input_world(&self, _depth: PixelDepth) -> Result<WorldMetadata, RuntimeFailure> {
+            Err(RuntimeFailure::new(Classification::HostValidationError))
+        }
+
+        fn render(
+            &mut self,
+            _path: RenderPath,
+            _depth: PixelDepth,
+        ) -> Result<Value, RuntimeFailure> {
+            self.render_called.set(true);
+            unreachable!("bad input must fail before native rendering")
         }
     }
 
@@ -824,11 +858,31 @@ mod tests {
             renders: VecDeque::from([Ok(successful_report(PixelDepth::Argb16))]),
         };
         let result =
-            collect_runtime_results(&mut backend, &[RenderPath::Classic], &[PixelDepth::Argb16]);
+            collect_runtime_results(&mut backend, &[RenderPath::Classic], &[PixelDepth::Argb16])
+                .unwrap();
         assert_eq!(result[0].classification, Classification::Ok);
         assert_eq!(result[0].selector.error_code, Some(0));
         assert_eq!(result[0].world.as_ref().unwrap().row_bytes, 16);
         assert_eq!(result[0].world.as_ref().unwrap().extent_hint.left, 0);
+    }
+
+    #[test]
+    fn undecodable_input_fails_before_inspection_or_depth_results() {
+        let mut backend = UndecodableInputBackend {
+            inspect_called: Cell::new(false),
+            render_called: Cell::new(false),
+        };
+
+        let failure = collect_runtime_results(
+            &mut backend,
+            &[RenderPath::Classic],
+            &[PixelDepth::Argb8, PixelDepth::Argb16],
+        )
+        .unwrap_err();
+
+        assert_eq!(failure.classification, Classification::HostValidationError);
+        assert!(!backend.inspect_called.get());
+        assert!(!backend.render_called.get());
     }
 
     #[test]
@@ -863,7 +917,8 @@ mod tests {
                 renders: VecDeque::from([Err(failure)]),
             };
             let results =
-                collect_runtime_results(&mut backend, &[RenderPath::Classic], &[PixelDepth::Argb8]);
+                collect_runtime_results(&mut backend, &[RenderPath::Classic], &[PixelDepth::Argb8])
+                    .unwrap();
             assert_eq!(results[0].classification, expected);
             assert_eq!(results[0].selector.error_code, expected_selector);
             assert_eq!(results[0].missing_suites.len(), expected_suites);
@@ -881,7 +936,8 @@ mod tests {
             &mut backend,
             &[RenderPath::Classic, RenderPath::Smartfx],
             &[PixelDepth::Argb8],
-        );
+        )
+        .unwrap();
         assert_eq!(results.len(), 1);
         assert!(results
             .iter()
@@ -913,7 +969,8 @@ mod tests {
             renders: VecDeque::from([Ok(json!({"width": 2, "height": 2}))]),
         };
         let result =
-            collect_runtime_results(&mut backend, &[RenderPath::Smartfx], &[PixelDepth::Argb32f]);
+            collect_runtime_results(&mut backend, &[RenderPath::Smartfx], &[PixelDepth::Argb32f])
+                .unwrap();
         assert_eq!(result[0].classification, Classification::InvalidOutput);
         assert!(!result[0].selector.completed);
     }
@@ -927,7 +984,8 @@ mod tests {
             renders: VecDeque::from([Ok(report)]),
         };
         let result =
-            collect_runtime_results(&mut backend, &[RenderPath::Classic], &[PixelDepth::Argb8]);
+            collect_runtime_results(&mut backend, &[RenderPath::Classic], &[PixelDepth::Argb8])
+                .unwrap();
         assert_eq!(result[0].classification, Classification::InvalidOutput);
     }
 
@@ -946,7 +1004,8 @@ mod tests {
                 renders: VecDeque::from([Ok(report)]),
             };
             let result =
-                collect_runtime_results(&mut backend, &[RenderPath::Classic], &[PixelDepth::Argb8]);
+                collect_runtime_results(&mut backend, &[RenderPath::Classic], &[PixelDepth::Argb8])
+                    .unwrap();
             assert_eq!(
                 result[0].classification,
                 Classification::HostValidationError
@@ -966,7 +1025,8 @@ mod tests {
             renders: VecDeque::from([Ok(report)]),
         };
         let result =
-            collect_runtime_results(&mut backend, &[RenderPath::Classic], &[PixelDepth::Argb8]);
+            collect_runtime_results(&mut backend, &[RenderPath::Classic], &[PixelDepth::Argb8])
+                .unwrap();
         assert_eq!(result[0].suite_timeline.len(), 1);
         assert_eq!(result[0].suite_timeline[0].action, SuiteAction::Acquire);
     }
@@ -990,7 +1050,8 @@ mod tests {
             &mut backend,
             &[RenderPath::Smartfx, RenderPath::Classic],
             &[PixelDepth::Argb8],
-        );
+        )
+        .unwrap();
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].classification, Classification::Ok);
         assert_eq!(result[0].selector.render_path, RenderPath::Classic);
@@ -1129,7 +1190,8 @@ mod tests {
                 renders: VecDeque::from([Ok(report)]),
             };
             let result =
-                collect_runtime_results(&mut backend, &[RenderPath::Classic], &[PixelDepth::Argb8]);
+                collect_runtime_results(&mut backend, &[RenderPath::Classic], &[PixelDepth::Argb8])
+                    .unwrap();
             assert_eq!(result[0].classification, expected);
             assert_eq!(result[0].suite_timeline.len(), 1);
             assert_eq!(result[0].suite_timeline[0].action, SuiteAction::Acquire);
@@ -1145,7 +1207,8 @@ mod tests {
             renders: VecDeque::from([Ok(report)]),
         };
         let result =
-            collect_runtime_results(&mut backend, &[RenderPath::Classic], &[PixelDepth::Argb8]);
+            collect_runtime_results(&mut backend, &[RenderPath::Classic], &[PixelDepth::Argb8])
+                .unwrap();
         assert_eq!(result[0].classification, Classification::MissingSuite);
         assert_eq!(result[0].suite_timeline.len(), 1);
     }
@@ -1215,7 +1278,8 @@ mod tests {
             &mut backend,
             &[RenderPath::Classic, RenderPath::Smartfx],
             &[PixelDepth::Argb8],
-        );
+        )
+        .unwrap();
         assert_eq!(result[0].classification, Classification::Unsupported);
         assert_eq!(backend.renders.len(), 1);
     }
@@ -1231,7 +1295,8 @@ mod tests {
                 &mut backend,
                 &[RenderPath::Classic],
                 std::slice::from_ref(&depth),
-            );
+            )
+            .unwrap();
             let result = &result[0];
             assert_eq!(result.classification, Classification::Ok);
             assert_eq!(result.world.as_ref().unwrap().pixel_format, depth);
@@ -1254,7 +1319,8 @@ mod tests {
             renders: VecDeque::from([Ok(report)]),
         };
         let result =
-            collect_runtime_results(&mut backend, &[RenderPath::Classic], &[PixelDepth::Argb8]);
+            collect_runtime_results(&mut backend, &[RenderPath::Classic], &[PixelDepth::Argb8])
+                .unwrap();
         assert_eq!(
             result[0].classification,
             Classification::HostValidationError
