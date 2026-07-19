@@ -99,6 +99,7 @@
 #include "worker_pf_suites_internal.hpp"
 #include "worker_pf_world_transform_runtime.hpp"
 #include "worker_pf_adv_time_suite.hpp"
+#include "worker_pf_ansi_runtime.hpp"
 #include "worker_pf_ae_channel_runtime.hpp"
 #include "worker_pf_state_runtime.hpp"
 #include "worker_report.hpp"
@@ -3492,16 +3493,16 @@ bool configure_component_suite_catalog() {
        reinterpret_cast<void*>(&app_create_progress_dialog),
        reinterpret_cast<void*>(&app_update_progress_dialog),
        reinterpret_cast<void*>(&app_dispose_progress_dialog)},
-      {reinterpret_cast<void*>(&ansi_atan), reinterpret_cast<void*>(&ansi_atan2),
-       reinterpret_cast<void*>(&ansi_ceil), reinterpret_cast<void*>(&ansi_cos),
-       reinterpret_cast<void*>(&ansi_exp), reinterpret_cast<void*>(&ansi_fabs),
-       reinterpret_cast<void*>(&ansi_floor), reinterpret_cast<void*>(&ansi_fmod),
-       reinterpret_cast<void*>(&ansi_hypot), reinterpret_cast<void*>(&ansi_log),
-       reinterpret_cast<void*>(&ansi_log10), reinterpret_cast<void*>(&ansi_pow),
-       reinterpret_cast<void*>(&ansi_sin), reinterpret_cast<void*>(&ansi_sqrt),
-       reinterpret_cast<void*>(&ansi_tan), reinterpret_cast<void*>(&ansi_sprintf),
-       reinterpret_cast<void*>(&ansi_strcpy), reinterpret_cast<void*>(&ansi_asin),
-       reinterpret_cast<void*>(&ansi_acos)},
+      {reinterpret_cast<void*>(&aexcompat::pf_ansi::ansi_atan), reinterpret_cast<void*>(&aexcompat::pf_ansi::ansi_atan2),
+       reinterpret_cast<void*>(&aexcompat::pf_ansi::ansi_ceil), reinterpret_cast<void*>(&aexcompat::pf_ansi::ansi_cos),
+       reinterpret_cast<void*>(&aexcompat::pf_ansi::ansi_exp), reinterpret_cast<void*>(&aexcompat::pf_ansi::ansi_fabs),
+       reinterpret_cast<void*>(&aexcompat::pf_ansi::ansi_floor), reinterpret_cast<void*>(&aexcompat::pf_ansi::ansi_fmod),
+       reinterpret_cast<void*>(&aexcompat::pf_ansi::ansi_hypot), reinterpret_cast<void*>(&aexcompat::pf_ansi::ansi_log),
+       reinterpret_cast<void*>(&aexcompat::pf_ansi::ansi_log10), reinterpret_cast<void*>(&aexcompat::pf_ansi::ansi_pow),
+       reinterpret_cast<void*>(&aexcompat::pf_ansi::ansi_sin), reinterpret_cast<void*>(&aexcompat::pf_ansi::ansi_sqrt),
+       reinterpret_cast<void*>(&aexcompat::pf_ansi::ansi_tan), reinterpret_cast<void*>(&aexcompat::pf_ansi::ansi_sprintf),
+       reinterpret_cast<void*>(&aexcompat::pf_ansi::ansi_strcpy), reinterpret_cast<void*>(&aexcompat::pf_ansi::ansi_asin),
+       reinterpret_cast<void*>(&aexcompat::pf_ansi::ansi_acos)},
       reinterpret_cast<void*>(&aegp_set_dynamic_stream_flag_v2),
       {reinterpret_cast<void*>(&aegp_world_new_owned), reinterpret_cast<void*>(&aegp_world_dispose), reinterpret_cast<void*>(&aegp_world_get_type), reinterpret_cast<void*>(&aegp_world_get_size), reinterpret_cast<void*>(&aegp_world_get_rowbytes), reinterpret_cast<void*>(&aegp_world_get_base_addr8), reinterpret_cast<void*>(&aegp_world_get_base_addr16), reinterpret_cast<void*>(&aegp_world_get_base_addr32), reinterpret_cast<void*>(&aegp_world_fill_pf_world), reinterpret_cast<void*>(&aegp_world_fast_blur), reinterpret_cast<void*>(&aegp_world_new_platform), reinterpret_cast<void*>(&aegp_world_dispose_platform), reinterpret_cast<void*>(&aegp_world_reference_platform)},
       {reinterpret_cast<void*>(&new_layer_render_options), reinterpret_cast<void*>(&new_from_upstream_of_effect), reinterpret_cast<void*>(&duplicate_layer_render_options), reinterpret_cast<void*>(&dispose_layer_render_options), reinterpret_cast<void*>(&set_layer_render_time), reinterpret_cast<void*>(&get_layer_render_time), reinterpret_cast<void*>(&set_layer_render_time_step), reinterpret_cast<void*>(&get_layer_render_time_step), reinterpret_cast<void*>(&set_layer_render_world_type), reinterpret_cast<void*>(&get_layer_render_world_type), reinterpret_cast<void*>(&set_layer_render_downsample), reinterpret_cast<void*>(&get_layer_render_downsample), reinterpret_cast<void*>(&set_layer_render_matte), reinterpret_cast<void*>(&get_layer_render_matte)},
@@ -4095,116 +4096,6 @@ int32_t __cdecl aegp_get_effect_param_union_by_index_v3(
   return 0;
 }
 
-template <typename Operation>
-double finite_ansi_unary(double value, Operation operation) noexcept {
-  if (!std::isfinite(value)) return 0.0;
-  const double result = operation(value);
-  return std::isfinite(result) ? result : 0.0;
-}
-
-template <typename Operation>
-double finite_ansi_binary(double left, double right, Operation operation) noexcept {
-  if (!std::isfinite(left) || !std::isfinite(right)) return 0.0;
-  const double result = operation(left, right);
-  return std::isfinite(result) ? result : 0.0;
-}
-
-double __cdecl ansi_atan(double value) {
-  return finite_ansi_unary(value, [](double x) { return std::atan(x); });
-}
-
-double __cdecl ansi_atan2(double y, double x) {
-  return finite_ansi_binary(y, x, [](double a, double b) { return std::atan2(a, b); });
-}
-
-double __cdecl ansi_ceil(double value) {
-  return finite_ansi_unary(value, [](double x) { return std::ceil(x); });
-}
-
-double __cdecl ansi_cos(double value) {
-  return finite_ansi_unary(value, [](double x) { return std::cos(x); });
-}
-
-double __cdecl ansi_exp(double value) {
-  return finite_ansi_unary(value, [](double x) { return std::exp(x); });
-}
-
-double __cdecl ansi_fabs(double value) {
-  return finite_ansi_unary(value, [](double x) { return std::fabs(x); });
-}
-
-double __cdecl ansi_floor(double value) {
-  return finite_ansi_unary(value, [](double x) { return std::floor(x); });
-}
-
-double __cdecl ansi_fmod(double value, double divisor) {
-  if (divisor == 0.0) return 0.0;
-  return finite_ansi_binary(value, divisor, [](double x, double y) { return std::fmod(x, y); });
-}
-
-double __cdecl ansi_hypot(double x, double y) {
-  return finite_ansi_binary(x, y, [](double a, double b) { return std::hypot(a, b); });
-}
-
-double __cdecl ansi_log(double value) {
-  if (!(value > 0.0)) return 0.0;
-  return finite_ansi_unary(value, [](double x) { return std::log(x); });
-}
-
-double __cdecl ansi_log10(double value) {
-  if (!(value > 0.0)) return 0.0;
-  return finite_ansi_unary(value, [](double x) { return std::log10(x); });
-}
-
-double __cdecl ansi_pow(double base, double exponent) {
-  return finite_ansi_binary(base, exponent, [](double x, double y) { return std::pow(x, y); });
-}
-
-double __cdecl ansi_sin(double value) {
-  return finite_ansi_unary(value, [](double x) { return std::sin(x); });
-}
-
-double __cdecl ansi_sqrt(double value) {
-  if (value < 0.0) return 0.0;
-  return finite_ansi_unary(value, [](double x) { return std::sqrt(x); });
-}
-
-double __cdecl ansi_tan(double value) {
-  return finite_ansi_unary(value, [](double x) { return std::tan(x); });
-}
-
-int __cdecl ansi_sprintf(char* destination, const char* format, ...) {
-  if (!destination || !format || strnlen_s(format, 256) == 256) return -1;
-  va_list arguments;
-  va_start(arguments, format);
-  va_list measure;
-  va_copy(measure, arguments);
-  const int required = _vscprintf(format, measure);
-  va_end(measure);
-  const int written = required >= 0 && required <= 4096
-      ? vsprintf_s(destination, static_cast<std::size_t>(required) + 1, format, arguments)
-      : -1;
-  va_end(arguments);
-  return written;
-}
-
-char* __cdecl ansi_strcpy(char* destination, const char* source) {
-  if (!destination || !source) return nullptr;
-  const std::size_t length = strnlen_s(source, 4096);
-  if (length == 4096) return nullptr;
-  std::memmove(destination, source, length + 1);
-  return destination;
-}
-
-double __cdecl ansi_asin(double value) {
-  if (value < -1.0 || value > 1.0) return 0.0;
-  return finite_ansi_unary(value, [](double x) { return std::asin(x); });
-}
-
-double __cdecl ansi_acos(double value) {
-  if (value < -1.0 || value > 1.0) return 0.0;
-  return finite_ansi_unary(value, [](double x) { return std::acos(x); });
-}
 
 int32_t __cdecl get_platform_data(void* effect_ref, int32_t which, void* data) {
   constexpr int32_t kExeFilePathWide = 7;
@@ -7863,12 +7754,12 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
   write(utils, kUtilsNewWorld, &legacy_new_world);
   write(utils, kUtilsDisposeWorld, &dispose_world);
   write(utils, kUtilsTransformWorld, &transform_world);
-  write(utils, kUtilsAnsiCeil, &ansi_ceil);
-  write(utils, kUtilsAnsiFabs, &ansi_fabs);
-  write(utils, kUtilsAnsiPow, &ansi_pow);
-  write(utils, kUtilsAnsiSin, &ansi_sin);
-  write(utils, kUtilsAnsiSprintf, &ansi_sprintf);
-  write(utils, kUtilsAnsiStrcpy, &ansi_strcpy);
+  write(utils, kUtilsAnsiCeil, &aexcompat::pf_ansi::ansi_ceil);
+  write(utils, kUtilsAnsiFabs, &aexcompat::pf_ansi::ansi_fabs);
+  write(utils, kUtilsAnsiPow, &aexcompat::pf_ansi::ansi_pow);
+  write(utils, kUtilsAnsiSin, &aexcompat::pf_ansi::ansi_sin);
+  write(utils, kUtilsAnsiSprintf, &aexcompat::pf_ansi::ansi_sprintf);
+  write(utils, kUtilsAnsiStrcpy, &aexcompat::pf_ansi::ansi_strcpy);
   std::memcpy(utils.data() + kUtilsColorCallbacks, &g_color_suite8,
               sizeof(g_color_suite8));
   write(utils, kUtilsGetPlatformData, &get_platform_data);

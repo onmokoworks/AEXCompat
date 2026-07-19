@@ -16,6 +16,7 @@ PF_SAMPLING_SOURCE = ROOT / "minihost" / "src" / "worker_pf_sampling_runtime.cpp
 PF_AE_CHANNEL_RUNTIME_SOURCE = ROOT / "minihost" / "src" / "worker_pf_ae_channel_runtime.cpp"
 PF_PATH_SELFTESTS_SOURCE = ROOT / "minihost" / "src" / "worker_pf_path_selftests.cpp"
 PF_WORLD_TRANSFORM_SOURCE = ROOT / "minihost" / "src" / "worker_pf_world_transform_runtime.cpp"
+PF_ANSI_RUNTIME_SOURCE = ROOT / "minihost" / "src" / "worker_pf_ansi_runtime.cpp"
 HOST_SUITE_CATALOG_SOURCE = ROOT / "minihost" / "src" / "worker_host_suite_catalog.cpp"
 PARAMETER_EXECUTION_SOURCE = ROOT / "minihost" / "src" / "worker_parameter_execution.cpp"
 RENDER_HEADER = ROOT / "minihost" / "src" / "render_subsystem.h"
@@ -61,6 +62,7 @@ def l2_family_source():
         PF_AE_CHANNEL_RUNTIME_SOURCE,
         PF_PATH_SELFTESTS_SOURCE,
         PF_WORLD_TRANSFORM_SOURCE,
+        PF_ANSI_RUNTIME_SOURCE,
         HOST_SUITE_CATALOG_SOURCE,
         PARAMETER_EXECUTION_SOURCE,
         AEGP_SCENE_SOURCE, AEGP_SCENE_HEADER, AEGP_SCENE_RUNTIME_HEADER,
@@ -541,9 +543,9 @@ class MinihostL2SourceTests(unittest.TestCase):
             "if (error != 0) return error",
             "write(utils, kUtilsCopy, &copy_world8)",
             "write(utils, kUtilsIterate, &iterate_world8)",
-            "write(utils, kUtilsAnsiPow, &ansi_pow)",
+            "write(utils, kUtilsAnsiPow, &aexcompat::pf_ansi::ansi_pow)",
             "strnlen_s(source, 4096)",
-            "write(utils, kUtilsAnsiStrcpy, &ansi_strcpy)",
+            "write(utils, kUtilsAnsiStrcpy, &aexcompat::pf_ansi::ansi_strcpy)",
         ):
             self.assertIn(marker, text)
 
