@@ -2461,7 +2461,11 @@ bool run_pf_path_data_hardening_selftest() {
        &snapshot_mask_curve, &mask_lifetimes_balanced, &install_synthetic_mask_scene});
 }
 
-int worker_main_impl(int argc, wchar_t **argv) {
+// Component hook wiring for the worker entry (issue #171). Every hooks
+// struct the entry used to assemble inline is registered here, keeping
+// worker_main_impl to admission, invocation resolution, mode execution,
+// report, and exit code.
+int configure_worker_entry_bootstrap() {
   SceneSuiteFactoryHooks scene_factory{};
   scene_factory.render_scene_enabled = &scene_render_receipt_enabled;
   scene_factory.comp_bg_color = reinterpret_cast<void*>(&aegp_get_comp_bg_color);
@@ -2572,9 +2576,12 @@ int worker_main_impl(int argc, wchar_t **argv) {
   bootstrap_hooks.audit_capture = &capture_module_audit_phase;
   bootstrap_hooks.audit_passed = &module_audit_passed;
   bootstrap_hooks.trace = &record_selector_dispatch;
-  const auto bootstrap_error =
-      aexcompat::worker_runtime::entry_bootstrap::configure(bootstrap_hooks);
-  if (bootstrap_error != 0) return bootstrap_error;
+  return aexcompat::worker_runtime::entry_bootstrap::configure(bootstrap_hooks);
+}
+
+int worker_main_impl(int argc, wchar_t **argv) {
+  if (const int bootstrap_error = configure_worker_entry_bootstrap())
+    return bootstrap_error;
   const aexcompat::worker_runtime::selftest::AegpHooks aegp_selftests{
       &verify_aegp_projector_levels, &verify_aegp_effect_stack,
       &verify_aegp_apply_effect, &verify_aegp_resizer_3d_chain,
