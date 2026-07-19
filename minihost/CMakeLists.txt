@@ -43,6 +43,7 @@ set(AEXCOMPAT_WORKER_RUNTIME_CORE_SOURCES
     src/worker_aegp_scene.cpp
     src/worker_aegp_scene_runtime.cpp
     src/worker_aegp_scene_selftests.cpp
+    src/worker_classic_runtime.cpp
     src/worker_handle_runtime.cpp
     src/worker_pf_suites.cpp
     src/worker_report.cpp

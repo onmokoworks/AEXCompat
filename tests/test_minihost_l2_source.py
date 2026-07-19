@@ -17,6 +17,8 @@ RENDER_SOURCE = ROOT / "minihost" / "src" / "render_subsystem.cpp"
 REPORT_HEADER = ROOT / "minihost" / "src" / "worker_report.hpp"
 REPORT_SOURCE = ROOT / "minihost" / "src" / "worker_report.cpp"
 RUNTIME_ADMISSION_SOURCE = ROOT / "minihost" / "src" / "worker_runtime_admission.cpp"
+CLASSIC_RUNTIME_HEADER = ROOT / "minihost" / "src" / "worker_classic_runtime.hpp"
+CLASSIC_RUNTIME_SOURCE = ROOT / "minihost" / "src" / "worker_classic_runtime.cpp"
 PF_SUITES_INTERNAL = ROOT / "minihost" / "src" / "worker_pf_suites_internal.hpp"
 AEGP_SCENE_SOURCE = ROOT / "minihost" / "src" / "worker_aegp_scene.cpp"
 AEGP_SCENE_HEADER = ROOT / "minihost" / "src" / "worker_aegp_scene.hpp"
@@ -31,7 +33,7 @@ def l2_family_source():
         CLI_DISPATCH_SOURCE, PF_SUITES_ABI, PF_SUITES_INTERNAL, PF_SUITES_SOURCE,
         AEGP_SCENE_SOURCE, AEGP_SCENE_HEADER, AEGP_SCENE_RUNTIME_HEADER,
         AEGP_SCENE_RUNTIME_SOURCE, REPORT_HEADER, REPORT_SOURCE,
-        RUNTIME_ADMISSION_SOURCE
+        RUNTIME_ADMISSION_SOURCE, CLASSIC_RUNTIME_HEADER, CLASSIC_RUNTIME_SOURCE
     ))
 
 
@@ -466,7 +468,7 @@ class MinihostL2SourceTests(unittest.TestCase):
                        "existing.slot != layer.slot", "g_params[layer.slot - 1].type != 0",
                        "(mode.image_argc - 13) / 4 <= 64",
                        'L"v1|%d|%d|%u%n"', "same_rational_time",
-                       "g_timed_classic_layers", "timed_slot"):
+                       "copy_timed_layer", "timed_slot"):
             self.assertIn(marker, text)
 
     def test_large_parameter_sets_use_bounded_dynamic_storage(self):
@@ -542,7 +544,7 @@ class MinihostL2SourceTests(unittest.TestCase):
         )
         for marker in (
             "RenderLifecycle begin_render_lifecycle",
-            "g_classic_render_selector_dispatched = true;\n      error = entry(kRender",
+            "classic_context->mark_selector_dispatched();\n      error = entry(kRender",
             "end_render_lifecycle(entry, input, command_output, params.data()",
         ):
             self.assertIn(marker, text)

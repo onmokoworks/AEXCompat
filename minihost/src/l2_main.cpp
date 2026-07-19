@@ -68,6 +68,7 @@
 #include "worker_aegp_render_options.hpp"
 #include "worker_aegp_scene.hpp"
 #include "worker_aegp_scene_runtime.hpp"
+#include "worker_classic_runtime.hpp"
 #include "worker_handle_runtime.hpp"
 #include "worker_suite_abi.hpp"
 #include "worker_suite_registry.hpp"
@@ -634,7 +635,6 @@ int32_t g_last_param_checkout_time = 0;
 int32_t g_last_param_checkout_time_step = 0;
 uint32_t g_last_param_checkout_time_scale = 0;
 std::string g_options_button_name;
-std::atomic_bool g_classic_render_selector_dispatched{false};
 uint32_t g_options_button_name_calls = 0;
 std::atomic<uint32_t> g_channel_count_queries{0};
 uint32_t g_duck_quacks = 0;
@@ -673,14 +673,6 @@ struct ExternalLayerInput {
   int32_t height{};
   std::vector<unsigned char> rgba;
 };
-struct TimedClassicLayer {
-  int32_t slot{};
-  int32_t time{};
-  uint32_t time_scale{};
-  std::array<std::byte, kParamSize> definition{};
-};
-std::vector<TimedClassicLayer> g_timed_classic_layers;
-
 bool parse_layer_transport_key(const wchar_t* text, ExternalLayerInput& layer) {
   if (!text) return false;
   if (std::wstring(text).compare(0, 3, L"v1|") != 0) {
@@ -8997,21 +8989,16 @@ int32_t __cdecl checkout_param(void*, int32_t index, int32_t what_time, int32_t 
     ++g_rejected_temporal_param_checkouts;
     return 4;
   }
-  const auto timed = std::find_if(g_timed_classic_layers.begin(), g_timed_classic_layers.end(),
-      [index, what_time, time_scale](const auto& layer) {
-        return layer.slot == index &&
-            same_rational_time(layer.time, layer.time_scale, what_time, time_scale);
-      });
-  if (timed != g_timed_classic_layers.end()) {
-    std::memcpy(definition, timed->definition.data(), timed->definition.size());
+  auto* classic_context = aexcompat::worker_runtime::classic::active_context();
+  if (classic_context && classic_context->copy_timed_layer(
+          index, what_time, time_scale, definition, kParamSize)) {
     std::lock_guard<std::mutex> lock(g_param_checkout_mutex);
     ++g_live_param_checkouts[definition]; ++g_param_checkout_calls;
     g_last_param_checkout_index = index; g_last_param_checkout_time = what_time;
     g_last_param_checkout_time_step = time_step; g_last_param_checkout_time_scale = time_scale;
     return 0;
   }
-  if (std::any_of(g_timed_classic_layers.begin(), g_timed_classic_layers.end(),
-          [index](const auto& layer) { return layer.slot == index; })) return 4;
+  if (classic_context && classic_context->has_timed_slot(index)) return 4;
   const auto hosted = g_checkout_layer_definitions.find(index);
   if (hosted != g_checkout_layer_definitions.end()) {
     std::memcpy(definition, hosted->second.data(), hosted->second.size());
@@ -12006,7 +11993,8 @@ int32_t classic_render_runtime(EffectEntry entry, std::array<std::byte, kInSize>
                     int32_t external_pixel_bytes = 4,
                     bool manage_sequence = true,
                     std::vector<unsigned char>* captured_argb = nullptr) {
-  g_classic_render_selector_dispatched = false;
+  auto* classic_context = aexcompat::worker_runtime::classic::active_context();
+  if (!classic_context) return -1;
   aexcompat::render::ImageRequest image_request;
   const int request_error = aexcompat::render::prepare_image_request(
       case_id, external_rgba != nullptr, external_width, external_height,
@@ -12075,7 +12063,6 @@ int32_t classic_render_runtime(EffectEntry entry, std::array<std::byte, kInSize>
     if (g_params[slot - 1].type == 0 && g_params[slot - 1].layer_default == -1)
       std::memcpy(definitions[slot].data() + 56, input_world.data(), input_world.size());
   g_checkout_layer_definitions.clear();
-  g_timed_classic_layers.clear();
   if (external_layers) for (std::size_t layer_index = 0; layer_index < external_layers->size(); ++layer_index) {
     const auto& layer = (*external_layers)[layer_index];
     if (layer.slot <= 0 || static_cast<std::size_t>(layer.slot) >= definitions.size() ||
@@ -12100,8 +12087,10 @@ int32_t classic_render_runtime(EffectEntry entry, std::array<std::byte, kInSize>
     std::array<std::byte, kParamSize> checkout{};
     write<int32_t>(checkout, 12, 0);
     std::memcpy(checkout.data() + 56, world.data(), world.size());
-    if (layer.timed)
-      g_timed_classic_layers.push_back({layer.slot, layer.time, layer.time_scale, checkout});
+    if (layer.timed) {
+      if (!classic_context->add_timed_layer(
+              {layer.slot, layer.time, layer.time_scale, checkout})) return -3;
+    }
     else
       g_checkout_layer_definitions.emplace(layer.slot, checkout);
   }
@@ -12124,7 +12113,6 @@ int32_t classic_render_runtime(EffectEntry entry, std::array<std::byte, kInSize>
   struct CheckoutDefinitionsScope {
     ~CheckoutDefinitionsScope() {
       g_checkout_layer_definitions.clear();
-      g_timed_classic_layers.clear();
     }
   } checkout_definitions_scope;
   {
@@ -12236,7 +12224,7 @@ int32_t classic_render_runtime(EffectEntry entry, std::array<std::byte, kInSize>
           static_cast<int32_t>(external_time_scale), case_id, requested, external_rgba,
           external_layers, external_width, external_height, external_time_step,
           external_total_time, pixel_bytes, &logical_source, width, height});
-      g_classic_render_selector_dispatched = true;
+      classic_context->mark_selector_dispatched();
       error = entry(kRender, input.data(), command_output.data(), params.data(),
                     output_world.data(), nullptr);
     }
@@ -12357,12 +12345,12 @@ int32_t render_once(EffectEntry entry, std::array<std::byte, kInSize>& input,
       external_width, external_height, external_layers, external_current_time,
       external_time_step, external_total_time, external_time_scale, external_pixel_bytes,
       manage_sequence, captured_argb};
-  aexcompat::render::RenderContext context{
-      aexcompat::render::RenderKind::Classic, &request,
+  aexcompat::worker_runtime::classic::Request context{
+      &request,
       {&classic_render_guarded_effect_main, &classic_render_cleanup,
        &classic_render_dependencies_ready},
       g_module_audit.required};
-  return aexcompat::render::dispatch(context);
+  return aexcompat::worker_runtime::classic::dispatch(context);
 }
 
 bool exercise_loaded_effect_item_receipt(EffectEntry entry,
@@ -17055,7 +17043,8 @@ int worker_main_impl(int argc, wchar_t **argv) {
             << ",\"audio_lifetimes_balanced\":"
             << (audio_handle_lifetimes_balanced() ? "true" : "false")
             << ",\"render_selector_dispatched\":"
-            << (g_classic_render_selector_dispatched ? "true" : "false")
+            << (aexcompat::worker_runtime::classic::last_selector_dispatched()
+                    ? "true" : "false")
             << ",\"depth_supported\":" << (depth_supported ? "true" : "false")
             << ",\"render_error\":" << render_error
             << ",\"persistent_sequence\":" << (persistent_sequence ? "true" : "false")

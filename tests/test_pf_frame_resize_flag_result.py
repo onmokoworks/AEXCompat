@@ -5,6 +5,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 RENDER = ROOT / "minihost" / "src" / "render_subsystem.cpp"
 WORKER = ROOT / "minihost" / "src" / "l2_main.cpp"
+CLASSIC_RUNTIME = ROOT / "minihost" / "src" / "worker_classic_runtime.cpp"
 
 
 class PfFrameResizeFlagResultTest(unittest.TestCase):
@@ -34,7 +35,9 @@ class PfFrameResizeFlagResultTest(unittest.TestCase):
         validate = worker.index("aexcompat::render::validate_output_extent(")
         resize = worker.index("width = requested_width;", validate)
         self.assertLess(validate, resize)
-        self.assertIn("g_classic_render_selector_dispatched = true", worker)
+        self.assertIn("classic_context->mark_selector_dispatched()", worker)
+        self.assertIn("g_last_selector_dispatched = context.selector_dispatched()",
+                      CLASSIC_RUNTIME.read_text(encoding="utf-8"))
         fixture = (ROOT / "instruments" / "pf-frame-resize-probe" / "pf_frame_resize_probe.cpp").read_text()
         self.assertIn("PF_Cmd_FRAME_SETUP", fixture)
         self.assertIn("PF_Err_INTERNAL_STRUCT_DAMAGED", fixture)

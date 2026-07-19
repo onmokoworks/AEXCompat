@@ -1,0 +1,36 @@
+from pathlib import Path
+
+
+ROOT = Path(__file__).resolve().parents[1]
+HEADER = ROOT / "minihost" / "src" / "worker_classic_runtime.hpp"
+SOURCE = ROOT / "minihost" / "src" / "worker_classic_runtime.cpp"
+WORKER = ROOT / "minihost" / "src" / "l2_main.cpp"
+CMAKE = ROOT / "minihost" / "CMakeLists.txt"
+
+
+def test_classic_runtime_owns_per_render_state_and_dispatch_boundary():
+    header = HEADER.read_text(encoding="utf-8")
+    source = SOURCE.read_text(encoding="utf-8")
+    worker = WORKER.read_text(encoding="utf-8")
+
+    assert "thread_local Context* g_active_context" in source
+    assert "previous_(g_active_context)" in source
+    assert "g_active_context = previous_" in source
+    assert "std::vector<TimedLayerDefinition> timed_layers_" in header
+    assert "aexcompat::render::dispatch(render_context)" in source
+    assert "worker_runtime::classic::dispatch(context)" in worker
+    assert "g_timed_classic_layers" not in worker
+    assert "g_classic_render_selector_dispatched" not in worker
+
+
+def test_classic_runtime_preserves_timed_checkout_and_cleanup_hooks():
+    header = HEADER.read_text(encoding="utf-8")
+    source = SOURCE.read_text(encoding="utf-8")
+    worker = WORKER.read_text(encoding="utf-8")
+
+    assert "same_rational_time" in source
+    assert "copy_timed_layer" in header
+    assert "classic_context->copy_timed_layer" in worker
+    assert "classic_render_cleanup" in worker
+    assert "classic_render_dependencies_ready" in worker
+    assert "src/worker_classic_runtime.cpp" in CMAKE.read_text(encoding="utf-8")
