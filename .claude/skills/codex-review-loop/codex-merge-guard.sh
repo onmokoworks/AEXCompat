@@ -97,5 +97,37 @@ if [ -n "$owner_after" ]; then
   exit 1
 fi
 
-# Atomic: fails if head moved since the checks above.
+# FINAL OWNER SNAPSHOT: owner feedback does not change the head SHA, so
+# --match-head-commit alone cannot close the window between the earlier API
+# reads and merge. Re-fetch every owner surface immediately before merge and
+# run the complete owner gate again. Also refresh Codex inputs so a finding
+# arriving in the same window cannot be hidden by the earlier clean snapshot.
+pr_comments=$(fetch "pulls/$PR/comments") || { echo "REFUSE: final pulls/comments fetch failed"; exit 1; }
+review_threads=$(fetch_review_threads) || { echo "REFUSE: final reviewThreads fetch failed"; exit 1; }
+reviews=$(fetch "pulls/$PR/reviews") || { echo "REFUSE: final pulls/reviews fetch failed"; exit 1; }
+issue_comments=$(fetch "issues/$PR/comments") || { echo "REFUSE: final issues/comments fetch failed"; exit 1; }
+
+if [ -n "$(owner_review_gate <<<"$reviews")" ]; then
+  echo "REFUSE: final owner review is CHANGES_REQUESTED"; exit 1
+fi
+clearances=$(owner_clearances <<<"$reviews")
+ack_ts=$(me_ack_ts "$ME" <<<"$issue_comments")
+owner_after=$(
+  { owner_threads_unresolved "$ME" "$clearances" <<<"$review_threads"
+    owner_reviews_unresolved "$clearances" "$ack_ts" <<<"$reviews"
+    owner_comments_unresolved "$ME" "$clearances" <<<"$issue_comments"; } | grep -v '^$' || true
+)
+if [ -n "$owner_after" ]; then
+  echo "REFUSE: owner feedback arrived before merge; address it first:"
+  echo "$owner_after"
+  exit 1
+fi
+
+clean_ts=$(codex_clean_ts_for_head "$head" <<<"$issue_comments")
+find_ts=$(codex_finding_max_ts <<<"$pr_comments")
+if [ -z "$clean_ts" ] || [ -n "$(codex_finding_supersedes_clean "$find_ts" "$clean_ts")" ]; then
+  echo "REFUSE: final Codex snapshot is not clean for current head ${head:0:10}"; exit 1
+fi
+
+# Atomic head check closes the remaining commit race after the final snapshot.
 gh pr merge "$PR" --repo "$OWNER/$REPO" --merge --delete-branch --match-head-commit "$head"

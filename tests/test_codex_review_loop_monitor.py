@@ -617,6 +617,23 @@ def test_both_review_thread_connections_are_paginated() -> None:
         assert script.count("gh api graphql --paginate") >= 2
 
 
+def test_merge_guard_refetches_every_owner_surface_immediately_before_merge() -> None:
+    root = Path(__file__).resolve().parents[1] / ".claude" / "skills" / "codex-review-loop"
+    script = (root / "codex-merge-guard.sh").read_text(encoding="utf-8")
+    final = script.index("# FINAL OWNER SNAPSHOT")
+    merge = script.index("gh pr merge", final)
+    window = script[final:merge]
+    for endpoint in ('fetch "pulls/$PR/comments"', "fetch_review_threads",
+                     'fetch "pulls/$PR/reviews"', 'fetch "issues/$PR/comments"'):
+        assert endpoint in window
+    assert "owner_review_gate" in window
+    assert "owner_threads_unresolved" in window
+    assert "owner_reviews_unresolved" in window
+    assert "owner_comments_unresolved" in window
+    assert "codex_clean_ts_for_head" in window
+    assert "codex_finding_max_ts" in window
+
+
 def test_me_ack_ts_requires_the_marker() -> None:
     payload = [_toplevel(ME, "2026-07-18T11:00:00Z", "[ACK] 対応完了"),
                _toplevel(ME, "2026-07-18T12:00:00Z", "@codex review", id=78),
