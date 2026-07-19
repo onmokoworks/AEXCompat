@@ -32,6 +32,8 @@ WORKER_RUNTIME_OWNERS = (
     "minihost/src/worker_aegp_utility_suite.cpp",
     "minihost/src/worker_pf_pixel_data_suite.hpp",
     "minihost/src/worker_pf_pixel_data_suite.cpp",
+    "minihost/src/worker_pf_world_suite.hpp",
+    "minihost/src/worker_pf_world_suite.cpp",
 )
 
 # 契約名 → owner ファイル群 (repo ルート相対)。
@@ -42,6 +44,8 @@ CONTRACTS = {
         "minihost/src/worker_aegp_utility_suite.cpp",
         "minihost/src/worker_pf_pixel_data_suite.hpp",
         "minihost/src/worker_pf_pixel_data_suite.cpp",
+        "minihost/src/worker_pf_world_suite.hpp",
+        "minihost/src/worker_pf_world_suite.cpp",
         "minihost/src/l2_mode_execution.hpp",
         "minihost/src/l2_mode_execution.cpp",
         "minihost/src/l2_cli_dispatch.cpp",
