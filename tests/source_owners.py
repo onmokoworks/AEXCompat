@@ -50,6 +50,8 @@ WORKER_RUNTIME_OWNERS = (
     "minihost/src/worker_l2_render_abi.cpp",
     "minihost/src/worker_classic_report.hpp",
     "minihost/src/worker_classic_report.cpp",
+    "minihost/src/worker_smart_report.hpp",
+    "minihost/src/worker_smart_report.cpp",
 )
 
 # 契約名 → owner ファイル群 (repo ルート相対)。
@@ -76,6 +78,8 @@ CONTRACTS = {
         "minihost/src/worker_l2_render_abi.cpp",
         "minihost/src/worker_classic_report.hpp",
         "minihost/src/worker_classic_report.cpp",
+        "minihost/src/worker_smart_report.hpp",
+        "minihost/src/worker_smart_report.cpp",
         "minihost/src/l2_mode_execution.hpp",
         "minihost/src/l2_mode_execution.cpp",
         "minihost/src/l2_cli_dispatch.cpp",
@@ -254,6 +258,7 @@ CONTRACTS = {
         "minihost/src/worker_smart_dispatch.cpp",
         "minihost/src/worker_smart_finalize.cpp",
         "minihost/src/worker_render_report.cpp",
+        "minihost/src/worker_smart_report.cpp",
     ),
     "native_depth_image_transport": (
         "minihost/src/l2_main.cpp",

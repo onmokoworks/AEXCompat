@@ -36,6 +36,7 @@ PARAMETER_SELFTEST_ROUTING_SOURCE = (ROOT / "minihost" / "src" /
 CUSTOM_SELFTEST_ROUTING_SOURCE = (ROOT / "minihost" / "src" /
                                   "worker_custom_selftest_routing.cpp")
 CLASSIC_REPORT_SOURCE = ROOT / "minihost" / "src" / "worker_classic_report.cpp"
+SMART_REPORT_SOURCE = ROOT / "minihost" / "src" / "worker_smart_report.cpp"
 REQUEST_PARSER_HEADER = ROOT / "minihost" / "src" / "worker_request_parser.hpp"
 REQUEST_PARSER_SOURCE = ROOT / "minihost" / "src" / "worker_request_parser.cpp"
 RENDER_REPORT_HEADER = ROOT / "minihost" / "src" / "worker_render_report.hpp"
@@ -257,13 +258,14 @@ class MinihostL2SourceTests(unittest.TestCase):
         self.assertIn("src/worker_render_report.cpp", cmake)
         self.assertIn("class ReportSnapshot", header)
         self.assertIn("stream_.copyfmt(formatting_source)", implementation)
-        # The classic snapshot construction and emit moved to the
-        # worker_classic_report owner; the smart path stays in l2_main.
-        self.assertEqual(worker.count("worker_render_report::ReportSnapshot"), 1)
-        self.assertEqual(worker.count("worker_render_report::emit(report_snapshot"), 1)
-        classic_report = CLASSIC_REPORT_SOURCE.read_text(encoding="utf-8")
-        self.assertEqual(classic_report.count("report::ReportSnapshot"), 1)
-        self.assertEqual(classic_report.count("report::emit(report_snapshot"), 1)
+        # Snapshot construction and emit both live in the completion-report
+        # owners now; l2_main no longer instantiates a ReportSnapshot.
+        self.assertEqual(worker.count("worker_render_report::ReportSnapshot"), 0)
+        self.assertEqual(worker.count("worker_render_report::emit(report_snapshot"), 0)
+        for report_source in (CLASSIC_REPORT_SOURCE, SMART_REPORT_SOURCE):
+            report_text = report_source.read_text(encoding="utf-8")
+            self.assertEqual(report_text.count("report::ReportSnapshot"), 1)
+            self.assertEqual(report_text.count("report::emit(report_snapshot"), 1)
         self.assertNotIn('std::cout << "{\\\"schema_version\\\":1,\\\"stage\\\":\\\"classic_render', worker)
         self.assertNotIn('std::cout << "{\\\"schema_version\\\":1,\\\"stage\\\":\\\"smartfx_render', worker)
 
@@ -1273,7 +1275,8 @@ class MinihostL2SourceTests(unittest.TestCase):
     def test_suite_lease_leaks_are_reported_without_discarding_valid_images(self):
         text = l2_family_source()
         self.assertIn('"suite_lease_warning\\\":"', text)
-        self.assertIn("smart.guards_intact && handle_lifetimes_balanced()", text)
+        self.assertIn("smart.guards_intact &&", text)
+        self.assertIn("worker_runtime::handles::handle_lifetimes_balanced()", text)
         self.assertNotIn(
             "smart.guards_intact && suite_leases_balanced() && handle_lifetimes_balanced()",
             text,
