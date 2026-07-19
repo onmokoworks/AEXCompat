@@ -189,7 +189,7 @@ fn normalize_outcome(
     outcome: Result<Value, RuntimeFailure>,
 ) -> (DepthResult, bool) {
     match outcome {
-        Ok(report) => normalize_success(path, depth, &report)
+        Ok(report) => normalize_success(path, depth, input_world.as_ref(), &report)
             .map(|result| (result, false))
             .unwrap_or_else(|failure| {
                 let retry_classic = failure.retry_classic;
@@ -211,6 +211,7 @@ fn normalize_outcome(
 fn normalize_success(
     path: RenderPath,
     depth: PixelDepth,
+    expected_input_world: Option<&WorldMetadata>,
     report: &Value,
 ) -> Result<DepthResult, RuntimeFailure> {
     let timeline = suite_timeline(report);
@@ -243,7 +244,8 @@ fn normalize_success(
         .map_err(|failure| with_suite_timeline(failure, &timeline))?;
     let output_world = parse_world(report.get("output_world"))
         .map_err(|failure| with_suite_timeline(failure, &timeline))?;
-    if input_world.pixel_format != depth
+    if expected_input_world != Some(&input_world)
+        || input_world.pixel_format != depth
         || output_world.pixel_format != depth
         || u64::from(output_world.width) != width
         || u64::from(output_world.height) != height
@@ -884,6 +886,41 @@ mod tests {
         assert_eq!(failure.classification, Classification::HostValidationError);
         assert!(!backend.inspect_called.get());
         assert!(!backend.render_called.get());
+    }
+
+    #[test]
+    fn successful_report_must_match_preflight_input_world() {
+        let mut reports = Vec::new();
+        for (field, value) in [
+            ("width", json!(1)),
+            ("row_bytes", json!(12)),
+            ("premultiplication", json!("straight")),
+            (
+                "extent_hint",
+                json!({"left": 0, "top": 0, "right": 1, "bottom": 3}),
+            ),
+        ] {
+            let mut report = successful_report(PixelDepth::Argb8);
+            report["input_world"][field] = value;
+            reports.push(report);
+        }
+
+        for report in reports {
+            let mut backend = FakeBackend {
+                inspect: Ok(json!({})),
+                renders: VecDeque::from([Ok(report)]),
+            };
+            let results = collect_runtime_results(
+                &mut backend,
+                &[RenderPath::Classic],
+                &[PixelDepth::Argb8],
+            )
+            .unwrap();
+            assert_eq!(
+                results[0].classification,
+                Classification::HostValidationError
+            );
+        }
     }
 
     #[test]

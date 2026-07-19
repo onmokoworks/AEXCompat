@@ -71,6 +71,7 @@ pub fn redact_windows_paths(text: &str, limit: usize) -> (String, bool) {
     let chars: Vec<char> = bounded.chars().collect();
     let mut output = String::new();
     let mut index = 0;
+    let mut inside_json_string = false;
     while index < chars.len() {
         let starts_path = index + 2 < chars.len()
             && chars[index].is_ascii_alphabetic()
@@ -80,20 +81,39 @@ pub fn redact_windows_paths(text: &str, limit: usize) -> (String, bool) {
             // A path that is the complete value of a compact JSON string
             // needs a schema-safe replacement so redaction cannot corrupt
             // the report or cause an otherwise valid Suite event to vanish.
-            output.push_str(if index > 0 && chars[index - 1] == '"' {
+            output.push_str(if inside_json_string && index > 0 && chars[index - 1] == '"' {
                 "redacted-path"
             } else {
                 "<redacted-path>"
             });
             index += 3;
-            while index < chars.len()
-                && !chars[index].is_whitespace()
-                && !matches!(chars[index], '"' | ',' | '}' | ']')
-            {
+            while index < chars.len() {
+                if inside_json_string && chars[index] == '"' {
+                    let preceding_backslashes = chars[..index]
+                        .iter()
+                        .rev()
+                        .take_while(|character| **character == '\\')
+                        .count();
+                    if preceding_backslashes % 2 == 0 {
+                        break;
+                    }
+                } else if !inside_json_string && chars[index].is_whitespace() {
+                    break;
+                }
                 index += 1;
             }
         } else {
             output.push(chars[index]);
+            if chars[index] == '"' {
+                let preceding_backslashes = chars[..index]
+                    .iter()
+                    .rev()
+                    .take_while(|character| **character == '\\')
+                    .count();
+                if preceding_backslashes % 2 == 0 {
+                    inside_json_string = !inside_json_string;
+                }
+            }
             index += 1;
         }
     }
@@ -138,12 +158,14 @@ mod tests {
 
     #[test]
     fn redaction_preserves_compact_json_boundaries() {
-        let input = r#"{"suite_timeline":[{"name":"C:\\private","result":25}]}"#;
+        let input = r#"{"suite_timeline":[{"name":"C:\\private,secret]}tail","result":25}]}"#;
         let (redacted, truncated) = redact_windows_paths(input, 1024);
         assert!(!truncated);
         let value: serde_json::Value = serde_json::from_str(&redacted).unwrap();
         assert_eq!(value["suite_timeline"][0]["name"], "redacted-path");
         assert_eq!(value["suite_timeline"][0]["result"], 25);
         assert!(!redacted.contains("private"));
+        assert!(!redacted.contains("secret"));
+        assert!(!redacted.contains("tail"));
     }
 }
