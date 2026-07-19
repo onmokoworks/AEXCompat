@@ -5,6 +5,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 RESULT = ROOT / "analysis" / "SDK_PORTABLE_HOST_ITERATE_RESULT_2026-07-15.json"
 SOURCE = ROOT / "minihost" / "src" / "l2_main.cpp"
+RENDER_REPORT = ROOT / "minihost" / "src" / "worker_render_report.cpp"
 
 
 def test_portable_observes_host_lifecycle_and_classic_iterate():
@@ -42,4 +43,6 @@ def test_portable_bounded_ansi_callback_and_render_message_are_exposed():
     assert "required >= 0 && required <= 4096" in source
     assert "vsprintf_s(destination, static_cast<std::size_t>(required) + 1" in source
     assert "strnlen_s(format, 256) == 256" in source
-    assert r'\"return_message\"' in source
+    report = RENDER_REPORT.read_text(encoding="utf-8")
+    assert r'\"return_message\"' in report
+    assert "value.escaped_return_message" in report

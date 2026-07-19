@@ -42,13 +42,13 @@ def test_legacy_fill_callbacks_match_sdk_slots_and_reuse_suite_v2_implementation
         assert f"write(utils, {constant}, &{callback});" in text
     assert "static_assert(kUtilsSize == 69 * sizeof(void*));" in text
     assert re.search(
-        r"g_fill_matte_suite2\[0\].*?&fill_world8.*?"
-        r"g_fill_matte_suite2\[1\].*?&fill_world16.*?"
-        r"g_fill_matte_suite2\[4\].*?&premultiply_color8.*?"
-        r"g_fill_matte_suite2\[5\].*?&premultiply_color16",
-        text,
-        re.DOTALL,
+        r"void\* callbacks\[\] = \{.*?&fill_world8.*?&fill_world16.*?"
+        r"&fill_world_float.*?&premultiply_world8.*?&premultiply_color8.*?"
+        r"&premultiply_color16.*?&premultiply_color_float.*?\};",
+        text, re.DOTALL,
     )
+    assert "std::copy(std::begin(callbacks), std::end(callbacks), g_fill_matte_suite2.begin())" in text
+    assert '{"PF Fill Matte Suite", 2, nullptr, &provide_fill_matte2}' in text
     assert "wire_legacy_fill_matte_callbacks(utils);" in text
 
 

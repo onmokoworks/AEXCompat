@@ -41,7 +41,7 @@ def test_gpu_abi_and_suite_table_are_explicit():
         "write<int32_t>(smart_input, 64",
         "write<uint32_t>(smart_input, 68",
         "write<int32_t>(setdown_input, 8, gpu_framework)",
-        'std::strcmp(name, "PF GPU Device Suite") == 0 && version == 1',
+        '{"PF GPU Device Suite", 1, g_gpu_device_suite1.data()}',
         "kPixelFormatGpuBgra128",
         "result.output_pixels_valid = !logical_output.empty() && !output_untouched && output_finite",
     ):

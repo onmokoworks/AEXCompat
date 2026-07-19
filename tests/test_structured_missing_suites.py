@@ -6,6 +6,9 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def test_production_worker_reports_bounded_missing_suites():
     source = (ROOT / "minihost" / "src" / "l2_main.cpp").read_text(encoding="utf-8")
+    report = (ROOT / "minihost" / "src" / "worker_render_report.cpp").read_text(
+        encoding="utf-8"
+    )
     registry = (ROOT / "minihost" / "src" / "worker_suite_registry.cpp").read_text(
         encoding="utf-8"
     )
@@ -13,7 +16,9 @@ def test_production_worker_reports_bounded_missing_suites():
     assert "record_missing_suite(safe_name, version)" in registry
     assert "const bool valid_name" in registry
     assert "if (!valid_name || version <= 0) return" in registry
-    assert source.count("<< missing_suites_report_json()") >= 2
+    assert source.count("missing_suites_report_json()") >= 2
+    assert "value.missing_suites_json" in report
+    assert "v.missing_suites_json" in report
 
 
 def test_broker_uses_structured_report_not_stderr_for_missing_suites():

@@ -21,42 +21,25 @@ SUITES = {
 }
 
 
-def acquire_suite_source(source: str) -> str:
-    start = source.index("SuiteResolveResult resolve_suite(")
-    end = source.index("int32_t __cdecl acquire_suite(", start)
+def component_catalog_source(source: str) -> str:
+    start = source.index("const StaticSuite component_suites[]")
+    end = source.index("StaticProviderCatalog component_catalog", start)
     return source[start:end]
-
-
-def suite_branch(acquire: str, name: str, version: int) -> str:
-    pattern = re.compile(
-        rf'if \((?P<condition>[^{{]*std::strcmp\(name, "{re.escape(name)}"\) == 0[^{{]*)\) '
-        rf'\{{(?P<body>.*?)\n  \}}',
-        re.DOTALL,
-    )
-    matches = [match for match in pattern.finditer(acquire) if f"version == {version}" in match["condition"]]
-    assert len(matches) == 1, f"expected one {name} v{version} acquire branch"
-    return matches[0]["condition"] + matches[0]["body"]
 
 
 def test_general_effect_suites_are_available_without_mask_mode_and_are_version_exact():
     source = SOURCE.read_text(encoding="utf-8")
-    acquire = acquire_suite_source(source)
+    catalog = component_catalog_source(source)
 
     for name, (version, function_markers) in SUITES.items():
-        branch = suite_branch(acquire, name, version)
-        assert "g_mask_model_enabled" not in branch
-        assert f"version == {version}" in branch
-        assert "*suite =" in branch
-        assert "return SuiteResolveResult::acquired;" in branch
+        entries = re.findall(rf'\{{"{re.escape(name)}",\s*(\d+),[^\n]*', catalog)
+        assert entries == [str(version)], f"{name} must have one exact-version provider"
         for marker in function_markers:
-            assert f"&{marker}" in branch
+            assert f"&{marker}" in source
 
-        versions = re.findall(
-            rf'std::strcmp\(name, "{re.escape(name)}"\) == 0[^{{]*version == (\d+)', acquire
-        )
-        assert versions == [str(version)], f"{name} must not accept an uncontracted version"
-
-    assert "return SuiteResolveResult::not_found;" in acquire
+    assert "StaticProviderCatalog component_catalog" in source
+    assert "resolve_static_provider, &component_catalog" in source
+    assert "acquire_host_suite(catalog, name, version, suite" in source
 
 
 def test_general_effect_suite_functions_keep_existing_safety_bounds():

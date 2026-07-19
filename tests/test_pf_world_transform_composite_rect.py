@@ -31,7 +31,8 @@ def test_world_transform_suite_has_typed_frozen_abi_and_wired_composite_rect():
     assert "decltype(&composite_rect8) composite_rect;" in text
     assert "static_assert(sizeof(WorldTransformSuite1) == 7 * sizeof(void*))" in text
     assert "offsetof(WorldTransformSuite1, transform_world) == 6 * sizeof(void*)" in text
-    assert "g_world_transform_suite1.composite_rect = &composite_rect8;" in text
+    assert "g_world_transform_suite1 = {&composite_rect8, &blend_world, &convolve_world," in text
+    assert '{"PF World Transform Suite", 1, nullptr, &provide_world_transform1}' in text
     assert "unsupported_after_copy" not in text
 
 
