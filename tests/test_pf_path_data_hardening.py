@@ -17,7 +17,7 @@ def _worker() -> Path:
 
 def test_path_hardening_is_fail_closed_in_source():
     source = SOURCE.read_text(encoding="utf-8")
-    assert "mask->open && vertices > 0 ? vertices - 1 : vertices" in source
+    assert "curve.open && vertices > 0 ? vertices - 1 : vertices" in source
     assert "path.open && count > 0 ? count - 1 : count" in source
     assert "registered_pf_segment_prep" in source
     cleanup = source[source.index("int32_t __cdecl pf_path_cleanup_seg_length") :]
