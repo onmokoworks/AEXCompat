@@ -160,6 +160,10 @@ using namespace aexcompat::color_settings;
 int32_t __cdecl acquire_suite(const char* name, int32_t version, const void** suite);
 int32_t __cdecl release_suite(const char* name, int32_t version);
 
+// Retained worker-entry identity state (issue #126 Phase D). The worker-kind
+// selector is set once by the entry shims before worker_main runs and is part
+// of the entry/admission minimum that stays owned here. Lifetime: set at
+// process entry, constant afterwards.
 aexcompat::worker_target::Kind g_worker_target =
     aexcompat::worker_target::Kind::L2;
 
@@ -421,6 +425,8 @@ auto& g_last_seh_exception_address = selector_dispatch_telemetry().seh_address;
 auto& g_last_seh_exception_module = selector_dispatch_telemetry().seh_module;
 auto& g_last_seh_selector = selector_dispatch_telemetry().selector;
 auto& g_last_seh_error = selector_dispatch_telemetry().error;
+// Retained entry/admission state: the trace sink is installed by
+// WorkerSession for the session's lifetime and cleared on teardown.
 aexcompat::TraceWriter* g_trace_writer{};
 
 void record_selector_dispatch(const char* selector) {
@@ -485,6 +491,8 @@ auto& g_arbitrary_new_calls = g_parameter_runtime.arbitrary.new_calls;
 auto& g_arbitrary_interpolation_calls = g_parameter_runtime.arbitrary.interpolation_calls;
 auto& g_arbitrary_interpolation_failures = g_parameter_runtime.arbitrary.interpolation_failures;
 auto& g_last_arbitrary_interpolation_amount = g_parameter_runtime.arbitrary.last_interpolation_amount;
+// Retained entry/admission state: the admitted plug-in path, set once after
+// WorkerSession admission for diagnostics.
 std::wstring g_plugin_file_path;
 const aexcompat::host_audio::Telemetry& audio_telemetry() {
   return aexcompat::host_audio::runtime().telemetry();
@@ -680,6 +688,10 @@ static_assert(sizeof(HostTime) == 8);
 static_assert(sizeof(StreamValue) == 40);
 OutlineData* sampled_outline(HostStreamRef* stream, const HostTime* time,
                              std::unique_ptr<OutlineData>& owned);
+// Retained host-object identities (issue #126 Phase D): the tagged effect
+// and layer refs every suite callback validates against. They are the
+// dispatch-boundary identity the suites pin, so they stay owned beside the
+// callback ABI in this TU. Lifetime: process-lifetime constants.
 OpaqueHostObject g_effect{0x45464658};
 OpaqueHostObject g_layer{0x4c415952};
 
@@ -1117,6 +1129,12 @@ static_assert(std::is_same_v<decltype(&aegp_world_dispose_platform),
 static_assert(std::is_same_v<decltype(&aegp_world_reference_platform),
                              aexcompat::suite_abi::AegpWorldReferencePlatform>);
 
+// Retained custom-UI callback-ABI state (issue #126 Phase D): the opaque
+// Drawbot refs and the live object table are handed to the plug-in as raw
+// pointers by the Drawbot suite callbacks below, so their storage stays with
+// that ABI; the plain-data counters live in
+// ui_event_execution::custom_ui_telemetry(). Lifetime: process-lifetime; the
+// object table is balanced by the create/release callbacks.
 struct DrawbotOpaque { uint32_t tag; };
 DrawbotOpaque g_drawbot_draw{0x44524157};
 DrawbotOpaque g_drawbot_supplier{0x53555050};
@@ -1156,6 +1174,9 @@ struct HostUiContext {
   void* pane{};
   void* job_manager{};
 };
+// Retained custom-UI callback-ABI state: the event context block whose
+// address is written into the PF event ABI, owned beside the callbacks that
+// hand it out. Lifetime: process-lifetime, re-armed per UI dispatch.
 HostUiContext g_ui_context;
 HostUiContext* g_ui_context_pointer = &g_ui_context;
 struct PfHelperUiContextScope {
@@ -1345,6 +1366,9 @@ int32_t __cdecl app_convert_local_to_global(const int32_t*, int32_t*) { return 4
 int32_t __cdecl app_get_color_at_global_point(const int32_t*, int16_t, int16_t, float*) {
   return 4;
 }
+// Retained custom-UI callback-ABI state: live App progress-dialog handles
+// returned to the plug-in; balanced by the create/dispose callbacks and
+// counted in custom_ui_telemetry().
 struct AppProgressDialog { uint32_t magic{0x50524744}; };
 std::unordered_map<void*, std::unique_ptr<AppProgressDialog>> g_app_progress_dialogs;
 int32_t __cdecl app_create_progress_dialog(const uint16_t* title, const uint16_t*, int32_t,
