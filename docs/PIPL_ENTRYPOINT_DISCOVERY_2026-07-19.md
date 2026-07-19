@@ -2,7 +2,8 @@
 
 Issue #84 replaces export-name guessing at the PF Effect boundary with the
 Adobe PiPL contract. The worker enumerates bounded `PiPL` resources, parses the
-Windows 10-byte list header and padded property records, requires `Kind`
+Windows 10-byte list header and padded property records, scopes standard
+properties to Adobe's serialized `MIB8` vendor signature, requires `Kind`
 (`AEEffect` / serialized `TKFe`) plus `CodeWin64X86` (`8664` / serialized
 `4668`), validates a bounded ASCII export identifier, and only then resolves
 that declared symbol. `AEGP` (`xgEA`) is never cast to the Effect ABI.

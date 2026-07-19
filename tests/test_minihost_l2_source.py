@@ -15,6 +15,8 @@ class MinihostL2SourceTests(unittest.TestCase):
             "languages.size() != 1",
             'pipl_tag(property + 4, "dnik")',
             'pipl_tag(property + 4, "4668")',
+            'const bool adobe_vendor = pipl_tag(property, "MIB8")',
+            'adobe_vendor && pipl_tag(property + 4, "dnik")',
             'std::memcmp(kind.data(), "TKFe", 4)',
             'std::memcmp(kind.data(), "xgEA", 4)',
             "pipl_entrypoint.symbol.c_str()",

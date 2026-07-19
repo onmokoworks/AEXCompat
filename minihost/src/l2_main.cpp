@@ -116,6 +116,7 @@ PiplEntrypoint parse_pipl_entrypoint(const unsigned char* bytes, std::size_t siz
     }
     const unsigned char* property = bytes + offset;
     const uint32_t length = read_pipl_u32(property + 12);
+    const bool adobe_vendor = pipl_tag(property, "MIB8");
     offset += 16;
     if (length > size - offset || length > std::numeric_limits<uint32_t>::max() - 3U) {
       result.kind = PiplPluginKind::Invalid;
@@ -128,14 +129,14 @@ PiplEntrypoint parse_pipl_entrypoint(const unsigned char* bytes, std::size_t siz
     }
     // PiPL four-character constants are stored as little-endian DWORD bytes
     // in Windows resources (for example PIKindProperty 'kind' is "dnik").
-    if (pipl_tag(property + 4, "dnik")) {
+    if (adobe_vendor && pipl_tag(property + 4, "dnik")) {
       if (saw_kind || length != 4) {
         result.kind = PiplPluginKind::Invalid;
         return result;
       }
       std::copy_n(bytes + offset, 4, kind.begin());
       saw_kind = true;
-    } else if (pipl_tag(property + 4, "4668")) {
+    } else if (adobe_vendor && pipl_tag(property + 4, "4668")) {
       if (saw_code || !valid_export_symbol(bytes + offset, length, symbol)) {
         result.kind = PiplPluginKind::Invalid;
         return result;
@@ -281,8 +282,17 @@ bool verify_pipl_entrypoint_parser() {
       PiplPluginKind::Invalid) return false;
   auto hostile_length = effect;
   std::fill(hostile_length.begin() + 22, hostile_length.begin() + 26, 0xff);
-  return parse_pipl_entrypoint(hostile_length.data(), hostile_length.size()).kind ==
-      PiplPluginKind::Invalid;
+  if (parse_pipl_entrypoint(hostile_length.data(), hostile_length.size()).kind !=
+      PiplPluginKind::Invalid) return false;
+  auto vendor_private_duplicate = effect;
+  vendor_private_duplicate[6] = 3;
+  const std::size_t private_offset = vendor_private_duplicate.size();
+  append_pipl_property(vendor_private_duplicate, "4668", {'O', 't', 'h', 'e', 'r', 0});
+  std::copy_n("VEND", 4, vendor_private_duplicate.begin() + private_offset);
+  const auto private_parsed = parse_pipl_entrypoint(
+      vendor_private_duplicate.data(), vendor_private_duplicate.size());
+  return private_parsed.kind == PiplPluginKind::Effect &&
+      private_parsed.symbol == "entryPointFunc";
 }
 
 struct AuthorizedRuntimeModule {
