@@ -55,8 +55,15 @@ $outputPath = Join-Path $runRoot 'render-output.avi'
 $prepareResult = Join-Path $runRoot 'prepare-result.json'
 $logPath = Join-Path $runRoot 'selector-timeline.jsonl'
 $summaryPath = Join-Path $runRoot 'capture-summary.json'
-foreach ($stale in @($projectPath, $prepareResult, $logPath, $summaryPath)) {
+foreach ($stale in @($projectPath, $outputPath, $prepareResult, $logPath, $summaryPath)) {
     if (Test-Path -LiteralPath $stale) { throw "Refusing to overwrite existing output: $stale" }
+}
+# The default output module renders an image sequence next to $outputPath
+# (render-output_00000.png ...), so stale sequence files from a reused run
+# root are refused too.
+$staleSequence = Get-ChildItem -LiteralPath $runRoot -Filter 'render-output*' -ErrorAction SilentlyContinue
+if ($staleSequence) {
+    throw "Refusing to overwrite existing render outputs in: $runRoot"
 }
 if (Test-Path -LiteralPath $installRoot) {
     throw "Temporary oracle plug-in directory already exists: $installRoot"
