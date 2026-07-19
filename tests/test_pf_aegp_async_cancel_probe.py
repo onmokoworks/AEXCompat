@@ -9,6 +9,7 @@ import subprocess
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "instruments/pf-aegp-async-cancel-probe/pf_aegp_async_cancel_probe.cpp"
 HOST = ROOT / "minihost/src/l2_main.cpp"
+ASYNC_RUNTIME = ROOT / "minihost/src/worker_aegp_async_layer_runtime.cpp"
 
 
 def test_fixture_cancels_immediately_and_requires_one_canceled_callback_without_receipt():
@@ -26,11 +27,12 @@ def test_fixture_cancels_immediately_and_requires_one_canceled_callback_without_
 
 def test_current_host_needs_a_pre_claim_gate_for_deterministic_cancellation():
     host = HOST.read_text(encoding="utf-8")
+    runtime = ASYNC_RUNTIME.read_text(encoding="utf-8")
     assert 'AEXCOMPAT_TEST_ASYNC_CANCEL_GATE' in host
-    assert "request->gate_changed.wait_for" in host
-    assert "request->state.compare_exchange_strong(expected, 1)" in host
-    assert "found->second->state.compare_exchange_strong(expected, 2)" in host
-    assert "found->second->gate_changed.notify_one()" in host
+    assert "request->gate_changed.wait_for" in runtime
+    assert "request->state.compare_exchange_strong(expected, 1)" in runtime
+    assert "found->second->state.compare_exchange_strong(expected, 2)" in runtime
+    assert "found->second->gate_changed.notify_one()" in runtime
 
 
 def test_real_probe_deterministically_cancels_before_completion(tmp_path):

@@ -3015,13 +3015,21 @@ int32_t publish_async_layer_source(
   }
   return publish_loaded_layer_receipt_from_context(context, options, receipt);
 }
+int async_layer_exception_filter(EXCEPTION_POINTERS* information,
+                                 uint32_t* exception_code) {
+  if (exception_code && information && information->ExceptionRecord)
+    *exception_code = information->ExceptionRecord->ExceptionCode;
+  return EXCEPTION_EXECUTE_HANDLER;
+}
 int32_t invoke_async_layer_callback_seh(AegpAsyncFrameReadyCallback callback,
     uint64_t request_id, uint8_t canceled, int32_t error, void* receipt,
     void* refcon, int32_t* callback_error, uint32_t* exception_code) {
   if (!callback || !callback_error || !exception_code) return 4;
   *callback_error = 4; *exception_code = 0;
   __try { *callback_error = callback(request_id, canceled, error, receipt, refcon); return 0; }
-  __except(EXCEPTION_EXECUTE_HANDLER) { *exception_code = 0xffffffffu; return 4; }
+  __except(async_layer_exception_filter(GetExceptionInformation(), exception_code)) {
+    return 4;
+  }
 }
 int32_t __cdecl render_checkout_layer_async_reject(
     void* options, AegpAsyncFrameReadyCallback callback, void* refcon, uint64_t* id) {
