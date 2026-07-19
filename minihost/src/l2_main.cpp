@@ -6717,6 +6717,19 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
   // write(utils, kUtilsIterate, &iterate_world8)
   // write(utils, kUtilsAnsiPow, &aexcompat::pf_ansi::ansi_pow)
   // write(utils, kUtilsAnsiStrcpy, &aexcompat::pf_ansi::ansi_strcpy)
+  // memcpy(utils.data() + kUtilsColorCallbacks, &g_color_suite8,
+  //        sizeof(g_color_suite8))
+  // write(utils, kUtilsBeginSampling, &begin_sampling8)
+  // write(utils, kUtilsAreaSample, &area_sample8)
+  // write(utils, kUtilsEndSampling, &end_sampling8)
+  // write(input, 24, &abort_render)
+  // write(input, 32, &report_progress)
+  // external_pixel_bytes == 8 &&
+  // external_pixel_bytes == 16 &&
+  // params_error == 0 && image_render_supported && depth_supported
+  // (1u << 26)
+  // write<int32_t>(input, 248, g_shutter_angle)
+  // write<int32_t>(input, 400, g_shutter_phase)
   // about_error = g_skip_about ? 0
   // invoke_entry_seh(entry, kGlobalSetup)
   // invoke_entry_seh(entry, kAbout)
