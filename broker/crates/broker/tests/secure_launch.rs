@@ -44,7 +44,10 @@ mod windows_e2e {
         };
         let tree = SealedLoadTree::create(entry, vec![]).unwrap();
         let sealed_root = tree.root().to_owned();
-        let before = vec!["before".to_owned()];
+        // The worker asserts its cwd against this expected repository path
+        // (issue #141: one-shot launches must run from the repository, not
+        // from the staging root).
+        let before = vec![worker_dir.0.to_string_lossy().into_owned()];
         let after = vec!["after".to_owned()];
         let request = SecureLaunchRequest {
             worker_program: &worker,
@@ -240,12 +243,15 @@ mod windows_e2e {
     let argv0 = all_args.next().unwrap();
     let args: Vec<_> = all_args.collect();
     let argv0 = std::path::PathBuf::from(argv0);
-    let current = std::env::current_dir().unwrap();
     assert!(argv0.is_absolute());
-    assert_eq!(argv0.parent(), Some(current.as_path()));
-    assert_eq!(argv0, current.join("trusted-worker.exe"));
+    // The executed binary is the staged copy, but the working directory is
+    // the repository the broker passed as args[0] (issue #141), so relative
+    // target/image-transport pins resolve against broker-owned transport.
+    assert_eq!(argv0.file_name().unwrap(), "trusted-worker.exe");
     assert_eq!(args.len(), 3);
-    assert_eq!(args[0], "before");
+    let current = std::env::current_dir().unwrap();
+    assert_eq!(current, std::path::PathBuf::from(&args[0]));
+    assert_ne!(argv0.parent(), Some(current.as_path()));
     assert_eq!(args[2], "after");
     let bytes = std::fs::read(&args[1]).expect("read sealed plugin");
     assert_eq!(bytes, b"authenticated sealed plugin");
