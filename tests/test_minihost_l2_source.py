@@ -182,7 +182,9 @@ class MinihostL2SourceTests(unittest.TestCase):
                      "verify_aegp_resizer_3d_chain",
                      "verify_aegp_apply_effect",
                      "verify_aegp_effect_stack",
-                     "verify_aegp_projector_levels"):
+                     "verify_aegp_projector_levels",
+                     "verify_aegp_effect_param_union_suite4",
+                     "verify_aegp_installed_effect_catalog_suite4"):
             self.assertIn(f"bool {name}()", implementation)
             self.assertNotIn(f"bool {name}()", worker)
         for name in ("run_verify_legacy_effect_compat_suites",

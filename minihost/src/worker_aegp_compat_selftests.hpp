@@ -40,6 +40,8 @@ struct AegpCompatSelftestHooks {
   void* item_suite{};
   uint32_t* layer_source_item_calls{};
   uint32_t* item_type_calls{};
+  int32_t (__cdecl* get_effect_param_union_v3)(int32_t, void*, int32_t,
+                                               int32_t*, void*){};
 };
 void configure_aegp_compat_selftests(AegpCompatSelftestHooks hooks);
 bool verify_legacy_effect_compat_suites();
@@ -49,4 +51,6 @@ bool verify_aegp_apply_effect();
 bool verify_aegp_effect_stack();
 bool verify_aegp_projector_levels();
 bool verify_aegp_layer_source_item();
+bool verify_aegp_effect_param_union_suite4();
+bool verify_aegp_installed_effect_catalog_suite4();
 }

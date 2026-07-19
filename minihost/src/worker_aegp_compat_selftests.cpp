@@ -1,4 +1,5 @@
 #include "worker_aegp_compat_selftests.hpp"
+#include "worker_parameter_runtime.hpp"
 #include "worker_mask_runtime_internal.hpp"
 #include "worker_aegp_scene.hpp"
 #include "worker_aegp_scene_runtime.hpp"
@@ -637,5 +638,92 @@ bool verify_aegp_resizer_3d_chain() {
   g_aegp_layer_in_points = saved_in_points;
   g_aegp_layer_durations = saved_durations;
   return ok && suite_leases_balanced();
+}
+
+#define g_aegp_effect scene_runtime_state().effect
+#define aegp_get_effect_param_union_by_index_v3 g_hooks.get_effect_param_union_v3
+
+bool verify_aegp_effect_param_union_suite4() {
+  constexpr std::size_t kParamSize = worker_runtime::parameters::kDefinitionSize;
+  const bool saved_live = g_aegp_effect_live;
+  g_aegp_effect_live = true;
+  std::array<std::byte, kParamSize - 56> value{};
+  std::array<std::byte, kParamSize - 56> sentinel{};
+  sentinel.fill(std::byte{0x5a});
+  int32_t type = -1;
+  bool ok = aegp_get_effect_param_union_by_index_v3(
+                1, &g_aegp_effect, 0, &type, value.data()) == 0 &&
+            type == 0 &&
+            std::all_of(value.begin(), value.end(),
+                        [](std::byte byte) { return byte == std::byte{0}; });
+  value = sentinel;
+  type = -1;
+  ok = ok && aegp_get_effect_param_union_by_index_v3(
+                 1, &g_aegp_effect, 1, &type, value.data()) == 0 &&
+       type == 1;
+  for (const int32_t index : {-1, 5}) {
+    value = sentinel;
+    type = 0x12345678;
+    ok = ok && aegp_get_effect_param_union_by_index_v3(
+                   1, &g_aegp_effect, index, &type, value.data()) == 4 &&
+         type == 0x12345678 && value == sentinel;
+  }
+  value = sentinel;
+  type = 0x12345678;
+  ok = ok && aegp_get_effect_param_union_by_index_v3(
+                 1, &g_aegp_effect, 0, nullptr, value.data()) == 4 &&
+       value == sentinel &&
+       aegp_get_effect_param_union_by_index_v3(
+           1, &g_aegp_effect, 0, &type, nullptr) == 4 &&
+       type == 0x12345678;
+  g_aegp_effect_live = false;
+  ok = ok && aegp_get_effect_param_union_by_index_v3(
+                 1, &g_aegp_effect, 0, &type, value.data()) == 4;
+  g_aegp_effect_live = saved_live;
+  return ok;
+}
+
+bool verify_aegp_installed_effect_catalog_suite4() {
+  const bool saved_comp_idle_mode = g_aegp_comp_idle_roundtrip_mode;
+  g_aegp_comp_idle_roundtrip_mode = true;
+  const void* acquired = nullptr;
+  bool ok = acquire_suite("AEGP Effect Suite", 4, &acquired) == 0 &&
+            acquired == g_aegp_effect_suite4.data();
+  int32_t count = -1;
+  ok = ok && aegp_get_num_installed_effects(&count) == 0 &&
+       count == static_cast<int32_t>(kAegpInstalledEffects.size());
+  count = 0x12345678;
+  ok = ok && aegp_get_num_installed_effects(nullptr) == 4 && count == 0x12345678;
+
+  int32_t key = -1;
+  ok = ok && aegp_get_next_installed_effect(kAegpInstalledEffectKeyNone, &key) == 0 &&
+       key == kAegpInstalledEffects[0].key;
+  const int32_t installed_key = key;
+  for (std::size_t index = 1; index < kAegpInstalledEffects.size(); ++index)
+    ok = ok && aegp_get_next_installed_effect(key, &key) == 0 &&
+         key == kAegpInstalledEffects[index].key;
+  ok = ok && aegp_get_next_installed_effect(key, &key) == 0 &&
+       key == kAegpInstalledEffectKeyNone;
+  key = 0x12345678;
+  ok = ok && aegp_get_next_installed_effect(9999, &key) == 4 &&
+       key == 0x12345678 &&
+       aegp_get_next_installed_effect(kAegpInstalledEffectKeyNone, nullptr) == 4;
+
+  std::array<char, kAegpMaxEffectCategoryNameSize> name{};
+  std::array<char, kAegpMaxEffectCategoryNameSize> match_name{};
+  std::array<char, kAegpMaxEffectCategoryNameSize> category{};
+  ok = ok && aegp_get_effect_name(installed_key, name.data()) == 0 &&
+       std::strcmp(name.data(), kAegpInstalledEffects[0].name) == 0 &&
+       aegp_get_effect_match_name(installed_key, match_name.data()) == 0 &&
+       std::strcmp(match_name.data(), kAegpInstalledEffects[0].match_name) == 0 &&
+       aegp_get_effect_category(installed_key, category.data()) == 0 &&
+       std::strcmp(category.data(), kAegpInstalledEffects[0].category) == 0 &&
+       category[std::strlen(kAegpInstalledEffects[0].category)] == '\0';
+  category.fill('Z');
+  ok = ok && aegp_get_effect_category(9999, category.data()) == 4 &&
+       std::all_of(category.begin(), category.end(), [](char value) { return value == 'Z'; }) &&
+       aegp_get_effect_category(installed_key, nullptr) == 4;
+  g_aegp_comp_idle_roundtrip_mode = saved_comp_idle_mode;
+  return ok;
 }
 }  // namespace aexcompat::l2_detail
