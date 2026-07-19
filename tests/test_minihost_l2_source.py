@@ -81,6 +81,11 @@ def l2_family_source():
 
 
 class MinihostL2SourceTests(unittest.TestCase):
+    def test_smart_report_emits_each_geometry_key_once(self):
+        report = RENDER_REPORT_SOURCE.read_text(encoding="utf-8")
+        self.assertEqual(report.count(r'\"result_rect\":'), 1)
+        self.assertEqual(report.count(r'\"max_result_rect\":'), 1)
+
     def test_parameter_selftest_routes_are_a_true_translation_unit(self):
         worker = SOURCE.read_text(encoding="utf-8")
         routing = PARAMETER_SELFTEST_ROUTING_SOURCE.read_text(encoding="utf-8")
