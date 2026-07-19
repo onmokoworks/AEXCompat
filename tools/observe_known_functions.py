@@ -266,7 +266,7 @@ def run_observation(
     except ImportError as exc:  # pragma: no cover - runtime-only path
         raise ObservationError(
             "frida is required for live observation; install it in the observation "
-            "environment (it is intentionally not in requirements-dev.txt)"
+            "environment (it is intentionally not in the uv-managed dev dependencies)"
         ) from exc
 
     collector = MessageCollector(
