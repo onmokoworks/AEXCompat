@@ -14,6 +14,10 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
+# Repo の dev 依存 (Pillow / OpenEXR) は uv 管理の .venv にあるため、Python
+# ツールは uv run 経由で起動する (CWD に依存しないよう --project で固定)。
+$uvProject = Split-Path -Parent $PSScriptRoot
+
 function Sha256([string]$Path) {
     (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
 }
@@ -27,7 +31,7 @@ function ConvertPngToRaw([string]$PngPath) {
     # recorded host raw can be verified as the conversion of the recorded PNG.
     $scratch = Join-Path ([System.IO.Path]::GetTempPath()) ("aexcompat-refresh-" + [guid]::NewGuid().ToString('N') + '.rgba')
     try {
-        $report = & python (Join-Path $PSScriptRoot 'png-to-rgba-raw.py') --png $PngPath --out $scratch | ConvertFrom-Json
+        $report = & uv run --project $uvProject python (Join-Path $PSScriptRoot 'png-to-rgba-raw.py') --png $PngPath --out $scratch | ConvertFrom-Json
         if ($LASTEXITCODE -ne 0 -or -not $report) {
             throw "png-to-rgba-raw.py failed for $PngPath"
         }
@@ -42,7 +46,7 @@ function DecodedRgbaSha256([string]$PngPath) {
     # identity is the decoded RGBA hash from ae_png_depth_inspect.
     $scratch = Join-Path ([System.IO.Path]::GetTempPath()) ("aexcompat-refresh-" + [guid]::NewGuid().ToString('N') + '.json')
     try {
-        & python (Join-Path $PSScriptRoot 'ae_png_depth_inspect.py') --png $PngPath --out $scratch | Out-Null
+        & uv run --project $uvProject python (Join-Path $PSScriptRoot 'ae_png_depth_inspect.py') --png $PngPath --out $scratch | Out-Null
         if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $scratch)) {
             throw "ae_png_depth_inspect.py failed for $PngPath"
         }

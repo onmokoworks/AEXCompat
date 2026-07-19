@@ -24,6 +24,10 @@ param(
 . (Join-Path $PSScriptRoot 'sha256.ps1')
 
 $ErrorActionPreference = 'Stop'
+
+# Repo の dev 依存 (Pillow / OpenEXR) は uv 管理の .venv にあるため、Python
+# ツールは uv run 経由で起動する (CWD に依存しないよう --project で固定)。
+$uvProject = Split-Path -Parent $PSScriptRoot
 $probePath = (Resolve-Path -LiteralPath $ProbeAex).Path
 $probeHash = Get-Sha256Hex $probePath
 $afterEffectsPath = (Resolve-Path -LiteralPath $AfterEffects).Path
@@ -53,7 +57,7 @@ function Invoke-OracleComparison {
     if (Test-Path -LiteralPath $reportPath) {
         throw "Refusing to overwrite comparison report: $reportPath"
     }
-    & python (Join-Path $PSScriptRoot 'compare-pixel-oracles.py') `
+    & uv run --project $uvProject python (Join-Path $PSScriptRoot 'compare-pixel-oracles.py') `
         --raw $rawPath --render ([System.IO.Path]::GetFullPath($Render)) `
         --width $Width --height $Height --raw-format $RawFormat `
         --tolerance $Tolerance --out $reportPath

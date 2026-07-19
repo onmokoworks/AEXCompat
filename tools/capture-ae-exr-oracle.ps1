@@ -17,6 +17,10 @@ param(
 . (Join-Path $PSScriptRoot 'sha256.ps1')
 
 $ErrorActionPreference = 'Stop'
+
+# Repo の dev 依存 (Pillow / OpenEXR) は uv 管理の .venv にあるため、Python
+# ツールは uv run 経由で起動する (CWD に依存しないよう --project で固定)。
+$uvProject = Split-Path -Parent $PSScriptRoot
 if ($Width -le 0 -or $Height -le 0) { throw 'Width and Height must be positive.' }
 
 $afterEffectsPath = (Resolve-Path -LiteralPath $AfterEffects).Path
@@ -81,7 +85,7 @@ if ($process.ExitCode -ne 0 -or -not (Test-Path -LiteralPath $exr -PathType Leaf
     throw "aerender failed to produce the EXR (exit code $($process.ExitCode))."
 }
 
-& python (Join-Path $PSScriptRoot 'compare-pixel-oracles.py') `
+& uv run --project $uvProject python (Join-Path $PSScriptRoot 'compare-pixel-oracles.py') `
     --raw $rawPath --render $exr --width $Width --height $Height `
     --raw-format rgba32f-le --tolerance $Tolerance --out $comparison
 $comparisonExit = $LASTEXITCODE

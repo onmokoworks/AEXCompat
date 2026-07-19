@@ -14,6 +14,10 @@ param(
 # paths or raw image contents.
 
 $ErrorActionPreference = 'Stop'
+
+# Repo の dev 依存 (Pillow / OpenEXR) は uv 管理の .venv にあるため、Python
+# ツールは uv run 経由で起動する (CWD に依存しないよう --project で固定)。
+$uvProject = Split-Path -Parent $PSScriptRoot
 . (Join-Path $PSScriptRoot 'windows-file-identity.ps1')
 
 function Sha256([string]$Path) {
@@ -29,7 +33,7 @@ function DecodedRgbaSha256([string]$PngPath) {
     # identity is the decoded RGBA hash from ae_png_depth_inspect.
     $scratch = Join-Path ([System.IO.Path]::GetTempPath()) ("aexcompat-refresh-" + [guid]::NewGuid().ToString('N') + '.json')
     try {
-        & python (Join-Path $PSScriptRoot 'ae_png_depth_inspect.py') --png $PngPath --out $scratch | Out-Null
+        & uv run --project $uvProject python (Join-Path $PSScriptRoot 'ae_png_depth_inspect.py') --png $PngPath --out $scratch | Out-Null
         if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $scratch)) {
             throw "ae_png_depth_inspect.py failed for $PngPath"
         }
@@ -147,7 +151,7 @@ $caseRecords = foreach ($case in $cases) {
     $comparisonScratch = Join-Path ([System.IO.Path]::GetTempPath()) `
         ("aexcompat-deep16-compare-" + [guid]::NewGuid().ToString('N') + '.json')
     try {
-        & python (Join-Path $PSScriptRoot 'compare-pixel-oracles.py') `
+        & uv run --project $uvProject python (Join-Path $PSScriptRoot 'compare-pixel-oracles.py') `
             --raw $hostRaw --render $aePng --width $case.width --height $case.height `
             --raw-format rgba16le --raw-integer-max 32768 --tolerance 0.000125 `
             --out $comparisonScratch | Out-Null
@@ -259,7 +263,7 @@ if ($noeffectCapture.status -ne 'captured' -or [bool]$noeffectCapture.effect_app
 $mechanismScratch = Join-Path ([System.IO.Path]::GetTempPath()) `
     ("aexcompat-deep16-mechanism-" + [guid]::NewGuid().ToString('N') + '.json')
 try {
-    & python (Join-Path $PSScriptRoot 'verify-deep16-mechanism.py') `
+    & uv run --project $uvProject python (Join-Path $PSScriptRoot 'verify-deep16-mechanism.py') `
         --input-png $gradientInput --smart-input-dump $gradientDump `
         --noeffect-png $noeffectPng --out $mechanismScratch | Out-Null
     if ($LASTEXITCODE -ne 0) { throw 'deep16 mechanism verification failed' }
