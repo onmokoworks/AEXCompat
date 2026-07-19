@@ -20494,12 +20494,15 @@ SmartResult smart_render_once(EffectEntry entry, std::array<std::byte, kInSize>&
   if (result.empty_result_rect && result.pre_error == 0) {
     // A legally empty result_rect renders nothing; the selector is skipped.
     result.render_error = 0;
-  } else if (result.pre_error == 0 && cuda_transport_ready) {
+  } else if (result.pre_error == 0 && cuda_transport_ready && result.rects_valid) {
     if (gpu_negotiation) capture_module_audit();
     result.selector_error = entry(render_selector, input.data(), command_output.data(),
                                   params.data(), nullptr, smart_extra.data());
     result.render_error = result.selector_error;
   } else {
+    // Invalid geometry (rects_valid false with a successful pre-render) lands
+    // here too: dispatching into the stale full-frame output world would turn
+    // the rejected rects into a silent render, so the run fails explicitly.
     result.render_error = result.pre_error == 0 ? -6 : -1;
   }
   if (result.gpu_render_dispatched && (use_cuda || use_opencl || use_directx) &&
@@ -20594,6 +20597,9 @@ SmartResult smart_render_once(EffectEntry entry, std::array<std::byte, kInSize>&
   if (result.render_error == 0 && !result.output_pixels_valid) result.render_error = -6;
   std::memcpy(result.output_extent_hint.data(), output_world.data() + 44,
               sizeof(result.output_extent_hint));
+  // The empty answer never resized or dispatched the output world; reporting
+  // the stale full-frame extent would claim pixels that were never promised.
+  if (result.empty_result_rect) result.output_extent_hint = {0, 0, 0, 0};
   if (external_output && result.render_error == 0) {
     std::vector<unsigned char> rgba(static_cast<std::size_t>(result.output_width) *
                                     result.output_height * pixel_bytes);

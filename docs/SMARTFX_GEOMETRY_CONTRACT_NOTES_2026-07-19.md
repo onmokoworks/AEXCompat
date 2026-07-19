@@ -222,3 +222,24 @@ world は promote されないのに、view が抑止されて交差契約が失
 - 未実施 (PR3 送り): output world sizing の result_rect 基準への変更は
   probe/oracle 証拠が出るまで保留 (max_result_rect 基準を維持)。probe で
   AE 実挙動を観測してから確定する。
+
+## 2026-07-19 訂正: dispatch gate と empty extent (PR #86 Codex P2 ×2)
+
+観察 (Codex review findings):
+1. 空 result の report が output world の full-frame extent_hint をそのまま
+   出しており、約束していない領域を主張していた。また broker の conformance
+   経路 (`conformance.rs` normalize_success) は width==0 を `invalid_output`
+   に分類するため、worker 側で合法化した空 result が bundle 側では不正扱いの
+   まま。
+2. pre-render 成功 + rects_valid=false (例: ±2^24 超の座標) でも render
+   selector が stale な full-frame output world に dispatch されていた
+   (従来からの挙動だが、検証強化後は明示 fail にすべき)。
+
+訂正:
+1. 空 result の `output_extent_hint` は `{0,0,0,0}` を報告する。conformance
+   bundle 側の空 result 分類は schema (`classification` enum / world 非 null
+   要求)・validator・進行中の issue #4 系列に跨る契約変更のため本 PR の
+   scope 外とし、issue #88 として起票。
+2. dispatch 条件に `result.rects_valid` を追加。invalid geometry は selector
+   を dispatch せず `render_error=-6` で明示的に失敗する (空 result の合法
+   スキップは別分岐で維持)。

@@ -21,6 +21,10 @@ def test_l2_source_validates_extra_pixels_and_geometry_rects() -> None:
         # dispatching into a zero-sized world or failing the run.
         "result.empty_result_rect = result.rects_valid && empty_checkout_rect(result_rect);",
         "if (result.empty_result_rect && result.pre_error == 0) {",
+        # Invalid geometry never reaches the render selector; the run fails
+        # explicitly instead of rendering into the stale full-frame world.
+        "result.pre_error == 0 && cuda_transport_ready && result.rects_valid",
+        "if (result.empty_result_rect) result.output_extent_hint = {0, 0, 0, 0};",
         # Rect validation is a named, self-testable function with an absolute
         # coordinate bound, not an inline lambda.
         "bool smart_geometry_rect_valid(const std::array<int32_t, 4>& rect)",
