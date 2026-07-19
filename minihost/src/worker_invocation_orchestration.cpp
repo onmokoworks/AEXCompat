@@ -2,6 +2,7 @@
 
 #include "worker_classic_runtime.hpp"
 #include "worker_handle_runtime.hpp"
+#include "worker_mask_runtime.hpp"
 #include "worker_mask_selftests.hpp"
 
 #include <array>
@@ -231,7 +232,6 @@ constexpr int32_t kSequenceFlatten = 7;
 constexpr int32_t kSequenceSetdown = 8;
 constexpr int32_t kGetFlattenedSequenceData = 28;
 
-extern bool g_mask_model_enabled;
 bool configure_mask_scene(const std::string& scene_id);
 int32_t invoke_sequence_selector(EffectEntry entry, int32_t selector, void* input,
                                  void* output, uint32_t* exception_code = nullptr);
@@ -338,7 +338,7 @@ ClassicFinalDispatchResult run_classic_final_dispatch(const FinalDispatchRequest
   std::cerr << "stage:render_begin\n" << std::flush;
   render_error = !image_render_supported ? -7 : (depth_supported ? -1 : -6);
   if (params_error == 0 && image_render_supported && depth_supported && copied_flattened_sequence) {
-    g_mask_model_enabled = true;
+    aexcompat::mask_runtime::set_model_enabled(true);
     configure_mask_scene("rectangle");
     std::cerr << "stage:sequence_setup_begin\n" << std::flush;
     persistent_sequence_setup_error = invoke_sequence_selector(
@@ -381,7 +381,7 @@ ClassicFinalDispatchResult run_classic_final_dispatch(const FinalDispatchRequest
         flattened_handle_host_disposed && persistent_frame_errors[0] == 0 &&
         persistent_sequence_setdown_error == 0 ? 0 : -1;
   } else if (params_error == 0 && image_render_supported && depth_supported && flattened_sequence) {
-    g_mask_model_enabled = true;
+    aexcompat::mask_runtime::set_model_enabled(true);
     configure_mask_scene("rectangle");
     std::cerr << "stage:sequence_setup_begin\n" << std::flush;
     persistent_sequence_setup_error = invoke_sequence_selector(
