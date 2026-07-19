@@ -4785,9 +4785,15 @@ fn render_with_artifact(
         "exclusive_access_depth": worker_report.get("gpu_exclusive_access_depth"),
         "invalid_operations": worker_report.get("invalid_gpu_memory_operations"),
     });
-    let output_raw = preserved_output
-        .as_ref()
-        .map(|path| path.to_string_lossy().into_owned());
+    // The empty branch never writes the preserved raw sidecar, so pointing
+    // the report at that path would name a file that does not exist.
+    let output_raw = if empty_smart_result {
+        None
+    } else {
+        preserved_output
+            .as_ref()
+            .map(|path| path.to_string_lossy().into_owned())
+    };
     let mut report = json!({
         "schema_version": 1, "stage": "interactive_image_render", "plugin_id": plugin_id,
         "render_path": if smart { "smartfx" } else { "classic" },
