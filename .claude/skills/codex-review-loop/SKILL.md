@@ -107,7 +107,10 @@ merge 側 (`codex-merge-guard.sh` が head 拘束 clean なしに merge を拒�
   1. Codex の状態に関係なく、まず owner の指摘に対応する
   2. 各指摘の妥当性を判断し (owner 指摘も盲従はしないが、Codex より重い)、
      妥当なら対応・commit・push、inline コメントには返信
-  3. owner の指摘へ返信して対応済みを明示し、手順 1 に戻る (再トリガー)
+  3. owner の指摘へ返信して対応済みを明示し、手順 1 に戻る (再トリガー)。
+     inline 指摘はスレッドへの返信が解決シグナル。top-level コメント・bodied
+     review への対応完了は、本文に **`[ack]` マーカーを含む** top-level
+     コメントで明示する (マーカーなしのステータス報告は解決として扱われない)
   4. **owner の要求が未解決の間は merge しない** (CHANGES_REQUESTED は特に)
 - **TIMEOUT**: 1時間 verdict が来なかった。Codex 不調を疑い PR を直接確認し、
   必要なら `@codex review` を再トリガーして監視を張り直す。
@@ -130,8 +133,9 @@ merge 側 (`codex-merge-guard.sh` が head 拘束 clean なしに merge を拒�
   フィードバックを解決しない。inline はスレッド単位で「owner の最後の発言より
   後にセッションの返信があるか」で判定 (owner が ack 後に再返信すれば再 block)。
   bodied COMMENTED review と top-level コメントは返信スレッドを持たないため、
-  「セッションのより新しい非トリガー top-level ack コメント」で解決する (ループ
-  開始前から存在する未対応 owner コメントも fail-closed に block する)。いずれも
+  「セッションのより新しい **`[ack]` マーカー付き** top-level コメント」で解決
+  する (マーカーなしのステータス報告は ack にならない。ループ開始前から存在する
+  未対応 owner コメントも fail-closed に block する)。いずれも
   作者自身の後続 approve/dismiss でも clear される (per-reviewer)。self-block
   回避は **authorship** で狭く行う: セッション自身の認証 login (`gh api user`) の
   inline 返信と top-level コメント (ack チャネル) だけを blocker から除外し、

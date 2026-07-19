@@ -396,14 +396,14 @@ def test_preexisting_owner_comment_with_no_ack_blocks() -> None:
 
 def test_owner_comment_before_session_ack_is_resolved() -> None:
     payload = [_toplevel("onmokoworks", "2026-07-18T10:00:00Z", "note"),
-               _toplevel(ME, "2026-07-18T11:00:00Z", "addressed in abc123", id=78)]
+               _toplevel(ME, "2026-07-18T11:00:00Z", "[ack] addressed in abc123", id=78)]
     assert _call("owner_comments_unresolved", payload, ME, NO_CLEAR) == ""
 
 
 def test_owner_comment_in_same_second_as_ack_blocks() -> None:
     # Second-resolution race: the ack may not have seen a same-second comment.
     payload = [_toplevel("onmokoworks", "2026-07-18T11:00:00Z", "hold the merge"),
-               _toplevel(ME, "2026-07-18T11:00:00Z", "addressed", id=78)]
+               _toplevel(ME, "2026-07-18T11:00:00Z", "[ack] addressed", id=78)]
     assert "OWNER-COMMENT" in _call("owner_comments_unresolved", payload, ME, NO_CLEAR)
 
 
@@ -411,6 +411,14 @@ def test_session_trigger_is_not_an_ack() -> None:
     # A bare "@codex review" by the session must not resolve owner comments.
     payload = [_toplevel("onmokoworks", "2026-07-18T10:00:00Z", "unaddressed"),
                _toplevel(ME, "2026-07-18T11:00:00Z", "@codex review", id=78)]
+    assert "OWNER-COMMENT" in _call("owner_comments_unresolved", payload, ME, NO_CLEAR)
+
+
+def test_session_status_comment_is_not_an_ack() -> None:
+    # An ordinary status comment by the session ("確認します") must not resolve
+    # owner feedback — only a comment carrying the explicit [ack] marker does.
+    payload = [_toplevel("onmokoworks", "2026-07-18T10:00:00Z", "not mergeable yet"),
+               _toplevel(ME, "2026-07-18T11:00:00Z", "確認します", id=78)]
     assert "OWNER-COMMENT" in _call("owner_comments_unresolved", payload, ME, NO_CLEAR)
 
 
@@ -426,14 +434,16 @@ def test_owner_comment_cleared_by_later_approval() -> None:
     assert _call("owner_comments_unresolved", payload, ME, clr) == ""
 
 
-def test_me_ack_ts_ignores_triggers() -> None:
-    payload = [_toplevel(ME, "2026-07-18T11:00:00Z", "addressed"),
-               _toplevel(ME, "2026-07-18T12:00:00Z", "@codex review", id=78)]
+def test_me_ack_ts_requires_the_marker() -> None:
+    payload = [_toplevel(ME, "2026-07-18T11:00:00Z", "[ACK] 対応完了"),
+               _toplevel(ME, "2026-07-18T12:00:00Z", "@codex review", id=78),
+               _toplevel(ME, "2026-07-18T13:00:00Z", "status: still working", id=79)]
     assert _call("me_ack_ts", payload, ME) == "2026-07-18T11:00:00Z"
 
 
 def test_me_ack_ts_empty_without_acks() -> None:
-    payload = [_toplevel(ME, "2026-07-18T12:00:00Z", "@codex review")]
+    payload = [_toplevel(ME, "2026-07-18T12:00:00Z", "@codex review"),
+               _toplevel(ME, "2026-07-18T13:00:00Z", "確認します", id=78)]
     assert _call("me_ack_ts", payload, ME) == ""
 
 

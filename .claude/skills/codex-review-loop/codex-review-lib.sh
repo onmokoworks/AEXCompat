@@ -184,7 +184,8 @@ owner_clearances() {
 #     message (the loop's "対応済み" reply), or the author later
 #     approved/dismissed;
 #   - bodied COMMENTED reviews / top-level comments (no reply threading): a
-#     later non-trigger top-level ack comment by $me, or the author's later
+#     later top-level comment by $me containing the explicit "[ack]" marker
+#     (an ordinary status comment is NOT an ack), or the author's later
 #     approval/dismissal. $me's own top-level comments are the ack channel and
 #     do not themselves block; $me hard-blocks via a review or a non-reply
 #     inline comment, which DO block even from $me.
@@ -210,21 +211,25 @@ owner_inline_unresolved() {
     | "OWNER-INLINE id=\(.id) \(.path):\(.line // .original_line): \((.body | split("\n")[0]))"'
 }
 
-# Timestamp of $me's newest non-trigger top-level ack comment, or "" (input:
-# issue-comments array). Bare "@codex review" triggers are not acks.
+# Timestamp of $me's newest EXPLICIT ack comment, or "" (input: issue-comments
+# array). An ack is a top-level comment by $me containing the literal marker
+# "[ack]" (case-insensitive). Requiring the marker keeps ordinary status
+# comments ("確認します", progress notes) from silently resolving owner
+# feedback — only a comment that deliberately declares itself an ack counts.
 me_ack_ts() {
   jq -r --arg me "$1" '
     [ .[] | select(.user.login == $me)
-      | select((.body | ascii_downcase | gsub("[[:space:]]"; "")) != "@codexreview")
+      | select(.body | ascii_downcase | contains("[ack]"))
       | .created_at ]
     | if length > 0 then max else "" end'
 }
 
 # Owner bodied non-inline REVIEWS with no later resolution (input: reviews
-# array). Args: $1 = clearances JSON; $2 = $me ack timestamp (me_ack_ts).
+# array). Args: $1 = clearances JSON; $2 = $me ack timestamp (me_ack_ts — an
+# explicit "[ack]" comment only, never an ordinary status comment).
 # owner_review_gate already handles CHANGES_REQUESTED; this covers the bodied
 # COMMENTED review it misses. Reviews have no reply threading, so resolution is
-# a later ack comment (>= blocks a same-second race, fail-closed) or the
+# a later explicit ack (>= blocks a same-second race, fail-closed) or the
 # reviewer's later approval/dismissal. Bodyless COMMENTED reviews (this
 # session's inline-thread replies) are excluded.
 owner_reviews_unresolved() {
@@ -240,14 +245,18 @@ owner_reviews_unresolved() {
 # array). Args: $1 = this session's login; $2 = clearances JSON. Excludes bare
 # "@codex review" triggers (real feedback containing the phrase is kept) and
 # $me's own comments (the ack channel). Blocks a non-$me owner comment with no
-# later $me ack (>= blocks a same-second race, fail-closed) and no later
-# approval/dismissal by its author — including comments that predate this loop
-# invocation entirely: a pre-existing unaddressed owner comment must fail
-# closed, not be superseded by a fresh Codex clean.
+# later EXPLICIT "[ack]" comment by $me (>= blocks a same-second race,
+# fail-closed; an ordinary status comment by $me is NOT an ack — only the
+# marker counts) and no later approval/dismissal by its author — including
+# comments that predate this loop invocation entirely: a pre-existing
+# unaddressed owner comment must fail closed, not be superseded by a fresh
+# Codex clean.
 owner_comments_unresolved() {
   jq -r --arg me "$1" --argjson clr "$2" --argjson owner "$OWNER_LOGINS" '
     def nontrigger: select((.body | ascii_downcase | gsub("[[:space:]]"; "")) != "@codexreview");
-    ( [ .[] | nontrigger | select(.user.login == $me) | .created_at ] | max // "" ) as $ack
+    ( [ .[] | select(.user.login == $me)
+        | select(.body | ascii_downcase | contains("[ack]"))
+        | .created_at ] | max // "" ) as $ack
     | .[] | nontrigger
     | select([.user.login] | inside($owner))
     | select(.user.login != $me)
