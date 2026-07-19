@@ -12,6 +12,7 @@ ABI = ROOT / "minihost" / "src" / "worker_suite_abi.hpp"
 REGISTRY = ROOT / "minihost" / "src" / "worker_aegp_render_options.cpp"
 STAGED_RUNTIME = ROOT / "minihost" / "src" / "worker_aegp_staged_item_runtime.cpp"
 RENDER_SELFTESTS = ROOT / "minihost" / "src" / "worker_aegp_render_selftests.cpp"
+ITEM_RUNTIME = ROOT / "minihost" / "src" / "worker_aegp_item_render_runtime.cpp"
 
 
 def _worker() -> pathlib.Path | None:
@@ -56,6 +57,7 @@ def test_render_options_suite1_has_exact_typed_17_slot_abi():
 def test_registry_is_bounded_aba_resistant_and_receipts_snapshot_options():
     text = (SOURCE.read_text(encoding="utf-8") +
             STAGED_RUNTIME.read_text(encoding="utf-8") +
+            ITEM_RUNTIME.read_text(encoding="utf-8") +
             RENDER_SELFTESTS.read_text(encoding="utf-8"))
     registry = REGISTRY.read_text(encoding="utf-8")
     for marker in (
@@ -63,7 +65,7 @@ def test_registry_is_bounded_aba_resistant_and_receipts_snapshot_options():
         "snapshot.matte == 2",
         "kSyntheticCompWidth + options->downsample_x - 1",
         "kSyntheticCompHeight + options->downsample_y - 1",
-        "synthetic_item_pixel",
+        "synthetic_pixel",
         "x * options.downsample_x",
         "source_x >= source_roi.left",
         "converted[channel] = static_cast<uint16_t>(pixel[channel]) * 257u",
@@ -82,12 +84,16 @@ def test_registry_is_bounded_aba_resistant_and_receipts_snapshot_options():
 
 def test_item_async_and_render_suite_slot_zero_publish_ready_receipts():
     text = SOURCE.read_text(encoding="utf-8")
-    assert "return publish_item_receipt(options, receipt);" in text
-    assert "return publish_item_receipt(options, out);" in text
+    runtime = ITEM_RUNTIME.read_text(encoding="utf-8")
+    assert "aegp_item_render_runtime::publish_receipt(options, receipt)" in text
+    assert "aegp_item_render_runtime::checkout(" in text
+    assert "return g_hooks.publish_staged(options, out);" in runtime
+    assert "g_hooks.publish_cached(snapshot, out, &cache_hit)" in runtime
     assert "render_checkout_frame_reject" in text
     assert "render_checkout_layer_reject" in text
     assert "checkin_frame" in text
     assert "get_receipt_world" in text
+    assert "std::array<uint8_t, 4> synthetic_pixel" not in text
 
 
 def test_render_options_runtime_matrix(tmp_path):

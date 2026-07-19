@@ -27,7 +27,7 @@ def test_async_and_render_suites_have_typed_frozen_abi():
     assert "struct AegpRenderSuite4" in text
     assert "sizeof(AegpRenderSuite4) == 12 * sizeof(void*)" in text
     assert '{"AEGP Render Suite", 5, nullptr, &provide_render_suite5}' in text
-    assert "&checkin_frame, &get_receipt_world" in text
+    assert "&checkin_frame" in text and "&get_receipt_world" in text
     assert "g_render_async_manager_suite1.fill" not in text
 
 

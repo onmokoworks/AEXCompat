@@ -74,6 +74,8 @@ def test_source_wiring_matches_inventory():
 def test_render_options_and_async_receipt_claims_match_current_source():
     report = load_report()
     source = SOURCE.read_text(encoding="utf-8")
+    item_runtime = (ROOT / "minihost" / "src" /
+                    "worker_aegp_item_render_runtime.cpp").read_text(encoding="utf-8")
     ownership_source = source + (ROOT / "minihost" / "src" / "worker_render_receipts.cpp").read_text(
         encoding="utf-8"
     )
@@ -83,8 +85,8 @@ def test_render_options_and_async_receipt_claims_match_current_source():
     suite_abi = (ROOT / "minihost" / "src" / "worker_suite_abi.hpp").read_text(encoding="utf-8")
     assert report["suites"]["AEGP_RenderOptionsSuite1"]["status"] == "implemented_and_focused_runtime_tested"
     assert "static_assert(sizeof(AegpRenderOptionsSuite1) == 17 * sizeof(void*));" in suite_abi
-    assert "receipt->render_options = *options;" in source
-    assert "return publish_item_receipt(options, receipt);" in source
+    assert "receipt->render_options = *options;" in item_runtime
+    assert "aegp_item_render_runtime::publish_receipt(options, receipt)" in source
 
     async_state = report["suites"]["AEGP_WorldSuite3"]["async_receipt_integration"]
     assert async_state["status"] == "implemented_for_layer_argb8_argb16_argb32f_and_focused_runtime_tested"
@@ -97,9 +99,9 @@ def test_render_options_and_async_receipt_claims_match_current_source():
     assert "snapshot_layer_render_options(options, snapshot)" in checkout
     assert "snapshot.world_type == 1 ? kPixelFormatArgb32" in checkout
     assert "snapshot.world_type == 2 ? kPixelFormatArgb64 : kPixelFormatArgb128" in checkout
-    assert "return publish_async_receipt(pixel_format, receipt);" in checkout
+    assert "aegp_item_render_runtime::publish_synthetic(" in checkout
     assert '{"AEGP Render Suite", 5, nullptr, &provide_render_suite5}' in source
-    assert "&checkin_frame, &get_receipt_world" in source
+    assert "&checkin_frame" in source and "&get_receipt_world" in source
     assert "world_registry::unregister_borrowed_view(" in ownership_source
 
     assert report["suites"]["AEGP_WorldSuite3"]["slots"][1]["range"] == [2, 8]

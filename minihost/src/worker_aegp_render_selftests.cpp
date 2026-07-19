@@ -1,6 +1,7 @@
 #include "worker_aegp_render_selftests.hpp"
 #include "worker_aegp_render_options.hpp"
 #include "worker_aegp_staged_item_runtime.hpp"
+#include "worker_aegp_item_render_runtime.hpp"
 #include "worker_render_receipts.hpp"
 #include "worker_world_registry.hpp"
 #include <algorithm>
@@ -34,7 +35,6 @@ extern std::array<uint16_t, 4> g_render_options_argb16;
 extern std::array<float, 4> g_render_options_argb32f;
 bool render_options_lifetimes_balanced();
 bool async_receipt_lifetimes_balanced();
-void populate_synthetic_item_pixels(ReceiptDraft&, int32_t, int32_t, int32_t);
 void* aegp_comp_item_handle();
 int32_t __cdecl checkout_item_frame_async(void*, uint32_t, void*, void**);
 int32_t get_receipt_world(void*, void***);
@@ -42,7 +42,6 @@ int32_t checkin_frame(void*);
 int32_t __cdecl render_get_region_reject(void*, void*);
 using AegpRenderCancelV1 = int32_t(__cdecl*)(void*, uint8_t*);
 int32_t __cdecl render_checkout_frame_reject(void*, AegpRenderCancelV1, void*, void**);
-int32_t publish_item_receipt(void*, void**);
 void clear_staged_item_worlds_for_test();
 bool verify_item_render_cycle_contract(void*);
 
@@ -77,7 +76,8 @@ bool verify_aegp_render_options_suite1() {
         options.downsample_y;
     const int32_t pixel_bytes = type == 1 ? 4 : (type == 2 ? 8 : 16);
     probe.pixels.resize(static_cast<std::size_t>(width) * height * pixel_bytes);
-    populate_synthetic_item_pixels(probe, type, width, height);
+    aexcompat::aegp_item_render_runtime::populate_synthetic_pixels(
+        probe, type, width, height);
     std::memcpy(output, probe.pixels.data() +
         (static_cast<std::size_t>(sample_y) * width + sample_x) * pixel_bytes, pixel_bytes);
   };
@@ -249,7 +249,8 @@ bool verify_aegp_render_options_suite1() {
       int32_t local_type = 0;
       if (render_options_new_from_item(1, aegp_comp_item_handle(), &local) != 0 ||
           render_options_set_world_type(local, index + 1) != 0 ||
-          publish_item_receipt(local, &local_receipt) != 0 ||
+          aexcompat::aegp_item_render_runtime::publish_receipt(
+              local, &local_receipt) != 0 ||
           render_options_dispose(local) != 0 ||
           get_receipt_world(local_receipt, &local_world) != 0 ||
           aegp_world_get_type(local_world, &local_type) != 0 || local_type != index + 1 ||

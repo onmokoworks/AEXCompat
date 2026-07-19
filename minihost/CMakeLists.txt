@@ -55,6 +55,7 @@ set(AEXCOMPAT_WORKER_RUNTIME_CORE_SOURCES
       src/worker_aegp_staged_item_runtime.cpp
       src/worker_aegp_external_render_runtime.cpp
       src/worker_aegp_layer_render_runtime.cpp
+      src/worker_aegp_item_render_runtime.cpp
     src/worker_aegp_world_selftests.cpp
     src/worker_aegp_init_runtime.cpp
     src/worker_aegp_scene.cpp
