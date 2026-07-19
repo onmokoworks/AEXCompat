@@ -128,8 +128,10 @@ auto& g_aegp_effect = state().effect;
 #define free_aegp_mem_handle(...) scene_context()->hooks.free_mem_handle(__VA_ARGS__)
 
 bool& g_aegp_effect_live = scene_runtime_state().effect_live;
-auto& g_aegp_effect_instances = scene_runtime_state().effect_instances;
-auto& g_aegp_effect_leases = scene_runtime_state().effect_leases;
+std::array<AegpEffectInstance, kAegpEffectInstanceCapacity>& g_aegp_effect_instances =
+    scene_runtime_state().effect_instances;
+std::array<AegpEffectLease, kAegpEffectLeaseCapacity>& g_aegp_effect_leases =
+    scene_runtime_state().effect_leases;
 uint32_t& g_aegp_effect_lease_generation = scene_runtime_state().effect_lease_generation;
 
 void* effect_lease_handle(std::size_t slot, uint32_t generation) {
@@ -198,8 +200,9 @@ bool layer_effect_boundary_is_live(const AegpLayerRenderOptionsValue& options) {
 const AegpInstalledEffectRecord* find_installed_effect(int32_t key);
 const AegpEffectParameterRecord* find_effect_parameter(int32_t key, int32_t index);
 void initialize_effect_parameter_values(AegpEffectInstance& instance);
-auto& g_aegp_transform_stream = scene_runtime_state().transform_stream;
-auto& g_aegp_legacy_effect_streams = scene_runtime_state().legacy_effect_streams;
+AegpTransformStream& g_aegp_transform_stream = scene_runtime_state().transform_stream;
+std::array<AegpLegacyEffectStream, kAegpLegacyEffectStreamCapacity>&
+    g_aegp_legacy_effect_streams = scene_runtime_state().legacy_effect_streams;
 uint32_t& g_aegp_legacy_effect_stream_generation =
     scene_runtime_state().legacy_effect_stream_generation;
 

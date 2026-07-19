@@ -167,15 +167,10 @@ extern const std::array<AegpEffectParameterRecord, 5> kAegpProbeParameters;
 extern const std::array<AegpEffectParameterRecord, 7> kAegpLevelsParameters;
 extern const std::array<AegpInstalledEffectRecord, 3> kAegpInstalledEffects;
 
-// Staging boundary for the AEGP scene runtime.  It intentionally owns no
-// scene state yet: the first extraction step records the complete dependency
-// set before callbacks are moved out of l2_main.cpp.
-//
-// The following groups move together in the next steps because their lifetime
-// checks are coupled: effect instance/lease state, legacy Stream Suite v2
-// wrappers, installed-effect catalog metadata, suite tables, and native
-// scene verifiers.  Splitting an individual group would reintroduce stale
-// handles or duplicate render-options ownership.
+// Host services retained by the independently compiled AEGP scene runtime.
+// Mutable scene state and suite tables are owned by SceneRuntimeState and the
+// scene translation unit; the host supplies only lifecycle checks and stable
+// object identities through this context.
 struct SceneRuntimeHostHooks {
   bool (__cdecl *suite_lease_balanced)(){};
 };

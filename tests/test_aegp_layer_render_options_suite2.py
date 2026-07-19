@@ -85,7 +85,7 @@ def test_sync_and_async_paths_share_the_same_pixel_publisher():
 def test_native_selftest_covers_boundary_hashes_cycle_async_and_ownership():
     text = SOURCE.read_text(encoding="utf-8")
     body = text[text.index("bool verify_aegp_layer_render_options_suite2()") :]
-    body = body[: body.index("int wmain(")]
+    body = body[: body.index("int worker_main_impl(")]
     for marker in (
         "upstream_hash != all_hash",
         "upstream_hash != downstream_hash",
