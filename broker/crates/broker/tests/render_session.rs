@@ -186,12 +186,14 @@ mod windows_e2e {
                 width: WIDTH,
                 height: HEIGHT,
                 rgba: vec![3u8; (WIDTH * HEIGHT * 4) as usize],
+                timed: None,
             },
             SessionLayer {
                 slot: 7,
                 width: WIDTH,
                 height: HEIGHT,
                 rgba: vec![7u8; (WIDTH * HEIGHT * 4) as usize],
+                timed: None,
             },
         ];
         let mut session = RenderSession::open(SessionOpenRequest {
@@ -226,6 +228,229 @@ mod windows_e2e {
     }
 
     #[test]
+    fn timed_layers_travel_the_session_trailer_into_their_slots() {
+        let _behavior = BehaviorGuard::set(None);
+        let (repository, plugin, sha) = temp_repository();
+        // Two timed entries share slot 5 at different rational times, plus a
+        // static secondary in slot 9. Each physical slot is filled with its
+        // slot number as a byte; the fixture validates the header's
+        // layer_slot_count and every slot's first byte, so the 5-field timed
+        // trailer form must reach the same slots the static form does.
+        let layers = vec![
+            SessionLayer {
+                slot: 5,
+                width: WIDTH,
+                height: HEIGHT,
+                rgba: vec![5u8; (WIDTH * HEIGHT * 4) as usize],
+                timed: Some((0, 30)),
+            },
+            SessionLayer {
+                slot: 5,
+                width: WIDTH,
+                height: HEIGHT,
+                rgba: vec![5u8; (WIDTH * HEIGHT * 4) as usize],
+                timed: Some((7, 30)),
+            },
+            SessionLayer {
+                slot: 9,
+                width: WIDTH,
+                height: HEIGHT,
+                rgba: vec![9u8; (WIDTH * HEIGHT * 4) as usize],
+                timed: None,
+            },
+        ];
+        let mut session = RenderSession::open(SessionOpenRequest {
+            repository: &repository.0,
+            plugin_path: &plugin,
+            plugin_sha256: &sha,
+            parameters: None,
+            parameter_animation: None,
+            aux_manifest: None,
+            world_dump_dir: None,
+            output_checksum_detail: false,
+            mask_trailer: None,
+            spatial_trailer: None,
+            render_environment_trailer: None,
+            layers: &layers,
+            dependencies: Vec::new(),
+            width: WIDTH,
+            height: HEIGHT,
+            pixel_format: RenderPixelFormat::Argb8,
+            time_step: 1,
+            total_time: 300,
+            time_scale: 30,
+            frame_deadline: Duration::from_secs(30),
+        })
+        .expect("open render session with timed layers");
+        let outcome = session
+            .render_frame(0, 0, &input_pattern(5))
+            .expect("frame renders with timed layers in their slots");
+        assert!(matches!(outcome.status, FrameStatus::Rendered { .. }));
+        let close = session.close();
+        assert_eq!(close["session_clean"], true, "close: {close}");
+    }
+
+    #[test]
+    fn open_rejects_two_timed_layers_at_the_same_slot_and_time() {
+        let _behavior = BehaviorGuard::set(None);
+        let (repository, plugin, sha) = temp_repository();
+        // Same slot, equal rational time (2/60 == 1/30): a per-frame collision
+        // the worker parser would reject, so open must fail fast the same way.
+        let layers = vec![
+            SessionLayer {
+                slot: 4,
+                width: WIDTH,
+                height: HEIGHT,
+                rgba: vec![4u8; (WIDTH * HEIGHT * 4) as usize],
+                timed: Some((1, 30)),
+            },
+            SessionLayer {
+                slot: 4,
+                width: WIDTH,
+                height: HEIGHT,
+                rgba: vec![4u8; (WIDTH * HEIGHT * 4) as usize],
+                timed: Some((2, 60)),
+            },
+        ];
+        let error = RenderSession::open(SessionOpenRequest {
+            repository: &repository.0,
+            plugin_path: &plugin,
+            plugin_sha256: &sha,
+            parameters: None,
+            parameter_animation: None,
+            aux_manifest: None,
+            world_dump_dir: None,
+            output_checksum_detail: false,
+            mask_trailer: None,
+            spatial_trailer: None,
+            render_environment_trailer: None,
+            layers: &layers,
+            dependencies: Vec::new(),
+            width: WIDTH,
+            height: HEIGHT,
+            pixel_format: RenderPixelFormat::Argb8,
+            time_step: 1,
+            total_time: 300,
+            time_scale: 30,
+            frame_deadline: Duration::from_secs(30),
+        })
+        .map(|_| ())
+        .expect_err("open must reject a same-slot same-time timed collision");
+        assert!(
+            error.to_string().contains("unique"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn open_admits_a_static_and_timed_layer_at_the_same_slot() {
+        let _behavior = BehaviorGuard::set(None);
+        let (repository, plugin, sha) = temp_repository();
+        // A static entry and a timed entry share slot 4: the valid one-shot
+        // representation of a layer parameter sampled at current_time (static)
+        // and at another time (timed). The session must admit exactly what the
+        // one-shot layered path admits, so open succeeds and both physical
+        // slots (indexed by position) carry the slot-4 byte the fixture checks.
+        let layers = vec![
+            SessionLayer {
+                slot: 4,
+                width: WIDTH,
+                height: HEIGHT,
+                rgba: vec![4u8; (WIDTH * HEIGHT * 4) as usize],
+                timed: None,
+            },
+            SessionLayer {
+                slot: 4,
+                width: WIDTH,
+                height: HEIGHT,
+                rgba: vec![4u8; (WIDTH * HEIGHT * 4) as usize],
+                timed: Some((7, 30)),
+            },
+        ];
+        let mut session = RenderSession::open(SessionOpenRequest {
+            repository: &repository.0,
+            plugin_path: &plugin,
+            plugin_sha256: &sha,
+            parameters: None,
+            parameter_animation: None,
+            aux_manifest: None,
+            world_dump_dir: None,
+            output_checksum_detail: false,
+            mask_trailer: None,
+            spatial_trailer: None,
+            render_environment_trailer: None,
+            layers: &layers,
+            dependencies: Vec::new(),
+            width: WIDTH,
+            height: HEIGHT,
+            pixel_format: RenderPixelFormat::Argb8,
+            time_step: 1,
+            total_time: 300,
+            time_scale: 30,
+            frame_deadline: Duration::from_secs(30),
+        })
+        .expect("open must admit a same-slot static and timed mix");
+        let outcome = session
+            .render_frame(0, 0, &input_pattern(4))
+            .expect("frame renders with the static+timed slot mix");
+        assert!(matches!(outcome.status, FrameStatus::Rendered { .. }));
+        let close = session.close();
+        assert_eq!(close["session_clean"], true, "close: {close}");
+    }
+
+    #[test]
+    fn open_rejects_two_static_layers_at_the_same_slot() {
+        let _behavior = BehaviorGuard::set(None);
+        let (repository, plugin, sha) = temp_repository();
+        // Two static entries at one slot are ambiguous per frame; open must
+        // fail closed, the same rule the one-shot parser applies.
+        let layers = vec![
+            SessionLayer {
+                slot: 4,
+                width: WIDTH,
+                height: HEIGHT,
+                rgba: vec![4u8; (WIDTH * HEIGHT * 4) as usize],
+                timed: None,
+            },
+            SessionLayer {
+                slot: 4,
+                width: WIDTH,
+                height: HEIGHT,
+                rgba: vec![4u8; (WIDTH * HEIGHT * 4) as usize],
+                timed: None,
+            },
+        ];
+        let error = RenderSession::open(SessionOpenRequest {
+            repository: &repository.0,
+            plugin_path: &plugin,
+            plugin_sha256: &sha,
+            parameters: None,
+            parameter_animation: None,
+            aux_manifest: None,
+            world_dump_dir: None,
+            output_checksum_detail: false,
+            mask_trailer: None,
+            spatial_trailer: None,
+            render_environment_trailer: None,
+            layers: &layers,
+            dependencies: Vec::new(),
+            width: WIDTH,
+            height: HEIGHT,
+            pixel_format: RenderPixelFormat::Argb8,
+            time_step: 1,
+            total_time: 300,
+            time_scale: 30,
+            frame_deadline: Duration::from_secs(30),
+        })
+        .map(|_| ())
+        .expect_err("open must reject two static layers at one slot");
+        assert!(
+            error.to_string().contains("unique"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
     fn open_rejects_layer_pixels_that_do_not_fit_the_slot() {
         let _behavior = BehaviorGuard::set(None);
         let (repository, plugin, sha) = temp_repository();
@@ -235,6 +460,7 @@ mod windows_e2e {
             height: HEIGHT,
             // One byte short of the declared geometry.
             rgba: vec![3u8; (WIDTH * HEIGHT * 4 - 1) as usize],
+            timed: None,
         }];
         let error = RenderSession::open(SessionOpenRequest {
             repository: &repository.0,
@@ -272,6 +498,7 @@ mod windows_e2e {
             width: WIDTH,
             height: HEIGHT,
             rgba: vec![0u8; (WIDTH * HEIGHT * 4) as usize],
+            timed: None,
         }];
         let error = RenderSession::open(SessionOpenRequest {
             repository: &repository.0,

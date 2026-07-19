@@ -4228,13 +4228,15 @@ fn render_with_artifact(
     });
     if !smart
         && session_representable_context
-        && timed_secondaries.is_empty()
         && audio.is_none()
         && custom_ui_action.is_none()
         && gpu_backend == RenderGpuBackend::Auto
         && payload == encode_interactive_payload(interactive_parameters.unwrap_or_default())?
         && std::env::var_os(DISABLE_SESSION_WRAPPER_ENV).is_none()
     {
+        // Static secondaries render on every frame; timed secondaries (issue
+        // #98 W1-4b) carry their rational admission time so the worker selects
+        // the matching entry per frame, the same as the one-shot transport.
         let session_layers = secondaries
             .iter()
             .map(|(slot, width, height, rgba)| crate::render_session::SessionLayer {
@@ -4242,7 +4244,17 @@ fn render_with_artifact(
                 width: *width,
                 height: *height,
                 rgba: rgba.clone(),
+                timed: None,
             })
+            .chain(timed_secondaries.iter().map(
+                |(slot, time, width, height, rgba)| crate::render_session::SessionLayer {
+                    slot: *slot,
+                    width: *width,
+                    height: *height,
+                    rgba: rgba.clone(),
+                    timed: Some((time.value, time.scale)),
+                },
+            ))
             .collect::<Vec<_>>();
         // A host context always sends the mask trailer (the one-shot path does
         // too, even for an empty mask scene), keeping the argv shapes identical.
@@ -5050,10 +5062,14 @@ fn render_classic_via_length_one_session(
         gpu_fallback_reason: None,
         gpu_attempt: None,
         // Same shape as the one-shot path so a layered session render reports
-        // its layers instead of falsely claiming none (issue #98 W1-4).
+        // its layers instead of falsely claiming none (issue #98 W1-4). The
+        // one-shot `secondary_layers` field lists only the static secondaries;
+        // timed layers (W1-4b) ride the same trailer but stay out of this field
+        // so both routes report the identical set.
         secondary_layers: json!(request
             .layers
             .iter()
+            .filter(|layer| layer.timed.is_none())
             .map(|layer| json!({
                 "slot": layer.slot,
                 "width": layer.width,
