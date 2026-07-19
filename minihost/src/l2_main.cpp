@@ -4277,6 +4277,10 @@ RenderSessionOutcome run_render_session(
   constexpr int32_t kSessionDimensionMismatch = -44;
   constexpr int32_t kSessionOutputValidationError = -45;
   constexpr int32_t kSessionTimeOutOfRange = -46;
+  // Deferred SEQUENCE_SETUP failed: the session can never render, so the
+  // response must read as continuation-impossible, not frame-local (the
+  // plug-in's own setup error is preserved in the final report).
+  constexpr int32_t kSessionSequenceSetupFailed = -47;
 
   RenderSessionOutcome outcome;
   const wrs::SessionGeometry geometry{max_width, max_height, pixel_bytes, 0};
@@ -4418,10 +4422,11 @@ RenderSessionOutcome run_render_session(
       outcome.setup_error = invoke_sequence_selector(entry, kSequenceSetup,
                                                      input.data(), output.data());
       if (outcome.setup_error != 0) {
-        // The session cannot render anything; report the frame as failed and
-        // stop accepting work (the one-shot equivalent is a failed render
-        // lifecycle surfacing through validation).
-        respond_error(outcome.setup_error);
+        // The session can never render; answer with the reserved
+        // continuation-impossible code so the broker invalidates instead of
+        // treating this as a reusable frame-local diagnostic. The plug-in's
+        // setup error itself reaches the final report.
+        respond_error(kSessionSequenceSetupFailed);
         break;
       }
       sequence_started = true;
