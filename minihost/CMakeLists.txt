@@ -92,6 +92,7 @@ set(AEXCOMPAT_WORKER_RUNTIME_CORE_SOURCES
     src/worker_classic_render_runtime.cpp
     src/worker_host_suite_wiring.cpp
     src/worker_l2_shared_helpers.cpp
+    src/worker_l2_payload_parsers.cpp
     src/worker_entry_bootstrap.cpp
     src/worker_effect_bootstrap.cpp
     src/worker_aegp_timeline_probe.cpp
