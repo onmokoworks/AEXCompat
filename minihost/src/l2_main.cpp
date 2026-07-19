@@ -6793,29 +6793,18 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
         if (g_aegp_switch_roundtrip_mode && !switch_probe.start()) event_error = 4;
         const int32_t command = g_aegp_inserted_commands.front();
         const auto dispatch_command = [&]() {
-          uint8_t already_handled = 0;
-          for (const auto& registration : g_aegp_command_registrations) {
-            if (registration.command != 0 && registration.command != command) continue;
-            uint8_t handled = 0;
-            const int32_t error = registration.hook(global_refcon, registration.refcon,
-                command, registration.priority, already_handled, &handled);
-            ++command_hooks_invoked;
-            if (error != 0 && event_error == 0) event_error = error;
-            if (handled > 1 && event_error == 0) event_error = 4;
-            if (handled) {
-              ++command_handled_count;
-              already_handled = 1;
-            }
-          }
-          if (!already_handled && event_error == 0) event_error = 4;
+          const auto event = aexcompat::worker_runtime::aegp_init::dispatch_command(
+              global_refcon, command, 0, 0);
+          command_hooks_invoked += event.invoked;
+          command_handled_count += event.handled_count;
+          if (event.error != 0 && event_error == 0) event_error = event.error;
         };
         dispatch_command();
         const auto dispatch_update_menu = [&]() {
-          for (const auto& registration : g_aegp_update_menu_registrations) {
-            const int32_t error = registration.hook(global_refcon, registration.refcon, 0);
-            ++menu_hooks_invoked;
-            if (error != 0 && event_error == 0) event_error = error;
-          }
+          const auto event = aexcompat::worker_runtime::aegp_init::dispatch_update_menu(
+              global_refcon, 0);
+          menu_hooks_invoked += event.invoked;
+          if (event.error != 0 && event_error == 0) event_error = event.error;
         };
         const int32_t idle_tick_count = g_aegp_comp_idle_roundtrip_mode ? 3 : 1;
         for (int32_t tick = 0; tick < idle_tick_count; ++tick) {
