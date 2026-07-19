@@ -283,6 +283,20 @@ struct ClassicSubsystemDiagnostics {
   std::array<int64_t, 7> async{};
 };
 
+struct ClassicEmission {
+  ClassicReport report;
+  CustomUiSnapshot custom_ui;
+  ClassicSubsystemDiagnostics subsystems;
+  GpuDiagnosticsSnapshot gpu;
+  SehDiagnosticsSnapshot seh;
+  RequestedParametersSnapshot requested;
+  bool selector_dispatched{};
+  bool depth_supported{};
+  int32_t render_error{};
+};
+
+void emit_classic_complete(ReportSnapshot& output, const ClassicEmission& emission);
+
 void append_classic_subsystems(
     ReportSnapshot& report, const ClassicSubsystemDiagnostics& snapshot);
 

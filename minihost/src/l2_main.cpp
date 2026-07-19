@@ -8802,7 +8802,6 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
       expand_buffer_advertised, shrink_buffer_advertised,
       classic_diagnostics.wide_time_allowed, classic_diagnostics.rejected_temporal_checkouts,
       classic_diagnostics.shutter_dependency_advertised};
-  aexcompat::worker_render_report::begin_classic(report_snapshot, classic_report.head);
   const auto& audio_report = audio_telemetry();
   classic_report.audio = {
       audio_report.usage_advertised, audio_report.checkout_allowed, audio_report.source_available,
@@ -8815,20 +8814,12 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
       audio_report.last_output_rate, audio_report.last_output_bytes_per_sample,
       audio_report.last_output_channels, audio_report.last_output_format,
       audio_report.last_returned_sample_frames, audio_handle_lifetimes_balanced()};
-  aexcompat::worker_render_report::append_classic_audio(report_snapshot, classic_report.audio);
-  report_snapshot.stream()
-            << ",\"render_selector_dispatched\":"
-            << (aexcompat::worker_runtime::classic::last_selector_dispatched()
-                    ? "true" : "false")
-            << ",\"depth_supported\":" << (depth_supported ? "true" : "false")
-            << ",\"render_error\":" << render_error;
   classic_report.sequence = {
       persistent_sequence, persistent_sequence_setup_error, persistent_sequence_setdown_error,
       persistent_frame_errors, persistent_frame_hashes, flattened_sequence,
       sequence_flatten_error, sequence_resetup_error, flattened_handle_replaced,
       resetup_handle_replaced, flattened_handle_host_disposed, copied_flattened_sequence,
       get_flattened_sequence_data_error, original_sequence_preserved};
-  aexcompat::worker_render_report::append_classic_sequence(report_snapshot, classic_report.sequence);
   const int32_t bytes_per_pixel = smart_state().pixel_format == "argb32f" ? 16 :
       (smart_state().pixel_format == "argb16" ? 8 : 4);
   classic_report.frame = {
@@ -8839,18 +8830,11 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
       render_width * bytes_per_pixel,
       std::max(0, render_rowbytes - render_width * bytes_per_pixel),
       input_hash, output_hash, guards_intact, world_debug_report_json()};
-  aexcompat::worker_render_report::append_classic_frame(report_snapshot, classic_report.frame);
-  aexcompat::worker_render_report::append_custom_ui(report_snapshot, {
+  const aexcompat::worker_render_report::CustomUiSnapshot classic_custom_ui{
       g_render_click_enabled, g_render_click_error, g_render_click_out_flags,
       g_render_click_changed_value, g_render_draw_enabled, g_render_draw_error,
       g_render_draw_out_flags, g_render_ui_lifecycle_errors, g_render_ui_context_closed,
-      g_app_color_picker_calls, g_app_invalidate_rect_calls, g_app_picker_color});
-  report_snapshot.stream()
-            ;
-  aexcompat::worker_render_report::append_classic_subsystems(
-      report_snapshot, capture_classic_subsystems());
-  aexcompat::worker_render_report::append_gpu_diagnostics(report_snapshot, capture_gpu_diagnostics());
-  aexcompat::worker_render_report::append_seh_diagnostics(report_snapshot, capture_seh_diagnostics());
+      g_app_color_picker_calls, g_app_invalidate_rect_calls, g_app_picker_color};
   const auto i64 = [](auto value) { return static_cast<int64_t>(value); };
   classic_report.callbacks = {
       classic_diagnostics.balanced,
@@ -8863,9 +8847,7 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
        i64(g_transform_world_calls), i64(g_last_transform_x), i64(g_last_transform_y),
        i64(g_last_transform_opacity), i64(g_abort_calls), i64(g_progress_calls),
        i64(g_register_ui_calls), i64(g_last_progress_current), i64(g_last_progress_total)}};
-  aexcompat::worker_render_report::append_classic_callbacks(report_snapshot, classic_report.callbacks);
   classic_report.threads = {concurrent_render, thread_errors, thread_hashes, thread_guards};
-  aexcompat::worker_render_report::append_classic_threads(report_snapshot, classic_report.threads);
   classic_report.context = {
       request_mode,
       {static_cast<int32_t>(g_downsample_x.numerator), static_cast<int32_t>(g_downsample_x.denominator)},
@@ -8879,15 +8861,19 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
       {read<int32_t>(input, 252), read<int32_t>(input, 256)},
       {read<int32_t>(input, 392), read<int32_t>(input, 396)},
       {read<int32_t>(input, 276), read<int32_t>(input, 280)}};
-  aexcompat::worker_render_report::append_classic_context(report_snapshot, classic_report.context);
-  aexcompat::worker_render_report::finish_requested_parameters(report_snapshot, {
+  const aexcompat::worker_render_report::RequestedParametersSnapshot classic_requested{
       requested_parameters_json(requested_parameters),
       static_cast<int32_t>(requested_value(requested_parameters, L"amount")),
       static_cast<int32_t>(requested_value(requested_parameters, L"direction")),
       static_cast<int32_t>(requested_value(requested_parameters, L"seed")),
       requested_value(requested_parameters, L"mix"),
       static_cast<int32_t>(requested_value(requested_parameters, L"invert_map")),
-      !nop_render_advertised, module_audit_json()});
+      !nop_render_advertised, module_audit_json()};
+  aexcompat::worker_render_report::emit_classic_complete(report_snapshot, {
+      classic_report, classic_custom_ui, capture_classic_subsystems(),
+      capture_gpu_diagnostics(), capture_seh_diagnostics(), classic_requested,
+      aexcompat::worker_runtime::classic::last_selector_dispatched(),
+      depth_supported, render_error});
   aexcompat::worker_render_report::emit(report_snapshot, std::cout);
   } else if (is_smart_worker()) {
   restore_native_stdout();

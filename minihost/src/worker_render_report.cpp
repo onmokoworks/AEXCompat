@@ -42,6 +42,25 @@ void finish_requested_parameters(
       << ",\"module_audit\":" << value.module_audit_json << "}\n";
 }
 
+void emit_classic_complete(ReportSnapshot& output, const ClassicEmission& value) {
+  begin_classic(output, value.report.head);
+  append_classic_audio(output, value.report.audio);
+  output.stream() << ",\"render_selector_dispatched\":"
+      << (value.selector_dispatched ? "true" : "false")
+      << ",\"depth_supported\":" << (value.depth_supported ? "true" : "false")
+      << ",\"render_error\":" << value.render_error;
+  append_classic_sequence(output, value.report.sequence);
+  append_classic_frame(output, value.report.frame);
+  append_custom_ui(output, value.custom_ui);
+  append_classic_subsystems(output, value.subsystems);
+  append_gpu_diagnostics(output, value.gpu);
+  append_seh_diagnostics(output, value.seh);
+  append_classic_callbacks(output, value.report.callbacks);
+  append_classic_threads(output, value.report.threads);
+  append_classic_context(output, value.report.context);
+  finish_requested_parameters(output, value.requested);
+}
+
 void begin_classic(ReportSnapshot& report, const ClassicReport::Head& value) {
   report.stream()
       << "{\"schema_version\":1,\"stage\":\"classic_render\",\"status\":\""
