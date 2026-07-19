@@ -117,9 +117,12 @@ W1-4b では timed layer を同 trailer の 5 フィールド形式 `slot,w,h,ti
 index ごとに割り当てられるため、同じ semantic `slot` を持つ複数の timed layer
 (異なる rational time) はそれぞれ独立スロットを占有し、worker は各フレームの
 current_time に対し one-shot と同じ有理時刻一致 (`same_time` / `same_rational_time`)
-でマッチするエントリを選ぶ。dedup 規則も one-shot と一致: 同一 slot は「両方 timed
-かつ有理時刻が異なる」場合のみ許可、それ以外 (static 同士、static と timed の混在、
-timed 同士の同時刻) は broker open と worker parse の双方で fail-closed。broker の
+でマッチするエントリを選ぶ。dedup 規則は one-shot の layered_image_mode parser と
+完全一致させ、session が one-shot と同じ集合を受理・拒否するようにする (適格な
+構成で wrapper が無言 fallback しない)。同一 slot の判定: static 同士は拒否
+(フレームごとに曖昧)、timed 同士は有理時刻が等しいとき拒否、**static と timed の
+混在は許可** (layer parameter を current_time = static と他時刻 = timed で
+サンプルする正当な表現)。broker open と worker parse の双方が同一規則。broker の
 `secondary_layers` 診断フィールドは one-shot と揃えるため static layer のみ列挙し、
 timed layer は含めない (両ルートで同一集合になる)。
 

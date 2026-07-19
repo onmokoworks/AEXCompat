@@ -343,13 +343,14 @@ mod windows_e2e {
     }
 
     #[test]
-    fn open_rejects_a_static_and_timed_layer_at_the_same_slot() {
+    fn open_admits_a_static_and_timed_layer_at_the_same_slot() {
         let _behavior = BehaviorGuard::set(None);
         let (repository, plugin, sha) = temp_repository();
-        // A static entry and a timed entry share slot 4. A static layer
-        // renders on every frame, so the timed frame would admit both and the
-        // slot is ambiguous; open must fail closed, the same rule the worker
-        // parser applies to a hand-built argv.
+        // A static entry and a timed entry share slot 4: the valid one-shot
+        // representation of a layer parameter sampled at current_time (static)
+        // and at another time (timed). The session must admit exactly what the
+        // one-shot layered path admits, so open succeeds and both physical
+        // slots (indexed by position) carry the slot-4 byte the fixture checks.
         let layers = vec![
             SessionLayer {
                 slot: 4,
@@ -363,7 +364,60 @@ mod windows_e2e {
                 width: WIDTH,
                 height: HEIGHT,
                 rgba: vec![4u8; (WIDTH * HEIGHT * 4) as usize],
-                timed: Some((0, 30)),
+                timed: Some((7, 30)),
+            },
+        ];
+        let mut session = RenderSession::open(SessionOpenRequest {
+            repository: &repository.0,
+            plugin_path: &plugin,
+            plugin_sha256: &sha,
+            parameters: None,
+            parameter_animation: None,
+            aux_manifest: None,
+            world_dump_dir: None,
+            output_checksum_detail: false,
+            mask_trailer: None,
+            spatial_trailer: None,
+            render_environment_trailer: None,
+            layers: &layers,
+            dependencies: Vec::new(),
+            width: WIDTH,
+            height: HEIGHT,
+            pixel_format: RenderPixelFormat::Argb8,
+            time_step: 1,
+            total_time: 300,
+            time_scale: 30,
+            frame_deadline: Duration::from_secs(30),
+        })
+        .expect("open must admit a same-slot static and timed mix");
+        let outcome = session
+            .render_frame(0, 0, &input_pattern(4))
+            .expect("frame renders with the static+timed slot mix");
+        assert!(matches!(outcome.status, FrameStatus::Rendered { .. }));
+        let close = session.close();
+        assert_eq!(close["session_clean"], true, "close: {close}");
+    }
+
+    #[test]
+    fn open_rejects_two_static_layers_at_the_same_slot() {
+        let _behavior = BehaviorGuard::set(None);
+        let (repository, plugin, sha) = temp_repository();
+        // Two static entries at one slot are ambiguous per frame; open must
+        // fail closed, the same rule the one-shot parser applies.
+        let layers = vec![
+            SessionLayer {
+                slot: 4,
+                width: WIDTH,
+                height: HEIGHT,
+                rgba: vec![4u8; (WIDTH * HEIGHT * 4) as usize],
+                timed: None,
+            },
+            SessionLayer {
+                slot: 4,
+                width: WIDTH,
+                height: HEIGHT,
+                rgba: vec![4u8; (WIDTH * HEIGHT * 4) as usize],
+                timed: None,
             },
         ];
         let error = RenderSession::open(SessionOpenRequest {
@@ -389,7 +443,7 @@ mod windows_e2e {
             frame_deadline: Duration::from_secs(30),
         })
         .map(|_| ())
-        .expect_err("open must reject a same-slot static and timed mix");
+        .expect_err("open must reject two static layers at one slot");
         assert!(
             error.to_string().contains("unique"),
             "unexpected error: {error}"

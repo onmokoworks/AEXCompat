@@ -474,3 +474,32 @@ PR-C (#116) merge 後のコードに対して、段階1-3「既存 one-shot 経�
   worker 経由の transport 検証が interim。
 - alpha-as-coverage は W1-4b と別コミットで扱う (適格条件の
   `alpha_as_coverage_params.is_empty()` 緩和 + aux option 追加)。
+
+### 訂正 (W1-4b dedup: static+timed 混在は拒否でなく許可)
+
+上の W1-4b 追記で「同一 slot は両方 timed かつ異なる有理時刻のみ許可」と
+書いたが、これは誤り。Codex レビュー (#204) の2指摘が逆方向を突いて真の
+規則が判明した:
+
+- 1回目: worker の session parse が static+timed 混在を受理するのに broker
+  open が拒否する不整合を指摘 → 私は worker を拒否側に寄せた (誤り)。
+- 2回目: one-shot の layered_image_mode parser
+  (`worker_request_parser.cpp` の該当ラムダ) は static+timed 同一 slot を
+  受理しており、それは layer parameter を current_time (static) と他時刻
+  (timed) でサンプルする正当な構成。broker open が拒否すると wrapper が
+  適格な render で無言 one-shot fallback する、と指摘。
+
+観察: 正しい規則は one-shot と完全一致。同一 slot は (a) static 同士 →
+拒否、(b) timed 同士同時刻 → 拒否、(c) static + timed の混在 → **許可**、
+(d) timed 同士異時刻 → 許可。W1-4b の目的は one-shot 等価なので、session
+の worker parse・broker open の双方をこの canonical 規則に揃えた
+(worker は最初の実装 = one-shot ラムダに revert、broker open は
+`(None,None)=>拒否, (Some,Some)=>同時刻拒否, _=>許可`)。テストは
+`open_admits_a_static_and_timed_layer_at_the_same_slot` (受理) と
+`open_rejects_two_static_layers_at_the_same_slot` (static 同士拒否) に
+差し替え、`open_rejects_two_timed_layers_at_the_same_slot_and_time` は
+維持。
+
+教訓: 「両ルートの整合」を取る方向は2つあり (両方拒否 / 両方許可)、
+canonical な基準 (= 既存の one-shot 挙動、AE 等価の真値) に合わせる方を
+選ぶべきだった。1回目の指摘に literal に従って拒否側に倒したのが誤り。

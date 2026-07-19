@@ -124,13 +124,14 @@ ParseResult parse(Kind kind, int argc, wchar_t** argv, const Hooks& hooks) {
               layer.height <= 0 || layer.height > 4096 ||
               std::any_of(invocation.layers.begin(), invocation.layers.end(),
                   [&](const auto& existing) {
+                    // Same dedup as the one-shot layered_image_mode path: a
+                    // slot rejects only a second static entry or a timed entry
+                    // at a rational time already present. A static plus timed
+                    // entries at one slot is the valid representation of a
+                    // layer parameter sampled at current_time and other times,
+                    // so the session must admit exactly what one-shot does.
                     if (existing.slot != layer.slot) return false;
-                    // A slot may host more than one entry only when every
-                    // entry is timed at a distinct rational time; a static
-                    // member makes the slot ambiguous per frame, so any
-                    // same-slot pair with a static member fails closed, the
-                    // same rule RenderSession::open enforces broker-side.
-                    if (!existing.timed || !layer.timed) return true;
+                    if (!existing.timed || !layer.timed) return !existing.timed && !layer.timed;
                     return same_time(existing, layer);
                   }))
             throw 1;

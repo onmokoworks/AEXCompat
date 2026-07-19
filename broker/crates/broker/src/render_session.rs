@@ -519,11 +519,15 @@ impl RenderSession {
             pixel_format: request.pixel_format,
             layer_slot_count: request.layers.len() as u32,
         };
-        // Each layer's RGBA must fit its slot (input-slot shaped) and slots
-        // must be unique, before any transport work. Timed layers (issue #98
-        // W1-4b) may share a slot when their rational times differ, matching the
-        // worker parser's dedup exactly so a directly built request fails fast
-        // at open instead of on the worker's first frame.
+        // Each layer's RGBA must fit its slot (input-slot shaped), before any
+        // transport work. Slot dedup mirrors the one-shot layered_image_mode
+        // parser exactly (issue #98 W1-4b) so a directly built request accepts
+        // and rejects the same sets the one-shot path does, and the wrapper
+        // never silently falls back for a config one-shot would render: a slot
+        // rejects only a second static entry or a timed entry at a rational
+        // time already present. A static plus timed entries at one slot is the
+        // valid representation of a layer parameter sampled at current_time and
+        // at other times, so it is admitted.
         for (index, layer) in request.layers.iter().enumerate() {
             // Same slot and dimension bounds the worker parser enforces.
             if layer.slot == 0
@@ -545,10 +549,15 @@ impl RenderSession {
                     continue;
                 }
                 let conflict = match (other.timed, layer.timed) {
+                    // Both timed: a collision only when the rational times are
+                    // equal (cross-multiplied to avoid dividing).
                     (Some((lt, ls)), Some((rt, rs))) => {
                         i64::from(lt) * i64::from(rs) == i64::from(rt) * i64::from(ls)
                     }
-                    _ => true,
+                    // Two static entries at one slot are ambiguous per frame.
+                    (None, None) => true,
+                    // A static entry plus a timed entry is the valid mix.
+                    _ => false,
                 };
                 if conflict {
                     return Err(invalid("render session layer slots must be unique"));
