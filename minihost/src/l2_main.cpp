@@ -77,6 +77,7 @@
 #include "worker_pf_pixel_data_suite.hpp"
 #include "worker_pf_world_suite.hpp"
 #include "worker_pf_pixel_format_registry.hpp"
+#include "worker_pf_param_suites.hpp"
 #include "worker_smart_runtime.hpp"
 #include "worker_smart_execution.hpp"
 #include "worker_smart_setup.hpp"
@@ -2021,13 +2022,6 @@ int32_t __cdecl floating_point_from_angle(void*, const void* definition, double*
   return 0;
 }
 
-struct PfColorParamPixelFloat {
-  float alpha;
-  float red;
-  float green;
-  float blue;
-};
-
 int32_t __cdecl floating_point_from_color(void* effect_ref, const void* definition,
                                           PfColorParamPixelFloat* output) {
   if (effect_ref != &g_effect || !definition || !output) return kPfBadCallbackParam;
@@ -2055,19 +2049,6 @@ int32_t __cdecl floating_point_from_color(void* effect_ref, const void* definiti
   return 0;
 }
 
-struct PointParamSuite { decltype(&floating_point_from_point) get_floating_point_value; };
-struct AngleParamSuite { decltype(&floating_point_from_angle) get_floating_point_value; };
-struct PfColorParamSuite1 {
-  decltype(&floating_point_from_color) PF_GetFloatingPointColorFromColorDef;
-};
-static_assert(sizeof(PfColorParamPixelFloat) == 4 * sizeof(float));
-static_assert(offsetof(PfColorParamPixelFloat, alpha) == 0 * sizeof(float));
-static_assert(offsetof(PfColorParamPixelFloat, red) == 1 * sizeof(float));
-static_assert(offsetof(PfColorParamPixelFloat, green) == 2 * sizeof(float));
-static_assert(offsetof(PfColorParamPixelFloat, blue) == 3 * sizeof(float));
-static_assert(sizeof(PfColorParamSuite1) == 1 * sizeof(void*));
-static_assert(offsetof(PfColorParamSuite1, PF_GetFloatingPointColorFromColorDef) ==
-              0 * sizeof(void*));
 int32_t __cdecl update_param_ui(void* effect_ref, int32_t index, const void* definition) {
   if (effect_ref != &g_effect || (!g_update_params_ui_active && !g_user_changed_param_active) || !definition || index <= 0 ||
       static_cast<std::size_t>(index) >= g_active_ui_param_count || !g_active_ui_params ||
@@ -2407,55 +2388,8 @@ int32_t __cdecl param_key_index_to_time(void* effect_ref, int32_t index, int32_t
   return 0;
 }
 
-struct ParamUtilsSuite1 {
-  decltype(&update_param_ui) PF_UpdateParamUI;
-  decltype(&get_current_param_state_obsolete) PF_GetCurrentStateObsolete;
-  decltype(&has_param_changed_obsolete) PF_HasParamChangedObsolete;
-  decltype(&have_inputs_changed_over_time_span_obsolete)
-      PF_HaveInputsChangedOverTimeSpanObsolete;
-  decltype(&is_identical_param_checkout) PF_IsIdenticalCheckout;
-  decltype(&find_param_keyframe_time) PF_FindKeyframeTime;
-  decltype(&get_param_keyframe_count) PF_GetKeyframeCount;
-  decltype(&checkout_param_keyframe) PF_CheckoutKeyframe;
-  decltype(&checkin_param_keyframe) PF_CheckinKeyframe;
-  decltype(&param_key_index_to_time) PF_KeyIndexToTime;
-};
-
-struct ParamUtilsSuite3 {
-  decltype(&update_param_ui) PF_UpdateParamUI;
-  decltype(&get_current_param_state) PF_GetCurrentState;
-  decltype(&are_param_states_identical) PF_AreStatesIdentical;
-  decltype(&is_identical_param_checkout) PF_IsIdenticalCheckout;
-  decltype(&find_param_keyframe_time) PF_FindKeyframeTime;
-  decltype(&get_param_keyframe_count) PF_GetKeyframeCount;
-  decltype(&checkout_param_keyframe) PF_CheckoutKeyframe;
-  decltype(&checkin_param_keyframe) PF_CheckinKeyframe;
-  decltype(&param_key_index_to_time) PF_KeyIndexToTime;
-};
-static_assert(sizeof(PfState) == 16);
-static_assert(sizeof(ParamUtilsSuite1) == 10 * sizeof(void*));
-static_assert(offsetof(ParamUtilsSuite1, PF_UpdateParamUI) == 0 * sizeof(void*));
-static_assert(offsetof(ParamUtilsSuite1, PF_GetCurrentStateObsolete) == 1 * sizeof(void*));
-static_assert(offsetof(ParamUtilsSuite1, PF_HasParamChangedObsolete) == 2 * sizeof(void*));
-static_assert(offsetof(ParamUtilsSuite1, PF_HaveInputsChangedOverTimeSpanObsolete) ==
-              3 * sizeof(void*));
-static_assert(offsetof(ParamUtilsSuite1, PF_KeyIndexToTime) == 9 * sizeof(void*));
-static_assert(sizeof(ParamUtilsSuite3) == 9 * sizeof(void*));
-static_assert(offsetof(ParamUtilsSuite3, PF_UpdateParamUI) == 0 * sizeof(void*));
-static_assert(offsetof(ParamUtilsSuite3, PF_GetCurrentState) == 1 * sizeof(void*));
-static_assert(offsetof(ParamUtilsSuite3, PF_AreStatesIdentical) == 2 * sizeof(void*));
-static_assert(offsetof(ParamUtilsSuite3, PF_KeyIndexToTime) == 8 * sizeof(void*));
-PointParamSuite g_point_param_suite{&floating_point_from_point};
-AngleParamSuite g_angle_param_suite{&floating_point_from_angle};
-PfColorParamSuite1 g_color_param_suite1{&floating_point_from_color};
-ParamUtilsSuite1 g_param_utils_suite1{&update_param_ui, &get_current_param_state_obsolete,
-    &has_param_changed_obsolete, &have_inputs_changed_over_time_span_obsolete,
-    &is_identical_param_checkout, &find_param_keyframe_time, &get_param_keyframe_count,
-    &checkout_param_keyframe, &checkin_param_keyframe, &param_key_index_to_time};
-ParamUtilsSuite3 g_param_utils_suite{&update_param_ui, &get_current_param_state,
-    &are_param_states_identical, &is_identical_param_checkout, &find_param_keyframe_time,
-    &get_param_keyframe_count, &checkout_param_keyframe, &checkin_param_keyframe,
-    &param_key_index_to_time};
+// The PF param suite tables (Point/Angle/ColorParam/ParamUtils1/3) live in
+// worker_pf_param_suites.cpp; their production callbacks stay here.
 
 // verify_pixel_format_registry_rejection lives in
 // worker_pf_pixel_format_registry.cpp.
