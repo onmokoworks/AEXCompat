@@ -20,6 +20,8 @@ RUNTIME_ADMISSION_SOURCE = ROOT / "minihost" / "src" / "worker_runtime_admission
 CLASSIC_RUNTIME_HEADER = ROOT / "minihost" / "src" / "worker_classic_runtime.hpp"
 CLASSIC_RUNTIME_SOURCE = ROOT / "minihost" / "src" / "worker_classic_runtime.cpp"
 SELFTEST_DISPATCH_SOURCE = ROOT / "minihost" / "src" / "worker_selftest_dispatch.cpp"
+REQUEST_PARSER_HEADER = ROOT / "minihost" / "src" / "worker_request_parser.hpp"
+REQUEST_PARSER_SOURCE = ROOT / "minihost" / "src" / "worker_request_parser.cpp"
 PF_SUITES_INTERNAL = ROOT / "minihost" / "src" / "worker_pf_suites_internal.hpp"
 AEGP_SCENE_SOURCE = ROOT / "minihost" / "src" / "worker_aegp_scene.cpp"
 AEGP_SCENE_HEADER = ROOT / "minihost" / "src" / "worker_aegp_scene.hpp"
@@ -43,11 +45,24 @@ def l2_family_source():
         HANDLE_RUNTIME_HEADER, HANDLE_RUNTIME_SOURCE,
         REPORT_HEADER, REPORT_SOURCE,
         RUNTIME_ADMISSION_SOURCE, CLASSIC_RUNTIME_HEADER, CLASSIC_RUNTIME_SOURCE,
-        SELFTEST_DISPATCH_SOURCE
+        SELFTEST_DISPATCH_SOURCE, REQUEST_PARSER_HEADER, REQUEST_PARSER_SOURCE
     ))
 
 
 class MinihostL2SourceTests(unittest.TestCase):
+    def test_render_worker_request_validation_is_extracted(self):
+        worker = SOURCE.read_text(encoding="utf-8")
+        parser = REQUEST_PARSER_SOURCE.read_text(encoding="utf-8")
+        cmake = MINIHOST_CMAKE.read_text(encoding="utf-8")
+
+        self.assertIn("src/worker_request_parser.cpp", cmake)
+        self.assertEqual(worker.count("request_parser::parse("), 2)
+        for marker in ("strip_auxiliary_options", "classify_worker_mode",
+                       "load_rgba", "load_audio", "same_time"):
+            self.assertIn(marker, parser)
+        self.assertNotIn("std::ifstream layer_file", worker)
+        self.assertNotIn("std::ifstream file(argv[5]", worker)
+
     def test_aegp_scene_runtime_owns_shared_types_catalog_and_state(self):
         header = AEGP_SCENE_RUNTIME_HEADER.read_text(encoding="utf-8")
         implementation = AEGP_SCENE_RUNTIME_SOURCE.read_text(encoding="utf-8")
@@ -513,7 +528,7 @@ class MinihostL2SourceTests(unittest.TestCase):
         text = l2_family_source()
         for marker in ("external_current_time", "external_time_step",
                        "external_total_time", "external_time_scale",
-                       "external_total_time < external_current_time",
+                       "invocation.total_time < invocation.current_time",
                        "write<int32_t>(input, 224, external_current_time)"):
             self.assertIn(marker, text)
 

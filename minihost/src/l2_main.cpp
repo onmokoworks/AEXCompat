@@ -82,6 +82,7 @@
 #include "worker_pf_suites_internal.hpp"
 #include "worker_pf_adv_time_suite.hpp"
 #include "worker_report.hpp"
+#include "worker_request_parser.hpp"
 #include "worker_render_receipts.hpp"
 #include "worker_target.hpp"
 
@@ -636,15 +637,8 @@ std::string g_last_adv_app_info_text;
 int32_t g_last_progress_current = 0;
 int32_t g_last_progress_total = 0;
 int32_t g_secondary_layer_slot = 6;
-struct ExternalLayerInput {
-  int32_t slot{};
-  int32_t time{};
-  uint32_t time_scale{};
-  bool timed{};
-  int32_t width{};
-  int32_t height{};
-  std::vector<unsigned char> rgba;
-};
+using ExternalLayerInput =
+    aexcompat::worker_runtime::request_parser::LayerInput;
 bool parse_layer_transport_key(const wchar_t* text, ExternalLayerInput& layer) {
   if (!text) return false;
   if (std::wstring(text).compare(0, 3, L"v1|") != 0) {
@@ -14078,137 +14072,46 @@ int worker_main_impl(int argc, wchar_t **argv) {
   auto& keydown_modifiers = invocation.keydown_modifiers;
 
   if (is_render_worker()) {
-  const aexcompat::l2cli::AuxiliaryOptionHooks auxiliary_hooks{
-      nullptr, set_l2_dump_worlds_dir, enable_l2_checksum_detail,
-      load_l2_aux_manifest, parse_l2_alpha_coverage, load_l2_parameter_animation};
-  const auto auxiliary_options =
-      aexcompat::l2cli::strip_auxiliary_options(argc, argv, auxiliary_hooks);
-  if (!auxiliary_options.accepted) return 3;
-  const int effective_argc = auxiliary_options.effective_argc;
-  const auto worker_mode = aexcompat::l2cli::classify_worker_mode(
-      aexcompat::l2cli::WorkerKind::Render, argc, argv, effective_argc);
-  audio_mode = worker_mode.audio_mode;
-  image_audio_mode = worker_mode.image_audio_mode;
-  external_pixel_bytes = worker_mode.external_pixel_bytes;
-  transport_argc = worker_mode.transport_argc;
-  image_click_context = worker_mode.image_click_context;
-  image_draw_context = worker_mode.image_draw_context;
-  image_click_argc = worker_mode.image_click_argc;
-  image_render_environment = worker_mode.image_render_environment;
-  image_environment_argc = worker_mode.image_environment_argc;
-  image_spatial_context = worker_mode.image_spatial_context;
-  image_trailer_argc = worker_mode.image_trailer_argc;
-  image_mask_context = worker_mode.image_mask_context;
-  image_argc = worker_mode.image_argc;
-  layered_image_mode = worker_mode.layered_image_mode;
-  image_mode = worker_mode.image_mode;
-  request_mode = worker_mode.request_mode;
-  if (!worker_mode.command_accepted) return 2;
+    const auto parsed = aexcompat::worker_runtime::request_parser::parse(
+      aexcompat::worker_runtime::request_parser::Kind::Render, argc, argv,
+      {{nullptr, set_l2_dump_worlds_dir, enable_l2_checksum_detail,
+        load_l2_aux_manifest, parse_l2_alpha_coverage, load_l2_parameter_animation},
+       &parse_layer_transport_key, &parse_mask_context_payload,
+       &parse_spatial_context_payload, &parse_render_environment_payload});
+    if (parsed.error != 0) return parsed.error;
+    const auto& worker_mode = parsed.invocation.mode;
+  audio_mode = worker_mode.audio_mode; image_audio_mode = worker_mode.image_audio_mode;
+  external_pixel_bytes = worker_mode.external_pixel_bytes; transport_argc = worker_mode.transport_argc;
+  image_click_context = worker_mode.image_click_context; image_draw_context = worker_mode.image_draw_context;
+  image_click_argc = worker_mode.image_click_argc; image_render_environment = worker_mode.image_render_environment;
+  image_environment_argc = worker_mode.image_environment_argc; image_spatial_context = worker_mode.image_spatial_context;
+  image_trailer_argc = worker_mode.image_trailer_argc; image_mask_context = worker_mode.image_mask_context;
+  image_argc = worker_mode.image_argc; layered_image_mode = worker_mode.layered_image_mode;
+  image_mode = worker_mode.image_mode; request_mode = worker_mode.request_mode;
+  external_rgba = parsed.invocation.rgba; external_layers = parsed.invocation.layers;
+  external_output = parsed.invocation.output; external_audio = parsed.invocation.audio;
+  external_audio_output = parsed.invocation.audio_output;
+  external_width = parsed.invocation.width; external_height = parsed.invocation.height;
+  external_current_time = parsed.invocation.current_time; external_time_step = parsed.invocation.time_step;
+  external_total_time = parsed.invocation.total_time; external_time_scale = parsed.invocation.time_scale;
+  external_audio_samples = parsed.invocation.audio_samples; external_audio_rate = parsed.invocation.audio_rate;
+  if (worker_mode.image_click_context) {
+    g_render_click_x = parsed.invocation.click_x; g_render_click_y = parsed.invocation.click_y;
+    g_app_picker_color = parsed.invocation.picker_color; g_render_click_enabled = true;
+  }
+  if (worker_mode.image_draw_context) g_render_draw_enabled = true;
   if (request_mode && !parse_parameter_payload(argv[4], requested_parameters)) return 3;
-  if (audio_mode) {
-    try {
-      external_audio_samples = std::stoi(argv[7]);
-      external_audio_rate = std::stoi(argv[8]);
-    } catch (...) { return 3; }
-    if (external_audio_samples <= 0 || external_audio_samples > 10'000'000 ||
-        external_audio_rate != 44100) return 3;
-    const auto byte_count = static_cast<std::size_t>(external_audio_samples) * sizeof(float);
-    std::ifstream file(argv[5], std::ios::binary | std::ios::ate);
-    if (!file || static_cast<std::size_t>(file.tellg()) != byte_count) return 3;
-    external_audio.resize(static_cast<std::size_t>(external_audio_samples) + 1, 0.0f);
-    file.seekg(0);
-    if (!file.read(reinterpret_cast<char*>(external_audio.data()), byte_count)) return 3;
-    if (std::any_of(external_audio.begin(), external_audio.end() - 1,
-                    [](float value) { return !std::isfinite(value); })) return 3;
-    external_audio_output = argv[6];
-    if (std::filesystem::exists(external_audio_output)) return 3;
-  }
-  if (image_audio_mode) {
-    try {
-      external_audio_samples = std::stoi(argv[14]);
-      external_audio_rate = std::stoi(argv[15]);
-    } catch (...) { return 3; }
-    if (external_audio_samples <= 0 || external_audio_samples > 10'000'000 ||
-        external_audio_rate != 44100) return 3;
-    const auto byte_count = static_cast<std::size_t>(external_audio_samples) * sizeof(float);
-    std::ifstream file(argv[13], std::ios::binary | std::ios::ate);
-    if (!file || static_cast<std::size_t>(file.tellg()) != byte_count) return 3;
-    external_audio.resize(static_cast<std::size_t>(external_audio_samples) + 1, 0.0f);
-    file.seekg(0);
-    if (!file.read(reinterpret_cast<char*>(external_audio.data()), byte_count) ||
-        std::any_of(external_audio.begin(), external_audio.end() - 1,
-                    [](float value) { return !std::isfinite(value); })) return 3;
-    aexcompat::host_audio::runtime().set_source(&external_audio, external_audio_samples);
-  }
-  if (image_mode) {
-    try { external_width = std::stoi(argv[7]); external_height = std::stoi(argv[8]); } catch (...) { return 3; }
-    if (external_width <= 0 || external_height <= 0 || external_width > 4096 || external_height > 4096) return 3;
-    const auto byte_count = static_cast<std::size_t>(external_width) * external_height * 4;
-    std::ifstream file(argv[5], std::ios::binary | std::ios::ate);
-    if (!file || static_cast<std::size_t>(file.tellg()) != byte_count) return 3;
-    external_rgba.resize(byte_count); file.seekg(0);
-    if (!file.read(reinterpret_cast<char*>(external_rgba.data()), byte_count)) return 3;
-    external_output = argv[6];
-    if (std::filesystem::exists(external_output)) return 3;
-    try {
-      external_current_time = std::stoi(argv[9]); external_time_step = std::stoi(argv[10]);
-      external_total_time = std::stoi(argv[11]); external_time_scale = std::stoul(argv[12]);
-    } catch (...) { return 3; }
-    if (external_current_time < 0 || external_time_step <= 0 ||
-        external_total_time < external_current_time || external_time_scale == 0) return 3;
-    if (layered_image_mode) {
-      for (int argument = 13; argument < image_argc; argument += 4) {
-        ExternalLayerInput layer;
-        try {
-          if (!parse_layer_transport_key(argv[argument], layer)) return 3;
-          layer.width = std::stoi(argv[argument + 2]);
-          layer.height = std::stoi(argv[argument + 3]);
-        } catch (...) { return 3; }
-        if (layer.slot <= 0 || layer.slot > static_cast<int32_t>(kMaxParams) || layer.width <= 0 ||
-            layer.height <= 0 || layer.width > 4096 || layer.height > 4096 ||
-            std::any_of(external_layers.begin(), external_layers.end(), [&](const auto& existing) {
-              if (existing.slot != layer.slot) return false;
-              if (!existing.timed || !layer.timed) return !existing.timed && !layer.timed;
-              return same_rational_time(existing.time, existing.time_scale,
-                                        layer.time, layer.time_scale);
-            })) return 3;
-        const auto layer_bytes = static_cast<std::size_t>(layer.width) * layer.height * 4;
-        std::ifstream layer_file(argv[argument + 1], std::ios::binary | std::ios::ate);
-        if (!layer_file || static_cast<std::size_t>(layer_file.tellg()) != layer_bytes) return 3;
-        layer.rgba.resize(layer_bytes); layer_file.seekg(0);
-        if (!layer_file.read(reinterpret_cast<char*>(layer.rgba.data()), layer_bytes)) return 3;
-        external_layers.push_back(std::move(layer));
-      }
-    }
-    if (image_mask_context && !parse_mask_context_payload(argv[image_trailer_argc - 1])) return 3;
-    if (image_spatial_context && !parse_spatial_context_payload(argv[image_environment_argc - 1])) return 3;
-    if (image_render_environment &&
-        !parse_render_environment_payload(argv[image_click_argc - 1])) return 3;
-    if (image_click_context) {
-      float red{}, green{}, blue{}, alpha{};
-      if (swscanf_s(argv[effective_argc - 1] + 9, L"%d|%d|%f|%f|%f|%f",
-                    &g_render_click_x, &g_render_click_y, &red, &green, &blue, &alpha) != 6 ||
-          g_render_click_x < 0 || g_render_click_x > 8192 ||
-          g_render_click_y < 0 || g_render_click_y > 8192 ||
-          !std::isfinite(red) || !std::isfinite(green) || !std::isfinite(blue) ||
-          !std::isfinite(alpha) || red < 0 || red > 1 || green < 0 || green > 1 ||
-          blue < 0 || blue > 1 || alpha < 0 || alpha > 1) return 3;
-      g_app_picker_color = {red, green, blue, alpha};
-      g_render_click_enabled = true;
-    }
-    if (image_draw_context)
-      g_render_draw_enabled = true;
-  }
+    if (image_audio_mode)
+      aexcompat::host_audio::runtime().set_source(&external_audio, external_audio_samples);
   } else if (is_smart_worker()) {
-  const aexcompat::l2cli::AuxiliaryOptionHooks auxiliary_hooks{
-      nullptr, set_l2_dump_worlds_dir, enable_l2_checksum_detail,
-      load_l2_aux_manifest, parse_l2_alpha_coverage, load_l2_parameter_animation};
-  const auto auxiliary_options =
-      aexcompat::l2cli::strip_auxiliary_options(argc, argv, auxiliary_hooks);
-  if (!auxiliary_options.accepted) return 3;
-  const int effective_argc = auxiliary_options.effective_argc;
-  const auto worker_mode = aexcompat::l2cli::classify_worker_mode(
-      aexcompat::l2cli::WorkerKind::Smart, argc, argv, effective_argc);
+    const auto parsed = aexcompat::worker_runtime::request_parser::parse(
+        aexcompat::worker_runtime::request_parser::Kind::Smart, argc, argv,
+        {{nullptr, set_l2_dump_worlds_dir, enable_l2_checksum_detail,
+          load_l2_aux_manifest, parse_l2_alpha_coverage, load_l2_parameter_animation},
+         &parse_layer_transport_key, &parse_mask_context_payload,
+         &parse_spatial_context_payload, &parse_render_environment_payload});
+    if (parsed.error != 0) return parsed.error;
+    const auto& worker_mode = parsed.invocation.mode;
   smart_force_cpu = worker_mode.force_cpu;
   smart_opencl = worker_mode.opencl;
   smart_directx = worker_mode.directx;
@@ -14243,71 +14146,28 @@ int worker_main_impl(int argc, wchar_t **argv) {
   outline_mutation_mode = worker_mode.outline_mutation_mode;
   mask_attribute_mode = worker_mode.mask_attribute_mode;
   request_mode = worker_mode.request_mode;
-  if (!worker_mode.command_accepted) return 2;
   g_mask_model_enabled = worker_mode.mask_model_enabled;
   aexcompat::mask_runtime::set_fault(mask_count_error_mode
       ? aexcompat::mask_runtime::Fault::CountError
       : mask_count_crash_mode ? aexcompat::mask_runtime::Fault::CountCrash
                               : aexcompat::mask_runtime::Fault::None);
-  if (request_mode && !parse_parameter_payload(argv[4], requested_parameters)) return 3;
-  if (smart_image_mode) {
-    try { external_width = std::stoi(argv[7]); external_height = std::stoi(argv[8]); } catch (...) { return 3; }
-    if (external_width <= 0 || external_height <= 0 || external_width > 4096 || external_height > 4096) return 3;
-    const auto byte_count = static_cast<std::size_t>(external_width) * external_height * 4;
-    std::ifstream file(argv[5], std::ios::binary | std::ios::ate);
-    if (!file || static_cast<std::size_t>(file.tellg()) != byte_count) return 3;
-    external_rgba.resize(byte_count); file.seekg(0);
-    if (!file.read(reinterpret_cast<char*>(external_rgba.data()), byte_count)) return 3;
-    external_output = argv[6];
-    if (std::filesystem::exists(external_output)) return 3;
-    try {
-      external_current_time = std::stoi(argv[9]); external_time_step = std::stoi(argv[10]);
-      external_total_time = std::stoi(argv[11]); external_time_scale = std::stoul(argv[12]);
-    } catch (...) { return 3; }
-    if (external_current_time < 0 || external_time_step <= 0 ||
-        external_total_time < external_current_time || external_time_scale == 0) return 3;
-    if (smart_layered_image_mode) {
-      for (int argument = 13; argument < smart_image_argc; argument += 4) {
-        ExternalLayerInput layer;
-        try {
-          if (!parse_layer_transport_key(argv[argument], layer)) return 3;
-          layer.width = std::stoi(argv[argument + 2]);
-          layer.height = std::stoi(argv[argument + 3]);
-        } catch (...) { return 3; }
-        if (layer.slot <= 0 || layer.slot > static_cast<int32_t>(kMaxParams) || layer.width <= 0 ||
-            layer.height <= 0 || layer.width > 4096 || layer.height > 4096 ||
-            std::any_of(external_layers.begin(), external_layers.end(), [&](const auto& existing) {
-              if (existing.slot != layer.slot) return false;
-              if (!existing.timed || !layer.timed) return !existing.timed && !layer.timed;
-              return same_rational_time(existing.time, existing.time_scale,
-                                        layer.time, layer.time_scale);
-            })) return 3;
-        const auto layer_bytes = static_cast<std::size_t>(layer.width) * layer.height * 4;
-        std::ifstream layer_file(argv[argument + 1], std::ios::binary | std::ios::ate);
-        if (!layer_file || static_cast<std::size_t>(layer_file.tellg()) != layer_bytes) return 3;
-        layer.rgba.resize(layer_bytes); layer_file.seekg(0);
-        if (!layer_file.read(reinterpret_cast<char*>(layer.rgba.data()), layer_bytes)) return 3;
-        external_layers.push_back(std::move(layer));
-      }
-    }
-    if (smart_image_mask_context && !parse_mask_context_payload(argv[smart_image_trailer_argc - 1])) return 3;
-    if (smart_image_spatial_context && !parse_spatial_context_payload(argv[smart_image_environment_argc - 1])) return 3;
-    if (smart_image_render_environment &&
-        !parse_render_environment_payload(argv[smart_image_click_argc - 1])) return 3;
+    external_rgba = parsed.invocation.rgba;
+    external_layers = parsed.invocation.layers;
+    external_output = parsed.invocation.output;
+    external_width = parsed.invocation.width;
+    external_height = parsed.invocation.height;
+    external_current_time = parsed.invocation.current_time;
+    external_time_step = parsed.invocation.time_step;
+    external_total_time = parsed.invocation.total_time;
+    external_time_scale = parsed.invocation.time_scale;
     if (smart_image_click_context) {
-      float red{}, green{}, blue{}, alpha{};
-      if (swscanf_s(argv[effective_argc - 1] + 9, L"%d|%d|%f|%f|%f|%f",
-                    &g_render_click_x, &g_render_click_y, &red, &green, &blue, &alpha) != 6 ||
-          g_render_click_x < 0 || g_render_click_x > 8192 ||
-          g_render_click_y < 0 || g_render_click_y > 8192 ||
-          !std::isfinite(red) || !std::isfinite(green) || !std::isfinite(blue) ||
-          !std::isfinite(alpha) || red < 0 || red > 1 || green < 0 || green > 1 ||
-          blue < 0 || blue > 1 || alpha < 0 || alpha > 1) return 3;
-      g_app_picker_color = {red, green, blue, alpha};
+      g_render_click_x = parsed.invocation.click_x;
+      g_render_click_y = parsed.invocation.click_y;
+      g_app_picker_color = parsed.invocation.picker_color;
       g_render_click_enabled = true;
     }
     if (smart_image_draw_context) g_render_draw_enabled = true;
-  }
+    if (request_mode && !parse_parameter_payload(argv[4], requested_parameters)) return 3;
   if (g_mask_model_enabled) {
     std::string scene_id = "rectangle";
     if (mask_context_request_mode) {
