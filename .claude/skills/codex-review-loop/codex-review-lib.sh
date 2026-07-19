@@ -186,9 +186,10 @@ owner_clearances() {
 #   - bodied COMMENTED reviews / top-level comments (no reply threading): a
 #     later top-level comment by $me containing the explicit "[ack]" marker
 #     (an ordinary status comment is NOT an ack), or the author's later
-#     approval/dismissal. $me's own top-level comments are the ack channel and
-#     do not themselves block; $me hard-blocks via a review or a non-reply
-#     inline comment, which DO block even from $me.
+#     approval/dismissal. Only $me's [ack] comments are exempt from blocking
+#     (they are the resolution signal); $me's marker-less comments block like
+#     any owner's, so a human comment from the session's own login is never
+#     dropped.
 
 # Owner INLINE feedback with no later resolution, thread-scoped (input: pull
 # review-comments array). Args: $1 = this session's login; $2 = clearances JSON.
@@ -244,22 +245,23 @@ owner_reviews_unresolved() {
 # Owner TOP-LEVEL comments with no later resolution (input: issue-comments
 # array). Args: $1 = this session's login; $2 = clearances JSON. Excludes bare
 # "@codex review" triggers (real feedback containing the phrase is kept) and
-# $me's own comments (the ack channel). Blocks a non-$me owner comment with no
-# later EXPLICIT "[ack]" comment by $me (>= blocks a same-second race,
-# fail-closed; an ordinary status comment by $me is NOT an ack — only the
-# marker counts) and no later approval/dismissal by its author — including
-# comments that predate this loop invocation entirely: a pre-existing
-# unaddressed owner comment must fail closed, not be superseded by a fresh
-# Codex clean.
+# ONLY $me's "[ack]" comments (the resolution signal itself). Every other
+# owner comment blocks — including $me's own marker-less comments: with an
+# owner-authenticated token a human "merge不可" from the same login must not
+# be dropped, and the loop's own status comments simply get cleared by its
+# final [ack]. A comment blocks while there is no LATER [ack] by $me (>=
+# blocks a same-second race, fail-closed) and no later approval/dismissal by
+# its author — including comments that predate this loop invocation entirely:
+# a pre-existing unaddressed owner comment must fail closed, not be superseded
+# by a fresh Codex clean.
 owner_comments_unresolved() {
   jq -r --arg me "$1" --argjson clr "$2" --argjson owner "$OWNER_LOGINS" '
     def nontrigger: select((.body | ascii_downcase | gsub("[[:space:]]"; "")) != "@codexreview");
-    ( [ .[] | select(.user.login == $me)
-        | select(.body | ascii_downcase | contains("[ack]"))
-        | .created_at ] | max // "" ) as $ack
+    def isack: .user.login == $me and (.body | ascii_downcase | contains("[ack]"));
+    ( [ .[] | select(isack) | .created_at ] | max // "" ) as $ack
     | .[] | nontrigger
     | select([.user.login] | inside($owner))
-    | select(.user.login != $me)
+    | select(isack | not)
     | select(.created_at >= $ack)
     | . as $c | select( ($clr[$c.user.login] // "") == "" or $c.created_at > $clr[$c.user.login] )
     | "OWNER-COMMENT id=\(.id): \((.body | split("\n"))[0])"'

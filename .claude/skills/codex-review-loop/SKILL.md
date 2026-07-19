@@ -137,9 +137,11 @@ merge 側 (`codex-merge-guard.sh` が head 拘束 clean なしに merge を拒�
   する (マーカーなしのステータス報告は ack にならない。ループ開始前から存在する
   未対応 owner コメントも fail-closed に block する)。いずれも
   作者自身の後続 approve/dismiss でも clear される (per-reviewer)。self-block
-  回避は **authorship** で狭く行う: セッション自身の認証 login (`gh api user`) の
-  inline 返信と top-level コメント (ack チャネル) だけを blocker から除外し、
-  同 login でも非返信 inline や bodied review は本物のフィードバックとして拾う)、
+  回避は最小限: セッション自身の認証 login (`gh api user`) の inline 返信と
+  **`[ack]` マーカー付き top-level コメント (解決シグナルそのもの) だけ**を
+  blocker から除外し、同 login でもマーカーなし top-level コメント・非返信
+  inline・bodied review は本物のフィードバックとして拾う (owner 認証トークンで
+  回している時に人間の「merge不可」コメントが落ちないように))、
   (b) 現在の
   head SHA に拘束された Codex text clean を fail-closed で再確認し (PR 本体 👍
   だけの reaction clean は受理しない)、(c) `gh pr merge --match-head-commit

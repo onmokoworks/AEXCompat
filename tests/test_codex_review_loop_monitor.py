@@ -422,10 +422,19 @@ def test_session_status_comment_is_not_an_ack() -> None:
     assert "OWNER-COMMENT" in _call("owner_comments_unresolved", payload, ME, NO_CLEAR)
 
 
-def test_session_own_comment_does_not_block() -> None:
-    # The session's own top-level comments are the ack channel, not blockers.
-    payload = [_toplevel(ME, "2026-07-18T11:00:00Z", "status update")]
+def test_session_ack_comment_does_not_block() -> None:
+    # The [ack] comment is the resolution signal itself, never a blocker.
+    payload = [_toplevel(ME, "2026-07-18T11:00:00Z", "[ack] all owner feedback addressed")]
     assert _call("owner_comments_unresolved", payload, ME, NO_CLEAR) == ""
+
+
+def test_session_markerless_comment_blocks_like_any_owner() -> None:
+    # With an owner-authenticated token, a human comment from the same login
+    # ("merge不可") must not be dropped; it blocks until a LATER [ack].
+    payload = [_toplevel(ME, "2026-07-18T11:00:00Z", "merge不可、先に直して")]
+    assert "OWNER-COMMENT" in _call("owner_comments_unresolved", payload, ME, NO_CLEAR)
+    resolved = payload + [_toplevel(ME, "2026-07-18T12:00:00Z", "[ack] 対応した", id=78)]
+    assert _call("owner_comments_unresolved", resolved, ME, NO_CLEAR) == ""
 
 
 def test_owner_comment_cleared_by_later_approval() -> None:
