@@ -1811,7 +1811,10 @@ const LIVE_RENDER_FRAME_DEADLINE_MS: u64 = 30_000;
 #[derive(Clone, PartialEq)]
 struct LiveSessionKey {
     plugin_sha256: String,
-    dependency_hashes: Vec<String>,
+    /// Identity of every approved dependency: staged basename, size, and
+    /// content hash. The sealed tree stages dependencies by basename, so a
+    /// renamed DLL with identical bytes still needs a fresh session.
+    dependency_identities: Vec<String>,
     /// Parameter structure only (slots, kinds, ranges, choices); values ride
     /// each frame's v:2 message and must not force a reopen.
     parameter_signature: String,
@@ -1874,6 +1877,7 @@ struct LiveSessionHandle {
 struct DecodedInput {
     path: PathBuf,
     modified: Option<SystemTime>,
+    size: u64,
     width: u32,
     height: u32,
     rgba: std::sync::Arc<Vec<u8>>,
@@ -1906,11 +1910,15 @@ impl LiveSessionState {
     }
 
     fn decode_input(&mut self, path: &Path) -> Result<&DecodedInput, String> {
-        let modified = fs::metadata(path).and_then(|meta| meta.modified()).ok();
-        let stale = !self
-            .decoded
-            .as_ref()
-            .is_some_and(|cached| cached.path.as_path() == path && cached.modified == modified);
+        // Both the timestamp and the byte count key the cache: an overwrite
+        // that preserves mtime (coarse filesystem resolution, mtime-keeping
+        // tools) must still invalidate when the size moved.
+        let metadata = fs::metadata(path).ok();
+        let modified = metadata.as_ref().and_then(|meta| meta.modified().ok());
+        let size = metadata.as_ref().map(|meta| meta.len()).unwrap_or_default();
+        let stale = !self.decoded.as_ref().is_some_and(|cached| {
+            cached.path.as_path() == path && cached.modified == modified && cached.size == size
+        });
         if stale {
             let decoded = aexcompat_broker::image_render::decode_bounded_image(path, "input")
                 .map_err(|error| error.to_string())?;
@@ -1918,6 +1926,7 @@ impl LiveSessionState {
             self.decoded = Some(DecodedInput {
                 path: path.to_path_buf(),
                 modified,
+                size,
                 width,
                 height,
                 rgba: std::sync::Arc::new(decoded.into_rgba8().into_raw()),
@@ -1941,10 +1950,22 @@ fn live_render(state: &mut LiveSessionState, request: &LiveRenderRequest) -> Res
     };
     let key = LiveSessionKey {
         plugin_sha256: request.plugin_sha256.clone(),
-        dependency_hashes: request
+        dependency_identities: request
             .dependencies
             .iter()
-            .map(|artifact| format!("{:x?}", artifact.expected_sha256))
+            .map(|artifact| {
+                let basename = artifact
+                    .path
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                let hash: String = artifact
+                    .expected_sha256
+                    .iter()
+                    .map(|byte| format!("{byte:02x}"))
+                    .collect();
+                format!("{basename}:{}:{hash}", artifact.expected_size)
+            })
             .collect(),
         parameter_signature: parameter_structure_signature(&request.parameters),
         width,

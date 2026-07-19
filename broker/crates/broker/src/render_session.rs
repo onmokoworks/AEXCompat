@@ -1112,6 +1112,16 @@ impl RenderSession {
                 self.time_scale
             ),
         };
+        // The encoder's 16 KiB payload cap keeps every message far below the
+        // protocol's 64 KiB framing limit today, but the bound is enforced
+        // here regardless: an oversized message must be a caller error before
+        // any transport mutation, never a send failure that kills a healthy
+        // session.
+        if message.len() > MAX_MESSAGE_BYTES {
+            return Err(invalid(
+                "per-frame parameter message exceeds the protocol message cap",
+            ));
+        }
         self.transport.write_input_slot(rgba);
         self.transport
             .write_header_u32(INPUT_GENERATION_OFFSET, expected_generation);
