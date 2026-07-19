@@ -768,15 +768,19 @@ impl RenderSession {
                 }
                 if is_fatal_session_error(done.render_error) {
                     // The worker reported a host-protection invariant failure
-                    // and is exiting fail-closed; the session is over.
+                    // and is running its own fail-closed teardown (setdown
+                    // selectors, final report, exit 24). Wait boundedly for
+                    // that exit instead of racing it with a job termination:
+                    // collection terminates the job anyway if the worker does
+                    // not leave within the timeout.
                     return Err(self.invalidate(
                         "worker_invariant_failure",
                         format!(
                             "frame {frame_index} reported the fatal session error {}",
                             done.render_error
                         ),
-                        true,
-                        POST_TERMINATION_COLLECT_TIMEOUT,
+                        false,
+                        CLOSE_COLLECT_TIMEOUT,
                     ));
                 }
                 // Frame-local diagnostic (protocol §4.3): the sequence state
