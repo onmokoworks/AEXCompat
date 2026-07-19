@@ -5032,74 +5032,8 @@ aexcompat::worker_render_report::ClassicSubsystemDiagnostics capture_classic_sub
        i64(aexcompat::aegp_async_layer::diagnostics().reserved_bytes)}};
 }
 
-int selftest_render_output_safety(int, wchar_t**) {
-  const bool passed = aexcompat::host_guard_selftests::verify_render_output_safety();
-  std::cout << "{\"render_output_safety\":\"" << (passed ? "passed" : "failed")
-            << "\",\"cleanup_selector\":\"" << escape(g_last_seh_selector)
-            << "\",\"cleanup_error\":" << g_last_seh_error
-            << ",\"cleanup_calls\":"
-            << aexcompat::host_guard_selftests::cleanup_safety_selftest_calls()
-            << ",\"guard_pages\":true,\"overrun_beyond_64_detected\":true}\n";
-  return passed ? 0 : 1;
-}
-
-int selftest_crash_minidump(int, wchar_t** argv) {
-  if (!aexcompat::worker_runtime::minidump::configure_directory(
-          std::filesystem::path(argv[2]))) {
-    std::cout << "{\"crash_minidump\":\"failed\",\"reason\":\"bad_directory\"}\n";
-    return 1;
-  }
-  const uint32_t exception_code = selftest_trigger_guarded_crash();
-  const std::filesystem::path dump_path =
-      aexcompat::worker_runtime::minidump::current_process_dump_path();
-  std::error_code dump_size_error;
-  const auto dump_size = std::filesystem::file_size(dump_path, dump_size_error);
-  const bool written = !dump_size_error && dump_size > 0;
-  std::cout << "{\"crash_minidump\":\"" << (written ? "passed" : "failed")
-            << "\",\"exception_code\":" << exception_code
-            << ",\"dump_bytes\":" << (written ? dump_size : 0)
-            << ",\"attempted\":"
-            << (aexcompat::worker_runtime::minidump::attempted() ? "true" : "false")
-            << "}\n";
-  return written ? 0 : 1;
-}
-
-int selftest_pf_adv_time(int, wchar_t**) {
-  const bool passed = aexcompat::worker_runtime::pf_adv_time::verify_suite_versions();
-  std::cout << "{\"pf_adv_time_suite_versions\":\"" << (passed ? "passed" : "failed")
-            << "\",\"v1_slots\":4,\"v2_slots\":4,\"v3_slots\":4,\"v4_slots\":5,\"independent_identity\":true"
-            << ",\"guard_intact\":true,\"reverse_release\":true,\"suite_leases_balanced\":"
-            << (suite_leases_balanced() ? "true" : "false") << "}\n";
-  return passed ? 0 : 1;
-}
-
-int selftest_suite_entry_utility13(int, wchar_t**) {
-  const bool passed = verify_suite_entry_guards_and_utility13();
-  std::cout << "{\"suite_entry_utility13\":\"" << (passed ? "passed" : "failed")
-            << "\",\"null_fail_closed\":true,\"normal_effect_available\":true"
-            << ",\"versions_12_14_rejected\":true,\"mask_callbacks_exposed\":false"
-            << ",\"suite_leases_balanced\":"
-            << (suite_leases_balanced() ? "true" : "false") << "}\n";
-  return passed ? 0 : 1;
-}
-
-int selftest_pf_adv_app(int, wchar_t**) {
-  const bool passed =
-      aexcompat::host_guard_selftests::verify_pf_adv_app_suite_versions();
-  std::cout << "{\"pf_adv_app_suite_versions\":\"" << (passed ? "passed" : "failed")
-            << "\",\"v1_slots\":10,\"v2_slots\":11,\"independent_identity\":true"
-            << ",\"suite_leases_balanced\":"
-            << (suite_leases_balanced() ? "true" : "false") << "}\n";
-  return passed ? 0 : 1;
-}
-
-int selftest_effect_param_union(int, wchar_t**) {
-  const bool passed = verify_aegp_effect_param_union_suite4();
-  std::cout << "{\"aegp_effect_param_union_suite4\":\""
-            << (passed ? "passed" : "failed")
-            << "\",\"successful_calls\":" << g_aegp_effect_param_union_calls << "}\n";
-  return passed ? 0 : 1;
-}
+// The six former host selftest wrappers and their JSON now live in
+// worker_fixed_selftest_routing.cpp beside the command catalog.
 
 bool run_pf_path_data_hardening_selftest() {
   return verify_pf_path_data_hardening(
@@ -5238,9 +5172,7 @@ int worker_main_impl(int argc, wchar_t **argv) {
   SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX);
   const auto fixed_selftest = aexcompat::worker_runtime::fixed_selftests::dispatch(
       {argc, argv, is_render_worker()},
-      {{&selftest_render_output_safety, &selftest_crash_minidump,
-        &selftest_pf_adv_time, &selftest_suite_entry_utility13,
-        &selftest_pf_adv_app, &selftest_effect_param_union},
+      {{&escape, &selftest_trigger_guarded_crash, &suite_leases_balanced},
        {&verify_aegp_installed_effect_catalog_suite4,
         &verify_parameter_animation_transport, &verify_pf_param_utils_suite3,
         &verify_pre_checkout_result_contract,
