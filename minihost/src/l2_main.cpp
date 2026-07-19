@@ -87,6 +87,7 @@
 #include "worker_aegp_item_render_runtime.hpp"
 #include "worker_aegp_world_selftests.hpp"
 #include "worker_aegp_init_runtime.hpp"
+#include "worker_aegp_timeline_probe.hpp"
 #include "worker_aegp_scene.hpp"
 #include "worker_aegp_host_selftests.hpp"
 #include "worker_aegp_compat_selftests.hpp"
@@ -126,6 +127,7 @@ using aexcompat::parameter_selftests::verify_pf_param_utils_suite3;
 using namespace aexcompat::pf_ae_channel;
 using namespace aexcompat::pf_state_runtime;
 using namespace aexcompat::worker_runtime::parameter_execution;
+using namespace aexcompat::worker_runtime::aegp_timeline;
 
 using namespace aexcompat::color_settings;
 
@@ -2942,171 +2944,6 @@ int32_t __cdecl get_effect_camera_matrix(void* effect, const AegpTime* comp_time
   return 0;
 }
 auto& g_aegp_selection = scene_runtime_state().selection;
-#pragma pack(push, 1)
-struct TimelinePacketHeader {
-  uint32_t magic{0x52414558u};
-  uint16_t version{2};
-  uint16_t type{13};
-  uint64_t sequence{1};
-};
-struct TimelineKeyframeRequest {
-  TimelinePacketHeader header{};
-  uint64_t comp_id{1001};
-  uint64_t layer_id{2001};
-};
-struct TimelineKeyframesSnapshotHeader {
-  TimelinePacketHeader header{};
-  uint64_t comp_id{};
-  uint64_t layer_id{};
-  uint32_t total_data_bytes{};
-  uint32_t prop_count{};
-};
-struct TimelineKeyframedPropHeader {
-  char name[64]{};
-  char effect_match[32]{};
-  uint32_t keyframe_count{};
-  uint8_t reserved[4]{};
-};
-struct TimelineKeyframeEntry {
-  int32_t frame{};
-  uint8_t interpolation{};
-  uint8_t reserved[3]{};
-  float value[4]{};
-};
-struct TimelineHostSeekRequest {
-  TimelinePacketHeader header{0x52414558u, 2, 5, 7};
-  int64_t frame{75};
-  double time_seconds{2.5};
-  double fps{30.0};
-  uint32_t flags{};
-  uint32_t reserved{};
-};
-struct TimelineHostSeekAck {
-  TimelinePacketHeader header{};
-  int32_t status{};
-  int64_t accepted_frame{};
-  double accepted_time_seconds{};
-  double accepted_fps{};
-};
-struct TimelineHostTrimRequest {
-  TimelinePacketHeader header{0x52414558u, 2, 15, 9};
-  uint64_t comp_id{1001};
-  uint64_t layer_id{2001};
-  int32_t in_frame{30};
-  int32_t out_frame{240};
-  uint64_t reserved{};
-};
-struct TimelineHostTrimAck {
-  TimelinePacketHeader header{};
-  uint32_t status{};
-  uint32_t reserved{};
-  uint64_t layer_id{};
-  int32_t in_frame{};
-  int32_t out_frame{};
-};
-struct TimelineHostSwitchRequest {
-  TimelinePacketHeader header{0x52414558u, 2, 22, 11};
-  uint64_t comp_id{1001};
-  uint64_t layer_id{2001};
-  uint32_t flags_to_toggle{0x00000036u};
-  uint32_t reserved{};
-};
-struct TimelineHostSwitchAck {
-  TimelinePacketHeader header{};
-  uint32_t status{};
-  uint32_t applied_flags{};
-  uint64_t layer_id{};
-  uint32_t reserved{};
-};
-#pragma pack(pop)
-static_assert(sizeof(TimelineKeyframeRequest) == 32);
-static_assert(sizeof(TimelineKeyframesSnapshotHeader) == 40);
-static_assert(sizeof(TimelineKeyframedPropHeader) == 104);
-static_assert(sizeof(TimelineKeyframeEntry) == 24);
-static_assert(sizeof(TimelineHostSeekRequest) == 48);
-static_assert(sizeof(TimelineHostSeekAck) == 44);
-static_assert(sizeof(TimelineHostTrimRequest) == 48);
-static_assert(sizeof(TimelineHostTrimAck) == 40);
-static_assert(sizeof(TimelineHostSwitchRequest) == 40);
-static_assert(sizeof(TimelineHostSwitchAck) == 36);
-
-struct KeyframePipeProbe {
-  HANDLE pipe{INVALID_HANDLE_VALUE};
-  std::thread reader;
-  std::atomic_bool connected{false};
-  std::atomic_bool request_sent{false};
-  std::atomic_bool response_received{false};
-  std::atomic_bool response_valid{false};
-  std::atomic_uint32_t response_bytes{0};
-
-  bool start() {
-    pipe = CreateNamedPipeW(L"\\\\.\\pipe\\ae-timeline-sync",
-        PIPE_ACCESS_DUPLEX, PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
-        1, 1024 * 1024, 1024 * 1024, 0, nullptr);
-    if (pipe == INVALID_HANDLE_VALUE) return false;
-    reader = std::thread([this]() {
-      const BOOL connected_now = ConnectNamedPipe(pipe, nullptr) ||
-          GetLastError() == ERROR_PIPE_CONNECTED;
-      if (!connected_now) return;
-      connected = true;
-      const TimelineKeyframeRequest request{};
-      DWORD written = 0;
-      if (WriteFile(pipe, &request, sizeof(request), &written, nullptr) &&
-          written == sizeof(request)) request_sent = true;
-      else return;
-
-      std::vector<uint8_t> inbound;
-      inbound.reserve(4096);
-      std::array<uint8_t, 4096> chunk{};
-      while (inbound.size() < 1024 * 1024) {
-        DWORD bytes_read = 0;
-        if (!ReadFile(pipe, chunk.data(), static_cast<DWORD>(chunk.size()), &bytes_read, nullptr) ||
-            bytes_read == 0) return;
-        inbound.insert(inbound.end(), chunk.begin(), chunk.begin() + bytes_read);
-        for (std::size_t offset = 0;
-             offset + sizeof(TimelineKeyframesSnapshotHeader) <= inbound.size(); ++offset) {
-          TimelineKeyframesSnapshotHeader header{};
-          std::memcpy(&header, inbound.data() + offset, sizeof(header));
-          if (header.header.magic != 0x52414558u || header.header.version != 2 ||
-              header.header.type != 14) continue;
-          if (header.total_data_bytes > 1024 * 1024 - sizeof(header) ||
-              offset + sizeof(header) + header.total_data_bytes > inbound.size()) continue;
-          response_received = true;
-          response_bytes = static_cast<uint32_t>(sizeof(header) + header.total_data_bytes);
-          if (header.comp_id != 1001 || header.layer_id != 2001 || header.prop_count != 1 ||
-              header.total_data_bytes != sizeof(TimelineKeyframedPropHeader) +
-                  2 * sizeof(TimelineKeyframeEntry)) return;
-          TimelineKeyframedPropHeader property{};
-          TimelineKeyframeEntry first{}, second{};
-          const auto* payload = inbound.data() + offset + sizeof(header);
-          std::memcpy(&property, payload, sizeof(property));
-          std::memcpy(&first, payload + sizeof(property), sizeof(first));
-          std::memcpy(&second, payload + sizeof(property) + sizeof(first), sizeof(second));
-          const bool strings_valid = std::strncmp(property.name, "Amount", sizeof(property.name)) == 0 &&
-              std::strncmp(property.effect_match, "AEXCompat.Probe", sizeof(property.effect_match)) == 0;
-          const bool keys_valid = property.keyframe_count == 2 &&
-              first.frame == 0 && first.interpolation == 0 && first.value[0] == 10.0f &&
-              second.frame == 60 && second.interpolation == 2 && second.value[0] == 90.0f;
-          response_valid = strings_valid && keys_valid;
-          return;
-        }
-      }
-    });
-    return true;
-  }
-
-  void stop() {
-    if (reader.joinable())
-      CancelSynchronousIo(static_cast<HANDLE>(reader.native_handle()));
-    if (reader.joinable()) reader.join();
-    if (pipe != INVALID_HANDLE_VALUE) {
-      DisconnectNamedPipe(pipe);
-      CloseHandle(pipe);
-      pipe = INVALID_HANDLE_VALUE;
-    }
-  }
-  ~KeyframePipeProbe() { stop(); }
-};
 
 struct SeekPipeProbe {
   HANDLE pipe{INVALID_HANDLE_VALUE};
