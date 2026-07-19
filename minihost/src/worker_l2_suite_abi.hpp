@@ -16,8 +16,6 @@ int32_t __cdecl adv_app_info_text(const char*, const char*);
 int32_t __cdecl adv_app_info_text3(const char*, const char*, const char*);
 int32_t __cdecl composite_rect8(void*, LegacyRect*, int32_t, void*, int32_t, int32_t,
                                 int32_t, int32_t, void*);
-int32_t __cdecl legacy_new_world(void*, int32_t, int32_t, int32_t, void*);
-int32_t __cdecl dispose_world(void*, void*);
 }
 double __cdecl ansi_atan(double);
 double __cdecl ansi_atan2(double, double);

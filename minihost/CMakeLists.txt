@@ -45,6 +45,7 @@ set(AEXCOMPAT_WORKER_RUNTIME_CORE_SOURCES
     src/worker_pf_suites.cpp
     src/worker_report.cpp
     src/worker_suite_abi.cpp
+    src/worker_world_registry.cpp
     src/worker_world_safety.cpp)
 
 add_library(aex_worker_runtime_core OBJECT ${AEXCOMPAT_WORKER_RUNTIME_CORE_SOURCES})

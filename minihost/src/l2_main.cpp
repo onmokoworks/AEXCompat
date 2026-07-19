@@ -70,6 +70,7 @@
 #include "worker_aegp_scene_runtime.hpp"
 #include "worker_handle_runtime.hpp"
 #include "worker_suite_abi.hpp"
+#include "worker_world_registry.hpp"
 #include "worker_world_safety.hpp"
 #include "worker_pf_suites_internal.hpp"
 #include "worker_report.hpp"
@@ -171,11 +172,19 @@ using aexcompat::world_safety::DispatchWorldFormat;
 using aexcompat::world_safety::DispatchWorldFormatScope;
 using aexcompat::world_safety::LocalEffectWorld;
 using aexcompat::world_safety::LocalRationalScale;
-using aexcompat::world_safety::OwnedWorldResolution;
 using aexcompat::world_safety::bounded_argb8_world;
 using aexcompat::world_safety::bounded_typed_world;
 using aexcompat::world_safety::kEffectWorldSize;
 using aexcompat::world_safety::resolve_registered_dispatch_world;
+using aexcompat::world_registry::dispose_world;
+using aexcompat::world_registry::get_pixel_format;
+using aexcompat::world_registry::kPixelFormatArgb32;
+using aexcompat::world_registry::kPixelFormatArgb64;
+using aexcompat::world_registry::kPixelFormatArgb128;
+using aexcompat::world_registry::kPixelFormatGpuBgra128;
+using aexcompat::world_registry::legacy_new_world;
+using aexcompat::world_registry::new_world;
+using aexcompat::world_registry::resolve_dispatch_world_format;
 using aexcompat::render_pixel_transport::argb_to_rgba8;
 using aexcompat::render_pixel_transport::argb_to_rgba_native;
 using aexcompat::render_pixel_transport::rgba8_to_argb;
@@ -4297,19 +4306,6 @@ MaskOutlineSuite g_mask_outline_suite{&is_mask_outline_open, &set_mask_outline_o
                                       &create_mask_outline_feather,
                                       &delete_mask_outline_feather};
 
-constexpr int32_t kPixelFormatArgb32 = 1650946657;
-constexpr int32_t kPixelFormatArgb64 = 909206881;
-constexpr int32_t kPixelFormatArgb128 = 842229089;
-constexpr int32_t kPixelFormatGpuBgra128 = 1094992704;
-constexpr uint64_t kMaxWorldBytes = 256ULL * 1024 * 1024;
-constexpr std::size_t kMaxWorldCount = 64;
-
-struct OwnedWorld {
-  void* pixels{};
-  uint64_t size{};
-  int32_t pixel_format{};
-};
-std::unordered_map<void*, OwnedWorld> g_owned_worlds;
 std::atomic<uint64_t> g_platform_world_bytes{};
 struct PlatformWorldBacking {
   LocalEffectWorld world{};
@@ -4348,47 +4344,6 @@ constexpr std::size_t kMaxPlatformReferences = 64;
 constexpr std::size_t kMaxOwnedAegpWorlds = 64;
 constexpr uint64_t kMaxPlatformWorldBytes = 64ULL * 1024 * 1024;
 std::mutex g_world_mutex;
-
-OwnedWorldResolution resolve_owned_world(
-    const void* world, void* data, int32_t rowbytes, int32_t width,
-    int32_t height, DispatchWorldFormat& result) {
-  std::lock_guard<std::mutex> lock(g_world_mutex);
-  const auto exact = g_owned_worlds.find(const_cast<void*>(world));
-  if (exact != g_owned_worlds.end()) {
-    if (exact->second.pixels != data) return OwnedWorldResolution::rejected;
-    result = {world, data, width, height, rowbytes, exact->second.pixel_format, 0};
-    return OwnedWorldResolution::resolved;
-  }
-  const OwnedWorld* unique_owned = nullptr;
-  const void* unique_world = nullptr;
-  for (const auto& candidate : g_owned_worlds) {
-    if (candidate.second.pixels != data) continue;
-    const auto* candidate_bytes = static_cast<const std::byte*>(candidate.first);
-    int32_t candidate_rowbytes{}, candidate_width{}, candidate_height{};
-    std::memcpy(&candidate_rowbytes, candidate_bytes + 32, sizeof(candidate_rowbytes));
-    std::memcpy(&candidate_width, candidate_bytes + 36, sizeof(candidate_width));
-    std::memcpy(&candidate_height, candidate_bytes + 40, sizeof(candidate_height));
-    if (candidate_rowbytes != rowbytes || candidate_width != width ||
-        candidate_height != height) continue;
-    if (unique_owned) return OwnedWorldResolution::rejected;
-    unique_owned = &candidate.second;
-    unique_world = candidate.first;
-  }
-  if (!unique_owned) return OwnedWorldResolution::not_owned;
-  result = {unique_world, data, width, height, rowbytes,
-            unique_owned->pixel_format, 0};
-  return OwnedWorldResolution::resolved;
-}
-
-bool resolve_dispatch_world_format(const void* world,
-                                   DispatchWorldFormat& result) {
-  return aexcompat::world_safety::resolve_dispatch_world_format(
-      world, &resolve_owned_world, result);
-}
-uint32_t g_worlds_created{};
-uint32_t g_worlds_disposed{};
-uint32_t g_invalid_world_operations{};
-uint64_t g_world_bytes{};
 
 constexpr std::size_t kMaxAsyncReceipts = 32;
 constexpr uint64_t kMaxAsyncReceiptBytes = 64ULL * 1024 * 1024;
@@ -5728,9 +5683,9 @@ bool get_aegp_world_view(void** handle, AegpWorldView* view, LocalEffectWorld* w
   const auto found = g_aegp_world_views.find(handle);
   if (found == g_aegp_world_views.end() || !found->second.pf_world) return false;
   if (!found->second.borrowed && (!*handle || *handle != found->second.pf_world)) return false;
-  const auto owned = g_owned_worlds.find(found->second.pf_world);
   if (!found->second.borrowed &&
-      (owned == g_owned_worlds.end() || owned->second.pixel_format != found->second.pixel_format))
+      !aexcompat::world_registry::owned_world_matches(
+          found->second.pf_world, found->second.pixel_format))
     return false;
   std::memcpy(world, found->second.pf_world, sizeof(*world));
   if (!world->data || world->width <= 0 || world->height <= 0 || world->rowbytes <= 0) return false;
@@ -6645,8 +6600,6 @@ int32_t __cdecl aegp_world_reference_platform(int32_t plugin_id, void* platform,
   return 0;
 }
 
-int32_t __cdecl new_world(void*, int32_t, int32_t, int32_t, int32_t, void*);
-int32_t __cdecl dispose_world(void*, void*);
 bool world_lifetimes_balanced();
 
 bool verify_aegp_world_suite3() {
@@ -7234,92 +7187,7 @@ bool verify_aegp_item_staged_worlds() {
 }
 
 bool world_lifetimes_balanced() {
-  std::lock_guard<std::mutex> lock(g_world_mutex);
-  return g_owned_worlds.empty() && g_worlds_created == g_worlds_disposed &&
-      g_world_bytes == 0;
-}
-
-int32_t __cdecl new_world(void*, int32_t width, int32_t height, int32_t clear_pixels,
-                          int32_t pixel_format, void* world) {
-  std::lock_guard<std::mutex> lock(g_world_mutex);
-  int32_t bytes_per_pixel = 0;
-  if (pixel_format == kPixelFormatArgb32) bytes_per_pixel = 4;
-  else if (pixel_format == kPixelFormatArgb64) bytes_per_pixel = 8;
-  else if (pixel_format == kPixelFormatArgb128 || pixel_format == kPixelFormatGpuBgra128)
-    bytes_per_pixel = 16;
-  if (!world || width <= 0 || height <= 0 || bytes_per_pixel == 0 ||
-      g_owned_worlds.count(world) || g_owned_worlds.size() >= kMaxWorldCount) {
-    ++g_invalid_world_operations;
-    return 4;
-  }
-  const uint64_t rowbytes64 = static_cast<uint64_t>(width) * bytes_per_pixel;
-  const uint64_t size = rowbytes64 * static_cast<uint64_t>(height);
-  if (rowbytes64 > static_cast<uint64_t>((std::numeric_limits<int32_t>::max)()) ||
-      size > kMaxWorldBytes || g_world_bytes > kMaxWorldBytes - size) {
-    ++g_invalid_world_operations;
-    return 4;
-  }
-  void* pixels = ::operator new(static_cast<std::size_t>(size), std::nothrow);
-  if (!pixels) return 1;
-  // Never expose stale allocator contents when AE leaves scratch pixels unspecified.
-  std::memset(pixels, clear_pixels ? 0 : 0xcd, static_cast<std::size_t>(size));
-  std::memset(world, 0, kEffectWorldSize);
-  auto* bytes = static_cast<std::byte*>(world);
-  const int32_t flags = 2 | (pixel_format == kPixelFormatArgb32 ? 0 : 1);
-  const int32_t rowbytes = static_cast<int32_t>(rowbytes64);
-  const std::array<int32_t, 4> extent{0, 0, width, height};
-  const int32_t aspect_num = 1;
-  const uint32_t aspect_den = 1;
-  std::memcpy(bytes + 16, &flags, sizeof(flags));
-  std::memcpy(bytes + 24, &pixels, sizeof(pixels));
-  std::memcpy(bytes + 32, &rowbytes, sizeof(rowbytes));
-  std::memcpy(bytes + 36, &width, sizeof(width));
-  std::memcpy(bytes + 40, &height, sizeof(height));
-  std::memcpy(bytes + 44, extent.data(), sizeof(extent));
-  std::memcpy(bytes + 88, &aspect_num, sizeof(aspect_num));
-  std::memcpy(bytes + 92, &aspect_den, sizeof(aspect_den));
-  g_owned_worlds.emplace(world, OwnedWorld{pixels, size, pixel_format});
-  ++g_worlds_created;
-  g_world_bytes += size;
-  return 0;
-}
-
-int32_t __cdecl legacy_new_world(void* effect_ref, int32_t width, int32_t height,
-                                 int32_t flags, void* world) {
-  if ((flags & ~3) != 0) return 4;
-  return new_world(effect_ref, width, height, flags & 1,
-                   (flags & 2) ? kPixelFormatArgb64 : kPixelFormatArgb32, world);
-}
-
-int32_t __cdecl dispose_world(void*, void* world) {
-  std::lock_guard<std::mutex> lock(g_world_mutex);
-  const auto found = g_owned_worlds.find(world);
-  if (!world || found == g_owned_worlds.end()) {
-    ++g_invalid_world_operations;
-    return 4;
-  }
-  ::operator delete(found->second.pixels);
-  g_world_bytes -= found->second.size;
-  g_owned_worlds.erase(found);
-  ++g_worlds_disposed;
-  std::memset(world, 0, kEffectWorldSize);
-  return 0;
-}
-
-int32_t __cdecl get_pixel_format(const void* world, int32_t* pixel_format) {
-  if (!world || !pixel_format) return 4;
-  {
-    std::lock_guard<std::mutex> lock(g_world_mutex);
-    const auto found = g_owned_worlds.find(const_cast<void*>(world));
-    if (found != g_owned_worlds.end()) {
-      *pixel_format = found->second.pixel_format;
-      return 0;
-    }
-  }
-  DispatchWorldFormat resolved{};
-  if (!resolve_dispatch_world_format(world, resolved)) return 4;
-  *pixel_format = resolved.pixel_format;
-  return 0;
+  return aexcompat::world_registry::lifetimes_balanced();
 }
 
 int32_t get_typed_pixel_data(void* world, void* pixels0, void** output,
@@ -8144,7 +8012,8 @@ bool verify_pixel_format_registry_rejection() {
 
 bool verify_world_double_dispose_rejected() {
   alignas(8) std::array<std::byte, kEffectWorldSize> world{};
-  const uint32_t invalid_before = g_invalid_world_operations;
+  const uint64_t invalid_before =
+      aexcompat::world_registry::statistics().invalid_operations;
   if (new_world(&g_effect, 7, 5, 1, kPixelFormatArgb128, world.data()) != 0) return false;
   void* pixels{};
   int32_t flags{}, rowbytes{}, width{}, height{}, format{};
@@ -8161,18 +8030,21 @@ bool verify_world_double_dispose_rejected() {
   const int32_t first = dispose_world(&g_effect, world.data());
   const int32_t second = dispose_world(&g_effect, world.data());
   return layout_valid && first == 0 && second != 0 &&
-      g_invalid_world_operations == invalid_before + 1 && world_lifetimes_balanced();
+      aexcompat::world_registry::statistics().invalid_operations ==
+          invalid_before + 1 && world_lifetimes_balanced();
 }
 
 bool verify_world_allocation_limit_rejected() {
   alignas(8) std::array<std::byte, kEffectWorldSize> world{};
   world.fill(std::byte{0x5a});
   const auto before = world;
-  const uint32_t invalid_before = g_invalid_world_operations;
+  const uint64_t invalid_before =
+      aexcompat::world_registry::statistics().invalid_operations;
   const int32_t error = new_world(&g_effect, 32768, 32768, 1,
                                   kPixelFormatArgb128, world.data());
   return error != 0 && world == before &&
-      g_invalid_world_operations == invalid_before + 1 && world_lifetimes_balanced();
+      aexcompat::world_registry::statistics().invalid_operations ==
+          invalid_before + 1 && world_lifetimes_balanced();
 }
 
 SuiteLeaseTracker g_suite_lease_tracker;
@@ -8823,18 +8695,12 @@ auto& g_gpu_allocations_created = gpu_transport::allocations_created;
 auto& g_gpu_allocations_freed = gpu_transport::allocations_freed;
 auto& g_invalid_gpu_memory_operations = gpu_transport::invalid_memory_operations;
 
-bool host_owns_gpu_fallback_world(void* world) {
-  std::lock_guard<std::mutex> lock(g_world_mutex);
-  return g_owned_worlds.count(world) != 0;
-}
-
 bool host_recognizes_smart_gpu_world(void* world) {
   return world && (world == g_smart_input_world || world == g_smart_output_world);
 }
 
 const bool g_gpu_transport_configured = [] {
-  gpu_transport::configure_host_world_fallback(
-      &new_world, &dispose_world, &host_owns_gpu_fallback_world,
+  aexcompat::world_registry::configure_gpu_fallback_bridge(
       &host_recognizes_smart_gpu_world);
   return true;
 }();
@@ -15624,6 +15490,23 @@ int worker_main_impl(int argc, wchar_t **argv) {
               << (passed ? "passed" : "failed") << "\"}\n";
     return passed ? 0 : 1;
   }
+  if (argc == 2 && std::wstring(argv[1]) == L"--self-test-pf-world-registry") {
+    const bool double_dispose = verify_world_double_dispose_rejected();
+    const bool allocation_limit = verify_world_allocation_limit_rejected();
+    const auto world_stats = aexcompat::world_registry::statistics();
+    const bool passed = double_dispose && allocation_limit &&
+        world_lifetimes_balanced() && world_stats.live_count == 0 &&
+        world_stats.live_bytes == 0;
+    std::cout << "{\"pf_world_registry\":\""
+              << (passed ? "passed" : "failed")
+              << "\",\"double_dispose_rejected\":"
+              << (double_dispose ? "true" : "false")
+              << ",\"allocation_limit_rejected\":"
+              << (allocation_limit ? "true" : "false")
+              << ",\"live_count\":" << world_stats.live_count
+              << ",\"live_bytes\":" << world_stats.live_bytes << "}\n";
+    return passed ? 0 : 1;
+  }
   if (argc == 2 && std::wstring(argv[1]) == L"--self-test-pf-fill-matte-legacy") {
     const bool passed = verify_legacy_fill_matte_callbacks();
     std::cout << "{\"pf_fill_matte_legacy_callbacks\":\""
@@ -17796,8 +17679,8 @@ int worker_main_impl(int argc, wchar_t **argv) {
             << ",\"arbitrary_interpolation_amount\":" << g_last_arbitrary_interpolation_amount
             << ",\"invalid_arbitrary_operations\":" << g_invalid_arbitrary_operations
             << ",\"world_lifetimes_balanced\":" << (world_lifetimes_balanced() ? "true" : "false")
-            << ",\"worlds_created\":" << g_worlds_created
-            << ",\"worlds_disposed\":" << g_worlds_disposed
+            << ",\"worlds_created\":" << aexcompat::world_registry::statistics().created
+            << ",\"worlds_disposed\":" << aexcompat::world_registry::statistics().disposed
             << ",\"receipt_lifetimes_balanced\":"
             << (async_receipt_lifetimes_balanced() ? "true" : "false")
             << ",\"receipts_created\":" << g_async_receipts_created
@@ -18058,11 +17941,12 @@ int worker_main_impl(int argc, wchar_t **argv) {
             << ",\"handle_fault_observed\":" << (handle_fault_observed ? "true" : "false")
             << ",\"world_fault_observed\":" << (world_fault_observed ? "true" : "false")
             << ",\"world_lifetimes_balanced\":" << (world_lifetimes_balanced() ? "true" : "false")
-            << ",\"worlds_created\":" << g_worlds_created
-            << ",\"worlds_disposed\":" << g_worlds_disposed
-            << ",\"live_world_count\":" << g_owned_worlds.size()
-            << ",\"live_world_bytes\":" << g_world_bytes
-            << ",\"invalid_world_operations\":" << g_invalid_world_operations
+            << ",\"worlds_created\":" << aexcompat::world_registry::statistics().created
+            << ",\"worlds_disposed\":" << aexcompat::world_registry::statistics().disposed
+            << ",\"live_world_count\":" << aexcompat::world_registry::statistics().live_count
+            << ",\"live_world_bytes\":" << aexcompat::world_registry::statistics().live_bytes
+            << ",\"invalid_world_operations\":"
+            << aexcompat::world_registry::statistics().invalid_operations
             << ",\"gpu_memory_lifetimes_balanced\":" << (gpu_memory_lifetimes_balanced() ? "true" : "false")
             << ",\"gpu_allocations_created\":" << g_gpu_allocations_created
             << ",\"gpu_allocations_freed\":" << g_gpu_allocations_freed

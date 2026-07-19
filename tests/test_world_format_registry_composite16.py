@@ -9,6 +9,8 @@ SOURCE = ROOT / "minihost" / "src" / "l2_main.cpp"
 RENDER_SOURCE = ROOT / "minihost" / "src" / "render_subsystem.cpp"
 WORLD_SAFETY_SOURCE = ROOT / "minihost" / "src" / "worker_world_safety.cpp"
 WORLD_SAFETY_HEADER = ROOT / "minihost" / "src" / "worker_world_safety.hpp"
+WORLD_REGISTRY_SOURCE = ROOT / "minihost" / "src" / "worker_world_registry.cpp"
+WORLD_REGISTRY_HEADER = ROOT / "minihost" / "src" / "worker_world_registry.hpp"
 
 
 def _worker() -> Path | None:
@@ -25,16 +27,39 @@ def test_dispatch_registry_is_tls_scoped_and_fail_closed():
     text = WORLD_SAFETY_SOURCE.read_text(encoding="utf-8")
     header = WORLD_SAFETY_HEADER.read_text(encoding="utf-8")
     main = SOURCE.read_text(encoding="utf-8")
+    registry = WORLD_REGISTRY_SOURCE.read_text(encoding="utf-8")
     assert "thread_local std::vector<std::vector<DispatchWorldFormat>>" in text
     assert "class DispatchWorldFormatScope" in header
     assert "entry->world == world" in text
     assert "entry.data == data && entry.rowbytes == rowbytes" in text
     assert "unique->pixel_format != entry.pixel_format" in text
     assert "OwnedWorldResolution::rejected" in text
-    assert "const auto exact = g_owned_worlds.find" in main
-    assert "candidate.second.pixels != data" in main
-    assert "OwnedWorldResolution::rejected" in main
-    assert "std::abs(rowbytes) / width" not in text + main
+    assert "const auto exact = g_worlds.find" in registry
+    assert "candidate.second.pixels != data" in registry
+    assert "OwnedWorldResolution::rejected" in registry
+    assert "std::abs(rowbytes) / width" not in text + main + registry
+
+
+def test_pf_owned_world_registry_is_a_genuine_bounded_component():
+    header = WORLD_REGISTRY_HEADER.read_text(encoding="utf-8")
+    source = WORLD_REGISTRY_SOURCE.read_text(encoding="utf-8")
+    main = SOURCE.read_text(encoding="utf-8")
+    cmake = (ROOT / "minihost" / "CMakeLists.txt").read_text(encoding="utf-8")
+    assert cmake.count("src/worker_world_registry.cpp") == 1
+    assert '#include "worker_world_registry.cpp"' not in main
+    assert "std::unordered_map<void*, OwnedWorld> g_worlds" in source
+    assert "constexpr std::size_t kMaxWorldCount = 64" in source
+    assert "constexpr uint64_t kMaxWorldBytes = 256ULL * 1024 * 1024" in source
+    assert "g_live_bytes > kMaxWorldBytes - size" in source
+    assert "found == g_worlds.end()" in source
+    assert "configure_gpu_fallback_bridge" in header + source
+    assert "configure_host_world_fallback" in source
+    assert "g_owned_worlds" not in main
+    assert "int32_t __cdecl new_world(" not in main
+    assert "configure_host_world_fallback" not in main
+    assert "g_aegp_world_views" not in source
+    assert "g_platform_worlds" not in source
+    assert "g_async_receipts" not in source
 
 
 def test_effect_world_abi_and_bounds_live_in_world_safety_component():
@@ -77,3 +102,24 @@ def test_composite16_runtime_provenance_and_concurrency_matrix():
     )
     assert completed.returncode == 0, completed.stderr or completed.stdout
     assert json.loads(completed.stdout) == {"world_transform_composite_rect": "passed"}
+
+
+def test_pf_world_registry_rejects_double_dispose_and_oversized_allocations():
+    worker = _worker()
+    assert worker is not None, "build aex_render_worker before running the runtime test"
+    completed = subprocess.run(
+        [worker, "--self-test-pf-world-registry"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr or completed.stdout
+    assert json.loads(completed.stdout) == {
+        "pf_world_registry": "passed",
+        "double_dispose_rejected": True,
+        "allocation_limit_rejected": True,
+        "live_count": 0,
+        "live_bytes": 0,
+    }
