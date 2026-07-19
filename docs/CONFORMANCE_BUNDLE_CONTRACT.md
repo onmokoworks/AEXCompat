@@ -35,8 +35,15 @@ The destination must not already exist. A native run copies the pinned AEX, decl
 input, harness, and the three native workers into the new bundle before dispatch. The report's
 `identities.workers` entries bind the exact L2, classic-render, and SmartFX worker bytes used by
 the run; validation reopens and hashes those bundle-local artifacts. Adapter-backed tests record
-an empty worker list because no native worker is executed.
+an empty worker list because no native worker is executed. An adapter receives the requested
+`--render-path` and must return `parameter_metadata` from its own immutable inspection step;
+the runner never derives defaults, types, or ranges from requested assignments. Metadata must
+be identical at every requested depth.
 
 Parameter values are limited to the typed sidecar transport: finite JSON numbers, strings,
 booleans (encoded as checkbox-compatible 0/1 scalars), or numeric component arrays. Null and
 mixed-type arrays are rejected by the manifest schema before any AEX inspection begins.
+Current native execution supports disabled color management, no working space, linear light
+disabled, and the `AEXCompat CPU`/`software` renderer aliases. Generated bundle paths
+(`manifest.json`, `report.json`, and the `diagnostics`, `outputs`, `raw`, `requests`, and
+`target` namespaces) are reserved and cannot be used by pinned artifacts.

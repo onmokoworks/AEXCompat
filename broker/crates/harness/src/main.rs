@@ -1786,6 +1786,44 @@ fn emit_typed_failure(message: &str) {
     eprintln!("{message}");
 }
 
+fn emit_typed_failure_with_parameter_metadata(
+    message: &str,
+    parameter_metadata: &serde_json::Value,
+) {
+    let mut document = typed_failure_document(message).unwrap_or_else(|| {
+        serde_json::json!({
+            "classification": "nonzero_exit",
+            "failure_stage": "render",
+        })
+    });
+    document["parameter_metadata"] = parameter_metadata.clone();
+    if let Ok(encoded) = serde_json::to_string(&document) {
+        println!("{encoded}");
+    }
+    eprintln!("{message}");
+}
+
+fn host_request_validation_failure(
+    parameter_metadata: &serde_json::Value,
+) -> serde_json::Value {
+    serde_json::json!({
+        "classification": "host_validation_error",
+        "failure_stage": "request_validation",
+        "parameter_metadata": parameter_metadata,
+    })
+}
+
+fn emit_host_request_validation_failure(
+    message: &str,
+    parameter_metadata: &serde_json::Value,
+) {
+    let document = host_request_validation_failure(parameter_metadata);
+    if let Ok(encoded) = serde_json::to_string(&document) {
+        println!("{encoded}");
+    }
+    eprintln!("{message}");
+}
+
 fn failure_diagnostics(message: &str) -> Option<FailureDiagnostics> {
     let diagnostics = json_after_marker(message, "diagnostics=")
         .or_else(|| json_after_marker(message, "worker report unavailable: "))?;
@@ -5171,32 +5209,39 @@ fn main() -> eframe::Result {
         });
         let plugin = Path::new(&args[2]);
         let hash = format!("{:X}", Sha256::digest(fs::read(plugin).unwrap()));
-        let mut parameters = aexcompat_broker::image_render::inspect_experimental_with_approved_dependencies(
-            &repository,
-            plugin,
-            &hash,
-            dependencies.clone(),
-        )
+        let (mut parameters, inspection_diagnostics) =
+            aexcompat_broker::image_render::inspect_experimental_with_approved_dependencies_and_diagnostics(
+                &repository,
+                plugin,
+                &hash,
+                dependencies.clone(),
+            )
         .unwrap_or_else(|error| {
             emit_typed_failure(&error.to_string());
             std::process::exit(1);
         });
+        let parameter_metadata = inspection_diagnostics["parameter_metadata"].clone();
         let timing = typed_request_timing(&document).unwrap_or_else(|error| {
-            eprintln!("{error}");
+            emit_host_request_validation_failure(&error, &parameter_metadata);
             std::process::exit(1);
         });
         let host_context = typed_request_host_context(&document).unwrap_or_else(|error| {
-            eprintln!("{error}");
+            emit_host_request_validation_failure(&error, &parameter_metadata);
             std::process::exit(1);
         });
         let render_settings = typed_request_render_settings(&document).unwrap_or_else(|error| {
-            eprintln!("{error}");
+            emit_host_request_validation_failure(&error, &parameter_metadata);
             std::process::exit(1);
         });
-        let _render_settings_guard =
-            ConformanceRenderSettingsGuard::install(render_settings.as_deref()).unwrap();
+        let _render_settings_guard = ConformanceRenderSettingsGuard::install(
+            render_settings.as_deref(),
+        )
+        .unwrap_or_else(|error| {
+            emit_host_request_validation_failure(&error, &parameter_metadata);
+            std::process::exit(1);
+        });
         if let Err(error) = apply_typed_assignments(&mut parameters, &document) {
-            eprintln!("{error}");
+            emit_host_request_validation_failure(&error, &parameter_metadata);
             std::process::exit(1);
         }
         let report = aexcompat_broker::image_render::render_experimental_image_with_approved_dependencies(
@@ -5219,9 +5264,15 @@ fn main() -> eframe::Result {
             dependencies,
         );
         match report {
-            Ok(value) => println!("{}", serde_json::to_string_pretty(&value).unwrap()),
+            Ok(mut value) => {
+                value["parameter_metadata"] = parameter_metadata;
+                println!("{}", serde_json::to_string_pretty(&value).unwrap());
+            }
             Err(error) => {
-                emit_typed_failure(&error.to_string());
+                emit_typed_failure_with_parameter_metadata(
+                    &error.to_string(),
+                    &parameter_metadata,
+                );
                 std::process::exit(1);
             }
         }
@@ -6809,6 +6860,21 @@ mod tests {
         assert_eq!(document["render_error"], 25);
         assert_eq!(document["missing_suites"][0]["name"], "PF World Suite");
         assert_eq!(document["suite_timeline"][0]["result"], 25);
+    }
+
+    #[test]
+    fn host_request_validation_failure_preserves_immutable_parameter_metadata() {
+        let metadata = serde_json::json!([{
+            "index": 1,
+            "type": "float_slider",
+            "initial_value": 25.0,
+            "host_range": {"minimum": 0.0, "maximum": 100.0},
+            "user_range": {"minimum": 10.0, "maximum": 90.0}
+        }]);
+        let document = host_request_validation_failure(&metadata);
+        assert_eq!(document["classification"], "host_validation_error");
+        assert_eq!(document["failure_stage"], "request_validation");
+        assert_eq!(document["parameter_metadata"], metadata);
     }
 
     #[test]

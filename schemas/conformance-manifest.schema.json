@@ -39,10 +39,10 @@
         "premultiplication": {"enum": ["straight", "premultiplied", "opaque"]},
         "color_management": {
           "type": "object", "additionalProperties": false, "required": ["enabled", "working_space"],
-          "properties": {"enabled": {"type": "boolean"}, "working_space": {"type": ["string", "null"], "maxLength": 256}}
+          "properties": {"enabled": {"const": false}, "working_space": {"type": "null"}}
         },
-        "linear_light": {"type": "boolean"},
-        "renderer": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9._ -]+$"}
+        "linear_light": {"const": false},
+        "renderer": {"enum": ["AEXCompat CPU", "software"]}
       }
     },
     "oracle": {

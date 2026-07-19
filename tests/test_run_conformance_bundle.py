@@ -72,7 +72,7 @@ def fixture(tmp_path: Path):
         "data=b'output-'+a.depth.encode(); open(a.output,'wb').write(data)\n"
         "import os; os.makedirs(a.world_dump_dir); open(os.path.join(a.world_dump_dir,'000-smart-input-2x2.raw'),'wb').write(b'i'*(4*bpp)); open(os.path.join(a.world_dump_dir,'001-smart-output-2x2.raw'),'wb').write(b'o'*(4*bpp))\n"
         "w={'width':2,'height':2,'row_bytes':2*bpp,'pixel_format':a.depth,'premultiplication':'straight','extent_hint':{'left':0,'top':0,'right':2,'bottom':2}}\n"
-        "print(json.dumps({'depth':a.depth,'classification':'ok','selector':{'render_path':a.render_path,'completed':True,'error_code':0},'input_world':w,'world':w,'raw_input':None,'raw_output':None,'output_sha256':hashlib.sha256(data).hexdigest(),'suite_timeline':[],'oracle':{'state':'not_captured','identity_match':False,'exact':False}}))\n",
+        "print(json.dumps({'depth':a.depth,'classification':'ok','selector':{'render_path':a.render_path,'completed':True,'error_code':0},'input_world':w,'world':w,'raw_input':None,'raw_output':None,'output_sha256':hashlib.sha256(data).hexdigest(),'suite_timeline':[],'parameter_metadata':[{'index':1,'type':'float','initial_value':25,'host_range':{'minimum':0,'maximum':100},'user_range':{'minimum':10,'maximum':90}}],'oracle':{'state':'not_captured','identity_match':False,'exact':False}}))\n",
         encoding="utf-8",
     )
     return path, adapter
@@ -105,7 +105,13 @@ def test_creates_self_contained_schema_valid_bundle(tmp_path):
     metadata = json.loads((output / "diagnostics" / "run.json").read_text())
     assert len(metadata["bundle_runner"]["sha256"]) == 64
     assert metadata["status"] == "completed"
-    assert report["parameters"][0]["initial_value"] == 50
+    assert report["parameters"] == [{
+        "index": 1,
+        "type": "float",
+        "initial_value": 25,
+        "host_range": {"minimum": 0, "maximum": 100},
+        "user_range": {"minimum": 10, "maximum": 90},
+    }]
     assert report["results"][0]["raw_input"]["path"].startswith("raw/argb8/")
 
 
@@ -214,6 +220,138 @@ def test_manifest_timing_schema_matches_harness_bounds(tmp_path, value, scale, a
     manifest.write_text(json.dumps(document), encoding="utf-8")
     completed = invoke(manifest, tmp_path / "bundle", adapter)
     assert (completed.returncode == 0) is accepted
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        lambda execution: execution["color_management"].update({"enabled": True}),
+        lambda execution: execution["color_management"].update({"working_space": "sRGB"}),
+        lambda execution: execution.update({"linear_light": True}),
+        lambda execution: execution.update({"renderer": "arbitrary renderer"}),
+    ],
+)
+def test_manifest_rejects_native_render_settings_the_harness_cannot_apply(
+    tmp_path, mutation
+):
+    manifest, adapter = fixture(tmp_path)
+    document = json.loads(manifest.read_text(encoding="utf-8"))
+    mutation(document["execution"])
+    manifest.write_text(json.dumps(document), encoding="utf-8")
+    completed = invoke(manifest, tmp_path / "bundle", adapter)
+    assert completed.returncode != 0
+    failure = json.loads(
+        (tmp_path / "bundle" / "diagnostics" / "failure.json").read_text()
+    )
+    assert failure["stage"] == "validate_manifest"
+
+
+@pytest.mark.parametrize("renderer", ["AEXCompat CPU", "software"])
+def test_manifest_accepts_each_native_renderer_alias(tmp_path, renderer):
+    manifest, adapter = fixture(tmp_path)
+    document = json.loads(manifest.read_text(encoding="utf-8"))
+    document["execution"]["renderer"] = renderer
+    manifest.write_text(json.dumps(document), encoding="utf-8")
+    completed = invoke(manifest, tmp_path / "bundle", adapter)
+    assert completed.returncode == 0, completed.stderr
+
+
+@pytest.mark.parametrize(
+    "reserved",
+    [
+        "manifest.json",
+        "report.json",
+        "Report.JSON",
+        "Report.JSON/payload.bin",
+        "manifest.json/child.bin",
+        "diagnostics/input.bin",
+        "outputs/input.bin",
+        "raw/input.bin",
+        "requests/input.bin",
+        "target/input.bin",
+    ],
+)
+def test_rejects_artifacts_that_collide_with_generated_bundle_paths(tmp_path, reserved):
+    manifest, adapter = fixture(tmp_path)
+    document = json.loads(manifest.read_text(encoding="utf-8"))
+    # Destination validation must reject reserved output namespaces before the
+    # source artifact is resolved or copied.  Some cases intentionally describe
+    # a child of the existing manifest.json file and therefore cannot be
+    # materialized in the fixture filesystem.
+    document["plugin"]["aex"] = {
+        "path": reserved,
+        "sha256": "0" * 64,
+        "size_bytes": 1,
+    }
+    manifest.write_text(json.dumps(document), encoding="utf-8")
+    output = tmp_path / "bundle"
+    completed = invoke(manifest, output, adapter)
+    assert completed.returncode != 0
+    assert not (output / "report.json").exists()
+    failure = json.loads((output / "diagnostics" / "failure.json").read_text())
+    assert failure["stage"] == "validate_manifest"
+    assert "collides with generated bundle content" in failure["error"]["text"]
+
+
+@pytest.mark.parametrize("role", ["aex", "dependency", "input", "runner", "oracle"])
+def test_reserved_path_check_applies_to_every_artifact_role(tmp_path, role):
+    manifest, adapter = fixture(tmp_path)
+    document = json.loads(manifest.read_text(encoding="utf-8"))
+    artifact = {"path": "report.json", "sha256": "0" * 64, "size_bytes": 1}
+    if role == "aex":
+        document["plugin"]["aex"] = artifact
+    elif role == "dependency":
+        document["plugin"]["dependencies"] = [artifact]
+    elif role == "input":
+        document["input"] = artifact
+    elif role == "runner":
+        document["runner"] = artifact
+    else:
+        document["requested_depths"] = ["argb8"]
+        document["oracle"] = {
+            "state": "captured",
+            "identity_match": True,
+            "artifacts": {"argb8": artifact},
+        }
+    manifest.write_text(json.dumps(document), encoding="utf-8")
+    completed = invoke(manifest, tmp_path / "bundle", adapter)
+    assert completed.returncode != 0
+    failure = json.loads(
+        (tmp_path / "bundle" / "diagnostics" / "failure.json").read_text()
+    )
+    assert "collides with generated bundle content" in failure["error"]["text"]
+
+
+def test_parameter_metadata_must_match_across_depths(tmp_path):
+    manifest, adapter = fixture(tmp_path)
+    source = adapter.read_text(encoding="utf-8")
+    adapter.write_text(
+        source.replace("'initial_value':25", "'initial_value':25 if a.depth=='argb8' else 26"),
+        encoding="utf-8",
+    )
+    output = tmp_path / "bundle"
+    completed = invoke(manifest, output, adapter)
+    assert completed.returncode != 0
+    assert not (output / "report.json").exists()
+    failure = json.loads((output / "diagnostics" / "failure.json").read_text())
+    assert "parameter metadata differs" in failure["error"]["text"]
+
+
+@pytest.mark.parametrize("second_path", ["ARTIFACTS/EFFECT.AEX", "artifacts/effect.aex/child"])
+def test_rejects_case_and_file_parent_artifact_aliases(tmp_path, second_path):
+    manifest, adapter = fixture(tmp_path)
+    document = json.loads(manifest.read_text(encoding="utf-8"))
+    document["plugin"]["dependencies"] = [
+        {"path": second_path, "sha256": "0" * 64, "size_bytes": 1}
+    ]
+    manifest.write_text(json.dumps(document), encoding="utf-8")
+    completed = invoke(manifest, tmp_path / "bundle", adapter)
+    assert completed.returncode != 0
+    failure = json.loads(
+        (tmp_path / "bundle" / "diagnostics" / "failure.json").read_text()
+    )
+    assert failure["stage"] == "validate_manifest"
+    assert "artifact" in failure["error"]["text"]
 
 
 def test_refuses_existing_bundle_and_identity_mismatch(tmp_path):

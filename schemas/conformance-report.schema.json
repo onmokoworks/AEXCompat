@@ -52,7 +52,7 @@
       "properties": {
         "index": {"type": "integer", "minimum": 0, "maximum": 65535},
         "type": {"type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[A-Za-z0-9_ -]+$"},
-        "initial_value": {"$ref": "conformance-manifest.schema.json#/$defs/json_value"},
+        "initial_value": {"oneOf": [{"$ref": "conformance-manifest.schema.json#/$defs/json_value"}, {"type": "null"}]},
         "host_range": {"$ref": "#/$defs/range"},
         "user_range": {"$ref": "#/$defs/range"}
       }

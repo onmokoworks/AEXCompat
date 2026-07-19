@@ -61,10 +61,22 @@ NATIVE_WORKERS = (
     "target/minihost-build/aex_render_worker.exe",
     "target/minihost-build/aex_smart_worker.exe",
 )
+RESERVED_BUNDLE_FILES = {"manifest.json", "report.json"}
+RESERVED_BUNDLE_DIRECTORIES = {"diagnostics", "outputs", "raw", "requests", "target"}
 
 
 def load_json(path: Path) -> Any:
     return strict_json_loads(path.read_text(encoding="utf-8"))
+
+
+def validate_artifact_destination(path: str) -> None:
+    normalized = path.replace("\\", "/").casefold()
+    first = normalized.split("/", 1)[0]
+    if (
+        any(normalized == name or normalized.startswith(name + "/") for name in RESERVED_BUNDLE_FILES)
+        or first in RESERVED_BUNDLE_DIRECTORIES
+    ):
+        raise ValueError(f"artifact path collides with generated bundle content: {path}")
 
 
 def meaningful_selector_error(value: dict[str, Any]) -> int | None:
@@ -305,7 +317,11 @@ def normalize_harness_report(
     premultiplication: str,
     render_path: str = "smartfx",
 ) -> dict[str, Any]:
-    if not value.get("passed") or not output.is_file():
+    if (
+        not value.get("passed")
+        or not output.is_file()
+        or not isinstance(value.get("parameter_metadata"), list)
+    ):
         return failed_result(depth, input_world, "invalid_output", render_path)
     try:
         actual_input_world = value["input_world"]
@@ -330,6 +346,7 @@ def normalize_harness_report(
         "raw_output": None,
         "output_sha256": sha256(output),
         "suite_timeline": value.get("suite_timeline"),
+        "_parameter_metadata": value["parameter_metadata"],
         "oracle": {"state": "not_captured", "identity_match": False, "exact": False},
     }
     return result
@@ -394,6 +411,8 @@ def normalize_structured_failure(
         "suite_timeline": value.get("suite_timeline") if isinstance(value.get("suite_timeline"), list) else None,
         "oracle": {"state": "not_captured", "identity_match": False, "exact": False},
     }
+    if isinstance(value.get("parameter_metadata"), list):
+        result["_parameter_metadata"] = value["parameter_metadata"]
     if value.get("plugin_kind") in {"aegp_candidate", "unknown_no_effect_entrypoint"}:
         result["plugin_kind"] = value["plugin_kind"]
     missing = value.get("missing_suites")
@@ -652,8 +671,15 @@ def run_depth(
         return normalize_structured_failure(depth, value, input_world, render_path), detail
     if adapter:
         if value.get("classification") == "ok":
-            if not output.is_file() or value.get("output_sha256") != sha256(output):
+            if (
+                not output.is_file()
+                or value.get("output_sha256") != sha256(output)
+                or not isinstance(value.get("parameter_metadata"), list)
+            ):
                 return failed_result(depth, input_world, "invalid_output", render_path), detail
+        parameter_metadata = value.pop("parameter_metadata", None)
+        if isinstance(parameter_metadata, list):
+            value["_parameter_metadata"] = parameter_metadata
         return value, detail
     return normalize_harness_report(
         depth, value, output, input_world, premultiplication, render_path
@@ -822,10 +848,18 @@ def main() -> int:
         artifacts.extend(oracle_artifacts.values())
         by_path: dict[str, dict[str, Any]] = {}
         for item in artifacts:
-            previous = by_path.get(item["path"])
+            validate_artifact_destination(item["path"])
+            destination_key = item["path"].replace("\\", "/").casefold()
+            if any(
+                destination_key.startswith(existing + "/")
+                or existing.startswith(destination_key + "/")
+                for existing in by_path
+            ):
+                raise ValueError(f"artifact path collides with another artifact: {item['path']}")
+            previous = by_path.get(destination_key)
             if previous is not None and previous != item:
                 raise ValueError(f"conflicting artifact identity: {item['path']}")
-            by_path[item["path"]] = item
+            by_path[destination_key] = item
 
         stage = "copy_pinned_artifacts"
         for item in by_path.values():
@@ -842,6 +876,7 @@ def main() -> int:
         requests.mkdir()
         diagnostics_dir.mkdir(exist_ok=True)
         results = []
+        observed_parameter_metadata = None
         with Image.open(output_root / manifest["input"]["path"]) as source_image:
             input_width, input_height = source_image.size
 
@@ -873,6 +908,12 @@ def main() -> int:
                 output_root,
                 manifest["execution"]["render_path"],
             )
+            parameter_metadata = result.pop("_parameter_metadata", None)
+            if parameter_metadata is not None:
+                if observed_parameter_metadata is None:
+                    observed_parameter_metadata = parameter_metadata
+                elif parameter_metadata != observed_parameter_metadata:
+                    raise ValueError("native parameter metadata differs between requested depths")
             attach_raw_artifacts(
                 result,
                 depth,
@@ -909,16 +950,7 @@ def main() -> int:
                 "runner": manifest["runner"],
                 "workers": worker_identities,
             },
-            "parameters": [
-                {
-                    "index": parameter["index"],
-                    "type": parameter["type"],
-                    "initial_value": parameter["value"],
-                    "host_range": None,
-                    "user_range": None,
-                }
-                for parameter in manifest["execution"]["parameters"]
-            ],
+            "parameters": observed_parameter_metadata or [],
             "results": results,
         }
         validate_bundle(manifest, report, output_root)
