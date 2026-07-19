@@ -323,13 +323,16 @@ bool register_borrowed_view(void** handle, void* pf_world,
   }
 }
 
-bool unregister_borrowed_view(void** handle) {
-  if (!handle) return false;
+UnregisterBorrowedViewResult unregister_borrowed_view(void** handle) {
+  if (!handle) return UnregisterBorrowedViewResult::already_absent;
   std::lock_guard<std::mutex> lock(g_mutex);
   const auto found = g_aegp_views.find(handle);
-  if (found == g_aegp_views.end() || found->second.disposable) return false;
+  if (found == g_aegp_views.end())
+    return UnregisterBorrowedViewResult::already_absent;
+  if (found->second.disposable)
+    return UnregisterBorrowedViewResult::ownership_mismatch;
   g_aegp_views.erase(found);
-  return true;
+  return UnregisterBorrowedViewResult::removed;
 }
 
 bool snapshot_aegp_world(void** handle, AegpWorldSnapshot& snapshot) {

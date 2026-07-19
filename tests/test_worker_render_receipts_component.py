@@ -22,13 +22,24 @@ def test_receipt_registry_is_a_compiled_owner_with_one_registration_path():
 def test_registry_never_calls_world_registry_while_holding_receipt_mutex():
     registration = SOURCE[SOURCE.index("int32_t register_receipt("):
                           SOURCE.index("int32_t get_world(")]
-    assert registration.index("register_borrowed_view(") < registration.index(
-        "bool committed")
+    assert registration.index("g_receipts.emplace(key") < registration.index(
+        "register_borrowed_view(")
+    assert "published = true" in registration
+    assert "g_reserved_count" in registration
     checkin = SOURCE[SOURCE.index("int32_t checkin("):
                      SOURCE.index("bool checkin_if_live(")]
     assert checkin.index("g_receipts.extract(found)") < checkin.index(
         "unregister_borrowed_view(")
-    assert "g_receipts.insert(std::move(receipt))" in checkin
+    assert "ownership_mismatch" in checkin
+
+
+def test_inflight_admission_and_unregister_outcomes_are_explicit():
+    assert "g_live_bytes + g_reserved_bytes" in SOURCE
+    assert "reserved_count" in HEADER
+    world_header = (ROOT / "minihost" / "src" /
+                    "worker_world_registry.hpp").read_text(encoding="utf-8")
+    for outcome in ("removed", "already_absent", "ownership_mismatch"):
+        assert outcome in world_header
 
 
 def test_stats_bounds_snapshots_and_opaque_generations_are_owned_by_service():

@@ -39,6 +39,8 @@ struct Statistics {
   uint64_t invalid_operations{};
   std::size_t live_count{};
   uint64_t live_bytes{};
+  std::size_t reserved_count{};
+  uint64_t reserved_bytes{};
 };
 
 int32_t register_receipt(std::unique_ptr<ReceiptDraft> draft, void** output);

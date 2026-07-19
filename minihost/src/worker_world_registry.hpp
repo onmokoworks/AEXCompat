@@ -85,7 +85,12 @@ void configure_gpu_fallback_bridge(RecognizesSmartWorld recognizes_smart_world);
 int32_t aegp_world_type_from_format(int32_t pixel_format);
 bool register_borrowed_view(void** handle, void* pf_world, int32_t pixel_format,
                             bool borrowed = true);
-bool unregister_borrowed_view(void** handle);
+enum class UnregisterBorrowedViewResult {
+  removed,
+  already_absent,
+  ownership_mismatch,
+};
+UnregisterBorrowedViewResult unregister_borrowed_view(void** handle);
 bool snapshot_aegp_world(void** handle, AegpWorldSnapshot& snapshot);
 bool snapshot_platform_world(void* handle,
                              std::shared_ptr<PlatformWorldBacking>& backing);

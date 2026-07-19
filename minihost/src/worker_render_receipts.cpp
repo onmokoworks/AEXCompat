@@ -18,6 +18,7 @@ struct Receipt {
   void* handle{};
   void** world_handle{};
   std::array<uint8_t, 16> guid{};
+  bool published{};
 };
 
 std::mutex g_mutex;
@@ -25,6 +26,8 @@ std::unordered_map<void*, std::unique_ptr<Receipt>> g_receipts;
 std::atomic<uint64_t> g_receipt_generation{1};
 std::atomic<uint64_t> g_world_generation{1};
 uint64_t g_live_bytes{};
+std::size_t g_reserved_count{};
+uint64_t g_reserved_bytes{};
 uint64_t g_created{};
 uint64_t g_checked_in{};
 uint64_t g_invalid_operations{};
@@ -61,8 +64,14 @@ bool assign_handles(Receipt& receipt) {
 }
 
 bool has_capacity(uint64_t bytes) {
-  return bytes <= kMaxReceiptBytes && g_receipts.size() < kMaxReceiptCount &&
-      g_live_bytes <= kMaxReceiptBytes - bytes;
+  return bytes <= kMaxReceiptBytes &&
+      g_receipts.size() < kMaxReceiptCount &&
+      g_live_bytes + g_reserved_bytes <= kMaxReceiptBytes - bytes;
+}
+
+void release_reservation(uint64_t bytes) {
+  --g_reserved_count;
+  g_reserved_bytes -= bytes;
 }
 
 }  // namespace
@@ -80,34 +89,45 @@ int32_t register_receipt(std::unique_ptr<ReceiptDraft> draft, void** output) {
   }
   receipt->draft = std::move(draft);
   if (!assign_handles(*receipt)) return 4;
+  void* const key = receipt->handle;
   {
     std::lock_guard<std::mutex> lock(g_mutex);
     if (!has_capacity(bytes)) return 4;
-  }
-  if (!world_registry::register_borrowed_view(
-          receipt->world_handle, &receipt->draft->world,
-          receipt->draft->pixel_format)) return 4;
-  void** const registered_world_handle = receipt->world_handle;
-  bool committed = false;
-  {
-    std::lock_guard<std::mutex> lock(g_mutex);
-    if (has_capacity(bytes)) {
-      try {
-        void* const key = receipt->handle;
-        committed = g_receipts.emplace(receipt->handle, std::move(receipt)).second;
-        if (committed) {
-          g_live_bytes += bytes;
-          ++g_created;
-          *output = key;
-        }
-      } catch (...) {
-        committed = false;
+    ++g_reserved_count;
+    g_reserved_bytes += bytes;
+    try {
+      if (!g_receipts.emplace(key, std::move(receipt)).second) {
+        release_reservation(bytes);
+        return 4;
       }
+    } catch (...) {
+      release_reservation(bytes);
+      return 4;
     }
   }
-  if (!committed) {
-    world_registry::unregister_borrowed_view(registered_world_handle);
+  // The unpublished map entry pins the descriptor and pixels for the entire
+  // period in which the world registry may contain a pointer to them.
+  Receipt* pinned = nullptr;
+  {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    pinned = g_receipts.find(key)->second.get();
+  }
+  if (!world_registry::register_borrowed_view(
+          pinned->world_handle, &pinned->draft->world,
+          pinned->draft->pixel_format)) {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    g_receipts.erase(key);
+    release_reservation(bytes);
     return 4;
+  }
+  {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    auto found = g_receipts.find(key);
+    found->second->published = true;
+    release_reservation(bytes);
+    g_live_bytes += bytes;
+    ++g_created;
+    *output = key;
   }
   return 0;
 }
@@ -117,7 +137,8 @@ int32_t get_world(void* receipt, void*** world) {
   if (!receipt || !world) return 4;
   std::lock_guard<std::mutex> lock(g_mutex);
   const auto found = g_receipts.find(receipt);
-  if (found == g_receipts.end() || !found->second->world_handle) {
+  if (found == g_receipts.end() || !found->second->published ||
+      !found->second->world_handle) {
     ++g_invalid_operations;
     return 4;
   }
@@ -138,7 +159,10 @@ int32_t checkin(void* handle) {
     receipt = g_receipts.extract(found);
     g_live_bytes -= receipt.mapped()->draft->pixels.size();
   }
-  if (!world_registry::unregister_borrowed_view(receipt.mapped()->world_handle)) {
+  const auto unregister_result = world_registry::unregister_borrowed_view(
+      receipt.mapped()->world_handle);
+  if (unregister_result ==
+      world_registry::UnregisterBorrowedViewResult::ownership_mismatch) {
     std::lock_guard<std::mutex> lock(g_mutex);
     ++g_invalid_operations;
     g_live_bytes += receipt.mapped()->draft->pixels.size();
@@ -147,6 +171,9 @@ int32_t checkin(void* handle) {
   }
   {
     std::lock_guard<std::mutex> lock(g_mutex);
+    if (unregister_result ==
+        world_registry::UnregisterBorrowedViewResult::already_absent)
+      ++g_invalid_operations;
     ++g_checked_in;
   }
   return 0;
@@ -162,7 +189,10 @@ bool checkin_if_live(void* handle) {
     receipt = g_receipts.extract(found);
     g_live_bytes -= receipt.mapped()->draft->pixels.size();
   }
-  if (!world_registry::unregister_borrowed_view(receipt.mapped()->world_handle)) {
+  const auto unregister_result = world_registry::unregister_borrowed_view(
+      receipt.mapped()->world_handle);
+  if (unregister_result ==
+      world_registry::UnregisterBorrowedViewResult::ownership_mismatch) {
     std::lock_guard<std::mutex> lock(g_mutex);
     g_live_bytes += receipt.mapped()->draft->pixels.size();
     g_receipts.insert(std::move(receipt));
@@ -170,6 +200,9 @@ bool checkin_if_live(void* handle) {
   }
   {
     std::lock_guard<std::mutex> lock(g_mutex);
+    if (unregister_result ==
+        world_registry::UnregisterBorrowedViewResult::already_absent)
+      ++g_invalid_operations;
     ++g_checked_in;
   }
   return true;
@@ -180,7 +213,7 @@ bool snapshot(void* handle, ReceiptSnapshot& output) {
   if (!handle) return false;
   std::lock_guard<std::mutex> lock(g_mutex);
   const auto found = g_receipts.find(handle);
-  if (found == g_receipts.end()) return false;
+  if (found == g_receipts.end() || !found->second->published) return false;
   const auto& receipt = *found->second;
   output.has_render_options = receipt.draft->has_render_options;
   output.render_options = receipt.draft->render_options;
@@ -192,13 +225,15 @@ bool snapshot(void* handle, ReceiptSnapshot& output) {
 
 Statistics statistics() {
   std::lock_guard<std::mutex> lock(g_mutex);
-  return {g_created, g_checked_in, g_invalid_operations, g_receipts.size(),
-          g_live_bytes};
+  return {g_created, g_checked_in, g_invalid_operations,
+          g_receipts.size() - g_reserved_count, g_live_bytes,
+          g_reserved_count, g_reserved_bytes};
 }
 
 bool lifetimes_balanced() {
   const auto stats = statistics();
   return stats.live_count == 0 && stats.live_bytes == 0 &&
+      stats.reserved_count == 0 && stats.reserved_bytes == 0 &&
       stats.created == stats.checked_in;
 }
 

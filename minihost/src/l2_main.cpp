@@ -6186,7 +6186,8 @@ bool verify_aegp_world_suite3() {
     std::memcpy(&world, storage.data(), sizeof(world));
     const bool addresses_ok = correct_addr == 0 && pixels == world.data && wrong_addr != 0 &&
         wrong_pixels == reinterpret_cast<void*>(1);
-    if (!aexcompat::world_registry::unregister_borrowed_view(handle)) return false;
+    if (aexcompat::world_registry::unregister_borrowed_view(handle) !=
+        aexcompat::world_registry::UnregisterBorrowedViewResult::removed) return false;
     const bool stale_rejected = aegp_world_get_type(handle, &type) != 0;
     if (dispose_world(nullptr, storage.data()) != 0 || !metadata_ok || !addresses_ok ||
         !stale_rejected) return false;
@@ -6207,7 +6208,8 @@ bool verify_aegp_world_suite3() {
   int32_t width = 0, height = 0;
   const bool borrowed_live = aegp_world_get_size(handle, &width, &height) == 0 &&
       width == 2 && height == 2 && aegp_world_dispose(handle) != 0;
-  if (!aexcompat::world_registry::unregister_borrowed_view(handle)) return false;
+  if (aexcompat::world_registry::unregister_borrowed_view(handle) !=
+      aexcompat::world_registry::UnregisterBorrowedViewResult::removed) return false;
   if (!borrowed_live || aegp_world_get_size(handle, &width, &height) == 0) return false;
 
   for (int32_t type = 1; type <= 3; ++type) {

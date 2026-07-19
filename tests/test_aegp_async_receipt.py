@@ -34,7 +34,7 @@ def test_receipt_registry_is_bounded_and_invalidates_borrowed_world_first():
     text = RECEIPTS.read_text(encoding="utf-8")
     for marker in (
         "g_receipts.size() < kMaxReceiptCount",
-        "g_live_bytes <= kMaxReceiptBytes - bytes",
+        "g_live_bytes + g_reserved_bytes <= kMaxReceiptBytes - bytes",
         "std::unordered_map<void*, std::unique_ptr<Receipt>> g_receipts",
         "world_registry::unregister_borrowed_view(",
         "receipt = g_receipts.extract(found);",
