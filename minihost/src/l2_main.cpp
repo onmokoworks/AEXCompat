@@ -608,23 +608,18 @@ auto& g_last_transform_y = g_host_callback_telemetry.last_transform_y;
 auto& g_last_transform_opacity = g_host_callback_telemetry.last_transform_opacity;
 auto& g_abort_calls = g_host_callback_telemetry.abort_calls;
 auto& g_progress_calls = g_host_callback_telemetry.progress_calls;
-uint32_t g_register_ui_calls = 0;
-struct CustomUiRegistration {
-  uint32_t events{};
-  int32_t comp_width{};
-  int32_t comp_height{};
-  int32_t comp_alignment{};
-  int32_t layer_width{};
-  int32_t layer_height{};
-  int32_t layer_alignment{};
-  int32_t preview_width{};
-  int32_t preview_height{};
-  int32_t preview_alignment{};
-};
-CustomUiRegistration g_custom_ui_registration;
-uint32_t g_invalid_custom_ui_registrations{};
-uint32_t g_adv_app_info_text_calls{};
-std::string g_last_adv_app_info_text;
+// Custom-UI/Drawbot/App telemetry storage moved to its owner,
+// aexcompat::worker_runtime::ui_event_execution::custom_ui_telemetry()
+// (issue #126 Phase D); these references keep the g_* spellings.
+using CustomUiRegistration =
+    aexcompat::worker_runtime::ui_event_execution::CustomUiRegistration;
+auto& g_custom_ui_telemetry =
+    aexcompat::worker_runtime::ui_event_execution::custom_ui_telemetry();
+auto& g_register_ui_calls = g_custom_ui_telemetry.register_ui_calls;
+auto& g_custom_ui_registration = g_custom_ui_telemetry.registration;
+auto& g_invalid_custom_ui_registrations = g_custom_ui_telemetry.invalid_custom_ui_registrations;
+auto& g_adv_app_info_text_calls = g_custom_ui_telemetry.adv_app_info_text_calls;
+auto& g_last_adv_app_info_text = g_custom_ui_telemetry.last_adv_app_info_text;
 auto& g_last_progress_current = g_host_callback_telemetry.last_progress_current;
 auto& g_last_progress_total = g_host_callback_telemetry.last_progress_total;
 auto& g_secondary_layer_slot = g_host_callback_telemetry.secondary_layer_slot;
@@ -691,7 +686,7 @@ void raise_mask_access_violation() {
 }
 constexpr int32_t kPfBadCallbackParam = 516;
 constexpr int32_t kPfSuiteToolNone = 0;
-bool g_render_ui_context_active{};
+auto& g_render_ui_context_active = g_custom_ui_telemetry.render_ui_context_active;
 using aexcompat::pf_helper::reset;
 
 aexcompat::mask_runtime::Snapshot mask_runtime_snapshot() {
@@ -1133,23 +1128,23 @@ struct DrawbotObject {
   uint32_t path_points{};
 };
 std::unordered_map<void*, std::unique_ptr<DrawbotObject>> g_drawbot_objects;
-uint32_t g_drawbot_objects_created{};
-uint32_t g_drawbot_objects_released{};
-uint32_t g_drawbot_paint_rect_calls{};
-uint32_t g_drawbot_fill_path_calls{};
-uint32_t g_drawbot_stroke_path_calls{};
-uint32_t g_drawbot_invalid_operations{};
-uint32_t g_drawbot_get_supplier_calls{};
-uint32_t g_drawbot_get_surface_calls{};
-uint32_t g_drawbot_get_drawing_ref_calls{};
-uint32_t g_overlay_stroke_path_calls{};
-uint32_t g_app_get_background_color_calls{};
-uint32_t g_app_color_picker_calls{};
-uint32_t g_app_invalidate_rect_calls{};
-uint32_t g_app_progress_dialogs_created{};
-uint32_t g_app_progress_dialogs_disposed{};
-std::array<float, 4> g_app_picker_color{1.0f, 0.25f, 0.75f, 0.5f};
-std::array<int32_t, 4> g_app_invalidated_rect{};
+auto& g_drawbot_objects_created = g_custom_ui_telemetry.drawbot_objects_created;
+auto& g_drawbot_objects_released = g_custom_ui_telemetry.drawbot_objects_released;
+auto& g_drawbot_paint_rect_calls = g_custom_ui_telemetry.drawbot_paint_rect_calls;
+auto& g_drawbot_fill_path_calls = g_custom_ui_telemetry.drawbot_fill_path_calls;
+auto& g_drawbot_stroke_path_calls = g_custom_ui_telemetry.drawbot_stroke_path_calls;
+auto& g_drawbot_invalid_operations = g_custom_ui_telemetry.drawbot_invalid_operations;
+auto& g_drawbot_get_supplier_calls = g_custom_ui_telemetry.drawbot_get_supplier_calls;
+auto& g_drawbot_get_surface_calls = g_custom_ui_telemetry.drawbot_get_surface_calls;
+auto& g_drawbot_get_drawing_ref_calls = g_custom_ui_telemetry.drawbot_get_drawing_ref_calls;
+auto& g_overlay_stroke_path_calls = g_custom_ui_telemetry.overlay_stroke_path_calls;
+auto& g_app_get_background_color_calls = g_custom_ui_telemetry.app_get_background_color_calls;
+auto& g_app_color_picker_calls = g_custom_ui_telemetry.app_color_picker_calls;
+auto& g_app_invalidate_rect_calls = g_custom_ui_telemetry.app_invalidate_rect_calls;
+auto& g_app_progress_dialogs_created = g_custom_ui_telemetry.app_progress_dialogs_created;
+auto& g_app_progress_dialogs_disposed = g_custom_ui_telemetry.app_progress_dialogs_disposed;
+auto& g_app_picker_color = g_custom_ui_telemetry.app_picker_color;
+auto& g_app_invalidated_rect = g_custom_ui_telemetry.app_invalidated_rect;
 struct HostUiContext {
   uint32_t magic{0x05ea771e};
   int32_t window_type{2};
@@ -1183,22 +1178,22 @@ void set_custom_ui_context_tool(int32_t context) {
   aexcompat::pf_helper::set_context_tool(
       context, aexcompat::pf_helper::kExtendedToolMin);
 }
-uint32_t g_ui_drag_calls{};
-bool g_ui_drag_requested{};
-bool g_ui_drag_terminated{};
-uint32_t g_ui_coordinate_transform_calls{};
-bool g_render_click_enabled{};
-bool g_render_draw_enabled{};
-int32_t g_render_click_x{};
-int32_t g_render_click_y{};
-int32_t g_render_click_error{-1};
-int32_t g_render_click_out_flags{};
-bool g_render_click_changed_value{};
-int32_t g_render_draw_error{-1};
-int32_t g_render_draw_out_flags{};
-std::array<int32_t, 4> g_render_ui_lifecycle_errors{-1, -1, -1, -1};
-bool g_render_ui_context_closed{};
-std::vector<std::array<float, 4>> g_drawbot_fill_colors;
+auto& g_ui_drag_calls = g_custom_ui_telemetry.ui_drag_calls;
+auto& g_ui_drag_requested = g_custom_ui_telemetry.ui_drag_requested;
+auto& g_ui_drag_terminated = g_custom_ui_telemetry.ui_drag_terminated;
+auto& g_ui_coordinate_transform_calls = g_custom_ui_telemetry.ui_coordinate_transform_calls;
+auto& g_render_click_enabled = g_custom_ui_telemetry.render_click_enabled;
+auto& g_render_draw_enabled = g_custom_ui_telemetry.render_draw_enabled;
+auto& g_render_click_x = g_custom_ui_telemetry.render_click_x;
+auto& g_render_click_y = g_custom_ui_telemetry.render_click_y;
+auto& g_render_click_error = g_custom_ui_telemetry.render_click_error;
+auto& g_render_click_out_flags = g_custom_ui_telemetry.render_click_out_flags;
+auto& g_render_click_changed_value = g_custom_ui_telemetry.render_click_changed_value;
+auto& g_render_draw_error = g_custom_ui_telemetry.render_draw_error;
+auto& g_render_draw_out_flags = g_custom_ui_telemetry.render_draw_out_flags;
+auto& g_render_ui_lifecycle_errors = g_custom_ui_telemetry.render_ui_lifecycle_errors;
+auto& g_render_ui_context_closed = g_custom_ui_telemetry.render_ui_context_closed;
+auto& g_drawbot_fill_colors = g_custom_ui_telemetry.drawbot_fill_colors;
 
 int32_t __cdecl drawbot_get_supplier(void* draw, void** supplier) {
   if (draw != &g_drawbot_draw || !supplier) return 4;

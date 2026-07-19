@@ -97,6 +97,7 @@ CONTRACTS = {
         "minihost/src/worker_pf_ansi_runtime.cpp",
         "minihost/src/worker_host_suite_catalog.cpp",
         "minihost/src/worker_parameter_execution.cpp",
+        "minihost/src/worker_ui_event_execution.hpp",
         "minihost/src/worker_ui_event_execution.cpp",
         "minihost/src/worker_entry_bootstrap.cpp",
         "minihost/src/worker_smart_runtime.cpp",
