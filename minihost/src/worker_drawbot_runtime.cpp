@@ -2,6 +2,7 @@
 
 #include "worker_mask_runtime_internal.hpp"
 #include "worker_pf_helper_runtime.hpp"
+#include "worker_selector_dispatch.hpp"
 #include "worker_ui_event_execution.hpp"
 
 #include <algorithm>
@@ -10,6 +11,8 @@
 #include <cstdint>
 #include <cstring>
 #include <memory>
+#include <utility>
+#include <vector>
 #include <new>
 #include <unordered_map>
 
@@ -359,5 +362,136 @@ int32_t __cdecl adv_app_info_text3(const char* first, const char* second,
 }
 
 bool drawbot_objects_empty() { return g_drawbot_objects.empty(); }
+
+}  // namespace aexcompat::l2_detail
+
+// Render-worker click/draw probes and the UI context close moved from
+// worker_main (issue #170); they arm the HostUiContext owned above and read
+// their telemetry through the Phase D owner.
+namespace aexcompat::l2_detail {
+
+using EffectEntry = aexcompat::worker_runtime::parameter_execution::EffectEntry;
+using aexcompat::worker_runtime::invoke_entry_seh;
+void write_rect(void* destination, int32_t width, int32_t height);
+
+namespace {
+constexpr std::size_t kInSize = 408;
+constexpr std::size_t kOutSize = 408;
+constexpr std::size_t kParamSize = 176;
+constexpr int32_t kEvent = 15;
+auto& g_render_click_enabled = g_custom_ui_telemetry.render_click_enabled;
+auto& g_render_draw_enabled = g_custom_ui_telemetry.render_draw_enabled;
+auto& g_render_click_x = g_custom_ui_telemetry.render_click_x;
+auto& g_render_click_y = g_custom_ui_telemetry.render_click_y;
+auto& g_render_click_error = g_custom_ui_telemetry.render_click_error;
+auto& g_render_click_out_flags = g_custom_ui_telemetry.render_click_out_flags;
+auto& g_render_click_changed_value = g_custom_ui_telemetry.render_click_changed_value;
+auto& g_render_draw_error = g_custom_ui_telemetry.render_draw_error;
+auto& g_render_draw_out_flags = g_custom_ui_telemetry.render_draw_out_flags;
+auto& g_render_ui_lifecycle_errors = g_custom_ui_telemetry.render_ui_lifecycle_errors;
+auto& g_render_ui_context_closed = g_custom_ui_telemetry.render_ui_context_closed;
+
+template <typename T, std::size_t N>
+void write(std::array<std::byte, N>& bytes, std::size_t offset, T value) {
+  std::memcpy(bytes.data() + offset, &value, sizeof(value));
+}
+}  // namespace
+
+bool dispatch_render_click(EffectEntry entry, std::array<std::byte, kInSize>& input,
+                           std::array<std::byte, kOutSize>& output,
+                           std::vector<std::array<std::byte, kParamSize>>& definitions) {
+  if (!g_render_click_enabled) return true;
+  std::vector<void*> params(definitions.size());
+  for (std::size_t i = 0; i < definitions.size(); ++i) params[i] = definitions[i].data();
+  std::array<std::byte, 208> extra{};
+  write<void*>(extra, 0, &g_ui_context_pointer);
+  g_ui_context.window_type = 2;
+  const auto dispatch_lifecycle_event = [&](int32_t event_type, std::size_t result_index) {
+    write<int32_t>(extra, 8, event_type);
+    uint32_t exception_code = 0;
+    g_render_ui_lifecycle_errors[result_index] = invoke_entry_seh(entry, kEvent,
+        input.data(), output.data(), params.data(), nullptr, extra.data(), &exception_code);
+    if (exception_code != 0) g_render_ui_lifecycle_errors[result_index] = 512;
+    return g_render_ui_lifecycle_errors[result_index] == 0;
+  };
+  if (!dispatch_lifecycle_event(0, 0) || !dispatch_lifecycle_event(1, 1)) return false;
+  g_render_ui_context_active = true;
+  write<int32_t>(extra, 8, 2);
+  write<uint32_t>(extra, 16, 1);
+  write<int32_t>(extra, 20, g_render_click_y);
+  write<int32_t>(extra, 24, g_render_click_x);
+  write<int32_t>(extra, 28, 1);
+  write<int32_t>(extra, 80, 1);
+  write<int32_t>(extra, 84, 2);
+  write_rect(extra.data() + 88, 203, 203);
+  uint32_t exception_code = 0;
+  g_render_click_error = invoke_entry_seh(entry, kEvent, input.data(), output.data(),
+      params.data(), nullptr, extra.data(), &exception_code);
+  if (exception_code != 0) g_render_click_error = 512;
+  g_render_click_out_flags = read<int32_t>(extra, 204);
+  g_render_click_changed_value = definitions.size() > 1 &&
+      (read<uint32_t>(definitions[1], 0) & 1u) != 0;
+  return g_render_click_error == 0 && (g_render_click_out_flags & 9) == 9 &&
+      g_render_click_changed_value && g_app_color_picker_calls == 1 &&
+      g_app_invalidate_rect_calls == 1;
+}
+
+bool dispatch_render_draw(EffectEntry entry, std::array<std::byte, kInSize>& input,
+                          std::array<std::byte, kOutSize>& output,
+                          std::vector<std::array<std::byte, kParamSize>>& definitions) {
+  if (!g_render_draw_enabled) return true;
+  std::vector<void*> params(definitions.size());
+  for (std::size_t i = 0; i < definitions.size(); ++i) params[i] = definitions[i].data();
+  std::array<std::byte, 208> extra{};
+  write<void*>(extra, 0, &g_ui_context_pointer);
+  g_ui_context.window_type = 2;
+  const auto dispatch_lifecycle_event = [&](int32_t event_type, std::size_t result_index) {
+    write<int32_t>(extra, 8, event_type);
+    uint32_t exception_code = 0;
+    g_render_ui_lifecycle_errors[result_index] = invoke_entry_seh(entry, kEvent,
+        input.data(), output.data(), params.data(), nullptr, extra.data(), &exception_code);
+    if (exception_code != 0) g_render_ui_lifecycle_errors[result_index] = 512;
+    return g_render_ui_lifecycle_errors[result_index] == 0;
+  };
+  if (!dispatch_lifecycle_event(0, 0) || !dispatch_lifecycle_event(1, 1)) return false;
+  g_render_ui_context_active = true;
+  write<int32_t>(extra, 8, 4);
+  write_rect(extra.data() + 16, 203, 203);
+  write<int32_t>(extra, 32, 32);
+  uint32_t exception_code = 0;
+  g_render_draw_error = invoke_entry_seh(entry, kEvent, input.data(), output.data(),
+      params.data(), nullptr, extra.data(), &exception_code);
+  if (exception_code != 0) g_render_draw_error = 512;
+  g_render_draw_out_flags = read<int32_t>(extra, 204);
+  return g_render_draw_error == 0 && (g_render_draw_out_flags & 1) != 0 &&
+      (g_drawbot_paint_rect_calls + g_drawbot_fill_path_calls +
+       g_drawbot_stroke_path_calls + g_overlay_stroke_path_calls) > 0 &&
+      g_drawbot_objects_created == g_drawbot_objects_released &&
+      drawbot_objects_empty() && g_drawbot_invalid_operations == 0;
+}
+
+bool close_render_ui_context(EffectEntry entry, std::array<std::byte, kInSize>& input,
+                             std::array<std::byte, kOutSize>& output,
+                             std::vector<std::array<std::byte, kParamSize>>& definitions) {
+  if ((!g_render_click_enabled && !g_render_draw_enabled) || !g_render_ui_context_active)
+    return !g_render_click_enabled && !g_render_draw_enabled;
+  std::vector<void*> params(definitions.size());
+  for (std::size_t i = 0; i < definitions.size(); ++i) params[i] = definitions[i].data();
+  std::array<std::byte, 208> extra{};
+  write<void*>(extra, 0, &g_ui_context_pointer);
+  for (const auto [event_type, result_index] :
+       std::array<std::pair<int32_t, std::size_t>, 2>{{{5, 2}, {6, 3}}}) {
+    write<int32_t>(extra, 8, event_type);
+    uint32_t exception_code = 0;
+    g_render_ui_lifecycle_errors[result_index] = invoke_entry_seh(entry, kEvent,
+        input.data(), output.data(), params.data(), nullptr, extra.data(), &exception_code);
+    if (exception_code != 0) g_render_ui_lifecycle_errors[result_index] = 512;
+  }
+  g_render_ui_context_active = false;
+  for (auto& state : g_ui_context.plugin_state) state = 0;
+  g_render_ui_context_closed = std::all_of(g_render_ui_lifecycle_errors.begin(),
+      g_render_ui_lifecycle_errors.end(), [](int32_t error) { return error == 0; });
+  return g_render_ui_context_closed;
+}
 
 }  // namespace aexcompat::l2_detail
