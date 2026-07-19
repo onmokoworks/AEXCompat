@@ -341,7 +341,7 @@ outputs can feed `compare-pixel-oracles.py --raw`), and the evidence
 refresh script named above.
 
 ## Follow-up: the 2026-07-19 16 bpc difference does not reproduce;
-   full-precision equivalence holds (2026-07-19, issue #53)
+   replacement captures agree within full-precision tolerance (2026-07-19, issue #53)
 
 The "fresh 16 bpc comparison detects a real unresolved difference" section
 above is corrected by this follow-up. Its artifacts
@@ -367,9 +367,9 @@ then the corrected reading.
    (decoded RGBA `d6f2a543...`) gives the same scale (max 6.1e-5). About
    4.1-5.2 million of 8.29 million channels differ by 1-2 codes; none
    differ more.
-4. **The residue is quantization boundary behavior, not a rendering gap
-   (observation + verified mechanism).** The host's smart-input world is
-   exactly `round(v * 32768 / 255)` of the 8-bit input (verified against
+4. **The residue is consistent with quantization boundary behavior
+   (observation; mechanism evidence not retained).** The host's smart-input world was
+   observed as `round(v * 32768 / 255)` of the 8-bit input (checked against
    the `AEXCOMPAT_DUMP_WORLDS_DIR` smart-input snapshot on all 8,294,400
    samples). AE's composed 8-bit-import -> 16 bpc -> `saveFrameToPng`
    chain, measured with a no-effect 16 bpc capture of the same input, is
@@ -392,10 +392,14 @@ then the corrected reading.
 
 Corrected claim level: the unresolved-16-bpc-gap observation above is
 withdrawn as evidence; it is unreproduced and its artifacts are
-unavailable. In its place, this follow-up establishes AE-oracle
-equivalence for ntsc-rs SmartFX at full 16 bpc transport precision
+unavailable. The replacement captures show export-tolerance agreement for
+ntsc-rs SmartFX at full 16 bpc transport precision
 (tolerance 4/32768, observed residue within 2/32768), frame 0, default
-parameters, across two inputs and two comp fps values. The
+parameters, across two inputs and two comp fps values. They do not prove
+which AEX module AE loaded because the old capture result did not record a
+loaded-module identity. Therefore this is not yet identity-bound AE-oracle
+equivalence. A fresh capture with `-RequireLoadedAexIdentity` is required
+before promoting the claim again. The
 machine-readable judgments live in
 `analysis/NTSC_RS_ORACLE_DEEP16_RESULT_2026-07-19.json` (regenerated only
 via `tools/refresh-ntsc-rs-oracle-deep16-evidence.ps1` from the executed
@@ -490,3 +494,57 @@ fail explicitly instead.
 `tests/test_ae_reference_capture_automation.py` locks the version branch,
 the gate list, the PID-scoped shutdown, and the survival of an unrelated
 AE-named process that appears mid-capture.
+
+## Follow-up: evidence hardening after the PR #56 review (2026-07-19,
+   issue #61)
+
+The post-merge review of PR #56 found three gaps in the deep16 evidence
+chain. Fresh captures were taken with an intermediate hardened runner (all four AE renders came
+back byte-identical to the previous session's captures, which doubles as
+another determinism observation).
+
+1. **AE-loaded module identity.** The intermediate runner scanned the
+   installed plug-in's folder tree and the AE application's own `Plug-ins`
+   tree for any other `.aex` containing the effect name bytes (refusing on
+   a collision), and re-hashes the installed plug-in after AE exits
+   (refusing on change). Both hashes and the scan summary are recorded in
+   the capture result; the refresh script fails closed unless every
+   capture observed a stable installed hash, a collision-free scan, and the
+   expected `effect_match_name`. That does not prove the module AE mapped:
+   the scan covers only two roots and races launch. The current runner instead
+   locks the installed file against replacement and compares its handle-derived
+   final path/file ID with the launched process's loaded module. The committed
+   captures predate that stronger proof, so `oracle_identity.state` remains
+   `unverified` and exact claims remain disabled until a fresh recapture.
+2. **Comparisons are recomputed at refresh time.** The refresh script now
+    re-runs `tools/compare-pixel-oracles.py` with the frozen arguments for
+    every case, using the pinned raw world and the AE PNG whose hash is bound
+    to its capture manifest. It serializes that freshly generated scratch
+    report directly into the evidence document; stored comparison JSON is
+    neither required nor trusted, so stale or rewritten judgment fields cannot
+    be carried into refreshed evidence.
+3. **The promotion/export mechanism is bound to local-only artifacts.** The smart-input
+   world snapshot (`host-gradient-smart-input.rgba16le`, re-dumped and
+   hash-verified during the refresh re-render) and the no-effect 16 bpc
+   control capture (`ae-noeffect-16.png`, identity-checked like the effect
+   captures) are corpus artifacts now, and
+   `tools/verify-deep16-mechanism.py` recomputes both mechanism claims
+   from them at refresh time: the host promotion
+   `round(v * 32768 / 255)` holds on all 8,294,400 samples, and AE's
+   composed import/export map is `v * 257 + d` with `d` in {-1, 0, +1}
+   (histogram -1: 126, 0: 129, +1: 1 over all 256 values), deterministic
+   and exactly invertible by `round(v16 / 257)`. The earlier section's
+   mechanism statements were machine-checked instead of resting only on
+   memory. These `target/oracle-deep16` raw artifacts are not committed, so
+   a clean clone cannot independently rerun this verification; the evidence
+   records `clean_clone_reproducible=false` until they are admitted into a
+   portable conformance bundle. The export-map measurement (observation)
+   remains separate from the residue attribution (explanation consistent
+   with those bounds, not a per-sample proof).
+
+The AE-side captures for this refresh also surfaced an operational
+constraint worth recording: launching a capture while the previous AE
+instance is still tearing down can hand the `-r` script to the dying
+instance, which rejects it ("Attempt was made to run a second script
+while another script was already running") and the new capture times out.
+Waiting for process exit plus a grace period between captures avoids it.
