@@ -64,14 +64,15 @@ def test_l2_source_writes_full_checkout_result() -> None:
     source = SOURCE.read_text(encoding="utf-8")
     for marker in (
         "constexpr size_t kCheckoutResultBytes = 76;",
-        "void write_checkout_result(void* destination",
+        "void write_checkout_result_rects(void* destination",
         "std::memset(bytes, 0, kCheckoutResultBytes);",
         "const int32_t par[2] = {g_pixel_aspect_ratio.numerator,",
         "std::memcpy(bytes + 32, par, sizeof(par));",
         "std::memcpy(bytes + 44, reference_size, sizeof(reference_size));",
         "g_full_resolution_width > 0 ? g_full_resolution_width : g_smart_width;",
-        "write_checkout_result(result, g_smart_width, g_smart_height,\n"
-        "                          reference_width, reference_height);",
+        "write_checkout_result_rects(result, g_input_checkout_result_rect,\n"
+        "                                {0, 0, g_smart_width, g_smart_height},\n"
+        "                                reference_width, reference_height);",
         'L"--self-test-pf-pre-checkout-result"',
     ):
         assert marker in source
