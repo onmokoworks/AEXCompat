@@ -879,6 +879,8 @@ name = "dummy-workers"
 version = "0.1.0"
 dependencies = [
  "aexcompat-broker",
+ "serde_json",
+ "sha2",
  "windows-sys 0.59.0",
 ]
 

@@ -28,6 +28,20 @@ fn main() {
         };
         std::process::exit(if accepted { 0 } else { 3 });
     }
+    if args.len() == 4 && args[1] == "render-video-batch" {
+        let passed = match aexcompat_broker::render_session::run_video_batch(
+            repository,
+            &PathBuf::from(&args[2]),
+            &PathBuf::from(&args[3]),
+        ) {
+            Ok(passed) => passed,
+            Err(_) => {
+                eprintln!("batch video render session failed");
+                std::process::exit(2);
+            }
+        };
+        std::process::exit(if passed { 0 } else { 3 });
+    }
     if args.len() == 4 && args[1] == "render-parameter-request" {
         let passed = match aexcompat_broker::render_request::execute(
             repository,

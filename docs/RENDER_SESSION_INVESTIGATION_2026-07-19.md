@@ -262,6 +262,49 @@ private VirtualAlloc probe 192MiB、auto-reset event 対で ping-pong 2000 回�
 - 段階1 の制御チャネル設計 (HANDLE_LIST + 環境変数での handle 番号伝達 +
   専用イベント/パイプ) はこの spike の形をそのまま昇格させれば足りる。
 
+### 段階1 PR-C: broker RenderSession + バッチ動画レンダー CLI (2026-07-19 追記)
+
+実装は `broker/crates/broker/src/render_session.rs` (RenderSession
+open/render_frame/close + `render-video-batch` CLI)、launch 分離は
+`windows_process.rs` (`run_isolated_impl` を launch (`launch_isolated_impl`) と
+回収 (`LaunchedIsolatedProcess::wait_and_collect`) に分割、one-shot 経路は
+分割後の合成で挙動不変)、sealed staging のセッション生存期間保持は
+`secure_launch.rs` (`SecureSessionProcess`) と `secure_image_dispatch.rs`
+(`dispatch_secure_image_session`)。
+
+観察 (実 worker との相互運用、開発機、frozen evidence ではない):
+
+- PR-B (#115, b11129d) の worker を worktree でビルドし、broker CLI
+  `render-video-batch` で PNG 3 フレームを 1 worker プロセスに通した。
+  `passed: true`、`persistent_sequence_setup_error/setdown_error: 0`、
+  `render_error: 0`、`guard_bytes_intact: true`、suite/handle lifetimes
+  balanced。同一入力 3 フレームの slot checksum は一致し、フレーム転送は
+  決定的だった (fixture: pf_sampling_probe)。
+- broker 統合テスト (`broker/crates/broker/tests/render_session.rs`) は
+  プロトコル忠実な dummy worker
+  (`dummy-workers/src/bin/session_protocol_worker.rs`) を実プロセス
+  (restricted token + sealed tree + Job Object) で駆動し、正常系・
+  frame-local エラー継続・watchdog (deadline 超過で TerminateJobObject)・
+  クラッシュ無効化・generation 不一致・静的ヘッダ改変・checksum 不一致の
+  fail-closed を検証した (9 本、いずれも pass)。
+
+逸脱 (プロトコル §8 からの):
+
+- §8 は「per-frame 出力検証は `render_with_artifact` 内の検証列
+  (image_render.rs の selector/bounds/size/pixel/guard 検証) を純粋関数に
+  切り出して one-shot とセッションで共用する」とした。実装では共用せず、
+  セッション専用の per-frame 検証 (`validate_ok_frame` + slot checksum
+  再計算) を書いた。理由: one-shot の検証列は one-shot worker report の
+  フィールド (spatial echo、custom UI、GPU 系) に強く結合しており、
+  per-frame の正本は `frame_done` + slot バイト列でフィールド集合が重なら
+  ない。共有済みの純粋関数 `validate_image_buffer_layout` は両経路で共用
+  している。one-shot 側の検証列の純粋関数化は PR-D (長さ1セッション
+  wrapper 化) で改めて評価する。
+- §8 の API スケッチでは `close()` が `io::Result<SessionReport>` だが、
+  実装は診断を常に返すため `Value` (セッション要約 JSON) を返す。無効化
+  済みセッションの close でも「frame N で死亡、N 以降未レンダー」を
+  構造化して返すため。
+
 ### 段階0 項目1・2・6: AE 実機のフレーム列 selector 観測 (2026-07-19 追記)
 
 観測手段: 新規 instruments `pf-selector-timeline-probe` (Classic/Smart 2 flavor、

@@ -26,9 +26,11 @@ def test_render_workers_admit_the_local_build_through_dispatch_only():
     ):
         assert not (SOURCE.parent / name).exists()
 
-    # Admission happens exactly once, inside dispatch_secure_image, and the
-    # staged copy must still match the admitted bytes before launch.
-    assert dispatch.count("admit_local_worker(") == 2  # definition + one call
+    # Admission happens exactly once per launch, inside dispatch_secure_image
+    # and its render-session variant, and the staged copy must still match the
+    # admitted bytes before launch.
+    assert dispatch.count("admit_local_worker(") == 3  # definition + one-shot + session
+    assert "pub fn dispatch_secure_image_session(" in dispatch
     assert "local worker binary is missing or unreadable" in dispatch
     assert "local worker binary is empty" in dispatch
     assert "Sha256::digest(fs::read(&worker" not in render_function()
@@ -105,7 +107,7 @@ def test_all_other_image_routes_use_secure_dispatch_without_isolated_fallback():
 def test_shared_dispatch_preserves_cli_order_and_empty_dependency_approval():
     source = SOURCE.read_text(encoding="utf-8")
     start = source.index("fn dispatch_approved_image(")
-    end = source.index("\nfn decode_sha256_hex", start)
+    end = source.index("\npub(crate) fn decode_sha256_hex", start)
     helper = source[start:end]
     assert "expected_sha256: decode_sha256_hex(approved_sha256)?" in helper
     assert "expected_size: fs::metadata(plugin_path)?.len()" in helper

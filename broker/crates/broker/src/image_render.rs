@@ -21,12 +21,12 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-const MAX_DIMENSION: u32 = 4096;
-const MAX_PIXELS: u64 = 16_777_216;
-const MAX_RGBA_TRANSPORT_BYTES: u64 = MAX_PIXELS * 4;
-const MAX_INTERNAL_IMAGE_BYTES: u64 = MAX_PIXELS * 16;
+pub(crate) const MAX_DIMENSION: u32 = 4096;
+pub(crate) const MAX_PIXELS: u64 = 16_777_216;
+pub(crate) const MAX_RGBA_TRANSPORT_BYTES: u64 = MAX_PIXELS * 4;
+pub(crate) const MAX_INTERNAL_IMAGE_BYTES: u64 = MAX_PIXELS * 16;
 const MAX_PARAMETERS: u32 = 1024;
-const INTERACTIVE_RENDER_TIMEOUT_MS: u64 = 30_000;
+pub(crate) const INTERACTIVE_RENDER_TIMEOUT_MS: u64 = 30_000;
 const MAX_STAGE_EVENTS: usize = 32;
 const MAX_MISSING_SUITES: usize = 16;
 const MAX_SUITE_NAME_LEN: usize = 96;
@@ -142,7 +142,7 @@ fn prepare_runtime_authorization_transport(
     })
 }
 
-fn decode_sha256_hex(value: &str) -> io::Result<[u8; 32]> {
+pub(crate) fn decode_sha256_hex(value: &str) -> io::Result<[u8; 32]> {
     if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return Err(invalid(
             "plugin SHA-256 must be exactly 64 hexadecimal characters",
@@ -279,7 +279,7 @@ pub(crate) fn decode_bounded_image(path: &Path, role: &str) -> io::Result<image:
 /// Diagnostics for a dispatched worker run, including the kill evidence from
 /// Job Object accounting (issue #21): why a dead worker died (timeout versus
 /// allocations failing at the memory cap) and how much memory it peaked at.
-fn isolated_worker_diagnostics(
+pub(crate) fn isolated_worker_diagnostics(
     isolated: &crate::secure_launch::SecureLaunchResult,
     elapsed_ms: u128,
 ) -> Value {
@@ -635,7 +635,7 @@ fn is_auto_gpu_preflight_error(error: &io::Error) -> bool {
 }
 
 impl RenderPixelFormat {
-    fn report_name(self) -> &'static str {
+    pub(crate) fn report_name(self) -> &'static str {
         match self {
             Self::Argb8 => "argb8",
             Self::Argb16 => "argb16",
@@ -643,7 +643,7 @@ impl RenderPixelFormat {
         }
     }
 
-    fn bytes_per_pixel(self) -> u64 {
+    pub(crate) fn bytes_per_pixel(self) -> u64 {
         match self {
             Self::Argb8 => 4,
             Self::Argb16 => 8,
@@ -651,7 +651,7 @@ impl RenderPixelFormat {
         }
     }
 
-    fn raw_extension(self) -> Option<&'static str> {
+    pub(crate) fn raw_extension(self) -> Option<&'static str> {
         match self {
             Self::Argb8 => None,
             Self::Argb16 => Some("rgba16le"),
@@ -660,7 +660,7 @@ impl RenderPixelFormat {
     }
 }
 
-fn native_rgba_to_preview(bytes: &[u8], format: RenderPixelFormat) -> io::Result<Vec<u8>> {
+pub(crate) fn native_rgba_to_preview(bytes: &[u8], format: RenderPixelFormat) -> io::Result<Vec<u8>> {
     match format {
         RenderPixelFormat::Argb8 => Ok(bytes.to_vec()),
         RenderPixelFormat::Argb16 => {
@@ -3910,7 +3910,7 @@ pub fn dispatch_experimental_aegp_switch_roundtrip(
     Ok(report)
 }
 
-fn encode_interactive_payload(parameters: &[InteractiveParameter]) -> io::Result<String> {
+pub(crate) fn encode_interactive_payload(parameters: &[InteractiveParameter]) -> io::Result<String> {
     let parameters = parameters
         .iter()
         .filter(|item| {
