@@ -32,6 +32,17 @@ const MAX_MISSING_SUITES: usize = 16;
 const MAX_SUITE_NAME_LEN: usize = 96;
 const STALE_IMAGE_TRANSPORT_AGE: Duration = Duration::from_secs(15 * 60);
 
+/// PF_OutFlag2_SUPPORTS_SMART_RENDER in the out_flags2 word the plug-in
+/// advertises from PF_Cmd_GLOBAL_SETUP.
+pub const PF_OUTFLAG2_SUPPORTS_SMART_RENDER: u64 = 1 << 10;
+
+/// A plug-in that advertises SUPPORTS_SMART_RENDER expects the SmartFX
+/// selector sequence; After Effects always prefers it over Classic RENDER,
+/// so hosts can use this as the default render path (issue #105).
+pub fn smart_render_advertised(out_flags2: u64) -> bool {
+    out_flags2 & PF_OUTFLAG2_SUPPORTS_SMART_RENDER != 0
+}
+
 fn dispatch_approved_image(
     repository: &Path,
     worker_kind: WorkerKind,
@@ -2723,6 +2734,7 @@ fn inspect_experimental_with_diagnostics_and_runtime_policy(
     let audio_effect_only = advertised_out_flags & (1_u64 << 31) != 0;
     diagnostics["advertised_out_flags"] = json!(advertised_out_flags);
     diagnostics["advertised_out_flags2"] = json!(advertised_out_flags2);
+    diagnostics["smart_render_advertised"] = json!(smart_render_advertised(advertised_out_flags2));
     diagnostics["audio_effect_only"] = json!(audio_effect_only);
     diagnostics["image_render_supported"] = json!(!audio_effect_only);
     diagnostics["runtime_module_policy_applied"] = json!(runtime_policy.is_some());
@@ -5014,6 +5026,18 @@ fn render_with_artifact(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn smart_render_advertised_follows_out_flags2_bit_10() {
+        assert!(!smart_render_advertised(0));
+        assert!(smart_render_advertised(PF_OUTFLAG2_SUPPORTS_SMART_RENDER));
+        // ntsc-rs (SmartFX-only) and the ONMK MaskOffset fixture advertise the
+        // bit inside larger flag words (issue #105).
+        assert!(smart_render_advertised(142_611_592));
+        assert!(smart_render_advertised(525_312));
+        // Every other flag set without bit 10 stays Classic.
+        assert!(!smart_render_advertised(u64::MAX & !PF_OUTFLAG2_SUPPORTS_SMART_RENDER));
+    }
 
     #[test]
     fn bounded_decode_rejects_header_only_images() {

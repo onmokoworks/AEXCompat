@@ -1794,6 +1794,12 @@ fn apply_dynamic_ui_report(
     true
 }
 
+/// The AEX's own SUPPORTS_SMART_RENDER declaration from the parameter
+/// inspection diagnostics; None until an inspection has completed (issue #105).
+fn advertised_smart_render(report: &serde_json::Value) -> Option<bool> {
+    report["worker_diagnostics"]["smart_render_advertised"].as_bool()
+}
+
 struct HarnessApp {
     repository: PathBuf,
     selection: Option<Selection>,
@@ -1821,6 +1827,7 @@ struct HarnessApp {
     parameter_defaults: Vec<aexcompat_broker::image_render::InteractiveParameter>,
     host_context: Option<aexcompat_broker::render_request::HostContext>,
     smart_render: bool,
+    smart_render_advertised: Option<bool>,
     pixel_format: aexcompat_broker::image_render::RenderPixelFormat,
     gpu_backend: aexcompat_broker::image_render::RenderGpuBackend,
     frame: i32,
@@ -1886,6 +1893,7 @@ impl HarnessApp {
             parameter_defaults: Vec::new(),
             host_context: None,
             smart_render: false,
+            smart_render_advertised: None,
             pixel_format: aexcompat_broker::image_render::RenderPixelFormat::Argb8,
             gpu_backend: aexcompat_broker::image_render::RenderGpuBackend::Auto,
             frame: 0,
@@ -2017,6 +2025,8 @@ impl HarnessApp {
         self.parameter_defaults.clear();
         self.audio_input = None;
         self.audio_effect_only = false;
+        self.smart_render = false;
+        self.smart_render_advertised = None;
         self.host_context = None;
         self.choose_aex();
     }
@@ -2441,6 +2451,7 @@ impl HarnessApp {
                 self.parameters.clear();
                 self.audio_input = None;
                 self.audio_effect_only = false;
+                self.smart_render_advertised = None;
                 self.host_context = None;
                 self.output_image = None;
                 self.preview = None;
@@ -3749,9 +3760,14 @@ impl HarnessApp {
                     self.audio_effect_only = report["worker_diagnostics"]["audio_effect_only"]
                         .as_bool()
                         .unwrap_or(false);
+                    self.smart_render_advertised = advertised_smart_render(&report);
+                    if let Some(advertised) = self.smart_render_advertised {
+                        self.smart_render = advertised;
+                    }
                     self.status = format!(
-                        "Effect Controls ready: {} editable parameter(s).",
-                        self.parameters.len()
+                        "Effect Controls ready: {} editable parameter(s). Render path: {}.",
+                        self.parameters.len(),
+                        if self.smart_render { "SmartFX" } else { "Classic" }
                     );
                 }
             }
@@ -4208,6 +4224,12 @@ impl eframe::App for HarnessApp {
                         ui.label("Render path:");
                         ui.selectable_value(&mut self.smart_render, false, "Classic");
                         ui.selectable_value(&mut self.smart_render, true, "SmartFX");
+                        if let Some(advertised) = self.smart_render_advertised {
+                            ui.weak(if advertised { "advertised: SmartFX" } else { "advertised: Classic" });
+                            if self.smart_render != advertised {
+                                ui.colored_label(egui::Color32::from_rgb(230, 180, 60), "manual override");
+                            }
+                        }
                     });
                     ui.horizontal(|ui| {
                         use aexcompat_broker::image_render::RenderPixelFormat;
@@ -4822,6 +4844,7 @@ fn main() -> eframe::Result {
         && matches!(
             args[1].to_string_lossy().as_ref(),
             "--render-experimental"
+                | "--render-experimental-auto"
                 | "--render-experimental-16"
                 | "--render-experimental-16-deep"
                 | "--render-experimental-32"
@@ -4834,7 +4857,7 @@ fn main() -> eframe::Result {
     {
         use aexcompat_broker::image_render::RenderPixelFormat;
         let command = args[1].to_string_lossy();
-        let smart = command.contains("smart");
+        let auto_path = command == "--render-experimental-auto";
         let deep16_png = command.ends_with("-16-deep");
         let pixel_format = if command.ends_with("-16") || deep16_png {
             RenderPixelFormat::Argb16
@@ -4845,9 +4868,30 @@ fn main() -> eframe::Result {
         };
         let plugin = Path::new(&args[2]);
         let hash = format!("{:X}", Sha256::digest(fs::read(plugin).unwrap()));
-        let parameters =
-            aexcompat_broker::image_render::inspect_experimental(&repository, plugin, &hash)
-                .unwrap_or_default();
+        let (parameters, inspection) =
+            match aexcompat_broker::image_render::inspect_experimental_with_diagnostics(
+                &repository,
+                plugin,
+                &hash,
+            ) {
+                Ok(inspected) => inspected,
+                Err(error) if auto_path => {
+                    eprintln!(
+                        "automatic render-path selection needs a successful parameter \
+                         inspection: {error}"
+                    );
+                    std::process::exit(1);
+                }
+                Err(_) => Default::default(),
+            };
+        let smart_advertised = inspection["smart_render_advertised"]
+            .as_bool()
+            .unwrap_or(false);
+        let smart = if auto_path {
+            smart_advertised
+        } else {
+            command.contains("smart")
+        };
         let report = if deep16_png {
             aexcompat_broker::image_render::render_experimental_image_at_time_with_deep16_png(
                 &repository,
@@ -4888,7 +4932,13 @@ fn main() -> eframe::Result {
             )
         };
         match report {
-            Ok(value) => println!("{}", serde_json::to_string_pretty(&value).unwrap()),
+            Ok(mut value) => {
+                if auto_path {
+                    value["render_path_source"] = serde_json::json!("advertised_out_flags2");
+                    value["smart_render_advertised"] = serde_json::json!(smart_advertised);
+                }
+                println!("{}", serde_json::to_string_pretty(&value).unwrap());
+            }
             Err(error) => {
                 eprintln!("{error}");
                 std::process::exit(1);
@@ -5783,6 +5833,23 @@ fn main() -> eframe::Result {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn advertised_smart_render_reads_inspection_diagnostics_only() {
+        let smart = serde_json::json!({
+            "worker_diagnostics": { "smart_render_advertised": true }
+        });
+        assert_eq!(advertised_smart_render(&smart), Some(true));
+        let classic = serde_json::json!({
+            "worker_diagnostics": { "smart_render_advertised": false }
+        });
+        assert_eq!(advertised_smart_render(&classic), Some(false));
+        // Reports from older workers without the field must not force a
+        // default-path change.
+        let missing = serde_json::json!({ "worker_diagnostics": {} });
+        assert_eq!(advertised_smart_render(&missing), None);
+        assert_eq!(advertised_smart_render(&serde_json::json!({})), None);
+    }
 
     fn temporary_directory(name: &str) -> PathBuf {
         let path = std::env::temp_dir().join(format!(
