@@ -1,6 +1,4 @@
 #include <windows.h>
-// MiniDumpWriteDump types only; dbghelp.dll is loaded dynamically on crash.
-#include <DbgHelp.h>
 #include <bcrypt.h>
 #include <d3d12.h>
 #include <fcntl.h>
@@ -68,6 +66,7 @@
 #include "worker_selftest_dispatch.hpp"
 #include "worker_smart_runtime.hpp"
 #include "worker_mask_runtime.hpp"
+#include "worker_minidump_runtime.hpp"
 #include "worker_pf_helper_runtime.hpp"
 #include "worker_aegp_render_options.hpp"
 #include "worker_aegp_init_runtime.hpp"
@@ -364,75 +363,8 @@ const char* trace_worker_label() {
   return "aex_l2_worker";
 }
 
-// Opt-in crash minidumps (issue #18): broker-validated directory passed via
-// --minidump-v1. Default off; one create-new dump per process; local only.
-std::filesystem::path g_minidump_dir;
-// Atomic one-time guard: a plug-in can crash several of its own threads at
-// once, and the top-level filter runs on each, so the writer must admit only
-// the first.
-std::atomic<bool> g_minidump_attempted{false};
-
-void write_crash_minidump(EXCEPTION_POINTERS* information) {
-  if (g_minidump_dir.empty() || !information) return;
-  if (g_minidump_attempted.exchange(true)) return;
-  HMODULE dbghelp = LoadLibraryExW(L"dbghelp.dll", nullptr,
-                                   LOAD_LIBRARY_SEARCH_SYSTEM32);
-  if (!dbghelp) {
-    std::fprintf(stderr, "stage:minidump_failed reason=dbghelp_unavailable\n");
-    return;
-  }
-  using MiniDumpWriteDumpFn = BOOL(WINAPI*)(HANDLE, DWORD, HANDLE,
-                                            MINIDUMP_TYPE,
-                                            PMINIDUMP_EXCEPTION_INFORMATION,
-                                            void*, void*);
-  const auto write_dump = reinterpret_cast<MiniDumpWriteDumpFn>(
-      GetProcAddress(dbghelp, "MiniDumpWriteDump"));
-  if (!write_dump) {
-    std::fprintf(stderr, "stage:minidump_failed reason=entry_unavailable\n");
-    return;
-  }
-  wchar_t name[64]{};
-  std::swprintf(name, std::size(name), L"crash-%lu.dmp", GetCurrentProcessId());
-  const std::filesystem::path dump_path = g_minidump_dir / name;
-  // CREATE_NEW enforces the create-new policy: never overwrite an existing
-  // dump, even across an unexpected process id reuse.
-  HANDLE file = CreateFileW(dump_path.c_str(), GENERIC_WRITE, 0, nullptr,
-                            CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
-  if (file == INVALID_HANDLE_VALUE) {
-    std::fprintf(stderr, "stage:minidump_failed reason=create_failed code=%lu\n",
-                 GetLastError());
-    return;
-  }
-  MINIDUMP_EXCEPTION_INFORMATION exception_info{};
-  exception_info.ThreadId = GetCurrentThreadId();
-  exception_info.ExceptionPointers = information;
-  exception_info.ClientPointers = FALSE;
-  const BOOL written = write_dump(GetCurrentProcess(), GetCurrentProcessId(),
-                                  file, MiniDumpNormal, &exception_info,
-                                  nullptr, nullptr);
-  LARGE_INTEGER size{};
-  GetFileSizeEx(file, &size);
-  CloseHandle(file);
-  if (written) {
-    std::fprintf(stderr, "stage:minidump_written name=crash-%lu.dmp bytes=%lld\n",
-                 GetCurrentProcessId(), static_cast<long long>(size.QuadPart));
-  } else {
-    std::fprintf(stderr, "stage:minidump_failed reason=write_failed code=%lu\n",
-                 GetLastError());
-    DeleteFileW(dump_path.c_str());
-  }
-}
-
-// Best-effort coverage for crashes that never reach an __except filter
-// (e.g. on foreign threads). Continue the search so default handling and the
-// nonzero exit code are unchanged.
-LONG WINAPI top_level_crash_filter(EXCEPTION_POINTERS* information) {
-  write_crash_minidump(information);
-  return EXCEPTION_CONTINUE_SEARCH;
-}
-
 int capture_seh_exception(EXCEPTION_POINTERS* information) {
-  write_crash_minidump(information);
+  aexcompat::worker_runtime::minidump::write_crash_minidump(information);
   g_last_seh_exception_code = information && information->ExceptionRecord
       ? information->ExceptionRecord->ExceptionCode : 0;
   const void* address = information && information->ExceptionRecord
@@ -13623,17 +13555,14 @@ int worker_main_impl(int argc, wchar_t **argv) {
     // End-to-end proof that the SEH-guarded path writes a minidump when the
     // opt-in directory is set. Raises a real access violation under the same
     // __except filter production uses, then reports whether the dump landed.
-    g_minidump_dir = std::filesystem::path(argv[2]);
-    std::error_code minidump_dir_error;
-    if (g_minidump_dir.empty() ||
-        !std::filesystem::is_directory(g_minidump_dir, minidump_dir_error)) {
+    if (!aexcompat::worker_runtime::minidump::configure_directory(
+            std::filesystem::path(argv[2]))) {
       std::cout << "{\"crash_minidump\":\"failed\",\"reason\":\"bad_directory\"}\n";
       return 1;
     }
     const uint32_t exception_code = selftest_trigger_guarded_crash();
-    wchar_t name[64]{};
-    std::swprintf(name, std::size(name), L"crash-%lu.dmp", GetCurrentProcessId());
-    const std::filesystem::path dump_path = g_minidump_dir / name;
+    const std::filesystem::path dump_path =
+        aexcompat::worker_runtime::minidump::current_process_dump_path();
     std::error_code dump_size_error;
     const auto dump_size =
         std::filesystem::file_size(dump_path, dump_size_error);
@@ -13641,7 +13570,9 @@ int worker_main_impl(int argc, wchar_t **argv) {
     std::cout << "{\"crash_minidump\":\"" << (written ? "passed" : "failed")
               << "\",\"exception_code\":" << exception_code
               << ",\"dump_bytes\":" << (written ? dump_size : 0)
-              << ",\"attempted\":" << (g_minidump_attempted.load() ? "true" : "false")
+              << ",\"attempted\":"
+              << (aexcompat::worker_runtime::minidump::attempted()
+                      ? "true" : "false")
               << "}\n";
     return written ? 0 : 1;
   }
@@ -13889,12 +13820,11 @@ int worker_main_impl(int argc, wchar_t **argv) {
   // kind-specific, argc-exact dispatch runs. Reducing argc hides the pair from
   // those checks; the crash path is opt-in and off by default (issue #18).
   if (argc >= 3 && std::wstring(argv[argc - 2]) == L"--minidump-v1") {
-    g_minidump_dir = std::filesystem::path(argv[argc - 1]);
-    std::error_code minidump_dir_error;
-    if (g_minidump_dir.empty() ||
-        !std::filesystem::is_directory(g_minidump_dir, minidump_dir_error))
+    if (!aexcompat::worker_runtime::minidump::configure_directory(
+            std::filesystem::path(argv[argc - 1])))
       return 3;
-    SetUnhandledExceptionFilter(top_level_crash_filter);
+    SetUnhandledExceptionFilter(
+        aexcompat::worker_runtime::minidump::top_level_crash_filter);
     argc -= 2;
   }
   struct InvocationState {
