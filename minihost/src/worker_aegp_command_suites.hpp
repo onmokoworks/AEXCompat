@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <vector>
 
 namespace aexcompat::l2_detail {
 
@@ -47,5 +48,25 @@ struct AegpRegisterSuite {
 
 extern AegpCommandSuite g_aegp_command_suite;
 extern AegpRegisterSuite g_aegp_register_suite;
+
+// Mutable command-suite fixture state is owned here so l2_main only wires
+// callbacks and consumes the state for reports.  The fields intentionally
+// preserve the legacy names/semantics at their call sites.
+struct AegpCommandState {
+  bool keyframe_roundtrip_mode{};
+  bool seek_roundtrip_mode{};
+  bool trim_roundtrip_mode{};
+  bool switch_roundtrip_mode{};
+  uint32_t commands_created{};
+  uint32_t menu_commands_inserted{};
+  uint32_t command_enable_calls{};
+  uint32_t command_check_calls{};
+  uint32_t command_checked_true_calls{};
+  uint32_t command_checked_false_calls{};
+  uint32_t effect_param_union_calls{};
+  std::vector<int32_t> inserted_commands;
+};
+
+AegpCommandState& command_state();
 
 }  // namespace aexcompat::l2_detail
