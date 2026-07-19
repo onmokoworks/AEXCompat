@@ -40,10 +40,10 @@ mod windows_e2e {
     };
     use windows_sys::Win32::System::Threading::{
         CreateEventW, CreateProcessAsUserW, DeleteProcThreadAttributeList, GetExitCodeProcess,
-        InitializeProcThreadAttributeList, ResumeThread, SetEvent, UpdateProcThreadAttribute,
-        WaitForSingleObject, CREATE_NO_WINDOW, CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT,
-        EXTENDED_STARTUPINFO_PRESENT, PROCESS_INFORMATION, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
-        STARTUPINFOEXW,
+        InitializeProcThreadAttributeList, ResumeThread, SetEvent, TerminateProcess,
+        UpdateProcThreadAttribute, WaitForSingleObject, CREATE_NO_WINDOW, CREATE_SUSPENDED,
+        CREATE_UNICODE_ENVIRONMENT, EXTENDED_STARTUPINFO_PRESENT, PROCESS_INFORMATION,
+        PROC_THREAD_ATTRIBUTE_HANDLE_LIST, STARTUPINFOEXW,
     };
 
     const SECTION_BYTES: usize = 256 * 1024 * 1024;
@@ -342,16 +342,49 @@ mod windows_e2e {
         );
         let process_handle = OwnedHandle::new(process.hProcess).unwrap();
         let thread_handle = OwnedHandle::new(process.hThread).unwrap();
+
+        // production の SuspendedProcessCleanup と同型: 作成後〜resume 成功
+        // までに panic した場合、suspended な子を残さない。Job 割り当て前は
+        // TerminateProcess、割り当て後は TerminateJobObject で始末する。
+        struct SuspendedProcessCleanup {
+            process: HANDLE,
+            job: HANDLE,
+            assigned_to_job: bool,
+            armed: bool,
+        }
+        impl Drop for SuspendedProcessCleanup {
+            fn drop(&mut self) {
+                if !self.armed {
+                    return;
+                }
+                unsafe {
+                    if self.assigned_to_job {
+                        TerminateJobObject(self.job, 0xDEAD);
+                    } else {
+                        TerminateProcess(self.process, 0xDEAD);
+                    }
+                    WaitForSingleObject(self.process, 5_000);
+                }
+            }
+        }
+        let mut suspended_cleanup = SuspendedProcessCleanup {
+            process: process_handle.raw(),
+            job: job.raw(),
+            assigned_to_job: false,
+            armed: true,
+        };
         assert_ne!(
             unsafe { AssignProcessToJobObject(job.raw(), process_handle.raw()) },
             0,
             "AssignProcessToJobObject failed"
         );
+        suspended_cleanup.assigned_to_job = true;
         assert_ne!(
             unsafe { ResumeThread(thread_handle.raw()) },
             u32::MAX,
             "ResumeThread failed"
         );
+        suspended_cleanup.armed = false;
         drop(thread_handle);
 
         // 5. worker の ready (map + パターン検証 + ACK 書き込み完了) を待つ。
