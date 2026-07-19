@@ -37,4 +37,16 @@ std::optional<int> dispatch_simple(int argc, wchar_t** argv,
                                    const SimpleCommand* commands,
                                    std::size_t command_count);
 
+struct HostCommand {
+  std::wstring_view command;
+  int argc{};
+  int (*run)(int argc, wchar_t** argv){};
+};
+
+// Owns exact command admission for host-specific tests whose implementation
+// must remain behind l2_main's private ABI boundary.
+std::optional<int> dispatch_host(int argc, wchar_t** argv,
+                                 const HostCommand* commands,
+                                 std::size_t command_count);
+
 }  // namespace aexcompat::worker_runtime::selftest

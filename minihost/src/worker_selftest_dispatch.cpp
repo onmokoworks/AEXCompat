@@ -61,4 +61,18 @@ std::optional<int> dispatch_simple(int argc, wchar_t** argv,
   return std::nullopt;
 }
 
+std::optional<int> dispatch_host(int argc, wchar_t** argv,
+                                 const HostCommand* commands,
+                                 std::size_t command_count) {
+  if (!commands || argc < 2 || !argv || !argv[1]) return std::nullopt;
+  const std::wstring_view requested(argv[1]);
+  for (std::size_t index = 0; index < command_count; ++index) {
+    const auto& command = commands[index];
+    if (requested != command.command) continue;
+    if (argc != command.argc || !command.run) return 2;
+    return command.run(argc, argv);
+  }
+  return std::nullopt;
+}
+
 }  // namespace aexcompat::worker_runtime::selftest

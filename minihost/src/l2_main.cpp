@@ -6432,6 +6432,73 @@ aexcompat::worker_render_report::ClassicSubsystemDiagnostics capture_classic_sub
        i64(aexcompat::aegp_async_layer::diagnostics().reserved_bytes)}};
 }
 
+int selftest_render_output_safety(int, wchar_t**) {
+  const bool passed = verify_render_output_safety();
+  std::cout << "{\"render_output_safety\":\"" << (passed ? "passed" : "failed")
+            << "\",\"cleanup_selector\":\"" << escape(g_last_seh_selector)
+            << "\",\"cleanup_error\":" << g_last_seh_error
+            << ",\"cleanup_calls\":" << g_cleanup_safety_selftest_calls
+            << ",\"guard_pages\":true,\"overrun_beyond_64_detected\":true}\n";
+  return passed ? 0 : 1;
+}
+
+int selftest_crash_minidump(int, wchar_t** argv) {
+  if (!aexcompat::worker_runtime::minidump::configure_directory(
+          std::filesystem::path(argv[2]))) {
+    std::cout << "{\"crash_minidump\":\"failed\",\"reason\":\"bad_directory\"}\n";
+    return 1;
+  }
+  const uint32_t exception_code = selftest_trigger_guarded_crash();
+  const std::filesystem::path dump_path =
+      aexcompat::worker_runtime::minidump::current_process_dump_path();
+  std::error_code dump_size_error;
+  const auto dump_size = std::filesystem::file_size(dump_path, dump_size_error);
+  const bool written = !dump_size_error && dump_size > 0;
+  std::cout << "{\"crash_minidump\":\"" << (written ? "passed" : "failed")
+            << "\",\"exception_code\":" << exception_code
+            << ",\"dump_bytes\":" << (written ? dump_size : 0)
+            << ",\"attempted\":"
+            << (aexcompat::worker_runtime::minidump::attempted() ? "true" : "false")
+            << "}\n";
+  return written ? 0 : 1;
+}
+
+int selftest_pf_adv_time(int, wchar_t**) {
+  const bool passed = aexcompat::worker_runtime::pf_adv_time::verify_suite_versions();
+  std::cout << "{\"pf_adv_time_suite_versions\":\"" << (passed ? "passed" : "failed")
+            << "\",\"v1_slots\":4,\"v2_slots\":4,\"v3_slots\":4,\"v4_slots\":5,\"independent_identity\":true"
+            << ",\"guard_intact\":true,\"reverse_release\":true,\"suite_leases_balanced\":"
+            << (suite_leases_balanced() ? "true" : "false") << "}\n";
+  return passed ? 0 : 1;
+}
+
+int selftest_suite_entry_utility13(int, wchar_t**) {
+  const bool passed = verify_suite_entry_guards_and_utility13();
+  std::cout << "{\"suite_entry_utility13\":\"" << (passed ? "passed" : "failed")
+            << "\",\"null_fail_closed\":true,\"normal_effect_available\":true"
+            << ",\"versions_12_14_rejected\":true,\"mask_callbacks_exposed\":false"
+            << ",\"suite_leases_balanced\":"
+            << (suite_leases_balanced() ? "true" : "false") << "}\n";
+  return passed ? 0 : 1;
+}
+
+int selftest_pf_adv_app(int, wchar_t**) {
+  const bool passed = verify_pf_adv_app_suite_versions();
+  std::cout << "{\"pf_adv_app_suite_versions\":\"" << (passed ? "passed" : "failed")
+            << "\",\"v1_slots\":10,\"v2_slots\":11,\"independent_identity\":true"
+            << ",\"suite_leases_balanced\":"
+            << (suite_leases_balanced() ? "true" : "false") << "}\n";
+  return passed ? 0 : 1;
+}
+
+int selftest_effect_param_union(int, wchar_t**) {
+  const bool passed = verify_aegp_effect_param_union_suite4();
+  std::cout << "{\"aegp_effect_param_union_suite4\":\""
+            << (passed ? "passed" : "failed")
+            << "\",\"successful_calls\":" << g_aegp_effect_param_union_calls << "}\n";
+  return passed ? 0 : 1;
+}
+
 int worker_main_impl(int argc, wchar_t **argv) {
   aexcompat::pf_state_runtime::configure_host_hooks({
       []() -> void* { return &g_effect; },
@@ -6561,77 +6628,17 @@ int worker_main_impl(int argc, wchar_t **argv) {
       GetEnvironmentVariableW(L"AEXCOMPAT_TEST_ASYNC_CANCEL_GATE", cancel_gate,
                               2) == 1 && cancel_gate[0] == L'1');
   SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX);
-  if (argc == 2 && std::wstring(argv[1]) == L"--self-test-render-output-safety") {
-    const bool passed = verify_render_output_safety();
-    std::cout << "{\"render_output_safety\":\"" << (passed ? "passed" : "failed")
-              << "\",\"cleanup_selector\":\"" << escape(g_last_seh_selector)
-              << "\",\"cleanup_error\":" << g_last_seh_error
-              << ",\"cleanup_calls\":" << g_cleanup_safety_selftest_calls
-              << ",\"guard_pages\":true,\"overrun_beyond_64_detected\":true}\n";
-    return passed ? 0 : 1;
-  }
-  if (argc == 3 && std::wstring(argv[1]) == L"--self-test-crash-minidump") {
-    // End-to-end proof that the SEH-guarded path writes a minidump when the
-    // opt-in directory is set. Raises a real access violation under the same
-    // __except filter production uses, then reports whether the dump landed.
-    if (!aexcompat::worker_runtime::minidump::configure_directory(
-            std::filesystem::path(argv[2]))) {
-      std::cout << "{\"crash_minidump\":\"failed\",\"reason\":\"bad_directory\"}\n";
-      return 1;
-    }
-    const uint32_t exception_code = selftest_trigger_guarded_crash();
-    const std::filesystem::path dump_path =
-        aexcompat::worker_runtime::minidump::current_process_dump_path();
-    std::error_code dump_size_error;
-    const auto dump_size =
-        std::filesystem::file_size(dump_path, dump_size_error);
-    const bool written = !dump_size_error && dump_size > 0;
-    std::cout << "{\"crash_minidump\":\"" << (written ? "passed" : "failed")
-              << "\",\"exception_code\":" << exception_code
-              << ",\"dump_bytes\":" << (written ? dump_size : 0)
-              << ",\"attempted\":"
-              << (aexcompat::worker_runtime::minidump::attempted()
-                      ? "true" : "false")
-              << "}\n";
-    return written ? 0 : 1;
-  }
-  if (argc == 2 && std::wstring(argv[1]) == L"--self-test-pf-adv-time-suite1") {
-    const bool passed =
-        aexcompat::worker_runtime::pf_adv_time::verify_suite_versions();
-    std::cout << "{\"pf_adv_time_suite_versions\":\"" << (passed ? "passed" : "failed")
-              << "\",\"v1_slots\":4,\"v2_slots\":4,\"v3_slots\":4,\"v4_slots\":5,\"independent_identity\":true"
-              << ",\"guard_intact\":true,\"reverse_release\":true,\"suite_leases_balanced\":"
-              << (suite_leases_balanced() ? "true" : "false") << "}\n";
-    return passed ? 0 : 1;
-  }
-  if (argc == 2 && std::wstring(argv[1]) == L"--self-test-suite-entry-utility13") {
-    const bool passed = verify_suite_entry_guards_and_utility13();
-    std::cout << "{\"suite_entry_utility13\":\"" << (passed ? "passed" : "failed")
-              << "\",\"null_fail_closed\":true,\"normal_effect_available\":true"
-              << ",\"versions_12_14_rejected\":true,\"mask_callbacks_exposed\":false"
-              << ",\"suite_leases_balanced\":"
-              << (suite_leases_balanced() ? "true" : "false") << "}\n";
-    return passed ? 0 : 1;
-  }
-  if (argc == 2 && std::wstring(argv[1]) == L"--self-test-pf-adv-app-suite") {
-    const bool passed = verify_pf_adv_app_suite_versions();
-    std::cout << "{\"pf_adv_app_suite_versions\":\""
-              << (passed ? "passed" : "failed")
-              << "\",\"v1_slots\":10,\"v2_slots\":11"
-              << ",\"independent_identity\":true"
-              << ",\"suite_leases_balanced\":"
-              << (suite_leases_balanced() ? "true" : "false") << "}\n";
-    return passed ? 0 : 1;
-  }
-  if (argc == 2 &&
-      std::wstring(argv[1]) == L"--self-test-aegp-effect-param-union-suite4") {
-    const bool passed = verify_aegp_effect_param_union_suite4();
-    std::cout << "{\"aegp_effect_param_union_suite4\":\""
-              << (passed ? "passed" : "failed")
-              << "\",\"successful_calls\":" << g_aegp_effect_param_union_calls
-              << "}\n";
-    return passed ? 0 : 1;
-  }
+  const std::array<aexcompat::worker_runtime::selftest::HostCommand, 6> host_selftests{{
+      {L"--self-test-render-output-safety", 2, &selftest_render_output_safety},
+      {L"--self-test-crash-minidump", 3, &selftest_crash_minidump},
+      {L"--self-test-pf-adv-time-suite1", 2, &selftest_pf_adv_time},
+      {L"--self-test-suite-entry-utility13", 2, &selftest_suite_entry_utility13},
+      {L"--self-test-pf-adv-app-suite", 2, &selftest_pf_adv_app},
+      {L"--self-test-aegp-effect-param-union-suite4", 2, &selftest_effect_param_union},
+  }};
+  if (const auto selftest_exit = aexcompat::worker_runtime::selftest::dispatch_host(
+          argc, argv, host_selftests.data(), host_selftests.size()))
+    return *selftest_exit;
   const std::array<aexcompat::worker_runtime::selftest::SimpleCommand, 20> simple_selftests{{
       {L"--self-test-aegp-installed-effect-catalog", "aegp_installed_effect_catalog", &verify_aegp_installed_effect_catalog_suite4},
       {L"--self-test-parameter-animation", "parameter_animation_transport", &verify_parameter_animation_transport},
