@@ -637,13 +637,23 @@ def test_merge_guard_refetches_every_owner_surface_immediately_before_merge() ->
 def test_merge_guard_requires_atomic_server_side_conversation_resolution() -> None:
     root = Path(__file__).resolve().parents[1] / ".claude" / "skills" / "codex-review-loop"
     script = (root / "codex-merge-guard.sh").read_text(encoding="utf-8")
-    final = script.index("# FINAL OWNER SNAPSHOT")
-    server_gate = script.index("if ! require_server_thread_gate", final)
-    merge = script.index("gh pr merge", server_gate)
-    assert final < server_gate < merge
+    server_gate = script.index("if ! require_server_thread_gate")
+    final = script.index("# FINAL OWNER SNAPSHOT", server_gate)
+    merge = script.index("gh pr merge", final)
+    assert server_gate < final < merge
     assert ".required_conversation_resolution.enabled == true" in script
     assert 'branches/$base/protection' in script
+    assert 'rules/branches/$base' in script
+    assert 'required_review_thread_resolution' in script
     assert "REFUSE: base branch must enable server-side" in script
+
+
+def test_codex_finding_instructions_resolve_the_review_thread() -> None:
+    root = Path(__file__).resolve().parents[1] / ".claude" / "skills" / "codex-review-loop"
+    skill = (root / "SKILL.md").read_text(encoding="utf-8")
+    finding = skill[skill.index("**FINDING"):skill.index("**CLEAN (", skill.index("**FINDING"))]
+    assert "resolveReviewThread" in finding
+    assert "threadId:$id" in finding
 
 
 def test_me_ack_ts_requires_the_marker() -> None:

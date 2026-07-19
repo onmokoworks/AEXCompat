@@ -134,7 +134,12 @@ merge 側 (`codex-merge-guard.sh` が head 拘束 clean なしに merge を拒�
   2. 妥当な指摘に対応し、commit・push
   3. 各 inline コメントに対応内容を返信:
      `gh api -X POST repos/{owner}/{repo}/pulls/{PR}/comments/{comment_id}/replies -f body="[ack] 対応済み (<sha>)。<内容>"`
-  4. 手順 1 に戻る (新しい `since` で再トリガー)
+  4. 返信したコメントが属する review thread を GraphQL の
+     `resolveReviewThread` で resolve:
+     `gh api graphql -f query='mutation($id:ID!){resolveReviewThread(input:{threadId:$id}){thread{id isResolved}}}' -F id='{thread_id}'`
+     Require conversation resolution は Codex を含む全review threadを対象にするため、
+     対応済みthreadを未解決のまま残さない。
+  5. 手順 1 に戻る (新しい `since` で再トリガー)
 - **CLEAN (Codex 指摘なし)**: **merge は `codex-merge-guard.sh` 経由でのみ行う**。
   これが (a) owner blocker の不在 (owner_review_gate の CHANGES_REQUESTED、
   および **未解決の owner フィードバック**の不在。解決は**明示シグナルのみ**:

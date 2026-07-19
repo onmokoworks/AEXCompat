@@ -49,10 +49,14 @@ fetch_review_threads() {
 # therefore a mandatory safety prerequisite. Fail closed if the repository
 # plan/token cannot read protection or the rule is disabled.
 require_server_thread_gate() {
-  local base protection
+  local base protection applicable_rules
   base=$(gh api "repos/$OWNER/$REPO/pulls/$PR" --jq '.base.ref') || return 1
-  protection=$(gh api "repos/$OWNER/$REPO/branches/$base/protection") || return 1
-  jq -e '.required_conversation_resolution.enabled == true' <<<"$protection" >/dev/null
+  protection=$(gh api "repos/$OWNER/$REPO/branches/$base/protection" 2>/dev/null) || protection='null'
+  if jq -e '.required_conversation_resolution.enabled == true' <<<"$protection" >/dev/null; then
+    return 0
+  fi
+  applicable_rules=$(gh api "repos/$OWNER/$REPO/rules/branches/$base" 2>/dev/null) || return 1
+  jq -e 'any(.[]; .type == "required_review_thread_resolution")' <<<"$applicable_rules" >/dev/null
 }
 
 head=$(gh api "repos/$OWNER/$REPO/pulls/$PR" --jq '.head.sha') || {
@@ -109,6 +113,13 @@ if [ -n "$owner_after" ]; then
   exit 1
 fi
 
+# Prove the static server-side prerequisite before the final dynamic snapshot.
+# Looking it up afterward would reopen a window for owner feedback forms that
+# the conversation-resolution rule cannot see.
+if ! require_server_thread_gate; then
+  echo "REFUSE: base branch must enable server-side required conversation resolution (branch protection/ruleset); current plan, token, or setting cannot prove it"; exit 1
+fi
+
 # FINAL OWNER SNAPSHOT: owner feedback does not change the head SHA, so
 # --match-head-commit alone cannot close the window between the earlier API
 # reads and merge. Re-fetch every owner surface immediately before merge and
@@ -139,13 +150,6 @@ clean_ts=$(codex_clean_ts_for_head "$head" <<<"$issue_comments")
 find_ts=$(codex_finding_max_ts <<<"$pr_comments")
 if [ -z "$clean_ts" ] || [ -n "$(codex_finding_supersedes_clean "$find_ts" "$clean_ts")" ]; then
   echo "REFUSE: final Codex snapshot is not clean for current head ${head:0:10}"; exit 1
-fi
-
-# The server-side rule closes the inline-review race that no client snapshot
-# can close. If unavailable, preserving the never-merge invariant means this
-# guard must refuse rather than pretend the polling window is atomic.
-if ! require_server_thread_gate; then
-  echo "REFUSE: base branch must enable server-side required conversation resolution (branch protection/ruleset); current plan, token, or setting cannot prove it"; exit 1
 fi
 
 # Atomic head check closes the remaining commit race after the final snapshot;
