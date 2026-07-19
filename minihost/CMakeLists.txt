@@ -48,6 +48,7 @@ set(AEXCOMPAT_WORKER_RUNTIME_CORE_SOURCES
     src/worker_selftest_dispatch.cpp
     src/worker_fixed_selftest_routing.cpp
     src/worker_custom_selftest_routing.cpp
+    src/worker_host_guard_selftests.cpp
     src/worker_smart_runtime.cpp
     src/worker_smart_execution.cpp
     src/worker_smart_setup.cpp

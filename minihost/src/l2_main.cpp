@@ -72,6 +72,7 @@
 #include "worker_selftest_dispatch.hpp"
 #include "worker_fixed_selftest_routing.hpp"
 #include "worker_custom_selftest_routing.hpp"
+#include "worker_host_guard_selftests.hpp"
 #include "worker_smart_runtime.hpp"
 #include "worker_smart_execution.hpp"
 #include "worker_smart_setup.hpp"
@@ -5252,43 +5253,8 @@ using namespace aexcompat::l2_detail;
 // verify_aegp_layer_render_options_suite2 and its async callback live in
 // worker_aegp_render_selftests.cpp.
 
-bool verify_pf_adv_app_suite_versions() {
-  const void* suite1 = nullptr;
-  const void* suite2 = nullptr;
-  const uint32_t acquires_before = suite_acquire_count();
-  const uint32_t releases_before = suite_release_count();
-  bool ok = acquire_suite("PF AE Adv App Suite", 1, &suite1) == 0 &&
-      acquire_suite("PF AE Adv App Suite", 2, &suite2) == 0;
-  auto* slots1 = static_cast<void* const*>(suite1);
-  auto* slots2 = static_cast<void* const*>(suite2);
-  ok = ok && suite1 == aexcompat::worker_runtime::host_suites::adv_app_suite(1) &&
-       suite2 == aexcompat::worker_runtime::host_suites::adv_app_suite(2) &&
-      suite1 != suite2 && slots1 && slots2;
-  if (slots1 && slots2) {
-    ok = ok && std::all_of(slots1, slots1 + 10,
-                           [](void* callback) { return callback != nullptr; }) &&
-        std::all_of(slots2, slots2 + 11,
-                    [](void* callback) { return callback != nullptr; });
-    using UnsupportedProjectOperation = int32_t(__cdecl*)();
-    using UnsupportedInfoColor = int32_t(__cdecl*)(uint32_t);
-    using UnsupportedInfoText3Plus = int32_t(__cdecl*)(
-        const char*, const char*, const char*, const char*, const char*);
-    using InfoDrawText = int32_t(__cdecl*)(const char*, const char*);
-    using InfoDrawText3 = int32_t(__cdecl*)(const char*, const char*, const char*);
-    for (std::size_t slot = 0; slot < 6; ++slot)
-      ok = reinterpret_cast<UnsupportedProjectOperation>(slots1[slot])() != 0 && ok;
-    ok = ok && reinterpret_cast<UnsupportedInfoColor>(slots1[7])(0) != 0 &&
-        reinterpret_cast<UnsupportedInfoText3Plus>(slots1[9])(
-            nullptr, nullptr, nullptr, nullptr, nullptr) != 0 &&
-        reinterpret_cast<InfoDrawText>(slots1[6])("suite1-line1", "suite1-line2") == 0 &&
-        reinterpret_cast<InfoDrawText3>(slots1[8])(
-            "suite1-line1", "suite1-line2", "suite1-line3") == 0;
-  }
-  ok = release_suite("PF AE Adv App Suite", 2) == 0 &&
-      release_suite("PF AE Adv App Suite", 1) == 0 && ok;
-  return ok && suite_acquire_count() == acquires_before + 2 &&
-      suite_release_count() == releases_before + 2 && suite_leases_balanced();
-}
+// verify_pf_adv_app_suite_versions / verify_render_output_safety live in
+// worker_host_guard_selftests.cpp behind its configure() hooks.
 
 bool verify_suite_entry_guards_and_utility13() {
   const uint32_t acquires_before = suite_acquire_count();
@@ -5325,32 +5291,6 @@ bool verify_suite_entry_guards_and_utility13() {
       suite_release_count() == releases_before + 1 && suite_leases_balanced();
 }
 
-uint32_t g_cleanup_safety_selftest_calls{};
-void __cdecl cleanup_safety_selftest_fault(void*) {
-  ++g_cleanup_safety_selftest_calls;
-  RaiseException(EXCEPTION_ACCESS_VIOLATION, 0, 0, nullptr);
-}
-
-bool verify_render_output_safety() {
-  OutputPixelBuffer output(257);
-  if (!output || !output.sentinels_intact() || !output.guard_pages_intact()) return false;
-  std::memset(output.data(), 0x11, output.size());
-  if (!output.sentinels_intact()) return false;
-  output.data()[output.size() + OutputPixelBuffer::kSentinelBytes + 16] = 0x22;
-  const bool oversized_overrun_detected = !output.sentinels_intact();
-  const bool reset_ok = output.reset(8193) && output.sentinels_intact() &&
-      output.guard_pages_intact();
-
-  g_cleanup_safety_selftest_calls = 0;
-  g_last_seh_selector.clear();
-  g_last_seh_error = 0;
-  const int32_t original_render_error = -37;
-  const int32_t cleanup_error = invoke_smart_pre_render_cleanup_seh(
-      &cleanup_safety_selftest_fault, reinterpret_cast<void*>(1));
-  return oversized_overrun_detected && reset_ok && cleanup_error == 512 &&
-      original_render_error == -37 && g_cleanup_safety_selftest_calls == 1 &&
-      g_last_seh_selector == "SMART_PRE_RENDER_CLEANUP" && g_last_seh_error == 512;
-}
 
 
 
@@ -5452,11 +5392,12 @@ aexcompat::worker_render_report::ClassicSubsystemDiagnostics capture_classic_sub
 }
 
 int selftest_render_output_safety(int, wchar_t**) {
-  const bool passed = verify_render_output_safety();
+  const bool passed = aexcompat::host_guard_selftests::verify_render_output_safety();
   std::cout << "{\"render_output_safety\":\"" << (passed ? "passed" : "failed")
             << "\",\"cleanup_selector\":\"" << escape(g_last_seh_selector)
             << "\",\"cleanup_error\":" << g_last_seh_error
-            << ",\"cleanup_calls\":" << g_cleanup_safety_selftest_calls
+            << ",\"cleanup_calls\":"
+            << aexcompat::host_guard_selftests::cleanup_safety_selftest_calls()
             << ",\"guard_pages\":true,\"overrun_beyond_64_detected\":true}\n";
   return passed ? 0 : 1;
 }
@@ -5502,7 +5443,8 @@ int selftest_suite_entry_utility13(int, wchar_t**) {
 }
 
 int selftest_pf_adv_app(int, wchar_t**) {
-  const bool passed = verify_pf_adv_app_suite_versions();
+  const bool passed =
+      aexcompat::host_guard_selftests::verify_pf_adv_app_suite_versions();
   std::cout << "{\"pf_adv_app_suite_versions\":\"" << (passed ? "passed" : "failed")
             << "\",\"v1_slots\":10,\"v2_slots\":11,\"independent_identity\":true"
             << ",\"suite_leases_balanced\":"
@@ -7226,6 +7168,12 @@ const bool g_parameter_selftests_configured = [] {
       &has_param_changed_obsolete,
       &have_inputs_changed_over_time_span_obsolete,
       &apply_parameter_animation});
+  return true;
+}();
+const bool g_host_guard_selftests_configured = [] {
+  aexcompat::host_guard_selftests::configure(
+      {&acquire_suite, &release_suite, &suite_acquire_count,
+       &suite_release_count, &suite_leases_balanced});
   return true;
 }();
 const bool g_pf_color_selftests_configured = [] {
