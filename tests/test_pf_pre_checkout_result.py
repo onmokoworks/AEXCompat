@@ -12,6 +12,7 @@ SOURCE = ROOT / "minihost" / "src" / "l2_main.cpp"
 SMART_RUNTIME_SOURCE = ROOT / "minihost" / "src" / "worker_smart_runtime.cpp"
 SMART_RUNTIME_HEADER = ROOT / "minihost" / "src" / "worker_smart_runtime.hpp"
 SMART_EXECUTION_HEADER = ROOT / "minihost" / "src" / "worker_smart_execution.hpp"
+FIXED_SELFTEST_ROUTING_SOURCE = ROOT / "minihost" / "src" / "worker_fixed_selftest_routing.cpp"
 BUILD = ROOT / "target" / "minihost-build"
 SDK_ROOT = os.environ.get("AFTER_EFFECTS_SDK_ROOT")
 HEADERS = Path(SDK_ROOT) / "Examples" / "Headers" if SDK_ROOT else None
@@ -66,7 +67,8 @@ int main() { return 0; }
 def test_l2_source_writes_full_checkout_result() -> None:
     source = SOURCE.read_text(encoding="utf-8")
     runtime_source = "\n".join(path.read_text(encoding="utf-8") for path in (
-        SMART_RUNTIME_SOURCE, SMART_RUNTIME_HEADER, SMART_EXECUTION_HEADER
+        SMART_RUNTIME_SOURCE, SMART_RUNTIME_HEADER, SMART_EXECUTION_HEADER,
+        FIXED_SELFTEST_ROUTING_SOURCE
     ))
     for marker in (
         "constexpr std::size_t kCheckoutResultBytes = 76;",

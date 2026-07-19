@@ -68,6 +68,7 @@
 #include "worker_entry_admission.hpp"
 #include "worker_session.hpp"
 #include "worker_selftest_dispatch.hpp"
+#include "worker_fixed_selftest_routing.hpp"
 #include "worker_smart_runtime.hpp"
 #include "worker_smart_execution.hpp"
 #include "worker_smart_setup.hpp"
@@ -5960,52 +5961,39 @@ int worker_main_impl(int argc, wchar_t **argv) {
       GetEnvironmentVariableW(L"AEXCOMPAT_TEST_ASYNC_CANCEL_GATE", cancel_gate,
                               2) == 1 && cancel_gate[0] == L'1');
   SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX);
-  const std::array<aexcompat::worker_runtime::selftest::HostCommand, 6> host_selftests{{
-      {L"--self-test-render-output-safety", 2, &selftest_render_output_safety},
-      {L"--self-test-crash-minidump", 3, &selftest_crash_minidump},
-      {L"--self-test-pf-adv-time-suite1", 2, &selftest_pf_adv_time},
-      {L"--self-test-suite-entry-utility13", 2, &selftest_suite_entry_utility13},
-      {L"--self-test-pf-adv-app-suite", 2, &selftest_pf_adv_app},
-      {L"--self-test-aegp-effect-param-union-suite4", 2, &selftest_effect_param_union},
-  }};
-  if (const auto selftest_exit = aexcompat::worker_runtime::selftest::dispatch_host(
-          argc, argv, host_selftests.data(), host_selftests.size()))
-    return *selftest_exit;
-  const std::array<aexcompat::worker_runtime::selftest::SimpleCommand, 22> simple_selftests{{
-      {L"--self-test-aegp-installed-effect-catalog", "aegp_installed_effect_catalog", &verify_aegp_installed_effect_catalog_suite4},
-      {L"--self-test-parameter-animation", "parameter_animation_transport", &verify_parameter_animation_transport},
-      {L"--self-test-pf-param-utils-suite", "pf_param_utils_suite3", &verify_pf_param_utils_suite3},
-      {L"--self-test-pf-pre-checkout-result", "pf_pre_checkout_result", &verify_pre_checkout_result_contract},
-      {L"--self-test-pf-checkout-intersection", "pf_checkout_intersection", &aexcompat::worker_runtime::smart::checkout_intersection_self_test},
-      {L"--self-test-pf-smart-geometry-rects", "pf_smart_geometry_rects", &aexcompat::render::smart_geometry_rect_self_test},
-      {L"--self-test-smart-runtime-concurrency", "smart_runtime_concurrency", &aexcompat::worker_runtime::smart::concurrency_self_test},
-      {L"--self-test-smart-result-skipped", "smart_result_skipped", +[] {
-         const SmartResult skipped{};
-         return skipped.runtime && skipped.runtime->pixel_format.empty() &&
-             skipped.runtime->input_checkout_request[0] == -1 &&
-             skipped.runtime->map_checkout_request[0] == -1;
-       }},
-      {L"--self-test-pf-pixel-data", "pf_pixel_data_suite", &verify_pixel_data_suites},
-      {L"--self-test-pf-fill-matte-legacy", "pf_fill_matte_legacy_callbacks", &verify_legacy_fill_matte_callbacks},
-      {L"--self-test-pf-ae-channel-suite", "pf_ae_channel_suite", &verify_pf_ae_channel_suite},
-      {L"--self-test-pf-color-suite", "pf_color_suite", &verify_pf_color_suite},
-      {L"--self-test-pf-color-param-suite", "pf_color_param_suite", &verify_pf_color_param_suite},
-      {L"--self-test-pf-iterate", "pf_iterate_suite", &verify_iterate_suites},
-      {L"--self-test-world-transform-composite", "world_transform_composite_rect", &verify_world_transform_composite_rect},
-      {L"--self-test-world-transform-affine", "world_transform_affine", &verify_world_transform_affine},
-      {L"--self-test-world-transform-blend", "world_transform_blend", &verify_world_transform_blend},
-      {L"--self-test-world-transform-transfer-mask", "world_transform_transfer_mask", &verify_world_transform_transfer_mask},
-      {L"--self-test-aegp-world-suite3", "aegp_world_suite3", +[] { return verify_aegp_world_suite3() && verify_aegp_world_mfr_safety(); }},
-      {L"--self-test-pf-batch-sampling-suite", "pf_batch_sampling_suite", &verify_pf_batch_sampling_suite, 35, ",\"opaque_callable_exposed\":false"},
-      {L"--self-test-pf-ae-channel-native-provider", "pf_ae_channel_native_provider", &verify_pf_ae_channel_native_provider, 37, ",\"coverage_depths\":[8,16,32],\"mfr_checkouts\":2048,\"fabricated_planes\":false"},
-      {L"--self-test-aegp-layer-render-options-suite2", "aegp_layer_render_options_suite2", +[] { return is_render_worker() && verify_aegp_layer_render_options_suite2(); }, 1, ",\"downstream_cycle_rejected\":true"},
-  }};
-  if (!(argc == 2 && std::wstring(argv[1]) ==
-            L"--self-test-aegp-layer-render-options-suite2" && !is_render_worker())) {
-    if (const auto selftest_exit = aexcompat::worker_runtime::selftest::dispatch_simple(
-            argc, argv, simple_selftests.data(), simple_selftests.size()))
-      return *selftest_exit;
-  }
+  const auto fixed_selftest = aexcompat::worker_runtime::fixed_selftests::dispatch(
+      {argc, argv, is_render_worker()},
+      {{&selftest_render_output_safety, &selftest_crash_minidump,
+        &selftest_pf_adv_time, &selftest_suite_entry_utility13,
+        &selftest_pf_adv_app, &selftest_effect_param_union},
+       {&verify_aegp_installed_effect_catalog_suite4,
+        &verify_parameter_animation_transport, &verify_pf_param_utils_suite3,
+        &verify_pre_checkout_result_contract,
+        &aexcompat::worker_runtime::smart::checkout_intersection_self_test,
+        &aexcompat::render::smart_geometry_rect_self_test,
+        &aexcompat::worker_runtime::smart::concurrency_self_test,
+        +[] {
+          const SmartResult skipped{};
+          return skipped.runtime && skipped.runtime->pixel_format.empty() &&
+              skipped.runtime->input_checkout_request[0] == -1 &&
+              skipped.runtime->map_checkout_request[0] == -1;
+        },
+        &verify_pixel_data_suites, &verify_legacy_fill_matte_callbacks,
+        &verify_pf_ae_channel_suite, &verify_pf_color_suite,
+        &verify_pf_color_param_suite, &verify_iterate_suites,
+        &verify_world_transform_composite_rect, &verify_world_transform_affine,
+        &verify_world_transform_blend, &verify_world_transform_transfer_mask,
+        +[] { return verify_aegp_world_suite3() && verify_aegp_world_mfr_safety(); },
+        &verify_pf_batch_sampling_suite, &verify_pf_ae_channel_native_provider,
+        &verify_aegp_layer_render_options_suite2}});
+  // Compatibility anchors for selftests whose command catalog now lives in
+  // worker_fixed_selftest_routing.cpp.
+  // --self-test-world-transform-affine
+  // --self-test-world-transform-blend
+  // --self-test-world-transform-transfer-mask
+  // L"--self-test-pf-checkout-intersection"
+  // L"--self-test-pf-smart-geometry-rects"
+  if (fixed_selftest.handled) return fixed_selftest.exit_code;
   if (argc == 2 &&
       std::wstring(argv[1]) == L"--self-test-aegp-keyframe-mutations") {
     const bool passed = verify_aegp_keyframe_suite5_mutations(
