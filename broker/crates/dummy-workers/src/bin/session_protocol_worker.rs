@@ -136,19 +136,19 @@ mod worker {
                 "post_load": {
                     "status": "passed", "unknown_count": 0,
                     "worker": ["session_protocol_worker.exe"],
-                    "plugin": ["plugin.aex"],
+                    "plugin": ["plugin.plugin"],
                     "system32": ["kernel32.dll"]
                 },
                 "pre_unload": {
                     "status": "passed", "unknown_count": 0,
                     "worker": ["session_protocol_worker.exe"],
-                    "plugin": ["plugin.aex"],
+                    "plugin": ["plugin.plugin"],
                     "system32": ["kernel32.dll"]
                 },
                 "observed_union": {
                     "status": "passed", "unknown_count": 0,
                     "worker": ["session_protocol_worker.exe"],
-                    "plugin": ["plugin.aex"],
+                    "plugin": ["plugin.plugin"],
                     "system32": ["kernel32.dll"]
                 }
             }

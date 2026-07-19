@@ -84,7 +84,7 @@ mod windows_e2e {
         let worker_dir = root.join("target/minihost-build");
         std::fs::create_dir_all(&worker_dir).unwrap();
         std::fs::copy(fixture, worker_dir.join("aex_render_worker.exe")).unwrap();
-        let plugin = root.join("plugin.aex");
+        let plugin = root.join("plugin.plugin");
         let plugin_bytes = b"render session dummy plugin";
         std::fs::write(&plugin, plugin_bytes).unwrap();
         let sha = format!("{:x}", Sha256::digest(plugin_bytes));
