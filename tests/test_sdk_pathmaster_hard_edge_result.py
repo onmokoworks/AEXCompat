@@ -53,10 +53,10 @@ def test_worker_and_broker_keep_the_path_boundary_explicit_and_observable():
     broker = BROKER.read_text(encoding="utf-8")
 
     for marker in (
-        'std::strcmp(name, "PF Path Query Suite") == 0',
-        'std::strcmp(name, "PF Path Data Suite") == 0',
+        '{"PF Path Query Suite", 1, nullptr, &provide_path_query1',
+        '{"PF Path Data Suite", 1, nullptr, &provide_path_data1',
         "struct MaskSuite5",
-        "version == 6",
+        '{"AEGP Layer Mask Suite", 6',
         "write_rect(lifecycle_world.data() + 44, 1, 1)",
         "transfer_mode < 0 || transfer_mode > 38",
         "bool flatten(",

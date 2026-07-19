@@ -35,17 +35,19 @@ def test_schema_and_compiled_abi_are_grounded_in_probe_result():
 def test_source_wiring_matches_inventory():
     report = load_report()
     source = SOURCE.read_text(encoding="utf-8")
+    compact_source = " ".join(source.split())
     suite_abi = (ROOT / "minihost" / "src" / "worker_suite_abi.hpp").read_text(encoding="utf-8")
 
     world = report["suites"]["PF_WorldTransformSuite1"]
-    for slot in world["slots"]:
-        assert f"g_world_transform_suite1.{slot['name']} = &{slot['callback']};" in source
+    world_callbacks = ", ".join(f"&{slot['callback']}" for slot in world["slots"])
+    assert f"g_world_transform_suite1 = {{{world_callbacks}" in compact_source
 
     path = report["suites"]["PF_PathDataSuite1"]
     for index, callback in zip(path["implemented_slots"], path["callbacks"]):
         runtime_callback = callback.removeprefix("pf_")
+        assert index < len(path["callbacks"])
         assert (
-            f"g_pf_path_data_suite1[{index}] = reinterpret_cast<void*>(&aexcompat::pf_path_runtime::{runtime_callback});"
+            f"reinterpret_cast<void*>(&aexcompat::pf_path_runtime::{runtime_callback})"
             in source
         )
 
@@ -56,9 +58,15 @@ def test_source_wiring_matches_inventory():
             assert f"{table_names[depth]}[{index}] = reinterpret_cast<void*>(&{callback});" in source
 
     fill_ranges = report["suites"]["PF_FillMatteSuite2"]["slots"]
+    fill_callbacks = []
     for group in fill_ranges:
         for index, callback in zip(range(group["range"][0], group["range"][1] + 1), group["callbacks"]):
-            assert f"g_fill_matte_suite2[{index}] = reinterpret_cast<void*>(&{callback});" in source
+            assert index == len(fill_callbacks)
+            fill_callbacks.append(callback)
+    callback_table = ", ".join(
+        f"reinterpret_cast<void*>(&{callback})" for callback in fill_callbacks
+    )
+    assert f"void* callbacks[] = {{{callback_table}" in compact_source
 
 
 def test_render_options_and_async_receipt_claims_match_current_source():
