@@ -4,13 +4,13 @@
     "artifacts":  {
                       "source":  {
                                      "path":  "minihost/src/l2_main.cpp",
-                                     "size_bytes":  1274027,
-                                     "sha256":  "718e65da075e4ae7df080151604c36303822d37ef8160c79daff5456b401770f"
+                                     "size_bytes":  417735,
+                                     "sha256":  "9bd347b4100331033a95dff76aa8ade491afa11693dfcb8abf4c330ccecd49e3"
                                  },
                       "worker":  {
                                      "path":  "target/minihost-build/aex_smart_worker.exe",
-                                     "size_bytes":  894464,
-                                     "sha256":  "93e34a120cbafd893ad34dc8c1e9e68df0f0a2d293061ae7ee63c9987f428579"
+                                     "size_bytes":  1074688,
+                                     "sha256":  "8d72ef56a16542d87d4f3a46c9ad3f5d68bae94f7ac748f445cb4f4137443335"
                                  },
                       "probe":  {
                                     "path":  "target/pf-smart-geometry-probe-build/Release/pf_smart_geometry_probe.aex",
