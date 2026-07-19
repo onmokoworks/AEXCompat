@@ -1149,6 +1149,7 @@ bool verify_pre_checkout_result_case(int32_t expected_par_numerator,
 }
 
 bool verify_pre_checkout_result_contract() {
+  SmartRuntimeSession smart_session;
   const int32_t saved_width = smart_state().width;
   const int32_t saved_height = smart_state().height;
   const SpatialRatio saved_par = g_pixel_aspect_ratio;
@@ -1156,13 +1157,17 @@ bool verify_pre_checkout_result_contract() {
   const int32_t saved_full_height = g_full_resolution_height;
   smart_state().width = 640;
   smart_state().height = 360;
-  g_pixel_aspect_ratio = {1, 1};
-  g_full_resolution_width = 0;
-  g_full_resolution_height = 0;
+  smart_state().current_time = g_checkout_current_time;
+  smart_state().current_time_scale = g_checkout_current_time_scale;
+  smart_state().pixel_aspect_numerator = 1;
+  smart_state().pixel_aspect_denominator = 1;
+  smart_state().full_resolution_width = 0;
+  smart_state().full_resolution_height = 0;
   bool passed = verify_pre_checkout_result_case(1, 1, 640, 360);
-  g_pixel_aspect_ratio = {10, 11};
-  g_full_resolution_width = 1280;
-  g_full_resolution_height = 720;
+  smart_state().pixel_aspect_numerator = 10;
+  smart_state().pixel_aspect_denominator = 11;
+  smart_state().full_resolution_width = 1280;
+  smart_state().full_resolution_height = 720;
   passed = verify_pre_checkout_result_case(10, 11, 1280, 720) && passed;
   smart_state().width = saved_width;
   smart_state().height = saved_height;
@@ -12451,12 +12456,17 @@ SmartResult smart_render_runtime(EffectEntry entry, std::array<std::byte, kInSiz
   SmartResult result;
   const uint32_t effective_out_flags = read<uint32_t>(command_output, kOutFlags);
   const uint32_t effective_out_flags2 = read<uint32_t>(command_output, kOutFlags2);
-  g_wide_time_checkout_allowed =
+  smart_state().wide_time_checkout_allowed =
       (effective_out_flags & kOutFlagWideTimeInput) != 0 ||
       (effective_out_flags2 & kOutFlag2AutomaticWideTimeInput) != 0;
-  g_checkout_current_time = external_current_time;
-  g_checkout_current_time_scale = external_time_scale;
-  g_rejected_temporal_param_checkouts = 0;
+  smart_state().current_time = external_current_time;
+  smart_state().current_time_scale = external_time_scale;
+  smart_state().rejected_temporal_checkouts = 0;
+  smart_state().secondary_layer_slot = g_secondary_layer_slot;
+  smart_state().full_resolution_width = g_full_resolution_width;
+  smart_state().full_resolution_height = g_full_resolution_height;
+  smart_state().pixel_aspect_numerator = g_pixel_aspect_ratio.numerator;
+  smart_state().pixel_aspect_denominator = g_pixel_aspect_ratio.denominator;
   const bool deep16 = case_id == "deep16_default" || (external_rgba && external_pixel_bytes == 8);
   const bool fixture_gpu_negotiation = case_id == "gpu_fallback_float32";
   const bool opencl_gpu_negotiation = case_id == "gpu_opencl_float32";
@@ -12694,7 +12704,7 @@ SmartResult smart_render_runtime(EffectEntry entry, std::array<std::byte, kInSiz
   }
   const uint32_t dynamic_out_flags = read<uint32_t>(command_output, kOutFlags);
   const uint32_t dynamic_out_flags2 = read<uint32_t>(command_output, kOutFlags2);
-  g_wide_time_checkout_allowed =
+  smart_state().wide_time_checkout_allowed =
       (dynamic_out_flags & kOutFlagWideTimeInput) != 0 ||
       (dynamic_out_flags2 & kOutFlag2AutomaticWideTimeInput) != 0;
   g_shutter_dependency_advertised =
@@ -14666,14 +14676,6 @@ int worker_main_impl(int argc, wchar_t **argv) {
   scene_factory.keyframe_callbacks[20] = reinterpret_cast<void*>(&get_keyframe_label);
   scene_factory.keyframe_callbacks[21] = reinterpret_cast<void*>(&set_keyframe_label);
 
-  const aexcompat::worker_runtime::smart::HostHooks smart_host_hooks{
-      &g_wide_time_checkout_allowed, &g_checkout_current_time,
-      &g_checkout_current_time_scale, &g_rejected_temporal_param_checkouts,
-      &g_secondary_layer_slot, &g_full_resolution_width,
-      &g_full_resolution_height, &g_pixel_aspect_ratio.numerator,
-      &g_pixel_aspect_ratio.denominator};
-  if (!aexcompat::worker_runtime::smart::configure_host_hooks(smart_host_hooks))
-    return 75;
   const SceneContext scene_host{
       {&bump_render_project_timestamp, &validate_render_options_item,
        &scene_initialize_layer_render_options, &suite_leases_balanced,
@@ -14929,6 +14931,12 @@ int worker_main_impl(int argc, wchar_t **argv) {
   if (argc == 2 && std::wstring(argv[1]) == L"--self-test-pf-pre-checkout-result") {
     const bool passed = verify_pre_checkout_result_contract();
     std::cout << "{\"pf_pre_checkout_result\":\""
+              << (passed ? "passed" : "failed") << "\"}\n";
+    return passed ? 0 : 1;
+  }
+  if (argc == 2 && std::wstring(argv[1]) == L"--self-test-smart-runtime-concurrency") {
+    const bool passed = aexcompat::worker_runtime::smart::concurrency_self_test();
+    std::cout << "{\"smart_runtime_concurrency\":\""
               << (passed ? "passed" : "failed") << "\"}\n";
     return passed ? 0 : 1;
   }
@@ -17262,8 +17270,8 @@ int worker_main_impl(int argc, wchar_t **argv) {
             << ",\"nop_render_advertised\":" << (nop_render_advertised ? "true" : "false")
             << ",\"input_write_advertised\":" << (input_write_advertised ? "true" : "false")
             << ",\"input_buffer_writable\":" << (input_write_advertised ? "true" : "false")
-            << ",\"wide_time_checkout_allowed\":" << (g_wide_time_checkout_allowed ? "true" : "false")
-            << ",\"rejected_temporal_param_checkouts\":" << g_rejected_temporal_param_checkouts
+            << ",\"wide_time_checkout_allowed\":" << (smart_state().wide_time_checkout_allowed ? "true" : "false")
+            << ",\"rejected_temporal_param_checkouts\":" << smart_state().rejected_temporal_checkouts
             << ",\"shutter_dependency_advertised\":" << (g_shutter_dependency_advertised ? "true" : "false")
             << ",\"smart_pre_render_dispatched\":" << (nop_render_advertised ? "false" : "true")
             << ",\"smart_render_selector_dispatched\":" << (nop_render_advertised ? "false" : "true")
