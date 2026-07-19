@@ -2,6 +2,8 @@
 
 #include "gpu_device_info_registry.hpp"
 #include "worker_smart_runtime.hpp"
+#include "render_pixel_transport.hpp"
+#include "worker_world_registry.hpp"
 
 #include <algorithm>
 #include <cstring>
@@ -84,6 +86,214 @@ Plan prepare(const Context& context, const Request& request) {
       !plan.connected_map) return plan;
   plan.valid = true;
   return plan;
+}
+
+bool prepare_world_buffers(const Plan& plan, const std::string& case_id,
+                           const std::vector<unsigned char>* external_rgba,
+                           bool input_write_advertised,
+                           WorldBuffers buffers) {
+  if (!plan.valid || !buffers.source || !buffers.output || !buffers.destination ||
+      !buffers.input_world || !buffers.output_world || !buffers.formats ||
+      !buffers.map || !*buffers.source || !*buffers.output) return false;
+  auto& source = *buffers.source;
+  std::memset(source.data(), 0x5A,
+              static_cast<std::size_t>(plan.rowbytes) * plan.height);
+  if (external_rgba && external_rgba->size() !=
+      static_cast<std::size_t>(plan.width) * plan.height * 4) return false;
+  for (int32_t y = 0; y < plan.height; ++y) {
+    for (int32_t x = 0; x < plan.width; ++x) {
+      auto* pixel = &source[static_cast<std::size_t>(y) * plan.rowbytes +
+                            static_cast<std::size_t>(x) * plan.pixel_bytes];
+      if (external_rgba) {
+        const auto* rgba = &(*external_rgba)[
+            (static_cast<std::size_t>(y) * plan.width + x) * 4];
+        render_pixel_transport::rgba8_to_argb(pixel, rgba, plan.pixel_bytes);
+      } else if (plan.float32) {
+        const float values[4] = {1.0f,
+            static_cast<float>(x) / static_cast<float>(plan.width - 1),
+            static_cast<float>(y) / static_cast<float>(plan.height - 1),
+            static_cast<float>(x + y) /
+                static_cast<float>(plan.width + plan.height - 2)};
+        std::memcpy(pixel, values, sizeof(values));
+      } else if (plan.deep16) {
+        const uint16_t values[4] = {32768,
+            static_cast<uint16_t>(x * 32768 / (plan.width - 1)),
+            static_cast<uint16_t>(y * 32768 / (plan.height - 1)),
+            static_cast<uint16_t>((x + y) * 32768 /
+                                  (plan.width + plan.height - 2))};
+        std::memcpy(pixel, values, sizeof(values));
+      } else {
+        pixel[0] = 255;
+        pixel[1] = static_cast<unsigned char>(x * 255 / (plan.width - 1));
+        pixel[2] = static_cast<unsigned char>(y * 255 / (plan.height - 1));
+        pixel[3] = static_cast<unsigned char>((x + y) * 255 /
+                                              (plan.width + plan.height - 2));
+      }
+    }
+  }
+  if (!source.set_plugin_writable(input_write_advertised)) return false;
+  *buffers.destination = buffers.output->data();
+  const render::WorldLayout layout{(plan.deep16 || plan.float32) ? 1 : 0,
+      plan.pixel_bytes, plan.width, plan.height, plan.rowbytes};
+  if (!render::prepare_world_layout(*buffers.input_world, layout, source.data()) ||
+      !render::prepare_world_layout(*buffers.output_world, layout,
+                                    *buffers.destination)) return false;
+  const int32_t pixel_format = plan.float32 ? world_registry::kPixelFormatArgb128 :
+      (plan.deep16 ? world_registry::kPixelFormatArgb64 :
+                     world_registry::kPixelFormatArgb32);
+  if (!buffers.formats->register_world(buffers.input_world->data(), pixel_format) ||
+      !buffers.formats->register_world(buffers.output_world->data(), pixel_format))
+    return false;
+  if (plan.connected_map) {
+    if (!render::prepare_connected_map_world(case_id, plan.width, plan.height,
+                                             *buffers.map) ||
+        !buffers.formats->register_world(
+            buffers.map->world.data(), world_registry::kPixelFormatArgb32))
+      return false;
+    auto& state = smart::state();
+    state.map_width = buffers.map->width;
+    state.map_height = buffers.map->height;
+    state.map_world = buffers.map->world.data();
+  }
+  return true;
+}
+
+ParameterState::ParameterState(std::size_t definition_count,
+                               std::size_t external_layer_count)
+    : definitions(definition_count), hosted_pixels(external_layer_count),
+      hosted_worlds(external_layer_count) {}
+
+ParameterState::~ParameterState() {
+  parameters::state().checkout.definitions.clear();
+}
+
+bool prepare_parameters(const ParameterRequest& request, ParameterState& prepared,
+                        const ParameterHooks& hooks) {
+  if (!request.entry || !request.input || !request.output || !request.case_id ||
+      !request.plan || !request.input_world || !request.formats || !request.source ||
+      !hooks.apply_animation || !hooks.dump_world) return false;
+  const auto& plan = *request.plan;
+  auto& runtime = parameters::state();
+  auto& definitions = prepared.definitions;
+  if (definitions.size() != runtime.records.size() + 1) return false;
+  if (request.requested && !parameter_execution::apply_arbitrary_text_assignments(
+          request.entry, *request.input, *request.output, definitions,
+          *request.requested)) return false;
+  parameter_execution::probe_arbitrary_scan(
+      request.entry, *request.input, *request.output, definitions);
+  for (std::size_t slot = 1; slot < definitions.size(); ++slot) {
+    if (runtime.records[slot - 1].type == 0 &&
+        runtime.records[slot - 1].layer_default == -1)
+      std::memcpy(definitions[slot].data() + 56, request.input_world->data(),
+                  request.input_world->size());
+  }
+  auto& smart_state = smart::state();
+  smart_state.hosted_layers.clear();
+  if (request.external_layers) {
+    for (std::size_t layer_index = 0;
+         layer_index < request.external_layers->size(); ++layer_index) {
+      const auto& layer = (*request.external_layers)[layer_index];
+      if (layer.slot <= 0 || static_cast<std::size_t>(layer.slot) >= definitions.size() ||
+          runtime.records[layer.slot - 1].type != 0 || layer.rgba.size() !=
+              static_cast<std::size_t>(layer.width) * layer.height * 4) return false;
+      auto& pixels = prepared.hosted_pixels[layer_index];
+      pixels.resize(static_cast<std::size_t>(layer.width) * layer.height *
+                    plan.pixel_bytes);
+      for (std::size_t offset = 0; offset < layer.rgba.size(); offset += 4)
+        render_pixel_transport::rgba8_to_argb(
+            pixels.data() + (offset / 4) * plan.pixel_bytes,
+            layer.rgba.data() + offset, plan.pixel_bytes);
+      hooks.dump_world("smart-layer-slot" + std::to_string(layer.slot),
+                       pixels.data(), layer.width, layer.height, plan.pixel_bytes);
+      auto& world = prepared.hosted_worlds[layer_index];
+      if (!render::prepare_world_layout(
+              world, {plan.pixel_bytes == 4 ? 0 : 1, plan.pixel_bytes,
+                      layer.width, layer.height, layer.width * plan.pixel_bytes},
+              pixels.data()) ||
+          !request.formats->register_world(world.data(),
+                                           request.dispatch_pixel_format)) return false;
+      const int32_t requested_time = plan.temporal_context ? 42 :
+          request.external_current_time;
+      const uint32_t requested_scale = plan.temporal_context ? 24 :
+          request.external_time_scale;
+      const bool same_time = static_cast<int64_t>(layer.time) * requested_scale ==
+          static_cast<int64_t>(requested_time) * layer.time_scale;
+      if (!layer.timed || same_time)
+        std::memcpy(definitions[layer.slot].data() + 56, world.data(), world.size());
+      smart_state.hosted_layers.push_back({layer.slot, layer.time, layer.time_scale,
+          layer.timed, layer.width, layer.height, -1, world.data()});
+    }
+  }
+  if (request.requested) {
+    if (!parameter_execution::apply_requested_assignments(
+            definitions, *request.requested)) return false;
+  } else if (definitions.size() > 7) {
+    const auto profile = render::prepare_parameter_profile(*request.case_id);
+    auto write_i32 = [&](std::size_t slot, int32_t value) {
+      std::memcpy(definitions[slot].data() + 56, &value, sizeof(value));
+    };
+    write_i32(1, profile.amount); write_i32(2, profile.direction);
+    write_i32(3, profile.seed); write_i32(4, profile.repeat);
+    std::memcpy(definitions[5].data() + 56, &profile.mix, sizeof(profile.mix));
+    if (profile.inverted_map) write_i32(7, 1);
+  }
+  const int32_t animation_time = plan.temporal_context ? 42 :
+      request.external_current_time;
+  const uint32_t animation_scale = plan.temporal_context ? 24 :
+      request.external_time_scale;
+  if (!hooks.apply_animation(definitions, animation_time, animation_scale) ||
+      !parameter_execution::apply_arbitrary_parameter_animation(
+          request.entry, *request.input, *request.output, definitions,
+          animation_time, animation_scale)) return false;
+  auto& checkout = runtime.checkout;
+  checkout.definitions.clear();
+  for (std::size_t slot = 0; slot < definitions.size(); ++slot)
+    checkout.definitions.emplace(static_cast<int32_t>(slot), definitions[slot]);
+  {
+    std::lock_guard<std::mutex> lock(checkout.mutex);
+    checkout.live.clear();
+    checkout.checkout_calls = checkout.checkin_calls = checkout.invalid_checkins = 0;
+    checkout.automatic_checkins = 0;
+    checkout.last_index = -1;
+    checkout.last_time = checkout.last_time_step = 0;
+    checkout.last_time_scale = 0;
+  }
+  prepared.params.resize(definitions.size());
+  for (std::size_t i = 0; i < definitions.size(); ++i)
+    prepared.params[i] = definitions[i].data();
+  const int32_t current_time = plan.temporal_context ? 42 :
+      request.external_current_time;
+  const int32_t time_step = plan.temporal_context ? 2 : request.external_time_step;
+  const uint32_t time_scale = plan.temporal_context ? 24 : request.external_time_scale;
+  auto write_input = [&](std::size_t offset, const auto& value) {
+    std::memcpy(request.input->data() + offset, &value, sizeof(value));
+  };
+  write_input(224, current_time); write_input(228, time_step);
+  const int32_t total_time = plan.temporal_context ? 240 : request.external_total_time;
+  write_input(232, total_time); write_input(236, time_step); write_input(240, time_scale);
+  const int32_t full_width = request.full_resolution_width > 0 ?
+      request.full_resolution_width : plan.width;
+  const int32_t full_height = request.full_resolution_height > 0 ?
+      request.full_resolution_height : plan.height;
+  write_input(252, full_width); write_input(256, full_height);
+  const int32_t full_extent[4] = {0, 0, plan.width, plan.height};
+  std::memcpy(request.input->data() + 260, full_extent, sizeof(full_extent));
+  if (plan.partial_output_request) {
+    const int32_t extent[4] = {3, 2, 11, 8};
+    std::memcpy(request.input->data() + 260, extent, sizeof(extent));
+  }
+  smart_state.checkout_time = smart_state.checkout_time_step = 0;
+  smart_state.checkout_time_scale = 0;
+  prepared.pre_render_source.resize(
+      static_cast<std::size_t>(plan.width) * plan.height * plan.pixel_bytes);
+  for (int32_t row = 0; row < plan.height; ++row)
+    std::memcpy(prepared.pre_render_source.data() +
+                    static_cast<std::size_t>(row) * plan.width * plan.pixel_bytes,
+                request.source->data() + static_cast<std::size_t>(row) * plan.rowbytes,
+                static_cast<std::size_t>(plan.width) * plan.pixel_bytes);
+  hooks.dump_world("smart-input", prepared.pre_render_source.data(), plan.width,
+                   plan.height, plan.pixel_bytes);
+  return true;
 }
 
 }  // namespace aexcompat::worker_runtime::smart_setup

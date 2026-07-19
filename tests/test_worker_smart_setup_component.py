@@ -30,3 +30,18 @@ def test_plan_preserves_gpu_format_dimensions_and_time_setup():
         "plan.pixel_bytes = plan.float32 ? 16 : (plan.deep16 ? 8 : 4)",
     ):
         assert marker in SOURCE
+
+
+def test_world_buffers_and_parameter_definitions_are_owned_by_setup_tu():
+    for marker in (
+        "bool prepare_world_buffers(",
+        "bool prepare_parameters(",
+        "parameter_execution::apply_arbitrary_text_assignments",
+        "parameter_execution::apply_requested_assignments",
+        "parameter_execution::apply_arbitrary_parameter_animation",
+        "checkout.definitions.emplace",
+        'hooks.dump_world("smart-input"',
+    ):
+        assert marker in SOURCE
+    assert "smart_setup::prepare_world_buffers(" in MAIN
+    assert "smart_setup::prepare_parameters(" in MAIN

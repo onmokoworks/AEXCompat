@@ -5212,150 +5212,38 @@ SmartResult smart_render_runtime(EffectEntry entry, std::array<std::byte, kInSiz
   const int32_t height = plan.height;
   const int32_t pixel_bytes = plan.pixel_bytes;
   const int32_t rowbytes = plan.rowbytes;
-  const aexcompat::render::ParameterProfile parameter_profile =
-      aexcompat::render::prepare_parameter_profile(case_id);
   InputPixelBuffer source(static_cast<std::size_t>(rowbytes) * height);
-  if (!source) return result;
-  std::memset(source.data(), 0x5A, static_cast<std::size_t>(rowbytes) * height);
-  if (external_rgba && external_rgba->size() != static_cast<std::size_t>(width) * height * 4) return result;
-  for (int32_t y = 0; y < height; ++y) for (int32_t x = 0; x < width; ++x) {
-    auto* pixel = &source[y * rowbytes + x * pixel_bytes];
-    if (external_rgba) {
-      const auto* rgba = &(*external_rgba)[(y * width + x) * 4];
-      rgba8_to_argb(pixel, rgba, pixel_bytes);
-    } else if (float32) {
-      const float values[4] = {1.0f, static_cast<float>(x) / static_cast<float>(width - 1),
-          static_cast<float>(y) / static_cast<float>(height - 1),
-          static_cast<float>(x + y) / static_cast<float>(width + height - 2)};
-      std::memcpy(pixel, values, sizeof(values));
-    } else if (deep16) {
-      const uint16_t values[4] = {32768, static_cast<uint16_t>(x * 32768 / (width - 1)),
-          static_cast<uint16_t>(y * 32768 / (height - 1)),
-          static_cast<uint16_t>((x + y) * 32768 / (width + height - 2))};
-      std::memcpy(pixel, values, sizeof(values));
-    } else {
-      pixel[0] = 255; pixel[1] = static_cast<unsigned char>(x * 255 / (width - 1));
-      pixel[2] = static_cast<unsigned char>(y * 255 / (height - 1));
-      pixel[3] = static_cast<unsigned char>((x + y) * 255 / (width + height - 2));
-    }
-  }
-  const bool input_write_advertised =
-      (read<uint32_t>(command_output, kOutFlags) & kOutFlagIWriteInputBuffer) != 0;
-  if (!source.set_plugin_writable(input_write_advertised)) return result;
   OutputPixelBuffer guarded(static_cast<std::size_t>(rowbytes) * height);
-  if (!guarded) return result;
   auto* destination = guarded.data();
   result.guards_intact = true;
   std::array<std::byte, 120> input_world{}, output_world{};
-  const aexcompat::render::WorldLayout primary_world{
-      (deep16 || float32) ? 1 : 0, pixel_bytes, width, height, rowbytes};
-  if (!aexcompat::render::prepare_world_layout(input_world, primary_world, source.data()) ||
-      !aexcompat::render::prepare_world_layout(output_world, primary_world, destination)) return result;
+  DispatchWorldFormatScope dispatch_worlds;
+  aexcompat::render::MapWorld map_world;
+  const bool input_write_advertised =
+      (read<uint32_t>(command_output, kOutFlags) & kOutFlagIWriteInputBuffer) != 0;
+  if (!aexcompat::worker_runtime::smart_setup::prepare_world_buffers(
+          plan, case_id, external_rgba, input_write_advertised,
+          {&source, &guarded, &destination, &input_world, &output_world,
+           &dispatch_worlds, &map_world})) return result;
   const int32_t dispatch_pixel_format = float32 ? kPixelFormatArgb128 :
       (deep16 ? kPixelFormatArgb64 : kPixelFormatArgb32);
-  DispatchWorldFormatScope dispatch_worlds;
-  if (!dispatch_worlds.register_world(input_world.data(), dispatch_pixel_format) ||
-      !dispatch_worlds.register_world(output_world.data(), dispatch_pixel_format)) return result;
-
-  aexcompat::render::MapWorld map_world;
-  if (connected_map) {
-    if (!aexcompat::render::prepare_connected_map_world(case_id, width, height, map_world) ||
-        !dispatch_worlds.register_world(map_world.world.data(), kPixelFormatArgb32)) return result;
-    smart_state().map_width = map_world.width;
-    smart_state().map_height = map_world.height;
-    smart_state().map_world = map_world.world.data();
-  }
-
-  std::vector<std::array<std::byte, kParamSize>> definitions(g_params.size() + 1);
-  std::vector<std::vector<unsigned char>> hosted_pixels;
-  std::vector<std::array<std::byte, 120>> hosted_worlds;
-  if (external_layers) {
-    hosted_pixels.resize(external_layers->size());
-    hosted_worlds.resize(external_layers->size());
-  }
+  aexcompat::worker_runtime::smart_setup::ParameterState parameter_state(
+      g_params.size() + 1, external_layers ? external_layers->size() : 0);
+  auto& definitions = parameter_state.definitions;
   std::memcpy(definitions[0].data() + 56, input_world.data(), input_world.size());
   initialize_parameter_definitions(definitions);
   if (!initialize_arbitrary_values(entry, input, command_output, definitions)) return result;
   ArbitraryValuesScope arbitrary_scope{entry, &input, &command_output, &definitions};
-  if (requested && !apply_arbitrary_text_assignments(entry, input, command_output, definitions, *requested)) return result;
-  probe_arbitrary_scan(entry, input, command_output, definitions);
-  for (std::size_t slot = 1; slot < definitions.size(); ++slot)
-    if (g_params[slot - 1].type == 0 && g_params[slot - 1].layer_default == -1)
-      std::memcpy(definitions[slot].data() + 56, input_world.data(), input_world.size());
-  smart_state().hosted_layers.clear();
-  if (external_layers) for (std::size_t layer_index = 0; layer_index < external_layers->size(); ++layer_index) {
-    const auto& layer = (*external_layers)[layer_index];
-    if (layer.slot <= 0 || static_cast<std::size_t>(layer.slot) >= definitions.size() ||
-        g_params[layer.slot - 1].type != 0 || layer.rgba.size() !=
-            static_cast<std::size_t>(layer.width) * layer.height * 4) return result;
-    auto& pixels = hosted_pixels[layer_index];
-    pixels.resize(static_cast<std::size_t>(layer.width) * layer.height * pixel_bytes);
-    for (std::size_t offset = 0; offset < layer.rgba.size(); offset += 4) {
-      rgba8_to_argb(pixels.data() + (offset / 4) * pixel_bytes,
-                    layer.rgba.data() + offset, pixel_bytes);
-    }
-    dump_world_snapshot("smart-layer-slot" + std::to_string(layer.slot),
-                        pixels.data(), layer.width, layer.height, pixel_bytes);
-    auto& world = hosted_worlds[layer_index];
-    if (!aexcompat::render::prepare_world_layout(
-            world, {pixel_bytes == 4 ? 0 : 1, pixel_bytes, layer.width, layer.height,
-                    layer.width * pixel_bytes}, pixels.data()) ||
-        !dispatch_worlds.register_world(world.data(), dispatch_pixel_format)) return result;
-    const int32_t requested_time = temporal_context ? 42 : external_current_time;
-    const uint32_t requested_scale = temporal_context ? 24 : external_time_scale;
-    if (!layer.timed || same_rational_time(layer.time, layer.time_scale,
-            requested_time, requested_scale))
-      std::memcpy(definitions[layer.slot].data() + 56, world.data(), world.size());
-    smart_state().hosted_layers.push_back({layer.slot, layer.time, layer.time_scale, layer.timed,
-        layer.width, layer.height, -1, world.data()});
-  }
-  if (requested) {
-    if (!apply_requested_assignments(definitions, *requested)) return result;
-  } else if (definitions.size() > 7) {
-    write<int32_t>(definitions[1], 56, parameter_profile.amount);
-    write<int32_t>(definitions[2], 56, parameter_profile.direction);
-    write<int32_t>(definitions[3], 56, parameter_profile.seed);
-    write<int32_t>(definitions[4], 56, parameter_profile.repeat);
-    write<double>(definitions[5], 56, parameter_profile.mix);
-    if (parameter_profile.inverted_map) write<int32_t>(definitions[7], 56, 1);
-  }
-  const int32_t animation_time = temporal_context ? 42 : external_current_time;
-  const uint32_t animation_scale = temporal_context ? 24 : external_time_scale;
-  if (!apply_parameter_animation(definitions, animation_time, animation_scale)) return result;
-  if (!apply_arbitrary_parameter_animation(entry, input, command_output, definitions,
-                                            animation_time, animation_scale)) return result;
-  g_checkout_layer_definitions.clear();
-  for (std::size_t slot = 0; slot < definitions.size(); ++slot)
-    g_checkout_layer_definitions.emplace(static_cast<int32_t>(slot), definitions[slot]);
-  struct CheckoutDefinitionsScope {
-    ~CheckoutDefinitionsScope() { g_checkout_layer_definitions.clear(); }
-  } checkout_definitions_scope;
-  {
-    std::lock_guard<std::mutex> lock(g_param_checkout_mutex);
-    g_live_param_checkouts.clear();
-    g_param_checkout_calls = g_param_checkin_calls = g_invalid_param_checkins = 0;
-    g_automatic_param_checkins = 0;
-    g_last_param_checkout_index = -1;
-    g_last_param_checkout_time = g_last_param_checkout_time_step = 0;
-    g_last_param_checkout_time_scale = 0;
-  }
-  std::vector<void*> params(definitions.size());
-  for (std::size_t i = 0; i < definitions.size(); ++i) params[i] = definitions[i].data();
-  const int32_t current_time = temporal_context ? 42 : external_current_time;
-  const int32_t time_step = temporal_context ? 2 : external_time_step;
-  const uint32_t time_scale = temporal_context ? 24 : external_time_scale;
-  write<int32_t>(input, 224, current_time); write<int32_t>(input, 228, time_step);
-  write<int32_t>(input, 232, temporal_context ? 240 : external_total_time);
-  write<int32_t>(input, 236, time_step);
-  write<uint32_t>(input, 240, time_scale);
-  write<int32_t>(input, 252, g_full_resolution_width > 0 ? g_full_resolution_width : width);
-  write<int32_t>(input, 256, g_full_resolution_height > 0 ? g_full_resolution_height : height);
-  const int32_t full_extent[4] = {0, 0, width, height};
-  std::memcpy(input.data() + 260, full_extent, sizeof(full_extent));
-  if (partial_output_request) {
-    const int32_t extent[4] = {3, 2, 11, 8};
-    std::memcpy(input.data() + 260, extent, sizeof(extent));
-  }
+  if (!aexcompat::worker_runtime::smart_setup::prepare_parameters(
+          {entry, &input, &command_output, &case_id, &plan, requested,
+           external_layers, external_current_time, external_time_step,
+           external_total_time, external_time_scale, g_full_resolution_width,
+           g_full_resolution_height, dispatch_pixel_format, &input_world,
+           &dispatch_worlds, &source},
+          parameter_state, {&apply_parameter_animation, &dump_world_snapshot}))
+    return result;
+  auto& params = parameter_state.params;
+  auto& pre_render_source = parameter_state.pre_render_source;
   struct SmartRenderUiContextScope {
     EffectEntry entry;
     std::array<std::byte, kInSize>& input;
@@ -5366,16 +5254,6 @@ SmartResult smart_render_runtime(EffectEntry entry, std::array<std::byte, kInSiz
         close_render_ui_context(entry, input, output, definitions);
     }
   } render_ui_context_scope{entry, input, command_output, definitions};
-  smart_state().checkout_time = 0;
-  smart_state().checkout_time_step = 0;
-  smart_state().checkout_time_scale = 0;
-  std::vector<unsigned char> pre_render_source(
-      static_cast<std::size_t>(width) * height * pixel_bytes);
-  for (int32_t row = 0; row < height; ++row)
-    std::memcpy(pre_render_source.data() + static_cast<std::size_t>(row) * width * pixel_bytes,
-                source.data() + static_cast<std::size_t>(row) * rowbytes,
-                static_cast<std::size_t>(width) * pixel_bytes);
-  dump_world_snapshot("smart-input", pre_render_source.data(), width, height, pixel_bytes);
   // This immutable provider is published before Smart Pre-Render and remains pinned
   // through Smart Render; output pixels are never used to infer auxiliary planes.
   publish_alpha_coverage_provider(pre_render_source, width, height, pixel_bytes,
