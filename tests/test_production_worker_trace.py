@@ -20,7 +20,15 @@ class ProductionWorkerTraceTests(unittest.TestCase):
     def test_three_production_workers_link_the_shared_writer(self):
         cmake = (MINIHOST / "CMakeLists.txt").read_text(encoding="utf-8")
         self.assertIn("../instruments/common/trace_writer.cpp", cmake)
-        self.assertEqual(cmake.count("aexcompat_trace_writer)"), 3)
+        self.assertIn(
+            "target_link_libraries(aex_worker_runtime_core PRIVATE aexcompat_trace_writer)",
+            cmake,
+        )
+        for worker in ("aex_l2_worker", "aex_render_worker", "aex_smart_worker"):
+            self.assertIn(
+                f"target_link_libraries({worker} PRIVATE bcrypt aexcompat_trace_writer)",
+                cmake,
+            )
         source = (MINIHOST / "src" / "l2_main.cpp").read_text(encoding="utf-8")
         self.assertIn('#include "trace_writer.hpp"', source)
         self.assertEqual(source.count("trace_worker_label()"), 2)
