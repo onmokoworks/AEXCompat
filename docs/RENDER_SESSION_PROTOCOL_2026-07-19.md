@@ -123,11 +123,16 @@ u32 LE の長さ接頭辞 + UTF-8 JSON 本文。1 メッセージ上限 64 KiB (
 
 - `frame_index`: 0 始まりの通し番号。generation 検証 (§6) に使う。
 - `current_time`: 有理数時刻。`scale` は launch の `time_scale` と一致必須
-  (不一致は worker がエラー応答)。任意時刻を許す: セッションは順序・単調性を
-  仮定しない (Effect API にレンダー順序契約は存在しない、調査ノート項目3)。
-- 予約 (v1 では未定義、worker は未知フィールドを拒否せず無視する):
-  `parameters` (per-frame 動的パラメーター、#107 / AviUtl2 向け v2)、
-  `param_epoch` (RESETUP 意味論が観測で確定したときの世代番号)。
+  (不一致はフレーム単位エラー応答)。任意時刻を許す: セッションは順序・
+  単調性を仮定しない (Effect API にレンダー順序契約は存在しない、調査
+  ノート項目3)。
+- **メッセージ検証は strict (fail-closed)**: worker は exact-key 検証
+  (`strict_json` の `json_exact_keys` と同じ流儀) を行い、未知フィールド・
+  未知 `type`・`v != 1` はプロトコル違反としてセッションを終了する (§7)。
+  黙って無視する経路は設けない: 将来の per-frame `parameters` (#107 /
+  AviUtl2 向け) や `param_epoch` (RESETUP 意味論確定後) は `v` の増分と
+  ともに導入し、旧 worker に送ると fail-closed になることで「stale な
+  launch 時パラメーターのまま ok を返す」誤動作を構造的に排除する。
 
 ```json
 {"v":1,"type":"close"}
@@ -148,9 +153,15 @@ u32 LE の長さ接頭辞 + UTF-8 JSON 本文。1 メッセージ上限 64 KiB (
  "generation":1}
 ```
 
-- `status`: `"ok"` | `"error"`。`"error"` はフレーム単位の互換性診断
-  (selector 非 0 / 出力検証失敗等)。セッション自体は継続可能で、続行判断は
-  broker 側 (バッチ CLI は既定で中断)。
+- `status`: `"ok"` | `"error"`。`"error"` のうち**フレーム局所の互換性診断**
+  (selector 非 0、`render_error` 非 0、時刻 scale 不一致) のみセッション
+  継続可能で、続行判断は broker 側 (バッチ CLI は既定で中断)。
+- **host-protection invariant の失敗は継続不可**: `guards_intact` false、
+  出力 bounds/寸法検証の失敗、generation 不一致、ヘッダ改変の検出は
+  フレーム局所エラーではなくセッション無効化。worker は該当 frame_done を
+  送信した後、以降の `render_frame` を受理せず終了列 (§7) に入る。broker は
+  該当 frame_done (または worker 死) を観測した時点でセッションを無効化
+  する。壊れた可能性のある worker 状態を次フレームへ引き回さない。
 - `status:"error"` の応答は `output` と `generation` を持たない専用形:
 
 ```json
@@ -290,8 +301,14 @@ generation は追加の整合性検証であって同期プリミティブでは
 - **worker 終了の検知**: フレームループ中も broker はプロセス handle を
   監視対象に含める (frame_done 待ちは「応答パイプ or プロセス死 or
   deadline」の 3 者待ち)。
-- **exit 契約**: 正常終了は close 後の exit 0 のみ。フレームループ中の
-  自発的 exit は全てセッション異常。
+- **exit 契約**: 正常終了は close (またはパイプ EOF) 後の exit 0 のみ。
+  それ以外に worker が自発的に終了するのは次の 2 つの fail-closed 経路で、
+  どちらも SEQUENCE_SETDOWN → GLOBAL_SETDOWN → 最終レポートを経て
+  **非 0 の専用 exit code** で終了し、broker はセッションを無効化する:
+  (a) プロトコル違反 (strict 検証に落ちるメッセージ、フレーミング違反、
+  §4.2)、(b) host-protection invariant の失敗 (§4.3。該当 frame_done を
+  送ってから終了する)。上記以外の自発的 exit・クラッシュは全て
+  セッション異常として扱う。
 
 ## 8. broker 側 API と実装マッピング
 
