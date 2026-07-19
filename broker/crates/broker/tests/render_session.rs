@@ -208,6 +208,21 @@ mod windows_e2e {
     }
 
     #[test]
+    fn a_reserved_fatal_session_error_invalidates_instead_of_continuing() {
+        let _behavior = BehaviorGuard::set(Some("fatal_error_frame_0"));
+        let (repository, plugin, sha) = temp_repository();
+        let mut session = open_session(&repository.0, &plugin, &sha, Duration::from_secs(30));
+        let error = session
+            .render_frame(0, 0, &input_pattern(12))
+            .expect_err("a reserved fatal error code must not read as frame-local");
+        assert!(error.to_string().contains("worker_invariant_failure"), "{error}");
+        let close = session.close();
+        assert_eq!(close["invalidated"], true);
+        assert_eq!(close["invalidated_reason"]["reason"], "worker_invariant_failure");
+        assert_eq!(close["session_clean"], false);
+    }
+
+    #[test]
     fn error_response_with_a_mutated_header_is_fail_closed() {
         let _behavior = BehaviorGuard::set(Some("error_mutates_header"));
         let (repository, plugin, sha) = temp_repository();

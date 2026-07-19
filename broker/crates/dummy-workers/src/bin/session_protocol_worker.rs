@@ -116,6 +116,7 @@ mod worker {
         // one-shot path; this fixture reports its own honest minimal audit.
         serde_json::json!({
             "status": "render_completed",
+            "render_error": 0,
             "session_frames": frames,
             // The clean-close contract fields the broker validates, mirroring
             // the real worker's final report.
@@ -257,6 +258,16 @@ mod worker {
                     return EXIT_PROTOCOL_VIOLATION;
                 }
                 continue;
+            }
+            if behavior == "fatal_error_frame_0" && frame_index == 0 {
+                // Mirrors the real worker's invariant path: a reserved fatal
+                // session error response followed by a fail-closed exit.
+                let reply = format!(
+                    "{{\"v\":1,\"type\":\"frame_done\",\"frame_index\":{frame_index},\
+                     \"status\":\"error\",\"render_error\":-43}}"
+                );
+                let _ = write_message(response, &reply);
+                std::process::exit(EXIT_INVARIANT_FAILURE);
             }
             if behavior == "error_mutates_header" && frame_index == 0 {
                 view.write_u32(MAX_WIDTH_OFFSET, width as u32 + 1);

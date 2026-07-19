@@ -56,6 +56,16 @@ const SECTION_HARD_CAP_BYTES: u64 = 1 << 30;
 pub const EXIT_PROTOCOL_VIOLATION: u32 = 23;
 pub const EXIT_INVARIANT_FAILURE: u32 = 24;
 
+/// The worker's reserved session error codes that accompany a host-protection
+/// invariant failure (`l2_main.cpp` `kSessionGenerationMismatch` ..
+/// `kSessionOutputValidationError`). The worker exits fail-closed right after
+/// sending such a response, so the broker must invalidate the session rather
+/// than surface them as reusable frame-local diagnostics. Time-scale (-40)
+/// and time-range (-46) rejections stay frame-local by the worker's contract.
+fn is_fatal_session_error(render_error: i64) -> bool {
+    matches!(render_error, -45..=-41)
+}
+
 const MAGIC_OFFSET: usize = 0;
 const VERSION_OFFSET: usize = 4;
 const DEPTH_CODE_OFFSET: usize = 8;
@@ -756,6 +766,19 @@ impl RenderSession {
                         POST_TERMINATION_COLLECT_TIMEOUT,
                     ));
                 }
+                if is_fatal_session_error(done.render_error) {
+                    // The worker reported a host-protection invariant failure
+                    // and is exiting fail-closed; the session is over.
+                    return Err(self.invalidate(
+                        "worker_invariant_failure",
+                        format!(
+                            "frame {frame_index} reported the fatal session error {}",
+                            done.render_error
+                        ),
+                        true,
+                        POST_TERMINATION_COLLECT_TIMEOUT,
+                    ));
+                }
                 // Frame-local diagnostic (protocol §4.3): the sequence state
                 // is still host-owned, so the session continues; whether to
                 // proceed is the caller's decision.
@@ -1009,7 +1032,9 @@ impl RenderSession {
 /// error, guards must be intact, and every ownership ledger must balance.
 /// Missing keys fail closed.
 fn final_report_clean(report: &Value) -> bool {
-    report.get("persistent_sequence_setup_error") == Some(&json!(0))
+    report.get("status") == Some(&json!("render_completed"))
+        && report.get("render_error") == Some(&json!(0))
+        && report.get("persistent_sequence_setup_error") == Some(&json!(0))
         && report.get("persistent_sequence_setdown_error") == Some(&json!(0))
         && report.get("guard_bytes_intact") == Some(&Value::Bool(true))
         && report.get("suite_leases_balanced") == Some(&Value::Bool(true))
@@ -1258,6 +1283,8 @@ mod tests {
     #[test]
     fn final_report_clean_fails_closed_on_missing_or_dirty_fields() {
         let clean = serde_json::json!({
+            "status": "render_completed",
+            "render_error": 0,
             "persistent_sequence_setup_error": 0,
             "persistent_sequence_setdown_error": 0,
             "guard_bytes_intact": true,
@@ -1268,6 +1295,11 @@ mod tests {
         });
         assert!(final_report_clean(&clean));
         for (key, dirty) in [
+            // A protocol-violation or invariant-failure session loop ends
+            // render_failed with render_error -1 even when the ledgers
+            // balance; both fields must gate the clean verdict.
+            ("status", serde_json::json!("render_failed")),
+            ("render_error", serde_json::json!(-1)),
             ("persistent_sequence_setup_error", serde_json::json!(25)),
             ("persistent_sequence_setdown_error", serde_json::json!(-1)),
             ("guard_bytes_intact", serde_json::json!(false)),
@@ -1285,6 +1317,19 @@ mod tests {
         }
         // A parseable but unrelated report (an older worker) is not clean.
         assert!(!final_report_clean(&serde_json::json!({"status": "ok"})));
+    }
+
+    #[test]
+    fn fatal_session_error_codes_match_the_worker_contract() {
+        // kSessionGenerationMismatch .. kSessionOutputValidationError.
+        for code in [-41, -42, -43, -44, -45] {
+            assert!(is_fatal_session_error(code), "{code} is session-fatal");
+        }
+        // Time-scale (-40) and time-range (-46) rejections are frame-local,
+        // as are ordinary positive selector errors.
+        for code in [-40, -46, 516, 25, -1] {
+            assert!(!is_fatal_session_error(code), "{code} stays frame-local");
+        }
     }
 
     #[test]
