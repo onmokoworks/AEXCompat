@@ -46,6 +46,7 @@ AEGP_HOST_SELFTESTS_SOURCE = ROOT / "minihost" / "src" / "worker_aegp_host_selft
 AEGP_COMPAT_SELFTESTS_SOURCE = ROOT / "minihost" / "src" / "worker_aegp_compat_selftests.cpp"
 INVOCATION_ORCHESTRATION_HEADER = ROOT / "minihost" / "src" / "worker_invocation_orchestration.hpp"
 SMART_EXECUTION_SOURCE = ROOT / "minihost" / "src" / "worker_smart_execution.cpp"
+SMART_SETUP_SOURCE = ROOT / "minihost" / "src" / "worker_smart_setup.cpp"
 AEGP_COMPAT_SELFTEST_HEADER = ROOT / "minihost" / "src" / "worker_aegp_compat_selftests.hpp"
 MASK_RUNTIME_HEADER = ROOT / "minihost" / "src" / "worker_mask_runtime.hpp"
 MASK_RUNTIME_SOURCE = ROOT / "minihost" / "src" / "worker_mask_runtime.cpp"
@@ -65,6 +66,7 @@ def l2_family_source():
         PF_ANSI_RUNTIME_SOURCE,
         HOST_SUITE_CATALOG_SOURCE,
         PARAMETER_EXECUTION_SOURCE,
+        SMART_SETUP_SOURCE,
         AEGP_SCENE_SOURCE, AEGP_SCENE_HEADER, AEGP_SCENE_RUNTIME_HEADER,
         AEGP_SCENE_RUNTIME_SOURCE, AEGP_INIT_RUNTIME_HEADER, AEGP_INIT_RUNTIME_SOURCE,
         AEGP_HOST_SELFTESTS_SOURCE,
@@ -578,7 +580,7 @@ class MinihostL2SourceTests(unittest.TestCase):
             "progress_final, 8, source_world",
             "progress_final, 16, source_world",
             "rowbytes >= width * pixel_bytes",
-            "g_checkout_layer_definitions.emplace(static_cast<int32_t>(slot), definitions[slot])",
+            "checkout.definitions.emplace(static_cast<int32_t>(slot), definitions[slot])",
             "index < 0 ? static_cast<int32_t>(g_params.size() + 1) : index",
         ):
             self.assertIn(marker, text)
@@ -676,8 +678,8 @@ class MinihostL2SourceTests(unittest.TestCase):
             "constexpr std::size_t kInLocalTimeStep = 236",
             "write<int32_t>(input, kInQuality, g_render_quality)",
             "write<int32_t>(input, 236, external_time_step)",
-            "write<int32_t>(input, 236, time_step)",
-            "g_full_resolution_width > 0 ? g_full_resolution_width : width",
+            "write_input(232, total_time); write_input(236, time_step)",
+            "request.full_resolution_width > 0 ?",
             "parse_render_environment_payload",
             'L"render:v1|"',
         ):
