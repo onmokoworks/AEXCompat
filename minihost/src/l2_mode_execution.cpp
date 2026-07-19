@@ -182,4 +182,13 @@ int run_early_mode(const Request& r) {
   }
   return -1;
 }
+
+EarlyMode select_early_mode(bool automatic_dialog, bool do_dialog,
+                            bool external_dependencies, bool parameters_only) {
+  if (automatic_dialog) return EarlyMode::AutomaticDialog;
+  if (do_dialog) return EarlyMode::DoDialog;
+  if (external_dependencies) return EarlyMode::ExternalDependencies;
+  if (parameters_only) return EarlyMode::ParametersOnly;
+  return EarlyMode::None;
+}
 }  // namespace aexcompat::l2mode

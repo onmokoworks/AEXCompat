@@ -7526,27 +7526,15 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
       invoke_global_setdown(entry, input.data(), output.data());
     return session.finish(3);
   }
-  aexcompat::l2mode::EarlyMode early_mode = aexcompat::l2mode::EarlyMode::None;
-  if (auto_dialog_mode) early_mode = aexcompat::l2mode::EarlyMode::AutomaticDialog;
-  else if (do_dialog_mode) early_mode = aexcompat::l2mode::EarlyMode::DoDialog;
-  else if (external_dependencies_mode) early_mode = aexcompat::l2mode::EarlyMode::ExternalDependencies;
-  else if (params_only_mode) early_mode = aexcompat::l2mode::EarlyMode::ParametersOnly;
+  const auto early_mode = aexcompat::l2mode::select_early_mode(
+      auto_dialog_mode, do_dialog_mode, external_dependencies_mode, params_only_mode);
   if (!is_rendering_worker() && early_mode != aexcompat::l2mode::EarlyMode::None) {
     EarlyModeBridge bridge{entry, &input, &output, &session, &about_message};
-    const aexcompat::l2mode::Hooks hooks{
-        early_mode_out_flags, early_mode_copy_sequence_data_to_input,
-        early_mode_sequence_setup, early_mode_sequence_setdown, early_mode_do_dialog,
-        early_mode_global_setdown, early_mode_return_message, early_mode_handle_lifetimes_balanced,
-        early_mode_prepare_protocol_report, early_mode_external_dependencies,
-        early_mode_handle_is_live, early_mode_handle_size, early_mode_lock_handle,
-        early_mode_unlock_handle, early_mode_dispose_handle, early_mode_handle_statistics,
-        early_mode_dispose_arbitrary_defaults, early_mode_report_parameters};
     const int early_result = aexcompat::l2mode::run_early_mode(
-        {early_mode, &bridge, hooks, global_error, params_error,
+        {early_mode, &bridge, early_mode_hooks(), global_error, params_error,
          parameter_count_contract_valid,
          external_dependencies_mode ? argv[4] : nullptr});
     return session.finish(early_result);
-
   }
   if (is_render_worker() && audio_mode) {
     constexpr std::size_t kAudioGuardSamples = 8;

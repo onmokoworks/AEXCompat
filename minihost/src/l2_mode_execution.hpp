@@ -8,6 +8,8 @@ namespace aexcompat::l2mode {
 // ABI-facing data remains private to l2_main. This is the narrow callback seam
 // used by the mode executor for selector ordering, cleanup, and reporting.
 enum class EarlyMode { None, AutomaticDialog, DoDialog, ExternalDependencies, ParametersOnly };
+EarlyMode select_early_mode(bool automatic_dialog, bool do_dialog,
+                            bool external_dependencies, bool parameters_only);
 struct HandleStatistics { uint64_t created{}; uint64_t disposed{}; };
 struct Hooks {
   uint32_t (*out_flags)(void*){};
