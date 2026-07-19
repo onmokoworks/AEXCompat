@@ -5683,18 +5683,22 @@ bool get_aegp_world_view(void** handle, AegpWorldView* view, LocalEffectWorld* w
   const auto found = g_aegp_world_views.find(handle);
   if (found == g_aegp_world_views.end() || !found->second.pf_world) return false;
   if (!found->second.borrowed && (!*handle || *handle != found->second.pf_world)) return false;
-  if (!found->second.borrowed &&
-      !aexcompat::world_registry::owned_world_matches(
-          found->second.pf_world, found->second.pixel_format))
-    return false;
-  std::memcpy(world, found->second.pf_world, sizeof(*world));
+  *view = found->second;
+  if (!found->second.borrowed) {
+    aexcompat::world_registry::OwnedWorldSnapshot snapshot{};
+    if (!aexcompat::world_registry::snapshot_owned_world(
+            found->second.pf_world, snapshot) ||
+        snapshot.pixel_format != found->second.pixel_format) return false;
+    *world = snapshot.world;
+  } else {
+    std::memcpy(world, found->second.pf_world, sizeof(*world));
+  }
   if (!world->data || world->width <= 0 || world->height <= 0 || world->rowbytes <= 0) return false;
   const int32_t type = aegp_world_type_from_format(found->second.pixel_format);
   const int32_t bytes_per_pixel = type == 1 ? 4 : (type == 2 ? 8 : (type == 3 ? 16 : 0));
   const int64_t minimum_rowbytes = static_cast<int64_t>(world->width) * bytes_per_pixel;
   if (!bytes_per_pixel || minimum_rowbytes > (std::numeric_limits<int32_t>::max)() ||
       world->rowbytes < minimum_rowbytes) return false;
-  *view = found->second;
   return true;
 }
 
@@ -8045,6 +8049,54 @@ bool verify_world_allocation_limit_rejected() {
   return error != 0 && world == before &&
       aexcompat::world_registry::statistics().invalid_operations ==
           invalid_before + 1 && world_lifetimes_balanced();
+}
+
+bool verify_owned_world_snapshot_is_atomic() {
+  alignas(8) std::array<std::byte, kEffectWorldSize> world{};
+  if (new_world(&g_effect, 2, 2, 1, kPixelFormatArgb32, world.data()) != 0)
+    return false;
+  aexcompat::world_registry::OwnedWorldSnapshot snapshot{};
+  if (!aexcompat::world_registry::snapshot_owned_world(world.data(), snapshot) ||
+      !snapshot.world.data || snapshot.pixel_format != kPixelFormatArgb32 ||
+      snapshot.world.width != 2 || snapshot.world.height != 2 ||
+      snapshot.world.rowbytes != 8) {
+    dispose_world(&g_effect, world.data());
+    return false;
+  }
+  const void* captured_data = snapshot.world.data;
+  if (dispose_world(&g_effect, world.data()) != 0 || !world_lifetimes_balanced())
+    return false;
+  aexcompat::world_registry::OwnedWorldSnapshot stale{};
+  return captured_data && snapshot.world.data == captured_data &&
+      snapshot.world.width == 2 && snapshot.pixel_format == kPixelFormatArgb32 &&
+      !aexcompat::world_registry::snapshot_owned_world(world.data(), stale);
+}
+
+bool verify_owned_world_snapshot_concurrent_dispose() {
+  for (int iteration = 0; iteration < 64; ++iteration) {
+    alignas(8) std::array<std::byte, kEffectWorldSize> world{};
+    if (new_world(&g_effect, 3, 2, 1, kPixelFormatArgb64, world.data()) != 0)
+      return false;
+    std::atomic_bool ready{false};
+    std::atomic_bool go{false};
+    bool resolved = false;
+    aexcompat::world_registry::OwnedWorldSnapshot snapshot{};
+    std::thread reader([&] {
+      ready.store(true, std::memory_order_release);
+      while (!go.load(std::memory_order_acquire)) std::this_thread::yield();
+      resolved = aexcompat::world_registry::snapshot_owned_world(
+          world.data(), snapshot);
+    });
+    while (!ready.load(std::memory_order_acquire)) std::this_thread::yield();
+    go.store(true, std::memory_order_release);
+    const int32_t dispose_error = dispose_world(&g_effect, world.data());
+    reader.join();
+    if (dispose_error != 0 || !world_lifetimes_balanced()) return false;
+    if (resolved && (!snapshot.world.data || snapshot.world.width != 3 ||
+        snapshot.world.height != 2 || snapshot.world.rowbytes != 24 ||
+        snapshot.pixel_format != kPixelFormatArgb64)) return false;
+  }
+  return true;
 }
 
 SuiteLeaseTracker g_suite_lease_tracker;
@@ -15493,8 +15545,12 @@ int worker_main_impl(int argc, wchar_t **argv) {
   if (argc == 2 && std::wstring(argv[1]) == L"--self-test-pf-world-registry") {
     const bool double_dispose = verify_world_double_dispose_rejected();
     const bool allocation_limit = verify_world_allocation_limit_rejected();
+    const bool snapshot_atomic = verify_owned_world_snapshot_is_atomic();
+    const bool concurrent_snapshot =
+        verify_owned_world_snapshot_concurrent_dispose();
     const auto world_stats = aexcompat::world_registry::statistics();
-    const bool passed = double_dispose && allocation_limit &&
+    const bool passed = double_dispose && allocation_limit && snapshot_atomic &&
+        concurrent_snapshot &&
         world_lifetimes_balanced() && world_stats.live_count == 0 &&
         world_stats.live_bytes == 0;
     std::cout << "{\"pf_world_registry\":\""
@@ -15503,6 +15559,10 @@ int worker_main_impl(int argc, wchar_t **argv) {
               << (double_dispose ? "true" : "false")
               << ",\"allocation_limit_rejected\":"
               << (allocation_limit ? "true" : "false")
+              << ",\"owned_snapshot_atomic\":"
+              << (snapshot_atomic ? "true" : "false")
+              << ",\"concurrent_snapshot_dispose\":"
+              << (concurrent_snapshot ? "true" : "false")
               << ",\"live_count\":" << world_stats.live_count
               << ",\"live_bytes\":" << world_stats.live_bytes << "}\n";
     return passed ? 0 : 1;

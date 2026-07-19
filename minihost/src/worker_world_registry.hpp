@@ -20,6 +20,11 @@ struct Statistics {
   uint64_t live_bytes{};
 };
 
+struct OwnedWorldSnapshot {
+  world_safety::LocalEffectWorld world{};
+  int32_t pixel_format{};
+};
+
 int32_t __cdecl new_world(void*, int32_t width, int32_t height,
                           int32_t clear_pixels, int32_t pixel_format,
                           void* world);
@@ -36,6 +41,7 @@ bool resolve_dispatch_world_format(
 
 bool owns_world(void* world);
 bool owned_world_matches(void* world, int32_t pixel_format);
+bool snapshot_owned_world(void* world, OwnedWorldSnapshot& snapshot);
 bool lifetimes_balanced();
 Statistics statistics();
 

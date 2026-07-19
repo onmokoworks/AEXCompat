@@ -171,6 +171,20 @@ bool owned_world_matches(void* world, int32_t pixel_format) {
   return found != g_worlds.end() && found->second.pixel_format == pixel_format;
 }
 
+bool snapshot_owned_world(void* world, OwnedWorldSnapshot& snapshot) {
+  snapshot = {};
+  if (!world) return false;
+  std::lock_guard<std::mutex> lock(g_mutex);
+  const auto found = g_worlds.find(world);
+  if (found == g_worlds.end() || !found->second.pixels) return false;
+  world_safety::LocalEffectWorld descriptor{};
+  std::memcpy(&descriptor, world, sizeof(descriptor));
+  if (descriptor.data != found->second.pixels) return false;
+  snapshot.world = descriptor;
+  snapshot.pixel_format = found->second.pixel_format;
+  return true;
+}
+
 bool lifetimes_balanced() {
   std::lock_guard<std::mutex> lock(g_mutex);
   return g_worlds.empty() && g_created == g_disposed && g_live_bytes == 0;

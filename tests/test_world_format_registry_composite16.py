@@ -52,6 +52,7 @@ def test_pf_owned_world_registry_is_a_genuine_bounded_component():
     assert "constexpr uint64_t kMaxWorldBytes = 256ULL * 1024 * 1024" in source
     assert "g_live_bytes > kMaxWorldBytes - size" in source
     assert "found == g_worlds.end()" in source
+    assert "snapshot_owned_world" in header + source
     assert "configure_gpu_fallback_bridge" in header + source
     assert "configure_host_world_fallback" in source
     assert "g_owned_worlds" not in main
@@ -120,6 +121,8 @@ def test_pf_world_registry_rejects_double_dispose_and_oversized_allocations():
         "pf_world_registry": "passed",
         "double_dispose_rejected": True,
         "allocation_limit_rejected": True,
+        "owned_snapshot_atomic": True,
+        "concurrent_snapshot_dispose": True,
         "live_count": 0,
         "live_bytes": 0,
     }
