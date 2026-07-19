@@ -36,15 +36,19 @@ extern bool g_render_ui_context_closed;
 extern uint32_t g_app_color_picker_calls;
 extern uint32_t g_app_invalidate_rect_calls;
 extern std::array<float, 4> g_app_picker_color;
-extern uint32_t g_transform_world_calls;
-extern int32_t g_last_transform_x;
-extern int32_t g_last_transform_y;
-extern uint8_t g_last_transform_opacity;
-extern uint32_t g_abort_calls;
-extern uint32_t g_progress_calls;
 extern uint32_t g_register_ui_calls;
-extern int32_t g_last_progress_current;
-extern int32_t g_last_progress_total;
+namespace {
+auto& g_report_callback_telemetry =
+    aexcompat::worker_runtime::classic::host_callback_telemetry();
+auto& g_transform_world_calls = g_report_callback_telemetry.transform_world_calls;
+auto& g_last_transform_x = g_report_callback_telemetry.last_transform_x;
+auto& g_last_transform_y = g_report_callback_telemetry.last_transform_y;
+auto& g_last_transform_opacity = g_report_callback_telemetry.last_transform_opacity;
+auto& g_abort_calls = g_report_callback_telemetry.abort_calls;
+auto& g_progress_calls = g_report_callback_telemetry.progress_calls;
+auto& g_last_progress_current = g_report_callback_telemetry.last_progress_current;
+auto& g_last_progress_total = g_report_callback_telemetry.last_progress_total;
+}  // namespace
 std::string escape(const std::string&);
 std::string world_debug_report_json();
 const aexcompat::host_audio::Telemetry& audio_telemetry();

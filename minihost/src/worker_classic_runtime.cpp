@@ -191,6 +191,11 @@ Context* active_context() noexcept { return g_active_context; }
 bool last_selector_dispatched() noexcept {
   return g_last_selector_dispatched.load(std::memory_order_relaxed);
 }
+HostCallbackTelemetry& host_callback_telemetry() {
+  static HostCallbackTelemetry telemetry;
+  return telemetry;
+}
+
 void reset_selector_diagnostic() noexcept {
   g_last_selector_dispatched.store(false, std::memory_order_relaxed);
   std::lock_guard<std::mutex> lock(g_diagnostics_mutex);

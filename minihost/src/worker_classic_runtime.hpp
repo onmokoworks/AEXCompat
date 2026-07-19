@@ -81,6 +81,26 @@ class Context final {
 Context* active_context() noexcept;
 bool last_selector_dispatched() noexcept;
 void reset_selector_diagnostic() noexcept;
+
+// Classic host-callback telemetry (issue #126 Phase D): counters recorded by
+// worker_main's PF utility and world-transform callbacks (quack,
+// transform_world, abort, progress) plus the classic fallback layer slot.
+// Those callbacks and the world-transform pointer bundle write it; the
+// classic completion report reads it back. Lifetime: process-lifetime, never
+// torn down.
+struct HostCallbackTelemetry {
+  uint32_t duck_quacks{};
+  uint32_t transform_world_calls{};
+  int32_t last_transform_x{};
+  int32_t last_transform_y{};
+  uint8_t last_transform_opacity{};
+  uint32_t abort_calls{};
+  uint32_t progress_calls{};
+  int32_t last_progress_current{};
+  int32_t last_progress_total{};
+  int32_t secondary_layer_slot{6};
+};
+HostCallbackTelemetry& host_callback_telemetry();
 bool dispatch_active() noexcept;
 Diagnostics diagnostics() noexcept;
 

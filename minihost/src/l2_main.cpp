@@ -595,13 +595,18 @@ auto& g_last_param_checkout_time_scale = g_parameter_runtime.checkout.last_time_
 auto& g_options_button_name = g_parameter_runtime.ui.options_button_name;
 auto& g_options_button_name_calls = g_parameter_runtime.ui.options_button_name_calls;
 
-uint32_t g_duck_quacks = 0;
-uint32_t g_transform_world_calls = 0;
-int32_t g_last_transform_x = 0;
-int32_t g_last_transform_y = 0;
-uint8_t g_last_transform_opacity = 0;
-uint32_t g_abort_calls = 0;
-uint32_t g_progress_calls = 0;
+// Host-callback telemetry storage moved to its owner,
+// aexcompat::worker_runtime::classic::host_callback_telemetry()
+// (issue #126 Phase D); these references keep the g_* spellings.
+auto& g_host_callback_telemetry =
+    aexcompat::worker_runtime::classic::host_callback_telemetry();
+auto& g_duck_quacks = g_host_callback_telemetry.duck_quacks;
+auto& g_transform_world_calls = g_host_callback_telemetry.transform_world_calls;
+auto& g_last_transform_x = g_host_callback_telemetry.last_transform_x;
+auto& g_last_transform_y = g_host_callback_telemetry.last_transform_y;
+auto& g_last_transform_opacity = g_host_callback_telemetry.last_transform_opacity;
+auto& g_abort_calls = g_host_callback_telemetry.abort_calls;
+auto& g_progress_calls = g_host_callback_telemetry.progress_calls;
 uint32_t g_register_ui_calls = 0;
 struct CustomUiRegistration {
   uint32_t events{};
@@ -619,9 +624,9 @@ CustomUiRegistration g_custom_ui_registration;
 uint32_t g_invalid_custom_ui_registrations{};
 uint32_t g_adv_app_info_text_calls{};
 std::string g_last_adv_app_info_text;
-int32_t g_last_progress_current = 0;
-int32_t g_last_progress_total = 0;
-int32_t g_secondary_layer_slot = 6;
+auto& g_last_progress_current = g_host_callback_telemetry.last_progress_current;
+auto& g_last_progress_total = g_host_callback_telemetry.last_progress_total;
+auto& g_secondary_layer_slot = g_host_callback_telemetry.secondary_layer_slot;
 using ExternalLayerInput =
     aexcompat::worker_runtime::request_parser::LayerInput;
 bool parse_layer_transport_key(const wchar_t* text, ExternalLayerInput& layer) {
@@ -1286,7 +1291,9 @@ int32_t __cdecl get_drawing_reference(void* context, void** drawing) {
   ++g_drawbot_get_drawing_ref_calls;
   return 0;
 }
-int g_async_manager{};
+// Receipt test-mode storage moved to aexcompat::render_receipts::
+// receipt_test_state() (issue #126 Phase D).
+auto& g_async_manager = aexcompat::render_receipts::receipt_test_state().async_manager;
 int32_t __cdecl get_context_async_manager(void* input, void* extra, void** manager) {
   if (!input || !extra || !manager) return 4;
   *manager = &g_async_manager;
@@ -1392,7 +1399,8 @@ constexpr int32_t kSyntheticCompHeight = 9;
 // The g_render_options_* probe fixtures moved to their writer,
 // worker_aegp_render_selftests.cpp (issue #126 Phase D); the declarations in
 // its header keep the custom-selftest hook wiring below resolving.
-bool g_synthetic_receipt_test_mode{};
+auto& g_synthetic_receipt_test_mode =
+    aexcompat::render_receipts::receipt_test_state().synthetic_test_mode;
 int32_t __cdecl app_get_personal_info(char* info) {
   if (!info) return 4;
   std::memset(info, 0, 64 * 3);
@@ -1493,9 +1501,12 @@ int32_t __cdecl adv_item_effect_is_active(void* context_handle, uint8_t* enabled
 }
 
 // The PF AE Adv Item Suite ABI and table live in worker_l2_render_abi.{hpp,cpp}.
-bool g_loaded_effect_receipt_fixture_passed{};
-bool g_loaded_effect_receipt_unsupported_rejected{};
-bool g_loaded_effect_receipt_stale_world_rejected{};
+auto& g_loaded_effect_receipt_fixture_passed =
+    aexcompat::render_receipts::receipt_test_state().loaded_effect_receipt_fixture_passed;
+auto& g_loaded_effect_receipt_unsupported_rejected =
+    aexcompat::render_receipts::receipt_test_state().loaded_effect_receipt_unsupported_rejected;
+auto& g_loaded_effect_receipt_stale_world_rejected =
+    aexcompat::render_receipts::receipt_test_state().loaded_effect_receipt_stale_world_rejected;
 void drain_async_layer_requests();
 
 uint32_t staged_item_project_generation() {
