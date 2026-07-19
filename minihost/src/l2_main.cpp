@@ -4912,6 +4912,10 @@ RenderSessionOutcome run_render_session(
   outcome.setup_error =
       invoke_sequence_selector(entry, kSequenceSetup, input.data(), output.data());
   if (outcome.setup_error != 0) return outcome;
+  // Mirrors begin_render for the hoisted sequence: an --aux-manifest-v1
+  // manifest becomes visible to the channel suite once SEQUENCE_SETUP
+  // succeeds, and stays active for every session frame.
+  activate_external_aux();
   write<void*>(input, kInSequenceData, read<void*>(output, kOutSequenceData));
 
   const std::size_t input_offset = wrs::input_slot_offset();
@@ -5023,6 +5027,10 @@ RenderSessionOutcome run_render_session(
         frame_input_hash, frame_output_hash, frame_guards, requested, &frame_rgba,
         nullptr, max_width, max_height, nullptr, current_time, time_step, total_time,
         time_scale, pixel_bytes, false, &captured);
+    // Aux channel chunks are host-owned and cannot outlive one frame's render
+    // lifecycle (end_render's cleanup for the one-shot path); the manifest
+    // itself stays active across frames.
+    aexcompat::pf_ae_channel::reclaim_layer_channels();
     outcome.width = frame_width;
     outcome.height = frame_height;
     outcome.rowbytes = frame_rowbytes;
@@ -5084,6 +5092,9 @@ RenderSessionOutcome run_render_session(
   outcome.setdown_error =
       invoke_sequence_selector(entry, kSequenceSetdown, input.data(), output.data());
   write<void*>(input, kInSequenceData, nullptr);
+  aexcompat::pf_ae_channel::reclaim_layer_channels();
+  deactivate_external_aux();
+  clear_native_aux_provider();
   // Frame-local errors were already reported through frame_done and the
   // broker owned the continue/stop decision, so a clean close after them is
   // still a successful session; only session mechanics count here.
