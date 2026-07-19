@@ -449,6 +449,7 @@ fn minidump_marker(line: &str) -> Option<String> {
             | "handle_invalid"
             | "writer_unavailable"
             | "writer_timeout"
+            | "capacity_exceeded"
     )
     .then(|| format!("failed reason={reason}"))
 }

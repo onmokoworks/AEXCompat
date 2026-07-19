@@ -838,6 +838,9 @@ class MinihostL2SourceTests(unittest.TestCase):
             "input->Io",
             "LOAD_LIBRARY_SEARCH_SYSTEM32",
             "AEXCOMPAT_MINIDUMP_HANDLE",
+            "AEXCOMPAT_MINIDUMP_ACK_HANDLE",
+            "preload_minidump_writer",
+            "FILE_TYPE_PIPE",
             'L"--self-test-crash-minidump"',
             'L"--self-test-crash-no-minidump"',
         ):

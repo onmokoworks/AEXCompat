@@ -654,9 +654,12 @@ const char* effect_selector_name(int32_t command) {
 constexpr uint64_t kMaxMinidumpFileBytes = 64ull * 1024ull * 1024ull;
 constexpr DWORD kMinidumpWriterWaitMs = 2'000;
 HANDLE g_minidump_handle{};
+HANDLE g_minidump_ack_handle{};
 HANDLE g_minidump_request_event{};
 HANDLE g_minidump_complete_event{};
 std::atomic<bool> g_minidump_attempted{false};
+std::atomic<uint64_t> g_minidump_written_bytes{0};
+std::atomic<bool> g_minidump_broker_rejected{false};
 EXCEPTION_RECORD g_minidump_exception_record{};
 CONTEXT g_minidump_context{};
 EXCEPTION_POINTERS g_minidump_exception_pointers{};
@@ -665,6 +668,24 @@ DWORD g_minidump_thread_id{};
 struct MinidumpLimitContext {
   uint64_t max_bytes{kMaxMinidumpFileBytes};
 };
+
+using MiniDumpWriteDumpFn = BOOL(WINAPI*)(HANDLE, DWORD, HANDLE,
+                                          MINIDUMP_TYPE,
+                                          PMINIDUMP_EXCEPTION_INFORMATION,
+                                          PMINIDUMP_USER_STREAM_INFORMATION,
+                                          PMINIDUMP_CALLBACK_INFORMATION);
+HMODULE g_dbghelp{};
+MiniDumpWriteDumpFn g_minidump_write_dump{};
+
+bool preload_minidump_writer() {
+  if (g_minidump_write_dump) return true;
+  g_dbghelp = LoadLibraryExW(L"dbghelp.dll", nullptr,
+                             LOAD_LIBRARY_SEARCH_SYSTEM32);
+  if (!g_dbghelp) return false;
+  g_minidump_write_dump = reinterpret_cast<MiniDumpWriteDumpFn>(
+      GetProcAddress(g_dbghelp, "MiniDumpWriteDump"));
+  return g_minidump_write_dump != nullptr;
+}
 
 BOOL CALLBACK minidump_limit_callback(
     PVOID parameter, const PMINIDUMP_CALLBACK_INPUT input,
@@ -680,22 +701,40 @@ BOOL CALLBACK minidump_limit_callback(
   return TRUE;
 }
 
-void write_minidump_on_dedicated_thread() {
-  HMODULE dbghelp = LoadLibraryExW(L"dbghelp.dll", nullptr,
-                                   LOAD_LIBRARY_SEARCH_SYSTEM32);
-  if (!dbghelp) {
-    std::fprintf(stderr, "stage:minidump_failed reason=dbghelp_unavailable\n");
-    return;
+struct MinidumpBrokerAck {
+  bool valid{false};
+  uint64_t bytes{};
+  bool rejected{false};
+};
+
+MinidumpBrokerAck finish_minidump_transport() {
+  if (g_minidump_handle) {
+    CloseHandle(g_minidump_handle);
+    g_minidump_handle = nullptr;
   }
-  using MiniDumpWriteDumpFn = BOOL(WINAPI*)(HANDLE, DWORD, HANDLE,
-                                            MINIDUMP_TYPE,
-                                            PMINIDUMP_EXCEPTION_INFORMATION,
-                                            PMINIDUMP_USER_STREAM_INFORMATION,
-                                            PMINIDUMP_CALLBACK_INFORMATION);
-  const auto write_dump = reinterpret_cast<MiniDumpWriteDumpFn>(
-      GetProcAddress(dbghelp, "MiniDumpWriteDump"));
-  if (!write_dump) {
-    std::fprintf(stderr, "stage:minidump_failed reason=entry_unavailable\n");
+  MinidumpBrokerAck result;
+  if (!g_minidump_ack_handle) return result;
+  std::array<unsigned char, 9> ack{};
+  DWORD read = 0;
+  const BOOL ok = ReadFile(g_minidump_ack_handle, ack.data(),
+                           static_cast<DWORD>(ack.size()), &read, nullptr);
+  CloseHandle(g_minidump_ack_handle);
+  g_minidump_ack_handle = nullptr;
+  if (ok && read == ack.size()) {
+    std::memcpy(&result.bytes, ack.data(), sizeof(result.bytes));
+    result.rejected = ack[8] != 0;
+    result.valid = true;
+  }
+  g_minidump_written_bytes.store(result.bytes);
+  g_minidump_broker_rejected.store(result.rejected);
+  return result;
+}
+
+void write_minidump_on_dedicated_thread() {
+  if (!g_minidump_write_dump) {
+    finish_minidump_transport();
+    std::fprintf(stderr, "stage:minidump_failed reason=%s\n",
+                 g_dbghelp ? "entry_unavailable" : "dbghelp_unavailable");
     return;
   }
   MINIDUMP_EXCEPTION_INFORMATION exception_info{};
@@ -706,18 +745,20 @@ void write_minidump_on_dedicated_thread() {
   MINIDUMP_CALLBACK_INFORMATION callback_info{};
   callback_info.CallbackParam = &limit;
   callback_info.CallbackRoutine = minidump_limit_callback;
-  const BOOL written = write_dump(
+  const BOOL written = g_minidump_write_dump(
       GetCurrentProcess(), GetCurrentProcessId(), g_minidump_handle,
       MiniDumpNormal, &exception_info, nullptr, &callback_info);
-  LARGE_INTEGER size{};
-  GetFileSizeEx(g_minidump_handle, &size);
-  if (written && size.QuadPart >= 0 &&
-      static_cast<uint64_t>(size.QuadPart) <= kMaxMinidumpFileBytes) {
+  const DWORD error = GetLastError();
+  const MinidumpBrokerAck broker = finish_minidump_transport();
+  if (written && broker.valid && !broker.rejected && broker.bytes > 0 &&
+      broker.bytes <= kMaxMinidumpFileBytes) {
     std::fprintf(stderr, "stage:minidump_written bytes=%lld\n",
-                 static_cast<long long>(size.QuadPart));
+                 static_cast<long long>(broker.bytes));
+  } else if (broker.rejected) {
+    std::fprintf(stderr, "stage:minidump_failed reason=capacity_exceeded\n");
   } else {
     std::fprintf(stderr, "stage:minidump_failed reason=write_failed code=%lu\n",
-                 GetLastError());
+                 error);
   }
 }
 
@@ -728,8 +769,9 @@ DWORD WINAPI minidump_writer_thread(void*) {
   return 0;
 }
 
-bool start_minidump_writer(HANDLE handle) {
+bool start_minidump_writer(HANDLE handle, HANDLE ack_handle) {
   g_minidump_handle = handle;
+  g_minidump_ack_handle = ack_handle;
   g_minidump_request_event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
   g_minidump_complete_event = CreateEventW(nullptr, TRUE, FALSE, nullptr);
   if (!g_minidump_request_event || !g_minidump_complete_event) {
@@ -738,6 +780,7 @@ bool start_minidump_writer(HANDLE handle) {
     g_minidump_request_event = nullptr;
     g_minidump_complete_event = nullptr;
     g_minidump_handle = nullptr;
+    g_minidump_ack_handle = nullptr;
     return false;
   }
   HANDLE thread = CreateThread(nullptr, 0, minidump_writer_thread, nullptr, 0,
@@ -748,6 +791,7 @@ bool start_minidump_writer(HANDLE handle) {
     g_minidump_request_event = nullptr;
     g_minidump_complete_event = nullptr;
     g_minidump_handle = nullptr;
+    g_minidump_ack_handle = nullptr;
     return false;
   }
   CloseHandle(thread);
@@ -780,10 +824,10 @@ void request_crash_minidump(EXCEPTION_POINTERS* information) {
     std::fprintf(stderr, "stage:minidump_failed reason=writer_timeout\n");
 }
 
-HANDLE inherited_minidump_handle() {
+HANDLE inherited_minidump_handle(const wchar_t* name) {
   wchar_t buffer[64]{};
   const DWORD length = GetEnvironmentVariableW(
-      L"AEXCOMPAT_MINIDUMP_HANDLE", buffer, static_cast<DWORD>(std::size(buffer)));
+      name, buffer, static_cast<DWORD>(std::size(buffer)));
   if (length == 0 || length >= std::size(buffer)) return nullptr;
   wchar_t* end = nullptr;
   const unsigned long long value = _wcstoui64(buffer, &end, 10);
@@ -791,7 +835,7 @@ HANDLE inherited_minidump_handle() {
   const HANDLE handle = reinterpret_cast<HANDLE>(static_cast<uintptr_t>(value));
   DWORD flags{};
   if (!GetHandleInformation(handle, &flags) ||
-      !(flags & HANDLE_FLAG_INHERIT) || GetFileType(handle) != FILE_TYPE_DISK)
+      !(flags & HANDLE_FLAG_INHERIT) || GetFileType(handle) != FILE_TYPE_PIPE)
     return nullptr;
   return handle;
 }
@@ -803,15 +847,37 @@ bool configure_minidump_from_inherited_handle() {
   if (GetEnvironmentVariableW(L"AEXCOMPAT_MINIDUMP_HANDLE", probe,
                               static_cast<DWORD>(std::size(probe))) == 0)
     return true;
-  const HANDLE handle = inherited_minidump_handle();
-  if (!handle) {
+  const HANDLE handle = inherited_minidump_handle(L"AEXCOMPAT_MINIDUMP_HANDLE");
+  const HANDLE ack_handle =
+      inherited_minidump_handle(L"AEXCOMPAT_MINIDUMP_ACK_HANDLE");
+  if (!handle || !ack_handle) {
+    if (handle) CloseHandle(handle);
+    if (ack_handle) CloseHandle(ack_handle);
+    SetEnvironmentVariableW(L"AEXCOMPAT_MINIDUMP_HANDLE", nullptr);
+    SetEnvironmentVariableW(L"AEXCOMPAT_MINIDUMP_ACK_HANDLE", nullptr);
     std::fprintf(stderr, "stage:minidump_failed reason=handle_invalid\n");
     return false;
   }
-  if (!start_minidump_writer(handle)) {
+  if (SetHandleInformation(handle, HANDLE_FLAG_INHERIT, 0) == 0 ||
+      SetHandleInformation(ack_handle, HANDLE_FLAG_INHERIT, 0) == 0) {
+    CloseHandle(handle);
+    CloseHandle(ack_handle);
+    SetEnvironmentVariableW(L"AEXCOMPAT_MINIDUMP_HANDLE", nullptr);
+    SetEnvironmentVariableW(L"AEXCOMPAT_MINIDUMP_ACK_HANDLE", nullptr);
+    std::fprintf(stderr, "stage:minidump_failed reason=handle_invalid\n");
+    return false;
+  }
+  preload_minidump_writer();
+  if (!start_minidump_writer(handle, ack_handle)) {
+    CloseHandle(handle);
+    CloseHandle(ack_handle);
+    SetEnvironmentVariableW(L"AEXCOMPAT_MINIDUMP_HANDLE", nullptr);
+    SetEnvironmentVariableW(L"AEXCOMPAT_MINIDUMP_ACK_HANDLE", nullptr);
     std::fprintf(stderr, "stage:minidump_failed reason=writer_unavailable\n");
     return false;
   }
+  SetEnvironmentVariableW(L"AEXCOMPAT_MINIDUMP_HANDLE", nullptr);
+  SetEnvironmentVariableW(L"AEXCOMPAT_MINIDUMP_ACK_HANDLE", nullptr);
   SetUnhandledExceptionFilter(top_level_crash_filter);
   return true;
 }
@@ -21947,13 +22013,13 @@ int wmain(int argc, wchar_t **argv) {
       return 1;
     }
     const uint32_t exception_code = selftest_trigger_guarded_crash();
-    LARGE_INTEGER dump_size{};
-    const bool readable = GetFileSizeEx(g_minidump_handle, &dump_size) != FALSE;
-    const bool written = readable && dump_size.QuadPart > 0 &&
-        static_cast<uint64_t>(dump_size.QuadPart) <= kMaxMinidumpFileBytes;
+    const uint64_t dump_size = g_minidump_written_bytes.load();
+    const bool written = exception_code == EXCEPTION_ACCESS_VIOLATION &&
+        dump_size > 0 && dump_size <= kMaxMinidumpFileBytes &&
+        !g_minidump_broker_rejected.load();
     std::cout << "{\"crash_minidump\":\"" << (written ? "passed" : "failed")
               << "\",\"exception_code\":" << exception_code
-              << ",\"dump_bytes\":" << (written ? dump_size.QuadPart : 0)
+              << ",\"dump_bytes\":" << (written ? dump_size : 0)
               << ",\"attempted\":" << (g_minidump_attempted.load() ? "true" : "false")
               << "}\n";
     return written ? 0 : 1;

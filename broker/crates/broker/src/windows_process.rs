@@ -148,7 +148,11 @@ fn quote(value: &str) -> String {
     quoted
 }
 
-fn child_environment(trace_handle: Option<HANDLE>, minidump_handle: Option<HANDLE>) -> Vec<u16> {
+fn child_environment(
+    trace_handle: Option<HANDLE>,
+    minidump_handle: Option<HANDLE>,
+    minidump_ack_handle: Option<HANDLE>,
+) -> Vec<u16> {
     let mut entries: Vec<(String, std::ffi::OsString, std::ffi::OsString)> = std::env::vars_os()
         .filter_map(|(key, value)| {
             let normalized = key.to_string_lossy().to_ascii_uppercase();
@@ -156,6 +160,7 @@ fn child_environment(trace_handle: Option<HANDLE>, minidump_handle: Option<HANDL
                 || normalized == "AEX_INSTRUMENT_TRACE_HANDLE"
                 || normalized == "AEXCOMPAT_MINIDUMP_DIR"
                 || normalized == "AEXCOMPAT_MINIDUMP_HANDLE"
+                || normalized == "AEXCOMPAT_MINIDUMP_ACK_HANDLE"
             {
                 None
             } else {
@@ -174,6 +179,13 @@ fn child_environment(trace_handle: Option<HANDLE>, minidump_handle: Option<HANDL
         entries.push((
             "AEXCOMPAT_MINIDUMP_HANDLE".into(),
             "AEXCOMPAT_MINIDUMP_HANDLE".into(),
+            (handle as usize).to_string().into(),
+        ));
+    }
+    if let Some(handle) = minidump_ack_handle {
+        entries.push((
+            "AEXCOMPAT_MINIDUMP_ACK_HANDLE".into(),
+            "AEXCOMPAT_MINIDUMP_ACK_HANDLE".into(),
             (handle as usize).to_string().into(),
         ));
     }
@@ -312,7 +324,7 @@ fn run_isolated_impl(
     repository: Option<&Path>,
 ) -> io::Result<ProcessResult> {
     let trace_file = crate::trace_policy::create_trace_file_for_launch()?;
-    let minidump_file = repository
+    let mut minidump_file = repository
         .map(crate::minidump_policy::create_minidump_file_for_launch)
         .transpose()?
         .flatten();
@@ -361,6 +373,7 @@ fn run_isolated_impl(
     }
     if let Some(minidump_file) = minidump_file.as_ref() {
         inherited.push(minidump_file.raw());
+        inherited.push(minidump_file.ack_raw());
     }
     if unsafe {
         UpdateProcThreadAttribute(
@@ -391,6 +404,7 @@ fn run_isolated_impl(
     let mut environment = child_environment(
         trace_file.as_ref().map(|file| file.raw()),
         minidump_file.as_ref().map(|file| file.raw()),
+        minidump_file.as_ref().map(|file| file.ack_raw()),
     );
     let mut startup: STARTUPINFOEXW = unsafe { zeroed() };
     startup.StartupInfo.cb = size_of::<STARTUPINFOEXW>() as u32;
@@ -442,6 +456,11 @@ fn run_isolated_impl(
     };
     if created == 0 {
         return Err(io::Error::last_os_error());
+    }
+    // The child has the explicitly allowlisted copies now. Close the broker's
+    // pipe copies immediately so the reader observes EOF when the worker exits.
+    if let Some(minidump_file) = minidump_file.as_mut() {
+        minidump_file.close_worker_handles();
     }
     let process_handle = OwnedHandle::new(process.hProcess)?;
     let thread_handle = OwnedHandle::new(process.hThread)?;

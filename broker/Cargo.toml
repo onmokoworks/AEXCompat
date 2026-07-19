@@ -10,6 +10,7 @@ license = "MIT"
 windows-sys = { version = "0.59", features = [
   "Win32_Foundation",
   "Win32_Security",
+  "Win32_Security_Authorization",
   "Win32_Security_Cryptography",
   "Win32_Security_Cryptography_Catalog",
   "Win32_Security_WinTrust",

@@ -15,16 +15,28 @@ broker\target\release\aexcompat-harness.exe --render-experimental-smart `
 
 The broker resolves the value below the repository `target/` tree, rejects
 `.`/`..` traversal and reparse-point components, and creates one `CREATE_NEW`
-file for the launch. It then authenticates the file's final path and inherits
-the handle through the same explicit `PROC_THREAD_ATTRIBUTE_HANDLE_LIST`
-transport used by the trace channel. The worker receives only the numeric
-handle value; it never receives a dump path and never re-opens one.
+file for the launch. It then authenticates the file's final path and keeps the
+file handle broker-private. The worker receives only an explicit pipe transport
+through the same `PROC_THREAD_ATTRIBUTE_HANDLE_LIST` mechanism used by the
+trace channel; a broker reader copies at most 64 MiB into the authenticated
+file. The worker never receives a dump path or the dump file handle and never
+re-opens one.
+
+The managed dump directory and each reservation file use a protected DACL
+granting full access only to LocalSystem and the object owner, because a dump
+can contain arbitrary process memory. Publication renames the still-open authenticated handle from
+`.dmp.part` to `.dmp`; no close-then-path-rename window exists.
 
 The broker policy bounds both dimensions of local storage:
 
 - at most 16 retained dump files;
 - at most 256 MiB cumulative dump bytes;
-- at most 64 MiB for one dump.
+- at most 64 MiB for one dump, enforced by the broker reader;
+- each in-flight `.dmp.part` reservation accounts for the full 64 MiB maximum.
+
+Under the policy lock, exclusively openable stale `.dmp.part` files are
+authenticated and deleted by handle before budgeting. Active reservations are
+held with share mode zero and remain charged at the full per-dump maximum.
 
 A lock file serializes only the budget check and `CREATE_NEW` reservation. A
 contender waits for the lock with a bounded timeout, then proceeds once the
@@ -35,11 +47,16 @@ dropping the dispatch.
 
 ## Behavior
 
-The worker starts a dedicated writer thread before dispatch. The SEH filter
+The worker preloads system32 `dbghelp.dll` and resolves `MiniDumpWriteDump`
+before any plug-in load or execution. It then starts a dedicated writer thread
+before dispatch. The SEH filter
 copies the exception record and context into broker-owned storage, signals that
 thread, and waits up to two seconds. `MiniDumpWriteDump` is never called from
-the faulting thread. The writer loads `dbghelp.dll` from system32, uses the
-authenticated inherited handle, and applies a 64 MiB write callback limit.
+the faulting thread. The writer uses the inherited pipe and waits for the
+broker's bounded-copy acknowledgement.
+The broker reader stops immediately on overflow and uses a cancellable polling
+loop, so a worker that duplicates or retains its pipe writer cannot block
+broker teardown indefinitely.
 
 The worker emits one of these bounded diagnostics:
 
@@ -58,8 +75,9 @@ handle value, or dump contents.
 ## Verification
 
 `--self-test-crash-minidump` raises a real access violation under the
-production SEH guard. The native test supplies an already-created inheritable
-file handle, then verifies a non-empty `MDMP` file and the byte bound.
+production SEH guard. The native test supplies the same inheritable dump pipe
+and broker acknowledgement pipe used in production, copies the stream into a
+file, then verifies a non-empty `MDMP` file and the byte bound.
 
 `--self-test-crash-no-minidump` raises the same real access violation without
 opt-in and verifies that no writer was attempted. Both modes are covered for

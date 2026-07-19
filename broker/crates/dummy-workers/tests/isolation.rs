@@ -84,7 +84,9 @@ fn descendant_oom_does_not_implicate_the_worker() {
     assert!(!result.memory_limit_reached);
     let job_peak = result.peak_process_memory_bytes.expect("job peak recorded");
     assert!(job_peak >= result.process_memory_limit_bytes - 16 * 1024 * 1024);
-    let worker_peak = result.worker_peak_commit_bytes.expect("worker peak recorded");
+    let worker_peak = result
+        .worker_peak_commit_bytes
+        .expect("worker peak recorded");
     assert!(worker_peak < result.process_memory_limit_bytes / 2);
 }
 
