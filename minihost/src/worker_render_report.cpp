@@ -247,6 +247,11 @@ void begin_smart(ReportSnapshot& report, const SmartReport::Head& v) {
       << v.map_checkout_result[3] << ']'
       << ",\"malformed_checkout_request_count\":" << v.malformed_checkout_requests
       << ",\"empty_checkout_pixel_denial_count\":" << v.empty_checkout_pixel_denials
+      << ",\"returns_extra_pixels\":" << (v.returns_extra_pixels ? "true" : "false")
+      << ",\"result_within_request\":" << (v.result_within_request ? "true" : "false")
+      << ",\"extra_pixels_contract_violation\":"
+      << (v.extra_pixels_contract_violation ? "true" : "false")
+      << ",\"empty_result_rect\":" << (v.empty_result_rect ? "true" : "false")
       << ",\"global_setdown_error\":" << v.global_setdown_error
       << ",\"case_id\":\"" << v.case_id << "\",\"pixel_format\":\"" << v.pixel_format
       << "\",\"width\":" << v.dimensions[0] << ",\"height\":" << v.dimensions[1]
@@ -262,8 +267,10 @@ void begin_smart(ReportSnapshot& report, const SmartReport::Head& v) {
       << ",\"output_world\":{\"width\":" << v.dimensions[0]
       << ",\"height\":" << v.dimensions[1] << ",\"row_bytes\":" << v.dimensions[2]
       << ",\"pixel_format\":\"" << v.pixel_format
-      << "\",\"premultiplication\":\"premultiplied\",\"extent_hint\":{\"left\":0,\"top\":0,\"right\":"
-      << v.dimensions[0] << ",\"bottom\":" << v.dimensions[1] << "}}"
+      << "\",\"premultiplication\":\"premultiplied\",\"extent_hint\":{\"left\":"
+      << v.output_extent_hint[0] << ",\"top\":" << v.output_extent_hint[1]
+      << ",\"right\":" << v.output_extent_hint[2] << ",\"bottom\":"
+      << v.output_extent_hint[3] << "}}"
       << ",\"bytes_written_per_row\":" << v.dimensions[2]
       << ",\"undefined_tail_bytes_per_row\":0"
       << ",\"input_sha256\":\"" << v.input_sha256 << "\",\"output_sha256\":\""

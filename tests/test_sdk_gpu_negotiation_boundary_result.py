@@ -48,7 +48,10 @@ def test_gpu_abi_and_suite_table_are_explicit():
         "write<int32_t>(setdown_input, 8, gpu_framework)",
         '{"PF GPU Device Suite", 1, g_gpu_device_suite1.data()}',
         "kPixelFormatGpuBgra128",
-        "result.output_pixels_valid = !logical_output.empty() && !untouched && finite",
+        # Empty legal results are exempt; every rendered output still passes
+        # the untouched/finite validation.
+        "result.output_pixels_valid = result.empty_result_rect",
+        "!logical_output.empty() && !untouched && finite",
     ):
         assert marker in source
     transport = TRANSPORT.read_text(encoding="utf-8")

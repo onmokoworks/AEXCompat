@@ -176,6 +176,11 @@ struct SmartReport {
     std::array<int32_t, 4> map_checkout_result{};
     uint32_t malformed_checkout_requests{};
     uint32_t empty_checkout_pixel_denials{};
+    bool returns_extra_pixels{};
+    bool result_within_request{};
+    bool extra_pixels_contract_violation{};
+    bool empty_result_rect{};
+    std::array<int32_t, 4> output_extent_hint{};
     int32_t global_setdown_error{};
     std::string case_id;
     std::string pixel_format;

@@ -5028,6 +5028,7 @@ SmartResult smart_render_runtime(EffectEntry entry, std::array<std::byte, kInSiz
     result.output_rowbytes = rowbytes;
     result.result_rect = {0, 0, width, height};
     result.max_result_rect = result.result_rect;
+    result.output_extent_hint = result.result_rect;
     std::vector<unsigned char> logical_input(width * height * pixel_bytes);
     std::vector<unsigned char> logical_output(width * height * pixel_bytes);
     for (int32_t y = 0; y < height; ++y) {
@@ -6010,12 +6011,13 @@ int worker_main_impl(int argc, wchar_t **argv) {
   if (const auto selftest_exit = aexcompat::worker_runtime::selftest::dispatch_host(
           argc, argv, host_selftests.data(), host_selftests.size()))
     return *selftest_exit;
-  const std::array<aexcompat::worker_runtime::selftest::SimpleCommand, 21> simple_selftests{{
+  const std::array<aexcompat::worker_runtime::selftest::SimpleCommand, 22> simple_selftests{{
       {L"--self-test-aegp-installed-effect-catalog", "aegp_installed_effect_catalog", &verify_aegp_installed_effect_catalog_suite4},
       {L"--self-test-parameter-animation", "parameter_animation_transport", &verify_parameter_animation_transport},
       {L"--self-test-pf-param-utils-suite", "pf_param_utils_suite3", &verify_pf_param_utils_suite3},
       {L"--self-test-pf-pre-checkout-result", "pf_pre_checkout_result", &verify_pre_checkout_result_contract},
       {L"--self-test-pf-checkout-intersection", "pf_checkout_intersection", &aexcompat::worker_runtime::smart::checkout_intersection_self_test},
+      {L"--self-test-pf-smart-geometry-rects", "pf_smart_geometry_rects", &aexcompat::render::smart_geometry_rect_self_test},
       {L"--self-test-smart-runtime-concurrency", "smart_runtime_concurrency", &aexcompat::worker_runtime::smart::concurrency_self_test},
       {L"--self-test-smart-result-skipped", "smart_result_skipped", +[] {
          const SmartResult skipped{};
@@ -7684,7 +7686,7 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
       {global_error, params_error, advertised_out_flags, advertised_out_flags2},
       {image_render_supported, smart_render_supported, nop_render_advertised, input_write_advertised},
       {smart.runtime->wide_time_checkout_allowed, smart.runtime->shutter_dependency_advertised,
-       !nop_render_advertised, !nop_render_advertised, false},
+       !nop_render_advertised, smart.selector_dispatched, false},
       smart.runtime->rejected_temporal_checkouts,
       {g_comp_bg_color_successes.load(std::memory_order_relaxed),
        g_comp_bg_color_rejections.load(std::memory_order_relaxed),
@@ -7702,7 +7704,10 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
       smart.roi_contract_valid, smart.runtime->input_checkout_request,
       smart.runtime->map_checkout_request, smart.input_checkout_result_rect,
       smart.map_checkout_result_rect, smart.malformed_checkout_requests,
-      smart.empty_checkout_pixel_denials, setdown_error, case_id, smart.runtime->pixel_format,
+      smart.empty_checkout_pixel_denials, smart.returns_extra_pixels,
+      smart.result_within_request, smart.extra_pixels_contract_violation,
+      smart.empty_result_rect, smart.output_extent_hint,
+      setdown_error, case_id, smart.runtime->pixel_format,
       {smart.output_width, smart.output_height, smart.output_rowbytes},
       {external_width, external_height},
       smart.runtime->pixel_format == "argb32f" ? 16 :

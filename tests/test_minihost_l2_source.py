@@ -687,10 +687,14 @@ class MinihostL2SourceTests(unittest.TestCase):
                        "write<int32_t>(input, 276", "write<int32_t>(input, 280",
                        "result.output_width", "result.output_height",
                        "extent_hint\\\":{\\\"left\\\":0,\\\"top\\\":0,\\\"right\\\":",
-                       "v.dimensions[0] << \",\\\"bottom\\\":\" << v.dimensions[1]"):
+                       # The output world extent_hint is read back from the
+                       # world the plug-in saw, not hardcoded to the frame.
+                       "std::memcpy(result.output_extent_hint.data(), r.output_world->data() + 44,",
+                       "v.output_extent_hint[2] << \",\\\"bottom\\\":\""):
             self.assertIn(marker, text)
         for marker in ("width <= 4096", "height <= 4096",
-                       "width * height <= 16'777'216"):
+                       "width * height <= 16'777'216",
+                       "kMaxSmartRectMagnitude"):
             self.assertIn(marker, bounds)
 
     def test_classic_render_defaults_extent_hint_to_the_full_input_world(self):

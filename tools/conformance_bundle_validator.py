@@ -250,6 +250,9 @@ def _artifacts(manifest: dict, report: dict):
             yield f"result {index} raw_output", result["raw_output"]
 
 
+_EMPTY_SHA256 = hashlib.sha256(b"").hexdigest()
+
+
 def _validate_world(result: dict, errors: list[str]) -> None:
     depth = result["depth"]
     for key in ("input_world", "world"):
@@ -327,7 +330,16 @@ def validate_bundle(manifest: dict, report: dict, bundle_root: Path) -> None:
             errors.append(f"{result['depth']} exact oracle requires manifest identity match")
         output_hash = result["output_sha256"]
         raw_output = result["raw_output"]
-        if output_hash is not None and (
+        if result["classification"] == "empty_result":
+            # A legal empty SmartFX result renders nothing: its hash is the
+            # empty-byte digest and no raw output artifact exists.
+            if raw_output is not None:
+                errors.append(f"{result['depth']} empty result must not carry a raw output")
+            if output_hash != _EMPTY_SHA256:
+                errors.append(
+                    f"{result['depth']} empty result output hash must be the empty digest"
+                )
+        elif output_hash is not None and (
             raw_output is None or output_hash != raw_output["sha256"]
         ):
             errors.append(f"{result['depth']} output hash does not match raw output")

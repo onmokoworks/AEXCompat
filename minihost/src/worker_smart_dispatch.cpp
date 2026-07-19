@@ -112,7 +112,18 @@ bool dispatch(const Request& request, const Hooks& hooks,
   result.result_rect = smart_bounds.result_rect;
   result.max_result_rect = smart_bounds.max_result_rect;
   result.rects_valid = result.pre_error == 0 && smart_bounds.valid;
-  if (result.rects_valid) {
+  result.empty_result_rect = result.rects_valid && smart_bounds.empty_result;
+  result.returns_extra_pixels =
+      (read<uint16_t>(dispatch_state.pre_output, 34) & 0x1u) != 0;
+  // Without RETURNS_EXTRA_PIXELS the SDK does not admit result > request. The
+  // overrun is surfaced as an explicit diagnostic rather than a render
+  // failure: AE silently clips, and blocking here would turn an observable
+  // compatibility gap into a dead end for real-AEX observation.
+  result.result_within_request =
+      render::smart_rect_contained(smart_bounds.result_rect, expected_request);
+  result.extra_pixels_contract_violation = result.rects_valid &&
+      !result.returns_extra_pixels && !result.result_within_request;
+  if (result.rects_valid && !result.empty_result_rect) {
     if (!request.guarded->reset(
             static_cast<std::size_t>(smart_bounds.rowbytes) * smart_bounds.height)) {
       result.rects_valid = false;
@@ -169,7 +180,12 @@ bool dispatch(const Request& request, const Hooks& hooks,
 
   const int32_t render_selector = plan.gpu_negotiation && result.gpu_render_possible
       ? kSmartRenderGpu : kSmartRender;
-  result.gpu_render_dispatched = render_selector == kSmartRenderGpu;
+  // One predicate drives the selector call, the GPU transport, and the
+  // dispatch reporting, so a skipped render (empty result or rejected
+  // geometry) never prepares device transport or claims a GPU dispatch.
+  const bool will_dispatch = result.pre_error == 0 && result.rects_valid &&
+      !result.empty_result_rect;
+  result.gpu_render_dispatched = render_selector == kSmartRenderGpu && will_dispatch;
   transport::RenderTransport render_transport;
   const bool transport_ready = !result.gpu_render_dispatched || !use_transport ||
       transport::prepare_render_transport(runtime.input_world, runtime.output_world,
@@ -177,15 +193,22 @@ bool dispatch(const Request& request, const Hooks& hooks,
   std::cerr << "stage:"
             << (result.gpu_render_dispatched ? "smart_render_gpu" : "smart_render_cpu")
             << "_begin\n" << std::flush;
-  if (result.pre_error == 0 && transport_ready) {
+  if (result.empty_result_rect && result.pre_error == 0) {
+    // A legally empty result_rect renders nothing; the selector is skipped.
+    result.render_error = 0;
+  } else if (will_dispatch && transport_ready) {
     if (plan.gpu_negotiation) hooks.capture_module_audit();
     runtime.gpu_render_dispatched = result.gpu_render_dispatched;
+    result.selector_dispatched = true;
     result.selector_error = hooks.guarded_call(request.entry, render_selector,
         request.input->data(), request.output->data(), params.data(), nullptr,
         smart_extra.data());
     runtime.gpu_render_dispatched = false;
     result.render_error = result.selector_error;
   } else {
+    // Invalid geometry (rects_valid false with a successful pre-render) lands
+    // here too: dispatching into the stale full-frame output world would turn
+    // the rejected rects into a silent render, so the run fails explicitly.
     result.render_error = result.pre_error == 0 ? -6 : -1;
   }
   if (result.gpu_render_dispatched && use_transport && transport_ready &&

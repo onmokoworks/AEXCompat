@@ -50,8 +50,18 @@ bool finalize(const Request& r, const Hooks& h, smart_execution::Result& result)
       std::all_of(logical_output.begin(), logical_output.end(),
                   [](unsigned char value) { return value == 0xCC; });
   const bool finite = r.pixel_bytes != 16 || render::finite_float_world(logical_output);
-  result.output_pixels_valid = !logical_output.empty() && !untouched && finite;
+  // A legally empty result promised no pixels; zero output bytes are the
+  // correct fulfillment of that contract, not a validation failure.
+  result.output_pixels_valid = result.empty_result_rect
+      ? true
+      : !logical_output.empty() && !untouched && finite;
   if (result.render_error == 0 && !result.output_pixels_valid) result.render_error = -6;
+  // The output world extent_hint is read back from the world the plug-in saw.
+  // The empty answer never resized or dispatched the output world; reporting
+  // the stale full-frame extent would claim pixels that were never promised.
+  std::memcpy(result.output_extent_hint.data(), r.output_world->data() + 44,
+              sizeof(result.output_extent_hint));
+  if (result.empty_result_rect) result.output_extent_hint = {0, 0, 0, 0};
   if (r.external_output && result.render_error == 0) {
     std::vector<unsigned char> rgba(static_cast<std::size_t>(result.output_width) *
                                     result.output_height * r.pixel_bytes);

@@ -194,3 +194,94 @@ world は promote されないのに、view が抑止されて交差契約が失
 訂正: 新フラグ `g_smart_gpu_render_dispatched` (kSmartRenderGpu dispatch の
 間のみ true) で gate する。GPU negotiation からの CPU fallback では view と
 交差契約が維持される。self-test も新フラグでの gating を検証するよう更新。
+
+## 2026-07-19 PR2 implementation record (RETURNS_EXTRA_PIXELS / rect 検証強化)
+
+観察/実装 (branch `issue8-smartfx-extra-pixels`, PR1 merge 後の main 起点):
+
+- `RETURNS_EXTRA_PIXELS` (pre_output flags @34 bit 0x1) を読み取り、
+  `result_rect ⊆ output_request.rect` の包含を検証。flag なしで超過した場合は
+  `extra_pixels_contract_violation` として **診断のみ** (render 失敗にはしない)。
+  理由: AE は黙って clip する挙動であり、ここで hard fail にすると実 AEX の
+  観測 (Project Direction 1) が止まる。broker 側 gate での強制は fixture 側の
+  証拠が揃ってから判断する。
+- 空 `result_rect` は SDK の "can be empty" どおり合法扱いに変更: render
+  selector を dispatch せず `empty_result_rect: true` を報告し、0 byte 出力を
+  正常 (output_pixels_valid=true) とする。従来は rects_valid=false でも
+  pre_error==0 なら render が走っていた (max_result が空のときのみ暗黙に
+  失敗)。
+- rect 検証を inline lambda から `smart_geometry_rect_valid` に切り出し、
+  絶対座標の上限 `kMaxSmartRectMagnitude = 1<<24` を追加 (負座標そのものは
+  buffer expansion で合法なので下限も −2^24)。既存の 4096 辺長・面積上限は
+  維持。
+- output world の `extent_hint` を render 後に読み戻して report の
+  `output_world.extent_hint` に反映 (従来はフルフレームをハードコード)。
+  plug-in が extent_hint を設定した場合のみ値が変わる。
+- 新 self-test `--self-test-pf-smart-geometry-rects` で
+  `smart_geometry_rect_valid` / `smart_rect_contained` の純関数を検証。
+- 未実施 (PR3 送り): output world sizing の result_rect 基準への変更は
+  probe/oracle 証拠が出るまで保留 (max_result_rect 基準を維持)。probe で
+  AE 実挙動を観測してから確定する。
+
+## 2026-07-19 訂正: dispatch gate と empty extent (PR #86 Codex P2 ×2)
+
+観察 (Codex review findings):
+1. 空 result の report が output world の full-frame extent_hint をそのまま
+   出しており、約束していない領域を主張していた。また broker の conformance
+   経路 (`conformance.rs` normalize_success) は width==0 を `invalid_output`
+   に分類するため、worker 側で合法化した空 result が bundle 側では不正扱いの
+   まま。
+2. pre-render 成功 + rects_valid=false (例: ±2^24 超の座標) でも render
+   selector が stale な full-frame output world に dispatch されていた
+   (従来からの挙動だが、検証強化後は明示 fail にすべき)。
+
+訂正:
+1. 空 result の `output_extent_hint` は `{0,0,0,0}` を報告する。conformance
+   bundle 側の空 result 分類は schema (`classification` enum / world 非 null
+   要求)・validator・進行中の issue #4 系列に跨る契約変更のため本 PR の
+   scope 外とし、issue #88 として起票。
+2. dispatch 条件に `result.rects_valid` を追加。invalid geometry は selector
+   を dispatch せず `render_error=-6` で明示的に失敗する (空 result の合法
+   スキップは別分岐で維持)。
+
+## 2026-07-19 訂正: dispatch 判定の単一述語化 (PR #86 Codex P2 round 2)
+
+観察 (Codex review findings): (1) `gpu_render_dispatched` が empty しか除外
+しておらず、rects_valid=false の skip 時にも GPU transport を prepare/finish
+して `gpu_render_dispatched=true` を報告していた。(2) report の
+`smart_render_selector_dispatched` が NOP 判定のみで駆動され、empty skip や
+invalid-geometry 拒否でも true になっていた。
+
+訂正: `will_dispatch = pre_error==0 && rects_valid && !empty_result_rect` の
+単一述語で selector 呼び出し・GPU transport・報告を駆動する。SmartResult に
+`selector_dispatched` (実際に entry を呼んだ時のみ true) を追加し、report は
+それを出す。既存 frozen evidence への影響は NOP case の false のみで不変。
+
+## 2026-07-19 訂正: conformance に empty_result 分類を実装 (PR #86 Codex 再指摘 → issue #88)
+
+観察 (Codex review round 3): worker 側で合法化した空 result を broker の
+conformance 経路が `invalid_output` に分類したままでは end-to-end で成立
+しない、との再指摘。issue #88 への deferral では通らないため #88 を claim
+して同 PR で実装。
+
+実装: `Classification::EmptyResult` ("empty_result") を追加。
+`normalize_success` は smartfx report の `empty_result_rect==true` かつ
+width==height==0 のとき input world の認証後に EmptyResult
+(world: null, selector completed error 0, 空バイトの output_sha256) を返す。
+非ゼロ寸法 + empty marker の不整合は invalid_output のまま、classic 経路に
+empty 許容は無い。schema には classification enum への追加と
+empty_result 用の allOf 制約 (world/raw_output null, smartfx, error 0) を追加。
+validator (`tools/conformance_bundle_validator.py`) は classification != "ok"
+を pixel 検証スキップとして扱うため変更不要。
+
+追記 (Codex round 4 P1): 実 dispatch (`image_render.rs`
+`render_experimental_image_at_time_with_format` 系) は worker report の
+width/height を `validate_image_buffer_layout` (0 拒否) に通し、broker report
+の転記フィールドに `empty_result_rect` が無かったため、実経路では空 result
+が conformance の EmptyResult 分岐に到達できなかった。訂正: smartfx report が
+`empty_result_rect==true` の場合は寸法 0 / raw 0 byte を検証した上で pixel
+経路 (buffer 検証・raw 読出し・PNG 出力) をスキップし、`output_png: null` と
+geometry フィールド群 (`empty_result_rect` / `returns_extra_pixels` /
+`result_within_request` / `extra_pixels_contract_violation` /
+`smart_render_selector_dispatched` / `input_checkout_result_rect`) を broker
+report に転記する。非ゼロ寸法や非 0 byte 出力を伴う empty 主張は fail-closed。

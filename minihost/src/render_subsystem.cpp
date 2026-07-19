@@ -22,13 +22,45 @@ bool valid_world_layout(const WorldLayout& layout) {
       : false;
 }
 
-bool valid_rect(const std::array<int32_t, 4>& rect) {
+}  // namespace
+
+bool smart_geometry_rect_valid(const std::array<int32_t, 4>& rect) {
   const int64_t width = static_cast<int64_t>(rect[2]) - rect[0];
   const int64_t height = static_cast<int64_t>(rect[3]) - rect[1];
-  return rect[2] >= rect[0] && rect[3] >= rect[1] && width <= 4096 && height <= 4096 &&
-      width * height <= 16'777'216;
+  return rect[2] >= rect[0] && rect[3] >= rect[1] &&
+      rect[0] >= -kMaxSmartRectMagnitude && rect[1] >= -kMaxSmartRectMagnitude &&
+      rect[2] <= kMaxSmartRectMagnitude && rect[3] <= kMaxSmartRectMagnitude &&
+      width <= 4096 && height <= 4096 && width * height <= 16'777'216;
 }
-}  // namespace
+
+bool smart_rect_contained(const std::array<int32_t, 4>& inner,
+                          const std::array<int32_t, 4>& outer) {
+  const bool inner_empty = inner[0] >= inner[2] || inner[1] >= inner[3];
+  return inner_empty ||
+      (inner[0] >= outer[0] && inner[1] >= outer[1] &&
+       inner[2] <= outer[2] && inner[3] <= outer[3]);
+}
+
+bool smart_geometry_rect_self_test() {
+  bool passed = smart_geometry_rect_valid({0, 0, 640, 360});
+  passed = smart_geometry_rect_valid({-8, -8, 4088, 352}) && passed;
+  passed = smart_geometry_rect_valid({0, 0, 4096, 4096}) && passed;
+  passed = smart_geometry_rect_valid({5, 5, 5, 5}) && passed;
+  passed = !smart_geometry_rect_valid({10, 0, 0, 10}) && passed;
+  passed = !smart_geometry_rect_valid({0, 10, 10, 0}) && passed;
+  passed = !smart_geometry_rect_valid({0, 0, 4097, 1}) && passed;
+  passed = !smart_geometry_rect_valid({0, 0, 1, 4097}) && passed;
+  passed = !smart_geometry_rect_valid(
+      {kMaxSmartRectMagnitude - 10, 0, kMaxSmartRectMagnitude + 10, 10}) && passed;
+  passed = !smart_geometry_rect_valid(
+      {-kMaxSmartRectMagnitude - 10, 0, -kMaxSmartRectMagnitude + 10, 10}) && passed;
+  passed = smart_rect_contained({1, 1, 5, 5}, {0, 0, 10, 10}) && passed;
+  passed = smart_rect_contained({0, 0, 10, 10}, {0, 0, 10, 10}) && passed;
+  passed = !smart_rect_contained({-1, 0, 5, 5}, {0, 0, 10, 10}) && passed;
+  passed = !smart_rect_contained({0, 0, 11, 10}, {0, 0, 10, 10}) && passed;
+  passed = smart_rect_contained({7, 7, 7, 7}, {0, 0, 1, 1}) && passed;
+  return passed;
+}
 
 bool prepare_world_layout(std::array<std::byte, 120>& world,
                           const WorldLayout& layout, void* pixels) {
@@ -103,11 +135,20 @@ SmartOutputBounds prepare_smart_output_bounds(const void* pre_render_output,
   std::memcpy(bounds.max_result_rect.data(),
               static_cast<const std::byte*>(pre_render_output) + 16,
               sizeof(bounds.max_result_rect));
-  if (!valid_rect(bounds.result_rect) || !valid_rect(bounds.max_result_rect) ||
+  if (!smart_geometry_rect_valid(bounds.result_rect) ||
+      !smart_geometry_rect_valid(bounds.max_result_rect) ||
       bounds.result_rect[0] < bounds.max_result_rect[0] ||
       bounds.result_rect[1] < bounds.max_result_rect[1] ||
       bounds.result_rect[2] > bounds.max_result_rect[2] ||
       bounds.result_rect[3] > bounds.max_result_rect[3]) return bounds;
+  if (bounds.result_rect[0] >= bounds.result_rect[2] ||
+      bounds.result_rect[1] >= bounds.result_rect[3]) {
+    // Legal empty answer: geometry is well-formed and nothing will render, so
+    // no output world is sized at all.
+    bounds.empty_result = true;
+    bounds.valid = true;
+    return bounds;
+  }
   bounds.width = bounds.max_result_rect[2] - bounds.max_result_rect[0];
   bounds.height = bounds.max_result_rect[3] - bounds.max_result_rect[1];
   if (bounds.width <= 0 || bounds.height <= 0) return bounds;

@@ -104,12 +104,34 @@ bool validate_output_extent(int32_t current_width, int32_t current_height,
 
 struct SmartOutputBounds {
   bool valid{};
+  // SDK: PF_PreRenderOutput.result_rect "can be empty". An empty result rect
+  // with well-formed geometry is a legal answer that renders nothing; the
+  // caller skips the render selector instead of failing the run.
+  bool empty_result{};
   std::array<int32_t, 4> result_rect{};
   std::array<int32_t, 4> max_result_rect{};
   int32_t width{};
   int32_t height{};
   int32_t rowbytes{};
 };
+
+// Absolute-coordinate bound for plug-in supplied Smart geometry rects. Layer
+// coordinates can legitimately be negative (buffer expansion), but a rect
+// coordinate beyond this magnitude cannot come from any real composition and
+// only feeds later size arithmetic, so it fails closed.
+constexpr int32_t kMaxSmartRectMagnitude = 1 << 24;
+
+// Well-formedness for plug-in supplied Smart geometry rects: non-inverted,
+// coordinates within +/-kMaxSmartRectMagnitude, and edge/area caps.
+bool smart_geometry_rect_valid(const std::array<int32_t, 4>& rect);
+
+// True when inner is contained in outer; an empty inner rect is contained in
+// anything.
+bool smart_rect_contained(const std::array<int32_t, 4>& inner,
+                          const std::array<int32_t, 4>& outer);
+
+// Self-test for the rect validation and containment helpers.
+bool smart_geometry_rect_self_test();
 
 // Parses Smart Pre-Render rectangles and applies the same output bounds used
 // to allocate the guarded Smart render world.

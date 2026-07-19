@@ -32,6 +32,10 @@ pub enum RenderPath {
 #[serde(rename_all = "snake_case")]
 pub enum Classification {
     Ok,
+    // A SmartFX pre-render legally answered an empty result_rect (SDK: "can
+    // be empty"): the selector was skipped and zero output bytes are the
+    // correct fulfillment, not an invalid output.
+    EmptyResult,
     Unsupported,
     SelectorError,
     MissingSuite,
@@ -239,13 +243,52 @@ fn normalize_success(
             &timeline,
         ));
     };
-    if width == 0 || height == 0 || width > u32::MAX as u64 || height > u32::MAX as u64 {
+    if output_sha256.len() != 64 || !output_sha256.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return Err(with_suite_timeline(
             RuntimeFailure::new(Classification::InvalidOutput),
             &timeline,
         ));
     }
-    if output_sha256.len() != 64 || !output_sha256.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+    // A SmartFX run that legally answered an empty result_rect produced no
+    // output world at all; zero dimensions are that contract's fulfillment,
+    // not an invalid output. The input world still has to authenticate, and
+    // the reported hash must be exactly the digest of zero bytes: there is no
+    // raw output artifact left to cross-check it against later.
+    if path == RenderPath::Smartfx
+        && report.get("empty_result_rect").and_then(Value::as_bool) == Some(true)
+    {
+        const EMPTY_SHA256: &str =
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+        if width != 0 || height != 0 || !output_sha256.eq_ignore_ascii_case(EMPTY_SHA256) {
+            return Err(with_suite_timeline(
+                RuntimeFailure::new(Classification::InvalidOutput),
+                &timeline,
+            ));
+        }
+        let input_world = parse_world(report.get("input_world"))
+            .map_err(|failure| with_suite_timeline(failure, &timeline))?;
+        if expected_input_world != Some(&input_world) || input_world.pixel_format != depth {
+            return Err(with_suite_timeline(
+                RuntimeFailure::new(Classification::HostValidationError),
+                &timeline,
+            ));
+        }
+        return Ok(DepthResult {
+            depth,
+            classification: Classification::EmptyResult,
+            selector: SelectorResult {
+                render_path: path,
+                completed: true,
+                error_code: Some(0),
+            },
+            input_world: Some(input_world),
+            world: None,
+            output_sha256: Some(output_sha256.to_ascii_lowercase()),
+            missing_suites: Vec::new(),
+            suite_timeline: timeline,
+        });
+    }
+    if width == 0 || height == 0 || width > u32::MAX as u64 || height > u32::MAX as u64 {
         return Err(with_suite_timeline(
             RuntimeFailure::new(Classification::InvalidOutput),
             &timeline,
@@ -1034,6 +1077,74 @@ mod tests {
         assert_eq!(failure.classification, Classification::HostValidationError);
         assert!(!backend.inspect_called.get());
         assert!(!backend.render_called.get());
+    }
+
+    #[test]
+    fn normalizes_a_legal_empty_smartfx_result() {
+        let mut report = successful_report(PixelDepth::Argb8);
+        report["width"] = json!(0);
+        report["height"] = json!(0);
+        report["empty_result_rect"] = json!(true);
+        // sha256 of zero bytes: the worker hashes the (empty) logical output.
+        report["output_sha256"] =
+            json!("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
+        let mut backend = FakeBackend {
+            inspect: Ok(json!({})),
+            renders: VecDeque::from([Ok(report)]),
+        };
+        let result =
+            collect_runtime_results(&mut backend, &[RenderPath::Smartfx], &[PixelDepth::Argb8])
+                .unwrap();
+        assert_eq!(result[0].classification, Classification::EmptyResult);
+        assert_eq!(result[0].selector.error_code, Some(0));
+        assert!(result[0].selector.completed);
+        assert!(result[0].world.is_none());
+        assert!(result[0].input_world.is_some());
+    }
+
+    #[test]
+    fn empty_smartfx_result_still_authenticates_dimensions_and_path() {
+        // Nonzero dimensions with the empty marker are inconsistent and stay
+        // invalid output, and a classic render never gets the empty admission.
+        let mut nonzero = successful_report(PixelDepth::Argb8);
+        nonzero["empty_result_rect"] = json!(true);
+        let mut backend = FakeBackend {
+            inspect: Ok(json!({})),
+            renders: VecDeque::from([Ok(nonzero)]),
+        };
+        let result =
+            collect_runtime_results(&mut backend, &[RenderPath::Smartfx], &[PixelDepth::Argb8])
+                .unwrap();
+        assert_eq!(result[0].classification, Classification::InvalidOutput);
+
+        let mut classic_empty = successful_report(PixelDepth::Argb8);
+        classic_empty["width"] = json!(0);
+        classic_empty["height"] = json!(0);
+        classic_empty["empty_result_rect"] = json!(true);
+        let mut backend = FakeBackend {
+            inspect: Ok(json!({})),
+            renders: VecDeque::from([Ok(classic_empty)]),
+        };
+        let result =
+            collect_runtime_results(&mut backend, &[RenderPath::Classic], &[PixelDepth::Argb8])
+                .unwrap();
+        assert_eq!(result[0].classification, Classification::InvalidOutput);
+
+        // A hash other than the empty-byte digest cannot be cross-checked
+        // against any raw output and is rejected.
+        let mut wrong_digest = successful_report(PixelDepth::Argb8);
+        wrong_digest["width"] = json!(0);
+        wrong_digest["height"] = json!(0);
+        wrong_digest["empty_result_rect"] = json!(true);
+        wrong_digest["output_sha256"] = json!("ab".repeat(32));
+        let mut backend = FakeBackend {
+            inspect: Ok(json!({})),
+            renders: VecDeque::from([Ok(wrong_digest)]),
+        };
+        let result =
+            collect_runtime_results(&mut backend, &[RenderPath::Smartfx], &[PixelDepth::Argb8])
+                .unwrap();
+        assert_eq!(result[0].classification, Classification::InvalidOutput);
     }
 
     #[test]
