@@ -84,16 +84,35 @@ def bench_spawn_floor():
     }
 
 
+def stream_hash(path):
+    # admit_local_worker (secure_image_dispatch.rs) と同じく、毎回ディスクから
+    # open して 1MiB チャンクで stream しながら hash する。read_bytes 後の
+    # CPU-only 計測ではディスクキャッシュ/AV スキャンのコストが抜けるため
+    # (Codex PR #101 P2 指摘)、本番 admission と同じ経路を測る。
+    hasher = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            hasher.update(chunk)
+    return hasher.hexdigest()
+
+
 def bench_hash():
     result = {}
     for name, path in (("worker_exe", WORKER), ("probe_aex", AEX)):
-        data = path.read_bytes()
-        start = time.perf_counter()
-        for _ in range(5):
-            hashlib.sha256(data).hexdigest()
+        size = path.stat().st_size
+        samples = []
+        for _ in range(N):
+            start = time.perf_counter()
+            stream_hash(path)
+            samples.append(time.perf_counter() - start)
         result[name] = {
-            "size_bytes": len(data),
-            "sha256_ms_per_hash": round((time.perf_counter() - start) / 5 * 1e3, 2),
+            "size_bytes": size,
+            "note": "open+stream+hash per iteration (mirrors admit_local_worker); "
+                    "includes disk/AV overhead, warm cache",
+            "n": N,
+            "min_ms": round(min(samples) * 1e3, 3),
+            "median_ms": round(statistics.median(samples) * 1e3, 3),
+            "max_ms": round(max(samples) * 1e3, 3),
         }
     return result
 

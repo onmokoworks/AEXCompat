@@ -53,9 +53,14 @@ frozen evidence ではない。
 | 37x23 レンダー一式 | 38.6ms | 35.6ms | 571.5ms |
 | 1920x1080 レンダー一式 | 123.5ms | 76.4ms | 164.6ms |
 
-- worker exe の SHA-256 は 0.55ms/回 (868KB)、probe AEX は 0.02ms/回 (18KB)。
-  broker は dispatch ごとに worker exe を hash する (`admit_local_worker`) が、
-  このサイズでは支配項ではない。
+- worker exe の hash は本番 admission (`admit_local_worker` = ディスクから
+  open して stream hash) と同じ経路で median 1.394ms (868KB、warm、disk/AV
+  込み)、probe AEX は median 0.697ms (18KB)。broker は dispatch ごとに worker
+  exe を hash するが、起動フロア 35〜40ms に対して支配項ではない。
+  (訂正 2026-07-19: 当初は read_bytes 後の CPU-only sha256 で 0.55ms/回と
+  記録していたが、これはディスク/AV スキャンのコストを落としていた。Codex
+  PR #101 P2 指摘を受け、本番と同じ open+stream 計測に修正。結論=支配項では
+  ない、は変わらず。)
 - 入力 raw 書き込みは FHD 8.3MB で 11.1ms。
 - 起動フロアの median 254ms は最初に計測した (cold) 系列で、後続の
   37x23 系列 (median 38.6ms、起動込み) と矛盾する。ばらつきの原因は
