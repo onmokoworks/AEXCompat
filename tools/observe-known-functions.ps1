@@ -27,8 +27,8 @@ if (-not (Test-Path -LiteralPath $workerAbsolute -PathType Leaf)) {
     throw "Worker build is missing: $Worker. Build it first (see docs/COMPATIBILITY_STATUS) before observation."
 }
 
-# Frida is an observation-only dependency, intentionally absent from
-# requirements-dev.txt so the machine-portable suite does not require it.
+# Frida is an observation-only dependency, intentionally absent from the
+# uv-managed dev dependencies so the machine-portable suite does not require it.
 & python -c "import frida" 2>$null
 if ($LASTEXITCODE -ne 0) {
     throw "frida is not importable in this Python. Install it in the observation environment (pip install frida)."

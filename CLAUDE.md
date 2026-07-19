@@ -124,8 +124,8 @@ and bounded image input/output are now the main implementation path.
 ```powershell
 [Environment]::SetEnvironmentVariable('AFTER_EFFECTS_SDK_ROOT', 'C:\path\to\AfterEffectsSDK', 'User')
 # Reopen PowerShell after changing the user environment.
-python -m pip install -r requirements-dev.txt
-python -m pytest -q
+uv sync --locked
+uv run python -m pytest -q
 cargo test --manifest-path broker\Cargo.toml --workspace
 ```
 

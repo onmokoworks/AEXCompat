@@ -97,14 +97,14 @@ release生成物はGit管理対象に含まれません。
 ### テスト
 
 ```powershell
-# Python test dependency
-python -m pip install -r requirements-dev.txt
+# Python test dependency (uv が pyproject.toml + uv.lock から .venv を構築する)
+uv sync --locked
 
 # Rust broker / harness / isolation tests
 cargo test --manifest-path broker\Cargo.toml --workspace
 
 # Contract, ABI, oracle, and source-level regression tests
-python -m pytest -q
+uv run python -m pytest -q
 ```
 
 `pytest` がPythonテストの正規ランナーです。`unittest discover` ではbare function形式のテストを収集できないため、完全な検証には使用しません。一部のnative fixture、GPU、After Effects oracleテストには、ローカルSDK、対応GPU runtime、またはAE本体が必要です。ビルド生成物やローカル承認receiptを必要とするテストは、それらを生成する明示的なgateまたはbuild手順と組み合わせて実行します。
@@ -259,9 +259,9 @@ cargo build -p aexcompat-harness --release
 ### Tests
 
 ```powershell
-python -m pip install -r requirements-dev.txt
+uv sync --locked
 cargo test --manifest-path broker\Cargo.toml --workspace
-python -m pytest -q
+uv run python -m pytest -q
 ```
 
 `pytest` is the canonical Python test runner. `unittest discover` does not collect the repository's bare-function tests and must not be used as the complete verification command. Some native-fixture, GPU, and AE-oracle tests require a local SDK, a matching GPU runtime, or After Effects. Tests that require generated binaries or local approval receipts must be paired with their explicit build or gate step.

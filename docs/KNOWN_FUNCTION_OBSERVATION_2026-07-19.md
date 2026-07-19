@@ -288,9 +288,10 @@ tools/observe-known-functions.ps1 `
 `-ModulePath` is the canonical path of the plug-in the worker loads; hooks bind
 to that exact module. `-Out` must resolve under `target/known-function-observation/`.
 
-Frida is an **observation-only** dependency. It is intentionally not in
-`requirements-dev.txt`, so `python -m pytest` and `cargo test` (the canonical,
-machine-portable verification) never require it. The launcher imports `frida`
+Frida is an **observation-only** dependency. It is intentionally not in the
+uv-managed dev dependencies (`pyproject.toml`), so `uv run python -m pytest`
+and `cargo test` (the canonical, machine-portable verification) never require
+it. The launcher imports `frida`
 lazily and fails with a clear message if it is absent.
 
 The worker render does not use After Effects, so `AfterFX` / `aerender` /

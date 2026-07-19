@@ -91,7 +91,7 @@ def load_render(path: Path) -> tuple[int, int, list[float], str]:
             import OpenEXR
         except ImportError as exc:
             raise InputError(
-                "EXR support requires the OpenEXR package from requirements-dev.txt"
+                "EXR support requires the OpenEXR package from the uv dev environment (uv sync)"
             ) from exc
         try:
             with OpenEXR.File(str(path)) as infile:

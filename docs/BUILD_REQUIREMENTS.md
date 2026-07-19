@@ -9,7 +9,7 @@
 | コンポーネント | 生成物 | 必要なもの |
 |---|---|---|
 | Rust broker / harness (`broker/`) | `aexcompat-harness.exe` (GUI) ほか | Rust + MSVC Build Tools + Windows SDK |
-| Python テスト (`tests/`) | - | Python + `requirements-dev.txt` (一部は下記 SDK / VS も) |
+| Python テスト (`tests/`) | - | uv (`pyproject.toml` + `uv.lock`、一部は下記 SDK / VS も) |
 | C++ worker (`minihost/`) | `aex_l1_worker.exe` / `aex_l2_worker.exe` ほか | CMake + MSVC (After Effects SDK 不要) |
 | probe AEX (`instruments/`) | `pf_*_probe.aex` ほか | CMake + Visual Studio + After Effects SDK |
 | SDK sample fixture (v143 固定分: Grabba / Supervisor 等) | `Grabba.aex` ほか | v143 toolset + MSBuild + After Effects SDK (Supervisor は VS 2022 Build Tools 既定パス固定) |
@@ -38,18 +38,19 @@ After Effects SDK は不要。GUI の起動だけならこれで足りる
 
 ## Python テスト
 
-- Python 3.x (3.14 で検証)
-- `python -m pip install -r requirements-dev.txt` (pytest / Pillow / jsonschema)。
-  Pillow と jsonschema はテストが collection 時に import するため必須。
+- uv。Python 本体は `.python-version` (3.12) に従い uv が管理版を解決する。
+- `uv sync --locked` で `pyproject.toml` + `uv.lock` から `.venv` を構築する
+  (pytest / Pillow / jsonschema / OpenEXR)。Pillow と jsonschema はテストが
+  collection 時に import するため必須。
 
 ```powershell
-python -m pytest -q
+uv run python -m pytest -q
 ```
 
 期待結果は「ソースのみ検証」と「SDK 込み検証」で異なるため、入口で分けて
 考える。
 
-- **ソースのみ検証 (SDK なし)**: clean clone + `requirements-dev.txt` だけで
+- **ソースのみ検証 (SDK なし)**: clean clone + `uv sync --locked` だけで
   実行した場合。SDK ヘッダの ABI を検証するテストは `AFTER_EFFECTS_SDK_ROOT`
   が未設定 (または無効) なら `pytest.skip` で明示的に skip される (一部は
   Visual Studio C++ tools 不在時も skip)。一方、probe / fixture を
@@ -220,8 +221,8 @@ windows runner で走る。
 
 - `.github/workflows/windows-clean-clone.yml`: source-only 検証。SDK なしの
   clean clone 相当で `cargo check` / `cargo test` (hosted runner の restricted
-  token では起動できない 2 テストを `--skip`) と `python -m pytest -q` を実行
-  する。
+  token では起動できない 2 テストを `--skip`) と `uv run python -m pytest -q`
+  を実行する。
 - `.github/workflows/ae-sdk-tests.yml`: SDK 込み検証 + built artifact 検証。
   - private release `ci-sdk-ae25.2` の asset
     `AfterEffectsSDK-ae25.2-win.zip` を `GITHUB_TOKEN` でダウンロード・展開し、
@@ -235,7 +236,7 @@ windows runner で走る。
     `minihost-timed-layers\Release` / `minihost-build\Release`) へ複製する。
     probe .aex 群を `tools/build-*.ps1` でビルドし、probe 入力 fixture
     (37x23 raw RGBA) を決定論的に生成する。
-  - `python -m pytest -q -rs --run-sdk-tests --run-built-artifact-tests
+  - `uv run python -m pytest -q -rs --run-sdk-tests --run-built-artifact-tests
     --validate-local-artifact-manifest` を実行する。SDK 依存テスト
     (`tests/sdk_required_tests.txt` と `AFTER_EFFECTS_SDK_ROOT` を inline skip
     で見るテスト) に加え、`tests/built_artifact_tests.txt` の built artifact
@@ -249,9 +250,10 @@ local artifact テスト (`--run-local-artifact-tests`、machine-bound evidence
 従来どおりローカル gate で実行する。SDK asset は private repo の collaborator 限定 asset であり、SDK の
 公開再配布ではない (リポジトリへ SDK を複製しない方針は維持)。
 
-CI の Python は両 workflow とも 3.12 (OpenEXR の win_amd64 wheel が 3.14 に
-無く、ソースビルドで約 2.5 分かかるため)。ローカルの検証済み構成 (3.14) とは
-版が異なる点に注意。3.14 に wheel が出たら揃えてよい。
+Python は CI・ローカルとも `.python-version` (3.12) に従い uv が解決する
+(OpenEXR の win_amd64 wheel が 3.14 に無く、ソースビルドで約 2.5 分かかる
+ため 3.12 に留めている)。3.14 に wheel が出たら `.python-version` を上げて
+`uv lock` し直せばよい。
 
 ## 最低対応版と検証済み構成
 
@@ -275,6 +277,11 @@ CI の Python は両 workflow とも 3.12 (OpenEXR の win_amd64 wheel が 3.14 
 `cargo test --workspace` が成功する。passed / skipped の件数はテストの増減で
 変わるためここには固定値を記載しない (最新の内訳は手元の実行結果を見る)。
 
+注: 上記は uv 移行 (2026-07-19、#78) 前に system Python 3.14.3 で検証した
+記録。移行後は `.python-version` (3.12) の uv 管理 Python + `uv run` が
+正準経路で、移行時に failure 集合が移行前後で一致することを確認済み
+(0 failed の SDK 込み再検証はまだ)。
+
 ---
 
 ## English Summary
@@ -284,8 +291,9 @@ Per-component prerequisites on Windows x64:
 - **Rust broker / harness**: Rust toolchain plus MSVC Build Tools and the
   Windows SDK (the default `x86_64-pc-windows-msvc` target needs the MSVC
   linker). No After Effects SDK.
-- **Python tests**: Python 3.x plus `requirements-dev.txt` (pytest, Pillow,
-  jsonschema; the latter two are imported at collection time). Expected
+- **Python tests**: uv (`uv sync --locked` builds `.venv` from
+  `pyproject.toml` + `uv.lock`: pytest, Pillow, jsonschema, OpenEXR; Pillow
+  and jsonschema are imported at collection time). Expected
   results differ by entry point. Source-only verification (no SDK):
   SDK-header ABI tests explicitly skip, but the probe / fixture build tests
   that invoke `tools/build-*.ps1` do not pre-check and fail without the SDK.
@@ -340,14 +348,14 @@ Per-component prerequisites on Windows x64:
 - **CI**: two Windows workflows run per push / pull request.
   `windows-clean-clone.yml` covers source-only verification (`cargo check`,
   `cargo test` minus two launch tests the hosted runner's restricted token
-  cannot execute, and `python -m pytest -q` without the SDK).
+  cannot execute, and `uv run python -m pytest -q` without the SDK).
   `ae-sdk-tests.yml` covers SDK-backed and built-artifact verification: it
   downloads the hash-pinned SDK zip from the private release
   `ci-sdk-ae25.2` with `GITHUB_TOKEN`, sets `AFTER_EFFECTS_SDK_ROOT`,
   builds the minihost workers (Ninja) and the probe AEX set, mirrors the
   workers into the multi-config layout paths, generates the deterministic
   probe input fixture, runs
-  `python -m pytest -q -rs --run-sdk-tests --run-built-artifact-tests
+  `uv run python -m pytest -q -rs --run-sdk-tests --run-built-artifact-tests
   --validate-local-artifact-manifest`, and fails if any test was skipped
   for a missing SDK or missing built artifact. Local-artifact
   (machine-bound evidence), prebuilt, AE oracle, and GPU gates stay
