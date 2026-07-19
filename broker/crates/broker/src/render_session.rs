@@ -59,12 +59,14 @@ pub const EXIT_INVARIANT_FAILURE: u32 = 24;
 
 /// The worker's reserved session error codes that accompany a host-protection
 /// invariant failure (`l2_main.cpp` `kSessionGenerationMismatch` ..
-/// `kSessionOutputValidationError`). The worker exits fail-closed right after
-/// sending such a response, so the broker must invalidate the session rather
-/// than surface them as reusable frame-local diagnostics. Time-scale (-40)
-/// and time-range (-46) rejections stay frame-local by the worker's contract.
+/// `kSessionOutputValidationError`) or a failed deferred SEQUENCE_SETUP
+/// (`kSessionSequenceSetupFailed`, -47: the session can never render). The
+/// worker exits fail-closed right after sending such a response, so the
+/// broker must invalidate the session rather than surface them as reusable
+/// frame-local diagnostics. Time-scale (-40) and time-range (-46) rejections
+/// stay frame-local by the worker's contract.
 fn is_fatal_session_error(render_error: i64) -> bool {
-    matches!(render_error, -45..=-41)
+    matches!(render_error, -47 | -45..=-41)
 }
 
 const MAGIC_OFFSET: usize = 0;
@@ -323,6 +325,13 @@ pub struct SessionOpenRequest<'a> {
     /// Enables the worker's per-output checksum detail records
     /// (`--output-checksum-detail-v1`).
     pub output_checksum_detail: bool,
+    /// Static spatial context trailer (`spatial:v*`), already encoded by
+    /// `encode_spatial_context`; carried in the session launch argv so the
+    /// hoisted SEQUENCE_SETUP and every frame observe it (issue #98 W1-3).
+    pub spatial_trailer: Option<String>,
+    /// Static render-environment trailer (`render:v1|`), already encoded by
+    /// `encode_render_environment`.
+    pub render_environment_trailer: Option<String>,
     pub dependencies: Vec<ApprovedImageArtifact>,
     pub width: u32,
     pub height: u32,
@@ -555,6 +564,16 @@ impl RenderSession {
             request.total_time.to_string(),
             request.time_scale.to_string(),
         ];
+        // Static context trailers ride the positional tail in the one-shot
+        // order (mask, spatial, render), ahead of the auxiliary option pairs
+        // the worker peels first. v1-3a carries spatial and render-environment;
+        // mask context stays with the layer work.
+        if let Some(spatial) = &request.spatial_trailer {
+            args_after_plugin.push(spatial.clone());
+        }
+        if let Some(render_environment) = &request.render_environment_trailer {
+            args_after_plugin.push(render_environment.clone());
+        }
         // Auxiliary option pairs ride argv's tail; the worker peels them
         // before the positional session contract (strip_auxiliary_options)
         // and validates each strictly. The broker pre-checks the path shapes
@@ -1302,6 +1321,8 @@ pub fn run_video_batch(
         aux_manifest: request.aux_manifest.as_deref().map(Path::new),
         world_dump_dir: request.world_dump_dir.as_deref().map(Path::new),
         output_checksum_detail: request.output_checksum_detail,
+        spatial_trailer: None,
+        render_environment_trailer: None,
         dependencies: Vec::new(),
         width,
         height,
@@ -1520,6 +1541,8 @@ mod tests {
                 aux_manifest: None,
                 world_dump_dir: None,
                 output_checksum_detail: false,
+                spatial_trailer: None,
+                render_environment_trailer: None,
                 dependencies: Vec::new(),
                 width: 8,
                 height: 4,
@@ -1538,8 +1561,9 @@ mod tests {
 
     #[test]
     fn fatal_session_error_codes_match_the_worker_contract() {
-        // kSessionGenerationMismatch .. kSessionOutputValidationError.
-        for code in [-41, -42, -43, -44, -45] {
+        // kSessionGenerationMismatch .. kSessionOutputValidationError, plus
+        // the deferred-setup failure (-47).
+        for code in [-41, -42, -43, -44, -45, -47] {
             assert!(is_fatal_session_error(code), "{code} is session-fatal");
         }
         // Time-scale (-40) and time-range (-46) rejections are frame-local,

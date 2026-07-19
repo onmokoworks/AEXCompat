@@ -241,6 +241,21 @@ mod worker {
             }
             effective -= 2;
         }
+        // Static context trailers ride the positional tail in the one-shot
+        // order (mask, spatial, render); the real classifier peels render,
+        // then spatial, then mask before the 10-slot session contract. The
+        // fixture mirrors that shape check so a mangled trailer would break
+        // these tests, but leaves the deep payload validation to the real
+        // worker's context parsers.
+        if effective >= 11 && args[effective - 1].starts_with("render:v1|") {
+            effective -= 1;
+        }
+        if effective >= 11 && args[effective - 1].starts_with("spatial:v") {
+            effective -= 1;
+        }
+        if effective >= 11 && args[effective - 1].starts_with("v2|") {
+            effective -= 1;
+        }
         if effective != 10 || args[1] != "--render-session-v1" {
             return 2;
         }

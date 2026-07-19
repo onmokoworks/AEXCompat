@@ -46,7 +46,13 @@ def test_nested_failure_stage_and_parameterized_cli_are_fixed():
 
 def test_selector_failure_is_checked_before_output_read():
     renderer = IMAGE_RENDER.read_text(encoding="utf-8")
-    failure_check = renderer.index("if !worker_passed")
+    # The gate lives in validate_interactive_worker_report (issue #98 W2
+    # extraction); the ordering contract is that its call site rejects a
+    # failed worker before any output bytes are read.
+    assert "if !worker_passed" in renderer
+    failure_check = renderer.index(
+        "= validate_interactive_worker_report("
+    )
     output_read = renderer.index("let rendered = fs::read(&output_raw)")
     assert failure_check < output_read
 

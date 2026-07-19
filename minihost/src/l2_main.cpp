@@ -108,6 +108,9 @@
 #include "worker_aegp_init_runtime.hpp"
 #include "worker_aegp_init_execution.hpp"
 #include "worker_aegp_init_orchestration.hpp"
+#include "worker_aegp_init_report.hpp"
+#include "worker_ui_event_report.hpp"
+#include "worker_audio_execution.hpp"
 #include "worker_entry_bootstrap.hpp"
 #include "worker_effect_bootstrap.hpp"
 #include "worker_aegp_timeline_probe.hpp"
@@ -4238,279 +4241,10 @@ int32_t render_once(EffectEntry entry, std::array<std::byte, kInSize>& input,
   return aexcompat::worker_runtime::classic::dispatch(context);
 }
 
-// Resident render session frame loop (docs/RENDER_SESSION_PROTOCOL_2026-07-19.md).
-// SEQUENCE_SETUP is hoisted once around render_once(manage_sequence=false)
-// following the persistent_sequence precedent; pixels move through the
-// inherited anonymous section (copy-through slots, the plug-in never sees the
-// mapping) and control messages over the inherited pipe pair with strict
-// exact-key validation. RenderSessionOutcome is defined in
-// worker_invocation_orchestration.hpp so the final dispatch owner can call
-// this across TUs.
-RenderSessionOutcome run_render_session(
-    EffectEntry entry, std::array<std::byte, kInSize>& input,
-    std::array<std::byte, kOutSize>& output, const RequestedAssignments* requested,
-    int32_t max_width, int32_t max_height, int32_t time_step, int32_t total_time,
-    uint32_t time_scale, int32_t pixel_bytes) {
-  using aexcompat::strict_json::JsonValue;
-  using aexcompat::strict_json::StrictJsonParser;
-  using aexcompat::strict_json::json_exact_keys;
-  using aexcompat::strict_json::json_i32;
-  using aexcompat::strict_json::json_member;
-  using aexcompat::strict_json::json_string;
-  namespace wrs = aexcompat::worker_render_session;
-  constexpr int32_t kSessionTimeScaleMismatch = -40;
-  constexpr int32_t kSessionGenerationMismatch = -41;
-  constexpr int32_t kSessionOutputCaptureError = -42;
-  constexpr int32_t kSessionGuardViolation = -43;
-  constexpr int32_t kSessionDimensionMismatch = -44;
-  constexpr int32_t kSessionOutputValidationError = -45;
-  constexpr int32_t kSessionTimeOutOfRange = -46;
+// run_render_session moved to worker_render_session.cpp (issue #169); the
+// cross-TU declaration in worker_invocation_orchestration.cpp still resolves
+// to that owner.
 
-  RenderSessionOutcome outcome;
-  const wrs::SessionGeometry geometry{max_width, max_height, pixel_bytes, 0};
-  wrs::SessionChannels channels;
-  if (!channels.open_from_environment(geometry) ||
-      !channels.static_header_matches(geometry)) {
-    outcome.protocol_violation = true;
-    return outcome;
-  }
-  // Effects may initialize persistent sequence state from in_data during
-  // SEQUENCE_SETUP, so the hoisted setup needs the same time and geometry
-  // fields the one-shot path seeds right before its render lifecycle
-  // (classic_render_runtime); the session equivalent is the launch
-  // configuration with time zero.
-  write<int32_t>(input, 224, 0);
-  write<int32_t>(input, 228, time_step);
-  write<int32_t>(input, 232, total_time);
-  write<int32_t>(input, 236, time_step);
-  write<uint32_t>(input, 240, time_scale);
-  write<int32_t>(input, 252, max_width);
-  write<int32_t>(input, 256, max_height);
-  const int32_t session_extent[4] = {0, 0, max_width, max_height};
-  std::memcpy(input.data() + 260, session_extent, sizeof(session_extent));
-  outcome.setup_error =
-      invoke_sequence_selector(entry, kSequenceSetup, input.data(), output.data());
-  if (outcome.setup_error != 0) return outcome;
-  // Mirrors begin_render for the hoisted sequence: an --aux-manifest-v1
-  // manifest becomes visible to the channel suite once SEQUENCE_SETUP
-  // succeeds, and stays active for every session frame.
-  activate_external_aux();
-  write<void*>(input, kInSequenceData, read<void*>(output, kOutSequenceData));
-
-  const std::size_t input_offset = wrs::input_slot_offset();
-  const std::size_t output_offset = wrs::output_slot_offset(geometry);
-  const char* pixel_format = pixel_bytes == 16 ? "argb32f" :
-      (pixel_bytes == 8 ? "argb16" : "argb8");
-  std::vector<unsigned char> frame_rgba(wrs::input_slot_bytes(geometry));
-  std::vector<unsigned char> captured;
-  std::string message;
-  for (;;) {
-    const auto read_result = channels.read_message(message);
-    if (read_result == wrs::SessionChannels::ReadResult::Eof) break;
-    if (read_result != wrs::SessionChannels::ReadResult::Message) {
-      // Malformed framing is invalid control input, not a close signal.
-      outcome.protocol_violation = true;
-      break;
-    }
-    JsonValue root;
-    if (!StrictJsonParser(std::move(message)).parse(root) ||
-        !std::holds_alternative<JsonValue::Object>(root.value)) {
-      outcome.protocol_violation = true;
-      break;
-    }
-    const auto& object = std::get<JsonValue::Object>(root.value);
-    std::string type;
-    int32_t version{};
-    if (!json_string(object, "type", type) || !json_i32(object, "v", version) ||
-        version != static_cast<int32_t>(wrs::kProtocolVersion)) {
-      outcome.protocol_violation = true;
-      break;
-    }
-    if (type == "close") {
-      if (!json_exact_keys(object, {"v", "type"})) outcome.protocol_violation = true;
-      break;
-    }
-    int32_t frame_index{};
-    const auto* time_value = json_member(object, "current_time");
-    if (type != "render_frame" ||
-        !json_exact_keys(object, {"v", "type", "frame_index", "current_time"}) ||
-        !json_i32(object, "frame_index", frame_index) || frame_index < 0 ||
-        !time_value || !std::holds_alternative<JsonValue::Object>(time_value->value)) {
-      outcome.protocol_violation = true;
-      break;
-    }
-    const auto& time_object = std::get<JsonValue::Object>(time_value->value);
-    int32_t current_time{};
-    int32_t current_scale{};
-    if (!json_exact_keys(time_object, {"value", "scale"}) ||
-        !json_i32(time_object, "value", current_time) ||
-        !json_i32(time_object, "scale", current_scale) || current_scale <= 0) {
-      outcome.protocol_violation = true;
-      break;
-    }
-    const uint32_t expected_generation = static_cast<uint32_t>(frame_index) + 1;
-    // Error responses carry no output or generation: a frame rejected before
-    // or during rendering never updates the output slot, so there is no slot
-    // metadata to report (protocol §4.3).
-    const auto respond_error = [&](int32_t frame_error) {
-      std::string reply = "{\"v\":1,\"type\":\"frame_done\",\"frame_index\":" +
-          std::to_string(frame_index) + ",\"status\":\"error\",\"render_error\":" +
-          std::to_string(frame_error) + "}";
-      return channels.write_message(reply);
-    };
-    const auto respond_ok = [&](int32_t frame_width, int32_t frame_height,
-                                int32_t frame_rowbytes, const std::string& checksum) {
-      std::string reply;
-      reply.reserve(256);
-      reply += "{\"v\":1,\"type\":\"frame_done\",\"frame_index\":";
-      reply += std::to_string(frame_index);
-      reply += ",\"status\":\"ok\",\"output\":{\"width\":";
-      reply += std::to_string(frame_width);
-      reply += ",\"height\":";
-      reply += std::to_string(frame_height);
-      reply += ",\"rowbytes\":";
-      reply += std::to_string(frame_rowbytes);
-      reply += ",\"pixel_format\":\"";
-      reply += pixel_format;
-      reply += "\",\"checksum\":\"";
-      reply += checksum;
-      reply += "\",\"guards_intact\":true},\"render_error\":0,\"generation\":";
-      reply += std::to_string(expected_generation);
-      reply += "}";
-      return channels.write_message(reply);
-    };
-    if (static_cast<uint32_t>(current_scale) != time_scale) {
-      // Frame-local diagnostic: the session continues, the broker decides.
-      if (!respond_error(kSessionTimeScaleMismatch)) {
-        outcome.protocol_violation = true;
-        break;
-      }
-      continue;
-    }
-    if (current_time < 0 || current_time > total_time) {
-      // Same range contract the one-shot parser enforces on its launch time:
-      // frames outside the declared timeline are rejected before rendering.
-      if (!respond_error(kSessionTimeOutOfRange)) {
-        outcome.protocol_violation = true;
-        break;
-      }
-      continue;
-    }
-    if (channels.read_header_u32(wrs::kHeaderInputGenerationOffset) !=
-            expected_generation ||
-        !channels.static_header_matches(geometry)) {
-      // Stale slot or mutated header: host-protection invariant, fail closed.
-      respond_error(kSessionGenerationMismatch);
-      outcome.invariant_failure = true;
-      break;
-    }
-    std::memcpy(frame_rgba.data(), channels.view() + input_offset, frame_rgba.size());
-    outcome.frames_attempted += 1;
-    int32_t frame_width = 0, frame_height = 0, frame_rowbytes = 0;
-    std::string frame_input_hash, frame_output_hash;
-    // Initialized true so it means "finalize observed corruption" when false:
-    // render_once's early host-side failures return before touching it, while
-    // every path that allocates the guarded buffer overwrites it.
-    bool frame_guards = true;
-    bool output_validation_failed = false;
-    captured.clear();
-    const int32_t frame_error = render_once(
-        entry, input, output, "request", frame_width, frame_height, frame_rowbytes,
-        frame_input_hash, frame_output_hash, frame_guards, requested, &frame_rgba,
-        nullptr, max_width, max_height, nullptr, current_time, time_step, total_time,
-        time_scale, pixel_bytes, false, &captured, &output_validation_failed);
-    // Aux channel chunks are host-owned and cannot outlive one frame's render
-    // lifecycle (end_render's cleanup for the one-shot path); the manifest
-    // itself stays active across frames.
-    aexcompat::pf_ae_channel::reclaim_layer_channels();
-    outcome.width = frame_width;
-    outcome.height = frame_height;
-    outcome.rowbytes = frame_rowbytes;
-    outcome.input_hash = frame_input_hash;
-    outcome.output_hash = frame_output_hash;
-    // Corruption evidence outranks the render error: a plug-in that wrote
-    // outside its guarded private buffer invalidates the session even when it
-    // also reported a nonzero error. Host-protection invariant, fail closed.
-    if (!frame_guards) {
-      outcome.guards_intact = false;
-      respond_error(kSessionGuardViolation);
-      outcome.invariant_failure = true;
-      break;
-    }
-    // Host-side output validation failures (rejected or failed resize) share
-    // numeric codes with selector errors, so the dispatch owner reports them
-    // out of band; they are output-bounds invariant failures, not frame-local
-    // diagnostics (protocol §4.3).
-    if (output_validation_failed) {
-      respond_error(kSessionOutputValidationError);
-      outcome.invariant_failure = true;
-      break;
-    }
-    if (frame_error != 0) {
-      // Frame-local compatibility diagnostic; the sequence state is still
-      // owned by the host, so the session may continue.
-      if (!respond_error(frame_error)) {
-        outcome.protocol_violation = true;
-        break;
-      }
-      continue;
-    }
-    // v1 fixes every frame to the launch max dimensions (protocol §3); an
-    // expand/shrink-output effect changing them would publish dimensions the
-    // broker cannot trust against the slot layout. Fail closed.
-    if (frame_width != max_width || frame_height != max_height) {
-      respond_error(kSessionDimensionMismatch);
-      outcome.invariant_failure = true;
-      break;
-    }
-    const std::size_t expected_pixels =
-        static_cast<std::size_t>(frame_width) * frame_height;
-    if (captured.size() != expected_pixels * pixel_bytes ||
-        output_offset + captured.size() > wrs::expected_section_bytes(geometry)) {
-      respond_error(kSessionOutputCaptureError);
-      outcome.invariant_failure = true;
-      break;
-    }
-    unsigned char* slot = channels.view() + output_offset;
-    for (std::size_t pixel = 0; pixel < expected_pixels; ++pixel)
-      argb_to_rgba_native(slot + pixel * pixel_bytes,
-                          captured.data() + pixel * pixel_bytes, pixel_bytes);
-    // Mirrors the one-shot finalize checksum hook (gated on the opt-in aux
-    // option): detail is computed from the same transferred RGBA bytes the
-    // broker reads. The final report carries the last rendered frame's
-    // detail; frame_done stays the per-frame truth.
-    record_output_checksum_detail(slot, frame_width, frame_height, pixel_bytes);
-    channels.write_header_u32(wrs::kHeaderFrameWidthOffset,
-                              static_cast<uint32_t>(frame_width));
-    channels.write_header_u32(wrs::kHeaderFrameHeightOffset,
-                              static_cast<uint32_t>(frame_height));
-    channels.write_header_u32(wrs::kHeaderOutputGenerationOffset,
-                              expected_generation);
-    // The frame checksum covers the transferred slot bytes, the exact bytes
-    // the broker reads; the final report's output_hash keeps the one-shot
-    // internal-ARGB definition (protocol §4.3).
-    const std::string slot_checksum = sha256_bytes(slot, captured.size());
-    if (!respond_ok(frame_width, frame_height, frame_rowbytes, slot_checksum)) {
-      outcome.protocol_violation = true;
-      break;
-    }
-  }
-  outcome.setdown_error =
-      invoke_sequence_selector(entry, kSequenceSetdown, input.data(), output.data());
-  write<void*>(input, kInSequenceData, nullptr);
-  aexcompat::pf_ae_channel::reclaim_layer_channels();
-  deactivate_external_aux();
-  clear_native_aux_provider();
-  // Frame-local errors were already reported through frame_done and the
-  // broker owned the continue/stop decision, so a clean close after them is
-  // still a successful session; only session mechanics count here.
-  outcome.render_error =
-      outcome.setup_error == 0 && outcome.setdown_error == 0 &&
-              !outcome.protocol_violation && !outcome.invariant_failure
-          ? 0
-          : -1;
-  return outcome;
-}
 
 bool exercise_loaded_effect_item_receipt(EffectEntry entry,
     std::array<std::byte, kInSize>& input, std::array<std::byte, kOutSize>& output) {
@@ -5288,16 +5022,6 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
                  g_aegp_layer_flags[0] == 0x00004026u &&
                  g_aegp_layer_flags[1] == 0x00000005u &&
                  g_aegp_layer_flags[2] == 0x00000005u; }});
-    void* global_refcon = aegp_init.global_refcon;
-    const int32_t init_error = aegp_init.init_error;
-    const int32_t event_error = aegp_init.event_error;
-    const int32_t death_error = aegp_init.death_error;
-    const uint32_t hooks_invoked = aegp_init.hooks_invoked;
-    const uint32_t menu_hooks_invoked = aegp_init.menu_hooks_invoked;
-    const uint32_t death_hooks_invoked = aegp_init.death_hooks_invoked;
-    const uint32_t command_hooks_invoked = aegp_init.command_hooks_invoked;
-    const uint32_t command_handled_count = aegp_init.command_handled_count;
-    const int32_t idle_max_sleep = aegp_init.idle_max_sleep;
     // Capture the event-complete and terminal loaded-module sets before the
     // AEGP is unloaded so secure broker launches can validate this early path.
     // Stop and unload first. Some AEGP_SuiteHandler builds retain exactly one
@@ -5306,149 +5030,21 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
     capture_module_audit_phase();
     const bool module_audit_ok = session.shutdown_before_report();
     module = nullptr;
-    const uint32_t live_suite_references = live_suite_reference_count();
-    const std::string live_suite_summary = live_suite_lease_summary();
-    const bool isolated_item_cache = g_aegp_active_idle_roundtrip_mode &&
-        live_suite_references == 1 && live_suite_summary == "AEGP Item Suite@14=1";
-    const bool isolated_comp_cache = g_aegp_comp_idle_roundtrip_mode &&
-        isolated_aegp_read_cache_is_bounded();
-    const bool leases_balanced = live_suite_references == 0 || isolated_item_cache || isolated_comp_cache;
-    const bool effect_lifetimes_balanced = !g_aegp_effect_live &&
-        !any_effect_lease_live() && g_aegp_effect_acquires == g_aegp_effect_disposes;
-    const bool stream_lifetimes_balanced = !g_aegp_transform_stream.live &&
-        !g_aegp_transform_stream.value_live &&
-        g_aegp_stream_acquires == g_aegp_stream_disposes &&
-        g_aegp_stream_value_acquires == g_aegp_stream_value_disposes;
-    const bool collection_lifetimes_balanced = !g_aegp_selection.live &&
-        g_aegp_collection_creates == g_aegp_collection_disposes;
-    const bool aegp_memory_lifetimes_balanced = aegp_memory_balanced();
-    const bool passed = init_error == 0 && event_error == 0 && death_error == 0 &&
-        leases_balanced && effect_lifetimes_balanced && stream_lifetimes_balanced &&
-        collection_lifetimes_balanced &&
-        aegp_memory_lifetimes_balanced && async_receipt_lifetimes_balanced() &&
-        module_audit_ok;
-    std::cout << "{\"schema_version\":1,\"stage\":\"aegp_init\",\"status\":\""
-              << (passed ? ((g_aegp_update_menu_mode || g_aegp_idle_mode || g_aegp_command_roundtrip_mode || g_aegp_active_idle_roundtrip_mode || g_aegp_comp_idle_roundtrip_mode) ? "event_completed" : "initialized") : "initialization_failed")
-              << "\",\"identity_verified\":true,\"entrypoint\":\"EntryPointFunc\""
-              << ",\"driver_major_version\":24,\"driver_minor_version\":0"
-              << ",\"plugin_id\":1,\"init_error\":" << init_error
-              << ",\"global_refcon_nonnull\":" << (global_refcon ? "true" : "false")
-              << ",\"commands_created\":" << g_aegp_commands_created
-              << ",\"menu_commands_inserted\":" << g_aegp_menu_commands_inserted
-              << ",\"command_hooks_registered\":" << g_aegp_command_hooks
-              << ",\"update_menu_hooks_registered\":" << g_aegp_update_menu_hooks
-              << ",\"idle_hooks_registered\":" << g_aegp_idle_hooks
-              << ",\"death_hooks_registered\":" << g_aegp_death_hooks
-              << ",\"death_hooks_invoked\":" << death_hooks_invoked
-              << ",\"death_error\":" << death_error
-              << ",\"event_requested\":\"" << (g_aegp_update_menu_mode ? "update_menu" : (g_aegp_idle_mode ? "idle" : (g_aegp_command_roundtrip_mode ? "command_roundtrip" : (g_aegp_active_idle_roundtrip_mode ? "active_idle_roundtrip" : (g_aegp_keyframe_roundtrip_mode ? "keyframe_roundtrip" : (g_aegp_seek_roundtrip_mode ? "seek_roundtrip" : (g_aegp_trim_roundtrip_mode ? "trim_roundtrip" : (g_aegp_switch_roundtrip_mode ? "switch_roundtrip" : (g_aegp_comp_idle_roundtrip_mode ? "comp_idle_roundtrip" : "none"))))))))) << "\""
-              << ",\"event_error\":" << event_error
-              << ",\"hooks_invoked\":" << hooks_invoked
-              << ",\"menu_hooks_invoked\":" << menu_hooks_invoked
-              << ",\"scene_first_observed_frame\":" << g_aegp_first_observed_frame
-              << ",\"scene_last_observed_frame\":" << g_aegp_last_observed_frame
-              << ",\"scene_current_frame\":" << g_aegp_scene_frame
-              << ",\"scene_layer_count\":" << g_aegp_layers.size()
-              << ",\"scene_selected_layer_count\":2"
-              << ",\"idle_max_sleep\":" << idle_max_sleep
-              << ",\"command_hooks_invoked\":" << command_hooks_invoked
-              << ",\"command_handled_count\":" << command_handled_count
-              << ",\"command_enable_calls\":" << g_aegp_command_enable_calls
-              << ",\"command_check_calls\":" << g_aegp_command_check_calls
-              << ",\"command_checked_true_calls\":"
-              << g_aegp_command_checked_true_calls
-              << ",\"command_checked_false_calls\":"
-              << g_aegp_command_checked_false_calls
-              << ",\"item_current_time_calls\":" << g_aegp_item_current_time_calls
-              << ",\"item_set_current_time_calls\":" << g_aegp_item_set_current_time_calls
-              << ",\"item_last_set_time_value\":" << g_aegp_item_last_set_time_value
-              << ",\"item_last_set_time_scale\":" << g_aegp_item_last_set_time_scale
-              << ",\"item_name_calls\":" << g_aegp_item_name_calls
-              << ",\"item_duration_calls\":" << g_aegp_item_duration_calls
-              << ",\"comp_from_item_calls\":" << g_aegp_comp_from_item_calls
-              << ",\"comp_framerate_calls\":" << g_aegp_comp_framerate_calls
-              << ",\"layer_count_calls\":" << g_aegp_layer_count_calls
-              << ",\"layer_by_index_calls\":" << g_aegp_layer_by_index_calls
-              << ",\"layer_source_item_calls\":" << g_aegp_layer_source_item_calls
-              << ",\"layer_id_calls\":" << g_aegp_layer_id_calls
-              << ",\"layer_attribute_calls\":" << g_aegp_layer_attribute_calls
-              << ",\"layer_trim_set_calls\":" << g_aegp_layer_trim_set_calls
-              << ",\"layer_flag_set_calls\":" << g_aegp_layer_flag_set_calls
-              << ",\"layer_1_flags\":" << g_aegp_layer_flags[0]
-              << ",\"layer_2_flags\":" << g_aegp_layer_flags[1]
-              << ",\"layer_3_flags\":" << g_aegp_layer_flags[2]
-              << ",\"layer_1_in_point_value\":" << g_aegp_layer_in_points[0].value
-              << ",\"layer_1_in_point_scale\":" << g_aegp_layer_in_points[0].scale
-              << ",\"layer_1_duration_value\":" << g_aegp_layer_durations[0].value
-              << ",\"layer_1_duration_scale\":" << g_aegp_layer_durations[0].scale
-              << ",\"layer_name_calls\":" << g_aegp_layer_name_calls
-              << ",\"effect_count_calls\":" << g_aegp_effect_count_calls
-              << ",\"effect_acquires\":" << g_aegp_effect_acquires
-              << ",\"effect_disposes\":" << g_aegp_effect_disposes
-              << ",\"effect_metadata_calls\":" << g_aegp_effect_metadata_calls
-              << ",\"effect_lifetimes_balanced\":"
-              << (effect_lifetimes_balanced ? "true" : "false")
-              << ",\"stream_acquires\":" << g_aegp_stream_acquires
-              << ",\"stream_disposes\":" << g_aegp_stream_disposes
-              << ",\"stream_value_acquires\":" << g_aegp_stream_value_acquires
-              << ",\"stream_value_disposes\":" << g_aegp_stream_value_disposes
-              << ",\"stream_sampled_selector_mask\":"
-              << g_aegp_stream_sampled_selector_mask
-              << ",\"stream_lifetimes_balanced\":"
-              << (stream_lifetimes_balanced ? "true" : "false")
-              << ",\"effect_param_name_calls\":" << g_aegp_effect_param_name_calls
-              << ",\"effect_param_value_calls\":" << g_aegp_effect_param_value_calls
-              << ",\"effect_param_union_calls\":" << g_aegp_effect_param_union_calls
-              << ",\"keyframe_count_calls\":" << g_aegp_keyframe_count_calls
-              << ",\"keyframed_stream_reports\":" << g_aegp_keyframed_stream_reports
-              << ",\"keyframe_time_calls\":" << g_aegp_keyframe_time_calls
-              << ",\"keyframe_value_calls\":" << g_aegp_keyframe_value_calls
-              << ",\"keyframe_interpolation_calls\":"
-              << g_aegp_keyframe_interpolation_calls
-              << ",\"keyframe_pipe_connected\":"
-              << (keyframe_probe.connected ? "true" : "false")
-              << ",\"keyframe_pipe_request_sent\":"
-              << (keyframe_probe.request_sent ? "true" : "false")
-              << ",\"keyframe_pipe_response_received\":"
-              << (keyframe_probe.response_received ? "true" : "false")
-              << ",\"keyframe_pipe_response_valid\":"
-              << (keyframe_probe.response_valid ? "true" : "false")
-              << ",\"keyframe_pipe_response_bytes\":"
-              << keyframe_probe.response_bytes
-              << ",\"seek_pipe_connected\":" << (seek_probe.connected ? "true" : "false")
-              << ",\"seek_pipe_request_sent\":" << (seek_probe.request_sent ? "true" : "false")
-              << ",\"seek_pipe_ack_received\":" << (seek_probe.ack_received ? "true" : "false")
-              << ",\"seek_pipe_ack_valid\":" << (seek_probe.ack_valid ? "true" : "false")
-              << ",\"trim_pipe_connected\":" << (trim_probe.connected ? "true" : "false")
-              << ",\"trim_pipe_request_sent\":" << (trim_probe.request_sent ? "true" : "false")
-              << ",\"trim_pipe_ack_received\":" << (trim_probe.ack_received ? "true" : "false")
-              << ",\"trim_pipe_ack_valid\":" << (trim_probe.ack_valid ? "true" : "false")
-              << ",\"switch_pipe_connected\":" << (switch_probe.connected ? "true" : "false")
-              << ",\"switch_pipe_request_sent\":" << (switch_probe.request_sent ? "true" : "false")
-              << ",\"switch_pipe_ack_received\":" << (switch_probe.ack_received ? "true" : "false")
-              << ",\"switch_pipe_ack_valid\":" << (switch_probe.ack_valid ? "true" : "false")
-              << ",\"collection_creates\":" << g_aegp_collection_creates
-              << ",\"collection_disposes\":" << g_aegp_collection_disposes
-              << ",\"collection_item_reads\":" << g_aegp_collection_item_reads
-              << ",\"collection_lifetimes_balanced\":"
-              << (collection_lifetimes_balanced ? "true" : "false")
-              << ",\"aegp_memory_created\":" << aegp_memory_statistics().created
-              << ",\"aegp_memory_freed\":" << aegp_memory_statistics().freed
-              << ",\"aegp_memory_lifetimes_balanced\":"
-              << (aegp_memory_lifetimes_balanced ? "true" : "false")
-              << ",\"suite_acquires\":" << suite_acquire_count()
-              << ",\"suite_releases\":" << suite_release_count()
-              << ",\"live_suite_reference_count\":" << live_suite_references
-              << ",\"live_suite_leases\":\"" << live_suite_summary << "\""
-              << ",\"suite_cache_reclaimed_at_process_exit\":"
-              << ((isolated_item_cache || isolated_comp_cache) ? "true" : "false")
-              << ",\"suite_leases_balanced\":" << (leases_balanced ? "true" : "false")
-              << ",\"receipts_created\":" << aexcompat::render_receipts::statistics().created
-              << ",\"receipts_checked_in\":" << aexcompat::render_receipts::statistics().checked_in
-              << ",\"live_receipts\":" << aexcompat::render_receipts::statistics().live_count
-              << ",\"render_performed\":"
-              << (aexcompat::render_receipts::statistics().created > 0 ? "true" : "false")
-              << ",\"module_audit\":" << module_audit_json() << "}\n";
+    const bool passed = emit_aegp_init_completion_report(
+        {aegp_init.init_error, aegp_init.event_error, aegp_init.death_error,
+         aegp_init.global_refcon != nullptr, aegp_init.hooks_invoked,
+         aegp_init.menu_hooks_invoked, aegp_init.death_hooks_invoked,
+         aegp_init.command_hooks_invoked, aegp_init.command_handled_count,
+         aegp_init.idle_max_sleep, module_audit_ok,
+         {keyframe_probe.connected, keyframe_probe.request_sent,
+          keyframe_probe.response_received, keyframe_probe.response_valid,
+          keyframe_probe.response_bytes},
+         {seek_probe.connected, seek_probe.request_sent,
+          seek_probe.ack_received, seek_probe.ack_valid},
+         {trim_probe.connected, trim_probe.request_sent,
+          trim_probe.ack_received, trim_probe.ack_valid},
+         {switch_probe.connected, switch_probe.request_sent,
+          switch_probe.ack_received, switch_probe.ack_valid}});
     return session.finish_integrated_report(passed ? 0 : 23);
   }
   auto entry = reinterpret_cast<EffectEntry>(GetProcAddress(module, "EffectMain"));
@@ -5495,7 +5091,7 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
         static_cast<int32_t>(g_downsample_y.denominator)},
        {static_cast<int32_t>(g_pixel_aspect_ratio.numerator),
         static_cast<int32_t>(g_pixel_aspect_ratio.denominator)},
-       invocation.external_pixel_bytes, static_cast<int32_t>(g_params.size() + 1),
+       invocation.external_pixel_bytes,
        is_render_worker(), is_rendering_worker(), invocation.audio_mode, g_skip_about},
       {&invoke_entry_seh, &reset_effect_lifetime,
        +[](bool active) { g_global_setup_active = active; },
@@ -5505,7 +5101,8 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
        +[](EffectEntry callback,
            aexcompat::worker_runtime::effect_bootstrap::State& state) {
          observe_arbitrary_defaults(callback, state.input, state.output);
-       }});
+       },
+       +[]() { return static_cast<int32_t>(g_params.size()); }});
   const int32_t global_error = bootstrap.global_error;
   const int32_t about_error = bootstrap.about_error;
   const int32_t params_error = bootstrap.params_error;
@@ -5628,103 +5225,19 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
         ? invoke_global_setdown(entry, input.data(), output.data()) : -1;
     if (!session.prepare_protocol_report()) return session.finish(14);
     restore_native_stdout();
-    const bool event_contract = (invocation.ui_lifecycle_mode || invocation.ui_idle_mode || invocation.ui_keydown_mode ||
-        invocation.ui_mouse_exited_mode)
-        ? std::all_of(lifecycle_errors.begin(),
-              lifecycle_errors.begin() +
-                  ((invocation.ui_idle_mode || invocation.ui_keydown_mode || invocation.ui_mouse_exited_mode) ? 5 : 4),
-              [](int32_t error) { return error == 0; }) &&
-            lifecycle_context_stable && lifecycle_host_state_cleared
-        : invocation.draw_event_mode
-        ? event_error == 0 && (event_out_flags & 1) != 0 &&
-            (g_drawbot_paint_rect_calls + g_drawbot_fill_path_calls +
-             g_drawbot_stroke_path_calls + g_overlay_stroke_path_calls) > 0 &&
-            g_drawbot_fill_colors.size() == g_drawbot_fill_path_calls &&
-            std::all_of(g_drawbot_fill_colors.begin(), g_drawbot_fill_colors.end(),
-                [](const auto& color) { return std::all_of(color.begin(), color.end(),
-                    [](float value) { return std::isfinite(value) && value >= 0 && value <= 1; }); }) &&
-            g_drawbot_objects_created == g_drawbot_objects_released && g_drawbot_objects.empty() &&
-            g_drawbot_invalid_operations == 0
-        : invocation.drag_event_mode
-            ? event_error == 0 && g_ui_drag_requested &&
-                g_ui_drag_calls == static_cast<uint32_t>(invocation.drag_steps) && g_ui_drag_terminated
-            : invocation.click_event_mode
-            ? event_error == 0 && (event_out_flags & 9) == 9 &&
-                g_app_color_picker_calls == 1 && g_app_invalidate_rect_calls == 1
-            : event_error == 0 && cursor == 13;
-    std::cout << "{\"schema_version\":1,\"stage\":\"custom_ui_event\",\"status\":\""
-              << (event_contract && event_sequence_setdown_error == 0 &&
-                  defaults_disposed && handle_lifetimes_balanced()
-                  ? "event_completed" : "event_failed")
-              << "\",\"event_type\":\"" << (invocation.ui_mouse_exited_mode ? "ui_mouse_exited" :
-                  (invocation.ui_keydown_mode ? "ui_keydown" :
-                  (invocation.ui_idle_mode ? "ui_idle" :
-                  (invocation.ui_lifecycle_mode ? "ui_lifecycle" :
-                  (invocation.draw_event_mode ? "draw" :
-                  (invocation.drag_event_mode ? "drag_sequence" :
-                   (invocation.click_event_mode ? "do_click" : "adjust_cursor")))))))
-              << "\",\"event_target\":\"" << event_target
-              << "\",\"event_error\":" << event_error
-              << ",\"cursor\":" << cursor << ",\"event_out_flags\":" << event_out_flags
-              << ",\"adv_app_info_text_calls\":" << g_adv_app_info_text_calls
-              << ",\"adv_app_info_text\":\"" << escape(g_last_adv_app_info_text)
-              << "\",\"arbitrary_values_disposed\":"
-              << (arbitrary_values_disposed ? "true" : "false")
-              << ",\"handle_lifetimes_balanced\":"
-              << (handle_lifetimes_balanced() ? "true" : "false")
-              << ",\"suite_leases_balanced\":"
-              << (suite_leases_balanced() ? "true" : "false")
-              << ",\"drawbot_paint_rect_calls\":" << g_drawbot_paint_rect_calls
-              << ",\"drawbot_fill_path_calls\":" << g_drawbot_fill_path_calls
-              << ",\"drawbot_stroke_path_calls\":" << g_drawbot_stroke_path_calls
-              << ",\"overlay_stroke_path_calls\":" << g_overlay_stroke_path_calls
-              << ",\"drawbot_objects_created\":" << g_drawbot_objects_created
-              << ",\"drawbot_objects_released\":" << g_drawbot_objects_released
-              << ",\"drawbot_invalid_operations\":" << g_drawbot_invalid_operations
-              << ",\"drawbot_fill_color_count\":" << g_drawbot_fill_colors.size()
-              << ",\"drawbot_first_fill_color\":["
-              << (g_drawbot_fill_colors.empty() ? 0.0f : g_drawbot_fill_colors[0][0]) << ','
-              << (g_drawbot_fill_colors.empty() ? 0.0f : g_drawbot_fill_colors[0][1]) << ','
-              << (g_drawbot_fill_colors.empty() ? 0.0f : g_drawbot_fill_colors[0][2]) << ','
-              << (g_drawbot_fill_colors.empty() ? 0.0f : g_drawbot_fill_colors[0][3]) << ']'
-              << ",\"drawbot_get_drawing_ref_calls\":" << g_drawbot_get_drawing_ref_calls
-              << ",\"drawbot_get_supplier_calls\":" << g_drawbot_get_supplier_calls
-              << ",\"drawbot_get_surface_calls\":" << g_drawbot_get_surface_calls
-              << ",\"app_get_background_color_calls\":" << g_app_get_background_color_calls
-              << ",\"app_color_picker_calls\":" << g_app_color_picker_calls
-              << ",\"app_invalidate_rect_calls\":" << g_app_invalidate_rect_calls
-              << ",\"picker_color_rgba\":[" << g_app_picker_color[0] << ','
-              << g_app_picker_color[1] << ',' << g_app_picker_color[2] << ','
-              << g_app_picker_color[3] << ']'
-              << ",\"invalidated_rect\":[" << g_app_invalidated_rect[0] << ','
-              << g_app_invalidated_rect[1] << ',' << g_app_invalidated_rect[2] << ','
-              << g_app_invalidated_rect[3] << ']'
-              << ",\"changed_value\":" << (changed_value ? "true" : "false")
-              << ",\"drag_requested\":" << (g_ui_drag_requested ? "true" : "false")
-              << ",\"drag_calls\":" << g_ui_drag_calls
-              << ",\"drag_terminated\":" << (g_ui_drag_terminated ? "true" : "false")
-              << ",\"coordinate_transform_calls\":" << g_ui_coordinate_transform_calls
-              << ",\"lifecycle_errors\":[" << lifecycle_errors[0] << ','
-              << lifecycle_errors[1] << ',' << lifecycle_errors[2] << ','
-              << lifecycle_errors[3] << ',' << lifecycle_errors[4] << ']'
-              << ",\"lifecycle_context_stable\":"
-              << (lifecycle_context_stable ? "true" : "false")
-              << ",\"plugin_state_before_close\":[" << plugin_state_before_close[0] << ','
-              << plugin_state_before_close[1] << ',' << plugin_state_before_close[2] << ','
-              << plugin_state_before_close[3] << ']'
-              << ",\"lifecycle_host_state_cleared\":"
-              << (lifecycle_host_state_cleared ? "true" : "false")
-              << ",\"keydown_code\":" << invocation.keydown_code
-              << ",\"keydown_modifiers\":" << invocation.keydown_modifiers
-              << ",\"event_assignments_applied\":"
-              << (event_assignments_applied ? "true" : "false")
-              << ",\"sequence_setdown_error\":" << event_sequence_setdown_error
-              << ",\"requested_parameters\":"
-              << requested_parameters_json(invocation.ui_event_assignments)
-              << ",\"global_setdown_error\":" << event_setdown_error << "}\n";
-    return session.finish(event_contract && event_sequence_setdown_error == 0 &&
-        defaults_disposed && handle_lifetimes_balanced() && event_setdown_error == 0
-            ? 0 : 20);
+    const bool ui_event_passed = emit_ui_event_completion_report(
+        {invocation.ui_lifecycle_mode, invocation.ui_idle_mode,
+         invocation.ui_keydown_mode, invocation.ui_mouse_exited_mode,
+         invocation.draw_event_mode, invocation.drag_event_mode,
+         invocation.click_event_mode, invocation.drag_steps,
+         invocation.keydown_code, invocation.keydown_modifiers, event_target,
+         event_error, cursor, event_out_flags, changed_value, lifecycle_errors,
+         plugin_state_before_close, lifecycle_context_stable,
+         lifecycle_host_state_cleared, event_assignments_applied,
+         arbitrary_values_disposed, defaults_disposed, g_drawbot_objects.empty(),
+         event_sequence_setdown_error, event_setdown_error,
+         requested_parameters_json(invocation.ui_event_assignments)});
+    return session.finish(ui_event_passed ? 0 : 20);
   }
   if (is_rendering_worker() && invocation.request_mode &&
       (params_error != 0 || !parameter_count_contract_valid ||
@@ -5746,143 +5259,15 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
     return session.finish(early_result);
   }
   if (is_render_worker() && invocation.audio_mode) {
-    constexpr std::size_t kAudioGuardSamples = 8;
-    constexpr float kAudioGuardValue = 1234567.0f;
-    std::vector<std::array<std::byte, kParamSize>> audio_definitions(g_params.size() + 1);
-    initialize_parameter_definitions(audio_definitions);
-    const bool assignments_applied =
-        apply_requested_assignments(audio_definitions, invocation.requested_parameters);
-    std::vector<std::array<std::byte, kParamSize>> audio_values(audio_definitions.size() * 2);
-    for (std::size_t index = 0; index < audio_definitions.size(); ++index) {
-      audio_values[index] = audio_definitions[index];
-      audio_values[index + audio_definitions.size()] = audio_definitions[index];
-    }
-    std::vector<void*> audio_params(audio_values.size());
-    for (std::size_t index = 0; index < audio_values.size(); ++index)
-      audio_params[index] = audio_values[index].data();
-
-    write<int32_t>(input, 336, 0);
-    write<int32_t>(input, 340, invocation.external_audio_samples);
-    write<int32_t>(input, 344, invocation.external_audio_samples);
-    write<uint32_t>(input, kInTimeScale, 44100);
-    write<double>(input, 352, 44100.0);
-    write<int16_t>(input, 360, 1);
-    write<int16_t>(input, 362, 2);
-    write<int16_t>(input, 364, 4);
-    write<int32_t>(input, 368, invocation.external_audio_samples);
-    write<void*>(input, 376, invocation.external_audio.data());
-    aexcompat::host_audio::runtime().set_source(&invocation.external_audio, invocation.external_audio_samples);
-
-    std::cerr << "stage:audio_setup_begin\n" << std::flush;
-    const int32_t audio_setup_error = assignments_applied
-        ? entry(kAudioSetup, input.data(), output.data(), audio_params.data(), nullptr, nullptr)
-        : -1;
-    std::cerr << "stage:audio_setup_end error=" << audio_setup_error << "\n" << std::flush;
-    const int32_t output_start = read<int32_t>(output, 356);
-    const int32_t output_samples = read<int32_t>(output, 360);
-    const bool setup_range_valid = output_start >= 0 && output_samples >= 0 &&
-        output_start <= invocation.external_audio_samples &&
-        output_samples <= invocation.external_audio_samples - output_start;
-
-    std::vector<float> guarded_output(
-        kAudioGuardSamples + static_cast<std::size_t>(invocation.external_audio_samples) +
-        kAudioGuardSamples, kAudioGuardValue);
-    auto* audio_destination = guarded_output.data() + kAudioGuardSamples;
-    if (setup_range_valid) {
-      std::fill_n(audio_destination, invocation.external_audio_samples, 0.0f);
-      write<double>(output, 368, 44100.0);
-      write<int16_t>(output, 376, 1);
-      write<int16_t>(output, 378, 2);
-      write<int16_t>(output, 380, 4);
-      write<int32_t>(output, 384, output_samples);
-      write<void*>(output, 392, audio_destination);
-    }
-    std::cerr << "stage:audio_render_begin\n" << std::flush;
-    const int32_t audio_render_error = audio_setup_error == 0 && setup_range_valid
-        ? entry(kAudioRender, input.data(), output.data(), audio_params.data(), nullptr, nullptr)
-        : -1;
-    std::cerr << "stage:audio_render_end error=" << audio_render_error << "\n" << std::flush;
-    std::cerr << "stage:audio_setdown_begin\n" << std::flush;
-    const int32_t audio_setdown_error = audio_setup_error == 0
-        ? entry(kAudioSetdown, input.data(), output.data(), audio_params.data(), nullptr, nullptr)
-        : -1;
-    std::cerr << "stage:audio_setdown_end error=" << audio_setdown_error << "\n" << std::flush;
-
-    const bool guards_intact = std::all_of(guarded_output.begin(),
-        guarded_output.begin() + kAudioGuardSamples,
-        [=](float value) { return value == kAudioGuardValue; }) &&
-        std::all_of(guarded_output.end() - kAudioGuardSamples, guarded_output.end(),
-        [=](float value) { return value == kAudioGuardValue; });
-    const bool samples_finite = setup_range_valid && std::all_of(
-        audio_destination, audio_destination + output_samples,
-        [](float value) { return std::isfinite(value); });
-    const bool audio_lifetimes_balanced = audio_handle_lifetimes_balanced();
-    const bool arbitrary_defaults_disposed = dispose_arbitrary_defaults(entry, input, output);
-    std::cerr << "stage:global_setdown_begin\n" << std::flush;
-    const int32_t audio_global_setdown_error = global_error == 0
-        ? invoke_global_setdown(entry, input.data(), output.data()) : -1;
-    std::cerr << "stage:global_setdown_end error=" << audio_global_setdown_error
-              << "\n" << std::flush;
-    const bool passed = global_error == 0 && params_error == 0 && assignments_applied &&
-        audio_setup_error == 0 && audio_render_error == 0 && audio_setdown_error == 0 &&
-        setup_range_valid && guards_intact && samples_finite && audio_lifetimes_balanced &&
-        audio_telemetry().invalid_operations == 0 && arbitrary_defaults_disposed &&
-        handle_lifetimes_balanced() && audio_global_setdown_error == 0;
-    bool output_created = false;
-    if (passed) {
-      HANDLE file = CreateFileW(invocation.external_audio_output.c_str(), GENERIC_WRITE, 0, nullptr,
-                                CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
-      if (file != INVALID_HANDLE_VALUE) {
-        const DWORD bytes = static_cast<DWORD>(output_samples * sizeof(float));
-        DWORD written = 0;
-        output_created = WriteFile(file, audio_destination, bytes, &written, nullptr) &&
-            written == bytes && FlushFileBuffers(file);
-        CloseHandle(file);
-        if (!output_created) DeleteFileW(invocation.external_audio_output.c_str());
-      }
-    }
+    const AudioModeRequest audio_request{
+        entry, &input, &output, global_error, params_error,
+        invocation.external_audio_samples, &invocation.external_audio,
+        &invocation.external_audio_output, &invocation.requested_parameters};
+    const auto audio_outcome = run_audio_mode(audio_request);
     if (!session.prepare_protocol_report()) return session.finish(14);
     restore_native_stdout();
-    std::cout << "{\"schema_version\":1,\"stage\":\"audio_render\",\"status\":\""
-              << (passed && output_created ? "render_completed" : "render_failed")
-              << "\",\"global_setup_error\":" << global_error
-              << ",\"params_setup_error\":" << params_error
-              << ",\"audio_setup_error\":" << audio_setup_error
-              << ",\"audio_render_error\":" << audio_render_error
-              << ",\"audio_setdown_error\":" << audio_setdown_error
-              << ",\"global_setdown_error\":" << audio_global_setdown_error
-              << ",\"sample_rate\":44100,\"channels\":1,\"sample_format\":\"float32\""
-              << ",\"input_samples\":" << invocation.external_audio_samples
-              << ",\"output_start_sample\":" << output_start
-              << ",\"output_samples\":" << output_samples
-              << ",\"setup_range_valid\":" << (setup_range_valid ? "true" : "false")
-              << ",\"guard_bytes_intact\":" << (guards_intact ? "true" : "false")
-              << ",\"samples_finite\":" << (samples_finite ? "true" : "false")
-              << ",\"audio_checkout_calls\":" << audio_telemetry().checkout_calls
-              << ",\"audio_usage_advertised\":" << (audio_telemetry().usage_advertised ? "true" : "false")
-              << ",\"audio_checkout_allowed\":" << (audio_telemetry().checkout_allowed ? "true" : "false")
-              << ",\"rejected_unadvertised_audio_checkouts\":" << audio_telemetry().rejected_unadvertised_checkouts
-              << ",\"rejected_audio_format_requests\":" << audio_telemetry().rejected_format_requests
-              << ",\"audio_handle_exhaustions\":" << audio_telemetry().handle_exhaustions
-              << ",\"peak_live_audio_handles\":" << audio_telemetry().peak_live_handles
-              << ",\"audio_checkin_calls\":" << audio_telemetry().checkin_calls
-              << ",\"audio_get_data_calls\":" << audio_telemetry().get_data_calls
-              << ",\"invalid_audio_operations\":" << audio_telemetry().invalid_operations
-              << ",\"last_audio_checkout_start_time\":" << audio_telemetry().last_checkout_start_time
-              << ",\"last_audio_checkout_duration\":" << audio_telemetry().last_checkout_duration
-              << ",\"last_audio_checkout_time_scale\":" << audio_telemetry().last_checkout_time_scale
-              << ",\"last_audio_window_start_sample\":" << audio_telemetry().last_window_start_sample
-              << ",\"last_audio_window_sample_count\":" << audio_telemetry().last_window_sample_count
-              << ",\"last_audio_window_silence_samples\":" << audio_telemetry().last_window_silence_samples
-              << ",\"last_audio_output_rate_fixed\":" << audio_telemetry().last_output_rate
-              << ",\"last_audio_output_bytes_per_sample\":" << audio_telemetry().last_output_bytes_per_sample
-              << ",\"last_audio_output_channels\":" << audio_telemetry().last_output_channels
-              << ",\"last_audio_output_format\":" << audio_telemetry().last_output_format
-              << ",\"last_audio_returned_sample_frames\":" << audio_telemetry().last_returned_sample_frames
-              << ",\"audio_lifetimes_balanced\":"
-              << (audio_lifetimes_balanced ? "true" : "false")
-              << ",\"output_created\":" << (output_created ? "true" : "false") << "}\n";
-    return session.finish(passed && output_created ? 0 : 20);
+    emit_audio_render_report(audio_request, audio_outcome);
+    return session.finish(audio_outcome.passed && audio_outcome.output_created ? 0 : 20);
   }
   std::array<int32_t, 5> lifecycle_errors{-1, -1, -1, -1, -1};
   bool lifecycle_data_null = false;
