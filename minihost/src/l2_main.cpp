@@ -67,6 +67,7 @@
 #include "worker_selftest_dispatch.hpp"
 #include "worker_smart_runtime.hpp"
 #include "worker_smart_execution.hpp"
+#include "worker_smart_setup.hpp"
 #include "worker_mask_runtime.hpp"
 #include "worker_mask_selftests.hpp"
 #include "worker_pf_path_runtime.hpp"
@@ -5166,60 +5167,32 @@ SmartResult smart_render_runtime(EffectEntry entry, std::array<std::byte, kInSiz
   reset_smart_host_telemetry();
   SmartResult result;
   result.runtime = smart_session.snapshot();
-  const uint32_t effective_out_flags = read<uint32_t>(command_output, kOutFlags);
-  const uint32_t effective_out_flags2 = read<uint32_t>(command_output, kOutFlags2);
-  smart_state().wide_time_checkout_allowed =
-      (effective_out_flags & kOutFlagWideTimeInput) != 0 ||
-      (effective_out_flags2 & kOutFlag2AutomaticWideTimeInput) != 0;
-  smart_state().current_time = external_current_time;
-  smart_state().current_time_scale = external_time_scale;
-  smart_state().rejected_temporal_checkouts = 0;
-  smart_state().secondary_layer_slot = g_secondary_layer_slot;
-  smart_state().full_resolution_width = g_full_resolution_width;
-  smart_state().full_resolution_height = g_full_resolution_height;
-  smart_state().pixel_aspect_numerator = g_pixel_aspect_ratio.numerator;
-  smart_state().pixel_aspect_denominator = g_pixel_aspect_ratio.denominator;
-  const bool deep16 = case_id == "deep16_default" || (external_rgba && external_pixel_bytes == 8);
-  const bool fixture_gpu_negotiation = case_id == "gpu_fallback_float32";
-  const bool opencl_gpu_negotiation = case_id == "gpu_opencl_float32";
-  const bool directx_gpu_negotiation = case_id == "gpu_directx_float32";
-  uint32_t gpu_device_index = 0;
-  const std::string gpu_device_prefix = "gpu_device_";
-  const bool explicit_gpu_device = case_id.rfind(gpu_device_prefix, 0) == 0;
-  if (explicit_gpu_device) {
-    const std::string ordinal = case_id.substr(gpu_device_prefix.size());
-    if (ordinal.empty() || ordinal.size() > 2 ||
-        !std::all_of(ordinal.begin(), ordinal.end(), [](unsigned char ch) {
-          return ch >= '0' && ch <= '9';
-        })) return result;
-    gpu_device_index = static_cast<uint32_t>(std::stoul(ordinal));
-    if (gpu_device_index >= kMaxCudaDevices) return result;
-  }
-  const bool force_cpu_image = case_id == "request_cpu";
-  const bool advertised_gpu_support =
-      (read<uint32_t>(command_output, kOutFlags2) & (1u << 25)) != 0;
-  const bool gpu_negotiation = fixture_gpu_negotiation || opencl_gpu_negotiation ||
-      directx_gpu_negotiation ||
-      explicit_gpu_device ||
-      (external_rgba && external_pixel_bytes == 16 && advertised_gpu_support &&
-       !force_cpu_image);
-  const bool missing_input = case_id == "error_missing_input";
-  const bool crash_null_output = case_id == "crash_null_output_world";
-  const bool temporal_context = case_id == "temporal_context";
-  const bool partial_output_request = case_id == "partial_output_request";
-  const bool float32 = case_id == "float32_default" || gpu_negotiation ||
-      (external_rgba && external_pixel_bytes == 16);
-  const bool connected_map = case_id == "connected_map" || case_id == "inverted_map";
-  const int32_t width = external_rgba ? external_width :
-      (connected_map ? 11 : ((case_id == "odd_dimensions" || case_id == "padded_stride") ? 13 : 16));
-  const int32_t height = external_rgba ? external_height :
-      (connected_map ? 7 : ((case_id == "odd_dimensions" || case_id == "padded_stride") ? 9 : 12));
-  if (width <= 0 || height <= 0 || width > 4096 || height > 4096) return result;
-  const int32_t pixel_bytes = float32 ? 16 : (deep16 ? 8 : 4);
-  const int32_t rowbytes = case_id == "padded_stride" ? 64 : width * pixel_bytes;
+  const auto plan = aexcompat::worker_runtime::smart_setup::prepare(
+      {g_secondary_layer_slot, g_full_resolution_width, g_full_resolution_height,
+       g_pixel_aspect_ratio.numerator, g_pixel_aspect_ratio.denominator},
+      {&command_output, &case_id, external_rgba != nullptr, external_width,
+       external_height, external_current_time, external_time_scale,
+       external_pixel_bytes});
+  if (!plan.valid) return result;
+  const bool deep16 = plan.deep16;
+  const bool fixture_gpu_negotiation = plan.fixture_gpu_negotiation;
+  const bool opencl_gpu_negotiation = plan.opencl_gpu_negotiation;
+  const bool directx_gpu_negotiation = plan.directx_gpu_negotiation;
+  const bool explicit_gpu_device = plan.explicit_gpu_device;
+  const uint32_t gpu_device_index = plan.gpu_device_index;
+  const bool gpu_negotiation = plan.gpu_negotiation;
+  const bool missing_input = plan.missing_input;
+  const bool crash_null_output = plan.crash_null_output;
+  const bool temporal_context = plan.temporal_context;
+  const bool partial_output_request = plan.partial_output_request;
+  const bool float32 = plan.float32;
+  const bool connected_map = plan.connected_map;
+  const int32_t width = plan.width;
+  const int32_t height = plan.height;
+  const int32_t pixel_bytes = plan.pixel_bytes;
+  const int32_t rowbytes = plan.rowbytes;
   const aexcompat::render::ParameterProfile parameter_profile =
       aexcompat::render::prepare_parameter_profile(case_id);
-  if (case_id != "default" && case_id != "request" && !deep16 && !float32 && !missing_input && !crash_null_output && !temporal_context && !partial_output_request && !connected_map) return result;
   InputPixelBuffer source(static_cast<std::size_t>(rowbytes) * height);
   if (!source) return result;
   std::memset(source.data(), 0x5A, static_cast<std::size_t>(rowbytes) * height);
