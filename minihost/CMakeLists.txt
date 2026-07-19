@@ -48,6 +48,7 @@ set(AEXCOMPAT_WORKER_RUNTIME_CORE_SOURCES
     src/worker_pf_path_runtime.cpp
     src/worker_aegp_render_options.cpp
     src/worker_aegp_render_selftests.cpp
+    src/worker_aegp_world_selftests.cpp
     src/worker_aegp_init_runtime.cpp
     src/worker_aegp_scene.cpp
     src/worker_aegp_scene_runtime.cpp

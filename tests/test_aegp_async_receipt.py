@@ -7,6 +7,7 @@ import subprocess
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "minihost" / "src" / "l2_main.cpp"
 RECEIPTS = ROOT / "minihost" / "src" / "worker_render_receipts.cpp"
+WORLD_SELFTESTS = ROOT / "minihost" / "src" / "worker_aegp_world_selftests.cpp"
 
 
 def _worker() -> pathlib.Path | None:
@@ -48,7 +49,10 @@ def test_receipt_registry_is_bounded_and_invalidates_borrowed_world_first():
 
 
 def test_receipt_and_borrowed_world_handles_are_opaque_and_never_reused():
-    text = RECEIPTS.read_text(encoding="utf-8") + SOURCE.read_text(encoding="utf-8")
+    text = "".join(
+        path.read_text(encoding="utf-8")
+        for path in (RECEIPTS, SOURCE, WORLD_SELFTESTS)
+    )
     for marker in (
         "g_receipt_generation{1}",
         "g_world_generation{1}",

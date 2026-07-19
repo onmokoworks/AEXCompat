@@ -42,6 +42,21 @@ def test_world_suite3_is_exact_typed_sdk_layout():
         assert f"&{callback}" in text
 
 
+def test_aegp_world_selftests_have_an_independent_translation_unit():
+    owner = (ROOT / "minihost" / "src" / "worker_aegp_world_selftests.cpp").read_text(
+        encoding="utf-8"
+    )
+    cmake = (ROOT / "minihost" / "CMakeLists.txt").read_text(encoding="utf-8")
+    main = SOURCE.read_text(encoding="utf-8")
+    assert "bool verify_world_suite3(const Hooks& h)" in owner
+    assert "bool verify_world_mfr_safety(const Hooks& h)" in owner
+    assert "bool verify_async_receipts(const Hooks& h)" in owner
+    assert "class SyntheticReceiptScope" in owner
+    assert "bool verify_aegp_world_suite3()" in main
+    assert "std::atomic_bool start" not in main
+    assert "worker_aegp_world_selftests.cpp" in cmake
+
+
 def test_world_suite3_callbacks_are_cross_tu_calling_convention_checked():
     text = SOURCE.read_text(encoding="utf-8")
     abi = ABI_SOURCE.read_text(encoding="utf-8")
