@@ -15029,25 +15029,13 @@ int worker_main_impl(int argc, wchar_t **argv) {
                  (smart_state().pixel_format == "argb16" ? 8 : 4)))
             << ",\"input_sha256\":\"" << input_hash << "\",\"output_sha256\":\""
             << output_hash << "\",\"guard_bytes_intact\":" << (guards_intact ? "true" : "false")
-            << world_debug_report_json()
-            << ",\"custom_ui_click_dispatched\":" << (g_render_click_enabled ? "true" : "false")
-            << ",\"custom_ui_click_error\":" << g_render_click_error
-            << ",\"custom_ui_click_out_flags\":" << g_render_click_out_flags
-            << ",\"custom_ui_click_changed_value\":"
-            << (g_render_click_changed_value ? "true" : "false")
-            << ",\"custom_ui_draw_dispatched\":" << (g_render_draw_enabled ? "true" : "false")
-            << ",\"custom_ui_draw_error\":" << g_render_draw_error
-            << ",\"custom_ui_draw_out_flags\":" << g_render_draw_out_flags
-            << ",\"custom_ui_lifecycle_errors\":[" << g_render_ui_lifecycle_errors[0]
-            << ',' << g_render_ui_lifecycle_errors[1] << ','
-            << g_render_ui_lifecycle_errors[2] << ',' << g_render_ui_lifecycle_errors[3] << ']'
-            << ",\"custom_ui_context_closed\":"
-            << (g_render_ui_context_closed ? "true" : "false")
-            << ",\"app_color_picker_calls\":" << g_app_color_picker_calls
-            << ",\"app_invalidate_rect_calls\":" << g_app_invalidate_rect_calls
-            << ",\"picker_color_rgba\":[" << g_app_picker_color[0] << ','
-            << g_app_picker_color[1] << ',' << g_app_picker_color[2] << ','
-            << g_app_picker_color[3] << ']'
+            << world_debug_report_json();
+  aexcompat::worker_render_report::append_custom_ui(report_snapshot, {
+      g_render_click_enabled, g_render_click_error, g_render_click_out_flags,
+      g_render_click_changed_value, g_render_draw_enabled, g_render_draw_error,
+      g_render_draw_out_flags, g_render_ui_lifecycle_errors, g_render_ui_context_closed,
+      g_app_color_picker_calls, g_app_invalidate_rect_calls, g_app_picker_color});
+  report_snapshot.stream()
             << ",\"suite_leases_balanced\":" << (suite_leases_balanced() ? "true" : "false")
             << ",\"suite_lease_warning\":" << (!suite_leases_balanced() ? "true" : "false")
             << ",\"suite_acquires\":" << suite_acquire_count()
@@ -15180,15 +15168,15 @@ int worker_main_impl(int argc, wchar_t **argv) {
             << ",\"shutter_phase_fixed\":" << read<int32_t>(input, 400)
             << ",\"in_data_dimensions\":[" << read<int32_t>(input, 252) << "," << read<int32_t>(input, 256) << "]"
             << ",\"pre_effect_source_origin\":[" << read<int32_t>(input, 392) << "," << read<int32_t>(input, 396) << "]"
-            << ",\"output_origin\":[" << read<int32_t>(input, 276) << "," << read<int32_t>(input, 280) << "]"
-            << ",\"requested_parameters\":" << requested_parameters_json(requested_parameters)
-            << ",\"requested_amount\":" << static_cast<int32_t>(requested_value(requested_parameters, L"amount"))
-            << ",\"requested_direction\":" << static_cast<int32_t>(requested_value(requested_parameters, L"direction"))
-            << ",\"requested_seed\":" << static_cast<int32_t>(requested_value(requested_parameters, L"seed"))
-            << ",\"requested_mix\":" << std::setprecision(17) << requested_value(requested_parameters, L"mix")
-            << ",\"requested_invert_map\":" << static_cast<int32_t>(requested_value(requested_parameters, L"invert_map"))
-            << ",\"render_performed\":" << (nop_render_advertised ? "false" : "true")
-            << ",\"module_audit\":" << module_audit_json() << "}\n";
+            << ",\"output_origin\":[" << read<int32_t>(input, 276) << "," << read<int32_t>(input, 280) << "]";
+  aexcompat::worker_render_report::finish_requested_parameters(report_snapshot, {
+      requested_parameters_json(requested_parameters),
+      static_cast<int32_t>(requested_value(requested_parameters, L"amount")),
+      static_cast<int32_t>(requested_value(requested_parameters, L"direction")),
+      static_cast<int32_t>(requested_value(requested_parameters, L"seed")),
+      requested_value(requested_parameters, L"mix"),
+      static_cast<int32_t>(requested_value(requested_parameters, L"invert_map")),
+      !nop_render_advertised, module_audit_json()});
   aexcompat::worker_render_report::emit(report_snapshot, std::cout);
   } else if (is_smart_worker()) {
   restore_native_stdout();
@@ -15262,25 +15250,13 @@ int worker_main_impl(int argc, wchar_t **argv) {
             << ",\"undefined_tail_bytes_per_row\":0"
             << ",\"input_sha256\":\"" << smart.input_hash << "\",\"output_sha256\":\""
             << smart.output_hash << "\",\"result_rects_valid\":" << (smart.rects_valid ? "true" : "false")
-            << world_debug_report_json()
-            << ",\"custom_ui_click_dispatched\":" << (g_render_click_enabled ? "true" : "false")
-            << ",\"custom_ui_click_error\":" << g_render_click_error
-            << ",\"custom_ui_click_out_flags\":" << g_render_click_out_flags
-            << ",\"custom_ui_click_changed_value\":"
-            << (g_render_click_changed_value ? "true" : "false")
-            << ",\"custom_ui_draw_dispatched\":" << (g_render_draw_enabled ? "true" : "false")
-            << ",\"custom_ui_draw_error\":" << g_render_draw_error
-            << ",\"custom_ui_draw_out_flags\":" << g_render_draw_out_flags
-            << ",\"custom_ui_lifecycle_errors\":[" << g_render_ui_lifecycle_errors[0]
-            << ',' << g_render_ui_lifecycle_errors[1] << ','
-            << g_render_ui_lifecycle_errors[2] << ',' << g_render_ui_lifecycle_errors[3] << ']'
-            << ",\"custom_ui_context_closed\":"
-            << (g_render_ui_context_closed ? "true" : "false")
-            << ",\"app_color_picker_calls\":" << g_app_color_picker_calls
-            << ",\"app_invalidate_rect_calls\":" << g_app_invalidate_rect_calls
-            << ",\"picker_color_rgba\":[" << g_app_picker_color[0] << ','
-            << g_app_picker_color[1] << ',' << g_app_picker_color[2] << ','
-            << g_app_picker_color[3] << ']'
+            << world_debug_report_json();
+  aexcompat::worker_render_report::append_custom_ui(report_snapshot, {
+      g_render_click_enabled, g_render_click_error, g_render_click_out_flags,
+      g_render_click_changed_value, g_render_draw_enabled, g_render_draw_error,
+      g_render_draw_out_flags, g_render_ui_lifecycle_errors, g_render_ui_context_closed,
+      g_app_color_picker_calls, g_app_invalidate_rect_calls, g_app_picker_color});
+  report_snapshot.stream()
             << ",\"result_rect\":[" << smart.result_rect[0] << "," << smart.result_rect[1]
             << "," << smart.result_rect[2] << "," << smart.result_rect[3] << "]"
             << ",\"max_result_rect\":[" << smart.max_result_rect[0] << "," << smart.max_result_rect[1]
@@ -15418,15 +15394,15 @@ int worker_main_impl(int argc, wchar_t **argv) {
             << ",\"aegp_memory_freed\":" << aegp_memory_statistics().freed
             << ",\"live_aegp_memory_handles\":" << aegp_memory_statistics().live_count
             << ",\"live_aegp_memory_bytes\":" << aegp_memory_statistics().live_bytes
-            << ",\"invalid_aegp_memory_operations\":" << aegp_memory_statistics().invalid_operations
-            << ",\"requested_parameters\":" << requested_parameters_json(requested_parameters)
-            << ",\"requested_amount\":" << static_cast<int32_t>(requested_value(requested_parameters, L"amount"))
-            << ",\"requested_direction\":" << static_cast<int32_t>(requested_value(requested_parameters, L"direction"))
-            << ",\"requested_seed\":" << static_cast<int32_t>(requested_value(requested_parameters, L"seed"))
-            << ",\"requested_mix\":" << std::setprecision(17) << requested_value(requested_parameters, L"mix")
-            << ",\"requested_invert_map\":" << static_cast<int32_t>(requested_value(requested_parameters, L"invert_map"))
-            << ",\"render_performed\":" << (nop_render_advertised ? "false" : "true")
-            << ",\"module_audit\":" << module_audit_json() << "}\n";
+            << ",\"invalid_aegp_memory_operations\":" << aegp_memory_statistics().invalid_operations;
+  aexcompat::worker_render_report::finish_requested_parameters(report_snapshot, {
+      requested_parameters_json(requested_parameters),
+      static_cast<int32_t>(requested_value(requested_parameters, L"amount")),
+      static_cast<int32_t>(requested_value(requested_parameters, L"direction")),
+      static_cast<int32_t>(requested_value(requested_parameters, L"seed")),
+      requested_value(requested_parameters, L"mix"),
+      static_cast<int32_t>(requested_value(requested_parameters, L"invert_map")),
+      !nop_render_advertised, module_audit_json()});
   aexcompat::worker_render_report::emit(report_snapshot, std::cout);
   } else {
   report(global_error == 0 && params_error == 0 ? "selectors_completed" : "selector_error",

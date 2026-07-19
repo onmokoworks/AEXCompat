@@ -4,6 +4,9 @@ import re
 
 ROOT = Path(__file__).resolve().parents[1]
 MAIN = (ROOT / "minihost" / "src" / "l2_main.cpp").read_text(encoding="utf-8")
+RENDER_REPORT = (ROOT / "minihost" / "src" / "worker_render_report.cpp").read_text(
+    encoding="utf-8"
+)
 ADMISSION = (ROOT / "minihost" / "src" / "worker_runtime_admission.cpp").read_text(
     encoding="utf-8"
 )
@@ -74,7 +77,8 @@ def test_pre_unload_audit_precedes_final_free_and_direct_workers_remain_optional
     assert final_audit < final_free
     assert 'std::string status{"not_required"}' in HEADER
     assert ': "not_required")' in SOURCE
-    assert MAIN.count('",\\\"module_audit\\\":" << module_audit_json()') >= 3
+    assert MAIN.count("finish_requested_parameters(report_snapshot") == 2
+    assert '\\\"module_audit\\\"' in RENDER_REPORT
 
 
 def test_all_effectmain_calls_share_the_cumulative_audit_boundary():

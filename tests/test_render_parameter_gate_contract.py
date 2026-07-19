@@ -8,6 +8,7 @@ WORKER = ROOT / "minihost" / "src" / "l2_main.cpp"
 CLI_DISPATCH = ROOT / "minihost" / "src" / "l2_cli_dispatch.cpp"
 RUNTIME_ADMISSION = ROOT / "minihost" / "src" / "worker_runtime_admission.cpp"
 REQUEST_PARSER = ROOT / "minihost" / "src" / "worker_request_parser.cpp"
+RENDER_REPORT = ROOT / "minihost" / "src" / "worker_render_report.cpp"
 
 
 class RenderParameterGateContractTests(unittest.TestCase):
@@ -73,6 +74,7 @@ class RenderParameterGateContractTests(unittest.TestCase):
 
     def test_worker_revalidates_and_echoes_bound_values(self):
         worker = WORKER.read_text(encoding="utf-8")
+        worker_family = worker + RENDER_REPORT.read_text(encoding="utf-8")
         cli_dispatch = CLI_DISPATCH.read_text(encoding="utf-8")
         for marker in ('L"--render-request"', 'L"--smart-mask-context-request"'):
             self.assertIn(marker, cli_dispatch)
@@ -88,7 +90,7 @@ class RenderParameterGateContractTests(unittest.TestCase):
                        "requested_mix", "requested_invert_map", "std::setprecision(17)",
                        "parse_mask_context_payload", "encoded.size() > 8192",
                        "total_vertices > 128"):
-            self.assertIn(marker, worker)
+            self.assertIn(marker, worker_family)
         # Payload rejection is delegated through the request parser before
         # worker runtime admission can load the plug-in.
         parser = REQUEST_PARSER.read_text(encoding="utf-8")
