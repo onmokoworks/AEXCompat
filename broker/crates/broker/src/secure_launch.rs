@@ -86,6 +86,7 @@ pub fn secure_launch(
         request.worker_expected_size,
         &args,
         request.require_module_audit,
+        request.repository,
         timeout,
     )
 }
@@ -98,6 +99,7 @@ fn secure_launch_impl(
     worker_expected_size: u64,
     args: &[String],
     require_module_audit: bool,
+    repository: &Path,
     timeout: Duration,
 ) -> io::Result<SecureLaunchResult> {
     use crate::restricted_worker_acl::{protect_sealed_load_tree, RestrictedWorkerSid};
@@ -125,12 +127,19 @@ fn secure_launch_impl(
         &worker_sid,
     )
     .map_err(|error| stage_error("trusted worker staging", error))?;
+    // One-shot workers run with the repository as their working directory,
+    // exactly like session workers (`secure_launch_session`): the native
+    // parameter-animation loader only accepts sidecars whose parent is
+    // current_path()/target/image-transport, the same broker-owned transport
+    // directory the one-shot input raws already live in. A staging-root cwd
+    // makes that pin unsatisfiable and every one-shot sidecar rejected
+    // (issue #141).
     let result = crate::windows_process::run_isolated_with_restricted_token(
         worker_stage.worker_path(),
         args,
         timeout,
         &token,
-        worker_stage.root(),
+        repository,
     )
     .map_err(|error| stage_error("restricted process launch", error))?;
     if require_module_audit && result.classification == ExitClassification::Ok {
@@ -302,6 +311,7 @@ fn secure_launch_impl(
     _worker_expected_size: u64,
     _args: &[String],
     _require_module_audit: bool,
+    _repository: &Path,
     _timeout: Duration,
 ) -> io::Result<SecureLaunchResult> {
     Err(io::Error::new(
