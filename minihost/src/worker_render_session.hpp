@@ -66,8 +66,11 @@ class SessionChannels {
   unsigned char* view() const { return view_; }
 
   // Length-prefixed control framing: u32 LE byte count, then UTF-8 JSON.
-  // read_message returns false on EOF, transport error, or oversized frame.
-  bool read_message(std::string& payload);
+  // A clean EOF on a frame boundary is the broker-side close signal and must
+  // stay distinguishable from malformed framing (zero or oversized length,
+  // EOF inside a frame), which is a protocol violation.
+  enum class ReadResult { Message, Eof, Violation };
+  ReadResult read_message(std::string& payload);
   bool write_message(const std::string& payload);
 
   uint32_t read_header_u32(std::size_t offset) const;

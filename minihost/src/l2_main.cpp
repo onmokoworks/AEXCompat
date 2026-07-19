@@ -4921,7 +4921,14 @@ RenderSessionOutcome run_render_session(
   std::vector<unsigned char> frame_rgba(wrs::input_slot_bytes(geometry));
   std::vector<unsigned char> captured;
   std::string message;
-  while (channels.read_message(message)) {
+  for (;;) {
+    const auto read_result = channels.read_message(message);
+    if (read_result == wrs::SessionChannels::ReadResult::Eof) break;
+    if (read_result != wrs::SessionChannels::ReadResult::Message) {
+      // Malformed framing is invalid control input, not a close signal.
+      outcome.protocol_violation = true;
+      break;
+    }
     JsonValue root;
     if (!StrictJsonParser(std::move(message)).parse(root) ||
         !std::holds_alternative<JsonValue::Object>(root.value)) {

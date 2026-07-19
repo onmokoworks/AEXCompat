@@ -135,7 +135,9 @@ class SessionTransport:
 
     def send(self, payload):
         data = json.dumps(payload).encode() if isinstance(payload, dict) else payload
-        frame = struct.pack("<I", len(data)) + data
+        self.send_raw(struct.pack("<I", len(data)) + data)
+
+    def send_raw(self, frame):
         written = wintypes.DWORD()
         assert self.kernel32.WriteFile(
             wintypes.HANDLE(self.request_write), frame, len(frame),
@@ -304,6 +306,26 @@ def test_session_rejects_unknown_message_fields_fail_closed():
         message["parameters"] = {"slot": 1}
         transport.send(message)
         # Protocol violation: no response is defined; the worker terminates.
+        assert transport.receive() is None
+        code, _, _ = _finish(process)
+        assert code == EXIT_PROTOCOL_VIOLATION
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.communicate(timeout=30)
+
+
+def test_session_treats_malformed_framing_as_protocol_violation():
+    _require_artifacts()
+    transport = SessionTransport()
+    process = _spawn(transport)
+    try:
+        transport.write_input(45, 1)
+        transport.send(render_frame_message(0, 0))
+        assert transport.receive()["status"] == "ok"
+        # A zero-length prefix is invalid framing, not a close signal: the
+        # worker must exit through the protocol-violation path, not exit 0.
+        transport.send_raw(struct.pack("<I", 0))
         assert transport.receive() is None
         code, _, _ = _finish(process)
         assert code == EXIT_PROTOCOL_VIOLATION

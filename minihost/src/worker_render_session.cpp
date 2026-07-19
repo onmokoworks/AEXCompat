@@ -44,17 +44,19 @@ HANDLE pipe_from_variable(const wchar_t* name) {
   return handle;
 }
 
-bool read_exact(HANDLE pipe, unsigned char* destination, std::size_t bytes) {
+// Returns the byte count actually collected; a stop before `bytes` means the
+// pipe hit EOF or an error mid-read.
+std::size_t read_up_to(HANDLE pipe, unsigned char* destination, std::size_t bytes) {
   std::size_t collected = 0;
   while (collected < bytes) {
     DWORD read = 0;
     const DWORD request = static_cast<DWORD>(bytes - collected);
     if (!ReadFile(pipe, destination + collected, request, &read, nullptr) ||
         read == 0)
-      return false;
+      break;
     collected += read;
   }
-  return true;
+  return collected;
 }
 
 bool write_exact(HANDLE pipe, const unsigned char* source, std::size_t bytes) {
@@ -131,18 +133,23 @@ bool SessionChannels::open_from_environment(const SessionGeometry& geometry) {
   return true;
 }
 
-bool SessionChannels::read_message(std::string& payload) {
-  if (!request_pipe_) return false;
+SessionChannels::ReadResult SessionChannels::read_message(std::string& payload) {
+  if (!request_pipe_) return ReadResult::Violation;
   unsigned char prefix[4];
-  if (!read_exact(request_pipe_, prefix, sizeof(prefix))) return false;
+  const std::size_t prefix_read = read_up_to(request_pipe_, prefix, sizeof(prefix));
+  if (prefix_read == 0) return ReadResult::Eof;
+  if (prefix_read != sizeof(prefix)) return ReadResult::Violation;
   const uint32_t length = static_cast<uint32_t>(prefix[0]) |
                           (static_cast<uint32_t>(prefix[1]) << 8) |
                           (static_cast<uint32_t>(prefix[2]) << 16) |
                           (static_cast<uint32_t>(prefix[3]) << 24);
-  if (length == 0 || length > kMaxMessageBytes) return false;
+  if (length == 0 || length > kMaxMessageBytes) return ReadResult::Violation;
   payload.resize(length);
-  return read_exact(request_pipe_,
-                    reinterpret_cast<unsigned char*>(payload.data()), length);
+  return read_up_to(request_pipe_,
+                    reinterpret_cast<unsigned char*>(payload.data()),
+                    length) == length
+             ? ReadResult::Message
+             : ReadResult::Violation;
 }
 
 bool SessionChannels::write_message(const std::string& payload) {
