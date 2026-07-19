@@ -45,9 +45,10 @@ fetch_review_threads() {
   query='query($owner:String!,$repo:String!,$pr:Int!,$endCursor:String){repository(owner:$owner,name:$repo){pullRequest(number:$pr){reviewThreads(first:100,after:$endCursor){nodes{id isResolved}pageInfo{hasNextPage endCursor}}}}}'
   out=$(gh api graphql --paginate -F owner="$OWNER" -F repo="$REPO" -F pr="$PR" -f query="$query" 2>/dev/null) || return 1
   comment_query='query($id:ID!,$endCursor:String){node(id:$id){... on PullRequestReviewThread{comments(first:100,after:$endCursor){nodes{databaseId author{login} body createdAt path line originalLine replyTo{databaseId}}pageInfo{hasNextPage endCursor}}}}}'
-  for encoded in $(jq -r -s '[.[].data.repository.pullRequest.reviewThreads.nodes[]] | .[] | @base64' <<<"$out"); do
+  # Windows jq emits CRLF; strip CR or base64 --decode rejects the tokens.
+  for encoded in $(jq -r -s '[.[].data.repository.pullRequest.reviewThreads.nodes[]] | .[] | @base64' <<<"$out" | tr -d '\r'); do
     thread=$(printf '%s' "$encoded" | base64 --decode) || return 1
-    id=$(jq -r '.id' <<<"$thread"); resolved=$(jq -r '.isResolved' <<<"$thread")
+    id=$(jq -r '.id' <<<"$thread" | tr -d '\r'); resolved=$(jq -r '.isResolved' <<<"$thread" | tr -d '\r')
     comments=$(gh api graphql --paginate -F id="$id" -f query="$comment_query" 2>/dev/null) || return 1
     comments=$(jq -s '[.[].data.node.comments.nodes[] | {id:.databaseId,user:{login:.author.login},body,created_at:.createdAt,path,line,original_line:.originalLine,in_reply_to_id:(.replyTo.databaseId // null)}]' <<<"$comments") || return 1
     result=$(jq -c --argjson resolved "$resolved" --argjson comments "$comments" '. + [{isResolved:$resolved,comments:$comments}]' <<<"$result") || return 1
