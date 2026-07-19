@@ -7,6 +7,26 @@ SOURCE = ROOT / "minihost" / "src" / "l2_main.cpp"
 
 
 class MinihostL2SourceTests(unittest.TestCase):
+    def test_effect_entrypoint_is_discovered_from_bounded_pipl_kind_and_code(self):
+        text = SOURCE.read_text(encoding="utf-8")
+        for marker in (
+            "discover_pipl_entrypoint(module)",
+            "EnumResourceLanguagesW(module",
+            "languages.size() != 1",
+            'pipl_tag(property + 4, "dnik")',
+            'pipl_tag(property + 4, "4668")',
+            'std::memcmp(kind.data(), "TKFe", 4)',
+            'std::memcmp(kind.data(), "xgEA", 4)',
+            "pipl_entrypoint.symbol.c_str()",
+            'L"--self-test-pipl-entrypoint"',
+            '"invalid_pipl"',
+        ):
+            self.assertIn(marker, text)
+        self.assertNotIn(
+            'reinterpret_cast<EffectEntry>(GetProcAddress(module, "EntryPointFunc"))',
+            text,
+        )
+
     def test_legacy_render_alpha_default_remains_premultiplied(self):
         text = SOURCE.read_text(encoding="utf-8")
         self.assertIn(

@@ -143,7 +143,7 @@ def test_render_path_echo_rejects_each_mismatch_and_contradiction():
     assert not module.is_crash_exit_code(1)
 
 
-@pytest.mark.parametrize("plugin_kind", ["aegp_candidate", "unknown_no_effect_entrypoint"])
+@pytest.mark.parametrize("plugin_kind", ["aegp_candidate", "invalid_pipl", "unknown_no_effect_entrypoint"])
 def test_plugin_kind_maps_to_loader_error(plugin_kind):
     module = load_runner_module()
     result = module.normalize_structured_failure(

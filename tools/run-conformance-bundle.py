@@ -373,7 +373,7 @@ def normalize_structured_failure(
     render_path: str = "smartfx",
 ) -> dict[str, Any]:
     classification = value.get("classification")
-    if value.get("plugin_kind") in {"aegp_candidate", "unknown_no_effect_entrypoint"}:
+    if value.get("plugin_kind") in {"aegp_candidate", "invalid_pipl", "unknown_no_effect_entrypoint"}:
         classification = "loader_error"
     if classification not in {
         "loader_error",
@@ -427,7 +427,7 @@ def normalize_structured_failure(
     }
     if isinstance(value.get("parameter_metadata"), list):
         result["_parameter_metadata"] = value["parameter_metadata"]
-    if value.get("plugin_kind") in {"aegp_candidate", "unknown_no_effect_entrypoint"}:
+    if value.get("plugin_kind") in {"aegp_candidate", "invalid_pipl", "unknown_no_effect_entrypoint"}:
         result["plugin_kind"] = value["plugin_kind"]
     missing = value.get("missing_suites")
     if not missing and isinstance(value.get("worker_diagnostics"), dict):

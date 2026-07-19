@@ -388,6 +388,7 @@ fn worker_diagnostics(
     for line in stderr.lines() {
         plugin_kind = plugin_kind.or_else(|| match line.trim() {
             "plugin_kind:aegp_candidate" => Some("aegp_candidate"),
+            "plugin_kind:invalid_pipl" => Some("invalid_pipl"),
             "plugin_kind:unknown_no_effect_entrypoint" => Some("unknown_no_effect_entrypoint"),
             _ => None,
         });
