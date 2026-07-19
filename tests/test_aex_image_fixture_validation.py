@@ -3,6 +3,7 @@ import json
 import sys
 import time
 import unittest
+import uuid
 from pathlib import Path
 
 
@@ -25,7 +26,10 @@ ppm_fixture_tool = load_tool("ppm_fixture_tool")
 def create_ppm(name: str, width: int, height: int, pattern: str) -> Path:
     root = LAB_ROOT / "target" / "ppm-fixtures"
     root.mkdir(parents=True, exist_ok=True)
-    path = root / f"{time.time_ns()}-{name}.ppm"
+    # Windows time.time_ns() is not guaranteed to advance between calls. This
+    # helper is invoked repeatedly with the same name while writes are
+    # intentionally create-new, so a coarse clock can cause a false collision.
+    path = root / f"{uuid.uuid4().hex}-{name}.ppm"
     image = ppm_fixture_tool.generate_image(width, height, pattern)
     ppm_fixture_tool.write_ppm_create_new(path, image)
     return path
@@ -69,6 +73,11 @@ def make_suite(width: int = 5, height: int = 4) -> dict:
 
 
 class AexImageFixtureValidationTests(unittest.TestCase):
+    def test_fixture_paths_are_unique_even_for_repeated_names(self):
+        first = create_ppm("same-name", 2, 2, "checker")
+        second = create_ppm("same-name", 2, 2, "checker")
+        self.assertNotEqual(first, second)
+
     def test_validation_passes_generated_ppm_suite_and_records_hashes(self):
         report = aex_image_fixture_validation.build_validation_report(make_suite(), Path("suite.json"))
         self.assertEqual(report["report_kind"], "aex_image_fixture_validation")
