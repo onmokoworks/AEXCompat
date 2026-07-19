@@ -637,7 +637,7 @@ def test_merge_guard_refetches_every_owner_surface_immediately_before_merge() ->
 def test_merge_guard_requires_atomic_server_side_conversation_resolution() -> None:
     root = Path(__file__).resolve().parents[1] / ".claude" / "skills" / "codex-review-loop"
     script = (root / "codex-merge-guard.sh").read_text(encoding="utf-8")
-    server_gate = script.index("if ! require_server_thread_gate")
+    server_gate = script.index("server_thread_gate_state; gate_state=$?")
     final = script.index("# FINAL OWNER SNAPSHOT", server_gate)
     merge = script.index("gh pr merge", final)
     assert server_gate < final < merge
@@ -645,7 +645,12 @@ def test_merge_guard_requires_atomic_server_side_conversation_resolution() -> No
     assert 'branches/$base/protection' in script
     assert 'rules/branches/$base' in script
     assert 'required_review_thread_resolution' in script
+    # Reachable-but-disabled (or unknown failure) still refuses...
     assert "REFUSE: base branch must enable server-side" in script
+    # ...but a plan that provably does not sell the feature falls back to the
+    # final snapshot instead of refusing forever (private Free repo).
+    assert "Upgrade to GitHub Pro or make this repository public" in script
+    assert "falling back to the final owner snapshot" in script
 
 
 def test_codex_finding_instructions_resolve_the_review_thread() -> None:

@@ -45,18 +45,35 @@ fetch_review_threads() {
 
 # Client-side snapshots cannot atomically exclude an inline owner comment that
 # lands between the final fetch and merge. GitHub's required conversation
-# resolution rule is evaluated by the server in the merge transaction and is
-# therefore a mandatory safety prerequisite. Fail closed if the repository
-# plan/token cannot read protection or the rule is disabled.
-require_server_thread_gate() {
-  local base protection applicable_rules
+# resolution rule is evaluated by the server in the merge transaction, so it is
+# required WHERE THE PLAN OFFERS IT. Three outcomes:
+#   0 = proven enabled (strongest path)
+#   1 = the feature is reachable but not enabled, or the lookup failed for an
+#       unknown reason — REFUSE (an available-but-unconfigured rule is an owner
+#       choice; an unknown failure fails closed)
+#   2 = the plan provably does not offer branch protection/rulesets (GitHub
+#       Free private repo: protection 404 AND the rules API answers with its
+#       explicit upgrade message) — fall back to the FINAL OWNER SNAPSHOT +
+#       --match-head-commit below, accepting the documented sub-second residual
+#       race as the best available guarantee on this plan. Demanding a feature
+#       the plan does not sell would make the guard permanently unable to merge
+#       (observed on this repo), which just pushes operators to bypass it.
+server_thread_gate_state() {
+  local base protection rules_out
   base=$(gh api "repos/$OWNER/$REPO/pulls/$PR" --jq '.base.ref') || return 1
   protection=$(gh api "repos/$OWNER/$REPO/branches/$base/protection" 2>/dev/null) || protection='null'
   if jq -e '.required_conversation_resolution.enabled == true' <<<"$protection" >/dev/null; then
     return 0
   fi
-  applicable_rules=$(gh api "repos/$OWNER/$REPO/rules/branches/$base" 2>/dev/null) || return 1
-  jq -e 'any(.[]; .type == "required_review_thread_resolution")' <<<"$applicable_rules" >/dev/null
+  if rules_out=$(gh api "repos/$OWNER/$REPO/rules/branches/$base" 2>/dev/null); then
+    jq -e 'any(.[]; .type == "required_review_thread_resolution")' <<<"$rules_out" >/dev/null && return 0
+    return 1
+  fi
+  rules_out=$(gh api "repos/$OWNER/$REPO/rules/branches/$base" 2>&1) && return 1
+  if grep -q "Upgrade to GitHub Pro or make this repository public" <<<"$rules_out"; then
+    return 2
+  fi
+  return 1
 }
 
 head=$(gh api "repos/$OWNER/$REPO/pulls/$PR" --jq '.head.sha') || {
@@ -116,9 +133,12 @@ fi
 # Prove the static server-side prerequisite before the final dynamic snapshot.
 # Looking it up afterward would reopen a window for owner feedback forms that
 # the conversation-resolution rule cannot see.
-if ! require_server_thread_gate; then
-  echo "REFUSE: base branch must enable server-side required conversation resolution (branch protection/ruleset); current plan, token, or setting cannot prove it"; exit 1
-fi
+server_thread_gate_state; gate_state=$?
+case "$gate_state" in
+  0) : ;;
+  2) echo "NOTE: branch protection/rulesets are not offered on this plan (private Free repo); falling back to the final owner snapshot + --match-head-commit (documented residual race)" ;;
+  *) echo "REFUSE: base branch must enable server-side required conversation resolution (branch protection/ruleset), or the rule lookup failed"; exit 1 ;;
+esac
 
 # FINAL OWNER SNAPSHOT: owner feedback does not change the head SHA, so
 # --match-head-commit alone cannot close the window between the earlier API

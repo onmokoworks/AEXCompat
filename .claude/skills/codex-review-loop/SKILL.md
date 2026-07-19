@@ -12,14 +12,22 @@ description: >-
 
 # Codex Review Loop
 
-## Mandatory server-side merge rule
+## Server-side merge rule (where the plan offers it)
 
-The base branch MUST enable GitHub's **Require conversation resolution before
-merging** rule (`required_conversation_resolution.enabled=true`) through branch
-protection or a ruleset. Inline review comments do not change the head SHA, so
-no client-side fetch-then-merge sequence can enforce the never-merge invariant
-atomically. `codex-merge-guard.sh` fails closed when this rule cannot be proven,
-including when the repository plan or token cannot read branch protection.
+Inline review comments do not change the head SHA, so no client-side
+fetch-then-merge sequence can enforce the never-merge invariant atomically.
+GitHub's **Require conversation resolution before merging** rule
+(`required_conversation_resolution.enabled=true`, branch protection or a
+ruleset) closes that window server-side, so `codex-merge-guard.sh` requires it
+**whenever the plan offers the feature**: reachable-but-disabled or an unknown
+lookup failure still REFUSEs. On plans that provably do not sell branch
+protection/rulesets at all (private repo on GitHub Free — protection 404 and
+the rules API answers with its explicit upgrade message), the guard falls back
+to the FINAL OWNER SNAPSHOT plus `--match-head-commit`, accepting a documented
+sub-second residual race (owner feedback landing between the last snapshot and
+the merge API call) as the best guarantee available on that plan. Demanding an
+unpurchasable feature would leave the guard permanently unable to merge and
+push operators to bypass it entirely.
 
 PR を Codex にレビューさせ、指摘ゼロになるまで対応を繰り返すループ。
 
