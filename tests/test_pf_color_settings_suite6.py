@@ -42,8 +42,8 @@ def test_color_settings_suite6_has_exact_typed_20_slot_abi():
     assert "sizeof(AegpColorSettingsSuite6) == 20 * sizeof(void*)" in text
     for slot, member in enumerate(MEMBERS):
         assert f"offsetof(AegpColorSettingsSuite6, {member}) == {slot} * sizeof(void*)" in text
-    assert 'std::strcmp(name, "PF Color Settings Suite") == 0 && version == 7' in text
-    assert "*suite = &g_color_settings_suite6" in text
+    assert '{"PF Color Settings Suite", 7, nullptr, &provide_color_settings7}' in text
+    assert "return &g_color_settings_suite6" in text
     assert "color_settings_validate_icc" in text
     assert "color_settings_builtin_srgb_icc" in text
     assert "color_settings_builtin_linear_icc" in text

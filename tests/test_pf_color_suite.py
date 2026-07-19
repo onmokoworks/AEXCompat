@@ -30,8 +30,7 @@ def test_color_suites_are_typed_frozen_v1_abis():
     for name, instance in (("PF Color Suite", "g_color_suite8"),
                            ("PF Color16 Suite", "g_color_suite16"),
                            ("PF ColorFloat Suite", "g_color_suite_float")):
-        assert f'std::strcmp(name, "{name}") == 0' in text
-        assert f"*suite = &{instance}" in text
+        assert f'{{"{name}", 1, &{instance}}}' in text
 
 def test_legacy_block_ends_where_platform_data_begins():
     text = source_text()

@@ -14,7 +14,9 @@ def test_app_suite_versions_use_sdk_slot_counts_and_acquire_versions():
     assert "std::array<void*, 11> g_app_suite4" in text
     assert "std::array<void*, 12> g_app_suite5" in text
     assert "std::array<void*, 15> g_app_suite6" in text
-    assert "(version == 6 || version == 7 || version == 1)" in text
+    assert '{"PF AE App Suite", 6, nullptr, &provide_app_suite4}' in text
+    assert '{"PF AE App Suite", 7, nullptr, &provide_app_suite5}' in text
+    assert '{"PF AE App Suite", 1, nullptr, &provide_app_suite6}' in text
     assert "populate_app_suite(g_app_suite4, false, false)" in text
     assert "populate_app_suite(g_app_suite5, true, false)" in text
     assert "populate_app_suite(g_app_suite6, true, true)" in text

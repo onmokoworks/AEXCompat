@@ -79,13 +79,9 @@ def test_iterate_suite_names_and_versions_are_acquirable():
         ("PF iterate16 Suite", "g_iterate16_suite2"),
         ("PF iterateFloat Suite", "g_iterate_float_suite2"),
     ):
-        assert re.search(
-            rf'std::strcmp\(name, "{name}"\) == 0 &&\s*'
-            r'\(version == 1 \|\| version == 2\)\) \{.*?'
-            rf"\*suite = &{global_name};",
-            text,
-            re.DOTALL,
-        )
+        for version in (1, 2):
+            assert f'{{"{name}", {version},' in text
+        assert global_name in text
 
 
 def test_iterate_native_lut_non_clip_generic_and_error_paths():

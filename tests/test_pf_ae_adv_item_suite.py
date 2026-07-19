@@ -15,7 +15,8 @@ BUILD = ROOT / "tools/build-pf-ae-adv-item-probe.ps1"
 
 def test_adv_item_v1_exact_name_version_abi_and_slot_order():
     text = "\n".join(path.read_text(encoding="utf-8") for path in SOURCES)
-    assert 'std::strcmp(name, "PF AE Adv Item Suite") == 0 && version == 1' in text
+    assert '{"PF AE Adv Item Suite", 1, &g_adv_item_suite1' in text
+    assert "&render_worker_suite_provider_available" in text
     assert "sizeof(PfAdvItemSuite1) == 5 * sizeof(void*)" in text
     slots = ["move_time_step", "move_time_step_active_item", "touch_active_item",
              "force_rerender", "effect_is_active_or_enabled"]

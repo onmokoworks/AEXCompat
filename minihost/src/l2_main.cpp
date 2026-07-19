@@ -6651,6 +6651,196 @@ const void* provide_render_async_manager1(void*) {
   return &g_render_async_manager_suite1;
 }
 
+bool aegp_init_suite_provider_available(void*) { return g_aegp_init_mode; }
+bool render_worker_suite_provider_available(void*) { return is_render_worker(); }
+
+const void* provide_batch_sampling1(void*) {
+  g_batch_sampling_suite1 = {&begin_sampling8, &end_sampling8,
+      &unsupported_batch_sample_func, &unsupported_batch_sample_func};
+  return &g_batch_sampling_suite1;
+}
+const void* provide_path_query1(void*) {
+  g_pf_path_query_suite1 = {reinterpret_cast<void*>(&pf_num_paths),
+      reinterpret_cast<void*>(&pf_path_info), reinterpret_cast<void*>(&pf_checkout_path),
+      reinterpret_cast<void*>(&pf_checkin_path)};
+  return g_pf_path_query_suite1.data();
+}
+const void* provide_path_data1(void*) {
+  g_pf_path_data_suite1.fill(reinterpret_cast<void*>(&aegp_unsupported_suite_call));
+  void* callbacks[] = {reinterpret_cast<void*>(&pf_path_is_open),
+      reinterpret_cast<void*>(&pf_path_num_segments), reinterpret_cast<void*>(&pf_path_vertex_info),
+      reinterpret_cast<void*>(&pf_path_prepare_seg_length), reinterpret_cast<void*>(&pf_path_get_seg_length),
+      reinterpret_cast<void*>(&pf_path_eval_seg_length), reinterpret_cast<void*>(&pf_path_eval_seg_length_deriv1),
+      reinterpret_cast<void*>(&pf_path_cleanup_seg_length), reinterpret_cast<void*>(&pf_path_is_inverted),
+      reinterpret_cast<void*>(&pf_path_get_mask_mode), reinterpret_cast<void*>(&pf_path_get_name)};
+  std::copy(std::begin(callbacks), std::end(callbacks), g_pf_path_data_suite1.begin());
+  return g_pf_path_data_suite1.data();
+}
+const void* provide_duck1(void*) {
+  g_duck_suite1[0] = reinterpret_cast<void*>(&duck_quack); return g_duck_suite1.data();
+}
+const void* provide_effect_ui1(void*) {
+  g_effect_ui_suite1[0] = reinterpret_cast<void*>(&set_options_button_name);
+  return g_effect_ui_suite1.data();
+}
+const void* provide_adv_app1(void*) {
+  g_adv_app_suite1.fill(reinterpret_cast<void*>(&aegp_unsupported_suite_call));
+  g_adv_app_suite1[6] = reinterpret_cast<void*>(&adv_app_info_text);
+  g_adv_app_suite1[8] = reinterpret_cast<void*>(&adv_app_info_text3);
+  return g_adv_app_suite1.data();
+}
+const void* provide_adv_app2(void*) {
+  g_adv_app_suite2.fill(reinterpret_cast<void*>(&aegp_unsupported_suite_call));
+  g_adv_app_suite2[6] = reinterpret_cast<void*>(&adv_app_info_text);
+  g_adv_app_suite2[8] = reinterpret_cast<void*>(&adv_app_info_text3);
+  return g_adv_app_suite2.data();
+}
+const void* provide_drawbot_draw1(void*) {
+  g_drawbot_draw_suite1 = {reinterpret_cast<void*>(&drawbot_get_supplier),
+                           reinterpret_cast<void*>(&drawbot_get_surface)};
+  return g_drawbot_draw_suite1.data();
+}
+const void* provide_drawbot_supplier1(void*) {
+  g_drawbot_supplier_suite1.fill(reinterpret_cast<void*>(&aegp_unsupported_suite_call));
+  g_drawbot_supplier_suite1[0] = reinterpret_cast<void*>(&drawbot_new_pen);
+  g_drawbot_supplier_suite1[1] = reinterpret_cast<void*>(&drawbot_new_brush);
+  g_drawbot_supplier_suite1[6] = reinterpret_cast<void*>(&drawbot_new_path);
+  g_drawbot_supplier_suite1[12] = reinterpret_cast<void*>(&drawbot_release_object);
+  return g_drawbot_supplier_suite1.data();
+}
+const void* provide_drawbot_surface2(void*) {
+  g_drawbot_surface_suite2.fill(reinterpret_cast<void*>(&aegp_unsupported_suite_call));
+  g_drawbot_surface_suite2[2] = reinterpret_cast<void*>(&drawbot_paint_rect);
+  g_drawbot_surface_suite2[3] = reinterpret_cast<void*>(&drawbot_fill_path);
+  g_drawbot_surface_suite2[4] = reinterpret_cast<void*>(&drawbot_stroke_path);
+  return g_drawbot_surface_suite2.data();
+}
+const void* provide_drawbot_path1(void*) {
+  g_drawbot_path_suite1.fill(reinterpret_cast<void*>(&aegp_unsupported_suite_call));
+  g_drawbot_path_suite1[0] = reinterpret_cast<void*>(&drawbot_path_point);
+  g_drawbot_path_suite1[1] = reinterpret_cast<void*>(&drawbot_path_point);
+  g_drawbot_path_suite1[3] = reinterpret_cast<void*>(&drawbot_add_rect);
+  return g_drawbot_path_suite1.data();
+}
+const void* provide_custom_ui1(void*) {
+  g_effect_custom_ui_suite1[0] = reinterpret_cast<void*>(&get_drawing_reference);
+  return g_effect_custom_ui_suite1.data();
+}
+const void* provide_custom_ui2(void*) {
+  g_effect_custom_ui_suite2[0] = reinterpret_cast<void*>(&get_drawing_reference);
+  g_effect_custom_ui_suite2[1] = reinterpret_cast<void*>(&get_context_async_manager);
+  return g_effect_custom_ui_suite2.data();
+}
+const void* provide_overlay_theme1(void*) {
+  g_effect_overlay_theme_suite1.fill(reinterpret_cast<void*>(&aegp_unsupported_suite_call));
+  g_effect_overlay_theme_suite1[0] = reinterpret_cast<void*>(&overlay_foreground);
+  g_effect_overlay_theme_suite1[5] = reinterpret_cast<void*>(&overlay_stroke_path);
+  return g_effect_overlay_theme_suite1.data();
+}
+
+template <typename Suite>
+const void* populate_app_suite(Suite& suite, bool language, bool progress) {
+  suite.fill(reinterpret_cast<void*>(&aegp_unsupported_suite_call));
+  std::size_t slot = 0;
+  suite[slot++] = reinterpret_cast<void*>(&app_get_background_color);
+  suite[slot++] = reinterpret_cast<void*>(&app_get_color);
+  if (language) suite[slot++] = reinterpret_cast<void*>(&app_get_language);
+  suite[slot++] = reinterpret_cast<void*>(&app_get_personal_info);
+  suite[slot++] = reinterpret_cast<void*>(&app_get_font_style);
+  suite[slot++] = reinterpret_cast<void*>(&app_set_cursor);
+  suite[slot++] = reinterpret_cast<void*>(&app_is_render_engine);
+  suite[slot++] = reinterpret_cast<void*>(&app_color_picker);
+  suite[slot++] = reinterpret_cast<void*>(&app_get_mouse);
+  suite[slot++] = reinterpret_cast<void*>(&app_invalidate_rect);
+  suite[slot++] = reinterpret_cast<void*>(&app_convert_local_to_global);
+  suite[slot++] = reinterpret_cast<void*>(&app_get_color_at_global_point);
+  if (progress) {
+    suite[slot++] = reinterpret_cast<void*>(&app_create_progress_dialog);
+    suite[slot++] = reinterpret_cast<void*>(&app_update_progress_dialog);
+    suite[slot++] = reinterpret_cast<void*>(&app_dispose_progress_dialog);
+  }
+  return suite.data();
+}
+const void* provide_app_suite4(void*) { return populate_app_suite(g_app_suite4, false, false); }
+const void* provide_app_suite5(void*) { return populate_app_suite(g_app_suite5, true, false); }
+const void* provide_app_suite6(void*) { return populate_app_suite(g_app_suite6, true, true); }
+
+const void* provide_ansi1(void*) {
+  g_ansi_suite1[0] = reinterpret_cast<void*>(&ansi_atan);
+  g_ansi_suite1[1] = reinterpret_cast<void*>(&ansi_atan2);
+  g_ansi_suite1[2] = reinterpret_cast<void*>(&ansi_ceil);
+  g_ansi_suite1[3] = reinterpret_cast<void*>(&ansi_cos);
+  g_ansi_suite1[4] = reinterpret_cast<void*>(&ansi_exp);
+  g_ansi_suite1[5] = reinterpret_cast<void*>(&ansi_fabs);
+  g_ansi_suite1[6] = reinterpret_cast<void*>(&ansi_floor);
+  g_ansi_suite1[7] = reinterpret_cast<void*>(&ansi_fmod);
+  g_ansi_suite1[8] = reinterpret_cast<void*>(&ansi_hypot);
+  g_ansi_suite1[9] = reinterpret_cast<void*>(&ansi_log);
+  g_ansi_suite1[10] = reinterpret_cast<void*>(&ansi_log10);
+  g_ansi_suite1[11] = reinterpret_cast<void*>(&ansi_pow);
+  g_ansi_suite1[12] = reinterpret_cast<void*>(&ansi_sin);
+  g_ansi_suite1[13] = reinterpret_cast<void*>(&ansi_sqrt);
+  g_ansi_suite1[14] = reinterpret_cast<void*>(&ansi_tan);
+  g_ansi_suite1[15] = reinterpret_cast<void*>(&ansi_sprintf);
+  g_ansi_suite1[16] = reinterpret_cast<void*>(&ansi_strcpy);
+  g_ansi_suite1[17] = reinterpret_cast<void*>(&ansi_asin);
+  g_ansi_suite1[18] = reinterpret_cast<void*>(&ansi_acos);
+  return g_ansi_suite1.data();
+}
+const void* provide_color_settings7(void*) {
+  g_color_settings_suite6 = {&color_get_blending_tables, &color_does_view_have_xform,
+      &color_xform_working_to_view, &color_get_new_working_space_profile,
+      &color_get_new_profile_from_icc, &color_get_new_icc_from_profile,
+      &color_get_new_profile_description, &color_dispose_profile,
+      &color_get_profile_approximate_gamma, &color_is_rgb_profile,
+      &color_set_working_color_space, &color_is_ocio_used,
+      &color_get_ocio_configuration_file, &color_get_ocio_configuration_file_path,
+      &color_get_ocio_working_colorspace, &color_get_ocio_display_colorspace,
+      &color_is_colorspace_aware_effects_enabled, &color_get_lut_interpolation_method,
+      &color_get_graphics_white_luminance, &color_get_working_colorspace_id};
+  return &g_color_settings_suite6;
+}
+const void* provide_iterate8(void*) {
+  g_iterate8_suite2.iterate = reinterpret_cast<void*>(&iterate_world8); return &g_iterate8_suite2;
+}
+const void* provide_sampling8(void*) {
+  g_sampling8_suite1.fill(reinterpret_cast<void*>(&aegp_unsupported_suite_call));
+  g_sampling8_suite1[0] = reinterpret_cast<void*>(&nearest_sample8);
+  g_sampling8_suite1[1] = reinterpret_cast<void*>(&subpixel_sample8);
+  g_sampling8_suite1[2] = reinterpret_cast<void*>(&area_sample8); return g_sampling8_suite1.data();
+}
+const void* provide_sampling16(void*) {
+  g_sampling16_suite1.fill(reinterpret_cast<void*>(&aegp_unsupported_suite_call));
+  g_sampling16_suite1[0] = reinterpret_cast<void*>(&nearest_sample16);
+  g_sampling16_suite1[1] = reinterpret_cast<void*>(&subpixel_sample16);
+  g_sampling16_suite1[2] = reinterpret_cast<void*>(&area_sample16); return g_sampling16_suite1.data();
+}
+const void* provide_sampling_float(void*) {
+  g_sampling_float_suite1.fill(reinterpret_cast<void*>(&aegp_unsupported_suite_call));
+  g_sampling_float_suite1[0] = reinterpret_cast<void*>(&nearest_sample_float);
+  g_sampling_float_suite1[1] = reinterpret_cast<void*>(&subpixel_sample_float);
+  g_sampling_float_suite1[2] = reinterpret_cast<void*>(&area_sample_float); return g_sampling_float_suite1.data();
+}
+const void* provide_world_transform1(void*) {
+  g_world_transform_suite1 = {&composite_rect8, &blend_world, &convolve_world,
+      &copy_world8, &copy_world_hq, &transfer_rect, &transform_world};
+  return &g_world_transform_suite1;
+}
+const void* provide_fill_matte2(void*) {
+  g_fill_matte_suite2.fill(reinterpret_cast<void*>(&aegp_unsupported_suite_call));
+  void* callbacks[] = {reinterpret_cast<void*>(&fill_world8), reinterpret_cast<void*>(&fill_world16),
+      reinterpret_cast<void*>(&fill_world_float), reinterpret_cast<void*>(&premultiply_world8),
+      reinterpret_cast<void*>(&premultiply_color8), reinterpret_cast<void*>(&premultiply_color16),
+      reinterpret_cast<void*>(&premultiply_color_float)};
+  std::copy(std::begin(callbacks), std::end(callbacks), g_fill_matte_suite2.begin());
+  return g_fill_matte_suite2.data();
+}
+const void* provide_dynamic_stream2(void*) {
+  g_aegp_dynamic_stream_suite2.fill(reinterpret_cast<void*>(&aegp_unsupported_suite_call));
+  g_aegp_dynamic_stream_suite2[5] = reinterpret_cast<void*>(&aegp_set_dynamic_stream_flag_v2);
+  return g_aegp_dynamic_stream_suite2.data();
+}
+
 SuiteResolveResult resolve_scene_suite_provider(
     void*, const char* name, int32_t version, const void** suite) {
   if (scene_context()) {
@@ -6661,291 +6851,6 @@ SuiteResolveResult resolve_scene_suite_provider(
     }
     if (scene_result == SceneSuiteAcquireResult::rejected)
       return SuiteResolveResult::rejected_bad_param;
-  }
-  return SuiteResolveResult::not_found;
-}
-
-SuiteResolveResult resolve_legacy_host_suite(
-    void*, const char* name, int32_t version, const void** suite) {
-  if (name && version == 1 && std::strcmp(name, "PF Color Suite") == 0) {
-    *suite = &g_color_suite8; return SuiteResolveResult::acquired;
-  }
-  if (name && version == 1 && std::strcmp(name, "PF Color16 Suite") == 0) {
-    *suite = &g_color_suite16; return SuiteResolveResult::acquired;
-  }
-  if (name && version == 1 && std::strcmp(name, "PF ColorFloat Suite") == 0) {
-    *suite = &g_color_suite_float; return SuiteResolveResult::acquired;
-  }
-  if (name && version == 1 && std::strcmp(name, "PF Batch Sampling Suite") == 0) {
-    g_batch_sampling_suite1 = {&begin_sampling8, &end_sampling8,
-                               &unsupported_batch_sample_func,
-                               &unsupported_batch_sample_func};
-    *suite = &g_batch_sampling_suite1;
-    return SuiteResolveResult::acquired;
-  }
-  if (g_mask_model_enabled && name && std::strcmp(name, "PF Path Query Suite") == 0 && version == 1) {
-    g_pf_path_query_suite1 = {
-        reinterpret_cast<void*>(&pf_num_paths),
-        reinterpret_cast<void*>(&pf_path_info),
-        reinterpret_cast<void*>(&pf_checkout_path),
-        reinterpret_cast<void*>(&pf_checkin_path)};
-    *suite = g_pf_path_query_suite1.data();
-    return SuiteResolveResult::acquired;
-  }
-  if (g_mask_model_enabled && name && std::strcmp(name, "PF Path Data Suite") == 0 && version == 1) {
-    g_pf_path_data_suite1.fill(reinterpret_cast<void*>(&aegp_unsupported_suite_call));
-    g_pf_path_data_suite1[0] = reinterpret_cast<void*>(&pf_path_is_open);
-    g_pf_path_data_suite1[1] = reinterpret_cast<void*>(&pf_path_num_segments);
-    g_pf_path_data_suite1[2] = reinterpret_cast<void*>(&pf_path_vertex_info);
-    g_pf_path_data_suite1[3] = reinterpret_cast<void*>(&pf_path_prepare_seg_length);
-    g_pf_path_data_suite1[4] = reinterpret_cast<void*>(&pf_path_get_seg_length);
-    g_pf_path_data_suite1[5] = reinterpret_cast<void*>(&pf_path_eval_seg_length);
-    g_pf_path_data_suite1[6] = reinterpret_cast<void*>(&pf_path_eval_seg_length_deriv1);
-    g_pf_path_data_suite1[7] = reinterpret_cast<void*>(&pf_path_cleanup_seg_length);
-    g_pf_path_data_suite1[8] = reinterpret_cast<void*>(&pf_path_is_inverted);
-    g_pf_path_data_suite1[9] = reinterpret_cast<void*>(&pf_path_get_mask_mode);
-    g_pf_path_data_suite1[10] = reinterpret_cast<void*>(&pf_path_get_name);
-    *suite = g_pf_path_data_suite1.data();
-    return SuiteResolveResult::acquired;
-  }
-  if (name && std::strcmp(name, "AEGP Duck Suite") == 0 && version == 1) {
-    g_duck_suite1[0] = reinterpret_cast<void*>(&duck_quack);
-    *suite = g_duck_suite1.data();
-    return SuiteResolveResult::acquired;
-  }
-  if (g_aegp_init_mode && name && std::strcmp(name, "AEGP Command Suite") == 0 && version == 1) {
-    *suite = &g_aegp_command_suite;
-    return SuiteResolveResult::acquired;
-  }
-  if (g_aegp_init_mode && name && std::strcmp(name, "AEGP Register Suite") == 0 && version == 6) {
-    *suite = &g_aegp_register_suite;
-    return SuiteResolveResult::acquired;
-  }
-
-  if (name && std::strcmp(name, "PF Effect UI Suite") == 0 && version == 1) {
-    g_effect_ui_suite1[0] = reinterpret_cast<void*>(&set_options_button_name);
-    *suite = g_effect_ui_suite1.data();
-    return SuiteResolveResult::acquired;
-  }
-  if (name && std::strcmp(name, "PF AE Adv App Suite") == 0 && version == 1) {
-    g_adv_app_suite1.fill(reinterpret_cast<void*>(&aegp_unsupported_suite_call));
-    g_adv_app_suite1[6] = reinterpret_cast<void*>(&adv_app_info_text);
-    g_adv_app_suite1[8] = reinterpret_cast<void*>(&adv_app_info_text3);
-    *suite = g_adv_app_suite1.data();
-    return SuiteResolveResult::acquired;
-  }
-  if (name && std::strcmp(name, "PF AE Adv App Suite") == 0 && version == 2) {
-    g_adv_app_suite2.fill(reinterpret_cast<void*>(&aegp_unsupported_suite_call));
-    g_adv_app_suite2[6] = reinterpret_cast<void*>(&adv_app_info_text);
-    g_adv_app_suite2[8] = reinterpret_cast<void*>(&adv_app_info_text3);
-    *suite = g_adv_app_suite2.data();
-    return SuiteResolveResult::acquired;
-  }
-  if (name && std::strcmp(name, "DRAWBOT Draw Suite") == 0 && version == 1) {
-    g_drawbot_draw_suite1 = {reinterpret_cast<void*>(&drawbot_get_supplier),
-                             reinterpret_cast<void*>(&drawbot_get_surface)};
-    *suite = g_drawbot_draw_suite1.data(); return SuiteResolveResult::acquired;
-  }
-  if (name && std::strcmp(name, "DRAWBOT Supplier Suite") == 0 && version == 1) {
-    g_drawbot_supplier_suite1.fill(reinterpret_cast<void*>(&aegp_unsupported_suite_call));
-    g_drawbot_supplier_suite1[0] = reinterpret_cast<void*>(&drawbot_new_pen);
-    g_drawbot_supplier_suite1[1] = reinterpret_cast<void*>(&drawbot_new_brush);
-    g_drawbot_supplier_suite1[6] = reinterpret_cast<void*>(&drawbot_new_path);
-    g_drawbot_supplier_suite1[12] = reinterpret_cast<void*>(&drawbot_release_object);
-    *suite = g_drawbot_supplier_suite1.data(); return SuiteResolveResult::acquired;
-  }
-  if (name && std::strcmp(name, "DRAWBOT Surface Suite") == 0 && version == 2) {
-    g_drawbot_surface_suite2.fill(reinterpret_cast<void*>(&aegp_unsupported_suite_call));
-    g_drawbot_surface_suite2[2] = reinterpret_cast<void*>(&drawbot_paint_rect);
-    g_drawbot_surface_suite2[3] = reinterpret_cast<void*>(&drawbot_fill_path);
-    g_drawbot_surface_suite2[4] = reinterpret_cast<void*>(&drawbot_stroke_path);
-    *suite = g_drawbot_surface_suite2.data(); return SuiteResolveResult::acquired;
-  }
-  if (name && std::strcmp(name, "DRAWBOT Path Suite") == 0 && version == 1) {
-    g_drawbot_path_suite1.fill(reinterpret_cast<void*>(&aegp_unsupported_suite_call));
-    g_drawbot_path_suite1[0] = reinterpret_cast<void*>(&drawbot_path_point);
-    g_drawbot_path_suite1[1] = reinterpret_cast<void*>(&drawbot_path_point);
-    g_drawbot_path_suite1[3] = reinterpret_cast<void*>(&drawbot_add_rect);
-    *suite = g_drawbot_path_suite1.data(); return SuiteResolveResult::acquired;
-  }
-  if (name && std::strcmp(name, "PF Effect Custom UI Suite") == 0 && version == 1) {
-    g_effect_custom_ui_suite1[0] = reinterpret_cast<void*>(&get_drawing_reference);
-    *suite = g_effect_custom_ui_suite1.data(); return SuiteResolveResult::acquired;
-  }
-  if (name && std::strcmp(name, "PF Effect Custom UI Overlay Theme Suite") == 0 && version == 1) {
-    g_effect_overlay_theme_suite1.fill(reinterpret_cast<void*>(&aegp_unsupported_suite_call));
-    g_effect_overlay_theme_suite1[0] = reinterpret_cast<void*>(&overlay_foreground);
-    g_effect_overlay_theme_suite1[5] = reinterpret_cast<void*>(&overlay_stroke_path);
-    *suite = g_effect_overlay_theme_suite1.data(); return SuiteResolveResult::acquired;
-  }
-  if (name && std::strcmp(name, "PF AE App Suite") == 0 &&
-      (version == 6 || version == 7 || version == 1)) {
-    auto populate_app_suite = [&](auto& app_suite, bool has_language, bool has_progress) {
-      app_suite.fill(reinterpret_cast<void*>(&aegp_unsupported_suite_call));
-      std::size_t slot = 0;
-      app_suite[slot++] = reinterpret_cast<void*>(&app_get_background_color);
-      app_suite[slot++] = reinterpret_cast<void*>(&app_get_color);
-      if (has_language) app_suite[slot++] = reinterpret_cast<void*>(&app_get_language);
-      app_suite[slot++] = reinterpret_cast<void*>(&app_get_personal_info);
-      app_suite[slot++] = reinterpret_cast<void*>(&app_get_font_style);
-      app_suite[slot++] = reinterpret_cast<void*>(&app_set_cursor);
-      app_suite[slot++] = reinterpret_cast<void*>(&app_is_render_engine);
-      app_suite[slot++] = reinterpret_cast<void*>(&app_color_picker);
-      app_suite[slot++] = reinterpret_cast<void*>(&app_get_mouse);
-      app_suite[slot++] = reinterpret_cast<void*>(&app_invalidate_rect);
-      app_suite[slot++] = reinterpret_cast<void*>(&app_convert_local_to_global);
-      app_suite[slot++] = reinterpret_cast<void*>(&app_get_color_at_global_point);
-      if (has_progress) {
-        app_suite[slot++] = reinterpret_cast<void*>(&app_create_progress_dialog);
-        app_suite[slot++] = reinterpret_cast<void*>(&app_update_progress_dialog);
-        app_suite[slot++] = reinterpret_cast<void*>(&app_dispose_progress_dialog);
-      }
-    };
-    if (version == 6) {
-      populate_app_suite(g_app_suite4, false, false); *suite = g_app_suite4.data();
-    } else if (version == 7) {
-      populate_app_suite(g_app_suite5, true, false); *suite = g_app_suite5.data();
-    } else {
-      populate_app_suite(g_app_suite6, true, true); *suite = g_app_suite6.data();
-    }
-    return SuiteResolveResult::acquired;
-  }
-  if (name && std::strcmp(name, "PF AE Channel Suite") == 0 && version == 1) {
-    *suite = &g_channel_suite1;
-    return SuiteResolveResult::acquired;
-  }
-  if (name && std::strcmp(name, "PF Effect Sequence Data Suite") == 0 && version == 1) {
-    *suite = &g_effect_sequence_data_suite1;
-    return SuiteResolveResult::acquired;
-  }
-  if (name && std::strcmp(name, "PF Handle Suite") == 0 && version == 2) {
-    *suite = &g_handle_suite;
-    return SuiteResolveResult::acquired;
-  }
-  if (name && std::strcmp(name, "PF GPU Device Suite") == 0 && version == 1) {
-    *suite = g_gpu_device_suite1.data();
-    return SuiteResolveResult::acquired;
-  }
-  if (name && std::strcmp(name, "PF ANSI Suite") == 0 && version == 1) {
-    g_ansi_suite1[0] = reinterpret_cast<void*>(&ansi_atan);
-    g_ansi_suite1[1] = reinterpret_cast<void*>(&ansi_atan2);
-    g_ansi_suite1[2] = reinterpret_cast<void*>(&ansi_ceil);
-    g_ansi_suite1[3] = reinterpret_cast<void*>(&ansi_cos);
-    g_ansi_suite1[4] = reinterpret_cast<void*>(&ansi_exp);
-    g_ansi_suite1[5] = reinterpret_cast<void*>(&ansi_fabs);
-    g_ansi_suite1[6] = reinterpret_cast<void*>(&ansi_floor);
-    g_ansi_suite1[7] = reinterpret_cast<void*>(&ansi_fmod);
-    g_ansi_suite1[8] = reinterpret_cast<void*>(&ansi_hypot);
-    g_ansi_suite1[9] = reinterpret_cast<void*>(&ansi_log);
-    g_ansi_suite1[10] = reinterpret_cast<void*>(&ansi_log10);
-    g_ansi_suite1[11] = reinterpret_cast<void*>(&ansi_pow);
-    g_ansi_suite1[12] = reinterpret_cast<void*>(&ansi_sin);
-    g_ansi_suite1[13] = reinterpret_cast<void*>(&ansi_sqrt);
-    g_ansi_suite1[14] = reinterpret_cast<void*>(&ansi_tan);
-    g_ansi_suite1[15] = reinterpret_cast<void*>(&ansi_sprintf);
-    g_ansi_suite1[16] = reinterpret_cast<void*>(&ansi_strcpy);
-    g_ansi_suite1[17] = reinterpret_cast<void*>(&ansi_asin);
-    g_ansi_suite1[18] = reinterpret_cast<void*>(&ansi_acos);
-    *suite = g_ansi_suite1.data();
-    return SuiteResolveResult::acquired;
-  }
-  if (is_render_worker() && name &&
-      std::strcmp(name, "PF AE Adv Item Suite") == 0 && version == 1) {
-    *suite = &g_adv_item_suite1;
-    return SuiteResolveResult::acquired;
-  }
-  if (name && std::strcmp(name, "PF Color Settings Suite") == 0 && version == 7) {
-    g_color_settings_suite6 = {&color_get_blending_tables, &color_does_view_have_xform,
-        &color_xform_working_to_view, &color_get_new_working_space_profile,
-        &color_get_new_profile_from_icc, &color_get_new_icc_from_profile,
-        &color_get_new_profile_description, &color_dispose_profile,
-        &color_get_profile_approximate_gamma, &color_is_rgb_profile,
-        &color_set_working_color_space, &color_is_ocio_used,
-        &color_get_ocio_configuration_file, &color_get_ocio_configuration_file_path,
-        &color_get_ocio_working_colorspace, &color_get_ocio_display_colorspace,
-        &color_is_colorspace_aware_effects_enabled, &color_get_lut_interpolation_method,
-        &color_get_graphics_white_luminance, &color_get_working_colorspace_id};
-    *suite = &g_color_settings_suite6;
-    return SuiteResolveResult::acquired;
-  }
-  if (name && std::strcmp(name, "PF Iterate8 Suite") == 0 &&
-      (version == 1 || version == 2)) {
-    g_iterate8_suite2.iterate = reinterpret_cast<void*>(&iterate_world8);
-    *suite = &g_iterate8_suite2;
-    return SuiteResolveResult::acquired;
-  }
-  if (name && std::strcmp(name, "PF iterate16 Suite") == 0 &&
-      (version == 1 || version == 2)) {
-    *suite = &g_iterate16_suite2;
-    return SuiteResolveResult::acquired;
-  }
-  if (name && std::strcmp(name, "PF iterateFloat Suite") == 0 &&
-      (version == 1 || version == 2)) {
-    *suite = &g_iterate_float_suite2;
-    return SuiteResolveResult::acquired;
-  }
-  if (name && std::strcmp(name, "PF Sampling8 Suite") == 0 && version == 1) {
-    g_sampling8_suite1.fill(reinterpret_cast<void*>(&aegp_unsupported_suite_call));
-    g_sampling8_suite1[0] = reinterpret_cast<void*>(&nearest_sample8);
-    g_sampling8_suite1[1] = reinterpret_cast<void*>(&subpixel_sample8);
-    g_sampling8_suite1[2] = reinterpret_cast<void*>(&area_sample8);
-    *suite = g_sampling8_suite1.data();
-    return SuiteResolveResult::acquired;
-  }
-  if (name && std::strcmp(name, "PF Sampling16 Suite") == 0 &&
-      version == 1) {
-    g_sampling16_suite1.fill(reinterpret_cast<void*>(&aegp_unsupported_suite_call));
-    g_sampling16_suite1[0] = reinterpret_cast<void*>(&nearest_sample16);
-    g_sampling16_suite1[1] = reinterpret_cast<void*>(&subpixel_sample16);
-    g_sampling16_suite1[2] = reinterpret_cast<void*>(&area_sample16);
-    *suite = g_sampling16_suite1.data();
-    return SuiteResolveResult::acquired;
-  }
-  if (name && std::strcmp(name, "PF SamplingFloat Suite") == 0 &&
-      version == 1) {
-    g_sampling_float_suite1.fill(reinterpret_cast<void*>(&aegp_unsupported_suite_call));
-    g_sampling_float_suite1[0] = reinterpret_cast<void*>(&nearest_sample_float);
-    g_sampling_float_suite1[1] = reinterpret_cast<void*>(&subpixel_sample_float);
-    g_sampling_float_suite1[2] = reinterpret_cast<void*>(&area_sample_float);
-    *suite = g_sampling_float_suite1.data();
-    return SuiteResolveResult::acquired;
-  }
-  if (name && std::strcmp(name, "PF World Transform Suite") == 0 &&
-      version == 1) {
-    g_world_transform_suite1.composite_rect = &composite_rect8;
-    g_world_transform_suite1.blend = &blend_world;
-    g_world_transform_suite1.convolve = &convolve_world;
-    g_world_transform_suite1.copy = &copy_world8;
-    g_world_transform_suite1.copy_hq = &copy_world_hq;
-    g_world_transform_suite1.transfer_rect = &transfer_rect;
-    g_world_transform_suite1.transform_world = &transform_world;
-    *suite = &g_world_transform_suite1;
-    return SuiteResolveResult::acquired;
-  }
-  if (name && std::strcmp(name, "PF Fill Matte Suite") == 0 &&
-      version == 2) {
-    g_fill_matte_suite2.fill(reinterpret_cast<void*>(&aegp_unsupported_suite_call));
-    g_fill_matte_suite2[0] = reinterpret_cast<void*>(&fill_world8);
-    g_fill_matte_suite2[1] = reinterpret_cast<void*>(&fill_world16);
-    g_fill_matte_suite2[2] = reinterpret_cast<void*>(&fill_world_float);
-    g_fill_matte_suite2[3] = reinterpret_cast<void*>(&premultiply_world8);
-    g_fill_matte_suite2[4] = reinterpret_cast<void*>(&premultiply_color8);
-    g_fill_matte_suite2[5] = reinterpret_cast<void*>(&premultiply_color16);
-    g_fill_matte_suite2[6] = reinterpret_cast<void*>(&premultiply_color_float);
-    *suite = g_fill_matte_suite2.data();
-    return SuiteResolveResult::acquired;
-  }
-  if (name && std::strcmp(name, "AEGP Dynamic Stream Suite") == 0 && version == 2) {
-    g_aegp_dynamic_stream_suite2.fill(reinterpret_cast<void*>(&aegp_unsupported_suite_call));
-    g_aegp_dynamic_stream_suite2[5] = reinterpret_cast<void*>(&aegp_set_dynamic_stream_flag_v2);
-    *suite = g_aegp_dynamic_stream_suite2.data();
-    return SuiteResolveResult::acquired;
-  }
-  if (name && std::strcmp(name, "PF Effect Custom UI Suite") == 0 && version == 2) {
-    g_effect_custom_ui_suite2[0] = reinterpret_cast<void*>(&get_drawing_reference);
-    g_effect_custom_ui_suite2[1] = reinterpret_cast<void*>(&get_context_async_manager);
-    *suite = g_effect_custom_ui_suite2.data();
-    return SuiteResolveResult::acquired;
   }
   return SuiteResolveResult::not_found;
 }
@@ -7007,6 +6912,53 @@ int32_t __cdecl acquire_suite(const char* name, int32_t version,
        nullptr, nullptr, &mask_suite_provider_available},
       {"AEGP Mask Outline Suite", 5, &g_mask_outline_suite,
        nullptr, nullptr, &mask_suite_provider_available},
+      {"PF Color Suite", 1, &g_color_suite8},
+      {"PF Color16 Suite", 1, &g_color_suite16},
+      {"PF ColorFloat Suite", 1, &g_color_suite_float},
+      {"PF Batch Sampling Suite", 1, nullptr, &provide_batch_sampling1},
+      {"PF Path Query Suite", 1, nullptr, &provide_path_query1, nullptr,
+       &mask_suite_provider_available},
+      {"PF Path Data Suite", 1, nullptr, &provide_path_data1, nullptr,
+       &mask_suite_provider_available},
+      {"AEGP Duck Suite", 1, nullptr, &provide_duck1},
+      {"AEGP Command Suite", 1, &g_aegp_command_suite, nullptr, nullptr,
+       &aegp_init_suite_provider_available},
+      {"AEGP Register Suite", 6, &g_aegp_register_suite, nullptr, nullptr,
+       &aegp_init_suite_provider_available},
+      {"PF Effect UI Suite", 1, nullptr, &provide_effect_ui1},
+      {"PF AE Adv App Suite", 1, nullptr, &provide_adv_app1},
+      {"PF AE Adv App Suite", 2, nullptr, &provide_adv_app2},
+      {"DRAWBOT Draw Suite", 1, nullptr, &provide_drawbot_draw1},
+      {"DRAWBOT Supplier Suite", 1, nullptr, &provide_drawbot_supplier1},
+      {"DRAWBOT Surface Suite", 2, nullptr, &provide_drawbot_surface2},
+      {"DRAWBOT Path Suite", 1, nullptr, &provide_drawbot_path1},
+      {"PF Effect Custom UI Suite", 1, nullptr, &provide_custom_ui1},
+      {"PF Effect Custom UI Suite", 2, nullptr, &provide_custom_ui2},
+      {"PF Effect Custom UI Overlay Theme Suite", 1, nullptr,
+       &provide_overlay_theme1},
+      {"PF AE App Suite", 6, nullptr, &provide_app_suite4},
+      {"PF AE App Suite", 7, nullptr, &provide_app_suite5},
+      {"PF AE App Suite", 1, nullptr, &provide_app_suite6},
+      {"PF AE Channel Suite", 1, &g_channel_suite1},
+      {"PF Effect Sequence Data Suite", 1, &g_effect_sequence_data_suite1},
+      {"PF Handle Suite", 2, &g_handle_suite},
+      {"PF GPU Device Suite", 1, g_gpu_device_suite1.data()},
+      {"PF ANSI Suite", 1, nullptr, &provide_ansi1},
+      {"PF AE Adv Item Suite", 1, &g_adv_item_suite1, nullptr, nullptr,
+       &render_worker_suite_provider_available},
+      {"PF Color Settings Suite", 7, nullptr, &provide_color_settings7},
+      {"PF Iterate8 Suite", 1, nullptr, &provide_iterate8},
+      {"PF Iterate8 Suite", 2, nullptr, &provide_iterate8},
+      {"PF iterate16 Suite", 1, &g_iterate16_suite2},
+      {"PF iterate16 Suite", 2, &g_iterate16_suite2},
+      {"PF iterateFloat Suite", 1, &g_iterate_float_suite2},
+      {"PF iterateFloat Suite", 2, &g_iterate_float_suite2},
+      {"PF Sampling8 Suite", 1, nullptr, &provide_sampling8},
+      {"PF Sampling16 Suite", 1, nullptr, &provide_sampling16},
+      {"PF SamplingFloat Suite", 1, nullptr, &provide_sampling_float},
+      {"PF World Transform Suite", 1, nullptr, &provide_world_transform1},
+      {"PF Fill Matte Suite", 2, nullptr, &provide_fill_matte2},
+      {"AEGP Dynamic Stream Suite", 2, nullptr, &provide_dynamic_stream2},
   };
   StaticProviderCatalog component_catalog{
       component_suites, std::size(component_suites)};
@@ -7014,8 +6966,7 @@ int32_t __cdecl acquire_suite(const char* name, int32_t version,
       {&resolve_scene_suite_provider, nullptr},
       {&resolve_static_provider, &component_catalog},
   };
-  const ProviderCatalog catalog{providers, std::size(providers),
-                                &resolve_legacy_host_suite, nullptr};
+  const ProviderCatalog catalog{providers, std::size(providers), nullptr, nullptr};
   return acquire_host_suite(catalog, name, version, suite, g_trace_writer);
 }
 

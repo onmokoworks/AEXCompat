@@ -38,7 +38,7 @@ def test_channel_suite1_is_typed_and_matches_the_frozen_sdk_abi():
         r"&get_layer_channel_typed, &checkout_layer_channel, &checkin_layer_channel\}",
         text,
     )
-    assert '*suite = &g_channel_suite1;' in text
+    assert '{"PF AE Channel Suite", 1, &g_channel_suite1}' in text
 
 
 def test_channel_struct_layout_errors_and_found_contract_are_explicit():

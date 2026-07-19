@@ -35,7 +35,7 @@ def test_provider_priority_and_terminal_errors_are_explicit():
     assert "SuiteResolveResult::rejected_bad_param" in SOURCE
 
 
-def test_component_pf_and_aegp_families_are_injected_ahead_of_legacy_route():
+def test_component_pf_and_aegp_families_are_injected_without_legacy_route():
     acquire = MAIN[MAIN.index("int32_t __cdecl acquire_suite"):]
     for suite in (
         "AE Plugin Helper Suite",
@@ -47,10 +47,11 @@ def test_component_pf_and_aegp_families_are_injected_ahead_of_legacy_route():
         assert suite in acquire
     assert "resolve_scene_suite_provider" in acquire
     assert "resolve_static_provider" in acquire
-    assert "resolve_legacy_host_suite" in acquire
     assert acquire.index("resolve_scene_suite_provider") < acquire.index(
         "resolve_static_provider"
-    ) < acquire.index("resolve_legacy_host_suite")
+    )
+    assert "resolve_legacy_host_suite" not in MAIN
+    assert "ProviderCatalog catalog{providers, std::size(providers), nullptr, nullptr}" in acquire
 
 
 def test_static_provider_matches_exact_name_and_version_only():
@@ -76,3 +77,11 @@ def test_factory_and_availability_hooks_preserve_conditional_suite_routes():
     assert "render_options4_provider_available" in MAIN
     assert "render_suite2_provider_available" in MAIN
     assert "mask_suite_provider_available" in MAIN
+
+
+def test_l2_has_no_legacy_name_version_routing_chain():
+    routing = MAIN[MAIN.index("SuiteResolveResult resolve_scene_suite_provider(") :]
+    routing = routing[: routing.index("int32_t __cdecl release_suite(")]
+    assert "resolve_legacy_host_suite" not in routing
+    assert "std::strcmp(name" not in routing
+    assert "ProviderCatalog catalog{providers, std::size(providers), nullptr, nullptr}" in routing
