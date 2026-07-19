@@ -47,9 +47,12 @@ MAX_PROTOCOL_BYTES = int(
     ]
 )
 DEPTH_COMMANDS = {
-    "argb8": "--render-experimental-smart-request",
-    "argb16": "--render-experimental-smart-request-16",
-    "argb32f": "--render-experimental-smart-request-32-cpu",
+    ("classic", "argb8"): "--render-experimental-request",
+    ("classic", "argb16"): "--render-experimental-request-16",
+    ("classic", "argb32f"): "--render-experimental-request-32",
+    ("smartfx", "argb8"): "--render-experimental-smart-request",
+    ("smartfx", "argb16"): "--render-experimental-smart-request-16",
+    ("smartfx", "argb32f"): "--render-experimental-smart-request-32-cpu",
 }
 PIXEL_BYTES = {"argb8": 4, "argb16": 8, "argb32f": 16}
 RAW_SUFFIX = {"argb8": "rgba8", "argb16": "rgba16le", "argb32f": "rgba32f-le"}
@@ -76,6 +79,19 @@ def meaningful_selector_error(value: dict[str, Any]) -> int | None:
         if isinstance(candidate, int) and not isinstance(candidate, bool) and candidate not in (0, -1):
             return candidate
     return None
+
+
+def reported_render_path_matches(value: dict[str, Any], expected: str) -> bool:
+    if "render_path" in value and value.get("render_path") != expected:
+        return False
+    selector = value.get("selector")
+    if isinstance(selector, dict) and "render_path" in selector:
+        return selector.get("render_path") == expected
+    return True
+
+
+def is_crash_exit_code(returncode: int) -> bool:
+    return returncode < 0 or returncode >= 0xC0000000
 
 
 def validator(name: str) -> Draft202012Validator:
@@ -262,12 +278,15 @@ def write_native_input(
 
 
 def failed_result(
-    depth: str, input_world: dict[str, Any], classification: str = "nonzero_exit"
+    depth: str,
+    input_world: dict[str, Any],
+    classification: str = "nonzero_exit",
+    render_path: str = "smartfx",
 ) -> dict[str, Any]:
     return {
         "depth": depth,
         "classification": classification,
-        "selector": {"render_path": "smartfx", "completed": False, "error_code": None},
+        "selector": {"render_path": render_path, "completed": False, "error_code": None},
         "input_world": input_world,
         "world": None,
         "raw_input": None,
@@ -284,23 +303,24 @@ def normalize_harness_report(
     output: Path,
     input_world: dict[str, Any],
     premultiplication: str,
+    render_path: str = "smartfx",
 ) -> dict[str, Any]:
     if not value.get("passed") or not output.is_file():
-        return failed_result(depth, input_world, "invalid_output")
+        return failed_result(depth, input_world, "invalid_output", render_path)
     try:
         actual_input_world = value["input_world"]
         actual_world = value["output_world"]
         width = int(actual_world["width"])
         height = int(actual_world["height"])
     except (KeyError, TypeError, ValueError):
-        return failed_result(depth, input_world, "invalid_output")
+        return failed_result(depth, input_world, "invalid_output", render_path)
     if not isinstance(actual_input_world, dict) or not isinstance(actual_world, dict):
-        return failed_result(depth, input_world, "invalid_output")
+        return failed_result(depth, input_world, "invalid_output", render_path)
     result = {
         "depth": depth,
         "classification": "ok",
         "selector": {
-            "render_path": value.get("render_path", "smartfx"),
+            "render_path": render_path,
             "completed": True,
             "error_code": 0,
         },
@@ -312,17 +332,20 @@ def normalize_harness_report(
         "suite_timeline": value.get("suite_timeline"),
         "oracle": {"state": "not_captured", "identity_match": False, "exact": False},
     }
-    missing = value.get("missing_suites")
-    if isinstance(missing, list) and missing:
-        result["missing_suites"] = missing[:16]
     return result
 
 
 def normalize_structured_failure(
-    depth: str, value: dict[str, Any], input_world: dict[str, Any]
+    depth: str,
+    value: dict[str, Any],
+    input_world: dict[str, Any],
+    render_path: str = "smartfx",
 ) -> dict[str, Any]:
     classification = value.get("classification")
+    if value.get("plugin_kind") in {"aegp_candidate", "unknown_no_effect_entrypoint"}:
+        classification = "loader_error"
     if classification not in {
+        "loader_error",
         "unsupported",
         "selector_error",
         "missing_suite",
@@ -349,7 +372,7 @@ def normalize_structured_failure(
     selector = value.get("selector")
     if not isinstance(selector, dict):
         selector = {
-            "render_path": "smartfx",
+            "render_path": render_path,
             "completed": False,
             "error_code": meaningful_selector_error(value),
         }
@@ -377,9 +400,10 @@ def normalize_structured_failure(
     if not missing and isinstance(value.get("worker_diagnostics"), dict):
         missing = value["worker_diagnostics"].get("missing_suites")
     if isinstance(missing, list) and missing:
-        result["missing_suites"] = missing[:16]
         if result["classification"] == "nonzero_exit":
             result["classification"] = "missing_suite"
+        if result["classification"] == "missing_suite":
+            result["missing_suites"] = missing[:16]
     return result
 
 
@@ -556,6 +580,7 @@ def run_depth(
     input_world: dict[str, Any],
     premultiplication: str,
     bundle_root: Path,
+    render_path: str,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     if adapter:
         command = [
@@ -563,6 +588,8 @@ def run_depth(
             str(adapter),
             "--depth",
             depth,
+            "--render-path",
+            render_path,
             "--runner",
             str(harness),
             "--plugin",
@@ -579,7 +606,7 @@ def run_depth(
     else:
         command = [
             str(harness),
-            DEPTH_COMMANDS[depth],
+            DEPTH_COMMANDS[(render_path, depth)],
             str(plugin),
             str(input_path),
             str(output),
@@ -604,27 +631,33 @@ def run_depth(
     detail.update(stream_detail)
     if stream_detail.get("spawn_error"):
         detail["spawn_error"] = bounded_text(stream_detail["spawn_error"])
-        return failed_result(depth, input_world, "host_validation_error"), detail
+        return failed_result(depth, input_world, "host_validation_error", render_path), detail
     if timed_out:
-        return failed_result(depth, input_world, "timeout_killed"), detail
+        return failed_result(depth, input_world, "timeout_killed", render_path), detail
+    if is_crash_exit_code(returncode):
+        return failed_result(depth, input_world, "crashed", render_path), detail
     try:
         value = strict_json_loads(stdout)
     except (json.JSONDecodeError, ValueError):
         if returncode != 0:
-            return failed_result(depth, input_world), detail
-        return failed_result(depth, input_world, "invalid_output"), detail
+            return failed_result(depth, input_world, render_path=render_path), detail
+        return failed_result(depth, input_world, "invalid_output", render_path), detail
     if not isinstance(value, dict):
         if returncode != 0:
-            return failed_result(depth, input_world), detail
-        return failed_result(depth, input_world, "invalid_output"), detail
+            return failed_result(depth, input_world, render_path=render_path), detail
+        return failed_result(depth, input_world, "invalid_output", render_path), detail
+    if not reported_render_path_matches(value, render_path):
+        return failed_result(depth, input_world, "host_validation_error", render_path), detail
     if returncode != 0:
-        return normalize_structured_failure(depth, value, input_world), detail
+        return normalize_structured_failure(depth, value, input_world, render_path), detail
     if adapter:
         if value.get("classification") == "ok":
             if not output.is_file() or value.get("output_sha256") != sha256(output):
-                return failed_result(depth, input_world, "invalid_output"), detail
+                return failed_result(depth, input_world, "invalid_output", render_path), detail
         return value, detail
-    return normalize_harness_report(depth, value, output, input_world, premultiplication), detail
+    return normalize_harness_report(
+        depth, value, output, input_world, premultiplication, render_path
+    ), detail
 
 
 def attach_raw_artifacts(
@@ -838,6 +871,7 @@ def main() -> int:
                 input_world,
                 manifest["execution"]["premultiplication"],
                 output_root,
+                manifest["execution"]["render_path"],
             )
             attach_raw_artifacts(
                 result,

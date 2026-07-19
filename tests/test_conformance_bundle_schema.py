@@ -143,6 +143,27 @@ class ConformanceBundleSchemaTests(unittest.TestCase):
         self.report_validator.validate(report)
         validate_bundle(self.manifest, report, self.bundle_root)
 
+    def test_missing_suite_evidence_is_exclusive_to_its_classification(self):
+        report = self.valid_report()
+        report["results"][0]["missing_suites"] = [
+            {"name": "PF World Suite", "version": 2}
+        ]
+        self.assert_invalid(self.report_validator, report)
+        report["results"][0].update(
+            {
+                "classification": "missing_suite",
+                "world": None,
+                "raw_output": None,
+                "output_sha256": None,
+                "selector": {
+                    "render_path": "classic",
+                    "completed": False,
+                    "error_code": 25,
+                },
+            }
+        )
+        self.report_validator.validate(report)
+
     def test_report_rejects_unknown_absolute_identity_and_missing_evidence(self):
         for mutate in (
             lambda item: item["results"][0].update({"unknown": True}),

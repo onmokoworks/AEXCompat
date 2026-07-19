@@ -94,7 +94,7 @@
       "required": ["depth", "classification", "selector", "input_world", "world", "raw_input", "raw_output", "output_sha256", "suite_timeline", "oracle"],
       "properties": {
         "depth": {"enum": ["argb8", "argb16", "argb32f"]},
-        "classification": {"enum": ["ok", "unsupported", "selector_error", "missing_suite", "nonzero_exit", "crashed", "timeout_killed", "invalid_output", "host_validation_error"]},
+        "classification": {"enum": ["ok", "loader_error", "unsupported", "selector_error", "missing_suite", "nonzero_exit", "crashed", "timeout_killed", "invalid_output", "host_validation_error"]},
         "selector": {"$ref": "#/$defs/selector"},
         "input_world": {"$ref": "#/$defs/world"},
         "world": {"oneOf": [{"$ref": "#/$defs/world"}, {"type": "null"}]},
@@ -108,7 +108,7 @@
       },
       "allOf": [
         {"if": {"properties": {"classification": {"const": "ok"}}, "required": ["classification"]}, "then": {"properties": {"world": {"$ref": "#/$defs/world"}, "raw_output": {"$ref": "conformance-manifest.schema.json#/$defs/artifact"}, "output_sha256": {"$ref": "#/$defs/sha256"}, "selector": {"properties": {"completed": {"const": true}, "error_code": {"const": 0}}}}}},
-        {"if": {"properties": {"classification": {"const": "missing_suite"}}, "required": ["classification"]}, "then": {"required": ["missing_suites"], "properties": {"missing_suites": {"minItems": 1}}}}
+        {"if": {"properties": {"classification": {"const": "missing_suite"}}, "required": ["classification"]}, "then": {"required": ["missing_suites"], "properties": {"missing_suites": {"minItems": 1}}}, "else": {"properties": {"missing_suites": {"maxItems": 0}}}}
       ]
     }
   }

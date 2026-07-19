@@ -28,11 +28,12 @@
     "execution": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["time", "parameters", "premultiplication", "color_management", "linear_light", "renderer"],
+      "required": ["render_path", "time", "parameters", "premultiplication", "color_management", "linear_light", "renderer"],
       "properties": {
+        "render_path": {"enum": ["classic", "smartfx"]},
         "time": {
           "type": "object", "additionalProperties": false, "required": ["value", "scale"],
-          "properties": {"value": {"type": "integer"}, "scale": {"type": "integer", "minimum": 1, "maximum": 2147483647}}
+          "properties": {"value": {"type": "integer", "minimum": 0, "maximum": 10000000}, "scale": {"type": "integer", "minimum": 1, "maximum": 1000000}}
         },
         "parameters": {"type": "array", "maxItems": 1024, "items": {"$ref": "#/$defs/parameter_value"}},
         "premultiplication": {"enum": ["straight", "premultiplied", "opaque"]},

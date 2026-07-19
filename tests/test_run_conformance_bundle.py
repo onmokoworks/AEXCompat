@@ -1,4 +1,5 @@
 import hashlib
+import importlib.util
 import json
 import struct
 import subprocess
@@ -14,6 +15,16 @@ from referencing import Registry, Resource
 ROOT = Path(__file__).resolve().parents[1]
 RUNNER = ROOT / "tools" / "run-conformance-bundle.py"
 SCHEMAS = ROOT / "schemas"
+if str(ROOT / "tools") not in sys.path:
+    sys.path.insert(0, str(ROOT / "tools"))
+
+
+def load_runner_module():
+    spec = importlib.util.spec_from_file_location("run_conformance_bundle", RUNNER)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    return module
 
 
 def identity(path: Path, relative: str):
@@ -40,6 +51,7 @@ def fixture(tmp_path: Path):
         "runner": identity(harness, "runner/harness.exe"),
         "requested_depths": ["argb8", "argb16"],
         "execution": {
+            "render_path": "smartfx",
             "time": {"value": 0, "scale": 30},
             "parameters": [{"index": 1, "type": "slider", "value": 50}],
             "premultiplication": "straight",
@@ -55,12 +67,12 @@ def fixture(tmp_path: Path):
     adapter.write_text(
         "import argparse, hashlib, json\n"
         "p=argparse.ArgumentParser()\n"
-        "[p.add_argument(x) for x in ('--depth','--runner','--plugin','--input','--output','--request','--world-dump-dir')]\n"
+        "[p.add_argument(x) for x in ('--depth','--render-path','--runner','--plugin','--input','--output','--request','--world-dump-dir')]\n"
         "a=p.parse_args(); bpp={'argb8':4,'argb16':8,'argb32f':16}[a.depth]\n"
         "data=b'output-'+a.depth.encode(); open(a.output,'wb').write(data)\n"
         "import os; os.makedirs(a.world_dump_dir); open(os.path.join(a.world_dump_dir,'000-smart-input-2x2.raw'),'wb').write(b'i'*(4*bpp)); open(os.path.join(a.world_dump_dir,'001-smart-output-2x2.raw'),'wb').write(b'o'*(4*bpp))\n"
         "w={'width':2,'height':2,'row_bytes':2*bpp,'pixel_format':a.depth,'premultiplication':'straight','extent_hint':{'left':0,'top':0,'right':2,'bottom':2}}\n"
-        "print(json.dumps({'depth':a.depth,'classification':'ok','selector':{'render_path':'smartfx','completed':True,'error_code':0},'input_world':w,'world':w,'raw_input':None,'raw_output':None,'output_sha256':hashlib.sha256(data).hexdigest(),'suite_timeline':[],'oracle':{'state':'not_captured','identity_match':False,'exact':False}}))\n",
+        "print(json.dumps({'depth':a.depth,'classification':'ok','selector':{'render_path':a.render_path,'completed':True,'error_code':0},'input_world':w,'world':w,'raw_input':None,'raw_output':None,'output_sha256':hashlib.sha256(data).hexdigest(),'suite_timeline':[],'oracle':{'state':'not_captured','identity_match':False,'exact':False}}))\n",
         encoding="utf-8",
     )
     return path, adapter
@@ -95,6 +107,113 @@ def test_creates_self_contained_schema_valid_bundle(tmp_path):
     assert metadata["status"] == "completed"
     assert report["parameters"][0]["initial_value"] == 50
     assert report["results"][0]["raw_input"]["path"].startswith("raw/argb8/")
+
+
+def test_all_classic_and_smartfx_depths_have_canonical_commands():
+    module = load_runner_module()
+    assert module.DEPTH_COMMANDS == {
+        ("classic", "argb8"): "--render-experimental-request",
+        ("classic", "argb16"): "--render-experimental-request-16",
+        ("classic", "argb32f"): "--render-experimental-request-32",
+        ("smartfx", "argb8"): "--render-experimental-smart-request",
+        ("smartfx", "argb16"): "--render-experimental-smart-request-16",
+        ("smartfx", "argb32f"): "--render-experimental-smart-request-32-cpu",
+    }
+
+
+def test_render_path_echo_rejects_each_mismatch_and_contradiction():
+    module = load_runner_module()
+    assert module.reported_render_path_matches({}, "classic")
+    assert not module.reported_render_path_matches({"render_path": "smartfx"}, "classic")
+    assert not module.reported_render_path_matches(
+        {"render_path": "classic", "selector": {"render_path": "smartfx"}}, "classic"
+    )
+    assert not module.reported_render_path_matches(
+        {"render_path": "smartfx", "selector": {"render_path": "classic"}}, "classic"
+    )
+    assert module.is_crash_exit_code(-11)
+    assert module.is_crash_exit_code(0xC0000005)
+    assert not module.is_crash_exit_code(1)
+
+
+@pytest.mark.parametrize("plugin_kind", ["aegp_candidate", "unknown_no_effect_entrypoint"])
+def test_plugin_kind_maps_to_loader_error(plugin_kind):
+    module = load_runner_module()
+    result = module.normalize_structured_failure(
+        "argb8",
+        {
+            "classification": "nonzero_exit",
+            "plugin_kind": plugin_kind,
+            "missing_suites": [{"name": "PF World Suite", "version": 2}],
+        },
+        {
+            "width": 2,
+            "height": 2,
+            "row_bytes": 8,
+            "pixel_format": "argb8",
+            "premultiplication": "straight",
+            "extent_hint": {"left": 0, "top": 0, "right": 2, "bottom": 2},
+        },
+        "classic",
+    )
+    assert result["classification"] == "loader_error"
+    assert result["plugin_kind"] == plugin_kind
+    assert result["selector"]["render_path"] == "classic"
+    assert "missing_suites" not in result
+
+
+def test_explicit_loader_error_is_preserved():
+    module = load_runner_module()
+    result = module.normalize_structured_failure(
+        "argb8",
+        {"classification": "loader_error"},
+        {},
+        "classic",
+    )
+    assert result["classification"] == "loader_error"
+
+
+def test_manifest_requires_a_valid_render_path(tmp_path):
+    manifest, adapter = fixture(tmp_path)
+    document = json.loads(manifest.read_text(encoding="utf-8"))
+    del document["execution"]["render_path"]
+    manifest.write_text(json.dumps(document), encoding="utf-8")
+    assert invoke(manifest, tmp_path / "missing", adapter).returncode != 0
+    document["execution"]["render_path"] = "automatic"
+    manifest.write_text(json.dumps(document), encoding="utf-8")
+    assert invoke(manifest, tmp_path / "invalid", adapter).returncode != 0
+
+
+@pytest.mark.parametrize("render_path", ["classic", "smartfx"])
+def test_adapter_receives_and_reports_requested_render_path(tmp_path, render_path):
+    manifest, adapter = fixture(tmp_path)
+    document = json.loads(manifest.read_text(encoding="utf-8"))
+    document["execution"]["render_path"] = render_path
+    manifest.write_text(json.dumps(document), encoding="utf-8")
+    output = tmp_path / "bundle"
+    completed = invoke(manifest, output, adapter)
+    assert completed.returncode == 0, completed.stderr
+    report = json.loads((output / "report.json").read_text())
+    assert {item["selector"]["render_path"] for item in report["results"]} == {render_path}
+
+
+@pytest.mark.parametrize(
+    "value,scale,accepted",
+    [
+        (0, 1, True),
+        (10_000_000, 1_000_000, True),
+        (-1, 30, False),
+        (10_000_001, 30, False),
+        (0, 1_000_001, False),
+    ],
+)
+def test_manifest_timing_schema_matches_harness_bounds(tmp_path, value, scale, accepted):
+    manifest, adapter = fixture(tmp_path)
+    document = json.loads(manifest.read_text(encoding="utf-8"))
+    document["execution"]["time"] = {"value": value, "scale": scale}
+    manifest.write_text(json.dumps(document), encoding="utf-8")
+    completed = invoke(manifest, tmp_path / "bundle", adapter)
+    assert (completed.returncode == 0) is accepted
 
 
 def test_refuses_existing_bundle_and_identity_mismatch(tmp_path):
@@ -419,6 +538,9 @@ def test_source_has_no_host_reimplementation():
 def test_harness_exposes_depth_variants_of_typed_request_cli():
     source = (ROOT / "broker" / "crates" / "harness" / "src" / "main.rs").read_text()
     for flag in (
+        '"--render-experimental-request"',
+        '"--render-experimental-request-16"',
+        '"--render-experimental-request-32"',
         '"--render-experimental-smart-request"',
         '"--render-experimental-smart-request-16"',
         '"--render-experimental-smart-request-32-cpu"',
