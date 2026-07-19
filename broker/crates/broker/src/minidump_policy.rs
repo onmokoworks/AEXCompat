@@ -250,7 +250,7 @@ struct NtIoStatusBlock {
 
 #[cfg(windows)]
 #[link(name = "ntdll")]
-extern "system" {
+unsafe extern "system" {
     fn NtCreateFile(
         file_handle: *mut windows_sys::Win32::Foundation::HANDLE,
         desired_access: u32,
