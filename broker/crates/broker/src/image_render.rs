@@ -5049,7 +5049,17 @@ fn render_classic_via_length_one_session(
         gpu_fallback_used: false,
         gpu_fallback_reason: None,
         gpu_attempt: None,
-        secondary_layers: json!([] as [Value; 0]),
+        // Same shape as the one-shot path so a layered session render reports
+        // its layers instead of falsely claiming none (issue #98 W1-4).
+        secondary_layers: json!(request
+            .layers
+            .iter()
+            .map(|layer| json!({
+                "slot": layer.slot,
+                "width": layer.width,
+                "height": layer.height,
+            }))
+            .collect::<Vec<_>>()),
         empty_smart_result: false,
         output_raw: request
             .preserved_output
