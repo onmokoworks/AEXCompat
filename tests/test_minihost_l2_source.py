@@ -44,6 +44,7 @@ AEGP_ASYNC_LAYER_RUNTIME = ROOT / "minihost" / "src" / "worker_aegp_async_layer_
 AEGP_HOST_SELFTESTS_SOURCE = ROOT / "minihost" / "src" / "worker_aegp_host_selftests.cpp"
 AEGP_COMPAT_SELFTESTS_SOURCE = ROOT / "minihost" / "src" / "worker_aegp_compat_selftests.cpp"
 INVOCATION_ORCHESTRATION_HEADER = ROOT / "minihost" / "src" / "worker_invocation_orchestration.hpp"
+SMART_EXECUTION_SOURCE = ROOT / "minihost" / "src" / "worker_smart_execution.cpp"
 AEGP_COMPAT_SELFTEST_HEADER = ROOT / "minihost" / "src" / "worker_aegp_compat_selftests.hpp"
 MASK_RUNTIME_HEADER = ROOT / "minihost" / "src" / "worker_mask_runtime.hpp"
 MASK_RUNTIME_SOURCE = ROOT / "minihost" / "src" / "worker_mask_runtime.cpp"
@@ -251,7 +252,7 @@ class MinihostL2SourceTests(unittest.TestCase):
         header = RENDER_HEADER.read_text(encoding="utf-8")
         implementation = RENDER_SOURCE.read_text(encoding="utf-8")
         cmake = (ROOT / "minihost" / "CMakeLists.txt").read_text(encoding="utf-8")
-        worker = SOURCE.read_text(encoding="utf-8")
+        worker = SOURCE.read_text(encoding="utf-8") + SMART_EXECUTION_SOURCE.read_text(encoding="utf-8")
 
         self.assertIn("struct HostHooks", header)
         self.assertIn("struct RenderContext", header)
@@ -280,7 +281,7 @@ class MinihostL2SourceTests(unittest.TestCase):
         self.assertNotIn("#if 0", implementation)
         self.assertIn("src/render_subsystem.cpp", cmake)
         self.assertIn("ClassicRenderRequest", worker)
-        self.assertIn("SmartRenderRequest", worker)
+        self.assertIn("struct Request", SMART_EXECUTION_SOURCE.read_text(encoding="utf-8"))
         self.assertIn("classic_render_runtime", worker)
         self.assertIn("smart_render_runtime", worker)
         self.assertIn("aexcompat::render::prepare_image_request", worker)
