@@ -131,6 +131,44 @@ void append_classic_threads(ReportSnapshot& report, const ClassicReport::Threads
       << ",\"thread_2_guards_intact\":" << (value.guards_intact[1] ? "true" : "false");
 }
 
+void append_gpu_diagnostics(ReportSnapshot& report, const GpuDiagnosticsSnapshot& value) {
+  report.stream()
+      << ",\"gpu_memory_lifetimes_balanced\":" << (value.memory_lifetimes_balanced ? "true" : "false")
+      << ",\"cuda_context_used\":" << (value.cuda_context_used ? "true" : "false")
+      << ",\"cuda_upload_bytes\":" << value.cuda[0]
+      << ",\"cuda_download_bytes\":" << value.cuda[1]
+      << ",\"cuda_sync_failures\":" << value.cuda[2]
+      << ",\"cuda_device_count\":" << value.cuda[3]
+      << ",\"cuda_device_index\":" << value.cuda[4]
+      << ",\"opencl_context_used\":" << (value.opencl_context_used ? "true" : "false")
+      << ",\"opencl_upload_bytes\":" << value.opencl[0]
+      << ",\"opencl_download_bytes\":" << value.opencl[1]
+      << ",\"opencl_sync_failures\":" << value.opencl[2]
+      << ",\"opencl_device_count\":" << value.opencl[3]
+      << ",\"opencl_device_index\":" << value.opencl[4]
+      << ",\"directx_context_used\":" << (value.directx_context_used ? "true" : "false")
+      << ",\"directx_device_count\":" << value.directx[0]
+      << ",\"directx_device_index\":" << value.directx[1]
+      << ",\"directx_upload_bytes\":" << value.directx[2]
+      << ",\"directx_download_bytes\":" << value.directx[3]
+      << ",\"directx_sync_failures\":" << value.directx[4]
+      << ",\"gpu_allocations_created\":" << value.allocations[0]
+      << ",\"gpu_allocations_freed\":" << value.allocations[1]
+      << ",\"live_gpu_allocation_count\":" << value.allocations[2]
+      << ",\"live_gpu_memory_bytes\":" << value.allocations[3]
+      << ",\"gpu_exclusive_access_depth\":" << value.allocations[4]
+      << ",\"invalid_gpu_memory_operations\":" << value.allocations[5];
+}
+
+void append_seh_diagnostics(ReportSnapshot& report, const SehDiagnosticsSnapshot& value) {
+  report.stream()
+      << ",\"last_seh_exception_code\":" << value.code
+      << ",\"last_seh_exception_address\":" << value.address
+      << ",\"last_seh_exception_module\":\"" << value.escaped_module << '"'
+      << ",\"last_seh_selector\":\"" << value.escaped_selector << '"'
+      << ",\"last_seh_error\":" << value.error;
+}
+
 void emit(const ReportSnapshot& snapshot, std::ostream& output) {
   output << snapshot.json();
 }

@@ -138,6 +138,29 @@ void append_classic_audio(ReportSnapshot& report, const ClassicReport::Audio& sn
 void append_classic_frame(ReportSnapshot& report, const ClassicReport::Frame& snapshot);
 void append_classic_threads(ReportSnapshot& report, const ClassicReport::Threads& snapshot);
 
+struct GpuDiagnosticsSnapshot {
+  bool memory_lifetimes_balanced{};
+  bool cuda_context_used{};
+  std::array<int64_t, 5> cuda{};  // upload, download, failures, count, index
+  bool opencl_context_used{};
+  std::array<int64_t, 5> opencl{};
+  bool directx_context_used{};
+  std::array<int64_t, 5> directx{};  // count, index, upload, download, failures
+  std::array<int64_t, 6> allocations{};  // created, freed, live count/bytes, depth, invalid
+};
+
+void append_gpu_diagnostics(ReportSnapshot& report, const GpuDiagnosticsSnapshot& snapshot);
+
+struct SehDiagnosticsSnapshot {
+  uint32_t code{};
+  uint64_t address{};
+  std::string escaped_module;
+  std::string escaped_selector;
+  int32_t error{};
+};
+
+void append_seh_diagnostics(ReportSnapshot& report, const SehDiagnosticsSnapshot& snapshot);
+
 void emit(const ReportSnapshot& snapshot, std::ostream& output);
 
 }  // namespace aexcompat::worker_render_report

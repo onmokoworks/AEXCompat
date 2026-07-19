@@ -12851,6 +12851,29 @@ bool __cdecl scene_render_receipt_enabled() {
   return is_render_worker() && g_loaded_effect_receipt_context.entry != nullptr;
 }
 
+aexcompat::worker_render_report::GpuDiagnosticsSnapshot capture_gpu_diagnostics() {
+  const auto& directx = directx_backend::diagnostics();
+  const auto i64 = [](auto value) { return static_cast<int64_t>(value); };
+  return {
+      gpu_memory_lifetimes_balanced(), g_cuda_upload_bytes > 0,
+      {i64(g_cuda_upload_bytes), i64(g_cuda_download_bytes), i64(g_cuda_sync_failures),
+       i64(g_last_cuda_device_count), i64(g_last_cuda_device_index)},
+      g_opencl_upload_bytes > 0,
+      {i64(g_opencl_upload_bytes), i64(g_opencl_download_bytes), i64(g_opencl_sync_failures),
+       i64(opencl::last_device_count()), i64(opencl::last_device_index())},
+      directx.context_used,
+      {i64(directx.device_count), i64(directx.device_index), i64(directx.upload_bytes),
+       i64(directx.download_bytes), i64(directx.sync_failures)},
+      {i64(g_gpu_allocations_created), i64(g_gpu_allocations_freed),
+       i64(gpu_transport::live_allocation_count()), i64(gpu_transport::live_memory_bytes()),
+       i64(gpu_transport::exclusive_access_depth()), i64(g_invalid_gpu_memory_operations)}};
+}
+
+aexcompat::worker_render_report::SehDiagnosticsSnapshot capture_seh_diagnostics() {
+  return {g_last_seh_exception_code, g_last_seh_exception_address,
+          escape(g_last_seh_exception_module), escape(g_last_seh_selector), g_last_seh_error};
+}
+
 int worker_main_impl(int argc, wchar_t **argv) {
   SceneSuiteFactoryHooks scene_factory{};
   scene_factory.render_scene_enabled = &scene_render_receipt_enabled;
@@ -15039,36 +15062,10 @@ int worker_main_impl(int argc, wchar_t **argv) {
             << ",\"async_layer_callback_exceptions\":" << g_async_layer_callback_exceptions
             << ",\"live_async_layer_requests\":" << g_async_layer_requests.size()
             << ",\"async_layer_reserved_bytes\":" << g_async_layer_reserved_bytes
-            << ",\"gpu_memory_lifetimes_balanced\":" << (gpu_memory_lifetimes_balanced() ? "true" : "false")
-            << ",\"cuda_context_used\":" << (g_cuda_upload_bytes > 0 ? "true" : "false")
-            << ",\"cuda_upload_bytes\":" << g_cuda_upload_bytes
-            << ",\"cuda_download_bytes\":" << g_cuda_download_bytes
-            << ",\"cuda_sync_failures\":" << g_cuda_sync_failures
-            << ",\"cuda_device_count\":" << g_last_cuda_device_count
-            << ",\"cuda_device_index\":" << g_last_cuda_device_index
-            << ",\"opencl_context_used\":" << (g_opencl_upload_bytes > 0 ? "true" : "false")
-            << ",\"opencl_upload_bytes\":" << g_opencl_upload_bytes
-            << ",\"opencl_download_bytes\":" << g_opencl_download_bytes
-            << ",\"opencl_sync_failures\":" << g_opencl_sync_failures
-            << ",\"opencl_device_count\":" << opencl::last_device_count()
-            << ",\"opencl_device_index\":" << opencl::last_device_index()
-            << ",\"directx_context_used\":" << (directx_backend::diagnostics().context_used ? "true" : "false")
-            << ",\"directx_device_count\":" << directx_backend::diagnostics().device_count
-            << ",\"directx_device_index\":" << directx_backend::diagnostics().device_index
-            << ",\"directx_upload_bytes\":" << directx_backend::diagnostics().upload_bytes
-            << ",\"directx_download_bytes\":" << directx_backend::diagnostics().download_bytes
-            << ",\"directx_sync_failures\":" << directx_backend::diagnostics().sync_failures
-            << ",\"gpu_allocations_created\":" << g_gpu_allocations_created
-            << ",\"gpu_allocations_freed\":" << g_gpu_allocations_freed
-            << ",\"live_gpu_allocation_count\":" << gpu_transport::live_allocation_count()
-            << ",\"live_gpu_memory_bytes\":" << gpu_transport::live_memory_bytes()
-            << ",\"gpu_exclusive_access_depth\":" << gpu_transport::exclusive_access_depth()
-            << ",\"invalid_gpu_memory_operations\":" << g_invalid_gpu_memory_operations
-            << ",\"last_seh_exception_code\":" << g_last_seh_exception_code
-            << ",\"last_seh_exception_address\":" << g_last_seh_exception_address
-            << ",\"last_seh_exception_module\":\"" << escape(g_last_seh_exception_module) << "\""
-            << ",\"last_seh_selector\":\"" << escape(g_last_seh_selector) << "\""
-            << ",\"last_seh_error\":" << g_last_seh_error
+            ;
+  aexcompat::worker_render_report::append_gpu_diagnostics(report_snapshot, capture_gpu_diagnostics());
+  aexcompat::worker_render_report::append_seh_diagnostics(report_snapshot, capture_seh_diagnostics());
+  report_snapshot.stream()
             << ",\"param_checkouts_balanced\":" << (classic_diagnostics.balanced ? "true" : "false")
             << ",\"param_checkout_calls\":" << classic_diagnostics.checkout_calls
             << ",\"param_checkin_calls\":" << classic_diagnostics.checkin_calls
@@ -15282,12 +15279,9 @@ int worker_main_impl(int argc, wchar_t **argv) {
             << ",\"live_gpu_allocation_count\":" << gpu_transport::live_allocation_count()
             << ",\"live_gpu_memory_bytes\":" << gpu_transport::live_memory_bytes()
             << ",\"gpu_exclusive_access_depth\":" << gpu_transport::exclusive_access_depth()
-            << ",\"invalid_gpu_memory_operations\":" << g_invalid_gpu_memory_operations
-            << ",\"last_seh_exception_code\":" << g_last_seh_exception_code
-            << ",\"last_seh_exception_address\":" << g_last_seh_exception_address
-            << ",\"last_seh_exception_module\":\"" << escape(g_last_seh_exception_module) << "\""
-            << ",\"last_seh_selector\":\"" << escape(g_last_seh_selector) << "\""
-            << ",\"last_seh_error\":" << g_last_seh_error
+            << ",\"invalid_gpu_memory_operations\":" << g_invalid_gpu_memory_operations;
+  aexcompat::worker_render_report::append_seh_diagnostics(report_snapshot, capture_seh_diagnostics());
+  report_snapshot.stream()
             << ",\"cuda_context_used\":" << (g_cuda_upload_bytes > 0 ? "true" : "false")
             << ",\"cuda_upload_bytes\":" << g_cuda_upload_bytes
             << ",\"cuda_download_bytes\":" << g_cuda_download_bytes
