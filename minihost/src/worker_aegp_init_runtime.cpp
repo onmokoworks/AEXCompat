@@ -106,4 +106,30 @@ EventResult dispatch_death(void* global_refcon) {
   return result;
 }
 
+BasicDispatchResult dispatch_basic_events(void* global_refcon,
+                                          bool update_menu, bool idle,
+                                          bool command, int32_t command_id) {
+  BasicDispatchResult result;
+  if (update_menu) {
+    const auto event = dispatch_update_menu(global_refcon, 0);
+    result.hooks_invoked += event.invoked;
+    if (event.error != 0 && result.error == 0) result.error = event.error;
+  }
+  if (idle) {
+    const auto event = dispatch_idle(global_refcon);
+    result.hooks_invoked += event.invoked;
+    result.idle_max_sleep = event.idle_max_sleep;
+    if (event.error != 0 && result.error == 0) result.error = event.error;
+  }
+  if (command) {
+    for (int pass = 0; pass < 2; ++pass) {
+      const auto event = dispatch_command(global_refcon, command_id, 0, 0);
+      result.command_hooks_invoked += event.invoked;
+      result.command_handled_count += event.handled_count;
+      if (event.error != 0 && result.error == 0) result.error = event.error;
+    }
+  }
+  return result;
+}
+
 }  // namespace aexcompat::worker_runtime::aegp_init

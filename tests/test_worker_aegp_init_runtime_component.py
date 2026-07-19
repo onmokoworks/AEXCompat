@@ -24,8 +24,7 @@ def test_aegp_init_runtime_owns_hook_dtos_registration_and_event_runners():
         "kMaxHooks = 64",
     ):
         assert marker in header + source
-    assert "aegp_init::dispatch_update_menu" in main
-    assert "aegp_init::dispatch_idle" in main
+    assert "aegp_init::dispatch_basic_events" in main
     assert "aegp_init::dispatch_death" in main
     assert '#include "worker_aegp_init_runtime.cpp"' not in main
 

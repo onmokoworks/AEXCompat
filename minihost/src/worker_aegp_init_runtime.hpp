@@ -42,6 +42,15 @@ struct EventResult {
   uint32_t handled_count{};
 };
 
+struct BasicDispatchResult {
+  int32_t error{};
+  uint32_t hooks_invoked{};
+  uint32_t menu_hooks_invoked{};
+  uint32_t command_hooks_invoked{};
+  uint32_t command_handled_count{};
+  int32_t idle_max_sleep{-1};
+};
+
 State& state() noexcept;
 int32_t register_command_hook(int32_t plugin_id, int32_t priority,
                               int32_t command, void* hook, void* refcon);
@@ -53,5 +62,7 @@ EventResult dispatch_idle(void* global_refcon);
 EventResult dispatch_command(void* global_refcon, int32_t command,
                              uint32_t hook_priority, uint8_t already_handled);
 EventResult dispatch_death(void* global_refcon);
+BasicDispatchResult dispatch_basic_events(void* global_refcon,
+    bool update_menu, bool idle, bool command, int32_t command_id);
 
 }  // namespace aexcompat::worker_runtime::aegp_init

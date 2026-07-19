@@ -6762,30 +6762,22 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
     SeekPipeProbe seek_probe;
     TrimPipeProbe trim_probe;
     SwitchPipeProbe switch_probe;
-    if (init_error == 0 && g_aegp_update_menu_mode) {
-      const auto event = aexcompat::worker_runtime::aegp_init::dispatch_update_menu(
-          global_refcon, 0);
-      hooks_invoked += event.invoked;
-      if (event.error != 0 && event_error == 0) event_error = event.error;
-    }
-    if (init_error == 0 && g_aegp_idle_mode) {
-      const auto event = aexcompat::worker_runtime::aegp_init::dispatch_idle(global_refcon);
-      hooks_invoked += event.invoked;
-      idle_max_sleep = event.idle_max_sleep;
-      if (event.error != 0 && event_error == 0) event_error = event.error;
-    }
-    if (init_error == 0 && g_aegp_command_roundtrip_mode) {
-      if (g_aegp_inserted_commands.empty() || g_aegp_command_registrations.empty()) {
+    if (init_error == 0) {
+      const bool command_ready = !g_aegp_inserted_commands.empty() &&
+          !g_aegp_command_registrations.empty();
+      if (g_aegp_command_roundtrip_mode && !command_ready) {
         event_error = 4;
       } else {
-        const int32_t command = g_aegp_inserted_commands.front();
-        for (int pass = 0; pass < 2; ++pass) {
-          const auto event = aexcompat::worker_runtime::aegp_init::dispatch_command(
-              global_refcon, command, 0, 0);
-          command_hooks_invoked += event.invoked;
-          command_handled_count += event.handled_count;
-          if (event.error != 0 && event_error == 0) event_error = event.error;
-        }
+        const int32_t command = command_ready ? g_aegp_inserted_commands.front() : 0;
+        const auto events = aexcompat::worker_runtime::aegp_init::dispatch_basic_events(
+            global_refcon, g_aegp_update_menu_mode, g_aegp_idle_mode,
+            g_aegp_command_roundtrip_mode, command);
+        hooks_invoked += events.hooks_invoked;
+        menu_hooks_invoked += events.menu_hooks_invoked;
+        command_hooks_invoked += events.command_hooks_invoked;
+        command_handled_count += events.command_handled_count;
+        idle_max_sleep = events.idle_max_sleep;
+        if (events.error != 0 && event_error == 0) event_error = events.error;
       }
     }
     if (init_error == 0 &&
