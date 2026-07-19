@@ -626,7 +626,7 @@ uint32_t g_automatic_param_checkins = 0;
 uint32_t g_invalid_param_checkins = 0;
 uint32_t g_rejected_temporal_param_checkouts = 0;
 bool g_wide_time_checkout_allowed = false;
-bool g_shutter_dependency_advertised = false;
+bool g_classic_shutter_dependency_advertised = false;
 int32_t g_checkout_current_time = 0;
 uint32_t g_checkout_current_time_scale = 1;
 int32_t g_last_param_checkout_index = -1;
@@ -663,8 +663,6 @@ uint32_t g_adv_app_info_text_calls{};
 std::string g_last_adv_app_info_text;
 int32_t g_last_progress_current = 0;
 int32_t g_last_progress_total = 0;
-bool g_gpu_world_mode = false;
-void* g_cuda_context_for_info = nullptr;
 int32_t g_secondary_layer_slot = 6;
 struct ExternalLayerInput {
   int32_t slot{};
@@ -12179,7 +12177,7 @@ int32_t classic_render_runtime(EffectEntry entry, std::array<std::byte, kInSize>
       (effective_out_flags & kOutFlagWideTimeInput) != 0 ||
       ((effective_out_flags2 & kOutFlag2AutomaticWideTimeInput) != 0 &&
        (effective_out_flags2 & kOutFlag2SupportsSmartRender) == 0);
-  g_shutter_dependency_advertised =
+  g_classic_shutter_dependency_advertised =
       (effective_out_flags & kOutFlagIUseShutterAngle) != 0;
   g_checkout_current_time = read<int32_t>(input, kInCurrentTime);
   g_checkout_current_time_scale = read<uint32_t>(input, kInTimeScale);
@@ -12416,6 +12414,7 @@ bool exercise_loaded_effect_item_receipt(EffectEntry entry,
   return g_loaded_effect_receipt_fixture_passed;
 }
 struct SmartResult {
+  std::shared_ptr<const aexcompat::worker_runtime::smart::Snapshot> runtime;
   int32_t gpu_setup_error{};
   int32_t pre_error{-1};
   int32_t selector_error{-1};
@@ -12454,6 +12453,7 @@ SmartResult smart_render_runtime(EffectEntry entry, std::array<std::byte, kInSiz
   SmartRuntimeSession smart_session;
   reset_smart_host_telemetry();
   SmartResult result;
+  result.runtime = smart_session.snapshot();
   const uint32_t effective_out_flags = read<uint32_t>(command_output, kOutFlags);
   const uint32_t effective_out_flags2 = read<uint32_t>(command_output, kOutFlags2);
   smart_state().wide_time_checkout_allowed =
@@ -12707,7 +12707,7 @@ SmartResult smart_render_runtime(EffectEntry entry, std::array<std::byte, kInSiz
   smart_state().wide_time_checkout_allowed =
       (dynamic_out_flags & kOutFlagWideTimeInput) != 0 ||
       (dynamic_out_flags2 & kOutFlag2AutomaticWideTimeInput) != 0;
-  g_shutter_dependency_advertised =
+  smart_state().shutter_dependency_advertised =
       (dynamic_out_flags & kOutFlagIUseShutterAngle) != 0;
   const bool nop_render =
       (read<uint32_t>(command_output, kOutFlags) & kOutFlagNopRender) != 0;
@@ -12769,14 +12769,12 @@ SmartResult smart_render_runtime(EffectEntry entry, std::array<std::byte, kInSiz
   std::array<std::byte, 16> gpu_setup_extra{};
   const int32_t gpu_framework = (fixture_gpu_negotiation || directx_gpu_negotiation) ? 4 :
       (opencl_gpu_negotiation ? 1 : 3);
-  g_gpu_world_mode = gpu_negotiation;
   const bool use_cuda = gpu_negotiation && gpu_framework == 3;
   const bool use_opencl = gpu_negotiation && gpu_framework == 1;
   const bool use_directx = gpu_negotiation && gpu_framework == 4;
   if (gpu_negotiation) capture_module_audit();
   const bool gpu_context_started = gpu_transport::begin_backend_context(
       gpu_framework, gpu_device_index);
-  if (use_cuda) g_cuda_context_for_info = gpu_transport::active_cuda_context();
   if (gpu_negotiation) {
     write<int32_t>(gpu_setup_input, 0, gpu_framework);
     write<uint32_t>(gpu_setup_input, 4, gpu_device_index);
@@ -12916,7 +12914,6 @@ SmartResult smart_render_runtime(EffectEntry entry, std::array<std::byte, kInSiz
       !gpu_transport::end_backend_context(gpu_framework) &&
       result.gpu_setdown_error == 0)
     result.gpu_setdown_error = -6;
-  if (use_cuda) g_cuda_context_for_info = nullptr;
   void* pre_render_data = read<void*>(pre_output, 40);
   if (auto delete_pre_render_data = read<void(__cdecl*)(void*)>(pre_output, 48)) {
     // A supplied callback owns cleanup even if it faults; host fallback would double-free.
@@ -12938,7 +12935,6 @@ SmartResult smart_render_runtime(EffectEntry entry, std::array<std::byte, kInSiz
   smart_state().input_world = nullptr;
   smart_state().output_world = nullptr;
   smart_state().map_world = nullptr;
-  g_gpu_world_mode = false;
   smart_state().hosted_layers.clear();
   std::vector<unsigned char> logical_input;
   std::vector<unsigned char> logical_output;
@@ -17023,7 +17019,7 @@ int worker_main_impl(int argc, wchar_t **argv) {
             << ",\"input_buffer_writable\":" << (input_write_advertised ? "true" : "false")
             << ",\"wide_time_checkout_allowed\":" << (g_wide_time_checkout_allowed ? "true" : "false")
             << ",\"rejected_temporal_param_checkouts\":" << g_rejected_temporal_param_checkouts
-            << ",\"shutter_dependency_advertised\":" << (g_shutter_dependency_advertised ? "true" : "false")
+            << ",\"shutter_dependency_advertised\":" << (g_classic_shutter_dependency_advertised ? "true" : "false")
             << ",\"audio_usage_advertised\":" << (audio_telemetry().usage_advertised ? "true" : "false")
             << ",\"audio_checkout_allowed\":" << (audio_telemetry().checkout_allowed ? "true" : "false")
             << ",\"audio_source_available\":" << (audio_telemetry().source_available ? "true" : "false")
@@ -17270,9 +17266,9 @@ int worker_main_impl(int argc, wchar_t **argv) {
             << ",\"nop_render_advertised\":" << (nop_render_advertised ? "true" : "false")
             << ",\"input_write_advertised\":" << (input_write_advertised ? "true" : "false")
             << ",\"input_buffer_writable\":" << (input_write_advertised ? "true" : "false")
-            << ",\"wide_time_checkout_allowed\":" << (smart_state().wide_time_checkout_allowed ? "true" : "false")
-            << ",\"rejected_temporal_param_checkouts\":" << smart_state().rejected_temporal_checkouts
-            << ",\"shutter_dependency_advertised\":" << (g_shutter_dependency_advertised ? "true" : "false")
+            << ",\"wide_time_checkout_allowed\":" << (smart.runtime->wide_time_checkout_allowed ? "true" : "false")
+            << ",\"rejected_temporal_param_checkouts\":" << smart.runtime->rejected_temporal_checkouts
+            << ",\"shutter_dependency_advertised\":" << (smart.runtime->shutter_dependency_advertised ? "true" : "false")
             << ",\"smart_pre_render_dispatched\":" << (nop_render_advertised ? "false" : "true")
             << ",\"smart_render_selector_dispatched\":" << (nop_render_advertised ? "false" : "true")
             << ",\"comp_bg_color_success_count\":"
@@ -17305,12 +17301,12 @@ int worker_main_impl(int argc, wchar_t **argv) {
             << ",\"checkout_time_step\":" << smart.checkout_time_step
             << ",\"checkout_time_scale\":" << smart.checkout_time_scale
             << ",\"roi_contract_valid\":" << (smart.roi_contract_valid ? "true" : "false")
-            << ",\"input_checkout_request\":[" << smart_state().input_checkout_request[0] << "," << smart_state().input_checkout_request[1]
-            << "," << smart_state().input_checkout_request[2] << "," << smart_state().input_checkout_request[3] << "]"
-            << ",\"map_checkout_request\":[" << smart_state().map_checkout_request[0] << "," << smart_state().map_checkout_request[1]
-            << "," << smart_state().map_checkout_request[2] << "," << smart_state().map_checkout_request[3] << "]"
+            << ",\"input_checkout_request\":[" << smart.runtime->input_checkout_request[0] << "," << smart.runtime->input_checkout_request[1]
+            << "," << smart.runtime->input_checkout_request[2] << "," << smart.runtime->input_checkout_request[3] << "]"
+            << ",\"map_checkout_request\":[" << smart.runtime->map_checkout_request[0] << "," << smart.runtime->map_checkout_request[1]
+            << "," << smart.runtime->map_checkout_request[2] << "," << smart.runtime->map_checkout_request[3] << "]"
             << ",\"global_setdown_error\":" << setdown_error
-            << ",\"case_id\":\"" << case_id << "\",\"pixel_format\":\"" << smart_state().pixel_format << "\",\"width\":"
+            << ",\"case_id\":\"" << case_id << "\",\"pixel_format\":\"" << smart.runtime->pixel_format << "\",\"width\":"
             << smart.output_width << ",\"height\":" << smart.output_height << ",\"rowbytes\":"
             << smart.output_rowbytes
             << ",\"bytes_written_per_row\":" << smart.output_rowbytes

@@ -56,23 +56,24 @@ void State::clear_transient() {
 }
 
 State& state() { return g_active_state ? *g_active_state : g_default_state; }
-int32_t __cdecl width() { return state().width; }
-int32_t __cdecl height() { return state().height; }
+int32_t __cdecl width() { return g_active_state ? g_active_state->width : 0; }
+int32_t __cdecl height() { return g_active_state ? g_active_state->height : 0; }
 
 Session::Session() : previous_(g_active_state) { g_active_state = &state_; }
 
 Session::~Session() {
-  g_default_state.width = state_.width;
-  g_default_state.height = state_.height;
-  g_default_state.rowbytes = state_.rowbytes;
-  g_default_state.pixel_format = state_.pixel_format;
-  g_default_state.checkout_time = state_.checkout_time;
-  g_default_state.checkout_time_step = state_.checkout_time_step;
-  g_default_state.checkout_time_scale = state_.checkout_time_scale;
-  g_default_state.input_checkout_request = state_.input_checkout_request;
-  g_default_state.map_checkout_request = state_.map_checkout_request;
-  g_default_state.wide_time_checkout_allowed = state_.wide_time_checkout_allowed;
-  g_default_state.rejected_temporal_checkouts = state_.rejected_temporal_checkouts;
+  snapshot_->width = state_.width;
+  snapshot_->height = state_.height;
+  snapshot_->rowbytes = state_.rowbytes;
+  snapshot_->pixel_format = state_.pixel_format;
+  snapshot_->wide_time_checkout_allowed = state_.wide_time_checkout_allowed;
+  snapshot_->shutter_dependency_advertised = state_.shutter_dependency_advertised;
+  snapshot_->rejected_temporal_checkouts = state_.rejected_temporal_checkouts;
+  snapshot_->checkout_time = state_.checkout_time;
+  snapshot_->checkout_time_step = state_.checkout_time_step;
+  snapshot_->checkout_time_scale = state_.checkout_time_scale;
+  snapshot_->input_checkout_request = state_.input_checkout_request;
+  snapshot_->map_checkout_request = state_.map_checkout_request;
   state_.clear_transient();
   g_active_state = previous_;
 }
@@ -178,10 +179,12 @@ bool concurrency_self_test() {
   std::atomic<int> ready{};
   std::atomic<bool> release{};
   std::array<bool, 2> passed{};
+  std::array<std::shared_ptr<const Snapshot>, 2> snapshots;
   std::array<std::thread, 2> workers;
   for (int index = 0; index < 2; ++index) {
     workers[index] = std::thread([&, index] {
       Session session;
+      snapshots[index] = session.snapshot();
       auto& runtime = state();
       runtime.width = 320 + index;
       runtime.height = 180 + index;
@@ -189,6 +192,9 @@ bool concurrency_self_test() {
       runtime.current_time_scale = 24;
       runtime.pixel_aspect_numerator = 1 + index;
       runtime.pixel_aspect_denominator = 2 + index;
+      runtime.wide_time_checkout_allowed = index != 0;
+      runtime.shutter_dependency_advertised = index == 0;
+      runtime.rejected_temporal_checkouts = 40 + index;
       runtime.output_world = reinterpret_cast<void*>(static_cast<uintptr_t>(index + 1));
       ++ready;
       while (!release.load(std::memory_order_acquire)) std::this_thread::yield();
@@ -203,15 +209,22 @@ bool concurrency_self_test() {
       passed[index] = checkout_status == 0 && checkout_output(nullptr, &output) == 0 &&
           output == runtime.output_world &&
           result_width == 320 + index && result_height == 180 + index &&
-          par_numerator == 1 + index;
+          par_numerator == 1 + index && width() == 320 + index &&
+          height() == 180 + index;
     });
   }
   while (ready.load(std::memory_order_acquire) != 2) std::this_thread::yield();
   release.store(true, std::memory_order_release);
   for (auto& worker : workers) worker.join();
   void* cross_thread_output{};
-  return passed[0] && passed[1] &&
-      checkout_output(nullptr, &cross_thread_output) == 4;
+  return passed[0] && passed[1] && snapshots[0] && snapshots[1] &&
+      snapshots[0]->width == 320 && snapshots[1]->width == 321 &&
+      snapshots[0]->rejected_temporal_checkouts == 40 &&
+      snapshots[1]->rejected_temporal_checkouts == 41 &&
+      snapshots[0]->shutter_dependency_advertised &&
+      snapshots[1]->wide_time_checkout_allowed &&
+      checkout_output(nullptr, &cross_thread_output) == 4 && width() == 0 &&
+      height() == 0;
 }
 
 }  // namespace aexcompat::worker_runtime::smart

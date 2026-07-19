@@ -2,6 +2,7 @@
 
 #include <array>
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -30,6 +31,7 @@ struct State {
   int32_t rowbytes{64};
   std::string pixel_format{"argb8"};
   bool wide_time_checkout_allowed{};
+  bool shutter_dependency_advertised{};
   int32_t current_time{};
   uint32_t current_time_scale{1};
   uint32_t rejected_temporal_checkouts{};
@@ -48,6 +50,21 @@ struct State {
   void clear_transient();
 };
 
+struct Snapshot {
+  int32_t width{};
+  int32_t height{};
+  int32_t rowbytes{};
+  std::string pixel_format;
+  bool wide_time_checkout_allowed{};
+  bool shutter_dependency_advertised{};
+  uint32_t rejected_temporal_checkouts{};
+  int32_t checkout_time{};
+  int32_t checkout_time_step{};
+  uint32_t checkout_time_scale{};
+  std::array<int32_t, 4> input_checkout_request{-1, -1, -1, -1};
+  std::array<int32_t, 4> map_checkout_request{-1, -1, -1, -1};
+};
+
 State& state();
 int32_t __cdecl width();
 int32_t __cdecl height();
@@ -58,10 +75,12 @@ class Session {
   ~Session();
   Session(const Session&) = delete;
   Session& operator=(const Session&) = delete;
+  std::shared_ptr<const Snapshot> snapshot() const { return snapshot_; }
 
  private:
   State state_{};
   State* previous_{};
+  std::shared_ptr<Snapshot> snapshot_{std::make_shared<Snapshot>()};
 };
 
 int32_t __cdecl pre_checkout_layer(void*, int32_t index, int32_t checkout_id,

@@ -81,6 +81,7 @@ def test_l2_source_writes_full_checkout_result() -> None:
         "thread_local State g_default_state;",
         "thread_local State* g_active_state{};",
         "if (!g_active_state || time_step <= 0 || time_scale == 0) return 4;",
+        "int32_t __cdecl width() { return g_active_state ? g_active_state->width : 0; }",
     ):
         assert marker in runtime_source
     # No success path may write only the rects and leave par, ref_width, and
