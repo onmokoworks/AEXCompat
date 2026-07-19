@@ -21,7 +21,7 @@ def test_classic_runtime_owns_per_render_state_and_dispatch_boundary():
     assert "std::map<int32_t, ParameterDefinition> definitions_" in header
     assert "aexcompat::render::dispatch(render_context)" in source
     checkout = source_owners.contract_text("classic_param_checkout")
-    assert "worker_runtime::classic::dispatch(context)" in worker
+    assert "worker_runtime::classic::dispatch(context)" in checkout
     assert "g_timed_classic_layers" not in worker
     assert "g_classic_render_selector_dispatched" not in worker
     assert "g_checkout_layer_definitions.find(index)" in checkout
@@ -44,7 +44,9 @@ def test_classic_runtime_preserves_timed_checkout_and_cleanup_hooks():
     assert "copy_timed_layer" in header
     assert "classic_context->copy_timed_layer" in source_owners.contract_text(
         "classic_param_checkout")
-    assert "classic_render_cleanup" in worker
-    assert "classic_render_dependencies_ready" in worker
+    assert "classic_render_cleanup" in source_owners.contract_text(
+        "classic_param_checkout")
+    assert "classic_render_dependencies_ready" in source_owners.contract_text(
+        "classic_param_checkout")
     assert "src/worker_classic_runtime.cpp" in CMAKE.read_text(encoding="utf-8")
     assert "worker_classic_runtime_selftest" in CMAKE.read_text(encoding="utf-8")

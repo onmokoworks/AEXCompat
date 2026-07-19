@@ -68,6 +68,7 @@ WORKER_RUNTIME_OWNERS = (
     "minihost/src/worker_drawbot_runtime.cpp",
     "minihost/src/worker_param_checkout_runtime.hpp",
     "minihost/src/worker_param_checkout_runtime.cpp",
+    "minihost/src/worker_classic_render_runtime.cpp",
 )
 
 # 契約名 → owner ファイル群 (repo ルート相対)。
@@ -138,6 +139,7 @@ CONTRACTS = {
         "minihost/src/worker_drawbot_runtime.cpp",
         "minihost/src/worker_param_checkout_runtime.hpp",
         "minihost/src/worker_param_checkout_runtime.cpp",
+        "minihost/src/worker_classic_render_runtime.cpp",
         "minihost/src/worker_aegp_timeline_probe.hpp",
         "minihost/src/worker_aegp_timeline_probe.cpp",
         "minihost/src/worker_aegp_host_selftests.cpp",
@@ -275,12 +277,14 @@ CONTRACTS = {
     ),
     "sdk_shifter_transform_sampling_result": (
         "minihost/src/l2_main.cpp",
+        "minihost/src/worker_classic_render_runtime.cpp",
         "minihost/src/worker_pf_suites.cpp",
         "minihost/src/worker_render_report.cpp",
         "minihost/src/worker_pf_sampling_runtime.cpp",
     ),
     "sdk_transformer_multi_input_result": (
         "minihost/src/l2_main.cpp",
+        "minihost/src/worker_classic_render_runtime.cpp",
         "minihost/src/worker_pf_suites.cpp",
         "minihost/src/worker_pf_world_transform_runtime.cpp",
     ),
@@ -295,6 +299,7 @@ CONTRACTS = {
     ),
     "native_depth_image_transport": (
         "minihost/src/l2_main.cpp",
+        "minihost/src/worker_classic_render_runtime.cpp",
         "minihost/src/render_subsystem.cpp",
         "minihost/src/worker_smart_finalize.cpp",
         "minihost/src/worker_render_session.cpp",
@@ -306,6 +311,7 @@ CONTRACTS = {
     ),
     "classic_param_checkout": (
         "minihost/src/l2_main.cpp",
+        "minihost/src/worker_classic_render_runtime.cpp",
         "minihost/src/worker_param_checkout_runtime.cpp",
     ),
     "pf_ae_app_suite_complete": (
