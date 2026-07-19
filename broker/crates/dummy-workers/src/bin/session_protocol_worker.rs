@@ -117,6 +117,7 @@ mod worker {
         serde_json::json!({
             "status": "render_completed",
             "render_error": 0,
+            "global_setdown_error": 0,
             "session_frames": frames,
             // The clean-close contract fields the broker validates, mirroring
             // the real worker's final report.

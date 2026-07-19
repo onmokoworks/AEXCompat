@@ -1046,6 +1046,7 @@ impl RenderSession {
 fn final_report_clean(report: &Value) -> bool {
     report.get("status") == Some(&json!("render_completed"))
         && report.get("render_error") == Some(&json!(0))
+        && report.get("global_setdown_error") == Some(&json!(0))
         && report.get("persistent_sequence_setup_error") == Some(&json!(0))
         && report.get("persistent_sequence_setdown_error") == Some(&json!(0))
         && report.get("guard_bytes_intact") == Some(&Value::Bool(true))
@@ -1297,6 +1298,7 @@ mod tests {
         let clean = serde_json::json!({
             "status": "render_completed",
             "render_error": 0,
+            "global_setdown_error": 0,
             "persistent_sequence_setup_error": 0,
             "persistent_sequence_setdown_error": 0,
             "guard_bytes_intact": true,
@@ -1312,6 +1314,10 @@ mod tests {
             // balance; both fields must gate the clean verdict.
             ("status", serde_json::json!("render_failed")),
             ("render_error", serde_json::json!(-1)),
+            // The worker's own exit gate does not include GLOBAL_SETDOWN, so
+            // a teardown failure can hide behind exit 0; the broker gate must
+            // catch it.
+            ("global_setdown_error", serde_json::json!(25)),
             ("persistent_sequence_setup_error", serde_json::json!(25)),
             ("persistent_sequence_setdown_error", serde_json::json!(-1)),
             ("guard_bytes_intact", serde_json::json!(false)),
