@@ -1399,7 +1399,7 @@ mod tests {
             // The worker parses per-frame scales as signed 32-bit.
             (1, 300, i32::MAX as u32 + 1),
         ] {
-            let error = RenderSession::open(SessionOpenRequest {
+            let result = RenderSession::open(SessionOpenRequest {
                 repository: Path::new("missing-repository"),
                 plugin_path: Path::new("missing-plugin.aex"),
                 plugin_sha256: &"0".repeat(64),
@@ -1412,8 +1412,10 @@ mod tests {
                 total_time,
                 time_scale,
                 frame_deadline: Duration::from_secs(1),
-            })
-            .expect_err("invalid timing must be rejected before launch");
+            });
+            let Err(error) = result else {
+                panic!("invalid timing must be rejected before launch");
+            };
             assert_eq!(error.to_string(), "render session timing is invalid");
         }
     }
