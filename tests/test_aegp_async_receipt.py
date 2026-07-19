@@ -35,11 +35,15 @@ def test_receipt_registry_is_bounded_and_invalidates_borrowed_world_first():
         "kMaxAsyncReceipts = 32",
         "kMaxAsyncReceiptBytes = 64ULL * 1024 * 1024",
         "std::unordered_map<void*, std::unique_ptr<AsyncFrameReceipt>> g_async_receipts",
-        "g_aegp_world_views.erase(found->second->world_handle);",
+        "aexcompat::world_registry::unregister_borrowed_view(",
         "g_async_receipts.erase(found);",
         "g_async_receipt_bytes -= bytes;",
     ):
         assert marker in text
+    checkin = text[text.index("int32_t __cdecl checkin_frame(void* receipt)"):
+                   text.index("bool checkin_frame_if_live(void* receipt)")]
+    assert checkin.index("unregister_borrowed_view(") < checkin.index(
+        "g_async_receipts.erase(found);")
 
 
 def test_receipt_and_borrowed_world_handles_are_opaque_and_never_reused():
