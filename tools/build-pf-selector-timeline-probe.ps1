@@ -1,0 +1,30 @@
+param(
+    [string]$AfterEffectsSdk = $env:AFTER_EFFECTS_SDK_ROOT,
+    [string]$Generator = "",
+    [string]$Architecture = "x64",
+    [string]$CMake = "",
+    [ValidateSet("Debug", "Release")]
+    [string]$Configuration = "Release"
+)
+
+$ErrorActionPreference = "Stop"
+$AfterEffectsSdk = & "$PSScriptRoot\resolve-after-effects-sdk.ps1" $AfterEffectsSdk
+$repository = Split-Path -Parent $PSScriptRoot
+$source = Join-Path $repository "instruments\pf-selector-timeline-probe"
+$build = Join-Path $repository "target\pf-selector-timeline-probe-build"
+$headers = Join-Path $AfterEffectsSdk "Examples\Headers\AE_Effect.h"
+if (-not (Test-Path -LiteralPath $headers)) { throw "After Effects SDK headers were not found: $headers" }
+$Generator = & "$PSScriptRoot\resolve-cmake-generator.ps1" $Generator
+$CMake = & "$PSScriptRoot\resolve-build-cmake.ps1" $CMake $Generator
+$env:AE_SDK_ROOT = $AfterEffectsSdk
+& $CMake -S $source -B $build -G $Generator -A $Architecture
+if ($LASTEXITCODE -ne 0) { throw "Selector timeline probe configure failed" }
+& $CMake --build $build --config $Configuration --clean-first
+if ($LASTEXITCODE -ne 0) { throw "Selector timeline probe build failed" }
+$artifacts = @("pf_selector_timeline_classic.aex", "pf_selector_timeline_smart.aex") | ForEach-Object {
+    $artifact = Join-Path $build "$Configuration\$_"
+    if (-not (Test-Path -LiteralPath $artifact)) { throw "Probe artifact was not produced: $artifact" }
+    $file = Get-Item -LiteralPath $artifact
+    [pscustomobject]@{ path = $file.FullName; size = $file.Length; sha256 = (Get-FileHash -LiteralPath $artifact -Algorithm SHA256).Hash.ToLowerInvariant() }
+}
+$artifacts

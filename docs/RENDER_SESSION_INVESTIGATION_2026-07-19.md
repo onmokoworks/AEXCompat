@@ -304,3 +304,69 @@ open/render_frame/close + `render-video-batch` CLI)、launch 分離は
   実装は診断を常に返すため `Value` (セッション要約 JSON) を返す。無効化
   済みセッションの close でも「frame N で死亡、N 以降未レンダー」を
   構造化して返すため。
+
+### 段階0 項目1・2・6: AE 実機のフレーム列 selector 観測 (2026-07-19 追記)
+
+観測手段: 新規 instruments `pf-selector-timeline-probe` (Classic/Smart 2 flavor、
+全 selector を JSONL sidecar へ記録、sequence data 内カウンターで継続性を追跡、
+アニメーション可能な "Drive" slider と挙動選択の "Probe Mode" slider を搭載)。
+`tools/capture-selector-timeline.ps1` が probe を
+`MediaCore\AEXCompatOracle` 配下へ一時インストールし、AfterFX.com で
+24 フレーム comp (640x360, 30fps) + Drive keyframe (0→100) の project を構築、
+aerender で全フレームレンダーして sidecar を回収する。環境: After Effects
+25.3.1x3 (aerender)、Windows 11。数値は開発機の観察で frozen evidence では
+ない。生ログは `target/selector-timeline/` (untracked)。
+
+#### 観察 (Classic flavor、MFR 宣言なし、24 フレーム、Drive アニメーション)
+
+- render engine プロセスは 1 つ。GLOBAL_SETUP / PARAMS_SETUP /
+  GLOBAL_SETDOWN は各 1 回。
+- **render engine で SEQUENCE_SETUP は 1 回も呼ばれない**。project 構築側の
+  AE セッションが SETUP → (FLATTEN → RESETUP)×3 → SETDOWN を発行し
+  (project 保存のたびに FLATTEN。`SEQUENCE_DATA_NEEDS_FLATTENING` を宣言して
+  いなくても呼ばれる)、render engine は保存済み project のロードから
+  **SEQUENCE_RESETUP (11 回)** で復元する。
+- **sequence data はレンダーコンテキストごとにクローンされ、全フレームを
+  通した単一の連続 handle は存在しない**。render engine には 12 の thread が
+  現れ、RESETUP ごとに「保存時点の counter 値」へ戻った独立クローンが生まれ、
+  クローン内でのみ render counter が継続する (1→2→3)。SETDOWN はクローン数
+  と同数。
+- **フレーム順序は非順次**。RENDER 発行順 (frame): 4, 7, 2, 0, 6, 5, 3, 1,
+  8, 9, ..., 20, 16, 17, 19, 18, 15, 21, 22, 23。atomic 通し番号で見る限り
+  selector 呼び出し自体は直列 (ブロック交差なし)。
+- フレームごとの列は FRAME_SETUP → RENDER → FRAME_SETDOWN で固定 (各 24 回)。
+- 時刻表現: time_scale=30720 (30fps×1024)、time_step=1024。
+- **項目2**: アニメーションする Drive の値変化は selector を誘発しない
+  (USER_CHANGED_PARAM / UPDATE_PARAMS_UI / RESETUP のいずれも来ない)。
+  per-frame の補間値が FRAME_SETUP / RENDER の params にそのまま届く。
+  RESETUP はコンテキスト管理 (クローン生成) にのみ紐付く。
+
+#### 観察 (Smart flavor、SUPPORTS_SMART_RENDER、24 フレーム、Drive アニメーション)
+
+- ライフサイクル構造は Classic と同一 (RESETUP×11 クローン、順不同分配、
+  SETUP なし)。フレームごとに SMART_PRE_RENDER → SMART_RENDER が各 1 回。
+- **項目6 (checkout パターン)**: host が effect へ渡す output_request は毎
+  フレーム同一で、レイヤー範囲より外側へ拡張されていた
+  ([-64,-36,704,396] = 640x360 の各辺 10% 拡張)。probe の full-frame
+  checkout への応答 (result/max_result) も毎フレーム同一の full-frame。
+  この単純 comp ではフレーム間で checkout 要求・応答は変化せず、v1.1 の
+  単一入力スロット割当で足りると思われる。
+- **フレームキャッシュ**: 静止入力 + 静的パラメーターの 8 フレーム comp
+  (smart-inset run) では SMART_PRE_RENDER / SMART_RENDER が **1 回だけ**
+  発行され、8 フレーム分の出力 PNG が同一レンダーから複製された。
+  「1 出力フレーム = 1 RENDER」は AE では成立しない (時間変化がなければ
+  キャッシュされる)。oracle の複数フレーム比較 (#10 の temporal 拡張) は
+  時間依存性のある comp でのみ per-frame レンダーを強制できる。
+
+#### 仮説・含意 (セッション設計への反映)
+
+- AE 自身が aerender で全フレーム連続の sequence data を保証していない
+  (コンテキストクローン単位の継続のみ)。セッション v1 の「1 worker = 1
+  sequence handle 連続」は AE の 1 レンダーコンテキストと同型で、AE 等価性の
+  観点で過剰でも不足でもないと思われる。
+- v1 が SEQUENCE_RESETUP を発行しない設計は「単一コンテキストの生存期間」に
+  一致する。per-frame パラメーター変更 (#107) を将来入れる場合も、AE は値
+  変化で RESETUP しないため、param_epoch 相当を RESETUP に結び付ける必要は
+  ないと思われる (メッセージフィールド追加で足りる)。
+- 非順次アクセス (シーク・逆再生) はセッション仕様が既に「順序仮定なし」で
+  あり、AE 実機の分配挙動 (順不同) と整合。
