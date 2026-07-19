@@ -59,7 +59,7 @@ def test_scene_precedence_and_live_tls_conditional_exposure_stay_in_resolver():
     scene = resolver.index("if (scene_context())")
     assert "SceneSuiteAcquireResult::rejected" in resolver
     assert "return SuiteResolveResult::rejected_bad_param" in resolver
-    assert "is_render_worker() && g_loaded_effect_receipt_context.entry" in MAIN
+    assert "is_render_worker() && aexcompat::aegp_layer_render_runtime::active()" in MAIN
     assert "g_aegp_command_roundtrip_mode" in MAIN
     assert "render_options4_provider_available" in MAIN
     assert "render_suite2_provider_available" in MAIN

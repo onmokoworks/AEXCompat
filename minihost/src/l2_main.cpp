@@ -77,6 +77,7 @@
 #include "worker_aegp_async_layer_runtime.hpp"
 #include "worker_aegp_staged_item_runtime.hpp"
 #include "worker_aegp_external_render_runtime.hpp"
+#include "worker_aegp_layer_render_runtime.hpp"
 #include "worker_aegp_world_selftests.hpp"
 #include "worker_aegp_init_runtime.hpp"
 #include "worker_aegp_scene.hpp"
@@ -1609,38 +1610,7 @@ bool claim_opaque_generation(std::atomic<uint64_t>& counter, uint64_t& generatio
   }
 }
 
-struct LoadedEffectReceiptContext {
-  EffectEntry entry{};
-  std::array<std::byte, kInSize>* input{};
-  std::array<std::byte, kOutSize>* output{};
-  int32_t current_time{};
-  int32_t time_scale{1};
-  std::string case_id{"default"};
-  const void* requested{};
-  const std::vector<unsigned char>* external_rgba{};
-  const std::vector<ExternalLayerInput>* external_layers{};
-  int32_t external_width{};
-  int32_t external_height{};
-  int32_t time_step{1};
-  int32_t total_time{1};
-  int32_t pixel_bytes{4};
-  const std::vector<unsigned char>* source_argb{};
-  int32_t source_width{};
-  int32_t source_height{};
-  const std::vector<unsigned char>* downstream_argb{};
-  int32_t downstream_width{};
-  int32_t downstream_height{};
-  int32_t downstream_pixel_bytes{};
-  bool downstream_finalized{};
-  const std::vector<unsigned char>* all_effects_argb{};
-  int32_t all_effects_width{};
-  int32_t all_effects_height{};
-  int32_t all_effects_pixel_bytes{};
-  bool all_effects_finalized{};
-  int32_t active_item_time{};
-  bool active_item_time_valid{};
-};
-thread_local LoadedEffectReceiptContext g_loaded_effect_receipt_context{};
+using LayerRenderContext = aexcompat::aegp_layer_render_runtime::Context;
 std::atomic<uint64_t> g_pf_adv_item_touches{};
 std::atomic<uint64_t> g_pf_adv_item_rerenders{};
 
@@ -1655,8 +1625,8 @@ int32_t checked_adv_item_move(int32_t direction, int32_t steps, int32_t step,
 }
 
 bool active_adv_item_context(void* in_data) {
-  return g_loaded_effect_receipt_context.entry && g_loaded_effect_receipt_context.input &&
-      in_data == g_loaded_effect_receipt_context.input->data();
+  const auto& context = aexcompat::aegp_layer_render_runtime::context();
+  return context.entry && context.input && in_data == context.input;
 }
 
 bool active_adv_item_world(const void* world, DispatchWorldFormat& result) {
@@ -1665,7 +1635,7 @@ bool active_adv_item_world(const void* world, DispatchWorldFormat& result) {
 
 int32_t __cdecl adv_item_move_time_step(void* in_data, void* world,
                                         int32_t direction, int32_t steps) {
-  auto& context = g_loaded_effect_receipt_context;
+  auto& context = aexcompat::aegp_layer_render_runtime::context();
   DispatchWorldFormat effect_world{};
   if (!active_adv_item_context(in_data) || !active_adv_item_world(world, effect_world) ||
       !effect_world.data || effect_world.width <= 0 || effect_world.height <= 0 ||
@@ -1680,7 +1650,7 @@ int32_t __cdecl adv_item_move_time_step(void* in_data, void* world,
 }
 
 int32_t __cdecl adv_item_move_time_step_active(int32_t direction, int32_t steps) {
-  auto& context = g_loaded_effect_receipt_context;
+  auto& context = aexcompat::aegp_layer_render_runtime::context();
   if (!context.entry || context.time_step <= 0) return 4;
   int32_t moved = context.active_item_time_valid ? context.active_item_time : context.current_time;
   if (checked_adv_item_move(direction, steps, context.time_step, moved) != 0) return 4;
@@ -1690,7 +1660,7 @@ int32_t __cdecl adv_item_move_time_step_active(int32_t direction, int32_t steps)
 }
 
 int32_t __cdecl adv_item_touch_active() {
-  if (!g_loaded_effect_receipt_context.entry) return 4;
+  if (!aexcompat::aegp_layer_render_runtime::context().entry) return 4;
   ++g_pf_adv_item_touches;
   bump_render_project_timestamp();
   return 0;
@@ -1708,7 +1678,7 @@ int32_t __cdecl adv_item_force_rerender(void* in_data, void* world) {
 
 int32_t __cdecl adv_item_effect_is_active(void* context_handle, uint8_t* enabled) {
   if (enabled) *enabled = 0;
-  if (!context_handle || !enabled || !g_loaded_effect_receipt_context.entry) return 4;
+  if (!context_handle || !enabled || !aexcompat::aegp_layer_render_runtime::context().entry) return 4;
   // UI context handles are opaque. A live render owns no UI context, so headless mode
   // can only report disabled without dereferencing an untrusted or stale handle.
   return 0;
@@ -1869,108 +1839,14 @@ int32_t publish_item_receipt(void* options, void** receipt) {
   return aexcompat::aegp_staged_item_runtime::publish_receipt(options, receipt);
 }
 
-int32_t publish_loaded_layer_receipt_from_context(
-    const LoadedEffectReceiptContext& context,
-    const AegpLayerRenderOptionsValue& options, void** receipt) {
-  if (receipt) *receipt = nullptr;
-  if (!receipt) return 4;
-  const int32_t pixel_format = options.world_type == 1 ? kPixelFormatArgb32 :
-      (options.world_type == 2 ? kPixelFormatArgb64 :
-       (options.world_type == 3 ? kPixelFormatArgb128 : 0));
-  const int32_t pixel_bytes = options.world_type == 1 ? 4 :
-      (options.world_type == 2 ? 8 : (options.world_type == 3 ? 16 : 0));
-  const bool current_time = options.time.scale != 0 && context.time_scale != 0 &&
-      static_cast<int64_t>(options.time.value) * context.time_scale ==
-      static_cast<int64_t>(context.current_time) * options.time.scale;
-  const bool wants_downstream =
-      options.effect_boundary == AegpLayerEffectBoundary::downstream;
-  const bool wants_all_staged = options.effect_boundary == AegpLayerEffectBoundary::all &&
-      context.all_effects_finalized;
-  const auto* selected_pixels = wants_downstream ? context.downstream_argb :
-      (wants_all_staged ? context.all_effects_argb : context.source_argb);
-  const int32_t selected_width = wants_downstream ? context.downstream_width :
-      (wants_all_staged ? context.all_effects_width : context.source_width);
-  const int32_t selected_height = wants_downstream ? context.downstream_height :
-      (wants_all_staged ? context.all_effects_height : context.source_height);
-  const int32_t source_pixel_bytes = wants_downstream ? context.downstream_pixel_bytes :
-      (wants_all_staged ? context.all_effects_pixel_bytes : context.pixel_bytes);
-  if (!context.entry || !selected_pixels || pixel_format == 0 ||
-      options.time_step.scale == 0 || options.time_step.value <= 0 || !current_time ||
-      options.downsample_x <= 0 || options.downsample_y <= 0 || options.matte == 2 ||
-      !layer_effect_boundary_is_live(options) ||
-      (wants_downstream && !context.downstream_finalized) ||
-      selected_width <= 0 || selected_height <= 0 ||
-      selected_width > 4096 || selected_height > 4096) return 4;
-  const uint64_t source_bytes = static_cast<uint64_t>(selected_width) *
-      selected_height * source_pixel_bytes;
-  const int32_t width = (selected_width + options.downsample_x - 1) /
-      options.downsample_x;
-  const int32_t height = (selected_height + options.downsample_y - 1) /
-      options.downsample_y;
-  const uint64_t bytes = static_cast<uint64_t>(width) * height * pixel_bytes;
-  if ((source_pixel_bytes != 4 && source_pixel_bytes != 8 && source_pixel_bytes != 16) ||
-      selected_pixels->size() != source_bytes || bytes == 0 ||
-      bytes > kMaxReceiptBytes) return 4;
-  std::unique_ptr<ReceiptDraft> loaded_receipt;
-  try {
-    loaded_receipt = std::make_unique<ReceiptDraft>();
-    loaded_receipt->pixels.resize(static_cast<std::size_t>(bytes));
-    for (int32_t y = 0; y < height; ++y) {
-      const int32_t source_y = y * options.downsample_y;
-      for (int32_t x = 0; x < width; ++x) {
-        const int32_t source_x = x * options.downsample_x;
-        const unsigned char* source = selected_pixels->data() +
-            (static_cast<std::size_t>(source_y) * selected_width + source_x) *
-                source_pixel_bytes;
-        std::array<float, 4> channels{};
-        if (source_pixel_bytes == 4) {
-          for (int c = 0; c < 4; ++c) channels[c] = source[c] / 255.0f;
-        } else if (source_pixel_bytes == 8) {
-          const auto* values = reinterpret_cast<const uint16_t*>(source);
-          for (int c = 0; c < 4; ++c) channels[c] = values[c] / 65535.0f;
-        } else {
-          std::memcpy(channels.data(), source, sizeof(channels));
-        }
-        if (options.matte == 1)
-          for (int c = 1; c < 4; ++c) channels[c] *= channels[0];
-        unsigned char* destination = reinterpret_cast<unsigned char*>(
-            loaded_receipt->pixels.data()) +
-            (static_cast<std::size_t>(y) * width + x) * pixel_bytes;
-        if (pixel_bytes == 4) {
-          for (int c = 0; c < 4; ++c) destination[c] = static_cast<unsigned char>(
-              std::clamp(channels[c], 0.0f, 1.0f) * 255.0f + 0.5f);
-        } else if (pixel_bytes == 8) {
-          std::array<uint16_t, 4> values{};
-          for (int c = 0; c < 4; ++c) values[c] = static_cast<uint16_t>(
-              std::clamp(channels[c], 0.0f, 1.0f) * 65535.0f + 0.5f);
-          std::memcpy(destination, values.data(), sizeof(values));
-        } else {
-          std::memcpy(destination, channels.data(), sizeof(channels));
-        }
-      }
-    }
-  } catch (const std::bad_alloc&) {
-    return 4;
-  }
-  loaded_receipt->pixel_format = pixel_format;
-  loaded_receipt->rendered_region = {0, 0, width, height};
-  loaded_receipt->world.data = loaded_receipt->pixels.data();
-  loaded_receipt->world.rowbytes = width * pixel_bytes;
-  loaded_receipt->world.world_flags = pixel_bytes == 4 ? 0 : 1;
-  loaded_receipt->world.width = width;
-  loaded_receipt->world.height = height;
-  loaded_receipt->world.extent_hint = {0, 0, width, height};
-  loaded_receipt->world.pix_aspect_ratio = {1, 1};
-  return aexcompat::render_receipts::register_receipt(
-      std::move(loaded_receipt), receipt);
-}
+const bool g_layer_render_runtime_configured = [] {
+  aexcompat::aegp_layer_render_runtime::configure({
+      &is_render_worker, &layer_effect_boundary_is_live});
+  return true;
+}();
 int32_t publish_loaded_layer_receipt(
     const AegpLayerRenderOptionsValue& options, void** receipt) {
-  if (is_render_worker())
-    return publish_loaded_layer_receipt_from_context(
-        g_loaded_effect_receipt_context, options, receipt);
-  if (receipt) *receipt = nullptr;
-  return 4;
+  return aexcompat::aegp_layer_render_runtime::publish(options, receipt);
 }
 int32_t __cdecl checkout_item_frame_async(
     void* manager, uint32_t purpose, void* options, void** receipt) {
@@ -1984,7 +1860,7 @@ int32_t __cdecl checkout_layer_frame_async(
   AegpLayerRenderOptionsValue snapshot{};
   if (manager != &g_async_manager || purpose == 0 || !receipt ||
       !snapshot_layer_render_options(options, snapshot)) return 4;
-  if (is_render_worker() && g_loaded_effect_receipt_context.entry)
+  if (is_render_worker() && aexcompat::aegp_layer_render_runtime::active())
     return publish_loaded_layer_receipt(snapshot, receipt);
   const int32_t pixel_format = snapshot.world_type == 1 ? kPixelFormatArgb32 :
       (snapshot.world_type == 2 ? kPixelFormatArgb64 : kPixelFormatArgb128);
@@ -2045,48 +1921,6 @@ int32_t __cdecl render_checkout_layer_v5(
   }
   return publish_loaded_layer_receipt(snapshot, out);
 }
-bool capture_async_layer_source(
-    const AegpLayerRenderOptionsValue& options,
-    aexcompat::aegp_async_layer::SourceSnapshot& output) {
-  const auto& context = g_loaded_effect_receipt_context;
-  const bool downstream = options.effect_boundary == AegpLayerEffectBoundary::downstream;
-  const bool all = options.effect_boundary == AegpLayerEffectBoundary::all &&
-      context.all_effects_finalized;
-  const auto* pixels = downstream ? context.downstream_argb :
-      (all ? context.all_effects_argb : context.source_argb);
-  const int32_t width = downstream ? context.downstream_width :
-      (all ? context.all_effects_width : context.source_width);
-  const int32_t height = downstream ? context.downstream_height :
-      (all ? context.all_effects_height : context.source_height);
-  const int32_t pixel_bytes = downstream ? context.downstream_pixel_bytes :
-      (all ? context.all_effects_pixel_bytes : context.pixel_bytes);
-  if (!context.entry || !pixels || (downstream && !context.downstream_finalized) ||
-      width <= 0 || height <= 0 || pixel_bytes <= 0) return false;
-  output.entry = reinterpret_cast<void*>(context.entry);
-  output.pixel_bytes = pixel_bytes; output.width = width; output.height = height;
-  output.current_time = context.current_time; output.time_scale = context.time_scale;
-  output.pixels = *pixels;
-  return true;
-}
-int32_t publish_async_layer_source(
-    const aexcompat::aegp_async_layer::SourceSnapshot& source,
-    const AegpLayerRenderOptionsValue& options, void** receipt) {
-  LoadedEffectReceiptContext context{};
-  context.entry = reinterpret_cast<EffectEntry>(source.entry);
-  context.pixel_bytes = source.pixel_bytes; context.source_argb = &source.pixels;
-  context.source_width = source.width; context.source_height = source.height;
-  context.current_time = source.current_time; context.time_scale = source.time_scale;
-  if (options.effect_boundary == AegpLayerEffectBoundary::downstream) {
-    context.downstream_argb = &source.pixels; context.downstream_width = source.width;
-    context.downstream_height = source.height; context.downstream_pixel_bytes = source.pixel_bytes;
-    context.downstream_finalized = true;
-  } else if (options.effect_boundary == AegpLayerEffectBoundary::all) {
-    context.all_effects_argb = &source.pixels; context.all_effects_width = source.width;
-    context.all_effects_height = source.height; context.all_effects_pixel_bytes = source.pixel_bytes;
-    context.all_effects_finalized = true;
-  }
-  return publish_loaded_layer_receipt_from_context(context, options, receipt);
-}
 int async_layer_exception_filter(EXCEPTION_POINTERS* information,
                                  uint32_t* exception_code) {
   if (exception_code && information && information->ExceptionRecord)
@@ -2114,8 +1948,10 @@ void drain_async_layer_requests() { aexcompat::aegp_async_layer::drain(); }
 bool async_layer_requests_balanced() { return aexcompat::aegp_async_layer::balanced(); }
 const bool g_async_layer_runtime_configured = [] {
   aexcompat::aegp_async_layer::configure({&is_render_worker,
-      &snapshot_layer_render_options, &capture_async_layer_source,
-      &publish_async_layer_source, &checkin_frame_if_live,
+      &snapshot_layer_render_options,
+      &aexcompat::aegp_layer_render_runtime::capture_async_source,
+      &aexcompat::aegp_layer_render_runtime::publish_async_source,
+      &checkin_frame_if_live,
       &invoke_async_layer_callback_seh});
   return true;
 }();
@@ -3661,12 +3497,12 @@ bool finish_cuda_render_transport(CudaRenderTransport& transport) {
 bool mask_suite_provider_available(void*) { return g_mask_model_enabled; }
 
 bool render_options4_provider_available(void*) {
-  return is_render_worker() && g_loaded_effect_receipt_context.entry;
+  return is_render_worker() && aexcompat::aegp_layer_render_runtime::active();
 }
 
 bool render_suite2_provider_available(void*) {
   return g_aegp_command_roundtrip_mode ||
-      (is_render_worker() && g_loaded_effect_receipt_context.entry != nullptr);
+      (is_render_worker() && aexcompat::aegp_layer_render_runtime::active());
 }
 
 bool aegp_init_suite_provider_available(void*) { return g_aegp_init_mode; }
@@ -6090,14 +5926,13 @@ int32_t classic_render_runtime(EffectEntry entry, std::array<std::byte, kInSize>
       }
     }
     if (error == 0) {
-      struct LoadedEffectReceiptContextScope {
-        LoadedEffectReceiptContext previous;
-        explicit LoadedEffectReceiptContextScope(LoadedEffectReceiptContext context)
-            : previous(std::move(g_loaded_effect_receipt_context)) {
-          g_loaded_effect_receipt_context = std::move(context);
-        }
-        ~LoadedEffectReceiptContextScope() {
-          g_loaded_effect_receipt_context = std::move(previous);
+      struct LayerRenderContextScope {
+        LayerRenderContext previous;
+        explicit LayerRenderContextScope(LayerRenderContext context)
+            : previous(aexcompat::aegp_layer_render_runtime::replace_context(
+                  std::move(context))) {}
+        ~LayerRenderContextScope() {
+          aexcompat::aegp_layer_render_runtime::replace_context(std::move(previous));
         }
       } receipt_context_scope({entry, &input, &command_output, external_current_time,
           static_cast<int32_t>(external_time_scale), case_id, requested, external_rgba,
@@ -6232,7 +6067,7 @@ int32_t render_once(EffectEntry entry, std::array<std::byte, kInSize>& input,
 
 bool exercise_loaded_effect_item_receipt(EffectEntry entry,
     std::array<std::byte, kInSize>& input, std::array<std::byte, kOutSize>& output) {
-  g_loaded_effect_receipt_context = {
+  aexcompat::aegp_layer_render_runtime::context() = {
       entry, &input, &output, read<int32_t>(input, kInCurrentTime),
       static_cast<int32_t>(read<uint32_t>(input, kInTimeScale))};
   std::vector<uint8_t> final_stage(16 * 12 * 4);
@@ -6271,7 +6106,7 @@ bool exercise_loaded_effect_item_receipt(EffectEntry entry,
         aegp_world_get_type(world, &stale_type) != 0;
   }
   const bool options_disposed = options && render_options_dispose(options) == 0;
-  g_loaded_effect_receipt_context = {};
+  aexcompat::aegp_layer_render_runtime::context() = {};
   g_loaded_effect_receipt_fixture_passed = stage_published && checked_out && checked_in && options_disposed &&
       g_loaded_effect_receipt_unsupported_rejected &&
       g_loaded_effect_receipt_stale_world_rejected &&
@@ -7622,7 +7457,7 @@ int32_t __cdecl layer_suite2_async_test_callback(
 
 bool verify_aegp_layer_render_options_suite2() {
   const bool saved_effect_live = g_aegp_effect_live;
-  const auto saved_context = g_loaded_effect_receipt_context;
+  const auto saved_context = aexcompat::aegp_layer_render_runtime::context();
   const uint32_t created_before = layer_created_count();
   const uint32_t disposed_before = layer_disposed_count();
   g_aegp_effect_live = true;
@@ -7639,7 +7474,7 @@ bool verify_aegp_layer_render_options_suite2() {
   auto source = make_world(100, 50, 25);
   auto all_effects = make_world(40, 120, 30);
   auto downstream_pixels = make_world(20, 60, 140);
-  LoadedEffectReceiptContext context{};
+  LayerRenderContext context{};
   context.entry = reinterpret_cast<EffectEntry>(&verify_aegp_layer_render_options_suite2);
   context.current_time = 0;
   context.time_scale = 1;
@@ -7654,7 +7489,7 @@ bool verify_aegp_layer_render_options_suite2() {
   context.all_effects_height = 2;
   context.all_effects_pixel_bytes = 4;
   context.all_effects_finalized = true;
-  g_loaded_effect_receipt_context = context;
+  aexcompat::aegp_layer_render_runtime::context() = context;
 
   const void* acquired = nullptr;
   bool ok = acquire_suite("AEGP Layer Render Options Suite", 2, &acquired) == 0 &&
@@ -7693,11 +7528,11 @@ bool verify_aegp_layer_render_options_suite2() {
   void* rejected = reinterpret_cast<void*>(1);
   ok = ok && render_checkout_layer_v5(downstream, nullptr, nullptr, &rejected) != 0 &&
       rejected == nullptr;
-  g_loaded_effect_receipt_context.downstream_argb = &downstream_pixels;
-  g_loaded_effect_receipt_context.downstream_width = 4;
-  g_loaded_effect_receipt_context.downstream_height = 2;
-  g_loaded_effect_receipt_context.downstream_pixel_bytes = 4;
-  g_loaded_effect_receipt_context.downstream_finalized = true;
+  aexcompat::aegp_layer_render_runtime::context().downstream_argb = &downstream_pixels;
+  aexcompat::aegp_layer_render_runtime::context().downstream_width = 4;
+  aexcompat::aegp_layer_render_runtime::context().downstream_height = 2;
+  aexcompat::aegp_layer_render_runtime::context().downstream_pixel_bytes = 4;
+  aexcompat::aegp_layer_render_runtime::context().downstream_finalized = true;
   ok = ok && set_layer_render_downsample(downstream, 2, 2) == 0 &&
       set_layer_render_world_type(downstream, 2) == 0 &&
       set_layer_render_matte(downstream, 1) == 0 &&
@@ -7729,7 +7564,7 @@ bool verify_aegp_layer_render_options_suite2() {
   ok = ok && dispose_layer_render_options(upstream) == 0 &&
       dispose_layer_render_options(all) == 0 &&
       dispose_layer_render_options(downstream) == 0;
-  g_loaded_effect_receipt_context = saved_context;
+  aexcompat::aegp_layer_render_runtime::context() = saved_context;
   g_aegp_effect_live = saved_effect_live;
   return ok && async_receipt_lifetimes_balanced() &&
       layer_created_count() == created_before + 3 &&
@@ -8428,7 +8263,7 @@ bool load_l2_parameter_animation(void*, const wchar_t* value) {
 }
 
 bool __cdecl scene_render_receipt_enabled() {
-  return is_render_worker() && g_loaded_effect_receipt_context.entry != nullptr;
+  return is_render_worker() && aexcompat::aegp_layer_render_runtime::active();
 }
 
 aexcompat::worker_render_report::GpuDiagnosticsSnapshot capture_gpu_diagnostics() {

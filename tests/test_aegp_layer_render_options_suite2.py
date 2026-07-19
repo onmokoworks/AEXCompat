@@ -6,8 +6,7 @@ SOURCE = ROOT / "minihost" / "src" / "l2_main.cpp"
 ABI_PROBE = ROOT / "instruments" / "abi-layout-probe" / "main.cpp"
 ABI = ROOT / "minihost" / "src" / "worker_suite_abi.hpp"
 REGISTRY = ROOT / "minihost" / "src" / "worker_aegp_render_options.cpp"
-STAGED_RUNTIME = ROOT / "minihost" / "src" / "worker_aegp_staged_item_runtime.cpp"
-EXTERNAL_RUNTIME = ROOT / "minihost" / "src" / "worker_aegp_external_render_runtime.cpp"
+LAYER_RUNTIME = ROOT / "minihost" / "src" / "worker_aegp_layer_render_runtime.cpp"
 ASYNC_RUNTIME = ROOT / "minihost" / "src" / "worker_aegp_async_layer_runtime.cpp"
 
 
@@ -48,9 +47,9 @@ def test_minihost_publishes_typed_suite2_without_changing_suite1():
 
 
 def test_layer_checkout_applies_options_to_real_source_pixels():
-    text = SOURCE.read_text(encoding="utf-8")
-    body = text[text.index("int32_t publish_loaded_layer_receipt_from_context(") :]
-    body = body[: body.index("int32_t publish_loaded_layer_receipt(")]
+    text = LAYER_RUNTIME.read_text(encoding="utf-8")
+    body = text[text.index("int32_t publish_from_context(") :]
+    body = body[: body.index("int32_t publish(", 1)]
     for marker in (
         "options.time.value",
         "options.time_step.value <= 0",
@@ -63,14 +62,18 @@ def test_layer_checkout_applies_options_to_real_source_pixels():
         "std::memcpy(destination, channels.data(), sizeof(channels))",
     ):
         assert marker in body
+    host = SOURCE.read_text(encoding="utf-8")
+    assert "thread_local Context g_context" in text
+    assert "publish_from_context(" not in host
+    assert "struct LoadedEffectReceiptContext {" not in host
 
 
 def test_effect_boundaries_accept_only_finalized_staged_downstream():
-    text = SOURCE.read_text(encoding="utf-8")
+    text = LAYER_RUNTIME.read_text(encoding="utf-8")
     registry = REGISTRY.read_text(encoding="utf-8")
     assert "LayerEffectBoundary::upstream" in registry
     assert "LayerEffectBoundary::downstream" in registry
-    assert "layer_effect_boundary_is_live(options)" in text
+    assert "g_hooks.effect_boundary_live(options)" in text
     assert "context.downstream_finalized" in text
     assert "wants_downstream && !context.downstream_finalized" in text
     assert "context.downstream_argb" in text
@@ -79,14 +82,14 @@ def test_effect_boundaries_accept_only_finalized_staged_downstream():
 
 
 def test_sync_and_async_paths_share_the_same_pixel_publisher():
-    text = (SOURCE.read_text(encoding="utf-8") +
-            STAGED_RUNTIME.read_text(encoding="utf-8") +
-            EXTERNAL_RUNTIME.read_text(encoding="utf-8") +
-            ASYNC_RUNTIME.read_text(encoding="utf-8"))
-    assert text.count("publish_loaded_layer_receipt(snapshot, out)") >= 2
-    assert "request->options = snapshot" in text
-    assert "g_hooks.publish(request->source, request->options, &receipt)" in text
-    assert "context.downstream_finalized = true" in text
+    host = SOURCE.read_text(encoding="utf-8")
+    layer = LAYER_RUNTIME.read_text(encoding="utf-8")
+    async_runtime = ASYNC_RUNTIME.read_text(encoding="utf-8")
+    assert host.count("publish_loaded_layer_receipt(snapshot, out)") >= 2
+    assert "request->options = snapshot" in async_runtime
+    assert "g_hooks.publish(request->source, request->options, &receipt)" in async_runtime
+    assert "context.downstream_finalized = true" in layer
+    assert "return publish_from_context(context, options, receipt)" in layer
 
 
 def test_native_selftest_covers_boundary_hashes_cycle_async_and_ownership():
