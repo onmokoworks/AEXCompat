@@ -182,3 +182,15 @@ base とまったく同じ data/寸法を持つため、view を別エントリ�
 渡された場合は exact-pointer lookup を外れて content fallback に落ち、base
 エントリに一意解決される — これは copied-struct fallback の設計どおりの経路
 であり、view はまさに base のコピーなので正しい形式に解決される。
+
+## 2026-07-19 訂正: view 抑止は「GPU render が実際に dispatch された間」のみ (PR #83 Codex P2 round 3)
+
+観察 (Codex review finding): 最初の GPU 訂正で gate に使った
+`g_gpu_world_mode` は「GPU negotiation が有効」を意味し、plug-in が
+`GPU_RENDER_POSSIBLE` を立てなかった場合は negotiation 有効のまま CPU の
+`kSmartRender` が dispatch される。このとき CUDA transport は走らず base
+world は promote されないのに、view が抑止されて交差契約が失われていた。
+
+訂正: 新フラグ `g_smart_gpu_render_dispatched` (kSmartRenderGpu dispatch の
+間のみ true) で gate する。GPU negotiation からの CPU fallback では view と
+交差契約が維持される。self-test も新フラグでの gating を検証するよう更新。

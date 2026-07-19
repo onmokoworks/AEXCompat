@@ -1169,6 +1169,11 @@ uint32_t g_malformed_checkout_requests = 0;
 uint32_t g_empty_checkout_pixel_denials = 0;
 void* g_input_checkout_view_world = nullptr;
 void* g_map_checkout_view_world = nullptr;
+// True only while a kSmartRenderGpu dispatch is in flight, i.e. when the GPU
+// transport has promoted the base input/output worlds in place. A GPU
+// negotiation that falls back to a CPU kSmartRender keeps this false so the
+// checkout views (and the intersection contract) stay in force.
+bool g_smart_gpu_render_dispatched = false;
 std::string g_smart_pixel_format = "argb8";
 // Opt-in world snapshot dumps and output checksum detail (issue #19). Both
 // default off; the broker enables them per run with the --dump-worlds-v1 and
@@ -1780,13 +1785,15 @@ bool checkout_promised_no_pixels(const std::array<int32_t, 4>& rect) {
 
 int32_t __cdecl smart_checkout_pixels(void*, int32_t checkout_id, void** world) {
   if (!world) return 4;
-  // GPU Smart Render promotes the base input/output worlds in place (the
-  // CUDA transport rewrites their data pointers to device allocations, and
-  // is_active_gpu_world admits only those base worlds). A checkout view would
-  // hand the plug-in a stale host pointer the GPU Device Suite rejects, so in
-  // GPU mode the base world is returned as before; the empty-answer denial
-  // stays in force on every path.
-  const bool use_views = !g_gpu_world_mode;
+  // A dispatched GPU Smart Render promotes the base input/output worlds in
+  // place (the CUDA transport rewrites their data pointers to device
+  // allocations, and is_active_gpu_world admits only those base worlds). A
+  // checkout view would hand the plug-in a stale host pointer the GPU Device
+  // Suite rejects, so during an actual kSmartRenderGpu dispatch the base
+  // world is returned as before. A GPU negotiation that fell back to a CPU
+  // kSmartRender never promotes the worlds, so views (and the intersection
+  // contract) stay active there; the empty-answer denial holds on every path.
+  const bool use_views = !g_smart_gpu_render_dispatched;
   const auto hosted = std::find_if(g_smart_hosted_layers.begin(), g_smart_hosted_layers.end(),
       [checkout_id](const auto& layer) { return layer.checkout_id == checkout_id; });
   if (hosted != g_smart_hosted_layers.end() && hosted->world) {
@@ -1909,19 +1916,20 @@ bool verify_checkout_request_intersection_contract() {
   g_input_checkout_result_rect = {-1, -1, -1, -1};
   passed = smart_checkout_pixels(nullptr, 0, &checked_out) == 0 &&
       checked_out == dummy_world.data() && passed;
-  // In GPU mode the base world (promoted in place by the CUDA transport) is
-  // returned instead of the CPU-backed checkout view.
+  // During a dispatched GPU render the base world (promoted in place by the
+  // CUDA transport) is returned; a CPU render — including a GPU negotiation
+  // that fell back to CPU — keeps returning the checkout view.
   std::array<std::byte, 120> dummy_view{};
-  const bool saved_gpu_mode = g_gpu_world_mode;
+  const bool saved_gpu_dispatched = g_smart_gpu_render_dispatched;
   g_input_checkout_view_world = dummy_view.data();
   g_input_checkout_result_rect = {0, 0, 8, 8};
-  g_gpu_world_mode = false;
+  g_smart_gpu_render_dispatched = false;
   passed = smart_checkout_pixels(nullptr, 0, &checked_out) == 0 &&
       checked_out == dummy_view.data() && passed;
-  g_gpu_world_mode = true;
+  g_smart_gpu_render_dispatched = true;
   passed = smart_checkout_pixels(nullptr, 0, &checked_out) == 0 &&
       checked_out == dummy_world.data() && passed;
-  g_gpu_world_mode = saved_gpu_mode;
+  g_smart_gpu_render_dispatched = saved_gpu_dispatched;
   g_smart_width = saved_width;
   g_smart_height = saved_height;
   g_pixel_aspect_ratio = saved_par;
@@ -19953,6 +19961,7 @@ SmartResult smart_render_once(EffectEntry entry, std::array<std::byte, kInSize>&
   g_empty_checkout_pixel_denials = 0;
   g_input_checkout_view_world = nullptr;
   g_map_checkout_view_world = nullptr;
+  g_smart_gpu_render_dispatched = false;
   SmartResult result;
   const uint32_t effective_out_flags = read<uint32_t>(command_output, kOutFlags);
   const uint32_t effective_out_flags2 = read<uint32_t>(command_output, kOutFlags2);
@@ -20413,6 +20422,7 @@ SmartResult smart_render_once(EffectEntry entry, std::array<std::byte, kInSize>&
   }
   const int32_t render_selector = gpu_negotiation && result.gpu_render_possible ? kSmartRenderGpu : kSmartRender;
   result.gpu_render_dispatched = render_selector == kSmartRenderGpu;
+  g_smart_gpu_render_dispatched = result.gpu_render_dispatched;
   CudaRenderTransport cuda_transport;
   const bool cuda_transport_ready = !result.gpu_render_dispatched ||
       (!use_cuda && !use_opencl && !use_directx) ||
@@ -20482,6 +20492,7 @@ SmartResult smart_render_once(EffectEntry entry, std::array<std::byte, kInSize>&
   g_smart_input_world = nullptr; g_smart_output_world = nullptr; g_smart_map_world = nullptr;
   g_input_checkout_view_world = nullptr; g_map_checkout_view_world = nullptr;
   g_gpu_world_mode = false;
+  g_smart_gpu_render_dispatched = false;
   g_smart_hosted_layers.clear();
   std::vector<unsigned char> logical_input(width * height * pixel_bytes);
   std::vector<unsigned char> logical_output(
