@@ -39,6 +39,8 @@ AEGP_SCENE_RUNTIME_HEADER = ROOT / "minihost" / "src" / "worker_aegp_scene_runti
 AEGP_SCENE_RUNTIME_SOURCE = ROOT / "minihost" / "src" / "worker_aegp_scene_runtime.cpp"
 AEGP_INIT_RUNTIME_HEADER = ROOT / "minihost" / "src" / "worker_aegp_init_runtime.hpp"
 AEGP_INIT_RUNTIME_SOURCE = ROOT / "minihost" / "src" / "worker_aegp_init_runtime.cpp"
+AEGP_INIT_EXECUTION_HEADER = ROOT / "minihost" / "src" / "worker_aegp_init_execution.hpp"
+AEGP_INIT_EXECUTION_SOURCE = ROOT / "minihost" / "src" / "worker_aegp_init_execution.cpp"
 AEGP_TIMELINE_PROBE_HEADER = ROOT / "minihost" / "src" / "worker_aegp_timeline_probe.hpp"
 AEGP_TIMELINE_PROBE_SOURCE = ROOT / "minihost" / "src" / "worker_aegp_timeline_probe.cpp"
 AEGP_RENDER_SELFTEST_HEADER = ROOT / "minihost" / "src" / "worker_aegp_render_selftests.hpp"
@@ -78,6 +80,7 @@ def l2_family_source():
         CLASSIC_EXECUTION_SOURCE,
         AEGP_SCENE_SOURCE, AEGP_SCENE_HEADER, AEGP_SCENE_RUNTIME_HEADER,
         AEGP_SCENE_RUNTIME_SOURCE, AEGP_INIT_RUNTIME_HEADER, AEGP_INIT_RUNTIME_SOURCE,
+        AEGP_INIT_EXECUTION_HEADER, AEGP_INIT_EXECUTION_SOURCE,
         AEGP_TIMELINE_PROBE_HEADER, AEGP_TIMELINE_PROBE_SOURCE,
         AEGP_HOST_SELFTESTS_SOURCE,
         AEGP_COMPAT_SELFTESTS_SOURCE,
@@ -850,7 +853,7 @@ class MinihostL2SourceTests(unittest.TestCase):
         for marker in ('L"--aegp-idle"', "IdleRegistration",
                        "g_state.idle_registrations.size() >= kMaxHooks",
                        "requested_sleep < 0 || requested_sleep > 3600",
-                       "registration.refcon, &requested_sleep"):
+                       "aegp_init::dispatch_idle("):
             self.assertIn(marker, text)
 
     def test_aegp_death_hooks_are_owned_before_module_unload(self):
@@ -958,7 +961,7 @@ class MinihostL2SourceTests(unittest.TestCase):
                        "layer_durations{{",
                        "{300, 30}, {300, 30}, {300, 30}",
                        '"layer_attribute_calls\\\":"',
-                       "g_aegp_scene_frame = tick + 1",
+                       "*request.scene_frame = tick + 1",
                        '"scene_first_observed_frame\\\":"',
                        '"scene_last_observed_frame\\\":"'):
             self.assertIn(marker, text)
@@ -971,7 +974,7 @@ class MinihostL2SourceTests(unittest.TestCase):
                        "static_assert(sizeof(TimelineKeyframedPropHeader) == 104)",
                        "static_assert(sizeof(TimelineKeyframeEntry) == 24)",
                        'CreateNamedPipeW(L"\\\\\\\\.\\\\pipe\\\\ae-timeline-sync"',
-                       "g_aegp_keyframe_roundtrip_mode && !keyframe_probe.start()",
+                       "modes.keyframe && (!request.keyframe_probe || !request.keyframe_probe->start())",
                        '"keyframe_pipe_connected\\\":"',
                        '"keyframe_pipe_request_sent\\\":"',
                        '"keyframe_pipe_response_received\\\":"',
@@ -986,8 +989,8 @@ class MinihostL2SourceTests(unittest.TestCase):
                        "static_assert(sizeof(TimelineHostSeekAck) == 44)",
                        "aegp_set_item_current_time",
                        "after_get_item_type[14]",
-                       "g_aegp_item_set_current_time_calls != 1",
-                       "g_aegp_scene_frame != 75",
+                       "g_aegp_item_set_current_time_calls == 1",
+                       "g_aegp_scene_frame == 75",
                        '"scene_current_frame\\\":"',
                        '"seek_pipe_ack_received\\\":"',
                        '"seek_pipe_ack_valid\\\":"'):
@@ -1000,7 +1003,7 @@ class MinihostL2SourceTests(unittest.TestCase):
                        "static_assert(sizeof(TimelineHostTrimAck) == 40)",
                        "aegp_set_layer_in_point_and_duration",
                        "g_aegp_layer_suite9[17]",
-                       "g_aegp_layer_trim_set_calls != 1",
+                       "g_aegp_layer_trim_set_calls == 1",
                        '"layer_1_duration_value\\\":"',
                        '"trim_pipe_ack_received\\\":"',
                        '"trim_pipe_ack_valid\\\":"'):
@@ -1013,8 +1016,8 @@ class MinihostL2SourceTests(unittest.TestCase):
                        "static_assert(sizeof(TimelineHostSwitchAck) == 36)",
                        "aegp_set_layer_flag",
                        "g_aegp_layer_suite8[11]",
-                       "g_aegp_layer_flag_set_calls != 4",
-                       "g_aegp_layer_flags[0] != 0x00004026u",
+                       "g_aegp_layer_flag_set_calls == 4",
+                       "g_aegp_layer_flags[0] == 0x00004026u",
                        '"switch_pipe_ack_received\\\":"',
                        '"switch_pipe_ack_valid\\\":"'):
             self.assertIn(marker, text)
