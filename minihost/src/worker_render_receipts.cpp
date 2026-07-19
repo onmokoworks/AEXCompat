@@ -11,6 +11,11 @@
 #include <utility>
 
 namespace aexcompat::render_receipts {
+
+ReceiptTestState& receipt_test_state() {
+  static ReceiptTestState state;
+  return state;
+}
 namespace {
 
 struct Receipt {

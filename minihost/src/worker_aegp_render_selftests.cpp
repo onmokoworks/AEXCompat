@@ -30,8 +30,11 @@ using namespace aexcompat::world_registry;
 constexpr std::size_t kMaxRenderOptions = 32;
 constexpr int32_t kSyntheticCompWidth = 17;
 constexpr int32_t kSyntheticCompHeight = 9;
-extern bool g_synthetic_receipt_test_mode;
-extern int g_async_manager;
+namespace {
+auto& g_synthetic_receipt_test_mode =
+    aexcompat::render_receipts::receipt_test_state().synthetic_test_mode;
+auto& g_async_manager = aexcompat::render_receipts::receipt_test_state().async_manager;
+}  // namespace
 // Definitions of the probe fixtures declared in the header: this TU owns
 // them because its render probes are the only writers.
 std::array<uint8_t, 4> g_render_options_baseline8{};

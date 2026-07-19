@@ -14,6 +14,20 @@ namespace aexcompat::render_receipts {
 inline constexpr std::size_t kMaxReceiptCount = 32;
 inline constexpr uint64_t kMaxReceiptBytes = 64ULL * 1024 * 1024;
 
+// Receipt test-mode state (issue #126 Phase D): the synthetic-receipt
+// toggle, the async-manager identity anchor handed to the AEGP render
+// suites, and the loaded-effect receipt fixture verdicts. worker_main and
+// the AEGP render selftests write it; the fixture query reads it back.
+// Lifetime: process-lifetime, defaults off/false, never torn down.
+struct ReceiptTestState {
+  bool synthetic_test_mode{};
+  int async_manager{};
+  bool loaded_effect_receipt_fixture_passed{};
+  bool loaded_effect_receipt_unsupported_rejected{};
+  bool loaded_effect_receipt_stale_world_rejected{};
+};
+ReceiptTestState& receipt_test_state();
+
 struct ReceiptDraft {
   world_safety::LocalEffectWorld world{};
   std::vector<std::byte> pixels;
