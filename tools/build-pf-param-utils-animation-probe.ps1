@@ -1,6 +1,6 @@
 param(
     [string]$AfterEffectsSdk = $env:AFTER_EFFECTS_SDK_ROOT,
-    [string]$Generator = "Visual Studio 18 2026",
+    [string]$Generator = "",
     [string]$Architecture = "x64",
     [string]$CMake = "",
     [ValidateSet("Debug", "Release")][string]$Configuration = "Release"
@@ -10,6 +10,7 @@ $AfterEffectsSdk = & "$PSScriptRoot\resolve-after-effects-sdk.ps1" $AfterEffects
 $repository = Split-Path -Parent $PSScriptRoot
 $source = Join-Path $repository "instruments\pf-param-utils-animation-probe"
 $build = Join-Path $repository "target\pf-param-utils-animation-probe-build"
+$Generator = & "$PSScriptRoot\resolve-cmake-generator.ps1" $Generator
 $CMake = & "$PSScriptRoot\resolve-build-cmake.ps1" $CMake $Generator
 $env:AE_SDK_ROOT = $AfterEffectsSdk
 & $CMake -S $source -B $build -G $Generator -A $Architecture

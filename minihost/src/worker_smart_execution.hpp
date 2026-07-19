@@ -42,6 +42,10 @@ struct Result {
   bool roi_contract_valid{};
   std::array<int32_t, 4> result_rect{};
   std::array<int32_t, 4> max_result_rect{};
+  std::array<int32_t, 4> input_checkout_result_rect{-1, -1, -1, -1};
+  std::array<int32_t, 4> map_checkout_result_rect{-1, -1, -1, -1};
+  uint32_t malformed_checkout_requests{};
+  uint32_t empty_checkout_pixel_denials{};
   int32_t output_width{};
   int32_t output_height{};
   int32_t output_rowbytes{};

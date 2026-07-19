@@ -179,9 +179,11 @@ bool dispatch(const Request& request, const Hooks& hooks,
             << "_begin\n" << std::flush;
   if (result.pre_error == 0 && transport_ready) {
     if (plan.gpu_negotiation) hooks.capture_module_audit();
+    runtime.gpu_render_dispatched = result.gpu_render_dispatched;
     result.selector_error = hooks.guarded_call(request.entry, render_selector,
         request.input->data(), request.output->data(), params.data(), nullptr,
         smart_extra.data());
+    runtime.gpu_render_dispatched = false;
     result.render_error = result.selector_error;
   } else {
     result.render_error = result.pre_error == 0 ? -6 : -1;
@@ -212,6 +214,10 @@ bool dispatch(const Request& request, const Hooks& hooks,
   if (plan.gpu_negotiation && gpu_context_started &&
       !transport::end_backend_context(gpu_framework) && result.gpu_setdown_error == 0)
     result.gpu_setdown_error = -6;
+  result.input_checkout_result_rect = runtime.input_checkout_result_rect;
+  result.map_checkout_result_rect = runtime.map_checkout_result_rect;
+  result.malformed_checkout_requests = runtime.malformed_checkout_requests;
+  result.empty_checkout_pixel_denials = runtime.empty_checkout_pixel_denials;
   return true;
 }
 

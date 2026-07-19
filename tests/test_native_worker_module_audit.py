@@ -22,6 +22,9 @@ DISPATCH = (ROOT / "minihost" / "src" / "worker_selector_dispatch.cpp").read_tex
 SESSION = (ROOT / "minihost" / "src" / "worker_session.cpp").read_text(
     encoding="utf-8"
 )
+SMART_DISPATCH = (ROOT / "minihost" / "src" / "worker_smart_dispatch.cpp").read_text(
+    encoding="utf-8"
+)
 
 
 def test_sealed_workers_audit_immediately_after_load_before_symbol_lookup():
@@ -77,7 +80,9 @@ def test_pre_unload_audit_precedes_final_free_and_direct_workers_remain_optional
     assert final_audit < final_free
     assert 'std::string status{"not_required"}' in HEADER
     assert ': "not_required")' in SOURCE
-    assert MAIN.count("finish_requested_parameters(report_snapshot") == 2
+    # One call remains in orchestration; the extracted report owner performs
+    # the other terminal-report call.
+    assert (MAIN + RENDER_REPORT).count("finish_requested_parameters(") >= 2
     assert '\\\"module_audit\\\"' in RENDER_REPORT
 
 
@@ -101,11 +106,8 @@ def test_observed_modules_are_bounded_deduplicated_and_unknowns_are_sticky():
 
 
 def test_gpu_boundaries_capture_before_begin_selector_setdown_and_end():
-    smart = MAIN[
-        MAIN.index("SmartResult smart_render_runtime"):
-        MAIN.index("const bool g_smart_execution_configured")
-    ]
-    assert smart.count("if (gpu_negotiation) capture_module_audit();") >= 3
+    smart = SMART_DISPATCH
+    assert smart.count("if (plan.gpu_negotiation) hooks.capture_module_audit();") >= 3
     setdown = smart.index('stage:gpu_device_setdown_begin')
     assert smart.rfind("capture_module_audit();", 0, setdown) > smart.rfind(
         "write<void*>(setdown_extra", 0, setdown)

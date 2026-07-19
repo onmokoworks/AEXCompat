@@ -10,6 +10,8 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "minihost" / "src" / "l2_main.cpp"
 SMART_RUNTIME_SOURCE = ROOT / "minihost" / "src" / "worker_smart_runtime.cpp"
+SMART_RUNTIME_HEADER = ROOT / "minihost" / "src" / "worker_smart_runtime.hpp"
+SMART_EXECUTION_HEADER = ROOT / "minihost" / "src" / "worker_smart_execution.hpp"
 BUILD = ROOT / "target" / "minihost-build"
 SDK_ROOT = os.environ.get("AFTER_EFFECTS_SDK_ROOT")
 HEADERS = Path(SDK_ROOT) / "Examples" / "Headers" if SDK_ROOT else None
@@ -63,7 +65,9 @@ int main() { return 0; }
 
 def test_l2_source_writes_full_checkout_result() -> None:
     source = SOURCE.read_text(encoding="utf-8")
-    runtime_source = SMART_RUNTIME_SOURCE.read_text(encoding="utf-8")
+    runtime_source = "\n".join(path.read_text(encoding="utf-8") for path in (
+        SMART_RUNTIME_SOURCE, SMART_RUNTIME_HEADER, SMART_EXECUTION_HEADER
+    ))
     for marker in (
         "constexpr std::size_t kCheckoutResultBytes = 76;",
         "void write_checkout_result(void* destination",
@@ -74,12 +78,12 @@ def test_l2_source_writes_full_checkout_result() -> None:
         'L"--self-test-pf-pre-checkout-result"',
         'L"--self-test-smart-runtime-concurrency"',
         'L"--self-test-smart-result-skipped"',
-        "std::make_shared<aexcompat::worker_runtime::smart::Snapshot>()",
+        "std::make_shared<smart::Snapshot>()",
     ):
         assert marker in source + runtime_source
     for marker in (
         "runtime.full_resolution_width > 0",
-        "write_checkout_result(result, runtime.width, runtime.height,",
+        "write_checkout_result(result, runtime.input_checkout_result_rect,",
         "thread_local State g_default_state;",
         "thread_local State* g_active_state{};",
         "if (!g_active_state || time_step <= 0 || time_scale == 0) return 4;",

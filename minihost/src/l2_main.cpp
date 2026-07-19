@@ -5268,6 +5268,7 @@ SmartResult smart_render_runtime(EffectEntry entry, std::array<std::byte, kInSiz
   auto* destination = guarded.data();
   result.guards_intact = true;
   std::array<std::byte, 120> input_world{}, output_world{};
+  std::array<std::byte, 120> input_checkout_view{}, map_checkout_view{};
   DispatchWorldFormatScope dispatch_worlds;
   aexcompat::render::MapWorld map_world;
   const bool input_write_advertised =
@@ -5275,7 +5276,8 @@ SmartResult smart_render_runtime(EffectEntry entry, std::array<std::byte, kInSiz
   if (!aexcompat::worker_runtime::smart_setup::prepare_world_buffers(
           plan, case_id, external_rgba, input_write_advertised,
           {&source, &guarded, &destination, &input_world, &output_world,
-           &dispatch_worlds, &map_world})) return result;
+           &input_checkout_view, &map_checkout_view, &dispatch_worlds,
+           &map_world})) return result;
   const int32_t dispatch_pixel_format = float32 ? kPixelFormatArgb128 :
       (deep16 ? kPixelFormatArgb64 : kPixelFormatArgb32);
   aexcompat::worker_runtime::smart_setup::ParameterState parameter_state(
@@ -5546,6 +5548,19 @@ void early_mode_report_parameters(void* opaque, const char* status, int32_t glob
   const auto& b = *static_cast<EarlyModeBridge*>(opaque);
   report(status, global_error, params_error, setdown_error, *b.output, *b.about_message,
          {-1, -1, -1, -1, -1}, true);
+}
+
+const aexcompat::l2mode::Hooks& early_mode_hooks() {
+  static const aexcompat::l2mode::Hooks hooks{
+      early_mode_out_flags, early_mode_copy_sequence_data_to_input,
+      early_mode_sequence_setup, early_mode_sequence_setdown, early_mode_do_dialog,
+      early_mode_global_setdown, early_mode_return_message,
+      early_mode_handle_lifetimes_balanced, early_mode_prepare_protocol_report,
+      early_mode_external_dependencies, early_mode_handle_is_live,
+      early_mode_handle_size, early_mode_lock_handle, early_mode_unlock_handle,
+      early_mode_dispose_handle, early_mode_handle_statistics,
+      early_mode_dispose_arbitrary_defaults, early_mode_report_parameters};
+  return hooks;
 }
 
 
@@ -6329,11 +6344,12 @@ int worker_main_impl(int argc, wchar_t **argv) {
   if (const auto selftest_exit = aexcompat::worker_runtime::selftest::dispatch_host(
           argc, argv, host_selftests.data(), host_selftests.size()))
     return *selftest_exit;
-  const std::array<aexcompat::worker_runtime::selftest::SimpleCommand, 20> simple_selftests{{
+  const std::array<aexcompat::worker_runtime::selftest::SimpleCommand, 21> simple_selftests{{
       {L"--self-test-aegp-installed-effect-catalog", "aegp_installed_effect_catalog", &verify_aegp_installed_effect_catalog_suite4},
       {L"--self-test-parameter-animation", "parameter_animation_transport", &verify_parameter_animation_transport},
       {L"--self-test-pf-param-utils-suite", "pf_param_utils_suite3", &verify_pf_param_utils_suite3},
       {L"--self-test-pf-pre-checkout-result", "pf_pre_checkout_result", &verify_pre_checkout_result_contract},
+      {L"--self-test-pf-checkout-intersection", "pf_checkout_intersection", &aexcompat::worker_runtime::smart::checkout_intersection_self_test},
       {L"--self-test-smart-runtime-concurrency", "smart_runtime_concurrency", &aexcompat::worker_runtime::smart::concurrency_self_test},
       {L"--self-test-smart-result-skipped", "smart_result_skipped", +[] {
          const SmartResult skipped{};
@@ -8189,8 +8205,14 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
       {smart.gpu_render_possible, smart.gpu_render_dispatched},
       {smart.checkout_time, smart.checkout_time_step, smart.checkout_time_scale},
       smart.roi_contract_valid, smart.runtime->input_checkout_request,
-      smart.runtime->map_checkout_request, setdown_error, case_id, smart.runtime->pixel_format,
-      {smart.output_width, smart.output_height, smart.output_rowbytes}, smart.input_hash,
+      smart.runtime->map_checkout_request, smart.input_checkout_result_rect,
+      smart.map_checkout_result_rect, smart.malformed_checkout_requests,
+      smart.empty_checkout_pixel_denials, setdown_error, case_id, smart.runtime->pixel_format,
+      {smart.output_width, smart.output_height, smart.output_rowbytes},
+      {external_width, external_height},
+      smart.runtime->pixel_format == "argb32f" ? 16 :
+          (smart.runtime->pixel_format == "argb16" ? 8 : 4),
+      smart.input_hash,
       smart.output_hash, smart.rects_valid, world_debug_report_json()});
   aexcompat::worker_render_report::append_custom_ui(report_snapshot, {
       g_render_click_enabled, g_render_click_error, g_render_click_out_flags,

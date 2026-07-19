@@ -94,6 +94,7 @@ bool prepare_world_buffers(const Plan& plan, const std::string& case_id,
                            WorldBuffers buffers) {
   if (!plan.valid || !buffers.source || !buffers.output || !buffers.destination ||
       !buffers.input_world || !buffers.output_world || !buffers.formats ||
+      !buffers.input_checkout_view || !buffers.map_checkout_view ||
       !buffers.map || !*buffers.source || !*buffers.output) return false;
   auto& source = *buffers.source;
   std::memset(source.data(), 0x5A,
@@ -144,6 +145,10 @@ bool prepare_world_buffers(const Plan& plan, const std::string& case_id,
   if (!buffers.formats->register_world(buffers.input_world->data(), pixel_format) ||
       !buffers.formats->register_world(buffers.output_world->data(), pixel_format))
     return false;
+  *buffers.input_checkout_view = *buffers.input_world;
+  auto& smart_state = smart::state();
+  smart_state.input_checkout_view_world = buffers.input_checkout_view->data();
+  smart_state.map_checkout_view_world = nullptr;
   if (plan.connected_map) {
     if (!render::prepare_connected_map_world(case_id, plan.width, plan.height,
                                              *buffers.map) ||
@@ -154,6 +159,8 @@ bool prepare_world_buffers(const Plan& plan, const std::string& case_id,
     state.map_width = buffers.map->width;
     state.map_height = buffers.map->height;
     state.map_world = buffers.map->world.data();
+    *buffers.map_checkout_view = buffers.map->world;
+    state.map_checkout_view_world = buffers.map_checkout_view->data();
   }
   return true;
 }
@@ -161,7 +168,7 @@ bool prepare_world_buffers(const Plan& plan, const std::string& case_id,
 ParameterState::ParameterState(std::size_t definition_count,
                                std::size_t external_layer_count)
     : definitions(definition_count), hosted_pixels(external_layer_count),
-      hosted_worlds(external_layer_count) {}
+      hosted_worlds(external_layer_count), hosted_view_worlds(external_layer_count) {}
 
 ParameterState::~ParameterState() {
   parameters::state().checkout.definitions.clear();
@@ -212,6 +219,8 @@ bool prepare_parameters(const ParameterRequest& request, ParameterState& prepare
               pixels.data()) ||
           !request.formats->register_world(world.data(),
                                            request.dispatch_pixel_format)) return false;
+      auto& view_world = prepared.hosted_view_worlds[layer_index];
+      view_world = world;
       const int32_t requested_time = plan.temporal_context ? 42 :
           request.external_current_time;
       const uint32_t requested_scale = plan.temporal_context ? 24 :
@@ -221,7 +230,8 @@ bool prepare_parameters(const ParameterRequest& request, ParameterState& prepare
       if (!layer.timed || same_time)
         std::memcpy(definitions[layer.slot].data() + 56, world.data(), world.size());
       smart_state.hosted_layers.push_back({layer.slot, layer.time, layer.time_scale,
-          layer.timed, layer.width, layer.height, -1, world.data()});
+          layer.timed, layer.width, layer.height, -1, world.data(),
+          view_world.data(), {-1, -1, -1, -1}});
     }
   }
   if (request.requested) {

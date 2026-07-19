@@ -172,10 +172,16 @@ struct SmartReport {
     bool roi_contract_valid{};
     std::array<int32_t, 4> input_checkout{};
     std::array<int32_t, 4> map_checkout{};
+    std::array<int32_t, 4> input_checkout_result{};
+    std::array<int32_t, 4> map_checkout_result{};
+    uint32_t malformed_checkout_requests{};
+    uint32_t empty_checkout_pixel_denials{};
     int32_t global_setdown_error{};
     std::string case_id;
     std::string pixel_format;
     std::array<int32_t, 3> dimensions{};
+    std::array<int32_t, 2> input_world_dimensions{};
+    int32_t pixel_bytes{};
     std::string input_sha256;
     std::string output_sha256;
     bool result_rects_valid{};

@@ -126,3 +126,23 @@ fn pipe_holding_descendant_does_not_block_capture() {
     assert!(result.stdout.contains("parent completed"));
     assert!(started.elapsed() < Duration::from_secs(20));
 }
+
+#[cfg(windows)]
+#[test]
+fn production_stdout_capture_preserves_large_bounded_worker_reports() {
+    use aexcompat_broker::windows_process::{run_isolated, STDOUT_CAPTURE_LIMIT};
+    use std::path::Path;
+    use std::time::Duration;
+
+    let report_bytes = 17 * 1024 * 1024;
+    assert!(report_bytes < STDOUT_CAPTURE_LIMIT);
+    let result = run_isolated(
+        Path::new(env!("CARGO_BIN_EXE_dummy_large_stdout")),
+        &[report_bytes.to_string()],
+        Duration::from_secs(30),
+    )
+    .expect("run large-report worker");
+    assert_eq!(result.classification.as_str(), "ok");
+    assert_eq!(result.stdout.len(), report_bytes);
+    assert!(!result.stdout_truncated);
+}

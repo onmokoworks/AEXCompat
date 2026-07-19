@@ -239,10 +239,31 @@ void begin_smart(ReportSnapshot& report, const SmartReport::Head& v) {
       << ',' << v.input_checkout[2] << ',' << v.input_checkout[3] << ']'
       << ",\"map_checkout_request\":[" << v.map_checkout[0] << ',' << v.map_checkout[1]
       << ',' << v.map_checkout[2] << ',' << v.map_checkout[3] << ']'
+      << ",\"input_checkout_result_rect\":[" << v.input_checkout_result[0] << ','
+      << v.input_checkout_result[1] << ',' << v.input_checkout_result[2] << ','
+      << v.input_checkout_result[3] << ']'
+      << ",\"map_checkout_result_rect\":[" << v.map_checkout_result[0] << ','
+      << v.map_checkout_result[1] << ',' << v.map_checkout_result[2] << ','
+      << v.map_checkout_result[3] << ']'
+      << ",\"malformed_checkout_request_count\":" << v.malformed_checkout_requests
+      << ",\"empty_checkout_pixel_denial_count\":" << v.empty_checkout_pixel_denials
       << ",\"global_setdown_error\":" << v.global_setdown_error
       << ",\"case_id\":\"" << v.case_id << "\",\"pixel_format\":\"" << v.pixel_format
       << "\",\"width\":" << v.dimensions[0] << ",\"height\":" << v.dimensions[1]
       << ",\"rowbytes\":" << v.dimensions[2]
+      << ",\"premultiplication\":\"premultiplied\""
+      << ",\"input_world\":{\"width\":" << v.input_world_dimensions[0]
+      << ",\"height\":" << v.input_world_dimensions[1]
+      << ",\"row_bytes\":" << v.input_world_dimensions[0] * v.pixel_bytes
+      << ",\"pixel_format\":\"" << v.pixel_format
+      << "\",\"premultiplication\":\"premultiplied\",\"extent_hint\":{\"left\":0,\"top\":0,\"right\":"
+      << v.input_world_dimensions[0] << ",\"bottom\":" << v.input_world_dimensions[1]
+      << "}}"
+      << ",\"output_world\":{\"width\":" << v.dimensions[0]
+      << ",\"height\":" << v.dimensions[1] << ",\"row_bytes\":" << v.dimensions[2]
+      << ",\"pixel_format\":\"" << v.pixel_format
+      << "\",\"premultiplication\":\"premultiplied\",\"extent_hint\":{\"left\":0,\"top\":0,\"right\":"
+      << v.dimensions[0] << ",\"bottom\":" << v.dimensions[1] << "}}"
       << ",\"bytes_written_per_row\":" << v.dimensions[2]
       << ",\"undefined_tail_bytes_per_row\":0"
       << ",\"input_sha256\":\"" << v.input_sha256 << "\",\"output_sha256\":\""

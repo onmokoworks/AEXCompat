@@ -1,8 +1,10 @@
 param([string]$AfterEffectsSdk=$env:AFTER_EFFECTS_SDK_ROOT,
-      [string]$Generator="Visual Studio 18 2026",[string]$Architecture="x64",
-      [string]$CMake="C:\Program Files\Microsoft Visual Studio\18\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe")
+      [string]$Generator="",[string]$Architecture="x64",
+      [string]$CMake="")
 $ErrorActionPreference="Stop"
 $AfterEffectsSdk = & "$PSScriptRoot\resolve-after-effects-sdk.ps1" $AfterEffectsSdk
+$Generator = & "$PSScriptRoot\resolve-cmake-generator.ps1" $Generator
+$CMake = & "$PSScriptRoot\resolve-build-cmake.ps1" $CMake $Generator
 $repo=Split-Path -Parent $PSScriptRoot
 $src=Join-Path $repo "instruments\pf-batch-sampling-oracle"
 $build=Join-Path $repo "target\pf-batch-sampling-oracle-build"

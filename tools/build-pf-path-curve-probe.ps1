@@ -1,6 +1,6 @@
 param(
     [string]$AfterEffectsSdk = $env:AFTER_EFFECTS_SDK_ROOT,
-    [string]$Generator = "Visual Studio 18 2026",
+    [string]$Generator = "",
     [string]$Architecture = "x64",
     [string]$CMake = "",
     [ValidateSet("Debug", "Release")]
@@ -17,6 +17,7 @@ $headers = Join-Path $AfterEffectsSdk "Examples\Headers\AE_EffectSuites.h"
 if (-not (Test-Path -LiteralPath $headers)) {
     throw "After Effects SDK headers were not found: $headers"
 }
+$Generator = & "$PSScriptRoot\resolve-cmake-generator.ps1" $Generator
 $CMake = & "$PSScriptRoot\resolve-build-cmake.ps1" $CMake $Generator
 
 $env:AE_SDK_ROOT = $AfterEffectsSdk

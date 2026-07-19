@@ -35,6 +35,16 @@ def test_reference_capture_contract_is_hash_bound_create_new_and_temporary():
     assert "if (-not $process.HasExited) {" in runner
     assert "Stop-Process" not in runner
     assert "Installed AEX hash does not match tested AEX" in runner
+    assert "Process.Modules" in runner
+    assert "loaded_aex_identity" in runner
+    assert "RequireLoadedAexIdentity" in runner
+    assert "Get-LaunchedProcessTreeIds" in runner
+    assert "effect_provenance" in runner
+    assert "unique_loaded_provider" in runner
+    assert "output_png_sha256" in runner
+    helper = (ROOT / "tools" / "windows-file-identity.ps1").read_text(encoding="utf-8")
+    assert "GetFinalPathNameByHandleW" in helper
+    assert "GetFileInformationByHandle" in helper
     assert "OutputPng already exists" in runner
     assert "Test-Path -LiteralPath $resultPath" in runner
     assert "[DateTime]::UtcNow -lt $deadline" in runner
@@ -81,6 +91,20 @@ def test_reference_capture_color_pipeline_pin_is_optional_and_fail_closed():
     assert "linearize_working_space: app.project.linearizeWorkingSpace" in script
 
 
+def test_reference_capture_lock_and_identity_failures_share_cleanup_scope():
+    runner = RUNNER.read_text(encoding="utf-8")
+    cleanup_try = runner.index("$installedLock = $null\n$process = $null\n$captureFailed = $true\ntry {")
+    lock_open = runner.index("$installedLock = [System.IO.File]::Open(")
+    identity_validation = runner.index("$lockedIdentity = Get-LockedFileIdentity $installedLock")
+    cleanup_finally = runner.index("} finally {", identity_validation)
+
+    # Both operations can throw after the staged input and environment contract
+    # exist, so they must be enclosed by the same cleanup try/finally as launch.
+    assert cleanup_try < lock_open < identity_validation < cleanup_finally
+    assert "if ($captureFailed -and $null -ne $installedLock) { $installedLock.Dispose() }" in runner
+    assert "Remove-Item -LiteralPath $stagedInput -ErrorAction SilentlyContinue" in runner
+
+
 @pytest.mark.skipif(
     sys.platform != "win32" or shutil.which("powershell") is None,
     reason="mock capture run requires Windows PowerShell and a Windows executable")
@@ -125,6 +149,7 @@ def test_reference_capture_result_records_prelaunch_input_identities(tmp_path):
     recorded = json.loads(result_path.read_text(encoding="utf-8-sig"))
     assert recorded["input_sha256"] == hashlib.sha256(original_input).hexdigest()
     assert recorded["tested_aex_sha256"] == hashlib.sha256(b"fixture-bytes").hexdigest()
+    assert recorded["output_png_sha256"] == hashlib.sha256(b"png-placeholder").hexdigest()
     assert json.loads(stdout)["input_sha256"] == recorded["input_sha256"]
 
 
@@ -175,3 +200,73 @@ def test_reference_capture_shutdown_never_touches_unrelated_ae_named_processes(t
         process.kill()
         if decoy is not None:
             decoy.kill()
+
+
+@pytest.mark.skipif(
+    sys.platform != "win32" or shutil.which("powershell") is None,
+    reason="mock capture run requires Windows PowerShell and a Windows executable")
+def test_reference_capture_fails_closed_without_loaded_module_identity(tmp_path):
+    import subprocess
+    import time
+
+    aex = tmp_path / "fixture.aex"
+    aex.write_bytes(b"fixture-bytes")
+    input_image = tmp_path / "input.png"
+    input_image.write_bytes(b"input")
+    mock_ae = tmp_path / "mock-afterfx.exe"
+    shutil.copyfile(Path("C:/Windows/System32/where.exe"), mock_ae)
+    output = tmp_path / "capture.png"
+    result_path = tmp_path / "capture.result.json"
+
+    process = subprocess.Popen(
+        ["powershell", "-NoProfile", "-File", str(RUNNER),
+         "-AfterEffects", str(mock_ae), "-TestedAex", str(aex),
+         "-InstalledAex", str(aex), "-InputImage", str(input_image),
+         "-OutputPng", str(output), "-EffectName", "Fixture",
+         "-RequireLoadedAexIdentity", "-TimeoutSeconds", "60"],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    try:
+        time.sleep(5)
+        output.write_bytes(b"png-placeholder")
+        result_path.write_text(
+            '{"schema_version": 1, "status": "captured"}', encoding="utf-8")
+        _, stderr = process.communicate(timeout=90)
+    finally:
+        process.kill()
+
+    assert process.returncode != 0
+    assert "without verified loaded AEX module identity" in stderr
+    recorded = json.loads(result_path.read_text(encoding="utf-8-sig"))
+    assert recorded["status"] == "identity_unverified"
+    assert recorded["loaded_aex_identity"] == {
+        "state": "unverified", "reason": "loaded_module_not_observed"}
+
+
+@pytest.mark.skipif(
+    sys.platform != "win32" or shutil.which("powershell") is None,
+    reason="file identity helper is Windows-only")
+def test_locked_file_identity_distinguishes_equal_bytes_at_different_paths(tmp_path):
+    import subprocess
+
+    first = tmp_path / "first.aex"
+    second = tmp_path / "second.aex"
+    first.write_bytes(b"same-plugin-bytes")
+    second.write_bytes(b"same-plugin-bytes")
+    helper = ROOT / "tools" / "windows-file-identity.ps1"
+    script = tmp_path / "identity.ps1"
+    script.write_text(
+        "param($Helper,$First,$Second)\n"
+        ". $Helper\n"
+        "$a=[IO.File]::Open($First,'Open','Read','Read'); "
+        "$b=[IO.File]::Open($Second,'Open','Read','Read')\n"
+        "try { @((Get-LockedFileIdentity $a),(Get-LockedFileIdentity $b)) "
+        "| ConvertTo-Json -Depth 4 } finally { $a.Dispose(); $b.Dispose() }\n",
+        encoding="utf-8")
+    output = subprocess.check_output(
+        ["powershell", "-NoProfile", "-File", str(script),
+         "-Helper", str(helper), "-First", str(first), "-Second", str(second)],
+        text=True)
+    identities = json.loads(output)
+    assert identities[0]["sha256"] == identities[1]["sha256"]
+    assert identities[0]["canonical_path_sha256"] != identities[1]["canonical_path_sha256"]
+    assert identities[0]["file_id"] != identities[1]["file_id"]

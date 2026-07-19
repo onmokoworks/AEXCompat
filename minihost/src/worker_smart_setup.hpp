@@ -60,6 +60,8 @@ struct WorldBuffers {
   unsigned char** destination{};
   std::array<std::byte, 120>* input_world{};
   std::array<std::byte, 120>* output_world{};
+  std::array<std::byte, 120>* input_checkout_view{};
+  std::array<std::byte, 120>* map_checkout_view{};
   world_safety::DispatchWorldFormatScope* formats{};
   render::MapWorld* map{};
 };
@@ -81,6 +83,7 @@ struct ParameterState {
   parameter_execution::Definitions definitions;
   std::vector<std::vector<unsigned char>> hosted_pixels;
   std::vector<std::array<std::byte, 120>> hosted_worlds;
+  std::vector<std::array<std::byte, 120>> hosted_view_worlds;
   std::vector<void*> params;
   std::vector<unsigned char> pre_render_source;
 };

@@ -17,12 +17,16 @@ struct HostedLayer {
   int32_t height{};
   int32_t checkout_id{-1};
   void* world{};
+  void* view_world{};
+  std::array<int32_t, 4> checkout_rect{-1, -1, -1, -1};
 };
 
 struct State {
   void* input_world{};
   void* output_world{};
   void* map_world{};
+  void* input_checkout_view_world{};
+  void* map_checkout_view_world{};
   std::vector<HostedLayer> hosted_layers;
   int32_t width{16};
   int32_t height{12};
@@ -46,6 +50,11 @@ struct State {
   uint32_t checkout_time_scale{};
   std::array<int32_t, 4> input_checkout_request{-1, -1, -1, -1};
   std::array<int32_t, 4> map_checkout_request{-1, -1, -1, -1};
+  std::array<int32_t, 4> input_checkout_result_rect{-1, -1, -1, -1};
+  std::array<int32_t, 4> map_checkout_result_rect{-1, -1, -1, -1};
+  uint32_t malformed_checkout_requests{};
+  uint32_t empty_checkout_pixel_denials{};
+  bool gpu_render_dispatched{};
 
   void clear_transient();
 };
@@ -63,6 +72,10 @@ struct Snapshot {
   uint32_t checkout_time_scale{};
   std::array<int32_t, 4> input_checkout_request{-1, -1, -1, -1};
   std::array<int32_t, 4> map_checkout_request{-1, -1, -1, -1};
+  std::array<int32_t, 4> input_checkout_result_rect{-1, -1, -1, -1};
+  std::array<int32_t, 4> map_checkout_result_rect{-1, -1, -1, -1};
+  uint32_t malformed_checkout_requests{};
+  uint32_t empty_checkout_pixel_denials{};
 };
 
 State& state();
@@ -91,5 +104,6 @@ int32_t __cdecl checkout_pixels(void*, int32_t checkout_id, void** world);
 int32_t __cdecl checkin_pixels(void*, int32_t checkout_id);
 int32_t __cdecl checkout_output(void*, void** world);
 bool concurrency_self_test();
+bool checkout_intersection_self_test();
 
 }  // namespace aexcompat::worker_runtime::smart
