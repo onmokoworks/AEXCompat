@@ -15,6 +15,13 @@ namespace aexcompat::worker_runtime {
 // terminal module audit, trace end, module unload, then native stdout restore.
 class WorkerSession final {
  public:
+  // Returns true only after all plug-in callbacks and worker threads that may
+  // execute plug-in code have quiesced. A false result prevents module unload
+  // and makes the terminal lifecycle fail closed. The noexcept function type
+  // also makes an escaping C++ exception terminate rather than cross the host
+  // lifecycle boundary.
+  using PreUnloadHook = bool(__cdecl*)(void*) noexcept;
+
   WorkerSession(RuntimeContext& context, TraceWriter* trace_writer,
                 TraceWriter** active_trace_writer) noexcept;
   ~WorkerSession();
@@ -26,6 +33,10 @@ class WorkerSession final {
   const std::filesystem::path& plugin_path() const noexcept {
     return plugin_path_;
   }
+
+  // Registers the session's single pre-unload barrier. Registration is only
+  // accepted before terminal audit/quiescence begins.
+  bool set_pre_unload_hook(PreUnloadHook hook, void* context) noexcept;
 
   // Captures the terminal loaded-module set before protocol output and restores
   // stdout. On audit rejection it emits the canonical fail-closed report.
@@ -45,6 +56,7 @@ class WorkerSession final {
   int finish(int exit_code) noexcept;
 
  private:
+  bool quiesce_once() noexcept;
   bool capture_terminal_audit() noexcept;
   void stop_trace() noexcept;
   void unload_module() noexcept;
@@ -57,6 +69,11 @@ class WorkerSession final {
   bool stdout_redirected_{};
   bool terminal_audit_captured_{};
   bool terminal_audit_passed_{true};
+  PreUnloadHook pre_unload_hook_{};
+  void* pre_unload_context_{};
+  bool pre_unload_hook_registered_{};
+  bool pre_unload_hook_invoked_{};
+  bool pre_unload_hook_passed_{true};
   bool audit_failure_reported_{};
   TraceWriter* trace_writer_{};
   TraceWriter** active_trace_writer_{};
