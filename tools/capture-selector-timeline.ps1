@@ -160,10 +160,22 @@ try {
         'AEXCOMPAT_SELECTOR_TIMELINE_LOG')) {
         Remove-Item "Env:$name" -ErrorAction SilentlyContinue
     }
+    # The startup gate refused to run while any AE-named process existed, so
+    # an AE-named process alive here is from this capture (a render engine
+    # that outlived its launcher, or a timed-out phase). Give it a bounded
+    # grace to exit, then terminate it: leaving it alive would keep the
+    # probe DLL loaded and strand the temporary install below.
+    $graceDeadline = (Get-Date).AddSeconds(30)
+    while ((Get-Process AfterFX,AfterFX.com,aerender,aerendercore -ErrorAction SilentlyContinue) -and
+        ((Get-Date) -lt $graceDeadline)) {
+        Start-Sleep -Milliseconds 500
+    }
     $lingering = Get-Process AfterFX,AfterFX.com,aerender,aerendercore -ErrorAction SilentlyContinue
     if ($lingering) {
-        Write-Warning ('Not terminating AE-named processes this run did not launch: ' +
+        Write-Warning ('Terminating AE engine processes left over from this capture: ' +
             (($lingering | ForEach-Object { "$($_.ProcessName):$($_.Id)" }) -join ', '))
+        $lingering | Stop-Process -Force -ErrorAction SilentlyContinue
+        $lingering | ForEach-Object { try { $_.WaitForExit(10000) | Out-Null } catch {} }
     }
     if (Test-Path -LiteralPath $installRoot) {
         $resolvedRoot = (Resolve-Path -LiteralPath $installRoot).Path
