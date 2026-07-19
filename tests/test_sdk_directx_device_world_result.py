@@ -62,6 +62,7 @@ def test_directx_implementation_build_and_readme_markers_are_present():
     main = (ROOT / "minihost" / "src" / "l2_main.cpp").read_text()
     main += "\n" + (ROOT / "minihost" / "src" / "l2_cli_dispatch.cpp").read_text()
     main += "\n" + (ROOT / "minihost" / "src" / "gpu_memory_world_transport.cpp").read_text()
+    main += "\n" + (ROOT / "minihost" / "src" / "worker_render_report.cpp").read_text()
     source = (ROOT / "minihost" / "src" / "gpu_directx_backend.cpp").read_text()
     for marker in (
         'LoadLibraryExW(L"dxgi.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32)',

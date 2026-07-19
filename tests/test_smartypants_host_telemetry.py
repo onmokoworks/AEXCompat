@@ -6,6 +6,9 @@ SOURCE = (ROOT / "minihost" / "src" / "l2_main.cpp").read_text(encoding="utf-8")
 SCENE_SOURCE = (ROOT / "minihost" / "src" / "worker_aegp_scene.cpp").read_text(
     encoding="utf-8"
 )
+REPORT_SOURCE = (ROOT / "minihost" / "src" / "worker_render_report.cpp").read_text(
+    encoding="utf-8"
+)
 
 
 def test_smart_pre_render_exposes_bounded_thread_safe_guid_mix_callback():
@@ -41,4 +44,4 @@ def test_telemetry_is_reset_per_smart_render_and_is_additive_json():
         "guid_mix_in_size_limit",
         "guid_mix_in_last_result",
     ):
-        assert f'\\\"{field}\\\"' in SOURCE
+        assert f'\\\"{field}\\\"' in REPORT_SOURCE

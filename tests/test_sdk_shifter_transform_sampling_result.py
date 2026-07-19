@@ -7,6 +7,7 @@ RESULT = ROOT / "analysis" / "SDK_SHIFTER_TRANSFORM_SAMPLING_RESULT_2026-07-15.j
 SOURCES = (
     ROOT / "minihost" / "src" / "l2_main.cpp",
     ROOT / "minihost" / "src" / "worker_pf_suites.cpp",
+    ROOT / "minihost" / "src" / "worker_render_report.cpp",
 )
 
 
