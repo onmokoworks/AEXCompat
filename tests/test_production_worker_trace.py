@@ -46,9 +46,9 @@ class ProductionWorkerTraceTests(unittest.TestCase):
         registry = (MINIHOST / "src" / "worker_suite_registry.cpp").read_text(
             encoding="utf-8"
         )
-        self.assertIn("trace_writer->suite_acquire(name, version, true)", registry)
+        self.assertIn("trace_writer->suite_acquire(safe_name, version, true)", registry)
         self.assertIn(
-            "trace_writer->suite_release(name, std::max<int32_t>(version, 0), released)",
+            "trace_writer->suite_release(safe_name, std::max<int32_t>(version, 0), released)",
             registry,
         )
 

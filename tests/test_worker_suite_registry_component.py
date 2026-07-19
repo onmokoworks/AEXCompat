@@ -10,10 +10,15 @@ SOURCE = (ROOT / "minihost" / "src" / "worker_suite_registry.cpp").read_text(
     encoding="utf-8"
 )
 CMAKE = (ROOT / "minihost" / "CMakeLists.txt").read_text(encoding="utf-8")
+NATIVE = (ROOT / "tests" / "native" / "worker_suite_registry_selftest.cpp").read_text(
+    encoding="utf-8"
+)
 
 
 def test_registry_is_a_genuine_compiled_owner_and_abi_wrappers_remain_in_main():
-    assert CMAKE.count("src/worker_suite_registry.cpp") == 1
+    core_sources = CMAKE[CMAKE.index("set(AEXCOMPAT_WORKER_RUNTIME_CORE_SOURCES") :
+                         CMAKE.index("add_library(aex_worker_runtime_core")]
+    assert core_sources.count("src/worker_suite_registry.cpp") == 1
     assert '#include "worker_suite_registry.hpp"' in MAIN
     assert "SuiteResolveResult resolve_suite(" in MAIN
     acquire = MAIN[MAIN.index("int32_t __cdecl acquire_suite(") :]
@@ -33,12 +38,12 @@ def test_registry_owns_success_reject_unknown_and_release_protocols():
     assert "*suite = nullptr" in acquire
     assert "if (!name || !resolver) return 4" in acquire
     assert "case SuiteResolveResult::acquired" in acquire
-    assert "lease_tracker_.acquire(name, version)" in acquire
-    assert "suite_acquire(name, version, true)" in acquire
+    assert "lease_tracker_.acquire(safe_name, version)" in acquire
+    assert "suite_acquire(safe_name, version, true)" in acquire
     assert "case SuiteResolveResult::rejected_bad_param" in acquire
     assert "case SuiteResolveResult::not_found" in acquire
-    assert "return reject_unknown(name, version, trace_writer)" in acquire
-    assert "lease_tracker_.release(name, version)" in SOURCE
+    assert "return reject_unknown(safe_name, version, trace_writer)" in acquire
+    assert "lease_tracker_.release(safe_name, version)" in SOURCE
     assert "return released ? 0 : 1" in SOURCE
 
 
@@ -66,3 +71,33 @@ def test_missing_suite_diagnostics_remain_bounded_sanitized_and_fail_closed():
     assert "suite_acquire(safe_name, std::max<int32_t>(version, 0), false)" in SOURCE
     assert '"stage:suite_acquire_failed name="' in SOURCE
     assert "return 1" in SOURCE
+
+
+def test_raw_plugin_name_is_copied_once_before_resolver_lease_or_trace_use():
+    boundary = SOURCE[SOURCE.index("bool copy_bounded_suite_name") :
+                      SOURCE.index("}  // namespace")]
+    assert "index <= kMaxSuiteNameBytes" in boundary
+    assert "__try" in boundary
+    assert "__except (EXCEPTION_EXECUTE_HANDLER)" in boundary
+    acquire = SOURCE[SOURCE.index("int32_t SuiteRegistry::acquire") :
+                     SOURCE.index("int32_t SuiteRegistry::release")]
+    copied = acquire.index("copy_bounded_suite_name(name, owned_name)")
+    resolved = acquire.index("resolver(resolver_context, safe_name")
+    tracked = acquire.index("lease_tracker_.acquire(safe_name")
+    traced = acquire.index("suite_acquire(safe_name")
+    assert copied < resolved < tracked < traced
+    assert "resolver(resolver_context, name" not in acquire
+    assert "lease_tracker_.acquire(name" not in acquire
+    release = SOURCE[SOURCE.index("int32_t SuiteRegistry::release") :
+                     SOURCE.index("std::string SuiteRegistry::safe_missing_name")]
+    assert "copy_bounded_suite_name(name, owned_name)" in release
+    assert "lease_tracker_.release(safe_name" in release
+
+
+def test_native_bounds_fixture_covers_guard_page_overlong_and_invalid_pointer():
+    assert "worker_suite_registry_selftest" in CMAKE
+    assert "PAGE_NOACCESS" in NATIVE
+    assert "page_size - 96" in NATIVE
+    assert "std::array<char, 98> overlong" in NATIVE
+    assert "static_cast<uintptr_t>(1)" in NATIVE
+    assert "g_resolver_calls == calls_before" in NATIVE

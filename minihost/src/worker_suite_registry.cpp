@@ -2,7 +2,10 @@
 
 #include "trace_writer.hpp"
 
+#include <windows.h>
+
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <iostream>
 #include <sstream>
@@ -13,6 +16,26 @@ namespace {
 constexpr std::size_t kMaxMissingSuites = 16;
 constexpr std::size_t kMaxSuiteNameBytes = 96;
 
+bool copy_bounded_suite_name(
+    const char* source,
+    std::array<char, kMaxSuiteNameBytes + 1>& destination) noexcept {
+  if (!source) return false;
+  __try {
+    for (std::size_t index = 0; index <= kMaxSuiteNameBytes; ++index) {
+      const char character = source[index];
+      if (character == '\0') {
+        destination[index] = '\0';
+        return true;
+      }
+      if (index == kMaxSuiteNameBytes) return false;
+      destination[index] = character;
+    }
+  } __except (EXCEPTION_EXECUTE_HANDLER) {
+    return false;
+  }
+  return false;
+}
+
 }  // namespace
 
 int32_t SuiteRegistry::acquire(const char* name, int32_t version,
@@ -22,18 +45,21 @@ int32_t SuiteRegistry::acquire(const char* name, int32_t version,
   if (!suite) return 4;
   *suite = nullptr;
   if (!name || !resolver) return 4;
+  std::array<char, kMaxSuiteNameBytes + 1> owned_name{};
+  if (!copy_bounded_suite_name(name, owned_name)) return 4;
+  const char* const safe_name = owned_name.data();
 
-  switch (resolver(resolver_context, name, version, suite)) {
+  switch (resolver(resolver_context, safe_name, version, suite)) {
     case SuiteResolveResult::acquired:
-      lease_tracker_.acquire(name, version);
-      if (trace_writer) trace_writer->suite_acquire(name, version, true);
+      lease_tracker_.acquire(safe_name, version);
+      if (trace_writer) trace_writer->suite_acquire(safe_name, version, true);
       return 0;
     case SuiteResolveResult::rejected_bad_param:
       *suite = nullptr;
       return 4;
     case SuiteResolveResult::not_found:
       *suite = nullptr;
-      return reject_unknown(name, version, trace_writer);
+      return reject_unknown(safe_name, version, trace_writer);
   }
   *suite = nullptr;
   return 4;
@@ -41,9 +67,12 @@ int32_t SuiteRegistry::acquire(const char* name, int32_t version,
 
 int32_t SuiteRegistry::release(const char* name, int32_t version,
                                TraceWriter* trace_writer) {
-  const bool released = lease_tracker_.release(name, version);
-  if (trace_writer && name)
-    trace_writer->suite_release(name, std::max<int32_t>(version, 0), released);
+  std::array<char, kMaxSuiteNameBytes + 1> owned_name{};
+  if (!copy_bounded_suite_name(name, owned_name)) return 1;
+  const char* const safe_name = owned_name.data();
+  const bool released = lease_tracker_.release(safe_name, version);
+  if (trace_writer)
+    trace_writer->suite_release(safe_name, std::max<int32_t>(version, 0), released);
   return released ? 0 : 1;
 }
 
@@ -51,7 +80,7 @@ std::string SuiteRegistry::safe_missing_name(const char* name) {
   std::string safe_name;
   if (name) {
     for (std::size_t index = 0;
-         name[index] && index < kMaxSuiteNameBytes; ++index) {
+         index < kMaxSuiteNameBytes && name[index]; ++index) {
       const unsigned char character = static_cast<unsigned char>(name[index]);
       safe_name.push_back(character >= 0x20 && character <= 0x7e
                               ? name[index]
