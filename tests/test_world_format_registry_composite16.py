@@ -17,6 +17,8 @@ def _worker() -> Path | None:
     configured = os.environ.get("AEXCOMPAT_RENDER_WORKER")
     candidates = [
         Path(configured) if configured else None,
+        ROOT / "target" / "minihost-build" / "Release" / "aex_render_worker.exe",
+        ROOT / "target" / "minihost-build" / "aex_render_worker.exe",
         ROOT / "target" / "minihost-build-v18" / "Release" / "aex_render_worker.exe",
         ROOT / "target" / "minihost-build-v18" / "aex_render_worker.exe",
     ]
