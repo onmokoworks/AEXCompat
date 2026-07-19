@@ -488,6 +488,19 @@ def test_owner_comment_cleared_by_later_approval() -> None:
     assert _call("owner_comments_unresolved", payload, ME, clr) == ""
 
 
+def test_both_review_thread_connections_are_paginated() -> None:
+    # A single GraphQL cursor cannot advance both nested connections. The
+    # scripts must enumerate threads, then issue a separately paginated query
+    # for every thread's comments (finding on d62ad17).
+    root = Path(__file__).resolve().parents[1] / ".claude" / "skills" / "codex-review-loop"
+    for name in ("codex-review-monitor.sh", "codex-merge-guard.sh"):
+        script = (root / name).read_text(encoding="utf-8")
+        assert "nodes{id isResolved}" in script
+        assert "node(id:$id)" in script
+        assert "comments(first:100,after:$endCursor)" in script
+        assert script.count("gh api graphql --paginate") >= 2
+
+
 def test_me_ack_ts_requires_the_marker() -> None:
     payload = [_toplevel(ME, "2026-07-18T11:00:00Z", "[ACK] 対応完了"),
                _toplevel(ME, "2026-07-18T12:00:00Z", "@codex review", id=78),

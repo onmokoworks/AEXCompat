@@ -29,10 +29,18 @@ fetch() {
 }
 
 fetch_review_threads() {
-  local out query
-  query='query($owner:String!,$repo:String!,$pr:Int!,$endCursor:String){repository(owner:$owner,name:$repo){pullRequest(number:$pr){reviewThreads(first:100,after:$endCursor){nodes{isResolved comments(first:100){nodes{databaseId author{login} body createdAt path line originalLine}pageInfo{hasNextPage}}}pageInfo{hasNextPage endCursor}}}}}'
+  local out query comment_query encoded thread id resolved comments result='[]'
+  query='query($owner:String!,$repo:String!,$pr:Int!,$endCursor:String){repository(owner:$owner,name:$repo){pullRequest(number:$pr){reviewThreads(first:100,after:$endCursor){nodes{id isResolved}pageInfo{hasNextPage endCursor}}}}}'
   out=$(gh api graphql --paginate -F owner="$OWNER" -F repo="$REPO" -F pr="$PR" -f query="$query") || return 1
-  jq -s '[.[].data.repository.pullRequest.reviewThreads.nodes[] | {isResolved,truncated:.comments.pageInfo.hasNextPage,comments:[.comments.nodes[]|{id:.databaseId,user:{login:.author.login},body,created_at:.createdAt,path,line,original_line:.originalLine}]}]' <<<"$out"
+  comment_query='query($id:ID!,$endCursor:String){node(id:$id){... on PullRequestReviewThread{comments(first:100,after:$endCursor){nodes{databaseId author{login} body createdAt path line originalLine}pageInfo{hasNextPage endCursor}}}}}'
+  for encoded in $(jq -r -s '[.[].data.repository.pullRequest.reviewThreads.nodes[]] | .[] | @base64' <<<"$out"); do
+    thread=$(printf '%s' "$encoded" | base64 --decode) || return 1
+    id=$(jq -r '.id' <<<"$thread"); resolved=$(jq -r '.isResolved' <<<"$thread")
+    comments=$(gh api graphql --paginate -F id="$id" -f query="$comment_query") || return 1
+    comments=$(jq -s '[.[].data.node.comments.nodes[] | {id:.databaseId,user:{login:.author.login},body,created_at:.createdAt,path,line,original_line:.originalLine}]' <<<"$comments") || return 1
+    result=$(jq -c --argjson resolved "$resolved" --argjson comments "$comments" '. + [{isResolved:$resolved,comments:$comments}]' <<<"$result") || return 1
+  done
+  printf '%s\n' "$result"
 }
 
 head=$(gh api "repos/$OWNER/$REPO/pulls/$PR" --jq '.head.sha') || {
