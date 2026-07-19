@@ -14612,8 +14612,7 @@ int worker_main_impl(int argc, wchar_t **argv) {
   restore_native_stdout();
   const auto mask_report = aexcompat::mask_runtime::snapshot();
   aexcompat::worker_render_report::ReportSnapshot report_snapshot(std::cout);
-  report_snapshot.stream() << "{\"schema_version\":1,\"stage\":\"smartfx_render\",\"status\":\""
-            << (smart.pre_error == 0 && smart.render_error == 0 &&
+  const bool smart_completed = smart.pre_error == 0 && smart.render_error == 0 &&
                 parameter_count_contract_valid && smart.rects_valid &&
                 arbitrary_defaults_disposed && g_invalid_arbitrary_operations == 0 &&
                 smart.gpu_setup_error == 0 && smart.gpu_setdown_error == 0 &&
@@ -14622,206 +14621,100 @@ int worker_main_impl(int argc, wchar_t **argv) {
                 audio_handle_lifetimes_balanced() && audio_telemetry().invalid_operations == 0 &&
                 param_checkouts_balanced() &&
                 ((!g_render_click_enabled && !g_render_draw_enabled) ||
-                 g_render_ui_context_closed)
-                ? "render_completed" : "render_failed")
-            << "\",\"global_setup_error\":" << global_error
-            << ",\"params_setup_error\":" << params_error
-            << ",\"advertised_out_flags\":" << advertised_out_flags
-            << ",\"advertised_out_flags2\":" << advertised_out_flags2
-            << ",\"image_render_supported\":" << (image_render_supported ? "true" : "false")
-            << ",\"smart_render_supported\":" << (smart_render_supported ? "true" : "false")
-            << ",\"nop_render_advertised\":" << (nop_render_advertised ? "true" : "false")
-            << ",\"input_write_advertised\":" << (input_write_advertised ? "true" : "false")
-            << ",\"input_buffer_writable\":" << (input_write_advertised ? "true" : "false")
-            << ",\"wide_time_checkout_allowed\":" << (smart.runtime->wide_time_checkout_allowed ? "true" : "false")
-            << ",\"rejected_temporal_param_checkouts\":" << smart.runtime->rejected_temporal_checkouts
-            << ",\"shutter_dependency_advertised\":" << (smart.runtime->shutter_dependency_advertised ? "true" : "false")
-            << ",\"smart_pre_render_dispatched\":" << (nop_render_advertised ? "false" : "true")
-            << ",\"smart_render_selector_dispatched\":" << (nop_render_advertised ? "false" : "true")
-            << ",\"comp_bg_color_success_count\":"
-            << g_comp_bg_color_successes.load(std::memory_order_relaxed)
-            << ",\"comp_bg_color_rejection_count\":"
-            << g_comp_bg_color_rejections.load(std::memory_order_relaxed)
-            << ",\"guid_mix_in_call_count\":"
-            << g_guid_mix_in_calls.load(std::memory_order_relaxed)
-            << ",\"guid_mix_in_success_count\":"
-            << g_guid_mix_in_successes.load(std::memory_order_relaxed)
-            << ",\"guid_mix_in_rejection_count\":"
-            << g_guid_mix_in_rejections.load(std::memory_order_relaxed)
-            << ",\"guid_mix_in_last_size\":"
-            << g_guid_mix_in_last_size.load(std::memory_order_relaxed)
-            << ",\"guid_mix_in_max_size\":"
-            << g_guid_mix_in_max_size.load(std::memory_order_relaxed)
-            << ",\"guid_mix_in_size_limit\":" << kMaxGuidMixInBytes
-            << ",\"guid_mix_in_last_result\":"
-            << g_guid_mix_in_last_result.load(std::memory_order_relaxed)
-            << ",\"depth_supported\":" << (depth_supported ? "true" : "false")
-            << ",\"pre_render_error\":" << smart.pre_error
-            << ",\"smart_render_error\":" << smart.render_error
-            << ",\"smart_render_selector_error\":" << smart.selector_error
-            << ",\"gpu_device_setup_error\":" << smart.gpu_setup_error
-            << ",\"gpu_device_setdown_error\":" << smart.gpu_setdown_error
-            << ",\"gpu_device_setdown_exception_code\":" << smart.gpu_setdown_exception_code
-            << ",\"gpu_render_possible\":" << (smart.gpu_render_possible ? "true" : "false")
-            << ",\"gpu_render_dispatched\":" << (smart.gpu_render_dispatched ? "true" : "false")
-            << ",\"checkout_time\":" << smart.checkout_time
-            << ",\"checkout_time_step\":" << smart.checkout_time_step
-            << ",\"checkout_time_scale\":" << smart.checkout_time_scale
-            << ",\"roi_contract_valid\":" << (smart.roi_contract_valid ? "true" : "false")
-            << ",\"input_checkout_request\":[" << smart.runtime->input_checkout_request[0] << "," << smart.runtime->input_checkout_request[1]
-            << "," << smart.runtime->input_checkout_request[2] << "," << smart.runtime->input_checkout_request[3] << "]"
-            << ",\"map_checkout_request\":[" << smart.runtime->map_checkout_request[0] << "," << smart.runtime->map_checkout_request[1]
-            << "," << smart.runtime->map_checkout_request[2] << "," << smart.runtime->map_checkout_request[3] << "]"
-            << ",\"global_setdown_error\":" << setdown_error
-            << ",\"case_id\":\"" << case_id << "\",\"pixel_format\":\"" << smart.runtime->pixel_format << "\",\"width\":"
-            << smart.output_width << ",\"height\":" << smart.output_height << ",\"rowbytes\":"
-            << smart.output_rowbytes
-            << ",\"bytes_written_per_row\":" << smart.output_rowbytes
-            << ",\"undefined_tail_bytes_per_row\":0"
-            << ",\"input_sha256\":\"" << smart.input_hash << "\",\"output_sha256\":\""
-            << smart.output_hash << "\",\"result_rects_valid\":" << (smart.rects_valid ? "true" : "false")
-            << world_debug_report_json();
+                 g_render_ui_context_closed);
+  aexcompat::worker_render_report::begin_smart(report_snapshot, {
+      smart_completed,
+      {global_error, params_error, advertised_out_flags, advertised_out_flags2},
+      {image_render_supported, smart_render_supported, nop_render_advertised, input_write_advertised},
+      {smart.runtime->wide_time_checkout_allowed, smart.runtime->shutter_dependency_advertised,
+       !nop_render_advertised, !nop_render_advertised, false},
+      smart.runtime->rejected_temporal_checkouts,
+      {g_comp_bg_color_successes.load(std::memory_order_relaxed),
+       g_comp_bg_color_rejections.load(std::memory_order_relaxed),
+       g_guid_mix_in_calls.load(std::memory_order_relaxed),
+       g_guid_mix_in_successes.load(std::memory_order_relaxed),
+       g_guid_mix_in_rejections.load(std::memory_order_relaxed),
+       g_guid_mix_in_last_size.load(std::memory_order_relaxed),
+       g_guid_mix_in_max_size.load(std::memory_order_relaxed), kMaxGuidMixInBytes,
+       g_guid_mix_in_last_result.load(std::memory_order_relaxed)},
+      depth_supported,
+      {smart.pre_error, smart.render_error, smart.selector_error, smart.gpu_setup_error,
+       smart.gpu_setdown_error, smart.gpu_setdown_exception_code},
+      {smart.gpu_render_possible, smart.gpu_render_dispatched},
+      {smart.checkout_time, smart.checkout_time_step, smart.checkout_time_scale},
+      smart.roi_contract_valid, smart.runtime->input_checkout_request,
+      smart.runtime->map_checkout_request, setdown_error, case_id, smart.runtime->pixel_format,
+      {smart.output_width, smart.output_height, smart.output_rowbytes}, smart.input_hash,
+      smart.output_hash, smart.rects_valid, world_debug_report_json()});
   aexcompat::worker_render_report::append_custom_ui(report_snapshot, {
       g_render_click_enabled, g_render_click_error, g_render_click_out_flags,
       g_render_click_changed_value, g_render_draw_enabled, g_render_draw_error,
       g_render_draw_out_flags, g_render_ui_lifecycle_errors, g_render_ui_context_closed,
       g_app_color_picker_calls, g_app_invalidate_rect_calls, g_app_picker_color});
-  report_snapshot.stream()
-            << ",\"result_rect\":[" << smart.result_rect[0] << "," << smart.result_rect[1]
-            << "," << smart.result_rect[2] << "," << smart.result_rect[3] << "]"
-            << ",\"max_result_rect\":[" << smart.max_result_rect[0] << "," << smart.max_result_rect[1]
-            << "," << smart.max_result_rect[2] << "," << smart.max_result_rect[3] << "]"
-            << ",\"guard_bytes_intact\":" << (smart.guards_intact ? "true" : "false")
-            << ",\"output_pixels_valid\":" << (smart.output_pixels_valid ? "true" : "false")
-            << ",\"param_checkouts_balanced\":" << (param_checkouts_balanced() ? "true" : "false")
-            << ",\"param_checkout_calls\":" << g_param_checkout_calls
-            << ",\"param_checkin_calls\":" << g_param_checkin_calls
-            << ",\"automatic_param_checkins\":" << g_automatic_param_checkins
-            << ",\"invalid_param_checkins\":" << g_invalid_param_checkins
-            << ",\"request_mode\":" << (request_mode ? "true" : "false")
-            << ",\"downsample_x\":[" << g_downsample_x.numerator << "," << g_downsample_x.denominator << "]"
-            << ",\"downsample_y\":[" << g_downsample_y.numerator << "," << g_downsample_y.denominator << "]"
-            << ",\"pixel_aspect_ratio\":[" << g_pixel_aspect_ratio.numerator << "," << g_pixel_aspect_ratio.denominator << "]"
-            << ",\"full_resolution_dimensions\":[" << (g_full_resolution_width > 0 ? g_full_resolution_width : external_width)
-            << "," << (g_full_resolution_height > 0 ? g_full_resolution_height : external_height) << "]"
-            << ",\"quality\":" << read<int32_t>(input, kInQuality)
-            << ",\"in_data_num_params\":" << read<int32_t>(input, kInNumParams)
-            << ",\"local_time_step\":" << read<int32_t>(input, kInLocalTimeStep)
-            << ",\"field\":" << read<int32_t>(input, 244)
-            << ",\"shutter_angle_fixed\":" << read<int32_t>(input, 248)
-            << ",\"shutter_phase_fixed\":" << read<int32_t>(input, 400)
-            << ",\"in_data_dimensions\":[" << read<int32_t>(input, 252) << "," << read<int32_t>(input, 256) << "]"
-            << ",\"pre_effect_source_origin\":[" << read<int32_t>(input, 392) << "," << read<int32_t>(input, 396) << "]"
-            << ",\"output_origin\":[" << read<int32_t>(input, 276) << "," << read<int32_t>(input, 280) << "]"
-            << ",\"mask_scene_id\":\"" << g_mask_scene_id << "\""
-            << ",\"mask_count\":" << mask_report.active_masks
-            << ",\"mask_open_count\":" << mask_open_count()
-            << ",\"mask_tangent_vertex_count\":" << mask_tangent_vertex_count()
-            << ",\"mask_lifetimes_balanced\":" << (mask_lifetimes_balanced() ? "true" : "false")
-            << ",\"mask_handles_acquired\":" << mask_report.masks_acquired
-            << ",\"mask_handles_disposed\":" << mask_report.masks_disposed
-            << ",\"stream_handles_acquired\":" << mask_report.streams_acquired
-            << ",\"stream_handles_disposed\":" << mask_report.streams_disposed
-            << ",\"stream_values_acquired\":" << mask_report.values_acquired
-            << ",\"stream_values_disposed\":" << mask_report.values_disposed
-            << ",\"lifetime_fault_observed\":" << (lifetime_fault_observed ? "true" : "false")
-            << ",\"suite_leases_balanced\":" << (suite_leases_balanced() ? "true" : "false")
-            << ",\"suite_lease_warning\":" << (!suite_leases_balanced() ? "true" : "false")
-            << ",\"suite_acquires\":" << suite_acquire_count()
-            << ",\"suite_releases\":" << suite_release_count()
-            << missing_suites_report_json()
-            << ",\"live_suite_lease_count\":" << live_suite_lease_count()
-            << ",\"live_suite_reference_count\":" << live_suite_reference_count()
-            << ",\"live_suite_leases\":\"" << live_suite_lease_summary() << "\""
-            << ",\"suite_fault_observed\":" << (suite_fault_observed ? "true" : "false")
-            << ",\"handle_lifetimes_balanced\":" << (handle_lifetimes_balanced() ? "true" : "false")
-            << ",\"handles_created\":" << statistics().created
-            << ",\"handles_disposed\":" << statistics().disposed
-            << ",\"arbitrary_copy_calls\":" << g_arbitrary_copy_calls
-            << ",\"arbitrary_dispose_calls\":" << g_arbitrary_dispose_calls
-            << ",\"arbitrary_print_calls\":" << g_arbitrary_print_calls
-            << ",\"arbitrary_print_failures\":" << g_arbitrary_print_failures
-            << ",\"arbitrary_roundtrip_calls\":" << g_arbitrary_roundtrip_calls
-            << ",\"arbitrary_roundtrip_failures\":" << g_arbitrary_roundtrip_failures
-            << ",\"arbitrary_scan_calls\":" << g_arbitrary_scan_calls
-            << ",\"arbitrary_scan_failures\":" << g_arbitrary_scan_failures
-            << ",\"arbitrary_compare_disagreements\":" << g_arbitrary_compare_disagreements
-            << ",\"arbitrary_new_calls\":" << g_arbitrary_new_calls
-            << ",\"arbitrary_interpolation_calls\":" << g_arbitrary_interpolation_calls
-            << ",\"arbitrary_interpolation_failures\":" << g_arbitrary_interpolation_failures
-            << ",\"arbitrary_interpolation_amount\":" << g_last_arbitrary_interpolation_amount
-            << ",\"invalid_arbitrary_operations\":" << g_invalid_arbitrary_operations
-            << ",\"automatic_pre_render_handle_disposals\":"
-            << statistics().automatic_pre_render_disposals
-            << ",\"handle_locks\":" << statistics().locks
-            << ",\"handle_unlocks\":" << statistics().unlocks
-            << ",\"live_handle_count\":" << statistics().live_count
-            << ",\"live_handle_bytes\":" << statistics().live_bytes
-            << ",\"invalid_handle_operations\":" << statistics().invalid_operations
-            << ",\"handle_fault_observed\":" << (handle_fault_observed ? "true" : "false")
-            << ",\"world_fault_observed\":" << (world_fault_observed ? "true" : "false")
-            << ",\"world_lifetimes_balanced\":" << (world_lifetimes_balanced() ? "true" : "false")
-            << ",\"worlds_created\":" << aexcompat::world_registry::statistics().created
-            << ",\"worlds_disposed\":" << aexcompat::world_registry::statistics().disposed
-            << ",\"live_world_count\":" << aexcompat::world_registry::statistics().live_count
-            << ",\"live_world_bytes\":" << aexcompat::world_registry::statistics().live_bytes
-            << ",\"invalid_world_operations\":"
-            << aexcompat::world_registry::statistics().invalid_operations
-            << ",\"gpu_memory_lifetimes_balanced\":" << (gpu_memory_lifetimes_balanced() ? "true" : "false")
-            << ",\"gpu_allocations_created\":" << g_gpu_allocations_created
-            << ",\"gpu_allocations_freed\":" << g_gpu_allocations_freed
-            << ",\"live_gpu_allocation_count\":" << gpu_transport::live_allocation_count()
-            << ",\"live_gpu_memory_bytes\":" << gpu_transport::live_memory_bytes()
-            << ",\"gpu_exclusive_access_depth\":" << gpu_transport::exclusive_access_depth()
-            << ",\"invalid_gpu_memory_operations\":" << g_invalid_gpu_memory_operations;
+  aexcompat::worker_render_report::append_smart_context(report_snapshot, {
+      smart.result_rect, smart.max_result_rect,
+      {smart.guards_intact, smart.output_pixels_valid, param_checkouts_balanced()},
+      {g_param_checkout_calls, g_param_checkin_calls, g_automatic_param_checkins,
+       g_invalid_param_checkins}, request_mode,
+      {static_cast<int32_t>(g_downsample_x.numerator), static_cast<int32_t>(g_downsample_x.denominator)},
+      {static_cast<int32_t>(g_downsample_y.numerator), static_cast<int32_t>(g_downsample_y.denominator)},
+      {static_cast<int32_t>(g_pixel_aspect_ratio.numerator), static_cast<int32_t>(g_pixel_aspect_ratio.denominator)},
+      {g_full_resolution_width > 0 ? g_full_resolution_width : external_width,
+       g_full_resolution_height > 0 ? g_full_resolution_height : external_height},
+      {read<int32_t>(input, kInQuality), read<int32_t>(input, kInNumParams),
+       read<int32_t>(input, kInLocalTimeStep), read<int32_t>(input, 244),
+       read<int32_t>(input, 248), read<int32_t>(input, 400)},
+      {read<int32_t>(input, 252), read<int32_t>(input, 256)},
+      {read<int32_t>(input, 392), read<int32_t>(input, 396)},
+      {read<int32_t>(input, 276), read<int32_t>(input, 280)}});
+  const auto handle_stats = statistics();
+  const auto world_stats = aexcompat::world_registry::statistics();
+  aexcompat::worker_render_report::append_smart_lifetimes(report_snapshot, {
+      g_mask_scene_id, {static_cast<int64_t>(mask_report.active_masks), static_cast<int64_t>(mask_open_count()), static_cast<int64_t>(mask_tangent_vertex_count())},
+      mask_lifetimes_balanced(), {mask_report.masks_acquired, mask_report.masks_disposed,
+      mask_report.streams_acquired, mask_report.streams_disposed, mask_report.values_acquired,
+      mask_report.values_disposed}, lifetime_fault_observed, suite_leases_balanced(),
+      {static_cast<int64_t>(suite_acquire_count()), static_cast<int64_t>(suite_release_count()), static_cast<int64_t>(live_suite_lease_count()),
+       static_cast<int64_t>(live_suite_reference_count())}, missing_suites_report_json(), live_suite_lease_summary(),
+      suite_fault_observed, handle_lifetimes_balanced(),
+      {handle_stats.created, handle_stats.disposed},
+      {g_arbitrary_copy_calls, g_arbitrary_dispose_calls, g_arbitrary_print_calls,
+       g_arbitrary_print_failures, g_arbitrary_roundtrip_calls, g_arbitrary_roundtrip_failures,
+       g_arbitrary_scan_calls, g_arbitrary_scan_failures, g_arbitrary_compare_disagreements,
+       g_arbitrary_new_calls, g_arbitrary_interpolation_calls,
+       g_arbitrary_interpolation_failures, g_invalid_arbitrary_operations},
+      g_last_arbitrary_interpolation_amount,
+      {static_cast<int64_t>(handle_stats.automatic_pre_render_disposals), static_cast<int64_t>(handle_stats.locks), static_cast<int64_t>(handle_stats.unlocks),
+       static_cast<int64_t>(handle_stats.live_count), static_cast<int64_t>(handle_stats.live_bytes), static_cast<int64_t>(handle_stats.invalid_operations), 0},
+      handle_fault_observed, world_fault_observed, world_lifetimes_balanced(),
+      {static_cast<int64_t>(world_stats.created), static_cast<int64_t>(world_stats.disposed), static_cast<int64_t>(world_stats.live_count), static_cast<int64_t>(world_stats.live_bytes),
+       static_cast<int64_t>(world_stats.invalid_operations)}, gpu_memory_lifetimes_balanced(),
+      {static_cast<int64_t>(g_gpu_allocations_created), static_cast<int64_t>(g_gpu_allocations_freed), static_cast<int64_t>(gpu_transport::live_allocation_count()),
+       static_cast<int64_t>(gpu_transport::live_memory_bytes()), static_cast<int64_t>(gpu_transport::exclusive_access_depth()),
+       static_cast<int64_t>(g_invalid_gpu_memory_operations)}});
   aexcompat::worker_render_report::append_seh_diagnostics(report_snapshot, capture_seh_diagnostics());
-  report_snapshot.stream()
-            << ",\"cuda_context_used\":" << (g_cuda_upload_bytes > 0 ? "true" : "false")
-            << ",\"cuda_upload_bytes\":" << g_cuda_upload_bytes
-            << ",\"cuda_download_bytes\":" << g_cuda_download_bytes
-            << ",\"cuda_sync_failures\":" << g_cuda_sync_failures
-            << ",\"cuda_device_count\":" << g_last_cuda_device_count
-            << ",\"cuda_device_index\":" << g_last_cuda_device_index
-            << ",\"opencl_context_used\":" << (g_opencl_upload_bytes > 0 ? "true" : "false")
-            << ",\"opencl_upload_bytes\":" << g_opencl_upload_bytes
-            << ",\"opencl_download_bytes\":" << g_opencl_download_bytes
-            << ",\"opencl_sync_failures\":" << g_opencl_sync_failures
-            << ",\"opencl_device_count\":" << opencl::last_device_count()
-            << ",\"opencl_device_index\":" << opencl::last_device_index()
-            << ",\"directx_context_used\":" << (directx_backend::diagnostics().context_used ? "true" : "false")
-            << ",\"directx_device_count\":" << directx_backend::diagnostics().device_count
-            << ",\"directx_device_index\":" << directx_backend::diagnostics().device_index
-            << ",\"directx_upload_bytes\":" << directx_backend::diagnostics().upload_bytes
-            << ",\"directx_download_bytes\":" << directx_backend::diagnostics().download_bytes
-            << ",\"directx_sync_failures\":" << directx_backend::diagnostics().sync_failures
-            << ",\"pixel_format_fault_observed\":" << (pixel_format_fault_observed ? "true" : "false")
-            << ",\"pixel_format_add_calls\":" << g_pixel_format_add_calls
-            << ",\"pixel_format_clear_calls\":" << g_pixel_format_clear_calls
-            << ",\"supported_pixel_format_count\":" << g_supported_pixel_formats.size()
-            << ",\"invalid_pixel_format_operations\":" << g_invalid_pixel_format_operations
-            << ",\"outline_fault_observed\":" << (outline_fault_observed ? "true" : "false")
-            << ",\"outline_mutations\":" << mask_report.outline_mutations
-            << ",\"invalid_outline_operations\":" << mask_report.invalid_outline_operations
-            << ",\"mask_attribute_fault_observed\":" << (mask_attribute_fault_observed ? "true" : "false")
-            << ",\"mask_mutations\":" << mask_report.mask_mutations
-            << ",\"invalid_mask_operations\":" << mask_report.invalid_mask_operations
-            << ",\"stream_metadata_fault_observed\":" << (stream_metadata_fault_observed ? "true" : "false")
-            << ",\"stream_metadata_queries\":" << g_stream_metadata_queries
-            << ",\"stream_duplicates\":" << g_stream_duplicates
-            << ",\"invalid_stream_operations\":" << g_invalid_stream_operations
-            << ",\"keyframe_fault_observed\":" << (keyframe_fault_observed ? "true" : "false")
-            << ",\"keyframe_mutations\":" << mask_report.keyframe_mutations
-            << ",\"invalid_keyframe_operations\":" << mask_report.invalid_keyframe_operations
-            << ",\"dynamic_stream_fault_observed\":" << (dynamic_stream_fault_observed ? "true" : "false")
-            << ",\"dynamic_stream_queries\":" << g_dynamic_stream_queries
-            << ",\"dynamic_stream_mutations\":" << g_dynamic_stream_mutations
-            << ",\"invalid_dynamic_stream_operations\":" << g_invalid_dynamic_stream_operations
-            << ",\"aegp_memory_fault_observed\":" << (aegp_memory_fault_observed ? "true" : "false")
-            << ",\"aegp_memory_created\":" << aegp_memory_statistics().created
-            << ",\"aegp_memory_freed\":" << aegp_memory_statistics().freed
-            << ",\"live_aegp_memory_handles\":" << aegp_memory_statistics().live_count
-            << ",\"live_aegp_memory_bytes\":" << aegp_memory_statistics().live_bytes
-            << ",\"invalid_aegp_memory_operations\":" << aegp_memory_statistics().invalid_operations;
+  const auto directx_stats = directx_backend::diagnostics();
+  const auto aegp_memory_stats = aegp_memory_statistics();
+  aexcompat::worker_render_report::append_smart_faults(report_snapshot, {
+      {static_cast<int64_t>(g_cuda_upload_bytes), static_cast<int64_t>(g_cuda_download_bytes), static_cast<int64_t>(g_cuda_sync_failures),
+       g_last_cuda_device_count, g_last_cuda_device_index},
+      {static_cast<int64_t>(g_opencl_upload_bytes), static_cast<int64_t>(g_opencl_download_bytes), static_cast<int64_t>(g_opencl_sync_failures),
+       opencl::last_device_count(), opencl::last_device_index()},
+      {static_cast<int64_t>(directx_stats.device_count), static_cast<int64_t>(directx_stats.device_index), static_cast<int64_t>(directx_stats.upload_bytes),
+       static_cast<int64_t>(directx_stats.download_bytes), static_cast<int64_t>(directx_stats.sync_failures)}, directx_stats.context_used,
+      pixel_format_fault_observed,
+      {static_cast<int64_t>(g_pixel_format_add_calls), static_cast<int64_t>(g_pixel_format_clear_calls), static_cast<int64_t>(g_supported_pixel_formats.size()),
+       g_invalid_pixel_format_operations},
+      {outline_fault_observed, mask_attribute_fault_observed, stream_metadata_fault_observed,
+       keyframe_fault_observed, dynamic_stream_fault_observed, aegp_memory_fault_observed, false},
+      {mask_report.outline_mutations, mask_report.invalid_outline_operations,
+       mask_report.mask_mutations, mask_report.invalid_mask_operations,
+       g_stream_metadata_queries, g_stream_duplicates, g_invalid_stream_operations,
+       mask_report.keyframe_mutations, mask_report.invalid_keyframe_operations,
+       g_dynamic_stream_queries, g_dynamic_stream_mutations, g_invalid_dynamic_stream_operations,
+       0, 0, 0},
+      {static_cast<int64_t>(aegp_memory_stats.created), static_cast<int64_t>(aegp_memory_stats.freed), static_cast<int64_t>(aegp_memory_stats.live_count),
+       static_cast<int64_t>(aegp_memory_stats.live_bytes), static_cast<int64_t>(aegp_memory_stats.invalid_operations)}});
   aexcompat::worker_render_report::finish_requested_parameters(report_snapshot, {
       requested_parameters_json(requested_parameters),
       static_cast<int32_t>(requested_value(requested_parameters, L"amount")),

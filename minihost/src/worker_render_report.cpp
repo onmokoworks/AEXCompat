@@ -176,6 +176,191 @@ void append_classic_context(ReportSnapshot& report, const ClassicReport::Context
       << ",\"output_origin\":[" << value.output_origin[0] << ',' << value.output_origin[1] << ']';
 }
 
+void begin_smart(ReportSnapshot& report, const SmartReport::Head& v) {
+  report.stream()
+      << "{\"schema_version\":1,\"stage\":\"smartfx_render\",\"status\":\""
+      << (v.completed ? "render_completed" : "render_failed")
+      << "\",\"global_setup_error\":" << v.setup_flags[0]
+      << ",\"params_setup_error\":" << v.setup_flags[1]
+      << ",\"advertised_out_flags\":" << v.setup_flags[2]
+      << ",\"advertised_out_flags2\":" << v.setup_flags[3]
+      << ",\"image_render_supported\":" << (v.advertised[0] ? "true" : "false")
+      << ",\"smart_render_supported\":" << (v.advertised[1] ? "true" : "false")
+      << ",\"nop_render_advertised\":" << (v.advertised[2] ? "true" : "false")
+      << ",\"input_write_advertised\":" << (v.advertised[3] ? "true" : "false")
+      << ",\"input_buffer_writable\":" << (v.advertised[3] ? "true" : "false")
+      << ",\"wide_time_checkout_allowed\":" << (v.runtime_flags[0] ? "true" : "false")
+      << ",\"rejected_temporal_param_checkouts\":" << v.rejected_temporal_checkouts
+      << ",\"shutter_dependency_advertised\":" << (v.runtime_flags[1] ? "true" : "false")
+      << ",\"smart_pre_render_dispatched\":" << (v.runtime_flags[2] ? "true" : "false")
+      << ",\"smart_render_selector_dispatched\":" << (v.runtime_flags[3] ? "true" : "false")
+      << ",\"comp_bg_color_success_count\":" << v.host_context[0]
+      << ",\"comp_bg_color_rejection_count\":" << v.host_context[1]
+      << ",\"guid_mix_in_call_count\":" << v.host_context[2]
+      << ",\"guid_mix_in_success_count\":" << v.host_context[3]
+      << ",\"guid_mix_in_rejection_count\":" << v.host_context[4]
+      << ",\"guid_mix_in_last_size\":" << v.host_context[5]
+      << ",\"guid_mix_in_max_size\":" << v.host_context[6]
+      << ",\"guid_mix_in_size_limit\":" << v.host_context[7]
+      << ",\"guid_mix_in_last_result\":" << v.host_context[8]
+      << ",\"depth_supported\":" << (v.depth_supported ? "true" : "false")
+      << ",\"pre_render_error\":" << v.selector_errors[0]
+      << ",\"smart_render_error\":" << v.selector_errors[1]
+      << ",\"smart_render_selector_error\":" << v.selector_errors[2]
+      << ",\"gpu_device_setup_error\":" << v.selector_errors[3]
+      << ",\"gpu_device_setdown_error\":" << v.selector_errors[4]
+      << ",\"gpu_device_setdown_exception_code\":" << v.selector_errors[5]
+      << ",\"gpu_render_possible\":" << (v.gpu_flags[0] ? "true" : "false")
+      << ",\"gpu_render_dispatched\":" << (v.gpu_flags[1] ? "true" : "false")
+      << ",\"checkout_time\":" << v.checkout_time[0]
+      << ",\"checkout_time_step\":" << v.checkout_time[1]
+      << ",\"checkout_time_scale\":" << v.checkout_time[2]
+      << ",\"roi_contract_valid\":" << (v.roi_contract_valid ? "true" : "false")
+      << ",\"input_checkout_request\":[" << v.input_checkout[0] << ',' << v.input_checkout[1]
+      << ',' << v.input_checkout[2] << ',' << v.input_checkout[3] << ']'
+      << ",\"map_checkout_request\":[" << v.map_checkout[0] << ',' << v.map_checkout[1]
+      << ',' << v.map_checkout[2] << ',' << v.map_checkout[3] << ']'
+      << ",\"global_setdown_error\":" << v.global_setdown_error
+      << ",\"case_id\":\"" << v.case_id << "\",\"pixel_format\":\"" << v.pixel_format
+      << "\",\"width\":" << v.dimensions[0] << ",\"height\":" << v.dimensions[1]
+      << ",\"rowbytes\":" << v.dimensions[2]
+      << ",\"bytes_written_per_row\":" << v.dimensions[2]
+      << ",\"undefined_tail_bytes_per_row\":0"
+      << ",\"input_sha256\":\"" << v.input_sha256 << "\",\"output_sha256\":\""
+      << v.output_sha256 << "\",\"result_rects_valid\":"
+      << (v.result_rects_valid ? "true" : "false") << v.world_debug_json;
+}
+
+void append_smart_context(ReportSnapshot& report, const SmartReport::Context& v) {
+  report.stream()
+      << ",\"result_rect\":[" << v.result_rect[0] << ',' << v.result_rect[1] << ','
+      << v.result_rect[2] << ',' << v.result_rect[3] << ']'
+      << ",\"max_result_rect\":[" << v.max_result_rect[0] << ',' << v.max_result_rect[1]
+      << ',' << v.max_result_rect[2] << ',' << v.max_result_rect[3] << ']'
+      << ",\"guard_bytes_intact\":" << (v.validity[0] ? "true" : "false")
+      << ",\"output_pixels_valid\":" << (v.validity[1] ? "true" : "false")
+      << ",\"param_checkouts_balanced\":" << (v.validity[2] ? "true" : "false")
+      << ",\"param_checkout_calls\":" << v.parameter_checkouts[0]
+      << ",\"param_checkin_calls\":" << v.parameter_checkouts[1]
+      << ",\"automatic_param_checkins\":" << v.parameter_checkouts[2]
+      << ",\"invalid_param_checkins\":" << v.parameter_checkouts[3]
+      << ",\"request_mode\":" << (v.request_mode ? "true" : "false")
+      << ",\"downsample_x\":[" << v.downsample_x[0] << ',' << v.downsample_x[1] << ']'
+      << ",\"downsample_y\":[" << v.downsample_y[0] << ',' << v.downsample_y[1] << ']'
+      << ",\"pixel_aspect_ratio\":[" << v.pixel_aspect_ratio[0] << ',' << v.pixel_aspect_ratio[1] << ']'
+      << ",\"full_resolution_dimensions\":[" << v.full_resolution_dimensions[0] << ','
+      << v.full_resolution_dimensions[1] << ']'
+      << ",\"quality\":" << v.scalar_metadata[0]
+      << ",\"in_data_num_params\":" << v.scalar_metadata[1]
+      << ",\"local_time_step\":" << v.scalar_metadata[2]
+      << ",\"field\":" << v.scalar_metadata[3]
+      << ",\"shutter_angle_fixed\":" << v.scalar_metadata[4]
+      << ",\"shutter_phase_fixed\":" << v.scalar_metadata[5]
+      << ",\"in_data_dimensions\":[" << v.input_dimensions[0] << ',' << v.input_dimensions[1] << ']'
+      << ",\"pre_effect_source_origin\":[" << v.pre_effect_source_origin[0] << ','
+      << v.pre_effect_source_origin[1] << ']'
+      << ",\"output_origin\":[" << v.output_origin[0] << ',' << v.output_origin[1] << ']';
+}
+
+void append_smart_lifetimes(ReportSnapshot& report, const SmartReport::Lifetimes& v) {
+  report.stream()
+      << ",\"mask_scene_id\":\"" << v.mask_scene_id << '"'
+      << ",\"mask_count\":" << v.mask_geometry[0]
+      << ",\"mask_open_count\":" << v.mask_geometry[1]
+      << ",\"mask_tangent_vertex_count\":" << v.mask_geometry[2]
+      << ",\"mask_lifetimes_balanced\":" << (v.mask_balanced ? "true" : "false")
+      << ",\"mask_handles_acquired\":" << v.mask_handles[0]
+      << ",\"mask_handles_disposed\":" << v.mask_handles[1]
+      << ",\"stream_handles_acquired\":" << v.mask_handles[2]
+      << ",\"stream_handles_disposed\":" << v.mask_handles[3]
+      << ",\"stream_values_acquired\":" << v.mask_handles[4]
+      << ",\"stream_values_disposed\":" << v.mask_handles[5]
+      << ",\"lifetime_fault_observed\":" << (v.lifetime_fault ? "true" : "false")
+      << ",\"suite_leases_balanced\":" << (v.suites_balanced ? "true" : "false")
+      << ",\"suite_lease_warning\":" << (!v.suites_balanced ? "true" : "false")
+      << ",\"suite_acquires\":" << v.suites[0] << ",\"suite_releases\":" << v.suites[1]
+      << v.missing_suites_json
+      << ",\"live_suite_lease_count\":" << v.suites[2]
+      << ",\"live_suite_reference_count\":" << v.suites[3]
+      << ",\"live_suite_leases\":\"" << v.live_suite_leases << '"'
+      << ",\"suite_fault_observed\":" << (v.suite_fault ? "true" : "false")
+      << ",\"handle_lifetimes_balanced\":" << (v.handles_balanced ? "true" : "false")
+      << ",\"handles_created\":" << v.handles[0] << ",\"handles_disposed\":" << v.handles[1]
+      << ",\"arbitrary_copy_calls\":" << v.arbitrary[0]
+      << ",\"arbitrary_dispose_calls\":" << v.arbitrary[1]
+      << ",\"arbitrary_print_calls\":" << v.arbitrary[2]
+      << ",\"arbitrary_print_failures\":" << v.arbitrary[3]
+      << ",\"arbitrary_roundtrip_calls\":" << v.arbitrary[4]
+      << ",\"arbitrary_roundtrip_failures\":" << v.arbitrary[5]
+      << ",\"arbitrary_scan_calls\":" << v.arbitrary[6]
+      << ",\"arbitrary_scan_failures\":" << v.arbitrary[7]
+      << ",\"arbitrary_compare_disagreements\":" << v.arbitrary[8]
+      << ",\"arbitrary_new_calls\":" << v.arbitrary[9]
+      << ",\"arbitrary_interpolation_calls\":" << v.arbitrary[10]
+      << ",\"arbitrary_interpolation_failures\":" << v.arbitrary[11]
+      << ",\"arbitrary_interpolation_amount\":" << v.arbitrary_interpolation_amount
+      << ",\"invalid_arbitrary_operations\":" << v.arbitrary[12]
+      << ",\"automatic_pre_render_handle_disposals\":" << v.handle_details[0]
+      << ",\"handle_locks\":" << v.handle_details[1]
+      << ",\"handle_unlocks\":" << v.handle_details[2]
+      << ",\"live_handle_count\":" << v.handle_details[3]
+      << ",\"live_handle_bytes\":" << v.handle_details[4]
+      << ",\"invalid_handle_operations\":" << v.handle_details[5]
+      << ",\"handle_fault_observed\":" << (v.handle_fault ? "true" : "false")
+      << ",\"world_fault_observed\":" << (v.world_fault ? "true" : "false")
+      << ",\"world_lifetimes_balanced\":" << (v.worlds_balanced ? "true" : "false")
+      << ",\"worlds_created\":" << v.worlds[0] << ",\"worlds_disposed\":" << v.worlds[1]
+      << ",\"live_world_count\":" << v.worlds[2] << ",\"live_world_bytes\":" << v.worlds[3]
+      << ",\"invalid_world_operations\":" << v.worlds[4]
+      << ",\"gpu_memory_lifetimes_balanced\":" << (v.gpu_balanced ? "true" : "false")
+      << ",\"gpu_allocations_created\":" << v.gpu_allocations[0]
+      << ",\"gpu_allocations_freed\":" << v.gpu_allocations[1]
+      << ",\"live_gpu_allocation_count\":" << v.gpu_allocations[2]
+      << ",\"live_gpu_memory_bytes\":" << v.gpu_allocations[3]
+      << ",\"gpu_exclusive_access_depth\":" << v.gpu_allocations[4]
+      << ",\"invalid_gpu_memory_operations\":" << v.gpu_allocations[5];
+}
+
+void append_smart_faults(ReportSnapshot& report, const SmartReport::Faults& v) {
+  report.stream()
+      << ",\"cuda_context_used\":" << (v.cuda[0] > 0 ? "true" : "false")
+      << ",\"cuda_upload_bytes\":" << v.cuda[0] << ",\"cuda_download_bytes\":" << v.cuda[1]
+      << ",\"cuda_sync_failures\":" << v.cuda[2] << ",\"cuda_device_count\":" << v.cuda[3]
+      << ",\"cuda_device_index\":" << v.cuda[4]
+      << ",\"opencl_context_used\":" << (v.opencl[0] > 0 ? "true" : "false")
+      << ",\"opencl_upload_bytes\":" << v.opencl[0] << ",\"opencl_download_bytes\":" << v.opencl[1]
+      << ",\"opencl_sync_failures\":" << v.opencl[2] << ",\"opencl_device_count\":" << v.opencl[3]
+      << ",\"opencl_device_index\":" << v.opencl[4]
+      << ",\"directx_context_used\":" << (v.directx_context_used ? "true" : "false")
+      << ",\"directx_device_count\":" << v.directx[0] << ",\"directx_device_index\":" << v.directx[1]
+      << ",\"directx_upload_bytes\":" << v.directx[2] << ",\"directx_download_bytes\":" << v.directx[3]
+      << ",\"directx_sync_failures\":" << v.directx[4]
+      << ",\"pixel_format_fault_observed\":" << (v.pixel_format_fault ? "true" : "false")
+      << ",\"pixel_format_add_calls\":" << v.pixel_format[0]
+      << ",\"pixel_format_clear_calls\":" << v.pixel_format[1]
+      << ",\"supported_pixel_format_count\":" << v.pixel_format[2]
+      << ",\"invalid_pixel_format_operations\":" << v.pixel_format[3]
+      << ",\"outline_fault_observed\":" << (v.faults[0] ? "true" : "false")
+      << ",\"outline_mutations\":" << v.operations[0] << ",\"invalid_outline_operations\":" << v.operations[1]
+      << ",\"mask_attribute_fault_observed\":" << (v.faults[1] ? "true" : "false")
+      << ",\"mask_mutations\":" << v.operations[2] << ",\"invalid_mask_operations\":" << v.operations[3]
+      << ",\"stream_metadata_fault_observed\":" << (v.faults[2] ? "true" : "false")
+      << ",\"stream_metadata_queries\":" << v.operations[4] << ",\"stream_duplicates\":" << v.operations[5]
+      << ",\"invalid_stream_operations\":" << v.operations[6]
+      << ",\"keyframe_fault_observed\":" << (v.faults[3] ? "true" : "false")
+      << ",\"keyframe_mutations\":" << v.operations[7] << ",\"invalid_keyframe_operations\":" << v.operations[8]
+      << ",\"dynamic_stream_fault_observed\":" << (v.faults[4] ? "true" : "false")
+      << ",\"dynamic_stream_queries\":" << v.operations[9]
+      << ",\"dynamic_stream_mutations\":" << v.operations[10]
+      << ",\"invalid_dynamic_stream_operations\":" << v.operations[11]
+      << ",\"aegp_memory_fault_observed\":" << (v.faults[5] ? "true" : "false")
+      << ",\"aegp_memory_created\":" << v.aegp_memory[0]
+      << ",\"aegp_memory_freed\":" << v.aegp_memory[1]
+      << ",\"live_aegp_memory_handles\":" << v.aegp_memory[2]
+      << ",\"live_aegp_memory_bytes\":" << v.aegp_memory[3]
+      << ",\"invalid_aegp_memory_operations\":" << v.aegp_memory[4];
+}
+
 void append_gpu_diagnostics(ReportSnapshot& report, const GpuDiagnosticsSnapshot& value) {
   report.stream()
       << ",\"gpu_memory_lifetimes_balanced\":" << (value.memory_lifetimes_balanced ? "true" : "false")
