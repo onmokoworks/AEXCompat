@@ -54,6 +54,8 @@ set(AEXCOMPAT_WORKER_RUNTIME_CORE_SOURCES
     src/worker_pf_world_suite.cpp
     src/worker_pf_pixel_format_registry.cpp
     src/worker_pf_param_suites.cpp
+    src/worker_aegp_pf_interface_suite.cpp
+    src/worker_aegp_command_suites.cpp
     src/worker_smart_runtime.cpp
     src/worker_smart_execution.cpp
     src/worker_smart_setup.cpp

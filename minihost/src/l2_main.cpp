@@ -78,6 +78,8 @@
 #include "worker_pf_world_suite.hpp"
 #include "worker_pf_pixel_format_registry.hpp"
 #include "worker_pf_param_suites.hpp"
+#include "worker_aegp_pf_interface_suite.hpp"
+#include "worker_aegp_command_suites.hpp"
 #include "worker_smart_runtime.hpp"
 #include "worker_smart_execution.hpp"
 #include "worker_smart_setup.hpp"
@@ -966,18 +968,7 @@ int32_t __cdecl get_effect_camera_matrix(void* effect, const AegpTime* comp_time
 
 
 
-struct PfInterfaceSuite {
-  decltype(&get_effect_layer) get_effect_layer;
-  decltype(&get_new_effect_for_effect) get_new_effect_for_effect;
-  decltype(&convert_effect_to_comp_time) convert_effect_to_comp_time;
-  decltype(&get_effect_camera) get_effect_camera;
-  decltype(&get_effect_camera_matrix) get_effect_camera_matrix;
-};
-static_assert(sizeof(PfInterfaceSuite) == 5 * sizeof(void*));
-static_assert(offsetof(PfInterfaceSuite, convert_effect_to_comp_time) == 2 * sizeof(void*));
-static_assert(offsetof(PfInterfaceSuite, get_effect_camera) == 3 * sizeof(void*));
-static_assert(offsetof(PfInterfaceSuite, get_effect_camera) == 24);
-static_assert(offsetof(PfInterfaceSuite, get_effect_camera_matrix) == 32);
+// The AEGP PF Interface Suite table lives in worker_aegp_pf_interface_suite.cpp.
 int32_t __cdecl unsupported_path_mask() { return 4; }
 struct LegacyRect { int32_t left, top, right, bottom; };
 
@@ -986,9 +977,6 @@ int32_t __cdecl pf_mask_world_with_path(void* effect_ref, void** path, double fe
                                         int32_t quality, void* world, LegacyRect* bounds);
 #include "worker_l2_suite_abi.hpp"
 
-PfInterfaceSuite g_pf_interface_suite{&get_effect_layer, &get_new_effect_for_effect,
-    &convert_effect_to_comp_time, &get_effect_camera,
-    &get_effect_camera_matrix};
 using AegpStreamValue = aexcompat::scene_runtime::AegpStreamValue;
 int32_t __cdecl aegp_get_new_effect_stream_by_index_v2(
     int32_t plugin_id, void* effect, int32_t index, void** stream);
@@ -2450,20 +2438,7 @@ int32_t __cdecl aegp_check_menu_command(int32_t command, uint8_t checked) {
   else ++g_aegp_command_checked_false_calls;
   return 0;
 }
-struct AegpCommandSuite {
-  decltype(&aegp_get_unique_command) get_unique_command;
-  decltype(&aegp_insert_menu_command) insert_menu_command;
-  decltype(&aegp_remove_menu_command) remove_menu_command;
-  decltype(&aegp_set_menu_command_name) set_menu_command_name;
-  decltype(&aegp_command_state) enable_command;
-  decltype(&aegp_command_state) disable_command;
-  decltype(&aegp_check_menu_command) check_menu_command;
-  decltype(&aegp_command_state) do_command;
-};
-AegpCommandSuite g_aegp_command_suite{
-    &aegp_get_unique_command, &aegp_insert_menu_command, &aegp_remove_menu_command,
-    &aegp_set_menu_command_name, &aegp_command_state, &aegp_command_state,
-    &aegp_check_menu_command, &aegp_command_state};
+// The AEGP Command Suite table lives in worker_aegp_command_suites.cpp.
 
 int32_t __cdecl aegp_register_command_hook(int32_t plugin_id, int32_t priority,
                                            int32_t command, void* hook, void* refcon) {
@@ -2480,24 +2455,7 @@ int32_t __cdecl aegp_register_death_hook(int32_t plugin_id, void* hook, void* re
 int32_t __cdecl aegp_register_idle_hook(int32_t plugin_id, void* hook, void* refcon) {
   return aexcompat::worker_runtime::aegp_init::register_idle_hook(plugin_id, hook, refcon);
 }
-struct AegpRegisterSuite {
-  decltype(&aegp_register_command_hook) register_command_hook;
-  decltype(&aegp_register_update_menu_hook) register_update_menu_hook;
-  decltype(&aegp_register_death_hook) register_death_hook;
-  void* register_version_hook{};
-  void* register_about_string_hook{};
-  void* register_about_hook{};
-  void* register_artisan{};
-  void* register_io{};
-  decltype(&aegp_register_idle_hook) register_idle_hook;
-  void* register_tracker{};
-  void* register_interactive_artisan{};
-  void* register_preset_localization{};
-};
-AegpRegisterSuite g_aegp_register_suite{
-    &aegp_register_command_hook, &aegp_register_update_menu_hook,
-    &aegp_register_death_hook, nullptr, nullptr, nullptr, nullptr, nullptr,
-    &aegp_register_idle_hook, nullptr, nullptr, nullptr};
+// The AEGP Register Suite table lives in worker_aegp_command_suites.cpp.
 
 AegpSceneObject& g_aegp_comp_item = scene_runtime_state().composition_item;
 AegpSceneObject& g_aegp_comp = scene_runtime_state().composition;
