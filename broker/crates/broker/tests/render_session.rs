@@ -207,6 +207,50 @@ mod windows_e2e {
     }
 
     #[test]
+    fn arbitrary_data_parameters_accept_arbitrary_animation() {
+        let _behavior = BehaviorGuard::set(None);
+        let (repository, plugin, sha) = temp_repository();
+        let parameters: [InteractiveParameter; 1] = [serde_json::from_value(serde_json::json!({
+            "slot": 1, "name": "state", "kind": "arbitrary_data",
+            "minimum": 0.0, "maximum": 0.0, "value": 0.0,
+            "choices": [], "color": [0, 0, 0, 0], "components": [0.0, 0.0, 0.0],
+            "component_count": 0, "layer_path": null,
+            "enabled": true, "visible": true, "supervised": false,
+            "debug_summary": "state",
+        }))
+        .expect("arbitrary parameter fixture")];
+        let animations: [ParameterAnimation; 1] = [serde_json::from_value(serde_json::json!({
+            "slot": 1,
+            "keys": [
+                {"time": {"value": 0, "scale": 30}, "interpolation": "hold",
+                 "value": {"type": "arbitrary", "value": [1, 2, 3]}},
+            ],
+        }))
+        .expect("arbitrary animation fixture")];
+        let mut session = RenderSession::open(SessionOpenRequest {
+            repository: &repository.0,
+            plugin_path: &plugin,
+            plugin_sha256: &sha,
+            parameters: Some(&parameters),
+            parameter_animation: Some(&animations),
+            dependencies: Vec::new(),
+            width: WIDTH,
+            height: HEIGHT,
+            pixel_format: RenderPixelFormat::Argb8,
+            time_step: 1,
+            total_time: 300,
+            time_scale: 30,
+            frame_deadline: Duration::from_secs(30),
+        })
+        .expect("arbitrary_data parameters bind arbitrary animation timelines");
+        let outcome = session
+            .render_frame(0, 0, &input_pattern(3))
+            .expect("frame renders");
+        assert!(matches!(outcome.status, FrameStatus::Rendered { .. }));
+        assert_eq!(session.close()["session_clean"], true);
+    }
+
+    #[test]
     fn open_rejects_animation_bound_to_an_unknown_slot() {
         let _behavior = BehaviorGuard::set(None);
         let (repository, plugin, sha) = temp_repository();

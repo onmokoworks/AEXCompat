@@ -1140,7 +1140,10 @@ pub(crate) fn validate_animation_bindings(
                 (AnimationValue::Components { value }, "angle") => value.len() == 1,
                 (AnimationValue::Components { value }, "point") => value.len() == 2,
                 (AnimationValue::Components { value }, "point3d") => value.len() == 3,
-                (AnimationValue::Arbitrary { .. }, "arbitrary") => true,
+                // Parameter discovery reports PF arbitrary parameters as
+                // "arbitrary_data" (see interactive parameter kinds); there is
+                // no "arbitrary" kind anywhere in the transport.
+                (AnimationValue::Arbitrary { .. }, "arbitrary_data") => true,
                 _ => false,
             };
             if !compatible {
