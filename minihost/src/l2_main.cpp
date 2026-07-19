@@ -64,6 +64,7 @@
 #include "strict_json.hpp"
 #include "worker_selector_dispatch.hpp"
 #include "worker_runtime_admission.hpp"
+#include "worker_entry_admission.hpp"
 #include "worker_session.hpp"
 #include "worker_selftest_dispatch.hpp"
 #include "worker_smart_runtime.hpp"
@@ -6387,14 +6388,13 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
       argv[2], argv[3], !is_rendering_worker() && runtime_module_authorization_mode,
       runtime_module_authorization_mode ? argv[5] : nullptr, runtime_request);
   if (request_error != 0) return request_error;
-  aexcompat::TraceWriter trace_writer(
-      "minihost", trace_worker_label(),
-      std::filesystem::path(argv[2]).filename().string());
-  if (trace_writer.requested() && !trace_writer.enabled()) return 16;
+  std::unique_ptr<aexcompat::TraceWriter> trace_writer;
   RuntimeContext runtime_context;
-  const int admission_error = admit_runtime(runtime_hooks, runtime_request, runtime_context);
+  const int admission_error = aexcompat::worker_runtime::admit_worker_entry(
+      runtime_hooks, runtime_request, trace_worker_label(), trace_writer,
+      runtime_context);
   if (admission_error != 0) return admission_error;
-  WorkerSession session(runtime_context, &trace_writer, &g_trace_writer);
+  WorkerSession session(runtime_context, trace_writer.get(), &g_trace_writer);
   g_plugin_file_path = session.plugin_path().wstring();
   HMODULE module = session.module();
   if (g_aegp_init_mode) {

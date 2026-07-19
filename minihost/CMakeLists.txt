@@ -40,6 +40,7 @@ set(AEXCOMPAT_WORKER_RUNTIME_CORE_SOURCES
     src/worker_selector_dispatch.cpp
     src/worker_suite_registry.cpp
     src/worker_runtime_admission.cpp
+    src/worker_entry_admission.cpp
     src/worker_session.cpp
     src/worker_selftest_dispatch.cpp
     src/worker_smart_runtime.cpp
