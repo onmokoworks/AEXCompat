@@ -4,6 +4,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "minihost" / "src" / "l2_main.cpp"
 RECEIPTS = ROOT / "minihost" / "src" / "worker_render_receipts.cpp"
+EXTERNAL_RUNTIME = ROOT / "minihost" / "src" / "worker_aegp_external_render_runtime.cpp"
 
 
 def test_render_suite5_metadata_uses_exact_frozen_abi():
@@ -32,16 +33,20 @@ def test_render_sufficiency_requires_equivalent_options_and_roi_coverage():
 
 
 def test_timestamp_change_and_worthwhile_queries_share_one_project_epoch():
-    text = SOURCE.read_text(encoding="utf-8")
+    host = SOURCE.read_text(encoding="utf-8")
+    text = EXTERNAL_RUNTIME.read_text(encoding="utf-8")
     for marker in (
-        "g_render_project_timestamp{1}",
-        "bump_render_project_timestamp()",
-        "store_render_timestamp(timestamp, g_render_project_timestamp.load())",
-        "observed != g_render_project_timestamp.load()",
-        "observed == g_render_project_timestamp.load()",
-        "item != aegp_comp_item_handle()",
+        "g_project_generation{1}",
+        "bump_project_generation()",
+        "store_timestamp(output, g_project_generation.load())",
+        "observed != g_project_generation.load()",
+        "g_timestamp_exhausted.load()",
+        "!g_hooks.valid_item(item)",
     ):
         assert marker in text
+    for marker in ("ExternalRenderedFrame", "g_project_generation{1}",
+                   "g_timestamp_exhausted", "g_cache"):
+        assert marker not in host
 
 
 def test_receipt_guid_is_stable_owned_memory_and_rejects_stale_receipts():

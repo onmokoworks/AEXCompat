@@ -76,6 +76,7 @@
 #include "worker_aegp_render_selftests.hpp"
 #include "worker_aegp_async_layer_runtime.hpp"
 #include "worker_aegp_staged_item_runtime.hpp"
+#include "worker_aegp_external_render_runtime.hpp"
 #include "worker_aegp_world_selftests.hpp"
 #include "worker_aegp_init_runtime.hpp"
 #include "worker_aegp_scene.hpp"
@@ -1742,31 +1743,6 @@ std::array<uint8_t, 4> g_render_options_matte8{};
 std::array<uint16_t, 4> g_render_options_argb16{};
 std::array<float, 4> g_render_options_argb32f{};
 bool g_synthetic_receipt_test_mode{};
-std::atomic<uint32_t> g_render_project_timestamp{1};
-std::atomic<bool> g_render_timestamp_exhausted{};
-struct ExternalRenderedFrame {
-  AegpRenderOptionsValue options{};
-  AegpRect rendered_region{};
-  uint32_t timestamp{};
-  uint32_t ticks_to_render{};
-  std::shared_ptr<PlatformWorldBacking> backing;
-};
-std::vector<ExternalRenderedFrame> g_external_render_cache;
-constexpr std::size_t kMaxExternalRenderCache = 16;
-uint32_t g_external_frames_checked_in{};
-
-bool same_render_options(const AegpRenderOptionsValue& left,
-                         const AegpRenderOptionsValue& right) {
-  return left.item == right.item && left.time.value == right.time.value &&
-      left.time.scale == right.time.scale && left.time_step.value == right.time_step.value &&
-      left.time_step.scale == right.time_step.scale && left.field == right.field &&
-      left.world_type == right.world_type && left.downsample_x == right.downsample_x &&
-      left.downsample_y == right.downsample_y &&
-      std::memcmp(&left.roi, &right.roi, sizeof(left.roi)) == 0 && left.matte == right.matte &&
-      left.channel_order == right.channel_order &&
-      left.render_guide_layers == right.render_guide_layers &&
-      left.render_quality == right.render_quality;
-}
 int32_t __cdecl app_get_personal_info(char* info) {
   if (!info) return 4;
   std::memset(info, 0, 64 * 3);
@@ -1776,23 +1752,7 @@ int32_t __cdecl app_get_personal_info(char* info) {
   return 0;
 }
 void bump_render_project_timestamp() {
-  uint32_t current = g_render_project_timestamp.load();
-  for (;;) {
-    const uint32_t next = current == UINT32_MAX ? UINT32_MAX : current + 1;
-    if (next == current) {
-      g_render_timestamp_exhausted.store(true);
-      std::lock_guard<std::mutex> lock(g_world_mutex);
-      g_external_render_cache.clear();
-      aexcompat::aegp_staged_item_runtime::clear();
-      return;
-    }
-    if (g_render_project_timestamp.compare_exchange_weak(current, next)) {
-      std::lock_guard<std::mutex> lock(g_world_mutex);
-      g_external_render_cache.clear();
-      aexcompat::aegp_staged_item_runtime::clear();
-      return;
-    }
-  }
+  aexcompat::aegp_external_render_runtime::bump_project_generation();
 }
 
 bool claim_opaque_generation(std::atomic<uint64_t>& counter, uint64_t& generation) {
@@ -2042,70 +2002,12 @@ int32_t publish_async_receipt(int32_t pixel_format, void** output,
 
 int32_t publish_external_cached_receipt(const AegpRenderOptionsValue& options,
                                         void** output, bool* cache_hit) {
-  if (output) *output = nullptr;
-  if (cache_hit) *cache_hit = false;
-  if (!output || !cache_hit || g_render_timestamp_exhausted.load()) return 4;
-  const uint32_t current_timestamp = g_render_project_timestamp.load();
-  AegpRenderOptionsValue cached_options{};
-  AegpRect cached_region{};
-  std::shared_ptr<PlatformWorldBacking> backing;
-  {
-    std::lock_guard<std::mutex> lock(g_world_mutex);
-    const auto cached = std::find_if(g_external_render_cache.begin(),
-        g_external_render_cache.end(), [&](const auto& frame) {
-          return frame.timestamp == current_timestamp &&
-              same_render_options(frame.options, options);
-        });
-    if (cached == g_external_render_cache.end()) return 0;
-    cached_options = cached->options;
-    cached_region = cached->rendered_region;
-    backing = cached->backing;
-  }
-  if (!backing || !backing->world.data || backing->world.width <= 0 ||
-      backing->world.height <= 0 || backing->world.rowbytes <= 0) return 4;
-  const int32_t type = aegp_world_type_from_format(backing->pixel_format);
-  const int32_t pixel_bytes = type == 1 ? 4 : (type == 2 ? 8 : (type == 3 ? 16 : 0));
-  const uint64_t tight_rowbytes = static_cast<uint64_t>(backing->world.width) * pixel_bytes;
-  const uint64_t bytes = tight_rowbytes * backing->world.height;
-  if (!pixel_bytes || backing->world.rowbytes < tight_rowbytes ||
-      bytes == 0 || bytes > kMaxReceiptBytes) return 4;
-  std::unique_ptr<ReceiptDraft> receipt;
-  try {
-    receipt = std::make_unique<ReceiptDraft>();
-    receipt->pixels.resize(static_cast<std::size_t>(bytes));
-    std::lock_guard<std::mutex> pixels_lock(backing->pixels_mutex);
-    for (int32_t y = 0; y < backing->world.height; ++y) {
-      std::memcpy(receipt->pixels.data() + static_cast<std::size_t>(y) * tight_rowbytes,
-          static_cast<const std::byte*>(backing->world.data) +
-              static_cast<std::size_t>(y) * backing->world.rowbytes,
-          static_cast<std::size_t>(tight_rowbytes));
-    }
-  } catch (...) { return 4; }
-  if (current_timestamp != g_render_project_timestamp.load() ||
-      g_render_timestamp_exhausted.load()) return 4;
-  receipt->pixel_format = backing->pixel_format;
-  receipt->has_render_options = true;
-  receipt->render_options = cached_options;
-  receipt->rendered_region = cached_region;
-  receipt->render_timestamp = current_timestamp;
-  receipt->world.world_flags = type == 1 ? 0 : 1;
-  receipt->world.data = receipt->pixels.data();
-  receipt->world.rowbytes = static_cast<int32_t>(tight_rowbytes);
-  receipt->world.width = backing->world.width;
-  receipt->world.height = backing->world.height;
-  receipt->world.extent_hint = {0, 0, backing->world.width, backing->world.height};
-  receipt->world.pix_aspect_ratio = {1, 1};
-  std::lock_guard<std::mutex> lock(g_world_mutex);
-  if (current_timestamp != g_render_project_timestamp.load() ||
-      g_render_timestamp_exhausted.load()) return 4;
-  if (aexcompat::render_receipts::register_receipt(
-          std::move(receipt), output) != 0) return 4;
-  *cache_hit = true;
-  return 0;
+  return aexcompat::aegp_external_render_runtime::publish_cached_receipt(
+      options, output, cache_hit);
 }
 
 uint32_t staged_item_project_generation() {
-  return g_render_project_timestamp.load();
+  return aexcompat::aegp_external_render_runtime::project_generation();
 }
 bool staged_item_synthetic_receipts_enabled() {
   return g_synthetic_receipt_test_mode;
@@ -2114,6 +2016,12 @@ const bool g_staged_item_runtime_configured = [] {
   aexcompat::aegp_staged_item_runtime::configure({
       &staged_item_project_generation, &staged_item_synthetic_receipts_enabled,
       &publish_async_receipt});
+  return true;
+}();
+const bool g_external_render_runtime_configured = [] {
+  aexcompat::aegp_external_render_runtime::configure({
+      &aexcompat::aegp_staged_item_runtime::clear,
+      +[](void* item) { return item == aegp_comp_item_handle(); }});
   return true;
 }();
 int32_t publish_item_receipt(void* options, void** receipt) {
@@ -2409,105 +2317,22 @@ int32_t __cdecl render_sufficient_reject(void* rendered, void* proposed, uint8_t
 int32_t __cdecl render_sound_reject(void*, const void*, const void*, const void*, void*, void*, void** out) {
   if (out) *out = nullptr; return 4;
 }
-void store_render_timestamp(AegpTimeStamp& timestamp, uint32_t value) {
-  std::memcpy(timestamp.bytes.data(), &value, sizeof(value));
-}
-bool read_render_timestamp(const void* timestamp, uint32_t& value) {
-  if (!timestamp) return false;
-  std::memcpy(&value, timestamp, sizeof(value));
-  return value != 0;
-}
 int32_t __cdecl render_timestamp_reject(void* output) {
-  if (!output || g_render_timestamp_exhausted.load()) return 4;
-  AegpTimeStamp timestamp{};
-  store_render_timestamp(timestamp, g_render_project_timestamp.load());
-  std::memcpy(output, &timestamp, sizeof(timestamp));
-  return 0;
+  return aexcompat::aegp_external_render_runtime::timestamp(output);
 }
-int32_t __cdecl render_changed_reject(void* item, const void* start_raw,
-    const void* duration_raw, const void* timestamp, uint8_t* out) {
-  if (out) *out = 0;
-  uint32_t observed = 0;
-  const auto* start = static_cast<const AegpTime*>(start_raw);
-  const auto* duration = static_cast<const AegpTime*>(duration_raw);
-  if (!out || item != aegp_comp_item_handle() || !start || !duration ||
-      start->scale == 0 || duration->scale == 0 || duration->value < 0 ||
-      !read_render_timestamp(timestamp, observed)) return 4;
-  if (g_render_timestamp_exhausted.load()) { *out = 1; return 0; }
-  *out = observed != g_render_project_timestamp.load();
-  return 0;
+int32_t __cdecl render_changed_reject(void* item, const void* start,
+    const void* duration, const void* timestamp, uint8_t* out) {
+  return aexcompat::aegp_external_render_runtime::changed(
+      item, start, duration, timestamp, out);
 }
-int32_t __cdecl render_worthwhile_reject(void* options, const void* timestamp, uint8_t* out) {
-  if (out) *out = 0;
-  uint32_t observed = 0;
-  AegpRenderOptionsValue snapshot{};
-  if (!out || !snapshot_render_options(options, snapshot) ||
-      !read_render_timestamp(timestamp, observed)) return 4;
-  if (g_render_timestamp_exhausted.load()) return 0;
-  const bool timestamp_current = observed == g_render_project_timestamp.load();
-  if (!timestamp_current) return 0;
-  std::lock_guard<std::mutex> lock(g_world_mutex);
-  *out = std::none_of(g_external_render_cache.begin(), g_external_render_cache.end(),
-      [&](const auto& frame) {
-        return frame.timestamp == observed && same_render_options(frame.options, snapshot);
-      });
-  return 0;
+int32_t __cdecl render_worthwhile_reject(
+    void* options, const void* timestamp, uint8_t* out) {
+  return aexcompat::aegp_external_render_runtime::worthwhile(options, timestamp, out);
 }
-int32_t __cdecl render_checkin_rendered(void* options, const void* timestamp,
-                                        uint32_t ticks_to_render, void* image) {
-  AegpRenderOptionsValue snapshot{};
-  uint32_t observed = 0;
-  const bool metadata_valid = snapshot_render_options(options, snapshot) &&
-      read_render_timestamp(timestamp, observed);
-  if (!metadata_valid || g_render_timestamp_exhausted.load()) return 4;
-  std::lock_guard<std::mutex> lock(g_world_mutex);
-  if (observed != g_render_project_timestamp.load() || g_render_timestamp_exhausted.load())
-    return 4;
-  std::shared_ptr<PlatformWorldBacking> backing;
-  if (!aexcompat::world_registry::snapshot_platform_world(image, backing) ||
-      aegp_world_type_from_format(backing->pixel_format) != snapshot.world_type)
-    return 4;
-  const int32_t width = backing->world.width;
-  const int32_t height = backing->world.height;
-  AegpRect rendered_region{0, 0, width, height};
-  if (snapshot.roi.left != 0 || snapshot.roi.top != 0 ||
-      snapshot.roi.right != 0 || snapshot.roi.bottom != 0) {
-    const auto ceil_div = [](int32_t value, int32_t divisor) {
-      return value <= 0 ? 0 : (value + divisor - 1) / divisor;
-    };
-    rendered_region = {
-        (std::max)(0, snapshot.roi.left / snapshot.downsample_x),
-        (std::max)(0, snapshot.roi.top / snapshot.downsample_y),
-        (std::min)(width, ceil_div(snapshot.roi.right, snapshot.downsample_x)),
-        (std::min)(height, ceil_div(snapshot.roi.bottom, snapshot.downsample_y))};
-    if (rendered_region.right < rendered_region.left ||
-        rendered_region.bottom < rendered_region.top) return 4;
-  }
-  auto cached = std::find_if(g_external_render_cache.begin(), g_external_render_cache.end(),
-      [&](const auto& frame) {
-        return frame.timestamp == observed && same_render_options(frame.options, snapshot);
-      });
-  if (cached == g_external_render_cache.end() &&
-      g_external_render_cache.size() < kMaxExternalRenderCache) {
-    try {
-      g_external_render_cache.reserve(g_external_render_cache.size() + 1);
-    } catch (...) { return 4; }
-    cached = g_external_render_cache.end();
-  }
-  std::shared_ptr<PlatformWorldBacking> adopted;
-  if (!aexcompat::world_registry::adopt_platform_world(image, adopted) ||
-      adopted != backing) return 4;
-  const ExternalRenderedFrame frame{
-      snapshot, rendered_region, observed, ticks_to_render, std::move(adopted)};
-  if (cached != g_external_render_cache.end()) {
-    *cached = frame;
-  } else if (g_external_render_cache.size() >= kMaxExternalRenderCache) {
-    g_external_render_cache.front() = frame;
-  } else {
-    g_external_render_cache.push_back(frame);
-  }
-  ++g_external_frames_checked_in;
-  return 0;
+int32_t __cdecl render_checkin_rendered(
+    void* options, const void* timestamp, uint32_t ticks, void* image) {
+  return aexcompat::aegp_external_render_runtime::checkin_rendered(
+      options, timestamp, ticks, image);
 }
 int32_t __cdecl render_guid_reject(void* receipt, void** out) {
   if (out) *out = nullptr;
@@ -2542,7 +2367,7 @@ const aexcompat::aegp_world_selftests::Hooks& aegp_world_selftest_hooks() {
       &checkin_frame,
       &bump_render_project_timestamp,
       &render_options_dispose,
-      +[] { return g_external_render_cache.empty(); },
+      &aexcompat::aegp_external_render_runtime::cache_empty,
       +[](bool enabled) { g_synthetic_receipt_test_mode = enabled; },
       +[] { return aexcompat::render_receipts::lifetimes_balanced(); },
       +[](int32_t pixel_format, void** output) {
@@ -2589,10 +2414,11 @@ bool verify_item_render_cycle_contract(void* options) {
   const AegpTime time{5, 24};
   if (!aexcompat::aegp_staged_item_runtime::verify_recursion_guard(
           aegp_comp_item_handle(), time, options, &render_checkout_frame_reject)) return false;
-  const uint32_t old_generation = g_render_project_timestamp.load();
+  const uint32_t old_generation =
+      aexcompat::aegp_external_render_runtime::project_generation();
   bump_render_project_timestamp();
   void* rejected = reinterpret_cast<void*>(1);
-  return g_render_project_timestamp.load() != old_generation &&
+  return aexcompat::aegp_external_render_runtime::project_generation() != old_generation &&
       render_checkout_frame_reject(options, nullptr, nullptr, &rejected) != 0 && !rejected &&
       render_options_dispose(options) == 0;
 }
@@ -8563,7 +8389,8 @@ bool verify_aegp_apply_effect() {
   const auto saved_leases = g_aegp_effect_leases;
   const bool saved_live = g_aegp_effect_live;
   const bool saved_mode = g_aegp_comp_idle_roundtrip_mode;
-  const uint32_t timestamp_before = g_render_project_timestamp.load();
+  const uint32_t timestamp_before =
+      aexcompat::aegp_external_render_runtime::project_generation();
   g_aegp_effect_instances = {};
   g_aegp_effect_instances[0] = {
       &g_aegp_layers[0], kAegpInstalledEffects[0].key, 0, 1, 1, true};
@@ -8606,7 +8433,8 @@ bool verify_aegp_apply_effect() {
       aegp_dispose_stream(stream) == 0;
   void* unchanged = reinterpret_cast<void*>(static_cast<uintptr_t>(0x5678));
   const auto scene_before_failures = g_aegp_effect_instances;
-  const uint32_t timestamp_after_apply = g_render_project_timestamp.load();
+  const uint32_t timestamp_after_apply =
+      aexcompat::aegp_external_render_runtime::project_generation();
   ok = ok && aegp_get_new_effect_stream_by_index(8, applied, 1, &unchanged) == 4 &&
       unchanged == reinterpret_cast<void*>(static_cast<uintptr_t>(0x5678)) &&
       aegp_apply_effect(7, nullptr, kAegpInstalledEffects[0].key, &unchanged) == 4 &&
@@ -8615,7 +8443,7 @@ bool verify_aegp_apply_effect() {
       unchanged == reinterpret_cast<void*>(static_cast<uintptr_t>(0x5678)) &&
       std::memcmp(g_aegp_effect_instances.data(), scene_before_failures.data(),
                   sizeof(g_aegp_effect_instances)) == 0 &&
-      g_render_project_timestamp.load() == timestamp_after_apply;
+      aexcompat::aegp_external_render_runtime::project_generation() == timestamp_after_apply;
 
   std::array<void*, kAegpEffectInstanceCapacity - 2> more{};
   for (std::size_t i = 0; ok && i < more.size(); ++i)
