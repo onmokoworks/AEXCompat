@@ -54,6 +54,7 @@
 #include "parameter_animation_transport.hpp"
 #include "worker_parameter_runtime.hpp"
 #include "worker_parameter_selftests.hpp"
+#include "worker_parameter_selftest_routing.hpp"
 #include "worker_parameter_execution.hpp"
 #include "worker_ui_event_execution.hpp"
 #include "pf_cache_on_load_suite.hpp"
@@ -5994,17 +5995,15 @@ int worker_main_impl(int argc, wchar_t **argv) {
   // L"--self-test-pf-checkout-intersection"
   // L"--self-test-pf-smart-geometry-rects"
   if (fixed_selftest.handled) return fixed_selftest.exit_code;
-  if (argc == 2 &&
-      std::wstring(argv[1]) == L"--self-test-aegp-keyframe-mutations") {
-    const bool passed = verify_aegp_keyframe_suite5_mutations(
-        keyframe_suite5_abi_wiring_valid());
-    std::cout << "{\"aegp_keyframe_mutations\":\""
-              << (passed ? "passed" : "failed")
-              << "\",\"mutations\":" << g_keyframe_mutations
-              << ",\"ownership_rejections\":" << g_invalid_keyframe_operations
-              << ",\"lifetimes_balanced\":"
-              << (mask_lifetimes_balanced() ? "true" : "false") << "}\n";
-    return passed ? 0 : 1;
+  const auto parameter_selftest =
+      aexcompat::worker_runtime::parameter_selftests::dispatch(
+          {argc, argv},
+          {&verify_aegp_keyframe_suite5_mutations,
+           &keyframe_suite5_abi_wiring_valid, &g_keyframe_mutations,
+           &g_invalid_keyframe_operations, &mask_lifetimes_balanced});
+  if (parameter_selftest.handled) {
+    std::cout << parameter_selftest.output;
+    return parameter_selftest.exit_code;
   }
   if (argc == 2 &&
       std::wstring(argv[1]) == L"--self-test-aegp-layer-source-item") {
@@ -6015,15 +6014,6 @@ int worker_main_impl(int argc, wchar_t **argv) {
               << ",\"item_type_calls\":" << g_aegp_item_type_calls
               << "}\n";
     return passed ? 0 : 1;
-  }
-  if (argc == 3 && std::wstring(argv[1]) == L"--self-test-parameter-animation-sidecar") {
-    std::vector<ParameterTimeline> timelines;
-    const bool passed =
-        load_parameter_animation(std::filesystem::path(argv[2]), timelines);
-    std::cout << "{\"parameter_animation_sidecar\":\""
-              << (passed ? "accepted" : "rejected")
-              << "\",\"timelines\":" << timelines.size() << "}\n";
-    return passed ? 0 : 3;
   }
   if (argc == 2 && std::wstring(argv[1]) == L"--self-test-pf-path-data-hardening") {
     const bool passed = verify_pf_path_data_hardening(

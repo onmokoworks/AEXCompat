@@ -30,6 +30,8 @@ CLASSIC_RUNTIME_HEADER = ROOT / "minihost" / "src" / "worker_classic_runtime.hpp
 CLASSIC_RUNTIME_SOURCE = ROOT / "minihost" / "src" / "worker_classic_runtime.cpp"
 SELFTEST_DISPATCH_SOURCE = ROOT / "minihost" / "src" / "worker_selftest_dispatch.cpp"
 FIXED_SELFTEST_ROUTING_SOURCE = ROOT / "minihost" / "src" / "worker_fixed_selftest_routing.cpp"
+PARAMETER_SELFTEST_ROUTING_SOURCE = (ROOT / "minihost" / "src" /
+                                     "worker_parameter_selftest_routing.cpp")
 REQUEST_PARSER_HEADER = ROOT / "minihost" / "src" / "worker_request_parser.hpp"
 REQUEST_PARSER_SOURCE = ROOT / "minihost" / "src" / "worker_request_parser.cpp"
 RENDER_REPORT_HEADER = ROOT / "minihost" / "src" / "worker_render_report.hpp"
@@ -97,6 +99,7 @@ def l2_family_source():
         REPORT_HEADER, REPORT_SOURCE,
         RUNTIME_ADMISSION_SOURCE, CLASSIC_RUNTIME_HEADER, CLASSIC_RUNTIME_SOURCE,
         SELFTEST_DISPATCH_SOURCE, FIXED_SELFTEST_ROUTING_SOURCE,
+        PARAMETER_SELFTEST_ROUTING_SOURCE,
         REQUEST_PARSER_HEADER, REQUEST_PARSER_SOURCE,
         INVOCATION_ORCHESTRATION_HEADER, INVOCATION_ORCHESTRATION_SOURCE,
         RENDER_REPORT_HEADER, RENDER_REPORT_SOURCE
@@ -104,6 +107,22 @@ def l2_family_source():
 
 
 class MinihostL2SourceTests(unittest.TestCase):
+    def test_parameter_selftest_routes_are_a_true_translation_unit(self):
+        worker = SOURCE.read_text(encoding="utf-8")
+        routing = PARAMETER_SELFTEST_ROUTING_SOURCE.read_text(encoding="utf-8")
+        header = (ROOT / "minihost" / "src" /
+                  "worker_parameter_selftest_routing.hpp").read_text(encoding="utf-8")
+        cmake = MINIHOST_CMAKE.read_text(encoding="utf-8")
+        self.assertIn("src/worker_parameter_selftest_routing.cpp", cmake)
+        for marker in ("struct Request", "struct Hooks", "struct Result"):
+            self.assertIn(marker, header)
+        for marker in ('L"--self-test-aegp-keyframe-mutations"',
+                       'L"--self-test-parameter-animation-sidecar"',
+                       '"ownership_rejections\\\":"',
+                       "parameter_animation_sidecar"):
+            self.assertIn(marker, routing)
+            self.assertNotIn(marker, worker)
+
     def test_fixed_selftest_catalog_is_a_true_translation_unit(self):
         worker = SOURCE.read_text(encoding="utf-8")
         routing = FIXED_SELFTEST_ROUTING_SOURCE.read_text(encoding="utf-8")
