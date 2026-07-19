@@ -27,6 +27,7 @@ set(AEXCOMPAT_WORKER_RUNTIME_CORE_SOURCES
     src/native_stdout_guard.cpp
     src/parameter_animation_transport.cpp
     src/worker_parameter_runtime.cpp
+    src/worker_parameter_execution.cpp
     src/pf_cache_on_load_suite.cpp
     src/render_lifecycle.cpp
     src/render_pixel_buffer.cpp

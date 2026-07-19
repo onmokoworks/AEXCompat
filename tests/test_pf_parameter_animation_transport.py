@@ -7,11 +7,12 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "minihost/src/l2_main.cpp"
 DISPATCH_SOURCE = ROOT / "minihost/src/l2_cli_dispatch.cpp"
+EXECUTION_SOURCE = ROOT / "minihost/src/worker_parameter_execution.cpp"
 TRANSPORT = ROOT / "target/image-transport"
 
 
 def worker_source():
-    return SOURCE.read_text(encoding="utf-8") + "\n" + DISPATCH_SOURCE.read_text(encoding="utf-8")
+    return SOURCE.read_text(encoding="utf-8") + "\n" + DISPATCH_SOURCE.read_text(encoding="utf-8") + "\n" + EXECUTION_SOURCE.read_text(encoding="utf-8")
 
 
 def _workers():
