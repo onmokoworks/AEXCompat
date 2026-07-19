@@ -88,7 +88,7 @@ worker 側パースは `trace_writer.cpp:16-28` の型)。worker はパス文字
 ```
 aex_render_worker.exe --render-session-v1 <plugin> <plugin_sha256> <payload>
     <max_width> <max_height> <time_step> <total_time> <time_scale>
-    [session-layers:v1|<slot,w,h;...>]
+    [session-layers:v1|<slot,w,h[,time,scale];...>]
     [v2|<mask context>] [spatial:v*|<...>] [render:v1|<...>]
     [--aux-manifest-v1 <path>] [--parameter-animation-v1 <path>]
     [--dump-worlds-v1 <dir>] [--output-checksum-detail-v1 1] [--minidump-v1 <dir>]
@@ -110,9 +110,23 @@ W1-4 では secondary layer を `session-layers:v1|slot,w,h;...` trailer
 (context trailer より前) で運ぶ。各 layer の RGBA8 ピクセルは §6 のレイヤー
 スロット (出力スロットの後、各 max_width*max_height*4) に static 配置され、
 worker は open 時に一度読んで全フレームで使い回す。header の
-`layer_slot_count` は broker が書き、両者が検証する。timed layer と
-alpha-as-coverage は後続 (v1.1) で、実 AEX での layer 消費の等価性検証は
-layer parameter を宣言する probe fixture を要する (別スコープ)。
+`layer_slot_count` は broker が書き、両者が検証する。
+
+W1-4b では timed layer を同 trailer の 5 フィールド形式 `slot,w,h,time,scale`
+で運ぶ (3 フィールドは従来どおり static secondary)。物理スロットは layer 配列の
+index ごとに割り当てられるため、同じ semantic `slot` を持つ複数の timed layer
+(異なる rational time) はそれぞれ独立スロットを占有し、worker は各フレームの
+current_time に対し one-shot と同じ有理時刻一致 (`same_time` / `same_rational_time`)
+でマッチするエントリを選ぶ。dedup 規則も one-shot と一致: 同一 slot は「両方 timed
+かつ有理時刻が異なる」場合のみ許可、それ以外 (static 同士、static と timed の混在、
+timed 同士の同時刻) は broker open と worker parse の双方で fail-closed。broker の
+`secondary_layers` 診断フィールドは one-shot と揃えるため static layer のみ列挙し、
+timed layer は含めない (両ルートで同一集合になる)。
+
+alpha-as-coverage は後続で、実 AEX での layer 消費 (static/timed 双方) の等価性
+検証は layer parameter を宣言する probe fixture を要する (#195)。それまでは
+fixture worker (`session_protocol_worker`) 経由の統合テストで trailer 往復と
+スロット配置を検証する。
 
 one-shot との差分:
 

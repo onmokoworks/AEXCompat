@@ -431,3 +431,46 @@ PR-C (#116) merge 後のコードに対して、段階1-3「既存 one-shot 経�
 クリティカルパスは W1 (context/layer) → W2。W1 の「最小」2 件は即着手
 可能。custom UI のセッション化は #107 の per-frame parameters (v2) と
 同時期に扱う。
+
+## 追記 (W1-4b: timed layer をセッションで運ぶ)
+
+観察 (実装):
+
+- timed layer の worker 側消費ロジック (`l2_main.cpp` の
+  `same_rational_time` 選択と `classic_context->add_timed_layer`) は既に
+  render_once に存在する。W1-4b は transport の拡張のみで、`LayerInput` は
+  `time`/`time_scale`/`timed` フィールドを既に持つ。
+- `session-layers:v1|` trailer を 5 フィールド形式 `slot,w,h,time,scale`
+  に拡張 (3 フィールドは従来の static secondary)。worker parser
+  (`worker_request_parser.cpp`) はエントリ内カンマ数で 3/5 を分岐し、5 なら
+  `timed=true` + `time`/`time_scale` を設定。dedup は one-shot の
+  layered_image_mode と同一ラムダに揃えた (同一 slot は両方 timed かつ
+  異なる有理時刻のみ許可)。
+- broker `SessionLayer` に `timed: Option<(i32,u32)>` を追加。open の
+  slot 一意性検証を「同一 slot は両方 timed かつ有理時刻相違のみ許可」に
+  変更 (worker parse と一致、fail-closed を open 時点に前倒し)。trailer
+  生成は `timed` が Some なら 5 フィールドを emit。物理スロットは layer
+  index ごとなので同一 semantic slot の timed 複数もそれぞれ独立領域を占有。
+- wrapper (`image_render.rs`) の適格条件から `timed_secondaries.is_empty()`
+  を除去。static secondary と timed secondary を連結して `session_layers`
+  を構築。session ルートの `secondary_layers` 診断は one-shot と揃えるため
+  `timed.is_none()` で static のみ列挙 (両ルート同一集合)。
+
+観察 (検証):
+
+- broker 統合テスト `render_session` 26 件パス。追加した
+  `timed_layers_travel_the_session_trailer_into_their_slots` (同一 slot に
+  2 つの異なる時刻の timed + 別 slot の static、fixture worker が
+  `layer_slot_count` と各スロット先頭バイトを検証) と
+  `open_rejects_two_timed_layers_at_the_same_slot_and_time` (2/60 == 1/30
+  の同時刻衝突を open が拒否) を含む。
+- 実 worker 再ビルド後、wrapper A/B 等価テスト
+  (`render_session_wrapper`) パス。plain classic 経路の回帰なし。
+
+仮説 (残作業):
+
+- 実 AEX での timed layer 消費の等価性 (A/B PNG バイト一致) は layer
+  parameter を宣言する probe fixture (#195) を要する。それまでは fixture
+  worker 経由の transport 検証が interim。
+- alpha-as-coverage は W1-4b と別コミットで扱う (適格条件の
+  `alpha_as_coverage_params.is_empty()` 緩和 + aux option 追加)。

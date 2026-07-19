@@ -363,13 +363,18 @@ pub struct SessionOpenRequest<'a> {
 
 /// A secondary layer whose RGBA8 pixels occupy one shared layer slot for the
 /// whole session. Width/height are the layer's own geometry, bounded by the
-/// input slot.
+/// input slot. A timed layer (issue #98 W1-4b) additionally carries the frame
+/// time at which the worker admits it; the worker selects the matching timed
+/// entry per frame with the same rational-time test the one-shot path uses.
 #[derive(Clone)]
 pub struct SessionLayer {
     pub slot: u32,
     pub width: u32,
     pub height: u32,
     pub rgba: Vec<u8>,
+    /// `Some((time, time_scale))` marks this a timed layer; `None` is a static
+    /// secondary that renders on every frame.
+    pub timed: Option<(i32, u32)>,
 }
 
 #[derive(Debug)]
@@ -515,12 +520,12 @@ impl RenderSession {
             layer_slot_count: request.layers.len() as u32,
         };
         // Each layer's RGBA must fit its slot (input-slot shaped) and slots
-        // must be unique, before any transport work.
-        let mut seen_layer_slots = std::collections::HashSet::new();
-        for layer in request.layers {
-            // Same slot and dimension bounds the worker parser enforces, so a
-            // directly built request fails fast at open instead of launching a
-            // worker that rejects the layer on the first frame.
+        // must be unique, before any transport work. Timed layers (issue #98
+        // W1-4b) may share a slot when their rational times differ, matching the
+        // worker parser's dedup exactly so a directly built request fails fast
+        // at open instead of on the worker's first frame.
+        for (index, layer) in request.layers.iter().enumerate() {
+            // Same slot and dimension bounds the worker parser enforces.
             if layer.slot == 0
                 || layer.slot > 1024
                 || layer.width == 0
@@ -530,8 +535,24 @@ impl RenderSession {
             {
                 return Err(invalid("render session layer slot or dimensions are invalid"));
             }
-            if !seen_layer_slots.insert(layer.slot) {
-                return Err(invalid("render session layer slots must be unique"));
+            if let Some((_, time_scale)) = layer.timed {
+                if time_scale == 0 {
+                    return Err(invalid("render session timed layer time scale is zero"));
+                }
+            }
+            for other in &request.layers[..index] {
+                if other.slot != layer.slot {
+                    continue;
+                }
+                let conflict = match (other.timed, layer.timed) {
+                    (Some((lt, ls)), Some((rt, rs))) => {
+                        i64::from(lt) * i64::from(rs) == i64::from(rt) * i64::from(ls)
+                    }
+                    _ => true,
+                };
+                if conflict {
+                    return Err(invalid("render session layer slots must be unique"));
+                }
             }
             let expected = layer.width as usize * layer.height as usize * 4;
             if layer.rgba.len() != expected || expected > geometry.input_slot_bytes() {
@@ -641,7 +662,14 @@ impl RenderSession {
                 if index != 0 {
                     encoded.push(';');
                 }
-                encoded.push_str(&format!("{},{},{}", layer.slot, layer.width, layer.height));
+                match layer.timed {
+                    Some((time, time_scale)) => encoded.push_str(&format!(
+                        "{},{},{},{},{}",
+                        layer.slot, layer.width, layer.height, time, time_scale
+                    )),
+                    None => encoded
+                        .push_str(&format!("{},{},{}", layer.slot, layer.width, layer.height)),
+                }
             }
             args_after_plugin.push(encoded);
         }
