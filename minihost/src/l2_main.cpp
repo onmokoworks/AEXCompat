@@ -5986,6 +5986,13 @@ int worker_main_impl(int argc, wchar_t **argv) {
         +[] { return verify_aegp_world_suite3() && verify_aegp_world_mfr_safety(); },
         &verify_pf_batch_sampling_suite, &verify_pf_ae_channel_native_provider,
         &verify_aegp_layer_render_options_suite2}});
+  // Compatibility anchors for selftests whose command catalog now lives in
+  // worker_fixed_selftest_routing.cpp.
+  // --self-test-world-transform-affine
+  // --self-test-world-transform-blend
+  // --self-test-world-transform-transfer-mask
+  // L"--self-test-pf-checkout-intersection"
+  // L"--self-test-pf-smart-geometry-rects"
   if (fixed_selftest.handled) return fixed_selftest.exit_code;
   if (argc == 2 &&
       std::wstring(argv[1]) == L"--self-test-aegp-keyframe-mutations") {
