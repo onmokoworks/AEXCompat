@@ -141,7 +141,9 @@ class MinihostL2SourceTests(unittest.TestCase):
             self.assertIn(marker, routing)
             self.assertNotIn(marker, worker)
         # Host-private verification bodies stay behind explicit hooks.
-        self.assertIn("run_pf_path_data_hardening_selftest", worker)
+        wiring = (ROOT / "minihost" / "src" /
+                  "worker_entry_wiring.cpp").read_text(encoding="utf-8")
+        self.assertIn("run_pf_path_data_hardening_selftest", wiring)
         self.assertNotIn("verify_pf_path_data_hardening(", routing)
 
     def test_aegp_compat_selftests_are_a_true_translation_unit(self):

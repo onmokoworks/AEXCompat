@@ -52,11 +52,14 @@ def test_aegp_world_selftests_have_an_independent_translation_unit():
     )
     cmake = (ROOT / "minihost" / "CMakeLists.txt").read_text(encoding="utf-8")
     main = SOURCE.read_text(encoding="utf-8")
+    wiring = (ROOT / "minihost" / "src" / "worker_entry_wiring.cpp").read_text(
+        encoding="utf-8"
+    )
     assert "bool verify_world_suite3(const Hooks& h)" in owner
     assert "bool verify_world_mfr_safety(const Hooks& h)" in owner
     assert "bool verify_async_receipts(const Hooks& h)" in owner
     assert "class SyntheticReceiptScope" in owner
-    assert "bool verify_aegp_world_suite3()" in main
+    assert "bool verify_aegp_world_suite3()" in wiring
     assert "std::atomic_bool start" not in main
     assert "worker_aegp_world_selftests.cpp" in cmake
 
