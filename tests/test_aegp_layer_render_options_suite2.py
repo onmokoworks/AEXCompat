@@ -84,7 +84,7 @@ def test_effect_boundaries_accept_only_finalized_staged_downstream():
 
 
 def test_sync_and_async_paths_share_the_same_pixel_publisher():
-    host = SOURCE.read_text(encoding="utf-8")
+    host = source_owners.contract_text("aegp_receipt_callbacks")
     layer = LAYER_RUNTIME.read_text(encoding="utf-8")
     async_runtime = ASYNC_RUNTIME.read_text(encoding="utf-8")
     assert host.count("publish_loaded_layer_receipt(snapshot, out)") >= 2

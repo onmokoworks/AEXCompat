@@ -259,6 +259,7 @@ CONTRACTS = {
     "sdk_grabba_update_menu": (
         "minihost/src/l2_main.cpp",
         "minihost/src/worker_l2_render_abi.hpp",
+        "minihost/src/worker_l2_render_abi.cpp",
         "minihost/src/worker_aegp_scene.cpp",
         "minihost/src/worker_aegp_scene.hpp",
         "minihost/src/worker_aegp_layer_render_runtime.cpp",
@@ -297,6 +298,11 @@ CONTRACTS = {
         "minihost/src/render_subsystem.cpp",
         "minihost/src/worker_smart_finalize.cpp",
         "minihost/src/worker_render_session.cpp",
+    ),
+    "aegp_receipt_callbacks": (
+        "minihost/src/l2_main.cpp",
+        "minihost/src/worker_l2_render_abi.hpp",
+        "minihost/src/worker_l2_render_abi.cpp",
     ),
     "classic_param_checkout": (
         "minihost/src/l2_main.cpp",
