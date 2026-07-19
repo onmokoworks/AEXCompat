@@ -325,6 +325,10 @@ pub struct SessionOpenRequest<'a> {
     /// Enables the worker's per-output checksum detail records
     /// (`--output-checksum-detail-v1`).
     pub output_checksum_detail: bool,
+    /// Static mask context trailer (`v2|`), already encoded by
+    /// `encode_mask_context`; carried in the session launch argv (issue #98
+    /// W1-3b). Precedes the spatial trailer in the one-shot positional order.
+    pub mask_trailer: Option<String>,
     /// Static spatial context trailer (`spatial:v*`), already encoded by
     /// `encode_spatial_context`; carried in the session launch argv so the
     /// hoisted SEQUENCE_SETUP and every frame observe it (issue #98 W1-3).
@@ -566,8 +570,10 @@ impl RenderSession {
         ];
         // Static context trailers ride the positional tail in the one-shot
         // order (mask, spatial, render), ahead of the auxiliary option pairs
-        // the worker peels first. v1-3a carries spatial and render-environment;
-        // mask context stays with the layer work.
+        // the worker peels first.
+        if let Some(mask) = &request.mask_trailer {
+            args_after_plugin.push(mask.clone());
+        }
         if let Some(spatial) = &request.spatial_trailer {
             args_after_plugin.push(spatial.clone());
         }
@@ -1321,6 +1327,7 @@ pub fn run_video_batch(
         aux_manifest: request.aux_manifest.as_deref().map(Path::new),
         world_dump_dir: request.world_dump_dir.as_deref().map(Path::new),
         output_checksum_detail: request.output_checksum_detail,
+        mask_trailer: None,
         spatial_trailer: None,
         render_environment_trailer: None,
         dependencies: Vec::new(),
@@ -1541,6 +1548,7 @@ mod tests {
                 aux_manifest: None,
                 world_dump_dir: None,
                 output_checksum_detail: false,
+                mask_trailer: None,
                 spatial_trailer: None,
                 render_environment_trailer: None,
                 dependencies: Vec::new(),
