@@ -1,21 +1,108 @@
 #include "worker_fixed_selftest_routing.hpp"
 
+#include "worker_aegp_compat_selftests.hpp"
+#include "worker_aegp_utility_suite.hpp"
+#include "worker_host_guard_selftests.hpp"
+#include "worker_minidump_runtime.hpp"
+#include "worker_pf_adv_time_suite.hpp"
+#include "worker_selector_dispatch.hpp"
 #include "worker_selftest_dispatch.hpp"
 
 #include <array>
+#include <filesystem>
+#include <iostream>
 #include <string_view>
+#include <system_error>
+
+namespace aexcompat::l2_detail {
+extern uint32_t g_aegp_effect_param_union_calls;
+}
 
 namespace aexcompat::worker_runtime::fixed_selftests {
+namespace {
+
+const HostHooks* g_host{};
+
+int selftest_render_output_safety(int, wchar_t**) {
+  const bool passed = aexcompat::host_guard_selftests::verify_render_output_safety();
+  auto& telemetry = selector_dispatch_telemetry();
+  std::cout << "{\"render_output_safety\":\"" << (passed ? "passed" : "failed")
+            << "\",\"cleanup_selector\":\"" << g_host->escape(telemetry.selector)
+            << "\",\"cleanup_error\":" << telemetry.error
+            << ",\"cleanup_calls\":"
+            << aexcompat::host_guard_selftests::cleanup_safety_selftest_calls()
+            << ",\"guard_pages\":true,\"overrun_beyond_64_detected\":true}\n";
+  return passed ? 0 : 1;
+}
+
+int selftest_crash_minidump(int, wchar_t** argv) {
+  if (!minidump::configure_directory(std::filesystem::path(argv[2]))) {
+    std::cout << "{\"crash_minidump\":\"failed\",\"reason\":\"bad_directory\"}\n";
+    return 1;
+  }
+  const uint32_t exception_code = g_host->trigger_guarded_crash();
+  const std::filesystem::path dump_path = minidump::current_process_dump_path();
+  std::error_code dump_size_error;
+  const auto dump_size = std::filesystem::file_size(dump_path, dump_size_error);
+  const bool written = !dump_size_error && dump_size > 0;
+  std::cout << "{\"crash_minidump\":\"" << (written ? "passed" : "failed")
+            << "\",\"exception_code\":" << exception_code
+            << ",\"dump_bytes\":" << (written ? dump_size : 0)
+            << ",\"attempted\":" << (minidump::attempted() ? "true" : "false")
+            << "}\n";
+  return written ? 0 : 1;
+}
+
+int selftest_pf_adv_time(int, wchar_t**) {
+  const bool passed = pf_adv_time::verify_suite_versions();
+  std::cout << "{\"pf_adv_time_suite_versions\":\"" << (passed ? "passed" : "failed")
+            << "\",\"v1_slots\":4,\"v2_slots\":4,\"v3_slots\":4,\"v4_slots\":5,\"independent_identity\":true"
+            << ",\"guard_intact\":true,\"reverse_release\":true,\"suite_leases_balanced\":"
+            << (g_host->suite_leases_balanced() ? "true" : "false") << "}\n";
+  return passed ? 0 : 1;
+}
+
+int selftest_suite_entry_utility13(int, wchar_t**) {
+  const bool passed = aexcompat::l2_detail::verify_suite_entry_guards_and_utility13();
+  std::cout << "{\"suite_entry_utility13\":\"" << (passed ? "passed" : "failed")
+            << "\",\"null_fail_closed\":true,\"normal_effect_available\":true"
+            << ",\"versions_12_14_rejected\":true,\"mask_callbacks_exposed\":false"
+            << ",\"suite_leases_balanced\":"
+            << (g_host->suite_leases_balanced() ? "true" : "false") << "}\n";
+  return passed ? 0 : 1;
+}
+
+int selftest_pf_adv_app(int, wchar_t**) {
+  const bool passed =
+      aexcompat::host_guard_selftests::verify_pf_adv_app_suite_versions();
+  std::cout << "{\"pf_adv_app_suite_versions\":\"" << (passed ? "passed" : "failed")
+            << "\",\"v1_slots\":10,\"v2_slots\":11,\"independent_identity\":true"
+            << ",\"suite_leases_balanced\":"
+            << (g_host->suite_leases_balanced() ? "true" : "false") << "}\n";
+  return passed ? 0 : 1;
+}
+
+int selftest_effect_param_union(int, wchar_t**) {
+  const bool passed = aexcompat::l2_detail::verify_aegp_effect_param_union_suite4();
+  std::cout << "{\"aegp_effect_param_union_suite4\":\""
+            << (passed ? "passed" : "failed")
+            << "\",\"successful_calls\":"
+            << aexcompat::l2_detail::g_aegp_effect_param_union_calls << "}\n";
+  return passed ? 0 : 1;
+}
+
+}  // namespace
 
 Result dispatch(const Request& request, const Hooks& hooks) {
+  g_host = &hooks.host;
   const std::array<selftest::HostCommand, 6> host_commands{{
-      {L"--self-test-render-output-safety", 2, hooks.host.render_output_safety},
-      {L"--self-test-crash-minidump", 3, hooks.host.crash_minidump},
-      {L"--self-test-pf-adv-time-suite1", 2, hooks.host.pf_adv_time_suite1},
-      {L"--self-test-suite-entry-utility13", 2, hooks.host.suite_entry_utility13},
-      {L"--self-test-pf-adv-app-suite", 2, hooks.host.pf_adv_app_suite},
+      {L"--self-test-render-output-safety", 2, &selftest_render_output_safety},
+      {L"--self-test-crash-minidump", 3, &selftest_crash_minidump},
+      {L"--self-test-pf-adv-time-suite1", 2, &selftest_pf_adv_time},
+      {L"--self-test-suite-entry-utility13", 2, &selftest_suite_entry_utility13},
+      {L"--self-test-pf-adv-app-suite", 2, &selftest_pf_adv_app},
       {L"--self-test-aegp-effect-param-union-suite4", 2,
-       hooks.host.aegp_effect_param_union_suite4},
+       &selftest_effect_param_union},
   }};
   if (const auto exit = selftest::dispatch_host(
           request.argc, request.argv, host_commands.data(), host_commands.size()))

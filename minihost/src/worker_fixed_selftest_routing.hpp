@@ -1,5 +1,8 @@
 #pragma once
 
+#include <cstdint>
+#include <string>
+
 namespace aexcompat::worker_runtime::fixed_selftests {
 
 struct Request {
@@ -8,13 +11,13 @@ struct Request {
   bool render_worker{};
 };
 
+// The verification bodies for the six former host wrappers live in their
+// owner TUs (host guard, utility suite, compat selftests, pf adv time,
+// minidump runtime); only l2_main-private helpers remain hooked.
 struct HostHooks {
-  int (*render_output_safety)(int, wchar_t**){};
-  int (*crash_minidump)(int, wchar_t**){};
-  int (*pf_adv_time_suite1)(int, wchar_t**){};
-  int (*suite_entry_utility13)(int, wchar_t**){};
-  int (*pf_adv_app_suite)(int, wchar_t**){};
-  int (*aegp_effect_param_union_suite4)(int, wchar_t**){};
+  std::string (*escape)(const std::string&){};
+  uint32_t (*trigger_guarded_crash)(){};
+  bool (*suite_leases_balanced)(){};
 };
 
 struct SimpleHooks {
