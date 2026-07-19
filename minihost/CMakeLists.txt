@@ -56,6 +56,7 @@ set(AEXCOMPAT_WORKER_RUNTIME_CORE_SOURCES
     src/worker_pf_param_suites.cpp
     src/worker_aegp_pf_interface_suite.cpp
     src/worker_aegp_command_suites.cpp
+    src/worker_custom_ui_state.cpp
     src/worker_mask_suite_tables.cpp
     src/worker_l2_render_abi.cpp
     src/worker_classic_report.cpp

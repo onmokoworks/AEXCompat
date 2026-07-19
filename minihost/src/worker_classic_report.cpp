@@ -4,6 +4,7 @@
 #include "host_audio_runtime.hpp"
 #include "worker_aegp_async_layer_runtime.hpp"
 #include "worker_classic_runtime.hpp"
+#include "worker_custom_ui_state.hpp"
 #include "worker_handle_runtime.hpp"
 #include "worker_parameter_execution.hpp"
 #include "worker_pf_ae_channel_runtime.hpp"
@@ -24,18 +25,20 @@ namespace aexcompat::l2_detail {
 
 // Worker-entry owned custom-UI/callback/context state and helpers; the
 // definitions stay in l2_main with the dispatch that mutates them.
-extern bool g_render_click_enabled;
-extern bool g_render_draw_enabled;
-extern int32_t g_render_click_error;
-extern int32_t g_render_click_out_flags;
-extern bool g_render_click_changed_value;
-extern int32_t g_render_draw_error;
-extern int32_t g_render_draw_out_flags;
-extern std::array<int32_t, 4> g_render_ui_lifecycle_errors;
-extern bool g_render_ui_context_closed;
-extern uint32_t g_app_color_picker_calls;
-extern uint32_t g_app_invalidate_rect_calls;
-extern std::array<float, 4> g_app_picker_color;
+namespace {
+auto& g_render_click_enabled = worker_runtime::custom_ui::state().render_click_enabled;
+auto& g_render_draw_enabled = worker_runtime::custom_ui::state().render_draw_enabled;
+auto& g_render_click_error = worker_runtime::custom_ui::state().render_click_error;
+auto& g_render_click_out_flags = worker_runtime::custom_ui::state().render_click_out_flags;
+auto& g_render_click_changed_value = worker_runtime::custom_ui::state().render_click_changed_value;
+auto& g_render_draw_error = worker_runtime::custom_ui::state().render_draw_error;
+auto& g_render_draw_out_flags = worker_runtime::custom_ui::state().render_draw_out_flags;
+auto& g_render_ui_lifecycle_errors = worker_runtime::custom_ui::state().render_ui_lifecycle_errors;
+auto& g_render_ui_context_closed = worker_runtime::custom_ui::state().render_ui_context_closed;
+auto& g_app_color_picker_calls = worker_runtime::custom_ui::state().app_color_picker_calls;
+auto& g_app_invalidate_rect_calls = worker_runtime::custom_ui::state().app_invalidate_rect_calls;
+auto& g_app_picker_color = worker_runtime::custom_ui::state().app_picker_color;
+}  // namespace
 extern uint32_t g_register_ui_calls;
 namespace {
 auto& g_report_callback_telemetry =
