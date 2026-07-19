@@ -64,6 +64,21 @@ def test_output_destinations_reject_same_and_nested_paths(tmp_path):
     with pytest.raises(ValueError,match="non-nested"):corpus.output_destinations(tmp_path/"same",tmp_path/"same")
     with pytest.raises(ValueError,match="non-nested"):corpus.output_destinations(tmp_path/"outer",tmp_path/"outer/private")
 
+def test_private_case_list_replays_every_group_occurrence(tmp_path):
+    case_list=tmp_path/"gap-cases.json";case_list.write_text('["case-000001","case-000025","case-000049","case-000073"]')
+    assert corpus.selected_case_ids(None,case_list)=={"case-000001","case-000025","case-000049","case-000073"}
+    for value in ('[]','["case-000001","case-000001"]','["private-plugin"]'):
+        case_list.write_text(value)
+        with pytest.raises(ValueError): corpus.selected_case_ids(None,case_list)
+
+def test_public_group_replay_uses_complete_private_case_list(tmp_path):
+    identities={"input":{"role":"input","sha256":"1"*64,"size_bytes":1},"runner":{"role":"runner","sha256":"2"*64,"size_bytes":1},"workers":[{"role":f"worker-{index:03d}","sha256":str(index+3)*64,"size_bytes":1} for index in range(3)]}
+    rows=[{"case_id":case_id,"classification":"loader_error","render_path":"classic","depth":"argb8","time":{"value":0,"scale":1},"parameter_set_index":0,"selector_error_code":None,"missing_suites":[],"identities":identities} for case_id in ("case-000001","case-000025","case-000049","case-000073")]
+    records,mapping=corpus.gap_records(rows,{"parameter_sets":[[]]},tmp_path)
+    assert records[0]["occurrence_count"]==4
+    assert records[0]["replay"][-2:]==["--case-list","<PRIVATE_CASE_LIST>"]
+    assert mapping[0]["case_ids"]==["case-000001","case-000025","case-000049","case-000073"]
+
 def test_publish_rolls_back_private_when_public_commit_fails(tmp_path,monkeypatch):
     public_tmp=tmp_path/"public-tmp";private_tmp=tmp_path/"private-tmp";public_tmp.mkdir();private_tmp.mkdir();public=tmp_path/"public";private=tmp_path/"private";original=Path.replace;calls=0
     def replace(path,target):

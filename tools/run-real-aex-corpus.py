@@ -184,7 +184,7 @@ def gap_records(rows,matrix,public_root):
     grouped=defaultdict(list)
     for value,case_id in pending: grouped[canonical(value)].append((value,case_id))
     records=[];mapping=[]
-    replay=["python","tools/run-real-aex-corpus.py","--inventory","<PUBLIC_INVENTORY>","--locator","<PRIVATE_LOCATOR>","--matrix","<MATRIX>","--runner","<PINNED_RUNNER>","--input","<INPUT>","--out","<NEW_PUBLIC_OUT>","--private-evidence-out","<NEW_PRIVATE_OUT>","--case-id","<PRIVATE_CASE_ID>"]
+    replay=["python","tools/run-real-aex-corpus.py","--inventory","<PUBLIC_INVENTORY>","--locator","<PRIVATE_LOCATOR>","--matrix","<MATRIX>","--runner","<PINNED_RUNNER>","--input","<INPUT>","--out","<NEW_PUBLIC_OUT>","--private-evidence-out","<NEW_PRIVATE_OUT>","--case-list","<PRIVATE_CASE_LIST>"]
     evidence_schema=Draft202012Validator(strict_json(SCHEMAS/"real-aex-public-evidence.schema.json"))
     for index,key in enumerate(sorted(grouped),1):
         values=grouped[key];value=values[0][0];gap_id=f"gap-{index:06d}"; evidence={"schema_version":1,"gap_id":gap_id,"occurrence_count":len(values),**value};evidence_schema.validate(evidence);reject_private_paths(evidence);destination=public_root/"evidence"/f"{gap_id}.json";destination.parent.mkdir(parents=True,exist_ok=True);data=canonical(evidence);destination.write_bytes(data)
@@ -192,16 +192,26 @@ def gap_records(rows,matrix,public_root):
         mapping.append({"gap_id":gap_id,"case_ids":sorted(case_id for _,case_id in values)})
     return records,mapping
 
+def selected_case_ids(case_id,case_list):
+    if case_id is not None: return {case_id}
+    if case_list is None: return None
+    values=strict_json(case_list)
+    if not isinstance(values,list) or not values: raise ValueError("--case-list must be a non-empty JSON array")
+    if any(not isinstance(value,str) or re.fullmatch(r"case-[0-9]{6}",value) is None for value in values): raise ValueError("--case-list contains an invalid case id")
+    if len(set(values))!=len(values): raise ValueError("--case-list contains duplicate case ids")
+    return set(values)
+
 def main():
-    parser=argparse.ArgumentParser(); parser.add_argument("--inventory",type=Path,required=True);parser.add_argument("--locator",type=Path,required=True);parser.add_argument("--matrix",type=Path,required=True);parser.add_argument("--runner",type=Path,required=True);parser.add_argument("--input",type=Path,required=True);parser.add_argument("--out",type=Path,required=True);parser.add_argument("--private-evidence-out",type=Path,required=True);parser.add_argument("--case-id");args=parser.parse_args()
+    parser=argparse.ArgumentParser(); parser.add_argument("--inventory",type=Path,required=True);parser.add_argument("--locator",type=Path,required=True);parser.add_argument("--matrix",type=Path,required=True);parser.add_argument("--runner",type=Path,required=True);parser.add_argument("--input",type=Path,required=True);parser.add_argument("--out",type=Path,required=True);parser.add_argument("--private-evidence-out",type=Path,required=True);selection=parser.add_mutually_exclusive_group();selection.add_argument("--case-id");selection.add_argument("--case-list",type=Path);args=parser.parse_args()
     inventory=load_validated(args.inventory,"real-aex-corpus.schema.json");matrix=load_validated(args.matrix,"real-aex-matrix.schema.json");locator=load_validated(args.locator,"real-aex-locator.schema.json");validate_inventory(inventory);bound=bind_locator(inventory,locator)
     public_destination,private_destination=output_destinations(args.out,args.private_evidence_out)
     public_destination.parent.mkdir(parents=True,exist_ok=True);private_destination.parent.mkdir(parents=True,exist_ok=True);publish=Path(tempfile.mkdtemp(prefix=".aexcompat-corpus-publish-",dir=public_destination.parent));private_publish=Path(tempfile.mkdtemp(prefix=".aexcompat-corpus-private-",dir=private_destination.parent))
-    rows=[]; expected_common=None
+    rows=[]; expected_common=None;requested_cases=selected_case_ids(args.case_id,args.case_list);matched_cases=set()
     try:
      with pinned_common_sources(args.runner.resolve(strict=True),args.input.resolve(strict=True)) as (pinned_runner,pinned_input):
       for case in matrix_cases(inventory,matrix):
-        if args.case_id is not None and case["case_id"] != args.case_id: continue
+        if requested_cases is not None and case["case_id"] not in requested_cases: continue
+        matched_cases.add(case["case_id"])
         report,result,report_hash,evidence=execute_case(case,matrix,bound[case["plugin_id"]],pinned_runner,pinned_input)
         if hashlib.sha256(evidence["report.json"]).hexdigest()!=report_hash: raise ValueError("private report evidence hash mismatch")
         observed=common_identities(report["identities"])
@@ -209,7 +219,8 @@ def main():
         elif observed != expected_common: raise ValueError("run-wide runner, input, or worker identity changed")
         retain_private_evidence(private_publish,case["case_id"],evidence)
         rows.append({**case,"classification":normalize_classification(result["classification"]),"selector_error_code":result["selector"]["error_code"],"missing_suites":result.get("missing_suites",[]),"private_report_path":f"evidence/{case['case_id']}/report.json","private_report_sha256":report_hash,"identities":sanitized_identities(report["identities"])})
-     if not rows: raise ValueError("--case-id did not select a matrix cell")
+     if requested_cases is not None and matched_cases!=requested_cases: raise ValueError("case selection contains an unknown matrix cell")
+     if not rows: raise ValueError("case selection did not select a matrix cell")
      suites=aggregate(rows)
      inventory_hash=hashlib.sha256(canonical(inventory)).hexdigest();matrix_hash=hashlib.sha256(canonical(matrix)).hexdigest()
      triage={"schema_version":1,"inventory_sha256":inventory_hash,"matrix_sha256":matrix_hash,"results":rows,"missing_suite_aggregation":suites};Draft202012Validator(strict_json(SCHEMAS/"real-aex-triage.schema.json")).validate(triage);atomic_write(private_publish/"triage.json",triage)
