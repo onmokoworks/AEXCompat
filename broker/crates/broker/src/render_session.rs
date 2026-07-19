@@ -1046,12 +1046,12 @@ mod tests {
             height: 17,
             pixel_format: RenderPixelFormat::Argb16,
         };
-        assert_eq!(geometry.input_slot_bytes(), 33 * 17 * 4);
-        assert_eq!(geometry.output_slot_bytes(), 33 * 17 * 8);
+        assert_eq!(geometry.input_slot_bytes(), 33 * 17 * 4); // 2244
+        assert_eq!(geometry.output_slot_bytes(), 33 * 17 * 8); // 4488
         // Slots are 4096-aligned after the one-page header (protocol §6).
         assert_eq!(geometry.output_slot_offset() % SLOT_ALIGNMENT, 0);
-        assert_eq!(geometry.output_slot_offset(), 4096 + 8192);
-        assert_eq!(geometry.section_bytes(), 4096 + 8192 + 8192);
+        assert_eq!(geometry.output_slot_offset(), 4096 + 4096);
+        assert_eq!(geometry.section_bytes(), 4096 + 4096 + 8192);
     }
 
     #[test]
