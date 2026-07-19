@@ -194,3 +194,31 @@ world は promote されないのに、view が抑止されて交差契約が失
 訂正: 新フラグ `g_smart_gpu_render_dispatched` (kSmartRenderGpu dispatch の
 間のみ true) で gate する。GPU negotiation からの CPU fallback では view と
 交差契約が維持される。self-test も新フラグでの gating を検証するよう更新。
+
+## 2026-07-19 PR2 implementation record (RETURNS_EXTRA_PIXELS / rect 検証強化)
+
+観察/実装 (branch `issue8-smartfx-extra-pixels`, PR1 merge 後の main 起点):
+
+- `RETURNS_EXTRA_PIXELS` (pre_output flags @34 bit 0x1) を読み取り、
+  `result_rect ⊆ output_request.rect` の包含を検証。flag なしで超過した場合は
+  `extra_pixels_contract_violation` として **診断のみ** (render 失敗にはしない)。
+  理由: AE は黙って clip する挙動であり、ここで hard fail にすると実 AEX の
+  観測 (Project Direction 1) が止まる。broker 側 gate での強制は fixture 側の
+  証拠が揃ってから判断する。
+- 空 `result_rect` は SDK の "can be empty" どおり合法扱いに変更: render
+  selector を dispatch せず `empty_result_rect: true` を報告し、0 byte 出力を
+  正常 (output_pixels_valid=true) とする。従来は rects_valid=false でも
+  pre_error==0 なら render が走っていた (max_result が空のときのみ暗黙に
+  失敗)。
+- rect 検証を inline lambda から `smart_geometry_rect_valid` に切り出し、
+  絶対座標の上限 `kMaxSmartRectMagnitude = 1<<24` を追加 (負座標そのものは
+  buffer expansion で合法なので下限も −2^24)。既存の 4096 辺長・面積上限は
+  維持。
+- output world の `extent_hint` を render 後に読み戻して report の
+  `output_world.extent_hint` に反映 (従来はフルフレームをハードコード)。
+  plug-in が extent_hint を設定した場合のみ値が変わる。
+- 新 self-test `--self-test-pf-smart-geometry-rects` で
+  `smart_geometry_rect_valid` / `smart_rect_contained` の純関数を検証。
+- 未実施 (PR3 送り): output world sizing の result_rect 基準への変更は
+  probe/oracle 証拠が出るまで保留 (max_result_rect 基準を維持)。probe で
+  AE 実挙動を観測してから確定する。

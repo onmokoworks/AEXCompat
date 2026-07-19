@@ -43,7 +43,10 @@ def test_gpu_abi_and_suite_table_are_explicit():
         "std::array<void*, 15> g_gpu_device_suite1",
         'std::strcmp(name, "PF GPU Device Suite") == 0 && version == 1',
         "kPixelFormatGpuBgra128",
-        "result.output_pixels_valid = !logical_output.empty() && !output_untouched && output_finite",
+        # Empty legal results are exempt; every rendered output still passes
+        # the untouched/finite validation.
+        "result.output_pixels_valid = result.empty_result_rect",
+        "!logical_output.empty() && !output_untouched && output_finite",
     ):
         assert marker in source
     assert "write<int32_t>(setdown_input, 8, 4)" not in source

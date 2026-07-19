@@ -1608,6 +1608,31 @@ void write_world_extent_hint(void* world, const std::array<int32_t, 4>& rect) {
   std::memcpy(static_cast<std::byte*>(world) + 44, rect.data(), sizeof(rect));
 }
 
+// Absolute-coordinate bound for plug-in supplied Smart geometry rects. Layer
+// coordinates can legitimately be negative (buffer expansion), but a rect
+// coordinate beyond this magnitude cannot come from any real composition and
+// only feeds later size arithmetic, so it fails closed.
+constexpr int32_t kMaxSmartRectMagnitude = 1 << 24;
+
+bool smart_geometry_rect_valid(const std::array<int32_t, 4>& rect) {
+  const int64_t rect_width = static_cast<int64_t>(rect[2]) - rect[0];
+  const int64_t rect_height = static_cast<int64_t>(rect[3]) - rect[1];
+  return rect[3] >= rect[1] && rect[2] >= rect[0] &&
+      rect[0] >= -kMaxSmartRectMagnitude && rect[1] >= -kMaxSmartRectMagnitude &&
+      rect[2] <= kMaxSmartRectMagnitude && rect[3] <= kMaxSmartRectMagnitude &&
+      rect_width <= 4096 && rect_height <= 4096 &&
+      rect_width * rect_height <= 16'777'216;
+}
+
+// True when inner is contained in outer; an empty inner rect is contained
+// in anything.
+bool smart_rect_contained(const std::array<int32_t, 4>& inner,
+                          const std::array<int32_t, 4>& outer) {
+  return empty_checkout_rect(inner) ||
+      (inner[0] >= outer[0] && inner[1] >= outer[1] &&
+       inner[2] <= outer[2] && inner[3] <= outer[3]);
+}
+
 constexpr uint32_t kMaxGuidMixInBytes = 1024 * 1024;
 std::atomic<uint32_t> g_comp_bg_color_successes{};
 std::atomic<uint32_t> g_comp_bg_color_rejections{};
@@ -1917,8 +1942,8 @@ bool verify_checkout_request_intersection_contract() {
   passed = smart_checkout_pixels(nullptr, 0, &checked_out) == 0 &&
       checked_out == dummy_world.data() && passed;
   // During a dispatched GPU render the base world (promoted in place by the
-  // CUDA transport) is returned; a CPU render — including a GPU negotiation
-  // that fell back to CPU — keeps returning the checkout view.
+  // CUDA transport) is returned; a CPU render, including a GPU negotiation
+  // that fell back to CPU, keeps returning the checkout view.
   std::array<std::byte, 120> dummy_view{};
   const bool saved_gpu_dispatched = g_smart_gpu_render_dispatched;
   g_input_checkout_view_world = dummy_view.data();
@@ -1940,6 +1965,27 @@ bool verify_checkout_request_intersection_contract() {
   g_smart_hosted_layers = saved_hosted_layers;
   g_smart_input_world = saved_input_world;
   g_input_checkout_view_world = saved_input_view;
+  return passed;
+}
+
+bool verify_smart_geometry_rect_contract() {
+  bool passed = smart_geometry_rect_valid({0, 0, 640, 360});
+  passed = smart_geometry_rect_valid({-8, -8, 4088, 352}) && passed;
+  passed = smart_geometry_rect_valid({0, 0, 4096, 4096}) && passed;
+  passed = smart_geometry_rect_valid({5, 5, 5, 5}) && passed;
+  passed = !smart_geometry_rect_valid({10, 0, 0, 10}) && passed;
+  passed = !smart_geometry_rect_valid({0, 10, 10, 0}) && passed;
+  passed = !smart_geometry_rect_valid({0, 0, 4097, 1}) && passed;
+  passed = !smart_geometry_rect_valid({0, 0, 1, 4097}) && passed;
+  passed = !smart_geometry_rect_valid(
+      {kMaxSmartRectMagnitude - 10, 0, kMaxSmartRectMagnitude + 10, 10}) && passed;
+  passed = !smart_geometry_rect_valid(
+      {-kMaxSmartRectMagnitude - 10, 0, -kMaxSmartRectMagnitude + 10, 10}) && passed;
+  passed = smart_rect_contained({1, 1, 5, 5}, {0, 0, 10, 10}) && passed;
+  passed = smart_rect_contained({0, 0, 10, 10}, {0, 0, 10, 10}) && passed;
+  passed = !smart_rect_contained({-1, 0, 5, 5}, {0, 0, 10, 10}) && passed;
+  passed = !smart_rect_contained({0, 0, 11, 10}, {0, 0, 10, 10}) && passed;
+  passed = smart_rect_contained({7, 7, 7, 7}, {0, 0, 1, 1}) && passed;
   return passed;
 }
 struct HandleRecord {
@@ -19941,6 +19987,15 @@ struct SmartResult {
   int32_t output_width{};
   int32_t output_height{};
   int32_t output_rowbytes{};
+  // PF_RenderOutputFlag_RETURNS_EXTRA_PIXELS (pre_output flags bit 0x1): the
+  // SDK admits result_rect > output_request.rect only when this is set.
+  bool returns_extra_pixels{};
+  bool result_within_request{true};
+  bool extra_pixels_contract_violation{};
+  // An empty result_rect is a legal answer ("can be empty" per the SDK); the
+  // render selector is skipped instead of dispatched against a zero world.
+  bool empty_result_rect{};
+  std::array<int32_t, 4> output_extent_hint{};
 };
 
 SmartResult smart_render_once(EffectEntry entry, std::array<std::byte, kInSize>& input,
@@ -20258,6 +20313,7 @@ SmartResult smart_render_once(EffectEntry entry, std::array<std::byte, kInSize>&
     result.output_rowbytes = rowbytes;
     result.result_rect = {0, 0, width, height};
     result.max_result_rect = result.result_rect;
+    result.output_extent_hint = result.result_rect;
     std::vector<unsigned char> logical_input(width * height * pixel_bytes);
     std::vector<unsigned char> logical_output(width * height * pixel_bytes);
     for (int32_t y = 0; y < height; ++y) {
@@ -20351,23 +20407,20 @@ SmartResult smart_render_once(EffectEntry entry, std::array<std::byte, kInSize>&
       : -1;
   std::cerr << "stage:smart_pre_render_end error=" << result.pre_error << "\n" << std::flush;
   automatic_checkin_pre_render_params();
-  auto valid_rect = [&](std::size_t offset) {
-    const int32_t left = read<int32_t>(pre_output, offset), top = read<int32_t>(pre_output, offset + 4);
-    const int32_t right = read<int32_t>(pre_output, offset + 8), bottom = read<int32_t>(pre_output, offset + 12);
-    const int64_t rect_width = static_cast<int64_t>(right) - left;
-    const int64_t rect_height = static_cast<int64_t>(bottom) - top;
-    return bottom >= top && right >= left && rect_width <= 4096 && rect_height <= 4096 &&
-        rect_width * rect_height <= 16'777'216;
-  };
   std::array<int32_t, 4> result_rect{}, max_result_rect{};
   std::memcpy(result_rect.data(), pre_output.data(), sizeof(result_rect));
   std::memcpy(max_result_rect.data(), pre_output.data() + 16, sizeof(max_result_rect));
   result.result_rect = result_rect;
   result.max_result_rect = max_result_rect;
-  result.rects_valid = result.pre_error == 0 && valid_rect(0) && valid_rect(16) &&
+  result.rects_valid = result.pre_error == 0 && smart_geometry_rect_valid(result_rect) &&
+      smart_geometry_rect_valid(max_result_rect) &&
       result_rect[0] >= max_result_rect[0] && result_rect[1] >= max_result_rect[1] &&
       result_rect[2] <= max_result_rect[2] && result_rect[3] <= max_result_rect[3];
-  if (result.rects_valid) {
+  // SDK: PF_PreRenderOutput.result_rect "can be empty". A legally empty
+  // answer skips the render selector instead of failing; a plug-in that
+  // reports empty geometry renders nothing.
+  result.empty_result_rect = result.rects_valid && empty_checkout_rect(result_rect);
+  if (result.rects_valid && !result.empty_result_rect) {
     const int32_t output_width = max_result_rect[2] - max_result_rect[0];
     const int32_t output_height = max_result_rect[3] - max_result_rect[1];
     if (output_width > 0 && output_height > 0) {
@@ -20397,6 +20450,14 @@ SmartResult smart_render_once(EffectEntry entry, std::array<std::byte, kInSize>&
       (g_input_checkout_request == expected_request && g_map_checkout_request == expected_request &&
        result_rect == expected_request && max_result_rect == expected_request);
   result.gpu_render_possible = (read<uint16_t>(pre_output, 34) & 0x2u) != 0;
+  result.returns_extra_pixels = (read<uint16_t>(pre_output, 34) & 0x1u) != 0;
+  // Without RETURNS_EXTRA_PIXELS the SDK does not admit result > request.
+  // The overrun is surfaced as an explicit diagnostic rather than a render
+  // failure: AE silently clips, and blocking here would turn an observable
+  // compatibility gap into a dead end for real-AEX observation.
+  result.result_within_request = smart_rect_contained(result_rect, expected_request);
+  result.extra_pixels_contract_violation = result.rects_valid &&
+      !result.returns_extra_pixels && !result.result_within_request;
   result.checkout_time = g_checkout_time; result.checkout_time_step = g_checkout_time_step;
   result.checkout_time_scale = g_checkout_time_scale;
 
@@ -20421,7 +20482,7 @@ SmartResult smart_render_once(EffectEntry entry, std::array<std::byte, kInSize>&
       result.pre_error = 4;
   }
   const int32_t render_selector = gpu_negotiation && result.gpu_render_possible ? kSmartRenderGpu : kSmartRender;
-  result.gpu_render_dispatched = render_selector == kSmartRenderGpu;
+  result.gpu_render_dispatched = render_selector == kSmartRenderGpu && !result.empty_result_rect;
   g_smart_gpu_render_dispatched = result.gpu_render_dispatched;
   CudaRenderTransport cuda_transport;
   const bool cuda_transport_ready = !result.gpu_render_dispatched ||
@@ -20430,7 +20491,10 @@ SmartResult smart_render_once(EffectEntry entry, std::array<std::byte, kInSize>&
                                     cuda_transport);
   std::cerr << "stage:" << (result.gpu_render_dispatched ? "smart_render_gpu" : "smart_render_cpu")
             << "_begin\n" << std::flush;
-  if (result.pre_error == 0 && cuda_transport_ready) {
+  if (result.empty_result_rect && result.pre_error == 0) {
+    // A legally empty result_rect renders nothing; the selector is skipped.
+    result.render_error = 0;
+  } else if (result.pre_error == 0 && cuda_transport_ready) {
     if (gpu_negotiation) capture_module_audit();
     result.selector_error = entry(render_selector, input.data(), command_output.data(),
                                   params.data(), nullptr, smart_extra.data());
@@ -20522,8 +20586,14 @@ SmartResult smart_render_once(EffectEntry entry, std::array<std::byte, kInSize>&
       }
     }
   }
-  result.output_pixels_valid = !logical_output.empty() && !output_untouched && output_finite;
+  // A legally empty result promised no pixels; zero output bytes are the
+  // correct fulfillment of that contract, not a validation failure.
+  result.output_pixels_valid = result.empty_result_rect
+      ? true
+      : !logical_output.empty() && !output_untouched && output_finite;
   if (result.render_error == 0 && !result.output_pixels_valid) result.render_error = -6;
+  std::memcpy(result.output_extent_hint.data(), output_world.data() + 44,
+              sizeof(result.output_extent_hint));
   if (external_output && result.render_error == 0) {
     std::vector<unsigned char> rgba(static_cast<std::size_t>(result.output_width) *
                                     result.output_height * pixel_bytes);
@@ -22370,6 +22440,12 @@ int wmain(int argc, wchar_t **argv) {
   if (argc == 2 && std::wstring(argv[1]) == L"--self-test-pf-checkout-intersection") {
     const bool passed = verify_checkout_request_intersection_contract();
     std::cout << "{\"pf_checkout_intersection\":\""
+              << (passed ? "passed" : "failed") << "\"}\n";
+    return passed ? 0 : 1;
+  }
+  if (argc == 2 && std::wstring(argv[1]) == L"--self-test-pf-smart-geometry-rects") {
+    const bool passed = verify_smart_geometry_rect_contract();
+    std::cout << "{\"pf_smart_geometry_rects\":\""
               << (passed ? "passed" : "failed") << "\"}\n";
     return passed ? 0 : 1;
   }
@@ -24931,6 +25007,11 @@ int wmain(int argc, wchar_t **argv) {
             << g_map_checkout_result_rect[3] << "]"
             << ",\"malformed_checkout_request_count\":" << g_malformed_checkout_requests
             << ",\"empty_checkout_pixel_denial_count\":" << g_empty_checkout_pixel_denials
+            << ",\"returns_extra_pixels\":" << (smart.returns_extra_pixels ? "true" : "false")
+            << ",\"result_within_request\":" << (smart.result_within_request ? "true" : "false")
+            << ",\"extra_pixels_contract_violation\":"
+            << (smart.extra_pixels_contract_violation ? "true" : "false")
+            << ",\"empty_result_rect\":" << (smart.empty_result_rect ? "true" : "false")
             << ",\"global_setdown_error\":" << setdown_error
             << ",\"case_id\":\"" << case_id << "\",\"pixel_format\":\"" << g_smart_pixel_format << "\",\"width\":"
             << smart.output_width << ",\"height\":" << smart.output_height << ",\"rowbytes\":"
@@ -24948,8 +25029,10 @@ int wmain(int argc, wchar_t **argv) {
             << external_width << ",\"bottom\":" << external_height << "}}"
             << ",\"output_world\":{\"width\":" << smart.output_width << ",\"height\":" << smart.output_height
             << ",\"row_bytes\":" << smart.output_rowbytes << ",\"pixel_format\":\"" << g_smart_pixel_format
-            << "\",\"premultiplication\":\"premultiplied\",\"extent_hint\":{\"left\":0,\"top\":0,\"right\":"
-            << smart.output_width << ",\"bottom\":" << smart.output_height << "}}"
+            << "\",\"premultiplication\":\"premultiplied\",\"extent_hint\":{\"left\":"
+            << smart.output_extent_hint[0] << ",\"top\":" << smart.output_extent_hint[1]
+            << ",\"right\":" << smart.output_extent_hint[2] << ",\"bottom\":"
+            << smart.output_extent_hint[3] << "}}"
             << ",\"bytes_written_per_row\":" << smart.output_rowbytes
             << ",\"undefined_tail_bytes_per_row\":0"
             << ",\"input_sha256\":\"" << smart.input_hash << "\",\"output_sha256\":\""
