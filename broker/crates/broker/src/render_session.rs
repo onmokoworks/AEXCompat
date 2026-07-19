@@ -518,6 +518,18 @@ impl RenderSession {
         // must be unique, before any transport work.
         let mut seen_layer_slots = std::collections::HashSet::new();
         for layer in request.layers {
+            // Same slot and dimension bounds the worker parser enforces, so a
+            // directly built request fails fast at open instead of launching a
+            // worker that rejects the layer on the first frame.
+            if layer.slot == 0
+                || layer.slot > 1024
+                || layer.width == 0
+                || layer.height == 0
+                || layer.width > MAX_DIMENSION
+                || layer.height > MAX_DIMENSION
+            {
+                return Err(invalid("render session layer slot or dimensions are invalid"));
+            }
             if !seen_layer_slots.insert(layer.slot) {
                 return Err(invalid("render session layer slots must be unique"));
             }

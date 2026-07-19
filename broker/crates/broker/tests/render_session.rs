@@ -264,6 +264,43 @@ mod windows_e2e {
     }
 
     #[test]
+    fn open_rejects_a_zero_layer_slot() {
+        let _behavior = BehaviorGuard::set(None);
+        let (repository, plugin, sha) = temp_repository();
+        let layers = vec![SessionLayer {
+            slot: 0,
+            width: WIDTH,
+            height: HEIGHT,
+            rgba: vec![0u8; (WIDTH * HEIGHT * 4) as usize],
+        }];
+        let error = RenderSession::open(SessionOpenRequest {
+            repository: &repository.0,
+            plugin_path: &plugin,
+            plugin_sha256: &sha,
+            parameters: None,
+            parameter_animation: None,
+            aux_manifest: None,
+            world_dump_dir: None,
+            output_checksum_detail: false,
+            mask_trailer: None,
+            spatial_trailer: None,
+            render_environment_trailer: None,
+            layers: &layers,
+            dependencies: Vec::new(),
+            width: WIDTH,
+            height: HEIGHT,
+            pixel_format: RenderPixelFormat::Argb8,
+            time_step: 1,
+            total_time: 300,
+            time_scale: 30,
+            frame_deadline: Duration::from_secs(30),
+        })
+        .map(|_| ())
+        .expect_err("a zero layer slot fails fast at open");
+        assert!(error.to_string().contains("slot or dimensions"), "{error}");
+    }
+
+    #[test]
     fn animation_sidecar_rides_the_session_and_is_cleaned_up() {
         let _behavior = BehaviorGuard::set(None);
         let (repository, plugin, sha) = temp_repository();
