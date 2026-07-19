@@ -1808,6 +1808,7 @@ const LIVE_RENDER_FRAME_DEADLINE_MS: u64 = 30_000;
 /// #107). A key change means the running worker cannot carry the next render:
 /// the session thread closes it and opens a fresh one (SEQUENCE_SETUP runs
 /// again; the reopen is visible in the report's `resident_session` facts).
+#[cfg(windows)]
 #[derive(Clone, PartialEq)]
 struct LiveSessionKey {
     plugin_sha256: String,
@@ -1826,6 +1827,9 @@ struct LiveSessionKey {
     time_scale: u32,
 }
 
+// Platform-independent (and unit-tested) even though the resident session
+// that consumes it is Windows-only.
+#[cfg_attr(not(windows), allow(dead_code))]
 fn parameter_structure_signature(
     parameters: &[aexcompat_broker::image_render::InteractiveParameter],
 ) -> String {
@@ -1848,6 +1852,7 @@ fn parameter_structure_signature(
     .unwrap_or_default()
 }
 
+#[cfg(windows)]
 struct LiveRenderRequest {
     repository: PathBuf,
     plugin_path: PathBuf,
@@ -1863,6 +1868,7 @@ struct LiveRenderRequest {
     diagnostic_eligible: bool,
 }
 
+#[cfg(windows)]
 enum LiveCommand {
     Render(Box<LiveRenderRequest>),
     /// AEX change, approval invalidation, or shutdown: the resident worker
@@ -1870,10 +1876,12 @@ enum LiveCommand {
     Close,
 }
 
+#[cfg(windows)]
 struct LiveSessionHandle {
     sender: mpsc::Sender<LiveCommand>,
 }
 
+#[cfg(windows)]
 struct DecodedInput {
     path: PathBuf,
     modified: Option<SystemTime>,
@@ -1886,6 +1894,7 @@ struct DecodedInput {
 /// State owned by the GUI's single background session thread (issue #107
 /// design: one async session thread inside the GUI process drives the
 /// out-of-process resident worker; the UI thread never blocks on it).
+#[cfg(windows)]
 struct LiveSessionState {
     decoded: Option<DecodedInput>,
     open: Option<(
@@ -1899,6 +1908,7 @@ struct LiveSessionState {
     pending_close_summary: Option<serde_json::Value>,
 }
 
+#[cfg(windows)]
 impl LiveSessionState {
     fn close_current(&mut self) {
         if let Some((_, session)) = self.open.take() {
@@ -1941,6 +1951,7 @@ impl LiveSessionState {
 /// back to the one-shot transport when the session infrastructure cannot
 /// carry the render (open failure or invalidation), mirroring the broker's
 /// length-1 wrapper fallback policy.
+#[cfg(windows)]
 fn live_render(state: &mut LiveSessionState, request: &LiveRenderRequest) -> Result<(String, Option<PathBuf>), String> {
     use aexcompat_broker::image_render::{InteractiveRenderSession, InteractiveSessionOpen};
 
@@ -2061,6 +2072,7 @@ fn live_render(state: &mut LiveSessionState, request: &LiveRenderRequest) -> Res
     }
 }
 
+#[cfg(windows)]
 fn spawn_live_session_thread(receiver: mpsc::Receiver<LiveCommand>) {
     thread::spawn(move || {
         let mut state = LiveSessionState {
@@ -2160,7 +2172,9 @@ struct HarnessApp {
     render_after_parameter_change: bool,
     /// Command channel into the background session thread (issue #107); the
     /// resident worker lives on the other side of it. Dropped with the app,
-    /// which closes the session gracefully.
+    /// which closes the session gracefully. The session transport is
+    /// Windows-only; other targets keep the one-shot path.
+    #[cfg(windows)]
     live_session: Option<LiveSessionHandle>,
 }
 
@@ -2228,6 +2242,7 @@ impl HarnessApp {
             pending_live_render: false,
             live_render_due: None,
             render_after_parameter_change: false,
+            #[cfg(windows)]
             live_session: None,
         }
     }
@@ -2236,6 +2251,7 @@ impl HarnessApp {
     /// whenever the AEX selection or its approval changes: the worker must
     /// not outlive the selection it was opened for.
     fn close_live_session(&mut self) {
+        #[cfg(windows)]
         if let Some(handle) = &self.live_session {
             if handle.sender.send(LiveCommand::Close).is_err() {
                 self.live_session = None;
@@ -3414,7 +3430,10 @@ impl HarnessApp {
             && audio_sidecar.is_none();
         // Resident-session eligibility mirrors the broker's length-1 wrapper:
         // plain classic CPU renders only. Anything else keeps the one-shot
-        // transport below (issue #107).
+        // transport below (issue #107). The session transport is
+        // Windows-only; other targets always render one-shot.
+        #[cfg(windows)]
+        {
         let live_eligible = !smart
             && host_context.is_none()
             && custom_ui_action.is_none()
@@ -3470,6 +3489,7 @@ impl HarnessApp {
             self.live_session = None;
             self.status = "The session thread had exited; press Render to retry.".into();
             return;
+        }
         }
         self.status = "Rendering in an isolated worker...".into();
         self.rendering = true;

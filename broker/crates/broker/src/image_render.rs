@@ -5217,6 +5217,19 @@ impl InteractiveRenderSession {
         output_path: &Path,
     ) -> io::Result<Value> {
         use crate::render_session::FrameStatus;
+        // The one-shot transport refuses to overwrite an existing output or
+        // depth-preserving sidecar; the resident path enforces the same guard
+        // before dispatching the frame.
+        let preserved_probe = self
+            .pixel_format
+            .raw_extension()
+            .map(|extension| output_path.with_extension(extension));
+        if output_path.exists() || preserved_probe.as_ref().is_some_and(|path| path.exists()) {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "render output already exists",
+            ));
+        }
         let started = Instant::now();
         let frame_index = self.frame_serial;
         let outcome = self.session.render_frame_with_parameters(
