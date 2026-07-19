@@ -4,7 +4,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SOURCE = ROOT / "minihost" / "src" / "l2_main.cpp"
+SOURCE = ROOT / "minihost" / "src" / "worker_pf_path_runtime.cpp"
 
 
 def _worker() -> Path:
@@ -17,17 +17,15 @@ def _worker() -> Path:
 
 def test_path_hardening_is_fail_closed_in_source():
     source = SOURCE.read_text(encoding="utf-8")
-    assert "curve.open && vertices > 0 ? vertices - 1 : vertices" in source
-    assert "snapshot_checked_pf_path(path, curve)" in source
-    assert "path.open && count > 0 ? count - 1 : count" in source
-    assert "registered_pf_segment_prep" in source
-    cleanup = source[source.index("int32_t __cdecl pf_path_cleanup_seg_length") :]
-    cleanup = cleanup[: cleanup.index("bool verify_pf_path_data_hardening")]
-    assert "registered_pf_segment_prep" in cleanup
-    assert "checked_pf_segment_prep" not in cleanup
-    assert "catch (const std::bad_alloc&)" in source
-    assert "kPfBadCallbackParam" in cleanup
-    assert "g_pf_path_segment_preps_mutex" in cleanup
+    assert "c.open&&n?n-1:n" in source
+    assert "checked(path,c)" in source
+    assert "registered(prep,path,segment,false)" in source
+    cleanup = source[source.index("int32_t __cdecl path_cleanup_seg_length") :]
+    cleanup = cleanup[: cleanup.index("int32_t __cdecl path_is_inverted")]
+    assert "registered(prep,path,segment,false)" in cleanup
+    assert "catch(const std::bad_alloc&)" in source
+    assert "kBad" in cleanup
+    assert "lock(g_mutex)" in cleanup
 
 
 def test_path_hardening_runtime_self_test():

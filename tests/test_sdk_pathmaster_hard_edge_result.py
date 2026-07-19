@@ -9,6 +9,7 @@ WORKER_SOURCES = (
     ROOT / "minihost" / "src" / "worker_pf_suites.cpp",
     ROOT / "minihost" / "src" / "worker_pf_suites_internal.hpp",
     ROOT / "minihost" / "src" / "worker_l2_suite_abi.hpp",
+    ROOT / "minihost" / "src" / "worker_pf_path_runtime.cpp",
 )
 BROKER = ROOT / "broker" / "crates" / "broker" / "src" / "image_render.rs"
 
@@ -58,10 +59,10 @@ def test_worker_and_broker_keep_the_path_boundary_explicit_and_observable():
         "version == 6",
         "write_rect(lifecycle_world.data() + 44, 1, 1)",
         "transfer_mode < 0 || transfer_mode > 38",
-        "flatten_pf_path",
-        "pf_path_distance",
-        "kMaxOutlineVertices * 16",
-        "pf_path_lifetimes_balanced()",
+        "bool flatten(",
+        "double edge_distance(",
+        "out.size()<=64*16",
+        "pf_path_runtime::lifetimes_balanced()",
     ):
         assert marker in worker
     for marker in (

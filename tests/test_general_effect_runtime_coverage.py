@@ -43,7 +43,11 @@ def test_source_wiring_matches_inventory():
 
     path = report["suites"]["PF_PathDataSuite1"]
     for index, callback in zip(path["implemented_slots"], path["callbacks"]):
-        assert f"g_pf_path_data_suite1[{index}] = reinterpret_cast<void*>(&{callback});" in source
+        runtime_callback = callback.removeprefix("pf_")
+        assert (
+            f"g_pf_path_data_suite1[{index}] = reinterpret_cast<void*>(&aexcompat::pf_path_runtime::{runtime_callback});"
+            in source
+        )
 
     sampling = report["suites"]["PF_SamplingSuites1"]["callbacks"]
     table_names = {"8": "g_sampling8_suite1", "16": "g_sampling16_suite1", "float": "g_sampling_float_suite1"}
