@@ -1,7 +1,9 @@
 int32_t __cdecl get_layer_num_masks(void* layer, int32_t* count) {
-  if (layer != &g_layer || !count) return 4;
+  const auto host = aexcompat::mask_runtime::host_context();
+  if (layer != host.layer || !count) return 4;
   if (aexcompat::mask_runtime::fault() == aexcompat::mask_runtime::Fault::CountCrash) {
-    RaiseException(EXCEPTION_ACCESS_VIOLATION, 0, 0, nullptr);
+    if (host.raise_access_violation) host.raise_access_violation();
+    return 4;
   }
   if (aexcompat::mask_runtime::fault() == aexcompat::mask_runtime::Fault::CountError) return 4;
   *count = static_cast<int32_t>(std::count_if(g_mask_scene.begin(), g_mask_scene.end(),
@@ -10,7 +12,7 @@ int32_t __cdecl get_layer_num_masks(void* layer, int32_t* count) {
 }
 
 int32_t __cdecl get_layer_mask_by_index(void* layer, int32_t index, void** mask) {
-  if (layer != &g_layer || index < 0 || !mask) return 4;
+  if (layer != aexcompat::mask_runtime::host_context().layer || index < 0 || !mask) return 4;
   const auto masks = ordered_active_masks();
   if (static_cast<std::size_t>(index) >= masks.size()) return 4;
   auto& record = *masks[static_cast<std::size_t>(index)];
@@ -71,7 +73,8 @@ int32_t __cdecl get_mask_id(void* handle, int32_t* value) {
   *value = mask->id; return 0;
 }
 int32_t __cdecl create_new_mask(void* layer, void** handle, int32_t* index) {
-  if (layer != &g_layer || !handle || g_mask_scene.size() >= kMaxHostMasks) {
+  if (layer != aexcompat::mask_runtime::host_context().layer || !handle ||
+      g_mask_scene.size() >= kMaxHostMasks) {
     ++g_invalid_mask_operations; return 4;
   }
   HostMask mask; mask.id = g_next_mask_id++; mask.outline_stream_id = g_next_stream_id++;
@@ -248,7 +251,7 @@ int32_t __cdecl dispose_stream_value(StreamValue* value) {
 }
 
 int32_t __cdecl is_stream_legal(void* layer, int32_t, uint8_t* legal) {
-  if (layer != &g_layer || !legal) return 4;
+  if (layer != aexcompat::mask_runtime::host_context().layer || !legal) return 4;
   *legal = 0;
   ++g_stream_metadata_queries;
   return 0;

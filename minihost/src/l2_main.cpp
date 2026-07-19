@@ -796,6 +796,10 @@ int32_t __cdecl set_mask_outline_vertex_info(void* outline, int32_t index,
                                               const MaskVertex* vertex);
 OpaqueHostObject g_effect{0x45464658};
 OpaqueHostObject g_layer{0x4c415952};
+
+void raise_mask_access_violation() {
+  RaiseException(EXCEPTION_ACCESS_VIOLATION, 0, 0, nullptr);
+}
 std::vector<HostMask> g_mask_scene;
 std::unordered_map<HostMask*, uint32_t> g_pf_path_checkouts;
 uint32_t g_pf_path_checkout_calls{};
@@ -867,6 +871,25 @@ struct AddKeyframesTransaction {
 };
 std::list<AddKeyframesTransaction> g_add_keyframe_transactions;
 
+aexcompat::mask_runtime::Snapshot mask_runtime_snapshot() {
+  aexcompat::mask_runtime::Snapshot snapshot;
+  snapshot.active_masks = static_cast<uint32_t>(std::count_if(
+      g_mask_scene.begin(), g_mask_scene.end(), [](const auto& mask) { return !mask.deleted; }));
+  snapshot.masks_acquired = g_mask_lifetime.masks_acquired;
+  snapshot.masks_disposed = g_mask_lifetime.masks_disposed;
+  snapshot.streams_acquired = g_mask_lifetime.streams_acquired;
+  snapshot.streams_disposed = g_mask_lifetime.streams_disposed;
+  snapshot.values_acquired = g_mask_lifetime.values_acquired;
+  snapshot.values_disposed = g_mask_lifetime.values_disposed;
+  snapshot.mask_mutations = g_mask_mutations;
+  snapshot.invalid_mask_operations = g_invalid_mask_operations;
+  snapshot.outline_mutations = g_outline_mutations;
+  snapshot.invalid_outline_operations = g_invalid_outline_operations;
+  snapshot.keyframe_mutations = g_keyframe_mutations;
+  snapshot.invalid_keyframe_operations = g_invalid_keyframe_operations;
+  return snapshot;
+}
+
 std::size_t distinct_vertex_count(const OutlineData& mask) {
   return mask.vertices.size() - static_cast<std::size_t>(!mask.open && !mask.vertices.empty());
 }
@@ -893,6 +916,8 @@ bool pf_path_lifetimes_balanced() {
 }
 
 bool configure_mask_scene(const std::string& scene_id) {
+  aexcompat::mask_runtime::configure_host_context(
+      {&g_layer, &raise_mask_access_violation, &mask_runtime_snapshot});
   if (!g_stream_refs.empty() || !g_stream_values.empty() ||
       !g_add_keyframe_transactions.empty()) return false;
   aexcompat::mask_runtime::SceneSeed seed;

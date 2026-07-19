@@ -8,6 +8,32 @@ namespace aexcompat::mask_runtime {
 
 enum class Fault { None, CountError, CountCrash };
 
+struct Snapshot {
+  Fault fault{Fault::None};
+  uint32_t active_masks{};
+  uint32_t masks_acquired{};
+  uint32_t masks_disposed{};
+  uint32_t streams_acquired{};
+  uint32_t streams_disposed{};
+  uint32_t values_acquired{};
+  uint32_t values_disposed{};
+  uint32_t mask_mutations{};
+  uint32_t invalid_mask_operations{};
+  uint32_t outline_mutations{};
+  uint32_t invalid_outline_operations{};
+  uint32_t keyframe_mutations{};
+  uint32_t invalid_keyframe_operations{};
+};
+
+// Worker-owned host identities used by the raw AEGP callback ABI.  Keeping
+// these as opaque pointers prevents the mask runtime from depending on l2's
+// concrete host-object layout.
+struct HostContext {
+  void* layer{};
+  void (*raise_access_violation)(){};
+  Snapshot (*snapshot)(){};
+};
+
 struct Vertex {
   double x{};
   double y{};
@@ -33,5 +59,8 @@ struct SceneSeed {
 bool build_scene_seed(const std::string& scene_id, SceneSeed& seed);
 void set_fault(Fault fault);
 Fault fault();
+void configure_host_context(HostContext context);
+HostContext host_context();
+Snapshot snapshot();
 
 }  // namespace aexcompat::mask_runtime

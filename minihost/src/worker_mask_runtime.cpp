@@ -7,6 +7,9 @@ namespace aexcompat::mask_runtime {
 namespace {
 
 std::atomic<Fault> g_fault{Fault::None};
+std::atomic<void*> g_layer{nullptr};
+std::atomic<void (*)()> g_raise_access_violation{nullptr};
+std::atomic<Snapshot (*)()> g_snapshot{nullptr};
 
 MaskSeed rectangle(double left, double top, double right, double bottom) {
   MaskSeed mask;
@@ -23,6 +26,25 @@ MaskSeed rectangle(double left, double top, double right, double bottom) {
 void set_fault(Fault fault) { g_fault.store(fault, std::memory_order_release); }
 
 Fault fault() { return g_fault.load(std::memory_order_acquire); }
+
+void configure_host_context(HostContext context) {
+  g_layer.store(context.layer, std::memory_order_release);
+  g_raise_access_violation.store(context.raise_access_violation, std::memory_order_release);
+  g_snapshot.store(context.snapshot, std::memory_order_release);
+}
+
+HostContext host_context() {
+  return {g_layer.load(std::memory_order_acquire),
+          g_raise_access_violation.load(std::memory_order_acquire),
+          g_snapshot.load(std::memory_order_acquire)};
+}
+
+Snapshot snapshot() {
+  const auto provider = g_snapshot.load(std::memory_order_acquire);
+  Snapshot value = provider ? provider() : Snapshot{};
+  value.fault = fault();
+  return value;
+}
 
 bool build_scene_seed(const std::string& scene_id, SceneSeed& seed) {
   SceneSeed candidate;
