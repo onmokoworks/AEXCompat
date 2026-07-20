@@ -45,6 +45,13 @@ struct SequenceCounters {
   std::uint32_t flatten_count;
   std::uint32_t frame_setup_count;
   std::uint32_t frame_setdown_count;
+  // Audio observation (issue #98 W4 / #239 stage 0): the AUDIO selector
+  // issuance relative to the image RENDER path is the open question for the
+  // resident-session audio design. The probe advertises AUDIO_EFFECT_TOO so
+  // the host routes these when the comp carries audio.
+  std::uint32_t audio_setup_count;
+  std::uint32_t audio_render_count;
+  std::uint32_t audio_setdown_count;
 };
 
 std::atomic<std::uint32_t> event_counter{0};
@@ -69,6 +76,9 @@ const char* selector_name(PF_Cmd cmd) {
     case PF_Cmd_SMART_PRE_RENDER: return "SMART_PRE_RENDER";
     case PF_Cmd_SMART_RENDER: return "SMART_RENDER";
     case PF_Cmd_GET_FLATTENED_SEQUENCE_DATA: return "GET_FLATTENED_SEQUENCE_DATA";
+    case PF_Cmd_AUDIO_SETUP: return "AUDIO_SETUP";
+    case PF_Cmd_AUDIO_RENDER: return "AUDIO_RENDER";
+    case PF_Cmd_AUDIO_SETDOWN: return "AUDIO_SETDOWN";
     default: return "OTHER";
   }
 }
@@ -135,11 +145,13 @@ void log_event(PF_Cmd cmd, PF_InData* in_data, const SequenceCounters* counters,
         buffer, sizeof(buffer),
         ",\"seq_counters\":{\"setup\":%u,\"resetup\":%u,\"render\":%u,"
         "\"smart_pre_render\":%u,\"smart_render\":%u,\"flatten\":%u,"
-        "\"frame_setup\":%u,\"frame_setdown\":%u}",
+        "\"frame_setup\":%u,\"frame_setdown\":%u,\"audio_setup\":%u,"
+        "\"audio_render\":%u,\"audio_setdown\":%u}",
         counters->setup_count, counters->resetup_count, counters->render_count,
         counters->smart_pre_render_count, counters->smart_render_count,
         counters->flatten_count, counters->frame_setup_count,
-        counters->frame_setdown_count);
+        counters->frame_setdown_count, counters->audio_setup_count,
+        counters->audio_render_count, counters->audio_setdown_count);
     line.append(buffer, written > 0 ? static_cast<size_t>(written) : 0);
   }
   if (drive_valid) {
@@ -177,7 +189,7 @@ PF_Err sequence_setup(PF_InData* in_data, PF_OutData* out_data) {
   auto* counters = static_cast<SequenceCounters*>(
       (*in_data->utils->host_lock_handle)(handle));
   if (!counters) return PF_Err_OUT_OF_MEMORY;
-  *counters = SequenceCounters{kSequenceMagic, 1, 0, 0, 0, 0, 0, 0, 0};
+  *counters = SequenceCounters{kSequenceMagic, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
   (*in_data->utils->host_unlock_handle)(handle);
   out_data->sequence_data = handle;
   return PF_Err_NONE;
@@ -228,6 +240,50 @@ PF_Err classic_render(PF_InData* in_data, PF_ParamDef* params[],
   const bool drive_valid = params && params[1];
   log_event(PF_Cmd_RENDER, in_data, counters_valid ? &counters : nullptr,
             drive_valid ? params[1]->u.fs_d.value : 0.0, drive_valid, extra);
+  return PF_Err_NONE;
+}
+
+// Audio selectors (issue #98 W4 / #239 stage 0). Counts the selector, passes
+// the input audio through unchanged on AUDIO_RENDER (the host allocates
+// dest_snd; a same-format copy keeps the render valid without altering the
+// signal), and logs the sample range plus the negotiated format so the JSONL
+// timeline shows how AUDIO selectors interleave with the image RENDER path.
+PF_Err handle_audio(PF_Cmd cmd, PF_InData* in_data, PF_OutData* out_data) {
+  update_counters(in_data, [cmd](SequenceCounters* counters) {
+    if (cmd == PF_Cmd_AUDIO_SETUP)
+      counters->audio_setup_count += 1;
+    else if (cmd == PF_Cmd_AUDIO_RENDER)
+      counters->audio_render_count += 1;
+    else
+      counters->audio_setdown_count += 1;
+  });
+  if (cmd == PF_Cmd_AUDIO_RENDER) {
+    const PF_SoundWorld& src = in_data->src_snd;
+    PF_SoundWorld& dst = out_data->dest_snd;
+    if (src.dataP && dst.dataP &&
+        src.fi.num_channels == dst.fi.num_channels &&
+        src.fi.sample_size == dst.fi.sample_size &&
+        src.num_samples == dst.num_samples) {
+      const std::size_t bytes = static_cast<std::size_t>(src.num_samples) *
+                                src.fi.num_channels * src.fi.sample_size;
+      std::memcpy(dst.dataP, src.dataP, bytes);
+    }
+  }
+  const PF_SoundWorld& src = in_data->src_snd;
+  char extra[512];
+  std::snprintf(
+      extra, sizeof(extra),
+      "\"audio\":{\"start_samp\":%ld,\"dur_samp\":%ld,\"total_samp\":%ld,"
+      "\"src_rate\":%.3f,\"src_channels\":%d,\"src_sample_size\":%d,"
+      "\"src_samples\":%ld}",
+      static_cast<long>(in_data->start_sampL),
+      static_cast<long>(in_data->dur_sampL),
+      static_cast<long>(in_data->total_sampL), static_cast<double>(src.fi.rateF),
+      static_cast<int>(src.fi.num_channels), static_cast<int>(src.fi.sample_size),
+      static_cast<long>(src.num_samples));
+  bool counters_valid = false;
+  const SequenceCounters counters = snapshot_counters(in_data, &counters_valid);
+  log_event(cmd, in_data, counters_valid ? &counters : nullptr, 0.0, false, extra);
   return PF_Err_NONE;
 }
 
@@ -365,10 +421,17 @@ extern "C" DllExport PF_Err EffectMain(PF_Cmd cmd, PF_InData* in_data,
   switch (cmd) {
     case PF_Cmd_GLOBAL_SETUP:
       out_data->my_version = PF_VERSION(1, 0, 0, PF_Stage_DEVELOP, 0);
-      out_data->out_flags = PF_OutFlag_PIX_INDEPENDENT;
 #if defined(SELTIMELINE_SMART)
+      out_data->out_flags = PF_OutFlag_PIX_INDEPENDENT;
       out_data->out_flags2 = PF_OutFlag2_SUPPORTS_SMART_RENDER;
 #else
+      // AUDIO_EFFECT_TOO (not just I_USE_AUDIO) is what makes the host issue
+      // AUDIO_SETUP/RENDER/SETDOWN to this effect, so a multi-frame comp with
+      // audio records the audio selector timeline alongside the image path
+      // (issue #98 W4 / #239 stage 0). Classic flavor only; the flag must also
+      // be declared in the PiPL OutFlags (pf_selector_timeline_classic.rc) to
+      // match, or the host rejects the GLOBAL_SETUP out_flags as inconsistent.
+      out_data->out_flags = PF_OutFlag_PIX_INDEPENDENT | PF_OutFlag_AUDIO_EFFECT_TOO;
       out_data->out_flags2 = 0;
 #endif
       log_event(cmd, in_data, nullptr, 0.0, false, nullptr);
@@ -455,6 +518,10 @@ extern "C" DllExport PF_Err EffectMain(PF_Cmd cmd, PF_InData* in_data,
         counters->render_count += 1;
       });
       return classic_render(in_data, params, output);
+    case PF_Cmd_AUDIO_SETUP:
+    case PF_Cmd_AUDIO_RENDER:
+    case PF_Cmd_AUDIO_SETDOWN:
+      return handle_audio(cmd, in_data, out_data);
 #if defined(SELTIMELINE_SMART)
     case PF_Cmd_SMART_PRE_RENDER:
       return smart_pre_render(in_data, static_cast<PF_PreRenderExtra*>(extra));
