@@ -113,6 +113,10 @@ struct SmartOutputBounds {
   int32_t width{};
   int32_t height{};
   int32_t rowbytes{};
+  // Top-left of the output buffer in layer coordinates (result_rect's
+  // top-left); becomes PF_LayerDef::origin_x/origin_y on the output world.
+  int32_t origin_x{};
+  int32_t origin_y{};
 };
 
 // Absolute-coordinate bound for plug-in supplied Smart geometry rects. Layer
