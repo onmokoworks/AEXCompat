@@ -7,7 +7,7 @@
 1. この `AGENTS.md` を読む。
 2. `git status --short --branch` と `git worktree list` を確認する。
 3. 主worktree (`codex/harness-live-preview-ui`) の既存変更は、閲覧以外の操作をしない。revert、reset、checkout、clean、上書きを禁止する。
-4. `git fetch origin main` と GitHub の Issue/PR の現在状態を確認する。過去の会話や古いcommitを正本にしない。
+4. 設定済みのremote (通常は `origin`) から最新を fetch し、GitHub の Issue/PR の現在状態を確認する。remoteが無い、または名前が異なる環境では fetch は best-effort とし (`git remote` で実際の名前を確認する)、GitHub側の現在状態の確認を優先する。過去の会話や古いcommitを正本にしない。
 5. 同時に複数のIssue、PR、worktree、エージェントを進めない。ユーザーが明示的に並列作業を依頼した場合だけ例外とする。
 
 ## 1. Issue-first / claim-first
