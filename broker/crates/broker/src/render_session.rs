@@ -382,8 +382,9 @@ struct SessionGeometry {
     /// output slot holds up to `output_capacity_width * output_capacity_height`
     /// pixels so an expand-output effect can render larger than the input
     /// without changing the render geometry (in_data extent / full resolution,
-    /// which stay `width`/`height`). Equal to `width`/`height` unless the
-    /// wrapper re-opened the session to accommodate an expand.
+    /// which stay `width`/`height`). Starts equal to `width`/`height` and is
+    /// raised in place by an in-session grow (#262) when an expand overruns the
+    /// launch slot.
     output_capacity_width: u32,
     output_capacity_height: u32,
     pixel_format: RenderPixelFormat,

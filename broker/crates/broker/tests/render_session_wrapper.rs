@@ -1266,13 +1266,13 @@ mod windows_e2e {
         let _ = std::fs::remove_dir_all(&scratch);
     }
 
-    /// A/B equivalence for an expand-output effect (issue #261): the length-1
-    /// session route re-opens with a larger output slot and renders the
+    /// A/B equivalence for an expand-output effect (issue #262): the length-1
+    /// session route grows the shared output slot in place and renders the
     /// expanded output byte-identically to the one-shot argv transport, instead
     /// of falling back. The fixture is pf_expand_allowed_probe (FRAME_SETUP
     /// grows the output by 4px with PF_OutFlag_I_EXPAND_BUFFER), which overruns
-    /// the initial slot and drives the resize_needed re-open. Requires the
-    /// render worker and the resize probe (tools/build-pf-frame-resize-probe.ps1).
+    /// the initial slot and drives the resize_needed in-session grow. Requires
+    /// the render worker and the resize probe (tools/build-pf-frame-resize-probe.ps1).
     #[test]
     fn expand_output_matches_the_one_shot_transport() {
         let _env_guard = SESSION_ROUTE_ENV_LOCK
