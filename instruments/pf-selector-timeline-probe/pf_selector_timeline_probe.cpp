@@ -281,16 +281,19 @@ PF_Err handle_audio(PF_Cmd cmd, PF_InData* in_data, PF_OutData* out_data) {
     // and AUDIO_SETDOWN frees setup memory; reading src_snd there yields stale
     // or undefined data, so only log the sound world for AUDIO_RENDER.
     const PF_SoundWorld& src = in_data->src_snd;
+    // src_format is the PF_SoundFormat enum (unsigned PCM / signed PCM / float),
+    // orthogonal to sample_size: a 4-byte PCM buffer is not the same as 4-byte
+    // float. Log it so the trace can substantiate which format AE negotiated.
     std::snprintf(
         extra, sizeof(extra),
         "\"audio\":{\"start_samp\":%ld,\"dur_samp\":%ld,\"total_samp\":%ld,"
         "\"src_rate\":%.3f,\"src_channels\":%d,\"src_sample_size\":%d,"
-        "\"src_samples\":%ld}",
+        "\"src_format\":%d,\"src_samples\":%ld}",
         static_cast<long>(in_data->start_sampL),
         static_cast<long>(in_data->dur_sampL),
         static_cast<long>(in_data->total_sampL), static_cast<double>(src.fi.rateF),
         static_cast<int>(src.fi.num_channels), static_cast<int>(src.fi.sample_size),
-        static_cast<long>(src.num_samples));
+        static_cast<int>(src.fi.format), static_cast<long>(src.num_samples));
   } else {
     // Explicit null so the timeline records that no sound-world data was read
     // for setup/setdown, rather than emitting stale fields.

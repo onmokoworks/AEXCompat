@@ -78,8 +78,11 @@ install、実行後 cleanup。生ログは scratchpad の `audio-selector-timeli
    image が sequence 状態を共有するか分離するかは、映像+音声レイヤーでの
    追加観測 (次アクション参照) が要る。ここで確定なのは「audio が別スレッドで
    独立した sequence 履歴を持つ」ことまで。
-4. host が rate/channels を正規化した: src は 48000Hz / stereo / sample_size=4
-   (float) で届いた (入力 WAV は 44100Hz mono)。session でも audio フォーマットは
+4. host が rate/channels/format を正規化した: src は 48000Hz / stereo /
+   sample_size=4 / **format=2 (PF_SIGNED_FLOAT)** で届いた (入力 WAV は
+   44100Hz mono)。format enum を trace に記録して float であることを確認済み
+   (sample_size=4 だけでは 4byte PCM と区別できないため。probe 更新後の
+   映像+音声再観測で `src_format=2`)。session でも audio フォーマットは
    host 交渉値であり、入力そのままではない。
 5. image RENDER は発火しなかった (render=0)。probe が audio-only レイヤーに
    載っていたため。image と audio を同一レイヤーで同時観測するには映像+音声を
