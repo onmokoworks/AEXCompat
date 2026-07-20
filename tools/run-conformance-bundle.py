@@ -358,6 +358,33 @@ def empty_smartfx_result(
     }
 
 
+def world_from_report_dims(
+    value: dict[str, Any], depth: str, premultiplication: str
+) -> dict[str, Any] | None:
+    # The Classic worker report exposes geometry as top-level width/height/rowbytes
+    # and emits no premultiplication (only begin_smart does), so the broker forwards
+    # the input_world/output_world objects as null. Rebuild the output world (a
+    # Classic render fills the whole frame) from those worker dims, pinning
+    # pixel_format to the requested depth and premultiplication to the manifest's
+    # requested alpha mode the broker pre-transformed the input to.
+    try:
+        width = int(value["width"])
+        height = int(value["height"])
+        row_bytes = int(value["row_bytes"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    if width < 0 or height < 0 or row_bytes < 0:
+        return None
+    return {
+        "width": width,
+        "height": height,
+        "row_bytes": row_bytes,
+        "pixel_format": depth,
+        "premultiplication": premultiplication,
+        "extent_hint": {"left": 0, "top": 0, "right": width, "bottom": height},
+    }
+
+
 def normalize_harness_report(
     depth: str,
     value: dict[str, Any],
@@ -376,14 +403,25 @@ def normalize_harness_report(
         return empty_smartfx_result(depth, value, input_world)
     if not output.is_file():
         return failed_result(depth, input_world, "invalid_output", render_path)
-    try:
-        actual_input_world = value["input_world"]
-        actual_world = value["output_world"]
-        width = int(actual_world["width"])
-        height = int(actual_world["height"])
-    except (KeyError, TypeError, ValueError):
+    # SmartFX reports carry explicit input_world/output_world objects
+    # (begin_smart); the Classic report only exposes top-level
+    # width/height/rowbytes/pixel_format/premultiplication plus world_debug_json,
+    # so the broker forwards those world objects as null. Rebuild the output
+    # world from the authoritative worker dims (a Classic render fills the whole
+    # frame) and use the known input world when the report omits them, otherwise
+    # a successful Classic render would be mislabeled invalid_output.
+    actual_input_world = value.get("input_world")
+    actual_world = value.get("output_world")
+    if not isinstance(actual_world, dict):
+        actual_world = world_from_report_dims(value, depth, premultiplication)
+    if not isinstance(actual_input_world, dict):
+        actual_input_world = input_world
+    if not isinstance(actual_world, dict) or not isinstance(actual_input_world, dict):
         return failed_result(depth, input_world, "invalid_output", render_path)
-    if not isinstance(actual_input_world, dict) or not isinstance(actual_world, dict):
+    try:
+        int(actual_world["width"])
+        int(actual_world["height"])
+    except (KeyError, TypeError, ValueError):
         return failed_result(depth, input_world, "invalid_output", render_path)
     result = {
         "depth": depth,

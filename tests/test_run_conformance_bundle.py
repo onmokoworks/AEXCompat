@@ -203,6 +203,55 @@ def test_empty_result_rect_on_classic_is_still_invalid_without_a_png(tmp_path):
     assert result["classification"] == "invalid_output"
 
 
+def test_classic_report_without_world_objects_is_ok(tmp_path):
+    module = load_runner_module()
+    input_world = {
+        "width": 4,
+        "height": 3,
+        "row_bytes": 16,
+        "pixel_format": "argb8",
+        "premultiplication": "premultiplied",
+        "extent_hint": {"left": 0, "top": 0, "right": 4, "bottom": 3},
+    }
+    output = tmp_path / "out.rgba"
+    output.write_bytes(b"\x00" * 48)
+    # The Classic worker report exposes geometry at the top level and omits the
+    # input_world/output_world objects that begin_smart emits, so the broker
+    # forwards them as null. A successful Classic render must still be "ok".
+    value = {
+        "passed": True,
+        "render_path": "classic",
+        "width": 4,
+        "height": 3,
+        "row_bytes": 16,
+        "pixel_format": "argb8",
+        # The Classic report emits no premultiplication, so the broker forwards
+        # it as null; the world's alpha mode comes from the manifest argument.
+        "premultiplication": None,
+        "input_world": None,
+        "output_world": None,
+        "parameter_metadata": [],
+    }
+    result = module.normalize_harness_report(
+        "argb8", value, output, input_world, "premultiplied", "classic"
+    )
+    assert result["classification"] == "ok"
+    assert result["world"] == {
+        "width": 4,
+        "height": 3,
+        "row_bytes": 16,
+        "pixel_format": "argb8",
+        "premultiplication": "premultiplied",
+        "extent_hint": {"left": 0, "top": 0, "right": 4, "bottom": 3},
+    }
+    assert result["input_world"] == input_world
+    assert result["selector"] == {
+        "render_path": "classic",
+        "completed": True,
+        "error_code": 0,
+    }
+
+
 @pytest.mark.parametrize("plugin_kind", ["aegp_candidate", "unknown_no_effect_entrypoint"])
 def test_plugin_kind_maps_to_loader_error(plugin_kind):
     module = load_runner_module()
