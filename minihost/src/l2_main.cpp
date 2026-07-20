@@ -1705,7 +1705,12 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
        {static_cast<int32_t>(g_pixel_aspect_ratio.numerator),
         static_cast<int32_t>(g_pixel_aspect_ratio.denominator)},
        invocation.external_pixel_bytes,
-       is_render_worker(), is_rendering_worker(), invocation.audio_mode, g_skip_about},
+       is_render_worker(), is_rendering_worker(),
+       // The audio session is an audio invocation too: without this the
+       // admission "requested audio" flag stays false and host_audio::Runtime
+       // rejects unadvertised audio checkouts on the session path, breaking
+       // audio-only plug-ins that render fine under --render-audio (Codex #252).
+       invocation.audio_mode || invocation.audio_session_mode, g_skip_about},
       {&invoke_entry_seh, &reset_effect_lifetime,
        +[](bool active) { g_global_setup_active = active; },
        +[](bool requested, bool advertised) {
@@ -1876,6 +1881,21 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
          parameter_count_contract_valid,
          invocation.external_dependencies_mode ? argv[4] : nullptr});
     return session.finish(early_result);
+  }
+  if (is_render_worker() && invocation.audio_session_mode) {
+    const aexcompat::worker_audio_session::AudioSessionGeometry geometry{
+        invocation.audio_session_max_samples, invocation.audio_session_channels};
+    const auto session_outcome = run_audio_render_session(
+        entry, input, output, global_error, params_error,
+        invocation.requested_parameters, geometry, invocation.external_time_scale);
+    if (!session.prepare_protocol_report()) return session.finish(14);
+    restore_native_stdout();
+    emit_audio_session_report(global_error, params_error, session_outcome);
+    if (session_outcome.protocol_violation)
+      return session.finish(aexcompat::worker_audio_session::kExitProtocolViolation);
+    if (session_outcome.invariant_failure)
+      return session.finish(aexcompat::worker_audio_session::kExitInvariantFailure);
+    return session.finish(session_outcome.clean ? 0 : 20);
   }
   if (is_render_worker() && invocation.audio_mode) {
     const AudioModeRequest audio_request{

@@ -1542,6 +1542,156 @@ pub fn render_experimental_image(
     )
 }
 
+enum AudioWrapperOutcome {
+    /// The length-1 audio session rendered and closed clean; this is the public
+    /// report, satisfying the same contract the one-shot path asserts.
+    Report(Value),
+    /// The session carried the render but a post-render step (output already
+    /// exists, write failure) failed; final, not a fallback.
+    Failure(io::Error),
+    /// The session infrastructure could not carry the render; the caller reruns
+    /// the one-shot `--render-audio` transport.
+    Fallback,
+}
+
+/// Renders a single audio buffer through a length-1 AudioRenderSession (§10),
+/// so the one-shot `--render-audio` argv transport is a fallback rather than
+/// the only path (issue #98 W4 / #239). The session's own validation (guards,
+/// checksum, generation, and the clean-close gate on the worker's audio
+/// report) enforces the same contract the one-shot report is checked against,
+/// so the synthesized report carries the asserted fields.
+#[cfg(windows)]
+fn render_audio_via_length_one_session(
+    repository: &Path,
+    plugin_path: &Path,
+    approved_sha256: &str,
+    input: &[u8],
+    output_path: &Path,
+    parameters: &[InteractiveParameter],
+) -> AudioWrapperOutcome {
+    use crate::render_session::{AudioRenderSession, AudioSessionOpenRequest, AudioSpanStatus};
+    const SAMPLE_RATE: u32 = 44_100;
+    let samples: Vec<f32> = input
+        .chunks_exact(4)
+        .map(|bytes| f32::from_le_bytes(bytes.try_into().unwrap()))
+        .collect();
+    let mut session = match AudioRenderSession::open(AudioSessionOpenRequest {
+        repository,
+        plugin_path,
+        plugin_sha256: approved_sha256,
+        parameters: Some(parameters),
+        dependencies: Vec::new(),
+        max_samples: samples.len() as u32,
+        channels: 1,
+        time_scale: SAMPLE_RATE,
+        frame_deadline: Duration::from_millis(INTERACTIVE_RENDER_TIMEOUT_MS),
+    }) {
+        Ok(session) => session,
+        Err(_) => return AudioWrapperOutcome::Fallback,
+    };
+    let outcome = match session.render_span(0, &samples) {
+        Ok(outcome) => outcome,
+        // Invalidation (crash, deadline, invariant): the one-shot transport may
+        // still carry it.
+        Err(_) => {
+            let _ = session.close();
+            return AudioWrapperOutcome::Fallback;
+        }
+    };
+    let (output, output_start) = match outcome.status {
+        AudioSpanStatus::Rendered {
+            samples,
+            output_start,
+            ..
+        } => (samples, output_start),
+        // A per-span compatibility error: let the one-shot path report it in
+        // its own terms rather than synthesizing a divergent report.
+        AudioSpanStatus::SpanError { .. } => {
+            let _ = session.close();
+            return AudioWrapperOutcome::Fallback;
+        }
+    };
+    let close = session.close();
+    if close.get("session_clean") != Some(&Value::Bool(true))
+        || close.get("invalidated") != Some(&Value::Bool(false))
+    {
+        return AudioWrapperOutcome::Fallback;
+    }
+    if output_path.exists() {
+        return AudioWrapperOutcome::Failure(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            "output audio already exists",
+        ));
+    }
+    let mut destination = match OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(output_path)
+    {
+        Ok(file) => file,
+        Err(error) => return AudioWrapperOutcome::Failure(error),
+    };
+    if let Err(error) = destination
+        .write_all(&output)
+        .and_then(|_| destination.sync_all())
+    {
+        drop(destination);
+        let _ = fs::remove_file(output_path);
+        return AudioWrapperOutcome::Failure(error);
+    }
+    // Preserve the one-shot audio report schema: start from the worker's
+    // aggregate audio report (which carries the audio_* telemetry the SDK audio
+    // contract consumes, at parity with emit_audio_render_report) and add or
+    // override the fields render_experimental_audio's one-shot path exposes, so
+    // a Windows caller on the default session path sees the same public shape.
+    let Some(mut report) = close
+        .get("final_report")
+        .and_then(Value::as_object)
+        .cloned()
+    else {
+        return AudioWrapperOutcome::Fallback;
+    };
+    // Override/add the fields the one-shot emit_audio_render_report exposes so
+    // the default session path returns the same public JSON shape as the
+    // `--render-audio` fallback. The wrapper only reaches here on a clean close
+    // (every span succeeded), so the selector errors are 0, the ranges valid,
+    // and the output was created.
+    for (key, value) in [
+        ("stage", json!("audio_render")),
+        ("status", json!("render_completed")),
+        ("sample_rate", json!(SAMPLE_RATE)),
+        ("channels", json!(1)),
+        ("sample_format", json!("float32")),
+        ("audio_setup_error", json!(0)),
+        ("audio_render_error", json!(0)),
+        ("audio_setdown_error", json!(0)),
+        ("setup_range_valid", json!(true)),
+        ("guard_bytes_intact", json!(true)),
+        ("samples_finite", json!(true)),
+        ("input_samples", json!(input.len() / 4)),
+        ("output_start_sample", json!(output_start)),
+        ("output_samples", json!(output.len() / 4)),
+        ("output_created", json!(true)),
+        ("input_sha256", json!(format!("{:x}", Sha256::digest(input)))),
+        ("output_sha256", json!(format!("{:x}", Sha256::digest(&output)))),
+        ("output_transport", json!("mono_f32le_44100")),
+        ("render_path", json!("audio_session")),
+    ] {
+        report.insert(key.to_owned(), value);
+    }
+    // Preserve the one-shot path's top-level `worker_diagnostics`
+    // (classification / stage events) rather than only nesting it under
+    // session_close, so a caller on the default session path keeps that field.
+    let worker_diagnostics = close
+        .get("worker")
+        .and_then(|worker| worker.get("diagnostics"))
+        .cloned()
+        .unwrap_or(Value::Null);
+    report.insert("worker_diagnostics".to_owned(), worker_diagnostics);
+    report.insert("session_close".to_owned(), close);
+    AudioWrapperOutcome::Report(Value::Object(report))
+}
+
 pub fn render_experimental_audio(
     repository: &Path,
     plugin_path: &Path,
@@ -1574,6 +1724,26 @@ pub fn render_experimental_audio(
         .any(|bytes| !f32::from_le_bytes(bytes.try_into().unwrap()).is_finite())
     {
         return Err(invalid("audio input contains a non-finite sample"));
+    }
+
+    // Route the render through a length-1 audio session by default (protocol
+    // §10); the one-shot `--render-audio` argv transport below is the fallback
+    // when the session infrastructure cannot carry it. The escape hatch
+    // (AEXCOMPAT_DISABLE_RENDER_SESSION_WRAPPER=1) forces the one-shot path.
+    #[cfg(windows)]
+    if std::env::var_os(DISABLE_SESSION_WRAPPER_ENV).is_none() {
+        match render_audio_via_length_one_session(
+            repository,
+            plugin_path,
+            approved_sha256,
+            &input,
+            output_path,
+            parameters,
+        ) {
+            AudioWrapperOutcome::Report(report) => return Ok(report),
+            AudioWrapperOutcome::Failure(error) => return Err(error),
+            AudioWrapperOutcome::Fallback => {}
+        }
     }
 
     let transport = repository.join("target/audio-transport");

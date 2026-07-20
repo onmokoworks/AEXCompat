@@ -49,6 +49,8 @@ struct WorkerInvocation {
   uint32_t time_scale{1};
   int32_t audio_samples{};
   int32_t audio_rate{};
+  int32_t audio_session_max_samples{};
+  int32_t audio_session_channels{1};
   int32_t click_x{};
   int32_t click_y{};
   std::array<float, 4> picker_color{};

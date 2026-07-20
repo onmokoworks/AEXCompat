@@ -45,6 +45,9 @@ struct InvocationState {
     bool image_audio_mode{};
     bool image_mode{};
     bool render_session_mode{};
+    bool audio_session_mode{};
+    int32_t audio_session_max_samples{};
+    int32_t audio_session_channels{1};
     bool layered_image_mode{};
     bool smart_force_cpu{};
     bool smart_opencl{};

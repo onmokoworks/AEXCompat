@@ -38,6 +38,8 @@ struct WorkerMode {
   bool image_audio_mode{};
   bool image_mode{};
   bool render_session_mode{};
+  // Resident audio render session (`--render-audio-session-v1`, protocol §10).
+  bool audio_session_mode{};
   // Session secondary-layer trailer (`session-layers:v1|`) present; when set,
   // it is the positional argument at index `image_argc - 1` (issue #98 W1-4).
   bool session_layers{};

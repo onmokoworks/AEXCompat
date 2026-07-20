@@ -13,7 +13,8 @@ mod windows_e2e {
         InteractiveParameter, ParameterAnimation, RenderGpuBackend, RenderPixelFormat,
     };
     use aexcompat_broker::render_session::{
-        run_video_batch, FrameStatus, RenderSession, SessionLayer, SessionOpenRequest,
+        run_video_batch, AudioRenderSession, AudioSessionOpenRequest, AudioSpanStatus, FrameStatus,
+        RenderSession, SessionLayer, SessionOpenRequest,
     };
     use sha2::{Digest, Sha256};
     use std::path::{Path, PathBuf};
@@ -153,6 +154,126 @@ mod windows_e2e {
         (0..WIDTH * HEIGHT * 4)
             .map(|index| seed.wrapping_add(index as u8))
             .collect()
+    }
+
+    fn build_audio_fixture() -> PathBuf {
+        let manifest = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../Cargo.toml");
+        let status = std::process::Command::new(env!("CARGO"))
+            .args(["build", "--manifest-path"])
+            .arg(manifest)
+            .args(["-p", "dummy-workers", "--bin", "audio_session_protocol_worker"])
+            .status()
+            .expect("run cargo build for the audio session fixture");
+        assert!(status.success(), "audio session fixture build failed");
+        std::env::current_exe()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("audio_session_protocol_worker.exe")
+    }
+
+    fn temp_audio_repository() -> (TempRepository, PathBuf, String) {
+        let fixture = build_audio_fixture();
+        let root = std::env::temp_dir().join(format!(
+            "aexcompat-audio-session-{}-{:032x}",
+            std::process::id(),
+            rand::random::<u128>()
+        ));
+        let worker_dir = root.join("target/minihost-build");
+        std::fs::create_dir_all(&worker_dir).unwrap();
+        std::fs::copy(&fixture, worker_dir.join("aex_render_worker.exe")).unwrap();
+        let plugin = root.join("plugin.plugin");
+        let plugin_bytes = b"audio session dummy plugin";
+        std::fs::write(&plugin, plugin_bytes).unwrap();
+        let sha = format!("{:x}", Sha256::digest(plugin_bytes));
+        (TempRepository(root), plugin, sha)
+    }
+
+    #[test]
+    fn audio_session_renders_spans_and_closes_clean() {
+        let _behavior = BehaviorGuard::set(None);
+        let (repository, plugin, sha) = temp_audio_repository();
+        let mut session = AudioRenderSession::open(AudioSessionOpenRequest {
+            repository: &repository.0,
+            plugin_path: &plugin,
+            plugin_sha256: &sha,
+            parameters: None,
+            dependencies: Vec::new(),
+            max_samples: 1024,
+            channels: 1,
+            time_scale: 44100,
+            frame_deadline: Duration::from_secs(30),
+        })
+        .expect("open audio session");
+
+        // The fixture negates each f32 input sample into the output slot.
+        let input: Vec<f32> = (0..8).map(|i| i as f32 * 0.25 - 1.0).collect();
+        let outcome = session.render_span(0, &input).expect("span 0 renders");
+        let AudioSpanStatus::Rendered {
+            samples,
+            checksum,
+            output_start,
+        } = outcome.status
+        else {
+            panic!("span 0 errored");
+        };
+        let expected: Vec<u8> = input.iter().flat_map(|s| (-s).to_le_bytes()).collect();
+        assert_eq!(samples, expected);
+        assert_eq!(checksum, format!("{:x}", Sha256::digest(&expected)));
+        // The fixture reports the input start it received back through
+        // start_sample (Codex #252); the wrapper carries it to the report.
+        assert_eq!(output_start, 0);
+
+        // A second span advances the generation and renders independently.
+        let input2: Vec<f32> = vec![0.5, -0.5, 1.0];
+        let outcome2 = session.render_span(1, &input2).expect("span 1 renders");
+        let AudioSpanStatus::Rendered { samples: s2, .. } = outcome2.status else {
+            panic!("span 1 errored");
+        };
+        let expected2: Vec<u8> = input2.iter().flat_map(|s| (-s).to_le_bytes()).collect();
+        assert_eq!(s2, expected2);
+
+        // Reusing a request index does not advance the generation: a caller
+        // error that leaves the session usable.
+        assert!(session.render_span(1, &input2).is_err());
+
+        let close = session.close();
+        assert_eq!(close["requests_ok"], 2);
+        assert_eq!(close["session_clean"], true, "close: {close}");
+    }
+
+    /// The broker independently bounds the reported output window against the
+    /// submitted input span (Codex #252): a worker that reports
+    /// start_sample + sample_count past input.len() is rejected as a
+    /// host-protection invariant breach, not published as a valid span.
+    #[test]
+    fn audio_session_rejects_out_of_range_output_start() {
+        let _behavior = BehaviorGuard::set(Some("audio_out_of_range_start"));
+        let (repository, plugin, sha) = temp_audio_repository();
+        let mut session = AudioRenderSession::open(AudioSessionOpenRequest {
+            repository: &repository.0,
+            plugin_path: &plugin,
+            plugin_sha256: &sha,
+            parameters: None,
+            dependencies: Vec::new(),
+            max_samples: 1024,
+            channels: 1,
+            time_scale: 44100,
+            frame_deadline: Duration::from_secs(30),
+        })
+        .expect("open audio session");
+
+        let input: Vec<f32> = vec![0.25, -0.5, 0.75, -1.0];
+        // The fixture reports start_sample = input_samples + 1, so the output
+        // window runs past the input span and the broker must reject it.
+        assert!(
+            session.render_span(0, &input).is_err(),
+            "an out-of-range output start must invalidate the span"
+        );
+        let close = session.close();
+        assert_eq!(close["invalidated"], true, "close: {close}");
     }
 
     #[test]
