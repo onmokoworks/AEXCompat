@@ -5,7 +5,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def test_arbitrary_scan_requires_a_new_owned_handle():
-    data = json.loads((ROOT / "analysis" / "PF_ARBITRARY_SCAN_BOUNDARY_RESULT_2026-07-15.json").read_text())
+    data = json.loads((ROOT / "analysis" / "PF_ARBITRARY_SCAN_BOUNDARY_RESULT_2026-07-15.json").read_text(encoding="utf-8"))
     colorgrid = data["adobe_sdk_colorgrid"]
     assert data["generic_contract"]["required_result"].startswith("new non-null")
     assert colorgrid["scan_callback_error"] == 0
@@ -23,7 +23,7 @@ def test_arbitrary_scan_requires_a_new_owned_handle():
 
 
 def test_scan_probe_compares_and_disposes_plugin_handles():
-    source = (ROOT / "minihost" / "src" / "worker_parameter_execution.cpp").read_text()
+    source = (ROOT / "minihost" / "src" / "worker_parameter_execution.cpp").read_text(encoding="utf-8")
     assert "probe_arbitrary_scan" in source
     assert "hooks().handle_is_live(scanned) && scanned != source" in source
     assert "comparison == 0" in source

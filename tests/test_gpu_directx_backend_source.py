@@ -3,12 +3,12 @@ import source_owners
 
 
 ROOT = Path(__file__).resolve().parents[1]
-HEADER = (ROOT / "minihost" / "src" / "gpu_directx_backend.hpp").read_text()
-SOURCE = (ROOT / "minihost" / "src" / "gpu_directx_backend.cpp").read_text()
-MAIN = source_owners.L2_MAIN.read_text()
-SMART_DISPATCH = (ROOT / "minihost" / "src" / "worker_smart_dispatch.cpp").read_text()
-CMAKE = (ROOT / "minihost" / "CMakeLists.txt").read_text()
-TRANSPORT = (ROOT / "minihost" / "src" / "gpu_memory_world_transport.cpp").read_text()
+HEADER = (ROOT / "minihost" / "src" / "gpu_directx_backend.hpp").read_text(encoding="utf-8")
+SOURCE = (ROOT / "minihost" / "src" / "gpu_directx_backend.cpp").read_text(encoding="utf-8")
+MAIN = source_owners.L2_MAIN.read_text(encoding="utf-8")
+SMART_DISPATCH = (ROOT / "minihost" / "src" / "worker_smart_dispatch.cpp").read_text(encoding="utf-8")
+CMAKE = (ROOT / "minihost" / "CMakeLists.txt").read_text(encoding="utf-8")
+TRANSPORT = (ROOT / "minihost" / "src" / "gpu_memory_world_transport.cpp").read_text(encoding="utf-8")
 
 
 def test_directx_backend_owns_secure_dynamic_loader_and_lifecycle():

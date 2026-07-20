@@ -57,7 +57,7 @@ def test_midpoint_stress_reproduced_one_safe_interpolated_signature():
 
 
 def test_sidecar_contains_two_distinct_144_byte_keys():
-    sidecar = json.loads((ROOT / _load()["authenticated_artifacts"]["sidecar"]["path"]).read_text())
+    sidecar = json.loads((ROOT / _load()["authenticated_artifacts"]["sidecar"]["path"]).read_text(encoding="utf-8"))
     keys = sidecar["parameters"][0]["keys"]
     assert sidecar["schema_version"] == 1
     assert sidecar["parameters"][0]["slot"] == 1

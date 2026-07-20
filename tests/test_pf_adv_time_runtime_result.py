@@ -27,8 +27,8 @@ def test_adv_time_runtime_authenticates_current_artifacts() -> None:
 def test_adv_time_runtime_records_balanced_raw_v4_results() -> None:
     evidence = _load()
     runtime = evidence["runtime"]
-    sidecar = json.loads((ROOT / evidence["authenticated_artifacts"]["sidecar"]["path"]).read_text())
-    report = json.loads((ROOT / evidence["authenticated_artifacts"]["report"]["path"]).read_text())
+    sidecar = json.loads((ROOT / evidence["authenticated_artifacts"]["sidecar"]["path"]).read_text(encoding="utf-8"))
+    report = json.loads((ROOT / evidence["authenticated_artifacts"]["report"]["path"]).read_text(encoding="utf-8"))
     assert evidence["result"] == "current_worker_exercised_all_adv_time_v4_slots"
     assert runtime["exit_code"] == 0
     assert report["status"] == runtime["status"] == "render_completed"

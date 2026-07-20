@@ -6,7 +6,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def test_path_parameter_assignment_resolves_only_connected_masks():
-    data = json.loads((ROOT / "analysis" / "PF_PATH_PARAMETER_ASSIGNMENT_RESULT_2026-07-15.json").read_text())
+    data = json.loads((ROOT / "analysis" / "PF_PATH_PARAMETER_ASSIGNMENT_RESULT_2026-07-15.json").read_text(encoding="utf-8"))
     assert data["sdk_semantics"]["none"] == 0
     assert data["positive"]["requested_index"] == data["positive"]["observed_path_id"] == 2
     assert data["positive"]["status"] == "render_completed"
@@ -24,8 +24,8 @@ def test_path_parameter_assignment_resolves_only_connected_masks():
 
 def test_path_assignment_is_slot_bound_across_ui_broker_and_worker():
     worker = source_owners.contract_text("path_parameter_assignment")
-    broker = (ROOT / "broker" / "crates" / "broker" / "src" / "image_render.rs").read_text()
-    harness = (ROOT / "broker" / "crates" / "harness" / "src" / "main.rs").read_text()
+    broker = (ROOT / "broker" / "crates" / "broker" / "src" / "image_render.rs").read_text(encoding="utf-8")
+    harness = (ROOT / "broker" / "crates" / "harness" / "src" / "main.rs").read_text(encoding="utf-8")
     assert "descriptor.type == 7 || descriptor.type == 12" in worker
     assert "hooks().active_mask_count()" in worker
     assert "runtime().records[i].default_value" in worker

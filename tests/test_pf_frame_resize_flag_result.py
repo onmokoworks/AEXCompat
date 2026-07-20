@@ -11,7 +11,7 @@ CLASSIC_RUNTIME = ROOT / "minihost" / "src" / "worker_classic_runtime.cpp"
 
 class PfFrameResizeFlagResultTest(unittest.TestCase):
     def test_evidence_covers_allowed_and_denied_resize_contracts(self):
-        data = json.loads((ROOT / "analysis" / "PF_FRAME_RESIZE_FLAG_RESULT_2026-07-15.json").read_text())
+        data = json.loads((ROOT / "analysis" / "PF_FRAME_RESIZE_FLAG_RESULT_2026-07-15.json").read_text(encoding="utf-8"))
         cases = {case["fixture"]: case for case in data["cases"]}
         self.assertEqual(data["sdk_constants"]["PF_OutFlag_I_EXPAND_BUFFER"], 512)
         self.assertEqual(data["sdk_constants"]["PF_OutFlag_I_SHRINK_BUFFER"], 4096)
@@ -39,13 +39,13 @@ class PfFrameResizeFlagResultTest(unittest.TestCase):
         self.assertIn("classic_context.mark_selector_dispatched()", worker)
         self.assertIn("g_last_selector_dispatched.store(true",
                       CLASSIC_RUNTIME.read_text(encoding="utf-8"))
-        fixture = (ROOT / "instruments" / "pf-frame-resize-probe" / "pf_frame_resize_probe.cpp").read_text()
+        fixture = (ROOT / "instruments" / "pf-frame-resize-probe" / "pf_frame_resize_probe.cpp").read_text(encoding="utf-8")
         self.assertIn("PF_Cmd_FRAME_SETUP", fixture)
         self.assertIn("PF_Err_INTERNAL_STRUCT_DAMAGED", fixture)
 
     def test_broker_and_harness_expose_isolated_resize_probes(self):
-        broker = (ROOT / "broker" / "crates" / "broker" / "src" / "image_render.rs").read_text()
-        harness = (ROOT / "broker" / "crates" / "harness" / "src" / "main.rs").read_text()
+        broker = (ROOT / "broker" / "crates" / "broker" / "src" / "image_render.rs").read_text(encoding="utf-8")
+        harness = (ROOT / "broker" / "crates" / "harness" / "src" / "main.rs").read_text(encoding="utf-8")
         for direction in ("expand", "shrink"):
             self.assertIn(f"probe_experimental_{direction}_buffer", broker)
             self.assertIn(f"--probe-experimental-{direction}-buffer", harness)

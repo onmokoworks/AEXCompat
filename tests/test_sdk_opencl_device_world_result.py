@@ -8,7 +8,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def test_opencl_device_world_evidence_records_exact_public_rgba8_conformance():
     evidence = json.loads(
-        (ROOT / "analysis" / "SDK_OPENCL_DEVICE_WORLD_RESULT_2026-07-15.json").read_text()
+        (ROOT / "analysis" / "SDK_OPENCL_DEVICE_WORLD_RESULT_2026-07-15.json").read_text(encoding="utf-8")
     )
     assert evidence["fixture"]["source_modified"] is False
     assert evidence["host"]["device_count"] == 1
@@ -55,9 +55,9 @@ def test_opencl_device_world_evidence_records_exact_public_rgba8_conformance():
 
 def test_opencl_boundary_and_fixture_build_markers_are_present():
     source = source_owners.worker_text()
-    source += "\n" + (ROOT / "minihost" / "src" / "l2_cli_dispatch.cpp").read_text()
-    transport = (ROOT / "minihost" / "src" / "gpu_memory_world_transport.cpp").read_text()
-    backend = (ROOT / "minihost" / "src" / "gpu_opencl_backend.cpp").read_text()
+    source += "\n" + (ROOT / "minihost" / "src" / "l2_cli_dispatch.cpp").read_text(encoding="utf-8")
+    transport = (ROOT / "minihost" / "src" / "gpu_memory_world_transport.cpp").read_text(encoding="utf-8")
+    backend = (ROOT / "minihost" / "src" / "gpu_opencl_backend.cpp").read_text(encoding="utf-8")
     for marker in (
         'LoadLibraryExW(L"OpenCL.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32)',
         'load_function(g_api.create_buffer, "clCreateBuffer")',
@@ -79,7 +79,7 @@ def test_opencl_boundary_and_fixture_build_markers_are_present():
     assert "opencl_upload_bytes += input_size" in transport
     assert "opencl_download_bytes += output_size" in transport
 
-    build = (ROOT / "tools" / "build-sdk-invert-opencl.ps1").read_text()
+    build = (ROOT / "tools" / "build-sdk-invert-opencl.ps1").read_text(encoding="utf-8")
     for marker in (
         "SDK_Invert_ProcAmp_Kernel.cl",
         "/DGF_DEVICE_TARGET_OPENCL=1",
