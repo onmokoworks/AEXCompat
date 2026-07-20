@@ -2295,6 +2295,13 @@ impl AudioRenderSession {
                     || output.rate != self.rate
                     || output.sample_size != 4
                     || output.sample_count as usize > max_samples
+                    // Bound the reported output window against the submitted
+                    // input span (Codex #252): a negative start or a
+                    // start+count past input.len() is an invalid range the
+                    // one-shot path rejects via setup_range_valid; the session
+                    // must independently reject it before publishing it.
+                    || output.start_sample < 0
+                    || output.start_sample + output.sample_count as i64 > input.len() as i64
                     || generation != expected_generation
                     || !self.static_header_ok()
                     || self.transport.read_header_u32(AUDIO_OUTPUT_GENERATION_OFFSET)

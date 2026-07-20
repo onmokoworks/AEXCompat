@@ -244,6 +244,38 @@ mod windows_e2e {
         assert_eq!(close["session_clean"], true, "close: {close}");
     }
 
+    /// The broker independently bounds the reported output window against the
+    /// submitted input span (Codex #252): a worker that reports
+    /// start_sample + sample_count past input.len() is rejected as a
+    /// host-protection invariant breach, not published as a valid span.
+    #[test]
+    fn audio_session_rejects_out_of_range_output_start() {
+        let _behavior = BehaviorGuard::set(Some("audio_out_of_range_start"));
+        let (repository, plugin, sha) = temp_audio_repository();
+        let mut session = AudioRenderSession::open(AudioSessionOpenRequest {
+            repository: &repository.0,
+            plugin_path: &plugin,
+            plugin_sha256: &sha,
+            parameters: None,
+            dependencies: Vec::new(),
+            max_samples: 1024,
+            channels: 1,
+            time_scale: 44100,
+            frame_deadline: Duration::from_secs(30),
+        })
+        .expect("open audio session");
+
+        let input: Vec<f32> = vec![0.25, -0.5, 0.75, -1.0];
+        // The fixture reports start_sample = input_samples + 1, so the output
+        // window runs past the input span and the broker must reject it.
+        assert!(
+            session.render_span(0, &input).is_err(),
+            "an out-of-range output start must invalidate the span"
+        );
+        let close = session.close();
+        assert_eq!(close["invalidated"], true, "close: {close}");
+    }
+
     #[test]
     fn smart_session_dispatches_the_smart_worker_and_closes_clean() {
         let _behavior = BehaviorGuard::set(None);

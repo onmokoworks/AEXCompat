@@ -155,6 +155,13 @@ mod worker {
         let input_offset = HEADER_BYTES;
         let output_offset = HEADER_BYTES + align(max_samples * channels * 4);
 
+        // Test-only misbehavior: report an output window that runs past the
+        // submitted input span so the broker's range validation must reject it
+        // (Codex #252). Read once; the broker sets this env on the child.
+        let out_of_range_start = std::env::var("AEXCOMPAT_TEST_SESSION_BEHAVIOR")
+            .as_deref()
+            == Ok("audio_out_of_range_start");
+
         let mut requests_ok = 0u32;
         loop {
             let mut prefix = [0u8; 4];
@@ -221,9 +228,14 @@ mod worker {
             view.write_u32(OUTPUT_GENERATION_OFFSET, expected_generation);
             requests_ok += 1;
             let checksum = format!("{:x}", Sha256::digest(&output_bytes));
+            let start_sample: i64 = if out_of_range_start {
+                input_samples as i64 + 1
+            } else {
+                0
+            };
             let reply = format!(
                 "{{\"v\":1,\"type\":\"audio_done\",\"request_index\":{request_index},\
-                 \"status\":\"ok\",\"output\":{{\"start_sample\":0,\"sample_count\":{input_samples},\"rate\":44100,\
+                 \"status\":\"ok\",\"output\":{{\"start_sample\":{start_sample},\"sample_count\":{input_samples},\"rate\":44100,\
                  \"channels\":{channels},\"sample_size\":4,\"checksum\":\"{checksum}\",\
                  \"guards_intact\":true}},\"audio_render_error\":0,\"generation\":{expected_generation}}}"
             );
