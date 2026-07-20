@@ -650,6 +650,44 @@ class MinihostL2SourceTests(unittest.TestCase):
         ):
             self.assertIn(marker, text)
 
+    def test_utils_table_exposes_handle_callbacks(self):
+        # A conformant AE host provides host_new_handle/lock/unlock/dispose/
+        # get_handle_size/resize through in_data->utils, not only through the PF
+        # Handle Suite (issue #220). l2_main wires the host handle functions into
+        # the utility_callbacks table and documents their offsets.
+        text = l2_family_source()
+        for marker in (
+            "kUtilsNewHandle = 160",
+            "kUtilsLockHandle = 168",
+            "kUtilsUnlockHandle = 176",
+            "kUtilsDisposeHandle = 184",
+            "kUtilsGetHandleSize = 440",
+            "kUtilsResizeHandle = 464",
+            "write(utils, kUtilsNewHandle, &new_handle)",
+            "write(utils, kUtilsLockHandle, &lock_handle)",
+            "write(utils, kUtilsUnlockHandle, &unlock_handle)",
+            "write(utils, kUtilsDisposeHandle, &dispose_handle)",
+            "write(utils, kUtilsGetHandleSize, &handle_size)",
+            "write(utils, kUtilsResizeHandle, &resize_handle)",
+            "reinterpret_cast<void*>(&new_handle)",
+            "reinterpret_cast<void*>(&lock_handle)",
+            "reinterpret_cast<void*>(&unlock_handle)",
+            "reinterpret_cast<void*>(&dispose_handle)",
+            "reinterpret_cast<void*>(&handle_size)",
+            "reinterpret_cast<void*>(&resize_handle)",
+        ):
+            self.assertIn(marker, text)
+
+    def test_utils_handle_callbacks_have_a_behavioral_self_test(self):
+        # The behavioral self-test drives the production install path and reads
+        # each callback back through the in_data->utils link before invoking a
+        # new/lock/resize/dispose roundtrip (issue #220).
+        text = l2_family_source()
+        self.assertIn("verify_utils_handle_callbacks_wired", text)
+        self.assertIn("install_callback_tables(state, abi)", text)
+        self.assertIn("--self-test-pf-utils-handle-callbacks", text)
+        self.assertIn("pf_utils_handle_callbacks", text)
+
     def test_render_exposes_bounded_suite_adapters_for_path_effects(self):
         text = l2_family_source()
         for marker in (

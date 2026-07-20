@@ -20,7 +20,7 @@ struct State {
 
 struct AbiHooks {
   std::array<void*, 9> input_callbacks{};
-  std::array<void*, 25> utility_callbacks{};
+  std::array<void*, 31> utility_callbacks{};
   const void* color_callbacks{};
   std::size_t color_callbacks_size{};
   void* basic_suite{};
@@ -75,6 +75,12 @@ struct Result {
   bool parameter_count_contract_valid{};
   std::string about_message;
 };
+
+// Installs the input/utility/color callback tables into the ABI buffers and
+// links in_data->utils to the utility block. Extracted from run() so behavioral
+// self-tests can exercise the exact wiring a plug-in observes through
+// in_data->utils without dispatching a selector (issue #220).
+void install_callback_tables(State& state, const AbiHooks& abi);
 
 Result run(State& state, EffectEntry entry, const AbiHooks& abi,
            const Request& request, const RuntimeHooks& hooks);

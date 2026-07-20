@@ -132,6 +132,16 @@ static_assert(offsetof(PF_BatchSamplingSuite1, begin_sampling) == 0 * sizeof(voi
 static_assert(offsetof(PF_BatchSamplingSuite1, end_sampling) == 1 * sizeof(void*));
 static_assert(offsetof(PF_BatchSamplingSuite1, get_batch_func) == 2 * sizeof(void*));
 static_assert(offsetof(PF_BatchSamplingSuite1, get_batch_func16) == 3 * sizeof(void*));
+// in_data->utils handle callback offsets (issue #220). These pin the exact
+// numeric offsets wired into kUtilityCallbackOffsets in
+// worker_effect_bootstrap.cpp to the SDK PF_UtilCallbacks layout so a host or
+// SDK header drift fails the build instead of handing plug-ins a null callback.
+static_assert(offsetof(PF_UtilCallbacks, host_new_handle) == 160);
+static_assert(offsetof(PF_UtilCallbacks, host_lock_handle) == 168);
+static_assert(offsetof(PF_UtilCallbacks, host_unlock_handle) == 176);
+static_assert(offsetof(PF_UtilCallbacks, host_dispose_handle) == 184);
+static_assert(offsetof(PF_UtilCallbacks, host_get_handle_size) == 440);
+static_assert(offsetof(PF_UtilCallbacks, host_resize_handle) == 464);
 
 template <typename T>
 void field(const char* name, std::size_t offset, bool& first) {
@@ -262,6 +272,8 @@ int main() {
   field<decltype(PF_UtilCallbacks::host_lock_handle)>("utils.host_lock_handle", offsetof(PF_UtilCallbacks, host_lock_handle), first);
   field<decltype(PF_UtilCallbacks::host_unlock_handle)>("utils.host_unlock_handle", offsetof(PF_UtilCallbacks, host_unlock_handle), first);
   field<decltype(PF_UtilCallbacks::host_dispose_handle)>("utils.host_dispose_handle", offsetof(PF_UtilCallbacks, host_dispose_handle), first);
+  field<decltype(PF_UtilCallbacks::host_get_handle_size)>("utils.host_get_handle_size", offsetof(PF_UtilCallbacks, host_get_handle_size), first);
+  field<decltype(PF_UtilCallbacks::host_resize_handle)>("utils.host_resize_handle", offsetof(PF_UtilCallbacks, host_resize_handle), first);
   field<decltype(PF_ANSICallbacks::sin)>("utils.ansi_sin",
       offsetof(PF_UtilCallbacks, ansi) + offsetof(PF_ANSICallbacks, sin), first);
   field<decltype(PF_UtilCallbacks::blend)>("utils.blend", offsetof(PF_UtilCallbacks, blend), first);

@@ -649,7 +649,8 @@ std::optional<int> dispatch_worker_selftests(int argc, wchar_t** argv) {
         &verify_world_transform_blend, &verify_world_transform_transfer_mask,
         +[] { return verify_aegp_world_suite3() && verify_aegp_world_mfr_safety(); },
         &verify_pf_batch_sampling_suite, &verify_pf_ae_channel_native_provider,
-        &verify_aegp_layer_render_options_suite2}});
+        &verify_aegp_layer_render_options_suite2,
+        &verify_utils_handle_callbacks_wired}});
   // Compatibility anchors for selftests whose command catalog now lives in
   // worker_fixed_selftest_routing.cpp.
   // --self-test-world-transform-affine

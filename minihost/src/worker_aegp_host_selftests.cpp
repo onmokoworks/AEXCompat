@@ -1,11 +1,14 @@
 #include "worker_aegp_host_selftests.hpp"
 #include "worker_mask_runtime_internal.hpp"
 #include "worker_handle_runtime.hpp"
+#include "worker_effect_bootstrap.hpp"
 #include "worker_smart_runtime.hpp"
 #include "worker_mask_selftests.hpp"
 
 #include <algorithm>
 #include <array>
+#include <cstddef>
+#include <cstdint>
 #include <cstring>
 #include <string>
 
@@ -78,6 +81,68 @@ bool verify_handle_resize_while_locked_rejected() {
   unlock_handle(handle);
   dispose_handle(handle);
   return resize_error != 0 && statistics().invalid_operations == invalid_before + 1 &&
+      handle_lifetimes_balanced();
+}
+
+bool verify_utils_handle_callbacks_wired() {
+  namespace boot = aexcompat::worker_runtime::effect_bootstrap;
+  boot::State state{};
+  boot::AbiHooks abi{};
+  // The handle callbacks occupy the tail of the utility table, index-aligned
+  // with kUtilityCallbackOffsets (160/168/176/184/440/464). Mirror the exact
+  // functions l2_main installs so this drives the production write path.
+  abi.utility_callbacks[25] = reinterpret_cast<void*>(&new_handle);
+  abi.utility_callbacks[26] = reinterpret_cast<void*>(&lock_handle);
+  abi.utility_callbacks[27] = reinterpret_cast<void*>(&unlock_handle);
+  abi.utility_callbacks[28] = reinterpret_cast<void*>(&dispose_handle);
+  abi.utility_callbacks[29] = reinterpret_cast<void*>(&handle_size);
+  abi.utility_callbacks[30] = reinterpret_cast<void*>(&resize_handle);
+  boot::install_callback_tables(state, abi);
+
+  // A plug-in reaches these as in_data->utils->host_*; recover the utility
+  // block through the in_data+176 link install writes, then read each callback
+  // at its SDK offset. Reading via the offsets (not the AbiHooks array) is what
+  // catches an offset/index misalignment in the production wiring.
+  std::byte* utils = *reinterpret_cast<std::byte**>(state.input.data() + 176);
+  if (!utils) return false;
+  auto slot = [&](std::size_t offset) {
+    void* value{};
+    std::memcpy(&value, utils + offset, sizeof(value));
+    return value;
+  };
+  auto new_fn = reinterpret_cast<void** (__cdecl*)(std::uint64_t)>(slot(160));
+  auto lock_fn = reinterpret_cast<void* (__cdecl*)(void**)>(slot(168));
+  auto unlock_fn = reinterpret_cast<void (__cdecl*)(void**)>(slot(176));
+  auto dispose_fn = reinterpret_cast<void (__cdecl*)(void**)>(slot(184));
+  auto size_fn = reinterpret_cast<std::uint64_t (__cdecl*)(void**)>(slot(440));
+  auto resize_fn =
+      reinterpret_cast<std::int32_t (__cdecl*)(std::uint64_t, void***)>(slot(464));
+  if (reinterpret_cast<void*>(new_fn) != reinterpret_cast<void*>(&new_handle) ||
+      reinterpret_cast<void*>(lock_fn) != reinterpret_cast<void*>(&lock_handle) ||
+      reinterpret_cast<void*>(unlock_fn) != reinterpret_cast<void*>(&unlock_handle) ||
+      reinterpret_cast<void*>(dispose_fn) != reinterpret_cast<void*>(&dispose_handle) ||
+      reinterpret_cast<void*>(size_fn) != reinterpret_cast<void*>(&handle_size) ||
+      reinterpret_cast<void*>(resize_fn) != reinterpret_cast<void*>(&resize_handle))
+    return false;
+
+  const uint32_t invalid_before = statistics().invalid_operations;
+  void** handle = new_fn(16);
+  if (!handle) return false;
+  auto* data = static_cast<std::uint8_t*>(lock_fn(handle));
+  if (!data) {
+    dispose_fn(handle);
+    return false;
+  }
+  data[0] = 0xAB;
+  data[15] = 0xCD;
+  unlock_fn(handle);
+  bool passed = size_fn(handle) == 16 && resize_fn(32, &handle) == 0 &&
+      size_fn(handle) == 32;
+  auto* resized = static_cast<std::uint8_t*>(lock_fn(handle));
+  passed = passed && resized && resized[0] == 0xAB && resized[15] == 0xCD;
+  if (resized) unlock_fn(handle);
+  dispose_fn(handle);
+  return passed && statistics().invalid_operations == invalid_before &&
       handle_lifetimes_balanced();
 }
 

@@ -56,6 +56,25 @@ class AbiLayoutProbeTests(unittest.TestCase):
         ):
             self.assertIn(marker, text)
 
+    def test_utils_handle_callback_offsets_are_pinned_to_the_sdk(self):
+        # The handle callbacks wired into in_data->utils (issue #220) must have
+        # their exact numeric offsets pinned to PF_UtilCallbacks so a host or SDK
+        # header drift fails the build instead of handing a plug-in a null slot.
+        text = (ROOT / "instruments" / "abi-layout-probe" / "main.cpp").read_text(
+            encoding="utf-8")
+        for member, offset in (
+            ("host_new_handle", 160),
+            ("host_lock_handle", 168),
+            ("host_unlock_handle", 176),
+            ("host_dispose_handle", 184),
+            ("host_get_handle_size", 440),
+            ("host_resize_handle", 464),
+        ):
+            assert (f"static_assert(offsetof(PF_UtilCallbacks, {member}) == {offset});"
+                    in text)
+        assert '"utils.host_get_handle_size"' in text
+        assert '"utils.host_resize_handle"' in text
+
     def test_batch_sampling_suite1_has_official_four_slot_abi(self):
         text = (ROOT / "instruments" / "abi-layout-probe" / "main.cpp").read_text(encoding="utf-8")
         self.assertIn("sizeof(PF_BatchSamplingSuite1) == 4 * sizeof(void*)", text)

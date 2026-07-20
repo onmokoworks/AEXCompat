@@ -114,7 +114,7 @@ Result dispatch(const Request& request, const Hooks& hooks) {
       !request.render_worker)
     return {};
 
-  const std::array<selftest::SimpleCommand, 22> simple_commands{{
+  const std::array<selftest::SimpleCommand, 23> simple_commands{{
       {L"--self-test-aegp-installed-effect-catalog", "aegp_installed_effect_catalog",
        hooks.simple.aegp_installed_effect_catalog},
       {L"--self-test-parameter-animation", "parameter_animation_transport",
@@ -160,6 +160,9 @@ Result dispatch(const Request& request, const Hooks& hooks) {
       {kRenderOptionsCommand, "aegp_layer_render_options_suite2",
        hooks.simple.aegp_layer_render_options_suite2, 1,
        ",\"downstream_cycle_rejected\":true"},
+      {L"--self-test-pf-utils-handle-callbacks", "pf_utils_handle_callbacks",
+       hooks.simple.pf_utils_handle_callbacks, 1,
+       ",\"reached_via_in_data_utils\":true,\"offsets\":[160,168,176,184,440,464]"},
   }};
   if (const auto exit = selftest::dispatch_simple(
           request.argc, request.argv, simple_commands.data(), simple_commands.size()))
