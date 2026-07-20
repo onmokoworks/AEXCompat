@@ -557,8 +557,8 @@ struct FrameDone {
     render_error: i64,
     #[serde(default)]
     generation: Option<u32>,
-    /// Present only on a "resize_needed" status (#261): the dimensions the
-    /// re-opened session must accommodate.
+    /// Present only on a "resize_needed" status (#262): the dimensions the
+    /// in-place grown output slot must accommodate.
     #[serde(default)]
     width: Option<u32>,
     #[serde(default)]
@@ -629,19 +629,11 @@ impl Drop for AnimationSidecar {
 }
 
 impl RenderSession {
+    /// Opens a resident render session. The output slot starts sized to the
+    /// render dimensions; an expand-output effect that overruns it grows the
+    /// slot in place mid-session (protocol §3, issue #262), so there is no
+    /// launch-time output-capacity parameter.
     pub fn open(request: SessionOpenRequest<'_>) -> io::Result<RenderSession> {
-        Self::open_with_output_capacity(request, None)
-    }
-
-    /// Opens a session whose output slot is sized to `output_capacity` rather
-    /// than the render dimensions (#261). The length-1 wrapper re-opens with a
-    /// capacity >= the render dimensions to accommodate an expand-output effect
-    /// without changing the render geometry. `None` sizes the slot to the
-    /// render dimensions (no expansion).
-    pub fn open_with_output_capacity(
-        request: SessionOpenRequest<'_>,
-        output_capacity: Option<(u32, u32)>,
-    ) -> io::Result<RenderSession> {
         if request.time_step <= 0
             || request.total_time <= 0
             || request.time_scale == 0
@@ -666,25 +658,9 @@ impl RenderSession {
         if request.layers.len() > 64 {
             return Err(invalid("render session layer count exceeds 64"));
         }
-        let (output_capacity_width, output_capacity_height) =
-            output_capacity.unwrap_or((request.width, request.height));
-        // The output slot is a flat buffer, so a packed output fits by total
-        // pixel count regardless of shape. The capacity must hold at least a
-        // fixed-size render (so a re-open never loses the ability to render the
-        // input dimensions, e.g. for a single-axis expand like 4096x1) and stay
-        // within the resize bounds. A per-axis floor would wrongly reject a
-        // legal expand whose shape shrinks one axis.
-        let capacity_pixels =
-            u64::from(output_capacity_width) * u64::from(output_capacity_height);
-        if output_capacity_width == 0
-            || output_capacity_height == 0
-            || output_capacity_width > MAX_RESIZE_DIMENSION
-            || output_capacity_height > MAX_RESIZE_DIMENSION
-            || capacity_pixels > MAX_RESIZE_PIXELS
-            || capacity_pixels < u64::from(request.width) * u64::from(request.height)
-        {
-            return Err(invalid("render session output capacity is out of range"));
-        }
+        // The output slot starts at the render dimensions; an in-session grow
+        // (#262) raises the capacity when an expand overruns it.
+        let (output_capacity_width, output_capacity_height) = (request.width, request.height);
         let geometry = SessionGeometry {
             width: request.width,
             height: request.height,
@@ -964,15 +940,9 @@ impl RenderSession {
                 sidecar.0.to_string_lossy().into_owned(),
             ]);
         }
-        // Carry a non-default output-slot capacity to the worker (#261); an
-        // absent trailer means the capacity equals the render dimensions, so the
-        // launch stays byte-identical for a fixed-size session.
-        if (output_capacity_width, output_capacity_height) != (request.width, request.height) {
-            args_after_plugin.extend([
-                "--output-capacity-v1".to_owned(),
-                format!("{output_capacity_width}x{output_capacity_height}"),
-            ]);
-        }
+        // The session always launches at the render dimensions; an expand grows
+        // the output slot in place mid-session (#262), so there is no launch-time
+        // output-capacity trailer.
         let dispatch = SecureImageDispatch {
             repository: request.repository,
             worker_kind: if request.smart {

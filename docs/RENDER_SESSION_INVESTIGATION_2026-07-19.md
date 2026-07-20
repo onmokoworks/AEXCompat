@@ -880,3 +880,23 @@ lifecycle は private buffer で完結しスロットサイズに依存しない
 注記: 起動時の `--output-capacity-v1` トレーラと `open_with_output_capacity` は
 grow の導入で production からは未使用 (常に render 寸法で開く) になったが、API/
 launch 経路としては残置 (grow が全経路をカバーするため呼ばれない)。
+
+## 追記 (#262 レビュー後: dead 化した launch-capacity 配線を除去)
+
+session 内 grow の導入で、起動時 `--output-capacity-v1` トレーラ経路は完全に
+unreachable になった (session は常に render 寸法で開き grow が拡大を担う)。
+ローカルレビュー P3 と最終レビュー指摘に沿い、#262 内で除去した:
+`RenderSession::open_with_output_capacity` を `open` に統合 (capacity 引数・容量
+bounds 検証・トレーラ emit を削除)、worker 側の `--output-capacity-v1` パーサ
+(`parse_l2_output_capacity`・`g_session_output_capacity_*` globals・
+`AuxiliaryOptionHooks::parse_output_capacity` hook・`strip_auxiliary_options` の
+該当分岐) と `run_render_session` の output_capacity 引数を削除。SessionGeometry
+の `output_capacity_*` フィールドは grow が実行時に更新するため残置。
+
+ビルド上の教訓 (観察): ヘッダの構造体 (`AuxiliaryOptionHooks`) からフィールドを
+削除した際、それを値で埋め込む `worker_request_parser.cpp` が Ninja のインクリメ
+ンタルビルドで再コンパイルされず、ABI 不一致で worker が起動時に 0xC0000409
+(STACK_BUFFER_OVERRUN) クラッシュした。`--clean-first` で全 TU を再ビルドすると
+解消。値埋め込みの構造体レイアウトを変えたら、インクリメンタルを信用せずクリーン
+ビルドで検証する (CLAUDE.md「untracked target/ 成果物に頼らず named build/gate を
+走らせる」と整合)。

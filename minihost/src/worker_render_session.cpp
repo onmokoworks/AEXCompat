@@ -731,9 +731,10 @@ RenderSessionOutcome run_session_frame_loop(
     };
     // A resize-output effect whose result overruns the launch output slot: the
     // worker cannot write it here, so it reports the required dimensions and the
-    // broker re-opens the session with a larger slot (protocol §3, issue #261),
-    // rather than the render falling back to the one-shot transport. No slot
-    // write, no generation advance; the session stays usable.
+    // broker grows the shared section in place (protocol §3, issue #262), after
+    // which the same worker transfers the frame, rather than the render falling
+    // back to the one-shot transport. No slot write, no generation advance; the
+    // session stays usable.
     const auto respond_resize_needed = [&](int32_t frame_width, int32_t frame_height) {
       std::string reply = "{\"v\":1,\"type\":\"frame_done\",\"frame_index\":" +
           std::to_string(frame_index) + ",\"status\":\"resize_needed\",\"width\":" +
@@ -917,13 +918,14 @@ RenderSessionOutcome run_session_frame_loop(
 RenderSessionOutcome run_render_session(
     EffectEntry entry, std::array<std::byte, kInSize>& input,
     std::array<std::byte, kOutSize>& output, const RequestedAssignments* requested,
-    int32_t max_width, int32_t max_height, int32_t output_capacity_width,
-    int32_t output_capacity_height, int32_t time_step, int32_t total_time,
+    int32_t max_width, int32_t max_height, int32_t time_step, int32_t total_time,
     uint32_t time_scale, int32_t pixel_bytes,
     const std::vector<ExternalLayerInput>* external_layers) {
+  // The output slot starts at the render dimensions; an expand grows it in place
+  // mid-session (#262), so the initial output capacity equals max_width/height.
   return run_session_frame_loop(
-      entry, input, output, max_width, max_height, output_capacity_width,
-      output_capacity_height, time_step, total_time,
+      entry, input, output, max_width, max_height, max_width,
+      max_height, time_step, total_time,
       time_scale, pixel_bytes, external_layers,
       [&](int32_t current_time, const std::vector<unsigned char>& frame_rgba,
           std::vector<unsigned char>& captured,

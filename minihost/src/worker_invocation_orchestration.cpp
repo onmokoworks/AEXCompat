@@ -270,14 +270,9 @@ SmartResult smart_render_once(EffectEntry entry, std::array<std::byte, kInSize>&
 RenderSessionOutcome run_render_session(
     EffectEntry entry, std::array<std::byte, kInSize>& input,
     std::array<std::byte, kOutSize>& output, const RequestedAssignments* requested,
-    int32_t max_width, int32_t max_height, int32_t output_capacity_width,
-    int32_t output_capacity_height, int32_t time_step, int32_t total_time,
+    int32_t max_width, int32_t max_height, int32_t time_step, int32_t total_time,
     uint32_t time_scale, int32_t pixel_bytes,
     const std::vector<ExternalLayerInput>* external_layers);
-// Render-session output-slot capacity (#261); 0/0 means the render dimensions.
-// Set by the --output-capacity-v1 trailer through l2_main.
-extern int32_t g_session_output_capacity_width;
-extern int32_t g_session_output_capacity_height;
 SmartRenderSessionOutcome run_smart_render_session(
     EffectEntry entry, std::array<std::byte, kInSize>& input,
     std::array<std::byte, kOutSize>& output, const RequestedAssignments* requested,
@@ -502,8 +497,7 @@ ClassicFinalDispatchResult run_classic_final_dispatch(const FinalDispatchRequest
              invocation.render_session_mode) {
     const auto session_outcome = run_render_session(
         entry, input, output, &invocation.requested_parameters, invocation.external_width,
-        invocation.external_height, g_session_output_capacity_width,
-        g_session_output_capacity_height, invocation.external_time_step,
+        invocation.external_height, invocation.external_time_step,
         invocation.external_total_time,
         invocation.external_time_scale, invocation.external_pixel_bytes,
         invocation.external_layers.empty() ? nullptr : &invocation.external_layers);
