@@ -373,14 +373,23 @@ int32_t iterate_world_typed(void* in_data, int32_t progress_base, int32_t progre
   unsigned char *source{}, *destination{};
   int32_t source_rowbytes{}, source_width{}, source_height{};
   int32_t destination_rowbytes{}, destination_width{}, destination_height{};
+  // A null source world is the documented "iterate over the destination only"
+  // mode (the SDK lets the src world be NULL; effects that generate or transform
+  // in place pass NULL). Resolve the source only when one was supplied;
+  // otherwise bound the walk to the destination and alias each callback's input
+  // pixel to the destination pixel it is processing.
+  const bool has_source = source_world != nullptr;
   if (!pixel_function ||
-      !resolve_world(source_world, pixel_bytes, source, source_rowbytes,
-                           source_width, source_height) ||
+      (has_source && !resolve_world(source_world, pixel_bytes, source, source_rowbytes,
+                                    source_width, source_height)) ||
       !resolve_world(destination_world, pixel_bytes, destination,
                            destination_rowbytes, destination_width, destination_height)) return 4;
   LegacyRect bounds{};
-  if (!normalize_legacy_rect(area, std::min(source_width, destination_width),
-                             std::min(source_height, destination_height), bounds)) return 4;
+  const int32_t bound_width = has_source
+      ? std::min(source_width, destination_width) : destination_width;
+  const int32_t bound_height = has_source
+      ? std::min(source_height, destination_height) : destination_height;
+  if (!normalize_legacy_rect(area, bound_width, bound_height, bounds)) return 4;
   IterateAbortCallback abort_callback{};
   IterateProgressCallback progress_callback{};
   void* effect_ref{};
@@ -393,10 +402,15 @@ int32_t iterate_world_typed(void* in_data, int32_t progress_base, int32_t progre
   const int32_t rows = bounds.bottom - bounds.top;
   for (int32_t y = bounds.top; y < bounds.bottom; ++y) {
     for (int32_t x = bounds.left; x < bounds.right; ++x) {
-      void* source_pixel = source + static_cast<std::size_t>(y) * source_rowbytes +
-          static_cast<std::size_t>(x) * pixel_bytes;
       void* destination_pixel = destination + static_cast<std::size_t>(y) * destination_rowbytes +
           static_cast<std::size_t>(x) * pixel_bytes;
+      // With no source world the SDK aliases the input pixel to the destination
+      // pixel (in-place destination-only walk), so C/C++ effects that read `in`
+      // still get a valid pixel instead of dereferencing null.
+      void* source_pixel = has_source
+          ? source + static_cast<std::size_t>(y) * source_rowbytes +
+                static_cast<std::size_t>(x) * pixel_bytes
+          : destination_pixel;
       const int32_t error = pixel_function(refcon, x, y, source_pixel, destination_pixel);
       if (error != 0) return error;
     }
@@ -453,9 +467,14 @@ int32_t iterate_origin_typed(int32_t pixel_bytes, void* source_world, const Lega
   unsigned char *source{}, *destination{};
   int32_t source_rowbytes{}, source_width{}, source_height{};
   int32_t destination_rowbytes{}, destination_width{}, destination_height{};
+  // A null source world is legal (destination-only mode, issue #219). Leaving
+  // source_width/source_height at 0 makes the in-bounds check below fall through
+  // to the zero source pixel for every location, matching how out-of-source
+  // locations are already handled.
+  const bool has_source = source_world != nullptr;
   if (!origin || !pixel_function ||
-      !resolve_world(source_world, pixel_bytes, source, source_rowbytes,
-                           source_width, source_height) ||
+      (has_source && !resolve_world(source_world, pixel_bytes, source, source_rowbytes,
+                                    source_width, source_height)) ||
       !resolve_world(destination_world, pixel_bytes, destination, destination_rowbytes,
                            destination_width, destination_height)) return 4;
   LegacyRect bounds{};
@@ -597,6 +616,17 @@ int32_t __cdecl iterate_test_pixel(void* opaque, int32_t, int32_t, void* input, 
   return 0;
 }
 
+// Destination-only iteration (null source world): the host must alias the
+// callback's input pixel to the destination pixel being processed.
+int32_t __cdecl iterate_test_null_source_pixel(void* opaque, int32_t, int32_t,
+                                               void* input, void* output) {
+  auto& state = *static_cast<IterateInteractionTestState*>(opaque);
+  ++state.pixel_calls;
+  if (input != output) return 74;
+  *static_cast<unsigned char*>(output) = 42;
+  return 0;
+}
+
 bool verify_iterate_suites() {
   std::array<unsigned char, 8> source{{10, 20, 30, 40, 50, 60, 70, 80}};
   std::array<unsigned char, 8> destination{};
@@ -657,6 +687,13 @@ bool verify_iterate_suites() {
   if (iterate_origin_non_clip8(nullptr, 0, 1, &source_world, nullptr, origin.data(),
                               nullptr, error_callback, &destination_world) != 73) return false;
 
+  // A null source world walks the destination and supplies the zero source
+  // pixel everywhere (issue #219), instead of failing with A_Err_ALLOC.
+  PixelState null_origin_state{};
+  if (iterate_origin_non_clip8(nullptr, 0, 1, nullptr, nullptr, origin.data(),
+                               &null_origin_state, pixel_callback, &destination_world) != 0 ||
+      null_origin_state.calls != 3 || !null_origin_state.saw_zero) return false;
+
   alignas(8) std::array<std::byte, kInSize> input{};
   write(input, 24, &iterate_test_abort);
   write(input, 32, &iterate_test_progress);
@@ -694,6 +731,31 @@ bool verify_iterate_suites() {
             &interaction, &iterate_test_pixel, &typed_destination_world) != 73 ||
         interaction.pixel_calls != 2 || interaction.abort_calls != 1 ||
         interaction.progress != std::vector<int32_t>({11})) return false;
+  }
+
+  // A null source world selects the documented destination-only walk (issue
+  // #219): the host must bound the iteration to the destination, hand the
+  // callback a null source pixel, and still report progress. Rejecting this
+  // with A_Err_ALLOC surfaced as OutOfMemory in crate-based effects that
+  // iterate in place.
+  {
+    std::array<unsigned char, 16> dst_only_pixels{};
+    LocalEffectWorld dst_only_world{};
+    dst_only_world.data = dst_only_pixels.data();
+    dst_only_world.rowbytes = 4;
+    dst_only_world.width = 1;
+    dst_only_world.height = 4;
+    dst_only_world.world_flags = 0;
+    IterateInteractionTestState interaction{};
+    g_iterate_interaction_test = &interaction;
+    const LegacyRect all_rows{0, 0, 1, 4};
+    if (iterate_world_typed(input.data(), 10, 14, 4, nullptr, &all_rows,
+            &interaction, &iterate_test_null_source_pixel, &dst_only_world) != 0 ||
+        interaction.pixel_calls != 4 || interaction.abort_calls != 3 ||
+        interaction.progress != std::vector<int32_t>({11, 12, 13, 14}) ||
+        dst_only_pixels != std::array<unsigned char, 16>{{42, 0, 0, 0, 42, 0, 0, 0,
+                                                          42, 0, 0, 0, 42, 0, 0, 0}})
+      return false;
   }
   g_iterate_interaction_test = nullptr;
   return true;
