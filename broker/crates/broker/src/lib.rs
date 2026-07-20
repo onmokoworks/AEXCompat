@@ -7,6 +7,7 @@ pub mod image_render;
 pub mod l1;
 #[cfg(windows)]
 pub mod l2;
+pub mod minidump_policy;
 #[cfg(windows)]
 pub mod render;
 #[cfg(windows)]

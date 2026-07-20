@@ -1489,18 +1489,12 @@ int worker_main_impl(int argc, wchar_t **argv) {
     return bootstrap_error;
   if (const auto selftest_exit = dispatch_worker_selftests(argc, argv))
     return *selftest_exit;
-  // Consume an optional trailing --minidump-v1 <dir> pair for every worker
-  // kind (render, smart, and the L2 inspection/params paths below) before any
-  // kind-specific, argc-exact dispatch runs. Reducing argc hides the pair from
-  // those checks; the crash path is opt-in and off by default (issue #18).
-  if (argc >= 3 && std::wstring(argv[argc - 2]) == L"--minidump-v1") {
-    if (!aexcompat::worker_runtime::minidump::configure_directory(
-            std::filesystem::path(argv[argc - 1])))
-      return 3;
-    SetUnhandledExceptionFilter(
-        aexcompat::worker_runtime::minidump::top_level_crash_filter);
-    argc -= 2;
-  }
+  // The broker passes only an authenticated inherited file handle via
+  // environment (issue #18). No dump directory or dump path is accepted on the
+  // worker command line, so nothing is consumed from argv here. Fails closed on
+  // a real misconfiguration; a no-op when opt-in is off.
+  if (!aexcompat::worker_runtime::minidump::configure_from_inherited_handle())
+    return 3;
 aexcompat::worker_runtime::invocation::InvocationState invocation;
 
 

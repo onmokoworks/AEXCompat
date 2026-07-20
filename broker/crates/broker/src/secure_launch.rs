@@ -30,42 +30,20 @@ pub struct SecureLaunchRequest<'a> {
     pub plugin_basename: &'a str,
     pub args_before_plugin: &'a [String],
     pub args_after_plugin: &'a [String],
-    /// Repository root, used to resolve the opt-in crash minidump directory
-    /// (issue #18). Every sealed dispatch funnels through `secure_launch`, so
-    /// the `--minidump-v1` flag is injected here once for all worker kinds.
+    /// Repository root used by the Windows launch boundary to create and
+    /// authenticate the optional broker-owned minidump handle (issue #18). The
+    /// worker never receives this path or a dump-file handle.
     pub repository: &'a Path,
     pub require_module_audit: bool,
 }
 
-/// The `--minidump-v1 <dir>` tail pair for a dispatch, or empty when the
-/// opt-in env var is unset. The resolver lives in the Windows-only
-/// image_render module, so a cfg-gated shim keeps this unconditionally
-/// compiled path building on non-Windows, where dispatch already fails closed.
-#[cfg(windows)]
-fn minidump_dispatch_args(repository: &Path) -> io::Result<Vec<String>> {
-    crate::image_render::minidump_dispatch_args(repository)
-}
-
-#[cfg(not(windows))]
-fn minidump_dispatch_args(_repository: &Path) -> io::Result<Vec<String>> {
-    Ok(Vec::new())
-}
-
 fn build_launch_args(tree: &SealedLoadTree, request: &SecureLaunchRequest<'_>) -> io::Result<Vec<String>> {
     let plugin_path = tree.plugin_path(request.plugin_basename)?;
-    let minidump_args = minidump_dispatch_args(request.repository)?;
-    let mut args = Vec::with_capacity(
-        request.args_before_plugin.len()
-            + 1
-            + request.args_after_plugin.len()
-            + minidump_args.len(),
-    );
+    let mut args =
+        Vec::with_capacity(request.args_before_plugin.len() + 1 + request.args_after_plugin.len());
     args.extend_from_slice(request.args_before_plugin);
     args.push(plugin_path.into_os_string().to_string_lossy().into_owned());
     args.extend_from_slice(request.args_after_plugin);
-    // Tail position is required: the worker consumes the trailing
-    // --minidump-v1 <dir> pair before its argc-exact mode dispatch.
-    args.extend(minidump_args);
     Ok(args)
 }
 
@@ -139,6 +117,9 @@ fn secure_launch_impl(
         args,
         timeout,
         &token,
+        // Working directory (issue #141, see above): the repository.
+        repository,
+        // Repository root for the launch-boundary minidump handle (issue #18).
         repository,
     )
     .map_err(|error| stage_error("restricted process launch", error))?;

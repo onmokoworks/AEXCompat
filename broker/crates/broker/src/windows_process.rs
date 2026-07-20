@@ -168,12 +168,20 @@ pub struct SessionChildHandles {
     pub section: HANDLE,
 }
 
-fn child_environment(trace_handle: Option<HANDLE>, session: Option<&SessionChildHandles>) -> Vec<u16> {
+fn child_environment(
+    trace_handle: Option<HANDLE>,
+    minidump_handle: Option<HANDLE>,
+    minidump_ack_handle: Option<HANDLE>,
+    session: Option<&SessionChildHandles>,
+) -> Vec<u16> {
     let mut entries: Vec<(String, std::ffi::OsString, std::ffi::OsString)> = std::env::vars_os()
         .filter_map(|(key, value)| {
             let normalized = key.to_string_lossy().to_ascii_uppercase();
             if normalized == "AEX_INSTRUMENT_TRACE_DIR"
                 || normalized == "AEX_INSTRUMENT_TRACE_HANDLE"
+                || normalized == "AEXCOMPAT_MINIDUMP_DIR"
+                || normalized == "AEXCOMPAT_MINIDUMP_HANDLE"
+                || normalized == "AEXCOMPAT_MINIDUMP_ACK_HANDLE"
                 || normalized == SESSION_REQUEST_HANDLE_VARIABLE
                 || normalized == SESSION_RESPONSE_HANDLE_VARIABLE
                 || normalized == SESSION_SECTION_HANDLE_VARIABLE
@@ -188,6 +196,20 @@ fn child_environment(trace_handle: Option<HANDLE>, session: Option<&SessionChild
         entries.push((
             "AEX_INSTRUMENT_TRACE_HANDLE".into(),
             "AEX_INSTRUMENT_TRACE_HANDLE".into(),
+            (handle as usize).to_string().into(),
+        ));
+    }
+    if let Some(handle) = minidump_handle {
+        entries.push((
+            "AEXCOMPAT_MINIDUMP_HANDLE".into(),
+            "AEXCOMPAT_MINIDUMP_HANDLE".into(),
+            (handle as usize).to_string().into(),
+        ));
+    }
+    if let Some(handle) = minidump_ack_handle {
+        entries.push((
+            "AEXCOMPAT_MINIDUMP_ACK_HANDLE".into(),
+            "AEXCOMPAT_MINIDUMP_ACK_HANDLE".into(),
             (handle as usize).to_string().into(),
         ));
     }
@@ -314,7 +336,7 @@ pub fn run_isolated(
     args: &[String],
     timeout: Duration,
 ) -> io::Result<ProcessResult> {
-    run_isolated_impl(program, args, timeout, None)
+    run_isolated_impl(program, args, timeout, None, None)
 }
 
 pub fn run_isolated_with_restricted_token(
@@ -323,12 +345,14 @@ pub fn run_isolated_with_restricted_token(
     timeout: Duration,
     token: &RestrictedWorkerToken,
     current_directory: &Path,
+    repository: &Path,
 ) -> io::Result<ProcessResult> {
     run_isolated_impl(
         program,
         args,
         timeout,
         Some((token.as_raw_handle(), current_directory)),
+        Some(repository),
     )
 }
 
@@ -337,8 +361,9 @@ fn run_isolated_impl(
     args: &[String],
     timeout: Duration,
     token: Option<(HANDLE, &Path)>,
+    repository: Option<&Path>,
 ) -> io::Result<ProcessResult> {
-    launch_isolated_impl(program, args, token, None)?.wait_and_collect(timeout)
+    launch_isolated_impl(program, args, token, None, repository)?.wait_and_collect(timeout)
 }
 
 /// A resumed isolated worker whose exit has not been awaited yet. One-shot
@@ -351,6 +376,11 @@ pub struct LaunchedIsolatedProcess {
     job: OwnedHandle,
     stdout_reader: thread::JoinHandle<io::Result<(String, bool)>>,
     stderr_reader: thread::JoinHandle<io::Result<(String, bool)>>,
+    // Opt-in crash minidump (issue #18). The broker keeps the pipe read side
+    // and its reader thread alive here until the worker exits; dropping this
+    // after `wait_and_collect` finalizes the capture into a `.dmp`. `None` for
+    // the render-session path and whenever no repository was supplied.
+    minidump_file: Option<crate::minidump_policy::MinidumpLaunchFile>,
 }
 
 impl LaunchedIsolatedProcess {
@@ -405,6 +435,7 @@ impl LaunchedIsolatedProcess {
             job,
             stdout_reader,
             stderr_reader,
+            minidump_file,
         } = self;
         let wait = unsafe {
             WaitForSingleObject(
@@ -434,6 +465,10 @@ impl LaunchedIsolatedProcess {
         let (stderr, stderr_truncated) = stderr_reader
             .join()
             .map_err(|_| io::Error::other("stderr reader panicked"))??;
+        // The worker and its job are gone, so any crash minidump the worker
+        // wrote is fully buffered in the pipe. Drop the retained file now to
+        // drain the reader and finalize the `.dmp` (no-op when opt-in was off).
+        drop(minidump_file);
         let (peak_process_memory_bytes, peak_job_memory_bytes) = query_job_memory_peaks(job.raw());
         let worker_peak_commit_bytes = query_worker_peak_commit(process_handle.raw());
         let classification = classify_exit(exit_code, timed_out);
@@ -490,6 +525,7 @@ pub fn launch_isolated_session_with_restricted_token(
         args,
         Some((token.as_raw_handle(), current_directory)),
         Some(session),
+        None,
     )
 }
 
@@ -498,8 +534,13 @@ fn launch_isolated_impl(
     args: &[String],
     token: Option<(HANDLE, &Path)>,
     session: Option<&SessionChildHandles>,
+    repository: Option<&Path>,
 ) -> io::Result<LaunchedIsolatedProcess> {
     let trace_file = crate::trace_policy::create_trace_file_for_launch()?;
+    let mut minidump_file = repository
+        .map(crate::minidump_policy::create_minidump_file_for_launch)
+        .transpose()?
+        .flatten();
     let (stdout_read, stdout_write) = pipe()?;
     let (stderr_read, stderr_write) = pipe()?;
     let job = OwnedHandle::new(unsafe { CreateJobObjectW(null(), null()) })?;
@@ -543,6 +584,10 @@ fn launch_isolated_impl(
     if let Some(trace_file) = trace_file.as_ref() {
         inherited.push(trace_file.raw());
     }
+    if let Some(minidump_file) = minidump_file.as_ref() {
+        inherited.push(minidump_file.raw());
+        inherited.push(minidump_file.ack_raw());
+    }
     if let Some(session) = session {
         inherited.extend([
             session.request_read,
@@ -576,7 +621,12 @@ fn launch_isolated_impl(
         .chain(Some(0))
         .collect();
     let application_wide: Vec<u16> = program.as_os_str().encode_wide().chain(Some(0)).collect();
-    let mut environment = child_environment(trace_file.as_ref().map(|file| file.raw()), session);
+    let mut environment = child_environment(
+        trace_file.as_ref().map(|file| file.raw()),
+        minidump_file.as_ref().map(|file| file.raw()),
+        minidump_file.as_ref().map(|file| file.ack_raw()),
+        session,
+    );
     let mut startup: STARTUPINFOEXW = unsafe { zeroed() };
     startup.StartupInfo.cb = size_of::<STARTUPINFOEXW>() as u32;
     startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
@@ -643,6 +693,13 @@ fn launch_isolated_impl(
     drop(stdout_write);
     drop(stderr_write);
     drop(trace_file);
+    // The child holds its own inherited copies now. Close the broker's worker
+    // copies (pipe write side + ack) so the reader observes EOF when the worker
+    // exits; the broker keeps the read side and reader thread alive inside the
+    // retained `minidump_file` until `wait_and_collect` drops it.
+    if let Some(minidump_file) = minidump_file.as_mut() {
+        minidump_file.close_worker_handles();
+    }
     let stdout_reader = reader(stdout_read.take() as usize, STDOUT_CAPTURE_LIMIT);
     let stderr_reader = reader(stderr_read.take() as usize, STDERR_CAPTURE_LIMIT);
     Ok(LaunchedIsolatedProcess {
@@ -650,6 +707,7 @@ fn launch_isolated_impl(
         job,
         stdout_reader,
         stderr_reader,
+        minidump_file,
     })
 }
 
