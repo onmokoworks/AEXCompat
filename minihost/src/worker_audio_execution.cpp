@@ -3,6 +3,7 @@
 #include <windows.h>
 
 #include "host_audio_runtime.hpp"
+#include "runtime_module_audit.hpp"
 #include "strict_json.hpp"
 #include "worker_handle_runtime.hpp"
 
@@ -401,9 +402,20 @@ AudioSessionOutcome run_audio_render_session(
       break;
     }
   }
+  // Dispose arbitrary-data parameter defaults before GLOBAL_SETDOWN, the same
+  // as the one-shot/common render paths (run_audio_mode): a plug-in that
+  // declares arbitrary defaults leaves those handles live otherwise, so
+  // handle_lifetimes_balanced() would fail an otherwise clean session.
+  const bool arbitrary_defaults_disposed = dispose_arbitrary_defaults(entry, input, output);
   outcome.global_setdown_error = (global_error == 0 && params_error == 0)
       ? invoke_global_setdown(entry, input.data(), output.data()) : -1;
-  if (outcome.global_setdown_error != 0 || !handle_lifetimes_balanced())
+  // Capture the pre-unload module audit phase before the report; the broker's
+  // SecureSessionProcess::finish fails a clean-exit report closed if
+  // `module_audit` is missing (worker_module_audit.rs), so a session report
+  // must carry it exactly like the image session's final report.
+  aexcompat::worker_runtime::capture_module_audit_phase();
+  if (outcome.global_setdown_error != 0 || !arbitrary_defaults_disposed
+      || !handle_lifetimes_balanced())
     outcome.clean = false;
   return outcome;
 }
@@ -448,6 +460,7 @@ void emit_audio_session_report(int32_t global_error, int32_t params_error,
             << ",\"audio_lifetimes_balanced\":"
             << (audio_handle_lifetimes_balanced() ? "true" : "false")
             << ",\"invalid_audio_operations\":" << audio_telemetry().invalid_operations
+            << ",\"module_audit\":" << aexcompat::worker_runtime::module_audit_json()
             << ",\"session_clean\":" << (outcome.clean ? "true" : "false") << "}\n";
 }
 
