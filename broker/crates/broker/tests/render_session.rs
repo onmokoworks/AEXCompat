@@ -1224,13 +1224,16 @@ mod windows_e2e {
                 .render_frame(frame_index, frame_index as i32, &input)
                 .expect("frame renders");
             match outcome.status {
-                FrameStatus::Rendered { pixels, checksum } => {
+                FrameStatus::Rendered { pixels, checksum, .. } => {
                     let expected: Vec<u8> = input.iter().map(|byte| 255 - byte).collect();
                     assert_eq!(pixels, expected, "slot transfer round-trips the render");
                     checksums.push(checksum);
                 }
                 FrameStatus::FrameError { render_error } => {
                     panic!("frame {frame_index} unexpectedly errored: {render_error}")
+                }
+                FrameStatus::ResizeNeeded { width, height } => {
+                    panic!("frame {frame_index} unexpectedly resized to {width}x{height}")
                 }
             }
         }

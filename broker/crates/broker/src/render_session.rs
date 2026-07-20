@@ -73,6 +73,13 @@ fn is_fatal_session_error(render_error: i64) -> bool {
     matches!(render_error, -47 | -45..=-41)
 }
 
+/// Resize-output bounds mirroring the worker's `validate_output_extent`
+/// (render_subsystem.cpp): each dimension <= 4096 and <= 16,777,216 pixels
+/// total. The broker re-caps a resize_needed request so a misbehaving worker
+/// cannot force an unbounded re-open (#261).
+const MAX_RESIZE_DIMENSION: u32 = 4096;
+const MAX_RESIZE_PIXELS: u64 = 16_777_216;
+
 const MAGIC_OFFSET: usize = 0;
 const VERSION_OFFSET: usize = 4;
 const DEPTH_CODE_OFFSET: usize = 8;
@@ -436,10 +443,23 @@ pub enum FrameStatus {
     /// The frame rendered and every per-frame invariant held. `pixels` are
     /// the validated native RGBA bytes copied out of the output slot;
     /// `checksum` is their lowercase SHA-256 (matching the worker's).
-    Rendered { pixels: Vec<u8>, checksum: String },
+    Rendered {
+        pixels: Vec<u8>,
+        checksum: String,
+        /// The frame's actual rendered dimensions. Equal to the session
+        /// dimensions for a fixed-size effect, smaller for a shrink-output
+        /// effect (#261); `pixels` is packed at exactly `width*height*bpp`.
+        width: u32,
+        height: u32,
+    },
     /// A frame-local compatibility diagnostic (selector error, time scale
     /// mismatch). The session stays usable; continuing is the caller's call.
     FrameError { render_error: i64 },
+    /// A resize-output effect rendered at dimensions that overrun the launch
+    /// output slot (#261). The worker wrote nothing; the caller must re-open the
+    /// session with a slot at least this large and re-render. The session stays
+    /// usable (no generation advance).
+    ResizeNeeded { width: u32, height: u32 },
 }
 
 #[derive(Debug)]
@@ -480,6 +500,12 @@ struct FrameDone {
     render_error: i64,
     #[serde(default)]
     generation: Option<u32>,
+    /// Present only on a "resize_needed" status (#261): the dimensions the
+    /// re-opened session must accommodate.
+    #[serde(default)]
+    width: Option<u32>,
+    #[serde(default)]
+    height: Option<u32>,
 }
 
 struct CollectedExit {
@@ -1303,10 +1329,15 @@ impl RenderSession {
                         POST_TERMINATION_COLLECT_TIMEOUT,
                     ));
                 }
-                let pixels = self.transport.read_output_slot(
-                    self.geometry.output_slot_offset(),
-                    self.geometry.output_slot_bytes(),
-                );
+                // Read only the frame's actual packed bytes, not the whole
+                // launch slot: a shrink-output effect fills less than the slot,
+                // and the worker's checksum covers those actual bytes (#261).
+                let actual_bytes = output.width as usize
+                    * output.height as usize
+                    * self.geometry.pixel_format.bytes_per_pixel() as usize;
+                let pixels = self
+                    .transport
+                    .read_output_slot(self.geometry.output_slot_offset(), actual_bytes);
                 let checksum = format!("{:x}", Sha256::digest(&pixels));
                 if !checksum.eq_ignore_ascii_case(&output.checksum) {
                     return Err(self.invalidate(
@@ -1324,7 +1355,80 @@ impl RenderSession {
                 self.last_output_generation = expected_generation;
                 Ok(FrameOutcome {
                     frame_index,
-                    status: FrameStatus::Rendered { pixels, checksum },
+                    status: FrameStatus::Rendered {
+                        pixels,
+                        checksum,
+                        width: output.width,
+                        height: output.height,
+                    },
+                })
+            }
+            "resize_needed" => {
+                // The effect rendered larger than the launch slot; the worker
+                // wrote nothing and left the generation untouched (#261). It
+                // carries only width/height. Bound the requested size so a
+                // misbehaving worker cannot force an unbounded re-open, and
+                // require it to actually exceed the current slot.
+                if done.output.is_some() || done.generation.is_some() || done.render_error != 0 {
+                    return Err(self.invalidate(
+                        "malformed_resize_response",
+                        format!("frame {frame_index} resize_needed carried output/generation/error"),
+                        true,
+                        POST_TERMINATION_COLLECT_TIMEOUT,
+                    ));
+                }
+                let (Some(width), Some(height)) = (done.width, done.height) else {
+                    return Err(self.invalidate(
+                        "malformed_resize_response",
+                        format!("frame {frame_index} resize_needed missed width or height"),
+                        true,
+                        POST_TERMINATION_COLLECT_TIMEOUT,
+                    ));
+                };
+                let requested_pixels = width as u64 * height as u64;
+                let current_pixels =
+                    u64::from(self.geometry.width) * u64::from(self.geometry.height);
+                if width == 0
+                    || height == 0
+                    || width > MAX_RESIZE_DIMENSION
+                    || height > MAX_RESIZE_DIMENSION
+                    || requested_pixels > MAX_RESIZE_PIXELS
+                    || requested_pixels <= current_pixels
+                {
+                    return Err(self.invalidate(
+                        "resize_out_of_range",
+                        format!(
+                            "frame {frame_index} resize_needed {width}x{height} is out of range \
+                             (current {}x{})",
+                            self.geometry.width, self.geometry.height
+                        ),
+                        true,
+                        POST_TERMINATION_COLLECT_TIMEOUT,
+                    ));
+                }
+                // The header and generation must be untouched, like an error
+                // response: nothing was written to the slot.
+                if let Err(detail) = self.validate_static_header() {
+                    return Err(self.invalidate(
+                        "frame_invariant_failure",
+                        format!("frame {frame_index} (resize response): {detail}"),
+                        true,
+                        POST_TERMINATION_COLLECT_TIMEOUT,
+                    ));
+                }
+                if self.transport.read_header_u32(OUTPUT_GENERATION_OFFSET)
+                    != self.last_output_generation
+                {
+                    return Err(self.invalidate(
+                        "frame_invariant_failure",
+                        format!("frame {frame_index} resize response advanced the output generation"),
+                        true,
+                        POST_TERMINATION_COLLECT_TIMEOUT,
+                    ));
+                }
+                Ok(FrameOutcome {
+                    frame_index,
+                    status: FrameStatus::ResizeNeeded { width, height },
                 })
             }
             other => Err(self.invalidate(
@@ -1383,16 +1487,22 @@ impl RenderSession {
         if !output.guards_intact {
             return Err("guard bytes were reported violated".into());
         }
-        // v1 requires every frame at the session dimensions (protocol §3).
-        if output.width != self.geometry.width || output.height != self.geometry.height {
+        // A resize-output effect may render at any positive dimensions that
+        // still fit the launch output slot (#261): shrink, or an expand small
+        // enough to fit. An expand that overruns the slot arrives as a
+        // "resize_needed" status instead, never here.
+        let bpp = self.geometry.pixel_format.bytes_per_pixel();
+        if output.width == 0 || output.height == 0 {
+            return Err(format!("output geometry {}x{} is empty", output.width, output.height));
+        }
+        let actual_bytes = u64::from(output.width) * u64::from(output.height) * u64::from(bpp);
+        if actual_bytes > self.geometry.output_slot_bytes() as u64 {
             return Err(format!(
-                "output geometry {}x{} differs from the session {}x{}",
+                "output geometry {}x{} overruns the session slot {}x{}",
                 output.width, output.height, self.geometry.width, self.geometry.height
             ));
         }
-        if output.rowbytes
-            != u64::from(self.geometry.width) * self.geometry.pixel_format.bytes_per_pixel()
-        {
+        if output.rowbytes != u64::from(output.width) * u64::from(bpp) {
             return Err(format!("output rowbytes {} is not packed", output.rowbytes));
         }
         if output.pixel_format != self.geometry.pixel_format.report_name() {
@@ -1411,10 +1521,13 @@ impl RenderSession {
             return Err("header output generation is stale".into());
         }
         self.validate_static_header()?;
-        if self.transport.read_header_u32(FRAME_WIDTH_OFFSET) != self.geometry.width
-            || self.transport.read_header_u32(FRAME_HEIGHT_OFFSET) != self.geometry.height
+        // The worker writes the frame's actual (possibly resized) dimensions to
+        // these headers (#261), so they must match the reported output, not the
+        // launch max.
+        if self.transport.read_header_u32(FRAME_WIDTH_OFFSET) != output.width
+            || self.transport.read_header_u32(FRAME_HEIGHT_OFFSET) != output.height
         {
-            return Err("frame dimension header does not match the session".into());
+            return Err("frame dimension header does not match the reported output".into());
         }
         Ok(())
     }
@@ -1728,10 +1841,16 @@ pub fn run_video_batch(
             let rgba = decoded.into_rgba8().into_raw();
             let outcome = session.render_frame(frame_index, frame_time, &rgba)?;
             match outcome.status {
-                FrameStatus::Rendered { pixels, checksum } => {
+                FrameStatus::Rendered {
+                    pixels,
+                    checksum,
+                    width: frame_width,
+                    height: frame_height,
+                } => {
                     let output_png = output_directory.join(format!("frame-{frame_index:06}.png"));
                     let preview = native_rgba_to_preview(&pixels, request.pixel_format)?;
-                    let image = image::RgbaImage::from_raw(width, height, preview)
+                    // Use the frame's actual (possibly shrunk) dimensions (#261).
+                    let image = image::RgbaImage::from_raw(frame_width, frame_height, preview)
                         .ok_or_else(|| invalid("output dimensions are invalid"))?;
                     if output_png.exists() {
                         return Err(invalid("output frame already exists"));
@@ -1759,6 +1878,14 @@ pub fn run_video_batch(
                     "status": "error",
                     "render_error": render_error,
                 })),
+                // A multi-frame batch declares one fixed slot for the whole run;
+                // a mid-stream expand-output frame would need a slot re-open that
+                // the batch does not perform (#261). Reject it with a clear
+                // diagnostic rather than silently degrading.
+                FrameStatus::ResizeNeeded { width: rw, height: rh } => Err(invalid(format!(
+                    "frame {frame_index} requires an output resize to {rw}x{rh}, \
+                     which the video batch session does not support"
+                ))),
             }
         })();
         match frame_entry {

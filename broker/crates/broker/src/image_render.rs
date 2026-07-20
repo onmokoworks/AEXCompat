@@ -5431,6 +5431,15 @@ fn render_classic_via_length_one_session(
                 "session frame reported error {render_error} past a clean final report"
             )));
         }
+        // An expand-output effect overran the launch slot. Re-opening the
+        // session with a larger *output* slot (without changing the render
+        // dimensions the effect reads from in_data) needs the output-slot
+        // capacity decoupled from the render geometry; until that lands, the
+        // one-shot transport carries the expand (#261). Shrink already renders
+        // on the session route above.
+        FrameStatus::ResizeNeeded { .. } => {
+            return fallback_with_clean_dumps(&world_dump_dir);
+        }
     };
     if let Some(path) = request.preserved_output {
         if let Some(parent) = path.parent() {
@@ -5672,7 +5681,12 @@ impl InteractiveRenderSession {
             })
         };
         match outcome.status {
-            FrameStatus::Rendered { pixels, checksum } => {
+            FrameStatus::Rendered {
+                pixels,
+                checksum,
+                width: frame_width,
+                height: frame_height,
+            } => {
                 self.frame_serial += 1;
                 self.frames_ok += 1;
                 let preserved = self
@@ -5690,7 +5704,8 @@ impl InteractiveRenderSession {
                         .write_all(&pixels)?;
                 }
                 let preview = native_rgba_to_preview(&pixels, self.pixel_format)?;
-                let image = image::RgbaImage::from_raw(self.width, self.height, preview)
+                // The frame's actual (possibly shrunk) dimensions (#261).
+                let image = image::RgbaImage::from_raw(frame_width, frame_height, preview)
                     .ok_or_else(|| invalid("session output dimensions are invalid"))?;
                 image
                     .save_with_format(output_path, ImageFormat::Png)
@@ -5701,8 +5716,8 @@ impl InteractiveRenderSession {
                     "plugin_id": self.plugin_id,
                     "render_path": "classic",
                     "pixel_format": self.pixel_format.report_name(),
-                    "width": self.width,
-                    "height": self.height,
+                    "width": frame_width,
+                    "height": frame_height,
                     "input_width": self.width,
                     "input_height": self.height,
                     // Deep formats ship the depth-preserving raw next to an
@@ -5741,6 +5756,24 @@ impl InteractiveRenderSession {
                     "worker_classification": "resident_session",
                     "resident_session": session_facts(self.frames_ok, self.frames_errored),
                     "render_error": render_error,
+                    "passed": false,
+                }))
+            }
+            // This live session runs at fixed dimensions; an expand-output frame
+            // needs a slot re-open it does not perform (#261). Report it as a
+            // failed frame rather than silently degrading.
+            FrameStatus::ResizeNeeded { width, height } => {
+                self.frames_errored += 1;
+                Ok(json!({
+                    "schema_version": 1,
+                    "stage": "interactive_image_render",
+                    "plugin_id": self.plugin_id,
+                    "render_path": "classic",
+                    "pixel_format": self.pixel_format.report_name(),
+                    "current_time": current_time,
+                    "worker_classification": "resident_session",
+                    "resident_session": session_facts(self.frames_ok, self.frames_errored),
+                    "resize_needed": json!({ "width": width, "height": height }),
                     "passed": false,
                 }))
             }
