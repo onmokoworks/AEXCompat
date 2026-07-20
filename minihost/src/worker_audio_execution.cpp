@@ -346,9 +346,13 @@ AudioSessionOutcome run_audio_render_session(
         entry, input, output, &span_input, input_samples, requested_parameters,
         &captured);
     // A guard breach is corruption evidence and outranks the render error:
-    // invalidate the session (§4.3 host-protection).
+    // invalidate the session (§4.3 host-protection). Send NO audio_done reply:
+    // a `status:"error"` response is a per-span diagnostic the broker keeps the
+    // session valid on, which would let host-protection corruption look like a
+    // frame-local compatibility error. Breaking here runs the fail-closed
+    // teardown (GLOBAL_SETDOWN, report, exit 24); the broker observes the
+    // worker leave and invalidates the session.
     if (!span.guards_intact) {
-      respond_error(request_index, span.audio_render_error);
       outcome.clean = false;
       outcome.invariant_failure = true;
       break;
@@ -416,6 +420,31 @@ void emit_audio_session_report(int32_t global_error, int32_t params_error,
             << ",\"session_invariant_failure\":"
             << (outcome.invariant_failure ? "true" : "false")
             << ",\"global_setdown_error\":" << outcome.global_setdown_error
+            // Audio telemetry parity with the one-shot audio report
+            // (emit_audio_render_report): the SDK audio contract consumers read
+            // these, and the length-1 session wrapper surfaces them on the
+            // session-routed public report. For a session they are the
+            // aggregate (last span's) values.
+            << ",\"audio_checkout_calls\":" << audio_telemetry().checkout_calls
+            << ",\"audio_usage_advertised\":" << (audio_telemetry().usage_advertised ? "true" : "false")
+            << ",\"audio_checkout_allowed\":" << (audio_telemetry().checkout_allowed ? "true" : "false")
+            << ",\"rejected_unadvertised_audio_checkouts\":" << audio_telemetry().rejected_unadvertised_checkouts
+            << ",\"rejected_audio_format_requests\":" << audio_telemetry().rejected_format_requests
+            << ",\"audio_handle_exhaustions\":" << audio_telemetry().handle_exhaustions
+            << ",\"peak_live_audio_handles\":" << audio_telemetry().peak_live_handles
+            << ",\"audio_checkin_calls\":" << audio_telemetry().checkin_calls
+            << ",\"audio_get_data_calls\":" << audio_telemetry().get_data_calls
+            << ",\"last_audio_checkout_start_time\":" << audio_telemetry().last_checkout_start_time
+            << ",\"last_audio_checkout_duration\":" << audio_telemetry().last_checkout_duration
+            << ",\"last_audio_checkout_time_scale\":" << audio_telemetry().last_checkout_time_scale
+            << ",\"last_audio_window_start_sample\":" << audio_telemetry().last_window_start_sample
+            << ",\"last_audio_window_sample_count\":" << audio_telemetry().last_window_sample_count
+            << ",\"last_audio_window_silence_samples\":" << audio_telemetry().last_window_silence_samples
+            << ",\"last_audio_output_rate_fixed\":" << audio_telemetry().last_output_rate
+            << ",\"last_audio_output_bytes_per_sample\":" << audio_telemetry().last_output_bytes_per_sample
+            << ",\"last_audio_output_channels\":" << audio_telemetry().last_output_channels
+            << ",\"last_audio_output_format\":" << audio_telemetry().last_output_format
+            << ",\"last_audio_returned_sample_frames\":" << audio_telemetry().last_returned_sample_frames
             << ",\"audio_lifetimes_balanced\":"
             << (audio_handle_lifetimes_balanced() ? "true" : "false")
             << ",\"invalid_audio_operations\":" << audio_telemetry().invalid_operations

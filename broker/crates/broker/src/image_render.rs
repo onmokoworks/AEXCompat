@@ -1635,22 +1635,36 @@ fn render_audio_via_length_one_session(
         let _ = fs::remove_file(output_path);
         return AudioWrapperOutcome::Failure(error);
     }
-    AudioWrapperOutcome::Report(json!({
-        "status": "render_completed",
-        "sample_rate": SAMPLE_RATE,
-        "channels": 1,
-        "sample_format": "float32",
-        "guard_bytes_intact": true,
-        "samples_finite": true,
-        "audio_lifetimes_balanced": true,
-        "invalid_audio_operations": 0,
-        "output_samples": output.len() / 4,
-        "input_sha256": format!("{:x}", Sha256::digest(input)),
-        "output_sha256": format!("{:x}", Sha256::digest(&output)),
-        "output_transport": "mono_f32le_44100",
-        "render_path": "audio_session",
-        "session_close": close,
-    }))
+    // Preserve the one-shot audio report schema: start from the worker's
+    // aggregate audio report (which carries the audio_* telemetry the SDK audio
+    // contract consumes, at parity with emit_audio_render_report) and add or
+    // override the fields render_experimental_audio's one-shot path exposes, so
+    // a Windows caller on the default session path sees the same public shape.
+    let Some(mut report) = close
+        .get("final_report")
+        .and_then(Value::as_object)
+        .cloned()
+    else {
+        return AudioWrapperOutcome::Fallback;
+    };
+    for (key, value) in [
+        ("status", json!("render_completed")),
+        ("sample_rate", json!(SAMPLE_RATE)),
+        ("channels", json!(1)),
+        ("sample_format", json!("float32")),
+        ("guard_bytes_intact", json!(true)),
+        ("samples_finite", json!(true)),
+        ("input_samples", json!(input.len() / 4)),
+        ("output_samples", json!(output.len() / 4)),
+        ("input_sha256", json!(format!("{:x}", Sha256::digest(input)))),
+        ("output_sha256", json!(format!("{:x}", Sha256::digest(&output)))),
+        ("output_transport", json!("mono_f32le_44100")),
+        ("render_path", json!("audio_session")),
+    ] {
+        report.insert(key.to_owned(), value);
+    }
+    report.insert("session_close".to_owned(), close);
+    AudioWrapperOutcome::Report(Value::Object(report))
 }
 
 pub fn render_experimental_audio(
