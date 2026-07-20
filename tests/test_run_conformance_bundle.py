@@ -143,6 +143,66 @@ def test_render_path_echo_rejects_each_mismatch_and_contradiction():
     assert not module.is_crash_exit_code(1)
 
 
+def test_empty_smartfx_result_is_preserved_without_a_png(tmp_path):
+    module = load_runner_module()
+    input_world = {
+        "width": 2,
+        "height": 2,
+        "row_bytes": 8,
+        "pixel_format": "argb8",
+        "premultiplication": "premultiplied",
+        "extent_hint": {"left": 0, "top": 0, "right": 2, "bottom": 2},
+    }
+    empty_hash = hashlib.sha256(b"").hexdigest()
+    value = {
+        "passed": True,
+        "empty_result_rect": True,
+        "input_world": input_world,
+        "output_sha256": empty_hash,
+        "suite_timeline": [],
+        "parameter_metadata": [],
+    }
+    # The broker writes no PNG for an empty result_rect, so the output path is
+    # absent here; the normalizer must still preserve it as empty_result.
+    result = module.normalize_harness_report(
+        "argb8", value, tmp_path / "missing.png", input_world, "premultiplied", "smartfx"
+    )
+    assert result["classification"] == "empty_result"
+    assert result["world"] is None
+    assert result["raw_output"] is None
+    assert result["output_sha256"] == empty_hash
+    assert result["selector"] == {
+        "render_path": "smartfx",
+        "completed": True,
+        "error_code": 0,
+    }
+
+
+def test_empty_result_rect_on_classic_is_still_invalid_without_a_png(tmp_path):
+    module = load_runner_module()
+    input_world = {
+        "width": 2,
+        "height": 2,
+        "row_bytes": 8,
+        "pixel_format": "argb8",
+        "premultiplication": "premultiplied",
+        "extent_hint": {"left": 0, "top": 0, "right": 2, "bottom": 2},
+    }
+    value = {
+        "passed": True,
+        "empty_result_rect": True,
+        "input_world": input_world,
+        "output_sha256": hashlib.sha256(b"").hexdigest(),
+        "parameter_metadata": [],
+    }
+    # empty_result is a SmartFX-only contract; the classic path has no such
+    # allowance, so a missing PNG stays invalid_output.
+    result = module.normalize_harness_report(
+        "argb8", value, tmp_path / "missing.png", input_world, "premultiplied", "classic"
+    )
+    assert result["classification"] == "invalid_output"
+
+
 @pytest.mark.parametrize("plugin_kind", ["aegp_candidate", "unknown_no_effect_entrypoint"])
 def test_plugin_kind_maps_to_loader_error(plugin_kind):
     module = load_runner_module()

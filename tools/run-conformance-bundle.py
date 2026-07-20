@@ -323,6 +323,41 @@ def failed_result(
     }
 
 
+def _is_sha256_hex(value: Any) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) == 64
+        and all(character in "0123456789abcdef" for character in value)
+    )
+
+
+def empty_smartfx_result(
+    depth: str, value: dict[str, Any], input_world: dict[str, Any]
+) -> dict[str, Any]:
+    # A SmartFX render that legally answers an empty result_rect renders no
+    # pixels: the broker reports zero geometry and an empty output, hashed as
+    # sha256(b""). world/raw_output stay null (attach_raw_artifacts leaves
+    # raw_output None for any non-"ok" result); output_sha256 carries the empty
+    # hash the schema/validator require for empty_result.
+    actual_input_world = value.get("input_world")
+    output_sha256 = value.get("output_sha256")
+    if not isinstance(actual_input_world, dict) or not _is_sha256_hex(output_sha256):
+        return failed_result(depth, input_world, "invalid_output", "smartfx")
+    return {
+        "depth": depth,
+        "classification": "empty_result",
+        "selector": {"render_path": "smartfx", "completed": True, "error_code": 0},
+        "input_world": actual_input_world,
+        "world": None,
+        "raw_input": None,
+        "raw_output": None,
+        "output_sha256": output_sha256,
+        "suite_timeline": value.get("suite_timeline"),
+        "_parameter_metadata": value["parameter_metadata"],
+        "oracle": {"state": "not_captured", "identity_match": False, "exact": False},
+    }
+
+
 def normalize_harness_report(
     depth: str,
     value: dict[str, Any],
@@ -331,11 +366,15 @@ def normalize_harness_report(
     premultiplication: str,
     render_path: str = "smartfx",
 ) -> dict[str, Any]:
-    if (
-        not value.get("passed")
-        or not output.is_file()
-        or not isinstance(value.get("parameter_metadata"), list)
-    ):
+    if not value.get("passed") or not isinstance(value.get("parameter_metadata"), list):
+        return failed_result(depth, input_world, "invalid_output", render_path)
+    # A SmartFX render may legally answer an empty result_rect: the broker
+    # reports empty_result_rect with zero geometry and intentionally writes no
+    # PNG. Requiring output.is_file() here would mislabel that schema-supported
+    # empty_result as invalid_output, dropping a valid conformance result.
+    if render_path == "smartfx" and value.get("empty_result_rect") is True:
+        return empty_smartfx_result(depth, value, input_world)
+    if not output.is_file():
         return failed_result(depth, input_world, "invalid_output", render_path)
     try:
         actual_input_world = value["input_world"]
