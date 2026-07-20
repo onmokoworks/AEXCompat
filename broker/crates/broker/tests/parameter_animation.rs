@@ -15,9 +15,9 @@ use serde_json::Value;
 #[cfg(windows)]
 mod windows_real_worker {
     use aexcompat_broker::image_render::{
-        render_experimental_image_with_parameter_animation, AnimationInterpolation, AnimationTime,
-        AnimationValue, InteractiveParameter, ParameterAnimation, ParameterAnimationKey,
-        RenderTiming,
+        render_experimental_image, render_experimental_image_with_parameter_animation,
+        AnimationInterpolation, AnimationTime, AnimationValue, InteractiveParameter,
+        ParameterAnimation, ParameterAnimationKey, RenderTiming, DISABLE_SESSION_WRAPPER_ENV,
     };
     use sha2::{Digest, Sha256};
     use std::fs;
@@ -128,6 +128,185 @@ mod windows_real_worker {
             rendered.pixels().all(|pixel| pixel.0 == [0, 211, 0, 255]),
             "probe reported keyframe failures: report={report}, pixel={:?}",
             rendered.pixels().next()
+        );
+    }
+
+    fn layer_param(slot: u32, path: &Path) -> InteractiveParameter {
+        InteractiveParameter {
+            slot,
+            name: "layer".into(),
+            kind: "layer".into(),
+            minimum: 0.0,
+            maximum: 0.0,
+            value: 0.0,
+            choices: Vec::new(),
+            color: [0; 4],
+            components: [0.0; 3],
+            component_count: 0,
+            layer_path: Some(path.to_path_buf()),
+            enabled: true,
+            visible: true,
+            supervised: false,
+            debug_summary: None,
+            custom_ui_events: 0,
+            control_size: [0, 0],
+        }
+    }
+
+    fn float_param(slot: u32, value: f64) -> InteractiveParameter {
+        InteractiveParameter {
+            slot,
+            name: "amount".into(),
+            kind: "float".into(),
+            minimum: 0.0,
+            maximum: 255.0,
+            value,
+            choices: Vec::new(),
+            color: [0; 4],
+            components: [0.0; 3],
+            component_count: 0,
+            layer_path: None,
+            enabled: true,
+            visible: true,
+            supervised: false,
+            debug_summary: None,
+            custom_ui_events: 0,
+            control_size: [0, 0],
+        }
+    }
+
+    /// Real-AEX coverage that classic parameter animation (issue #132) writes the
+    /// interpolated-at-current_time value into the `params[]` array the effect
+    /// reads at PF_Cmd_RENDER — a surface distinct from the PF_ParamUtilsSuite
+    /// keyframe path that pf_param_utils_animation_probe exercises. The
+    /// pf-layer-param-probe reflects its slider (slot 2) into the output, so the
+    /// animated value is observable byte-for-byte. Two oracle-free claims:
+    ///   1. the value moves over time: the render at the first keyframe time
+    ///      differs from the render at the last keyframe time;
+    ///   2. the value is correct: the render at a keyframe time is byte-identical
+    ///      to a static render carrying that keyframe's value (both forced through
+    ///      the one-shot transport so only the value-supply mechanism differs).
+    /// Session-carried parameter animation stays on the one-shot path today (the
+    /// image_render payload gate refuses the "v5|" animation payload), so this is
+    /// a one-shot observation, not a session/one-shot A/B; that equivalence is
+    /// tracked separately. Gated on the locally built worker and the
+    /// pf-layer-param-probe fixture.
+    #[test]
+    fn classic_parameter_animation_drives_params_array_on_the_real_worker() {
+        let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .ancestors()
+            .nth(3)
+            .unwrap();
+        let worker = repository.join("target/minihost-build/aex_render_worker.exe");
+        let plugin = repository
+            .join("target/pf-layer-param-probe-build/Release")
+            .join(["pf_layer_param_probe", "aex"].join("."));
+        if !worker.exists() || !plugin.exists() {
+            return;
+        }
+        let hash = format!("{:X}", Sha256::digest(fs::read(&plugin).unwrap()));
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let temp = std::env::temp_dir();
+        let input = temp.join(format!("aexcompat-anim-layer-input-{nonce}.png"));
+        let layer = temp.join(format!("aexcompat-anim-layer-layer-{nonce}.png"));
+        let anim_low = temp.join(format!("aexcompat-anim-layer-a0-{nonce}.png"));
+        let anim_high = temp.join(format!("aexcompat-anim-layer-a1-{nonce}.png"));
+        let static_low = temp.join(format!("aexcompat-anim-layer-s0-{nonce}.png"));
+        let _cleanup = RemoveOnDrop(vec![
+            input.clone(),
+            layer.clone(),
+            anim_low.clone(),
+            anim_high.clone(),
+            static_low.clone(),
+        ]);
+        image::RgbaImage::from_fn(9, 6, |x, y| {
+            image::Rgba([(x * 5) as u8, (y * 9) as u8, (x + y) as u8, 255])
+        })
+        .save(&input)
+        .unwrap();
+        image::RgbaImage::from_fn(9, 6, |x, y| {
+            image::Rgba([(x + y) as u8, (x * 6) as u8, (y * 7) as u8, 255])
+        })
+        .save(&layer)
+        .unwrap();
+
+        // The slider (slot 2) animates 20 -> 220 over times 0..60 @ scale 30.
+        // Linear interpolation is exact at both keyframe times, and the probe
+        // snaps the value to an integer, so the observed value is exactly 20 at
+        // t=0 and 220 at t=60.
+        let low = 20.0;
+        let high = 220.0;
+        let params = |value: f64| vec![layer_param(1, &layer), float_param(2, value)];
+        let animations = [ParameterAnimation {
+            slot: 2,
+            keys: vec![
+                scalar_key((0, 30), AnimationInterpolation::Linear, low),
+                scalar_key((60, 30), AnimationInterpolation::Linear, high),
+            ],
+        }];
+        let timing = |current_time: i32| RenderTiming {
+            current_time,
+            time_step: 1,
+            total_time: 60,
+            time_scale: 30,
+        };
+
+        let report_low = render_experimental_image_with_parameter_animation(
+            repository,
+            &plugin,
+            &hash,
+            &input,
+            &anim_low,
+            &params(low),
+            &animations,
+            timing(0),
+        )
+        .expect("animation render at the first keyframe time");
+        assert_eq!(report_low["passed"], true, "report: {report_low}");
+        let report_high = render_experimental_image_with_parameter_animation(
+            repository,
+            &plugin,
+            &hash,
+            &input,
+            &anim_high,
+            &params(low),
+            &animations,
+            timing(60),
+        )
+        .expect("animation render at the last keyframe time");
+        assert_eq!(report_high["passed"], true, "report: {report_high}");
+
+        // Claim 1: the animated parameter actually moves the output over time.
+        assert_ne!(
+            fs::read(&anim_low).unwrap(),
+            fs::read(&anim_high).unwrap(),
+            "the animated slider did not change the output between keyframe times"
+        );
+
+        // Claim 2: the animated value at a keyframe time equals a static render
+        // carrying that value. Forcing the static render through the one-shot
+        // transport leaves the value-supply mechanism (static payload vs
+        // animation sidecar) as the only difference from the animation render.
+        unsafe { std::env::set_var(DISABLE_SESSION_WRAPPER_ENV, "1") };
+        let static_report = render_experimental_image(
+            repository,
+            &plugin,
+            &hash,
+            &input,
+            &static_low,
+            &params(low),
+        )
+        .expect("static render carrying the first keyframe value");
+        unsafe { std::env::remove_var(DISABLE_SESSION_WRAPPER_ENV) };
+        assert_eq!(static_report["passed"], true, "report: {static_report}");
+        assert_eq!(
+            fs::read(&anim_low).unwrap(),
+            fs::read(&static_low).unwrap(),
+            "classic animation at t=0 did not match a static render carrying the keyframe value; \
+             the interpolated value was not written into params[]"
         );
     }
 }
