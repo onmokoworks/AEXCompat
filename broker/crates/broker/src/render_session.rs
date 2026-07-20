@@ -1295,7 +1295,12 @@ impl RenderSession {
         // resize_needed, the broker grows the shared section in place (protocol
         // §3, issue #262), and the worker then answers ok for the same frame.
         // Loop until a terminal (ok/error) status; a resize_needed grows and
-        // waits for the follow-up without re-dispatching the frame.
+        // waits for the follow-up without re-dispatching the frame. A legitimate
+        // frame needs at most one grow (the worker reports its full required size
+        // and renders exactly once into a private buffer), so a second
+        // resize_needed for the same frame is a fail-closed protocol violation,
+        // bounding section-allocation amplification from a buggy worker.
+        let mut grows: u32 = 0;
         loop {
         let body = match self.await_frame_response() {
             FrameWait::Message(body) => body,
@@ -1553,6 +1558,18 @@ impl RenderSession {
                         POST_TERMINATION_COLLECT_TIMEOUT,
                     ));
                 }
+                // A legitimate frame grows at most once; a second resize_needed
+                // for the same frame is a fail-closed violation (bounds the
+                // section-allocation work a buggy worker can force).
+                grows += 1;
+                if grows > 1 {
+                    return Err(self.invalidate(
+                        "repeated_resize_needed",
+                        format!("frame {frame_index} reported resize_needed more than once"),
+                        true,
+                        POST_TERMINATION_COLLECT_TIMEOUT,
+                    ));
+                }
                 // Grow the shared section in place and wait for the worker's
                 // follow-up ok for this same frame (protocol §3, issue #262). The
                 // render lifecycle already ran once into the worker's private
@@ -1603,13 +1620,14 @@ impl RenderSession {
             ));
         }
         // The grown section is handed to the worker by DuplicateHandle, not by
-        // inheritance, so it needs no inheritable security. On any failure below
-        // the current section stays live and the session is invalidated.
-        let mut security = inheritable_security();
+        // inheritance, so it is created non-inheritable (null security): no other
+        // spawned process should ever inherit this section carrying rendered
+        // image bytes. On any failure below the current section stays live and
+        // the session is invalidated.
         let section = match OwnedHandle::new(unsafe {
             CreateFileMappingW(
                 INVALID_HANDLE_VALUE,
-                &mut security,
+                null(),
                 PAGE_READWRITE,
                 ((section_bytes as u64) >> 32) as u32,
                 section_bytes as u32,
