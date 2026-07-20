@@ -97,7 +97,11 @@ std::size_t input_slot_bytes(const SessionGeometry& geometry) {
 }
 
 std::size_t output_slot_bytes(const SessionGeometry& geometry) {
-  return static_cast<std::size_t>(geometry.max_width) * geometry.max_height *
+  const int32_t capacity_width = geometry.output_capacity_width > 0
+      ? geometry.output_capacity_width : geometry.max_width;
+  const int32_t capacity_height = geometry.output_capacity_height > 0
+      ? geometry.output_capacity_height : geometry.max_height;
+  return static_cast<std::size_t>(capacity_width) * capacity_height *
          geometry.output_pixel_bytes;
 }
 
@@ -409,7 +413,8 @@ template <typename FrameFn>
 RenderSessionOutcome run_session_frame_loop(
     EffectEntry entry, std::array<std::byte, kInSize>& input,
     std::array<std::byte, kOutSize>& output,
-    int32_t max_width, int32_t max_height, int32_t time_step, int32_t total_time,
+    int32_t max_width, int32_t max_height, int32_t output_capacity_width,
+    int32_t output_capacity_height, int32_t time_step, int32_t total_time,
     uint32_t time_scale, int32_t pixel_bytes,
     const std::vector<ExternalLayerInput>* external_layers, FrameFn&& render_frame) {
   using aexcompat::strict_json::JsonValue;
@@ -434,8 +439,11 @@ RenderSessionOutcome run_session_frame_loop(
   RenderSessionOutcome outcome;
   const int32_t layer_slot_count =
       external_layers ? static_cast<int32_t>(external_layers->size()) : 0;
-  const wrs::SessionGeometry geometry{max_width, max_height, pixel_bytes,
-                                      layer_slot_count};
+  const wrs::SessionGeometry geometry{
+      max_width, max_height,
+      output_capacity_width > 0 ? output_capacity_width : max_width,
+      output_capacity_height > 0 ? output_capacity_height : max_height,
+      pixel_bytes, layer_slot_count};
   wrs::SessionChannels channels;
   if (!channels.open_from_environment(geometry) ||
       !channels.static_header_matches(geometry)) {
@@ -648,7 +656,7 @@ RenderSessionOutcome run_session_frame_loop(
       std::string reply = "{\"v\":1,\"type\":\"frame_done\",\"frame_index\":" +
           std::to_string(frame_index) + ",\"status\":\"resize_needed\",\"width\":" +
           std::to_string(frame_width) + ",\"height\":" + std::to_string(frame_height) +
-          "}";
+          ",\"render_error\":0}";
       return channels.write_message(reply);
     };
     if (static_cast<uint32_t>(current_scale) != time_scale) {
@@ -819,11 +827,13 @@ RenderSessionOutcome run_session_frame_loop(
 RenderSessionOutcome run_render_session(
     EffectEntry entry, std::array<std::byte, kInSize>& input,
     std::array<std::byte, kOutSize>& output, const RequestedAssignments* requested,
-    int32_t max_width, int32_t max_height, int32_t time_step, int32_t total_time,
+    int32_t max_width, int32_t max_height, int32_t output_capacity_width,
+    int32_t output_capacity_height, int32_t time_step, int32_t total_time,
     uint32_t time_scale, int32_t pixel_bytes,
     const std::vector<ExternalLayerInput>* external_layers) {
   return run_session_frame_loop(
-      entry, input, output, max_width, max_height, time_step, total_time,
+      entry, input, output, max_width, max_height, output_capacity_width,
+      output_capacity_height, time_step, total_time,
       time_scale, pixel_bytes, external_layers,
       [&](int32_t current_time, const std::vector<unsigned char>& frame_rgba,
           std::vector<unsigned char>& captured,
@@ -865,7 +875,9 @@ SmartRenderSessionOutcome run_smart_render_session(
     int32_t pixel_bytes) {
   SmartRenderSessionOutcome outcome;
   outcome.session = run_session_frame_loop(
-      entry, input, output, max_width, max_height, time_step, total_time,
+      entry, input, output, max_width, max_height,
+      // Smart sessions (v1.1) render at fixed dimensions; no output expansion.
+      max_width, max_height, time_step, total_time,
       time_scale, pixel_bytes, nullptr,
       [&](int32_t current_time, const std::vector<unsigned char>& frame_rgba,
           std::vector<unsigned char>& captured,

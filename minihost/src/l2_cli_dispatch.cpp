@@ -27,13 +27,13 @@ AuxiliaryOptionResult strip_auxiliary_options(
   if (argc < 0 || !argv || !hooks.set_dump_worlds_dir ||
       !hooks.enable_checksum_detail || !hooks.load_aux_manifest ||
       !hooks.parse_alpha_coverage || !hooks.load_parameter_animation ||
-      !hooks.parse_conformance_render_settings)
+      !hooks.parse_conformance_render_settings || !hooks.parse_output_capacity)
     return {argc, false};
 
   int effective_argc = argc;
   bool saw_aux = false, saw_animation = false, saw_coverage = false;
   bool saw_dump_worlds = false, saw_checksum_detail = false;
-  bool saw_render_settings = false;
+  bool saw_render_settings = false, saw_output_capacity = false;
   while (effective_argc >= 3) {
     const wchar_t* flag = argv[effective_argc - 2];
     const wchar_t* value = argv[effective_argc - 1];
@@ -57,6 +57,9 @@ AuxiliaryOptionResult strip_auxiliary_options(
                !saw_render_settings) {
       accepted = hooks.parse_conformance_render_settings(hooks.context, value);
       saw_render_settings = accepted;
+    } else if (equals(flag, L"--output-capacity-v1") && !saw_output_capacity) {
+      accepted = hooks.parse_output_capacity(hooks.context, value);
+      saw_output_capacity = accepted;
     } else {
       break;
     }

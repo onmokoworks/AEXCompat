@@ -13,6 +13,11 @@ struct AuxiliaryOptionHooks {
   bool (*parse_alpha_coverage)(void* context, const wchar_t* value){};
   bool (*load_parameter_animation)(void* context, const wchar_t* value){};
   bool (*parse_conformance_render_settings)(void* context, const wchar_t* value){};
+  // Render-session output-slot capacity "<width>x<height>" (#261): sizes the
+  // shared output slot larger than the render dimensions so an expand-output
+  // effect fits without changing the render geometry. Absent = render
+  // dimensions.
+  bool (*parse_output_capacity)(void* context, const wchar_t* value){};
 };
 
 struct AuxiliaryOptionResult {

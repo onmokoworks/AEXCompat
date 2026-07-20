@@ -1345,6 +1345,34 @@ bool parse_l2_conformance_render_settings(void*, const wchar_t* value) {
   return aexcompat::worker_render_report::parse_conformance_render_settings(value);
 }
 
+// Render-session output-slot capacity (#261), set by --output-capacity-v1
+// "<width>x<height>". Read cross-TU by worker_invocation_orchestration when it
+// launches the session frame loop; 0 means "use the render dimensions". Defined
+// in aexcompat::l2_detail (external linkage) so the dispatch owner's extern
+// resolves it.
+namespace aexcompat::l2_detail {
+int32_t g_session_output_capacity_width = 0;
+int32_t g_session_output_capacity_height = 0;
+}  // namespace aexcompat::l2_detail
+
+bool parse_l2_output_capacity(void*, const wchar_t* value) {
+  if (!value) return false;
+  wchar_t* after_width = nullptr;
+  const long width = std::wcstol(value, &after_width, 10);
+  if (after_width == value || *after_width != L'x') return false;
+  wchar_t* after_height = nullptr;
+  const long height = std::wcstol(after_width + 1, &after_height, 10);
+  if (after_height == after_width + 1 || *after_height != L'\0') return false;
+  // Mirror the worker's validate_output_extent bounds so the session capacity
+  // can never exceed what a one-shot expand render would accept.
+  if (width <= 0 || height <= 0 || width > 4096 || height > 4096 ||
+      static_cast<long long>(width) * height > 16'777'216)
+    return false;
+  aexcompat::l2_detail::g_session_output_capacity_width = static_cast<int32_t>(width);
+  aexcompat::l2_detail::g_session_output_capacity_height = static_cast<int32_t>(height);
+  return true;
+}
+
 bool __cdecl scene_render_receipt_enabled() {
   return is_render_worker() && aexcompat::aegp_layer_render_runtime::active();
 }
@@ -1527,7 +1555,7 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
       aexcompat::worker_runtime::request_parser::Kind::Render, argc, argv,
       {{nullptr, set_l2_dump_worlds_dir, enable_l2_checksum_detail,
         load_l2_aux_manifest, parse_l2_alpha_coverage, load_l2_parameter_animation,
-        parse_l2_conformance_render_settings},
+        parse_l2_conformance_render_settings, parse_l2_output_capacity},
        &parse_layer_transport_key, &parse_mask_context_payload,
        &parse_spatial_context_payload, &parse_render_environment_payload,
        &invocation.requested_parameters, parse_requested_payload, &configure_mask_scene});
@@ -1539,7 +1567,7 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
         aexcompat::worker_runtime::request_parser::Kind::Smart, argc, argv,
         {{nullptr, set_l2_dump_worlds_dir, enable_l2_checksum_detail,
           load_l2_aux_manifest, parse_l2_alpha_coverage, load_l2_parameter_animation,
-          parse_l2_conformance_render_settings},
+          parse_l2_conformance_render_settings, parse_l2_output_capacity},
          &parse_layer_transport_key, &parse_mask_context_payload,
          &parse_spatial_context_payload, &parse_render_environment_payload,
          &invocation.requested_parameters, parse_requested_payload, &configure_mask_scene});

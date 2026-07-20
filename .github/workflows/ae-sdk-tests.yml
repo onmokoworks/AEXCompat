@@ -135,6 +135,7 @@ jobs:
             build-pf-transfer-rect-probe
             build-pf-transform-affine-probe
             build-pf-custom-ui-probe
+            build-pf-frame-resize-probe
           ) do (
             powershell -NoProfile -ExecutionPolicy Bypass -File tools\%%s.ps1 || exit /b 1
           )

@@ -4723,7 +4723,7 @@ fn render_with_artifact(
             expected_shutter_angle,
             expected_shutter_phase,
             custom_ui_action: custom_ui_action.as_ref(),
-        }) {
+        }, None) {
             SessionWrapperOutcome::Report(report) => return Ok(report),
             SessionWrapperOutcome::Failure(error) => return Err(error),
             SessionWrapperOutcome::Fallback => {}
@@ -5310,13 +5310,20 @@ enum SessionWrapperOutcome {
 }
 
 #[cfg(not(windows))]
-fn render_classic_via_length_one_session(_: &SessionWrapperRequest<'_>) -> SessionWrapperOutcome {
+fn render_classic_via_length_one_session(
+    _: &SessionWrapperRequest<'_>,
+    _: Option<(u32, u32)>,
+) -> SessionWrapperOutcome {
     SessionWrapperOutcome::Fallback
 }
 
 #[cfg(windows)]
 fn render_classic_via_length_one_session(
     request: &SessionWrapperRequest<'_>,
+    // Output-slot capacity for this attempt (#261). `None` opens at the render
+    // dimensions; a resize_needed frame re-opens with `Some((w, h))` sized to
+    // the effect's expanded output, keeping the render on the session route.
+    output_capacity: Option<(u32, u32)>,
 ) -> SessionWrapperOutcome {
     use crate::render_session::{FrameStatus, RenderSession, SessionOpenRequest};
 
@@ -5329,7 +5336,7 @@ fn render_classic_via_length_one_session(
         Err(error) => return SessionWrapperOutcome::Failure(error),
     };
     let output_checksum_detail = output_checksum_detail_requested();
-    let mut session = match RenderSession::open(SessionOpenRequest {
+    let mut session = match RenderSession::open_with_output_capacity(SessionOpenRequest {
         repository: request.repository,
         plugin_path: request.plugin_path,
         plugin_sha256: request.plugin_sha256,
@@ -5354,7 +5361,7 @@ fn render_classic_via_length_one_session(
         smart: false,
         gpu_backend: RenderGpuBackend::Cpu,
         gpu_runtime_policy: None,
-    }) {
+    }, output_capacity) {
         Ok(session) => session,
         Err(_) => return SessionWrapperOutcome::Fallback,
     };
@@ -5383,6 +5390,22 @@ fn render_classic_via_length_one_session(
             return fallback_with_clean_dumps(&world_dump_dir);
         }
     };
+    // An expand-output effect overran the slot: re-open once at the required
+    // capacity and re-render on the session route (#261). The render dimensions
+    // are unchanged, so the effect renders the same content into a larger slot.
+    // A second resize_needed cannot happen (the slot is sized to exactly the
+    // reported dimensions); fall back defensively if it somehow does.
+    if let FrameStatus::ResizeNeeded { width, height } = &outcome.status {
+        let (width, height) = (*width, *height);
+        let _ = session.close();
+        if let Some(dump) = &world_dump_dir {
+            let _ = clear_world_dump_files(&dump.path);
+        }
+        if output_capacity.is_some() {
+            return fallback_with_clean_dumps(&world_dump_dir);
+        }
+        return render_classic_via_length_one_session(request, Some((width, height)));
+    }
     let close = session.close();
     if close.get("session_clean") != Some(&Value::Bool(true))
         || close.get("invalidated") != Some(&Value::Bool(false))
@@ -5422,8 +5445,15 @@ fn render_classic_via_length_one_session(
         Ok(values) => values,
         Err(error) => return SessionWrapperOutcome::Failure(error),
     };
-    let pixels = match outcome.status {
-        FrameStatus::Rendered { pixels, .. } => pixels,
+    // The frame's actual (possibly expanded/shrunk) dimensions drive the PNG
+    // encode and the public report, not the launch render dimensions (#261).
+    let (pixels, rendered_width, rendered_height) = match outcome.status {
+        FrameStatus::Rendered {
+            pixels,
+            width,
+            height,
+            ..
+        } => (pixels, width, height),
         FrameStatus::FrameError { render_error } => {
             // The gate above rejects any final report carrying a render
             // error, so this arm is defensive only.
@@ -5431,15 +5461,8 @@ fn render_classic_via_length_one_session(
                 "session frame reported error {render_error} past a clean final report"
             )));
         }
-        // An expand-output effect overran the launch slot. Re-opening the
-        // session with a larger *output* slot (without changing the render
-        // dimensions the effect reads from in_data) needs the output-slot
-        // capacity decoupled from the render geometry; until that lands, the
-        // one-shot transport carries the expand (#261). Shrink already renders
-        // on the session route above.
-        FrameStatus::ResizeNeeded { .. } => {
-            return fallback_with_clean_dumps(&world_dump_dir);
-        }
+        // Handled before close above (re-open at the required capacity).
+        FrameStatus::ResizeNeeded { .. } => unreachable!("resize handled before close"),
     };
     if let Some(path) = request.preserved_output {
         if let Some(parent) = path.parent() {
@@ -5466,8 +5489,8 @@ fn render_classic_via_length_one_session(
         rgba16_transport_to_png16(&pixels).and_then(|(samples, overrange)| {
             deep_overrange_samples = Some(overrange);
             let image = image::ImageBuffer::<image::Rgba<u16>, Vec<u16>>::from_raw(
-                request.width,
-                request.height,
+                rendered_width,
+                rendered_height,
                 samples,
             )
             .ok_or_else(|| invalid("worker output dimensions are invalid"))?;
@@ -5477,7 +5500,7 @@ fn render_classic_via_length_one_session(
         })
     } else {
         native_rgba_to_preview(&pixels, request.pixel_format).and_then(|preview| {
-            let image = image::RgbaImage::from_raw(request.width, request.height, preview)
+            let image = image::RgbaImage::from_raw(rendered_width, rendered_height, preview)
                 .ok_or_else(|| invalid("worker output dimensions are invalid"))?;
             image
                 .save_with_format(request.output_path, ImageFormat::Png)
@@ -5491,8 +5514,8 @@ fn render_classic_via_length_one_session(
         plugin_id: request.plugin_id.to_owned(),
         smart: false,
         pixel_format: request.pixel_format,
-        rendered_width: request.width,
-        rendered_height: request.height,
+        rendered_width,
+        rendered_height,
         input_width: request.width,
         input_height: request.height,
         output_png: request.output_path.to_path_buf(),

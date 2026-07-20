@@ -1265,4 +1265,98 @@ mod windows_e2e {
 
         let _ = std::fs::remove_dir_all(&scratch);
     }
+
+    /// A/B equivalence for an expand-output effect (issue #261): the length-1
+    /// session route re-opens with a larger output slot and renders the
+    /// expanded output byte-identically to the one-shot argv transport, instead
+    /// of falling back. The fixture is pf_expand_allowed_probe (FRAME_SETUP
+    /// grows the output by 4px with PF_OutFlag_I_EXPAND_BUFFER), which overruns
+    /// the initial slot and drives the resize_needed re-open. Requires the
+    /// render worker and the resize probe (tools/build-pf-frame-resize-probe.ps1).
+    #[test]
+    fn expand_output_matches_the_one_shot_transport() {
+        let _env_guard = SESSION_ROUTE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let root = repository_root();
+        let worker = root.join("target/minihost-build/aex_render_worker.exe");
+        let aex = root
+            .join("target/pf-frame-resize-probe-build/Release/pf_expand_allowed_probe.aex");
+        if !worker.is_file() || !aex.is_file() {
+            eprintln!(
+                "skipping expand A/B: build aex_render_worker.exe and pf_expand_allowed_probe.aex \
+                 (tools/build-pf-frame-resize-probe.ps1) first"
+            );
+            return;
+        }
+        let sha = format!("{:x}", Sha256::digest(std::fs::read(&aex).unwrap()));
+        let scratch = std::env::temp_dir().join(format!(
+            "aexcompat-expand-ab-{}-{:032x}",
+            std::process::id(),
+            rand::random::<u128>()
+        ));
+        std::fs::create_dir_all(&scratch).unwrap();
+        let input = scratch.join("input.png");
+        image::RgbaImage::from_fn(64, 48, |x, y| {
+            image::Rgba([(x * 3) as u8, (y * 5) as u8, (x + y) as u8, 255])
+        })
+        .save(&input)
+        .unwrap();
+
+        // Run A: default routing. The effect expands 64x48 -> 68x52, overruns
+        // the initial 64x48 slot, and the wrapper re-opens at 68x52 on the
+        // session route. The counter proves the session carried it (a silent
+        // one-shot fallback would leave it unchanged).
+        let before = RENDER_SESSION_WRAPPER_RENDERS.load(Ordering::SeqCst);
+        let output_a = scratch.join("out-a.png");
+        let report_a = render_experimental_image(&root, &aex, &sha, &input, &output_a, &[])
+            .expect("session-route expand render");
+        assert!(
+            RENDER_SESSION_WRAPPER_RENDERS.load(Ordering::SeqCst) > before,
+            "the session wrapper did not carry the expand render"
+        );
+        // The output really expanded past the input dimensions.
+        assert_eq!(report_a.get("width"), Some(&serde_json::json!(68)));
+        assert_eq!(report_a.get("height"), Some(&serde_json::json!(52)));
+
+        // Run B: the escape hatch forces the one-shot argv transport.
+        unsafe { std::env::set_var(DISABLE_SESSION_WRAPPER_ENV, "1") };
+        let after_a = RENDER_SESSION_WRAPPER_RENDERS.load(Ordering::SeqCst);
+        let output_b = scratch.join("out-b.png");
+        let report_b = render_experimental_image(&root, &aex, &sha, &input, &output_b, &[]);
+        unsafe { std::env::remove_var(DISABLE_SESSION_WRAPPER_ENV) };
+        let report_b = report_b.expect("one-shot expand render");
+        assert_eq!(
+            RENDER_SESSION_WRAPPER_RENDERS.load(Ordering::SeqCst),
+            after_a,
+            "the escape hatch did not force the one-shot transport"
+        );
+
+        let volatile = ["output_png", "output_raw", "worker_diagnostics"];
+        let mut flattened_a = report_a.as_object().expect("report A object").clone();
+        let mut flattened_b = report_b.as_object().expect("report B object").clone();
+        for key in volatile {
+            flattened_a.remove(key);
+            flattened_b.remove(key);
+        }
+        assert_eq!(
+            flattened_a.keys().collect::<Vec<_>>(),
+            flattened_b.keys().collect::<Vec<_>>(),
+            "expand report key sets diverge"
+        );
+        for (key, value_a) in &flattened_a {
+            assert_eq!(
+                Some(value_a),
+                flattened_b.get(key),
+                "expand report field {key} differs between the session and one-shot routes"
+            );
+        }
+        assert_eq!(
+            std::fs::read(&output_a).unwrap(),
+            std::fs::read(&output_b).unwrap(),
+            "expanded PNG bytes differ between the session and one-shot routes"
+        );
+
+        let _ = std::fs::remove_dir_all(&scratch);
+    }
 }

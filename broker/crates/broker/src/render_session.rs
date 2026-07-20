@@ -912,6 +912,15 @@ impl RenderSession {
                 sidecar.0.to_string_lossy().into_owned(),
             ]);
         }
+        // Carry a non-default output-slot capacity to the worker (#261); an
+        // absent trailer means the capacity equals the render dimensions, so the
+        // launch stays byte-identical for a fixed-size session.
+        if (output_capacity_width, output_capacity_height) != (request.width, request.height) {
+            args_after_plugin.extend([
+                "--output-capacity-v1".to_owned(),
+                format!("{output_capacity_width}x{output_capacity_height}"),
+            ]);
+        }
         let dispatch = SecureImageDispatch {
             repository: request.repository,
             worker_kind: if request.smart {

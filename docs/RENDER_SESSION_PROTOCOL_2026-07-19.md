@@ -341,6 +341,30 @@ u32 LE の長さ接頭辞 + UTF-8 JSON 本文。1 メッセージ上限 64 KiB (
   レンダー前に拒否されたフレーム (時刻 scale 不一致等) では出力スロットも
   `output_generation` も更新されないため、stale な値を運ばない。broker は
   error 応答ではスロットを読まない。
+
+#### 出力リサイズ (可変寸法 / `resize_needed`) — #261
+
+エフェクトが `PF_OutFlag_I_EXPAND_BUFFER` / `PF_OutFlag_I_SHRINK_BUFFER` で
+出力を入力と異なる寸法にする場合 (one-shot 本流と同じ範囲: 各次元 ≤ 4096、
+≤ 16,777,216 px)、frame は render 寸法 (`max_width`/`max_height`) と異なる
+実寸法で完了しうる。**レンダー寸法 (in_data の extent / full_resolution) と
+出力スロット容量を分離**する:
+
+- **shrink / スロット内 expand**: worker は実寸法で出力スロットに書き、
+  `frame_done.output.width/height` に実寸法を報告。`output.checksum` は
+  実寸法の packed バイト (`width*height*bpp`) を覆う。broker は実寸法バイト
+  だけ読む (スロット全体ではない)。
+- **スロット超過 expand**: worker は溢れ書きせず
+  `{"v":1,"type":"frame_done","frame_index":N,"status":"resize_needed",
+  "width":W,"height":H,"render_error":0}` を返す (出力スロット・generation
+  不変、セッションは継続使用可)。length-1 wrapper はこの寸法を
+  `--output-capacity-v1 "<W>x<H>"` トレーラ (auxiliary option pair) で渡して
+  セッションを開き直し (`open_with_output_capacity`)、レンダー寸法は据え置いた
+  まま出力スロットだけ拡大して再レンダーする (one-shot argv には落ちない)。
+  multi-frame バッチ / ライブセッションは固定スロットのため `resize_needed`
+  を診断付きで拒否する。
+- `--output-capacity-v1` トレーラが無い場合、容量はレンダー寸法に等しく launch
+  はバイト不変。共有メモリレイアウト (§6) の出力スロットは容量寸法で確保する。
 - `output` の各値は broker 側 per-frame 検証 (§7) の入力。`checksum` は
   **出力スロットへ転送した RGBA バイト列 (broker が読むバイトそのもの) の
   sha256**。one-shot の `output_hash` は内部 ARGB 論理バッファの hash
