@@ -1962,6 +1962,11 @@ pub fn run_video_batch(
                         "frame_index": frame_index,
                         "status": "ok",
                         "checksum": checksum,
+                        // The frame's actual (possibly shrunk) dimensions, so a
+                        // consumer reading the raw sidecar interprets it with the
+                        // right geometry instead of the input dimensions (#261).
+                        "width": frame_width,
+                        "height": frame_height,
                         "output_png": output_png.file_name().and_then(|name| name.to_str()),
                     }))
                 }
