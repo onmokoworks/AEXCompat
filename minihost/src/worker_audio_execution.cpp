@@ -280,6 +280,12 @@ AudioSessionOutcome run_audio_render_session(
   auto* output_slot =
       reinterpret_cast<float*>(channels.view() + was::output_slot_offset(geometry));
 
+  // Sentinel returned when a span fails host-protection validation (range,
+  // finiteness, lifetime balance) without any selector reporting an error code.
+  // A zero "error" status would let the broker accept the span as a success
+  // (Codex #252): every error reply must carry a non-zero code.
+  constexpr int32_t kAudioSpanRejected = -48;
+
   uint32_t last_output_generation = 0;
   std::string message;
   const auto respond_error = [&](int32_t request_index, int32_t render_error) {
@@ -369,10 +375,18 @@ AudioSessionOutcome run_audio_render_session(
         span.audio_render_error == 0 && span.audio_setdown_error == 0 &&
         span.setup_range_valid && span.samples_finite &&
         span.audio_lifetimes_balanced && audio_telemetry().invalid_operations == 0;
+    // Collapse the failed selector into a single non-zero code so the broker
+    // never accepts a zero-error "error" status as a success (Codex #252):
+    // prefer the actual selector error, else the range/finiteness sentinel.
+    const int32_t span_error =
+        span.audio_setup_error != 0    ? span.audio_setup_error
+        : span.audio_render_error != 0 ? span.audio_render_error
+        : span.audio_setdown_error != 0 ? span.audio_setdown_error
+                                        : kAudioSpanRejected;
     if (!span_ok) {
       // Frame-local compatibility diagnostic: the session stays usable and the
       // broker decides whether to continue.
-      if (!respond_error(request_index, span.audio_render_error)) {
+      if (!respond_error(request_index, span_error)) {
         outcome.clean = false;
         outcome.protocol_violation = true;
         break;
@@ -381,7 +395,7 @@ AudioSessionOutcome run_audio_render_session(
     }
     const std::size_t output_count = static_cast<std::size_t>(span.output_samples);
     if (output_count > max_slot_samples) {
-      respond_error(request_index, span.audio_render_error);
+      respond_error(request_index, kAudioSpanRejected);
       outcome.clean = false;
       outcome.invariant_failure = true;
       break;
@@ -398,7 +412,8 @@ AudioSessionOutcome run_audio_render_session(
     const std::string reply =
         "{\"v\":1,\"type\":\"audio_done\",\"request_index\":" +
         std::to_string(request_index) +
-        ",\"status\":\"ok\",\"output\":{\"sample_count\":" +
+        ",\"status\":\"ok\",\"output\":{\"start_sample\":" +
+        std::to_string(span.output_start) + ",\"sample_count\":" +
         std::to_string(span.output_samples) + ",\"rate\":" + std::to_string(rate) +
         ",\"channels\":1,\"sample_size\":4,\"checksum\":\"" +
         checksum + "\",\"guards_intact\":true},\"audio_render_error\":0,\"generation\":" +

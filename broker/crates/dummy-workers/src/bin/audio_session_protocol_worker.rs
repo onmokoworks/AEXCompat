@@ -223,7 +223,7 @@ mod worker {
             let checksum = format!("{:x}", Sha256::digest(&output_bytes));
             let reply = format!(
                 "{{\"v\":1,\"type\":\"audio_done\",\"request_index\":{request_index},\
-                 \"status\":\"ok\",\"output\":{{\"sample_count\":{input_samples},\"rate\":44100,\
+                 \"status\":\"ok\",\"output\":{{\"start_sample\":0,\"sample_count\":{input_samples},\"rate\":44100,\
                  \"channels\":{channels},\"sample_size\":4,\"checksum\":\"{checksum}\",\
                  \"guards_intact\":true}},\"audio_render_error\":0,\"generation\":{expected_generation}}}"
             );

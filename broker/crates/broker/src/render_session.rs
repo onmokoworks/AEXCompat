@@ -1866,7 +1866,13 @@ pub enum AudioSpanStatus {
     /// The span rendered and every invariant held. `samples` are the rendered
     /// f32 output bytes copied out of the output slot (LE, matching the
     /// one-shot .f32 output); `checksum` is their lowercase SHA-256.
-    Rendered { samples: Vec<u8>, checksum: String },
+    Rendered {
+        samples: Vec<u8>,
+        checksum: String,
+        /// The plugin's AUDIO_SETUP output start sample; the wrapper reports it
+        /// as `output_start_sample` instead of hard-coding 0 (Codex #252).
+        output_start: i64,
+    },
     /// A per-span compatibility diagnostic; the session stays usable.
     SpanError { render_error: i64 },
 }
@@ -1880,6 +1886,7 @@ pub struct AudioSpanOutcome {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct AudioDoneOutput {
+    start_sample: i64,
     sample_count: u32,
     rate: u32,
     channels: u32,
@@ -2243,10 +2250,16 @@ impl AudioRenderSession {
         }
         match done.status.as_str() {
             "error" => {
-                if done.output.is_some() || done.generation.is_some() {
+                // A zero error code on an "error" status is a success in
+                // disguise; reject it so a failed selector cannot be recorded
+                // as SpanError(0) (Codex #252, mirroring the image session).
+                if done.output.is_some()
+                    || done.generation.is_some()
+                    || done.audio_render_error == 0
+                {
                     return Err(self.invalidate(
                         "malformed_error_response",
-                        format!("request {request_index} error response carried output fields"),
+                        format!("request {request_index} error response carried output fields or zero error"),
                         POST_TERMINATION_COLLECT_TIMEOUT,
                     ));
                 }
@@ -2317,7 +2330,11 @@ impl AudioRenderSession {
                 self.requests_ok += 1;
                 Ok(AudioSpanOutcome {
                     request_index,
-                    status: AudioSpanStatus::Rendered { samples, checksum },
+                    status: AudioSpanStatus::Rendered {
+                        samples,
+                        checksum,
+                        output_start: output.start_sample,
+                    },
                 })
             }
             other => Err(self.invalidate(

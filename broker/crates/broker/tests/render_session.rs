@@ -211,12 +211,20 @@ mod windows_e2e {
         // The fixture negates each f32 input sample into the output slot.
         let input: Vec<f32> = (0..8).map(|i| i as f32 * 0.25 - 1.0).collect();
         let outcome = session.render_span(0, &input).expect("span 0 renders");
-        let AudioSpanStatus::Rendered { samples, checksum } = outcome.status else {
+        let AudioSpanStatus::Rendered {
+            samples,
+            checksum,
+            output_start,
+        } = outcome.status
+        else {
             panic!("span 0 errored");
         };
         let expected: Vec<u8> = input.iter().flat_map(|s| (-s).to_le_bytes()).collect();
         assert_eq!(samples, expected);
         assert_eq!(checksum, format!("{:x}", Sha256::digest(&expected)));
+        // The fixture reports the input start it received back through
+        // start_sample (Codex #252); the wrapper carries it to the report.
+        assert_eq!(output_start, 0);
 
         // A second span advances the generation and renders independently.
         let input2: Vec<f32> = vec![0.5, -0.5, 1.0];

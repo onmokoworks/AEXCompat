@@ -1598,8 +1598,12 @@ fn render_audio_via_length_one_session(
             return AudioWrapperOutcome::Fallback;
         }
     };
-    let output = match outcome.status {
-        AudioSpanStatus::Rendered { samples, .. } => samples,
+    let (output, output_start) = match outcome.status {
+        AudioSpanStatus::Rendered {
+            samples,
+            output_start,
+            ..
+        } => (samples, output_start),
         // A per-span compatibility error: let the one-shot path report it in
         // its own terms rather than synthesizing a divergent report.
         AudioSpanStatus::SpanError { .. } => {
@@ -1665,7 +1669,7 @@ fn render_audio_via_length_one_session(
         ("guard_bytes_intact", json!(true)),
         ("samples_finite", json!(true)),
         ("input_samples", json!(input.len() / 4)),
-        ("output_start_sample", json!(0)),
+        ("output_start_sample", json!(output_start)),
         ("output_samples", json!(output.len() / 4)),
         ("output_created", json!(true)),
         ("input_sha256", json!(format!("{:x}", Sha256::digest(input)))),
