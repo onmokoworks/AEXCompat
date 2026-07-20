@@ -90,10 +90,19 @@ AudioSpanOutcome run_audio_span(
   write<void*>(input, 376, external_audio->data());
   aexcompat::host_audio::runtime().set_source(external_audio, external_audio_samples);
 
+  // The audio selectors are invoked as raw entry() calls rather than through
+  // guarded_effect_call, so capture the loaded-module set at each selector
+  // boundary here exactly as audited_effect_call does after every guarded call
+  // (its audit_capture hook is capture_module_audit_phase). Without this, a
+  // transient DLL loaded only during AUDIO_SETUP/RENDER/SETDOWN and unloaded
+  // before GLOBAL_SETDOWN would never enter the module audit, and the broker's
+  // secure dispatch would accept a report that never observed the audio render
+  // phase (Codex #258).
   std::cerr << "stage:audio_setup_begin\n" << std::flush;
   const int32_t audio_setup_error = assignments_applied
       ? entry(kAudioSetup, input.data(), output.data(), audio_params.data(), nullptr, nullptr)
       : -1;
+  aexcompat::worker_runtime::capture_module_audit_phase();
   std::cerr << "stage:audio_setup_end error=" << audio_setup_error << "\n" << std::flush;
   const int32_t output_start = read<int32_t>(output, 356);
   const int32_t output_samples = read<int32_t>(output, 360);
@@ -118,11 +127,13 @@ AudioSpanOutcome run_audio_span(
   const int32_t audio_render_error = audio_setup_error == 0 && setup_range_valid
       ? entry(kAudioRender, input.data(), output.data(), audio_params.data(), nullptr, nullptr)
       : -1;
+  aexcompat::worker_runtime::capture_module_audit_phase();
   std::cerr << "stage:audio_render_end error=" << audio_render_error << "\n" << std::flush;
   std::cerr << "stage:audio_setdown_begin\n" << std::flush;
   const int32_t audio_setdown_error = audio_setup_error == 0
       ? entry(kAudioSetdown, input.data(), output.data(), audio_params.data(), nullptr, nullptr)
       : -1;
+  aexcompat::worker_runtime::capture_module_audit_phase();
   std::cerr << "stage:audio_setdown_end error=" << audio_setdown_error << "\n" << std::flush;
 
   const bool guards_intact = std::all_of(guarded_output.begin(),
@@ -251,7 +262,10 @@ void emit_audio_render_report(const AudioModeRequest& request,
             // The broker's secure dispatch (dispatch_approved_image) requires a
             // module_audit exactly like the image and session reports, else it
             // fails "secure worker module audit is missing" (issue #257). The
-            // phase is already captured in run_audio_mode before this report.
+            // audio render phase is observed because run_audio_span captures the
+            // module audit at each AUDIO_SETUP/RENDER/SETDOWN boundary and
+            // invoke_global_setdown captures again at teardown, so a transient
+            // module used only by the audio selectors still enters the union.
             << ",\"module_audit\":" << aexcompat::worker_runtime::module_audit_json() << "}\n";
 }
 
