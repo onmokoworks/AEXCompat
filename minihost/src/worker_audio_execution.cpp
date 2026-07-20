@@ -3,6 +3,7 @@
 #include <windows.h>
 
 #include "host_audio_runtime.hpp"
+#include "strict_json.hpp"
 #include "worker_handle_runtime.hpp"
 
 #include <algorithm>
@@ -27,6 +28,10 @@ using aexcompat::worker_runtime::parameters::kDefinitionSize;
 int32_t invoke_global_setdown(EffectEntry entry, void* input, void* output);
 const aexcompat::host_audio::Telemetry& audio_telemetry();
 bool audio_handle_lifetimes_balanced();
+// Defined in l2_main (the render subsystem owner); the audio session's
+// audio_done checksum is the sha256 of the rendered output bytes the broker
+// reads, matching the image session's frame_done.output.checksum contract.
+std::string sha256_bytes(const unsigned char* data, std::size_t size);
 
 namespace {
 // Private protocol constants mirrored from worker_main's selector table; the
@@ -240,6 +245,163 @@ void emit_audio_render_report(const AudioModeRequest& request,
             << ",\"audio_lifetimes_balanced\":"
             << (outcome.audio_lifetimes_balanced ? "true" : "false")
             << ",\"output_created\":" << (outcome.output_created ? "true" : "false") << "}\n";
+}
+
+AudioSessionOutcome run_audio_render_session(
+    EffectEntry entry, BufferIn& input, BufferOut& output, int32_t global_error,
+    int32_t params_error,
+    const worker_runtime::parameters::RequestedAssignments& requested_parameters,
+    const worker_audio_session::AudioSessionGeometry& geometry) {
+  namespace was = aexcompat::worker_audio_session;
+  using aexcompat::strict_json::JsonValue;
+  using aexcompat::strict_json::StrictJsonParser;
+  using aexcompat::strict_json::json_exact_keys;
+  using aexcompat::strict_json::json_i32;
+  using aexcompat::strict_json::json_string;
+
+  AudioSessionOutcome outcome;
+  was::AudioSessionChannels channels;
+  if (!channels.open_from_environment(geometry) ||
+      !channels.static_header_matches(geometry)) {
+    outcome.clean = false;
+    outcome.protocol_violation = true;
+    return outcome;
+  }
+  // v1 audio session is mono (host-negotiated to channels==1, matching the
+  // one-shot audio report); the channel bound stays in the geometry for the
+  // multi-channel extension. input_samples counts f32 samples in the input
+  // slot; the slot holds at most max_samples of them.
+  const std::size_t max_slot_samples = static_cast<std::size_t>(geometry.max_samples);
+  const auto* input_slot =
+      reinterpret_cast<const float*>(channels.view() + was::input_slot_offset());
+  auto* output_slot =
+      reinterpret_cast<float*>(channels.view() + was::output_slot_offset(geometry));
+
+  uint32_t last_output_generation = 0;
+  std::string message;
+  const auto respond_error = [&](int32_t request_index, int32_t render_error) {
+    const std::string reply =
+        "{\"v\":1,\"type\":\"audio_done\",\"request_index\":" +
+        std::to_string(request_index) +
+        ",\"status\":\"error\",\"audio_render_error\":" +
+        std::to_string(render_error) + "}";
+    return channels.write_message(reply);
+  };
+  for (;;) {
+    const auto read = channels.read_message(message);
+    if (read == was::AudioSessionChannels::ReadResult::Eof) break;  // broker close
+    if (read != was::AudioSessionChannels::ReadResult::Message) {
+      outcome.clean = false;
+      outcome.protocol_violation = true;
+      break;
+    }
+    JsonValue root;
+    if (!StrictJsonParser(std::move(message)).parse(root) ||
+        !std::holds_alternative<JsonValue::Object>(root.value)) {
+      outcome.clean = false;
+      outcome.protocol_violation = true;
+      break;
+    }
+    const auto& object = std::get<JsonValue::Object>(root.value);
+    std::string type;
+    int32_t version = 0;
+    if (!json_string(object, "type", type) || !json_i32(object, "v", version) ||
+        version != static_cast<int32_t>(was::kProtocolVersion)) {
+      outcome.clean = false;
+      outcome.protocol_violation = true;
+      break;
+    }
+    if (type == "close") {
+      if (!json_exact_keys(object, {"v", "type"})) {
+        outcome.clean = false;
+        outcome.protocol_violation = true;
+      }
+      break;
+    }
+    int32_t request_index = 0;
+    int32_t input_samples = 0;
+    if (type != "audio_render" ||
+        !json_exact_keys(object, {"v", "type", "request_index", "input_samples"}) ||
+        !json_i32(object, "request_index", request_index) || request_index < 0 ||
+        !json_i32(object, "input_samples", input_samples) || input_samples < 0 ||
+        static_cast<std::size_t>(input_samples) > max_slot_samples) {
+      outcome.clean = false;
+      outcome.protocol_violation = true;
+      break;
+    }
+    const uint32_t expected_generation = static_cast<uint32_t>(request_index) + 1;
+    if (expected_generation <= last_output_generation ||
+        channels.read_header_u32(was::kHeaderInputGenerationOffset) != expected_generation) {
+      // A stale or foreign generation is a host-protection failure, not a
+      // per-request diagnostic (§7): invalidate the session.
+      outcome.clean = false;
+      outcome.invariant_failure = true;
+      break;
+    }
+    // Copy the input span out of the shared slot into a private buffer so the
+    // plug-in never sees the mapping (copy-through, §10.4).
+    std::vector<float> span_input(input_slot, input_slot + input_samples);
+    std::vector<float> captured;
+    const AudioSpanOutcome span = run_audio_span(
+        entry, input, output, &span_input, input_samples, requested_parameters,
+        &captured);
+    // A guard breach is corruption evidence and outranks the render error:
+    // invalidate the session (§4.3 host-protection).
+    if (!span.guards_intact) {
+      respond_error(request_index, span.audio_render_error);
+      outcome.clean = false;
+      outcome.invariant_failure = true;
+      break;
+    }
+    const bool span_ok = span.assignments_applied && span.audio_setup_error == 0 &&
+        span.audio_render_error == 0 && span.audio_setdown_error == 0 &&
+        span.setup_range_valid && span.samples_finite &&
+        span.audio_lifetimes_balanced && audio_telemetry().invalid_operations == 0;
+    if (!span_ok) {
+      // Frame-local compatibility diagnostic: the session stays usable and the
+      // broker decides whether to continue.
+      if (!respond_error(request_index, span.audio_render_error)) {
+        outcome.clean = false;
+        outcome.protocol_violation = true;
+        break;
+      }
+      continue;
+    }
+    const std::size_t output_count = static_cast<std::size_t>(span.output_samples);
+    if (output_count > max_slot_samples) {
+      respond_error(request_index, span.audio_render_error);
+      outcome.clean = false;
+      outcome.invariant_failure = true;
+      break;
+    }
+    std::memcpy(output_slot, captured.data(), output_count * sizeof(float));
+    channels.write_header_u32(was::kHeaderOutputSamplesOffset,
+                              static_cast<uint32_t>(span.output_samples));
+    channels.write_header_u32(was::kHeaderOutputGenerationOffset, expected_generation);
+    last_output_generation = expected_generation;
+    outcome.requests_ok += 1;
+    const std::string checksum = sha256_bytes(
+        reinterpret_cast<const unsigned char*>(captured.data()),
+        output_count * sizeof(float));
+    const std::string reply =
+        "{\"v\":1,\"type\":\"audio_done\",\"request_index\":" +
+        std::to_string(request_index) +
+        ",\"status\":\"ok\",\"output\":{\"sample_count\":" +
+        std::to_string(span.output_samples) +
+        ",\"rate\":44100,\"channels\":1,\"sample_size\":4,\"checksum\":\"" +
+        checksum + "\",\"guards_intact\":true},\"audio_render_error\":0,\"generation\":" +
+        std::to_string(expected_generation) + "}";
+    if (!channels.write_message(reply)) {
+      outcome.clean = false;
+      outcome.protocol_violation = true;
+      break;
+    }
+  }
+  outcome.global_setdown_error = (global_error == 0 && params_error == 0)
+      ? invoke_global_setdown(entry, input.data(), output.data()) : -1;
+  if (outcome.global_setdown_error != 0 || !handle_lifetimes_balanced())
+    outcome.clean = false;
+  return outcome;
 }
 
 }  // namespace aexcompat::l2_detail

@@ -1,5 +1,6 @@
 #pragma once
 
+#include "worker_audio_session.hpp"
 #include "worker_parameter_execution.hpp"
 
 #include <cstdint>
@@ -78,5 +79,29 @@ AudioModeOutcome run_audio_mode(const AudioModeRequest& request);
 // Emits the audio_render completion JSON.
 void emit_audio_render_report(const AudioModeRequest& request,
                               const AudioModeOutcome& outcome);
+
+// Resident audio render session loop (protocol §10). GLOBAL_SETUP / PARAMS_SETUP
+// have already run at launch; this opens the inherited audio transport, then
+// per `audio_render` request reads the input samples from the section, drives
+// run_audio_span, writes the rendered samples to the output slot with a
+// generation update, and replies `audio_done`. On `close` / pipe EOF it runs
+// GLOBAL_SETDOWN and returns the aggregate outcome for the final report. A
+// protocol violation or a host-protection invariant failure invalidates the
+// session (exit 23 / 24 per §7).
+struct AudioSessionOutcome {
+  bool clean{true};
+  bool protocol_violation{};
+  bool invariant_failure{};
+  uint32_t requests_ok{};
+  int32_t global_setdown_error{};
+};
+
+AudioSessionOutcome run_audio_render_session(
+    worker_runtime::parameter_execution::EffectEntry entry,
+    worker_runtime::parameter_execution::BufferIn& input,
+    worker_runtime::parameter_execution::BufferOut& output, int32_t global_error,
+    int32_t params_error,
+    const worker_runtime::parameters::RequestedAssignments& requested_parameters,
+    const worker_audio_session::AudioSessionGeometry& geometry);
 
 }  // namespace aexcompat::l2_detail
