@@ -1,8 +1,16 @@
 <?xml version="1.0" encoding="utf-8"?>
 <Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <!-- Keep the SDK tree read-only: generate and compile the PiPL from target/. -->
+    <CustomBuild Update="..\SDK_BackwardsPiPL.r">
+      <ExcludedFromBuild>true</ExcludedFromBuild>
+    </CustomBuild>
+    <ResourceCompile Remove="SDK_BackwardsPiPL.rc" />
+    <ResourceCompile Include="$(AEXCompatSdkBackwardsPiPLRc)" />
+  </ItemGroup>
   <ItemDefinitionGroup>
     <ClCompile>
-      <!-- Keep the legacy sample source intact under the current MSVC toolchain. -->
+      <!-- Keep the legacy audio sample source intact under the current MSVC toolchain. -->
       <DisableSpecificWarnings>4103;4996;%(DisableSpecificWarnings)</DisableSpecificWarnings>
     </ClCompile>
   </ItemDefinitionGroup>

@@ -247,7 +247,12 @@ void emit_audio_render_report(const AudioModeRequest& request,
             << ",\"last_audio_returned_sample_frames\":" << audio_telemetry().last_returned_sample_frames
             << ",\"audio_lifetimes_balanced\":"
             << (outcome.audio_lifetimes_balanced ? "true" : "false")
-            << ",\"output_created\":" << (outcome.output_created ? "true" : "false") << "}\n";
+            << ",\"output_created\":" << (outcome.output_created ? "true" : "false")
+            // The broker's secure dispatch (dispatch_approved_image) requires a
+            // module_audit exactly like the image and session reports, else it
+            // fails "secure worker module audit is missing" (issue #257). The
+            // phase is already captured in run_audio_mode before this report.
+            << ",\"module_audit\":" << aexcompat::worker_runtime::module_audit_json() << "}\n";
 }
 
 AudioSessionOutcome run_audio_render_session(
