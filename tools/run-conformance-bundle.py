@@ -452,12 +452,17 @@ def normalize_structured_failure(
     classification = value.get("classification")
     if value.get("plugin_kind") in {"aegp_candidate", "unknown_no_effect_entrypoint"}:
         classification = "loader_error"
+    # The native harness reports a process-level classification that is usually
+    # the generic `nonzero_exit`, alongside report evidence (render_error,
+    # pre_render_error, depth_supported, missing_suites). Treat `nonzero_exit`
+    # (and any unrecognized value) as refinable so the evidence branches below
+    # can upgrade it to the actionable selector_error/unsupported/missing_suite,
+    # while keeping specific classes (crashes, timeouts, loader/host errors) final.
     if classification not in {
         "loader_error",
         "unsupported",
         "selector_error",
         "missing_suite",
-        "nonzero_exit",
         "crashed",
         "timeout_killed",
         "invalid_output",

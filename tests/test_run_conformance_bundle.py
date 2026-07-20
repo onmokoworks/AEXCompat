@@ -289,6 +289,65 @@ def test_explicit_loader_error_is_preserved():
     assert result["classification"] == "loader_error"
 
 
+def test_generic_nonzero_exit_is_refined_by_report_evidence():
+    module = load_runner_module()
+    input_world = {
+        "width": 2,
+        "height": 2,
+        "row_bytes": 8,
+        "pixel_format": "argb8",
+        "premultiplication": "premultiplied",
+        "extent_hint": {"left": 0, "top": 0, "right": 2, "bottom": 2},
+    }
+    # The harness reports the generic process-level nonzero_exit; report evidence
+    # must still refine it to the actionable classes.
+    selector = module.normalize_structured_failure(
+        "argb8",
+        {"classification": "nonzero_exit", "pre_render_error": 25, "smart_render_error": -1},
+        input_world,
+        "smartfx",
+    )
+    assert selector["classification"] == "selector_error"
+    assert selector["selector"]["error_code"] == 25
+
+    unsupported = module.normalize_structured_failure(
+        "argb8",
+        {"classification": "nonzero_exit", "depth_supported": False},
+        input_world,
+        "smartfx",
+    )
+    assert unsupported["classification"] == "unsupported"
+
+    missing = module.normalize_structured_failure(
+        "argb8",
+        {
+            "classification": "nonzero_exit",
+            "missing_suites": [{"name": "PF World Suite", "version": 2}],
+        },
+        input_world,
+        "smartfx",
+    )
+    assert missing["classification"] == "missing_suite"
+    assert missing["missing_suites"] == [{"name": "PF World Suite", "version": 2}]
+
+    # A crash stays final and a bare nonzero_exit with no actionable evidence
+    # is left as the generic class.
+    crashed = module.normalize_structured_failure(
+        "argb8",
+        {"classification": "crashed", "depth_supported": False},
+        input_world,
+        "smartfx",
+    )
+    assert crashed["classification"] == "crashed"
+    generic = module.normalize_structured_failure(
+        "argb8",
+        {"classification": "nonzero_exit"},
+        input_world,
+        "smartfx",
+    )
+    assert generic["classification"] == "nonzero_exit"
+
+
 def test_manifest_requires_a_valid_render_path(tmp_path):
     manifest, adapter = fixture(tmp_path)
     document = json.loads(manifest.read_text(encoding="utf-8"))
