@@ -1924,15 +1924,23 @@ impl LiveSessionState {
         // preserves size and mtime (mtime-keeping tools, coarse filesystem
         // timestamps) must still invalidate here. Hashing the encoded bytes
         // per render is cheap next to a decode; only the decode is reused.
-        // The read is bounded like the decoder's allocation limit so a
-        // mispicked huge file cannot balloon the session thread.
-        const MAX_ENCODED_INPUT_BYTES: u64 = 64 * 1024 * 1024;
-        let encoded_size = fs::metadata(path).map_err(|error| error.to_string())?.len();
-        if encoded_size > MAX_ENCODED_INPUT_BYTES {
-            return Err("input image file exceeds the live-render size bound".into());
-        }
-        let bytes = fs::read(path).map_err(|error| error.to_string())?;
-        let content_sha256: [u8; 32] = Sha256::digest(&bytes).into();
+        // The hash streams in bounded chunks, so memory stays flat for any
+        // encoded size and the decoder's own limits keep bounding what is
+        // actually accepted (no encoded-size cap of its own: legitimate
+        // encodings can be larger than the decoded transport cap).
+        let content_sha256: [u8; 32] = {
+            let mut file = fs::File::open(path).map_err(|error| error.to_string())?;
+            let mut hasher = Sha256::new();
+            let mut buffer = vec![0u8; 1024 * 1024];
+            loop {
+                let read = file.read(&mut buffer).map_err(|error| error.to_string())?;
+                if read == 0 {
+                    break;
+                }
+                hasher.update(&buffer[..read]);
+            }
+            hasher.finalize().into()
+        };
         let stale = !self.decoded.as_ref().is_some_and(|cached| {
             cached.path.as_path() == path && cached.content_sha256 == content_sha256
         });
@@ -3454,7 +3462,12 @@ impl HarnessApp {
             && audio_sidecar.is_none()
             && gpu_backend == aexcompat_broker::image_render::RenderGpuBackend::Auto
             && !use_registered_default
-            && !parameters.iter().any(|parameter| parameter.kind == "layer");
+            && !parameters.iter().any(|parameter| parameter.kind == "layer")
+            // The A/B escape hatch disables every resident-session route,
+            // this GUI adapter included, not just the broker's length-1
+            // wrapper.
+            && std::env::var_os(aexcompat_broker::image_render::DISABLE_SESSION_WRAPPER_ENV)
+                .is_none();
         if live_eligible {
             let identity = DispatchIdentity {
                 sha256: hash.clone(),
