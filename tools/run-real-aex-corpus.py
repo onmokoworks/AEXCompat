@@ -7,7 +7,7 @@ or machine-local paths.
 """
 from __future__ import annotations
 
-import argparse, hashlib, importlib.util, json, os, re, shutil, sys, tempfile
+import argparse, hashlib, importlib.util, json, math, os, re, shutil, sys, tempfile
 from collections import defaultdict
 from contextlib import contextmanager
 from itertools import product
@@ -33,8 +33,19 @@ def strict_json(path: Path) -> Any:
             if key in result: raise ValueError(f"duplicate JSON key: {key}")
             result[key] = value
         return result
-    return json.loads(path.read_text(encoding="utf-8"), object_pairs_hook=unique,
-                      parse_constant=lambda value: (_ for _ in ()).throw(ValueError(f"non-finite JSON: {value}")))
+    value = json.loads(path.read_text(encoding="utf-8"), object_pairs_hook=unique,
+                       parse_constant=lambda value: (_ for _ in ()).throw(ValueError(f"non-finite JSON: {value}")))
+    # parse_constant only catches the Infinity/NaN literals; an overflowing number
+    # such as 1e999 decodes to float('inf') without it, so reject non-finite floats
+    # recursively before they reach canonical()/the Issue #4 manifest (mirrors the
+    # Issue #4 loader's strict_json_loads).
+    def reject_overflowed(item):
+        if isinstance(item, float) and not math.isfinite(item): raise ValueError(f"non-finite JSON number: {item}")
+        if isinstance(item, dict):
+            for child in item.values(): reject_overflowed(child)
+        elif isinstance(item, list):
+            for child in item: reject_overflowed(child)
+    reject_overflowed(value); return value
 
 def load_validated(path: Path, schema: str) -> Any:
     value = strict_json(path); Draft202012Validator(strict_json(SCHEMAS / schema)).validate(value); return value

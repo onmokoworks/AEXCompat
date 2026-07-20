@@ -61,6 +61,10 @@ def test_strict_json_rejects_duplicates_and_nonfinite(tmp_path):
     with pytest.raises(ValueError,match="duplicate"):corpus.strict_json(p)
     p.write_text('{"x":NaN}')
     with pytest.raises(ValueError,match="non-finite"):corpus.strict_json(p)
+    p.write_text('{"x":1e999}')  # overflows to inf without hitting parse_constant
+    with pytest.raises(ValueError,match="non-finite"):corpus.strict_json(p)
+    p.write_text('{"a":[{"b":-1e999}]}')  # nested overflow is rejected recursively
+    with pytest.raises(ValueError,match="non-finite"):corpus.strict_json(p)
 
 @pytest.mark.parametrize("value",[r"C:\private\x",r"\\server\share",r"\\?\C:\x",r"\\.\pipe\x",r"\??\C:\x",r"\Device\HarddiskVolume1\x",r"\private\x","/home/private/x","../private/x",r"safe\..\private"])
 def test_public_evidence_rejects_absolute_unc_and_device_paths(value):
