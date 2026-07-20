@@ -768,3 +768,66 @@ prefix だった)。
 の aux A/B block を復元し、実 worker + pf_sampling_probe で session/one-shot の
 公開レポート全フィールド + PNG バイト一致を確認 (両経路成功)。回帰は機械可搬な
 単体テスト `aux_transport_de_verbatims_manifest_and_sidecar_paths` が守る。
+
+## 追記 (#261: session 内 expand 再オープン + 出力容量デカップリング、exactly-once)
+
+背景: #98 W4 (one-shot argv モードの縮退・削除) の残存障壁は「session が
+one-shot fallback に依存している能力ギャップ」であり、調査の結果ギャップは
+classic の出力リサイズ (expand) 1 点に収束した。session の出力スロットは起動時
+の render 寸法に固定されていたため、`PF_OutFlag_I_EXPAND_BUFFER` で出力が起動
+スロットを超える効果は session で扱えず、broker が自動で one-shot に fallback
+していた。「使われ続けない経路は腐る」(owner 方針) ため、fallback を fail-closed
+に除去できる状態を作るのが目的。
+
+設計 (合意: session 内 re-open):
+
+- 出力スロットの **容量** (capacity) を **render 寸法** から分離する。
+  `SessionGeometry` に `output_capacity_width/height` を追加。shrink や起動
+  スロット内に収まる expand は実寸法で書く。起動スロットを超える expand は
+  worker が `resize_needed` を報告し、broker が **より大きい容量で session を
+  再オープン** する (`--output-capacity-v1 "<w>x<h>"` auxiliary trailer)。
+  `in_data` の extent / full_resolution は render 寸法のままなので効果は同一
+  条件で描画する。bounds: ≤4096/次元・≤16,777,216 px (worker の
+  `validate_output_extent` と一致)。
+- プロトコル §3 改訂: 可変寸法 frame_done / `resize_needed` ステータス /
+  `--output-capacity-v1` を規定。
+
+exactly-once (Codex #262 finding 3617423905):
+
+- 観察 (問題): 初期実装は expand frame を private guarded buffer に **描画して
+  から** スロット超過を検知し、再オープン後にもう一度描画していた。破棄される
+  worker と再オープン worker で **RENDER が2回** 走る。W4 が one-shot を唯一の
+  経路にする以上、副作用あり/非決定的な効果で one-shot と乖離する。
+- 修正: `prepare_output()` が FRAME_SETUP で出力寸法を確定した直後・
+  `dispatch_selector` (kRender) の前に容量超過を検知し、`*resize_needed` を立て
+  `kResizeNeededSkipRender` (0x7265737A) を返して RENDER をスキップ。
+  `classic_render_runtime` はその frame の finalize をスキップ (guarded buffer は
+  拡大寸法に確保されていないため read すると over-read)。session loop は captured
+  サイズ検査より前に `frame.resize_needed` を見て `respond_resize_needed`。
+  再オープン後の worker が拡大容量で **一度だけ** RENDER する = 全体で
+  exactly-once。
+- 短絡の安全条件 (local review P3 hardening): `prepare_output` は
+  `resize_needed != nullptr` のときだけ短絡する (「skip は呼び出し元が flag
+  ベース早期 return を必ず走らせる」invariant を将来の呼び出し元にも保証し、
+  finalize が拡大寸法で undersized buffer を read する経路を塞ぐ)。skip 経路は
+  FRAME_SETDOWN に sentinel でなく 0 を渡す (clean な one-shot frame と同じ
+  in_data error)。
+
+検証 (機械可搬):
+
+- `render_session_wrapper.rs::expand_output_matches_the_one_shot_transport`:
+  `pf_expand_allowed_probe` (64x48→68x52) を session 経路で描画し、報告寸法
+  width=68/height=52、wrapper が session を担った counter bump、one-shot 経路
+  (escape hatch `AEXCOMPAT_DISABLE_SESSION_WRAPPER=1`) と **PNG バイト一致** を
+  確認。
+- exactly-once の behavioral 観測: 破棄される worker の pixels は観測できない
+  ため、probe が kRender 毎に env var `AEXCOMPAT_RESIZE_RENDER_LOG` 指定の
+  ファイルへ1バイト追記 (唯一の cross-process 観測点)。session 経路の RENDER
+  dispatch が **ちょうど1回** であることを assert (二重描画なら2バイトで fail)。
+- broker `render_session` / `render_session_wrapper` スイート全パス (回帰なし)、
+  minihost 全ターゲット build clean。
+
+現状: PR #262 (Refs #261 #98)。この修正で W4 の前提 (session が classic 出力
+リサイズを one-shot と exactly-once で一致させて扱える) が満たされる。#261 が
+close されれば W4 本体 (自動 session→one-shot fallback の fail-closed 除去、
+broker CLI 経路の見直し、one-shot argv モード削除、#36 と統合) に進める。
