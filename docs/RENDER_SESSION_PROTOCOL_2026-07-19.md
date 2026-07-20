@@ -591,3 +591,147 @@ worker 側の実装マッピング (worker 側調査より):
   GPU backend かつ policy 無しは open で fail-closed。`render-video-batch`
   は `smart` / `gpu_backend` を受けるが policy 配線を持たないため GPU
   backend は CPU 縮退 (Auto) か拒否 (明示) になる。
+
+## 10. Audio セッション (issue #239)
+
+改訂 2026-07-20 (issue #239): 段階0 の AE 実機観測
+(`docs/RENDER_SESSION_AUDIO_STAGE0_2026-07-20.md`) に基づく audio セッションの
+設計。image セッション (§2-§8) とは**独立した経路**で、§4 の image メッセージ・
+§6 の RGBA スロットは一切変更しない。
+
+### 10.1 位置づけ (段階0 の結論)
+
+観測で確定した audio の性質:
+
+- audio は per-frame ではなく**期間一括**でレンダーされる (1 AUDIO_SETUP →
+  1 AUDIO_RENDER が全期間 → 1 AUDIO_SETDOWN)。AUDIO_RENDER は
+  `start_samp` / `dur_samp` の sample 区間を 1 チャンクで要求する。
+- audio は image RENDER とは**別スレッド・別 sequence インスタンス**で並行する。
+- audio フォーマット (rate / channels / sample_size) は host 交渉値。
+
+したがって audio は image frame loop (§5) に相乗りさせず、**期間指定の audio
+要求を運ぶ別メッセージ + audio sample バッファの別チャネル**で session 化する。
+custom UI (§4.2.1 の per-frame `ui_action`、image frame loop 相乗り) とは
+対照的な選択。
+
+### 10.2 launch 時の静的構成 (argv)
+
+one-shot audio (`--render-audio`、`worker_audio_execution.cpp` の
+`run_audio_mode`) の位置引数を踏襲し、resident audio session のコマンド語を
+足す:
+
+```
+aex_render_worker.exe --render-audio-session-v1 <plugin> <plugin_sha256>
+    <payload> <time_scale> [--parameter-animation-v1 <path>] [--minidump-v1 <dir>]
+```
+
+- 入力 audio の raw パス・出力パスは取らない (§10.4 の共有メモリチャネルに置換)。
+- audio フォーマット (rate / channels / sample_size) は host 交渉値なので
+  launch では申告しない。実際の値は AUDIO_RENDER 時に worker が観測し、
+  `audio_done` (§10.3) と共有バッファヘッダに書く。tier は default tier。
+
+### 10.3 制御チャネル: メッセージ仕様
+
+§4.1 のフレーミング (u32 LE 長さ接頭辞 + UTF-8 JSON、上限 64 KiB、strict
+exact-key) を共用。image の `render_frame` とは別 `type`:
+
+broker → worker:
+
+```json
+{"v":1,"type":"audio_render","request_index":0,
+ "start_sample":0,"duration_samples":48000,
+ "time":{"value":0,"scale":30}}
+```
+
+- `request_index`: 0 始まりの通し番号 (§6 と同型の generation 検証に使う)。
+- `start_sample` / `duration_samples`: 要求する audio 区間 (段階0 の
+  `start_sampL` / `dur_sampL` に対応)。worker は入力スロットの該当区間を
+  effect に渡し、AUDIO_SETUP → AUDIO_RENDER → AUDIO_SETDOWN を駆動する。
+- `time`: 有理数時刻 (parameter animation 評価用、`scale` は launch と一致必須)。
+- `close`: `{"v":1,"type":"close"}` で GLOBAL_SETDOWN → 最終レポート → exit 0。
+
+worker → broker:
+
+```json
+{"v":1,"type":"audio_done","request_index":0,"status":"ok",
+ "output":{"start_sample":0,"sample_count":48000,"rate":48000,
+           "channels":2,"sample_size":4,"checksum":"<sha256>",
+           "guards_intact":true},
+ "audio_render_error":0,"generation":1}
+```
+
+- host 交渉フォーマット (rate/channels/sample_size) と実 sample_count を報告。
+- `status:"error"` は `output`/`generation` を持たない専用形 (§4.3 と同型)。
+  AUDIO_SETUP 失敗はセッション無効化 (§4.3 の -47 に相当する専用コード)。
+- host-protection invariant (guards_intact false、bounds/寸法検証失敗、
+  generation 不一致) はフレーム局所でなくセッション無効化 (§4.3 と同方針)。
+
+### 10.4 データチャネル: audio sample バッファ
+
+§6 とは**別の無名 file mapping** (image セッションの RGBA スロットとは混ぜない)。
+broker が作成・継承 handle で渡す (環境変数
+`AEXCOMPAT_AUDIO_SESSION_SECTION_HANDLE`)。レイアウト:
+
+```
+offset 0     : AudioSessionHeader (1 ページ 4096B)
+offset 4096  : 入力 audio スロット  (max_samples * max_channels * 4、float)
+align 4096   : 出力 audio スロット  (max_samples * max_channels * 4、float)
+```
+
+- サンプルは f32 interleaved。one-shot の `host_audio::Runtime` が float 入力を
+  扱う契約 (`set_source(const std::vector<float>*, sample_count)`) に一致。
+- `max_samples` の上限は broker が hard cap する (長尺は §10.7 の分割チャンクで
+  対応、当面は上限内 1 チャンク)。48kHz stereo float で 10 秒 ≈ 3.8MB。
+- generation 契約は §6 と同型 (broker が入力書込→request 送信、worker が
+  出力書込→generation 更新→audio_done)。plugin にスロットポインタは渡さない
+  (worker 私有バッファ経由、§6 と同じ host-protection)。
+
+### 10.5 worker 側 lifecycle
+
+```
+launch → admit_worker_entry → AEX ロード → GLOBAL_SETUP → PARAMS_SETUP →
+  loop {
+    audio_render 受信 → 入力スロット該当区間読取 →
+    apply_parameter_animation(time) → AUDIO_SETUP(start/dur) → AUDIO_RENDER →
+    AUDIO_SETDOWN (run_audio_mode の selector 列を区間駆動に流用) →
+    出力スロット書込 + generation → audio_done 送信
+  }
+→ close → GLOBAL_SETDOWN → 最終レポート → exit 0
+```
+
+- `run_audio_mode` (`worker_audio_execution.cpp`) の SETUP/RENDER/SETDOWN 駆動と
+  `host_audio::Runtime` の checkout/checkin/get_data 契約をループ外にホイスト
+  して各 audio_render で再利用する (image の `persistent_sequence` に相当)。
+- audio は image と別 sequence (段階0 観測2) なので、image セッションの
+  sequence data 保持機構とは独立。SEQUENCE 系は audio セッションでは発行しない
+  (one-shot audio と同じく AUDIO 系のみ)。
+
+### 10.6 broker 側 API
+
+```rust
+pub struct AudioRenderSession { /* process, job, pipes, section, config */ }
+impl AudioRenderSession {
+    pub fn open(request: AudioSessionOpenRequest) -> io::Result<Self>;
+    pub fn render_span(&mut self, request_index: u32, start: u32, duration: u32,
+                       time: i32, samples: &[f32]) -> io::Result<AudioSpanResult>;
+    pub fn close(self) -> io::Result<AudioSessionReport>;
+}
+```
+
+- launch / Job Object / restricted token / sealed staging は image セッションの
+  `run_isolated_impl` 分離 (§8) を流用。handle list に audio section + 制御パイプ
+  2 本。per-request deadline (§7) を audio_render ごとに張る。
+- wrapper: `render_with_artifact` の audio 経路 (`audio.is_some()`) と
+  `render_experimental_audio` を、単発 audio を「長さ1 audio セッション」として
+  この経路に載せる (image の length-1 wrapper と同型、挙動不変)。適格条件から
+  `audio.is_none()` 除外を外す。
+
+### 10.7 検証
+
+- fixture worker (audio 版、または `session_protocol_worker` の audio 拡張) で
+  audio_render 到達・generation・区間往復を broker 統合テストで証明。
+- 実 worker A/B: 同一入力 audio を session / one-shot でレンダーし、出力 audio
+  サンプルのバイト一致 + 公開レポート (audio_* フィールド) 一致を証明。
+- 長尺 comp で AUDIO_RENDER が複数チャンクに分割されるかは追加観測の候補
+  (段階0 次アクション item)。分割される場合、`audio_render` を複数 request に
+  分けるか、リングバッファ (§6 の将来拡張と同型) で対応する。
