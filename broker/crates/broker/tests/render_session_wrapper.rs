@@ -1312,6 +1312,9 @@ mod windows_e2e {
         // fix detects the overrun in prepare_output before dispatching, so RENDER
         // runs exactly once (one byte), matching the one-shot route.
         let render_log = scratch.join("render-dispatches.bin");
+        // The probe appends (mode "ab"); start from a clean slate so a stale file
+        // can never inflate the count into a false negative.
+        std::fs::remove_file(&render_log).ok();
         unsafe { std::env::set_var("AEXCOMPAT_RESIZE_RENDER_LOG", &render_log) };
 
         // Run A: default routing. The effect expands 64x48 -> 68x52, overruns

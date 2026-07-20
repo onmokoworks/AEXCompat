@@ -350,9 +350,14 @@ struct ClassicRenderDispatchOwner {
     // ask the broker to re-open at a larger capacity before RENDER runs, so the
     // render selector executes exactly once (as one-shot does). No guarded
     // buffer is allocated and RENDER is skipped (#261).
-    if (output_slot_capacity_bytes != 0 &&
+    // The short-circuit is only safe when the caller can observe it: the return
+    // value alone is discarded by the session loop, which acts on *resize_needed.
+    // Requiring a non-null resize_needed keeps the invariant "skip implies the
+    // caller runs the flag-based early return" so no path reaches finalize with
+    // the expanded width*height against the still-undersized guarded buffer.
+    if (output_slot_capacity_bytes != 0 && resize_needed &&
         static_cast<std::size_t>(rowbytes) * height > output_slot_capacity_bytes) {
-      if (resize_needed) *resize_needed = true;
+      *resize_needed = true;
       return kResizeNeededSkipRender;
     }
     if (!guarded.reset(static_cast<std::size_t>(rowbytes) * height)) return fail(-3);
@@ -572,21 +577,26 @@ int32_t classic_render_runtime(EffectEntry entry, std::array<std::byte, kInSize>
         external_layers, external_width, external_height, *classic_context, logical_source,
         output_validation_failed, output_slot_capacity_bytes, resize_needed};
     error = dispatch_owner.run(error);
-    lifecycle.error = error;
+    // On the resize short-circuit RENDER never ran, so the frame is clean as far
+    // as FRAME_SETDOWN is concerned; pass 0 (not the sentinel) into the lifecycle
+    // finish so the plug-in's setdown sees the same in_data error a successful
+    // one-shot frame would, rather than a large non-PF_Err value.
+    const bool skip_render_resize = resize_needed && *resize_needed;
+    lifecycle.error = skip_render_resize ? 0 : error;
     error = lifecycle_owner.finish(lifecycle);
-  }
-  // prepare_output short-circuited for a resident-session expand (#261): RENDER
-  // never ran and the guarded buffer was never sized to the (now expanded)
-  // width*height, so the finalize pass below must not read `destination` at
-  // those dimensions (it would over-read the undersized buffer). The frame FRAME
-  // lifecycle was still torn down above; report resize_needed to the caller,
-  // which re-opens the session larger. captured/output_hash are unused for this
-  // frame (the session loop reports resize_needed off *resize_needed).
-  if (resize_needed && *resize_needed) {
-    guards_intact = true;
-    output_hash.clear();
-    if (captured_argb) captured_argb->clear();
-    return kResizeNeededSkipRender;
+    // prepare_output short-circuited for a resident-session expand (#261): RENDER
+    // never ran and the guarded buffer was never sized to the (now expanded)
+    // width*height, so the finalize pass below must not read `destination` at
+    // those dimensions (it would over-read the undersized buffer). The frame
+    // FRAME lifecycle was still torn down above; report resize_needed to the
+    // caller, which re-opens the session larger. captured/output_hash are unused
+    // for this frame (the session loop reports resize_needed off *resize_needed).
+    if (skip_render_resize) {
+      guards_intact = true;
+      output_hash.clear();
+      if (captured_argb) captured_argb->clear();
+      return kResizeNeededSkipRender;
+    }
   }
   aexcompat::worker_runtime::classic_execution::Context final_context{
       destination, rowbytes, width, height, pixel_bytes, error,
