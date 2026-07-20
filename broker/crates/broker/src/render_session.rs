@@ -2301,7 +2301,10 @@ impl AudioRenderSession {
                     // one-shot path rejects via setup_range_valid; the session
                     // must independently reject it before publishing it.
                     || output.start_sample < 0
-                    || output.start_sample + output.sample_count as i64 > input.len() as i64
+                    // saturating_add so a huge start_sample cannot overflow i64
+                    // (debug panic / release wrap) before the range check (Codex #252).
+                    || output.start_sample.saturating_add(output.sample_count as i64)
+                        > input.len() as i64
                     || generation != expected_generation
                     || !self.static_header_ok()
                     || self.transport.read_header_u32(AUDIO_OUTPUT_GENERATION_OFFSET)
