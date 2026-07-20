@@ -85,17 +85,41 @@ install、実行後 cleanup。生ログは scratchpad の `audio-selector-timeli
    載っていたため。image と audio を同一レイヤーで同時観測するには映像+音声を
    持つ footage が要る (interleave 詳細の追加観測は任意)。
 
+## 観測2 (映像+音声レイヤー、2026-07-20)
+
+先の audio-only 観測の限界 (image RENDER 不発で audio/image の sequence 分離を
+断定できない) を埋めるため、映像+音声を持つ footage (ffmpeg 生成の 64x32 30fps
+1 秒 MP4、H.264 映像 + AAC 440Hz 音声) に同じ probe を適用して再観測した。
+
+**観察 (事実):**
+
+1. **同一 effect が image RENDER と AUDIO 両方を受けた。** RENDER ×30 /
+   FRAME_SETUP ×30 / FRAME_SETDOWN ×30 (フレーム毎) と、AUDIO_SETUP ×1 /
+   AUDIO_RENDER ×1 / AUDIO_SETDOWN ×1。
+2. **AUDIO は映像+音声 comp でも全期間 1 回・1 チャンク**: AUDIO_RENDER は
+   `start_samp=0, dur_samp=48000, total_samp=48000` (audio-only 観測と一致)。
+3. **image と audio は別スレッドで並行し、sequence インスタンスも分離していた
+   (今回は断定できる)**: image の FRAME/RENDER は約 10 個の worker スレッドに
+   分散 (MFR)、AUDIO 系は単一の専用スレッド tid=14184 で、image RENDER の
+   どのスレッドとも重ならない。SEQUENCE_SETDOWN が 11 回 (各 render スレッド +
+   audio スレッド) 発行され、audio は自前の sequence インスタンスを持つ。
+4. **interleave は非同期**: AUDIO_SETUP はフレーム描画の途中 (約 8 フレーム後)
+   に発行され、AUDIO_RENDER・AUDIO_SETDOWN も image フレームが他スレッドで
+   描画され続ける中で並行して起きた。image の per-frame と audio の期間一括は
+   時間的にインターリーブするが、別スレッド・別 sequence で独立している。
+
+これで観測1 の未確定 (audio/image の sequence 分離) が確認された: **両者は
+別スレッド・別 sequence インスタンスで、audio は per-frame image とは独立した
+期間一括処理**。設計方針 (別チャネル) が sequence 分離の面からも裏付けられた。
+
 ## 結論 (観測に基づく設計方針)
 
-**audio は image frame loop に相乗りさせない。** これは観測で確定した
-「audio は per-frame ではなく期間一括 (1 AUDIO_SETUP → 1 AUDIO_RENDER が全期間
-→ 1 AUDIO_SETDOWN)」という事実だけで導ける: 期間一括の audio は image の
-per-frame RGBA スロットモデルに構造的に合わない。加えて audio は別スレッドで
-独立した sequence 履歴を持つ (観測 #3)。**ただし audio と image の sequence
-状態が分離しているか (共有か) は本観測では未確定** (audio-only レイヤーで
-image RENDER が出ていない)。よってプロトコルを「image/audio の sequence 分離」
-前提で固定はしない。映像+音声レイヤーでの interleave 観測を実装確定前に行う
-(次アクション)。設計方針としての #239 の audio session 化は:
+**audio は image frame loop に相乗りさせない。** 観測1・2 で確定:
+(a) audio は per-frame ではなく期間一括 (1 AUDIO_SETUP → 1 AUDIO_RENDER が
+全期間 → 1 AUDIO_SETDOWN)、(b) 映像+音声 comp でも audio は image RENDER とは
+別スレッド・別 sequence インスタンスで独立して並行する (観測2 #3)。期間一括
+かつ独立処理なので、image の per-frame RGBA スロットモデルには構造的に合わない。
+設計方針としての #239 の audio session 化は:
 
 - 共有メモリの per-frame RGBA スロット (§6) には載せない。audio 専用の sample
   バッファ (float, host 交渉の rate/channels) を別チャネルで運ぶ。
@@ -136,18 +160,14 @@ AUDIO_EFFECT_TOO なので、適用レイヤーに audio が無いと AUDIO_REND
 
 ## 次アクション (段階0 完了後)
 
-段階0 の主要観測は完了し、設計方針の核 (audio は期間一括なので image frame loop
-に相乗りさせず別チャネルで運ぶ) は期間一括の事実で確定した。ただし sequence 状態の
-分離/共有は未確定なので、プロトコルを sequence 分離前提で固定する前に以下を行う:
+段階0 観測 (観測1: audio-only、観測2: 映像+音声) は完了。設計方針 (audio は
+期間一括かつ image と別スレッド・別 sequence で独立するので、image frame loop
+に相乗りさせず別チャネルで運ぶ) が確定した。以降:
 
-0. **(実装確定の前提) 映像+音声レイヤーでの interleave 観測**: 映像も音声も持つ
-   footage に probe を適用し、image RENDER と AUDIO_RENDER の相対順序、sequence
-   状態の分離/共有を観測する。これで audio と image が sequence_data を共有するか
-   独立かを確定してからプロトコルを固める。
 1. audio session プロトコルの設計: 期間指定 (start_samp/dur_samp) の audio 要求
    メッセージと audio sample バッファチャネル (host 交渉の rate/channels/float)。
-   image session とは独立。プロトコル文書に §10 (audio) 等として追記。
-   sequence 状態の扱いは item 0 の結果を反映する。
+   image session とは独立 (別 sequence インスタンスの観測に整合)。プロトコル
+   文書に §10 (audio) 等として追記。
 2. worker: audio-only レンダー経路 (`--render-audio` / `render_experimental_audio`)
    をセッション化。AUDIO_SETUP → AUDIO_RENDER(区間) → AUDIO_SETDOWN を
    session lifecycle に載せる。
