@@ -7,9 +7,13 @@
 namespace aexcompat::worker_audio_session {
 namespace {
 
-constexpr const wchar_t* kRequestVariable = L"AEXCOMPAT_AUDIO_SESSION_REQUEST_HANDLE";
-constexpr const wchar_t* kResponseVariable = L"AEXCOMPAT_AUDIO_SESSION_RESPONSE_HANDLE";
-constexpr const wchar_t* kSectionVariable = L"AEXCOMPAT_AUDIO_SESSION_SECTION_HANDLE";
+// The audio session reuses the image session's inherited-handle transport, so
+// it reuses the same env variable names the broker's SessionChildHandles sets
+// (windows_process.rs). The worker distinguishes an audio session from an image
+// session by the CLI command word (--render-audio-session-v1), not the env name.
+constexpr const wchar_t* kRequestVariable = L"AEXCOMPAT_RENDER_SESSION_REQUEST_HANDLE";
+constexpr const wchar_t* kResponseVariable = L"AEXCOMPAT_RENDER_SESSION_RESPONSE_HANDLE";
+constexpr const wchar_t* kSectionVariable = L"AEXCOMPAT_RENDER_SESSION_SECTION_HANDLE";
 
 std::size_t align_slot(std::size_t bytes) {
   return (bytes + kSlotAlignment - 1) / kSlotAlignment * kSlotAlignment;
