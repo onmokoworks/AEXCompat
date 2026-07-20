@@ -90,6 +90,30 @@ mod worker {
         true
     }
 
+    // Opt-in crash minidump transport (issue #18/#224). The native worker
+    // writes the DbgHelp image to the broker-inherited pipe from its dedicated
+    // writer thread and terminates it with a fixed completion marker; the broker
+    // reader withholds that marker-sized suffix and publishes the prefix as the
+    // `.dmp`. This fixture stands in for the DbgHelp payload with a recognizable
+    // `MDMP`-prefixed body so a session crash exercises the broker's session
+    // launch handle plumbing, bounded copy, and finalize-on-close end to end.
+    fn write_opt_in_minidump() {
+        const COMPLETION_MARKER: &[u8; 16] = b"AEXDUMP-COMPLETE";
+        let Some(handle) = env_handle("AEXCOMPAT_MINIDUMP_HANDLE") else {
+            return;
+        };
+        let mut payload = b"MDMP session-crash-minidump-fixture".to_vec();
+        payload.resize(4096, 0x5a);
+        if write_all(handle, &payload) && write_all(handle, COMPLETION_MARKER) {
+            // Mirror the native worker's stderr note so the broker's diagnostics
+            // parser (`minidump_marker`) surfaces the capture in the session
+            // report. Flush before the crash exit so the line is not lost.
+            use std::io::Write;
+            let _ = write!(std::io::stderr(), "stage:minidump_written bytes={}\n", payload.len());
+            let _ = std::io::stderr().flush();
+        }
+    }
+
     fn write_message(handle: HANDLE, payload: &str) -> bool {
         let prefix = (payload.len() as u32).to_le_bytes();
         write_all(handle, &prefix) && write_all(handle, payload.as_bytes())
@@ -391,6 +415,13 @@ mod worker {
                     std::thread::sleep(std::time::Duration::from_secs(3600));
                 },
                 "crash_frame" => std::process::exit(0xC000_0005_u32 as i32),
+                "crash_frame_minidump" => {
+                    // Same access-violation death as `crash_frame`, but first
+                    // stream an opt-in minidump through the broker-inherited
+                    // pipe so the session capture path is exercised end to end.
+                    write_opt_in_minidump();
+                    std::process::exit(0xC000_0005_u32 as i32);
+                }
                 "bad_framing_frame_0" => {
                     // A zero-length prefix from a worker that then stays
                     // alive: only an explicit reader-violation event can
