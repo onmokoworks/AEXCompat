@@ -513,19 +513,25 @@ impl LaunchedIsolatedProcess {
 /// inheritance), plus the three session transport handles inherited and
 /// advertised via environment variables. The caller drives the frame loop and
 /// collects the exit through the returned `LaunchedIsolatedProcess`.
+///
+/// `repository` feeds the opt-in crash minidump handle (issue #18/#224): the
+/// resident worker gets the same broker-created inherited dump pipe as the
+/// one-shot path, retained across the frame loop on the returned process and
+/// finalized when the caller collects it at close (`wait_and_collect`).
 pub fn launch_isolated_session_with_restricted_token(
     program: &Path,
     args: &[String],
     token: &RestrictedWorkerToken,
     current_directory: &Path,
     session: &SessionChildHandles,
+    repository: &Path,
 ) -> io::Result<LaunchedIsolatedProcess> {
     launch_isolated_impl(
         program,
         args,
         Some((token.as_raw_handle(), current_directory)),
         Some(session),
-        None,
+        Some(repository),
     )
 }
 

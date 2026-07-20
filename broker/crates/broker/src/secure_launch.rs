@@ -266,8 +266,11 @@ pub fn secure_launch_session(
         worker_stage.worker_path(),
         &args,
         &token,
+        // Working directory (see above): the repository.
         request.repository,
         session,
+        // Repository root for the launch-boundary minidump handle (issue #18/#224).
+        request.repository,
     )
     .map_err(|error| stage_error("restricted session launch", error))?;
     Ok(SecureSessionProcess {

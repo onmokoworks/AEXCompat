@@ -55,6 +55,23 @@ mod windows_e2e {
         }
     }
 
+    /// Sets the process-global opt-in minidump directory env for the duration
+    /// of a test and removes it on drop (panic-safe). Callers hold the behavior
+    /// lock, which serializes every session test that touches process-global
+    /// env, so the window cannot interleave with another behavior test.
+    struct MinidumpDirGuard;
+    impl MinidumpDirGuard {
+        fn set(value: &str) -> Self {
+            unsafe { std::env::set_var("AEXCOMPAT_MINIDUMP_DIR", value) };
+            Self
+        }
+    }
+    impl Drop for MinidumpDirGuard {
+        fn drop(&mut self) {
+            unsafe { std::env::remove_var("AEXCOMPAT_MINIDUMP_DIR") };
+        }
+    }
+
     fn build_fixture() -> PathBuf {
         let manifest = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../Cargo.toml");
         let status = std::process::Command::new(env!("CARGO"))
@@ -1276,6 +1293,52 @@ mod windows_e2e {
         assert_eq!(close["invalidated"], true);
         assert_eq!(close["worker"]["classification"], "crashed");
         assert_eq!(close["session_clean"], false);
+    }
+
+    #[test]
+    fn a_crashing_resident_session_captures_an_opt_in_minidump() {
+        // Opt-in on: the broker creates one inherited dump pipe for the session
+        // launch (the same launch-boundary plumbing the one-shot path uses,
+        // issue #18/#224) because AEXCOMPAT_MINIDUMP_DIR resolves under the
+        // repository target tree. The fixture streams a marker-terminated image
+        // through that pipe from its crash frame, and the broker finalizes it
+        // into a .dmp when the session collects the exit at close.
+        let _behavior = BehaviorGuard::set(Some("crash_frame_minidump"));
+        let (repository, plugin, sha) = temp_repository();
+        let _minidump_dir = MinidumpDirGuard::set("target/crash-dumps");
+        let dump_dir = repository.0.join("target").join("crash-dumps");
+
+        let mut session = open_session(&repository.0, &plugin, &sha, Duration::from_secs(30));
+        let error = session
+            .render_frame(0, 0, &input_pattern(5))
+            .expect_err("a crashed worker must invalidate the session");
+        assert!(error.to_string().contains("worker_exited"), "{error}");
+        let close = session.close();
+        assert_eq!(close["invalidated"], true);
+        assert_eq!(close["worker"]["classification"], "crashed");
+        // The session report surfaces the capture through the same path-free
+        // `minidump` marker the one-shot path uses (issue #224 item 2).
+        assert_eq!(close["worker"]["diagnostics"]["minidump"], "written bytes=4096");
+
+        // Exactly one dump is finalized at close; the broker withholds the
+        // completion marker from the published file.
+        let dumps: Vec<PathBuf> = std::fs::read_dir(&dump_dir)
+            .expect("managed dump directory exists")
+            .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+            .filter(|path| path.extension().is_some_and(|ext| ext == "dmp"))
+            .collect();
+        assert_eq!(dumps.len(), 1, "exactly one finalized dump: {dumps:?}");
+        let bytes = std::fs::read(&dumps[0]).unwrap();
+        assert!(bytes.starts_with(b"MDMP"), "published dump keeps the streamed body");
+        assert!(!bytes.ends_with(b"AEXDUMP-COMPLETE"), "marker withheld from the file");
+        assert_eq!(bytes.len(), 4096);
+        // No orphan reservation is left behind.
+        let parts = std::fs::read_dir(&dump_dir)
+            .unwrap()
+            .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+            .filter(|path| path.extension().is_some_and(|ext| ext == "part"))
+            .count();
+        assert_eq!(parts, 0, "no unfinalized .dmp.part remains");
     }
 
     #[test]
