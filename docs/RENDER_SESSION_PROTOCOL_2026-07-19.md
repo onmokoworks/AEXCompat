@@ -113,9 +113,18 @@ auxiliary フック (`parse_l2_alpha_coverage`) でこれを parse し、launch 
 alpha-coverage provider をグローバルへ publish する。classic render runtime が
 毎フレームこれを読むため、session の「一度設定して全フレーム再利用」ライフタイムに
 一致し、worker 側の変更は不要。broker open は one-shot と同一の値域検証 (sort・重複
-禁止・slot <= 1024) を launch 前に行う。aux channels のみ後続 (session transport
-未対応)。値域・検証は one-shot と同一 (parse_mask_context_payload /
-parse_spatial_context_payload / parse_render_environment_payload)。full-resolution
+禁止・slot <= 1024) を launch 前に行う。#211 で aux channels
+(`host_context.aux_channels`) も session に載った: wrapper は one-shot と同じ
+`prepare_aux_transport` で aux channels を検証し、broker 所有の
+`target/image-transport` 配下に sidecar (`.f32le`) と `aux-manifest-v1` 形式の
+manifest を書き出し、その絶対パスを `SessionOpenRequest::aux_manifest` に渡す
+(session/one-shot 双方が同一 manifest を `--aux-manifest-v1 <path>` で同一 worker
+に送る)。manifest は broker が一度構築して両 transport で共有し、二重構築しない。
+これで HostContext の全フィールド (mask / spatial / render-environment /
+alpha-as-coverage / aux channels) が session-representable になり、classic
+レンダーに残る one-shot 専用の host context 構成は無くなった。値域・検証は
+one-shot と同一 (parse_mask_context_payload / parse_spatial_context_payload /
+parse_render_environment_payload / prepare_aux_transport)。full-resolution
 寸法を宣言する spatial は遅延 SEQUENCE_SETUP と全フレームの in_data に反映される。
 
 W1-4 では secondary layer を `session-layers:v1|slot,w,h;...` trailer
@@ -145,7 +154,13 @@ timed layer は含めない (両ルートで同一集合になる)。
 pf_sampling_probe による wrapper A/B (byte 一致) で session/one-shot 等価を
 直接検証済み (provider の意味的効果は probe が alpha-coverage を消費しないため
 byte 差としては現れないが、両ルートが同一オプションを同一 worker に送ることの
-等価性は確認できる)。
+等価性は確認できる)。aux channels (#211) も同型で、実 worker + pf_sampling_probe
+の wrapper A/B (`render_session_wrapper.rs`) が session/one-shot の公開レポート
+全フィールド + PNG バイト一致を検証する (probe は depth channel を消費しないが、
+両ルートが同一 manifest を同一 worker に load させることを担保する)。加えて機械
+可搬な単体テスト (`prepare_aux_transport_output_satisfies_the_session_aux_manifest_contract`)
+が、wrapper が構築する manifest が session の `--aux-manifest-v1` 前提 (絶対パス・
+実在ファイル・v1 スキーマの top-level 契約) を満たすことを、実 worker 無しで保証する。
 
 one-shot との差分:
 
