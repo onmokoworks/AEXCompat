@@ -70,8 +70,14 @@ def test_broker_requires_explicit_coverage_contract():
 
 def test_coverage_transport_follows_positional_ui_trailers():
     transport = (ROOT / "broker/crates/broker/src/image_render.rs").read_text(encoding="utf-8")
+    # #238 moved the inline click:v1 / draw:v1 pushes into RenderUiAction::
+    # encode_ui_field, so the command builder now pushes a single encoded UI
+    # field. The named --alpha-as-coverage-v1 transport must still follow that
+    # positional UI trailer.
+    ui_action = transport.index("args_after_plugin.push(action.encode_ui_field()?)")
     coverage = transport.index('"--alpha-as-coverage-v1".into()')
-    click = transport.index('args_after_plugin.push(format!(\n                    "click:v1|')
-    draw = transport.index('RenderUiAction::Draw => args_after_plugin.push("draw:v1".into())')
-    assert coverage > click
-    assert coverage > draw
+    assert coverage > ui_action
+    # The click/draw fields the trailer order protects still live in
+    # encode_ui_field.
+    assert '"click:v1|' in transport
+    assert '"draw:v1".into()' in transport
