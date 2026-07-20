@@ -16,7 +16,8 @@ use crate::image_render::{
     decode_bounded_image, decode_sha256_hex, encode_interactive_payload,
     isolated_worker_diagnostics, native_rgba_to_preview, parameter_animation_sidecar_json,
     runtime_backend, validate_animation_bindings, GpuRuntimePolicyInput, InteractiveParameter,
-    ParameterAnimation, RenderGpuBackend, RenderPixelFormat, INTERACTIVE_RENDER_TIMEOUT_MS,
+    ParameterAnimation, RenderGpuBackend, RenderPixelFormat, RenderUiAction,
+    INTERACTIVE_RENDER_TIMEOUT_MS,
     MAX_DIMENSION, MAX_PIXELS, MAX_RGBA_TRANSPORT_BYTES,
 };
 use crate::runtime_module_policy::{authenticate_gpu_worker_report, WorkerModuleValidation};
@@ -1021,18 +1022,34 @@ impl RenderSession {
         self.render_frame_with_parameters(frame_index, current_time, rgba, None)
     }
 
-    /// Renders one frame, optionally replacing the launch payload's parameter
-    /// assignments for this frame only through the v:2 `render_frame` message
-    /// (protocol §4.2.1, issue #107). The parameters ride the message in the
-    /// same encoding as the launch argv payload and go through the identical
-    /// broker-side validation before anything is sent, so an invalid set is a
-    /// plain caller error and the session stays usable.
+    /// Renders one frame carrying the launch payload's parameters (v:2
+    /// `render_frame` with a per-frame `parameters` attribute) but no custom-UI
+    /// action. Thin delegate kept for callers that only drive parameters.
     pub fn render_frame_with_parameters(
         &mut self,
         frame_index: u32,
         current_time: i32,
         rgba: &[u8],
         parameters: Option<&[InteractiveParameter]>,
+    ) -> io::Result<FrameOutcome> {
+        self.render_frame_with_attributes(frame_index, current_time, rgba, parameters, None)
+    }
+
+    /// Renders one frame, optionally carrying per-frame dynamic attributes that
+    /// override the launch configuration for this frame only through the v:2
+    /// `render_frame` message (protocol §4.2.1): `parameters` (issue #107) and
+    /// `ui_action` (issue #238). Each attribute rides the message in the same
+    /// encoding as its one-shot argv form and goes through the identical
+    /// broker-side validation before anything is sent, so an invalid value is a
+    /// plain caller error and the session stays usable. With neither attribute
+    /// a plain v:1 frame goes out.
+    pub fn render_frame_with_attributes(
+        &mut self,
+        frame_index: u32,
+        current_time: i32,
+        rgba: &[u8],
+        parameters: Option<&[InteractiveParameter]>,
+        ui_action: Option<&RenderUiAction>,
     ) -> io::Result<FrameOutcome> {
         if let Some(invalidation) = &self.invalidation {
             return Err(invalid(format!(
@@ -1092,25 +1109,37 @@ impl RenderSession {
                 self.last_output_generation
             )));
         }
-        // Encode and validate the per-frame payload before any slot write, so
-        // a rejected parameter set leaves the transport state untouched.
-        let message = match parameters {
-            Some(parameters) => {
-                let payload = encode_interactive_payload(parameters)?;
-                serde_json::to_string(&json!({
-                    "v": 2,
-                    "type": "render_frame",
-                    "frame_index": frame_index,
-                    "current_time": {"value": current_time, "scale": self.time_scale},
-                    "parameters": payload,
-                }))
-                .map_err(|error| invalid(error.to_string()))?
-            }
-            None => format!(
+        // Encode and validate the per-frame attributes before any slot write,
+        // so a rejected value leaves the transport state untouched. v:2 carries
+        // the present attributes as presence-driven fields (protocol §4.2.1);
+        // with neither, a plain v:1 frame goes out. Key order is irrelevant to
+        // the worker's exact-key set check.
+        let message = if parameters.is_none() && ui_action.is_none() {
+            format!(
                 "{{\"v\":1,\"type\":\"render_frame\",\"frame_index\":{frame_index},\
                  \"current_time\":{{\"value\":{current_time},\"scale\":{}}}}}",
                 self.time_scale
-            ),
+            )
+        } else {
+            let mut message_value = json!({
+                "v": 2,
+                "type": "render_frame",
+                "frame_index": frame_index,
+                "current_time": {"value": current_time, "scale": self.time_scale},
+            });
+            let object = message_value
+                .as_object_mut()
+                .expect("object literal is an object");
+            if let Some(parameters) = parameters {
+                object.insert(
+                    "parameters".into(),
+                    Value::String(encode_interactive_payload(parameters)?),
+                );
+            }
+            if let Some(ui_action) = ui_action {
+                object.insert("ui_action".into(), Value::String(ui_action.encode_ui_field()?));
+            }
+            serde_json::to_string(&message_value).map_err(|error| invalid(error.to_string()))?
         };
         // The encoder's 16 KiB payload cap keeps every message far below the
         // protocol's 64 KiB framing limit today, but the bound is enforced

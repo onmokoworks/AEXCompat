@@ -841,6 +841,31 @@ pub enum RenderUiAction {
     Draw,
 }
 
+impl RenderUiAction {
+    /// Encodes the action in the custom-UI trailer grammar shared by the
+    /// one-shot argv path and the v:2 session `ui_action` field
+    /// (`click:v1|x|y|r|g|b|a` / `draw:v1`). The click color is validated here
+    /// (finite, in 0..=1) so both callers reject the same set before it reaches
+    /// a worker.
+    pub fn encode_ui_field(&self) -> io::Result<String> {
+        match self {
+            RenderUiAction::Click { point, color } => {
+                if color
+                    .iter()
+                    .any(|value| !value.is_finite() || !(0.0..=1.0).contains(value))
+                {
+                    return Err(invalid("custom UI render click color is invalid"));
+                }
+                Ok(format!(
+                    "click:v1|{}|{}|{}|{}|{}|{}",
+                    point[0], point[1], color[0], color[1], color[2], color[3]
+                ))
+            }
+            RenderUiAction::Draw => Ok("draw:v1".into()),
+        }
+    }
+}
+
 fn image_worker_command(
     smart: bool,
     pixel_format: RenderPixelFormat,
@@ -4245,7 +4270,6 @@ fn render_with_artifact(
         host_context.map_or(&[], |context| context.alpha_as_coverage_params.as_slice());
     if !smart
         && audio.is_none()
-        && custom_ui_action.is_none()
         && gpu_backend == RenderGpuBackend::Auto
         && payload == encode_interactive_payload(interactive_parameters.unwrap_or_default())?
         && std::env::var_os(DISABLE_SESSION_WRAPPER_ENV).is_none()
@@ -4314,6 +4338,7 @@ fn render_with_artifact(
             expected_field,
             expected_shutter_angle,
             expected_shutter_phase,
+            custom_ui_action: custom_ui_action.as_ref(),
         }) {
             SessionWrapperOutcome::Report(report) => return Ok(report),
             SessionWrapperOutcome::Failure(error) => return Err(error),
@@ -4455,21 +4480,7 @@ fn render_with_artifact(
         }
     }
     if let Some(action) = custom_ui_action {
-        match action {
-            RenderUiAction::Click { point, color } => {
-                if color
-                    .iter()
-                    .any(|value| !value.is_finite() || !(0.0..=1.0).contains(value))
-                {
-                    return Err(invalid("custom UI render click color is invalid"));
-                }
-                args_after_plugin.push(format!(
-                    "click:v1|{}|{}|{}|{}|{}|{}",
-                    point[0], point[1], color[0], color[1], color[2], color[3]
-                ));
-            }
-            RenderUiAction::Draw => args_after_plugin.push("draw:v1".into()),
-        }
+        args_after_plugin.push(action.encode_ui_field()?);
     }
     // Named transports must remain after positional UI/context trailers. The
     // native workers peel these pairs from argv's tail before decoding the
@@ -4892,6 +4903,9 @@ struct SessionWrapperRequest<'a> {
     expected_field: i32,
     expected_shutter_angle: i32,
     expected_shutter_phase: i32,
+    /// Per-frame custom-UI action (#238) driven on the wrapper's single frame
+    /// through the v:2 `ui_action` attribute. `None` for a plain render.
+    custom_ui_action: Option<&'a RenderUiAction>,
 }
 
 enum SessionWrapperOutcome {
@@ -4966,7 +4980,13 @@ fn render_classic_via_length_one_session(
         }
         SessionWrapperOutcome::Fallback
     };
-    let outcome = match session.render_frame(0, request.timing.current_time, request.rgba) {
+    let outcome = match session.render_frame_with_attributes(
+        0,
+        request.timing.current_time,
+        request.rgba,
+        None,
+        request.custom_ui_action,
+    ) {
         Ok(outcome) => outcome,
         // Invalidation (crash, deadline, dimension or guard invariant): the
         // one-shot transport may still carry this render, for example for an
@@ -5002,7 +5022,7 @@ fn render_classic_via_length_one_session(
             expected_field: request.expected_field,
             expected_shutter_angle: request.expected_shutter_angle,
             expected_shutter_phase: request.expected_shutter_phase,
-            custom_ui_action: None,
+            custom_ui_action: request.custom_ui_action,
             audio_present: false,
             interactive_parameters: request.interactive_parameters,
             classification: &classification,
