@@ -1552,11 +1552,30 @@ impl RenderSession {
         if output.width == 0 || output.height == 0 {
             return Err(format!("output geometry {}x{} is empty", output.width, output.height));
         }
+        // A resized output (dimensions other than the render dimensions) must
+        // obey the same per-dimension and total-pixel caps as the worker's
+        // validate_output_extent, so a buggy or compromised worker cannot report
+        // an absurd shape (e.g. 1000000x1) that happens to fit a large slot by
+        // total bytes. A fixed-size output was already bounded at session open.
+        let is_resize = output.width != self.geometry.width || output.height != self.geometry.height;
+        if is_resize
+            && (output.width > MAX_RESIZE_DIMENSION
+                || output.height > MAX_RESIZE_DIMENSION
+                || u64::from(output.width) * u64::from(output.height) > MAX_RESIZE_PIXELS)
+        {
+            return Err(format!(
+                "resized output geometry {}x{} exceeds the resize bounds",
+                output.width, output.height
+            ));
+        }
         let actual_bytes = u64::from(output.width) * u64::from(output.height) * u64::from(bpp);
         if actual_bytes > self.geometry.output_slot_bytes() as u64 {
             return Err(format!(
-                "output geometry {}x{} overruns the session slot {}x{}",
-                output.width, output.height, self.geometry.width, self.geometry.height
+                "output geometry {}x{} overruns the session slot capacity {}x{}",
+                output.width,
+                output.height,
+                self.geometry.output_capacity_width,
+                self.geometry.output_capacity_height
             ));
         }
         if output.rowbytes != u64::from(output.width) * u64::from(bpp) {
