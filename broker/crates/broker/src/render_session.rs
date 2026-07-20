@@ -621,15 +621,20 @@ impl RenderSession {
         }
         let (output_capacity_width, output_capacity_height) =
             output_capacity.unwrap_or((request.width, request.height));
-        // The output capacity must cover the render dimensions and stay within
-        // the resize bounds; a smaller capacity could not even hold a
-        // fixed-size render.
-        if output_capacity_width < request.width
-            || output_capacity_height < request.height
+        // The output slot is a flat buffer, so a packed output fits by total
+        // pixel count regardless of shape. The capacity must hold at least a
+        // fixed-size render (so a re-open never loses the ability to render the
+        // input dimensions, e.g. for a single-axis expand like 4096x1) and stay
+        // within the resize bounds. A per-axis floor would wrongly reject a
+        // legal expand whose shape shrinks one axis.
+        let capacity_pixels =
+            u64::from(output_capacity_width) * u64::from(output_capacity_height);
+        if output_capacity_width == 0
+            || output_capacity_height == 0
             || output_capacity_width > MAX_RESIZE_DIMENSION
             || output_capacity_height > MAX_RESIZE_DIMENSION
-            || u64::from(output_capacity_width) * u64::from(output_capacity_height)
-                > MAX_RESIZE_PIXELS
+            || capacity_pixels > MAX_RESIZE_PIXELS
+            || capacity_pixels < u64::from(request.width) * u64::from(request.height)
         {
             return Err(invalid("render session output capacity is out of range"));
         }
@@ -1450,8 +1455,9 @@ impl RenderSession {
                         "resize_out_of_range",
                         format!(
                             "frame {frame_index} resize_needed {width}x{height} is out of range \
-                             (current {}x{})",
-                            self.geometry.width, self.geometry.height
+                             (current capacity {}x{})",
+                            self.geometry.output_capacity_width,
+                            self.geometry.output_capacity_height
                         ),
                         true,
                         POST_TERMINATION_COLLECT_TIMEOUT,
