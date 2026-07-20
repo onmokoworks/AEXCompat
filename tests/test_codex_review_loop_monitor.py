@@ -23,11 +23,20 @@ LIB = ROOT / ".claude" / "skills" / "codex-review-loop" / "codex-review-lib.sh"
 @functools.lru_cache(maxsize=1)
 def _working_bash() -> str | None:
     # shutil.which("bash") returns only the first PATH match, which on Windows is
-    # often a WSL relay (System32\bash.exe, WindowsApps\bash.exe) that exits 1
-    # with "execvpe(/bin/bash) failed" when no distro is installed, while a real
-    # bash (Git Bash / msys2) sits later on PATH. Enumerate every candidate and
-    # pick the first that actually runs, so the tests use a working bash instead
-    # of failing on the broken relay (they only skip when none work). See #85.
+    # often a WSL relay (System32\bash.exe, WindowsApps\bash.exe) that either
+    # exits 1 with "execvpe(/bin/bash) failed" (no distro) or, with a distro
+    # installed, runs but cannot resolve the Windows C:/ paths the suite uses,
+    # while a real bash (Git Bash / msys2) sits later on PATH. Enumerate every
+    # candidate and probe representatively: source LIB via its as_posix() C:/
+    # path (exactly what _call does) and confirm a library function is defined.
+    # A bare `exit 0` would wrongly accept a distro-backed WSL relay that then
+    # fails every test on the C:/ source. Pick the first bash that passes; skip
+    # only when none do. Fall back to `exit 0` when LIB is absent so the caller
+    # still reaches its own "LIB not found" skip. See #85.
+    if LIB.is_file():
+        probe = f'. "{LIB.as_posix()}"; declare -F codex_error >/dev/null'
+    else:
+        probe = "exit 0"
     seen: set[str] = set()
     for directory in os.environ.get("PATH", "").split(os.pathsep):
         if not directory:
@@ -37,12 +46,12 @@ def _working_bash() -> str | None:
             continue
         seen.add(candidate)
         try:
-            probe = subprocess.run(
-                [candidate, "-c", "exit 0"], capture_output=True, timeout=15
+            result = subprocess.run(
+                [candidate, "-c", probe], capture_output=True, timeout=15
             )
         except (OSError, subprocess.SubprocessError):
             continue
-        if probe.returncode == 0:
+        if result.returncode == 0:
             return candidate
     return None
 
