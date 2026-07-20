@@ -83,7 +83,7 @@ install、実行後 cleanup。生ログは scratchpad の `audio-selector-timeli
    host 交渉値であり、入力そのままではない。
 5. image RENDER は発火しなかった (render=0)。probe が audio-only レイヤーに
    載っていたため。image と audio を同一レイヤーで同時観測するには映像+音声を
-   持つ footage が要る (interleave 詳細の追加観測は任意)。
+   持つ footage が要る → **観測2 で実施済み** (下記)。
 
 ## 観測2 (映像+音声レイヤー、2026-07-20)
 
@@ -152,11 +152,13 @@ AUDIO_EFFECT_TOO なので、適用レイヤーに audio が無いと AUDIO_REND
 ## 仮説 (2026-07-20 観測で確認済み)
 
 - ~~audio render は image フレームとは別の時間軸・別まとめ~~ → **確認**
-  (上記「観測」参照)。audio は per-frame ではなく期間一括で、別スレッドで独立した
+  (観測1・2 参照)。audio は per-frame ではなく期間一括で、別スレッドで独立した
   sequence 履歴を持つ。「区間 audio を別チャネルで運ぶ / audio 専用セッション」で
-  image frame loop に相乗りさせない、という設計方針は期間一括の事実で裏付けられた。
-  ただし audio と image の sequence 状態の分離/共有は未確認 (audio-only 観測、
-  image RENDER 不発)。映像+音声観測を実装確定前に行う (次アクション)。
+  image frame loop に相乗りさせない、という設計方針が裏付けられた。
+- (訂正 2026-07-20) 当初、観測1 (audio-only) では audio と image の sequence
+  状態の分離/共有が未確認と記していたが、**観測2 (映像+音声) で分離を確認済み
+  (別スレッド・別 sequence インスタンス)。この caveat は解消**。実装確定前の
+  追加観測は不要になった。
 
 ## 次アクション (段階0 完了後)
 
