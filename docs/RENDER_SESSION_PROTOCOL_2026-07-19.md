@@ -622,10 +622,18 @@ one-shot audio (`--render-audio`、`worker_audio_execution.cpp` の
 
 ```
 aex_render_worker.exe --render-audio-session-v1 <plugin> <plugin_sha256>
-    <payload> <time_scale> [--parameter-animation-v1 <path>] [--minidump-v1 <dir>]
+    <payload> <max_samples> <channels> <time_scale>
+    [--parameter-animation-v1 <path>] [--minidump-v1 <dir>]
 ```
 
+- 位置引数は 7 個 (command 含む `effective_argc == 8`)。`l2_cli_dispatch.cpp`
+  がこの数で分類し、`worker_request_parser.cpp` が `argv[4]=payload`,
+  `argv[5]=max_samples`, `argv[6]=channels`, `argv[7]=time_scale` を読む。
 - 入力 audio の raw パス・出力パスは取らない (§10.4 の共有メモリチャネルに置換)。
+- `max_samples` / `channels` は §10.4 共有バッファの入出力スロット寸法 (geometry)
+  の上限。v1 は mono 固定 (`channels == 1`、それ以外は launch で reject)、
+  `max_samples` は `1 <= n <= 16 Mi`。これは**バッファ確保のための境界**であり、
+  下の host 交渉フォーマットとは別物。
 - audio フォーマット (rate / channels / sample_size) は host 交渉値なので
   launch では申告しない。実際の値は AUDIO_RENDER 時に worker が観測し、
   `audio_done` (§10.3) と共有バッファヘッダに書く。tier は default tier。
@@ -638,17 +646,23 @@ exact-key) を共用。image の `render_frame` とは別 `type`:
 broker → worker:
 
 ```json
-{"v":1,"type":"audio_render","request_index":0,
- "start_sample":0,"duration_samples":48000,
- "time":{"value":0,"scale":30}}
+{"v":1,"type":"audio_render","request_index":0,"input_samples":48000}
 ```
 
+- 受理キーは strict exact: `v` / `type` / `request_index` / `input_samples`
+  の 4 個のみ (`worker_audio_execution.cpp` の `json_exact_keys`)。それ以外の
+  キーはプロトコル違反。broker (`AudioRenderSession::render_span`) もこの縮約形
+  だけを送る。
 - `request_index`: 0 始まりの通し番号 (§6 と同型の generation 検証に使う)。
-- `start_sample` / `duration_samples`: 要求する audio 区間 (段階0 の
-  `start_sampL` / `dur_sampL` に対応)。worker は入力スロットの該当区間を
-  effect に渡し、AUDIO_SETUP → AUDIO_RENDER → AUDIO_SETDOWN を駆動する。
-- `time`: 有理数時刻 (parameter animation 評価用、`scale` は launch と一致必須)。
-- `close`: `{"v":1,"type":"close"}` で GLOBAL_SETDOWN → 最終レポート → exit 0。
+- `input_samples`: broker が入力スロット先頭に書いた f32 sample 数。要求区間は
+  暗黙に `[0, input_samples)`、区間先頭は常に slot offset 0。`max_samples`
+  (§10.2 geometry) を超える値は reject。
+- **v1 の未実装 (今後の拡張余地)**: 明示 `start_sample` / `duration_samples`
+  区間指定と、parameter animation 評価用の有理数 `time` は v1 要求では運ばない
+  (段階0 の `start_sampL` / `dur_sampL` を活かす区間レンダーは後続作業)。現状は
+  1 要求 = 1 連続区間を先頭から。
+- `close`: `{"v":1,"type":"close"}` (exact key `v` / `type`) で GLOBAL_SETDOWN
+  → 最終レポート → exit 0。
 
 worker → broker:
 
