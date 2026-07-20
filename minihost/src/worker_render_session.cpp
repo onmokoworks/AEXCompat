@@ -9,10 +9,13 @@
 #include "worker_pf_ae_channel_runtime.hpp"
 #include "worker_request_parser.hpp"
 #include "worker_smart_execution.hpp"
+#include "worker_ui_event_execution.hpp"
 
 #include <array>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <cwchar>
 #include <filesystem>
@@ -291,6 +294,70 @@ template <typename T, std::size_t N>
 void write(std::array<std::byte, N>& bytes, std::size_t offset, T value) {
   std::memcpy(bytes.data() + offset, &value, sizeof(value));
 }
+
+// One frame's decoded v:2 `ui_action` (protocol §4.2.1, issue #238): a click
+// with its coordinates and picker color, or a draw. Empty (neither flag) is
+// never constructed; a frame with no `ui_action` passes a null pointer.
+struct SessionUiAction {
+  bool click{false};
+  bool draw{false};
+  int32_t x{0};
+  int32_t y{0};
+  std::array<float, 4> color{};
+};
+
+// Decodes the v:2 `ui_action` string, reusing the one-shot custom-UI trailer
+// grammar so the session and one-shot admit/reject the identical set:
+// "click:v1|x|y|r|g|b|a" (worker_request_parser.cpp:177-186) or "draw:v1"
+// (l2_cli_dispatch.cpp:180-181). Bounds mirror the argv path: x/y in [0,8192],
+// each color component finite in [0,1]. Returns false on any malformed value,
+// which the caller escalates to a protocol violation (the broker validates the
+// same grammar before sending, so a bad value is a defect or tampering).
+bool parse_session_ui_action(const std::string& text, SessionUiAction& action) {
+  if (text == "draw:v1") {
+    action.draw = true;
+    return true;
+  }
+  constexpr std::size_t kClickPrefixLen = 9;  // "click:v1|"
+  if (text.rfind("click:v1|", 0) != 0) return false;
+  float red{}, green{}, blue{}, alpha{};
+  int consumed = 0;
+  if (std::sscanf(text.c_str() + kClickPrefixLen, "%d|%d|%f|%f|%f|%f%n",
+                  &action.x, &action.y, &red, &green, &blue, &alpha,
+                  &consumed) != 6)
+    return false;
+  // Reject trailing bytes after the seventh field: a well-formed broker message
+  // ends exactly here.
+  if (text[kClickPrefixLen + static_cast<std::size_t>(consumed)] != '\0')
+    return false;
+  if (action.x < 0 || action.x > 8192 || action.y < 0 || action.y > 8192)
+    return false;
+  for (const float value : {red, green, blue, alpha})
+    if (!std::isfinite(value) || value < 0.0f || value > 1.0f) return false;
+  action.click = true;
+  action.color = {red, green, blue, alpha};
+  return true;
+}
+
+// Applies one frame's v:2 `ui_action` to the process-lifetime custom-UI
+// telemetry the render path reads (the same singleton the one-shot ApplyHooks
+// setters drive from argv, l2_main.cpp:1505-1509). The per-frame semantic is a
+// complete replacement (protocol §4.2.1): the enabled flags are cleared first
+// so a frame with no ui_action renders with no custom-UI event, then set from
+// this frame's action. Frame N's click never leaks into frame N+1.
+void apply_session_ui_action(const SessionUiAction* action) {
+  auto& telemetry = worker_runtime::ui_event_execution::custom_ui_telemetry();
+  telemetry.render_click_enabled = false;
+  telemetry.render_draw_enabled = false;
+  if (!action) return;
+  if (action->click) {
+    telemetry.render_click_x = action->x;
+    telemetry.render_click_y = action->y;
+    telemetry.app_picker_color = action->color;
+    telemetry.render_click_enabled = true;
+  }
+  if (action->draw) telemetry.render_draw_enabled = true;
+}
 }  // namespace
 
 // One rendered session frame as the shared loop below consumes it: the
@@ -314,10 +381,12 @@ struct SessionFrameOutput {
 // section (copy-through slots, the plug-in never sees the mapping) and control
 // messages over the inherited pipe pair with strict exact-key validation.
 // render_frame(current_time, frame_rgba, captured, frame_layers,
-// frame_override) runs one frame under the hoisted sequence and returns the
-// SessionFrameOutput above with the packed ARGB output in `captured`.
-// frame_override is a v:2 per-frame parameter set (protocol §4.2.1) or null;
-// the wrappers fall back to their launch payload when it is null.
+// frame_override, frame_ui) runs one frame under the hoisted sequence and
+// returns the SessionFrameOutput above with the packed ARGB output in
+// `captured`. frame_override is a v:2 per-frame parameter set (protocol
+// §4.2.1) or null; the wrappers fall back to their launch payload when it is
+// null. frame_ui is a v:2 per-frame custom-UI action (§4.2.1) or null; the
+// callback drives the click/draw event sequence for that frame only.
 // RenderSessionOutcome is defined in worker_invocation_orchestration.hpp so
 // the final dispatch owner can call the wrappers below across TUs.
 template <typename FrameFn>
@@ -439,12 +508,32 @@ RenderSessionOutcome run_session_frame_loop(
     }
     int32_t frame_index{};
     const auto* time_value = json_member(object, "current_time");
-    const bool with_parameters =
+    // v:2 carries per-frame dynamic attributes (protocol §4.2.1): `parameters`
+    // (#107) and/or `ui_action` (#238) as presence-driven optional fields. At
+    // least one must be present; a v:2 with neither is a protocol violation
+    // (senders use v:1 for a plain frame). The exact-key set is built from the
+    // present optionals so unknown keys stay rejected.
+    const bool with_attributes =
         version == static_cast<int32_t>(wrs::kRenderFrameParametersVersion);
-    const bool exact_keys = with_parameters
-        ? json_exact_keys(object,
-                          {"v", "type", "frame_index", "current_time", "parameters"})
-        : json_exact_keys(object, {"v", "type", "frame_index", "current_time"});
+    const bool has_parameters = json_member(object, "parameters") != nullptr;
+    const bool has_ui_action = json_member(object, "ui_action") != nullptr;
+    bool exact_keys;
+    if (with_attributes) {
+      if (has_parameters && has_ui_action)
+        exact_keys = json_exact_keys(
+            object, {"v", "type", "frame_index", "current_time", "parameters",
+                     "ui_action"});
+      else if (has_parameters)
+        exact_keys = json_exact_keys(
+            object, {"v", "type", "frame_index", "current_time", "parameters"});
+      else if (has_ui_action)
+        exact_keys = json_exact_keys(
+            object, {"v", "type", "frame_index", "current_time", "ui_action"});
+      else
+        exact_keys = false;  // v:2 must carry at least one dynamic attribute.
+    } else {
+      exact_keys = json_exact_keys(object, {"v", "type", "frame_index", "current_time"});
+    }
     if (type != "render_frame" || !exact_keys ||
         !json_i32(object, "frame_index", frame_index) || frame_index < 0 ||
         !time_value || !std::holds_alternative<JsonValue::Object>(time_value->value)) {
@@ -460,15 +549,16 @@ RenderSessionOutcome run_session_frame_loop(
       outcome.protocol_violation = true;
       break;
     }
-    // v:2 replaces the launch payload's assignments for this frame only
-    // (protocol §4.2.1). The payload rides the message in the argv encoding,
-    // ASCII only; a payload the broker's pre-send validation would have
-    // rejected is a protocol violation, not a frame-local diagnostic. The
-    // loop only produces the override; the launch payload itself stays with
-    // the flavor wrappers, which fall back to it when this is null.
+    // The v:2 `parameters` attribute replaces the launch payload's assignments
+    // for this frame only (protocol §4.2.1). The payload rides the message in
+    // the argv encoding, ASCII only; a payload the broker's pre-send validation
+    // would have rejected is a protocol violation, not a frame-local
+    // diagnostic. The loop only produces the override; the launch payload
+    // itself stays with the flavor wrappers, which fall back to it when this is
+    // null.
     RequestedAssignments frame_assignments;
     const RequestedAssignments* frame_override = nullptr;
-    if (with_parameters) {
+    if (has_parameters) {
       std::string parameters_text;
       std::wstring widened;
       bool widened_ok = json_string(object, "parameters", parameters_text);
@@ -487,6 +577,20 @@ RenderSessionOutcome run_session_frame_loop(
         break;
       }
       frame_override = &frame_assignments;
+    }
+    // The v:2 `ui_action` attribute drives the one-shot custom-UI event
+    // sequence for this frame only (protocol §4.2.1). Same grammar and bounds
+    // as the argv trailer; a malformed value is a protocol violation.
+    SessionUiAction frame_ui_action;
+    const SessionUiAction* frame_ui = nullptr;
+    if (has_ui_action) {
+      std::string ui_action_text;
+      if (!json_string(object, "ui_action", ui_action_text) ||
+          !parse_session_ui_action(ui_action_text, frame_ui_action)) {
+        outcome.protocol_violation = true;
+        break;
+      }
+      frame_ui = &frame_ui_action;
     }
     const uint32_t expected_generation = static_cast<uint32_t>(frame_index) + 1;
     // Error responses carry no output or generation: a frame rejected before
@@ -568,7 +672,8 @@ RenderSessionOutcome run_session_frame_loop(
     }
     captured.clear();
     const SessionFrameOutput frame =
-        render_frame(current_time, frame_rgba, captured, frame_layers, frame_override);
+        render_frame(current_time, frame_rgba, captured, frame_layers, frame_override,
+                     frame_ui);
     // Aux channel chunks are host-owned and cannot outlive one frame's render
     // lifecycle (end_render's cleanup for the one-shot path); the manifest
     // itself stays active across frames.
@@ -684,7 +789,9 @@ RenderSessionOutcome run_render_session(
       [&](int32_t current_time, const std::vector<unsigned char>& frame_rgba,
           std::vector<unsigned char>& captured,
           const std::vector<ExternalLayerInput>* frame_layers,
-          const RequestedAssignments* frame_override) {
+          const RequestedAssignments* frame_override,
+          const SessionUiAction* frame_ui) {
+        apply_session_ui_action(frame_ui);
         SessionFrameOutput frame;
         // Initialized true so it means "finalize observed corruption" when
         // false: render_once's early host-side failures return before touching
@@ -724,7 +831,9 @@ SmartRenderSessionOutcome run_smart_render_session(
       [&](int32_t current_time, const std::vector<unsigned char>& frame_rgba,
           std::vector<unsigned char>& captured,
           const std::vector<ExternalLayerInput>*,
-          const RequestedAssignments* frame_override) {
+          const RequestedAssignments* frame_override,
+          const SessionUiAction* frame_ui) {
+        apply_session_ui_action(frame_ui);
         SessionFrameOutput frame;
         worker_runtime::smart_execution::SessionFrame session_frame{&captured};
         const worker_runtime::smart_execution::Result frame_result = smart_render_once(
