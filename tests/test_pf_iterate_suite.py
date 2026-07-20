@@ -48,12 +48,29 @@ def test_iterate_suite2_structs_match_sdk_abi_without_null_slots():
 
 def test_iterate_callbacks_are_bounded_and_propagate_errors():
     text = source_text()
-    assert "normalize_legacy_rect(area, std::min(source_width, destination_width)" in text
+    assert "normalize_legacy_rect(area, bound_width, bound_height, bounds)" in text
     assert "constexpr int32_t kMaxIterations = 16'777'216;" in text
     assert "iterations <= 0 || iterations > kMaxIterations" in text
     assert "if (error != 0) return error;" in text
     assert "tables[channel] ? tables[channel][value] : value" in text
     assert "std::array<unsigned char, 16> zero{};" in text
+
+
+def test_world_iterate_supports_null_source_destination_only_walk():
+    # issue #219: a null source world is the documented destination-only mode.
+    # The host must skip source resolution, bound the walk to the destination,
+    # and pass a null source pixel to the callback instead of returning A_Err_ALLOC.
+    text = source_text()
+    assert "const bool has_source = source_world != nullptr;" in text
+    assert "has_source && !resolve_world(source_world" in text
+    assert "? std::min(source_width, destination_width) : destination_width;" in text
+    assert "? std::min(source_height, destination_height) : destination_height;" in text
+    assert "void* source_pixel = has_source" in text
+    assert "iterate_test_null_source_pixel" in text
+    assert "iterate_world_typed(input.data(), 10, 14, 4, nullptr, &all_rows," in text
+    # The origin variants share the same null-source rule.
+    assert text.count("const bool has_source = source_world != nullptr;") >= 2
+    assert "iterate_origin_non_clip8(nullptr, 0, 1, nullptr, nullptr, origin.data()," in text
 
 
 def test_world_iterate_reports_rows_and_checks_abort_without_masking_pixel_errors():
