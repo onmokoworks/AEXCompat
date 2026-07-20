@@ -259,7 +259,9 @@ int32_t render_once(EffectEntry entry, std::array<std::byte, kInSize>& input,
                     int32_t external_total_time = 1, uint32_t external_time_scale = 1,
                     int32_t external_pixel_bytes = 4, bool manage_sequence = true,
                     std::vector<unsigned char>* captured_argb = nullptr,
-                    bool* output_validation_failed = nullptr);
+                    bool* output_validation_failed = nullptr,
+                    std::size_t output_slot_capacity_bytes = 0,
+                    bool* resize_needed = nullptr);
 worker_runtime::smart_execution::Result smart_render_once(
     EffectEntry entry, std::array<std::byte, kInSize>& input,
     std::array<std::byte, kOutSize>& output, const std::string& case_id,
@@ -393,6 +395,10 @@ struct SessionFrameOutput {
   std::string output_hash;
   bool guard_violation{false};
   bool output_validation_failed{false};
+  // Set when prepare_output detected the requested output dimensions overrun
+  // the slot capacity before RENDER ran, so the frame is reported as
+  // resize_needed without ever dispatching kRender (protocol §3, exactly-once).
+  bool resize_needed{false};
 };
 
 // Resident render session frame loop (docs/RENDER_SESSION_PROTOCOL_2026-07-19.md).
@@ -737,6 +743,24 @@ RenderSessionOutcome run_session_frame_loop(
       outcome.invariant_failure = true;
       break;
     }
+    // Expand-output detected before RENDER (protocol §3): the requested
+    // dimensions overrun the output slot, so prepare_output short-circuited
+    // without dispatching kRender (captured is empty). Report resize_needed at
+    // the requested dimensions so the broker re-opens larger; RENDER never ran,
+    // so this frame diverges from one-shot by nothing (exactly-once). The
+    // session stays usable: no slot write, no generation advance.
+    if (frame.resize_needed) {
+      if (frame.width <= 0 || frame.height <= 0) {
+        respond_error(kSessionDimensionMismatch);
+        outcome.invariant_failure = true;
+        break;
+      }
+      if (!respond_resize_needed(frame.width, frame.height)) {
+        outcome.protocol_violation = true;
+        break;
+      }
+      continue;
+    }
     if (frame.frame_error != 0) {
       // Frame-local compatibility diagnostic; the sequence state is still
       // owned by the host, so the session may continue.
@@ -847,15 +871,27 @@ RenderSessionOutcome run_render_session(
         // it, while every path that allocates the guarded buffer overwrites it.
         bool frame_guards = true;
         bool output_validation_failed = false;
+        // Capacity of the output slot in bytes; prepare_output uses it to
+        // detect an expand-output frame before RENDER and short-circuit to
+        // resize_needed (protocol §3), so RENDER runs at most once per frame.
+        const std::size_t output_slot_capacity_bytes =
+            static_cast<std::size_t>(output_capacity_width > 0 ? output_capacity_width
+                                                               : max_width) *
+            static_cast<std::size_t>(output_capacity_height > 0 ? output_capacity_height
+                                                                : max_height) *
+            static_cast<std::size_t>(pixel_bytes);
+        bool resize_needed = false;
         frame.frame_error = render_once(
             entry, input, output, "request", frame.width, frame.height,
             frame.rowbytes, frame.input_hash, frame.output_hash, frame_guards,
             frame_override ? frame_override : requested, &frame_rgba, nullptr,
             max_width, max_height, frame_layers,
             current_time, time_step, total_time, time_scale, pixel_bytes, false,
-            &captured, &output_validation_failed);
+            &captured, &output_validation_failed, output_slot_capacity_bytes,
+            &resize_needed);
         frame.guard_violation = !frame_guards;
         frame.output_validation_failed = output_validation_failed;
+        frame.resize_needed = resize_needed;
         return frame;
       });
 }

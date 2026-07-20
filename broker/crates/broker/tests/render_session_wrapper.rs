@@ -1303,6 +1303,17 @@ mod windows_e2e {
         .save(&input)
         .unwrap();
 
+        // The probe appends one byte per kRender entry to this file (across
+        // every worker process it is spawned into), so its length is the total
+        // number of RENDER dispatches. This is the only cross-process observable
+        // of the throwaway first worker: an expand that dispatched RENDER before
+        // detecting the slot overrun would render once in the discarded 64x48
+        // worker and again in the re-opened 68x52 worker (two bytes); the #261
+        // fix detects the overrun in prepare_output before dispatching, so RENDER
+        // runs exactly once (one byte), matching the one-shot route.
+        let render_log = scratch.join("render-dispatches.bin");
+        unsafe { std::env::set_var("AEXCOMPAT_RESIZE_RENDER_LOG", &render_log) };
+
         // Run A: default routing. The effect expands 64x48 -> 68x52, overruns
         // the initial 64x48 slot, and the wrapper re-opens at 68x52 on the
         // session route. The counter proves the session carried it (a silent
@@ -1318,6 +1329,16 @@ mod windows_e2e {
         // The output really expanded past the input dimensions.
         assert_eq!(report_a.get("width"), Some(&serde_json::json!(68)));
         assert_eq!(report_a.get("height"), Some(&serde_json::json!(52)));
+        // Exactly-once: the session re-open must not double-dispatch RENDER.
+        let session_dispatches = std::fs::metadata(&render_log)
+            .map(|meta| meta.len())
+            .unwrap_or(0);
+        assert_eq!(
+            session_dispatches, 1,
+            "the session expand dispatched RENDER {session_dispatches} times (expected exactly once; \
+             a pre-detect overrun renders once in the discarded worker and again after re-open)"
+        );
+        std::fs::remove_file(&render_log).ok();
 
         // Run B: the escape hatch forces the one-shot argv transport.
         unsafe { std::env::set_var(DISABLE_SESSION_WRAPPER_ENV, "1") };
@@ -1326,10 +1347,20 @@ mod windows_e2e {
         let report_b = render_experimental_image(&root, &aex, &sha, &input, &output_b, &[]);
         unsafe { std::env::remove_var(DISABLE_SESSION_WRAPPER_ENV) };
         let report_b = report_b.expect("one-shot expand render");
+        unsafe { std::env::remove_var("AEXCOMPAT_RESIZE_RENDER_LOG") };
         assert_eq!(
             RENDER_SESSION_WRAPPER_RENDERS.load(Ordering::SeqCst),
             after_a,
             "the escape hatch did not force the one-shot transport"
+        );
+        // The one-shot route renders exactly once; this is the baseline the
+        // session route's single dispatch above is matched against.
+        let one_shot_dispatches = std::fs::metadata(&render_log)
+            .map(|meta| meta.len())
+            .unwrap_or(0);
+        assert_eq!(
+            one_shot_dispatches, 1,
+            "the one-shot expand dispatched RENDER {one_shot_dispatches} times (expected exactly once)"
         );
 
         let volatile = ["output_png", "output_raw", "worker_diagnostics"];

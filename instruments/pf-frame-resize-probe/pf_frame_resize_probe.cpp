@@ -1,12 +1,31 @@
+#define _CRT_SECURE_NO_WARNINGS
 #include "AEConfig.h"
 #include "entry.h"
 #include "AE_Effect.h"
 
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 
 #ifndef AEXCOMPAT_RESIZE_FLAG
 #define AEXCOMPAT_RESIZE_FLAG 0
 #endif
+
+// Observable RENDER side effect for the exactly-once test (#262): when
+// AEXCOMPAT_RESIZE_RENDER_LOG names a file, append one byte per kRender entry.
+// A resident-session expand that dispatched RENDER before detecting the slot
+// overrun (the pre-#261-fix behaviour) would append twice across the throwaway
+// first worker and the re-opened worker; the fix keeps it at one. The count is
+// the only cross-process observable, since the throwaway worker's pixels are
+// discarded. No env var set (every non-expand test) means no side effect.
+static void record_render_dispatch() {
+  const char* path = std::getenv("AEXCOMPAT_RESIZE_RENDER_LOG");
+  if (!path || !*path) return;
+  if (std::FILE* file = std::fopen(path, "ab")) {
+    std::fputc(1, file);
+    std::fclose(file);
+  }
+}
 
 extern "C" DllExport PF_Err EffectMain(PF_Cmd cmd, PF_InData*,
                                         PF_OutData* out_data, PF_ParamDef* params[],
@@ -24,6 +43,7 @@ extern "C" DllExport PF_Err EffectMain(PF_Cmd cmd, PF_InData*,
       out_data->height = params[0]->u.ld.height + AEXCOMPAT_RESIZE_DELTA;
       return PF_Err_NONE;
     case PF_Cmd_RENDER:
+      record_render_dispatch();
 #if AEXCOMPAT_EXPECT_DENIED
       return PF_Err_INTERNAL_STRUCT_DAMAGED;
 #else
