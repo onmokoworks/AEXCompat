@@ -2587,6 +2587,11 @@ impl HarnessApp {
     }
 
     fn approve_session(&mut self) -> Result<(), String> {
+        // Every dependency-set change funnels through re-approval; the
+        // resident worker still holds the previous approved set and must not
+        // idle past it, so close eagerly rather than lazily at the next
+        // render.
+        self.close_live_session();
         let selection = self.selection.as_ref().ok_or("No AEX is selected")?;
         let main = aexcompat_broker::secure_image_dispatch::ApprovedImageArtifact {
             path: selection.path.clone(),
@@ -4374,6 +4379,7 @@ impl eframe::App for HarnessApp {
                             self.approved_dependencies.clear();
                             self.session_approved = true;
                             self.status = "Dependency list cleared.".into();
+                            self.close_live_session();
                         }
                     });
                     if let Some(index) = remove {
@@ -4381,6 +4387,7 @@ impl eframe::App for HarnessApp {
                         if self.dependencies.is_empty() {
                             self.approved_dependencies.clear();
                             self.session_approved = true;
+                            self.close_live_session();
                         } else if let Err(error) = self.approve_session() {
                             self.invalidate_session_approval("Dependency manifest validation failed.");
                             self.report = error;
