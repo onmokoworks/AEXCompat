@@ -49,18 +49,19 @@ void write(std::array<std::byte, N>& bytes, std::size_t offset, T value) {
 }
 }  // namespace
 
-AudioModeOutcome run_audio_mode(const AudioModeRequest& request) {
-  AudioModeOutcome outcome;
-  auto& input = *request.input;
-  auto& output = *request.output;
-  const auto entry = request.entry;
+AudioSpanOutcome run_audio_span(
+    EffectEntry entry, BufferIn& input, BufferOut& output,
+    std::vector<float>* external_audio, int32_t external_audio_samples,
+    const worker_runtime::parameters::RequestedAssignments& requested_parameters,
+    std::vector<float>* captured_output) {
+  AudioSpanOutcome outcome;
   constexpr std::size_t kAudioGuardSamples = 8;
   constexpr float kAudioGuardValue = 1234567.0f;
   std::vector<std::array<std::byte, kDefinitionSize>> audio_definitions(
       aexcompat::worker_runtime::parameters::state().records.size() + 1);
   initialize_parameter_definitions(audio_definitions);
   const bool assignments_applied =
-      apply_requested_assignments(audio_definitions, *request.requested_parameters);
+      apply_requested_assignments(audio_definitions, requested_parameters);
   outcome.assignments_applied = assignments_applied;
   std::vector<std::array<std::byte, kDefinitionSize>> audio_values(audio_definitions.size() * 2);
   for (std::size_t index = 0; index < audio_definitions.size(); ++index) {
@@ -72,17 +73,16 @@ AudioModeOutcome run_audio_mode(const AudioModeRequest& request) {
     audio_params[index] = audio_values[index].data();
 
   write<int32_t>(input, 336, 0);
-  write<int32_t>(input, 340, request.external_audio_samples);
-  write<int32_t>(input, 344, request.external_audio_samples);
+  write<int32_t>(input, 340, external_audio_samples);
+  write<int32_t>(input, 344, external_audio_samples);
   write<uint32_t>(input, kInTimeScale, 44100);
   write<double>(input, 352, 44100.0);
   write<int16_t>(input, 360, 1);
   write<int16_t>(input, 362, 2);
   write<int16_t>(input, 364, 4);
-  write<int32_t>(input, 368, request.external_audio_samples);
-  write<void*>(input, 376, request.external_audio->data());
-  aexcompat::host_audio::runtime().set_source(request.external_audio,
-                                              request.external_audio_samples);
+  write<int32_t>(input, 368, external_audio_samples);
+  write<void*>(input, 376, external_audio->data());
+  aexcompat::host_audio::runtime().set_source(external_audio, external_audio_samples);
 
   std::cerr << "stage:audio_setup_begin\n" << std::flush;
   const int32_t audio_setup_error = assignments_applied
@@ -92,15 +92,15 @@ AudioModeOutcome run_audio_mode(const AudioModeRequest& request) {
   const int32_t output_start = read<int32_t>(output, 356);
   const int32_t output_samples = read<int32_t>(output, 360);
   const bool setup_range_valid = output_start >= 0 && output_samples >= 0 &&
-      output_start <= request.external_audio_samples &&
-      output_samples <= request.external_audio_samples - output_start;
+      output_start <= external_audio_samples &&
+      output_samples <= external_audio_samples - output_start;
 
   std::vector<float> guarded_output(
-      kAudioGuardSamples + static_cast<std::size_t>(request.external_audio_samples) +
+      kAudioGuardSamples + static_cast<std::size_t>(external_audio_samples) +
       kAudioGuardSamples, kAudioGuardValue);
   auto* audio_destination = guarded_output.data() + kAudioGuardSamples;
   if (setup_range_valid) {
-    std::fill_n(audio_destination, request.external_audio_samples, 0.0f);
+    std::fill_n(audio_destination, external_audio_samples, 0.0f);
     write<double>(output, 368, 44100.0);
     write<int16_t>(output, 376, 1);
     write<int16_t>(output, 378, 2);
@@ -127,41 +127,72 @@ AudioModeOutcome run_audio_mode(const AudioModeRequest& request) {
   const bool samples_finite = setup_range_valid && std::all_of(
       audio_destination, audio_destination + output_samples,
       [](float value) { return std::isfinite(value); });
-  const bool audio_lifetimes_balanced = audio_handle_lifetimes_balanced();
+
+  // Capture the rendered samples while the guarded buffer is still alive, so
+  // the caller (one-shot file write or session output slot) has them after the
+  // guard buffer is torn down.
+  if (captured_output && setup_range_valid)
+    captured_output->assign(audio_destination, audio_destination + output_samples);
+
+  outcome.audio_setup_error = audio_setup_error;
+  outcome.audio_render_error = audio_render_error;
+  outcome.audio_setdown_error = audio_setdown_error;
+  outcome.output_start = output_start;
+  outcome.output_samples = output_samples;
+  outcome.setup_range_valid = setup_range_valid;
+  outcome.guards_intact = guards_intact;
+  outcome.samples_finite = samples_finite;
+  outcome.audio_lifetimes_balanced = audio_handle_lifetimes_balanced();
+  return outcome;
+}
+
+AudioModeOutcome run_audio_mode(const AudioModeRequest& request) {
+  AudioModeOutcome outcome;
+  auto& input = *request.input;
+  auto& output = *request.output;
+  const auto entry = request.entry;
+  std::vector<float> captured;
+  const AudioSpanOutcome span = run_audio_span(
+      entry, input, output, request.external_audio, request.external_audio_samples,
+      *request.requested_parameters, &captured);
+  outcome.assignments_applied = span.assignments_applied;
+
   const bool arbitrary_defaults_disposed = dispose_arbitrary_defaults(entry, input, output);
   std::cerr << "stage:global_setdown_begin\n" << std::flush;
   const int32_t audio_global_setdown_error = request.global_error == 0
       ? invoke_global_setdown(entry, input.data(), output.data()) : -1;
   std::cerr << "stage:global_setdown_end error=" << audio_global_setdown_error
             << "\n" << std::flush;
-  const bool passed = request.global_error == 0 && request.params_error == 0 && assignments_applied &&
-      audio_setup_error == 0 && audio_render_error == 0 && audio_setdown_error == 0 &&
-      setup_range_valid && guards_intact && samples_finite && audio_lifetimes_balanced &&
-      audio_telemetry().invalid_operations == 0 && arbitrary_defaults_disposed &&
-      handle_lifetimes_balanced() && audio_global_setdown_error == 0;
+  const bool passed = request.global_error == 0 && request.params_error == 0 &&
+      span.assignments_applied && span.audio_setup_error == 0 &&
+      span.audio_render_error == 0 && span.audio_setdown_error == 0 &&
+      span.setup_range_valid && span.guards_intact && span.samples_finite &&
+      span.audio_lifetimes_balanced && audio_telemetry().invalid_operations == 0 &&
+      arbitrary_defaults_disposed && handle_lifetimes_balanced() &&
+      audio_global_setdown_error == 0;
   bool output_created = false;
   if (passed) {
     HANDLE file = CreateFileW(request.external_audio_output->c_str(), GENERIC_WRITE, 0, nullptr,
                               CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (file != INVALID_HANDLE_VALUE) {
-      const DWORD bytes = static_cast<DWORD>(output_samples * sizeof(float));
+      const DWORD bytes = static_cast<DWORD>(span.output_samples * sizeof(float));
       DWORD written = 0;
-      output_created = WriteFile(file, audio_destination, bytes, &written, nullptr) &&
+      output_created = WriteFile(file, captured.data(), bytes, &written, nullptr) &&
           written == bytes && FlushFileBuffers(file);
       CloseHandle(file);
       if (!output_created) DeleteFileW(request.external_audio_output->c_str());
     }
   }
-  outcome.audio_setup_error = audio_setup_error;
-  outcome.audio_render_error = audio_render_error;
-  outcome.audio_setdown_error = audio_setdown_error;
+  outcome.audio_setup_error = span.audio_setup_error;
+  outcome.audio_render_error = span.audio_render_error;
+  outcome.audio_setdown_error = span.audio_setdown_error;
   outcome.audio_global_setdown_error = audio_global_setdown_error;
-  outcome.output_start = output_start;
-  outcome.output_samples = output_samples;
-  outcome.setup_range_valid = setup_range_valid;
-  outcome.guards_intact = guards_intact;
-  outcome.samples_finite = samples_finite;
-  outcome.audio_lifetimes_balanced = audio_lifetimes_balanced;
+  outcome.output_start = span.output_start;
+  outcome.output_samples = span.output_samples;
+  outcome.setup_range_valid = span.setup_range_valid;
+  outcome.guards_intact = span.guards_intact;
+  outcome.samples_finite = span.samples_finite;
+  outcome.audio_lifetimes_balanced = span.audio_lifetimes_balanced;
   outcome.arbitrary_defaults_disposed = arbitrary_defaults_disposed;
   outcome.passed = passed;
   outcome.output_created = output_created;
