@@ -138,6 +138,16 @@ jobs:
             powershell -NoProfile -ExecutionPolicy Bypass -File tools\%%s.ps1 || exit /b 1
           )
 
+      # built_artifact テスト (test_sdk_backwards_audio_worker) が参照する
+      # SDK example fixture を事前ビルドする。pytest の収集順は
+      # test_sdk_backwards_audio_worker.py (audio) を fixture_build.py より先に
+      # 並べるため、fixture ビルドを pytest 前に済ませてテスト順序依存をなくす。
+      - name: Build SDK example fixtures (built-artifact deps)
+        shell: cmd
+        run: |
+          set "PSModulePath=%ProgramFiles%\WindowsPowerShell\Modules;%SystemRoot%\System32\WindowsPowerShell\v1.0\Modules;%PSModulePath%"
+          powershell -NoProfile -ExecutionPolicy Bypass -File tools\build-sdk-backwards.ps1 || exit /b 1
+
       # cmd で実行する: pwsh の step から spawn すると、テストが起動する
       # powershell.exe (5.1) が pwsh 用の PSModulePath を継承してしまい、
       # Get-FileHash 等の組み込み cmdlet を解決できなくなる。

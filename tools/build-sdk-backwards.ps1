@@ -1,0 +1,91 @@
+[CmdletBinding()]
+param(
+    [string]$SdkRoot = $env:AFTER_EFFECTS_SDK_ROOT,
+    [string]$VisualStudioRoot
+)
+
+$ErrorActionPreference = 'Stop'
+$SdkRoot = & "$PSScriptRoot\resolve-after-effects-sdk.ps1" $SdkRoot
+$repoRoot = Split-Path -Parent $PSScriptRoot
+$sourceRoot = Join-Path $SdkRoot 'Examples\Effect\SDK_Backwards'
+$project = Join-Path $sourceRoot 'Win\SDK_Backwards.vcxproj'
+$props = Join-Path $PSScriptRoot 'sdk-fixtures\sdk-backwards-v143.props'
+$target = Join-Path $repoRoot 'target\sdk-fixtures\sdk-backwards'
+$intermediate = Join-Path $target 'obj'
+$pipRc = Join-Path $target 'SDK_BackwardsPiPL.rc'
+$artifact = Join-Path $target 'SDK_Backwards.aex'
+$manifest = Join-Path $target 'build-result.json'
+$vsRoot = & "$PSScriptRoot\resolve-msvc-tools.ps1" $VisualStudioRoot -RequireV143Toolset -RequireMSBuild
+$vcvars = Join-Path $vsRoot 'VC\Auxiliary\Build\vcvars64.bat'
+$msbuild = Join-Path $vsRoot 'MSBuild\Current\Bin\MSBuild.exe'
+$pipTool = Join-Path $SdkRoot 'Examples\Resources\PiPLTool.exe'
+$pipSource = Join-Path $sourceRoot 'SDK_BackwardsPiPL.r'
+$headers = Join-Path $SdkRoot 'Examples\Headers'
+
+foreach ($required in @($project, $props, $vcvars, $msbuild, $pipTool, $pipSource)) {
+    if (-not (Test-Path -LiteralPath $required -PathType Leaf)) {
+        throw "Required SDK_Backwards build input is missing: $required"
+    }
+}
+
+New-Item -ItemType Directory -Force -Path $target, $intermediate | Out-Null
+$env:TEMP = Join-Path $repoRoot 'target\tmp'
+$env:TMP = $env:TEMP
+New-Item -ItemType Directory -Force -Path $env:TEMP | Out-Null
+
+$sourceFiles = Get-ChildItem -LiteralPath $sourceRoot -Recurse -File |
+    Where-Object { $_.FullName -notmatch '\\(Debug|Release)\\|\\x64\\' }
+$before = @{}
+foreach ($file in $sourceFiles) {
+    $before[$file.FullName] = (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash
+}
+
+$rr = Join-Path $target 'SDK_BackwardsPiPL.rr'
+$rrc = Join-Path $target 'SDK_BackwardsPiPL.rrc'
+$buildLog = Join-Path $target 'build.log'
+$targetMsBuild = ($target -replace '\\', '/') + '/'
+$intermediateMsBuild = ($intermediate -replace '\\', '/') + '/'
+$commands = @(
+    "call `"$vcvars`"",
+    "cl.exe /nologo /I `"$headers`" /EP `"$pipSource`" > `"$rr`"",
+    "`"$pipTool`" `"$rr`" `"$rrc`"",
+    "cl.exe /nologo /D MSWindows /EP `"$rrc`" > `"$pipRc`"",
+    "`"$msbuild`" `"$project`" /nologo /m /t:Rebuild /p:Configuration=Release /p:Platform=x64 /p:PlatformToolset=v143 /p:ForceImportBeforeCppTargets=`"$props`" /p:AEXCompatSdkBackwardsPiPLRc=`"$pipRc`" /p:OutDir=`"$targetMsBuild`" /p:IntDir=`"$intermediateMsBuild`" /p:AE_PLUGIN_BUILD_DIR=`"$target`" /bl:`"$target\build.binlog`""
+)
+$buildBatch = Join-Path $target 'build-sdk-backwards.cmd'
+@('@echo off', 'setlocal', ($commands -join ' && ')) |
+    Set-Content -LiteralPath $buildBatch -Encoding ascii
+$previousErrorAction = $ErrorActionPreference
+$ErrorActionPreference = 'Continue'
+& cmd.exe /d /c $buildBatch 2>&1 | Tee-Object -FilePath $buildLog
+$buildExitCode = $LASTEXITCODE
+$ErrorActionPreference = $previousErrorAction
+if ($buildExitCode -ne 0) {
+    throw "SDK_Backwards v143 build failed with exit code $buildExitCode. See $buildLog"
+}
+
+foreach ($entry in $before.GetEnumerator()) {
+    $after = (Get-FileHash -LiteralPath $entry.Key -Algorithm SHA256).Hash
+    if ($after -ne $entry.Value) {
+        throw "SDK source changed during build: $($entry.Key)"
+    }
+}
+if (-not (Test-Path -LiteralPath $artifact -PathType Leaf)) {
+    throw "MSBuild succeeded but did not produce $artifact"
+}
+
+$hash = (Get-FileHash -LiteralPath $artifact -Algorithm SHA256).Hash.ToLowerInvariant()
+$result = [ordered]@{
+    status = 'built'
+    source_project = $project
+    platform_toolset = 'v143'
+    configuration = 'Release|x64'
+    artifact = $artifact
+    artifact_size = (Get-Item -LiteralPath $artifact).Length
+    artifact_sha256 = $hash
+    sdk_source_unchanged = $true
+    temp_root = $env:TEMP
+}
+$result | ConvertTo-Json | Set-Content -LiteralPath $manifest -Encoding utf8
+Write-Output "SDK_Backwards.aex SHA-256: $hash"
+Write-Output ($result | ConvertTo-Json -Compress)
