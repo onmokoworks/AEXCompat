@@ -263,12 +263,29 @@ AudioSessionOutcome run_audio_render_session(
   using aexcompat::strict_json::json_string;
 
   AudioSessionOutcome outcome;
+  // Fail-closed teardown tail shared by every exit: GLOBAL_SETUP/PARAMS_SETUP
+  // already ran at launch, so even a transport-open failure must dispose the
+  // arbitrary defaults and run GLOBAL_SETDOWN before returning (Codex #252),
+  // and the report must carry the module audit like the image session's.
+  const auto finish_session = [&]() -> AudioSessionOutcome {
+    const bool arbitrary_defaults_disposed =
+        dispose_arbitrary_defaults(entry, input, output);
+    outcome.global_setdown_error = (global_error == 0 && params_error == 0)
+        ? invoke_global_setdown(entry, input.data(), output.data())
+        : -1;
+    aexcompat::worker_runtime::capture_module_audit_phase();
+    if (outcome.global_setdown_error != 0 || !arbitrary_defaults_disposed ||
+        !handle_lifetimes_balanced())
+      outcome.clean = false;
+    return outcome;
+  };
+
   was::AudioSessionChannels channels;
   if (!channels.open_from_environment(geometry) ||
       !channels.static_header_matches(geometry)) {
     outcome.clean = false;
     outcome.protocol_violation = true;
-    return outcome;
+    return finish_session();
   }
   // v1 audio session is mono (host-negotiated to channels==1, matching the
   // one-shot audio report); the channel bound stays in the geometry for the
@@ -424,22 +441,13 @@ AudioSessionOutcome run_audio_render_session(
       break;
     }
   }
-  // Dispose arbitrary-data parameter defaults before GLOBAL_SETDOWN, the same
-  // as the one-shot/common render paths (run_audio_mode): a plug-in that
-  // declares arbitrary defaults leaves those handles live otherwise, so
-  // handle_lifetimes_balanced() would fail an otherwise clean session.
-  const bool arbitrary_defaults_disposed = dispose_arbitrary_defaults(entry, input, output);
-  outcome.global_setdown_error = (global_error == 0 && params_error == 0)
-      ? invoke_global_setdown(entry, input.data(), output.data()) : -1;
-  // Capture the pre-unload module audit phase before the report; the broker's
-  // SecureSessionProcess::finish fails a clean-exit report closed if
-  // `module_audit` is missing (worker_module_audit.rs), so a session report
-  // must carry it exactly like the image session's final report.
-  aexcompat::worker_runtime::capture_module_audit_phase();
-  if (outcome.global_setdown_error != 0 || !arbitrary_defaults_disposed
-      || !handle_lifetimes_balanced())
-    outcome.clean = false;
-  return outcome;
+  // Dispose arbitrary-data parameter defaults, run GLOBAL_SETDOWN, and capture
+  // the pre-unload module audit through the shared teardown tail (finish_session):
+  // a plug-in that declares arbitrary defaults leaves those handles live
+  // otherwise, and the broker's SecureSessionProcess::finish fails a clean-exit
+  // report closed if `module_audit` is missing (worker_module_audit.rs), so a
+  // session report must carry it exactly like the image session's final report.
+  return finish_session();
 }
 
 void emit_audio_session_report(int32_t global_error, int32_t params_error,
