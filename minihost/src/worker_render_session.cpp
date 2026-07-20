@@ -639,6 +639,18 @@ RenderSessionOutcome run_session_frame_loop(
       reply += "}";
       return channels.write_message(reply);
     };
+    // A resize-output effect whose result overruns the launch output slot: the
+    // worker cannot write it here, so it reports the required dimensions and the
+    // broker re-opens the session with a larger slot (protocol §3, issue #261),
+    // rather than the render falling back to the one-shot transport. No slot
+    // write, no generation advance; the session stays usable.
+    const auto respond_resize_needed = [&](int32_t frame_width, int32_t frame_height) {
+      std::string reply = "{\"v\":1,\"type\":\"frame_done\",\"frame_index\":" +
+          std::to_string(frame_index) + ",\"status\":\"resize_needed\",\"width\":" +
+          std::to_string(frame_width) + ",\"height\":" + std::to_string(frame_height) +
+          "}";
+      return channels.write_message(reply);
+    };
     if (static_cast<uint32_t>(current_scale) != time_scale) {
       // Frame-local diagnostic: the session continues, the broker decides.
       if (!respond_error(kSessionTimeScaleMismatch)) {
@@ -726,21 +738,32 @@ RenderSessionOutcome run_session_frame_loop(
       }
       continue;
     }
-    // v1 fixes every frame to the launch max dimensions (protocol §3); an
-    // expand/shrink-output effect changing them would publish dimensions the
-    // broker cannot trust against the slot layout. Fail closed.
-    if (frame.width != max_width || frame.height != max_height) {
+    // A resize-output effect may render at dimensions other than the launch max
+    // (protocol §3, issue #261). The captured pixels must match the reported
+    // frame dimensions exactly (a mismatch is a capture invariant failure), and
+    // must be positive.
+    if (frame.width <= 0 || frame.height <= 0) {
       respond_error(kSessionDimensionMismatch);
       outcome.invariant_failure = true;
       break;
     }
     const std::size_t expected_pixels =
         static_cast<std::size_t>(frame.width) * frame.height;
-    if (captured.size() != expected_pixels * pixel_bytes ||
-        output_offset + captured.size() > wrs::expected_section_bytes(geometry)) {
+    if (captured.size() != expected_pixels * pixel_bytes) {
       respond_error(kSessionOutputCaptureError);
       outcome.invariant_failure = true;
       break;
+    }
+    // Shrink, or an expand that still fits the launch output slot, is written at
+    // its actual dimensions. An expand that overruns the slot cannot be written
+    // here: report resize_needed so the broker re-opens at these dimensions
+    // (the session stays usable; no slot write, no generation advance).
+    if (captured.size() > wrs::output_slot_bytes(geometry)) {
+      if (!respond_resize_needed(frame.width, frame.height)) {
+        outcome.protocol_violation = true;
+        break;
+      }
+      continue;
     }
     unsigned char* slot = channels.view() + output_offset;
     for (std::size_t pixel = 0; pixel < expected_pixels; ++pixel)
