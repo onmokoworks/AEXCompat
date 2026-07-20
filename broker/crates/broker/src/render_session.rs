@@ -1301,8 +1301,13 @@ impl RenderSession {
         // resize_needed for the same frame is a fail-closed protocol violation,
         // bounding section-allocation amplification from a buggy worker.
         let mut grows: u32 = 0;
+        // One watchdog for the whole dispatched frame: a resize/grow handshake
+        // (#262) reuses this instant across the resize wait, the grow work, and
+        // the follow-up ok, so an expand frame cannot run for nearly two full
+        // per-frame deadlines by resetting the clock at each control message.
+        let frame_deadline_at = Instant::now() + self.frame_deadline;
         loop {
-        let body = match self.await_frame_response() {
+        let body = match self.await_frame_response(frame_deadline_at) {
             FrameWait::Message(body) => body,
             FrameWait::Deadline => {
                 return Err(self.invalidate(
@@ -1737,9 +1742,11 @@ impl RenderSession {
     /// Protocol §7's three-way frame wait: the response channel, the process
     /// handle (via the watcher event), and the deadline. After a process-death
     /// event, a short drain still honors a frame_done the worker flushed
-    /// before dying rather than racing the watcher.
-    fn await_frame_response(&mut self) -> FrameWait {
-        let deadline = Instant::now() + self.frame_deadline;
+    /// before dying rather than racing the watcher. `deadline` is the single
+    /// wall-clock instant for the whole dispatched frame, carried across a
+    /// resize/grow handshake (#262) so an expand frame honors one watchdog
+    /// rather than a fresh deadline per control message.
+    fn await_frame_response(&mut self, deadline: Instant) -> FrameWait {
         loop {
             let mut remaining = deadline.saturating_duration_since(Instant::now());
             if self.process_exit_observed {
