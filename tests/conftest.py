@@ -45,9 +45,12 @@ def canonical_release_worker(tmp_path_factory):
     vswhere = Path(program_files_x86) / "Microsoft Visual Studio" / "Installer" / "vswhere.exe"
     if not vswhere.is_file():
         pytest.fail("vswhere.exe is unavailable; install Visual Studio C++ tools")
+    # -utf8 forces UTF-8 output; without it vswhere emits its description strings
+    # in the console code page (CP932 on a Japanese locale), which breaks the
+    # utf-8-sig decode below with a UnicodeDecodeError (#58).
     result = subprocess.run(
         [str(vswhere), "-latest", "-products", "*", "-requires",
-         "Microsoft.VisualStudio.Component.VC.Tools.x86.x64", "-format", "json"],
+         "Microsoft.VisualStudio.Component.VC.Tools.x86.x64", "-format", "json", "-utf8"],
         check=True,
         capture_output=True,
         text=True,
