@@ -332,6 +332,14 @@ impl Drop for SessionTransport {
 struct SessionGeometry {
     width: u32,
     height: u32,
+    /// Output slot capacity, decoupled from the render dimensions (#261): the
+    /// output slot holds up to `output_capacity_width * output_capacity_height`
+    /// pixels so an expand-output effect can render larger than the input
+    /// without changing the render geometry (in_data extent / full resolution,
+    /// which stay `width`/`height`). Equal to `width`/`height` unless the
+    /// wrapper re-opened the session to accommodate an expand.
+    output_capacity_width: u32,
+    output_capacity_height: u32,
     pixel_format: RenderPixelFormat,
     layer_slot_count: u32,
 }
@@ -341,7 +349,9 @@ impl SessionGeometry {
         self.width as usize * self.height as usize * 4
     }
     fn output_slot_bytes(&self) -> usize {
-        self.width as usize * self.height as usize * self.pixel_format.bytes_per_pixel() as usize
+        self.output_capacity_width as usize
+            * self.output_capacity_height as usize
+            * self.pixel_format.bytes_per_pixel() as usize
     }
     fn output_slot_offset(&self) -> usize {
         HEADER_BYTES + align_slot(self.input_slot_bytes())
@@ -573,6 +583,18 @@ impl Drop for AnimationSidecar {
 
 impl RenderSession {
     pub fn open(request: SessionOpenRequest<'_>) -> io::Result<RenderSession> {
+        Self::open_with_output_capacity(request, None)
+    }
+
+    /// Opens a session whose output slot is sized to `output_capacity` rather
+    /// than the render dimensions (#261). The length-1 wrapper re-opens with a
+    /// capacity >= the render dimensions to accommodate an expand-output effect
+    /// without changing the render geometry. `None` sizes the slot to the
+    /// render dimensions (no expansion).
+    pub fn open_with_output_capacity(
+        request: SessionOpenRequest<'_>,
+        output_capacity: Option<(u32, u32)>,
+    ) -> io::Result<RenderSession> {
         if request.time_step <= 0
             || request.total_time <= 0
             || request.time_scale == 0
@@ -597,9 +619,25 @@ impl RenderSession {
         if request.layers.len() > 64 {
             return Err(invalid("render session layer count exceeds 64"));
         }
+        let (output_capacity_width, output_capacity_height) =
+            output_capacity.unwrap_or((request.width, request.height));
+        // The output capacity must cover the render dimensions and stay within
+        // the resize bounds; a smaller capacity could not even hold a
+        // fixed-size render.
+        if output_capacity_width < request.width
+            || output_capacity_height < request.height
+            || output_capacity_width > MAX_RESIZE_DIMENSION
+            || output_capacity_height > MAX_RESIZE_DIMENSION
+            || u64::from(output_capacity_width) * u64::from(output_capacity_height)
+                > MAX_RESIZE_PIXELS
+        {
+            return Err(invalid("render session output capacity is out of range"));
+        }
         let geometry = SessionGeometry {
             width: request.width,
             height: request.height,
+            output_capacity_width,
+            output_capacity_height,
             pixel_format: request.pixel_format,
             layer_slot_count: request.layers.len() as u32,
         };
@@ -1386,8 +1424,12 @@ impl RenderSession {
                     ));
                 };
                 let requested_pixels = width as u64 * height as u64;
-                let current_pixels =
-                    u64::from(self.geometry.width) * u64::from(self.geometry.height);
+                // Compare against the current output-slot capacity, not the
+                // render dimensions: a re-opened session already has a larger
+                // slot, and the worker only reports resize_needed when the
+                // output overruns that slot (#261).
+                let current_pixels = u64::from(self.geometry.output_capacity_width)
+                    * u64::from(self.geometry.output_capacity_height);
                 if width == 0
                     || height == 0
                     || width > MAX_RESIZE_DIMENSION
@@ -2598,6 +2640,8 @@ mod tests {
         let geometry = SessionGeometry {
             width: 33,
             height: 17,
+            output_capacity_width: 33,
+            output_capacity_height: 17,
             pixel_format: RenderPixelFormat::Argb16,
             layer_slot_count: 0,
         };
