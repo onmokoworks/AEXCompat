@@ -96,11 +96,15 @@ def test_synthetic_main_publishes_schema_valid_redacted_gap_and_private_mapping(
     def pinned(_runner,_input): yield runner,input_path
     monkeypatch.setattr(corpus,"pinned_common_sources",pinned)
     monkeypatch.setattr(corpus,"bind_locator",lambda inventory,locator:{"ntsc-rs":(tmp_path,{},[])})
+    # The real corpus/local-locator.json is a machine-local, git-ignored file, so
+    # a fresh checkout/CI has none. bind_locator is mocked above, so only the
+    # schema-validating load must succeed: write a minimal valid locator to tmp.
+    locator_path=tmp_path/"local-locator.json";locator_path.write_text(json.dumps({"schema_version":1,"plugins":{"ntsc-rs":{"source_root":"C:/local/ntsc-rs","aex":{"path":"ntsc-rs.aex","sha256":"a"*64,"size_bytes":1}}}}),encoding="utf-8")
     identity=lambda path,sha,size:{"path":path,"sha256":sha,"size_bytes":size}
     identities={"aex":identity("plugin/private-name.aex","a"*64,1),"dependencies":[],"input":identity("inputs/private.png","b"*64,1),"runner":identity("runner/private.exe","c"*64,1),"workers":[identity(f"target/worker-{i}.exe",str(i+1)*64,1) for i in range(3)]}
     report={"identities":identities};result={"classification":"missing_suite","selector":{"render_path":"classic","error_code":7},"missing_suites":[{"name":"PF World Suite","version":2}]};report_bytes=b'{"private":"local-only"}\n'
     monkeypatch.setattr(corpus,"execute_case",lambda *args:(report,result,corpus.hashlib.sha256(report_bytes).hexdigest(),{"manifest.json":b"{}\n","report.json":report_bytes,"run.json":b"{}\n"}))
-    monkeypatch.setattr(corpus.sys,"argv",["run-real-aex-corpus.py","--inventory",str(ROOT/"corpus/real-aex-public.json"),"--locator",str(ROOT/"corpus/local-locator.json"),"--matrix",str(ROOT/"corpus/common-matrix.json"),"--runner",str(runner),"--input",str(input_path),"--out",str(public),"--private-evidence-out",str(private),"--case-id","case-000001"])
+    monkeypatch.setattr(corpus.sys,"argv",["run-real-aex-corpus.py","--inventory",str(ROOT/"corpus/real-aex-public.json"),"--locator",str(locator_path),"--matrix",str(ROOT/"corpus/common-matrix.json"),"--runner",str(runner),"--input",str(input_path),"--out",str(public),"--private-evidence-out",str(private),"--case-id","case-000001"])
     assert corpus.main()==0
     gaps=json.loads((public/"reproducible-gaps.json").read_text());Draft202012Validator(json.loads((ROOT/"schemas/real-aex-gaps.schema.json").read_text())).validate(gaps)
     encoded=(public/"reproducible-gaps.json").read_text()+next((public/"evidence").glob("*.json")).read_text()
