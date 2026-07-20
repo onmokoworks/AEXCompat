@@ -28,6 +28,12 @@ def test_issue4_runner_maps_every_explicit_path_and_depth():
     assert set(bundle.DEPTH_COMMANDS)=={(path,depth) for path in ("classic","smartfx") for depth in ("argb8","argb16","argb32f")}
     assert bundle.DEPTH_COMMANDS[("classic","argb32f")]=="--render-experimental-request-32"
 
+def test_normalize_classification_covers_every_report_schema_class():
+    schema=json.loads((ROOT/"schemas/conformance-report.schema.json").read_text())
+    classes=schema["$defs"]["depth_result"]["properties"]["classification"]["enum"]
+    for value in classes: corpus.normalize_classification(value)  # no KeyError for any schema class
+    assert corpus.normalize_classification("empty_result")=="ok"  # a legal empty SmartFX render is not a gap
+
 def test_classic_success_and_invalid_output_never_become_smartfx(tmp_path):
     world={"width":1,"height":1,"row_bytes":4,"pixel_format":"argb8","premultiplication":"straight","extent_hint":{"left":0,"top":0,"right":1,"bottom":1}}
     failed=bundle.normalize_harness_report("argb8",{},tmp_path/"absent",world,"straight","classic")

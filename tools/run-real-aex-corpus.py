@@ -158,7 +158,10 @@ def retain_private_evidence(root: Path, case_id: str, evidence):
         (destination/name).write_bytes(data)
 
 def normalize_classification(value):
-    return {"ok":"ok","loader_error":"loader_error","unsupported":"selector_error","selector_error":"selector_error","missing_suite":"missing_suite","crashed":"crashed","timeout_killed":"timeout","host_validation_error":"host_validation_error","invalid_output":"host_validation_error","nonzero_exit":"host_validation_error"}[value]
+    # empty_result is a legal empty SmartFX render (Issue #4 schema/runner), not a
+    # capability gap, so map it to the non-gap "ok" bucket rather than KeyError-ing
+    # and aborting the whole matrix run.
+    return {"ok":"ok","empty_result":"ok","loader_error":"loader_error","unsupported":"selector_error","selector_error":"selector_error","missing_suite":"missing_suite","crashed":"crashed","timeout_killed":"timeout","host_validation_error":"host_validation_error","invalid_output":"host_validation_error","nonzero_exit":"host_validation_error"}[value]
 
 def suite_id(name: str, version: int) -> str: return "suite-" + hashlib.sha256(f"{name}\0{version}".encode()).hexdigest()[:20]
 
