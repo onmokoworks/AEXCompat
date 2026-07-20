@@ -469,16 +469,28 @@ extern "C" DllExport PF_Err EffectMain(PF_Cmd cmd, PF_InData* in_data,
       return err;
     }
     case PF_Cmd_SEQUENCE_RESETUP: {
-      // No flattening is advertised, so an existing (unflat) handle is kept;
-      // a null sequence_data (the documented flat-restore path) allocates a
-      // fresh counter block whose setup/resetup history restarts.
+      // A null sequence_data (the documented flat-restore path) allocates a
+      // fresh counter block whose setup/resetup history restarts. A non-null
+      // handle whose magic matches the current layout is kept and its resetup
+      // counted. A non-null handle from a previous probe build carries the old
+      // layout magic, so lock_counters rejects it; dispose it and allocate a
+      // fresh full-size block rather than reusing the stale one, otherwise the
+      // new (audio) counters would be silently lost.
       PF_Err err = PF_Err_NONE;
-      if (in_data->sequence_data) {
+      const auto existing = static_cast<PF_Handle>(in_data->sequence_data);
+      bool existing_valid = false;
+      if (existing && lock_counters(in_data, existing)) {
+        existing_valid = true;
+        (*in_data->utils->host_unlock_handle)(existing);
+      }
+      if (existing_valid) {
         update_counters(in_data, [](SequenceCounters* counters) {
           counters->resetup_count += 1;
         });
-        out_data->sequence_data = static_cast<PF_Handle>(in_data->sequence_data);
+        out_data->sequence_data = existing;
       } else {
+        if (existing && in_data->utils)
+          (*in_data->utils->host_dispose_handle)(existing);
         err = sequence_setup(in_data, out_data);
       }
       PF_InData probe = *in_data;
