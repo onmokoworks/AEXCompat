@@ -1705,7 +1705,12 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
        {static_cast<int32_t>(g_pixel_aspect_ratio.numerator),
         static_cast<int32_t>(g_pixel_aspect_ratio.denominator)},
        invocation.external_pixel_bytes,
-       is_render_worker(), is_rendering_worker(), invocation.audio_mode, g_skip_about},
+       is_render_worker(), is_rendering_worker(),
+       // The audio session is an audio invocation too: without this the
+       // admission "requested audio" flag stays false and host_audio::Runtime
+       // rejects unadvertised audio checkouts on the session path, breaking
+       // audio-only plug-ins that render fine under --render-audio (Codex #252).
+       invocation.audio_mode || invocation.audio_session_mode, g_skip_about},
       {&invoke_entry_seh, &reset_effect_lifetime,
        +[](bool active) { g_global_setup_active = active; },
        +[](bool requested, bool advertised) {
