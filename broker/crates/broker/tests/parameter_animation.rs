@@ -34,6 +34,38 @@ mod windows_real_worker {
         }
     }
 
+    // Both tests in this module now force the one-shot argv transport: since
+    // issue #227 lets parameter animation ride the length-1 session wrapper by
+    // default, and cargo runs a binary's tests concurrently, the two must
+    // serialize their process-global DISABLE_SESSION_WRAPPER_ENV toggling.
+    // one_shot_dispatch validates the one-shot launch cwd (issue #141) and
+    // classic_parameter_animation observes the one-shot params[] write, so both
+    // pin one-shot for their whole run rather than exercising the session path
+    // (the session/one-shot animation A/B lives in render_session_wrapper.rs).
+    static ONE_SHOT_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Holds DISABLE_SESSION_WRAPPER_ENV set for its lifetime under the shared
+    /// lock, restoring the environment on drop.
+    struct ForcedOneShot {
+        _guard: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl ForcedOneShot {
+        fn new() -> Self {
+            let guard = ONE_SHOT_ENV_LOCK
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+            unsafe { std::env::set_var(DISABLE_SESSION_WRAPPER_ENV, "1") };
+            Self { _guard: guard }
+        }
+    }
+
+    impl Drop for ForcedOneShot {
+        fn drop(&mut self) {
+            unsafe { std::env::remove_var(DISABLE_SESSION_WRAPPER_ENV) };
+        }
+    }
+
     fn scalar_key(time: (i32, u32), interpolation: AnimationInterpolation, value: f64) -> ParameterAnimationKey {
         ParameterAnimationKey {
             time: AnimationTime {
@@ -60,6 +92,10 @@ mod windows_real_worker {
         if !worker.exists() || !plugin.exists() {
             return;
         }
+        // Issue #141 regresses only on the one-shot launch cwd, so keep this
+        // dispatch on the one-shot transport even though issue #227 now routes
+        // animation through the session wrapper by default.
+        let _one_shot = ForcedOneShot::new();
         let hash = format!("{:X}", Sha256::digest(fs::read(&plugin).unwrap()));
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -186,10 +222,12 @@ mod windows_real_worker {
     ///   2. the value is correct: the render at a keyframe time is byte-identical
     ///      to a static render carrying that keyframe's value (both forced through
     ///      the one-shot transport so only the value-supply mechanism differs).
-    /// Session-carried parameter animation stays on the one-shot path today (the
-    /// image_render payload gate refuses the "v5|" animation payload), so this is
-    /// a one-shot observation, not a session/one-shot A/B; that equivalence is
-    /// tracked separately. Gated on the locally built worker and the
+    /// This is a deliberate one-shot observation of the params[] write, not a
+    /// session/one-shot A/B. Since issue #227 the payload gate admits parameter
+    /// animation onto the session wrapper, so every render here forces the
+    /// one-shot transport to keep the value-supply mechanism the only variable;
+    /// the session/one-shot animation equivalence lives in
+    /// render_session_wrapper.rs. Gated on the locally built worker and the
     /// pf-layer-param-probe fixture.
     #[test]
     fn classic_parameter_animation_drives_params_array_on_the_real_worker() {
@@ -204,6 +242,10 @@ mod windows_real_worker {
         if !worker.exists() || !plugin.exists() {
             return;
         }
+        // Pin every render below to the one-shot transport: this test observes
+        // the one-shot params[] write, and issue #227 would otherwise route the
+        // animation renders through the session wrapper.
+        let _one_shot = ForcedOneShot::new();
         let hash = format!("{:X}", Sha256::digest(fs::read(&plugin).unwrap()));
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -287,10 +329,9 @@ mod windows_real_worker {
         );
 
         // Claim 2: the animated value at a keyframe time equals a static render
-        // carrying that value. Forcing the static render through the one-shot
-        // transport leaves the value-supply mechanism (static payload vs
-        // animation sidecar) as the only difference from the animation render.
-        unsafe { std::env::set_var(DISABLE_SESSION_WRAPPER_ENV, "1") };
+        // carrying that value. Both renders are on the one-shot transport (the
+        // guard above), so the value-supply mechanism (static payload vs
+        // animation sidecar) is the only difference from the animation render.
         let static_report = render_experimental_image(
             repository,
             &plugin,
@@ -300,7 +341,6 @@ mod windows_real_worker {
             &params(low),
         )
         .expect("static render carrying the first keyframe value");
-        unsafe { std::env::remove_var(DISABLE_SESSION_WRAPPER_ENV) };
         assert_eq!(static_report["passed"], true, "report: {static_report}");
         assert_eq!(
             fs::read(&anim_low).unwrap(),

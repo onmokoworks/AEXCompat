@@ -1896,6 +1896,18 @@ pub fn render_experimental_image_with_parameter_animation(
     if !actual.eq_ignore_ascii_case(approved_sha256) {
         return Err(invalid("selected AEX changed after session approval"));
     }
+    // Issue #227: encode the base payload from the same parameters the session
+    // wrapper reconstructs (`render_session.rs` builds `encode_interactive_payload`
+    // from the parameter set). A fixed `"v5|"` placeholder never matched that
+    // reconstruction, so the length-1 session gate in `render_with_artifact`
+    // (`payload == encode_interactive_payload(interactive_parameters)`) always
+    // failed and parameter animation was forced onto the one-shot argv path.
+    // Deriving the payload here lets the gate hold so animation rides the session
+    // transport, and keeps the one-shot fallback byte-identical: the animation
+    // sidecar overwrites every animated slot's value per frame, and an empty
+    // payload is version-agnostic to the worker, so the only observable change
+    // is that a non-animated parameter's declared value is now honored instead
+    // of dropped (matching every other interactive entrypoint).
     render_with_artifact(
         repository,
         "experimental-parameter-animation",
@@ -1904,7 +1916,7 @@ pub fn render_experimental_image_with_parameter_animation(
         INTERACTIVE_RENDER_TIMEOUT_MS,
         input_path,
         output_path,
-        Some("v5|".to_owned()),
+        Some(encode_interactive_payload(parameters)?),
         Some(parameters),
         None,
         timing,

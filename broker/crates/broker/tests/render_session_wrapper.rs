@@ -10,7 +10,9 @@
 mod windows_e2e {
     use aexcompat_broker::image_render::{
         render_experimental_image, render_experimental_image_at_time,
-        render_experimental_image_at_time_with_format_and_context, InteractiveParameter,
+        render_experimental_image_at_time_with_format_and_context,
+        render_experimental_image_with_parameter_animation, AnimationInterpolation, AnimationTime,
+        AnimationValue, InteractiveParameter, ParameterAnimation, ParameterAnimationKey,
         RenderPixelFormat, RenderTiming, DISABLE_SESSION_WRAPPER_ENV,
         RENDER_SESSION_WRAPPER_RENDERS,
     };
@@ -595,6 +597,185 @@ mod windows_e2e {
             base_bytes,
             std::fs::read(&layer_out).unwrap(),
             "changing the secondary layer did not change the output; the layer was not consumed"
+        );
+
+        let _ = std::fs::remove_dir_all(&scratch);
+    }
+
+    fn scalar_key(
+        time: (i32, u32),
+        interpolation: AnimationInterpolation,
+        value: f64,
+    ) -> ParameterAnimationKey {
+        ParameterAnimationKey {
+            time: AnimationTime {
+                value: time.0,
+                scale: time.1,
+            },
+            interpolation,
+            value: AnimationValue::Scalar { value },
+        }
+    }
+
+    /// Session/one-shot A/B for parameter animation (issue #227). Until #227 the
+    /// interactive dispatch handed `render_with_artifact` a fixed `"v5|"` base
+    /// payload, which never matched the session wrapper's
+    /// `encode_interactive_payload(parameters)` reconstruction, so the length-1
+    /// session gate refused every animated render and parameter animation only
+    /// ever ran one-shot. With the base payload now derived from the parameters,
+    /// the gate holds and the session wrapper carries the animation sidecar. This
+    /// proves the two routes are equivalent with animation present: the same
+    /// public report (field-for-field, minus the volatile process/output keys)
+    /// and the same PNG bytes at a keyframe time and at an interpolated
+    /// mid-timeline time, and that the animated value actually moves the output
+    /// over time (so a cross-route match is not a vacuous "animation ignored"
+    /// pass). Gated on the locally built worker and the pf-layer-param-probe
+    /// fixture, like the sibling A/B tests.
+    #[test]
+    fn wrapper_parameter_animation_matches_the_one_shot_transport() {
+        let _env_guard = SESSION_ROUTE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        // Deliberately a plain (non-canonicalized) repository root, unlike the
+        // sibling tests' `repository_root()`. On Windows `canonicalize()` yields
+        // a `\\?\` verbatim path, and the worker's parameter-animation sidecar
+        // loader pins the sidecar's parent to `current_path()/target/
+        // image-transport`; a verbatim sidecar path fails that string compare
+        // (its `\\?\` prefix survives `canonical()` while the cwd-derived owned
+        // path has none), rejecting the launch with exit 3. Production derives
+        // the repository from `current_exe()` (a plain path), so this mirrors
+        // production and keeps the A/B focused on transport routing rather than
+        // that separate verbatim-path fragility (tracked apart from #227).
+        let root: PathBuf = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .ancestors()
+            .nth(3)
+            .expect("repository root")
+            .to_path_buf();
+        let worker = root.join("target/minihost-build/aex_render_worker.exe");
+        let aex = root.join("target/pf-layer-param-probe-build/Release/pf_layer_param_probe.aex");
+        if !worker.is_file() || !aex.is_file() {
+            eprintln!(
+                "skipping animation A/B: build aex_render_worker.exe and \
+                 pf_layer_param_probe.aex first"
+            );
+            return;
+        }
+        let sha = format!("{:x}", Sha256::digest(std::fs::read(&aex).unwrap()));
+        let scratch = std::env::temp_dir().join(format!(
+            "aexcompat-wrapper-anim-ab-{}-{:032x}",
+            std::process::id(),
+            rand::random::<u128>()
+        ));
+        std::fs::create_dir_all(&scratch).unwrap();
+        let input = scratch.join("input.png");
+        image::RgbaImage::from_fn(64, 32, |x, y| {
+            image::Rgba([(x * 3) as u8, (y * 5) as u8, (x + y) as u8, 255])
+        })
+        .save(&input)
+        .unwrap();
+        let secondary = scratch.join("layer.png");
+        image::RgbaImage::from_fn(64, 32, |x, y| {
+            image::Rgba([(x + y) as u8, (x * 7) as u8, (y * 9) as u8, 255])
+        })
+        .save(&secondary)
+        .unwrap();
+
+        // Slot 2 animates 20 -> 220 linearly over times 0..60 @ scale 30. The
+        // render timing shares that scale, so current_time 0 evaluates to the
+        // first keyframe value (20) and current_time 30 to the exact midpoint
+        // (120) between the two keys.
+        let params = vec![layer_parameter(1, &secondary), float_parameter(2, 20.0)];
+        let animations = [ParameterAnimation {
+            slot: 2,
+            keys: vec![
+                scalar_key((0, 30), AnimationInterpolation::Linear, 20.0),
+                scalar_key((60, 30), AnimationInterpolation::Linear, 220.0),
+            ],
+        }];
+        let timing = |current_time: i32| RenderTiming {
+            current_time,
+            time_step: 1,
+            total_time: 60,
+            time_scale: 30,
+        };
+
+        let volatile = ["output_png", "output_raw", "worker_diagnostics"];
+        let render = |output: &Path, current_time: i32, disable_session: bool| {
+            if disable_session {
+                unsafe { std::env::set_var(DISABLE_SESSION_WRAPPER_ENV, "1") };
+            }
+            let before = RENDER_SESSION_WRAPPER_RENDERS.load(Ordering::SeqCst);
+            let report = render_experimental_image_with_parameter_animation(
+                &root,
+                &aex,
+                &sha,
+                &input,
+                output,
+                &params,
+                &animations,
+                timing(current_time),
+            )
+            .expect("parameter animation render");
+            let carried = RENDER_SESSION_WRAPPER_RENDERS.load(Ordering::SeqCst) > before;
+            if disable_session {
+                unsafe { std::env::remove_var(DISABLE_SESSION_WRAPPER_ENV) };
+            }
+            (report, carried)
+        };
+
+        for (label, current_time) in [("keyframe", 0), ("interpolated", 30)] {
+            let out_a = scratch.join(format!("{label}-a.png"));
+            let (report_a, carried_a) = render(&out_a, current_time, false);
+            assert!(
+                carried_a,
+                "the session wrapper did not carry the animation render ({label})"
+            );
+            let out_b = scratch.join(format!("{label}-b.png"));
+            let (report_b, carried_b) = render(&out_b, current_time, true);
+            assert!(
+                !carried_b,
+                "the escape hatch did not force the one-shot transport ({label})"
+            );
+
+            let mut flat_a = report_a.as_object().expect("report A object").clone();
+            let mut flat_b = report_b.as_object().expect("report B object").clone();
+            for key in volatile {
+                flat_a.remove(key);
+                flat_b.remove(key);
+            }
+            assert_eq!(
+                flat_a.keys().collect::<Vec<_>>(),
+                flat_b.keys().collect::<Vec<_>>(),
+                "report key sets diverge ({label})"
+            );
+            for (key, value_a) in &flat_a {
+                assert_eq!(
+                    Some(value_a),
+                    flat_b.get(key),
+                    "report field {key} differs between the routes ({label})"
+                );
+            }
+            assert_eq!(
+                flat_a.get("passed"),
+                Some(&serde_json::json!(true)),
+                "animation render did not pass ({label}): {report_a}"
+            );
+            assert_eq!(
+                std::fs::read(&out_a).unwrap(),
+                std::fs::read(&out_b).unwrap(),
+                "PNG bytes differ between the session and one-shot routes ({label})"
+            );
+        }
+
+        // The animated slider must actually move the output over time, otherwise
+        // the cross-route match above is a vacuous "the probe ignored animation"
+        // pass. Both frames render on the session route.
+        let keyframe = scratch.join("keyframe-a.png");
+        let interpolated = scratch.join("interpolated-a.png");
+        assert_ne!(
+            std::fs::read(&keyframe).unwrap(),
+            std::fs::read(&interpolated).unwrap(),
+            "the animated slider did not change the output between timeline positions"
         );
 
         let _ = std::fs::remove_dir_all(&scratch);
