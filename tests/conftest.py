@@ -48,8 +48,12 @@ def canonical_release_worker(tmp_path_factory):
     # -utf8 forces UTF-8 output; without it vswhere emits its description strings
     # in the console code page (CP932 on a Japanese locale), which breaks the
     # utf-8-sig decode below with a UnicodeDecodeError (#58).
+    # Enumerate every C++ x64 install, not just -latest: the resolved cmake may
+    # predate the newest VS. cmake 3.24 knows "Visual Studio 17 2022" but not
+    # "Visual Studio 18 2026", so taking the latest install and configuring its
+    # generator fails outright on a machine with both VS 2022 and VS 2026 (#89).
     result = subprocess.run(
-        [str(vswhere), "-latest", "-products", "*", "-requires",
+        [str(vswhere), "-products", "*", "-requires",
          "Microsoft.VisualStudio.Component.VC.Tools.x86.x64", "-format", "json", "-utf8"],
         check=True,
         capture_output=True,
@@ -60,21 +64,47 @@ def canonical_release_worker(tmp_path_factory):
     installations = json.loads(result.stdout)
     if not installations:
         pytest.fail("no Visual Studio installation with the C++ x64 toolset")
-    installation = installations[0]
-    vs_root = Path(installation["installationPath"])
-    vcvars = vs_root / "VC" / "Auxiliary" / "Build" / "vcvars64.bat"
-    if not vcvars.is_file():
-        pytest.fail("vcvars64.bat is unavailable; install Visual Studio C++ tools")
     cmake = shutil.which("cmake")
     if cmake is None:
         pytest.fail("cmake is unavailable on PATH")
 
-    major = int(installation["installationVersion"].split(".", 1)[0])
+    # Generator names are ASCII, but pin the decode so a Japanese console code
+    # page cannot break the substring match (cf. #58).
+    cmake_help = subprocess.run(
+        [cmake, "--help"],
+        check=True,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    ).stdout
     known_generator_years = {17: "2022", 18: "2026"}
-    generator_year = known_generator_years.get(major)
-    if generator_year is None:
-        pytest.fail(f"unsupported Visual Studio CMake generator version: {major}")
-    generator = f"Visual Studio {major} {generator_year}"
+
+    def installation_version(entry):
+        return tuple(int(part) for part in entry["installationVersion"].split("."))
+
+    # Prefer the newest install whose generator the resolved cmake actually
+    # advertises, falling back to older toolsets (e.g. VS 2022 under cmake 3.24).
+    chosen = None
+    for installation in sorted(installations, key=installation_version, reverse=True):
+        major = int(installation["installationVersion"].split(".", 1)[0])
+        generator_year = known_generator_years.get(major)
+        if generator_year is None:
+            continue
+        candidate = f"Visual Studio {major} {generator_year}"
+        if candidate in cmake_help:
+            chosen = (installation, candidate)
+            break
+    if chosen is None:
+        pytest.fail(
+            "no Visual Studio install whose CMake generator is supported by the "
+            f"resolved cmake ({cmake}); install a newer cmake or an older VS toolset"
+        )
+    installation, generator = chosen
+    vs_root = Path(installation["installationPath"])
+    vcvars = vs_root / "VC" / "Auxiliary" / "Build" / "vcvars64.bat"
+    if not vcvars.is_file():
+        pytest.fail("vcvars64.bat is unavailable; install Visual Studio C++ tools")
     build = tmp_path_factory.mktemp("canonical-release-worker")
     source = ROOT / "minihost"
     command = (
