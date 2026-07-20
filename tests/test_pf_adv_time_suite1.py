@@ -12,14 +12,15 @@ SDK_HEADERS = Path(SDK_ROOT) / "Examples" / "Headers" if SDK_ROOT else None
 def run_in_vs_environment(command, *, cwd=None, timeout=420):
     program_files_x86 = os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")
     vswhere = Path(program_files_x86) / "Microsoft Visual Studio" / "Installer" / "vswhere.exe"
-    # -utf8 forces vswhere's output to UTF-8; without it a Japanese-locale
-    # console emits CP932 bytes that break the text decode. errors="replace"
-    # guards any other CP932 chatter captured on stderr (#237, follow-up to #58).
+    # -utf8 forces vswhere's output to UTF-8, so decode it as UTF-8 explicitly
+    # rather than the process locale (the SDK workflow does not set PYTHONUTF8);
+    # otherwise a UTF-8 install path with non-ASCII characters would mojibake.
+    # errors="replace" still guards any stray CP932 chatter (#237, follow-up #58).
     result = subprocess.run(
         [str(vswhere), "-latest", "-products", "*", "-requires",
          "Microsoft.VisualStudio.Component.VC.Tools.x86.x64", "-property", "installationPath",
          "-utf8"],
-        check=True, capture_output=True, text=True, errors="replace",
+        check=True, capture_output=True, text=True, encoding="utf-8-sig", errors="replace",
     )
     vs_root = Path(result.stdout.strip())
     if not vs_root.is_dir():

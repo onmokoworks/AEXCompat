@@ -19,13 +19,15 @@ def _msvc_vcvars() -> Path:
     vswhere = Path(program_files_x86) / "Microsoft Visual Studio" / "Installer" / "vswhere.exe"
     if not vswhere.is_file():
         pytest.skip("vswhere.exe is unavailable; install Visual Studio C++ tools")
-    # -utf8 forces UTF-8 output; errors="replace" guards any CP932 chatter on a
-    # Japanese-locale console (#237, follow-up to #58).
+    # -utf8 forces UTF-8 output, so decode it as UTF-8 explicitly rather than the
+    # process locale (the SDK workflow does not set PYTHONUTF8), else a UTF-8
+    # install path with non-ASCII characters would mojibake. errors="replace"
+    # still guards any stray CP932 chatter (#237, follow-up to #58).
     installation = subprocess.run(
         [str(vswhere), "-latest", "-products", "*", "-requires",
          "Microsoft.VisualStudio.Component.VC.Tools.x86.x64", "-property", "installationPath",
          "-utf8"],
-        capture_output=True, text=True, errors="replace",
+        capture_output=True, text=True, encoding="utf-8-sig", errors="replace",
     ).stdout.strip()
     if not installation:
         pytest.skip("no Visual Studio installation with the C++ x64 toolset")
