@@ -575,7 +575,17 @@ int32_t classic_render_runtime(EffectEntry entry, std::array<std::byte, kInSize>
         argb_to_rgba_native(destination, source, bytes);
       }, &record_output_checksum_detail,
       +[](const char* format) { smart_state().pixel_format = format; }});
-  if (!close_render_ui_context(entry, input, command_output, definitions)) return -5;
+  // The render dispatch hook (ClassicRenderDispatchOwner, RenderHooks) already
+  // closes the UI context when it is active, so only close here if it is still
+  // open. Without the g_render_ui_context_active guard this re-closes an
+  // already-closed context: close_render_ui_context early-returns false for a
+  // click/draw request whose context is inactive, spuriously turning a clean
+  // custom-UI render into render_error -5 (issue #259). The smart path guards
+  // this the same way.
+  if (g_render_ui_context_active &&
+      !close_render_ui_context(entry, input, command_output, definitions) &&
+      error == 0)
+    error = -5;
   return error;
 }
 
