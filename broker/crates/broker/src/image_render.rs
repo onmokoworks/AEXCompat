@@ -4407,6 +4407,14 @@ fn render_with_artifact(
         && gpu_backend == RenderGpuBackend::Auto
         && payload == encode_interactive_payload(interactive_parameters.unwrap_or_default())?
         && std::env::var_os(DISABLE_SESSION_WRAPPER_ENV).is_none()
+        // The length-1 session path launches through SessionOpenRequest, which
+        // carries no conformance render-settings trailer, so the worker would
+        // report its legacy premultiplied/null settings while the broker has
+        // already pre-transformed the input for the requested alpha mode. Only
+        // the one-shot path below forwards --conformance-render-settings-v1, so
+        // bypass the session optimization whenever a conformance trailer is set
+        // to keep the pre-transform and the worker-reported settings consistent.
+        && conformance_render_settings.is_none()
     {
         // Static secondaries render on every frame; timed secondaries (issue
         // #98 W1-4b) carry their rational admission time so the worker selects
