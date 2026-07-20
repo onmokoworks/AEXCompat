@@ -1,3 +1,6 @@
+cmake_minimum_required(VERSION 3.20)
+project(pf_frame_resize_probe LANGUAGES CXX)
+
 foreach(target
     pf_expand_allowed_probe pf_expand_denied_probe
     pf_shrink_allowed_probe pf_shrink_denied_probe)

@@ -5310,7 +5310,9 @@ enum SessionWrapperOutcome {
 }
 
 #[cfg(not(windows))]
-fn render_classic_via_length_one_session(_: &SessionWrapperRequest<'_>) -> SessionWrapperOutcome {
+fn render_classic_via_length_one_session(
+    _: &SessionWrapperRequest<'_>,
+) -> SessionWrapperOutcome {
     SessionWrapperOutcome::Fallback
 }
 
@@ -5383,6 +5385,11 @@ fn render_classic_via_length_one_session(
             return fallback_with_clean_dumps(&world_dump_dir);
         }
     };
+    // An expand-output effect that overran the launch slot no longer surfaces
+    // here: render_frame grows the shared section in place and returns Rendered
+    // at the expanded dimensions (protocol §3, issue #262), so the session route
+    // carries the expand without a re-open (which would replay SEQUENCE/FRAME
+    // setup and setdown).
     let close = session.close();
     if close.get("session_clean") != Some(&Value::Bool(true))
         || close.get("invalidated") != Some(&Value::Bool(false))
@@ -5422,8 +5429,15 @@ fn render_classic_via_length_one_session(
         Ok(values) => values,
         Err(error) => return SessionWrapperOutcome::Failure(error),
     };
-    let pixels = match outcome.status {
-        FrameStatus::Rendered { pixels, .. } => pixels,
+    // The frame's actual (possibly expanded/shrunk) dimensions drive the PNG
+    // encode and the public report, not the launch render dimensions (#261).
+    let (pixels, rendered_width, rendered_height) = match outcome.status {
+        FrameStatus::Rendered {
+            pixels,
+            width,
+            height,
+            ..
+        } => (pixels, width, height),
         FrameStatus::FrameError { render_error } => {
             // The gate above rejects any final report carrying a render
             // error, so this arm is defensive only.
@@ -5457,8 +5471,8 @@ fn render_classic_via_length_one_session(
         rgba16_transport_to_png16(&pixels).and_then(|(samples, overrange)| {
             deep_overrange_samples = Some(overrange);
             let image = image::ImageBuffer::<image::Rgba<u16>, Vec<u16>>::from_raw(
-                request.width,
-                request.height,
+                rendered_width,
+                rendered_height,
                 samples,
             )
             .ok_or_else(|| invalid("worker output dimensions are invalid"))?;
@@ -5468,7 +5482,7 @@ fn render_classic_via_length_one_session(
         })
     } else {
         native_rgba_to_preview(&pixels, request.pixel_format).and_then(|preview| {
-            let image = image::RgbaImage::from_raw(request.width, request.height, preview)
+            let image = image::RgbaImage::from_raw(rendered_width, rendered_height, preview)
                 .ok_or_else(|| invalid("worker output dimensions are invalid"))?;
             image
                 .save_with_format(request.output_path, ImageFormat::Png)
@@ -5482,8 +5496,8 @@ fn render_classic_via_length_one_session(
         plugin_id: request.plugin_id.to_owned(),
         smart: false,
         pixel_format: request.pixel_format,
-        rendered_width: request.width,
-        rendered_height: request.height,
+        rendered_width,
+        rendered_height,
         input_width: request.width,
         input_height: request.height,
         output_png: request.output_path.to_path_buf(),
@@ -5672,7 +5686,12 @@ impl InteractiveRenderSession {
             })
         };
         match outcome.status {
-            FrameStatus::Rendered { pixels, checksum } => {
+            FrameStatus::Rendered {
+                pixels,
+                checksum,
+                width: frame_width,
+                height: frame_height,
+            } => {
                 self.frame_serial += 1;
                 self.frames_ok += 1;
                 let preserved = self
@@ -5690,7 +5709,8 @@ impl InteractiveRenderSession {
                         .write_all(&pixels)?;
                 }
                 let preview = native_rgba_to_preview(&pixels, self.pixel_format)?;
-                let image = image::RgbaImage::from_raw(self.width, self.height, preview)
+                // The frame's actual (possibly shrunk) dimensions (#261).
+                let image = image::RgbaImage::from_raw(frame_width, frame_height, preview)
                     .ok_or_else(|| invalid("session output dimensions are invalid"))?;
                 image
                     .save_with_format(output_path, ImageFormat::Png)
@@ -5701,8 +5721,8 @@ impl InteractiveRenderSession {
                     "plugin_id": self.plugin_id,
                     "render_path": "classic",
                     "pixel_format": self.pixel_format.report_name(),
-                    "width": self.width,
-                    "height": self.height,
+                    "width": frame_width,
+                    "height": frame_height,
                     "input_width": self.width,
                     "input_height": self.height,
                     // Deep formats ship the depth-preserving raw next to an

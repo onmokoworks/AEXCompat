@@ -497,7 +497,8 @@ ClassicFinalDispatchResult run_classic_final_dispatch(const FinalDispatchRequest
              invocation.render_session_mode) {
     const auto session_outcome = run_render_session(
         entry, input, output, &invocation.requested_parameters, invocation.external_width,
-        invocation.external_height, invocation.external_time_step, invocation.external_total_time,
+        invocation.external_height, invocation.external_time_step,
+        invocation.external_total_time,
         invocation.external_time_scale, invocation.external_pixel_bytes,
         invocation.external_layers.empty() ? nullptr : &invocation.external_layers);
     persistent_sequence_setup_error = session_outcome.setup_error;

@@ -341,6 +341,41 @@ u32 LE の長さ接頭辞 + UTF-8 JSON 本文。1 メッセージ上限 64 KiB (
   レンダー前に拒否されたフレーム (時刻 scale 不一致等) では出力スロットも
   `output_generation` も更新されないため、stale な値を運ばない。broker は
   error 応答ではスロットを読まない。
+
+#### 出力リサイズ (可変寸法 / `resize_needed`) — #261
+
+エフェクトが `PF_OutFlag_I_EXPAND_BUFFER` / `PF_OutFlag_I_SHRINK_BUFFER` で
+出力を入力と異なる寸法にする場合 (one-shot 本流と同じ範囲: 各次元 ≤ 4096、
+≤ 16,777,216 px)、frame は render 寸法 (`max_width`/`max_height`) と異なる
+実寸法で完了しうる。**レンダー寸法 (in_data の extent / full_resolution) と
+出力スロット容量を分離**する:
+
+- **shrink / スロット内 expand**: worker は実寸法で出力スロットに書き、
+  `frame_done.output.width/height` に実寸法を報告。`output.checksum` は
+  実寸法の packed バイト (`width*height*bpp`) を覆う。broker は実寸法バイト
+  だけ読む (スロット全体ではない)。
+- **スロット超過 expand (session 内 grow, #262)**: RENDER は worker private
+  buffer に既に1回だけ完了している (共有スロットへのコピーは lifecycle 外)。
+  worker は溢れ書きせず
+  `{"v":1,"type":"frame_done","frame_index":N,"status":"resize_needed",
+  "width":W,"height":H,"render_error":0}` を返し、**同一 worker のまま** broker の
+  grow 応答を待つ (出力スロット・generation 不変)。broker は要求寸法を
+  再キャップ (各次元 ≤ 4096、≤ 16,777,216 px) した上で、より大きい匿名 section を
+  作成・静的ヘッダを初期化し、その handle を **`DuplicateHandle` で worker プロセス
+  に複製**して
+  `{"v":1,"type":"grow","section_handle":"<value>","output_capacity_width":W,
+  "output_capacity_height":H}` を request pipe に送る。worker は
+  `adopt_grown_section` で旧 section を unmap/close して grown section を map し
+  (`geometry` の出力容量のみ更新、入力/出力スロット offset は render 寸法固定で不変)、
+  **その同じ frame の描画済みピクセルを拡大スロットへ転送**して `status:"ok"` を返す。
+  SEQUENCE/FRAME setup・RENDER・setdown は各1回で one-shot と一致する
+  (再オープンして lifecycle を第2 worker で replay しない)。handle は path でなく
+  複製ハンドルで渡すため TOCTOU 面を作らない。
+- section は grow で拡大するため、開始時の出力スロットは常にレンダー寸法で確保し
+  launch はバイト不変。共有メモリレイアウト (§6) の出力スロットは容量寸法で確保する
+  (grow 後は新容量)。grow は length-1 wrapper・multi-frame バッチ・ライブセッション
+  すべてで機能する (render_frame が内部で処理し `resize_needed` は呼び出し元へ
+  表出しない)。
 - `output` の各値は broker 側 per-frame 検証 (§7) の入力。`checksum` は
   **出力スロットへ転送した RGBA バイト列 (broker が読むバイトそのもの) の
   sha256**。one-shot の `output_hash` は内部 ARGB 論理バッファの hash
