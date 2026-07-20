@@ -1,8 +1,8 @@
 # 常駐セッション audio 段階0 調査ノート (#98 W4 / #239)
 
-status: 進行中。custom UI (#238/PR #241) と並行して、audio を常駐レンダー
-セッションに載せる (#239) ための段階0 = AE 実機観測を進める。時系列追記。
-観察 (事実) と仮説 (推論) を分けて書く。frozen evidence 化する値は
+status: 段階0 (AE 実機観測) 完了。設計方針が確定した (audio は image frame loop
+に相乗りさせず別チャネル/別セッションで期間一括 audio を運ぶ)。実装は次段階。
+時系列追記。観察 (事実) と仮説 (推論) を分けて書く。frozen evidence 化する値は
 `analysis/` + refresh script 経由 (`docs/EVIDENCE_POLICY_2026-07-18.md`)。
 
 ## 位置づけ
@@ -51,7 +51,54 @@ audio 対応に拡張した (commit: "instrument: record AUDIO selectors ..."):
 - **ビルド成功**: `tools/build-pf-selector-timeline-probe.ps1 -Configuration
   Release` で classic/smart 両 .aex を生成。
 
-## 残作業 (段階0 の観測実行)
+## 観測 (AE 実機、2026-07-20)
+
+After Effects 25.3.1x3 (Windows 11)。拡張した classic probe を audio-only WAV
+footage (mono 44100、tone) レイヤーに適用し、30fps / 30 フレーム (1 秒) comp を
+"Lossless with Alpha" (audio 付き movie) で in-app レンダー。probe は
+`AEXCompatOracle` (ユーザー書込可の MediaCore サブフォルダ、UAC 不要) へ一時
+install、実行後 cleanup。生ログは scratchpad の `audio-selector-timeline.jsonl`
+(開発機観察、frozen evidence ではない)。
+
+**観察 (事実):**
+
+1. **AUDIO selector はフレーム単位ではなく、レンダー全体で 1 回だけ発行された。**
+   30 フレーム comp に対し AUDIO_SETUP ×1 / AUDIO_RENDER ×1 / AUDIO_SETDOWN ×1
+   (image の per-frame とは無関係)。
+2. **AUDIO_RENDER は全期間を 1 チャンクで要求した。** `start_samp=0`,
+   `dur_samp=48000`, `total_samp=48000` (48kHz × 1 秒 = 48000 サンプルを一括)。
+   image の time_step (1024/30720) とは別単位の sample 時間軸。
+3. **audio は image とは別スレッド・別 sequence_data インスタンスで走った。**
+   AUDIO 系は tid=2676、image の SEQUENCE 系 (SETUP/FLATTEN/RESETUP) は主に
+   tid=32732。SEQUENCE_SETDOWN が 2 回 (スレッド/インスタンスごと) 発行され、
+   audio 側の seq_counters (resetup=1/flatten=1) は image 側 (resetup=3/flatten=3)
+   と独立していた。
+4. host が rate/channels を正規化した: src は 48000Hz / stereo / sample_size=4
+   (float) で届いた (入力 WAV は 44100Hz mono)。session でも audio フォーマットは
+   host 交渉値であり、入力そのままではない。
+5. image RENDER は発火しなかった (render=0)。probe が audio-only レイヤーに
+   載っていたため。image と audio を同一レイヤーで同時観測するには映像+音声を
+   持つ footage が要る (interleave 詳細の追加観測は任意)。
+
+## 結論 (観測に基づく設計方針)
+
+**audio は image frame loop に相乗りさせない。** 観測より、audio は per-frame
+ではなく期間一括 (1 AUDIO_SETUP → 1+ AUDIO_RENDER チャンク → 1 AUDIO_SETDOWN)
+で、image とは別スレッド・別 sequence_data で走る。したがって #239 の audio
+session 化は:
+
+- 共有メモリの per-frame RGBA スロット (§6) には載せない。audio 専用の sample
+  バッファ (float, host 交渉の rate/channels) を別チャネルで運ぶ。
+- image の `render_frame` メッセージではなく、期間指定の audio 要求
+  (start_samp/dur_samp) を運ぶ別メッセージ (または audio 専用セッション) にする。
+- 大きな dur を 1 チャンクで要求されうるため、audio バッファ上限は image スロット
+  とは別に見積もる (48kHz stereo float で 1 秒 ≒ 384KB、長尺は分割チャンクの
+  可能性 — 長尺 comp での AUDIO_RENDER 分割有無は追加観測の候補)。
+
+これは custom UI (v:2 の per-frame `ui_action` で image frame loop に相乗り) とは
+対照的で、audio は別経路が適切。§4.2 の「per-frame 動的属性」一般化には乗らない。
+
+## 残作業 (段階0 の観測実行) — 完了 (上記観測で解決)
 
 観測にはフレーム列 comp に **audio が載っている** 必要がある (probe は
 AUDIO_EFFECT_TOO なので、適用レイヤーに audio が無いと AUDIO_RENDER が発火しない)。
@@ -68,18 +115,26 @@ AUDIO_EFFECT_TOO なので、適用レイヤーに audio が無いと AUDIO_REND
    image RENDER (FRAME_SETUP/RENDER) との時間軸関係。sample range が
    frame と同期するか、別レート・別まとめか。sequence data を image と共有するか。
 
-## 仮説 (未検証、観測で確定する)
+## 仮説 (2026-07-20 観測で確認済み)
 
-- audio render は image フレームとは別の時間軸・別まとめ (AE の audio は
-  image render とは独立した audio-render パスで、フレーム単位ではなく
-  区間単位でまとめて要求される) の可能性が高い。もしそうなら、session の
-  audio 意味論は「per-frame audio スロット」ではなく「区間 audio を別チャネルで
-  まとめて運ぶ」または「audio 専用セッション」になり、image frame loop への
-  相乗りは適さない。→ 観測で確定する。
+- ~~audio render は image フレームとは別の時間軸・別まとめ~~ → **確認**
+  (上記「観測」参照)。audio は per-frame ではなく期間一括、image とは別スレッド・
+  別 sequence_data。「区間 audio を別チャネルで運ぶ / audio 専用セッション」で
+  image frame loop に相乗りさせない、という設計方針が観測で裏付けられた。
 
-## 判断待ち / 次アクション
+## 次アクション (段階0 完了後)
 
-- 観測実行 (audio 版 capture の構築 + aerender) は AE 実機の排他利用。
-  段階0 観測結果が出るまで §6 共有メモリ audio スロットは設計しない。
-- 観測後、結果を本ノートに追記し、design を固めてから実装 (worker/broker) と
-  実 worker A/B に進む。
+段階0 観測は完了し、設計方針 (audio を image frame loop に相乗りさせず別チャネル
+/別セッションで期間一括 audio を運ぶ) が確定した。以降:
+
+1. audio session プロトコルの設計: 期間指定 (start_samp/dur_samp) の audio 要求
+   メッセージと audio sample バッファチャネル (host 交渉の rate/channels/float)。
+   image session とは独立。プロトコル文書に §10 (audio) 等として追記。
+2. worker: audio-only レンダー経路 (`--render-audio` / `render_experimental_audio`)
+   をセッション化。AUDIO_SETUP → AUDIO_RENDER(区間) → AUDIO_SETDOWN を
+   session lifecycle に載せる。
+3. broker: audio session の open/render/close 配線、wrapper 適格条件から
+   `audio.is_none()` を外す (または audio 専用ルート)。
+4. 実 worker A/B: audio バイト一致で session ≡ one-shot 等価。
+5. (任意) 長尺 comp で AUDIO_RENDER が複数チャンクに分割されるかの追加観測。
+   分割される場合、audio バッファのチャンク境界設計に反映。
