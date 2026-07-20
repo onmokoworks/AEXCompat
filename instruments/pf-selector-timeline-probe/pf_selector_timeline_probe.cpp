@@ -33,7 +33,12 @@
 
 namespace {
 
-constexpr std::uint32_t kSequenceMagic = 0x53454C54;  // "SELT"
+// Bumped to "SEL2" when the audio counters were appended (#239): an old-layout
+// handle from a previously loaded build carries the former magic, so lock_counters
+// rejects it (magic mismatch -> nullptr) and the RESETUP null-restore path
+// reallocates a full-size block, instead of reading/writing past the smaller old
+// allocation. Any layout change to SequenceCounters must bump this.
+constexpr std::uint32_t kSequenceMagic = 0x53454C32;  // "SEL2"
 
 struct SequenceCounters {
   std::uint32_t magic;
