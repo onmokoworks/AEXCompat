@@ -4227,15 +4227,39 @@ fn render_with_artifact(
     // failures inside the session path are final: they are the same
     // fail-closed validation the one-shot path applies.
     // The session transport carries mask, spatial, render-environment context
-    // (W1-3) and alpha-as-coverage parameter slots (W1-4c, published once at
-    // launch), but not yet aux channels; a host context using aux channels
-    // stays on the one-shot path.
-    let session_representable_context =
-        host_context.is_none_or(|context| context.aux_channels.is_empty());
+    // (W1-3), alpha-as-coverage parameter slots (W1-4c, published once at
+    // launch), and aux channels (#211): every HostContext field is now
+    // session-representable.
+    //
+    // Aux channels ride the same broker-created manifest sidecar the one-shot
+    // path consumes (`--aux-manifest-v1 <manifest>`), so prepare it once here
+    // and share it with both transports rather than building it twice. The
+    // sidecars and manifest live under the broker-owned `target/image-transport`
+    // root; the worker only ever reads broker-written files there (the sample
+    // source paths are canonicalized, bounded, and copied by the broker inside
+    // prepare_aux_transport), so session-izing adds no new worker-side path
+    // re-resolution beyond the pre-existing one-shot transport. `root` and
+    // `nonce` are established here so the one-shot path below reuses them.
+    let root = repository.join("target/image-transport");
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| invalid(error.to_string()))?
+        .as_nanos();
+    let aux_channels: &[crate::render_request::AuxChannel] =
+        host_context.map_or(&[], |context| context.aux_channels.as_slice());
+    let aux_transport = if aux_channels.is_empty() {
+        None
+    } else {
+        // Only aux-carrying renders touch the transport root up front; a plain
+        // session render still creates nothing here. create_dir_all and the
+        // stale sweep are idempotent with the one-shot path's own calls below.
+        fs::create_dir_all(&root)?;
+        cleanup_stale_image_transport(&root, SystemTime::now())?;
+        prepare_aux_transport(repository, aux_channels, &root, nonce)?
+    };
     let alpha_as_coverage_params: &[u32] =
         host_context.map_or(&[], |context| context.alpha_as_coverage_params.as_slice());
     if !smart
-        && session_representable_context
         && audio.is_none()
         && custom_ui_action.is_none()
         && gpu_backend == RenderGpuBackend::Auto
@@ -4293,6 +4317,7 @@ fn render_with_artifact(
             spatial_trailer,
             render_environment_trailer,
             alpha_as_coverage_params,
+            aux_manifest: aux_transport.as_ref().map(|aux| aux.manifest_path.as_path()),
             timing,
             pixel_format,
             deep_png_output,
@@ -4312,13 +4337,13 @@ fn render_with_artifact(
         }
     }
 
-    let root = repository.join("target/image-transport");
+    // `root` and `nonce` were established above and shared with the aux-manifest
+    // sidecar. Ensure the directory exists for renders that had no aux channels
+    // to prepare; create_dir_all and the stale sweep are idempotent, so a
+    // fallback after an aux-carrying session attempt repeats them harmlessly
+    // (the just-written aux sidecars are fresh and survive the sweep).
     fs::create_dir_all(&root)?;
     cleanup_stale_image_transport(&root, SystemTime::now())?;
-    let nonce = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|error| invalid(error.to_string()))?
-        .as_nanos();
     let input_raw = root.join(format!("input-{nonce}.rgba"));
     let output_raw = root.join(format!("output-{nonce}.rgba"));
     let audio_raw = audio
@@ -4372,12 +4397,9 @@ fn render_with_artifact(
         file.write_all(&bytes)?;
         file.sync_all()?;
     }
-    let aux_transport = prepare_aux_transport(
-        repository,
-        host_context.map_or(&[], |context| context.aux_channels.as_slice()),
-        &root,
-        nonce,
-    )?;
+    // `aux_transport` was prepared once above and is shared with the session
+    // wrapper; the one-shot worker consumes the same `--aux-manifest-v1`
+    // manifest when the session path fell back or was ineligible.
     let world_dump_dir = requested_world_dump_dir(repository)?;
     let minidump_dir = requested_minidump_dir(repository)?;
     let output_checksum_detail = output_checksum_detail_requested();
@@ -4869,6 +4891,10 @@ struct SessionWrapperRequest<'a> {
     spatial_trailer: Option<String>,
     render_environment_trailer: Option<String>,
     alpha_as_coverage_params: &'a [u32],
+    /// Absolute path to the broker-prepared aux-channel manifest sidecar
+    /// (`--aux-manifest-v1`), shared with the one-shot transport. `None` when
+    /// the host context carries no aux channels (#211).
+    aux_manifest: Option<&'a Path>,
     timing: RenderTiming,
     pixel_format: RenderPixelFormat,
     deep_png_output: bool,
@@ -4923,7 +4949,7 @@ fn render_classic_via_length_one_session(
         plugin_sha256: request.plugin_sha256,
         parameters: request.interactive_parameters,
         parameter_animation: request.parameter_animation,
-        aux_manifest: None,
+        aux_manifest: request.aux_manifest,
         world_dump_dir: world_dump_dir.as_ref().map(|dump| dump.path.as_path()),
         output_checksum_detail,
         layers: &request.layers,
@@ -5977,6 +6003,71 @@ mod tests {
         drop(transport);
         assert!(!manifest_path.exists());
         assert!(!raw.exists());
+        fs::remove_dir_all(repository).unwrap();
+    }
+
+    #[test]
+    fn prepare_aux_transport_output_satisfies_the_session_aux_manifest_contract() {
+        // #211: the length-1 session wrapper now carries aux channels through
+        // the same broker-built manifest the one-shot path uses, passing its
+        // path to SessionOpenRequest::aux_manifest. This guards the handoff:
+        // the manifest prepare_aux_transport produces must satisfy the session's
+        // `--aux-manifest-v1` precondition (render_session.rs requires an
+        // absolute, existing file) and the worker's top-level manifest gate
+        // (session_protocol_worker mirrors the real load_aux_manifest contract:
+        // exactly {schema, nonce, channels}, the v1 schema string, a digit
+        // nonce, and a non-empty channel list). A manifest that failed any of
+        // these would make the wrapper's session route dead-on-arrival while the
+        // one-shot route kept working, exactly the silent split #211 removes.
+        let repository = std::env::temp_dir().join(format!(
+            "aexcompat-aux-session-contract-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let transport_root = repository.join("transport");
+        fs::create_dir_all(&transport_root).unwrap();
+        let channel = aux_fixture(&repository, "depth.f32", &[0.0, 0.25, 1.0, 2.0]);
+        let transport = prepare_aux_transport(&repository, &[channel], &transport_root, 42)
+            .unwrap()
+            .expect("aux channels present, so a manifest is produced");
+
+        // The session gate rejects a non-absolute or missing manifest before it
+        // ever launches the worker (render_session.rs `aux_manifest` handling).
+        assert!(
+            transport.manifest_path.is_absolute(),
+            "session aux_manifest must be an absolute path"
+        );
+        assert!(
+            transport.manifest_path.is_file(),
+            "session aux_manifest must point at an existing file"
+        );
+
+        // The worker's top-level manifest gate.
+        let document: Value =
+            serde_json::from_slice(&fs::read(&transport.manifest_path).unwrap()).unwrap();
+        let object = document.as_object().expect("manifest is a JSON object");
+        assert_eq!(
+            object.len(),
+            3,
+            "manifest carries exactly schema/nonce/channels"
+        );
+        assert_eq!(object["schema"], "aux-manifest-v1");
+        let nonce = object["nonce"].as_str().expect("nonce is a string");
+        assert!(
+            !nonce.is_empty() && nonce.bytes().all(|byte| byte.is_ascii_digit()),
+            "nonce is a non-empty digit string"
+        );
+        let channels = object["channels"]
+            .as_array()
+            .expect("channels is an array");
+        assert!(
+            !channels.is_empty() && channels.iter().all(Value::is_object),
+            "channels is a non-empty list of objects"
+        );
+
+        drop(transport);
         fs::remove_dir_all(repository).unwrap();
     }
 

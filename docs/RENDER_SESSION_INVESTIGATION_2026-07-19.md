@@ -548,6 +548,10 @@ canonical な基準 (= 既存の one-shot 挙動、AE 等価の真値) に合わ
 - これで goal 条件1 (W1-3 context + alpha-as-coverage が session を通り適格
   条件に入る) が充足。残る one-shot 専用は audio / custom UI (#201 で確定) と
   aux channels (session transport 未対応、別途)。
+  - **訂正 (2026-07-20, #211)**: aux channels は後に session 化した (末尾
+    「W1-4d / #211」節を参照)。この時点の「session transport 未対応」は
+    wrapper の配線が無かったという意味で、session 側 `aux_manifest` 受け口は
+    当時から存在していた。one-shot 専用に残るのは audio / custom UI のみ。
 ## 追記 (2026-07-20): W3 SmartFX セッション v1.1 の実装
 
 観察と実装記録 (issue #98 W3、プロトコル文書 §9.1 が正本):
@@ -658,3 +662,46 @@ fixture は `pf_parameter_echo_probe.aex` (float slider 1 本、値を出力色�
   エンコード + 検証と思われる (内訳分離は未実施)。
 - max 2680ms は one-shot 初回の AV スキャン系 cold 効果と思われる
   (段階0 項目4 と同じパターン)。常駐セッションはこの再発自体が起きない。
+
+### 追記 (W1-4d / #211: aux channels をセッションで運ぶ、2026-07-20)
+
+W1-4c まででセッションは mask / spatial / render-environment /
+alpha-as-coverage を受けられるようになり、残る one-shot 専用の host context
+構成は aux channels (`host_context.aux_channels`) のみだった。owner 判断
+(session 化) を受け、#211 でこれをセッションに載せた。
+
+観察: session 側は `SessionOpenRequest::aux_manifest: Option<&Path>` を既に
+持ち、`--aux-manifest-v1` を emit する経路があった (audio / custom UI (#201)
+と異なり protocol v2 拡張は不要)。欠けていたのは wrapper
+(`render_experimental_image...`) が `host_context.aux_channels` を manifest
+sidecar へ変換して session に渡す配線だけ。
+
+実装: wrapper 適格判定の `session_representable_context`
+(`host_context.aux_channels.is_empty()` 要求) を撤去。one-shot の
+`prepare_aux_transport` を session 分岐の手前に 1 回だけ hoist し、返る
+`AuxTransport` の `manifest_path` を `SessionWrapperRequest::aux_manifest`
+経由で `SessionOpenRequest::aux_manifest` に流す。one-shot 側の 2 回目
+`prepare_aux_transport` 呼び出しは削除し、両 transport が同一 manifest を
+共有する (二重構築しない)。`root` / `nonce` も hoist して共有。aux channels
+が無いレンダーは従来どおり transport root を作らない (aux 有りのときだけ
+`create_dir_all` + stale sweep + prepare)。
+
+#18 minidump レビューの教訓との関係: aux sidecar は broker が自前で
+`target/image-transport` 配下に書き (sha256 検証付き)、worker は broker が
+書いた manifest/sidecar のみを読む。sample source path は broker 側で
+canonicalize + allowed_root 内 + sha256 + byte 長検証してから sidecar へ
+コピーする。session 化は既存 one-shot transport をそのまま再利用しており、
+worker 側の新規な path 再解決 (TOCTOU 面) を増やしていない。handle 継承 /
+managed 境界規則に沿う。
+
+検証: 機械可搬な単体テスト
+`prepare_aux_transport_output_satisfies_the_session_aux_manifest_contract`
+が、wrapper の manifest 出力が session の `--aux-manifest-v1` 前提 (絶対
+パス・実在ファイル・v1 スキーマ top-level 契約) を満たすことを実 worker
+無しで保証する。実 worker A/B は `render_session_wrapper.rs` に aux ブロック
+を追加 (pf_sampling_probe に full-res depth channel を付け、session/one-shot
+の公開レポート全フィールド + PNG バイト一致を検証)。この A/B は既存の
+worker/probe fixture が要り、未ビルド環境では他ブロック同様スキップする
+(byte 一致の実 worker 確認は fixture ビルド環境での実行が前提)。probe は
+depth を消費しないが、両ルートが同一 manifest を同一 worker に load させる
+等価性を担保する。
