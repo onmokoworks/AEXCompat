@@ -260,12 +260,20 @@ u32 LE の長さ接頭辞 + UTF-8 JSON 本文。1 メッセージ上限 64 KiB (
   `--parameter-animation-v1` タイムラインが重なる。
 - **`ui_action`**: one-shot の custom UI argv trailer と同一符号化を再利用
   (`click:v1|x|y|r|g|b|a` / `draw:v1`、ASCII のみ)。新しい直列化形式は
-  導入しない。意味論は**そのフレーム限りの UI イベント列駆動**: worker は
-  該当フレームで one-shot と同じイベント列 (new_context → activate →
-  click/draw → deactivate → close_context) を `worker_ui_event_execution` で
-  駆動してからレンダーする。context はフレーム内で開閉する (session 生存期間
-  保持は将来最適化。v1 は one-shot と同観測を優先)。UI アクションの無い
-  フレームは `ui_action` を載せない。
+  導入しない。意味論は**そのフレーム限りの UI 駆動**で、実現は one-shot と
+  同一機構: worker は該当フレームの render 前に one-shot の argv 経路と同じ
+  custom UI テレメトリ (render_click_enabled / 座標 / picker color、または
+  render_draw_enabled) を立てるだけで、UI イベント列 (new_context → activate →
+  click/draw → **render** → close_context) の駆動と context のライフタイムは
+  render 経路 (`render_once`) が one-shot と同じ点で行う。**context は render 中も
+  開いたままで、close は render 後の cleanup で行われる** (effect は render 中に
+  active な UI context を観測する。one-shot の `dispatch_render_click` /
+  `close_render_ui_context` と同順)。session が別の pre-render 列を送ることは
+  しない。UI アクションの無いフレームは `ui_action` を載せない。フレーム間で
+  テレメトリが漏れないよう、worker は各フレームの render 前に per-render の
+  custom UI 観測フィールドを既定に戻す (register 系の setup-time フィールドは
+  保持)。これで各フレームが fresh な one-shot と同じ初期状態から観測される
+  (session 生存期間の context 保持は将来最適化)。
 - **検証は strict fail-closed**: パース不能・非 ASCII・長さ超過・launch/one-shot
   と同じ構文検証に落ちる `parameters` / `ui_action` はプロトコル違反として
   セッションを終了する (§7)。broker は送信前に one-shot と同じ検証を済ませて

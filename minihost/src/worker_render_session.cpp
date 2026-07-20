@@ -346,9 +346,25 @@ bool parse_session_ui_action(const std::string& text, SessionUiAction& action) {
 // so a frame with no ui_action renders with no custom-UI event, then set from
 // this frame's action. Frame N's click never leaks into frame N+1.
 void apply_session_ui_action(const SessionUiAction* action) {
-  auto& telemetry = worker_runtime::ui_event_execution::custom_ui_telemetry();
-  telemetry.render_click_enabled = false;
-  telemetry.render_draw_enabled = false;
+  namespace ui = worker_runtime::ui_event_execution;
+  ui::CustomUiTelemetry& telemetry = ui::custom_ui_telemetry();
+  // Reset the per-render custom-UI observation before every frame so a
+  // multi-frame session starts each frame from the same state a fresh one-shot
+  // process would, then apply this frame's action. Without this the counters
+  // the click dispatcher checks for an exact value (app_color_picker_calls /
+  // app_invalidate_rect_calls == 1, the lifecycle/error fields) accumulate
+  // across frames and the second click reports a frame error. Only the
+  // setup-time registration fields (captured once at GLOBAL_SETUP) are
+  // preserved; every other field resets to its default (a fresh render's
+  // starting point, e.g. render_click_error == -1). The enabled flags default
+  // to false, so a frame with no ui_action renders with no custom-UI event.
+  const auto register_ui_calls = telemetry.register_ui_calls;
+  const auto registration = telemetry.registration;
+  const auto invalid_registrations = telemetry.invalid_custom_ui_registrations;
+  telemetry = ui::CustomUiTelemetry{};
+  telemetry.register_ui_calls = register_ui_calls;
+  telemetry.registration = registration;
+  telemetry.invalid_custom_ui_registrations = invalid_registrations;
   if (!action) return;
   if (action->click) {
     telemetry.render_click_x = action->x;

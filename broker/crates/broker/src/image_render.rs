@@ -850,6 +850,13 @@ impl RenderUiAction {
     pub fn encode_ui_field(&self) -> io::Result<String> {
         match self {
             RenderUiAction::Click { point, color } => {
+                // The worker (argv parser and the session ui_action decoder)
+                // rejects x/y above 8192. Validate here so an out-of-range point
+                // is a plain caller error before any transport mutation, not a
+                // protocol violation that invalidates a resident session.
+                if point[0] > 8192 || point[1] > 8192 {
+                    return Err(invalid("custom UI render click point is out of range"));
+                }
                 if color
                     .iter()
                     .any(|value| !value.is_finite() || !(0.0..=1.0).contains(value))
