@@ -1303,23 +1303,30 @@ mod windows_e2e {
         .save(&input)
         .unwrap();
 
-        // The probe appends one byte per kRender entry to this file (across
-        // every worker process it is spawned into), so its length is the total
-        // number of RENDER dispatches. This is the only cross-process observable
-        // of the throwaway first worker: an expand that dispatched RENDER before
-        // detecting the slot overrun would render once in the discarded 64x48
-        // worker and again in the re-opened 68x52 worker (two bytes); the #261
-        // fix detects the overrun in prepare_output before dispatching, so RENDER
-        // runs exactly once (one byte), matching the one-shot route.
-        let render_log = scratch.join("render-dispatches.bin");
+        // The probe appends one byte per lifecycle selector to this file across
+        // every worker it is spawned into: 'S' for FRAME_SETUP, 'R' for RENDER.
+        // The counts are the only cross-process observable of a re-opened
+        // worker's lifecycle: an expand that overran the launch slot and re-opened
+        // the session (the pre-#262 behaviour) runs FRAME_SETUP and RENDER once in
+        // the discarded worker and again in the re-opened worker (two 'S', two
+        // 'R'); the in-session grow keeps the same worker, so each runs exactly
+        // once (one 'S', one 'R'), matching the one-shot route. This is the direct
+        // evidence that SEQUENCE/FRAME setup+setdown are not replayed (#262
+        // finding 3617631908).
+        let render_log = scratch.join("selector-dispatches.bin");
         // The probe appends (mode "ab"); start from a clean slate so a stale file
-        // can never inflate the count into a false negative.
+        // can never inflate the counts into a false negative.
         std::fs::remove_file(&render_log).ok();
         unsafe { std::env::set_var("AEXCOMPAT_RESIZE_RENDER_LOG", &render_log) };
+        let count_marker = |marker: u8| -> usize {
+            std::fs::read(&render_log)
+                .map(|bytes| bytes.iter().filter(|byte| **byte == marker).count())
+                .unwrap_or(0)
+        };
 
-        // Run A: default routing. The effect expands 64x48 -> 68x52, overruns
-        // the initial 64x48 slot, and the wrapper re-opens at 68x52 on the
-        // session route. The counter proves the session carried it (a silent
+        // Run A: default routing. The effect expands 64x48 -> 68x52, overruns the
+        // initial 64x48 slot, and the worker grows the shared section in place on
+        // the session route. The counter proves the session carried it (a silent
         // one-shot fallback would leave it unchanged).
         let before = RENDER_SESSION_WRAPPER_RENDERS.load(Ordering::SeqCst);
         let output_a = scratch.join("out-a.png");
@@ -1332,14 +1339,14 @@ mod windows_e2e {
         // The output really expanded past the input dimensions.
         assert_eq!(report_a.get("width"), Some(&serde_json::json!(68)));
         assert_eq!(report_a.get("height"), Some(&serde_json::json!(52)));
-        // Exactly-once: the session re-open must not double-dispatch RENDER.
-        let session_dispatches = std::fs::metadata(&render_log)
-            .map(|meta| meta.len())
-            .unwrap_or(0);
+        // Exactly-once for the whole lifecycle: the in-session grow must not
+        // replay FRAME_SETUP or RENDER (a re-open would run each twice).
+        let (session_setups, session_renders) = (count_marker(b'S'), count_marker(b'R'));
         assert_eq!(
-            session_dispatches, 1,
-            "the session expand dispatched RENDER {session_dispatches} times (expected exactly once; \
-             a pre-detect overrun renders once in the discarded worker and again after re-open)"
+            (session_setups, session_renders),
+            (1, 1),
+            "the session expand ran FRAME_SETUP {session_setups}x and RENDER {session_renders}x \
+             (expected 1/1; a re-open would replay the lifecycle in a second worker)"
         );
         std::fs::remove_file(&render_log).ok();
 
@@ -1356,14 +1363,15 @@ mod windows_e2e {
             after_a,
             "the escape hatch did not force the one-shot transport"
         );
-        // The one-shot route renders exactly once; this is the baseline the
-        // session route's single dispatch above is matched against.
-        let one_shot_dispatches = std::fs::metadata(&render_log)
-            .map(|meta| meta.len())
-            .unwrap_or(0);
+        // The one-shot route runs the lifecycle exactly once; this is the
+        // baseline the session route's single-worker grow above is matched
+        // against.
+        let (one_shot_setups, one_shot_renders) = (count_marker(b'S'), count_marker(b'R'));
         assert_eq!(
-            one_shot_dispatches, 1,
-            "the one-shot expand dispatched RENDER {one_shot_dispatches} times (expected exactly once)"
+            (one_shot_setups, one_shot_renders),
+            (1, 1),
+            "the one-shot expand ran FRAME_SETUP {one_shot_setups}x and RENDER {one_shot_renders}x \
+             (expected 1/1)"
         );
 
         let volatile = ["output_png", "output_raw", "worker_diagnostics"];

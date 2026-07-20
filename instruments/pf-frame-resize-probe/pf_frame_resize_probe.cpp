@@ -11,18 +11,21 @@
 #define AEXCOMPAT_RESIZE_FLAG 0
 #endif
 
-// Observable RENDER side effect for the exactly-once test (#262): when
-// AEXCOMPAT_RESIZE_RENDER_LOG names a file, append one byte per kRender entry.
-// A resident-session expand that dispatched RENDER before detecting the slot
-// overrun (the pre-#261-fix behaviour) would append twice across the throwaway
-// first worker and the re-opened worker; the fix keeps it at one. The count is
-// the only cross-process observable, since the throwaway worker's pixels are
-// discarded. No env var set (every non-expand test) means no side effect.
-static void record_render_dispatch() {
+// Observable selector side effect for the exactly-once test (#262): when
+// AEXCOMPAT_RESIZE_RENDER_LOG names a file, append one distinct byte per
+// FRAME_SETUP ('S') and RENDER ('R') entry. An expand that overran the launch
+// slot and re-opened the session (the pre-#262 behaviour) replays the whole
+// lifecycle in a fresh worker, so 'S' and 'R' would each appear twice across the
+// throwaway and re-opened workers; the in-session grow keeps the same worker, so
+// each appears exactly once, matching one-shot. The log is the only
+// cross-process observable of the setup/setdown replay, since a re-opened
+// worker's pixels are discarded. No env var set (every non-expand test) means no
+// side effect.
+static void record_selector(char marker) {
   const char* path = std::getenv("AEXCOMPAT_RESIZE_RENDER_LOG");
   if (!path || !*path) return;
   if (std::FILE* file = std::fopen(path, "ab")) {
-    std::fputc(1, file);
+    std::fputc(marker, file);
     std::fclose(file);
   }
 }
@@ -39,11 +42,12 @@ extern "C" DllExport PF_Err EffectMain(PF_Cmd cmd, PF_InData*,
       out_data->num_params = 1;
       return PF_Err_NONE;
     case PF_Cmd_FRAME_SETUP:
+      record_selector('S');
       out_data->width = params[0]->u.ld.width + AEXCOMPAT_RESIZE_DELTA;
       out_data->height = params[0]->u.ld.height + AEXCOMPAT_RESIZE_DELTA;
       return PF_Err_NONE;
     case PF_Cmd_RENDER:
-      record_render_dispatch();
+      record_selector('R');
 #if AEXCOMPAT_EXPECT_DENIED
       return PF_Err_INTERNAL_STRUCT_DAMAGED;
 #else

@@ -831,3 +831,52 @@ exactly-once (Codex #262 finding 3617423905):
 リサイズを one-shot と exactly-once で一致させて扱える) が満たされる。#261 が
 close されれば W4 本体 (自動 session→one-shot fallback の fail-closed 除去、
 broker CLI 経路の見直し、one-shot argv モード削除、#36 と統合) に進める。
+
+## 逸脱 (#262: reopen 方式 → session 内 grow へ変更、setup/setdown exactly-once)
+
+上記「session 内 re-open」方式は、Codex review (#262 finding 3617631908, P2) の
+指摘で棄却した。理由: expand overrun 時に session を閉じて別 worker で開き直す
+再オープンは、RENDER を skip しても **SEQUENCE_SETUP / FRAME_SETUP /
+FRAME_SETDOWN が破棄 worker と再オープン worker で計2回** 走る。one-shot は各1回。
+setup/setdown で allocate・sequence data 変異・乱数・副作用を持つ効果は、
+再オープンだと fallback (one-shot、lifecycle 1回) より悪化する退行だった。W4 は
+fallback を消して session を唯一の経路にするため、この lifecycle replay を残せない。
+
+観察 (設計上の鍵): classic の RENDER は worker private の guarded buffer に描画し、
+共有スロットへのコピーは render_once 完了後 (session loop) に行われる。つまり
+lifecycle は private buffer で完結しスロットサイズに依存しない。スロット不足は
+「転送」の問題であって「描画」の問題ではない。
+
+方式 (session 内 grow):
+
+- worker は render_once を常に完走 (FRAME_SETUP → RENDER → FRAME_SETDOWN、各1回)。
+  `captured` が起動スロットを超えたら、session を閉じず `resize_needed` を返して
+  同一 worker のまま broker の grow 応答を待つ。
+- broker (`RenderSession::grow_output_capacity`) はより大きい section を作成・
+  静的ヘッダ初期化し、`DuplicateHandle` で worker プロセスへ複製 (path 再オープン
+  でなく複製ハンドル = CLAUDE.md の #18 minidump 教訓に沿い TOCTOU 面を作らない)、
+  `{"type":"grow","section_handle":...,...}` を request pipe で送る。render_frame は
+  応答を loop で受け、`resize_needed` なら grow して次の `ok` を待つ (frame 再送は
+  しない)。broker 側 transport の section/view を差し替え、layer スロットは worker が
+  open 時に private キャッシュ済みのため新 section では未初期化で良い。
+- worker (`SessionChannels::adopt_grown_section`) は旧 section を unmap/close し
+  grown section を map、`geometry` の出力容量のみ更新 (入力/出力スロット offset は
+  render 寸法固定で不変)、描画済みピクセルを拡大スロットへ転送して `ok`。
+- `FrameStatus::ResizeNeeded` は撤去。render_frame が内部で grow し常に `Rendered`
+  を返すので、length-1 wrapper の再帰リトライ・batch/live の resize 拒否 arm・
+  `render_classic_via_length_one_session` の output_capacity 引数はすべて削除。
+  batch/live も expand を grow で扱えるようになった (副産物)。
+
+検証 (機械可搬):
+
+- probe を拡張し kFrameSetup で 'S'、kRender で 'R' を env 指定ファイルへ追記。
+  `expand_output_matches_the_one_shot_transport` は session 経路で
+  **FRAME_SETUP == 1 かつ RENDER == 1** (= 単一 worker・lifecycle 非 replay) を
+  assert し、one-shot と byte 一致。再オープンなら各2で fail する discriminating test。
+  これが finding 3617631908 (setup/setdown replay) の直接証拠。
+- broker `render_session` 40 / `render_session_wrapper` 7 / workspace 全パス、
+  minihost 全ターゲット build clean。
+
+注記: 起動時の `--output-capacity-v1` トレーラと `open_with_output_capacity` は
+grow の導入で production からは未使用 (常に render 寸法で開く) になったが、API/
+launch 経路としては残置 (grow が全経路をカバーするため呼ばれない)。

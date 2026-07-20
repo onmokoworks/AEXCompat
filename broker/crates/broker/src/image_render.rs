@@ -4723,7 +4723,7 @@ fn render_with_artifact(
             expected_shutter_angle,
             expected_shutter_phase,
             custom_ui_action: custom_ui_action.as_ref(),
-        }, None) {
+        }) {
             SessionWrapperOutcome::Report(report) => return Ok(report),
             SessionWrapperOutcome::Failure(error) => return Err(error),
             SessionWrapperOutcome::Fallback => {}
@@ -5312,7 +5312,6 @@ enum SessionWrapperOutcome {
 #[cfg(not(windows))]
 fn render_classic_via_length_one_session(
     _: &SessionWrapperRequest<'_>,
-    _: Option<(u32, u32)>,
 ) -> SessionWrapperOutcome {
     SessionWrapperOutcome::Fallback
 }
@@ -5320,10 +5319,6 @@ fn render_classic_via_length_one_session(
 #[cfg(windows)]
 fn render_classic_via_length_one_session(
     request: &SessionWrapperRequest<'_>,
-    // Output-slot capacity for this attempt (#261). `None` opens at the render
-    // dimensions; a resize_needed frame re-opens with `Some((w, h))` sized to
-    // the effect's expanded output, keeping the render on the session route.
-    output_capacity: Option<(u32, u32)>,
 ) -> SessionWrapperOutcome {
     use crate::render_session::{FrameStatus, RenderSession, SessionOpenRequest};
 
@@ -5336,7 +5331,7 @@ fn render_classic_via_length_one_session(
         Err(error) => return SessionWrapperOutcome::Failure(error),
     };
     let output_checksum_detail = output_checksum_detail_requested();
-    let mut session = match RenderSession::open_with_output_capacity(SessionOpenRequest {
+    let mut session = match RenderSession::open(SessionOpenRequest {
         repository: request.repository,
         plugin_path: request.plugin_path,
         plugin_sha256: request.plugin_sha256,
@@ -5361,7 +5356,7 @@ fn render_classic_via_length_one_session(
         smart: false,
         gpu_backend: RenderGpuBackend::Cpu,
         gpu_runtime_policy: None,
-    }, output_capacity) {
+    }) {
         Ok(session) => session,
         Err(_) => return SessionWrapperOutcome::Fallback,
     };
@@ -5390,22 +5385,11 @@ fn render_classic_via_length_one_session(
             return fallback_with_clean_dumps(&world_dump_dir);
         }
     };
-    // An expand-output effect overran the slot: re-open once at the required
-    // capacity and re-render on the session route (#261). The render dimensions
-    // are unchanged, so the effect renders the same content into a larger slot.
-    // A second resize_needed cannot happen (the slot is sized to exactly the
-    // reported dimensions); fall back defensively if it somehow does.
-    if let FrameStatus::ResizeNeeded { width, height } = &outcome.status {
-        let (width, height) = (*width, *height);
-        let _ = session.close();
-        if let Some(dump) = &world_dump_dir {
-            let _ = clear_world_dump_files(&dump.path);
-        }
-        if output_capacity.is_some() {
-            return fallback_with_clean_dumps(&world_dump_dir);
-        }
-        return render_classic_via_length_one_session(request, Some((width, height)));
-    }
+    // An expand-output effect that overran the launch slot no longer surfaces
+    // here: render_frame grows the shared section in place and returns Rendered
+    // at the expanded dimensions (protocol §3, issue #262), so the session route
+    // carries the expand without a re-open (which would replay SEQUENCE/FRAME
+    // setup and setdown).
     let close = session.close();
     if close.get("session_clean") != Some(&Value::Bool(true))
         || close.get("invalidated") != Some(&Value::Bool(false))
@@ -5461,8 +5445,6 @@ fn render_classic_via_length_one_session(
                 "session frame reported error {render_error} past a clean final report"
             )));
         }
-        // Handled before close above (re-open at the required capacity).
-        FrameStatus::ResizeNeeded { .. } => unreachable!("resize handled before close"),
     };
     if let Some(path) = request.preserved_output {
         if let Some(parent) = path.parent() {
@@ -5779,24 +5761,6 @@ impl InteractiveRenderSession {
                     "worker_classification": "resident_session",
                     "resident_session": session_facts(self.frames_ok, self.frames_errored),
                     "render_error": render_error,
-                    "passed": false,
-                }))
-            }
-            // This live session runs at fixed dimensions; an expand-output frame
-            // needs a slot re-open it does not perform (#261). Report it as a
-            // failed frame rather than silently degrading.
-            FrameStatus::ResizeNeeded { width, height } => {
-                self.frames_errored += 1;
-                Ok(json!({
-                    "schema_version": 1,
-                    "stage": "interactive_image_render",
-                    "plugin_id": self.plugin_id,
-                    "render_path": "classic",
-                    "pixel_format": self.pixel_format.report_name(),
-                    "current_time": current_time,
-                    "worker_classification": "resident_session",
-                    "resident_session": session_facts(self.frames_ok, self.frames_errored),
-                    "resize_needed": json!({ "width": width, "height": height }),
                     "passed": false,
                 }))
             }

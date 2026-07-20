@@ -282,12 +282,6 @@ struct ClassicLifecycleOwner {
 
 // Owns render-dispatch state. Buffer resize mutates all related world references
 // atomically; LayerRenderContext is scoped strictly to the kRender callback.
-// prepare_output returns this to skip RENDER when a resident-session output
-// would overrun the slot (#261). Nonzero so dispatch_render skips the render
-// selector; the value itself is ignored by the session loop, which reports
-// resize_needed off the flag instead of this code.
-constexpr int32_t kResizeNeededSkipRender = 0x7265737A;  // 'resz'
-
 struct ClassicRenderDispatchOwner {
   EffectEntry entry;
   std::array<std::byte, kInSize>& input;
@@ -311,14 +305,6 @@ struct ClassicRenderDispatchOwner {
   // requested output resize, so callers can tell host-side output validation
   // failures apart from selector errors sharing the same numeric codes.
   bool* output_validation_failed{};
-  // Resident-session output-slot capacity in bytes (#261). When nonzero and the
-  // resized output would overrun it, prepare_output sets *resize_needed and
-  // skips RENDER, so the session re-opens at a larger capacity without ever
-  // invoking the render selector on the undersized attempt (one-shot renders
-  // exactly once; the session must too, for side-effecting/non-deterministic
-  // effects). Zero disables the check (one-shot path).
-  std::size_t output_slot_capacity_bytes{};
-  bool* resize_needed{};
 
   int32_t run(int32_t error) {
     return aexcompat::worker_runtime::classic_execution::dispatch_render(this, error, hooks());
@@ -346,20 +332,6 @@ struct ClassicRenderDispatchOwner {
             read<uint32_t>(output, kOutFlags))) return fail(4);
     if (next_width <= 0 || next_height <= 0) return 0;
     width = next_width; height = next_height; rowbytes = width * pixel_bytes;
-    // Resident session: if the resized output overruns the launch output slot,
-    // ask the broker to re-open at a larger capacity before RENDER runs, so the
-    // render selector executes exactly once (as one-shot does). No guarded
-    // buffer is allocated and RENDER is skipped (#261).
-    // The short-circuit is only safe when the caller can observe it: the return
-    // value alone is discarded by the session loop, which acts on *resize_needed.
-    // Requiring a non-null resize_needed keeps the invariant "skip implies the
-    // caller runs the flag-based early return" so no path reaches finalize with
-    // the expanded width*height against the still-undersized guarded buffer.
-    if (output_slot_capacity_bytes != 0 && resize_needed &&
-        static_cast<std::size_t>(rowbytes) * height > output_slot_capacity_bytes) {
-      *resize_needed = true;
-      return kResizeNeededSkipRender;
-    }
     if (!guarded.reset(static_cast<std::size_t>(rowbytes) * height)) return fail(-3);
     destination = guarded.data();
     if (!aexcompat::render::prepare_world_layout(world,
@@ -399,9 +371,7 @@ int32_t classic_render_runtime(EffectEntry entry, std::array<std::byte, kInSize>
                     int32_t external_pixel_bytes = 4,
                     bool manage_sequence = true,
                     std::vector<unsigned char>* captured_argb = nullptr,
-                    bool* output_validation_failed = nullptr,
-                    std::size_t output_slot_capacity_bytes = 0,
-                    bool* resize_needed = nullptr) {
+                    bool* output_validation_failed = nullptr) {
   auto* classic_context = aexcompat::worker_runtime::classic::active_context();
   if (!classic_context) return -1;
   aexcompat::render::ImageRequest image_request;
@@ -575,28 +545,10 @@ int32_t classic_render_runtime(EffectEntry entry, std::array<std::byte, kInSize>
         pixel_bytes, dispatch_pixel_format, external_current_time, external_time_step,
         external_total_time, external_time_scale, case_id, requested, external_rgba,
         external_layers, external_width, external_height, *classic_context, logical_source,
-        output_validation_failed, output_slot_capacity_bytes, resize_needed};
+        output_validation_failed};
     error = dispatch_owner.run(error);
-    // On the resize short-circuit RENDER never ran, so the frame is clean as far
-    // as FRAME_SETDOWN is concerned; pass 0 (not the sentinel) into the lifecycle
-    // finish so the plug-in's setdown sees the same in_data error a successful
-    // one-shot frame would, rather than a large non-PF_Err value.
-    const bool skip_render_resize = resize_needed && *resize_needed;
-    lifecycle.error = skip_render_resize ? 0 : error;
+    lifecycle.error = error;
     error = lifecycle_owner.finish(lifecycle);
-    // prepare_output short-circuited for a resident-session expand (#261): RENDER
-    // never ran and the guarded buffer was never sized to the (now expanded)
-    // width*height, so the finalize pass below must not read `destination` at
-    // those dimensions (it would over-read the undersized buffer). The frame
-    // FRAME lifecycle was still torn down above; report resize_needed to the
-    // caller, which re-opens the session larger. captured/output_hash are unused
-    // for this frame (the session loop reports resize_needed off *resize_needed).
-    if (skip_render_resize) {
-      guards_intact = true;
-      output_hash.clear();
-      if (captured_argb) captured_argb->clear();
-      return kResizeNeededSkipRender;
-    }
   }
   aexcompat::worker_runtime::classic_execution::Context final_context{
       destination, rowbytes, width, height, pixel_bytes, error,
@@ -665,8 +617,6 @@ struct ClassicRenderRequest {
   bool manage_sequence;
   std::vector<unsigned char>* captured_argb;
   bool* output_validation_failed;
-  std::size_t output_slot_capacity_bytes;
-  bool* resize_needed;
 };
 
 bool classic_render_dependencies_ready(void* opaque) {
@@ -683,8 +633,7 @@ int classic_render_guarded_effect_main(void* opaque) {
       request.external_width, request.external_height, request.external_layers,
       request.external_current_time, request.external_time_step, request.external_total_time,
       request.external_time_scale, request.external_pixel_bytes, request.manage_sequence,
-      request.captured_argb, request.output_validation_failed,
-      request.output_slot_capacity_bytes, request.resize_needed);
+      request.captured_argb, request.output_validation_failed);
 }
 
 int classic_render_cleanup(void*) {
@@ -706,15 +655,12 @@ int32_t render_once(EffectEntry entry, std::array<std::byte, kInSize>& input,
                     int32_t external_total_time = 1, uint32_t external_time_scale = 1,
                     int32_t external_pixel_bytes = 4, bool manage_sequence = true,
                     std::vector<unsigned char>* captured_argb = nullptr,
-                    bool* output_validation_failed = nullptr,
-                    std::size_t output_slot_capacity_bytes = 0,
-                    bool* resize_needed = nullptr) {
+                    bool* output_validation_failed = nullptr) {
   ClassicRenderRequest request{entry, input, output, case_id, width, height, rowbytes,
       input_hash, output_hash, guards_intact, requested, external_rgba, external_output,
       external_width, external_height, external_layers, external_current_time,
       external_time_step, external_total_time, external_time_scale, external_pixel_bytes,
-      manage_sequence, captured_argb, output_validation_failed,
-      output_slot_capacity_bytes, resize_needed};
+      manage_sequence, captured_argb, output_validation_failed};
   aexcompat::worker_runtime::classic::Request context{
       &request,
       {&classic_render_guarded_effect_main, &classic_render_cleanup,

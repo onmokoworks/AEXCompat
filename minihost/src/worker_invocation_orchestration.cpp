@@ -252,9 +252,7 @@ int32_t render_once(EffectEntry entry, std::array<std::byte, kInSize>& input,
                     int32_t external_total_time = 1, uint32_t external_time_scale = 1,
                     int32_t external_pixel_bytes = 4, bool manage_sequence = true,
                     std::vector<unsigned char>* captured_argb = nullptr,
-                    bool* output_validation_failed = nullptr,
-                    std::size_t output_slot_capacity_bytes = 0,
-                    bool* resize_needed = nullptr);
+                    bool* output_validation_failed = nullptr);
 SmartResult smart_render_once(EffectEntry entry, std::array<std::byte, kInSize>& input,
                               std::array<std::byte, kOutSize>& output,
                               const std::string& case_id,

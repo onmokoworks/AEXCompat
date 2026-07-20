@@ -39,7 +39,8 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use windows_sys::Win32::Foundation::{
-    CloseHandle, SetHandleInformation, HANDLE, HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE,
+    CloseHandle, DuplicateHandle, SetHandleInformation, DUPLICATE_SAME_ACCESS, HANDLE,
+    HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE,
 };
 use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
 use windows_sys::Win32::Storage::FileSystem::{ReadFile, WriteFile};
@@ -310,6 +311,51 @@ impl SessionTransport {
     fn close_request_pipe(&mut self) {
         self.request_write = None;
     }
+
+    /// Replaces the mapped section with a larger one (in-session grow, protocol
+    /// §3), keeping the request pipe. Unmaps the current view and drops the
+    /// current section handle (CloseHandle), then adopts the grown section.
+    fn adopt_section(&mut self, section: OwnedHandle, view: *mut u8, section_bytes: usize) {
+        if !self.view.is_null() {
+            let address = MEMORY_MAPPED_VIEW_ADDRESS {
+                Value: self.view as *mut _,
+            };
+            unsafe {
+                UnmapViewOfFile(address);
+            }
+        }
+        // Assigning drops the previous OwnedHandle, closing the old section.
+        self.section = section;
+        self.view = view;
+        self.section_bytes = section_bytes;
+    }
+}
+
+/// Writes a header u32 into a raw mapped view (used to initialise a grown
+/// section before it is adopted, when no `SessionTransport` owns it yet).
+fn write_header_u32_raw(view: *mut u8, offset: usize, value: u32) {
+    debug_assert!(offset + 4 <= HEADER_BYTES);
+    unsafe {
+        std::ptr::copy_nonoverlapping(value.to_le_bytes().as_ptr(), view.add(offset), 4);
+    }
+}
+
+/// Initialises the broker-owned static header (and generation/frame fields) of a
+/// freshly mapped section, exactly as `open` does, so the worker's
+/// `static_header_matches` passes after it adopts the grown section. The worker
+/// overwrites the output generation and frame dimensions when it transfers the
+/// pending frame; `generation` seeds them consistently in the meantime.
+fn init_section_header(view: *mut u8, geometry: &SessionGeometry, generation: u32) {
+    write_header_u32_raw(view, MAGIC_OFFSET, HEADER_MAGIC);
+    write_header_u32_raw(view, VERSION_OFFSET, PROTOCOL_VERSION);
+    write_header_u32_raw(view, DEPTH_CODE_OFFSET, depth_code(geometry.pixel_format));
+    write_header_u32_raw(view, MAX_WIDTH_OFFSET, geometry.width);
+    write_header_u32_raw(view, MAX_HEIGHT_OFFSET, geometry.height);
+    write_header_u32_raw(view, LAYER_SLOT_COUNT_OFFSET, geometry.layer_slot_count);
+    write_header_u32_raw(view, INPUT_GENERATION_OFFSET, generation);
+    write_header_u32_raw(view, OUTPUT_GENERATION_OFFSET, generation);
+    write_header_u32_raw(view, FRAME_WIDTH_OFFSET, geometry.width);
+    write_header_u32_raw(view, FRAME_HEIGHT_OFFSET, geometry.height);
 }
 
 impl Drop for SessionTransport {
@@ -465,11 +511,12 @@ pub enum FrameStatus {
     /// A frame-local compatibility diagnostic (selector error, time scale
     /// mismatch). The session stays usable; continuing is the caller's call.
     FrameError { render_error: i64 },
-    /// A resize-output effect rendered at dimensions that overrun the launch
-    /// output slot (#261). The worker wrote nothing; the caller must re-open the
-    /// session with a slot at least this large and re-render. The session stays
-    /// usable (no generation advance).
-    ResizeNeeded { width: u32, height: u32 },
+    // An expand-output effect that overruns the launch slot no longer surfaces to
+    // the caller: `render_frame` grows the shared section in place and waits for
+    // the worker's follow-up ok (protocol §3, issue #262), so it always resolves
+    // to `Rendered` at the expanded dimensions. The re-open path (a distinct
+    // `ResizeNeeded` outcome) is gone, and with it the SEQUENCE/FRAME setup and
+    // setdown replay it caused.
 }
 
 #[derive(Debug)]
@@ -1243,6 +1290,13 @@ impl RenderSession {
         if parameters.is_some() {
             self.parameter_update_frames += 1;
         }
+        // The worker may answer a single dispatched frame with more than one
+        // control message: an expand that overruns the launch slot replies
+        // resize_needed, the broker grows the shared section in place (protocol
+        // §3, issue #262), and the worker then answers ok for the same frame.
+        // Loop until a terminal (ok/error) status; a resize_needed grows and
+        // waits for the follow-up without re-dispatching the frame.
+        loop {
         let body = match self.await_frame_response() {
             FrameWait::Message(body) => body,
             FrameWait::Deadline => {
@@ -1364,12 +1418,12 @@ impl RenderSession {
                 // is still host-owned, so the session continues; whether to
                 // proceed is the caller's decision.
                 self.frames_errored += 1;
-                Ok(FrameOutcome {
+                return Ok(FrameOutcome {
                     frame_index,
                     status: FrameStatus::FrameError {
                         render_error: done.render_error,
                     },
-                })
+                });
             }
             "ok" => {
                 let (Some(output), Some(generation)) = (done.output, done.generation) else {
@@ -1421,7 +1475,7 @@ impl RenderSession {
                 }
                 self.frames_ok += 1;
                 self.last_output_generation = expected_generation;
-                Ok(FrameOutcome {
+                return Ok(FrameOutcome {
                     frame_index,
                     status: FrameStatus::Rendered {
                         pixels,
@@ -1429,7 +1483,7 @@ impl RenderSession {
                         width: output.width,
                         height: output.height,
                     },
-                })
+                });
             }
             "resize_needed" => {
                 // The effect rendered larger than the launch slot; the worker
@@ -1499,18 +1553,167 @@ impl RenderSession {
                         POST_TERMINATION_COLLECT_TIMEOUT,
                     ));
                 }
-                Ok(FrameOutcome {
-                    frame_index,
-                    status: FrameStatus::ResizeNeeded { width, height },
-                })
+                // Grow the shared section in place and wait for the worker's
+                // follow-up ok for this same frame (protocol §3, issue #262). The
+                // render lifecycle already ran once into the worker's private
+                // buffer, so this transfers those pixels into the larger slot
+                // instead of re-opening (which would replay SEQUENCE/FRAME setup
+                // and setdown). `?` invalidates the session on a grow failure.
+                self.grow_output_capacity(frame_index, width, height)?;
+                continue;
             }
-            other => Err(self.invalidate(
-                "unknown_frame_status",
-                format!("frame {frame_index} reported status {other:?}"),
+            other => {
+                return Err(self.invalidate(
+                    "unknown_frame_status",
+                    format!("frame {frame_index} reported status {other:?}"),
+                    true,
+                    POST_TERMINATION_COLLECT_TIMEOUT,
+                ));
+            }
+        }
+        }
+    }
+
+    /// In-session output-slot grow (protocol §3, issue #262). The worker
+    /// reported an expand that overran the launch slot; rather than tearing the
+    /// session down and re-opening (which replays SEQUENCE/FRAME setup and
+    /// setdown in a fresh worker), create a larger section, duplicate it into the
+    /// same worker, and let it transfer the already-rendered frame. The render
+    /// lifecycle ran exactly once, matching the one-shot path. The caller already
+    /// bounded `(width, height)` and confirmed it exceeds the current capacity.
+    fn grow_output_capacity(
+        &mut self,
+        frame_index: u32,
+        width: u32,
+        height: u32,
+    ) -> io::Result<()> {
+        use windows_sys::Win32::System::Threading::GetCurrentProcess;
+        // The grown geometry keeps the render dimensions and layout, raising only
+        // the output-slot capacity to the effect's requested output size.
+        let mut grown = self.geometry;
+        grown.output_capacity_width = width;
+        grown.output_capacity_height = height;
+        let section_bytes = grown.section_bytes();
+        if section_bytes as u64 > SECTION_HARD_CAP_BYTES {
+            return Err(self.invalidate(
+                "resize_out_of_range",
+                format!("frame {frame_index} grow to {width}x{height} exceeds the section cap"),
                 true,
                 POST_TERMINATION_COLLECT_TIMEOUT,
-            )),
+            ));
         }
+        // The grown section is handed to the worker by DuplicateHandle, not by
+        // inheritance, so it needs no inheritable security. On any failure below
+        // the current section stays live and the session is invalidated.
+        let mut security = inheritable_security();
+        let section = match OwnedHandle::new(unsafe {
+            CreateFileMappingW(
+                INVALID_HANDLE_VALUE,
+                &mut security,
+                PAGE_READWRITE,
+                ((section_bytes as u64) >> 32) as u32,
+                section_bytes as u32,
+                null(),
+            )
+        }) {
+            Ok(section) => section,
+            Err(error) => {
+                return Err(self.invalidate(
+                    "grow_section_failed",
+                    format!("frame {frame_index} grow could not create the section: {error}"),
+                    true,
+                    POST_TERMINATION_COLLECT_TIMEOUT,
+                ));
+            }
+        };
+        let view_address = unsafe { MapViewOfFile(section.raw(), FILE_MAP_ALL_ACCESS, 0, 0, 0) };
+        if view_address.Value.is_null() {
+            return Err(self.invalidate(
+                "grow_section_failed",
+                format!("frame {frame_index} grow could not map the section"),
+                true,
+                POST_TERMINATION_COLLECT_TIMEOUT,
+            ));
+        }
+        let view = view_address.Value as *mut u8;
+        // Establish the static header the worker re-validates after adopting; the
+        // layer slots stay uninitialised because the worker cached the layers
+        // privately at open and never re-reads them from the section.
+        init_section_header(view, &grown, self.last_output_generation);
+        let unmap_new = || {
+            let address = MEMORY_MAPPED_VIEW_ADDRESS { Value: view as *mut _ };
+            unsafe {
+                UnmapViewOfFile(address);
+            }
+        };
+        // Duplicate the section into the worker process; it maps the value the
+        // grow message carries. Uses the worker's own process handle, so a path
+        // the worker re-opens (a TOCTOU surface) is never handed over.
+        let Some(process) = self.process.as_ref() else {
+            unmap_new();
+            return Err(self.invalidate(
+                "grow_section_failed",
+                format!("frame {frame_index} grow has no worker process handle"),
+                true,
+                POST_TERMINATION_COLLECT_TIMEOUT,
+            ));
+        };
+        let worker_process = match process.duplicated_process_handle() {
+            Ok(handle) => handle,
+            Err(error) => {
+                unmap_new();
+                return Err(self.invalidate(
+                    "grow_section_failed",
+                    format!("frame {frame_index} grow could not open the worker process: {error}"),
+                    true,
+                    POST_TERMINATION_COLLECT_TIMEOUT,
+                ));
+            }
+        };
+        let mut duplicated: HANDLE = null_mut();
+        let dup_ok = unsafe {
+            DuplicateHandle(
+                GetCurrentProcess(),
+                section.raw(),
+                worker_process as HANDLE,
+                &mut duplicated,
+                0,
+                0, // not inheritable
+                DUPLICATE_SAME_ACCESS,
+            )
+        };
+        unsafe {
+            CloseHandle(worker_process as HANDLE);
+        }
+        if dup_ok == 0 {
+            unmap_new();
+            return Err(self.invalidate(
+                "grow_section_failed",
+                format!("frame {frame_index} grow could not duplicate the section into the worker"),
+                true,
+                POST_TERMINATION_COLLECT_TIMEOUT,
+            ));
+        }
+        // Hand the duplicated handle and new capacity to the worker, then swap in
+        // the broker-side section. A send failure invalidates; the duplicated
+        // handle is left with the worker, which is being torn down.
+        let grow_message = format!(
+            "{{\"v\":1,\"type\":\"grow\",\"section_handle\":\"{}\",\
+             \"output_capacity_width\":{width},\"output_capacity_height\":{height}}}",
+            duplicated as usize
+        );
+        if !self.transport.send_message(&grow_message) {
+            unmap_new();
+            return Err(self.invalidate(
+                "request_pipe_closed",
+                format!("frame {frame_index} grow could not send the grow message"),
+                true,
+                POST_TERMINATION_COLLECT_TIMEOUT,
+            ));
+        }
+        self.transport.adopt_section(section, view, section_bytes);
+        self.geometry = grown;
+        Ok(())
     }
 
     /// Protocol §7's three-way frame wait: the response channel, the process
@@ -1975,14 +2178,6 @@ pub fn run_video_batch(
                     "status": "error",
                     "render_error": render_error,
                 })),
-                // A multi-frame batch declares one fixed slot for the whole run;
-                // a mid-stream expand-output frame would need a slot re-open that
-                // the batch does not perform (#261). Reject it with a clear
-                // diagnostic rather than silently degrading.
-                FrameStatus::ResizeNeeded { width: rw, height: rh } => Err(invalid(format!(
-                    "frame {frame_index} requires an output resize to {rw}x{rh}, \
-                     which the video batch session does not support"
-                ))),
             }
         })();
         match frame_entry {

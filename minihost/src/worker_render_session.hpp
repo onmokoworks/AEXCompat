@@ -79,6 +79,17 @@ class SessionChannels {
   bool opened() const { return view_ != nullptr; }
   unsigned char* view() const { return view_; }
 
+  // In-session output-slot grow (protocol §3, issue #262): the broker duplicates
+  // a larger anonymous section into this process and passes its handle value in
+  // a `grow` control message. Maps it, checks the mapped size covers
+  // `new_geometry`, then unmaps and closes the previous section and adopts the
+  // grown one. Returns false (leaving the previous section in place) on any
+  // mismatch, so the caller can fail the session closed. Used so an expand that
+  // overruns the launch slot re-uses the same worker and lifecycle instead of a
+  // re-open that would replay SEQUENCE/FRAME setup and setdown.
+  bool adopt_grown_section(unsigned long long section_handle_value,
+                           const SessionGeometry& new_geometry);
+
   // Length-prefixed control framing: u32 LE byte count, then UTF-8 JSON.
   // A clean EOF on a frame boundary is the broker-side close signal and must
   // stay distinguishable from malformed framing (zero or oversized length,

@@ -16,6 +16,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <cwchar>
 #include <filesystem>
@@ -160,6 +161,32 @@ bool SessionChannels::open_from_environment(const SessionGeometry& geometry) {
   return true;
 }
 
+bool SessionChannels::adopt_grown_section(unsigned long long section_handle_value,
+                                          const SessionGeometry& new_geometry) {
+  if (!opened() || section_handle_value == 0) return false;
+  const HANDLE grown =
+      reinterpret_cast<HANDLE>(static_cast<uintptr_t>(section_handle_value));
+  DWORD flags = 0;
+  if (!GetHandleInformation(grown, &flags)) return false;
+  void* view = MapViewOfFile(grown, FILE_MAP_ALL_ACCESS, 0, 0, 0);
+  if (!view) return false;
+  MEMORY_BASIC_INFORMATION region{};
+  if (VirtualQuery(view, &region, sizeof(region)) != sizeof(region) ||
+      region.RegionSize < expected_section_bytes(new_geometry)) {
+    UnmapViewOfFile(view);
+    return false;
+  }
+  // Adopt only after the grown mapping is validated: unmap and close the
+  // previous section, then take the grown one (the broker duplicated its handle
+  // into this process). On any earlier failure the previous section stays live.
+  if (view_) UnmapViewOfFile(view_);
+  if (section_) CloseHandle(section_);
+  section_ = grown;
+  view_ = static_cast<unsigned char*>(view);
+  view_bytes_ = region.RegionSize;
+  return true;
+}
+
 SessionChannels::ReadResult SessionChannels::read_message(std::string& payload) {
   if (!request_pipe_) return ReadResult::Violation;
   unsigned char prefix[4];
@@ -259,9 +286,7 @@ int32_t render_once(EffectEntry entry, std::array<std::byte, kInSize>& input,
                     int32_t external_total_time = 1, uint32_t external_time_scale = 1,
                     int32_t external_pixel_bytes = 4, bool manage_sequence = true,
                     std::vector<unsigned char>* captured_argb = nullptr,
-                    bool* output_validation_failed = nullptr,
-                    std::size_t output_slot_capacity_bytes = 0,
-                    bool* resize_needed = nullptr);
+                    bool* output_validation_failed = nullptr);
 worker_runtime::smart_execution::Result smart_render_once(
     EffectEntry entry, std::array<std::byte, kInSize>& input,
     std::array<std::byte, kOutSize>& output, const std::string& case_id,
@@ -395,10 +420,6 @@ struct SessionFrameOutput {
   std::string output_hash;
   bool guard_violation{false};
   bool output_validation_failed{false};
-  // Set when prepare_output detected the requested output dimensions overrun
-  // the slot capacity before RENDER ran, so the frame is reported as
-  // resize_needed without ever dispatching kRender (protocol §3, exactly-once).
-  bool resize_needed{false};
 };
 
 // Resident render session frame loop (docs/RENDER_SESSION_PROTOCOL_2026-07-19.md).
@@ -445,7 +466,10 @@ RenderSessionOutcome run_session_frame_loop(
   RenderSessionOutcome outcome;
   const int32_t layer_slot_count =
       external_layers ? static_cast<int32_t>(external_layers->size()) : 0;
-  const wrs::SessionGeometry geometry{
+  // Non-const: an in-session grow (protocol §3, issue #262) raises the output
+  // capacity in place when an expand overruns the launch slot, without changing
+  // the render dimensions (max_width/max_height) or the input/output offsets.
+  wrs::SessionGeometry geometry{
       max_width, max_height,
       output_capacity_width > 0 ? output_capacity_width : max_width,
       output_capacity_height > 0 ? output_capacity_height : max_height,
@@ -507,6 +531,58 @@ RenderSessionOutcome run_session_frame_loop(
   std::vector<unsigned char> frame_rgba(wrs::input_slot_bytes(geometry));
   std::vector<unsigned char> captured;
   std::string message;
+  // In-session output-slot grow (protocol §3, issue #262). After the worker
+  // reports resize_needed for an expand that overran the launch slot, the broker
+  // duplicates a larger anonymous section into this process and replies with a
+  // `grow` control message carrying the handle value and new capacity. This
+  // adopts the grown section (updating `geometry`), so the same worker transfers
+  // the already-rendered frame into the larger slot. The render lifecycle
+  // (SEQUENCE/FRAME setup, RENDER, setdown) is not re-run: it already completed
+  // once into the private buffer, exactly like the one-shot path. `required`
+  // is the byte count of the rendered output that must fit the grown slot.
+  const auto grow_output_slot = [&](std::size_t required) -> bool {
+    std::string grow_message;
+    if (channels.read_message(grow_message) !=
+        wrs::SessionChannels::ReadResult::Message)
+      return false;
+    JsonValue grow_root;
+    if (!StrictJsonParser(std::move(grow_message)).parse(grow_root) ||
+        !std::holds_alternative<JsonValue::Object>(grow_root.value))
+      return false;
+    const auto& grow_object = std::get<JsonValue::Object>(grow_root.value);
+    int32_t grow_version{};
+    std::string grow_type;
+    std::string handle_text;
+    int32_t capacity_width{};
+    int32_t capacity_height{};
+    if (!json_exact_keys(grow_object,
+                         {"v", "type", "section_handle",
+                          "output_capacity_width", "output_capacity_height"}) ||
+        !json_i32(grow_object, "v", grow_version) ||
+        grow_version != static_cast<int32_t>(wrs::kProtocolVersion) ||
+        !json_string(grow_object, "type", grow_type) || grow_type != "grow" ||
+        !json_string(grow_object, "section_handle", handle_text) ||
+        !json_i32(grow_object, "output_capacity_width", capacity_width) ||
+        !json_i32(grow_object, "output_capacity_height", capacity_height) ||
+        capacity_width <= 0 || capacity_height <= 0)
+      return false;
+    // Parse the duplicated section handle value (decimal, strict tail).
+    char* tail = nullptr;
+    const unsigned long long handle_value =
+        std::strtoull(handle_text.c_str(), &tail, 10);
+    if (!tail || *tail != '\0' || handle_value == 0) return false;
+    // The granted capacity must cover the rendered pixels; the broker bounds it
+    // too, this is defense in depth against a slot copy overrunning the section.
+    wrs::SessionGeometry grown = geometry;
+    grown.output_capacity_width = capacity_width;
+    grown.output_capacity_height = capacity_height;
+    if (wrs::output_slot_bytes(grown) < required) return false;
+    if (!channels.adopt_grown_section(handle_value, grown) ||
+        !channels.static_header_matches(grown))
+      return false;
+    geometry = grown;
+    return true;
+  };
   for (;;) {
     const auto read_result = channels.read_message(message);
     if (read_result == wrs::SessionChannels::ReadResult::Eof) break;
@@ -743,24 +819,6 @@ RenderSessionOutcome run_session_frame_loop(
       outcome.invariant_failure = true;
       break;
     }
-    // Expand-output detected before RENDER (protocol §3): the requested
-    // dimensions overrun the output slot, so prepare_output short-circuited
-    // without dispatching kRender (captured is empty). Report resize_needed at
-    // the requested dimensions so the broker re-opens larger; RENDER never ran,
-    // so this frame diverges from one-shot by nothing (exactly-once). The
-    // session stays usable: no slot write, no generation advance.
-    if (frame.resize_needed) {
-      if (frame.width <= 0 || frame.height <= 0) {
-        respond_error(kSessionDimensionMismatch);
-        outcome.invariant_failure = true;
-        break;
-      }
-      if (!respond_resize_needed(frame.width, frame.height)) {
-        outcome.protocol_violation = true;
-        break;
-      }
-      continue;
-    }
     if (frame.frame_error != 0) {
       // Frame-local compatibility diagnostic; the sequence state is still
       // owned by the host, so the session may continue.
@@ -786,16 +844,24 @@ RenderSessionOutcome run_session_frame_loop(
       outcome.invariant_failure = true;
       break;
     }
-    // Shrink, or an expand that still fits the launch output slot, is written at
-    // its actual dimensions. An expand that overruns the slot cannot be written
-    // here: report resize_needed so the broker re-opens at these dimensions
-    // (the session stays usable; no slot write, no generation advance).
+    // Shrink, or an expand that still fits the launch output slot, is written
+    // below at its actual dimensions. An expand that overruns the slot needs a
+    // larger slot: the render already ran exactly once into the private buffer
+    // (captured), so instead of tearing the session down and replaying the whole
+    // SEQUENCE/FRAME setup+setdown lifecycle in a fresh worker, report the
+    // required dimensions and let the broker grow the shared section in place
+    // (protocol §3, issue #262). After the grow the same slot copy below lands in
+    // the enlarged slot; FRAME_SETUP/RENDER/FRAME_SETDOWN ran once, matching the
+    // one-shot lifecycle. A malformed or insufficient grant fails closed.
     if (captured.size() > wrs::output_slot_bytes(geometry)) {
       if (!respond_resize_needed(frame.width, frame.height)) {
         outcome.protocol_violation = true;
         break;
       }
-      continue;
+      if (!grow_output_slot(captured.size())) {
+        outcome.invariant_failure = true;
+        break;
+      }
     }
     unsigned char* slot = channels.view() + output_offset;
     for (std::size_t pixel = 0; pixel < expected_pixels; ++pixel)
@@ -871,27 +937,15 @@ RenderSessionOutcome run_render_session(
         // it, while every path that allocates the guarded buffer overwrites it.
         bool frame_guards = true;
         bool output_validation_failed = false;
-        // Capacity of the output slot in bytes; prepare_output uses it to
-        // detect an expand-output frame before RENDER and short-circuit to
-        // resize_needed (protocol §3), so RENDER runs at most once per frame.
-        const std::size_t output_slot_capacity_bytes =
-            static_cast<std::size_t>(output_capacity_width > 0 ? output_capacity_width
-                                                               : max_width) *
-            static_cast<std::size_t>(output_capacity_height > 0 ? output_capacity_height
-                                                                : max_height) *
-            static_cast<std::size_t>(pixel_bytes);
-        bool resize_needed = false;
         frame.frame_error = render_once(
             entry, input, output, "request", frame.width, frame.height,
             frame.rowbytes, frame.input_hash, frame.output_hash, frame_guards,
             frame_override ? frame_override : requested, &frame_rgba, nullptr,
             max_width, max_height, frame_layers,
             current_time, time_step, total_time, time_scale, pixel_bytes, false,
-            &captured, &output_validation_failed, output_slot_capacity_bytes,
-            &resize_needed);
+            &captured, &output_validation_failed);
         frame.guard_violation = !frame_guards;
         frame.output_validation_failed = output_validation_failed;
-        frame.resize_needed = resize_needed;
         return frame;
       });
 }

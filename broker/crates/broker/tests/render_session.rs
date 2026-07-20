@@ -1232,9 +1232,6 @@ mod windows_e2e {
                 FrameStatus::FrameError { render_error } => {
                     panic!("frame {frame_index} unexpectedly errored: {render_error}")
                 }
-                FrameStatus::ResizeNeeded { width, height } => {
-                    panic!("frame {frame_index} unexpectedly resized to {width}x{height}")
-                }
             }
         }
         assert_ne!(checksums[0], checksums[1], "distinct inputs produce distinct outputs");
