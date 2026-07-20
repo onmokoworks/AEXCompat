@@ -5282,7 +5282,13 @@ impl InteractiveRenderSession {
                     "height": self.height,
                     "input_width": self.width,
                     "input_height": self.height,
-                    "output_transport": "rgba8_png",
+                    // Deep formats ship the depth-preserving raw next to an
+                    // 8-bit preview PNG, matching the one-shot contract.
+                    "output_transport": if self.pixel_format == RenderPixelFormat::Argb8 {
+                        "rgba8_png"
+                    } else {
+                        "native_raw+rgba8_png_preview"
+                    },
                     "output_png": output_path,
                     "output_raw": preserved,
                     // The slot-transfer checksum (protocol §4.3), not the

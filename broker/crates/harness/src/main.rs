@@ -1884,8 +1884,7 @@ struct LiveSessionHandle {
 #[cfg(windows)]
 struct DecodedInput {
     path: PathBuf,
-    modified: Option<SystemTime>,
-    size: u64,
+    content_sha256: [u8; 32],
     width: u32,
     height: u32,
     rgba: std::sync::Arc<Vec<u8>>,
@@ -1920,14 +1919,22 @@ impl LiveSessionState {
     }
 
     fn decode_input(&mut self, path: &Path) -> Result<&DecodedInput, String> {
-        // Both the timestamp and the byte count key the cache: an overwrite
-        // that preserves mtime (coarse filesystem resolution, mtime-keeping
-        // tools) must still invalidate when the size moved.
-        let metadata = fs::metadata(path).ok();
-        let modified = metadata.as_ref().and_then(|meta| meta.modified().ok());
-        let size = metadata.as_ref().map(|meta| meta.len()).unwrap_or_default();
+        // The cache key is the file's content hash, not its metadata: the
+        // one-shot path re-decoded every render, so an overwrite that
+        // preserves size and mtime (mtime-keeping tools, coarse filesystem
+        // timestamps) must still invalidate here. Hashing the encoded bytes
+        // per render is cheap next to a decode; only the decode is reused.
+        // The read is bounded like the decoder's allocation limit so a
+        // mispicked huge file cannot balloon the session thread.
+        const MAX_ENCODED_INPUT_BYTES: u64 = 64 * 1024 * 1024;
+        let encoded_size = fs::metadata(path).map_err(|error| error.to_string())?.len();
+        if encoded_size > MAX_ENCODED_INPUT_BYTES {
+            return Err("input image file exceeds the live-render size bound".into());
+        }
+        let bytes = fs::read(path).map_err(|error| error.to_string())?;
+        let content_sha256: [u8; 32] = Sha256::digest(&bytes).into();
         let stale = !self.decoded.as_ref().is_some_and(|cached| {
-            cached.path.as_path() == path && cached.modified == modified && cached.size == size
+            cached.path.as_path() == path && cached.content_sha256 == content_sha256
         });
         if stale {
             let decoded = aexcompat_broker::image_render::decode_bounded_image(path, "input")
@@ -1935,8 +1942,7 @@ impl LiveSessionState {
             let (width, height) = (decoded.width(), decoded.height());
             self.decoded = Some(DecodedInput {
                 path: path.to_path_buf(),
-                modified,
-                size,
+                content_sha256,
                 width,
                 height,
                 rgba: std::sync::Arc::new(decoded.into_rgba8().into_raw()),
