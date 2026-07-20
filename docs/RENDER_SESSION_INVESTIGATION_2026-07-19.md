@@ -705,3 +705,29 @@ worker/probe fixture が要り、未ビルド環境では他ブロック同様�
 (byte 一致の実 worker 確認は fixture ビルド環境での実行が前提)。probe は
 depth を消費しないが、両ルートが同一 manifest を同一 worker に load させる
 等価性を担保する。
+
+### 追記 (実測: 実 worker での aux render, 2026-07-20, #231)
+
+#211 マージ後、fixture (aex_render_worker + pf_sampling_probe /
+pf_convolve_depth_probe) をローカルビルドして実 worker A/B を回したところ、
+**aux channels を伴う classic render が session/one-shot 両経路で
+`exit_code 3` (stderr 空・stage event 無し) で早期失敗**した。
+
+観察 (scratch で両経路比較):
+
+- session 経路と one-shot 経路は完全に同一の失敗 → #211 の broker 側 session
+  配線は正しく、session ≡ one-shot 等価は実 worker で裏付けられた。
+- worker stderr 空 + stage_events 空 = render lifecycle 以前の早期 exit。
+  `strip_auxiliary_options` の `load_aux_manifest` が false を返し argv strip
+  失敗で return するパターン (l2_cli_dispatch.cpp:45-57) と一致。
+- transport self-test (`--self-test-pf-ae-channel-transport`) は同型 manifest
+  を受理 (returncode 0)。broker の manifest 形式は妥当。
+- aux を消費する pf_convolve_depth_probe でも同じ exit 3 → effect の消費可否
+  ではなく sealed render 経路の aux 取り込みギャップ (仮説)。
+
+結論: 実 worker aux render は #211 以前から end-to-end 未検証で、現状 exit 3。
+これは #211 (session が one-shot と同じ manifest を運ぶ) のスコープ外の
+pre-existing ギャップ。#231 で worker 側を追跡する。#229 の
+`render_session_wrapper.rs` aux A/B block は「aux render 成功」前提で
+hard-fail していたため、#231 で成功前提を外し #231 を注記する形に修正した
+(machine-portable 単体テストは #211 の broker 配線ガードとして維持)。

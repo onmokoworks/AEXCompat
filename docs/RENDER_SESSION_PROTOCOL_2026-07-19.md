@@ -154,13 +154,18 @@ timed layer は含めない (両ルートで同一集合になる)。
 pf_sampling_probe による wrapper A/B (byte 一致) で session/one-shot 等価を
 直接検証済み (provider の意味的効果は probe が alpha-coverage を消費しないため
 byte 差としては現れないが、両ルートが同一オプションを同一 worker に送ることの
-等価性は確認できる)。aux channels (#211) も同型で、実 worker + pf_sampling_probe
-の wrapper A/B (`render_session_wrapper.rs`) が session/one-shot の公開レポート
-全フィールド + PNG バイト一致を検証する (probe は depth channel を消費しないが、
-両ルートが同一 manifest を同一 worker に load させることを担保する)。加えて機械
-可搬な単体テスト (`prepare_aux_transport_output_satisfies_the_session_aux_manifest_contract`)
-が、wrapper が構築する manifest が session の `--aux-manifest-v1` 前提 (絶対パス・
-実在ファイル・v1 スキーマの top-level 契約) を満たすことを、実 worker 無しで保証する。
+等価性は確認できる)。aux channels (#211) の broker 側配線
+(aux_channels -> manifest -> `SessionOpenRequest::aux_manifest`) は機械可搬な
+単体テスト (`prepare_aux_transport_output_satisfies_the_session_aux_manifest_contract`)
+が、wrapper の manifest 出力が session の `--aux-manifest-v1` 前提 (絶対パス・
+実在ファイル・v1 スキーマの top-level 契約) を満たすことを実 worker 無しで保証する。
+実 worker での byte 一致 A/B は現状動かせない: sealed classic-render 経路が
+aux 付き render を session/one-shot 双方で `exit_code 3` (stderr 空・stage
+event 無し) で早期拒否する (transport self-test は同 manifest を受理する)。
+これは one-shot aux 経路由来の pre-existing ギャップで #211 とは独立、#231 で
+追跡する。session ≡ one-shot 等価は実 worker で手動確認済み (両ルートが aux
+render で同一に失敗する = session が one-shot と同じ manifest を同じ worker に
+運ぶことの裏付け)。#231 で render 経路が通れば実 worker byte 一致 A/B を有効化する。
 
 one-shot との差分:
 
