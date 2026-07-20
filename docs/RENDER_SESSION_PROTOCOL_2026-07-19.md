@@ -726,6 +726,30 @@ impl AudioRenderSession {
   この経路に載せる (image の length-1 wrapper と同型、挙動不変)。適格条件から
   `audio.is_none()` 除外を外す。
 
+**実装再利用マップ (継続用、worker 側は実装済み・検証済み)**: broker
+`AudioRenderSession` は `render_session.rs` の `RenderSession` と同一モジュール内に
+置き、private helper をそのまま再利用する — `inheritable_pipe` / `inheritable_security`
+/ `read_exact_handle` / `write_all_handle` / `SessionTransport` (view + header +
+`send_message` + `read_output_slot`、`write_input_slot` は HEADER_BYTES 直後書込で
+audio 入力スロットにそのまま使える) / `SecureImageDispatch` +
+`dispatch_secure_image_session` / `SessionChildHandles` / `SessionEvent` + reader
+thread + process-death watcher / `SecureSessionProcess` + `CollectedExit` /
+`await_frame_response` の 3-way wait / `invalidate` パターン。audio 固有部のみ新規:
+(a) geometry = HEADER + 2×align(max_samples×channels×4)、(b) header 書込 (magic
+"AAUS"=`kHeaderMagic`、version、max_samples、channels、input/output generation)、
+(c) argv `--render-audio-session-v1 <sha> <payload> <max_samples> <channels>
+<time_scale>` (worker の `worker_request_parser.cpp` パースと対、`WorkerKind::Render`
+の `dispatch_secure_image_session`)、(d) `render_span(request_index, &[f32])`:
+入力 f32 を `write_input_slot`、`input_generation=request_index+1` 書込、
+`{"v":1,"type":"audio_render","request_index":N,"input_samples":M}` 送信、
+`audio_done` を await→検証 (generation・guards_intact・checksum)、出力 f32 を
+`read_output_slot(output_slot_offset, output_samples*4)` で回収、(e) close:
+`{"v":1,"type":"close"}` 送信→exit 回収→最終レポート (`stage:"audio_session"`) を
+parse。worker 側メッセージ・exit コード (23/24)・レポート形は実装済み
+(`worker_audio_execution.cpp` の `run_audio_render_session` /
+`emit_audio_session_report`)。A/B は既存 `SDK_Backwards.aex` (audio fixture) で
+session/one-shot の出力 f32 バイト一致を検証する。
+
 ### 10.7 検証
 
 - fixture worker (audio 版、または `session_protocol_worker` の audio 拡張) で
