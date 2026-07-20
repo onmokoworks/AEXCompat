@@ -6,7 +6,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def test_wide_time_evidence_covers_sdk_positive_and_cleanroom_negative():
-    data = json.loads((ROOT / "analysis" / "PF_WIDE_TIME_INPUT_RESULT_2026-07-15.json").read_text())
+    data = json.loads((ROOT / "analysis" / "PF_WIDE_TIME_INPUT_RESULT_2026-07-15.json").read_text(encoding="utf-8"))
     cases = {case["fixture"]: case for case in data["cases"]}
     assert data["sdk_constants"]["PF_OutFlag_WIDE_TIME_INPUT"] == 2
     assert data["sdk_constants"]["PF_OutFlag2_AUTOMATIC_WIDE_TIME_INPUT"] == 131072
@@ -29,10 +29,10 @@ def test_wide_time_evidence_covers_sdk_positive_and_cleanroom_negative():
 
 def test_worker_gates_non_current_time_as_rational_values():
     source = source_owners.worker_text()
-    runtime = (ROOT / "minihost" / "src" / "worker_smart_runtime.cpp").read_text()
+    runtime = (ROOT / "minihost" / "src" / "worker_smart_runtime.cpp").read_text(encoding="utf-8")
     assert "static_cast<int64_t>(what_time) * runtime.current_time_scale" in runtime
     assert "!current_time && !runtime.wide_time_checkout_allowed" in runtime
     assert "kOutFlag2AutomaticWideTimeInput" in source
     assert "int32_t __cdecl pre_checkout_layer" in runtime
-    fixture = (ROOT / "instruments" / "pf-wide-time-probe" / "pf_wide_time_probe.cpp").read_text()
+    fixture = (ROOT / "instruments" / "pf-wide-time-probe" / "pf_wide_time_probe.cpp").read_text(encoding="utf-8")
     assert "in_data->current_time + in_data->time_step" in fixture

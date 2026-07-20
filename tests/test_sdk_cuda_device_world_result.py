@@ -8,7 +8,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def test_cuda_device_world_matches_cpu_public_pixels_and_balances_ownership():
     evidence = json.loads(
-        (ROOT / "analysis" / "SDK_CUDA_DEVICE_WORLD_RESULT_2026-07-15.json").read_text()
+        (ROOT / "analysis" / "SDK_CUDA_DEVICE_WORLD_RESULT_2026-07-15.json").read_text(encoding="utf-8")
     )
     assert evidence["fixture"]["source_modified"] is False
     assert evidence["one_pixel_oracle"]["output_rgba8"] == [245, 235, 225, 255]
@@ -26,9 +26,9 @@ def test_cuda_device_world_matches_cpu_public_pixels_and_balances_ownership():
 
 
 def test_cuda_driver_boundary_is_dynamic_bounded_and_channel_explicit():
-    source = (ROOT / "minihost" / "src" / "gpu_memory_world_transport.cpp").read_text()
+    source = (ROOT / "minihost" / "src" / "gpu_memory_world_transport.cpp").read_text(encoding="utf-8")
     worker = source_owners.worker_text()
-    backend = (ROOT / "minihost" / "src" / "gpu_cuda_backend.cpp").read_text()
+    backend = (ROOT / "minihost" / "src" / "gpu_cuda_backend.cpp").read_text(encoding="utf-8")
     for marker in (
         'LoadLibraryExW(L"nvcuda.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32)',
         'load_function(state->module, state->mem_alloc, "cuMemAlloc_v2")',
@@ -47,7 +47,7 @@ def test_cuda_driver_boundary_is_dynamic_bounded_and_channel_explicit():
         assert marker in source
     assert "finish_cuda_render_transport" in worker
 
-    build = (ROOT / "tools" / "build-sdk-invert-cuda.ps1").read_text()
+    build = (ROOT / "tools" / "build-sdk-invert-cuda.ps1").read_text(encoding="utf-8")
     assert "SDK_Invert_ProcAmp_Kernel.cu" in build
     assert "/DHAS_CUDA=1" in build
     assert "target\\sdk-fixtures" in build

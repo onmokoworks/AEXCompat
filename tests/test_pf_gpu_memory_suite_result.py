@@ -7,7 +7,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def test_gpu_device_suite_memory_probe_is_balanced_and_rejects_double_free():
     result = json.loads(
-        (ROOT / "analysis" / "PF_GPU_MEMORY_SUITE_RESULT_2026-07-15.json").read_text()
+        (ROOT / "analysis" / "PF_GPU_MEMORY_SUITE_RESULT_2026-07-15.json").read_text(encoding="utf-8")
     )
     render = result["render"]
     assert result["fixture_sha256"] == "a8f5a20ae5f12eb4509b5a73fc7c21aee4b3530a080ef963b41adc1bcc9d62f0"
@@ -25,7 +25,7 @@ def test_gpu_device_suite_memory_probe_is_balanced_and_rejects_double_free():
 
 
 def test_gpu_device_suite_has_no_unsupported_slots_and_is_bounded():
-    source = (ROOT / "minihost" / "src" / "gpu_memory_world_transport.cpp").read_text()
+    source = (ROOT / "minihost" / "src" / "gpu_memory_world_transport.cpp").read_text(encoding="utf-8")
     table = source[source.index("std::array<void*, 15> gpu_device_suite1") :]
     table = table[: table.index("};")]
     assert "gpu_unsupported" not in table

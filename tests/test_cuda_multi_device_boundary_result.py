@@ -7,7 +7,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def test_cuda_multi_device_evidence_preserves_runtime_and_failure_isolation():
     evidence = json.loads(
-        (ROOT / "analysis" / "CUDA_MULTI_DEVICE_BOUNDARY_RESULT_2026-07-15.json").read_text()
+        (ROOT / "analysis" / "CUDA_MULTI_DEVICE_BOUNDARY_RESULT_2026-07-15.json").read_text(encoding="utf-8")
     )
     assert evidence["host"]["observed_device_count"] >= 1
     runtime = evidence["device_0_runtime"]
@@ -24,8 +24,8 @@ def test_cuda_multi_device_evidence_preserves_runtime_and_failure_isolation():
 
 
 def test_cuda_device_enumeration_is_bounded_and_worlds_keep_their_ordinal():
-    source = (ROOT / "minihost" / "src" / "gpu_memory_world_transport.cpp").read_text()
-    backend = (ROOT / "minihost" / "src" / "gpu_cuda_backend.cpp").read_text()
+    source = (ROOT / "minihost" / "src" / "gpu_memory_world_transport.cpp").read_text(encoding="utf-8")
+    backend = (ROOT / "minihost" / "src" / "gpu_cuda_backend.cpp").read_text(encoding="utf-8")
     for marker in (
         'load_function(state->module, state->device_get_count, "cuDeviceGetCount")',
         "static_assert(kMaxGpuDevices == 16)",
@@ -41,6 +41,6 @@ def test_cuda_device_enumeration_is_bounded_and_worlds_keep_their_ordinal():
     ):
         assert marker in source
 
-    broker = (ROOT / "broker" / "crates" / "broker" / "src" / "image_render.rs").read_text()
+    broker = (ROOT / "broker" / "crates" / "broker" / "src" / "image_render.rs").read_text(encoding="utf-8")
     assert '"cuda_device_count"' in broker
     assert '"cuda_device_index"' in broker

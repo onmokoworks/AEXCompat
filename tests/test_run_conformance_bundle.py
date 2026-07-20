@@ -87,8 +87,8 @@ def invoke(manifest: Path, output: Path, adapter: Path):
 
 
 def report_validator():
-    manifest_schema = json.loads((SCHEMAS / "conformance-manifest.schema.json").read_text())
-    report_schema = json.loads((SCHEMAS / "conformance-report.schema.json").read_text())
+    manifest_schema = json.loads((SCHEMAS / "conformance-manifest.schema.json").read_text(encoding="utf-8"))
+    report_schema = json.loads((SCHEMAS / "conformance-report.schema.json").read_text(encoding="utf-8"))
     registry = Registry().with_resource(manifest_schema["$id"], Resource.from_contents(manifest_schema))
     return Draft202012Validator(report_schema, registry=registry)
 
@@ -98,12 +98,12 @@ def test_creates_self_contained_schema_valid_bundle(tmp_path):
     output = tmp_path / "bundle"
     completed = invoke(manifest, output, adapter)
     assert completed.returncode == 0, completed.stderr
-    report = json.loads((output / "report.json").read_text())
+    report = json.loads((output / "report.json").read_text(encoding="utf-8"))
     report_validator().validate(report)
     assert (output / "artifacts" / "effect.aex").read_bytes() == b"aex"
     assert (output / "inputs" / "input.png").is_file()
     assert (output / "outputs" / "argb16.png").is_file()
-    metadata = json.loads((output / "diagnostics" / "run.json").read_text())
+    metadata = json.loads((output / "diagnostics" / "run.json").read_text(encoding="utf-8"))
     assert len(metadata["bundle_runner"]["sha256"]) == 64
     assert metadata["status"] == "completed"
     assert report["parameters"] == [{
@@ -447,7 +447,7 @@ def test_adapter_receives_and_reports_requested_render_path(tmp_path, render_pat
     output = tmp_path / "bundle"
     completed = invoke(manifest, output, adapter)
     assert completed.returncode == 0, completed.stderr
-    report = json.loads((output / "report.json").read_text())
+    report = json.loads((output / "report.json").read_text(encoding="utf-8"))
     assert {item["selector"]["render_path"] for item in report["results"]} == {render_path}
 
 
@@ -489,7 +489,7 @@ def test_manifest_rejects_native_render_settings_the_harness_cannot_apply(
     completed = invoke(manifest, tmp_path / "bundle", adapter)
     assert completed.returncode != 0
     failure = json.loads(
-        (tmp_path / "bundle" / "diagnostics" / "failure.json").read_text()
+        (tmp_path / "bundle" / "diagnostics" / "failure.json").read_text(encoding="utf-8")
     )
     assert failure["stage"] == "validate_manifest"
 
@@ -536,7 +536,7 @@ def test_rejects_artifacts_that_collide_with_generated_bundle_paths(tmp_path, re
     completed = invoke(manifest, output, adapter)
     assert completed.returncode != 0
     assert not (output / "report.json").exists()
-    failure = json.loads((output / "diagnostics" / "failure.json").read_text())
+    failure = json.loads((output / "diagnostics" / "failure.json").read_text(encoding="utf-8"))
     assert failure["stage"] == "validate_manifest"
     assert "collides with generated bundle content" in failure["error"]["text"]
 
@@ -565,7 +565,7 @@ def test_reserved_path_check_applies_to_every_artifact_role(tmp_path, role):
     completed = invoke(manifest, tmp_path / "bundle", adapter)
     assert completed.returncode != 0
     failure = json.loads(
-        (tmp_path / "bundle" / "diagnostics" / "failure.json").read_text()
+        (tmp_path / "bundle" / "diagnostics" / "failure.json").read_text(encoding="utf-8")
     )
     assert "collides with generated bundle content" in failure["error"]["text"]
 
@@ -581,7 +581,7 @@ def test_parameter_metadata_must_match_across_depths(tmp_path):
     completed = invoke(manifest, output, adapter)
     assert completed.returncode != 0
     assert not (output / "report.json").exists()
-    failure = json.loads((output / "diagnostics" / "failure.json").read_text())
+    failure = json.loads((output / "diagnostics" / "failure.json").read_text(encoding="utf-8"))
     assert "parameter metadata differs" in failure["error"]["text"]
 
 
@@ -596,7 +596,7 @@ def test_rejects_case_and_file_parent_artifact_aliases(tmp_path, second_path):
     completed = invoke(manifest, tmp_path / "bundle", adapter)
     assert completed.returncode != 0
     failure = json.loads(
-        (tmp_path / "bundle" / "diagnostics" / "failure.json").read_text()
+        (tmp_path / "bundle" / "diagnostics" / "failure.json").read_text(encoding="utf-8")
     )
     assert failure["stage"] == "validate_manifest"
     assert "artifact" in failure["error"]["text"]
@@ -620,14 +620,14 @@ def test_semantic_report_is_reproducible(tmp_path):
     first, second = tmp_path / "first", tmp_path / "second"
     assert invoke(manifest, first, adapter).returncode == 0
     assert invoke(manifest, second, adapter).returncode == 0
-    assert json.loads((first / "report.json").read_text()) == json.loads((second / "report.json").read_text())
+    assert json.loads((first / "report.json").read_text(encoding="utf-8")) == json.loads((second / "report.json").read_text(encoding="utf-8"))
 
 
 def test_bundle_artifact_identities_match_every_file(tmp_path):
     manifest, adapter = fixture(tmp_path)
     output = tmp_path / "bundle"
     assert invoke(manifest, output, adapter).returncode == 0
-    report = json.loads((output / "report.json").read_text())
+    report = json.loads((output / "report.json").read_text(encoding="utf-8"))
     artifacts = [
         report["identities"]["aex"],
         report["identities"]["input"],
@@ -647,9 +647,9 @@ def test_failure_leaves_bounded_diagnostic_bundle(tmp_path):
     output = tmp_path / "bundle"
     completed = invoke(manifest, output, adapter)
     assert completed.returncode == 0, completed.stderr
-    report = json.loads((output / "report.json").read_text())
+    report = json.loads((output / "report.json").read_text(encoding="utf-8"))
     assert {item["classification"] for item in report["results"]} == {"nonzero_exit"}
-    detail = json.loads((output / "diagnostics" / "run.json").read_text())
+    detail = json.loads((output / "diagnostics" / "run.json").read_text(encoding="utf-8"))
     assert detail["depths"]["argb8"]["stderr"]["truncated"] is True
     assert len(detail["depths"]["argb8"]["stderr"]["text"].encode()) <= 65536
     assert report["results"][0]["suite_timeline"] is None
@@ -663,7 +663,7 @@ def test_structured_failure_uses_meaningful_pre_render_error_over_sentinel(tmp_p
     )
     output = tmp_path / "bundle"
     assert invoke(manifest, output, adapter).returncode == 0
-    report = json.loads((output / "report.json").read_text())
+    report = json.loads((output / "report.json").read_text(encoding="utf-8"))
     assert {item["classification"] for item in report["results"]} == {"selector_error"}
     assert {item["selector"]["error_code"] for item in report["results"]} == {25}
 
@@ -676,7 +676,7 @@ def test_structured_inspection_failure_preserves_bounded_plugin_kind(tmp_path):
     )
     output = tmp_path / "bundle"
     assert invoke(manifest, output, adapter).returncode == 0
-    report = json.loads((output / "report.json").read_text())
+    report = json.loads((output / "report.json").read_text(encoding="utf-8"))
     assert {item["plugin_kind"] for item in report["results"]} == {"unknown_no_effect_entrypoint"}
 
 
@@ -689,7 +689,7 @@ def test_manifest_rejects_non_finite_json_numbers(tmp_path, constant):
     completed = invoke(manifest, output, adapter)
     assert completed.returncode != 0
     assert not (output / "report.json").exists()
-    failure = json.loads((output / "diagnostics" / "failure.json").read_text())
+    failure = json.loads((output / "diagnostics" / "failure.json").read_text(encoding="utf-8"))
     assert failure["stage"] == "load_manifest"
     assert "non-finite JSON number" in failure["error"]["text"]
 
@@ -702,7 +702,7 @@ def test_manifest_rejects_overflowed_nested_json_number(tmp_path):
     completed = invoke(manifest, output, adapter)
     assert completed.returncode != 0
     assert not (output / "report.json").exists()
-    failure = json.loads((output / "diagnostics" / "failure.json").read_text())
+    failure = json.loads((output / "diagnostics" / "failure.json").read_text(encoding="utf-8"))
     assert failure["stage"] == "load_manifest"
     assert "non-finite JSON number" in failure["error"]["text"]
 
@@ -794,7 +794,7 @@ def test_stderr_truncation_observes_exact_64k_boundary(tmp_path, size, truncated
     )
     output = tmp_path / "bundle"
     assert invoke(manifest, output, adapter).returncode == 0
-    detail = json.loads((output / "diagnostics" / "run.json").read_text())
+    detail = json.loads((output / "diagnostics" / "run.json").read_text(encoding="utf-8"))
     stderr = detail["depths"]["argb8"]["stderr"]
     assert stderr["bytes_kept"] == min(size, 65536)
     assert stderr["truncated"] is truncated
@@ -821,7 +821,7 @@ def test_synthesized_raw_input_applies_declared_alpha_mode(tmp_path, mode, sampl
 
     output = tmp_path / "bundle"
     assert invoke(manifest_path, output, adapter).returncode == 0
-    report = json.loads((output / "report.json").read_text())
+    report = json.loads((output / "report.json").read_text(encoding="utf-8"))
     result = report["results"][0]
     if depth == "argb8":
         expected = samples
@@ -845,10 +845,10 @@ def test_structured_nonzero_failure_preserves_protocol_and_missing_suites(tmp_pa
     output = tmp_path / "bundle"
     completed = invoke(manifest, output, adapter)
     assert completed.returncode == 0, completed.stderr
-    report = json.loads((output / "report.json").read_text())
+    report = json.loads((output / "report.json").read_text(encoding="utf-8"))
     assert {item["classification"] for item in report["results"]} == {"missing_suite"}
     assert report["results"][0]["missing_suites"] == [{"name": "PF World Suite", "version": 2}]
-    detail = json.loads((output / "diagnostics" / "run.json").read_text())
+    detail = json.loads((output / "diagnostics" / "run.json").read_text(encoding="utf-8"))
     assert detail["depths"]["argb8"]["stdout"]["truncated"] is False
     assert detail["depths"]["argb8"]["stdout"]["bytes_kept"] > 65536
 
@@ -869,7 +869,7 @@ def test_captured_oracle_identity_is_not_derived_from_bytes(tmp_path):
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
     output = tmp_path / "bundle"
     assert invoke(manifest_path, output, adapter).returncode == 0
-    oracle_result = json.loads((output / "report.json").read_text())["results"][0]["oracle"]
+    oracle_result = json.loads((output / "report.json").read_text(encoding="utf-8"))["results"][0]["oracle"]
     assert oracle_result["identity_match"] is False
     assert oracle_result["exact"] is False
     assert oracle_result["mismatched_pixels"] == 0
@@ -882,7 +882,7 @@ def test_adapter_cannot_claim_success_for_wrong_output_identity(tmp_path):
     output = tmp_path / "bundle"
     completed = invoke(manifest, output, adapter)
     assert completed.returncode == 0, completed.stderr
-    report = json.loads((output / "report.json").read_text())
+    report = json.loads((output / "report.json").read_text(encoding="utf-8"))
     assert {item["classification"] for item in report["results"]} == {"invalid_output"}
 
 
@@ -890,7 +890,7 @@ def test_request_sidecar_records_execution_and_redacted_full_argv(tmp_path):
     manifest, adapter = fixture(tmp_path)
     output = tmp_path / "bundle"
     assert invoke(manifest, output, adapter).returncode == 0
-    request = json.loads((output / "requests" / "argb8.json").read_text())
+    request = json.loads((output / "requests" / "argb8.json").read_text(encoding="utf-8"))
     assert request["timing"] == {"frame": 0, "time_scale": 30, "time_step": 1}
     assert request["assignments"] == [{"slot": 1, "value": 50}]
     assert request["render_settings"] == {
@@ -899,7 +899,7 @@ def test_request_sidecar_records_execution_and_redacted_full_argv(tmp_path):
         "linear_light": False,
         "renderer": "AEXCompat CPU",
     }
-    run = json.loads((output / "diagnostics" / "run.json").read_text())
+    run = json.loads((output / "diagnostics" / "run.json").read_text(encoding="utf-8"))
     argv = run["depths"]["argb8"]["argv"]
     assert [item["index"] for item in argv] == list(range(len(argv)))
     assert any(item["role"] == "request" for item in argv if item["kind"] == "path")
@@ -919,7 +919,7 @@ def test_request_sidecar_transports_dependencies_and_boolean_values(tmp_path):
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
     output = tmp_path / "bundle"
     assert invoke(manifest_path, output, adapter).returncode == 0
-    request = json.loads((output / "requests" / "argb8.json").read_text())
+    request = json.loads((output / "requests" / "argb8.json").read_text(encoding="utf-8"))
     assert request["dependencies"] == manifest["plugin"]["dependencies"]
     assert request["assignments"] == [{"slot": 1, "value": 1}, {"slot": 2, "value": 0}]
 
@@ -932,7 +932,7 @@ def test_manifest_rejects_parameter_values_without_a_typed_transport(tmp_path, v
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
     output = tmp_path / "bundle"
     assert invoke(manifest_path, output, adapter).returncode != 0
-    failure = json.loads((output / "diagnostics" / "failure.json").read_text())
+    failure = json.loads((output / "diagnostics" / "failure.json").read_text(encoding="utf-8"))
     assert failure["stage"] == "validate_manifest"
 
 
@@ -954,7 +954,7 @@ def test_failed_render_retains_captured_oracle_identity(tmp_path):
     output = tmp_path / "bundle"
     completed = invoke(manifest_path, output, adapter)
     assert completed.returncode == 0, completed.stderr
-    report = json.loads((output / "report.json").read_text())
+    report = json.loads((output / "report.json").read_text(encoding="utf-8"))
     report_validator().validate(report)
     assert report["results"][0]["oracle"] == {
         "state": "not_captured",
@@ -979,7 +979,7 @@ def test_not_requested_oracle_state_is_retained_for_every_render_outcome(
     completed = invoke(manifest_path, output, adapter)
 
     assert completed.returncode == 0, completed.stderr
-    report = json.loads((output / "report.json").read_text())
+    report = json.loads((output / "report.json").read_text(encoding="utf-8"))
     report_validator().validate(report)
     assert report["results"][0]["oracle"] == {
         "state": "not_requested",
@@ -997,7 +997,7 @@ def test_validator_failure_persists_failure_evidence_without_report(tmp_path):
     output = tmp_path / "bundle"
     completed = invoke(manifest, output, adapter)
     assert completed.returncode != 0
-    failure = json.loads((output / "diagnostics" / "failure.json").read_text())
+    failure = json.loads((output / "diagnostics" / "failure.json").read_text(encoding="utf-8"))
     assert failure["stage"] == "validate_report"
     assert failure["report_written"] is False
     assert failure["report_status"] == "not_a_report"
@@ -1022,7 +1022,7 @@ def test_captured_oracle_is_compared_per_depth(tmp_path):
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
     output = tmp_path / "bundle"
     assert invoke(manifest_path, output, adapter).returncode == 0
-    report = json.loads((output / "report.json").read_text())
+    report = json.loads((output / "report.json").read_text(encoding="utf-8"))
     assert {item["oracle"]["state"] for item in report["results"]} == {"captured"}
     assert {item["oracle"]["exact"] for item in report["results"]} == {True}
 
@@ -1038,7 +1038,7 @@ def test_source_has_no_host_reimplementation():
 
 
 def test_harness_exposes_depth_variants_of_typed_request_cli():
-    source = (ROOT / "broker" / "crates" / "harness" / "src" / "main.rs").read_text()
+    source = (ROOT / "broker" / "crates" / "harness" / "src" / "main.rs").read_text(encoding="utf-8")
     for flag in (
         '"--render-experimental-request"',
         '"--render-experimental-request-16"',

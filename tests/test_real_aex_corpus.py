@@ -13,11 +13,11 @@ def test_public_inventory_matrix_and_case_count():
     inventory=corpus.load_validated(ROOT/"corpus/real-aex-public.json","real-aex-corpus.schema.json");matrix=corpus.load_validated(ROOT/"corpus/common-matrix.json","real-aex-matrix.schema.json");corpus.validate_inventory(inventory)
     assert len(inventory["entries"])==5 and len({x["supplier"] for x in inventory["entries"]})==3
     assert set(matrix["render_paths"])=={"classic","smartfx"} and len(list(corpus.matrix_cases(inventory,matrix)))==120
-    assert "Program Files" not in (ROOT/"corpus/real-aex-public.json").read_text()
+    assert "Program Files" not in (ROOT/"corpus/real-aex-public.json").read_text(encoding="utf-8")
 
 def test_all_corpus_schemas_are_valid_draft_2020_12():
     for name in ("real-aex-corpus.schema.json","real-aex-locator.schema.json","real-aex-matrix.schema.json","real-aex-triage.schema.json","real-aex-gaps.schema.json","real-aex-public-evidence.schema.json"):
-        Draft202012Validator.check_schema(json.loads((ROOT/"schemas"/name).read_text()))
+        Draft202012Validator.check_schema(json.loads((ROOT/"schemas"/name).read_text(encoding="utf-8")))
 
 def test_suite_aggregation_is_distinct_sha_and_gap_safe():
     rows=[{"classification":"missing_suite","plugin_sha256":"a"*64,"missing_suites":[{"name":"Private Looking Suite","version":2}]},{"classification":"missing_suite","plugin_sha256":"a"*64,"missing_suites":[{"name":"Private Looking Suite","version":2}]},{"classification":"missing_suite","plugin_sha256":"b"*64,"missing_suites":[{"name":"Private Looking Suite","version":2}]}]
@@ -29,7 +29,7 @@ def test_issue4_runner_maps_every_explicit_path_and_depth():
     assert bundle.DEPTH_COMMANDS[("classic","argb32f")]=="--render-experimental-request-32"
 
 def test_normalize_classification_covers_every_report_schema_class():
-    schema=json.loads((ROOT/"schemas/conformance-report.schema.json").read_text())
+    schema=json.loads((ROOT/"schemas/conformance-report.schema.json").read_text(encoding="utf-8"))
     classes=schema["$defs"]["depth_result"]["properties"]["classification"]["enum"]
     for value in classes: corpus.normalize_classification(value)  # no KeyError for any schema class
     assert corpus.normalize_classification("empty_result")=="ok"  # a legal empty SmartFX render is not a gap
@@ -116,8 +116,8 @@ def test_synthetic_main_publishes_schema_valid_redacted_gap_and_private_mapping(
     monkeypatch.setattr(corpus,"execute_case",lambda *args:(report,result,corpus.hashlib.sha256(report_bytes).hexdigest(),{"manifest.json":b"{}\n","report.json":report_bytes,"run.json":b"{}\n"}))
     monkeypatch.setattr(corpus.sys,"argv",["run-real-aex-corpus.py","--inventory",str(ROOT/"corpus/real-aex-public.json"),"--locator",str(locator_path),"--matrix",str(ROOT/"corpus/common-matrix.json"),"--runner",str(runner),"--input",str(input_path),"--out",str(public),"--private-evidence-out",str(private),"--case-id","case-000001"])
     assert corpus.main()==0
-    gaps=json.loads((public/"reproducible-gaps.json").read_text());Draft202012Validator(json.loads((ROOT/"schemas/real-aex-gaps.schema.json").read_text())).validate(gaps)
-    encoded=(public/"reproducible-gaps.json").read_text()+next((public/"evidence").glob("*.json")).read_text()
+    gaps=json.loads((public/"reproducible-gaps.json").read_text(encoding="utf-8"));Draft202012Validator(json.loads((ROOT/"schemas/real-aex-gaps.schema.json").read_text(encoding="utf-8"))).validate(gaps)
+    encoded=(public/"reproducible-gaps.json").read_text(encoding="utf-8")+next((public/"evidence").glob("*.json")).read_text(encoding="utf-8")
     assert "ntsc-rs" not in encoded and "private-name" not in encoded and "case-000001" not in encoded and "0.5" not in encoded
-    assert json.loads((private/"gap-map.json").read_text())["mapping"][0]["case_ids"]==["case-000001"]
+    assert json.loads((private/"gap-map.json").read_text(encoding="utf-8"))["mapping"][0]["case_ids"]==["case-000001"]
     assert corpus.hashlib.sha256(next((public/"evidence").glob("*.json")).read_bytes()).hexdigest()==gaps["records"][0]["evidence"]["sha256"]

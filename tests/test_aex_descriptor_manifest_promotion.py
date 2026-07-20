@@ -96,8 +96,8 @@ class DescriptorManifestPromotionTests(unittest.TestCase):
                 report,
             )
         )
-        self.assertEqual(json.loads(candidate.read_text()), self.manifest)
-        result = json.loads(report.read_text())
+        self.assertEqual(json.loads(candidate.read_text(encoding="utf-8")), self.manifest)
+        result = json.loads(report.read_text(encoding="utf-8"))
         self.assertTrue(result["matches_promoted"])
         self.assertEqual(result["candidate_canonical_sha256"], "C797EC7C45A603D2C86FB980DC5279E8B075D0E27D466315A2ABFA15BE608C37")
         self.assertFalse(result["native_process_started"])
@@ -117,7 +117,7 @@ class DescriptorManifestPromotionTests(unittest.TestCase):
         self.assertFalse(
             promotion.run(source, promotion.PROFILE_ROOT / "scattermap/parameter_descriptors.json", candidate, report)
         )
-        result = json.loads(report.read_text())
+        result = json.loads(report.read_text(encoding="utf-8"))
         self.assertFalse(result["matches_promoted"])
         self.assertNotEqual(result["candidate_canonical_sha256"], result["promoted_canonical_sha256"])
 

@@ -6,7 +6,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def test_shutter_transport_is_independent_from_dependency_advertisement():
-    data = json.loads((ROOT / "analysis" / "PF_SHUTTER_DEPENDENCY_RESULT_2026-07-15.json").read_text())
+    data = json.loads((ROOT / "analysis" / "PF_SHUTTER_DEPENDENCY_RESULT_2026-07-15.json").read_text(encoding="utf-8"))
     cases = {case["fixture"]: case for case in data["cases"]}
     advertised = cases["pf_shutter_dependency_probe"]
     unadvertised = cases["pf_shutter_unadvertised_probe"]

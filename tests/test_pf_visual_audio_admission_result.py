@@ -7,13 +7,13 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def worker_source():
     return (source_owners.worker_text() + "\n" +
-            (ROOT / "minihost" / "src" / "l2_cli_dispatch.cpp").read_text() + "\n" +
-            (ROOT / "minihost" / "src" / "host_audio_runtime.hpp").read_text() + "\n" +
-            (ROOT / "minihost" / "src" / "host_audio_runtime.cpp").read_text())
+            (ROOT / "minihost" / "src" / "l2_cli_dispatch.cpp").read_text(encoding="utf-8") + "\n" +
+            (ROOT / "minihost" / "src" / "host_audio_runtime.hpp").read_text(encoding="utf-8") + "\n" +
+            (ROOT / "minihost" / "src" / "host_audio_runtime.cpp").read_text(encoding="utf-8"))
 
 
 def test_visual_audio_admission_and_audio_only_exemption():
-    data = json.loads((ROOT / "analysis" / "PF_VISUAL_AUDIO_ADMISSION_RESULT_2026-07-15.json").read_text())
+    data = json.loads((ROOT / "analysis" / "PF_VISUAL_AUDIO_ADMISSION_RESULT_2026-07-15.json").read_text(encoding="utf-8"))
     cases = {case["fixture"]: case for case in data["cases"]}
     advertised = cases["pf_visual_audio_advertised_probe"]
     denied = cases["pf_visual_audio_unadvertised_probe"]
@@ -44,11 +44,11 @@ def test_worker_checks_admission_before_source_availability():
     assert admission < source_check
     assert "audio_only_mode || usage_advertised" in source
     assert 'L"--render-image-audio"' in source
-    fixture = (ROOT / "instruments" / "pf-visual-audio-probe" / "pf_visual_audio_probe.cpp").read_text()
+    fixture = (ROOT / "instruments" / "pf-visual-audio-probe" / "pf_visual_audio_probe.cpp").read_text(encoding="utf-8")
     assert "PF_CHECKOUT_LAYER_AUDIO" in fixture
     assert "PF_GET_AUDIO_DATA" in fixture
-    broker = (ROOT / "broker" / "crates" / "broker" / "src" / "image_render.rs").read_text()
-    harness = (ROOT / "broker" / "crates" / "harness" / "src" / "main.rs").read_text()
+    broker = (ROOT / "broker" / "crates" / "broker" / "src" / "image_render.rs").read_text(encoding="utf-8")
+    harness = (ROOT / "broker" / "crates" / "harness" / "src" / "main.rs").read_text(encoding="utf-8")
     assert "render_experimental_image_with_audio_sidecar" in broker
     assert "audio sidecar contains a non-finite sample" in broker
     assert "--render-experimental-image-audio-sidecar" in harness
@@ -57,7 +57,7 @@ def test_worker_checks_admission_before_source_availability():
 
 
 def test_audio_checkout_windows_are_bounded_owned_and_time_scaled():
-    data = json.loads((ROOT / "analysis" / "PF_AUDIO_CHECKOUT_WINDOW_RESULT_2026-07-15.json").read_text())
+    data = json.loads((ROOT / "analysis" / "PF_AUDIO_CHECKOUT_WINDOW_RESULT_2026-07-15.json").read_text(encoding="utf-8"))
     cases = {case["fixture"]: case for case in data["cases"]}
     boundary = cases["pf_visual_audio_boundary_probe"]
     sdk = cases["Adobe SDK SDK_Backwards.aex"]
@@ -78,14 +78,14 @@ def test_audio_checkout_windows_are_bounded_owned_and_time_scaled():
     assert "const bool sentinel_frame = frame == window_count" in worker
     assert "telemetry_.last_window_silence_samples" in worker
     assert "write<uint32_t>(input, kInTimeScale, 44100);" in worker
-    broker = (ROOT / "broker" / "crates" / "broker" / "src" / "image_render.rs").read_text()
+    broker = (ROOT / "broker" / "crates" / "broker" / "src" / "image_render.rs").read_text(encoding="utf-8")
     assert '"last_audio_window_sample_count"' in broker
     assert '"last_audio_window_silence_samples"' in broker
     assert '"last_audio_output_channels"' in broker
 
 
 def test_audio_checkout_converts_requested_sdk_formats():
-    data = json.loads((ROOT / "analysis" / "PF_AUDIO_FORMAT_CONVERSION_RESULT_2026-07-15.json").read_text())
+    data = json.loads((ROOT / "analysis" / "PF_AUDIO_FORMAT_CONVERSION_RESULT_2026-07-15.json").read_text(encoding="utf-8"))
     matrix = data["supported_request_matrix"]
     fixture = data["fixture"]
     assert matrix["channels"] == [1, 2]
@@ -106,7 +106,7 @@ def test_audio_checkout_converts_requested_sdk_formats():
 
 
 def test_audio_handles_support_bounded_overlapping_lifetimes():
-    data = json.loads((ROOT / "analysis" / "PF_AUDIO_MULTI_HANDLE_RESULT_2026-07-15.json").read_text())
+    data = json.loads((ROOT / "analysis" / "PF_AUDIO_MULTI_HANDLE_RESULT_2026-07-15.json").read_text(encoding="utf-8"))
     run = data["run"]
     assert data["maximum_live_handles"] == 16
     assert run["checkout_calls"] == run["get_data_calls"] == run["checkin_calls"] == 2
@@ -126,7 +126,7 @@ def test_audio_handles_support_bounded_overlapping_lifetimes():
 
 
 def test_audio_data_includes_the_sdk_trailing_silent_frame():
-    data = json.loads((ROOT / "analysis" / "PF_AUDIO_SENTINEL_FRAME_RESULT_2026-07-15.json").read_text())
+    data = json.loads((ROOT / "analysis" / "PF_AUDIO_SENTINEL_FRAME_RESULT_2026-07-15.json").read_text(encoding="utf-8"))
     cases = {case["fixture"]: case for case in data["verified_cases"] if "format" in case}
     assert data["host_contract"]["requested_window_frames_excludes_sentinel"] is True
     assert cases["pf_visual_audio_sidecar_probe"]["returned_frames"] == 7

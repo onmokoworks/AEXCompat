@@ -10,7 +10,7 @@ OUTPUT_SHA256 = "6f24052bf442cc05899fdfe3779514c610652c6ab1d8dcba083dbf36f9ad061
 
 def load_evidence():
     return json.loads(
-        (ROOT / "analysis" / "SDK_DIRECTX_DEVICE_WORLD_RESULT_2026-07-16.json").read_text()
+        (ROOT / "analysis" / "SDK_DIRECTX_DEVICE_WORLD_RESULT_2026-07-16.json").read_text(encoding="utf-8")
     )
 
 
@@ -61,10 +61,10 @@ def test_directx_device_world_evidence_records_exact_public_rgba8_conformance():
 
 def test_directx_implementation_build_and_readme_markers_are_present():
     main = source_owners.worker_text()
-    main += "\n" + (ROOT / "minihost" / "src" / "l2_cli_dispatch.cpp").read_text()
-    main += "\n" + (ROOT / "minihost" / "src" / "gpu_memory_world_transport.cpp").read_text()
-    main += "\n" + (ROOT / "minihost" / "src" / "worker_render_report.cpp").read_text()
-    source = (ROOT / "minihost" / "src" / "gpu_directx_backend.cpp").read_text()
+    main += "\n" + (ROOT / "minihost" / "src" / "l2_cli_dispatch.cpp").read_text(encoding="utf-8")
+    main += "\n" + (ROOT / "minihost" / "src" / "gpu_memory_world_transport.cpp").read_text(encoding="utf-8")
+    main += "\n" + (ROOT / "minihost" / "src" / "worker_render_report.cpp").read_text(encoding="utf-8")
+    source = (ROOT / "minihost" / "src" / "gpu_directx_backend.cpp").read_text(encoding="utf-8")
     for marker in (
         'LoadLibraryExW(L"dxgi.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32)',
         'LoadLibraryExW(L"d3d12.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32)',
@@ -86,7 +86,7 @@ def test_directx_implementation_build_and_readme_markers_are_present():
     ):
         assert marker in main
 
-    build = (ROOT / "tools" / "build-sdk-invert-directx.ps1").read_text()
+    build = (ROOT / "tools" / "build-sdk-invert-directx.ps1").read_text(encoding="utf-8")
     for marker in (
         "SDK_Invert_ProcAmp_Kernel.chlsl",
         "/DGF_DEVICE_TARGET_HLSL=1",
