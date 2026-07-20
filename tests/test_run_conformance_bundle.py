@@ -393,6 +393,40 @@ def test_missing_suite_names_are_filtered_to_the_report_schema():
     assert "missing_suites" not in dropped
 
 
+def test_suite_timeline_entries_are_filtered_to_the_report_schema():
+    module = load_runner_module()
+    valid_event = {
+        "sequence": 0,
+        "action": "acquire",
+        "name": "PF World Suite",
+        "version": 2,
+        "selector": "acquire_suite",
+        "result": 0,
+    }
+    # A dotted suite name is accepted by the native collector but rejected by the
+    # report schema, so this timeline entry must be dropped before storage.
+    invalid_event = {**valid_event, "sequence": 1, "action": "release", "name": "AEGP.World.Suite"}
+    assert module.schema_valid_suite_timeline([valid_event, invalid_event]) == [valid_event]
+    assert module.schema_valid_suite_timeline(None) is None
+    assert module.schema_valid_suite_timeline("not-a-list") is None
+
+    input_world = {
+        "width": 2,
+        "height": 2,
+        "row_bytes": 8,
+        "pixel_format": "argb8",
+        "premultiplication": "premultiplied",
+        "extent_hint": {"left": 0, "top": 0, "right": 2, "bottom": 2},
+    }
+    failure = module.normalize_structured_failure(
+        "argb8",
+        {"classification": "nonzero_exit", "suite_timeline": [valid_event, invalid_event]},
+        input_world,
+        "smartfx",
+    )
+    assert failure["suite_timeline"] == [valid_event]
+
+
 def test_manifest_requires_a_valid_render_path(tmp_path):
     manifest, adapter = fixture(tmp_path)
     document = json.loads(manifest.read_text(encoding="utf-8"))

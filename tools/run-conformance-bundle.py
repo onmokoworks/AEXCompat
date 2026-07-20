@@ -353,7 +353,7 @@ def empty_smartfx_result(
         "raw_input": None,
         "raw_output": None,
         "output_sha256": output_sha256,
-        "suite_timeline": value.get("suite_timeline"),
+        "suite_timeline": schema_valid_suite_timeline(value.get("suite_timeline")),
         "_parameter_metadata": value["parameter_metadata"],
         "oracle": {"state": "not_captured", "identity_match": False, "exact": False},
     }
@@ -437,7 +437,7 @@ def normalize_harness_report(
         "raw_input": None,
         "raw_output": None,
         "output_sha256": sha256(output),
-        "suite_timeline": value.get("suite_timeline"),
+        "suite_timeline": schema_valid_suite_timeline(value.get("suite_timeline")),
         "_parameter_metadata": value["parameter_metadata"],
         "oracle": {"state": "not_captured", "identity_match": False, "exact": False},
     }
@@ -476,6 +476,45 @@ def schema_valid_missing_suites(missing: Any) -> list[dict[str, Any]]:
         if len(valid) >= 16:
             break
     return valid
+
+
+# Mirrors $defs/suite_event in conformance-report.schema.json. The native suite
+# collector accepts names the report schema rejects (e.g. dotted names), so a
+# timeline entry naming such a suite must be dropped before it reaches the bundle.
+_SUITE_EVENT_SELECTOR = re.compile(r"[A-Za-z0-9_ -]+")
+_SUITE_EVENT_KEYS = {"sequence", "action", "name", "version", "selector", "result"}
+
+
+def _is_bounded_int(value: Any, low: int, high: int) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and low <= value <= high
+
+
+def _valid_suite_event(event: Any) -> bool:
+    if not isinstance(event, dict) or set(event.keys()) != _SUITE_EVENT_KEYS:
+        return False
+    name = event["name"]
+    selector = event["selector"]
+    return (
+        _is_bounded_int(event["sequence"], 0, 4294967295)
+        and event["action"] in ("acquire", "release")
+        and isinstance(name, str)
+        and _MISSING_SUITE_NAME.fullmatch(name) is not None
+        and _is_bounded_int(event["version"], 1, 65535)
+        and isinstance(selector, str)
+        and 1 <= len(selector) <= 64
+        and _SUITE_EVENT_SELECTOR.fullmatch(selector) is not None
+        and isinstance(event["result"], int)
+        and not isinstance(event["result"], bool)
+    )
+
+
+def schema_valid_suite_timeline(timeline: Any) -> list[dict[str, Any]] | None:
+    # Drop timeline entries the report schema would reject so a single
+    # schema-incompatible suite name cannot make validate_bundle discard the whole
+    # bundle. A non-list (or absent) timeline stays null.
+    if not isinstance(timeline, list):
+        return None
+    return [event for event in timeline if _valid_suite_event(event)][:65536]
 
 
 def normalize_structured_failure(
@@ -544,7 +583,7 @@ def normalize_structured_failure(
         "raw_input": None,
         "raw_output": None,
         "output_sha256": None,
-        "suite_timeline": value.get("suite_timeline") if isinstance(value.get("suite_timeline"), list) else None,
+        "suite_timeline": schema_valid_suite_timeline(value.get("suite_timeline")),
         "oracle": {"state": "not_captured", "identity_match": False, "exact": False},
     }
     if isinstance(value.get("parameter_metadata"), list):
