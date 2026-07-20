@@ -186,6 +186,7 @@ void apply_smart(const request_parser::WorkerInvocation& source,
   target.smart_image_argc = mode.image_argc;
   target.smart_layered_image_mode = mode.layered_image_mode;
   target.smart_image_mode = mode.image_mode;
+  target.render_session_mode = mode.render_session_mode;
   target.mask_request_mode = mode.mask_request_mode;
   target.mask_scene_request_mode = mode.mask_scene_request_mode;
   target.mask_context_request_mode = mode.mask_context_request_mode;
@@ -260,12 +261,21 @@ SmartResult smart_render_once(EffectEntry entry, std::array<std::byte, kInSize>&
                               int32_t external_current_time = 0, int32_t external_time_step = 1,
                               int32_t external_total_time = 1,
                               uint32_t external_time_scale = 1,
-                              int32_t external_pixel_bytes = 4);
+                              int32_t external_pixel_bytes = 4,
+                              aexcompat::worker_runtime::smart_execution::SessionFrame*
+                                  session = nullptr);
 RenderSessionOutcome run_render_session(
     EffectEntry entry, std::array<std::byte, kInSize>& input,
     std::array<std::byte, kOutSize>& output, const RequestedAssignments* requested,
     int32_t max_width, int32_t max_height, int32_t time_step, int32_t total_time,
-    uint32_t time_scale, int32_t pixel_bytes);
+    uint32_t time_scale, int32_t pixel_bytes,
+    const std::vector<ExternalLayerInput>* external_layers);
+SmartRenderSessionOutcome run_smart_render_session(
+    EffectEntry entry, std::array<std::byte, kInSize>& input,
+    std::array<std::byte, kOutSize>& output, const RequestedAssignments* requested,
+    const std::string& case_id, int32_t max_width, int32_t max_height,
+    int32_t time_step, int32_t total_time, uint32_t time_scale,
+    int32_t pixel_bytes);
 
 template <typename T, std::size_t N>
 T read(const std::array<std::byte, N>& bytes, std::size_t offset) {
@@ -485,7 +495,8 @@ ClassicFinalDispatchResult run_classic_final_dispatch(const FinalDispatchRequest
     const auto session_outcome = run_render_session(
         entry, input, output, &invocation.requested_parameters, invocation.external_width,
         invocation.external_height, invocation.external_time_step, invocation.external_total_time,
-        invocation.external_time_scale, invocation.external_pixel_bytes);
+        invocation.external_time_scale, invocation.external_pixel_bytes,
+        invocation.external_layers.empty() ? nullptr : &invocation.external_layers);
     persistent_sequence_setup_error = session_outcome.setup_error;
     persistent_sequence_setdown_error = session_outcome.setdown_error;
     render_width = session_outcome.width;
@@ -537,6 +548,31 @@ SmartFinalDispatchResult run_smart_final_dispatch(const FinalDispatchRequest& re
       case_id.push_back(static_cast<char>(*p));
     }
   std::cerr << "stage:smart_render_begin\n" << std::flush;
+  if (invocation.render_session_mode) {
+    // Resident smart session (protocol v1.1). When the plug-in cannot render
+    // (bad params, unsupported depth, no SmartFX support) the loop is never
+    // entered; the broker observes the nonzero process exit instead of a
+    // hanging session, exactly like the classic session branch.
+    if (params_error == 0 && image_render_supported && depth_supported &&
+        smart_render_supported) {
+      const auto outcome = run_smart_render_session(
+          entry, input, output, &invocation.requested_parameters, case_id,
+          invocation.external_width, invocation.external_height,
+          invocation.external_time_step, invocation.external_total_time,
+          invocation.external_time_scale, invocation.external_pixel_bytes);
+      smart = outcome.last;
+      // The report's guard verdict is the session-level one: a per-frame
+      // guard violation invalidated the session (exit 24), and an empty
+      // session never built a guarded buffer to corrupt.
+      smart.guards_intact = outcome.session.guards_intact;
+      result.session_protocol_violation = outcome.session.protocol_violation;
+      result.session_invariant_failure = outcome.session.invariant_failure;
+      result.session_frames_attempted = outcome.session.frames_attempted;
+      result.session_sequence_setup_error = outcome.session.setup_error;
+      result.session_sequence_setdown_error = outcome.session.setdown_error;
+      result.session_render_error = outcome.session.render_error;
+    }
+  } else {
   smart = params_error == 0 && image_render_supported && depth_supported &&
       smart_render_supported
       ? smart_render_once(entry, input, output, case_id,
@@ -549,6 +585,7 @@ SmartFinalDispatchResult run_smart_final_dispatch(const FinalDispatchRequest& re
                           invocation.external_total_time, invocation.external_time_scale,
                           invocation.external_pixel_bytes)
       : SmartResult{};
+  }
   lifetime_fault_observed = invocation.mask_double_dispose_mode
       ? verify_mask_double_dispose_rejected()
       : invocation.stream_live_value_dispose_mode

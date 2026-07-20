@@ -1800,6 +1800,329 @@ fn advertised_smart_render(report: &serde_json::Value) -> Option<bool> {
     report["worker_diagnostics"]["smart_render_advertised"].as_bool()
 }
 
+/// Per-frame watchdog deadline for resident-session renders, matching the
+/// broker's interactive one-shot timeout.
+const LIVE_RENDER_FRAME_DEADLINE_MS: u64 = 30_000;
+
+/// Static configuration a resident render session was opened with (issue
+/// #107). A key change means the running worker cannot carry the next render:
+/// the session thread closes it and opens a fresh one (SEQUENCE_SETUP runs
+/// again; the reopen is visible in the report's `resident_session` facts).
+#[cfg(windows)]
+#[derive(Clone, PartialEq)]
+struct LiveSessionKey {
+    plugin_sha256: String,
+    /// Identity of every approved dependency: staged basename, size, and
+    /// content hash. The sealed tree stages dependencies by basename, so a
+    /// renamed DLL with identical bytes still needs a fresh session.
+    dependency_identities: Vec<String>,
+    /// Parameter structure only (slots, kinds, ranges, choices); values ride
+    /// each frame's v:2 message and must not force a reopen.
+    parameter_signature: String,
+    width: u32,
+    height: u32,
+    pixel_format: aexcompat_broker::image_render::RenderPixelFormat,
+    time_step: i32,
+    total_time: i32,
+    time_scale: u32,
+}
+
+// Platform-independent (and unit-tested) even though the resident session
+// that consumes it is Windows-only.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn parameter_structure_signature(
+    parameters: &[aexcompat_broker::image_render::InteractiveParameter],
+) -> String {
+    serde_json::to_string(
+        &parameters
+            .iter()
+            .map(|parameter| {
+                serde_json::json!({
+                    "slot": parameter.slot,
+                    "kind": parameter.kind,
+                    "name": parameter.name,
+                    "minimum": parameter.minimum,
+                    "maximum": parameter.maximum,
+                    "choices": parameter.choices,
+                    "component_count": parameter.component_count,
+                })
+            })
+            .collect::<Vec<_>>(),
+    )
+    .unwrap_or_default()
+}
+
+#[cfg(windows)]
+struct LiveRenderRequest {
+    repository: PathBuf,
+    plugin_path: PathBuf,
+    plugin_sha256: String,
+    dependencies: Vec<aexcompat_broker::secure_image_dispatch::ApprovedImageArtifact>,
+    parameters: Vec<aexcompat_broker::image_render::InteractiveParameter>,
+    input_path: PathBuf,
+    timing: aexcompat_broker::image_render::RenderTiming,
+    pixel_format: aexcompat_broker::image_render::RenderPixelFormat,
+    output: PathBuf,
+    respond: mpsc::Sender<TaskResult>,
+    identity: DispatchIdentity,
+    diagnostic_eligible: bool,
+}
+
+#[cfg(windows)]
+enum LiveCommand {
+    Render(Box<LiveRenderRequest>),
+    /// AEX change, approval invalidation, or shutdown: the resident worker
+    /// must not outlive the selection it was opened for.
+    Close,
+}
+
+#[cfg(windows)]
+struct LiveSessionHandle {
+    sender: mpsc::Sender<LiveCommand>,
+}
+
+#[cfg(windows)]
+struct DecodedInput {
+    path: PathBuf,
+    content_sha256: [u8; 32],
+    width: u32,
+    height: u32,
+    rgba: std::sync::Arc<Vec<u8>>,
+}
+
+/// State owned by the GUI's single background session thread (issue #107
+/// design: one async session thread inside the GUI process drives the
+/// out-of-process resident worker; the UI thread never blocks on it).
+#[cfg(windows)]
+struct LiveSessionState {
+    decoded: Option<DecodedInput>,
+    open: Option<(
+        LiveSessionKey,
+        aexcompat_broker::image_render::InteractiveRenderSession,
+    )>,
+    /// Counts session opens; each reopen means temporal state restarted.
+    session_generation: u64,
+    /// Unclean close summary of the previous session, surfaced in the next
+    /// render report instead of being dropped silently.
+    pending_close_summary: Option<serde_json::Value>,
+}
+
+#[cfg(windows)]
+impl LiveSessionState {
+    fn close_current(&mut self) {
+        if let Some((_, session)) = self.open.take() {
+            let summary = session.close();
+            if summary.get("session_clean") != Some(&serde_json::json!(true)) {
+                self.pending_close_summary = Some(summary);
+            }
+        }
+    }
+
+    fn decode_input(&mut self, path: &Path) -> Result<&DecodedInput, String> {
+        // The cache key is the file's content hash, not its metadata: the
+        // one-shot path re-decoded every render, so an overwrite that
+        // preserves size and mtime (mtime-keeping tools, coarse filesystem
+        // timestamps) must still invalidate here. Hashing the encoded bytes
+        // per render is cheap next to a decode; only the decode is reused.
+        // The hash streams in bounded chunks, so memory stays flat for any
+        // encoded size and the decoder's own limits keep bounding what is
+        // actually accepted (no encoded-size cap of its own: legitimate
+        // encodings can be larger than the decoded transport cap).
+        let content_sha256: [u8; 32] = {
+            let mut file = fs::File::open(path).map_err(|error| error.to_string())?;
+            let mut hasher = Sha256::new();
+            let mut buffer = vec![0u8; 1024 * 1024];
+            loop {
+                let read = file.read(&mut buffer).map_err(|error| error.to_string())?;
+                if read == 0 {
+                    break;
+                }
+                hasher.update(&buffer[..read]);
+            }
+            hasher.finalize().into()
+        };
+        let stale = !self.decoded.as_ref().is_some_and(|cached| {
+            cached.path.as_path() == path && cached.content_sha256 == content_sha256
+        });
+        if stale {
+            let decoded = aexcompat_broker::image_render::decode_bounded_image(path, "input")
+                .map_err(|error| error.to_string())?;
+            let (width, height) = (decoded.width(), decoded.height());
+            self.decoded = Some(DecodedInput {
+                path: path.to_path_buf(),
+                content_sha256,
+                width,
+                height,
+                rgba: std::sync::Arc::new(decoded.into_rgba8().into_raw()),
+            });
+        }
+        Ok(self.decoded.as_ref().expect("just cached"))
+    }
+}
+
+/// One live render on the session thread: decode (cached), reopen the session
+/// when the static key changed, render through the resident worker, and fall
+/// back to the one-shot transport when the session infrastructure cannot
+/// carry the render (open failure or invalidation), mirroring the broker's
+/// length-1 wrapper fallback policy.
+#[cfg(windows)]
+fn live_render(state: &mut LiveSessionState, request: &LiveRenderRequest) -> Result<(String, Option<PathBuf>), String> {
+    use aexcompat_broker::image_render::{InteractiveRenderSession, InteractiveSessionOpen};
+
+    let (width, height, rgba) = {
+        let decoded = state.decode_input(&request.input_path)?;
+        (decoded.width, decoded.height, decoded.rgba.clone())
+    };
+    let key = LiveSessionKey {
+        plugin_sha256: request.plugin_sha256.clone(),
+        dependency_identities: request
+            .dependencies
+            .iter()
+            .map(|artifact| {
+                let basename = artifact
+                    .path
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                let hash: String = artifact
+                    .expected_sha256
+                    .iter()
+                    .map(|byte| format!("{byte:02x}"))
+                    .collect();
+                format!("{basename}:{}:{hash}", artifact.expected_size)
+            })
+            .collect(),
+        parameter_signature: parameter_structure_signature(&request.parameters),
+        width,
+        height,
+        pixel_format: request.pixel_format,
+        time_step: request.timing.time_step,
+        total_time: request.timing.total_time,
+        time_scale: request.timing.time_scale,
+    };
+    if state.open.as_ref().is_some_and(|(open_key, _)| *open_key != key) {
+        state.close_current();
+    }
+    let one_shot = |reason: String| -> Result<(String, Option<PathBuf>), String> {
+        let mut report =
+            aexcompat_broker::image_render::render_experimental_image_with_approved_dependencies(
+                &request.repository,
+                &request.plugin_path,
+                &request.plugin_sha256,
+                &request.input_path,
+                &request.output,
+                &request.parameters,
+                request.timing,
+                false,
+                request.pixel_format,
+                None,
+                None,
+                aexcompat_broker::image_render::RenderGpuBackend::Auto,
+                request.dependencies.clone(),
+            )
+            .map_err(|error| format!("{error} (after resident session fallback: {reason})"))?;
+        report["resident_session_fallback"] = serde_json::json!(reason);
+        let body = serde_json::to_string_pretty(&report).map_err(|error| error.to_string())?;
+        Ok((body, Some(request.output.clone())))
+    };
+    if state.open.is_none() {
+        let opened = InteractiveRenderSession::open(InteractiveSessionOpen {
+            repository: &request.repository,
+            plugin_id: "experimental",
+            plugin_path: &request.plugin_path,
+            plugin_sha256: &request.plugin_sha256,
+            parameters: (!request.parameters.is_empty()).then_some(request.parameters.as_slice()),
+            dependencies: request.dependencies.clone(),
+            width,
+            height,
+            pixel_format: request.pixel_format,
+            time_step: request.timing.time_step,
+            total_time: request.timing.total_time,
+            time_scale: request.timing.time_scale,
+            timeout_ms: LIVE_RENDER_FRAME_DEADLINE_MS,
+        });
+        match opened {
+            Ok(session) => {
+                state.session_generation += 1;
+                state.open = Some((key.clone(), session));
+            }
+            Err(error) => return one_shot(format!("session open failed: {error}")),
+        }
+    }
+    let (_, session) = state.open.as_mut().expect("session just ensured");
+    let parameters = (!request.parameters.is_empty()).then_some(request.parameters.as_slice());
+    match session.render(&rgba, request.timing.current_time, parameters, &request.output) {
+        Ok(mut report) => {
+            report["resident_session"]["session_generation"] =
+                serde_json::json!(state.session_generation);
+            if let Some(summary) = state.pending_close_summary.take() {
+                report["previous_session_close"] = summary;
+            }
+            let passed = report.get("passed") == Some(&serde_json::json!(true));
+            let body =
+                serde_json::to_string_pretty(&report).map_err(|error| error.to_string())?;
+            if passed {
+                Ok((body, Some(request.output.clone())))
+            } else {
+                // Frame-local compatibility error: the session stays open and
+                // the failure reports like a one-shot render failure.
+                Err(body)
+            }
+        }
+        Err(error) => {
+            let invalidated = state
+                .open
+                .as_ref()
+                .is_some_and(|(_, session)| session.invalidated());
+            if invalidated {
+                state.close_current();
+                one_shot(format!("session invalidated: {error}"))
+            } else {
+                // Rejected request (bad timing or parameter set); the session
+                // itself is still usable for the next render.
+                Err(format!("resident session rejected the render: {error}"))
+            }
+        }
+    }
+}
+
+#[cfg(windows)]
+fn spawn_live_session_thread(receiver: mpsc::Receiver<LiveCommand>) {
+    thread::spawn(move || {
+        let mut state = LiveSessionState {
+            decoded: None,
+            open: None,
+            session_generation: 0,
+            pending_close_summary: None,
+        };
+        loop {
+            match receiver.recv() {
+                Ok(LiveCommand::Render(request)) => {
+                    let outcome = live_render(&mut state, &request);
+                    let (success, body, output) = match outcome {
+                        Ok((body, output)) => (true, body, output),
+                        Err(body) => (false, body, None),
+                    };
+                    let _ = request.respond.send(TaskResult {
+                        success,
+                        body,
+                        output,
+                        identity: Some(request.identity.clone()),
+                        operation: Some("render_image".into()),
+                        diagnostic_eligible: request.diagnostic_eligible,
+                    });
+                }
+                Ok(LiveCommand::Close) => state.close_current(),
+                // The app dropped the handle: close the worker and exit.
+                Err(_) => {
+                    state.close_current();
+                    return;
+                }
+            }
+        }
+    });
+}
+
 struct HarnessApp {
     repository: PathBuf,
     selection: Option<Selection>,
@@ -1861,6 +2184,12 @@ struct HarnessApp {
     pending_live_render: bool,
     live_render_due: Option<Instant>,
     render_after_parameter_change: bool,
+    /// Command channel into the background session thread (issue #107); the
+    /// resident worker lives on the other side of it. Dropped with the app,
+    /// which closes the session gracefully. The session transport is
+    /// Windows-only; other targets keep the one-shot path.
+    #[cfg(windows)]
+    live_session: Option<LiveSessionHandle>,
 }
 
 impl HarnessApp {
@@ -1927,6 +2256,20 @@ impl HarnessApp {
             pending_live_render: false,
             live_render_due: None,
             render_after_parameter_change: false,
+            #[cfg(windows)]
+            live_session: None,
+        }
+    }
+
+    /// Tells the session thread to close the resident worker. Required
+    /// whenever the AEX selection or its approval changes: the worker must
+    /// not outlive the selection it was opened for.
+    fn close_live_session(&mut self) {
+        #[cfg(windows)]
+        if let Some(handle) = &self.live_session {
+            if handle.sender.send(LiveCommand::Close).is_err() {
+                self.live_session = None;
+            }
         }
     }
 
@@ -2013,6 +2356,9 @@ impl HarnessApp {
     }
 
     fn reset_and_choose_aex(&mut self) {
+        // The selection is gone the moment the reset starts; the resident
+        // worker for it must not outlive a cancelled or failed re-pick.
+        self.close_live_session();
         self.selection = None;
         self.session_approved = false;
         self.approved_dependencies.clear();
@@ -2248,9 +2594,15 @@ impl HarnessApp {
         self.approval_check = false;
         self.approved_dependencies.clear();
         self.status = status.into();
+        self.close_live_session();
     }
 
     fn approve_session(&mut self) -> Result<(), String> {
+        // Every dependency-set change funnels through re-approval; the
+        // resident worker still holds the previous approved set and must not
+        // idle past it, so close eagerly rather than lazily at the next
+        // render.
+        self.close_live_session();
         let selection = self.selection.as_ref().ok_or("No AEX is selected")?;
         let main = aexcompat_broker::secure_image_dispatch::ApprovedImageArtifact {
             path: selection.path.clone(),
@@ -2440,6 +2792,10 @@ impl HarnessApp {
                 let metadata = fs::metadata(&path).ok();
                 let profile = profile_for_hash(&hash);
                 let identity_changed = hash != previous_hash;
+                if identity_changed {
+                    // Do not keep a worker holding the previous build alive.
+                    self.close_live_session();
+                }
                 self.selection = Some(Selection {
                     path: path.clone(),
                     size: bytes.len() as u64,
@@ -2503,6 +2859,7 @@ impl HarnessApp {
         let Ok(metadata) = fs::metadata(&selected.path) else {
             self.selection_stale = true;
             self.status = "Selected AEX is unavailable. Reload after the build finishes.".into();
+            self.close_live_session();
             return;
         };
         let modified = metadata.modified().ok();
@@ -2517,6 +2874,9 @@ impl HarnessApp {
             self.selection_stale = true;
             self.session_approved = false;
             self.approved_dependencies.clear();
+            // The resident worker still holds the previous build; a rebuilt
+            // AEX must go through a fresh session open.
+            self.close_live_session();
         }
         if self.dependencies.iter().any(|dependency| {
             read_bounded_pe(&dependency.path).map_or(true, |bytes| {
@@ -3090,6 +3450,74 @@ impl HarnessApp {
             && custom_ui_action.is_none()
             && pixel_format == aexcompat_broker::image_render::RenderPixelFormat::Argb8
             && audio_sidecar.is_none();
+        // Resident-session eligibility mirrors the broker's length-1 wrapper:
+        // plain classic CPU renders only. Anything else keeps the one-shot
+        // transport below (issue #107). The session transport is
+        // Windows-only; other targets always render one-shot.
+        #[cfg(windows)]
+        {
+        let live_eligible = !smart
+            && host_context.is_none()
+            && custom_ui_action.is_none()
+            && audio_sidecar.is_none()
+            && gpu_backend == aexcompat_broker::image_render::RenderGpuBackend::Auto
+            && !use_registered_default
+            && !parameters.iter().any(|parameter| parameter.kind == "layer")
+            // The A/B escape hatch disables every resident-session route,
+            // this GUI adapter included, not just the broker's length-1
+            // wrapper.
+            && std::env::var_os(aexcompat_broker::image_render::DISABLE_SESSION_WRAPPER_ENV)
+                .is_none();
+        if live_eligible {
+            let identity = DispatchIdentity {
+                sha256: hash.clone(),
+                size: self.selection.as_ref().map(|item| item.size).unwrap_or_default(),
+            };
+            let diagnostic_eligible = self
+                .selection
+                .as_ref()
+                .is_some_and(|item| item.profile.is_none());
+            let (respond, receiver) = mpsc::channel();
+            let request = LiveRenderRequest {
+                repository,
+                plugin_path,
+                plugin_sha256: hash,
+                dependencies,
+                parameters,
+                input_path: input,
+                timing,
+                pixel_format,
+                output,
+                respond,
+                identity,
+                diagnostic_eligible,
+            };
+            if self.live_session.is_none() {
+                let (sender, commands) = mpsc::channel();
+                spawn_live_session_thread(commands);
+                self.live_session = Some(LiveSessionHandle { sender });
+            }
+            let sent = self
+                .live_session
+                .as_ref()
+                .expect("session handle just ensured")
+                .sender
+                .send(LiveCommand::Render(Box::new(request)));
+            if sent.is_ok() {
+                self.status = "Rendering through the resident session...".into();
+                self.rendering = true;
+                self.receiver = Some(receiver);
+                self.busy = true;
+                self.task_kind = TaskKind::Generic;
+                return;
+            }
+            // The session thread is gone; drop the handle so the next render
+            // starts a fresh one. Nothing rendered on this attempt.
+            self.live_session = None;
+            self.status = "The session thread had exited; press Render to retry.".into();
+            return;
+        }
+        }
         self.status = "Rendering in an isolated worker...".into();
         self.rendering = true;
         self.spawn_native("render_image", move || {
@@ -3715,6 +4143,9 @@ impl HarnessApp {
             if let (Some(path), Some(size), Some(hash)) = (lines.next(), lines.next(), lines.next())
             {
                 let profile = profile_for_hash(hash);
+                // A newly selected AEX replaces whatever the resident worker
+                // was opened for.
+                self.close_live_session();
                 self.selection = Some(Selection {
                     path: path.into(),
                     size: size.parse().unwrap_or(0),
@@ -3964,6 +4395,7 @@ impl eframe::App for HarnessApp {
                             self.approved_dependencies.clear();
                             self.session_approved = true;
                             self.status = "Dependency list cleared.".into();
+                            self.close_live_session();
                         }
                     });
                     if let Some(index) = remove {
@@ -3971,6 +4403,7 @@ impl eframe::App for HarnessApp {
                         if self.dependencies.is_empty() {
                             self.approved_dependencies.clear();
                             self.session_approved = true;
+                            self.close_live_session();
                         } else if let Err(error) = self.approve_session() {
                             self.invalidate_session_approval("Dependency manifest validation failed.");
                             self.report = error;
@@ -5833,6 +6266,37 @@ fn main() -> eframe::Result {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parameter_signature_ignores_values_but_pins_structure() {
+        let parameter = |slot: u32, kind: &str, value: f64| {
+            serde_json::from_value::<aexcompat_broker::image_render::InteractiveParameter>(
+                serde_json::json!({
+                    "slot": slot, "name": "amount", "kind": kind,
+                    "minimum": 0.0, "maximum": 100.0, "value": value,
+                    "choices": [], "color": [0, 0, 0, 0],
+                    "components": [0.0, 0.0, 0.0], "component_count": 0,
+                    "layer_path": null, "enabled": true, "visible": true,
+                    "supervised": false,
+                }),
+            )
+            .expect("parameter fixture")
+        };
+        // A value change is a per-frame update, never a session reopen.
+        assert_eq!(
+            parameter_structure_signature(&[parameter(1, "float", 1.0)]),
+            parameter_structure_signature(&[parameter(1, "float", 99.0)]),
+        );
+        // Structure changes must produce a different key.
+        assert_ne!(
+            parameter_structure_signature(&[parameter(1, "float", 1.0)]),
+            parameter_structure_signature(&[parameter(2, "float", 1.0)]),
+        );
+        assert_ne!(
+            parameter_structure_signature(&[parameter(1, "float", 1.0)]),
+            parameter_structure_signature(&[parameter(1, "integer", 1.0)]),
+        );
+    }
 
     #[test]
     fn advertised_smart_render_reads_inspection_diagnostics_only() {

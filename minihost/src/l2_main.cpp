@@ -111,6 +111,9 @@
 #include "worker_aegp_init_report.hpp"
 #include "worker_ui_event_report.hpp"
 #include "worker_audio_execution.hpp"
+#include "worker_drawbot_runtime.hpp"
+#include "worker_early_mode_bridge.hpp"
+#include "worker_param_checkout_runtime.hpp"
 #include "worker_entry_bootstrap.hpp"
 #include "worker_effect_bootstrap.hpp"
 #include "worker_aegp_timeline_probe.hpp"
@@ -302,7 +305,6 @@ using aexcompat::render_pixel_transport::argb_to_rgba8;
 using aexcompat::render_pixel_transport::argb_to_rgba_native;
 using aexcompat::render_pixel_transport::rgba8_to_argb;
 
-auto& g_module_audit = module_audit_report();
 
 auto& smart_state() { return aexcompat::worker_runtime::smart::state(); }
 
@@ -473,27 +475,17 @@ using RequestedAssignment = aexcompat::worker_runtime::parameters::RequestedAssi
 using RequestedAssignments = aexcompat::worker_runtime::parameters::RequestedAssignments;
 static_assert(aexcompat::worker_runtime::parameters::kDefinitionSize == kParamSize);
 auto& g_parameter_runtime = aexcompat::worker_runtime::parameters::state();
-auto& g_params = g_parameter_runtime.records;
-auto& g_parameter_timelines = g_parameter_runtime.timelines;
-auto& g_keyframe_checkout_ledger = g_parameter_runtime.keyframe_checkout_ledger;
-auto& g_keyframe_checkout_mutex = g_parameter_runtime.keyframe_checkout_mutex;
-const ParameterTimeline *parameter_timeline(int32_t slot) {
-  return aexcompat::worker_runtime::parameters::timeline(slot);
-}
-auto& g_arbitrary_copy_calls = g_parameter_runtime.arbitrary.copy_calls;
-auto& g_arbitrary_dispose_calls = g_parameter_runtime.arbitrary.dispose_calls;
-auto& g_invalid_arbitrary_operations = g_parameter_runtime.arbitrary.invalid_operations;
-auto& g_arbitrary_print_calls = g_parameter_runtime.arbitrary.print_calls;
+// Source-contract anchors: these owner bindings document that the arbitrary
+// counters live in parameters::state() (issue #126 Phase D) and are asserted
+// by the arbitrary-parameter source tests.
 auto& g_arbitrary_print_failures = g_parameter_runtime.arbitrary.print_failures;
-auto& g_arbitrary_roundtrip_calls = g_parameter_runtime.arbitrary.roundtrip_calls;
 auto& g_arbitrary_roundtrip_failures = g_parameter_runtime.arbitrary.roundtrip_failures;
-auto& g_arbitrary_scan_calls = g_parameter_runtime.arbitrary.scan_calls;
-auto& g_arbitrary_scan_failures = g_parameter_runtime.arbitrary.scan_failures;
 auto& g_arbitrary_compare_disagreements = g_parameter_runtime.arbitrary.compare_disagreements;
 auto& g_arbitrary_new_calls = g_parameter_runtime.arbitrary.new_calls;
-auto& g_arbitrary_interpolation_calls = g_parameter_runtime.arbitrary.interpolation_calls;
-auto& g_arbitrary_interpolation_failures = g_parameter_runtime.arbitrary.interpolation_failures;
-auto& g_last_arbitrary_interpolation_amount = g_parameter_runtime.arbitrary.last_interpolation_amount;
+auto& g_last_arbitrary_interpolation_amount =
+    g_parameter_runtime.arbitrary.last_interpolation_amount;
+auto& g_params = g_parameter_runtime.records;
+auto& g_parameter_timelines = g_parameter_runtime.timelines;
 // Retained entry/admission state: the admitted plug-in path, set once after
 // WorkerSession admission for diagnostics.
 std::wstring g_plugin_file_path;
@@ -530,66 +522,22 @@ auto& g_aegp_seek_roundtrip_mode = g_aegp_init_runtime.seek_roundtrip_mode;
 auto& g_aegp_trim_roundtrip_mode = g_aegp_init_runtime.trim_roundtrip_mode;
 auto& g_aegp_switch_roundtrip_mode = g_aegp_init_runtime.switch_roundtrip_mode;
 auto& g_skip_about = g_aegp_init_runtime.skip_about;
-auto& g_aegp_commands_created = g_aegp_init_runtime.commands_created;
-auto& g_aegp_menu_commands_inserted = g_aegp_init_runtime.menu_commands_inserted;
-auto& g_aegp_command_hooks = g_aegp_init_runtime.command_hooks;
-auto& g_aegp_update_menu_hooks = g_aegp_init_runtime.update_menu_hooks;
-auto& g_aegp_idle_hooks = g_aegp_init_runtime.idle_hooks;
-auto& g_aegp_death_hooks = g_aegp_init_runtime.death_hooks;
-auto& g_next_aegp_command = g_aegp_init_runtime.next_command;
-auto& g_aegp_command_enable_calls = g_aegp_init_runtime.command_enable_calls;
-auto& g_aegp_command_check_calls = g_aegp_init_runtime.command_check_calls;
-auto& g_aegp_command_checked_true_calls = g_aegp_init_runtime.command_checked_true_calls;
-auto& g_aegp_command_checked_false_calls = g_aegp_init_runtime.command_checked_false_calls;
-uint32_t& g_aegp_item_current_time_calls = scene_runtime_state().item_current_time_calls;
 uint32_t& g_aegp_item_set_current_time_calls = scene_runtime_state().item_set_current_time_calls;
 int32_t& g_aegp_item_last_set_time_value = scene_runtime_state().item_last_set_time_value;
 uint32_t& g_aegp_item_last_set_time_scale = scene_runtime_state().item_last_set_time_scale;
-uint32_t& g_aegp_item_name_calls = scene_runtime_state().item_name_calls;
-uint32_t& g_aegp_item_duration_calls = scene_runtime_state().item_duration_calls;
 uint32_t& g_aegp_item_type_calls = scene_runtime_state().item_type_calls;
-uint32_t& g_aegp_comp_from_item_calls = scene_runtime_state().comp_from_item_calls;
-uint32_t& g_aegp_comp_framerate_calls = scene_runtime_state().comp_framerate_calls;
-uint32_t& g_aegp_layer_count_calls = scene_runtime_state().layer_count_calls;
-uint32_t& g_aegp_layer_by_index_calls = scene_runtime_state().layer_by_index_calls;
 uint32_t& g_aegp_layer_source_item_calls = scene_runtime_state().layer_source_item_calls;
-uint32_t& g_aegp_layer_id_calls = scene_runtime_state().layer_id_calls;
-uint32_t& g_aegp_layer_attribute_calls = scene_runtime_state().layer_attribute_calls;
 uint32_t& g_aegp_layer_trim_set_calls = scene_runtime_state().layer_trim_set_calls;
 uint32_t& g_aegp_layer_flag_set_calls = scene_runtime_state().layer_flag_set_calls;
 auto& g_aegp_layer_flags = scene_runtime_state().layer_flags;
-uint32_t& g_aegp_layer_name_calls = scene_runtime_state().layer_name_calls;
-uint32_t& g_aegp_effect_count_calls = scene_runtime_state().effect_count_calls;
-uint32_t& g_aegp_effect_acquires = scene_runtime_state().effect_acquires;
-uint32_t& g_aegp_effect_disposes = scene_runtime_state().effect_disposes;
-uint32_t& g_aegp_effect_metadata_calls = scene_runtime_state().effect_metadata_calls;
-uint32_t& g_aegp_stream_acquires = scene_runtime_state().stream_acquires;
-uint32_t& g_aegp_stream_disposes = scene_runtime_state().stream_disposes;
-uint32_t& g_aegp_stream_value_acquires = scene_runtime_state().stream_value_acquires;
-uint32_t& g_aegp_stream_value_disposes = scene_runtime_state().stream_value_disposes;
-uint32_t& g_aegp_stream_sampled_selector_mask = scene_runtime_state().stream_sampled_selector_mask;
-uint32_t& g_aegp_effect_param_name_calls = scene_runtime_state().effect_param_name_calls;
-uint32_t& g_aegp_effect_param_value_calls = scene_runtime_state().effect_param_value_calls;
-uint32_t& g_aegp_effect_param_union_calls = scene_runtime_state().effect_param_union_calls;
-uint32_t& g_aegp_keyframe_count_calls = scene_runtime_state().keyframe_count_calls;
-uint32_t& g_aegp_keyframed_stream_reports = scene_runtime_state().keyframed_stream_reports;
 uint32_t& g_aegp_keyframe_time_calls = scene_runtime_state().keyframe_time_calls;
 uint32_t& g_aegp_keyframe_value_calls = scene_runtime_state().keyframe_value_calls;
 uint32_t& g_aegp_keyframe_interpolation_calls = scene_runtime_state().keyframe_interpolation_calls;
-uint32_t& g_aegp_collection_creates = scene_runtime_state().collection_creates;
-uint32_t& g_aegp_collection_disposes = scene_runtime_state().collection_disposes;
-uint32_t& g_aegp_collection_item_reads = scene_runtime_state().collection_item_reads;
 int32_t& g_aegp_scene_frame = scene_runtime_state().scene_frame;
-int32_t& g_aegp_first_observed_frame = scene_runtime_state().first_observed_frame;
-int32_t& g_aegp_last_observed_frame = scene_runtime_state().last_observed_frame;
-auto& g_aegp_update_menu_registrations = g_aegp_init_runtime.update_menu_registrations;
 using AegpCommandRegistration =
     aexcompat::worker_runtime::aegp_init::CommandRegistration;
 using AegpUpdateMenuRegistration =
     aexcompat::worker_runtime::aegp_init::UpdateMenuRegistration;
-auto& g_aegp_idle_registrations = g_aegp_init_runtime.idle_registrations;
-auto& g_aegp_death_registrations = g_aegp_init_runtime.death_registrations;
-auto& g_aegp_command_registrations = g_aegp_init_runtime.command_registrations;
 auto& g_aegp_inserted_commands = g_aegp_init_runtime.inserted_commands;
 auto& g_checkout_layer_definitions = g_parameter_runtime.checkout.definitions;
 auto& g_param_checkout_mutex = g_parameter_runtime.checkout.mutex;
@@ -598,29 +546,16 @@ auto& g_param_checkout_calls = g_parameter_runtime.checkout.checkout_calls;
 auto& g_param_checkin_calls = g_parameter_runtime.checkout.checkin_calls;
 auto& g_automatic_param_checkins = g_parameter_runtime.checkout.automatic_checkins;
 auto& g_invalid_param_checkins = g_parameter_runtime.checkout.invalid_checkins;
-auto& g_rejected_temporal_param_checkouts = g_parameter_runtime.checkout.rejected_temporal;
-auto& g_wide_time_checkout_allowed = g_parameter_runtime.checkout.wide_time_allowed;
-auto& g_checkout_current_time = g_parameter_runtime.checkout.current_time;
-auto& g_checkout_current_time_scale = g_parameter_runtime.checkout.current_time_scale;
-auto& g_last_param_checkout_index = g_parameter_runtime.checkout.last_index;
-auto& g_last_param_checkout_time = g_parameter_runtime.checkout.last_time;
-auto& g_last_param_checkout_time_step = g_parameter_runtime.checkout.last_time_step;
-auto& g_last_param_checkout_time_scale = g_parameter_runtime.checkout.last_time_scale;
-auto& g_options_button_name = g_parameter_runtime.ui.options_button_name;
-auto& g_options_button_name_calls = g_parameter_runtime.ui.options_button_name_calls;
 
 // Host-callback telemetry storage moved to its owner,
 // aexcompat::worker_runtime::classic::host_callback_telemetry()
 // (issue #126 Phase D); these references keep the g_* spellings.
 auto& g_host_callback_telemetry =
     aexcompat::worker_runtime::classic::host_callback_telemetry();
-auto& g_duck_quacks = g_host_callback_telemetry.duck_quacks;
 auto& g_transform_world_calls = g_host_callback_telemetry.transform_world_calls;
 auto& g_last_transform_x = g_host_callback_telemetry.last_transform_x;
 auto& g_last_transform_y = g_host_callback_telemetry.last_transform_y;
 auto& g_last_transform_opacity = g_host_callback_telemetry.last_transform_opacity;
-auto& g_abort_calls = g_host_callback_telemetry.abort_calls;
-auto& g_progress_calls = g_host_callback_telemetry.progress_calls;
 // Custom-UI/Drawbot/App telemetry storage moved to its owner,
 // aexcompat::worker_runtime::ui_event_execution::custom_ui_telemetry()
 // (issue #126 Phase D); these references keep the g_* spellings.
@@ -631,32 +566,9 @@ auto& g_custom_ui_telemetry =
 auto& g_register_ui_calls = g_custom_ui_telemetry.register_ui_calls;
 auto& g_custom_ui_registration = g_custom_ui_telemetry.registration;
 auto& g_invalid_custom_ui_registrations = g_custom_ui_telemetry.invalid_custom_ui_registrations;
-auto& g_adv_app_info_text_calls = g_custom_ui_telemetry.adv_app_info_text_calls;
-auto& g_last_adv_app_info_text = g_custom_ui_telemetry.last_adv_app_info_text;
-auto& g_last_progress_current = g_host_callback_telemetry.last_progress_current;
-auto& g_last_progress_total = g_host_callback_telemetry.last_progress_total;
-auto& g_secondary_layer_slot = g_host_callback_telemetry.secondary_layer_slot;
 using ExternalLayerInput =
     aexcompat::worker_runtime::request_parser::LayerInput;
-bool parse_layer_transport_key(const wchar_t* text, ExternalLayerInput& layer) {
-  if (!text) return false;
-  if (std::wstring(text).compare(0, 3, L"v1|") != 0) {
-    try { layer.slot = std::stoi(text); } catch (...) { return false; }
-    return layer.slot > 0;
-  }
-  int consumed = 0;
-  if (swscanf_s(text, L"v1|%d|%d|%u%n", &layer.slot, &layer.time,
-          &layer.time_scale, &consumed) != 3 || text[consumed] != L'\0' ||
-      layer.slot <= 0 || layer.time_scale == 0) return false;
-  layer.timed = true;
-  return true;
-}
 
-bool same_rational_time(int32_t left, uint32_t left_scale,
-                        int32_t right, uint32_t right_scale) {
-  return static_cast<int64_t>(left) * right_scale ==
-      static_cast<int64_t>(right) * left_scale;
-}
 // Opt-in world snapshot dumps and output checksum detail (issue #19). Both
 // default off; the broker enables them per run with the --dump-worlds-v1 and
 // --output-checksum-detail-v1 argv trailers, and the dump directory is
@@ -698,223 +610,26 @@ OutlineData* sampled_outline(HostStreamRef* stream, const HostTime* time,
 OpaqueHostObject g_effect{0x45464658};
 OpaqueHostObject g_layer{0x4c415952};
 
-void raise_mask_access_violation() {
-  RaiseException(EXCEPTION_ACCESS_VIOLATION, 0, 0, nullptr);
-}
+// The mask scene helpers and configure_mask_scene moved to their state
+// owner, worker_mask_runtime_callbacks.cpp (issue #170); worker_main keeps
+// resolving them through these declarations.
+void raise_mask_access_violation();
+aexcompat::mask_runtime::Snapshot mask_runtime_snapshot();
+bool snapshot_mask_curve(void* handle, aexcompat::mask_runtime::CurveSnapshot& curve);
+bool install_synthetic_mask_scene(
+    const std::vector<aexcompat::mask_runtime::CurveSnapshot>& curves);
+std::vector<aexcompat::pf_path_runtime::PathInfo> enumerate_pf_paths();
+bool snapshot_pf_path(void* handle, aexcompat::mask_runtime::CurveSnapshot& curve);
+bool bounded_pf_path_world(void* world, aexcompat::pf_path_runtime::WorldView& view);
+bool mask_lifetimes_balanced();
+bool configure_mask_scene(const std::string& scene_id);
+std::size_t mask_open_count();
+std::size_t mask_tangent_vertex_count();
 constexpr int32_t kPfBadCallbackParam = 516;
 constexpr int32_t kPfSuiteToolNone = 0;
-auto& g_render_ui_context_active = g_custom_ui_telemetry.render_ui_context_active;
 using aexcompat::pf_helper::reset;
 
-aexcompat::mask_runtime::Snapshot mask_runtime_snapshot() {
-  aexcompat::mask_runtime::Snapshot snapshot;
-  snapshot.active_masks = static_cast<uint32_t>(std::count_if(
-      g_mask_scene.begin(), g_mask_scene.end(), [](const auto& mask) { return !mask.deleted; }));
-  snapshot.masks_acquired = g_mask_lifetime.masks_acquired;
-  snapshot.masks_disposed = g_mask_lifetime.masks_disposed;
-  snapshot.streams_acquired = g_mask_lifetime.streams_acquired;
-  snapshot.streams_disposed = g_mask_lifetime.streams_disposed;
-  snapshot.values_acquired = g_mask_lifetime.values_acquired;
-  snapshot.values_disposed = g_mask_lifetime.values_disposed;
-  snapshot.mask_mutations = g_mask_mutations;
-  snapshot.invalid_mask_operations = g_invalid_mask_operations;
-  snapshot.outline_mutations = g_outline_mutations;
-  snapshot.invalid_outline_operations = g_invalid_outline_operations;
-  snapshot.keyframe_mutations = g_keyframe_mutations;
-  snapshot.invalid_keyframe_operations = g_invalid_keyframe_operations;
-  snapshot.stream_metadata_queries = g_stream_metadata_queries;
-  snapshot.stream_duplicates = g_stream_duplicates;
-  snapshot.invalid_stream_operations = g_invalid_stream_operations;
-  snapshot.dynamic_stream_mutations = g_dynamic_stream_mutations;
-  snapshot.invalid_dynamic_stream_operations = g_invalid_dynamic_stream_operations;
-  return snapshot;
-}
 
-bool snapshot_mask_curve(void* handle, aexcompat::mask_runtime::CurveSnapshot& curve) {
-  HostMask* mask = find_mask(handle);
-  if (!mask || mask->deleted) return false;
-  aexcompat::mask_runtime::CurveSnapshot candidate;
-  candidate.id = mask->id;
-  candidate.open = mask->open;
-  candidate.vertices.reserve(mask->vertices.size());
-  for (const auto& vertex : mask->vertices) {
-    candidate.vertices.push_back({vertex.x, vertex.y, vertex.tangent_in_x,
-                                  vertex.tangent_in_y, vertex.tangent_out_x,
-                                  vertex.tangent_out_y});
-  }
-  curve = std::move(candidate);
-  return true;
-}
-
-bool install_synthetic_mask_scene(
-    const std::vector<aexcompat::mask_runtime::CurveSnapshot>& curves) {
-  if (!g_stream_refs.empty() || !g_stream_values.empty() || !g_add_keyframe_transactions.empty())
-    return false;
-  g_mask_scene.clear();
-  g_mask_scene.reserve(kMaxHostMasks);
-  if (curves.size() > kMaxHostMasks) return false;
-  for (const auto& curve : curves) {
-    HostMask mask;
-    mask.id = curve.id;
-    mask.open = curve.open;
-    mask.vertices.reserve(curve.vertices.size());
-    for (const auto& vertex : curve.vertices)
-      mask.vertices.push_back({vertex.x, vertex.y, vertex.tangent_in_x,
-          vertex.tangent_in_y, vertex.tangent_out_x, vertex.tangent_out_y});
-    g_mask_scene.push_back(std::move(mask));
-  }
-  return true;
-}
-
-std::vector<HostMask*> ordered_active_masks();
-std::vector<aexcompat::pf_path_runtime::PathInfo> enumerate_pf_paths() {
-  std::vector<aexcompat::pf_path_runtime::PathInfo> result;
-  for (auto* mask : ordered_active_masks())
-    result.push_back({mask, mask->id, mask->dynamic_order, mask->open,
-                      mask->invert, mask->mode});
-  return result;
-}
-
-bool snapshot_pf_path(void* handle, aexcompat::mask_runtime::CurveSnapshot& curve) {
-  auto* mask = static_cast<HostMask*>(handle);
-  if (!mask || mask->deleted) return false;
-  aexcompat::mask_runtime::CurveSnapshot candidate;
-  candidate.id = mask->id;
-  candidate.open = mask->open;
-  candidate.vertices.reserve(mask->vertices.size());
-  for (const auto& vertex : mask->vertices)
-    candidate.vertices.push_back({vertex.x, vertex.y, vertex.tangent_in_x,
-        vertex.tangent_in_y, vertex.tangent_out_x, vertex.tangent_out_y});
-  curve = std::move(candidate);
-  return true;
-}
-
-bool bounded_pf_path_world(void* world,
-    aexcompat::pf_path_runtime::WorldView& view) {
-  if (!world) return false;
-  int32_t flags{};
-  std::memcpy(&flags, static_cast<std::byte*>(world) + 16, sizeof(flags));
-  view.pixel_bytes = (flags & 1) != 0 ? 8 : 4;
-  return bounded_typed_world(world, view.pixel_bytes, view.pixels, view.rowbytes,
-                             view.width, view.height);
-}
-
-std::size_t distinct_vertex_count(const OutlineData& mask) {
-  return mask.vertices.size() - static_cast<std::size_t>(!mask.open && !mask.vertices.empty());
-}
-
-void sync_closed_vertex(OutlineData& mask) {
-  if (!mask.open && !mask.vertices.empty()) mask.vertices.back() = mask.vertices.front();
-}
-
-bool mask_lifetimes_balanced() {
-  return g_mask_lifetime.masks_acquired == g_mask_lifetime.masks_disposed &&
-      g_mask_lifetime.streams_acquired == g_mask_lifetime.streams_disposed &&
-      g_mask_lifetime.values_acquired == g_mask_lifetime.values_disposed &&
-      g_stream_refs.empty() && g_stream_values.empty() && g_add_keyframe_transactions.empty() &&
-      std::none_of(g_mask_scene.begin(), g_mask_scene.end(), [](const auto& mask) {
-        return mask.mask_live || mask.stream_live || mask.value_live;
-      });
-}
-
-bool configure_mask_scene(const std::string& scene_id) {
-  aexcompat::mask_runtime::configure_host_context(
-      {&g_layer, &raise_mask_access_violation, &mask_runtime_snapshot,
-       &snapshot_mask_curve, &mask_lifetimes_balanced, &install_synthetic_mask_scene});
-  aexcompat::pf_path_runtime::configure(
-      {&g_effect, &enumerate_pf_paths, &snapshot_pf_path, &bounded_pf_path_world});
-  if (!g_stream_refs.empty() || !g_stream_values.empty() ||
-      !g_add_keyframe_transactions.empty()) return false;
-  aexcompat::mask_runtime::SceneSeed seed;
-  if (!aexcompat::mask_runtime::build_scene_seed(scene_id, seed)) return false;
-  g_mask_scene.clear();
-  g_mask_scene.reserve(kMaxHostMasks);
-  g_mask_lifetime = {};
-  aexcompat::mask_runtime::set_mask_scene_id(seed.id);
-  for (auto& source : seed.masks) {
-    HostMask mask;
-    mask.id = g_next_mask_id++;
-    mask.outline_stream_id = g_next_stream_id++;
-    mask.feather_stream_id = g_next_stream_id++;
-    mask.opacity_stream_id = g_next_stream_id++;
-    mask.expansion_stream_id = g_next_stream_id++;
-    mask.open = source.open;
-    mask.dynamic_order = source.dynamic_order;
-    mask.vertices.reserve(source.vertices.size());
-    for (const auto& vertex : source.vertices) {
-      mask.vertices.push_back({vertex.x, vertex.y, vertex.tangent_in_x,
-          vertex.tangent_in_y, vertex.tangent_out_x, vertex.tangent_out_y});
-    }
-    g_mask_scene.push_back(std::move(mask));
-  }
-  return true;
-}
-
-std::vector<HostMask*> ordered_active_masks() {
-  std::vector<HostMask*> masks;
-  for (auto& mask : g_mask_scene) if (!mask.deleted) masks.push_back(&mask);
-  std::sort(masks.begin(), masks.end(), [](const HostMask* left, const HostMask* right) {
-    return left->dynamic_order < right->dynamic_order;
-  });
-  return masks;
-}
-
-HostMask* find_mask(void* handle) {
-  const auto found = std::find_if(g_mask_scene.begin(), g_mask_scene.end(),
-      [handle](auto& mask) { return handle == &mask.mask; });
-  return found == g_mask_scene.end() ? nullptr : &*found;
-}
-HostStreamRef* find_stream(void* handle) {
-  const auto found = std::find_if(g_stream_refs.begin(), g_stream_refs.end(),
-      [handle](auto& stream) { return handle == &stream.opaque; });
-  return found == g_stream_refs.end() ? nullptr : &*found;
-}
-OutlineData* find_outline(void* handle) {
-  const auto found = std::find_if(g_mask_scene.begin(), g_mask_scene.end(),
-      [handle](auto& mask) { return handle == &mask.outline; });
-  if (found != g_mask_scene.end()) return &*found;
-  for (auto& mask : g_mask_scene) {
-    const auto key = std::find_if(mask.keyframes.begin(), mask.keyframes.end(),
-        [handle](auto& item) { return handle == &item.outline; });
-    if (key != mask.keyframes.end()) return &*key;
-  }
-  for (auto& item : g_stream_values) {
-    if (item.second.outline && handle == &item.second.outline->outline)
-      return item.second.outline;
-  }
-  return nullptr;
-}
-
-std::size_t mask_open_count() {
-  return static_cast<std::size_t>(std::count_if(g_mask_scene.begin(), g_mask_scene.end(),
-      [](const auto& mask) { return !mask.deleted && mask.open; }));
-}
-
-std::size_t active_mask_count() {
-  return static_cast<std::size_t>(std::count_if(g_mask_scene.begin(), g_mask_scene.end(),
-      [](const auto& mask) { return !mask.deleted; }));
-}
-
-std::size_t mask_tangent_vertex_count() {
-  std::size_t count = 0;
-  for (const auto& mask : g_mask_scene) {
-    if (mask.deleted) continue;
-    const auto end = !mask.open && !mask.vertices.empty()
-        ? mask.vertices.end() - 1 : mask.vertices.end();
-    count += static_cast<std::size_t>(std::count_if(mask.vertices.begin(), end,
-        [](const auto& vertex) {
-          return vertex.tangent_in_x != 0 || vertex.tangent_in_y != 0 ||
-                 vertex.tangent_out_x != 0 || vertex.tangent_out_y != 0;
-        }));
-  }
-  return count;
-}
-
-void write_rect(void* destination, int32_t width, int32_t height) {
-  auto* bytes = static_cast<std::byte*>(destination);
-  const int32_t values[4] = {0, 0, width, height};
-  std::memcpy(bytes, values, sizeof(values));
-}
 
 // PF_CheckoutResult is 76 bytes: result_rect @0, max_result_rect @16,
 // par (rational num/den) @32, solid + 3 reserved bytes @40, ref_width @44,
@@ -960,18 +675,8 @@ int32_t __cdecl guid_mix_in_ptr(void* effect_ref, uint32_t size, const void* byt
 
 // register_with_aegp / get_main_hwnd live in worker_aegp_utility_suite.cpp.
 
-int32_t __cdecl get_effect_layer(void* effect, void** layer) {
-  if (effect != &g_effect || !layer) return 4;
-  *layer = &g_layer;
-  return 0;
-}
-int32_t __cdecl convert_effect_to_comp_time(
-    void* effect, int32_t what_time, uint32_t time_scale, AegpTime* comp_time);
-int32_t __cdecl get_effect_camera(
-    void* effect, const AegpTime* comp_time, void** camera_layer);
-int32_t __cdecl get_effect_camera_matrix(void* effect, const AegpTime* comp_time,
-    AegpMatrix4* camera_matrix, double* distance_to_image_plane,
-    int16_t* image_plane_width, int16_t* image_plane_height);
+// The PF Interface effect/camera callbacks and their declarations live in
+// worker_aegp_pf_interface_suite.{hpp,cpp} (issue #170).
 
 
 
@@ -1011,20 +716,6 @@ int32_t __cdecl aegp_get_effect_param_union_by_index_v3(
 // The mask/stream/keyframe suite tables live in worker_mask_suite_tables.cpp.
 // PF_AdvAppSuite1 is frozen at ten callbacks; keep its storage independent
 // from the eleven-slot v2 table so versioned suite identity cannot alias.
-int32_t __cdecl convert_effect_to_comp_time(
-    void* effect, int32_t what_time, uint32_t time_scale, AegpTime* comp_time) {
-  if (effect != &g_effect || time_scale == 0 || !comp_time) return 4;
-  const int64_t checked_value = static_cast<int64_t>(what_time);
-  const uint64_t checked_scale = static_cast<uint64_t>(time_scale);
-  if (checked_value < (std::numeric_limits<int32_t>::min)() ||
-      checked_value > (std::numeric_limits<int32_t>::max)() ||
-      checked_scale > (std::numeric_limits<uint32_t>::max)())
-    return 4;
-  const AegpTime converted{static_cast<int32_t>(checked_value),
-                           static_cast<uint32_t>(checked_scale)};
-  *comp_time = converted;
-  return 0;
-}
 struct AegpTimeStamp { std::array<uint8_t, 4> bytes{}; };
 static_assert(sizeof(AegpTimeStamp) == 4);
 static_assert(std::is_same_v<decltype(&new_layer_render_options),
@@ -1132,291 +823,25 @@ static_assert(std::is_same_v<decltype(&aegp_world_dispose_platform),
 static_assert(std::is_same_v<decltype(&aegp_world_reference_platform),
                              aexcompat::suite_abi::AegpWorldReferencePlatform>);
 
-// Retained custom-UI callback-ABI state (issue #126 Phase D): the opaque
-// Drawbot refs and the live object table are handed to the plug-in as raw
-// pointers by the Drawbot suite callbacks below, so their storage stays with
-// that ABI; the plain-data counters live in
-// ui_event_execution::custom_ui_telemetry(). Lifetime: process-lifetime; the
-// object table is balanced by the create/release callbacks.
-struct DrawbotOpaque { uint32_t tag; };
-DrawbotOpaque g_drawbot_draw{0x44524157};
-DrawbotOpaque g_drawbot_supplier{0x53555050};
-DrawbotOpaque g_drawbot_surface{0x53555246};
-enum class DrawbotObjectKind { Pen, Brush, Path };
-struct DrawbotObject {
-  DrawbotObjectKind kind{};
-  std::array<float, 4> color{};
-  std::array<float, 4> rect{};
-  float pen_size{};
-  uint32_t path_points{};
-};
-std::unordered_map<void*, std::unique_ptr<DrawbotObject>> g_drawbot_objects;
-auto& g_drawbot_objects_created = g_custom_ui_telemetry.drawbot_objects_created;
-auto& g_drawbot_objects_released = g_custom_ui_telemetry.drawbot_objects_released;
-auto& g_drawbot_paint_rect_calls = g_custom_ui_telemetry.drawbot_paint_rect_calls;
-auto& g_drawbot_fill_path_calls = g_custom_ui_telemetry.drawbot_fill_path_calls;
-auto& g_drawbot_stroke_path_calls = g_custom_ui_telemetry.drawbot_stroke_path_calls;
-auto& g_drawbot_invalid_operations = g_custom_ui_telemetry.drawbot_invalid_operations;
-auto& g_drawbot_get_supplier_calls = g_custom_ui_telemetry.drawbot_get_supplier_calls;
-auto& g_drawbot_get_surface_calls = g_custom_ui_telemetry.drawbot_get_surface_calls;
-auto& g_drawbot_get_drawing_ref_calls = g_custom_ui_telemetry.drawbot_get_drawing_ref_calls;
-auto& g_overlay_stroke_path_calls = g_custom_ui_telemetry.overlay_stroke_path_calls;
-auto& g_app_get_background_color_calls = g_custom_ui_telemetry.app_get_background_color_calls;
-auto& g_app_color_picker_calls = g_custom_ui_telemetry.app_color_picker_calls;
-auto& g_app_invalidate_rect_calls = g_custom_ui_telemetry.app_invalidate_rect_calls;
-auto& g_app_progress_dialogs_created = g_custom_ui_telemetry.app_progress_dialogs_created;
-auto& g_app_progress_dialogs_disposed = g_custom_ui_telemetry.app_progress_dialogs_disposed;
+// Drawbot/App custom-UI callbacks, their opaque object tables, and the
+// HostUiContext event block moved to their owner, worker_drawbot_runtime.cpp
+// (issue #170); the suite assembly below keeps resolving them through
+// worker_drawbot_runtime.hpp.
 auto& g_app_picker_color = g_custom_ui_telemetry.app_picker_color;
-auto& g_app_invalidated_rect = g_custom_ui_telemetry.app_invalidated_rect;
-struct HostUiContext {
-  uint32_t magic{0x05ea771e};
-  int32_t window_type{2};
-  void* reserved_filter{};
-  std::array<intptr_t, 4> plugin_state{};
-  void* draw_ref{};
-  void* pane{};
-  void* job_manager{};
-};
-// Retained custom-UI callback-ABI state: the event context block whose
-// address is written into the PF event ABI, owned beside the callbacks that
-// hand it out. Lifetime: process-lifetime, re-armed per UI dispatch.
-HostUiContext g_ui_context;
-HostUiContext* g_ui_context_pointer = &g_ui_context;
-struct PfHelperUiContextScope {
-  explicit PfHelperUiContextScope(int32_t context)
-      : runtime_scope(context), previous_active(g_render_ui_context_active) {
-    g_render_ui_context_active = context >= 0 && context < 3;
-  }
-  ~PfHelperUiContextScope() { g_render_ui_context_active = previous_active; }
-  aexcompat::pf_helper::UiContextScope runtime_scope;
-  bool previous_active;
-};
-void* enter_custom_ui_context(int32_t context) {
-  return new (std::nothrow) PfHelperUiContextScope(context);
-}
-void leave_custom_ui_context(void* scope) {
-  delete static_cast<PfHelperUiContextScope*>(scope);
-}
-bool custom_ui_context_stable() {
-  return g_ui_context_pointer == &g_ui_context;
-}
-void set_custom_ui_context_tool(int32_t context) {
-  aexcompat::pf_helper::set_context_tool(
-      context, aexcompat::pf_helper::kExtendedToolMin);
-}
 auto& g_ui_drag_calls = g_custom_ui_telemetry.ui_drag_calls;
 auto& g_ui_drag_requested = g_custom_ui_telemetry.ui_drag_requested;
 auto& g_ui_drag_terminated = g_custom_ui_telemetry.ui_drag_terminated;
-auto& g_ui_coordinate_transform_calls = g_custom_ui_telemetry.ui_coordinate_transform_calls;
 auto& g_render_click_enabled = g_custom_ui_telemetry.render_click_enabled;
 auto& g_render_draw_enabled = g_custom_ui_telemetry.render_draw_enabled;
 auto& g_render_click_x = g_custom_ui_telemetry.render_click_x;
 auto& g_render_click_y = g_custom_ui_telemetry.render_click_y;
-auto& g_render_click_error = g_custom_ui_telemetry.render_click_error;
-auto& g_render_click_out_flags = g_custom_ui_telemetry.render_click_out_flags;
-auto& g_render_click_changed_value = g_custom_ui_telemetry.render_click_changed_value;
-auto& g_render_draw_error = g_custom_ui_telemetry.render_draw_error;
-auto& g_render_draw_out_flags = g_custom_ui_telemetry.render_draw_out_flags;
-auto& g_render_ui_lifecycle_errors = g_custom_ui_telemetry.render_ui_lifecycle_errors;
 auto& g_render_ui_context_closed = g_custom_ui_telemetry.render_ui_context_closed;
-auto& g_drawbot_fill_colors = g_custom_ui_telemetry.drawbot_fill_colors;
 
-int32_t __cdecl drawbot_get_supplier(void* draw, void** supplier) {
-  if (draw != &g_drawbot_draw || !supplier) return 4;
-  *supplier = &g_drawbot_supplier;
-  ++g_drawbot_get_supplier_calls;
-  return 0;
-}
-int32_t __cdecl drawbot_get_surface(void* draw, void** surface) {
-  if (draw != &g_drawbot_draw || !surface) return 4;
-  *surface = &g_drawbot_surface;
-  ++g_drawbot_get_surface_calls;
-  return 0;
-}
-int32_t new_drawbot_object(DrawbotObjectKind kind, void** output) {
-  if (!output || g_drawbot_objects.size() >= 256) return 4;
-  auto object = std::make_unique<DrawbotObject>();
-  object->kind = kind;
-  void* key = object.get();
-  g_drawbot_objects.emplace(key, std::move(object));
-  ++g_drawbot_objects_created;
-  *output = key;
-  return 0;
-}
-int32_t __cdecl drawbot_new_pen(void* supplier, const float* color, float size, void** pen) {
-  if (supplier != &g_drawbot_supplier || !color || !std::isfinite(size) || size <= 0) return 4;
-  const int32_t error = new_drawbot_object(DrawbotObjectKind::Pen, pen);
-  if (!error) {
-    std::copy_n(color, 4, g_drawbot_objects[*pen]->color.begin());
-    g_drawbot_objects[*pen]->pen_size = size;
-  }
-  return error;
-}
-int32_t __cdecl drawbot_new_brush(void* supplier, const float* color, void** brush) {
-  if (supplier != &g_drawbot_supplier || !color) return 4;
-  const int32_t error = new_drawbot_object(DrawbotObjectKind::Brush, brush);
-  if (!error) std::copy_n(color, 4, g_drawbot_objects[*brush]->color.begin());
-  return error;
-}
-int32_t __cdecl drawbot_new_path(void* supplier, void** path) {
-  return supplier == &g_drawbot_supplier ? new_drawbot_object(DrawbotObjectKind::Path, path) : 4;
-}
-int32_t __cdecl drawbot_release_object(void* object) {
-  const auto found = g_drawbot_objects.find(object);
-  if (found == g_drawbot_objects.end()) { ++g_drawbot_invalid_operations; return 4; }
-  g_drawbot_objects.erase(found);
-  ++g_drawbot_objects_released;
-  return 0;
-}
-int32_t __cdecl drawbot_add_rect(void* path, const float* rect) {
-  const auto found = g_drawbot_objects.find(path);
-  if (found == g_drawbot_objects.end() || found->second->kind != DrawbotObjectKind::Path || !rect)
-    return 4;
-  if (!std::all_of(rect, rect + 4, [](float value) { return std::isfinite(value); }) ||
-      rect[2] < 0 || rect[3] < 0) return 4;
-  std::copy_n(rect, 4, found->second->rect.begin());
-  return 0;
-}
-int32_t __cdecl drawbot_path_point(void* path, float x, float y) {
-  const auto found = g_drawbot_objects.find(path);
-  if (found == g_drawbot_objects.end() || found->second->kind != DrawbotObjectKind::Path ||
-      !std::isfinite(x) || !std::isfinite(y) || found->second->path_points >= 4096) return 4;
-  ++found->second->path_points;
-  return 0;
-}
-int32_t __cdecl drawbot_paint_rect(void* surface, const float* color, const float* rect) {
-  if (surface != &g_drawbot_surface || !color || !rect) return 4;
-  ++g_drawbot_paint_rect_calls;
-  return 0;
-}
-int32_t __cdecl drawbot_fill_path(void* surface, void* brush, void* path, int32_t fill_type) {
-  const auto brush_it = g_drawbot_objects.find(brush), path_it = g_drawbot_objects.find(path);
-  if (surface != &g_drawbot_surface || fill_type != 1 ||
-      brush_it == g_drawbot_objects.end() || path_it == g_drawbot_objects.end() ||
-      brush_it->second->kind != DrawbotObjectKind::Brush ||
-      path_it->second->kind != DrawbotObjectKind::Path) return 4;
-  g_drawbot_fill_colors.push_back(brush_it->second->color);
-  ++g_drawbot_fill_path_calls;
-  return 0;
-}
-int32_t __cdecl drawbot_stroke_path(void* surface, void* pen, void* path) {
-  const auto pen_it = g_drawbot_objects.find(pen), path_it = g_drawbot_objects.find(path);
-  if (surface != &g_drawbot_surface || pen_it == g_drawbot_objects.end() ||
-      path_it == g_drawbot_objects.end() || pen_it->second->kind != DrawbotObjectKind::Pen ||
-      path_it->second->kind != DrawbotObjectKind::Path) return 4;
-  ++g_drawbot_stroke_path_calls;
-  return 0;
-}
-int32_t __cdecl get_drawing_reference(void* context, void** drawing) {
-  if (context != &g_ui_context_pointer || !drawing) return 4;
-  *drawing = &g_drawbot_draw;
-  ++g_drawbot_get_drawing_ref_calls;
-  return 0;
-}
 // Receipt test-mode storage moved to aexcompat::render_receipts::
 // receipt_test_state() (issue #126 Phase D).
 auto& g_async_manager = aexcompat::render_receipts::receipt_test_state().async_manager;
-int32_t __cdecl get_context_async_manager(void* input, void* extra, void** manager) {
-  if (!input || !extra || !manager) return 4;
-  *manager = &g_async_manager;
-  return 0;
-}
-int32_t __cdecl app_get_background_color(uint16_t* color) {
-  if (!color) return 4;
-  color[0] = color[1] = color[2] = 0x3030;
-  ++g_app_get_background_color_calls;
-  return 0;
-}
-int32_t __cdecl app_get_color(int16_t color_type, uint16_t* color) {
-  if (!color || color_type < 0 || (color_type > 127 && (color_type < 1000 || color_type > 1004)))
-    return 4;
-  const uint16_t value = static_cast<uint16_t>(0x2020 + (color_type & 7) * 0x0808);
-  color[0] = color[1] = color[2] = value;
-  return 0;
-}
-int32_t __cdecl app_get_language(char* language) {
-  if (!language) return 4;
-  std::memcpy(language, "en_US", sizeof("en_US"));
-  return 0;
-}
-int32_t __cdecl app_get_font_style(int16_t, char*, int16_t*, int16_t*, int16_t*) { return 4; }
-int32_t __cdecl app_set_cursor(int16_t) { return 4; }
-int32_t __cdecl app_is_render_engine(uint8_t* render_engine) {
-  if (!render_engine) return 4;
-  *render_engine = 1;  // The SDK includes no-UI hosts in render-engine semantics.
-  return 0;
-}
-int32_t __cdecl app_color_picker(const char* title, const float* sample_color,
-                                 int32_t, float* new_color) {
-  if (!g_render_ui_context_active || !title || !sample_color || !new_color) return 4;
-  // PF_PixelFloat is alpha, red, green, blue; the CLI color is RGBA.
-  new_color[0] = g_app_picker_color[3];
-  new_color[1] = g_app_picker_color[0];
-  new_color[2] = g_app_picker_color[1];
-  new_color[3] = g_app_picker_color[2];
-  ++g_app_color_picker_calls;
-  return 0;
-}
-int32_t __cdecl app_invalidate_rect(void* context, const int32_t* rect) {
-  if (context != &g_ui_context_pointer || !g_render_ui_context_active) return 4;
-  if (rect) std::copy_n(rect, 4, g_app_invalidated_rect.begin());
-  else g_app_invalidated_rect.fill(0);
-  ++g_app_invalidate_rect_calls;
-  return 0;
-}
-int32_t __cdecl app_get_mouse(int32_t*) { return 4; }
-int32_t __cdecl app_convert_local_to_global(const int32_t*, int32_t*) { return 4; }
-int32_t __cdecl app_get_color_at_global_point(const int32_t*, int16_t, int16_t, float*) {
-  return 4;
-}
-// Retained custom-UI callback-ABI state: live App progress-dialog handles
-// returned to the plug-in; balanced by the create/dispose callbacks and
-// counted in custom_ui_telemetry().
-struct AppProgressDialog { uint32_t magic{0x50524744}; };
-std::unordered_map<void*, std::unique_ptr<AppProgressDialog>> g_app_progress_dialogs;
-int32_t __cdecl app_create_progress_dialog(const uint16_t* title, const uint16_t*, int32_t,
-                                            void** dialog) {
-  if (!title || !dialog || g_app_progress_dialogs.size() >= 32) return 4;
-  auto progress = std::make_unique<AppProgressDialog>();
-  void* key = progress.get();
-  g_app_progress_dialogs.emplace(key, std::move(progress));
-  *dialog = key;
-  ++g_app_progress_dialogs_created;
-  return 0;
-}
-int32_t __cdecl app_update_progress_dialog(void* dialog, int32_t count, int32_t total) {
-  if (g_app_progress_dialogs.find(dialog) == g_app_progress_dialogs.end() || count < 0 ||
-      total < 0 || (total != 0 && count > total)) return 4;
-  return 0;
-}
-int32_t __cdecl app_dispose_progress_dialog(void* dialog) {
-  if (g_app_progress_dialogs.erase(dialog) != 1) return 4;
-  ++g_app_progress_dialogs_disposed;
-  return 0;
-}
-int32_t __cdecl overlay_foreground(float* color) {
-  if (!color) return 4;
-  color[0] = color[1] = color[2] = 0.9f;
-  color[3] = 1.0f;
-  return 0;
-}
-int32_t __cdecl overlay_stroke_path(void* draw, void* path, int32_t) {
-  const auto found = g_drawbot_objects.find(path);
-  if (draw != &g_drawbot_draw || found == g_drawbot_objects.end() ||
-      found->second->kind != DrawbotObjectKind::Path || found->second->path_points == 0) return 4;
-  ++g_overlay_stroke_path_calls;
-  return 0;
-}
-int32_t __cdecl ui_transform_point(void*, void* context, int32_t, uint32_t, int32_t* point) {
-  if (context != &g_ui_context_pointer || !point) return 4;
-  ++g_ui_coordinate_transform_calls;
-  return 0;
-}
-int32_t __cdecl ui_transform_point_simple(void*, void* context, int32_t* point) {
-  if (context != &g_ui_context_pointer || !point) return 4;
-  ++g_ui_coordinate_transform_calls;
-  return 0;
-}
+// get_context_async_manager moved to worker_l2_render_abi.cpp (issue #170).
+int32_t __cdecl get_context_async_manager(void* input, void* extra, void** manager);
 
 
 constexpr int32_t kSyntheticCompWidth = 17;
@@ -1426,14 +851,6 @@ constexpr int32_t kSyntheticCompHeight = 9;
 // its header keep the custom-selftest hook wiring below resolving.
 auto& g_synthetic_receipt_test_mode =
     aexcompat::render_receipts::receipt_test_state().synthetic_test_mode;
-int32_t __cdecl app_get_personal_info(char* info) {
-  if (!info) return 4;
-  std::memset(info, 0, 64 * 3);
-  std::memcpy(info, "AEXCompat", sizeof("AEXCompat"));
-  std::memcpy(info + 64, "onmokoworks", sizeof("onmokoworks"));
-  std::memcpy(info + 128, "SDK fixture", sizeof("SDK fixture"));
-  return 0;
-}
 void bump_render_project_timestamp() {
   aexcompat::aegp_external_render_runtime::bump_project_generation();
 }
@@ -1452,371 +869,25 @@ bool claim_opaque_generation(std::atomic<uint64_t>& counter, uint64_t& generatio
 }
 
 using LayerRenderContext = aexcompat::aegp_layer_render_runtime::Context;
-auto& g_pf_adv_item_touches =
-    aexcompat::worker_runtime::pf_adv_time::item_telemetry().touches;
-auto& g_pf_adv_item_rerenders =
-    aexcompat::worker_runtime::pf_adv_time::item_telemetry().rerenders;
 
-int32_t checked_adv_item_move(int32_t direction, int32_t steps, int32_t step,
-                              int32_t& time) {
-  if ((direction != 0 && direction != 1) || steps < 0 || step <= 0) return 4;
-  const int64_t distance = static_cast<int64_t>(steps) * step;
-  const int64_t moved = static_cast<int64_t>(time) + (direction == 0 ? distance : -distance);
-  if (moved < INT32_MIN || moved > INT32_MAX) return 4;
-  time = static_cast<int32_t>(moved);
-  return 0;
-}
-
-bool active_adv_item_context(void* in_data) {
-  const auto& context = aexcompat::aegp_layer_render_runtime::context();
-  return context.entry && context.input && in_data == context.input;
-}
-
-bool active_adv_item_world(const void* world, DispatchWorldFormat& result) {
-  return resolve_registered_dispatch_world(world, result);
-}
-
-int32_t __cdecl adv_item_move_time_step(void* in_data, void* world,
-                                        int32_t direction, int32_t steps) {
-  auto& context = aexcompat::aegp_layer_render_runtime::context();
-  DispatchWorldFormat effect_world{};
-  if (!active_adv_item_context(in_data) || !active_adv_item_world(world, effect_world) ||
-      !effect_world.data || effect_world.width <= 0 || effect_world.height <= 0 ||
-      effect_world.rowbytes <= 0 || context.pixel_bytes <= 0 ||
-      effect_world.width > INT32_MAX / context.pixel_bytes ||
-      effect_world.rowbytes < effect_world.width * context.pixel_bytes) return 4;
-  int32_t moved = context.current_time;
-  if (checked_adv_item_move(direction, steps, context.time_step, moved) != 0) return 4;
-  context.active_item_time = moved;
-  context.active_item_time_valid = true;
-  return 0;
-}
-
-int32_t __cdecl adv_item_move_time_step_active(int32_t direction, int32_t steps) {
-  auto& context = aexcompat::aegp_layer_render_runtime::context();
-  if (!context.entry || context.time_step <= 0) return 4;
-  int32_t moved = context.active_item_time_valid ? context.active_item_time : context.current_time;
-  if (checked_adv_item_move(direction, steps, context.time_step, moved) != 0) return 4;
-  context.active_item_time = moved;
-  context.active_item_time_valid = true;
-  return 0;
-}
-
-int32_t __cdecl adv_item_touch_active() {
-  if (!aexcompat::aegp_layer_render_runtime::context().entry) return 4;
-  ++g_pf_adv_item_touches;
-  bump_render_project_timestamp();
-  return 0;
-}
-
-int32_t __cdecl adv_item_force_rerender(void* in_data, void* world) {
-  DispatchWorldFormat effect_world{};
-  if (!active_adv_item_context(in_data) || !active_adv_item_world(world, effect_world) ||
-      !effect_world.data || effect_world.width <= 0 || effect_world.height <= 0 ||
-      effect_world.rowbytes <= 0) return 4;
-  ++g_pf_adv_item_rerenders;
-  bump_render_project_timestamp();
-  return 0;
-}
-
-int32_t __cdecl adv_item_effect_is_active(void* context_handle, uint8_t* enabled) {
-  if (enabled) *enabled = 0;
-  if (!context_handle || !enabled || !aexcompat::aegp_layer_render_runtime::context().entry) return 4;
-  // UI context handles are opaque. A live render owns no UI context, so headless mode
-  // can only report disabled without dereferencing an untrusted or stale handle.
-  return 0;
-}
-
-// The PF AE Adv Item Suite ABI and table live in worker_l2_render_abi.{hpp,cpp}.
-auto& g_loaded_effect_receipt_fixture_passed =
-    aexcompat::render_receipts::receipt_test_state().loaded_effect_receipt_fixture_passed;
-auto& g_loaded_effect_receipt_unsupported_rejected =
-    aexcompat::render_receipts::receipt_test_state().loaded_effect_receipt_unsupported_rejected;
-auto& g_loaded_effect_receipt_stale_world_rejected =
-    aexcompat::render_receipts::receipt_test_state().loaded_effect_receipt_stale_world_rejected;
+// The PF AE Adv Item Suite callbacks, ABI, and table live in
+// worker_l2_render_abi.{hpp,cpp} (issue #170).
 void drain_async_layer_requests();
 
-uint32_t staged_item_project_generation() {
-  return aexcompat::aegp_external_render_runtime::project_generation();
-}
-bool staged_item_synthetic_receipts_enabled() {
-  return g_synthetic_receipt_test_mode;
-}
-const bool g_staged_item_runtime_configured = [] {
-  aexcompat::aegp_staged_item_runtime::configure({
-      &staged_item_project_generation, &staged_item_synthetic_receipts_enabled,
-      &aexcompat::aegp_item_render_runtime::publish_synthetic});
-  return true;
-}();
-const bool g_external_render_runtime_configured = [] {
-  aexcompat::aegp_external_render_runtime::configure({
-      &aexcompat::aegp_staged_item_runtime::clear,
-      +[](void* item) { return item == aegp_comp_item_handle(); }});
-  return true;
-}();
-const bool g_item_render_runtime_configured = [] {
-  aexcompat::aegp_item_render_runtime::configure({
-      &snapshot_render_options,
-      &aexcompat::aegp_external_render_runtime::publish_cached_receipt,
-      &aexcompat::aegp_staged_item_runtime::publish_receipt});
-  return true;
-}();
-const bool g_layer_render_runtime_configured = [] {
-  aexcompat::aegp_layer_render_runtime::configure({
-      &is_render_worker, &layer_effect_boundary_is_live});
-  return true;
-}();
-int32_t publish_loaded_layer_receipt(
-    const AegpLayerRenderOptionsValue& options, void** receipt) {
-  return aexcompat::aegp_layer_render_runtime::publish(options, receipt);
-}
-int32_t __cdecl checkout_item_frame_async(
-    void* manager, uint32_t purpose, void* options, void** receipt) {
-  if (receipt) *receipt = nullptr;
-  if (manager != &g_async_manager || purpose == 0) return 4;
-  return aexcompat::aegp_item_render_runtime::publish_receipt(options, receipt);
-}
-int32_t __cdecl checkout_layer_frame_async(
-    void* manager, uint32_t purpose, void* options, void** receipt) {
-  if (receipt) *receipt = nullptr;
-  AegpLayerRenderOptionsValue snapshot{};
-  if (manager != &g_async_manager || purpose == 0 || !receipt ||
-      !snapshot_layer_render_options(options, snapshot)) return 4;
-  if (is_render_worker() && aexcompat::aegp_layer_render_runtime::active())
-    return publish_loaded_layer_receipt(snapshot, receipt);
-  const int32_t pixel_format = snapshot.world_type == 1 ? kPixelFormatArgb32 :
-      (snapshot.world_type == 2 ? kPixelFormatArgb64 : kPixelFormatArgb128);
-  return aexcompat::aegp_item_render_runtime::publish_synthetic(
-      pixel_format, receipt);
-}
-int32_t __cdecl get_receipt_world(void* receipt, void*** world) {
-  return aexcompat::render_receipts::get_world(receipt, world);
-}
-int32_t __cdecl checkin_frame(void* receipt) {
-  return aexcompat::render_receipts::checkin(receipt);
-}
-
-bool checkin_frame_if_live(void* receipt) {
-  return aexcompat::render_receipts::checkin_if_live(receipt);
-}
-
-int32_t __cdecl render_checkout_frame_reject(
-    void* options, AegpRenderCancelV1 check_cancel, void* cancel_refcon, void** out) {
-  return aexcompat::aegp_item_render_runtime::checkout(
-      options, check_cancel, cancel_refcon, out);
-}
-int32_t __cdecl render_checkout_layer_reject(
-    void* options, uint8_t, void* check_cancel_raw, void* cancel_refcon, void** out) {
-  if (out) *out = nullptr;
-  AegpLayerRenderOptionsValue snapshot{};
-  if (!out || !snapshot_layer_render_options(options, snapshot)) return 4;
-  const auto check_cancel = reinterpret_cast<AegpRenderCancelV1>(check_cancel_raw);
-  if (check_cancel) {
-    uint8_t cancelled = 0;
-    const int32_t cancel_error = check_cancel(cancel_refcon, &cancelled);
-    if (cancel_error != 0) return cancel_error;
-    if (cancelled != 0) return 4;
-  }
-  return publish_loaded_layer_receipt(snapshot, out);
-}
-int32_t __cdecl render_checkout_layer_v5(
-    void* options, AegpRenderCancelV1 check_cancel, void* cancel_refcon, void** out) {
-  if (out) *out = nullptr;
-  AegpLayerRenderOptionsValue snapshot{};
-  if (!out || !snapshot_layer_render_options(options, snapshot)) return 4;
-  if (check_cancel) {
-    uint8_t cancelled = 0;
-    const int32_t cancel_error = check_cancel(cancel_refcon, &cancelled);
-    if (cancel_error != 0) return cancel_error;
-    if (cancelled != 0) return 4;
-  }
-  return publish_loaded_layer_receipt(snapshot, out);
-}
-int async_layer_exception_filter(EXCEPTION_POINTERS* information,
-                                 uint32_t* exception_code) {
-  if (exception_code && information && information->ExceptionRecord)
-    *exception_code = information->ExceptionRecord->ExceptionCode;
-  return EXCEPTION_EXECUTE_HANDLER;
-}
-int32_t invoke_async_layer_callback_seh(AegpAsyncFrameReadyCallback callback,
-    uint64_t request_id, uint8_t canceled, int32_t error, void* receipt,
-    void* refcon, int32_t* callback_error, uint32_t* exception_code) {
-  if (!callback || !callback_error || !exception_code) return 4;
-  *callback_error = 4; *exception_code = 0;
-  __try { *callback_error = callback(request_id, canceled, error, receipt, refcon); return 0; }
-  __except(async_layer_exception_filter(GetExceptionInformation(), exception_code)) {
-    return 4;
-  }
-}
-int32_t __cdecl render_checkout_layer_async_reject(
-    void* options, AegpAsyncFrameReadyCallback callback, void* refcon, uint64_t* id) {
-  return aexcompat::aegp_async_layer::checkout(options, callback, refcon, id);
-}
-int32_t __cdecl render_cancel_async_reject(uint64_t id) {
-  return aexcompat::aegp_async_layer::cancel(id);
-}
-void drain_async_layer_requests() { aexcompat::aegp_async_layer::drain(); }
-bool async_layer_requests_balanced() { return aexcompat::aegp_async_layer::balanced(); }
-const bool g_async_layer_runtime_configured = [] {
-  aexcompat::aegp_async_layer::configure({&is_render_worker,
-      &snapshot_layer_render_options,
-      &aexcompat::aegp_layer_render_runtime::capture_async_source,
-      &aexcompat::aegp_layer_render_runtime::publish_async_source,
-      &checkin_frame_if_live,
-      &invoke_async_layer_callback_seh});
-  return true;
-}();
-int32_t __cdecl render_get_region_reject(void* receipt, void* region) {
-  if (!receipt || !region) return 4;
-  ReceiptSnapshot snapshot{};
-  if (!aexcompat::render_receipts::snapshot(receipt, snapshot)) return 4;
-  std::memcpy(region, &snapshot.rendered_region, sizeof(AegpRect));
-  return 0;
-}
-int32_t __cdecl render_sufficient_reject(void* rendered, void* proposed, uint8_t* out) {
-  if (out) *out = 0;
-  AegpRenderOptionsValue first{}, second{};
-  if (!out || !snapshot_render_options(rendered, first) ||
-      !snapshot_render_options(proposed, second)) return 4;
-  const auto roi = [](const AegpRenderOptionsValue& options) {
-    return options.roi.left == 0 && options.roi.top == 0 &&
-        options.roi.right == 0 && options.roi.bottom == 0
-        ? AegpRect{0, 0, kSyntheticCompWidth, kSyntheticCompHeight} : options.roi;
-  };
-  const AegpRect rendered_roi = roi(first), proposed_roi = roi(second);
-  const auto same_rational = [](const AegpTime& left, const AegpTime& right) {
-    return static_cast<int64_t>(left.value) * right.scale ==
-        static_cast<int64_t>(right.value) * left.scale;
-  };
-  const bool same_time = same_rational(first.time, second.time);
-  const bool same_step = same_rational(first.time_step, second.time_step);
-  const bool contains = rendered_roi.left <= proposed_roi.left &&
-      rendered_roi.top <= proposed_roi.top && rendered_roi.right >= proposed_roi.right &&
-      rendered_roi.bottom >= proposed_roi.bottom;
-  *out = first.item == second.item && same_time && same_step &&
-      first.field == second.field && first.world_type == second.world_type &&
-      first.downsample_x == second.downsample_x &&
-      first.downsample_y == second.downsample_y && first.matte == second.matte &&
-      first.channel_order == second.channel_order &&
-      first.render_guide_layers == second.render_guide_layers &&
-      first.render_quality == second.render_quality && contains;
-  return 0;
-}
-int32_t __cdecl render_sound_reject(void*, const void*, const void*, const void*, void*, void*, void** out) {
-  if (out) *out = nullptr; return 4;
-}
-int32_t __cdecl render_timestamp_reject(void* output) {
-  return aexcompat::aegp_external_render_runtime::timestamp(output);
-}
-int32_t __cdecl render_changed_reject(void* item, const void* start,
-    const void* duration, const void* timestamp, uint8_t* out) {
-  return aexcompat::aegp_external_render_runtime::changed(
-      item, start, duration, timestamp, out);
-}
-int32_t __cdecl render_worthwhile_reject(
-    void* options, const void* timestamp, uint8_t* out) {
-  return aexcompat::aegp_external_render_runtime::worthwhile(options, timestamp, out);
-}
-int32_t __cdecl render_checkin_rendered(
-    void* options, const void* timestamp, uint32_t ticks, void* image) {
-  return aexcompat::aegp_external_render_runtime::checkin_rendered(
-      options, timestamp, ticks, image);
-}
-int32_t __cdecl render_guid_reject(void* receipt, void** out) {
-  if (out) *out = nullptr;
-  if (!receipt || !out) return 4;
-  ReceiptSnapshot snapshot{};
-  if (!aexcompat::render_receipts::snapshot(receipt, snapshot)) return 4;
-  const auto& guid = snapshot.guid;
-  if (new_aegp_mem_handle(1, "render receipt guid", static_cast<uint32_t>(guid.size()),
-                          1, out) != 0) return 4;
-  void* bytes = nullptr;
-  if (lock_aegp_mem_handle(*out, &bytes) != 0 || !bytes) {
-    free_aegp_mem_handle(*out); *out = nullptr; return 4;
-  }
-  std::memcpy(bytes, guid.data(), guid.size());
-  return unlock_aegp_mem_handle(*out);
-}
+bool async_layer_requests_balanced();
+// The render receipt/async checkout callbacks and the render-runtime
+// configure wiring moved to their owner, worker_l2_render_abi.cpp
+// (issue #170); the suite assembly and selftest hooks below keep
+// resolving them through worker_l2_render_abi.hpp declarations.
 
 bool world_lifetimes_balanced();
+// The worker-entry selftest verify bridges, the world/receipt selftest
+// hooks, the loaded-effect receipt fixture, and the PF parameter state
+// capture moved to worker_entry_wiring.cpp (issue #165); worker_main keeps
+// resolving the survivors below through these declarations.
+bool async_receipt_lifetimes_balanced();
+bool verify_suite_release_without_acquire_rejected();
 
-const aexcompat::aegp_world_selftests::Hooks& aegp_world_selftest_hooks() {
-  static const aexcompat::aegp_world_selftests::Hooks hooks{
-      &world_lifetimes_balanced,
-      &aegp_comp_item_handle,
-      +[](void* item, void** output) { return render_options_new_from_item(1, item, output); },
-      &render_timestamp_reject,
-      &render_checkin_rendered,
-      &render_worthwhile_reject,
-      +[](void* options, void** receipt) {
-        return render_checkout_frame_reject(options, nullptr, nullptr, receipt);
-      },
-      &get_receipt_world,
-      &checkin_frame,
-      &bump_render_project_timestamp,
-      &render_options_dispose,
-      &aexcompat::aegp_external_render_runtime::cache_empty,
-      +[](bool enabled) { g_synthetic_receipt_test_mode = enabled; },
-      +[] { return aexcompat::render_receipts::lifetimes_balanced(); },
-      +[](int32_t pixel_format, void** output) {
-        return aexcompat::aegp_item_render_runtime::publish_synthetic(
-            pixel_format, output);
-      },
-      +[](void** output) {
-        return insert_layer_render_options(AegpLayerRenderOptionsValue{}, output);
-      },
-      +[](void* options, void** receipt) {
-        return checkout_layer_frame_async(&g_async_manager, 1, options, receipt);
-      },
-      &dispose_layer_render_options,
-      nullptr};
-  return hooks;
-}
-
-bool verify_aegp_world_suite3() {
-  return aexcompat::aegp_world_selftests::verify_world_suite3(
-      aegp_world_selftest_hooks());
-}
-
-bool verify_aegp_world_mfr_safety() {
-  return aexcompat::aegp_world_selftests::verify_world_mfr_safety(
-      aegp_world_selftest_hooks());
-}
-
-bool async_receipt_lifetimes_balanced() {
-  return aexcompat::render_receipts::lifetimes_balanced();
-}
-
-bool verify_aegp_async_receipts() {
-  return aexcompat::aegp_world_selftests::verify_async_receipts(
-      aegp_world_selftest_hooks());
-}
-bool render_options_lifetimes_balanced() {
-  return item_live_count() == 0 && item_created_count() == item_disposed_count();
-}
-
-void clear_staged_item_worlds_for_test() {
-  aexcompat::aegp_staged_item_runtime::clear();
-}
-
-bool verify_item_render_cycle_contract(void* options) {
-  const AegpTime time{5, 24};
-  if (!aexcompat::aegp_staged_item_runtime::verify_recursion_guard(
-          aegp_comp_item_handle(), time, options, &render_checkout_frame_reject)) return false;
-  const uint32_t old_generation =
-      aexcompat::aegp_external_render_runtime::project_generation();
-  bump_render_project_timestamp();
-  void* rejected = reinterpret_cast<void*>(1);
-  return aexcompat::aegp_external_render_runtime::project_generation() != old_generation &&
-      render_checkout_frame_reject(options, nullptr, nullptr, &rejected) != 0 && !rejected &&
-      render_options_dispose(options) == 0;
-}
-
-
-
-bool world_lifetimes_balanced() {
-  return aexcompat::world_registry::lifetimes_balanced();
-}
 
 // The PF Pixel Data suites and their verify live in
 // worker_pf_pixel_data_suite.cpp.
@@ -1827,391 +898,19 @@ bool world_lifetimes_balanced() {
 // The PF pixel format registry (registration callbacks, GLOBAL_SETUP gate,
 // and accounting) lives in worker_pf_pixel_format_registry.cpp.
 
-int32_t __cdecl floating_point_from_point(void*, const void* definition, void* output) {
-  if (!definition || !output) return 4;
-  const auto* bytes = static_cast<const std::byte*>(definition);
-  auto* values = static_cast<double*>(output);
-  int32_t x{}, y{};
-  std::memcpy(&x, bytes + 56, sizeof(x));
-  std::memcpy(&y, bytes + 60, sizeof(y));
-  values[0] = x / 65536.0;
-  values[1] = y / 65536.0;
-  return 0;
-}
 
-int32_t __cdecl floating_point_from_angle(void*, const void* definition, double* output) {
-  if (!definition || !output) return 4;
-  int32_t value{};
-  std::memcpy(&value, static_cast<const std::byte*>(definition) + 56, sizeof(value));
-  *output = value / 65536.0;
-  return 0;
-}
-
-int32_t __cdecl floating_point_from_color(void* effect_ref, const void* definition,
-                                          PfColorParamPixelFloat* output) {
-  if (effect_ref != &g_effect || !definition || !output) return kPfBadCallbackParam;
-  const auto* bytes = static_cast<const std::byte*>(definition);
-  int32_t disk_id{}, type{};
-  std::memcpy(&disk_id, bytes, sizeof(disk_id));
-  std::memcpy(&type, bytes + kParamType, sizeof(type));
-  const auto found = std::find_if(g_params.begin(), g_params.end(), [disk_id](const ParamRecord& p) {
-    return p.disk_id == disk_id;
-  });
-  if (found == g_params.end()) return kPfInvalidIndex;
-  if (type != 5 || found->type != 5 || !found->has_color)
-    return kPfUnrecognizedParamType;
-
-  std::array<unsigned char, 4> value{};
-  std::memcpy(value.data(), bytes + 56, value.size());
-  const std::array<float, 4>* resolved = nullptr;
-  if (value == found->current_color) resolved = &found->current_float_color;
-  else if (value == found->default_color) resolved = &found->default_float_color;
-  else return kPfBadCallbackParam;
-
-  const PfColorParamPixelFloat result{(*resolved)[0], (*resolved)[1],
-                                      (*resolved)[2], (*resolved)[3]};
-  std::memcpy(output, &result, sizeof(result));
-  return 0;
-}
-
-int32_t __cdecl update_param_ui(void* effect_ref, int32_t index, const void* definition) {
-  if (effect_ref != &g_effect || (!g_update_params_ui_active && !g_user_changed_param_active) || !definition || index <= 0 ||
-      static_cast<std::size_t>(index) >= g_active_ui_param_count || !g_active_ui_params ||
-      !g_active_ui_params[index]) return kPfBadCallbackParam;
-  const auto* source = static_cast<const std::byte*>(definition);
-  auto* target = static_cast<std::byte*>(g_active_ui_params[index]);
-  int32_t source_type{}, target_type{};
-  std::memcpy(&source_type, source + kParamType, sizeof(source_type));
-  std::memcpy(&target_type, target + kParamType, sizeof(target_type));
-  if (source_type != target_type) return kPfUnrecognizedParamType;
-
-  constexpr uint32_t kMutableUiFlags = (1u << 4) | (1u << 5) | (1u << 9);
-  constexpr uint32_t kCollapseTwirly = 1u << 5;
-  uint32_t source_ui{}, target_ui{}, source_flags{}, target_flags{};
-  std::memcpy(&source_ui, source + kParamUiFlags, sizeof(source_ui));
-  std::memcpy(&target_ui, target + kParamUiFlags, sizeof(target_ui));
-  std::memcpy(&source_flags, source + kParamFlags, sizeof(source_flags));
-  std::memcpy(&target_flags, target + kParamFlags, sizeof(target_flags));
-  target_ui = (target_ui & ~kMutableUiFlags) | (source_ui & kMutableUiFlags);
-  target_flags = (target_flags & ~kCollapseTwirly) | (source_flags & kCollapseTwirly);
-  std::memcpy(target + kParamUiFlags, &target_ui, sizeof(target_ui));
-  std::memcpy(target + 8, source + 8, 2 * sizeof(int16_t));
-  std::memcpy(target + kParamName, source + kParamName, kParamNameSize);
-  target[kParamName + kParamNameSize - 1] = std::byte{0};
-  std::memcpy(target + kParamFlags, &target_flags, sizeof(target_flags));
-
-  constexpr std::size_t u = 56;
-  if (target_type == 1 || target_type == 2) {
-    std::memcpy(target + u + 76, source + u + 76, 2 * sizeof(int32_t));
-    if (target_type == 2) std::memcpy(target + u + 88, source + u + 88, 8);
-  } else if (target_type == 10) {
-    std::memcpy(target + u + 56, source + u + 56, 2 * sizeof(float));
-    std::memcpy(target + u + 68, source + u + 68, 8);
-  }
-  ++g_update_param_ui_calls;
-  return 0;
-}
-
-bool valid_param_utils_index(int32_t index, bool allow_groups = false) {
-  if (allow_groups && index >= -4 && index <= -1) return true;
-  return std::any_of(g_params.begin(), g_params.end(),
-      [index](const ParamRecord& param) { return param.index == index; });
-}
+// The Point/Angle/ColorParam and ParamUtils production callbacks moved to
+// their table owner, worker_pf_param_suites.cpp (issue #170); the shared
+// animation helpers below stay here with the lifecycle apply path.
 
 template <typename T, std::size_t N>
 void write(std::array<std::byte, N> &bytes, std::size_t offset, T value);
 
-ParameterAnimationKey evaluate_animation(const ParameterTimeline &timeline,
-                                         int32_t time, uint32_t scale) {
-  if (!rational_less(timeline.keys.front().time, timeline.keys.front().scale,
-                     time, scale))
-    return timeline.keys.front();
-  for (std::size_t i = 1; i < timeline.keys.size(); ++i) {
-    const auto &right = timeline.keys[i];
-    if (rational_less(time, scale, right.time, right.scale)) {
-      const auto &left = timeline.keys[i - 1];
-      if (left.hold || left.kind != right.kind ||
-          left.component_count != right.component_count)
-        return left;
-      const long double now = static_cast<long double>(time) / scale,
-                        a = static_cast<long double>(left.time) / left.scale,
-                        b = static_cast<long double>(right.time) / right.scale;
-      const double f = static_cast<double>((now - a) / (b - a));
-      AnimationKey value = left;
-      if (value.kind == AnimationValueKind::Scalar)
-        value.scalar += (right.scalar - value.scalar) * f;
-      else if (value.kind == AnimationValueKind::Color)
-        for (std::size_t c = 0; c < 4; ++c)
-          value.color[c] = static_cast<unsigned char>(
-              std::clamp(std::lround(value.color[c] +
-                                     (right.color[c] - value.color[c]) * f),
-                         0l, 255l));
-      else
-        for (int c = 0; c < value.component_count; ++c)
-          value.components[c] +=
-              (right.components[c] - value.components[c]) * f;
-      return value;
-    }
-  }
-  return timeline.keys.back();
-}
 
-bool write_animation_value(std::array<std::byte, kParamSize> &definition,
-                           const ParamRecord &param,
-                           const ParameterAnimationKey &key) {
-  if (key.kind == AnimationValueKind::Scalar) {
-    if (param.type == 1 || param.type == 4 || param.type == 7) {
-      if (!std::isfinite(key.scalar) || std::floor(key.scalar) != key.scalar ||
-          key.scalar < INT32_MIN || key.scalar > INT32_MAX)
-        return false;
-      write<int32_t>(definition, 56, static_cast<int32_t>(key.scalar));
-    } else if (param.type == 2) {
-      const double encoded = key.scalar * 65536.0;
-      if (encoded < INT32_MIN || encoded > INT32_MAX)
-        return false;
-      write<int32_t>(definition, 56, static_cast<int32_t>(std::round(encoded)));
-    } else if (param.type == 10) {
-      write<double>(definition, 56, key.scalar);
-    } else {
-      return false;
-    }
-  } else if (key.kind == AnimationValueKind::Color) {
-    if (param.type != 5)
-      return false;
-    std::memcpy(definition.data() + 56, key.color.data(), key.color.size());
-  } else {
-    const int component_count =
-        param.type == 3 ? 1
-                        : (param.type == 6 ? 2 : (param.type == 18 ? 3 : 0));
-    if (component_count == 0 || key.component_count != component_count)
-      return false;
-    for (int component = 0; component < component_count; ++component) {
-      if (param.type == 18) {
-        write<double>(definition, 56 + component * 8,
-                      key.components[component]);
-      } else {
-        const double encoded = key.components[component] * 65536.0;
-        if (encoded < INT32_MIN || encoded > INT32_MAX)
-          return false;
-        write<int32_t>(definition, 56 + component * 4,
-                       static_cast<int32_t>(std::round(encoded)));
-      }
-    }
-  }
-  return true;
-}
 
-bool apply_parameter_animation(
-    std::vector<std::array<std::byte, kParamSize>> &definitions, int32_t time,
-    uint32_t scale) {
-  if (scale == 0)
-    return false;
-  for (const auto &timeline : g_parameter_timelines) {
-    if (timeline.slot <= 0 ||
-        static_cast<std::size_t>(timeline.slot) >= definitions.size())
-      return false;
-    const auto &param = g_params[timeline.slot - 1];
-    if (timeline.keys.front().kind == AnimationValueKind::Arbitrary) {
-      if (param.type != 11 || std::any_of(timeline.keys.begin(), timeline.keys.end(),
-          [](const auto &key) { return key.kind != AnimationValueKind::Arbitrary; }))
-        return false;
-      continue;
-    }
-    if (param.type == 11 || !write_animation_value(definitions[timeline.slot], param,
-                                                   evaluate_animation(timeline, time, scale)))
-      return false;
-  }
-  return true;
-}
 
-template <typename T>
-void append_pf_state_bytes(std::vector<unsigned char>& snapshot, const T& value) {
-  const auto* bytes = reinterpret_cast<const unsigned char*>(&value);
-  snapshot.insert(snapshot.end(), bytes, bytes + sizeof(value));
-}
 
-bool capture_pf_parameter_state(int32_t index,
-                                std::vector<unsigned char>& snapshot) {
-  try {
-    for (const auto& param : g_params) {
-      if (index >= 0 && param.index != index) continue;
-      if (index == -3 && param.type == 0) continue;
-      append_pf_state_bytes(snapshot, param.disk_id);
-      append_pf_state_bytes(snapshot, param.type);
-      const auto* raw = reinterpret_cast<const unsigned char*>(param.raw.data());
-      snapshot.insert(snapshot.end(), raw, raw + param.raw.size());
-    }
-    for (const auto& timeline : g_parameter_timelines) {
-      if (index >= 0 && timeline.slot != index) continue;
-      append_pf_state_bytes(snapshot, timeline.slot);
-      const std::size_t key_count = timeline.keys.size();
-      append_pf_state_bytes(snapshot, key_count);
-      for (const auto& key : timeline.keys) {
-        append_pf_state_bytes(snapshot, key.time);
-        append_pf_state_bytes(snapshot, key.scale);
-        append_pf_state_bytes(snapshot, key.hold);
-        append_pf_state_bytes(snapshot, key.kind);
-        append_pf_state_bytes(snapshot, key.scalar);
-        snapshot.insert(snapshot.end(), key.color.begin(), key.color.end());
-        const auto* components =
-            reinterpret_cast<const unsigned char*>(key.components.data());
-        snapshot.insert(snapshot.end(), components,
-                        components + sizeof(double) * key.components.size());
-        append_pf_state_bytes(snapshot, key.component_count);
-      }
-    }
-  } catch (const std::bad_alloc&) {
-    return false;
-  }
-  return true;
-}
 
-int32_t invoke_global_setdown(EffectEntry entry, void* input, void* output) {
-  uint32_t exception_code{};
-  const int32_t error = invoke_entry_seh(entry, kGlobalSetdown, input, output,
-                                         nullptr, nullptr, nullptr,
-                                         &exception_code);
-  on_global_setdown();
-  aexcompat::pf_helper::reset();
-  return error;
-}
-
-int32_t __cdecl is_identical_param_checkout(void *effect_ref, int32_t index,
-                                            int32_t time1, int32_t step1,
-                                            uint32_t scale1, int32_t time2,
-                                            int32_t step2, uint32_t scale2,
-                                            uint8_t *identical) {
-  if (effect_ref != &g_effect || !identical ||
-      !valid_param_utils_index(index) || scale1 == 0 || scale2 == 0 ||
-      step1 < 0 || step2 < 0)
-    return kPfBadCallbackParam;
-  const auto *timeline = parameter_timeline(index);
-  if (!timeline) {
-    *identical = 1;
-    return 0;
-  }
-  std::array<std::byte, kParamSize> first = g_params[index - 1].raw,
-                                    second = first;
-  if (!write_animation_value(first, g_params[index - 1],
-                             evaluate_animation(*timeline, time1, scale1)) ||
-      !write_animation_value(second, g_params[index - 1],
-                             evaluate_animation(*timeline, time2, scale2)))
-    return kPfBadCallbackParam;
-  *identical =
-      std::memcmp(first.data() + 56, second.data() + 56, kParamSize - 56) == 0
-          ? 1
-          : 0;
-  return 0;
-}
-
-int32_t __cdecl find_param_keyframe_time(void *effect_ref, int32_t index,
-                                         int32_t time, uint32_t scale,
-                                         int32_t direction, uint8_t *found,
-                                         int32_t *key_index, int32_t *key_time,
-                                         uint32_t *key_scale) {
-  if (effect_ref != &g_effect || !found || !valid_param_utils_index(index) ||
-      scale == 0 ||
-      (direction != 0 && direction != 1 && direction != 0x1000 &&
-       direction != 0x1001) ||
-      ((!key_time) != (!key_scale)))
-    return kPfBadCallbackParam;
-  const auto *timeline = parameter_timeline(index);
-  *found = 0;
-  if (timeline) {
-    const bool greater = direction == 0 || direction == 0x1000;
-    const bool inclusive = direction == 0x1000 || direction == 0x1001;
-    const auto matches = [&](const ParameterAnimationKey &key) {
-      const bool key_less = rational_less(key.time, key.scale, time, scale);
-      const bool time_less = rational_less(time, scale, key.time, key.scale);
-      const bool equal = !key_less && !time_less;
-      return greater ? (time_less || (inclusive && equal))
-                     : (key_less || (inclusive && equal));
-    };
-    for (std::size_t offset = 0; offset < timeline->keys.size(); ++offset) {
-      const std::size_t i = greater ? offset : timeline->keys.size() - 1 - offset;
-      const auto &key = timeline->keys[i];
-      if (matches(key)) {
-        *found = 1;
-        if (key_index)
-          *key_index = static_cast<int32_t>(i);
-        if (key_time) {
-          *key_time = key.time;
-          *key_scale = key.scale;
-        }
-        return 0;
-      }
-    }
-  }
-  if (key_index)
-    *key_index = -1;
-  if (key_time) {
-    *key_time = 0;
-    *key_scale = scale;
-  }
-  return 0;
-}
-
-int32_t __cdecl get_param_keyframe_count(void *effect_ref, int32_t index,
-                                         int32_t *count) {
-  if (effect_ref != &g_effect || !count || !valid_param_utils_index(index))
-    return kPfBadCallbackParam;
-  *count = -1;
-  const auto *timeline = parameter_timeline(index);
-  if (timeline)
-    *count = static_cast<int32_t>(timeline->keys.size());
-  return 0;
-}
-
-int32_t __cdecl checkout_param_keyframe(void *effect_ref, int32_t index,
-                                        int32_t key_index, int32_t *key_time,
-                                        uint32_t *key_scale, void *definition) {
-  if (effect_ref != &g_effect || !valid_param_utils_index(index) ||
-      key_index < 0 || ((!key_time) != (!key_scale)) ||
-      (!definition && !key_time))
-    return kPfBadCallbackParam;
-  const auto *timeline = parameter_timeline(index);
-  if (!timeline || static_cast<std::size_t>(key_index) >= timeline->keys.size())
-    return kPfInvalidIndex;
-  const auto &key = timeline->keys[key_index];
-  if (key_time) {
-    *key_time = key.time;
-    *key_scale = key.scale;
-  }
-  if (definition) {
-    auto bytes = g_params[index - 1].raw;
-    if (!write_animation_value(bytes, g_params[index - 1], key))
-      return kPfBadCallbackParam;
-    std::memcpy(definition, bytes.data(), bytes.size());
-    std::lock_guard<std::mutex> lock(g_keyframe_checkout_mutex);
-    if (!g_keyframe_checkout_ledger.emplace(definition, bytes).second)
-      return kPfBadCallbackParam;
-  }
-  return 0;
-}
-
-int32_t __cdecl checkin_param_keyframe(void *effect_ref, void *definition) {
-  if (effect_ref != &g_effect || !definition)
-    return kPfBadCallbackParam;
-  std::lock_guard<std::mutex> lock(g_keyframe_checkout_mutex);
-  const auto found = g_keyframe_checkout_ledger.find(definition);
-  if (found == g_keyframe_checkout_ledger.end())
-    return kPfInvalidIndex;
-  g_keyframe_checkout_ledger.erase(found);
-  return 0;
-}
-
-int32_t __cdecl param_key_index_to_time(void* effect_ref, int32_t index, int32_t key_index,
-                                         int32_t* key_time, uint32_t* key_scale) {
-  if (effect_ref != &g_effect || !valid_param_utils_index(index) || key_index < 0 ||
-      !key_time || !key_scale)
-    return kPfBadCallbackParam;
-  const auto* timeline = parameter_timeline(index);
-  if (!timeline || static_cast<std::size_t>(key_index) >= timeline->keys.size())
-    return kPfInvalidIndex;
-  *key_time = timeline->keys[key_index].time;
-  *key_scale = timeline->keys[key_index].scale;
-  return 0;
-}
 
 // The PF param suite tables (Point/Angle/ColorParam/ParamUtils1/3) live in
 // worker_pf_param_suites.cpp; their production callbacks stay here.
@@ -2245,54 +944,8 @@ uint32_t live_suite_reference_count() {
 uint32_t suite_acquire_count() { return suite_registry().acquire_count(); }
 uint32_t suite_release_count() { return suite_registry().release_count(); }
 
-int32_t __cdecl aegp_get_unique_command(int32_t* command) {
-  if (!command || g_aegp_commands_created >= 64) return 4;
-  *command = g_next_aegp_command++;
-  ++g_aegp_commands_created;
-  return 0;
-}
-int32_t __cdecl aegp_insert_menu_command(int32_t command, const char* name,
-                                         int32_t menu, int32_t) {
-  if (command < 10000 || !name || strnlen_s(name, 1024) == 0 || menu < 0 || menu > 16 ||
-      g_aegp_menu_commands_inserted >= 64) return 4;
-  ++g_aegp_menu_commands_inserted;
-  g_aegp_inserted_commands.push_back(command);
-  return 0;
-}
-int32_t __cdecl aegp_remove_menu_command(int32_t) { return 0; }
-int32_t __cdecl aegp_set_menu_command_name(int32_t, const char* name) {
-  return name && strnlen_s(name, 1024) > 0 ? 0 : 4;
-}
-int32_t __cdecl aegp_command_state(int32_t command) {
-  if (command < 10000) return 4;
-  ++g_aegp_command_enable_calls;
-  return 0;
-}
-int32_t __cdecl aegp_check_menu_command(int32_t command, uint8_t checked) {
-  if (command < 10000) return 4;
-  ++g_aegp_command_check_calls;
-  if (checked) ++g_aegp_command_checked_true_calls;
-  else ++g_aegp_command_checked_false_calls;
-  return 0;
-}
-// The AEGP Command Suite table lives in worker_aegp_command_suites.cpp.
-
-int32_t __cdecl aegp_register_command_hook(int32_t plugin_id, int32_t priority,
-                                           int32_t command, void* hook, void* refcon) {
-  return aexcompat::worker_runtime::aegp_init::register_command_hook(
-      plugin_id, priority, command, hook, refcon);
-}
-int32_t __cdecl aegp_register_update_menu_hook(int32_t plugin_id, void* hook, void* refcon) {
-  return aexcompat::worker_runtime::aegp_init::register_update_menu_hook(
-      plugin_id, hook, refcon);
-}
-int32_t __cdecl aegp_register_death_hook(int32_t plugin_id, void* hook, void* refcon) {
-  return aexcompat::worker_runtime::aegp_init::register_death_hook(plugin_id, hook, refcon);
-}
-int32_t __cdecl aegp_register_idle_hook(int32_t plugin_id, void* hook, void* refcon) {
-  return aexcompat::worker_runtime::aegp_init::register_idle_hook(plugin_id, hook, refcon);
-}
-// The AEGP Register Suite table lives in worker_aegp_command_suites.cpp.
+// The AEGP Command/Register Suite callbacks and tables live in
+// worker_aegp_command_suites.cpp (issue #170).
 
 AegpSceneObject& g_aegp_comp_item = scene_runtime_state().composition_item;
 AegpSceneObject& g_aegp_comp = scene_runtime_state().composition;
@@ -2317,71 +970,11 @@ AegpSceneObject& g_aegp_effect = scene_runtime_state().effect;
 int32_t& g_aegp_active_camera_layer_index =
     scene_runtime_state().active_camera_layer_index;
 
-bool valid_comp_time(const AegpTime& time) {
-  if (time.scale == 0) return false;
-  constexpr int64_t kCompDurationValue = 300;
-  constexpr uint32_t kCompDurationScale = 30;
-  const int64_t scaled_time = static_cast<int64_t>(time.value) * kCompDurationScale;
-  const int64_t scaled_duration = kCompDurationValue * static_cast<int64_t>(time.scale);
-  return scaled_time >= 0 && scaled_time < scaled_duration;
-}
 
-bool layer_active_at_time(std::size_t index, const AegpTime& time) {
-  if (index >= g_aegp_layer_in_points.size() || index >= g_aegp_layer_durations.size())
-    return false;
-  const auto& in_point = g_aegp_layer_in_points[index];
-  const auto& duration = g_aegp_layer_durations[index];
-  if (in_point.scale == 0 || duration.scale == 0 || duration.value <= 0) return false;
-  const long double seconds =
-      static_cast<long double>(time.value) / static_cast<long double>(time.scale);
-  const long double in_seconds =
-      static_cast<long double>(in_point.value) / static_cast<long double>(in_point.scale);
-  const long double duration_seconds =
-      static_cast<long double>(duration.value) / static_cast<long double>(duration.scale);
-  return seconds >= in_seconds && seconds < in_seconds + duration_seconds;
-}
-
-int32_t __cdecl get_effect_camera(
-    void* effect, const AegpTime* comp_time, void** camera_layer) {
-  if (effect != &g_effect || !effect_is_live() || !comp_time || !camera_layer ||
-      !valid_comp_time(*comp_time)) return 4;
-  void* result = nullptr;
-  if (g_aegp_active_camera_layer_index >= 0) {
-    const auto index = static_cast<std::size_t>(g_aegp_active_camera_layer_index);
-    if (index >= g_aegp_layers.size()) return 4;
-    if (layer_active_at_time(index, *comp_time)) result = &g_aegp_layers[index];
-  }
-  *camera_layer = result;
-  return 0;
-}
-
-int32_t __cdecl get_effect_camera_matrix(void* effect, const AegpTime* comp_time,
-    AegpMatrix4* camera_matrix, double* distance_to_image_plane,
-    int16_t* image_plane_width, int16_t* image_plane_height) {
-  if (effect != &g_effect || !effect_is_live() || !comp_time ||
-      !camera_matrix || !distance_to_image_plane || !image_plane_width ||
-      !image_plane_height || !valid_comp_time(*comp_time)) return 4;
-  const int32_t width = g_full_resolution_width > 0
-      ? g_full_resolution_width : smart_state().width;
-  const int32_t height = g_full_resolution_height > 0
-      ? g_full_resolution_height : smart_state().height;
-  if (width <= 0 || height <= 0 || width > INT16_MAX || height > INT16_MAX)
-    return 4;
-
-  // The headless scene uses an unrotated default camera and a deterministic
-  // image-plane distance until project camera transforms are modeled.
-  AegpMatrix4 result{};
-  for (std::size_t index = 0; index < 4; ++index) result.mat[index][index] = 1.0;
-  *camera_matrix = result;
-  *distance_to_image_plane = static_cast<double>(width);
-  *image_plane_width = static_cast<int16_t>(width);
-  *image_plane_height = static_cast<int16_t>(height);
-  return 0;
-}
-auto& g_aegp_selection = scene_runtime_state().selection;
-
-// AEGP project/item/comp/layer/effect/collection/stream/keyframe callbacks are
-// compiled in worker_aegp_scene.cpp.
+// The PF Interface effect/camera callbacks live in
+// worker_aegp_pf_interface_suite.cpp (issue #170). AEGP project/item/comp/
+// layer/effect/collection/stream/keyframe callbacks are compiled in
+// worker_aegp_scene.cpp.
 bool __cdecl validate_render_options_item(int32_t plugin_id, void* item) {
   return plugin_id == 1 && item == &g_aegp_comp_item;
 }
@@ -2442,18 +1035,6 @@ constexpr uint32_t kMaxCudaDevices = kMaxGpuDevices;
 
 namespace gpu_transport = aexcompat::gpu_runtime::memory_world_transport;
 using CudaRenderTransport = gpu_transport::RenderTransport;
-auto& g_gpu_device_suite1 = gpu_transport::gpu_device_suite1;
-auto& g_cuda_upload_bytes = gpu_transport::cuda_upload_bytes;
-auto& g_cuda_download_bytes = gpu_transport::cuda_download_bytes;
-auto& g_cuda_sync_failures = gpu_transport::cuda_sync_failures;
-auto& g_last_cuda_device_count = gpu_transport::last_cuda_device_count;
-auto& g_last_cuda_device_index = gpu_transport::last_cuda_device_index;
-auto& g_opencl_upload_bytes = gpu_transport::opencl_upload_bytes;
-auto& g_opencl_download_bytes = gpu_transport::opencl_download_bytes;
-auto& g_opencl_sync_failures = gpu_transport::opencl_sync_failures;
-auto& g_gpu_allocations_created = gpu_transport::allocations_created;
-auto& g_gpu_allocations_freed = gpu_transport::allocations_freed;
-auto& g_invalid_gpu_memory_operations = gpu_transport::invalid_memory_operations;
 
 bool host_recognizes_smart_gpu_world(void* world) {
   return world &&
@@ -2490,300 +1071,15 @@ bool finish_cuda_render_transport(CudaRenderTransport& transport) {
   return gpu_transport::finish_render_transport(transport);
 }
 
-bool mask_suite_provider_available(void*) { return aexcompat::mask_runtime::model_enabled(); }
+// The host suite catalog wiring (component providers, the assembly hook
+// table, the static suite catalog, and acquire/release_suite) moved to
+// worker_host_suite_wiring.cpp (issue #171); worker_main keeps resolving
+// acquire/release through worker_l2_render_abi.hpp.
 
-bool render_options4_provider_available(void*) {
-  return is_render_worker() && aexcompat::aegp_layer_render_runtime::active();
-}
-
-bool render_suite2_provider_available(void*) {
-  return g_aegp_command_roundtrip_mode ||
-      (is_render_worker() && aexcompat::aegp_layer_render_runtime::active());
-}
-
-bool aegp_init_suite_provider_available(void*) { return g_aegp_init_mode; }
-bool render_worker_suite_provider_available(void*) { return is_render_worker(); }
-
-const void* provide_batch_sampling1(void*) {
-  g_batch_sampling_suite1 = {&begin_sampling8, &end_sampling8,
-      &unsupported_batch_sample_func, &unsupported_batch_sample_func};
-  return &g_batch_sampling_suite1;
-}
-const void* provide_color_settings7(void*) {
-  configure_host_hooks({&composition_handle, &acquire_suite, &release_suite});
-  return aexcompat::color_settings::suite();
-}
-const void* provide_iterate8(void*) {
-  g_iterate8_suite2.iterate = reinterpret_cast<void*>(&iterate_world8); return &g_iterate8_suite2;
-}
-const void* provide_sampling8(void*) {
-  g_sampling8_suite1.fill(reinterpret_cast<void*>(&aegp_unsupported_suite_call));
-  g_sampling8_suite1[0] = reinterpret_cast<void*>(&nearest_sample8);
-  g_sampling8_suite1[1] = reinterpret_cast<void*>(&subpixel_sample8);
-  g_sampling8_suite1[2] = reinterpret_cast<void*>(&area_sample8); return g_sampling8_suite1.data();
-}
-const void* provide_sampling16(void*) {
-  g_sampling16_suite1.fill(reinterpret_cast<void*>(&aegp_unsupported_suite_call));
-  g_sampling16_suite1[0] = reinterpret_cast<void*>(&nearest_sample16);
-  g_sampling16_suite1[1] = reinterpret_cast<void*>(&subpixel_sample16);
-  g_sampling16_suite1[2] = reinterpret_cast<void*>(&area_sample16); return g_sampling16_suite1.data();
-}
-const void* provide_sampling_float(void*) {
-  g_sampling_float_suite1.fill(reinterpret_cast<void*>(&aegp_unsupported_suite_call));
-  g_sampling_float_suite1[0] = reinterpret_cast<void*>(&nearest_sample_float);
-  g_sampling_float_suite1[1] = reinterpret_cast<void*>(&subpixel_sample_float);
-  g_sampling_float_suite1[2] = reinterpret_cast<void*>(&area_sample_float); return g_sampling_float_suite1.data();
-}
-SuiteResolveResult resolve_scene_suite_provider(
-    void*, const char* name, int32_t version, const void** suite) {
-  if (scene_context()) {
-    const SceneSuiteAcquireResult scene_result =
-        scene_acquire_suite(name, version, suite);
-    if (scene_result == SceneSuiteAcquireResult::acquired) {
-      return SuiteResolveResult::acquired;
-    }
-    if (scene_result == SceneSuiteAcquireResult::rejected)
-      return SuiteResolveResult::rejected_bad_param;
-  }
-  return SuiteResolveResult::not_found;
-}
-
-bool configure_component_suite_catalog() {
-  using namespace aexcompat::worker_runtime::host_suites;
-  const AssemblyHooks assembly{
-      reinterpret_cast<void*>(&aegp_unsupported_suite_call),
-      {reinterpret_cast<void*>(&aexcompat::pf_path_runtime::num_paths),
-       reinterpret_cast<void*>(&aexcompat::pf_path_runtime::path_info),
-       reinterpret_cast<void*>(&aexcompat::pf_path_runtime::checkout_path),
-       reinterpret_cast<void*>(&aexcompat::pf_path_runtime::checkin_path)},
-      {reinterpret_cast<void*>(&aexcompat::pf_path_runtime::path_is_open),
-       reinterpret_cast<void*>(&aexcompat::pf_path_runtime::path_num_segments),
-       reinterpret_cast<void*>(&aexcompat::pf_path_runtime::path_vertex_info),
-       reinterpret_cast<void*>(&aexcompat::pf_path_runtime::path_prepare_seg_length),
-       reinterpret_cast<void*>(&aexcompat::pf_path_runtime::path_get_seg_length),
-       reinterpret_cast<void*>(&aexcompat::pf_path_runtime::path_eval_seg_length),
-       reinterpret_cast<void*>(&aexcompat::pf_path_runtime::path_eval_seg_length_deriv1),
-       reinterpret_cast<void*>(&aexcompat::pf_path_runtime::path_cleanup_seg_length),
-       reinterpret_cast<void*>(&aexcompat::pf_path_runtime::path_is_inverted),
-       reinterpret_cast<void*>(&aexcompat::pf_path_runtime::path_get_mask_mode),
-       reinterpret_cast<void*>(&aexcompat::pf_path_runtime::path_get_name)},
-      reinterpret_cast<void*>(&duck_quack),
-      reinterpret_cast<void*>(&set_options_button_name),
-      reinterpret_cast<void*>(&adv_app_info_text),
-      reinterpret_cast<void*>(&adv_app_info_text3),
-      {reinterpret_cast<void*>(&drawbot_get_supplier),
-       reinterpret_cast<void*>(&drawbot_get_surface)},
-      reinterpret_cast<void*>(&drawbot_new_pen),
-      reinterpret_cast<void*>(&drawbot_new_brush),
-      reinterpret_cast<void*>(&drawbot_new_path),
-      reinterpret_cast<void*>(&drawbot_release_object),
-      reinterpret_cast<void*>(&drawbot_paint_rect),
-      reinterpret_cast<void*>(&drawbot_fill_path),
-      reinterpret_cast<void*>(&drawbot_stroke_path),
-      reinterpret_cast<void*>(&drawbot_path_point),
-      reinterpret_cast<void*>(&drawbot_add_rect),
-      reinterpret_cast<void*>(&get_drawing_reference),
-      reinterpret_cast<void*>(&get_context_async_manager),
-      reinterpret_cast<void*>(&overlay_foreground),
-      reinterpret_cast<void*>(&overlay_stroke_path),
-      {reinterpret_cast<void*>(&app_get_background_color),
-       reinterpret_cast<void*>(&app_get_color),
-       reinterpret_cast<void*>(&app_get_language),
-       reinterpret_cast<void*>(&app_get_personal_info),
-       reinterpret_cast<void*>(&app_get_font_style),
-       reinterpret_cast<void*>(&app_set_cursor),
-       reinterpret_cast<void*>(&app_is_render_engine),
-       reinterpret_cast<void*>(&app_color_picker),
-       reinterpret_cast<void*>(&app_get_mouse),
-       reinterpret_cast<void*>(&app_invalidate_rect),
-       reinterpret_cast<void*>(&app_convert_local_to_global),
-       reinterpret_cast<void*>(&app_get_color_at_global_point),
-       reinterpret_cast<void*>(&app_create_progress_dialog),
-       reinterpret_cast<void*>(&app_update_progress_dialog),
-       reinterpret_cast<void*>(&app_dispose_progress_dialog)},
-      {reinterpret_cast<void*>(&aexcompat::pf_ansi::ansi_atan), reinterpret_cast<void*>(&aexcompat::pf_ansi::ansi_atan2),
-       reinterpret_cast<void*>(&aexcompat::pf_ansi::ansi_ceil), reinterpret_cast<void*>(&aexcompat::pf_ansi::ansi_cos),
-       reinterpret_cast<void*>(&aexcompat::pf_ansi::ansi_exp), reinterpret_cast<void*>(&aexcompat::pf_ansi::ansi_fabs),
-       reinterpret_cast<void*>(&aexcompat::pf_ansi::ansi_floor), reinterpret_cast<void*>(&aexcompat::pf_ansi::ansi_fmod),
-       reinterpret_cast<void*>(&aexcompat::pf_ansi::ansi_hypot), reinterpret_cast<void*>(&aexcompat::pf_ansi::ansi_log),
-       reinterpret_cast<void*>(&aexcompat::pf_ansi::ansi_log10), reinterpret_cast<void*>(&aexcompat::pf_ansi::ansi_pow),
-       reinterpret_cast<void*>(&aexcompat::pf_ansi::ansi_sin), reinterpret_cast<void*>(&aexcompat::pf_ansi::ansi_sqrt),
-       reinterpret_cast<void*>(&aexcompat::pf_ansi::ansi_tan), reinterpret_cast<void*>(&aexcompat::pf_ansi::ansi_sprintf),
-       reinterpret_cast<void*>(&aexcompat::pf_ansi::ansi_strcpy), reinterpret_cast<void*>(&aexcompat::pf_ansi::ansi_asin),
-       reinterpret_cast<void*>(&aexcompat::pf_ansi::ansi_acos)},
-      reinterpret_cast<void*>(&aegp_set_dynamic_stream_flag_v2),
-      {reinterpret_cast<void*>(&aegp_world_new_owned), reinterpret_cast<void*>(&aegp_world_dispose), reinterpret_cast<void*>(&aegp_world_get_type), reinterpret_cast<void*>(&aegp_world_get_size), reinterpret_cast<void*>(&aegp_world_get_rowbytes), reinterpret_cast<void*>(&aegp_world_get_base_addr8), reinterpret_cast<void*>(&aegp_world_get_base_addr16), reinterpret_cast<void*>(&aegp_world_get_base_addr32), reinterpret_cast<void*>(&aegp_world_fill_pf_world), reinterpret_cast<void*>(&aegp_world_fast_blur), reinterpret_cast<void*>(&aegp_world_new_platform), reinterpret_cast<void*>(&aegp_world_dispose_platform), reinterpret_cast<void*>(&aegp_world_reference_platform)},
-      {reinterpret_cast<void*>(&new_layer_render_options), reinterpret_cast<void*>(&new_from_upstream_of_effect), reinterpret_cast<void*>(&duplicate_layer_render_options), reinterpret_cast<void*>(&dispose_layer_render_options), reinterpret_cast<void*>(&set_layer_render_time), reinterpret_cast<void*>(&get_layer_render_time), reinterpret_cast<void*>(&set_layer_render_time_step), reinterpret_cast<void*>(&get_layer_render_time_step), reinterpret_cast<void*>(&set_layer_render_world_type), reinterpret_cast<void*>(&get_layer_render_world_type), reinterpret_cast<void*>(&set_layer_render_downsample), reinterpret_cast<void*>(&get_layer_render_downsample), reinterpret_cast<void*>(&set_layer_render_matte), reinterpret_cast<void*>(&get_layer_render_matte)},
-      {reinterpret_cast<void*>(&new_layer_render_options), reinterpret_cast<void*>(&new_from_upstream_of_effect), reinterpret_cast<void*>(&new_from_downstream_of_effect), reinterpret_cast<void*>(&duplicate_layer_render_options), reinterpret_cast<void*>(&dispose_layer_render_options), reinterpret_cast<void*>(&set_layer_render_time), reinterpret_cast<void*>(&get_layer_render_time), reinterpret_cast<void*>(&set_layer_render_time_step), reinterpret_cast<void*>(&get_layer_render_time_step), reinterpret_cast<void*>(&set_layer_render_world_type), reinterpret_cast<void*>(&get_layer_render_world_type), reinterpret_cast<void*>(&set_layer_render_downsample), reinterpret_cast<void*>(&get_layer_render_downsample), reinterpret_cast<void*>(&set_layer_render_matte), reinterpret_cast<void*>(&get_layer_render_matte)},
-      {reinterpret_cast<void*>(&render_options_new_from_item), reinterpret_cast<void*>(&render_options_duplicate), reinterpret_cast<void*>(&render_options_dispose), reinterpret_cast<void*>(&render_options_set_time), reinterpret_cast<void*>(&render_options_get_time), reinterpret_cast<void*>(&render_options_set_time_step), reinterpret_cast<void*>(&render_options_get_time_step), reinterpret_cast<void*>(&render_options_set_field), reinterpret_cast<void*>(&render_options_get_field), reinterpret_cast<void*>(&render_options_set_world_type), reinterpret_cast<void*>(&render_options_get_world_type), reinterpret_cast<void*>(&render_options_set_downsample), reinterpret_cast<void*>(&render_options_get_downsample), reinterpret_cast<void*>(&render_options_set_roi), reinterpret_cast<void*>(&render_options_get_roi), reinterpret_cast<void*>(&render_options_set_matte), reinterpret_cast<void*>(&render_options_get_matte)},
-      {reinterpret_cast<void*>(&render_options_new_from_item), reinterpret_cast<void*>(&render_options_duplicate), reinterpret_cast<void*>(&render_options_dispose), reinterpret_cast<void*>(&render_options_set_time), reinterpret_cast<void*>(&render_options_get_time), reinterpret_cast<void*>(&render_options_set_time_step), reinterpret_cast<void*>(&render_options_get_time_step), reinterpret_cast<void*>(&render_options_set_field), reinterpret_cast<void*>(&render_options_get_field), reinterpret_cast<void*>(&render_options_set_world_type), reinterpret_cast<void*>(&render_options_get_world_type), reinterpret_cast<void*>(&render_options_set_downsample), reinterpret_cast<void*>(&render_options_get_downsample), reinterpret_cast<void*>(&render_options_set_roi), reinterpret_cast<void*>(&render_options_get_roi), reinterpret_cast<void*>(&render_options_set_matte), reinterpret_cast<void*>(&render_options_get_matte), reinterpret_cast<void*>(&render_options_set_channel_order), reinterpret_cast<void*>(&render_options_get_channel_order), reinterpret_cast<void*>(&render_options_get_guide_layers), reinterpret_cast<void*>(&render_options_set_guide_layers), reinterpret_cast<void*>(&render_options_get_quality), reinterpret_cast<void*>(&render_options_set_quality)},
-      {reinterpret_cast<void*>(&render_checkout_frame_reject), reinterpret_cast<void*>(&checkin_frame), reinterpret_cast<void*>(&get_receipt_world), reinterpret_cast<void*>(&render_get_region_reject), reinterpret_cast<void*>(&render_sufficient_reject), reinterpret_cast<void*>(&render_sound_reject), reinterpret_cast<void*>(&render_timestamp_reject), reinterpret_cast<void*>(&render_changed_reject), reinterpret_cast<void*>(&render_worthwhile_reject), reinterpret_cast<void*>(&render_checkin_rendered)},
-      {reinterpret_cast<void*>(&render_checkout_frame_reject), reinterpret_cast<void*>(&render_checkout_layer_reject), reinterpret_cast<void*>(&checkin_frame), reinterpret_cast<void*>(&get_receipt_world), reinterpret_cast<void*>(&render_get_region_reject), reinterpret_cast<void*>(&render_sufficient_reject), reinterpret_cast<void*>(&render_sound_reject), reinterpret_cast<void*>(&render_timestamp_reject), reinterpret_cast<void*>(&render_changed_reject), reinterpret_cast<void*>(&render_worthwhile_reject), reinterpret_cast<void*>(&render_checkin_rendered), reinterpret_cast<void*>(&render_guid_reject)},
-      {reinterpret_cast<void*>(&render_checkout_frame_reject), reinterpret_cast<void*>(&render_checkout_layer_v5), reinterpret_cast<void*>(&render_checkout_layer_async_reject), reinterpret_cast<void*>(&render_cancel_async_reject), reinterpret_cast<void*>(&checkin_frame), reinterpret_cast<void*>(&get_receipt_world), reinterpret_cast<void*>(&render_get_region_reject), reinterpret_cast<void*>(&render_sufficient_reject), reinterpret_cast<void*>(&render_sound_reject), reinterpret_cast<void*>(&render_timestamp_reject), reinterpret_cast<void*>(&render_changed_reject), reinterpret_cast<void*>(&render_worthwhile_reject), reinterpret_cast<void*>(&render_checkin_rendered), reinterpret_cast<void*>(&render_guid_reject)},
-      {reinterpret_cast<void*>(&checkout_item_frame_async), reinterpret_cast<void*>(&checkout_layer_frame_async)}};
-  if (!configure_suite_assembly(assembly)) return false;
-  const StaticSuite component_suites[] = {
-      {"AE Plugin Helper Suite", 1, aexcompat::pf_helper::suite1()},
-      {"AE Plugin Helper Suite2", 2, aexcompat::pf_helper::suite2()},
-      {"PF Cache On Load Suite", 1, &cache_on_load_suite()},
-      {"PF AE Adv Time Suite", 1,
-       aexcompat::worker_runtime::pf_adv_time::suite(1)},
-      {"PF AE Adv Time Suite", 2,
-       aexcompat::worker_runtime::pf_adv_time::suite(2)},
-      {"PF AE Adv Time Suite", 3,
-       aexcompat::worker_runtime::pf_adv_time::suite(3)},
-      {"PF AE Adv Time Suite", 4,
-       aexcompat::worker_runtime::pf_adv_time::suite(4)},
-      {"AEGP Memory Suite", 1, &g_aegp_memory_suite},
-      {"AEGP Utility Suite", 7, &g_utility_suite3},
-      {"AEGP Utility Suite", 13, &g_utility_suite},
-      {"PF Pixel Data Suite", 1, &g_pixel_data_suite1},
-      {"PF Pixel Data Suite", 2, &g_pixel_data_suite2},
-      {"PF World Suite", 1, g_world_suite1.data()},
-      {"PF World Suite", 2, &g_world_suite},
-      {"PF Pixel Format Suite", 2, &g_pixel_format_suite},
-      {"PF PointParamSuite", 1, &g_point_param_suite},
-      {"PF AngleParamSuite", 1, &g_angle_param_suite},
-      {"PF ColorParamSuite", 1, &g_color_param_suite1},
-      {"PF Param Utils Suite", 2, &g_param_utils_suite1},
-      {"PF Param Utils Suite", 3, &g_param_utils_suite},
-      {"AEGP PF Interface Suite", 1, &g_pf_interface_suite},
-      {"AEGP World Suite", 3, nullptr, &provide_aegp_world_suite3},
-      {"AEGP Layer Render Options Suite", 1, nullptr,
-       &provide_layer_render_options1},
-      {"AEGP Layer Render Options Suite", 2, nullptr,
-       &provide_layer_render_options2},
-      {"AEGP Render Options Suite", 1, nullptr, &provide_render_options1},
-      {"AEGP Render Options Suite", 4, nullptr, &provide_render_options4,
-       nullptr, &render_options4_provider_available},
-      {"AEGP Render Suite", 2, nullptr, &provide_render_suite2, nullptr,
-       &render_suite2_provider_available},
-      {"AEGP Render Suite", 5, nullptr, &provide_render_suite5},
-      {"AEGP Render Suite", 8, nullptr, &provide_render_suite8},
-      {"AEGP Render Asyc Manager Suite", 1, nullptr,
-       &provide_render_async_manager1},
-      {"AEGP Mask Suite", 1, &g_pf_mask_suite1, nullptr, nullptr,
-       &mask_suite_provider_available},
-      {"AEGP Layer Mask Suite", 6, &g_mask_suite5, nullptr, nullptr,
-       &mask_suite_provider_available},
-      {"AEGP Layer Mask Suite", 7, &g_mask_suite, nullptr, nullptr,
-       &mask_suite_provider_available},
-      {"AEGP Stream Suite", 11, &g_stream_suite, nullptr, nullptr,
-       &mask_suite_provider_available},
-      {"AEGP Keyframe Suite", 5, &g_keyframe_suite, nullptr, nullptr,
-       &mask_suite_provider_available},
-      {"AEGP Dynamic Stream Suite", 5, &g_dynamic_stream_suite,
-       nullptr, nullptr, &mask_suite_provider_available},
-      {"AEGP Mask Outline Suite", 5, &g_mask_outline_suite,
-       nullptr, nullptr, &mask_suite_provider_available},
-      {"PF Color Suite", 1, &g_color_suite8},
-      {"PF Color16 Suite", 1, &g_color_suite16},
-      {"PF ColorFloat Suite", 1, &g_color_suite_float},
-      {"PF Batch Sampling Suite", 1, nullptr, &provide_batch_sampling1},
-      {"PF Path Query Suite", 1, nullptr, &provide_path_query1, nullptr,
-       &mask_suite_provider_available},
-      {"PF Path Data Suite", 1, nullptr, &provide_path_data1, nullptr,
-       &mask_suite_provider_available},
-      {"AEGP Duck Suite", 1, nullptr, &provide_duck1},
-      {"AEGP Command Suite", 1, &g_aegp_command_suite, nullptr, nullptr,
-       &aegp_init_suite_provider_available},
-      {"AEGP Register Suite", 6, &g_aegp_register_suite, nullptr, nullptr,
-       &aegp_init_suite_provider_available},
-      {"PF Effect UI Suite", 1, nullptr, &provide_effect_ui1},
-      {"PF AE Adv App Suite", 1, nullptr, &provide_adv_app1},
-      {"PF AE Adv App Suite", 2, nullptr, &provide_adv_app2},
-      {"DRAWBOT Draw Suite", 1, nullptr, &provide_drawbot_draw1},
-      {"DRAWBOT Supplier Suite", 1, nullptr, &provide_drawbot_supplier1},
-      {"DRAWBOT Surface Suite", 2, nullptr, &provide_drawbot_surface2},
-      {"DRAWBOT Path Suite", 1, nullptr, &provide_drawbot_path1},
-      {"PF Effect Custom UI Suite", 1, nullptr, &provide_custom_ui1},
-      {"PF Effect Custom UI Suite", 2, nullptr, &provide_custom_ui2},
-      {"PF Effect Custom UI Overlay Theme Suite", 1, nullptr,
-       &provide_overlay_theme1},
-      {"PF AE App Suite", 6, nullptr, &provide_app_suite4},
-      {"PF AE App Suite", 7, nullptr, &provide_app_suite5},
-      {"PF AE App Suite", 1, nullptr, &provide_app_suite6},
-      {"PF AE Channel Suite", 1, &g_channel_suite1},
-      {"PF Effect Sequence Data Suite", 1, &g_effect_sequence_data_suite1},
-      {"PF Handle Suite", 2, &g_handle_suite},
-      {"PF GPU Device Suite", 1, g_gpu_device_suite1.data()},
-      {"PF ANSI Suite", 1, nullptr, &provide_ansi1},
-      {"PF AE Adv Item Suite", 1, &g_adv_item_suite1, nullptr, nullptr,
-       &render_worker_suite_provider_available},
-      {"PF Color Settings Suite", 7, nullptr, &provide_color_settings7},
-      {"PF Iterate8 Suite", 1, nullptr, &provide_iterate8},
-      {"PF Iterate8 Suite", 2, nullptr, &provide_iterate8},
-      {"PF iterate16 Suite", 1, &g_iterate16_suite2},
-      {"PF iterate16 Suite", 2, &g_iterate16_suite2},
-      {"PF iterateFloat Suite", 1, &g_iterate_float_suite2},
-      {"PF iterateFloat Suite", 2, &g_iterate_float_suite2},
-      {"PF Sampling8 Suite", 1, nullptr, &provide_sampling8},
-      {"PF Sampling16 Suite", 1, nullptr, &provide_sampling16},
-      {"PF SamplingFloat Suite", 1, nullptr, &provide_sampling_float},
-      {"PF World Transform Suite", 1, nullptr,
-       &aexcompat::pf_world_transform::provide_world_transform1},
-      {"PF Fill Matte Suite", 2, nullptr,
-       &aexcompat::pf_world_transform::provide_fill_matte2},
-      {"AEGP Dynamic Stream Suite", 2, nullptr, &provide_dynamic_stream2},
-  };
-  return configure_host_suite_catalog(
-      {component_suites, std::size(component_suites),
-       {&resolve_scene_suite_provider, nullptr}});
-}
-
-int32_t __cdecl acquire_suite(const char* name, int32_t version,
-                              const void** suite) {
-  using namespace aexcompat::worker_runtime::host_suites;
-  static const bool configured = configure_component_suite_catalog();
-  if (!configured) {
-    if (suite) *suite = nullptr;
-    return 4;
-  }
-  return acquire_catalog_suite(name, version, suite, g_trace_writer);
-}
-int32_t __cdecl release_suite(const char* name, int32_t version) {
-  return aexcompat::worker_runtime::host_suites::release_catalog_suite(
-      name, version, g_trace_writer);
-}
-
-bool verify_suite_release_without_acquire_rejected() {
-  const uint32_t acquires_before = suite_acquire_count();
-  const uint32_t releases_before = suite_release_count();
-  const uint32_t live_before = live_suite_reference_count();
-  return release_suite("AEGP Layer Mask Suite", 999) != 0 &&
-      suite_acquire_count() == acquires_before &&
-      suite_release_count() == releases_before &&
-      live_suite_reference_count() == live_before;
-}
 
 // The SPBasic-style BasicSuite ABI and table live in
 // worker_l2_render_abi.{hpp,cpp}.
 
-int32_t invoke_sequence_selector(EffectEntry entry, int32_t selector, void* input,
-                                 void* output, uint32_t* exception_code = nullptr) {
-  uint32_t local_exception{};
-  uint32_t* observed_exception = exception_code ? exception_code : &local_exception;
-  if (selector == kSequenceSetdown) invalidate_effect_sequence(&g_effect);
-  const int32_t error = invoke_entry_seh(entry, selector, input, output, nullptr, nullptr,
-                                         nullptr, observed_exception);
-  if (selector == kSequenceSetup || selector == kSequenceResetup) {
-    if (error == 0 && *observed_exception == 0) {
-      void* sequence_handle{};
-      std::memcpy(&sequence_handle,
-                  static_cast<const std::byte*>(output) + kOutSequenceData,
-                  sizeof(sequence_handle));
-      if (!sequence_handle) {
-        invalidate_effect_sequence(&g_effect);
-      } else if (!publish_effect_sequence(&g_effect, sequence_handle)) {
-        invalidate_effect_sequence(&g_effect);
-        return kPfBadCallbackParam;
-      }
-    } else {
-      invalidate_effect_sequence(&g_effect);
-    }
-  }
-  return error;
-}
 
 template <typename T, std::size_t N>
 T read(const std::array<std::byte, N>& bytes, std::size_t offset) {
@@ -2797,408 +1093,23 @@ void write(std::array<std::byte, N>& bytes, std::size_t offset, T value) {
   std::memcpy(bytes.data() + offset, &value, sizeof(value));
 }
 
+// The render-worker click/draw probes and close_render_ui_context moved to
+// worker_drawbot_runtime.cpp with the UI context they arm (issue #170).
 bool dispatch_render_click(EffectEntry entry, std::array<std::byte, kInSize>& input,
                            std::array<std::byte, kOutSize>& output,
-                           std::vector<std::array<std::byte, kParamSize>>& definitions) {
-  if (!g_render_click_enabled) return true;
-  std::vector<void*> params(definitions.size());
-  for (std::size_t i = 0; i < definitions.size(); ++i) params[i] = definitions[i].data();
-  std::array<std::byte, 208> extra{};
-  write<void*>(extra, 0, &g_ui_context_pointer);
-  g_ui_context.window_type = 2;
-  const auto dispatch_lifecycle_event = [&](int32_t event_type, std::size_t result_index) {
-    write<int32_t>(extra, 8, event_type);
-    uint32_t exception_code = 0;
-    g_render_ui_lifecycle_errors[result_index] = invoke_entry_seh(entry, kEvent,
-        input.data(), output.data(), params.data(), nullptr, extra.data(), &exception_code);
-    if (exception_code != 0) g_render_ui_lifecycle_errors[result_index] = 512;
-    return g_render_ui_lifecycle_errors[result_index] == 0;
-  };
-  if (!dispatch_lifecycle_event(0, 0) || !dispatch_lifecycle_event(1, 1)) return false;
-  g_render_ui_context_active = true;
-  write<int32_t>(extra, 8, 2);
-  write<uint32_t>(extra, 16, 1);
-  write<int32_t>(extra, 20, g_render_click_y);
-  write<int32_t>(extra, 24, g_render_click_x);
-  write<int32_t>(extra, 28, 1);
-  write<int32_t>(extra, 80, 1);
-  write<int32_t>(extra, 84, 2);
-  write_rect(extra.data() + 88, 203, 203);
-  uint32_t exception_code = 0;
-  g_render_click_error = invoke_entry_seh(entry, kEvent, input.data(), output.data(),
-      params.data(), nullptr, extra.data(), &exception_code);
-  if (exception_code != 0) g_render_click_error = 512;
-  g_render_click_out_flags = read<int32_t>(extra, 204);
-  g_render_click_changed_value = definitions.size() > 1 &&
-      (read<uint32_t>(definitions[1], 0) & 1u) != 0;
-  return g_render_click_error == 0 && (g_render_click_out_flags & 9) == 9 &&
-      g_render_click_changed_value && g_app_color_picker_calls == 1 &&
-      g_app_invalidate_rect_calls == 1;
-}
-
+                           std::vector<std::array<std::byte, kParamSize>>& definitions);
 bool dispatch_render_draw(EffectEntry entry, std::array<std::byte, kInSize>& input,
                           std::array<std::byte, kOutSize>& output,
-                          std::vector<std::array<std::byte, kParamSize>>& definitions) {
-  if (!g_render_draw_enabled) return true;
-  std::vector<void*> params(definitions.size());
-  for (std::size_t i = 0; i < definitions.size(); ++i) params[i] = definitions[i].data();
-  std::array<std::byte, 208> extra{};
-  write<void*>(extra, 0, &g_ui_context_pointer);
-  g_ui_context.window_type = 2;
-  const auto dispatch_lifecycle_event = [&](int32_t event_type, std::size_t result_index) {
-    write<int32_t>(extra, 8, event_type);
-    uint32_t exception_code = 0;
-    g_render_ui_lifecycle_errors[result_index] = invoke_entry_seh(entry, kEvent,
-        input.data(), output.data(), params.data(), nullptr, extra.data(), &exception_code);
-    if (exception_code != 0) g_render_ui_lifecycle_errors[result_index] = 512;
-    return g_render_ui_lifecycle_errors[result_index] == 0;
-  };
-  if (!dispatch_lifecycle_event(0, 0) || !dispatch_lifecycle_event(1, 1)) return false;
-  g_render_ui_context_active = true;
-  write<int32_t>(extra, 8, 4);
-  write_rect(extra.data() + 16, 203, 203);
-  write<int32_t>(extra, 32, 32);
-  uint32_t exception_code = 0;
-  g_render_draw_error = invoke_entry_seh(entry, kEvent, input.data(), output.data(),
-      params.data(), nullptr, extra.data(), &exception_code);
-  if (exception_code != 0) g_render_draw_error = 512;
-  g_render_draw_out_flags = read<int32_t>(extra, 204);
-  return g_render_draw_error == 0 && (g_render_draw_out_flags & 1) != 0 &&
-      (g_drawbot_paint_rect_calls + g_drawbot_fill_path_calls +
-       g_drawbot_stroke_path_calls + g_overlay_stroke_path_calls) > 0 &&
-      g_drawbot_objects_created == g_drawbot_objects_released &&
-      g_drawbot_objects.empty() && g_drawbot_invalid_operations == 0;
-}
-
+                          std::vector<std::array<std::byte, kParamSize>>& definitions);
 bool close_render_ui_context(EffectEntry entry, std::array<std::byte, kInSize>& input,
                              std::array<std::byte, kOutSize>& output,
-                             std::vector<std::array<std::byte, kParamSize>>& definitions) {
-  if ((!g_render_click_enabled && !g_render_draw_enabled) || !g_render_ui_context_active)
-    return !g_render_click_enabled && !g_render_draw_enabled;
-  std::vector<void*> params(definitions.size());
-  for (std::size_t i = 0; i < definitions.size(); ++i) params[i] = definitions[i].data();
-  std::array<std::byte, 208> extra{};
-  write<void*>(extra, 0, &g_ui_context_pointer);
-  for (const auto [event_type, result_index] :
-       std::array<std::pair<int32_t, std::size_t>, 2>{{{5, 2}, {6, 3}}}) {
-    write<int32_t>(extra, 8, event_type);
-    uint32_t exception_code = 0;
-    g_render_ui_lifecycle_errors[result_index] = invoke_entry_seh(entry, kEvent,
-        input.data(), output.data(), params.data(), nullptr, extra.data(), &exception_code);
-    if (exception_code != 0) g_render_ui_lifecycle_errors[result_index] = 512;
-  }
-  g_render_ui_context_active = false;
-  for (auto& state : g_ui_context.plugin_state) state = 0;
-  g_render_ui_context_closed = std::all_of(g_render_ui_lifecycle_errors.begin(),
-      g_render_ui_lifecycle_errors.end(), [](int32_t error) { return error == 0; });
-  return g_render_ui_context_closed;
-}
+                             std::vector<std::array<std::byte, kParamSize>>& definitions);
 
-int32_t __cdecl add_param(void*, int32_t index, void* definition) {
-  if (!definition || g_params.size() >= kMaxParams) return 4;
-  std::array<std::byte, kParamSize> bytes{};
-  std::memcpy(bytes.data(), definition, bytes.size());
-  const char* name = reinterpret_cast<const char*>(bytes.data() + kParamName);
-  const auto length = strnlen_s(name, kParamNameSize);
-  const int32_t host_index = index < 0 ? static_cast<int32_t>(g_params.size() + 1) : index;
-  if (host_index <= 0 || host_index > static_cast<int32_t>(kMaxParams) ||
-      std::any_of(g_params.begin(), g_params.end(),
-                  [host_index](const auto& param) { return param.index == host_index; })) return 4;
-  ParamRecord record{host_index, read<int32_t>(bytes, 0), read<int32_t>(bytes, kParamType),
-                     read<uint32_t>(bytes, kParamFlags), std::string(name, length)};
-  constexpr std::size_t u = 56;
-  if (record.type == 1) {
-    record.has_numeric = true;
-    record.valid_min = read<int32_t>(bytes, u + 68);
-    record.valid_max = read<int32_t>(bytes, u + 72);
-    record.slider_min = read<int32_t>(bytes, u + 76);
-    record.slider_max = read<int32_t>(bytes, u + 80);
-    record.default_value = read<int32_t>(bytes, u + 84);
-  } else if (record.type == 2) {
-    record.has_numeric = true;
-    record.has_current = true;
-    record.current_value = read<int32_t>(bytes, u) / 65536.0;
-    record.valid_min = read<int32_t>(bytes, u + 68) / 65536.0;
-    record.valid_max = read<int32_t>(bytes, u + 72) / 65536.0;
-    record.slider_min = read<int32_t>(bytes, u + 76) / 65536.0;
-    record.slider_max = read<int32_t>(bytes, u + 80) / 65536.0;
-    record.default_value = read<int32_t>(bytes, u + 84) / 65536.0;
-    record.precision = read<int16_t>(bytes, u + 88);
-  } else if (record.type == 7) {
-    record.has_numeric = true;
-    record.valid_min = 1;
-    record.valid_max = read<int16_t>(bytes, u + 4);
-    record.slider_min = record.valid_min;
-    record.slider_max = record.valid_max;
-    record.default_value = read<int16_t>(bytes, u + 6);
-    const char* choices = read<const char*>(bytes, u + 8);
-    if (choices) record.choices.assign(choices, strnlen_s(choices, 4096));
-  } else if (record.type == 4) {
-    record.has_numeric = true;
-    record.has_current = true;
-    record.valid_min = 0;
-    record.valid_max = 1;
-    record.slider_min = 0;
-    record.slider_max = 1;
-    record.default_value = read<uint8_t>(bytes, u + 4) ? 1 : 0;
-    record.current_value = read<int32_t>(bytes, u) != 0 ? 1 : 0;
-    const char* label = read<const char*>(bytes, u + 8);
-    if (label) record.label.assign(label, strnlen_s(label, 4096));
-  } else if (record.type == 0) {
-    record.layer_default = read<int32_t>(bytes, u + 116);
-  } else if (record.type == 12) {
-    record.has_numeric = true;
-    record.valid_min = 0;
-    record.valid_max = 1024;
-    record.slider_min = 0;
-    record.slider_max = 1024;
-    record.default_value = read<int32_t>(bytes, u + 8);
-  } else if (record.type == 10) {
-    record.has_numeric = true;
-    record.valid_min = read<float>(bytes, u + 48);
-    record.valid_max = read<float>(bytes, u + 52);
-    record.slider_min = read<float>(bytes, u + 56);
-    record.slider_max = read<float>(bytes, u + 60);
-    record.default_value = read<float>(bytes, u + 64);
-    record.precision = read<int16_t>(bytes, u + 68);
-  } else if (record.type == 5) {
-    record.has_color = true;
-    std::memcpy(record.current_color.data(), bytes.data() + u, record.current_color.size());
-    std::memcpy(record.default_color.data(), bytes.data() + u + 4, record.default_color.size());
-    for (std::size_t channel = 0; channel < 4; ++channel) {
-      record.current_float_color[channel] = record.current_color[channel] / 255.0f;
-      record.default_float_color[channel] = record.default_color[channel] / 255.0f;
-    }
-  } else if (record.type == 3) {
-    record.component_count = 1;
-    record.current_components[0] = read<int32_t>(bytes, u) / 65536.0;
-    record.default_components[0] = read<int32_t>(bytes, u + 4) / 65536.0;
-  } else if (record.type == 6) {
-    record.component_count = 2;
-    record.current_components[0] = read<int32_t>(bytes, u) / 65536.0;
-    record.current_components[1] = read<int32_t>(bytes, u + 4) / 65536.0;
-    record.default_components[0] = read<int32_t>(bytes, u + 12) / 65536.0;
-    record.default_components[1] = read<int32_t>(bytes, u + 16) / 65536.0;
-  } else if (record.type == 18) {
-    record.component_count = 3;
-    for (int component = 0; component < 3; ++component) {
-      record.current_components[component] = read<double>(bytes, u + component * 8);
-      record.default_components[component] = read<double>(bytes, u + 24 + component * 8);
-    }
-  } else if (record.type == 15) {
-    const char* label = read<const char*>(bytes, u + 8);
-    if (label) record.label.assign(label, strnlen_s(label, 4096));
-  }
-  record.raw = bytes;
-  g_params.push_back(std::move(record));
-  return 0;
-}
 
-int32_t __cdecl checkout_param(void*, int32_t index, int32_t what_time, int32_t time_step,
-                               uint32_t time_scale, void* definition) {
-  if (!definition || time_step <= 0 || time_scale == 0) return 4;
-  auto* classic_context = aexcompat::worker_runtime::classic::active_context();
-  if (!classic_context && aexcompat::worker_runtime::classic::dispatch_active()) return 4;
-  if (classic_context && !classic_context->checkout_time_allowed(what_time, time_scale))
-    return 4;
-  if (!classic_context) {
-    const bool current_time = static_cast<int64_t>(what_time) * g_checkout_current_time_scale ==
-        static_cast<int64_t>(g_checkout_current_time) * time_scale;
-    if (!current_time && !g_wide_time_checkout_allowed) {
-      ++g_rejected_temporal_param_checkouts;
-      return 4;
-    }
-  }
-  const auto record_checkout = [&] {
-    if (classic_context) {
-      classic_context->record_checkout(definition, index, what_time, time_step, time_scale);
-      return;
-    }
-    std::lock_guard<std::mutex> lock(g_param_checkout_mutex);
-    ++g_live_param_checkouts[definition];
-    ++g_param_checkout_calls;
-    g_last_param_checkout_index = index;
-    g_last_param_checkout_time = what_time;
-    g_last_param_checkout_time_step = time_step;
-    g_last_param_checkout_time_scale = time_scale;
-  };
-  if (classic_context && classic_context->copy_timed_layer(
-          index, what_time, time_scale, definition, kParamSize)) {
-    record_checkout();
-    return 0;
-  }
-  if (classic_context && classic_context->has_timed_slot(index)) return 4;
-  if (classic_context) {
-    if (classic_context->copy_definition(index, definition, kParamSize) ||
-        classic_context->copy_fallback_definition(index, definition, kParamSize)) {
-      record_checkout();
-      return 0;
-    }
-    return 4;
-  }
-  const auto hosted = g_checkout_layer_definitions.find(index);
-  if (hosted != g_checkout_layer_definitions.end()) {
-    std::memcpy(definition, hosted->second.data(), hosted->second.size());
-    record_checkout();
-    return 0;
-  }
-  return 4;
-}
 
-constexpr int32_t kPfErrBadCallbackParam = 516;
-
-int32_t __cdecl aegp_get_new_effect_stream_by_index_v2(
-    int32_t plugin_id, void* effect, int32_t index, void** stream) {
-  std::size_t instance_index = 0;
-  const auto* instance = resolve_effect_instance(effect, plugin_id, &instance_index);
-  const auto* parameter = instance
-      ? find_effect_parameter(instance->installed_key, index) : nullptr;
-  if (plugin_id <= 0 || !instance || !stream || !parameter) return 4;
-  const auto free_slot = std::find_if(g_aegp_legacy_effect_streams.begin(),
-      g_aegp_legacy_effect_streams.end(), [](const auto& value) { return !value.live; });
-  if (free_slot == g_aegp_legacy_effect_streams.end()) return 4;
-  auto& value = *free_slot;
-  const std::size_t slot = static_cast<std::size_t>(
-      std::distance(g_aegp_legacy_effect_streams.begin(), free_slot));
-  uint32_t generation = ++g_aegp_legacy_effect_stream_generation;
-  if (generation == 0) generation = ++g_aegp_legacy_effect_stream_generation;
-  const uintptr_t encoded = (static_cast<uintptr_t>(generation) << 8) |
-      (static_cast<uintptr_t>(slot) << 2) | 3;
-  if (encoded <= 3) return 4;
-  value.param_index = index;
-  value.live = true;
-  value.hidden = false;
-  value.value_live = false;
-  value.effect_instance_index = static_cast<uint32_t>(instance_index);
-  value.effect_instance_generation = instance->generation;
-  value.generation = generation;
-  value.owner_plugin_id = plugin_id;
-  ++g_aegp_stream_acquires;
-  *stream = reinterpret_cast<void*>(encoded);
-  return 0;
-}
-AegpLegacyEffectStream* legacy_effect_stream(void* stream) {
-  const uintptr_t encoded = reinterpret_cast<uintptr_t>(stream);
-  if (!stream || (encoded & 3) != 3) return nullptr;
-  const std::size_t slot = (encoded >> 2) & 0x3f;
-  const uint32_t generation = static_cast<uint32_t>(encoded >> 8);
-  if (slot >= g_aegp_legacy_effect_streams.size()) return nullptr;
-  auto& value = g_aegp_legacy_effect_streams[slot];
-  return value.live && value.generation == generation ? &value : nullptr;
-}
-bool legacy_effect_stream_parent_live(const AegpLegacyEffectStream& stream) {
-  if (stream.effect_instance_index >= g_aegp_effect_instances.size()) return false;
-  const auto& instance = g_aegp_effect_instances[stream.effect_instance_index];
-  return instance.occupied && instance.generation == stream.effect_instance_generation;
-}
-int32_t __cdecl aegp_get_stream_name_v2(void* stream, uint8_t, char* name) {
-  auto* value = legacy_effect_stream(stream);
-  if (!value || !legacy_effect_stream_parent_live(*value) || !name) return 4;
-  const auto& instance = g_aegp_effect_instances[value->effect_instance_index];
-  const auto* parameter = find_effect_parameter(instance.installed_key, value->param_index);
-  if (!parameter) return 4;
-  std::strcpy(name, parameter->name);
-  return 0;
-}
-int32_t __cdecl aegp_get_stream_type_v2(void* stream, int32_t* type) {
-  auto* value = legacy_effect_stream(stream);
-  if (!value || !legacy_effect_stream_parent_live(*value) || !type) return 4;
-  const auto& instance = g_aegp_effect_instances[value->effect_instance_index];
-  const auto* parameter = find_effect_parameter(instance.installed_key, value->param_index);
-  if (!parameter) return 4;
-  *type = parameter->type;
-  return 0;
-}
-int32_t __cdecl aegp_get_new_stream_value_v2(
-    int32_t plugin_id, void* stream, int32_t, const AegpTime* time,
-    uint8_t, AegpStreamValue* output) {
-  auto* value = legacy_effect_stream(stream);
-  if (!value || !legacy_effect_stream_parent_live(*value) ||
-      plugin_id != value->owner_plugin_id || value->value_live || !time ||
-      time->scale == 0 || !output)
-    return 4;
-  const auto& instance = g_aegp_effect_instances[value->effect_instance_index];
-  const auto* parameter = find_effect_parameter(instance.installed_key, value->param_index);
-  if (!parameter) return 4;
-  output->stream = stream;
-  output->value.fill(std::byte{});
-  if (value->param_index == 0) {
-    std::memcpy(output->value.data(), &instance.layer, sizeof(instance.layer));
-  } else {
-    std::memcpy(output->value.data(),
-                instance.parameter_values[static_cast<std::size_t>(value->param_index - 1)].data(),
-                sizeof(instance.parameter_values[0]));
-  }
-  value->value_live = true;
-  value->checked_out_value = output;
-  ++g_aegp_stream_value_acquires;
-  return 0;
-}
-int32_t __cdecl aegp_dispose_stream_value_v2(AegpStreamValue* output) {
-  if (!output) return 4;
-  auto* stream = legacy_effect_stream(output->stream);
-  if (!stream || !stream->value_live || stream->checked_out_value != output) return 4;
-  output->stream = nullptr;
-  stream->value_live = false;
-  stream->checked_out_value = nullptr;
-  ++g_aegp_stream_value_disposes;
-  return 0;
-}
-int32_t __cdecl aegp_set_stream_value_v2(
-    int32_t plugin_id, void* stream, AegpStreamValue* input) {
-  auto* value = legacy_effect_stream(stream);
-  if (!value || !legacy_effect_stream_parent_live(*value) ||
-      plugin_id != value->owner_plugin_id || !value->value_live || !input ||
-      input->stream != stream || value->checked_out_value != input)
-    return 4;
-  const auto& current = g_aegp_effect_instances[value->effect_instance_index];
-  const auto* parameter = find_effect_parameter(current.installed_key, value->param_index);
-  if (!parameter || value->param_index == 0 || !parameter->writable) return 4;
-  std::array<double, 4> candidate{};
-  std::memcpy(candidate.data(), input->value.data(), sizeof(candidate));
-  for (std::size_t index = 0; index < candidate.size(); ++index)
-    if (!std::isfinite(candidate[static_cast<std::size_t>(index)])) return 4;
-  auto& instance = g_aegp_effect_instances[value->effect_instance_index];
-  instance.parameter_values[static_cast<std::size_t>(value->param_index - 1)] = candidate;
-  bump_render_project_timestamp();
-  return 0;
-}
-int32_t __cdecl aegp_dispose_stream_v2(void* stream) {
-  auto* value = legacy_effect_stream(stream);
-  if (!value || value->value_live) return 4;
-  value->live = false;
-  value->param_index = -1;
-  value->effect_instance_index = 0;
-  value->effect_instance_generation = 0;
-  value->checked_out_value = nullptr;
-  value->owner_plugin_id = 0;
-  ++g_aegp_stream_disposes;
-  return 0;
-}
-int32_t __cdecl aegp_set_dynamic_stream_flag_v2(
-    void* stream, uint32_t one_flag, uint8_t undoable, uint8_t set) {
-  auto* value = legacy_effect_stream(stream);
-  constexpr uint32_t kHidden = 1u << 1;
-  if (!value || !legacy_effect_stream_parent_live(*value) ||
-      one_flag != kHidden || undoable > 1 || set > 1) return 4;
-  value->hidden = set != 0;
-  return 0;
-}
-int32_t __cdecl aegp_get_effect_param_union_by_index_v3(
-    int32_t plugin_id, void* effect, int32_t index, int32_t* type, void* param_union) {
-  if (plugin_id <= 0 || !resolve_effect_instance(effect, plugin_id) || !type ||
-      !param_union || index < 0 || index >= 5) return 4;
-  // AEGP effect inspection is independent of PF selector-local parameter
-  // buffers. These are definition unions for the bounded synthetic scene,
-  // never current values (which belong to the Stream Suite).
-  static constexpr std::array<int32_t, 5> kTypes{0, 1, 4, 5, 10};
-  static constexpr std::array<std::array<std::byte, kParamSize - 56>, 5> kUnions{};
-  *type = kTypes[static_cast<std::size_t>(index)];
-  std::memcpy(param_union, kUnions[static_cast<std::size_t>(index)].data(),
-              kUnions[static_cast<std::size_t>(index)].size());
-  ++g_aegp_effect_param_union_calls;
-  return 0;
-}
+// The legacy AEGP effect stream (v2) and effect-param-union (v3) callbacks
+// moved to their owner, worker_aegp_scene.cpp (issue #170); the suite tables
+// below keep resolving them through the declarations above.
 
 
 int32_t __cdecl get_platform_data(void* effect_ref, int32_t which, void* data) {
@@ -3214,117 +1125,46 @@ int32_t __cdecl get_platform_data(void* effect_ref, int32_t which, void* data) {
   return 0;
 }
 
-int32_t __cdecl checkin_param(void*, void* definition) {
-  if (auto* context = aexcompat::worker_runtime::classic::active_context())
-    return context->checkin(definition);
-  if (aexcompat::worker_runtime::classic::dispatch_active()) return 4;
-  std::lock_guard<std::mutex> lock(g_param_checkout_mutex);
-  if (!definition || g_live_param_checkouts.empty()) {
-    ++g_invalid_param_checkins;
-    return 4;
-  }
-  auto found = g_live_param_checkouts.find(definition);
-  // PF_ParamDef is a value type. Wrappers may move the checked-out value before
-  // checkin, so its address is not a stable checkout identity.
-  if (found == g_live_param_checkouts.end()) found = g_live_param_checkouts.begin();
-  if (--found->second == 0) g_live_param_checkouts.erase(found);
-  ++g_param_checkin_calls;
-  return 0;
-}
 
-bool param_checkouts_balanced() {
-  if (auto* context = aexcompat::worker_runtime::classic::active_context())
-    return context->checkouts_balanced();
-  std::lock_guard<std::mutex> lock(g_param_checkout_mutex);
-  return g_live_param_checkouts.empty() && g_param_checkout_calls == g_param_checkin_calls &&
-      g_invalid_param_checkins == 0;
-}
 
-void automatic_checkin_pre_render_params() {
-  if (auto* context = aexcompat::worker_runtime::classic::active_context()) {
-    context->automatic_checkin();
-    return;
-  }
-  std::lock_guard<std::mutex> lock(g_param_checkout_mutex);
-  uint32_t checkout_count = 0;
-  for (const auto& checkout : g_live_param_checkouts) checkout_count += checkout.second;
-  g_automatic_param_checkins += checkout_count;
-  g_param_checkin_calls += checkout_count;
-  g_live_param_checkouts.clear();
-}
 
-int32_t __cdecl set_options_button_name(void* effect_ref, const char* name) {
-  if (!effect_ref || !name) return 4;
-  const std::size_t length = strnlen_s(name, 256);
-  if (length == 256) return 4;
-  g_options_button_name.assign(name, length);
-  ++g_options_button_name_calls;
-  return 0;
-}
+// The PF parameter checkout/checkin callbacks and their balance accounting
+// moved to their owner, worker_param_checkout_runtime.cpp (issue #170).
 
 bool sha256(const std::filesystem::path& path, std::string& result);
-int32_t __cdecl duck_quack(uint16_t times) {
-  if (times > 64) return 4;
-  g_duck_quacks += times;
-  return 0;
-}
+// The shared worker-entry helpers (rational time, animation evaluation,
+// guarded selector invokers, diagnostic escaping/hashing, and the world-dump
+// telemetry wrappers) moved to worker_l2_shared_helpers.cpp (issue #165);
+// worker_main keeps resolving them through these declarations.
+const ParameterTimeline* parameter_timeline(int32_t slot);
+bool same_rational_time(int32_t left, uint32_t left_scale,
+                        int32_t right, uint32_t right_scale);
+void write_rect(void* destination, int32_t width, int32_t height);
+ParameterAnimationKey evaluate_animation(const ParameterTimeline& timeline,
+                                         int32_t time, uint32_t scale);
+bool write_animation_value(std::array<std::byte, kParamSize>& definition,
+                           const ParamRecord& param,
+                           const ParameterAnimationKey& key);
+bool apply_parameter_animation(
+    std::vector<std::array<std::byte, kParamSize>>& definitions, int32_t time,
+    uint32_t scale);
+int32_t invoke_global_setdown(EffectEntry entry, void* input, void* output);
+int32_t invoke_sequence_selector(EffectEntry entry, int32_t selector, void* input,
+                                 void* output, uint32_t* exception_code = nullptr);
+std::string escape(const std::string& input);
+std::string sha256_bytes(const unsigned char* data, std::size_t size);
+void dump_world_snapshot(const std::string& stage, const unsigned char* packed_argb,
+                         int32_t width, int32_t height, int32_t pixel_bytes);
+void record_output_checksum_detail(const unsigned char* rgba, int32_t width,
+                                   int32_t height, int32_t pixel_bytes);
+std::string world_debug_report_json();
+int32_t __cdecl add_param(void*, int32_t index, void* definition);
+// The classic host callbacks (duck_quack/abort_render/report_progress), the
+// custom-UI registration/adv-app-info callbacks, add_param, and
+// set_options_button_name moved to their owners (issue #170):
+// worker_classic_runtime.cpp, worker_drawbot_runtime.cpp, and
+// worker_parameter_execution.cpp.
 
-int32_t __cdecl abort_render(void* effect_ref) {
-  if (!effect_ref) return 4;
-  ++g_abort_calls;
-  return 0;
-}
-
-int32_t __cdecl report_progress(void* effect_ref, int32_t current, int32_t total) {
-  if (!effect_ref || total <= 0 || current < 0 || current > total) return 4;
-  ++g_progress_calls;
-  g_last_progress_current = current;
-  g_last_progress_total = total;
-  return 0;
-}
-
-int32_t __cdecl register_custom_ui(void* effect_ref, const void* custom_ui_info) {
-  if (effect_ref != &g_effect || !custom_ui_info) return 4;
-  std::array<std::byte, 44> bytes{};
-  std::memcpy(bytes.data(), custom_ui_info, bytes.size());
-  CustomUiRegistration registration{
-      read<uint32_t>(bytes, 4), read<int32_t>(bytes, 8), read<int32_t>(bytes, 12),
-      read<int32_t>(bytes, 16), read<int32_t>(bytes, 20), read<int32_t>(bytes, 24),
-      read<int32_t>(bytes, 28), read<int32_t>(bytes, 32), read<int32_t>(bytes, 36),
-      read<int32_t>(bytes, 40)};
-  const auto valid_dimension = [](int32_t value) { return value >= 0 && value <= 8192; };
-  if ((registration.events & ~15u) != 0 ||
-      !valid_dimension(registration.comp_width) ||
-      !valid_dimension(registration.comp_height) ||
-      !valid_dimension(registration.layer_width) ||
-      !valid_dimension(registration.layer_height) ||
-      !valid_dimension(registration.preview_width) ||
-      !valid_dimension(registration.preview_height)) {
-    ++g_invalid_custom_ui_registrations;
-    return 4;
-  }
-  g_custom_ui_registration = registration;
-  ++g_register_ui_calls;
-  return 0;
-}
-
-int32_t __cdecl adv_app_info_text(const char* first, const char* second) {
-  if (!first || !second || strnlen_s(first, 256) == 256 || strnlen_s(second, 256) == 256)
-    return 4;
-  g_last_adv_app_info_text = std::string(first) + " | " + second;
-  ++g_adv_app_info_text_calls;
-  return 0;
-}
-
-int32_t __cdecl adv_app_info_text3(const char* first, const char* second,
-                                   const char* third) {
-  if (!first || !second || (third && strnlen_s(third, 256) == 256) ||
-      strnlen_s(first, 256) == 256 || strnlen_s(second, 256) == 256) return 4;
-  g_last_adv_app_info_text = std::string(first) + " | " + second;
-  if (third) g_last_adv_app_info_text += std::string(" | ") + third;
-  ++g_adv_app_info_text_calls;
-  return 0;
-}
 
 bool dispatch_conditional_ui_selectors(EffectEntry entry,
                                        std::array<std::byte, kInSize>& input,
@@ -3353,338 +1193,21 @@ bool dispatch_conditional_ui_selectors(EffectEntry entry,
       (!g_query_dynamic_flags_advertised || g_query_dynamic_flags_error == 0);
 }
 
-std::string escape(const std::string& input) {
-  std::string output;
-  for (unsigned char ch : input) {
-    if (ch == '"' || ch == '\\') output.push_back('\\');
-    if (ch >= 0x20 && ch < 0x7f) output.push_back(static_cast<char>(ch));
-  }
-  return output;
-}
 
-bool sha256(const std::filesystem::path& path, std::string& result) {
-  BCRYPT_ALG_HANDLE algorithm{};
-  BCRYPT_HASH_HANDLE hash{};
-  DWORD object_size{}, returned{};
-  if (BCryptOpenAlgorithmProvider(&algorithm, BCRYPT_SHA256_ALGORITHM, nullptr, 0) < 0 ||
-      BCryptGetProperty(algorithm, BCRYPT_OBJECT_LENGTH,
-                        reinterpret_cast<PUCHAR>(&object_size), sizeof(object_size),
-                        &returned, 0) < 0) return false;
-  std::vector<unsigned char> object(object_size);
-  if (BCryptCreateHash(algorithm, &hash, object.data(), object_size, nullptr, 0, 0) < 0) return false;
-  std::ifstream input(path, std::ios::binary);
-  std::array<unsigned char, 65536> buffer{};
-  while (input) {
-    input.read(reinterpret_cast<char*>(buffer.data()), buffer.size());
-    if (input.gcount() > 0 && BCryptHashData(hash, buffer.data(), static_cast<ULONG>(input.gcount()), 0) < 0) return false;
-  }
-  std::array<unsigned char, 32> digest{};
-  const bool ok = input.eof() && BCryptFinishHash(hash, digest.data(), digest.size(), 0) >= 0;
-  BCryptDestroyHash(hash);
-  BCryptCloseAlgorithmProvider(algorithm, 0);
-  if (!ok) return false;
-  std::ostringstream text;
-  text << std::hex << std::setfill('0');
-  for (auto byte : digest) text << std::setw(2) << static_cast<unsigned>(byte);
-  result = text.str();
-  return true;
-}
 
-std::string sha256_bytes(const unsigned char* data, std::size_t size) {
-  BCRYPT_ALG_HANDLE algorithm{};
-  BCRYPT_HASH_HANDLE hash{};
-  DWORD object_size{}, returned{};
-  BCryptOpenAlgorithmProvider(&algorithm, BCRYPT_SHA256_ALGORITHM, nullptr, 0);
-  BCryptGetProperty(algorithm, BCRYPT_OBJECT_LENGTH,
-                    reinterpret_cast<PUCHAR>(&object_size), sizeof(object_size), &returned, 0);
-  std::vector<unsigned char> object(object_size);
-  BCryptCreateHash(algorithm, &hash, object.data(), object_size, nullptr, 0, 0);
-  BCryptHashData(hash, const_cast<PUCHAR>(data), static_cast<ULONG>(size), 0);
-  std::array<unsigned char, 32> digest{};
-  BCryptFinishHash(hash, digest.data(), digest.size(), 0);
-  BCryptDestroyHash(hash);
-  BCryptCloseAlgorithmProvider(algorithm, 0);
-  std::ostringstream text;
-  text << std::hex << std::setfill('0');
-  for (auto byte : digest) text << std::setw(2) << static_cast<unsigned>(byte);
-  return text.str();
-}
 
-bool verify_pf_effect_sequence_data_suite1() {
-  return aexcompat::pf_effect_sequence_selftests::verify_suite1(
-      &g_effect, {&acquire_suite, &release_suite,
-                  &g_effect_sequence_data_suite1, kPfBadCallbackParam});
-}
 
-std::string hex_bytes(const unsigned char* data, std::size_t size) {
-  std::ostringstream text;
-  text << std::hex << std::setfill('0');
-  for (std::size_t index = 0; index < size; ++index)
-    text << std::setw(2) << static_cast<unsigned>(data[index]);
-  return text.str();
-}
 
 auto& g_user_changed_parameters = g_parameter_runtime.user_changed_parameters;
 
-bool parse_i32_arg(const wchar_t* text, int32_t minimum, int32_t maximum, int32_t& output) {
-  if (!text || !*text) return false;
-  wchar_t* end = nullptr;
-  errno = 0;
-  const long long value = std::wcstoll(text, &end, 10);
-  if (errno != 0 || !end || *end != L'\0' || value < minimum || value > maximum) return false;
-  output = static_cast<int32_t>(value);
-  return true;
-}
 
-bool parse_double_arg(const wchar_t* text, double minimum, double maximum, double& output) {
-  if (!text || !*text) return false;
-  wchar_t* end = nullptr;
-  errno = 0;
-  const double value = std::wcstod(text, &end);
-  if (errno != 0 || !end || *end != L'\0' || !std::isfinite(value) || value < minimum || value > maximum)
-    return false;
-  output = value;
-  return true;
-}
-
-bool parse_mask_context_payload(const wchar_t* text) {
-  if (!text) return false;
-  if (!g_stream_refs.empty() || !g_stream_values.empty() ||
-      !g_add_keyframe_transactions.empty()) return false;
-  const std::wstring encoded(text);
-  if (encoded.size() < 3 || encoded.size() > 8192 || encoded.compare(0, 3, L"v2|") != 0)
-    return false;
-  std::vector<HostMask> masks;
-  std::size_t total_vertices = 0;
-  const std::wstring payload = encoded.substr(3);
-  if (payload.empty()) {
-    g_mask_scene.clear();
-    g_mask_lifetime = {};
-    aexcompat::mask_runtime::set_mask_scene_id("request_v4");
-    return true;
-  }
-  std::size_t mask_offset = 0;
-  while (mask_offset < payload.size()) {
-    const std::size_t mask_separator = payload.find(L';', mask_offset);
-    const std::size_t mask_end = mask_separator == std::wstring::npos
-        ? payload.size() : mask_separator;
-    const std::wstring item = payload.substr(mask_offset, mask_end - mask_offset);
-    if (item.size() < 5 || (item.compare(0, 2, L"0:") != 0 &&
-                            item.compare(0, 2, L"1:") != 0)) return false;
-    HostMask mask;
-    mask.id = g_next_mask_id++;
-    mask.outline_stream_id = g_next_stream_id++;
-    mask.feather_stream_id = g_next_stream_id++;
-    mask.opacity_stream_id = g_next_stream_id++;
-    mask.expansion_stream_id = g_next_stream_id++;
-    mask.dynamic_order = static_cast<int32_t>(masks.size());
-    mask.open = item[0] == L'1';
-    std::size_t vertex_offset = 2;
-    while (vertex_offset < item.size()) {
-      const std::size_t vertex_separator = item.find(L'/', vertex_offset);
-      const std::size_t vertex_end = vertex_separator == std::wstring::npos
-          ? item.size() : vertex_separator;
-      const std::wstring point = item.substr(vertex_offset, vertex_end - vertex_offset);
-      std::array<double, 6> components{};
-      std::size_t component_offset = 0;
-      for (std::size_t component = 0; component < components.size(); ++component) {
-        const std::size_t comma = point.find(L',', component_offset);
-        const bool final_component = component + 1 == components.size();
-        if ((final_component && comma != std::wstring::npos) ||
-            (!final_component && comma == std::wstring::npos)) return false;
-        const std::size_t component_end = final_component ? point.size() : comma;
-        if (!parse_double_arg(point.substr(component_offset, component_end - component_offset).c_str(),
-                              -32768.0, 32768.0, components[component])) return false;
-        component_offset = component_end + 1;
-      }
-      mask.vertices.push_back({components[0], components[1], components[2],
-                               components[3], components[4], components[5]});
-      if (mask.vertices.size() > 64 || ++total_vertices > 128) return false;
-      if (vertex_separator == std::wstring::npos) break;
-      vertex_offset = vertex_separator + 1;
-      if (vertex_offset == item.size()) return false;
-    }
-    if (mask.vertices.size() < (mask.open ? 2u : 3u)) return false;
-    if (!mask.open) mask.vertices.push_back(mask.vertices.front());
-    masks.push_back(std::move(mask));
-    if (masks.size() > 8) return false;
-    if (mask_separator == std::wstring::npos) break;
-    mask_offset = mask_separator + 1;
-    if (mask_offset == payload.size()) return false;
-  }
-  g_mask_scene = std::move(masks);
-  g_mask_scene.reserve(kMaxHostMasks);
-  g_mask_lifetime = {};
-  aexcompat::mask_runtime::set_mask_scene_id("request_v4");
-  return true;
-}
-
-bool parse_spatial_context_payload(const wchar_t* text) {
-  if (!text) return false;
-  const std::wstring encoded(text);
-  const bool version3 = encoded.compare(0, 11, L"spatial:v3|") == 0;
-  const bool version2 = encoded.compare(0, 11, L"spatial:v2|") == 0;
-  if ((!version3 && !version2 && encoded.compare(0, 11, L"spatial:v1|") != 0) || encoded.size() > 160) return false;
-  const std::wstring payload = encoded.substr(11);
-  std::array<int32_t, 10> values{};
-  const std::size_t value_count = version3 ? 10 : (version2 ? 8 : 6);
-  std::size_t offset = 0;
-  for (std::size_t index = 0; index < value_count; ++index) {
-    const auto comma = payload.find(L',', offset);
-    const bool final = index + 1 == value_count;
-    if ((final && comma != std::wstring::npos) || (!final && comma == std::wstring::npos)) return false;
-    const auto end = final ? payload.size() : comma;
-    const int32_t minimum = index < 6 ? 1 : (index < 8 ? (version3 ? 0 : 1) : -32768);
-    const int32_t maximum = index < 6 ? 1'000'000 : 32768;
-    if (!parse_i32_arg(payload.substr(offset, end - offset).c_str(), minimum, maximum, values[index])) return false;
-    offset = end + 1;
-  }
-  g_downsample_x = {values[0], static_cast<uint32_t>(values[1])};
-  g_downsample_y = {values[2], static_cast<uint32_t>(values[3])};
-  g_pixel_aspect_ratio = {values[4], static_cast<uint32_t>(values[5])};
-  g_full_resolution_width = version2 || version3 ? values[6] : 0;
-  g_full_resolution_height = version2 || version3 ? values[7] : 0;
-  g_pre_effect_source_origin_x = version3 ? values[8] : 0;
-  g_pre_effect_source_origin_y = version3 ? values[9] : 0;
-  if (g_full_resolution_width > 32768 || g_full_resolution_height > 32768) return false;
-  return true;
-}
-
-bool parse_render_environment_payload(const wchar_t* text) {
-  if (!text) return false;
-  const std::wstring encoded(text);
-  if (encoded.compare(0, 10, L"render:v1|") != 0 || encoded.size() > 96) return false;
-  const std::wstring payload = encoded.substr(10);
-  std::array<int32_t, 4> values{};
-  std::size_t offset = 0;
-  for (std::size_t index = 0; index < values.size(); ++index) {
-    const auto comma = payload.find(L',', offset);
-    const bool final = index + 1 == values.size();
-    if ((final && comma != std::wstring::npos) || (!final && comma == std::wstring::npos)) return false;
-    const auto end = final ? payload.size() : comma;
-    if (!parse_i32_arg(payload.substr(offset, end - offset).c_str(),
-                       index == 3 ? -65536 : 0,
-                       index < 2 ? (index == 0 ? 1 : 2) : 65536,
-                       values[index])) return false;
-    offset = end + 1;
-  }
-  g_render_quality = values[0];
-  g_render_field = values[1];
-  g_shutter_angle = values[2];
-  g_shutter_phase = values[3];
-  return true;
-}
-
-bool valid_parameter_id(const std::wstring& id) {
-  if (id.empty() || id.size() > 64 || id.front() < L'a' || id.front() > L'z') return false;
-  return std::all_of(id.begin(), id.end(), [](wchar_t character) {
-    return (character >= L'a' && character <= L'z') ||
-           (character >= L'0' && character <= L'9') || character == L'_';
-  });
-}
-
-bool parse_parameter_payload(const wchar_t* text, RequestedAssignments& output) {
-  if (!text) return false;
-  const std::wstring encoded(text);
-  const bool version5 = encoded.compare(0, 3, L"v5|") == 0;
-  const bool version4 = encoded.compare(0, 3, L"v4|") == 0;
-  const bool version3 = encoded.compare(0, 3, L"v3|") == 0;
-  if (encoded.size() < 3 || encoded.size() > 16384 ||
-      (!version5 && !version4 && !version3 && encoded.compare(0, 3, L"v2|") != 0)) return false;
-  const std::wstring payload = encoded.substr(3);
-  if (payload.empty()) return true;
-  std::unordered_set<std::wstring> seen_ids;
-  std::unordered_set<int32_t> seen_indices;
-  std::size_t offset = 0;
-  while (offset < payload.size()) {
-    const std::size_t separator = payload.find(L';', offset);
-    const std::size_t end = separator == std::wstring::npos ? payload.size() : separator;
-    const std::wstring assignment = payload.substr(offset, end - offset);
-    const std::size_t at = assignment.find(L'@');
-    const std::size_t colon = assignment.find(L':', at == std::wstring::npos ? 0 : at + 1);
-    const std::size_t equals = assignment.find(L'=', colon == std::wstring::npos ? 0 : colon + 1);
-    if (at == std::wstring::npos || colon == std::wstring::npos || equals == std::wstring::npos ||
-        at == 0 || colon <= at + 1 || equals <= colon + 1 || equals + 1 >= assignment.size() ||
-        assignment.find(L'=', equals + 1) != std::wstring::npos) return false;
-    const std::wstring id = assignment.substr(0, at);
-    const std::wstring index_text = assignment.substr(at + 1, colon - at - 1);
-    const std::wstring kind_text = assignment.substr(colon + 1, equals - colon - 1);
-    const std::wstring value = assignment.substr(equals + 1);
-    int32_t index{};
-    if (!valid_parameter_id(id) || value.size() > 8192 ||
-        !parse_i32_arg(index_text.c_str(), 1, static_cast<int32_t>(kMaxParams), index) ||
-        !seen_ids.insert(id).second || !seen_indices.insert(index).second) return false;
-    RequestedKind kind{};
-    if (kind_text == L"i32") kind = RequestedKind::Integer;
-    else if (kind_text == L"f64") kind = RequestedKind::Float;
-    else if ((version3 || version4 || version5) && kind_text == L"argb8") kind = RequestedKind::Color;
-    else if ((version4 || version5) && kind_text == L"angle") kind = RequestedKind::Angle;
-    else if ((version4 || version5) && kind_text == L"point") kind = RequestedKind::Point;
-    else if ((version4 || version5) && kind_text == L"point3d") kind = RequestedKind::Point3D;
-    else if (version5 && kind_text == L"arbhex") kind = RequestedKind::ArbitraryText;
-    else return false;
-    double parsed{};
-    std::array<unsigned char, 4> color{};
-    std::array<double, 3> components{};
-    std::string arbitrary_text;
-    if (kind == RequestedKind::Color) {
-      std::size_t start = 0;
-      for (std::size_t channel = 0; channel < color.size(); ++channel) {
-        const std::size_t comma = value.find(L',', start);
-        const bool final_channel = channel + 1 == color.size();
-        if ((final_channel && comma != std::wstring::npos) ||
-            (!final_channel && comma == std::wstring::npos)) return false;
-        const std::size_t finish = final_channel ? value.size() : comma;
-        int32_t component{};
-        if (!parse_i32_arg(value.substr(start, finish - start).c_str(), 0, 255, component))
-          return false;
-        color[channel] = static_cast<unsigned char>(component);
-        start = finish + 1;
-      }
-    } else if (kind == RequestedKind::Angle || kind == RequestedKind::Point || kind == RequestedKind::Point3D) {
-      const std::size_t count = kind == RequestedKind::Point3D ? 3 : (kind == RequestedKind::Point ? 2 : 1);
-      std::size_t start = 0;
-      for (std::size_t component = 0; component < count; ++component) {
-        const std::size_t comma = value.find(L',', start);
-        const bool final_component = component + 1 == count;
-        if ((final_component && comma != std::wstring::npos) || (!final_component && comma == std::wstring::npos)) return false;
-        const std::size_t finish = final_component ? value.size() : comma;
-        if (!parse_double_arg(value.substr(start, finish - start).c_str(), -32768.0, 32768.0, components[component])) return false;
-        start = finish + 1;
-      }
-    } else if (kind == RequestedKind::ArbitraryText) {
-      if (value.empty() || value.size() > 8192 || value.size() % 2 != 0) return false;
-      arbitrary_text.reserve(value.size() / 2);
-      const auto nibble = [](wchar_t ch) -> int {
-        if (ch >= L'0' && ch <= L'9') return ch - L'0';
-        if (ch >= L'a' && ch <= L'f') return ch - L'a' + 10;
-        return -1;
-      };
-      for (std::size_t pos = 0; pos < value.size(); pos += 2) {
-        const int high = nibble(value[pos]), low = nibble(value[pos + 1]);
-        if (high < 0 || low < 0) return false;
-        arbitrary_text.push_back(static_cast<char>((high << 4) | low));
-      }
-      if (arbitrary_text.empty() || arbitrary_text.size() > 4096 ||
-          arbitrary_text.find('\0') != std::string::npos) return false;
-    } else {
-      const double minimum = kind == RequestedKind::Integer
-          ? static_cast<double>((std::numeric_limits<int32_t>::min)())
-          : -(std::numeric_limits<double>::max)();
-      const double maximum = kind == RequestedKind::Integer
-          ? static_cast<double>((std::numeric_limits<int32_t>::max)())
-          : (std::numeric_limits<double>::max)();
-      if (!parse_double_arg(value.c_str(), minimum, maximum, parsed) ||
-          (kind == RequestedKind::Integer && std::trunc(parsed) != parsed)) return false;
-    }
-    output.push_back({id, index, kind, parsed, color, components, arbitrary_text});
-    if (output.size() > kMaxParams) return false;
-    if (separator == std::wstring::npos) break;
-    offset = separator + 1;
-    if (offset == payload.size()) return false;
-  }
-  return true;
-}
+// The broker payload parsers moved to worker_l2_payload_parsers.cpp
+// (issue #165); worker_main keeps resolving them through these declarations.
+bool parse_layer_transport_key(const wchar_t* text, ExternalLayerInput& layer);
+bool parse_mask_context_payload(const wchar_t* text);
+bool parse_spatial_context_payload(const wchar_t* text);
+bool parse_render_environment_payload(const wchar_t* text);
+bool parse_parameter_payload(const wchar_t* text, RequestedAssignments& output);
 
 std::size_t parameter_active_mask_count() {
   return ordered_active_masks().size();
@@ -3703,803 +1226,21 @@ const bool g_parameter_execution_configured = configure_hooks({
 // Write one packed-ARGB world as raw RGBA in the byte layout that
 // tools/compare-pixel-oracles.py consumes (rgba8 / rgba16le / rgba32f-le,
 // row-major, no stride padding). Little-endian is the only supported target.
-void dump_world_snapshot(const std::string& stage, const unsigned char* packed_argb,
-                         int32_t width, int32_t height, int32_t pixel_bytes) {
-  auto& state = aexcompat::render::telemetry_state();
-  aexcompat::render::RenderTelemetry telemetry{
-      &state.dump_worlds_dir, &state.world_dumps_written, &state.world_dumps_skipped,
-      &state.world_dump_bytes, state.output_checksum_detail, &state.output_row_crc32,
-      &state.output_channel_sha256, {&argb_to_rgba_native, &sha256_bytes}};
-  aexcompat::render::dump_world_snapshot(telemetry, stage, packed_argb, width,
-                                          height, pixel_bytes);
-}
 
-// Record per-row CRC32 and per-channel SHA-256 of the RGBA-ordered output
-// transport bytes, so a differing region can be narrowed to rows and channels
-// without shipping any pixel content in the report.
-void record_output_checksum_detail(const unsigned char* rgba, int32_t width,
-                                   int32_t height, int32_t pixel_bytes) {
-  auto& state = aexcompat::render::telemetry_state();
-  aexcompat::render::RenderTelemetry telemetry{
-      &state.dump_worlds_dir, &state.world_dumps_written, &state.world_dumps_skipped,
-      &state.world_dump_bytes, state.output_checksum_detail, &state.output_row_crc32,
-      &state.output_channel_sha256, {&argb_to_rgba_native, &sha256_bytes}};
-  aexcompat::render::record_output_checksum_detail(telemetry, rgba, width,
-                                                    height, pixel_bytes);
-}
 
-// Single insertion point for both image report emitters: dump counters are
-// always present, checksum detail only when the opt-in trailer enabled it.
-std::string world_debug_report_json() {
-  auto& state = aexcompat::render::telemetry_state();
-  const aexcompat::render::RenderTelemetry telemetry{
-      &state.dump_worlds_dir, &state.world_dumps_written, &state.world_dumps_skipped,
-      &state.world_dump_bytes, state.output_checksum_detail, &state.output_row_crc32,
-      &state.output_channel_sha256, {&argb_to_rgba_native, &sha256_bytes}};
-  return aexcompat::render::world_debug_report_json(telemetry);
-}
-
-struct LifecycleContext { EffectEntry effect_entry; };
-
-constexpr aexcompat::render_lifecycle::Layout kRenderLifecycleLayout{
-    kInSequenceData, kOutSequenceData, kInFrameData, kOutFrameData,
-    kSequenceSetup, kSequenceSetdown, kFrameSetup, kFrameSetdown};
-
-int32_t lifecycle_invoke_frame(void* opaque, int32_t selector, void* input,
-                               void* output, void** params, void* world) {
-  const EffectEntry effect_entry = static_cast<LifecycleContext*>(opaque)->effect_entry;
-  return guarded_effect_call(effect_entry, selector, input, output, params, world, nullptr);
-}
-
-int32_t lifecycle_invoke_sequence(void* opaque, int32_t selector, void* input,
-                                  void* output) {
-  return invoke_sequence_selector(
-      static_cast<LifecycleContext*>(opaque)->effect_entry, selector, input, output);
-}
-
-void lifecycle_activate_aux(void*) {
-  activate_external_aux();
-}
-
-void lifecycle_cleanup_aux(void*) {
-  // Aux channel chunks are host-owned and cannot outlive a render lifecycle.
-  aexcompat::pf_ae_channel::reclaim_layer_channels();
-  deactivate_external_aux();
-  clear_native_aux_provider();
-}
-
-aexcompat::render_lifecycle::Hooks lifecycle_hooks(LifecycleContext& context) {
-  return {&context, &lifecycle_invoke_frame, &lifecycle_invoke_sequence,
-          &lifecycle_activate_aux, &lifecycle_cleanup_aux};
-}
-
-RenderLifecycle begin_frame_lifecycle(EffectEntry effect_entry,
-    std::array<std::byte, kInSize>& input,
-    std::array<std::byte, kOutSize>& output, void** params, void* world) {
-  LifecycleContext context{effect_entry};
-  return aexcompat::render_lifecycle::begin_frame(
-      lifecycle_hooks(context), kRenderLifecycleLayout, input.data(), output.data(),
-      params, world);
-}
-
-int32_t end_frame_lifecycle(EffectEntry effect_entry,
-    std::array<std::byte, kInSize>& input,
-    std::array<std::byte, kOutSize>& output, void** params, void* world,
-    const RenderLifecycle& lifecycle, int32_t primary_error) {
-  LifecycleContext context{effect_entry};
-  return aexcompat::render_lifecycle::end_frame(
-      lifecycle_hooks(context), kRenderLifecycleLayout, input.data(), output.data(),
-      params, world, lifecycle, primary_error);
-}
-
-RenderLifecycle begin_render_lifecycle(EffectEntry effect_entry,
-    std::array<std::byte, kInSize>& input,
-    std::array<std::byte, kOutSize>& output, void** params, void* world) {
-  LifecycleContext context{effect_entry};
-  return aexcompat::render_lifecycle::begin_render(
-      lifecycle_hooks(context), kRenderLifecycleLayout, input.data(), output.data(),
-      params, world);
-}
-
-int32_t end_render_lifecycle(EffectEntry effect_entry,
-    std::array<std::byte, kInSize>& input,
-    std::array<std::byte, kOutSize>& output, void** params, void* world,
-    const RenderLifecycle& lifecycle, int32_t primary_error) {
-  LifecycleContext context{effect_entry};
-  return aexcompat::render_lifecycle::end_render(
-      lifecycle_hooks(context), kRenderLifecycleLayout, input.data(), output.data(),
-      params, world, lifecycle, primary_error);
-}
-
-// Owns the references that must remain alive from lifecycle begin through end.
-// The opaque hook ABI never outlives this stack owner.
-struct ClassicLifecycleOwner {
-  EffectEntry entry;
-  std::array<std::byte, kInSize>& input;
-  std::array<std::byte, kOutSize>& output;
-  std::vector<std::array<std::byte, kParamSize>>& definitions;
-  std::vector<void*>& params;
-  std::array<std::byte, kEffectWorldSize>& world;
-  bool manage_sequence;
-
-  aexcompat::worker_runtime::classic_execution::LifecycleResult begin() {
-    return aexcompat::worker_runtime::classic_execution::begin_lifecycle(this, hooks());
-  }
-  int32_t finish(aexcompat::worker_runtime::classic_execution::LifecycleResult& state,
-                 bool draw = false) {
-    return aexcompat::worker_runtime::classic_execution::finish_lifecycle(
-        this, state, hooks(), draw);
-  }
-
- private:
-  static const aexcompat::worker_runtime::classic_execution::LifecycleHooks& hooks() {
-    static const aexcompat::worker_runtime::classic_execution::LifecycleHooks value{
-        +[](void* opaque) -> void* {
-          auto& h = *static_cast<ClassicLifecycleOwner*>(opaque);
-          const auto lifecycle = h.manage_sequence
-              ? begin_render_lifecycle(h.entry, h.input, h.output, h.params.data(), h.world.data())
-              : begin_frame_lifecycle(h.entry, h.input, h.output, h.params.data(), h.world.data());
-          return new (std::nothrow) RenderLifecycle(lifecycle);
-        },
-        +[](void* opaque) { auto& h = *static_cast<ClassicLifecycleOwner*>(opaque);
-          return dispatch_render_click(h.entry, h.input, h.output, h.definitions); },
-        +[](void* opaque) { auto& h = *static_cast<ClassicLifecycleOwner*>(opaque);
-          return interpolate_arbitrary_values(h.entry, h.input, h.output, h.definitions); },
-        +[](void* opaque) { auto& h = *static_cast<ClassicLifecycleOwner*>(opaque);
-          return roundtrip_arbitrary_values(h.entry, h.input, h.output, h.definitions); },
-        +[](void* opaque) { auto& h = *static_cast<ClassicLifecycleOwner*>(opaque);
-          return dispatch_conditional_ui_selectors(h.entry, h.input, h.output, h.params.data()); },
-        +[](void* opaque) { auto& h = *static_cast<ClassicLifecycleOwner*>(opaque);
-          return dispatch_render_draw(h.entry, h.input, h.output, h.definitions); },
-        +[](void* opaque, void* lifecycle, int32_t error) { auto& h = *static_cast<ClassicLifecycleOwner*>(opaque);
-          return h.manage_sequence
-              ? end_render_lifecycle(h.entry, h.input, h.output, h.params.data(), h.world.data(),
-                    *static_cast<RenderLifecycle*>(lifecycle), error)
-              : end_frame_lifecycle(h.entry, h.input, h.output, h.params.data(), h.world.data(),
-                    *static_cast<RenderLifecycle*>(lifecycle), error); },
-        +[](void* lifecycle) { delete static_cast<RenderLifecycle*>(lifecycle); }};
-    return value;
-  }
-};
-
-// Owns render-dispatch state. Buffer resize mutates all related world references
-// atomically; LayerRenderContext is scoped strictly to the kRender callback.
-struct ClassicRenderDispatchOwner {
-  EffectEntry entry;
-  std::array<std::byte, kInSize>& input;
-  std::array<std::byte, kOutSize>& output;
-  std::array<std::byte, kEffectWorldSize>& world;
-  OutputPixelBuffer& guarded;
-  DispatchWorldFormatScope& worlds;
-  std::vector<std::array<std::byte, kParamSize>>& definitions;
-  std::vector<void*>& params;
-  int32_t& width; int32_t& height; int32_t& rowbytes;
-  unsigned char*& destination;
-  int32_t pixel_bytes; int32_t pixel_format;
-  int32_t current_time; int32_t time_step; int32_t total_time; uint32_t time_scale;
-  const std::string& case_id; const RequestedAssignments* requested;
-  const std::vector<unsigned char>* external_rgba;
-  const std::vector<ExternalLayerInput>* external_layers;
-  int32_t external_width; int32_t external_height;
-  aexcompat::worker_runtime::classic::Context& classic_context;
-  std::vector<unsigned char>& logical_source;
-  // When set, records that the host itself rejected or failed the plug-in's
-  // requested output resize, so callers can tell host-side output validation
-  // failures apart from selector errors sharing the same numeric codes.
-  bool* output_validation_failed{};
-
-  int32_t run(int32_t error) {
-    return aexcompat::worker_runtime::classic_execution::dispatch_render(this, error, hooks());
-  }
-
- private:
-  static const aexcompat::worker_runtime::classic_execution::RenderHooks& hooks() {
-    static const aexcompat::worker_runtime::classic_execution::RenderHooks value{
-        +[](void* opaque) { auto& h = *static_cast<ClassicRenderDispatchOwner*>(opaque);
-          return dispatch_render_draw(h.entry, h.input, h.output, h.definitions); },
-        +[](void* opaque) { return static_cast<ClassicRenderDispatchOwner*>(opaque)->prepare_output(); },
-        +[](void* opaque) { return static_cast<ClassicRenderDispatchOwner*>(opaque)->dispatch_selector(); },
-        +[](void* opaque) { auto& h = *static_cast<ClassicRenderDispatchOwner*>(opaque);
-          return !g_render_ui_context_active || close_render_ui_context(h.entry, h.input, h.output, h.definitions); }};
-    return value;
-  }
-  int32_t prepare_output() {
-    const auto fail = [this](int32_t error) {
-      if (output_validation_failed) *output_validation_failed = true;
-      return error;
-    };
-    const int32_t next_width = read<int32_t>(output, kOutWidth);
-    const int32_t next_height = read<int32_t>(output, kOutHeight);
-    if (!aexcompat::render::validate_output_extent(width, height, next_width, next_height,
-            read<uint32_t>(output, kOutFlags))) return fail(4);
-    if (next_width <= 0 || next_height <= 0) return 0;
-    width = next_width; height = next_height; rowbytes = width * pixel_bytes;
-    if (!guarded.reset(static_cast<std::size_t>(rowbytes) * height)) return fail(-3);
-    destination = guarded.data();
-    if (!aexcompat::render::prepare_world_layout(world,
-            {pixel_bytes == 4 ? 0 : 1, pixel_bytes, width, height, rowbytes}, destination)) return fail(-3);
-    if (!worlds.register_world(world.data(), pixel_format)) return fail(4);
-    write<int32_t>(input, 276, read<int32_t>(output, kOutOrigin));
-    write<int32_t>(input, 280, read<int32_t>(output, kOutOrigin + 4));
-    return 0;
-  }
-  int32_t dispatch_selector() {
-    struct LayerContextScope {
-      LayerRenderContext previous;
-      explicit LayerContextScope(LayerRenderContext next)
-          : previous(aexcompat::aegp_layer_render_runtime::replace_context(std::move(next))) {}
-      ~LayerContextScope() {
-        aexcompat::aegp_layer_render_runtime::replace_context(std::move(previous));
-      }
-    } scope({entry, &input, &output, current_time, static_cast<int32_t>(time_scale), case_id,
-        requested, external_rgba, external_layers, external_width, external_height,
-        time_step, total_time, pixel_bytes, &logical_source, width, height});
-    classic_context.mark_selector_dispatched();
-    return entry(kRender, input.data(), output.data(), params.data(), world.data(), nullptr);
-  }
-};
-int32_t classic_render_runtime(EffectEntry entry, std::array<std::byte, kInSize>& input,
-                    std::array<std::byte, kOutSize>& command_output,
-                    const std::string& case_id, int32_t& width, int32_t& height,
-                    int32_t& rowbytes,
-                    std::string& input_hash, std::string& output_hash,
-                    bool& guards_intact, const RequestedAssignments* requested = nullptr,
-                    const std::vector<unsigned char>* external_rgba = nullptr,
-                    const std::filesystem::path* external_output = nullptr,
-                    int32_t external_width = 0, int32_t external_height = 0,
-                    const std::vector<ExternalLayerInput>* external_layers = nullptr,
-                    int32_t external_current_time = 0, int32_t external_time_step = 1,
-                    int32_t external_total_time = 1, uint32_t external_time_scale = 1,
-                    int32_t external_pixel_bytes = 4,
-                    bool manage_sequence = true,
-                    std::vector<unsigned char>* captured_argb = nullptr,
-                    bool* output_validation_failed = nullptr) {
-  auto* classic_context = aexcompat::worker_runtime::classic::active_context();
-  if (!classic_context) return -1;
-  aexcompat::render::ImageRequest image_request;
-  const int request_error = aexcompat::render::prepare_image_request(
-      case_id, external_rgba != nullptr, external_width, external_height,
-      external_pixel_bytes, image_request);
-  if (request_error != 0) return request_error;
-  const bool connected_map = image_request.connected_map;
-  const bool partial_extent_hint = image_request.partial_extent_hint;
-  width = image_request.width;
-  height = image_request.height;
-  const int32_t pixel_bytes = image_request.pixel_bytes;
-  smart_state().pixel_format = pixel_bytes == 16 ? "argb32f" :
-      (pixel_bytes == 8 ? "argb16" : "argb8");
-  rowbytes = image_request.rowbytes;
-  const aexcompat::render::ParameterProfile parameter_profile =
-      aexcompat::render::prepare_parameter_profile(case_id);
-  std::vector<unsigned char> logical_source(width * height * pixel_bytes);
-  InputPixelBuffer source(static_cast<std::size_t>(rowbytes) * height);
-  if (!source) return -3;
-  std::memset(source.data(), 0x5A, static_cast<std::size_t>(rowbytes) * height);
-  if (!aexcompat::render::build_argb_input(image_request, external_rgba,
-                                            logical_source, source.data())) return -3;
-  dump_world_snapshot("classic-input", logical_source.data(), width, height, pixel_bytes);
-  const bool input_write_advertised =
-      (read<uint32_t>(command_output, kOutFlags) & kOutFlagIWriteInputBuffer) != 0;
-  if (!source.set_plugin_writable(input_write_advertised)) return -3;
-  OutputPixelBuffer guarded(static_cast<std::size_t>(rowbytes) * height);
-  if (!guarded) return -3;
-  unsigned char* destination = guarded.data();
-  guards_intact = true;
-
-  std::array<std::byte, 120> input_world{}, output_world{};
-  const aexcompat::render::WorldLayout primary_world{
-      pixel_bytes == 4 ? 0 : 1, pixel_bytes, width, height, rowbytes};
-  if (!aexcompat::render::prepare_world_layout(input_world, primary_world, source.data()) ||
-      !aexcompat::render::prepare_world_layout(output_world, primary_world, destination)) return -3;
-  const int32_t dispatch_pixel_format = pixel_bytes == 4 ? kPixelFormatArgb32 :
-      (pixel_bytes == 8 ? kPixelFormatArgb64 : kPixelFormatArgb128);
-  DispatchWorldFormatScope dispatch_worlds;
-  if (!dispatch_worlds.register_world(input_world.data(), dispatch_pixel_format) ||
-      !dispatch_worlds.register_world(output_world.data(), dispatch_pixel_format)) return -3;
-
-  aexcompat::render::MapWorld map_world;
-  if (connected_map) {
-    if (!aexcompat::render::prepare_connected_map_world(case_id, width, height, map_world) ||
-        !dispatch_worlds.register_world(map_world.world.data(), kPixelFormatArgb32)) return -3;
-    aexcompat::worker_runtime::classic::ParameterDefinition checkout_definition{};
-    write<int32_t>(checkout_definition, 12, 0);
-    std::memcpy(checkout_definition.data() + 56, map_world.world.data(), map_world.world.size());
-    classic_context->set_fallback_definition(g_secondary_layer_slot,
-                                             checkout_definition);
-  }
-
-  std::vector<std::array<std::byte, kParamSize>> definitions(g_params.size() + 1);
-  std::vector<std::vector<unsigned char>> hosted_pixels;
-  std::vector<std::array<std::byte, 120>> hosted_worlds;
-  if (external_layers) {
-    hosted_pixels.resize(external_layers->size());
-    hosted_worlds.resize(external_layers->size());
-  }
-  std::memcpy(definitions[0].data() + 56, input_world.data(), input_world.size());
-  initialize_parameter_definitions(definitions);
-  if (!initialize_arbitrary_values(entry, input, command_output, definitions)) return -5;
-  ArbitraryValuesScope arbitrary_scope{entry, &input, &command_output, &definitions};
-  if (requested && !apply_arbitrary_text_assignments(entry, input, command_output, definitions, *requested)) return -5;
-  probe_arbitrary_scan(entry, input, command_output, definitions);
-  for (std::size_t slot = 1; slot < definitions.size(); ++slot)
-    if (g_params[slot - 1].type == 0 && g_params[slot - 1].layer_default == -1)
-      std::memcpy(definitions[slot].data() + 56, input_world.data(), input_world.size());
-  if (external_layers) for (std::size_t layer_index = 0; layer_index < external_layers->size(); ++layer_index) {
-    const auto& layer = (*external_layers)[layer_index];
-    if (layer.slot <= 0 || static_cast<std::size_t>(layer.slot) >= definitions.size() ||
-        g_params[layer.slot - 1].type != 0 || layer.rgba.size() !=
-            static_cast<std::size_t>(layer.width) * layer.height * 4) return -3;
-    auto& pixels = hosted_pixels[layer_index];
-      pixels.resize(static_cast<std::size_t>(layer.width) * layer.height * pixel_bytes);
-      for (std::size_t offset = 0; offset < layer.rgba.size(); offset += 4) {
-      rgba8_to_argb(pixels.data() + (offset / 4) * pixel_bytes,
-                    layer.rgba.data() + offset, pixel_bytes);
-    }
-    dump_world_snapshot("classic-layer-slot" + std::to_string(layer.slot),
-                        pixels.data(), layer.width, layer.height, pixel_bytes);
-    auto& world = hosted_worlds[layer_index];
-    if (!aexcompat::render::prepare_world_layout(
-            world, {pixel_bytes == 4 ? 0 : 1, pixel_bytes, layer.width, layer.height,
-                    layer.width * pixel_bytes}, pixels.data()) ||
-        !dispatch_worlds.register_world(world.data(), dispatch_pixel_format)) return -3;
-    if (!layer.timed || same_rational_time(layer.time, layer.time_scale,
-            external_current_time, external_time_scale))
-      std::memcpy(definitions[layer.slot].data() + 56, world.data(), world.size());
-    std::array<std::byte, kParamSize> checkout{};
-    write<int32_t>(checkout, 12, 0);
-    std::memcpy(checkout.data() + 56, world.data(), world.size());
-    if (layer.timed) {
-      if (!classic_context->add_timed_layer(
-              {layer.slot, layer.time, layer.time_scale, checkout})) return -3;
-    }
-  }
-  if (requested) {
-    if (!apply_requested_assignments(definitions, *requested)) return -3;
-  } else if (definitions.size() > 7) {
-    write<int32_t>(definitions[1], 56, parameter_profile.amount);
-    write<int32_t>(definitions[2], 56, parameter_profile.direction);
-    write<int32_t>(definitions[3], 56, parameter_profile.seed);
-    write<int32_t>(definitions[4], 56, parameter_profile.repeat);
-    write<double>(definitions[5], 56, parameter_profile.mix);
-    if (parameter_profile.inverted_map) write<int32_t>(definitions[7], 56, 1);
-  }
-  if (!apply_parameter_animation(definitions, external_current_time, external_time_scale)) return -3;
-  if (!apply_arbitrary_parameter_animation(entry, input, command_output, definitions,
-                                            external_current_time, external_time_scale)) return -3;
-  for (std::size_t slot = 0; slot < definitions.size(); ++slot)
-    classic_context->set_definition(static_cast<int32_t>(slot), definitions[slot]);
-  std::vector<void*> params(definitions.size());
-  for (std::size_t i = 0; i < definitions.size(); ++i) params[i] = definitions[i].data();
-  write<int32_t>(input, 224, external_current_time);
-  write<int32_t>(input, 228, external_time_step);
-  write<int32_t>(input, 232, external_total_time);
-  write<int32_t>(input, 236, external_time_step);
-  write<uint32_t>(input, 240, external_time_scale);
-  write<int32_t>(input, 252, g_full_resolution_width > 0 ? g_full_resolution_width : width);
-  write<int32_t>(input, 256, g_full_resolution_height > 0 ? g_full_resolution_height : height);
-  const int32_t full_extent[4] = {0, 0, width, height};
-  std::memcpy(input.data() + 260, full_extent, sizeof(full_extent));
-  if (partial_extent_hint) {
-    const int32_t extent[4] = {3, 2, 11, 8};
-    std::memcpy(input.data() + 260, extent, sizeof(extent));
-  }
-  struct RenderUiContextScope {
-    EffectEntry entry;
-    std::array<std::byte, kInSize>& input;
-    std::array<std::byte, kOutSize>& output;
-    std::vector<std::array<std::byte, kParamSize>>& definitions;
-    ~RenderUiContextScope() {
-      if (g_render_ui_context_active)
-        close_render_ui_context(entry, input, output, definitions);
-    }
-  } render_ui_context_scope{entry, input, command_output, definitions};
-  publish_alpha_coverage_provider(logical_source, width, height, pixel_bytes,
-                                  external_current_time, external_time_scale);
-  ClassicLifecycleOwner lifecycle_owner{entry, input, command_output, definitions, params,
-                                        output_world, manage_sequence};
-  auto lifecycle = lifecycle_owner.begin();
-  int32_t error = lifecycle.error;
-  const uint32_t effective_out_flags = read<uint32_t>(command_output, kOutFlags);
-  const uint32_t effective_out_flags2 = read<uint32_t>(command_output, kOutFlags2);
-  const bool classic_wide_time_allowed =
-      (effective_out_flags & kOutFlagWideTimeInput) != 0 ||
-      ((effective_out_flags2 & kOutFlag2AutomaticWideTimeInput) != 0 &&
-       (effective_out_flags2 & kOutFlag2SupportsSmartRender) == 0);
-  const bool classic_shutter_dependency_advertised =
-      (effective_out_flags & kOutFlagIUseShutterAngle) != 0;
-  classic_context->configure_checkout_time(
-      read<int32_t>(input, kInCurrentTime), read<uint32_t>(input, kInTimeScale),
-      classic_wide_time_allowed, classic_shutter_dependency_advertised);
-  input_hash = sha256_bytes(logical_source.data(), logical_source.size());
-  const bool nop_render =
-      (read<uint32_t>(command_output, kOutFlags) & kOutFlagNopRender) != 0;
-  if (nop_render) {
-    if (error == 0) {
-      for (int32_t y = 0; y < height; ++y)
-        std::memcpy(destination + y * rowbytes,
-                    logical_source.data() + y * width * pixel_bytes,
-                    width * pixel_bytes);
-    }
-    error = lifecycle_owner.finish(lifecycle);
-  } else {
-    ClassicRenderDispatchOwner dispatch_owner{entry, input, command_output, output_world,
-        guarded, dispatch_worlds, definitions, params, width, height, rowbytes, destination,
-        pixel_bytes, dispatch_pixel_format, external_current_time, external_time_step,
-        external_total_time, external_time_scale, case_id, requested, external_rgba,
-        external_layers, external_width, external_height, *classic_context, logical_source,
-        output_validation_failed};
-    error = dispatch_owner.run(error);
-    lifecycle.error = error;
-    error = lifecycle_owner.finish(lifecycle);
-  }
-  aexcompat::worker_runtime::classic_execution::Context final_context{
-      destination, rowbytes, width, height, pixel_bytes, error,
-      external_current_time, external_time_step, external_time_scale,
-      read<int32_t>(input, kInQuality), dispatch_pixel_format, &output_hash,
-      &guards_intact, captured_argb, external_output, guarded.sentinels_intact()};
-  error = aexcompat::worker_runtime::classic_execution::finalize(final_context, {
-      +[](const unsigned char* data, int32_t rowbytes, int32_t width, int32_t height,
-          int32_t bytes, std::vector<unsigned char>& output) {
-        return aexcompat::render::copy_packed_world(data, rowbytes, width, height, bytes, output);
-      }, &sha256_bytes,
-      +[](AegpTime time, AegpTime step, int8_t quality, int32_t format,
-          int32_t width, int32_t height, const void* pixels) {
-        return aexcompat::aegp_staged_item_runtime::publish_world(aegp_comp_item_handle(),
-            time, step, quality, 0, format, width, height,
-            width * (format == kPixelFormatArgb32 ? 4 :
-                (format == kPixelFormatArgb64 ? 8 : 16)), pixels);
-      },
-      +[](const void* pixels, int32_t width, int32_t height, int32_t bytes) {
-        dump_world_snapshot("classic-output",
-            static_cast<const unsigned char*>(pixels), width, height, bytes);
-      },
-      +[](unsigned char* destination, const unsigned char* source, int32_t bytes) {
-        argb_to_rgba_native(destination, source, bytes);
-      }, &record_output_checksum_detail,
-      +[](const char* format) { smart_state().pixel_format = format; }});
-  if (!close_render_ui_context(entry, input, command_output, definitions)) return -5;
-  return error;
-}
-
-// The request keeps render-local state out of wmain.  The shared subsystem
-// controls admission and failure priority; this hook retains the audited host
-// implementation that prepares PF worlds, params, suites, and lifecycle data.
-struct ClassicRenderRequest {
-  EffectEntry entry;
-  std::array<std::byte, kInSize>& input;
-  std::array<std::byte, kOutSize>& output;
-  const std::string& case_id;
-  int32_t& width;
-  int32_t& height;
-  int32_t& rowbytes;
-  std::string& input_hash;
-  std::string& output_hash;
-  bool& guards_intact;
-  const RequestedAssignments* requested;
-  const std::vector<unsigned char>* external_rgba;
-  const std::filesystem::path* external_output;
-  int32_t external_width;
-  int32_t external_height;
-  const std::vector<ExternalLayerInput>* external_layers;
-  int32_t external_current_time;
-  int32_t external_time_step;
-  int32_t external_total_time;
-  uint32_t external_time_scale;
-  int32_t external_pixel_bytes;
-  bool manage_sequence;
-  std::vector<unsigned char>* captured_argb;
-  bool* output_validation_failed;
-};
-
-bool classic_render_dependencies_ready(void* opaque) {
-  const auto& request = *static_cast<ClassicRenderRequest*>(opaque);
-  return request.entry && request.width >= 0 && request.height >= 0 &&
-      request.external_time_scale != 0;
-}
-
-int classic_render_guarded_effect_main(void* opaque) {
-  auto& request = *static_cast<ClassicRenderRequest*>(opaque);
-  return classic_render_runtime(request.entry, request.input, request.output, request.case_id,
-      request.width, request.height, request.rowbytes, request.input_hash, request.output_hash,
-      request.guards_intact, request.requested, request.external_rgba, request.external_output,
-      request.external_width, request.external_height, request.external_layers,
-      request.external_current_time, request.external_time_step, request.external_total_time,
-      request.external_time_scale, request.external_pixel_bytes, request.manage_sequence,
-      request.captured_argb, request.output_validation_failed);
-}
-
-int classic_render_cleanup(void*) {
-  // classic_render_runtime performs sequence/frame/UI/world cleanup before it
-  // returns.  This explicit hook documents the completed cleanup boundary.
-  return 0;
-}
-
-int32_t render_once(EffectEntry entry, std::array<std::byte, kInSize>& input,
-                    std::array<std::byte, kOutSize>& output,
-                    const std::string& case_id, int32_t& width, int32_t& height,
-                    int32_t& rowbytes, std::string& input_hash, std::string& output_hash,
-                    bool& guards_intact, const RequestedAssignments* requested = nullptr,
-                    const std::vector<unsigned char>* external_rgba = nullptr,
-                    const std::filesystem::path* external_output = nullptr,
-                    int32_t external_width = 0, int32_t external_height = 0,
-                    const std::vector<ExternalLayerInput>* external_layers = nullptr,
-                    int32_t external_current_time = 0, int32_t external_time_step = 1,
-                    int32_t external_total_time = 1, uint32_t external_time_scale = 1,
-                    int32_t external_pixel_bytes = 4, bool manage_sequence = true,
-                    std::vector<unsigned char>* captured_argb = nullptr,
-                    bool* output_validation_failed = nullptr) {
-  ClassicRenderRequest request{entry, input, output, case_id, width, height, rowbytes,
-      input_hash, output_hash, guards_intact, requested, external_rgba, external_output,
-      external_width, external_height, external_layers, external_current_time,
-      external_time_step, external_total_time, external_time_scale, external_pixel_bytes,
-      manage_sequence, captured_argb, output_validation_failed};
-  aexcompat::worker_runtime::classic::Request context{
-      &request,
-      {&classic_render_guarded_effect_main, &classic_render_cleanup,
-       &classic_render_dependencies_ready},
-      g_module_audit.required};
-  return aexcompat::worker_runtime::classic::dispatch(context);
-}
-
+// The classic/smart render runtimes (lifecycle wrappers, dispatch owners,
+// classic_render_runtime, render_once, smart_render_runtime, and
+// smart_render_once) moved to worker_classic_render_runtime.cpp
+// (issue #170); the cross-TU declarations in
+// worker_invocation_orchestration.cpp and worker_render_session.cpp keep
+// resolving them there.
 // run_render_session moved to worker_render_session.cpp (issue #169); the
 // cross-TU declaration in worker_invocation_orchestration.cpp still resolves
 // to that owner.
 
 
-bool exercise_loaded_effect_item_receipt(EffectEntry entry,
-    std::array<std::byte, kInSize>& input, std::array<std::byte, kOutSize>& output) {
-  aexcompat::aegp_layer_render_runtime::context() = {
-      entry, &input, &output, read<int32_t>(input, kInCurrentTime),
-      static_cast<int32_t>(read<uint32_t>(input, kInTimeScale))};
-  std::vector<uint8_t> final_stage(16 * 12 * 4);
-  for (std::size_t pixel = 0; pixel < final_stage.size() / 4; ++pixel) {
-    final_stage[pixel * 4] = static_cast<uint8_t>(64 + pixel % 191);
-    final_stage[pixel * 4 + 1] = static_cast<uint8_t>(pixel * 17);
-    final_stage[pixel * 4 + 2] = static_cast<uint8_t>(pixel * 29);
-    final_stage[pixel * 4 + 3] = static_cast<uint8_t>(pixel * 43);
-  }
-  const bool stage_published = aexcompat::aegp_staged_item_runtime::publish_world(aegp_comp_item_handle(),
-      {read<int32_t>(input, kInCurrentTime),
-       read<uint32_t>(input, kInTimeScale)},
-      {1, 30}, 1, 0, kPixelFormatArgb32, 16, 12, 16 * 4, final_stage.data());
-  void* options = nullptr;
-  void* receipt = nullptr;
-  void** world = nullptr;
-  void* pixels = nullptr;
-  int32_t width = 0, height = 0, type = 0;
-  const bool checked_out = render_options_new_from_item(1, aegp_comp_item_handle(), &options) == 0 &&
-      checkout_item_frame_async(&g_async_manager, 1, options, &receipt) == 0 && receipt &&
-      get_receipt_world(receipt, &world) == 0 && world &&
-      aegp_world_get_type(world, &type) == 0 && type == 1 &&
-      aegp_world_get_size(world, &width, &height) == 0 && width == 16 && height == 12 &&
-      aegp_world_get_base_addr8(world, &pixels) == 0 && pixels;
-  if (options) {
-    render_options_set_world_type(options, 2);
-    void* unsupported = reinterpret_cast<void*>(1);
-    g_loaded_effect_receipt_unsupported_rejected =
-        checkout_item_frame_async(&g_async_manager, 1, options, &unsupported) != 0 &&
-        unsupported == nullptr;
-  }
-  const bool checked_in = receipt && checkin_frame(receipt) == 0;
-  if (world) {
-    int32_t stale_type = 0;
-    g_loaded_effect_receipt_stale_world_rejected =
-        aegp_world_get_type(world, &stale_type) != 0;
-  }
-  const bool options_disposed = options && render_options_dispose(options) == 0;
-  aexcompat::aegp_layer_render_runtime::context() = {};
-  g_loaded_effect_receipt_fixture_passed = stage_published && checked_out && checked_in && options_disposed &&
-      g_loaded_effect_receipt_unsupported_rejected &&
-      g_loaded_effect_receipt_stale_world_rejected &&
-      async_receipt_lifetimes_balanced() && render_options_lifetimes_balanced();
-  return g_loaded_effect_receipt_fixture_passed;
-}
 using SmartResult = aexcompat::worker_runtime::smart_execution::Result;
 
-SmartResult smart_render_runtime(EffectEntry entry, std::array<std::byte, kInSize>& input,
-                              std::array<std::byte, kOutSize>& command_output,
-                              const std::string& case_id,
-                              const RequestedAssignments* requested = nullptr,
-                              const std::vector<unsigned char>* external_rgba = nullptr,
-                              const std::filesystem::path* external_output = nullptr,
-                              int32_t external_width = 0, int32_t external_height = 0,
-                              const std::vector<ExternalLayerInput>* external_layers = nullptr,
-                              int32_t external_current_time = 0, int32_t external_time_step = 1,
-                              int32_t external_total_time = 1, uint32_t external_time_scale = 1,
-                              int32_t external_pixel_bytes = 4) {
-  SmartRuntimeSession smart_session;
-  reset_smart_host_telemetry();
-  SmartResult result;
-  result.runtime = smart_session.snapshot();
-  const auto plan = aexcompat::worker_runtime::smart_setup::prepare(
-      {g_secondary_layer_slot, g_full_resolution_width, g_full_resolution_height,
-       g_pixel_aspect_ratio.numerator, g_pixel_aspect_ratio.denominator},
-      {&command_output, &case_id, external_rgba != nullptr, external_width,
-       external_height, external_current_time, external_time_scale,
-       external_pixel_bytes});
-  if (!plan.valid) return result;
-  const bool deep16 = plan.deep16;
-  const bool fixture_gpu_negotiation = plan.fixture_gpu_negotiation;
-  const bool opencl_gpu_negotiation = plan.opencl_gpu_negotiation;
-  const bool directx_gpu_negotiation = plan.directx_gpu_negotiation;
-  const bool explicit_gpu_device = plan.explicit_gpu_device;
-  const uint32_t gpu_device_index = plan.gpu_device_index;
-  const bool gpu_negotiation = plan.gpu_negotiation;
-  const bool missing_input = plan.missing_input;
-  const bool temporal_context = plan.temporal_context;
-  const bool partial_output_request = plan.partial_output_request;
-  const bool float32 = plan.float32;
-  const bool connected_map = plan.connected_map;
-  const int32_t width = plan.width;
-  const int32_t height = plan.height;
-  const int32_t pixel_bytes = plan.pixel_bytes;
-  const int32_t rowbytes = plan.rowbytes;
-  InputPixelBuffer source(static_cast<std::size_t>(rowbytes) * height);
-  OutputPixelBuffer guarded(static_cast<std::size_t>(rowbytes) * height);
-  auto* destination = guarded.data();
-  result.guards_intact = true;
-  std::array<std::byte, 120> input_world{}, output_world{};
-  std::array<std::byte, 120> input_checkout_view{}, map_checkout_view{};
-  DispatchWorldFormatScope dispatch_worlds;
-  aexcompat::render::MapWorld map_world;
-  const bool input_write_advertised =
-      (read<uint32_t>(command_output, kOutFlags) & kOutFlagIWriteInputBuffer) != 0;
-  if (!aexcompat::worker_runtime::smart_setup::prepare_world_buffers(
-          plan, case_id, external_rgba, input_write_advertised,
-          {&source, &guarded, &destination, &input_world, &output_world,
-           &input_checkout_view, &map_checkout_view, &dispatch_worlds,
-           &map_world})) return result;
-  const int32_t dispatch_pixel_format = float32 ? kPixelFormatArgb128 :
-      (deep16 ? kPixelFormatArgb64 : kPixelFormatArgb32);
-  aexcompat::worker_runtime::smart_setup::ParameterState parameter_state(
-      g_params.size() + 1, external_layers ? external_layers->size() : 0);
-  auto& definitions = parameter_state.definitions;
-  std::memcpy(definitions[0].data() + 56, input_world.data(), input_world.size());
-  initialize_parameter_definitions(definitions);
-  if (!initialize_arbitrary_values(entry, input, command_output, definitions)) return result;
-  ArbitraryValuesScope arbitrary_scope{entry, &input, &command_output, &definitions};
-  if (!aexcompat::worker_runtime::smart_setup::prepare_parameters(
-          {entry, &input, &command_output, &case_id, &plan, requested,
-           external_layers, external_current_time, external_time_step,
-           external_total_time, external_time_scale, g_full_resolution_width,
-           g_full_resolution_height, dispatch_pixel_format, &input_world,
-           &dispatch_worlds, &source},
-          parameter_state, {&apply_parameter_animation, &dump_world_snapshot}))
-    return result;
-  auto& params = parameter_state.params;
-  auto& pre_render_source = parameter_state.pre_render_source;
-  struct SmartRenderUiContextScope {
-    EffectEntry entry;
-    std::array<std::byte, kInSize>& input;
-    std::array<std::byte, kOutSize>& output;
-    std::vector<std::array<std::byte, kParamSize>>& definitions;
-    ~SmartRenderUiContextScope() {
-      if (g_render_ui_context_active)
-        close_render_ui_context(entry, input, output, definitions);
-    }
-  } render_ui_context_scope{entry, input, command_output, definitions};
-  // This immutable provider is published before Smart Pre-Render and remains pinned
-  // through Smart Render; output pixels are never used to infer auxiliary planes.
-  publish_alpha_coverage_provider(pre_render_source, width, height, pixel_bytes,
-                                  external_current_time, external_time_scale);
-  const RenderLifecycle lifecycle = begin_render_lifecycle(
-      entry, input, command_output, params.data(), output_world.data());
-  if (lifecycle.setup_error != 0) {
-    result.pre_error = lifecycle.setup_error;
-    result.render_error = end_render_lifecycle(entry, input, command_output, params.data(),
-                                                output_world.data(), lifecycle,
-                                                lifecycle.setup_error);
-    return result;
-  }
-  if (!dispatch_render_click(entry, input, command_output, definitions)) {
-    result.pre_error = -5;
-    result.render_error = end_render_lifecycle(entry, input, command_output, params.data(),
-                                                output_world.data(), lifecycle, -5);
-    return result;
-  }
-  if (!interpolate_arbitrary_values(entry, input, command_output, definitions) ||
-      !roundtrip_arbitrary_values(entry, input, command_output, definitions)) {
-    result.pre_error = -5;
-    result.render_error = end_render_lifecycle(entry, input, command_output, params.data(),
-                                                output_world.data(), lifecycle, -5);
-    return result;
-  }
-  if (!dispatch_conditional_ui_selectors(entry, input, command_output, params.data())) {
-    result.pre_error = -5;
-    result.render_error = end_render_lifecycle(entry, input, command_output, params.data(),
-                                                output_world.data(), lifecycle, -5);
-    return result;
-  }
-  const uint32_t dynamic_out_flags = read<uint32_t>(command_output, kOutFlags);
-  const uint32_t dynamic_out_flags2 = read<uint32_t>(command_output, kOutFlags2);
-  smart_state().wide_time_checkout_allowed =
-      (dynamic_out_flags & kOutFlagWideTimeInput) != 0 ||
-      (dynamic_out_flags2 & kOutFlag2AutomaticWideTimeInput) != 0;
-  smart_state().shutter_dependency_advertised =
-      (dynamic_out_flags & kOutFlagIUseShutterAngle) != 0;
-  const bool nop_render =
-      (read<uint32_t>(command_output, kOutFlags) & kOutFlagNopRender) != 0;
-  if (nop_render) {
-    for (int32_t y = 0; y < height; ++y)
-      std::memcpy(destination + y * rowbytes, source.data() + y * rowbytes,
-                  width * pixel_bytes);
-    result.pre_error = 0;
-    result.render_error = end_render_lifecycle(entry, input, command_output, params.data(),
-                                                output_world.data(), lifecycle, 0);
-    result.rects_valid = true;
-    result.roi_contract_valid = true;
-    result.output_width = width;
-    result.output_height = height;
-    result.output_rowbytes = rowbytes;
-    result.result_rect = {0, 0, width, height};
-    result.max_result_rect = result.result_rect;
-    result.output_extent_hint = result.result_rect;
-    std::vector<unsigned char> logical_input(width * height * pixel_bytes);
-    std::vector<unsigned char> logical_output(width * height * pixel_bytes);
-    for (int32_t y = 0; y < height; ++y) {
-      std::memcpy(logical_input.data() + y * width * pixel_bytes,
-                  source.data() + y * rowbytes, width * pixel_bytes);
-      std::memcpy(logical_output.data() + y * width * pixel_bytes,
-                  destination + y * rowbytes, width * pixel_bytes);
-    }
-    result.input_hash = sha256_bytes(logical_input.data(), logical_input.size());
-    result.output_hash = sha256_bytes(logical_output.data(), logical_output.size());
-    dump_world_snapshot("smart-output", logical_output.data(), width, height, pixel_bytes);
-    if (external_output && result.render_error == 0) {
-      std::vector<unsigned char> rgba(static_cast<std::size_t>(width) * height * pixel_bytes);
-      for (std::size_t pixel = 0; pixel < static_cast<std::size_t>(width) * height; ++pixel)
-        argb_to_rgba_native(rgba.data() + pixel * pixel_bytes,
-                      logical_output.data() + pixel * pixel_bytes, pixel_bytes);
-      record_output_checksum_detail(rgba.data(), width, height, pixel_bytes);
-      std::ofstream file(*external_output, std::ios::binary | std::ios::out);
-      if (!file || !file.write(reinterpret_cast<const char*>(rgba.data()), rgba.size()))
-        result.render_error = -4;
-    }
-    result.guards_intact = guarded.sentinels_intact();
-    if (g_render_ui_context_active &&
-        !close_render_ui_context(entry, input, command_output, definitions) &&
-        result.render_error == 0)
-      result.render_error = -5;
-    return result;
-  }
-  if (!aexcompat::worker_runtime::smart_render_runtime::execute(
-          {entry, &input, &command_output, &plan, &parameter_state, &input_world,
-           &output_world, &dispatch_worlds, &source, &guarded, &destination,
-           &lifecycle, external_output, dispatch_pixel_format, width, height,
-           rowbytes, pixel_bytes},
-          {&dispatch_render_draw,
-           {&guarded_effect_call, &capture_module_audit,
-            reinterpret_cast<void*>(&guid_mix_in_ptr),
-            &automatic_checkin_pre_render_params},
-           {&close_render_ui_context, &end_render_lifecycle, &dump_world_snapshot,
-            &record_output_checksum_detail, &sha256_bytes,
-            +[] { return g_render_ui_context_active; }}}, result))
-    return result;
-  return result;
-}
-
-const bool g_smart_execution_configured =
-    aexcompat::worker_runtime::smart_execution::configure({
-        &smart_render_runtime, +[] { return g_module_audit.required; }});
-
-SmartResult smart_render_once(EffectEntry entry, std::array<std::byte, kInSize>& input,
-                              std::array<std::byte, kOutSize>& output,
-                              const std::string& case_id,
-                              const RequestedAssignments* requested = nullptr,
-                              const std::vector<unsigned char>* external_rgba = nullptr,
-                              const std::filesystem::path* external_output = nullptr,
-                              int32_t external_width = 0, int32_t external_height = 0,
-                              const std::vector<ExternalLayerInput>* external_layers = nullptr,
-                              int32_t external_current_time = 0, int32_t external_time_step = 1,
-                              int32_t external_total_time = 1,
-                              uint32_t external_time_scale = 1,
-                              int32_t external_pixel_bytes = 4) {
-  return aexcompat::worker_runtime::smart_execution::render_once(
-      entry, input, output, case_id, requested, external_rgba, external_output,
-      external_width, external_height, external_layers, external_current_time,
-      external_time_step, external_total_time, external_time_scale,
-      external_pixel_bytes);
-}
 
 void report(const char* status, int32_t global_error, int32_t params_error,
             int32_t setdown_error, const std::array<std::byte, kOutSize>& output,
@@ -4536,87 +1277,9 @@ void report(const char* status, int32_t global_error, int32_t params_error,
   std::cout << aexcompat::worker_report::serialize_l2_report(c);
 }
 
-struct EarlyModeBridge {
-  EffectEntry entry{};
-  std::array<std::byte, kInSize>* input{};
-  std::array<std::byte, kOutSize>* output{};
-  WorkerSession* session{};
-  const std::string* about_message{};
-};
-uint32_t early_mode_out_flags(void* opaque) {
-  const auto& b = *static_cast<EarlyModeBridge*>(opaque);
-  return read<uint32_t>(*b.output, kOutFlags);
-}
-void early_mode_copy_sequence_data_to_input(void* opaque) {
-  const auto& b = *static_cast<EarlyModeBridge*>(opaque);
-  write<void**>(*b.input, kInSequenceData, read<void**>(*b.output, kOutSequenceData));
-}
-int32_t early_mode_sequence_setup(void* opaque, uint32_t* exception) {
-  const auto& b = *static_cast<EarlyModeBridge*>(opaque);
-  return invoke_sequence_selector(b.entry, kSequenceSetup, b.input->data(), b.output->data(), exception);
-}
-int32_t early_mode_sequence_setdown(void* opaque, uint32_t* exception) {
-  const auto& b = *static_cast<EarlyModeBridge*>(opaque);
-  return invoke_sequence_selector(b.entry, kSequenceSetdown, b.input->data(), b.output->data(), exception);
-}
-int32_t early_mode_do_dialog(void* opaque, uint32_t* exception) {
-  const auto& b = *static_cast<EarlyModeBridge*>(opaque);
-  return invoke_entry_seh(b.entry, kDoDialog, b.input->data(), b.output->data(),
-                          nullptr, nullptr, nullptr, exception);
-}
-int32_t early_mode_global_setdown(void* opaque) {
-  const auto& b = *static_cast<EarlyModeBridge*>(opaque);
-  return invoke_global_setdown(b.entry, b.input->data(), b.output->data());
-}
-std::string early_mode_return_message(void* opaque) {
-  const auto& b = *static_cast<EarlyModeBridge*>(opaque);
-  const char* message = reinterpret_cast<const char*>(b.output->data() + kOutMessage);
-  return {message, strnlen_s(message, kOutSize - kOutMessage)};
-}
-bool early_mode_handle_lifetimes_balanced(void*) { return handle_lifetimes_balanced(); }
-bool early_mode_prepare_protocol_report(void* opaque) {
-  return static_cast<EarlyModeBridge*>(opaque)->session->prepare_protocol_report();
-}
-void* early_mode_external_dependencies(void* opaque, int32_t check_type,
-                                       int32_t* error, uint32_t* exception) {
-  const auto& b = *static_cast<EarlyModeBridge*>(opaque);
-  std::array<std::byte, 16> extra{};
-  write<int32_t>(extra, 0, check_type);
-  *error = invoke_entry_seh(b.entry, kGetExternalDependencies, b.input->data(), b.output->data(),
-                            nullptr, nullptr, extra.data(), exception);
-  return read<void**>(extra, 8);
-}
-bool early_mode_handle_is_live(void*, void* handle) { return host_handle_is_live(static_cast<void**>(handle)); }
-uint64_t early_mode_handle_size(void*, void* handle) { return handle_size(static_cast<void**>(handle)); }
-void* early_mode_lock_handle(void*, void* handle) { return lock_handle(static_cast<void**>(handle)); }
-void early_mode_unlock_handle(void*, void* handle) { unlock_handle(static_cast<void**>(handle)); }
-void early_mode_dispose_handle(void*, void* handle) { dispose_handle(static_cast<void**>(handle)); }
-aexcompat::l2mode::HandleStatistics early_mode_handle_statistics(void*) {
-  const auto s = statistics(); return {s.created, s.disposed};
-}
-bool early_mode_dispose_arbitrary_defaults(void* opaque) {
-  const auto& b = *static_cast<EarlyModeBridge*>(opaque);
-  return dispose_arbitrary_defaults(b.entry, *b.input, *b.output);
-}
-void early_mode_report_parameters(void* opaque, const char* status, int32_t global_error,
-                                  int32_t params_error, int32_t setdown_error) {
-  const auto& b = *static_cast<EarlyModeBridge*>(opaque);
-  report(status, global_error, params_error, setdown_error, *b.output, *b.about_message,
-         {-1, -1, -1, -1, -1}, true);
-}
-
-const aexcompat::l2mode::Hooks& early_mode_hooks() {
-  static const aexcompat::l2mode::Hooks hooks{
-      early_mode_out_flags, early_mode_copy_sequence_data_to_input,
-      early_mode_sequence_setup, early_mode_sequence_setdown, early_mode_do_dialog,
-      early_mode_global_setdown, early_mode_return_message,
-      early_mode_handle_lifetimes_balanced, early_mode_prepare_protocol_report,
-      early_mode_external_dependencies, early_mode_handle_is_live,
-      early_mode_handle_size, early_mode_lock_handle, early_mode_unlock_handle,
-      early_mode_dispose_handle, early_mode_handle_statistics,
-      early_mode_dispose_arbitrary_defaults, early_mode_report_parameters};
-  return hooks;
-}
+// The early-mode bridge (EarlyModeBridge and its l2mode hook adapters)
+// moved to worker_early_mode_bridge.cpp (issue #165); worker_main keeps
+// resolving it through worker_early_mode_bridge.hpp.
 
 
 }  // namespace aexcompat::l2_detail
@@ -4689,202 +1352,141 @@ using aexcompat::worker_render_report::capture_classic_subsystems;
 // The six former host selftest wrappers and their JSON now live in
 // worker_fixed_selftest_routing.cpp beside the command catalog.
 
-bool run_pf_path_data_hardening_selftest() {
-  return verify_pf_path_data_hardening(
-      {&g_effect, &enumerate_pf_paths, &snapshot_pf_path, &bounded_pf_path_world},
-      {&g_layer, &raise_mask_access_violation, &mask_runtime_snapshot,
-       &snapshot_mask_curve, &mask_lifetimes_balanced, &install_synthetic_mask_scene});
+
+
+
+// L2 parameter-lifecycle probe (issue #171): the non-rendering inspection
+// path's sequence/frame selector walk, user-changed-param dispatch, and
+// conditional-UI pass, extracted verbatim from worker_main_impl. Returns an
+// exit code when the requested assignments are rejected (global setdown has
+// already run), std::nullopt otherwise.
+std::optional<int> run_l2_parameter_lifecycle(EffectEntry entry,
+    std::array<std::byte, kInSize>& input, std::array<std::byte, kOutSize>& output,
+    int32_t global_error, int32_t params_error,
+    std::array<int32_t, 5>& lifecycle_errors, bool& lifecycle_data_null,
+    bool& user_changed_ok, bool& conditional_ui_ok) {
+  std::vector<std::array<std::byte, kParamSize>> lifecycle_definitions(g_params.size() + 1);
+  std::array<unsigned char, 4> lifecycle_pixel{255, 0, 0, 0};
+  std::array<std::byte, 120> lifecycle_world{};
+  write<void*>(lifecycle_world, 24, lifecycle_pixel.data());
+  write<int32_t>(lifecycle_world, 32, 4); write<int32_t>(lifecycle_world, 36, 1);
+  write<int32_t>(lifecycle_world, 40, 1); write_rect(lifecycle_world.data() + 44, 1, 1);
+  std::memcpy(lifecycle_definitions[0].data() + 56, lifecycle_world.data(), lifecycle_world.size());
+  for (std::size_t i = 0; i < g_params.size(); ++i) {
+    lifecycle_definitions[i + 1] = g_params[i].raw;
+    if (g_params[i].type == 1 || g_params[i].type == 7)
+      write<int32_t>(lifecycle_definitions[i + 1], 56, static_cast<int32_t>(g_params[i].default_value));
+    else if (g_params[i].type == 4)
+      write<int32_t>(lifecycle_definitions[i + 1], 56, g_params[i].default_value != 0 ? 1 : 0);
+    else if (g_params[i].type == 2)
+      write<int32_t>(lifecycle_definitions[i + 1], 56,
+          static_cast<int32_t>(std::round(g_params[i].default_value * 65536.0)));
+    else if (g_params[i].type == 10)
+      write<double>(lifecycle_definitions[i + 1], 56, g_params[i].default_value);
+    else if (g_params[i].type == 3)
+      write<int32_t>(lifecycle_definitions[i + 1], 56,
+          static_cast<int32_t>(std::round(g_params[i].default_components[0] * 65536.0)));
+    else if (g_params[i].type == 6) {
+      write<int32_t>(lifecycle_definitions[i + 1], 56,
+          static_cast<int32_t>(std::round(g_params[i].default_components[0] * 65536.0)));
+      write<int32_t>(lifecycle_definitions[i + 1], 60,
+          static_cast<int32_t>(std::round(g_params[i].default_components[1] * 65536.0)));
+    } else if (g_params[i].type == 18) {
+      for (int component = 0; component < 3; ++component)
+        write<double>(lifecycle_definitions[i + 1], 56 + component * 8,
+            g_params[i].default_components[component]);
+    }
+  }
+  if (g_user_changed_param_requested &&
+      !apply_requested_assignments(lifecycle_definitions, g_user_changed_parameters)) {
+    if (global_error == 0)
+      invoke_global_setdown(entry, input.data(), output.data());
+    return 3;
+  }
+  std::vector<void*> lifecycle_params(lifecycle_definitions.size());
+  for (std::size_t i = 0; i < lifecycle_definitions.size(); ++i)
+    lifecycle_params[i] = lifecycle_definitions[i].data();
+  struct LifecycleCheckoutDefinitionsScope {
+    ~LifecycleCheckoutDefinitionsScope() {
+      g_checkout_layer_definitions.clear();
+      std::lock_guard<std::mutex> lock(g_param_checkout_mutex);
+      g_live_param_checkouts.clear();
+    }
+  } lifecycle_checkout_definitions_scope;
+  g_checkout_layer_definitions.clear();
+  for (std::size_t i = 0; i < lifecycle_definitions.size(); ++i)
+    g_checkout_layer_definitions[static_cast<int32_t>(i)] = lifecycle_definitions[i];
+  {
+    std::lock_guard<std::mutex> lock(g_param_checkout_mutex);
+    g_live_param_checkouts.clear();
+    g_param_checkout_calls = g_param_checkin_calls = g_invalid_param_checkins = 0;
+    g_automatic_param_checkins = 0;
+  }
+  std::cerr << "stage:sequence_setup_begin\n" << std::flush;
+  lifecycle_errors[0] = params_error == 0
+      ? invoke_sequence_selector(entry, kSequenceSetup, input.data(), output.data())
+      : -1;
+  std::cerr << "stage:sequence_setup_end error=" << lifecycle_errors[0] << "\n" << std::flush;
+  write<void*>(input, kInSequenceData, read<void*>(output, kOutSequenceData));
+  if (lifecycle_errors[0] == 0 && g_user_changed_param_requested) {
+    const auto offset = static_cast<std::size_t>(g_user_changed_param_slot - 1);
+    if (offset >= g_params.size() || (g_params[offset].flags & (1u << 6)) == 0) {
+      g_user_changed_param_error = 4;
+    } else {
+      std::array<std::byte, 4> changed_extra{};
+      write<int32_t>(changed_extra, 0, g_user_changed_param_slot);
+      g_user_changed_param_active = true;
+      g_active_ui_params = lifecycle_params.data();
+      g_active_ui_param_count = lifecycle_params.size();
+      g_user_changed_param_error = entry(kUserChangedParam, input.data(), output.data(),
+          lifecycle_params.data(), nullptr, changed_extra.data());
+      g_active_ui_params = nullptr;
+      g_active_ui_param_count = 0;
+      g_user_changed_param_active = false;
+    }
+  }
+  user_changed_ok = lifecycle_errors[0] == 0 &&
+      (!g_user_changed_param_requested || g_user_changed_param_error == 0);
+  conditional_ui_ok = user_changed_ok && dispatch_conditional_ui_selectors(
+      entry, input, output, lifecycle_params.data());
+  if (conditional_ui_ok) {
+    for (std::size_t i = 0; i < g_params.size(); ++i)
+      g_params[i].raw = lifecycle_definitions[i + 1];
+  }
+  std::cerr << "stage:sequence_resetup_begin\n" << std::flush;
+  lifecycle_errors[1] = lifecycle_errors[0] == 0
+      ? invoke_sequence_selector(entry, kSequenceResetup, input.data(), output.data()) : -1;
+  std::cerr << "stage:sequence_resetup_end error=" << lifecycle_errors[1] << "\n" << std::flush;
+  write<void*>(input, kInSequenceData, read<void*>(output, kOutSequenceData));
+  std::cerr << "stage:frame_setup_begin\n" << std::flush;
+  lifecycle_errors[2] = lifecycle_errors[1] == 0 ? entry(kFrameSetup, input.data(), output.data(), lifecycle_params.data(), lifecycle_world.data(), nullptr) : -1;
+  std::cerr << "stage:frame_setup_end error=" << lifecycle_errors[2] << "\n" << std::flush;
+  write<void*>(input, kInFrameData, read<void*>(output, kOutFrameData));
+  std::cerr << "stage:frame_setdown_begin\n" << std::flush;
+  lifecycle_errors[3] = lifecycle_errors[2] == 0 ? entry(kFrameSetdown, input.data(), output.data(), lifecycle_params.data(), lifecycle_world.data(), nullptr) : -1;
+  std::cerr << "stage:frame_setdown_end error=" << lifecycle_errors[3] << "\n" << std::flush;
+  if (lifecycle_errors[3] == 0) write<void*>(output, kOutFrameData, nullptr);
+  std::cerr << "stage:sequence_setdown_begin\n" << std::flush;
+  lifecycle_errors[4] = lifecycle_errors[3] == 0
+      ? invoke_sequence_selector(entry, kSequenceSetdown, input.data(), output.data()) : -1;
+  std::cerr << "stage:sequence_setdown_end error=" << lifecycle_errors[4] << "\n" << std::flush;
+  if (lifecycle_errors[4] == 0) write<void*>(output, kOutSequenceData, nullptr);
+  lifecycle_data_null = read<void*>(output, kOutSequenceData) == nullptr &&
+      read<void*>(output, kOutFrameData) == nullptr;
+  return std::nullopt;
 }
 
-int worker_main_impl(int argc, wchar_t **argv) {
-  SceneSuiteFactoryHooks scene_factory{};
-  scene_factory.render_scene_enabled = &scene_render_receipt_enabled;
-  scene_factory.comp_bg_color = reinterpret_cast<void*>(&aegp_get_comp_bg_color);
-  scene_factory.effect_param_union =
-      reinterpret_cast<void*>(&aegp_get_effect_param_union_by_index_v3);
-  scene_factory.legacy_stream_callbacks = {{
-      reinterpret_cast<void*>(&aegp_get_new_effect_stream_by_index_v2),
-      reinterpret_cast<void*>(&aegp_dispose_stream_v2),
-      reinterpret_cast<void*>(&aegp_get_stream_name_v2),
-      reinterpret_cast<void*>(&aegp_get_stream_type_v2),
-      reinterpret_cast<void*>(&aegp_get_new_stream_value_v2),
-      reinterpret_cast<void*>(&aegp_dispose_stream_value_v2),
-      reinterpret_cast<void*>(&aegp_set_stream_value_v2)}};
-  scene_factory.keyframe_callbacks[2] = reinterpret_cast<void*>(&insert_keyframe);
-  scene_factory.keyframe_callbacks[3] = reinterpret_cast<void*>(&delete_keyframe);
-  scene_factory.keyframe_callbacks[5] = reinterpret_cast<void*>(&set_keyframe_value);
-  scene_factory.keyframe_callbacks[6] =
-      reinterpret_cast<void*>(&get_stream_value_dimensionality);
-  scene_factory.keyframe_callbacks[7] =
-      reinterpret_cast<void*>(&get_stream_temporal_dimensionality);
-  scene_factory.keyframe_callbacks[8] =
-      reinterpret_cast<void*>(&get_new_keyframe_spatial_tangents);
-  scene_factory.keyframe_callbacks[9] =
-      reinterpret_cast<void*>(&set_keyframe_spatial_tangents);
-  scene_factory.keyframe_callbacks[10] =
-      reinterpret_cast<void*>(&get_keyframe_temporal_ease);
-  scene_factory.keyframe_callbacks[11] =
-      reinterpret_cast<void*>(&set_keyframe_temporal_ease);
-  scene_factory.keyframe_callbacks[12] = reinterpret_cast<void*>(&get_keyframe_flags);
-  scene_factory.keyframe_callbacks[13] = reinterpret_cast<void*>(&set_keyframe_flag);
-  scene_factory.keyframe_callbacks[15] =
-      reinterpret_cast<void*>(&set_keyframe_interpolation);
-  scene_factory.keyframe_callbacks[16] = reinterpret_cast<void*>(&start_add_keyframes);
-  scene_factory.keyframe_callbacks[17] = reinterpret_cast<void*>(&add_keyframes);
-  scene_factory.keyframe_callbacks[18] = reinterpret_cast<void*>(&set_add_keyframe);
-  scene_factory.keyframe_callbacks[19] = reinterpret_cast<void*>(&end_add_keyframes);
-  scene_factory.keyframe_callbacks[20] = reinterpret_cast<void*>(&get_keyframe_label);
-  scene_factory.keyframe_callbacks[21] = reinterpret_cast<void*>(&set_keyframe_label);
+// The worker-entry bootstrap wiring and the selftest command dispatch moved
+// to worker_entry_wiring.cpp (issue #171 / #165); worker_main_impl keeps
+// consuming them through these declarations.
+int configure_worker_entry_bootstrap();
+std::optional<int> dispatch_worker_selftests(int argc, wchar_t** argv);
 
-  const SceneContext scene_host{
-      {&bump_render_project_timestamp, &validate_render_options_item,
-       &scene_initialize_layer_render_options, &suite_leases_balanced,
-       &make_utf16_handle, &free_aegp_mem_handle, scene_factory},
-      &g_aegp_comp_item, &g_aegp_comp, &g_layer, &g_effect,
-      &g_full_resolution_width,
-      &g_full_resolution_height, &aexcompat::worker_runtime::smart::width,
-      &aexcompat::worker_runtime::smart::height};
-  const SceneRuntimeContext scene_runtime_host{
-      {&suite_leases_balanced}, &g_aegp_comp_item, &g_aegp_comp,
-      &g_full_resolution_width, &g_full_resolution_height,
-      &aexcompat::worker_runtime::smart::width,
-      &aexcompat::worker_runtime::smart::height};
-  const PfHostContext pf_host_context{
-      {
-          [](void* world, int32_t pixel_bytes, unsigned char*& pixels,
-             int32_t& rowbytes, int32_t& width, int32_t& height) -> bool {
-            return bounded_typed_world(world, pixel_bytes, pixels, rowbytes, width, height);
-          },
-          [](const void* world, DispatchWorldFormat& result) -> bool {
-            return resolve_dispatch_world_format(world, result);
-          },
-          []() -> const char* { return smart_state().pixel_format.c_str(); },
-          [](const char* value) -> bool {
-            if (!value || (std::strcmp(value, "argb8") != 0 &&
-                           std::strcmp(value, "argb16") != 0 &&
-                           std::strcmp(value, "argb32f") != 0)) return false;
-            smart_state().pixel_format = value;
-            return true;
-          },
-          &acquire_suite,
-          &release_suite,
-      },
-      &g_effect,
-      &g_batch_sampling_suite1,
-  };
-  aexcompat::worker_runtime::entry_bootstrap::Hooks bootstrap_hooks{};
-  bootstrap_hooks.pf_state = {
-      []() -> void* { return &g_effect; },
-      [](int32_t index, bool allow_groups) -> bool {
-        return valid_param_utils_index(index, allow_groups);
-      },
-      &capture_pf_parameter_state};
-  bootstrap_hooks.pf_ae_channel = {
-      []() -> void* { return &g_effect; },
-      []() -> std::size_t { return g_params.size(); },
-      [](std::size_t index) -> bool {
-        return index < g_params.size() && g_params[index].type == 0;
-      },
-      &sha256};
-  bootstrap_hooks.scene = scene_host;
-  bootstrap_hooks.scene_runtime = scene_runtime_host;
-  bootstrap_hooks.validate_item = &validate_render_options_item;
-  bootstrap_hooks.initialize_layer = &initialize_layer_render_options;
-  bootstrap_hooks.effect_ref = &g_effect;
-  bootstrap_hooks.pf = pf_host_context;
-  bootstrap_hooks.world_transform = {
-      {pf_host_context.hooks.resolve_world,
-       pf_host_context.hooks.resolve_dispatch_world_format,
-       pf_host_context.hooks.pixel_format,
-       pf_host_context.hooks.set_pixel_format,
-       &bounded_argb8_world,
-       reinterpret_cast<void*>(&aegp_unsupported_suite_call)},
-      {&g_transform_world_calls, &g_last_transform_x, &g_last_transform_y,
-       &g_last_transform_opacity}};
-  bootstrap_hooks.adv_time = {&acquire_suite, &release_suite, &suite_acquire_count,
-                              &suite_release_count, &suite_leases_balanced};
-  bootstrap_hooks.hash = &sha256;
-  bootstrap_hooks.audit_capture = &capture_module_audit_phase;
-  bootstrap_hooks.audit_passed = &module_audit_passed;
-  bootstrap_hooks.trace = &record_selector_dispatch;
-  const auto bootstrap_error =
-      aexcompat::worker_runtime::entry_bootstrap::configure(bootstrap_hooks);
-  if (bootstrap_error != 0) return bootstrap_error;
-  const aexcompat::worker_runtime::selftest::AegpHooks aegp_selftests{
-      &verify_aegp_projector_levels, &verify_aegp_effect_stack,
-      &verify_aegp_apply_effect, &verify_aegp_resizer_3d_chain,
-      &verify_aegp_get_effect_camera, &verify_legacy_effect_compat_suites,
-      kAegpEffectInstanceCapacity, kAegpEffectLeaseCapacity};
-  if (const auto selftest_exit =
-          aexcompat::worker_runtime::selftest::dispatch_aegp(
-              argc, argv, aegp_selftests))
+int worker_main_impl(int argc, wchar_t **argv) {
+  if (const int bootstrap_error = configure_worker_entry_bootstrap())
+    return bootstrap_error;
+  if (const auto selftest_exit = dispatch_worker_selftests(argc, argv))
     return *selftest_exit;
-  wchar_t cancel_gate[2]{};
-  aexcompat::aegp_async_layer::set_cancel_test_gate(is_render_worker() &&
-      GetEnvironmentVariableW(L"AEXCOMPAT_TEST_ASYNC_CANCEL_GATE", cancel_gate,
-                              2) == 1 && cancel_gate[0] == L'1');
-  SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX);
-  const auto fixed_selftest = aexcompat::worker_runtime::fixed_selftests::dispatch(
-      {argc, argv, is_render_worker()},
-      {{&escape, &selftest_trigger_guarded_crash, &suite_leases_balanced},
-       {&verify_aegp_installed_effect_catalog_suite4,
-        &verify_parameter_animation_transport, &verify_pf_param_utils_suite3,
-        &verify_pre_checkout_result_contract,
-        &aexcompat::worker_runtime::smart::checkout_intersection_self_test,
-        &aexcompat::render::smart_geometry_rect_self_test,
-        &aexcompat::worker_runtime::smart::concurrency_self_test,
-        +[] {
-          const SmartResult skipped{};
-          return skipped.runtime && skipped.runtime->pixel_format.empty() &&
-              skipped.runtime->input_checkout_request[0] == -1 &&
-              skipped.runtime->map_checkout_request[0] == -1;
-        },
-        &verify_pixel_data_suites, &verify_legacy_fill_matte_callbacks,
-        &verify_pf_ae_channel_suite,
-        &aexcompat::pf_color_selftests::verify_pf_color_suite,
-        &aexcompat::pf_color_selftests::verify_pf_color_param_suite,
-        &verify_iterate_suites,
-        &verify_world_transform_composite_rect, &verify_world_transform_affine,
-        &verify_world_transform_blend, &verify_world_transform_transfer_mask,
-        +[] { return verify_aegp_world_suite3() && verify_aegp_world_mfr_safety(); },
-        &verify_pf_batch_sampling_suite, &verify_pf_ae_channel_native_provider,
-        &verify_aegp_layer_render_options_suite2}});
-  // Compatibility anchors for selftests whose command catalog now lives in
-  // worker_fixed_selftest_routing.cpp.
-  // --self-test-world-transform-affine
-  // --self-test-world-transform-blend
-  // --self-test-world-transform-transfer-mask
-  // L"--self-test-pf-checkout-intersection"
-  // L"--self-test-pf-smart-geometry-rects"
-  if (fixed_selftest.handled) return fixed_selftest.exit_code;
-  const auto parameter_selftest =
-      aexcompat::worker_runtime::parameter_selftests::dispatch(
-          {argc, argv},
-          {&verify_aegp_keyframe_suite5_mutations,
-           &keyframe_suite5_abi_wiring_valid, &g_keyframe_mutations,
-           &g_invalid_keyframe_operations, &mask_lifetimes_balanced});
-  if (parameter_selftest.handled) {
-    std::cout << parameter_selftest.output;
-    return parameter_selftest.exit_code;
-  }
-  const auto custom_selftest =
-      aexcompat::worker_runtime::custom_selftests::dispatch(
-          {argc, argv},
-          {&run_pf_path_data_hardening_selftest,
-           &verify_world_double_dispose_rejected,
-           &verify_world_allocation_limit_rejected,
-           &verify_owned_world_snapshot_is_atomic,
-           &verify_owned_world_snapshot_concurrent_dispose,
-           &verify_pf_effect_sequence_data_suite1,
-           &verify_aegp_async_receipts, &sha256_bytes, &hex_bytes,
-           &g_render_options_baseline8, &g_render_options_time8,
-           &g_render_options_downsample8, &g_render_options_roi_inside8,
-           &g_render_options_matte8, &g_render_options_argb16,
-           &g_render_options_argb32f});
-  if (custom_selftest.handled) {
-    std::cout << custom_selftest.output;
-    return custom_selftest.exit_code;
-  }
   // Consume an optional trailing --minidump-v1 <dir> pair for every worker
   // kind (render, smart, and the L2 inspection/params paths below) before any
   // kind-specific, argc-exact dispatch runs. Reducing argc hides the pair from
@@ -5234,7 +1836,7 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
          event_error, cursor, event_out_flags, changed_value, lifecycle_errors,
          plugin_state_before_close, lifecycle_context_stable,
          lifecycle_host_state_cleared, event_assignments_applied,
-         arbitrary_values_disposed, defaults_disposed, g_drawbot_objects.empty(),
+         arbitrary_values_disposed, defaults_disposed, drawbot_objects_empty(),
          event_sequence_setdown_error, event_setdown_error,
          requested_parameters_json(invocation.ui_event_assignments)});
     return session.finish(ui_event_passed ? 0 : 20);
@@ -5274,114 +1876,10 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
   bool user_changed_ok = false;
   bool conditional_ui_ok = false;
   if (!is_rendering_worker()) {
-  std::vector<std::array<std::byte, kParamSize>> lifecycle_definitions(g_params.size() + 1);
-  std::array<unsigned char, 4> lifecycle_pixel{255, 0, 0, 0};
-  std::array<std::byte, 120> lifecycle_world{};
-  write<void*>(lifecycle_world, 24, lifecycle_pixel.data());
-  write<int32_t>(lifecycle_world, 32, 4); write<int32_t>(lifecycle_world, 36, 1);
-  write<int32_t>(lifecycle_world, 40, 1); write_rect(lifecycle_world.data() + 44, 1, 1);
-  std::memcpy(lifecycle_definitions[0].data() + 56, lifecycle_world.data(), lifecycle_world.size());
-  for (std::size_t i = 0; i < g_params.size(); ++i) {
-    lifecycle_definitions[i + 1] = g_params[i].raw;
-    if (g_params[i].type == 1 || g_params[i].type == 7)
-      write<int32_t>(lifecycle_definitions[i + 1], 56, static_cast<int32_t>(g_params[i].default_value));
-    else if (g_params[i].type == 4)
-      write<int32_t>(lifecycle_definitions[i + 1], 56, g_params[i].default_value != 0 ? 1 : 0);
-    else if (g_params[i].type == 2)
-      write<int32_t>(lifecycle_definitions[i + 1], 56,
-          static_cast<int32_t>(std::round(g_params[i].default_value * 65536.0)));
-    else if (g_params[i].type == 10)
-      write<double>(lifecycle_definitions[i + 1], 56, g_params[i].default_value);
-    else if (g_params[i].type == 3)
-      write<int32_t>(lifecycle_definitions[i + 1], 56,
-          static_cast<int32_t>(std::round(g_params[i].default_components[0] * 65536.0)));
-    else if (g_params[i].type == 6) {
-      write<int32_t>(lifecycle_definitions[i + 1], 56,
-          static_cast<int32_t>(std::round(g_params[i].default_components[0] * 65536.0)));
-      write<int32_t>(lifecycle_definitions[i + 1], 60,
-          static_cast<int32_t>(std::round(g_params[i].default_components[1] * 65536.0)));
-    } else if (g_params[i].type == 18) {
-      for (int component = 0; component < 3; ++component)
-        write<double>(lifecycle_definitions[i + 1], 56 + component * 8,
-            g_params[i].default_components[component]);
-    }
-  }
-  if (g_user_changed_param_requested &&
-      !apply_requested_assignments(lifecycle_definitions, g_user_changed_parameters)) {
-    if (global_error == 0)
-      invoke_global_setdown(entry, input.data(), output.data());
-    return session.finish(3);
-  }
-  std::vector<void*> lifecycle_params(lifecycle_definitions.size());
-  for (std::size_t i = 0; i < lifecycle_definitions.size(); ++i)
-    lifecycle_params[i] = lifecycle_definitions[i].data();
-  struct LifecycleCheckoutDefinitionsScope {
-    ~LifecycleCheckoutDefinitionsScope() {
-      g_checkout_layer_definitions.clear();
-      std::lock_guard<std::mutex> lock(g_param_checkout_mutex);
-      g_live_param_checkouts.clear();
-    }
-  } lifecycle_checkout_definitions_scope;
-  g_checkout_layer_definitions.clear();
-  for (std::size_t i = 0; i < lifecycle_definitions.size(); ++i)
-    g_checkout_layer_definitions[static_cast<int32_t>(i)] = lifecycle_definitions[i];
-  {
-    std::lock_guard<std::mutex> lock(g_param_checkout_mutex);
-    g_live_param_checkouts.clear();
-    g_param_checkout_calls = g_param_checkin_calls = g_invalid_param_checkins = 0;
-    g_automatic_param_checkins = 0;
-  }
-  std::cerr << "stage:sequence_setup_begin\n" << std::flush;
-  lifecycle_errors[0] = params_error == 0
-      ? invoke_sequence_selector(entry, kSequenceSetup, input.data(), output.data())
-      : -1;
-  std::cerr << "stage:sequence_setup_end error=" << lifecycle_errors[0] << "\n" << std::flush;
-  write<void*>(input, kInSequenceData, read<void*>(output, kOutSequenceData));
-  if (lifecycle_errors[0] == 0 && g_user_changed_param_requested) {
-    const auto offset = static_cast<std::size_t>(g_user_changed_param_slot - 1);
-    if (offset >= g_params.size() || (g_params[offset].flags & (1u << 6)) == 0) {
-      g_user_changed_param_error = 4;
-    } else {
-      std::array<std::byte, 4> changed_extra{};
-      write<int32_t>(changed_extra, 0, g_user_changed_param_slot);
-      g_user_changed_param_active = true;
-      g_active_ui_params = lifecycle_params.data();
-      g_active_ui_param_count = lifecycle_params.size();
-      g_user_changed_param_error = entry(kUserChangedParam, input.data(), output.data(),
-          lifecycle_params.data(), nullptr, changed_extra.data());
-      g_active_ui_params = nullptr;
-      g_active_ui_param_count = 0;
-      g_user_changed_param_active = false;
-    }
-  }
-  user_changed_ok = lifecycle_errors[0] == 0 &&
-      (!g_user_changed_param_requested || g_user_changed_param_error == 0);
-  conditional_ui_ok = user_changed_ok && dispatch_conditional_ui_selectors(
-      entry, input, output, lifecycle_params.data());
-  if (conditional_ui_ok) {
-    for (std::size_t i = 0; i < g_params.size(); ++i)
-      g_params[i].raw = lifecycle_definitions[i + 1];
-  }
-  std::cerr << "stage:sequence_resetup_begin\n" << std::flush;
-  lifecycle_errors[1] = lifecycle_errors[0] == 0
-      ? invoke_sequence_selector(entry, kSequenceResetup, input.data(), output.data()) : -1;
-  std::cerr << "stage:sequence_resetup_end error=" << lifecycle_errors[1] << "\n" << std::flush;
-  write<void*>(input, kInSequenceData, read<void*>(output, kOutSequenceData));
-  std::cerr << "stage:frame_setup_begin\n" << std::flush;
-  lifecycle_errors[2] = lifecycle_errors[1] == 0 ? entry(kFrameSetup, input.data(), output.data(), lifecycle_params.data(), lifecycle_world.data(), nullptr) : -1;
-  std::cerr << "stage:frame_setup_end error=" << lifecycle_errors[2] << "\n" << std::flush;
-  write<void*>(input, kInFrameData, read<void*>(output, kOutFrameData));
-  std::cerr << "stage:frame_setdown_begin\n" << std::flush;
-  lifecycle_errors[3] = lifecycle_errors[2] == 0 ? entry(kFrameSetdown, input.data(), output.data(), lifecycle_params.data(), lifecycle_world.data(), nullptr) : -1;
-  std::cerr << "stage:frame_setdown_end error=" << lifecycle_errors[3] << "\n" << std::flush;
-  if (lifecycle_errors[3] == 0) write<void*>(output, kOutFrameData, nullptr);
-  std::cerr << "stage:sequence_setdown_begin\n" << std::flush;
-  lifecycle_errors[4] = lifecycle_errors[3] == 0
-      ? invoke_sequence_selector(entry, kSequenceSetdown, input.data(), output.data()) : -1;
-  std::cerr << "stage:sequence_setdown_end error=" << lifecycle_errors[4] << "\n" << std::flush;
-  if (lifecycle_errors[4] == 0) write<void*>(output, kOutSequenceData, nullptr);
-  lifecycle_data_null = read<void*>(output, kOutSequenceData) == nullptr &&
-      read<void*>(output, kOutFrameData) == nullptr;
+    if (const auto lifecycle_exit = run_l2_parameter_lifecycle(
+            entry, input, output, global_error, params_error, lifecycle_errors,
+            lifecycle_data_null, user_changed_ok, conditional_ui_ok))
+      return session.finish(*lifecycle_exit);
   }
   std::string case_id;
   std::string input_hash;
@@ -5412,6 +1910,10 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
   bool original_sequence_preserved = false;
   int32_t render_error = -1;
   SmartResult smart{};
+  int32_t smart_session_frames_attempted = 0;
+  int32_t smart_session_sequence_setup_error = -1;
+  int32_t smart_session_sequence_setdown_error = -1;
+  int32_t smart_session_render_error = -1;
   bool lifetime_fault_observed = false;
   bool suite_fault_observed = false;
   bool handle_fault_observed = false;
@@ -5465,34 +1967,51 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
     case_id = dispatch.case_id;
     smart = dispatch.smart;
     lifetime_fault_observed = dispatch.lifetime_fault_observed;
+    session_protocol_violation = dispatch.session_protocol_violation;
+    session_invariant_failure = dispatch.session_invariant_failure;
+    smart_session_frames_attempted = dispatch.session_frames_attempted;
+    smart_session_sequence_setup_error = dispatch.session_sequence_setup_error;
+    smart_session_sequence_setdown_error = dispatch.session_sequence_setdown_error;
+    smart_session_render_error = dispatch.session_render_error;
   }
   if (is_render_worker()) drain_async_layer_requests();
   const bool arbitrary_defaults_disposed = dispose_arbitrary_defaults(entry, input, output);
   std::cerr << "stage:global_setdown_begin\n" << std::flush;
   const int32_t setdown_error = global_error == 0
       ? invoke_global_setdown(entry, input.data(), output.data()) : -1;
-  if (is_smart_worker() && invocation.suite_release_without_acquire_mode)
-    suite_fault_observed = verify_suite_release_without_acquire_rejected();
-  if (is_smart_worker() && invocation.handle_resize_while_locked_mode)
-    handle_fault_observed = verify_handle_resize_while_locked_rejected();
-  if (is_smart_worker() && invocation.world_double_dispose_mode)
-    world_fault_observed = verify_world_double_dispose_rejected();
-  if (is_smart_worker() && invocation.world_allocation_limit_mode)
-    world_fault_observed = verify_world_allocation_limit_rejected();
-  if (is_smart_worker() && invocation.pixel_format_registry_mode)
-    pixel_format_fault_observed = verify_pixel_format_registry_rejection();
-  if (is_smart_worker() && invocation.outline_mutation_mode)
-    outline_fault_observed = verify_outline_mutation_rejection();
-  if (is_smart_worker() && invocation.mask_attribute_mode)
-    mask_attribute_fault_observed = verify_mask_attribute_and_ownership_rejection();
-  if (is_smart_worker() && invocation.stream_metadata_ownership_mode)
-    stream_metadata_fault_observed = verify_stream_metadata_and_ownership_rejection();
-  if (is_smart_worker() && invocation.keyframe_ownership_mode)
-    keyframe_fault_observed = verify_keyframe_ownership_rejection();
-  if (is_smart_worker() && invocation.dynamic_stream_tree_mode)
-    dynamic_stream_fault_observed = verify_dynamic_stream_tree_rejection();
-  if (is_smart_worker() && invocation.aegp_memory_strings_mode)
-    aegp_memory_fault_observed = verify_aegp_memory_and_strings_rejection();
+  // Smart-worker fault-injection probes as a handler table (issue #171):
+  // each requested mode runs its verifier in the same order as before.
+  const struct SmartFaultProbe {
+    bool requested;
+    bool (*verify)();
+    bool* observed;
+  } smart_fault_probes[] = {
+      {invocation.suite_release_without_acquire_mode,
+       &verify_suite_release_without_acquire_rejected, &suite_fault_observed},
+      {invocation.handle_resize_while_locked_mode,
+       &verify_handle_resize_while_locked_rejected, &handle_fault_observed},
+      {invocation.world_double_dispose_mode,
+       &verify_world_double_dispose_rejected, &world_fault_observed},
+      {invocation.world_allocation_limit_mode,
+       &verify_world_allocation_limit_rejected, &world_fault_observed},
+      {invocation.pixel_format_registry_mode,
+       &verify_pixel_format_registry_rejection, &pixel_format_fault_observed},
+      {invocation.outline_mutation_mode,
+       &verify_outline_mutation_rejection, &outline_fault_observed},
+      {invocation.mask_attribute_mode,
+       &verify_mask_attribute_and_ownership_rejection, &mask_attribute_fault_observed},
+      {invocation.stream_metadata_ownership_mode,
+       &verify_stream_metadata_and_ownership_rejection, &stream_metadata_fault_observed},
+      {invocation.keyframe_ownership_mode,
+       &verify_keyframe_ownership_rejection, &keyframe_fault_observed},
+      {invocation.dynamic_stream_tree_mode,
+       &verify_dynamic_stream_tree_rejection, &dynamic_stream_fault_observed},
+      {invocation.aegp_memory_strings_mode,
+       &verify_aegp_memory_and_strings_rejection, &aegp_memory_fault_observed},
+  };
+  if (is_smart_worker())
+    for (const auto& probe : smart_fault_probes)
+      if (probe.requested) *probe.observed = probe.verify();
   std::cerr << "stage:global_setdown_end error=" << setdown_error << "\n" << std::flush;
   if (!session.prepare_protocol_report()) return session.finish(14);
   if (is_render_worker()) {
@@ -5586,6 +2105,13 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
   smart_inputs.nop_render_advertised = nop_render_advertised;
   smart_inputs.input_write_advertised = input_write_advertised;
   smart_inputs.request_mode = invocation.request_mode;
+  smart_inputs.session_mode = invocation.render_session_mode;
+  smart_inputs.session_frames_attempted = smart_session_frames_attempted;
+  smart_inputs.session_sequence_setup_error = smart_session_sequence_setup_error;
+  smart_inputs.session_sequence_setdown_error = smart_session_sequence_setdown_error;
+  smart_inputs.session_render_error = smart_session_render_error;
+  smart_inputs.session_protocol_violation = session_protocol_violation;
+  smart_inputs.session_invariant_failure = session_invariant_failure;
   smart_inputs.case_id = case_id;
   smart_inputs.external_size = {invocation.external_width, invocation.external_height};
   smart_inputs.requested_parameters = &invocation.requested_parameters;
@@ -5627,6 +2153,25 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
        g_render_ui_context_closed) ? 0 : 21);
   }
   if (is_smart_worker()) {
+    // The smart session shares the render worker's dedicated fail-closed exit
+    // codes: protocol violations (23) and host-protection invariant failures
+    // (24) stay distinguishable from ordinary smart failures (22).
+    if (session_protocol_violation) return session.finish(23);
+    if (session_invariant_failure) return session.finish(24);
+    if (invocation.render_session_mode) {
+      // Frame-local selector errors were reported through frame_done and the
+      // broker owned the continue decision; only session mechanics and host
+      // state cleanliness decide the exit.
+      return session.finish(global_error == 0 && params_error == 0 && parameter_count_contract_valid &&
+        image_render_supported && depth_supported && smart_render_supported &&
+        smart_session_render_error == 0 && smart.guards_intact &&
+        handle_lifetimes_balanced() && world_lifetimes_balanced() &&
+        gpu_memory_lifetimes_balanced() &&
+        audio_handle_lifetimes_balanced() && audio_telemetry().invalid_operations == 0 &&
+        param_checkouts_balanced() &&
+        ((!g_render_click_enabled && !g_render_draw_enabled) ||
+         g_render_ui_context_closed) ? 0 : 22);
+    }
     return session.finish(global_error == 0 && params_error == 0 && parameter_count_contract_valid &&
       image_render_supported && depth_supported && smart.pre_error == 0 && smart.render_error == 0 &&
       smart.gpu_setup_error == 0 && smart.gpu_setdown_error == 0 &&

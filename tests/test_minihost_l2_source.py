@@ -141,7 +141,9 @@ class MinihostL2SourceTests(unittest.TestCase):
             self.assertIn(marker, routing)
             self.assertNotIn(marker, worker)
         # Host-private verification bodies stay behind explicit hooks.
-        self.assertIn("run_pf_path_data_hardening_selftest", worker)
+        wiring = (ROOT / "minihost" / "src" /
+                  "worker_entry_wiring.cpp").read_text(encoding="utf-8")
+        self.assertIn("run_pf_path_data_hardening_selftest", wiring)
         self.assertNotIn("verify_pf_path_data_hardening(", routing)
 
     def test_aegp_compat_selftests_are_a_true_translation_unit(self):
@@ -810,7 +812,13 @@ class MinihostL2SourceTests(unittest.TestCase):
         for marker in (
             "RenderLifecycle begin_render_lifecycle",
             "classic_context.mark_selector_dispatched();\n    return entry(kRender",
-            "end_render_lifecycle(entry, input, command_output, params.data()",
+            # The smart runtime picks the frame-only lifecycle for resident
+            # session frames (the session loop owns the hoisted SEQUENCE pair)
+            # and the full pair for one-shot renders; both begin/end through
+            # the same selected pointer, so the pair stays balanced.
+            "session ? &begin_frame_lifecycle : &begin_render_lifecycle",
+            "session ? &end_frame_lifecycle : &end_render_lifecycle",
+            "end_lifecycle(entry, input, command_output, params.data()",
         ):
             self.assertIn(marker, text)
         for marker in (

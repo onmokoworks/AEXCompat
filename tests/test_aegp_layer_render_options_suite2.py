@@ -38,7 +38,7 @@ def test_sdk_probe_freezes_all_layer_render_options_suite2_slots():
 
 
 def test_minihost_publishes_typed_suite2_without_changing_suite1():
-    text = SOURCE.read_text(encoding="utf-8")
+    text = SOURCE.read_text(encoding="utf-8") + (source_owners.SRC / "worker_host_suite_wiring.cpp").read_text(encoding="utf-8")
     abi = ABI.read_text(encoding="utf-8")
     assert "sizeof(AegpLayerRenderOptionsSuite1) == 14 * sizeof(void*)" in abi
     assert "sizeof(AegpLayerRenderOptionsSuite2) == 15 * sizeof(void*)" in abi
@@ -84,7 +84,7 @@ def test_effect_boundaries_accept_only_finalized_staged_downstream():
 
 
 def test_sync_and_async_paths_share_the_same_pixel_publisher():
-    host = SOURCE.read_text(encoding="utf-8")
+    host = source_owners.contract_text("aegp_receipt_callbacks")
     layer = LAYER_RUNTIME.read_text(encoding="utf-8")
     async_runtime = ASYNC_RUNTIME.read_text(encoding="utf-8")
     assert host.count("publish_loaded_layer_receipt(snapshot, out)") >= 2

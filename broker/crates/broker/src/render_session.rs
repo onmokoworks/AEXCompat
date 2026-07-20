@@ -15,11 +15,14 @@
 use crate::image_render::{
     decode_bounded_image, decode_sha256_hex, encode_interactive_payload,
     isolated_worker_diagnostics, native_rgba_to_preview, parameter_animation_sidecar_json,
-    validate_animation_bindings, InteractiveParameter, ParameterAnimation, RenderPixelFormat,
-    INTERACTIVE_RENDER_TIMEOUT_MS, MAX_DIMENSION, MAX_PIXELS, MAX_RGBA_TRANSPORT_BYTES,
+    runtime_backend, validate_animation_bindings, GpuRuntimePolicyInput, InteractiveParameter,
+    ParameterAnimation, RenderGpuBackend, RenderPixelFormat, INTERACTIVE_RENDER_TIMEOUT_MS,
+    MAX_DIMENSION, MAX_PIXELS, MAX_RGBA_TRANSPORT_BYTES,
 };
+use crate::runtime_module_policy::{authenticate_gpu_worker_report, WorkerModuleValidation};
 use crate::secure_image_dispatch::{
-    dispatch_secure_image_session, ApprovedImageArtifact, SecureImageDispatch, WorkerKind,
+    dispatch_secure_gpu_image_session, dispatch_secure_image_session, ApprovedImageArtifact,
+    GpuRuntimeAuthorization, SecureImageDispatch, WorkerKind,
 };
 use crate::secure_launch::{SecureLaunchResult, SecureSessionProcess};
 use crate::windows_process::SessionChildHandles;
@@ -103,11 +106,43 @@ fn depth_code(pixel_format: RenderPixelFormat) -> u32 {
     }
 }
 
-fn session_command(pixel_format: RenderPixelFormat) -> &'static str {
-    match pixel_format {
-        RenderPixelFormat::Argb8 => "--render-session-v1",
-        RenderPixelFormat::Argb16 => "--render-session16-v1",
-        RenderPixelFormat::Argb32f => "--render-session32-v1",
+/// Maps the session flavor to the worker command word (protocol §3, v1.1).
+/// SmartFX ARGB32f carries the GPU backend in the command word, mirroring the
+/// one-shot `--smart-image32[-cpu|-opencl|-directx]` family; every other
+/// depth is CPU-only, and classic sessions reject explicit GPU backends.
+fn session_command(
+    pixel_format: RenderPixelFormat,
+    smart: bool,
+    gpu_backend: RenderGpuBackend,
+) -> io::Result<&'static str> {
+    if !smart {
+        return match gpu_backend {
+            RenderGpuBackend::Auto | RenderGpuBackend::Cpu => Ok(match pixel_format {
+                RenderPixelFormat::Argb8 => "--render-session-v1",
+                RenderPixelFormat::Argb16 => "--render-session16-v1",
+                RenderPixelFormat::Argb32f => "--render-session32-v1",
+            }),
+            _ => Err(invalid("GPU backends require a SmartFX ARGB32f session")),
+        };
+    }
+    match (pixel_format, gpu_backend) {
+        (RenderPixelFormat::Argb32f, RenderGpuBackend::Auto | RenderGpuBackend::Cuda) => {
+            Ok("--smart-session32-v1")
+        }
+        (RenderPixelFormat::Argb32f, RenderGpuBackend::OpenCl) => Ok("--smart-session32-opencl-v1"),
+        (RenderPixelFormat::Argb32f, RenderGpuBackend::DirectX) => {
+            Ok("--smart-session32-directx-v1")
+        }
+        (RenderPixelFormat::Argb32f, RenderGpuBackend::Cpu) => Ok("--smart-session32-cpu-v1"),
+        (RenderPixelFormat::Argb8, RenderGpuBackend::Auto | RenderGpuBackend::Cpu) => {
+            Ok("--smart-session-v1")
+        }
+        (RenderPixelFormat::Argb16, RenderGpuBackend::Auto | RenderGpuBackend::Cpu) => {
+            Ok("--smart-session16-v1")
+        }
+        _ => Err(invalid(
+            "an explicit GPU backend requires a SmartFX ARGB32f session",
+        )),
     }
 }
 
@@ -290,6 +325,7 @@ struct SessionGeometry {
     width: u32,
     height: u32,
     pixel_format: RenderPixelFormat,
+    layer_slot_count: u32,
 }
 
 impl SessionGeometry {
@@ -302,8 +338,15 @@ impl SessionGeometry {
     fn output_slot_offset(&self) -> usize {
         HEADER_BYTES + align_slot(self.input_slot_bytes())
     }
+    fn layer_slot_offset(&self, index: u32) -> usize {
+        self.output_slot_offset()
+            + align_slot(self.output_slot_bytes())
+            + index as usize * align_slot(self.input_slot_bytes())
+    }
     fn section_bytes(&self) -> usize {
-        self.output_slot_offset() + align_slot(self.output_slot_bytes())
+        self.output_slot_offset()
+            + align_slot(self.output_slot_bytes())
+            + self.layer_slot_count as usize * align_slot(self.input_slot_bytes())
     }
 }
 
@@ -325,6 +368,10 @@ pub struct SessionOpenRequest<'a> {
     /// Enables the worker's per-output checksum detail records
     /// (`--output-checksum-detail-v1`).
     pub output_checksum_detail: bool,
+    /// Static mask context trailer (`v2|`), already encoded by
+    /// `encode_mask_context`; carried in the session launch argv (issue #98
+    /// W1-3b). Precedes the spatial trailer in the one-shot positional order.
+    pub mask_trailer: Option<String>,
     /// Static spatial context trailer (`spatial:v*`), already encoded by
     /// `encode_spatial_context`; carried in the session launch argv so the
     /// hoisted SEQUENCE_SETUP and every frame observe it (issue #98 W1-3).
@@ -332,6 +379,17 @@ pub struct SessionOpenRequest<'a> {
     /// Static render-environment trailer (`render:v1|`), already encoded by
     /// `encode_render_environment`.
     pub render_environment_trailer: Option<String>,
+    /// Alpha-as-coverage parameter slots (`--alpha-as-coverage-v1`), issue #98
+    /// W1-4c. The worker publishes the alpha-coverage provider once at launch
+    /// (a global the classic render runtime reads on every frame), matching the
+    /// session's set-once lifetime, so only the slot list travels. Empty means
+    /// the option is not emitted.
+    pub alpha_as_coverage_params: &'a [u32],
+    /// Secondary layers, static for the whole session (issue #98 W1-4). The
+    /// pixels ride the shared layer slots; the slot/geometry metadata rides
+    /// the `session-layers:v1|` launch trailer. Borrowed so open copies the
+    /// bytes straight into the section without a second heap copy.
+    pub layers: &'a [SessionLayer],
     pub dependencies: Vec<ApprovedImageArtifact>,
     pub width: u32,
     pub height: u32,
@@ -342,6 +400,34 @@ pub struct SessionOpenRequest<'a> {
     /// Per-frame watchdog deadline; the job is terminated when a frame's
     /// response does not arrive in time (protocol §7).
     pub frame_deadline: Duration,
+    /// Selects the SmartFX resident session (protocol v1.1): the smart worker
+    /// runs PreRender→SmartRender per frame under the hoisted sequence.
+    pub smart: bool,
+    /// GPU backend for smart ARGB32f sessions, carried in the command word
+    /// like the one-shot smart dispatch. `Auto` without a runtime policy
+    /// degrades to the CPU command (a session cannot retry mid-flight, so the
+    /// one-shot's preflight fallback happens at open instead); an explicit
+    /// GPU backend without a policy fails closed.
+    pub gpu_backend: RenderGpuBackend,
+    /// Session-bound authenticated runtime module policy inputs, required for
+    /// every GPU-backed launch, exactly like the one-shot GPU path.
+    pub gpu_runtime_policy: Option<GpuRuntimePolicyInput<'a>>,
+}
+
+/// A secondary layer whose RGBA8 pixels occupy one shared layer slot for the
+/// whole session. Width/height are the layer's own geometry, bounded by the
+/// input slot. A timed layer (issue #98 W1-4b) additionally carries the frame
+/// time at which the worker admits it; the worker selects the matching timed
+/// entry per frame with the same rational-time test the one-shot path uses.
+#[derive(Clone)]
+pub struct SessionLayer {
+    pub slot: u32,
+    pub width: u32,
+    pub height: u32,
+    pub rgba: Vec<u8>,
+    /// `Some((time, time_scale))` marks this a timed layer; `None` is a static
+    /// secondary that renders on every frame.
+    pub timed: Option<(i32, u32)>,
 }
 
 #[derive(Debug)]
@@ -438,8 +524,12 @@ pub struct RenderSession {
     last_output_generation: u32,
     frames_ok: u32,
     frames_errored: u32,
+    parameter_update_frames: u32,
     opened: Instant,
     plugin_sha256: String,
+    /// SmartFX session (protocol v1.1); selects the smart worker's final
+    /// report contract when validating a clean close.
+    smart: bool,
     /// Keeps the animation sidecar alive for the whole session; the worker
     /// reads it once at launch, but leaving transport files behind on drop
     /// would leak into target/image-transport.
@@ -477,14 +567,107 @@ impl RenderSession {
             MAX_PIXELS,
             MAX_RGBA_TRANSPORT_BYTES,
         )?;
+        if request.layers.len() > 64 {
+            return Err(invalid("render session layer count exceeds 64"));
+        }
         let geometry = SessionGeometry {
             width: request.width,
             height: request.height,
             pixel_format: request.pixel_format,
+            layer_slot_count: request.layers.len() as u32,
         };
+        // Each layer's RGBA must fit its slot (input-slot shaped), before any
+        // transport work. Slot dedup mirrors the one-shot layered_image_mode
+        // parser exactly (issue #98 W1-4b) so a directly built request accepts
+        // and rejects the same sets the one-shot path does, and the wrapper
+        // never silently falls back for a config one-shot would render: a slot
+        // rejects only a second static entry or a timed entry at a rational
+        // time already present. A static plus timed entries at one slot is the
+        // valid representation of a layer parameter sampled at current_time and
+        // at other times, so it is admitted.
+        for (index, layer) in request.layers.iter().enumerate() {
+            // Same slot and dimension bounds the worker parser enforces.
+            if layer.slot == 0
+                || layer.slot > 1024
+                || layer.width == 0
+                || layer.height == 0
+                || layer.width > MAX_DIMENSION
+                || layer.height > MAX_DIMENSION
+            {
+                return Err(invalid("render session layer slot or dimensions are invalid"));
+            }
+            if let Some((_, time_scale)) = layer.timed {
+                if time_scale == 0 {
+                    return Err(invalid("render session timed layer time scale is zero"));
+                }
+            }
+            for other in &request.layers[..index] {
+                if other.slot != layer.slot {
+                    continue;
+                }
+                let conflict = match (other.timed, layer.timed) {
+                    // Both timed: a collision only when the rational times are
+                    // equal (cross-multiplied to avoid dividing).
+                    (Some((lt, ls)), Some((rt, rs))) => {
+                        i64::from(lt) * i64::from(rs) == i64::from(rt) * i64::from(ls)
+                    }
+                    // Two static entries at one slot are ambiguous per frame.
+                    (None, None) => true,
+                    // A static entry plus a timed entry is the valid mix.
+                    _ => false,
+                };
+                if conflict {
+                    return Err(invalid("render session layer slots must be unique"));
+                }
+            }
+            let expected = layer.width as usize * layer.height as usize * 4;
+            if layer.rgba.len() != expected || expected > geometry.input_slot_bytes() {
+                return Err(invalid("render session layer pixels do not fit the slot"));
+            }
+        }
         if geometry.section_bytes() as u64 > SECTION_HARD_CAP_BYTES {
             return Err(invalid("render session section exceeds the hard cap"));
         }
+        if !request.smart && request.gpu_runtime_policy.is_some() {
+            return Err(invalid(
+                "a runtime module policy only applies to SmartFX GPU sessions",
+            ));
+        }
+        // v1.1 smart sessions carry no layer slots and no static context
+        // trailers; the worker's smart session contract is the bare 10-slot
+        // argv, so reject the combination here instead of as an opaque
+        // worker command rejection.
+        if request.smart
+            && (!request.layers.is_empty()
+                || request.mask_trailer.is_some()
+                || request.spatial_trailer.is_some()
+                || request.render_environment_trailer.is_some())
+        {
+            return Err(invalid(
+                "smart sessions do not carry layers or static context trailers yet",
+            ));
+        }
+        // A session cannot retry mid-flight, so the one-shot's Auto GPU
+        // preflight fallback collapses to open time: Auto without a policy is
+        // a CPU session, Auto with a policy is a CUDA session with no CPU
+        // retry, and an explicit GPU backend without a policy fails closed
+        // here before any transport work.
+        let gpu_capable = request.smart && request.pixel_format == RenderPixelFormat::Argb32f;
+        let effective_backend = if gpu_capable
+            && request.gpu_backend == RenderGpuBackend::Auto
+            && request.gpu_runtime_policy.is_none()
+        {
+            RenderGpuBackend::Cpu
+        } else {
+            request.gpu_backend
+        };
+        let gpu_attempt = gpu_capable && runtime_backend(effective_backend).is_some();
+        if gpu_attempt && request.gpu_runtime_policy.is_none() {
+            return Err(invalid(
+                "GPU render requires a session-bound authenticated runtime module policy report; supply gpu_runtime_policy or select the CPU backend",
+            ));
+        }
+        let command = session_command(request.pixel_format, request.smart, effective_backend)?;
         let payload = encode_interactive_payload(request.parameters.unwrap_or_default())?;
         // The sidecar mirrors the one-shot transport: validated bindings,
         // JSON under <repository>/target/image-transport (the only directory
@@ -543,18 +726,30 @@ impl RenderSession {
         transport.write_header_u32(DEPTH_CODE_OFFSET, depth_code(request.pixel_format));
         transport.write_header_u32(MAX_WIDTH_OFFSET, request.width);
         transport.write_header_u32(MAX_HEIGHT_OFFSET, request.height);
-        transport.write_header_u32(LAYER_SLOT_COUNT_OFFSET, 0);
+        transport.write_header_u32(LAYER_SLOT_COUNT_OFFSET, geometry.layer_slot_count);
         transport.write_header_u32(INPUT_GENERATION_OFFSET, 0);
         transport.write_header_u32(OUTPUT_GENERATION_OFFSET, 0);
         transport.write_header_u32(FRAME_WIDTH_OFFSET, request.width);
         transport.write_header_u32(FRAME_HEIGHT_OFFSET, request.height);
+        // Layers are static: copy each into its slot once; the worker reads
+        // them at open and reuses them for every frame.
+        for (index, layer) in request.layers.iter().enumerate() {
+            let offset = geometry.layer_slot_offset(index as u32);
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    layer.rgba.as_ptr(),
+                    transport.view.add(offset),
+                    layer.rgba.len(),
+                );
+            }
+        }
 
         let plugin = ApprovedImageArtifact {
             path: request.plugin_path.to_path_buf(),
             expected_sha256: decode_sha256_hex(request.plugin_sha256)?,
             expected_size: fs::metadata(request.plugin_path)?.len(),
         };
-        let args_before_plugin = vec![session_command(request.pixel_format).to_owned()];
+        let args_before_plugin = vec![command.to_owned()];
         let mut args_after_plugin = vec![
             request.plugin_sha256.to_ascii_lowercase(),
             payload,
@@ -564,10 +759,32 @@ impl RenderSession {
             request.total_time.to_string(),
             request.time_scale.to_string(),
         ];
+        // The secondary-layer trailer sits ahead of the context trailers in
+        // the positional tail (issue #98 W1-4). Its pixels already reached the
+        // shared slots above; only the slot/geometry metadata travels here.
+        if !request.layers.is_empty() {
+            let mut encoded = String::from("session-layers:v1|");
+            for (index, layer) in request.layers.iter().enumerate() {
+                if index != 0 {
+                    encoded.push(';');
+                }
+                match layer.timed {
+                    Some((time, time_scale)) => encoded.push_str(&format!(
+                        "{},{},{},{},{}",
+                        layer.slot, layer.width, layer.height, time, time_scale
+                    )),
+                    None => encoded
+                        .push_str(&format!("{},{},{}", layer.slot, layer.width, layer.height)),
+                }
+            }
+            args_after_plugin.push(encoded);
+        }
         // Static context trailers ride the positional tail in the one-shot
         // order (mask, spatial, render), ahead of the auxiliary option pairs
-        // the worker peels first. v1-3a carries spatial and render-environment;
-        // mask context stays with the layer work.
+        // the worker peels first.
+        if let Some(mask) = &request.mask_trailer {
+            args_after_plugin.push(mask.clone());
+        }
         if let Some(spatial) = &request.spatial_trailer {
             args_after_plugin.push(spatial.clone());
         }
@@ -579,6 +796,27 @@ impl RenderSession {
         // and validates each strictly. The broker pre-checks the path shapes
         // so a misconfigured request fails fast at open instead of as an
         // opaque worker exit on the first frame.
+        if !request.alpha_as_coverage_params.is_empty() {
+            // Same validation and encoding as the one-shot path
+            // (image_render.rs): sorted, unique, slot <= 1024. The worker's
+            // shared auxiliary hook parses this identically for the session and
+            // one-shot Render entries.
+            let mut slots = request.alpha_as_coverage_params.to_vec();
+            slots.sort_unstable();
+            if slots.windows(2).any(|pair| pair[0] == pair[1])
+                || slots.iter().any(|slot| *slot > 1024)
+            {
+                return Err(invalid("alpha-as-coverage parameter slots are invalid"));
+            }
+            args_after_plugin.extend([
+                "--alpha-as-coverage-v1".to_owned(),
+                slots
+                    .iter()
+                    .map(u32::to_string)
+                    .collect::<Vec<_>>()
+                    .join(","),
+            ]);
+        }
         if let Some(manifest) = request.aux_manifest {
             if !manifest.is_absolute() || !manifest.is_file() {
                 return Err(invalid("aux manifest must be an absolute path to a file"));
@@ -609,22 +847,53 @@ impl RenderSession {
                 sidecar.0.to_string_lossy().into_owned(),
             ]);
         }
-        let process = dispatch_secure_image_session(
-            SecureImageDispatch {
-                repository: request.repository,
-                worker_kind: WorkerKind::Render,
-                plugin,
-                dependencies: request.dependencies,
-                args_before_plugin: &args_before_plugin,
-                args_after_plugin: &args_after_plugin,
-                timeout: request.frame_deadline,
+        let dispatch = SecureImageDispatch {
+            repository: request.repository,
+            worker_kind: if request.smart {
+                WorkerKind::Smart
+            } else {
+                WorkerKind::Render
             },
-            &SessionChildHandles {
-                request_read: request_read.raw(),
-                response_write: response_write.raw(),
-                section: transport.section.raw(),
-            },
-        )?;
+            plugin,
+            dependencies: request.dependencies,
+            args_before_plugin: &args_before_plugin,
+            args_after_plugin: &args_after_plugin,
+            timeout: request.frame_deadline,
+        };
+        let child_handles = SessionChildHandles {
+            request_read: request_read.raw(),
+            response_write: response_write.raw(),
+            section: transport.section.raw(),
+        };
+        let process = if gpu_attempt {
+            let policy_input = request
+                .gpu_runtime_policy
+                .expect("gpu attempt was validated to carry a policy at open");
+            let backend =
+                runtime_backend(effective_backend).expect("GPU attempt has a runtime backend");
+            let report = authenticate_gpu_worker_report(
+                policy_input.module_report_json,
+                &policy_input.session_identity,
+                backend,
+                WorkerModuleValidation {
+                    policy: policy_input.policy,
+                    sealed: policy_input.sealed_modules,
+                    trusted: policy_input.trusted_modules,
+                    system32: policy_input.system32,
+                },
+            )?;
+            dispatch_secure_gpu_image_session(
+                dispatch,
+                GpuRuntimeAuthorization {
+                    backend,
+                    session_identity: policy_input.session_identity,
+                    module_report: &report,
+                },
+                &child_handles,
+            )?
+        } else {
+            dispatch_secure_image_session(dispatch, &child_handles)?
+        };
         // The worker inherited its copies; dropping the broker's child-side
         // ends turns a worker exit into pipe EOF instead of a hang.
         drop(request_read);
@@ -691,8 +960,10 @@ impl RenderSession {
             last_output_generation: 0,
             frames_ok: 0,
             frames_errored: 0,
+            parameter_update_frames: 0,
             opened: Instant::now(),
             plugin_sha256: request.plugin_sha256.to_ascii_lowercase(),
+            smart: request.smart,
             _animation_sidecar: animation_sidecar,
         })
     }
@@ -746,6 +1017,22 @@ impl RenderSession {
         frame_index: u32,
         current_time: i32,
         rgba: &[u8],
+    ) -> io::Result<FrameOutcome> {
+        self.render_frame_with_parameters(frame_index, current_time, rgba, None)
+    }
+
+    /// Renders one frame, optionally replacing the launch payload's parameter
+    /// assignments for this frame only through the v:2 `render_frame` message
+    /// (protocol §4.2.1, issue #107). The parameters ride the message in the
+    /// same encoding as the launch argv payload and go through the identical
+    /// broker-side validation before anything is sent, so an invalid set is a
+    /// plain caller error and the session stays usable.
+    pub fn render_frame_with_parameters(
+        &mut self,
+        frame_index: u32,
+        current_time: i32,
+        rgba: &[u8],
+        parameters: Option<&[InteractiveParameter]>,
     ) -> io::Result<FrameOutcome> {
         if let Some(invalidation) = &self.invalidation {
             return Err(invalid(format!(
@@ -805,14 +1092,39 @@ impl RenderSession {
                 self.last_output_generation
             )));
         }
+        // Encode and validate the per-frame payload before any slot write, so
+        // a rejected parameter set leaves the transport state untouched.
+        let message = match parameters {
+            Some(parameters) => {
+                let payload = encode_interactive_payload(parameters)?;
+                serde_json::to_string(&json!({
+                    "v": 2,
+                    "type": "render_frame",
+                    "frame_index": frame_index,
+                    "current_time": {"value": current_time, "scale": self.time_scale},
+                    "parameters": payload,
+                }))
+                .map_err(|error| invalid(error.to_string()))?
+            }
+            None => format!(
+                "{{\"v\":1,\"type\":\"render_frame\",\"frame_index\":{frame_index},\
+                 \"current_time\":{{\"value\":{current_time},\"scale\":{}}}}}",
+                self.time_scale
+            ),
+        };
+        // The encoder's 16 KiB payload cap keeps every message far below the
+        // protocol's 64 KiB framing limit today, but the bound is enforced
+        // here regardless: an oversized message must be a caller error before
+        // any transport mutation, never a send failure that kills a healthy
+        // session.
+        if message.len() > MAX_MESSAGE_BYTES {
+            return Err(invalid(
+                "per-frame parameter message exceeds the protocol message cap",
+            ));
+        }
         self.transport.write_input_slot(rgba);
         self.transport
             .write_header_u32(INPUT_GENERATION_OFFSET, expected_generation);
-        let message = format!(
-            "{{\"v\":1,\"type\":\"render_frame\",\"frame_index\":{frame_index},\
-             \"current_time\":{{\"value\":{current_time},\"scale\":{}}}}}",
-            self.time_scale
-        );
         if !self.transport.send_message(&message) {
             return Err(self.invalidate(
                 "request_pipe_closed",
@@ -820,6 +1132,9 @@ impl RenderSession {
                 true,
                 POST_TERMINATION_COLLECT_TIMEOUT,
             ));
+        }
+        if parameters.is_some() {
+            self.parameter_update_frames += 1;
         }
         let body = match self.await_frame_response() {
             FrameWait::Message(body) => body,
@@ -1082,7 +1397,8 @@ impl RenderSession {
                 != depth_code(self.geometry.pixel_format)
             || self.transport.read_header_u32(MAX_WIDTH_OFFSET) != self.geometry.width
             || self.transport.read_header_u32(MAX_HEIGHT_OFFSET) != self.geometry.height
-            || self.transport.read_header_u32(LAYER_SLOT_COUNT_OFFSET) != 0
+            || self.transport.read_header_u32(LAYER_SLOT_COUNT_OFFSET)
+                != self.geometry.layer_slot_count
         {
             return Err("static session header was mutated".into());
         }
@@ -1177,15 +1493,19 @@ impl RenderSession {
                 Some(CollectedExit { result: Some(result), .. })
                     if result.classification == crate::ExitClassification::Ok
             )
-            && final_report.as_ref().is_some_and(final_report_clean);
+            && final_report
+                .as_ref()
+                .is_some_and(|report| final_report_clean(report, self.smart));
         json!({
             "stage": "render_session_close",
+            "render_path": if self.smart { "smart" } else { "classic" },
             "plugin_sha256": self.plugin_sha256,
             "pixel_format": self.geometry.pixel_format.report_name(),
             "width": self.geometry.width,
             "height": self.geometry.height,
             "frames_ok": self.frames_ok,
             "frames_errored": self.frames_errored,
+            "parameter_update_frames": self.parameter_update_frames,
             "invalidated": self.invalidation.is_some(),
             "invalidated_reason": self.invalidation.as_ref().map(|invalidation| json!({
                 "reason": invalidation.reason,
@@ -1199,20 +1519,32 @@ impl RenderSession {
 }
 
 /// A clean session close requires the final report to agree, not just the
-/// exit code: the persistent sequence must have set up and torn down without
+/// exit code: the hoisted sequence must have set up and torn down without
 /// error, guards must be intact, and every ownership ledger must balance.
-/// Missing keys fail closed.
-fn final_report_clean(report: &Value) -> bool {
-    report.get("status") == Some(&json!("render_completed"))
-        && report.get("render_error") == Some(&json!(0))
+/// Missing keys fail closed. The classic and smart workers report session
+/// mechanics under different keys (the classic report reuses its
+/// persistent-sequence fields; the smart report carries dedicated session_*
+/// fields, protocol v1.1).
+fn final_report_clean(report: &Value, smart: bool) -> bool {
+    let shared = report.get("status") == Some(&json!("render_completed"))
         && report.get("global_setdown_error") == Some(&json!(0))
-        && report.get("persistent_sequence_setup_error") == Some(&json!(0))
-        && report.get("persistent_sequence_setdown_error") == Some(&json!(0))
         && report.get("guard_bytes_intact") == Some(&Value::Bool(true))
         && report.get("suite_leases_balanced") == Some(&Value::Bool(true))
         && report.get("handle_lifetimes_balanced") == Some(&Value::Bool(true))
         && report.get("world_lifetimes_balanced") == Some(&Value::Bool(true))
-        && report.get("param_checkouts_balanced") == Some(&Value::Bool(true))
+        && report.get("param_checkouts_balanced") == Some(&Value::Bool(true));
+    if smart {
+        shared
+            && report.get("session_mode") == Some(&Value::Bool(true))
+            && report.get("session_render_error") == Some(&json!(0))
+            && report.get("session_sequence_setup_error") == Some(&json!(0))
+            && report.get("session_sequence_setdown_error") == Some(&json!(0))
+    } else {
+        shared
+            && report.get("render_error") == Some(&json!(0))
+            && report.get("persistent_sequence_setup_error") == Some(&json!(0))
+            && report.get("persistent_sequence_setdown_error") == Some(&json!(0))
+    }
 }
 
 #[derive(Deserialize)]
@@ -1252,6 +1584,18 @@ struct VideoBatchRequest {
     /// Enables the worker's per-output checksum detail records.
     #[serde(default)]
     output_checksum_detail: bool,
+    /// Alpha-as-coverage parameter slots (`--alpha-as-coverage-v1`), issue #98
+    /// W1-4c. Published once at launch and read on every frame.
+    #[serde(default)]
+    alpha_as_coverage_params: Vec<u32>,
+    /// Runs the batch through a SmartFX session (protocol v1.1).
+    #[serde(default)]
+    smart: bool,
+    /// GPU backend for smart ARGB32f batches. The batch CLI carries no
+    /// runtime module policy, so `auto` degrades to the CPU command at open
+    /// and the explicit GPU backends fail closed there.
+    #[serde(default)]
+    gpu_backend: RenderGpuBackend,
 }
 
 fn default_time_scale() -> u32 {
@@ -1321,8 +1665,11 @@ pub fn run_video_batch(
         aux_manifest: request.aux_manifest.as_deref().map(Path::new),
         world_dump_dir: request.world_dump_dir.as_deref().map(Path::new),
         output_checksum_detail: request.output_checksum_detail,
+        mask_trailer: None,
         spatial_trailer: None,
         render_environment_trailer: None,
+        alpha_as_coverage_params: &request.alpha_as_coverage_params,
+        layers: &[],
         dependencies: Vec::new(),
         width,
         height,
@@ -1331,6 +1678,9 @@ pub fn run_video_batch(
         total_time,
         time_scale: request.time_scale,
         frame_deadline,
+        smart: request.smart,
+        gpu_backend: request.gpu_backend,
+        gpu_runtime_policy: None,
     })?;
 
     let raw_extension = request.pixel_format.raw_extension();
@@ -1416,7 +1766,7 @@ pub fn run_video_batch(
         "schema_version": 1,
         "stage": "render_video_batch",
         "plugin_sha256": plugin_sha256,
-        "render_path": "classic",
+        "render_path": if request.smart { "smart" } else { "classic" },
         "pixel_format": request.pixel_format.report_name(),
         "width": width,
         "height": height,
@@ -1445,6 +1795,7 @@ mod tests {
             width: 33,
             height: 17,
             pixel_format: RenderPixelFormat::Argb16,
+            layer_slot_count: 0,
         };
         assert_eq!(geometry.input_slot_bytes(), 33 * 17 * 4); // 2244
         assert_eq!(geometry.output_slot_bytes(), 33 * 17 * 8); // 4488
@@ -1491,7 +1842,7 @@ mod tests {
             "world_lifetimes_balanced": true,
             "param_checkouts_balanced": true,
         });
-        assert!(final_report_clean(&clean));
+        assert!(final_report_clean(&clean, false));
         for (key, dirty) in [
             // A protocol-violation or invariant-failure session loop ends
             // render_failed with render_error -1 even when the ledgers
@@ -1512,13 +1863,59 @@ mod tests {
         ] {
             let mut report = clean.clone();
             report[key] = dirty;
-            assert!(!final_report_clean(&report), "{key} must fail closed");
+            assert!(!final_report_clean(&report, false), "{key} must fail closed");
             let mut missing = clean.clone();
             missing.as_object_mut().unwrap().remove(key);
-            assert!(!final_report_clean(&missing), "missing {key} must fail closed");
+            assert!(
+                !final_report_clean(&missing, false),
+                "missing {key} must fail closed"
+            );
         }
         // A parseable but unrelated report (an older worker) is not clean.
-        assert!(!final_report_clean(&serde_json::json!({"status": "ok"})));
+        assert!(!final_report_clean(&serde_json::json!({"status": "ok"}), false));
+    }
+
+    #[test]
+    fn smart_final_report_clean_requires_the_session_fields() {
+        let clean = serde_json::json!({
+            "status": "render_completed",
+            "global_setdown_error": 0,
+            "guard_bytes_intact": true,
+            "suite_leases_balanced": true,
+            "handle_lifetimes_balanced": true,
+            "world_lifetimes_balanced": true,
+            "param_checkouts_balanced": true,
+            "session_mode": true,
+            "session_render_error": 0,
+            "session_sequence_setup_error": 0,
+            "session_sequence_setdown_error": 0,
+        });
+        assert!(final_report_clean(&clean, true));
+        // The classic gate must not accept a smart report and vice versa:
+        // each worker's session mechanics live under different keys, and a
+        // missing key fails closed.
+        assert!(!final_report_clean(&clean, false));
+        for (key, dirty) in [
+            ("session_mode", serde_json::json!(false)),
+            // A clean close after frame-local errors keeps
+            // session_render_error 0; -1 means the session mechanics broke.
+            ("session_render_error", serde_json::json!(-1)),
+            ("session_sequence_setup_error", serde_json::json!(25)),
+            ("session_sequence_setdown_error", serde_json::json!(-1)),
+            // The last rendered frame's selector errors do not gate a clean
+            // close, but the shared host-state keys still do.
+            ("guard_bytes_intact", serde_json::json!(false)),
+        ] {
+            let mut report = clean.clone();
+            report[key] = dirty;
+            assert!(!final_report_clean(&report, true), "{key} must fail closed");
+            let mut missing = clean.clone();
+            missing.as_object_mut().unwrap().remove(key);
+            assert!(
+                !final_report_clean(&missing, true),
+                "missing {key} must fail closed"
+            );
+        }
     }
 
     #[test]
@@ -1541,8 +1938,11 @@ mod tests {
                 aux_manifest: None,
                 world_dump_dir: None,
                 output_checksum_detail: false,
+                mask_trailer: None,
                 spatial_trailer: None,
                 render_environment_trailer: None,
+                alpha_as_coverage_params: &[],
+                layers: &[],
                 dependencies: Vec::new(),
                 width: 8,
                 height: 4,
@@ -1551,6 +1951,9 @@ mod tests {
                 total_time,
                 time_scale,
                 frame_deadline: Duration::from_secs(1),
+                smart: false,
+                gpu_backend: RenderGpuBackend::Cpu,
+                gpu_runtime_policy: None,
             });
             let Err(error) = result else {
                 panic!("invalid timing must be rejected before launch");
@@ -1578,14 +1981,58 @@ mod tests {
         assert_eq!(depth_code(RenderPixelFormat::Argb8), 8);
         assert_eq!(depth_code(RenderPixelFormat::Argb16), 16);
         assert_eq!(depth_code(RenderPixelFormat::Argb32f), 32);
-        assert_eq!(session_command(RenderPixelFormat::Argb8), "--render-session-v1");
+        for (pixel_format, expected) in [
+            (RenderPixelFormat::Argb8, "--render-session-v1"),
+            (RenderPixelFormat::Argb16, "--render-session16-v1"),
+            (RenderPixelFormat::Argb32f, "--render-session32-v1"),
+        ] {
+            assert_eq!(
+                session_command(pixel_format, false, RenderGpuBackend::Cpu).unwrap(),
+                expected
+            );
+            assert_eq!(
+                session_command(pixel_format, false, RenderGpuBackend::Auto).unwrap(),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn smart_session_commands_carry_the_gpu_backend() {
+        for (backend, expected) in [
+            (RenderGpuBackend::Auto, "--smart-session32-v1"),
+            (RenderGpuBackend::Cuda, "--smart-session32-v1"),
+            (RenderGpuBackend::OpenCl, "--smart-session32-opencl-v1"),
+            (RenderGpuBackend::DirectX, "--smart-session32-directx-v1"),
+            (RenderGpuBackend::Cpu, "--smart-session32-cpu-v1"),
+        ] {
+            assert_eq!(
+                session_command(RenderPixelFormat::Argb32f, true, backend).unwrap(),
+                expected
+            );
+        }
         assert_eq!(
-            session_command(RenderPixelFormat::Argb16),
-            "--render-session16-v1"
+            session_command(RenderPixelFormat::Argb8, true, RenderGpuBackend::Auto).unwrap(),
+            "--smart-session-v1"
         );
         assert_eq!(
-            session_command(RenderPixelFormat::Argb32f),
-            "--render-session32-v1"
+            session_command(RenderPixelFormat::Argb16, true, RenderGpuBackend::Cpu).unwrap(),
+            "--smart-session16-v1"
         );
+        // Explicit GPU backends exist only for SmartFX ARGB32f; every other
+        // combination fails closed instead of silently degrading.
+        for (pixel_format, smart) in [
+            (RenderPixelFormat::Argb8, true),
+            (RenderPixelFormat::Argb16, true),
+            (RenderPixelFormat::Argb32f, false),
+        ] {
+            for backend in [
+                RenderGpuBackend::Cuda,
+                RenderGpuBackend::OpenCl,
+                RenderGpuBackend::DirectX,
+            ] {
+                assert!(session_command(pixel_format, smart, backend).is_err());
+            }
+        }
     }
 }

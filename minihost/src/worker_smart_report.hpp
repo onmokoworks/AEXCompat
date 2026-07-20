@@ -39,6 +39,15 @@ struct SmartCompletionInputs {
   bool nop_render_advertised{};
   bool input_write_advertised{};
   bool request_mode{};
+  // Resident smart session summary (protocol v1.1); emitted and folded into
+  // the completion verdict only when session_mode is true.
+  bool session_mode{};
+  int32_t session_frames_attempted{};
+  int32_t session_sequence_setup_error{-1};
+  int32_t session_sequence_setdown_error{-1};
+  int32_t session_render_error{-1};
+  bool session_protocol_violation{};
+  bool session_invariant_failure{};
   std::string case_id;
   std::array<int32_t, 2> external_size{};
   const worker_runtime::parameters::RequestedAssignments* requested_parameters{};

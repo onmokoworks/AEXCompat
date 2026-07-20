@@ -431,3 +431,230 @@ PR-C (#116) merge 後のコードに対して、段階1-3「既存 one-shot 経�
 クリティカルパスは W1 (context/layer) → W2。W1 の「最小」2 件は即着手
 可能。custom UI のセッション化は #107 の per-frame parameters (v2) と
 同時期に扱う。
+
+## 追記 (W1-4b: timed layer をセッションで運ぶ)
+
+観察 (実装):
+
+- timed layer の worker 側消費ロジック (`l2_main.cpp` の
+  `same_rational_time` 選択と `classic_context->add_timed_layer`) は既に
+  render_once に存在する。W1-4b は transport の拡張のみで、`LayerInput` は
+  `time`/`time_scale`/`timed` フィールドを既に持つ。
+- `session-layers:v1|` trailer を 5 フィールド形式 `slot,w,h,time,scale`
+  に拡張 (3 フィールドは従来の static secondary)。worker parser
+  (`worker_request_parser.cpp`) はエントリ内カンマ数で 3/5 を分岐し、5 なら
+  `timed=true` + `time`/`time_scale` を設定。dedup は one-shot の
+  layered_image_mode と同一ラムダに揃えた (同一 slot は両方 timed かつ
+  異なる有理時刻のみ許可)。
+- broker `SessionLayer` に `timed: Option<(i32,u32)>` を追加。open の
+  slot 一意性検証を「同一 slot は両方 timed かつ有理時刻相違のみ許可」に
+  変更 (worker parse と一致、fail-closed を open 時点に前倒し)。trailer
+  生成は `timed` が Some なら 5 フィールドを emit。物理スロットは layer
+  index ごとなので同一 semantic slot の timed 複数もそれぞれ独立領域を占有。
+- wrapper (`image_render.rs`) の適格条件から `timed_secondaries.is_empty()`
+  を除去。static secondary と timed secondary を連結して `session_layers`
+  を構築。session ルートの `secondary_layers` 診断は one-shot と揃えるため
+  `timed.is_none()` で static のみ列挙 (両ルート同一集合)。
+
+観察 (検証):
+
+- broker 統合テスト `render_session` 26 件パス。追加した
+  `timed_layers_travel_the_session_trailer_into_their_slots` (同一 slot に
+  2 つの異なる時刻の timed + 別 slot の static、fixture worker が
+  `layer_slot_count` と各スロット先頭バイトを検証) と
+  `open_rejects_two_timed_layers_at_the_same_slot_and_time` (2/60 == 1/30
+  の同時刻衝突を open が拒否) を含む。
+- 実 worker 再ビルド後、wrapper A/B 等価テスト
+  (`render_session_wrapper`) パス。plain classic 経路の回帰なし。
+
+仮説 (残作業):
+
+- 実 AEX での timed layer 消費の等価性 (A/B PNG バイト一致) は layer
+  parameter を宣言する probe fixture (#195) を要する。それまでは fixture
+  worker 経由の transport 検証が interim。
+- alpha-as-coverage は W1-4b と別コミットで扱う (適格条件の
+  `alpha_as_coverage_params.is_empty()` 緩和 + aux option 追加)。
+
+### 訂正 (W1-4b dedup: static+timed 混在は拒否でなく許可)
+
+上の W1-4b 追記で「同一 slot は両方 timed かつ異なる有理時刻のみ許可」と
+書いたが、これは誤り。Codex レビュー (#204) の2指摘が逆方向を突いて真の
+規則が判明した:
+
+- 1回目: worker の session parse が static+timed 混在を受理するのに broker
+  open が拒否する不整合を指摘 → 私は worker を拒否側に寄せた (誤り)。
+- 2回目: one-shot の layered_image_mode parser
+  (`worker_request_parser.cpp` の該当ラムダ) は static+timed 同一 slot を
+  受理しており、それは layer parameter を current_time (static) と他時刻
+  (timed) でサンプルする正当な構成。broker open が拒否すると wrapper が
+  適格な render で無言 one-shot fallback する、と指摘。
+
+観察: 正しい規則は one-shot と完全一致。同一 slot は (a) static 同士 →
+拒否、(b) timed 同士同時刻 → 拒否、(c) static + timed の混在 → **許可**、
+(d) timed 同士異時刻 → 許可。W1-4b の目的は one-shot 等価なので、session
+の worker parse・broker open の双方をこの canonical 規則に揃えた
+(worker は最初の実装 = one-shot ラムダに revert、broker open は
+`(None,None)=>拒否, (Some,Some)=>同時刻拒否, _=>許可`)。テストは
+`open_admits_a_static_and_timed_layer_at_the_same_slot` (受理) と
+`open_rejects_two_static_layers_at_the_same_slot` (static 同士拒否) に
+差し替え、`open_rejects_two_timed_layers_at_the_same_slot_and_time` は
+維持。
+
+教訓: 「両ルートの整合」を取る方向は2つあり (両方拒否 / 両方許可)、
+canonical な基準 (= 既存の one-shot 挙動、AE 等価の真値) に合わせる方を
+選ぶべきだった。1回目の指摘に literal に従って拒否側に倒したのが誤り。
+
+## 追記 (W1-4c: alpha-as-coverage をセッションで運ぶ)
+
+観察 (実装):
+
+- alpha-as-coverage は one-shot で auxiliary option
+  `--alpha-as-coverage-v1 <slot,...>` として送られる
+  (`image_render.rs`)。worker (Render entry) は one-shot と共有の auxiliary
+  フック `parse_l2_alpha_coverage` (`l2_main.cpp:2457`) でこれを parse し、
+  `parse_alpha_coverage_params` がグローバル `g_alpha_as_coverage_params` に
+  格納、classic render runtime が毎フレーム
+  `publish_alpha_coverage_provider` で読む。
+- auxiliary option は `classify_worker_mode` の前に
+  `strip_auxiliary_options` で tail から剥がされる
+  (`l2_cli_dispatch.cpp:76-77` のコメント)。session mode も同じ経路を通る
+  ため、**worker 側の変更は不要**。設定は launch 時一度・全フレーム再利用で、
+  session ライフタイムに一致。
+- broker のみ変更: `SessionOpenRequest.alpha_as_coverage_params: &[u32]` を
+  追加、open で one-shot と同一検証 (sort・重複禁止・slot <= 1024) 後に
+  `--alpha-as-coverage-v1` を emit。`VideoBatchRequest` にも
+  `alpha_as_coverage_params` を追加 (CLI 経路も対応)。wrapper の
+  `session_representable_context` から `alpha_as_coverage_params.is_empty()`
+  を除去し (aux_channels のみ残す)、host_context の slot を
+  `SessionWrapperRequest` 経由で open に渡す。
+
+観察 (検証):
+
+- broker 統合テスト `render_session` 30 件パス。追加した
+  `alpha_as_coverage_params_travel_the_session_launch` (open + fixture
+  render 成功) と `open_rejects_an_out_of_range_alpha_as_coverage_slot`
+  (slot 1025 を open が拒否) を含む。
+- 実 worker + pf_sampling_probe の wrapper A/B (`render_session_wrapper`)
+  に alpha-as-coverage ペア (`alpha_as_coverage_params:[0]`) を追加、
+  session/one-shot の report 全フィールド + PNG byte 一致を確認。C++ 変更が
+  ないため worker 再ビルド不要 (#204 マージ済み main と同一バイナリ)。
+
+仮説 (残作業):
+
+- pf_sampling_probe は alpha-coverage provider を消費しないため、byte 差
+  としての意味的効果は現れない。alpha-coverage を実際に読む effect での
+  検証は #195 の probe fixture 系の作業。それでも「両ルートが同一オプションを
+  同一 worker に送る」等価性は wrapper A/B で確認済み。
+- これで goal 条件1 (W1-3 context + alpha-as-coverage が session を通り適格
+  条件に入る) が充足。残る one-shot 専用は audio / custom UI (#201 で確定) と
+  aux channels (session transport 未対応、別途)。
+## 追記 (2026-07-20): W3 SmartFX セッション v1.1 の実装
+
+観察と実装記録 (issue #98 W3、プロトコル文書 §9.1 が正本):
+
+- **観察 (worker 構造)**: smart 経路の SEQUENCE は `begin_render_lifecycle`
+  が張っており、`smart_render_runtime` 自体に manage_sequence は無かった。
+  拡張は「begin/end を frame-only lifecycle に差し替える」1 点に集約でき、
+  `smart_execution::SessionFrame` (manage_sequence 相当 + 出力 ARGB 捕捉 +
+  guard 判定) を 1 ポインタで通した。one-shot 経路は SessionFrame=nullptr
+  で挙動不変。
+- **実装 (worker)**: classic の `run_render_session` をフレームループ共通部
+  (`run_session_frame_loop`) と renderer コールバックに分離し、smart 版
+  (`run_smart_render_session`) は `smart_render_once(session)` を
+  per-frame で呼ぶ。SEQUENCE_SETUP の遅延ホイスト (-47) と §4 のメッセージ
+  仕様・fail-closed 判定は classic と完全共通。フレーム局所エラーは
+  one-shot の優先順位 (GPU setup → PreRender → render → GPU setdown) で
+  frame_done.render_error に畳む。寸法契約は classic と同じ「全フレーム =
+  launch 寸法」で、SmartFX の partial/empty result も -44 で無効化する
+  (部分レンダー受容はレイヤースロットと同時期の拡張)。
+- **実装 (report/exit)**: smart 最終レポートに session_* フィールドを追加
+  (`append_smart_session`)、session の clean 判定はセッション機構のみで
+  決める (最終フレームの selector エラーで clean close を落とさない)。
+  exit 23/24 契約を smart worker にも配線。broker `final_report_clean` は
+  classic/smart でキー集合を分けて fail-closed。
+- **実装 (broker)**: `SessionOpenRequest` に smart / gpu_backend /
+  gpu_runtime_policy。GPU 起動は one-shot と同じ認証列を
+  `dispatch_secure_gpu_image_session` として通す。セッションは飛行中
+  リトライ不可のため Auto の CPU fallback は open 時に畳む (Auto+policy
+  なし→CPU コマンド、明示 GPU+policy なし→open で拒否)。
+- **検証**: worker 直接駆動の behavioral self-test 5 本
+  (tests/test_smart_session_worker.py、pf_smart_geometry_probe) と broker
+  統合テスト (fixture、smart close 契約 + GPU policy 拒否 + Auto 縮退) が
+  pass。cargo workspace / pytest 全体も pass (既存の環境依存 ERROR 2 件
+  (vswhere 応答空) は main でも再現し無関係)。
+- **観察 (E2E 阻害、#185 に切り出し)**: 実 worker での smart batch E2E
+  (render-video-batch smart:true) はこのマシンでは module audit 失敗で
+  不成立。原因は W3 ではなく、smart dispatch が CPU レンダーでも
+  `begin_backend_context(3)` (CUDA) を無条件初期化し、NVIDIA driver store
+  DLL が audit の unknown (2 件) になる既存問題。sealed 経路の one-shot
+  smart (`render_experimental_image_at_time_with_format(smart=true)`) でも
+  同一失敗を確認済み (＝W3 回帰ではない)。classic batch は同一 sandbox で
+  成功。audit なしの直接駆動では smart session は全シナリオ成功。
+
+## 2026-07-20
+
+### issue #107: プロトコル v:2 (per-frame parameters) の設計判断 (合意方針の実装着手)
+
+GUI ハーネスの「パラメーター操作のライブ再レンダーでセッションを維持する」
+には、レンダー間でパラメーター値を更新する手段が要る。v1 では launch argv
+payload で固定のため、選択肢は (a) パラメーター変更ごとに open し直す、
+(b) §4.2 予約どおり render_frame の v 増分でフィールドを足す、の 2 つ。
+(a) は固定費 (warm 35〜40ms + broker staging/hash) を最頻操作で毎回払う
+ことになり issue の目的を満たさない。(b) を採る。
+
+観察 (worker 側実装調査):
+
+- `render_once` は呼び出しごとに definitions をローカル再初期化し、
+  requested (`apply_requested_assignments`, l2_main.cpp:4054) →
+  parameter animation (同:4063) の順に毎回適用している。セッションループ
+  (`run_render_session`, l2_main.cpp:4249) は launch 時の
+  `RequestedAssignments*` を全フレームに渡しているだけで、per-frame の
+  適用器は既に存在する。
+- payload 符号化 (`encode_interactive_payload` ⇔ `parse_parameter_payload`)
+  は両側に strict 検証込みで実装済み。メッセージに同じ符号化文字列を
+  載せれば新形式の発明が不要。
+
+設計 (プロトコル文書 §4.2.1 に反映):
+
+- v:2 render_frame は `parameters` 必須・そのフレーム限りの完全置換。
+  stateful な「セッションに sticky なパラメーター状態」は持たない
+  (GUI も AviUtl2 も毎呼び出しで現在値を持っているため不要で、状態を
+  持たない方が診断が単純)。
+- 応答スキーマ・ヘッダレイアウト・launch 構成は不変。close は v:1 のみ。
+- 不正 `parameters` はフレーム局所エラーではなくプロトコル違反 (broker が
+  送信前検証済みのため、届いたら broker 欠陥か改竄)。宣言パラメーターとの
+  render 時型不一致はフレーム局所のまま。
+
+検証用 fixture: 既存 instruments にパラメーター値が出力画素へ反映される
+probe が無い (pf-param-utils-animation-probe は suite 検証で値を色に
+落とさない) ため、スライダー値を出力色に反映する `pf-parameter-echo-probe`
+を追加し、Python behavioral self-test で「v:2 で値を変えたフレームの
+出力バイトが自己計算した期待値と一致する」ことを確認する。
+
+GUI アダプタ (issue #107 コメントの合意どおり): 別プロセス常駐 worker +
+GUI 内非同期セッションスレッド。broker に公開セッション API
+(open / render / close、interactive_image_render 型レポート合成) を足し、
+harness はセッションスレッド 1 本がそれを所有する。セッション基盤失敗は
+one-shot spawn_native へ fallback し、次レンダーで新セッションを開き直す
+(SEQUENCE_SETUP からのやり直しであることは診断に明示する)。
+
+### issue #107: before/after 実測 (観察、2026-07-20)
+
+計測方法: `broker/crates/broker/tests/resident_session_live.rs` の
+`resident_session_latency_versus_one_shot` (--release、--ignored 手動実行)。
+fixture は `pf_parameter_echo_probe.aex` (float slider 1 本、値を出力色に
+反映)、FHD 1920x1080 8bpc、N=12、パラメーター値を毎回変更。broker の公開
+エントリ呼び出し時間 (staging・検証・PNG 変換込み) を計測。機材依存の
+参考値で frozen evidence ではない。
+
+| 経路 | median | min | max |
+|---|---|---|---|
+| one-shot (現行 GUI: パラメーター変更ごとに worker 起動) | 304.4ms | 283.1ms | 2680.4ms |
+| 常駐セッション open (初回のみ) | 177.9ms | - | - |
+| 常駐セッション render_frame (v:2 パラメーター更新込み) | 66.7ms | 58.1ms | 129.1ms |
+
+- パラメーター操作 1 回あたり約 4.6 倍の改善 (304ms → 67ms)。echo probe の
+  レンダー本体はほぼゼロなので、67ms の大半は FHD の入力転送 + PNG
+  エンコード + 検証と思われる (内訳分離は未実施)。
+- max 2680ms は one-shot 初回の AV スキャン系 cold 効果と思われる
+  (段階0 項目4 と同じパターン)。常駐セッションはこの再発自体が起きない。

@@ -10,10 +10,10 @@
 #[cfg(windows)]
 mod windows_e2e {
     use aexcompat_broker::image_render::{
-        InteractiveParameter, ParameterAnimation, RenderPixelFormat,
+        InteractiveParameter, ParameterAnimation, RenderGpuBackend, RenderPixelFormat,
     };
     use aexcompat_broker::render_session::{
-        run_video_batch, FrameStatus, RenderSession, SessionOpenRequest,
+        run_video_batch, FrameStatus, RenderSession, SessionLayer, SessionOpenRequest,
     };
     use sha2::{Digest, Sha256};
     use std::path::{Path, PathBuf};
@@ -85,7 +85,11 @@ mod windows_e2e {
         ));
         let worker_dir = root.join("target/minihost-build");
         std::fs::create_dir_all(&worker_dir).unwrap();
-        std::fs::copy(fixture, worker_dir.join("aex_render_worker.exe")).unwrap();
+        std::fs::copy(&fixture, worker_dir.join("aex_render_worker.exe")).unwrap();
+        // The smart session dispatches the smart worker binary; the fixture
+        // serves both roles and keys its final-report contract off the
+        // session command word.
+        std::fs::copy(&fixture, worker_dir.join("aex_smart_worker.exe")).unwrap();
         let plugin = root.join("plugin.plugin");
         let plugin_bytes = b"render session dummy plugin";
         std::fs::write(&plugin, plugin_bytes).unwrap();
@@ -108,8 +112,11 @@ mod windows_e2e {
             aux_manifest: None,
             world_dump_dir: None,
             output_checksum_detail: false,
+            mask_trailer: None,
             spatial_trailer: None,
             render_environment_trailer: None,
+            alpha_as_coverage_params: &[],
+            layers: &[],
             dependencies: Vec::new(),
             width: WIDTH,
             height: HEIGHT,
@@ -118,6 +125,9 @@ mod windows_e2e {
             total_time: 300,
             time_scale: 30,
             frame_deadline,
+            smart: false,
+            gpu_backend: RenderGpuBackend::Cpu,
+            gpu_runtime_policy: None,
         })
         .expect("open render session")
     }
@@ -126,6 +136,131 @@ mod windows_e2e {
         (0..WIDTH * HEIGHT * 4)
             .map(|index| seed.wrapping_add(index as u8))
             .collect()
+    }
+
+    #[test]
+    fn smart_session_dispatches_the_smart_worker_and_closes_clean() {
+        let _behavior = BehaviorGuard::set(None);
+        let (repository, plugin, sha) = temp_repository();
+        let mut session = RenderSession::open(SessionOpenRequest {
+            repository: &repository.0,
+            plugin_path: &plugin,
+            plugin_sha256: &sha,
+            parameters: None,
+            parameter_animation: None,
+            aux_manifest: None,
+            world_dump_dir: None,
+            output_checksum_detail: false,
+            mask_trailer: None,
+            spatial_trailer: None,
+            render_environment_trailer: None,
+            layers: &[],
+            alpha_as_coverage_params: &[],
+            dependencies: Vec::new(),
+            width: WIDTH,
+            height: HEIGHT,
+            pixel_format: RenderPixelFormat::Argb8,
+            time_step: 1,
+            total_time: 300,
+            time_scale: 30,
+            frame_deadline: Duration::from_secs(30),
+            smart: true,
+            gpu_backend: RenderGpuBackend::Cpu,
+            gpu_runtime_policy: None,
+        })
+        .expect("open smart render session");
+        let outcome = session
+            .render_frame(0, 0, &input_pattern(17))
+            .expect("smart session frame renders");
+        assert!(matches!(outcome.status, FrameStatus::Rendered { .. }));
+        let close = session.close();
+        assert_eq!(close["render_path"], "smart", "close: {close}");
+        assert_eq!(close["session_clean"], true, "close: {close}");
+        // The smart clean verdict comes from the smart report's dedicated
+        // session_* fields, not the classic persistent-sequence keys.
+        assert_eq!(close["final_report"]["session_mode"], true);
+        assert_eq!(close["final_report"]["session_render_error"], 0);
+    }
+
+    #[test]
+    fn smart_session_with_an_explicit_gpu_backend_requires_a_policy() {
+        let _behavior = BehaviorGuard::set(None);
+        let (repository, plugin, sha) = temp_repository();
+        let error = RenderSession::open(SessionOpenRequest {
+            repository: &repository.0,
+            plugin_path: &plugin,
+            plugin_sha256: &sha,
+            parameters: None,
+            parameter_animation: None,
+            aux_manifest: None,
+            world_dump_dir: None,
+            output_checksum_detail: false,
+            mask_trailer: None,
+            spatial_trailer: None,
+            render_environment_trailer: None,
+            layers: &[],
+            alpha_as_coverage_params: &[],
+            dependencies: Vec::new(),
+            width: WIDTH,
+            height: HEIGHT,
+            pixel_format: RenderPixelFormat::Argb32f,
+            time_step: 1,
+            total_time: 300,
+            time_scale: 30,
+            frame_deadline: Duration::from_secs(30),
+            smart: true,
+            gpu_backend: RenderGpuBackend::DirectX,
+            gpu_runtime_policy: None,
+        })
+        .map(|_| ())
+        .expect_err("an explicit GPU backend without a policy must fail closed");
+        assert!(
+            error.to_string().contains("runtime module policy"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn smart_auto_backend_without_a_policy_degrades_to_the_cpu_session() {
+        let _behavior = BehaviorGuard::set(None);
+        let (repository, plugin, sha) = temp_repository();
+        // Auto + no policy opens the CPU smart session command; the fixture
+        // rejects every command word except the two CPU session commands, so
+        // reaching a rendered frame proves no GPU command was attempted.
+        // (Argb8 keeps the fixture's depth-8 transport contract.)
+        let mut session = RenderSession::open(SessionOpenRequest {
+            repository: &repository.0,
+            plugin_path: &plugin,
+            plugin_sha256: &sha,
+            parameters: None,
+            parameter_animation: None,
+            aux_manifest: None,
+            world_dump_dir: None,
+            output_checksum_detail: false,
+            mask_trailer: None,
+            spatial_trailer: None,
+            render_environment_trailer: None,
+            layers: &[],
+            alpha_as_coverage_params: &[],
+            dependencies: Vec::new(),
+            width: WIDTH,
+            height: HEIGHT,
+            pixel_format: RenderPixelFormat::Argb8,
+            time_step: 1,
+            total_time: 300,
+            time_scale: 30,
+            frame_deadline: Duration::from_secs(30),
+            smart: true,
+            gpu_backend: RenderGpuBackend::Auto,
+            gpu_runtime_policy: None,
+        })
+        .expect("open smart render session with the auto backend");
+        let outcome = session
+            .render_frame(0, 0, &input_pattern(23))
+            .expect("smart auto session frame renders");
+        assert!(matches!(outcome.status, FrameStatus::Rendered { .. }));
+        let close = session.close();
+        assert_eq!(close["session_clean"], true, "close: {close}");
     }
 
     fn float_parameter(slot: u32) -> InteractiveParameter {
@@ -172,6 +307,471 @@ mod windows_e2e {
     }
 
     #[test]
+    fn secondary_layers_reach_their_shared_slots() {
+        let _behavior = BehaviorGuard::set(None);
+        let (repository, plugin, sha) = temp_repository();
+        // Each layer's slot is filled with its slot number as a byte; the
+        // fixture reads the first byte of each layer slot and rejects the
+        // session unless the metadata and pixels landed in the right slot.
+        let layers = vec![
+            SessionLayer {
+                slot: 3,
+                width: WIDTH,
+                height: HEIGHT,
+                rgba: vec![3u8; (WIDTH * HEIGHT * 4) as usize],
+                timed: None,
+            },
+            SessionLayer {
+                slot: 7,
+                width: WIDTH,
+                height: HEIGHT,
+                rgba: vec![7u8; (WIDTH * HEIGHT * 4) as usize],
+                timed: None,
+            },
+        ];
+        let mut session = RenderSession::open(SessionOpenRequest {
+            repository: &repository.0,
+            plugin_path: &plugin,
+            plugin_sha256: &sha,
+            parameters: None,
+            parameter_animation: None,
+            aux_manifest: None,
+            world_dump_dir: None,
+            output_checksum_detail: false,
+            mask_trailer: None,
+            spatial_trailer: None,
+            render_environment_trailer: None,
+            alpha_as_coverage_params: &[],
+            layers: &layers,
+            dependencies: Vec::new(),
+            width: WIDTH,
+            height: HEIGHT,
+            pixel_format: RenderPixelFormat::Argb8,
+            time_step: 1,
+            total_time: 300,
+            time_scale: 30,
+            frame_deadline: Duration::from_secs(30),
+            smart: false,
+            gpu_backend: RenderGpuBackend::Cpu,
+            gpu_runtime_policy: None,
+        })
+        .expect("open render session with secondary layers");
+        let outcome = session
+            .render_frame(0, 0, &input_pattern(5))
+            .expect("frame renders with layers in their slots");
+        assert!(matches!(outcome.status, FrameStatus::Rendered { .. }));
+        let close = session.close();
+        assert_eq!(close["session_clean"], true, "close: {close}");
+    }
+
+    #[test]
+    fn timed_layers_travel_the_session_trailer_into_their_slots() {
+        let _behavior = BehaviorGuard::set(None);
+        let (repository, plugin, sha) = temp_repository();
+        // Two timed entries share slot 5 at different rational times, plus a
+        // static secondary in slot 9. Each physical slot is filled with its
+        // slot number as a byte; the fixture validates the header's
+        // layer_slot_count and every slot's first byte, so the 5-field timed
+        // trailer form must reach the same slots the static form does.
+        let layers = vec![
+            SessionLayer {
+                slot: 5,
+                width: WIDTH,
+                height: HEIGHT,
+                rgba: vec![5u8; (WIDTH * HEIGHT * 4) as usize],
+                timed: Some((0, 30)),
+            },
+            SessionLayer {
+                slot: 5,
+                width: WIDTH,
+                height: HEIGHT,
+                rgba: vec![5u8; (WIDTH * HEIGHT * 4) as usize],
+                timed: Some((7, 30)),
+            },
+            SessionLayer {
+                slot: 9,
+                width: WIDTH,
+                height: HEIGHT,
+                rgba: vec![9u8; (WIDTH * HEIGHT * 4) as usize],
+                timed: None,
+            },
+        ];
+        let mut session = RenderSession::open(SessionOpenRequest {
+            repository: &repository.0,
+            plugin_path: &plugin,
+            plugin_sha256: &sha,
+            parameters: None,
+            parameter_animation: None,
+            aux_manifest: None,
+            world_dump_dir: None,
+            output_checksum_detail: false,
+            mask_trailer: None,
+            spatial_trailer: None,
+            render_environment_trailer: None,
+            alpha_as_coverage_params: &[],
+            layers: &layers,
+            dependencies: Vec::new(),
+            width: WIDTH,
+            height: HEIGHT,
+            pixel_format: RenderPixelFormat::Argb8,
+            time_step: 1,
+            total_time: 300,
+            time_scale: 30,
+            frame_deadline: Duration::from_secs(30),
+            smart: false,
+            gpu_backend: RenderGpuBackend::Cpu,
+            gpu_runtime_policy: None,
+        })
+        .expect("open render session with timed layers");
+        let outcome = session
+            .render_frame(0, 0, &input_pattern(5))
+            .expect("frame renders with timed layers in their slots");
+        assert!(matches!(outcome.status, FrameStatus::Rendered { .. }));
+        let close = session.close();
+        assert_eq!(close["session_clean"], true, "close: {close}");
+    }
+
+    #[test]
+    fn open_rejects_two_timed_layers_at_the_same_slot_and_time() {
+        let _behavior = BehaviorGuard::set(None);
+        let (repository, plugin, sha) = temp_repository();
+        // Same slot, equal rational time (2/60 == 1/30): a per-frame collision
+        // the worker parser would reject, so open must fail fast the same way.
+        let layers = vec![
+            SessionLayer {
+                slot: 4,
+                width: WIDTH,
+                height: HEIGHT,
+                rgba: vec![4u8; (WIDTH * HEIGHT * 4) as usize],
+                timed: Some((1, 30)),
+            },
+            SessionLayer {
+                slot: 4,
+                width: WIDTH,
+                height: HEIGHT,
+                rgba: vec![4u8; (WIDTH * HEIGHT * 4) as usize],
+                timed: Some((2, 60)),
+            },
+        ];
+        let error = RenderSession::open(SessionOpenRequest {
+            repository: &repository.0,
+            plugin_path: &plugin,
+            plugin_sha256: &sha,
+            parameters: None,
+            parameter_animation: None,
+            aux_manifest: None,
+            world_dump_dir: None,
+            output_checksum_detail: false,
+            mask_trailer: None,
+            spatial_trailer: None,
+            render_environment_trailer: None,
+            alpha_as_coverage_params: &[],
+            layers: &layers,
+            dependencies: Vec::new(),
+            width: WIDTH,
+            height: HEIGHT,
+            pixel_format: RenderPixelFormat::Argb8,
+            time_step: 1,
+            total_time: 300,
+            time_scale: 30,
+            frame_deadline: Duration::from_secs(30),
+            smart: false,
+            gpu_backend: RenderGpuBackend::Cpu,
+            gpu_runtime_policy: None,
+        })
+        .map(|_| ())
+        .expect_err("open must reject a same-slot same-time timed collision");
+        assert!(
+            error.to_string().contains("unique"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn open_admits_a_static_and_timed_layer_at_the_same_slot() {
+        let _behavior = BehaviorGuard::set(None);
+        let (repository, plugin, sha) = temp_repository();
+        // A static entry and a timed entry share slot 4: the valid one-shot
+        // representation of a layer parameter sampled at current_time (static)
+        // and at another time (timed). The session must admit exactly what the
+        // one-shot layered path admits, so open succeeds and both physical
+        // slots (indexed by position) carry the slot-4 byte the fixture checks.
+        let layers = vec![
+            SessionLayer {
+                slot: 4,
+                width: WIDTH,
+                height: HEIGHT,
+                rgba: vec![4u8; (WIDTH * HEIGHT * 4) as usize],
+                timed: None,
+            },
+            SessionLayer {
+                slot: 4,
+                width: WIDTH,
+                height: HEIGHT,
+                rgba: vec![4u8; (WIDTH * HEIGHT * 4) as usize],
+                timed: Some((7, 30)),
+            },
+        ];
+        let mut session = RenderSession::open(SessionOpenRequest {
+            repository: &repository.0,
+            plugin_path: &plugin,
+            plugin_sha256: &sha,
+            parameters: None,
+            parameter_animation: None,
+            aux_manifest: None,
+            world_dump_dir: None,
+            output_checksum_detail: false,
+            mask_trailer: None,
+            spatial_trailer: None,
+            render_environment_trailer: None,
+            alpha_as_coverage_params: &[],
+            layers: &layers,
+            dependencies: Vec::new(),
+            width: WIDTH,
+            height: HEIGHT,
+            pixel_format: RenderPixelFormat::Argb8,
+            time_step: 1,
+            total_time: 300,
+            time_scale: 30,
+            frame_deadline: Duration::from_secs(30),
+            smart: false,
+            gpu_backend: RenderGpuBackend::Cpu,
+            gpu_runtime_policy: None,
+        })
+        .expect("open must admit a same-slot static and timed mix");
+        let outcome = session
+            .render_frame(0, 0, &input_pattern(4))
+            .expect("frame renders with the static+timed slot mix");
+        assert!(matches!(outcome.status, FrameStatus::Rendered { .. }));
+        let close = session.close();
+        assert_eq!(close["session_clean"], true, "close: {close}");
+    }
+
+    #[test]
+    fn open_rejects_two_static_layers_at_the_same_slot() {
+        let _behavior = BehaviorGuard::set(None);
+        let (repository, plugin, sha) = temp_repository();
+        // Two static entries at one slot are ambiguous per frame; open must
+        // fail closed, the same rule the one-shot parser applies.
+        let layers = vec![
+            SessionLayer {
+                slot: 4,
+                width: WIDTH,
+                height: HEIGHT,
+                rgba: vec![4u8; (WIDTH * HEIGHT * 4) as usize],
+                timed: None,
+            },
+            SessionLayer {
+                slot: 4,
+                width: WIDTH,
+                height: HEIGHT,
+                rgba: vec![4u8; (WIDTH * HEIGHT * 4) as usize],
+                timed: None,
+            },
+        ];
+        let error = RenderSession::open(SessionOpenRequest {
+            repository: &repository.0,
+            plugin_path: &plugin,
+            plugin_sha256: &sha,
+            parameters: None,
+            parameter_animation: None,
+            aux_manifest: None,
+            world_dump_dir: None,
+            output_checksum_detail: false,
+            mask_trailer: None,
+            spatial_trailer: None,
+            render_environment_trailer: None,
+            alpha_as_coverage_params: &[],
+            layers: &layers,
+            dependencies: Vec::new(),
+            width: WIDTH,
+            height: HEIGHT,
+            pixel_format: RenderPixelFormat::Argb8,
+            time_step: 1,
+            total_time: 300,
+            time_scale: 30,
+            frame_deadline: Duration::from_secs(30),
+            smart: false,
+            gpu_backend: RenderGpuBackend::Cpu,
+            gpu_runtime_policy: None,
+        })
+        .map(|_| ())
+        .expect_err("open must reject two static layers at one slot");
+        assert!(
+            error.to_string().contains("unique"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn alpha_as_coverage_params_travel_the_session_launch() {
+        let _behavior = BehaviorGuard::set(None);
+        let (repository, plugin, sha) = temp_repository();
+        // The slots ride the `--alpha-as-coverage-v1` auxiliary option, which
+        // the worker peels from argv's tail before the session contract; the
+        // fixture strips the pair and still resolves the 10-slot contract, so
+        // open succeeds and frames render (issue #98 W1-4c).
+        let mut session = RenderSession::open(SessionOpenRequest {
+            repository: &repository.0,
+            plugin_path: &plugin,
+            plugin_sha256: &sha,
+            parameters: None,
+            parameter_animation: None,
+            aux_manifest: None,
+            world_dump_dir: None,
+            output_checksum_detail: false,
+            mask_trailer: None,
+            spatial_trailer: None,
+            render_environment_trailer: None,
+            alpha_as_coverage_params: &[0, 3],
+            layers: &[],
+            dependencies: Vec::new(),
+            width: WIDTH,
+            height: HEIGHT,
+            pixel_format: RenderPixelFormat::Argb8,
+            time_step: 1,
+            total_time: 300,
+            time_scale: 30,
+            frame_deadline: Duration::from_secs(30),
+            smart: false,
+            gpu_backend: RenderGpuBackend::Cpu,
+            gpu_runtime_policy: None,
+        })
+        .expect("open with alpha-as-coverage slots");
+        let outcome = session
+            .render_frame(0, 0, &input_pattern(6))
+            .expect("frame renders with alpha-as-coverage slots");
+        assert!(matches!(outcome.status, FrameStatus::Rendered { .. }));
+        let close = session.close();
+        assert_eq!(close["session_clean"], true, "close: {close}");
+    }
+
+    #[test]
+    fn open_rejects_an_out_of_range_alpha_as_coverage_slot() {
+        let _behavior = BehaviorGuard::set(None);
+        let (repository, plugin, sha) = temp_repository();
+        // Same bound the one-shot path enforces (slot <= 1024); open must fail
+        // fast rather than launch a worker that rejects the option.
+        let error = RenderSession::open(SessionOpenRequest {
+            repository: &repository.0,
+            plugin_path: &plugin,
+            plugin_sha256: &sha,
+            parameters: None,
+            parameter_animation: None,
+            aux_manifest: None,
+            world_dump_dir: None,
+            output_checksum_detail: false,
+            mask_trailer: None,
+            spatial_trailer: None,
+            render_environment_trailer: None,
+            alpha_as_coverage_params: &[1025],
+            layers: &[],
+            dependencies: Vec::new(),
+            width: WIDTH,
+            height: HEIGHT,
+            pixel_format: RenderPixelFormat::Argb8,
+            time_step: 1,
+            total_time: 300,
+            time_scale: 30,
+            frame_deadline: Duration::from_secs(30),
+            smart: false,
+            gpu_backend: RenderGpuBackend::Cpu,
+            gpu_runtime_policy: None,
+        })
+        .map(|_| ())
+        .expect_err("open must reject an out-of-range alpha-as-coverage slot");
+        assert!(
+            error.to_string().contains("alpha-as-coverage"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn open_rejects_layer_pixels_that_do_not_fit_the_slot() {
+        let _behavior = BehaviorGuard::set(None);
+        let (repository, plugin, sha) = temp_repository();
+        let layers = vec![SessionLayer {
+            slot: 3,
+            width: WIDTH,
+            height: HEIGHT,
+            // One byte short of the declared geometry.
+            rgba: vec![3u8; (WIDTH * HEIGHT * 4 - 1) as usize],
+            timed: None,
+        }];
+        let error = RenderSession::open(SessionOpenRequest {
+            repository: &repository.0,
+            plugin_path: &plugin,
+            plugin_sha256: &sha,
+            parameters: None,
+            parameter_animation: None,
+            aux_manifest: None,
+            world_dump_dir: None,
+            output_checksum_detail: false,
+            mask_trailer: None,
+            spatial_trailer: None,
+            render_environment_trailer: None,
+            alpha_as_coverage_params: &[],
+            layers: &layers,
+            dependencies: Vec::new(),
+            width: WIDTH,
+            height: HEIGHT,
+            pixel_format: RenderPixelFormat::Argb8,
+            time_step: 1,
+            total_time: 300,
+            time_scale: 30,
+            frame_deadline: Duration::from_secs(30),
+            smart: false,
+            gpu_backend: RenderGpuBackend::Cpu,
+            gpu_runtime_policy: None,
+        })
+        .map(|_| ())
+        .expect_err("mismatched layer pixels fail fast at open");
+        assert!(error.to_string().contains("do not fit"), "{error}");
+    }
+
+    #[test]
+    fn open_rejects_a_zero_layer_slot() {
+        let _behavior = BehaviorGuard::set(None);
+        let (repository, plugin, sha) = temp_repository();
+        let layers = vec![SessionLayer {
+            slot: 0,
+            width: WIDTH,
+            height: HEIGHT,
+            rgba: vec![0u8; (WIDTH * HEIGHT * 4) as usize],
+            timed: None,
+        }];
+        let error = RenderSession::open(SessionOpenRequest {
+            repository: &repository.0,
+            plugin_path: &plugin,
+            plugin_sha256: &sha,
+            parameters: None,
+            parameter_animation: None,
+            aux_manifest: None,
+            world_dump_dir: None,
+            output_checksum_detail: false,
+            mask_trailer: None,
+            spatial_trailer: None,
+            render_environment_trailer: None,
+            alpha_as_coverage_params: &[],
+            layers: &layers,
+            dependencies: Vec::new(),
+            width: WIDTH,
+            height: HEIGHT,
+            pixel_format: RenderPixelFormat::Argb8,
+            time_step: 1,
+            total_time: 300,
+            time_scale: 30,
+            frame_deadline: Duration::from_secs(30),
+            smart: false,
+            gpu_backend: RenderGpuBackend::Cpu,
+            gpu_runtime_policy: None,
+        })
+        .map(|_| ())
+        .expect_err("a zero layer slot fails fast at open");
+        assert!(error.to_string().contains("slot or dimensions"), "{error}");
+    }
+
+    #[test]
     fn animation_sidecar_rides_the_session_and_is_cleaned_up() {
         let _behavior = BehaviorGuard::set(None);
         let (repository, plugin, sha) = temp_repository();
@@ -186,8 +786,11 @@ mod windows_e2e {
             aux_manifest: None,
             world_dump_dir: None,
             output_checksum_detail: false,
+            mask_trailer: None,
             spatial_trailer: None,
             render_environment_trailer: None,
+            alpha_as_coverage_params: &[],
+            layers: &[],
             dependencies: Vec::new(),
             width: WIDTH,
             height: HEIGHT,
@@ -196,6 +799,9 @@ mod windows_e2e {
             total_time: 300,
             time_scale: 30,
             frame_deadline: Duration::from_secs(30),
+            smart: false,
+            gpu_backend: RenderGpuBackend::Cpu,
+            gpu_runtime_policy: None,
         })
         .expect("open render session with parameter animation");
         assert_eq!(
@@ -246,8 +852,11 @@ mod windows_e2e {
             aux_manifest: None,
             world_dump_dir: None,
             output_checksum_detail: false,
+            mask_trailer: None,
             spatial_trailer: None,
             render_environment_trailer: None,
+            alpha_as_coverage_params: &[],
+            layers: &[],
             dependencies: Vec::new(),
             width: WIDTH,
             height: HEIGHT,
@@ -256,6 +865,9 @@ mod windows_e2e {
             total_time: 300,
             time_scale: 30,
             frame_deadline: Duration::from_secs(30),
+            smart: false,
+            gpu_backend: RenderGpuBackend::Cpu,
+            gpu_runtime_policy: None,
         })
         .expect("arbitrary_data parameters bind arbitrary animation timelines");
         let outcome = session
@@ -322,8 +934,11 @@ mod windows_e2e {
             aux_manifest: Some(&manifest),
             world_dump_dir: Some(&dump_dir),
             output_checksum_detail: true,
+            mask_trailer: None,
             spatial_trailer: None,
             render_environment_trailer: None,
+            alpha_as_coverage_params: &[],
+            layers: &[],
             dependencies: Vec::new(),
             width: WIDTH,
             height: HEIGHT,
@@ -332,6 +947,9 @@ mod windows_e2e {
             total_time: 300,
             time_scale: 30,
             frame_deadline: Duration::from_secs(30),
+            smart: false,
+            gpu_backend: RenderGpuBackend::Cpu,
+            gpu_runtime_policy: None,
         })
         .expect("open render session with auxiliary options");
         let outcome = session
@@ -357,8 +975,11 @@ mod windows_e2e {
             aux_manifest: None,
             world_dump_dir: Some(&reused),
             output_checksum_detail: false,
+            mask_trailer: None,
             spatial_trailer: None,
             render_environment_trailer: None,
+            alpha_as_coverage_params: &[],
+            layers: &[],
             dependencies: Vec::new(),
             width: WIDTH,
             height: HEIGHT,
@@ -367,6 +988,9 @@ mod windows_e2e {
             total_time: 300,
             time_scale: 30,
             frame_deadline: Duration::from_secs(30),
+            smart: false,
+            gpu_backend: RenderGpuBackend::Cpu,
+            gpu_runtime_policy: None,
         })
         .map(|_| ())
         .expect_err("a reused dump directory fails fast at open");
@@ -387,8 +1011,11 @@ mod windows_e2e {
             aux_manifest: None,
             world_dump_dir: Some(&missing),
             output_checksum_detail: false,
+            mask_trailer: None,
             spatial_trailer: None,
             render_environment_trailer: None,
+            alpha_as_coverage_params: &[],
+            layers: &[],
             dependencies: Vec::new(),
             width: WIDTH,
             height: HEIGHT,
@@ -397,6 +1024,9 @@ mod windows_e2e {
             total_time: 300,
             time_scale: 30,
             frame_deadline: Duration::from_secs(30),
+            smart: false,
+            gpu_backend: RenderGpuBackend::Cpu,
+            gpu_runtime_policy: None,
         })
         .map(|_| ())
         .expect_err("a dump directory outside the managed tree fails fast at open");
@@ -417,8 +1047,11 @@ mod windows_e2e {
             aux_manifest: None,
             world_dump_dir: None,
             output_checksum_detail: false,
+            mask_trailer: None,
             spatial_trailer: None,
             render_environment_trailer: None,
+            alpha_as_coverage_params: &[],
+            layers: &[],
             dependencies: Vec::new(),
             width: WIDTH,
             height: HEIGHT,
@@ -427,6 +1060,9 @@ mod windows_e2e {
             total_time: 300,
             time_scale: 30,
             frame_deadline: Duration::from_secs(30),
+            smart: false,
+            gpu_backend: RenderGpuBackend::Cpu,
+            gpu_runtime_policy: None,
         })
         .map(|_| ())
         .expect_err("an animation without a matching parameter fails before launch");
@@ -467,6 +1103,123 @@ mod windows_e2e {
         assert_eq!(close["session_clean"], true, "close: {close}");
         assert_eq!(close["worker"]["classification"], "ok");
         assert_eq!(close["final_report"]["session_frames"], 2);
+    }
+
+    #[test]
+    fn per_frame_parameters_ride_the_v2_message_and_reach_the_worker() {
+        let _behavior = BehaviorGuard::set(None);
+        let (repository, plugin, sha) = temp_repository();
+        let mut session = open_session(&repository.0, &plugin, &sha, Duration::from_secs(30));
+        let input = input_pattern(31);
+        let inverted: Vec<u8> = input.iter().map(|byte| 255 - byte).collect();
+
+        // Frame 0 stays a v:1 message: plain inverted transfer.
+        let outcome = session.render_frame(0, 0, &input).expect("v1 frame renders");
+        let FrameStatus::Rendered { pixels, .. } = outcome.status else {
+            panic!("v1 frame errored");
+        };
+        assert_eq!(pixels, inverted);
+
+        // Frame 1 carries per-frame parameters; the fixture stamps the digest
+        // of the received payload into the frame, proving delivery.
+        let mut updated = float_parameter(1);
+        updated.value = 42.5;
+        let outcome = session
+            .render_frame_with_parameters(1, 1, &input, Some(std::slice::from_ref(&updated)))
+            .expect("v2 frame renders");
+        let FrameStatus::Rendered { pixels, .. } = outcome.status else {
+            panic!("v2 frame errored");
+        };
+        let payload = aexcompat_broker::image_render::encode_interactive_payload(
+            std::slice::from_ref(&updated),
+        )
+        .expect("payload encodes");
+        assert_eq!(&pixels[..32], Sha256::digest(payload.as_bytes()).as_slice());
+        assert_eq!(&pixels[32..], &inverted[32..]);
+
+        // Frame 2 reverts to v:1 and the stamp disappears: the update was
+        // frame-scoped, not sticky.
+        let outcome = session.render_frame(2, 2, &input).expect("v1 frame renders again");
+        let FrameStatus::Rendered { pixels, .. } = outcome.status else {
+            panic!("post-update v1 frame errored");
+        };
+        assert_eq!(pixels, inverted);
+
+        let close = session.close();
+        assert_eq!(close["frames_ok"], 3);
+        assert_eq!(close["parameter_update_frames"], 1);
+        assert_eq!(close["session_clean"], true, "close: {close}");
+    }
+
+    #[test]
+    fn interactive_session_renders_reports_and_previews_across_frames() {
+        use aexcompat_broker::image_render::{InteractiveRenderSession, InteractiveSessionOpen};
+        let _behavior = BehaviorGuard::set(None);
+        let (repository, plugin, sha) = temp_repository();
+        let parameters = [float_parameter(1)];
+        let mut session = InteractiveRenderSession::open(InteractiveSessionOpen {
+            repository: &repository.0,
+            plugin_id: "experimental",
+            plugin_path: &plugin,
+            plugin_sha256: &sha,
+            parameters: Some(&parameters),
+            dependencies: Vec::new(),
+            width: WIDTH,
+            height: HEIGHT,
+            pixel_format: RenderPixelFormat::Argb8,
+            time_step: 1,
+            total_time: 300,
+            time_scale: 30,
+            timeout_ms: 30_000,
+        })
+        .expect("open interactive session");
+        assert!(!session.invalidated());
+
+        let input = input_pattern(53);
+        let mut updated = float_parameter(1);
+        updated.value = 7.5;
+        for (frame, time) in [(0u32, 0i32), (1, 1)] {
+            let output = repository.0.join(format!("live-{frame}.png"));
+            let report = session
+                .render(&input, time, Some(std::slice::from_ref(&updated)), &output)
+                .expect("interactive frame renders");
+            assert_eq!(report["stage"], "interactive_image_render");
+            assert_eq!(report["render_path"], "classic");
+            assert_eq!(report["worker_classification"], "resident_session");
+            assert_eq!(report["passed"], true);
+            assert_eq!(report["resident_session"]["frame_index"], frame);
+            assert_eq!(report["resident_session"]["parameter_update"], true);
+            assert!(output.is_file(), "preview PNG is written per frame");
+        }
+        let close = session.close();
+        assert_eq!(close["frames_ok"], 2);
+        assert_eq!(close["parameter_update_frames"], 2);
+        assert_eq!(close["session_clean"], true, "close: {close}");
+    }
+
+    #[test]
+    fn rejected_per_frame_parameters_leave_the_session_usable() {
+        let _behavior = BehaviorGuard::set(None);
+        let (repository, plugin, sha) = temp_repository();
+        let mut session = open_session(&repository.0, &plugin, &sha, Duration::from_secs(30));
+        // Out-of-range value: the broker-side validation rejects the set
+        // before anything reaches the transport, exactly like the launch
+        // payload validation would.
+        let mut out_of_range = float_parameter(1);
+        out_of_range.value = 1000.0;
+        let error = session
+            .render_frame_with_parameters(0, 0, &input_pattern(7), Some(&[out_of_range]))
+            .expect_err("out-of-range parameters are rejected");
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert!(session.invalidation().is_none(), "session stays usable");
+        let outcome = session
+            .render_frame(0, 0, &input_pattern(7))
+            .expect("the session still renders after the rejection");
+        assert!(matches!(outcome.status, FrameStatus::Rendered { .. }));
+        let close = session.close();
+        assert_eq!(close["frames_ok"], 1);
+        assert_eq!(close["parameter_update_frames"], 0);
+        assert_eq!(close["session_clean"], true, "close: {close}");
     }
 
     #[test]

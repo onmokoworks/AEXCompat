@@ -9,7 +9,7 @@ import source_owners
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "instruments/pf-aegp-async-cancel-probe/pf_aegp_async_cancel_probe.cpp"
-HOST = source_owners.L2_MAIN
+HOST = ROOT / "minihost/src/worker_entry_wiring.cpp"
 ASYNC_RUNTIME = ROOT / "minihost/src/worker_aegp_async_layer_runtime.cpp"
 
 

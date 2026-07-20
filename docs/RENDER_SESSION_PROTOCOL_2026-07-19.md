@@ -3,6 +3,9 @@
 status: 設計確定版 (段階0 調査の結論に基づく)。実装は本書に従い、実装中の
 逸脱は `docs/RENDER_SESSION_INVESTIGATION_2026-07-19.md` に「逸脱」として
 追記する。根拠となる観察はすべて同調査ノートにある。
+改訂 2026-07-20 (issue #107): §4.2 の予約どおり、`render_frame` の v:2
+変種 (per-frame `parameters`) を §4.2.1 として定義した。launch 構成・
+ヘッダレイアウト・応答スキーマは v1 のまま変わらない。
 
 ## 1. 位置づけとスコープ
 
@@ -20,13 +23,15 @@ v1 のスコープ:
 - tier は default tier (crash containment)。hash の記録は現行どおり行うが、
   セッションであることによる追加の enforce はしない。
 
-v1 のスコープ外 (プロトコルは拡張点を予約する):
+v1.1 (issue #98 W3) で追加されたスコープ:
 
-- SmartFX セッション。`smart_render_runtime` に `manage_sequence` 相当が
-  無く (`l2_main.cpp:4998` で常に SEQUENCE を張る)、worker 側の追加工事が
-  要る。メッセージ仕様は selector 非依存なので v1.1 で worker 側のみ拡張。
+- SmartFX セッション (§9.1)。メッセージ仕様 (§4) は selector 非依存のまま
+  変更なしで、worker 側のフレームループと broker 側の起動配線のみの拡張。
+
+v1 のスコープ外 (プロトコルは拡張点を予約する):
 - per-frame の動的パラメーター割当 (#107 GUI ライブ操作、AviUtl2 ブリッジが
-  要求)。`render_frame` メッセージの追加フィールドとして予約 (§4.2)。
+  要求)。当初 `render_frame` メッセージの追加フィールドとして予約し、
+  2026-07-20 に §4.2.1 の v:2 変種として定義済み (スコープ外ではなくなった)。
 - SEQUENCE_RESETUP の発行。レンダー専用文脈での実発行頻度は AE 実機観測
   (段階0 項目1・2) 待ち。v1 は発行しない。
 - リングバッファ / 先読み。単一スロット逐次で開始 (設計ドラフト v1 合意)。
@@ -88,7 +93,9 @@ worker 側パースは `trace_writer.cpp:16-28` の型)。worker はパス文字
 ```
 aex_render_worker.exe --render-session-v1 <plugin> <plugin_sha256> <payload>
     <max_width> <max_height> <time_step> <total_time> <time_scale>
+    [session-layers:v1|<slot,w,h[,time,scale];...>]
     [v2|<mask context>] [spatial:v*|<...>] [render:v1|<...>]
+    [--alpha-as-coverage-v1 <slot,slot,...>]
     [--aux-manifest-v1 <path>] [--parameter-animation-v1 <path>]
     [--dump-worlds-v1 <dir>] [--output-checksum-detail-v1 1] [--minidump-v1 <dir>]
 ```
@@ -97,12 +104,48 @@ aex_render_worker.exe --render-session-v1 <plugin> <plugin_sha256> <payload>
 render) で、auxiliary option ペアより前 (argv 上ではコンテキストが先、
 auxiliary option が tail)。worker は auxiliary option を tail から剥がした
 後、render → spatial → mask の順に位置引数末尾から剥がして 10 スロットの
-セッション契約に還元する。W1-3 では spatial (`spatial:v1/v2/v3`) と
-render-environment (`render:v1|`) を broker が送出する。mask context
-(`v2|`) は worker が受理できる形にしてあるが broker 側の送出は layer 作業
-(W1-4) と同 PR。値域・検証は one-shot と同一 (parse_spatial_context_payload
-/ parse_render_environment_payload)。full-resolution 寸法を宣言する spatial は
-遅延 SEQUENCE_SETUP と全フレームの in_data に反映される。
+セッション契約に還元する。W1-3 では mask (`v2|`)、spatial (`spatial:v1/v2/v3`)、
+render-environment (`render:v1|`) を broker が送出する (host_context がある
+ときは one-shot と同じく mask trailer を常に送る、空 mask scene でも "v2|")。
+W1-4c では alpha-as-coverage の parameter slot 群を `--alpha-as-coverage-v1
+<slot,...>` auxiliary option で送る。worker (Render entry) は one-shot と共有の
+auxiliary フック (`parse_l2_alpha_coverage`) でこれを parse し、launch 時に一度
+alpha-coverage provider をグローバルへ publish する。classic render runtime が
+毎フレームこれを読むため、session の「一度設定して全フレーム再利用」ライフタイムに
+一致し、worker 側の変更は不要。broker open は one-shot と同一の値域検証 (sort・重複
+禁止・slot <= 1024) を launch 前に行う。aux channels のみ後続 (session transport
+未対応)。値域・検証は one-shot と同一 (parse_mask_context_payload /
+parse_spatial_context_payload / parse_render_environment_payload)。full-resolution
+寸法を宣言する spatial は遅延 SEQUENCE_SETUP と全フレームの in_data に反映される。
+
+W1-4 では secondary layer を `session-layers:v1|slot,w,h;...` trailer
+(context trailer より前) で運ぶ。各 layer の RGBA8 ピクセルは §6 のレイヤー
+スロット (出力スロットの後、各 max_width*max_height*4) に static 配置され、
+worker は open 時に一度読んで全フレームで使い回す。header の
+`layer_slot_count` は broker が書き、両者が検証する。
+
+W1-4b では timed layer を同 trailer の 5 フィールド形式 `slot,w,h,time,scale`
+で運ぶ (3 フィールドは従来どおり static secondary)。物理スロットは layer 配列の
+index ごとに割り当てられるため、同じ semantic `slot` を持つ複数の timed layer
+(異なる rational time) はそれぞれ独立スロットを占有し、worker は各フレームの
+current_time に対し one-shot と同じ有理時刻一致 (`same_time` / `same_rational_time`)
+でマッチするエントリを選ぶ。dedup 規則は one-shot の layered_image_mode parser と
+完全一致させ、session が one-shot と同じ集合を受理・拒否するようにする (適格な
+構成で wrapper が無言 fallback しない)。同一 slot の判定: static 同士は拒否
+(フレームごとに曖昧)、timed 同士は有理時刻が等しいとき拒否、**static と timed の
+混在は許可** (layer parameter を current_time = static と他時刻 = timed で
+サンプルする正当な表現)。broker open と worker parse の双方が同一規則。broker の
+`secondary_layers` 診断フィールドは one-shot と揃えるため static layer のみ列挙し、
+timed layer は含めない (両ルートで同一集合になる)。
+
+実 AEX での layer 消費 (static/timed 双方) の等価性検証は layer parameter を
+宣言する probe fixture を要する (#195)。それまでは fixture worker
+(`session_protocol_worker`) 経由の統合テストで trailer 往復とスロット配置を
+検証する。alpha-as-coverage (W1-4c) は auxiliary option で運ばれ、実 worker +
+pf_sampling_probe による wrapper A/B (byte 一致) で session/one-shot 等価を
+直接検証済み (provider の意味的効果は probe が alpha-coverage を消費しないため
+byte 差としては現れないが、両ルートが同一オプションを同一 worker に送ることの
+等価性は確認できる)。
 
 one-shot との差分:
 
@@ -118,6 +161,13 @@ one-shot との差分:
 - 深度はコマンド語で表現する (one-shot の `--render-image` /
   `--render-image16` / `--render-image32` に倣い、`--render-session-v1` /
   `--render-session16-v1` / `--render-session32-v1`)。
+- SmartFX セッション (v1.1) は smart worker (`aex_smart_worker.exe`) の
+  コマンド語で、位置引数の契約は同一: `--smart-session-v1` /
+  `--smart-session16-v1` / `--smart-session32-v1`。ARGB32f は one-shot の
+  `--smart-image32[-cpu|-opencl|-directx]` に倣い GPU backend をコマンド語で
+  固定する: `--smart-session32-cpu-v1` / `--smart-session32-opencl-v1` /
+  `--smart-session32-directx-v1` (無印は CUDA/自動交渉)。backend は launch で
+  確定し、セッション中に変わらない。
 
 ## 4. 制御チャネル: メッセージ仕様
 
@@ -141,11 +191,44 @@ u32 LE の長さ接頭辞 + UTF-8 JSON 本文。1 メッセージ上限 64 KiB (
   ノート項目3)。
 - **メッセージ検証は strict (fail-closed)**: worker は exact-key 検証
   (`strict_json` の `json_exact_keys` と同じ流儀) を行い、未知フィールド・
-  未知 `type`・`v != 1` はプロトコル違反としてセッションを終了する (§7)。
-  黙って無視する経路は設けない: 将来の per-frame `parameters` (#107 /
-  AviUtl2 向け) や `param_epoch` (RESETUP 意味論確定後) は `v` の増分と
-  ともに導入し、旧 worker に送ると fail-closed になることで「stale な
-  launch 時パラメーターのまま ok を返す」誤動作を構造的に排除する。
+  未知 `type`・未知 `v` はプロトコル違反としてセッションを終了する (§7)。
+  黙って無視する経路は設けない: per-frame `parameters` (#107 / AviUtl2 向け、
+  §4.2.1 で v:2 として導入済み) や `param_epoch` (RESETUP 意味論確定後) は
+  `v` の増分とともに導入し、旧 worker に送ると fail-closed になることで
+  「stale な launch 時パラメーターのまま ok を返す」誤動作を構造的に
+  排除する。
+
+#### 4.2.1 render_frame v:2 (per-frame parameters、issue #107)
+
+```json
+{"v":2,"type":"render_frame","frame_index":3,
+ "current_time":{"value":3,"scale":30},
+ "parameters":"v4|param_1@1:f64=12.5"}
+```
+
+- `v:2` の `render_frame` は `parameters` を必須で持つ (exact keys:
+  `v`,`type`,`frame_index`,`current_time`,`parameters`)。パラメーター更新の
+  無いフレームは従来どおり v:1 を送る。`close` は v:1 のみ。
+- `parameters` は launch argv payload と同一の符号化
+  (`encode_interactive_payload` が生成する `v2|`〜`v5|` 形式、上限 16384
+  バイト、ASCII のみ)。新しい直列化形式は導入しない。
+- 意味論は**そのフレーム限りの完全置換**: メッセージ内の割当が launch 時
+  payload の割当を丸ごと置き換える (overlay ではない。載っていない slot は
+  プラグイン既定値に戻る)。後続の v:1 フレームは launch 時 payload に戻る。
+  worker 側の適用器は one-shot と同一 (`render_once` が毎フレーム
+  definitions を再初期化 → requested → parameter animation の順に適用) で、
+  適用順序も one-shot と変わらない: v:2 の割当の上に
+  `--parameter-animation-v1` タイムラインが重なる。
+- 検証は strict fail-closed: パース不能・非 ASCII・長さ超過・launch payload
+  と同じ構文検証 (重複 slot、範囲外 slot、型語の版ゲート) に落ちる
+  `parameters` はプロトコル違反としてセッションを終了する (§7)。broker は
+  送信前に one-shot と同じ検証を済ませているため、worker に届く不正
+  payload は broker の欠陥または改竄であり、フレーム局所エラーにしない。
+  宣言済みパラメーターとの型不一致など render 時検証はフレーム局所
+  診断のまま (v:1 と同じ)。
+- 応答 (`frame_done`) のスキーマは v1 のまま変わらない。共有メモリ
+  レイアウト (§6) と launch 構成 (§3) も不変で、ヘッダの `version`
+  フィールドは 1 のままとする (レイアウト版であってメッセージ版ではない)。
 
 ```json
 {"v":1,"type":"close"}
@@ -390,6 +473,52 @@ worker 側の実装マッピング (worker 側調査より):
   contract test + conformance の挙動不変を確認してから。
 
 段階0 の残観測 (項目1・2・6) の反映先: RESETUP 発行方針 (§4.2 の
-`param_epoch`)、per-frame パラメーター (v2)、SmartFX checkout スロット割当
-(v1.1) はいずれもメッセージの追加フィールド + worker 側拡張で入る設計に
-してあり、v1 実装をブロックしない。
+`param_epoch`)、SmartFX checkout スロット割当 (v1.1) はいずれもメッセージの
+追加フィールド + worker 側拡張で入る設計にしてあり、v1 実装をブロック
+しない。per-frame パラメーターは §4.2.1 の v:2 として 2026-07-20 に導入
+済み (issue #107)。
+
+### 9.1 v1.1: SmartFX セッション (issue #98 W3)
+
+§4 のメッセージ仕様・§6 の共有メモリレイアウト・§7 の安全境界は一切変更
+しない。変わるのはフレームの中身と起動配線のみ。
+
+- **worker lifecycle (§5 の smart 版)**: 共有のフレームループ
+  (`run_session_frame_loop`) が SEQUENCE_SETUP を classic と同じ契約で遅延
+  ホイストし (最初にレンダー到達した `render_frame` の時刻を in_data に
+  seed して発行、失敗は -47 で継続不可)、各フレームは FRAME_SETUP →
+  SMART_PRE_RENDER → SMART_RENDER (GPU 交渉時は GPU_DEVICE_SETUP /
+  SMART_RENDER_GPU / GPU_DEVICE_SETDOWN を内包) → FRAME_SETDOWN を
+  `smart_render_once(session)` として実行する
+  (`begin_frame_lifecycle` / `end_frame_lifecycle` に差し替え、one-shot の
+  `begin_render_lifecycle` 経路は不変)。GPU デバイスの setup/setdown は
+  one-shot と同じくフレーム内で完結する (コンテキストのフレーム間保持は
+  将来の最適化であり、v1.1 は one-shot と同観測を優先する)。
+- **frame_done の意味論**: フレーム局所エラーは one-shot の優先順位
+  (GPU setup → PreRender → render/finalize → GPU setdown) で 1 つの
+  `render_error` に畳む。ROI/rect 系の診断 (result_rect、
+  extra_pixels_contract_violation 等) はフレームを落とさず最終レポート側に
+  残る。**全フレーム = launch 寸法の契約 (§3) は smart でも同一**で、
+  partial / empty result_rect を含む寸法逸脱は -44 (dimension mismatch) の
+  セッション無効化になる。部分レンダーの受容はレイヤースロット・リング
+  バッファと同じ将来拡張。
+- **最終レポート (§4.4 の smart 版)**: smart worker の one-shot 型レポート
+  (`stage:"smartfx_render"`) に session 集計フィールドを追加する:
+  `session_mode` / `session_frames_attempted` /
+  `session_sequence_setup_error` / `session_sequence_setdown_error` /
+  `session_render_error` / `session_protocol_violation` /
+  `session_invariant_failure`。smart 数値フィールド (pre_render_error 等) は
+  最終フレームの値で、クリーン判定には使わない (フレーム局所エラー後の
+  clean close は classic と同じく成功)。broker の clean 判定
+  (`final_report_clean`) は classic では従来キー、smart では session_* キーを
+  fail-closed に要求する。exit code 23/24 の契約は共通。
+- **broker 配線**: `SessionOpenRequest` に `smart` / `gpu_backend` /
+  `gpu_runtime_policy` を追加。GPU 起動 (smart × ARGB32f × runtime backend
+  あり) は one-shot と同じ認証列 (`authenticate_gpu_worker_report` →
+  `authorize_dispatch`) を `dispatch_secure_gpu_image_session` として通す。
+  セッションは飛行中のリトライができないため、one-shot の Auto GPU
+  preflight フォールバックは open 時点に畳む: Auto かつ policy 無しは CPU
+  コマンドで開き、Auto かつ policy ありは CUDA (CPU リトライなし)、明示
+  GPU backend かつ policy 無しは open で fail-closed。`render-video-batch`
+  は `smart` / `gpu_backend` を受けるが policy 配線を持たないため GPU
+  backend は CPU 縮退 (Auto) か拒否 (明示) になる。

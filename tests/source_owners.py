@@ -64,6 +64,17 @@ WORKER_RUNTIME_OWNERS = (
     "minihost/src/worker_audio_execution.cpp",
     "minihost/src/worker_render_session.hpp",
     "minihost/src/worker_render_session.cpp",
+    "minihost/src/worker_drawbot_runtime.hpp",
+    "minihost/src/worker_drawbot_runtime.cpp",
+    "minihost/src/worker_param_checkout_runtime.hpp",
+    "minihost/src/worker_param_checkout_runtime.cpp",
+    "minihost/src/worker_classic_render_runtime.cpp",
+    "minihost/src/worker_host_suite_wiring.cpp",
+    "minihost/src/worker_l2_shared_helpers.cpp",
+    "minihost/src/worker_l2_payload_parsers.cpp",
+    "minihost/src/worker_early_mode_bridge.hpp",
+    "minihost/src/worker_early_mode_bridge.cpp",
+    "minihost/src/worker_entry_wiring.cpp",
 )
 
 # 契約名 → owner ファイル群 (repo ルート相対)。
@@ -130,6 +141,17 @@ CONTRACTS = {
         "minihost/src/worker_audio_execution.cpp",
         "minihost/src/worker_render_session.hpp",
         "minihost/src/worker_render_session.cpp",
+        "minihost/src/worker_drawbot_runtime.hpp",
+        "minihost/src/worker_drawbot_runtime.cpp",
+        "minihost/src/worker_param_checkout_runtime.hpp",
+        "minihost/src/worker_param_checkout_runtime.cpp",
+        "minihost/src/worker_classic_render_runtime.cpp",
+        "minihost/src/worker_host_suite_wiring.cpp",
+        "minihost/src/worker_l2_shared_helpers.cpp",
+        "minihost/src/worker_l2_payload_parsers.cpp",
+        "minihost/src/worker_early_mode_bridge.hpp",
+        "minihost/src/worker_early_mode_bridge.cpp",
+        "minihost/src/worker_entry_wiring.cpp",
         "minihost/src/worker_aegp_timeline_probe.hpp",
         "minihost/src/worker_aegp_timeline_probe.cpp",
         "minihost/src/worker_aegp_host_selftests.cpp",
@@ -174,6 +196,8 @@ CONTRACTS = {
         "minihost/src/worker_aegp_pf_interface_suite.hpp",
         "minihost/src/worker_aegp_pf_interface_suite.cpp",
         "minihost/src/l2_main.cpp",
+        "minihost/src/worker_host_suite_wiring.cpp",
+        "minihost/src/worker_entry_wiring.cpp",
         "minihost/src/worker_aegp_scene.cpp",
         "minihost/src/worker_aegp_scene.hpp",
         "minihost/src/worker_pf_suites.cpp",
@@ -185,6 +209,7 @@ CONTRACTS = {
     ),
     "pf_ae_adv_item_suite": (
         "minihost/src/l2_main.cpp",
+        "minihost/src/worker_host_suite_wiring.cpp",
         "minihost/src/worker_l2_render_abi.hpp",
         "minihost/src/worker_l2_render_abi.cpp",
         "minihost/src/worker_pf_suites.cpp",
@@ -193,6 +218,7 @@ CONTRACTS = {
     ),
     "pf_ae_channel_suite": (
         "minihost/src/l2_main.cpp",
+        "minihost/src/worker_host_suite_wiring.cpp",
         "minihost/src/worker_pf_suites.cpp",
         "minihost/src/worker_l2_suite_abi.hpp",
         "minihost/src/worker_pf_suites_internal.hpp",
@@ -200,6 +226,7 @@ CONTRACTS = {
         "minihost/src/worker_pf_ae_channel_runtime.cpp",
     ),
     "pf_ansi_suite": (
+        "minihost/src/worker_host_suite_wiring.cpp",
         "minihost/src/l2_main.cpp",
         "minihost/src/worker_l2_suite_abi.hpp",
         "minihost/src/worker_host_suite_catalog.hpp",
@@ -207,12 +234,14 @@ CONTRACTS = {
     ),
     "pf_color_suite": (
         "minihost/src/l2_main.cpp",
+        "minihost/src/worker_host_suite_wiring.cpp",
         "minihost/src/worker_pf_suites.cpp",
         "minihost/src/worker_pf_suites_internal.hpp",
         "minihost/src/worker_pf_color_selftests.cpp",
     ),
     "pf_effect_sequence_data_suite": (
         "minihost/src/l2_main.cpp",
+        "minihost/src/worker_l2_shared_helpers.cpp",
         "minihost/src/worker_pf_suites_internal.hpp",
         "minihost/src/worker_pf_suites.cpp",
         "minihost/src/worker_pf_state_runtime.hpp",
@@ -222,13 +251,18 @@ CONTRACTS = {
     ),
     "pf_fill_matte_legacy_callbacks": (
         "minihost/src/l2_main.cpp",
+        "minihost/src/worker_host_suite_wiring.cpp",
         "minihost/src/worker_pf_suites.cpp",
         "minihost/src/worker_l2_suite_abi.hpp",
         "minihost/src/worker_pf_suites_internal.hpp",
         "minihost/src/worker_pf_world_transform_runtime.cpp",
     ),
     "pf_helper_suite2": (
+        # The helpers owner precedes l2_main so the definition-anchored
+        # invoke_global_setdown slice resolves into the production body.
+        "minihost/src/worker_l2_shared_helpers.cpp",
         "minihost/src/l2_main.cpp",
+        "minihost/src/worker_host_suite_wiring.cpp",
         "minihost/src/worker_l2_suite_abi.hpp",
         "minihost/src/worker_pf_helper_runtime.cpp",
         "minihost/src/worker_pf_helper_runtime.hpp",
@@ -237,6 +271,7 @@ CONTRACTS = {
     ),
     "pf_world_transform_composite_rect": (
         "minihost/src/l2_main.cpp",
+        "minihost/src/worker_host_suite_wiring.cpp",
         "minihost/src/worker_l2_suite_abi.hpp",
         "minihost/src/worker_pf_suites.cpp",
         "minihost/src/worker_pf_world_transform_runtime.cpp",
@@ -250,13 +285,16 @@ CONTRACTS = {
     ),
     "sdk_grabba_update_menu": (
         "minihost/src/l2_main.cpp",
+        "minihost/src/worker_host_suite_wiring.cpp",
         "minihost/src/worker_l2_render_abi.hpp",
+        "minihost/src/worker_l2_render_abi.cpp",
         "minihost/src/worker_aegp_scene.cpp",
         "minihost/src/worker_aegp_scene.hpp",
         "minihost/src/worker_aegp_layer_render_runtime.cpp",
     ),
     "sdk_pathmaster_hard_edge_result": (
         "minihost/src/l2_main.cpp",
+        "minihost/src/worker_host_suite_wiring.cpp",
         "minihost/src/worker_pf_suites.cpp",
         "minihost/src/worker_pf_suites_internal.hpp",
         "minihost/src/worker_l2_suite_abi.hpp",
@@ -266,17 +304,22 @@ CONTRACTS = {
     ),
     "sdk_shifter_transform_sampling_result": (
         "minihost/src/l2_main.cpp",
+        "minihost/src/worker_host_suite_wiring.cpp",
+        "minihost/src/worker_classic_render_runtime.cpp",
         "minihost/src/worker_pf_suites.cpp",
         "minihost/src/worker_render_report.cpp",
         "minihost/src/worker_pf_sampling_runtime.cpp",
     ),
     "sdk_transformer_multi_input_result": (
         "minihost/src/l2_main.cpp",
+        "minihost/src/worker_host_suite_wiring.cpp",
+        "minihost/src/worker_classic_render_runtime.cpp",
         "minihost/src/worker_pf_suites.cpp",
         "minihost/src/worker_pf_world_transform_runtime.cpp",
     ),
     "smartfx_geometry_flags": (
         "minihost/src/l2_main.cpp",
+        "minihost/src/worker_entry_wiring.cpp",
         "minihost/src/render_subsystem.h",
         "minihost/src/render_subsystem.cpp",
         "minihost/src/worker_smart_dispatch.cpp",
@@ -286,12 +329,30 @@ CONTRACTS = {
     ),
     "native_depth_image_transport": (
         "minihost/src/l2_main.cpp",
+        "minihost/src/worker_classic_render_runtime.cpp",
         "minihost/src/render_subsystem.cpp",
         "minihost/src/worker_smart_finalize.cpp",
         "minihost/src/worker_render_session.cpp",
     ),
+    "aegp_receipt_callbacks": (
+        "minihost/src/l2_main.cpp",
+        "minihost/src/worker_l2_render_abi.hpp",
+        "minihost/src/worker_l2_render_abi.cpp",
+    ),
+    "classic_param_checkout": (
+        "minihost/src/l2_main.cpp",
+        "minihost/src/worker_classic_render_runtime.cpp",
+        "minihost/src/worker_param_checkout_runtime.cpp",
+    ),
+    "pf_ae_app_suite_complete": (
+        "minihost/src/l2_main.cpp",
+        "minihost/src/worker_host_suite_wiring.cpp",
+        "minihost/src/worker_host_suite_catalog.cpp",
+        "minihost/src/worker_drawbot_runtime.cpp",
+    ),
     "pf_adv_app_suite": (
         "minihost/src/l2_main.cpp",
+        "minihost/src/worker_host_suite_wiring.cpp",
         "minihost/src/worker_l2_suite_abi.hpp",
         "minihost/src/worker_host_suite_catalog.cpp",
         "minihost/src/worker_host_guard_selftests.cpp",
@@ -302,9 +363,11 @@ CONTRACTS = {
     ),
     "smartfx_suite_fault": (
         "minihost/src/l2_main.cpp",
+        "minihost/src/worker_entry_wiring.cpp",
         "minihost/src/l2_cli_dispatch.cpp",
         "minihost/src/worker_mask_runtime.hpp",
         "minihost/src/worker_mask_runtime.cpp",
+        "minihost/src/worker_mask_runtime_callbacks.cpp",
     ),
     "custom_ui_lifecycle": (
         "minihost/src/l2_main.cpp",
@@ -317,6 +380,7 @@ CONTRACTS = {
         "minihost/src/worker_parameter_execution.cpp",
     ),
     "runtime_module_authorization": (
+        "minihost/src/worker_entry_wiring.cpp",
         "minihost/src/l2_main.cpp",
         "minihost/src/worker_invocation_orchestration.cpp",
         "minihost/src/worker_entry_admission.cpp",

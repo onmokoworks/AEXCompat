@@ -8,6 +8,7 @@
 #include "worker_invocation_orchestration.hpp"
 #include "worker_pf_ae_channel_runtime.hpp"
 #include "worker_request_parser.hpp"
+#include "worker_smart_execution.hpp"
 
 #include <array>
 #include <cstddef>
@@ -101,6 +102,11 @@ std::size_t input_slot_offset() { return kHeaderBytes; }
 
 std::size_t output_slot_offset(const SessionGeometry& geometry) {
   return kHeaderBytes + align_slot(input_slot_bytes(geometry));
+}
+
+std::size_t layer_slot_offset(const SessionGeometry& geometry, int32_t index) {
+  return output_slot_offset(geometry) + align_slot(output_slot_bytes(geometry)) +
+         static_cast<std::size_t>(index) * align_slot(input_slot_bytes(geometry));
 }
 
 std::size_t expected_section_bytes(const SessionGeometry& geometry) {
@@ -247,9 +253,24 @@ int32_t render_once(EffectEntry entry, std::array<std::byte, kInSize>& input,
                     int32_t external_pixel_bytes = 4, bool manage_sequence = true,
                     std::vector<unsigned char>* captured_argb = nullptr,
                     bool* output_validation_failed = nullptr);
+worker_runtime::smart_execution::Result smart_render_once(
+    EffectEntry entry, std::array<std::byte, kInSize>& input,
+    std::array<std::byte, kOutSize>& output, const std::string& case_id,
+    const RequestedAssignments* requested = nullptr,
+    const std::vector<unsigned char>* external_rgba = nullptr,
+    const std::filesystem::path* external_output = nullptr,
+    int32_t external_width = 0, int32_t external_height = 0,
+    const std::vector<ExternalLayerInput>* external_layers = nullptr,
+    int32_t external_current_time = 0, int32_t external_time_step = 1,
+    int32_t external_total_time = 1, uint32_t external_time_scale = 1,
+    int32_t external_pixel_bytes = 4,
+    worker_runtime::smart_execution::SessionFrame* session = nullptr);
 std::string sha256_bytes(const unsigned char* data, std::size_t size);
 void record_output_checksum_detail(const unsigned char* rgba, int32_t width,
                                    int32_t height, int32_t pixel_bytes);
+// Launch-payload parser reused verbatim for the v:2 per-frame `parameters`
+// field (protocol §4.2.1): the message rides the exact argv encoding.
+bool parse_parameter_payload(const wchar_t* text, RequestedAssignments& output);
 
 namespace {
 // Spatial-context full-resolution override read through its render-subsystem
@@ -272,19 +293,40 @@ void write(std::array<std::byte, N>& bytes, std::size_t offset, T value) {
 }
 }  // namespace
 
+// One rendered session frame as the shared loop below consumes it: the
+// renderer-specific callback (classic render_once or smart_render_once)
+// reports its result in this shape so the transport, message grammar, and
+// fail-closed decisions stay identical across both session flavors.
+struct SessionFrameOutput {
+  int32_t frame_error{0};
+  int32_t width{0};
+  int32_t height{0};
+  int32_t rowbytes{0};
+  std::string input_hash;
+  std::string output_hash;
+  bool guard_violation{false};
+  bool output_validation_failed{false};
+};
+
 // Resident render session frame loop (docs/RENDER_SESSION_PROTOCOL_2026-07-19.md).
-// SEQUENCE_SETUP is hoisted once around render_once(manage_sequence=false)
-// following the persistent_sequence precedent; pixels move through the
-// inherited anonymous section (copy-through slots, the plug-in never sees the
-// mapping) and control messages over the inherited pipe pair with strict
-// exact-key validation. RenderSessionOutcome is defined in
-// worker_invocation_orchestration.hpp so the final dispatch owner can call
-// this across TUs.
-RenderSessionOutcome run_render_session(
+// SEQUENCE_SETUP is hoisted once around per-frame renders following the
+// persistent_sequence precedent; pixels move through the inherited anonymous
+// section (copy-through slots, the plug-in never sees the mapping) and control
+// messages over the inherited pipe pair with strict exact-key validation.
+// render_frame(current_time, frame_rgba, captured, frame_layers,
+// frame_override) runs one frame under the hoisted sequence and returns the
+// SessionFrameOutput above with the packed ARGB output in `captured`.
+// frame_override is a v:2 per-frame parameter set (protocol §4.2.1) or null;
+// the wrappers fall back to their launch payload when it is null.
+// RenderSessionOutcome is defined in worker_invocation_orchestration.hpp so
+// the final dispatch owner can call the wrappers below across TUs.
+template <typename FrameFn>
+RenderSessionOutcome run_session_frame_loop(
     EffectEntry entry, std::array<std::byte, kInSize>& input,
-    std::array<std::byte, kOutSize>& output, const RequestedAssignments* requested,
+    std::array<std::byte, kOutSize>& output,
     int32_t max_width, int32_t max_height, int32_t time_step, int32_t total_time,
-    uint32_t time_scale, int32_t pixel_bytes) {
+    uint32_t time_scale, int32_t pixel_bytes,
+    const std::vector<ExternalLayerInput>* external_layers, FrameFn&& render_frame) {
   using aexcompat::strict_json::JsonValue;
   using aexcompat::strict_json::StrictJsonParser;
   using aexcompat::strict_json::json_exact_keys;
@@ -305,13 +347,38 @@ RenderSessionOutcome run_render_session(
   constexpr int32_t kSessionSequenceSetupFailed = -47;
 
   RenderSessionOutcome outcome;
-  const wrs::SessionGeometry geometry{max_width, max_height, pixel_bytes, 0};
+  const int32_t layer_slot_count =
+      external_layers ? static_cast<int32_t>(external_layers->size()) : 0;
+  const wrs::SessionGeometry geometry{max_width, max_height, pixel_bytes,
+                                      layer_slot_count};
   wrs::SessionChannels channels;
   if (!channels.open_from_environment(geometry) ||
       !channels.static_header_matches(geometry)) {
     outcome.protocol_violation = true;
     return outcome;
   }
+  // Layers are static for the whole session: copy each layer's RGBA out of
+  // its shared slot once, into a worker-private vector the render loop reuses
+  // (the plug-in never sees the mapping). A layer whose declared geometry
+  // overflows its slot is a fail-closed launch error.
+  std::vector<ExternalLayerInput> session_layers;
+  if (external_layers) {
+    session_layers = *external_layers;
+    for (int32_t index = 0; index < layer_slot_count; ++index) {
+      auto& layer = session_layers[index];
+      const std::size_t bytes =
+          static_cast<std::size_t>(layer.width) * layer.height * 4;
+      if (bytes == 0 || bytes > wrs::input_slot_bytes(geometry)) {
+        outcome.protocol_violation = true;
+        return outcome;
+      }
+      layer.rgba.resize(bytes);
+      std::memcpy(layer.rgba.data(),
+                  channels.view() + wrs::layer_slot_offset(geometry, index), bytes);
+    }
+  }
+  const std::vector<ExternalLayerInput>* frame_layers =
+      session_layers.empty() ? nullptr : &session_layers;
   // Static in_data geometry and timing fields for the whole session. The
   // per-frame current_time is seeded when SEQUENCE_SETUP actually runs:
   // setup is deferred to the first rendered frame so effects that
@@ -359,18 +426,26 @@ RenderSessionOutcome run_render_session(
     std::string type;
     int32_t version{};
     if (!json_string(object, "type", type) || !json_i32(object, "v", version) ||
-        version != static_cast<int32_t>(wrs::kProtocolVersion)) {
+        (version != static_cast<int32_t>(wrs::kProtocolVersion) &&
+         version != static_cast<int32_t>(wrs::kRenderFrameParametersVersion))) {
       outcome.protocol_violation = true;
       break;
     }
     if (type == "close") {
-      if (!json_exact_keys(object, {"v", "type"})) outcome.protocol_violation = true;
+      if (version != static_cast<int32_t>(wrs::kProtocolVersion) ||
+          !json_exact_keys(object, {"v", "type"}))
+        outcome.protocol_violation = true;
       break;
     }
     int32_t frame_index{};
     const auto* time_value = json_member(object, "current_time");
-    if (type != "render_frame" ||
-        !json_exact_keys(object, {"v", "type", "frame_index", "current_time"}) ||
+    const bool with_parameters =
+        version == static_cast<int32_t>(wrs::kRenderFrameParametersVersion);
+    const bool exact_keys = with_parameters
+        ? json_exact_keys(object,
+                          {"v", "type", "frame_index", "current_time", "parameters"})
+        : json_exact_keys(object, {"v", "type", "frame_index", "current_time"});
+    if (type != "render_frame" || !exact_keys ||
         !json_i32(object, "frame_index", frame_index) || frame_index < 0 ||
         !time_value || !std::holds_alternative<JsonValue::Object>(time_value->value)) {
       outcome.protocol_violation = true;
@@ -384,6 +459,34 @@ RenderSessionOutcome run_render_session(
         !json_i32(time_object, "scale", current_scale) || current_scale <= 0) {
       outcome.protocol_violation = true;
       break;
+    }
+    // v:2 replaces the launch payload's assignments for this frame only
+    // (protocol §4.2.1). The payload rides the message in the argv encoding,
+    // ASCII only; a payload the broker's pre-send validation would have
+    // rejected is a protocol violation, not a frame-local diagnostic. The
+    // loop only produces the override; the launch payload itself stays with
+    // the flavor wrappers, which fall back to it when this is null.
+    RequestedAssignments frame_assignments;
+    const RequestedAssignments* frame_override = nullptr;
+    if (with_parameters) {
+      std::string parameters_text;
+      std::wstring widened;
+      bool widened_ok = json_string(object, "parameters", parameters_text);
+      if (widened_ok) {
+        widened.reserve(parameters_text.size());
+        for (const unsigned char byte : parameters_text) {
+          if (byte < 0x20 || byte > 0x7E) {
+            widened_ok = false;
+            break;
+          }
+          widened.push_back(static_cast<wchar_t>(byte));
+        }
+      }
+      if (!widened_ok || !parse_parameter_payload(widened.c_str(), frame_assignments)) {
+        outcome.protocol_violation = true;
+        break;
+      }
+      frame_override = &frame_assignments;
     }
     const uint32_t expected_generation = static_cast<uint32_t>(frame_index) + 1;
     // Error responses carry no output or generation: a frame rejected before
@@ -463,32 +566,22 @@ RenderSessionOutcome run_render_session(
       activate_external_aux();
       write<void*>(input, kInSequenceData, read<void*>(output, kOutSequenceData));
     }
-    int32_t frame_width = 0, frame_height = 0, frame_rowbytes = 0;
-    std::string frame_input_hash, frame_output_hash;
-    // Initialized true so it means "finalize observed corruption" when false:
-    // render_once's early host-side failures return before touching it, while
-    // every path that allocates the guarded buffer overwrites it.
-    bool frame_guards = true;
-    bool output_validation_failed = false;
     captured.clear();
-    const int32_t frame_error = render_once(
-        entry, input, output, "request", frame_width, frame_height, frame_rowbytes,
-        frame_input_hash, frame_output_hash, frame_guards, requested, &frame_rgba,
-        nullptr, max_width, max_height, nullptr, current_time, time_step, total_time,
-        time_scale, pixel_bytes, false, &captured, &output_validation_failed);
+    const SessionFrameOutput frame =
+        render_frame(current_time, frame_rgba, captured, frame_layers, frame_override);
     // Aux channel chunks are host-owned and cannot outlive one frame's render
     // lifecycle (end_render's cleanup for the one-shot path); the manifest
     // itself stays active across frames.
     aexcompat::pf_ae_channel::reclaim_layer_channels();
-    outcome.width = frame_width;
-    outcome.height = frame_height;
-    outcome.rowbytes = frame_rowbytes;
-    outcome.input_hash = frame_input_hash;
-    outcome.output_hash = frame_output_hash;
+    outcome.width = frame.width;
+    outcome.height = frame.height;
+    outcome.rowbytes = frame.rowbytes;
+    outcome.input_hash = frame.input_hash;
+    outcome.output_hash = frame.output_hash;
     // Corruption evidence outranks the render error: a plug-in that wrote
     // outside its guarded private buffer invalidates the session even when it
     // also reported a nonzero error. Host-protection invariant, fail closed.
-    if (!frame_guards) {
+    if (frame.guard_violation) {
       outcome.guards_intact = false;
       respond_error(kSessionGuardViolation);
       outcome.invariant_failure = true;
@@ -498,15 +591,15 @@ RenderSessionOutcome run_render_session(
     // numeric codes with selector errors, so the dispatch owner reports them
     // out of band; they are output-bounds invariant failures, not frame-local
     // diagnostics (protocol §4.3).
-    if (output_validation_failed) {
+    if (frame.output_validation_failed) {
       respond_error(kSessionOutputValidationError);
       outcome.invariant_failure = true;
       break;
     }
-    if (frame_error != 0) {
+    if (frame.frame_error != 0) {
       // Frame-local compatibility diagnostic; the sequence state is still
       // owned by the host, so the session may continue.
-      if (!respond_error(frame_error)) {
+      if (!respond_error(frame.frame_error)) {
         outcome.protocol_violation = true;
         break;
       }
@@ -515,13 +608,13 @@ RenderSessionOutcome run_render_session(
     // v1 fixes every frame to the launch max dimensions (protocol §3); an
     // expand/shrink-output effect changing them would publish dimensions the
     // broker cannot trust against the slot layout. Fail closed.
-    if (frame_width != max_width || frame_height != max_height) {
+    if (frame.width != max_width || frame.height != max_height) {
       respond_error(kSessionDimensionMismatch);
       outcome.invariant_failure = true;
       break;
     }
     const std::size_t expected_pixels =
-        static_cast<std::size_t>(frame_width) * frame_height;
+        static_cast<std::size_t>(frame.width) * frame.height;
     if (captured.size() != expected_pixels * pixel_bytes ||
         output_offset + captured.size() > wrs::expected_section_bytes(geometry)) {
       respond_error(kSessionOutputCaptureError);
@@ -536,18 +629,18 @@ RenderSessionOutcome run_render_session(
     // option): detail is computed from the same transferred RGBA bytes the
     // broker reads. The final report carries the last rendered frame's
     // detail; frame_done stays the per-frame truth.
-    record_output_checksum_detail(slot, frame_width, frame_height, pixel_bytes);
+    record_output_checksum_detail(slot, frame.width, frame.height, pixel_bytes);
     channels.write_header_u32(wrs::kHeaderFrameWidthOffset,
-                              static_cast<uint32_t>(frame_width));
+                              static_cast<uint32_t>(frame.width));
     channels.write_header_u32(wrs::kHeaderFrameHeightOffset,
-                              static_cast<uint32_t>(frame_height));
+                              static_cast<uint32_t>(frame.height));
     channels.write_header_u32(wrs::kHeaderOutputGenerationOffset,
                               expected_generation);
     // The frame checksum covers the transferred slot bytes, the exact bytes
     // the broker reads; the final report's output_hash keeps the one-shot
     // internal-ARGB definition (protocol §4.3).
     const std::string slot_checksum = sha256_bytes(slot, captured.size());
-    if (!respond_ok(frame_width, frame_height, frame_rowbytes, slot_checksum)) {
+    if (!respond_ok(frame.width, frame.height, frame.rowbytes, slot_checksum)) {
       outcome.protocol_violation = true;
       break;
     }
@@ -574,6 +667,94 @@ RenderSessionOutcome run_render_session(
               !outcome.protocol_violation && !outcome.invariant_failure
           ? 0
           : -1;
+  return outcome;
+}
+
+// Classic resident session: render_once(manage_sequence=false) per frame
+// under the hoisted sequence, the persistent_sequence precedent.
+RenderSessionOutcome run_render_session(
+    EffectEntry entry, std::array<std::byte, kInSize>& input,
+    std::array<std::byte, kOutSize>& output, const RequestedAssignments* requested,
+    int32_t max_width, int32_t max_height, int32_t time_step, int32_t total_time,
+    uint32_t time_scale, int32_t pixel_bytes,
+    const std::vector<ExternalLayerInput>* external_layers) {
+  return run_session_frame_loop(
+      entry, input, output, max_width, max_height, time_step, total_time,
+      time_scale, pixel_bytes, external_layers,
+      [&](int32_t current_time, const std::vector<unsigned char>& frame_rgba,
+          std::vector<unsigned char>& captured,
+          const std::vector<ExternalLayerInput>* frame_layers,
+          const RequestedAssignments* frame_override) {
+        SessionFrameOutput frame;
+        // Initialized true so it means "finalize observed corruption" when
+        // false: render_once's early host-side failures return before touching
+        // it, while every path that allocates the guarded buffer overwrites it.
+        bool frame_guards = true;
+        bool output_validation_failed = false;
+        frame.frame_error = render_once(
+            entry, input, output, "request", frame.width, frame.height,
+            frame.rowbytes, frame.input_hash, frame.output_hash, frame_guards,
+            frame_override ? frame_override : requested, &frame_rgba, nullptr,
+            max_width, max_height, frame_layers,
+            current_time, time_step, total_time, time_scale, pixel_bytes, false,
+            &captured, &output_validation_failed);
+        frame.guard_violation = !frame_guards;
+        frame.output_validation_failed = output_validation_failed;
+        return frame;
+      });
+}
+
+// SmartFX resident session frame loop (protocol v1.1): each frame runs
+// PreRender→SmartRender (and any GPU device setup/setdown the plan selects)
+// inside the per-frame FRAME pair, while the shared loop above owns the
+// hoisted SEQUENCE pair, transport, and fail-closed decisions. The GPU
+// backend is fixed at launch through the session command word's case_id.
+// Smart sessions carry no layer slots in v1.1 (the broker rejects the
+// combination at open), so the loop's frame_layers stay unused here.
+SmartRenderSessionOutcome run_smart_render_session(
+    EffectEntry entry, std::array<std::byte, kInSize>& input,
+    std::array<std::byte, kOutSize>& output, const RequestedAssignments* requested,
+    const std::string& case_id, int32_t max_width, int32_t max_height,
+    int32_t time_step, int32_t total_time, uint32_t time_scale,
+    int32_t pixel_bytes) {
+  SmartRenderSessionOutcome outcome;
+  outcome.session = run_session_frame_loop(
+      entry, input, output, max_width, max_height, time_step, total_time,
+      time_scale, pixel_bytes, nullptr,
+      [&](int32_t current_time, const std::vector<unsigned char>& frame_rgba,
+          std::vector<unsigned char>& captured,
+          const std::vector<ExternalLayerInput>*,
+          const RequestedAssignments* frame_override) {
+        SessionFrameOutput frame;
+        worker_runtime::smart_execution::SessionFrame session_frame{&captured};
+        const worker_runtime::smart_execution::Result frame_result = smart_render_once(
+            entry, input, output, case_id, frame_override ? frame_override : requested,
+            &frame_rgba, nullptr,
+            max_width, max_height, nullptr, current_time, time_step, total_time,
+            time_scale, pixel_bytes, &session_frame);
+        outcome.last = frame_result;
+        frame.width = frame_result.output_width;
+        frame.height = frame_result.output_height;
+        frame.rowbytes = frame_result.output_rowbytes;
+        frame.input_hash = frame_result.input_hash;
+        frame.output_hash = frame_result.output_hash;
+        // Sentinel evidence only exists once the guarded output buffer was
+        // built; refusals before that point are frame-local diagnostics, not
+        // corruption.
+        frame.guard_violation =
+            session_frame.output_buffer_allocated && !session_frame.guards_intact;
+        // The per-frame diagnostic keeps the one-shot error priority: GPU
+        // device setup, then PreRender, then the render/finalize error, then
+        // GPU device setdown. ROI/rect diagnostics stay in the final report;
+        // host-protection stays with the shared loop's geometry checks.
+        frame.frame_error = frame_result.gpu_setup_error != 0
+            ? frame_result.gpu_setup_error
+            : frame_result.pre_error != 0
+                ? frame_result.pre_error
+                : frame_result.render_error != 0 ? frame_result.render_error
+                                                 : frame_result.gpu_setdown_error;
+        return frame;
+      });
   return outcome;
 }
 

@@ -14,6 +14,7 @@ SCENE_SOURCE = ROOT / "minihost" / "src" / "worker_aegp_scene.cpp"
 SCENE_SELFTEST_SOURCE = ROOT / "minihost" / "src" / "worker_aegp_scene_selftests.cpp"
 PF_SUITE_SOURCE = ROOT / "minihost" / "src" / "worker_pf_suites_internal.hpp"
 SELFTEST_DISPATCH_SOURCE = ROOT / "minihost" / "src" / "worker_selftest_dispatch.cpp"
+ENTRY_WIRING_SOURCE = ROOT / "minihost" / "src" / "worker_entry_wiring.cpp"
 BUILD = ROOT / "target" / "minihost-build"
 SDK_ROOT = os.environ.get("AFTER_EFFECTS_SDK_ROOT")
 HEADERS = Path(SDK_ROOT) / "Examples" / "Headers" if SDK_ROOT else None
@@ -118,7 +119,8 @@ int main() { return 0; }
 def test_l2_source_exposes_effect_stack_contract() -> None:
     source = "\n".join(path.read_text(encoding="utf-8") for path in
                        (SOURCE, SCENE_SOURCE, SCENE_SELFTEST_SOURCE,
-                           PF_SUITE_SOURCE, SELFTEST_DISPATCH_SOURCE))
+                           PF_SUITE_SOURCE, SELFTEST_DISPATCH_SOURCE,
+                           ENTRY_WIRING_SOURCE))
     for marker in (
         "int32_t __cdecl aegp_set_effect_flags(",
         "int32_t __cdecl aegp_reorder_effect(",

@@ -21,7 +21,9 @@ def worker():
 
 
 def test_native_provider_keeps_plane_metadata_and_never_infers_noncoverage_planes():
-    source = SOURCE.read_text(encoding="utf-8") + CHANNEL_RUNTIME.read_text(encoding="utf-8")
+    source = (SOURCE.read_text(encoding="utf-8") +
+              (SOURCE.parent / "worker_classic_render_runtime.cpp").read_text(encoding="utf-8") +
+              CHANNEL_RUNTIME.read_text(encoding="utf-8"))
     for contract in (
         "signed_row_bytes",
         "origin_x",

@@ -6,6 +6,7 @@ import source_owners
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = source_owners.L2_MAIN
+PARAM_SUITES = ROOT / "minihost" / "src" / "worker_pf_param_suites.cpp"
 SELFTEST_SOURCE = ROOT / "minihost" / "src" / "worker_pf_color_selftests.cpp"
 
 
@@ -20,10 +21,10 @@ def _worker():
 
 
 def test_color_param_suite_is_exact_typed_frozen_v1_abi():
-    # The catalog entry stays in l2_main; the ABI struct and asserts live in
-    # the worker-runtime owner set.
+    # The catalog entry stays with the suite wiring owner; the ABI struct and
+    # asserts live in the worker-runtime owner set.
     assert ('{"PF ColorParamSuite", 1, &g_color_param_suite1}'
-            in SOURCE.read_text(encoding="utf-8"))
+            in (source_owners.SRC / "worker_host_suite_wiring.cpp").read_text(encoding="utf-8"))
     text = source_owners.worker_text()
     assert "struct PfColorParamSuite1" in text
     assert "sizeof(PfColorParamSuite1) == 1 * sizeof(void*)" in text
@@ -33,7 +34,8 @@ def test_color_param_suite_is_exact_typed_frozen_v1_abi():
 
 
 def test_color_param_contract_is_stateful_depth_aware_and_fail_closed():
-    text = SOURCE.read_text(encoding="utf-8")
+    text = (SOURCE.read_text(encoding="utf-8") + (source_owners.SRC / "worker_host_suite_wiring.cpp").read_text(encoding="utf-8") +
+            PARAM_SUITES.read_text(encoding="utf-8"))
     # The production callback contract stays in l2_main.
     for marker in (
         "current_float_color",

@@ -36,7 +36,7 @@ def test_gpu_negotiation_rejects_unwritten_output_without_setdown_fault():
 def test_gpu_abi_and_suite_table_are_explicit():
     source = "".join(
         path.read_text(encoding="utf-8")
-        for path in (SOURCE, SMART_DISPATCH, SMART_FINALIZE)
+        for path in (SOURCE, source_owners.SRC / "worker_host_suite_wiring.cpp", SMART_DISPATCH, SMART_FINALIZE)
     )
     for marker in (
         "write<int16_t>(pre_input, 44",

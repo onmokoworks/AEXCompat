@@ -223,3 +223,45 @@ int dispatch(const Request& request) {
 }
 
 }  // namespace aexcompat::worker_runtime::classic
+
+// Classic host progress/abort/quack callbacks moved from worker_main
+// (issue #170); their telemetry already lives in host_callback_telemetry().
+// These callbacks keep the C linkage worker_l2_suite_abi.hpp froze for the
+// legacy callback slots.
+namespace aexcompat::l2_detail {
+extern "C" {
+int32_t __cdecl duck_quack(uint16_t);
+int32_t __cdecl abort_render(void*);
+int32_t __cdecl report_progress(void*, int32_t, int32_t);
+}
+namespace {
+auto& g_host_callback_telemetry =
+    aexcompat::worker_runtime::classic::host_callback_telemetry();
+auto& g_duck_quacks = g_host_callback_telemetry.duck_quacks;
+auto& g_abort_calls = g_host_callback_telemetry.abort_calls;
+auto& g_progress_calls = g_host_callback_telemetry.progress_calls;
+auto& g_last_progress_current = g_host_callback_telemetry.last_progress_current;
+auto& g_last_progress_total = g_host_callback_telemetry.last_progress_total;
+}  // namespace
+
+int32_t __cdecl duck_quack(uint16_t times) {
+  if (times > 64) return 4;
+  g_duck_quacks += times;
+  return 0;
+}
+
+int32_t __cdecl abort_render(void* effect_ref) {
+  if (!effect_ref) return 4;
+  ++g_abort_calls;
+  return 0;
+}
+
+int32_t __cdecl report_progress(void* effect_ref, int32_t current, int32_t total) {
+  if (!effect_ref || total <= 0 || current < 0 || current > total) return 4;
+  ++g_progress_calls;
+  g_last_progress_current = current;
+  g_last_progress_total = total;
+  return 0;
+}
+
+}  // namespace aexcompat::l2_detail

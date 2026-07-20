@@ -136,6 +136,7 @@ def test_classic_and_smart_dispatch_register_host_worlds_and_resizes():
         encoding="utf-8"
     )
     text = (SOURCE.read_text(encoding="utf-8") +
+            (SOURCE.parent / "worker_classic_render_runtime.cpp").read_text(encoding="utf-8") +
             WORLD_TRANSFORM_RUNTIME.read_text(encoding="utf-8") + smart_dispatch)
     render = RENDER_SOURCE.read_text(encoding="utf-8")
     assert text.count("DispatchWorldFormatScope dispatch_worlds;") >= 3

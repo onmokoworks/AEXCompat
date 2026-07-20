@@ -1,14 +1,8 @@
-from pathlib import Path
 import source_owners
 
 
-ROOT = Path(__file__).resolve().parents[1]
-SOURCE = source_owners.L2_MAIN
-CATALOG = ROOT / "minihost" / "src" / "worker_host_suite_catalog.cpp"
-
-
 def source() -> str:
-    return SOURCE.read_text(encoding="utf-8") + CATALOG.read_text(encoding="utf-8")
+    return source_owners.contract_text("pf_ae_app_suite_complete")
 
 
 def test_app_suite_versions_use_sdk_slot_counts_and_acquire_versions():

@@ -111,18 +111,31 @@ mod worker {
         }
     }
 
-    fn final_report(frames: u32) -> String {
+    fn final_report(frames: u32, smart: bool) -> String {
         // The broker validates a module audit on a clean exit exactly like the
         // one-shot path; this fixture reports its own honest minimal audit.
-        serde_json::json!({
+        // The session-mechanics keys follow the worker flavor: the classic
+        // report reuses its persistent-sequence fields while the smart report
+        // carries dedicated session_* fields (protocol v1.1).
+        let mechanics = if smart {
+            serde_json::json!({
+                "session_mode": true,
+                "session_frames_attempted": frames,
+                "session_render_error": 0,
+                "session_sequence_setup_error": 0,
+                "session_sequence_setdown_error": 0,
+            })
+        } else {
+            serde_json::json!({
+                "render_error": 0,
+                "persistent_sequence_setup_error": 0,
+                "persistent_sequence_setdown_error": 0,
+            })
+        };
+        let mut report = serde_json::json!({
             "status": "render_completed",
-            "render_error": 0,
             "global_setdown_error": 0,
             "session_frames": frames,
-            // The clean-close contract fields the broker validates, mirroring
-            // the real worker's final report.
-            "persistent_sequence_setup_error": 0,
-            "persistent_sequence_setdown_error": 0,
             "guard_bytes_intact": true,
             "suite_leases_balanced": true,
             "handle_lifetimes_balanced": true,
@@ -152,8 +165,12 @@ mod worker {
                     "system32": ["kernel32.dll"]
                 }
             }
-        })
-        .to_string()
+        });
+        report
+            .as_object_mut()
+            .unwrap()
+            .extend(mechanics.as_object().unwrap().clone());
+        report.to_string()
     }
 
     pub fn run() -> i32 {
@@ -256,7 +273,21 @@ mod worker {
         if effective >= 11 && args[effective - 1].starts_with("v2|") {
             effective -= 1;
         }
-        if effective != 10 || args[1] != "--render-session-v1" {
+        // The secondary-layer trailer sits ahead of the context trailers;
+        // keep it to validate the header's layer_slot_count and the slots.
+        let mut layer_trailer: Option<String> = None;
+        if effective >= 11 && args[effective - 1].starts_with("session-layers:v1|") {
+            layer_trailer = Some(args[effective - 1].clone());
+            effective -= 1;
+        }
+        let expected_layer_count = layer_trailer
+            .as_deref()
+            .map(|trailer| trailer["session-layers:v1|".len()..].split(';').count() as u32)
+            .unwrap_or(0);
+        // The smart session command selects the smart final-report contract
+        // (protocol v1.1); the transport behavior is identical.
+        let smart = args[1] == "--smart-session-v1";
+        if effective != 10 || (args[1] != "--render-session-v1" && !smart) {
             return 2;
         }
         let (Ok(width), Ok(height), Ok(time_scale)) = (
@@ -284,7 +315,7 @@ mod worker {
             || view.read_u32(DEPTH_CODE_OFFSET) != 8
             || view.read_u32(MAX_WIDTH_OFFSET) != width as u32
             || view.read_u32(MAX_HEIGHT_OFFSET) != height as u32
-            || view.read_u32(LAYER_SLOT_COUNT_OFFSET) != 0
+            || view.read_u32(LAYER_SLOT_COUNT_OFFSET) != expected_layer_count
         {
             return EXIT_PROTOCOL_VIOLATION;
         }
@@ -292,6 +323,24 @@ mod worker {
         let aligned = |bytes: usize| bytes.div_ceil(SLOT_ALIGNMENT) * SLOT_ALIGNMENT;
         let input_offset = HEADER_BYTES;
         let output_offset = HEADER_BYTES + aligned(slot_bytes);
+
+        // The integration test fills each layer's slot with its slot number as
+        // a byte, so reading the first byte of each layer slot proves the
+        // metadata reached the right slot with the right pixels (issue #98 W1-4).
+        if let Some(trailer) = &layer_trailer {
+            let layer_base = output_offset + aligned(slot_bytes);
+            for (index, entry) in trailer["session-layers:v1|".len()..].split(';').enumerate() {
+                let Some(slot) = entry.split(',').next().and_then(|s| s.parse::<u32>().ok())
+                else {
+                    return EXIT_PROTOCOL_VIOLATION;
+                };
+                let offset = layer_base + index * aligned(slot_bytes);
+                let byte = unsafe { view.0.add(offset).read() };
+                if byte != slot as u8 {
+                    return EXIT_PROTOCOL_VIOLATION;
+                }
+            }
+        }
 
         let mut frames = 0u32;
         loop {
@@ -315,6 +364,22 @@ mod worker {
                 Some("render_frame") => {}
                 _ => return EXIT_PROTOCOL_VIOLATION,
             }
+            // Mirrors the real worker's message version gate (protocol
+            // §4.2.1): v:1 must not carry parameters, v:2 must carry the
+            // string payload, anything else is a violation.
+            let frame_parameters = match message["v"].as_u64() {
+                Some(1) => {
+                    if message.get("parameters").is_some() {
+                        return EXIT_PROTOCOL_VIOLATION;
+                    }
+                    None
+                }
+                Some(2) => match message["parameters"].as_str() {
+                    Some(payload) => Some(payload.to_owned()),
+                    None => return EXIT_PROTOCOL_VIOLATION,
+                },
+                _ => return EXIT_PROTOCOL_VIOLATION,
+            };
             let Some(frame_index) = message["frame_index"].as_u64() else {
                 return EXIT_PROTOCOL_VIOLATION;
             };
@@ -409,6 +474,14 @@ mod worker {
             for byte in &mut output {
                 *byte = 255 - *byte;
             }
+            // Stamp the received per-frame payload's digest into the frame so
+            // integration tests can prove the v:2 parameters actually reached
+            // the worker (the real worker proves this by rendering with them).
+            if let Some(payload) = &frame_parameters {
+                let digest = Sha256::digest(payload.as_bytes());
+                let stamp = digest.len().min(output.len());
+                output[..stamp].copy_from_slice(&digest[..stamp]);
+            }
             unsafe {
                 std::ptr::copy_nonoverlapping(output.as_ptr(), view.0.add(output_offset), slot_bytes);
             }
@@ -448,11 +521,11 @@ mod worker {
             if behavior == "exit_after_frame_0" && frame_index == 0 {
                 // A unilateral exit with a clean-looking report and exit code
                 // 0, violating only the close-handshake contract.
-                println!("{}", final_report(frames));
+                println!("{}", final_report(frames, smart));
                 return 0;
             }
         }
-        println!("{}", final_report(frames));
+        println!("{}", final_report(frames, smart));
         0
     }
 }

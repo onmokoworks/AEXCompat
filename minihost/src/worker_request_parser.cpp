@@ -92,6 +92,55 @@ ParseResult parse(Kind kind, int argc, wchar_t** argv, const Hooks& hooks) {
           !hooks.parse_spatial_context(argv[mode.image_trailer_argc]))) throw 1;
       if (mode.image_render_environment && (!hooks.parse_render_environment ||
           !hooks.parse_render_environment(argv[mode.image_environment_argc]))) throw 1;
+      // Secondary layer metadata: `session-layers:v1|slot,w,h;slot,w,h;...`.
+      // The pixels arrive in the shared layer slots, so only the geometry and
+      // slot assignment travel here (issue #98 W1-4). Timed layers are v1.1.
+      if (mode.session_layers) {
+        const std::wstring trailer(argv[mode.image_argc - 1]);
+        const std::wstring body = trailer.substr(std::wcslen(L"session-layers:v1|"));
+        std::size_t offset = 0;
+        while (offset < body.size()) {
+          const std::size_t separator = body.find(L';', offset);
+          const std::size_t end = separator == std::wstring::npos ? body.size() : separator;
+          const std::wstring field = body.substr(offset, end - offset);
+          LayerInput layer;
+          int consumed = 0;
+          // `slot,w,h,time,scale` (5 fields) is a timed layer (issue #98
+          // W1-4b); the shorter `slot,w,h` stays a static secondary (W1-4).
+          if (std::count(field.begin(), field.end(), L',') == 4) {
+            if (swscanf_s(field.c_str(), L"%d,%d,%d,%d,%u%n", &layer.slot,
+                    &layer.width, &layer.height, &layer.time, &layer.time_scale,
+                    &consumed) != 5 ||
+                layer.time_scale == 0)
+              throw 1;
+            layer.timed = true;
+          } else if (swscanf_s(field.c_str(), L"%d,%d,%d%n", &layer.slot,
+                         &layer.width, &layer.height, &consumed) != 3) {
+            throw 1;
+          }
+          if (static_cast<std::size_t>(consumed) != field.size() ||
+              layer.slot <= 0 || layer.slot > 1024 ||
+              layer.width <= 0 || layer.width > 4096 ||
+              layer.height <= 0 || layer.height > 4096 ||
+              std::any_of(invocation.layers.begin(), invocation.layers.end(),
+                  [&](const auto& existing) {
+                    // Same dedup as the one-shot layered_image_mode path: a
+                    // slot rejects only a second static entry or a timed entry
+                    // at a rational time already present. A static plus timed
+                    // entries at one slot is the valid representation of a
+                    // layer parameter sampled at current_time and other times,
+                    // so the session must admit exactly what one-shot does.
+                    if (existing.slot != layer.slot) return false;
+                    if (!existing.timed || !layer.timed) return !existing.timed && !layer.timed;
+                    return same_time(existing, layer);
+                  }))
+            throw 1;
+          invocation.layers.push_back(std::move(layer));
+          if (separator == std::wstring::npos) break;
+          offset = separator + 1;
+        }
+        if (invocation.layers.empty() || invocation.layers.size() > 64) throw 1;
+      }
     }
     if (mode.image_mode) {
       auto& invocation = result.invocation;

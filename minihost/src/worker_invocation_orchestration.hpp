@@ -27,6 +27,15 @@ struct RenderSessionOutcome {
   bool guards_intact{true};
   int32_t render_error{-1};
 };
+
+// SmartFX resident session (protocol v1.1): the shared session mechanics plus
+// the last rendered frame's smart result, which feeds the smart completion
+// report the same way the one-shot path does. `last` stays default-initialized
+// when no frame reached rendering.
+struct SmartRenderSessionOutcome {
+  RenderSessionOutcome session;
+  worker_runtime::smart_execution::Result last;
+};
 }  // namespace aexcompat::l2_detail
 namespace aexcompat::worker_runtime::invocation {
 using parameters::RequestedAssignments;
@@ -205,6 +214,15 @@ struct SmartFinalDispatchResult {
   std::string case_id;
   smart_execution::Result smart;
   bool lifetime_fault_observed{};
+  // Resident smart session (protocol v1.1) summary; meaningful only when the
+  // invocation ran in session mode. Mirrors ClassicFinalDispatchResult's
+  // session fields so worker_main keeps the same 23/24 exit contract.
+  bool session_protocol_violation{};
+  bool session_invariant_failure{};
+  int32_t session_frames_attempted{};
+  int32_t session_sequence_setup_error{-1};
+  int32_t session_sequence_setdown_error{-1};
+  int32_t session_render_error{-1};
 };
 
 ClassicFinalDispatchResult run_classic_final_dispatch(const FinalDispatchRequest&);

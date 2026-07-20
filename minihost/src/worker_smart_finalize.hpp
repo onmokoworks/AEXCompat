@@ -34,6 +34,7 @@ struct Request {
   const std::filesystem::path* external_output{};
   int32_t width{}, height{}, rowbytes{}, pixel_bytes{};
   std::array<std::byte, 56>* pre_output{};
+  smart_execution::SessionFrame* session{};
 };
 bool finalize(const Request&, const Hooks&, smart_execution::Result&);
 }

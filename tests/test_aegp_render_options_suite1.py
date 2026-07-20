@@ -84,7 +84,7 @@ def test_registry_is_bounded_aba_resistant_and_receipts_snapshot_options():
 
 
 def test_item_async_and_render_suite_slot_zero_publish_ready_receipts():
-    text = SOURCE.read_text(encoding="utf-8")
+    text = source_owners.contract_text("aegp_receipt_callbacks")
     runtime = ITEM_RUNTIME.read_text(encoding="utf-8")
     assert "aegp_item_render_runtime::publish_receipt(options, receipt)" in text
     assert "aegp_item_render_runtime::checkout(" in text

@@ -20,6 +20,18 @@ using Output = parameter_execution::BufferOut;
 using RequestedAssignments = parameters::RequestedAssignments;
 using ExternalLayerInput = request_parser::LayerInput;
 
+// One resident-session frame (docs/RENDER_SESSION_PROTOCOL_2026-07-19.md
+// v1.1). Non-null selects the frame-only lifecycle (SEQUENCE_SETUP/SETDOWN are
+// hoisted by the session loop) and captures the packed ARGB output for the
+// shared-memory slot instead of a file. guards_intact is only meaningful when
+// output_buffer_allocated is true: early refusals never build the guarded
+// buffer, so there is nothing to corrupt.
+struct SessionFrame {
+  std::vector<unsigned char>* captured_argb{};
+  bool output_buffer_allocated{};
+  bool guards_intact{true};
+};
+
 struct Result {
   std::shared_ptr<const smart::Snapshot> runtime{
       std::make_shared<smart::Snapshot>()};
@@ -69,7 +81,7 @@ using Execute = Result (*)(EffectEntry, Input&, Output&, const std::string&,
     const RequestedAssignments*, const std::vector<unsigned char>*,
     const std::filesystem::path*, int32_t, int32_t,
     const std::vector<ExternalLayerInput>*, int32_t, int32_t, int32_t,
-    uint32_t, int32_t);
+    uint32_t, int32_t, SessionFrame*);
 
 struct Hooks {
   Execute execute{};
@@ -84,6 +96,6 @@ Result render_once(EffectEntry, Input&, Output&, const std::string&,
                    int32_t = 0, int32_t = 0,
                    const std::vector<ExternalLayerInput>* = nullptr,
                    int32_t = 0, int32_t = 1, int32_t = 1,
-                   uint32_t = 1, int32_t = 4);
+                   uint32_t = 1, int32_t = 4, SessionFrame* = nullptr);
 
 }  // namespace aexcompat::worker_runtime::smart_execution
