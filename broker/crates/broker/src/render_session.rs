@@ -1302,12 +1302,20 @@ impl RenderSession {
                 POST_TERMINATION_COLLECT_TIMEOUT,
             ));
         }
+        // The top-level width/height fields belong only to a resize_needed
+        // response; deny_unknown_fields treats them as known for every status,
+        // so reject them here on ok/error to keep the frame_done schema strict.
+        let carries_resize_fields = done.width.is_some() || done.height.is_some();
         match done.status.as_str() {
             "error" => {
-                if done.output.is_some() || done.generation.is_some() || done.render_error == 0 {
+                if done.output.is_some()
+                    || done.generation.is_some()
+                    || done.render_error == 0
+                    || carries_resize_fields
+                {
                     return Err(self.invalidate(
                         "malformed_error_response",
-                        format!("frame {frame_index} error response carried output fields"),
+                        format!("frame {frame_index} error response carried output/resize fields"),
                         true,
                         POST_TERMINATION_COLLECT_TIMEOUT,
                     ));
@@ -1372,6 +1380,14 @@ impl RenderSession {
                         POST_TERMINATION_COLLECT_TIMEOUT,
                     ));
                 };
+                if carries_resize_fields {
+                    return Err(self.invalidate(
+                        "malformed_ok_response",
+                        format!("frame {frame_index} ok response carried resize fields"),
+                        true,
+                        POST_TERMINATION_COLLECT_TIMEOUT,
+                    ));
+                }
                 if let Err(detail) = self.validate_ok_frame(expected_generation, &output, generation, done.render_error)
                 {
                     return Err(self.invalidate(
