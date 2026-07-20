@@ -8,6 +8,14 @@
 
 namespace aexcompat::worker_render_report {
 
+// Conformance render-settings transport (issue #4 one-command bundle). Legacy
+// callers that do not install --conformance-render-settings-v1 keep the historic
+// premultiplied contract; an explicit trailer overrides the reported alpha mode
+// and renderer. parse_ validates the encoded trailer and records the globals;
+// conformance_render_settings_report_json emits the provenance block (or null).
+bool parse_conformance_render_settings(const wchar_t* encoded);
+std::string conformance_render_settings_report_json();
+
 // Owns one complete ordered report before it becomes externally observable.
 // Callers append fields in schema order; emit publishes the JSON atomically.
 class ReportSnapshot {

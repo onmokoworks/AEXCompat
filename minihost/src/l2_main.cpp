@@ -1341,6 +1341,10 @@ bool load_l2_parameter_animation(void*, const wchar_t* value) {
                                   g_parameter_timelines);
 }
 
+bool parse_l2_conformance_render_settings(void*, const wchar_t* value) {
+  return aexcompat::worker_render_report::parse_conformance_render_settings(value);
+}
+
 bool __cdecl scene_render_receipt_enabled() {
   return is_render_worker() && aexcompat::aegp_layer_render_runtime::active();
 }
@@ -1522,7 +1526,8 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
     const auto parsed = aexcompat::worker_runtime::request_parser::parse(
       aexcompat::worker_runtime::request_parser::Kind::Render, argc, argv,
       {{nullptr, set_l2_dump_worlds_dir, enable_l2_checksum_detail,
-        load_l2_aux_manifest, parse_l2_alpha_coverage, load_l2_parameter_animation},
+        load_l2_aux_manifest, parse_l2_alpha_coverage, load_l2_parameter_animation,
+        parse_l2_conformance_render_settings},
        &parse_layer_transport_key, &parse_mask_context_payload,
        &parse_spatial_context_payload, &parse_render_environment_payload,
        &invocation.requested_parameters, parse_requested_payload, &configure_mask_scene});
@@ -1533,7 +1538,8 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
     const auto parsed = aexcompat::worker_runtime::request_parser::parse(
         aexcompat::worker_runtime::request_parser::Kind::Smart, argc, argv,
         {{nullptr, set_l2_dump_worlds_dir, enable_l2_checksum_detail,
-          load_l2_aux_manifest, parse_l2_alpha_coverage, load_l2_parameter_animation},
+          load_l2_aux_manifest, parse_l2_alpha_coverage, load_l2_parameter_animation,
+          parse_l2_conformance_render_settings},
          &parse_layer_transport_key, &parse_mask_context_payload,
          &parse_spatial_context_payload, &parse_render_environment_payload,
          &invocation.requested_parameters, parse_requested_payload, &configure_mask_scene});

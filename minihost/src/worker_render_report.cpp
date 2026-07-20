@@ -14,11 +14,64 @@
 #include <cstddef>
 #include <ostream>
 #include <iomanip>
+#include <string>
+#include <vector>
 
 namespace aexcompat::worker_render_report {
 
 ReportSnapshot::ReportSnapshot(const std::ios& formatting_source) {
   stream_.copyfmt(formatting_source);
+}
+
+// Legacy callers do not install conformance render settings and already
+// preflight their input worlds as premultiplied. Keep that contract unless an
+// explicit --conformance-render-settings-v1 trailer overrides it.
+std::string g_conformance_premultiplication = "premultiplied";
+std::string g_conformance_renderer = "software";
+bool g_conformance_render_settings_seen = false;
+
+bool narrow_ascii_checked(const std::wstring& text, std::string& output) {
+  output.clear();
+  output.reserve(text.size());
+  for (wchar_t character : text) {
+    if (character < L' ' || character > L'~') return false;
+    output.push_back(static_cast<char>(character));
+  }
+  return true;
+}
+
+bool parse_conformance_render_settings(const wchar_t* encoded) {
+  if (!encoded) return false;
+  std::vector<std::wstring> fields;
+  std::wstring value(encoded);
+  std::size_t start = 0;
+  while (start <= value.size()) {
+    const std::size_t end = value.find(L'|', start);
+    fields.push_back(value.substr(start, end == std::wstring::npos ? end : end - start));
+    if (end == std::wstring::npos) break;
+    start = end + 1;
+  }
+  if (fields.size() != 6 || fields[0] != L"v1" || fields[2] != L"0" ||
+      fields[3] != L"-" || fields[4] != L"0" ||
+      (fields[1] != L"straight" && fields[1] != L"premultiplied" &&
+       fields[1] != L"opaque") ||
+      (fields[5] != L"AEXCompat CPU" && fields[5] != L"software")) return false;
+  std::string premultiplication;
+  std::string renderer;
+  if (!narrow_ascii_checked(fields[1], premultiplication) ||
+      !narrow_ascii_checked(fields[5], renderer)) return false;
+  g_conformance_premultiplication = std::move(premultiplication);
+  g_conformance_renderer = std::move(renderer);
+  g_conformance_render_settings_seen = true;
+  return true;
+}
+
+std::string conformance_render_settings_report_json() {
+  if (!g_conformance_render_settings_seen) return ",\"render_settings\":null";
+  return ",\"render_settings\":{\"premultiplication\":\"" +
+      g_conformance_premultiplication +
+      "\",\"color_management\":{\"enabled\":false,\"working_space\":null},\"linear_light\":false,\"renderer\":\"" +
+      g_conformance_renderer + "\"}";
 }
 
 void append_custom_ui(ReportSnapshot& report, const CustomUiSnapshot& value) {
@@ -51,7 +104,8 @@ void finish_requested_parameters(
       << ",\"requested_mix\":" << std::setprecision(17) << value.mix
       << ",\"requested_invert_map\":" << value.invert_map
       << ",\"render_performed\":" << (value.render_performed ? "true" : "false")
-      << ",\"module_audit\":" << value.module_audit_json << "}\n";
+      << ",\"module_audit\":" << value.module_audit_json
+      << conformance_render_settings_report_json() << "}\n";
 }
 
 void emit_classic_complete(ReportSnapshot& output, const ClassicEmission& value) {
@@ -268,18 +322,20 @@ void begin_smart(ReportSnapshot& report, const SmartReport::Head& v) {
       << ",\"case_id\":\"" << v.case_id << "\",\"pixel_format\":\"" << v.pixel_format
       << "\",\"width\":" << v.dimensions[0] << ",\"height\":" << v.dimensions[1]
       << ",\"rowbytes\":" << v.dimensions[2]
-      << ",\"premultiplication\":\"premultiplied\""
+      << ",\"premultiplication\":\"" << g_conformance_premultiplication << "\""
       << ",\"input_world\":{\"width\":" << v.input_world_dimensions[0]
       << ",\"height\":" << v.input_world_dimensions[1]
       << ",\"row_bytes\":" << v.input_world_dimensions[0] * v.pixel_bytes
       << ",\"pixel_format\":\"" << v.pixel_format
-      << "\",\"premultiplication\":\"premultiplied\",\"extent_hint\":{\"left\":0,\"top\":0,\"right\":"
+      << "\",\"premultiplication\":\"" << g_conformance_premultiplication
+      << "\",\"extent_hint\":{\"left\":0,\"top\":0,\"right\":"
       << v.input_world_dimensions[0] << ",\"bottom\":" << v.input_world_dimensions[1]
       << "}}"
       << ",\"output_world\":{\"width\":" << v.dimensions[0]
       << ",\"height\":" << v.dimensions[1] << ",\"row_bytes\":" << v.dimensions[2]
       << ",\"pixel_format\":\"" << v.pixel_format
-      << "\",\"premultiplication\":\"premultiplied\",\"extent_hint\":{\"left\":"
+      << "\",\"premultiplication\":\"" << g_conformance_premultiplication
+      << "\",\"extent_hint\":{\"left\":"
       << v.output_extent_hint[0] << ",\"top\":" << v.output_extent_hint[1]
       << ",\"right\":" << v.output_extent_hint[2] << ",\"bottom\":"
       << v.output_extent_hint[3] << "}}"

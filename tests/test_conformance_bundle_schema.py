@@ -133,7 +133,7 @@ class ConformanceBundleSchemaTests(unittest.TestCase):
             })
         return {
             "schema_version": 1, "fixture_id": self.manifest["fixture_id"],
-            "identities": copy.deepcopy({"aex": self.manifest["plugin"]["aex"], "dependencies": self.manifest["plugin"]["dependencies"], "input": self.manifest["input"], "runner": self.manifest["runner"]}),
+            "identities": copy.deepcopy({"aex": self.manifest["plugin"]["aex"], "dependencies": self.manifest["plugin"]["dependencies"], "input": self.manifest["input"], "runner": self.manifest["runner"], "workers": []}),
             "parameters": [{"index": 1, "type": "slider", "initial_value": 50, "host_range": {"minimum": 0, "maximum": 100}, "user_range": {"minimum": 0, "maximum": 100}}],
             "results": results,
         }
@@ -142,6 +142,46 @@ class ConformanceBundleSchemaTests(unittest.TestCase):
         report = self.valid_report()
         self.report_validator.validate(report)
         validate_bundle(self.manifest, report, self.bundle_root)
+
+    def test_semantic_validator_rejects_oracle_state_that_differs_from_manifest(self):
+        for manifest_state, reported_state in (
+            ("not_requested", "not_captured"),
+            ("not_captured", "not_requested"),
+        ):
+            manifest = copy.deepcopy(self.manifest)
+            manifest["oracle"] = {"state": manifest_state, "identity_match": False}
+            report = self.valid_report()
+            report["results"] = [report["results"][0]]
+            manifest["requested_depths"] = [report["results"][0]["depth"]]
+            result = report["results"][0]
+            result["oracle"] = {
+                "state": reported_state,
+                "identity_match": False,
+                "exact": False,
+            }
+            with self.assertRaisesRegex(BundleValidationError, "oracle state does not match"):
+                validate_bundle(manifest, report, self.bundle_root)
+
+    def test_missing_suite_evidence_is_exclusive_to_its_classification(self):
+        report = self.valid_report()
+        report["results"][0]["missing_suites"] = [
+            {"name": "PF World Suite", "version": 2}
+        ]
+        self.assert_invalid(self.report_validator, report)
+        report["results"][0].update(
+            {
+                "classification": "missing_suite",
+                "world": None,
+                "raw_output": None,
+                "output_sha256": None,
+                "selector": {
+                    "render_path": "classic",
+                    "completed": False,
+                    "error_code": 25,
+                },
+            }
+        )
+        self.report_validator.validate(report)
 
     def test_report_rejects_unknown_absolute_identity_and_missing_evidence(self):
         for mutate in (
@@ -168,6 +208,15 @@ class ConformanceBundleSchemaTests(unittest.TestCase):
             mutate(report)
             with self.assertRaises(BundleValidationError):
                 validate_bundle(self.manifest, report, self.bundle_root)
+
+    def test_semantic_validator_rejects_world_premultiplication_mismatch(self):
+        report = self.valid_report()
+        report["results"][0]["input_world"]["premultiplication"] = "straight"
+        self.report_validator.validate(report)
+        with self.assertRaisesRegex(
+            BundleValidationError, "premultiplication does not match manifest"
+        ):
+            validate_bundle(self.manifest, report, self.bundle_root)
 
     def test_semantic_validator_rejects_exact_with_different_hashes(self):
         report = self.valid_report()

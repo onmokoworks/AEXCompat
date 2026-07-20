@@ -406,6 +406,13 @@ class MinihostL2SourceTests(unittest.TestCase):
         self.assertIn("configure_pf_host_context(hooks.pf)", bootstrap)
         self.assertIn("pf_host_context_configured()", bootstrap)
 
+    def test_legacy_render_alpha_default_remains_premultiplied(self):
+        text = RENDER_REPORT_SOURCE.read_text(encoding="utf-8")
+        self.assertIn(
+            'std::string g_conformance_premultiplication = "premultiplied";',
+            text,
+        )
+
     def test_batch_sampling_suite_is_typed_and_fail_closed(self):
         text = l2_family_source()
         for marker in (

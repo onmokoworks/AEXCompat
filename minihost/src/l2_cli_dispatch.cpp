@@ -26,12 +26,14 @@ AuxiliaryOptionResult strip_auxiliary_options(
     int argc, wchar_t** argv, const AuxiliaryOptionHooks& hooks) {
   if (argc < 0 || !argv || !hooks.set_dump_worlds_dir ||
       !hooks.enable_checksum_detail || !hooks.load_aux_manifest ||
-      !hooks.parse_alpha_coverage || !hooks.load_parameter_animation)
+      !hooks.parse_alpha_coverage || !hooks.load_parameter_animation ||
+      !hooks.parse_conformance_render_settings)
     return {argc, false};
 
   int effective_argc = argc;
   bool saw_aux = false, saw_animation = false, saw_coverage = false;
   bool saw_dump_worlds = false, saw_checksum_detail = false;
+  bool saw_render_settings = false;
   while (effective_argc >= 3) {
     const wchar_t* flag = argv[effective_argc - 2];
     const wchar_t* value = argv[effective_argc - 1];
@@ -51,6 +53,10 @@ AuxiliaryOptionResult strip_auxiliary_options(
     } else if (equals(flag, L"--parameter-animation-v1") && !saw_animation) {
       accepted = hooks.load_parameter_animation(hooks.context, value);
       saw_animation = accepted;
+    } else if (equals(flag, L"--conformance-render-settings-v1") &&
+               !saw_render_settings) {
+      accepted = hooks.parse_conformance_render_settings(hooks.context, value);
+      saw_render_settings = accepted;
     } else {
       break;
     }

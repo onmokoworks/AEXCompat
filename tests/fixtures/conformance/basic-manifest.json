@@ -11,6 +11,7 @@
   "runner": {"path": "runner/aexcompat-harness.exe", "sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd", "size_bytes": 8192},
   "requested_depths": ["argb8", "argb16", "argb32f"],
   "execution": {
+    "render_path": "classic",
     "time": {"value": 0, "scale": 30},
     "parameters": [{"index": 1, "type": "slider", "value": 50}],
     "premultiplication": "premultiplied",
