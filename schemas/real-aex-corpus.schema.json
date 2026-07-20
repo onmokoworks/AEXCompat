@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://aexcompat.local/schemas/real-aex-corpus.schema.json",
+  "title": "AEXCompat real Effect AEX corpus inventory",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "entries"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "entries": {
+      "type": "array", "minItems": 5, "uniqueItems": true,
+      "items": {"$ref": "#/$defs/entry"}
+    }
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "entry": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "supplier", "sha256", "size_bytes", "source", "license", "redistribution", "local_only"],
+      "properties": {
+        "id": {"type": "string", "pattern": "^[a-z][a-z0-9_-]{0,63}$"},
+        "supplier": {"type": "string", "minLength": 1, "maxLength": 128},
+        "sha256": {"$ref": "#/$defs/sha256"},
+        "size_bytes": {"type": "integer", "minimum": 1, "maximum": 1073741824},
+        "source": {"type": "string", "format": "uri", "maxLength": 512},
+        "license": {"type": "string", "minLength": 1, "maxLength": 256},
+        "redistribution": {"enum": ["allowed", "prohibited", "unknown"]},
+        "local_only": {"const": true}
+      }
+    }
+  }
+}
