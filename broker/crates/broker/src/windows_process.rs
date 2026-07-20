@@ -491,6 +491,24 @@ impl LaunchedIsolatedProcess {
         } else {
             None
         };
+        tracing::debug!(
+            classification = classification.as_str(),
+            exit_code = format_args!("{exit_code:#010x}"),
+            timed_out,
+            kill_reason,
+            stdout_bytes = stdout.len(),
+            stderr_bytes = stderr.len(),
+            stdout_truncated,
+            stderr_truncated,
+            "worker exited"
+        );
+        if stdout_truncated || stderr_truncated {
+            tracing::warn!(
+                stdout_truncated,
+                stderr_truncated,
+                "worker output truncated at capture limit"
+            );
+        }
         Ok(ProcessResult {
             classification,
             exit_code,
@@ -547,6 +565,13 @@ fn launch_isolated_impl(
         .map(crate::minidump_policy::create_minidump_file_for_launch)
         .transpose()?
         .flatten();
+    // Capture the opt-in feature flags before the handles are dropped below so
+    // the launch trace can report them. Never log the program path: it may be a
+    // private absolute path, which must not escape into diagnostics.
+    let trace_active = trace_file.is_some();
+    let minidump_active = minidump_file.is_some();
+    let session_active = session.is_some();
+    let restricted_token = token.is_some();
     let (stdout_read, stdout_write) = pipe()?;
     let (stderr_read, stderr_write) = pipe()?;
     let job = OwnedHandle::new(unsafe { CreateJobObjectW(null(), null()) })?;
@@ -695,6 +720,19 @@ fn launch_isolated_impl(
         return Err(io::Error::last_os_error());
     }
     suspended_cleanup.disarm();
+    tracing::debug!(
+        worker = %program
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default(),
+        process_id = process.dwProcessId,
+        args = args.len(),
+        trace_active,
+        minidump_active,
+        session_active,
+        restricted_token,
+        "worker launched"
+    );
     drop(thread_handle);
     drop(stdout_write);
     drop(stderr_write);

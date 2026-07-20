@@ -1649,6 +1649,12 @@ fn run_effect_matrix(
     host_context: Option<&aexcompat_broker::render_request::HostContext>,
 ) -> serde_json::Value {
     use aexcompat_broker::image_render::RenderPixelFormat;
+    // Plug-in hash is provenance, not a private path, so it is safe to trace.
+    tracing::debug!(
+        plugin_hash = %hash,
+        parameters = parameters.len(),
+        "harness effect matrix render start"
+    );
     let formats = [
         (RenderPixelFormat::Argb8, "argb8"),
         (RenderPixelFormat::Argb16, "argb16"),
@@ -5503,6 +5509,7 @@ fn repository_root(args: &[std::ffi::OsString]) -> PathBuf {
 }
 
 fn main() -> eframe::Result {
+    aexcompat_broker::observability::init();
     let args: Vec<_> = std::env::args_os().collect();
     let repository = repository_root(&args);
     if args.len() == 4 && args[1] == "--compare-images" {

@@ -17,6 +17,12 @@ class TraceWriter {
 
   bool enabled() const;
   bool requested() const;
+  // Opt-in second verbosity level (issue #17). When the worker enables tracing
+  // it emits the low-frequency events unconditionally; high-frequency detail
+  // (world descriptors, per-callback events) is gated on this so a single
+  // render cannot exhaust the bounded event budget by default. The writer's own
+  // emit methods stay ungated: this only advises worker call sites.
+  bool verbose() const;
   void session_start();
   void selector_dispatch(const std::string& selector);
   void suite_acquire(const std::string& name, std::int64_t version, bool granted);
@@ -40,6 +46,7 @@ class TraceWriter {
   std::uint64_t event_index_ = 0;
   void* handle_ = nullptr;
   bool requested_ = false;
+  bool verbose_ = false;
   mutable std::mutex mutex_;
   bool session_started_ = false;
   bool session_ended_ = false;
