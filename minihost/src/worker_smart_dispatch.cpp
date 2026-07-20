@@ -55,7 +55,11 @@ bool dispatch(const Request& request, const Hooks& hooks,
   const bool use_transport = plan.gpu_negotiation &&
       (gpu_framework == 1 || gpu_framework == 3 || gpu_framework == 4);
   if (plan.gpu_negotiation) hooks.capture_module_audit();
-  const bool gpu_context_started =
+  // CPU renders must not touch any GPU backend: an unconditional context
+  // start loads the CUDA runtime (nvcuda.dll plus NVIDIA driver-store
+  // DLLs) that the module audit cannot classify, failing every sealed
+  // smart dispatch on NVIDIA machines even for pure CPU plans (issue #185).
+  const bool gpu_context_started = plan.gpu_negotiation &&
       transport::begin_backend_context(gpu_framework, plan.gpu_device_index);
   if (plan.gpu_negotiation) {
     write<int32_t>(gpu_setup_input, 0, gpu_framework);
