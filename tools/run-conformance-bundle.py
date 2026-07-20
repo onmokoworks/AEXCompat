@@ -8,6 +8,7 @@ import hashlib
 import json
 import math
 import os
+import re
 import shutil
 import stat
 import struct
@@ -443,6 +444,40 @@ def normalize_harness_report(
     return result
 
 
+# Mirrors the missing_suites[*].name pattern in conformance-report.schema.json.
+# The native collectors accept a wider set (dots, up to 96 bytes), so the report
+# schema is the stricter authority the bundle must satisfy.
+_MISSING_SUITE_NAME = re.compile(r"[A-Za-z][A-Za-z0-9 _-]{0,62}[A-Za-z0-9]")
+
+
+def schema_valid_missing_suites(missing: Any) -> list[dict[str, Any]]:
+    if not isinstance(missing, list):
+        return []
+    valid: list[dict[str, Any]] = []
+    seen: set[tuple[str, int]] = set()
+    for entry in missing:
+        if not isinstance(entry, dict):
+            continue
+        name = entry.get("name")
+        version = entry.get("version")
+        if (
+            not isinstance(name, str)
+            or _MISSING_SUITE_NAME.fullmatch(name) is None
+            or not isinstance(version, int)
+            or isinstance(version, bool)
+            or not 1 <= version <= 65535
+        ):
+            continue
+        key = (name, version)
+        if key in seen:
+            continue
+        seen.add(key)
+        valid.append({"name": name, "version": version})
+        if len(valid) >= 16:
+            break
+    return valid
+
+
 def normalize_structured_failure(
     depth: str,
     value: dict[str, Any],
@@ -452,6 +487,14 @@ def normalize_structured_failure(
     classification = value.get("classification")
     if value.get("plugin_kind") in {"aegp_candidate", "unknown_no_effect_entrypoint"}:
         classification = "loader_error"
+    # Schema-filter the reported missing suites up front. Only entries whose name
+    # the report schema accepts make a render a missing_suite; an unfiltered copy
+    # of a schema-incompatible name would make validate_bundle reject the whole
+    # report and discard the otherwise-useful bounded evidence.
+    raw_missing = value.get("missing_suites")
+    if not raw_missing and isinstance(value.get("worker_diagnostics"), dict):
+        raw_missing = value["worker_diagnostics"].get("missing_suites")
+    missing = schema_valid_missing_suites(raw_missing)
     # The native harness reports a process-level classification that is usually
     # the generic `nonzero_exit`, alongside report evidence (render_error,
     # pre_render_error, depth_supported, missing_suites). Treat `nonzero_exit`
@@ -471,10 +514,7 @@ def normalize_structured_failure(
         worker_classification = value.get("worker_classification")
         if worker_classification in {"crashed", "timeout_killed", "host_validation_error"}:
             classification = worker_classification
-        elif value.get("missing_suites") or (
-            isinstance(value.get("worker_diagnostics"), dict)
-            and value["worker_diagnostics"].get("missing_suites")
-        ):
+        elif missing:
             classification = "missing_suite"
         elif meaningful_selector_error(value) is not None:
             classification = "selector_error"
@@ -511,14 +551,17 @@ def normalize_structured_failure(
         result["_parameter_metadata"] = value["parameter_metadata"]
     if value.get("plugin_kind") in {"aegp_candidate", "unknown_no_effect_entrypoint"}:
         result["plugin_kind"] = value["plugin_kind"]
-    missing = value.get("missing_suites")
-    if not missing and isinstance(value.get("worker_diagnostics"), dict):
-        missing = value["worker_diagnostics"].get("missing_suites")
-    if isinstance(missing, list) and missing:
-        if result["classification"] == "nonzero_exit":
-            result["classification"] = "missing_suite"
-        if result["classification"] == "missing_suite":
-            result["missing_suites"] = missing[:16]
+    # Reconcile the classification with the schema-valid missing suites: a
+    # generic nonzero_exit with valid missing suites becomes missing_suite, while
+    # a missing_suite with no schema-valid entry falls back to nonzero_exit
+    # (the schema requires at least one entry for missing_suite).
+    if missing and result["classification"] == "nonzero_exit":
+        result["classification"] = "missing_suite"
+    if result["classification"] == "missing_suite":
+        if missing:
+            result["missing_suites"] = missing
+        else:
+            result["classification"] = "nonzero_exit"
     return result
 
 

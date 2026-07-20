@@ -348,6 +348,51 @@ def test_generic_nonzero_exit_is_refined_by_report_evidence():
     assert generic["classification"] == "nonzero_exit"
 
 
+def test_missing_suite_names_are_filtered_to_the_report_schema():
+    module = load_runner_module()
+    input_world = {
+        "width": 2,
+        "height": 2,
+        "row_bytes": 8,
+        "pixel_format": "argb8",
+        "premultiplication": "premultiplied",
+        "extent_hint": {"left": 0, "top": 0, "right": 2, "bottom": 2},
+    }
+    # The native collectors accept dotted / overlong names the report schema
+    # rejects. A schema-incompatible entry must be dropped, keeping only the
+    # valid ones so validate_bundle still accepts the bounded evidence.
+    long_name = "A" + "b" * 70
+    mixed = module.normalize_structured_failure(
+        "argb8",
+        {
+            "classification": "nonzero_exit",
+            "missing_suites": [
+                {"name": "AEGP.World.Suite", "version": 3},
+                {"name": long_name, "version": 4},
+                {"name": "PF World Suite", "version": 2},
+            ],
+        },
+        input_world,
+        "smartfx",
+    )
+    assert mixed["classification"] == "missing_suite"
+    assert mixed["missing_suites"] == [{"name": "PF World Suite", "version": 2}]
+
+    # When every reported name is schema-incompatible, the render cannot be a
+    # missing_suite (the schema requires at least one), so it stays generic.
+    dropped = module.normalize_structured_failure(
+        "argb8",
+        {
+            "classification": "missing_suite",
+            "missing_suites": [{"name": "AEGP.World.Suite", "version": 3}],
+        },
+        input_world,
+        "smartfx",
+    )
+    assert dropped["classification"] == "nonzero_exit"
+    assert "missing_suites" not in dropped
+
+
 def test_manifest_requires_a_valid_render_path(tmp_path):
     manifest, adapter = fixture(tmp_path)
     document = json.loads(manifest.read_text(encoding="utf-8"))
