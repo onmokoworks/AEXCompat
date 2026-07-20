@@ -134,7 +134,7 @@ def test_reference_capture_result_records_prelaunch_input_identities(tmp_path):
          "-InstalledAex", str(aex), "-InputImage", str(input_image),
          "-OutputPng", str(output), "-EffectName", "Fixture",
          "-TimeoutSeconds", "60"],
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors="replace")
     try:
         time.sleep(5)  # let the runner hash the inputs and enter its poll loop
         input_image.write_bytes(b"replaced-while-ae-was-running")
@@ -181,7 +181,7 @@ def test_reference_capture_shutdown_never_touches_unrelated_ae_named_processes(t
          "-InstalledAex", str(aex), "-InputImage", str(input_image),
          "-OutputPng", str(output), "-EffectName", "Fixture",
          "-TimeoutSeconds", "60"],
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors="replace")
     decoy = None
     try:
         time.sleep(5)  # the runner has passed its gate and is polling
@@ -224,7 +224,7 @@ def test_reference_capture_fails_closed_without_loaded_module_identity(tmp_path)
          "-InstalledAex", str(aex), "-InputImage", str(input_image),
          "-OutputPng", str(output), "-EffectName", "Fixture",
          "-RequireLoadedAexIdentity", "-TimeoutSeconds", "60"],
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors="replace")
     try:
         time.sleep(5)
         output.write_bytes(b"png-placeholder")
@@ -265,7 +265,7 @@ def test_locked_file_identity_distinguishes_equal_bytes_at_different_paths(tmp_p
     output = subprocess.check_output(
         ["powershell", "-NoProfile", "-File", str(script),
          "-Helper", str(helper), "-First", str(first), "-Second", str(second)],
-        text=True)
+        text=True, errors="replace")
     identities = json.loads(output)
     assert identities[0]["sha256"] == identities[1]["sha256"]
     assert identities[0]["canonical_path_sha256"] != identities[1]["canonical_path_sha256"]
