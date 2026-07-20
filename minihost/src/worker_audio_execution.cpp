@@ -59,7 +59,7 @@ AudioSpanOutcome run_audio_span(
     EffectEntry entry, BufferIn& input, BufferOut& output,
     std::vector<float>* external_audio, int32_t external_audio_samples,
     const worker_runtime::parameters::RequestedAssignments& requested_parameters,
-    std::vector<float>* captured_output) {
+    std::vector<float>* captured_output, uint32_t rate) {
   AudioSpanOutcome outcome;
   constexpr std::size_t kAudioGuardSamples = 8;
   constexpr float kAudioGuardValue = 1234567.0f;
@@ -81,8 +81,8 @@ AudioSpanOutcome run_audio_span(
   write<int32_t>(input, 336, 0);
   write<int32_t>(input, 340, external_audio_samples);
   write<int32_t>(input, 344, external_audio_samples);
-  write<uint32_t>(input, kInTimeScale, 44100);
-  write<double>(input, 352, 44100.0);
+  write<uint32_t>(input, kInTimeScale, rate);
+  write<double>(input, 352, static_cast<double>(rate));
   write<int16_t>(input, 360, 1);
   write<int16_t>(input, 362, 2);
   write<int16_t>(input, 364, 4);
@@ -107,7 +107,7 @@ AudioSpanOutcome run_audio_span(
   auto* audio_destination = guarded_output.data() + kAudioGuardSamples;
   if (setup_range_valid) {
     std::fill_n(audio_destination, external_audio_samples, 0.0f);
-    write<double>(output, 368, 44100.0);
+    write<double>(output, 368, static_cast<double>(rate));
     write<int16_t>(output, 376, 1);
     write<int16_t>(output, 378, 2);
     write<int16_t>(output, 380, 4);
@@ -158,9 +158,11 @@ AudioModeOutcome run_audio_mode(const AudioModeRequest& request) {
   auto& output = *request.output;
   const auto entry = request.entry;
   std::vector<float> captured;
+  // The one-shot audio path is fixed at 44100 Hz (its report and transport
+  // contract), matching the legacy --render-audio behavior.
   const AudioSpanOutcome span = run_audio_span(
       entry, input, output, request.external_audio, request.external_audio_samples,
-      *request.requested_parameters, &captured);
+      *request.requested_parameters, &captured, 44100u);
   outcome.assignments_applied = span.assignments_applied;
 
   const bool arbitrary_defaults_disposed = dispose_arbitrary_defaults(entry, input, output);
@@ -252,7 +254,7 @@ AudioSessionOutcome run_audio_render_session(
     EffectEntry entry, BufferIn& input, BufferOut& output, int32_t global_error,
     int32_t params_error,
     const worker_runtime::parameters::RequestedAssignments& requested_parameters,
-    const worker_audio_session::AudioSessionGeometry& geometry) {
+    const worker_audio_session::AudioSessionGeometry& geometry, uint32_t rate) {
   namespace was = aexcompat::worker_audio_session;
   using aexcompat::strict_json::JsonValue;
   using aexcompat::strict_json::StrictJsonParser;
@@ -345,7 +347,7 @@ AudioSessionOutcome run_audio_render_session(
     std::vector<float> captured;
     const AudioSpanOutcome span = run_audio_span(
         entry, input, output, &span_input, input_samples, requested_parameters,
-        &captured);
+        &captured, rate);
     // run_audio_span left host_audio's source_ pointing at span_input, which is
     // destroyed at the end of this iteration. Clear it now so a plug-in that
     // checks out audio between requests or during GLOBAL_SETDOWN fails closed
@@ -397,8 +399,8 @@ AudioSessionOutcome run_audio_render_session(
         "{\"v\":1,\"type\":\"audio_done\",\"request_index\":" +
         std::to_string(request_index) +
         ",\"status\":\"ok\",\"output\":{\"sample_count\":" +
-        std::to_string(span.output_samples) +
-        ",\"rate\":44100,\"channels\":1,\"sample_size\":4,\"checksum\":\"" +
+        std::to_string(span.output_samples) + ",\"rate\":" + std::to_string(rate) +
+        ",\"channels\":1,\"sample_size\":4,\"checksum\":\"" +
         checksum + "\",\"guards_intact\":true},\"audio_render_error\":0,\"generation\":" +
         std::to_string(expected_generation) + "}";
     if (!channels.write_message(reply)) {

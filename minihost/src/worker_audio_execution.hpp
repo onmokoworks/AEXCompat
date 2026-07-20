@@ -70,7 +70,7 @@ AudioSpanOutcome run_audio_span(
     worker_runtime::parameter_execution::BufferOut& output,
     std::vector<float>* external_audio, int32_t external_audio_samples,
     const worker_runtime::parameters::RequestedAssignments& requested_parameters,
-    std::vector<float>* captured_output);
+    std::vector<float>* captured_output, uint32_t rate);
 
 // Runs one audio span (run_audio_span), disposes arbitrary defaults, runs
 // global setdown, and writes the output file on success.
@@ -102,7 +102,7 @@ AudioSessionOutcome run_audio_render_session(
     worker_runtime::parameter_execution::BufferOut& output, int32_t global_error,
     int32_t params_error,
     const worker_runtime::parameters::RequestedAssignments& requested_parameters,
-    const worker_audio_session::AudioSessionGeometry& geometry);
+    const worker_audio_session::AudioSessionGeometry& geometry, uint32_t rate);
 
 // Emits the audio session's final aggregate JSON report to stdout (protocol
 // §10.3 close), mirroring the image session's stdout final report.

@@ -1910,6 +1910,7 @@ pub struct AudioRenderSession {
     receiver: mpsc::Receiver<SessionEvent>,
     process_exit_observed: bool,
     geometry: AudioSessionGeometry,
+    rate: u32,
     frame_deadline: Duration,
     invalidation: Option<SessionInvalidation>,
     last_output_generation: u32,
@@ -2052,6 +2053,7 @@ impl AudioRenderSession {
             receiver,
             process_exit_observed: false,
             geometry,
+            rate: request.time_scale,
             frame_deadline: request.frame_deadline,
             invalidation: None,
             last_output_generation: 0,
@@ -2277,7 +2279,7 @@ impl AudioRenderSession {
                 if done.audio_render_error != 0
                     || !output.guards_intact
                     || output.channels != self.geometry.channels
-                    || output.rate != 44100
+                    || output.rate != self.rate
                     || output.sample_size != 4
                     || output.sample_count as usize > max_samples
                     || generation != expected_generation

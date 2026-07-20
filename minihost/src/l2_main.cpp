@@ -1882,7 +1882,7 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
         invocation.audio_session_max_samples, invocation.audio_session_channels};
     const auto session_outcome = run_audio_render_session(
         entry, input, output, global_error, params_error,
-        invocation.requested_parameters, geometry);
+        invocation.requested_parameters, geometry, invocation.external_time_scale);
     if (!session.prepare_protocol_report()) return session.finish(14);
     restore_native_stdout();
     emit_audio_session_report(global_error, params_error, session_outcome);

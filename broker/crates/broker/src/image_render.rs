@@ -1647,15 +1647,27 @@ fn render_audio_via_length_one_session(
     else {
         return AudioWrapperOutcome::Fallback;
     };
+    // Override/add the fields the one-shot emit_audio_render_report exposes so
+    // the default session path returns the same public JSON shape as the
+    // `--render-audio` fallback. The wrapper only reaches here on a clean close
+    // (every span succeeded), so the selector errors are 0, the ranges valid,
+    // and the output was created.
     for (key, value) in [
+        ("stage", json!("audio_render")),
         ("status", json!("render_completed")),
         ("sample_rate", json!(SAMPLE_RATE)),
         ("channels", json!(1)),
         ("sample_format", json!("float32")),
+        ("audio_setup_error", json!(0)),
+        ("audio_render_error", json!(0)),
+        ("audio_setdown_error", json!(0)),
+        ("setup_range_valid", json!(true)),
         ("guard_bytes_intact", json!(true)),
         ("samples_finite", json!(true)),
         ("input_samples", json!(input.len() / 4)),
+        ("output_start_sample", json!(0)),
         ("output_samples", json!(output.len() / 4)),
+        ("output_created", json!(true)),
         ("input_sha256", json!(format!("{:x}", Sha256::digest(input)))),
         ("output_sha256", json!(format!("{:x}", Sha256::digest(&output)))),
         ("output_transport", json!("mono_f32le_44100")),
