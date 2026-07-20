@@ -375,9 +375,9 @@ int32_t iterate_world_typed(void* in_data, int32_t progress_base, int32_t progre
   int32_t destination_rowbytes{}, destination_width{}, destination_height{};
   // A null source world is the documented "iterate over the destination only"
   // mode (the SDK lets the src world be NULL; effects that generate or transform
-  // in place pass NULL and read only the output pixel). Resolve the source only
-  // when one was supplied; otherwise bound the walk to the destination and pass
-  // a null source pixel to the callback.
+  // in place pass NULL). Resolve the source only when one was supplied;
+  // otherwise bound the walk to the destination and alias each callback's input
+  // pixel to the destination pixel it is processing.
   const bool has_source = source_world != nullptr;
   if (!pixel_function ||
       (has_source && !resolve_world(source_world, pixel_bytes, source, source_rowbytes,
@@ -402,12 +402,15 @@ int32_t iterate_world_typed(void* in_data, int32_t progress_base, int32_t progre
   const int32_t rows = bounds.bottom - bounds.top;
   for (int32_t y = bounds.top; y < bounds.bottom; ++y) {
     for (int32_t x = bounds.left; x < bounds.right; ++x) {
+      void* destination_pixel = destination + static_cast<std::size_t>(y) * destination_rowbytes +
+          static_cast<std::size_t>(x) * pixel_bytes;
+      // With no source world the SDK aliases the input pixel to the destination
+      // pixel (in-place destination-only walk), so C/C++ effects that read `in`
+      // still get a valid pixel instead of dereferencing null.
       void* source_pixel = has_source
           ? source + static_cast<std::size_t>(y) * source_rowbytes +
                 static_cast<std::size_t>(x) * pixel_bytes
-          : nullptr;
-      void* destination_pixel = destination + static_cast<std::size_t>(y) * destination_rowbytes +
-          static_cast<std::size_t>(x) * pixel_bytes;
+          : destination_pixel;
       const int32_t error = pixel_function(refcon, x, y, source_pixel, destination_pixel);
       if (error != 0) return error;
     }
@@ -613,13 +616,13 @@ int32_t __cdecl iterate_test_pixel(void* opaque, int32_t, int32_t, void* input, 
   return 0;
 }
 
-// Destination-only iteration (null source world): the host must hand the
-// callback a null source pixel and read/write only the destination.
+// Destination-only iteration (null source world): the host must alias the
+// callback's input pixel to the destination pixel being processed.
 int32_t __cdecl iterate_test_null_source_pixel(void* opaque, int32_t, int32_t,
                                                void* input, void* output) {
   auto& state = *static_cast<IterateInteractionTestState*>(opaque);
   ++state.pixel_calls;
-  if (input != nullptr) return 74;
+  if (input != output) return 74;
   *static_cast<unsigned char*>(output) = 42;
   return 0;
 }
