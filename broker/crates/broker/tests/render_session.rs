@@ -1169,6 +1169,74 @@ mod windows_e2e {
     }
 
     #[test]
+    fn per_frame_ui_action_rides_the_v2_message_and_reaches_the_worker() {
+        use aexcompat_broker::image_render::RenderUiAction;
+        let _behavior = BehaviorGuard::set(None);
+        let (repository, plugin, sha) = temp_repository();
+        let mut session = open_session(&repository.0, &plugin, &sha, Duration::from_secs(30));
+        let input = input_pattern(29);
+        let inverted: Vec<u8> = input.iter().map(|byte| 255 - byte).collect();
+
+        // Frame 0 stays a v:1 message: plain inverted transfer, no stamp.
+        let outcome = session.render_frame(0, 0, &input).expect("v1 frame renders");
+        let FrameStatus::Rendered { pixels, .. } = outcome.status else {
+            panic!("v1 frame errored");
+        };
+        assert_eq!(pixels, inverted);
+
+        // Frame 1 carries a ui_action only; the fixture stamps the digest of the
+        // received ui_action string into bytes [32,64), proving delivery.
+        let action = RenderUiAction::Click {
+            point: [64, 48],
+            color: [1.0, 0.0, 0.0, 1.0],
+        };
+        let encoded = action.encode_ui_field().expect("ui_action encodes");
+        let outcome = session
+            .render_frame_with_attributes(1, 1, &input, None, Some(&action))
+            .expect("v2 ui_action frame renders");
+        let FrameStatus::Rendered { pixels, .. } = outcome.status else {
+            panic!("v2 ui_action frame errored");
+        };
+        assert_eq!(&pixels[32..64], Sha256::digest(encoded.as_bytes()).as_slice());
+        // The parameters region stays untouched, and everything past the stamp
+        // is the plain inverted transfer.
+        assert_eq!(&pixels[..32], &inverted[..32]);
+        assert_eq!(&pixels[64..], &inverted[64..]);
+
+        // Frame 2 carries both parameters and ui_action in one v:2 message,
+        // proving the attributes co-exist (§4.2.1). Both digests are stamped.
+        let mut updated = float_parameter(1);
+        updated.value = 42.5;
+        let outcome = session
+            .render_frame_with_attributes(2, 2, &input, Some(std::slice::from_ref(&updated)), Some(&action))
+            .expect("v2 combined frame renders");
+        let FrameStatus::Rendered { pixels, .. } = outcome.status else {
+            panic!("v2 combined frame errored");
+        };
+        let payload = aexcompat_broker::image_render::encode_interactive_payload(
+            std::slice::from_ref(&updated),
+        )
+        .expect("payload encodes");
+        assert_eq!(&pixels[..32], Sha256::digest(payload.as_bytes()).as_slice());
+        assert_eq!(&pixels[32..64], Sha256::digest(encoded.as_bytes()).as_slice());
+
+        // Frame 3 reverts to v:1: both stamps disappear (attributes were
+        // frame-scoped, not sticky).
+        let outcome = session.render_frame(3, 3, &input).expect("v1 frame renders again");
+        let FrameStatus::Rendered { pixels, .. } = outcome.status else {
+            panic!("post-attribute v1 frame errored");
+        };
+        assert_eq!(pixels, inverted);
+
+        let close = session.close();
+        assert_eq!(close["frames_ok"], 4);
+        // Only frame 2 carried `parameters`; a ui_action-only frame is not a
+        // parameter update.
+        assert_eq!(close["parameter_update_frames"], 1);
+        assert_eq!(close["session_clean"], true, "close: {close}");
+    }
+
+    #[test]
     fn interactive_session_renders_reports_and_previews_across_frames() {
         use aexcompat_broker::image_render::{InteractiveRenderSession, InteractiveSessionOpen};
         let _behavior = BehaviorGuard::set(None);

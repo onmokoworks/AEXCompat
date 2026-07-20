@@ -223,16 +223,28 @@ u32 LE の長さ接頭辞 + UTF-8 JSON 本文。1 メッセージ上限 64 KiB (
   (不一致はフレーム単位エラー応答)。任意時刻を許す: セッションは順序・
   単調性を仮定しない (Effect API にレンダー順序契約は存在しない、調査
   ノート項目3)。
-- **メッセージ検証は strict (fail-closed)**: worker は exact-key 検証
-  (`strict_json` の `json_exact_keys` と同じ流儀) を行い、未知フィールド・
-  未知 `type`・未知 `v` はプロトコル違反としてセッションを終了する (§7)。
-  黙って無視する経路は設けない: per-frame `parameters` (#107 / AviUtl2 向け、
-  §4.2.1 で v:2 として導入済み) や `param_epoch` (RESETUP 意味論確定後) は
-  `v` の増分とともに導入し、旧 worker に送ると fail-closed になることで
-  「stale な launch 時パラメーターのまま ok を返す」誤動作を構造的に
-  排除する。
+- **メッセージ検証は strict (fail-closed)**: worker は許可キー集合検証
+  (`strict_json` の `json_exact_keys` を基に、optional キーの presence 規則を
+  加えたもの) を行い、未知フィールド・未知 `type`・未知 `v` はプロトコル
+  違反としてセッションを終了する (§7)。黙って無視する経路は設けない。
+- **`v` は「機能フラグ」ではなく「worker が要求する語彙レベル」(単調増加)**
+  として扱う (改訂 2026-07-20、issue #238 owner 判断 = #201 の B)。per-frame の
+  動的属性 (`parameters` #107、`ui_action` #238、将来の `param_epoch` /
+  audio #239) は `v` を機能ごとに掛け算で増やすのではなく、v:2 メッセージ内の
+  **独立フィールドの presence** で運ぶ (§4.2.1)。`v` の増分は「worker が新しい
+  フィールド語彙を要するとき」に限定する。旧 worker (v:1 のみ理解) に v:2 を
+  送ると `v` 検証で fail-closed になり、「stale な launch 時パラメーターのまま
+  ok を返す」誤動作を構造的に排除する — この安全性は `v` の単調性が担保し、
+  個々のフィールドが必須か optional かとは独立している。broker と worker は
+  同一リポジトリで lockstep ビルドされるため、v:2 を理解するが特定フィールドを
+  知らない中間世代の worker は実運用に存在しない。
 
-#### 4.2.1 render_frame v:2 (per-frame parameters、issue #107)
+#### 4.2.1 render_frame v:2 (per-frame 動的属性、issue #107 / #238)
+
+`v:2` の `render_frame` は per-frame の動的属性を運ぶ一般メッセージ。属性は
+独立フィールドの presence で表現し、現在 2 つある: `parameters` (#107) と
+`ui_action` (#238、custom UI)。将来の属性 (audio #239、`param_epoch`) も
+同じ v:2 にフィールドを足して運び、`v` は増やさない (§4.2 の語彙レベル方針)。
 
 ```json
 {"v":2,"type":"render_frame","frame_index":3,
@@ -240,26 +252,49 @@ u32 LE の長さ接頭辞 + UTF-8 JSON 本文。1 メッセージ上限 64 KiB (
  "parameters":"v4|param_1@1:f64=12.5"}
 ```
 
-- `v:2` の `render_frame` は `parameters` を必須で持つ (exact keys:
-  `v`,`type`,`frame_index`,`current_time`,`parameters`)。パラメーター更新の
-  無いフレームは従来どおり v:1 を送る。`close` は v:1 のみ。
-- `parameters` は launch argv payload と同一の符号化
+```json
+{"v":2,"type":"render_frame","frame_index":4,
+ "current_time":{"value":4,"scale":30},
+ "ui_action":"click:v1|64|48|1|0|0|1"}
+```
+
+- **許可キー集合**: `v`,`type`,`frame_index`,`current_time` は必須。
+  `parameters` と `ui_action` は optional だが**少なくとも一方が present**
+  (両方無いフレームは v:1 を送る。両方 present も許可し、同一フレームで
+  パラメーター更新と UI イベントを 1 往復で運べる — GUI ライブ操作向け)。
+  未知キーは従来どおりプロトコル違反 (§7)。`close` は v:1 のみ。
+- **`parameters`**: launch argv payload と同一の符号化
   (`encode_interactive_payload` が生成する `v2|`〜`v5|` 形式、上限 16384
-  バイト、ASCII のみ)。新しい直列化形式は導入しない。
-- 意味論は**そのフレーム限りの完全置換**: メッセージ内の割当が launch 時
-  payload の割当を丸ごと置き換える (overlay ではない。載っていない slot は
-  プラグイン既定値に戻る)。後続の v:1 フレームは launch 時 payload に戻る。
-  worker 側の適用器は one-shot と同一 (`render_once` が毎フレーム
+  バイト、ASCII のみ)。意味論は**そのフレーム限りの完全置換**: メッセージ内の
+  割当が launch 時 payload の割当を丸ごと置き換える (overlay ではない。
+  載っていない slot はプラグイン既定値に戻る)。後続の v:1 フレームは launch 時
+  payload に戻る。worker 側の適用器は one-shot と同一 (`render_once` が毎フレーム
   definitions を再初期化 → requested → parameter animation の順に適用) で、
   適用順序も one-shot と変わらない: v:2 の割当の上に
   `--parameter-animation-v1` タイムラインが重なる。
-- 検証は strict fail-closed: パース不能・非 ASCII・長さ超過・launch payload
-  と同じ構文検証 (重複 slot、範囲外 slot、型語の版ゲート) に落ちる
-  `parameters` はプロトコル違反としてセッションを終了する (§7)。broker は
-  送信前に one-shot と同じ検証を済ませているため、worker に届く不正
-  payload は broker の欠陥または改竄であり、フレーム局所エラーにしない。
-  宣言済みパラメーターとの型不一致など render 時検証はフレーム局所
-  診断のまま (v:1 と同じ)。
+- **`ui_action`**: one-shot の custom UI argv trailer と同一符号化を再利用
+  (`click:v1|x|y|r|g|b|a` / `draw:v1`、ASCII のみ)。新しい直列化形式は
+  導入しない。意味論は**そのフレーム限りの UI 駆動**で、実現は one-shot と
+  同一機構: worker は該当フレームの render 前に one-shot の argv 経路と同じ
+  custom UI テレメトリ (render_click_enabled / 座標 / picker color、または
+  render_draw_enabled) を立てるだけで、UI イベント列 (new_context → activate →
+  click/draw → **render** → close_context) の駆動と context のライフタイムは
+  render 経路 (`render_once`) が one-shot と同じ点で行う。**context は render 中も
+  開いたままで、close は render 後の cleanup で行われる** (effect は render 中に
+  active な UI context を観測する。one-shot の `dispatch_render_click` /
+  `close_render_ui_context` と同順)。session が別の pre-render 列を送ることは
+  しない。UI アクションの無いフレームは `ui_action` を載せない。フレーム間で
+  テレメトリが漏れないよう、worker は各フレームの render 前に per-render の
+  custom UI 観測フィールドを既定に戻す (register 系の setup-time フィールドは
+  保持)。これで各フレームが fresh な one-shot と同じ初期状態から観測される
+  (session 生存期間の context 保持は将来最適化)。
+- **検証は strict fail-closed**: パース不能・非 ASCII・長さ超過・launch/one-shot
+  と同じ構文検証に落ちる `parameters` / `ui_action` はプロトコル違反として
+  セッションを終了する (§7)。broker は送信前に one-shot と同じ検証を済ませて
+  いるため (`ui_action` は color 有限性・範囲 0..=1 を含む)、worker に届く
+  不正 payload は broker の欠陥または改竄であり、フレーム局所エラーにしない。
+  宣言済みパラメーターとの型不一致など render 時検証はフレーム局所診断のまま
+  (v:1 と同じ)。
 - 応答 (`frame_done`) のスキーマは v1 のまま変わらない。共有メモリ
   レイアウト (§6) と launch 構成 (§3) も不変で、ヘッダの `version`
   フィールドは 1 のままとする (レイアウト版であってメッセージ版ではない)。

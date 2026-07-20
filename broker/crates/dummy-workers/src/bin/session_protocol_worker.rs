@@ -389,19 +389,35 @@ mod worker {
                 _ => return EXIT_PROTOCOL_VIOLATION,
             }
             // Mirrors the real worker's message version gate (protocol
-            // §4.2.1): v:1 must not carry parameters, v:2 must carry the
-            // string payload, anything else is a violation.
-            let frame_parameters = match message["v"].as_u64() {
+            // §4.2.1): v:1 carries no dynamic attribute; v:2 carries at least
+            // one of `parameters` / `ui_action` as a string; anything else is a
+            // violation.
+            let (frame_parameters, frame_ui_action) = match message["v"].as_u64() {
                 Some(1) => {
-                    if message.get("parameters").is_some() {
+                    if message.get("parameters").is_some() || message.get("ui_action").is_some() {
                         return EXIT_PROTOCOL_VIOLATION;
                     }
-                    None
+                    (None, None)
                 }
-                Some(2) => match message["parameters"].as_str() {
-                    Some(payload) => Some(payload.to_owned()),
-                    None => return EXIT_PROTOCOL_VIOLATION,
-                },
+                Some(2) => {
+                    let read_attribute = |key: &str| match message.get(key) {
+                        Some(value) => match value.as_str() {
+                            Some(text) => Ok(Some(text.to_owned())),
+                            None => Err(()),
+                        },
+                        None => Ok(None),
+                    };
+                    let Ok(parameters) = read_attribute("parameters") else {
+                        return EXIT_PROTOCOL_VIOLATION;
+                    };
+                    let Ok(ui_action) = read_attribute("ui_action") else {
+                        return EXIT_PROTOCOL_VIOLATION;
+                    };
+                    if parameters.is_none() && ui_action.is_none() {
+                        return EXIT_PROTOCOL_VIOLATION;
+                    }
+                    (parameters, ui_action)
+                }
                 _ => return EXIT_PROTOCOL_VIOLATION,
             };
             let Some(frame_index) = message["frame_index"].as_u64() else {
@@ -505,13 +521,20 @@ mod worker {
             for byte in &mut output {
                 *byte = 255 - *byte;
             }
-            // Stamp the received per-frame payload's digest into the frame so
-            // integration tests can prove the v:2 parameters actually reached
-            // the worker (the real worker proves this by rendering with them).
+            // Stamp the received per-frame attribute digests into the frame so
+            // integration tests can prove the v:2 fields actually reached the
+            // worker (the real worker proves this by rendering with them):
+            // `parameters` into bytes [0,32), `ui_action` into [32,64).
             if let Some(payload) = &frame_parameters {
                 let digest = Sha256::digest(payload.as_bytes());
                 let stamp = digest.len().min(output.len());
                 output[..stamp].copy_from_slice(&digest[..stamp]);
+            }
+            if let Some(action) = &frame_ui_action {
+                let digest = Sha256::digest(action.as_bytes());
+                if output.len() >= 64 {
+                    output[32..64].copy_from_slice(&digest);
+                }
             }
             unsafe {
                 std::ptr::copy_nonoverlapping(output.as_ptr(), view.0.add(output_offset), slot_bytes);
