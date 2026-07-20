@@ -1877,6 +1877,21 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
          invocation.external_dependencies_mode ? argv[4] : nullptr});
     return session.finish(early_result);
   }
+  if (is_render_worker() && invocation.audio_session_mode) {
+    const aexcompat::worker_audio_session::AudioSessionGeometry geometry{
+        invocation.audio_session_max_samples, invocation.audio_session_channels};
+    const auto session_outcome = run_audio_render_session(
+        entry, input, output, global_error, params_error,
+        invocation.requested_parameters, geometry);
+    if (!session.prepare_protocol_report()) return session.finish(14);
+    restore_native_stdout();
+    emit_audio_session_report(global_error, params_error, session_outcome);
+    if (session_outcome.protocol_violation)
+      return session.finish(aexcompat::worker_audio_session::kExitProtocolViolation);
+    if (session_outcome.invariant_failure)
+      return session.finish(aexcompat::worker_audio_session::kExitInvariantFailure);
+    return session.finish(session_outcome.clean ? 0 : 20);
+  }
   if (is_render_worker() && invocation.audio_mode) {
     const AudioModeRequest audio_request{
         entry, &input, &output, global_error, params_error,

@@ -404,4 +404,22 @@ AudioSessionOutcome run_audio_render_session(
   return outcome;
 }
 
+void emit_audio_session_report(int32_t global_error, int32_t params_error,
+                               const AudioSessionOutcome& outcome) {
+  std::cout << "{\"schema_version\":1,\"stage\":\"audio_session\",\"status\":\""
+            << (outcome.clean ? "session_completed" : "session_failed")
+            << "\",\"global_setup_error\":" << global_error
+            << ",\"params_setup_error\":" << params_error
+            << ",\"session_requests_ok\":" << outcome.requests_ok
+            << ",\"session_protocol_violation\":"
+            << (outcome.protocol_violation ? "true" : "false")
+            << ",\"session_invariant_failure\":"
+            << (outcome.invariant_failure ? "true" : "false")
+            << ",\"global_setdown_error\":" << outcome.global_setdown_error
+            << ",\"audio_lifetimes_balanced\":"
+            << (audio_handle_lifetimes_balanced() ? "true" : "false")
+            << ",\"invalid_audio_operations\":" << audio_telemetry().invalid_operations
+            << ",\"session_clean\":" << (outcome.clean ? "true" : "false") << "}\n";
+}
+
 }  // namespace aexcompat::l2_detail

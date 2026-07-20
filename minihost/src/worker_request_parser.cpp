@@ -70,6 +70,18 @@ ParseResult parse(Kind kind, int argc, wchar_t** argv, const Hooks& hooks) {
       if (!load_audio(argv[13], result.invocation.audio_samples,
                       result.invocation.audio_rate, result.invocation.audio)) throw 1;
     }
+    if (mode.audio_session_mode) {
+      // [command, plugin, sha256, payload, max_samples, channels, time_scale]
+      // (protocol §10.2). v1 audio is mono; channels stays for the extension.
+      auto& invocation = result.invocation;
+      invocation.audio_session_max_samples = std::stoi(argv[5]);
+      invocation.audio_session_channels = std::stoi(argv[6]);
+      invocation.time_scale = std::stoul(argv[7]);
+      if (invocation.audio_session_max_samples <= 0 ||
+          invocation.audio_session_max_samples > 16 * 1024 * 1024 ||
+          invocation.audio_session_channels != 1 ||
+          invocation.time_scale == 0 || invocation.time_scale > 0x7FFFFFFFu) throw 1;
+    }
     if (mode.render_session_mode) {
       auto& invocation = result.invocation;
       invocation.width = std::stoi(argv[5]); invocation.height = std::stoi(argv[6]);

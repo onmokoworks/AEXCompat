@@ -109,6 +109,17 @@ WorkerMode classify_worker_mode(
       // rejected outright rather than reinterpreted as another mode.
       return WorkerMode{};
     }
+    if (equals(command, L"--render-audio-session-v1")) {
+      // [command, plugin, sha256, payload, max_samples, channels, time_scale]
+      // (protocol §10.2); no I/O paths, audio rides the shared section.
+      if (effective_argc == 8) {
+        mode.audio_session_mode = true;
+        mode.request_mode = true;
+        mode.command_accepted = true;
+        return mode;
+      }
+      return WorkerMode{};
+    }
     const bool image16 = equals(command, L"--render-image16") ||
         equals(command, L"--render-image16-layer");
     const bool image32 = equals(command, L"--render-image32") ||

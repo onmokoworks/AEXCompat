@@ -104,4 +104,9 @@ AudioSessionOutcome run_audio_render_session(
     const worker_runtime::parameters::RequestedAssignments& requested_parameters,
     const worker_audio_session::AudioSessionGeometry& geometry);
 
+// Emits the audio session's final aggregate JSON report to stdout (protocol
+// §10.3 close), mirroring the image session's stdout final report.
+void emit_audio_session_report(int32_t global_error, int32_t params_error,
+                               const AudioSessionOutcome& outcome);
+
 }  // namespace aexcompat::l2_detail
