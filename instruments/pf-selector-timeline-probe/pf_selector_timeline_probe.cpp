@@ -274,18 +274,28 @@ PF_Err handle_audio(PF_Cmd cmd, PF_InData* in_data, PF_OutData* out_data) {
       std::memcpy(dst.dataP, src.dataP, bytes);
     }
   }
-  const PF_SoundWorld& src = in_data->src_snd;
   char extra[512];
-  std::snprintf(
-      extra, sizeof(extra),
-      "\"audio\":{\"start_samp\":%ld,\"dur_samp\":%ld,\"total_samp\":%ld,"
-      "\"src_rate\":%.3f,\"src_channels\":%d,\"src_sample_size\":%d,"
-      "\"src_samples\":%ld}",
-      static_cast<long>(in_data->start_sampL),
-      static_cast<long>(in_data->dur_sampL),
-      static_cast<long>(in_data->total_sampL), static_cast<double>(src.fi.rateF),
-      static_cast<int>(src.fi.num_channels), static_cast<int>(src.fi.sample_size),
-      static_cast<long>(src.num_samples));
+  if (cmd == PF_Cmd_AUDIO_RENDER) {
+    // The SDK only guarantees the audio PF_InData fields (sample range and
+    // src_snd sound world) for AUDIO_RENDER. AUDIO_SETUP requests an input span
+    // and AUDIO_SETDOWN frees setup memory; reading src_snd there yields stale
+    // or undefined data, so only log the sound world for AUDIO_RENDER.
+    const PF_SoundWorld& src = in_data->src_snd;
+    std::snprintf(
+        extra, sizeof(extra),
+        "\"audio\":{\"start_samp\":%ld,\"dur_samp\":%ld,\"total_samp\":%ld,"
+        "\"src_rate\":%.3f,\"src_channels\":%d,\"src_sample_size\":%d,"
+        "\"src_samples\":%ld}",
+        static_cast<long>(in_data->start_sampL),
+        static_cast<long>(in_data->dur_sampL),
+        static_cast<long>(in_data->total_sampL), static_cast<double>(src.fi.rateF),
+        static_cast<int>(src.fi.num_channels), static_cast<int>(src.fi.sample_size),
+        static_cast<long>(src.num_samples));
+  } else {
+    // Explicit null so the timeline records that no sound-world data was read
+    // for setup/setdown, rather than emitting stale fields.
+    std::snprintf(extra, sizeof(extra), "\"audio\":null");
+  }
   bool counters_valid = false;
   const SequenceCounters counters = snapshot_counters(in_data, &counters_valid);
   log_event(cmd, in_data, counters_valid ? &counters : nullptr, 0.0, false, extra);
