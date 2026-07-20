@@ -81,6 +81,11 @@ def l2_family_source():
 
 
 class MinihostL2SourceTests(unittest.TestCase):
+    def test_smart_report_emits_each_geometry_key_once(self):
+        report = RENDER_REPORT_SOURCE.read_text(encoding="utf-8")
+        self.assertEqual(report.count(r'\"result_rect\":'), 1)
+        self.assertEqual(report.count(r'\"max_result_rect\":'), 1)
+
     def test_parameter_selftest_routes_are_a_true_translation_unit(self):
         worker = SOURCE.read_text(encoding="utf-8")
         routing = PARAMETER_SELFTEST_ROUTING_SOURCE.read_text(encoding="utf-8")
@@ -405,6 +410,13 @@ class MinihostL2SourceTests(unittest.TestCase):
         bootstrap = ENTRY_BOOTSTRAP_SOURCE.read_text(encoding="utf-8")
         self.assertIn("configure_pf_host_context(hooks.pf)", bootstrap)
         self.assertIn("pf_host_context_configured()", bootstrap)
+
+    def test_legacy_render_alpha_default_remains_premultiplied(self):
+        text = RENDER_REPORT_SOURCE.read_text(encoding="utf-8")
+        self.assertIn(
+            'std::string g_conformance_premultiplication = "premultiplied";',
+            text,
+        )
 
     def test_batch_sampling_suite_is_typed_and_fail_closed(self):
         text = l2_family_source()

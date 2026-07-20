@@ -12,6 +12,7 @@ struct AuxiliaryOptionHooks {
   bool (*load_aux_manifest)(void* context, const wchar_t* value){};
   bool (*parse_alpha_coverage)(void* context, const wchar_t* value){};
   bool (*load_parameter_animation)(void* context, const wchar_t* value){};
+  bool (*parse_conformance_render_settings)(void* context, const wchar_t* value){};
 };
 
 struct AuxiliaryOptionResult {

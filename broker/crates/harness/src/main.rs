@@ -1057,6 +1057,7 @@ fn assign_layer_paths(
 fn apply_typed_assignments(
     parameters: &mut Vec<aexcompat_broker::image_render::InteractiveParameter>,
     document: &serde_json::Value,
+    request_path: Option<&Path>,
 ) -> Result<(), String> {
     let root = document
         .as_object()
@@ -1064,7 +1065,12 @@ fn apply_typed_assignments(
     if root.keys().any(|key| {
         !matches!(
             key.as_str(),
-            "schema_version" | "assignments" | "timing" | "host_context"
+            "schema_version"
+                | "assignments"
+                | "timing"
+                | "host_context"
+                | "render_settings"
+                | "dependencies"
         )
     }) || root
         .get("schema_version")
@@ -1174,7 +1180,43 @@ fn apply_typed_assignments(
                     .and_then(serde_json::Value::as_str)
                     .filter(|path| !path.is_empty())
                     .ok_or_else(|| format!("parameter slot {slot} requires a layer path"))?;
-                parameter.layer_path = Some(PathBuf::from(path));
+                let layer = Path::new(path);
+                // A bundle-relative layer path (written by the conformance runner)
+                // is resolved against the request's own bundle root with the same
+                // traversal and containment guards as pinned dependencies, so a
+                // moved or replayed bundle keeps resolving and no absolute host
+                // path is trusted. Absolute paths, or requests with no bundle root
+                // context, stay verbatim for backwards compatibility.
+                let resolved = match (layer.is_absolute(), request_path) {
+                    (false, Some(request)) => {
+                        let bundle_root = request
+                            .parent()
+                            .and_then(Path::parent)
+                            .ok_or_else(|| "request path has no bundle root".to_owned())?
+                            .canonicalize()
+                            .map_err(|error| {
+                                format!("bundle root could not be resolved: {error}")
+                            })?;
+                        if layer.components().any(|component| {
+                            !matches!(component, std::path::Component::Normal(_))
+                        }) {
+                            return Err(format!(
+                                "parameter slot {slot} layer path must be bundle-relative without traversal"
+                            ));
+                        }
+                        let candidate = bundle_root.join(layer).canonicalize().map_err(|error| {
+                            format!("layer path could not be resolved: {error}")
+                        })?;
+                        if !candidate.starts_with(&bundle_root) || !candidate.is_file() {
+                            return Err(format!(
+                                "parameter slot {slot} layer path escapes the bundle or is not a file"
+                            ));
+                        }
+                        candidate
+                    }
+                    _ => PathBuf::from(path),
+                };
+                parameter.layer_path = Some(resolved);
             }
             "arbitrary_data" => {
                 let text = object
@@ -1190,6 +1232,183 @@ fn apply_typed_assignments(
     }
     *parameters = updated;
     Ok(())
+}
+
+const CONFORMANCE_RENDER_SETTINGS_ENV: &str = "AEXCOMPAT_CONFORMANCE_RENDER_SETTINGS";
+
+fn typed_request_render_settings(document: &serde_json::Value) -> Result<Option<String>, String> {
+    let Some(settings) = document.get("render_settings") else {
+        return Ok(None);
+    };
+    let settings = settings
+        .as_object()
+        .ok_or_else(|| "render_settings must be an object".to_owned())?;
+    if settings.keys().any(|key| {
+        !matches!(
+            key.as_str(),
+            "premultiplication" | "color_management" | "linear_light" | "renderer"
+        )
+    }) {
+        return Err("render_settings contains an unknown field".into());
+    }
+    let premultiplication = settings
+        .get("premultiplication")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| matches!(*value, "straight" | "premultiplied" | "opaque"))
+        .ok_or_else(|| "render_settings premultiplication is unsupported".to_owned())?;
+    let color_management = settings
+        .get("color_management")
+        .and_then(serde_json::Value::as_object)
+        .ok_or_else(|| "render_settings color_management must be an object".to_owned())?;
+    if color_management
+        .keys()
+        .any(|key| !matches!(key.as_str(), "enabled" | "working_space"))
+    {
+        return Err("render_settings color_management contains an unknown field".into());
+    }
+    let color_enabled = color_management
+        .get("enabled")
+        .and_then(serde_json::Value::as_bool)
+        .ok_or_else(|| "render_settings color_management.enabled must be boolean".to_owned())?;
+    let working_space = color_management
+        .get("working_space")
+        .ok_or_else(|| "render_settings color_management.working_space is required".to_owned())?;
+    if color_enabled || !working_space.is_null() {
+        return Err("unsupported render setting: color management".into());
+    }
+    let linear_light = settings
+        .get("linear_light")
+        .and_then(serde_json::Value::as_bool)
+        .ok_or_else(|| "render_settings linear_light must be boolean".to_owned())?;
+    if linear_light {
+        return Err("unsupported render setting: linear light".into());
+    }
+    let renderer = settings
+        .get("renderer")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| matches!(*value, "AEXCompat CPU" | "software"))
+        .ok_or_else(|| "unsupported render setting: renderer".to_owned())?;
+    if [premultiplication, renderer]
+        .iter()
+        .any(|value| value.bytes().any(|byte| byte < 0x20 || byte == b'|'))
+    {
+        return Err("render_settings contains an unsafe transport value".into());
+    }
+    Ok(Some(format!("v1|{premultiplication}|0|-|0|{renderer}")))
+}
+
+struct ConformanceRenderSettingsGuard {
+    previous: Option<std::ffi::OsString>,
+}
+
+impl ConformanceRenderSettingsGuard {
+    fn install(encoded: Option<&str>) -> Result<Self, String> {
+        let previous = std::env::var_os(CONFORMANCE_RENDER_SETTINGS_ENV);
+        // SAFETY: this guard is installed only by the synchronous CLI path before
+        // any render worker thread is spawned, and remains alive until that work joins.
+        unsafe {
+            match encoded {
+                Some(value) => std::env::set_var(CONFORMANCE_RENDER_SETTINGS_ENV, value),
+                None => std::env::remove_var(CONFORMANCE_RENDER_SETTINGS_ENV),
+            }
+        }
+        Ok(Self { previous })
+    }
+}
+
+impl Drop for ConformanceRenderSettingsGuard {
+    fn drop(&mut self) {
+        // SAFETY: the synchronous CLI render has completed before this guard drops,
+        // so no worker thread can concurrently access or mutate the process environment.
+        unsafe {
+            match &self.previous {
+                Some(value) => std::env::set_var(CONFORMANCE_RENDER_SETTINGS_ENV, value),
+                None => std::env::remove_var(CONFORMANCE_RENDER_SETTINGS_ENV),
+            }
+        }
+    }
+}
+
+fn typed_request_dependencies(
+    document: &serde_json::Value,
+    request_path: &Path,
+) -> Result<Vec<aexcompat_broker::secure_image_dispatch::ApprovedImageArtifact>, String> {
+    let Some(items) = document.get("dependencies") else {
+        return Ok(Vec::new());
+    };
+    let items = items
+        .as_array()
+        .filter(|items| items.len() <= 64)
+        .ok_or_else(|| "dependencies must be an array of at most 64 artifacts".to_owned())?;
+    let bundle_root = request_path
+        .parent()
+        .and_then(Path::parent)
+        .ok_or_else(|| "request path has no bundle root".to_owned())?
+        .canonicalize()
+        .map_err(|error| format!("bundle root could not be resolved: {error}"))?;
+    let mut dependencies = Vec::with_capacity(items.len());
+    let mut basenames = std::collections::HashSet::new();
+    for item in items {
+        let item = item
+            .as_object()
+            .ok_or_else(|| "dependency identity must be an object".to_owned())?;
+        if item.keys().any(|key| !matches!(key.as_str(), "path" | "sha256" | "size_bytes"))
+        {
+            return Err("dependency identity contains an unknown field".into());
+        }
+        let relative = item
+            .get("path")
+            .and_then(serde_json::Value::as_str)
+            .filter(|value| !value.is_empty() && value.len() <= 240 && !value.contains('\\'))
+            .ok_or_else(|| "dependency path is invalid".to_owned())?;
+        let relative_path = Path::new(relative);
+        if relative_path.is_absolute()
+            || relative_path
+                .components()
+                .any(|component| !matches!(component, std::path::Component::Normal(_)))
+        {
+            return Err("dependency path must be bundle-relative without traversal".into());
+        }
+        let path = bundle_root
+            .join(relative_path)
+            .canonicalize()
+            .map_err(|error| format!("dependency path could not be resolved: {error}"))?;
+        if !path.starts_with(&bundle_root) || !path.is_file() {
+            return Err("dependency path escapes the bundle or is not a file".into());
+        }
+        let basename = path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .ok_or_else(|| "dependency basename is not Unicode".to_owned())?
+            .to_ascii_lowercase();
+        if !basenames.insert(basename) {
+            return Err("dependency basenames must be case-insensitively unique".into());
+        }
+        let expected_size = item
+            .get("size_bytes")
+            .and_then(serde_json::Value::as_u64)
+            .filter(|size| *size <= 1024 * 1024 * 1024 * 1024)
+            .ok_or_else(|| "dependency size_bytes is invalid".to_owned())?;
+        let actual_size = fs::metadata(&path)
+            .map_err(|error| format!("dependency metadata failed: {error}"))?
+            .len();
+        if actual_size != expected_size {
+            return Err("dependency size changed after bundle verification".into());
+        }
+        let expected_sha256 = item
+            .get("sha256")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| "dependency sha256 is missing".to_owned())
+            .and_then(decode_sha256)?;
+        dependencies.push(
+            aexcompat_broker::secure_image_dispatch::ApprovedImageArtifact {
+                path,
+                expected_sha256,
+                expected_size,
+            },
+        );
+    }
+    Ok(dependencies)
 }
 
 fn typed_request_timing(
@@ -1575,6 +1794,77 @@ fn json_after_marker(text: &str, marker: &str) -> Option<serde_json::Value> {
         .into_iter::<serde_json::Value>()
         .next()?
         .ok()
+}
+
+fn typed_failure_document(message: &str) -> Option<serde_json::Value> {
+    let diagnostics = json_after_marker(message, "diagnostics=")
+        .or_else(|| json_after_marker(message, "worker report unavailable: "))
+        .or_else(|| json_after_marker(message, "AEX parameter inspection worker failed safely: "))?;
+    let report = json_after_marker(message, "report=");
+    let mut document = report
+        .and_then(|value| value.as_object().cloned())
+        .unwrap_or_default();
+    for field in [
+        "classification",
+        "failure_stage",
+        "exit_code",
+        "elapsed_ms",
+        "plugin_kind",
+        "missing_suites",
+        "suite_timeline",
+    ] {
+        if let Some(value) = diagnostics.get(field) {
+            document.insert(field.to_owned(), value.clone());
+        }
+    }
+    Some(serde_json::Value::Object(document))
+}
+
+fn emit_typed_failure(message: &str) {
+    if let Some(document) = typed_failure_document(message)
+        && let Ok(encoded) = serde_json::to_string(&document)
+    {
+        println!("{encoded}");
+    }
+    eprintln!("{message}");
+}
+
+fn emit_typed_failure_with_parameter_metadata(
+    message: &str,
+    parameter_metadata: &serde_json::Value,
+) {
+    let mut document = typed_failure_document(message).unwrap_or_else(|| {
+        serde_json::json!({
+            "classification": "nonzero_exit",
+            "failure_stage": "render",
+        })
+    });
+    document["parameter_metadata"] = parameter_metadata.clone();
+    if let Ok(encoded) = serde_json::to_string(&document) {
+        println!("{encoded}");
+    }
+    eprintln!("{message}");
+}
+
+fn host_request_validation_failure(
+    parameter_metadata: &serde_json::Value,
+) -> serde_json::Value {
+    serde_json::json!({
+        "classification": "host_validation_error",
+        "failure_stage": "request_validation",
+        "parameter_metadata": parameter_metadata,
+    })
+}
+
+fn emit_host_request_validation_failure(
+    message: &str,
+    parameter_metadata: &serde_json::Value,
+) {
+    let document = host_request_validation_failure(parameter_metadata);
+    if let Ok(encoded) = serde_json::to_string(&document) {
+        println!("{encoded}");
+    }
+    eprintln!("{message}");
 }
 
 fn failure_diagnostics(message: &str) -> Option<FailureDiagnostics> {
@@ -2730,7 +3020,7 @@ impl HarnessApp {
                 serde_json::from_slice(&bytes).map_err(|error| error.to_string())?;
             let timing = typed_request_timing(&document)?;
             let mut parameters = self.parameters.clone();
-            apply_typed_assignments(&mut parameters, &document)?;
+            apply_typed_assignments(&mut parameters, &document, Some(path.as_path()))?;
             let host_context = typed_request_host_context(&document)?;
             Ok((parameters, timing, host_context))
         })();
@@ -5181,7 +5471,26 @@ fn show_viewer_texture(
     );
 }
 
-fn repository_root() -> PathBuf {
+fn repository_root(args: &[std::ffi::OsString]) -> PathBuf {
+    let typed_conformance_request = args.get(1).is_some_and(|command| {
+        matches!(
+            command.to_string_lossy().as_ref(),
+            "--render-experimental-request"
+                | "--render-experimental-smart-request"
+                | "--render-experimental-request-16"
+                | "--render-experimental-smart-request-16"
+                | "--render-experimental-request-32"
+                | "--render-experimental-smart-request-32-cpu"
+        )
+    });
+    if typed_conformance_request
+        && let Some(path) = std::env::var_os("AEXCOMPAT_REPOSITORY_ROOT")
+    {
+        let path = PathBuf::from(path);
+        if path.is_absolute() && path.is_dir() {
+            return path;
+        }
+    }
     std::env::current_exe()
         .ok()
         .and_then(|path| {
@@ -5201,8 +5510,8 @@ fn repository_root() -> PathBuf {
 
 fn main() -> eframe::Result {
     aexcompat_broker::observability::init();
-    let repository = repository_root();
     let args: Vec<_> = std::env::args_os().collect();
+    let repository = repository_root(&args);
     if args.len() == 4 && args[1] == "--compare-images" {
         match compare_images(Path::new(&args[2]), Path::new(&args[3])) {
             Ok(comparison) => {
@@ -5387,10 +5696,26 @@ fn main() -> eframe::Result {
         return Ok(());
     }
     if args.len() == 6
-        && (args[1] == "--render-experimental-request"
-            || args[1] == "--render-experimental-smart-request")
+        && matches!(
+            args[1].to_string_lossy().as_ref(),
+            "--render-experimental-request"
+                | "--render-experimental-smart-request"
+                | "--render-experimental-request-16"
+                | "--render-experimental-smart-request-16"
+                | "--render-experimental-request-32"
+                | "--render-experimental-smart-request-32-cpu"
+        )
     {
-        let smart = args[1] == "--render-experimental-smart-request";
+        use aexcompat_broker::image_render::{RenderGpuBackend, RenderPixelFormat};
+        let command = args[1].to_string_lossy();
+        let smart = command.contains("-smart-");
+        let pixel_format = if command.contains("-16") {
+            RenderPixelFormat::Argb16
+        } else if command.contains("-32") {
+            RenderPixelFormat::Argb32f
+        } else {
+            RenderPixelFormat::Argb8
+        };
         let request_path = Path::new(&args[5]);
         let request_bytes = fs::read(request_path).unwrap_or_else(|error| {
             eprintln!("assignment document could not be read: {error}");
@@ -5405,24 +5730,49 @@ fn main() -> eframe::Result {
                 eprintln!("assignment document is not valid JSON: {error}");
                 std::process::exit(1);
             });
+        let dependencies = typed_request_dependencies(&document, request_path).unwrap_or_else(|error| {
+            eprintln!("{error}");
+            std::process::exit(1);
+        });
         let plugin = Path::new(&args[2]);
         let hash = format!("{:X}", Sha256::digest(fs::read(plugin).unwrap()));
-        let mut parameters =
-            aexcompat_broker::image_render::inspect_experimental(&repository, plugin, &hash)
-                .unwrap_or_default();
+        let (mut parameters, inspection_diagnostics) =
+            aexcompat_broker::image_render::inspect_experimental_with_approved_dependencies_and_diagnostics(
+                &repository,
+                plugin,
+                &hash,
+                dependencies.clone(),
+            )
+        .unwrap_or_else(|error| {
+            emit_typed_failure(&error.to_string());
+            std::process::exit(1);
+        });
+        let parameter_metadata = inspection_diagnostics["parameter_metadata"].clone();
         let timing = typed_request_timing(&document).unwrap_or_else(|error| {
-            eprintln!("{error}");
+            emit_host_request_validation_failure(&error, &parameter_metadata);
             std::process::exit(1);
         });
         let host_context = typed_request_host_context(&document).unwrap_or_else(|error| {
-            eprintln!("{error}");
+            emit_host_request_validation_failure(&error, &parameter_metadata);
             std::process::exit(1);
         });
-        if let Err(error) = apply_typed_assignments(&mut parameters, &document) {
-            eprintln!("{error}");
+        let render_settings = typed_request_render_settings(&document).unwrap_or_else(|error| {
+            emit_host_request_validation_failure(&error, &parameter_metadata);
+            std::process::exit(1);
+        });
+        let _render_settings_guard = ConformanceRenderSettingsGuard::install(
+            render_settings.as_deref(),
+        )
+        .unwrap_or_else(|error| {
+            emit_host_request_validation_failure(&error, &parameter_metadata);
+            std::process::exit(1);
+        });
+        if let Err(error) = apply_typed_assignments(&mut parameters, &document, Some(request_path))
+        {
+            emit_host_request_validation_failure(&error, &parameter_metadata);
             std::process::exit(1);
         }
-        let report = aexcompat_broker::image_render::render_experimental_image_at_time_with_format_and_context(
+        let report = aexcompat_broker::image_render::render_experimental_image_with_approved_dependencies(
             &repository,
             plugin,
             &hash,
@@ -5431,13 +5781,26 @@ fn main() -> eframe::Result {
             &parameters,
             timing,
             smart,
-            aexcompat_broker::image_render::RenderPixelFormat::Argb8,
+            pixel_format,
             host_context.as_ref(),
+            None,
+            if command.ends_with("-32-cpu") {
+                RenderGpuBackend::Cpu
+            } else {
+                RenderGpuBackend::Auto
+            },
+            dependencies,
         );
         match report {
-            Ok(value) => println!("{}", serde_json::to_string_pretty(&value).unwrap()),
+            Ok(mut value) => {
+                value["parameter_metadata"] = parameter_metadata;
+                println!("{}", serde_json::to_string_pretty(&value).unwrap());
+            }
             Err(error) => {
-                eprintln!("{error}");
+                emit_typed_failure_with_parameter_metadata(
+                    &error.to_string(),
+                    &parameter_metadata,
+                );
                 std::process::exit(1);
             }
         }
@@ -5462,7 +5825,9 @@ fn main() -> eframe::Result {
         let mut parameters =
             aexcompat_broker::image_render::inspect_experimental(&repository, plugin, &hash)
                 .unwrap_or_default();
-        if let Err(error) = apply_typed_assignments(&mut parameters, &document) {
+        if let Err(error) =
+            apply_typed_assignments(&mut parameters, &document, Some(Path::new(&args[5])))
+        {
             eprintln!("{error}");
             std::process::exit(1);
         }
@@ -6078,7 +6443,9 @@ fn main() -> eframe::Result {
                     eprintln!("{error}");
                     std::process::exit(1);
                 });
-        if let Err(error) = apply_typed_assignments(&mut parameters, &document) {
+        if let Err(error) =
+            apply_typed_assignments(&mut parameters, &document, Some(request_path))
+        {
             eprintln!("{error}");
             std::process::exit(1);
         }
@@ -6772,7 +7139,7 @@ mod tests {
                 {"slot": 5, "text": "value=7"}
             ]
         });
-        apply_typed_assignments(&mut parameters, &document).unwrap();
+        apply_typed_assignments(&mut parameters, &document, None).unwrap();
         let default_timing = typed_request_timing(&document).unwrap();
         assert_eq!(default_timing.current_time, 0);
         assert_eq!(default_timing.time_scale, 1);
@@ -6798,7 +7165,7 @@ mod tests {
         ];
         roundtripped[0].maximum = 10.0;
         roundtripped[2].component_count = 2;
-        apply_typed_assignments(&mut roundtripped, &saved).unwrap();
+        apply_typed_assignments(&mut roundtripped, &saved, None).unwrap();
         assert_eq!(
             serde_json::to_value(&roundtripped).unwrap(),
             serde_json::to_value(&parameters).unwrap()
@@ -6822,7 +7189,7 @@ mod tests {
                 {"slot":5,"text":""}
             ]}),
         ] {
-            assert!(apply_typed_assignments(&mut parameters, &invalid).is_err());
+            assert!(apply_typed_assignments(&mut parameters, &invalid, None).is_err());
             assert_eq!(
                 serde_json::to_value(&parameters).unwrap(),
                 serde_json::to_value(&before).unwrap()
@@ -6864,6 +7231,64 @@ mod tests {
             serde_json::json!({"timing":{"frame":10000000,"time_scale":1000000,"time_step":100000,"duration_frames":10000001}}),
         ] {
             assert!(typed_request_timing(&invalid_timing).is_err());
+        }
+    }
+
+    #[test]
+    fn typed_dependencies_are_bundle_bound_and_identity_pinned() {
+        let root = temporary_directory("typed-dependencies");
+        let requests = root.join("requests");
+        let artifacts = root.join("artifacts");
+        fs::create_dir_all(&requests).unwrap();
+        fs::create_dir_all(&artifacts).unwrap();
+        let dependency = artifacts.join("helper.dll");
+        fs::write(&dependency, b"dependency").unwrap();
+        let digest = format!("{:x}", Sha256::digest(b"dependency"));
+        let document = serde_json::json!({
+            "dependencies": [{
+                "path": "artifacts/helper.dll",
+                "sha256": digest,
+                "size_bytes": 10
+            }]
+        });
+        let approved = typed_request_dependencies(&document, &requests.join("argb8.json")).unwrap();
+        assert_eq!(approved.len(), 1);
+        assert_eq!(approved[0].path, dependency.canonicalize().unwrap());
+        assert_eq!(approved[0].expected_size, 10);
+
+        let escaped = serde_json::json!({
+            "dependencies": [{
+                "path": "../outside.dll",
+                "sha256": format!("{:064x}", 0),
+                "size_bytes": 0
+            }]
+        });
+        assert!(typed_request_dependencies(&escaped, &requests.join("argb8.json")).is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn conformance_render_settings_are_supported_or_rejected_before_render() {
+        let supported = serde_json::json!({
+            "render_settings": {
+                "premultiplication": "premultiplied",
+                "color_management": {"enabled": false, "working_space": null},
+                "linear_light": false,
+                "renderer": "AEXCompat CPU"
+            }
+        });
+        assert_eq!(
+            typed_request_render_settings(&supported)
+                .unwrap()
+                .as_deref(),
+            Some("v1|premultiplied|0|-|0|AEXCompat CPU")
+        );
+        for unsupported in [
+            serde_json::json!({"render_settings": {"premultiplication":"straight","color_management":{"enabled":true,"working_space":null},"linear_light":false,"renderer":"AEXCompat CPU"}}),
+            serde_json::json!({"render_settings": {"premultiplication":"straight","color_management":{"enabled":false,"working_space":null},"linear_light":true,"renderer":"AEXCompat CPU"}}),
+            serde_json::json!({"render_settings": {"premultiplication":"straight","color_management":{"enabled":false,"working_space":null},"linear_light":false,"renderer":"GPU"}}),
+        ] {
+            assert!(typed_request_render_settings(&unsupported).is_err());
         }
     }
 
@@ -7001,6 +7426,49 @@ mod tests {
         assert_eq!(diagnostics.selector_error, Some(25));
         assert_eq!(diagnostics.stages.len(), 2);
         assert!(diagnostics.stages[1].contains("25"));
+    }
+
+    #[test]
+    fn typed_failure_document_preserves_structured_native_evidence() {
+        let message = concat!(
+            r#"failed: diagnostics={"classification":"nonzero_exit","failure_stage":"render","exit_code":7,"missing_suites":[{"name":"PF World Suite","version":2}],"suite_timeline":[{"sequence":1,"operation":"acquire","name":"PF World Suite","version":2,"result":25}]}, report="#,
+            r#"{"render_error":25,"smart_render_supported":true,"depth_supported":true}"#,
+        );
+        let document = typed_failure_document(message).expect("structured failure");
+        assert_eq!(document["classification"], "nonzero_exit");
+        assert_eq!(document["failure_stage"], "render");
+        assert_eq!(document["render_error"], 25);
+        assert_eq!(document["missing_suites"][0]["name"], "PF World Suite");
+        assert_eq!(document["suite_timeline"][0]["result"], 25);
+    }
+
+    #[test]
+    fn host_request_validation_failure_preserves_immutable_parameter_metadata() {
+        let metadata = serde_json::json!([{
+            "index": 1,
+            "type": "float_slider",
+            "initial_value": 25.0,
+            "host_range": {"minimum": 0.0, "maximum": 100.0},
+            "user_range": {"minimum": 10.0, "maximum": 90.0}
+        }]);
+        let document = host_request_validation_failure(&metadata);
+        assert_eq!(document["classification"], "host_validation_error");
+        assert_eq!(document["failure_stage"], "request_validation");
+        assert_eq!(document["parameter_metadata"], metadata);
+    }
+
+    #[test]
+    fn typed_failure_document_preserves_inspection_worker_evidence() {
+        let message = concat!(
+            "AEX parameter inspection worker failed safely: ",
+            r#"{"classification":"crashed","failure_stage":"parameter_inspection","exit_code":3221225477,"plugin_kind":"unknown_no_effect_entrypoint","missing_suites":[{"name":"PF Handle Suite","version":1}]}"#,
+        );
+        let document = typed_failure_document(message).expect("structured inspection failure");
+        assert_eq!(document["classification"], "crashed");
+        assert_eq!(document["failure_stage"], "parameter_inspection");
+        assert_eq!(document["exit_code"], 3221225477u64);
+        assert_eq!(document["plugin_kind"], "unknown_no_effect_entrypoint");
+        assert_eq!(document["missing_suites"][0]["name"], "PF Handle Suite");
     }
 
     #[test]

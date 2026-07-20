@@ -242,6 +242,8 @@ def _artifacts(manifest: dict, report: dict):
         yield f"manifest dependency {index}", artifact
     yield "manifest input", manifest["input"]
     yield "manifest runner", manifest["runner"]
+    for index, artifact in enumerate(report["identities"]["workers"]):
+        yield f"native worker {index}", artifact
     for depth, artifact in manifest["oracle"].get("artifacts", {}).items():
         yield f"manifest oracle {depth}", artifact
     for index, result in enumerate(report["results"]):
@@ -253,7 +255,7 @@ def _artifacts(manifest: dict, report: dict):
 _EMPTY_SHA256 = hashlib.sha256(b"").hexdigest()
 
 
-def _validate_world(result: dict, errors: list[str]) -> None:
+def _validate_world(result: dict, premultiplication: str, errors: list[str]) -> None:
     depth = result["depth"]
     for key in ("input_world", "world"):
         world = result[key]
@@ -261,6 +263,8 @@ def _validate_world(result: dict, errors: list[str]) -> None:
             continue
         if world["pixel_format"] != depth:
             errors.append(f"{depth} {key} pixel_format does not match depth")
+        if world["premultiplication"] != premultiplication:
+            errors.append(f"{depth} {key} premultiplication does not match manifest")
         minimum_row_bytes = world["width"] * _PIXEL_BYTES[world["pixel_format"]]
         if world["row_bytes"] < minimum_row_bytes:
             errors.append(f"{depth} {key} row_bytes is smaller than one pixel row")
@@ -307,7 +311,7 @@ def validate_bundle(manifest: dict, report: dict, bundle_root: Path) -> None:
     }
     if report["fixture_id"] != manifest["fixture_id"]:
         errors.append("report fixture_id does not match manifest")
-    if report["identities"] != expected_identities:
+    if any(report["identities"].get(key) != value for key, value in expected_identities.items()):
         errors.append("report identities do not match manifest")
 
     requested = manifest["requested_depths"]
@@ -322,10 +326,19 @@ def validate_bundle(manifest: dict, report: dict, bundle_root: Path) -> None:
     if manifest["oracle"]["state"] == "captured" and set(oracle_artifacts) != set(requested):
         errors.append("manifest oracle depths do not exactly match requested_depths")
     for result in report["results"]:
-        _validate_world(result, errors)
+        if result["selector"]["render_path"] != manifest["execution"]["render_path"]:
+            errors.append(f"{result['depth']} selector render_path does not match manifest")
+        _validate_world(result, manifest["execution"]["premultiplication"], errors)
         oracle = result["oracle"]
         if oracle["identity_match"] != manifest_oracle_identity:
             errors.append(f"{result['depth']} oracle identity_match does not match manifest")
+        expected_oracle_state = manifest["oracle"]["state"]
+        if expected_oracle_state == "captured" and result["classification"] != "ok":
+            expected_oracle_state = "not_captured"
+        if oracle["state"] != expected_oracle_state:
+            errors.append(
+                f"{result['depth']} oracle state does not match manifest/result outcome"
+            )
         if not manifest_oracle_identity and oracle["exact"]:
             errors.append(f"{result['depth']} exact oracle requires manifest identity match")
         output_hash = result["output_sha256"]
