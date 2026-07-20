@@ -2348,6 +2348,9 @@ impl HarnessApp {
     }
 
     fn reset_and_choose_aex(&mut self) {
+        // The selection is gone the moment the reset starts; the resident
+        // worker for it must not outlive a cancelled or failed re-pick.
+        self.close_live_session();
         self.selection = None;
         self.session_approved = false;
         self.approved_dependencies.clear();
