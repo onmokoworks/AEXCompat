@@ -1182,6 +1182,30 @@ fn aux_type_dimension_matches(
     }
 }
 
+/// Strip the Windows `\\?\` (or `\\?\UNC\`) extended-length prefix from a path.
+///
+/// `Path::canonicalize()` — which every repository/transport root passes through
+/// — returns verbatim `\\?\C:\...` paths on Windows. The worker's aux-manifest
+/// loader rejects such paths: it gates each declared path on
+/// `std::filesystem::absolute(p).lexically_normal() == std::filesystem::canonical(p)`,
+/// and MSVC's `canonical` drops the `\\?\` prefix while `absolute` keeps it, so a
+/// verbatim path never matches its own canonical form and the render exits 3
+/// (issue #231). The broker already de-verbatims paths handed to the worker for
+/// minidump and trace targets (`strip_extended_prefix` in minidump_policy.rs /
+/// trace_policy.rs); the aux manifest and its sidecars must follow suit. The
+/// string form is identity on any path without the prefix, so this is a no-op on
+/// non-Windows and on already-plain paths.
+fn strip_extended_prefix(path: &Path) -> PathBuf {
+    let text = path.as_os_str().to_string_lossy();
+    if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
+        PathBuf::from(format!(r"\\{rest}"))
+    } else if let Some(rest) = text.strip_prefix(r"\\?\") {
+        PathBuf::from(rest)
+    } else {
+        path.to_path_buf()
+    }
+}
+
 fn prepare_aux_transport(
     repository: &Path,
     channels: &[crate::render_request::AuxChannel],
@@ -1194,6 +1218,11 @@ fn prepare_aux_transport(
     if channels.len() > MAX_AUX_CHANNELS {
         return Err(invalid("aux channel count exceeds 16"));
     }
+    // The worker's aux loader requires each declared path to equal its own
+    // canonical form; a `\\?\` verbatim root (from `Path::canonicalize()`) fails
+    // that gate, so hand the manifest and every sidecar plain absolute paths.
+    let root = strip_extended_prefix(root);
+    let root = root.as_path();
     let allowed_root = repository.canonicalize()?;
     let mut per_param = std::collections::BTreeMap::<u32, usize>::new();
     let mut channel_keys = BTreeSet::new();
@@ -6039,6 +6068,64 @@ mod tests {
             !channels.is_empty() && channels.iter().all(Value::is_object),
             "channels is a non-empty list of objects"
         );
+
+        drop(transport);
+        fs::remove_dir_all(repository).unwrap();
+    }
+
+    // Issue #231: the worker's aux loader gates every declared path on
+    // `absolute().lexically_normal() == canonical()`, and MSVC drops the `\\?\`
+    // verbatim prefix in `canonical` but keeps it in `absolute`, so a manifest or
+    // sidecar path carrying that prefix (as `Path::canonicalize()` produces on
+    // Windows) is rejected and the render exits 3. prepare_aux_transport must
+    // hand the worker plain absolute paths. This guards the de-verbatim without
+    // needing the real worker; it is Windows-only because the prefix is.
+    #[cfg(windows)]
+    #[test]
+    fn aux_transport_de_verbatims_manifest_and_sidecar_paths() {
+        let repository = std::env::temp_dir().join(format!(
+            "aexcompat-aux-verbatim-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&repository).unwrap();
+        // canonicalize() yields the `\\?\C:\...` verbatim form that reproduced
+        // the bug; derive the transport root from it exactly as the render path
+        // does (repository.join("target/image-transport")).
+        let canonical_repository = repository.canonicalize().unwrap();
+        assert!(
+            canonical_repository.as_os_str().to_string_lossy().starts_with(r"\\?\"),
+            "canonicalize() is expected to produce a verbatim root on Windows"
+        );
+        let transport_root = canonical_repository.join("transport");
+        fs::create_dir_all(&transport_root).unwrap();
+        let channel = aux_fixture(&canonical_repository, "depth.f32", &[0.0, 0.5, 1.0, 2.0]);
+        let transport = prepare_aux_transport(&canonical_repository, &[channel], &transport_root, 231)
+            .unwrap()
+            .expect("aux channels present, so a manifest is produced");
+
+        assert!(
+            !transport
+                .manifest_path
+                .as_os_str()
+                .to_string_lossy()
+                .starts_with(r"\\?\"),
+            "manifest path handed to the worker must not carry the \\?\\ prefix"
+        );
+        let document: Value =
+            serde_json::from_slice(&fs::read(&transport.manifest_path).unwrap()).unwrap();
+        let sample_path = document["channels"][0]["samples"][0]["path"]
+            .as_str()
+            .expect("sample path is a string");
+        assert!(
+            !sample_path.starts_with(r"\\?\"),
+            "sidecar path written into the manifest must not carry the \\?\\ prefix, got {sample_path}"
+        );
+        // The de-verbatimed manifest path still resolves to the written file.
+        assert!(transport.manifest_path.is_file());
+        assert!(Path::new(sample_path).is_file());
 
         drop(transport);
         fs::remove_dir_all(repository).unwrap();
