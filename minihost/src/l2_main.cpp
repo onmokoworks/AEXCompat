@@ -414,6 +414,8 @@ constexpr std::size_t kUtilsNewHandle = 160;
 constexpr std::size_t kUtilsLockHandle = 168;
 constexpr std::size_t kUtilsUnlockHandle = 176;
 constexpr std::size_t kUtilsDisposeHandle = 184;
+constexpr std::size_t kUtilsGetHandleSize = 440;
+constexpr std::size_t kUtilsResizeHandle = 464;
 constexpr std::size_t kUtilsGetPlatformData = 432;
 static_assert(kUtilsColorCallbacks + sizeof(PfColorCallbacks8) == kUtilsGetPlatformData);
 constexpr std::size_t kUtilsFill16 = 488;
@@ -1683,7 +1685,16 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
         reinterpret_cast<void*>(&aexcompat::pf_ansi::ansi_sprintf),
         reinterpret_cast<void*>(&aexcompat::pf_ansi::ansi_strcpy),
         reinterpret_cast<void*>(&get_platform_data), reinterpret_cast<void*>(&get_pixel_data8),
-        reinterpret_cast<void*>(&get_pixel_data16)}, &g_color_suite8, sizeof(g_color_suite8),
+        reinterpret_cast<void*>(&get_pixel_data16),
+        // Handle callbacks in in_data->utils (issue #220): a conformant AE host
+        // provides host_new_handle/lock/unlock/dispose/get_handle_size/resize
+        // through the utility block, not only through the PF Handle Suite. The
+        // index order here must match the tail of kUtilityCallbackOffsets
+        // (160/168/176/184/440/464) in worker_effect_bootstrap.cpp.
+        reinterpret_cast<void*>(&new_handle), reinterpret_cast<void*>(&lock_handle),
+        reinterpret_cast<void*>(&unlock_handle), reinterpret_cast<void*>(&dispose_handle),
+        reinterpret_cast<void*>(&handle_size), reinterpret_cast<void*>(&resize_handle)},
+       &g_color_suite8, sizeof(g_color_suite8),
        &g_basic_suite, &g_effect},
       {g_render_quality, g_render_field, g_shutter_angle, g_shutter_phase,
        {g_pre_effect_source_origin_x, g_pre_effect_source_origin_y},
@@ -1739,6 +1750,12 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
   // write(utils, kUtilsIterate, &iterate_world8)
   // write(utils, kUtilsAnsiPow, &aexcompat::pf_ansi::ansi_pow)
   // write(utils, kUtilsAnsiStrcpy, &aexcompat::pf_ansi::ansi_strcpy)
+  // write(utils, kUtilsNewHandle, &new_handle)
+  // write(utils, kUtilsLockHandle, &lock_handle)
+  // write(utils, kUtilsUnlockHandle, &unlock_handle)
+  // write(utils, kUtilsDisposeHandle, &dispose_handle)
+  // write(utils, kUtilsGetHandleSize, &handle_size)
+  // write(utils, kUtilsResizeHandle, &resize_handle)
   // memcpy(utils.data() + kUtilsColorCallbacks, &g_color_suite8, sizeof(g_color_suite8))
   // write(utils, kUtilsBeginSampling, &begin_sampling8)
   // write(utils, kUtilsAreaSample, &area_sample8)

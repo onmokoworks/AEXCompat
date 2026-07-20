@@ -43,6 +43,7 @@ struct SimpleHooks {
   bool (*pf_batch_sampling_suite)(){};
   bool (*pf_ae_channel_native_provider)(){};
   bool (*aegp_layer_render_options_suite2)(){};
+  bool (*pf_utils_handle_callbacks)(){};
 };
 
 struct Hooks {

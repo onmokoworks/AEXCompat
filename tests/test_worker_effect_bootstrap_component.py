@@ -17,6 +17,20 @@ def test_bootstrap_owns_stable_abi_buffers_and_callback_offsets():
     assert "write<void*>(state.input, 176, state.utils.data())" in SOURCE
 
 
+def test_utility_table_wires_handle_callbacks_at_sdk_offsets():
+    # in_data->utils must expose host_new_handle/lock/unlock/dispose/get_size/
+    # resize, not only the PF Handle Suite (issue #220). The offsets are the
+    # PF_UtilCallbacks member offsets pinned to the SDK by abi-layout-probe.
+    assert "std::array<std::size_t, 31> kUtilityCallbackOffsets" in SOURCE
+    assert "std::array<void*, 31> utility_callbacks" in HEADER
+    for offset in ("160", "168", "176", "184", "440", "464"):
+        assert offset in SOURCE
+    # The wiring is shared with run() through an extracted installer so a
+    # behavioral self-test can drive the exact production write path.
+    assert "void install_callback_tables(State& state, const AbiHooks& abi)" in SOURCE
+    assert "install_callback_tables(state, abi)" in SOURCE
+
+
 def test_selector_order_and_error_priority_remain_explicit():
     global_setup = SOURCE.index("hooks.invoke(entry, 1")
     about = SOURCE.index("hooks.invoke(entry, 0")

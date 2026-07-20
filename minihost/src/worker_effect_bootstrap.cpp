@@ -8,9 +8,14 @@ namespace {
 
 constexpr std::array<std::size_t, 9> kInputCallbackOffsets{
     0, 8, 16, 24, 32, 40, 48, 56, 64};
-constexpr std::array<std::size_t, 25> kUtilityCallbackOffsets{
+constexpr std::array<std::size_t, 31> kUtilityCallbackOffsets{
     0, 8, 16, 32, 48, 56, 64, 72, 96, 104, 488, 496,
-    88, 112, 120, 152, 224, 248, 296, 304, 328, 336, 432, 528, 536};
+    88, 112, 120, 152, 224, 248, 296, 304, 328, 336, 432, 528, 536,
+    // Handle callbacks (issue #220). Offsets are PF_UtilCallbacks member
+    // offsets verified against the SDK header by abi-layout-probe static_asserts:
+    // host_new_handle=160, host_lock_handle=168, host_unlock_handle=176,
+    // host_dispose_handle=184, host_get_handle_size=440, host_resize_handle=464.
+    160, 168, 176, 184, 440, 464};
 constexpr std::size_t kUtilityColorCallbacksOffset = 368;
 constexpr std::size_t kUtilityPlatformDataOffset = 432;
 static_assert(kUtilityColorCallbacksOffset + 64 == kUtilityPlatformDataOffset);
@@ -29,9 +34,7 @@ T read(const std::array<std::byte, N>& bytes, std::size_t offset) {
 
 }  // namespace
 
-Result run(State& state, EffectEntry entry, const AbiHooks& abi,
-           const Request& request, const RuntimeHooks& hooks) {
-  Result result;
+void install_callback_tables(State& state, const AbiHooks& abi) {
   for (std::size_t i = 0; i < abi.input_callbacks.size(); ++i)
     write(state.input, kInputCallbackOffsets[i], abi.input_callbacks[i]);
   for (std::size_t i = 0; i < abi.utility_callbacks.size(); ++i)
@@ -42,6 +45,12 @@ Result run(State& state, EffectEntry entry, const AbiHooks& abi,
   write<void*>(state.input, 176, state.utils.data());
   write(state.input, 384, abi.basic_suite);
   write(state.input, 184, abi.effect_ref);
+}
+
+Result run(State& state, EffectEntry entry, const AbiHooks& abi,
+           const Request& request, const RuntimeHooks& hooks) {
+  Result result;
+  install_callback_tables(state, abi);
   write(state.input, 192, request.quality);
   write<int16_t>(state.input, 196, 13);
   write<int16_t>(state.input, 198, 28);
