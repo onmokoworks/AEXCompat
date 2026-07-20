@@ -346,6 +346,11 @@ AudioSessionOutcome run_audio_render_session(
     const AudioSpanOutcome span = run_audio_span(
         entry, input, output, &span_input, input_samples, requested_parameters,
         &captured);
+    // run_audio_span left host_audio's source_ pointing at span_input, which is
+    // destroyed at the end of this iteration. Clear it now so a plug-in that
+    // checks out audio between requests or during GLOBAL_SETDOWN fails closed
+    // (no source) instead of dereferencing the freed buffer.
+    aexcompat::host_audio::runtime().set_source(nullptr, 0);
     // A guard breach is corruption evidence and outranks the render error:
     // invalidate the session (§4.3 host-protection). Send NO audio_done reply:
     // a `status:"error"` response is a per-span diagnostic the broker keeps the
