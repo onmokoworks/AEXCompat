@@ -73,6 +73,21 @@ jobs:
           cmake --build target\minihost-build || exit /b 1
           dir /b target\minihost-build\aex_*.exe
 
+      # trace writer の動的テスト (test_production_worker_trace.py /
+      # test_instruments_trace_writer.py の handle ベース検証) を CI で実走させる
+      # ため instruments の trace_writer_selftest をビルドする (#250)。この target は
+      # trace_writer.cpp + windows.h のみで SDK 不要なので AE_SDK_ROOT は渡さず、
+      # pf-null-echo はスキップさせる。出力先はテストが参照する target\instruments-build。
+      - name: Build trace writer selftest (Ninja)
+        shell: cmd
+        run: |
+          for /f "usebackq delims=" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do set "VSROOT=%%i"
+          if not defined VSROOT exit /b 1
+          call "%VSROOT%\VC\Auxiliary\Build\vcvars64.bat" || exit /b 1
+          cmake -S instruments -B target\instruments-build -G Ninja -DCMAKE_BUILD_TYPE=Release || exit /b 1
+          cmake --build target\instruments-build --target trace_writer_selftest || exit /b 1
+          dir /b target\instruments-build\trace_writer_selftest.exe
+
       # 一部の built_artifact テストは worker を multi-config 時代の固定パス
       # (minihost-build-v18\[Release]、minihost-timed-layers\Release、
       # minihost-build\Release) から探すため、同一バイナリを複製して満たす。
