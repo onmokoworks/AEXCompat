@@ -26,8 +26,18 @@ mod windows_e2e {
             .expect("repository root")
     }
 
+    // Both tests toggle the process-global DISABLE_SESSION_WRAPPER_ENV to force
+    // the one-shot route, and both assert on RENDER_SESSION_WRAPPER_RENDERS
+    // deltas. cargo runs a binary's tests concurrently, so without this lock one
+    // test's forced one-shot could bleed into the other's session-routing
+    // assertion. Serialize the env-sensitive tests.
+    static SESSION_ROUTE_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn wrapper_report_matches_the_one_shot_transport() {
+        let _env_guard = SESSION_ROUTE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
         let root = repository_root();
         let worker = root.join("target/minihost-build/aex_render_worker.exe");
         let aex = root.join("target/pf-sampling-probe-build/Release/pf_sampling_probe.aex");
@@ -401,6 +411,9 @@ mod windows_e2e {
     /// worker and the pf-layer-param-probe fixture, like the sibling test.
     #[test]
     fn wrapper_layer_and_slider_match_across_routes() {
+        let _env_guard = SESSION_ROUTE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
         let root = repository_root();
         let worker = root.join("target/minihost-build/aex_render_worker.exe");
         let aex =
