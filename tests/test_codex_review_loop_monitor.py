@@ -6,7 +6,9 @@ copy of the jq strings, so changing the skill's logic without updating behavior
 fails here. Requires bash + jq; skips cleanly when either is missing.
 """
 
+import functools
 import json
+import os
 import shlex
 import shutil
 import subprocess
@@ -18,11 +20,38 @@ ROOT = Path(__file__).resolve().parents[1]
 LIB = ROOT / ".claude" / "skills" / "codex-review-loop" / "codex-review-lib.sh"
 
 
+@functools.lru_cache(maxsize=1)
+def _working_bash() -> str | None:
+    # shutil.which("bash") returns only the first PATH match, which on Windows is
+    # often a WSL relay (System32\bash.exe, WindowsApps\bash.exe) that exits 1
+    # with "execvpe(/bin/bash) failed" when no distro is installed, while a real
+    # bash (Git Bash / msys2) sits later on PATH. Enumerate every candidate and
+    # pick the first that actually runs, so the tests use a working bash instead
+    # of failing on the broken relay (they only skip when none work). See #85.
+    seen: set[str] = set()
+    for directory in os.environ.get("PATH", "").split(os.pathsep):
+        if not directory:
+            continue
+        candidate = shutil.which("bash", path=directory)
+        if candidate is None or candidate in seen:
+            continue
+        seen.add(candidate)
+        try:
+            probe = subprocess.run(
+                [candidate, "-c", "exit 0"], capture_output=True, timeout=15
+            )
+        except (OSError, subprocess.SubprocessError):
+            continue
+        if probe.returncode == 0:
+            return candidate
+    return None
+
+
 def _call(func: str, payload: list, *args: str) -> str:
-    bash = shutil.which("bash")
+    bash = _working_bash()
     jq = shutil.which("jq")
     if bash is None or jq is None:
-        pytest.skip("bash and jq are required")
+        pytest.skip("a working bash and jq are required")
     if not LIB.is_file():
         pytest.skip(f"{LIB} not found")
     quoted_args = " ".join(shlex.quote(a) for a in args)
