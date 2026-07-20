@@ -1663,6 +1663,15 @@ fn render_audio_via_length_one_session(
     ] {
         report.insert(key.to_owned(), value);
     }
+    // Preserve the one-shot path's top-level `worker_diagnostics`
+    // (classification / stage events) rather than only nesting it under
+    // session_close, so a caller on the default session path keeps that field.
+    let worker_diagnostics = close
+        .get("worker")
+        .and_then(|worker| worker.get("diagnostics"))
+        .cloned()
+        .unwrap_or(Value::Null);
+    report.insert("worker_diagnostics".to_owned(), worker_diagnostics);
     report.insert("session_close".to_owned(), close);
     AudioWrapperOutcome::Report(Value::Object(report))
 }
