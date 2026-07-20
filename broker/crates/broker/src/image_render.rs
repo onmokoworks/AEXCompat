@@ -31,6 +31,44 @@ const MAX_STAGE_EVENTS: usize = 32;
 const MAX_MISSING_SUITES: usize = 16;
 const MAX_SUITE_NAME_LEN: usize = 96;
 const STALE_IMAGE_TRANSPORT_AGE: Duration = Duration::from_secs(15 * 60);
+const CONFORMANCE_RENDER_SETTINGS_ENV: &str = "AEXCOMPAT_CONFORMANCE_RENDER_SETTINGS";
+
+fn conformance_render_settings_transport() -> io::Result<Option<String>> {
+    let Ok(encoded) = std::env::var(CONFORMANCE_RENDER_SETTINGS_ENV) else {
+        return Ok(None);
+    };
+    let fields = encoded.split('|').collect::<Vec<_>>();
+    if fields.len() != 6
+        || fields[0] != "v1"
+        || !matches!(fields[1], "straight" | "premultiplied" | "opaque")
+        || fields[2] != "0"
+        || fields[3] != "-"
+        || fields[4] != "0"
+        || !matches!(fields[5], "AEXCompat CPU" | "software")
+        || encoded.bytes().any(|byte| byte < 0x20)
+    {
+        return Err(invalid(
+            "unsupported or malformed conformance render settings",
+        ));
+    }
+    Ok(Some(encoded))
+}
+
+fn apply_conformance_premultiplication(rgba: &mut [u8], mode: &str) {
+    if mode == "straight" {
+        return;
+    }
+    for pixel in rgba.chunks_exact_mut(4) {
+        if mode == "premultiplied" {
+            let alpha = u16::from(pixel[3]);
+            for channel in &mut pixel[..3] {
+                *channel = ((u16::from(*channel) * alpha + 127) / 255) as u8;
+            }
+        } else if mode == "opaque" {
+            pixel[3] = 255;
+        }
+    }
+}
 
 /// PF_OutFlag2_SUPPORTS_SMART_RENDER in the out_flags2 word the plug-in
 /// advertises from PF_Cmd_GLOBAL_SETUP.
@@ -2619,6 +2657,38 @@ pub fn inspect_experimental_with_diagnostics(
         repository,
         plugin_path,
         approved_sha256,
+        Vec::new(),
+        None,
+    )
+}
+
+pub fn inspect_experimental_with_approved_dependencies(
+    repository: &Path,
+    plugin_path: &Path,
+    approved_sha256: &str,
+    dependencies: Vec<ApprovedImageArtifact>,
+) -> io::Result<Vec<InteractiveParameter>> {
+    inspect_experimental_with_diagnostics_and_runtime_policy(
+        repository,
+        plugin_path,
+        approved_sha256,
+        dependencies,
+        None,
+    )
+    .map(|(parameters, _)| parameters)
+}
+
+pub fn inspect_experimental_with_approved_dependencies_and_diagnostics(
+    repository: &Path,
+    plugin_path: &Path,
+    approved_sha256: &str,
+    dependencies: Vec<ApprovedImageArtifact>,
+) -> io::Result<(Vec<InteractiveParameter>, Value)> {
+    inspect_experimental_with_diagnostics_and_runtime_policy(
+        repository,
+        plugin_path,
+        approved_sha256,
+        dependencies,
         None,
     )
 }
@@ -2639,6 +2709,7 @@ pub fn inspect_experimental_with_runtime_policy(
         repository,
         plugin_path,
         approved_sha256,
+        Vec::new(),
         Some((policy, backend)),
     )
 }
@@ -2647,6 +2718,7 @@ fn inspect_experimental_with_diagnostics_and_runtime_policy(
     repository: &Path,
     plugin_path: &Path,
     approved_sha256: &str,
+    mut dependencies: Vec<ApprovedImageArtifact>,
     runtime_policy: Option<(&RuntimeModulePolicy, RuntimeBackend)>,
 ) -> io::Result<(Vec<InteractiveParameter>, Value)> {
     let actual = format!("{:X}", Sha256::digest(fs::read(plugin_path)?));
@@ -2665,13 +2737,16 @@ fn inspect_experimental_with_diagnostics_and_runtime_policy(
         args_after_plugin.push(authorization.basename.clone());
     }
     let started = Instant::now();
-    let isolated = if let Some(authorization) = &authorization {
+    if let Some(authorization) = &authorization {
+        dependencies.push(authorization.artifact.clone());
+    }
+    let isolated = if !dependencies.is_empty() {
         dispatch_approved_image_with_dependencies(
             repository,
             WorkerKind::L2,
             plugin_path,
             approved_sha256,
-            vec![authorization.artifact.clone()],
+            dependencies,
             &args_before_plugin,
             &args_after_plugin,
             Duration::from_millis(5_000),
@@ -2724,19 +2799,22 @@ fn inspect_experimental_with_diagnostics_and_runtime_policy(
         .and_then(Value::as_array)
         .ok_or_else(|| invalid("inspection report has no parameters"))?;
     let mut parameters = Vec::new();
+    let mut parameter_metadata = Vec::new();
     let custom_ui_events = report
         .get("custom_ui")
         .and_then(|value| value.get("events"))
         .and_then(Value::as_u64)
         .unwrap_or(0) as u32;
-    for (index, row) in rows.iter().enumerate() {
-        let observed_type = row.get("type").and_then(Value::as_i64).unwrap_or(-1);
-        if !matches!(
-            observed_type,
-            0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | 13 | 14 | 15 | 18
-        ) {
-            continue;
-        }
+    for row in rows {
+        let observed_type = row
+            .get("type")
+            .and_then(Value::as_i64)
+            .ok_or_else(|| invalid("inspection parameter has no numeric type"))?;
+        let observed_index = row
+            .get("index")
+            .and_then(Value::as_u64)
+            .filter(|value| *value <= u64::from(u16::MAX))
+            .ok_or_else(|| invalid("inspection parameter has no bounded index"))?;
         let default = row.get("default").and_then(Value::as_f64).unwrap_or(0.0);
         let ui_flags = row.get("ui_flags").and_then(Value::as_u64).unwrap_or(0);
         let default_color = row.get("default_color");
@@ -2746,44 +2824,127 @@ fn inspect_experimental_with_diagnostics_and_runtime_policy(
                 .and_then(Value::as_u64)
                 .unwrap_or(if name == "alpha" { 255 } else { 0 }) as u8
         };
+        let known_metadata_kind = match observed_type {
+            0 => "layer",
+            1 => "slider",
+            2 => "fixed_slider",
+            3 => "angle",
+            4 => "checkbox",
+            5 => "color",
+            6 => "point",
+            7 => "popup",
+            8 => "custom",
+            9 => "no_data",
+            10 => "float_slider",
+            11 => "arbitrary_data",
+            12 => "path",
+            13 => "group_start",
+            14 => "group_end",
+            15 => "button",
+            18 => "point3d",
+            16 => "reserved16",
+            17 => "reserved17",
+            _ => "",
+        };
+        let metadata_kind = if known_metadata_kind.is_empty() {
+            format!("unknown_{observed_type}")
+        } else {
+            known_metadata_kind.to_owned()
+        };
+        let runtime_kind = match observed_type {
+            0 => "layer",
+            3 => "angle",
+            5 => "color",
+            6 => "point",
+            2 | 10 => "float",
+            8 => "custom",
+            9 => "no_data",
+            11 => "arbitrary_data",
+            12 => "path",
+            13 => "group_start",
+            14 => "group_end",
+            15 => "button",
+            18 => "point3d",
+            _ => "integer",
+        };
+        let host_minimum = if observed_type == 12 {
+            0.0
+        } else {
+            row.get("valid_min")
+                .and_then(Value::as_f64)
+                .unwrap_or(default)
+        };
+        let host_maximum = if observed_type == 12 {
+            1024.0
+        } else {
+            row.get("valid_max")
+                .and_then(Value::as_f64)
+                .unwrap_or(default)
+        };
+        let observed_host_range = row.get("valid_min").and_then(Value::as_f64).zip(
+            row.get("valid_max").and_then(Value::as_f64),
+        );
+        let observed_user_range = row.get("slider_min").and_then(Value::as_f64).zip(
+            row.get("slider_max").and_then(Value::as_f64),
+        );
+        let component_count = match observed_type {
+            3 => 1,
+            6 => 2,
+            18 => 3,
+            _ => 0,
+        };
+        let initial_value = if let Some(value) = row.get("default").and_then(Value::as_f64) {
+            json!(value)
+        } else if observed_type == 5 {
+            let color = row.get("default_color");
+            ["alpha", "red", "green", "blue"]
+                .iter()
+                .map(|name| color.and_then(|value| value.get(name)).and_then(Value::as_u64))
+                .collect::<Option<Vec<_>>>()
+                .map(Value::from)
+                .unwrap_or(Value::Null)
+        } else if component_count > 0 {
+            row
+                .get("default_components")
+                .and_then(Value::as_array)
+                .filter(|values| values.len() >= component_count)
+                .and_then(|values| {
+                    values
+                        .iter()
+                        .take(component_count)
+                        .map(Value::as_f64)
+                        .collect::<Option<Vec<_>>>()
+                })
+                .map(Value::from)
+                .unwrap_or(Value::Null)
+        } else if observed_type == 0 {
+            row.get("layer_default").cloned().unwrap_or(Value::Null)
+        } else {
+            Value::Null
+        };
+        parameter_metadata.push(json!({
+            "index": observed_index,
+            "type": metadata_kind,
+            "initial_value": initial_value,
+            "host_range": observed_host_range.map(|(minimum, maximum)| json!({"minimum": minimum, "maximum": maximum})),
+            "user_range": observed_user_range.map(|(minimum, maximum)| json!({"minimum": minimum, "maximum": maximum}))
+        }));
+        if !matches!(
+            observed_type,
+            0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | 13 | 14 | 15 | 18
+        ) {
+            continue;
+        }
         parameters.push(InteractiveParameter {
-            slot: (index + 1) as u32,
+            slot: observed_index as u32,
             name: row
                 .get("name")
                 .and_then(Value::as_str)
                 .unwrap_or("Parameter")
                 .to_owned(),
-            kind: match observed_type {
-                0 => "layer",
-                3 => "angle",
-                5 => "color",
-                6 => "point",
-                2 | 10 => "float",
-                8 => "custom",
-                9 => "no_data",
-                11 => "arbitrary_data",
-                12 => "path",
-                13 => "group_start",
-                14 => "group_end",
-                15 => "button",
-                18 => "point3d",
-                _ => "integer",
-            }
-            .into(),
-            minimum: if observed_type == 12 {
-                0.0
-            } else {
-                row.get("valid_min")
-                    .and_then(Value::as_f64)
-                    .unwrap_or(default)
-            },
-            maximum: if observed_type == 12 {
-                1024.0
-            } else {
-                row.get("valid_max")
-                    .and_then(Value::as_f64)
-                    .unwrap_or(default)
-            },
+            kind: runtime_kind.into(),
+            minimum: host_minimum,
+            maximum: host_maximum,
             value: default,
             choices: row
                 .get("choices")
@@ -2805,12 +2966,7 @@ fn inspect_experimental_with_diagnostics_and_runtime_policy(
                 }
                 result
             },
-            component_count: match observed_type {
-                3 => 1,
-                6 => 2,
-                18 => 3,
-                _ => 0,
-            },
+            component_count,
             layer_path: None,
             enabled: ui_flags & (1 << 5) == 0,
             visible: ui_flags & (1 << 9) == 0,
@@ -2826,6 +2982,7 @@ fn inspect_experimental_with_diagnostics_and_runtime_policy(
             ],
         });
     }
+    diagnostics["parameter_metadata"] = Value::Array(parameter_metadata);
     Ok((parameters, diagnostics))
 }
 
@@ -4090,6 +4247,10 @@ fn render_with_artifact(
             "depth-preserving output already exists",
         ));
     }
+    let conformance_render_settings = conformance_render_settings_transport()?;
+    let conformance_premultiplication = conformance_render_settings
+        .as_deref()
+        .map(|settings| settings.split('|').nth(1).expect("validated settings mode"));
     let decoded = decode_bounded_image(input_path, "input")?;
     let (width, height) = (decoded.width(), decoded.height());
     if width == 0
@@ -4100,7 +4261,10 @@ fn render_with_artifact(
     {
         return Err(invalid("input dimensions exceed the ARGB8 harness limit"));
     }
-    let rgba = decoded.into_rgba8().into_raw();
+    let mut rgba = decoded.into_rgba8().into_raw();
+    if let Some(mode) = conformance_premultiplication {
+        apply_conformance_premultiplication(&mut rgba, mode);
+    }
     crate::render_request::validate_image_buffer_layout(
         u64::from(width),
         u64::from(height),
@@ -4142,7 +4306,10 @@ fn render_with_artifact(
         {
             return Err(invalid("secondary image exceeds the layer transport limit"));
         }
-        let layer_rgba = decoded.into_rgba8().into_raw();
+        let mut layer_rgba = decoded.into_rgba8().into_raw();
+        if let Some(mode) = conformance_premultiplication {
+            apply_conformance_premultiplication(&mut layer_rgba, mode);
+        }
         crate::render_request::validate_image_buffer_layout(
             u64::from(layer_width),
             u64::from(layer_height),
@@ -4172,7 +4339,10 @@ fn render_with_artifact(
     for layer in timed_layers {
         let decoded = decode_bounded_image(&layer.image_path, "timed secondary")?;
         let (layer_width, layer_height) = (decoded.width(), decoded.height());
-        let rgba = decoded.into_rgba8().into_raw();
+        let mut rgba = decoded.into_rgba8().into_raw();
+        if let Some(mode) = conformance_premultiplication {
+            apply_conformance_premultiplication(&mut rgba, mode);
+        }
         crate::render_request::validate_image_buffer_layout(
             u64::from(layer_width),
             u64::from(layer_height),
@@ -4504,6 +4674,9 @@ fn render_with_artifact(
     // `minidump_directory` here is only for the report.
     if output_checksum_detail {
         args_after_plugin.extend(["--output-checksum-detail-v1".into(), "1".into()]);
+    }
+    if let Some(settings) = &conformance_render_settings {
+        args_after_plugin.extend(["--conformance-render-settings-v1".into(), settings.clone()]);
     }
     let mut args_before_plugin = vec![command.into()];
     let started = Instant::now();
@@ -5755,6 +5928,28 @@ mod tests {
         assert!(smart_render_advertised(525_312));
         // Every other flag set without bit 10 stays Classic.
         assert!(!smart_render_advertised(u64::MAX & !PF_OUTFLAG2_SUPPORTS_SMART_RENDER));
+    }
+
+    #[test]
+    fn conformance_alpha_mode_transforms_rgba_transports_consistently() {
+        let source = [200, 100, 50, 128, 9, 8, 7, 0];
+        for mode in ["straight", "premultiplied", "opaque"] {
+            let mut primary = source;
+            let mut secondary = source;
+            let mut timed_secondary = source;
+            apply_conformance_premultiplication(&mut primary, mode);
+            apply_conformance_premultiplication(&mut secondary, mode);
+            apply_conformance_premultiplication(&mut timed_secondary, mode);
+            assert_eq!(secondary, primary);
+            assert_eq!(timed_secondary, primary);
+        }
+
+        let mut premultiplied = source;
+        apply_conformance_premultiplication(&mut premultiplied, "premultiplied");
+        assert_eq!(premultiplied, [100, 50, 25, 128, 0, 0, 0, 0]);
+        let mut opaque = source;
+        apply_conformance_premultiplication(&mut opaque, "opaque");
+        assert_eq!(opaque, [200, 100, 50, 255, 9, 8, 7, 255]);
     }
 
     #[test]
