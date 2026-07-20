@@ -731,3 +731,40 @@ pre-existing ギャップ。#231 で worker 側を追跡する。#229 の
 `render_session_wrapper.rs` aux A/B block は「aux render 成功」前提で
 hard-fail していたため、#231 で成功前提を外し #231 を注記する形に修正した
 (machine-portable 単体テストは #211 の broker 配線ガードとして維持)。
+
+### 追記 (根本原因確定と修正, 2026-07-20, #231 本体)
+
+上記 exit 3 の根本原因を実測で確定した。
+
+観察 (切り分け):
+
+- broker の `prepare_aux_transport` 実出力を unsealed self-test
+  (`--self-test-pf-ae-channel-transport --aux-manifest-v1 <manifest>`) に
+  食わせると returncode 3。plain パスに直すと returncode 0。
+- manifest パス (argv) と manifest 内 sample パスの双方が独立に落ちることも
+  切り分け済み (片方だけ `\\?\` 付きでも rc=3、両方 plain で rc=0)。
+
+根本原因 (確定): worker の `load_aux_manifest`
+(`worker_pf_ae_channel_runtime.cpp:86-88`, および sample 側:179) が各パスを
+`std::filesystem::absolute(p).lexically_normal() == std::filesystem::canonical(p)`
+で厳格比較する。MSVC の `canonical` は Windows の `\\?\` verbatim
+(extended-length) prefix を剥がすが `absolute` は保持するため、`\\?\C:\...`
+形式のパスは自身の canonical 形と一致せず false を返す。argv strip が失敗し
+`worker_request_parser.cpp:45` で `error = 3` となり早期 exit していた。
+発火源は `repository_root()` / production の `Path::canonicalize()` が Windows で
+`\\?\` prefix 付きパスを返す点。broker がそのパスから transport root を
+`join` して manifest / sidecar パスを組み、両方を worker へ渡していた。
+regular render (`load_rgba`) はパスを直接 open するだけでこの canonical 検証が
+無いため aux のみが落ちていた。transport self-test も同 manifest 形式を plain
+パスで渡していたため成功しており、self-test 成功 = 形式妥当だが sealed render
+経路固有の失敗、という当初の観察と整合する (ただし "sealed 固有" の実体は
+restricted token でも取り込み未実装でもなく、broker が渡すパスの verbatim
+prefix だった)。
+
+修正: broker 側 `prepare_aux_transport` が transport root から verbatim prefix
+を剥がす (`strip_extended_prefix`, 既存の minidump_policy.rs / trace_policy.rs
+と同じ処理)。worker には plain な絶対パスが渡り、worker 側の fail-closed パス
+検証 (host-protection invariant) はそのまま維持。実機検証: `render_session_wrapper.rs`
+の aux A/B block を復元し、実 worker + pf_sampling_probe で session/one-shot の
+公開レポート全フィールド + PNG バイト一致を確認 (両経路成功)。回帰は機械可搬な
+単体テスト `aux_transport_de_verbatims_manifest_and_sidecar_paths` が守る。

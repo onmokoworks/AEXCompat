@@ -159,13 +159,27 @@ byte 差としては現れないが、両ルートが同一オプションを同
 単体テスト (`prepare_aux_transport_output_satisfies_the_session_aux_manifest_contract`)
 が、wrapper の manifest 出力が session の `--aux-manifest-v1` 前提 (絶対パス・
 実在ファイル・v1 スキーマの top-level 契約) を満たすことを実 worker 無しで保証する。
-実 worker での byte 一致 A/B は現状動かせない: sealed classic-render 経路が
-aux 付き render を session/one-shot 双方で `exit_code 3` (stderr 空・stage
-event 無し) で早期拒否する (transport self-test は同 manifest を受理する)。
-これは one-shot aux 経路由来の pre-existing ギャップで #211 とは独立、#231 で
-追跡する。session ≡ one-shot 等価は実 worker で手動確認済み (両ルートが aux
-render で同一に失敗する = session が one-shot と同じ manifest を同じ worker に
-運ぶことの裏付け)。#231 で render 経路が通れば実 worker byte 一致 A/B を有効化する。
+実 worker での byte 一致 A/B は #231 修正後に有効。加えて実 worker +
+pf_sampling_probe の wrapper A/B (`render_session_wrapper.rs`) が session/
+one-shot の公開レポート全フィールド + PNG バイト一致を検証する (probe は depth
+channel を消費しないが、両ルートが同一 manifest を同一 worker に load させること
+を担保する)。
+
+#231 の経緯 (2026-07-20 解決): sealed classic-render 経路は当初 aux 付き render
+を session/one-shot 双方で `exit_code 3` (stderr 空・stage event 無し) で早期
+拒否していた。根本原因は worker の aux loader
+(`worker_pf_ae_channel_runtime.cpp` `load_aux_manifest`) が各パスを
+`absolute().lexically_normal() == canonical()` で検証する点にある: MSVC の
+`std::filesystem::canonical` は Windows の `\\?\` verbatim (extended-length)
+prefix を剥がすが `absolute` は保持するため、`Path::canonicalize()` が生む
+`\\?\C:\...` 形式の manifest / sidecar パスが自身の canonical 形と一致せず false
+となり argv strip が失敗していた。regular render (`load_rgba`) はパスを直接 open
+するだけでこの検証が無いため aux のみが落ちていた (transport self-test も同 manifest
+を plain パスで渡していたため成功していた)。修正は broker 側で `prepare_aux_transport`
+が transport root から verbatim prefix を剥がし (既存の minidump/trace のパス処理と
+同じ `strip_extended_prefix`)、worker に plain な絶対パスを渡すもの。worker 側の
+fail-closed パス検証はそのまま維持。回帰は機械可搬な単体テスト
+(`aux_transport_de_verbatims_manifest_and_sidecar_paths`) が守る。
 
 one-shot との差分:
 
