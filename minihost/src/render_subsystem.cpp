@@ -59,6 +59,33 @@ bool smart_geometry_rect_self_test() {
   passed = !smart_rect_contained({-1, 0, 5, 5}, {0, 0, 10, 10}) && passed;
   passed = !smart_rect_contained({0, 0, 11, 10}, {0, 0, 10, 10}) && passed;
   passed = smart_rect_contained({7, 7, 7, 7}, {0, 0, 1, 1}) && passed;
+  // Output world sizing follows the AE 25.3 observation (issue #102):
+  // result_rect dimensions and origin, not the max_result_rect extent.
+  const auto bounds_for = [](const std::array<int32_t, 4>& result,
+                             const std::array<int32_t, 4>& maximum,
+                             int32_t pixel_bytes) {
+    std::array<unsigned char, 48> pre_output{};
+    std::memcpy(pre_output.data(), result.data(), sizeof(result));
+    std::memcpy(pre_output.data() + 16, maximum.data(), sizeof(maximum));
+    return prepare_smart_output_bounds(pre_output.data(), pre_output.size(),
+                                       pixel_bytes);
+  };
+  const SmartOutputBounds inset = bounds_for({8, 4, 632, 356}, {0, 0, 640, 360}, 4);
+  passed = inset.valid && !inset.empty_result && inset.width == 624 &&
+      inset.height == 352 && inset.rowbytes == 2496 && inset.origin_x == 8 &&
+      inset.origin_y == 4 && passed;
+  const SmartOutputBounds full = bounds_for({0, 0, 16, 12}, {0, 0, 16, 12}, 4);
+  passed = full.valid && full.width == 16 && full.height == 12 &&
+      full.rowbytes == 64 && full.origin_x == 0 && full.origin_y == 0 && passed;
+  const SmartOutputBounds expanded =
+      bounds_for({-2, -2, 18, 14}, {-2, -2, 18, 14}, 8);
+  passed = expanded.valid && expanded.width == 20 && expanded.height == 16 &&
+      expanded.rowbytes == 160 && expanded.origin_x == -2 &&
+      expanded.origin_y == -2 && passed;
+  const SmartOutputBounds empty = bounds_for({0, 0, 0, 0}, {0, 0, 16, 12}, 4);
+  passed = empty.valid && empty.empty_result && passed;
+  passed = !bounds_for({4, 4, 20, 20}, {0, 0, 16, 12}, 4).valid && passed;
+  passed = !bounds_for({0, 0, 16, 12}, {0, 0, 16, 12}, 3).valid && passed;
   return passed;
 }
 
@@ -149,10 +176,16 @@ SmartOutputBounds prepare_smart_output_bounds(const void* pre_render_output,
     bounds.valid = true;
     return bounds;
   }
-  bounds.width = bounds.max_result_rect[2] - bounds.max_result_rect[0];
-  bounds.height = bounds.max_result_rect[3] - bounds.max_result_rect[1];
+  // AE 25.3 observation (issue #102): with result_rect strictly inside
+  // max_result_rect, AE supplies the output world at the result_rect
+  // dimensions with the world origin at the result_rect top-left, not at
+  // the max_result_rect extent.
+  bounds.width = bounds.result_rect[2] - bounds.result_rect[0];
+  bounds.height = bounds.result_rect[3] - bounds.result_rect[1];
   if (bounds.width <= 0 || bounds.height <= 0) return bounds;
   bounds.rowbytes = bounds.width * pixel_bytes;
+  bounds.origin_x = bounds.result_rect[0];
+  bounds.origin_y = bounds.result_rect[1];
   bounds.valid = true;
   return bounds;
 }

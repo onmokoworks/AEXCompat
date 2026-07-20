@@ -332,3 +332,34 @@ output world 確保は AE と異なる。result_rect ≠ max_result_rect を返�
 plugin では、AE 上と host 上で output world の寸法・origin が食い違う。
 sizing の追随変更 (result_rect 基準 + origin 設定) は issue #102 の
 残作業として、SmartFX geometry evidence の refresh と併せて別 PR で行う。
+
+## 2026-07-20 issue #102 implementation record (output world sizing 追随)
+
+観察/実装 (上記 AE 実機観測に基づく host 追随):
+
+- `render::prepare_smart_output_bounds` (render_subsystem.cpp) の output
+  world sizing を `max_result_rect` 基準から `result_rect` 基準に変更し、
+  `SmartOutputBounds` に `origin_x` / `origin_y` (result_rect の左上 =
+  layer 座標系での buffer 原点) を追加した。
+- `worker_smart_dispatch.cpp` は output world block の
+  `PF_LayerDef::origin_x/origin_y` (offset 104/108) に result_rect の左上を
+  書き、in_data.output_origin (input+276/280) はその負値 (buffer 内での
+  layer 原点の位置) を書く。従来は world origin がゼロ埋めのまま、
+  in_data.output_origin が -max_result_rect[0/1] だった。
+- result_rect == max_result_rect を返す fixture (全 built-artifact テストの
+  fixture、ntsc-rs 実 AEX、full-frame checkout) では寸法・origin が従来と
+  一致するため既存 behavioral テストへの影響は無い。result ≠ max を返す
+  fixture は selector-timeline probe の inset mode のみで、これは AE 観測
+  専用 (pytest 未配線)。
+- `--self-test-pf-smart-geometry-rects` に `prepare_smart_output_bounds` の
+  ケースを追加: inset (624x352, rowbytes 2496, origin (8,4)) / full /
+  expanded deep16 (origin (-2,-2)) / empty / result ⊄ max 拒否 /
+  非対応 pixel_bytes 拒否。
+- evidence refresh について: smart worker のバイナリハッシュに紐づく
+  analysis/ の local-artifact evidence (SMARTFX_GEOMETRY_CONTRACT_RESULT,
+  REAL_AEX_SMART_TIMED_MULTI_LAYER_RESULT, GENERAL_EFFECT_RUNTIME_COVERAGE
+  等) は生成マシンに紐づいており、今回の作業マシンでは変更前の時点で既に
+  hash 不一致で fail していた。このため evidence の refresh は本 PR では
+  行わず、evidence 生成マシン側で
+  `tools/refresh-smartfx-geometry-evidence.ps1` /
+  `tools/refresh-runtime-evidence.ps1` を再実行する別作業とする。

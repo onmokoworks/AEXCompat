@@ -138,8 +138,14 @@ bool dispatch(const Request& request, const Hooks& hooks,
         !request.formats->register_world(request.output_world->data(),
                                          request.dispatch_pixel_format))
       result.rects_valid = false;
-    write<int32_t>(*request.input, 276, -smart_bounds.max_result_rect[0]);
-    write<int32_t>(*request.input, 280, -smart_bounds.max_result_rect[1]);
+    // AE 25.3 observation (issue #102): the output world carries the
+    // result_rect top-left as PF_LayerDef::origin_x/origin_y (offset 104/108),
+    // and in_data.output_origin (276/280) is the position of the layer origin
+    // inside that buffer, i.e. the negated result_rect top-left.
+    write<int32_t>(*request.output_world, 104, smart_bounds.origin_x);
+    write<int32_t>(*request.output_world, 108, smart_bounds.origin_y);
+    write<int32_t>(*request.input, 276, -smart_bounds.result_rect[0]);
+    write<int32_t>(*request.input, 280, -smart_bounds.result_rect[1]);
     result.output_width = smart_bounds.width;
     result.output_height = smart_bounds.height;
     result.output_rowbytes = smart_bounds.rowbytes;
