@@ -31,6 +31,7 @@ CLASSIC_RUNTIME_HEADER = ROOT / "minihost" / "src" / "worker_classic_runtime.hpp
 CLASSIC_RUNTIME_SOURCE = ROOT / "minihost" / "src" / "worker_classic_runtime.cpp"
 SELFTEST_DISPATCH_SOURCE = ROOT / "minihost" / "src" / "worker_selftest_dispatch.cpp"
 FIXED_SELFTEST_ROUTING_SOURCE = ROOT / "minihost" / "src" / "worker_fixed_selftest_routing.cpp"
+MINIDUMP_RUNTIME_SOURCE = ROOT / "minihost" / "src" / "worker_minidump_runtime.cpp"
 PARAMETER_SELFTEST_ROUTING_SOURCE = (ROOT / "minihost" / "src" /
                                      "worker_parameter_selftest_routing.cpp")
 CUSTOM_SELFTEST_ROUTING_SOURCE = (ROOT / "minihost" / "src" /
@@ -824,6 +825,70 @@ class MinihostL2SourceTests(unittest.TestCase):
             'L"render:v1|"',
         ):
             self.assertIn(marker, text)
+
+    def test_crash_minidump_uses_dedicated_writer_and_inherited_handle(self):
+        # The minidump implementation moved out of l2_main.cpp into
+        # worker_minidump_runtime.cpp; the self-test command routing lives in
+        # worker_fixed_selftest_routing.cpp. Read each at its owner.
+        runtime = MINIDUMP_RUNTIME_SOURCE.read_text(encoding="utf-8")
+        for marker in (
+            "minidump_writer_thread",
+            "CreateThread(nullptr, 0, minidump_writer_thread",
+            "request_crash_minidump",
+            "input->Io",
+            "IoStartCallback",
+            "output->Status = S_FALSE",
+            "IoWriteAllCallback",
+            "io.Offset > sink->capacity",
+            "io.BufferBytes > sink->capacity - io.Offset",
+            "INVALID_HANDLE_VALUE",
+            "write_minidump_transport",
+            "commit_end - sink->committed",
+            "MEM_COMMIT",
+            "MEM_RESERVE, PAGE_READWRITE",
+            "LOAD_LIBRARY_SEARCH_SYSTEM32",
+            "AEXCOMPAT_MINIDUMP_HANDLE",
+            "AEXCOMPAT_MINIDUMP_ACK_HANDLE",
+            "preload_minidump_writer",
+            "FILE_TYPE_PIPE",
+        ):
+            self.assertIn(marker, runtime)
+        routing = FIXED_SELFTEST_ROUTING_SOURCE.read_text(encoding="utf-8")
+        for marker in (
+            'L"--self-test-crash-minidump"',
+            'L"--self-test-crash-no-minidump"',
+        ):
+            self.assertIn(marker, routing)
+        # The worker command line no longer carries a dump directory, and the
+        # worker never opens a dump file by path. Assert on the exact former
+        # owners so a reintroduction anywhere is caught.
+        self.assertNotIn("--minidump-v1", SOURCE.read_text(encoding="utf-8"))
+        self.assertNotIn("--minidump-v1", runtime)
+        self.assertNotIn("CreateFileW(dump_path", runtime)
+        minidump = runtime[
+            runtime.index("// Opt-in crash minidumps"):
+            runtime.index("// Best-effort coverage for crashes")
+        ]
+        self.assertNotIn("MEM_RESERVE | MEM_COMMIT", minidump)
+
+    def test_crash_minidump_claims_transport_before_global_handle_access(self):
+        runtime = MINIDUMP_RUNTIME_SOURCE.read_text(encoding="utf-8")
+        request = runtime[
+            runtime.index("void request_crash_minidump("):
+            runtime.index("int capture_seh_exception(")
+        ]
+        ready = request.index("g_minidump_ready.load(std::memory_order_acquire)")
+        claim = request.index(
+            "g_minidump_attempted.exchange(true, std::memory_order_acq_rel)"
+        )
+        handle_access = request.index(
+            "if (!g_minidump_handle || !g_minidump_request_event)"
+        )
+        self.assertLess(ready, claim)
+        self.assertLess(claim, handle_access)
+        self.assertIn(
+            "g_minidump_ready.store(false, std::memory_order_release)", runtime
+        )
 
     def test_frame_setup_origin_uses_two_signed_32_bit_components(self):
         text = l2_family_source()

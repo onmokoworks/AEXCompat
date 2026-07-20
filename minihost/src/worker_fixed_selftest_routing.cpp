@@ -10,10 +10,8 @@
 #include "worker_selftest_dispatch.hpp"
 
 #include <array>
-#include <filesystem>
 #include <iostream>
 #include <string_view>
-#include <system_error>
 
 
 
@@ -34,22 +32,38 @@ int selftest_render_output_safety(int, wchar_t**) {
   return passed ? 0 : 1;
 }
 
-int selftest_crash_minidump(int, wchar_t** argv) {
-  if (!minidump::configure_directory(std::filesystem::path(argv[2]))) {
-    std::cout << "{\"crash_minidump\":\"failed\",\"reason\":\"bad_directory\"}\n";
+int selftest_crash_minidump(int, wchar_t**) {
+  // End-to-end proof that the production inherited-handle path writes a
+  // minidump. The worker must not receive a directory path; the broker-created
+  // pipe is inherited through the environment.
+  if (!minidump::configure_from_inherited_handle() ||
+      !minidump::handle_configured()) {
+    std::cout << "{\"crash_minidump\":\"failed\",\"reason\":\"missing_handle\"}\n";
     return 1;
   }
   const uint32_t exception_code = g_host->trigger_guarded_crash();
-  const std::filesystem::path dump_path = minidump::current_process_dump_path();
-  std::error_code dump_size_error;
-  const auto dump_size = std::filesystem::file_size(dump_path, dump_size_error);
-  const bool written = !dump_size_error && dump_size > 0;
+  const uint64_t dump_size = minidump::written_bytes();
+  const bool written = exception_code == EXCEPTION_ACCESS_VIOLATION &&
+      dump_size > 0 && !minidump::broker_rejected();
   std::cout << "{\"crash_minidump\":\"" << (written ? "passed" : "failed")
             << "\",\"exception_code\":" << exception_code
             << ",\"dump_bytes\":" << (written ? dump_size : 0)
             << ",\"attempted\":" << (minidump::attempted() ? "true" : "false")
             << "}\n";
   return written ? 0 : 1;
+}
+
+int selftest_crash_no_minidump(int, wchar_t**) {
+  // Real guarded access violation with no opt-in handle. This protects the
+  // default-off privacy invariant instead of merely testing argc rejection.
+  const uint32_t exception_code = g_host->trigger_guarded_crash();
+  const bool passed = exception_code == EXCEPTION_ACCESS_VIOLATION &&
+      !minidump::attempted();
+  std::cout << "{\"crash_minidump\":\"" << (passed ? "disabled" : "failed")
+            << "\",\"exception_code\":" << exception_code
+            << ",\"attempted\":" << (minidump::attempted() ? "true" : "false")
+            << "}\n";
+  return passed ? 0 : 1;
 }
 
 int selftest_pf_adv_time(int, wchar_t**) {
@@ -94,9 +108,10 @@ int selftest_effect_param_union(int, wchar_t**) {
 
 Result dispatch(const Request& request, const Hooks& hooks) {
   g_host = &hooks.host;
-  const std::array<selftest::HostCommand, 6> host_commands{{
+  const std::array<selftest::HostCommand, 7> host_commands{{
       {L"--self-test-render-output-safety", 2, &selftest_render_output_safety},
-      {L"--self-test-crash-minidump", 3, &selftest_crash_minidump},
+      {L"--self-test-crash-minidump", 2, &selftest_crash_minidump},
+      {L"--self-test-crash-no-minidump", 2, &selftest_crash_no_minidump},
       {L"--self-test-pf-adv-time-suite1", 2, &selftest_pf_adv_time},
       {L"--self-test-suite-entry-utility13", 2, &selftest_suite_entry_utility13},
       {L"--self-test-pf-adv-app-suite", 2, &selftest_pf_adv_app},
