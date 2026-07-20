@@ -40,6 +40,14 @@ TraceWriter::TraceWriter(std::string host_kind, std::string host_version_label,
     return;
   }
   handle_ = trace_handle();
+  // Verbosity is a pure opt-in flag inherited from the broker's environment;
+  // "1" turns on the high-frequency detail events. Any other value, including
+  // absent, leaves the writer at the low-frequency default.
+  wchar_t verbose_buffer[8]{};
+  const DWORD verbose_length = GetEnvironmentVariableW(
+      L"AEX_INSTRUMENT_TRACE_VERBOSE", verbose_buffer,
+      static_cast<DWORD>(std::size(verbose_buffer)));
+  verbose_ = verbose_length == 1 && verbose_buffer[0] == L'1';
 }
 
 TraceWriter::~TraceWriter() {
@@ -56,6 +64,7 @@ bool TraceWriter::enabled() const {
   return handle_ != nullptr;
 }
 bool TraceWriter::requested() const { return requested_; }
+bool TraceWriter::verbose() const { return verbose_; }
 
 std::string TraceWriter::escape(const std::string& value) {
   std::ostringstream out;

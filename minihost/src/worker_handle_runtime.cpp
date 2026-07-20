@@ -1,5 +1,7 @@
 #include "worker_handle_runtime.hpp"
 
+#include "trace_writer.hpp"
+
 #include <algorithm>
 #include <cstring>
 #include <iostream>
@@ -11,8 +13,22 @@
 #include <unordered_map>
 #include <vector>
 
+namespace aexcompat::l2_detail {
+// Session-lifetime trace sink (defined in l2_main.cpp). Per-callback events are
+// high-frequency, so they are emitted only under the writer's verbose opt-in
+// (issue #17); the existing unconditional stderr markers are unchanged.
+extern aexcompat::TraceWriter* g_trace_writer;
+}  // namespace aexcompat::l2_detail
+
 namespace aexcompat::worker_runtime::handles {
 namespace {
+
+void trace_callback_invoke() {
+  if (aexcompat::l2_detail::g_trace_writer &&
+      aexcompat::l2_detail::g_trace_writer->verbose()) {
+    aexcompat::l2_detail::g_trace_writer->callback_invoke();
+  }
+}
 
 struct HandleRecord {
   // This field must remain first: PF_Handle is the address of the movable data
@@ -41,6 +57,7 @@ void invalid_operation() { ++g_statistics.invalid_operations; }
 
 void** __cdecl new_handle(std::uint64_t size) {
   std::cerr << "callback:new_handle size=" << size << "\n" << std::flush;
+  trace_callback_invoke();
   std::lock_guard<std::mutex> lock(g_mutex);
   if (size > kMaxHandleBytes || g_handles.size() >= kMaxHandleCount ||
       g_statistics.live_bytes > kMaxHandleBytes - size) {
@@ -64,6 +81,7 @@ void** __cdecl new_handle(std::uint64_t size) {
 
 void* __cdecl lock_handle(void** handle) {
   std::cerr << "callback:lock_handle\n" << std::flush;
+  trace_callback_invoke();
   auto* record = reinterpret_cast<HandleRecord*>(handle);
   std::lock_guard<std::mutex> lock(g_mutex);
   if (!record || !g_handles.count(record)) {

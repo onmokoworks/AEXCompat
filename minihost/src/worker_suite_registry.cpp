@@ -168,8 +168,14 @@ int32_t SuiteRegistry::reject_unknown(const char* name, int32_t version,
                                       TraceWriter* trace_writer) {
   const std::string safe_name = safe_missing_name(name);
   record_missing_suite(safe_name, version);
-  if (trace_writer && !safe_name.empty())
+  if (trace_writer && !safe_name.empty()) {
     trace_writer->suite_acquire(safe_name, std::max<int32_t>(version, 0), false);
+    // An unknown suite is an unimplemented host capability (issue #17). Record
+    // it as an explicit trace error so compatibility gaps surface as diagnostics
+    // rather than only a granted=false acquire. Unsafe names are dropped by the
+    // writer's own safe_string guard.
+    trace_writer->error("unimplemented_suite", safe_name, /*unimplemented=*/true);
+  }
   std::cerr << "stage:suite_acquire_failed name=" << safe_name
             << " version=" << version << "\n" << std::flush;
   return 1;

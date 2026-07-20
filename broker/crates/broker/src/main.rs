@@ -2,6 +2,7 @@
 fn main() {
     use aexcompat_broker::selftest::{run, Workers};
     use std::path::{Component, PathBuf};
+    aexcompat_broker::observability::init();
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 2 {
         eprintln!("usage: broker <operation> <json arguments>");

@@ -1,6 +1,7 @@
 #include "worker_world_registry.hpp"
 
 #include "gpu_memory_world_transport.hpp"
+#include "trace_writer.hpp"
 
 #include <array>
 #include <algorithm>
@@ -14,8 +15,25 @@
 #include <utility>
 #include <vector>
 
+namespace aexcompat::l2_detail {
+// Installed by WorkerSession for the session lifetime (defined in l2_main.cpp).
+// World descriptors are a high-frequency detail event, so they are gated on the
+// writer's verbose opt-in to protect the bounded event budget (issue #17).
+extern aexcompat::TraceWriter* g_trace_writer;
+}  // namespace aexcompat::l2_detail
+
 namespace aexcompat::world_registry {
 namespace {
+
+// Map the internal pixel-format tag to a trace-contract pixel_format string
+// (contracts/trace/host_trace_event.schema.json). Unrecognized tags fall back
+// to "unknown" rather than emitting an out-of-contract value.
+const char* trace_pixel_format(int32_t pixel_format) {
+  if (pixel_format == kPixelFormatArgb32) return "argb8";
+  if (pixel_format == kPixelFormatArgb64) return "argb16";
+  if (pixel_format == kPixelFormatArgb128) return "argb32f";
+  return "unknown";
+}
 
 constexpr uint64_t kMaxWorldBytes = 256ULL * 1024 * 1024;
 constexpr std::size_t kMaxWorldCount = 64;
@@ -156,6 +174,11 @@ int32_t __cdecl new_world(void*, int32_t width, int32_t height,
   g_worlds.emplace(world, OwnedWorld{pixels, size, pixel_format});
   ++g_created;
   g_live_bytes += size;
+  if (aexcompat::l2_detail::g_trace_writer &&
+      aexcompat::l2_detail::g_trace_writer->verbose()) {
+    aexcompat::l2_detail::g_trace_writer->world_descriptor(
+        width, height, rowbytes, trace_pixel_format(pixel_format));
+  }
   return 0;
 }
 

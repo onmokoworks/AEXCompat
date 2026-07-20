@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from tools.trace_contract_validator import validate_event
+from tools.trace_contract_validator import EVENT_KINDS, validate_event
 import source_owners
 
 
@@ -118,6 +118,49 @@ class ProductionWorkerTraceTests(unittest.TestCase):
             self.assertEqual(sum(event["event_kind"] == "callback_invoke" for event in events), 513)
             self.assertTrue(all(validate_event(event) == [] for event in events))
             self.assertTrue(all("private" not in json.dumps(event) for event in events))
+
+
+class Issue17VerbosityWiringTests(unittest.TestCase):
+    """issue #17: the previously dead TraceWriter API is wired into real worker
+    choke points, gated so a default trace stays within the bounded budget."""
+
+    def test_writer_exposes_a_verbose_opt_in_from_the_environment(self):
+        header = (ROOT / "instruments" / "common" / "trace_writer.hpp").read_text(encoding="utf-8")
+        writer = (ROOT / "instruments" / "common" / "trace_writer.cpp").read_text(encoding="utf-8")
+        self.assertIn("bool verbose() const;", header)
+        self.assertIn("AEX_INSTRUMENT_TRACE_VERBOSE", writer)
+        # The verbose flag never changes what the emit methods write, so the
+        # bounded/ordered selftest contract above stays valid.
+        self.assertNotIn("verbose_", writer[writer.index("void TraceWriter::write_base"):])
+
+    def test_unknown_suite_emits_an_unimplemented_trace_error(self):
+        registry = (ROOT / "minihost" / "src" / "worker_suite_registry.cpp").read_text(encoding="utf-8")
+        reject = registry[registry.index("SuiteRegistry::reject_unknown"):]
+        reject = reject[: reject.index("return 1;")]
+        self.assertIn(
+            'trace_writer->error("unimplemented_suite", safe_name, /*unimplemented=*/true)',
+            reject,
+        )
+
+    def test_world_creation_emits_a_verbose_gated_world_descriptor(self):
+        registry = (ROOT / "minihost" / "src" / "worker_world_registry.cpp").read_text(encoding="utf-8")
+        new_world = registry[registry.index("int32_t __cdecl new_world("):]
+        new_world = new_world[: new_world.index("int32_t __cdecl legacy_new_world(")]
+        self.assertIn("g_trace_writer->verbose()", new_world)
+        self.assertIn("g_trace_writer->world_descriptor(", new_world)
+        # Pixel-format tags are mapped to contract strings, never emitted raw.
+        self.assertIn("trace_pixel_format(pixel_format)", new_world)
+
+    def test_handle_callbacks_emit_verbose_gated_callback_events(self):
+        handles = (ROOT / "minihost" / "src" / "worker_handle_runtime.cpp").read_text(encoding="utf-8")
+        self.assertIn("g_trace_writer->verbose()", handles)
+        self.assertIn("g_trace_writer->callback_invoke()", handles)
+        # Wired at the existing new_handle / lock_handle callback markers.
+        self.assertEqual(handles.count("trace_callback_invoke()"), 3)
+
+    def test_wired_event_kinds_are_already_in_the_trace_contract(self):
+        for kind in ("world_descriptor", "callback_invoke", "error", "unimplemented"):
+            self.assertIn(kind, EVENT_KINDS)
 
 
 if __name__ == "__main__":
