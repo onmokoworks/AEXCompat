@@ -12,10 +12,14 @@ SDK_HEADERS = Path(SDK_ROOT) / "Examples" / "Headers" if SDK_ROOT else None
 def run_in_vs_environment(command, *, cwd=None, timeout=420):
     program_files_x86 = os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")
     vswhere = Path(program_files_x86) / "Microsoft Visual Studio" / "Installer" / "vswhere.exe"
+    # -utf8 forces vswhere's output to UTF-8; without it a Japanese-locale
+    # console emits CP932 bytes that break the text decode. errors="replace"
+    # guards any other CP932 chatter captured on stderr (#237, follow-up to #58).
     result = subprocess.run(
         [str(vswhere), "-latest", "-products", "*", "-requires",
-         "Microsoft.VisualStudio.Component.VC.Tools.x86.x64", "-property", "installationPath"],
-        check=True, capture_output=True, text=True,
+         "Microsoft.VisualStudio.Component.VC.Tools.x86.x64", "-property", "installationPath",
+         "-utf8"],
+        check=True, capture_output=True, text=True, errors="replace",
     )
     vs_root = Path(result.stdout.strip())
     if not vs_root.is_dir():
@@ -57,7 +61,7 @@ int main() { return 0; }
 
 def test_release_worker_native_v1_v4_guard_and_lease_selftest(canonical_release_worker):
     result = subprocess.run([str(canonical_release_worker), "--self-test-pf-adv-time-suite1"], cwd=ROOT,
-                            check=True, capture_output=True, text=True, timeout=60)
+                            check=True, capture_output=True, text=True, errors="replace", timeout=60)
     assert json.loads(result.stdout) == {
         "pf_adv_time_suite_versions": "passed", "v1_slots": 4, "v2_slots": 4,
         "v3_slots": 4, "v4_slots": 5,

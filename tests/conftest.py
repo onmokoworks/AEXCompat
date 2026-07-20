@@ -55,6 +55,7 @@ def canonical_release_worker(tmp_path_factory):
         capture_output=True,
         text=True,
         encoding="utf-8-sig",
+        errors="replace",
     )
     installations = json.loads(result.stdout)
     if not installations:

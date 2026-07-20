@@ -28,7 +28,7 @@ def test_plan_only_is_hash_bound_and_has_capture_and_compare_argv(tmp_path):
         "-ExpectedRaw", str(raw), "-Width", "1", "-Height", "1",
         "-ComparisonReport", str(tmp_path / "comparison.json"),
     ]
-    result = subprocess.run(command, capture_output=True, text=True, check=False)
+    result = subprocess.run(command, capture_output=True, text=True, errors="replace", check=False)
     assert result.returncode == 0, result.stderr
     payload = json.loads(plan.read_text(encoding="utf-8-sig"))
     assert payload["side_effects_performed"] is False
@@ -51,7 +51,7 @@ def test_plan_only_requires_complete_comparison_contract(tmp_path):
         "-AfterEffects", "C:/Windows/System32/notepad.exe",
         "-ProbeAex", str(fixture), "-InputImage", str(image),
         "-OutputPng", str(tmp_path / "ae.png"), "-EffectName", "Fixture Effect",
-    ], capture_output=True, text=True, check=False)
+    ], capture_output=True, text=True, errors="replace", check=False)
     assert result.returncode != 0
     assert "ExpectedRaw" in result.stderr
 
@@ -76,7 +76,7 @@ def test_plan_only_records_no_effect_control_commands(tmp_path):
         "-ControlOutputPng", str(tmp_path / "control.png"),
         "-ControlExpectedRaw", str(control_raw),
         "-ControlComparisonReport", str(tmp_path / "control.json"),
-    ], capture_output=True, text=True, check=False)
+    ], capture_output=True, text=True, errors="replace", check=False)
     assert result.returncode == 0, result.stderr
     payload = json.loads(plan.read_text(encoding="utf-8-sig"))
     control = payload["no_effect_control"]
