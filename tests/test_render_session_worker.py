@@ -22,6 +22,9 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 WORKER = ROOT / "target" / "minihost-build" / "aex_render_worker.exe"
 AEX = ROOT / "target" / "pf-sampling-probe-build" / "Release" / "pf_sampling_probe.aex"
+PARAMETER_ECHO_AEX = (
+    ROOT / "target" / "pf-parameter-echo-probe-build" / "Release"
+    / "pf_parameter_echo_probe.aex")
 
 HEADER_BYTES = 4096
 SLOT_ALIGNMENT = 4096
@@ -197,10 +200,11 @@ def _require_artifacts():
         pytest.skip("pf_sampling_probe.aex is not built")
 
 
-def _spawn(transport):
-    aex_sha = hashlib.sha256(AEX.read_bytes()).hexdigest()
+def _spawn(transport, aex=None, payload="v5|"):
+    aex = AEX if aex is None else aex
+    aex_sha = hashlib.sha256(aex.read_bytes()).hexdigest()
     process = subprocess.Popen(
-        [str(WORKER), "--render-session-v1", str(AEX), aex_sha, "v5|",
+        [str(WORKER), "--render-session-v1", str(aex), aex_sha, payload,
          str(WIDTH), str(HEIGHT), "1", "300", str(TIME_SCALE)],
         cwd=ROOT, env=transport.environment(), close_fds=False,
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
@@ -352,6 +356,123 @@ def test_session_rejects_unknown_message_fields_fail_closed():
         message["parameters"] = {"slot": 1}
         transport.send(message)
         # Protocol violation: no response is defined; the worker terminates.
+        assert transport.receive() is None
+        code, _, _ = _finish(process)
+        assert code == EXIT_PROTOCOL_VIOLATION
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.communicate(timeout=30)
+
+
+def _require_parameter_echo():
+    if not PARAMETER_ECHO_AEX.is_file():
+        pytest.skip("pf_parameter_echo_probe.aex is not built")
+
+
+def _echo_frame_bytes(value):
+    # The parameter echo probe fills every pixel with (red=value,
+    # green=255-value, blue=128, alpha=255); the output slot carries RGBA.
+    return bytes((value, 255 - value, 128, 255)) * (WIDTH * HEIGHT)
+
+
+def render_frame_v2_message(frame_index, time_value, parameters,
+                            scale=TIME_SCALE):
+    return {"v": 2, "type": "render_frame", "frame_index": frame_index,
+            "current_time": {"value": time_value, "scale": scale},
+            "parameters": parameters}
+
+
+def test_v2_parameters_replace_the_launch_assignments_for_one_frame():
+    """Protocol §4.2.1: a v:2 frame renders with the message payload, and the
+    next v:1 frame falls back to the launch payload (no sticky state)."""
+    _require_artifacts()
+    _require_parameter_echo()
+    transport = SessionTransport()
+    process = _spawn(transport, aex=PARAMETER_ECHO_AEX,
+                     payload="v2|param_1@1:f64=32")
+    try:
+        expectations = [
+            (render_frame_message(0, 0), 32),
+            (render_frame_v2_message(1, 1, "v2|param_1@1:f64=200"), 200),
+            (render_frame_message(2, 2), 32),
+        ]
+        for frame_index, (message, value) in enumerate(expectations):
+            transport.write_input(frame_index * 7, frame_index + 1)
+            transport.send(message)
+            done = transport.receive()
+            assert done is not None, "worker closed the response pipe early"
+            assert done["status"] == "ok", done
+            expected = _echo_frame_bytes(value)
+            assert transport.output_bytes(len(expected)) == expected
+            assert done["output"]["checksum"] == hashlib.sha256(expected).hexdigest()
+        transport.send({"v": 1, "type": "close"})
+        code, _, stderr = _finish(process)
+        assert code == 0, (code, stderr[-500:])
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.communicate(timeout=30)
+
+
+def test_v2_render_frame_without_parameters_is_a_protocol_violation():
+    _require_artifacts()
+    transport = SessionTransport()
+    process = _spawn(transport)
+    try:
+        transport.write_input(17, 1)
+        message = render_frame_message(0, 0)
+        message["v"] = 2
+        transport.send(message)
+        assert transport.receive() is None
+        code, _, _ = _finish(process)
+        assert code == EXIT_PROTOCOL_VIOLATION
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.communicate(timeout=30)
+
+
+def test_v2_close_is_a_protocol_violation():
+    _require_artifacts()
+    transport = SessionTransport()
+    process = _spawn(transport)
+    try:
+        transport.send({"v": 2, "type": "close"})
+        assert transport.receive() is None
+        code, _, _ = _finish(process)
+        assert code == EXIT_PROTOCOL_VIOLATION
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.communicate(timeout=30)
+
+
+def test_v2_malformed_parameters_payload_fails_the_session_closed():
+    """A payload the broker's pre-send validation would reject is a protocol
+    violation, not a frame-local error (protocol §4.2.1)."""
+    _require_artifacts()
+    transport = SessionTransport()
+    process = _spawn(transport)
+    try:
+        transport.write_input(23, 1)
+        transport.send(render_frame_v2_message(0, 0, "v9|param_1@1:f64=1"))
+        assert transport.receive() is None
+        code, _, _ = _finish(process)
+        assert code == EXIT_PROTOCOL_VIOLATION
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.communicate(timeout=30)
+
+
+def test_v2_non_ascii_parameters_payload_fails_the_session_closed():
+    _require_artifacts()
+    transport = SessionTransport()
+    process = _spawn(transport)
+    try:
+        transport.write_input(29, 1)
+        transport.send(render_frame_v2_message(0, 0, "v2|param_é@1:f64=1"))
         assert transport.receive() is None
         code, _, _ = _finish(process)
         assert code == EXIT_PROTOCOL_VIOLATION

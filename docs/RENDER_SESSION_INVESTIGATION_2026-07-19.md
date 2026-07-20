@@ -590,3 +590,71 @@ canonical な基準 (= 既存の one-shot 挙動、AE 等価の真値) に合わ
   smart (`render_experimental_image_at_time_with_format(smart=true)`) でも
   同一失敗を確認済み (＝W3 回帰ではない)。classic batch は同一 sandbox で
   成功。audit なしの直接駆動では smart session は全シナリオ成功。
+
+## 2026-07-20
+
+### issue #107: プロトコル v:2 (per-frame parameters) の設計判断 (合意方針の実装着手)
+
+GUI ハーネスの「パラメーター操作のライブ再レンダーでセッションを維持する」
+には、レンダー間でパラメーター値を更新する手段が要る。v1 では launch argv
+payload で固定のため、選択肢は (a) パラメーター変更ごとに open し直す、
+(b) §4.2 予約どおり render_frame の v 増分でフィールドを足す、の 2 つ。
+(a) は固定費 (warm 35〜40ms + broker staging/hash) を最頻操作で毎回払う
+ことになり issue の目的を満たさない。(b) を採る。
+
+観察 (worker 側実装調査):
+
+- `render_once` は呼び出しごとに definitions をローカル再初期化し、
+  requested (`apply_requested_assignments`, l2_main.cpp:4054) →
+  parameter animation (同:4063) の順に毎回適用している。セッションループ
+  (`run_render_session`, l2_main.cpp:4249) は launch 時の
+  `RequestedAssignments*` を全フレームに渡しているだけで、per-frame の
+  適用器は既に存在する。
+- payload 符号化 (`encode_interactive_payload` ⇔ `parse_parameter_payload`)
+  は両側に strict 検証込みで実装済み。メッセージに同じ符号化文字列を
+  載せれば新形式の発明が不要。
+
+設計 (プロトコル文書 §4.2.1 に反映):
+
+- v:2 render_frame は `parameters` 必須・そのフレーム限りの完全置換。
+  stateful な「セッションに sticky なパラメーター状態」は持たない
+  (GUI も AviUtl2 も毎呼び出しで現在値を持っているため不要で、状態を
+  持たない方が診断が単純)。
+- 応答スキーマ・ヘッダレイアウト・launch 構成は不変。close は v:1 のみ。
+- 不正 `parameters` はフレーム局所エラーではなくプロトコル違反 (broker が
+  送信前検証済みのため、届いたら broker 欠陥か改竄)。宣言パラメーターとの
+  render 時型不一致はフレーム局所のまま。
+
+検証用 fixture: 既存 instruments にパラメーター値が出力画素へ反映される
+probe が無い (pf-param-utils-animation-probe は suite 検証で値を色に
+落とさない) ため、スライダー値を出力色に反映する `pf-parameter-echo-probe`
+を追加し、Python behavioral self-test で「v:2 で値を変えたフレームの
+出力バイトが自己計算した期待値と一致する」ことを確認する。
+
+GUI アダプタ (issue #107 コメントの合意どおり): 別プロセス常駐 worker +
+GUI 内非同期セッションスレッド。broker に公開セッション API
+(open / render / close、interactive_image_render 型レポート合成) を足し、
+harness はセッションスレッド 1 本がそれを所有する。セッション基盤失敗は
+one-shot spawn_native へ fallback し、次レンダーで新セッションを開き直す
+(SEQUENCE_SETUP からのやり直しであることは診断に明示する)。
+
+### issue #107: before/after 実測 (観察、2026-07-20)
+
+計測方法: `broker/crates/broker/tests/resident_session_live.rs` の
+`resident_session_latency_versus_one_shot` (--release、--ignored 手動実行)。
+fixture は `pf_parameter_echo_probe.aex` (float slider 1 本、値を出力色に
+反映)、FHD 1920x1080 8bpc、N=12、パラメーター値を毎回変更。broker の公開
+エントリ呼び出し時間 (staging・検証・PNG 変換込み) を計測。機材依存の
+参考値で frozen evidence ではない。
+
+| 経路 | median | min | max |
+|---|---|---|---|
+| one-shot (現行 GUI: パラメーター変更ごとに worker 起動) | 304.4ms | 283.1ms | 2680.4ms |
+| 常駐セッション open (初回のみ) | 177.9ms | - | - |
+| 常駐セッション render_frame (v:2 パラメーター更新込み) | 66.7ms | 58.1ms | 129.1ms |
+
+- パラメーター操作 1 回あたり約 4.6 倍の改善 (304ms → 67ms)。echo probe の
+  レンダー本体はほぼゼロなので、67ms の大半は FHD の入力転送 + PNG
+  エンコード + 検証と思われる (内訳分離は未実施)。
+- max 2680ms は one-shot 初回の AV スキャン系 cold 効果と思われる
+  (段階0 項目4 と同じパターン)。常駐セッションはこの再発自体が起きない。

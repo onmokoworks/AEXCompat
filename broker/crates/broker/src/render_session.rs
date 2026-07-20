@@ -524,6 +524,7 @@ pub struct RenderSession {
     last_output_generation: u32,
     frames_ok: u32,
     frames_errored: u32,
+    parameter_update_frames: u32,
     opened: Instant,
     plugin_sha256: String,
     /// SmartFX session (protocol v1.1); selects the smart worker's final
@@ -959,6 +960,7 @@ impl RenderSession {
             last_output_generation: 0,
             frames_ok: 0,
             frames_errored: 0,
+            parameter_update_frames: 0,
             opened: Instant::now(),
             plugin_sha256: request.plugin_sha256.to_ascii_lowercase(),
             smart: request.smart,
@@ -1015,6 +1017,22 @@ impl RenderSession {
         frame_index: u32,
         current_time: i32,
         rgba: &[u8],
+    ) -> io::Result<FrameOutcome> {
+        self.render_frame_with_parameters(frame_index, current_time, rgba, None)
+    }
+
+    /// Renders one frame, optionally replacing the launch payload's parameter
+    /// assignments for this frame only through the v:2 `render_frame` message
+    /// (protocol §4.2.1, issue #107). The parameters ride the message in the
+    /// same encoding as the launch argv payload and go through the identical
+    /// broker-side validation before anything is sent, so an invalid set is a
+    /// plain caller error and the session stays usable.
+    pub fn render_frame_with_parameters(
+        &mut self,
+        frame_index: u32,
+        current_time: i32,
+        rgba: &[u8],
+        parameters: Option<&[InteractiveParameter]>,
     ) -> io::Result<FrameOutcome> {
         if let Some(invalidation) = &self.invalidation {
             return Err(invalid(format!(
@@ -1074,14 +1092,39 @@ impl RenderSession {
                 self.last_output_generation
             )));
         }
+        // Encode and validate the per-frame payload before any slot write, so
+        // a rejected parameter set leaves the transport state untouched.
+        let message = match parameters {
+            Some(parameters) => {
+                let payload = encode_interactive_payload(parameters)?;
+                serde_json::to_string(&json!({
+                    "v": 2,
+                    "type": "render_frame",
+                    "frame_index": frame_index,
+                    "current_time": {"value": current_time, "scale": self.time_scale},
+                    "parameters": payload,
+                }))
+                .map_err(|error| invalid(error.to_string()))?
+            }
+            None => format!(
+                "{{\"v\":1,\"type\":\"render_frame\",\"frame_index\":{frame_index},\
+                 \"current_time\":{{\"value\":{current_time},\"scale\":{}}}}}",
+                self.time_scale
+            ),
+        };
+        // The encoder's 16 KiB payload cap keeps every message far below the
+        // protocol's 64 KiB framing limit today, but the bound is enforced
+        // here regardless: an oversized message must be a caller error before
+        // any transport mutation, never a send failure that kills a healthy
+        // session.
+        if message.len() > MAX_MESSAGE_BYTES {
+            return Err(invalid(
+                "per-frame parameter message exceeds the protocol message cap",
+            ));
+        }
         self.transport.write_input_slot(rgba);
         self.transport
             .write_header_u32(INPUT_GENERATION_OFFSET, expected_generation);
-        let message = format!(
-            "{{\"v\":1,\"type\":\"render_frame\",\"frame_index\":{frame_index},\
-             \"current_time\":{{\"value\":{current_time},\"scale\":{}}}}}",
-            self.time_scale
-        );
         if !self.transport.send_message(&message) {
             return Err(self.invalidate(
                 "request_pipe_closed",
@@ -1089,6 +1132,9 @@ impl RenderSession {
                 true,
                 POST_TERMINATION_COLLECT_TIMEOUT,
             ));
+        }
+        if parameters.is_some() {
+            self.parameter_update_frames += 1;
         }
         let body = match self.await_frame_response() {
             FrameWait::Message(body) => body,
@@ -1459,6 +1505,7 @@ impl RenderSession {
             "height": self.geometry.height,
             "frames_ok": self.frames_ok,
             "frames_errored": self.frames_errored,
+            "parameter_update_frames": self.parameter_update_frames,
             "invalidated": self.invalidation.is_some(),
             "invalidated_reason": self.invalidation.as_ref().map(|invalidation| json!({
                 "reason": invalidation.reason,

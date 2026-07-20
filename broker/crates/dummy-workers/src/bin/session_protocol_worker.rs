@@ -364,6 +364,22 @@ mod worker {
                 Some("render_frame") => {}
                 _ => return EXIT_PROTOCOL_VIOLATION,
             }
+            // Mirrors the real worker's message version gate (protocol
+            // §4.2.1): v:1 must not carry parameters, v:2 must carry the
+            // string payload, anything else is a violation.
+            let frame_parameters = match message["v"].as_u64() {
+                Some(1) => {
+                    if message.get("parameters").is_some() {
+                        return EXIT_PROTOCOL_VIOLATION;
+                    }
+                    None
+                }
+                Some(2) => match message["parameters"].as_str() {
+                    Some(payload) => Some(payload.to_owned()),
+                    None => return EXIT_PROTOCOL_VIOLATION,
+                },
+                _ => return EXIT_PROTOCOL_VIOLATION,
+            };
             let Some(frame_index) = message["frame_index"].as_u64() else {
                 return EXIT_PROTOCOL_VIOLATION;
             };
@@ -457,6 +473,14 @@ mod worker {
             }
             for byte in &mut output {
                 *byte = 255 - *byte;
+            }
+            // Stamp the received per-frame payload's digest into the frame so
+            // integration tests can prove the v:2 parameters actually reached
+            // the worker (the real worker proves this by rendering with them).
+            if let Some(payload) = &frame_parameters {
+                let digest = Sha256::digest(payload.as_bytes());
+                let stamp = digest.len().min(output.len());
+                output[..stamp].copy_from_slice(&digest[..stamp]);
             }
             unsafe {
                 std::ptr::copy_nonoverlapping(output.as_ptr(), view.0.add(output_offset), slot_bytes);

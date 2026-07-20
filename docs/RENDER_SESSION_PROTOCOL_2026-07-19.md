@@ -3,6 +3,9 @@
 status: 設計確定版 (段階0 調査の結論に基づく)。実装は本書に従い、実装中の
 逸脱は `docs/RENDER_SESSION_INVESTIGATION_2026-07-19.md` に「逸脱」として
 追記する。根拠となる観察はすべて同調査ノートにある。
+改訂 2026-07-20 (issue #107): §4.2 の予約どおり、`render_frame` の v:2
+変種 (per-frame `parameters`) を §4.2.1 として定義した。launch 構成・
+ヘッダレイアウト・応答スキーマは v1 のまま変わらない。
 
 ## 1. 位置づけとスコープ
 
@@ -27,7 +30,8 @@ v1.1 (issue #98 W3) で追加されたスコープ:
 
 v1 のスコープ外 (プロトコルは拡張点を予約する):
 - per-frame の動的パラメーター割当 (#107 GUI ライブ操作、AviUtl2 ブリッジが
-  要求)。`render_frame` メッセージの追加フィールドとして予約 (§4.2)。
+  要求)。当初 `render_frame` メッセージの追加フィールドとして予約し、
+  2026-07-20 に §4.2.1 の v:2 変種として定義済み (スコープ外ではなくなった)。
 - SEQUENCE_RESETUP の発行。レンダー専用文脈での実発行頻度は AE 実機観測
   (段階0 項目1・2) 待ち。v1 は発行しない。
 - リングバッファ / 先読み。単一スロット逐次で開始 (設計ドラフト v1 合意)。
@@ -187,11 +191,44 @@ u32 LE の長さ接頭辞 + UTF-8 JSON 本文。1 メッセージ上限 64 KiB (
   ノート項目3)。
 - **メッセージ検証は strict (fail-closed)**: worker は exact-key 検証
   (`strict_json` の `json_exact_keys` と同じ流儀) を行い、未知フィールド・
-  未知 `type`・`v != 1` はプロトコル違反としてセッションを終了する (§7)。
-  黙って無視する経路は設けない: 将来の per-frame `parameters` (#107 /
-  AviUtl2 向け) や `param_epoch` (RESETUP 意味論確定後) は `v` の増分と
-  ともに導入し、旧 worker に送ると fail-closed になることで「stale な
-  launch 時パラメーターのまま ok を返す」誤動作を構造的に排除する。
+  未知 `type`・未知 `v` はプロトコル違反としてセッションを終了する (§7)。
+  黙って無視する経路は設けない: per-frame `parameters` (#107 / AviUtl2 向け、
+  §4.2.1 で v:2 として導入済み) や `param_epoch` (RESETUP 意味論確定後) は
+  `v` の増分とともに導入し、旧 worker に送ると fail-closed になることで
+  「stale な launch 時パラメーターのまま ok を返す」誤動作を構造的に
+  排除する。
+
+#### 4.2.1 render_frame v:2 (per-frame parameters、issue #107)
+
+```json
+{"v":2,"type":"render_frame","frame_index":3,
+ "current_time":{"value":3,"scale":30},
+ "parameters":"v4|param_1@1:f64=12.5"}
+```
+
+- `v:2` の `render_frame` は `parameters` を必須で持つ (exact keys:
+  `v`,`type`,`frame_index`,`current_time`,`parameters`)。パラメーター更新の
+  無いフレームは従来どおり v:1 を送る。`close` は v:1 のみ。
+- `parameters` は launch argv payload と同一の符号化
+  (`encode_interactive_payload` が生成する `v2|`〜`v5|` 形式、上限 16384
+  バイト、ASCII のみ)。新しい直列化形式は導入しない。
+- 意味論は**そのフレーム限りの完全置換**: メッセージ内の割当が launch 時
+  payload の割当を丸ごと置き換える (overlay ではない。載っていない slot は
+  プラグイン既定値に戻る)。後続の v:1 フレームは launch 時 payload に戻る。
+  worker 側の適用器は one-shot と同一 (`render_once` が毎フレーム
+  definitions を再初期化 → requested → parameter animation の順に適用) で、
+  適用順序も one-shot と変わらない: v:2 の割当の上に
+  `--parameter-animation-v1` タイムラインが重なる。
+- 検証は strict fail-closed: パース不能・非 ASCII・長さ超過・launch payload
+  と同じ構文検証 (重複 slot、範囲外 slot、型語の版ゲート) に落ちる
+  `parameters` はプロトコル違反としてセッションを終了する (§7)。broker は
+  送信前に one-shot と同じ検証を済ませているため、worker に届く不正
+  payload は broker の欠陥または改竄であり、フレーム局所エラーにしない。
+  宣言済みパラメーターとの型不一致など render 時検証はフレーム局所
+  診断のまま (v:1 と同じ)。
+- 応答 (`frame_done`) のスキーマは v1 のまま変わらない。共有メモリ
+  レイアウト (§6) と launch 構成 (§3) も不変で、ヘッダの `version`
+  フィールドは 1 のままとする (レイアウト版であってメッセージ版ではない)。
 
 ```json
 {"v":1,"type":"close"}
@@ -436,9 +473,10 @@ worker 側の実装マッピング (worker 側調査より):
   contract test + conformance の挙動不変を確認してから。
 
 段階0 の残観測 (項目1・2・6) の反映先: RESETUP 発行方針 (§4.2 の
-`param_epoch`)、per-frame パラメーター (v2)、SmartFX checkout スロット割当
-(v1.1) はいずれもメッセージの追加フィールド + worker 側拡張で入る設計に
-してあり、v1 実装をブロックしない。
+`param_epoch`)、SmartFX checkout スロット割当 (v1.1) はいずれもメッセージの
+追加フィールド + worker 側拡張で入る設計にしてあり、v1 実装をブロック
+しない。per-frame パラメーターは §4.2.1 の v:2 として 2026-07-20 に導入
+済み (issue #107)。
 
 ### 9.1 v1.1: SmartFX セッション (issue #98 W3)
 

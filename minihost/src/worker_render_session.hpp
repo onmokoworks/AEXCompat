@@ -13,6 +13,10 @@
 namespace aexcompat::worker_render_session {
 
 inline constexpr uint32_t kProtocolVersion = 1;
+// render_frame v:2 carries a per-frame `parameters` payload replacing the
+// launch assignments for that frame only (protocol §4.2.1, issue #107). Every
+// other message, the frame_done schema, and the header layout stay v1.
+inline constexpr uint32_t kRenderFrameParametersVersion = 2;
 inline constexpr uint32_t kHeaderMagic = 0x53584541u;  // "AEXS" little-endian
 inline constexpr std::size_t kHeaderBytes = 4096;
 inline constexpr std::size_t kSlotAlignment = 4096;

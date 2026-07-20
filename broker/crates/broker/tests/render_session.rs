@@ -1106,6 +1106,123 @@ mod windows_e2e {
     }
 
     #[test]
+    fn per_frame_parameters_ride_the_v2_message_and_reach_the_worker() {
+        let _behavior = BehaviorGuard::set(None);
+        let (repository, plugin, sha) = temp_repository();
+        let mut session = open_session(&repository.0, &plugin, &sha, Duration::from_secs(30));
+        let input = input_pattern(31);
+        let inverted: Vec<u8> = input.iter().map(|byte| 255 - byte).collect();
+
+        // Frame 0 stays a v:1 message: plain inverted transfer.
+        let outcome = session.render_frame(0, 0, &input).expect("v1 frame renders");
+        let FrameStatus::Rendered { pixels, .. } = outcome.status else {
+            panic!("v1 frame errored");
+        };
+        assert_eq!(pixels, inverted);
+
+        // Frame 1 carries per-frame parameters; the fixture stamps the digest
+        // of the received payload into the frame, proving delivery.
+        let mut updated = float_parameter(1);
+        updated.value = 42.5;
+        let outcome = session
+            .render_frame_with_parameters(1, 1, &input, Some(std::slice::from_ref(&updated)))
+            .expect("v2 frame renders");
+        let FrameStatus::Rendered { pixels, .. } = outcome.status else {
+            panic!("v2 frame errored");
+        };
+        let payload = aexcompat_broker::image_render::encode_interactive_payload(
+            std::slice::from_ref(&updated),
+        )
+        .expect("payload encodes");
+        assert_eq!(&pixels[..32], Sha256::digest(payload.as_bytes()).as_slice());
+        assert_eq!(&pixels[32..], &inverted[32..]);
+
+        // Frame 2 reverts to v:1 and the stamp disappears: the update was
+        // frame-scoped, not sticky.
+        let outcome = session.render_frame(2, 2, &input).expect("v1 frame renders again");
+        let FrameStatus::Rendered { pixels, .. } = outcome.status else {
+            panic!("post-update v1 frame errored");
+        };
+        assert_eq!(pixels, inverted);
+
+        let close = session.close();
+        assert_eq!(close["frames_ok"], 3);
+        assert_eq!(close["parameter_update_frames"], 1);
+        assert_eq!(close["session_clean"], true, "close: {close}");
+    }
+
+    #[test]
+    fn interactive_session_renders_reports_and_previews_across_frames() {
+        use aexcompat_broker::image_render::{InteractiveRenderSession, InteractiveSessionOpen};
+        let _behavior = BehaviorGuard::set(None);
+        let (repository, plugin, sha) = temp_repository();
+        let parameters = [float_parameter(1)];
+        let mut session = InteractiveRenderSession::open(InteractiveSessionOpen {
+            repository: &repository.0,
+            plugin_id: "experimental",
+            plugin_path: &plugin,
+            plugin_sha256: &sha,
+            parameters: Some(&parameters),
+            dependencies: Vec::new(),
+            width: WIDTH,
+            height: HEIGHT,
+            pixel_format: RenderPixelFormat::Argb8,
+            time_step: 1,
+            total_time: 300,
+            time_scale: 30,
+            timeout_ms: 30_000,
+        })
+        .expect("open interactive session");
+        assert!(!session.invalidated());
+
+        let input = input_pattern(53);
+        let mut updated = float_parameter(1);
+        updated.value = 7.5;
+        for (frame, time) in [(0u32, 0i32), (1, 1)] {
+            let output = repository.0.join(format!("live-{frame}.png"));
+            let report = session
+                .render(&input, time, Some(std::slice::from_ref(&updated)), &output)
+                .expect("interactive frame renders");
+            assert_eq!(report["stage"], "interactive_image_render");
+            assert_eq!(report["render_path"], "classic");
+            assert_eq!(report["worker_classification"], "resident_session");
+            assert_eq!(report["passed"], true);
+            assert_eq!(report["resident_session"]["frame_index"], frame);
+            assert_eq!(report["resident_session"]["parameter_update"], true);
+            assert!(output.is_file(), "preview PNG is written per frame");
+        }
+        let close = session.close();
+        assert_eq!(close["frames_ok"], 2);
+        assert_eq!(close["parameter_update_frames"], 2);
+        assert_eq!(close["session_clean"], true, "close: {close}");
+    }
+
+    #[test]
+    fn rejected_per_frame_parameters_leave_the_session_usable() {
+        let _behavior = BehaviorGuard::set(None);
+        let (repository, plugin, sha) = temp_repository();
+        let mut session = open_session(&repository.0, &plugin, &sha, Duration::from_secs(30));
+        // Out-of-range value: the broker-side validation rejects the set
+        // before anything reaches the transport, exactly like the launch
+        // payload validation would.
+        let mut out_of_range = float_parameter(1);
+        out_of_range.value = 1000.0;
+        let error = session
+            .render_frame_with_parameters(0, 0, &input_pattern(7), Some(&[out_of_range]))
+            .expect_err("out-of-range parameters are rejected");
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert!(session.invalidation().is_none(), "session stays usable");
+        let outcome = session
+            .render_frame(0, 0, &input_pattern(7))
+            .expect("the session still renders after the rejection");
+        assert!(matches!(outcome.status, FrameStatus::Rendered { .. }));
+        let close = session.close();
+        assert_eq!(close["frames_ok"], 1);
+        assert_eq!(close["parameter_update_frames"], 0);
+        assert_eq!(close["session_clean"], true, "close: {close}");
+    }
+
+    #[test]
     fn frame_local_error_keeps_the_session_usable() {
         let _behavior = BehaviorGuard::set(Some("error_frame_0"));
         let (repository, plugin, sha) = temp_repository();
