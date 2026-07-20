@@ -1056,8 +1056,9 @@ mod windows_e2e {
         .save(&input)
         .unwrap();
 
-        // Click inside the grid; the picker returns this color, which the render
-        // paints into the selected cell.
+        // A click at this point drives DO_CLICK; the host picker returns this
+        // color, which the probe stores in its color param and RENDER fills the
+        // whole frame from (the click coordinates do not affect the output).
         let click = || RenderUiAction::Click {
             point: [20, 16],
             color: [0.85, 0.2, 0.6, 1.0],
@@ -1086,7 +1087,7 @@ mod windows_e2e {
             RENDER_SESSION_WRAPPER_RENDERS.load(Ordering::SeqCst) > before,
             "the session wrapper did not carry run A"
         );
-        // The click was actually dispatched and changed the grid param.
+        // The click was actually dispatched and changed the color param.
         assert_eq!(report_a.get("custom_ui_click_dispatched"), Some(&serde_json::json!(true)));
         assert_eq!(report_a.get("custom_ui_click_changed_value"), Some(&serde_json::json!(true)));
         assert_eq!(report_a.get("custom_ui_context_closed"), Some(&serde_json::json!(true)));

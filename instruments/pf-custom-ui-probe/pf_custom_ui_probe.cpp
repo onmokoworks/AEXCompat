@@ -150,29 +150,35 @@ PF_Err DrawEvent(PF_InData* in_data, PF_EventExtra* extra) {
       (*drawbot->GetSupplier)(drawing_ref, &supplier_ref);
       (*drawbot->GetSurface)(drawing_ref, &surface_ref);
       const void* supplier_p = nullptr;
-      const void* surface_p = nullptr;
+      // Acquire the Supplier and Surface suites in separate steps, each with a
+      // matching release, so a failure to acquire the Surface suite does not
+      // leak the already-acquired Supplier suite (a chained && would skip both
+      // releases). The minihost worker always provides both, but the probe may
+      // also run under real AE.
       if (supplier_ref && surface_ref &&
           basic->AcquireSuite(kDRAWBOT_SupplierSuite,
                               kDRAWBOT_SupplierSuite_VersionCurrent,
-                              &supplier_p) == kSPNoError &&
-          basic->AcquireSuite(kDRAWBOT_SurfaceSuite,
-                              kDRAWBOT_SurfaceSuite_VersionCurrent,
-                              &surface_p) == kSPNoError) {
-        const auto* supplier =
-            static_cast<const DRAWBOT_SupplierSuiteCurrent*>(supplier_p);
-        const auto* surface =
-            static_cast<const DRAWBOT_SurfaceSuiteCurrent*>(surface_p);
-        DRAWBOT_ColorRGBA color{0.9f, 0.2f, 0.6f, 1.0f};  // red, green, blue, alpha
-        DRAWBOT_BrushRef brush = nullptr;
-        if ((*supplier->NewBrush)(supplier_ref, &color, &brush) == kSPNoError &&
-            brush) {
-          DRAWBOT_RectF32 rect{2.0f, 2.0f, 8.0f, 8.0f};  // left, top, width, height
-          (*surface->PaintRect)(surface_ref, &color, &rect);
-          (*supplier->ReleaseObject)(
-              reinterpret_cast<DRAWBOT_ObjectRef>(brush));
+                              &supplier_p) == kSPNoError) {
+        const void* surface_p = nullptr;
+        if (basic->AcquireSuite(kDRAWBOT_SurfaceSuite,
+                                kDRAWBOT_SurfaceSuite_VersionCurrent,
+                                &surface_p) == kSPNoError) {
+          const auto* supplier =
+              static_cast<const DRAWBOT_SupplierSuiteCurrent*>(supplier_p);
+          const auto* surface =
+              static_cast<const DRAWBOT_SurfaceSuiteCurrent*>(surface_p);
+          DRAWBOT_ColorRGBA color{0.9f, 0.2f, 0.6f, 1.0f};  // red, green, blue, alpha
+          DRAWBOT_BrushRef brush = nullptr;
+          if ((*supplier->NewBrush)(supplier_ref, &color, &brush) == kSPNoError &&
+              brush) {
+            DRAWBOT_RectF32 rect{2.0f, 2.0f, 8.0f, 8.0f};  // left, top, width, height
+            (*surface->PaintRect)(surface_ref, &color, &rect);
+            (*supplier->ReleaseObject)(
+                reinterpret_cast<DRAWBOT_ObjectRef>(brush));
+          }
+          basic->ReleaseSuite(kDRAWBOT_SurfaceSuite,
+                              kDRAWBOT_SurfaceSuite_VersionCurrent);
         }
-        basic->ReleaseSuite(kDRAWBOT_SurfaceSuite,
-                            kDRAWBOT_SurfaceSuite_VersionCurrent);
         basic->ReleaseSuite(kDRAWBOT_SupplierSuite,
                             kDRAWBOT_SupplierSuite_VersionCurrent);
       }
