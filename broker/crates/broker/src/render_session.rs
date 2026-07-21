@@ -2317,6 +2317,21 @@ pub fn run_video_batch(
                     // mirroring the one-shot empty-result contract, instead of
                     // aborting the batch on a zero-dimension image.
                     debug_assert!(pixels.is_empty());
+                    // The non-empty arm refuses to overwrite an existing frame so
+                    // a reused output directory cannot mix runs. Enforce the same
+                    // fresh-output contract here: a stale frame-*.png (or its raw
+                    // sidecar) left from a previous run at this index would keep
+                    // old pixels on disk while the report says output_png: null,
+                    // so a directory glob would ingest the wrong frame. Reject it.
+                    let output_png = output_directory.join(format!("frame-{frame_index:06}.png"));
+                    if output_png.exists() {
+                        return Err(invalid("output frame already exists"));
+                    }
+                    if let Some(extension) = raw_extension {
+                        if output_png.with_extension(extension).exists() {
+                            return Err(invalid("output frame raw sidecar already exists"));
+                        }
+                    }
                     Ok(json!({
                         "frame_index": frame_index,
                         "status": "ok",

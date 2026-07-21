@@ -1942,6 +1942,48 @@ mod windows_e2e {
     }
 
     #[test]
+    fn video_batch_empty_frame_rejects_a_stale_output_png() {
+        // The empty-frame arm writes no PNG, but it must still honor the
+        // fresh-output contract the non-empty arm enforces (#278): a stale
+        // frame-*.png left in the output directory from a previous run would
+        // otherwise keep old pixels on disk while the report claims the frame is
+        // empty, so a directory glob would ingest the wrong frame. Reject it.
+        let _behavior = BehaviorGuard::set(Some("empty_result_frame_0"));
+        let (repository, plugin, _sha) = temp_repository();
+        let inputs = write_input_frames(&repository.0, 3);
+        let output_directory = repository.0.join("stale-batch-out");
+        std::fs::create_dir_all(&output_directory).unwrap();
+        // A leftover frame 0 from an earlier run, which frame 0 now renders empty.
+        std::fs::write(output_directory.join("frame-000000.png"), b"stale").unwrap();
+        let request_path = repository.0.join("stale-request.json");
+        std::fs::write(
+            &request_path,
+            serde_json::to_vec(&serde_json::json!({
+                "schema_version": 1,
+                "plugin": plugin.to_string_lossy(),
+                "input_frames": inputs,
+                "output_directory": output_directory.to_string_lossy(),
+                "smart": true,
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let report_path = repository.0.join("stale-report.json");
+        let passed = run_video_batch(&repository.0, &request_path, &report_path)
+            .expect("the batch runs and writes a report");
+        // The stale PNG aborts the batch (a failed frame), so it does not pass
+        // and the empty frame is recorded as failed rather than silently ok.
+        assert!(
+            !passed,
+            "an empty frame must not silently leave a stale PNG on disk"
+        );
+        let report: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&report_path).unwrap()).unwrap();
+        assert_eq!(report["aborted"], true, "report: {report}");
+        assert_eq!(report["frames"][0]["status"], "failed", "report: {report}");
+    }
+
+    #[test]
     fn video_batch_aborts_on_a_frame_error_by_default() {
         let _behavior = BehaviorGuard::set(Some("error_frame_0"));
         let (repository, plugin, _sha) = temp_repository();

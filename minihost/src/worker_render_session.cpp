@@ -890,6 +890,10 @@ RenderSessionOutcome run_session_frame_loop(
         outcome.invariant_failure = true;
         break;
       }
+      // Record the empty checksum detail (no rows, sha256-of-empty channels) so
+      // an opt-in final report does not carry a previous frame's stale detail
+      // for this zero-byte output (#278).
+      record_output_checksum_detail(channels.view() + output_offset, 0, 0, pixel_bytes);
       channels.write_header_u32(wrs::kHeaderFrameWidthOffset, 0);
       channels.write_header_u32(wrs::kHeaderFrameHeightOffset, 0);
       channels.write_header_u32(wrs::kHeaderOutputGenerationOffset, expected_generation);
