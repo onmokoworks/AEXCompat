@@ -93,7 +93,9 @@ into PARAMS_SETUP, confirming criterion 1 on a real third-party plug-in.
 
 - Rowbyte Data Glitch / Fast Bokeh discovery (criterion 2) and the full 5-AEX
   Classic/SmartFX matrix rerun (criterion 6) require the Rowbyte corpus, which is
-  not present on this machine (commercial plug-ins). The discovery mechanism is
-  the same one verified above for OLM (Rowbyte's uppercase `EntryPointFunc` is
-  accepted by the same bounded symbol validation), so these should pass once the
-  corpus is available. Tracked as follow-up in #279.
+  not present on this machine (commercial plug-ins). For criterion 2 specifically,
+  Rowbyte's uppercase `EntryPointFunc` is accepted by the same bounded symbol
+  validation just verified for OLM, so its entrypoint discovery is expected to
+  behave the same way. The criterion 6 matrix is left unpredicted: it exercises
+  render/lifecycle paths beyond export-symbol discovery and can fail for unrelated
+  reasons, so it must actually be run on the corpus. Tracked as follow-up in #279.
