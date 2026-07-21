@@ -1535,7 +1535,36 @@ mod windows_e2e {
         // failure) with no output pixels, and stays usable for later frames.
         let _behavior = BehaviorGuard::set(Some("empty_result_frame_0"));
         let (repository, plugin, sha) = temp_repository();
-        let mut session = open_session(&repository.0, &plugin, &sha, Duration::from_secs(30));
+        // Only a SmartFX session may report an empty result, so open a smart
+        // session (the broker rejects an empty result on a classic session).
+        let mut session = RenderSession::open(SessionOpenRequest {
+            repository: &repository.0,
+            plugin_path: &plugin,
+            plugin_sha256: &sha,
+            parameters: None,
+            parameter_animation: None,
+            aux_manifest: None,
+            world_dump_dir: None,
+            output_checksum_detail: false,
+            mask_trailer: None,
+            spatial_trailer: None,
+            render_environment_trailer: None,
+            alpha_as_coverage_params: &[],
+            conformance_render_settings: None,
+            layers: &[],
+            dependencies: Vec::new(),
+            width: WIDTH,
+            height: HEIGHT,
+            pixel_format: RenderPixelFormat::Argb8,
+            time_step: 1,
+            total_time: 300,
+            time_scale: 30,
+            frame_deadline: Duration::from_secs(30),
+            smart: true,
+            gpu_backend: RenderGpuBackend::Cpu,
+            gpu_runtime_policy: None,
+        })
+        .expect("open a smart render session");
         let outcome = session
             .render_frame(0, 0, &input_pattern(1))
             .expect("an empty-result frame is a valid render, not an invalidation");

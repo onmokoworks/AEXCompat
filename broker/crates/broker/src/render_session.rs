@@ -1890,10 +1890,25 @@ impl RenderSession {
         // invariant failure below). Validate the empty shape and the generation,
         // then accept it — there are no slot bytes to read.
         if output.empty_result {
+            // Only SmartFX PreRender produces a legally empty result; a classic
+            // session must never claim one. Enforce this broker-side too so a
+            // buggy or compromised classic worker cannot pass a 0x0 frame off as
+            // valid by setting the flag (the worker also keeps classic frames
+            // from setting it).
+            if !self.smart {
+                return Err("a classic session reported an empty SmartFX result".into());
+            }
             if output.width != 0 || output.height != 0 || output.rowbytes != 0 {
                 return Err(format!(
                     "empty-result frame must be 0x0 with 0 rowbytes, got {}x{} rowbytes {}",
                     output.width, output.height, output.rowbytes
+                ));
+            }
+            if output.pixel_format != self.geometry.pixel_format.report_name() {
+                return Err(format!(
+                    "output pixel format {} differs from the session {}",
+                    output.pixel_format,
+                    self.geometry.pixel_format.report_name()
                 ));
             }
             if generation != expected_generation {
@@ -1903,6 +1918,14 @@ impl RenderSession {
             }
             if self.transport.read_header_u32(OUTPUT_GENERATION_OFFSET) != expected_generation {
                 return Err("header output generation is stale".into());
+            }
+            // The worker stamps the frame dimensions into the header like a
+            // normal frame; for an empty result they must read back as 0x0,
+            // matching the non-empty path's frame-dimension check.
+            if self.transport.read_header_u32(FRAME_WIDTH_OFFSET) != 0
+                || self.transport.read_header_u32(FRAME_HEIGHT_OFFSET) != 0
+            {
+                return Err("header frame dimensions are not empty".into());
             }
             self.validate_static_header()?;
             return Ok(());
