@@ -12,11 +12,17 @@ foreach(target
   )
   set_target_properties(${target} PROPERTIES PREFIX "" SUFFIX ".aex")
 endforeach()
+# AEXCOMPAT_PIPL_OLGE feeds the shared PiPL's OLGe so each variant advertises
+# the same out_flags it returns from GLOBAL_SETUP (1024 PIX_INDEPENDENT base,
+# +512 PF_OutFlag_I_EXPAND_BUFFER, +4096 PF_OutFlag_I_SHRINK_BUFFER). The denied
+# variants add no resize flag, so they keep the .rc's 1024L default.
 target_compile_definitions(pf_expand_allowed_probe PRIVATE
-  AEXCOMPAT_RESIZE_DELTA=4 AEXCOMPAT_RESIZE_FLAG=PF_OutFlag_I_EXPAND_BUFFER)
+  AEXCOMPAT_RESIZE_DELTA=4 AEXCOMPAT_RESIZE_FLAG=PF_OutFlag_I_EXPAND_BUFFER
+  AEXCOMPAT_PIPL_OLGE=1536L)
 target_compile_definitions(pf_expand_denied_probe PRIVATE
   AEXCOMPAT_RESIZE_DELTA=4 AEXCOMPAT_EXPECT_DENIED=1)
 target_compile_definitions(pf_shrink_allowed_probe PRIVATE
-  AEXCOMPAT_RESIZE_DELTA=-4 AEXCOMPAT_RESIZE_FLAG=PF_OutFlag_I_SHRINK_BUFFER)
+  AEXCOMPAT_RESIZE_DELTA=-4 AEXCOMPAT_RESIZE_FLAG=PF_OutFlag_I_SHRINK_BUFFER
+  AEXCOMPAT_PIPL_OLGE=5120L)
 target_compile_definitions(pf_shrink_denied_probe PRIVATE
   AEXCOMPAT_RESIZE_DELTA=-4 AEXCOMPAT_EXPECT_DENIED=1)
