@@ -389,6 +389,20 @@ struct SessionGeometry {
     output_capacity_height: u32,
     pixel_format: RenderPixelFormat,
     layer_slot_count: u32,
+    /// Total bytes of the layer-slot region: the sum of each layer's own
+    /// 4096-aligned RGBA8 size (`align_slot(layer_w * layer_h * 4)`). Layer slots
+    /// are sized per-layer (#264), not uniformly to the primary input, so a
+    /// secondary or timed layer may be larger than the primary. The individual
+    /// slot offsets are a prefix sum of these aligned sizes, computed inline
+    /// where the layers are written/read (in launch order), so only the
+    /// aggregate is stored here. Zero when there are no layers.
+    layer_region_bytes: usize,
+}
+
+/// The aligned byte size of a single layer slot: the layer's own RGBA8 size,
+/// rounded up to the slot alignment. Layer slots are sized per-layer (#264).
+fn layer_slot_bytes(width: u32, height: u32) -> usize {
+    align_slot(width as usize * height as usize * 4)
 }
 
 impl SessionGeometry {
@@ -403,26 +417,25 @@ impl SessionGeometry {
     fn output_slot_offset(&self) -> usize {
         HEADER_BYTES + align_slot(self.input_slot_bytes())
     }
-    fn layer_slot_offset(&self, index: u32) -> usize {
-        self.output_slot_offset()
-            + align_slot(self.output_slot_bytes())
-            + index as usize * align_slot(self.input_slot_bytes())
+    /// Offset of the first layer slot; individual layer offsets follow as a
+    /// prefix sum of `layer_slot_bytes` in launch order.
+    fn layer_region_offset(&self) -> usize {
+        self.output_slot_offset() + align_slot(self.output_slot_bytes())
     }
     fn section_bytes(&self) -> usize {
-        self.output_slot_offset()
-            + align_slot(self.output_slot_bytes())
-            + self.layer_slot_count as usize * align_slot(self.input_slot_bytes())
+        self.layer_region_offset() + self.layer_region_bytes
     }
 }
 
 /// Whether a resident classic session can structurally represent this render:
 /// its uniform primary-sized input/layer slots plus the output slot must fit
 /// under the aggregate section cap `SECTION_HARD_CAP_BYTES`. This is a
-/// session-transport limit (all slots are sized to the primary input), not a
-/// compatibility limit — the one-shot layered path streams each layer to its own
-/// file with no aggregate bound — so the length-1 wrapper keeps a render that
-/// exceeds it on the one-shot path (#98 W4, #264) instead of fail-closing it.
-/// `layer_count` is the total secondary + timed layer slot count.
+/// session-transport limit, not a compatibility limit — the one-shot layered
+/// path streams each layer to its own file with no aggregate bound — so the
+/// length-1 wrapper keeps a render that exceeds it on the one-shot path
+/// (#98 W4, #264) instead of fail-closing it. `layer_dims` are each layer's
+/// (width, height); the layer region is the sum of their per-layer aligned
+/// slot sizes (#264), matching `open`'s layout exactly.
 ///
 /// The output slot is bounded against the LARGEST output an in-place expand
 /// could grow it to (`MAX_RESIZE_DIMENSION` per axis, #262), not just the launch
@@ -436,8 +449,23 @@ pub fn classic_session_section_fits(
     width: u32,
     height: u32,
     pixel_format: RenderPixelFormat,
-    layer_count: u32,
+    layer_dims: impl IntoIterator<Item = (u32, u32)>,
 ) -> bool {
+    let mut layer_slot_count = 0u32;
+    let mut layer_region_bytes = 0usize;
+    for (layer_width, layer_height) in layer_dims {
+        // Defense in depth (the caller pre-bounds these): a layer past the per-
+        // axis/pixel bounds is not session-representable (open rejects it), and
+        // bounding here also keeps `layer_slot_bytes` overflow-free.
+        if layer_width > MAX_DIMENSION
+            || layer_height > MAX_DIMENSION
+            || u64::from(layer_width) * u64::from(layer_height) > MAX_PIXELS
+        {
+            return false;
+        }
+        layer_slot_count += 1;
+        layer_region_bytes += layer_slot_bytes(layer_width, layer_height);
+    }
     let geometry = SessionGeometry {
         width,
         height,
@@ -446,7 +474,8 @@ pub fn classic_session_section_fits(
         output_capacity_width: MAX_RESIZE_DIMENSION,
         output_capacity_height: MAX_RESIZE_DIMENSION,
         pixel_format,
-        layer_slot_count: layer_count,
+        layer_slot_count,
+        layer_region_bytes,
     };
     geometry.section_bytes() as u64 <= SECTION_HARD_CAP_BYTES
 }
@@ -695,26 +724,18 @@ impl RenderSession {
         if request.layers.len() > 64 {
             return Err(invalid("render session layer count exceeds 64"));
         }
-        // The output slot starts at the render dimensions; an in-session grow
-        // (#262) raises the capacity when an expand overruns it.
-        let (output_capacity_width, output_capacity_height) = (request.width, request.height);
-        let geometry = SessionGeometry {
-            width: request.width,
-            height: request.height,
-            output_capacity_width,
-            output_capacity_height,
-            pixel_format: request.pixel_format,
-            layer_slot_count: request.layers.len() as u32,
-        };
-        // Each layer's RGBA must fit its slot (input-slot shaped), before any
-        // transport work. Slot dedup mirrors the one-shot layered_image_mode
+        // Validate each layer and accumulate the layer-slot region. Layer slots
+        // are sized per-layer (#264): a secondary or timed layer may be larger
+        // than the primary input (the session no longer requires it to fit the
+        // primary slot), so a config the one-shot layered path accepts renders on
+        // the session too. Slot dedup mirrors the one-shot layered_image_mode
         // parser exactly (issue #98 W1-4b) so a directly built request accepts
-        // and rejects the same sets the one-shot path does, and the wrapper
-        // never silently falls back for a config one-shot would render: a slot
-        // rejects only a second static entry or a timed entry at a rational
-        // time already present. A static plus timed entries at one slot is the
-        // valid representation of a layer parameter sampled at current_time and
-        // at other times, so it is admitted.
+        // and rejects the same sets the one-shot path does: a slot rejects only a
+        // second static entry or a timed entry at a rational time already
+        // present. A static plus timed entries at one slot is the valid
+        // representation of a layer parameter sampled at current_time and at
+        // other times, so it is admitted.
+        let mut layer_region_bytes = 0usize;
         for (index, layer) in request.layers.iter().enumerate() {
             // Same slot and dimension bounds the worker parser enforces.
             if layer.slot == 0
@@ -723,6 +744,7 @@ impl RenderSession {
                 || layer.height == 0
                 || layer.width > MAX_DIMENSION
                 || layer.height > MAX_DIMENSION
+                || u64::from(layer.width) * u64::from(layer.height) > MAX_PIXELS
             {
                 return Err(invalid("render session layer slot or dimensions are invalid"));
             }
@@ -750,11 +772,26 @@ impl RenderSession {
                     return Err(invalid("render session layer slots must be unique"));
                 }
             }
+            // The transported RGBA must match the declared per-layer dimensions
+            // exactly; each layer occupies its own primary-independent slot.
             let expected = layer.width as usize * layer.height as usize * 4;
-            if layer.rgba.len() != expected || expected > geometry.input_slot_bytes() {
-                return Err(invalid("render session layer pixels do not fit the slot"));
+            if layer.rgba.len() != expected {
+                return Err(invalid("render session layer pixels do not match dimensions"));
             }
+            layer_region_bytes += layer_slot_bytes(layer.width, layer.height);
         }
+        // The output slot starts at the render dimensions; an in-session grow
+        // (#262) raises the capacity when an expand overruns it.
+        let (output_capacity_width, output_capacity_height) = (request.width, request.height);
+        let geometry = SessionGeometry {
+            width: request.width,
+            height: request.height,
+            output_capacity_width,
+            output_capacity_height,
+            pixel_format: request.pixel_format,
+            layer_slot_count: request.layers.len() as u32,
+            layer_region_bytes,
+        };
         if geometry.section_bytes() as u64 > SECTION_HARD_CAP_BYTES {
             return Err(invalid("render session section exceeds the hard cap"));
         }
@@ -861,17 +898,20 @@ impl RenderSession {
         transport.write_header_u32(OUTPUT_GENERATION_OFFSET, 0);
         transport.write_header_u32(FRAME_WIDTH_OFFSET, request.width);
         transport.write_header_u32(FRAME_HEIGHT_OFFSET, request.height);
-        // Layers are static: copy each into its slot once; the worker reads
-        // them at open and reuses them for every frame.
-        for (index, layer) in request.layers.iter().enumerate() {
-            let offset = geometry.layer_slot_offset(index as u32);
+        // Layers are static: copy each into its own slot once; the worker reads
+        // them at open and reuses them for every frame. Slots are sized per-layer
+        // (#264), so the offset walks a prefix sum of the aligned per-layer sizes
+        // in launch order (matching the worker's read loop).
+        let mut layer_offset = geometry.layer_region_offset();
+        for layer in request.layers {
             unsafe {
                 std::ptr::copy_nonoverlapping(
                     layer.rgba.as_ptr(),
-                    transport.view.add(offset),
+                    transport.view.add(layer_offset),
                     layer.rgba.len(),
                 );
             }
+            layer_offset += layer_slot_bytes(layer.width, layer.height);
         }
 
         let plugin = ApprovedImageArtifact {
@@ -2926,6 +2966,7 @@ mod tests {
             output_capacity_height: 17,
             pixel_format: RenderPixelFormat::Argb16,
             layer_slot_count: 0,
+            layer_region_bytes: 0,
         };
         assert_eq!(geometry.input_slot_bytes(), 33 * 17 * 4); // 2244
         assert_eq!(geometry.output_slot_bytes(), 33 * 17 * 8); // 4488
@@ -2936,33 +2977,66 @@ mod tests {
     }
 
     #[test]
+    fn per_layer_slots_sum_their_aligned_sizes() {
+        // Layer slots are sized per-layer (#264): a layer larger than the primary
+        // is allowed. Section = header + align(input) + align(output) + Σ
+        // align(layer_w*layer_h*4). Primary 8x8 (256 B), Argb8 output (256 B), a
+        // 4x4 layer (64 B) and a 64x64 layer (16384 B, larger than the primary).
+        let geometry = SessionGeometry {
+            width: 8,
+            height: 8,
+            output_capacity_width: 8,
+            output_capacity_height: 8,
+            pixel_format: RenderPixelFormat::Argb8,
+            layer_slot_count: 2,
+            layer_region_bytes: layer_slot_bytes(4, 4) + layer_slot_bytes(64, 64),
+        };
+        // Each of the six regions rounds up to one 4096 page except the 64x64
+        // layer (64*64*4 = 16384 = 4 pages).
+        assert_eq!(geometry.layer_region_offset(), 4096 + 4096 + 4096);
+        assert_eq!(
+            geometry.section_bytes(),
+            4096 + 4096 + 4096 + 4096 + 16384
+        );
+    }
+
+    #[test]
     fn classic_session_section_fits_bounds_the_aggregate() {
         // A modest render fits even against the worst-case expanded output.
         assert!(classic_session_section_fits(
             64,
             48,
             RenderPixelFormat::Argb8,
-            3
+            std::iter::repeat((64, 48)).take(3)
         ));
-        // Each layer slot is sized to the primary input, so many full-resolution
-        // layers overrun the 1 GiB aggregate cap even at launch dimensions.
+        // Many full-resolution layers overrun the 1 GiB aggregate cap even at
+        // launch dimensions.
         assert!(!classic_session_section_fits(
             4096,
             4096,
             RenderPixelFormat::Argb32f,
-            15
+            std::iter::repeat((4096, 4096)).take(15)
         ));
-        // The grow-capability case (#264): 2048x2048 32f with 48 layers fits the
-        // section at its LAUNCH output (16 MiB input + 64 MiB output + 48*16 MiB
-        // layers ~= 848 MiB), but an in-place expand to 4096x4096 (256 MiB
-        // output) pushes it to ~1040 MiB > 1 GiB. The bound uses the worst-case
-        // expanded output, so this is correctly excluded (routed to one-shot)
-        // rather than fail-closing later when grow_output_capacity hits the cap.
+        // The grow-capability case (#264): 2048x2048 32f with 48 primary-sized
+        // layers fits the section at its LAUNCH output (16 MiB input + 64 MiB
+        // output + 48*16 MiB layers ~= 848 MiB), but an in-place expand to
+        // 4096x4096 (256 MiB output) pushes it to ~1040 MiB > 1 GiB. The bound
+        // uses the worst-case expanded output, so this is correctly excluded
+        // (routed to one-shot) rather than fail-closing later when
+        // grow_output_capacity hits the cap.
         assert!(!classic_session_section_fits(
             2048,
             2048,
             RenderPixelFormat::Argb32f,
-            48
+            std::iter::repeat((2048, 2048)).take(48)
+        ));
+        // A layer larger than the primary is now representable and, on its own,
+        // well under the cap: a 64x48 primary with a single 512x512 layer fits.
+        assert!(classic_session_section_fits(
+            64,
+            48,
+            RenderPixelFormat::Argb8,
+            std::iter::once((512, 512))
         ));
     }
 

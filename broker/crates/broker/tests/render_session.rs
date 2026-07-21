@@ -825,7 +825,7 @@ mod windows_e2e {
     }
 
     #[test]
-    fn open_rejects_layer_pixels_that_do_not_fit_the_slot() {
+    fn open_rejects_layer_pixels_that_do_not_match_dimensions() {
         let _behavior = BehaviorGuard::set(None);
         let (repository, plugin, sha) = temp_repository();
         let layers = vec![SessionLayer {
@@ -864,7 +864,7 @@ mod windows_e2e {
         })
         .map(|_| ())
         .expect_err("mismatched layer pixels fail fast at open");
-        assert!(error.to_string().contains("do not fit"), "{error}");
+        assert!(error.to_string().contains("do not match dimensions"), "{error}");
     }
 
     #[test]
