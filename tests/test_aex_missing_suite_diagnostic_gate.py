@@ -53,6 +53,14 @@ class MissingSuiteDiagnosticGateTests(unittest.TestCase):
         self.assertEqual(gate.classify_failure(stderr, 1)["kind"],
                          "unsupported_plugin_kind_for_pf_inspect")
 
+    def test_classifies_invalid_pipl(self):
+        stderr = ('AEX parameter inspection worker failed safely: '
+                  '{"classification":"nonzero_exit","exit_code":12,"failure_stage":null,'
+                  '"stage_events":[],"plugin_kind":"invalid_pipl"}')
+        result = gate.classify_failure(stderr, 1)
+        self.assertEqual(result["kind"], "invalid_pipl_for_pf_inspect")
+        self.assertEqual(result["plugin_kind"], "invalid_pipl")
+
     def test_recorded_sdk_sweep_separates_effect_failures_from_aegp(self):
         summary = json.loads(SUMMARY.read_text(encoding="utf-8"))
         self.assertEqual((summary["fixture_count"], summary["effect_fixture_count"]), (23, 22))

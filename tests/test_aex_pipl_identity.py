@@ -157,16 +157,42 @@ def test_classify_effect_missing_entrypoint_is_invalid():
     assert ident._classify([ident.parse_pipl_payload(payload)]) == "invalid_pipl"
 
 
-def test_effect_with_invalid_entrypoint_symbol_is_not_dispatchable():
-    # A hyphenated symbol fails the worker's export-identifier validation, so it
-    # must not be classified as a dispatchable effect (regression for the static
-    # parser being laxer than the worker).
+def test_effect_with_invalid_entrypoint_symbol_is_invalid():
+    # A hyphenated symbol fails the worker's export-identifier validation, so the
+    # whole resource is Invalid at the worker (not a dispatchable effect).
     payload = _payload([_kind("eFKT"), _property("8664", b"bad-name\x00")])
     record = ident.parse_pipl_payload(payload)
-    assert record["parse_state"] == "parsed"
-    assert record["entrypoint_win64_valid"] is False
-    assert record["dispatchable_effect"] is False
+    assert record["parse_state"] == "invalid"
+    assert record["reason"] == "invalid_code_win64_symbol"
     assert ident._classify([record]) == "invalid_pipl"
+
+
+def test_invalid_code_on_non_effect_sibling_invalidates_module():
+    # Reviewer round-2 case: a valid Effect plus a sibling non-Effect resource
+    # whose CodeWin64X86 is invalid. The worker validates every 8664 regardless of
+    # Kind and short-circuits the whole module to Invalid, so the listing must not
+    # present the module as a dispatchable effect.
+    good_effect = ident.parse_pipl_payload(_effect_payload())
+    bad_sibling = ident.parse_pipl_payload(
+        _payload([_kind("FXIF"), _property("8664", b"bad-name\x00")])
+    )
+    assert good_effect["dispatchable_effect"] is True
+    assert bad_sibling["parse_state"] == "invalid"
+    assert ident._classify([good_effect, bad_sibling]) == "invalid_pipl"
+
+
+def test_invalid_code_on_aegp_is_invalid():
+    payload = _payload([_kind("AEgx"), _property("8664", b"bad-name\x00")])
+    assert ident.parse_pipl_payload(payload)["parse_state"] == "invalid"
+
+
+def test_duplicate_code_win64_is_invalid():
+    payload = _payload([
+        _kind("eFKT"),
+        _property("8664", b"EffectMain\x00"),
+        _property("8664", b"EffectMain\x00"),
+    ])
+    assert ident.parse_pipl_payload(payload)["reason"] == "duplicate_code_win64"
 
 
 def test_duplicate_kind_is_invalid():

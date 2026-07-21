@@ -156,6 +156,22 @@ CLAUDE.md の [[review-order-local-then-codex]] に従い、Codex より先に�
   非標準 real Effect (PiPL 非搭載等) の fail-closed は corpus-gated として doc に明記済み。コード変更不要。
 - 検証: identity unit 17 passed、conformance 109 passed、broker cargo check clean、実フィクスチャ分類維持。
 
+## ローカルレビュー ラウンド2 と対応 (2026-07-21)
+
+- **[Medium] worker 忠実性ギャップ (Kind非依存の 8664 検証欠落)**: worker は Kind に関係なく全 `8664` を
+  検証・重複チェックし、Invalid リソースが1つでもあればモジュール全体を Invalid に短絡する。旧 Python は
+  eFKT レコードにしか検証を適用せず、「有効 Effect + 不正 `8664` を持つ兄弟 FXIF/AEGP」を `effect`
+  (dispatchable) と誤表示 (危険側)。→ `parse_pipl_payload` を worker 忠実化: Kind 非依存に重複 kind/code・
+  不正 `8664` シンボル・kind 欠落・eFKT の code 欠落を parse 段階で parse_state=invalid に。`_classify` の
+  `any(parse_state != "parsed")` がモジュール短絡を拾う。kind/8664 検証は inline 化 (`_apply_adobe_property`
+  は identity 専用に)。テスト追加 (不正兄弟→invalid_pipl, AEGP不正code, code重複)。
+- **[Low] invalid_pipl の3消費点目**: `aex_missing_suite_diagnostic_gate.py:115` の allowlist にも
+  invalid_pipl 追加 + 専用 kind `invalid_pipl_for_pf_inspect` ブランチ + テスト。worker は finish(12) 前に
+  stderr へ plugin_kind を出し worker_diagnostics が拾うため到達し得る (他2サイトと整合)。
+- 検証: identity+gate 27 passed、実フィクスチャ分類維持 (ColorGrid/SDK_Backwards=effect, Grabba=aegp)。
+- clean な点 (レビュアー確認済み): `_valid_export_symbol` は C++ と byte-for-byte 等価、下流配線整合、
+  >64 判定境界一致、実 load 実証済み、退行なし。
+
 ## 制約 / 注意
 
 - 最終マージは CLAUDE.md 上 Codex レビューループ + owner レビューが前提。Codex は 2026-07-20 に

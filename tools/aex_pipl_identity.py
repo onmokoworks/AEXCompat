@@ -216,15 +216,41 @@ def parse_pipl_payload(payload: bytes | None) -> dict[str, Any]:
         canonical_key = _reverse4(key_raw)
         keys.append(canonical_key if adobe else f"{_reverse4(vendor)}:{canonical_key}")
         if adobe:
+            # The worker validates Kind and CodeWin64X86 independent of the Kind
+            # value and fails the whole resource (and the whole module) on a
+            # duplicate/malformed Kind or a duplicate/invalid CodeWin64X86. Mirror
+            # that at parse time so a bad sibling resource is not silently ignored.
             if canonical_key == "kind":
+                if kind_count >= 1 or len(data) != 4:
+                    record["reason"] = "duplicate_or_malformed_kind"
+                    return record
                 kind_count += 1
-            elif canonical_key == "8664":
+                record["kind_code"] = _reverse4(data)
+                record["kind_label"] = KIND_LABELS.get(record["kind_code"], "unknown")
+            elif canonical_key == "8664":  # CodeWin64X86
+                if code_count >= 1:
+                    record["reason"] = "duplicate_code_win64"
+                    return record
+                record["entrypoint_win64"] = _cstring(data)  # best-effort display
+                if _valid_export_symbol(data) is None:
+                    record["reason"] = "invalid_code_win64_symbol"
+                    return record
+                record["entrypoint_win64_valid"] = True
                 code_count += 1
-            _apply_adobe_property(record, canonical_key, data)
+            else:
+                _apply_adobe_property(record, canonical_key, data)
         offset += padded
 
     if offset != size:
         record["reason"] = "trailing_bytes_after_properties"
+        return record
+    # Worker requires exactly one Kind, and an Effect Kind requires its Win64
+    # entrypoint; both are Invalid otherwise.
+    if kind_count == 0:
+        record["reason"] = "missing_kind"
+        return record
+    if record["kind_code"] == "eFKT" and code_count == 0:
+        record["reason"] = "effect_missing_code_win64"
         return record
 
     record["property_keys"] = keys
@@ -232,34 +258,18 @@ def parse_pipl_payload(payload: bytes | None) -> dict[str, Any]:
     record["code_win64_count"] = code_count
     record["parse_state"] = "parsed"
     record["reason"] = None
-    # Mirror the worker's fail-closed dispatch decision (minihost
-    # discover_pipl_entrypoint / parse_pipl_entrypoint): the worker rejects a
-    # resource unless it carries exactly one Kind, and it only resolves an Effect
-    # when that Kind is AEEffect with exactly one CodeWin64X86 whose symbol is a
-    # valid bounded export identifier. This flag lets the listing avoid marking
-    # anything the worker would reject as a dispatchable Effect.
+    # After the parse-time gates above, a parsed eFKT resource necessarily has a
+    # single valid CodeWin64X86; keep the full predicate for clarity/safety.
     record["dispatchable_effect"] = (
-        kind_count == 1
-        and record["kind_code"] == "eFKT"
-        and code_count == 1
-        and record["entrypoint_win64_valid"]
+        record["kind_code"] == "eFKT" and code_count == 1 and record["entrypoint_win64_valid"]
     )
-    if kind_count == 0:
-        record["kind_label"] = record["kind_label"] or "no_kind"
     return record
 
 
 def _apply_adobe_property(record: dict[str, Any], key: str, data: bytes) -> None:
-    if key == "kind" and len(data) == 4:
-        code = _reverse4(data)
-        record["kind_code"] = code
-        record["kind_label"] = KIND_LABELS.get(code, "unknown")
-    elif key == "8664":  # CodeWin64X86
-        # Keep a best-effort display string, but only a symbol that passes the
-        # worker's validation counts as a resolvable entrypoint.
-        record["entrypoint_win64"] = _cstring(data)
-        record["entrypoint_win64_valid"] = _valid_export_symbol(data) is not None
-    elif key == "wx86":  # CodeWin32X86
+    # Kind and CodeWin64X86 are validated inline in parse_pipl_payload; this
+    # handles the display-only identity properties.
+    if key == "wx86":  # CodeWin32X86
         record["entrypoint_win32"] = _cstring(data)
     elif key == "name":
         record["name"] = _pstring(data)

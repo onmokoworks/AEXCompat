@@ -112,10 +112,12 @@ def classify_failure(stderr: str, process_exit: int) -> dict:
                 selector_error = error
                 break
     plugin_kind = diagnostics.get("plugin_kind")
-    if plugin_kind not in {"aegp_candidate", "unknown_no_effect_entrypoint"}:
+    if plugin_kind not in {"aegp_candidate", "invalid_pipl", "unknown_no_effect_entrypoint"}:
         plugin_kind = None
     if worker_exit == 12 and plugin_kind == "aegp_candidate" and not events:
         kind = "unsupported_plugin_kind_for_pf_inspect"
+    elif worker_exit == 12 and plugin_kind == "invalid_pipl" and not events:
+        kind = "invalid_pipl_for_pf_inspect"
     elif worker_exit == 12 and not events:
         kind = "effect_entrypoint_missing"
     elif missing_suites(stderr):
