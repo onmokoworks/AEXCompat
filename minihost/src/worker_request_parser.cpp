@@ -104,12 +104,15 @@ ParseResult parse(Kind kind, int argc, wchar_t** argv, const Hooks& hooks) {
           !hooks.parse_spatial_context(argv[mode.image_trailer_argc]))) throw 1;
       if (mode.image_render_environment && (!hooks.parse_render_environment ||
           !hooks.parse_render_environment(argv[mode.image_environment_argc]))) throw 1;
-      // Secondary layer metadata: `session-layers:v1|slot,w,h;slot,w,h;...`.
-      // The pixels arrive in the shared layer slots, so only the geometry and
-      // slot assignment travel here (issue #98 W1-4). Timed layers are v1.1.
+      // Secondary layer metadata:
+      // `session-layers:v2|slot,w,h,handle;slot,w,h,time,scale,handle;...`.
+      // The pixels travel as inherited per-layer file HANDLEs (#268); the slot,
+      // geometry, optional rational time, and the read handle value travel here
+      // (issue #98 W1-4, timed layers are v1.1). The frame loop reads each
+      // layer's bytes from its handle once at open.
       if (mode.session_layers) {
         const std::wstring trailer(argv[mode.image_argc - 1]);
-        const std::wstring body = trailer.substr(std::wcslen(L"session-layers:v1|"));
+        const std::wstring body = trailer.substr(std::wcslen(L"session-layers:v2|"));
         std::size_t offset = 0;
         while (offset < body.size()) {
           const std::size_t separator = body.find(L';', offset);
@@ -117,23 +120,27 @@ ParseResult parse(Kind kind, int argc, wchar_t** argv, const Hooks& hooks) {
           const std::wstring field = body.substr(offset, end - offset);
           LayerInput layer;
           int consumed = 0;
-          // `slot,w,h,time,scale` (5 fields) is a timed layer (issue #98
-          // W1-4b); the shorter `slot,w,h` stays a static secondary (W1-4).
-          if (std::count(field.begin(), field.end(), L',') == 4) {
-            if (swscanf_s(field.c_str(), L"%d,%d,%d,%d,%u%n", &layer.slot,
+          // `slot,w,h,time,scale,handle` (6 fields) is a timed layer (issue #98
+          // W1-4b); the shorter `slot,w,h,handle` stays a static secondary
+          // (W1-4). The handle value is always the final field (#268).
+          if (std::count(field.begin(), field.end(), L',') == 5) {
+            if (swscanf_s(field.c_str(), L"%d,%d,%d,%d,%u,%llu%n", &layer.slot,
                     &layer.width, &layer.height, &layer.time, &layer.time_scale,
-                    &consumed) != 5 ||
+                    &layer.rgba_handle, &consumed) != 6 ||
                 layer.time_scale == 0)
               throw 1;
             layer.timed = true;
-          } else if (swscanf_s(field.c_str(), L"%d,%d,%d%n", &layer.slot,
-                         &layer.width, &layer.height, &consumed) != 3) {
+          } else if (swscanf_s(field.c_str(), L"%d,%d,%d,%llu%n", &layer.slot,
+                         &layer.width, &layer.height, &layer.rgba_handle,
+                         &consumed) != 4) {
             throw 1;
           }
           if (static_cast<std::size_t>(consumed) != field.size() ||
               layer.slot <= 0 || layer.slot > 1024 ||
               layer.width <= 0 || layer.width > 4096 ||
               layer.height <= 0 || layer.height > 4096 ||
+              // A zero handle is never a valid inherited layer file (#268).
+              layer.rgba_handle == 0 ||
               std::any_of(invocation.layers.begin(), invocation.layers.end(),
                   [&](const auto& existing) {
                     // Same dedup as the one-shot layered_image_mode path: a

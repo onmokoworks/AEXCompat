@@ -158,14 +158,20 @@ pub const SESSION_REQUEST_HANDLE_VARIABLE: &str = "AEXCOMPAT_RENDER_SESSION_REQU
 pub const SESSION_RESPONSE_HANDLE_VARIABLE: &str = "AEXCOMPAT_RENDER_SESSION_RESPONSE_HANDLE";
 pub const SESSION_SECTION_HANDLE_VARIABLE: &str = "AEXCOMPAT_RENDER_SESSION_SECTION_HANDLE";
 
-/// Child-side transport handles for a resident render session launch. All
-/// three must already be inheritable; the caller keeps ownership and closes
-/// its copies after the launch. The worker receives only these numbers via
-/// the session environment variables and never opens a path for transport.
+/// Child-side transport handles for a resident render session launch. Every
+/// handle must already be inheritable; the caller keeps ownership and closes
+/// its copies after the launch. The worker receives the three transport handle
+/// numbers via the session environment variables and the per-layer read handle
+/// numbers via the `session-layers` launch trailer, and never opens a path for
+/// transport (#268).
 pub struct SessionChildHandles {
     pub request_read: HANDLE,
     pub response_write: HANDLE,
     pub section: HANDLE,
+    /// Per-layer RGBA8 read handles (#268), one per session layer in launch
+    /// order. Inherited so their numeric values match in the worker; the trailer
+    /// pairs each value with its layer's slot/geometry.
+    pub layers: Vec<HANDLE>,
 }
 
 fn child_environment(
@@ -625,6 +631,10 @@ fn launch_isolated_impl(
             session.response_write,
             session.section,
         ]);
+        // Per-layer RGBA8 read handles (#268) inherit alongside the transport
+        // handles; their numeric values reach the worker via the session-layers
+        // trailer.
+        inherited.extend(session.layers.iter().copied());
     }
     if unsafe {
         UpdateProcThreadAttribute(

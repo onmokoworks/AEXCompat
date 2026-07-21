@@ -218,14 +218,23 @@ fn is_owned_image_transport_name(name: &str) -> bool {
         return true;
     }
 
-    [("layer-", ".rgba"), ("aux-", ".f32le")]
-        .iter()
-        .any(|(prefix, suffix)| {
-            name.strip_prefix(prefix)
-                .and_then(|body| body.strip_suffix(suffix))
-                .and_then(|body| body.split_once('-'))
-                .is_some_and(|(nonce, index)| decimal_component(nonce) && decimal_component(index))
-        })
+    // `layer-<nonce>-<index>.rgba` is the one-shot layered transport; the
+    // resident session streams its own per-layer files as
+    // `layer-session-<nonce>-<index>.rgba` (#268), a distinct prefix so the two
+    // routes never collide on a nonce. Both are broker-owned and must be
+    // reclaimable by the stale sweep when a crash skips their normal deletion.
+    [
+        ("layer-", ".rgba"),
+        ("layer-session-", ".rgba"),
+        ("aux-", ".f32le"),
+    ]
+    .iter()
+    .any(|(prefix, suffix)| {
+        name.strip_prefix(prefix)
+            .and_then(|body| body.strip_suffix(suffix))
+            .and_then(|body| body.split_once('-'))
+            .is_some_and(|(nonce, index)| decimal_component(nonce) && decimal_component(index))
+    })
 }
 
 fn is_reparse_point(metadata: &fs::Metadata) -> bool {
@@ -4677,25 +4686,17 @@ fn render_with_artifact(
     };
     let alpha_as_coverage_params: &[u32] =
         host_context.map_or(&[], |context| context.alpha_as_coverage_params.as_slice());
-    // The session sizes each layer slot to that layer's own dimensions (#264),
-    // so a secondary or timed layer larger than the primary is representable and
-    // no longer needs the one-shot path. What remains a session-transport limit
-    // is the aggregate section cap (the one-shot per-file transport has no
-    // equivalent): a config whose per-layer slots sum past the cap stays on the
-    // one-shot path rather than fail-closing (#264). Feed the actual per-layer
-    // dimensions so this check matches open's per-layer section layout exactly.
-    let layer_dims = secondaries
-        .iter()
-        .map(|(_, w, h, _)| (*w, *h))
-        .chain(timed_secondaries.iter().map(|(_, _, w, h, _)| (*w, *h)));
-    let session_section_fits =
-        crate::render_session::classic_session_section_fits(width, height, pixel_format, layer_dims);
+    // Layer pixels travel as inherited per-layer file HANDLEs (#268), not
+    // section slots, so the section is header + input + output only and its
+    // aggregate cap is no longer a function of layer count or size. A layered
+    // config the one-shot per-file path accepts now always fits the session, so
+    // the former session_section_fits carve-out is gone (#264): every eligible
+    // render below can be carried by the length-1 session.
     if !smart
         && audio.is_none()
         && gpu_backend == RenderGpuBackend::Auto
         && payload == encode_interactive_payload(interactive_parameters.unwrap_or_default())?
         && std::env::var_os(DISABLE_SESSION_WRAPPER_ENV).is_none()
-        && session_section_fits
         // RenderSession::open rejects total_time <= 0, but the shared timing
         // validation (RenderTiming::is_valid) admits total_time == 0 at
         // current_time == 0. Keep such a zero-duration render on the one-shot
@@ -4717,24 +4718,41 @@ fn render_with_artifact(
         // to keep the pre-transform and the worker-reported settings consistent.
         && conformance_render_settings.is_none()
     {
+        // Only a layered session touches target/image-transport: RenderSession::
+        // open writes per-layer sidecars there (#268), so a file-free session
+        // (no secondary/timed layers) must not be forced to create or sweep the
+        // directory. When this session does write sidecars, run the same stale
+        // sweep the aux and one-shot paths do, since a pure layered session
+        // reaches neither: it reclaims leaked layer-session-* files from a prior
+        // crash. This render's own sidecars do not exist yet (open writes them
+        // with a fresh nonce) and freshly written aux sidecars survive the age
+        // cutoff, so it is idempotent with the aux/one-shot calls.
+        if !secondaries.is_empty() || !timed_secondaries.is_empty() {
+            fs::create_dir_all(&root)?;
+            cleanup_stale_image_transport(&root, SystemTime::now())?;
+        }
         // Static secondaries render on every frame; timed secondaries (issue
         // #98 W1-4b) carry their rational admission time so the worker selects
         // the matching entry per frame, the same as the one-shot transport.
+        // Every match arm below returns, so this branch never falls through to
+        // the one-shot code that reads `secondaries`/`timed_secondaries`; move
+        // the decoded RGBA buffers into the session layers instead of cloning
+        // them, so a large layered render does not double broker memory (#268).
         let session_layers = secondaries
-            .iter()
+            .into_iter()
             .map(|(slot, width, height, rgba)| crate::render_session::SessionLayer {
-                slot: *slot,
-                width: *width,
-                height: *height,
-                rgba: rgba.clone(),
+                slot,
+                width,
+                height,
+                rgba,
                 timed: None,
             })
-            .chain(timed_secondaries.iter().map(
+            .chain(timed_secondaries.into_iter().map(
                 |(slot, time, width, height, rgba)| crate::render_session::SessionLayer {
-                    slot: *slot,
-                    width: *width,
-                    height: *height,
-                    rgba: rgba.clone(),
+                    slot,
+                    width,
+                    height,
+                    rgba,
                     timed: Some((time.value, time.scale)),
                 },
             ))
@@ -6412,6 +6430,7 @@ mod tests {
             "output-123.rgba",
             "audio-123.f32",
             "layer-123-0.rgba",
+            "layer-session-123-0.rgba",
             "report-123.json",
             "parameter-animation-123.json",
             "aux-manifest-123.json",

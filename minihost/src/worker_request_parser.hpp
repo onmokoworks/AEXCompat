@@ -20,6 +20,11 @@ struct LayerInput {
   int32_t width{};
   int32_t height{};
   std::vector<unsigned char> rgba;
+  // Session transport only (#268): the inherited read HANDLE value carrying this
+  // layer's RGBA8 file. Zero for the one-shot layered path, which loads `rgba`
+  // directly from a file path. The session frame loop reads w*h*4 bytes from
+  // this handle into `rgba` once at open.
+  uint64_t rgba_handle{};
 };
 
 struct Hooks {

@@ -16,9 +16,11 @@ inline constexpr uint32_t kProtocolVersion = 1;
 // Version stamped in the shared-section header (kHeaderVersionOffset) and
 // validated by both sides. Distinct from the message version above so it tracks
 // the shared-memory LAYOUT: bumped to 2 when layer slots became per-layer sized
-// (#264). A stale broker/worker pair whose layouts disagree fails closed on the
-// header check (both directions) instead of reading the wrong bytes.
-inline constexpr uint32_t kSessionHeaderVersion = 2;
+// (#264), then to 3 when layer pixels left the section for inherited per-layer
+// file HANDLEs (#268), so the section is header + input + output only. A stale
+// broker/worker pair whose layouts disagree fails closed on the header check
+// (both directions) instead of reading the wrong bytes.
+inline constexpr uint32_t kSessionHeaderVersion = 3;
 // render_frame v:2 carries a per-frame `parameters` payload replacing the
 // launch assignments for that frame only (protocol §4.2.1, issue #107). Every
 // other message, the frame_done schema, and the header layout stay v1.
@@ -51,27 +53,20 @@ struct SessionGeometry {
   int32_t output_capacity_width{};
   int32_t output_capacity_height{};
   int32_t output_pixel_bytes{4};  // 4 (8bpc) / 8 (16bpc) / 16 (32f)
+  // Number of layers, kept only to cross-check the header
+  // kHeaderLayerSlotCountOffset field against the session-layers trailer count.
+  // Layer PIXELS no longer occupy the section (#268): they travel as inherited
+  // per-layer file HANDLEs, so this count does not size the section.
   int32_t layer_slot_count{};
-  // Total bytes of the layer-slot region: the sum of each layer's own
-  // 4096-aligned RGBA8 size (#264). Layer slots are sized per-layer, not
-  // uniformly to the primary input, so a layer may be larger than the primary.
-  // Individual slot offsets are a prefix sum of the aligned per-layer sizes,
-  // walked inline where the layers are read (in launch order).
-  std::size_t layer_region_bytes{};
 };
 
-// Input and layer slots are RGBA8 transport (4 bytes per pixel, matching the
-// one-shot raw input contract); only the output slot scales with depth.
+// The input slot is RGBA8 transport (4 bytes per pixel, matching the one-shot
+// raw input contract); only the output slot scales with depth. Layer pixels
+// travel as inherited file HANDLEs (#268), not section slots.
 std::size_t input_slot_bytes(const SessionGeometry& geometry);
 std::size_t output_slot_bytes(const SessionGeometry& geometry);
 std::size_t input_slot_offset();
 std::size_t output_slot_offset(const SessionGeometry& geometry);
-// The aligned byte size of a single layer slot (that layer's own RGBA8 size,
-// 4096-aligned); layer slots are sized per-layer (#264).
-std::size_t layer_slot_bytes(int32_t width, int32_t height);
-// Offset of the first layer slot; individual layer offsets follow as a prefix
-// sum of `layer_slot_bytes` in launch order.
-std::size_t layer_region_offset(const SessionGeometry& geometry);
 std::size_t expected_section_bytes(const SessionGeometry& geometry);
 
 // True when any of the session transport environment variables is set. Used
