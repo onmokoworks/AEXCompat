@@ -417,3 +417,101 @@ supervised は dynamic/soft な状態で AviUtl2 の静的 config では表現�
 - **ローカル 3周目**: P2/P3 修正を検証 (正しい、新規問題なし)。carry-over は
   「off-lock join は render_on が frame deadline で返る前提」= broker §7 watchdog の
   既存不変条件で bridge 起因でない。→ **ローカル clean 到達、Codex へ**。
+
+## 2026-07-22 段階3: SmartFX 対応 (実装)
+
+ntsc-rs のような実効果は SmartFX で、classic セッションでは
+`PF_Err_BAD_CALLBACK_PARAM` (516) で弾かれる (oracle: host_render_path=smartfx)。
+harness の live per-frame (InteractiveRenderSession) も classic 固定だが、broker の
+`RenderSession` は `smart: true` (SmartFX 常駐セッション、#98 W3) を持つ。bridge は
+RenderSession を直に叩くので、これを配線した:
+
+- **SmartFX 検出**: discovery の diagnostics `advertised_out_flags2` の
+  `PF_OutFlag2_SUPPORTS_SMART_RENDER` (bit 10、worker_effect_bootstrap.cpp:98) を見る。
+- **smart セッション**: 検出時 `RenderSession::open` に `smart: true` を渡す。8bit smart は
+  GPU 非対象 (`gpu_capable = smart && ARGB32f`) なので gpu_backend Auto=CPU、runtime policy 不要。
+  smart worker (`aex_smart_worker.exe`) を使う。
+- パラメーターマッピング (段階2) はそのまま流用。
+
+検証 (repro, ntsc-rs-ae.aex): SmartFX=true 検出、86 params discovery、Random seed を
+変えて 2 フレーム描画 (frame0 [1,2,5] / frame1 [10,14,12] = seed でノイズが変わる)。
+classic では両フレーム 516 だったのが smart で描画成功。実機は AviUtl2 で確認。
+
+## 2026-07-22 段階4: 実行中の AEX 切替 (File 設定項目)
+
+要件 (ユーザー): 環境変数指定は「固定」扱い。**AviUtl2 を再起動せず実行中に AEX を
+差し替えられる**べき。AviUtl2 は設定項目をロード時に一度だけ読む (静的 config) ので、
+実行中選択された AEX のパラメーターは個別コントロールにはできない (段階2 のマッピングは
+ロード時 discovery した env AEX にのみ効く)。設計:
+
+- **File 設定項目 "AEX" を config[0] に前置**。空 = env AEX (パラメーターコントロール付き)。
+  別の .aex を選ぶとその AEX にライブ切替、そちらは自前の既定値で描画 (パラメーター非公開)。
+- `resolve_aex(config)`: File 値があれば override、なければ env_plugin。sha を計算し、
+  `is_default = env_sha == sha` (**content 比較**。ファイルダイアログでパスが再正規化されても
+  env AEX のコントロール値が効き続ける)。smart は is_default なら load 時の値、別 AEX なら
+  `smart_for` (bit 10 を sha キャッシュ付きで inspect)。
+- **SessionIdentity に plugin_sha256 + smart を追加**。AEX を切替えると sha が変わり identity
+  不一致 → 既存セッションを evict して新 AEX で reopen。effect インスタンス単位で分離。
+- **sha_for**: path + (mtime, len) で sha をキャッシュ。毎フレーム multi-MB の read+hash を
+  避ける (export の数千フレームで効く)。rebuild は mtime/len 変化で無効化 → 固定 AEX の
+  再ビルドも検出して reopen。Windows (`.auf2` 唯一の対象) は NTFS で mtime 常時取得可。
+
+ローカルレビュー (2 巡): P2×2 を指摘・修正。(1) 毎フレーム read+hash → sha_for キャッシュ化。
+(2) is_default のパス比較 → env_sha content 比較。再レビューで両者解消・新規欠陥なしを確認。
+
+### Codex round 2 (PR #294) 対応
+
+- P2「セレクタは前置でなく後置」: File "AEX" を config[0] 前置していたのを**末尾に後置**に変更。
+  前置はパラメーターの位置インデックスを全てずらす (後のレイアウト変更/保存プロジェクトで
+  値がずれる)。`apply_config_values` は `config.zip(slots)` で slots(長さm)が先に尽きるため、
+  full config を渡しても末尾の File は消費されない。proc_video の `config.get(1..)` を撤去。
+- P3「is_default は content だけでなく同一パスも要求」: 別ディレクトリの同一バイトコピーは
+  sha 一致だけで is_default=true になり env のパラメーターが適用されてしまう (コピーは隣接
+  リソースが違えば別挙動)。**is_default を canonical path 比較に変更** (`env_canonical` を
+  load 時に確定、`resolve_aex` で `canonicalize(selected)==env_canonical`)。canonical は
+  大文字小文字/区切りを正規化するので**再選択のパス正規化と別ディレクトリ判別を同時に満たす**
+  (sha より正しい)。env_sha フィールドは撤去。
+
+## 2026-07-22 段階5 調査: フォルダ内各 AEX を別々のキーフレーム可能フィルタに
+
+要件 (ユーザー): AviUtl2 のキーフレームは登録済み config 項目 (Track 等) にしか効かない。
+実行中に選んだ AEX のパラメーターをキーフレーム可能にする迂回策が要る。無ければ**フォルダ内の
+各 .aex を、それぞれ固定パラメーター付きの別フィルタとして登録**したい。
+
+### ABI 調査 (aviutl2-sys 0.40 = SDK ヘッダの手書き Rust 転写)
+
+- **Q1 ロード後の動的 config 登録: 不可。** config 項目は `InitializePlugin`/テーブル生成時に
+  凍結 (`GetFilterPluginTable` が1テーブル返し items を leak)。再宣言フック無し・個数可変無し。
+  キーフレーム対象 (Track) もロード時固定。ただし `plugin_info()` はロード時に走るので、
+  **ロード時点で判る情報 (フォルダ走査結果) から Track を組み立てるのは可能**。
+- **Q2 単一 DLL で複数フィルタ: 可能 (SDK レベル)。** `register_filter_plugin!` (単一専用、
+  `no_mangle GetFilterPluginTable` 1個) ではなく、**generic 経路** (`register_generic_plugin!`
+  + `HostAppHandle::register_filter_plugin` を N 回) で N フィルタ登録できる。各フィルタは
+  独自の名前・固定 config を持てる。
+- **per-filter fn ポインタが必須 (共有不可)。** `func_proc_video(video: *mut FILTER_PROC_VIDEO)`
+  はテーブルポインタも context も受け取らない。`OBJECT_INFO.effect_id` はあるが
+  **effect_id → フィルタ名/定義 の対応 API は sys 全体に存在しない**。よって共有 proc では
+  1オブジェクトに自分のフィルタが複数載った時に発呼元を区別できない。正しく捌くには
+  フィルタ毎に別の fn ポインタ identity が要る。
+- **値はキー名で読める。** `get_object_track_value(object, effect名, 項目名, frame, &value)`
+  でキーフレーム済み値を名前ベースで取得できる (leak した item ポインタに縛られない)。
+- **generic プラグインの拡張子は `.aux2`** (filter=.auf2 / input=.aui2 / output=.auo2)。
+  `.auf2` で置くと AviUtl2 が `GetFilterPluginTable` を探して `GetProcAddress failed`
+  (HRESULT 0x8007007F) で失敗する (2026-07-22 に踏んだ)。logger の `[Plugin::vi5.aux2]` が根拠。
+
+### 実装方針 (ユーザー決定): libffi closure で上限なしの実行時 N
+
+per-filter fn ポインタを実行時に必要数だけ得る手段は (A) libffi closure でAEX毎のC
+コールバックを実行時生成 (上限なし) か (B) コンパイル時スロットプール (上限あり) の 2 択。
+ユーザーは「128 は近い天井、フォルダの AEX が 128 超は普通にある」として (A) を選択。
+libffi (成熟クレート、実行可能メモリ管理込み) で AEX を捕捉した
+`extern "C" fn(*mut FILTER_PROC_VIDEO)->bool` を実行時生成する。
+
+### スパイク検証 (aviutl2-multifilter-spike, `.aux2`)
+
+観察 (実機、2026-07-22): generic `.aux2` から 2 フィルタ (Spike Tint R / Spike Tint G、
+各1 Track "Amount") を crate の generic 経路 (compile-time 型) で登録。**両方が別フィルタ効果
+として出現し、独立に機能 (R/G を各々着色) し、各 Amount に独立してキーフレームを打てた。**
+→ 「1 DLL から複数フィルタ登録 + 各フィルタ独立キーフレーム」を AviUtl2 が honor することを
+立証。段階5 の土台が成立。**未検証: libffi closure 生成の fn ポインタが func_proc_video として
+機能するか** (スパイクは compile-time 型で、libffi 経路は次に別スパイクで確認する)。

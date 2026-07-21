@@ -30,13 +30,21 @@ fn main() {
     eprintln!("repository = {repository:?}");
 
     // 1. Discovery.
-    let (params, _diag) = match inspect_experimental_with_diagnostics(&repository, &plugin, &sha) {
+    let (params, diag) = match inspect_experimental_with_diagnostics(&repository, &plugin, &sha) {
         Ok(result) => result,
         Err(error) => {
             eprintln!("DISCOVERY FAILED: {error}");
             return;
         }
     };
+    // PF_OutFlag2_SUPPORTS_SMART_RENDER = bit 10 (worker_effect_bootstrap.cpp:98).
+    let smart = diag
+        .get("advertised_out_flags2")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0)
+        & (1 << 10)
+        != 0;
+    eprintln!("SmartFX = {smart}");
     eprintln!("DISCOVERY OK: {} parameters", params.len());
     for p in &params {
         eprintln!(
@@ -93,7 +101,7 @@ fn main() {
         total_time: 100,
         time_scale: 30,
         frame_deadline: Duration::from_millis(30_000),
-        smart: false,
+        smart,
         gpu_backend: RenderGpuBackend::Auto,
         gpu_runtime_policy: None,
     }) {
