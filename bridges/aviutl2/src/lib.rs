@@ -376,6 +376,12 @@ struct AexBridgeFilter {
     /// (which can load different adjacent resources) is correctly not treated as
     /// the default and renders at its own defaults.
     env_canonical: Option<PathBuf>,
+    /// The load-time env AEX's sha256, or `None` when no env AEX is set or
+    /// discovery failed. `is_default` requires this in addition to the canonical
+    /// path: a same-path rebuild keeps the canonical path but changes the sha and
+    /// may change the parameter set, so the load-time `param_template` (whose
+    /// controls AviUtl2 froze at load) must not be applied to the rebuilt bytes.
+    env_sha: Option<String>,
     /// Cache of AEX sha256 (lowercase hex) → advertises-SmartFX, so switching to
     /// a runtime-selected AEX detects its render path once, not per reopen.
     smart_cache: Mutex<HashMap<String, bool>>,
@@ -530,15 +536,20 @@ impl AexBridgeFilter {
             })?,
         };
         let sha = self.sha_for(&plugin)?;
-        // Canonical-path based: normalizes case/separators so a re-selection of
-        // the env AEX still matches, while a byte-identical copy in a different
-        // directory does not (it may load different adjacent resources, so it
-        // must render at its own defaults, not the env AEX's). Canonicalize
-        // failure (file vanished) conservatively falls to "not default".
-        let is_default = match (std::fs::canonicalize(&plugin).ok(), &self.env_canonical) {
+        // The selection is the env default (whose frozen load-time controls apply)
+        // only when it is BOTH the same file AND the same bytes as at load:
+        // - canonical path match: normalizes case/separators so a re-selection of
+        //   the env AEX still matches, while a byte-identical copy in another
+        //   directory does not (it can load different adjacent resources).
+        // - sha match: a same-path rebuild keeps the canonical path but changes the
+        //   bytes and may change the parameter set, so the load-time param_template
+        //   must not be applied to the rebuilt AEX (it renders at its own defaults).
+        // Canonicalize failure (file vanished) conservatively falls to "not default".
+        let same_path = match (std::fs::canonicalize(&plugin).ok(), &self.env_canonical) {
             (Some(selected), Some(env)) => &selected == env,
             _ => false,
         };
+        let is_default = same_path && self.env_sha.as_deref() == Some(sha.as_str());
         // Always resolve smart by the current sha (cached), never by is_default:
         // a same-path rebuild of the env AEX keeps is_default true but changes the
         // sha and may flip its SmartFX advertisement, so the load-time flag can be
@@ -660,8 +671,8 @@ impl FilterPlugin for AexBridgeFilter {
         // resolve_aex's per-frame `smart_for(sha)` is a cache hit until the bytes
         // change (a same-path rebuild changes the sha and re-inspects).
         let mut smart_cache = HashMap::new();
-        if let Some(sha) = env_sha {
-            smart_cache.insert(sha, env_smart);
+        if let Some(sha) = &env_sha {
+            smart_cache.insert(sha.clone(), env_smart);
         }
 
         Ok(Self {
@@ -669,6 +680,7 @@ impl FilterPlugin for AexBridgeFilter {
             param_template,
             env_plugin,
             env_canonical,
+            env_sha,
             smart_cache: Mutex::new(smart_cache),
             sha_cache: Mutex::new(HashMap::new()),
         })
