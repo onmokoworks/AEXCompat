@@ -682,7 +682,13 @@ impl RenderSession {
     /// launch-time output-capacity parameter.
     pub fn open(request: SessionOpenRequest<'_>) -> io::Result<RenderSession> {
         if request.time_step <= 0
-            || request.total_time <= 0
+            // A zero-duration render (total_time == 0) is valid: the shared
+            // RenderTiming::is_valid admits it at current_time == 0, and the
+            // one-shot worker renders the single t=0 frame, so the session must
+            // too (#272). Only a negative total_time is rejected; per-frame the
+            // worker still rejects current_time > total_time, so total_time == 0
+            // admits exactly the current_time == 0 frame.
+            || request.total_time < 0
             || request.time_scale == 0
             // The worker parses the per-frame current_time.scale as signed
             // 32-bit, so a larger launch time_scale could never render a
@@ -3159,7 +3165,9 @@ mod tests {
         // paths never get touched when the timing is invalid.
         for (time_step, total_time, time_scale) in [
             (0, 300, 30),
-            (1, 0, 30),
+            // total_time == 0 is now valid (the zero-duration t=0 render, #272);
+            // only a negative total_time is rejected.
+            (1, -1, 30),
             (1, 300, 0),
             // The worker parses per-frame scales as signed 32-bit.
             (1, 300, i32::MAX as u32 + 1),

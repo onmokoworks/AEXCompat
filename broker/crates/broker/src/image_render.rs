@@ -4697,11 +4697,10 @@ fn render_with_artifact(
         && gpu_backend == RenderGpuBackend::Auto
         && payload == encode_interactive_payload(interactive_parameters.unwrap_or_default())?
         && std::env::var_os(DISABLE_SESSION_WRAPPER_ENV).is_none()
-        // RenderSession::open rejects total_time <= 0, but the shared timing
-        // validation (RenderTiming::is_valid) admits total_time == 0 at
-        // current_time == 0. Keep such a zero-duration render on the one-shot
-        // path rather than fail-closing it (#264).
-        && timing.total_time > 0
+        // RenderSession::open and the session worker now admit total_time == 0
+        // (the zero-duration t=0 render the one-shot worker also produces), so a
+        // zero-duration render is carried by the session too (#272); no
+        // total_time carve-out remains.
         // RenderSession::open also rejects time_scale > i32::MAX (the worker
         // parses the per-frame scale as signed 32-bit), which is_valid admits.
         // The one-shot worker cannot render it either, so this loses no working
