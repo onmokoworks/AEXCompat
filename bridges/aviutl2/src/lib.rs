@@ -371,7 +371,11 @@ impl AexBridgeFilter {
 
 impl FilterPlugin for AexBridgeFilter {
     fn new(_info: AviUtl2Info) -> AnyResult<Self> {
-        aviutl2::tracing_subscriber::fmt()
+        // `try_init` instead of `init`: setting the global subscriber fails if
+        // one is already installed (the plugin reloaded, or the host set one).
+        // That is not fatal to the bridge, so ignore the error rather than panic
+        // inside `new`.
+        let _ = aviutl2::tracing_subscriber::fmt()
             .with_max_level(if cfg!(debug_assertions) {
                 tracing::Level::DEBUG
             } else {
@@ -379,7 +383,7 @@ impl FilterPlugin for AexBridgeFilter {
             })
             .event_format(aviutl2::logger::AviUtl2Formatter)
             .with_writer(aviutl2::logger::AviUtl2LogWriter)
-            .init();
+            .try_init();
         Ok(Self {
             sessions: Mutex::new(HashMap::new()),
         })
@@ -478,6 +482,20 @@ impl FilterPlugin for AexBridgeFilter {
 
         match render_on(&sender, current_time, rgba) {
             FrameReply::Rendered(frame) => {
+                // A filter object cannot change the image size (AviUtl2 filter
+                // contract). An expand/shrink-output effect (PF_OutFlag_I_*_BUFFER)
+                // returns dimensions different from the object's; pushing those
+                // through `set_image_data` in filter mode is undefined, so reject
+                // the frame and leave the object's pixels instead of resizing.
+                if frame.width != width || frame.height != height {
+                    tracing::warn!(
+                        "AEX resized effect {effect_id} from {width}x{height} to {}x{}; \
+                         a filter object cannot change size, leaving pixels unchanged",
+                        frame.width,
+                        frame.height
+                    );
+                    return Ok(());
+                }
                 video.set_image_data(&frame.pixels, frame.width, frame.height);
                 Ok(())
             }
