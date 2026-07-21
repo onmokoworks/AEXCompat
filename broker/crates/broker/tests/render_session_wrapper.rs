@@ -10,6 +10,7 @@
 mod windows_e2e {
     use aexcompat_broker::image_render::{
         render_experimental_audio, render_experimental_image, render_experimental_image_at_time,
+        render_experimental_smart_image, render_experimental_smart_image_at_time,
         render_experimental_image_at_time_with_format_and_context,
         render_experimental_image_at_time_with_format_context_and_ui_action,
         render_experimental_image_with_parameter_animation, AnimationInterpolation, AnimationTime,
@@ -39,6 +40,124 @@ mod windows_e2e {
     // test's forced one-shot could bleed into the other's session-routing
     // assertion. Serialize the env-sensitive tests.
     static SESSION_ROUTE_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn smart_single_image_matches_the_one_shot_transport() {
+        // A CPU SmartFX single-image render (no layers, no context) is now
+        // carried by the length-1 smart session (#278 stage 1). Prove it renders
+        // byte-identically to the one-shot --smart-image route, for both a normal
+        // frame (t=0) and a legally empty result (the probe answers an empty
+        // result_rect at current_time % 4 == 3), where both routes skip the PNG.
+        let _env_guard = SESSION_ROUTE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let root = repository_root();
+        let worker = root.join("target/minihost-build/aex_smart_worker.exe");
+        let aex = root
+            .join("target/pf-smart-geometry-probe-build/Release/pf_smart_geometry_probe.aex");
+        if !worker.is_file() || !aex.is_file() {
+            eprintln!(
+                "skipping smart A/B: build aex_smart_worker.exe and \
+                 pf_smart_geometry_probe.aex first"
+            );
+            return;
+        }
+        let sha = format!("{:x}", Sha256::digest(std::fs::read(&aex).unwrap()));
+        let scratch = std::env::temp_dir().join(format!(
+            "aexcompat-smart-ab-{}-{:032x}",
+            std::process::id(),
+            rand::random::<u128>()
+        ));
+        std::fs::create_dir_all(&scratch).unwrap();
+        let input = scratch.join("input.png");
+        image::RgbaImage::from_fn(64, 48, |x, y| {
+            image::Rgba([(x * 3) as u8, (y * 5) as u8, (x + y) as u8, 255])
+        })
+        .save(&input)
+        .unwrap();
+
+        let volatile = ["output_png", "output_raw", "worker_diagnostics"];
+        let compare = |report_a: &serde_json::Value, report_b: &serde_json::Value, label: &str| {
+            let mut a = report_a.as_object().expect("report A").clone();
+            let mut b = report_b.as_object().expect("report B").clone();
+            for key in volatile {
+                a.remove(key);
+                b.remove(key);
+            }
+            assert_eq!(
+                a.keys().collect::<Vec<_>>(),
+                b.keys().collect::<Vec<_>>(),
+                "{label}: smart report key sets diverge between the routes"
+            );
+            for (key, value_a) in &a {
+                assert_eq!(
+                    Some(value_a),
+                    b.get(key),
+                    "{label}: smart report field {key} differs between the routes"
+                );
+            }
+        };
+
+        // Case 1: a normal (non-empty) smart frame at t=0.
+        unsafe { std::env::remove_var(DISABLE_SESSION_WRAPPER_ENV) };
+        let before = RENDER_SESSION_WRAPPER_RENDERS.load(Ordering::SeqCst);
+        let out_a = scratch.join("normal-a.png");
+        let report_a = render_experimental_smart_image(&root, &aex, &sha, &input, &out_a, &[])
+            .expect("session-route smart render");
+        assert!(
+            RENDER_SESSION_WRAPPER_RENDERS.load(Ordering::SeqCst) > before,
+            "the smart render must now be carried by the session"
+        );
+        unsafe { std::env::set_var(DISABLE_SESSION_WRAPPER_ENV, "1") };
+        let out_b = scratch.join("normal-b.png");
+        let report_b = render_experimental_smart_image(&root, &aex, &sha, &input, &out_b, &[]);
+        unsafe { std::env::remove_var(DISABLE_SESSION_WRAPPER_ENV) };
+        let report_b = report_b.expect("one-shot smart render");
+        compare(&report_a, &report_b, "normal");
+        assert_eq!(
+            std::fs::read(&out_a).unwrap(),
+            std::fs::read(&out_b).unwrap(),
+            "the smart PNG differs between the routes"
+        );
+
+        // Case 2: a legally empty smart result at t=3 (probe mode EmptyResult).
+        // Neither route writes a PNG; the reports must still match.
+        let empty_timing = RenderTiming {
+            current_time: 3,
+            time_step: 1,
+            total_time: 300,
+            time_scale: 30,
+        };
+        unsafe { std::env::remove_var(DISABLE_SESSION_WRAPPER_ENV) };
+        let empty_before = RENDER_SESSION_WRAPPER_RENDERS.load(Ordering::SeqCst);
+        let empty_a = scratch.join("empty-a.png");
+        let empty_report_a = render_experimental_smart_image_at_time(
+            &root, &aex, &sha, &input, &empty_a, &[], empty_timing,
+        )
+        .expect("session-route empty smart render");
+        assert!(
+            RENDER_SESSION_WRAPPER_RENDERS.load(Ordering::SeqCst) > empty_before,
+            "the empty smart render must be carried by the session"
+        );
+        assert!(
+            !empty_a.exists(),
+            "an empty smart result writes no PNG on the session route"
+        );
+        assert_eq!(
+            empty_report_a.get("empty_result_rect"),
+            Some(&serde_json::Value::Bool(true)),
+            "the session must report the empty result: {empty_report_a}"
+        );
+        unsafe { std::env::set_var(DISABLE_SESSION_WRAPPER_ENV, "1") };
+        let empty_b = scratch.join("empty-b.png");
+        let empty_report_b = render_experimental_smart_image_at_time(
+            &root, &aex, &sha, &input, &empty_b, &[], empty_timing,
+        );
+        unsafe { std::env::remove_var(DISABLE_SESSION_WRAPPER_ENV) };
+        let empty_report_b = empty_report_b.expect("one-shot empty smart render");
+        compare(&empty_report_a, &empty_report_b, "empty");
+        let _ = std::fs::remove_dir_all(&scratch);
+    }
 
     #[test]
     fn wrapper_report_matches_the_one_shot_transport() {
