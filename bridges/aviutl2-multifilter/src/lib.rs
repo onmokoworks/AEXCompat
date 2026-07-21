@@ -16,10 +16,14 @@
 //! Deployed as `.aux2` (generic plugin extension); `.auf2` would make AviUtl2
 //! look for the single-filter `GetFilterPluginTable` export and fail.
 
+use std::collections::HashMap;
 use std::ffi::c_void;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use std::time::Duration;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc::{Sender, channel};
+use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
 
 use aexcompat_broker::image_render::{
     InteractiveParameter, RenderGpuBackend, RenderPixelFormat,
@@ -42,9 +46,21 @@ const REQUIRED_VERSION: u32 = 2010100;
 const ENV_DIR: &str = "AEXCOMPAT_MULTIFILTER_DIR";
 /// Repo root holding the built workers (`target/minihost-build/`).
 const ENV_REPOSITORY: &str = "AEXCOMPAT_MULTIFILTER_REPOSITORY";
-/// Session dimension bounds (mirrors the broker's limits).
-const MAX_DIMENSION: u32 = 16_384;
-const MAX_PIXELS: u64 = 64 * 1024 * 1024;
+/// Session dimension bounds (mirror the broker's `image_render` limits).
+const MAX_DIMENSION: u32 = 4096;
+const MAX_PIXELS: u64 = 16_777_216;
+/// Per-frame watchdog deadline handed to the session (protocol §7).
+const FRAME_DEADLINE_MS: u64 = 30_000;
+/// Idle timeout after which an abandoned effect's session (worker + thread +
+/// shared memory) is reaped. AviUtl2 has no per-effect teardown callback and
+/// `effect_id` is unique per launch, so a deleted/abandoned effect is never
+/// revisited; without reaping its session would leak until DLL unload. Well
+/// above the frame deadline so an in-flight frame is never reaped.
+const SESSION_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
+/// Monotonic instance counter, so a lost session is removed by the exact
+/// instance that failed rather than by `effect_id` alone (a concurrent reopen
+/// may have installed a healthy session at the same id).
+static SESSION_SERIAL: AtomicU64 = AtomicU64::new(0);
 
 /// A null-terminated UTF-16 string leaked for AviUtl2's lifetime (LPCWSTR).
 fn wide_leak(text: &str) -> *const u16 {
@@ -135,23 +151,85 @@ enum ItemReader {
     Color { ptr: *const FILTER_ITEM_COLOR, slot: u32 },
 }
 
-/// A live session pinned to one geometry/time; reopened when the object changes.
-struct SessionSlot {
-    session: RenderSession,
+/// The launch-fixed geometry/time of a session (the AEX identity is fixed per
+/// FilterCtx). A frame whose object geometry or timing differs needs a fresh
+/// session, so this is compared per frame.
+#[derive(Clone, PartialEq, Eq)]
+struct GeomIdentity {
     width: u32,
     height: u32,
     time_step: i32,
     total_time: i32,
     time_scale: u32,
-    /// Monotonic transport serial. The worker rejects a non-advancing
-    /// `frame_index`, so this must strictly increase for the session's life
-    /// regardless of the AE frame being (re-)rendered (paused redraws, backward
-    /// scrubs, parameter edits all re-render the same AE frame). AE time still
-    /// rides `current_time`.
-    frame_serial: u32,
 }
 
-/// Per-filter userdata carried by the libffi closure.
+/// A single validated frame handed back to the AviUtl2 callback thread.
+struct RenderedFrame {
+    pixels: Vec<u8>,
+    width: u32,
+    height: u32,
+}
+
+/// The outcome of one frame, distinguishing a still-usable session from a lost
+/// one so the caller reopens only when necessary.
+enum FrameReply {
+    Rendered(RenderedFrame),
+    /// A frame-local diagnostic; the session stays usable, leave pixels.
+    FrameLocal(i64),
+    /// The session/worker is gone; the caller drops it so the next frame reopens.
+    SessionLost(String),
+}
+
+/// A render request sent to a session's owning thread.
+struct RenderReq {
+    current_time: i32,
+    rgba: Vec<u8>,
+    parameters: Option<Vec<InteractiveParameter>>,
+    reply: Sender<FrameReply>,
+}
+
+/// Handle to a resident session. `RenderSession` is `!Send` (it holds the
+/// shared-memory view pointer), so it stays pinned to `join`'s thread and is
+/// reached only through `tx`. This handle is `Send`, so the per-AEX session map
+/// can live behind a `Mutex` reached from any AviUtl2 callback thread.
+struct MfSession {
+    tx: Option<Sender<RenderReq>>,
+    identity: GeomIdentity,
+    serial: u64,
+    last_used: Instant,
+    join: Option<JoinHandle<()>>,
+}
+
+impl MfSession {
+    fn sender(&self) -> Option<Sender<RenderReq>> {
+        self.tx.clone()
+    }
+}
+
+impl Drop for MfSession {
+    fn drop(&mut self) {
+        // Drop the sender first so the owning thread's `rx.recv()` returns and it
+        // closes the session; joining before disconnecting would deadlock.
+        self.tx = None;
+        if let Some(join) = self.join.take() {
+            let _ = join.join();
+        }
+    }
+}
+
+/// Per-filter userdata carried by the libffi closure. One per registered AEX,
+/// captured by that AEX's single closure and reached as `&FilterCtx` through the
+/// C callback boundary from any AviUtl2 callback thread.
+///
+/// `FilterCtx` is not auto-`Send + Sync` (the `ItemReader`s hold `*const
+/// FILTER_ITEM_*` raw pointers, which are `!Sync`), and no `unsafe impl` claims
+/// otherwise — the C boundary erases the check. Sharing it across threads is
+/// nonetheless sound because: the only genuinely thread-unsafe state, the
+/// `!Send` `RenderSession`, never leaves its owning session thread (only the
+/// `Send` `Sender<RenderReq>` crosses threads); the session map is behind a
+/// `Mutex`; and the raw item pointers address leaked `'static` (process-global)
+/// memory that is only ever read in `apply_readers`, on the calling AviUtl2
+/// thread. Do not move `readers`/`apply_readers` onto the session thread.
 struct FilterCtx {
     repository: PathBuf,
     plugin: PathBuf,
@@ -161,9 +239,9 @@ struct FilterCtx {
     defaults: Vec<InteractiveParameter>,
     /// Readers pulling each frame's current config value into the parameters.
     readers: Vec<ItemReader>,
-    /// The live session, reopened on geometry/time change. Mutex serializes the
-    /// blocking worker round-trip across concurrent proc_video calls.
-    session: Mutex<Option<SessionSlot>>,
+    /// Live sessions keyed by AviUtl2 `effect_id`, so two objects of the same
+    /// AEX filter each get their own session/worker (no cross-object thrash).
+    sessions: Mutex<HashMap<i64, MfSession>>,
 }
 
 fn register_aex(host: *mut HOST_APP_TABLE, repository: &Path, plugin: &Path) {
@@ -208,7 +286,7 @@ fn register_aex(host: *mut HOST_APP_TABLE, repository: &Path, plugin: &Path) {
         smart,
         defaults,
         readers,
-        session: Mutex::new(None),
+        sessions: Mutex::new(HashMap::new()),
     }));
 
     let cif = Cif::new([Type::pointer()], Type::u8());
@@ -404,107 +482,303 @@ fn render_frame(ctx: &FilterCtx, video: *mut FILTER_PROC_VIDEO) -> bool {
         Some(values)
     };
 
-    let mut guard = match ctx.session.lock() {
-        Ok(guard) => guard,
-        Err(_) => return false,
-    };
-    // Reuse a session matching this geometry/time, else (re)open.
-    let matches = guard.as_ref().is_some_and(|slot| {
-        slot.width == width
-            && slot.height == height
-            && slot.time_step == time_step
-            && slot.total_time == total_time
-            && slot.time_scale == time_scale
-    });
-    if !matches {
-        *guard = None; // drop the stale session before opening a new one
-        match open_session(ctx, width, height, time_step, total_time, time_scale) {
-            Ok(slot) => *guard = Some(slot),
-            Err(_) => return false,
-        }
-    }
-    let slot = guard.as_mut().expect("session set above");
-    let serial = slot.frame_serial;
+    let effect_id = unsafe { (*object).effect_id };
+    let identity = GeomIdentity { width, height, time_step, total_time, time_scale };
 
-    match slot.session.render_frame_with_parameters(
-        serial,
-        current_time,
-        &rgba,
-        parameters.as_deref(),
-    ) {
-        Ok(outcome) => {
-            // Advance the transport serial only on a delivered frame, so the next
-            // render (even of the same AE frame) is accepted as advancing.
-            slot.frame_serial = serial.wrapping_add(1);
-            match outcome.status {
-                FrameStatus::Rendered { pixels, width: out_w, height: out_h, .. } => {
-                    // A filter object cannot change the image size.
-                    if out_w != width || out_h != height {
-                        return true; // leave pixels unchanged
-                    }
-                    let out = bytes_to_pixels(&pixels);
-                    if out.len() == count {
-                        unsafe {
-                            ((*video).set_image_data)(out.as_ptr(), width as i32, height as i32)
-                        };
-                    }
-                    true
-                }
-                FrameStatus::FrameError { .. } => true, // keep session, leave pixels
+    // Reuse a live matching session, else open one outside the map lock (open
+    // blocks for seconds spawning the worker). The blocking render round-trip
+    // below runs off-lock too, so concurrent objects/threads never serialize on
+    // the map.
+    let (tx, serial) = match existing_sender(&ctx.sessions, effect_id, &identity) {
+        Some(pair) => pair,
+        None => match open_and_get_sender(ctx, effect_id, &identity) {
+            Ok(pair) => pair,
+            Err(_) => return false,
+        },
+    };
+
+    match render_on(&tx, current_time, rgba, parameters) {
+        FrameReply::Rendered(frame) => {
+            // A filter object cannot change the image size; reject a resized frame.
+            if frame.width != width || frame.height != height {
+                return true;
             }
+            let out = bytes_to_pixels(&frame.pixels);
+            if out.len() == count {
+                unsafe { ((*video).set_image_data)(out.as_ptr(), width as i32, height as i32) };
+            }
+            true
         }
-        Err(_) => {
-            *guard = None; // invalidate on transport failure
-            false
+        // Keep the session; leave this frame's pixels.
+        FrameReply::FrameLocal(_) => true,
+        FrameReply::SessionLost(_) => {
+            // Drop this exact instance so the next frame reopens, without
+            // disturbing a healthy session a concurrent reopen may have installed.
+            remove_session(&ctx.sessions, effect_id, serial);
+            true
         }
     }
 }
 
-fn open_session(
+/// The owned launch config moved into a session's thread.
+struct MfSessionConfig {
+    repository: PathBuf,
+    plugin: PathBuf,
+    sha: String,
+    smart: bool,
+    defaults: Vec<InteractiveParameter>,
+    identity: GeomIdentity,
+}
+
+/// Opens a session on its own thread, which owns the `!Send` `RenderSession` and
+/// serves render requests until the channel closes or the session is lost.
+fn open_mf_session(config: MfSessionConfig) -> Result<MfSession, String> {
+    let identity = config.identity.clone();
+    let (tx, rx) = channel::<RenderReq>();
+    let (open_tx, open_rx) = channel::<Result<(), String>>();
+
+    let join = std::thread::Builder::new()
+        .name("aex-multifilter-session".into())
+        .spawn(move || {
+            let baseline = (!config.defaults.is_empty()).then_some(&config.defaults[..]);
+            let mut session = match RenderSession::open(SessionOpenRequest {
+                repository: &config.repository,
+                plugin_path: &config.plugin,
+                plugin_sha256: &config.sha,
+                parameters: baseline,
+                parameter_animation: None,
+                aux_manifest: None,
+                world_dump_dir: None,
+                output_checksum_detail: false,
+                mask_trailer: None,
+                spatial_trailer: None,
+                render_environment_trailer: None,
+                alpha_as_coverage_params: &[],
+                conformance_render_settings: None,
+                layers: &[],
+                dependencies: Vec::new(),
+                width: config.identity.width,
+                height: config.identity.height,
+                pixel_format: RenderPixelFormat::Argb8,
+                time_step: config.identity.time_step,
+                total_time: config.identity.total_time,
+                time_scale: config.identity.time_scale,
+                frame_deadline: Duration::from_millis(FRAME_DEADLINE_MS),
+                smart: config.smart,
+                gpu_backend: RenderGpuBackend::Auto,
+                gpu_runtime_policy: None,
+            }) {
+                Ok(session) => session,
+                Err(error) => {
+                    let _ = open_tx.send(Err(format!("RenderSession::open failed: {error}")));
+                    return;
+                }
+            };
+            if open_tx.send(Ok(())).is_err() {
+                let _ = session.close();
+                return;
+            }
+
+            // `frame_index` is a transport serial for the worker's non-advancing
+            // check, decoupled from AviUtl2's `object.frame` (the host re-renders
+            // and scrubs the same frame); AE time rides `current_time`.
+            let mut frame_index: u32 = 0;
+            while let Ok(req) = rx.recv() {
+                let outcome = session.render_frame_with_parameters(
+                    frame_index,
+                    req.current_time,
+                    &req.rgba,
+                    req.parameters.as_deref(),
+                );
+                frame_index = frame_index.wrapping_add(1);
+                let reply = match outcome {
+                    Ok(outcome) => match outcome.status {
+                        FrameStatus::Rendered { pixels, width, height, .. } => {
+                            FrameReply::Rendered(RenderedFrame { pixels, width, height })
+                        }
+                        FrameStatus::FrameError { render_error } => {
+                            FrameReply::FrameLocal(render_error)
+                        }
+                    },
+                    Err(error) => FrameReply::SessionLost(format!("render_frame failed: {error}")),
+                };
+                // A host-protection invariant failure invalidates the whole
+                // session; report it lost so the next frame reopens.
+                let reply = if session.invalidation().is_some() {
+                    FrameReply::SessionLost(match reply {
+                        FrameReply::SessionLost(message) => message,
+                        FrameReply::FrameLocal(code) => {
+                            format!("session invalidated (render_error {code})")
+                        }
+                        FrameReply::Rendered(_) => "session invalidated".to_string(),
+                    })
+                } else {
+                    reply
+                };
+                let lost = matches!(reply, FrameReply::SessionLost(_));
+                let _ = req.reply.send(reply);
+                if lost {
+                    break;
+                }
+            }
+            let _ = session.close();
+        })
+        .map_err(|error| format!("failed to spawn session thread: {error}"))?;
+
+    match open_rx.recv() {
+        Ok(Ok(())) => Ok(MfSession {
+            tx: Some(tx),
+            identity,
+            serial: SESSION_SERIAL.fetch_add(1, Ordering::Relaxed),
+            last_used: Instant::now(),
+            join: Some(join),
+        }),
+        Ok(Err(message)) => {
+            let _ = join.join();
+            Err(message)
+        }
+        Err(_) => {
+            let _ = join.join();
+            Err("session thread exited before reporting open result".into())
+        }
+    }
+}
+
+/// Renders one frame by round-tripping through a session's owning thread, with
+/// no map lock held.
+fn render_on(
+    tx: &Sender<RenderReq>,
+    current_time: i32,
+    rgba: Vec<u8>,
+    parameters: Option<Vec<InteractiveParameter>>,
+) -> FrameReply {
+    let (reply_tx, reply_rx) = channel();
+    if tx
+        .send(RenderReq { current_time, rgba, parameters, reply: reply_tx })
+        .is_err()
+    {
+        return FrameReply::SessionLost("session thread is gone".to_string());
+    }
+    match reply_rx.recv() {
+        Ok(reply) => reply,
+        Err(_) => FrameReply::SessionLost("session thread dropped the reply".to_string()),
+    }
+}
+
+type SessionMap = Mutex<HashMap<i64, MfSession>>;
+
+/// Returns the sender + serial of a live session matching `identity`, refreshing
+/// its `last_used`, or `None` to open one. A mismatched session (object resized/
+/// retimed) is evicted; the eviction is dropped after the lock is released.
+fn existing_sender(
+    sessions: &SessionMap,
+    effect_id: i64,
+    identity: &GeomIdentity,
+) -> Option<(Sender<RenderReq>, u64)> {
+    let mut evicted: Option<MfSession> = None;
+    let result;
+    {
+        let Ok(mut map) = sessions.lock() else {
+            return None;
+        };
+        match map.get_mut(&effect_id) {
+            Some(session) if &session.identity == identity => {
+                session.last_used = Instant::now();
+                result = session.sender().map(|tx| (tx, session.serial));
+            }
+            Some(_) => {
+                evicted = map.remove(&effect_id);
+                result = None;
+            }
+            None => result = None,
+        }
+    }
+    drop(evicted);
+    result
+}
+
+/// Opens a session off-lock, then installs it under a brief lock. If another
+/// thread won the race, keeps that one and drops ours off-lock. Reaps idle
+/// sessions opportunistically.
+fn open_and_get_sender(
     ctx: &FilterCtx,
-    width: u32,
-    height: u32,
-    time_step: i32,
-    total_time: i32,
-    time_scale: u32,
-) -> Result<SessionSlot, ()> {
-    let session = RenderSession::open(SessionOpenRequest {
-        repository: &ctx.repository,
-        plugin_path: &ctx.plugin,
-        plugin_sha256: &ctx.sha,
-        parameters: (!ctx.defaults.is_empty()).then_some(&ctx.defaults[..]),
-        parameter_animation: None,
-        aux_manifest: None,
-        world_dump_dir: None,
-        output_checksum_detail: false,
-        mask_trailer: None,
-        spatial_trailer: None,
-        render_environment_trailer: None,
-        alpha_as_coverage_params: &[],
-        conformance_render_settings: None,
-        layers: &[],
-        dependencies: Vec::new(),
-        width,
-        height,
-        pixel_format: RenderPixelFormat::Argb8,
-        time_step,
-        total_time,
-        time_scale,
-        frame_deadline: Duration::from_millis(30_000),
+    effect_id: i64,
+    identity: &GeomIdentity,
+) -> Result<(Sender<RenderReq>, u64), String> {
+    let opened = open_mf_session(MfSessionConfig {
+        repository: ctx.repository.clone(),
+        plugin: ctx.plugin.clone(),
+        sha: ctx.sha.clone(),
         smart: ctx.smart,
-        gpu_backend: RenderGpuBackend::Auto,
-        gpu_runtime_policy: None,
-    })
-    .map_err(|_| ())?;
-    Ok(SessionSlot {
-        session,
-        width,
-        height,
-        time_step,
-        total_time,
-        time_scale,
-        frame_serial: 0,
-    })
+        defaults: ctx.defaults.clone(),
+        identity: identity.clone(),
+    })?;
+    let serial = opened.serial;
+    let mut discard: Vec<MfSession> = Vec::new();
+    let sender;
+    {
+        let mut map = ctx
+            .sessions
+            .lock()
+            .map_err(|_| "session map poisoned".to_string())?;
+
+        let now = Instant::now();
+        let expired: Vec<i64> = map
+            .iter()
+            .filter(|(_, session)| now.duration_since(session.last_used) > SESSION_IDLE_TIMEOUT)
+            .map(|(id, _)| *id)
+            .collect();
+        for id in expired {
+            if let Some(session) = map.remove(&id) {
+                discard.push(session);
+            }
+        }
+
+        match map
+            .get(&effect_id)
+            .filter(|session| &session.identity == identity)
+            .and_then(|session| session.sender().map(|tx| (tx, session.serial)))
+        {
+            // Lost the race; keep the installed session, discard ours. No clone of
+            // `opened`'s channel is taken here, so the off-lock drop/join cannot
+            // wait on a stray sender that outlives it.
+            Some(existing) => {
+                discard.push(opened);
+                sender = existing;
+            }
+            None => {
+                let tx = opened
+                    .sender()
+                    .expect("a freshly opened session has a live sender");
+                if let Some(old) = map.insert(effect_id, opened) {
+                    discard.push(old);
+                }
+                sender = (tx, serial);
+            }
+        }
+    }
+    drop(discard);
+    Ok(sender)
+}
+
+/// Removes and drops the session at `effect_id` matching `serial` (dropped
+/// off-lock). Matching on serial avoids dropping a healthy session a concurrent
+/// reopen installed at the same id.
+fn remove_session(sessions: &SessionMap, effect_id: i64, serial: u64) {
+    let removed = {
+        let Ok(mut map) = sessions.lock() else {
+            return;
+        };
+        if map
+            .get(&effect_id)
+            .is_some_and(|session| session.serial == serial)
+        {
+            map.remove(&effect_id)
+        } else {
+            None
+        }
+    };
+    drop(removed);
 }
 
 /// Reads each item's current (keyframed) value into the matching parameter.
