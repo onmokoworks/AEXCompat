@@ -4721,13 +4721,28 @@ fn render_with_artifact(
             //   - Argb32f Auto with a policy / explicit GPU backends: the GPU
             //     session path is unreached (no policy producer exists); defer
             //     to the GPU session stage (#290).
-            secondaries.is_empty()
-                && timed_secondaries.is_empty()
-                && host_context.is_none()
-                && ((gpu_backend == RenderGpuBackend::Cpu
-                    && pixel_format == RenderPixelFormat::Argb32f)
-                    || (gpu_backend == RenderGpuBackend::Auto
-                        && gpu_runtime_policy.is_none()))
+            // Static context trailers (host_context) are still not carried by
+            // smart sessions; secondary layers now are (issue #294).
+            host_context.is_none()
+                && if secondaries.is_empty() && timed_secondaries.is_empty() {
+                    (gpu_backend == RenderGpuBackend::Cpu
+                        && pixel_format == RenderPixelFormat::Argb32f)
+                        || (gpu_backend == RenderGpuBackend::Auto
+                            && gpu_runtime_policy.is_none())
+                } else {
+                    // Smart layered: admit Argb8/Argb16 under Auto only. The
+                    // one-shot layered arms (--smart-image*-layer) are Auto-only
+                    // and for these depths the worker's gpu_negotiation is false
+                    // (it requires float32), so both routes render on CPU.
+                    // Argb32f layered stays on one-shot: gpu_initial_attempt is
+                    // false when layers are present, so the broker does not fold
+                    // it to CPU, and a GPU-declaring float32 plug-in would
+                    // negotiate GPU in the worker on the one-shot route, which a
+                    // CPU-folded session cannot reproduce (issue #296 review).
+                    gpu_backend == RenderGpuBackend::Auto
+                        && gpu_runtime_policy.is_none()
+                        && pixel_format != RenderPixelFormat::Argb32f
+                }
         } else {
             gpu_backend == RenderGpuBackend::Auto
         };

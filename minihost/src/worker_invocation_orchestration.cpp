@@ -278,7 +278,7 @@ SmartRenderSessionOutcome run_smart_render_session(
     std::array<std::byte, kOutSize>& output, const RequestedAssignments* requested,
     const std::string& case_id, int32_t max_width, int32_t max_height,
     int32_t time_step, int32_t total_time, uint32_t time_scale,
-    int32_t pixel_bytes);
+    int32_t pixel_bytes, const std::vector<ExternalLayerInput>* external_layers);
 
 template <typename T, std::size_t N>
 T read(const std::array<std::byte, N>& bytes, std::size_t offset) {
@@ -563,7 +563,8 @@ SmartFinalDispatchResult run_smart_final_dispatch(const FinalDispatchRequest& re
           entry, input, output, &invocation.requested_parameters, case_id,
           invocation.external_width, invocation.external_height,
           invocation.external_time_step, invocation.external_total_time,
-          invocation.external_time_scale, invocation.external_pixel_bytes);
+          invocation.external_time_scale, invocation.external_pixel_bytes,
+          invocation.external_layers.empty() ? nullptr : &invocation.external_layers);
       smart = outcome.last;
       // The report's guard verdict is the session-level one: a per-frame
       // guard violation invalidated the session (exit 24), and an empty
