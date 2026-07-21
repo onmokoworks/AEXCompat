@@ -450,7 +450,9 @@ def build_report(input_path: Path) -> dict[str, Any]:
         "publication_status": "local-only",
         "report_kind": "aex_pipl_identity",
         "generated_at_utc": datetime.now(timezone.utc).isoformat(),
-        "input_root": str(input_path),
+        # Only the leaf name of the scanned root; never the caller's absolute
+        # filesystem path (per-entry relative_path carries the useful identity).
+        "input_root": input_path.name,
         "aex_count": len(entries),
         "classification_counts": dict(sorted(class_counts.items())),
         "native_load_performed": False,

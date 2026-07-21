@@ -7,6 +7,7 @@ decode without any real .aex file, DLL load, or After Effects invocation.
 
 from __future__ import annotations
 
+import json
 import struct
 import sys
 from pathlib import Path
@@ -203,6 +204,17 @@ def test_duplicate_kind_is_invalid():
 def test_missing_kind_is_invalid():
     payload = _payload([_property("8664", b"EffectMain\x00")])
     assert ident._classify([ident.parse_pipl_payload(payload)]) == "invalid_pipl"
+
+
+def test_report_input_root_is_redacted(tmp_path):
+    # The report must not serialize the caller's absolute filesystem path.
+    scan_dir = tmp_path / "plugins"
+    scan_dir.mkdir()
+    report = ident.build_report(scan_dir)
+    assert report["input_root"] == "plugins"
+    assert ":" not in report["input_root"]
+    assert "/" not in report["input_root"] and "\\" not in report["input_root"]
+    assert str(tmp_path) not in json.dumps(report)
 
 
 def test_classify_invalid_when_any_record_invalid():
