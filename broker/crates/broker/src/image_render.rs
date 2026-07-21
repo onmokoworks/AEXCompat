@@ -4738,7 +4738,9 @@ fn render_with_artifact(
                     "the resident render session could not carry this render ({reason}); the \
                      automatic one-shot fallback is disabled. Diagnose the session failure, or \
                      set {DISABLE_SESSION_WRAPPER_ENV}=1 to force the one-shot transport for \
-                     this render."
+                     this render. Any world-dump snapshots from the failed session are preserved \
+                     for diagnosis; clear the dump directory before re-running, since it must \
+                     start empty."
                 )));
             }
         }
@@ -5409,15 +5411,12 @@ fn render_classic_via_length_one_session(
             return SessionWrapperOutcome::Fallback(format!("session open failed: {error}"));
         }
     };
-    // The session attempt may dump snapshots before failing, and the one-shot
-    // rerun's resolver requires a fresh directory; clear our own snapshot files
-    // before reporting the failure, the same way the GPU retry path does.
-    let fallback_with_clean_dumps = |dump: &Option<WorldDumpDir>, reason: String| {
-        if let Some(dump) = dump {
-            let _ = clear_world_dump_files(&dump.path);
-        }
-        SessionWrapperOutcome::Fallback(reason)
-    };
+    // Fail-closed diagnostics (#264): the session may have written world-dump
+    // snapshots before failing. When a one-shot retry followed a Fallback we
+    // cleared them (the one-shot resolver requires a fresh directory); now a
+    // Fallback becomes a fail-closed error with no retry, so the snapshots are
+    // exactly the evidence the user needs to investigate the session failure.
+    // Preserve them: return the Fallback without clearing the dump directory.
     let outcome = match session.render_frame_with_attributes(
         0,
         request.timing.current_time,
@@ -5430,7 +5429,7 @@ fn render_classic_via_length_one_session(
         Err(error) => {
             let reason = format!("the render session was invalidated: {error}");
             let _ = session.close();
-            return fallback_with_clean_dumps(&world_dump_dir, reason);
+            return SessionWrapperOutcome::Fallback(reason);
         }
     };
     // An expand-output effect that overran the launch slot no longer surfaces
@@ -5442,15 +5441,13 @@ fn render_classic_via_length_one_session(
     if close.get("session_clean") != Some(&Value::Bool(true))
         || close.get("invalidated") != Some(&Value::Bool(false))
     {
-        return fallback_with_clean_dumps(
-            &world_dump_dir,
+        return SessionWrapperOutcome::Fallback(
             "the render session did not close cleanly".into(),
         );
     }
     let Some(final_report) = close.get("final_report").filter(|value| value.is_object()).cloned()
     else {
-        return fallback_with_clean_dumps(
-            &world_dump_dir,
+        return SessionWrapperOutcome::Fallback(
             "the render session close carried no final report".into(),
         );
     };
