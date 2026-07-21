@@ -114,6 +114,26 @@ match="ADBE SDK_Backwards", CodeWin64X86="EffectMain", kind=eFKT(Effect)。
   vcvars64 を取り込んで cl を有効化する。canonical パス `target\minihost-build` に flat 配置で
   全 worker を生成 (discovery テストの探索先)。
 
+## End-to-end 検証 (broker inspect, 2026-07-21)
+
+broker harness (`aexcompat-harness`, release ビルド) の `--inspect-experimental` を
+worktree の built worker (`target/minihost-build`) 経由で実行:
+- ColorGrid.aex (Effect): PiPL 経由で EffectMain を発見し PARAMS_SETUP 実行、
+  パラメータ ("Color Grid" arbitrary_data) 取得成功。→ 受け入れ基準3 (SDK Effect 経路維持)。
+- Grabba.aex (Kind=AEGP): worker が `exit_code:12` / `plugin_kind:"aegp_candidate"` で
+  fail-closed、selector stage 実行ゼロ。→ 受け入れ基準4 (AEGP を Effect selector に渡さない)。
+
+注意: フィクスチャは main repo 側 `target/sdk-fixtures/` にあり worktree には無いので絶対パス指定。
+harness の repository ルートは exe の 4 親 = worktree なので built worker を正しく解決する。
+
+## クロージャ状況
+
+- 実装 (Phase A/B) + 検証可能な受け入れ基準 (3/4) 完了。docs/PIPL_ENTRYPOINT_DISCOVERY_2026-07-21.md。
+- **残る外部ゲート**: (a) OLM/Rowbyte corpus と 5-AEX matrix 再実行 (基準1/2/6) は実 corpus が
+  checkout に無く不可、(b) マージは Codex レビュー (2026-07-20 制限到達) + owner レビュー必須。
+- self-authored の loadable AEX fixture (小文字/任意名/複数PiPL/kind不一致) はパースロジックを
+  C++ 合成 self-test + Python 14 テストで担保済み。実 .aex 化は SDK ビルドを要し未実施。
+
 ## 制約 / 注意
 
 - 最終マージは CLAUDE.md 上 Codex レビューループ + owner レビューが前提。Codex は 2026-07-20 に
