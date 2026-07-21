@@ -1,0 +1,26 @@
+[package]
+name = "aexcompat-aviutl2-bridge"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+publish = false
+description = "AviUtl2 filter plugin bridge driving an AEXCompat resident RenderSession (issue #269)"
+
+# A standalone crate, intentionally NOT a member of the broker workspace: the
+# `aviutl2` dependency tree must not enter the broker's `cargo test --workspace`
+# gate. The broker library is pulled in by path only.
+[lib]
+name = "aexcompat_aviutl2_bridge"
+crate-type = ["cdylib"]
+
+[dependencies]
+# The AEXCompat broker, driven as an in-process library. RenderSession::open
+# spawns the isolated worker subprocess, so the untrusted AEX stays
+# out-of-process (crash containment preserved) even though this plugin is
+# loaded in-process by AviUtl2.
+aexcompat-broker = { path = "../../broker/crates/broker" }
+# AviUtl2 filter plugin bindings (.auf2). Pinned to the workspace-tested
+# release; the crate's API moves fast, so bumps are deliberate.
+aviutl2 = "0.40"
+zerocopy = "0.8"
+sha2 = "0.10"
