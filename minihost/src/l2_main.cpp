@@ -1597,6 +1597,19 @@ bool parse_l2_conformance_render_settings(void*, const wchar_t* value) {
   return aexcompat::worker_render_report::parse_conformance_render_settings(value);
 }
 
+// Captures the sealed AEXRMA1 manifest basename carried by a GPU render's
+// `--runtime-module-authorization-v1` trailer (#290/#300). The render/smart
+// worker must parse the manifest just like the params-inspect path so the GPU
+// runtime DLLs it loads classify as authorized `policy` modules instead of
+// `unknown` in the required module audit. Stored in a global because the
+// auxiliary-option hook runs during request parsing, before runtime admission.
+std::wstring g_gpu_runtime_authorization_basename;
+bool capture_l2_runtime_module_authorization(void*, const wchar_t* value) {
+  if (!value || !*value) return false;
+  g_gpu_runtime_authorization_basename = value;
+  return true;
+}
+
 bool __cdecl scene_render_receipt_enabled() {
   return is_render_worker() && aexcompat::aegp_layer_render_runtime::active();
 }
@@ -1772,14 +1785,36 @@ int worker_main_impl(int argc, wchar_t **argv) {
                               : backend == 3 ? 4
                                              : 0;
     if (framework == 0) return 75;
-    if (!tp::begin_backend_context(framework, 0)) return 76;
+    // Load the plug-in and run the DLL-load module audit across the GPU lifecycle,
+    // exactly like a sealed render worker: the broker's secure dispatch requires a
+    // passing `module_audit` (non-empty worker+plugin sets, >= 3 phases, zero
+    // unknowns) on every ok worker, so the preflight must produce one alongside the
+    // classified GPU report. The GPU runtime's DriverStore modules classify as
+    // `policy` only when the authorization manifest lists them, so the audit passes
+    // exactly when the policy enumerates the GPU DLL closure (#300).
+    SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_SYSTEM32 | LOAD_LIBRARY_SEARCH_USER_DIRS);
+    HMODULE plugin = LoadLibraryExW(plugin_path.c_str(), nullptr,
+        LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32);
+    if (!plugin) return 78;
+    aexcompat::worker_runtime::ModuleAuditReport& audit = wr::module_audit_report();
+    audit.required = true;
+    audit.plugin_path = plugin_path;
+    audit.post_load = wr::capture_module_audit();  // phase 1: pre-GPU baseline
+    if (!tp::begin_backend_context(framework, 0)) {
+      FreeLibrary(plugin);
+      return 76;
+    }
+    wr::capture_module_audit_phase();  // phase 2: GPU runtime DLLs loaded
     const std::string report = wr::gpu_module_report_json();
+    audit.pre_unload = wr::capture_module_audit();  // phase 3: pre-teardown
     tp::end_backend_context(framework);
-    // An empty report means the enumeration could not be trusted or no
-    // authorized module actually loaded; fail closed rather than emit a report
-    // that would authenticate nothing.
+    FreeLibrary(plugin);
+    // An empty report means the enumeration could not be trusted or no authorized
+    // module actually loaded; fail closed rather than emit a report that would
+    // authenticate nothing. The broker re-validates the module_audit separately.
     if (report.empty()) return 77;
-    std::cout << report << "\n";
+    std::cout << "{\"module_audit\":" << wr::module_audit_json()
+              << ",\"gpu_module_report\":" << report << "}\n";
     return 0;
   }
   if (const auto selftest_exit = dispatch_worker_selftests(argc, argv))
@@ -1818,7 +1853,8 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
       aexcompat::worker_runtime::request_parser::Kind::Render, argc, argv,
       {{nullptr, set_l2_dump_worlds_dir, enable_l2_checksum_detail,
         load_l2_aux_manifest, parse_l2_alpha_coverage, load_l2_parameter_animation,
-        parse_l2_conformance_render_settings},
+        parse_l2_conformance_render_settings,
+        capture_l2_runtime_module_authorization},
        &parse_layer_transport_key, &parse_mask_context_payload,
        &parse_spatial_context_payload, &parse_render_environment_payload,
        &invocation.requested_parameters, parse_requested_payload, &configure_mask_scene});
@@ -1830,7 +1866,8 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
         aexcompat::worker_runtime::request_parser::Kind::Smart, argc, argv,
         {{nullptr, set_l2_dump_worlds_dir, enable_l2_checksum_detail,
           load_l2_aux_manifest, parse_l2_alpha_coverage, load_l2_parameter_animation,
-          parse_l2_conformance_render_settings},
+          parse_l2_conformance_render_settings,
+        capture_l2_runtime_module_authorization},
          &parse_layer_transport_key, &parse_mask_context_payload,
          &parse_spatial_context_payload, &parse_render_environment_payload,
          &invocation.requested_parameters, parse_requested_payload, &configure_mask_scene});
@@ -1863,9 +1900,22 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
   RuntimeHostHooks runtime_hooks{&sha256, &redirect_native_stdout,
                                  &restore_native_stdout};
   RuntimeAdmissionRequest runtime_request;
+  // A GPU render carries the AEXRMA1 manifest as a `--runtime-module-authorization-v1`
+  // trailer (captured above during request parsing); the render/smart worker must
+  // parse it so the GPU runtime DLLs classify as authorized `policy` modules in the
+  // required module audit instead of `unknown` (#290/#300). The params-inspect path
+  // keeps its argv[5] convention.
+  const bool render_gpu_authorization =
+      is_rendering_worker() && !g_gpu_runtime_authorization_basename.empty();
+  const bool authorize_runtime_modules =
+      render_gpu_authorization ||
+      (!is_rendering_worker() && invocation.runtime_module_authorization_mode);
+  const wchar_t* authorization_basename =
+      render_gpu_authorization  ? g_gpu_runtime_authorization_basename.c_str()
+      : invocation.runtime_module_authorization_mode ? argv[5]
+                                                     : nullptr;
   const int request_error = aexcompat::worker_runtime::prepare_runtime_request(
-      argv[2], argv[3], !is_rendering_worker() && invocation.runtime_module_authorization_mode,
-      invocation.runtime_module_authorization_mode ? argv[5] : nullptr, runtime_request);
+      argv[2], argv[3], authorize_runtime_modules, authorization_basename, runtime_request);
   if (request_error != 0) return request_error;
   std::unique_ptr<aexcompat::TraceWriter> trace_writer;
   RuntimeContext runtime_context;

@@ -131,7 +131,7 @@ fn dispatch_approved_image_with_dependencies(
     })
 }
 
-struct RuntimeAuthorizationTransport {
+pub(crate) struct RuntimeAuthorizationTransport {
     path: PathBuf,
     artifact: ApprovedImageArtifact,
     basename: String,
@@ -142,13 +142,26 @@ struct RuntimeAuthorizationTransport {
     session_identity: [u8; 32],
 }
 
+impl RuntimeAuthorizationTransport {
+    /// The sealed manifest basename to pass as the worker's
+    /// `--runtime-module-authorization-v1` trailer.
+    pub(crate) fn basename(&self) -> &str {
+        &self.basename
+    }
+
+    /// The manifest as a sealed dependency for the worker's load tree.
+    pub(crate) fn artifact(&self) -> ApprovedImageArtifact {
+        self.artifact.clone()
+    }
+}
+
 impl Drop for RuntimeAuthorizationTransport {
     fn drop(&mut self) {
         let _ = fs::remove_file(&self.path);
     }
 }
 
-fn prepare_runtime_authorization_transport(
+pub(crate) fn prepare_runtime_authorization_transport(
     repository: &Path,
     policy: &RuntimeModulePolicy,
     backend: RuntimeBackend,
@@ -281,20 +294,27 @@ pub fn prepare_gpu_runtime_policy(
             isolated.classification.as_str()
         )));
     }
-    let module_report_json = isolated.stdout.trim().as_bytes().to_vec();
-    if module_report_json.is_empty() {
+    let stdout = isolated.stdout.trim();
+    if stdout.is_empty() {
         return Err(invalid("GPU module-audit preflight produced no report"));
     }
-    // Defense in depth: a report with an empty `modules` array authenticates
-    // vacuously (zero modules to validate), so reject it here regardless of the
-    // worker's own guarantee. A valid preflight loaded at least one authorized
-    // module (the manifest carries at least one for the backend).
-    let report_value: Value = serde_json::from_slice(&module_report_json).map_err(|error| {
+    // The preflight prints a combined report: the DLL-load `module_audit` the
+    // secure dispatch already validated (require_module_audit), plus the
+    // classified `gpu_module_report` this producer authenticates. Extract the
+    // latter and authenticate it on its own.
+    let combined: Value = serde_json::from_slice(stdout.as_bytes()).map_err(|error| {
         invalid(format!(
             "GPU module-audit preflight report is not valid JSON: {error}"
         ))
     })?;
-    if !report_value
+    let report = combined.get("gpu_module_report").ok_or_else(|| {
+        invalid("GPU module-audit preflight output is missing the gpu_module_report")
+    })?;
+    // Defense in depth: a report with an empty `modules` array authenticates
+    // vacuously (zero modules to validate), so reject it here regardless of the
+    // worker's own guarantee. A valid preflight loaded at least one authorized
+    // module (the manifest carries at least one for the backend).
+    if !report
         .get("modules")
         .and_then(Value::as_array)
         .is_some_and(|modules| !modules.is_empty())
@@ -303,6 +323,9 @@ pub fn prepare_gpu_runtime_policy(
             "GPU module-audit preflight reported no authorized modules",
         ));
     }
+    let module_report_json = serde_json::to_vec(report).map_err(|error| {
+        invalid(format!("could not re-serialize the GPU module report: {error}"))
+    })?;
     let system32 = canonical_system32()?;
     // Fail-fast: the render path re-authenticates before dispatch, but validate
     // here too so a mismatched policy/report surfaces at prepare time.
@@ -5197,15 +5220,6 @@ fn render_with_artifact(
     }
     let mut args_before_plugin = vec![command.into()];
     let started = Instant::now();
-    let initial_dispatch = SecureImageDispatch {
-        repository,
-        worker_kind,
-        plugin: plugin.clone(),
-        dependencies: dependencies.clone(),
-        args_before_plugin: &args_before_plugin,
-        args_after_plugin: &args_after_plugin,
-        timeout: Duration::from_millis(timeout_ms),
-    };
     let gpu_initial_attempt = smart
         && pixel_format == RenderPixelFormat::Argb32f
         && secondaries.is_empty()
@@ -5216,6 +5230,35 @@ fn render_with_artifact(
         && smart
         && pixel_format == RenderPixelFormat::Argb32f
         && gpu_initial_attempt;
+    // A GPU render carries its authenticated policy's modules to the worker as an
+    // AEXRMA1 manifest (#300) so the GPU runtime DLLs classify as authorized
+    // `policy` in the required module audit instead of `unknown`. Added before the
+    // initial dispatch so it is sealed for it; a CPU fallback dispatch reuses the
+    // same args (a harmless no-op, since no GPU DLL loads there). The transport
+    // lives to the end of this render, past every dispatch that seals it.
+    let mut dependencies = dependencies;
+    let _runtime_authorization = match (gpu_initial_attempt, gpu_runtime_policy) {
+        (true, Some(policy_input)) => {
+            let backend =
+                runtime_backend(gpu_backend).expect("GPU attempt has a runtime backend");
+            let transport =
+                prepare_runtime_authorization_transport(repository, policy_input.policy, backend)?;
+            args_after_plugin.push("--runtime-module-authorization-v1".to_owned());
+            args_after_plugin.push(transport.basename().to_owned());
+            dependencies.push(transport.artifact());
+            Some(transport)
+        }
+        _ => None,
+    };
+    let initial_dispatch = SecureImageDispatch {
+        repository,
+        worker_kind,
+        plugin: plugin.clone(),
+        dependencies: dependencies.clone(),
+        args_before_plugin: &args_before_plugin,
+        args_after_plugin: &args_after_plugin,
+        timeout: Duration::from_millis(timeout_ms),
+    };
     let mut gpu_fallback_used = false;
     let mut gpu_fallback_reason: Option<String> = None;
     let mut gpu_attempt: Option<Value> = None;

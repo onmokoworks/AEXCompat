@@ -33,7 +33,7 @@ AuxiliaryOptionResult strip_auxiliary_options(
   int effective_argc = argc;
   bool saw_aux = false, saw_animation = false, saw_coverage = false;
   bool saw_dump_worlds = false, saw_checksum_detail = false;
-  bool saw_render_settings = false;
+  bool saw_render_settings = false, saw_authorization = false;
   while (effective_argc >= 3) {
     const wchar_t* flag = argv[effective_argc - 2];
     const wchar_t* value = argv[effective_argc - 1];
@@ -57,6 +57,10 @@ AuxiliaryOptionResult strip_auxiliary_options(
                !saw_render_settings) {
       accepted = hooks.parse_conformance_render_settings(hooks.context, value);
       saw_render_settings = accepted;
+    } else if (equals(flag, L"--runtime-module-authorization-v1") &&
+               hooks.set_runtime_module_authorization && !saw_authorization) {
+      accepted = hooks.set_runtime_module_authorization(hooks.context, value);
+      saw_authorization = accepted;
     } else {
       break;
     }

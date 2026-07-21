@@ -367,3 +367,174 @@ preflight にとっての壁 (観察 + 仮説):
    完全列挙 policy (driver バージョン依存, 大)。
 手順1-3 (producer + routing) のコードは完成しているが、手順4 はこの2難題の解決を要し、#290 当初の
 「Cuda 実機依存の gate 付きテスト」想定を大きく超える。→ 方針判断が必要 (ユーザに諮る)。
+
+## 2026-07-22 レビュー結果 + ゴール変更
+
+### ローカルレビュー + Codex
+- ローカルエージェントレビュー: blocking なし。低 severity 2 件 (GPU report の enumeration overflow /
+  空 report 認証) を fail-closed 強化で対応 (commit 7e34c82)。
+- Codex P1 (l2_main.cpp:1782): 「preflight は require_module_audit を満たさず構造的に成功不能」。正確
+  (smoke test で確認済みの #300 の壁)。Codex 提案 (a) module_audit 併記 / (b) 検証無効化 は
+  それぞれ「動かないコード追加」/「不変条件 weaken」で原則と衝突。
+- owner 判断: #301 を **hold (draft)、merge しない**。Codex thread は #300 tracker として未解決のまま。
+
+### ゴール (2026-07-22 更新): #300 の解決 + W4 (#290 手順4) の完全解決
+hold から方針転換。**#300 の2難題を実際に解き、GPU render A/B まで完遂する**。#296 マージ済みで
+実 GPU は排他競合なし。
+
+### #300 解決計画 (path a: nv DriverStore 閉包を policy に列挙)
+module-audit の unknown 分類の実態 (再分析):
+- 分類は worker(exe) / plugin(plugin dir) / system32(System32 dir) / policy(manifest 記載) / unknown。
+- d3d12.dll 等の標準 loader は System32 からロード → **system32 分類 (unknown ではない)**。OK。
+- unknown になるのは **DriverStore の nv 固有 DLL** (nvwgf2umx.dll 等、System32 外) で policy 未記載のもの。
+  これらは single-link (nvwgf2umx.dll=1, nvopencl64.dll=1 実測済み)。
+- → **policy に、GPU backend がロードする nv DriverStore DLL の推移的閉包を全列挙**すれば
+  unknown_count==0 を満たせる。閉包は audit の unknown_keys から反復的に発見可能・driver 依存だが
+  enumerable。d3d12/System32 deps は system32 分類で policy 不要。
+
+同時に require_module_audit は observed_union.plugin 非空 + worker 非空 + phase_count>=3 を要求する
+ため、preflight も **plugin をロードし 3+ フェーズ audit を回す**必要 (= render worker の audit
+lifecycle を preflight でも踏む)。これは Codex 提案(a)の contract も満たす。
+
+同じ閉包 policy が preflight と実 render 両方で機能する (両者とも同じ GPU DLL をロード)。
+
+### 実装ステップ (#300 → W4)
+1. preflight に plugin ロード + module_audit lifecycle (3+ フェーズ) を追加し、module_audit + gpu report
+   の結合 JSON を emit。broker は module_audit を validate_required_worker_audit に通し、gpu report を
+   抽出。→ これで preflight が走り、unknown_keys が **nv DriverStore 閉包を露出**する (診断兼 Codex fix)。
+2. unknown_keys を見て single-link な nv DriverStore DLL を policy に反復追加、zero-unknown まで収束。
+3. 収束した閉包 policy で preflight 成功 → producer が実 GPU で report を produce (C1/C2 初 e2e 検証)。
+4. 実 render (DirectX/OpenCl) を session と one-shot で回し byte + report 等価 A/B (#290 手順4)。
+5. gate script 化 (`run-invert-gpu-session-render-gate.ps1`) + evidence + 全 worker ビルド +
+   broker 統合テスト。
+6. #301 を完成 (Codex fix 含む) して Codex clean → merge。#300 を Closes。
+CUDA (Auto) は nvcuda が multi-link で不可のまま; W4 の実 render 検証は DirectX/OpenCl で行う
+(#290 スコープに明示 GPU backend 含む)。CUDA=Auto は #300 で別途 (署名/DriverStore 帰属認証拡張) 要検討。
+
+### 決定的 breakthrough (2026-07-22): DirectX 閉包を実測、path (a) viable 確定
+スタンドアロン probe (`scratchpad/gpu_closure_probe.cpp`: D3D12CreateDevice(default adapter) +
+EnumProcessModulesEx) で D3D12 デバイス作成時のロード閉包を実測 (実 GPU, hr=0 成功):
+- ロード総数 58。**非 System32 直下のモジュールは worker exe + 5 個の DriverStore nv DLL のみ**、
+  かつ **5 個とも single-link (linkcount=1)**:
+  - `nvldumdx.dll`, `nvgpucomp64.dll`, `NvMemMapStoragex.dll`, `nvwgf2umx.dll`, `nvppex.dll`
+  - 全て `C:\Windows\System32\DriverStore\FileRepository\nvmdsi.inf_amd64_d39f1ab212fcacea\` 配下。
+- 残り 51 個は System32 直下 → audit で system32 分類 (unknown ではない)。
+
+→ **policy にこの 5 個 (backend=directx) を載せれば**: (1) 全て single-link で validate_regular_unique
+を通り、(2) audit の unknown はゼロ (worker=exe / plugin=sealed / system32=51 / policy=5)。#300 の
+2 難題が DirectX で同時解決。閉包は小さく安定 (同一 DriverStore dir)。CUDA が multi-link nvcuda で
+不可なのと対照的に、DirectX の vendor UMD 群は single-link。
+
+### 残実装 (#300 → W4、次段)
+A. **preflight に module_audit lifecycle 追加** (Codex fix 兼 zero-unknown 充足): plugin を
+   LoadLibraryExW + `audit.required=true/plugin_path=plugin` 設定 + post_load(capture) →
+   begin_backend_context → capture_phase → gpu report 構築 → pre_unload(capture) → phase_count>=3。
+   stdout を結合 JSON `{ "module_audit": module_audit_json(), "gpu_module_report": <report> }` に。
+   (top-level は deny_unknown_fields 無し、validate_required_worker_audit は "module_audit" のみ見る)。
+B. **broker**: `prepare_gpu_runtime_policy` は stdout 全体でなく `gpu_module_report` フィールドを
+   抽出して authenticate に渡す (現状は stdout 全体を report bytes 扱い)。
+C. **DirectX 5-DLL policy** を構築 (上記 5 個、`\\?\` path、実 sha/size、backend=directx)。
+D. preflight 実行 → 成功 + report を確認 (C1/C2 初 e2e 検証)。
+E. 実 render A/B: `--render-experimental-smart-32-gpu-policy` を session / one-shot (DISABLE env) で
+   回し byte + report 等価。GPU-capable fixture (SDK_Invert_ProcAmp DirectX) が要 → build-sdk-invert
+   系でビルド。
+F. gate script + evidence + 全 worker ビルド + broker 統合テスト → #301 完成 (Codex clean) → merge。
+
+## 2026-07-22 MILESTONE: preflight producer が実 GPU で e2e 成功
+
+`--inspect-gpu-module-report <pf_sampling_probe.aex> directx <5-DLL closure policy>` が **exit 0** で
+gpu_module_report を出力。確認できたこと (観察):
+- DirectX 5-DLL closure policy 受理 (single-link 検証通過)。
+- preflight worker が plugin (pf_sampling_probe.aex) を LoadLibraryExW + D3D12 デバイス作成
+  (begin_backend_context) + module_audit lifecycle (post_load / capture_phase / pre_unload, 3 phase)。
+- **module_audit PASS (zero-unknown)**: 5 個の nv DriverStore DLL が policy 分類、残りは system32。
+  → validate_required_worker_audit を通過 (require_module_audit 充足)。
+- gpu_module_report が 5 policy モジュールを path_token + sha256 + size で報告。
+- broker が結合 JSON から gpu_module_report 抽出 + authenticate_gpu_worker_report 認証成功
+  → **C++ path_token が Rust path_token と実データで byte 一致 (correctness 実証)**。
+
+= GPU-runtime-policy producer の**初の end-to-end 実 GPU 実行成功**。C1 (C++ preflight) + C2
+(broker producer) が実機で機能。#300 の2難題 (single-link + zero-unknown module audit) が DirectX で
+解決。Codex #301 の module_audit contract 指摘も同時に解消 (preflight が module_audit を emit)。
+
+残: E. 実 render A/B (DirectX invert fixture で session vs one-shot、byte + report 等価)。
+render worker も require_module_audit を通すため同じ closure policy を使うが、実 SmartRender は追加
+DLL (d3dcompiler 等) をロードし得るので unknown を実測して policy に追記する可能性あり。
+
+## 2026-07-22 W4 最終ブロッカー特定: render worker が manifest を parse しない
+
+DirectX fixture (SDK_Invert_ProcAmp_DirectX.aex, PiPL .rc を .r から自前生成してビルド) で実 render
+A/B を試行 → session/one-shot とも失敗。one-shot 診断:
+- `first_failure_stage: gpu_device_setup`, error 512, exit_code 14 (module_audit_failed)。
+- module_audit: `unknown_count: 5`, `policy: []` (空)。**5個の GPU DLL はロードされたが unknown 分類**。
+
+根本原因: `parse_runtime_module_authorization` は `admit_runtime` (`worker_runtime_admission.cpp`) で
+`request.authorize_runtime_modules` が真の時だけ呼ばれ、それは l2_main.cpp:1835 で
+`!is_rendering_worker() && invocation.runtime_module_authorization_mode`。**render/smart worker は
+`is_rendering_worker()==true` なので manifest を parse せず** g_authorized_runtime_modules が空 →
+実 render 中にロードされる GPU DLL が policy でなく unknown に分類 → module audit fail →
+gpu_device_setup が 512 で失敗 → render 失敗。preflight (私の --gpu-module-report-v1 mode) は明示的に
+parse するので policy 分類され成功していた、という差。
+
+= GPU render 経路が never-executed だった**第3の層**:
+1. producer 不在 (解決: C1/C2)。
+2. single-link 認証 vs System32 loader (解決: vendor DriverStore single-link closure)。
+3. module audit zero-unknown (preflight は解決)。
+4. **実 render dispatch が AEXRMA1 manifest を render worker に渡さず、render worker もそれを parse
+   しない** ← 今ここ。
+
+### 残実装 (W4 完遂の最終ピース)
+- broker: `dispatch_secure_gpu_image` / `dispatch_secure_gpu_image_session` (または呼び出し元
+  render_session.rs:1106 / image_render.rs one-shot) で、GpuRuntimePolicyInput.policy + session_identity
+  から AEXRMA1 manifest を再 encode し、render worker に sealed dependency + `--runtime-module-authorization-v1`
+  arg として渡す (preflight と同じ transport)。
+- worker: render/smart path で manifest を parse し g_authorized_runtime_modules を populate
+  (admit_runtime の `!is_rendering_worker()` gate を GPU render のケースで解除、または render 経路に
+  manifest parse を追加)。これで実 render 中の GPU DLL が policy 分類され module audit 通過。
+- 注意: security-sensitive (secure dispatch + worker admission)。manifest の session_identity は
+  render の session と一致する必要 (preflight とは別 session_identity になる点に注意 — render 用に
+  再生成した manifest の session を GpuRuntimePolicyInput.session_identity と揃えるか、render は
+  manifest の session だけ使い report 認証と分離するか要設計)。
+
+## 2026-07-22 W4 実 GPU A/B: routing 等価性を実証、GPU render エンジンの別バグを露出
+
+4層目 (render worker が manifest を parse) を実装 (worker: strip_auxiliary_options に
+`--runtime-module-authorization-v1` trailer 追加 + capture hook + prepare_runtime_request を render で
+authorize; broker: render_session.rs / image_render.rs one-shot が policy から manifest 再 encode して
+sealed dep + arg で render worker に配線) → **module audit 通過を実証**:
+- one-shot DirectX で module_audit.observed_union.policy = [5 GPU DLL], status=passed (unknown 解消)。
+
+### DirectX の追加ブロッカー: 外部 asset (sealed tree 非互換)
+DirectX invert は `.cso` シェーダを `<plugin_dir>\DirectX_Assets\` から読む (SDK_Invert_ProcAmp.cpp:355)
+が、flat な sealed load tree には .aex しか入らず asset 不在 → gpu_device_setup 512。
+→ **OpenCL invert に切替** (カーネルを CreateCString で .aex に埋込、外部 asset 不要、sealed tree 互換)。
+
+### OpenCL 実 GPU A/B: routing 等価性を実証
+OpenCL 閉包を probe (context+queue+kernel build+run) で実測 → 4 個の DriverStore nv DLL、全 single-link:
+nvopencl64 / nvdxgdmal64 / nvvm64 (clBuildProgram の NVVM) / nvptxJitCompiler64。nvcuda (multi-link) は
+ロードされない。この 4-DLL policy で session / one-shot 両方を実行:
+
+| | session | one-shot |
+|-|-|-|
+| module_audit | passed (4 DLL policy) | passed |
+| gpu_device_setup_error | 0 | 0 |
+| gpu_render_dispatched | **true** | **true** |
+| smart_render_error | **4** | **4** |
+| output_pixels_valid | false | false |
+
+**session と one-shot が GPU dispatch まで完全に同一挙動 = #290 の routing 等価性を実証**。GPU デバイス
+setup 成功 (error 0)、GPU render dispatched。同 plugin の **CPU render は正常** (smart_render_error=0,
+output valid) なので plugin は健全。
+
+### 残: smart_render_error=4 は GPU render エンジンの別バグ (両経路共通・orthogonal)
+`what_gpu == PF_GPU_Framework_OPENCL` branch (SDK_Invert_ProcAmp.cpp:896) は走るが、その OpenCL render
+内で error 4。= worker の **never-executed GPU render エンジン** (`gpu_memory_world_transport` が plugin に
+渡す OpenCL GPU world data / PF_GPUDeviceSuite1) の問題。GPU render が今回初めて実行されて露出。
+- #290 routing とは独立 (session/one-shot で同一)。#300 single-link/module-audit とも独立。
+- → 別 issue 化。
+
+### 到達点
+- **#300 の2難題 (single-link + zero-unknown module audit) を解決・実 GPU で実証**。
+- **#290 の routing 等価性 (session ≡ one-shot GPU dispatch) を実 GPU で実証**。producer が e2e 動作。
+- **残る smart_render_error=4 は GPU render エンジン (worker GPU world transport) の別バグ**で、両経路
+  共通・#290/#300 と orthogonal。これが解ければ byte 等価 A/B (valid pixels) まで到達する。
