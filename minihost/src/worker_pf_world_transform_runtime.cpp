@@ -123,7 +123,9 @@ int32_t __cdecl fill_world8(void*, const void* color, const LegacyRect* area, vo
   if (std::strcmp(pixel_format(), "argb16") == 0) {
     std::array<uint16_t, 4> deep{};
     if (color) for (int channel = 0; channel < 4; ++channel)
-      deep[channel] = static_cast<uint16_t>(static_cast<const uint8_t*>(color)[channel] * 128u);
+      deep[channel] = static_cast<uint16_t>(
+          (static_cast<uint32_t>(static_cast<const uint8_t*>(color)[channel]) * 32768u + 127u) /
+          255u);
     return fill_world_typed(8, color ? deep.data() : nullptr, area, world);
   }
   if (std::strcmp(pixel_format(), "argb32f") == 0) {
