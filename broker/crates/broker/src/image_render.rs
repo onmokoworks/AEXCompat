@@ -4644,11 +4644,47 @@ fn render_with_artifact(
     };
     let alpha_as_coverage_params: &[u32] =
         host_context.map_or(&[], |context| context.alpha_as_coverage_params.as_slice());
+    // The session's input and layer slots are all sized to the primary input's
+    // pixel count (RenderSession::open rejects a layer whose RGBA bytes exceed
+    // that slot: "render session layer pixels do not fit the slot"). The one-shot
+    // layered path instead accepts independent per-layer dimensions bounded only
+    // by MAX_DIMENSION/MAX_PIXELS. A secondary or timed layer larger (in total
+    // pixels) than the primary is therefore a real capability gap, not an
+    // infrastructure failure: keep it session-ineligible so it renders one-shot,
+    // rather than fail-closing it now that the automatic fallback is gone (#264).
+    let primary_pixels = u64::from(width) * u64::from(height);
+    let layers_fit_session_slots = secondaries
+        .iter()
+        .all(|(_, w, h, _)| u64::from(*w) * u64::from(*h) <= primary_pixels)
+        && timed_secondaries
+            .iter()
+            .all(|(_, _, w, h, _)| u64::from(*w) * u64::from(*h) <= primary_pixels);
+    // The session's uniform primary-sized slots also fall under an aggregate
+    // section cap that the one-shot per-file transport has no equivalent for; a
+    // config that overruns it is a session-transport limit, not a compatibility
+    // failure, so keep it on the one-shot path rather than fail-closing (#264).
+    let layer_count = (secondaries.len() + timed_secondaries.len()) as u32;
+    let session_section_fits =
+        crate::render_session::classic_session_section_fits(width, height, pixel_format, layer_count);
     if !smart
         && audio.is_none()
         && gpu_backend == RenderGpuBackend::Auto
         && payload == encode_interactive_payload(interactive_parameters.unwrap_or_default())?
         && std::env::var_os(DISABLE_SESSION_WRAPPER_ENV).is_none()
+        && layers_fit_session_slots
+        && session_section_fits
+        // RenderSession::open rejects total_time <= 0, but the shared timing
+        // validation (RenderTiming::is_valid) admits total_time == 0 at
+        // current_time == 0. Keep such a zero-duration render on the one-shot
+        // path rather than fail-closing it (#264).
+        && timing.total_time > 0
+        // RenderSession::open also rejects time_scale > i32::MAX (the worker
+        // parses the per-frame scale as signed 32-bit), which is_valid admits.
+        // The one-shot worker cannot render it either, so this loses no working
+        // capability, but keeping the eligibility gate a strict superset of the
+        // session's config preconditions means an eligible render never
+        // fail-closes on a config the session structurally rejects (#264).
+        && timing.time_scale <= i32::MAX as u32
         // The length-1 session path launches through SessionOpenRequest, which
         // carries no conformance render-settings trailer, so the worker would
         // report its legacy premultiplied/null settings while the broker has

@@ -415,6 +415,33 @@ impl SessionGeometry {
     }
 }
 
+/// Whether a resident classic session can structurally represent this render:
+/// its uniform primary-sized input/layer slots plus the packed output slot must
+/// fit under the aggregate section cap `SECTION_HARD_CAP_BYTES`. This is a
+/// session-transport limit (all slots are sized to the primary input), not a
+/// compatibility limit — the one-shot layered path streams each layer to its own
+/// file with no aggregate bound — so the length-1 wrapper keeps a render that
+/// exceeds it on the one-shot path (#98 W4, #264) instead of fail-closing it.
+/// `layer_count` is the total secondary + timed layer slot count. The output
+/// slot is sized to the render dimensions (an expand grows it in place later,
+/// #262), matching `RenderSession::open`.
+pub fn classic_session_section_fits(
+    width: u32,
+    height: u32,
+    pixel_format: RenderPixelFormat,
+    layer_count: u32,
+) -> bool {
+    let geometry = SessionGeometry {
+        width,
+        height,
+        output_capacity_width: width,
+        output_capacity_height: height,
+        pixel_format,
+        layer_slot_count: layer_count,
+    };
+    geometry.section_bytes() as u64 <= SECTION_HARD_CAP_BYTES
+}
+
 pub struct SessionOpenRequest<'a> {
     pub repository: &'a Path,
     pub plugin_path: &'a Path,
@@ -2897,6 +2924,27 @@ mod tests {
         assert_eq!(geometry.output_slot_offset() % SLOT_ALIGNMENT, 0);
         assert_eq!(geometry.output_slot_offset(), 4096 + 4096);
         assert_eq!(geometry.section_bytes(), 4096 + 4096 + 8192);
+    }
+
+    #[test]
+    fn classic_session_section_fits_bounds_the_aggregate() {
+        // A modest render with a few layers fits comfortably.
+        assert!(classic_session_section_fits(
+            64,
+            48,
+            RenderPixelFormat::Argb8,
+            3
+        ));
+        // Each layer slot is sized to the primary input, so many full-resolution
+        // layers overrun the 1 GiB aggregate section cap even though every
+        // individual layer fits the primary slot. 15 layers + input + a 32f
+        // output slot at 4096x4096 exceed SECTION_HARD_CAP_BYTES.
+        assert!(!classic_session_section_fits(
+            4096,
+            4096,
+            RenderPixelFormat::Argb32f,
+            15
+        ));
     }
 
     #[test]

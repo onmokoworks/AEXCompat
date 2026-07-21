@@ -1478,4 +1478,70 @@ mod windows_e2e {
         );
         let _ = std::fs::remove_dir_all(&scratch);
     }
+
+    /// Capability-gap routing (#264): a secondary layer larger (in total pixels)
+    /// than the primary input does not fit the session's uniform input-shaped
+    /// slots (RenderSession::open rejects it), but the one-shot layered path
+    /// accepts independent per-layer dimensions. Such a render must stay
+    /// session-INELIGIBLE and render one-shot, not hit the fail-closed error now
+    /// that the automatic fallback is gone. On a version that fail-closes without
+    /// this eligibility carve-out, the session open fails and the render errors.
+    #[test]
+    fn oversized_layer_renders_one_shot_not_fail_closed() {
+        let _env_guard = SESSION_ROUTE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let root = repository_root();
+        let worker = root.join("target/minihost-build/aex_render_worker.exe");
+        let aex =
+            root.join("target/pf-layer-param-probe-build/Release/pf_layer_param_probe.aex");
+        if !worker.is_file() || !aex.is_file() {
+            eprintln!(
+                "skipping oversized-layer test: build aex_render_worker.exe and \
+                 pf_layer_param_probe.aex first"
+            );
+            return;
+        }
+        let sha = format!("{:x}", Sha256::digest(std::fs::read(&aex).unwrap()));
+        let scratch = std::env::temp_dir().join(format!(
+            "aexcompat-oversized-layer-{}-{:032x}",
+            std::process::id(),
+            rand::random::<u128>()
+        ));
+        std::fs::create_dir_all(&scratch).unwrap();
+        // Primary input smaller than the secondary layer: the layer's pixel count
+        // (64*48) exceeds the primary (40*30), so it cannot fit the session's
+        // primary-sized input slot but is a legal one-shot layered render.
+        let input = scratch.join("input.png");
+        image::RgbaImage::from_fn(40, 30, |x, y| {
+            image::Rgba([(x * 3) as u8, (y * 5) as u8, (x + y) as u8, 255])
+        })
+        .save(&input)
+        .unwrap();
+        let secondary = scratch.join("layer.png");
+        image::RgbaImage::from_fn(64, 48, |x, y| {
+            image::Rgba([(x + y) as u8, (x * 7) as u8, (y * 9) as u8, 255])
+        })
+        .save(&secondary)
+        .unwrap();
+
+        // No escape hatch: an eligible render would attempt the session. The
+        // oversized layer must make it ineligible so it renders one-shot instead.
+        unsafe { std::env::remove_var(DISABLE_SESSION_WRAPPER_ENV) };
+        let params = vec![layer_parameter(1, &secondary)];
+        let before = RENDER_SESSION_WRAPPER_RENDERS.load(Ordering::SeqCst);
+        let output = scratch.join("out.png");
+        let _report = render_experimental_image(&root, &aex, &sha, &input, &output, &params)
+            .expect("an oversized-layer render must succeed via one-shot, not fail closed");
+        assert_eq!(
+            RENDER_SESSION_WRAPPER_RENDERS.load(Ordering::SeqCst),
+            before,
+            "the oversized-layer render must be session-ineligible (carried by one-shot)"
+        );
+        assert!(
+            output.exists(),
+            "the one-shot render must produce an output PNG"
+        );
+        let _ = std::fs::remove_dir_all(&scratch);
+    }
 }
