@@ -735,8 +735,8 @@ fn exposed_config(template: &[InteractiveParameter]) -> ExposedParams {
 }
 
 /// Maps one discovered AEX parameter to an AviUtl2 config item, or `None` for
-/// kinds not yet exposed (point, layer, comp, button, custom, group markers, …),
-/// which keep their discovered default.
+/// kinds not yet exposed (angle, point, layer, comp, button, custom, group
+/// markers, …), which keep their discovered default.
 ///
 /// Discovery reports a parameter's *runtime* kind (`image_render.rs`
 /// `runtime_kind`), which collapses AE's slider/checkbox/popup (param types
@@ -749,13 +749,11 @@ fn config_item_for(parameter: &InteractiveParameter) -> Option<FilterConfigItem>
             let (min, max) = bounded_range(parameter)?;
             Some(track(name, parameter.value, min, max, track_step(max - min)))
         }
-        // An angle's value lives in `components[0]`; the interactive payload
-        // encodes it from there (`encode_interactive_payload`), so read and write
-        // that, not `value`.
-        "angle" => {
-            let (min, max) = bounded_range(parameter)?;
-            Some(track(name, parameter.components[0], min, max, track_step(max - min)))
-        }
+        // "angle" is deferred to stage 2b: its value lives in `components[0]`
+        // (not `value`), it usually reports no numeric bounds (so a slider needs
+        // a fallback degree range), and multi-turn angles do not fit a clamped
+        // slider. Exposing it needs a fixture to verify; for now it stays at the
+        // AEX default.
         "integer" => {
             let (min, max) = bounded_range(parameter)?;
             if min == 0.0 && max == 1.0 && parameter.choices.is_empty() {
@@ -829,15 +827,16 @@ fn apply_config_values(
             continue;
         };
         match item {
-            // An angle track drives `components[0]` (its value source, matching
-            // config_item_for and the payload encoder); an integer track is
-            // rounded (the encoder rejects the whole payload on a fractional
-            // integer value); every other track drives `value`.
-            FilterConfigItem::Track(track) => match parameter.kind.as_str() {
-                "angle" => parameter.components[0] = track.value,
-                "integer" => parameter.value = track.value.round(),
-                _ => parameter.value = track.value,
-            },
+            // An integer track is rounded (the encoder rejects the whole payload
+            // on a fractional integer value); every other track drives `value`.
+            // (Angle is not exposed in stage 2a, so no components handling here.)
+            FilterConfigItem::Track(track) => {
+                if parameter.kind == "integer" {
+                    parameter.value = track.value.round();
+                } else {
+                    parameter.value = track.value;
+                }
+            }
             FilterConfigItem::Checkbox(check) => {
                 parameter.value = if check.value { 1.0 } else { 0.0 }
             }
