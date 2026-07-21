@@ -1632,6 +1632,129 @@ mod windows_e2e {
         let _ = std::fs::remove_dir_all(&scratch);
     }
 
+    #[test]
+    fn conformance_render_settings_match_the_one_shot_transport() {
+        // A conformance render (AEXCOMPAT_CONFORMANCE_RENDER_SETTINGS set) is now
+        // carried by the session, which forwards the --conformance-render-settings-v1
+        // trailer so the worker reports the same render_settings block the
+        // one-shot route does (#275). The broker pre-transforms the input for the
+        // alpha mode on both routes, so the pixels match too.
+        let _env_guard = SESSION_ROUTE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let root = repository_root();
+        let worker = root.join("target/minihost-build/aex_render_worker.exe");
+        let aex = root.join("target/pf-sampling-probe-build/Release/pf_sampling_probe.aex");
+        if !worker.is_file() || !aex.is_file() {
+            eprintln!(
+                "skipping conformance A/B: build aex_render_worker.exe and \
+                 pf_sampling_probe.aex first"
+            );
+            return;
+        }
+        let sha = format!("{:x}", Sha256::digest(std::fs::read(&aex).unwrap()));
+        let scratch = std::env::temp_dir().join(format!(
+            "aexcompat-conformance-{}-{:032x}",
+            std::process::id(),
+            rand::random::<u128>()
+        ));
+        std::fs::create_dir_all(&scratch).unwrap();
+        let input = scratch.join("input.png");
+        image::RgbaImage::from_fn(48, 32, |x, y| {
+            image::Rgba([(x * 5) as u8, (y * 3) as u8, (x + y) as u8, 200])
+        })
+        .save(&input)
+        .unwrap();
+
+        // A valid v1 conformance trailer: premultiplied alpha (a non-trivial
+        // input pre-transform, so the broker actually rewrites the input on both
+        // routes), software renderer. The input above has alpha 200 < 255 so the
+        // premultiply changes the color channels. The conformance env changes
+        // both the pre-transform and the report, so a leak past this test (e.g.
+        // a panic before the explicit remove) would corrupt later tests; restore
+        // the prior value (or its absence) on drop rather than relying on
+        // reaching the end.
+        struct EnvVarGuard {
+            name: &'static str,
+            previous: Option<std::ffi::OsString>,
+        }
+        impl EnvVarGuard {
+            fn set(name: &'static str, value: &str) -> Self {
+                let previous = std::env::var_os(name);
+                unsafe { std::env::set_var(name, value) };
+                Self { name, previous }
+            }
+        }
+        impl Drop for EnvVarGuard {
+            fn drop(&mut self) {
+                match &self.previous {
+                    Some(value) => unsafe { std::env::set_var(self.name, value) },
+                    None => unsafe { std::env::remove_var(self.name) },
+                }
+            }
+        }
+        let _conformance_guard = EnvVarGuard::set(
+            "AEXCOMPAT_CONFORMANCE_RENDER_SETTINGS",
+            "v1|premultiplied|0|-|0|software",
+        );
+
+        // Run A: default routing now carries the conformance render on the
+        // session (the counter must advance).
+        unsafe { std::env::remove_var(DISABLE_SESSION_WRAPPER_ENV) };
+        let before = RENDER_SESSION_WRAPPER_RENDERS.load(Ordering::SeqCst);
+        let output_a = scratch.join("out-a.png");
+        let report_a = render_experimental_image(&root, &aex, &sha, &input, &output_a, &[])
+            .expect("session-route conformance render");
+        assert!(
+            RENDER_SESSION_WRAPPER_RENDERS.load(Ordering::SeqCst) > before,
+            "the conformance render must now be carried by the session"
+        );
+
+        // Run B: the escape hatch forces the one-shot argv transport.
+        unsafe { std::env::set_var(DISABLE_SESSION_WRAPPER_ENV, "1") };
+        let after_a = RENDER_SESSION_WRAPPER_RENDERS.load(Ordering::SeqCst);
+        let output_b = scratch.join("out-b.png");
+        let report_b = render_experimental_image(&root, &aex, &sha, &input, &output_b, &[]);
+        unsafe { std::env::remove_var(DISABLE_SESSION_WRAPPER_ENV) };
+        // The conformance env is cleared by `_conformance_guard` on drop.
+        let report_b = report_b.expect("one-shot conformance render");
+        assert_eq!(
+            RENDER_SESSION_WRAPPER_RENDERS.load(Ordering::SeqCst),
+            after_a,
+            "the escape hatch did not force the one-shot transport"
+        );
+
+        // The reports must match field-for-field except the output paths and the
+        // stderr-derived process diagnostics (the session's stage traces include
+        // its frame loop; elapsed timings are volatile). Forwarding the trailer
+        // keeps every conformance-affected report field consistent across routes.
+        let volatile = ["output_png", "output_raw", "worker_diagnostics"];
+        let mut flat_a = report_a.as_object().expect("report A object").clone();
+        let mut flat_b = report_b.as_object().expect("report B object").clone();
+        for key in volatile {
+            flat_a.remove(key);
+            flat_b.remove(key);
+        }
+        assert_eq!(
+            flat_a.keys().collect::<Vec<_>>(),
+            flat_b.keys().collect::<Vec<_>>(),
+            "conformance report key sets diverge between the routes"
+        );
+        for (key, value_a) in &flat_a {
+            assert_eq!(
+                Some(value_a),
+                flat_b.get(key),
+                "conformance report field {key} differs between the session and one-shot routes"
+            );
+        }
+        assert_eq!(
+            std::fs::read(&output_a).unwrap(),
+            std::fs::read(&output_b).unwrap(),
+            "the conformance PNG differs between the session and one-shot routes"
+        );
+        let _ = std::fs::remove_dir_all(&scratch);
+    }
+
     /// Audio fail-closed fallback removal (#264, #98 W4): when the audio session
     /// is attempted (escape hatch unset) but cannot carry the render, the render
     /// must surface an explicit error instead of silently rerunning the one-shot

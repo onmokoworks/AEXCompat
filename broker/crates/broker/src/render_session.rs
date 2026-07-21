@@ -473,6 +473,13 @@ pub struct SessionOpenRequest<'a> {
     /// session's set-once lifetime, so only the slot list travels. Empty means
     /// the option is not emitted.
     pub alpha_as_coverage_params: &'a [u32],
+    /// Conformance render-settings trailer (`--conformance-render-settings-v1`),
+    /// already validated by the wrapper. The broker pre-transforms the input for
+    /// the requested alpha mode on both routes; forwarding the trailer makes the
+    /// session worker report the same `render_settings` block the one-shot path
+    /// reports (it only feeds the worker's report, not the render). `None` leaves
+    /// the option unset (the worker reports the legacy null settings) (#275).
+    pub conformance_render_settings: Option<&'a str>,
     /// Secondary layers, static for the whole session (issue #98 W1-4). The
     /// pixels travel as inherited per-layer file HANDLEs, not section slots
     /// (#268): open streams each layer to its own file under
@@ -1030,6 +1037,17 @@ impl RenderSession {
         }
         if request.output_checksum_detail {
             args_after_plugin.extend(["--output-checksum-detail-v1".to_owned(), "1".to_owned()]);
+        }
+        // Conformance render settings ride the same shared auxiliary option the
+        // one-shot path forwards (#275); the worker peels it from the tail and
+        // feeds it to its report only (the pixels are already pre-transformed by
+        // the broker on both routes), so a conformance render reports the same
+        // render_settings block on the session and one-shot routes.
+        if let Some(settings) = request.conformance_render_settings {
+            args_after_plugin.extend([
+                "--conformance-render-settings-v1".to_owned(),
+                settings.to_owned(),
+            ]);
         }
         if let Some(sidecar) = &animation_sidecar {
             args_after_plugin.extend([
@@ -2203,6 +2221,8 @@ pub fn run_video_batch(
         spatial_trailer: None,
         render_environment_trailer: None,
         alpha_as_coverage_params: &request.alpha_as_coverage_params,
+        // The video-batch entry does not apply conformance render settings.
+        conformance_render_settings: None,
         layers: &[],
         dependencies: Vec::new(),
         width,
@@ -3185,6 +3205,7 @@ mod tests {
                 spatial_trailer: None,
                 render_environment_trailer: None,
                 alpha_as_coverage_params: &[],
+                conformance_render_settings: None,
                 layers: &[],
                 dependencies: Vec::new(),
                 width: 8,

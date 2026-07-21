@@ -4708,14 +4708,6 @@ fn render_with_artifact(
         // session's config preconditions means an eligible render never
         // fail-closes on a config the session structurally rejects (#264).
         && timing.time_scale <= i32::MAX as u32
-        // The length-1 session path launches through SessionOpenRequest, which
-        // carries no conformance render-settings trailer, so the worker would
-        // report its legacy premultiplied/null settings while the broker has
-        // already pre-transformed the input for the requested alpha mode. Only
-        // the one-shot path below forwards --conformance-render-settings-v1, so
-        // bypass the session optimization whenever a conformance trailer is set
-        // to keep the pre-transform and the worker-reported settings consistent.
-        && conformance_render_settings.is_none()
     {
         // Only a layered session touches target/image-transport: RenderSession::
         // open writes per-layer sidecars there (#268), so a file-free session
@@ -4785,6 +4777,7 @@ fn render_with_artifact(
             spatial_trailer,
             render_environment_trailer,
             alpha_as_coverage_params,
+            conformance_render_settings: conformance_render_settings.as_deref(),
             aux_manifest: aux_transport.as_ref().map(|aux| aux.manifest_path.as_path()),
             timing,
             pixel_format,
@@ -5408,6 +5401,12 @@ struct SessionWrapperRequest<'a> {
     spatial_trailer: Option<String>,
     render_environment_trailer: Option<String>,
     alpha_as_coverage_params: &'a [u32],
+    /// Conformance render-settings trailer (`--conformance-render-settings-v1`),
+    /// forwarded so the session worker reports the same render_settings block the
+    /// one-shot path does (#275). The input pre-transform is applied on both
+    /// routes before this point, so this only aligns the report. `None` leaves
+    /// the option unset.
+    conformance_render_settings: Option<&'a str>,
     /// Absolute path to the broker-prepared aux-channel manifest sidecar
     /// (`--aux-manifest-v1`), shared with the one-shot transport. `None` when
     /// the host context carries no aux channels (#211).
@@ -5486,6 +5485,7 @@ fn render_classic_via_length_one_session(
         spatial_trailer: request.spatial_trailer.clone(),
         render_environment_trailer: request.render_environment_trailer.clone(),
         alpha_as_coverage_params: request.alpha_as_coverage_params,
+        conformance_render_settings: request.conformance_render_settings,
         dependencies: request.dependencies.to_vec(),
         width: request.width,
         height: request.height,
@@ -5746,6 +5746,7 @@ impl InteractiveRenderSession {
                 spatial_trailer: None,
                 render_environment_trailer: None,
                 alpha_as_coverage_params: &[],
+                conformance_render_settings: None,
                 layers: &[],
                 smart: false,
                 gpu_backend: RenderGpuBackend::Auto,
