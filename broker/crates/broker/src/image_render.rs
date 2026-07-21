@@ -218,14 +218,23 @@ fn is_owned_image_transport_name(name: &str) -> bool {
         return true;
     }
 
-    [("layer-", ".rgba"), ("aux-", ".f32le")]
-        .iter()
-        .any(|(prefix, suffix)| {
-            name.strip_prefix(prefix)
-                .and_then(|body| body.strip_suffix(suffix))
-                .and_then(|body| body.split_once('-'))
-                .is_some_and(|(nonce, index)| decimal_component(nonce) && decimal_component(index))
-        })
+    // `layer-<nonce>-<index>.rgba` is the one-shot layered transport; the
+    // resident session streams its own per-layer files as
+    // `layer-session-<nonce>-<index>.rgba` (#268), a distinct prefix so the two
+    // routes never collide on a nonce. Both are broker-owned and must be
+    // reclaimable by the stale sweep when a crash skips their normal deletion.
+    [
+        ("layer-", ".rgba"),
+        ("layer-session-", ".rgba"),
+        ("aux-", ".f32le"),
+    ]
+    .iter()
+    .any(|(prefix, suffix)| {
+        name.strip_prefix(prefix)
+            .and_then(|body| body.strip_suffix(suffix))
+            .and_then(|body| body.split_once('-'))
+            .is_some_and(|(nonce, index)| decimal_component(nonce) && decimal_component(index))
+    })
 }
 
 fn is_reparse_point(metadata: &fs::Metadata) -> bool {
@@ -6404,6 +6413,7 @@ mod tests {
             "output-123.rgba",
             "audio-123.f32",
             "layer-123-0.rgba",
+            "layer-session-123-0.rgba",
             "report-123.json",
             "parameter-animation-123.json",
             "aux-manifest-123.json",
