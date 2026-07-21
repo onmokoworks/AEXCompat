@@ -4718,24 +4718,37 @@ fn render_with_artifact(
         // to keep the pre-transform and the worker-reported settings consistent.
         && conformance_render_settings.is_none()
     {
+        // Pure session launches never reach the one-shot stale sweep below, and
+        // the aux sweep only runs when aux channels are present, so a successful
+        // layered session would otherwise never reclaim leaked layer-session-*
+        // sidecars from a prior crash (#268). Run the same sweep here; this
+        // render's own sidecars do not exist yet (RenderSession::open writes them
+        // with a fresh nonce), and freshly written aux sidecars survive the age
+        // cutoff, so it is idempotent with the aux/one-shot calls.
+        fs::create_dir_all(&root)?;
+        cleanup_stale_image_transport(&root, SystemTime::now())?;
         // Static secondaries render on every frame; timed secondaries (issue
         // #98 W1-4b) carry their rational admission time so the worker selects
         // the matching entry per frame, the same as the one-shot transport.
+        // Every match arm below returns, so this branch never falls through to
+        // the one-shot code that reads `secondaries`/`timed_secondaries`; move
+        // the decoded RGBA buffers into the session layers instead of cloning
+        // them, so a large layered render does not double broker memory (#268).
         let session_layers = secondaries
-            .iter()
+            .into_iter()
             .map(|(slot, width, height, rgba)| crate::render_session::SessionLayer {
-                slot: *slot,
-                width: *width,
-                height: *height,
-                rgba: rgba.clone(),
+                slot,
+                width,
+                height,
+                rgba,
                 timed: None,
             })
-            .chain(timed_secondaries.iter().map(
+            .chain(timed_secondaries.into_iter().map(
                 |(slot, time, width, height, rgba)| crate::render_session::SessionLayer {
-                    slot: *slot,
-                    width: *width,
-                    height: *height,
-                    rgba: rgba.clone(),
+                    slot,
+                    width,
+                    height,
+                    rgba,
                     timed: Some((time.value, time.scale)),
                 },
             ))
