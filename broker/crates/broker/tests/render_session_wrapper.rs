@@ -1669,7 +1669,17 @@ mod windows_e2e {
         // A valid v1 conformance trailer: premultiplied alpha (a non-trivial
         // input pre-transform, so the broker actually rewrites the input on both
         // routes), software renderer. The input above has alpha 200 < 255 so the
-        // premultiply changes the color channels.
+        // premultiply changes the color channels. The conformance env changes
+        // both the pre-transform and the report, so a leak past this test (e.g.
+        // a panic before the explicit remove) would corrupt later tests; restore
+        // it on drop rather than relying on reaching the end.
+        struct EnvVarGuard(&'static str);
+        impl Drop for EnvVarGuard {
+            fn drop(&mut self) {
+                unsafe { std::env::remove_var(self.0) };
+            }
+        }
+        let _conformance_guard = EnvVarGuard("AEXCOMPAT_CONFORMANCE_RENDER_SETTINGS");
         unsafe {
             std::env::set_var(
                 "AEXCOMPAT_CONFORMANCE_RENDER_SETTINGS",
@@ -1695,7 +1705,7 @@ mod windows_e2e {
         let output_b = scratch.join("out-b.png");
         let report_b = render_experimental_image(&root, &aex, &sha, &input, &output_b, &[]);
         unsafe { std::env::remove_var(DISABLE_SESSION_WRAPPER_ENV) };
-        unsafe { std::env::remove_var("AEXCOMPAT_CONFORMANCE_RENDER_SETTINGS") };
+        // The conformance env is cleared by `_conformance_guard` on drop.
         let report_b = report_b.expect("one-shot conformance render");
         assert_eq!(
             RENDER_SESSION_WRAPPER_RENDERS.load(Ordering::SeqCst),

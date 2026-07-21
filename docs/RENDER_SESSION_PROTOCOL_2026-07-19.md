@@ -96,6 +96,7 @@ aex_render_worker.exe --render-session-v1 <plugin> <plugin_sha256> <payload>
     [session-layers:v2|<slot,w,h,handle | slot,w,h,time,scale,handle;...>]
     [v2|<mask context>] [spatial:v*|<...>] [render:v1|<...>]
     [--alpha-as-coverage-v1 <slot,slot,...>]
+    [--conformance-render-settings-v1 <v1|mode|0|-|0|renderer>]
     [--aux-manifest-v1 <path>] [--parameter-animation-v1 <path>]
     [--dump-worlds-v1 <dir>] [--output-checksum-detail-v1 1] [--minidump-v1 <dir>]
 ```
