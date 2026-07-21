@@ -39,3 +39,22 @@ Copy-Item bridges\aviutl2-multifilter\target\release\aexcompat_aviutl2_multifilt
 
 `.aux2` で置くこと (`.auf2` は不可)。AviUtl2 起動中はロック。設計経緯は
 `docs/AVIUTL2_BRIDGE_2026-07-21.md` の段階5。
+
+## 設定 (issue #299)
+
+対象 AEX フォルダ・worker repository・除外エフェクトを TOML で設定する。既定の設定パスは
+Windows 標準の per-user 位置 **`%APPDATA%\aexcompat-multifilter\config.toml`**
+(`AEXCOMPAT_MULTIFILTER_CONFIG` で明示パス上書き可)。
+
+```toml
+# 対象 AEX フォルダ (直下の *.aex を各々フィルタ登録)
+dir = 'C:\Users\me\aex'
+# 常駐 worker のある repo root (target/minihost-build/ を持つ)
+repository = 'C:\path\to\AEXCompat'
+# 除外するエフェクト (ファイル stem を大文字小文字無視でマッチ。.aex 付き/無し可)
+ignore = ['pf_sampling_probe', 'broken-effect']
+```
+
+環境変数 `AEXCOMPAT_MULTIFILTER_DIR` / `AEXCOMPAT_MULTIFILTER_REPOSITORY` を設定すると
+TOML の `dir` / `repository` を上書きする (env > TOML)。設定・env いずれも無ければ何も
+登録しない。config はプラグインのロード時に一度だけ読むので、変更後は AviUtl2 を再起動する。
