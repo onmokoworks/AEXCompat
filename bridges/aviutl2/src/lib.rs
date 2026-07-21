@@ -32,6 +32,13 @@ use aexcompat_broker::render_session::{FrameStatus, RenderSession, SessionOpenRe
 /// worker cannot finish in time invalidates the session fail-closed.
 const FRAME_DEADLINE_MS: u64 = 30_000;
 
+/// Image dimension bounds, mirrored from the broker (`image_render.rs`
+/// `MAX_DIMENSION` / `MAX_PIXELS`, which are `pub(crate)` and so cannot be
+/// imported). Checked before allocating the transfer buffer and before opening
+/// the session, which enforces the same limits.
+const MAX_DIMENSION: u32 = 4096;
+const MAX_PIXELS: u64 = 16_777_216;
+
 /// Idle timeout after which a session (worker subprocess + thread + shared
 /// memory) is reaped. AviUtl2's filter API has no per-effect teardown callback
 /// and `effect_id` is unique per app launch, so a deleted or abandoned effect
@@ -474,6 +481,19 @@ impl FilterPlugin for AexBridgeFilter {
         let width = video.video_object.width;
         let height = video.video_object.height;
         if width == 0 || height == 0 {
+            return Ok(());
+        }
+        // Bound the dimensions before allocating the transfer buffer (and before
+        // opening the session, which enforces the same limits). A pathological
+        // object size would otherwise allocate a huge Vec below.
+        if width > MAX_DIMENSION
+            || height > MAX_DIMENSION
+            || u64::from(width) * u64::from(height) > MAX_PIXELS
+        {
+            tracing::warn!(
+                "AEX object {width}x{height} exceeds the session limits \
+                 ({MAX_DIMENSION} per side, {MAX_PIXELS} px); leaving pixels unchanged"
+            );
             return Ok(());
         }
         let effect_id = video.object.effect_id;
