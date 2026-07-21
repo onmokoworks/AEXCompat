@@ -31,7 +31,8 @@ import aex_static_probe as probe  # noqa: E402  (path shim above is required fir
 REPORT_ROOT = LAB_ROOT / "target" / "aex-pipl-identity"
 MAX_SCAN_BYTES = probe.MAX_SCAN_BYTES
 # Match the worker parser bound (minihost parse_pipl_entrypoint) so the static
-# view classifies exactly what the worker would accept.
+# view mirrors the worker's fail-closed dispatch decision as closely as a no-load
+# parse can (a static approximation, not a byte-for-byte oracle of the runtime).
 MAX_PIPL_PAYLOAD_BYTES = 1024 * 1024
 MAX_PROPERTY_COUNT = 256
 MAX_PIPL_RESOURCES = 64
@@ -106,6 +107,31 @@ def _cstring(data: bytes) -> str | None:
     return raw.decode("ascii", errors="replace")
 
 
+def _valid_export_symbol(data: bytes) -> str | None:
+    """Mirror the worker's valid_export_symbol (minihost/src/l2_main.cpp).
+
+    Returns the export identifier only when it is a NUL-terminated ASCII symbol
+    (first char [_A-Za-z], rest [_A-Za-z0-9]), length 1..127, total size 1..256,
+    with all bytes after the NUL zero. Otherwise the worker rejects the plug-in,
+    so the static view must not treat it as a resolvable entrypoint.
+    """
+    if len(data) == 0 or len(data) > 256:
+        return None
+    nul = data.find(b"\x00")
+    if nul <= 0 or nul > 127:
+        return None
+    symbol = data[:nul]
+    first = symbol[0]
+    if not (first == 0x5F or 0x41 <= first <= 0x5A or 0x61 <= first <= 0x7A):
+        return None
+    for value in symbol[1:]:
+        if not (value == 0x5F or 0x41 <= value <= 0x5A or 0x61 <= value <= 0x7A or 0x30 <= value <= 0x39):
+            return None
+    if any(byte != 0 for byte in data[nul + 1 :]):
+        return None
+    return symbol.decode("ascii")
+
+
 def parse_pipl_payload(payload: bytes | None) -> dict[str, Any]:
     """Decode one PiPL resource payload into an identity record.
 
@@ -118,8 +144,12 @@ def parse_pipl_payload(payload: bytes | None) -> dict[str, Any]:
         "reason": None,
         "kind_code": None,
         "kind_label": None,
+        "kind_count": 0,
+        "code_win64_count": 0,
         "entrypoint_win64": None,
+        "entrypoint_win64_valid": False,
         "entrypoint_win32": None,
+        "dispatchable_effect": False,
         "name": None,
         "category": None,
         "match_name": None,
@@ -157,6 +187,8 @@ def parse_pipl_payload(payload: bytes | None) -> dict[str, Any]:
         return record
 
     keys: list[str] = []
+    kind_count = 0
+    code_count = 0
     offset = 10
     for _ in range(count):
         if offset > size or size - offset < 16:
@@ -184,6 +216,10 @@ def parse_pipl_payload(payload: bytes | None) -> dict[str, Any]:
         canonical_key = _reverse4(key_raw)
         keys.append(canonical_key if adobe else f"{_reverse4(vendor)}:{canonical_key}")
         if adobe:
+            if canonical_key == "kind":
+                kind_count += 1
+            elif canonical_key == "8664":
+                code_count += 1
             _apply_adobe_property(record, canonical_key, data)
         offset += padded
 
@@ -192,11 +228,23 @@ def parse_pipl_payload(payload: bytes | None) -> dict[str, Any]:
         return record
 
     record["property_keys"] = keys
+    record["kind_count"] = kind_count
+    record["code_win64_count"] = code_count
     record["parse_state"] = "parsed"
     record["reason"] = None
-    if record["kind_code"] is None:
-        # A well-formed list with no Kind still parses, but is not a plug-in we
-        # can classify; surface it explicitly rather than silently.
+    # Mirror the worker's fail-closed dispatch decision (minihost
+    # discover_pipl_entrypoint / parse_pipl_entrypoint): the worker rejects a
+    # resource unless it carries exactly one Kind, and it only resolves an Effect
+    # when that Kind is AEEffect with exactly one CodeWin64X86 whose symbol is a
+    # valid bounded export identifier. This flag lets the listing avoid marking
+    # anything the worker would reject as a dispatchable Effect.
+    record["dispatchable_effect"] = (
+        kind_count == 1
+        and record["kind_code"] == "eFKT"
+        and code_count == 1
+        and record["entrypoint_win64_valid"]
+    )
+    if kind_count == 0:
         record["kind_label"] = record["kind_label"] or "no_kind"
     return record
 
@@ -207,7 +255,10 @@ def _apply_adobe_property(record: dict[str, Any], key: str, data: bytes) -> None
         record["kind_code"] = code
         record["kind_label"] = KIND_LABELS.get(code, "unknown")
     elif key == "8664":  # CodeWin64X86
+        # Keep a best-effort display string, but only a symbol that passes the
+        # worker's validation counts as a resolvable entrypoint.
         record["entrypoint_win64"] = _cstring(data)
+        record["entrypoint_win64_valid"] = _valid_export_symbol(data) is not None
     elif key == "wx86":  # CodeWin32X86
         record["entrypoint_win32"] = _cstring(data)
     elif key == "name":
@@ -271,20 +322,34 @@ def _read_pipl_payloads(data: bytes, pe: dict[str, Any]) -> list[bytes]:
 
 
 def _classify(records: list[dict[str, Any]]) -> str:
-    """Fail-closed dispatch classification, matching the worker's discovery."""
+    """Static approximation of the worker's fail-closed dispatch decision.
+
+    A record that the worker's parse_pipl_entrypoint would reject as Invalid maps
+    to ``invalid_pipl`` here: a structural failure, a resource without exactly one
+    Kind, or an Effect Kind without exactly one valid CodeWin64X86. The classes
+    ``ambiguous_multiple_effect`` / ``ambiguous_effect_and_aegp`` are surfaced
+    separately for the listing, but like ``invalid_pipl`` they are never
+    dispatchable — only ``effect`` means the worker would resolve and run it.
+    """
     if not records:
         return "no_pipl"
-    if any(r["parse_state"] != "parsed" for r in records):
+    if any(r.get("parse_state") != "parsed" for r in records):
         return "invalid_pipl"
-    effects = [r for r in records if r["kind_code"] == "eFKT"]
-    aegp = [r for r in records if r["kind_code"] == "AEgx"]
+    for record in records:
+        # exactly one Kind is required; an Effect Kind must resolve a single
+        # valid Win64 entrypoint. Anything else is Invalid at the worker.
+        if record.get("kind_count") != 1:
+            return "invalid_pipl"
+        if record.get("kind_code") == "eFKT" and not record.get("dispatchable_effect"):
+            return "invalid_pipl"
+    effects = [r for r in records if r.get("dispatchable_effect")]
+    aegp = [r for r in records if r.get("kind_code") == "AEgx"]
     if len(effects) > 1:
         return "ambiguous_multiple_effect"
     if effects and aegp:
         return "ambiguous_effect_and_aegp"
     if effects:
-        # an Effect Kind with no resolvable Win64 entrypoint is not dispatchable
-        return "effect" if effects[0].get("entrypoint_win64") else "effect_missing_win64_entrypoint"
+        return "effect"
     if aegp:
         return "aegp"
     return "unknown"
@@ -308,16 +373,24 @@ def analyze_aex_file(path: Path, root: Path | None = None) -> dict[str, Any]:
 
     pe = probe.parse_pe(data)
     entry["machine_label"] = pe.get("machine_label")
+    resource_summary = pe.get("resource_summary", {})
+    total_pipl = int(resource_summary.get("pipl_resource_data_entry_count") or 0)
     payloads = _read_pipl_payloads(data, pe)
     records = [parse_pipl_payload(payload) for payload in payloads]
-    entry["pipl_resource_count"] = len(records)
+    entry["pipl_resource_count"] = total_pipl
     entry["pipl_records"] = records
-    entry["classification"] = _classify(records)
+    # The worker's resource enumeration fails closed past 64 PiPL resources, so a
+    # binary carrying more than that is Invalid regardless of the first 64.
+    if total_pipl > MAX_PIPL_RESOURCES:
+        entry["classification"] = "invalid_pipl"
+    else:
+        entry["classification"] = _classify(records)
 
-    # Surface the selected identity: the single Effect if unambiguous, else the
-    # first parsed record, so the listing always shows what it could read.
+    # Surface the selected identity: the single dispatchable Effect if
+    # unambiguous, else the first parsed record, so the listing always shows what
+    # it could read even when the plug-in is not dispatchable.
     selected = None
-    effects = [r for r in records if r["parse_state"] == "parsed" and r["kind_code"] == "eFKT"]
+    effects = [r for r in records if r.get("dispatchable_effect")]
     if len(effects) == 1:
         selected = effects[0]
     elif records:

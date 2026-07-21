@@ -37,8 +37,10 @@ the PE resource section without loading the module, calling an entrypoint,
 starting After Effects, or rendering. It additionally reads the identity
 properties `name`, `catg`, `eMNA` (Match Name), `eVER`/`eSVR`/`ePVR`,
 `eGLO`/`eGL2` for display. `tools/aex_list.py` prints a table (or JSON) for a
-single `.aex` or a recursively scanned directory, with the same fail-closed
-dispatch classification the worker would apply.
+single `.aex` or a recursively scanned directory, with a fail-closed dispatch
+classification that mirrors the worker's decision as a static approximation
+(only `effect` is dispatchable; ambiguous/invalid resources are surfaced but
+never treated as runnable).
 
 ```
 uv run python tools/aex_list.py --input path/to/plugins

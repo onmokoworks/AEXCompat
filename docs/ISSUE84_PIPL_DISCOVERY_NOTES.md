@@ -134,6 +134,28 @@ harness の repository ルートは exe の 4 親 = worktree なので built wor
 - self-authored の loadable AEX fixture (小文字/任意名/複数PiPL/kind不一致) はパースロジックを
   C++ 合成 self-test + Python 14 テストで担保済み。実 .aex 化は SDK ビルドを要し未実施。
 
+## ローカルエージェントレビュー ラウンド1 と対応 (2026-07-21)
+
+CLAUDE.md の [[review-order-local-then-codex]] に従い、Codex より先にローカルエージェントレビューを
+実施 (順序を誤って先に @codex を投げてしまったのを是正)。指摘と対応:
+
+- **[Medium] #2 invalid_pipl の下流未接続**: 新設した `plugin_kind:invalid_pipl` を broker/gate が
+  認識せず握り潰し。原因は **owner の下流配線移植漏れ** (l2_main.cpp だけ移植し、image_render.rs +1・
+  run-conformance-bundle.py・schema・test の invalid_pipl 追加を落としていた)。→ 全て移植:
+  `image_render.rs:414` の match、`run-conformance-bundle.py:527/591` の集合、
+  `conformance-report.schema.json` の enum、`test_run_conformance_bundle.py` の parametrize。
+- **[Medium] #1 Python パーサーが worker より緩い**: `_cstring` がシンボル検証をせず、不正シンボル
+  (ハイフン等) の Effect を dispatchable と誤表示。→ `_valid_export_symbol` を worker と同ロジックで
+  追加し、`entrypoint_win64_valid` / `dispatchable_effect` を導入。不正シンボルは effect に分類しない。
+- **[Low] #4 分類セマンティクス乖離**: kind/code 重複・kind 欠落・64個超を worker は Invalid にするが
+  Python は黙認/切り詰め。→ `_classify` を worker 忠実化 (kind_count!=1 や eFKT-without-valid-code は
+  invalid_pipl)、64個超は analyze で invalid_pipl。宣言文も「worker が受理するものを正確に」→
+  「fail-closed 判定の静的近似」に honest 化。
+- **[Medium/要確認] #3 実 AEX load 経路未検証**: レビュアーは broker inspect 実行を知らなかった。
+  実際は ColorGrid(Effect 到達)/Grabba(AEGP fail-closed) を `--inspect-experimental` で実証済み。
+  非標準 real Effect (PiPL 非搭載等) の fail-closed は corpus-gated として doc に明記済み。コード変更不要。
+- 検証: identity unit 17 passed、conformance 109 passed、broker cargo check clean、実フィクスチャ分類維持。
+
 ## 制約 / 注意
 
 - 最終マージは CLAUDE.md 上 Codex レビューループ + owner レビューが前提。Codex は 2026-07-20 に

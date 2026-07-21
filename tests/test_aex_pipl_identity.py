@@ -147,12 +147,36 @@ def test_classify_effect_and_aegp_is_ambiguous():
     assert ident._classify(records) == "ambiguous_effect_and_aegp"
 
 
-def test_classify_effect_missing_entrypoint():
+def test_classify_effect_missing_entrypoint_is_invalid():
+    # An Effect Kind with no CodeWin64X86 is Invalid at the worker, so the static
+    # view must not present it as a dispatchable effect.
     payload = _payload([
         _kind("eFKT"),
         _property("name", bytes([len("Demo")]) + b"Demo"),
     ])
-    assert ident._classify([ident.parse_pipl_payload(payload)]) == "effect_missing_win64_entrypoint"
+    assert ident._classify([ident.parse_pipl_payload(payload)]) == "invalid_pipl"
+
+
+def test_effect_with_invalid_entrypoint_symbol_is_not_dispatchable():
+    # A hyphenated symbol fails the worker's export-identifier validation, so it
+    # must not be classified as a dispatchable effect (regression for the static
+    # parser being laxer than the worker).
+    payload = _payload([_kind("eFKT"), _property("8664", b"bad-name\x00")])
+    record = ident.parse_pipl_payload(payload)
+    assert record["parse_state"] == "parsed"
+    assert record["entrypoint_win64_valid"] is False
+    assert record["dispatchable_effect"] is False
+    assert ident._classify([record]) == "invalid_pipl"
+
+
+def test_duplicate_kind_is_invalid():
+    payload = _payload([_kind("eFKT"), _kind("eFKT"), _property("8664", b"EffectMain\x00")])
+    assert ident._classify([ident.parse_pipl_payload(payload)]) == "invalid_pipl"
+
+
+def test_missing_kind_is_invalid():
+    payload = _payload([_property("8664", b"EffectMain\x00")])
+    assert ident._classify([ident.parse_pipl_payload(payload)]) == "invalid_pipl"
 
 
 def test_classify_invalid_when_any_record_invalid():
