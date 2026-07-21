@@ -898,12 +898,16 @@ impl RenderSession {
                 .as_nanos();
             for (index, layer) in request.layers.iter().enumerate() {
                 let path = root.join(format!("layer-session-{nonce}-{index}.rgba"));
-                OpenOptions::new()
+                let mut writer = OpenOptions::new()
                     .write(true)
                     .create_new(true)
-                    .open(&path)?
-                    .write_all(&layer.rgba)?;
+                    .open(&path)?;
+                // The file now exists on disk; track it for cleanup BEFORE the
+                // fallible write so a mid-write failure (or any later early
+                // return) still removes it instead of leaking a partial file.
                 layer_sidecars.0.push(path.clone());
+                writer.write_all(&layer.rgba)?;
+                drop(writer);
                 let file = OpenOptions::new().read(true).open(&path)?;
                 let handle = file.as_raw_handle() as HANDLE;
                 if unsafe {
