@@ -7,6 +7,7 @@ endif()
 
 add_library(pf_layer_param_probe MODULE
   pf_layer_param_probe.cpp
+  pf_layer_param_probe.rc
 )
 target_compile_features(pf_layer_param_probe PRIVATE cxx_std_17)
 target_include_directories(pf_layer_param_probe PRIVATE
