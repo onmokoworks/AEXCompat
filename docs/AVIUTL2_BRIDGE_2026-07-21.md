@@ -323,6 +323,11 @@ Codex が P2×3。broker source で3件とも妥当と確認して修正:
 float パスは回帰なし (echo probe [0,255,128]/[200,55,128] を維持)。color/angle/checkbox の
 実機 fixture は無いため broker source との一致で正しさを担保。
 
+追加 (Codex re-review): **hidden (`visible == false`) パラメーターを公開しない**。AE が
+private/条件付きで隠すパラメーターにコントロールを出して値を送ると意図を上書きしてしまう。
+harness (`main.rs:4181`) と同じく exposed_config で skip する (AEX 既定値のまま)。enabled/
+supervised は dynamic/soft な状態で AviUtl2 の静的 config では表現しづらいため今は据え置き。
+
 ## 段階1 総括
 
 段階1 exit 条件を満たした:

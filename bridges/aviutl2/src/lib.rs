@@ -718,6 +718,13 @@ fn exposed_config(template: &[InteractiveParameter]) -> ExposedParams {
         defaults: Vec::new(),
     };
     for parameter in template {
+        // Skip parameters AE keeps hidden (PF_PUI_INVISIBLE / conditionally
+        // hidden), matching the harness (main.rs:4181): exposing a control for
+        // one, and sending edited values, would override a parameter the effect
+        // intends to keep private. It stays at the AEX default.
+        if !parameter.visible {
+            continue;
+        }
         if let Some(item) = config_item_for(parameter) {
             exposed.items.push(item);
             exposed.slots.push(parameter.slot);
