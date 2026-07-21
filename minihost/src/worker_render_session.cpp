@@ -239,7 +239,7 @@ bool SessionChannels::static_header_matches(const SessionGeometry& geometry) con
                                   ? 32
                                   : (geometry.output_pixel_bytes == 8 ? 16 : 8);
   return opened() && read_header_u32(kHeaderMagicOffset) == kHeaderMagic &&
-         read_header_u32(kHeaderVersionOffset) == kProtocolVersion &&
+         read_header_u32(kHeaderVersionOffset) == kSessionHeaderVersion &&
          read_header_u32(kHeaderDepthCodeOffset) == depth_code &&
          read_header_u32(kHeaderMaxWidthOffset) ==
              static_cast<uint32_t>(geometry.max_width) &&

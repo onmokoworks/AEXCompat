@@ -473,7 +473,9 @@ SessionHeader (すべて u32 LE、予約領域は 0 埋め):
 
 ```
 magic            "AEXS"        (0x53584541)
-version          1
+version          2   (レイアウト版。layer slot が per-layer サイズ化 #264 で 1→2。
+                     制御メッセージの `v` とは別軸で、mismatch build を両方向で
+                     fail-closed にする。audio session は layout 不変で 1 のまま)
 depth_code       8 | 16 | 32
 max_width, max_height
 layer_slot_count

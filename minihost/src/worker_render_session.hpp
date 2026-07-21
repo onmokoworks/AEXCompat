@@ -13,6 +13,12 @@
 namespace aexcompat::worker_render_session {
 
 inline constexpr uint32_t kProtocolVersion = 1;
+// Version stamped in the shared-section header (kHeaderVersionOffset) and
+// validated by both sides. Distinct from the message version above so it tracks
+// the shared-memory LAYOUT: bumped to 2 when layer slots became per-layer sized
+// (#264). A stale broker/worker pair whose layouts disagree fails closed on the
+// header check (both directions) instead of reading the wrong bytes.
+inline constexpr uint32_t kSessionHeaderVersion = 2;
 // render_frame v:2 carries a per-frame `parameters` payload replacing the
 // launch assignments for that frame only (protocol §4.2.1, issue #107). Every
 // other message, the frame_done schema, and the header layout stay v1.

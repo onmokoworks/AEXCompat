@@ -335,7 +335,9 @@ mod worker {
         }
         let view = View(view_address.Value as *mut u8);
         if view.read_u32(MAGIC_OFFSET) != HEADER_MAGIC
-            || view.read_u32(VERSION_OFFSET) != 1
+            // Session header layout version: 2 since layer slots became
+            // per-layer sized (#264).
+            || view.read_u32(VERSION_OFFSET) != 2
             || view.read_u32(DEPTH_CODE_OFFSET) != 8
             || view.read_u32(MAX_WIDTH_OFFSET) != width as u32
             || view.read_u32(MAX_HEIGHT_OFFSET) != height as u32
@@ -351,18 +353,24 @@ mod worker {
         // The integration test fills each layer's slot with its slot number as
         // a byte, so reading the first byte of each layer slot proves the
         // metadata reached the right slot with the right pixels (issue #98 W1-4).
+        // Layer slots are sized per-layer (#264): the offset walks a prefix sum
+        // of each layer's own aligned RGBA8 size (slot,w,h[,time,scale]).
         if let Some(trailer) = &layer_trailer {
-            let layer_base = output_offset + aligned(slot_bytes);
-            for (index, entry) in trailer["session-layers:v1|".len()..].split(';').enumerate() {
-                let Some(slot) = entry.split(',').next().and_then(|s| s.parse::<u32>().ok())
-                else {
+            let mut offset = output_offset + aligned(slot_bytes);
+            for entry in trailer["session-layers:v1|".len()..].split(';') {
+                let fields: Vec<&str> = entry.split(',').collect();
+                let (Some(Ok(slot)), Some(Ok(layer_width)), Some(Ok(layer_height))) = (
+                    fields.first().map(|s| s.parse::<u32>()),
+                    fields.get(1).map(|s| s.parse::<usize>()),
+                    fields.get(2).map(|s| s.parse::<usize>()),
+                ) else {
                     return EXIT_PROTOCOL_VIOLATION;
                 };
-                let offset = layer_base + index * aligned(slot_bytes);
                 let byte = unsafe { view.0.add(offset).read() };
                 if byte != slot as u8 {
                     return EXIT_PROTOCOL_VIOLATION;
                 }
+                offset += aligned(layer_width * layer_height * 4);
             }
         }
 

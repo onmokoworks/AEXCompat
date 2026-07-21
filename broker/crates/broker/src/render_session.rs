@@ -54,7 +54,16 @@ use windows_sys::Win32::System::Pipes::CreatePipe;
 const HEADER_BYTES: usize = 4096;
 const SLOT_ALIGNMENT: usize = 4096;
 const HEADER_MAGIC: u32 = 0x5358_4541; // "AEXS" little-endian
+/// Base version of the control-message envelope (`frame_done`/`render_frame`
+/// `v`). Kept at 1; the per-frame-attributes messages use v2
+/// (`kRenderFrameParametersVersion`).
 const PROTOCOL_VERSION: u32 = 1;
+/// Version stamped in the shared-section header (`VERSION_OFFSET`) and validated
+/// by both broker and worker. Distinct from the message version so it can track
+/// the shared-memory LAYOUT: bumped to 2 when layer slots became per-layer sized
+/// (#264). A stale broker/worker pair whose layouts disagree fails closed on the
+/// header check (in both directions) instead of reading the wrong bytes.
+const SESSION_HEADER_VERSION: u32 = 2;
 const MAX_MESSAGE_BYTES: usize = 64 * 1024;
 /// Fail-closed cap on the whole section for pathological configurations
 /// (protocol §6); ordinary full-HD sessions stay far below it.
@@ -347,7 +356,7 @@ fn write_header_u32_raw(view: *mut u8, offset: usize, value: u32) {
 /// pending frame; `generation` seeds them consistently in the meantime.
 fn init_section_header(view: *mut u8, geometry: &SessionGeometry, generation: u32) {
     write_header_u32_raw(view, MAGIC_OFFSET, HEADER_MAGIC);
-    write_header_u32_raw(view, VERSION_OFFSET, PROTOCOL_VERSION);
+    write_header_u32_raw(view, VERSION_OFFSET, SESSION_HEADER_VERSION);
     write_header_u32_raw(view, DEPTH_CODE_OFFSET, depth_code(geometry.pixel_format));
     write_header_u32_raw(view, MAX_WIDTH_OFFSET, geometry.width);
     write_header_u32_raw(view, MAX_HEIGHT_OFFSET, geometry.height);
@@ -889,7 +898,7 @@ impl RenderSession {
             section_bytes,
         };
         transport.write_header_u32(MAGIC_OFFSET, HEADER_MAGIC);
-        transport.write_header_u32(VERSION_OFFSET, PROTOCOL_VERSION);
+        transport.write_header_u32(VERSION_OFFSET, SESSION_HEADER_VERSION);
         transport.write_header_u32(DEPTH_CODE_OFFSET, depth_code(request.pixel_format));
         transport.write_header_u32(MAX_WIDTH_OFFSET, request.width);
         transport.write_header_u32(MAX_HEIGHT_OFFSET, request.height);
@@ -1901,7 +1910,7 @@ impl RenderSession {
 
     fn validate_static_header(&self) -> Result<(), String> {
         if self.transport.read_header_u32(MAGIC_OFFSET) != HEADER_MAGIC
-            || self.transport.read_header_u32(VERSION_OFFSET) != PROTOCOL_VERSION
+            || self.transport.read_header_u32(VERSION_OFFSET) != SESSION_HEADER_VERSION
             || self.transport.read_header_u32(DEPTH_CODE_OFFSET)
                 != depth_code(self.geometry.pixel_format)
             || self.transport.read_header_u32(MAX_WIDTH_OFFSET) != self.geometry.width
@@ -2466,6 +2475,9 @@ impl AudioRenderSession {
             section_bytes,
         };
         transport.write_header_u32(MAGIC_OFFSET, AUDIO_HEADER_MAGIC);
+        // The audio session's shared-memory layout is unchanged (no layer
+        // slots), so its header version stays 1 (matching the audio worker's
+        // own `kProtocolVersion`); only the classic layout bumped to 2 (#264).
         transport.write_header_u32(VERSION_OFFSET, PROTOCOL_VERSION);
         transport.write_header_u32(AUDIO_MAX_SAMPLES_OFFSET, geometry.max_samples);
         transport.write_header_u32(AUDIO_CHANNELS_OFFSET, geometry.channels);
@@ -2617,6 +2629,7 @@ impl AudioRenderSession {
 
     fn static_header_ok(&self) -> bool {
         self.transport.read_header_u32(MAGIC_OFFSET) == AUDIO_HEADER_MAGIC
+            // Audio layout unchanged: header version stays 1 (see open).
             && self.transport.read_header_u32(VERSION_OFFSET) == PROTOCOL_VERSION
             && self.transport.read_header_u32(AUDIO_MAX_SAMPLES_OFFSET) == self.geometry.max_samples
             && self.transport.read_header_u32(AUDIO_CHANNELS_OFFSET) == self.geometry.channels
