@@ -94,6 +94,25 @@ def test_gpu_backend_mapping_is_explicit_and_auto_preflights_as_cuda():
     assert "RenderGpuBackend::Cpu => None" in mapping
 
 
+def test_gpu_policy_render_routes_through_the_session_and_a_preflight_producer():
+    source = SOURCE.read_text(encoding="utf-8")
+    body = render_function()
+    gate = body[body.index("let session_eligible ="):body.index("if session_eligible")]
+    # A GPU single-image render (Argb32f + a GPU backend) with an authenticated
+    # runtime-module policy is session-eligible (#290); policy-less GPU stays out.
+    assert "runtime_backend(gpu_backend).is_some()" in gate
+    assert "gpu_runtime_policy.is_some()" in gate
+    assert "gpu_runtime_policy.is_none()" in gate
+    # The wrapper carries the policy into the session instead of hard-coding None.
+    assert "gpu_runtime_policy: Option<GpuRuntimePolicyInput<'a>>," in source
+    assert "gpu_runtime_policy: request.gpu_runtime_policy," in source
+    # The policy input is produced by a GPU module-audit preflight worker run that
+    # emits the classified module report the render re-authenticates.
+    assert "pub fn prepare_gpu_runtime_policy(" in source
+    assert '"--gpu-module-report-v1"' in source
+    assert "authenticate_gpu_worker_report(" in source
+
+
 def test_all_other_image_routes_use_secure_dispatch_without_isolated_fallback():
     source = SOURCE.read_text(encoding="utf-8")
     assert "windows_process::run_isolated" not in source
@@ -101,7 +120,10 @@ def test_all_other_image_routes_use_secure_dispatch_without_isolated_fallback():
     assert source.count("dispatch_approved_image(") == 33
     assert source.count("WorkerKind::L2,") == 24
     assert source.count("WorkerKind::Render,") == 7
-    assert source.count("WorkerKind::Smart,") == 2
+    # Two smart render routes plus the GPU module-audit preflight (#290), which
+    # dispatches the smart worker to emit the classified module report the GPU
+    # policy producer authenticates.
+    assert source.count("WorkerKind::Smart,") == 3
 
 
 def test_shared_dispatch_preserves_cli_order_and_empty_dependency_approval():

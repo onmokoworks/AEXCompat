@@ -1750,6 +1750,33 @@ int worker_main_impl(int argc, wchar_t **argv) {
                  "\"bounded\":true,\"aegp_not_effect\":true}\n";
     return passed ? 0 : 72;
   }
+  // GPU module-audit preflight (#290): authorize the AEXRMA1-listed GPU runtime
+  // DLLs, load them via the transport backend, and emit the classified module
+  // report the broker re-authenticates before a secure GPU dispatch. argv shape
+  // mirrors the params-only manifest convention:
+  //   --gpu-module-report-v1 <plugin> <sha256> --runtime-module-authorization-v1 <manifest>
+  if (argc == 6 && std::wstring(argv[1]) == L"--gpu-module-report-v1" &&
+      std::wstring(argv[4]) == L"--runtime-module-authorization-v1") {
+    namespace wr = aexcompat::worker_runtime;
+    namespace tp = aexcompat::gpu_runtime::memory_world_transport;
+    const std::filesystem::path plugin_path = argv[2];
+    // Fail-closed identity gate: validates the plugin-dir manifest and re-hashes
+    // every authorized GPU runtime DLL before any of them can load.
+    if (!wr::parse_runtime_module_authorization(plugin_path, argv[5])) return 74;
+    // Manifest backend id (1=cuda,2=opencl,3=directx,4=opengl) → transport
+    // framework code (3=cuda,1=opencl,4=directx). OpenGL is inspect-only; a
+    // smart-session GPU render never runs on it.
+    const uint32_t backend = wr::authorized_runtime_backend();
+    const int32_t framework = backend == 1   ? 3
+                              : backend == 2 ? 1
+                              : backend == 3 ? 4
+                                             : 0;
+    if (framework == 0) return 75;
+    if (!tp::begin_backend_context(framework, 0)) return 76;
+    std::cout << wr::gpu_module_report_json() << "\n";
+    tp::end_backend_context(framework);
+    return 0;
+  }
   if (const auto selftest_exit = dispatch_worker_selftests(argc, argv))
     return *selftest_exit;
   // The broker passes only an authenticated inherited file handle via
