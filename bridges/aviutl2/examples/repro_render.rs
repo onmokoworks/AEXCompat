@@ -45,8 +45,9 @@ fn main() {
         );
     }
 
-    // 2. Build the exposed (float/checkbox/color/valid-integer) subset, same
-    //    predicate as the bridge, and try to open+render.
+    // 2. Build a scalar subset (float/checkbox/color/valid-integer) to open and
+    //    render with. This is a diagnostic stand-in, not the bridge's exact
+    //    `config_item_for` predicate (which also surfaces popups as Select).
     let exposed: Vec<InteractiveParameter> = params
         .iter()
         .filter(|p| {
@@ -116,7 +117,7 @@ fn main() {
                 FrameStatus::Rendered { pixels, .. } => {
                     eprintln!(
                         "  frame {frame} value={value:?} -> RENDERED, first pixel RGBA={:?}",
-                        &pixels[0..4]
+                        pixels.get(0..4).unwrap_or(&pixels)
                     );
                 }
                 FrameStatus::FrameError { render_error } => {
