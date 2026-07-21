@@ -210,6 +210,100 @@ green は行パリティ (偶191/奇64)、blue ~128。
   → 黒。正しく env を継いだ起動で fill probe が描画された。実機テストは env 更新後に
   新規プロセスツリーから AviUtl2 を起動すること。
 
+## 2026-07-21 段階2a: パラメーターマッピング (実装)
+
+段階2 の第一段。固定 AEX のパラメーターを AviUtl2 の設定項目に出し、値を
+per-frame でセッションに渡す。
+
+- **discovery**: `new()` (プラグインロード時) で
+  `inspect_experimental_with_diagnostics(repo, plugin, sha)` を呼び、AEX の
+  パラメーター (`Vec<InteractiveParameter>`: name/kind/min/max/value/choices/color)
+  を取得。失敗は非致命 (warn して段階1 の launch 既定値動作に縮退)。
+- **マッピング** (`config_item_for`): float/slider/angle → `Track`、integer →
+  `Track(step=1)`、checkbox → `Checkbox`、color → `Color` (0x00RRGGBB、AEX の
+  α は非公開)、popup → `Select` (choices → items)。point/layer/comp/button/
+  custom/group markers は未公開 (discovered 既定のまま、段階3)。範囲が退化
+  (min>=max, 非有限) の numeric は公開しない。
+- **保持**: `FilterConfigItem` は `Send+Sync` でない (Button/Data variant 由来) ため
+  `Send+Sync` 必須の plugin 構造体に保持できない。→ 保持は `param_template:
+  Vec<InteractiveParameter>` (プレーンデータ) のみ。config items は
+  `plugin_info()`、slots は `proc_video()` で `exposed_config()` から都度構築
+  (deterministic なので順序一致)。
+- **session open**: `SessionOpenRequest.parameters` に template (discovered 既定) を
+  baseline として渡す (段階1 は None)。
+- **per-frame** (`proc_video`): AviUtl2 が渡す `config: &[FilterConfigItem]` の
+  現在値を template に overlay し (`apply_config_values`、slot で対応付け)、
+  full set を `render_frame_with_parameters` に渡す。protocol §4.2.1 の per-frame
+  parameters は launch payload を完全置換するので、未マップ slot が既定に戻らない
+  よう全 slot を送る。
+- build/clippy クリーン。stage2 build を `.auf2` に再配置済み。
+
+### 2026-07-21 実機 (fill probe): 設定出ず + render worker crash — 原因と修正
+
+観察 (実機): 段階2 build で fill probe を適用したところ、(1) 設定に control が
+一切出ない、(2) **段階1 で描画できた render が worker exit する**
+(`render session invalidated (worker_exited): the worker was gone before frame 0`)。
+discovery 失敗 warn はログに無し (= discovery は成功、template 非空)。
+
+原因 (broker source 直読):
+
+- **popup が "integer" 化する**: inspection の `runtime_kind` は popup (observed_type 7)
+  を `_ => "integer"` に落とす (`image_render.rs:3139`)。かつ popup は valid_min/max を
+  持たず `host_min==host_max==default` (退化 range)。→ 私の `bounded_range` が None を
+  返し config item にならない。**fill probe は 3 popup のみなので control ゼロ**。
+- **worker crash の差分は「parameters 送出」**: 段階1 は `parameters: None` で payload を
+  渡さず動いた。段階2 は discovered template 全体 (退化 integer の popup 含む) を session
+  baseline + per-frame に渡していた。`encode_interactive_payload` は "integer" を i32 と
+  して載せる (filter 対象外) ため、popup 値が worker に渡り render を壊す (popup value の
+  index 不整合で fill probe render が不正 branch → crash と推測)。段階1 が動いたのは
+  何も送らなかったから。
+
+修正 (実装):
+
+- **exposed subset のみ送る**: `exposed_config` が UI 公開する (config_item_for が Some を
+  返す) パラメーターだけを返し、session baseline も per-frame もその subset のみに。
+  full template は送らない。fill probe → exposed 空 → None → 段階1 と同一経路で描画
+  (crash しない)。実 slider/checkbox/color を持つ AEX → それらのみ送出。
+- 結果: fill probe は描画できるが control は出ない (全 popup で公開対象ゼロ、正しい挙動)。
+  段階2 を体感するには float slider 等を持つ AEX が要る。
+
+### 2026-07-21 訂正: worker crash の真因は「ステール worker」、popup ではない
+
+上の「worker crash は popup 送出が原因」という仮説は**誤りだった (訂正)**。standalone
+repro (`bridges/aviutl2/examples/repro_render.rs`、broker を直に叩く) で切り分けた結果:
+
+- **discovery が AviUtl2 で失敗していたのは `aex_l2_worker.exe` 未ビルド**。inspect は
+  `WorkerKind::L2` を使う (`image_render.rs:2353`) が、私は render worker しか flat パスに
+  置いていなかった。→ l2/smart worker をビルドして揃えたら discovery 成功
+  (echo probe → `float "Echo" min=0 max=255` を正しく取得)。
+- **render の worker_exited は render worker binary がステール**だったのが真因。
+  l2/smart を VS generator でビルドした際に共有の `aex_worker_runtime_core` object が
+  再コンパイルされ、先にコピーしていた flat の `aex_render_worker.exe` (19:24) が
+  不整合になった。probe/パラメーターと無関係で、**pf_sampling_probe (段階1 で描画実績) すら
+  `parameters: None` で render_error -1 / exit 23 で落ちていた**のが決定的証拠。
+  → render worker を現ソースで再ビルド (21:36) したら **全 probe が描画成功**。
+- **per-frame パラメーター適用は byte 単位で実証**: echo probe を Echo=0 → 出力
+  RGBA=[0,255,128,255]、Echo=200 → [200,55,128,255] (赤=値, 緑=255-値)。段階2 の
+  パラメーターマッピング + per-frame 反映は正しく動く。バイト順 RGBA も再確認。
+
+教訓: **worker は全種 (l2/render/smart) を同一ソースから一括で flat に揃える**。
+片方だけ再ビルドすると共有 object の再コンパイルで他がステール化する。canonical な
+Ninja flat ビルド (`docs/BUILD_REQUIREMENTS.md`) を使うのが安全。
+
+`exposed-only` 送出の判断について: popup が crash 原因という前提は誤りだったが、
+「UI 公開できたパラメーターだけ送る」設計自体は維持する (退化 range の popup を
+slider として出しても無意味で、送らなくても AEX 既定値のままで差が無い)。popup を
+dropdown として正しく公開する件は段階2b (choices は保持されるので "integer+choices" を
+Select に写像可能、value の index 符号化を検証してから)。
+
+未解決 → 段階2b:
+
+- **popup を dropdown 公開する**: `choices` は保持される (`image_render.rs:3234`) ので
+  "integer + 非空 choices" を Select に写像できる。ただし popup 値を worker に送ると
+  crash する件 (index 符号化) の解明が先。crash 原因を standalone (render-parameter-request
+  CLI 等) で再現・特定してから popup 送出を有効化する。
+- integer 系で valid_min/max を持つものの range 取得改善。
+
 ## 段階1 総括
 
 段階1 exit 条件を満たした:

@@ -11,7 +11,7 @@ description = "AviUtl2 filter plugin bridge driving an AEXCompat resident Render
 # gate. The broker library is pulled in by path only.
 [lib]
 name = "aexcompat_aviutl2_bridge"
-crate-type = ["cdylib"]
+crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 # The AEXCompat broker, driven as an in-process library. RenderSession::open
