@@ -142,6 +142,11 @@ struct BridgeSession {
 /// no longer matches the object and must be reopened.
 #[derive(Clone, PartialEq, Eq)]
 struct SessionIdentity {
+    /// The selected AEX's path. Kept in the identity (separate from the
+    /// content-based `plugin_sha256`) so switching to a byte-identical copy at a
+    /// different directory still reopens: an AEX can load DLLs/resources adjacent
+    /// to its own path, so same bytes at another location may render differently.
+    plugin: PathBuf,
     /// The selected AEX's sha256; a different AEX (runtime file switch) reopens.
     plugin_sha256: String,
     /// Whether this identity renders on the smart path.
@@ -156,6 +161,7 @@ struct SessionIdentity {
 impl BridgeSession {
     fn open(config: SessionConfig) -> Result<BridgeSession, String> {
         let identity = SessionIdentity {
+            plugin: config.plugin.clone(),
             plugin_sha256: config.plugin_sha256.clone(),
             smart: config.smart,
             width: config.width,
@@ -751,6 +757,7 @@ impl FilterPlugin for AexBridgeFilter {
             .map_err(|message| aviutl2::anyhow::anyhow!("{message}"))?;
 
         let identity = SessionIdentity {
+            plugin: aex.plugin.clone(),
             plugin_sha256: aex.sha.clone(),
             smart: aex.smart,
             width,
