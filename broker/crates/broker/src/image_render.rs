@@ -4718,15 +4718,19 @@ fn render_with_artifact(
         // to keep the pre-transform and the worker-reported settings consistent.
         && conformance_render_settings.is_none()
     {
-        // Pure session launches never reach the one-shot stale sweep below, and
-        // the aux sweep only runs when aux channels are present, so a successful
-        // layered session would otherwise never reclaim leaked layer-session-*
-        // sidecars from a prior crash (#268). Run the same sweep here; this
-        // render's own sidecars do not exist yet (RenderSession::open writes them
-        // with a fresh nonce), and freshly written aux sidecars survive the age
+        // Only a layered session touches target/image-transport: RenderSession::
+        // open writes per-layer sidecars there (#268), so a file-free session
+        // (no secondary/timed layers) must not be forced to create or sweep the
+        // directory. When this session does write sidecars, run the same stale
+        // sweep the aux and one-shot paths do, since a pure layered session
+        // reaches neither: it reclaims leaked layer-session-* files from a prior
+        // crash. This render's own sidecars do not exist yet (open writes them
+        // with a fresh nonce) and freshly written aux sidecars survive the age
         // cutoff, so it is idempotent with the aux/one-shot calls.
-        fs::create_dir_all(&root)?;
-        cleanup_stale_image_transport(&root, SystemTime::now())?;
+        if !secondaries.is_empty() || !timed_secondaries.is_empty() {
+            fs::create_dir_all(&root)?;
+            cleanup_stale_image_transport(&root, SystemTime::now())?;
+        }
         // Static secondaries render on every frame; timed secondaries (issue
         // #98 W1-4b) carry their rational admission time so the worker selects
         // the matching entry per frame, the same as the one-shot transport.
