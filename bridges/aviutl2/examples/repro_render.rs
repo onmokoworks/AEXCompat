@@ -83,6 +83,7 @@ fn main() {
         spatial_trailer: None,
         render_environment_trailer: None,
         alpha_as_coverage_params: &[],
+        conformance_render_settings: None,
         layers: &[],
         dependencies: Vec::new(),
         width,
@@ -128,7 +129,13 @@ fn main() {
         }
     };
 
-    render_red(&mut session, 0, Some(0.0));
-    render_red(&mut session, 1, Some(200.0));
+    // Two in-range values for the first exposed param (its min and max), so the
+    // frames differ without tripping the encoder's range check for any AEX.
+    let (lo, hi) = exposed
+        .first()
+        .map(|p| (p.minimum, p.maximum))
+        .unwrap_or((0.0, 0.0));
+    render_red(&mut session, 0, Some(lo));
+    render_red(&mut session, 1, Some(hi));
     let _ = session.close();
 }
