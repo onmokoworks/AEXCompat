@@ -4698,19 +4698,29 @@ fn render_with_artifact(
         && std::env::var_os(DISABLE_SESSION_WRAPPER_ENV).is_none()
         && timing.time_scale <= i32::MAX as u32
         && if smart {
-            // Argb32f smart Auto is the one-shot GPU-preflight path
-            // (gpu_initial_attempt below requires smart && Argb32f && a runtime
-            // backend): one-shot attempts GPU, fails the policy-less preflight,
-            // and records gpu_attempt/gpu_fallback_used before the CPU render.
-            // A CPU session folds Auto+policy-none straight to CPU and cannot
-            // reproduce those report fields, so routing it here would diverge
-            // from one-shot on everything but pixels. Keep it on one-shot until
-            // the GPU session stage aligns that path; Argb8 Auto and any
-            // explicit-CPU smart render take no GPU attempt and stay equivalent.
+            // Only admit smart configs the one-shot transport also handles
+            // equivalently, so the escape hatch (AEXCOMPAT_DISABLE_RENDER_SESSION_WRAPPER)
+            // and the A/B tests stay valid. The one-shot smart command table
+            // (image_worker_command) has non-layered arms for Argb8/Argb16 only
+            // under Auto, and for Argb32f under Auto/Cpu/OpenCl/DirectX:
+            //   - Argb8/Argb16 Auto: no GPU attempt either side, equivalent.
+            //   - Argb32f Cpu: one-shot --smart-image32-cpu, no GPU attempt,
+            //     equivalent.
+            // Excluded here:
+            //   - Argb32f Auto: the one-shot GPU-preflight path
+            //     (gpu_initial_attempt = smart && Argb32f && a runtime backend);
+            //     one-shot attempts GPU, fails the policy-less preflight, and
+            //     records gpu_attempt/gpu_fallback_used before the CPU render,
+            //     which a CPU-folded Auto session cannot reproduce. Defer to the
+            //     GPU session stage.
+            //   - Argb8/Argb16 Cpu: the one-shot table has no CPU arm for these
+            //     depths (falls through to the error arm), so routing them to
+            //     the session would succeed while the forced one-shot fails.
             secondaries.is_empty()
                 && timed_secondaries.is_empty()
                 && host_context.is_none()
-                && (gpu_backend == RenderGpuBackend::Cpu
+                && ((gpu_backend == RenderGpuBackend::Cpu
+                    && pixel_format == RenderPixelFormat::Argb32f)
                     || (gpu_backend == RenderGpuBackend::Auto
                         && gpu_runtime_policy.is_none()
                         && pixel_format != RenderPixelFormat::Argb32f))
