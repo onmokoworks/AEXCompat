@@ -73,9 +73,27 @@ SDK anchors: `Examples/Resources/AE_General.r` (`AEEffect = 'eFKT'`,
   (Kind=AEGP, classified `aegp`, never `effect`).
 - 14 machine-portable Python unit tests for the bounded, fail-closed decode.
 
-## Pending (corpus-gated, not available in this checkout)
+## Real-corpus evidence: lowercase entrypoint discovery (issue #84 criterion 1)
 
-- OLM ColorKeep / OLMBlur and Rowbyte Data Glitch / Fast Bokeh discovery
-  (acceptance criteria 1-2) and the 5-AEX Classic/SmartFX matrix rerun
-  (criterion 6) require the real third-party corpus from issue #9, which is not
-  present locally. These remain to be run where the corpus is available.
+Verified against a locally available OLM corpus (private plug-ins; only their
+own public PiPL identity is recorded here, never paths or bytes). Both plug-ins
+declare a Kind of AEEffect with a lowercase `entryPointFunc` CodeWin64X86 symbol
+— exactly the case the old fixed-`EffectMain` lookup misclassified as an AEGP
+candidate:
+
+| plug-in (Match Name, version) | Kind | CodeWin64X86 | static class | worker `--inspect-experimental` |
+|---|---|---|---|---|
+| OLM Blur (`OLM OLM Blur`, 1.2.0) | AEEffect | `entryPointFunc` | effect | reaches PARAMS_SETUP; 5 params (float/integer) |
+| OLM Color Key (`OLM Color Key`, 2.3.0) | AEEffect | `entryPointFunc` | effect | reaches PARAMS_SETUP; 223 params (color/float/group/integer) |
+
+Both are discovered from PiPL as PF entrypoints and dispatch past GLOBAL_SETUP
+into PARAMS_SETUP, confirming criterion 1 on a real third-party plug-in.
+
+## Pending (corpus-gated) — tracked in #279
+
+- Rowbyte Data Glitch / Fast Bokeh discovery (criterion 2) and the full 5-AEX
+  Classic/SmartFX matrix rerun (criterion 6) require the Rowbyte corpus, which is
+  not present on this machine (commercial plug-ins). The discovery mechanism is
+  the same one verified above for OLM (Rowbyte's uppercase `EntryPointFunc` is
+  accepted by the same bounded symbol validation), so these should pass once the
+  corpus is available. Tracked as follow-up in #279.
