@@ -91,9 +91,14 @@ ParseResult parse(Kind kind, int argc, wchar_t** argv, const Hooks& hooks) {
       // The per-frame protocol carries current_time.scale as a signed 32-bit
       // value, so a launch scale above INT32_MAX could never be matched by
       // any frame; keep the launch and frame contracts on the same domain.
+      // A zero-duration session (total_time == 0) is valid and renders the
+      // single current_time == 0 frame, matching the one-shot worker (#272);
+      // only a negative total_time is rejected. The per-frame loop still rejects
+      // current_time > total_time (worker_render_session.cpp), so total_time == 0
+      // admits exactly the t=0 frame.
       if (invocation.width <= 0 || invocation.height <= 0 ||
           invocation.width > 4096 || invocation.height > 4096 ||
-          invocation.time_step <= 0 || invocation.total_time <= 0 ||
+          invocation.time_step <= 0 || invocation.total_time < 0 ||
           invocation.time_scale == 0 ||
           invocation.time_scale > 0x7FFFFFFFu) throw 1;
       // Static context trailers, one-shot order and hooks (the classifier

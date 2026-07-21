@@ -1559,6 +1559,79 @@ mod windows_e2e {
         let _ = std::fs::remove_dir_all(&scratch);
     }
 
+    #[test]
+    fn zero_duration_render_matches_the_one_shot_transport() {
+        // A zero-duration render (total_time == 0) is the single t=0 frame the
+        // one-shot worker produces; the session now carries it too (#272), so it
+        // is no longer routed to one-shot. Prove the session renders it (the
+        // wrapper counter advances) byte-for-byte identically to the one-shot
+        // escape-hatch route.
+        let _env_guard = SESSION_ROUTE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let root = repository_root();
+        let worker = root.join("target/minihost-build/aex_render_worker.exe");
+        let aex = root.join("target/pf-sampling-probe-build/Release/pf_sampling_probe.aex");
+        if !worker.is_file() || !aex.is_file() {
+            eprintln!(
+                "skipping zero-duration A/B: build aex_render_worker.exe and \
+                 pf_sampling_probe.aex first"
+            );
+            return;
+        }
+        let sha = format!("{:x}", Sha256::digest(std::fs::read(&aex).unwrap()));
+        let scratch = std::env::temp_dir().join(format!(
+            "aexcompat-zero-duration-{}-{:032x}",
+            std::process::id(),
+            rand::random::<u128>()
+        ));
+        std::fs::create_dir_all(&scratch).unwrap();
+        let input = scratch.join("input.png");
+        image::RgbaImage::from_fn(48, 32, |x, y| {
+            image::Rgba([(x * 5) as u8, (y * 3) as u8, (x + y) as u8, 255])
+        })
+        .save(&input)
+        .unwrap();
+        let timing = RenderTiming {
+            current_time: 0,
+            time_step: 1,
+            total_time: 0,
+            time_scale: 30,
+        };
+
+        // Run A: default routing, the zero-duration render now carried by the
+        // session (the counter must advance, or the comparison is vacuous).
+        unsafe { std::env::remove_var(DISABLE_SESSION_WRAPPER_ENV) };
+        let before = RENDER_SESSION_WRAPPER_RENDERS.load(Ordering::SeqCst);
+        let output_a = scratch.join("out-a.png");
+        render_experimental_image_at_time(&root, &aex, &sha, &input, &output_a, &[], timing)
+            .expect("session-route zero-duration render");
+        assert!(
+            RENDER_SESSION_WRAPPER_RENDERS.load(Ordering::SeqCst) > before,
+            "the zero-duration render must now be carried by the session"
+        );
+
+        // Run B: the escape hatch forces the one-shot argv transport.
+        unsafe { std::env::set_var(DISABLE_SESSION_WRAPPER_ENV, "1") };
+        let after_a = RENDER_SESSION_WRAPPER_RENDERS.load(Ordering::SeqCst);
+        let output_b = scratch.join("out-b.png");
+        let result_b =
+            render_experimental_image_at_time(&root, &aex, &sha, &input, &output_b, &[], timing);
+        unsafe { std::env::remove_var(DISABLE_SESSION_WRAPPER_ENV) };
+        result_b.expect("one-shot zero-duration render");
+        assert_eq!(
+            RENDER_SESSION_WRAPPER_RENDERS.load(Ordering::SeqCst),
+            after_a,
+            "the escape hatch did not force the one-shot transport"
+        );
+        assert_eq!(
+            std::fs::read(&output_a).unwrap(),
+            std::fs::read(&output_b).unwrap(),
+            "the zero-duration PNG differs between the session and one-shot routes"
+        );
+        let _ = std::fs::remove_dir_all(&scratch);
+    }
+
     /// Audio fail-closed fallback removal (#264, #98 W4): when the audio session
     /// is attempted (escape hatch unset) but cannot carry the render, the render
     /// must surface an explicit error instead of silently rerunning the one-shot

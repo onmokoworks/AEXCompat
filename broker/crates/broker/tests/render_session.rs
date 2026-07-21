@@ -1244,6 +1244,63 @@ mod windows_e2e {
     }
 
     #[test]
+    fn zero_duration_session_renders_the_single_frame() {
+        // A zero-duration render (total_time == 0) is valid and renders the
+        // single current_time == 0 frame, matching the one-shot worker (#272).
+        // It is no longer routed to the one-shot path.
+        let _behavior = BehaviorGuard::set(None);
+        let (repository, plugin, sha) = temp_repository();
+        let mut session = RenderSession::open(SessionOpenRequest {
+            repository: &repository.0,
+            plugin_path: &plugin,
+            plugin_sha256: &sha,
+            parameters: None,
+            parameter_animation: None,
+            aux_manifest: None,
+            world_dump_dir: None,
+            output_checksum_detail: false,
+            mask_trailer: None,
+            spatial_trailer: None,
+            render_environment_trailer: None,
+            alpha_as_coverage_params: &[],
+            layers: &[],
+            dependencies: Vec::new(),
+            width: WIDTH,
+            height: HEIGHT,
+            pixel_format: RenderPixelFormat::Argb8,
+            time_step: 1,
+            total_time: 0,
+            time_scale: 30,
+            frame_deadline: Duration::from_secs(30),
+            smart: false,
+            gpu_backend: RenderGpuBackend::Cpu,
+            gpu_runtime_policy: None,
+        })
+        .expect("a zero-duration session opens");
+        let input = input_pattern(19);
+        let outcome = session
+            .render_frame(0, 0, &input)
+            .expect("the t=0 frame renders");
+        let FrameStatus::Rendered { pixels, .. } = outcome.status else {
+            panic!("the t=0 frame errored");
+        };
+        let expected: Vec<u8> = input.iter().map(|byte| 255 - byte).collect();
+        assert_eq!(pixels, expected);
+        // total_time == 0 admits exactly the t=0 frame: a later current_time is
+        // outside the session's total time and is rejected per-frame without
+        // tearing the session down (a plain validation error, not an
+        // invalidation), so the session still closes clean afterwards.
+        assert!(
+            session.render_frame(1, 1, &input).is_err(),
+            "a frame past total_time must be rejected"
+        );
+        let close = session.close();
+        assert_eq!(close["frames_ok"], 1);
+        assert_eq!(close["invalidated"], false);
+        assert_eq!(close["session_clean"], true, "close: {close}");
+    }
+
+    #[test]
     fn per_frame_parameters_ride_the_v2_message_and_reach_the_worker() {
         let _behavior = BehaviorGuard::set(None);
         let (repository, plugin, sha) = temp_repository();
