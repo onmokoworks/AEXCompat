@@ -1,19 +1,19 @@
 use crate::host_core::descriptor_manifest::load as load_manifest;
-use crate::host_core::parameter::{apply_defaults, encode_worker_payload, ValidatedAssignments};
+use crate::host_core::parameter::{ValidatedAssignments, apply_defaults, encode_worker_payload};
 use crate::runtime_module_authorization::{
-    encode_runtime_module_authorization, RuntimeModulePurpose,
+    RuntimeModulePurpose, encode_runtime_module_authorization,
 };
 use crate::runtime_module_policy::{
-    authenticate_gpu_worker_report, ApprovedClassifiedModule, RuntimeBackend, RuntimeModulePolicy,
-    WorkerModuleValidation,
+    ApprovedClassifiedModule, RuntimeBackend, RuntimeModulePolicy, WorkerModuleValidation,
+    authenticate_gpu_worker_report,
 };
 use crate::secure_image_dispatch::{
-    dispatch_secure_gpu_image, dispatch_secure_image, ApprovedImageArtifact,
-    GpuRuntimeAuthorization, SecureImageDispatch, WorkerKind,
+    ApprovedImageArtifact, GpuRuntimeAuthorization, SecureImageDispatch, WorkerKind,
+    dispatch_secure_gpu_image, dispatch_secure_image,
 };
 use image::ImageFormat;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeSet, HashSet};
 use std::fs::{self, OpenOptions};
@@ -763,7 +763,10 @@ impl RenderPixelFormat {
     }
 }
 
-pub(crate) fn native_rgba_to_preview(bytes: &[u8], format: RenderPixelFormat) -> io::Result<Vec<u8>> {
+pub(crate) fn native_rgba_to_preview(
+    bytes: &[u8],
+    format: RenderPixelFormat,
+) -> io::Result<Vec<u8>> {
     match format {
         RenderPixelFormat::Argb8 => Ok(bytes.to_vec()),
         RenderPixelFormat::Argb16 => {
@@ -1007,7 +1010,7 @@ fn image_worker_command(
         _ => {
             return Err(invalid(
                 "explicit GPU backend requires non-layered SmartFX ARGB32f rendering",
-            ))
+            ));
         }
     };
     Ok(command)
@@ -1694,9 +1697,7 @@ fn render_audio_via_length_one_session(
     if close.get("session_clean") != Some(&Value::Bool(true))
         || close.get("invalidated") != Some(&Value::Bool(false))
     {
-        return AudioWrapperOutcome::Fallback(
-            "the audio session did not close cleanly".into(),
-        );
+        return AudioWrapperOutcome::Fallback("the audio session did not close cleanly".into());
     }
     if output_path.exists() {
         return AudioWrapperOutcome::Failure(io::Error::new(
@@ -1755,8 +1756,14 @@ fn render_audio_via_length_one_session(
         ("output_start_sample", json!(output_start)),
         ("output_samples", json!(output.len() / 4)),
         ("output_created", json!(true)),
-        ("input_sha256", json!(format!("{:x}", Sha256::digest(input)))),
-        ("output_sha256", json!(format!("{:x}", Sha256::digest(&output)))),
+        (
+            "input_sha256",
+            json!(format!("{:x}", Sha256::digest(input))),
+        ),
+        (
+            "output_sha256",
+            json!(format!("{:x}", Sha256::digest(&output))),
+        ),
         ("output_transport", json!("mono_f32le_44100")),
         ("render_path", json!("audio_session")),
     ] {
@@ -3220,12 +3227,14 @@ fn inspect_experimental_with_diagnostics_and_runtime_policy(
                 .and_then(Value::as_f64)
                 .unwrap_or(default)
         };
-        let observed_host_range = row.get("valid_min").and_then(Value::as_f64).zip(
-            row.get("valid_max").and_then(Value::as_f64),
-        );
-        let observed_user_range = row.get("slider_min").and_then(Value::as_f64).zip(
-            row.get("slider_max").and_then(Value::as_f64),
-        );
+        let observed_host_range = row
+            .get("valid_min")
+            .and_then(Value::as_f64)
+            .zip(row.get("valid_max").and_then(Value::as_f64));
+        let observed_user_range = row
+            .get("slider_min")
+            .and_then(Value::as_f64)
+            .zip(row.get("slider_max").and_then(Value::as_f64));
         let component_count = match observed_type {
             3 => 1,
             6 => 2,
@@ -3238,13 +3247,16 @@ fn inspect_experimental_with_diagnostics_and_runtime_policy(
             let color = row.get("default_color");
             ["alpha", "red", "green", "blue"]
                 .iter()
-                .map(|name| color.and_then(|value| value.get(name)).and_then(Value::as_u64))
+                .map(|name| {
+                    color
+                        .and_then(|value| value.get(name))
+                        .and_then(Value::as_u64)
+                })
                 .collect::<Option<Vec<_>>>()
                 .map(Value::from)
                 .unwrap_or(Value::Null)
         } else if component_count > 0 {
-            row
-                .get("default_components")
+            row.get("default_components")
                 .and_then(Value::as_array)
                 .filter(|values| values.len() >= component_count)
                 .and_then(|values| {
@@ -4779,8 +4791,7 @@ fn render_with_artifact(
                 && host_context.is_none()
                 && ((gpu_backend == RenderGpuBackend::Cpu
                     && pixel_format == RenderPixelFormat::Argb32f)
-                    || (gpu_backend == RenderGpuBackend::Auto
-                        && gpu_runtime_policy.is_none()))
+                    || (gpu_backend == RenderGpuBackend::Auto && gpu_runtime_policy.is_none()))
         } else {
             gpu_backend == RenderGpuBackend::Auto
         };
@@ -4807,22 +4818,28 @@ fn render_with_artifact(
         // them, so a large layered render does not double broker memory (#268).
         let session_layers = secondaries
             .into_iter()
-            .map(|(slot, width, height, rgba)| crate::render_session::SessionLayer {
-                slot,
-                width,
-                height,
-                rgba,
-                timed: None,
-            })
-            .chain(timed_secondaries.into_iter().map(
-                |(slot, time, width, height, rgba)| crate::render_session::SessionLayer {
+            .map(
+                |(slot, width, height, rgba)| crate::render_session::SessionLayer {
                     slot,
                     width,
                     height,
                     rgba,
-                    timed: Some((time.value, time.scale)),
+                    timed: None,
                 },
-            ))
+            )
+            .chain(
+                timed_secondaries
+                    .into_iter()
+                    .map(
+                        |(slot, time, width, height, rgba)| crate::render_session::SessionLayer {
+                            slot,
+                            width,
+                            height,
+                            rgba,
+                            timed: Some((time.value, time.scale)),
+                        },
+                    ),
+            )
             .collect::<Vec<_>>();
         // A host context always sends the mask trailer (the one-shot path does
         // too, even for an empty mask scene), keeping the argv shapes identical.
@@ -4854,7 +4871,9 @@ fn render_with_artifact(
             render_environment_trailer,
             alpha_as_coverage_params,
             conformance_render_settings: conformance_render_settings.as_deref(),
-            aux_manifest: aux_transport.as_ref().map(|aux| aux.manifest_path.as_path()),
+            aux_manifest: aux_transport
+                .as_ref()
+                .map(|aux| aux.manifest_path.as_path()),
             timing,
             pixel_format,
             deep_png_output,
@@ -5392,10 +5411,12 @@ fn render_with_artifact(
         gpu_fallback_used,
         gpu_fallback_reason,
         gpu_attempt,
-        secondary_layers: json!(secondaries
-            .iter()
-            .map(|item| json!({"slot": item.0, "width": item.1, "height": item.2}))
-            .collect::<Vec<_>>()),
+        secondary_layers: json!(
+            secondaries
+                .iter()
+                .map(|item| json!({"slot": item.0, "width": item.1, "height": item.2}))
+                .collect::<Vec<_>>()
+        ),
         empty_smart_result,
         output_raw,
         deep_png_output,
@@ -5413,7 +5434,6 @@ fn render_with_artifact(
     drop(cleanup);
     Ok(build_interactive_image_report(&worker_report, facts))
 }
-
 
 /// Escape hatch for A/B verification against the one-shot argv transport;
 /// the equivalence test renders both ways and diffs the public reports.
@@ -5434,11 +5454,13 @@ pub const FORCE_SESSION_FALLBACK_ENV: &str = "AEXCOMPAT_FORCE_SESSION_FALLBACK";
 /// constant `None` (no env lookup, nothing to break a real render).
 #[cfg(debug_assertions)]
 fn forced_session_fallback() -> Option<SessionWrapperOutcome> {
-    std::env::var_os(FORCE_SESSION_FALLBACK_ENV).is_some().then(|| {
-        SessionWrapperOutcome::Fallback(
-            "forced session fallback (AEXCOMPAT_FORCE_SESSION_FALLBACK)".into(),
-        )
-    })
+    std::env::var_os(FORCE_SESSION_FALLBACK_ENV)
+        .is_some()
+        .then(|| {
+            SessionWrapperOutcome::Fallback(
+                "forced session fallback (AEXCOMPAT_FORCE_SESSION_FALLBACK)".into(),
+            )
+        })
 }
 #[cfg(not(debug_assertions))]
 fn forced_session_fallback() -> Option<SessionWrapperOutcome> {
@@ -5450,11 +5472,13 @@ fn forced_session_fallback() -> Option<SessionWrapperOutcome> {
 /// fail-closed caller arm. Absent from release builds.
 #[cfg(debug_assertions)]
 fn forced_audio_session_fallback() -> Option<AudioWrapperOutcome> {
-    std::env::var_os(FORCE_SESSION_FALLBACK_ENV).is_some().then(|| {
-        AudioWrapperOutcome::Fallback(
-            "forced session fallback (AEXCOMPAT_FORCE_SESSION_FALLBACK)".into(),
-        )
-    })
+    std::env::var_os(FORCE_SESSION_FALLBACK_ENV)
+        .is_some()
+        .then(|| {
+            AudioWrapperOutcome::Fallback(
+                "forced session fallback (AEXCOMPAT_FORCE_SESSION_FALLBACK)".into(),
+            )
+        })
 }
 #[cfg(not(debug_assertions))]
 fn forced_audio_session_fallback() -> Option<AudioWrapperOutcome> {
@@ -5615,11 +5639,12 @@ fn render_classic_via_length_one_session(
     if close.get("session_clean") != Some(&Value::Bool(true))
         || close.get("invalidated") != Some(&Value::Bool(false))
     {
-        return SessionWrapperOutcome::Fallback(
-            "the render session did not close cleanly".into(),
-        );
+        return SessionWrapperOutcome::Fallback("the render session did not close cleanly".into());
     }
-    let Some(final_report) = close.get("final_report").filter(|value| value.is_object()).cloned()
+    let Some(final_report) = close
+        .get("final_report")
+        .filter(|value| value.is_object())
+        .cloned()
     else {
         return SessionWrapperOutcome::Fallback(
             "the render session close carried no final report".into(),
@@ -5748,16 +5773,18 @@ fn render_classic_via_length_one_session(
         // one-shot `secondary_layers` field lists only the static secondaries;
         // timed layers (W1-4b) ride the same trailer but stay out of this field
         // so both routes report the identical set.
-        secondary_layers: json!(request
-            .layers
-            .iter()
-            .filter(|layer| layer.timed.is_none())
-            .map(|layer| json!({
-                "slot": layer.slot,
-                "width": layer.width,
-                "height": layer.height,
-            }))
-            .collect::<Vec<_>>()),
+        secondary_layers: json!(
+            request
+                .layers
+                .iter()
+                .filter(|layer| layer.timed.is_none())
+                .map(|layer| json!({
+                    "slot": layer.slot,
+                    "width": layer.width,
+                    "height": layer.height,
+                }))
+                .collect::<Vec<_>>()
+        ),
         empty_smart_result,
         // The empty branch above never writes the preserved raw sidecar, so
         // pointing the report at that path would name a file that does not
@@ -6099,13 +6126,25 @@ pub(crate) fn validate_interactive_worker_report(
             ]))
         && worker_report.get("full_resolution_dimensions")
             == Some(&json!([
-                facts.spatial.full_resolution_width.unwrap_or(facts.input_width),
-                facts.spatial.full_resolution_height.unwrap_or(facts.input_height)
+                facts
+                    .spatial
+                    .full_resolution_width
+                    .unwrap_or(facts.input_width),
+                facts
+                    .spatial
+                    .full_resolution_height
+                    .unwrap_or(facts.input_height)
             ]))
         && worker_report.get("in_data_dimensions")
             == Some(&json!([
-                facts.spatial.full_resolution_width.unwrap_or(facts.input_width),
-                facts.spatial.full_resolution_height.unwrap_or(facts.input_height)
+                facts
+                    .spatial
+                    .full_resolution_width
+                    .unwrap_or(facts.input_width),
+                facts
+                    .spatial
+                    .full_resolution_height
+                    .unwrap_or(facts.input_height)
             ]))
         && worker_report.get("pre_effect_source_origin")
             == Some(&json!([
@@ -6263,8 +6302,14 @@ pub(crate) fn build_interactive_image_report(
         ("empty_result_rect", "empty_result_rect"),
         ("returns_extra_pixels", "returns_extra_pixels"),
         ("result_within_request", "result_within_request"),
-        ("extra_pixels_contract_violation", "extra_pixels_contract_violation"),
-        ("smart_render_selector_dispatched", "smart_render_selector_dispatched"),
+        (
+            "extra_pixels_contract_violation",
+            "extra_pixels_contract_violation",
+        ),
+        (
+            "smart_render_selector_dispatched",
+            "smart_render_selector_dispatched",
+        ),
         ("input_checkout_result_rect", "input_checkout_result_rect"),
     ] {
         report_object.insert(
@@ -6438,7 +6483,9 @@ mod tests {
         assert!(smart_render_advertised(142_611_592));
         assert!(smart_render_advertised(525_312));
         // Every other flag set without bit 10 stays Classic.
-        assert!(!smart_render_advertised(u64::MAX & !PF_OUTFLAG2_SUPPORTS_SMART_RENDER));
+        assert!(!smart_render_advertised(
+            u64::MAX & !PF_OUTFLAG2_SUPPORTS_SMART_RENDER
+        ));
     }
 
     #[test]
@@ -6504,11 +6551,10 @@ mod tests {
         let slots = HashSet::from([6]);
         validate_timed_layer_identities(&[timed_layer(6, 1, 2), timed_layer(6, 3, 4)], &slots)
             .unwrap();
-        assert!(validate_timed_layer_identities(
-            &[timed_layer(6, 1, 2), timed_layer(6, 2, 4)],
-            &slots,
-        )
-        .is_err());
+        assert!(
+            validate_timed_layer_identities(&[timed_layer(6, 1, 2), timed_layer(6, 2, 4)], &slots,)
+                .is_err()
+        );
         assert!(validate_timed_layer_identities(&[timed_layer(7, 1, 2)], &slots).is_err());
         assert!(validate_timed_layer_identities(&[timed_layer(6, 1, 0)], &slots).is_err());
         assert!(validate_timed_layer_identities(&vec![timed_layer(6, 1, 2); 65], &slots).is_err());
@@ -6596,10 +6642,12 @@ mod tests {
 
         assert_eq!(fs::read(&target).unwrap(), b"target");
         if linked {
-            assert!(fs::symlink_metadata(&link)
-                .unwrap()
-                .file_type()
-                .is_symlink());
+            assert!(
+                fs::symlink_metadata(&link)
+                    .unwrap()
+                    .file_type()
+                    .is_symlink()
+            );
         }
         fs::remove_dir_all(root).unwrap();
     }
@@ -6739,9 +6787,7 @@ mod tests {
             !nonce.is_empty() && nonce.bytes().all(|byte| byte.is_ascii_digit()),
             "nonce is a non-empty digit string"
         );
-        let channels = object["channels"]
-            .as_array()
-            .expect("channels is an array");
+        let channels = object["channels"].as_array().expect("channels is an array");
         assert!(
             !channels.is_empty() && channels.iter().all(Value::is_object),
             "channels is a non-empty list of objects"
@@ -6774,15 +6820,19 @@ mod tests {
         // does (repository.join("target/image-transport")).
         let canonical_repository = repository.canonicalize().unwrap();
         assert!(
-            canonical_repository.as_os_str().to_string_lossy().starts_with(r"\\?\"),
+            canonical_repository
+                .as_os_str()
+                .to_string_lossy()
+                .starts_with(r"\\?\"),
             "canonicalize() is expected to produce a verbatim root on Windows"
         );
         let transport_root = canonical_repository.join("transport");
         fs::create_dir_all(&transport_root).unwrap();
         let channel = aux_fixture(&canonical_repository, "depth.f32", &[0.0, 0.5, 1.0, 2.0]);
-        let transport = prepare_aux_transport(&canonical_repository, &[channel], &transport_root, 231)
-            .unwrap()
-            .expect("aux channels present, so a manifest is produced");
+        let transport =
+            prepare_aux_transport(&canonical_repository, &[channel], &transport_root, 231)
+                .unwrap()
+                .expect("aux channels present, so a manifest is produced");
 
         assert!(
             !transport
@@ -7148,20 +7198,24 @@ mod tests {
 
     #[test]
     fn render_timing_is_bounded_and_monotonic() {
-        assert!(RenderTiming {
-            current_time: 3,
-            time_step: 1,
-            total_time: 4,
-            time_scale: 30,
-        }
-        .is_valid());
-        assert!(!RenderTiming {
-            current_time: 3,
-            time_step: 0,
-            total_time: 2,
-            time_scale: 0,
-        }
-        .is_valid());
+        assert!(
+            RenderTiming {
+                current_time: 3,
+                time_step: 1,
+                total_time: 4,
+                time_scale: 30,
+            }
+            .is_valid()
+        );
+        assert!(
+            !RenderTiming {
+                current_time: 3,
+                time_step: 0,
+                total_time: 2,
+                time_scale: 0,
+            }
+            .is_valid()
+        );
     }
 
     #[test]
@@ -7621,20 +7675,24 @@ mod tests {
                 expected
             );
         }
-        assert!(image_worker_command(
-            true,
-            RenderPixelFormat::Argb32f,
-            true,
-            RenderGpuBackend::Cpu
-        )
-        .is_err());
-        assert!(image_worker_command(
-            false,
-            RenderPixelFormat::Argb32f,
-            false,
-            RenderGpuBackend::Cuda
-        )
-        .is_err());
+        assert!(
+            image_worker_command(
+                true,
+                RenderPixelFormat::Argb32f,
+                true,
+                RenderGpuBackend::Cpu
+            )
+            .is_err()
+        );
+        assert!(
+            image_worker_command(
+                false,
+                RenderPixelFormat::Argb32f,
+                false,
+                RenderGpuBackend::Cuda
+            )
+            .is_err()
+        );
         assert_eq!(
             serde_json::to_string(&RenderGpuBackend::OpenCl).unwrap(),
             "\"opencl\""

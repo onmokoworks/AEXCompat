@@ -23,7 +23,7 @@ mod worker {
     use std::ptr::null_mut;
     use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
     use windows_sys::Win32::Storage::FileSystem::{ReadFile, WriteFile};
-    use windows_sys::Win32::System::Memory::{MapViewOfFile, FILE_MAP_ALL_ACCESS};
+    use windows_sys::Win32::System::Memory::{FILE_MAP_ALL_ACCESS, MapViewOfFile};
 
     const HEADER_BYTES: usize = 4096;
     const SLOT_ALIGNMENT: usize = 4096;
@@ -112,7 +112,11 @@ mod worker {
             // parser (`minidump_marker`) surfaces the capture in the session
             // report. Flush before the crash exit so the line is not lost.
             use std::io::Write;
-            let _ = write!(std::io::stderr(), "stage:minidump_written bytes={}\n", payload.len());
+            let _ = write!(
+                std::io::stderr(),
+                "stage:minidump_written bytes={}\n",
+                payload.len()
+            );
             let _ = std::io::stderr().flush();
         }
     }
@@ -222,7 +226,9 @@ mod worker {
                     let pinned = std::env::current_dir()
                         .ok()
                         .and_then(|cwd| cwd.join("target/image-transport").canonicalize().ok());
-                    let parent = sidecar.parent().and_then(|parent| parent.canonicalize().ok());
+                    let parent = sidecar
+                        .parent()
+                        .and_then(|parent| parent.canonicalize().ok());
                     if !sidecar.is_file() || pinned.is_none() || pinned != parent {
                         return 3;
                     }
@@ -251,14 +257,15 @@ mod worker {
                     let Some(object) = document.as_object() else {
                         return 3;
                     };
-                    let schema_ok = object.get("schema").and_then(|v| v.as_str())
-                        == Some("aux-manifest-v1");
-                    let nonce_ok = object
-                        .get("nonce")
-                        .and_then(|v| v.as_str())
-                        .is_some_and(|nonce| {
-                            !nonce.is_empty() && nonce.bytes().all(|b| b.is_ascii_digit())
-                        });
+                    let schema_ok =
+                        object.get("schema").and_then(|v| v.as_str()) == Some("aux-manifest-v1");
+                    let nonce_ok =
+                        object
+                            .get("nonce")
+                            .and_then(|v| v.as_str())
+                            .is_some_and(|nonce| {
+                                !nonce.is_empty() && nonce.bytes().all(|b| b.is_ascii_digit())
+                            });
                     let channels_ok = object
                         .get("channels")
                         .and_then(serde_json::Value::as_array)
@@ -378,7 +385,8 @@ mod worker {
                     fields.get(1).map(|s| s.parse::<usize>()),
                     fields.get(2).map(|s| s.parse::<usize>()),
                     fields.last().map(|s| s.parse::<usize>()),
-                ) else {
+                )
+                else {
                     return EXIT_PROTOCOL_VIOLATION;
                 };
                 let layer_bytes = layer_width * layer_height * 4;
@@ -588,7 +596,11 @@ mod worker {
                 }
             }
             unsafe {
-                std::ptr::copy_nonoverlapping(output.as_ptr(), view.0.add(output_offset), slot_bytes);
+                std::ptr::copy_nonoverlapping(
+                    output.as_ptr(),
+                    view.0.add(output_offset),
+                    slot_bytes,
+                );
             }
             frames += 1;
 

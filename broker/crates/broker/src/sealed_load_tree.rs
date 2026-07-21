@@ -303,7 +303,7 @@ fn validate_regular_unique(file: &File) -> io::Result<()> {
     use std::mem::zeroed;
     use std::os::windows::io::AsRawHandle;
     use windows_sys::Win32::Storage::FileSystem::{
-        GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION,
+        BY_HANDLE_FILE_INFORMATION, GetFileInformationByHandle,
     };
     let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { zeroed() };
     let ok = unsafe { GetFileInformationByHandle(file.as_raw_handle() as _, &mut info) };

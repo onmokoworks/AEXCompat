@@ -1,4 +1,4 @@
-use crate::windows_process::{run_isolated, run_sentinel_check, ProcessResult};
+use crate::windows_process::{ProcessResult, run_isolated, run_sentinel_check};
 use std::fs::OpenOptions;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -89,7 +89,11 @@ pub fn run(workers: &Workers, output: &Path) -> io::Result<bool> {
         rows.push_str(&format!("{{\"name\":\"{}\",\"result\":\"{}\",\"exit_code\":{},\"passed\":{},\"stdout\":\"{}\",\"stderr\":\"{}\",\"stdout_truncated\":{},\"stderr_truncated\":{}}}",
             item.name, item.result.classification.as_str(), item.result.exit_code, item.passed, escape(&item.result.stdout), escape(&item.result.stderr), item.result.stdout_truncated, item.result.stderr_truncated));
     }
-    let report = format!("{{\n  \"schema_version\": 1,\n  \"report_kind\": \"broker_selftest\",\n  \"selftest_state\": \"{}\",\n  \"scenario_count\": 5,\n  \"scenarios\": [{}],\n  \"accepts_aex_path\": false,\n  \"dll_load_performed\": false,\n  \"native_load_enabled\": false\n}}\n", if passed {"passed"} else {"failed"}, rows);
+    let report = format!(
+        "{{\n  \"schema_version\": 1,\n  \"report_kind\": \"broker_selftest\",\n  \"selftest_state\": \"{}\",\n  \"scenario_count\": 5,\n  \"scenarios\": [{}],\n  \"accepts_aex_path\": false,\n  \"dll_load_performed\": false,\n  \"native_load_enabled\": false\n}}\n",
+        if passed { "passed" } else { "failed" },
+        rows
+    );
     let mut file = OpenOptions::new()
         .write(true)
         .create_new(true)

@@ -1,7 +1,7 @@
 #[cfg(windows)]
 #[test]
 fn five_isolation_scenarios_pass() {
-    use aexcompat_broker::selftest::{run, Workers};
+    use aexcompat_broker::selftest::{Workers, run};
     use std::path::PathBuf;
     let output = std::env::temp_dir().join(format!(
         "aexcompat-broker-selftest-{}.json",
@@ -84,7 +84,9 @@ fn descendant_oom_does_not_implicate_the_worker() {
     assert!(!result.memory_limit_reached);
     let job_peak = result.peak_process_memory_bytes.expect("job peak recorded");
     assert!(job_peak >= result.process_memory_limit_bytes - 16 * 1024 * 1024);
-    let worker_peak = result.worker_peak_commit_bytes.expect("worker peak recorded");
+    let worker_peak = result
+        .worker_peak_commit_bytes
+        .expect("worker peak recorded");
     assert!(worker_peak < result.process_memory_limit_bytes / 2);
 }
 
@@ -130,7 +132,7 @@ fn pipe_holding_descendant_does_not_block_capture() {
 #[cfg(windows)]
 #[test]
 fn production_stdout_capture_preserves_large_bounded_worker_reports() {
-    use aexcompat_broker::windows_process::{run_isolated, STDOUT_CAPTURE_LIMIT};
+    use aexcompat_broker::windows_process::{STDOUT_CAPTURE_LIMIT, run_isolated};
     use std::path::Path;
     use std::time::Duration;
 

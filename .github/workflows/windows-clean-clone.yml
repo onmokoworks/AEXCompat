@@ -17,6 +17,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: Check Rust formatting
+        working-directory: broker
+        run: cargo fmt --all --check
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: broker

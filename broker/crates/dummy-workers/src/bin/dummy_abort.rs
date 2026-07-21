@@ -1,7 +1,7 @@
 #[cfg(windows)]
 fn main() {
     use windows_sys::Win32::System::Diagnostics::Debug::{
-        RaiseException, SetErrorMode, SEM_NOGPFAULTERRORBOX,
+        RaiseException, SEM_NOGPFAULTERRORBOX, SetErrorMode,
     };
     unsafe {
         SetErrorMode(SEM_NOGPFAULTERRORBOX);

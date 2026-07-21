@@ -13,7 +13,7 @@ mod worker {
     use std::ptr::null_mut;
     use windows_sys::Win32::Foundation::HANDLE;
     use windows_sys::Win32::Storage::FileSystem::{ReadFile, WriteFile};
-    use windows_sys::Win32::System::Memory::{MapViewOfFile, FILE_MAP_ALL_ACCESS};
+    use windows_sys::Win32::System::Memory::{FILE_MAP_ALL_ACCESS, MapViewOfFile};
 
     const HEADER_BYTES: usize = 4096;
     const SLOT_ALIGNMENT: usize = 4096;
@@ -158,8 +158,7 @@ mod worker {
         // Test-only misbehavior: report an output window that runs past the
         // submitted input span so the broker's range validation must reject it
         // (Codex #252). Read once; the broker sets this env on the child.
-        let out_of_range_start = std::env::var("AEXCOMPAT_TEST_SESSION_BEHAVIOR")
-            .as_deref()
+        let out_of_range_start = std::env::var("AEXCOMPAT_TEST_SESSION_BEHAVIOR").as_deref()
             == Ok("audio_out_of_range_start");
 
         let mut requests_ok = 0u32;

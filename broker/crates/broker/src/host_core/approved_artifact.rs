@@ -408,11 +408,13 @@ mod tests {
                 )
             })
             .collect();
-        assert!(parse_v2(v2_allowlist(
-            receipt("C:/approved/main.plugin", "main.plugin"),
-            dependencies,
-        ))
-        .is_err());
+        assert!(
+            parse_v2(v2_allowlist(
+                receipt("C:/approved/main.plugin", "main.plugin"),
+                dependencies,
+            ))
+            .is_err()
+        );
     }
 
     #[test]
@@ -428,11 +430,13 @@ mod tests {
             assert!(parse_v2(v2_allowlist(invalid_main, vec![])).is_err());
         }
 
-        assert!(parse_v2(v2_allowlist(
-            receipt("C:/approved/Main.plugin", "Main.plugin"),
-            vec![receipt("C:/approved/main.plugin", "main.plugin")],
-        ))
-        .is_err());
+        assert!(
+            parse_v2(v2_allowlist(
+                receipt("C:/approved/Main.plugin", "Main.plugin"),
+                vec![receipt("C:/approved/main.plugin", "main.plugin")],
+            ))
+            .is_err()
+        );
     }
 
     #[test]

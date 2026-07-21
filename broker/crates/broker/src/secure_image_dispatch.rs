@@ -1,6 +1,6 @@
 use crate::runtime_module_policy::{AuthenticatedGpuModuleReport, RuntimeBackend};
 use crate::sealed_load_tree::{LoadEntry, SealedLoadTree};
-use crate::secure_launch::{secure_launch, SecureLaunchRequest, SecureLaunchResult};
+use crate::secure_launch::{SecureLaunchRequest, SecureLaunchResult, secure_launch};
 use sha2::{Digest, Sha256};
 use std::fs::File;
 use std::io;

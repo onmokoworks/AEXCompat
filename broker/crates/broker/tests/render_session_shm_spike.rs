@@ -17,7 +17,7 @@
 
 #[cfg(windows)]
 mod windows_e2e {
-    use aexcompat_broker::restricted_worker_acl::{protect_sealed_load_tree, RestrictedWorkerSid};
+    use aexcompat_broker::restricted_worker_acl::{RestrictedWorkerSid, protect_sealed_load_tree};
     use aexcompat_broker::restricted_worker_token::create_restricted_worker_token;
     use std::ffi::c_void;
     use std::io;
@@ -30,20 +30,20 @@ mod windows_e2e {
     };
     use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
     use windows_sys::Win32::System::JobObjects::{
-        AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
-        QueryInformationJobObject, SetInformationJobObject, TerminateJobObject,
-        JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
-        JOB_OBJECT_LIMIT_PROCESS_MEMORY,
+        AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+        JOB_OBJECT_LIMIT_PROCESS_MEMORY, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+        JobObjectExtendedLimitInformation, QueryInformationJobObject, SetInformationJobObject,
+        TerminateJobObject,
     };
     use windows_sys::Win32::System::Memory::{
-        CreateFileMappingW, MapViewOfFile, UnmapViewOfFile, FILE_MAP_ALL_ACCESS, PAGE_READWRITE,
+        CreateFileMappingW, FILE_MAP_ALL_ACCESS, MapViewOfFile, PAGE_READWRITE, UnmapViewOfFile,
     };
     use windows_sys::Win32::System::Threading::{
-        CreateEventW, CreateProcessAsUserW, DeleteProcThreadAttributeList, GetExitCodeProcess,
-        InitializeProcThreadAttributeList, ResumeThread, SetEvent, TerminateProcess,
-        UpdateProcThreadAttribute, WaitForSingleObject, CREATE_NO_WINDOW, CREATE_SUSPENDED,
-        CREATE_UNICODE_ENVIRONMENT, EXTENDED_STARTUPINFO_PRESENT, PROCESS_INFORMATION,
-        PROC_THREAD_ATTRIBUTE_HANDLE_LIST, STARTUPINFOEXW,
+        CREATE_NO_WINDOW, CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, CreateEventW,
+        CreateProcessAsUserW, DeleteProcThreadAttributeList, EXTENDED_STARTUPINFO_PRESENT,
+        GetExitCodeProcess, InitializeProcThreadAttributeList, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
+        PROCESS_INFORMATION, ResumeThread, STARTUPINFOEXW, SetEvent, TerminateProcess,
+        UpdateProcThreadAttribute, WaitForSingleObject,
     };
 
     const SECTION_BYTES: usize = 256 * 1024 * 1024;
@@ -205,8 +205,7 @@ mod windows_e2e {
             )
         })
         .expect("create anonymous section");
-        let view_address =
-            unsafe { MapViewOfFile(section.raw(), FILE_MAP_ALL_ACCESS, 0, 0, 0) };
+        let view_address = unsafe { MapViewOfFile(section.raw(), FILE_MAP_ALL_ACCESS, 0, 0, 0) };
         assert!(!view_address.Value.is_null(), "parent MapViewOfFile failed");
         let view = View(view_address.Value as *mut u8);
         unsafe {
@@ -299,8 +298,14 @@ mod windows_e2e {
                 "AEXCOMPAT_SPIKE_SECTION_HANDLE",
                 (section.raw() as usize).to_string(),
             ),
-            ("AEXCOMPAT_SPIKE_REQ_EVENT", (req.raw() as usize).to_string()),
-            ("AEXCOMPAT_SPIKE_RSP_EVENT", (rsp.raw() as usize).to_string()),
+            (
+                "AEXCOMPAT_SPIKE_REQ_EVENT",
+                (req.raw() as usize).to_string(),
+            ),
+            (
+                "AEXCOMPAT_SPIKE_RSP_EVENT",
+                (rsp.raw() as usize).to_string(),
+            ),
             ("AEXCOMPAT_SPIKE_SECTION_BYTES", SECTION_BYTES.to_string()),
             (
                 "AEXCOMPAT_SPIKE_PINGPONG_ROUNDS",
@@ -487,7 +492,10 @@ mod windows_e2e {
             peak_pagefile / 1024,
         );
         println!("worker working set after touch: {} KiB", working_set / 1024);
-        println!("job PeakProcessMemoryUsed: {:?} KiB", peak_process_memory.map(|v| v / 1024));
+        println!(
+            "job PeakProcessMemoryUsed: {:?} KiB",
+            peak_process_memory.map(|v| v / 1024)
+        );
         println!(
             "event ping-pong round trip over {} rounds: median {:?}, min {:?}, max {:?}",
             PINGPONG_ROUNDS, median, minimum, maximum

@@ -9,6 +9,11 @@ def test_windows_clean_clone_runs_canonical_source_reproducible_gates():
         encoding="utf-8"
     )
     assert "runs-on: windows-latest" in workflow
+    assert "components: rustfmt" in workflow
+    assert """      - name: Check Rust formatting
+        working-directory: broker
+        run: cargo fmt --all --check
+""" in workflow
     assert "cargo check --workspace --locked" in workflow
     assert "cargo check --manifest-path bridges/aviutl2/Cargo.toml --locked" in workflow
     assert "cargo test --workspace --locked" in workflow

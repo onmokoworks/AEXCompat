@@ -1,8 +1,8 @@
 #[cfg(windows)]
 mod windows_e2e {
-    use aexcompat_broker::restricted_worker_acl::{protect_sealed_load_tree, RestrictedWorkerSid};
+    use aexcompat_broker::restricted_worker_acl::{RestrictedWorkerSid, protect_sealed_load_tree};
     use aexcompat_broker::restricted_worker_token::{
-        create_restricted_worker_token, RestrictedWorkerToken,
+        RestrictedWorkerToken, create_restricted_worker_token,
     };
     use std::ffi::c_void;
     use std::io;
@@ -12,7 +12,7 @@ mod windows_e2e {
     use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
     use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
     use windows_sys::Win32::System::Threading::{
-        GetExitCodeProcess, WaitForSingleObject, PROCESS_INFORMATION, STARTUPINFOW,
+        GetExitCodeProcess, PROCESS_INFORMATION, STARTUPINFOW, WaitForSingleObject,
     };
 
     #[link(name = "advapi32")]

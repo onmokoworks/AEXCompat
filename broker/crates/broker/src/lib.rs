@@ -85,11 +85,13 @@ pub fn redact_windows_paths(text: &str, limit: usize) -> (String, bool) {
             // A path that is the complete value of a compact JSON string
             // needs a schema-safe replacement so redaction cannot corrupt
             // the report or cause an otherwise valid Suite event to vanish.
-            output.push_str(if inside_json_string && index > 0 && chars[index - 1] == '"' {
-                "redacted-path"
-            } else {
-                "<redacted-path>"
-            });
+            output.push_str(
+                if inside_json_string && index > 0 && chars[index - 1] == '"' {
+                    "redacted-path"
+                } else {
+                    "<redacted-path>"
+                },
+            );
             index += 3;
             // Validate at most one marker-shaped suffix per path. This keeps
             // hostile punctuation-heavy diagnostics linear in the capture
@@ -110,14 +112,12 @@ pub fn redact_windows_paths(text: &str, limit: usize) -> (String, bool) {
                         break;
                     }
                     if !structured_marker_checked && chars[index] == ',' {
-                        let marker_shaped = [",diagnostics=", ",report="]
-                            .iter()
-                            .any(|marker| {
-                                let mut actual = chars[index..].iter();
-                                marker
-                                    .chars()
-                                    .all(|expected| actual.next() == Some(&expected))
-                            });
+                        let marker_shaped = [",diagnostics=", ",report="].iter().any(|marker| {
+                            let mut actual = chars[index..].iter();
+                            marker
+                                .chars()
+                                .all(|expected| actual.next() == Some(&expected))
+                        });
                         if marker_shaped {
                             structured_marker_checked = true;
                             if validated_structured_marker(&chars, index) {

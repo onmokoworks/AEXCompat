@@ -1,6 +1,6 @@
 use aexcompat_broker::runtime_module_policy::{
-    authenticate_gpu_worker_report_at, parse_and_validate_at, path_token, validate_worker_report,
-    RuntimeBackend, WorkerModuleValidation,
+    RuntimeBackend, WorkerModuleValidation, authenticate_gpu_worker_report_at,
+    parse_and_validate_at, path_token, validate_worker_report,
 };
 use sha2::{Digest, Sha256};
 use std::fs;
@@ -47,19 +47,25 @@ fn gpu_report_is_bound_to_backend_session_and_policy_expiration() {
     authenticated
         .authorize_dispatch_at(&session, RuntimeBackend::Cuda, UNIX_EPOCH)
         .unwrap();
-    assert!(authenticated
-        .authorize_dispatch_at(&[0x6b; 32], RuntimeBackend::Cuda, UNIX_EPOCH)
-        .is_err());
-    assert!(authenticated
-        .authorize_dispatch_at(&session, RuntimeBackend::Opencl, UNIX_EPOCH)
-        .is_err());
-    assert!(authenticated
-        .authorize_dispatch_at(
-            &session,
-            RuntimeBackend::Cuda,
-            policy.expires() + Duration::from_secs(1)
-        )
-        .is_err());
+    assert!(
+        authenticated
+            .authorize_dispatch_at(&[0x6b; 32], RuntimeBackend::Cuda, UNIX_EPOCH)
+            .is_err()
+    );
+    assert!(
+        authenticated
+            .authorize_dispatch_at(&session, RuntimeBackend::Opencl, UNIX_EPOCH)
+            .is_err()
+    );
+    assert!(
+        authenticated
+            .authorize_dispatch_at(
+                &session,
+                RuntimeBackend::Cuda,
+                policy.expires() + Duration::from_secs(1)
+            )
+            .is_err()
+    );
 }
 
 #[test]
@@ -87,19 +93,21 @@ fn gpu_report_rejects_cpu_and_unbound_or_wrong_backend_reports() {
     };
     assert!(validate(RuntimeBackend::Cuda).is_err());
     assert!(validate(RuntimeBackend::Cpu).is_err());
-    assert!(authenticate_gpu_worker_report_at(
-        report.as_bytes(),
-        &[0x44; 32],
-        RuntimeBackend::Opencl,
-        WorkerModuleValidation {
-            policy: &policy,
-            sealed: &[],
-            trusted: &[],
-            system32: &f.root,
-        },
-        UNIX_EPOCH,
-    )
-    .is_err());
+    assert!(
+        authenticate_gpu_worker_report_at(
+            report.as_bytes(),
+            &[0x44; 32],
+            RuntimeBackend::Opencl,
+            WorkerModuleValidation {
+                policy: &policy,
+                sealed: &[],
+                trusted: &[],
+                system32: &f.root,
+            },
+            UNIX_EPOCH,
+        )
+        .is_err()
+    );
 }
 
 impl Fixture {
@@ -202,16 +210,18 @@ fn rejects_collisions_and_changed_file() {
         path_token(&f.module),
         f.digest
     );
-    assert!(validate_worker_report(
-        report.as_bytes(),
-        WorkerModuleValidation {
-            policy: &policy,
-            sealed: &[],
-            trusted: &[],
-            system32: &f.root
-        }
-    )
-    .is_err());
+    assert!(
+        validate_worker_report(
+            report.as_bytes(),
+            WorkerModuleValidation {
+                policy: &policy,
+                sealed: &[],
+                trusted: &[],
+                system32: &f.root
+            }
+        )
+        .is_err()
+    );
 }
 
 #[test]
@@ -223,16 +233,18 @@ fn classification_cannot_be_substituted() {
         path_token(&f.module),
         f.digest
     );
-    assert!(validate_worker_report(
-        report.as_bytes(),
-        WorkerModuleValidation {
-            policy: &policy,
-            sealed: &[],
-            trusted: &[],
-            system32: &f.root
-        }
-    )
-    .is_err());
+    assert!(
+        validate_worker_report(
+            report.as_bytes(),
+            WorkerModuleValidation {
+                policy: &policy,
+                sealed: &[],
+                trusted: &[],
+                system32: &f.root
+            }
+        )
+        .is_err()
+    );
 }
 
 #[test]

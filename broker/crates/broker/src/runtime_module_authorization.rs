@@ -1,4 +1,4 @@
-use crate::runtime_module_policy::{RuntimeBackend, RuntimeModulePolicy, MAX_RUNTIME_MODULES};
+use crate::runtime_module_policy::{MAX_RUNTIME_MODULES, RuntimeBackend, RuntimeModulePolicy};
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::io;
@@ -235,12 +235,14 @@ mod tests {
         assert!(encode(RuntimeBackend::Cpu, [1; 32], valid_now).is_err());
         assert!(encode(RuntimeBackend::Cuda, [0; 32], valid_now).is_err());
         assert!(encode(RuntimeBackend::Directx, [1; 32], valid_now).is_err());
-        assert!(encode(
-            RuntimeBackend::Cuda,
-            [1; 32],
-            UNIX_EPOCH + Duration::from_secs(4_102_444_800)
-        )
-        .is_err());
+        assert!(
+            encode(
+                RuntimeBackend::Cuda,
+                [1; 32],
+                UNIX_EPOCH + Duration::from_secs(4_102_444_800)
+            )
+            .is_err()
+        );
 
         drop(policy);
         fs::remove_dir_all(cleanup.last().unwrap()).unwrap();

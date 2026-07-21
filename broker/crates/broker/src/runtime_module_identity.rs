@@ -86,8 +86,8 @@ fn capture_impl(path: &Path) -> Result<RuntimeModuleIdentityEvidence, IdentityEv
     use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
     use std::os::windows::io::AsRawHandle;
     use windows_sys::Win32::Storage::FileSystem::{
-        GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_REPARSE_POINT,
-        FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_READ,
+        BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_OPEN_REPARSE_POINT,
+        FILE_SHARE_READ, GetFileInformationByHandle,
     };
 
     validate_input_path(path)?;
@@ -150,7 +150,7 @@ fn verify_open_file_identity(
 ) -> Result<(), IdentityEvidenceError> {
     use std::os::windows::io::AsRawHandle;
     use windows_sys::Win32::Storage::FileSystem::{
-        GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION,
+        BY_HANDLE_FILE_INFORMATION, GetFileInformationByHandle,
     };
 
     let mut current: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
@@ -179,9 +179,9 @@ fn verify_authenticode(
 ) -> Result<AuthenticodeEvidence, IdentityEvidenceError> {
     use std::os::windows::io::AsRawHandle;
     use windows_sys::Win32::Security::Cryptography::Catalog::{
-        CryptCATAdminAcquireContext2, CryptCATAdminCalcHashFromFileHandle2,
+        CATALOG_INFO, CryptCATAdminAcquireContext2, CryptCATAdminCalcHashFromFileHandle2,
         CryptCATAdminEnumCatalogFromHash, CryptCATAdminReleaseCatalogContext,
-        CryptCATAdminReleaseContext, CryptCATCatalogInfoFromContext, CATALOG_INFO,
+        CryptCATAdminReleaseContext, CryptCATCatalogInfoFromContext,
     };
     use windows_sys::Win32::Security::WinTrust::{
         WINTRUST_CATALOG_INFO, WINTRUST_DATA_0, WINTRUST_FILE_INFO, WTD_CHOICE_CATALOG,
@@ -326,7 +326,7 @@ fn trust_data(choice: u32) -> windows_sys::Win32::Security::WinTrust::WINTRUST_D
 #[cfg(windows)]
 fn verify_and_close(data: &mut windows_sys::Win32::Security::WinTrust::WINTRUST_DATA) -> i32 {
     use windows_sys::Win32::Security::WinTrust::{
-        WinVerifyTrust, WINTRUST_ACTION_GENERIC_VERIFY_V2, WTD_STATEACTION_CLOSE,
+        WINTRUST_ACTION_GENERIC_VERIFY_V2, WTD_STATEACTION_CLOSE, WinVerifyTrust,
     };
     let mut action = WINTRUST_ACTION_GENERIC_VERIFY_V2;
     let status = unsafe { WinVerifyTrust(std::ptr::null_mut(), &mut action, data as *mut _ as _) };

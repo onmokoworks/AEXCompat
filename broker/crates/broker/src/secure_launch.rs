@@ -1,5 +1,5 @@
-use crate::sealed_load_tree::SealedLoadTree;
 use crate::ExitClassification;
+use crate::sealed_load_tree::SealedLoadTree;
 use std::io;
 use std::path::Path;
 use std::time::Duration;
@@ -37,7 +37,10 @@ pub struct SecureLaunchRequest<'a> {
     pub require_module_audit: bool,
 }
 
-fn build_launch_args(tree: &SealedLoadTree, request: &SecureLaunchRequest<'_>) -> io::Result<Vec<String>> {
+fn build_launch_args(
+    tree: &SealedLoadTree,
+    request: &SecureLaunchRequest<'_>,
+) -> io::Result<Vec<String>> {
     let plugin_path = tree.plugin_path(request.plugin_basename)?;
     let mut args =
         Vec::with_capacity(request.args_before_plugin.len() + 1 + request.args_after_plugin.len());
@@ -80,7 +83,7 @@ fn secure_launch_impl(
     repository: &Path,
     timeout: Duration,
 ) -> io::Result<SecureLaunchResult> {
-    use crate::restricted_worker_acl::{protect_sealed_load_tree, RestrictedWorkerSid};
+    use crate::restricted_worker_acl::{RestrictedWorkerSid, protect_sealed_load_tree};
     use crate::restricted_worker_token::create_restricted_worker_token;
     use crate::trusted_worker_stage::TrustedWorkerStage;
 
@@ -231,7 +234,7 @@ pub fn secure_launch_session(
     request: SecureLaunchRequest<'_>,
     session: &crate::windows_process::SessionChildHandles,
 ) -> io::Result<SecureSessionProcess> {
-    use crate::restricted_worker_acl::{protect_sealed_load_tree, RestrictedWorkerSid};
+    use crate::restricted_worker_acl::{RestrictedWorkerSid, protect_sealed_load_tree};
     use crate::restricted_worker_token::create_restricted_worker_token;
     use crate::trusted_worker_stage::TrustedWorkerStage;
 

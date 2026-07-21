@@ -1,4 +1,4 @@
-use crate::restricted_worker_acl::{protect_sealed_load_tree, RestrictedWorkerSid};
+use crate::restricted_worker_acl::{RestrictedWorkerSid, protect_sealed_load_tree};
 use sha2::{Digest, Sha256};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Seek, Write};
