@@ -372,12 +372,14 @@ struct AexBridgeFilter {
     /// AEX defaults, and the env AEX's controls apply only when the control is
     /// left empty / equal to it.
     env_plugin: Option<PathBuf>,
-    /// The load-time env AEX's sha256 (lowercase hex), or `None` when no env AEX
-    /// is set or discovery failed. `is_default` compares against this by content
-    /// rather than by path, so re-selecting the same file through AviUtl2's dialog
-    /// (which may re-case or normalize the path) still exposes the env AEX's
-    /// parameter controls' values instead of silently dropping them.
-    env_sha: Option<String>,
+    /// The load-time env AEX's canonical path, or `None` when no env AEX is set
+    /// or it could not be canonicalized. `is_default` compares the selected AEX's
+    /// canonical path against this: canonicalization normalizes case/separators so
+    /// re-selecting the same file through AviUtl2's dialog still exposes the env
+    /// AEX's parameter controls, while a byte-identical copy in another directory
+    /// (which can load different adjacent resources) is correctly not treated as
+    /// the default and renders at its own defaults.
+    env_canonical: Option<PathBuf>,
     /// Cache of AEX sha256 (lowercase hex) → advertises-SmartFX, so switching to
     /// a runtime-selected AEX detects its render path once, not per reopen.
     smart_cache: Mutex<HashMap<String, bool>>,
@@ -532,9 +534,15 @@ impl AexBridgeFilter {
             })?,
         };
         let sha = self.sha_for(&plugin)?;
-        // Content-based: a re-cased/normalized re-selection of the env AEX still
-        // matches, so its parameter controls' values keep applying.
-        let is_default = self.env_sha.as_deref() == Some(sha.as_str());
+        // Canonical-path based: normalizes case/separators so a re-selection of
+        // the env AEX still matches, while a byte-identical copy in a different
+        // directory does not (it may load different adjacent resources, so it
+        // must render at its own defaults, not the env AEX's). Canonicalize
+        // failure (file vanished) conservatively falls to "not default".
+        let is_default = match (std::fs::canonicalize(&plugin).ok(), &self.env_canonical) {
+            (Some(selected), Some(env)) => &selected == env,
+            _ => false,
+        };
         let smart = if is_default {
             self.smart
         } else {
@@ -637,13 +645,17 @@ impl FilterPlugin for AexBridgeFilter {
         // plug-in still loads and renders with launch defaults (the render path
         // surfaces the real error).
         let env_plugin = std::env::var_os(ENV_PLUGIN).map(PathBuf::from);
-        let (param_template, smart, env_sha) = match discover_config() {
-            Ok((parameters, smart, sha)) => (parameters, smart, Some(sha)),
+        // Canonicalize once at load for the is_default comparison in `resolve_aex`.
+        let env_canonical = env_plugin
+            .as_ref()
+            .and_then(|path| std::fs::canonicalize(path).ok());
+        let (param_template, smart) = match discover_config() {
+            Ok(discovered) => discovered,
             Err(message) => {
                 tracing::warn!(
                     "AEX parameter discovery failed ({message}); rendering with launch defaults"
                 );
-                (Vec::new(), false, None)
+                (Vec::new(), false)
             }
         };
 
@@ -652,17 +664,22 @@ impl FilterPlugin for AexBridgeFilter {
             param_template,
             smart,
             env_plugin,
-            env_sha,
+            env_canonical,
             smart_cache: Mutex::new(HashMap::new()),
             sha_cache: Mutex::new(HashMap::new()),
         })
     }
 
     fn plugin_info(&self) -> FilterPluginTable {
-        // First control: pick the AEX at runtime. Empty means "use the env AEX",
-        // whose discovered parameters follow as controls; selecting a different
-        // AEX switches to it live and renders it at its own defaults.
-        let mut config_items = vec![FilterConfigItem::File(FilterConfigFile {
+        // The env AEX's discovered parameter controls come first, so their config
+        // indices line up 1:1 with `exposed_config`'s slots (proc_video zips them
+        // directly). The "AEX" selector is appended last: prepending it would
+        // shift every parameter's positional index, so a later layout change (or a
+        // saved project) would misalign the saved values. Empty selector means
+        // "use the env AEX"; selecting a different AEX switches to it live and
+        // renders it at its own defaults.
+        let mut config_items = exposed_config(&self.param_template).items;
+        config_items.push(FilterConfigItem::File(FilterConfigFile {
             name: "AEX".to_string(),
             value: self
                 .env_plugin
@@ -679,8 +696,7 @@ impl FilterPlugin for AexBridgeFilter {
                     extensions: vec![],
                 },
             ],
-        })];
-        config_items.extend(exposed_config(&self.param_template).items);
+        }));
         FilterPluginTable {
             name: "AEXCompat (AEX bridge)".to_string(),
             label: None,
@@ -808,13 +824,16 @@ impl FilterPlugin for AexBridgeFilter {
         };
 
         // Overlay this object's config values onto the exposed defaults and send
-        // them per frame. The parameter controls follow the "AEX" file control at
-        // index 0, so skip it. No exposed params => None (launch baseline).
+        // them per frame. The parameter controls occupy config[0..slots.len()] and
+        // the appended "AEX" selector sits after them, so `apply_config_values`
+        // (which zips slots against config) consumes only the parameter items and
+        // never reaches the trailing selector. No exposed params => None (launch
+        // baseline).
         let parameters = if exposed.defaults.is_empty() {
             None
         } else {
             let mut values = exposed.defaults;
-            apply_config_values(&mut values, &exposed.slots, config.get(1..).unwrap_or(&[]));
+            apply_config_values(&mut values, &exposed.slots, config);
             Some(values)
         };
 
@@ -881,7 +900,7 @@ fn resolve_launch_env() -> AnyResult<(PathBuf, PathBuf, String)> {
 /// Discovers the fixed AEX's parameter set (spawns a `--l2-params-only` worker
 /// via the broker). The result is the launch baseline; exposed config items are
 /// derived from it by [`exposed_config`].
-fn discover_config() -> AnyResult<(Vec<InteractiveParameter>, bool, String)> {
+fn discover_config() -> AnyResult<(Vec<InteractiveParameter>, bool)> {
     let (repository, plugin, plugin_sha256) = resolve_launch_env()?;
     let (parameters, diagnostics) =
         inspect_experimental_with_diagnostics(&repository, &plugin, &plugin_sha256)
@@ -894,7 +913,7 @@ fn discover_config() -> AnyResult<(Vec<InteractiveParameter>, bool, String)> {
         .unwrap_or(0)
         & (1 << 10)
         != 0;
-    Ok((parameters, smart, plugin_sha256))
+    Ok((parameters, smart))
 }
 
 /// The mappable parameters exposed as AviUtl2 controls: the config items, the
