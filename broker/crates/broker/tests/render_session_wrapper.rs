@@ -1479,15 +1479,16 @@ mod windows_e2e {
         let _ = std::fs::remove_dir_all(&scratch);
     }
 
-    /// Capability-gap routing (#264): a secondary layer larger (in total pixels)
-    /// than the primary input does not fit the session's uniform input-shaped
-    /// slots (RenderSession::open rejects it), but the one-shot layered path
-    /// accepts independent per-layer dimensions. Such a render must stay
-    /// session-INELIGIBLE and render one-shot, not hit the fail-closed error now
-    /// that the automatic fallback is gone. On a version that fail-closes without
-    /// this eligibility carve-out, the session open fails and the render errors.
+    /// Variable-sized layer slots (#264): a secondary layer larger (in total
+    /// pixels) than the primary input is now carried by the SESSION (its slot is
+    /// sized to the layer's own dimensions), not routed to one-shot. Run A (the
+    /// session route) must carry it (the counter advances) and produce the same
+    /// PNG as Run B (the one-shot route via the escape hatch), proving the
+    /// variable-slot transport is byte-equivalent. Before this change the layer
+    /// overran the uniform primary-sized slot and the render was routed to
+    /// one-shot instead.
     #[test]
-    fn oversized_layer_renders_one_shot_not_fail_closed() {
+    fn oversized_layer_renders_on_the_session_matching_one_shot() {
         let _env_guard = SESSION_ROUTE_ENV_LOCK
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
@@ -1510,8 +1511,8 @@ mod windows_e2e {
         ));
         std::fs::create_dir_all(&scratch).unwrap();
         // Primary input smaller than the secondary layer: the layer's pixel count
-        // (64*48) exceeds the primary (40*30), so it cannot fit the session's
-        // primary-sized input slot but is a legal one-shot layered render.
+        // (64*48) exceeds the primary (40*30). The session now sizes the layer
+        // slot to the layer's own dimensions, so it carries this render.
         let input = scratch.join("input.png");
         image::RgbaImage::from_fn(40, 30, |x, y| {
             image::Rgba([(x * 3) as u8, (y * 5) as u8, (x + y) as u8, 255])
@@ -1524,23 +1525,36 @@ mod windows_e2e {
         })
         .save(&secondary)
         .unwrap();
-
-        // No escape hatch: an eligible render would attempt the session. The
-        // oversized layer must make it ineligible so it renders one-shot instead.
-        unsafe { std::env::remove_var(DISABLE_SESSION_WRAPPER_ENV) };
         let params = vec![layer_parameter(1, &secondary)];
+
+        // Run A: default routing, oversized layer now carried by the session.
+        unsafe { std::env::remove_var(DISABLE_SESSION_WRAPPER_ENV) };
         let before = RENDER_SESSION_WRAPPER_RENDERS.load(Ordering::SeqCst);
-        let output = scratch.join("out.png");
-        let _report = render_experimental_image(&root, &aex, &sha, &input, &output, &params)
-            .expect("an oversized-layer render must succeed via one-shot, not fail closed");
+        let output_a = scratch.join("out-a.png");
+        let _report_a = render_experimental_image(&root, &aex, &sha, &input, &output_a, &params)
+            .expect("session-route oversized-layer render");
+        assert!(
+            RENDER_SESSION_WRAPPER_RENDERS.load(Ordering::SeqCst) > before,
+            "the oversized-layer render must now be carried by the session"
+        );
+
+        // Run B: escape hatch forces the one-shot layered transport.
+        unsafe { std::env::set_var(DISABLE_SESSION_WRAPPER_ENV, "1") };
+        let after_a = RENDER_SESSION_WRAPPER_RENDERS.load(Ordering::SeqCst);
+        let output_b = scratch.join("out-b.png");
+        let result_b = render_experimental_image(&root, &aex, &sha, &input, &output_b, &params);
+        unsafe { std::env::remove_var(DISABLE_SESSION_WRAPPER_ENV) };
+        result_b.expect("one-shot oversized-layer render");
         assert_eq!(
             RENDER_SESSION_WRAPPER_RENDERS.load(Ordering::SeqCst),
-            before,
-            "the oversized-layer render must be session-ineligible (carried by one-shot)"
+            after_a,
+            "the escape hatch did not force the one-shot transport"
         );
-        assert!(
-            output.exists(),
-            "the one-shot render must produce an output PNG"
+
+        assert_eq!(
+            std::fs::read(&output_a).unwrap(),
+            std::fs::read(&output_b).unwrap(),
+            "the oversized-layer PNG differs between the session and one-shot routes"
         );
         let _ = std::fs::remove_dir_all(&scratch);
     }

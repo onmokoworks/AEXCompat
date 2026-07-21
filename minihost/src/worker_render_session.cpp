@@ -112,15 +112,16 @@ std::size_t output_slot_offset(const SessionGeometry& geometry) {
   return kHeaderBytes + align_slot(input_slot_bytes(geometry));
 }
 
-std::size_t layer_slot_offset(const SessionGeometry& geometry, int32_t index) {
-  return output_slot_offset(geometry) + align_slot(output_slot_bytes(geometry)) +
-         static_cast<std::size_t>(index) * align_slot(input_slot_bytes(geometry));
+std::size_t layer_slot_bytes(int32_t width, int32_t height) {
+  return align_slot(static_cast<std::size_t>(width) * height * 4);
+}
+
+std::size_t layer_region_offset(const SessionGeometry& geometry) {
+  return output_slot_offset(geometry) + align_slot(output_slot_bytes(geometry));
 }
 
 std::size_t expected_section_bytes(const SessionGeometry& geometry) {
-  return output_slot_offset(geometry) + align_slot(output_slot_bytes(geometry)) +
-         static_cast<std::size_t>(geometry.layer_slot_count) *
-             align_slot(input_slot_bytes(geometry));
+  return layer_region_offset(geometry) + geometry.layer_region_bytes;
 }
 
 bool session_environment_requested() {
@@ -238,7 +239,7 @@ bool SessionChannels::static_header_matches(const SessionGeometry& geometry) con
                                   ? 32
                                   : (geometry.output_pixel_bytes == 8 ? 16 : 8);
   return opened() && read_header_u32(kHeaderMagicOffset) == kHeaderMagic &&
-         read_header_u32(kHeaderVersionOffset) == kProtocolVersion &&
+         read_header_u32(kHeaderVersionOffset) == kSessionHeaderVersion &&
          read_header_u32(kHeaderDepthCodeOffset) == depth_code &&
          read_header_u32(kHeaderMaxWidthOffset) ==
              static_cast<uint32_t>(geometry.max_width) &&
@@ -466,6 +467,15 @@ RenderSessionOutcome run_session_frame_loop(
   RenderSessionOutcome outcome;
   const int32_t layer_slot_count =
       external_layers ? static_cast<int32_t>(external_layers->size()) : 0;
+  // Layer slots are sized per-layer (#264): sum each layer's own aligned size so
+  // the section-size validation below matches the broker's per-layer layout. The
+  // per-layer dimensions arrive in the session-layers trailer (external_layers),
+  // already parsed and bounded before this point.
+  std::size_t layer_region_bytes = 0;
+  if (external_layers) {
+    for (const auto& layer : *external_layers)
+      layer_region_bytes += wrs::layer_slot_bytes(layer.width, layer.height);
+  }
   // Non-const: an in-session grow (protocol §3, issue #262) raises the output
   // capacity in place when an expand overruns the launch slot, without changing
   // the render dimensions (max_width/max_height) or the input/output offsets.
@@ -473,31 +483,34 @@ RenderSessionOutcome run_session_frame_loop(
       max_width, max_height,
       output_capacity_width > 0 ? output_capacity_width : max_width,
       output_capacity_height > 0 ? output_capacity_height : max_height,
-      pixel_bytes, layer_slot_count};
+      pixel_bytes, layer_slot_count, layer_region_bytes};
   wrs::SessionChannels channels;
   if (!channels.open_from_environment(geometry) ||
       !channels.static_header_matches(geometry)) {
     outcome.protocol_violation = true;
     return outcome;
   }
-  // Layers are static for the whole session: copy each layer's RGBA out of
-  // its shared slot once, into a worker-private vector the render loop reuses
-  // (the plug-in never sees the mapping). A layer whose declared geometry
-  // overflows its slot is a fail-closed launch error.
+  // Layers are static for the whole session: copy each layer's RGBA out of its
+  // own shared slot once, into a worker-private vector the render loop reuses
+  // (the plug-in never sees the mapping). Slots are sized per-layer, so the
+  // offset walks a prefix sum of the aligned per-layer sizes in launch order
+  // (matching the broker's write loop). A zero-size layer is a fail-closed
+  // launch error.
   std::vector<ExternalLayerInput> session_layers;
   if (external_layers) {
     session_layers = *external_layers;
+    std::size_t layer_offset = wrs::layer_region_offset(geometry);
     for (int32_t index = 0; index < layer_slot_count; ++index) {
       auto& layer = session_layers[index];
       const std::size_t bytes =
           static_cast<std::size_t>(layer.width) * layer.height * 4;
-      if (bytes == 0 || bytes > wrs::input_slot_bytes(geometry)) {
+      if (bytes == 0) {
         outcome.protocol_violation = true;
         return outcome;
       }
       layer.rgba.resize(bytes);
-      std::memcpy(layer.rgba.data(),
-                  channels.view() + wrs::layer_slot_offset(geometry, index), bytes);
+      std::memcpy(layer.rgba.data(), channels.view() + layer_offset, bytes);
+      layer_offset += wrs::layer_slot_bytes(layer.width, layer.height);
     }
   }
   const std::vector<ExternalLayerInput>* frame_layers =

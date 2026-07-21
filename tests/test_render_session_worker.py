@@ -30,6 +30,10 @@ HEADER_BYTES = 4096
 SLOT_ALIGNMENT = 4096
 HEADER_MAGIC = 0x53584541  # "AEXS"
 PROTOCOL_VERSION = 1
+# Session header layout version (distinct from the message `v`): 2 since layer
+# slots became per-layer sized (#264). The real worker's static_header_matches
+# requires it, so this stand-in broker must stamp 2 or the worker fail-closes.
+SESSION_HEADER_VERSION = 2
 
 MAGIC_OFFSET = 0
 VERSION_OFFSET = 4
@@ -113,7 +117,7 @@ class SessionTransport:
         self.view = (ctypes.c_ubyte * self.section_bytes).from_address(view)
 
         self.write_header(MAGIC_OFFSET, HEADER_MAGIC)
-        self.write_header(VERSION_OFFSET, PROTOCOL_VERSION)
+        self.write_header(VERSION_OFFSET, SESSION_HEADER_VERSION)
         self.write_header(DEPTH_CODE_OFFSET, depth_code)
         self.write_header(MAX_WIDTH_OFFSET, WIDTH)
         self.write_header(MAX_HEIGHT_OFFSET, HEIGHT)

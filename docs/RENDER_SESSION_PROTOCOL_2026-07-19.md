@@ -129,9 +129,14 @@ parse_render_environment_payload / prepare_aux_transport)。full-resolution
 
 W1-4 では secondary layer を `session-layers:v1|slot,w,h;...` trailer
 (context trailer より前) で運ぶ。各 layer の RGBA8 ピクセルは §6 のレイヤー
-スロット (出力スロットの後、各 max_width*max_height*4) に static 配置され、
-worker は open 時に一度読んで全フレームで使い回す。header の
-`layer_slot_count` は broker が書き、両者が検証する。
+スロット (出力スロットの後) に static 配置され、worker は open 時に一度読んで
+全フレームで使い回す。**レイヤースロットは layer ごとに自分の寸法 (layer_w*layer_h*4)
+で確保する (#264)**。primary 入力サイズに統一しないため、primary より大きい layer
+も表現でき、one-shot layered が受容する構成を session でも扱える。個々のスロット
+offset は aligned な per-layer サイズの prefix sum (launch 順) で、broker の書き込み
+ループと worker の読み出しループが同順で inline に歩む。header の `layer_slot_count`
+は broker が書き、両者が検証する (per-layer 寸法は trailer が運ぶので header 追加は
+不要)。
 
 W1-4b では timed layer を同 trailer の 5 フィールド形式 `slot,w,h,time,scale`
 で運ぶ (3 フィールドは従来どおり static secondary)。物理スロットは layer 配列の
@@ -436,8 +441,9 @@ publish_effect_sequence) →
 ```
 offset 0        : SessionHeader (1 ページ 4096B)
 offset 4096     : 入力スロット   (max_width * max_height * 4)
-align 4096      : 出力スロット   (max_width * max_height * bpp)
-align 4096      : レイヤースロット × n (launch の layer 数、各 max_width * max_height * 4)
+align 4096      : 出力スロット   (max_width * max_height * bpp、grow で拡大 #262)
+align 4096      : レイヤースロット × n (launch の layer 数、各 layer_w * layer_h * 4、
+                  layer ごとに個別サイズ #264、4096-align の prefix sum で配置)
 ```
 
 - 入力・レイヤースロットは RGBA8 (4B/px) 固定。one-shot の入力 raw
@@ -467,7 +473,9 @@ SessionHeader (すべて u32 LE、予約領域は 0 埋め):
 
 ```
 magic            "AEXS"        (0x53584541)
-version          1
+version          2   (レイアウト版。layer slot が per-layer サイズ化 #264 で 1→2。
+                     制御メッセージの `v` とは別軸で、mismatch build を両方向で
+                     fail-closed にする。audio session は layout 不変で 1 のまま)
 depth_code       8 | 16 | 32
 max_width, max_height
 layer_slot_count

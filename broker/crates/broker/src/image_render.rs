@@ -4677,34 +4677,24 @@ fn render_with_artifact(
     };
     let alpha_as_coverage_params: &[u32] =
         host_context.map_or(&[], |context| context.alpha_as_coverage_params.as_slice());
-    // The session's input and layer slots are all sized to the primary input's
-    // pixel count (RenderSession::open rejects a layer whose RGBA bytes exceed
-    // that slot: "render session layer pixels do not fit the slot"). The one-shot
-    // layered path instead accepts independent per-layer dimensions bounded only
-    // by MAX_DIMENSION/MAX_PIXELS. A secondary or timed layer larger (in total
-    // pixels) than the primary is therefore a real capability gap, not an
-    // infrastructure failure: keep it session-ineligible so it renders one-shot,
-    // rather than fail-closing it now that the automatic fallback is gone (#264).
-    let primary_pixels = u64::from(width) * u64::from(height);
-    let layers_fit_session_slots = secondaries
+    // The session sizes each layer slot to that layer's own dimensions (#264),
+    // so a secondary or timed layer larger than the primary is representable and
+    // no longer needs the one-shot path. What remains a session-transport limit
+    // is the aggregate section cap (the one-shot per-file transport has no
+    // equivalent): a config whose per-layer slots sum past the cap stays on the
+    // one-shot path rather than fail-closing (#264). Feed the actual per-layer
+    // dimensions so this check matches open's per-layer section layout exactly.
+    let layer_dims = secondaries
         .iter()
-        .all(|(_, w, h, _)| u64::from(*w) * u64::from(*h) <= primary_pixels)
-        && timed_secondaries
-            .iter()
-            .all(|(_, _, w, h, _)| u64::from(*w) * u64::from(*h) <= primary_pixels);
-    // The session's uniform primary-sized slots also fall under an aggregate
-    // section cap that the one-shot per-file transport has no equivalent for; a
-    // config that overruns it is a session-transport limit, not a compatibility
-    // failure, so keep it on the one-shot path rather than fail-closing (#264).
-    let layer_count = (secondaries.len() + timed_secondaries.len()) as u32;
+        .map(|(_, w, h, _)| (*w, *h))
+        .chain(timed_secondaries.iter().map(|(_, _, w, h, _)| (*w, *h)));
     let session_section_fits =
-        crate::render_session::classic_session_section_fits(width, height, pixel_format, layer_count);
+        crate::render_session::classic_session_section_fits(width, height, pixel_format, layer_dims);
     if !smart
         && audio.is_none()
         && gpu_backend == RenderGpuBackend::Auto
         && payload == encode_interactive_payload(interactive_parameters.unwrap_or_default())?
         && std::env::var_os(DISABLE_SESSION_WRAPPER_ENV).is_none()
-        && layers_fit_session_slots
         && session_section_fits
         // RenderSession::open rejects total_time <= 0, but the shared timing
         // validation (RenderTiming::is_valid) admits total_time == 0 at
