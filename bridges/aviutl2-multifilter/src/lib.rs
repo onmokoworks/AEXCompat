@@ -229,6 +229,11 @@ const MAX_DISCOVERY_PARALLELISM: usize = 3;
 /// trees); the AE plug-in tree is only a few levels deep.
 const MAX_SCAN_DEPTH: usize = 8;
 
+/// The background discovery saves the cache after each chunk of this many AEX, so
+/// progress survives a restart/shutdown mid-scan (rather than only at the end of a
+/// multi-minute scan).
+const DISCOVERY_SAVE_CHUNK: usize = 24;
+
 /// Set on plugin unload so the background discovery thread stops promptly.
 static DISCOVERY_SHUTDOWN: AtomicBool = AtomicBool::new(false);
 /// The background discovery thread's join handle, so `UninitializePlugin` can
@@ -300,17 +305,36 @@ fn spawn_background_discovery(
     let handle = std::thread::Builder::new()
         .name("aex-multifilter-discovery".into())
         .spawn(move || {
-            for (plugin, entry) in discover_all(&repository, &misses) {
-                cache.insert(plugin.to_string_lossy().into_owned(), entry);
-            }
-            // Prune entries for AEX no longer in the scan set so the cache file
-            // does not grow unbounded across app upgrades / removals.
             let current: std::collections::HashSet<String> = plugins
                 .iter()
                 .map(|plugin| plugin.to_string_lossy().into_owned())
                 .collect();
+            // Prune stale entries (removed/renamed AEX) up front so an early
+            // shutdown still leaves a pruned cache.
             cache.retain(|key, _| current.contains(key));
-            save_cache(&cache);
+
+            // Discover in chunks and save the cache after each, so a restart or
+            // shutdown mid-scan keeps the progress so far (effects appear across
+            // successive launches) instead of discarding a multi-minute scan. The
+            // full scan of hundreds of AE effects can only ever populate the cache
+            // — AviUtl2 freezes a filter's config at load — so the results show on
+            // the next launch.
+            for chunk in misses.chunks(DISCOVERY_SAVE_CHUNK) {
+                if DISCOVERY_SHUTDOWN.load(Ordering::Relaxed) {
+                    break;
+                }
+                let results = discover_all(&repository, chunk);
+                let discovered = results.len();
+                for (plugin, entry) in results {
+                    cache.insert(plugin.to_string_lossy().into_owned(), entry);
+                }
+                // discover_all returns fewer than the chunk only if it was cut
+                // short by the shutdown flag; save what we have and stop.
+                save_cache(&cache);
+                if discovered < chunk.len() {
+                    break;
+                }
+            }
         });
     if let Ok(handle) = handle
         && let Ok(mut slot) = DISCOVERY_THREAD.lock()
