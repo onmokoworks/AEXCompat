@@ -4698,32 +4698,36 @@ fn render_with_artifact(
         && std::env::var_os(DISABLE_SESSION_WRAPPER_ENV).is_none()
         && timing.time_scale <= i32::MAX as u32
         && if smart {
-            // Only admit smart configs the one-shot transport also handles
-            // equivalently, so the escape hatch (AEXCOMPAT_DISABLE_RENDER_SESSION_WRAPPER)
-            // and the A/B tests stay valid. The one-shot smart command table
+            // Admit the smart configs the CPU session serves and that no policy
+            // is required for; the pixels match one-shot because both render on
+            // the smart worker's CPU path. The one-shot smart command table
             // (image_worker_command) has non-layered arms for Argb8/Argb16 only
-            // under Auto, and for Argb32f under Auto/Cpu/OpenCl/DirectX:
-            //   - Argb8/Argb16 Auto: no GPU attempt either side, equivalent.
-            //   - Argb32f Cpu: one-shot --smart-image32-cpu, no GPU attempt,
-            //     equivalent.
+            // under Auto, and for Argb32f under Auto/Cpu/OpenCl/DirectX.
+            // Admitted here:
+            //   - Argb8/Argb16 Auto: no GPU attempt either side, fully equivalent.
+            //   - Argb32f Cpu: one-shot --smart-image32-cpu, no GPU attempt.
+            //   - Argb32f Auto (policy-none): the session folds Auto to CPU
+            //     (--smart-session32-cpu-v1) and renders on CPU. One-shot fails
+            //     its policy-less GPU preflight *before touching any device* and
+            //     falls back to the same CPU render, so the pixels match, but it
+            //     records gpu_attempt/gpu_fallback_used. Per W4 (#264) the
+            //     session is the anchor and that futile preflight record is an
+            //     artifact being removed, so the session's no-GPU-attempt report
+            //     is canonical (issue #292).
             // Excluded here:
-            //   - Argb32f Auto: the one-shot GPU-preflight path
-            //     (gpu_initial_attempt = smart && Argb32f && a runtime backend);
-            //     one-shot attempts GPU, fails the policy-less preflight, and
-            //     records gpu_attempt/gpu_fallback_used before the CPU render,
-            //     which a CPU-folded Auto session cannot reproduce. Defer to the
-            //     GPU session stage.
             //   - Argb8/Argb16 Cpu: the one-shot table has no CPU arm for these
             //     depths (falls through to the error arm), so routing them to
             //     the session would succeed while the forced one-shot fails.
+            //   - Argb32f Auto with a policy / explicit GPU backends: the GPU
+            //     session path is unreached (no policy producer exists); defer
+            //     to the GPU session stage (#290).
             secondaries.is_empty()
                 && timed_secondaries.is_empty()
                 && host_context.is_none()
                 && ((gpu_backend == RenderGpuBackend::Cpu
                     && pixel_format == RenderPixelFormat::Argb32f)
                     || (gpu_backend == RenderGpuBackend::Auto
-                        && gpu_runtime_policy.is_none()
-                        && pixel_format != RenderPixelFormat::Argb32f))
+                        && gpu_runtime_policy.is_none()))
         } else {
             gpu_backend == RenderGpuBackend::Auto
         };

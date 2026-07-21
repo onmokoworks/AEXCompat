@@ -13,10 +13,11 @@ mod windows_e2e {
         render_experimental_smart_image, render_experimental_smart_image_at_time,
         render_experimental_image_at_time_with_format_and_context,
         render_experimental_image_at_time_with_format_context_and_ui_action,
+        render_experimental_image_at_time_with_format_context_ui_action_and_gpu_backend,
         render_experimental_image_with_parameter_animation, AnimationInterpolation, AnimationTime,
         AnimationValue, InteractiveParameter, ParameterAnimation, ParameterAnimationKey,
-        RenderPixelFormat, RenderTiming, RenderUiAction, DISABLE_SESSION_WRAPPER_ENV,
-        RENDER_SESSION_WRAPPER_RENDERS,
+        RenderGpuBackend, RenderPixelFormat, RenderTiming, RenderUiAction,
+        DISABLE_SESSION_WRAPPER_ENV, RENDER_SESSION_WRAPPER_RENDERS,
     };
     // The fault-injection knob exists only in debug builds (image_render.rs), so
     // the test that uses it is gated to debug too.
@@ -156,6 +157,126 @@ mod windows_e2e {
         unsafe { std::env::remove_var(DISABLE_SESSION_WRAPPER_ENV) };
         let empty_report_b = empty_report_b.expect("one-shot empty smart render");
         compare(&empty_report_a, &empty_report_b, "empty");
+        let _ = std::fs::remove_dir_all(&scratch);
+    }
+
+    #[test]
+    fn smart_argb32f_auto_is_session_canonical_and_pixel_matches_one_shot() {
+        // Argb32f smart Auto (policy-none) is now carried by the length-1 session
+        // (#292): the session folds Auto to CPU and renders on
+        // --smart-session32-cpu-v1. One-shot Argb32f Auto fails its policy-less
+        // GPU preflight *before touching any device* and falls back to the same
+        // CPU render, so the pixels match, but one-shot records
+        // gpu_attempt/gpu_fallback_used while the session does not. Per W4 (#264)
+        // the session is the anchor, so its no-GPU-attempt report is canonical;
+        // assert the pixel equivalence and pin the intended report divergence.
+        let _env_guard = SESSION_ROUTE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let root = repository_root();
+        let worker = root.join("target/minihost-build/aex_smart_worker.exe");
+        let aex = root
+            .join("target/pf-smart-geometry-probe-build/Release/pf_smart_geometry_probe.aex");
+        if !worker.is_file() || !aex.is_file() {
+            eprintln!(
+                "skipping Argb32f smart Auto A/B: build aex_smart_worker.exe and \
+                 pf_smart_geometry_probe.aex first"
+            );
+            return;
+        }
+        let sha = format!("{:x}", Sha256::digest(std::fs::read(&aex).unwrap()));
+        let scratch = std::env::temp_dir().join(format!(
+            "aexcompat-smart32-ab-{}-{:032x}",
+            std::process::id(),
+            rand::random::<u128>()
+        ));
+        std::fs::create_dir_all(&scratch).unwrap();
+        let input = scratch.join("input.png");
+        image::RgbaImage::from_fn(64, 48, |x, y| {
+            image::Rgba([(x * 3) as u8, (y * 5) as u8, (x + y) as u8, 255])
+        })
+        .save(&input)
+        .unwrap();
+        let timing = RenderTiming {
+            current_time: 0,
+            time_step: 1,
+            total_time: 300,
+            time_scale: 30,
+        };
+        let render = |output: &Path| {
+            render_experimental_image_at_time_with_format_context_ui_action_and_gpu_backend(
+                &root,
+                &aex,
+                &sha,
+                &input,
+                output,
+                &[],
+                timing,
+                true,
+                RenderPixelFormat::Argb32f,
+                None,
+                None,
+                RenderGpuBackend::Auto,
+            )
+        };
+
+        // Run A: default routing carries Argb32f Auto on the session.
+        unsafe { std::env::remove_var(DISABLE_SESSION_WRAPPER_ENV) };
+        let before = RENDER_SESSION_WRAPPER_RENDERS.load(Ordering::SeqCst);
+        let out_a = scratch.join("a.png");
+        let report_a = render(&out_a).expect("session-route Argb32f Auto smart render");
+        assert!(
+            RENDER_SESSION_WRAPPER_RENDERS.load(Ordering::SeqCst) > before,
+            "the Argb32f Auto smart render must now be carried by the session"
+        );
+
+        // Run B: escape hatch forces the one-shot transport.
+        unsafe { std::env::set_var(DISABLE_SESSION_WRAPPER_ENV, "1") };
+        let out_b = scratch.join("b.png");
+        let report_b = render(&out_b);
+        unsafe { std::env::remove_var(DISABLE_SESSION_WRAPPER_ENV) };
+        let report_b = report_b.expect("one-shot Argb32f Auto smart render");
+
+        // Pixel equivalence: both render on the smart worker's CPU path.
+        assert_eq!(
+            report_a.get("output_sha256"),
+            report_b.get("output_sha256"),
+            "the Argb32f Auto render output must match between the routes"
+        );
+        assert!(
+            report_a
+                .get("output_sha256")
+                .is_some_and(|value| !value.is_null()),
+            "the session render must report an output_sha256: {report_a}"
+        );
+
+        // Session-canonical report: the session takes no GPU attempt.
+        assert_eq!(
+            report_a.get("gpu_fallback_used"),
+            Some(&serde_json::Value::Bool(false)),
+            "the session must not report a GPU fallback: {report_a}"
+        );
+        assert_eq!(
+            report_a.get("gpu_attempt"),
+            Some(&serde_json::Value::Null),
+            "the session must record no GPU attempt: {report_a}"
+        );
+
+        // One-shot records the futile policy-less preflight and CPU fallback:
+        // exactly the artifact the session drops. Pinning it fixes the intended
+        // divergence so a later change cannot silently converge or widen it.
+        assert_eq!(
+            report_b.get("gpu_fallback_used"),
+            Some(&serde_json::Value::Bool(true)),
+            "one-shot Argb32f Auto must record the CPU fallback: {report_b}"
+        );
+        assert!(
+            report_b
+                .get("gpu_attempt")
+                .is_some_and(|value| !value.is_null()),
+            "one-shot Argb32f Auto must record the GPU preflight attempt: {report_b}"
+        );
+
         let _ = std::fs::remove_dir_all(&scratch);
     }
 
