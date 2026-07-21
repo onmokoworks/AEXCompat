@@ -1672,20 +1672,31 @@ mod windows_e2e {
         // premultiply changes the color channels. The conformance env changes
         // both the pre-transform and the report, so a leak past this test (e.g.
         // a panic before the explicit remove) would corrupt later tests; restore
-        // it on drop rather than relying on reaching the end.
-        struct EnvVarGuard(&'static str);
-        impl Drop for EnvVarGuard {
-            fn drop(&mut self) {
-                unsafe { std::env::remove_var(self.0) };
+        // the prior value (or its absence) on drop rather than relying on
+        // reaching the end.
+        struct EnvVarGuard {
+            name: &'static str,
+            previous: Option<std::ffi::OsString>,
+        }
+        impl EnvVarGuard {
+            fn set(name: &'static str, value: &str) -> Self {
+                let previous = std::env::var_os(name);
+                unsafe { std::env::set_var(name, value) };
+                Self { name, previous }
             }
         }
-        let _conformance_guard = EnvVarGuard("AEXCOMPAT_CONFORMANCE_RENDER_SETTINGS");
-        unsafe {
-            std::env::set_var(
-                "AEXCOMPAT_CONFORMANCE_RENDER_SETTINGS",
-                "v1|premultiplied|0|-|0|software",
-            );
+        impl Drop for EnvVarGuard {
+            fn drop(&mut self) {
+                match &self.previous {
+                    Some(value) => unsafe { std::env::set_var(self.name, value) },
+                    None => unsafe { std::env::remove_var(self.name) },
+                }
+            }
         }
+        let _conformance_guard = EnvVarGuard::set(
+            "AEXCOMPAT_CONFORMANCE_RENDER_SETTINGS",
+            "v1|premultiplied|0|-|0|software",
+        );
 
         // Run A: default routing now carries the conformance render on the
         // session (the counter must advance).
