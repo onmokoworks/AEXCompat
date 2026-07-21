@@ -425,6 +425,258 @@ constexpr std::size_t kUtilsGetPixelData16 = 536;
 
 using EffectEntry = int32_t(__cdecl*)(int32_t, void*, void*, void**, void*, void*);
 using AegpEntry = int32_t(__cdecl*)(void*, int32_t, int32_t, int32_t, void**);
+
+// PiPL-driven Effect entrypoint discovery (issue #84). The loader must decide
+// the plug-in ABI from the plug-in's own PiPL resource (Kind + CodeWin64X86),
+// not from a fixed export name, so an Effect whose entrypoint is not literally
+// "EffectMain" (for example OLM's lowercase entryPointFunc) is discovered and
+// an AEGP is never handed to the Effect selector. Bounded and fail-closed:
+// malformed, ambiguous, or non-Effect PiPL is rejected before any selector runs.
+// Ported from the reviewed/audited implementation on codex/issue84-pipl-entrypoint.
+enum class PiplPluginKind { Effect, Aegp, Unknown, Invalid };
+
+struct PiplEntrypoint {
+  PiplPluginKind kind{PiplPluginKind::Unknown};
+  std::string symbol;
+};
+
+uint32_t read_pipl_u32(const unsigned char* bytes) {
+  return uint32_t(bytes[0]) | (uint32_t(bytes[1]) << 8) |
+      (uint32_t(bytes[2]) << 16) | (uint32_t(bytes[3]) << 24);
+}
+
+bool pipl_tag(const unsigned char* bytes, const char (&tag)[5]) {
+  return std::memcmp(bytes, tag, 4) == 0;
+}
+
+bool valid_export_symbol(const unsigned char* bytes, std::size_t size,
+                         std::string& symbol) {
+  if (size == 0 || size > 256) return false;
+  const void* terminator = std::memchr(bytes, 0, size);
+  if (!terminator) return false;
+  const std::size_t length = static_cast<const unsigned char*>(terminator) - bytes;
+  if (length == 0 || length > 127) return false;
+  if (!(bytes[0] == '_' || (bytes[0] >= 'A' && bytes[0] <= 'Z') ||
+        (bytes[0] >= 'a' && bytes[0] <= 'z'))) return false;
+  for (std::size_t index = 1; index < length; ++index) {
+    const unsigned char value = bytes[index];
+    if (!(value == '_' || (value >= 'A' && value <= 'Z') ||
+          (value >= 'a' && value <= 'z') || (value >= '0' && value <= '9')))
+      return false;
+  }
+  for (std::size_t index = length + 1; index < size; ++index)
+    if (bytes[index] != 0) return false;
+  symbol.assign(reinterpret_cast<const char*>(bytes), length);
+  return true;
+}
+
+PiplEntrypoint parse_pipl_entrypoint(const unsigned char* bytes, std::size_t size) {
+  PiplEntrypoint result;
+  if (!bytes || size < 10 || size > 1024 * 1024) {
+    result.kind = PiplPluginKind::Invalid;
+    return result;
+  }
+  // Adobe's Windows PiPL resource serialization has a 10-byte list header:
+  // a little-endian 32-bit version followed by a padded 16-bit count tuple
+  // (0, count, 0). This is the layout emitted by the SDK PiPL tool/RC files.
+  const uint32_t version = read_pipl_u32(bytes);
+  const uint32_t count = uint32_t(bytes[6]) | (uint32_t(bytes[7]) << 8);
+  if (version > 1 || bytes[4] != 0 || bytes[5] != 0 || bytes[8] != 0 ||
+      bytes[9] != 0 || count == 0 || count > 256) {
+    result.kind = PiplPluginKind::Invalid;
+    return result;
+  }
+  bool saw_kind = false;
+  bool saw_code = false;
+  std::array<unsigned char, 4> kind{};
+  std::string symbol;
+  std::size_t offset = 10;
+  for (uint32_t index = 0; index < count; ++index) {
+    if (offset > size || size - offset < 16) {
+      result.kind = PiplPluginKind::Invalid;
+      return result;
+    }
+    const unsigned char* property = bytes + offset;
+    const uint32_t length = read_pipl_u32(property + 12);
+    const bool adobe_vendor = pipl_tag(property, "MIB8");
+    offset += 16;
+    if (length > size - offset || length > std::numeric_limits<uint32_t>::max() - 3U) {
+      result.kind = PiplPluginKind::Invalid;
+      return result;
+    }
+    const uint32_t padded_length = (length + 3U) & ~3U;
+    if (padded_length > size - offset) {
+      result.kind = PiplPluginKind::Invalid;
+      return result;
+    }
+    // PiPL four-character constants are stored as little-endian DWORD bytes
+    // in Windows resources (for example PIKindProperty 'kind' is "dnik").
+    if (adobe_vendor && pipl_tag(property + 4, "dnik")) {
+      if (saw_kind || length != 4) {
+        result.kind = PiplPluginKind::Invalid;
+        return result;
+      }
+      std::copy_n(bytes + offset, 4, kind.begin());
+      saw_kind = true;
+    } else if (adobe_vendor && pipl_tag(property + 4, "4668")) {
+      if (saw_code || !valid_export_symbol(bytes + offset, length, symbol)) {
+        result.kind = PiplPluginKind::Invalid;
+        return result;
+      }
+      saw_code = true;
+    }
+    for (uint32_t padding = length; padding < padded_length; ++padding)
+      if (bytes[offset + padding] != 0) {
+        result.kind = PiplPluginKind::Invalid;
+        return result;
+      }
+    offset += padded_length;
+  }
+  if (offset != size || !saw_kind) {
+    result.kind = PiplPluginKind::Invalid;
+    return result;
+  }
+  if (std::memcmp(kind.data(), "TKFe", 4) == 0) {
+    if (!saw_code) result.kind = PiplPluginKind::Invalid;
+    else {
+      result.kind = PiplPluginKind::Effect;
+      result.symbol = std::move(symbol);
+    }
+  } else if (std::memcmp(kind.data(), "xgEA", 4) == 0) {
+    result.kind = PiplPluginKind::Aegp;
+  } else {
+    result.kind = PiplPluginKind::Unknown;
+  }
+  return result;
+}
+
+struct PiplResourceName {
+  bool integer{};
+  WORD id{};
+  std::wstring text;
+};
+
+BOOL CALLBACK collect_pipl_resource(HMODULE, LPCWSTR, LPWSTR name, LONG_PTR context) {
+  auto* names = reinterpret_cast<std::vector<PiplResourceName>*>(context);
+  if (names->size() >= 64) return FALSE;
+  PiplResourceName copy;
+  if (IS_INTRESOURCE(name)) {
+    copy.integer = true;
+    copy.id = LOWORD(reinterpret_cast<ULONG_PTR>(name));
+  } else {
+    if (!name || std::wcslen(name) > 255) return FALSE;
+    copy.text = name;
+  }
+  names->push_back(std::move(copy));
+  return TRUE;
+}
+
+BOOL CALLBACK collect_pipl_language(HMODULE, LPCWSTR, LPCWSTR, WORD language,
+                                    LONG_PTR context) {
+  auto* languages = reinterpret_cast<std::vector<WORD>*>(context);
+  if (languages->size() >= 8) return FALSE;
+  languages->push_back(language);
+  return TRUE;
+}
+
+PiplEntrypoint discover_pipl_entrypoint(HMODULE module) {
+  std::vector<PiplResourceName> names;
+  SetLastError(ERROR_SUCCESS);
+  if (!EnumResourceNamesW(module, L"PiPL", &collect_pipl_resource,
+                          reinterpret_cast<LONG_PTR>(&names))) {
+    const DWORD error = GetLastError();
+    if (error != ERROR_RESOURCE_TYPE_NOT_FOUND && error != ERROR_RESOURCE_NAME_NOT_FOUND)
+      return {PiplPluginKind::Invalid, {}};
+  }
+  if (names.empty()) return {PiplPluginKind::Unknown, {}};
+  PiplEntrypoint selected;
+  bool selected_effect = false;
+  bool saw_aegp = false;
+  for (const auto& name : names) {
+    LPCWSTR resource_name = name.integer ? MAKEINTRESOURCEW(name.id) : name.text.c_str();
+    std::vector<WORD> languages;
+    SetLastError(ERROR_SUCCESS);
+    if (!EnumResourceLanguagesW(module, L"PiPL", resource_name,
+                                &collect_pipl_language,
+                                reinterpret_cast<LONG_PTR>(&languages)) ||
+        languages.size() != 1)
+      return {PiplPluginKind::Invalid, {}};
+    HRSRC resource = FindResourceExW(module, L"PiPL", resource_name, languages[0]);
+    if (!resource) return {PiplPluginKind::Invalid, {}};
+    const DWORD size = SizeofResource(module, resource);
+    HGLOBAL loaded = LoadResource(module, resource);
+    const auto* bytes = loaded ? static_cast<const unsigned char*>(LockResource(loaded)) : nullptr;
+    PiplEntrypoint current = parse_pipl_entrypoint(bytes, size);
+    if (current.kind == PiplPluginKind::Invalid) return current;
+    if (current.kind == PiplPluginKind::Aegp) saw_aegp = true;
+    if (current.kind == PiplPluginKind::Effect) {
+      if (selected_effect) return {PiplPluginKind::Invalid, {}};
+      selected = std::move(current);
+      selected_effect = true;
+    }
+  }
+  if (selected_effect && saw_aegp) return {PiplPluginKind::Invalid, {}};
+  if (selected_effect) return selected;
+  if (saw_aegp) return {PiplPluginKind::Aegp, {}};
+  return {PiplPluginKind::Unknown, {}};
+}
+
+void append_pipl_u32(std::vector<unsigned char>& bytes, uint32_t value) {
+  for (unsigned shift = 0; shift < 32; shift += 8)
+    bytes.push_back(static_cast<unsigned char>(value >> shift));
+}
+
+void append_pipl_property(std::vector<unsigned char>& bytes, const char (&key)[5],
+                          const std::vector<unsigned char>& data) {
+  bytes.insert(bytes.end(), {'M', 'I', 'B', '8'});
+  bytes.insert(bytes.end(), key, key + 4);
+  append_pipl_u32(bytes, 0);
+  append_pipl_u32(bytes, static_cast<uint32_t>(data.size()));
+  bytes.insert(bytes.end(), data.begin(), data.end());
+  while ((bytes.size() - 10) % 4 != 0) bytes.push_back(0);
+}
+
+std::vector<unsigned char> synthetic_pipl(
+    const std::array<unsigned char, 4>& kind, const std::string& symbol) {
+  std::vector<unsigned char> bytes{1, 0, 0, 0, 0, 0, 2, 0, 0, 0};
+  append_pipl_property(
+      bytes, "dnik", std::vector<unsigned char>(kind.begin(), kind.end()));
+  std::vector<unsigned char> code(symbol.begin(), symbol.end());
+  code.push_back(0);
+  append_pipl_property(bytes, "4668", code);
+  return bytes;
+}
+
+bool verify_pipl_entrypoint_parser() {
+  const auto effect = synthetic_pipl({'T', 'K', 'F', 'e'}, "entryPointFunc");
+  const auto parsed_effect = parse_pipl_entrypoint(effect.data(), effect.size());
+  if (parsed_effect.kind != PiplPluginKind::Effect ||
+      parsed_effect.symbol != "entryPointFunc") return false;
+  const auto aegp = synthetic_pipl({'x', 'g', 'E', 'A'}, "EntryPointFunc");
+  if (parse_pipl_entrypoint(aegp.data(), aegp.size()).kind != PiplPluginKind::Aegp)
+    return false;
+  auto invalid_symbol = synthetic_pipl({'T', 'K', 'F', 'e'}, "bad-name");
+  if (parse_pipl_entrypoint(invalid_symbol.data(), invalid_symbol.size()).kind !=
+      PiplPluginKind::Invalid) return false;
+  auto truncated = effect;
+  truncated.pop_back();
+  if (parse_pipl_entrypoint(truncated.data(), truncated.size()).kind !=
+      PiplPluginKind::Invalid) return false;
+  auto hostile_length = effect;
+  std::fill(hostile_length.begin() + 22, hostile_length.begin() + 26, 0xff);
+  if (parse_pipl_entrypoint(hostile_length.data(), hostile_length.size()).kind !=
+      PiplPluginKind::Invalid) return false;
+  auto vendor_private_duplicate = effect;
+  vendor_private_duplicate[6] = 3;
+  const std::size_t private_offset = vendor_private_duplicate.size();
+  append_pipl_property(vendor_private_duplicate, "4668", {'O', 't', 'h', 'e', 'r', 0});
+  std::copy_n("VEND", 4, vendor_private_duplicate.begin() + private_offset);
+  const auto private_parsed = parse_pipl_entrypoint(
+      vendor_private_duplicate.data(), vendor_private_duplicate.size());
+  return private_parsed.kind == PiplPluginKind::Effect &&
+      private_parsed.symbol == "entryPointFunc";
+}
+
 using AddParamCallback = int32_t(__cdecl*)(void*, int32_t, void*);
 
 auto& g_last_seh_exception_code = selector_dispatch_telemetry().seh_code;
@@ -1491,6 +1743,13 @@ std::optional<int> dispatch_worker_selftests(int argc, wchar_t** argv);
 int worker_main_impl(int argc, wchar_t **argv) {
   if (const int bootstrap_error = configure_worker_entry_bootstrap())
     return bootstrap_error;
+  if (argc == 2 && std::wstring(argv[1]) == L"--self-test-pipl-entrypoint") {
+    const bool passed = verify_pipl_entrypoint_parser();
+    std::cout << "{\"pipl_entrypoint\":\"" << (passed ? "passed" : "failed")
+              << "\",\"kind_discriminator\":true,\"code_win64_x86\":true,"
+                 "\"bounded\":true,\"aegp_not_effect\":true}\n";
+    return passed ? 0 : 72;
+  }
   if (const auto selftest_exit = dispatch_worker_selftests(argc, argv))
     return *selftest_exit;
   // The broker passes only an authenticated inherited file handle via
@@ -1651,12 +1910,26 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
           switch_probe.ack_received, switch_probe.ack_valid}});
     return session.finish_integrated_report(passed ? 0 : 23);
   }
-  auto entry = reinterpret_cast<EffectEntry>(GetProcAddress(module, "EffectMain"));
+  // Resolve the Effect entrypoint from the plug-in's own PiPL (issue #84): the
+  // Kind atom decides the ABI and CodeWin64X86 names the export, so an Effect
+  // whose entrypoint is not literally "EffectMain" still dispatches and a
+  // Kind=AEGP plug-in is never handed to the Effect selector. Fail closed on
+  // AEGP, missing/invalid PiPL, ambiguity, or an unresolvable symbol.
+  const PiplEntrypoint pipl_entrypoint = discover_pipl_entrypoint(module);
+  if (pipl_entrypoint.kind != PiplPluginKind::Effect) {
+    const char* plugin_kind =
+        pipl_entrypoint.kind == PiplPluginKind::Aegp
+            ? "aegp_candidate"
+            : (pipl_entrypoint.kind == PiplPluginKind::Invalid
+                   ? "invalid_pipl"
+                   : "unknown_no_effect_entrypoint");
+    std::cerr << "plugin_kind:" << plugin_kind << "\n" << std::flush;
+    return session.finish(12);
+  }
+  auto entry = reinterpret_cast<EffectEntry>(
+      GetProcAddress(module, pipl_entrypoint.symbol.c_str()));
   if (!entry) {
-    const bool has_aegp_entry = GetProcAddress(module, "EntryPointFunc") != nullptr;
-    std::cerr << "plugin_kind:"
-              << (has_aegp_entry ? "aegp_candidate" : "unknown_no_effect_entrypoint")
-              << "\n" << std::flush;
+    std::cerr << "plugin_kind:unknown_no_effect_entrypoint\n" << std::flush;
     return session.finish(12);
   }
 

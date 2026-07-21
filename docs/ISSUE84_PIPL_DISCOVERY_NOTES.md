@@ -74,6 +74,46 @@ match="ADBE SDK_Backwards", CodeWin64X86="EffectMain", kind=eFKT(Effect)。
 - [ ] Phase C: self-authored fixture (小文字名/任意有効名/複数PiPL/kind-code不一致)、
       pytest、docs、実 5-AEX corpus 再実行 (worker ビルド要、AE 排他資源に注意)。
 
+## Phase A 進捗ログ (2026-07-21)
+
+- Phase B commit 済み (377f25f): `aex_pipl_identity.py` / `aex_list.py` /
+  `test_aex_pipl_identity.py` (14 テスト green)。実 SDK ColorGrid/SDK_Backwards/Grabba で検証。
+- Phase A: owner の audit 済みパーサー群 (`PiplPluginKind`〜`verify_pipl_entrypoint_parser`)
+  を `l2_main.cpp` の `aexcompat::l2_detail` namespace (EffectEntry/AegpEntry typedef 直後) へ
+  verbatim 流用。関数名衝突なしを grep 確認済み。必要 include (windows/array/cstring/limits/
+  vector/string/algorithm/cstdint) 全て既存。
+- dispatch 再配線: `l2_main.cpp` の worker_main_impl 内 `GetProcAddress(module,"EffectMain")`
+  固定探索 + `EntryPointFunc` 有無からの AEGP 推定を `discover_pipl_entrypoint(module)` へ置換。
+  Effect 以外は fail-closed (aegp_candidate / invalid_pipl / unknown_no_effect_entrypoint) で 12。
+- self-test: `--self-test-pipl-entrypoint` を worker_main_impl 冒頭 (bootstrap 後、
+  dispatch_worker_selftests 前) に owner 流の早期チェックとして追加 (同 TU なのでヘッダ不要)。
+- **判断 (逸脱ではなく scope 限定)**: owner の #84 diff は main.cpp / worker_aegp_init_report.cpp
+  を触っていない (diff stat は l2_main.cpp 中心) ため、当方も触らない。main.cpp:118-123 の
+  EffectMain/EntryPointFunc 併記は L1 identify の既存挙動 (selector dispatch なし) で #84 の
+  「export 名 AEGP 推定廃止」対象外。g_aegp_init_mode(1590) は明示 AEGP テストモードで据え置き。
+  Rowbyte 系 (EntryPointFunc 名の Effect) の誤分類は effect dispatch path の PiPL 化で解消される。
+- ビルド: `cl` 未ロードのため VS generator (VS 18 2026 / MSVC 19.51) で configure、
+  canonical `target\minihost-build` と衝突させないよう `target\minihost-build-issue84` に
+  aex_l2_worker を Release ビルド中。検証後に必要なら Ninja で canonical パスにも生成する。
+
+## Phase A テスト移植と逸脱 (2026-07-21)
+
+- `test_minihost_l2_source.py`: owner のソースマーカー検査メソッドを verbatim 追加。
+  挿入コードが全マーカーを満たし、`reinterpret_cast<EffectEntry>(GetProcAddress(module,
+  "EntryPointFunc"))` が不在であることを確認済み。single method + full source-text test pass。
+- `test_pipl_entrypoint_discovery.py`: **逸脱** — owner 版は `assert worker.exists()` で
+  未ビルド時にハード失敗するが、これは clean checkout での `uv run python -m pytest -q`
+  (CLAUDE.md canonical verification) を壊す。machine-portable 方針に合わせ、worker 未ビルド時は
+  `pytest.skip` に変更し worker ごとに parametrize。ビルドがあれば l2/render/smart の
+  `--self-test-pipl-entrypoint` を実走検証、なければ skip。
+- self-test 実走確認: `aex_l2_worker.exe --self-test-pipl-entrypoint` →
+  `{"pipl_entrypoint":"passed",...}` exit 0 (VS 18 2026 / MSVC 19.51 ビルド)。
+- **ビルドの落とし穴**: canonical Ninja ビルドで PATH に Strawberry Perl の
+  `c++.exe` (MinGW g++) があると cmake -G Ninja がそれを CXX に誤選択する。worker は MSVC 前提
+  なので `-DCMAKE_CXX_COMPILER=cl` を明示し、ninja は `-DCMAKE_MAKE_PROGRAM` で指定、
+  vcvars64 を取り込んで cl を有効化する。canonical パス `target\minihost-build` に flat 配置で
+  全 worker を生成 (discovery テストの探索先)。
+
 ## 制約 / 注意
 
 - 最終マージは CLAUDE.md 上 Codex レビューループ + owner レビューが前提。Codex は 2026-07-20 に
