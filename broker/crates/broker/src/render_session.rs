@@ -803,18 +803,17 @@ impl RenderSession {
                 "a runtime module policy only applies to SmartFX GPU sessions",
             ));
         }
-        // v1.1 smart sessions carry no layer slots and no static context
-        // trailers; the worker's smart session contract is the bare 10-slot
-        // argv, so reject the combination here instead of as an opaque
-        // worker command rejection.
+        // Smart sessions now carry the same secondary-layer trailer as the
+        // classic session (issue #294): layers ride the shared session-layers
+        // trailer + inherited handles below. Static context trailers
+        // (mask/spatial/render) are still not carried by smart sessions.
         if request.smart
-            && (!request.layers.is_empty()
-                || request.mask_trailer.is_some()
+            && (request.mask_trailer.is_some()
                 || request.spatial_trailer.is_some()
                 || request.render_environment_trailer.is_some())
         {
             return Err(invalid(
-                "smart sessions do not carry layers or static context trailers yet",
+                "smart sessions do not carry static context trailers yet",
             ));
         }
         // A session cannot retry mid-flight, so the one-shot's Auto GPU
