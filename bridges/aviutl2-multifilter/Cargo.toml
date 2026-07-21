@@ -20,3 +20,5 @@ libffi = "5.1.1"
 # though this plugin is loaded in-process by AviUtl2.
 aexcompat-broker = { path = "../../broker/crates/broker" }
 sha2 = "0.10"
+toml = "1.1.3"
+serde = { version = "1.0.229", features = ["derive"] }

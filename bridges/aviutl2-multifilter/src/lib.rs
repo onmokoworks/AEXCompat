@@ -42,10 +42,14 @@ use sha2::{Digest, Sha256};
 
 /// AviUtl2 minimum supported version (matches the aviutl2 crate constant).
 const REQUIRED_VERSION: u32 = 2010100;
-/// Folder scanned at load for `*.aex`; each becomes its own filter.
+/// Folder scanned at load for `*.aex`; each becomes its own filter. Overrides
+/// the TOML `dir` when set.
 const ENV_DIR: &str = "AEXCOMPAT_MULTIFILTER_DIR";
-/// Repo root holding the built workers (`target/minihost-build/`).
+/// Repo root holding the built workers (`target/minihost-build/`). Overrides the
+/// TOML `repository` when set.
 const ENV_REPOSITORY: &str = "AEXCOMPAT_MULTIFILTER_REPOSITORY";
+/// Explicit TOML config path; overrides the default location when set.
+const ENV_CONFIG: &str = "AEXCOMPAT_MULTIFILTER_CONFIG";
 /// Session dimension bounds (mirror the broker's `image_render` limits).
 const MAX_DIMENSION: u32 = 4096;
 const MAX_PIXELS: u64 = 16_777_216;
@@ -128,9 +132,74 @@ pub extern "C" fn GetCommonPluginTable() -> *mut COMMON_PLUGIN_TABLE {
     Box::leak(Box::new(COMMON_PLUGIN_TABLE {
         name: wide_leak("AEXCompat multi-filter"),
         information: wide_leak(
-            "Registers each AEX in AEXCOMPAT_MULTIFILTER_DIR as its own keyframeable filter (issue #295)",
+            "Registers each AEX in the configured folder as its own keyframeable filter (issue #295)",
         ),
     }))
+}
+
+/// Plugin configuration, from the TOML config file (see [`config_path`]). Env
+/// vars override `dir`/`repository`. Absent fields fall back to those env vars.
+#[derive(Default, serde::Deserialize)]
+struct Config {
+    /// Folder scanned for `*.aex`.
+    dir: Option<PathBuf>,
+    /// Repo root holding the built workers.
+    repository: Option<PathBuf>,
+    /// Effect names to skip (matched against each AEX's file stem, case- and
+    /// `.aex`-extension-insensitive).
+    #[serde(default)]
+    ignore: Vec<String>,
+}
+
+/// The TOML config path: `AEXCOMPAT_MULTIFILTER_CONFIG` if set, else the Windows
+/// per-user default `%APPDATA%\aexcompat-multifilter\config.toml`.
+fn config_path() -> Option<PathBuf> {
+    if let Some(path) = std::env::var_os(ENV_CONFIG) {
+        return Some(PathBuf::from(path));
+    }
+    let appdata = std::env::var_os("APPDATA")?;
+    Some(
+        PathBuf::from(appdata)
+            .join("aexcompat-multifilter")
+            .join("config.toml"),
+    )
+}
+
+/// Loads the config file, or a default (all-absent) config when it is missing or
+/// malformed — the plug-in then relies on the env vars, or registers nothing.
+fn load_config() -> Config {
+    let Some(path) = config_path() else {
+        return Config::default();
+    };
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return Config::default();
+    };
+    toml::from_str(&text).unwrap_or_default()
+}
+
+/// Drops a trailing `.aex` extension (any case) from an ignore entry so it may
+/// be written with or without it. Checks the last four bytes case-insensitively,
+/// then slices the `str` only on that ASCII-`.aex` match — where the byte at
+/// `len - 4` is `.` and therefore a char boundary — so a multi-byte entry never
+/// slices mid-character (that would panic across the `extern "C"` boundary).
+fn strip_aex_ext(entry: &str) -> &str {
+    let bytes = entry.as_bytes();
+    if bytes.len() >= 4 && bytes[bytes.len() - 4..].eq_ignore_ascii_case(b".aex") {
+        &entry[..entry.len() - 4]
+    } else {
+        entry
+    }
+}
+
+/// Whether `path`'s file stem matches an ignore entry (case-insensitive; an
+/// entry may be written with or without the `.aex` extension).
+fn is_ignored(path: &Path, ignore: &[String]) -> bool {
+    let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) else {
+        return false;
+    };
+    ignore
+        .iter()
+        .any(|entry| strip_aex_ext(entry).eq_ignore_ascii_case(stem))
 }
 
 #[unsafe(no_mangle)]
@@ -138,12 +207,18 @@ pub extern "C" fn RegisterPlugin(host: *mut HOST_APP_TABLE) {
     if host.is_null() {
         return;
     }
-    let Some(dir) = std::env::var_os(ENV_DIR).map(PathBuf::from) else {
+    let config = load_config();
+    // Env vars override the TOML values (backward compatible; useful for tests).
+    let dir = std::env::var_os(ENV_DIR)
+        .map(PathBuf::from)
+        .or(config.dir);
+    let repository = std::env::var_os(ENV_REPOSITORY)
+        .map(PathBuf::from)
+        .or(config.repository);
+    let (Some(dir), Some(repository)) = (dir, repository) else {
         return;
     };
-    let Some(repository) = std::env::var_os(ENV_REPOSITORY).map(PathBuf::from) else {
-        return;
-    };
+
     let mut entries: Vec<PathBuf> = match std::fs::read_dir(&dir) {
         Ok(read) => read
             .filter_map(|entry| entry.ok().map(|entry| entry.path()))
@@ -152,6 +227,7 @@ pub extern "C" fn RegisterPlugin(host: *mut HOST_APP_TABLE) {
                     .and_then(|ext| ext.to_str())
                     .is_some_and(|ext| ext.eq_ignore_ascii_case("aex"))
             })
+            .filter(|path| !is_ignored(path, &config.ignore))
             .collect(),
         Err(_) => return,
     };
