@@ -1,4 +1,5 @@
 #include "worker_host_suite_catalog.hpp"
+#include "worker_suite_registry.hpp"
 
 #include <mutex>
 #include <vector>
@@ -52,7 +53,7 @@ OwnedCatalog& state() {
 }  // namespace
 
 bool configure_suite_assembly(const AssemblyHooks& hooks) {
-  if (!hooks.unsupported || !hooks.duck || !hooks.effect_ui ||
+  if (!hooks.duck || !hooks.effect_ui ||
       !hooks.adv_info || !hooks.adv_info3 || !hooks.dynamic_stream_set_flag)
     return false;
   auto& catalog = state();
@@ -63,15 +64,14 @@ bool configure_suite_assembly(const AssemblyHooks& hooks) {
 }
 
 namespace {
-template <std::size_t N>
-void fill_unsupported(std::array<void*, N>& suite, const OwnedCatalog& catalog) {
-  suite.fill(catalog.assembly.unsupported);
+template <UnsupportedSuiteId Suite, std::size_t N>
+void fill_unsupported(std::array<void*, N>& suite) {
+  suite = unsupported_suite_slots<Suite, N>();
 }
 
 template <std::size_t N>
 const void* populate_app(std::array<void*, N>& suite, bool language, bool progress) {
   auto& c = state();
-  fill_unsupported(suite, c);
   std::size_t out = 0, in = 0;
   suite[out++] = c.assembly.app[in++]; // background
   suite[out++] = c.assembly.app[in++]; // color
@@ -87,20 +87,20 @@ const void* provide_path_query1(void*) { auto& c=state(); c.path_query=c.assembl
 const void* provide_path_data1(void*) { auto& c=state(); c.path_data=c.assembly.path_data; return c.path_data.data(); }
 const void* provide_duck1(void*) { auto& c=state(); c.duck[0]=c.assembly.duck; return c.duck.data(); }
 const void* provide_effect_ui1(void*) { auto& c=state(); c.effect_ui[0]=c.assembly.effect_ui; return c.effect_ui.data(); }
-const void* provide_adv_app1(void*) { auto& c=state(); fill_unsupported(c.adv_app1,c); c.adv_app1[6]=c.assembly.adv_info; c.adv_app1[8]=c.assembly.adv_info3; return c.adv_app1.data(); }
-const void* provide_adv_app2(void*) { auto& c=state(); fill_unsupported(c.adv_app2,c); c.adv_app2[6]=c.assembly.adv_info; c.adv_app2[8]=c.assembly.adv_info3; return c.adv_app2.data(); }
+const void* provide_adv_app1(void*) { auto& c=state(); fill_unsupported<UnsupportedSuiteId::pf_ae_adv_app_1>(c.adv_app1); c.adv_app1[6]=c.assembly.adv_info; c.adv_app1[8]=c.assembly.adv_info3; return c.adv_app1.data(); }
+const void* provide_adv_app2(void*) { auto& c=state(); fill_unsupported<UnsupportedSuiteId::pf_ae_adv_app_2>(c.adv_app2); c.adv_app2[6]=c.assembly.adv_info; c.adv_app2[8]=c.assembly.adv_info3; return c.adv_app2.data(); }
 const void* provide_drawbot_draw1(void*) { auto& c=state(); c.drawbot_draw=c.assembly.drawbot_draw; return c.drawbot_draw.data(); }
-const void* provide_drawbot_supplier1(void*) { auto& c=state(); fill_unsupported(c.drawbot_supplier,c); c.drawbot_supplier[0]=c.assembly.drawbot_new_pen; c.drawbot_supplier[1]=c.assembly.drawbot_new_brush; c.drawbot_supplier[6]=c.assembly.drawbot_new_path; c.drawbot_supplier[12]=c.assembly.drawbot_release; return c.drawbot_supplier.data(); }
-const void* provide_drawbot_surface2(void*) { auto& c=state(); fill_unsupported(c.drawbot_surface,c); c.drawbot_surface[2]=c.assembly.drawbot_paint_rect; c.drawbot_surface[3]=c.assembly.drawbot_fill_path; c.drawbot_surface[4]=c.assembly.drawbot_stroke_path; return c.drawbot_surface.data(); }
-const void* provide_drawbot_path1(void*) { auto& c=state(); fill_unsupported(c.drawbot_path,c); c.drawbot_path[0]=c.assembly.drawbot_path_point; c.drawbot_path[1]=c.assembly.drawbot_path_point; c.drawbot_path[3]=c.assembly.drawbot_add_rect; return c.drawbot_path.data(); }
+const void* provide_drawbot_supplier1(void*) { auto& c=state(); fill_unsupported<UnsupportedSuiteId::drawbot_supplier_1>(c.drawbot_supplier); c.drawbot_supplier[0]=c.assembly.drawbot_new_pen; c.drawbot_supplier[1]=c.assembly.drawbot_new_brush; c.drawbot_supplier[6]=c.assembly.drawbot_new_path; c.drawbot_supplier[12]=c.assembly.drawbot_release; return c.drawbot_supplier.data(); }
+const void* provide_drawbot_surface2(void*) { auto& c=state(); fill_unsupported<UnsupportedSuiteId::drawbot_surface_2>(c.drawbot_surface); c.drawbot_surface[2]=c.assembly.drawbot_paint_rect; c.drawbot_surface[3]=c.assembly.drawbot_fill_path; c.drawbot_surface[4]=c.assembly.drawbot_stroke_path; return c.drawbot_surface.data(); }
+const void* provide_drawbot_path1(void*) { auto& c=state(); fill_unsupported<UnsupportedSuiteId::drawbot_path_1>(c.drawbot_path); c.drawbot_path[0]=c.assembly.drawbot_path_point; c.drawbot_path[1]=c.assembly.drawbot_path_point; c.drawbot_path[3]=c.assembly.drawbot_add_rect; return c.drawbot_path.data(); }
 const void* provide_custom_ui1(void*) { auto& c=state(); c.custom_ui1[0]=c.assembly.drawing_reference; return c.custom_ui1.data(); }
 const void* provide_custom_ui2(void*) { auto& c=state(); c.custom_ui2={c.assembly.drawing_reference,c.assembly.context_async_manager}; return c.custom_ui2.data(); }
-const void* provide_overlay_theme1(void*) { auto& c=state(); fill_unsupported(c.overlay,c); c.overlay[0]=c.assembly.overlay_foreground; c.overlay[5]=c.assembly.overlay_stroke_path; return c.overlay.data(); }
+const void* provide_overlay_theme1(void*) { auto& c=state(); fill_unsupported<UnsupportedSuiteId::pf_effect_custom_ui_overlay_theme_1>(c.overlay); c.overlay[0]=c.assembly.overlay_foreground; c.overlay[5]=c.assembly.overlay_stroke_path; return c.overlay.data(); }
 const void* provide_app_suite4(void*) { auto& c=state(); return populate_app(c.app4,false,false); }
 const void* provide_app_suite5(void*) { auto& c=state(); return populate_app(c.app5,true,false); }
 const void* provide_app_suite6(void*) { auto& c=state(); return populate_app(c.app6,true,true); }
 const void* provide_ansi1(void*) { auto& c=state(); c.ansi=c.assembly.ansi; return c.ansi.data(); }
-const void* provide_dynamic_stream2(void*) { auto& c=state(); fill_unsupported(c.dynamic_stream2,c); c.dynamic_stream2[5]=c.assembly.dynamic_stream_set_flag; return c.dynamic_stream2.data(); }
+const void* provide_dynamic_stream2(void*) { auto& c=state(); fill_unsupported<UnsupportedSuiteId::aegp_dynamic_stream_2>(c.dynamic_stream2); c.dynamic_stream2[5]=c.assembly.dynamic_stream_set_flag; return c.dynamic_stream2.data(); }
 const void* provide_aegp_world_suite3(void*) { auto& c=state(); c.aegp_world=c.assembly.aegp_world; return c.aegp_world.data(); }
 const void* provide_layer_render_options1(void*) { auto& c=state(); c.layer_render_options1=c.assembly.layer_render_options1; return c.layer_render_options1.data(); }
 const void* provide_layer_render_options2(void*) { auto& c=state(); c.layer_render_options2=c.assembly.layer_render_options2; return c.layer_render_options2.data(); }

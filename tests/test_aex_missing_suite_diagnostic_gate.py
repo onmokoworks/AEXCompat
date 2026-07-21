@@ -24,6 +24,40 @@ class MissingSuiteDiagnosticGateTests(unittest.TestCase):
         self.assertEqual(rows[0], {"name": "Suite A", "version": 1, "sha_count": 2, "event_count": 2})
         self.assertEqual(rows[1]["event_count"], 2)
 
+    def test_extracts_only_bounded_valid_unique_unsupported_calls(self):
+        stderr = (
+            'failed: diagnostics={"unsupported_suite_calls":['
+            '{"name":"AEGP Comp Suite","version":21,"slot":7,"call_count":2},'
+            '{"name":"AEGP Comp Suite","version":21,"slot":7,"call_count":9},'
+            '{"name":"C:\\\\private","version":1,"slot":1,"call_count":1},'
+            '{"name":"Bad","version":1,"slot":2048,"call_count":1}]}'
+        )
+        self.assertEqual(gate.unsupported_suite_calls(stderr), [{
+            "name": "AEGP Comp Suite", "version": 21, "slot": 7, "call_count": 2,
+        }])
+        self.assertEqual(
+            gate.unsupported_suite_calls(
+                'failed: diagnostics={"unsupported_suite_calls":null}'
+            ),
+            [],
+        )
+
+    def test_unsupported_call_aggregate_ranks_sha_then_event_then_call_count(self):
+        slot_a = [{
+            "name": "Suite A", "version": 1, "slot": 3, "call_count": 2,
+        }]
+        slot_b = [{
+            "name": "Suite B", "version": 2, "slot": 4, "call_count": 20,
+        }]
+        rows = gate.aggregate_unsupported_calls([
+            ("a" * 64, slot_a), ("b" * 64, slot_a), ("c" * 64, slot_b),
+        ])
+        self.assertEqual(rows[0], {
+            "name": "Suite A", "version": 1, "slot": 3,
+            "sha_count": 2, "event_count": 2, "call_count": 4,
+        })
+        self.assertEqual(rows[1]["call_count"], 20)
+
     def test_persisted_event_has_no_path_or_private_stderr(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -45,6 +79,17 @@ class MissingSuiteDiagnosticGateTests(unittest.TestCase):
             "kind": "selector_error", "process_exit_code": 1, "worker_exit_code": 14,
             "failure_stage": "global_setup", "selector_error": 512, "plugin_kind": None,
         })
+
+    def test_classifies_structured_unsupported_suite_call(self):
+        stderr = (
+            'AEX parameter inspection worker failed safely: '
+            '{"classification":"nonzero_exit","exit_code":14,'
+            '"unsupported_suite_calls":[{"name":"AEGP Comp Suite",'
+            '"version":21,"slot":7,"call_count":1}]}'
+        )
+        self.assertEqual(
+            gate.classify_failure(stderr, 1)["kind"], "unsupported_suite_call"
+        )
 
     def test_classifies_non_effect_entrypoint(self):
         stderr = ('AEX parameter inspection worker failed safely: '

@@ -9,6 +9,8 @@
 namespace {
 
 using aexcompat::worker_runtime::SuiteResolveResult;
+using aexcompat::worker_runtime::UnsupportedSuiteId;
+using aexcompat::worker_runtime::unsupported_suite_slots;
 
 int g_resolver_calls{};
 
@@ -48,6 +50,18 @@ int main() {
 
   passed = passed && rejected_without_resolving(
       registry, reinterpret_cast<const char*>(static_cast<uintptr_t>(1)));
+
+  const auto& unsupported =
+      unsupported_suite_slots<UnsupportedSuiteId::aegp_comp_21, 41>();
+  const auto unsupported_slot =
+      reinterpret_cast<int32_t(__cdecl*)()>(unsupported[7]);
+  passed = passed && unsupported_slot() == 4 && unsupported_slot() == 4;
+  const std::string unsupported_report =
+      aexcompat::worker_runtime::suite_registry()
+          .unsupported_suite_calls_report_json();
+  passed = passed && unsupported_report ==
+      ",\"unsupported_suite_calls\":[{\"name\":\"AEGP Comp Suite\","
+      "\"version\":21,\"slot\":7,\"call_count\":2}]";
 
   SYSTEM_INFO system_info{};
   GetSystemInfo(&system_info);

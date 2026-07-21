@@ -520,8 +520,7 @@ int configure_worker_entry_bootstrap() {
        pf_host_context.hooks.resolve_dispatch_world_format,
        pf_host_context.hooks.pixel_format,
        pf_host_context.hooks.set_pixel_format,
-       &bounded_argb8_world,
-       reinterpret_cast<void*>(&aegp_unsupported_suite_call)},
+       &bounded_argb8_world},
       {&g_transform_world_calls, &g_last_transform_x, &g_last_transform_y,
        &g_last_transform_opacity}};
   bootstrap_hooks.adv_time = {&acquire_suite, &release_suite, &suite_acquire_count,

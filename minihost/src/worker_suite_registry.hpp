@@ -2,6 +2,7 @@
 
 #include "suite_lease_tracker.hpp"
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <mutex>
@@ -24,6 +25,54 @@ enum class SuiteResolveResult {
 using SuiteResolver = SuiteResolveResult (*)(
     void* context, const char* name, int32_t version, const void** suite);
 
+enum class UnsupportedSuiteId : uint8_t {
+  aegp_item_14,
+  aegp_item_10,
+  aegp_comp_25,
+  aegp_comp_26,
+  aegp_comp_21,
+  aegp_comp_9,
+  aegp_layer_15,
+  aegp_layer_11,
+  aegp_layer_14,
+  aegp_collection_2,
+  aegp_effect_4,
+  aegp_effect_2,
+  aegp_effect_3,
+  aegp_stream_11,
+  aegp_stream_7,
+  aegp_keyframe_5,
+  pf_ae_adv_app_1,
+  pf_ae_adv_app_2,
+  drawbot_supplier_1,
+  drawbot_surface_2,
+  drawbot_path_1,
+  pf_effect_custom_ui_overlay_theme_1,
+  aegp_dynamic_stream_2,
+  pf_batch_sampling_1,
+};
+
+int32_t record_unsupported_suite_call(UnsupportedSuiteId suite,
+                                      uint32_t slot) noexcept;
+
+template <UnsupportedSuiteId Suite, std::size_t Slot>
+int32_t __cdecl unsupported_suite_slot() noexcept {
+  return record_unsupported_suite_call(Suite, static_cast<uint32_t>(Slot));
+}
+
+template <UnsupportedSuiteId Suite, std::size_t... Slots>
+std::array<void*, sizeof...(Slots)> make_unsupported_suite_slots(
+    std::index_sequence<Slots...>) {
+  return {{reinterpret_cast<void*>(&unsupported_suite_slot<Suite, Slots>)...}};
+}
+
+template <UnsupportedSuiteId Suite, std::size_t SlotCount>
+const std::array<void*, SlotCount>& unsupported_suite_slots() {
+  static const auto slots = make_unsupported_suite_slots<Suite>(
+      std::make_index_sequence<SlotCount>{});
+  return slots;
+}
+
 class SuiteRegistry final {
  public:
   int32_t acquire(const char* name, int32_t version, const void** suite,
@@ -40,7 +89,11 @@ class SuiteRegistry final {
   std::string live_summary() const;
   suite_runtime::SuiteLeaseSnapshot snapshot() const;
   std::string missing_suites_report_json() const;
+  std::string unsupported_suite_calls_report_json() const;
   std::string suite_timeline_report_json() const;
+
+  void note_unsupported_suite_call(UnsupportedSuiteId suite,
+                                   uint32_t slot) noexcept;
 
  private:
   static std::string safe_missing_name(const char* name);
@@ -51,6 +104,13 @@ class SuiteRegistry final {
   suite_runtime::SuiteLeaseTracker lease_tracker_;
   mutable std::mutex missing_suites_mutex_;
   std::vector<std::pair<std::string, int32_t>> missing_suites_;
+  struct UnsupportedSuiteCall {
+    UnsupportedSuiteId suite{};
+    uint32_t slot{};
+    uint32_t call_count{};
+  };
+  mutable std::mutex unsupported_suite_calls_mutex_;
+  std::vector<UnsupportedSuiteCall> unsupported_suite_calls_;
   struct SuiteTimelineEvent {
     uint32_t sequence{};
     bool acquire{};

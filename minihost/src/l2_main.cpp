@@ -1179,6 +1179,10 @@ std::string missing_suites_report_json() {
   return suite_registry().missing_suites_report_json();
 }
 
+std::string unsupported_suite_calls_report_json() {
+  return suite_registry().unsupported_suite_calls_report_json();
+}
+
 std::string suite_timeline_report_json() {
   return suite_registry().suite_timeline_report_json();
 }
@@ -1522,7 +1526,9 @@ void report(const char* status, int32_t global_error, int32_t params_error,
   const auto* message = reinterpret_cast<const char*>(output.data() + kOutMessage);
   c.return_message.assign(message, strnlen_s(message, 256)); c.about_message = about_message;
   c.about_selector_dispatched = !g_skip_about; c.last_seh_selector = g_last_seh_selector; c.last_seh_error = g_last_seh_error;
-  c.lifecycle_errors = lifecycle_errors; c.lifecycle_data_null = lifecycle_data_null; c.module_audit_json = module_audit_json();
+  c.lifecycle_errors = lifecycle_errors; c.lifecycle_data_null = lifecycle_data_null;
+  c.unsupported_suite_calls_json = unsupported_suite_calls_report_json();
+  c.module_audit_json = module_audit_json();
   c.parameters.reserve(g_params.size());
   for (const auto& p : g_params) {
     const auto* name = reinterpret_cast<const char*>(p.raw.data() + kParamName);

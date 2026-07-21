@@ -9,14 +9,17 @@
 #include <cctype>
 #include <iostream>
 #include <iomanip>
+#include <limits>
 #include <sstream>
 
 namespace aexcompat::worker_runtime {
 namespace {
 
 constexpr std::size_t kMaxMissingSuites = 16;
+constexpr std::size_t kMaxUnsupportedSuiteCalls = 32;
 constexpr std::size_t kMaxSuiteNameBytes = 96;
 constexpr std::size_t kMaxSuiteTimeline = 65536;
+constexpr uint32_t kMaxUnsupportedSuiteSlot = 1023;
 thread_local const char* g_suite_selector = "HOST";
 
 struct SuiteNameCopy {
@@ -68,6 +71,45 @@ std::string escape_json(const std::string& input) {
     }
   }
   return escaped.str();
+}
+
+struct UnsupportedSuiteDescriptor {
+  const char* name{};
+  int32_t version{};
+};
+
+UnsupportedSuiteDescriptor unsupported_suite_descriptor(
+    UnsupportedSuiteId suite) noexcept {
+  switch (suite) {
+    case UnsupportedSuiteId::aegp_item_14: return {"AEGP Item Suite", 14};
+    case UnsupportedSuiteId::aegp_item_10: return {"AEGP Item Suite", 10};
+    case UnsupportedSuiteId::aegp_comp_25: return {"AEGP Comp Suite", 25};
+    case UnsupportedSuiteId::aegp_comp_26: return {"AEGP Comp Suite", 26};
+    case UnsupportedSuiteId::aegp_comp_21: return {"AEGP Comp Suite", 21};
+    case UnsupportedSuiteId::aegp_comp_9: return {"AEGP Comp Suite", 9};
+    case UnsupportedSuiteId::aegp_layer_15: return {"AEGP Layer Suite", 15};
+    case UnsupportedSuiteId::aegp_layer_11: return {"AEGP Layer Suite", 11};
+    case UnsupportedSuiteId::aegp_layer_14: return {"AEGP Layer Suite", 14};
+    case UnsupportedSuiteId::aegp_collection_2: return {"AEGP Collection Suite", 2};
+    case UnsupportedSuiteId::aegp_effect_4: return {"AEGP Effect Suite", 4};
+    case UnsupportedSuiteId::aegp_effect_2: return {"AEGP Effect Suite", 2};
+    case UnsupportedSuiteId::aegp_effect_3: return {"AEGP Effect Suite", 3};
+    case UnsupportedSuiteId::aegp_stream_11: return {"AEGP Stream Suite", 11};
+    case UnsupportedSuiteId::aegp_stream_7: return {"AEGP Stream Suite", 7};
+    case UnsupportedSuiteId::aegp_keyframe_5: return {"AEGP Keyframe Suite", 5};
+    case UnsupportedSuiteId::pf_ae_adv_app_1: return {"PF AE Adv App Suite", 1};
+    case UnsupportedSuiteId::pf_ae_adv_app_2: return {"PF AE Adv App Suite", 2};
+    case UnsupportedSuiteId::drawbot_supplier_1: return {"DRAWBOT Supplier Suite", 1};
+    case UnsupportedSuiteId::drawbot_surface_2: return {"DRAWBOT Surface Suite", 2};
+    case UnsupportedSuiteId::drawbot_path_1: return {"DRAWBOT Path Suite", 1};
+    case UnsupportedSuiteId::pf_effect_custom_ui_overlay_theme_1:
+      return {"PF Effect Custom UI Overlay Theme Suite", 1};
+    case UnsupportedSuiteId::aegp_dynamic_stream_2:
+      return {"AEGP Dynamic Stream Suite", 2};
+    case UnsupportedSuiteId::pf_batch_sampling_1:
+      return {"PF Batch Sampling Suite", 1};
+  }
+  return {};
 }
 
 }  // namespace
@@ -214,6 +256,57 @@ std::string SuiteRegistry::missing_suites_report_json() const {
   return json.str();
 }
 
+void SuiteRegistry::note_unsupported_suite_call(UnsupportedSuiteId suite,
+                                                uint32_t slot) noexcept {
+  const auto descriptor = unsupported_suite_descriptor(suite);
+  if (!descriptor.name || descriptor.version <= 0 ||
+      slot > kMaxUnsupportedSuiteSlot) return;
+  bool inserted = false;
+  try {
+    std::lock_guard<std::mutex> lock(unsupported_suite_calls_mutex_);
+    const auto found = std::find_if(
+        unsupported_suite_calls_.begin(), unsupported_suite_calls_.end(),
+        [suite, slot](const UnsupportedSuiteCall& call) {
+          return call.suite == suite && call.slot == slot;
+        });
+    if (found != unsupported_suite_calls_.end()) {
+      if (found->call_count != std::numeric_limits<uint32_t>::max())
+        ++found->call_count;
+      return;
+    }
+    if (unsupported_suite_calls_.size() >= kMaxUnsupportedSuiteCalls) return;
+    unsupported_suite_calls_.push_back({suite, slot, 1});
+    inserted = true;
+  } catch (...) {
+    return;
+  }
+  if (inserted) {
+    try {
+      std::cerr << "stage:suite_slot_unsupported suite=" << descriptor.name
+                << " version=" << descriptor.version << " slot=" << slot
+                << "\n" << std::flush;
+    } catch (...) {
+    }
+  }
+}
+
+std::string SuiteRegistry::unsupported_suite_calls_report_json() const {
+  std::lock_guard<std::mutex> lock(unsupported_suite_calls_mutex_);
+  std::ostringstream json;
+  json << ",\"unsupported_suite_calls\":[";
+  for (std::size_t index = 0; index < unsupported_suite_calls_.size(); ++index) {
+    if (index != 0) json << ',';
+    const auto& call = unsupported_suite_calls_[index];
+    const auto descriptor = unsupported_suite_descriptor(call.suite);
+    json << "{\"name\":\"" << escape_json(descriptor.name)
+         << "\",\"version\":" << descriptor.version
+         << ",\"slot\":" << call.slot
+         << ",\"call_count\":" << call.call_count << '}';
+  }
+  json << ']';
+  return json.str();
+}
+
 std::string SuiteRegistry::suite_timeline_report_json() const {
   std::lock_guard<std::mutex> lock(timeline_mutex_);
   std::ostringstream json;
@@ -235,6 +328,12 @@ std::string SuiteRegistry::suite_timeline_report_json() const {
 SuiteRegistry& suite_registry() {
   static SuiteRegistry registry;
   return registry;
+}
+
+int32_t record_unsupported_suite_call(UnsupportedSuiteId suite,
+                                      uint32_t slot) noexcept {
+  suite_registry().note_unsupported_suite_call(suite, slot);
+  return 4;
 }
 
 const char* set_suite_timeline_selector(const char* selector) noexcept {

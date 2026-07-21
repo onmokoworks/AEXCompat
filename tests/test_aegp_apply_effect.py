@@ -86,7 +86,7 @@ def test_l2_source_exposes_apply_effect_contract() -> None:
     for marker in (
         "int32_t __cdecl aegp_apply_effect(",
         "(version == 2 || version == 3)",
-        "g_aegp_effect_suite3[9] = reinterpret_cast<void*>(&aegp_apply_effect)",
+        "effect_suite[9] = reinterpret_cast<void*>(&aegp_apply_effect)",
         "g_aegp_effect_suite4[9] = reinterpret_cast<void*>(&aegp_apply_effect)",
         'L"--self-test-aegp-apply-effect"',
     ):

@@ -38,7 +38,8 @@ struct L2ReportContext {
   uint32_t update_param_ui_calls{}, pf_get_current_state_calls{}, pf_are_states_identical_calls{};
   bool suite_leases_balanced{}, user_changed_param_requested{};
   int32_t user_changed_param_slot{}, user_changed_param_error{};
-  std::string user_changed_parameters_json, return_message, about_message;
+  std::string user_changed_parameters_json, unsupported_suite_calls_json;
+  std::string return_message, about_message;
   bool about_selector_dispatched{};
   std::string last_seh_selector;
   int32_t last_seh_error{};

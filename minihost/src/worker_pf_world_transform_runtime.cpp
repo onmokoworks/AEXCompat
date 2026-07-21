@@ -94,7 +94,7 @@ void configure(const Context& context) {
   g_configured = context.hooks.resolve_world &&
       context.hooks.resolve_dispatch_world_format && context.hooks.pixel_format &&
       context.hooks.set_pixel_format && context.hooks.bounded_argb8_world &&
-      context.hooks.unsupported_callback && context.telemetry.calls &&
+      context.telemetry.calls &&
       context.telemetry.last_x && context.telemetry.last_y &&
       context.telemetry.last_opacity;
 }
@@ -1805,7 +1805,6 @@ const void* provide_world_transform1(void*) {
 }
 
 const void* provide_fill_matte2(void*) {
-  g_fill_matte_suite2.fill(g_context.hooks.unsupported_callback);
   void* callbacks[] = {reinterpret_cast<void*>(&fill_world8),
       reinterpret_cast<void*>(&fill_world16), reinterpret_cast<void*>(&fill_world_float),
       reinterpret_cast<void*>(&premultiply_world8), reinterpret_cast<void*>(&premultiply_color8),

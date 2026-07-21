@@ -29,7 +29,9 @@ const MAX_PARAMETERS: u32 = 1024;
 pub(crate) const INTERACTIVE_RENDER_TIMEOUT_MS: u64 = 30_000;
 const MAX_STAGE_EVENTS: usize = 32;
 const MAX_MISSING_SUITES: usize = 16;
+const MAX_UNSUPPORTED_SUITE_CALLS: usize = 32;
 const MAX_SUITE_NAME_LEN: usize = 96;
+const MAX_UNSUPPORTED_SUITE_SLOT: u64 = 1023;
 const STALE_IMAGE_TRANSPORT_AGE: Duration = Duration::from_secs(15 * 60);
 const CONFORMANCE_RENDER_SETTINGS_ENV: &str = "AEXCOMPAT_CONFORMANCE_RENDER_SETTINGS";
 
@@ -547,6 +549,56 @@ fn propagate_missing_suites(diagnostics: &mut Value, worker_report: &Value) {
         }
     }
     diagnostics["missing_suites"] = Value::Array(suites);
+}
+
+fn propagate_unsupported_suite_calls(diagnostics: &mut Value, worker_report: &Value) {
+    let mut calls = Vec::new();
+    let mut seen = BTreeSet::new();
+    for call in worker_report["unsupported_suite_calls"]
+        .as_array()
+        .into_iter()
+        .flatten()
+    {
+        if calls.len() >= MAX_UNSUPPORTED_SUITE_CALLS {
+            break;
+        }
+        let Some(name) = call["name"].as_str().filter(|name| {
+            !name.is_empty()
+                && name.len() <= MAX_SUITE_NAME_LEN
+                && name.bytes().all(|byte| {
+                    byte.is_ascii_alphanumeric() || matches!(byte, b' ' | b'.' | b'_' | b'-')
+                })
+        }) else {
+            continue;
+        };
+        let Some(version) = call["version"]
+            .as_i64()
+            .filter(|version| *version > 0 && *version <= i32::MAX as i64)
+        else {
+            continue;
+        };
+        let Some(slot) = call["slot"]
+            .as_u64()
+            .filter(|slot| *slot <= MAX_UNSUPPORTED_SUITE_SLOT)
+        else {
+            continue;
+        };
+        let Some(call_count) = call["call_count"]
+            .as_u64()
+            .filter(|count| *count > 0 && *count <= u32::MAX as u64)
+        else {
+            continue;
+        };
+        if seen.insert((name.to_owned(), version, slot)) {
+            calls.push(json!({
+                "name": name,
+                "version": version,
+                "slot": slot,
+                "call_count": call_count,
+            }));
+        }
+    }
+    diagnostics["unsupported_suite_calls"] = Value::Array(calls);
 }
 
 fn module_audit_summary(audit: &Value) -> Option<Value> {
@@ -3052,6 +3104,7 @@ fn inspect_experimental_with_diagnostics_and_runtime_policy(
     let worker_report: Option<Value> = serde_json::from_str(isolated.stdout.trim()).ok();
     if let Some(report) = &worker_report {
         propagate_missing_suites(&mut diagnostics, report);
+        propagate_unsupported_suite_calls(&mut diagnostics, report);
     }
     if isolated.classification.as_str() != "ok" {
         if let Some(summary) = failed_module_audit_summary(&isolated.stdout) {
@@ -5103,6 +5156,7 @@ fn render_with_artifact(
     let initial_report: Option<Value> = serde_json::from_str(isolated.stdout.trim()).ok();
     if let Some(report) = &initial_report {
         propagate_missing_suites(&mut diagnostics, report);
+        propagate_unsupported_suite_calls(&mut diagnostics, report);
     }
     if initial_report
         .as_ref()
@@ -5172,6 +5226,7 @@ fn render_with_artifact(
             ))
         })?;
         propagate_missing_suites(&mut diagnostics, &retry_report);
+        propagate_unsupported_suite_calls(&mut diagnostics, &retry_report);
         gpu_fallback_used = true;
         retry_report
     } else {
@@ -7332,6 +7387,44 @@ mod tests {
             suites
                 .iter()
                 .filter(|suite| suite["name"] == "PF World Suite")
+                .count(),
+            1
+        );
+        assert!(!diagnostics.to_string().contains("private"));
+    }
+
+    #[test]
+    fn structured_worker_report_supplies_bounded_unique_unsupported_suite_calls() {
+        let mut diagnostics = json!({});
+        let mut reported = vec![
+            json!({"name": "AEGP Comp Suite", "version": 21, "slot": 7, "call_count": 2}),
+            json!({"name": "AEGP Comp Suite", "version": 21, "slot": 7, "call_count": 9}),
+            json!({"name": "C:\\private\\suite", "version": 1, "slot": 1, "call_count": 1}),
+            json!({"name": "Bad Suite", "version": 1, "slot": 2048, "call_count": 1}),
+        ];
+        for index in 0..(MAX_UNSUPPORTED_SUITE_CALLS + 3) {
+            reported.push(json!({
+                "name": format!("Safe Suite {index}"),
+                "version": 1,
+                "slot": index,
+                "call_count": 1,
+            }));
+        }
+
+        propagate_unsupported_suite_calls(
+            &mut diagnostics,
+            &json!({"unsupported_suite_calls": reported}),
+        );
+        let calls = diagnostics["unsupported_suite_calls"].as_array().unwrap();
+        assert_eq!(calls.len(), MAX_UNSUPPORTED_SUITE_CALLS);
+        assert_eq!(
+            calls[0],
+            json!({"name": "AEGP Comp Suite", "version": 21, "slot": 7, "call_count": 2})
+        );
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|call| call["name"] == "AEGP Comp Suite" && call["slot"] == 7)
                 .count(),
             1
         );

@@ -2,6 +2,7 @@
 // Independent compiled implementation for the AEGP scene family.
 
 #include "worker_aegp_scene.hpp"
+#include "worker_suite_registry.hpp"
 
 #include <algorithm>
 #include <climits>
@@ -10,6 +11,8 @@
 #include <iterator>
 
 using aexcompat::scene_runtime::scene_runtime_state;
+using aexcompat::worker_runtime::UnsupportedSuiteId;
+using aexcompat::worker_runtime::unsupported_suite_slots;
 
 namespace {
 SceneContext g_scene_context{};
@@ -227,7 +230,6 @@ AegpLegacyItemSuite6 g_aegp_legacy_item_suite6{};
 
 std::array<AegpTime, 3>& g_aegp_layer_in_points = state().layer_in_points;
 std::array<AegpTime, 3>& g_aegp_layer_durations = state().layer_durations;
-int32_t __cdecl aegp_unsupported_suite_call() { return 4; }
 
 int32_t __cdecl aegp_get_item_current_time(void* item, AegpTime* time) {
   if (item != &g_aegp_comp_item || !time) return 4;
@@ -429,12 +431,7 @@ int32_t __cdecl aegp_get_collection_item(
   ++g_aegp_collection_item_reads;
   return 0;
 }
-AegpCollectionSuite g_aegp_collection_suite{
-    reinterpret_cast<void*>(&aegp_unsupported_suite_call),
-    &aegp_dispose_collection, &aegp_get_collection_count,
-    &aegp_get_collection_item,
-    reinterpret_cast<void*>(&aegp_unsupported_suite_call),
-    reinterpret_cast<void*>(&aegp_unsupported_suite_call)};
+AegpCollectionSuite g_aegp_collection_suite{};
 int32_t __cdecl aegp_get_layer_id(void* layer, int32_t* id) {
   const int32_t index = aegp_layer_index(layer);
   if (index < 0 || !id) return 4;
@@ -964,6 +961,7 @@ std::array<void*, 44> g_aegp_comp_suite12{};
 std::array<void*, 46> g_aegp_layer_suite5{};
 std::array<void*, 50> g_aegp_layer_suite8{};
 std::array<void*, 53> g_aegp_layer_suite9{};
+std::array<void*, 17> g_aegp_effect_suite2{};
 std::array<void*, 17> g_aegp_effect_suite3{};
 std::array<void*, 22> g_aegp_effect_suite4{};
 std::array<void*, 22> g_aegp_stream_suite2{};
@@ -977,6 +975,7 @@ static_assert(sizeof(g_aegp_layer_suite5) == 368);
 static_assert(sizeof(g_aegp_layer_suite8) == 400);
 static_assert(sizeof(g_aegp_layer_suite9) == 424);
 static_assert(sizeof(g_aegp_effect_suite4) == 176);
+static_assert(sizeof(g_aegp_effect_suite2) == 136);
 static_assert(sizeof(g_aegp_effect_suite3) == 136);
 static_assert(sizeof(g_aegp_stream_suite2) == 176);
 static_assert(sizeof(g_aegp_stream_suite6) == 184);
@@ -989,12 +988,12 @@ SceneSuiteAcquireResult scene_acquire_suite(
   const auto named = [name](const char* expected) {
     return std::strcmp(name, expected) == 0;
   };
-  const auto unsupported = reinterpret_cast<void*>(&aegp_unsupported_suite_call);
   const auto& factory = scene_context()->hooks.suite_factory;
 
   if (named("AEGP Item Suite") && version == 14 &&
       (state().active_idle_roundtrip_mode || state().comp_idle_roundtrip_mode)) {
-    std::fill_n(reinterpret_cast<void**>(&g_aegp_item_suite), 26, unsupported);
+    std::copy_n(unsupported_suite_slots<UnsupportedSuiteId::aegp_item_14, 26>().data(),
+                26, reinterpret_cast<void**>(&g_aegp_item_suite));
     g_aegp_item_suite.get_active_item = &aegp_get_active_item;
     g_aegp_item_suite.get_item_type = &aegp_get_item_type;
     g_aegp_item_suite.after_get_item_type[1] = reinterpret_cast<void*>(&aegp_get_item_name);
@@ -1008,7 +1007,8 @@ SceneSuiteAcquireResult scene_acquire_suite(
     return SceneSuiteAcquireResult::acquired;
   }
   if (named("AEGP Item Suite") && version == 10) {
-    std::fill_n(reinterpret_cast<void**>(&g_aegp_legacy_item_suite6), 26, unsupported);
+    std::copy_n(unsupported_suite_slots<UnsupportedSuiteId::aegp_item_10, 26>().data(),
+                26, reinterpret_cast<void**>(&g_aegp_legacy_item_suite6));
     g_aegp_legacy_item_suite6.get_active_item = &aegp_get_active_item;
     g_aegp_legacy_item_suite6.get_item_type = &aegp_get_item_type;
     if (!(state().update_menu_mode || state().command_roundtrip_mode ||
@@ -1020,7 +1020,8 @@ SceneSuiteAcquireResult scene_acquire_suite(
     return SceneSuiteAcquireResult::acquired;
   }
   if (named("AEGP Comp Suite") && version == 25 && state().comp_idle_roundtrip_mode) {
-    g_aegp_comp_suite11.fill(unsupported);
+    g_aegp_comp_suite11 =
+        unsupported_suite_slots<UnsupportedSuiteId::aegp_comp_25, 44>();
     g_aegp_comp_suite11[0] = reinterpret_cast<void*>(&aegp_get_comp_from_item);
     g_aegp_comp_suite11[11] = reinterpret_cast<void*>(&aegp_get_comp_framerate);
     g_aegp_comp_suite11[26] = reinterpret_cast<void*>(&aegp_get_comp_selection);
@@ -1029,19 +1030,22 @@ SceneSuiteAcquireResult scene_acquire_suite(
     return SceneSuiteAcquireResult::acquired;
   }
   if (named("AEGP Comp Suite") && version == 26 && state().comp_idle_roundtrip_mode) {
-    g_aegp_comp_suite12.fill(unsupported);
+    g_aegp_comp_suite12 =
+        unsupported_suite_slots<UnsupportedSuiteId::aegp_comp_26, 44>();
     g_aegp_comp_suite12[26] = reinterpret_cast<void*>(&aegp_get_comp_selection);
     *suite = g_aegp_comp_suite12.data();
     return SceneSuiteAcquireResult::acquired;
   }
   if (named("AEGP Comp Suite") && version == 21) {
-    g_aegp_comp_suite10.fill(unsupported);
+    g_aegp_comp_suite10 =
+        unsupported_suite_slots<UnsupportedSuiteId::aegp_comp_21, 41>();
     g_aegp_comp_suite10[4] = factory.comp_bg_color;
     *suite = g_aegp_comp_suite10.data();
     return SceneSuiteAcquireResult::acquired;
   }
   if (named("AEGP Comp Suite") && version == 9) {
-    g_aegp_comp_suite4.fill(unsupported);
+    g_aegp_comp_suite4 =
+        unsupported_suite_slots<UnsupportedSuiteId::aegp_comp_9, 28>();
     g_aegp_comp_suite4[0] = reinterpret_cast<void*>(&aegp_get_comp_from_item);
     g_aegp_comp_suite4[1] = reinterpret_cast<void*>(&aegp_get_item_from_comp);
     *suite = g_aegp_comp_suite4.data();
@@ -1051,7 +1055,8 @@ SceneSuiteAcquireResult scene_acquire_suite(
   if (named("AEGP Layer Suite") && version == 15) {
     const bool render_receipt = factory.render_scene_enabled();
     if (render_receipt || state().comp_idle_roundtrip_mode) {
-      g_aegp_layer_suite9.fill(unsupported);
+      g_aegp_layer_suite9 =
+          unsupported_suite_slots<UnsupportedSuiteId::aegp_layer_15, 53>();
       g_aegp_layer_suite9[0] = reinterpret_cast<void*>(&aegp_get_comp_num_layers);
       g_aegp_layer_suite9[1] = reinterpret_cast<void*>(&aegp_get_comp_layer_by_index);
       g_aegp_layer_suite9[2] = reinterpret_cast<void*>(&aegp_get_active_layer);
@@ -1075,7 +1080,8 @@ SceneSuiteAcquireResult scene_acquire_suite(
     }
   }
   if (named("AEGP Layer Suite") && version == 11 && state().comp_idle_roundtrip_mode) {
-    g_aegp_layer_suite5.fill(unsupported);
+    g_aegp_layer_suite5 =
+        unsupported_suite_slots<UnsupportedSuiteId::aegp_layer_11, 46>();
     g_aegp_layer_suite5[0] = reinterpret_cast<void*>(&aegp_get_comp_num_layers);
     g_aegp_layer_suite5[1] = reinterpret_cast<void*>(&aegp_get_comp_layer_by_index);
     g_aegp_layer_suite5[2] = reinterpret_cast<void*>(&aegp_get_active_layer);
@@ -1093,7 +1099,8 @@ SceneSuiteAcquireResult scene_acquire_suite(
     return SceneSuiteAcquireResult::acquired;
   }
   if (named("AEGP Layer Suite") && version == 14) {
-    g_aegp_layer_suite8.fill(unsupported);
+    g_aegp_layer_suite8 =
+        unsupported_suite_slots<UnsupportedSuiteId::aegp_layer_14, 50>();
     g_aegp_layer_suite8[0] = reinterpret_cast<void*>(&aegp_get_comp_num_layers);
     g_aegp_layer_suite8[1] = reinterpret_cast<void*>(&aegp_get_comp_layer_by_index);
     g_aegp_layer_suite8[2] = reinterpret_cast<void*>(&aegp_get_active_layer);
@@ -1111,12 +1118,19 @@ SceneSuiteAcquireResult scene_acquire_suite(
     return SceneSuiteAcquireResult::acquired;
   }
   if (named("AEGP Collection Suite") && version == 2 && state().comp_idle_roundtrip_mode) {
+    std::copy_n(
+        unsupported_suite_slots<UnsupportedSuiteId::aegp_collection_2, 6>().data(),
+        6, reinterpret_cast<void**>(&g_aegp_collection_suite));
+    g_aegp_collection_suite.dispose_collection = &aegp_dispose_collection;
+    g_aegp_collection_suite.get_count = &aegp_get_collection_count;
+    g_aegp_collection_suite.get_by_index = &aegp_get_collection_item;
     *suite = &g_aegp_collection_suite;
     return SceneSuiteAcquireResult::acquired;
   }
 
   if (named("AEGP Effect Suite") && version == 4 && state().comp_idle_roundtrip_mode) {
-    g_aegp_effect_suite4.fill(unsupported);
+    g_aegp_effect_suite4 =
+        unsupported_suite_slots<UnsupportedSuiteId::aegp_effect_4, 22>();
     g_aegp_effect_suite4[0] = reinterpret_cast<void*>(&aegp_get_layer_num_effects);
     g_aegp_effect_suite4[1] = reinterpret_cast<void*>(&aegp_get_layer_effect_by_index);
     g_aegp_effect_suite4[2] =
@@ -1138,25 +1152,30 @@ SceneSuiteAcquireResult scene_acquire_suite(
     return SceneSuiteAcquireResult::acquired;
   }
   if (named("AEGP Effect Suite") && (version == 2 || version == 3)) {
-    g_aegp_effect_suite3.fill(unsupported);
-    g_aegp_effect_suite3[0] = reinterpret_cast<void*>(&aegp_get_layer_num_effects);
-    g_aegp_effect_suite3[1] = reinterpret_cast<void*>(&aegp_get_layer_effect_by_index);
-    g_aegp_effect_suite3[2] =
+    auto& effect_suite = version == 2
+        ? g_aegp_effect_suite2 : g_aegp_effect_suite3;
+    effect_suite = version == 2
+        ? unsupported_suite_slots<UnsupportedSuiteId::aegp_effect_2, 17>()
+        : unsupported_suite_slots<UnsupportedSuiteId::aegp_effect_3, 17>();
+    effect_suite[0] = reinterpret_cast<void*>(&aegp_get_layer_num_effects);
+    effect_suite[1] = reinterpret_cast<void*>(&aegp_get_layer_effect_by_index);
+    effect_suite[2] =
         reinterpret_cast<void*>(&aegp_get_installed_key_from_layer_effect);
-    g_aegp_effect_suite3[3] = factory.effect_param_union;
-    g_aegp_effect_suite3[4] = reinterpret_cast<void*>(&aegp_get_effect_flags);
-    g_aegp_effect_suite3[5] = reinterpret_cast<void*>(&aegp_set_effect_flags);
-    g_aegp_effect_suite3[6] = reinterpret_cast<void*>(&aegp_reorder_effect);
-    g_aegp_effect_suite3[8] = reinterpret_cast<void*>(&aegp_dispose_effect);
-    g_aegp_effect_suite3[9] = reinterpret_cast<void*>(&aegp_apply_effect);
-    g_aegp_effect_suite3[10] = reinterpret_cast<void*>(&aegp_delete_layer_effect);
-    g_aegp_effect_suite3[16] = reinterpret_cast<void*>(&aegp_duplicate_effect);
-    *suite = g_aegp_effect_suite3.data();
+    effect_suite[3] = factory.effect_param_union;
+    effect_suite[4] = reinterpret_cast<void*>(&aegp_get_effect_flags);
+    effect_suite[5] = reinterpret_cast<void*>(&aegp_set_effect_flags);
+    effect_suite[6] = reinterpret_cast<void*>(&aegp_reorder_effect);
+    effect_suite[8] = reinterpret_cast<void*>(&aegp_dispose_effect);
+    effect_suite[9] = reinterpret_cast<void*>(&aegp_apply_effect);
+    effect_suite[10] = reinterpret_cast<void*>(&aegp_delete_layer_effect);
+    effect_suite[16] = reinterpret_cast<void*>(&aegp_duplicate_effect);
+    *suite = effect_suite.data();
     return SceneSuiteAcquireResult::acquired;
   }
 
   if (named("AEGP Stream Suite") && version == 11 && state().comp_idle_roundtrip_mode) {
-    g_aegp_stream_suite6.fill(unsupported);
+    g_aegp_stream_suite6 =
+        unsupported_suite_slots<UnsupportedSuiteId::aegp_stream_11, 23>();
     g_aegp_stream_suite6[3] = reinterpret_cast<void*>(&aegp_get_new_layer_stream);
     g_aegp_stream_suite6[4] = reinterpret_cast<void*>(&aegp_get_effect_num_param_streams_v6);
     g_aegp_stream_suite6[5] = reinterpret_cast<void*>(&aegp_get_new_effect_stream_by_index);
@@ -1170,7 +1189,8 @@ SceneSuiteAcquireResult scene_acquire_suite(
     return SceneSuiteAcquireResult::acquired;
   }
   if (named("AEGP Stream Suite") && version == 7) {
-    g_aegp_stream_suite2.fill(unsupported);
+    g_aegp_stream_suite2 =
+        unsupported_suite_slots<UnsupportedSuiteId::aegp_stream_7, 22>();
     g_aegp_stream_suite2[4] = reinterpret_cast<void*>(&aegp_get_effect_num_param_streams_v2);
     g_aegp_stream_suite2[5] = factory.legacy_stream_callbacks[0];
     g_aegp_stream_suite2[7] = factory.legacy_stream_callbacks[1];
@@ -1184,7 +1204,8 @@ SceneSuiteAcquireResult scene_acquire_suite(
     return SceneSuiteAcquireResult::acquired;
   }
   if (named("AEGP Keyframe Suite") && version == 5 && state().comp_idle_roundtrip_mode) {
-    g_aegp_keyframe_suite5.fill(unsupported);
+    g_aegp_keyframe_suite5 =
+        unsupported_suite_slots<UnsupportedSuiteId::aegp_keyframe_5, 22>();
     g_aegp_keyframe_suite5[0] = reinterpret_cast<void*>(&aegp_get_stream_num_keyframes);
     g_aegp_keyframe_suite5[1] = reinterpret_cast<void*>(&aegp_get_keyframe_time);
     g_aegp_keyframe_suite5[4] = reinterpret_cast<void*>(&aegp_get_new_keyframe_value);
