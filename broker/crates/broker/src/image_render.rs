@@ -285,6 +285,24 @@ pub fn prepare_gpu_runtime_policy(
     if module_report_json.is_empty() {
         return Err(invalid("GPU module-audit preflight produced no report"));
     }
+    // Defense in depth: a report with an empty `modules` array authenticates
+    // vacuously (zero modules to validate), so reject it here regardless of the
+    // worker's own guarantee. A valid preflight loaded at least one authorized
+    // module (the manifest carries at least one for the backend).
+    let report_value: Value = serde_json::from_slice(&module_report_json).map_err(|error| {
+        invalid(format!(
+            "GPU module-audit preflight report is not valid JSON: {error}"
+        ))
+    })?;
+    if !report_value
+        .get("modules")
+        .and_then(Value::as_array)
+        .is_some_and(|modules| !modules.is_empty())
+    {
+        return Err(invalid(
+            "GPU module-audit preflight reported no authorized modules",
+        ));
+    }
     let system32 = canonical_system32()?;
     // Fail-fast: the render path re-authenticates before dispatch, but validate
     // here too so a mismatched policy/report surfaces at prepare time.

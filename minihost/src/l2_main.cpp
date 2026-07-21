@@ -1773,8 +1773,13 @@ int worker_main_impl(int argc, wchar_t **argv) {
                                              : 0;
     if (framework == 0) return 75;
     if (!tp::begin_backend_context(framework, 0)) return 76;
-    std::cout << wr::gpu_module_report_json() << "\n";
+    const std::string report = wr::gpu_module_report_json();
     tp::end_backend_context(framework);
+    // An empty report means the enumeration could not be trusted or no
+    // authorized module actually loaded; fail closed rather than emit a report
+    // that would authenticate nothing.
+    if (report.empty()) return 77;
+    std::cout << report << "\n";
     return 0;
   }
   if (const auto selftest_exit = dispatch_worker_selftests(argc, argv))

@@ -438,39 +438,47 @@ std::string gpu_module_report_json() {
   // matched to its authorized entry and emitted from that entry's disk-verified
   // identity, so the report never serializes a raw path (only the hashed
   // path_token, the basename, and the size the broker re-authenticates).
-  std::ostringstream output;
-  output << "{\"session_identity\":\"" << session_hex << "\",\"backend\":\""
-         << backend << "\",\"modules\":[";
-  bool first = true;
+  //
+  // Fails closed (returns an empty string) when the module enumeration cannot be
+  // trusted (query failure, or a > kMaxAuditedModules overflow that would drop
+  // modules) or when none of the authorized modules actually loaded. The audit
+  // path treats the same overflow as a failure, and an empty `modules` array
+  // would authenticate vacuously downstream, so both must fail here instead of
+  // emitting a report that proves nothing loaded.
   std::array<HMODULE, kMaxAuditedModules> modules{};
   DWORD needed = 0;
-  if (EnumProcessModulesEx(GetCurrentProcess(), modules.data(),
-          static_cast<DWORD>(sizeof(modules)), &needed, LIST_MODULES_ALL) &&
-      needed != 0 && needed <= sizeof(modules) && needed % sizeof(HMODULE) == 0) {
-    const std::size_t count = needed / sizeof(HMODULE);
-    for (std::size_t index = 0; index < count; ++index) {
-      std::array<wchar_t, 32768> buffer{};
-      const DWORD length = GetModuleFileNameExW(GetCurrentProcess(), modules[index],
-          buffer.data(), static_cast<DWORD>(buffer.size()));
-      std::filesystem::path loaded_module;
-      if (length == 0 || length >= buffer.size() ||
-          !canonical_path(buffer.data(), loaded_module))
-        continue;
-      const auto found = std::find_if(g_authorized_runtime_modules.begin(),
-          g_authorized_runtime_modules.end(),
-          [&](const AuthorizedRuntimeModule& entry) {
-            return same_path(loaded_module, entry.path);
-          });
-      if (found == g_authorized_runtime_modules.end()) continue;
-      if (!first) output << ',';
-      first = false;
-      output << "{\"classification\":\"policy\",\"basename\":\""
-             << audit_basename(found->path) << "\",\"path_token\":\""
-             << path_token(found->path) << "\",\"sha256\":\"" << found->sha256
-             << "\",\"size\":" << found->size << "}";
-    }
+  if (!EnumProcessModulesEx(GetCurrentProcess(), modules.data(),
+          static_cast<DWORD>(sizeof(modules)), &needed, LIST_MODULES_ALL) ||
+      needed == 0 || needed > sizeof(modules) || needed % sizeof(HMODULE) != 0)
+    return {};
+  const std::size_t count = needed / sizeof(HMODULE);
+  std::ostringstream entries;
+  bool first = true;
+  for (std::size_t index = 0; index < count; ++index) {
+    std::array<wchar_t, 32768> buffer{};
+    const DWORD length = GetModuleFileNameExW(GetCurrentProcess(), modules[index],
+        buffer.data(), static_cast<DWORD>(buffer.size()));
+    std::filesystem::path loaded_module;
+    if (length == 0 || length >= buffer.size() ||
+        !canonical_path(buffer.data(), loaded_module))
+      continue;
+    const auto found = std::find_if(g_authorized_runtime_modules.begin(),
+        g_authorized_runtime_modules.end(),
+        [&](const AuthorizedRuntimeModule& entry) {
+          return same_path(loaded_module, entry.path);
+        });
+    if (found == g_authorized_runtime_modules.end()) continue;
+    if (!first) entries << ',';
+    first = false;
+    entries << "{\"classification\":\"policy\",\"basename\":\""
+            << audit_basename(found->path) << "\",\"path_token\":\""
+            << path_token(found->path) << "\",\"sha256\":\"" << found->sha256
+            << "\",\"size\":" << found->size << "}";
   }
-  output << "]}";
+  if (first) return {};  // no authorized module loaded -> nothing to authenticate
+  std::ostringstream output;
+  output << "{\"session_identity\":\"" << session_hex << "\",\"backend\":\""
+         << backend << "\",\"modules\":[" << entries.str() << "]}";
   return output.str();
 }
 
