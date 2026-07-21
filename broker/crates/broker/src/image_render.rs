@@ -4677,25 +4677,17 @@ fn render_with_artifact(
     };
     let alpha_as_coverage_params: &[u32] =
         host_context.map_or(&[], |context| context.alpha_as_coverage_params.as_slice());
-    // The session sizes each layer slot to that layer's own dimensions (#264),
-    // so a secondary or timed layer larger than the primary is representable and
-    // no longer needs the one-shot path. What remains a session-transport limit
-    // is the aggregate section cap (the one-shot per-file transport has no
-    // equivalent): a config whose per-layer slots sum past the cap stays on the
-    // one-shot path rather than fail-closing (#264). Feed the actual per-layer
-    // dimensions so this check matches open's per-layer section layout exactly.
-    let layer_dims = secondaries
-        .iter()
-        .map(|(_, w, h, _)| (*w, *h))
-        .chain(timed_secondaries.iter().map(|(_, _, w, h, _)| (*w, *h)));
-    let session_section_fits =
-        crate::render_session::classic_session_section_fits(width, height, pixel_format, layer_dims);
+    // Layer pixels travel as inherited per-layer file HANDLEs (#268), not
+    // section slots, so the section is header + input + output only and its
+    // aggregate cap is no longer a function of layer count or size. A layered
+    // config the one-shot per-file path accepts now always fits the session, so
+    // the former session_section_fits carve-out is gone (#264): every eligible
+    // render below can be carried by the length-1 session.
     if !smart
         && audio.is_none()
         && gpu_backend == RenderGpuBackend::Auto
         && payload == encode_interactive_payload(interactive_parameters.unwrap_or_default())?
         && std::env::var_os(DISABLE_SESSION_WRAPPER_ENV).is_none()
-        && session_section_fits
         // RenderSession::open rejects total_time <= 0, but the shared timing
         // validation (RenderTiming::is_valid) admits total_time == 0 at
         // current_time == 0. Keep such a zero-duration render on the one-shot

@@ -112,16 +112,10 @@ std::size_t output_slot_offset(const SessionGeometry& geometry) {
   return kHeaderBytes + align_slot(input_slot_bytes(geometry));
 }
 
-std::size_t layer_slot_bytes(int32_t width, int32_t height) {
-  return align_slot(static_cast<std::size_t>(width) * height * 4);
-}
-
-std::size_t layer_region_offset(const SessionGeometry& geometry) {
-  return output_slot_offset(geometry) + align_slot(output_slot_bytes(geometry));
-}
-
 std::size_t expected_section_bytes(const SessionGeometry& geometry) {
-  return layer_region_offset(geometry) + geometry.layer_region_bytes;
+  // Header + input + output only (#268); layer pixels travel as inherited file
+  // HANDLEs, so nothing beyond the output slot lives in the section.
+  return output_slot_offset(geometry) + align_slot(output_slot_bytes(geometry));
 }
 
 bool session_environment_requested() {
@@ -467,50 +461,64 @@ RenderSessionOutcome run_session_frame_loop(
   RenderSessionOutcome outcome;
   const int32_t layer_slot_count =
       external_layers ? static_cast<int32_t>(external_layers->size()) : 0;
-  // Layer slots are sized per-layer (#264): sum each layer's own aligned size so
-  // the section-size validation below matches the broker's per-layer layout. The
-  // per-layer dimensions arrive in the session-layers trailer (external_layers),
-  // already parsed and bounded before this point.
-  std::size_t layer_region_bytes = 0;
-  if (external_layers) {
-    for (const auto& layer : *external_layers)
-      layer_region_bytes += wrs::layer_slot_bytes(layer.width, layer.height);
-  }
   // Non-const: an in-session grow (protocol §3, issue #262) raises the output
   // capacity in place when an expand overruns the launch slot, without changing
   // the render dimensions (max_width/max_height) or the input/output offsets.
+  // The section holds only header + input + output (#268); layer pixels no
+  // longer occupy it, so no layer region feeds the geometry.
   wrs::SessionGeometry geometry{
       max_width, max_height,
       output_capacity_width > 0 ? output_capacity_width : max_width,
       output_capacity_height > 0 ? output_capacity_height : max_height,
-      pixel_bytes, layer_slot_count, layer_region_bytes};
+      pixel_bytes, layer_slot_count};
   wrs::SessionChannels channels;
   if (!channels.open_from_environment(geometry) ||
       !channels.static_header_matches(geometry)) {
     outcome.protocol_violation = true;
     return outcome;
   }
-  // Layers are static for the whole session: copy each layer's RGBA out of its
-  // own shared slot once, into a worker-private vector the render loop reuses
-  // (the plug-in never sees the mapping). Slots are sized per-layer, so the
-  // offset walks a prefix sum of the aligned per-layer sizes in launch order
-  // (matching the broker's write loop). A zero-size layer is a fail-closed
+  // Layers are static for the whole session and travel as inherited per-layer
+  // read HANDLEs (#268), not section slots: read each layer's RGBA8 once from
+  // its handle into a worker-private vector the render loop reuses (the plug-in
+  // never sees a mapping), then close the handle. A short read, a zero-size
+  // layer, or a handle that is not an inherited disk file is a fail-closed
   // launch error.
   std::vector<ExternalLayerInput> session_layers;
   if (external_layers) {
     session_layers = *external_layers;
-    std::size_t layer_offset = wrs::layer_region_offset(geometry);
     for (int32_t index = 0; index < layer_slot_count; ++index) {
       auto& layer = session_layers[index];
       const std::size_t bytes =
           static_cast<std::size_t>(layer.width) * layer.height * 4;
-      if (bytes == 0) {
+      const HANDLE handle =
+          reinterpret_cast<HANDLE>(static_cast<uintptr_t>(layer.rgba_handle));
+      DWORD flags = 0;
+      if (bytes == 0 || layer.rgba_handle == 0 ||
+          !GetHandleInformation(handle, &flags) ||
+          GetFileType(handle) != FILE_TYPE_DISK) {
         outcome.protocol_violation = true;
         return outcome;
       }
       layer.rgba.resize(bytes);
-      std::memcpy(layer.rgba.data(), channels.view() + layer_offset, bytes);
-      layer_offset += wrs::layer_slot_bytes(layer.width, layer.height);
+      std::size_t collected = 0;
+      bool read_ok = true;
+      while (collected < bytes) {
+        DWORD read = 0;
+        const DWORD request = static_cast<DWORD>(bytes - collected);
+        if (!ReadFile(handle, layer.rgba.data() + collected, request, &read,
+                      nullptr) ||
+            read == 0) {
+          read_ok = false;
+          break;
+        }
+        collected += read;
+      }
+      CloseHandle(handle);
+      layer.rgba_handle = 0;  // consumed; never reused
+      if (!read_ok || collected != bytes) {
+        outcome.protocol_violation = true;
+        return outcome;
+      }
     }
   }
   const std::vector<ExternalLayerInput>* frame_layers =

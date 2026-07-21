@@ -21,7 +21,7 @@
 mod worker {
     use sha2::{Digest, Sha256};
     use std::ptr::null_mut;
-    use windows_sys::Win32::Foundation::HANDLE;
+    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
     use windows_sys::Win32::Storage::FileSystem::{ReadFile, WriteFile};
     use windows_sys::Win32::System::Memory::{MapViewOfFile, FILE_MAP_ALL_ACCESS};
 
@@ -42,6 +42,9 @@ mod worker {
 
     const EXIT_PROTOCOL_VIOLATION: i32 = 23;
     const EXIT_INVARIANT_FAILURE: i32 = 24;
+    // Layer pixels travel as inherited file handles (#268); the trailer carries
+    // each layer's slot/geometry plus its read handle value (v2).
+    const LAYER_TRAILER_PREFIX: &str = "session-layers:v2|";
 
     fn env_handle(name: &str) -> Option<HANDLE> {
         let value = std::env::var(name).ok()?.parse::<usize>().ok()?;
@@ -297,16 +300,17 @@ mod worker {
         if effective >= 11 && args[effective - 1].starts_with("v2|") {
             effective -= 1;
         }
-        // The secondary-layer trailer sits ahead of the context trailers;
-        // keep it to validate the header's layer_slot_count and the slots.
+        // The secondary-layer trailer sits ahead of the context trailers; keep
+        // it to validate the header's layer_slot_count and the per-layer
+        // inherited handles (#268).
         let mut layer_trailer: Option<String> = None;
-        if effective >= 11 && args[effective - 1].starts_with("session-layers:v1|") {
+        if effective >= 11 && args[effective - 1].starts_with(LAYER_TRAILER_PREFIX) {
             layer_trailer = Some(args[effective - 1].clone());
             effective -= 1;
         }
         let expected_layer_count = layer_trailer
             .as_deref()
-            .map(|trailer| trailer["session-layers:v1|".len()..].split(';').count() as u32)
+            .map(|trailer| trailer[LAYER_TRAILER_PREFIX.len()..].split(';').count() as u32)
             .unwrap_or(0);
         // The smart session command selects the smart final-report contract
         // (protocol v1.1); the transport behavior is identical.
@@ -335,9 +339,9 @@ mod worker {
         }
         let view = View(view_address.Value as *mut u8);
         if view.read_u32(MAGIC_OFFSET) != HEADER_MAGIC
-            // Session header layout version: 2 since layer slots became
-            // per-layer sized (#264).
-            || view.read_u32(VERSION_OFFSET) != 2
+            // Session header layout version: 3 since layer pixels left the
+            // section for inherited file handles (#268).
+            || view.read_u32(VERSION_OFFSET) != 3
             || view.read_u32(DEPTH_CODE_OFFSET) != 8
             || view.read_u32(MAX_WIDTH_OFFSET) != width as u32
             || view.read_u32(MAX_HEIGHT_OFFSET) != height as u32
@@ -350,27 +354,45 @@ mod worker {
         let input_offset = HEADER_BYTES;
         let output_offset = HEADER_BYTES + aligned(slot_bytes);
 
-        // The integration test fills each layer's slot with its slot number as
-        // a byte, so reading the first byte of each layer slot proves the
-        // metadata reached the right slot with the right pixels (issue #98 W1-4).
-        // Layer slots are sized per-layer (#264): the offset walks a prefix sum
-        // of each layer's own aligned RGBA8 size (slot,w,h[,time,scale]).
+        // Layer pixels travel as inherited per-layer read handles (#268), not
+        // section slots. The integration test fills each layer's file with its
+        // slot number as a byte, so reading w*h*4 bytes from the handle and
+        // checking the first byte proves the right file reached the right layer
+        // entry (issue #98 W1-4). Each entry is static `slot,w,h,handle` (4
+        // fields) or timed `slot,w,h,time,scale,handle` (6); the handle value is
+        // always last. The handle is inherited, so its numeric value matches the
+        // broker's.
         if let Some(trailer) = &layer_trailer {
-            let mut offset = output_offset + aligned(slot_bytes);
-            for entry in trailer["session-layers:v1|".len()..].split(';') {
+            for entry in trailer[LAYER_TRAILER_PREFIX.len()..].split(';') {
                 let fields: Vec<&str> = entry.split(',').collect();
-                let (Some(Ok(slot)), Some(Ok(layer_width)), Some(Ok(layer_height))) = (
+                if fields.len() != 4 && fields.len() != 6 {
+                    return EXIT_PROTOCOL_VIOLATION;
+                }
+                let (
+                    Some(Ok(slot)),
+                    Some(Ok(layer_width)),
+                    Some(Ok(layer_height)),
+                    Some(Ok(handle_value)),
+                ) = (
                     fields.first().map(|s| s.parse::<u32>()),
                     fields.get(1).map(|s| s.parse::<usize>()),
                     fields.get(2).map(|s| s.parse::<usize>()),
+                    fields.last().map(|s| s.parse::<usize>()),
                 ) else {
                     return EXIT_PROTOCOL_VIOLATION;
                 };
-                let byte = unsafe { view.0.add(offset).read() };
-                if byte != slot as u8 {
+                let layer_bytes = layer_width * layer_height * 4;
+                if layer_bytes == 0 {
                     return EXIT_PROTOCOL_VIOLATION;
                 }
-                offset += aligned(layer_width * layer_height * 4);
+                let handle = handle_value as HANDLE;
+                let mut buffer = vec![0u8; layer_bytes];
+                if !read_exact(handle, &mut buffer) || buffer[0] != slot as u8 {
+                    return EXIT_PROTOCOL_VIOLATION;
+                }
+                unsafe {
+                    CloseHandle(handle);
+                }
             }
         }
 

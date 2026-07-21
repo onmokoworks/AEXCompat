@@ -96,7 +96,7 @@ WorkerMode classify_worker_mode(
       // The secondary-layer trailer sits ahead of the context trailers in the
       // positional tail; peel it last to reach the ten-slot session contract.
       mode.session_layers = mode.image_argc >= 11 &&
-          starts_with(argv[mode.image_argc - 1], L"session-layers:v1|");
+          starts_with(argv[mode.image_argc - 1], L"session-layers:v2|");
       const int session_core_argc = mode.image_argc - (mode.session_layers ? 1 : 0);
       mode.render_session_mode = session_core_argc == 10;
       if (mode.render_session_mode) {

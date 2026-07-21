@@ -93,7 +93,7 @@ worker 側パースは `trace_writer.cpp:16-28` の型)。worker はパス文字
 ```
 aex_render_worker.exe --render-session-v1 <plugin> <plugin_sha256> <payload>
     <max_width> <max_height> <time_step> <total_time> <time_scale>
-    [session-layers:v1|<slot,w,h[,time,scale];...>]
+    [session-layers:v2|<slot,w,h,handle | slot,w,h,time,scale,handle;...>]
     [v2|<mask context>] [spatial:v*|<...>] [render:v1|<...>]
     [--alpha-as-coverage-v1 <slot,slot,...>]
     [--aux-manifest-v1 <path>] [--parameter-animation-v1 <path>]
@@ -127,19 +127,25 @@ one-shot と同一 (parse_mask_context_payload / parse_spatial_context_payload /
 parse_render_environment_payload / prepare_aux_transport)。full-resolution
 寸法を宣言する spatial は遅延 SEQUENCE_SETUP と全フレームの in_data に反映される。
 
-W1-4 では secondary layer を `session-layers:v1|slot,w,h;...` trailer
-(context trailer より前) で運ぶ。各 layer の RGBA8 ピクセルは §6 のレイヤー
-スロット (出力スロットの後) に static 配置され、worker は open 時に一度読んで
-全フレームで使い回す。**レイヤースロットは layer ごとに自分の寸法 (layer_w*layer_h*4)
-で確保する (#264)**。primary 入力サイズに統一しないため、primary より大きい layer
-も表現でき、one-shot layered が受容する構成を session でも扱える。個々のスロット
-offset は aligned な per-layer サイズの prefix sum (launch 順) で、broker の書き込み
-ループと worker の読み出しループが同順で inline に歩む。header の `layer_slot_count`
-は broker が書き、両者が検証する (per-layer 寸法は trailer が運ぶので header 追加は
-不要)。
+W1-4 では secondary layer を `session-layers:v2|slot,w,h,handle;...` trailer
+(context trailer より前) で運ぶ。**layer の RGBA8 ピクセルは §6 の共有 section
+には置かず、broker が `target/image-transport` に per-layer の一時ファイルとして
+書き、その path-authenticated な read HANDLE を継承ハンドルリスト (section/pipe
+と同じ機構) で worker に渡す (#268)**。trailer は各 layer の slot/寸法に加えて
+その handle 値を最終フィールドとして運ぶ (handle は継承なので worker 側で同じ数値)。
+worker は open 時に各 handle から `w*h*4` バイトちょうどを private vector へ一度
+読み、handle を閉じて全フレームで使い回す (plug-in は mapping もファイルも見ない)。
+layer がファイル転送になったことで **layer 枚数・サイズは section の aggregate cap
+を一切占めず**、section は header + input + output のみ (常に cap 未満) に境界化され、
+primary より大きい layer も任意枚数扱えて one-shot layered per-file 転送と同等の
+capability になる (#264 の per-layer スロットは #268 でファイル転送に置換)。header の
+`layer_slot_count` は broker が書き、両者が trailer の layer 数と突き合わせて検証する
+(section を指さなくなったので「注入された layer ファイル数」の意味)。broker は一時
+ファイルを session の間保持し、session 終了時 (drop) に削除する。継承 read HANDLE は
+broker が所有し drop で閉じる。
 
-W1-4b では timed layer を同 trailer の 5 フィールド形式 `slot,w,h,time,scale`
-で運ぶ (3 フィールドは従来どおり static secondary)。物理スロットは layer 配列の
+W1-4b では timed layer を同 trailer の 6 フィールド形式 `slot,w,h,time,scale,handle`
+で運ぶ (4 フィールド `slot,w,h,handle` は static secondary)。物理スロットは layer 配列の
 index ごとに割り当てられるため、同じ semantic `slot` を持つ複数の timed layer
 (異なる rational time) はそれぞれ独立スロットを占有し、worker は各フレームの
 current_time に対し one-shot と同じ有理時刻一致 (`same_time` / `same_rational_time`)
@@ -442,14 +448,16 @@ publish_effect_sequence) →
 offset 0        : SessionHeader (1 ページ 4096B)
 offset 4096     : 入力スロット   (max_width * max_height * 4)
 align 4096      : 出力スロット   (max_width * max_height * bpp、grow で拡大 #262)
-align 4096      : レイヤースロット × n (launch の layer 数、各 layer_w * layer_h * 4、
-                  layer ごとに個別サイズ #264、4096-align の prefix sum で配置)
 ```
 
-- 入力・レイヤースロットは RGBA8 (4B/px) 固定。one-shot の入力 raw
+（レイヤーは #268 で section から外れ、継承ファイル HANDLE 経由で転送される。
+section は header + input + output のみ。）
+
+- 入力スロットは RGBA8 (4B/px) 固定。one-shot の入力 raw
   transport と同一 (`load_rgba` は深度によらず w*h*4 を要求し、深度昇格は
   worker 内部の `rgba8_to_argb` が行う。深い入力転送は #57 系の既存課題で、
-  セッションで新設しない)。出力スロットのみ深度で bpp が決まる
+  セッションで新設しない)。レイヤーも RGBA8 (4B/px) で、per-layer の一時
+  ファイルとして継承 HANDLE で運ぶ (#268)。出力スロットのみ深度で bpp が決まる
   (8bpc=4B/px、16bpc=8B/px、32f=16B/px。one-shot の出力 raw と同一)。
 - rowbytes = width * bpp の密詰め (one-shot raw ファイルと同じ)。
 - **スロットは転送専用で、plugin にスロットへのポインタは渡らない**:
@@ -464,21 +472,23 @@ align 4096      : レイヤースロット × n (launch の layer 数、各 laye
   あり、v1 では採らない。
 - 上限: `max_width`/`max_height` は one-shot と同じ
   `validate_image_buffer_layout` の上限 (`MAX_DIMENSION=4096`,
-  `MAX_PIXELS=16M`) に従う。section 全体は 32f フル構成でも
-  16M px × 16B × (2+n) スロット + ヘッダで抑えられ、spike の結果から
-  ProcessMemoryLimit とは独立に予算化できるが、broker 側で section 合計
-  1 GiB を hard cap とする (異常構成の fail-closed)。
+  `MAX_PIXELS=16M`) に従う。layer が section を離れた (#268) ため section 全体は
+  header + input (<= 64 MiB) + 出力 worst-case-expand (32f で <= 256 MiB) ≈ 320 MiB
+  で、layer 枚数・サイズに依らず常に 1 GiB hard cap 未満。broker 側で section 合計
+  1 GiB を hard cap とするのは異常構成の fail-closed の defense in depth として残す
+  (適格構成では発火しない)。
 
 SessionHeader (すべて u32 LE、予約領域は 0 埋め):
 
 ```
 magic            "AEXS"        (0x53584541)
-version          2   (レイアウト版。layer slot が per-layer サイズ化 #264 で 1→2。
-                     制御メッセージの `v` とは別軸で、mismatch build を両方向で
+version          3   (レイアウト版。layer slot が per-layer サイズ化 #264 で 1→2、
+                     layer が section を離れ継承ファイル HANDLE 転送になり #268 で
+                     2→3。制御メッセージの `v` とは別軸で、mismatch build を両方向で
                      fail-closed にする。audio session は layout 不変で 1 のまま)
 depth_code       8 | 16 | 32
 max_width, max_height
-layer_slot_count
+layer_slot_count   (#268 以降は「注入された layer ファイル数」。section は指さない)
 input_generation   (broker が render_frame 送信前にインクリメント)
 output_generation  (worker が出力書込完了後に input_generation の値を書く)
 frame_width, frame_height     (v1 では max と同値)
@@ -547,7 +557,8 @@ impl RenderSession {
 - launch: `run_isolated_impl` (`windows_process.rs:303`) を「作成・Job 割当・
   resume まで」と「exit 待ち・回収」に分離し、間にフレームループを挟める
   セッション版を追加する (one-shot 経路は不変)。handle list に section +
-  制御パイプ 2 本を追加。suspended cleanup guard は現行のまま。
+  制御パイプ 2 本 + per-layer read HANDLE 群 (#268) を追加。suspended cleanup
+  guard は現行のまま。
 - per-frame 出力検証: `render_with_artifact` 内の検証列
   (`image_render.rs:4478-5011` の selector/bounds/size/pixel/guard 検証) を
   純粋関数に切り出し、one-shot とセッションで共用する。
