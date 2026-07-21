@@ -5336,14 +5336,11 @@ enum SessionWrapperOutcome {
     Fallback(String),
 }
 
-#[cfg(not(windows))]
-fn render_classic_via_length_one_session(
-    _: &SessionWrapperRequest<'_>,
-) -> SessionWrapperOutcome {
-    SessionWrapperOutcome::Fallback("resident render sessions are only implemented on Windows".into())
-}
-
-#[cfg(windows)]
+// The whole `image_render` module is `#[cfg(windows)]` (lib.rs), and the render
+// workers are Windows executables, so there is no non-Windows render path. The
+// former `#[cfg(not(windows))]` shim here was dead code that never compiled on
+// any target and misleadingly suggested a non-Windows fallback; it is removed so
+// the fail-closed caller is not misread as breaking non-Windows renders.
 fn render_classic_via_length_one_session(
     request: &SessionWrapperRequest<'_>,
 ) -> SessionWrapperOutcome {
