@@ -1890,6 +1890,58 @@ mod windows_e2e {
     }
 
     #[test]
+    fn video_batch_reports_an_empty_smart_frame_without_a_png() {
+        // A SmartFX batch frame that legally renders an empty result (#278) has
+        // no pixels, so there is no PNG or raw to write. The batch must report it
+        // as a legal empty frame and keep going, not abort on a 0x0 image. The
+        // fixture answers frame 0 empty; frames 1-2 render normally.
+        let _behavior = BehaviorGuard::set(Some("empty_result_frame_0"));
+        let (repository, plugin, _sha) = temp_repository();
+        let inputs = write_input_frames(&repository.0, 3);
+        let output_directory = repository.0.join("empty-batch-out");
+        let request_path = repository.0.join("empty-request.json");
+        std::fs::write(
+            &request_path,
+            serde_json::to_vec(&serde_json::json!({
+                "schema_version": 1,
+                "plugin": plugin.to_string_lossy(),
+                "input_frames": inputs,
+                "output_directory": output_directory.to_string_lossy(),
+                // Only a SmartFX session may report an empty result.
+                "smart": true,
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let report_path = repository.0.join("empty-report.json");
+        let passed = run_video_batch(&repository.0, &request_path, &report_path)
+            .expect("batch render runs");
+        let report: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&report_path).unwrap()).unwrap();
+        assert!(passed, "the empty frame must not abort the batch: {report}");
+        assert_eq!(report["frame_count"], 3);
+        assert_eq!(report["frames_ok"], 3);
+        assert_eq!(report["aborted"], false);
+        // Frame 0 rendered empty: legal, no PNG.
+        let frame0 = &report["frames"][0];
+        assert_eq!(frame0["status"], "ok");
+        assert_eq!(frame0["empty_result"], true);
+        assert_eq!(frame0["width"], 0);
+        assert_eq!(frame0["output_png"], serde_json::Value::Null);
+        assert!(
+            !output_directory.join("frame-000000.png").exists(),
+            "an empty frame writes no PNG"
+        );
+        // The remaining frames rendered normally with PNGs.
+        for index in 1..3 {
+            assert!(
+                output_directory.join(format!("frame-{index:06}.png")).is_file(),
+                "non-empty frame {index} writes a PNG"
+            );
+        }
+    }
+
+    #[test]
     fn video_batch_aborts_on_a_frame_error_by_default() {
         let _behavior = BehaviorGuard::set(Some("error_frame_0"));
         let (repository, plugin, _sha) = temp_repository();

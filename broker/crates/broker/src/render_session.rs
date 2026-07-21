@@ -2310,6 +2310,28 @@ pub fn run_video_batch(
                     checksum,
                     width: frame_width,
                     height: frame_height,
+                } if frame_width == 0 && frame_height == 0 => {
+                    // A legally empty SmartFX result (#278): the frame rendered
+                    // no pixels, so there is no PNG or raw sidecar to write (a 0x0
+                    // image cannot be represented). Report a legal empty frame,
+                    // mirroring the one-shot empty-result contract, instead of
+                    // aborting the batch on a zero-dimension image.
+                    debug_assert!(pixels.is_empty());
+                    Ok(json!({
+                        "frame_index": frame_index,
+                        "status": "ok",
+                        "checksum": checksum,
+                        "width": 0,
+                        "height": 0,
+                        "empty_result": true,
+                        "output_png": Value::Null,
+                    }))
+                }
+                FrameStatus::Rendered {
+                    pixels,
+                    checksum,
+                    width: frame_width,
+                    height: frame_height,
                 } => {
                     let output_png = output_directory.join(format!("frame-{frame_index:06}.png"));
                     let preview = native_rgba_to_preview(&pixels, request.pixel_format)?;
