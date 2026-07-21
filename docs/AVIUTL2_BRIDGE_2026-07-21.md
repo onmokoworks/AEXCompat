@@ -259,3 +259,34 @@ green は行パリティ (偶191/奇64)、blue ~128。
 
 - pixel チャンネル順 `Argb8` スロット vs `RgbaPixel`: fill-premultiply probe の
   実機結果 (赤 seed が赤に見える) で RGBA 一貫を確認済み。コード変更不要。
+
+## 2026-07-21 レビューループ (ローカル→Codex)
+
+方針を「ローカルエージェントレビューをループで clean にしてから Codex」に修正
+(ユーザー指示、[[review-order-local-then-codex]])。単発ローカル1回→Codex では、
+ローカル指摘対応で入れた変更が生む回帰 (下記 deadlock) を Codex 側で拾う羽目に
+なった反省。
+
+- **Codex 1st**: P2×2 (`init()`→`try_init()` で二重初期化 panic 回避、
+  filter object で resize フレームを拒否)。対応 `d99f233`。
+- **Codex 2nd**: P1 deadlock (`bc62bb5` で修正)。`open_and_get_sender` の
+  double-check insert (ローカル指摘の「ロック外化」対応で導入) で、race に
+  負けたとき事前取得した sender clone が `drop(discard)` の join より長生きし、
+  join がその clone を待って永久ブロック。sender clone を install パス内でのみ
+  取るよう修正。→ **ローカルを先にループで回していれば Codex 前に捕まえられた**。
+- **ローカル 2周目** (bc62bb5): deadlock 修正を検証 (正しい) + 2 件:
+  - P2 (leak): 削除/放棄 effect のセッション (worker サブプロセス + スレッド +
+    共有メモリ) が reap されず leak。aviutl2 の FilterPlugin に teardown
+    コールバックが無く `effect_id` は起動ごと固有のため、再レンダーされない
+    effect は evict 経路に乗らない。→ **idle reaping** で修正: `BridgeSession` に
+    `last_used: Instant`、`open_and_get_sender` で `SESSION_IDLE_TIMEOUT` (120s、
+    frame deadline 30s を余裕で超過) 超過を sweep してロック外 drop。active に
+    使われている effect のセッションは last_used 更新で残る (正当。hard cap で
+    スラッシュさせない)。放棄セッションは次の open 時に刈られ、unbounded 増加が
+    bounded 残留になる。
+  - P3: `remove_session` が key 消去で、並行 reopen が入れた健全セッションを
+    巻き込みうる。→ `BridgeSession` に `serial: u64` (static AtomicU64)、
+    `remove_session(effect_id, serial)` が serial 一致時のみ除去。
+- **ローカル 3周目**: P2/P3 修正を検証 (正しい、新規問題なし)。carry-over は
+  「off-lock join は render_on が frame deadline で返る前提」= broker §7 watchdog の
+  既存不変条件で bridge 起因でない。→ **ローカル clean 到達、Codex へ**。

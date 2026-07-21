@@ -13,9 +13,10 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Sender, channel};
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use aviutl2::{
     AnyResult, AviUtl2Info,
@@ -30,6 +31,20 @@ use aexcompat_broker::render_session::{FrameStatus, RenderSession, SessionOpenRe
 /// Per-frame watchdog deadline handed to the session (protocol §7). A frame the
 /// worker cannot finish in time invalidates the session fail-closed.
 const FRAME_DEADLINE_MS: u64 = 30_000;
+
+/// Idle timeout after which a session (worker subprocess + thread + shared
+/// memory) is reaped. AviUtl2's filter API has no per-effect teardown callback
+/// and `effect_id` is unique per app launch, so a deleted or abandoned effect
+/// is never revisited; without reaping its session would leak until DLL
+/// unload. The timeout comfortably exceeds the frame deadline so an in-flight
+/// frame is never reaped. Reaping runs opportunistically when a new session is
+/// opened.
+const SESSION_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// Monotonic instance counter so a session can be removed by the exact instance
+/// that failed rather than by `effect_id` alone (which a concurrent reopen may
+/// have replaced with a healthy session).
+static SESSION_SERIAL: AtomicU64 = AtomicU64::new(0);
 
 /// Environment variable naming the AEX to load (stage 1 fixed plug-in).
 const ENV_PLUGIN: &str = "AEXCOMPAT_AVIUTL2_PLUGIN";
@@ -89,6 +104,10 @@ struct BridgeSession {
     /// differs needs a fresh session (the slot dimensions, total_time and
     /// time_scale are fixed at launch), so this is compared per frame.
     identity: SessionIdentity,
+    /// Unique instance id (see [`SESSION_SERIAL`]).
+    serial: u64,
+    /// Last time a frame was routed to this session; drives idle reaping.
+    last_used: Instant,
     join: Option<JoinHandle<()>>,
 }
 
@@ -221,6 +240,8 @@ impl BridgeSession {
             Ok(Ok(())) => Ok(BridgeSession {
                 tx: Some(tx),
                 identity,
+                serial: SESSION_SERIAL.fetch_add(1, Ordering::Relaxed),
+                last_used: Instant::now(),
                 join: Some(join),
             }),
             Ok(Err(message)) => {
@@ -282,73 +303,101 @@ struct AexBridgeFilter {
 }
 
 impl AexBridgeFilter {
-    /// Returns the request channel of a live session already matching `identity`,
-    /// or `None` when the caller must open one. A session whose identity no
-    /// longer matches (object resized, retimed) is evicted here; the eviction is
-    /// dropped after the lock is released so its thread `join()` never blocks the
-    /// map.
+    /// Returns the channel and instance serial of a live session already
+    /// matching `identity`, or `None` when the caller must open one. A session
+    /// whose identity no longer matches (object resized, retimed) is evicted
+    /// here. The matched session's `last_used` is refreshed so it is not reaped
+    /// while in use. Any eviction is dropped after the lock is released so its
+    /// thread `join()` never blocks the map.
     fn existing_sender(
         &self,
         effect_id: i64,
         identity: SessionIdentity,
-    ) -> Result<Option<Sender<RenderReq>>, String> {
+    ) -> Result<Option<(Sender<RenderReq>, u64)>, String> {
         let mut evicted: Option<BridgeSession> = None;
-        let sender;
+        let result;
         {
             let mut sessions = self
                 .sessions
                 .lock()
                 .map_err(|_| "session map poisoned".to_string())?;
-            match sessions.get(&effect_id) {
-                Some(session) if session.identity == identity => sender = session.sender(),
+            match sessions.get_mut(&effect_id) {
+                Some(session) if session.identity == identity => {
+                    session.last_used = Instant::now();
+                    result = session.sender().map(|tx| (tx, session.serial));
+                }
                 Some(_) => {
                     evicted = sessions.remove(&effect_id);
-                    sender = None;
+                    result = None;
                 }
-                None => sender = None,
+                None => result = None,
             }
         }
         drop(evicted);
-        Ok(sender)
+        Ok(result)
     }
 
     /// Opens a session outside the map lock (open blocks for seconds spawning the
     /// worker), then inserts it under a brief lock. If another thread won the
     /// race and already installed a matching session, that one is kept and the
-    /// freshly opened session is dropped after the lock is released.
+    /// freshly opened session is dropped after the lock is released. Idle
+    /// sessions are reaped here (see [`SESSION_IDLE_TIMEOUT`]). Every removed
+    /// session is dropped off-lock.
     fn open_and_get_sender(
         &self,
         effect_id: i64,
         identity: SessionIdentity,
         config: SessionConfig,
-    ) -> Result<Sender<RenderReq>, String> {
+    ) -> Result<(Sender<RenderReq>, u64), String> {
         let opened = BridgeSession::open(config)?;
-        let discard: Option<BridgeSession>;
+        let serial = opened.serial;
+        let mut discard: Vec<BridgeSession> = Vec::new();
         let sender;
         {
             let mut sessions = self
                 .sessions
                 .lock()
                 .map_err(|_| "session map poisoned".to_string())?;
+
+            // Reap sessions of abandoned effects (deleted, or scrubbed past and
+            // not re-rendered). last_used exceeds the frame deadline by far, so
+            // an in-flight frame is never reaped.
+            let now = Instant::now();
+            let expired: Vec<i64> = sessions
+                .iter()
+                .filter(|(_, session)| now.duration_since(session.last_used) > SESSION_IDLE_TIMEOUT)
+                .map(|(id, _)| *id)
+                .collect();
+            for id in expired {
+                if let Some(session) = sessions.remove(&id) {
+                    discard.push(session);
+                }
+            }
+
             match sessions
                 .get(&effect_id)
                 .filter(|session| session.identity == identity)
-                .and_then(|session| session.sender())
+                .and_then(|session| session.sender().map(|tx| (tx, session.serial)))
             {
                 // Lost the open race; keep the installed session, discard ours.
                 // No clone of `opened`'s channel is taken on this path, so the
-                // off-lock `drop(discard)` join below cannot wait on a stray
-                // sender that outlives it (would deadlock).
+                // off-lock drop/join below cannot wait on a stray sender that
+                // outlives it (would deadlock).
                 Some(existing) => {
-                    discard = Some(opened);
+                    discard.push(opened);
                     sender = existing;
                 }
                 // Install ours, evicting any stale/dead entry (dropped off-lock).
                 // Clone the sender before the move; a freshly opened session
                 // always has a live channel.
                 None => {
-                    sender = opened.sender().expect("a freshly opened session has a live sender");
-                    discard = sessions.insert(effect_id, opened);
+                    let tx = opened
+                        .sender()
+                        .expect("a freshly opened session has a live sender");
+                    if let Some(old) = sessions.insert(effect_id, opened) {
+                        discard.push(old);
+                    }
+                    sender = (tx, serial);
                 }
             }
         }
@@ -356,15 +405,25 @@ impl AexBridgeFilter {
         Ok(sender)
     }
 
-    /// Removes and drops a session, e.g. after its worker died so the next frame
-    /// reopens. The drop (thread `join()` + `RenderSession::close`) runs after
-    /// the lock is released.
-    fn remove_session(&self, effect_id: i64) {
-        let removed = self
-            .sessions
-            .lock()
-            .ok()
-            .and_then(|mut sessions| sessions.remove(&effect_id));
+    /// Removes and drops the session identified by `effect_id` **and** `serial`,
+    /// e.g. after its worker died so the next frame reopens. Matching on serial
+    /// avoids dropping a healthy session that a concurrent reopen installed at
+    /// the same `effect_id`. The drop (thread `join()` + `RenderSession::close`)
+    /// runs after the lock is released.
+    fn remove_session(&self, effect_id: i64, serial: u64) {
+        let removed = {
+            let Ok(mut sessions) = self.sessions.lock() else {
+                return;
+            };
+            if sessions
+                .get(&effect_id)
+                .is_some_and(|session| session.serial == serial)
+            {
+                sessions.remove(&effect_id)
+            } else {
+                None
+            }
+        };
         drop(removed);
     }
 }
@@ -458,11 +517,12 @@ impl FilterPlugin for AexBridgeFilter {
 
         // Reuse a live matching session; otherwise open one outside the map lock.
         // Neither the blocking worker round-trip below nor `open` holds the lock.
-        let sender = match self
+        // `serial` identifies this exact instance for a precise removal on loss.
+        let (sender, serial) = match self
             .existing_sender(effect_id, identity)
             .map_err(|message| aviutl2::anyhow::anyhow!("{message}"))?
         {
-            Some(sender) => sender,
+            Some(pair) => pair,
             None => {
                 let (repository, plugin, plugin_sha256) = resolve_launch_env()?;
                 let config = SessionConfig {
@@ -508,8 +568,10 @@ impl FilterPlugin for AexBridgeFilter {
             }
             FrameReply::SessionLost(message) => {
                 // Worker crash, timeout, or host-protection invalidation. Drop
-                // the dead entry so the next frame reopens.
-                self.remove_session(effect_id);
+                // this exact instance so the next frame reopens, without
+                // disturbing a healthy session a concurrent reopen may have
+                // installed at the same effect_id.
+                self.remove_session(effect_id, serial);
                 tracing::error!("AEX session lost on effect {effect_id}: {message}");
                 Ok(())
             }
