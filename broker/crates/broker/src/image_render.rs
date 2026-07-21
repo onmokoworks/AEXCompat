@@ -4644,11 +4644,47 @@ fn render_with_artifact(
     };
     let alpha_as_coverage_params: &[u32] =
         host_context.map_or(&[], |context| context.alpha_as_coverage_params.as_slice());
+    // The session's input and layer slots are all sized to the primary input's
+    // pixel count (RenderSession::open rejects a layer whose RGBA bytes exceed
+    // that slot: "render session layer pixels do not fit the slot"). The one-shot
+    // layered path instead accepts independent per-layer dimensions bounded only
+    // by MAX_DIMENSION/MAX_PIXELS. A secondary or timed layer larger (in total
+    // pixels) than the primary is therefore a real capability gap, not an
+    // infrastructure failure: keep it session-ineligible so it renders one-shot,
+    // rather than fail-closing it now that the automatic fallback is gone (#264).
+    let primary_pixels = u64::from(width) * u64::from(height);
+    let layers_fit_session_slots = secondaries
+        .iter()
+        .all(|(_, w, h, _)| u64::from(*w) * u64::from(*h) <= primary_pixels)
+        && timed_secondaries
+            .iter()
+            .all(|(_, _, w, h, _)| u64::from(*w) * u64::from(*h) <= primary_pixels);
+    // The session's uniform primary-sized slots also fall under an aggregate
+    // section cap that the one-shot per-file transport has no equivalent for; a
+    // config that overruns it is a session-transport limit, not a compatibility
+    // failure, so keep it on the one-shot path rather than fail-closing (#264).
+    let layer_count = (secondaries.len() + timed_secondaries.len()) as u32;
+    let session_section_fits =
+        crate::render_session::classic_session_section_fits(width, height, pixel_format, layer_count);
     if !smart
         && audio.is_none()
         && gpu_backend == RenderGpuBackend::Auto
         && payload == encode_interactive_payload(interactive_parameters.unwrap_or_default())?
         && std::env::var_os(DISABLE_SESSION_WRAPPER_ENV).is_none()
+        && layers_fit_session_slots
+        && session_section_fits
+        // RenderSession::open rejects total_time <= 0, but the shared timing
+        // validation (RenderTiming::is_valid) admits total_time == 0 at
+        // current_time == 0. Keep such a zero-duration render on the one-shot
+        // path rather than fail-closing it (#264).
+        && timing.total_time > 0
+        // RenderSession::open also rejects time_scale > i32::MAX (the worker
+        // parses the per-frame scale as signed 32-bit), which is_valid admits.
+        // The one-shot worker cannot render it either, so this loses no working
+        // capability, but keeping the eligibility gate a strict superset of the
+        // session's config preconditions means an eligible render never
+        // fail-closes on a config the session structurally rejects (#264).
+        && timing.time_scale <= i32::MAX as u32
         // The length-1 session path launches through SessionOpenRequest, which
         // carries no conformance render-settings trailer, so the worker would
         // report its legacy premultiplied/null settings while the broker has
@@ -4726,7 +4762,23 @@ fn render_with_artifact(
         }) {
             SessionWrapperOutcome::Report(report) => return Ok(report),
             SessionWrapperOutcome::Failure(error) => return Err(error),
-            SessionWrapperOutcome::Fallback => {}
+            // Fail closed (#98 W4, #264): a resident-session infrastructure
+            // failure no longer silently falls back to the one-shot transport,
+            // which would let the session path rot undetected. Surface it as an
+            // explicit diagnostic. The one-shot transport stays available for
+            // renders the session cannot serve (the ineligible shapes handled
+            // below) and via the AEXCOMPAT_DISABLE_RENDER_SESSION_WRAPPER
+            // override, which bypasses the session attempt entirely.
+            SessionWrapperOutcome::Fallback(reason) => {
+                return Err(invalid(format!(
+                    "the resident render session could not carry this render ({reason}); the \
+                     automatic one-shot fallback is disabled. Diagnose the session failure, or \
+                     set {DISABLE_SESSION_WRAPPER_ENV}=1 to force the one-shot transport for \
+                     this render. Any world-dump snapshots from the failed session are preserved \
+                     for diagnosis; clear the dump directory before re-running, since it must \
+                     start empty."
+                )));
+            }
         }
     }
 
@@ -5254,6 +5306,32 @@ fn render_with_artifact(
 /// the equivalence test renders both ways and diffs the public reports.
 pub const DISABLE_SESSION_WRAPPER_ENV: &str = "AEXCOMPAT_DISABLE_RENDER_SESSION_WRAPPER";
 
+/// Test-only fault injection (#264): when set, the length-1 classic wrapper
+/// reports a `Fallback` before opening the session, so a test can exercise the
+/// fail-closed caller arm (an attempted session that fails must surface an
+/// explicit error, not silently rerun the one-shot transport) without a
+/// deterministic real session failure, which #262 made hard to induce. Compiled
+/// only in debug builds (see `forced_session_fallback`), so a release/production
+/// broker cannot be made to fail-close by inheriting this variable.
+#[cfg(debug_assertions)]
+pub const FORCE_SESSION_FALLBACK_ENV: &str = "AEXCOMPAT_FORCE_SESSION_FALLBACK";
+
+/// The test-only fault injection above, gated so it is entirely absent from
+/// release builds: the debug variant reads the env var, the release variant is a
+/// constant `None` (no env lookup, nothing to break a real render).
+#[cfg(debug_assertions)]
+fn forced_session_fallback() -> Option<SessionWrapperOutcome> {
+    std::env::var_os(FORCE_SESSION_FALLBACK_ENV).is_some().then(|| {
+        SessionWrapperOutcome::Fallback(
+            "forced session fallback (AEXCOMPAT_FORCE_SESSION_FALLBACK)".into(),
+        )
+    })
+}
+#[cfg(not(debug_assertions))]
+fn forced_session_fallback() -> Option<SessionWrapperOutcome> {
+    None
+}
+
 /// Diagnostic counter for tests: incremented whenever a render is carried by
 /// the length-1 session wrapper instead of the one-shot argv transport.
 pub static RENDER_SESSION_WRAPPER_RENDERS: std::sync::atomic::AtomicU64 =
@@ -5304,23 +5382,30 @@ enum SessionWrapperOutcome {
     /// this is final rather than a fallback.
     Failure(io::Error),
     /// The session infrastructure could not carry the render (open failure,
-    /// worker crash or invalidation, malformed close summary); the caller
-    /// re-runs the one-shot transport, which reports its own outcome.
-    Fallback,
+    /// worker crash or invalidation, malformed close summary). The string is the
+    /// reason. The automatic one-shot fallback is removed (#98 W4, #264): the
+    /// caller turns this into an explicit fail-closed error so a session
+    /// infrastructure failure surfaces instead of being masked by a silent
+    /// one-shot rerun. The one-shot transport stays reachable only for renders
+    /// the session cannot serve (ineligible shapes) or the explicit
+    /// `AEXCOMPAT_DISABLE_RENDER_SESSION_WRAPPER` override.
+    Fallback(String),
 }
 
-#[cfg(not(windows))]
-fn render_classic_via_length_one_session(
-    _: &SessionWrapperRequest<'_>,
-) -> SessionWrapperOutcome {
-    SessionWrapperOutcome::Fallback
-}
-
-#[cfg(windows)]
+// The whole `image_render` module is `#[cfg(windows)]` (lib.rs), and the render
+// workers are Windows executables, so there is no non-Windows render path. The
+// former `#[cfg(not(windows))]` shim here was dead code that never compiled on
+// any target and misleadingly suggested a non-Windows fallback; it is removed so
+// the fail-closed caller is not misread as breaking non-Windows renders.
 fn render_classic_via_length_one_session(
     request: &SessionWrapperRequest<'_>,
 ) -> SessionWrapperOutcome {
     use crate::render_session::{FrameStatus, RenderSession, SessionOpenRequest};
+
+    // Test-only fault injection (debug builds only); a no-op in release.
+    if let Some(outcome) = forced_session_fallback() {
+        return outcome;
+    }
 
     let world_dump_dir = match requested_world_dump_dir(request.repository) {
         Ok(value) => value,
@@ -5358,17 +5443,16 @@ fn render_classic_via_length_one_session(
         gpu_runtime_policy: None,
     }) {
         Ok(session) => session,
-        Err(_) => return SessionWrapperOutcome::Fallback,
-    };
-    // The session attempt may dump snapshots before failing, and the one-shot
-    // rerun's resolver requires a fresh directory; clear our own snapshot
-    // files before falling back, the same way the GPU retry path does.
-    let fallback_with_clean_dumps = |dump: &Option<WorldDumpDir>| {
-        if let Some(dump) = dump {
-            let _ = clear_world_dump_files(&dump.path);
+        Err(error) => {
+            return SessionWrapperOutcome::Fallback(format!("session open failed: {error}"));
         }
-        SessionWrapperOutcome::Fallback
     };
+    // Fail-closed diagnostics (#264): the session may have written world-dump
+    // snapshots before failing. When a one-shot retry followed a Fallback we
+    // cleared them (the one-shot resolver requires a fresh directory); now a
+    // Fallback becomes a fail-closed error with no retry, so the snapshots are
+    // exactly the evidence the user needs to investigate the session failure.
+    // Preserve them: return the Fallback without clearing the dump directory.
     let outcome = match session.render_frame_with_attributes(
         0,
         request.timing.current_time,
@@ -5377,12 +5461,11 @@ fn render_classic_via_length_one_session(
         request.custom_ui_action,
     ) {
         Ok(outcome) => outcome,
-        // Invalidation (crash, deadline, dimension or guard invariant): the
-        // one-shot transport may still carry this render, for example for an
-        // effect that legally resizes its output.
-        Err(_) => {
+        // Invalidation (worker crash, deadline, or a host-protection invariant).
+        Err(error) => {
+            let reason = format!("the render session was invalidated: {error}");
             let _ = session.close();
-            return fallback_with_clean_dumps(&world_dump_dir);
+            return SessionWrapperOutcome::Fallback(reason);
         }
     };
     // An expand-output effect that overran the launch slot no longer surfaces
@@ -5394,11 +5477,15 @@ fn render_classic_via_length_one_session(
     if close.get("session_clean") != Some(&Value::Bool(true))
         || close.get("invalidated") != Some(&Value::Bool(false))
     {
-        return fallback_with_clean_dumps(&world_dump_dir);
+        return SessionWrapperOutcome::Fallback(
+            "the render session did not close cleanly".into(),
+        );
     }
     let Some(final_report) = close.get("final_report").filter(|value| value.is_object()).cloned()
     else {
-        return fallback_with_clean_dumps(&world_dump_dir);
+        return SessionWrapperOutcome::Fallback(
+            "the render session close carried no final report".into(),
+        );
     };
     let classification = close["worker"]["classification"]
         .as_str()

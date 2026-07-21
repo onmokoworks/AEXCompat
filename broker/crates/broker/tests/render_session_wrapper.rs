@@ -17,6 +17,10 @@ mod windows_e2e {
         RenderPixelFormat, RenderTiming, RenderUiAction, DISABLE_SESSION_WRAPPER_ENV,
         RENDER_SESSION_WRAPPER_RENDERS,
     };
+    // The fault-injection knob exists only in debug builds (image_render.rs), so
+    // the test that uses it is gated to debug too.
+    #[cfg(debug_assertions)]
+    use aexcompat_broker::image_render::FORCE_SESSION_FALLBACK_ENV;
     use aexcompat_broker::render_request::HostContext;
     use sha2::{Digest, Sha256};
     use std::path::{Path, PathBuf};
@@ -1399,6 +1403,145 @@ mod windows_e2e {
             "expanded PNG bytes differ between the session and one-shot routes"
         );
 
+        let _ = std::fs::remove_dir_all(&scratch);
+    }
+
+    /// Fail-closed fallback removal (#264, #98 W4): when the classic session is
+    /// attempted (eligible render, escape hatch unset) but cannot carry the
+    /// render, the render must surface an explicit error instead of silently
+    /// rerunning the one-shot transport (which would let the session path rot
+    /// undetected). The fault-injection env forces the session wrapper to report
+    /// a Fallback without a real failure; the caller must then error (naming the
+    /// override) and leave the session-carried counter unchanged — neither a
+    /// session success nor a silent one-shot. On the pre-#264 code this test
+    /// fails: the forced Fallback fell through to a successful one-shot render.
+    ///
+    /// Debug-only: the fault-injection knob it drives is compiled out of release
+    /// builds (image_render.rs), so this test is gated to debug too.
+    #[cfg(debug_assertions)]
+    #[test]
+    fn session_infra_failure_fails_closed_without_silent_one_shot() {
+        let _env_guard = SESSION_ROUTE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let root = repository_root();
+        let worker = root.join("target/minihost-build/aex_render_worker.exe");
+        let aex = root.join("target/pf-sampling-probe-build/Release/pf_sampling_probe.aex");
+        if !worker.is_file() || !aex.is_file() {
+            eprintln!(
+                "skipping fail-closed test: build aex_render_worker.exe and pf_sampling_probe.aex first"
+            );
+            return;
+        }
+        let sha = format!("{:x}", Sha256::digest(std::fs::read(&aex).unwrap()));
+        let scratch = std::env::temp_dir().join(format!(
+            "aexcompat-failclosed-{}-{:032x}",
+            std::process::id(),
+            rand::random::<u128>()
+        ));
+        std::fs::create_dir_all(&scratch).unwrap();
+        let input = scratch.join("input.png");
+        image::RgbaImage::from_fn(64, 32, |x, y| {
+            image::Rgba([(x * 3) as u8, (y * 5) as u8, (x + y) as u8, 255])
+        })
+        .save(&input)
+        .unwrap();
+
+        // Eligible render with the escape hatch unset, so the session IS
+        // attempted; the fault injection then forces it to report a Fallback.
+        unsafe { std::env::remove_var(DISABLE_SESSION_WRAPPER_ENV) };
+        unsafe { std::env::set_var(FORCE_SESSION_FALLBACK_ENV, "1") };
+        let before = RENDER_SESSION_WRAPPER_RENDERS.load(Ordering::SeqCst);
+        let output = scratch.join("out.png");
+        let result = render_experimental_image(&root, &aex, &sha, &input, &output, &[]);
+        unsafe { std::env::remove_var(FORCE_SESSION_FALLBACK_ENV) };
+
+        let error = result.expect_err("a forced session fallback must fail closed, not fall back");
+        let message = error.to_string();
+        assert!(
+            message.contains(DISABLE_SESSION_WRAPPER_ENV),
+            "the fail-closed error must name the one-shot override; got: {message}"
+        );
+        // Secondary sanity check: the session wrapper did not carry a render.
+        // (This counter only tracks the session path, so it alone does not
+        // distinguish fail-closed from a silent one-shot; the discriminators are
+        // the Err above and the absent output PNG below, both of which a silent
+        // one-shot success would violate.)
+        assert_eq!(
+            RENDER_SESSION_WRAPPER_RENDERS.load(Ordering::SeqCst),
+            before,
+            "no session render should have been carried"
+        );
+        assert!(
+            !output.exists(),
+            "a fail-closed render must not write an output PNG (a silent one-shot would)"
+        );
+        let _ = std::fs::remove_dir_all(&scratch);
+    }
+
+    /// Capability-gap routing (#264): a secondary layer larger (in total pixels)
+    /// than the primary input does not fit the session's uniform input-shaped
+    /// slots (RenderSession::open rejects it), but the one-shot layered path
+    /// accepts independent per-layer dimensions. Such a render must stay
+    /// session-INELIGIBLE and render one-shot, not hit the fail-closed error now
+    /// that the automatic fallback is gone. On a version that fail-closes without
+    /// this eligibility carve-out, the session open fails and the render errors.
+    #[test]
+    fn oversized_layer_renders_one_shot_not_fail_closed() {
+        let _env_guard = SESSION_ROUTE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let root = repository_root();
+        let worker = root.join("target/minihost-build/aex_render_worker.exe");
+        let aex =
+            root.join("target/pf-layer-param-probe-build/Release/pf_layer_param_probe.aex");
+        if !worker.is_file() || !aex.is_file() {
+            eprintln!(
+                "skipping oversized-layer test: build aex_render_worker.exe and \
+                 pf_layer_param_probe.aex first"
+            );
+            return;
+        }
+        let sha = format!("{:x}", Sha256::digest(std::fs::read(&aex).unwrap()));
+        let scratch = std::env::temp_dir().join(format!(
+            "aexcompat-oversized-layer-{}-{:032x}",
+            std::process::id(),
+            rand::random::<u128>()
+        ));
+        std::fs::create_dir_all(&scratch).unwrap();
+        // Primary input smaller than the secondary layer: the layer's pixel count
+        // (64*48) exceeds the primary (40*30), so it cannot fit the session's
+        // primary-sized input slot but is a legal one-shot layered render.
+        let input = scratch.join("input.png");
+        image::RgbaImage::from_fn(40, 30, |x, y| {
+            image::Rgba([(x * 3) as u8, (y * 5) as u8, (x + y) as u8, 255])
+        })
+        .save(&input)
+        .unwrap();
+        let secondary = scratch.join("layer.png");
+        image::RgbaImage::from_fn(64, 48, |x, y| {
+            image::Rgba([(x + y) as u8, (x * 7) as u8, (y * 9) as u8, 255])
+        })
+        .save(&secondary)
+        .unwrap();
+
+        // No escape hatch: an eligible render would attempt the session. The
+        // oversized layer must make it ineligible so it renders one-shot instead.
+        unsafe { std::env::remove_var(DISABLE_SESSION_WRAPPER_ENV) };
+        let params = vec![layer_parameter(1, &secondary)];
+        let before = RENDER_SESSION_WRAPPER_RENDERS.load(Ordering::SeqCst);
+        let output = scratch.join("out.png");
+        let _report = render_experimental_image(&root, &aex, &sha, &input, &output, &params)
+            .expect("an oversized-layer render must succeed via one-shot, not fail closed");
+        assert_eq!(
+            RENDER_SESSION_WRAPPER_RENDERS.load(Ordering::SeqCst),
+            before,
+            "the oversized-layer render must be session-ineligible (carried by one-shot)"
+        );
+        assert!(
+            output.exists(),
+            "the one-shot render must produce an output PNG"
+        );
         let _ = std::fs::remove_dir_all(&scratch);
     }
 }
