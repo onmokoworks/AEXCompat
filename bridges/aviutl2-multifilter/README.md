@@ -47,8 +47,10 @@ Windows 標準の per-user 位置 **`%APPDATA%\aexcompat-multifilter\config.toml
 (`AEXCOMPAT_MULTIFILTER_CONFIG` で明示パス上書き可)。
 
 ```toml
-# 対象 AEX フォルダ (直下の *.aex を各々フィルタ登録)
+# 対象 AEX フォルダ。dir(単一) と dirs(複数) は再帰スキャンされ、各 *.aex が
+# 個別フィルタとして登録される。両方省略時は AE/MediaCore の既定を使う (後述)。
 dir = 'C:\Users\me\aex'
+dirs = ['C:\more\aex', 'D:\shared\aex']
 # 常駐 worker のある repo root (target/minihost-build/ を持つ)
 repository = 'C:\path\to\AEXCompat'
 # 除外するエフェクト (ファイル stem を大文字小文字無視でマッチ。.aex 付き/無し可)
@@ -56,5 +58,23 @@ ignore = ['pf_sampling_probe', 'broken-effect']
 ```
 
 環境変数 `AEXCOMPAT_MULTIFILTER_DIR` / `AEXCOMPAT_MULTIFILTER_REPOSITORY` を設定すると
-TOML の `dir` / `repository` を上書きする (env > TOML)。設定・env いずれも無ければ何も
-登録しない。config はプラグインのロード時に一度だけ読むので、変更後は AviUtl2 を再起動する。
+TOML の `dir`(+`dirs`) / `repository` を上書きする (env > TOML)。config はプラグインの
+ロード時に一度だけ読むので、変更後は AviUtl2 を再起動する。
+
+### 既定のスキャン対象 (issue #303)
+
+`dir` / `dirs` / env いずれも無ければ、既定で **After Effects (最新版) の
+`Support Files\Plug-ins` と Adobe の `Common\Plug-ins\<ver>\MediaCore`** を再帰スキャンする。
+AE の全エフェクトをそのまま AviUtl2 のキーフレーム可能フィルタとして使える。effect でない
+`.aex` (Format/codec 等) は discovery に失敗して自動的にスキップされる。
+
+### discovery キャッシュ
+
+各 AEX の discovery (パラメーター取得) はロード時に worker を起動して行うため、AE の全
+エフェクト (数百) を毎回起動時に discovery すると非常に遅い。結果を
+`%APPDATA%\aexcompat-multifilter\discovery-cache.json` に (mtime+len キーで) キャッシュし、
+2 回目以降の起動は再 discovery を省く。**初回のみ低速** (数分)。cache miss は並列に discovery する。
+
+- AEX を差し替えた・追加した場合は mtime/len 変化で自動的に再 discovery される。
+- 稀に一時的な失敗 (負荷下のタイムアウト等) で effect が誤って除外されキャッシュされることがある。
+  その場合は該当 AEX を touch するか **`discovery-cache.json` を削除**すれば再 discovery される。
