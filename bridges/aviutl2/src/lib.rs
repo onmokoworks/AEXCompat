@@ -322,12 +322,7 @@ impl AexBridgeFilter {
         identity: SessionIdentity,
         config: SessionConfig,
     ) -> Result<Sender<RenderReq>, String> {
-        let mut opened = Some(BridgeSession::open(config)?);
-        let my_sender = opened
-            .as_ref()
-            .expect("just opened")
-            .sender()
-            .ok_or_else(|| "session is closing".to_string())?;
+        let opened = BridgeSession::open(config)?;
         let discard: Option<BridgeSession>;
         let sender;
         {
@@ -341,14 +336,19 @@ impl AexBridgeFilter {
                 .and_then(|session| session.sender())
             {
                 // Lost the open race; keep the installed session, discard ours.
+                // No clone of `opened`'s channel is taken on this path, so the
+                // off-lock `drop(discard)` join below cannot wait on a stray
+                // sender that outlives it (would deadlock).
                 Some(existing) => {
-                    discard = opened.take();
+                    discard = Some(opened);
                     sender = existing;
                 }
                 // Install ours, evicting any stale/dead entry (dropped off-lock).
+                // Clone the sender before the move; a freshly opened session
+                // always has a live channel.
                 None => {
-                    discard = sessions.insert(effect_id, opened.take().expect("just opened"));
-                    sender = my_sender;
+                    sender = opened.sender().expect("a freshly opened session has a live sender");
+                    discard = sessions.insert(effect_id, opened);
                 }
             }
         }
