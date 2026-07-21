@@ -15,8 +15,12 @@ mod windows_e2e {
         render_experimental_image_with_parameter_animation, AnimationInterpolation, AnimationTime,
         AnimationValue, InteractiveParameter, ParameterAnimation, ParameterAnimationKey,
         RenderPixelFormat, RenderTiming, RenderUiAction, DISABLE_SESSION_WRAPPER_ENV,
-        FORCE_SESSION_FALLBACK_ENV, RENDER_SESSION_WRAPPER_RENDERS,
+        RENDER_SESSION_WRAPPER_RENDERS,
     };
+    // The fault-injection knob exists only in debug builds (image_render.rs), so
+    // the test that uses it is gated to debug too.
+    #[cfg(debug_assertions)]
+    use aexcompat_broker::image_render::FORCE_SESSION_FALLBACK_ENV;
     use aexcompat_broker::render_request::HostContext;
     use sha2::{Digest, Sha256};
     use std::path::{Path, PathBuf};
@@ -1411,6 +1415,10 @@ mod windows_e2e {
     /// override) and leave the session-carried counter unchanged — neither a
     /// session success nor a silent one-shot. On the pre-#264 code this test
     /// fails: the forced Fallback fell through to a successful one-shot render.
+    ///
+    /// Debug-only: the fault-injection knob it drives is compiled out of release
+    /// builds (image_render.rs), so this test is gated to debug too.
+    #[cfg(debug_assertions)]
     #[test]
     fn session_infra_failure_fails_closed_without_silent_one_shot() {
         let _env_guard = SESSION_ROUTE_ENV_LOCK

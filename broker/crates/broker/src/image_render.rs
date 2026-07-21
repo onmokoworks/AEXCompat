@@ -5272,9 +5272,27 @@ pub const DISABLE_SESSION_WRAPPER_ENV: &str = "AEXCOMPAT_DISABLE_RENDER_SESSION_
 /// reports a `Fallback` before opening the session, so a test can exercise the
 /// fail-closed caller arm (an attempted session that fails must surface an
 /// explicit error, not silently rerun the one-shot transport) without a
-/// deterministic real session failure, which #262 made hard to induce. Never
-/// set in production.
+/// deterministic real session failure, which #262 made hard to induce. Compiled
+/// only in debug builds (see `forced_session_fallback`), so a release/production
+/// broker cannot be made to fail-close by inheriting this variable.
+#[cfg(debug_assertions)]
 pub const FORCE_SESSION_FALLBACK_ENV: &str = "AEXCOMPAT_FORCE_SESSION_FALLBACK";
+
+/// The test-only fault injection above, gated so it is entirely absent from
+/// release builds: the debug variant reads the env var, the release variant is a
+/// constant `None` (no env lookup, nothing to break a real render).
+#[cfg(debug_assertions)]
+fn forced_session_fallback() -> Option<SessionWrapperOutcome> {
+    std::env::var_os(FORCE_SESSION_FALLBACK_ENV).is_some().then(|| {
+        SessionWrapperOutcome::Fallback(
+            "forced session fallback (AEXCOMPAT_FORCE_SESSION_FALLBACK)".into(),
+        )
+    })
+}
+#[cfg(not(debug_assertions))]
+fn forced_session_fallback() -> Option<SessionWrapperOutcome> {
+    None
+}
 
 /// Diagnostic counter for tests: incremented whenever a render is carried by
 /// the length-1 session wrapper instead of the one-shot argv transport.
@@ -5346,12 +5364,9 @@ fn render_classic_via_length_one_session(
 ) -> SessionWrapperOutcome {
     use crate::render_session::{FrameStatus, RenderSession, SessionOpenRequest};
 
-    // Test-only fault injection: force the fail-closed caller arm without a real
-    // session failure (see FORCE_SESSION_FALLBACK_ENV).
-    if std::env::var_os(FORCE_SESSION_FALLBACK_ENV).is_some() {
-        return SessionWrapperOutcome::Fallback(
-            "forced session fallback (AEXCOMPAT_FORCE_SESSION_FALLBACK)".into(),
-        );
+    // Test-only fault injection (debug builds only); a no-op in release.
+    if let Some(outcome) = forced_session_fallback() {
+        return outcome;
     }
 
     let world_dump_dir = match requested_world_dump_dir(request.repository) {
