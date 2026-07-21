@@ -362,10 +362,6 @@ struct AexBridgeFilter {
     /// config items are rebuilt from this on demand (`FilterConfigItem` is not
     /// `Sync`, so it cannot be stored in this `Send + Sync` plug-in).
     param_template: Vec<InteractiveParameter>,
-    /// True when the load-time env AEX advertises SmartFX; the session opens on
-    /// the smart path (a SmartFX effect fails the classic path with
-    /// PF_Err_BAD_CALLBACK_PARAM).
-    smart: bool,
     /// The load-time env AEX path, if set. When the "AEX" file control selects a
     /// different path the bridge switches to it at runtime; its parameters are
     /// not exposed as controls (AviUtl2 config is static), so it renders at the
@@ -543,11 +539,12 @@ impl AexBridgeFilter {
             (Some(selected), Some(env)) => &selected == env,
             _ => false,
         };
-        let smart = if is_default {
-            self.smart
-        } else {
-            self.smart_for(&repository, &plugin, &sha)
-        };
+        // Always resolve smart by the current sha (cached), never by is_default:
+        // a same-path rebuild of the env AEX keeps is_default true but changes the
+        // sha and may flip its SmartFX advertisement, so the load-time flag can be
+        // stale. The env AEX's load-time (sha -> smart) is primed into the cache in
+        // `new`, so this is a cache hit until the bytes actually change.
+        let smart = self.smart_for(&repository, &plugin, &sha);
         Ok(ResolvedAex {
             repository,
             plugin,
@@ -649,23 +646,30 @@ impl FilterPlugin for AexBridgeFilter {
         let env_canonical = env_plugin
             .as_ref()
             .and_then(|path| std::fs::canonicalize(path).ok());
-        let (param_template, smart) = match discover_config() {
-            Ok(discovered) => discovered,
+        let (param_template, env_smart, env_sha) = match discover_config() {
+            Ok((parameters, smart, sha)) => (parameters, smart, Some(sha)),
             Err(message) => {
                 tracing::warn!(
                     "AEX parameter discovery failed ({message}); rendering with launch defaults"
                 );
-                (Vec::new(), false)
+                (Vec::new(), false, None)
             }
         };
+
+        // Prime the SmartFX cache with the env AEX's load-time (sha -> smart), so
+        // resolve_aex's per-frame `smart_for(sha)` is a cache hit until the bytes
+        // change (a same-path rebuild changes the sha and re-inspects).
+        let mut smart_cache = HashMap::new();
+        if let Some(sha) = env_sha {
+            smart_cache.insert(sha, env_smart);
+        }
 
         Ok(Self {
             sessions: Mutex::new(HashMap::new()),
             param_template,
-            smart,
             env_plugin,
             env_canonical,
-            smart_cache: Mutex::new(HashMap::new()),
+            smart_cache: Mutex::new(smart_cache),
             sha_cache: Mutex::new(HashMap::new()),
         })
     }
@@ -900,7 +904,7 @@ fn resolve_launch_env() -> AnyResult<(PathBuf, PathBuf, String)> {
 /// Discovers the fixed AEX's parameter set (spawns a `--l2-params-only` worker
 /// via the broker). The result is the launch baseline; exposed config items are
 /// derived from it by [`exposed_config`].
-fn discover_config() -> AnyResult<(Vec<InteractiveParameter>, bool)> {
+fn discover_config() -> AnyResult<(Vec<InteractiveParameter>, bool, String)> {
     let (repository, plugin, plugin_sha256) = resolve_launch_env()?;
     let (parameters, diagnostics) =
         inspect_experimental_with_diagnostics(&repository, &plugin, &plugin_sha256)
@@ -913,7 +917,7 @@ fn discover_config() -> AnyResult<(Vec<InteractiveParameter>, bool)> {
         .unwrap_or(0)
         & (1 << 10)
         != 0;
-    Ok((parameters, smart))
+    Ok((parameters, smart, plugin_sha256))
 }
 
 /// The mappable parameters exposed as AviUtl2 controls: the config items, the
