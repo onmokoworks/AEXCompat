@@ -474,9 +474,11 @@ pub struct SessionOpenRequest<'a> {
     /// the option is not emitted.
     pub alpha_as_coverage_params: &'a [u32],
     /// Secondary layers, static for the whole session (issue #98 W1-4). The
-    /// pixels ride the shared layer slots; the slot/geometry metadata rides
-    /// the `session-layers:v1|` launch trailer. Borrowed so open copies the
-    /// bytes straight into the section without a second heap copy.
+    /// pixels travel as inherited per-layer file HANDLEs, not section slots
+    /// (#268): open streams each layer to its own file under
+    /// target/image-transport, passes the read handle through the inherited
+    /// handle list, and rides the slot/geometry plus the handle value on the
+    /// `session-layers:v2|` launch trailer.
     pub layers: &'a [SessionLayer],
     pub dependencies: Vec<ApprovedImageArtifact>,
     pub width: u32,
@@ -502,11 +504,12 @@ pub struct SessionOpenRequest<'a> {
     pub gpu_runtime_policy: Option<GpuRuntimePolicyInput<'a>>,
 }
 
-/// A secondary layer whose RGBA8 pixels occupy one shared layer slot for the
-/// whole session. Width/height are the layer's own geometry, bounded by the
-/// input slot. A timed layer (issue #98 W1-4b) additionally carries the frame
-/// time at which the worker admits it; the worker selects the matching timed
-/// entry per frame with the same rational-time test the one-shot path uses.
+/// A secondary layer whose RGBA8 pixels travel as an inherited per-layer file
+/// HANDLE for the whole session (#268), read once by the worker at open.
+/// Width/height are the layer's own geometry, independent of the primary input.
+/// A timed layer (issue #98 W1-4b) additionally carries the frame time at which
+/// the worker admits it; the worker selects the matching timed entry per frame
+/// with the same rational-time test the one-shot path uses.
 #[derive(Clone)]
 pub struct SessionLayer {
     pub slot: u32,
