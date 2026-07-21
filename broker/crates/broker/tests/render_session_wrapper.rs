@@ -15,7 +15,7 @@ mod windows_e2e {
         render_experimental_image_with_parameter_animation, AnimationInterpolation, AnimationTime,
         AnimationValue, InteractiveParameter, ParameterAnimation, ParameterAnimationKey,
         RenderPixelFormat, RenderTiming, RenderUiAction, DISABLE_SESSION_WRAPPER_ENV,
-        RENDER_SESSION_WRAPPER_RENDERS,
+        FORCE_SESSION_FALLBACK_ENV, RENDER_SESSION_WRAPPER_RENDERS,
     };
     use aexcompat_broker::render_request::HostContext;
     use sha2::{Digest, Sha256};
@@ -1399,6 +1399,75 @@ mod windows_e2e {
             "expanded PNG bytes differ between the session and one-shot routes"
         );
 
+        let _ = std::fs::remove_dir_all(&scratch);
+    }
+
+    /// Fail-closed fallback removal (#264, #98 W4): when the classic session is
+    /// attempted (eligible render, escape hatch unset) but cannot carry the
+    /// render, the render must surface an explicit error instead of silently
+    /// rerunning the one-shot transport (which would let the session path rot
+    /// undetected). The fault-injection env forces the session wrapper to report
+    /// a Fallback without a real failure; the caller must then error (naming the
+    /// override) and leave the session-carried counter unchanged — neither a
+    /// session success nor a silent one-shot. On the pre-#264 code this test
+    /// fails: the forced Fallback fell through to a successful one-shot render.
+    #[test]
+    fn session_infra_failure_fails_closed_without_silent_one_shot() {
+        let _env_guard = SESSION_ROUTE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let root = repository_root();
+        let worker = root.join("target/minihost-build/aex_render_worker.exe");
+        let aex = root.join("target/pf-sampling-probe-build/Release/pf_sampling_probe.aex");
+        if !worker.is_file() || !aex.is_file() {
+            eprintln!(
+                "skipping fail-closed test: build aex_render_worker.exe and pf_sampling_probe.aex first"
+            );
+            return;
+        }
+        let sha = format!("{:x}", Sha256::digest(std::fs::read(&aex).unwrap()));
+        let scratch = std::env::temp_dir().join(format!(
+            "aexcompat-failclosed-{}-{:032x}",
+            std::process::id(),
+            rand::random::<u128>()
+        ));
+        std::fs::create_dir_all(&scratch).unwrap();
+        let input = scratch.join("input.png");
+        image::RgbaImage::from_fn(64, 32, |x, y| {
+            image::Rgba([(x * 3) as u8, (y * 5) as u8, (x + y) as u8, 255])
+        })
+        .save(&input)
+        .unwrap();
+
+        // Eligible render with the escape hatch unset, so the session IS
+        // attempted; the fault injection then forces it to report a Fallback.
+        unsafe { std::env::remove_var(DISABLE_SESSION_WRAPPER_ENV) };
+        unsafe { std::env::set_var(FORCE_SESSION_FALLBACK_ENV, "1") };
+        let before = RENDER_SESSION_WRAPPER_RENDERS.load(Ordering::SeqCst);
+        let output = scratch.join("out.png");
+        let result = render_experimental_image(&root, &aex, &sha, &input, &output, &[]);
+        unsafe { std::env::remove_var(FORCE_SESSION_FALLBACK_ENV) };
+
+        let error = result.expect_err("a forced session fallback must fail closed, not fall back");
+        let message = error.to_string();
+        assert!(
+            message.contains(DISABLE_SESSION_WRAPPER_ENV),
+            "the fail-closed error must name the one-shot override; got: {message}"
+        );
+        // Secondary sanity check: the session wrapper did not carry a render.
+        // (This counter only tracks the session path, so it alone does not
+        // distinguish fail-closed from a silent one-shot; the discriminators are
+        // the Err above and the absent output PNG below, both of which a silent
+        // one-shot success would violate.)
+        assert_eq!(
+            RENDER_SESSION_WRAPPER_RENDERS.load(Ordering::SeqCst),
+            before,
+            "no session render should have been carried"
+        );
+        assert!(
+            !output.exists(),
+            "a fail-closed render must not write an output PNG (a silent one-shot would)"
+        );
         let _ = std::fs::remove_dir_all(&scratch);
     }
 }

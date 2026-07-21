@@ -4726,7 +4726,21 @@ fn render_with_artifact(
         }) {
             SessionWrapperOutcome::Report(report) => return Ok(report),
             SessionWrapperOutcome::Failure(error) => return Err(error),
-            SessionWrapperOutcome::Fallback => {}
+            // Fail closed (#98 W4, #264): a resident-session infrastructure
+            // failure no longer silently falls back to the one-shot transport,
+            // which would let the session path rot undetected. Surface it as an
+            // explicit diagnostic. The one-shot transport stays available for
+            // renders the session cannot serve (the ineligible shapes handled
+            // below) and via the AEXCOMPAT_DISABLE_RENDER_SESSION_WRAPPER
+            // override, which bypasses the session attempt entirely.
+            SessionWrapperOutcome::Fallback(reason) => {
+                return Err(invalid(format!(
+                    "the resident render session could not carry this render ({reason}); the \
+                     automatic one-shot fallback is disabled. Diagnose the session failure, or \
+                     set {DISABLE_SESSION_WRAPPER_ENV}=1 to force the one-shot transport for \
+                     this render."
+                )));
+            }
         }
     }
 
@@ -5254,6 +5268,14 @@ fn render_with_artifact(
 /// the equivalence test renders both ways and diffs the public reports.
 pub const DISABLE_SESSION_WRAPPER_ENV: &str = "AEXCOMPAT_DISABLE_RENDER_SESSION_WRAPPER";
 
+/// Test-only fault injection (#264): when set, the length-1 classic wrapper
+/// reports a `Fallback` before opening the session, so a test can exercise the
+/// fail-closed caller arm (an attempted session that fails must surface an
+/// explicit error, not silently rerun the one-shot transport) without a
+/// deterministic real session failure, which #262 made hard to induce. Never
+/// set in production.
+pub const FORCE_SESSION_FALLBACK_ENV: &str = "AEXCOMPAT_FORCE_SESSION_FALLBACK";
+
 /// Diagnostic counter for tests: incremented whenever a render is carried by
 /// the length-1 session wrapper instead of the one-shot argv transport.
 pub static RENDER_SESSION_WRAPPER_RENDERS: std::sync::atomic::AtomicU64 =
@@ -5304,16 +5326,21 @@ enum SessionWrapperOutcome {
     /// this is final rather than a fallback.
     Failure(io::Error),
     /// The session infrastructure could not carry the render (open failure,
-    /// worker crash or invalidation, malformed close summary); the caller
-    /// re-runs the one-shot transport, which reports its own outcome.
-    Fallback,
+    /// worker crash or invalidation, malformed close summary). The string is the
+    /// reason. The automatic one-shot fallback is removed (#98 W4, #264): the
+    /// caller turns this into an explicit fail-closed error so a session
+    /// infrastructure failure surfaces instead of being masked by a silent
+    /// one-shot rerun. The one-shot transport stays reachable only for renders
+    /// the session cannot serve (ineligible shapes) or the explicit
+    /// `AEXCOMPAT_DISABLE_RENDER_SESSION_WRAPPER` override.
+    Fallback(String),
 }
 
 #[cfg(not(windows))]
 fn render_classic_via_length_one_session(
     _: &SessionWrapperRequest<'_>,
 ) -> SessionWrapperOutcome {
-    SessionWrapperOutcome::Fallback
+    SessionWrapperOutcome::Fallback("resident render sessions are only implemented on Windows".into())
 }
 
 #[cfg(windows)]
@@ -5321,6 +5348,14 @@ fn render_classic_via_length_one_session(
     request: &SessionWrapperRequest<'_>,
 ) -> SessionWrapperOutcome {
     use crate::render_session::{FrameStatus, RenderSession, SessionOpenRequest};
+
+    // Test-only fault injection: force the fail-closed caller arm without a real
+    // session failure (see FORCE_SESSION_FALLBACK_ENV).
+    if std::env::var_os(FORCE_SESSION_FALLBACK_ENV).is_some() {
+        return SessionWrapperOutcome::Fallback(
+            "forced session fallback (AEXCOMPAT_FORCE_SESSION_FALLBACK)".into(),
+        );
+    }
 
     let world_dump_dir = match requested_world_dump_dir(request.repository) {
         Ok(value) => value,
@@ -5358,16 +5393,18 @@ fn render_classic_via_length_one_session(
         gpu_runtime_policy: None,
     }) {
         Ok(session) => session,
-        Err(_) => return SessionWrapperOutcome::Fallback,
+        Err(error) => {
+            return SessionWrapperOutcome::Fallback(format!("session open failed: {error}"));
+        }
     };
     // The session attempt may dump snapshots before failing, and the one-shot
-    // rerun's resolver requires a fresh directory; clear our own snapshot
-    // files before falling back, the same way the GPU retry path does.
-    let fallback_with_clean_dumps = |dump: &Option<WorldDumpDir>| {
+    // rerun's resolver requires a fresh directory; clear our own snapshot files
+    // before reporting the failure, the same way the GPU retry path does.
+    let fallback_with_clean_dumps = |dump: &Option<WorldDumpDir>, reason: String| {
         if let Some(dump) = dump {
             let _ = clear_world_dump_files(&dump.path);
         }
-        SessionWrapperOutcome::Fallback
+        SessionWrapperOutcome::Fallback(reason)
     };
     let outcome = match session.render_frame_with_attributes(
         0,
@@ -5377,12 +5414,11 @@ fn render_classic_via_length_one_session(
         request.custom_ui_action,
     ) {
         Ok(outcome) => outcome,
-        // Invalidation (crash, deadline, dimension or guard invariant): the
-        // one-shot transport may still carry this render, for example for an
-        // effect that legally resizes its output.
-        Err(_) => {
+        // Invalidation (worker crash, deadline, or a host-protection invariant).
+        Err(error) => {
+            let reason = format!("the render session was invalidated: {error}");
             let _ = session.close();
-            return fallback_with_clean_dumps(&world_dump_dir);
+            return fallback_with_clean_dumps(&world_dump_dir, reason);
         }
     };
     // An expand-output effect that overran the launch slot no longer surfaces
@@ -5394,11 +5430,17 @@ fn render_classic_via_length_one_session(
     if close.get("session_clean") != Some(&Value::Bool(true))
         || close.get("invalidated") != Some(&Value::Bool(false))
     {
-        return fallback_with_clean_dumps(&world_dump_dir);
+        return fallback_with_clean_dumps(
+            &world_dump_dir,
+            "the render session did not close cleanly".into(),
+        );
     }
     let Some(final_report) = close.get("final_report").filter(|value| value.is_object()).cloned()
     else {
-        return fallback_with_clean_dumps(&world_dump_dir);
+        return fallback_with_clean_dumps(
+            &world_dump_dir,
+            "the render session close carried no final report".into(),
+        );
     };
     let classification = close["worker"]["classification"]
         .as_str()
