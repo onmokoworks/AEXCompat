@@ -417,3 +417,22 @@ supervised は dynamic/soft な状態で AviUtl2 の静的 config では表現�
 - **ローカル 3周目**: P2/P3 修正を検証 (正しい、新規問題なし)。carry-over は
   「off-lock join は render_on が frame deadline で返る前提」= broker §7 watchdog の
   既存不変条件で bridge 起因でない。→ **ローカル clean 到達、Codex へ**。
+
+## 2026-07-22 段階3: SmartFX 対応 (実装)
+
+ntsc-rs のような実効果は SmartFX で、classic セッションでは
+`PF_Err_BAD_CALLBACK_PARAM` (516) で弾かれる (oracle: host_render_path=smartfx)。
+harness の live per-frame (InteractiveRenderSession) も classic 固定だが、broker の
+`RenderSession` は `smart: true` (SmartFX 常駐セッション、#98 W3) を持つ。bridge は
+RenderSession を直に叩くので、これを配線した:
+
+- **SmartFX 検出**: discovery の diagnostics `advertised_out_flags2` の
+  `PF_OutFlag2_SUPPORTS_SMART_RENDER` (bit 10、worker_effect_bootstrap.cpp:98) を見る。
+- **smart セッション**: 検出時 `RenderSession::open` に `smart: true` を渡す。8bit smart は
+  GPU 非対象 (`gpu_capable = smart && ARGB32f`) なので gpu_backend Auto=CPU、runtime policy 不要。
+  smart worker (`aex_smart_worker.exe`) を使う。
+- パラメーターマッピング (段階2) はそのまま流用。
+
+検証 (repro, ntsc-rs-ae.aex): SmartFX=true 検出、86 params discovery、Random seed を
+変えて 2 フレーム描画 (frame0 [1,2,5] / frame1 [10,14,12] = seed でノイズが変わる)。
+classic では両フレーム 516 だったのが smart で描画成功。実機は AviUtl2 で確認。

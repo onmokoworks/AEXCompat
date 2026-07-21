@@ -76,6 +76,8 @@ struct SessionConfig {
     time_step: i32,
     total_time: i32,
     time_scale: u32,
+    /// Open the SmartFX session instead of the classic one.
+    smart: bool,
     /// The declared parameter set (discovered defaults) used as the session's
     /// launch baseline. Per-frame `render` messages override individual values.
     /// Empty means open with no declared parameters (the plug-in's own
@@ -187,7 +189,9 @@ impl BridgeSession {
                     total_time: config.total_time,
                     time_scale: config.time_scale,
                     frame_deadline: Duration::from_millis(FRAME_DEADLINE_MS),
-                    smart: false,
+                    // SmartFX at 8-bit is CPU (RenderSession only treats
+                    // smart+ARGB32f as GPU-capable), so Auto needs no runtime policy.
+                    smart: config.smart,
                     gpu_backend: aexcompat_broker::image_render::RenderGpuBackend::Auto,
                     gpu_runtime_policy: None,
                 }) {
@@ -341,6 +345,9 @@ struct AexBridgeFilter {
     /// config items are rebuilt from this on demand (`FilterConfigItem` is not
     /// `Sync`, so it cannot be stored in this `Send + Sync` plug-in).
     param_template: Vec<InteractiveParameter>,
+    /// True when the fixed AEX advertises SmartFX; the session opens on the smart
+    /// path (a SmartFX effect fails the classic path with PF_Err_BAD_CALLBACK_PARAM).
+    smart: bool,
 }
 
 impl AexBridgeFilter {
@@ -488,19 +495,20 @@ impl FilterPlugin for AexBridgeFilter {
         // Discover the fixed AEX's parameters once. Failure is non-fatal: the
         // plug-in still loads and renders with launch defaults (the render path
         // surfaces the real error).
-        let param_template = match discover_config() {
-            Ok(parameters) => parameters,
+        let (param_template, smart) = match discover_config() {
+            Ok(discovered) => discovered,
             Err(message) => {
                 tracing::warn!(
                     "AEX parameter discovery failed ({message}); rendering with launch defaults"
                 );
-                Vec::new()
+                (Vec::new(), false)
             }
         };
 
         Ok(Self {
             sessions: Mutex::new(HashMap::new()),
             param_template,
+            smart,
         })
     }
 
@@ -609,6 +617,7 @@ impl FilterPlugin for AexBridgeFilter {
                     time_step,
                     total_time,
                     time_scale,
+                    smart: self.smart,
                     parameters: exposed.defaults.clone(),
                 };
                 self.open_and_get_sender(effect_id, identity, config)
@@ -691,12 +700,20 @@ fn resolve_launch_env() -> AnyResult<(PathBuf, PathBuf, String)> {
 /// Discovers the fixed AEX's parameter set (spawns a `--l2-params-only` worker
 /// via the broker). The result is the launch baseline; exposed config items are
 /// derived from it by [`exposed_config`].
-fn discover_config() -> AnyResult<Vec<InteractiveParameter>> {
+fn discover_config() -> AnyResult<(Vec<InteractiveParameter>, bool)> {
     let (repository, plugin, plugin_sha256) = resolve_launch_env()?;
-    let (parameters, _diagnostics) =
+    let (parameters, diagnostics) =
         inspect_experimental_with_diagnostics(&repository, &plugin, &plugin_sha256)
             .map_err(|error| aviutl2::anyhow::anyhow!("parameter discovery failed: {error}"))?;
-    Ok(parameters)
+    // A SmartFX effect (PF_OutFlag2_SUPPORTS_SMART_RENDER = bit 10) must run on
+    // the smart session; the classic session rejects it with a callback error.
+    let smart = diagnostics
+        .get("advertised_out_flags2")
+        .and_then(|value| value.as_u64())
+        .unwrap_or(0)
+        & (1 << 10)
+        != 0;
+    Ok((parameters, smart))
 }
 
 /// The mappable parameters exposed as AviUtl2 controls: the config items, the
