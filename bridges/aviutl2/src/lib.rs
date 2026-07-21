@@ -20,12 +20,18 @@ use std::time::{Duration, Instant};
 
 use aviutl2::{
     AnyResult, AviUtl2Info,
-    filter::{FilterPlugin, FilterPluginFlags, FilterPluginTable, FilterProcVideo, RgbaPixel},
+    filter::{
+        FilterConfigCheckbox, FilterConfigColor, FilterConfigColorValue, FilterConfigItem,
+        FilterConfigTrack, FilterPlugin, FilterPluginFlags, FilterPluginTable, FilterProcVideo,
+        RgbaPixel,
+    },
     tracing,
 };
 use zerocopy::IntoBytes;
 
-use aexcompat_broker::image_render::RenderPixelFormat;
+use aexcompat_broker::image_render::{
+    InteractiveParameter, RenderPixelFormat, inspect_experimental_with_diagnostics,
+};
 use aexcompat_broker::render_session::{FrameStatus, RenderSession, SessionOpenRequest};
 
 /// Per-frame watchdog deadline handed to the session (protocol §7). A frame the
@@ -70,6 +76,11 @@ struct SessionConfig {
     time_step: i32,
     total_time: i32,
     time_scale: u32,
+    /// The declared parameter set (discovered defaults) used as the session's
+    /// launch baseline. Per-frame `render` messages override individual values.
+    /// Empty means open with no declared parameters (the plug-in's own
+    /// defaults), matching stage-1 behaviour.
+    parameters: Vec<InteractiveParameter>,
 }
 
 /// A single validated frame handed back to the AviUtl2 callback thread.
@@ -97,6 +108,11 @@ enum FrameReply {
 struct RenderReq {
     current_time: i32,
     rgba: Vec<u8>,
+    /// Per-frame parameter values (protocol §4.2.1). `None` renders with the
+    /// session's launch baseline. When present it fully replaces the baseline,
+    /// so it carries the whole declared set (unmapped slots keep their
+    /// discovered defaults).
+    parameters: Option<Vec<InteractiveParameter>>,
     reply: Sender<FrameReply>,
 }
 
@@ -144,11 +160,12 @@ impl BridgeSession {
         let join = std::thread::Builder::new()
             .name("aex-aviutl2-session".into())
             .spawn(move || {
+                let baseline = (!config.parameters.is_empty()).then_some(&config.parameters[..]);
                 let mut session = match RenderSession::open(SessionOpenRequest {
                     repository: &config.repository,
                     plugin_path: &config.plugin,
                     plugin_sha256: &config.plugin_sha256,
-                    parameters: None,
+                    parameters: baseline,
                     parameter_animation: None,
                     aux_manifest: None,
                     world_dump_dir: None,
@@ -193,7 +210,7 @@ impl BridgeSession {
                         frame_index,
                         req.current_time,
                         &req.rgba,
-                        None,
+                        req.parameters.as_deref(),
                     );
                     frame_index = frame_index.wrapping_add(1);
                     let reply = match outcome {
@@ -274,12 +291,18 @@ impl BridgeSession {
 /// with no lock held so concurrent effect instances render in parallel and a
 /// slow worker never stalls other AviUtl2 threads on the session map. A gone
 /// thread is reported as `SessionLost` so the caller reopens.
-fn render_on(tx: &Sender<RenderReq>, current_time: i32, rgba: Vec<u8>) -> FrameReply {
+fn render_on(
+    tx: &Sender<RenderReq>,
+    current_time: i32,
+    rgba: Vec<u8>,
+    parameters: Option<Vec<InteractiveParameter>>,
+) -> FrameReply {
     let (reply_tx, reply_rx) = channel();
     if tx
         .send(RenderReq {
             current_time,
             rgba,
+            parameters,
             reply: reply_tx,
         })
         .is_err()
@@ -307,6 +330,13 @@ impl Drop for BridgeSession {
 #[aviutl2::plugin(FilterPlugin)]
 struct AexBridgeFilter {
     sessions: Mutex<HashMap<i64, BridgeSession>>,
+    /// The fixed AEX's discovered parameter set (defaults), resolved once at
+    /// load. Cloned as each session's launch baseline and overlaid with the
+    /// object's config values per frame. Empty if discovery failed (the bridge
+    /// then renders with the plug-in's own defaults, as in stage 1). The exposed
+    /// config items are rebuilt from this on demand (`FilterConfigItem` is not
+    /// `Sync`, so it cannot be stored in this `Send + Sync` plug-in).
+    param_template: Vec<InteractiveParameter>,
 }
 
 impl AexBridgeFilter {
@@ -450,32 +480,46 @@ impl FilterPlugin for AexBridgeFilter {
             .event_format(aviutl2::logger::AviUtl2Formatter)
             .with_writer(aviutl2::logger::AviUtl2LogWriter)
             .try_init();
+
+        // Discover the fixed AEX's parameters once. Failure is non-fatal: the
+        // plug-in still loads and renders with launch defaults (the render path
+        // surfaces the real error).
+        let param_template = match discover_config() {
+            Ok(parameters) => parameters,
+            Err(message) => {
+                tracing::warn!(
+                    "AEX parameter discovery failed ({message}); rendering with launch defaults"
+                );
+                Vec::new()
+            }
+        };
+
         Ok(Self {
             sessions: Mutex::new(HashMap::new()),
+            param_template,
         })
     }
 
     fn plugin_info(&self) -> FilterPluginTable {
+        let config_items = exposed_config(&self.param_template).items;
         FilterPluginTable {
             name: "AEXCompat (AEX bridge)".to_string(),
             label: None,
             information: format!(
-                "Run After Effects AEX plug-ins out-of-process via AEXCompat / v{version} (stage 1)",
+                "Run After Effects AEX plug-ins out-of-process via AEXCompat / v{version}",
                 version = env!("CARGO_PKG_VERSION")
             ),
             flags: aviutl2::bitflag!(FilterPluginFlags {
                 video: true,
                 filter: true,
             }),
-            // Stage 1 carries no parameters; the AEX runs with its launch
-            // defaults. Parameter mapping is stage 2 (issue #269).
-            config_items: Vec::new(),
+            config_items,
         }
     }
 
     fn proc_video(
         &self,
-        _config: &[aviutl2::filter::FilterConfigItem],
+        config: &[FilterConfigItem],
         video: &mut FilterProcVideo,
     ) -> AnyResult<()> {
         let width = video.video_object.width;
@@ -535,6 +579,13 @@ impl FilterPlugin for AexBridgeFilter {
             time_scale,
         };
 
+        // Only the exposed (UI-controllable) parameters are sent to the worker;
+        // the rest stay at the AEX's own defaults (stage-1 behaviour). Feeding
+        // the full discovered set back — which includes kinds the interactive
+        // payload cannot carry, e.g. a popup reported as a degenerate `integer` —
+        // breaks the render.
+        let exposed = exposed_config(&self.param_template);
+
         // Reuse a live matching session; otherwise open one outside the map lock.
         // Neither the blocking worker round-trip below nor `open` holds the lock.
         // `serial` identifies this exact instance for a precise removal on loss.
@@ -554,13 +605,26 @@ impl FilterPlugin for AexBridgeFilter {
                     time_step,
                     total_time,
                     time_scale,
+                    parameters: exposed.defaults.clone(),
                 };
                 self.open_and_get_sender(effect_id, identity, config)
                     .map_err(|message| aviutl2::anyhow::anyhow!("{message}"))?
             }
         };
 
-        match render_on(&sender, current_time, rgba) {
+        // Overlay this object's config values onto the exposed defaults and send
+        // them per frame (protocol §4.2.1 fully replaces the launch baseline;
+        // unexposed slots stay at the AEX defaults). No exposed params => None,
+        // i.e. render with the launch baseline.
+        let parameters = if exposed.defaults.is_empty() {
+            None
+        } else {
+            let mut values = exposed.defaults;
+            apply_config_values(&mut values, &exposed.slots, config);
+            Some(values)
+        };
+
+        match render_on(&sender, current_time, rgba, parameters) {
             FrameReply::Rendered(frame) => {
                 // A filter object cannot change the image size (AviUtl2 filter
                 // contract). An expand/shrink-output effect (PF_OutFlag_I_*_BUFFER)
@@ -618,6 +682,176 @@ fn resolve_launch_env() -> AnyResult<(PathBuf, PathBuf, String)> {
     let plugin_sha256 = hex_lower(&Sha256::digest(&bytes));
 
     Ok((repository, plugin, plugin_sha256))
+}
+
+/// Discovers the fixed AEX's parameter set (spawns a `--l2-params-only` worker
+/// via the broker). The result is the launch baseline; exposed config items are
+/// derived from it by [`exposed_config`].
+fn discover_config() -> AnyResult<Vec<InteractiveParameter>> {
+    let (repository, plugin, plugin_sha256) = resolve_launch_env()?;
+    let (parameters, _diagnostics) =
+        inspect_experimental_with_diagnostics(&repository, &plugin, &plugin_sha256)
+            .map_err(|error| aviutl2::anyhow::anyhow!("parameter discovery failed: {error}"))?;
+    Ok(parameters)
+}
+
+/// The mappable parameters exposed as AviUtl2 controls: the config items, the
+/// AEX slot each drives, and the parameters themselves (a subset of the template).
+/// The three vectors are parallel and deterministic, so `plugin_info` (items),
+/// session open (defaults), and `proc_video` (slots + defaults) all agree.
+///
+/// Only exposed parameters are ever sent to the worker. The full discovered set
+/// includes kinds the interactive payload cannot carry (a popup, for instance,
+/// is reported as an `integer` with a degenerate range and is dropped here);
+/// feeding those back to the worker breaks the render, whereas an AEX renders
+/// fine with them left at its own defaults (stage-1 behaviour).
+struct ExposedParams {
+    items: Vec<FilterConfigItem>,
+    slots: Vec<u32>,
+    defaults: Vec<InteractiveParameter>,
+}
+
+fn exposed_config(template: &[InteractiveParameter]) -> ExposedParams {
+    let mut exposed = ExposedParams {
+        items: Vec::new(),
+        slots: Vec::new(),
+        defaults: Vec::new(),
+    };
+    for parameter in template {
+        // Skip parameters AE keeps hidden (PF_PUI_INVISIBLE / conditionally
+        // hidden), matching the harness (main.rs:4181): exposing a control for
+        // one, and sending edited values, would override a parameter the effect
+        // intends to keep private. It stays at the AEX default.
+        if !parameter.visible {
+            continue;
+        }
+        if let Some(item) = config_item_for(parameter) {
+            exposed.items.push(item);
+            exposed.slots.push(parameter.slot);
+            exposed.defaults.push(parameter.clone());
+        }
+    }
+    exposed
+}
+
+/// Maps one discovered AEX parameter to an AviUtl2 config item, or `None` for
+/// kinds not yet exposed (angle, point, layer, comp, button, custom, group
+/// markers, …), which keep their discovered default.
+///
+/// Discovery reports a parameter's *runtime* kind (`image_render.rs`
+/// `runtime_kind`), which collapses AE's slider/checkbox/popup (param types
+/// 1/4/7) all into `"integer"`. So a checkbox is recognised here as an integer
+/// spanning exactly 0..1 with no choices, not by a dedicated kind string.
+fn config_item_for(parameter: &InteractiveParameter) -> Option<FilterConfigItem> {
+    let name = parameter.name.clone();
+    match parameter.kind.as_str() {
+        "float" => {
+            let (min, max) = bounded_range(parameter)?;
+            Some(track(name, parameter.value, min, max, track_step(max - min)))
+        }
+        // "angle" is deferred to stage 2b: its value lives in `components[0]`
+        // (not `value`), it usually reports no numeric bounds (so a slider needs
+        // a fallback degree range), and multi-turn angles do not fit a clamped
+        // slider. Exposing it needs a fixture to verify; for now it stays at the
+        // AEX default.
+        "integer" => {
+            let (min, max) = bounded_range(parameter)?;
+            if min == 0.0 && max == 1.0 && parameter.choices.is_empty() {
+                // An AE checkbox arrives here as an integer 0..1; expose it as a
+                // checkbox rather than a two-tick slider.
+                Some(FilterConfigItem::Checkbox(FilterConfigCheckbox {
+                    name,
+                    value: parameter.value != 0.0,
+                }))
+            } else {
+                Some(track(name, parameter.value.round(), min, max, 1.0))
+            }
+        }
+        "color" => Some(FilterConfigItem::Color(FilterConfigColor {
+            name,
+            // InteractiveParameter.color is ARGB ([alpha, red, green, blue]);
+            // AviUtl2 wants 0x00RRGGBB.
+            value: FilterConfigColorValue(
+                ((parameter.color[1] as u32) << 16)
+                    | ((parameter.color[2] as u32) << 8)
+                    | (parameter.color[3] as u32),
+            ),
+        })),
+        _ => None,
+    }
+}
+
+/// A clamped AviUtl2 track (slider) config item.
+fn track(name: String, value: f64, min: f64, max: f64, step: f64) -> FilterConfigItem {
+    FilterConfigItem::Track(FilterConfigTrack {
+        name,
+        value: value.clamp(min, max),
+        range: min..=max,
+        step,
+        zero_display: None,
+        slider_ratio: 1.0,
+    })
+}
+
+/// A finite, strictly-increasing range for a numeric parameter, or `None` when
+/// the reported bounds are degenerate (the parameter then keeps its default,
+/// unexposed).
+fn bounded_range(parameter: &InteractiveParameter) -> Option<(f64, f64)> {
+    let (min, max) = (parameter.minimum, parameter.maximum);
+    (min.is_finite() && max.is_finite() && min < max).then_some((min, max))
+}
+
+/// AviUtl2's track `step` must be a power-of-ten unit (1.0 / 0.1 / 0.01 / 0.001
+/// per `filter2.h`); an arbitrary fraction is snapped by the host, distorting
+/// the slider (a 0.255 step over 0..255 rendered as a 0..1000 slider). Pick the
+/// largest such unit that still gives at least ~100 divisions over `span`.
+fn track_step(span: f64) -> f64 {
+    for step in [1.0, 0.1, 0.01] {
+        if span / step >= 100.0 {
+            return step;
+        }
+    }
+    0.001
+}
+
+/// Overlays the object's current config values onto `parameters`. `config` is
+/// the slice AviUtl2 hands `proc_video`, parallel to the declared config items
+/// and to `slots`, so each entry updates the parameter at the matching slot.
+fn apply_config_values(
+    parameters: &mut [InteractiveParameter],
+    slots: &[u32],
+    config: &[FilterConfigItem],
+) {
+    for (item, &slot) in config.iter().zip(slots) {
+        let Some(parameter) = parameters.iter_mut().find(|p| p.slot == slot) else {
+            continue;
+        };
+        match item {
+            // An integer track is rounded (the encoder rejects the whole payload
+            // on a fractional integer value); every other track drives `value`.
+            // (Angle is not exposed in stage 2a, so no components handling here.)
+            FilterConfigItem::Track(track) => {
+                if parameter.kind == "integer" {
+                    parameter.value = track.value.round();
+                } else {
+                    parameter.value = track.value;
+                }
+            }
+            FilterConfigItem::Checkbox(check) => {
+                parameter.value = if check.value { 1.0 } else { 0.0 }
+            }
+            FilterConfigItem::Color(color) => {
+                // color is ARGB ([alpha, red, green, blue]); update RGB, keep alpha.
+                let (r, g, b) = color.value.to_rgb();
+                parameter.color[1] = r;
+                parameter.color[2] = g;
+                parameter.color[3] = b;
+            }
+            // config_item_for emits only Track/Checkbox/Color, so no other
+            // variant is ever handed back.
+            _ => {}
+        }
+    }
 }
 
 /// Lowercase hex encoding matching the worker's sha256 form.
