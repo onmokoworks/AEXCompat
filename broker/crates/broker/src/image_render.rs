@@ -1546,12 +1546,18 @@ enum AudioWrapperOutcome {
     /// The length-1 audio session rendered and closed clean; this is the public
     /// report, satisfying the same contract the one-shot path asserts.
     Report(Value),
-    /// The session carried the render but a post-render step (output already
-    /// exists, write failure) failed; final, not a fallback.
+    /// The session carried the render but the render itself failed the way the
+    /// one-shot path also fails it (a per-span compatibility error, or a
+    /// post-render output/write failure). The one-shot `--render-audio` transport
+    /// returns Err for the same input, so this is final, not a fallback.
     Failure(io::Error),
-    /// The session infrastructure could not carry the render; the caller reruns
-    /// the one-shot `--render-audio` transport.
-    Fallback,
+    /// The session infrastructure could not carry the render (open failure,
+    /// worker crash or invalidation, malformed close). The string is the reason;
+    /// the automatic one-shot fallback is removed (#98 W4, #264), so the caller
+    /// turns this into an explicit fail-closed error rather than silently
+    /// rerunning the one-shot transport. The one-shot transport stays reachable
+    /// only via the AEXCOMPAT_DISABLE_RENDER_SESSION_WRAPPER override.
+    Fallback(String),
 }
 
 /// Renders a single audio buffer through a length-1 AudioRenderSession (§10),
@@ -1570,6 +1576,10 @@ fn render_audio_via_length_one_session(
     parameters: &[InteractiveParameter],
 ) -> AudioWrapperOutcome {
     use crate::render_session::{AudioRenderSession, AudioSessionOpenRequest, AudioSpanStatus};
+    // Test-only fault injection (debug builds only); a no-op in release.
+    if let Some(outcome) = forced_audio_session_fallback() {
+        return outcome;
+    }
     const SAMPLE_RATE: u32 = 44_100;
     let samples: Vec<f32> = input
         .chunks_exact(4)
@@ -1587,15 +1597,17 @@ fn render_audio_via_length_one_session(
         frame_deadline: Duration::from_millis(INTERACTIVE_RENDER_TIMEOUT_MS),
     }) {
         Ok(session) => session,
-        Err(_) => return AudioWrapperOutcome::Fallback,
+        Err(error) => {
+            return AudioWrapperOutcome::Fallback(format!("audio session open failed: {error}"));
+        }
     };
     let outcome = match session.render_span(0, &samples) {
         Ok(outcome) => outcome,
-        // Invalidation (crash, deadline, invariant): the one-shot transport may
-        // still carry it.
-        Err(_) => {
+        // Invalidation (worker crash, deadline, or a host-protection invariant).
+        Err(error) => {
+            let reason = format!("the audio session was invalidated: {error}");
             let _ = session.close();
-            return AudioWrapperOutcome::Fallback;
+            return AudioWrapperOutcome::Fallback(reason);
         }
     };
     let (output, output_start) = match outcome.status {
@@ -1604,18 +1616,25 @@ fn render_audio_via_length_one_session(
             output_start,
             ..
         } => (samples, output_start),
-        // A per-span compatibility error: let the one-shot path report it in
-        // its own terms rather than synthesizing a divergent report.
-        AudioSpanStatus::SpanError { .. } => {
+        // A per-span compatibility error: the one-shot `--render-audio` path
+        // returns Err for the same input (its worker exits non-zero and the
+        // report gate rejects a non-"render_completed" status), so this is a
+        // final compatibility failure, not a session-infrastructure fallback.
+        // Fail closed with the error the effect reported (#98 W4, #264).
+        AudioSpanStatus::SpanError { render_error } => {
             let _ = session.close();
-            return AudioWrapperOutcome::Fallback;
+            return AudioWrapperOutcome::Failure(invalid(format!(
+                "the audio render reported a compatibility error (audio_render_error {render_error})"
+            )));
         }
     };
     let close = session.close();
     if close.get("session_clean") != Some(&Value::Bool(true))
         || close.get("invalidated") != Some(&Value::Bool(false))
     {
-        return AudioWrapperOutcome::Fallback;
+        return AudioWrapperOutcome::Fallback(
+            "the audio session did not close cleanly".into(),
+        );
     }
     if output_path.exists() {
         return AudioWrapperOutcome::Failure(io::Error::new(
@@ -1649,7 +1668,9 @@ fn render_audio_via_length_one_session(
         .and_then(Value::as_object)
         .cloned()
     else {
-        return AudioWrapperOutcome::Fallback;
+        return AudioWrapperOutcome::Fallback(
+            "the audio session close carried no final report".into(),
+        );
     };
     // Override/add the fields the one-shot emit_audio_render_report exposes so
     // the default session path returns the same public JSON shape as the
@@ -1742,7 +1763,19 @@ pub fn render_experimental_audio(
         ) {
             AudioWrapperOutcome::Report(report) => return Ok(report),
             AudioWrapperOutcome::Failure(error) => return Err(error),
-            AudioWrapperOutcome::Fallback => {}
+            // Fail closed (#98 W4, #264): an audio-session infrastructure failure
+            // no longer silently falls back to the one-shot transport. Surface it
+            // as an explicit diagnostic. The one-shot transport stays reachable
+            // via the AEXCOMPAT_DISABLE_RENDER_SESSION_WRAPPER override, which
+            // bypasses the session attempt entirely.
+            AudioWrapperOutcome::Fallback(reason) => {
+                return Err(invalid(format!(
+                    "the resident audio render session could not carry this render ({reason}); \
+                     the automatic one-shot fallback is disabled. Diagnose the session failure, \
+                     or set {DISABLE_SESSION_WRAPPER_ENV}=1 to force the one-shot transport for \
+                     this render."
+                )));
+            }
         }
     }
 
@@ -5329,6 +5362,22 @@ fn forced_session_fallback() -> Option<SessionWrapperOutcome> {
 }
 #[cfg(not(debug_assertions))]
 fn forced_session_fallback() -> Option<SessionWrapperOutcome> {
+    None
+}
+
+/// The audio counterpart of `forced_session_fallback`, reading the same
+/// debug-only `FORCE_SESSION_FALLBACK_ENV` knob so a test can exercise the audio
+/// fail-closed caller arm. Absent from release builds.
+#[cfg(debug_assertions)]
+fn forced_audio_session_fallback() -> Option<AudioWrapperOutcome> {
+    std::env::var_os(FORCE_SESSION_FALLBACK_ENV).is_some().then(|| {
+        AudioWrapperOutcome::Fallback(
+            "forced session fallback (AEXCOMPAT_FORCE_SESSION_FALLBACK)".into(),
+        )
+    })
+}
+#[cfg(not(debug_assertions))]
+fn forced_audio_session_fallback() -> Option<AudioWrapperOutcome> {
     None
 }
 

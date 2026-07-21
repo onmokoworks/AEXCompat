@@ -1544,4 +1544,67 @@ mod windows_e2e {
         );
         let _ = std::fs::remove_dir_all(&scratch);
     }
+
+    /// Audio fail-closed fallback removal (#264, #98 W4): when the audio session
+    /// is attempted (escape hatch unset) but cannot carry the render, the render
+    /// must surface an explicit error instead of silently rerunning the one-shot
+    /// `--render-audio` transport. The fault-injection env forces the audio
+    /// session wrapper to report a Fallback without a real failure; the caller
+    /// must then error (naming the override) and write no output. On the pre-#264
+    /// code the forced Fallback fell through to a successful one-shot render.
+    ///
+    /// Debug-only: the fault-injection knob it drives is compiled out of release
+    /// builds (image_render.rs), so this test is gated to debug too.
+    #[cfg(debug_assertions)]
+    #[test]
+    fn audio_session_failure_fails_closed_without_silent_one_shot() {
+        let _env_guard = SESSION_ROUTE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let root = repository_root();
+        let worker = root.join("target/minihost-build/aex_render_worker.exe");
+        let aex = root.join("target/sdk-fixtures/sdk-backwards/SDK_Backwards.aex");
+        if !worker.is_file() || !aex.is_file() {
+            eprintln!(
+                "skipping audio fail-closed test: build aex_render_worker.exe and \
+                 SDK_Backwards.aex (tools/build-sdk-backwards.ps1) first"
+            );
+            return;
+        }
+        let sha = format!("{:x}", Sha256::digest(std::fs::read(&aex).unwrap()));
+        let scratch = std::env::temp_dir().join(format!(
+            "aexcompat-audio-failclosed-{}-{:032x}",
+            std::process::id(),
+            rand::random::<u128>()
+        ));
+        std::fs::create_dir_all(&scratch).unwrap();
+        let input_path = scratch.join("input.f32");
+        let samples: Vec<f32> = (0..256).map(|i| ((i as f32) * 0.05).sin() * 0.5).collect();
+        let mut input_bytes = Vec::with_capacity(samples.len() * 4);
+        for sample in &samples {
+            input_bytes.extend_from_slice(&sample.to_le_bytes());
+        }
+        std::fs::write(&input_path, &input_bytes).unwrap();
+
+        // Eligible audio render with the escape hatch unset, so the session is
+        // attempted; the fault injection forces it to report a Fallback.
+        unsafe { std::env::remove_var(DISABLE_SESSION_WRAPPER_ENV) };
+        unsafe { std::env::set_var(FORCE_SESSION_FALLBACK_ENV, "1") };
+        let output = scratch.join("out.f32");
+        let result = render_experimental_audio(&root, &aex, &sha, &input_path, &output, &[]);
+        unsafe { std::env::remove_var(FORCE_SESSION_FALLBACK_ENV) };
+
+        let error =
+            result.expect_err("a forced audio session fallback must fail closed, not fall back");
+        let message = error.to_string();
+        assert!(
+            message.contains(DISABLE_SESSION_WRAPPER_ENV),
+            "the fail-closed error must name the one-shot override; got: {message}"
+        );
+        assert!(
+            !output.exists(),
+            "a fail-closed audio render must not write an output file (a silent one-shot would)"
+        );
+        let _ = std::fs::remove_dir_all(&scratch);
+    }
 }
