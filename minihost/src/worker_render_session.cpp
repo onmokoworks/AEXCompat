@@ -1031,23 +1031,25 @@ RenderSessionOutcome run_render_session(
 // inside the per-frame FRAME pair, while the shared loop above owns the
 // hoisted SEQUENCE pair, transport, and fail-closed decisions. The GPU
 // backend is fixed at launch through the session command word's case_id.
-// Smart sessions carry no layer slots in v1.1 (the broker rejects the
-// combination at open), so the loop's frame_layers stay unused here.
+// Smart sessions carry the same static secondary layer slots as the classic
+// session (issue #294): the loop hands each frame its layers and
+// smart_render_once checks them out for the SmartFX render exactly as the
+// one-shot --smart-image-layer path does.
 SmartRenderSessionOutcome run_smart_render_session(
     EffectEntry entry, std::array<std::byte, kInSize>& input,
     std::array<std::byte, kOutSize>& output, const RequestedAssignments* requested,
     const std::string& case_id, int32_t max_width, int32_t max_height,
     int32_t time_step, int32_t total_time, uint32_t time_scale,
-    int32_t pixel_bytes) {
+    int32_t pixel_bytes, const std::vector<ExternalLayerInput>* external_layers) {
   SmartRenderSessionOutcome outcome;
   outcome.session = run_session_frame_loop(
       entry, input, output, max_width, max_height,
       // Smart sessions (v1.1) render at fixed dimensions; no output expansion.
       max_width, max_height, time_step, total_time,
-      time_scale, pixel_bytes, nullptr,
+      time_scale, pixel_bytes, external_layers,
       [&](int32_t current_time, const std::vector<unsigned char>& frame_rgba,
           std::vector<unsigned char>& captured,
-          const std::vector<ExternalLayerInput>*,
+          const std::vector<ExternalLayerInput>* frame_layers,
           const RequestedAssignments* frame_override,
           const SessionUiAction* frame_ui) {
         apply_session_ui_action(frame_ui);
@@ -1056,7 +1058,7 @@ SmartRenderSessionOutcome run_smart_render_session(
         const worker_runtime::smart_execution::Result frame_result = smart_render_once(
             entry, input, output, case_id, frame_override ? frame_override : requested,
             &frame_rgba, nullptr,
-            max_width, max_height, nullptr, current_time, time_step, total_time,
+            max_width, max_height, frame_layers, current_time, time_step, total_time,
             time_scale, pixel_bytes, &session_frame);
         outcome.last = frame_result;
         frame.width = frame_result.output_width;

@@ -14,9 +14,10 @@ mod windows_e2e {
         render_experimental_image_at_time_with_format_and_context,
         render_experimental_image_at_time_with_format_context_and_ui_action,
         render_experimental_image_at_time_with_format_context_ui_action_and_gpu_backend,
-        render_experimental_image_with_parameter_animation, AnimationInterpolation, AnimationTime,
+        render_experimental_image_with_parameter_animation,
+        render_experimental_image_with_timed_layers, AnimationInterpolation, AnimationTime,
         AnimationValue, InteractiveParameter, ParameterAnimation, ParameterAnimationKey,
-        RenderGpuBackend, RenderPixelFormat, RenderTiming, RenderUiAction,
+        RenderGpuBackend, RenderPixelFormat, RenderTiming, RenderUiAction, TimedLayerImage,
         DISABLE_SESSION_WRAPPER_ENV, RENDER_SESSION_WRAPPER_RENDERS,
     };
     // The fault-injection knob exists only in debug builds (image_render.rs), so
@@ -277,6 +278,142 @@ mod windows_e2e {
             "one-shot Argb32f Auto must record the GPU preflight attempt: {report_b}"
         );
 
+        let _ = std::fs::remove_dir_all(&scratch);
+    }
+
+    #[test]
+    fn smart_timed_multilayer_matches_the_one_shot_transport() {
+        // Smart sessions now carry the secondary-layer trailer (#294): a SmartFX
+        // effect that checks out three timed layers renders byte-identically on
+        // the length-1 session and the one-shot --smart-image16-layer route.
+        let _env_guard = SESSION_ROUTE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let root = repository_root();
+        let worker = root.join("target/minihost-build/aex_smart_worker.exe");
+        let aex = root.join(
+            "target/pf-smart-timed-multilayer-probe-build/Release/pf_smart_timed_multilayer_probe.aex",
+        );
+        if !worker.is_file() || !aex.is_file() {
+            eprintln!(
+                "skipping smart timed-multilayer A/B: build aex_smart_worker.exe and \
+                 pf_smart_timed_multilayer_probe.aex first"
+            );
+            return;
+        }
+        let sha = format!("{:x}", Sha256::digest(std::fs::read(&aex).unwrap()));
+        let scratch = std::env::temp_dir().join(format!(
+            "aexcompat-smart-timedlayer-{}-{:032x}",
+            std::process::id(),
+            rand::random::<u128>()
+        ));
+        std::fs::create_dir_all(&scratch).unwrap();
+        let input = scratch.join("input.png");
+        image::RgbaImage::from_fn(48, 32, |x, y| {
+            image::Rgba([(x * 4) as u8, (y * 6) as u8, (x + y) as u8, 255])
+        })
+        .save(&input)
+        .unwrap();
+        // Three secondary layers at slot 1, one per time the probe checks out
+        // (comp times 6/8, 1/3, 5/4). Distinct pixels so the composite is not a
+        // vacuous match.
+        let make_layer = |name: &str, seed: u8| {
+            let path = scratch.join(name);
+            image::RgbaImage::from_fn(48, 32, |x, y| {
+                image::Rgba([
+                    (x as u8).wrapping_add(seed),
+                    (y as u8).wrapping_mul(2).wrapping_add(seed),
+                    seed,
+                    255,
+                ])
+            })
+            .save(&path)
+            .unwrap();
+            path
+        };
+        let timed_layers = vec![
+            TimedLayerImage {
+                slot: 1,
+                time: AnimationTime { value: 6, scale: 8 },
+                image_path: make_layer("layer0.png", 10),
+            },
+            TimedLayerImage {
+                slot: 1,
+                time: AnimationTime { value: 1, scale: 3 },
+                image_path: make_layer("layer1.png", 40),
+            },
+            TimedLayerImage {
+                slot: 1,
+                time: AnimationTime { value: 5, scale: 4 },
+                image_path: make_layer("layer2.png", 70),
+            },
+        ];
+        // Declare slot 1 as a layer input (a null-path layer parameter names
+        // the slot without contributing a static secondary), so the three timed
+        // layers are the only secondaries the probe checks out.
+        let layer_decl: InteractiveParameter = serde_json::from_value(serde_json::json!({
+            "slot": 1, "name": "layer", "kind": "layer",
+            "minimum": 0.0, "maximum": 0.0, "value": 0.0,
+            "choices": [], "color": [0, 0, 0, 0], "components": [0.0, 0.0, 0.0],
+            "component_count": 0, "layer_path": null,
+            "enabled": true, "visible": true, "supervised": false,
+        }))
+        .expect("layer declaration");
+        let params = vec![layer_decl];
+        let timing = RenderTiming {
+            current_time: 0,
+            time_step: 1,
+            total_time: 300,
+            time_scale: 30,
+        };
+        let render = |output: &Path| {
+            render_experimental_image_with_timed_layers(
+                &root,
+                &aex,
+                &sha,
+                &input,
+                output,
+                &params,
+                &timed_layers,
+                timing,
+                true,
+                RenderPixelFormat::Argb16,
+            )
+        };
+
+        // Run A: default routing carries the smart layered render on the session.
+        unsafe { std::env::remove_var(DISABLE_SESSION_WRAPPER_ENV) };
+        let before = RENDER_SESSION_WRAPPER_RENDERS.load(Ordering::SeqCst);
+        let out_a = scratch.join("a.png");
+        let report_a = render(&out_a).expect("session-route smart timed-multilayer render");
+        assert!(
+            RENDER_SESSION_WRAPPER_RENDERS.load(Ordering::SeqCst) > before,
+            "the smart timed-multilayer render must be carried by the session"
+        );
+
+        // Run B: escape hatch forces the one-shot --smart-image16-layer transport.
+        unsafe { std::env::set_var(DISABLE_SESSION_WRAPPER_ENV, "1") };
+        let out_b = scratch.join("b.png");
+        let report_b = render(&out_b);
+        unsafe { std::env::remove_var(DISABLE_SESSION_WRAPPER_ENV) };
+        let report_b = report_b.expect("one-shot smart timed-multilayer render");
+
+        assert_eq!(
+            report_a.get("output_sha256"),
+            report_b.get("output_sha256"),
+            "the smart timed-multilayer output must match between the routes"
+        );
+        assert!(
+            report_a
+                .get("output_sha256")
+                .is_some_and(|value| !value.is_null()),
+            "the session render must report an output_sha256: {report_a}"
+        );
+        assert_eq!(
+            std::fs::read(&out_a).unwrap(),
+            std::fs::read(&out_b).unwrap(),
+            "the smart timed-multilayer PNG differs between the routes"
+        );
         let _ = std::fs::remove_dir_all(&scratch);
     }
 
