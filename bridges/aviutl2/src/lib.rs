@@ -11,7 +11,7 @@
 //! parameters. See `docs/AVIUTL2_BRIDGE_2026-07-21.md`.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Sender, channel};
@@ -20,10 +20,11 @@ use std::time::{Duration, Instant};
 
 use aviutl2::{
     AnyResult, AviUtl2Info,
+    common::FileFilter,
     filter::{
-        FilterConfigCheckbox, FilterConfigColor, FilterConfigColorValue, FilterConfigItem,
-        FilterConfigSelect, FilterConfigSelectItem, FilterConfigTrack, FilterPlugin,
-        FilterPluginFlags, FilterPluginTable, FilterProcVideo, RgbaPixel,
+        FilterConfigCheckbox, FilterConfigColor, FilterConfigColorValue, FilterConfigFile,
+        FilterConfigItem, FilterConfigSelect, FilterConfigSelectItem, FilterConfigTrack,
+        FilterPlugin, FilterPluginFlags, FilterPluginTable, FilterProcVideo, RgbaPixel,
     },
     tracing,
 };
@@ -61,8 +62,9 @@ static SESSION_SERIAL: AtomicU64 = AtomicU64::new(0);
 
 /// Environment variable naming the AEX to load (stage 1 fixed plug-in).
 const ENV_PLUGIN: &str = "AEXCOMPAT_AVIUTL2_PLUGIN";
-/// Environment variable naming the repository root holding the built worker at
-/// `target/minihost-build/aex_render_worker.exe`.
+/// Environment variable naming the repository root holding the built workers at
+/// `target/minihost-build/` — `aex_render_worker.exe` for a classic AEX and
+/// `aex_smart_worker.exe` for a SmartFX AEX.
 const ENV_REPOSITORY: &str = "AEXCOMPAT_AVIUTL2_REPOSITORY";
 
 /// The immutable launch configuration for one resident session, resolved once
@@ -138,8 +140,12 @@ struct BridgeSession {
 
 /// The launch-fixed identity of a session, used to detect when a live session
 /// no longer matches the object and must be reopened.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 struct SessionIdentity {
+    /// The selected AEX's sha256; a different AEX (runtime file switch) reopens.
+    plugin_sha256: String,
+    /// Whether this identity renders on the smart path.
+    smart: bool,
     width: u32,
     height: u32,
     time_step: i32,
@@ -150,6 +156,8 @@ struct SessionIdentity {
 impl BridgeSession {
     fn open(config: SessionConfig) -> Result<BridgeSession, String> {
         let identity = SessionIdentity {
+            plugin_sha256: config.plugin_sha256.clone(),
+            smart: config.smart,
             width: config.width,
             height: config.height,
             time_step: config.time_step,
@@ -335,6 +343,9 @@ impl Drop for BridgeSession {
     }
 }
 
+/// AEX path → (mtime, len, sha256): the [`AexBridgeFilter::sha_for`] cache.
+type ShaCache = HashMap<PathBuf, (Option<std::time::SystemTime>, u64, String)>;
+
 #[aviutl2::plugin(FilterPlugin)]
 struct AexBridgeFilter {
     sessions: Mutex<HashMap<i64, BridgeSession>>,
@@ -345,9 +356,29 @@ struct AexBridgeFilter {
     /// config items are rebuilt from this on demand (`FilterConfigItem` is not
     /// `Sync`, so it cannot be stored in this `Send + Sync` plug-in).
     param_template: Vec<InteractiveParameter>,
-    /// True when the fixed AEX advertises SmartFX; the session opens on the smart
-    /// path (a SmartFX effect fails the classic path with PF_Err_BAD_CALLBACK_PARAM).
+    /// True when the load-time env AEX advertises SmartFX; the session opens on
+    /// the smart path (a SmartFX effect fails the classic path with
+    /// PF_Err_BAD_CALLBACK_PARAM).
     smart: bool,
+    /// The load-time env AEX path, if set. When the "AEX" file control selects a
+    /// different path the bridge switches to it at runtime; its parameters are
+    /// not exposed as controls (AviUtl2 config is static), so it renders at the
+    /// AEX defaults, and the env AEX's controls apply only when the control is
+    /// left empty / equal to it.
+    env_plugin: Option<PathBuf>,
+    /// The load-time env AEX's sha256 (lowercase hex), or `None` when no env AEX
+    /// is set or discovery failed. `is_default` compares against this by content
+    /// rather than by path, so re-selecting the same file through AviUtl2's dialog
+    /// (which may re-case or normalize the path) still exposes the env AEX's
+    /// parameter controls' values instead of silently dropping them.
+    env_sha: Option<String>,
+    /// Cache of AEX sha256 (lowercase hex) → advertises-SmartFX, so switching to
+    /// a runtime-selected AEX detects its render path once, not per reopen.
+    smart_cache: Mutex<HashMap<String, bool>>,
+    /// Cache of AEX path → (mtime, len, sha256), so `resolve_aex` does not re-read
+    /// and re-hash a multi-MB AEX on every frame. A rebuild (mtime/len change)
+    /// invalidates the entry, so a switched-in or rebuilt AEX is still detected.
+    sha_cache: Mutex<ShaCache>,
 }
 
 impl AexBridgeFilter {
@@ -360,7 +391,7 @@ impl AexBridgeFilter {
     fn existing_sender(
         &self,
         effect_id: i64,
-        identity: SessionIdentity,
+        identity: &SessionIdentity,
     ) -> Result<Option<(Sender<RenderReq>, u64)>, String> {
         let mut evicted: Option<BridgeSession> = None;
         let result;
@@ -370,7 +401,7 @@ impl AexBridgeFilter {
                 .lock()
                 .map_err(|_| "session map poisoned".to_string())?;
             match sessions.get_mut(&effect_id) {
-                Some(session) if session.identity == identity => {
+                Some(session) if &session.identity == identity => {
                     session.last_used = Instant::now();
                     result = session.sender().map(|tx| (tx, session.serial));
                 }
@@ -394,7 +425,7 @@ impl AexBridgeFilter {
     fn open_and_get_sender(
         &self,
         effect_id: i64,
-        identity: SessionIdentity,
+        identity: &SessionIdentity,
         config: SessionConfig,
     ) -> Result<(Sender<RenderReq>, u64), String> {
         let opened = BridgeSession::open(config)?;
@@ -424,7 +455,7 @@ impl AexBridgeFilter {
 
             match sessions
                 .get(&effect_id)
-                .filter(|session| session.identity == identity)
+                .filter(|session| &session.identity == identity)
                 .and_then(|session| session.sender().map(|tx| (tx, session.serial)))
             {
                 // Lost the open race; keep the installed session, discard ours.
@@ -474,6 +505,110 @@ impl AexBridgeFilter {
         };
         drop(removed);
     }
+
+    /// Resolves which AEX to render: the "AEX" file control (config item 0)
+    /// overrides the env default, letting the operator switch AEX at runtime.
+    fn resolve_aex(&self, config: &[FilterConfigItem]) -> Result<ResolvedAex, String> {
+        let repository = PathBuf::from(std::env::var_os(ENV_REPOSITORY).ok_or_else(|| {
+            format!("set {ENV_REPOSITORY} to the repo root holding the built workers")
+        })?);
+        let override_path = config.iter().find_map(|item| match item {
+            FilterConfigItem::File(file) => {
+                let trimmed = file.value.trim();
+                (!trimmed.is_empty()).then(|| PathBuf::from(trimmed))
+            }
+            _ => None,
+        });
+        let plugin = match override_path {
+            Some(path) => path,
+            None => self.env_plugin.clone().ok_or_else(|| {
+                format!("select an AEX (the \"AEX\" control) or set {ENV_PLUGIN}")
+            })?,
+        };
+        let sha = self.sha_for(&plugin)?;
+        // Content-based: a re-cased/normalized re-selection of the env AEX still
+        // matches, so its parameter controls' values keep applying.
+        let is_default = self.env_sha.as_deref() == Some(sha.as_str());
+        let smart = if is_default {
+            self.smart
+        } else {
+            self.smart_for(&repository, &plugin, &sha)
+        };
+        Ok(ResolvedAex {
+            repository,
+            plugin,
+            sha,
+            smart,
+            is_default,
+        })
+    }
+
+    /// The AEX's sha256 (lowercase hex), cached by path + (mtime, len) so a frame
+    /// does not re-read and re-hash a multi-MB AEX every time. A rebuild changes
+    /// mtime/len and invalidates the entry, so a rebuilt AEX is still detected.
+    fn sha_for(&self, plugin: &Path) -> Result<String, String> {
+        use sha2::{Digest, Sha256};
+        let metadata = std::fs::metadata(plugin)
+            .map_err(|error| format!("cannot stat AEX {plugin:?}: {error}"))?;
+        let len = metadata.len();
+        // On Windows (the only `.auf2` target) NTFS always reports mtime, so
+        // (mtime, len) catches every rebuild. If mtime is unavailable the entry
+        // degrades to len-only keying, which a same-length rebuild could evade;
+        // that path does not occur on the supported platform.
+        let mtime = metadata.modified().ok();
+        if let Ok(cache) = self.sha_cache.lock()
+            && let Some((cached_mtime, cached_len, cached_sha)) = cache.get(plugin)
+            && *cached_mtime == mtime
+            && *cached_len == len
+        {
+            return Ok(cached_sha.clone());
+        }
+        let bytes = std::fs::read(plugin)
+            .map_err(|error| format!("cannot read AEX {plugin:?}: {error}"))?;
+        let sha = hex_lower(&Sha256::digest(&bytes));
+        if let Ok(mut cache) = self.sha_cache.lock() {
+            cache.insert(plugin.to_path_buf(), (mtime, len, sha.clone()));
+        }
+        Ok(sha)
+    }
+
+    /// Whether an AEX advertises SmartFX, discovered once per distinct AEX and
+    /// cached by sha so a runtime switch does not re-inspect on every reopen.
+    fn smart_for(&self, repository: &Path, plugin: &Path, sha: &str) -> bool {
+        if let Ok(cache) = self.smart_cache.lock()
+            && let Some(&cached) = cache.get(sha)
+        {
+            return cached;
+        }
+        // PF_OutFlag2_SUPPORTS_SMART_RENDER = bit 10. Default classic on any
+        // discovery failure; the render then surfaces the real error per frame.
+        let smart = inspect_experimental_with_diagnostics(repository, plugin, sha)
+            .ok()
+            .map(|(_, diagnostics)| {
+                diagnostics
+                    .get("advertised_out_flags2")
+                    .and_then(|value| value.as_u64())
+                    .unwrap_or(0)
+                    & (1 << 10)
+                    != 0
+            })
+            .unwrap_or(false);
+        if let Ok(mut cache) = self.smart_cache.lock() {
+            cache.insert(sha.to_string(), smart);
+        }
+        smart
+    }
+}
+
+/// The AEX to render for a frame, resolved from the file control or env default.
+struct ResolvedAex {
+    repository: PathBuf,
+    plugin: PathBuf,
+    sha: String,
+    smart: bool,
+    /// True when this is the load-time env AEX, whose discovered parameters are
+    /// exposed as controls (a runtime-selected AEX renders at its own defaults).
+    is_default: bool,
 }
 
 impl FilterPlugin for AexBridgeFilter {
@@ -495,13 +630,14 @@ impl FilterPlugin for AexBridgeFilter {
         // Discover the fixed AEX's parameters once. Failure is non-fatal: the
         // plug-in still loads and renders with launch defaults (the render path
         // surfaces the real error).
-        let (param_template, smart) = match discover_config() {
-            Ok(discovered) => discovered,
+        let env_plugin = std::env::var_os(ENV_PLUGIN).map(PathBuf::from);
+        let (param_template, smart, env_sha) = match discover_config() {
+            Ok((parameters, smart, sha)) => (parameters, smart, Some(sha)),
             Err(message) => {
                 tracing::warn!(
                     "AEX parameter discovery failed ({message}); rendering with launch defaults"
                 );
-                (Vec::new(), false)
+                (Vec::new(), false, None)
             }
         };
 
@@ -509,11 +645,36 @@ impl FilterPlugin for AexBridgeFilter {
             sessions: Mutex::new(HashMap::new()),
             param_template,
             smart,
+            env_plugin,
+            env_sha,
+            smart_cache: Mutex::new(HashMap::new()),
+            sha_cache: Mutex::new(HashMap::new()),
         })
     }
 
     fn plugin_info(&self) -> FilterPluginTable {
-        let config_items = exposed_config(&self.param_template).items;
+        // First control: pick the AEX at runtime. Empty means "use the env AEX",
+        // whose discovered parameters follow as controls; selecting a different
+        // AEX switches to it live and renders it at its own defaults.
+        let mut config_items = vec![FilterConfigItem::File(FilterConfigFile {
+            name: "AEX".to_string(),
+            value: self
+                .env_plugin
+                .as_ref()
+                .map(|path| path.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+            filters: vec![
+                FileFilter {
+                    name: "After Effects plug-in".to_string(),
+                    extensions: vec!["aex".to_string()],
+                },
+                FileFilter {
+                    name: "All files".to_string(),
+                    extensions: vec![],
+                },
+            ],
+        })];
+        config_items.extend(exposed_config(&self.param_template).items);
         FilterPluginTable {
             name: "AEXCompat (AEX bridge)".to_string(),
             label: None,
@@ -583,7 +744,15 @@ impl FilterPlugin for AexBridgeFilter {
         video.get_image_data(&mut pixels);
         let rgba = pixels.as_bytes().to_vec();
 
+        // Resolve the AEX: the "AEX" file control (config[0]) overrides the env
+        // default at runtime; a different AEX reopens (identity includes its sha).
+        let aex = self
+            .resolve_aex(config)
+            .map_err(|message| aviutl2::anyhow::anyhow!("{message}"))?;
+
         let identity = SessionIdentity {
+            plugin_sha256: aex.sha.clone(),
+            smart: aex.smart,
             width,
             height,
             time_step,
@@ -591,49 +760,54 @@ impl FilterPlugin for AexBridgeFilter {
             time_scale,
         };
 
-        // Only the exposed (UI-controllable) parameters are sent to the worker;
-        // the rest stay at the AEX's own defaults (stage-1 behaviour). Feeding
-        // the full discovered set back — which includes kinds the interactive
-        // payload cannot carry, e.g. a popup reported as a degenerate `integer` —
-        // breaks the render.
-        let exposed = exposed_config(&self.param_template);
+        // The env AEX's discovered controls apply only when it is the selected
+        // AEX; a runtime-selected AEX renders at its own defaults (AviUtl2 config
+        // is static, so its parameters cannot be exposed as controls). Only the
+        // exposed (UI-controllable) parameters are ever sent.
+        let exposed = if aex.is_default {
+            exposed_config(&self.param_template)
+        } else {
+            ExposedParams {
+                items: Vec::new(),
+                slots: Vec::new(),
+                defaults: Vec::new(),
+            }
+        };
 
         // Reuse a live matching session; otherwise open one outside the map lock.
         // Neither the blocking worker round-trip below nor `open` holds the lock.
         // `serial` identifies this exact instance for a precise removal on loss.
         let (sender, serial) = match self
-            .existing_sender(effect_id, identity)
+            .existing_sender(effect_id, &identity)
             .map_err(|message| aviutl2::anyhow::anyhow!("{message}"))?
         {
             Some(pair) => pair,
             None => {
-                let (repository, plugin, plugin_sha256) = resolve_launch_env()?;
-                let config = SessionConfig {
-                    repository,
-                    plugin,
-                    plugin_sha256,
+                let session_config = SessionConfig {
+                    repository: aex.repository.clone(),
+                    plugin: aex.plugin.clone(),
+                    plugin_sha256: aex.sha.clone(),
                     width,
                     height,
                     time_step,
                     total_time,
                     time_scale,
-                    smart: self.smart,
+                    smart: aex.smart,
                     parameters: exposed.defaults.clone(),
                 };
-                self.open_and_get_sender(effect_id, identity, config)
+                self.open_and_get_sender(effect_id, &identity, session_config)
                     .map_err(|message| aviutl2::anyhow::anyhow!("{message}"))?
             }
         };
 
         // Overlay this object's config values onto the exposed defaults and send
-        // them per frame (protocol §4.2.1 fully replaces the launch baseline;
-        // unexposed slots stay at the AEX defaults). No exposed params => None,
-        // i.e. render with the launch baseline.
+        // them per frame. The parameter controls follow the "AEX" file control at
+        // index 0, so skip it. No exposed params => None (launch baseline).
         let parameters = if exposed.defaults.is_empty() {
             None
         } else {
             let mut values = exposed.defaults;
-            apply_config_values(&mut values, &exposed.slots, config);
+            apply_config_values(&mut values, &exposed.slots, config.get(1..).unwrap_or(&[]));
             Some(values)
         };
 
@@ -700,7 +874,7 @@ fn resolve_launch_env() -> AnyResult<(PathBuf, PathBuf, String)> {
 /// Discovers the fixed AEX's parameter set (spawns a `--l2-params-only` worker
 /// via the broker). The result is the launch baseline; exposed config items are
 /// derived from it by [`exposed_config`].
-fn discover_config() -> AnyResult<(Vec<InteractiveParameter>, bool)> {
+fn discover_config() -> AnyResult<(Vec<InteractiveParameter>, bool, String)> {
     let (repository, plugin, plugin_sha256) = resolve_launch_env()?;
     let (parameters, diagnostics) =
         inspect_experimental_with_diagnostics(&repository, &plugin, &plugin_sha256)
@@ -713,7 +887,7 @@ fn discover_config() -> AnyResult<(Vec<InteractiveParameter>, bool)> {
         .unwrap_or(0)
         & (1 << 10)
         != 0;
-    Ok((parameters, smart))
+    Ok((parameters, smart, plugin_sha256))
 }
 
 /// The mappable parameters exposed as AviUtl2 controls: the config items, the

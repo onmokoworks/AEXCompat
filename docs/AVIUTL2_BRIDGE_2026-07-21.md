@@ -436,3 +436,26 @@ RenderSession を直に叩くので、これを配線した:
 検証 (repro, ntsc-rs-ae.aex): SmartFX=true 検出、86 params discovery、Random seed を
 変えて 2 フレーム描画 (frame0 [1,2,5] / frame1 [10,14,12] = seed でノイズが変わる)。
 classic では両フレーム 516 だったのが smart で描画成功。実機は AviUtl2 で確認。
+
+## 2026-07-22 段階4: 実行中の AEX 切替 (File 設定項目)
+
+要件 (ユーザー): 環境変数指定は「固定」扱い。**AviUtl2 を再起動せず実行中に AEX を
+差し替えられる**べき。AviUtl2 は設定項目をロード時に一度だけ読む (静的 config) ので、
+実行中選択された AEX のパラメーターは個別コントロールにはできない (段階2 のマッピングは
+ロード時 discovery した env AEX にのみ効く)。設計:
+
+- **File 設定項目 "AEX" を config[0] に前置**。空 = env AEX (パラメーターコントロール付き)。
+  別の .aex を選ぶとその AEX にライブ切替、そちらは自前の既定値で描画 (パラメーター非公開)。
+- `resolve_aex(config)`: File 値があれば override、なければ env_plugin。sha を計算し、
+  `is_default = env_sha == sha` (**content 比較**。ファイルダイアログでパスが再正規化されても
+  env AEX のコントロール値が効き続ける)。smart は is_default なら load 時の値、別 AEX なら
+  `smart_for` (bit 10 を sha キャッシュ付きで inspect)。
+- **SessionIdentity に plugin_sha256 + smart を追加**。AEX を切替えると sha が変わり identity
+  不一致 → 既存セッションを evict して新 AEX で reopen。effect インスタンス単位で分離。
+- **sha_for**: path + (mtime, len) で sha をキャッシュ。毎フレーム multi-MB の read+hash を
+  避ける (export の数千フレームで効く)。rebuild は mtime/len 変化で無効化 → 固定 AEX の
+  再ビルドも検出して reopen。Windows (`.auf2` 唯一の対象) は NTFS で mtime 常時取得可。
+
+ローカルレビュー (2 巡): P2×2 を指摘・修正。(1) 毎フレーム read+hash → sha_for キャッシュ化。
+(2) is_default のパス比較 → env_sha content 比較 (パス正規化でコントロール値が無効化される
+サイレント不具合の回避)。再レビューで両者解消・新規欠陥なしを確認。実機は AviUtl2 で確認。
