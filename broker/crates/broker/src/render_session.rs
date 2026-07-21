@@ -416,15 +416,22 @@ impl SessionGeometry {
 }
 
 /// Whether a resident classic session can structurally represent this render:
-/// its uniform primary-sized input/layer slots plus the packed output slot must
-/// fit under the aggregate section cap `SECTION_HARD_CAP_BYTES`. This is a
+/// its uniform primary-sized input/layer slots plus the output slot must fit
+/// under the aggregate section cap `SECTION_HARD_CAP_BYTES`. This is a
 /// session-transport limit (all slots are sized to the primary input), not a
 /// compatibility limit — the one-shot layered path streams each layer to its own
 /// file with no aggregate bound — so the length-1 wrapper keeps a render that
 /// exceeds it on the one-shot path (#98 W4, #264) instead of fail-closing it.
-/// `layer_count` is the total secondary + timed layer slot count. The output
-/// slot is sized to the render dimensions (an expand grows it in place later,
-/// #262), matching `RenderSession::open`.
+/// `layer_count` is the total secondary + timed layer slot count.
+///
+/// The output slot is bounded against the LARGEST output an in-place expand
+/// could grow it to (`MAX_RESIZE_DIMENSION` per axis, #262), not just the launch
+/// output. Whether and how far an effect expands is only known at FRAME_SETUP,
+/// so an eligible render must be able to survive a worst-case expand without
+/// `grow_output_capacity` hitting the same section cap and fail-closing; the
+/// one-shot path validates only the final output (`MAX_INTERNAL_IMAGE_BYTES`)
+/// with no aggregate cap, so it can still carry those. This worst-case bound is
+/// >= the launch-time section, so it also covers the launch check.
 pub fn classic_session_section_fits(
     width: u32,
     height: u32,
@@ -434,8 +441,10 @@ pub fn classic_session_section_fits(
     let geometry = SessionGeometry {
         width,
         height,
-        output_capacity_width: width,
-        output_capacity_height: height,
+        // Worst-case expanded output: the section must fit even if the effect
+        // grows the output slot to the resize bound mid-session (#262).
+        output_capacity_width: MAX_RESIZE_DIMENSION,
+        output_capacity_height: MAX_RESIZE_DIMENSION,
         pixel_format,
         layer_slot_count: layer_count,
     };
@@ -2928,7 +2937,7 @@ mod tests {
 
     #[test]
     fn classic_session_section_fits_bounds_the_aggregate() {
-        // A modest render with a few layers fits comfortably.
+        // A modest render fits even against the worst-case expanded output.
         assert!(classic_session_section_fits(
             64,
             48,
@@ -2936,14 +2945,24 @@ mod tests {
             3
         ));
         // Each layer slot is sized to the primary input, so many full-resolution
-        // layers overrun the 1 GiB aggregate section cap even though every
-        // individual layer fits the primary slot. 15 layers + input + a 32f
-        // output slot at 4096x4096 exceed SECTION_HARD_CAP_BYTES.
+        // layers overrun the 1 GiB aggregate cap even at launch dimensions.
         assert!(!classic_session_section_fits(
             4096,
             4096,
             RenderPixelFormat::Argb32f,
             15
+        ));
+        // The grow-capability case (#264): 2048x2048 32f with 48 layers fits the
+        // section at its LAUNCH output (16 MiB input + 64 MiB output + 48*16 MiB
+        // layers ~= 848 MiB), but an in-place expand to 4096x4096 (256 MiB
+        // output) pushes it to ~1040 MiB > 1 GiB. The bound uses the worst-case
+        // expanded output, so this is correctly excluded (routed to one-shot)
+        // rather than fail-closing later when grow_output_capacity hits the cap.
+        assert!(!classic_session_section_fits(
+            2048,
+            2048,
+            RenderPixelFormat::Argb32f,
+            48
         ));
     }
 
