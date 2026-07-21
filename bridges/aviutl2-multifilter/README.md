@@ -68,13 +68,23 @@ TOML の `dir`(+`dirs`) / `repository` を上書きする (env > TOML)。config 
 AE の全エフェクトをそのまま AviUtl2 のキーフレーム可能フィルタとして使える。effect でない
 `.aex` (Format/codec 等) は discovery に失敗して自動的にスキップされる。
 
-### discovery キャッシュ
+### discovery キャッシュ / バックグラウンド discovery
 
 各 AEX の discovery (パラメーター取得) はロード時に worker を起動して行うため、AE の全
-エフェクト (数百) を毎回起動時に discovery すると非常に遅い。結果を
-`%APPDATA%\aexcompat-multifilter\discovery-cache.json` に (mtime+len キーで) キャッシュし、
-2 回目以降の起動は再 discovery を省く。**初回のみ低速** (数分)。cache miss は並列に discovery する。
+エフェクト (数百) を毎回起動時に discovery すると数分かかる。**起動をブロックしないため、
+discovery はバックグラウンドスレッドで行う:**
 
-- AEX を差し替えた・追加した場合は mtime/len 変化で自動的に再 discovery される。
-- 稀に一時的な失敗 (負荷下のタイムアウト等) で effect が誤って除外されキャッシュされることがある。
-  その場合は該当 AEX を touch するか **`discovery-cache.json` を削除**すれば再 discovery される。
+- `RegisterPlugin` は**キャッシュ済み (discovery 成功済み) の効果を即座に登録して即リターン**
+  する。起動はブロックされない。
+- 未 discovery / 変更された AEX は**別スレッドで低並列に全部 discovery** し、結果を
+  `%APPDATA%\aexcompat-multifilter\discovery-cache.json` に (mtime+len キーで) 書く。
+- **新しく discovery された効果は次回の AviUtl2 起動時にキャッシュから登録されて出る。**
+  初回 (や AEX 追加後) は該当フィルタがその起動では出ず、次の起動で出る。
+
+つまり: 初回起動 → 即座に使える (バックグラウンドで数分かけて discovery) → 2 回目起動 → 全効果が
+出て高速。AEX を差し替え・追加すると mtime/len 変化で再 discovery され、次回起動で反映される。
+
+- discovery は結果を全てキャッシュする (effect でない `.aex` = Format/codec 等の negative も)。
+  低並列なので負荷下の偽タイムアウトは起きにくいが、稀に一時的失敗で effect が誤って除外・
+  キャッシュされることがある。その場合は該当 AEX を touch するか
+  **`discovery-cache.json` を削除**すれば再 discovery される。

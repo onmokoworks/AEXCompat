@@ -20,7 +20,7 @@ use std::collections::HashMap;
 use std::ffi::c_void;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{Sender, channel};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -110,6 +110,16 @@ pub extern "C" fn InitializePlugin(version: u32) -> bool {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn UninitializePlugin() {
+    // Stop the background discovery thread (if still warming the cache) and join
+    // it, so it does not outlive the plugin or leave an L2 worker orphaned. The
+    // flag makes its work-steal loop exit after the current in-flight worker, so
+    // the join is bounded by one worker deadline.
+    DISCOVERY_SHUTDOWN.store(true, Ordering::Relaxed);
+    let discovery = DISCOVERY_THREAD.lock().ok().and_then(|mut slot| slot.take());
+    if let Some(handle) = discovery {
+        let _ = handle.join();
+    }
+
     // Drain every registered filter's sessions so their MfSessions drop: each
     // disconnects its channel, lets the session thread run RenderSession::close,
     // and joins it. Copy the map references out first, then drain each map and
@@ -209,12 +219,21 @@ fn is_ignored(path: &Path, ignore: &[String]) -> bool {
 }
 
 /// Cap on concurrent discovery workers. Each spawns an L2 worker subprocess that
-/// loads the AEX + the compat runtime (memory-heavy), so bound it well below the
-/// core count for big plug-in sets (hundreds of AE effects).
-const MAX_DISCOVERY_PARALLELISM: usize = 8;
+/// loads the AEX + the compat runtime (memory-heavy). Kept low: too much
+/// concurrency causes resource contention that pushes a plain ~2 s discovery past
+/// the worker's 5 s deadline, so a discoverable effect times out and is wrongly
+/// cached as a non-effect. Discovery runs on a background thread, so a low cap is
+/// cheap. (Measured: 8-way ≈ 68% false timeouts, serial ≈ 3%.)
+const MAX_DISCOVERY_PARALLELISM: usize = 3;
 /// Recursion depth cap for the folder scan (guards symlink loops / pathological
 /// trees); the AE plug-in tree is only a few levels deep.
 const MAX_SCAN_DEPTH: usize = 8;
+
+/// Set on plugin unload so the background discovery thread stops promptly.
+static DISCOVERY_SHUTDOWN: AtomicBool = AtomicBool::new(false);
+/// The background discovery thread's join handle, so `UninitializePlugin` can
+/// stop and join it (bounded by one in-flight worker deadline).
+static DISCOVERY_THREAD: Mutex<Option<JoinHandle<()>>> = Mutex::new(None);
 
 #[unsafe(no_mangle)]
 pub extern "C" fn RegisterPlugin(host: *mut HOST_APP_TABLE) {
@@ -239,59 +258,66 @@ pub extern "C" fn RegisterPlugin(host: *mut HOST_APP_TABLE) {
         return;
     }
 
-    // Discovery is the slow part (an L2 worker per AEX): cache results by
-    // (mtime, len) so only new/changed AEX are re-discovered, and run the
-    // cache-misses in parallel. Negatives are cached too, so a non-effect .aex
-    // is not re-probed every launch.
-    let mut cache = load_cache();
+    // Discovery (an L2 worker per AEX) is slow — hundreds of AE effects take
+    // minutes — and can only ever populate the cache, since AviUtl2 freezes a
+    // filter's config at load and cannot register a filter discovered later. So
+    // register from the cache immediately (never blocking startup) and discover
+    // the rest on a background thread whose results appear on the NEXT launch.
+    let cache = load_cache();
+
+    // Register (host callback, main thread only) each AEX whose discovery already
+    // succeeded and is fresh. A changed/undiscovered AEX is a miss for the
+    // background pass; it renders (appears) once the next launch reads its cache.
     let mut misses: Vec<PathBuf> = Vec::new();
     for plugin in &plugins {
         let key = plugin.to_string_lossy().into_owned();
-        let fresh = file_meta(plugin)
-            .zip(cache.get(&key))
-            .is_some_and(|((mtime, len), entry)| entry.mtime == mtime && entry.len == len);
-        if !fresh {
-            misses.push(plugin.clone());
-        }
-    }
-    let mut dirty = false;
-    if !misses.is_empty() {
-        for (plugin, entry) in discover_parallel(&repository, &misses) {
-            // `None` is a transient failure: leave it a miss so it is retried next
-            // launch rather than cached as a permanent negative.
-            if let Some(entry) = entry {
-                cache.insert(plugin.to_string_lossy().into_owned(), entry);
-                dirty = true;
+        match cache.get(&key) {
+            Some(entry)
+                if file_meta(plugin)
+                    .is_some_and(|(mtime, len)| entry.mtime == mtime && entry.len == len) =>
+            {
+                if entry.ok {
+                    register_discovered(host, &repository, plugin, entry);
+                }
             }
+            _ => misses.push(plugin.clone()),
         }
     }
 
-    // Prune entries for AEX no longer in the scan set (e.g. after an app upgrade
-    // changed the path), so the cache file does not grow unbounded.
-    let current: std::collections::HashSet<String> = plugins
-        .iter()
-        .map(|plugin| plugin.to_string_lossy().into_owned())
-        .collect();
-    let before_prune = cache.len();
-    cache.retain(|key, _| current.contains(key));
-    dirty |= cache.len() != before_prune;
-    // Only rewrite the (potentially multi-MB) cache file when it actually changed,
-    // so an unchanged warm start does no cache I/O.
-    if dirty {
-        save_cache(&cache);
+    if !misses.is_empty() {
+        spawn_background_discovery(repository, plugins, cache, misses);
     }
+}
 
-    // Register (host callback, main thread only) each AEX whose discovery
-    // succeeded, from the cache.
-    for plugin in &plugins {
-        let key = plugin.to_string_lossy().into_owned();
-        let Some(entry) = cache.get(&key) else {
-            continue;
-        };
-        if !entry.ok {
-            continue;
-        }
-        register_discovered(host, &repository, plugin, entry);
+/// Discovers the misses on a background thread and rewrites the cache, so startup
+/// is never blocked. Newly-discovered effects appear on the next launch.
+fn spawn_background_discovery(
+    repository: PathBuf,
+    plugins: Vec<PathBuf>,
+    mut cache: HashMap<String, CacheEntry>,
+    misses: Vec<PathBuf>,
+) {
+    let handle = std::thread::Builder::new()
+        .name("aex-multifilter-discovery".into())
+        .spawn(move || {
+            for (plugin, entry) in discover_all(&repository, &misses) {
+                cache.insert(plugin.to_string_lossy().into_owned(), entry);
+            }
+            // Prune entries for AEX no longer in the scan set so the cache file
+            // does not grow unbounded across app upgrades / removals.
+            let current: std::collections::HashSet<String> = plugins
+                .iter()
+                .map(|plugin| plugin.to_string_lossy().into_owned())
+                .collect();
+            cache.retain(|key, _| current.contains(key));
+            save_cache(&cache);
+        });
+    if let Ok(handle) = handle
+        && let Ok(mut slot) = DISCOVERY_THREAD.lock()
+    {
+        // A previous launch's thread cannot exist (RegisterPlugin runs once), so
+        // just store this one for UninitializePlugin to join.
+        *slot = Some(handle);
     }
 }
 
@@ -573,8 +599,15 @@ fn save_cache(entries: &HashMap<String, CacheEntry>) {
             .map(|(key, entry)| (key.clone(), entry.clone()))
             .collect(),
     };
+    // Write atomically (temp + rename) so a crash or process exit mid-write (the
+    // background thread can still be writing when AviUtl2 quits) never leaves a
+    // truncated, unparseable cache file behind. The temp name carries the PID so
+    // two AviUtl2 instances do not clobber each other's temp before the rename.
     if let Ok(text) = serde_json::to_string(&file) {
-        let _ = std::fs::write(&path, text);
+        let temp = path.with_file_name(format!("discovery-cache.{}.tmp", std::process::id()));
+        if std::fs::write(&temp, text).is_ok() && std::fs::rename(&temp, &path).is_err() {
+            let _ = std::fs::remove_file(&temp);
+        }
     }
 }
 
@@ -591,71 +624,69 @@ fn file_meta(path: &Path) -> Option<((u64, u32), u64)> {
     Some((mtime, meta.len()))
 }
 
-/// A failed discovery that took at least this long is treated as a timeout /
-/// resource-pressure transient rather than a definitive non-effect, and is not
-/// negatively cached (the worker's own deadline is 5 s). So a slow failure during
-/// a large cold scan is retried next launch instead of permanently dropping the
-/// effect; a quick failure ("not an effect") is cached.
-const DISCOVERY_TRANSIENT_MS: u128 = 4_500;
-
-/// Discovers one AEX. Returns:
-/// - `Some(ok = true)` for a discoverable effect,
-/// - `Some(ok = false)` when the worker quickly reported non-effect (cache it so
-///   it is not re-probed every launch), or
-/// - `None` when discovery failed slowly (≈ the worker's timeout) — likely
-///   resource pressure during the cold scan — so it is NOT cached and is retried
-///   next launch instead of being permanently dropped.
-fn discover_one(repository: &Path, plugin: &Path) -> Option<CacheEntry> {
-    let (mtime, len) = file_meta(plugin)?;
-    let mut entry = CacheEntry {
+/// A negative (`ok = false`) cache entry for a plug-in that failed discovery.
+fn negative_entry(plugin: &Path) -> CacheEntry {
+    let (mtime, len) = file_meta(plugin).unwrap_or(((0, 0), 0));
+    CacheEntry {
         mtime,
         len,
         ok: false,
         sha: String::new(),
         smart: false,
         params: Vec::new(),
-    };
-    let Ok(bytes) = std::fs::read(plugin) else {
-        return None; // transient io error: retry next launch
-    };
-    entry.sha = hex_lower(&Sha256::digest(&bytes));
-    let started = std::time::Instant::now();
-    match inspect_experimental_with_diagnostics(repository, plugin, &entry.sha) {
-        Ok((params, diagnostics)) => {
-            // PF_OutFlag2_SUPPORTS_SMART_RENDER = bit 10.
-            entry.smart = diagnostics
-                .get("advertised_out_flags2")
-                .and_then(|value| value.as_u64())
-                .unwrap_or(0)
-                & (1 << 10)
-                != 0;
-            entry.params = params;
-            entry.ok = true;
-            Some(entry)
-        }
-        Err(_) if started.elapsed().as_millis() >= DISCOVERY_TRANSIENT_MS => None,
-        Err(_) => Some(entry), // definitive non-effect
     }
 }
 
-/// Discovers the given AEX in parallel (bounded), work-stealing over the slice.
-/// `None` in a result means "do not cache" (a transient failure to retry). A
-/// panic in `discover_one` — this scans arbitrary third-party AEX — is caught and
-/// turned into a negative entry, so one bad plug-in cannot abort AviUtl2 by
-/// unwinding out of the `extern "C"` `RegisterPlugin` (`thread::scope` re-raises).
-fn discover_parallel(repository: &Path, paths: &[PathBuf]) -> Vec<(PathBuf, Option<CacheEntry>)> {
+/// Discovers one AEX, always returning a cache entry (cache-all): `ok = true` for
+/// a discoverable effect, `ok = false` for any failure (a genuine non-effect, or
+/// an AEX the compat host cannot load, or a timeout). Discovery runs on the
+/// background thread, so caching every outcome — even a timeout — means it is not
+/// re-probed on later launches; a spurious negative is cleared by re-touching the
+/// AEX or deleting the cache file (documented in the README).
+fn discover_one(repository: &Path, plugin: &Path) -> CacheEntry {
+    let mut entry = negative_entry(plugin);
+    let Ok(bytes) = std::fs::read(plugin) else {
+        return entry;
+    };
+    entry.sha = hex_lower(&Sha256::digest(&bytes));
+    if let Ok((params, diagnostics)) =
+        inspect_experimental_with_diagnostics(repository, plugin, &entry.sha)
+    {
+        // PF_OutFlag2_SUPPORTS_SMART_RENDER = bit 10.
+        entry.smart = diagnostics
+            .get("advertised_out_flags2")
+            .and_then(|value| value.as_u64())
+            .unwrap_or(0)
+            & (1 << 10)
+            != 0;
+        entry.params = params;
+        entry.ok = true;
+    }
+    entry
+}
+
+/// Discovers the given AEX with low bounded parallelism (to keep each discovery
+/// under the worker deadline — high concurrency causes contention false-timeouts),
+/// work-stealing over the slice and caching every result. Stops promptly when
+/// `DISCOVERY_SHUTDOWN` is set (plugin unload); unprocessed paths stay misses and
+/// are retried next launch. A panic in `discover_one` (arbitrary third-party AEX)
+/// is caught and turned into a negative entry, so one bad plug-in cannot abort the
+/// process by unwinding out of the scoped thread.
+fn discover_all(repository: &Path, paths: &[PathBuf]) -> Vec<(PathBuf, CacheEntry)> {
     let parallelism = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(1)
         .min(MAX_DISCOVERY_PARALLELISM)
         .min(paths.len().max(1));
     let next = AtomicUsize::new(0);
-    let results: Mutex<Vec<(PathBuf, Option<CacheEntry>)>> =
-        Mutex::new(Vec::with_capacity(paths.len()));
+    let results: Mutex<Vec<(PathBuf, CacheEntry)>> = Mutex::new(Vec::with_capacity(paths.len()));
     std::thread::scope(|scope| {
         for _ in 0..parallelism {
             scope.spawn(|| {
                 loop {
+                    if DISCOVERY_SHUTDOWN.load(Ordering::Relaxed) {
+                        break;
+                    }
                     let index = next.fetch_add(1, Ordering::Relaxed);
                     if index >= paths.len() {
                         break;
@@ -664,18 +695,7 @@ fn discover_parallel(repository: &Path, paths: &[PathBuf]) -> Vec<(PathBuf, Opti
                     let entry = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                         discover_one(repository, plugin)
                     }))
-                    .unwrap_or_else(|_| {
-                        // Panic in discovery: cache a negative so it is skipped
-                        // (and never re-panicked), rather than aborting the host.
-                        file_meta(plugin).map(|(mtime, len)| CacheEntry {
-                            mtime,
-                            len,
-                            ok: false,
-                            sha: String::new(),
-                            smart: false,
-                            params: Vec::new(),
-                        })
-                    });
+                    .unwrap_or_else(|_| negative_entry(plugin));
                     if let Ok(mut results) = results.lock() {
                         results.push((plugin.clone(), entry));
                     }
