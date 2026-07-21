@@ -24,12 +24,12 @@ fn imports(path: &Path) -> Vec<String> {
         return Vec::new();
     };
     let mut names = Vec::new();
-    if let Ok(Some(table)) = pe.import_table() {
-        if let Ok(mut descs) = table.descriptors() {
-            while let Ok(Some(desc)) = descs.next() {
-                if let Ok(name) = table.name(desc.name.get(LittleEndian)) {
-                    names.push(String::from_utf8_lossy(name).to_string());
-                }
+    if let Ok(Some(table)) = pe.import_table()
+        && let Ok(mut descs) = table.descriptors()
+    {
+        while let Ok(Some(desc)) = descs.next() {
+            if let Ok(name) = table.name(desc.name.get(LittleEndian)) {
+                names.push(String::from_utf8_lossy(name).to_string());
             }
         }
     }

@@ -268,7 +268,12 @@ pub extern "C" fn RegisterPlugin(host: *mut HOST_APP_TABLE) {
     // filter's config at load and cannot register a filter discovered later. So
     // register from the cache immediately (never blocking startup) and discover
     // the rest on a background thread whose results appear on the NEXT launch.
-    let cache = load_cache();
+    // The cache is keyed by AEX (path, mtime, len), but a discovery *result* also
+    // depends on the compat host that produced it (the L2 worker and this DLL's
+    // in-process broker). Invalidate the whole cache when the host build changed,
+    // so effects that previously failed to load are re-discovered (issue #304).
+    let build = build_fingerprint(&repository);
+    let cache = load_cache(build);
 
     // Register (host callback, main thread only) each AEX whose discovery already
     // succeeded and is fresh. A changed/undiscovered AEX is a miss for the
@@ -290,7 +295,7 @@ pub extern "C" fn RegisterPlugin(host: *mut HOST_APP_TABLE) {
     }
 
     if !misses.is_empty() {
-        spawn_background_discovery(repository, plugins, cache, misses);
+        spawn_background_discovery(repository, plugins, cache, misses, build);
     }
 }
 
@@ -301,6 +306,7 @@ fn spawn_background_discovery(
     plugins: Vec<PathBuf>,
     mut cache: HashMap<String, CacheEntry>,
     misses: Vec<PathBuf>,
+    build: BuildFingerprint,
 ) {
     let handle = std::thread::Builder::new()
         .name("aex-multifilter-discovery".into())
@@ -330,7 +336,7 @@ fn spawn_background_discovery(
                 }
                 // discover_all returns fewer than the chunk only if it was cut
                 // short by the shutdown flag; save what we have and stop.
-                save_cache(&cache);
+                save_cache(&cache, build);
                 if discovered < chunk.len() {
                     break;
                 }
@@ -576,9 +582,28 @@ struct CacheEntry {
 /// Bump when [`CacheEntry`]'s meaning changes, to invalidate stale cache files.
 const CACHE_VERSION: u32 = 1;
 
+/// Fingerprints the compat host that produces a discovery result, so the cache is
+/// invalidated when the host changes (e.g. it gains support for an effect that
+/// previously failed to load — issue #304). A cached result depends on the host,
+/// not just the AEX bytes: on the L2 worker exe that loads the AEX and runs
+/// `EffectMain`, and on this multifilter DLL, whose in-process broker does the
+/// sealed-load-tree staging and dispatch that decide whether a load even succeeds.
+/// `(mtime_secs, mtime_nanos, len)` per file; `None` when a file cannot be stat'd.
+#[derive(serde::Serialize, serde::Deserialize, Default, PartialEq, Eq, Clone, Copy)]
+struct BuildFingerprint {
+    #[serde(default)]
+    worker: Option<(u64, u32, u64)>,
+    #[serde(default)]
+    host: Option<(u64, u32, u64)>,
+}
+
 #[derive(serde::Serialize, serde::Deserialize, Default)]
 struct CacheFile {
     version: u32,
+    /// The host build the entries were discovered with; a mismatch (worker or
+    /// this DLL rebuilt) invalidates the whole cache so everything is re-discovered.
+    #[serde(default)]
+    build: BuildFingerprint,
     entries: HashMap<String, CacheEntry>,
 }
 
@@ -592,7 +617,54 @@ fn cache_path() -> Option<PathBuf> {
     )
 }
 
-fn load_cache() -> HashMap<String, CacheEntry> {
+/// Fingerprints the L2 discovery worker and this multifilter DLL. Either side can
+/// change a discovery result: the worker exe loads the AEX and runs `EffectMain`,
+/// while the in-DLL broker does the sealed-load-tree staging that decides whether
+/// the load succeeds (issue #304's dep-sealing lives broker-side, in this DLL).
+fn build_fingerprint(repository: &Path) -> BuildFingerprint {
+    let worker = repository
+        .join("target")
+        .join("minihost-build")
+        .join("aex_l2_worker.exe");
+    let flatten = |m: ((u64, u32), u64)| (m.0.0, m.0.1, m.1);
+    BuildFingerprint {
+        worker: file_meta(&worker).map(flatten),
+        host: self_module_path().as_deref().and_then(file_meta).map(flatten),
+    }
+}
+
+/// The path of this running DLL, resolved from an address inside it. Used to
+/// fingerprint the in-process broker (its bytes ship in this module, not the
+/// worker exe), so a rebuilt-and-redeployed DLL invalidates the discovery cache.
+fn self_module_path() -> Option<PathBuf> {
+    use std::ffi::OsString;
+    use std::os::windows::ffi::OsStringExt;
+
+    // GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | _UNCHANGED_REFCOUNT: resolve the
+    // module owning `addr` without touching its refcount (no matching FreeLibrary).
+    const FROM_ADDRESS_UNCHANGED: u32 = 0x0000_0004 | 0x0000_0002;
+    unsafe extern "system" {
+        fn GetModuleHandleExW(flags: u32, addr: *const u16, module: *mut isize) -> i32;
+        fn GetModuleFileNameW(module: isize, buf: *mut u16, size: u32) -> u32;
+    }
+
+    let anchor = self_module_path as *const () as *const u16;
+    let mut module: isize = 0;
+    // SAFETY: `anchor` points into this module's code; out-params are valid.
+    if unsafe { GetModuleHandleExW(FROM_ADDRESS_UNCHANGED, anchor, &mut module) } == 0 {
+        return None;
+    }
+    let mut buf = [0u16; 32768];
+    // SAFETY: `module` is a valid HMODULE from the call above; `buf` is sized.
+    let len = unsafe { GetModuleFileNameW(module, buf.as_mut_ptr(), buf.len() as u32) } as usize;
+    // 0 = failure; len == buf.len() means truncation (path longer than the buffer).
+    if len == 0 || len >= buf.len() {
+        return None;
+    }
+    Some(PathBuf::from(OsString::from_wide(&buf[..len])))
+}
+
+fn load_cache(build: BuildFingerprint) -> HashMap<String, CacheEntry> {
     let Some(path) = cache_path() else {
         return HashMap::new();
     };
@@ -600,14 +672,16 @@ fn load_cache() -> HashMap<String, CacheEntry> {
         return HashMap::new();
     };
     let file: CacheFile = serde_json::from_str(&text).unwrap_or_default();
-    if file.version == CACHE_VERSION {
+    // Reuse the cache only when both the schema version and the host build that
+    // produced it match; otherwise re-discover everything.
+    if file.version == CACHE_VERSION && file.build == build {
         file.entries
     } else {
         HashMap::new()
     }
 }
 
-fn save_cache(entries: &HashMap<String, CacheEntry>) {
+fn save_cache(entries: &HashMap<String, CacheEntry>, build: BuildFingerprint) {
     let Some(path) = cache_path() else {
         return;
     };
@@ -616,6 +690,7 @@ fn save_cache(entries: &HashMap<String, CacheEntry>) {
     }
     let file = CacheFile {
         version: CACHE_VERSION,
+        build,
         // Clone is unavoidable through the borrow; the cache is small vs the AEX
         // bytes and this runs once per launch.
         entries: entries
