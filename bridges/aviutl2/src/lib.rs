@@ -22,8 +22,8 @@ use aviutl2::{
     AnyResult, AviUtl2Info,
     filter::{
         FilterConfigCheckbox, FilterConfigColor, FilterConfigColorValue, FilterConfigItem,
-        FilterConfigTrack, FilterPlugin, FilterPluginFlags, FilterPluginTable, FilterProcVideo,
-        RgbaPixel,
+        FilterConfigSelect, FilterConfigSelectItem, FilterConfigTrack, FilterPlugin,
+        FilterPluginFlags, FilterPluginTable, FilterProcVideo, RgbaPixel,
     },
     tracing,
 };
@@ -174,6 +174,10 @@ impl BridgeSession {
                     spatial_trailer: None,
                     render_environment_trailer: None,
                     alpha_as_coverage_params: &[],
+                    // Conformance render settings feed the worker's report, not
+                    // the render (#275). The interactive bridge does not produce
+                    // conformance evidence, so leave it unset.
+                    conformance_render_settings: None,
                     layers: &[],
                     dependencies: Vec::new(),
                     width: config.width,
@@ -726,9 +730,23 @@ fn exposed_config(template: &[InteractiveParameter]) -> ExposedParams {
             continue;
         }
         if let Some(item) = config_item_for(parameter) {
+            let mut sent = parameter.clone();
+            // A popup's valid range is 1..=choices.len() (AE popups are 1-based).
+            // Discovery falls the range back to the default when the plug-in sets
+            // no valid_min/max, so without this a selection above that degenerate
+            // maximum would be rejected as out-of-range by the payload encoder,
+            // invalidating the session. Normalize the range to cover every choice.
+            if sent.kind == "integer" && !sent.choices.is_empty() {
+                let count = sent.choices.len() as f64;
+                sent.minimum = 1.0;
+                sent.maximum = count;
+                // Guard a malformed/absent popup default (discovery reports 0 when
+                // the "default" field is missing) so the baseline stays in range.
+                sent.value = sent.value.clamp(1.0, count);
+            }
             exposed.items.push(item);
             exposed.slots.push(parameter.slot);
-            exposed.defaults.push(parameter.clone());
+            exposed.defaults.push(sent);
         }
     }
     exposed
@@ -755,8 +773,32 @@ fn config_item_for(parameter: &InteractiveParameter) -> Option<FilterConfigItem>
         // slider. Exposing it needs a fixture to verify; for now it stays at the
         // AEX default.
         "integer" => {
+            // A popup arrives here as an integer carrying its choice labels. AE
+            // popup values are 1-based (1..=N), matching the harness's ComboBox
+            // (main.rs:4298-4313). Expose it as a dropdown rather than a slider.
+            if !parameter.choices.is_empty() {
+                let items = parameter
+                    .choices
+                    .iter()
+                    .enumerate()
+                    .map(|(index, label)| FilterConfigSelectItem {
+                        name: label.clone(),
+                        value: index as i32 + 1,
+                    })
+                    .collect();
+                // Clamp the default to a real item value (1..=N) so a malformed
+                // popup default — discovery reports 0 when the "default" field is
+                // absent — still selects a valid choice, consistent with the
+                // range normalized onto the sent parameter in `exposed_config`.
+                let count = parameter.choices.len() as i32;
+                return Some(FilterConfigItem::Select(FilterConfigSelect {
+                    name,
+                    value: (parameter.value as i32).clamp(1, count),
+                    items,
+                }));
+            }
             let (min, max) = bounded_range(parameter)?;
-            if min == 0.0 && max == 1.0 && parameter.choices.is_empty() {
+            if min == 0.0 && max == 1.0 {
                 // An AE checkbox arrives here as an integer 0..1; expose it as a
                 // checkbox rather than a two-tick slider.
                 Some(FilterConfigItem::Checkbox(FilterConfigCheckbox {
@@ -840,6 +882,8 @@ fn apply_config_values(
             FilterConfigItem::Checkbox(check) => {
                 parameter.value = if check.value { 1.0 } else { 0.0 }
             }
+            // A popup's selected value is its (1-based) choice index.
+            FilterConfigItem::Select(select) => parameter.value = f64::from(select.value),
             FilterConfigItem::Color(color) => {
                 // color is ARGB ([alpha, red, green, blue]); update RGB, keep alpha.
                 let (r, g, b) = color.value.to_rgb();

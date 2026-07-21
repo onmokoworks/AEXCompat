@@ -296,13 +296,22 @@ slider として出しても無意味で、送らなくても AEX 既定値の�
 dropdown として正しく公開する件は段階2b (choices は保持されるので "integer+choices" を
 Select に写像可能、value の index 符号化を検証してから)。
 
-未解決 → 段階2b:
+### 2026-07-21 段階2b: popup を dropdown 公開 (実装)
 
-- **popup を dropdown 公開する**: discovery は popup を runtime_kind "integer" に落とすが
-  `choices` は保持する (`image_render.rs:3234`) ので、"integer + 非空 choices" を Select に
-  写像できる。crash 仮説は誤診だった (真因はステール worker) ので、value の index 符号化
-  (AE popup は 1-based の可能性) を確認して有効化する。現状 popup は integer スライダー
-  (choices 分の範囲) として一応操作可能。
+popup は runtime_kind "integer" + 非空 `choices` + **1-based** (min=1, value=1) で来る
+(fill probe で確認: Suite operation min=1 max=4)。config_item_for の "integer" arm で
+`!choices.is_empty()` を先に見て Select に写像 (items の value = index+1、default =
+discovered value)。apply は Select 値をそのまま integer 送出。AviUtl2 は item.value を
+キーにするので 1..N で問題ない (0始まり/連続不要、aviutl2 config.rs:157-178)。harness の
+ComboBox (main.rs:4298-4313) と同じ 1-based。fill probe で value 1 → 描画、value 4 →
+frame_error 516 (AEX の float premultiply 診断、bridge は FrameError で握る) を確認 =
+popup 値が正しく適用される。
+
+コンパイル fix も同梱: main #275 が `SessionOpenRequest.conformance_render_settings:
+Option<&str>` を追加。bridge は broker workspace 外で CI に拾われず、段階2a マージが
+main の bridge をコンパイル不能にしていた (issue #284)。両コンストラクタに `None` 追加。
+
+未解決 → 段階2b 以降:
 - **angle の scalar value 範囲**: encode は全 kind で untouched な scalar `value ∈ [min,max]`
   を検査する (`image_render.rs:4362`)。bridge は angle で `components[0]` のみ更新し `value` は
   discovery の default scalar のまま。plugin の default scalar が valid range 外だと毎フレーム
