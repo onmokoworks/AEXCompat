@@ -62,6 +62,12 @@ const SESSION_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
 /// may have installed a healthy session at the same id).
 static SESSION_SERIAL: AtomicU64 = AtomicU64::new(0);
 
+/// References to every registered filter's session map, so `UninitializePlugin`
+/// can drain them on plugin unload/reload (each `FilterCtx` is leaked `'static`,
+/// so nothing else would close its worker threads if AviUtl2 unloads the plugin
+/// without exiting the process).
+static SESSION_MAPS: Mutex<Vec<&'static SessionMap>> = Mutex::new(Vec::new());
+
 /// A null-terminated UTF-16 string leaked for AviUtl2's lifetime (LPCWSTR).
 fn wide_leak(text: &str) -> *const u16 {
     let mut units: Vec<u16> = text.encode_utf16().collect();
@@ -99,7 +105,23 @@ pub extern "C" fn InitializePlugin(version: u32) -> bool {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn UninitializePlugin() {}
+pub extern "C" fn UninitializePlugin() {
+    // Drain every registered filter's sessions so their MfSessions drop: each
+    // disconnects its channel, lets the session thread run RenderSession::close,
+    // and joins it. Copy the map references out first, then drain each map and
+    // drop the sessions after releasing that map's lock (joins run off-lock).
+    let maps: Vec<&'static SessionMap> = SESSION_MAPS
+        .lock()
+        .map(|maps| maps.clone())
+        .unwrap_or_default();
+    for map in maps {
+        let drained: Vec<MfSession> = match map.lock() {
+            Ok(mut sessions) => sessions.drain().map(|(_, session)| session).collect(),
+            Err(_) => continue,
+        };
+        drop(drained);
+    }
+}
 
 #[unsafe(no_mangle)]
 pub extern "C" fn GetCommonPluginTable() -> *mut COMMON_PLUGIN_TABLE {
@@ -288,6 +310,10 @@ fn register_aex(host: *mut HOST_APP_TABLE, repository: &Path, plugin: &Path) {
         readers,
         sessions: Mutex::new(HashMap::new()),
     }));
+    // Register this filter's session map so UninitializePlugin can drain it.
+    if let Ok(mut maps) = SESSION_MAPS.lock() {
+        maps.push(&userdata.sessions);
+    }
 
     let cif = Cif::new([Type::pointer()], Type::u8());
     let closure = Box::leak(Box::new(Closure::new(cif, render_callback, userdata)));
