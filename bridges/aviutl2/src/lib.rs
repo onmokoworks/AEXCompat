@@ -730,9 +730,23 @@ fn exposed_config(template: &[InteractiveParameter]) -> ExposedParams {
             continue;
         }
         if let Some(item) = config_item_for(parameter) {
+            let mut sent = parameter.clone();
+            // A popup's valid range is 1..=choices.len() (AE popups are 1-based).
+            // Discovery falls the range back to the default when the plug-in sets
+            // no valid_min/max, so without this a selection above that degenerate
+            // maximum would be rejected as out-of-range by the payload encoder,
+            // invalidating the session. Normalize the range to cover every choice.
+            if sent.kind == "integer" && !sent.choices.is_empty() {
+                let count = sent.choices.len() as f64;
+                sent.minimum = 1.0;
+                sent.maximum = count;
+                // Guard a malformed/absent popup default (discovery reports 0 when
+                // the "default" field is missing) so the baseline stays in range.
+                sent.value = sent.value.clamp(1.0, count);
+            }
             exposed.items.push(item);
             exposed.slots.push(parameter.slot);
-            exposed.defaults.push(parameter.clone());
+            exposed.defaults.push(sent);
         }
     }
     exposed
