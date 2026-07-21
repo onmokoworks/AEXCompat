@@ -4693,23 +4693,21 @@ fn render_with_artifact(
     // config the one-shot per-file path accepts now always fits the session, so
     // the former session_section_fits carve-out is gone (#264): every eligible
     // render below can be carried by the length-1 session.
-    if !smart
-        && audio.is_none()
-        && gpu_backend == RenderGpuBackend::Auto
+    let session_eligible = audio.is_none()
         && payload == encode_interactive_payload(interactive_parameters.unwrap_or_default())?
         && std::env::var_os(DISABLE_SESSION_WRAPPER_ENV).is_none()
-        // RenderSession::open and the session worker now admit total_time == 0
-        // (the zero-duration t=0 render the one-shot worker also produces), so a
-        // zero-duration render is carried by the session too (#272); no
-        // total_time carve-out remains.
-        // RenderSession::open also rejects time_scale > i32::MAX (the worker
-        // parses the per-frame scale as signed 32-bit), which is_valid admits.
-        // The one-shot worker cannot render it either, so this loses no working
-        // capability, but keeping the eligibility gate a strict superset of the
-        // session's config preconditions means an eligible render never
-        // fail-closes on a config the session structurally rejects (#264).
         && timing.time_scale <= i32::MAX as u32
-    {
+        && if smart {
+            secondaries.is_empty()
+                && timed_secondaries.is_empty()
+                && host_context.is_none()
+                && (gpu_backend == RenderGpuBackend::Cpu
+                    || (gpu_backend == RenderGpuBackend::Auto
+                        && gpu_runtime_policy.is_none()))
+        } else {
+            gpu_backend == RenderGpuBackend::Auto
+        };
+    if session_eligible {
         // Only a layered session touches target/image-transport: RenderSession::
         // open writes per-layer sidecars there (#268), so a file-free session
         // (no secondary/timed layers) must not be forced to create or sweep the
@@ -4793,6 +4791,8 @@ fn render_with_artifact(
             expected_shutter_angle,
             expected_shutter_phase,
             custom_ui_action: custom_ui_action.as_ref(),
+            smart,
+            gpu_backend,
         }) {
             SessionWrapperOutcome::Report(report) => return Ok(report),
             SessionWrapperOutcome::Failure(error) => return Err(error),
@@ -5427,6 +5427,8 @@ struct SessionWrapperRequest<'a> {
     /// Per-frame custom-UI action (#238) driven on the wrapper's single frame
     /// through the v:2 `ui_action` attribute. `None` for a plain render.
     custom_ui_action: Option<&'a RenderUiAction>,
+    smart: bool,
+    gpu_backend: RenderGpuBackend,
 }
 
 enum SessionWrapperOutcome {
@@ -5495,8 +5497,8 @@ fn render_classic_via_length_one_session(
         total_time: request.timing.total_time,
         time_scale: request.timing.time_scale,
         frame_deadline: Duration::from_millis(request.timeout_ms),
-        smart: false,
-        gpu_backend: RenderGpuBackend::Cpu,
+        smart: request.smart,
+        gpu_backend: request.gpu_backend,
         gpu_runtime_policy: None,
     }) {
         Ok(session) => session,
@@ -5553,7 +5555,7 @@ fn render_classic_via_length_one_session(
         &final_report,
         &diagnostics,
         &InteractiveGateFacts {
-            smart: false,
+            smart: request.smart,
             pixel_format: request.pixel_format,
             spatial: request.spatial,
             expected_quality: request.expected_quality,
@@ -5590,28 +5592,39 @@ fn render_classic_via_length_one_session(
             )));
         }
     };
-    if let Some(path) = request.preserved_output {
-        if let Some(parent) = path.parent() {
+    // A SmartFX render whose PreRender returned a legally empty result_rect
+    // (#278) rendered no pixels: 0x0 geometry with no bytes is the contract's
+    // fulfillment, and no PNG or raw can represent it, so skip the pixel pipeline
+    // while the report carries the empty-geometry fields — the same contract the
+    // one-shot smart path applies. Only a smart session can produce this
+    // (validate_ok_frame requires it).
+    let empty_smart_result = request.smart && rendered_width == 0 && rendered_height == 0;
+    if !empty_smart_result {
+        if let Some(path) = request.preserved_output {
+            if let Some(parent) = path.parent() {
+                if let Err(error) = fs::create_dir_all(parent) {
+                    return SessionWrapperOutcome::Failure(error);
+                }
+            }
+            let written = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(path)
+                .and_then(|mut file| file.write_all(&pixels));
+            if let Err(error) = written {
+                return SessionWrapperOutcome::Failure(error);
+            }
+        }
+        if let Some(parent) = request.output_path.parent() {
             if let Err(error) = fs::create_dir_all(parent) {
                 return SessionWrapperOutcome::Failure(error);
             }
         }
-        let written = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(path)
-            .and_then(|mut file| file.write_all(&pixels));
-        if let Err(error) = written {
-            return SessionWrapperOutcome::Failure(error);
-        }
-    }
-    if let Some(parent) = request.output_path.parent() {
-        if let Err(error) = fs::create_dir_all(parent) {
-            return SessionWrapperOutcome::Failure(error);
-        }
     }
     let mut deep_overrange_samples = None;
-    let png_written = if request.deep_png_output {
+    let png_written = if empty_smart_result {
+        Ok(())
+    } else if request.deep_png_output {
         rgba16_transport_to_png16(&pixels).and_then(|(samples, overrange)| {
             deep_overrange_samples = Some(overrange);
             let image = image::ImageBuffer::<image::Rgba<u16>, Vec<u16>>::from_raw(
@@ -5638,7 +5651,7 @@ fn render_classic_via_length_one_session(
     }
     let facts = InteractiveImageReportFacts {
         plugin_id: request.plugin_id.to_owned(),
-        smart: false,
+        smart: request.smart,
         pixel_format: request.pixel_format,
         rendered_width,
         rendered_height,
@@ -5666,7 +5679,7 @@ fn render_classic_via_length_one_session(
                 "height": layer.height,
             }))
             .collect::<Vec<_>>()),
-        empty_smart_result: false,
+        empty_smart_result,
         output_raw: request
             .preserved_output
             .map(|path| path.to_string_lossy().into_owned()),
