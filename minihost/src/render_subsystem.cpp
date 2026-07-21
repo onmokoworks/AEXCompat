@@ -372,9 +372,20 @@ void dump_world_snapshot(RenderTelemetry& telemetry, const std::string& stage,
 void record_output_checksum_detail(RenderTelemetry& telemetry,
                                    const unsigned char* rgba, int32_t width,
                                    int32_t height, int32_t pixel_bytes) {
-  if (!telemetry.output_checksum_detail || !rgba || width <= 0 || height <= 0 ||
-      !telemetry.output_row_crc32 || !telemetry.output_channel_sha256 ||
-      !telemetry.hooks.sha256_bytes) return;
+  if (!telemetry.output_checksum_detail || !telemetry.output_row_crc32 ||
+      !telemetry.output_channel_sha256 || !telemetry.hooks.sha256_bytes) return;
+  // A legally empty output (0x0, e.g. an empty SmartFX result #278) has no rows
+  // and no channel bytes. Record the empty detail (no row CRCs, each channel the
+  // sha256 of zero bytes) rather than returning early, so a later report never
+  // carries a previous frame's stale checksums.
+  if (!rgba || width <= 0 || height <= 0) {
+    telemetry.output_row_crc32->clear();
+    const unsigned char empty_marker = 0;
+    for (std::size_t channel = 0; channel < 4; ++channel)
+      (*telemetry.output_channel_sha256)[channel] =
+          telemetry.hooks.sha256_bytes(&empty_marker, 0);
+    return;
+  }
   const std::size_t row_bytes = static_cast<std::size_t>(width) * pixel_bytes;
   telemetry.output_row_crc32->clear();
   telemetry.output_row_crc32->reserve(static_cast<std::size_t>(height));

@@ -576,6 +576,12 @@ struct FrameDoneOutput {
     pixel_format: String,
     checksum: String,
     guards_intact: bool,
+    /// A SmartFX frame whose PreRender returned a legally empty result_rect
+    /// (#278): width/height are 0 and there are no output pixels. Absent (false)
+    /// for every normal frame, where a zero dimension stays an invariant
+    /// failure. Only the worker's smart session frame loop sets it.
+    #[serde(default)]
+    empty_result: bool,
 }
 
 #[derive(Deserialize)]
@@ -1878,6 +1884,52 @@ impl RenderSession {
         if !output.guards_intact {
             return Err("guard bytes were reported violated".into());
         }
+        // A legally empty SmartFX result (#278): PreRender skipped the render
+        // selector, so there are no pixels and the geometry is 0x0. The worker
+        // flags it explicitly (a zero dimension without the flag stays an
+        // invariant failure below). Validate the empty shape and the generation,
+        // then accept it — there are no slot bytes to read.
+        if output.empty_result {
+            // Only SmartFX PreRender produces a legally empty result; a classic
+            // session must never claim one. Enforce this broker-side too so a
+            // buggy or compromised classic worker cannot pass a 0x0 frame off as
+            // valid by setting the flag (the worker also keeps classic frames
+            // from setting it).
+            if !self.smart {
+                return Err("a classic session reported an empty SmartFX result".into());
+            }
+            if output.width != 0 || output.height != 0 || output.rowbytes != 0 {
+                return Err(format!(
+                    "empty-result frame must be 0x0 with 0 rowbytes, got {}x{} rowbytes {}",
+                    output.width, output.height, output.rowbytes
+                ));
+            }
+            if output.pixel_format != self.geometry.pixel_format.report_name() {
+                return Err(format!(
+                    "output pixel format {} differs from the session {}",
+                    output.pixel_format,
+                    self.geometry.pixel_format.report_name()
+                ));
+            }
+            if generation != expected_generation {
+                return Err(format!(
+                    "response generation {generation} differs from expected {expected_generation}"
+                ));
+            }
+            if self.transport.read_header_u32(OUTPUT_GENERATION_OFFSET) != expected_generation {
+                return Err("header output generation is stale".into());
+            }
+            // The worker stamps the frame dimensions into the header like a
+            // normal frame; for an empty result they must read back as 0x0,
+            // matching the non-empty path's frame-dimension check.
+            if self.transport.read_header_u32(FRAME_WIDTH_OFFSET) != 0
+                || self.transport.read_header_u32(FRAME_HEIGHT_OFFSET) != 0
+            {
+                return Err("header frame dimensions are not empty".into());
+            }
+            self.validate_static_header()?;
+            return Ok(());
+        }
         // A resize-output effect may render at any positive dimensions that
         // still fit the launch output slot (#261): shrink, or an expand small
         // enough to fit. An expand that overruns the slot arrives as a
@@ -2253,6 +2305,43 @@ pub fn run_video_batch(
             let rgba = decoded.into_rgba8().into_raw();
             let outcome = session.render_frame(frame_index, frame_time, &rgba)?;
             match outcome.status {
+                FrameStatus::Rendered {
+                    pixels,
+                    checksum,
+                    width: frame_width,
+                    height: frame_height,
+                } if frame_width == 0 && frame_height == 0 => {
+                    // A legally empty SmartFX result (#278): the frame rendered
+                    // no pixels, so there is no PNG or raw sidecar to write (a 0x0
+                    // image cannot be represented). Report a legal empty frame,
+                    // mirroring the one-shot empty-result contract, instead of
+                    // aborting the batch on a zero-dimension image.
+                    debug_assert!(pixels.is_empty());
+                    // The non-empty arm refuses to overwrite an existing frame so
+                    // a reused output directory cannot mix runs. Enforce the same
+                    // fresh-output contract here: a stale frame-*.png (or its raw
+                    // sidecar) left from a previous run at this index would keep
+                    // old pixels on disk while the report says output_png: null,
+                    // so a directory glob would ingest the wrong frame. Reject it.
+                    let output_png = output_directory.join(format!("frame-{frame_index:06}.png"));
+                    if output_png.exists() {
+                        return Err(invalid("output frame already exists"));
+                    }
+                    if let Some(extension) = raw_extension {
+                        if output_png.with_extension(extension).exists() {
+                            return Err(invalid("output frame raw sidecar already exists"));
+                        }
+                    }
+                    Ok(json!({
+                        "frame_index": frame_index,
+                        "status": "ok",
+                        "checksum": checksum,
+                        "width": 0,
+                        "height": 0,
+                        "empty_result": true,
+                        "output_png": Value::Null,
+                    }))
+                }
                 FrameStatus::Rendered {
                     pixels,
                     checksum,

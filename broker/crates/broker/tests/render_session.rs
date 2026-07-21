@@ -1528,6 +1528,68 @@ mod windows_e2e {
     }
 
     #[test]
+    fn empty_smart_result_frame_is_accepted_as_a_valid_empty_render() {
+        // A SmartFX frame whose PreRender returned a legally empty result_rect
+        // (#278) reports a 0x0 ok frame with the explicit empty_result flag. The
+        // session accepts it as a valid empty render (not a dimension invariant
+        // failure) with no output pixels, and stays usable for later frames.
+        let _behavior = BehaviorGuard::set(Some("empty_result_frame_0"));
+        let (repository, plugin, sha) = temp_repository();
+        // Only a SmartFX session may report an empty result, so open a smart
+        // session (the broker rejects an empty result on a classic session).
+        let mut session = RenderSession::open(SessionOpenRequest {
+            repository: &repository.0,
+            plugin_path: &plugin,
+            plugin_sha256: &sha,
+            parameters: None,
+            parameter_animation: None,
+            aux_manifest: None,
+            world_dump_dir: None,
+            output_checksum_detail: false,
+            mask_trailer: None,
+            spatial_trailer: None,
+            render_environment_trailer: None,
+            alpha_as_coverage_params: &[],
+            conformance_render_settings: None,
+            layers: &[],
+            dependencies: Vec::new(),
+            width: WIDTH,
+            height: HEIGHT,
+            pixel_format: RenderPixelFormat::Argb8,
+            time_step: 1,
+            total_time: 300,
+            time_scale: 30,
+            frame_deadline: Duration::from_secs(30),
+            smart: true,
+            gpu_backend: RenderGpuBackend::Cpu,
+            gpu_runtime_policy: None,
+        })
+        .expect("open a smart render session");
+        let outcome = session
+            .render_frame(0, 0, &input_pattern(1))
+            .expect("an empty-result frame is a valid render, not an invalidation");
+        let FrameStatus::Rendered {
+            pixels,
+            width,
+            height,
+            ..
+        } = outcome.status
+        else {
+            panic!("the empty-result frame did not render");
+        };
+        assert_eq!((width, height), (0, 0), "an empty result has zero geometry");
+        assert!(pixels.is_empty(), "an empty result carries no pixels");
+        // The session stays usable: a normal frame renders afterwards.
+        let outcome = session
+            .render_frame(1, 1, &input_pattern(2))
+            .expect("the session continues after an empty-result frame");
+        assert!(matches!(outcome.status, FrameStatus::Rendered { .. }));
+        let close = session.close();
+        assert_eq!(close["frames_ok"], 2);
+        assert_eq!(close["session_clean"], true, "close: {close}");
+    }
+
+    #[test]
     fn frame_deadline_watchdog_terminates_the_job() {
         let _behavior = BehaviorGuard::set(Some("hang_frame"));
         let (repository, plugin, sha) = temp_repository();
@@ -1825,6 +1887,100 @@ mod windows_e2e {
                 "output frame {index} exists"
             );
         }
+    }
+
+    #[test]
+    fn video_batch_reports_an_empty_smart_frame_without_a_png() {
+        // A SmartFX batch frame that legally renders an empty result (#278) has
+        // no pixels, so there is no PNG or raw to write. The batch must report it
+        // as a legal empty frame and keep going, not abort on a 0x0 image. The
+        // fixture answers frame 0 empty; frames 1-2 render normally.
+        let _behavior = BehaviorGuard::set(Some("empty_result_frame_0"));
+        let (repository, plugin, _sha) = temp_repository();
+        let inputs = write_input_frames(&repository.0, 3);
+        let output_directory = repository.0.join("empty-batch-out");
+        let request_path = repository.0.join("empty-request.json");
+        std::fs::write(
+            &request_path,
+            serde_json::to_vec(&serde_json::json!({
+                "schema_version": 1,
+                "plugin": plugin.to_string_lossy(),
+                "input_frames": inputs,
+                "output_directory": output_directory.to_string_lossy(),
+                // Only a SmartFX session may report an empty result.
+                "smart": true,
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let report_path = repository.0.join("empty-report.json");
+        let passed = run_video_batch(&repository.0, &request_path, &report_path)
+            .expect("batch render runs");
+        let report: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&report_path).unwrap()).unwrap();
+        assert!(passed, "the empty frame must not abort the batch: {report}");
+        assert_eq!(report["frame_count"], 3);
+        assert_eq!(report["frames_ok"], 3);
+        assert_eq!(report["aborted"], false);
+        // Frame 0 rendered empty: legal, no PNG.
+        let frame0 = &report["frames"][0];
+        assert_eq!(frame0["status"], "ok");
+        assert_eq!(frame0["empty_result"], true);
+        assert_eq!(frame0["width"], 0);
+        assert_eq!(frame0["output_png"], serde_json::Value::Null);
+        assert!(
+            !output_directory.join("frame-000000.png").exists(),
+            "an empty frame writes no PNG"
+        );
+        // The remaining frames rendered normally with PNGs.
+        for index in 1..3 {
+            assert!(
+                output_directory.join(format!("frame-{index:06}.png")).is_file(),
+                "non-empty frame {index} writes a PNG"
+            );
+        }
+    }
+
+    #[test]
+    fn video_batch_empty_frame_rejects_a_stale_output_png() {
+        // The empty-frame arm writes no PNG, but it must still honor the
+        // fresh-output contract the non-empty arm enforces (#278): a stale
+        // frame-*.png left in the output directory from a previous run would
+        // otherwise keep old pixels on disk while the report claims the frame is
+        // empty, so a directory glob would ingest the wrong frame. Reject it.
+        let _behavior = BehaviorGuard::set(Some("empty_result_frame_0"));
+        let (repository, plugin, _sha) = temp_repository();
+        let inputs = write_input_frames(&repository.0, 3);
+        let output_directory = repository.0.join("stale-batch-out");
+        std::fs::create_dir_all(&output_directory).unwrap();
+        // A leftover frame 0 from an earlier run, which frame 0 now renders empty.
+        std::fs::write(output_directory.join("frame-000000.png"), b"stale").unwrap();
+        let request_path = repository.0.join("stale-request.json");
+        std::fs::write(
+            &request_path,
+            serde_json::to_vec(&serde_json::json!({
+                "schema_version": 1,
+                "plugin": plugin.to_string_lossy(),
+                "input_frames": inputs,
+                "output_directory": output_directory.to_string_lossy(),
+                "smart": true,
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let report_path = repository.0.join("stale-report.json");
+        let passed = run_video_batch(&repository.0, &request_path, &report_path)
+            .expect("the batch runs and writes a report");
+        // The stale PNG aborts the batch (a failed frame), so it does not pass
+        // and the empty frame is recorded as failed rather than silently ok.
+        assert!(
+            !passed,
+            "an empty frame must not silently leave a stale PNG on disk"
+        );
+        let report: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&report_path).unwrap()).unwrap();
+        assert_eq!(report["aborted"], true, "report: {report}");
+        assert_eq!(report["frames"][0]["status"], "failed", "report: {report}");
     }
 
     #[test]

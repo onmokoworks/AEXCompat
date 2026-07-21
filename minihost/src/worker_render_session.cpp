@@ -415,6 +415,13 @@ struct SessionFrameOutput {
   std::string output_hash;
   bool guard_violation{false};
   bool output_validation_failed{false};
+  // A SmartFX frame whose PreRender returned a legally empty result_rect (#278):
+  // the render selector was skipped and there are no output pixels. This is a
+  // valid contract the one-shot path reports as a zero-dimension output, so the
+  // session must report it as a valid empty frame instead of a dimension
+  // invariant failure. Only smart frames ever set this; classic frames leave it
+  // false and a zero dimension stays an invariant failure.
+  bool empty_result{false};
 };
 
 // Resident render session frame loop (docs/RENDER_SESSION_PROTOCOL_2026-07-19.md).
@@ -750,6 +757,26 @@ RenderSessionOutcome run_session_frame_loop(
       reply += "}";
       return channels.write_message(reply);
     };
+    // A SmartFX frame whose PreRender returned a legally empty result_rect (#278):
+    // no pixels were rendered. Report a valid zero-dimension ok frame carrying
+    // an explicit "empty_result":true so the broker accepts the empty geometry
+    // (a zero dimension without this flag stays a dimension invariant failure).
+    // The checksum is over zero bytes, matching the one-shot empty-result output.
+    const auto respond_empty = [&]() {
+      std::string reply;
+      reply.reserve(256);
+      reply += "{\"v\":1,\"type\":\"frame_done\",\"frame_index\":";
+      reply += std::to_string(frame_index);
+      reply += ",\"status\":\"ok\",\"output\":{\"width\":0,\"height\":0,\"rowbytes\":0,";
+      reply += "\"pixel_format\":\"";
+      reply += pixel_format;
+      reply += "\",\"checksum\":\"";
+      reply += sha256_bytes(channels.view() + output_offset, 0);
+      reply += "\",\"guards_intact\":true,\"empty_result\":true},\"render_error\":0,\"generation\":";
+      reply += std::to_string(expected_generation);
+      reply += "}";
+      return channels.write_message(reply);
+    };
     // A resize-output effect whose result overruns the launch output slot: the
     // worker cannot write it here, so it reports the required dimensions and the
     // broker grows the shared section in place (protocol §3, issue #262), after
@@ -845,6 +872,32 @@ RenderSessionOutcome run_session_frame_loop(
       // Frame-local compatibility diagnostic; the sequence state is still
       // owned by the host, so the session may continue.
       if (!respond_error(frame.frame_error)) {
+        outcome.protocol_violation = true;
+        break;
+      }
+      continue;
+    }
+    // A legally empty SmartFX result (#278): PreRender skipped the render
+    // selector, so there are no pixels and the reported geometry is 0x0. This is
+    // a valid contract (the one-shot path reports it as a zero-dimension output),
+    // not a dimension invariant failure. Advance the output generation like a
+    // normal frame (no slot write) and report the empty ok frame. Only smart
+    // frames set this; a classic zero dimension falls through to the invariant
+    // failure below.
+    if (frame.empty_result) {
+      if (!captured.empty()) {
+        respond_error(kSessionOutputCaptureError);
+        outcome.invariant_failure = true;
+        break;
+      }
+      // Record the empty checksum detail (no rows, sha256-of-empty channels) so
+      // an opt-in final report does not carry a previous frame's stale detail
+      // for this zero-byte output (#278).
+      record_output_checksum_detail(channels.view() + output_offset, 0, 0, pixel_bytes);
+      channels.write_header_u32(wrs::kHeaderFrameWidthOffset, 0);
+      channels.write_header_u32(wrs::kHeaderFrameHeightOffset, 0);
+      channels.write_header_u32(wrs::kHeaderOutputGenerationOffset, expected_generation);
+      if (!respond_empty()) {
         outcome.protocol_violation = true;
         break;
       }
@@ -1011,6 +1064,9 @@ SmartRenderSessionOutcome run_smart_render_session(
         frame.rowbytes = frame_result.output_rowbytes;
         frame.input_hash = frame_result.input_hash;
         frame.output_hash = frame_result.output_hash;
+        // A legally empty PreRender result_rect (#278): no pixels were rendered,
+        // so this is a valid empty frame, not a zero-dimension invariant failure.
+        frame.empty_result = frame_result.empty_result_rect;
         // Sentinel evidence only exists once the guarded output buffer was
         // built; refusals before that point are frame-local diagnostics, not
         // corruption.

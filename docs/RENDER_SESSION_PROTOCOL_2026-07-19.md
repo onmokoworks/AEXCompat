@@ -333,6 +333,13 @@ u32 LE の長さ接頭辞 + UTF-8 JSON 本文。1 メッセージ上限 64 KiB (
 - `status`: `"ok"` | `"error"`。`"error"` のうち**フレーム局所の互換性診断**
   (selector 非 0、`render_error` 非 0、時刻 scale 不一致) のみセッション
   継続可能で、続行判断は broker 側 (バッチ CLI は既定で中断)。
+- **空 SmartFX result (#278)**: PreRender が合法な空 result_rect を返し render
+  selector をスキップした場合、`output` は `"width":0,"height":0,"rowbytes":0`
+  と **`"empty_result":true`** を含む `status:"ok"` を返す (checksum はゼロバイト
+  の sha256、one-shot の空出力と一致)。broker はこの明示フラグがあるときのみ
+  ゼロ寸法を合法な空レンダーとして受理し (フラグ無しのゼロ寸法は次項の invariant
+  失敗)、出力スロットは読まず空ピクセルの `Rendered` を返す。generation は通常
+  フレームと同様に前進する。classic フレームはこのフラグを立てない。
 - **SEQUENCE_SETUP の失敗も継続不可**: 遅延発行された SETUP が非 0 を返した
   セッションは何もレンダーできないため、専用コード (-47) の error 応答を
   最後に受理を停止する。broker はこれをフレーム局所診断として再利用させず

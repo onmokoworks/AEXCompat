@@ -527,6 +527,27 @@ mod worker {
                 }
                 continue;
             }
+            if behavior == "empty_result_frame_0" && frame_index == 0 {
+                // A legally empty SmartFX result (#278): no slot write, advance
+                // the output generation like a normal frame, and report a valid
+                // 0x0 ok frame with the explicit empty_result flag. The checksum
+                // is over zero bytes (what the broker reads for an empty frame).
+                view.write_u32(FRAME_WIDTH_OFFSET, 0);
+                view.write_u32(FRAME_HEIGHT_OFFSET, 0);
+                view.write_u32(OUTPUT_GENERATION_OFFSET, expected_generation);
+                let empty_checksum = format!("{:x}", Sha256::digest([]));
+                let reply = format!(
+                    "{{\"v\":1,\"type\":\"frame_done\",\"frame_index\":{frame_index},\
+                     \"status\":\"ok\",\"output\":{{\"width\":0,\"height\":0,\"rowbytes\":0,\
+                     \"pixel_format\":\"argb8\",\"checksum\":\"{empty_checksum}\",\
+                     \"guards_intact\":true,\"empty_result\":true}},\"render_error\":0,\
+                     \"generation\":{expected_generation}}}"
+                );
+                if !write_message(response, &reply) {
+                    return EXIT_PROTOCOL_VIOLATION;
+                }
+                continue;
+            }
             if scale != time_scale {
                 let reply = format!(
                     "{{\"v\":1,\"type\":\"frame_done\",\"frame_index\":{frame_index},\
