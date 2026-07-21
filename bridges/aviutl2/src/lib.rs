@@ -786,9 +786,14 @@ fn config_item_for(parameter: &InteractiveParameter) -> Option<FilterConfigItem>
                         value: index as i32 + 1,
                     })
                     .collect();
+                // Clamp the default to a real item value (1..=N) so a malformed
+                // popup default — discovery reports 0 when the "default" field is
+                // absent — still selects a valid choice, consistent with the
+                // range normalized onto the sent parameter in `exposed_config`.
+                let count = parameter.choices.len() as i32;
                 return Some(FilterConfigItem::Select(FilterConfigSelect {
                     name,
-                    value: parameter.value as i32,
+                    value: (parameter.value as i32).clamp(1, count),
                     items,
                 }));
             }
