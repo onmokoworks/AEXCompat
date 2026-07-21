@@ -1,0 +1,22 @@
+[package]
+name = "aexcompat-aviutl2-multifilter"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+publish = false
+description = "AviUtl2 generic (.aux2) plugin registering each AEX in a folder as its own keyframeable filter (issue #295)"
+
+# Standalone, intentionally outside the broker workspace (same as the aviutl2
+# bridge): the aviutl2 dependency tree must not enter the broker gate.
+[lib]
+name = "aexcompat_aviutl2_multifilter"
+crate-type = ["cdylib"]
+
+[dependencies]
+aviutl2-sys = "0.40"
+libffi = "5.1.1"
+# The AEXCompat broker, driven in-process. RenderSession::open spawns the
+# isolated worker subprocess, so the untrusted AEX stays out-of-process even
+# though this plugin is loaded in-process by AviUtl2.
+aexcompat-broker = { path = "../../broker/crates/broker" }
+sha2 = "0.10"
