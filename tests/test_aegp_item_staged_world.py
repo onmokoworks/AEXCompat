@@ -9,6 +9,8 @@ ROOT = Path(__file__).resolve().parents[1]
 SOURCE = source_owners.L2_MAIN
 RUNTIME = ROOT / "minihost" / "src" / "worker_aegp_staged_item_runtime.cpp"
 HEADER = ROOT / "minihost" / "src" / "worker_aegp_staged_item_runtime.hpp"
+ENTRY_WIRING = ROOT / "minihost" / "src" / "worker_entry_wiring.cpp"
+RECEIPTS_HEADER = ROOT / "minihost" / "src" / "worker_render_receipts.hpp"
 
 
 def _worker() -> Path | None:
@@ -24,6 +26,8 @@ def _worker() -> Path | None:
 def test_item_checkout_uses_immutable_host_stage_not_reentrant_render():
     host = SOURCE.read_text(encoding="utf-8")
     text = RUNTIME.read_text(encoding="utf-8")
+    entry_wiring = ENTRY_WIRING.read_text(encoding="utf-8")
+    receipts_header = RECEIPTS_HEADER.read_text(encoding="utf-8")
     for marker in (
         "struct StagedItemWorld",
         "bool publish_world(",
@@ -41,6 +45,9 @@ def test_item_checkout_uses_immutable_host_stage_not_reentrant_render():
     assert "render_loaded_effect_item_receipt(" not in host
     assert "g_loaded_effect_receipt_mutex" not in host
     assert "g_loaded_effect_receipt_active" not in host
+    assert "exercise_loaded_effect_item_receipt(" not in entry_wiring
+    assert "loaded_effect_receipt_" not in entry_wiring
+    assert "loaded_effect_receipt_" not in receipts_header
     assert "struct Hooks" in HEADER.read_text(encoding="utf-8")
 
 
