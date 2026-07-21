@@ -4,7 +4,7 @@ project(pf_frame_resize_probe LANGUAGES CXX)
 foreach(target
     pf_expand_allowed_probe pf_expand_denied_probe
     pf_shrink_allowed_probe pf_shrink_denied_probe)
-  add_library(${target} MODULE pf_frame_resize_probe.cpp)
+  add_library(${target} MODULE pf_frame_resize_probe.cpp pf_frame_resize_probe.rc)
   target_include_directories(${target} PRIVATE
     "$ENV{AE_SDK_ROOT}/Examples/Headers"
     "$ENV{AE_SDK_ROOT}/Examples/Headers/SP"
