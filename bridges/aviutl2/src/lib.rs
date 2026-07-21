@@ -22,8 +22,8 @@ use aviutl2::{
     AnyResult, AviUtl2Info,
     filter::{
         FilterConfigCheckbox, FilterConfigColor, FilterConfigColorValue, FilterConfigItem,
-        FilterConfigSelect, FilterConfigSelectItem, FilterConfigTrack, FilterPlugin,
-        FilterPluginFlags, FilterPluginTable, FilterProcVideo, RgbaPixel,
+        FilterConfigTrack, FilterPlugin, FilterPluginFlags, FilterPluginTable, FilterProcVideo,
+        RgbaPixel,
     },
     tracing,
 };
@@ -730,65 +730,62 @@ fn exposed_config(template: &[InteractiveParameter]) -> ExposedParams {
 /// Maps one discovered AEX parameter to an AviUtl2 config item, or `None` for
 /// kinds not yet exposed (point, layer, comp, button, custom, group markers, …),
 /// which keep their discovered default.
+///
+/// Discovery reports a parameter's *runtime* kind (`image_render.rs`
+/// `runtime_kind`), which collapses AE's slider/checkbox/popup (param types
+/// 1/4/7) all into `"integer"`. So a checkbox is recognised here as an integer
+/// spanning exactly 0..1 with no choices, not by a dedicated kind string.
 fn config_item_for(parameter: &InteractiveParameter) -> Option<FilterConfigItem> {
     let name = parameter.name.clone();
     match parameter.kind.as_str() {
-        "float" | "slider" | "angle" => {
+        "float" => {
             let (min, max) = bounded_range(parameter)?;
-            Some(FilterConfigItem::Track(FilterConfigTrack {
-                name,
-                value: parameter.value.clamp(min, max),
-                range: min..=max,
-                step: track_step(max - min),
-                zero_display: None,
-                slider_ratio: 1.0,
-            }))
+            Some(track(name, parameter.value, min, max, track_step(max - min)))
+        }
+        // An angle's value lives in `components[0]`; the interactive payload
+        // encodes it from there (`encode_interactive_payload`), so read and write
+        // that, not `value`.
+        "angle" => {
+            let (min, max) = bounded_range(parameter)?;
+            Some(track(name, parameter.components[0], min, max, track_step(max - min)))
         }
         "integer" => {
             let (min, max) = bounded_range(parameter)?;
-            Some(FilterConfigItem::Track(FilterConfigTrack {
-                name,
-                value: parameter.value.round().clamp(min, max),
-                range: min..=max,
-                step: 1.0,
-                zero_display: None,
-                slider_ratio: 1.0,
-            }))
+            if min == 0.0 && max == 1.0 && parameter.choices.is_empty() {
+                // An AE checkbox arrives here as an integer 0..1; expose it as a
+                // checkbox rather than a two-tick slider.
+                Some(FilterConfigItem::Checkbox(FilterConfigCheckbox {
+                    name,
+                    value: parameter.value != 0.0,
+                }))
+            } else {
+                Some(track(name, parameter.value.round(), min, max, 1.0))
+            }
         }
-        "checkbox" => Some(FilterConfigItem::Checkbox(FilterConfigCheckbox {
-            name,
-            value: parameter.value != 0.0,
-        })),
         "color" => Some(FilterConfigItem::Color(FilterConfigColor {
             name,
-            // AviUtl2 color is 0x00RRGGBB; the AEX alpha channel is not exposed.
+            // InteractiveParameter.color is ARGB ([alpha, red, green, blue]);
+            // AviUtl2 wants 0x00RRGGBB.
             value: FilterConfigColorValue(
-                ((parameter.color[0] as u32) << 16)
-                    | ((parameter.color[1] as u32) << 8)
-                    | (parameter.color[2] as u32),
+                ((parameter.color[1] as u32) << 16)
+                    | ((parameter.color[2] as u32) << 8)
+                    | (parameter.color[3] as u32),
             ),
         })),
-        "popup" => {
-            if parameter.choices.is_empty() {
-                return None;
-            }
-            let items = parameter
-                .choices
-                .iter()
-                .enumerate()
-                .map(|(index, label)| FilterConfigSelectItem {
-                    name: label.clone(),
-                    value: index as i32,
-                })
-                .collect();
-            Some(FilterConfigItem::Select(FilterConfigSelect {
-                name,
-                value: parameter.value as i32,
-                items,
-            }))
-        }
         _ => None,
     }
+}
+
+/// A clamped AviUtl2 track (slider) config item.
+fn track(name: String, value: f64, min: f64, max: f64, step: f64) -> FilterConfigItem {
+    FilterConfigItem::Track(FilterConfigTrack {
+        name,
+        value: value.clamp(min, max),
+        range: min..=max,
+        step,
+        zero_display: None,
+        slider_ratio: 1.0,
+    })
 }
 
 /// A finite, strictly-increasing range for a numeric parameter, or `None` when
@@ -825,15 +822,27 @@ fn apply_config_values(
             continue;
         };
         match item {
-            FilterConfigItem::Track(track) => parameter.value = track.value,
+            // An angle track drives `components[0]` (its value source, matching
+            // config_item_for and the payload encoder); an integer track is
+            // rounded (the encoder rejects the whole payload on a fractional
+            // integer value); every other track drives `value`.
+            FilterConfigItem::Track(track) => match parameter.kind.as_str() {
+                "angle" => parameter.components[0] = track.value,
+                "integer" => parameter.value = track.value.round(),
+                _ => parameter.value = track.value,
+            },
             FilterConfigItem::Checkbox(check) => {
                 parameter.value = if check.value { 1.0 } else { 0.0 }
             }
-            FilterConfigItem::Select(select) => parameter.value = f64::from(select.value),
             FilterConfigItem::Color(color) => {
+                // color is ARGB ([alpha, red, green, blue]); update RGB, keep alpha.
                 let (r, g, b) = color.value.to_rgb();
-                parameter.color = [r, g, b, parameter.color[3]];
+                parameter.color[1] = r;
+                parameter.color[2] = g;
+                parameter.color[3] = b;
             }
+            // config_item_for emits only Track/Checkbox/Color, so no other
+            // variant is ever handed back.
             _ => {}
         }
     }

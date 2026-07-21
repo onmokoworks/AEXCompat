@@ -298,11 +298,30 @@ Select に写像可能、value の index 符号化を検証してから)。
 
 未解決 → 段階2b:
 
-- **popup を dropdown 公開する**: `choices` は保持される (`image_render.rs:3234`) ので
-  "integer + 非空 choices" を Select に写像できる。ただし popup 値を worker に送ると
-  crash する件 (index 符号化) の解明が先。crash 原因を standalone (render-parameter-request
-  CLI 等) で再現・特定してから popup 送出を有効化する。
-- integer 系で valid_min/max を持つものの range 取得改善。
+- **popup を dropdown 公開する**: discovery は popup を runtime_kind "integer" に落とすが
+  `choices` は保持する (`image_render.rs:3234`) ので、"integer + 非空 choices" を Select に
+  写像できる。crash 仮説は誤診だった (真因はステール worker) ので、value の index 符号化
+  (AE popup は 1-based の可能性) を確認して有効化する。現状 popup は integer スライダー
+  (choices 分の範囲) として一応操作可能。
+- **angle の scalar value 範囲**: encode は全 kind で untouched な scalar `value ∈ [min,max]`
+  を検査する (`image_render.rs:4362`)。bridge は angle で `components[0]` のみ更新し `value` は
+  discovery の default scalar のまま。plugin の default scalar が valid range 外だと毎フレーム
+  payload 拒否になりうる (angle fixture が無く未検証、稀と思われる)。
+
+### 2026-07-21 Codex 指摘対応 (段階2 PR #281)
+
+Codex が P2×3。broker source で3件とも妥当と確認して修正:
+
+- **checkbox** (`runtime_kind` で "integer" 化、"checkbox" arm は死にコード) → "integer かつ
+  range [0,1] かつ choices 空" を Checkbox に写像。2択 popup (choices あり) は誤検出しない。
+- **angle** (encode は `components` から読む) → config/apply とも `components[0]` を使う。
+- **color** (`InteractiveParameter.color` は ARGB `[a,r,g,b]`、encode も `argb8=`) → pack/unpack
+  を ARGB 順に (RGB 更新・alpha 保持)。
+- 死にコード ("slider"/"checkbox"/"popup" arm、Select apply arm、未使用 import) を整理。
+  integer apply は `.round()` で防御 (encode は fractional integer で payload 全体を拒否)。
+
+float パスは回帰なし (echo probe [0,255,128]/[200,55,128] を維持)。color/angle/checkbox の
+実機 fixture は無いため broker source との一致で正しさを担保。
 
 ## 段階1 総括
 
