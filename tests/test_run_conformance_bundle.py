@@ -252,7 +252,7 @@ def test_classic_report_without_world_objects_is_ok(tmp_path):
     }
 
 
-@pytest.mark.parametrize("plugin_kind", ["aegp_candidate", "unknown_no_effect_entrypoint"])
+@pytest.mark.parametrize("plugin_kind", ["aegp_candidate", "invalid_pipl", "unknown_no_effect_entrypoint"])
 def test_plugin_kind_maps_to_loader_error(plugin_kind):
     module = load_runner_module()
     result = module.normalize_structured_failure(

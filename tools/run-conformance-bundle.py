@@ -524,7 +524,7 @@ def normalize_structured_failure(
     render_path: str = "smartfx",
 ) -> dict[str, Any]:
     classification = value.get("classification")
-    if value.get("plugin_kind") in {"aegp_candidate", "unknown_no_effect_entrypoint"}:
+    if value.get("plugin_kind") in {"aegp_candidate", "invalid_pipl", "unknown_no_effect_entrypoint"}:
         classification = "loader_error"
     # Schema-filter the reported missing suites up front. Only entries whose name
     # the report schema accepts make a render a missing_suite; an unfiltered copy
@@ -588,7 +588,7 @@ def normalize_structured_failure(
     }
     if isinstance(value.get("parameter_metadata"), list):
         result["_parameter_metadata"] = value["parameter_metadata"]
-    if value.get("plugin_kind") in {"aegp_candidate", "unknown_no_effect_entrypoint"}:
+    if value.get("plugin_kind") in {"aegp_candidate", "invalid_pipl", "unknown_no_effect_entrypoint"}:
         result["plugin_kind"] = value["plugin_kind"]
     # Reconcile the classification with the schema-valid missing suites: a
     # generic nonzero_exit with valid missing suites becomes missing_suite, while
