@@ -576,6 +576,12 @@ struct FrameDoneOutput {
     pixel_format: String,
     checksum: String,
     guards_intact: bool,
+    /// A SmartFX frame whose PreRender returned a legally empty result_rect
+    /// (#278): width/height are 0 and there are no output pixels. Absent (false)
+    /// for every normal frame, where a zero dimension stays an invariant
+    /// failure. Only the worker's smart session frame loop sets it.
+    #[serde(default)]
+    empty_result: bool,
 }
 
 #[derive(Deserialize)]
@@ -1877,6 +1883,29 @@ impl RenderSession {
         }
         if !output.guards_intact {
             return Err("guard bytes were reported violated".into());
+        }
+        // A legally empty SmartFX result (#278): PreRender skipped the render
+        // selector, so there are no pixels and the geometry is 0x0. The worker
+        // flags it explicitly (a zero dimension without the flag stays an
+        // invariant failure below). Validate the empty shape and the generation,
+        // then accept it — there are no slot bytes to read.
+        if output.empty_result {
+            if output.width != 0 || output.height != 0 || output.rowbytes != 0 {
+                return Err(format!(
+                    "empty-result frame must be 0x0 with 0 rowbytes, got {}x{} rowbytes {}",
+                    output.width, output.height, output.rowbytes
+                ));
+            }
+            if generation != expected_generation {
+                return Err(format!(
+                    "response generation {generation} differs from expected {expected_generation}"
+                ));
+            }
+            if self.transport.read_header_u32(OUTPUT_GENERATION_OFFSET) != expected_generation {
+                return Err("header output generation is stale".into());
+            }
+            self.validate_static_header()?;
+            return Ok(());
         }
         // A resize-output effect may render at any positive dimensions that
         // still fit the launch output slot (#261): shrink, or an expand small

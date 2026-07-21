@@ -1528,6 +1528,39 @@ mod windows_e2e {
     }
 
     #[test]
+    fn empty_smart_result_frame_is_accepted_as_a_valid_empty_render() {
+        // A SmartFX frame whose PreRender returned a legally empty result_rect
+        // (#278) reports a 0x0 ok frame with the explicit empty_result flag. The
+        // session accepts it as a valid empty render (not a dimension invariant
+        // failure) with no output pixels, and stays usable for later frames.
+        let _behavior = BehaviorGuard::set(Some("empty_result_frame_0"));
+        let (repository, plugin, sha) = temp_repository();
+        let mut session = open_session(&repository.0, &plugin, &sha, Duration::from_secs(30));
+        let outcome = session
+            .render_frame(0, 0, &input_pattern(1))
+            .expect("an empty-result frame is a valid render, not an invalidation");
+        let FrameStatus::Rendered {
+            pixels,
+            width,
+            height,
+            ..
+        } = outcome.status
+        else {
+            panic!("the empty-result frame did not render");
+        };
+        assert_eq!((width, height), (0, 0), "an empty result has zero geometry");
+        assert!(pixels.is_empty(), "an empty result carries no pixels");
+        // The session stays usable: a normal frame renders afterwards.
+        let outcome = session
+            .render_frame(1, 1, &input_pattern(2))
+            .expect("the session continues after an empty-result frame");
+        assert!(matches!(outcome.status, FrameStatus::Rendered { .. }));
+        let close = session.close();
+        assert_eq!(close["frames_ok"], 2);
+        assert_eq!(close["session_clean"], true, "close: {close}");
+    }
+
+    #[test]
     fn frame_deadline_watchdog_terminates_the_job() {
         let _behavior = BehaviorGuard::set(Some("hang_frame"));
         let (repository, plugin, sha) = temp_repository();
