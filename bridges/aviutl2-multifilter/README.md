@@ -20,8 +20,12 @@ AviUtl2 の generic プラグイン (`.aux2`)。フォルダ内の各 AEX を、
    登録し、closure が `func_proc_video` として機能し captured state (channel) で正しく動くかを実機確認。
    crate ベースのスパイク (`bridges/aviutl2-multifilter-spike`, `.aux2`) で「複数登録 + 独立
    キーフレーム」は別途立証済み。
-2. 各フィルタに discovery した Track/Checkbox/Select/Color を持たせ、キーフレーム値を
-   `get_object_track_value(object, effect名, 項目名, frame, &value)` の名前ベースで読む。
+2. 各フィルタに discovery した Track/Checkbox/Select/Color を持たせ、キーフレーム値を読む。
+   **AviUtl2 は func_proc_video 呼び出し直前に各テーブルの FILTER_ITEM 構造体の `value` を
+   現在のキーフレーム値に更新する** (`FILTER_ITEM_TRACK.value` のコメント「フィルタ処理の
+   呼び出し時に現在の値に更新されます」)。よって closure は userdata に自分の FILTER_ITEM
+   ポインタ群を持ち、`(*track).value` を直接読むだけでよい。edit_section も effect_id も
+   名前ベース lookup も不要。
 3. 各フィルタ proc → その AEX の常駐 `RenderSession` に配線 (SmartFX 検出含む)。
 4. フォルダ走査で実行時 N フィルタ登録。libffi closure・テーブル・item リストの生存期間管理。
 
