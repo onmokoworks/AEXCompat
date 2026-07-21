@@ -57,12 +57,25 @@ struct RenderedFrame {
     height: u32,
 }
 
-/// A render request sent to a session's owning thread. `reply` carries either
-/// the validated frame or a human-readable diagnostic.
+/// The outcome of one frame, distinguishing a still-usable session from a lost
+/// one so the caller reopens only when necessary.
+enum FrameReply {
+    /// The frame rendered; write these pixels back.
+    Rendered(RenderedFrame),
+    /// A frame-local compatibility diagnostic (selector error, time mismatch).
+    /// The session stays usable; leave the object's pixels for this frame.
+    FrameLocal(i64),
+    /// The session/worker is gone (crash, timeout, host-protection
+    /// invalidation, broken pipe). The caller drops it so the next frame
+    /// reopens.
+    SessionLost(String),
+}
+
+/// A render request sent to a session's owning thread.
 struct RenderReq {
     current_time: i32,
     rgba: Vec<u8>,
-    reply: Sender<Result<RenderedFrame, String>>,
+    reply: Sender<FrameReply>,
 }
 
 /// Handle to a resident session. The `RenderSession` itself is `!Send` (it
@@ -72,15 +85,33 @@ struct RenderReq {
 /// (watch-item #2, see the design note).
 struct BridgeSession {
     tx: Option<Sender<RenderReq>>,
+    /// Launch identity, frozen at open. A frame whose object geometry or timing
+    /// differs needs a fresh session (the slot dimensions, total_time and
+    /// time_scale are fixed at launch), so this is compared per frame.
+    identity: SessionIdentity,
+    join: Option<JoinHandle<()>>,
+}
+
+/// The launch-fixed identity of a session, used to detect when a live session
+/// no longer matches the object and must be reopened.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct SessionIdentity {
     width: u32,
     height: u32,
-    join: Option<JoinHandle<()>>,
+    time_step: i32,
+    total_time: i32,
+    time_scale: u32,
 }
 
 impl BridgeSession {
     fn open(config: SessionConfig) -> Result<BridgeSession, String> {
-        let width = config.width;
-        let height = config.height;
+        let identity = SessionIdentity {
+            width: config.width,
+            height: config.height,
+            time_step: config.time_step,
+            total_time: config.total_time,
+            time_scale: config.time_scale,
+        };
         let (tx, rx) = channel::<RenderReq>();
         let (open_tx, open_rx) = channel::<Result<(), String>>();
 
@@ -139,28 +170,46 @@ impl BridgeSession {
                         None,
                     );
                     frame_index = frame_index.wrapping_add(1);
-                    let result = match outcome {
+                    let reply = match outcome {
                         Ok(outcome) => match outcome.status {
                             FrameStatus::Rendered {
                                 pixels,
                                 width: frame_width,
                                 height: frame_height,
                                 ..
-                            } => Ok(RenderedFrame {
+                            } => FrameReply::Rendered(RenderedFrame {
                                 pixels,
                                 width: frame_width,
                                 height: frame_height,
                             }),
                             FrameStatus::FrameError { render_error } => {
-                                Err(format!("frame-local render error {render_error}"))
+                                FrameReply::FrameLocal(render_error)
                             }
                         },
-                        Err(error) => Err(format!("render_frame failed: {error}")),
+                        // An io error means the transport is broken; the session
+                        // cannot be trusted for further frames.
+                        Err(error) => FrameReply::SessionLost(format!("render_frame failed: {error}")),
                     };
+                    // A host-protection invariant failure invalidates the whole
+                    // session; the next frame must reopen, so report it lost even
+                    // if this frame came back as a frame-local diagnostic.
+                    let reply = if session.invalidation().is_some() {
+                        let detail = match reply {
+                            FrameReply::SessionLost(message) => message,
+                            FrameReply::FrameLocal(code) => {
+                                format!("session invalidated (render_error {code})")
+                            }
+                            FrameReply::Rendered(_) => "session invalidated".to_string(),
+                        };
+                        FrameReply::SessionLost(detail)
+                    } else {
+                        reply
+                    };
+                    let lost = matches!(reply, FrameReply::SessionLost(_));
                     // A dropped receiver means the callback stopped waiting; keep
                     // serving so the session stays valid for later frames.
-                    let _ = req.reply.send(result);
-                    if session.invalidation().is_some() {
+                    let _ = req.reply.send(reply);
+                    if lost {
                         break;
                     }
                 }
@@ -171,8 +220,7 @@ impl BridgeSession {
         match open_rx.recv() {
             Ok(Ok(())) => Ok(BridgeSession {
                 tx: Some(tx),
-                width,
-                height,
+                identity,
                 join: Some(join),
             }),
             Ok(Err(message)) => {
@@ -187,7 +235,7 @@ impl BridgeSession {
     }
 
     /// A clone of the request channel to the owning thread. `Sender` is `Send`
-    /// + `Clone`, so the caller can drive a render after releasing the session
+    /// and `Clone`, so the caller can drive a render after releasing the session
     /// map lock (the blocking worker round-trip must not hold that lock).
     fn sender(&self) -> Option<Sender<RenderReq>> {
         self.tx.clone()
@@ -196,18 +244,24 @@ impl BridgeSession {
 
 /// Renders one frame by round-tripping through a session's owning thread. Runs
 /// with no lock held so concurrent effect instances render in parallel and a
-/// slow worker never stalls other AviUtl2 threads on the session map.
-fn render_on(tx: &Sender<RenderReq>, current_time: i32, rgba: Vec<u8>) -> Result<RenderedFrame, String> {
+/// slow worker never stalls other AviUtl2 threads on the session map. A gone
+/// thread is reported as `SessionLost` so the caller reopens.
+fn render_on(tx: &Sender<RenderReq>, current_time: i32, rgba: Vec<u8>) -> FrameReply {
     let (reply_tx, reply_rx) = channel();
-    tx.send(RenderReq {
-        current_time,
-        rgba,
-        reply: reply_tx,
-    })
-    .map_err(|_| "session thread is gone".to_string())?;
-    reply_rx
-        .recv()
-        .map_err(|_| "session thread dropped the reply".to_string())?
+    if tx
+        .send(RenderReq {
+            current_time,
+            rgba,
+            reply: reply_tx,
+        })
+        .is_err()
+    {
+        return FrameReply::SessionLost("session thread is gone".to_string());
+    }
+    match reply_rx.recv() {
+        Ok(reply) => reply,
+        Err(_) => FrameReply::SessionLost("session thread dropped the reply".to_string()),
+    }
 }
 
 impl Drop for BridgeSession {
@@ -225,6 +279,94 @@ impl Drop for BridgeSession {
 #[aviutl2::plugin(FilterPlugin)]
 struct AexBridgeFilter {
     sessions: Mutex<HashMap<i64, BridgeSession>>,
+}
+
+impl AexBridgeFilter {
+    /// Returns the request channel of a live session already matching `identity`,
+    /// or `None` when the caller must open one. A session whose identity no
+    /// longer matches (object resized, retimed) is evicted here; the eviction is
+    /// dropped after the lock is released so its thread `join()` never blocks the
+    /// map.
+    fn existing_sender(
+        &self,
+        effect_id: i64,
+        identity: SessionIdentity,
+    ) -> Result<Option<Sender<RenderReq>>, String> {
+        let mut evicted: Option<BridgeSession> = None;
+        let sender;
+        {
+            let mut sessions = self
+                .sessions
+                .lock()
+                .map_err(|_| "session map poisoned".to_string())?;
+            match sessions.get(&effect_id) {
+                Some(session) if session.identity == identity => sender = session.sender(),
+                Some(_) => {
+                    evicted = sessions.remove(&effect_id);
+                    sender = None;
+                }
+                None => sender = None,
+            }
+        }
+        drop(evicted);
+        Ok(sender)
+    }
+
+    /// Opens a session outside the map lock (open blocks for seconds spawning the
+    /// worker), then inserts it under a brief lock. If another thread won the
+    /// race and already installed a matching session, that one is kept and the
+    /// freshly opened session is dropped after the lock is released.
+    fn open_and_get_sender(
+        &self,
+        effect_id: i64,
+        identity: SessionIdentity,
+        config: SessionConfig,
+    ) -> Result<Sender<RenderReq>, String> {
+        let mut opened = Some(BridgeSession::open(config)?);
+        let my_sender = opened
+            .as_ref()
+            .expect("just opened")
+            .sender()
+            .ok_or_else(|| "session is closing".to_string())?;
+        let discard: Option<BridgeSession>;
+        let sender;
+        {
+            let mut sessions = self
+                .sessions
+                .lock()
+                .map_err(|_| "session map poisoned".to_string())?;
+            match sessions
+                .get(&effect_id)
+                .filter(|session| session.identity == identity)
+                .and_then(|session| session.sender())
+            {
+                // Lost the open race; keep the installed session, discard ours.
+                Some(existing) => {
+                    discard = opened.take();
+                    sender = existing;
+                }
+                // Install ours, evicting any stale/dead entry (dropped off-lock).
+                None => {
+                    discard = sessions.insert(effect_id, opened.take().expect("just opened"));
+                    sender = my_sender;
+                }
+            }
+        }
+        drop(discard);
+        Ok(sender)
+    }
+
+    /// Removes and drops a session, e.g. after its worker died so the next frame
+    /// reopens. The drop (thread `join()` + `RenderSession::close`) runs after
+    /// the lock is released.
+    fn remove_session(&self, effect_id: i64) {
+        let removed = self
+            .sessions
+            .lock()
+            .ok()
+            .and_then(|mut sessions| sessions.remove(&effect_id));
+        drop(removed);
+    }
 }
 
 impl FilterPlugin for AexBridgeFilter {
@@ -302,24 +444,22 @@ impl FilterPlugin for AexBridgeFilter {
         video.get_image_data(&mut pixels);
         let rgba = pixels.as_bytes().to_vec();
 
-        // Hold the map lock only long enough to get (or open) the session and
-        // clone its request channel. The blocking worker round-trip then runs
-        // lock-free below.
-        let sender = {
-            let mut sessions = self
-                .sessions
-                .lock()
-                .map_err(|_| aviutl2::anyhow::anyhow!("session map poisoned"))?;
+        let identity = SessionIdentity {
+            width,
+            height,
+            time_step,
+            total_time,
+            time_scale,
+        };
 
-            // Re-open when the object geometry changes: the session's slot
-            // dimensions are fixed at launch.
-            let stale = sessions
-                .get(&effect_id)
-                .is_some_and(|session| session.width != width || session.height != height);
-            if stale {
-                sessions.remove(&effect_id);
-            }
-            if !sessions.contains_key(&effect_id) {
+        // Reuse a live matching session; otherwise open one outside the map lock.
+        // Neither the blocking worker round-trip below nor `open` holds the lock.
+        let sender = match self
+            .existing_sender(effect_id, identity)
+            .map_err(|message| aviutl2::anyhow::anyhow!("{message}"))?
+        {
+            Some(sender) => sender,
+            None => {
                 let (repository, plugin, plugin_sha256) = resolve_launch_env()?;
                 let config = SessionConfig {
                     repository,
@@ -331,28 +471,28 @@ impl FilterPlugin for AexBridgeFilter {
                     total_time,
                     time_scale,
                 };
-                let session = BridgeSession::open(config)
-                    .map_err(|message| aviutl2::anyhow::anyhow!("{message}"))?;
-                sessions.insert(effect_id, session);
+                self.open_and_get_sender(effect_id, identity, config)
+                    .map_err(|message| aviutl2::anyhow::anyhow!("{message}"))?
             }
-            sessions
-                .get(&effect_id)
-                .expect("session was just inserted")
-                .sender()
-                .ok_or_else(|| aviutl2::anyhow::anyhow!("session is closing"))?
         };
 
-        let rendered = render_on(&sender, current_time, rgba);
-
-        match rendered {
-            Ok(frame) => {
+        match render_on(&sender, current_time, rgba) {
+            FrameReply::Rendered(frame) => {
                 video.set_image_data(&frame.pixels, frame.width, frame.height);
                 Ok(())
             }
-            Err(message) => {
-                // A frame-local failure leaves the object's pixels untouched
-                // rather than aborting the whole filter/output chain.
-                tracing::error!("AEX render failed on effect {effect_id}: {message}");
+            FrameReply::FrameLocal(code) => {
+                // A frame-local diagnostic. Keep the session and leave this
+                // frame's pixels untouched rather than aborting the whole
+                // filter/output chain.
+                tracing::warn!("AEX frame-local error on effect {effect_id}: render_error {code}");
+                Ok(())
+            }
+            FrameReply::SessionLost(message) => {
+                // Worker crash, timeout, or host-protection invalidation. Drop
+                // the dead entry so the next frame reopens.
+                self.remove_session(effect_id);
+                tracing::error!("AEX session lost on effect {effect_id}: {message}");
                 Ok(())
             }
         }

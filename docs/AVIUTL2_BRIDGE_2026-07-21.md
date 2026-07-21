@@ -224,3 +224,38 @@ green は行パリティ (偶191/奇64)、blue ~128。
 - **PA64/HF64 深度**: 16bit 乗算済みα / fp16 の変換規則。
 - **固定 AEX の脱却**: env 直書きでなく設定項目や同梱でプラグイン選択。
 - worker 同梱パッケージング (shipping)。
+
+## 2026-07-21 ローカルレビュー対応 (Codex 前)
+
+段階1 コミット後、ローカルレビューエージェントに並行性・FFI・リーク観点で
+レビューさせ、3 点を段階1 内で修正した (残りは検証済み or 段階2 に送る)。
+
+修正 (実装):
+
+- **死んだセッションの reap/reopen** (HIGH): worker が timeout/クラッシュ/
+  host-protection invalidation で終了しても map に残り、以降 send 失敗を握り
+  潰して回復しなかった。→ reply を enum `FrameReply` 化し
+  `Rendered`/`FrameLocal`/`SessionLost` を区別。`SessionLost` (worker 消失・
+  invalidation・pipe 破損) のとき `remove_session` で除去し次フレームが再 open。
+  `FrameLocal` (frame 局所診断、セッション生存) では除去しない (毎フレーム
+  再 open storm を避ける)。
+- **ロック保持中のブロッキング排除** (HIGH/MED): `RenderSession::open` (数秒) と
+  stale セッションの drop/join (最大 frame deadline) がまだ map lock 内だった。
+  → `existing_sender` (短ロックで sender clone、stale はロック外 drop) と
+  `open_and_get_sender` (open はロック外、double-check insert、余剰は
+  ロック外 drop) に分割。ロックはマップ操作の間だけ。
+- **時刻パラメーターの staleness** (MED): `total_time`/`time_scale`/`time_step` は
+  open 固定で、オブジェクト長や fps 変更で以降フレームが total_time 超過→無描画
+  だった。→ `SessionIdentity` に幾何+時刻を入れ、不一致で再 open。
+
+段階2 送り (レビュー指摘、段階1 では未対処):
+
+- 拡大/縮小出力エフェクトを filter object で `set_image_data(w!=obj, h)` する件
+  (AviUtl2 が filter mode でサイズ変更を許すか要確認)。段階1 の probe は resize
+  しないので未発生。
+- 極端フレーム数での `current_time = frame*scale` の i32 飽和衝突 (実用外)。
+
+不対処 (検証済みで問題なし):
+
+- pixel チャンネル順 `Argb8` スロット vs `RgbaPixel`: fill-premultiply probe の
+  実機結果 (赤 seed が赤に見える) で RGBA 一貫を確認済み。コード変更不要。
