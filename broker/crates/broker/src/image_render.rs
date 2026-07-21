@@ -4698,12 +4698,22 @@ fn render_with_artifact(
         && std::env::var_os(DISABLE_SESSION_WRAPPER_ENV).is_none()
         && timing.time_scale <= i32::MAX as u32
         && if smart {
+            // Argb32f smart Auto is the one-shot GPU-preflight path
+            // (gpu_initial_attempt below requires smart && Argb32f && a runtime
+            // backend): one-shot attempts GPU, fails the policy-less preflight,
+            // and records gpu_attempt/gpu_fallback_used before the CPU render.
+            // A CPU session folds Auto+policy-none straight to CPU and cannot
+            // reproduce those report fields, so routing it here would diverge
+            // from one-shot on everything but pixels. Keep it on one-shot until
+            // the GPU session stage aligns that path; Argb8 Auto and any
+            // explicit-CPU smart render take no GPU attempt and stay equivalent.
             secondaries.is_empty()
                 && timed_secondaries.is_empty()
                 && host_context.is_none()
                 && (gpu_backend == RenderGpuBackend::Cpu
                     || (gpu_backend == RenderGpuBackend::Auto
-                        && gpu_runtime_policy.is_none()))
+                        && gpu_runtime_policy.is_none()
+                        && pixel_format != RenderPixelFormat::Argb32f))
         } else {
             gpu_backend == RenderGpuBackend::Auto
         };
@@ -5680,9 +5690,17 @@ fn render_classic_via_length_one_session(
             }))
             .collect::<Vec<_>>()),
         empty_smart_result,
-        output_raw: request
-            .preserved_output
-            .map(|path| path.to_string_lossy().into_owned()),
+        // The empty branch above never writes the preserved raw sidecar, so
+        // pointing the report at that path would name a file that does not
+        // exist. Mirror the one-shot smart guard and report no raw for an
+        // empty result.
+        output_raw: if empty_smart_result {
+            None
+        } else {
+            request
+                .preserved_output
+                .map(|path| path.to_string_lossy().into_owned())
+        },
         deep_png_output: request.deep_png_output,
         deep_overrange_samples,
         world_dump_display: world_dump_dir.as_ref().map(|dump| dump.display.clone()),
