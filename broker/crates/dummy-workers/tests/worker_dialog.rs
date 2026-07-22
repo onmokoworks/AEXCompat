@@ -86,6 +86,40 @@ fn a_modal_dialog_is_closed_so_the_worker_reaches_its_result() {
 }
 
 #[test]
+fn a_dialog_seen_to_go_away_while_the_worker_runs_is_reported_closed() {
+    use aexcompat_broker::windows_process::run_isolated;
+
+    // `closed` can only be observed while the worker is alive — once the
+    // process is gone so is every window it owned, answered or not. This worker
+    // keeps running after its dialog is answered so there is a poll in which to
+    // see it.
+    let title = format!("aexcompat-351-live-worker-{}", std::process::id());
+    let result = run_isolated(
+        Path::new(env!("CARGO_BIN_EXE_dummy_messagebox")),
+        &[title.clone(), "dialog-then-live".into()],
+        Duration::from_secs(30),
+    )
+    .expect("launch the dialog worker");
+
+    assert_eq!(result.classification.as_str(), "ok", "{:?}", result.stderr);
+    assert!(
+        result.stdout.contains("worker_still_running"),
+        "worker did not outlive its dialog: {:?}",
+        result.stdout
+    );
+    let dialog = result
+        .dismissed_windows
+        .iter()
+        .find(|window| window.title == title)
+        .unwrap_or_else(|| panic!("dialog not recorded: {:?}", result.dismissed_windows));
+    assert!(dialog.asked_to_close, "{dialog:?}");
+    assert!(
+        dialog.closed,
+        "the broker did not see its own close take effect: {dialog:?}"
+    );
+}
+
+#[test]
 fn a_window_that_is_not_a_dialog_is_recorded_and_left_alone() {
     use aexcompat_broker::windows_process::run_isolated;
 

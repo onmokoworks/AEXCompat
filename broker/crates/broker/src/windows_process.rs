@@ -645,14 +645,17 @@ impl LaunchedIsolatedProcess {
     /// deadline, exactly like the one-shot path), then collects output and
     /// job accounting into a `ProcessResult`.
     pub fn wait_and_collect(self, timeout: Duration) -> io::Result<ProcessResult> {
+        // Pattern bindings drop in reverse order, so `dialog_sweep` comes last
+        // here to be dropped first: an early return below must stop the sweep
+        // before the handles it reads are closed.
         let LaunchedIsolatedProcess {
-            dialog_sweep,
             process: process_handle,
             job,
             desktop,
             stdout_reader,
             stderr_reader,
             minidump_file,
+            dialog_sweep,
         } = self;
         let wait = unsafe {
             WaitForSingleObject(

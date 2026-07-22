@@ -173,9 +173,21 @@ mod windows_impl {
     /// One window the sweep is tracking across polls.
     struct Tracked {
         first_seen: Instant,
-        record: usize,
+        /// Where this window is reported, or `None` once the report is full.
+        /// Tracking continues either way: the cap bounds the diagnostic, and
+        /// letting it bound *closing* would silently disarm the sweep for a
+        /// worker that had cycled enough windows — which is the worker most
+        /// likely to put up the dialog that matters.
+        record: Option<usize>,
         is_dialog: bool,
+        /// Consecutive polls this window has been missing from, so one
+        /// truncated enumeration cannot be read as it having gone away.
+        missed: u32,
     }
+
+    /// How many polls in a row a window must be missing before it counts as
+    /// gone. Two, because a single pass can be truncated.
+    const MISSES_BEFORE_GONE: u32 = 2;
 
     fn sweep_until(watched: Watched, stop: &AtomicBool) -> Vec<DismissedWindow> {
         let mut state = SweepState {
@@ -191,34 +203,42 @@ mod windows_impl {
         // would report a dialog that ignored `WM_CLOSE` as having been closed.
         while !stop.load(Ordering::Relaxed) {
             state.still_present.clear();
-            let enumerated = unsafe {
+            unsafe {
                 EnumDesktopWindows(
                     watched.desktop,
                     Some(visit),
                     &mut state as *mut SweepState as isize,
-                )
-            } != 0;
-            // A window destroyed mid-enumeration makes `EnumDesktopWindows`
-            // stop early, and a partial list is not evidence that anything went
-            // away; acting on it would latch a window that is still up.
-            let worker_alive = unsafe { WaitForSingleObject(watched.process, 0) } == WAIT_TIMEOUT;
-            if enumerated {
-                state.tracked.retain(|window, tracked| {
-                    if state.still_present.contains(window) {
-                        return true;
-                    }
-                    // Only while the worker runs does a window going away mean
-                    // it was answered. Once the process is gone so is every
-                    // window it owned, answered or not.
-                    if worker_alive && state.found[tracked.record].asked_to_close {
-                        state.found[tracked.record].closed = true;
-                    }
-                    // Dropped, so a window handle Windows hands out again
-                    // starts its own grace and gets its own record rather than
-                    // inheriting the previous window's.
-                    false
-                });
+                );
             }
+            let worker_alive = unsafe { WaitForSingleObject(watched.process, 0) } == WAIT_TIMEOUT;
+            state.tracked.retain(|window, tracked| {
+                if state.still_present.contains(window) {
+                    tracked.missed = 0;
+                    return true;
+                }
+                // One absence is not evidence. `EnumDesktopWindows` answers
+                // false and enumerates nothing both when a window is destroyed
+                // mid-walk and when the desktop is simply empty, so a single
+                // empty pass cannot be told from a truncated one. A window that
+                // is really gone stays gone.
+                tracked.missed += 1;
+                if tracked.missed < MISSES_BEFORE_GONE {
+                    return true;
+                }
+                // Only while the worker runs does a window going away mean it
+                // was answered. Once the process is gone so is every window it
+                // owned, answered or not.
+                if worker_alive
+                    && let Some(record) = tracked.record
+                    && state.found[record].asked_to_close
+                {
+                    state.found[record].closed = true;
+                }
+                // Dropped, so a window handle Windows hands out again starts
+                // its own grace and gets its own record rather than inheriting
+                // the previous window's.
+                false
+            });
             std::thread::sleep(POLL);
         }
         state.found
@@ -233,6 +253,12 @@ mod windows_impl {
 
     unsafe extern "system" fn visit(window: HWND, param: LPARAM) -> BOOL {
         let state = unsafe { &mut *(param as *mut SweepState) };
+        // Recorded before any filter: a window that merely turned invisible for
+        // a moment, or whose job membership could not be tested this time, is
+        // still there. Treating it as gone would drop its entry and restart its
+        // grace, so a window that flapped could never age into being closed.
+        let key = window as isize;
+        state.still_present.insert(key);
         if unsafe { IsWindowVisible(window) } == 0 {
             return 1;
         }
@@ -243,18 +269,9 @@ mod windows_impl {
         if !belongs_to_job(window, state.job) {
             return 1;
         }
-        let key = window as isize;
-        state.still_present.insert(key);
         let (first_seen, is_dialog) = match state.tracked.get(&key) {
             Some(entry) => (entry.first_seen, entry.is_dialog),
             None => {
-                // A plug-in that opens and closes a window per frame would
-                // otherwise grow this without bound for the life of a session,
-                // and it all ends up in a diagnostic. Bounded like the stdout
-                // and stderr captures are.
-                if state.found.len() >= MAX_RECORDED {
-                    return 1;
-                }
                 let class = window_text(window, GetClassNameW);
                 let is_dialog = class == super::DIALOG_CLASS;
                 // Titles reach diagnostics, and a dialog routinely names the
@@ -262,18 +279,29 @@ mod windows_impl {
                 // than at every reader.
                 let (title, _) =
                     crate::redact_windows_paths(&window_text(window, GetWindowTextW), TITLE_LIMIT);
-                state.found.push(DismissedWindow {
-                    title,
-                    class,
-                    closed: false,
-                    asked_to_close: false,
-                });
+                // A plug-in that opens and closes a window per frame would
+                // otherwise grow the report without bound for the life of a
+                // session, and all of it ends up in a diagnostic. Bounded like
+                // the stdout and stderr captures are; the window is still
+                // tracked and still closed.
+                let record = if state.found.len() < MAX_RECORDED {
+                    state.found.push(DismissedWindow {
+                        title,
+                        class,
+                        closed: false,
+                        asked_to_close: false,
+                    });
+                    Some(state.found.len() - 1)
+                } else {
+                    None
+                };
                 state.tracked.insert(
                     key,
                     Tracked {
                         first_seen: Instant::now(),
-                        record: state.found.len() - 1,
+                        record,
                         is_dialog,
+                        missed: 0,
                     },
                 );
                 return 1;
@@ -288,8 +316,7 @@ mod windows_impl {
         // only once the post is accepted, so the field says what the broker did
         // rather than what it attempted.
         let posted = unsafe { PostMessageW(window, WM_CLOSE, 0, 0) } != 0;
-        if let Some(tracked) = state.tracked.get(&key) {
-            let record = tracked.record;
+        if let Some(record) = state.tracked.get(&key).and_then(|tracked| tracked.record) {
             state.found[record].asked_to_close |= posted;
         }
         1

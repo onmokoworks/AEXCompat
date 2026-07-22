@@ -4,6 +4,10 @@
 //! `argv[1]` is the window title, so a test can look for this exact window.
 //! `argv[2]` selects the shape:
 //!
+//! - `dialog-then-live`: the same message box, but the worker keeps running for
+//!   a while after it is answered. That gives the broker a poll while the
+//!   worker is still alive in which to observe the window gone, which is the
+//!   only way it can report a dialog as having been closed.
 //! - absent or `dialog`: a standard `MessageBox`. This is what a real plug-in's
 //!   dependency does when it fails at runtime — the Intel IPP dispatcher shipped
 //!   with After Effects asks for a CPU-specific backend it cannot find, and
@@ -51,6 +55,13 @@ fn main() {
         )
     };
     println!("messagebox_dismissed:{answer}");
+    if shape == "dialog-then-live" {
+        let _ = std::io::stdout().flush();
+        // Longer than one sweep poll, so the broker sees the window gone before
+        // the process is.
+        std::thread::sleep(std::time::Duration::from_millis(600));
+        println!("worker_still_running");
+    }
 }
 
 /// Creates a visible window of the worker's own class, pumps messages for long
