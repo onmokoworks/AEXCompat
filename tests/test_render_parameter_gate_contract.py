@@ -148,41 +148,88 @@ class RenderRequestSecureLaunchContractTests(unittest.TestCase):
 
     ROUTE = ROOT / "broker/crates/broker/src/render_request.rs"
 
-    def route_source(self):
-        """render_request.rs with its `#[cfg(test)]` module dropped.
+    def literal_end(self, text, index):
+        """End index of the Rust literal starting at `index`, or None if none does.
 
-        Every assertion here is about production launch sites and reports. Both sides
-        of each `== launches` comparison must count the same text, so the whole class
-        reads through this rather than the raw file: otherwise a Rust unit test that
-        mentions one marker but not another desynchronises the counts.
+        Handles `"..."` (with escapes), raw `r"..."` / `r#*"..."#*`, and char literals.
+        A lifetime (`'a`) is not a literal and returns None, which is safe: it carries
+        no brace, quote or comment opener.
+        """
+        char = text[index]
+        if char == "r" and not (index and (text[index - 1].isalnum() or text[index - 1] == "_")):
+            hashes = 0
+            cursor = index + 1
+            while text[cursor : cursor + 1] == "#":
+                hashes += 1
+                cursor += 1
+            if text[cursor : cursor + 1] != '"':
+                return None
+            terminator = '"' + "#" * hashes
+            close = text.find(terminator, cursor + 1)
+            return len(text) if close == -1 else close + len(terminator)
+        if char == '"':
+            cursor = index + 1
+            while cursor < len(text) and text[cursor] != '"':
+                cursor += 2 if text[cursor] == "\\" else 1
+            return min(cursor + 1, len(text))
+        if char == "'":
+            closing = index + (3 if text[index + 1 : index + 2] == "\\" else 2)
+            return closing + 1 if text[closing : closing + 1] == "'" else None
+        return None
+
+    def strip_comments(self, text):
+        """`text` with `//` and `/* */` comments removed, literals left intact."""
+        kept = []
+        index = 0
+        end = len(text)
+        while index < end:
+            stop = self.literal_end(text, index)
+            if stop is not None:
+                kept.append(text[index:stop])
+                index = stop
+                continue
+            pair = text[index : index + 2]
+            if pair == "//":
+                newline = text.find("\n", index)
+                index = end if newline == -1 else newline
+                continue
+            if pair == "/*":
+                close = text.find("*/", index + 2)
+                index = end if close == -1 else close + 2
+                continue
+            kept.append(text[index])
+            index += 1
+        return "".join(kept)
+
+    def route_source(self):
+        """render_request.rs with its `#[cfg(test)]` module and all comments removed.
+
+        Every assertion in this class counts over this one text, so the two sides of an
+        `== launches` comparison can never disagree because one of them saw a comment
+        or a Rust unit test that the other did not.
         """
         route = self.ROUTE.read_text(encoding="utf-8")
         cut = route.find("#[cfg(test)]")
-        return route if cut == -1 else route[:cut]
+        return self.strip_comments(route if cut == -1 else route[:cut])
 
     def launch_sites(self, route):
         """Number of real `secure_launch(` call sites in `route`.
 
-        Line comments are stripped and occurrences counted individually. Asserts a
-        floor so a module that lost every launch cannot make the `== launches` checks
-        pass vacuously as `0 == 0`.
+        Asserts a floor so a module that lost every launch cannot make the
+        `== launches` checks pass vacuously as `0 == 0`.
         """
-        sites = 0
-        for line in route.splitlines():
-            code = line.split("//", 1)[0]
-            sites += len(re.findall(r"(?<![a-z_])secure_launch\(", code))
+        sites = len(re.findall(r"(?<![a-z_])secure_launch\(", route))
         self.assertGreaterEqual(sites, 4, "render_request.rs lost its sealed launches")
         return sites
 
     def report_object(self, route, marker_at, stage):
         """The full `let report = json!({ ... })` text enclosing `marker_at`.
 
-        The end is found by balancing braces from the opening one, skipping string and
-        char literals and comments. A `}` inside a literal would otherwise drive the
-        depth to zero early and return a truncated body, dropping later keys from the
-        check unnoticed -- `"stage"` is the second key in every report, so the marker
-        assertion below would not catch it. Brace-in-literal is idiomatic here
-        (`format!("{byte:02x}")`).
+        The end is found by balancing braces from the opening one, skipping literals. A
+        `}` inside a literal would otherwise drive the depth to zero early and return a
+        truncated body, dropping later keys from the check unnoticed -- `"stage"` is the
+        second key in every report, so the marker assertion below would not catch it.
+        Comments are already gone (`route_source`).
 
         Known limitation: `declared` is the schema's top-level properties only, so a
         report value that is itself a `json!({...})` would have its inner keys
@@ -197,28 +244,11 @@ class RenderRequestSecureLaunchContractTests(unittest.TestCase):
         index = brace
         end = len(route)
         while index < end:
+            stop = self.literal_end(route, index)
+            if stop is not None:
+                index = stop
+                continue
             char = route[index]
-            if char == '"':
-                index += 1
-                while index < end and route[index] != '"':
-                    index += 2 if route[index] == "\\" else 1
-                index += 1
-                continue
-            if char == "'":
-                # A char literal ('x' or '\n'); anything else is a lifetime, which
-                # carries no brace and is safe to walk through one char at a time.
-                closing = index + (3 if route[index + 1 : index + 2] == "\\" else 2)
-                if route[closing : closing + 1] == "'":
-                    index = closing + 1
-                    continue
-            if char == "/" and route[index + 1 : index + 2] in ("/", "*"):
-                if route[index + 1] == "/":
-                    line_end = route.find("\n", index)
-                    index = end if line_end == -1 else line_end + 1
-                else:
-                    block_end = route.find("*/", index + 2)
-                    index = end if block_end == -1 else block_end + 2
-                continue
             if char == "{":
                 depth += 1
             elif char == "}":
@@ -232,6 +262,9 @@ class RenderRequestSecureLaunchContractTests(unittest.TestCase):
 
     def test_no_route_launches_with_normal_token_run_isolated(self):
         route = self.route_source()
+        # Two assertNotIns alone would also pass on an empty string, so share the
+        # launch floor its siblings use: the module must still have its launches.
+        self.launch_sites(route)
         self.assertNotIn("run_isolated", route)
         self.assertNotIn("windows_process", route)
 
