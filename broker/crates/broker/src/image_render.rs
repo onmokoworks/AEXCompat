@@ -5030,6 +5030,7 @@ fn render_with_artifact(
             //     stay off the GPU session arm (Auto-none folds to the CPU
             //     session below; explicit-GPU-none is ineligible and the
             //     one-shot path fails it closed).
+            //
             // A policy is inert below ARGB32f on both routes (#337): the one-shot's
             // gpu_initial_attempt requires float32, so it never reads the policy and
             // renders through --smart-image/--smart-image16; the session's gpu_capable
