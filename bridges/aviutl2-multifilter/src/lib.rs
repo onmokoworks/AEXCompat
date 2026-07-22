@@ -261,8 +261,9 @@ pub extern "C" fn RegisterPlugin(host: *mut HOST_APP_TABLE) {
     // `scan_complete` is false when a default folder went missing or one could not
     // be read, which makes the background pass keep (rather than prune) the
     // entries it did not see this launch.
-    let (plugins, read_complete) = collect_aex(&dirs, &config.ignore);
-    let scan_complete = dirs_complete && read_complete;
+    let scan = collect_aex(&dirs, &config.ignore);
+    let plugins = scan.plugins;
+    let scan_complete = dirs_complete && scan.complete;
     if plugins.is_empty() {
         return;
     }
@@ -280,15 +281,38 @@ pub extern "C" fn RegisterPlugin(host: *mut HOST_APP_TABLE) {
     // saving then deletes those objects for good, so a host rebuild must never
     // empty the filter list for a launch (issue #307).
     let build = build_fingerprint(&repository);
-    let cache = load_cache();
+    let mut cache = load_cache();
 
     // Register (host callback, main thread only) each AEX whose discovery already
     // succeeded and still matches the file on disk. Anything unknown, changed, or
     // discovered by an older host goes to the background pass; its (updated)
     // result is picked up on the next launch.
     let mut pending: Vec<PathBuf> = Vec::new();
+    let mut aliases: Option<HashMap<PathBuf, String>> = None;
+    let mut rekey: Vec<(String, String)> = Vec::new();
     for plugin in &plugins {
-        let cached = cache.get(&plugin.to_string_lossy().into_owned());
+        let key = plugin.to_string_lossy().into_owned();
+        let mut cached = cache.get(&key);
+        if cached.is_none() {
+            // Entries are keyed by the spelling the scan walked, and a junction
+            // added, renamed, or reached from another root changes that spelling
+            // without changing the file. Retry the miss against the real path, or
+            // every effect under it goes unregistered for a launch — which deletes
+            // them out of saved projects that use them (issue #307). The index is
+            // built lazily, and an empty one means there is nothing to match.
+            let index = aliases.get_or_insert_with(|| index_by_real_path(&cache, &dirs));
+            if !index.is_empty()
+                && let Some(alias) = plugin
+                    .canonicalize()
+                    .ok()
+                    .and_then(|real| index.get(&real).cloned())
+            {
+                cached = cache.get(&alias);
+                if cached.is_some() {
+                    rekey.push((alias, key.clone()));
+                }
+            }
+        }
         let decision = classify(cached, file_meta(plugin), build);
         if decision.register
             && let Some(entry) = cached
@@ -300,27 +324,114 @@ pub extern "C" fn RegisterPlugin(host: *mut HOST_APP_TABLE) {
         }
     }
 
-    if !pending.is_empty() {
-        spawn_background_discovery(repository, plugins, cache, pending, build, scan_complete);
+    let rekeyed = !rekey.is_empty();
+    apply_rekey(&mut cache, rekey);
+
+    if pending.is_empty() {
+        // Nothing to discover, so the background pass (the only other writer)
+        // will not run. Persist the re-key here or it is recomputed every launch.
+        if rekeyed {
+            save_cache(&cache);
+        }
+        return;
     }
+
+    spawn_background_discovery(
+        repository,
+        scan.seen,
+        dirs,
+        cache,
+        pending,
+        build,
+        scan_complete,
+    );
 }
 
 /// Drops cache entries for AEX that are no longer present.
 ///
-/// Only when the scan saw every folder: after a folder went missing or could not
-/// be read, "not scanned" does not mean "gone", and dropping a live entry would
-/// leave that effect unregistered on the next launch, deleting objects from saved
-/// projects that use it (issue #307). Keeping a stale entry costs only cache
-/// bytes, since registration iterates the scan result, not the cache.
-fn prune_cache(cache: &mut HashMap<String, CacheEntry>, plugins: &[PathBuf], scan_complete: bool) {
+/// An entry may only be judged gone if this launch actually looked where it
+/// lives, and looked completely. Two guards, because "not in this scan" is not
+/// "deleted", and dropping a live entry leaves that effect unregistered on the
+/// next launch, deleting objects from saved projects that use it (issue #307):
+///
+/// - `scan_complete` is false when a folder went missing or could not be read.
+/// - `roots` bounds the prune to the folders scanned. The cache file is shared
+///   across configurations, so pointing `AEXCOMPAT_MULTIFILTER_DIR` at one folder
+///   for a launch would otherwise delete every entry from the default AE and
+///   MediaCore folders, and the next unset launch would register none of them.
+/// - `seen` is every AEX found, `ignore`d ones included, since those exist on
+///   disk; judging from the registered subset would drop an ignored effect's
+///   entry and leave it unregistered the launch after it is un-ignored.
+/// - Anything still missing is confirmed against the filesystem before it goes,
+///   so a path the scan reached under a different spelling (through a junction)
+///   is not mistaken for a deleted one.
+///
+/// Keeping a stale entry costs only cache bytes, since registration iterates the
+/// scan result, not the cache.
+fn prune_cache(
+    cache: &mut HashMap<String, CacheEntry>,
+    seen: &[PathBuf],
+    roots: &[PathBuf],
+    scan_complete: bool,
+) {
     if !scan_complete {
         return;
     }
-    let present: std::collections::HashSet<String> = plugins
+    // Compare presence on the same lossy string the cache is keyed by, so a path
+    // that does not round-trip through UTF-8 still matches itself; `starts_with`
+    // needs a Path, but only decides whether this launch looked there at all.
+    let present: std::collections::HashSet<String> = seen
         .iter()
         .map(|plugin| plugin.to_string_lossy().into_owned())
         .collect();
-    cache.retain(|key, _| present.contains(key));
+    cache.retain(|key, _| {
+        let path = Path::new(key);
+        if present.contains(key) || !roots.iter().any(|root| path.starts_with(root)) {
+            return true;
+        }
+        // Missing from this launch's listing is not the same as gone: a junction
+        // can make one AEX reachable under several paths and the scan keeps only
+        // the spelling it walked. Ask the filesystem instead, and keep the entry
+        // unless it answers a definite "no" — an error is "could not tell". (A
+        // path behind an unresolvable link answers `Ok(false)`, not an error; that
+        // case is held off by `scan_complete`, which is false for such a link.)
+        !matches!(path.try_exists(), Ok(false))
+    });
+}
+
+/// Indexes the cache by each entry's real (link-resolved) path, so an AEX whose
+/// walked spelling changed between launches is still found. Keys that no longer
+/// resolve are skipped; they are handled by [`prune_cache`].
+///
+/// Restricted to `roots` as a trade-off, not because keys outside them cannot
+/// match: resolving one could match too, but a leftover key on a disconnected
+/// drive would stall startup. So a scan root whose own spelling changed between
+/// launches (its path is now written a different way) is not resolved, and its
+/// effects go unregistered for that launch — the case tracked as #321.
+fn index_by_real_path(
+    cache: &HashMap<String, CacheEntry>,
+    roots: &[PathBuf],
+) -> HashMap<PathBuf, String> {
+    cache
+        .keys()
+        .filter(|key| roots.iter().any(|root| Path::new(key.as_str()).starts_with(root)))
+        .filter_map(|key| Some((Path::new(key).canonicalize().ok()?, key.clone())))
+        .collect()
+}
+
+/// Moves each aliased entry onto the spelling the scan actually walked.
+///
+/// The background pass keys by that spelling, so without this it would find no
+/// cached entry and `keep_best`'s refusal to demote would never apply — a
+/// transient discovery failure could then write a negative and unregister the
+/// effect on the next launch (issue #307). It also stops the two spellings from
+/// accumulating as separate, diverging entries.
+fn apply_rekey(cache: &mut HashMap<String, CacheEntry>, rekey: Vec<(String, String)>) {
+    for (alias, walked) in rekey {
+        if let Some(entry) = cache.remove(&alias) {
+            cache.insert(walked, entry);
+        }
+    }
 }
 
 /// What to do with one AEX at load.
@@ -357,10 +468,12 @@ fn classify(
         };
     };
     match meta {
-        // Confirmed unchanged: re-verify only when the host build moved.
+        // Confirmed unchanged: re-verify when the entry is marked stale, or when
+        // the host build moved (but an unknown build is not a moved one — see
+        // `BuildFingerprint::is_known`, or one failed stat costs two full passes).
         Some((mtime, len)) if entry.mtime == mtime && entry.len == len => LoadDecision {
             register: entry.ok,
-            discover: entry.build != build,
+            discover: entry.stale || (build.is_known() && entry.build != build),
         },
         // Confirmed changed: a different plug-in, whose parameters the cached
         // entry does not describe, so it is not registered (tracked as #309).
@@ -380,7 +493,10 @@ fn classify(
 /// startup is never blocked. Newly-discovered effects appear on the next launch.
 fn spawn_background_discovery(
     repository: PathBuf,
-    plugins: Vec<PathBuf>,
+    // Every AEX the scan saw, ignored ones included: the prune judges existence
+    // from this, not from the registered subset (issue #307).
+    seen: Vec<PathBuf>,
+    roots: Vec<PathBuf>,
     mut cache: HashMap<String, CacheEntry>,
     pending: Vec<PathBuf>,
     build: BuildFingerprint,
@@ -391,7 +507,7 @@ fn spawn_background_discovery(
         .spawn(move || {
             // Prune stale entries (removed/renamed AEX) up front so an early
             // shutdown still leaves a pruned cache.
-            prune_cache(&mut cache, &plugins, scan_complete);
+            prune_cache(&mut cache, &seen, &roots, scan_complete);
 
             // Discover in chunks and save the cache after each, so a restart or
             // shutdown mid-scan keeps the progress so far (effects appear across
@@ -410,8 +526,11 @@ fn spawn_background_discovery(
                 let discovered = results.len();
                 for (plugin, entry) in results {
                     let key = plugin.to_string_lossy().into_owned();
-                    let merged = keep_best(cache.get(&key), entry, file_meta(&plugin));
-                    cache.insert(key, merged);
+                    // `None` means there was nothing trustworthy to write; the
+                    // existing entry keeps registering and is retried next launch.
+                    if let Some(merged) = keep_best(cache.get(&key), entry, file_meta(&plugin)) {
+                        cache.insert(key, merged);
+                    }
                 }
                 // discover_all returns fewer than the chunk only if it was cut
                 // short by the shutdown flag; save what we have and stop.
@@ -493,17 +612,19 @@ fn mediacore_dir() -> (Option<PathBuf>, bool) {
 /// starts with `prefix` (e.g. `Adobe After Effects 2025/Support Files/Plug-ins`).
 ///
 /// The second value is false when the pick cannot be trusted to be the newest:
-/// the folder could not be enumerated, an entry could not be read, or a versioned
-/// install was present but its `leaf` was not. That last case is what an install
-/// being updated looks like, and silently falling back to an older version while
-/// reporting a complete scan would make the newer version's plug-ins look
-/// deleted — which prunes their cache entries and unregisters them on the next
-/// launch, deleting objects from saved projects that use them (issue #307).
+/// the folder could not be enumerated, an entry could not be read, or a version
+/// *newer than the pick* was present without its `leaf`. That last case is what
+/// an install being updated looks like, and silently falling back to an older
+/// version while reporting a complete scan would make the newer version's
+/// plug-ins look deleted — which prunes their cache entries and unregisters them
+/// on the next launch, deleting objects from saved projects (issue #307). A
+/// leafless *older* version is just an uninstall leftover and means nothing.
 fn newest_versioned(root: &Path, prefix: &str, leaf: &[&str]) -> (Option<PathBuf>, bool) {
     let Ok(read) = std::fs::read_dir(root) else {
         return (None, false);
     };
     let mut best: Option<(Vec<u64>, PathBuf)> = None;
+    let mut leafless: Vec<Vec<u64>> = Vec::new();
     let mut complete = true;
     for entry in read {
         let Ok(entry) = entry else {
@@ -515,47 +636,106 @@ fn newest_versioned(root: &Path, prefix: &str, leaf: &[&str]) -> (Option<PathBuf
         let Some(version) = name.strip_prefix(prefix) else {
             continue;
         };
-        // Ignore entries that are not versioned at all (a stray file, an
-        // unrelated Adobe app); only a real version folder missing its leaf is
-        // evidence that this launch is seeing an incomplete install.
-        if !version.split(['.', ' ']).any(|part| part.parse::<u64>().is_ok()) {
+        // A numbered name is what an install in progress looks like. Unnumbered
+        // ones (`... (Beta)`) are still picked when nothing numbered exists, but a
+        // missing leaf under them is not evidence of an incomplete install.
+        let numbered = version.split(['.', ' ']).any(|part| part.parse::<u64>().is_ok());
+        let key = version_key(version);
+        let mut candidate = entry.path();
+        // Tested through the path, not `DirEntry::file_type`, which reports a
+        // directory junction as a symlink rather than a directory — Adobe installs
+        // are routinely junctioned to another drive.
+        if !candidate.is_dir() {
+            // A plain file is clutter. A reparse point that will not resolve is an
+            // install we simply could not see this launch, which must not read as
+            // "its plug-ins are gone".
+            let unresolved = candidate
+                .symlink_metadata()
+                .is_ok_and(|meta| meta.file_type().is_symlink());
+            if numbered && unresolved {
+                leafless.push(key);
+            }
             continue;
         }
-        let mut candidate = entry.path();
         candidate.extend(leaf);
         if !candidate.is_dir() {
-            complete = false;
+            if numbered {
+                leafless.push(key);
+            }
             continue;
         }
-        let key = version_key(version);
         if best.as_ref().is_none_or(|(best_key, _)| key > *best_key) {
             best = Some((key, candidate));
         }
     }
+    // A leafless version above the pick means the newest install is not fully
+    // visible this launch, so its absence is not evidence its plug-ins are gone.
+    let best_key = best.as_ref().map(|(key, _)| key);
+    complete &= !leafless
+        .iter()
+        .any(|key| best_key.is_none_or(|best_key| key > best_key));
     (best.map(|(_, path)| path), complete)
 }
 
-/// Recursively collects `*.aex` under `dirs` (minus ignored), deduped + sorted.
-/// Returns the AEX found, and whether the scan actually saw every folder. An
-/// incomplete scan (a folder that could not be read, a tree deeper than
-/// [`MAX_SCAN_DEPTH`]) must not be used to conclude an AEX is gone: pruning its
-/// cache entry would leave the effect unregistered on the next launch, which
-/// deletes objects from saved projects that use it (issue #307).
-fn collect_aex(dirs: &[PathBuf], ignore: &[String]) -> (Vec<PathBuf>, bool) {
-    let mut found = Vec::new();
+/// What one launch's folder scan saw.
+struct Scan {
+    /// The AEX to expose as filters (ignored ones removed).
+    plugins: Vec<PathBuf>,
+    /// Every `*.aex` seen, ignored ones included. This, not `plugins`, is what
+    /// the prune may judge existence from: an ignored AEX is present on disk, and
+    /// dropping its cache entry would leave it unregistered on the launch after
+    /// it is taken back out of `ignore` (issue #307).
+    seen: Vec<PathBuf>,
+    /// False if any folder could not be fully enumerated, in which case nothing
+    /// may be concluded to be gone at all.
+    complete: bool,
+}
+
+/// Recursively scans `dirs`. An incomplete scan (a folder that could not be read,
+/// a tree deeper than [`MAX_SCAN_DEPTH`]) must not be used to conclude an AEX is
+/// gone: pruning its cache entry would leave the effect unregistered on the next
+/// launch, which deletes objects from saved projects that use it (issue #307).
+fn collect_aex(dirs: &[PathBuf], ignore: &[String]) -> Scan {
+    let mut seen = Vec::new();
     let mut complete = true;
+    // Shared across roots: junctions can make one folder reachable from several
+    // of them, and descending twice would expose the same AEX as several filters.
+    let mut visited = std::collections::HashSet::new();
     for dir in dirs {
-        complete &= collect_aex_into(dir, ignore, 0, &mut found);
+        complete &= collect_aex_into(dir, 0, &mut seen, &mut visited);
     }
-    found.sort();
-    found.dedup();
-    (found, complete)
+    seen.sort();
+    seen.dedup();
+    let plugins = seen
+        .iter()
+        .filter(|path| !is_ignored(path, ignore))
+        .cloned()
+        .collect();
+    Scan {
+        plugins,
+        seen,
+        complete,
+    }
 }
 
 /// Returns false if any part of this subtree could not be enumerated.
-fn collect_aex_into(dir: &Path, ignore: &[String], depth: usize, out: &mut Vec<PathBuf>) -> bool {
+fn collect_aex_into(
+    dir: &Path,
+    depth: usize,
+    out: &mut Vec<PathBuf>,
+    visited: &mut std::collections::HashSet<PathBuf>,
+) -> bool {
     if depth > MAX_SCAN_DEPTH {
         return false;
+    }
+    // A junction can point back up the tree or make one folder reachable twice.
+    // Visiting the real folder once keeps an AEX from being registered as several
+    // filters (each with its own discovery worker). Already visited means "seen",
+    // not "not looked at", so it does not make the scan incomplete.
+    if let Ok(real) = dir.canonicalize()
+        && !visited.insert(real)
+    {
+        return true;
     }
     let Ok(read) = std::fs::read_dir(dir) else {
         return false;
@@ -574,13 +754,25 @@ fn collect_aex_into(dir: &Path, ignore: &[String], depth: usize, out: &mut Vec<P
             complete = false;
             continue;
         };
-        if file_type.is_dir() {
-            complete &= collect_aex_into(&path, ignore, depth + 1, out);
+        // A directory junction reports as a symlink, not a directory, so testing
+        // only `is_dir()` would silently skip a junctioned subfolder while still
+        // calling the scan complete — and the prune would then delete the cache
+        // entries of every AEX under it, unregistering them (issue #307).
+        // `MAX_SCAN_DEPTH` bounds any link cycle.
+        let resolved = file_type.is_symlink().then(|| std::fs::metadata(&path));
+        if matches!(resolved, Some(Err(_))) {
+            // A link whose target cannot be resolved (its drive is not mounted
+            // this launch) says nothing about what is behind it. Treating that as
+            // "no AEX here" would prune everything under it.
+            complete = false;
+            continue;
+        }
+        if file_type.is_dir() || matches!(&resolved, Some(Ok(meta)) if meta.is_dir()) {
+            complete &= collect_aex_into(&path, depth + 1, out, visited);
         } else if path
             .extension()
             .and_then(|ext| ext.to_str())
             .is_some_and(|ext| ext.eq_ignore_ascii_case("aex"))
-            && !is_ignored(&path, ignore)
         {
             out.push(path);
         }
@@ -710,6 +902,12 @@ struct CacheEntry {
     /// carrying the old build and they are queued again on the next launch.
     #[serde(default)]
     build: BuildFingerprint,
+    /// Set when the AEX changed while it was being discovered, so `sha`/`params`
+    /// may describe the previous bytes. The entry is still registered (better
+    /// than unregistering it — issue #307) but is always re-discovered, so it
+    /// cannot stay permanently wrong.
+    #[serde(default)]
+    stale: bool,
 }
 
 /// Invalidates cache files whose [`CacheEntry`] shape can no longer be trusted
@@ -739,10 +937,29 @@ struct BuildFingerprint {
     host: Option<(u64, u32, u64)>,
 }
 
+impl BuildFingerprint {
+    /// Whether both halves were actually stat'd. An unknown fingerprint must not
+    /// count as "a different host", or one transient stat failure re-discovers
+    /// every AEX twice: once under the unknown build, once when it resolves again.
+    fn is_known(&self) -> bool {
+        self.worker.is_some() && self.host.is_some()
+    }
+}
+
 #[derive(serde::Serialize, serde::Deserialize, Default)]
 struct CacheFile {
     version: u32,
-    entries: HashMap<String, CacheEntry>,
+    /// Held as raw JSON, and converted per entry on load, so one entry that no
+    /// longer deserializes drops only itself instead of emptying the cache and
+    /// unregistering every filter for a launch (issue #307).
+    ///
+    /// This contains *isolated* damage only. [`CacheEntry::params`] embeds
+    /// `InteractiveParameter` from the broker crate, whose fields are not all
+    /// `#[serde(default)]`, so a field added there fails every entry that has
+    /// parameters — i.e. every registerable filter — at once. That shared
+    /// dependency is pinned by `the_cached_parameter_schema_is_stable`, which
+    /// fails in `cargo test` rather than letting the change reach users' caches.
+    entries: HashMap<String, serde_json::Value>,
 }
 
 /// The discovery cache path, next to the config in `%APPDATA%`.
@@ -816,13 +1033,16 @@ fn load_cache() -> HashMap<String, CacheEntry> {
 /// trusted field-for-field. A host-build change does NOT discard them — each entry
 /// carries its own build ([`CacheEntry::build`]) and is re-verified in the
 /// background while still being registered, so no filter disappears for a launch
-/// (issue #307).
+/// (issue #307). An entry that no longer deserializes drops only itself, for the
+/// same reason.
 fn accept_cache_file(file: CacheFile) -> HashMap<String, CacheEntry> {
-    if file.version == CACHE_VERSION {
-        file.entries
-    } else {
-        HashMap::new()
+    if file.version != CACHE_VERSION {
+        return HashMap::new();
     }
+    file.entries
+        .into_iter()
+        .filter_map(|(key, value)| Some((key, serde_json::from_value(value).ok()?)))
+        .collect()
 }
 
 fn save_cache(entries: &HashMap<String, CacheEntry>) {
@@ -834,11 +1054,11 @@ fn save_cache(entries: &HashMap<String, CacheEntry>) {
     }
     let file = CacheFile {
         version: CACHE_VERSION,
-        // Clone is unavoidable through the borrow; the cache is small vs the AEX
-        // bytes and this runs once per launch.
+        // An entry that cannot be serialized is dropped rather than failing the
+        // whole write, so the rest of the cache still survives the launch.
         entries: entries
             .iter()
-            .map(|(key, entry)| (key.clone(), entry.clone()))
+            .filter_map(|(key, entry)| Some((key.clone(), serde_json::to_value(entry).ok()?)))
             .collect(),
     };
     // Write atomically (temp + rename) so a crash or process exit mid-write (the
@@ -879,42 +1099,47 @@ fn file_meta(path: &Path) -> Option<((u64, u32), u64)> {
 /// if the host really did regress, the effect fails at render time with a
 /// diagnostic, which is visible and recoverable, unlike a deleted object.
 ///
-/// A negative only wins when `meta` *proves* the AEX changed. `meta` is the file's
-/// current `(mtime, len)`, or `None` when it could not be stat'd — a transient
-/// condition (an AV scanner's sharing violation, a plug-in being replaced) that
-/// must not be read as "replaced", or the same irreversible deletion follows.
-/// The new `build` is always taken, so re-verification still converges and the
-/// entry is not queued again on the next launch.
+/// A negative only wins when the AEX's current `(mtime, len)` *proves* it changed.
+///
+/// Returns `None` to mean "leave the cache alone". `meta` is the file's current
+/// `(mtime, len)`, or `None` when it could not be stat'd — a transient condition
+/// (an AV scanner's sharing violation, a plug-in being replaced). Discovery's own
+/// stat can fail the same way, and [`negative_entry`] then falls back to
+/// `(0, 0), 0`; writing that out would store an entry under a `(mtime, len)` that
+/// never matches the file again, so every later launch would treat the effect as
+/// replaced and stop registering it. With no trustworthy meta there is nothing
+/// safe to write, so the existing entry (which still registers) is kept and the
+/// AEX is re-checked on the next launch.
 fn keep_best(
     cached: Option<&CacheEntry>,
     discovered: CacheEntry,
     meta: Option<((u64, u32), u64)>,
-) -> CacheEntry {
-    // Stamp the `(mtime, len)` just read over whatever discovery recorded.
-    // Discovery's own stat can fail — [`negative_entry`] then falls back to
-    // `(0, 0), 0` — and the file can be replaced between that stat and the read,
-    // either of which would store a successful entry under a `(mtime, len)` that
-    // never matches the file again, so the next launch treats it as changed and
-    // stops registering it (issue #307).
-    let mut discovered = discovered;
-    if let Some((mtime, len)) = meta {
-        discovered.mtime = mtime;
-        discovered.len = len;
-    }
-    let Some(old) = cached else {
-        return discovered;
+) -> Option<CacheEntry> {
+    let (mtime, len) = meta?;
+    // The AEX differs from what discovery stat'd, so `sha`/`params` may describe
+    // the previous bytes. Take the meta just read (so the entry keeps matching the
+    // file and stays registered) but mark it for one more pass.
+    let stale = discovered.mtime != mtime || discovered.len != len;
+    let discovered = CacheEntry {
+        mtime,
+        len,
+        stale,
+        ..discovered
     };
-    if !old.ok || discovered.ok {
-        return discovered;
-    }
-    let replaced = meta.is_some_and(|(mtime, len)| old.mtime != mtime || old.len != len);
-    if replaced {
-        discovered
-    } else {
-        CacheEntry {
-            build: discovered.build,
-            ..old.clone()
+    match cached {
+        Some(old) if old.ok && !discovered.ok && old.mtime == mtime && old.len == len => {
+            Some(CacheEntry {
+                build: discovered.build,
+                // Keep any existing stale mark. Clearing it because *this* pass
+                // failed would strand an entry whose sha/params describe older
+                // bytes: it would never be re-discovered again, so every frame
+                // would fail the sha check with no way back except deleting the
+                // cache — the very operation that risks issue #307.
+                stale: old.stale,
+                ..old.clone()
+            })
         }
+        _ => Some(discovered),
     }
 }
 
@@ -929,6 +1154,7 @@ fn negative_entry(plugin: &Path, build: BuildFingerprint) -> CacheEntry {
         smart: false,
         params: Vec::new(),
         build,
+        stale: false,
     }
 }
 
@@ -1620,6 +1846,7 @@ mod tests {
             smart: true,
             params: Vec::new(),
             build,
+            stale: false,
         }
     }
 
@@ -1641,7 +1868,7 @@ mod tests {
     #[test]
     fn a_failed_reverification_does_not_demote_an_unchanged_effect() {
         let old = discovered(5, 64, build(1));
-        let merged = keep_best(Some(&old), failed(5, 64, build(2)), META);
+        let merged = keep_best(Some(&old), failed(5, 64, build(2)), META).unwrap();
         assert!(merged.ok, "an unchanged, previously working AEX stayed ok");
         assert_eq!(merged.sha, "aa", "the old payload was kept");
         assert!(merged.smart);
@@ -1649,13 +1876,17 @@ mod tests {
 
     /// A failure to stat the AEX is not evidence that it changed, so it must not
     /// open the demotion path either.
+    /// With no trustworthy meta there is nothing safe to write: discovery's own
+    /// stat may have failed too, and storing its `(0, 0), 0` fallback would make
+    /// every later launch see a mismatch and unregister the effect (#307).
     #[test]
-    fn an_unreadable_aex_is_not_treated_as_replaced() {
+    fn an_unreadable_aex_leaves_the_cache_alone() {
         let old = discovered(5, 64, build(1));
-        let merged = keep_best(Some(&old), failed(0, 0, build(2)), NO_META);
-        assert!(merged.ok, "a transient stat failure did not demote");
-        assert_eq!(merged.mtime, (5, 0), "the old meta was kept, not zeroed");
-        assert_eq!(merged.len, 64);
+        assert!(keep_best(Some(&old), failed(0, 0, build(2)), NO_META).is_none());
+        assert!(
+            keep_best(None, discovered(0, 0, build(2)), NO_META).is_none(),
+            "a successful discovery with no meta is not written either"
+        );
     }
 
     /// Keeping the old result must still take the new build, otherwise the entry
@@ -1663,7 +1894,7 @@ mod tests {
     #[test]
     fn a_kept_entry_still_takes_the_new_build() {
         let old = discovered(5, 64, build(1));
-        let merged = keep_best(Some(&old), failed(5, 64, build(2)), META);
+        let merged = keep_best(Some(&old), failed(5, 64, build(2)), META).unwrap();
         assert_eq!(merged.build, build(2));
         assert_eq!(
             classify(Some(&merged), META, build(2)),
@@ -1679,8 +1910,8 @@ mod tests {
         let old = discovered(5, 64, build(1));
         let newer = Some(((9, 0), 64));
         let resized = Some(((5, 0), 99));
-        assert!(!keep_best(Some(&old), failed(9, 64, build(1)), newer).ok);
-        assert!(!keep_best(Some(&old), failed(5, 99, build(1)), resized).ok);
+        assert!(!keep_best(Some(&old), failed(9, 64, build(1)), newer).unwrap().ok);
+        assert!(!keep_best(Some(&old), failed(5, 99, build(1)), resized).unwrap().ok);
     }
 
     /// The point of re-verifying at all (issue #304): a host that gained support
@@ -1688,33 +1919,46 @@ mod tests {
     #[test]
     fn a_new_host_promotes_a_previously_failing_effect() {
         let old = failed(5, 64, build(1));
-        let merged = keep_best(Some(&old), discovered(5, 64, build(2)), META);
+        let merged = keep_best(Some(&old), discovered(5, 64, build(2)), META).unwrap();
         assert!(merged.ok);
         assert_eq!(merged.build, build(2));
     }
 
     #[test]
     fn a_first_discovery_is_taken_as_is() {
-        assert!(!keep_best(None, failed(5, 64, build(1)), META).ok);
-        assert!(keep_best(None, discovered(5, 64, build(1)), META).ok);
+        assert!(!keep_best(None, failed(5, 64, build(1)), META).unwrap().ok);
+        assert!(keep_best(None, discovered(5, 64, build(1)), META).unwrap().ok);
     }
 
-    /// Discovery records the AEX's meta itself, and its own stat can fail (or the
-    /// file can be replaced between that stat and the read). Storing a successful
-    /// entry under the `(0, 0), 0` fallback would make every later launch see a
-    /// mismatch and stop registering it, so the merge stamps the meta it read.
+    /// Discovery records the AEX's meta itself, and the file can change between
+    /// that stat and the read (or that stat can fail, falling back to `(0, 0), 0`).
+    /// Storing the entry under a `(mtime, len)` that never matches again would
+    /// make every later launch unregister it, so the merge stamps the meta it read
+    /// — and marks the entry stale, because `sha`/`params` may describe the older
+    /// bytes and would otherwise stay wrong forever without being re-discovered.
     #[test]
-    fn a_successful_discovery_takes_the_meta_read_at_merge_time() {
-        let mut fresh = discovered(0, 0, build(1)); // discovery could not stat it
-        fresh.mtime = (0, 0);
-        fresh.len = 0;
-        let merged = keep_best(None, fresh, META);
-        assert_eq!(merged.mtime, (5, 0));
+    fn a_discovery_that_raced_the_file_is_stamped_and_marked_stale() {
+        let fresh = discovered(9, 99, build(1)); // discovery saw different bytes
+        let merged = keep_best(None, fresh, META).unwrap();
+        assert_eq!(merged.mtime, (5, 0), "matches the file, so it registers");
         assert_eq!(merged.len, 64);
+        assert!(merged.stale);
         assert_eq!(
             classify(Some(&merged), META, build(1)),
-            LoadDecision { register: true, discover: false },
-            "the entry matches the file, so it registers next launch"
+            LoadDecision { register: true, discover: true },
+            "registered (no object loss) and re-discovered (self-heals)"
+        );
+    }
+
+    /// The ordinary case must not be marked stale, or every entry re-discovers
+    /// on every launch.
+    #[test]
+    fn an_undisturbed_discovery_is_not_stale() {
+        let merged = keep_best(None, discovered(5, 64, build(1)), META).unwrap();
+        assert!(!merged.stale);
+        assert_eq!(
+            classify(Some(&merged), META, build(1)),
+            LoadDecision { register: true, discover: false }
         );
     }
 
@@ -1804,6 +2048,13 @@ mod tests {
 
     // --- prune: never conclude "gone" from an incomplete scan ---------------
 
+    fn json_entries(keys: &[&str]) -> HashMap<String, serde_json::Value> {
+        cache_of(keys)
+            .iter()
+            .map(|(key, entry)| (key.clone(), serde_json::to_value(entry).unwrap()))
+            .collect()
+    }
+
     fn cache_of(keys: &[&str]) -> HashMap<String, CacheEntry> {
         keys.iter()
             .map(|key| ((*key).to_string(), discovered(5, 64, build(1))))
@@ -1813,7 +2064,7 @@ mod tests {
     #[test]
     fn a_complete_scan_prunes_entries_whose_aex_is_gone() {
         let mut cache = cache_of(&["a.aex", "gone.aex"]);
-        prune_cache(&mut cache, &[PathBuf::from("a.aex")], true);
+        prune_cache(&mut cache, &[PathBuf::from("a.aex")], &[PathBuf::from("")], true);
         assert_eq!(cache.len(), 1);
         assert!(cache.contains_key("a.aex"));
     }
@@ -1824,7 +2075,7 @@ mod tests {
     #[test]
     fn an_incomplete_scan_prunes_nothing() {
         let mut cache = cache_of(&["a.aex", "unscanned.aex"]);
-        prune_cache(&mut cache, &[PathBuf::from("a.aex")], false);
+        prune_cache(&mut cache, &[PathBuf::from("a.aex")], &[PathBuf::from("")], false);
         assert_eq!(cache.len(), 2, "the unscanned entry survived");
     }
 
@@ -1836,7 +2087,7 @@ mod tests {
     fn a_current_cache_file_keeps_its_entries() {
         let file = CacheFile {
             version: CACHE_VERSION,
-            entries: cache_of(&["a.aex"]),
+            entries: json_entries(&["a.aex"]),
         };
         assert_eq!(accept_cache_file(file).len(), 1);
     }
@@ -1845,7 +2096,7 @@ mod tests {
     fn a_future_or_older_schema_is_discarded() {
         let file = CacheFile {
             version: CACHE_VERSION + 1,
-            entries: cache_of(&["a.aex"]),
+            entries: json_entries(&["a.aex"]),
         };
         assert!(accept_cache_file(file).is_empty());
     }
@@ -1854,26 +2105,27 @@ mod tests {
 
     #[test]
     fn a_readable_folder_scans_completely() {
-        let dir = std::env::temp_dir().join("aexcompat-multifilter-scan-test");
+        let dir = std::env::temp_dir().join(format!("aexcompat-mf-{}-scan", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::create_dir_all(&dir);
-        let (_, complete) = collect_aex(&[dir], &[]);
+        let complete = collect_aex(&[dir], &[]).complete;
         assert!(complete);
     }
 
     #[test]
     fn an_unreadable_folder_marks_the_scan_incomplete() {
-        let missing = std::env::temp_dir().join("aexcompat-multifilter-does-not-exist");
-        let (plugins, complete) = collect_aex(&[missing], &[]);
-        assert!(plugins.is_empty());
-        assert!(!complete, "a folder that could not be read is not a complete scan");
+        let missing = std::env::temp_dir().join(format!("aexcompat-mf-{}-missing", std::process::id()));
+        let scan = collect_aex(&[missing], &[]);
+        assert!(scan.plugins.is_empty());
+        assert!(!scan.complete, "a folder that could not be read is not a complete scan");
     }
 
     // --- default folder resolution ------------------------------------------
 
-    /// A unique temp dir per test (no `Date::now`/rand available in-process here,
-    /// so the test name provides uniqueness).
+    /// A temp dir unique to this test and this process, so concurrent `cargo test`
+    /// runs do not delete each other's fixtures.
     fn temp_root(tag: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("aexcompat-mf-{tag}"));
+        let dir = std::env::temp_dir().join(format!("aexcompat-mf-{}-{tag}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("create temp root");
         dir
@@ -1917,10 +2169,422 @@ mod tests {
 
     #[test]
     fn a_missing_root_is_incomplete() {
-        let root = std::env::temp_dir().join("aexcompat-mf-no-such-root");
+        let root = std::env::temp_dir().join(format!("aexcompat-mf-{}-no-root", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let (picked, complete) = newest_versioned(&root, "App ", &["Plug-ins"]);
         assert!(picked.is_none());
         assert!(!complete);
+    }
+
+    /// The cache file is shared across scan configurations, so a launch that
+    /// scanned only one folder must not conclude the other folders' effects are
+    /// gone — that would unregister them all on the next normal launch (#307).
+    #[test]
+    fn a_prune_only_judges_the_folders_it_scanned() {
+        let scanned = PathBuf::from("scan-root");
+        let inside = scanned.join("gone.aex").to_string_lossy().into_owned();
+        let outside = PathBuf::from("other-root")
+            .join("kept.aex")
+            .to_string_lossy()
+            .into_owned();
+        let mut cache = cache_of(&[&inside, &outside]);
+        prune_cache(&mut cache, &[], &[scanned], true);
+        assert!(!cache.contains_key(&inside), "scanned and absent: pruned");
+        assert!(
+            cache.contains_key(&outside),
+            "outside the scanned roots: untouched"
+        );
+    }
+
+    /// `CacheEntry::params` embeds a broker type whose fields are not all
+    /// defaulted. One entry that no longer parses must not empty the cache and
+    /// unregister every filter for a launch (#307).
+    #[test]
+    fn one_unparseable_entry_does_not_discard_the_rest() {
+        let mut entries = json_entries(&["good.aex"]);
+        entries.insert("broken.aex".into(), serde_json::json!({"mtime": "not-a-tuple"}));
+        let accepted = accept_cache_file(CacheFile { version: CACHE_VERSION, entries });
+        assert_eq!(accepted.len(), 1);
+        assert!(accepted.contains_key("good.aex"));
+    }
+
+    /// A host fingerprint that could not be read is not "a different host":
+    /// treating it as one re-discovers everything twice for one failed stat.
+    #[test]
+    fn an_unknown_host_build_does_not_force_rediscovery() {
+        let entry = discovered(5, 64, build(1));
+        let unknown = BuildFingerprint::default();
+        assert!(!unknown.is_known());
+        assert_eq!(
+            classify(Some(&entry), META, unknown),
+            LoadDecision { register: true, discover: false }
+        );
+    }
+
+    /// An uninstall leaves empty version folders behind; one older than the pick
+    /// says nothing about the install being incomplete.
+    #[test]
+    fn a_leafless_older_version_does_not_mark_the_resolution_incomplete() {
+        let root = temp_root("leftover");
+        std::fs::create_dir_all(root.join("App 2025").join("Plug-ins")).unwrap();
+        std::fs::create_dir_all(root.join("App 2019")).unwrap(); // uninstall leftover
+        let (picked, complete) = newest_versioned(&root, "App ", &["Plug-ins"]);
+        assert_eq!(picked.unwrap(), root.join("App 2025").join("Plug-ins"));
+        assert!(complete);
+    }
+
+    /// The MediaCore shape: no prefix, so every entry under the root is a
+    /// candidate.
+    #[test]
+    fn an_empty_prefix_picks_the_newest_bare_version() {
+        let root = temp_root("mediacore");
+        for version in ["7.0", "10.0", "CS6"] {
+            std::fs::create_dir_all(root.join(version).join("MediaCore")).unwrap();
+        }
+        let (picked, complete) = newest_versioned(&root, "", &["MediaCore"]);
+        assert_eq!(picked.unwrap(), root.join("10.0").join("MediaCore"));
+        assert!(complete);
+    }
+
+    /// A re-verification that failed must not clear the stale mark: the entry's
+    /// sha/params would stay wrong forever with nothing left to re-discover it,
+    /// so every frame would fail the sha check (issue #307's recovery step is the
+    /// cache deletion that itself risks the data loss).
+    #[test]
+    fn a_failed_recheck_keeps_an_existing_stale_mark() {
+        let mut old = discovered(5, 64, build(1));
+        old.stale = true;
+        let merged = keep_best(Some(&old), failed(5, 64, build(2)), META).unwrap();
+        assert!(merged.ok, "still registered");
+        assert!(merged.stale, "still queued for another attempt");
+        assert_eq!(
+            classify(Some(&merged), META, build(2)),
+            LoadDecision { register: true, discover: true }
+        );
+    }
+
+    /// An ignored AEX is still on disk. Pruning its entry would leave it
+    /// unregistered on the launch after it is taken back out of `ignore` (#307).
+    #[test]
+    fn an_ignored_aex_keeps_its_cache_entry() {
+        let root = temp_root("ignored");
+        std::fs::write(root.join("keep.aex"), b"x").unwrap();
+        std::fs::write(root.join("skip.aex"), b"x").unwrap();
+        let scan = collect_aex(std::slice::from_ref(&root), &["skip".into()]);
+        assert_eq!(scan.plugins.len(), 1, "the ignored one is not registered");
+        assert_eq!(scan.seen.len(), 2, "but it was seen");
+
+        let key = root.join("skip.aex").to_string_lossy().into_owned();
+        let mut cache = cache_of(&[&key]);
+        prune_cache(&mut cache, &scan.seen, &[root], true);
+        assert!(cache.contains_key(&key), "an ignored AEX is not gone");
+    }
+
+    /// A stray file whose name carries digits is not an install, and must not
+    /// look like one missing its leaf — that would disable the prune forever.
+    #[test]
+    fn a_stray_file_is_not_a_version() {
+        let root = temp_root("stray-file");
+        std::fs::create_dir_all(root.join("App 2025").join("Plug-ins")).unwrap();
+        std::fs::write(root.join("App 2026.log"), b"x").unwrap();
+        let (picked, complete) = newest_versioned(&root, "App ", &["Plug-ins"]);
+        assert_eq!(picked.unwrap(), root.join("App 2025").join("Plug-ins"));
+        assert!(complete);
+    }
+
+    /// The cache embeds the broker's `InteractiveParameter`, whose fields are not
+    /// all defaulted, so a field added there stops every entry that has
+    /// parameters from deserializing at once — every registerable filter, on
+    /// users' machines, with the object deletion of issue #307 behind it. Pin the
+    /// shape here so that change fails in `cargo test` instead.
+    ///
+    /// If this fails because the broker type gained a field: give the new field
+    /// `#[serde(default)]` there (so old caches still read), then add it here.
+    #[test]
+    fn the_cached_parameter_schema_is_stable() {
+        let frozen = serde_json::json!({
+            "slot": 0,
+            "name": "Intensity",
+            "kind": "float",
+            "minimum": 0.0,
+            "maximum": 100.0,
+            "value": 50.0,
+            "choices": [],
+            "color": [0, 0, 0, 255],
+            "components": [0.0, 0.0, 0.0],
+            "component_count": 0,
+            "layer_path": null,
+            "enabled": true,
+            "visible": true,
+            "supervised": false,
+        });
+        let parsed = serde_json::from_value::<InteractiveParameter>(frozen.clone());
+        assert!(
+            parsed.is_ok(),
+            "a cache written by an older build no longer deserializes: {:?}",
+            parsed.err()
+        );
+        // And the fields we persist still round-trip.
+        let value = serde_json::to_value(parsed.unwrap()).unwrap();
+        for key in frozen.as_object().unwrap().keys() {
+            assert!(value.get(key).is_some(), "field `{key}` disappeared from the schema");
+        }
+    }
+
+    /// The same hazard for this crate's own entry shape: adding a field without
+    /// `#[serde(default)]` stops every existing cache entry from deserializing.
+    #[test]
+    fn an_older_cache_entry_shape_still_reads() {
+        // What an entry written before `params`/`build`/`stale` existed looks like.
+        let oldest = serde_json::json!({
+            "mtime": [5, 0],
+            "len": 64,
+            "ok": true,
+            "sha": "aa",
+            "smart": true,
+        });
+        let entry: CacheEntry = serde_json::from_value(oldest)
+            .expect("an entry from an older build must still read, or every filter unregisters");
+        assert!(entry.ok);
+        assert!(entry.params.is_empty());
+        assert!(!entry.stale);
+        assert_eq!(entry.build, BuildFingerprint::default());
+    }
+
+    /// A junctioned install (Adobe moved to another drive) must still be found:
+    /// `DirEntry::file_type` calls a junction a symlink, not a directory.
+    #[cfg(windows)]
+    #[test]
+    fn a_junctioned_install_is_still_found() {
+        let root = temp_root("junction");
+        let real = root.join("real");
+        std::fs::create_dir_all(real.join("Plug-ins")).unwrap();
+        let link = root.join("App 2025");
+        junction(&link, &real);
+        let (picked, complete) = newest_versioned(&root, "App ", &["Plug-ins"]);
+        assert_eq!(picked.unwrap(), link.join("Plug-ins"));
+        assert!(complete);
+    }
+
+    /// The same for a junctioned subfolder of a scan root: missing it would leave
+    /// its AEX out of `seen`, and the prune would then delete their entries.
+    #[cfg(windows)]
+    #[test]
+    fn a_junctioned_subfolder_is_scanned() {
+        let root = temp_root("junction-scan");
+        let real = root.join("real");
+        std::fs::create_dir_all(&real).unwrap();
+        std::fs::write(real.join("deep.aex"), b"x").unwrap();
+        let scanned = root.join("scanned");
+        std::fs::create_dir_all(&scanned).unwrap();
+        junction(&scanned.join("linked"), &real);
+        let scan = collect_aex(std::slice::from_ref(&scanned), &[]);
+        assert_eq!(scan.seen.len(), 1, "the AEX behind the junction was seen");
+        assert!(scan.complete);
+    }
+
+    /// Creates a directory junction, failing loudly rather than letting the test
+    /// pass without exercising anything. Junctions need no elevation on NTFS.
+    #[cfg(windows)]
+    fn junction(link: &Path, target: &Path) {
+        let out = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(link)
+            .arg(target)
+            .output()
+            .expect("run mklink");
+        assert!(
+            out.status.success(),
+            "could not create a junction, so this test proves nothing: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    /// A junction whose target is not mounted this launch hides whatever is
+    /// behind it. Reporting the scan as complete would let the prune delete those
+    /// AEX's cache entries, unregistering them once the drive is back (#307).
+    #[cfg(windows)]
+    #[test]
+    fn an_unresolvable_junction_marks_the_scan_incomplete() {
+        let root = temp_root("dangling");
+        let target = root.join("target");
+        std::fs::create_dir_all(target.join("sub")).unwrap();
+        let scanned = root.join("scanned");
+        std::fs::create_dir_all(&scanned).unwrap();
+        junction(&scanned.join("linked"), &target);
+        std::fs::remove_dir_all(&target).unwrap(); // the drive went away
+
+        let scan = collect_aex(std::slice::from_ref(&scanned), &[]);
+        assert!(
+            !scan.complete,
+            "an unresolvable link is 'not looked at', not 'nothing there'"
+        );
+
+        let hidden = scanned
+            .join("linked")
+            .join("deep.aex")
+            .to_string_lossy()
+            .into_owned();
+        let mut cache = cache_of(&[&hidden]);
+        prune_cache(&mut cache, &scan.seen, &[scanned], scan.complete);
+        assert!(cache.contains_key(&hidden), "its entry survived");
+    }
+
+    /// The same for a version folder that is an unresolvable junction: falling
+    /// back to an older version must not also claim the resolution was complete.
+    #[cfg(windows)]
+    #[test]
+    fn an_unresolvable_version_junction_marks_the_resolution_incomplete() {
+        let root = temp_root("dangling-version");
+        std::fs::create_dir_all(root.join("App 2024").join("Plug-ins")).unwrap();
+        let target = root.join("target");
+        std::fs::create_dir_all(&target).unwrap();
+        junction(&root.join("App 2025"), &target);
+        std::fs::remove_dir_all(&target).unwrap();
+
+        let (picked, complete) = newest_versioned(&root, "App ", &["Plug-ins"]);
+        assert_eq!(picked.unwrap(), root.join("App 2024").join("Plug-ins"));
+        assert!(!complete, "the newer install was not visible, not absent");
+    }
+
+    /// A junction pointing back up the tree must not expose the same AEX as a
+    /// pile of duplicate filters (each with its own discovery worker).
+    #[cfg(windows)]
+    #[test]
+    fn a_junction_loop_does_not_duplicate_an_aex() {
+        let root = temp_root("junction-loop");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("only.aex"), b"x").unwrap();
+        junction(&root.join("loop"), &root);
+        let scan = collect_aex(std::slice::from_ref(&root), &[]);
+        assert_eq!(scan.seen.len(), 1, "one AEX, seen once: {:?}", scan.seen);
+    }
+
+    /// Two scan roots that reach the same folder through a junction likewise
+    /// must not register everything under it twice.
+    #[cfg(windows)]
+    #[test]
+    fn two_roots_crossing_through_a_junction_do_not_duplicate() {
+        let root = temp_root("junction-cross");
+        let shared = root.join("shared");
+        std::fs::create_dir_all(&shared).unwrap();
+        std::fs::write(shared.join("one.aex"), b"x").unwrap();
+        let other = root.join("other");
+        std::fs::create_dir_all(&other).unwrap();
+        junction(&other.join("link"), &shared);
+        let scan = collect_aex(&[shared.clone(), other], &[]);
+        assert_eq!(scan.seen.len(), 1, "one AEX, seen once: {:?}", scan.seen);
+        assert!(scan.complete, "reaching it twice is not an incomplete scan");
+    }
+
+    /// The scan lists one spelling per AEX, so an entry keyed by another path to
+    /// the same file (reached through a junction) is missing from the listing but
+    /// is not gone. Pruning it would unregister that filter next launch (#307).
+    #[cfg(windows)]
+    #[test]
+    fn an_entry_reachable_under_another_name_is_not_pruned() {
+        let root = temp_root("alias");
+        let real = root.join("Effects");
+        std::fs::create_dir_all(&real).unwrap();
+        std::fs::write(real.join("foo.aex"), b"x").unwrap();
+        junction(&root.join("AAA-link"), &real);
+
+        let scan = collect_aex(std::slice::from_ref(&root), &[]);
+        assert_eq!(scan.seen.len(), 1, "walked once: {:?}", scan.seen);
+
+        // Key the cache by the spelling the scan did NOT keep.
+        let other = if scan.seen[0].starts_with(&real) {
+            root.join("AAA-link").join("foo.aex")
+        } else {
+            real.join("foo.aex")
+        };
+        let key = other.to_string_lossy().into_owned();
+        let mut cache = cache_of(&[&key]);
+        prune_cache(&mut cache, &scan.seen, &[root], scan.complete);
+        assert!(cache.contains_key(&key), "the file is still there, so is its entry");
+    }
+
+    /// An AEX that really is gone still goes, or the cache never shrinks.
+    #[test]
+    fn a_deleted_aex_is_still_pruned() {
+        let root = temp_root("deleted");
+        let key = root.join("gone.aex").to_string_lossy().into_owned();
+        let mut cache = cache_of(&[&key]);
+        prune_cache(&mut cache, &[], &[root], true);
+        assert!(cache.is_empty(), "the file does not exist, so the entry goes");
+    }
+
+    /// The spelling the scan walks can change between launches (a junction added
+    /// or renamed, a different scan-root order) without the file changing. The
+    /// entry must still be found, or that effect is unregistered for a launch and
+    /// saved projects lose the objects using it (#307).
+    #[cfg(windows)]
+    #[test]
+    fn an_entry_keyed_under_another_name_is_still_found() {
+        let root = temp_root("alias-lookup");
+        let real = root.join("Effects");
+        std::fs::create_dir_all(&real).unwrap();
+        std::fs::write(real.join("foo.aex"), b"x").unwrap();
+        junction(&root.join("AAA-link"), &real);
+
+        let scan = collect_aex(std::slice::from_ref(&root), &[]);
+        assert_eq!(scan.seen.len(), 1);
+        let walked = &scan.seen[0];
+        // Key the cache by the other spelling, as an earlier launch would have.
+        let other = if walked.starts_with(&real) {
+            root.join("AAA-link").join("foo.aex")
+        } else {
+            real.join("foo.aex")
+        };
+        let cache = cache_of(&[&other.to_string_lossy()]);
+
+        assert!(
+            !cache.contains_key(&walked.to_string_lossy().into_owned()),
+            "the exact key really does miss"
+        );
+        let index = index_by_real_path(&cache, std::slice::from_ref(&root));
+        let found = walked
+            .canonicalize()
+            .ok()
+            .and_then(|real| index.get(&real))
+            .and_then(|alias| cache.get(alias));
+        assert!(found.is_some(), "but the real path finds it");
+    }
+
+    /// After an aliased hit, the entry must end up under the spelling the scan
+    /// walked: the background pass keys by that, and without it `keep_best` sees
+    /// no cached entry, so a transient discovery failure would write a negative
+    /// and unregister the effect next launch (#307).
+    #[test]
+    fn an_aliased_entry_is_moved_onto_the_walked_key() {
+        let mut cache = cache_of(&["old-spelling.aex"]);
+        apply_rekey(
+            &mut cache,
+            vec![("old-spelling.aex".into(), "walked.aex".into())],
+        );
+        assert!(!cache.contains_key("old-spelling.aex"), "no duplicate left behind");
+        let moved = cache.get("walked.aex").expect("found under the walked key");
+        assert!(moved.ok);
+
+        // And now the background merge sees it, so a failed recheck cannot demote.
+        let merged = keep_best(Some(moved), failed(5, 64, build(2)), META).unwrap();
+        assert!(merged.ok, "the demotion guard applies again");
+    }
+
+    /// The alias index only covers the folders this launch scanned, so a leftover
+    /// key elsewhere (a disconnected drive) is never resolved at startup.
+    #[test]
+    fn the_alias_index_only_covers_the_scanned_roots() {
+        let root = temp_root("alias-scope");
+        std::fs::write(root.join("here.aex"), b"x").unwrap();
+        let inside = root.join("here.aex").to_string_lossy().into_owned();
+        let outside = PathBuf::from("elsewhere")
+            .join("far.aex")
+            .to_string_lossy()
+            .into_owned();
+        let cache = cache_of(&[&inside, &outside]);
+        let index = index_by_real_path(&cache, std::slice::from_ref(&root));
+        assert_eq!(index.len(), 1, "only the key under the scanned root");
+        assert!(index.values().any(|key| key == &inside));
     }
 }
