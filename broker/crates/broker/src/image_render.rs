@@ -1205,6 +1205,9 @@ fn image_worker_command(
         (true, RenderPixelFormat::Argb8, true, RenderGpuBackend::Auto) => "--smart-image-layer",
         (true, RenderPixelFormat::Argb16, true, RenderGpuBackend::Auto) => "--smart-image16-layer",
         (true, RenderPixelFormat::Argb32f, true, RenderGpuBackend::Auto) => "--smart-image32-layer",
+        (true, RenderPixelFormat::Argb32f, true, RenderGpuBackend::Cpu) => {
+            "--smart-image32-cpu-layer"
+        }
         (true, RenderPixelFormat::Argb8, false, RenderGpuBackend::Auto) => "--smart-image",
         (true, RenderPixelFormat::Argb16, false, RenderGpuBackend::Auto) => "--smart-image16",
         (false, RenderPixelFormat::Argb8, true, RenderGpuBackend::Auto) => "--render-image-layer",
@@ -8294,6 +8297,16 @@ mod tests {
             .unwrap(),
             "--smart-image32-layer"
         );
+        assert_eq!(
+            image_worker_command(
+                true,
+                RenderPixelFormat::Argb32f,
+                true,
+                RenderGpuBackend::Cpu
+            )
+            .unwrap(),
+            "--smart-image32-cpu-layer"
+        );
         assert_ne!(
             image_worker_command(
                 false,
@@ -8322,15 +8335,6 @@ mod tests {
                 expected
             );
         }
-        assert!(
-            image_worker_command(
-                true,
-                RenderPixelFormat::Argb32f,
-                true,
-                RenderGpuBackend::Cpu
-            )
-            .is_err()
-        );
         assert!(
             image_worker_command(
                 false,
