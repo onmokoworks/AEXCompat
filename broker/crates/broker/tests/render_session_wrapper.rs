@@ -1863,18 +1863,17 @@ mod windows_e2e {
         let _ = std::fs::remove_dir_all(&scratch);
     }
 
+    /// A conformance render carries the render-settings trailer into the
+    /// session (#275). Verified by the effect it is asked for -- the alpha
+    /// pre-transform -- and by the setting not surviving its own scope, rather
+    /// than by agreeing with the one-shot (#361).
     #[test]
-    fn conformance_render_settings_match_the_one_shot_transport() {
+    fn conformance_render_settings_change_the_render_and_do_not_leak() {
         if crate::common::skip_without_restricted_token_launch(
-            "conformance_render_settings_match_the_one_shot_transport",
+            "conformance_render_settings_change_the_render_and_do_not_leak",
         ) {
             return;
         }
-        // A conformance render (AEXCOMPAT_CONFORMANCE_RENDER_SETTINGS set) is now
-        // carried by the session, which forwards the --conformance-render-settings-v1
-        // trailer so the worker reports the same render_settings block the
-        // one-shot route does (#275). The broker pre-transforms the input for the
-        // alpha mode on both routes, so the pixels match too.
         let _env_guard = SESSION_ROUTE_ENV_LOCK
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
@@ -1883,7 +1882,7 @@ mod windows_e2e {
         let aex = root.join("target/pf-sampling-probe-build/Release/pf_sampling_probe.aex");
         if !worker.is_file() || !aex.is_file() {
             eprintln!(
-                "skipping conformance A/B: build aex_render_worker.exe and \
+                "skipping conformance render: build aex_render_worker.exe and \
                  pf_sampling_probe.aex first"
             );
             return;
@@ -1896,20 +1895,14 @@ mod windows_e2e {
         ));
         std::fs::create_dir_all(&scratch).unwrap();
         let input = scratch.join("input.png");
+        // Alpha below 255 so the premultiply pre-transform actually changes the
+        // colour channels; an opaque input would make the comparison vacuous.
         image::RgbaImage::from_fn(48, 32, |x, y| {
             image::Rgba([(x * 5) as u8, (y * 3) as u8, (x + y) as u8, 200])
         })
         .save(&input)
         .unwrap();
 
-        // A valid v1 conformance trailer: premultiplied alpha (a non-trivial
-        // input pre-transform, so the broker actually rewrites the input on both
-        // routes), software renderer. The input above has alpha 200 < 255 so the
-        // premultiply changes the color channels. The conformance env changes
-        // both the pre-transform and the report, so a leak past this test (e.g.
-        // a panic before the explicit remove) would corrupt later tests; restore
-        // the prior value (or its absence) on drop rather than relying on
-        // reaching the end.
         struct EnvVarGuard {
             name: &'static str,
             previous: Option<std::ffi::OsString>,
@@ -1929,64 +1922,55 @@ mod windows_e2e {
                 }
             }
         }
-        let _conformance_guard = EnvVarGuard::set(
+
+        // Baseline first, with no conformance settings at all.
+        let out_plain = scratch.join("plain.png");
+        let plain = render_experimental_image(&root, &aex, &sha, &input, &out_plain, &[])
+            .expect("session-route plain render");
+        assert_session_render_is_healthy(&plain, "conformance baseline");
+
+        let guard = EnvVarGuard::set(
             "AEXCOMPAT_CONFORMANCE_RENDER_SETTINGS",
             "v1|premultiplied|0|-|0|software",
         );
-
-        // Run A: default routing now carries the conformance render on the
-        // session (the counter must advance).
-        unsafe { std::env::remove_var(DISABLE_SESSION_WRAPPER_ENV) };
         let before = RENDER_SESSION_WRAPPER_RENDERS.load(Ordering::SeqCst);
-        let output_a = scratch.join("out-a.png");
-        let report_a = render_experimental_image(&root, &aex, &sha, &input, &output_a, &[])
+        let out_conf = scratch.join("conformance.png");
+        let conformance = render_experimental_image(&root, &aex, &sha, &input, &out_conf, &[])
             .expect("session-route conformance render");
         assert!(
             RENDER_SESSION_WRAPPER_RENDERS.load(Ordering::SeqCst) > before,
-            "the conformance render must now be carried by the session"
+            "the conformance render must be carried by the session"
+        );
+        assert_session_render_is_healthy(&conformance, "conformance render");
+
+        // What this test can and cannot see: the flattened public report carries
+        // no render_settings block -- that field lives in the worker report the
+        // session close returns, not in interactive_image_render (measured
+        // against the real report). So the worker-side arrival of the trailer is
+        // not observable here; it is the session protocol's own tests that cover
+        // it. What is observable is the effect the setting is asked for: the
+        // broker's alpha pre-transform rewrites the input the plug-in sees.
+        assert_ne!(
+            plain.get("input_sha256"),
+            conformance.get("input_sha256"),
+            "the premultiply pre-transform did not change the input"
+        );
+        assert_ne!(
+            plain.get("output_sha256"),
+            conformance.get("output_sha256"),
+            "a premultiplied translucent input rendered identically to the plain one"
         );
 
-        // Run B: the escape hatch forces the one-shot argv transport.
-        unsafe { std::env::set_var(DISABLE_SESSION_WRAPPER_ENV, "1") };
-        let after_a = RENDER_SESSION_WRAPPER_RENDERS.load(Ordering::SeqCst);
-        let output_b = scratch.join("out-b.png");
-        let report_b = render_experimental_image(&root, &aex, &sha, &input, &output_b, &[]);
-        unsafe { std::env::remove_var(DISABLE_SESSION_WRAPPER_ENV) };
-        // The conformance env is cleared by `_conformance_guard` on drop.
-        let report_b = report_b.expect("one-shot conformance render");
+        drop(guard);
+        // Without the env the render must go back to the baseline, so the
+        // setting is not leaking into later renders through the session.
+        let out_after = scratch.join("after.png");
+        let after = render_experimental_image(&root, &aex, &sha, &input, &out_after, &[])
+            .expect("session-route render after the conformance env cleared");
         assert_eq!(
-            RENDER_SESSION_WRAPPER_RENDERS.load(Ordering::SeqCst),
-            after_a,
-            "the escape hatch did not force the one-shot transport"
-        );
-
-        // The reports must match field-for-field except the output paths and the
-        // stderr-derived process diagnostics (the session's stage traces include
-        // its frame loop; elapsed timings are volatile). Forwarding the trailer
-        // keeps every conformance-affected report field consistent across routes.
-        let volatile = ["output_png", "output_raw", "worker_diagnostics"];
-        let mut flat_a = report_a.as_object().expect("report A object").clone();
-        let mut flat_b = report_b.as_object().expect("report B object").clone();
-        for key in volatile {
-            flat_a.remove(key);
-            flat_b.remove(key);
-        }
-        assert_eq!(
-            flat_a.keys().collect::<Vec<_>>(),
-            flat_b.keys().collect::<Vec<_>>(),
-            "conformance report key sets diverge between the routes"
-        );
-        for (key, value_a) in &flat_a {
-            assert_eq!(
-                Some(value_a),
-                flat_b.get(key),
-                "conformance report field {key} differs between the session and one-shot routes"
-            );
-        }
-        assert_eq!(
-            std::fs::read(&output_a).unwrap(),
-            std::fs::read(&output_b).unwrap(),
-            "the conformance PNG differs between the session and one-shot routes"
+            plain.get("output_sha256"),
+            after.get("output_sha256"),
+            "the conformance setting leaked past its guard"
         );
         let _ = std::fs::remove_dir_all(&scratch);
     }
