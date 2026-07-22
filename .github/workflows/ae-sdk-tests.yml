@@ -174,6 +174,27 @@ jobs:
       # AFTER_EFFECTS_SDK_ROOT が通っていれば SDK 由来の skip は 1 件も出ないはず。
       # 同様に、worker/probe をビルド済みなので built_artifact テストが成果物
       # 不在の inline skip ("... is not built" 等) で黙って skip されたら fail。
+      # The restricted-token limitation reaches the Python side too: the video
+      # batch CLI drives a live worker. That skip is legitimate on a hosted
+      # runner, so the gate below must not fail on it, but it must not be
+      # invisible either -- report it the way the Rust side does (#335).
+      - name: Report restricted-token skips
+        shell: pwsh
+        if: always()
+        run: |
+          if (-not (Test-Path pytest-output.txt)) {
+            Write-Host 'pytest produced no log; nothing to report.'
+            exit 0
+          }
+          $skips = Select-String -Path pytest-output.txt `
+            -Pattern 'cannot launch a restricted-token worker'
+          if ($skips) {
+            Write-Host "::warning::$($skips.Count) Python tests did not run: this runner cannot launch a restricted-token worker (issue #335)"
+            $skips | ForEach-Object { $_.Line }
+          } else {
+            Write-Host 'Every worker-launching Python test ran: no restricted-token skips.'
+          }
+
       - name: Fail if SDK or built-artifact tests were skipped
         shell: pwsh
         run: |
