@@ -45,3 +45,40 @@ def test_windows_clean_clone_runs_canonical_source_reproducible_gates():
     assert "uv run python -m pytest --collect-only -q --validate-local-artifact-manifest" in workflow
     assert "uv run python -m pytest -q" in workflow
     assert "--run-local-artifact-tests" not in workflow
+
+
+def test_pre_launch_rejection_tests_keep_running_on_a_restricted_token_host():
+    """Rejection paths that never start a process must not carry the #335 guard.
+
+    The guard exists because a hosted runner's restricted token cannot
+    initialize a worker. A test that asserts the launch is *refused* before any
+    process is created is unaffected by that, so guarding it would delete real
+    CI coverage of the refusal. `RenderSession::open` performs every argument
+    validation before it reaches the launch, and `secure_launch` fails trusted
+    worker staging before it spawns.
+    """
+    tests_dir = ROOT / "broker/crates/broker/tests"
+    unguarded = {
+        "render_session.rs": (
+            "smart_session_with_an_explicit_gpu_backend_requires_a_policy",
+            "open_rejects_two_timed_layers_at_the_same_slot_and_time",
+            "open_rejects_two_static_layers_at_the_same_slot",
+            "open_rejects_an_out_of_range_alpha_as_coverage_slot",
+            "open_rejects_layer_pixels_that_do_not_match_dimensions",
+            "open_rejects_a_zero_layer_slot",
+            "open_rejects_a_non_empty_world_dump_directory",
+            "open_rejects_a_world_dump_directory_outside_the_target_tree",
+            "open_rejects_animation_bound_to_an_unknown_slot",
+        ),
+        "secure_launch.rs": (
+            "worker_hash_mismatch_never_starts_process_and_cleans_tree",
+        ),
+    }
+    for filename, names in unguarded.items():
+        source = (tests_dir / filename).read_text(encoding="utf-8")
+        for name in names:
+            anchor = source.index(f"fn {name}(")
+            head = source[anchor:anchor + 400]
+            assert "skip_without_restricted_token_launch" not in head, (
+                f"{filename}::{name} rejects before any process starts; guarding it "
+                "removes CI coverage of the refusal")

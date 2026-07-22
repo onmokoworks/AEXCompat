@@ -88,12 +88,15 @@ mod windows_e2e {
 
     #[test]
     fn worker_hash_mismatch_never_starts_process_and_cleans_tree() {
+<<<<<<< HEAD
         if crate::common::skip_without_restricted_token_launch(
             "worker_hash_mismatch_never_starts_process_and_cleans_tree",
         ) {
             return;
         }
         let _lock = SECURE_LAUNCH_LOCK.lock().unwrap();
+=======
+>>>>>>> 6650c53 (Keep the pre-launch rejection tests running on a restricted-token host (Codex review))
         let worker_dir = TempDir::new("aexcompat-secure-launch-worker-mismatch");
         let marker = worker_dir.0.join("started.marker");
         let worker = build_marker_worker(&worker_dir.0);

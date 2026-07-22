@@ -386,11 +386,6 @@ mod windows_e2e {
 
     #[test]
     fn smart_session_with_an_explicit_gpu_backend_requires_a_policy() {
-        if crate::common::skip_without_restricted_token_launch(
-            "smart_session_with_an_explicit_gpu_backend_requires_a_policy",
-        ) {
-            return;
-        }
         let _behavior = BehaviorGuard::set(None);
         let (repository, plugin, sha) = temp_repository();
         let error = RenderSession::open(SessionOpenRequest {
@@ -663,11 +658,6 @@ mod windows_e2e {
 
     #[test]
     fn open_rejects_two_timed_layers_at_the_same_slot_and_time() {
-        if crate::common::skip_without_restricted_token_launch(
-            "open_rejects_two_timed_layers_at_the_same_slot_and_time",
-        ) {
-            return;
-        }
         let _behavior = BehaviorGuard::set(None);
         let (repository, plugin, sha) = temp_repository();
         // Same slot, equal rational time (2/60 == 1/30): a per-frame collision
@@ -793,11 +783,6 @@ mod windows_e2e {
 
     #[test]
     fn open_rejects_two_static_layers_at_the_same_slot() {
-        if crate::common::skip_without_restricted_token_launch(
-            "open_rejects_two_static_layers_at_the_same_slot",
-        ) {
-            return;
-        }
         let _behavior = BehaviorGuard::set(None);
         let (repository, plugin, sha) = temp_repository();
         // Two static entries at one slot are ambiguous per frame; open must
@@ -906,11 +891,6 @@ mod windows_e2e {
 
     #[test]
     fn open_rejects_an_out_of_range_alpha_as_coverage_slot() {
-        if crate::common::skip_without_restricted_token_launch(
-            "open_rejects_an_out_of_range_alpha_as_coverage_slot",
-        ) {
-            return;
-        }
         let _behavior = BehaviorGuard::set(None);
         let (repository, plugin, sha) = temp_repository();
         // Same bound the one-shot path enforces (slot <= 1024); open must fail
@@ -953,11 +933,6 @@ mod windows_e2e {
 
     #[test]
     fn open_rejects_layer_pixels_that_do_not_match_dimensions() {
-        if crate::common::skip_without_restricted_token_launch(
-            "open_rejects_layer_pixels_that_do_not_match_dimensions",
-        ) {
-            return;
-        }
         let _behavior = BehaviorGuard::set(None);
         let (repository, plugin, sha) = temp_repository();
         let layers = vec![SessionLayer {
@@ -1006,9 +981,6 @@ mod windows_e2e {
 
     #[test]
     fn open_rejects_a_zero_layer_slot() {
-        if crate::common::skip_without_restricted_token_launch("open_rejects_a_zero_layer_slot") {
-            return;
-        }
         let _behavior = BehaviorGuard::set(None);
         let (repository, plugin, sha) = temp_repository();
         let layers = vec![SessionLayer {
@@ -1262,11 +1234,6 @@ mod windows_e2e {
 
     #[test]
     fn open_rejects_a_non_empty_world_dump_directory() {
-        if crate::common::skip_without_restricted_token_launch(
-            "open_rejects_a_non_empty_world_dump_directory",
-        ) {
-            return;
-        }
         let _behavior = BehaviorGuard::set(None);
         let (repository, plugin, sha) = temp_repository();
         let reused = repository.0.join("target/reused-dumps");
@@ -1307,11 +1274,6 @@ mod windows_e2e {
 
     #[test]
     fn open_rejects_a_world_dump_directory_outside_the_target_tree() {
-        if crate::common::skip_without_restricted_token_launch(
-            "open_rejects_a_world_dump_directory_outside_the_target_tree",
-        ) {
-            return;
-        }
         let _behavior = BehaviorGuard::set(None);
         let (repository, plugin, sha) = temp_repository();
         let missing = repository.0.join("outside-dumps");
@@ -1350,11 +1312,6 @@ mod windows_e2e {
 
     #[test]
     fn open_rejects_animation_bound_to_an_unknown_slot() {
-        if crate::common::skip_without_restricted_token_launch(
-            "open_rejects_animation_bound_to_an_unknown_slot",
-        ) {
-            return;
-        }
         let _behavior = BehaviorGuard::set(None);
         let (repository, plugin, sha) = temp_repository();
         let animations = [scalar_animation(2)];

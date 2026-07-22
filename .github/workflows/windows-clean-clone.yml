@@ -42,8 +42,11 @@ jobs:
       # Hosted runners execute as a service account whose restricted token cannot
       # initialize even a static Rust worker (0xC0000142). The tests that drive a
       # live worker detect that themselves now (broker/crates/broker/tests/common,
-      # issue #335) and report a skip line instead of failing; rejection tests that
-      # never start a process still run. The old --skip list is gone because it did
+      # issue #335) and report a skip line instead of failing. Rejection tests that
+      # never start a process keep running: RenderSession::open validates every
+      # argument before it launches, and secure_launch fails trusted worker staging
+      # before it spawns, so those refusals are still covered here. The old --skip
+      # list is gone because it did
       # not follow the tests added after it was written, which left main red with
       # 32 failures.
       - name: Test Rust workspace
