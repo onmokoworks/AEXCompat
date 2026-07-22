@@ -592,10 +592,14 @@ fn classify(
     match meta {
         // Confirmed unchanged: re-verify when the entry is marked stale, or when
         // the host build moved (but an unknown build is not a moved one — see
-        // `BuildFingerprint::is_known`, or one failed stat costs two full passes).
+        // `BuildFingerprint::is_known`, or one failed stat costs two full passes)
+        // and this host has not already spent its [`RETRY_BUDGET`] on it.
         Some((mtime, len)) if entry.mtime == mtime && entry.len == len => LoadDecision {
             register: entry.ok,
-            discover: entry.stale || (build.is_known() && entry.build != build),
+            discover: entry.stale
+                || (build.is_known()
+                    && entry.build != build
+                    && (entry.checked != build || entry.attempts < RETRY_BUDGET)),
         },
         // Confirmed changed: a different plug-in, whose parameters the cached
         // entry does not describe, so it is not registered (tracked as #309).
@@ -1030,7 +1034,28 @@ struct CacheEntry {
     /// cannot stay permanently wrong.
     #[serde(default)]
     stale: bool,
+    /// The host that last *attempted* to re-verify this entry, which is not the
+    /// one that produced it when the attempt failed. Kept apart from `build` so a
+    /// failed attempt cannot pass the payload off as the current host's work:
+    /// doing that both hides its real provenance and silently ends re-verification
+    /// for that host, leaving an effect on an older host's parameters.
+    #[serde(default)]
+    checked: BuildFingerprint,
+    /// Failed re-verification attempts under `checked`, so retries are bounded
+    /// (see [`RETRY_BUDGET`]) instead of running on every launch forever.
+    #[serde(default)]
+    attempts: u8,
 }
+
+/// How many times a re-verification may fail for one host build before the entry
+/// is left alone until the host changes again.
+///
+/// Above one so a single transient failure — a worker timeout under load — does
+/// not strand an entry on an older host's parameters. Small, because a host that
+/// genuinely cannot discover an effect any more would otherwise re-run a worker
+/// for it on every launch, and a regression can put hundreds of entries in that
+/// state at once.
+const RETRY_BUDGET: u8 = 3;
 
 /// Invalidates cache files whose [`CacheEntry`] shape can no longer be trusted
 /// field-for-field.
@@ -1251,7 +1276,15 @@ fn keep_best(
     match cached {
         Some(old) if old.ok && !discovered.ok && old.mtime == mtime && old.len == len => {
             Some(CacheEntry {
-                build: discovered.build,
+                // Provenance stays with the host that actually produced the
+                // payload; only the attempt is recorded, and it is counted so
+                // retries are bounded rather than endless.
+                checked: discovered.build,
+                attempts: if old.checked == discovered.build {
+                    old.attempts.saturating_add(1)
+                } else {
+                    1
+                },
                 // Keep any existing stale mark. Clearing it because *this* pass
                 // failed would strand an entry whose sha/params describe older
                 // bytes: it would never be re-discovered again, so every frame
@@ -1290,6 +1323,8 @@ fn negative_entry(plugin: &Path, build: BuildFingerprint) -> CacheEntry {
         params: Vec::new(),
         build,
         stale: false,
+        checked: build,
+        attempts: 0,
     }
 }
 
@@ -1982,6 +2017,8 @@ mod tests {
             params: Vec::new(),
             build,
             stale: false,
+            checked: build,
+            attempts: 0,
         }
     }
 
@@ -2024,17 +2061,43 @@ mod tests {
         );
     }
 
-    /// Keeping the old result must still take the new build, otherwise the entry
-    /// is queued for re-verification again on every launch and never converges.
+    /// A failed re-verification must not pass the payload off as the current
+    /// host's work: that hides which host produced it and ends re-verification
+    /// for that host, stranding the effect on older parameters after a single
+    /// transient failure. The attempt is recorded separately and retried.
     #[test]
-    fn a_kept_entry_still_takes_the_new_build() {
+    fn a_failed_recheck_does_not_claim_the_new_build() {
         let old = discovered(5, 64, build(1));
         let merged = keep_best(Some(&old), failed(5, 64, build(2)), META).unwrap();
-        assert_eq!(merged.build, build(2));
+        assert_eq!(merged.build, build(1), "provenance is unchanged");
+        assert_eq!(merged.checked, build(2), "but the attempt is recorded");
+        assert_eq!(merged.attempts, 1);
         assert_eq!(
             classify(Some(&merged), META, build(2)),
+            LoadDecision { register: true, discover: true },
+            "still registered, and tried again"
+        );
+    }
+
+    /// Retries are bounded, so a host that genuinely cannot discover an effect
+    /// any more does not re-run a worker for it on every launch forever.
+    #[test]
+    fn re_verification_gives_up_after_the_retry_budget() {
+        let mut entry = discovered(5, 64, build(1));
+        for attempt in 1..=RETRY_BUDGET {
+            entry = keep_best(Some(&entry), failed(5, 64, build(2)), META).unwrap();
+            assert_eq!(entry.attempts, attempt);
+            assert!(entry.ok, "registered throughout");
+        }
+        assert_eq!(
+            classify(Some(&entry), META, build(2)),
             LoadDecision { register: true, discover: false },
-            "converged: registered, not queued again"
+            "converged: still registered, no longer queued"
+        );
+        // A different host starts the budget over, since it may well succeed.
+        assert_eq!(
+            classify(Some(&entry), META, build(3)),
+            LoadDecision { register: true, discover: true }
         );
     }
 
