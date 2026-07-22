@@ -30,8 +30,8 @@ use aexcompat_broker::image_render::{
     inspect_experimental_with_approved_dependencies_and_diagnostics,
 };
 use aexcompat_broker::plugin_dependency_closure::{
-    DependencyClosureRequest, ResolvedDependencyClosure, resolve_dependency_closure,
-    survey_dependency_closure,
+    DependencyClosureRequest, DependencyProvenance, ResolvedDependencyClosure,
+    resolve_dependency_closure, survey_dependency_closure,
 };
 use aexcompat_broker::render_session::{FrameStatus, RenderSession, SessionOpenRequest};
 use aviutl2_sys::filter2::{
@@ -1378,6 +1378,19 @@ struct CachedClosure {
     /// would only cost startup `stat` calls.
     #[serde(default)]
     missing: Vec<String>,
+    /// Resolver provenance for every sealed basename. This is diagnostic-only:
+    /// worker module audit still classifies each authenticated file through the
+    /// existing plug-in-tree policy. Additive/defaulted so pre-#360 caches remain
+    /// readable and are naturally refreshed by the rebuilt host fingerprint.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    provenance: Vec<CachedDependencyProvenance>,
+}
+
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+struct CachedDependencyProvenance {
+    basename: String,
+    import_derived: bool,
+    string_derived: bool,
 }
 
 /// One sealed dependency's identity, as cheap to re-check as a `stat`.
@@ -1386,6 +1399,17 @@ struct CachedDependency {
     path: String,
     mtime: (u64, u32),
     len: u64,
+}
+
+fn cached_provenance(sources: &[DependencyProvenance]) -> Vec<CachedDependencyProvenance> {
+    sources
+        .iter()
+        .map(|source| CachedDependencyProvenance {
+            basename: source.basename.clone(),
+            import_derived: source.import_derived,
+            string_derived: source.string_derived,
+        })
+        .collect()
 }
 
 /// Whether this entry should be re-discovered because its dependency closure
@@ -1917,6 +1941,7 @@ fn discover_one(
                     roots: recorded_roots,
                     sealed,
                     missing,
+                    provenance: cached_provenance(&survey.provenance),
                 }
             }
             Err(_) => CachedClosure {
@@ -1932,6 +1957,7 @@ fn discover_one(
         .map(|sealed| sealed.path.clone())
         .collect();
     let (sealed, vanished) = cached_dependencies(&sealed_paths);
+    let provenance = cached_provenance(closure.provenance());
     let mut missing = cached_missing(closure.unresolved());
     missing.extend(vanished);
     missing.sort();
@@ -1940,6 +1966,7 @@ fn discover_one(
         roots: recorded_roots,
         sealed,
         missing,
+        provenance,
     };
     match inspect_experimental_with_approved_dependencies_and_diagnostics(
         repository,
@@ -3165,6 +3192,7 @@ mod tests {
                 })
                 .collect(),
             missing: missing.iter().map(|name| name.to_string()).collect(),
+            provenance: Vec::new(),
         };
         entry
     }
@@ -3412,6 +3440,25 @@ mod tests {
         let (picked, complete) = newest_versioned(&root, "App ", &["Plug-ins"]);
         assert_eq!(picked.unwrap(), root.join("App 2025").join("Plug-ins"));
         assert!(complete);
+    }
+
+    #[test]
+    fn dependency_provenance_is_additive_and_round_trips() {
+        let closure = CachedClosure {
+            provenance: vec![CachedDependencyProvenance {
+                basename: "runtime.dll".into(),
+                import_derived: false,
+                string_derived: true,
+            }],
+            ..CachedClosure::default()
+        };
+        let encoded = serde_json::to_value(&closure).unwrap();
+        assert_eq!(encoded["provenance"][0]["basename"], "runtime.dll");
+        assert_eq!(encoded["provenance"][0]["string_derived"], true);
+        let decoded: CachedClosure = serde_json::from_value(encoded).unwrap();
+        assert_eq!(decoded.provenance.len(), 1);
+        assert!(!decoded.provenance[0].import_derived);
+        assert!(decoded.provenance[0].string_derived);
     }
 
     /// The cache embeds the broker's `InteractiveParameter`, whose fields are not

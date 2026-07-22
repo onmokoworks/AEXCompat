@@ -24,7 +24,8 @@ use std::time::Instant;
 
 use aexcompat_broker::image_render::inspect_experimental_with_approved_dependencies_and_diagnostics;
 use aexcompat_broker::plugin_dependency_closure::{
-    DependencyClosureRequest, resolve_dependency_closure, survey_dependency_closure,
+    DependencyClosureRequest, DependencyProvenance, resolve_dependency_closure,
+    survey_dependency_closure,
 };
 use aexcompat_broker::secure_image_dispatch::ApprovedImageArtifact;
 use serde_json::{Value, json};
@@ -149,6 +150,21 @@ fn bucket_of(error: &str) -> String {
     }
 }
 
+fn provenance_json(sources: &[DependencyProvenance]) -> Value {
+    Value::Array(
+        sources
+            .iter()
+            .map(|source| {
+                json!({
+                    "basename": source.basename,
+                    "import_derived": source.import_derived,
+                    "string_derived": source.string_derived,
+                })
+            })
+            .collect(),
+    )
+}
+
 fn main() {
     let options = parse_options();
     let repository = PathBuf::from(
@@ -224,6 +240,7 @@ fn main() {
                             "closure_bytes": survey.total_bytes,
                             "unresolved": survey.unresolved.len(),
                             "unreadable_images": survey.unreadable_images,
+                            "dependency_provenance": provenance_json(&survey.provenance),
                         }),
                     ));
                     *buckets.entry("surveyed".into()).or_default() += 1;
@@ -255,16 +272,21 @@ fn main() {
         // `unresolved` is `null` rather than 0 in the baseline: nothing was
         // resolved there, so reporting a count would read as "nothing was
         // missing" when the honest answer is "not measured".
-        let (dependencies, sealed_bytes, unresolved): (Vec<ApprovedImageArtifact>, u64, Value) =
-            match &closure {
-                Some(Ok(closure)) => (
-                    closure.dependencies().to_vec(),
-                    closure.total_bytes(),
-                    json!(closure.unresolved().len()),
-                ),
-                Some(Err(_)) => (Vec::new(), 0, json!(null)),
-                None => (Vec::new(), 0, json!(null)),
-            };
+        let (dependencies, sealed_bytes, unresolved, dependency_provenance): (
+            Vec<ApprovedImageArtifact>,
+            u64,
+            Value,
+            Value,
+        ) = match &closure {
+            Some(Ok(closure)) => (
+                closure.dependencies().to_vec(),
+                closure.total_bytes(),
+                json!(closure.unresolved().len()),
+                provenance_json(closure.provenance()),
+            ),
+            Some(Err(_)) => (Vec::new(), 0, json!(null), json!(null)),
+            None => (Vec::new(), 0, json!(null), json!(null)),
+        };
         let bucket = match &closure {
             Some(Err(error)) => format!("closure_error: {error}"),
             Some(Ok(_)) | None => {
@@ -282,6 +304,7 @@ fn main() {
                                 "sealed": dependencies.len(),
                                 "sealed_bytes": sealed_bytes,
                                 "unresolved": unresolved,
+                                "dependency_provenance": dependency_provenance,
                             }),
                         ));
                         *buckets.entry("loaded".into()).or_default() += 1;
@@ -305,6 +328,7 @@ fn main() {
                 "sealed": dependencies.len(),
                 "sealed_bytes": sealed_bytes,
                 "unresolved": unresolved,
+                "dependency_provenance": dependency_provenance,
             }),
         ));
         *buckets.entry(bucket.clone()).or_default() += 1;
