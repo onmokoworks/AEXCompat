@@ -20,8 +20,8 @@
     "artifacts":  {
                       "worker":  {
                                      "path":  "target/minihost-build/aex_render_worker.exe",
-                                     "size_bytes":  828928,
-                                     "sha256":  "373f5b48b2afb8b5b0b168e0ebb022312b2b1eb1ad6ffbd27f328c9a60b40055"
+                                     "size_bytes":  1218048,
+                                     "sha256":  "47daaf75e1bde6f09cfde040415da1e29f357b0d3b2fdbccc2b454f484a1b594"
                                  },
                       "probe":  {
                                     "path":  "target/pf-sampling-probe-build/Release/pf_sampling_probe.aex",

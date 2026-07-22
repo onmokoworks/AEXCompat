@@ -43,6 +43,7 @@ struct L2ReportContext {
   bool about_selector_dispatched{};
   std::string last_seh_selector;
   int32_t last_seh_error{};
+  uint32_t last_seh_exception_code{};
   std::array<int32_t, 5> lifecycle_errors{};
   bool lifecycle_data_null{};
   std::vector<ParameterSnapshot> parameters;

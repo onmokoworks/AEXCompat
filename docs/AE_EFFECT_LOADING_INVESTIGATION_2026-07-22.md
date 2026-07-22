@@ -255,3 +255,14 @@ AE エフェクトの互換性の指標としては使えない。#318 の解決
 | **L2** | module audit が WinSxS の OS assembly (COMCTL32 / gdiplus) を unknown 扱い | 未 (#315)。旧仮説「Adobe モジュールの runtime policy が要る」は否定 |
 | **L3** | Adobe runtime のスタンドアロン初期化ハング (dvacore→VulcanMessage5/dvanet) | 未検証のまま。L2 を越えないと再測できない。最難関という評価は変えていない |
 | **別軸** | selector dispatch が SEH 例外で落ちる (`last_seh_error: 512`)。プラグイン非依存 | 未 (#318)。#304 の解錠とは独立。これが解けるまで dispatch 以降の再測はできない |
+
+## #315 対応 (2026-07-22)
+
+WinSxS の OS side-by-side assembly は、`WinSxS\\<assembly>\\<module.dll>` の2段だけを
+`winsxs` 分類として扱うようにした。worker の `module_audit` JSON と broker validator、
+GPU module policy validator の分類を同期し、canonical path、reparse point、basename、
+hash/size の既存 fail-closed gate は維持する。その他の場所は引き続き `unknown` として拒否する。
+
+focused pytest、broker focused Rust tests、native worker Release build、L2/render/smart の
+native self-test は確認済み。実 AE 83件の再走査と GitHub Actions の最終判定は外部環境/CIの
+確認範囲として残る。

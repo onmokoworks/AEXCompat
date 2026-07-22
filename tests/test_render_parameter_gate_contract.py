@@ -1,3 +1,4 @@
+import re
 import json
 import unittest
 from pathlib import Path
@@ -58,7 +59,16 @@ class RenderParameterGateContractTests(unittest.TestCase):
         self.assertIn("load_manifest", route)
         self.assertIn("encode_worker_payload", route)
         self.assertIn("native_process_started: false", route)
-        self.assertIn("run_isolated", route)
+        # The route still launches a worker for the accepted path, but through the
+        # sealed load tree under a restricted token instead of normal-token
+        # run_isolated with an argv plug-in path (issue #312). Every launch in this
+        # module goes through secure_launch, and none may regress to run_isolated:
+        # an argv path is a TOCTOU window the worker would re-open.
+        self.assertNotIn("run_isolated", route)
+        self.assertIn("secure_launch(", route)
+        self.assertIn("SealedLoadTree::create(", route)
+        self.assertIn("load_v2_load_tree(", route)
+        self.assertIn("require_module_audit: true", route)
         self.assertIn("argb8_hash", route)
         self.assertIn('args[1] == "validate-render-request"', main)
         self.assertIn('args[1] == "render-parameter-request"', main)
@@ -124,6 +134,239 @@ class RenderParameterGateContractTests(unittest.TestCase):
         self.assertIn("worker_spec.request_mode", route)
         self.assertIn("SmartFX render is not supported for plugin profile", route)
         self.assertIn("classic render is not supported for plugin profile", route)
+
+
+class RenderRequestSecureLaunchContractTests(unittest.TestCase):
+    """Every worker launch in render_request.rs goes through the sealed load tree.
+
+    Before issue #312 three of the four routes (execute, execute_smart_suite_fault,
+    execute_smart_mask_scene) launched with normal-token run_isolated and handed the
+    worker the plug-in as an argv path, which the worker re-opened. That is a TOCTOU
+    window: the path can be swapped between the broker's check and the worker's open.
+    These assertions keep all four routes on secure_launch.
+    """
+
+    ROUTE = ROOT / "broker/crates/broker/src/render_request.rs"
+
+    def literal_end(self, text, index):
+        """End index of the Rust literal starting at `index`, or None if none does.
+
+        Handles `"..."` (with escapes), raw `r"..."` / `r#*"..."#*`, and char literals.
+        A lifetime (`'a`) is not a literal and returns None, which is safe: it carries
+        no brace, quote or comment opener.
+        """
+        char = text[index]
+        # `b` is the one preceding character where the raw reading is still correct
+        # (`br"..."`), so it must not be treated as an identifier prefix here.
+        start = index - 1 if index and text[index - 1] == "b" else index
+        if char == "r" and not (start and (text[start - 1].isalnum() or text[start - 1] == "_")):
+            hashes = 0
+            cursor = index + 1
+            while text[cursor : cursor + 1] == "#":
+                hashes += 1
+                cursor += 1
+            if text[cursor : cursor + 1] != '"':
+                return None
+            terminator = '"' + "#" * hashes
+            close = text.find(terminator, cursor + 1)
+            return len(text) if close == -1 else close + len(terminator)
+        if char == '"':
+            cursor = index + 1
+            while cursor < len(text) and text[cursor] != '"':
+                cursor += 2 if text[cursor] == "\\" else 1
+            return min(cursor + 1, len(text))
+        if char == "'":
+            closing = index + (3 if text[index + 1 : index + 2] == "\\" else 2)
+            return closing + 1 if text[closing : closing + 1] == "'" else None
+        return None
+
+    def strip_comments(self, text):
+        """`text` with `//` and `/* */` comments removed, literals left intact."""
+        kept = []
+        index = 0
+        end = len(text)
+        while index < end:
+            stop = self.literal_end(text, index)
+            if stop is not None:
+                kept.append(text[index:stop])
+                index = stop
+                continue
+            pair = text[index : index + 2]
+            if pair == "//":
+                newline = text.find("\n", index)
+                index = end if newline == -1 else newline
+                continue
+            if pair == "/*":
+                close = text.find("*/", index + 2)
+                index = end if close == -1 else close + 2
+                continue
+            kept.append(text[index])
+            index += 1
+        return "".join(kept)
+
+    def route_source(self):
+        """render_request.rs with its `#[cfg(test)]` module and all comments removed.
+
+        Every assertion in this class counts over this one text, so the two sides of an
+        `== launches` comparison can never disagree because one of them saw a comment
+        or a Rust unit test that the other did not.
+        """
+        route = self.ROUTE.read_text(encoding="utf-8")
+        cut = route.find("#[cfg(test)]")
+        return self.strip_comments(route if cut == -1 else route[:cut])
+
+    def launch_sites(self, route):
+        """Number of real `secure_launch(` call sites in `route`.
+
+        Asserts a floor so a module that lost every launch cannot make the
+        `== launches` checks pass vacuously as `0 == 0`.
+        """
+        sites = len(re.findall(r"(?<![a-z_])secure_launch\(", route))
+        self.assertGreaterEqual(sites, 4, "render_request.rs lost its sealed launches")
+        return sites
+
+    def report_object(self, route, marker_at, stage):
+        """The full `let report = json!({ ... })` text enclosing `marker_at`.
+
+        The end is found by balancing braces from the opening one, skipping literals. A
+        `}` inside a literal would otherwise drive the depth to zero early and return a
+        truncated body, dropping later keys from the check unnoticed -- `"stage"` is the
+        second key in every report, so the marker assertion below would not catch it.
+        Comments are already gone (`route_source`).
+
+        Known limitation: `declared` is the schema's top-level properties only, so a
+        report value that is itself a `json!({...})` would have its inner keys
+        reported as undeclared. No report does that today.
+        """
+        anchor = "let report = json!({"
+        opening = route.rfind(anchor, 0, marker_at)
+        self.assertNotEqual(opening, -1, f"{stage} marker has no `{anchor}` before it")
+        brace = opening + len(anchor) - 1
+        self.assertEqual(route[brace], "{", f"{stage} anchor does not end at its brace")
+        depth = 0
+        index = brace
+        end = len(route)
+        while index < end:
+            stop = self.literal_end(route, index)
+            if stop is not None:
+                index = stop
+                continue
+            char = route[index]
+            if char == "{":
+                depth += 1
+            elif char == "}":
+                depth -= 1
+                if depth == 0:
+                    body = route[opening : index + 1]
+                    self.assertIn(f'"stage":"{stage}"', body)
+                    return body
+            index += 1
+        self.fail(f"{stage} report object is unterminated")
+
+    def test_no_route_launches_with_normal_token_run_isolated(self):
+        route = self.route_source()
+        # Two assertNotIns alone would also pass on an empty string, so share the
+        # launch floor its siblings use: the module must still have its launches.
+        self.launch_sites(route)
+        self.assertNotIn("run_isolated", route)
+        self.assertNotIn("windows_process", route)
+
+    def test_every_route_launches_through_the_sealed_load_tree(self):
+        route = self.route_source()
+        # Counted against the number of launches rather than a fixed 4, so a
+        # correctly-sealed fifth route passes while an unsealed one fails:
+        # execute (parameter request), execute_smart, execute_smart_suite_fault,
+        # execute_smart_mask_scene today.
+        launches = self.launch_sites(route)
+        for marker in (
+            "SealedLoadTree::create(",
+            "load_v2_load_tree(",
+            "require_module_audit: true",
+        ):
+            self.assertEqual(route.count(marker), launches, marker)
+
+    def test_every_launch_pins_the_approval_across_determinism_runs(self):
+        route = self.route_source()
+        # The receipt is reloaded per determinism run, so each route must compare
+        # the whole approved identity between runs. The sealed manifest digest
+        # covers every dependency; the fixture digest alone would miss a swapped
+        # worker build or dependency set.
+        launches = self.launch_sites(route)
+        self.assertEqual(route.count("let identity = (\n            tree.manifest_digest(),"), launches)
+        self.assertEqual(route.count("approved_identity = Some(identity);"), launches)
+        self.assertEqual(route.count("approval changed between determinism runs"), launches)
+
+    def test_no_route_passes_the_plugin_as_an_argv_path(self):
+        route = self.route_source()
+        # secure_launch injects the sealed plug-in between the before/after argv
+        # slices, so no route may serialize a plug-in path into its own args.
+        self.assertNotIn("plugin_path.to_string_lossy()", route)
+        self.assertEqual(
+            route.count("plugin_basename: &plugin_basename"), self.launch_sites(route)
+        )
+
+    def test_each_launch_is_pinned_to_the_receipt_worker(self):
+        route = self.route_source()
+        # The profile-declared executable must match the receipt's trusted worker,
+        # compared canonically so a symlink or junction cannot substitute it.
+        launches = self.launch_sites(route)
+        self.assertEqual(
+            route.count("fs::canonicalize(&worker)? != fs::canonicalize(&receipt_worker)?"),
+            launches,
+        )
+        self.assertEqual(route.count("worker_program: &receipt_worker"), launches)
+
+    def test_migrated_reports_take_identity_from_the_receipt(self):
+        route = self.route_source()
+        # The schema-v1 `approved_entry` / `render::entry` helpers no longer supply
+        # the reported identity; it comes from the schema-v2 receipt and the
+        # approval policy, so the report names the same approval the launch used.
+        self.assertNotIn("approved_entry", route)
+        self.assertNotIn("crate::render::entry", route)
+        launches = self.launch_sites(route)
+        self.assertEqual(route.count('"receipt_id":worker_spec.approval.receipt_id'), launches)
+        self.assertEqual(route.count('"fixture_sha256":approved_fixture_sha256'), launches)
+
+    def test_migrated_reports_add_no_keys_outside_their_contract_schema(self):
+        """The three migrated routes must not grow report keys their schema forbids.
+
+        Each report schema is `additionalProperties: false`, so emitting sealed-launch
+        provenance would break contract conformance. `execute_smart` already emits
+        `secure_launch_*` keys that its schema does not declare (tracked separately);
+        the migrated routes must not add to that divergence.
+        """
+        route = self.route_source()
+        stages = {
+            "parameterized_classic_render": "parameterized_classic_render_report",
+            "smartfx_suite_fault": "smartfx_suite_fault_report",
+            "smartfx_mask_scene": "smartfx_mask_scene_report",
+        }
+        for stage, schema_name in stages.items():
+            schema = json.loads(
+                (ROOT / "contracts/aex" / f"{schema_name}.schema.json").read_text(encoding="utf-8")
+            )
+            self.assertFalse(schema["additionalProperties"], stage)
+            declared = set(schema["properties"])
+            marker = f'"stage":"{stage}"'
+            # A stage can be emitted more than once (the classic route writes a
+            # pre-dispatch rejection report as well as the success report), so every
+            # occurrence is checked -- not just the first. Each slice spans the whole
+            # `let report = json!({ ... })` binding: anchoring at the marker would hide
+            # keys emitted ahead of "stage" (schema_version today), and stopping at the
+            # first `});` would silently truncate the slice -- a false pass -- once any
+            # value is itself a `json!({...})`.
+            occurrences = 0
+            start = route.find(marker)
+            while start != -1:
+                occurrences += 1
+                body = self.report_object(route, start, stage)
+                emitted = set(re.findall(r'"([a-z0-9_]+)"\s*:', body))
+                self.assertTrue(
+                    emitted <= declared,
+                    f"{stage} emits keys absent from {schema_name}: {sorted(emitted - declared)}",
+                )
+                start = route.find(marker, start + 1)
+            self.assertGreater(occurrences, 0, stage)
 
 
 if __name__ == "__main__":

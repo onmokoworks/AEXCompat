@@ -70,6 +70,25 @@ def test_pf_owned_world_registry_is_a_genuine_bounded_component():
     assert "g_async_receipts" not in source
 
 
+def test_pf_world_transform_uses_shared_sdk_argb64_and_argb128_fourcc():
+    runtime = WORLD_TRANSFORM_RUNTIME.read_text(encoding="utf-8")
+    suites = (ROOT / "minihost" / "src" / "worker_pf_suites.cpp").read_text(
+        encoding="utf-8"
+    )
+    for source in (runtime, suites):
+        assert '#include "worker_world_registry.hpp"' in source
+        assert "world_registry::kPixelFormatArgb64" in source
+        assert "world_registry::kPixelFormatArgb128" in source
+        assert "1650946658" not in source
+        assert "1650946659" not in source
+    assert "kPixelFormatArgb64 = 909206881" in WORLD_REGISTRY_HEADER.read_text(
+        encoding="utf-8"
+    )
+    assert "kPixelFormatArgb128 = 842229089" in WORLD_REGISTRY_HEADER.read_text(
+        encoding="utf-8"
+    )
+
+
 def test_owned_snapshot_and_aegp_backing_lock_boundaries_are_explicit():
     source = WORLD_REGISTRY_SOURCE.read_text(encoding="utf-8")
     snapshot = source[source.index("bool snapshot_owned_world("):

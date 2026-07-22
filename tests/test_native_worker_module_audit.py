@@ -55,11 +55,15 @@ def test_module_enumeration_is_bounded_and_incomplete_results_fail_closed():
     assert "module_audit_failed" in SESSION
 
 
-def test_only_worker_plugin_root_and_system32_are_allowed():
+def test_only_worker_plugin_root_system32_and_winsxs_assembly_children_are_allowed():
     assert 'L"aexcompat-trusted-worker-"' in SOURCE
     assert "same_path(module_path, executable)" in SOURCE
     assert "same_path(module_path.parent_path(), plugin_root)" in SOURCE
     assert "same_path(module_path.parent_path(), system32)" in SOURCE
+    assert "GetWindowsDirectoryW" in SOURCE
+    assert 'L"WinSxS"' in SOURCE
+    assert "is_winsxs_module(module_path, winsxs_root)" in SOURCE
+    assert "contains_reparse_component" in SOURCE
     assert "++snapshot.unknown_count;" in SOURCE
     assert "snapshot.unknown_keys.push_back" in SOURCE
 
@@ -73,6 +77,7 @@ def test_report_exposes_schema_snapshots_counts_and_basenames_not_paths():
     assert '"phase_count\\\":"' in serializer
     assert '"unknown_count\\\":"' in serializer
     assert "audit_basename(module_path)" in SOURCE
+    assert '"winsxs\\\":"' in serializer
     assert "module_path.wstring()" not in serializer
     assert "plugin_root.wstring()" not in serializer
     assert "executable.wstring()" not in serializer

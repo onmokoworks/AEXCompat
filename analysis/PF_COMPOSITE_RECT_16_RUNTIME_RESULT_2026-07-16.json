@@ -5,18 +5,18 @@
     "authenticated_artifacts":  {
                                     "minihost_source":  {
                                                             "path":  "minihost/src/l2_main.cpp",
-                                                            "size_bytes":  1241709,
-                                                            "sha256":  "3beb22dd515f2933bc514b821fd5eaa386c189e0ef3855b009a622889bebf5d8"
+                                                            "size_bytes":  139615,
+                                                            "sha256":  "4ccae13e08ee5e00083136887ac36c48141c8e14d4315e282d468c6f56a42ac9"
                                                         },
                                     "worker":  {
                                                    "path":  "target/minihost-build/aex_render_worker.exe",
-                                                   "size_bytes":  828928,
-                                                   "sha256":  "373f5b48b2afb8b5b0b168e0ebb022312b2b1eb1ad6ffbd27f328c9a60b40055"
+                                                   "size_bytes":  1218048,
+                                                   "sha256":  "47daaf75e1bde6f09cfde040415da1e29f357b0d3b2fdbccc2b454f484a1b594"
                                                },
                                     "probe":  {
                                                   "path":  "target/pf-composite-rect-probe-build/Release/pf_composite_rect_probe.aex",
                                                   "size_bytes":  14848,
-                                                  "sha256":  "2af39d1da24bd0f4a8df8ca9017b660ae18a9cef636cc42305eb7ca4f06d6520"
+                                                  "sha256":  "41c3be4392ae06ad99bdf7c0565ceb894d3d1730903e7be14986fce3aabc0db2"
                                               },
                                     "input":  {
                                                   "path":  "target/gpu-effects/opencl-input.rgba",
@@ -48,8 +48,8 @@
                      "report_internal_output_sha256":  "bbac8251e939b6f267c082fd3bcd8f3739abe8f706aacb3e8483278aa4a5e2ed",
                      "external_output":  {
                                              "path":  "target/gpu-effects/composite-rect-probe-argb16-output-20260717-nativeaux4.rgba",
-                                             "size_bytes":  3404,
-                                             "sha256":  "013f45f2e81b60d159d20ab3927d174ed029c3e308c0e62057dc9e1b56c81c1f"
+                                             "size_bytes":  6808,
+                                             "sha256":  "bffdd0b39a198ff85981ca6ec50cce93912ede45a3dff4478629648ea493b2b5"
                                          },
                      "guard_bytes_intact":  true,
                      "suite_leases_balanced":  true,

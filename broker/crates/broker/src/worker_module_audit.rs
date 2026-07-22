@@ -28,6 +28,8 @@ struct AuditSnapshot {
     plugin: Vec<String>,
     system32: Vec<String>,
     #[serde(default)]
+    winsxs: Vec<String>,
+    #[serde(default)]
     policy: Option<Vec<String>>,
 }
 
@@ -60,9 +62,11 @@ pub fn validate_required_worker_audit(stdout: &str, stdout_truncated: bool) -> i
     require_subset(&audit.post_load.worker, &audit.observed_union.worker)?;
     require_subset(&audit.post_load.plugin, &audit.observed_union.plugin)?;
     require_subset(&audit.post_load.system32, &audit.observed_union.system32)?;
+    require_subset(&audit.post_load.winsxs, &audit.observed_union.winsxs)?;
     require_subset(&audit.pre_unload.worker, &audit.observed_union.worker)?;
     require_subset(&audit.pre_unload.plugin, &audit.observed_union.plugin)?;
     require_subset(&audit.pre_unload.system32, &audit.observed_union.system32)?;
+    require_subset(&audit.pre_unload.winsxs, &audit.observed_union.winsxs)?;
     require_optional_subset(&audit.post_load.policy, &audit.observed_union.policy)?;
     require_optional_subset(&audit.pre_unload.policy, &audit.observed_union.policy)?;
     Ok(())
@@ -77,6 +81,7 @@ fn validate_snapshot(snapshot: &AuditSnapshot, label: &str) -> io::Result<()> {
     let count = snapshot.worker.len()
         + snapshot.plugin.len()
         + snapshot.system32.len()
+        + snapshot.winsxs.len()
         + snapshot.policy.as_ref().map_or(0, Vec::len);
     if count > MAX_AUDITED_MODULES {
         return Err(invalid("secure worker module audit limit exceeded"));
@@ -87,6 +92,7 @@ fn validate_snapshot(snapshot: &AuditSnapshot, label: &str) -> io::Result<()> {
         .iter()
         .chain(&snapshot.plugin)
         .chain(&snapshot.system32)
+        .chain(&snapshot.winsxs)
         .chain(snapshot.policy.iter().flatten())
     {
         validate_basename(name)?;
@@ -173,7 +179,8 @@ mod tests {
             "unknown_count": 0,
             "worker": ["trusted-worker.exe"],
             "plugin": ["fixture.plugin"],
-            "system32": ["kernel32.dll"]
+            "system32": ["kernel32.dll"],
+            "winsxs": ["comctl32.dll"]
         })
     }
 
