@@ -19,6 +19,18 @@ pub fn pe64_importing(imports: &[&str]) -> Vec<u8> {
     pe64_with_imports(imports, &[])
 }
 
+/// A PE32+ image whose import data directory points outside every section, the
+/// shape a corrupt or hostile import directory has.
+pub fn pe64_with_broken_import_directory() -> Vec<u8> {
+    let mut image = pe64_importing(&["ignored.dll"]);
+    // Data directories start 112 bytes into the optional header, which starts at
+    // 0x58; entry 1 is the import directory, and its virtual address is first.
+    const IMPORT_DIRECTORY_VA: usize = 0x58 + 112 + 8;
+    image[IMPORT_DIRECTORY_VA..IMPORT_DIRECTORY_VA + 4]
+        .copy_from_slice(&0x7fff_0000u32.to_le_bytes());
+    image
+}
+
 /// A PE32+ image whose import descriptors and name strings live in *different*
 /// sections, as a linker that emits `.idata` plus `.rdata` produces.
 pub fn pe64_with_names_in_a_second_section(imports: &[&str]) -> Vec<u8> {

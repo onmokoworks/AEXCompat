@@ -202,7 +202,7 @@ fn main() {
                     records.push(json!({
                         "plugin": plugin.file_name().unwrap().to_string_lossy(),
                         "bucket": "surveyed",
-                        "closure_modules": survey.modules,
+                        "closure_modules": survey.modules.len(),
                         "closure_bytes": survey.total_bytes,
                         "unresolved": survey.unresolved.len(),
                     }));
@@ -212,7 +212,7 @@ fn main() {
                         index + 1,
                         plugins.len(),
                         plugin.file_name().unwrap().to_string_lossy(),
-                        survey.modules,
+                        survey.modules.len(),
                         survey.total_bytes
                     );
                 }

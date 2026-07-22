@@ -31,6 +31,7 @@ use aexcompat_broker::image_render::{
 };
 use aexcompat_broker::plugin_dependency_closure::{
     DependencyClosureRequest, ResolvedDependencyClosure, resolve_dependency_closure,
+    survey_dependency_closure,
 };
 use aexcompat_broker::render_session::{FrameStatus, RenderSession, SessionOpenRequest};
 use aviutl2_sys::filter2::{
@@ -721,7 +722,11 @@ struct CachedClosure {
     /// Search roots in resolution order (first match wins, like the loader).
     #[serde(default)]
     roots: Vec<String>,
-    /// The dependencies that were sealed, as `(path, mtime, len)`.
+    /// The dependency files the resolution reached, as `(path, mtime, len)`:
+    /// what was sealed when it succeeded, what it would have sealed when it
+    /// failed. Recording them either way is what lets a failure caused by the
+    /// dependencies themselves — an operator's ceiling exceeded, say — be retried
+    /// once those files change.
     #[serde(default)]
     sealed: Vec<CachedDependency>,
     /// Imported names no search root provided, whether the loader then found them
@@ -749,8 +754,45 @@ fn is_api_set(name: &str) -> bool {
     name.starts_with("api-ms-") || name.starts_with("ext-ms-")
 }
 
+/// `(path, mtime, len)` for each dependency file, plus the basenames of any that
+/// vanished between the walk and here.
+///
+/// A file that is already gone cannot be compared against later, but its
+/// disappearance is exactly the kind of change that should retire the entry — so
+/// it is handed back as a name nothing provides. If it stays gone the entry
+/// settles (no root offers it); if it comes back, the missing-name check fires.
+fn cached_dependencies(paths: &[PathBuf]) -> (Vec<CachedDependency>, Vec<String>) {
+    let mut dependencies = Vec::with_capacity(paths.len());
+    let mut vanished = Vec::new();
+    for path in paths {
+        match file_meta(path) {
+            Some((mtime, len)) => dependencies.push(CachedDependency {
+                path: path.to_string_lossy().into_owned(),
+                mtime,
+                len,
+            }),
+            None => vanished.extend(
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .map(str::to_lowercase),
+            ),
+        }
+    }
+    (dependencies, vanished)
+}
+
+/// The imported names worth re-checking at startup: everything no search root
+/// provided, minus the Windows API sets the loader owns.
+fn cached_missing(unresolved: &[String]) -> Vec<String> {
+    unresolved
+        .iter()
+        .filter(|name| !is_api_set(name))
+        .cloned()
+        .collect()
+}
+
 /// Bump when [`CacheEntry`]'s meaning changes, to invalidate stale cache files.
-const CACHE_VERSION: u32 = 4;
+const CACHE_VERSION: u32 = 5;
 
 /// Fingerprints the compat host that produces a discovery result, so the cache is
 /// invalidated when the host changes (e.g. it gains support for an effect that
@@ -1010,38 +1052,45 @@ fn discover_one(repository: &Path, plugin: &Path, dependency: &DependencyConfig)
         .map(|root| root.to_string_lossy().into_owned())
         .collect();
     let Ok(closure) = dependency_closure_for(plugin, dependency, &roots) else {
-        // A resolution that failed outright (over an operator's ceiling, an
-        // unreadable image) still records where it looked, so the negative
-        // settles instead of re-walking the same closure on every launch. It is
-        // retried when the AEX, the roots, or the ceilings change — the ceilings
-        // being part of the build fingerprint, which is the knob an operator
-        // actually turns after seeing a plug-in rejected.
-        entry.closure = CachedClosure {
-            roots: recorded_roots,
-            ..CachedClosure::default()
+        // A resolution that failed outright — over an operator's ceiling, an
+        // unreadable image — still records what it looked at, so the negative
+        // both settles (no re-walk every launch) and is retried once the reason
+        // it failed could have gone away. Surveying costs a walk without the
+        // hashing or copying, which is what the failure saved in the first place.
+        entry.closure = match survey_dependency_closure(plugin, &roots) {
+            Ok(survey) => {
+                let (sealed, vanished) = cached_dependencies(&survey.modules);
+                let mut missing = cached_missing(&survey.unresolved);
+                missing.extend(vanished);
+                missing.sort();
+                missing.dedup();
+                CachedClosure {
+                    roots: recorded_roots,
+                    sealed,
+                    missing,
+                }
+            }
+            Err(_) => CachedClosure {
+                roots: recorded_roots,
+                ..CachedClosure::default()
+            },
         };
         return entry;
     };
+    let sealed_paths: Vec<PathBuf> = closure
+        .dependencies()
+        .iter()
+        .map(|sealed| sealed.path.clone())
+        .collect();
+    let (sealed, vanished) = cached_dependencies(&sealed_paths);
+    let mut missing = cached_missing(closure.unresolved());
+    missing.extend(vanished);
+    missing.sort();
+    missing.dedup();
     entry.closure = CachedClosure {
         roots: recorded_roots,
-        sealed: closure
-            .dependencies()
-            .iter()
-            .filter_map(|sealed| {
-                let (mtime, len) = file_meta(&sealed.path)?;
-                Some(CachedDependency {
-                    path: sealed.path.to_string_lossy().into_owned(),
-                    mtime,
-                    len,
-                })
-            })
-            .collect(),
-        missing: closure
-            .unresolved()
-            .iter()
-            .filter(|name| !is_api_set(name))
-            .cloned()
-            .collect(),
+        sealed,
+        missing,
     };
     let dependencies = closure.into_dependencies();
     if let Ok((params, diagnostics)) =

@@ -171,6 +171,7 @@ pub fn resolve_dependency_closure(
         request.search_roots,
         request.max_dependencies,
         request.max_total_bytes,
+        UnreadableImage::Fail,
     )?;
     if walk.over_module_limit {
         return Err(invalid("dependency closure module limit exceeded"));
@@ -216,10 +217,18 @@ pub fn resolve_dependency_closure(
 /// What an import-closure walk found, without authenticating anything.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DependencyClosureSurvey {
-    pub modules: usize,
+    /// The dependency files the walk reached, in resolution order. A caller that
+    /// could not seal them (over its own ceiling, say) can still record their
+    /// identities and notice when they change.
+    pub modules: Vec<PathBuf>,
     pub total_bytes: u64,
     pub unresolved: Vec<String>,
     pub rejected_names: usize,
+    /// Images whose import table could not be read. A survey reports them and
+    /// keeps going — it measures, it never feeds a dispatch, and stopping at the
+    /// first unreadable image would leave a caller with nothing at all where it
+    /// could have had most of the closure.
+    pub unreadable_images: usize,
 }
 
 /// Counts what `plugin`'s import closure would seal, without hashing or
@@ -234,12 +243,19 @@ pub fn survey_dependency_closure(
     search_roots: &[PathBuf],
 ) -> io::Result<DependencyClosureSurvey> {
     let plugin = validated_image_path(plugin)?;
-    let walk = walk_import_closure(&plugin, search_roots, None, None)?;
+    let walk = walk_import_closure(
+        &plugin,
+        search_roots,
+        None,
+        None,
+        UnreadableImage::KeepGoing,
+    )?;
     Ok(DependencyClosureSurvey {
-        modules: walk.resolved.len(),
+        modules: walk.resolved,
         total_bytes: walk.total_bytes,
         unresolved: walk.unresolved,
         rejected_names: walk.rejected_names,
+        unreadable_images: walk.unreadable_images,
     })
 }
 
@@ -247,9 +263,20 @@ struct ImportClosureWalk {
     resolved: Vec<PathBuf>,
     unresolved: Vec<String>,
     rejected_names: usize,
+    unreadable_images: usize,
     total_bytes: u64,
     over_module_limit: bool,
     over_byte_limit: bool,
+}
+
+/// What a walk does with an image whose import table it cannot read.
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum UnreadableImage {
+    /// Fail the whole walk. Anything that will be sealed must be complete: a
+    /// dropped dependency becomes an opaque module-load failure later.
+    Fail,
+    /// Count it and carry on. Only for measurement, which never dispatches.
+    KeepGoing,
 }
 
 /// Breadth-first walk of `plugin`'s import graph, resolving each imported name
@@ -260,6 +287,7 @@ fn walk_import_closure(
     search_roots: &[PathBuf],
     max_modules: Option<usize>,
     max_total_bytes: Option<u64>,
+    unreadable: UnreadableImage,
 ) -> io::Result<ImportClosureWalk> {
     if search_roots.len() > MAX_SEARCH_ROOTS {
         return Err(invalid("dependency search root limit exceeded"));
@@ -275,6 +303,7 @@ fn walk_import_closure(
         resolved: Vec::new(),
         unresolved: Vec::new(),
         rejected_names: 0,
+        unreadable_images: 0,
         total_bytes: 0,
         over_module_limit: false,
         over_byte_limit: false,
@@ -283,7 +312,16 @@ fn walk_import_closure(
     queue.push_back(plugin.to_path_buf());
 
     'walk: while let Some(image) = queue.pop_front() {
-        for name in imported_names(&image)? {
+        let names = match imported_names(&image) {
+            Ok(names) => names,
+            Err(error) if unreadable == UnreadableImage::KeepGoing => {
+                let _ = error;
+                walk.unreadable_images += 1;
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
+        for name in names {
             // Names are ASCII-validated before anything else, so a name that
             // cannot be a DLL basename never reaches `seen`. Folding into `seen`
             // first would let a name that merely *lowercases* onto a real one
@@ -799,6 +837,39 @@ mod tests {
     }
 
     #[test]
+    fn a_survey_reports_what_it_reached_past_an_unreadable_image() {
+        // A survey measures; it never feeds a dispatch. Stopping at the first
+        // image it cannot parse would hand a caller nothing where it could have
+        // had most of the closure — and the caller that needs this most is the
+        // one recording why a resolution failed.
+        let install = temp_dir("tolerant");
+        let plugin = write_pe(&install, "effect.aex", &["good.dll", "broken.dll"]);
+        write_pe(&install, "good.dll", &[]);
+        // A PE whose import directory points outside every section: the resolver
+        // refuses it, the survey counts it and keeps the rest.
+        fs::write(
+            install.join("broken.dll"),
+            crate::test_pe::pe64_with_broken_import_directory(),
+        )
+        .unwrap();
+
+        let roots = vec![install.clone()];
+        assert!(
+            resolve_dependency_closure(DependencyClosureRequest::new(&plugin, &roots)).is_err()
+        );
+        let survey = survey_dependency_closure(&plugin, &roots).unwrap();
+        assert_eq!(survey.unreadable_images, 1);
+        let mut reached: Vec<String> = survey
+            .modules
+            .iter()
+            .map(|path| path.file_name().unwrap().to_string_lossy().into())
+            .collect();
+        reached.sort();
+        assert_eq!(reached, vec!["broken.dll", "good.dll"]);
+        fs::remove_dir_all(install).unwrap();
+    }
+
+    #[test]
     fn survey_measures_a_closure_without_paying_for_it() {
         let install = temp_dir("survey");
         let names: Vec<String> = (0..4).map(|index| format!("dep{index}.dll")).collect();
@@ -819,7 +890,7 @@ mod tests {
             .is_err()
         );
         let survey = survey_dependency_closure(&plugin, &roots).unwrap();
-        assert_eq!(survey.modules, 4);
+        assert_eq!(survey.modules.len(), 4);
         assert!(survey.total_bytes > 0);
         fs::remove_dir_all(install).unwrap();
     }
