@@ -2,6 +2,7 @@ import re
 import json
 import unittest
 from pathlib import Path
+from jsonschema import Draft202012Validator
 import source_owners
 
 
@@ -367,6 +368,73 @@ class RenderRequestSecureLaunchContractTests(unittest.TestCase):
                 )
                 start = route.find(marker, start + 1)
             self.assertGreater(occurrences, 0, stage)
+
+    def test_secure_launch_provenance_is_declared_and_validated(self):
+        schema_names = (
+            "parameterized_classic_render_report.schema.json",
+            "parameterized_smartfx_render_report.schema.json",
+            "smartfx_suite_fault_report.schema.json",
+            "smartfx_mask_scene_report.schema.json",
+        )
+        for schema_name in schema_names:
+            schema = json.loads(
+                (ROOT / "contracts/aex" / schema_name).read_text(encoding="utf-8")
+            )
+            Draft202012Validator.check_schema(schema)
+            properties = schema["properties"]
+            for key in (
+                "secure_launch_1",
+                "secure_launch_2",
+                "secure_launch_count",
+                "normal_token_fallback",
+            ):
+                self.assertIn(key, properties, schema_name)
+            self.assertFalse(schema["$defs"]["secure_launch"]["additionalProperties"])
+
+        smart_schema = json.loads(
+            (ROOT / "contracts/aex/parameterized_smartfx_render_report.schema.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        secure_launch = {
+            "launch_mode": "sealed_load_tree_restricted_token",
+            "worker_authenticated": True,
+            "worker_size_bytes": 123,
+            "worker_sha256": "a" * 64,
+            "plugin_basename": "fixture.aex",
+            "plugin_sha256": "b" * 64,
+            "sealed_manifest_sha256": "c" * 64,
+            "module_audit_required": True,
+            "module_audit": None,
+        }
+        run = {key: None for key in smart_schema["$defs"]["run"]["required"]}
+        run["classification"] = "timeout_killed"
+        report = {
+            "schema_version": 1,
+            "stage": "parameterized_smartfx_render",
+            "plugin_id": "fixture",
+            "assignment_count": 1,
+            "accepted": True,
+            "native_process_started": True,
+            "passed": False,
+            "receipt_id": "receipt-1",
+            "fixture_sha256": "D" * 64,
+            "parameters": {"mix": 1},
+            "expected_oracle_sha256": "E" * 64,
+            "run_1": run,
+            "run_2": run,
+            "secure_launch_1": secure_launch,
+            "secure_launch_2": secure_launch,
+            "secure_launch_count": 2,
+            "normal_token_fallback": False,
+            "deterministic": False,
+            "broker_survived": True,
+        }
+        Draft202012Validator(smart_schema).validate(report)
+
+        invalid = json.loads(json.dumps(report))
+        invalid["secure_launch_1"]["unexpected"] = True
+        self.assertTrue(list(Draft202012Validator(smart_schema).iter_errors(invalid)))
 
 
 if __name__ == "__main__":
