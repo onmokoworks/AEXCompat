@@ -27,3 +27,4 @@ def test_component_keeps_sensitive_paths_internal_to_nonserialized_keys():
     assert "unknown_keys" not in serializer
     assert "module_path.wstring()" not in serializer
     assert "plugin_root.wstring()" not in serializer
+    assert '"winsxs\\\":"' in serializer

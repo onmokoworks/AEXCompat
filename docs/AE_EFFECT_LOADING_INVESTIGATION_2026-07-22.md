@@ -109,3 +109,14 @@ aex の PE import を再帰的に辿り、AE の Support Files で解決した D
 - multi-filter (#295/#299/#303) 自体は正しく動作 — 互換ホストがロードできるものを公開している。
 - 本件 (dvacore 系 AE エフェクトの解錠) は互換ホストのコア機能 (依存封入 + runtime policy +
   Adobe IPC 互換) に触れる**多層プロジェクト**であり、multi-filter とは別。
+
+## #315 対応 (2026-07-22)
+
+WinSxS の OS side-by-side assembly は、`WinSxS\\<assembly>\\<module.dll>` の2段だけを
+`winsxs` 分類として扱うようにした。worker の `module_audit` JSON と broker validator、
+GPU module policy validator の分類を同期し、canonical path、reparse point、basename、
+hash/size の既存 fail-closed gate は維持する。その他の場所は引き続き `unknown` として拒否する。
+
+focused pytest、broker focused Rust tests、native worker Release build、L2/render/smart の
+native self-test は確認済み。実 AE 83件の再走査と GitHub Actions の最終判定は外部環境/CIの
+確認範囲として残る。

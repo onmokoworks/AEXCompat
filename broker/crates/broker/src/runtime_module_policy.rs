@@ -129,6 +129,7 @@ pub fn parse_and_validate_at(json: &[u8], now: SystemTime) -> io::Result<Runtime
 pub enum ModuleClassification {
     Policy,
     System32,
+    WinSxS,
     Sealed,
     Trusted,
 }
@@ -328,6 +329,13 @@ fn validate_worker_reports_at(
                     size: report.size,
                 }]
             }
+            ModuleClassification::WinSxS => {
+                let windows_root = system32
+                    .parent()
+                    .ok_or_else(|| invalid("System32 path has no Windows root"))?;
+                let winsxs = canonical_exact(&windows_root.join("WinSxS"))?;
+                winsxs_candidates(&winsxs, &report.basename, report.size, digest)?
+            }
         };
         let mut matched = None;
         for candidate in &candidates {
@@ -349,6 +357,68 @@ fn validate_worker_reports_at(
         authenticate_file(&module.path, module.size, &module.sha256)?;
     }
     Ok(())
+}
+
+// WinSxS module reports intentionally contain only a basename and a path
+// token, never an attacker-controlled directory. Resolve candidates from the
+// canonical WinSxS root and require exactly one assembly-directory boundary:
+// `WinSxS\\<assembly>\\<basename>`. Every existing component is checked for a
+// reparse point before the final identity/hash gate runs.
+fn winsxs_candidates(
+    winsxs_root: &Path,
+    basename: &str,
+    size: u64,
+    sha256: [u8; 32],
+) -> io::Result<Vec<ApprovedClassifiedModule>> {
+    let mut candidates = Vec::new();
+    for entry in fs::read_dir(winsxs_root)? {
+        let entry = entry?;
+        let assembly_path = entry.path();
+        let metadata = fs::symlink_metadata(&assembly_path)?;
+        if metadata.file_type().is_symlink() || is_reparse(&metadata) {
+            return Err(invalid("WinSxS assembly path contains a reparse point"));
+        }
+        if !metadata.is_dir() {
+            continue;
+        }
+        let assembly = canonical_exact(&assembly_path)?;
+        if !assembly
+            .parent()
+            .is_some_and(|parent| same_folded_path(parent, winsxs_root))
+        {
+            return Err(invalid("WinSxS assembly directory is not a direct child"));
+        }
+        let candidate = assembly.join(basename);
+        let metadata = match fs::symlink_metadata(&candidate) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error),
+        };
+        if metadata.file_type().is_symlink() || is_reparse(&metadata) {
+            return Err(invalid("WinSxS module path contains a reparse point"));
+        }
+        if !metadata.is_file() {
+            continue;
+        }
+        let canonical = canonical_exact(&candidate)?;
+        if !canonical
+            .parent()
+            .is_some_and(|parent| same_folded_path(parent, &assembly))
+            || !canonical
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.eq_ignore_ascii_case(basename))
+        {
+            return Err(invalid("WinSxS module is not a direct assembly child"));
+        }
+        candidates.push(ApprovedClassifiedModule {
+            path: canonical,
+            basename: basename.to_string(),
+            sha256,
+            size,
+        });
+    }
+    Ok(candidates)
 }
 
 fn constant_time_eq(left: &[u8; 32], right: &[u8; 32]) -> bool {
@@ -516,6 +586,9 @@ fn decode_sha256(v: &str) -> io::Result<[u8; 32]> {
 }
 fn fold_path(p: &Path) -> String {
     p.to_string_lossy().replace('/', "\\").to_lowercase()
+}
+fn same_folded_path(left: &Path, right: &Path) -> bool {
+    fold_path(left) == fold_path(right)
 }
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()

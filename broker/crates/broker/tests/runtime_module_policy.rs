@@ -172,6 +172,37 @@ fn parses_v1_and_validates_policy_worker_report() {
 }
 
 #[test]
+fn winsxs_report_is_bound_to_a_direct_assembly_child() {
+    let f = Fixture::new();
+    let winsxs = f
+        .root
+        .parent()
+        .unwrap()
+        .join("WinSxS");
+    let assembly = winsxs.join("amd64_microsoft.windows.common-controls_6595b64144ccf1df_5.82");
+    fs::create_dir_all(&assembly).unwrap();
+    let module = assembly.join("COMCTL32.dll");
+    let bytes = b"WinSxS fixture";
+    fs::write(&module, bytes).unwrap();
+    let digest = hex(&Sha256::digest(bytes));
+    let report = format!(
+        r#"[{{"classification":"winsxs","basename":"COMCTL32.dll","path_token":"{}","sha256":"{}","size":14}}]"#,
+        path_token(&module), digest
+    );
+    let result = validate_worker_report(
+        report.as_bytes(),
+        WorkerModuleValidation {
+            policy: &parse_and_validate_at(&f.json(""), UNIX_EPOCH).unwrap(),
+            sealed: &[],
+            trusted: &[],
+            system32: &f.root,
+        },
+    );
+    let _ = fs::remove_dir_all(&winsxs);
+    result.unwrap();
+}
+
+#[test]
 fn rejects_unknown_fields_expiration_and_unsafe_name() {
     let f = Fixture::new();
     assert!(parse_and_validate_at(&f.json(",\"surprise\":true"), UNIX_EPOCH).is_err());

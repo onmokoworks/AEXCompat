@@ -127,6 +127,38 @@ bool same_path(const std::filesystem::path& left,
   return lowercase(left.wstring()) == lowercase(right.wstring());
 }
 
+// A canonicalized path alone is not sufficient for the WinSxS allowlist: a
+// junction/symlink could resolve into an apparently valid assembly directory.
+// Inspect every existing component without following reparse points and fail
+// closed when any handle or metadata query is unavailable.
+bool contains_reparse_component(const std::filesystem::path& path) {
+  std::filesystem::path current = path;
+  while (!current.empty()) {
+    HANDLE file = CreateFileW(current.c_str(), FILE_READ_ATTRIBUTES,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+        OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+        nullptr);
+    if (file == INVALID_HANDLE_VALUE) return true;
+    BY_HANDLE_FILE_INFORMATION information{};
+    const bool failed = GetFileInformationByHandle(file, &information) == 0;
+    CloseHandle(file);
+    if (failed || (information.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0)
+      return true;
+    const std::filesystem::path parent = current.parent_path();
+    if (parent.empty() || parent == current) break;
+    current = parent;
+  }
+  return false;
+}
+
+bool is_winsxs_module(const std::filesystem::path& module_path,
+                      const std::filesystem::path& winsxs_root) {
+  const std::filesystem::path assembly = module_path.parent_path();
+  return !module_path.filename().empty() && !assembly.filename().empty() &&
+      same_path(assembly.parent_path(), winsxs_root) &&
+      !contains_reparse_component(module_path);
+}
+
 std::string audit_basename(const std::filesystem::path& path) {
   const std::wstring name = path.filename().wstring();
   std::string result;
@@ -179,12 +211,21 @@ ModuleAuditSnapshot audit_loaded_modules(const std::filesystem::path& plugin_pat
   std::array<wchar_t, MAX_PATH> system_buffer{};
   const UINT system_length = GetSystemDirectoryW(
       system_buffer.data(), static_cast<UINT>(system_buffer.size()));
-  std::filesystem::path executable, plugin_root, system32;
+  std::array<wchar_t, 32768> windows_buffer{};
+  const UINT windows_length = GetWindowsDirectoryW(
+      windows_buffer.data(), static_cast<UINT>(windows_buffer.size()));
+  std::filesystem::path executable, plugin_root, system32, windows_root, winsxs_root;
   if (executable_length == 0 || executable_length >= executable_buffer.size() ||
       system_length == 0 || system_length >= system_buffer.size() ||
+      windows_length == 0 || windows_length >= windows_buffer.size() ||
       !canonical_path(executable_buffer.data(), executable) ||
       !canonical_path(plugin_path.parent_path(), plugin_root) ||
       !canonical_path(system_buffer.data(), system32) ||
+      !canonical_path(windows_buffer.data(), windows_root) ||
+      !canonical_path(windows_root / L"WinSxS", winsxs_root) ||
+      contains_reparse_component(windows_buffer.data()) ||
+      contains_reparse_component(
+          std::filesystem::path(windows_buffer.data()) / L"WinSxS") ||
       !has_prefixed_basename(executable.parent_path(), L"aexcompat-trusted-worker-")) {
     snapshot.unknown_count = 1;
     return snapshot;
@@ -205,6 +246,9 @@ ModuleAuditSnapshot audit_loaded_modules(const std::filesystem::path& plugin_pat
     if (same_path(module_path, executable)) snapshot.worker.push_back(basename);
     else if (same_path(module_path.parent_path(), plugin_root)) snapshot.plugin.push_back(basename);
     else if (same_path(module_path.parent_path(), system32)) snapshot.system32.push_back(basename);
+    else if (is_winsxs_module(module_path, winsxs_root) &&
+             !contains_reparse_component(module_buffer.data()))
+      snapshot.winsxs.push_back(basename);
     else if (authorized_runtime_module(module_path)) snapshot.policy.push_back(basename);
     else {
       ++snapshot.unknown_count;
@@ -233,6 +277,7 @@ void accumulate_module_audit(const ModuleAuditSnapshot& snapshot) {
   append_unique(g_module_audit.observed_union.worker, snapshot.worker);
   append_unique(g_module_audit.observed_union.plugin, snapshot.plugin);
   append_unique(g_module_audit.observed_union.system32, snapshot.system32);
+  append_unique(g_module_audit.observed_union.winsxs, snapshot.winsxs);
   append_unique(g_module_audit.observed_union.policy, snapshot.policy);
   for (const auto& key : snapshot.unknown_keys) {
     auto& keys = g_module_audit.observed_union.unknown_keys;
@@ -275,6 +320,7 @@ std::string module_audit_snapshot_json(const ModuleAuditSnapshot& snapshot) {
          << snapshot.unknown_count << ",\"worker\":" << names(snapshot.worker)
          << ",\"plugin\":" << names(snapshot.plugin)
          << ",\"system32\":" << names(snapshot.system32)
+         << ",\"winsxs\":" << names(snapshot.winsxs)
          << ",\"policy\":" << names(snapshot.policy) << '}';
   return output.str();
 }
