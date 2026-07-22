@@ -55,11 +55,35 @@ dirs = ['C:\more\aex', 'D:\shared\aex']
 repository = 'C:\path\to\AEXCompat'
 # 除外するエフェクト (ファイル stem を大文字小文字無視でマッチ。.aex 付き/無し可)
 ignore = ['pf_sampling_probe', 'broken-effect']
+# 依存 DLL の探索フォルダ (issue #304)。AEX 自身のフォルダは常に最優先で探索されるので
+# ここには書かない。省略時は AE (最新版) の Support Files を使う。
+dependency_dirs = ['C:\Program Files\Adobe\Adobe After Effects 2025\Support Files']
 ```
 
-環境変数 `AEXCOMPAT_MULTIFILTER_DIR` / `AEXCOMPAT_MULTIFILTER_REPOSITORY` を設定すると
-TOML の `dir`(+`dirs`) / `repository` を上書きする (env > TOML)。config はプラグインの
-ロード時に一度だけ読むので、変更後は AviUtl2 を再起動する。
+環境変数 `AEXCOMPAT_MULTIFILTER_DIR` / `AEXCOMPAT_MULTIFILTER_REPOSITORY` /
+`AEXCOMPAT_MULTIFILTER_DEPENDENCY_DIRS` (`;` 区切り) を設定すると TOML の
+`dir`(+`dirs`) / `repository` / `dependency_dirs` を上書きする (env > TOML)。config は
+プラグインのロード時に一度だけ読むので、変更後は AviUtl2 を再起動する。
+
+### 依存 DLL の封入 (issue #304)
+
+worker は AEX を隔離した sealed load tree からロードし、探索先は
+「そのフォルダ + System32」しかない。AE のエフェクトの多くは `dvacore.dll` 等の Adobe
+ランタイム DLL を import しており、隔離先に無いと `LoadLibraryExW` が失敗する
+(worker exit 11)。そこで discovery / セッション開始時に **AEX の import を再帰的に辿って
+依存クロージャを解決し、sealed tree に AEX と一緒に封入する**。
+
+- 探索順は「AEX 自身のフォルダ → `dependency_dirs`」。Windows ローダーと同じく**最初に
+  見つかったものが勝つ**。System32 にある名前は封入しない (worker のロードフラグが
+  System32 を見るため)。
+- 封入された DLL は AEX 本体とまったく同じ経路で認証される (sha256 + サイズ照合、reparse
+  point 拒否、basename 衝突拒否)。探索フォルダを渡すことは worker の DLL 探索パスを
+  広げることではない。
+- クロージャが解決できない AEX (上限超過など) は discovery 失敗として扱う。依存無しで
+  再試行しても同じロード失敗になるため。
+- これで解けるのは L1 (LoadLibrary 失敗) だけで、Adobe ランタイムを引くエフェクトはさらに
+  module audit (L2) と Adobe IPC 初期化 (L3) の壁がある。実測は
+  `docs/AE_EFFECT_LOADING_INVESTIGATION_2026-07-22.md` を参照。
 
 ### 既定のスキャン対象 (issue #303)
 
