@@ -99,3 +99,35 @@ def test_pre_launch_rejection_tests_keep_running_on_a_restricted_token_host():
             assert "skip_without_restricted_token_launch" not in head, (
                 f"{filename}::{name} rejects before any process starts; guarding it "
                 "removes CI coverage of the refusal")
+
+
+def test_the_restricted_token_skip_is_opt_in_and_only_ci_opts_in():
+    """The skip must never be reachable without an explicit opt-in.
+
+    0xC0000142 is what a hosted runner produces, and it is equally what a
+    regression in the restricted token itself would produce -- drop an entry
+    from COMPATIBILITY_SIDS or change the CreateRestrictedToken flags and the
+    worker stops loading its system DLLs everywhere. The probe cannot tell those
+    apart, so the opt-in is what keeps a developer machine failing loudly
+    instead of skipping 56 tests (issue #335).
+    """
+    probe = (ROOT / "broker/crates/broker/tests/common/mod.rs").read_text(encoding="utf-8")
+    assert 'const ALLOW_SKIP_ENV: &str = "AEXCOMPAT_ALLOW_RESTRICTED_TOKEN_SKIP"' in probe
+    # The check must gate the probe itself, not merely exist somewhere.
+    body = probe[probe.index("fn probe() -> bool {"):]
+    gate = body.index("ALLOW_SKIP_ENV")
+    suppress = body.index("STATUS_DLL_INIT_FAILED")
+    assert gate < suppress, "the opt-in must be consulted before the skip decision"
+
+    video_batch = (ROOT / "tests/test_render_video_batch_cli.py").read_text(encoding="utf-8")
+    assert 'os.environ.get("AEXCOMPAT_ALLOW_RESTRICTED_TOKEN_SKIP") == "1"' in video_batch
+
+    # Exactly the two CI workflows opt in; nothing else may.
+    opted_in = set()
+    for workflow in sorted((ROOT / ".github/workflows").glob("*.yml")):
+        text = "\n".join(
+            line for line in workflow.read_text(encoding="utf-8").splitlines()
+            if not line.lstrip().startswith("#"))
+        if 'AEXCOMPAT_ALLOW_RESTRICTED_TOKEN_SKIP: "1"' in text:
+            opted_in.add(workflow.name)
+    assert opted_in == {"windows-clean-clone.yml", "ae-sdk-tests.yml"}, opted_in
