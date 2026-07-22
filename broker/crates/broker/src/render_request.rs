@@ -997,7 +997,13 @@ pub fn execute_smart(
             "plugin_sha256":approved_fixture_sha256,
             "sealed_manifest_sha256":sealed_manifest_sha256,
             "module_audit_required":true,
-            "module_audit":report.get("module_audit")
+            "module_audit":report.get("module_audit"),
+            // Present only when the worker put a window on its private desktop
+            // (issue #351). The one-shot report is hand-projected, so without
+            // this the observation would exist on the launch result and in the
+            // session diagnostics but vanish from the parameterized report.
+            // Titles are path-redacted where they are captured.
+            "dismissed_windows":isolated.dismissed_windows
         }));
         runs.push((isolated.classification, report));
     }

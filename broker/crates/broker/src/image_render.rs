@@ -570,6 +570,15 @@ pub(crate) fn isolated_worker_diagnostics(
         "process_memory_limit_bytes".into(),
         json!(isolated.process_memory_limit_bytes),
     );
+    // Absent when nothing appeared, which is the ordinary case; present the
+    // moment a plug-in tried to ask the user something (issue #351). Titles are
+    // already path-redacted where they are captured.
+    if !isolated.dismissed_windows.is_empty() {
+        object.insert(
+            "dismissed_windows".into(),
+            json!(isolated.dismissed_windows),
+        );
+    }
     diagnostics
 }
 
@@ -2705,6 +2714,21 @@ pub fn probe_experimental_options_dialog(
     }
     let mut report: Value = serde_json::from_str(isolated.stdout.trim())
         .map_err(|_| invalid("options dialog worker report is invalid"))?;
+    // A dialog the broker closed did not complete; it was cancelled by the
+    // host, and reporting that as a pass would turn a compatibility gap into
+    // fixture-shaped silent success. The probe fails explicitly instead, naming
+    // what was closed (issue #351).
+    let closed_by_host: Vec<_> = isolated
+        .dismissed_windows
+        .iter()
+        .filter(|window| window.asked_to_close)
+        .collect();
+    if !closed_by_host.is_empty() {
+        return Err(invalid(format!(
+            "options dialog was closed by the host, so it did not complete: {}",
+            serde_json::to_string(&closed_by_host).unwrap_or_default()
+        )));
+    }
     if report.get("status") != Some(&json!("dialog_completed"))
         || report.get("dialog_advertised") != Some(&json!(true))
         || report.get("selector_dispatched") != Some(&json!(true))
@@ -2748,6 +2772,19 @@ pub fn probe_experimental_automatic_options_dialog(
     }
     let mut report: Value = serde_json::from_str(isolated.stdout.trim())
         .map_err(|_| invalid("automatic options dialog worker report is invalid"))?;
+    // Same reasoning as the manual probe: a dialog the host closed did not
+    // complete (issue #351).
+    let closed_by_host: Vec<_> = isolated
+        .dismissed_windows
+        .iter()
+        .filter(|window| window.asked_to_close)
+        .collect();
+    if !closed_by_host.is_empty() {
+        return Err(invalid(format!(
+            "automatic options dialog was closed by the host, so it did not complete: {}",
+            serde_json::to_string(&closed_by_host).unwrap_or_default()
+        )));
+    }
     if report.get("status") != Some(&json!("automatic_dialog_completed"))
         || report.get("dialog_capability_advertised") != Some(&json!(true))
         || report.get("automatic_dialog_requested") != Some(&json!(true))
@@ -8229,6 +8266,7 @@ mod tests {
             peak_job_memory_bytes: Some(531_000_000),
             process_memory_limit_bytes: 536_870_912,
             memory_limit_reached: true,
+            dismissed_windows: Vec::new(),
         };
         let diagnostics = isolated_worker_diagnostics(&isolated, 1_234);
         assert_eq!(diagnostics["kill_reason"], "memory_limit");
@@ -8253,6 +8291,7 @@ mod tests {
             peak_job_memory_bytes: Some(1_000_000),
             process_memory_limit_bytes: 536_870_912,
             memory_limit_reached: false,
+            dismissed_windows: Vec::new(),
         };
         let diagnostics = isolated_worker_diagnostics(&alive, 5);
         assert_eq!(diagnostics["kill_reason"], Value::Null);
