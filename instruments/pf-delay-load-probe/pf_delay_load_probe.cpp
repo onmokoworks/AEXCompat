@@ -48,7 +48,11 @@ extern "C" DllExport PF_Err EffectMain(PF_Cmd cmd, PF_InData* in_data,
   switch (cmd) {
     case PF_Cmd_GLOBAL_SETUP:
       out_data->my_version = PF_VERSION(1, 0, 0, PF_Stage_DEVELOP, 0);
-      out_data->out_flags = PF_OutFlag_PIX_INDEPENDENT;
+      // The fixture copies arbitrary pixel bytes and is intentionally valid for
+      // the explicit Argb16 deep-render route as well as the default Argb8
+      // route. Without this advertisement the worker rejects the render before
+      // PF_Cmd_RENDER, masking the delay-load dependency test as render_error=-6.
+      out_data->out_flags = PF_OutFlag_PIX_INDEPENDENT | PF_OutFlag_DEEP_COLOR_AWARE;
       return PF_Err_NONE;
     case PF_Cmd_PARAMS_SETUP:
       {

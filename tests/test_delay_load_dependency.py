@@ -37,6 +37,7 @@ def test_generic_delay_load_fixture_covers_a_transitive_dependency():
     assert "case PF_Cmd_SEQUENCE_SETUP" in probe
     assert "issue60_transitive_value()" in dependency
     assert "issue60_delay_load_gate" in cmake
+    assert "PF_OutFlag_PIX_INDEPENDENT | PF_OutFlag_DEEP_COLOR_AWARE" in probe
 
 
 def test_auto_render_approves_adjacent_delay_load_dependencies_before_dispatch():
