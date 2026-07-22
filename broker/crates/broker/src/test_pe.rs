@@ -3,11 +3,14 @@
 //! `plugin_dependency_closure` walks real PE import tables, so its tests need
 //! real PE bytes rather than a stubbed parser. These builders emit the smallest
 //! PE32+ image that carries an import directory and a delay-load import
-//! directory: one `.rdata` section holding the descriptors and the imported DLL
-//! names. Nothing here is loadable by Windows, and nothing outside tests uses it.
+//! directory, either with the descriptors and name strings in one section or
+//! with the names in a second one — a layout real linkers produce and a
+//! single-section reader gets wrong. Nothing here is loadable by Windows, and
+//! nothing outside tests uses it.
 
 const HEADER_SIZE: u32 = 0x200;
 const SECTION_RVA: u32 = 0x1000;
+const SECOND_SECTION_RVA: u32 = 0x2000;
 const IMPORT_DESCRIPTOR_SIZE: usize = 20;
 const DELAY_DESCRIPTOR_SIZE: usize = 32;
 
@@ -16,18 +19,35 @@ pub fn pe64_importing(imports: &[&str]) -> Vec<u8> {
     pe64_with_imports(imports, &[])
 }
 
+/// A PE32+ image whose import descriptors and name strings live in *different*
+/// sections, as a linker that emits `.idata` plus `.rdata` produces.
+pub fn pe64_with_names_in_a_second_section(imports: &[&str]) -> Vec<u8> {
+    build(imports, &[], true)
+}
+
 /// A PE32+ image importing `imports` normally and `delay_imports` through the
 /// delay-load import directory.
 pub fn pe64_with_imports(imports: &[&str], delay_imports: &[&str]) -> Vec<u8> {
+    build(imports, delay_imports, false)
+}
+
+fn build(imports: &[&str], delay_imports: &[&str], names_in_second_section: bool) -> Vec<u8> {
     let import_table_size = (imports.len() + 1) * IMPORT_DESCRIPTOR_SIZE;
     let delay_table_size = (delay_imports.len() + 1) * DELAY_DESCRIPTOR_SIZE;
     let names_offset = import_table_size + delay_table_size;
+    // Where the name strings live: after the descriptors in the same section, or
+    // at the start of a second one.
+    let names_rva_base = if names_in_second_section {
+        SECOND_SECTION_RVA
+    } else {
+        SECTION_RVA + names_offset as u32
+    };
 
     // Lay the name strings out first so every descriptor can point at one.
     let mut names = Vec::new();
     let mut name_rva = Vec::new();
     for name in imports.iter().chain(delay_imports) {
-        name_rva.push(SECTION_RVA + (names_offset + names.len()) as u32);
+        name_rva.push(names_rva_base + names.len() as u32);
         names.extend_from_slice(name.as_bytes());
         names.push(0);
     }
@@ -49,10 +69,19 @@ pub fn pe64_with_imports(imports: &[&str], delay_imports: &[&str]) -> Vec<u8> {
         }
     }
     section.extend(std::iter::repeat_n(0u8, DELAY_DESCRIPTOR_SIZE));
-    section.extend_from_slice(&names);
+    let mut second_section = Vec::new();
+    if names_in_second_section {
+        second_section.extend_from_slice(&names);
+    } else {
+        section.extend_from_slice(&names);
+    }
     let section_size = section.len() as u32;
+    let second_section_size = second_section.len() as u32;
     while section.len() % HEADER_SIZE as usize != 0 {
         section.push(0);
+    }
+    while names_in_second_section && second_section.len() % HEADER_SIZE as usize != 0 {
+        second_section.push(0);
     }
 
     let mut image = Vec::new();
@@ -63,7 +92,7 @@ pub fn pe64_with_imports(imports: &[&str], delay_imports: &[&str]) -> Vec<u8> {
 
     image.extend_from_slice(b"PE\0\0");
     push_u16(&mut image, 0x8664); // machine: x86-64
-    push_u16(&mut image, 1); // number_of_sections
+    push_u16(&mut image, if names_in_second_section { 2 } else { 1 }); // number_of_sections
     push_u32(&mut image, 0); // time_date_stamp
     push_u32(&mut image, 0); // pointer_to_symbol_table
     push_u32(&mut image, 0); // number_of_symbols
@@ -87,7 +116,7 @@ pub fn pe64_with_imports(imports: &[&str], delay_imports: &[&str]) -> Vec<u8> {
     push_u16(&mut image, 6); // major_subsystem_version
     push_u16(&mut image, 0);
     push_u32(&mut image, 0); // win32_version_value
-    push_u32(&mut image, SECTION_RVA + 0x1000); // size_of_image
+    push_u32(&mut image, SECOND_SECTION_RVA + 0x1000); // size_of_image
     push_u32(&mut image, HEADER_SIZE); // size_of_headers
     push_u32(&mut image, 0); // checksum
     push_u16(&mut image, 3); // subsystem: console
@@ -114,21 +143,40 @@ pub fn pe64_with_imports(imports: &[&str], delay_imports: &[&str]) -> Vec<u8> {
         }
     }
 
-    image.extend_from_slice(b".rdata\0\0");
-    push_u32(&mut image, section_size); // virtual_size
-    push_u32(&mut image, SECTION_RVA); // virtual_address
-    push_u32(&mut image, section.len() as u32); // size_of_raw_data
-    push_u32(&mut image, HEADER_SIZE); // pointer_to_raw_data
-    push_u32(&mut image, 0); // pointer_to_relocations
-    push_u32(&mut image, 0); // pointer_to_linenumbers
-    push_u16(&mut image, 0); // number_of_relocations
-    push_u16(&mut image, 0); // number_of_linenumbers
-    push_u32(&mut image, 0x4000_0040); // initialized data, read
+    let mut section_header = |name: &[u8; 8], size: u32, rva: u32, raw: u32, pointer: u32| {
+        image.extend_from_slice(name);
+        push_u32(&mut image, size); // virtual_size
+        push_u32(&mut image, rva); // virtual_address
+        push_u32(&mut image, raw); // size_of_raw_data
+        push_u32(&mut image, pointer); // pointer_to_raw_data
+        push_u32(&mut image, 0); // pointer_to_relocations
+        push_u32(&mut image, 0); // pointer_to_linenumbers
+        push_u16(&mut image, 0); // number_of_relocations
+        push_u16(&mut image, 0); // number_of_linenumbers
+        push_u32(&mut image, 0x4000_0040); // initialized data, read
+    };
+    section_header(
+        b".idata\0\0",
+        section_size,
+        SECTION_RVA,
+        section.len() as u32,
+        HEADER_SIZE,
+    );
+    if names_in_second_section {
+        section_header(
+            b".rdata\0\0",
+            second_section_size,
+            SECOND_SECTION_RVA,
+            second_section.len() as u32,
+            HEADER_SIZE + section.len() as u32,
+        );
+    }
 
     while image.len() < HEADER_SIZE as usize {
         image.push(0);
     }
     image.extend_from_slice(&section);
+    image.extend_from_slice(&second_section);
     image
 }
 

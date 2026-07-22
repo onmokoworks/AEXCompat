@@ -440,33 +440,38 @@ fn import_names_from<Nt: ImageNtHeaders>(
     pe: &object::read::pe::PeFile<'_, Nt>,
 ) -> io::Result<Vec<String>> {
     let mut names = Vec::new();
-    // The ceiling counts descriptors walked, not names kept. A hostile import
-    // directory can hold millions of entries whose names are unreadable or not
-    // UTF-8, and counting only the ones that survive would let it decide how long
-    // this walk runs. Passing the ceiling is an error, not a truncation, so a
-    // closure is never quietly shortened into a load failure either.
+    // The ceiling counts descriptors walked, not names kept: a hostile import
+    // directory can hold millions of entries, and counting only what survives
+    // would let it decide how long this walk runs. Passing the ceiling is an
+    // error, not a truncation, so a closure is never quietly shortened into a
+    // load failure either.
     let mut walked = 0usize;
-    let mut step = |names: &mut Vec<String>, walked: &mut usize, raw: io::Result<&[u8]>| {
+    let mut step = |names: &mut Vec<String>, walked: &mut usize, raw: Option<&[u8]>| {
         *walked += 1;
         if *walked > MAX_IMPORT_NAMES_PER_IMAGE {
             return Err(invalid("imported name limit exceeded"));
         }
-        if let Ok(raw) = raw
-            && let Ok(name) = std::str::from_utf8(raw)
-            && !name.is_empty()
-        {
-            names.push(name.to_owned());
-        }
+        // A descriptor whose name cannot be read (bad RVA, empty, or not the
+        // ASCII a DLL name is) means the import table is malformed. Skipping it
+        // would drop a dependency from the closure and turn a diagnosable parse
+        // failure into an opaque module-load failure much later, so it fails here
+        // instead.
+        let name = raw
+            .and_then(|raw| std::str::from_utf8(raw).ok())
+            .filter(|name| !name.is_empty())
+            .ok_or_else(|| invalid("plug-in import name is unreadable"))?;
+        names.push(name.to_owned());
         Ok(())
     };
     if let Ok(Some(table)) = pe.import_table()
         && let Ok(mut descriptors) = table.descriptors()
     {
         while let Ok(Some(descriptor)) = descriptors.next() {
-            let raw = table
-                .name(descriptor.name.get(LittleEndian))
-                .map_err(|_| invalid("unreadable import name"));
-            step(&mut names, &mut walked, raw)?;
+            step(
+                &mut names,
+                &mut walked,
+                name_at(pe, descriptor.name.get(LittleEndian)),
+            )?;
         }
     }
     if let Ok(Some(table)) = pe
@@ -475,13 +480,32 @@ fn import_names_from<Nt: ImageNtHeaders>(
         && let Ok(mut descriptors) = table.descriptors()
     {
         while let Ok(Some(descriptor)) = descriptors.next() {
-            let raw = table
-                .name(descriptor.dll_name_rva.get(LittleEndian))
-                .map_err(|_| invalid("unreadable import name"));
-            step(&mut names, &mut walked, raw)?;
+            step(
+                &mut names,
+                &mut walked,
+                name_at(pe, descriptor.dll_name_rva.get(LittleEndian)),
+            )?;
         }
     }
     Ok(names)
+}
+
+/// The NUL-terminated name at `rva`, resolved against whichever section holds it.
+///
+/// The import table helper resolves names against one section, chosen from the
+/// first descriptor, which is not where every linker puts them: a PE that keeps
+/// its descriptors in `.idata` and some of its name strings in `.rdata` makes
+/// that helper fail for exactly those descriptors. Two of the 353 After Effects
+/// plug-ins measured for issue #304 are built that way, and dropping their
+/// imports would have shortened a closure silently. Resolving through the
+/// section table covers any layout, and a genuinely out-of-range RVA still fails.
+fn name_at<'data, Nt: ImageNtHeaders>(
+    pe: &object::read::pe::PeFile<'data, Nt>,
+    rva: u32,
+) -> Option<&'data [u8]> {
+    let data = pe.section_table().pe_data_at(pe.data(), rva)?;
+    let end = data.iter().position(|byte| *byte == 0)?;
+    Some(&data[..end])
 }
 
 /// `%SystemRoot%\System32`, canonicalized. `None` when it cannot be resolved,
@@ -821,6 +845,35 @@ mod tests {
         let expected: [u8; 32] = Sha256::digest(&bytes).into();
         assert_eq!(closure.dependencies()[0].expected_sha256, expected);
         assert_eq!(closure.dependencies()[0].expected_size, bytes.len() as u64);
+        fs::remove_dir_all(install).unwrap();
+    }
+
+    #[test]
+    fn resolves_import_names_that_live_in_another_section() {
+        // Descriptors in `.idata`, name strings in `.rdata`: a reader that binds
+        // the name section from the first descriptor alone loses these, which
+        // would drop dependencies from the closure without saying so. Two of the
+        // 353 After Effects plug-ins measured for #304 are built this way.
+        let install = temp_dir("sections");
+        let plugin = install.join("effect.aex");
+        fs::write(
+            &plugin,
+            crate::test_pe::pe64_with_names_in_a_second_section(&["first.dll", "second.dll"]),
+        )
+        .unwrap();
+        write_pe(&install, "first.dll", &[]);
+        write_pe(&install, "second.dll", &[]);
+
+        let roots = vec![install.clone()];
+        let closure =
+            resolve_dependency_closure(DependencyClosureRequest::new(&plugin, &roots)).unwrap();
+        let mut sealed: Vec<String> = closure
+            .dependencies()
+            .iter()
+            .map(|artifact| artifact.path.file_name().unwrap().to_string_lossy().into())
+            .collect();
+        sealed.sort();
+        assert_eq!(sealed, vec!["first.dll", "second.dll"]);
         fs::remove_dir_all(install).unwrap();
     }
 
