@@ -96,7 +96,8 @@ bash {SKILL_DIR}/codex-review-monitor.sh {owner} {repo} {PR} "{since}"
 - `OWNER-FINDING` / `OWNER-REVIEW` / `OWNER-COMMENT` — owner の指摘 (最優先)。
   owner review は **state ベース**で判定する (bodyless な `CHANGES_REQUESTED`
   も blocker)。純粋な `@codex review` トリガーのみのコメントは除外し、トリガー
-  句を含む実フィードバックは拾う。
+  句を含む実フィードバックは拾う。先頭行が単独の `@codex review` なら、後続行の
+  要約もトリガーの一部として扱う。
 - `CLEAN: codex clean for head <sha>` — **SHA 拘束の text clean**
   (`Didn't find any major issues` の issue コメントが現在の head SHA を参照)
   で、それより新しい finding も owner 活動も無い。これは merge-guard が受理する

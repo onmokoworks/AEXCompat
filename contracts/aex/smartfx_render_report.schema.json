@@ -1,0 +1,194 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://aexcompat.local/contracts/aex/smartfx_render_report.schema.json",
+  "schema_name": "AEXCompat SmartFX render report schema",
+  "schema_version": 1,
+  "title": "AEXCompat SmartFX render report",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "stage", "plugin_id", "receipt_id", "fixture_sha256",
+    "case_id", "expected_oracle_sha256", "run_1", "run_2", "deterministic",
+    "oracle_match", "gpu_negotiation_valid", "expected_error", "error_contract_valid",
+    "temporal_context_valid", "roi_contract_valid", "expected_crash",
+    "crash_contract_valid", "broker_survived", "passed"
+  ],
+  "properties": {
+    "schema_version": {"const": 1},
+    "stage": {"const": "smartfx_render"},
+    "plugin_id": {"type": "string", "pattern": "^[a-z][a-z0-9_-]{0,63}$"},
+    "receipt_id": {"type": "string", "minLength": 1, "maxLength": 128},
+    "fixture_sha256": {"$ref": "#/$defs/sha256"},
+    "case_id": {"$ref": "#/$defs/case_id"},
+    "expected_oracle_sha256": {"$ref": "#/$defs/optional_sha256"},
+    "run_1": {"$ref": "#/$defs/run"},
+    "run_2": {"$ref": "#/$defs/run"},
+    "deterministic": {"type": "boolean"},
+    "oracle_match": {"type": "boolean"},
+    "gpu_negotiation_valid": {"type": "boolean"},
+    "expected_error": {"type": "boolean"},
+    "error_contract_valid": {"type": "boolean"},
+    "temporal_context_valid": {"type": "boolean"},
+    "roi_contract_valid": {"type": "boolean"},
+    "expected_crash": {"type": "boolean"},
+    "crash_contract_valid": {"type": "boolean"},
+    "broker_survived": {"const": true},
+    "passed": {"type": "boolean"}
+  },
+  "allOf": [
+    {
+      "not": {
+        "properties": {
+          "expected_error": {"const": true},
+          "expected_crash": {"const": true}
+        },
+        "required": ["expected_error", "expected_crash"]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "passed": {"const": true}
+        },
+        "required": ["passed"]
+      },
+      "then": {
+        "properties": {
+          "deterministic": {"const": true},
+          "oracle_match": {"const": true},
+          "gpu_negotiation_valid": {"const": true},
+          "error_contract_valid": {"const": true},
+          "temporal_context_valid": {"const": true},
+          "roi_contract_valid": {"const": true},
+          "crash_contract_valid": {"const": true},
+          "broker_survived": {"const": true}
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "passed": {"const": true},
+          "expected_crash": {"const": true}
+        },
+        "required": ["passed", "expected_crash"]
+      },
+      "then": {
+        "properties": {
+          "expected_oracle_sha256": {"const": ""},
+          "run_1": {"$ref": "#/$defs/crash_run"},
+          "run_2": {"$ref": "#/$defs/crash_run"}
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "passed": {"const": true},
+          "expected_error": {"const": true}
+        },
+        "required": ["passed", "expected_error"]
+      },
+      "then": {
+        "properties": {
+          "run_1": {"$ref": "#/$defs/error_run"},
+          "run_2": {"$ref": "#/$defs/error_run"}
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "passed": {"const": true},
+          "expected_error": {"const": false},
+          "expected_crash": {"const": false}
+        },
+        "required": ["passed", "expected_error", "expected_crash"]
+      },
+      "then": {
+        "properties": {
+          "expected_oracle_sha256": {"$ref": "#/$defs/sha256"},
+          "run_1": {"$ref": "#/$defs/success_run"},
+          "run_2": {"$ref": "#/$defs/success_run"}
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[A-F0-9]{64}$"},
+    "optional_sha256": {"type": "string", "pattern": "^(?:[A-F0-9]{64})?$"},
+    "case_id": {
+      "enum": [
+        "default", "identity", "horizontal", "vertical_no_repeat", "mixed",
+        "amount_max", "seed_max", "mix_zero", "odd_dimensions", "padded_stride",
+        "connected_map", "inverted_map", "deep16_default", "float32_default",
+        "gpu_fallback_float32", "error_missing_input", "crash_null_output_world",
+        "temporal_context", "partial_output_request"
+      ]
+    },
+    "rect": {
+      "type": ["array", "null"],
+      "minItems": 4,
+      "maxItems": 4,
+      "items": {"type": "integer"}
+    },
+    "run": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "classification", "output_sha256", "smart_render_error",
+        "guard_bytes_intact", "input_checkout_request", "map_checkout_request"
+      ],
+      "properties": {
+        "classification": {"enum": ["ok", "nonzero_exit", "crashed", "timeout_killed"]},
+        "output_sha256": {"$ref": "#/$defs/optional_sha256"},
+        "smart_render_error": {"type": ["integer", "null"]},
+        "guard_bytes_intact": {"type": ["boolean", "null"]},
+        "input_checkout_request": {"$ref": "#/$defs/rect"},
+        "map_checkout_request": {"$ref": "#/$defs/rect"}
+      }
+    },
+    "success_run": {
+      "allOf": [
+        {"$ref": "#/$defs/run"},
+        {"properties": {
+          "classification": {"const": "ok"},
+          "output_sha256": {"$ref": "#/$defs/sha256"},
+          "smart_render_error": {"const": 0},
+          "guard_bytes_intact": {"const": true},
+          "input_checkout_request": {"$ref": "#/$defs/non_null_rect"},
+          "map_checkout_request": {"$ref": "#/$defs/non_null_rect"}
+        }}
+      ]
+    },
+    "error_run": {
+      "allOf": [
+        {"$ref": "#/$defs/run"},
+        {"properties": {
+          "classification": {"const": "nonzero_exit"},
+          "smart_render_error": {"type": "integer", "not": {"const": 0}},
+          "guard_bytes_intact": {"const": true}
+        }}
+      ]
+    },
+    "crash_run": {
+      "allOf": [
+        {"$ref": "#/$defs/run"},
+        {"properties": {
+          "classification": {"const": "crashed"},
+          "output_sha256": {"const": ""},
+          "smart_render_error": {"type": "null"},
+          "guard_bytes_intact": {"type": "null"},
+          "input_checkout_request": {"type": "null"},
+          "map_checkout_request": {"type": "null"}
+        }}
+      ]
+    },
+    "non_null_rect": {
+      "type": "array",
+      "minItems": 4,
+      "maxItems": 4,
+      "items": {"type": "integer"}
+    }
+  }
+}

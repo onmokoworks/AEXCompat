@@ -174,11 +174,7 @@ fn parses_v1_and_validates_policy_worker_report() {
 #[test]
 fn winsxs_report_is_bound_to_a_direct_assembly_child() {
     let f = Fixture::new();
-    let winsxs = f
-        .root
-        .parent()
-        .unwrap()
-        .join("WinSxS");
+    let winsxs = f.root.parent().unwrap().join("WinSxS");
     let assembly = winsxs.join("amd64_microsoft.windows.common-controls_6595b64144ccf1df_5.82");
     fs::create_dir_all(&assembly).unwrap();
     let module = assembly.join("COMCTL32.dll");
@@ -187,7 +183,8 @@ fn winsxs_report_is_bound_to_a_direct_assembly_child() {
     let digest = hex(&Sha256::digest(bytes));
     let report = format!(
         r#"[{{"classification":"winsxs","basename":"COMCTL32.dll","path_token":"{}","sha256":"{}","size":14}}]"#,
-        path_token(&module), digest
+        path_token(&module),
+        digest
     );
     let result = validate_worker_report(
         report.as_bytes(),

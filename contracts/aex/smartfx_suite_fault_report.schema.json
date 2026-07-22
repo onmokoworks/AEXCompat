@@ -19,9 +19,29 @@
     "run_1": {"$ref": "#/$defs/run"},
     "run_2": {"$ref": "#/$defs/run"},
     "broker_survived": {"const": true},
-    "passed": {"type": "boolean"}
+    "passed": {"type": "boolean"},
+    "secure_launch_1": {"$ref": "#/$defs/secure_launch"},
+    "secure_launch_2": {"$ref": "#/$defs/secure_launch"},
+    "secure_launch_count": {"const": 2},
+    "normal_token_fallback": {"const": false}
   },
   "$defs": {
+    "secure_launch": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["launch_mode", "worker_authenticated", "worker_size_bytes", "worker_sha256", "plugin_basename", "plugin_sha256", "sealed_manifest_sha256", "module_audit_required", "module_audit"],
+      "properties": {
+        "launch_mode": {"const": "sealed_load_tree_restricted_token"},
+        "worker_authenticated": {"const": true},
+        "worker_size_bytes": {"type": "integer", "minimum": 1},
+        "worker_sha256": {"type": "string", "pattern": "^[0-9a-fA-F]{64}$"},
+        "plugin_basename": {"type": "string", "minLength": 1, "maxLength": 260, "pattern": "^[^\\\\/:*?\"<>|]+$"},
+        "plugin_sha256": {"type": "string", "pattern": "^[0-9a-fA-F]{64}$"},
+        "sealed_manifest_sha256": {"type": "string", "pattern": "^[0-9a-fA-F]{64}$"},
+        "module_audit_required": {"const": true},
+        "module_audit": {"type": ["object", "null"]}
+      }
+    },
     "run": {
       "type": "object",
       "additionalProperties": false,

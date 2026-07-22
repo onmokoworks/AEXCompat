@@ -4,6 +4,7 @@
 #   codex-merge-guard.sh <owner> <repo> <pr>
 #
 # Refuses to merge unless, for the CURRENT head SHA:
+#   - all required GitHub checks are reported successful, and
 #   - no owner blocker is pending (inline finding, CHANGES_REQUESTED / bodied
 #     COMMENTED review, or non-trigger top-level comment), and
 #   - Codex went clean for that head via a "Didn't find any major issues"
@@ -42,6 +43,19 @@ fetch_review_threads() {
     result=$(jq -c --argjson resolved "$resolved" --argjson comments "$comments" '. + [{isResolved:$resolved,comments:$comments}]' <<<"$result") || return 1
   done
   printf '%s\n' "$result"
+}
+
+required_ci_gate() {
+  local checks
+  if ! checks=$(gh pr checks "$PR" --repo "$OWNER/$REPO" 2>&1); then
+    echo "REFUSE: required CI checks are not green for PR #$PR"
+    printf '%s\n' "$checks"
+    return 1
+  fi
+  if ! grep -q '[^[:space:]]' <<<"$checks"; then
+    echo "REFUSE: no required CI checks reported for PR #$PR"
+    return 1
+  fi
 }
 
 # Client-side snapshots cannot atomically exclude an inline owner comment that
@@ -88,6 +102,11 @@ head=$(gh api "repos/$OWNER/$REPO/pulls/$PR" --jq '.head.sha') || {
 # This session's own login, so its inline ACK replies (posted under an owner
 # login) can be identified; GraphQL thread state remains authoritative inline.
 ME=$(gh api user --jq '.login') || { echo "REFUSE: cannot read authenticated login"; exit 1; }
+
+# Check the current head before the review snapshots. A missing required check
+# is not equivalent to green: it usually means the workflow did not run or the
+# branch protection configuration is incomplete.
+required_ci_gate || exit 1
 
 pr_comments=$(fetch "pulls/$PR/comments") || { echo "REFUSE: pulls/comments fetch failed"; exit 1; }
 review_threads=$(fetch_review_threads) || { echo "REFUSE: reviewThreads fetch failed"; exit 1; }
@@ -178,6 +197,12 @@ find_ts=$(codex_finding_max_ts <<<"$pr_comments")
 if [ -z "$clean_ts" ] || [ -n "$(codex_finding_supersedes_clean "$find_ts" "$clean_ts")" ]; then
   echo "REFUSE: final Codex snapshot is not clean for current head ${head:0:10}"; exit 1
 fi
+
+# Re-check required CI after the final owner/Codex snapshot. The head-bound
+# merge below prevents a new commit from slipping through; this second check
+# prevents a pending or failed check observed before the final snapshot from
+# being treated as mergeable.
+required_ci_gate || exit 1
 
 # Atomic head check closes the remaining commit race after the final snapshot;
 # server-side conversation resolution independently closes the review race.
