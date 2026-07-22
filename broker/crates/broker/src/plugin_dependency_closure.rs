@@ -413,20 +413,27 @@ fn import_names_from<Nt: ImageNtHeaders>(
     pe: &object::read::pe::PeFile<'_, Nt>,
 ) -> io::Result<Vec<String>> {
     let mut names = Vec::new();
-    let mut push = |raw: &[u8]| {
-        if names.len() < MAX_IMPORT_NAMES_PER_IMAGE
-            && let Ok(name) = std::str::from_utf8(raw)
+    // A name that cannot be read as UTF-8 is skipped rather than counted: it can
+    // never match a file this resolver would seal. Passing the per-image ceiling
+    // is an error, not a truncation, so an import table built to overflow it
+    // cannot quietly shorten a closure into a load failure.
+    let mut push = |raw: &[u8]| -> io::Result<()> {
+        if names.len() >= MAX_IMPORT_NAMES_PER_IMAGE {
+            return Err(invalid("imported name limit exceeded"));
+        }
+        if let Ok(name) = std::str::from_utf8(raw)
             && !name.is_empty()
         {
             names.push(name.to_owned());
         }
+        Ok(())
     };
     if let Ok(Some(table)) = pe.import_table()
         && let Ok(mut descriptors) = table.descriptors()
     {
         while let Ok(Some(descriptor)) = descriptors.next() {
             if let Ok(raw) = table.name(descriptor.name.get(LittleEndian)) {
-                push(raw);
+                push(raw)?;
             }
         }
     }
@@ -437,7 +444,7 @@ fn import_names_from<Nt: ImageNtHeaders>(
     {
         while let Ok(Some(descriptor)) = descriptors.next() {
             if let Ok(raw) = table.name(descriptor.dll_name_rva.get(LittleEndian)) {
-                push(raw);
+                push(raw)?;
             }
         }
     }
@@ -712,6 +719,24 @@ mod tests {
             .collect();
         sealed.sort();
         assert_eq!(sealed, vec!["delayed.dll", "direct.dll"]);
+        fs::remove_dir_all(install).unwrap();
+    }
+
+    #[test]
+    fn fails_closed_on_an_import_table_over_the_per_image_ceiling() {
+        let install = temp_dir("imports");
+        let names: Vec<String> = (0..=MAX_IMPORT_NAMES_PER_IMAGE)
+            .map(|index| format!("d{index}.dll"))
+            .collect();
+        let borrowed: Vec<&str> = names.iter().map(String::as_str).collect();
+        let plugin = write_pe(&install, "effect.aex", &borrowed);
+        let roots = vec![install.clone()];
+        assert_eq!(
+            resolve_dependency_closure(DependencyClosureRequest::new(&plugin, &roots))
+                .unwrap_err()
+                .to_string(),
+            "imported name limit exceeded"
+        );
         fs::remove_dir_all(install).unwrap();
     }
 
