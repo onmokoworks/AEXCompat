@@ -206,10 +206,10 @@ mod windows_e2e {
         ) {
             return;
         }
-        // Still takes the route lock: the A/Bs that remain assert on exact
-        // deltas of RENDER_SESSION_WRAPPER_RENDERS, and a concurrent session
-        // render perturbs them. Measured -- without this, conformance_render_settings
-        // fails with "the escape hatch did not force the one-shot transport".
+        // Still takes the route lock: the tests that assert on exact deltas of
+        // RENDER_SESSION_WRAPPER_RENDERS are perturbed by a concurrent session
+        // render, and the two fail-closed diagnostics set a process-global
+        // fault-injection env that would otherwise leak into this render.
         let _env_guard = SESSION_ROUTE_ENV_LOCK
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
@@ -633,27 +633,27 @@ mod windows_e2e {
         .expect("float parameter fixture")
     }
 
-    /// Companion to `wrapper_report_matches_the_one_shot_transport` for the case
-    /// pf_sampling_probe cannot cover (issue #195): an AEX that declares a
-    /// `PF_Param_LAYER` secondary layer (slot 1) plus a float slider (slot 2) and
-    /// composites both on the classic render path. This is the first real-AEX A/B
-    /// for the session wrapper's secondary-layer transport (issue #98 W1-4): the
-    /// session route must deliver the same secondary-layer pixels and the same
-    /// user-parameter value as the one-shot argv transport, field-for-field and
-    /// byte-for-byte, at time 0 and at a nonzero time. It also proves both inputs
-    /// are actually consumed (changing either changes the output), so a match is
-    /// not a vacuous "the probe ignored them" pass. Gated on the locally built
-    /// worker and the pf-layer-param-probe fixture, like the sibling test.
+    /// Real-AEX coverage of the session wrapper's secondary-layer transport
+    /// (issue #98 W1-4) for the case pf_sampling_probe cannot cover (issue
+    /// #195): an AEX that declares a `PF_Param_LAYER` secondary layer (slot 1)
+    /// plus a float slider (slot 2) and composites both on the classic render
+    /// path. Both inputs must actually reach the plug-in -- changing either one
+    /// changes the output -- so this cannot pass vacuously by the probe ignoring
+    /// them, and the render must be deterministic at time 0 and at a nonzero
+    /// time. This was an A/B against the one-shot argv transport until #361
+    /// converted it and #365 deleted the comparison target. Gated on the
+    /// locally built worker and the pf-layer-param-probe fixture.
 
     /// The host-context shapes the session must carry, verified per shape.
     ///
     /// The A/B this replaces covered six sub-cases in one test; the first
     /// conversion kept only the plain render and silently dropped the other
     /// five, which the dead `HostContext` import gave away. Each is restored
-    /// here, because session *ineligibility* is a routing decision rather than a
-    /// failure: a gate regression that pushed these shapes back to the one-shot
-    /// would return Ok and go unnoticed. The counter assertion is what catches
-    /// that, so it is the point of this test (#361).
+    /// here. The counter assertion remains the point of the test (#361): before
+    /// #365 a gate regression could push a shape onto the one-shot and still
+    /// return Ok, and now that there is no second transport the counter is what
+    /// proves the render was carried by the session at all, rather than
+    /// short-circuiting somewhere that also returns Ok.
     #[test]
     fn host_context_shapes_stay_on_the_session() {
         if crate::common::skip_without_restricted_token_launch(
@@ -702,7 +702,7 @@ mod windows_e2e {
             .expect("session-route context render");
             assert!(
                 RENDER_SESSION_WRAPPER_RENDERS.load(Ordering::SeqCst) > before,
-                "this shape left the session and went to the one-shot: {report}"
+                "this shape was not carried by the session: {report}"
             );
             report
         };
@@ -857,10 +857,10 @@ mod windows_e2e {
         ) {
             return;
         }
-        // Still takes the route lock: the A/Bs that remain assert on exact
-        // deltas of RENDER_SESSION_WRAPPER_RENDERS, and a concurrent session
-        // render perturbs them. Measured -- without this, conformance_render_settings
-        // fails with "the escape hatch did not force the one-shot transport".
+        // Still takes the route lock: the tests that assert on exact deltas of
+        // RENDER_SESSION_WRAPPER_RENDERS are perturbed by a concurrent session
+        // render, and the two fail-closed diagnostics set a process-global
+        // fault-injection env that would otherwise leak into this render.
         let _env_guard = SESSION_ROUTE_ENV_LOCK
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());

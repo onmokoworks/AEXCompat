@@ -669,13 +669,14 @@ def _sidecar_path(tmp_path):
     return path
 
 
-def test_session_audio_trailer_feeds_the_plug_in_the_same_window_as_the_one_shot(tmp_path):
+def test_session_audio_trailer_feeds_the_plug_in_the_checked_out_window(tmp_path):
     """The classic session carries an audio source through `session-audio:v1|`.
 
-    The one-shot spends three bare argv slots on the sample count, rate, and
-    path under its own command word; a session cannot, because its tail is
+    The deleted one-shot spent three bare argv slots on the sample count, rate,
+    and path under its own command word; a session cannot, because its tail is
     shared with the other optional trailers, so the values ride one marked
-    argument peeled like the rest (issue #339).
+    argument peeled like the rest (issue #339). The name used to claim
+    equivalence with that transport, which #365 removed.
     """
     if not WORKER.is_file():
         pytest.skip("aex_render_worker.exe is not built; run the minihost build")

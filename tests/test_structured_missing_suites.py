@@ -80,5 +80,19 @@ def test_unsupported_suite_slots_flow_from_worker_report_to_broker_diagnostics()
     assert "unsupported_suite_calls_report_json()" in report
     assert "unsupported_suite_calls_report_json()" in smart
     assert "fn propagate_unsupported_suite_calls(" in broker
-    assert broker.count("propagate_unsupported_suite_calls(&mut diagnostics") >= 3
     assert 'worker_report["unsupported_suite_calls"]' in broker
+    # Every broker path that turns a worker report into public diagnostics must
+    # lift the structured suite records, or a compatibility gap stops being a
+    # reproducible diagnostic. The count used to be `>= 3` because the one-shot
+    # dispatch propagated twice (initial launch and CPU retry); #365 deleted it,
+    # so assert the two surviving paths by name instead of by a floor that a
+    # future deletion could satisfy while dropping the render path.
+    for owner, marker in (
+        ("inspection", "fn inspect_experimental_with_diagnostics_and_runtime_policy("),
+        ("session render", "fn render_classic_via_length_one_session("),
+    ):
+        start = broker.index(marker)
+        end = broker.index("\n}\n", start)
+        body = broker[start:end]
+        assert "propagate_missing_suites(&mut diagnostics" in body, owner
+        assert "propagate_unsupported_suite_calls(&mut diagnostics" in body, owner

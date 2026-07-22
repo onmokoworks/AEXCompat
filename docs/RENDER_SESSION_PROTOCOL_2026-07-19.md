@@ -7,6 +7,26 @@ status: 設計確定版 (段階0 調査の結論に基づく)。実装は本書�
 変種 (per-frame `parameters`) を §4.2.1 として定義した。launch 構成・
 ヘッダレイアウト・応答スキーマは v1 のまま変わらない。
 
+改訂 2026-07-22 (issue #365 / W4): one-shot argv render 経路
+(`--render-image[16|32][-layer]` / `--render-image-audio` /
+`--render-audio` / `--smart-image[16|32][-cpu|-opencl|-directx][-layer]`)
+を broker・worker 双方から削除した。**本書のプロトコル定義そのものは変更
+していない**が、以下の読み替えが必要になる。
+
+- §1 の「既存の one-shot argv 経路は不変のまま残す」は失効。session が
+  唯一の image / audio transport であり、session が担えない形は
+  `RenderSession::open` の明示エラーになる (無言の再ルートは無い)。
+- 本書の残りの箇所に出てくる "one-shot" 参照は、**session の設計を決めた
+  当時の参照実装**という歴史的な意味で読むこと。「もう一方の生きた経路」
+  ではない。§3 の位置引数順、§4.2.1 の `ui_action` 符号化、layer dedup 規則
+  などが one-shot に「倣った」という記述は、その形が session に取り込まれて
+  今も有効であることを意味する。
+- session/one-shot A/B (§ 検証) は #361 で session 直接検証に置き換わり、
+  比較対象そのものが本 issue で消えた。
+
+削除で受理範囲が広がった点・狭まった点は `image_render.rs` の
+`render_with_artifact` 冒頭コメントに記録した。
+
 ## 1. 位置づけとスコープ
 
 フレーム列 (動画) を主対象とする broker↔worker の常駐レンダリング

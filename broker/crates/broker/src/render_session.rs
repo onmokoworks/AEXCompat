@@ -137,7 +137,7 @@ fn depth_code(pixel_format: RenderPixelFormat) -> u32 {
 
 /// Maps the session flavor to the worker command word (protocol §3, v1.1).
 /// SmartFX ARGB32f carries the GPU backend in the command word, mirroring the
-/// one-shot `--smart-image32[-cpu|-opencl|-directx]` family; every other
+/// deleted one-shot `--smart-image32[-cpu|-opencl|-directx]` family; every other
 /// depth is CPU-only, and classic sessions reject explicit GPU backends.
 fn session_command(
     pixel_format: RenderPixelFormat,
@@ -489,7 +489,7 @@ pub struct SessionOpenRequest<'a> {
     pub render_environment_trailer: Option<String>,
     /// Static audio-source trailer (`session-audio:v1|<samples>|<rate>|<path>`),
     /// carrying the same span the one-shot passes as three bare argv slots under
-    /// `--render-image-audio` (issue #339). The plug-in sees one source for the
+    /// deleted `--render-image-audio` (issue #339). The plug-in sees one source for the
     /// whole session, so it rides the launch argv rather than the frame message.
     /// Rides at the tail of the *positional* section, behind the other optional
     /// trailers, so the worker peels it first of those. The auxiliary option

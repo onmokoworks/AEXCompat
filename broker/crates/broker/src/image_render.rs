@@ -1755,12 +1755,11 @@ pub fn render_experimental_image(
 
 enum AudioWrapperOutcome {
     /// The length-1 audio session rendered and closed clean; this is the public
-    /// report, satisfying the same contract the one-shot path asserts.
+    /// report, in the shape the deleted one-shot path asserted.
     Report(Value),
-    /// The session carried the render but the render itself failed the way the
-    /// one-shot path also fails it (a per-span compatibility error, or a
-    /// post-render output/write failure). The one-shot `--render-audio` transport
-    /// returns Err for the same input, so this is final, not a fallback.
+    /// The session carried the render but the render itself failed: a per-span
+    /// compatibility error, or a post-render output/write failure. This is the
+    /// render's verdict, not an infrastructure fault, so it is final.
     Failure(io::Error),
     /// The session infrastructure could not carry the render (open failure,
     /// worker crash or invalidation, malformed close). The string is the reason;
@@ -1769,12 +1768,12 @@ enum AudioWrapperOutcome {
     Fallback(String),
 }
 
-/// Renders a single audio buffer through a length-1 AudioRenderSession (§10),
-/// so the one-shot `--render-audio` argv transport is a fallback rather than
-/// the only path (issue #98 W4 / #239). The session's own validation (guards,
-/// checksum, generation, and the clean-close gate on the worker's audio
-/// report) enforces the same contract the one-shot report is checked against,
-/// so the synthesized report carries the asserted fields.
+/// Renders a single audio buffer through a length-1 AudioRenderSession (§10).
+/// This is the only audio transport since #365 deleted the one-shot
+/// `--render-audio` argv mode (issue #98 W4 / #239). The session's own
+/// validation (guards, checksum, generation, and the clean-close gate on the
+/// worker's audio report) enforces the contract the one-shot report used to be
+/// checked against, so the synthesized report carries the asserted fields.
 #[cfg(windows)]
 fn render_audio_via_length_one_session(
     repository: &Path,
@@ -1825,11 +1824,10 @@ fn render_audio_via_length_one_session(
             output_start,
             ..
         } => (samples, output_start),
-        // A per-span compatibility error: the one-shot `--render-audio` path
-        // returns Err for the same input (its worker exits non-zero and the
-        // report gate rejects a non-"render_completed" status), so this is a
-        // final compatibility failure, not a session-infrastructure fallback.
-        // Fail closed with the error the effect reported (#98 W4, #264).
+        // A per-span compatibility error: the effect could not render this
+        // input. That is a final compatibility failure, not a
+        // session-infrastructure fault, so fail closed with the error the
+        // effect reported (#98 W4, #264).
         AudioSpanStatus::SpanError { render_error } => {
             let _ = session.close();
             return AudioWrapperOutcome::Failure(invalid(format!(
@@ -1879,11 +1877,10 @@ fn render_audio_via_length_one_session(
             "the audio session close carried no final report".into(),
         );
     };
-    // Override/add the fields the one-shot emit_audio_render_report exposes so
-    // the default session path returns the same public JSON shape as the
-    // `--render-audio` fallback. The wrapper only reaches here on a clean close
-    // (every span succeeded), so the selector errors are 0, the ranges valid,
-    // and the output was created.
+    // Override/add the fields the deleted one-shot emit_audio_render_report
+    // exposed, so the public JSON shape callers parse is unchanged by #365. The
+    // wrapper only reaches here on a clean close (every span succeeded), so the
+    // selector errors are 0, the ranges valid, and the output was created.
     for (key, value) in [
         ("stage", json!("audio_render")),
         ("status", json!("render_completed")),
@@ -4974,9 +4971,8 @@ fn render_with_artifact(
             None => None,
         };
         // The worker loads the span from a file, exactly as it does for the
-        // one-shot's --render-image-audio, so the session writes the same sidecar
-        // before opening and names it in the trailer (issue #339). The one-shot
-        // writes its copy further below, after this branch has returned.
+        // deleted one-shot's --render-image-audio, so the session writes the
+        // sidecar before opening and names it in the trailer (issue #339).
         // One binding, so "a sidecar was written" and "a trailer was emitted"
         // cannot come apart: there is no shape here that writes the file and
         // then renders as if the render carried no audio.
@@ -5133,7 +5129,8 @@ pub static RENDER_SESSION_WRAPPER_RENDERS: std::sync::atomic::AtomicU64 =
 /// report it absent, or the reverse (issue #339).
 struct SessionAudioSource {
     /// `session-audio:v1|<samples>|<rate>|<path>`, the session's form of the
-    /// three bare argv slots the one-shot spends under `--render-image-audio`.
+    /// three bare argv slots the deleted one-shot spent under
+    /// `--render-image-audio`.
     trailer: String,
     input_sha256: String,
 }
@@ -5330,7 +5327,17 @@ fn render_classic_via_length_one_session(
         .as_str()
         .unwrap_or("unknown")
         .to_owned();
-    let diagnostics = close["worker"]["diagnostics"].clone();
+    let mut diagnostics = close["worker"]["diagnostics"].clone();
+    // Lift the worker's structured suite records into the diagnostics, the way
+    // the deleted one-shot dispatch did after every launch. Without this a
+    // session render silently drops `missing_suites` /
+    // `unsupported_suite_calls`, which is exactly the "a compatibility gap must
+    // become a reproducible diagnostic" contract those fields exist for. The
+    // one-shot was the only caller before #365 deleted it, so the propagation
+    // had to move here rather than go with it.
+    propagate_missing_suites(&mut diagnostics, &final_report);
+    propagate_unsupported_suite_calls(&mut diagnostics, &final_report);
+    let diagnostics = diagnostics;
     let gate = validate_interactive_worker_report(
         &final_report,
         &diagnostics,

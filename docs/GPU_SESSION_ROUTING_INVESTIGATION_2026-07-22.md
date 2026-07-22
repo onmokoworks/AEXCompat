@@ -704,3 +704,31 @@ trailer 無しの negative test も併せて追加 (`audio_source_available is F
 ### 未解決 (この PR の範囲外)
 - `tests/test_ae_reference_capture_automation.py::test_reference_capture_fails_closed_without_loaded_module_identity`
   が clean main でも fail する。#175 に追加観察をコメント済み。
+
+## 2026-07-22 追記 (issue #365 / W4): one-shot 削除により A/B 手順 E は実施不能
+
+**事実**: #365 で one-shot argv render 経路 (`--render-image*` /
+`--render-audio` / `--smart-image*`) と escape hatch
+`AEXCOMPAT_DISABLE_RENDER_SESSION_WRAPPER` を broker・worker 双方から削除した。
+
+このため本ノートの以下の項目は**もう実行できない**。将来のセッションが未消化
+タスクとして拾わないよう明記する。
+
+- 「E. 実 render A/B: `--render-experimental-smart-32-gpu-policy` を session /
+  one-shot (DISABLE env) で回して byte + report 等価」(残タスクとして記録されて
+  いたもの) — 比較対象の one-shot が存在しない。
+- 上記 302 行目の「A/B は同コマンドを DISABLE env の on/off で切替」も同様。
+- 326 行目の one-shot `dispatch_secure_gpu_image` も削除済み
+  (session 側 `dispatch_secure_gpu_image_session` は現存し、CPU backend 拒否と
+  session identity 不一致拒否の 2 ガードは同一)。
+
+**観察 (このノートの結論のうち今も有効なもの)**: 36-45 行目の「one-shot GPU も
+policy 必須」「成功 path の report 等価は成立、乖離は GPU 失敗時のみ (one-shot は
+CPU 再試行、session は fail-closed)」という調査結論は、#365 の判断根拠として使った。
+session の fail-closed 側を canonical として残し、CPU 再試行の記録
+(`gpu_attempt` / `gpu_fallback_used`) を生む経路ごと削除している。
+
+**残る検証手段**: GPU render の実機確認は session 単独で行う
+(`--render-experimental-smart-32-gpu-policy` は既定で session を通る)。等価性の
+基準は「one-shot と一致すること」ではなく、レンダー結果そのものの性質
+(#361 が A/B を session 直接検証に置き換えたときと同じ方針)。
