@@ -5638,7 +5638,9 @@ fn main() -> eframe::Result {
         };
         let (parameters, _inspection) =
             aexcompat_broker::image_render::inspect_experimental_with_diagnostics(
-                &repository, plugin, &hash,
+                &repository,
+                plugin,
+                &hash,
             )
             .unwrap_or_default();
         // The preflight seals the same approved dependency artifacts the render

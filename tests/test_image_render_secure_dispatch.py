@@ -234,20 +234,36 @@ def test_smart_sessions_carry_static_context_trailers():
 
     # Both session commands peel the three trailers ahead of the layer trailer, so
     # the ten-slot core lands at the same place on either route. `>= 11` is the
-    # session arity guard (10 slots + the trailer under test).
-    # The `>= 11` arity distinguishes the session peels from the one-shot ones,
-    # which share the same expressions but guard on `>= 14`.
-    for marker in (
-        "mode.image_render_environment = effective_argc >= 11 &&",
-        "mode.image_spatial_context = mode.image_environment_argc >= 11 &&",
-        "mode.image_mask_context = mode.image_trailer_argc >= 11 &&",
-        "mode.session_layers = mode.image_argc >= 11 &&",
-        "const int session_core_argc = mode.image_argc - (mode.session_layers ? 1 : 0);",
-    ):
-        assert dispatch.count(marker) == 2, marker
-    # The smart session must not reach the core count straight off effective_argc,
-    # which is what skipped the context trailers before #331.
-    assert (
-        "const int session_core_argc = effective_argc - (mode.session_layers ? 1 : 0);"
-        not in dispatch
-    )
+    # session arity guard (10 slots + the trailer under test) and distinguishes
+    # these from the one-shot peels, which share the expressions but guard on
+    # `>= 14`. Asserted per branch and in order: counting file-wide would pass a
+    # smart branch that peeled mask before render, which shifts where the core
+    # lands, or one that re-based image_argc on effective_argc ahead of the
+    # (shared) layer line -- both re-break #331 while keeping every count at 2.
+    peels = [
+        "mode.image_render_environment = ",
+        "mode.image_spatial_context = ",
+        "mode.image_mask_context = ",
+        "mode.session_layers = ",
+        "const int session_core_argc = ",
+    ]
+    branches = {
+        "classic": 'if (equals(command, L"--render-session-v1") || session16 || session32) {',
+        "smart": 'if (equals(command, L"--smart-session-v1") || session16 || session32) {',
+    }
+    for name, opener in branches.items():
+        start = dispatch.index(opener)
+        branch = dispatch[start : dispatch.index("return WorkerMode{};", start)]
+        at = -1
+        for peel in peels:
+            found = branch.find(peel, at + 1)
+            assert found > at, f"{name}: {peel} missing or out of order"
+            at = found
+        # The chain must thread through the *_argc fields, never restart from
+        # effective_argc after the first peel.
+        assert "mode.image_argc = mode.image_trailer_argc -" in branch, name
+        assert "mode.image_argc = effective_argc" not in branch, name
+        assert (
+            "const int session_core_argc = mode.image_argc - (mode.session_layers ? 1 : 0);"
+            in branch
+        ), name
