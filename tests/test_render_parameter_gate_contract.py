@@ -136,10 +136,6 @@ class RenderParameterGateContractTests(unittest.TestCase):
         self.assertIn("classic render is not supported for plugin profile", route)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class RenderRequestSecureLaunchContractTests(unittest.TestCase):
     """Every worker launch in render_request.rs goes through the sealed load tree.
 
@@ -248,3 +244,7 @@ class RenderRequestSecureLaunchContractTests(unittest.TestCase):
                 )
                 start = route.find(marker, start + 1)
             self.assertGreater(occurrences, 0, stage)
+
+
+if __name__ == "__main__":
+    unittest.main()
