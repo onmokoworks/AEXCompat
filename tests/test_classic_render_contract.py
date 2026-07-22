@@ -14,6 +14,16 @@ class ClassicRenderContractTests(unittest.TestCase):
         self.assertIn("secure_launch(tree", source)
         self.assertNotIn("run_isolated", source)
 
+    def test_registered_image_render_uses_the_v2_allowlist_and_load_tree(self):
+        render = (ROOT / "broker" / "crates" / "broker" / "src" / "render.rs").read_text(encoding="utf-8")
+        image = (ROOT / "broker" / "crates" / "broker" / "src" / "image_render.rs").read_text(encoding="utf-8")
+        self.assertNotIn("ApprovedArtifact, load", render)
+        self.assertNotIn("pub(crate) fn entry", render)
+        self.assertIn("pub(crate) fn secure_entry", render)
+        self.assertIn("crate::render::secure_entry(repository, plugin_id)?", image)
+        self.assertNotIn("crate::render::entry", image)
+        self.assertIn("approved\n        .dependencies", image)
+
     def test_each_determinism_run_reloads_receipt_and_builds_a_fresh_tree(self):
         source = (ROOT / "broker" / "crates" / "broker" / "src" / "render.rs").read_text(encoding="utf-8")
         loop = source.index("for _ in 0..2")

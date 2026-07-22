@@ -1755,15 +1755,33 @@ pub fn render_image(
     }
     let profile =
         crate::fixture_profiles::find(plugin_id).ok_or_else(|| invalid("unknown profile"))?;
-    profile
+    let worker = profile
         .classic_worker
         .ok_or_else(|| invalid("classic render is unavailable"))?;
-    let approved = crate::render::entry(repository, plugin_id)?;
+    let approved = crate::render::secure_entry(repository, plugin_id)?;
+    if approved.worker_path != repository.join(worker.executable) {
+        return Err(invalid(
+            "approved render worker differs from registered worker",
+        ));
+    }
+    let plugin_path = approved.main.source.clone();
+    let plugin_sha256 = approved
+        .main
+        .expected_sha256
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    let dependencies = approved
+        .dependencies
+        .iter()
+        .map(|entry| ApprovedImageArtifact {
+            path: entry.source.clone(),
+            expected_sha256: entry.expected_sha256,
+            expected_size: entry.expected_size,
+        })
+        .collect::<Vec<_>>();
     let manifest = load_manifest(repository, plugin_id, profile.descriptor_manifest)?;
-    if !manifest
-        .plugin_sha256
-        .eq_ignore_ascii_case(&approved.sha256)
-    {
+    if !manifest.plugin_sha256.eq_ignore_ascii_case(&plugin_sha256) {
         return Err(invalid("descriptor and approved artifact digests differ"));
     }
     let payload = encode_worker_payload(
@@ -1774,8 +1792,8 @@ pub fn render_image(
     render_with_artifact(
         repository,
         plugin_id,
-        &approved.plugin_path,
-        &approved.sha256,
+        &plugin_path,
+        &plugin_sha256,
         approved.timeout_ms,
         input_path,
         output_path,
@@ -1790,7 +1808,7 @@ pub fn render_image(
         None,
         None,
         None,
-        Vec::new(),
+        dependencies,
         None,
         false,
     )
