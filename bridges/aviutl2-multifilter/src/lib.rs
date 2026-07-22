@@ -443,7 +443,8 @@ fn index_by_real_path(
     index
 }
 
-/// Whether any cached key under `roots` is a spelling this scan did not walk.
+/// Whether any cached key under `roots` is a spelling this scan did not walk
+/// and is still worth resolving.
 ///
 /// If none is, every cached entry in scope is already keyed by the path the scan
 /// produced, so no other spelling exists to look for and the alias lookup — which
@@ -453,11 +454,16 @@ fn alias_possible(
     walked: &std::collections::HashSet<String>,
     roots: &[PathBuf],
 ) -> bool {
-    cache.keys().any(|key| {
+    cache.iter().any(|(key, entry)| {
         !walked.contains(key)
             && roots
                 .iter()
                 .any(|root| Path::new(key.as_str()).starts_with(root))
+            && (!entry.alias_fallback
+                || entry
+                    .alias_target
+                    .as_deref()
+                    .is_none_or(|target| !cache.contains_key(target)))
     })
 }
 
@@ -551,7 +557,16 @@ fn alias_rank(entry: Option<&CacheEntry>, build: BuildFingerprint) -> (bool, boo
 fn apply_rekey(cache: &mut HashMap<String, CacheEntry>, rekey: Vec<(String, String)>) {
     for (alias, walked) in rekey {
         if let Some(entry) = cache.get(&alias).cloned() {
-            cache.insert(walked, entry);
+            let mut walked_entry = entry.clone();
+            walked_entry.alias_fallback = false;
+            walked_entry.alias_target = None;
+            cache.insert(walked.clone(), walked_entry);
+            if alias != walked {
+                if let Some(alias_entry) = cache.get_mut(&alias) {
+                    alias_entry.alias_fallback = true;
+                    alias_entry.alias_target = Some(walked);
+                }
+            }
         }
     }
 }
@@ -1051,6 +1066,13 @@ struct CacheEntry {
     /// it to a negative cache entry (#328).
     #[serde(default)]
     failure_classification: Option<String>,
+    /// This spelling is retained only as a fallback after an alias re-key. It
+    /// must not keep the alias lookup hot while its walked spelling is present.
+    #[serde(default)]
+    alias_fallback: bool,
+    /// The walked spelling copied from this fallback, if it is still cached.
+    #[serde(default)]
+    alias_target: Option<String>,
 }
 
 /// How many times a re-verification may fail for one host build before the entry
@@ -1348,6 +1370,8 @@ fn negative_entry(plugin: &Path, build: BuildFingerprint) -> CacheEntry {
         checked: build,
         attempts: 0,
         failure_classification: None,
+        alias_fallback: false,
+        alias_target: None,
     }
 }
 
@@ -2141,6 +2165,8 @@ mod tests {
             checked: build,
             attempts: 0,
             failure_classification: None,
+            alias_fallback: false,
+            alias_target: None,
         }
     }
 
@@ -2953,6 +2979,26 @@ mod tests {
         apply_rekey(&mut cache, vec![("stable.aex".into(), "via-junction.aex".into())]);
         assert!(cache.contains_key("stable.aex"));
         assert!(cache.contains_key("via-junction.aex"));
+    }
+
+    #[test]
+    fn a_live_alias_copy_does_not_keep_alias_lookup_hot() {
+        let root = PathBuf::from("root");
+        let alias = root.join("stable.aex").to_string_lossy().into_owned();
+        let walked = root.join("walked.aex").to_string_lossy().into_owned();
+        let mut cache = cache_of(&[&alias]);
+        apply_rekey(&mut cache, vec![(alias.clone(), walked.clone())]);
+
+        assert!(!alias_possible(
+            &cache,
+            &walked_set(&[&walked]),
+            std::slice::from_ref(&root),
+        ));
+        cache.remove(&walked);
+        assert!(
+            alias_possible(&cache, &walked_set(&[&walked]), std::slice::from_ref(&root)),
+            "the fallback becomes eligible again if its walked copy disappears"
+        );
     }
 
     /// When both spellings of one file are cached and they disagree (only the
