@@ -121,6 +121,7 @@ name = "aexcompat-broker"
 version = "0.1.0"
 dependencies = [
  "image",
+ "object",
  "rand 0.9.5",
  "serde",
  "serde_json",
@@ -2314,6 +2315,15 @@ dependencies = [
  "objc2 0.5.2",
  "objc2-core-location",
  "objc2-foundation 0.2.2",
+]
+
+[[package]]
+name = "object"
+version = "0.39.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2e5a6c098c7a3b6547378093f5cc30bc54fd361ce711e05293a5cc589562739b"
+dependencies = [
+ "memchr",
 ]
 
 [[package]]

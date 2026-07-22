@@ -15,7 +15,6 @@ dependencies = [
  "aexcompat-broker",
  "aviutl2-sys",
  "libffi",
- "object",
  "serde",
  "serde_json",
  "sha2",
@@ -27,6 +26,7 @@ name = "aexcompat-broker"
 version = "0.1.0"
 dependencies = [
  "image",
+ "object",
  "rand",
  "serde",
  "serde_json",

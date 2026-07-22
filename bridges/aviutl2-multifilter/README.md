@@ -63,11 +63,59 @@ dirs = ['C:\more\aex', 'D:\shared\aex']
 repository = 'C:\path\to\AEXCompat'
 # 除外するエフェクト (ファイル stem を大文字小文字無視でマッチ。.aex 付き/無し可)
 ignore = ['pf_sampling_probe', 'broken-effect']
+# 依存 DLL の探索フォルダ (issue #304)。AEX 自身のフォルダは常に最優先で探索されるので
+# ここには書かない。省略時は AE (最新版) の Support Files を使う。
+dependency_dirs = ['C:\Program Files\Adobe\Adobe After Effects 2025\Support Files']
+# 1つの AEX に封入する依存の上限 (省略時は無制限)。重いプラグイン (最大 227 DLL / 約 1GB) の
+# discovery に時間をかけたくない場合だけ設定する。超えた AEX は discovery 失敗になる。
+# dependency_module_limit = 64
+# dependency_byte_limit = 268435456
 ```
 
-環境変数 `AEXCOMPAT_MULTIFILTER_DIR` / `AEXCOMPAT_MULTIFILTER_REPOSITORY` を設定すると
-TOML の `dir`(+`dirs`) / `repository` を上書きする (env > TOML)。config はプラグインの
-ロード時に一度だけ読むので、変更後は AviUtl2 を再起動する。
+環境変数 `AEXCOMPAT_MULTIFILTER_DIR` / `AEXCOMPAT_MULTIFILTER_REPOSITORY` /
+`AEXCOMPAT_MULTIFILTER_DEPENDENCY_DIRS` (`;` 区切り) を設定すると TOML の
+`dir`(+`dirs`) / `repository` / `dependency_dirs` を上書きする (env > TOML)。config は
+プラグインのロード時に一度だけ読むので、変更後は AviUtl2 を再起動する。
+
+### 依存 DLL の封入 (issue #304)
+
+worker は AEX を隔離した sealed load tree からロードし、探索先は
+「そのフォルダ + System32」しかない。AE のエフェクトの多くは `dvacore.dll` 等の Adobe
+ランタイム DLL を import しており、隔離先に無いと `LoadLibraryExW` が失敗する
+(worker exit 11)。そこで discovery / セッション開始時に **AEX の import を再帰的に辿って
+依存クロージャを解決し、sealed tree に AEX と一緒に封入する**。
+
+- 探索順は「AEX 自身のフォルダ → `dependency_dirs`」。Windows ローダーと同じく**最初に
+  見つかったものが勝つ**。探索フォルダが提供する名前は、System32 に同名があっても封入する
+  (`dvacore.dll` のような Adobe 同梱ランタイムを取りこぼさないため)。封入されないのは次の 3 つ:
+  - どの探索フォルダも提供しない名前 (worker のロードフラグが System32 を見る)
+  - API set (`api-ms-*` / `ext-ms-*`)。ローダーが schema から解決するので、探索フォルダに
+    コピーがあっても読まれない
+  - DLL 名として成立しない import 名 (区切り文字・ドライブレター・予約デバイス名・非 ASCII)。
+    件数だけが記録される
+- **封入 = そのコピーがロードされる、ではない**。ローダーは「既にプロセスに載っている
+  モジュール」と KnownDLLs を先に解決するので、worker 自身が既に読んでいる CRT
+  (`msvcp140.dll` / `vcruntime140.dll`) や `kernel32.dll` は、探索フォルダのコピーを封入しても
+  そちらが使われることはない。sealed tree は「必要なものを含む集合」であって「実際にロード
+  される集合」ではない。
+- 封入された DLL は AEX 本体とまったく同じ経路で認証される (sha256 + サイズ照合、reparse
+  point 拒否、basename 衝突拒否)。探索フォルダを渡すことは worker の DLL 探索パスを
+  広げることではない。
+- クロージャの大きさに上限は設けない (`dependency_module_limit` / `dependency_byte_limit` で
+  明示的に設定した場合を除く)。AE のエフェクトの一部は Adobe ランタイムをほぼ丸ごと
+  引く (実測で最大 225 DLL / 約 1.0GB) が、封入こそがそれをロード可能にする唯一の手段なので、
+  「大きいから」で弾かない。ただし sealed load tree は**コピー**なので、その分だけ discovery と
+  セッション開始が遅くなる (実測: 220MB で 0.8s、1.0GB で十数秒)。依存の重い AEX を大量に
+  抱えるフォルダを指定すると、バックグラウンド discovery は相応に長く走る。
+- クロージャが解決できない AEX (上限超過、探索フォルダが不正、image が壊れている等) は
+  discovery 失敗として扱う。依存無しで再試行しても同じロード失敗になるため。この negative も
+  キャッシュされるが、**失敗時も「解決が辿ったファイル」を記録する** (ハッシュもコピーもしない
+  survey を使う) ので、上限を超えていた依存 DLL が小さくなった・消えた・置き換わった場合は
+  自動的に再 discovery される。上限自体を変えた場合も (エントリの「どのホストで作られたか」に
+  含まれるため) 各エントリが再 discovery の対象になる — 登録は維持されたまま (issue #307)。
+- これで解けるのは L1 (LoadLibrary 失敗) だけで、Adobe ランタイムを引くエフェクトはさらに
+  module audit (L2) と Adobe IPC 初期化 (L3) の壁がある。実測は
+  `docs/AE_EFFECT_LOADING_INVESTIGATION_2026-07-22.md` を参照。
 
 ### 既定のスキャン対象 (issue #303)
 
@@ -92,6 +140,16 @@ discovery はバックグラウンドスレッドで行う:**
 つまり: 初回起動 → 即座に使える (バックグラウンドで数分かけて discovery) → 2 回目起動 → 全効果が
 出て高速。AEX を差し替え・追加すると mtime/len 変化で再 discovery され、次回起動で反映される。
 
+- **依存解決の入力** (探索フォルダの並び + 上限) は worker exe / この DLL と並んで
+  エントリの「どのホストで作られたか」に含まれる。変われば各エントリはバックグラウンドで
+  再 discovery される (登録は維持されたまま。issue #307)。
+- それとは別に、各エントリは**自分の依存解決の結果**を持っている: 探索した root の順序、
+  封入した DLL の (パス, mtime, サイズ)、どの root も提供しなかった import 名 (Windows の
+  API set は除く)。起動時にこれを stat で照合し、次のいずれかなら**その AEX だけ**再 discovery
+  の対象になる (これも登録は維持される)。
+  - 封入した DLL が書き換わった / 消えた (AE のアップデートが `dvacore.dll` を書き換えた等)
+  - より優先度の高い root に同名ファイルが現れ、解決先が変わる
+  - 見つからなかった import が置かれた (= 以前失敗した AEX が今なら動く)
 - discovery は結果を全てキャッシュする (effect でない `.aex` = Format/codec 等の negative も)。
   低並列なので負荷下の偽タイムアウトは起きにくいが、稀に一時的失敗で effect が誤って除外・
   キャッシュされることがある。その場合は該当 AEX を touch するか

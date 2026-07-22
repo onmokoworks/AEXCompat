@@ -9,6 +9,7 @@ pub mod l1;
 pub mod l2;
 pub mod minidump_policy;
 pub mod observability;
+pub mod plugin_dependency_closure;
 #[cfg(windows)]
 pub mod render;
 #[cfg(windows)]
@@ -28,6 +29,8 @@ pub mod selftest;
 pub mod session_dependency_manifest;
 #[cfg(windows)]
 pub mod smart;
+#[cfg(test)]
+mod test_pe;
 pub mod trace_policy;
 pub mod trusted_worker_stage;
 #[cfg(windows)]
