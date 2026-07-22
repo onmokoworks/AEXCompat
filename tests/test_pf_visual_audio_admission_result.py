@@ -77,7 +77,9 @@ def test_audio_checkout_windows_are_bounded_owned_and_time_scaled():
     assert "handle.samples.assign" in worker
     assert "const bool sentinel_frame = frame == window_count" in worker
     assert "telemetry_.last_window_silence_samples" in worker
-    assert "write<uint32_t>(input, kInTimeScale, 44100);" in worker
+    assert "std::vector<float>* captured_output, uint32_t rate)" in worker
+    assert "write<uint32_t>(input, kInTimeScale, rate);" in worker
+    assert "&captured, 44100u);" in worker
     broker = (ROOT / "broker" / "crates" / "broker" / "src" / "image_render.rs").read_text(encoding="utf-8")
     assert '"last_audio_window_sample_count"' in broker
     assert '"last_audio_window_silence_samples"' in broker

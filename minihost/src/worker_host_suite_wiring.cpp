@@ -110,7 +110,7 @@ bool render_worker_suite_provider_available(void*) { return is_render_worker(); 
 
 const void* provide_batch_sampling1(void*) {
   g_batch_sampling_suite1 = {&begin_sampling8, &end_sampling8,
-      &unsupported_batch_sample_func, &unsupported_batch_sample_func};
+      &unsupported_batch_sample_func, &unsupported_batch_sample_func16};
   return &g_batch_sampling_suite1;
 }
 const void* provide_color_settings7(void*) {
@@ -121,19 +121,16 @@ const void* provide_iterate8(void*) {
   g_iterate8_suite2.iterate = reinterpret_cast<void*>(&iterate_world8); return &g_iterate8_suite2;
 }
 const void* provide_sampling8(void*) {
-  g_sampling8_suite1.fill(reinterpret_cast<void*>(&aegp_unsupported_suite_call));
   g_sampling8_suite1[0] = reinterpret_cast<void*>(&nearest_sample8);
   g_sampling8_suite1[1] = reinterpret_cast<void*>(&subpixel_sample8);
   g_sampling8_suite1[2] = reinterpret_cast<void*>(&area_sample8); return g_sampling8_suite1.data();
 }
 const void* provide_sampling16(void*) {
-  g_sampling16_suite1.fill(reinterpret_cast<void*>(&aegp_unsupported_suite_call));
   g_sampling16_suite1[0] = reinterpret_cast<void*>(&nearest_sample16);
   g_sampling16_suite1[1] = reinterpret_cast<void*>(&subpixel_sample16);
   g_sampling16_suite1[2] = reinterpret_cast<void*>(&area_sample16); return g_sampling16_suite1.data();
 }
 const void* provide_sampling_float(void*) {
-  g_sampling_float_suite1.fill(reinterpret_cast<void*>(&aegp_unsupported_suite_call));
   g_sampling_float_suite1[0] = reinterpret_cast<void*>(&nearest_sample_float);
   g_sampling_float_suite1[1] = reinterpret_cast<void*>(&subpixel_sample_float);
   g_sampling_float_suite1[2] = reinterpret_cast<void*>(&area_sample_float); return g_sampling_float_suite1.data();
@@ -155,7 +152,6 @@ SuiteResolveResult resolve_scene_suite_provider(
 bool configure_component_suite_catalog() {
   using namespace aexcompat::worker_runtime::host_suites;
   const AssemblyHooks assembly{
-      reinterpret_cast<void*>(&aegp_unsupported_suite_call),
       {reinterpret_cast<void*>(&aexcompat::pf_path_runtime::num_paths),
        reinterpret_cast<void*>(&aexcompat::pf_path_runtime::path_info),
        reinterpret_cast<void*>(&aexcompat::pf_path_runtime::checkout_path),

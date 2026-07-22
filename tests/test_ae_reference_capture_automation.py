@@ -207,16 +207,18 @@ def test_reference_capture_shutdown_never_touches_unrelated_ae_named_processes(t
     reason="mock capture run requires Windows PowerShell and a Windows executable")
 def test_reference_capture_fails_closed_without_loaded_module_identity(tmp_path):
     import subprocess
+    import tempfile
     import time
 
     aex = tmp_path / "fixture.aex"
     aex.write_bytes(b"fixture-bytes")
     input_image = tmp_path / "input.png"
-    input_image.write_bytes(b"input")
     mock_ae = tmp_path / "mock-afterfx.exe"
     shutil.copyfile(Path("C:/Windows/System32/where.exe"), mock_ae)
     output = tmp_path / "capture.png"
     result_path = tmp_path / "capture.result.json"
+    input_marker = b"identity-gate-input"
+    input_image.write_bytes(input_marker)
 
     process = subprocess.Popen(
         ["powershell", "-NoProfile", "-File", str(RUNNER),
@@ -226,7 +228,31 @@ def test_reference_capture_fails_closed_without_loaded_module_identity(tmp_path)
          "-RequireLoadedAexIdentity", "-TimeoutSeconds", "60"],
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors="replace")
     try:
-        time.sleep(5)
+        # The staging copy is created after all preflight checks, including the
+        # result-path existence check, so it is a real synchronization marker
+        # rather than a fixed delay that races under full-suite load.
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
+            staged = False
+            for candidate in Path(tempfile.gettempdir()).glob(
+                    "aexcompat-ae-input-*.png"):
+                try:
+                    if candidate.read_bytes() == input_marker:
+                        staged = True
+                        break
+                except OSError:
+                    pass
+            if staged:
+                break
+            if process.poll() is not None:
+                stdout, stderr = process.communicate(timeout=5)
+                raise AssertionError(
+                    f"capture runner exited before staging input: {stderr}")
+            time.sleep(0.05)
+        else:
+            stdout, stderr = process.communicate(timeout=5)
+            raise AssertionError(
+                f"capture runner did not stage input: {stderr}")
         output.write_bytes(b"png-placeholder")
         result_path.write_text(
             '{"schema_version": 1, "status": "captured"}', encoding="utf-8")

@@ -13,8 +13,8 @@ mod windows_e2e {
         InteractiveParameter, ParameterAnimation, RenderGpuBackend, RenderPixelFormat,
     };
     use aexcompat_broker::render_session::{
-        run_video_batch, AudioRenderSession, AudioSessionOpenRequest, AudioSpanStatus, FrameStatus,
-        RenderSession, SessionLayer, SessionOpenRequest,
+        AudioRenderSession, AudioSessionOpenRequest, AudioSpanStatus, FrameStatus, RenderSession,
+        SessionLayer, SessionOpenRequest, run_video_batch,
     };
     use sha2::{Digest, Sha256};
     use std::path::{Path, PathBuf};
@@ -31,7 +31,9 @@ mod windows_e2e {
     struct BehaviorGuard(#[allow(dead_code)] std::sync::MutexGuard<'static, ()>);
     impl BehaviorGuard {
         fn set(behavior: Option<&str>) -> Self {
-            let guard = BEHAVIOR_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+            let guard = BEHAVIOR_LOCK
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
             unsafe {
                 match behavior {
                     Some(value) => std::env::set_var("AEXCOMPAT_TEST_SESSION_BEHAVIOR", value),
@@ -162,7 +164,12 @@ mod windows_e2e {
         let status = std::process::Command::new(env!("CARGO"))
             .args(["build", "--manifest-path"])
             .arg(manifest)
-            .args(["-p", "dummy-workers", "--bin", "audio_session_protocol_worker"])
+            .args([
+                "-p",
+                "dummy-workers",
+                "--bin",
+                "audio_session_protocol_worker",
+            ])
             .status()
             .expect("run cargo build for the audio session fixture");
         assert!(status.success(), "audio session fixture build failed");
@@ -876,7 +883,10 @@ mod windows_e2e {
         })
         .map(|_| ())
         .expect_err("mismatched layer pixels fail fast at open");
-        assert!(error.to_string().contains("do not match dimensions"), "{error}");
+        assert!(
+            error.to_string().contains("do not match dimensions"),
+            "{error}"
+        );
     }
 
     #[test]
@@ -1243,7 +1253,9 @@ mod windows_e2e {
                 .render_frame(frame_index, frame_index as i32, &input)
                 .expect("frame renders");
             match outcome.status {
-                FrameStatus::Rendered { pixels, checksum, .. } => {
+                FrameStatus::Rendered {
+                    pixels, checksum, ..
+                } => {
                     let expected: Vec<u8> = input.iter().map(|byte| 255 - byte).collect();
                     assert_eq!(pixels, expected, "slot transfer round-trips the render");
                     checksums.push(checksum);
@@ -1253,7 +1265,10 @@ mod windows_e2e {
                 }
             }
         }
-        assert_ne!(checksums[0], checksums[1], "distinct inputs produce distinct outputs");
+        assert_ne!(
+            checksums[0], checksums[1],
+            "distinct inputs produce distinct outputs"
+        );
         let close = session.close();
         assert_eq!(close["frames_ok"], 2);
         assert_eq!(close["invalidated"], false);
@@ -1329,7 +1344,9 @@ mod windows_e2e {
         let inverted: Vec<u8> = input.iter().map(|byte| 255 - byte).collect();
 
         // Frame 0 stays a v:1 message: plain inverted transfer.
-        let outcome = session.render_frame(0, 0, &input).expect("v1 frame renders");
+        let outcome = session
+            .render_frame(0, 0, &input)
+            .expect("v1 frame renders");
         let FrameStatus::Rendered { pixels, .. } = outcome.status else {
             panic!("v1 frame errored");
         };
@@ -1354,7 +1371,9 @@ mod windows_e2e {
 
         // Frame 2 reverts to v:1 and the stamp disappears: the update was
         // frame-scoped, not sticky.
-        let outcome = session.render_frame(2, 2, &input).expect("v1 frame renders again");
+        let outcome = session
+            .render_frame(2, 2, &input)
+            .expect("v1 frame renders again");
         let FrameStatus::Rendered { pixels, .. } = outcome.status else {
             panic!("post-update v1 frame errored");
         };
@@ -1376,7 +1395,9 @@ mod windows_e2e {
         let inverted: Vec<u8> = input.iter().map(|byte| 255 - byte).collect();
 
         // Frame 0 stays a v:1 message: plain inverted transfer, no stamp.
-        let outcome = session.render_frame(0, 0, &input).expect("v1 frame renders");
+        let outcome = session
+            .render_frame(0, 0, &input)
+            .expect("v1 frame renders");
         let FrameStatus::Rendered { pixels, .. } = outcome.status else {
             panic!("v1 frame errored");
         };
@@ -1395,7 +1416,10 @@ mod windows_e2e {
         let FrameStatus::Rendered { pixels, .. } = outcome.status else {
             panic!("v2 ui_action frame errored");
         };
-        assert_eq!(&pixels[32..64], Sha256::digest(encoded.as_bytes()).as_slice());
+        assert_eq!(
+            &pixels[32..64],
+            Sha256::digest(encoded.as_bytes()).as_slice()
+        );
         // The parameters region stays untouched, and everything past the stamp
         // is the plain inverted transfer.
         assert_eq!(&pixels[..32], &inverted[..32]);
@@ -1406,7 +1430,13 @@ mod windows_e2e {
         let mut updated = float_parameter(1);
         updated.value = 42.5;
         let outcome = session
-            .render_frame_with_attributes(2, 2, &input, Some(std::slice::from_ref(&updated)), Some(&action))
+            .render_frame_with_attributes(
+                2,
+                2,
+                &input,
+                Some(std::slice::from_ref(&updated)),
+                Some(&action),
+            )
             .expect("v2 combined frame renders");
         let FrameStatus::Rendered { pixels, .. } = outcome.status else {
             panic!("v2 combined frame errored");
@@ -1416,11 +1446,16 @@ mod windows_e2e {
         )
         .expect("payload encodes");
         assert_eq!(&pixels[..32], Sha256::digest(payload.as_bytes()).as_slice());
-        assert_eq!(&pixels[32..64], Sha256::digest(encoded.as_bytes()).as_slice());
+        assert_eq!(
+            &pixels[32..64],
+            Sha256::digest(encoded.as_bytes()).as_slice()
+        );
 
         // Frame 3 reverts to v:1: both stamps disappear (attributes were
         // frame-scoped, not sticky).
-        let outcome = session.render_frame(3, 3, &input).expect("v1 frame renders again");
+        let outcome = session
+            .render_frame(3, 3, &input)
+            .expect("v1 frame renders again");
         let FrameStatus::Rendered { pixels, .. } = outcome.status else {
             panic!("post-attribute v1 frame errored");
         };
@@ -1646,7 +1681,10 @@ mod windows_e2e {
         assert_eq!(close["worker"]["classification"], "crashed");
         // The session report surfaces the capture through the same path-free
         // `minidump` marker the one-shot path uses (issue #224 item 2).
-        assert_eq!(close["worker"]["diagnostics"]["minidump"], "written bytes=4096");
+        assert_eq!(
+            close["worker"]["diagnostics"]["minidump"],
+            "written bytes=4096"
+        );
 
         // Exactly one dump is finalized at close; the broker withholds the
         // completion marker from the published file.
@@ -1657,8 +1695,14 @@ mod windows_e2e {
             .collect();
         assert_eq!(dumps.len(), 1, "exactly one finalized dump: {dumps:?}");
         let bytes = std::fs::read(&dumps[0]).unwrap();
-        assert!(bytes.starts_with(b"MDMP"), "published dump keeps the streamed body");
-        assert!(!bytes.ends_with(b"AEXDUMP-COMPLETE"), "marker withheld from the file");
+        assert!(
+            bytes.starts_with(b"MDMP"),
+            "published dump keeps the streamed body"
+        );
+        assert!(
+            !bytes.ends_with(b"AEXDUMP-COMPLETE"),
+            "marker withheld from the file"
+        );
         assert_eq!(bytes.len(), 4096);
         // No orphan reservation is left behind.
         let parts = std::fs::read_dir(&dump_dir)
@@ -1677,10 +1721,16 @@ mod windows_e2e {
         let error = session
             .render_frame(0, 0, &input_pattern(12))
             .expect_err("a reserved fatal error code must not read as frame-local");
-        assert!(error.to_string().contains("worker_invariant_failure"), "{error}");
+        assert!(
+            error.to_string().contains("worker_invariant_failure"),
+            "{error}"
+        );
         let close = session.close();
         assert_eq!(close["invalidated"], true);
-        assert_eq!(close["invalidated_reason"]["reason"], "worker_invariant_failure");
+        assert_eq!(
+            close["invalidated_reason"]["reason"],
+            "worker_invariant_failure"
+        );
         assert_eq!(close["session_clean"], false);
     }
 
@@ -1721,10 +1771,7 @@ mod windows_e2e {
         let error = session
             .render_frame(0, 0, &input_pattern(15))
             .expect_err("a reused frame index must be rejected");
-        assert!(
-            error.to_string().contains("does not advance"),
-            "{error}"
-        );
+        assert!(error.to_string().contains("does not advance"), "{error}");
         // The rejection is caller-local: the session keeps rendering.
         let outcome = session
             .render_frame(1, 1, &input_pattern(16))
@@ -1743,7 +1790,10 @@ mod windows_e2e {
         let error = session
             .render_frame(0, 0, &input_pattern(10))
             .expect_err("a header mutation must not hide behind an error response");
-        assert!(error.to_string().contains("frame_invariant_failure"), "{error}");
+        assert!(
+            error.to_string().contains("frame_invariant_failure"),
+            "{error}"
+        );
         assert_eq!(session.close()["invalidated"], true);
     }
 
@@ -1801,7 +1851,10 @@ mod windows_e2e {
         let error = session
             .render_frame(0, 0, &input_pattern(6))
             .expect_err("a stale generation must invalidate the session");
-        assert!(error.to_string().contains("frame_invariant_failure"), "{error}");
+        assert!(
+            error.to_string().contains("frame_invariant_failure"),
+            "{error}"
+        );
         assert_eq!(session.close()["invalidated"], true);
     }
 
@@ -1813,7 +1866,10 @@ mod windows_e2e {
         let error = session
             .render_frame(0, 0, &input_pattern(7))
             .expect_err("a mutated broker-owned header must invalidate the session");
-        assert!(error.to_string().contains("frame_invariant_failure"), "{error}");
+        assert!(
+            error.to_string().contains("frame_invariant_failure"),
+            "{error}"
+        );
         assert_eq!(session.close()["invalidated"], true);
     }
 
@@ -1825,7 +1881,10 @@ mod windows_e2e {
         let error = session
             .render_frame(0, 0, &input_pattern(8))
             .expect_err("a checksum mismatch must invalidate the session");
-        assert!(error.to_string().contains("output_checksum_mismatch"), "{error}");
+        assert!(
+            error.to_string().contains("output_checksum_mismatch"),
+            "{error}"
+        );
         assert_eq!(session.close()["invalidated"], true);
     }
 
@@ -1872,8 +1931,8 @@ mod windows_e2e {
         )
         .unwrap();
         let report_path = repository.0.join("report.json");
-        let passed = run_video_batch(&repository.0, &request_path, &report_path)
-            .expect("batch render runs");
+        let passed =
+            run_video_batch(&repository.0, &request_path, &report_path).expect("batch render runs");
         let report: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&report_path).unwrap()).unwrap();
         assert!(passed, "report: {report}");
@@ -1883,7 +1942,9 @@ mod windows_e2e {
         assert_eq!(report["session"]["session_clean"], true);
         for index in 0..3 {
             assert!(
-                output_directory.join(format!("frame-{index:06}.png")).is_file(),
+                output_directory
+                    .join(format!("frame-{index:06}.png"))
+                    .is_file(),
                 "output frame {index} exists"
             );
         }
@@ -1914,8 +1975,8 @@ mod windows_e2e {
         )
         .unwrap();
         let report_path = repository.0.join("empty-report.json");
-        let passed = run_video_batch(&repository.0, &request_path, &report_path)
-            .expect("batch render runs");
+        let passed =
+            run_video_batch(&repository.0, &request_path, &report_path).expect("batch render runs");
         let report: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&report_path).unwrap()).unwrap();
         assert!(passed, "the empty frame must not abort the batch: {report}");
@@ -1935,7 +1996,9 @@ mod windows_e2e {
         // The remaining frames rendered normally with PNGs.
         for index in 1..3 {
             assert!(
-                output_directory.join(format!("frame-{index:06}.png")).is_file(),
+                output_directory
+                    .join(format!("frame-{index:06}.png"))
+                    .is_file(),
                 "non-empty frame {index} writes a PNG"
             );
         }
@@ -2001,8 +2064,8 @@ mod windows_e2e {
         )
         .unwrap();
         let report_path = repository.0.join("report.json");
-        let passed = run_video_batch(&repository.0, &request_path, &report_path)
-            .expect("batch render runs");
+        let passed =
+            run_video_batch(&repository.0, &request_path, &report_path).expect("batch render runs");
         assert!(!passed);
         let report: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&report_path).unwrap()).unwrap();

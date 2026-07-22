@@ -16,7 +16,6 @@ struct Hooks {
   const char* (__cdecl *pixel_format)(){};
   bool (__cdecl *set_pixel_format)(const char*){};
   bool (*bounded_argb8_world)(void*, unsigned char*&, int32_t&, int32_t&, int32_t&){};
-  void* unsupported_callback{};
 };
 
 struct Telemetry {

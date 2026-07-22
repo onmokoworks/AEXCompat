@@ -40,7 +40,7 @@ std::string serialize_l2_report(const L2ReportContext& c) {
   o << ",\"update_params_ui_error\":" << c.update_params_ui_error << ",\"query_dynamic_flags_error\":" << c.query_dynamic_flags_error
     << ",\"update_param_ui_calls\":" << c.update_param_ui_calls << ",\"pf_get_current_state_calls\":" << c.pf_get_current_state_calls
     << ",\"pf_are_states_identical_calls\":" << c.pf_are_states_identical_calls << ",\"suite_leases_balanced\":"; boolean(o, c.suite_leases_balanced);
-  o << ",\"user_changed_param_requested\":"; boolean(o, c.user_changed_param_requested);
+  o << c.unsupported_suite_calls_json << ",\"user_changed_param_requested\":"; boolean(o, c.user_changed_param_requested);
   o << ",\"user_changed_param_slot\":" << c.user_changed_param_slot << ",\"user_changed_param_error\":" << c.user_changed_param_error
     << ",\"user_changed_parameters\":" << c.user_changed_parameters_json << ",\"return_message\":\"" << bounded_diagnostic_text(c.return_message, 256)
     << "\",\"about_message\":\"" << bounded_diagnostic_text(c.about_message, 256) << "\",\"about_selector_dispatched\":"; boolean(o, c.about_selector_dispatched);

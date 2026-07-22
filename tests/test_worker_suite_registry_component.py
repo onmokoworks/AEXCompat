@@ -88,6 +88,17 @@ def test_missing_suite_diagnostics_remain_bounded_sanitized_and_fail_closed():
     assert "return 1" in SOURCE
 
 
+def test_acquired_suite_unsupported_slots_are_bounded_and_identified():
+    assert "enum class UnsupportedSuiteId" in HEADER
+    assert "unsupported_suite_slot()" in HEADER
+    assert "std::make_index_sequence<SlotCount>" in HEADER
+    assert "constexpr std::size_t kMaxUnsupportedSuiteCalls = 32" in SOURCE
+    assert "call.suite == suite && call.slot == slot" in SOURCE
+    assert "unsupported_suite_calls_.size() >= kMaxUnsupportedSuiteCalls" in SOURCE
+    assert '"stage:suite_slot_unsupported suite="' in SOURCE
+    assert "unsupported_suite_calls_report_json" in SOURCE
+
+
 def test_raw_plugin_name_is_copied_once_before_resolver_lease_or_trace_use():
     boundary = SOURCE[SOURCE.index("SuiteNameCopy copy_bounded_suite_name") :
                       SOURCE.index("}  // namespace")]
@@ -116,3 +127,5 @@ def test_native_bounds_fixture_covers_guard_page_overlong_and_invalid_pointer():
     assert "std::array<char, 98> overlong" in NATIVE
     assert "static_cast<uintptr_t>(1)" in NATIVE
     assert "g_resolver_calls == calls_before" in NATIVE
+    assert "UnsupportedSuiteId::aegp_comp_21" in NATIVE
+    assert "unsupported_suite_calls_report_json" in NATIVE

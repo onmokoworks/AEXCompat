@@ -1,5 +1,5 @@
 use crate::restricted_worker_token::RestrictedWorkerToken;
-use crate::{classify_exit, redact_windows_paths, ExitClassification};
+use crate::{ExitClassification, classify_exit, redact_windows_paths};
 use std::ffi::c_void;
 use std::io;
 use std::mem::{size_of, zeroed};
@@ -9,24 +9,24 @@ use std::ptr::{null, null_mut};
 use std::thread;
 use std::time::Duration;
 use windows_sys::Win32::Foundation::{
-    CloseHandle, SetHandleInformation, HANDLE, HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE,
+    CloseHandle, HANDLE, HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE, SetHandleInformation,
     WAIT_OBJECT_0, WAIT_TIMEOUT,
 };
 use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
 use windows_sys::Win32::Storage::FileSystem::ReadFile;
 use windows_sys::Win32::System::JobObjects::{
-    AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
-    QueryInformationJobObject, SetInformationJobObject, TerminateJobObject,
-    JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
-    JOB_OBJECT_LIMIT_PROCESS_MEMORY,
+    AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+    JOB_OBJECT_LIMIT_PROCESS_MEMORY, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+    JobObjectExtendedLimitInformation, QueryInformationJobObject, SetInformationJobObject,
+    TerminateJobObject,
 };
 use windows_sys::Win32::System::Pipes::CreatePipe;
 use windows_sys::Win32::System::Threading::{
-    CreateEventW, CreateProcessAsUserW, CreateProcessW, DeleteProcThreadAttributeList,
-    GetExitCodeProcess, InitializeProcThreadAttributeList, ResumeThread, TerminateProcess,
-    UpdateProcThreadAttribute, WaitForSingleObject, CREATE_NO_WINDOW, CREATE_SUSPENDED,
-    CREATE_UNICODE_ENVIRONMENT, EXTENDED_STARTUPINFO_PRESENT, PROCESS_INFORMATION,
-    PROC_THREAD_ATTRIBUTE_HANDLE_LIST, STARTF_USESTDHANDLES, STARTUPINFOEXW,
+    CREATE_NO_WINDOW, CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, CreateEventW,
+    CreateProcessAsUserW, CreateProcessW, DeleteProcThreadAttributeList,
+    EXTENDED_STARTUPINFO_PRESENT, GetExitCodeProcess, InitializeProcThreadAttributeList,
+    PROC_THREAD_ATTRIBUTE_HANDLE_LIST, PROCESS_INFORMATION, ResumeThread, STARTF_USESTDHANDLES,
+    STARTUPINFOEXW, TerminateProcess, UpdateProcThreadAttribute, WaitForSingleObject,
 };
 
 // Native render stdout is one bounded JSON report. Its 65,536 Suite events
@@ -412,7 +412,7 @@ impl LaunchedIsolatedProcess {
     /// holding the inherited response pipe must not mask a dead worker).
     /// The caller owns the duplicate and must close it.
     pub fn duplicated_process_handle(&self) -> io::Result<usize> {
-        use windows_sys::Win32::Foundation::{DuplicateHandle, DUPLICATE_SAME_ACCESS};
+        use windows_sys::Win32::Foundation::{DUPLICATE_SAME_ACCESS, DuplicateHandle};
         use windows_sys::Win32::System::Threading::GetCurrentProcess;
         let mut duplicated: HANDLE = null_mut();
         let ok = unsafe {

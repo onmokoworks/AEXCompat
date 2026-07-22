@@ -143,9 +143,9 @@ fn apply_protected_dacl_to_handle(
 ) -> io::Result<()> {
     use std::ffi::c_void;
     use std::os::windows::io::AsRawHandle;
-    use std::ptr::{null_mut, NonNull};
+    use std::ptr::{NonNull, null_mut};
     use windows_sys::Win32::Foundation::CloseHandle;
-    use windows_sys::Win32::Security::{GetTokenInformation, TokenUser, TOKEN_QUERY, TOKEN_USER};
+    use windows_sys::Win32::Security::{GetTokenInformation, TOKEN_QUERY, TOKEN_USER, TokenUser};
     use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
     type SecurityDescriptor = *mut c_void;

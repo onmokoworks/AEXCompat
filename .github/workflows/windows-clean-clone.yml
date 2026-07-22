@@ -17,6 +17,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: Check Rust formatting
+        working-directory: broker
+        run: cargo fmt --all --check
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: broker
@@ -30,6 +35,8 @@ jobs:
       - name: Check Rust workspace
         working-directory: broker
         run: cargo check --workspace --locked
+      - name: Check AviUtl2 bridge
+        run: cargo check --manifest-path bridges/aviutl2/Cargo.toml --locked
       - name: Test Rust workspace
         working-directory: broker
         # Hosted runners execute as a service account whose restricted token cannot

@@ -66,6 +66,14 @@ def test_world_transform_and_fill_ownership_is_outside_legacy_aggregates():
     assert "const void* provide_world_transform1(" not in legacy
 
 
+def test_fill_world8_uses_ae_argb16_promotion_rounding():
+    runtime = (ROOT / "minihost" / "src" / "worker_pf_world_transform_runtime.cpp").read_text(
+        encoding="utf-8"
+    )
+    assert "* 32768u + 127u) /" in runtime
+    assert "static_cast<const uint8_t*>(color)[channel] * 128u" not in runtime
+
+
 def test_composite_rect_runtime_matrix():
     worker = _worker()
     assert worker is not None, "build aex_render_worker before running the focused runtime test"

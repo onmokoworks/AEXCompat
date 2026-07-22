@@ -1,4 +1,4 @@
-use aexcompat_broker::host_core::descriptor_manifest::{load, ManifestPolicy};
+use aexcompat_broker::host_core::descriptor_manifest::{ManifestPolicy, load};
 use std::fs;
 use std::time::{SystemTime, UNIX_EPOCH};
 

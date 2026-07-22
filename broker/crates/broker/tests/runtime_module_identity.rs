@@ -1,8 +1,8 @@
 #![cfg(windows)]
 
 use aexcompat_broker::runtime_module_identity::{
-    capture_runtime_module_identity, require_verified_authenticode, AuthenticodeEvidence,
-    IdentityEvidenceErrorKind, PeMachine,
+    AuthenticodeEvidence, IdentityEvidenceErrorKind, PeMachine, capture_runtime_module_identity,
+    require_verified_authenticode,
 };
 use sha2::{Digest, Sha256};
 use std::fs;

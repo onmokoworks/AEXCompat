@@ -148,13 +148,13 @@ fn harden_directory_acl(directory: &Path) -> io::Result<std::sync::Arc<Directory
     use std::sync::Arc;
     use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
     use windows_sys::Win32::Security::{
-        SetKernelObjectSecurity, DACL_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION,
+        DACL_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION, SetKernelObjectSecurity,
     };
     use windows_sys::Win32::Storage::FileSystem::{
-        CreateFileW, GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION,
-        FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS,
-        FILE_FLAG_OPEN_REPARSE_POINT, FILE_LIST_DIRECTORY, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE,
-        FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING, READ_CONTROL, WRITE_DAC,
+        BY_HANDLE_FILE_INFORMATION, CreateFileW, FILE_ATTRIBUTE_DIRECTORY,
+        FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
+        FILE_LIST_DIRECTORY, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ,
+        FILE_SHARE_WRITE, GetFileInformationByHandle, OPEN_EXISTING, READ_CONTROL, WRITE_DAC,
     };
 
     let wide: Vec<u16> = directory.as_os_str().encode_wide().chain(Some(0)).collect();
@@ -577,7 +577,7 @@ fn authenticate_plain_file(
 ) -> io::Result<()> {
     use windows_sys::Win32::Foundation::{GetHandleInformation, HANDLE_FLAG_INHERIT};
     use windows_sys::Win32::Storage::FileSystem::{
-        GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_REPARSE_POINT,
+        BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_REPARSE_POINT, GetFileInformationByHandle,
     };
 
     let mut flags = 0;
@@ -595,12 +595,10 @@ fn authenticate_plain_file(
     if information.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0
         || information.nNumberOfLinks != 1
     {
-        return Err(invalid(
-            format!(
-                "minidump file handle is reparse-backed or multiply linked (attributes={:#x}, links={})",
-                information.dwFileAttributes, information.nNumberOfLinks
-            ),
-        ));
+        return Err(invalid(format!(
+            "minidump file handle is reparse-backed or multiply linked (attributes={:#x}, links={})",
+            information.dwFileAttributes, information.nNumberOfLinks
+        )));
     }
     Ok(())
 }
@@ -657,7 +655,7 @@ fn protected_file_security() -> io::Result<(
 #[cfg(windows)]
 fn harden_file_acl(handle: windows_sys::Win32::Foundation::HANDLE) -> io::Result<()> {
     use windows_sys::Win32::Security::{
-        SetKernelObjectSecurity, DACL_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION,
+        DACL_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION, SetKernelObjectSecurity,
     };
 
     let (_, descriptor) = protected_file_security()?;
@@ -830,7 +828,7 @@ fn rename_file_by_handle(
 #[cfg(windows)]
 fn mark_delete_by_handle(handle: windows_sys::Win32::Foundation::HANDLE) -> io::Result<()> {
     use windows_sys::Win32::Storage::FileSystem::{
-        FileDispositionInfo, SetFileInformationByHandle, FILE_DISPOSITION_INFO,
+        FILE_DISPOSITION_INFO, FileDispositionInfo, SetFileInformationByHandle,
     };
 
     let disposition = FILE_DISPOSITION_INFO { DeleteFile: 1 };
@@ -1044,7 +1042,7 @@ fn create_minidump_file_in_directory(
     directory: &MinidumpDirectory,
 ) -> io::Result<MinidumpLaunchFile> {
     use windows_sys::Win32::Foundation::{
-        CloseHandle, SetHandleInformation, HANDLE, HANDLE_FLAG_INHERIT,
+        CloseHandle, HANDLE, HANDLE_FLAG_INHERIT, SetHandleInformation,
     };
     use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
     use windows_sys::Win32::Storage::FileSystem::{
@@ -1182,9 +1180,11 @@ mod tests {
         let repository = test_repository();
         let resolved = resolve_directory(&repository, Path::new("target/crash-dumps"))
             .expect("relative directory should resolve");
-        assert!(resolved
-            .path
-            .starts_with(fs::canonicalize(repository.join("target")).expect("canonical target")));
+        assert!(
+            resolved.path.starts_with(
+                fs::canonicalize(repository.join("target")).expect("canonical target")
+            )
+        );
         let concurrent = resolve_directory(&repository, Path::new("target/crash-dumps"))
             .expect("concurrent directory guards should coexist");
         assert_eq!(concurrent.path, resolved.path);
@@ -1379,7 +1379,7 @@ mod tests {
     fn retained_writer_cannot_block_reservation_drop() {
         use std::time::{Duration, Instant};
         use windows_sys::Win32::Foundation::{
-            CloseHandle, DuplicateHandle, DUPLICATE_SAME_ACCESS, HANDLE,
+            CloseHandle, DUPLICATE_SAME_ACCESS, DuplicateHandle, HANDLE,
         };
         use windows_sys::Win32::System::Threading::GetCurrentProcess;
 

@@ -13,7 +13,7 @@
 #[cfg(windows)]
 mod windows_e2e {
     use aexcompat_broker::image_render::{
-        render_experimental_image_at_time_with_format, RenderPixelFormat, RenderTiming,
+        RenderPixelFormat, RenderTiming, render_experimental_image_at_time_with_format,
     };
     use sha2::{Digest, Sha256};
     use std::path::{Path, PathBuf};
@@ -29,7 +29,8 @@ mod windows_e2e {
     fn sealed_smart_cpu_render_passes_the_module_audit() {
         let root = repository_root();
         let worker = root.join("target/minihost-build/aex_smart_worker.exe");
-        let aex = root.join("target/pf-smart-geometry-probe-build/Release/pf_smart_geometry_probe.aex");
+        let aex =
+            root.join("target/pf-smart-geometry-probe-build/Release/pf_smart_geometry_probe.aex");
         if !worker.is_file() || !aex.is_file() {
             eprintln!(
                 "skipping sealed smart CPU render: build aex_smart_worker.exe and \
@@ -61,7 +62,10 @@ mod windows_e2e {
             RenderPixelFormat::Argb8,
         )
         .expect("sealed smart CPU render must not fail the module audit");
-        assert_eq!(report["stage"], "interactive_image_render", "report: {report}");
+        assert_eq!(
+            report["stage"], "interactive_image_render",
+            "report: {report}"
+        );
         assert_eq!(report["passed"], true, "report: {report}");
         let _ = std::fs::remove_dir_all(&scratch);
     }

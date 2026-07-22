@@ -1,21 +1,21 @@
 use crate::fixture_profiles::maskoffset::{
-    bezier_mask_argb8_hash, mask_scene_argb8_hash, rectangle_mask_argb8_hash, source_argb8_hash,
-    OracleMask, OracleMaskVertex,
+    OracleMask, OracleMaskVertex, bezier_mask_argb8_hash, mask_scene_argb8_hash,
+    rectangle_mask_argb8_hash, source_argb8_hash,
 };
 use crate::fixture_profiles::scattermap::expected_argb8_hash;
 use crate::fixture_profiles::{ParameterizedRenderAdapter, RegisteredProfile};
 use crate::host_core::approved_artifact::load_v2_load_tree;
-use crate::host_core::descriptor_manifest::{load as load_manifest, LoadedManifest};
+use crate::host_core::descriptor_manifest::{LoadedManifest, load as load_manifest};
 use crate::host_core::parameter::{
-    apply_defaults, encode_worker_payload, validate_assignments, ParameterValue, PluginProfile,
-    ValidatedAssignments, ValidationError, ValueKind,
+    ParameterValue, PluginProfile, ValidatedAssignments, ValidationError, ValueKind,
+    apply_defaults, encode_worker_payload, validate_assignments,
 };
 use crate::sealed_load_tree::SealedLoadTree;
-use crate::secure_launch::{secure_launch, SecureLaunchRequest};
+use crate::secure_launch::{SecureLaunchRequest, secure_launch};
 use crate::windows_process::run_isolated;
 use serde::de::{MapAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
@@ -1576,27 +1576,37 @@ mod tests {
         let json = r#"{"mask_scene":{"masks":[]},"aux_channels":[{"param_index":0,"channel":{"type":1146111048,"name":"depth","data_type":"f32le","dimension":1,"width":2,"height":1,"samples":[{"time":0,"time_scale":30,"path":"target/render-requests/depth.f32","sampling":"exact","interpretation":"depth"}]}}]}"#;
         let context: HostContext = serde_json::from_str(json).unwrap();
         assert_eq!(context.aux_channels.len(), 1);
-        assert!(serde_json::from_str::<HostContext>(
-            &json.replace("\"data_type\":\"f32le\"", "\"data_type\":\"f64le\"")
-        )
-        .is_err());
-        assert!(serde_json::from_str::<HostContext>(
-            &json.replace("\"dimension\":1", "\"dimension\":1,\"unknown\":true")
-        )
-        .is_err());
-        assert!(serde_json::from_str::<HostContext>(
-            &json.replace("\"param_index\":0", "\"param_index\":0,\"param_index\":1")
-        )
-        .is_err());
-        assert!(serde_json::from_str::<HostContext>(
-            &json.replace("\"sampling\":\"exact\"", "\"sampling\":\"nearest\"")
-        )
-        .is_err());
-        assert!(serde_json::from_str::<HostContext>(&json.replace(
-            "\"interpretation\":\"depth\"",
-            "\"interpretation\":\"position\""
-        ))
-        .is_err());
+        assert!(
+            serde_json::from_str::<HostContext>(
+                &json.replace("\"data_type\":\"f32le\"", "\"data_type\":\"f64le\"")
+            )
+            .is_err()
+        );
+        assert!(
+            serde_json::from_str::<HostContext>(
+                &json.replace("\"dimension\":1", "\"dimension\":1,\"unknown\":true")
+            )
+            .is_err()
+        );
+        assert!(
+            serde_json::from_str::<HostContext>(
+                &json.replace("\"param_index\":0", "\"param_index\":0,\"param_index\":1")
+            )
+            .is_err()
+        );
+        assert!(
+            serde_json::from_str::<HostContext>(
+                &json.replace("\"sampling\":\"exact\"", "\"sampling\":\"nearest\"")
+            )
+            .is_err()
+        );
+        assert!(
+            serde_json::from_str::<HostContext>(&json.replace(
+                "\"interpretation\":\"depth\"",
+                "\"interpretation\":\"position\""
+            ))
+            .is_err()
+        );
     }
 
     #[test]
@@ -1606,32 +1616,20 @@ mod tests {
                 .unwrap(),
             576
         );
-        assert!(validate_image_buffer_layout(
-            13,
-            9,
-            51,
-            4,
-            Some(576),
-            4096,
-            16_777_216,
-            67_108_864
-        )
-        .is_err());
-        assert!(validate_image_buffer_layout(
-            13,
-            9,
-            64,
-            4,
-            Some(575),
-            4096,
-            16_777_216,
-            67_108_864
-        )
-        .is_err());
-        assert!(validate_image_buffer_layout(
-            4096, 4096, 65_536, 16, None, 4096, 16_777_216, 67_108_864
-        )
-        .is_err());
+        assert!(
+            validate_image_buffer_layout(13, 9, 51, 4, Some(576), 4096, 16_777_216, 67_108_864)
+                .is_err()
+        );
+        assert!(
+            validate_image_buffer_layout(13, 9, 64, 4, Some(575), 4096, 16_777_216, 67_108_864)
+                .is_err()
+        );
+        assert!(
+            validate_image_buffer_layout(
+                4096, 4096, 65_536, 16, None, 4096, 16_777_216, 67_108_864
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -1639,28 +1637,23 @@ mod tests {
         assert!(
             validate_image_buffer_layout(0, 1, 4, 4, None, u64::MAX, u64::MAX, u64::MAX).is_err()
         );
-        assert!(validate_image_buffer_layout(
-            u64::MAX,
-            2,
-            u64::MAX,
-            1,
-            None,
-            u64::MAX,
-            u64::MAX,
-            u64::MAX
-        )
-        .is_err());
-        assert!(validate_image_buffer_layout(
-            1,
-            2,
-            u64::MAX,
-            1,
-            None,
-            u64::MAX,
-            u64::MAX,
-            u64::MAX
-        )
-        .is_err());
+        assert!(
+            validate_image_buffer_layout(
+                u64::MAX,
+                2,
+                u64::MAX,
+                1,
+                None,
+                u64::MAX,
+                u64::MAX,
+                u64::MAX
+            )
+            .is_err()
+        );
+        assert!(
+            validate_image_buffer_layout(1, 2, u64::MAX, 1, None, u64::MAX, u64::MAX, u64::MAX)
+                .is_err()
+        );
     }
     use serde_json::Value;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -1871,9 +1864,11 @@ mod tests {
         .unwrap();
         let open_context = open.host_context.as_ref().unwrap();
         assert!(validate_mask_context(open_context).is_ok());
-        assert!(encode_mask_context(open_context)
-            .unwrap()
-            .starts_with("v2|1:"));
+        assert!(
+            encode_mask_context(open_context)
+                .unwrap()
+                .starts_with("v2|1:")
+        );
 
         let legacy: Request = serde_json::from_str(
             r#"{"schema_version":3,"plugin_id":"maskoffset","assignments":{},"host_context":{"mask_scene":{"masks":[]}}}"#,

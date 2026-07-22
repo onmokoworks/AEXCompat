@@ -49,13 +49,13 @@ where
 /// subscriber already installed by another party is left in place.
 pub fn init() {
     INIT.call_once(|| {
-        use tracing_subscriber::{fmt, EnvFilter};
+        use tracing_subscriber::{EnvFilter, fmt};
 
         let directives = resolve_directives(|name| env::var(name).ok());
         // Fall back to the silent default if the resolved directives are
         // malformed rather than failing the whole process over a bad env var.
-        let filter = EnvFilter::try_new(&directives)
-            .unwrap_or_else(|_| EnvFilter::new(DEFAULT_DIRECTIVES));
+        let filter =
+            EnvFilter::try_new(&directives).unwrap_or_else(|_| EnvFilter::new(DEFAULT_DIRECTIVES));
 
         // stderr, never stdout: stdout is the JSON report channel.
         let _ = fmt()

@@ -176,16 +176,30 @@ WorkerMode classify_worker_mode(
     const bool session16 = equals(command, L"--smart-session16-v1");
     const bool session32 = equals(command, L"--smart-session32-v1") ||
         session_cpu || session_opencl || session_directx;
-    mode.render_session_mode = effective_argc == 10 &&
-        (equals(command, L"--smart-session-v1") || session16 || session32);
-    if (mode.render_session_mode) {
-      mode.external_pixel_bytes = session32 ? 16 : (session16 ? 8 : 4);
-      mode.force_cpu = session_cpu;
-      mode.opencl = session_opencl;
-      mode.directx = session_directx;
-      mode.request_mode = true;
-      mode.command_accepted = true;
-      return mode;
+    if (equals(command, L"--smart-session-v1") || session16 || session32) {
+      // Smart sessions carry the same optional secondary-layer trailer as the
+      // classic session commands (issue #294): peel `session-layers:v2|` from
+      // the tail to reach the ten-slot smart session contract. Static context
+      // trailers (mask/spatial/render) are not yet carried by smart sessions.
+      // image_argc must point past the trailer so the shared layer parser reads
+      // argv[image_argc - 1] (the trailer), not argv[-1].
+      mode.image_argc = effective_argc;
+      mode.session_layers = effective_argc >= 11 &&
+          starts_with(argv[effective_argc - 1], L"session-layers:v2|");
+      const int session_core_argc = effective_argc - (mode.session_layers ? 1 : 0);
+      mode.render_session_mode = session_core_argc == 10;
+      if (mode.render_session_mode) {
+        mode.external_pixel_bytes = session32 ? 16 : (session16 ? 8 : 4);
+        mode.force_cpu = session_cpu;
+        mode.opencl = session_opencl;
+        mode.directx = session_directx;
+        mode.request_mode = true;
+        mode.command_accepted = true;
+        return mode;
+      }
+      // A session command whose shape does not resolve to the contract is
+      // rejected outright rather than reinterpreted as another mode.
+      return WorkerMode{};
     }
   }
   mode.force_cpu = equals(command, L"--smart-image32-cpu") ||

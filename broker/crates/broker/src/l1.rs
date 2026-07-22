@@ -1,7 +1,7 @@
 use crate::fixture_profiles::find_observation;
 use crate::host_core::approved_artifact::load;
 use crate::windows_process::run_isolated;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Component, Path};
@@ -193,7 +193,7 @@ pub fn run(repository: &Path, worker: &Path, id: &str, output: &Path) -> io::Res
 #[cfg(test)]
 mod tests {
     use super::{failure_classification, worker_report_evidence};
-    use serde_json::{json, Value};
+    use serde_json::{Value, json};
 
     fn valid_report() -> Value {
         json!({"schema_version":1,"stage":"L1","status":"loaded_and_unloaded",

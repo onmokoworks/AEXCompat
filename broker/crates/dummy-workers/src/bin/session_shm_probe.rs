@@ -14,15 +14,13 @@ mod probe {
     use std::ptr::null_mut;
     use windows_sys::Win32::Foundation::{HANDLE, WAIT_OBJECT_0};
     use windows_sys::Win32::System::Memory::{
-        MapViewOfFile, VirtualAlloc, VirtualFree, FILE_MAP_ALL_ACCESS, MEM_COMMIT, MEM_RELEASE,
-        MEM_RESERVE, PAGE_READWRITE,
+        FILE_MAP_ALL_ACCESS, MEM_COMMIT, MEM_RELEASE, MEM_RESERVE, MapViewOfFile, PAGE_READWRITE,
+        VirtualAlloc, VirtualFree,
     };
     use windows_sys::Win32::System::ProcessStatus::{
         K32GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS,
     };
-    use windows_sys::Win32::System::Threading::{
-        GetCurrentProcess, SetEvent, WaitForSingleObject,
-    };
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, SetEvent, WaitForSingleObject};
 
     pub const FAIL_ENV: u32 = 1 << 0;
     pub const FAIL_MAP: u32 = 1 << 1;

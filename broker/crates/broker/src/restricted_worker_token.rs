@@ -53,7 +53,7 @@ impl RestrictedWorkerToken {
     fn contains_sid(&self, expected: &LocalSid) -> io::Result<bool> {
         use std::ptr::null_mut;
         use windows_sys::Win32::Security::{
-            EqualSid, GetTokenInformation, TokenRestrictedSids, TOKEN_GROUPS,
+            EqualSid, GetTokenInformation, TOKEN_GROUPS, TokenRestrictedSids,
         };
 
         let mut required = 0;
@@ -112,8 +112,8 @@ fn create_restricted_worker_token_impl(
 ) -> io::Result<RestrictedWorkerToken> {
     use std::ptr::{null, null_mut};
     use windows_sys::Win32::Security::{
-        CreateRestrictedToken, GetTokenInformation, TokenUser, DISABLE_MAX_PRIVILEGE,
-        SID_AND_ATTRIBUTES, TOKEN_ASSIGN_PRIMARY, TOKEN_DUPLICATE, TOKEN_QUERY, TOKEN_USER,
+        CreateRestrictedToken, DISABLE_MAX_PRIVILEGE, GetTokenInformation, SID_AND_ATTRIBUTES,
+        TOKEN_ASSIGN_PRIMARY, TOKEN_DUPLICATE, TOKEN_QUERY, TOKEN_USER, TokenUser,
     };
     use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
@@ -255,7 +255,7 @@ impl LocalSid {
     }
 
     fn as_ptr(&self) -> *mut std::ffi::c_void {
-        self.0 .0.as_ptr()
+        self.0.0.as_ptr()
     }
 }
 
@@ -293,7 +293,7 @@ mod tests {
         use std::ffi::c_void;
         use std::ptr::null_mut;
         use windows_sys::Win32::Security::{
-            EqualSid, GetTokenInformation, TokenRestrictedSids, TOKEN_GROUPS,
+            EqualSid, GetTokenInformation, TOKEN_GROUPS, TokenRestrictedSids,
         };
 
         #[link(name = "advapi32")]
@@ -304,9 +304,11 @@ mod tests {
         let worker_sid = RestrictedWorkerSid::parse("S-1-5-88-10-20-30-40").unwrap();
         let token = create_restricted_worker_token(&worker_sid).unwrap();
         assert!(token.contains_restricting_sid(&worker_sid).unwrap());
-        assert!(token
-            .contains_required_restricting_sids(&worker_sid)
-            .unwrap());
+        assert!(
+            token
+                .contains_required_restricting_sids(&worker_sid)
+                .unwrap()
+        );
 
         let expected_texts: Vec<_> = [RESTRICTED_CODE_SID, worker_sid.as_str()]
             .into_iter()
@@ -359,9 +361,11 @@ mod tests {
             std::slice::from_raw_parts(groups.Groups.as_ptr(), groups.GroupCount as usize)
         };
         for expected_sid in &expected {
-            assert!(entries
-                .iter()
-                .any(|entry| unsafe { EqualSid(entry.Sid, expected_sid.0.as_ptr()) != 0 }));
+            assert!(
+                entries
+                    .iter()
+                    .any(|entry| unsafe { EqualSid(entry.Sid, expected_sid.0.as_ptr()) != 0 })
+            );
         }
     }
 }

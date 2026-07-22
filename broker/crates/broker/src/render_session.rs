@@ -13,22 +13,21 @@
 //! or an out-of-bounds geometry invalidates the whole session fail-closed.
 
 use crate::image_render::{
-    decode_bounded_image, decode_sha256_hex, encode_interactive_payload,
+    GpuRuntimePolicyInput, INTERACTIVE_RENDER_TIMEOUT_MS, InteractiveParameter, MAX_DIMENSION,
+    MAX_PIXELS, MAX_RGBA_TRANSPORT_BYTES, ParameterAnimation, RenderGpuBackend, RenderPixelFormat,
+    RenderUiAction, decode_bounded_image, decode_sha256_hex, encode_interactive_payload,
     isolated_worker_diagnostics, native_rgba_to_preview, parameter_animation_sidecar_json,
-    runtime_backend, validate_animation_bindings, GpuRuntimePolicyInput, InteractiveParameter,
-    ParameterAnimation, RenderGpuBackend, RenderPixelFormat, RenderUiAction,
-    INTERACTIVE_RENDER_TIMEOUT_MS,
-    MAX_DIMENSION, MAX_PIXELS, MAX_RGBA_TRANSPORT_BYTES,
+    runtime_backend, validate_animation_bindings,
 };
-use crate::runtime_module_policy::{authenticate_gpu_worker_report, WorkerModuleValidation};
+use crate::runtime_module_policy::{WorkerModuleValidation, authenticate_gpu_worker_report};
 use crate::secure_image_dispatch::{
-    dispatch_secure_gpu_image_session, dispatch_secure_image_session, ApprovedImageArtifact,
-    GpuRuntimeAuthorization, SecureImageDispatch, WorkerKind,
+    ApprovedImageArtifact, GpuRuntimeAuthorization, SecureImageDispatch, WorkerKind,
+    dispatch_secure_gpu_image_session, dispatch_secure_image_session,
 };
 use crate::secure_launch::{SecureLaunchResult, SecureSessionProcess};
 use crate::windows_process::SessionChildHandles;
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
@@ -40,14 +39,14 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use windows_sys::Win32::Foundation::{
-    CloseHandle, DuplicateHandle, SetHandleInformation, DUPLICATE_SAME_ACCESS, HANDLE,
-    HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE,
+    CloseHandle, DUPLICATE_SAME_ACCESS, DuplicateHandle, HANDLE, HANDLE_FLAG_INHERIT,
+    INVALID_HANDLE_VALUE, SetHandleInformation,
 };
 use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
 use windows_sys::Win32::Storage::FileSystem::{ReadFile, WriteFile};
 use windows_sys::Win32::System::Memory::{
-    CreateFileMappingW, MapViewOfFile, UnmapViewOfFile, FILE_MAP_ALL_ACCESS,
-    MEMORY_MAPPED_VIEW_ADDRESS, PAGE_READWRITE,
+    CreateFileMappingW, FILE_MAP_ALL_ACCESS, MEMORY_MAPPED_VIEW_ADDRESS, MapViewOfFile,
+    PAGE_READWRITE, UnmapViewOfFile,
 };
 use windows_sys::Win32::System::Pipes::CreatePipe;
 
@@ -217,7 +216,11 @@ fn inheritable_pipe(broker_end_is_read: bool) -> io::Result<(OwnedHandle, OwnedH
     let read = OwnedHandle::new(read)?;
     let write = OwnedHandle::new(write)?;
     // Only the child-side end stays inheritable, matching windows_process.rs.
-    let broker_end = if broker_end_is_read { read.raw() } else { write.raw() };
+    let broker_end = if broker_end_is_read {
+        read.raw()
+    } else {
+        write.raw()
+    };
     if unsafe { SetHandleInformation(broker_end, HANDLE_FLAG_INHERIT, 0) } == 0 {
         return Err(io::Error::last_os_error());
     }
@@ -744,7 +747,9 @@ impl RenderSession {
                 || layer.height > MAX_DIMENSION
                 || u64::from(layer.width) * u64::from(layer.height) > MAX_PIXELS
             {
-                return Err(invalid("render session layer slot or dimensions are invalid"));
+                return Err(invalid(
+                    "render session layer slot or dimensions are invalid",
+                ));
             }
             if let Some((_, time_scale)) = layer.timed {
                 if time_scale == 0 {
@@ -774,7 +779,9 @@ impl RenderSession {
             // exactly; each layer occupies its own primary-independent slot.
             let expected = layer.width as usize * layer.height as usize * 4;
             if layer.rgba.len() != expected {
-                return Err(invalid("render session layer pixels do not match dimensions"));
+                return Err(invalid(
+                    "render session layer pixels do not match dimensions",
+                ));
             }
         }
         // The output slot starts at the render dimensions; an in-session grow
@@ -796,18 +803,17 @@ impl RenderSession {
                 "a runtime module policy only applies to SmartFX GPU sessions",
             ));
         }
-        // v1.1 smart sessions carry no layer slots and no static context
-        // trailers; the worker's smart session contract is the bare 10-slot
-        // argv, so reject the combination here instead of as an opaque
-        // worker command rejection.
+        // Smart sessions now carry the same secondary-layer trailer as the
+        // classic session (issue #294): layers ride the shared session-layers
+        // trailer + inherited handles below. Static context trailers
+        // (mask/spatial/render) are still not carried by smart sessions.
         if request.smart
-            && (!request.layers.is_empty()
-                || request.mask_trailer.is_some()
+            && (request.mask_trailer.is_some()
                 || request.spatial_trailer.is_some()
                 || request.render_environment_trailer.is_some())
         {
             return Err(invalid(
-                "smart sessions do not carry layers or static context trailers yet",
+                "smart sessions do not carry static context trailers yet",
             ));
         }
         // A session cannot retry mid-flight, so the one-shot's Auto GPU
@@ -929,9 +935,8 @@ impl RenderSession {
                 drop(writer);
                 let file = OpenOptions::new().read(true).open(&path)?;
                 let handle = file.as_raw_handle() as HANDLE;
-                if unsafe {
-                    SetHandleInformation(handle, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT)
-                } == 0
+                if unsafe { SetHandleInformation(handle, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT) }
+                    == 0
                 {
                     return Err(io::Error::last_os_error());
                 }
@@ -1189,7 +1194,7 @@ impl RenderSession {
         // handle open, so the frame wait also observes the process handle.
         let watched_process = process.duplicated_process_handle()?;
         thread::spawn(move || {
-            use windows_sys::Win32::System::Threading::{WaitForSingleObject, INFINITE};
+            use windows_sys::Win32::System::Threading::{INFINITE, WaitForSingleObject};
             let handle = watched_process as HANDLE;
             unsafe {
                 WaitForSingleObject(handle, INFINITE);
@@ -1389,7 +1394,10 @@ impl RenderSession {
                 );
             }
             if let Some(ui_action) = ui_action {
-                object.insert("ui_action".into(), Value::String(ui_action.encode_ui_field()?));
+                object.insert(
+                    "ui_action".into(),
+                    Value::String(ui_action.encode_ui_field()?),
+                );
             }
             serde_json::to_string(&message_value).map_err(|error| invalid(error.to_string()))?
         };
@@ -1434,231 +1442,240 @@ impl RenderSession {
         // per-frame deadlines by resetting the clock at each control message.
         let frame_deadline_at = Instant::now() + self.frame_deadline;
         loop {
-        let body = match self.await_frame_response(frame_deadline_at) {
-            FrameWait::Message(body) => body,
-            FrameWait::Deadline => {
-                return Err(self.invalidate(
-                    "frame_deadline",
-                    format!(
-                        "frame {frame_index} exceeded the {}ms deadline",
-                        self.frame_deadline.as_millis()
-                    ),
-                    true,
-                    POST_TERMINATION_COLLECT_TIMEOUT,
-                ));
-            }
-            FrameWait::WorkerGone => {
-                // Reached on process death (watcher) or on reader disconnect
-                // (worker exit closing the pipe). Terminate the job so
-                // descendants are reaped promptly; an already-exited worker
-                // keeps its own exit code.
-                return Err(self.invalidate(
-                    "worker_exited",
-                    format!("the worker was gone before frame {frame_index} completed"),
-                    true,
-                    POST_TERMINATION_COLLECT_TIMEOUT,
-                ));
-            }
-            FrameWait::FramingViolation => {
-                return Err(self.invalidate(
-                    "response_framing_violation",
-                    format!(
-                        "the worker broke the response framing during frame {frame_index}"
-                    ),
-                    true,
-                    POST_TERMINATION_COLLECT_TIMEOUT,
-                ));
-            }
-        };
-        let done: FrameDone = match serde_json::from_slice(&body) {
-            Ok(done) => done,
-            Err(error) => {
-                return Err(self.invalidate(
-                    "malformed_frame_done",
-                    format!("frame {frame_index} response did not parse strictly: {error}"),
-                    true,
-                    POST_TERMINATION_COLLECT_TIMEOUT,
-                ));
-            }
-        };
-        if done.v != PROTOCOL_VERSION || done.kind != "frame_done" || done.frame_index != frame_index
-        {
-            return Err(self.invalidate(
-                "frame_done_mismatch",
-                format!(
-                    "frame {frame_index} response carried v={} type={} frame_index={}",
-                    done.v, done.kind, done.frame_index
-                ),
-                true,
-                POST_TERMINATION_COLLECT_TIMEOUT,
-            ));
-        }
-        // The top-level width/height fields belong only to a resize_needed
-        // response; deny_unknown_fields treats them as known for every status,
-        // so reject them here on ok/error to keep the frame_done schema strict.
-        let carries_resize_fields = done.width.is_some() || done.height.is_some();
-        match done.status.as_str() {
-            "error" => {
-                if done.output.is_some()
-                    || done.generation.is_some()
-                    || done.render_error == 0
-                    || carries_resize_fields
-                {
+            let body = match self.await_frame_response(frame_deadline_at) {
+                FrameWait::Message(body) => body,
+                FrameWait::Deadline => {
                     return Err(self.invalidate(
-                        "malformed_error_response",
-                        format!("frame {frame_index} error response carried output/resize fields"),
-                        true,
-                        POST_TERMINATION_COLLECT_TIMEOUT,
-                    ));
-                }
-                // The header invariants hold on every response, not only ok
-                // ones: an error response must leave the broker-owned static
-                // fields and the output generation untouched.
-                if let Err(detail) = self.validate_static_header() {
-                    return Err(self.invalidate(
-                        "frame_invariant_failure",
-                        format!("frame {frame_index} (error response): {detail}"),
-                        true,
-                        POST_TERMINATION_COLLECT_TIMEOUT,
-                    ));
-                }
-                if self.transport.read_header_u32(OUTPUT_GENERATION_OFFSET)
-                    != self.last_output_generation
-                {
-                    return Err(self.invalidate(
-                        "frame_invariant_failure",
+                        "frame_deadline",
                         format!(
-                            "frame {frame_index} error response advanced the output generation"
+                            "frame {frame_index} exceeded the {}ms deadline",
+                            self.frame_deadline.as_millis()
                         ),
                         true,
                         POST_TERMINATION_COLLECT_TIMEOUT,
                     ));
                 }
-                if is_fatal_session_error(done.render_error) {
-                    // The worker reported a host-protection invariant failure
-                    // and is running its own fail-closed teardown (setdown
-                    // selectors, final report, exit 24). Wait boundedly for
-                    // that exit instead of racing it with a job termination:
-                    // collection terminates the job anyway if the worker does
-                    // not leave within the timeout.
+                FrameWait::WorkerGone => {
+                    // Reached on process death (watcher) or on reader disconnect
+                    // (worker exit closing the pipe). Terminate the job so
+                    // descendants are reaped promptly; an already-exited worker
+                    // keeps its own exit code.
                     return Err(self.invalidate(
-                        "worker_invariant_failure",
-                        format!(
-                            "frame {frame_index} reported the fatal session error {}",
-                            done.render_error
-                        ),
-                        false,
-                        CLOSE_COLLECT_TIMEOUT,
+                        "worker_exited",
+                        format!("the worker was gone before frame {frame_index} completed"),
+                        true,
+                        POST_TERMINATION_COLLECT_TIMEOUT,
                     ));
                 }
-                // Frame-local diagnostic (protocol §4.3): the sequence state
-                // is still host-owned, so the session continues; whether to
-                // proceed is the caller's decision.
-                self.frames_errored += 1;
-                return Ok(FrameOutcome {
-                    frame_index,
-                    status: FrameStatus::FrameError {
-                        render_error: done.render_error,
-                    },
-                });
+                FrameWait::FramingViolation => {
+                    return Err(self.invalidate(
+                        "response_framing_violation",
+                        format!("the worker broke the response framing during frame {frame_index}"),
+                        true,
+                        POST_TERMINATION_COLLECT_TIMEOUT,
+                    ));
+                }
+            };
+            let done: FrameDone = match serde_json::from_slice(&body) {
+                Ok(done) => done,
+                Err(error) => {
+                    return Err(self.invalidate(
+                        "malformed_frame_done",
+                        format!("frame {frame_index} response did not parse strictly: {error}"),
+                        true,
+                        POST_TERMINATION_COLLECT_TIMEOUT,
+                    ));
+                }
+            };
+            if done.v != PROTOCOL_VERSION
+                || done.kind != "frame_done"
+                || done.frame_index != frame_index
+            {
+                return Err(self.invalidate(
+                    "frame_done_mismatch",
+                    format!(
+                        "frame {frame_index} response carried v={} type={} frame_index={}",
+                        done.v, done.kind, done.frame_index
+                    ),
+                    true,
+                    POST_TERMINATION_COLLECT_TIMEOUT,
+                ));
             }
-            "ok" => {
-                let (Some(output), Some(generation)) = (done.output, done.generation) else {
-                    return Err(self.invalidate(
-                        "malformed_ok_response",
-                        format!("frame {frame_index} ok response missed output or generation"),
-                        true,
-                        POST_TERMINATION_COLLECT_TIMEOUT,
-                    ));
-                };
-                if carries_resize_fields {
-                    return Err(self.invalidate(
-                        "malformed_ok_response",
-                        format!("frame {frame_index} ok response carried resize fields"),
-                        true,
-                        POST_TERMINATION_COLLECT_TIMEOUT,
-                    ));
+            // The top-level width/height fields belong only to a resize_needed
+            // response; deny_unknown_fields treats them as known for every status,
+            // so reject them here on ok/error to keep the frame_done schema strict.
+            let carries_resize_fields = done.width.is_some() || done.height.is_some();
+            match done.status.as_str() {
+                "error" => {
+                    if done.output.is_some()
+                        || done.generation.is_some()
+                        || done.render_error == 0
+                        || carries_resize_fields
+                    {
+                        return Err(self.invalidate(
+                            "malformed_error_response",
+                            format!(
+                                "frame {frame_index} error response carried output/resize fields"
+                            ),
+                            true,
+                            POST_TERMINATION_COLLECT_TIMEOUT,
+                        ));
+                    }
+                    // The header invariants hold on every response, not only ok
+                    // ones: an error response must leave the broker-owned static
+                    // fields and the output generation untouched.
+                    if let Err(detail) = self.validate_static_header() {
+                        return Err(self.invalidate(
+                            "frame_invariant_failure",
+                            format!("frame {frame_index} (error response): {detail}"),
+                            true,
+                            POST_TERMINATION_COLLECT_TIMEOUT,
+                        ));
+                    }
+                    if self.transport.read_header_u32(OUTPUT_GENERATION_OFFSET)
+                        != self.last_output_generation
+                    {
+                        return Err(self.invalidate(
+                            "frame_invariant_failure",
+                            format!(
+                                "frame {frame_index} error response advanced the output generation"
+                            ),
+                            true,
+                            POST_TERMINATION_COLLECT_TIMEOUT,
+                        ));
+                    }
+                    if is_fatal_session_error(done.render_error) {
+                        // The worker reported a host-protection invariant failure
+                        // and is running its own fail-closed teardown (setdown
+                        // selectors, final report, exit 24). Wait boundedly for
+                        // that exit instead of racing it with a job termination:
+                        // collection terminates the job anyway if the worker does
+                        // not leave within the timeout.
+                        return Err(self.invalidate(
+                            "worker_invariant_failure",
+                            format!(
+                                "frame {frame_index} reported the fatal session error {}",
+                                done.render_error
+                            ),
+                            false,
+                            CLOSE_COLLECT_TIMEOUT,
+                        ));
+                    }
+                    // Frame-local diagnostic (protocol §4.3): the sequence state
+                    // is still host-owned, so the session continues; whether to
+                    // proceed is the caller's decision.
+                    self.frames_errored += 1;
+                    return Ok(FrameOutcome {
+                        frame_index,
+                        status: FrameStatus::FrameError {
+                            render_error: done.render_error,
+                        },
+                    });
                 }
-                if let Err(detail) = self.validate_ok_frame(expected_generation, &output, generation, done.render_error)
-                {
-                    return Err(self.invalidate(
-                        "frame_invariant_failure",
-                        format!("frame {frame_index}: {detail}"),
-                        true,
-                        POST_TERMINATION_COLLECT_TIMEOUT,
-                    ));
-                }
-                // Read only the frame's actual packed bytes, not the whole
-                // launch slot: a shrink-output effect fills less than the slot,
-                // and the worker's checksum covers those actual bytes (#261).
-                let actual_bytes = output.width as usize
-                    * output.height as usize
-                    * self.geometry.pixel_format.bytes_per_pixel() as usize;
-                let pixels = self
-                    .transport
-                    .read_output_slot(self.geometry.output_slot_offset(), actual_bytes);
-                let checksum = format!("{:x}", Sha256::digest(&pixels));
-                if !checksum.eq_ignore_ascii_case(&output.checksum) {
-                    return Err(self.invalidate(
-                        "output_checksum_mismatch",
-                        format!(
-                            "frame {frame_index} slot bytes hash {checksum} but the worker \
+                "ok" => {
+                    let (Some(output), Some(generation)) = (done.output, done.generation) else {
+                        return Err(self.invalidate(
+                            "malformed_ok_response",
+                            format!("frame {frame_index} ok response missed output or generation"),
+                            true,
+                            POST_TERMINATION_COLLECT_TIMEOUT,
+                        ));
+                    };
+                    if carries_resize_fields {
+                        return Err(self.invalidate(
+                            "malformed_ok_response",
+                            format!("frame {frame_index} ok response carried resize fields"),
+                            true,
+                            POST_TERMINATION_COLLECT_TIMEOUT,
+                        ));
+                    }
+                    if let Err(detail) = self.validate_ok_frame(
+                        expected_generation,
+                        &output,
+                        generation,
+                        done.render_error,
+                    ) {
+                        return Err(self.invalidate(
+                            "frame_invariant_failure",
+                            format!("frame {frame_index}: {detail}"),
+                            true,
+                            POST_TERMINATION_COLLECT_TIMEOUT,
+                        ));
+                    }
+                    // Read only the frame's actual packed bytes, not the whole
+                    // launch slot: a shrink-output effect fills less than the slot,
+                    // and the worker's checksum covers those actual bytes (#261).
+                    let actual_bytes = output.width as usize
+                        * output.height as usize
+                        * self.geometry.pixel_format.bytes_per_pixel() as usize;
+                    let pixels = self
+                        .transport
+                        .read_output_slot(self.geometry.output_slot_offset(), actual_bytes);
+                    let checksum = format!("{:x}", Sha256::digest(&pixels));
+                    if !checksum.eq_ignore_ascii_case(&output.checksum) {
+                        return Err(self.invalidate(
+                            "output_checksum_mismatch",
+                            format!(
+                                "frame {frame_index} slot bytes hash {checksum} but the worker \
                              reported {}",
-                            output.checksum
-                        ),
-                        true,
-                        POST_TERMINATION_COLLECT_TIMEOUT,
-                    ));
+                                output.checksum
+                            ),
+                            true,
+                            POST_TERMINATION_COLLECT_TIMEOUT,
+                        ));
+                    }
+                    self.frames_ok += 1;
+                    self.last_output_generation = expected_generation;
+                    return Ok(FrameOutcome {
+                        frame_index,
+                        status: FrameStatus::Rendered {
+                            pixels,
+                            checksum,
+                            width: output.width,
+                            height: output.height,
+                        },
+                    });
                 }
-                self.frames_ok += 1;
-                self.last_output_generation = expected_generation;
-                return Ok(FrameOutcome {
-                    frame_index,
-                    status: FrameStatus::Rendered {
-                        pixels,
-                        checksum,
-                        width: output.width,
-                        height: output.height,
-                    },
-                });
-            }
-            "resize_needed" => {
-                // The effect rendered larger than the launch slot; the worker
-                // wrote nothing and left the generation untouched (#261). It
-                // carries only width/height. Bound the requested size so a
-                // misbehaving worker cannot force an unbounded re-open, and
-                // require it to actually exceed the current slot.
-                if done.output.is_some() || done.generation.is_some() || done.render_error != 0 {
-                    return Err(self.invalidate(
-                        "malformed_resize_response",
-                        format!("frame {frame_index} resize_needed carried output/generation/error"),
-                        true,
-                        POST_TERMINATION_COLLECT_TIMEOUT,
-                    ));
-                }
-                let (Some(width), Some(height)) = (done.width, done.height) else {
-                    return Err(self.invalidate(
-                        "malformed_resize_response",
-                        format!("frame {frame_index} resize_needed missed width or height"),
-                        true,
-                        POST_TERMINATION_COLLECT_TIMEOUT,
-                    ));
-                };
-                let requested_pixels = width as u64 * height as u64;
-                // Compare against the current output-slot capacity, not the
-                // render dimensions: a re-opened session already has a larger
-                // slot, and the worker only reports resize_needed when the
-                // output overruns that slot (#261).
-                let current_pixels = u64::from(self.geometry.output_capacity_width)
-                    * u64::from(self.geometry.output_capacity_height);
-                if width == 0
-                    || height == 0
-                    || width > MAX_RESIZE_DIMENSION
-                    || height > MAX_RESIZE_DIMENSION
-                    || requested_pixels > MAX_RESIZE_PIXELS
-                    || requested_pixels <= current_pixels
-                {
-                    return Err(self.invalidate(
+                "resize_needed" => {
+                    // The effect rendered larger than the launch slot; the worker
+                    // wrote nothing and left the generation untouched (#261). It
+                    // carries only width/height. Bound the requested size so a
+                    // misbehaving worker cannot force an unbounded re-open, and
+                    // require it to actually exceed the current slot.
+                    if done.output.is_some() || done.generation.is_some() || done.render_error != 0
+                    {
+                        return Err(self.invalidate(
+                            "malformed_resize_response",
+                            format!(
+                                "frame {frame_index} resize_needed carried output/generation/error"
+                            ),
+                            true,
+                            POST_TERMINATION_COLLECT_TIMEOUT,
+                        ));
+                    }
+                    let (Some(width), Some(height)) = (done.width, done.height) else {
+                        return Err(self.invalidate(
+                            "malformed_resize_response",
+                            format!("frame {frame_index} resize_needed missed width or height"),
+                            true,
+                            POST_TERMINATION_COLLECT_TIMEOUT,
+                        ));
+                    };
+                    let requested_pixels = width as u64 * height as u64;
+                    // Compare against the current output-slot capacity, not the
+                    // render dimensions: a re-opened session already has a larger
+                    // slot, and the worker only reports resize_needed when the
+                    // output overruns that slot (#261).
+                    let current_pixels = u64::from(self.geometry.output_capacity_width)
+                        * u64::from(self.geometry.output_capacity_height);
+                    if width == 0
+                        || height == 0
+                        || width > MAX_RESIZE_DIMENSION
+                        || height > MAX_RESIZE_DIMENSION
+                        || requested_pixels > MAX_RESIZE_PIXELS
+                        || requested_pixels <= current_pixels
+                    {
+                        return Err(self.invalidate(
                         "resize_out_of_range",
                         format!(
                             "frame {frame_index} resize_needed {width}x{height} is out of range \
@@ -1669,57 +1686,59 @@ impl RenderSession {
                         true,
                         POST_TERMINATION_COLLECT_TIMEOUT,
                     ));
+                    }
+                    // The header and generation must be untouched, like an error
+                    // response: nothing was written to the slot.
+                    if let Err(detail) = self.validate_static_header() {
+                        return Err(self.invalidate(
+                            "frame_invariant_failure",
+                            format!("frame {frame_index} (resize response): {detail}"),
+                            true,
+                            POST_TERMINATION_COLLECT_TIMEOUT,
+                        ));
+                    }
+                    if self.transport.read_header_u32(OUTPUT_GENERATION_OFFSET)
+                        != self.last_output_generation
+                    {
+                        return Err(self.invalidate(
+                            "frame_invariant_failure",
+                            format!(
+                                "frame {frame_index} resize response advanced the output generation"
+                            ),
+                            true,
+                            POST_TERMINATION_COLLECT_TIMEOUT,
+                        ));
+                    }
+                    // A legitimate frame grows at most once; a second resize_needed
+                    // for the same frame is a fail-closed violation (bounds the
+                    // section-allocation work a buggy worker can force).
+                    grows += 1;
+                    if grows > 1 {
+                        return Err(self.invalidate(
+                            "repeated_resize_needed",
+                            format!("frame {frame_index} reported resize_needed more than once"),
+                            true,
+                            POST_TERMINATION_COLLECT_TIMEOUT,
+                        ));
+                    }
+                    // Grow the shared section in place and wait for the worker's
+                    // follow-up ok for this same frame (protocol §3, issue #262). The
+                    // render lifecycle already ran once into the worker's private
+                    // buffer, so this transfers those pixels into the larger slot
+                    // instead of re-opening (which would replay SEQUENCE/FRAME setup
+                    // and setdown). `?` invalidates the session on a grow failure.
+                    self.grow_output_capacity(frame_index, width, height)?;
+                    continue;
                 }
-                // The header and generation must be untouched, like an error
-                // response: nothing was written to the slot.
-                if let Err(detail) = self.validate_static_header() {
+                other => {
                     return Err(self.invalidate(
-                        "frame_invariant_failure",
-                        format!("frame {frame_index} (resize response): {detail}"),
+                        "unknown_frame_status",
+                        format!("frame {frame_index} reported status {other:?}"),
                         true,
                         POST_TERMINATION_COLLECT_TIMEOUT,
                     ));
                 }
-                if self.transport.read_header_u32(OUTPUT_GENERATION_OFFSET)
-                    != self.last_output_generation
-                {
-                    return Err(self.invalidate(
-                        "frame_invariant_failure",
-                        format!("frame {frame_index} resize response advanced the output generation"),
-                        true,
-                        POST_TERMINATION_COLLECT_TIMEOUT,
-                    ));
-                }
-                // A legitimate frame grows at most once; a second resize_needed
-                // for the same frame is a fail-closed violation (bounds the
-                // section-allocation work a buggy worker can force).
-                grows += 1;
-                if grows > 1 {
-                    return Err(self.invalidate(
-                        "repeated_resize_needed",
-                        format!("frame {frame_index} reported resize_needed more than once"),
-                        true,
-                        POST_TERMINATION_COLLECT_TIMEOUT,
-                    ));
-                }
-                // Grow the shared section in place and wait for the worker's
-                // follow-up ok for this same frame (protocol §3, issue #262). The
-                // render lifecycle already ran once into the worker's private
-                // buffer, so this transfers those pixels into the larger slot
-                // instead of re-opening (which would replay SEQUENCE/FRAME setup
-                // and setdown). `?` invalidates the session on a grow failure.
-                self.grow_output_capacity(frame_index, width, height)?;
-                continue;
             }
-            other => {
-                return Err(self.invalidate(
-                    "unknown_frame_status",
-                    format!("frame {frame_index} reported status {other:?}"),
-                    true,
-                    POST_TERMINATION_COLLECT_TIMEOUT,
-                ));
-            }
-        }
         }
     }
 
@@ -1791,7 +1810,9 @@ impl RenderSession {
         // privately at open and never re-reads them from the section.
         init_section_header(view, &grown, self.last_output_generation);
         let unmap_new = || {
-            let address = MEMORY_MAPPED_VIEW_ADDRESS { Value: view as *mut _ };
+            let address = MEMORY_MAPPED_VIEW_ADDRESS {
+                Value: view as *mut _,
+            };
             unsafe {
                 UnmapViewOfFile(address);
             }
@@ -1967,14 +1988,18 @@ impl RenderSession {
         // "resize_needed" status instead, never here.
         let bpp = self.geometry.pixel_format.bytes_per_pixel();
         if output.width == 0 || output.height == 0 {
-            return Err(format!("output geometry {}x{} is empty", output.width, output.height));
+            return Err(format!(
+                "output geometry {}x{} is empty",
+                output.width, output.height
+            ));
         }
         // A resized output (dimensions other than the render dimensions) must
         // obey the same per-dimension and total-pixel caps as the worker's
         // validate_output_extent, so a buggy or compromised worker cannot report
         // an absurd shape (e.g. 1000000x1) that happens to fit a large slot by
         // total bytes. A fixed-size output was already bounded at session open.
-        let is_resize = output.width != self.geometry.width || output.height != self.geometry.height;
+        let is_resize =
+            output.width != self.geometry.width || output.height != self.geometry.height;
         if is_resize
             && (output.width > MAX_RESIZE_DIMENSION
                 || output.height > MAX_RESIZE_DIMENSION
@@ -2120,7 +2145,10 @@ impl RenderSession {
             Some(CollectedExit {
                 error: Some(error), ..
             }) => (json!({ "collection_error": error }), None),
-            _ => (json!({ "collection_error": "worker was never collected" }), None),
+            _ => (
+                json!({ "collection_error": "worker was never collected" }),
+                None,
+            ),
         };
         let session_clean = self.invalidation.is_none()
             && matches!(
@@ -2705,7 +2733,7 @@ impl AudioRenderSession {
         });
         let watched_process = process.duplicated_process_handle()?;
         thread::spawn(move || {
-            use windows_sys::Win32::System::Threading::{WaitForSingleObject, INFINITE};
+            use windows_sys::Win32::System::Threading::{INFINITE, WaitForSingleObject};
             let handle = watched_process as HANDLE;
             unsafe {
                 WaitForSingleObject(handle, INFINITE);
@@ -2740,8 +2768,14 @@ impl AudioRenderSession {
             return;
         };
         self.collected = Some(match process.finish(wait) {
-            Ok(result) => CollectedExit { result: Some(result), error: None },
-            Err(error) => CollectedExit { result: None, error: Some(error.to_string()) },
+            Ok(result) => CollectedExit {
+                result: Some(result),
+                error: None,
+            },
+            Err(error) => CollectedExit {
+                result: None,
+                error: Some(error.to_string()),
+            },
         });
     }
 
@@ -2752,7 +2786,10 @@ impl AudioRenderSession {
         self.collect_exit(wait);
         self.invalidation = Some(SessionInvalidation { reason, detail });
         let stored = self.invalidation.as_ref().expect("just stored");
-        invalid(format!("audio session invalidated ({}): {}", stored.reason, stored.detail))
+        invalid(format!(
+            "audio session invalidated ({}): {}",
+            stored.reason, stored.detail
+        ))
     }
 
     fn await_response(&mut self) -> FrameWait {
@@ -2820,7 +2857,9 @@ impl AudioRenderSession {
                 Ok(SessionEvent::Message(_)) => {
                     return Err(self.invalidate(
                         "unsolicited_response",
-                        format!("a response arrived with no request in flight before {request_index}"),
+                        format!(
+                            "a response arrived with no request in flight before {request_index}"
+                        ),
                         POST_TERMINATION_COLLECT_TIMEOUT,
                     ));
                 }
@@ -2926,7 +2965,9 @@ impl AudioRenderSession {
                     ));
                 }
                 if !self.static_header_ok()
-                    || self.transport.read_header_u32(AUDIO_OUTPUT_GENERATION_OFFSET)
+                    || self
+                        .transport
+                        .read_header_u32(AUDIO_OUTPUT_GENERATION_OFFSET)
                         != self.last_output_generation
                 {
                     return Err(self.invalidate(
@@ -3032,7 +3073,8 @@ impl AudioRenderSession {
                     Ok(SessionEvent::Message(_)) => {
                         self.invalidation = Some(SessionInvalidation {
                             reason: "unsolicited_response",
-                            detail: "a response arrived with no request in flight before close".into(),
+                            detail: "a response arrived with no request in flight before close"
+                                .into(),
                         });
                         break;
                     }
@@ -3040,7 +3082,10 @@ impl AudioRenderSession {
                 }
             }
             if self.process_exit_observed
-                || self.process.as_ref().is_some_and(SecureSessionProcess::has_exited)
+                || self
+                    .process
+                    .as_ref()
+                    .is_some_and(SecureSessionProcess::has_exited)
             {
                 self.process_exit_observed = true;
             }
@@ -3064,7 +3109,10 @@ impl AudioRenderSession {
         let elapsed_ms = self.opened.elapsed().as_millis();
         let collected = self.collected.take();
         let (worker, final_report) = match &collected {
-            Some(CollectedExit { result: Some(result), .. }) => {
+            Some(CollectedExit {
+                result: Some(result),
+                ..
+            }) => {
                 let report: Option<Value> = serde_json::from_str(result.stdout.trim()).ok();
                 (
                     json!({
@@ -3075,10 +3123,13 @@ impl AudioRenderSession {
                     report,
                 )
             }
-            Some(CollectedExit { error: Some(error), .. }) => {
-                (json!({ "collection_error": error }), None)
-            }
-            _ => (json!({ "collection_error": "worker was never collected" }), None),
+            Some(CollectedExit {
+                error: Some(error), ..
+            }) => (json!({ "collection_error": error }), None),
+            _ => (
+                json!({ "collection_error": "worker was never collected" }),
+                None,
+            ),
         };
         let session_clean = self.invalidation.is_none()
             && matches!(
@@ -3086,9 +3137,7 @@ impl AudioRenderSession {
                 Some(CollectedExit { result: Some(result), .. })
                     if result.classification == crate::ExitClassification::Ok
             )
-            && final_report
-                .as_ref()
-                .is_some_and(audio_final_report_clean);
+            && final_report.as_ref().is_some_and(audio_final_report_clean);
         json!({
             "stage": "audio_session_close",
             "plugin_sha256": self.plugin_sha256,
@@ -3244,7 +3293,10 @@ mod tests {
         ] {
             let mut report = clean.clone();
             report[key] = dirty;
-            assert!(!final_report_clean(&report, false), "{key} must fail closed");
+            assert!(
+                !final_report_clean(&report, false),
+                "{key} must fail closed"
+            );
             let mut missing = clean.clone();
             missing.as_object_mut().unwrap().remove(key);
             assert!(
@@ -3253,7 +3305,10 @@ mod tests {
             );
         }
         // A parseable but unrelated report (an older worker) is not clean.
-        assert!(!final_report_clean(&serde_json::json!({"status": "ok"}), false));
+        assert!(!final_report_clean(
+            &serde_json::json!({"status": "ok"}),
+            false
+        ));
     }
 
     #[test]

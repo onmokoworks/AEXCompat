@@ -19,7 +19,6 @@
 #include <cstdarg>
 #include <cstdio>
 #include <cwchar>
-#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
@@ -102,7 +101,6 @@
 #include "worker_aegp_async_layer_runtime.hpp"
 #include "worker_aegp_staged_item_runtime.hpp"
 #include "worker_aegp_external_render_runtime.hpp"
-#include "worker_aegp_layer_render_runtime.hpp"
 #include "worker_aegp_item_render_runtime.hpp"
 #include "worker_aegp_world_selftests.hpp"
 #include "worker_aegp_init_runtime.hpp"
@@ -151,8 +149,8 @@
 
 // Worker-entry wiring moved from worker_main (issue #165): the component
 // hook bootstrap, the selftest command dispatch, the AEGP world/receipt
-// selftest hook table and its verify bridges, the loaded-effect receipt
-// fixture, and the PF parameter state capture. Host identity (g_effect,
+// selftest hook table and its verify bridges, and the PF parameter state
+// capture. Host identity (g_effect,
 // g_layer, the comp scene objects) stays in l2_main; this TU reaches it
 // through cross-TU declarations and the Phase D state owners.
 namespace aexcompat::l2_detail {
@@ -172,13 +170,8 @@ using aexcompat::worker_runtime::module_audit_passed;
 using aexcompat::world_safety::DispatchWorldFormat;
 using aexcompat::world_safety::bounded_argb8_world;
 using aexcompat::world_safety::bounded_typed_world;
-using aexcompat::world_registry::kPixelFormatArgb32;
 using aexcompat::world_registry::resolve_dispatch_world_format;
-using aexcompat::world_registry::aegp_world_get_base_addr8;
-using aexcompat::world_registry::aegp_world_get_size;
-using aexcompat::world_registry::aegp_world_get_type;
 using ParamRecord = aexcompat::worker_runtime::parameters::ParamRecord;
-using EffectEntry = int32_t(__cdecl*)(int32_t, void*, void*, void**, void*, void*);
 using SmartResult = aexcompat::worker_runtime::smart_execution::Result;
 using AegpStreamValue = aexcompat::scene_runtime::AegpStreamValue;
 
@@ -233,11 +226,7 @@ bool bounded_pf_path_world(void* world, aexcompat::pf_path_runtime::WorldView& v
 bool mask_lifetimes_balanced();
 
 namespace {
-constexpr std::size_t kInSize = 408;
-constexpr std::size_t kOutSize = 408;
 constexpr std::size_t kParamSize = 176;
-constexpr std::size_t kInCurrentTime = 224;
-constexpr std::size_t kInTimeScale = 240;
 constexpr int32_t kPfBadCallbackParam = 516;
 auto& g_parameter_runtime = aexcompat::worker_runtime::parameters::state();
 auto& g_params = g_parameter_runtime.records;
@@ -259,21 +248,7 @@ auto& g_full_resolution_width = g_render_context_state.full_resolution_width;
 auto& g_full_resolution_height = g_render_context_state.full_resolution_height;
 
 auto& smart_state() { return aexcompat::worker_runtime::smart::state(); }
-
-template <typename T, std::size_t N>
-T read(const std::array<std::byte, N>& bytes, std::size_t offset) {
-  T value{};
-  std::memcpy(&value, bytes.data() + offset, sizeof(value));
-  return value;
-}
 }  // namespace
-
-auto& g_loaded_effect_receipt_fixture_passed =
-    aexcompat::render_receipts::receipt_test_state().loaded_effect_receipt_fixture_passed;
-auto& g_loaded_effect_receipt_unsupported_rejected =
-    aexcompat::render_receipts::receipt_test_state().loaded_effect_receipt_unsupported_rejected;
-auto& g_loaded_effect_receipt_stale_world_rejected =
-    aexcompat::render_receipts::receipt_test_state().loaded_effect_receipt_stale_world_rejected;
 
 const aexcompat::aegp_world_selftests::Hooks& aegp_world_selftest_hooks() {
   static const aexcompat::aegp_world_selftests::Hooks hooks{
@@ -425,55 +400,6 @@ std::string hex_bytes(const unsigned char* data, std::size_t size) {
   return text.str();
 }
 
-bool exercise_loaded_effect_item_receipt(EffectEntry entry,
-    std::array<std::byte, kInSize>& input, std::array<std::byte, kOutSize>& output) {
-  aexcompat::aegp_layer_render_runtime::context() = {
-      entry, &input, &output, read<int32_t>(input, kInCurrentTime),
-      static_cast<int32_t>(read<uint32_t>(input, kInTimeScale))};
-  std::vector<uint8_t> final_stage(16 * 12 * 4);
-  for (std::size_t pixel = 0; pixel < final_stage.size() / 4; ++pixel) {
-    final_stage[pixel * 4] = static_cast<uint8_t>(64 + pixel % 191);
-    final_stage[pixel * 4 + 1] = static_cast<uint8_t>(pixel * 17);
-    final_stage[pixel * 4 + 2] = static_cast<uint8_t>(pixel * 29);
-    final_stage[pixel * 4 + 3] = static_cast<uint8_t>(pixel * 43);
-  }
-  const bool stage_published = aexcompat::aegp_staged_item_runtime::publish_world(aegp_comp_item_handle(),
-      {read<int32_t>(input, kInCurrentTime),
-       read<uint32_t>(input, kInTimeScale)},
-      {1, 30}, 1, 0, kPixelFormatArgb32, 16, 12, 16 * 4, final_stage.data());
-  void* options = nullptr;
-  void* receipt = nullptr;
-  void** world = nullptr;
-  void* pixels = nullptr;
-  int32_t width = 0, height = 0, type = 0;
-  const bool checked_out = render_options_new_from_item(1, aegp_comp_item_handle(), &options) == 0 &&
-      checkout_item_frame_async(&g_async_manager, 1, options, &receipt) == 0 && receipt &&
-      get_receipt_world(receipt, &world) == 0 && world &&
-      aegp_world_get_type(world, &type) == 0 && type == 1 &&
-      aegp_world_get_size(world, &width, &height) == 0 && width == 16 && height == 12 &&
-      aegp_world_get_base_addr8(world, &pixels) == 0 && pixels;
-  if (options) {
-    render_options_set_world_type(options, 2);
-    void* unsupported = reinterpret_cast<void*>(1);
-    g_loaded_effect_receipt_unsupported_rejected =
-        checkout_item_frame_async(&g_async_manager, 1, options, &unsupported) != 0 &&
-        unsupported == nullptr;
-  }
-  const bool checked_in = receipt && checkin_frame(receipt) == 0;
-  if (world) {
-    int32_t stale_type = 0;
-    g_loaded_effect_receipt_stale_world_rejected =
-        aegp_world_get_type(world, &stale_type) != 0;
-  }
-  const bool options_disposed = options && render_options_dispose(options) == 0;
-  aexcompat::aegp_layer_render_runtime::context() = {};
-  g_loaded_effect_receipt_fixture_passed = stage_published && checked_out && checked_in && options_disposed &&
-      g_loaded_effect_receipt_unsupported_rejected &&
-      g_loaded_effect_receipt_stale_world_rejected &&
-      async_receipt_lifetimes_balanced() && render_options_lifetimes_balanced();
-  return g_loaded_effect_receipt_fixture_passed;
-}
-
 }  // namespace aexcompat::l2_detail
 
 using namespace aexcompat::l2_detail;
@@ -594,8 +520,7 @@ int configure_worker_entry_bootstrap() {
        pf_host_context.hooks.resolve_dispatch_world_format,
        pf_host_context.hooks.pixel_format,
        pf_host_context.hooks.set_pixel_format,
-       &bounded_argb8_world,
-       reinterpret_cast<void*>(&aegp_unsupported_suite_call)},
+       &bounded_argb8_world},
       {&g_transform_world_calls, &g_last_transform_x, &g_last_transform_y,
        &g_last_transform_opacity}};
   bootstrap_hooks.adv_time = {&acquire_suite, &release_suite, &suite_acquire_count,

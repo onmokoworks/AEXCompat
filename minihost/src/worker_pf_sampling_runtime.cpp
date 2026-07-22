@@ -1,5 +1,6 @@
 #include "worker_pf_sampling_runtime.hpp"
 #include "worker_pf_suites_internal.hpp"
+#include "worker_suite_registry.hpp"
 #include <windows.h>
 #include <algorithm>
 #include <array>
@@ -45,7 +46,7 @@ std::array<void*, 3> g_sampling_float_suite1{
     reinterpret_cast<void*>(&area_sample_float)};
 PfBatchSamplingSuite1 g_batch_sampling_suite1{
     &begin_sampling8, &end_sampling8, &unsupported_batch_sample_func,
-    &unsupported_batch_sample_func};
+    &unsupported_batch_sample_func16};
 static_assert(sizeof(PfBatchSamplingSuite1) == 4 * sizeof(void*));
 static_assert(offsetof(PfBatchSamplingSuite1, get_batch_func) == 2 * sizeof(void*));
 
@@ -253,16 +254,33 @@ int32_t __cdecl end_sampling8(void* effect_ref, int32_t quality, uint32_t mode_f
   return 0;
 }
 
-int32_t __cdecl unsupported_batch_sample_func(void* effect_ref, int32_t quality,
-                                               uint32_t mode_flags,
-                                               const void* sampling_params,
-                                               void** batch) {
+int32_t unsupported_batch_sample_func_for_slot(
+    uint32_t slot, void* effect_ref, int32_t quality, uint32_t mode_flags,
+    const void* sampling_params, void** batch) {
   if (!batch) return kPfBadCallbackParam;
   *batch = nullptr;
   if (effect_ref != g_hooks.effect_ref || !sampling_params || (quality != 0 && quality != 1))
     return kPfBadCallbackParam;
   (void)mode_flags;
-  return 4;
+  return aexcompat::worker_runtime::record_unsupported_suite_call(
+      aexcompat::worker_runtime::UnsupportedSuiteId::pf_batch_sampling_1,
+      slot);
+}
+
+int32_t __cdecl unsupported_batch_sample_func(void* effect_ref, int32_t quality,
+                                               uint32_t mode_flags,
+                                               const void* sampling_params,
+                                               void** batch) {
+  return unsupported_batch_sample_func_for_slot(
+      2, effect_ref, quality, mode_flags, sampling_params, batch);
+}
+
+int32_t __cdecl unsupported_batch_sample_func16(void* effect_ref, int32_t quality,
+                                                 uint32_t mode_flags,
+                                                 const void* sampling_params,
+                                                 void** batch) {
+  return unsupported_batch_sample_func_for_slot(
+      3, effect_ref, quality, mode_flags, sampling_params, batch);
 }
 
 bool verify_pf_batch_sampling_suite() {

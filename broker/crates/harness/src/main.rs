@@ -1197,16 +1197,18 @@ fn apply_typed_assignments(
                             .map_err(|error| {
                                 format!("bundle root could not be resolved: {error}")
                             })?;
-                        if layer.components().any(|component| {
-                            !matches!(component, std::path::Component::Normal(_))
-                        }) {
+                        if layer
+                            .components()
+                            .any(|component| !matches!(component, std::path::Component::Normal(_)))
+                        {
                             return Err(format!(
                                 "parameter slot {slot} layer path must be bundle-relative without traversal"
                             ));
                         }
-                        let candidate = bundle_root.join(layer).canonicalize().map_err(|error| {
-                            format!("layer path could not be resolved: {error}")
-                        })?;
+                        let candidate =
+                            bundle_root.join(layer).canonicalize().map_err(|error| {
+                                format!("layer path could not be resolved: {error}")
+                            })?;
                         if !candidate.starts_with(&bundle_root) || !candidate.is_file() {
                             return Err(format!(
                                 "parameter slot {slot} layer path escapes the bundle or is not a file"
@@ -1352,7 +1354,9 @@ fn typed_request_dependencies(
         let item = item
             .as_object()
             .ok_or_else(|| "dependency identity must be an object".to_owned())?;
-        if item.keys().any(|key| !matches!(key.as_str(), "path" | "sha256" | "size_bytes"))
+        if item
+            .keys()
+            .any(|key| !matches!(key.as_str(), "path" | "sha256" | "size_bytes"))
         {
             return Err("dependency identity contains an unknown field".into());
         }
@@ -1799,7 +1803,9 @@ fn json_after_marker(text: &str, marker: &str) -> Option<serde_json::Value> {
 fn typed_failure_document(message: &str) -> Option<serde_json::Value> {
     let diagnostics = json_after_marker(message, "diagnostics=")
         .or_else(|| json_after_marker(message, "worker report unavailable: "))
-        .or_else(|| json_after_marker(message, "AEX parameter inspection worker failed safely: "))?;
+        .or_else(|| {
+            json_after_marker(message, "AEX parameter inspection worker failed safely: ")
+        })?;
     let report = json_after_marker(message, "report=");
     let mut document = report
         .and_then(|value| value.as_object().cloned())
@@ -1846,9 +1852,7 @@ fn emit_typed_failure_with_parameter_metadata(
     eprintln!("{message}");
 }
 
-fn host_request_validation_failure(
-    parameter_metadata: &serde_json::Value,
-) -> serde_json::Value {
+fn host_request_validation_failure(parameter_metadata: &serde_json::Value) -> serde_json::Value {
     serde_json::json!({
         "classification": "host_validation_error",
         "failure_stage": "request_validation",
@@ -1856,10 +1860,7 @@ fn host_request_validation_failure(
     })
 }
 
-fn emit_host_request_validation_failure(
-    message: &str,
-    parameter_metadata: &serde_json::Value,
-) {
+fn emit_host_request_validation_failure(message: &str, parameter_metadata: &serde_json::Value) {
     let document = host_request_validation_failure(parameter_metadata);
     if let Ok(encoded) = serde_json::to_string(&document) {
         println!("{encoded}");
@@ -2262,7 +2263,10 @@ impl LiveSessionState {
 /// carry the render (open failure or invalidation), mirroring the broker's
 /// length-1 wrapper fallback policy.
 #[cfg(windows)]
-fn live_render(state: &mut LiveSessionState, request: &LiveRenderRequest) -> Result<(String, Option<PathBuf>), String> {
+fn live_render(
+    state: &mut LiveSessionState,
+    request: &LiveRenderRequest,
+) -> Result<(String, Option<PathBuf>), String> {
     use aexcompat_broker::image_render::{InteractiveRenderSession, InteractiveSessionOpen};
 
     let (width, height, rgba) = {
@@ -2296,7 +2300,11 @@ fn live_render(state: &mut LiveSessionState, request: &LiveRenderRequest) -> Res
         total_time: request.timing.total_time,
         time_scale: request.timing.time_scale,
     };
-    if state.open.as_ref().is_some_and(|(open_key, _)| *open_key != key) {
+    if state
+        .open
+        .as_ref()
+        .is_some_and(|(open_key, _)| *open_key != key)
+    {
         state.close_current();
     }
     let one_shot = |reason: String| -> Result<(String, Option<PathBuf>), String> {
@@ -2347,7 +2355,12 @@ fn live_render(state: &mut LiveSessionState, request: &LiveRenderRequest) -> Res
     }
     let (_, session) = state.open.as_mut().expect("session just ensured");
     let parameters = (!request.parameters.is_empty()).then_some(request.parameters.as_slice());
-    match session.render(&rgba, request.timing.current_time, parameters, &request.output) {
+    match session.render(
+        &rgba,
+        request.timing.current_time,
+        parameters,
+        &request.output,
+    ) {
         Ok(mut report) => {
             report["resident_session"]["session_generation"] =
                 serde_json::json!(state.session_generation);
@@ -2355,8 +2368,7 @@ fn live_render(state: &mut LiveSessionState, request: &LiveRenderRequest) -> Res
                 report["previous_session_close"] = summary;
             }
             let passed = report.get("passed") == Some(&serde_json::json!(true));
-            let body =
-                serde_json::to_string_pretty(&report).map_err(|error| error.to_string())?;
+            let body = serde_json::to_string_pretty(&report).map_err(|error| error.to_string())?;
             if passed {
                 Ok((body, Some(request.output.clone())))
             } else {
@@ -3752,7 +3764,7 @@ impl HarnessApp {
         // Windows-only; other targets always render one-shot.
         #[cfg(windows)]
         {
-        let live_eligible = !smart
+            let live_eligible = !smart
             && host_context.is_none()
             && custom_ui_action.is_none()
             && audio_sidecar.is_none()
@@ -3764,55 +3776,59 @@ impl HarnessApp {
             // wrapper.
             && std::env::var_os(aexcompat_broker::image_render::DISABLE_SESSION_WRAPPER_ENV)
                 .is_none();
-        if live_eligible {
-            let identity = DispatchIdentity {
-                sha256: hash.clone(),
-                size: self.selection.as_ref().map(|item| item.size).unwrap_or_default(),
-            };
-            let diagnostic_eligible = self
-                .selection
-                .as_ref()
-                .is_some_and(|item| item.profile.is_none());
-            let (respond, receiver) = mpsc::channel();
-            let request = LiveRenderRequest {
-                repository,
-                plugin_path,
-                plugin_sha256: hash,
-                dependencies,
-                parameters,
-                input_path: input,
-                timing,
-                pixel_format,
-                output,
-                respond,
-                identity,
-                diagnostic_eligible,
-            };
-            if self.live_session.is_none() {
-                let (sender, commands) = mpsc::channel();
-                spawn_live_session_thread(commands);
-                self.live_session = Some(LiveSessionHandle { sender });
-            }
-            let sent = self
-                .live_session
-                .as_ref()
-                .expect("session handle just ensured")
-                .sender
-                .send(LiveCommand::Render(Box::new(request)));
-            if sent.is_ok() {
-                self.status = "Rendering through the resident session...".into();
-                self.rendering = true;
-                self.receiver = Some(receiver);
-                self.busy = true;
-                self.task_kind = TaskKind::Generic;
+            if live_eligible {
+                let identity = DispatchIdentity {
+                    sha256: hash.clone(),
+                    size: self
+                        .selection
+                        .as_ref()
+                        .map(|item| item.size)
+                        .unwrap_or_default(),
+                };
+                let diagnostic_eligible = self
+                    .selection
+                    .as_ref()
+                    .is_some_and(|item| item.profile.is_none());
+                let (respond, receiver) = mpsc::channel();
+                let request = LiveRenderRequest {
+                    repository,
+                    plugin_path,
+                    plugin_sha256: hash,
+                    dependencies,
+                    parameters,
+                    input_path: input,
+                    timing,
+                    pixel_format,
+                    output,
+                    respond,
+                    identity,
+                    diagnostic_eligible,
+                };
+                if self.live_session.is_none() {
+                    let (sender, commands) = mpsc::channel();
+                    spawn_live_session_thread(commands);
+                    self.live_session = Some(LiveSessionHandle { sender });
+                }
+                let sent = self
+                    .live_session
+                    .as_ref()
+                    .expect("session handle just ensured")
+                    .sender
+                    .send(LiveCommand::Render(Box::new(request)));
+                if sent.is_ok() {
+                    self.status = "Rendering through the resident session...".into();
+                    self.rendering = true;
+                    self.receiver = Some(receiver);
+                    self.busy = true;
+                    self.task_kind = TaskKind::Generic;
+                    return;
+                }
+                // The session thread is gone; drop the handle so the next render
+                // starts a fresh one. Nothing rendered on this attempt.
+                self.live_session = None;
+                self.status = "The session thread had exited; press Render to retry.".into();
                 return;
             }
-            // The session thread is gone; drop the handle so the next render
-            // starts a fresh one. Nothing rendered on this attempt.
-            self.live_session = None;
-            self.status = "The session thread had exited; press Render to retry.".into();
-            return;
-        }
         }
         self.status = "Rendering in an isolated worker...".into();
         self.rendering = true;
@@ -4494,7 +4510,11 @@ impl HarnessApp {
                     self.status = format!(
                         "Effect Controls ready: {} editable parameter(s). Render path: {}.",
                         self.parameters.len(),
-                        if self.smart_render { "SmartFX" } else { "Classic" }
+                        if self.smart_render {
+                            "SmartFX"
+                        } else {
+                            "Classic"
+                        }
                     );
                 }
             }
@@ -5483,9 +5503,7 @@ fn repository_root(args: &[std::ffi::OsString]) -> PathBuf {
                 | "--render-experimental-smart-request-32-cpu"
         )
     });
-    if typed_conformance_request
-        && let Some(path) = std::env::var_os("AEXCOMPAT_REPOSITORY_ROOT")
-    {
+    if typed_conformance_request && let Some(path) = std::env::var_os("AEXCOMPAT_REPOSITORY_ROOT") {
         let path = PathBuf::from(path);
         if path.is_absolute() && path.is_dir() {
             return path;
@@ -5851,10 +5869,11 @@ fn main() -> eframe::Result {
                 eprintln!("assignment document is not valid JSON: {error}");
                 std::process::exit(1);
             });
-        let dependencies = typed_request_dependencies(&document, request_path).unwrap_or_else(|error| {
-            eprintln!("{error}");
-            std::process::exit(1);
-        });
+        let dependencies =
+            typed_request_dependencies(&document, request_path).unwrap_or_else(|error| {
+                eprintln!("{error}");
+                std::process::exit(1);
+            });
         let plugin = Path::new(&args[2]);
         let hash = format!("{:X}", Sha256::digest(fs::read(plugin).unwrap()));
         let (mut parameters, inspection_diagnostics) =
@@ -5893,35 +5912,33 @@ fn main() -> eframe::Result {
             emit_host_request_validation_failure(&error, &parameter_metadata);
             std::process::exit(1);
         }
-        let report = aexcompat_broker::image_render::render_experimental_image_with_approved_dependencies(
-            &repository,
-            plugin,
-            &hash,
-            Path::new(&args[3]),
-            Path::new(&args[4]),
-            &parameters,
-            timing,
-            smart,
-            pixel_format,
-            host_context.as_ref(),
-            None,
-            if command.ends_with("-32-cpu") {
-                RenderGpuBackend::Cpu
-            } else {
-                RenderGpuBackend::Auto
-            },
-            dependencies,
-        );
+        let report =
+            aexcompat_broker::image_render::render_experimental_image_with_approved_dependencies(
+                &repository,
+                plugin,
+                &hash,
+                Path::new(&args[3]),
+                Path::new(&args[4]),
+                &parameters,
+                timing,
+                smart,
+                pixel_format,
+                host_context.as_ref(),
+                None,
+                if command.ends_with("-32-cpu") {
+                    RenderGpuBackend::Cpu
+                } else {
+                    RenderGpuBackend::Auto
+                },
+                dependencies,
+            );
         match report {
             Ok(mut value) => {
                 value["parameter_metadata"] = parameter_metadata;
                 println!("{}", serde_json::to_string_pretty(&value).unwrap());
             }
             Err(error) => {
-                emit_typed_failure_with_parameter_metadata(
-                    &error.to_string(),
-                    &parameter_metadata,
-                );
+                emit_typed_failure_with_parameter_metadata(&error.to_string(), &parameter_metadata);
                 std::process::exit(1);
             }
         }
@@ -6564,8 +6581,7 @@ fn main() -> eframe::Result {
                     eprintln!("{error}");
                     std::process::exit(1);
                 });
-        if let Err(error) =
-            apply_typed_assignments(&mut parameters, &document, Some(request_path))
+        if let Err(error) = apply_typed_assignments(&mut parameters, &document, Some(request_path))
         {
             eprintln!("{error}");
             std::process::exit(1);
@@ -6884,10 +6900,12 @@ mod tests {
             (2, 2)
         );
         assert!(aggregate.top.iter().any(|gap| gap.name == "covered suite"));
-        assert!(aggregate
-            .top
-            .iter()
-            .any(|gap| gap.name == "Covered Suite" && gap.version == 2));
+        assert!(
+            aggregate
+                .top
+                .iter()
+                .any(|gap| gap.name == "Covered Suite" && gap.version == 2)
+        );
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -6948,27 +6966,18 @@ mod tests {
         let mut adjacent = std::collections::HashMap::new();
         adjacent.insert("present.dll".into(), PathBuf::from("present.dll"));
         let mut warnings = std::collections::BTreeMap::new();
-        assert!(resolve_adjacent_import(
-            "present.dll",
-            ImportKind::Normal,
-            &adjacent,
-            &mut warnings
-        )
-        .is_some());
-        assert!(resolve_adjacent_import(
-            "missing.dll",
-            ImportKind::Normal,
-            &adjacent,
-            &mut warnings
-        )
-        .is_none());
-        assert!(resolve_adjacent_import(
-            "missing.dll",
-            ImportKind::Delay,
-            &adjacent,
-            &mut warnings
-        )
-        .is_none());
+        assert!(
+            resolve_adjacent_import("present.dll", ImportKind::Normal, &adjacent, &mut warnings)
+                .is_some()
+        );
+        assert!(
+            resolve_adjacent_import("missing.dll", ImportKind::Normal, &adjacent, &mut warnings)
+                .is_none()
+        );
+        assert!(
+            resolve_adjacent_import("missing.dll", ImportKind::Delay, &adjacent, &mut warnings)
+                .is_none()
+        );
         resolve_adjacent_import("missing.dll", ImportKind::Normal, &adjacent, &mut warnings);
         resolve_adjacent_import(
             "api-ms-win-core-file-l1-1-0.dll",
@@ -7068,16 +7077,18 @@ mod tests {
             "same",
         )
         .unwrap();
-        assert!(persist_diagnostic_with_nonce(
-            &root,
-            &identity,
-            "render_image",
-            true,
-            "new",
-            &serde_json::json!({"classification":"completed"}),
-            "same"
-        )
-        .is_err());
+        assert!(
+            persist_diagnostic_with_nonce(
+                &root,
+                &identity,
+                "render_image",
+                true,
+                "new",
+                &serde_json::json!({"classification":"completed"}),
+                "same"
+            )
+            .is_err()
+        );
         let bytes = fs::read(path).unwrap();
         let text = String::from_utf8(bytes.clone()).unwrap();
         assert!(!text.contains("Users"));
@@ -7225,18 +7236,24 @@ mod tests {
 
         let duplicate = ["2", "a.png", "2", "b.png"].map(std::ffi::OsString::from);
         let mut rejected = vec![parameter(2, "layer")];
-        assert!(assign_layer_paths(&mut rejected, &duplicate)
-            .unwrap_err()
-            .contains("more than once"));
+        assert!(
+            assign_layer_paths(&mut rejected, &duplicate)
+                .unwrap_err()
+                .contains("more than once")
+        );
         assert!(rejected[0].layer_path.is_none());
         let wrong_type = ["1", "a.png"].map(std::ffi::OsString::from);
-        assert!(assign_layer_paths(&mut parameters, &wrong_type)
-            .unwrap_err()
-            .contains("not a Layer input"));
+        assert!(
+            assign_layer_paths(&mut parameters, &wrong_type)
+                .unwrap_err()
+                .contains("not a Layer input")
+        );
         let unknown = ["77", "a.png"].map(std::ffi::OsString::from);
-        assert!(assign_layer_paths(&mut parameters, &unknown)
-            .unwrap_err()
-            .contains("no parameter"));
+        assert!(
+            assign_layer_paths(&mut parameters, &unknown)
+                .unwrap_err()
+                .contains("no parameter")
+        );
     }
 
     #[test]
@@ -7790,9 +7807,11 @@ mod tests {
 
         let malformed = root.join("malformed.aex");
         fs::write(&malformed, b"not a PE image").unwrap();
-        assert!(discover_adjacent_imports(&malformed)
-            .unwrap_err()
-            .contains("Could not inspect PE imports"));
+        assert!(
+            discover_adjacent_imports(&malformed)
+                .unwrap_err()
+                .contains("Could not inspect PE imports")
+        );
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -7841,9 +7860,11 @@ mod tests {
             .unwrap()
             .set_len(MAX_DISCOVERY_FILE_BYTES + 1)
             .unwrap();
-        assert!(read_bounded_pe(&path)
-            .unwrap_err()
-            .contains("PE image size"));
+        assert!(
+            read_bounded_pe(&path)
+                .unwrap_err()
+                .contains("PE image size")
+        );
         fs::remove_file(path).unwrap();
     }
 }

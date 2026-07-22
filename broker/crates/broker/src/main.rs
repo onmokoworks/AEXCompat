@@ -1,6 +1,6 @@
 #[cfg(windows)]
 fn main() {
-    use aexcompat_broker::selftest::{run, Workers};
+    use aexcompat_broker::selftest::{Workers, run};
     use std::path::{Component, PathBuf};
     aexcompat_broker::observability::init();
     let args: Vec<String> = std::env::args().collect();
@@ -124,7 +124,9 @@ fn main() {
         std::process::exit(if passed { 0 } else { 1 });
     }
     if args.len() != 3 || !args[2].ends_with(".json") {
-        eprintln!("usage: broker <selftest|l1-scattermap|l2-scattermap|render-scattermap|smart-scattermap> <create-new-json-output>");
+        eprintln!(
+            "usage: broker <selftest|l1-scattermap|l2-scattermap|render-scattermap|smart-scattermap> <create-new-json-output>"
+        );
         std::process::exit(2);
     }
     if args[1] == "l1-scattermap" {

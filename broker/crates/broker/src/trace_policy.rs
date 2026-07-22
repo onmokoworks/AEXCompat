@@ -171,8 +171,8 @@ fn create_trace_file(config: &TraceConfig) -> io::Result<TraceLaunchFile> {
     use windows_sys::Win32::Foundation::{HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE};
     use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
     use windows_sys::Win32::Storage::FileSystem::{
-        CreateFileW, GetFinalPathNameByHandleW, CREATE_NEW, FILE_ATTRIBUTE_NORMAL,
-        FILE_GENERIC_WRITE,
+        CREATE_NEW, CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_GENERIC_WRITE,
+        GetFinalPathNameByHandleW,
     };
 
     // Recheck every component immediately before the create-new operation.

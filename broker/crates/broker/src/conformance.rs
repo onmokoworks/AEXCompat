@@ -1033,12 +1033,9 @@ mod tests {
                 inspect_called: Cell::new(false),
                 render_called: Cell::new(false),
             };
-            let failure = collect_runtime_results(
-                &mut backend,
-                &[RenderPath::Classic],
-                &[PixelDepth::Argb8],
-            )
-            .unwrap_err();
+            let failure =
+                collect_runtime_results(&mut backend, &[RenderPath::Classic], &[PixelDepth::Argb8])
+                    .unwrap_err();
             assert_eq!(failure.classification, Classification::HostValidationError);
             assert!(!backend.inspect_called.get());
             assert!(!backend.render_called.get());
@@ -1233,9 +1230,11 @@ mod tests {
         )
         .unwrap();
         assert_eq!(results.len(), 1);
-        assert!(results
-            .iter()
-            .all(|item| item.classification == Classification::Crashed));
+        assert!(
+            results
+                .iter()
+                .all(|item| item.classification == Classification::Crashed)
+        );
     }
 
     #[test]

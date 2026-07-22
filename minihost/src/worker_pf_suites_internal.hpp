@@ -99,6 +99,8 @@ int32_t __cdecl begin_sampling8(void*, int32_t, uint32_t, void*);
 int32_t __cdecl end_sampling8(void*, int32_t, uint32_t, void*);
 int32_t __cdecl unsupported_batch_sample_func(void*, int32_t, uint32_t,
                                                const void*, void**);
+int32_t __cdecl unsupported_batch_sample_func16(void*, int32_t, uint32_t,
+                                                 const void*, void**);
 bool verify_iterate_suites();
 bool verify_pf_batch_sampling_suite();
 }

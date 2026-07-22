@@ -14,7 +14,6 @@ struct CatalogConfiguration {
 };
 
 struct AssemblyHooks {
-  void* unsupported{};
   std::array<void*, 4> path_query{};
   std::array<void*, 11> path_data{};
   void* duck{};

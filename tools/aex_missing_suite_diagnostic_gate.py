@@ -19,6 +19,8 @@ SUITE_RE = re.compile(r"^[A-Za-z0-9 ._-]{1,128}$")
 SHA_RE = re.compile(r"^[0-9a-f]{64}$")
 MARKER = "diagnostics="
 WORKER_FAILURE_MARKER = "AEX parameter inspection worker failed safely:"
+MAX_UNSUPPORTED_SUITE_CALLS = 32
+MAX_UNSUPPORTED_SUITE_SLOT = 1023
 
 
 def sha256_file(path: Path) -> str:
@@ -78,6 +80,47 @@ def missing_suites(stderr: str) -> list[dict]:
     return output
 
 
+def unsupported_suite_calls(stderr: str) -> list[dict]:
+    diagnostics = worker_failure(stderr)
+    if not diagnostics:
+        diagnostics = json_after_marker(stderr)
+    output = []
+    seen = set()
+    raw_calls = diagnostics.get("unsupported_suite_calls")
+    if not isinstance(raw_calls, list):
+        return output
+    for call in raw_calls[:MAX_UNSUPPORTED_SUITE_CALLS]:
+        if not isinstance(call, dict):
+            continue
+        name = call.get("name")
+        version = call.get("version")
+        slot = call.get("slot")
+        call_count = call.get("call_count")
+        key = (name, version, slot)
+        if (
+            isinstance(name, str)
+            and SUITE_RE.fullmatch(name)
+            and isinstance(version, int)
+            and not isinstance(version, bool)
+            and version > 0
+            and isinstance(slot, int)
+            and not isinstance(slot, bool)
+            and 0 <= slot <= MAX_UNSUPPORTED_SUITE_SLOT
+            and isinstance(call_count, int)
+            and not isinstance(call_count, bool)
+            and 0 < call_count <= 0xFFFFFFFF
+            and key not in seen
+        ):
+            seen.add(key)
+            output.append({
+                "name": name,
+                "version": version,
+                "slot": slot,
+                "call_count": call_count,
+            })
+    return output
+
+
 def worker_failure(stderr: str) -> dict:
     start = stderr.find(WORKER_FAILURE_MARKER)
     if start < 0:
@@ -122,6 +165,8 @@ def classify_failure(stderr: str, process_exit: int) -> dict:
         kind = "effect_entrypoint_missing"
     elif missing_suites(stderr):
         kind = "missing_suite"
+    elif unsupported_suite_calls(stderr):
+        kind = "unsupported_suite_call"
     elif selector_error is not None:
         kind = "selector_error"
     else:
@@ -136,7 +181,15 @@ def classify_failure(stderr: str, process_exit: int) -> dict:
     }
 
 
-def persist_event(repository: Path, sha: str, size: int, suites: list[dict], failure: dict, nonce: str) -> Path:
+def persist_event(
+    repository: Path,
+    sha: str,
+    size: int,
+    suites: list[dict],
+    failure: dict,
+    nonce: str,
+    unsupported_calls: list[dict] | None = None,
+) -> Path:
     if not SHA_RE.fullmatch(sha):
         raise ValueError("invalid SHA-256")
     directory = repository / "target" / "harness-diagnostics" / sha
@@ -153,7 +206,11 @@ def persist_event(repository: Path, sha: str, size: int, suites: list[dict], fai
             f"exit_code={failure['worker_exit_code'] if failure['worker_exit_code'] is not None else failure['process_exit_code']}"
         ),
         "identity": {"sha256": sha, "size": size},
-        "diagnostics": {"missing_suites": suites, **failure},
+        "diagnostics": {
+            "missing_suites": suites,
+            "unsupported_suite_calls": unsupported_calls or [],
+            **failure,
+        },
     }
     with path.open("x", encoding="utf-8", newline="\n") as stream:
         json.dump(event, stream, indent=2, sort_keys=True)
@@ -177,6 +234,38 @@ def aggregate(events: list[tuple[str, list[dict]]]) -> list[dict]:
     return rows[:10]
 
 
+def aggregate_unsupported_calls(events: list[tuple[str, list[dict]]]) -> list[dict]:
+    sha_sets: dict[tuple[str, int, int], set[str]] = defaultdict(set)
+    event_counts: dict[tuple[str, int, int], int] = defaultdict(int)
+    call_counts: dict[tuple[str, int, int], int] = defaultdict(int)
+    for sha, calls in events:
+        for call in calls:
+            key = (call["name"], call["version"], call["slot"])
+            sha_sets[key].add(sha)
+            event_counts[key] += 1
+            call_counts[key] += call["call_count"]
+    rows = [
+        {
+            "name": key[0],
+            "version": key[1],
+            "slot": key[2],
+            "sha_count": len(shas),
+            "event_count": event_counts[key],
+            "call_count": call_counts[key],
+        }
+        for key, shas in sha_sets.items()
+    ]
+    rows.sort(key=lambda row: (
+        -row["sha_count"],
+        -row["event_count"],
+        -row["call_count"],
+        row["name"],
+        row["version"],
+        row["slot"],
+    ))
+    return rows[:10]
+
+
 def run(repository: Path, fixture_root: Path, harness: Path) -> dict:
     fixtures = approved_fixtures(fixture_root)
     cases = []
@@ -195,18 +284,31 @@ def run(repository: Path, fixture_root: Path, harness: Path) -> dict:
             check=False,
         )
         suites = missing_suites(process.stderr)
+        unsupported_calls = unsupported_suite_calls(process.stderr)
         failure = classify_failure(process.stderr, process.returncode)
         if process.returncode != 0:
-            persist_event(repository, sha, fixture.stat().st_size, suites, failure, f"{nonce_base}-{index:03d}")
-            failures.append((sha, suites))
+            persist_event(
+                repository,
+                sha,
+                fixture.stat().st_size,
+                suites,
+                failure,
+                f"{nonce_base}-{index:03d}",
+                unsupported_calls,
+            )
+            failures.append((sha, suites, unsupported_calls))
         cases.append({
             "fixture": fixture.stem,
             "sha256": sha,
             "inspect_succeeded": process.returncode == 0,
             "missing_suite_count": len(suites),
+            "unsupported_suite_call_count": len(unsupported_calls),
             "failure": failure if process.returncode != 0 else None,
         })
-    top = aggregate(failures)
+    top = aggregate([(sha, suites) for sha, suites, _ in failures])
+    top_slots = aggregate_unsupported_calls(
+        [(sha, calls) for sha, _, calls in failures]
+    )
     out_of_scope_count = sum(
         (case.get("failure") or {}).get("kind") == "unsupported_plugin_kind_for_pf_inspect"
         for case in cases
@@ -224,11 +326,21 @@ def run(repository: Path, fixture_root: Path, harness: Path) -> dict:
             for case in cases
         ),
         "out_of_scope_plugin_count": out_of_scope_count,
-        "missing_suite_sha_count": len({sha for sha, suites in failures if suites}),
+        "missing_suite_sha_count": len({sha for sha, suites, _ in failures if suites}),
+        "unsupported_suite_call_sha_count": len(
+            {sha for sha, _, calls in failures if calls}
+        ),
         "top_missing_suites": top,
         "next_unimplemented_suite_candidates": top,
         "candidate_ranking_state": (
             "ranked_from_observed_missing_suites" if top else "no_missing_suite_observed_no_candidate_ranked"
+        ),
+        "top_unsupported_suite_calls": top_slots,
+        "next_unimplemented_slot_candidates": top_slots,
+        "slot_candidate_ranking_state": (
+            "ranked_from_observed_unsupported_suite_calls"
+            if top_slots
+            else "no_unsupported_suite_call_observed_no_slot_candidate_ranked"
         ),
         "cases": cases,
         "privacy": {"local_paths_exported": False, "private_stderr_exported": False},

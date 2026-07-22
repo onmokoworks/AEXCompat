@@ -22,7 +22,7 @@ def test_legacy_item_suite6_layout_matches_sdk_slots():
     assert 'version == 10' in source
     assert "g_aegp_legacy_item_suite6.get_active_item = &aegp_get_active_item" in source
     assert "g_aegp_legacy_item_suite6.get_item_type = &aegp_get_item_type" in source
-    assert "aegp_unsupported_suite_call" in source
+    assert "unsupported_suite_slots<UnsupportedSuiteId::aegp_item_10, 26>()" in source
 
 
 def test_render_suite2_has_dedicated_sdk_layout_for_grabba():

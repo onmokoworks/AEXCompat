@@ -1,6 +1,6 @@
 use aexcompat_broker::image_render::{
-    parameter_animation_sidecar_json, AnimationInterpolation, AnimationTime, AnimationValue,
-    ParameterAnimation, ParameterAnimationKey,
+    AnimationInterpolation, AnimationTime, AnimationValue, ParameterAnimation,
+    ParameterAnimationKey, parameter_animation_sidecar_json,
 };
 use serde_json::Value;
 
@@ -15,9 +15,9 @@ use serde_json::Value;
 #[cfg(windows)]
 mod windows_real_worker {
     use aexcompat_broker::image_render::{
+        AnimationInterpolation, AnimationTime, AnimationValue, DISABLE_SESSION_WRAPPER_ENV,
+        InteractiveParameter, ParameterAnimation, ParameterAnimationKey, RenderTiming,
         render_experimental_image, render_experimental_image_with_parameter_animation,
-        AnimationInterpolation, AnimationTime, AnimationValue, InteractiveParameter,
-        ParameterAnimation, ParameterAnimationKey, RenderTiming, DISABLE_SESSION_WRAPPER_ENV,
     };
     use sha2::{Digest, Sha256};
     use std::fs;
@@ -66,7 +66,11 @@ mod windows_real_worker {
         }
     }
 
-    fn scalar_key(time: (i32, u32), interpolation: AnimationInterpolation, value: f64) -> ParameterAnimationKey {
+    fn scalar_key(
+        time: (i32, u32),
+        interpolation: AnimationInterpolation,
+        value: f64,
+    ) -> ParameterAnimationKey {
         ParameterAnimationKey {
             time: AnimationTime {
                 value: time.0,
@@ -101,8 +105,10 @@ mod windows_real_worker {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let input = std::env::temp_dir().join(format!("aexcompat-oneshot-animation-input-{nonce}.png"));
-        let output = std::env::temp_dir().join(format!("aexcompat-oneshot-animation-output-{nonce}.png"));
+        let input =
+            std::env::temp_dir().join(format!("aexcompat-oneshot-animation-input-{nonce}.png"));
+        let output =
+            std::env::temp_dir().join(format!("aexcompat-oneshot-animation-output-{nonce}.png"));
         let _cleanup = RemoveOnDrop(vec![input.clone(), output.clone()]);
         image::RgbaImage::from_pixel(7, 5, image::Rgba([255, 0, 0, 0]))
             .save(&input)
@@ -421,11 +427,13 @@ fn zero_scale_nonfinite_and_invalid_components_fail_closed() {
         },
     ];
     for key in cases {
-        assert!(parameter_animation_sidecar_json(&[ParameterAnimation {
-            slot: 1,
-            keys: vec![key],
-        }])
-        .is_err());
+        assert!(
+            parameter_animation_sidecar_json(&[ParameterAnimation {
+                slot: 1,
+                keys: vec![key],
+            }])
+            .is_err()
+        );
     }
 }
 

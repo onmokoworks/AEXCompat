@@ -7,8 +7,10 @@ AEX 本体は `RenderSession::open` が起動する worker サブプロセスで
 プラグインが AviUtl2 に in-process ロードされても、crash containment
 (プロセス分離 + Job Object + per-frame watchdog) は保たれる。
 
-現状: 固定 AEX (環境変数で指定) を対象に、画像レンダリング (8bit RGBA) と
-パラメーターマッピング (段階2a: float/checkbox/color 等のスカラー) を実装。
+現状: 画像レンダリング (8bit RGBA、SmartFX 含む) + パラメーターマッピング
+(float/checkbox/color/popup dropdown) を実装。env AEX を既定に、設定項目
+"AEX" (File) で**実行中に別 AEX へ差し替え可能** (段階4)。差し替えた AEX は
+パラメーター非公開で自前の既定値描画 (AviUtl2 config は静的)。
 設計・経緯は [`docs/AVIUTL2_BRIDGE_2026-07-21.md`](../../docs/AVIUTL2_BRIDGE_2026-07-21.md)。
 
 ## 前提
@@ -88,6 +90,10 @@ AviUtl2 起動中は `.auf2` がロックされ上書きできない。閉じて
 3. その直後を右クリック →「フィルタ効果を追加」→「AEXCompat (AEX bridge)」
 4. AEX がパラメーターを持てば設定項目に出る (float→スライダー等)。値を変えると
    per-frame でセッションに反映される
+5. 設定項目 "AEX" (File) で別の `.aex` を選ぶと、AviUtl2 を再起動せず実行中に
+   その AEX へ切替わる。空に戻すと env AEX に戻る。差し替えた AEX は自前の既定値で
+   描画され、パラメーターコントロールは公開されない (AviUtl2 の config は静的なため、
+   コントロールはロード時の env AEX のものに固定される)
 
 ## テスト (AviUtl2 なし)
 

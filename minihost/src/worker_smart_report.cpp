@@ -46,6 +46,7 @@ constexpr uint32_t kMaxGuidMixInBytes = 1024 * 1024;
 std::string escape(const std::string&);
 std::string world_debug_report_json();
 std::string missing_suites_report_json();
+std::string unsupported_suite_calls_report_json();
 std::string suite_timeline_report_json();
 std::string live_suite_lease_summary();
 uint32_t suite_acquire_count();
@@ -159,7 +160,9 @@ void emit_smart_completion_report(const SmartCompletionInputs& in) {
       mask_report.streams_acquired, mask_report.streams_disposed, mask_report.values_acquired,
       mask_report.values_disposed}, in.lifetime_fault_observed, suite_leases_balanced(),
       {static_cast<int64_t>(suite_acquire_count()), static_cast<int64_t>(suite_release_count()), static_cast<int64_t>(live_suite_lease_count()),
-       static_cast<int64_t>(live_suite_reference_count())}, missing_suites_report_json() + suite_timeline_report_json(), live_suite_lease_summary(),
+       static_cast<int64_t>(live_suite_reference_count())},
+      missing_suites_report_json() + unsupported_suite_calls_report_json() +
+          suite_timeline_report_json(), live_suite_lease_summary(),
       in.suite_fault_observed, worker_runtime::handles::handle_lifetimes_balanced(),
       {handle_stats.created, handle_stats.disposed},
       {arbitrary.copy_calls, arbitrary.dispose_calls, arbitrary.print_calls,

@@ -601,6 +601,7 @@ std::size_t live_suite_lease_count();
 uint32_t live_suite_reference_count();
 bool suite_leases_balanced();
 std::string missing_suites_report_json();
+std::string unsupported_suite_calls_report_json();
 std::string suite_timeline_report_json();
 std::string live_suite_lease_summary();
 }  // namespace aexcompat::l2_detail
@@ -651,7 +652,9 @@ ClassicSubsystemDiagnostics capture_classic_subsystems() {
       {i64(l2_detail::suite_acquire_count()), i64(l2_detail::suite_release_count()),
        i64(l2_detail::live_suite_lease_count()),
        i64(l2_detail::live_suite_reference_count())},
-      l2_detail::missing_suites_report_json() + l2_detail::suite_timeline_report_json(),
+      l2_detail::missing_suites_report_json() +
+          l2_detail::unsupported_suite_calls_report_json() +
+          l2_detail::suite_timeline_report_json(),
       l2_detail::live_suite_lease_summary(),
       worker_runtime::handles::handle_lifetimes_balanced(),
       aexcompat::pf_path_runtime::lifetimes_balanced(),
