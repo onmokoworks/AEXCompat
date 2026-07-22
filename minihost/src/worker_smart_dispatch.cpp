@@ -198,9 +198,11 @@ bool dispatch(const Request& request, const Hooks& hooks,
   result.gpu_render_dispatched = render_selector == kSmartRenderGpu && will_dispatch;
   transport::RenderTransport render_transport;
   bool transport_ready = !result.gpu_render_dispatched || !use_transport;
+  bool transport_prepared = false;
   if (result.gpu_render_dispatched && use_transport) {
     transport_ready = transport::prepare_render_transport(
         runtime.input_world, runtime.output_world, render_transport);
+    transport_prepared = transport_ready;
     // prepare_render_transport swaps each world's +24 pixel pointer to the GPU
     // device buffer (so PF_GPUDeviceSuite1::GetGPUWorldData returns it). The
     // pre-transport register_world above captured the host pointer, so re-register
@@ -236,9 +238,23 @@ bool dispatch(const Request& request, const Hooks& hooks,
     // the rejected rects into a silent render, so the run fails explicitly.
     result.render_error = result.pre_error == 0 ? -6 : -1;
   }
-  if (result.gpu_render_dispatched && use_transport && transport_ready &&
-      !transport::finish_render_transport(render_transport) && result.render_error == 0)
-    result.render_error = -6;
+  if (transport_prepared) {
+    // Free the device allocations and restore each world's +24 host pointer
+    // whenever the transport was prepared, even if the device-pointer re-register
+    // above failed and suppressed the selector, so a prepared transport never
+    // leaks its allocations (#305 review).
+    if (!transport::finish_render_transport(render_transport) && result.render_error == 0)
+      result.render_error = -6;
+    // finish_render_transport restored +24 to the host pointer; re-register the
+    // host layout so a post-dispatch PF_GetPixelFormat (e.g. a plug-in that
+    // queries a render world during GPU device setdown) resolves the current
+    // layout instead of the now-stale device pointer (mirror of #305).
+    if (!plan.missing_input)
+      request.formats->register_world(runtime.input_world,
+                                      world_registry::kPixelFormatGpuBgra128);
+    request.formats->register_world(runtime.output_world,
+                                    world_registry::kPixelFormatGpuBgra128);
+  }
   std::cerr << "stage:"
             << (result.gpu_render_dispatched ? "smart_render_gpu" : "smart_render_cpu")
             << "_end error=" << result.render_error << "\n" << std::flush;
