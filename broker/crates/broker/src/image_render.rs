@@ -422,11 +422,12 @@ fn is_owned_image_transport_name(name: &str) -> bool {
         return true;
     }
 
-    // `layer-<nonce>-<index>.rgba` is the one-shot layered transport; the
-    // resident session streams its own per-layer files as
-    // `layer-session-<nonce>-<index>.rgba` (#268), a distinct prefix so the two
-    // routes never collide on a nonce. Both are broker-owned and must be
-    // reclaimable by the stale sweep when a crash skips their normal deletion.
+    // `layer-session-<nonce>-<index>.rgba` is the resident session's per-layer
+    // transport (#268). `layer-<nonce>-<index>.rgba` was the deleted one-shot's
+    // (#365); the prefix stays claimable so a file leaked by a crash before that
+    // deletion is still reclaimed rather than left behind forever. Both are
+    // broker-owned and must be reachable by the stale sweep when a crash skips
+    // their normal deletion.
     [
         ("layer-", ".rgba"),
         ("layer-session-", ".rgba"),
@@ -514,7 +515,7 @@ fn cleanup_stale_image_transport(root: &Path, now: SystemTime) -> io::Result<()>
 
 /// Decodes an input image while enforcing the transport bounds. Public so the
 /// harness's resident-session adapter can decode its cached input through the
-/// same fail-closed limits the one-shot entries apply.
+/// same fail-closed limits every render entry applies.
 pub fn decode_bounded_image(path: &Path, role: &str) -> io::Result<image::DynamicImage> {
     let mut reader = image::ImageReader::open(path)
         .map_err(|error| invalid(format!("{role} image open failed: {error}")))?
@@ -1113,11 +1114,11 @@ pub enum RenderUiAction {
 }
 
 impl RenderUiAction {
-    /// Encodes the action in the custom-UI trailer grammar shared by the
-    /// one-shot argv path and the v:2 session `ui_action` field
-    /// (`click:v1|x|y|r|g|b|a` / `draw:v1`). The click color is validated here
-    /// (finite, in 0..=1) so both callers reject the same set before it reaches
-    /// a worker.
+    /// Encodes the action in the custom-UI grammar the v:2 session `ui_action`
+    /// field carries (`click:v1|x|y|r|g|b|a` / `draw:v1`); it came from the
+    /// deleted one-shot argv trailer unchanged. The click color is validated
+    /// here (finite, in 0..=1) so a bad value is rejected before it reaches a
+    /// worker.
     pub fn encode_ui_field(&self) -> io::Result<String> {
         match self {
             RenderUiAction::Click { point, color } => {
@@ -1863,11 +1864,11 @@ fn render_audio_via_length_one_session(
         let _ = fs::remove_file(output_path);
         return AudioWrapperOutcome::Failure(error);
     }
-    // Preserve the one-shot audio report schema: start from the worker's
-    // aggregate audio report (which carries the audio_* telemetry the SDK audio
-    // contract consumes, at parity with emit_audio_render_report) and add or
-    // override the fields render_experimental_audio's one-shot path exposes, so
-    // a Windows caller on the default session path sees the same public shape.
+    // Keep the public audio report schema unchanged by #365: start from the
+    // worker's aggregate audio report (which carries the audio_* telemetry the
+    // SDK audio contract consumes, at parity with the deleted
+    // emit_audio_render_report) and add or override the fields the one-shot
+    // exposed, so a caller sees the same shape it always did.
     let Some(mut report) = close
         .get("final_report")
         .and_then(Value::as_object)
@@ -1910,9 +1911,9 @@ fn render_audio_via_length_one_session(
     ] {
         report.insert(key.to_owned(), value);
     }
-    // Preserve the one-shot path's top-level `worker_diagnostics`
-    // (classification / stage events) rather than only nesting it under
-    // session_close, so a caller on the default session path keeps that field.
+    // Keep `worker_diagnostics` (classification / stage events) at the top
+    // level, where the deleted one-shot put it, rather than only nesting it
+    // under session_close, so a caller keeps that field.
     let worker_diagnostics = close
         .get("worker")
         .and_then(|worker| worker.get("diagnostics"))
@@ -2354,12 +2355,13 @@ pub fn render_experimental_image_with_parameter_animation(
     // reconstruction, so the length-1 session gate in `render_with_artifact`
     // (`payload == encode_interactive_payload(interactive_parameters)`) always
     // failed and parameter animation was forced onto the one-shot argv path.
-    // Deriving the payload here lets the gate hold so animation rides the session
-    // transport, and keeps the one-shot fallback byte-identical: the animation
-    // sidecar overwrites every animated slot's value per frame, and an empty
-    // payload is version-agnostic to the worker, so the only observable change
-    // is that a non-animated parameter's declared value is now honored instead
-    // of dropped (matching every other interactive entrypoint).
+    // Deriving the payload here let the gate hold so animation rode the session;
+    // #365 then deleted both the gate and the one-shot, but deriving it is still
+    // what the worker needs. The animation sidecar overwrites every animated
+    // slot's value per frame, and an empty payload is version-agnostic to the
+    // worker, so the only observable effect of deriving it is that a
+    // non-animated parameter's declared value is honored instead of dropped
+    // (matching every other interactive entrypoint).
     render_with_artifact(
         repository,
         "experimental-parameter-animation",
@@ -4846,27 +4848,19 @@ fn render_with_artifact(
         timed_secondaries.push((layer.slot, layer.time, layer_width, layer_height, rgba));
     }
 
-    // Issue #98 stage W2: plain classic CPU renders route through a resident
-    // length-1 render session so the one-shot argv transport can eventually
-    // retire. Anything the session transport cannot carry yet keeps the
-    // one-shot dispatch below, as does any session-infrastructure failure
-    // (the one-shot re-run then reports through the original path). Gate
-    // failures inside the session path are final: they are the same
-    // fail-closed validation the one-shot path applies.
-    // The session transport carries mask, spatial, render-environment context
-    // (W1-3), alpha-as-coverage parameter slots (W1-4c, published once at
-    // launch), and aux channels (#211): every HostContext field is now
-    // session-representable.
+    // Issue #98 stage W2, completed by #365: every render routes through a
+    // resident length-1 render session, and the one-shot argv transport it was
+    // meant to retire is gone. The session carries mask, spatial,
+    // render-environment context (W1-3), alpha-as-coverage parameter slots
+    // (W1-4c, published once at launch), and aux channels (#211): every
+    // HostContext field is session-representable.
     //
-    // Aux channels ride the same broker-created manifest sidecar the one-shot
-    // path consumes (`--aux-manifest-v1 <manifest>`), so prepare it once here
-    // and share it with both transports rather than building it twice. The
-    // sidecars and manifest live under the broker-owned `target/image-transport`
-    // root; the worker only ever reads broker-written files there (the sample
-    // source paths are canonicalized, bounded, and copied by the broker inside
-    // prepare_aux_transport), so session-izing adds no new worker-side path
-    // re-resolution beyond the pre-existing one-shot transport. `root` and
-    // `nonce` are established here so the one-shot path below reuses them.
+    // Aux channels ride a broker-created manifest sidecar
+    // (`--aux-manifest-v1 <manifest>`) prepared here. The sidecars and manifest
+    // live under the broker-owned `target/image-transport` root; the worker only
+    // ever reads broker-written files there (the sample source paths are
+    // canonicalized, bounded, and copied by the broker inside
+    // prepare_aux_transport), so the worker re-resolves no caller-supplied path.
     let root = repository.join("target/image-transport");
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -4879,7 +4873,7 @@ fn render_with_artifact(
     } else {
         // Only aux-carrying renders touch the transport root up front; a plain
         // session render still creates nothing here. create_dir_all and the
-        // stale sweep are idempotent with the one-shot path's own calls below.
+        // stale sweep are idempotent with the layer/audio calls below.
         fs::create_dir_all(&root)?;
         cleanup_stale_image_transport(&root, SystemTime::now())?;
         prepare_aux_transport(repository, aux_channels, &root, nonce)?
@@ -4910,6 +4904,9 @@ fn render_with_artifact(
     // inherited file handles. The two transports are orthogonal, and the
     // combined native fixture proves that a classic session consumes both in
     // one render (issue #341).
+    //
+    // The block scopes the audio sidecar's cleanup guard so it is dropped on
+    // every arm of the match below, including the error arms.
     {
         // Only a layered session touches target/image-transport: RenderSession::
         // open writes per-layer sidecars there (#268), so a file-free session
@@ -5049,10 +5046,9 @@ fn render_with_artifact(
             custom_ui_action: custom_ui_action.as_ref(),
             smart,
             gpu_backend,
-            // Copy (not move): GpuRuntimePolicyInput is Copy, so the one-shot
-            // fall-through below still sees the same policy if this render is
-            // ineligible for the session. The gate above only reaches this
-            // construction with a policy present for Argb32f + a GPU backend.
+            // `RenderSession::open` decides what to do with this: it folds Auto
+            // to CPU when the policy is absent, requires one for any real GPU
+            // attempt, and ignores it entirely below float32 or on classic.
             gpu_runtime_policy,
         });
         match session_outcome {
