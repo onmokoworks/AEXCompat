@@ -300,7 +300,7 @@ native self-test は確認済み。実 AE 83件の再走査と GitHub Actions �
 |---|---|---|
 | `loaded` (パラメーター discovery 成功) | **87** | **87** |
 | `exit_11` (ロード失敗) | **222** | **1** |
-| `exit_12` (PiPL が Effect でない / entrypoint 解決不可) | 34 | 230 |
+| `exit_12` (PiPL が Effect でない / entrypoint 解決不可) | 34 | 230 (内訳は後述) |
 | `exit_20` (lifecycle 契約 fail) | 4 | 4 |
 | `module_audit_failure` | 5 | 5 |
 | `timeout_killed` | 1 | 26 |
@@ -316,9 +316,9 @@ native self-test は確認済み。実 AE 83件の再走査と GitHub Actions �
   (`Anywhere2.aex`) は 184 モジュールを封入してなお 49 個の import 名がどの探索フォルダにも
   無く、AE の Support Files の外に依存を持つ。
 - **しかし「使えるエフェクト」は 1 件も増えていない** (`loaded` は 87 → 87)。増えた 196 件の
-  行き先は `exit_12`、つまり **PiPL から Effect entrypoint を解決できない**層である。
-  AddGrain を単体で流すと `plugin_kind: "unknown_no_effect_entrypoint"` になる。実物の AE
-  エフェクトに対する PiPL discovery (#84 の機構) のギャップで、#304 の封入とは別の壁。
+  行き先は `exit_12`、つまり **Effect entrypoint を解決できない**層である。内訳を測ると
+  217 件が `unknown_no_effect_entrypoint` で、原因は「実物の AE エフェクトは PiPL ではなく
+  `PluginDataEntryFunction` で登録している」ことだった (後述、#326)。
 - `timeout_killed` 26 件はクロージャが 500MB〜1GB 級のもの。期限をスケールさせても
   この帯は落ちる。sealing 自体に 10〜18s かかり、その後 worker が 1GB を map するため。
 - 既に `loaded` していた 87 件は自己完結型で、封入の有無に関係なく動く。**MediaCore 210 件も
@@ -336,6 +336,41 @@ native self-test は確認済み。実 AE 83件の再走査と GitHub Actions �
   コピーしない封入 (共有 sealed runtime tree、あるいは default tier での探索パス拡張 +
   audit のクラス追加) は依然として将来の設計課題。
 
+## exit_12 の内訳と、その先に見えた壁 (#326)
+
+`plugin_kind` まで記録して測り直した内訳 (封入あり、353 件):
+
+| bucket | 件数 |
+|---|---|
+| `loaded` | 87 |
+| `exit_12_unknown_no_effect_entrypoint` | **217** |
+| `exit_12_aegp_candidate` | 13 |
+| `timeout_killed` | 26 |
+| `module_audit_failure` | 5 |
+| `exit_20` | 4 |
+| `exit_11` | 1 |
+
+`aegp_candidate` 13 件は本当に AEGP プラグインなので正しい分類。問題は 217 件のほうで、
+export を見ると理由が判明した:
+
+```
+AddGrain.aex   exports=2    FilterMain, PluginDataEntryFunction
+Bulge.aex      exports=2    EffectMainExtra, PluginDataEntryFunction
+Cartoon.aex    exports=3    EffectMainExtra, EffectMainExtra2, PluginDataEntryFunction
+Threshold.aex  exports=3    EffectMainExtra, EffectMainExtra2, PluginDataEntryFunction
+Bilateral.aex  exports=821  EffectMainExtra, PluginDataEntryFunction
+```
+
+**`EffectMain` を export しているものが 1 つも無い**。いずれも AE SDK の PiPL-less 登録
+(`PluginDataEntryFunction` / `...2` にホストがコールバックを渡すと、プラグイン側が名前・
+カテゴリ・**entrypoint 名**・フラグを実行時に登録する) を使っている。PiPL しか読まない
+現在の discovery (#84) では、`FilterMain` / `EffectMainExtra` / `EffectMainExtra2` という
+名前にたどり着けない。
+
+これが #304 の封入によって初めて観測できた「次の壁」で、#326 に切り出した。
+逆に言えば、**#304 単体では使えるエフェクトは増えない** (`loaded` 87 → 87) という結果は、
+この登録機構を実装するまでは変わらない。
+
 ## 層別の現状 (この再実測時点)
 
 | 層 | 内容 | 状態 |
@@ -344,5 +379,5 @@ native self-test は確認済み。実 AE 83件の再走査と GitHub Actions �
 | **L1'** | クロージャが大きすぎて封入できない | **撤去**。上限をやめたので `closure_error` は 0。代償は discovery の所要時間 |
 | **L2** | module audit が WinSxS の OS assembly を unknown 扱い | **解決** (#315、main 側の別作業)。この再実測では audit で落ちるのは封入前と同じ 5 件のみ |
 | **L2'** | 500MB〜1GB 級クロージャの `timeout_killed` 26 件 | 未。期限はバイト数比例にしたが足りない。sealing のコピーが支配的 |
-| **L3** | PiPL から Effect entrypoint を解決できない (`exit_12` 196 件) | 未。#304 の封入で初めて到達できた層。#84 の PiPL discovery を実物の AE エフェクトに当てる作業 |
+| **L3** | Effect entrypoint を解決できない (`exit_12_unknown_no_effect_entrypoint` 217 件) | 未 (#326)。#304 の封入で初めて到達できた層。実物の AE エフェクトは PiPL ではなく `PluginDataEntryFunction` で登録している |
 | **別軸** | selector SEH 512 (#318) | このビルドでは再現せず。前節の測定を無効化した原因 |
