@@ -30,9 +30,14 @@ struct RuntimeAdmissionRequest {
 struct RuntimeContext {
   std::filesystem::path plugin_path;
   HMODULE module{};
+  DLL_DIRECTORY_COOKIE sealed_directory_cookie{};
   bool stdout_redirected{};
   RuntimeStdoutRestore restore_native_stdout{};
 };
+
+// Releases an admitted context in lifecycle order. This is used by the one
+// preflight path that intentionally does not construct WorkerSession.
+void release_runtime_context(RuntimeContext& context) noexcept;
 
 // Returns the historical worker exit code on rejection. On success module
 // ownership transfers to RuntimeContext.

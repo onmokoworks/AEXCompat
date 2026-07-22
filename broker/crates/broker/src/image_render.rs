@@ -6231,7 +6231,7 @@ fn render_classic_via_length_one_session(
             height,
             ..
         } => (pixels, width, height),
-        FrameStatus::FrameError { render_error } => {
+        FrameStatus::FrameError { render_error, .. } => {
             // The gate above rejects any final report carrying a render
             // error, so this arm is defensive only.
             return SessionWrapperOutcome::Failure(invalid(format!(
@@ -6568,7 +6568,10 @@ impl InteractiveRenderSession {
                     "passed": true,
                 }))
             }
-            FrameStatus::FrameError { render_error } => {
+            FrameStatus::FrameError {
+                render_error,
+                missing_dependency,
+            } => {
                 self.frames_errored += 1;
                 Ok(json!({
                     "schema_version": 1,
@@ -6580,6 +6583,7 @@ impl InteractiveRenderSession {
                     "worker_classification": "resident_session",
                     "resident_session": session_facts(self.frames_ok, self.frames_errored),
                     "render_error": render_error,
+                    "missing_dependency": missing_dependency,
                     "passed": false,
                 }))
             }

@@ -85,6 +85,15 @@ fn is_fatal_session_error(render_error: i64) -> bool {
     matches!(render_error, -47 | -45..=-41)
 }
 
+fn valid_dependency_basename(name: &str) -> bool {
+    name.len() >= 5
+        && name.len() <= 260
+        && name.to_ascii_lowercase().ends_with(".dll")
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+}
+
 /// Resize-output bounds mirroring the worker's `validate_output_extent`
 /// (render_subsystem.cpp): each dimension <= 4096 and <= 16,777,216 pixels
 /// total. The broker re-caps a resize_needed request so a misbehaving worker
@@ -556,7 +565,10 @@ pub enum FrameStatus {
     },
     /// A frame-local compatibility diagnostic (selector error, time scale
     /// mismatch). The session stays usable; continuing is the caller's call.
-    FrameError { render_error: i64 },
+    FrameError {
+        render_error: i64,
+        missing_dependency: Option<String>,
+    },
     // An expand-output effect that overruns the launch slot no longer surfaces to
     // the caller: `render_frame` grows the shared section in place and waits for
     // the worker's follow-up ok (protocol §3, issue #262), so it always resolves
@@ -607,6 +619,8 @@ struct FrameDone {
     #[serde(default)]
     output: Option<FrameDoneOutput>,
     render_error: i64,
+    #[serde(default)]
+    missing_dependency: Option<String>,
     #[serde(default)]
     generation: Option<u32>,
     /// Present only on a "resize_needed" status (#262): the dimensions the
@@ -1551,6 +1565,18 @@ impl RenderSession {
             // response; deny_unknown_fields treats them as known for every status,
             // so reject them here on ok/error to keep the frame_done schema strict.
             let carries_resize_fields = done.width.is_some() || done.height.is_some();
+            if done
+                .missing_dependency
+                .as_deref()
+                .is_some_and(|name| !valid_dependency_basename(name))
+            {
+                return Err(self.invalidate(
+                    "malformed_dependency_diagnostic",
+                    format!("frame {frame_index} carried an unsafe dependency name"),
+                    true,
+                    POST_TERMINATION_COLLECT_TIMEOUT,
+                ));
+            }
             match done.status.as_str() {
                 "error" => {
                     if done.output.is_some()
@@ -1597,11 +1623,16 @@ impl RenderSession {
                         // that exit instead of racing it with a job termination:
                         // collection terminates the job anyway if the worker does
                         // not leave within the timeout.
+                        let dependency = done
+                            .missing_dependency
+                            .as_deref()
+                            .map(|name| format!(", missing dependency {name}"))
+                            .unwrap_or_default();
                         return Err(self.invalidate(
                             "worker_invariant_failure",
                             format!(
-                                "frame {frame_index} reported the fatal session error {}",
-                                done.render_error
+                                "frame {frame_index} reported the fatal session error {}{}",
+                                done.render_error, dependency
                             ),
                             false,
                             CLOSE_COLLECT_TIMEOUT,
@@ -1615,6 +1646,7 @@ impl RenderSession {
                         frame_index,
                         status: FrameStatus::FrameError {
                             render_error: done.render_error,
+                            missing_dependency: done.missing_dependency,
                         },
                     });
                 }
@@ -1627,7 +1659,7 @@ impl RenderSession {
                             POST_TERMINATION_COLLECT_TIMEOUT,
                         ));
                     };
-                    if carries_resize_fields {
+                    if carries_resize_fields || done.missing_dependency.is_some() {
                         return Err(self.invalidate(
                             "malformed_ok_response",
                             format!("frame {frame_index} ok response carried resize fields"),
@@ -2510,10 +2542,14 @@ pub fn run_video_batch(
                         "output_png": output_png.file_name().and_then(|name| name.to_str()),
                     }))
                 }
-                FrameStatus::FrameError { render_error } => Ok(json!({
+                FrameStatus::FrameError {
+                    render_error,
+                    missing_dependency,
+                } => Ok(json!({
                     "frame_index": frame_index,
                     "status": "error",
                     "render_error": render_error,
+                    "missing_dependency": missing_dependency,
                 })),
             }
         })();
@@ -3328,6 +3364,16 @@ mod tests {
         assert!(error_shape.output.is_none());
         assert!(error_shape.generation.is_none());
         assert_eq!(error_shape.render_error, -40);
+        assert!(error_shape.missing_dependency.is_none());
+        let dependency_error: FrameDone = serde_json::from_str(
+            r#"{"v":1,"type":"frame_done","frame_index":4,"status":"error",
+                "render_error":-47,"missing_dependency":"fixture_delay.dll"}"#,
+        )
+        .unwrap();
+        assert!(valid_dependency_basename(
+            dependency_error.missing_dependency.as_deref().unwrap()
+        ));
+        assert!(!valid_dependency_basename("..\\escape.dll"));
     }
 
     #[test]

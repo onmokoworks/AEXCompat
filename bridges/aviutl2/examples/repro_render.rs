@@ -131,7 +131,7 @@ fn main() {
                         pixels.get(0..4).unwrap_or(&pixels)
                     );
                 }
-                FrameStatus::FrameError { render_error } => {
+                FrameStatus::FrameError { render_error, .. } => {
                     eprintln!("  frame {frame} FRAME ERROR render_error={render_error}")
                 }
             },

@@ -1377,7 +1377,7 @@ mod windows_e2e {
                     assert_eq!(pixels, expected, "slot transfer round-trips the render");
                     checksums.push(checksum);
                 }
-                FrameStatus::FrameError { render_error } => {
+                FrameStatus::FrameError { render_error, .. } => {
                     panic!("frame {frame_index} unexpectedly errored: {render_error}")
                 }
             }
@@ -1698,7 +1698,10 @@ mod windows_e2e {
             .expect("frame-local errors do not invalidate the session");
         assert!(matches!(
             outcome.status,
-            FrameStatus::FrameError { render_error: -40 }
+            FrameStatus::FrameError {
+                render_error: -40,
+                missing_dependency: None,
+            }
         ));
         let outcome = session
             .render_frame(1, 1, &input_pattern(2))

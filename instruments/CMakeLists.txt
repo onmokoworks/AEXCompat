@@ -18,6 +18,7 @@ if(DEFINED ENV{AE_SDK_ROOT} AND EXISTS "$ENV{AE_SDK_ROOT}")
     "$ENV{AE_SDK_ROOT}/Examples/Util"
   )
   add_subdirectory(pf-null-echo)
+  add_subdirectory(pf-delay-load-probe)
   add_subdirectory(pf-callback-tracer)
   add_subdirectory(pf-crashkit)
   add_subdirectory(pf-gpu-memory-probe)

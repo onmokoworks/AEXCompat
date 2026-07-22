@@ -15,6 +15,7 @@ struct SelectorDispatchTelemetry {
   uint64_t seh_address{};
   std::string seh_module;
   std::string selector;
+  std::string missing_dependency;
   int32_t error{};
 };
 

@@ -251,7 +251,7 @@ impl BridgeSession {
                                 width: frame_width,
                                 height: frame_height,
                             }),
-                            FrameStatus::FrameError { render_error } => {
+                            FrameStatus::FrameError { render_error, .. } => {
                                 FrameReply::FrameLocal(render_error)
                             }
                         },

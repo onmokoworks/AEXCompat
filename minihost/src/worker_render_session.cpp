@@ -8,6 +8,7 @@
 #include "worker_invocation_orchestration.hpp"
 #include "worker_pf_ae_channel_runtime.hpp"
 #include "worker_request_parser.hpp"
+#include "worker_selector_dispatch.hpp"
 #include "worker_smart_execution.hpp"
 #include "worker_ui_event_execution.hpp"
 
@@ -733,7 +734,11 @@ RenderSessionOutcome run_session_frame_loop(
     const auto respond_error = [&](int32_t frame_error) {
       std::string reply = "{\"v\":1,\"type\":\"frame_done\",\"frame_index\":" +
           std::to_string(frame_index) + ",\"status\":\"error\",\"render_error\":" +
-          std::to_string(frame_error) + "}";
+          std::to_string(frame_error);
+      const auto& missing =
+          aexcompat::worker_runtime::selector_dispatch_telemetry().missing_dependency;
+      if (!missing.empty()) reply += ",\"missing_dependency\":\"" + missing + "\"";
+      reply += "}";
       return channels.write_message(reply);
     };
     const auto respond_ok = [&](int32_t frame_width, int32_t frame_height,

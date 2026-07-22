@@ -2493,7 +2493,7 @@ fn open_mf_session(config: MfSessionConfig) -> Result<MfSession, String> {
                         FrameStatus::Rendered { pixels, width, height, .. } => {
                             FrameReply::Rendered(RenderedFrame { pixels, width, height })
                         }
-                        FrameStatus::FrameError { render_error } => {
+                        FrameStatus::FrameError { render_error, .. } => {
                             FrameReply::FrameLocal(render_error)
                         }
                     },

@@ -2125,15 +2125,7 @@ int worker_main_impl(int argc, wchar_t **argv) {
         runtime_hooks, runtime_request, runtime_context);
     if (admission_error != 0) return admission_error;
     const auto release_admitted = [&] {
-      if (runtime_context.module) {
-        FreeLibrary(runtime_context.module);
-        runtime_context.module = nullptr;
-      }
-      if (runtime_context.stdout_redirected &&
-          runtime_context.restore_native_stdout) {
-        runtime_context.restore_native_stdout();
-        runtime_context.stdout_redirected = false;
-      }
+      wr::release_runtime_context(runtime_context);
     };
     // Load the plug-in and run the DLL-load module audit across the GPU lifecycle,
     // exactly like a sealed render worker: the broker's secure dispatch requires a

@@ -285,6 +285,7 @@ struct SehDiagnosticsSnapshot {
   uint64_t address{};
   std::string escaped_module;
   std::string escaped_selector;
+  std::string escaped_missing_dependency;
   int32_t error{};
 };
 
