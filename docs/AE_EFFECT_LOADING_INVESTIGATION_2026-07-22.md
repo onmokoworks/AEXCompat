@@ -266,3 +266,83 @@ hash/size の既存 fail-closed gate は維持する。その他の場所は引�
 focused pytest、broker focused Rust tests、native worker Release build、L2/render/smart の
 native self-test は確認済み。実 AE 83件の再走査と GitHub Actions の最終判定は外部環境/CIの
 確認範囲として残る。
+
+---
+
+# 再実測 (2026-07-22 夕方、#315 マージ後・封入上限撤去後)
+
+前節「実測 (2026-07-22 午後)」は、当時の worker ビルドが **selector dispatch でいきなり SEH
+例外を出す状態 (#318)** で採ったものだった。その後 main に #315 (module audit の WinSxS
+クラス) が入り、#318 の症状もこのビルドでは再現しなくなったので、条件を揃えて測り直した。
+**この節の数字が現時点の最新**で、前節の dispatch 以降の数字 (`exit_20` / `loaded`) は
+無効として扱う (観察の履歴として残す)。
+
+## 変更点 (前節との差分)
+
+1. **封入上限を撤去**。クロージャは AEX 自身の import から導出され、名前が指せるのは運用者が
+   指定した探索フォルダ直下の実在ファイルだけなので、大きさは運用者が決める。64 モジュール /
+   1 GiB の既定上限をやめ、`max_dependencies` / `max_total_bytes` は任意の caller bound に
+   格下げした。外部 JSON マニフェスト側の 64 件上限はそのまま (`validate_with_limit`)。
+2. **探索順の修正**。System32 を先に見ていたのを「探索フォルダ → System32」に反転
+   (ローダーの `LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR` → `..._SYSTEM32` と同じ順)。System32 に
+   同名があっても app-local ランタイムを封入する。これでクロージャを持つプラグインが
+   141 → 225 件に増えた (前節の数字はここを取りこぼしていた)。
+3. **inspect の worker 期限をスケール**。固定 5s では 1GB を map し終える前に kill されていた。
+   封入バイト数に比例 (5s + 32MiB あたり 1s、上限 120s) させた。
+4. **`--no-deps` ベースラインの修正**。AEX 自身のフォルダも渡さない、真の「何も封入しない」に
+   した (測り直しても数字は変わらなかった)。
+
+## 結果: exit 11 は 222 → 1、ただし discovery 成功は増えていない
+
+`Support Files\Plug-ins` 再帰 353 件、直列、worker は main マージ後のこのブランチのビルド:
+
+| bucket | 封入なし | 封入あり |
+|---|---|---|
+| `loaded` (パラメーター discovery 成功) | **87** | **87** |
+| `exit_11` (ロード失敗) | **222** | **1** |
+| `exit_12` (PiPL が Effect でない / entrypoint 解決不可) | 34 | 230 |
+| `exit_20` (lifecycle 契約 fail) | 4 | 4 |
+| `module_audit_failure` | 5 | 5 |
+| `timeout_killed` | 1 | 26 |
+| `closure_error` | 0 | **0** |
+
+プラグイン単位の遷移: `exit_11 → exit_12` 196、`exit_11 → timeout_killed` 25、
+`exit_11 → exit_11` 1、他は全て不変 (`loaded → loaded` 87、`exit_12 → exit_12` 34、
+`module_audit_failure` 5、`exit_20` 4)。**退行 0**。
+
+読み方を誤らないための明示:
+
+- **L1 (ロードできない) は解けた**。222 件中 221 件がローダーを越えた。残る 1 件
+  (`Anywhere2.aex`) は 184 モジュールを封入してなお 49 個の import 名がどの探索フォルダにも
+  無く、AE の Support Files の外に依存を持つ。
+- **しかし「使えるエフェクト」は 1 件も増えていない** (`loaded` は 87 → 87)。増えた 196 件の
+  行き先は `exit_12`、つまり **PiPL から Effect entrypoint を解決できない**層である。
+  AddGrain を単体で流すと `plugin_kind: "unknown_no_effect_entrypoint"` になる。実物の AE
+  エフェクトに対する PiPL discovery (#84 の機構) のギャップで、#304 の封入とは別の壁。
+- `timeout_killed` 26 件はクロージャが 500MB〜1GB 級のもの。期限をスケールさせても
+  この帯は落ちる。sealing 自体に 10〜18s かかり、その後 worker が 1GB を map するため。
+- 既に `loaded` していた 87 件は自己完結型で、封入の有無に関係なく動く。**MediaCore 210 件も
+  同様にクロージャ 0 モジュールなので #304 の影響を受けない**。
+
+## 封入コストの実測 (上限撤去後)
+
+- クロージャを持つのは 353 件中 **225 件** (探索順修正後)。最大 227 モジュール / 1029 MB。
+- discovery 1 件あたり (sealing + worker): 中央値 **1.0s**、最大 **51s**。353 件の直列 sweep
+  全体で 24〜30 分。
+- sealed load tree は**コピー**なので、バイトあたり source 4 パス + write 1 + dest 2 ≒ 7 回
+  触る。1GB のクロージャなら dispatch ごとにそれだけ動く。discovery とセッション開始で
+  それぞれ 1 回ずつ。
+- **上限を設けない代わりに、重いプラグインは discovery が遅い**というのが素直な結論。
+  コピーしない封入 (共有 sealed runtime tree、あるいは default tier での探索パス拡張 +
+  audit のクラス追加) は依然として将来の設計課題。
+
+## 層別の現状 (この再実測時点)
+
+| 層 | 内容 | 状態 |
+|---|---|---|
+| **L1** | ロード失敗 (exit 11) | **解決** (222 → 1)。依存クロージャの解決・封入は broker の機能 |
+| **L1'** | クロージャが大きすぎて封入できない | **撤去**。上限をやめたので `closure_error` は 0。代償は discovery の所要時間 |
+| **L2** | module audit が WinSxS の OS assembly を unknown 扱い | **解決** (#315、main 側の別作業)。この再実測では audit で落ちるのは封入前と同じ 5 件のみ |
+| **L2'** | 500MB〜1GB 級クロージャの `timeout_killed` 26 件 | 未。期限はバイト数比例にしたが足りない。sealing のコピーが支配的 |
+| **L3** | PiPL から Effect entrypoint を解決できない (`exit_12` 196 件) | 未。#304 の封入で初めて到達できた層。#84 の PiPL discovery を実物の AE エフェクトに当てる作業 |
+| **別軸** | selector SEH 512 (#318) | このビルドでは再現せず。前節の測定を無効化した原因 |
