@@ -89,8 +89,10 @@ worker は AEX を隔離した sealed load tree からロードし、探索先�
   「大きいから」で弾かない。ただし sealed load tree は**コピー**なので、その分だけ discovery と
   セッション開始が遅くなる (実測: 220MB で 0.8s、1.0GB で十数秒)。依存の重い AEX を大量に
   抱えるフォルダを指定すると、バックグラウンド discovery は相応に長く走る。
-- クロージャが解決できない AEX (探索フォルダが不正、image が壊れている等) は discovery 失敗
-  として扱う。依存無しで再試行しても同じロード失敗になるため。
+- クロージャが解決できない AEX (上限超過、探索フォルダが不正、image が壊れている等) は
+  discovery 失敗として扱う。依存無しで再試行しても同じロード失敗になるため。この negative も
+  キャッシュされ、AEX 自身・探索 root・上限のいずれかが変わったときに再試行される
+  (上限を上げれば全体が無効化されるので、弾かれたプラグインも自動で再 discovery される)。
 - これで解けるのは L1 (LoadLibrary 失敗) だけで、Adobe ランタイムを引くエフェクトはさらに
   module audit (L2) と Adobe IPC 初期化 (L3) の壁がある。実測は
   `docs/AE_EFFECT_LOADING_INVESTIGATION_2026-07-22.md` を参照。

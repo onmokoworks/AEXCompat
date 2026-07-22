@@ -1005,14 +1005,25 @@ fn discover_one(repository: &Path, plugin: &Path, dependency: &DependencyConfig)
     // root at all (issue #304). A closure that cannot be resolved is a failed
     // discovery, not a dependency-free retry.
     let roots = search_roots_for(plugin, &dependency.dirs);
+    let recorded_roots: Vec<String> = roots
+        .iter()
+        .map(|root| root.to_string_lossy().into_owned())
+        .collect();
     let Ok(closure) = dependency_closure_for(plugin, dependency, &roots) else {
+        // A resolution that failed outright (over an operator's ceiling, an
+        // unreadable image) still records where it looked, so the negative
+        // settles instead of re-walking the same closure on every launch. It is
+        // retried when the AEX, the roots, or the ceilings change — the ceilings
+        // being part of the build fingerprint, which is the knob an operator
+        // actually turns after seeing a plug-in rejected.
+        entry.closure = CachedClosure {
+            roots: recorded_roots,
+            ..CachedClosure::default()
+        };
         return entry;
     };
     entry.closure = CachedClosure {
-        roots: roots
-            .iter()
-            .map(|root| root.to_string_lossy().into_owned())
-            .collect(),
+        roots: recorded_roots,
         sealed: closure
             .dependencies()
             .iter()
