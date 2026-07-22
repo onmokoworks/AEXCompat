@@ -45,6 +45,8 @@ MAX_HEIGHT_OFFSET = 16
 LAYER_SLOT_COUNT_OFFSET = 20
 INPUT_GENERATION_OFFSET = 24
 OUTPUT_GENERATION_OFFSET = 28
+FRAME_WIDTH_OFFSET = 32
+FRAME_HEIGHT_OFFSET = 36
 
 EXIT_PROTOCOL_VIOLATION = 23
 EXIT_INVARIANT_FAILURE = 24
@@ -71,6 +73,9 @@ class SessionTransport:
     def __init__(self, depth_code=8, output_pixel_bytes=4):
         kernel32 = ctypes.windll.kernel32
         self.kernel32 = kernel32
+        self.depth_code = depth_code
+        self.output_pixel_bytes = output_pixel_bytes
+        self.process = None
         self.input_offset = HEADER_BYTES
         self.output_offset = HEADER_BYTES + _align(WIDTH * HEIGHT * 4)
         self.section_bytes = self.output_offset + _align(
@@ -116,6 +121,7 @@ class SessionTransport:
         view = kernel32.MapViewOfFile(
             wintypes.HANDLE(section), FILE_MAP_ALL_ACCESS, 0, 0, 0)
         assert view
+        self.view_address = view
         self.view = (ctypes.c_ubyte * self.section_bytes).from_address(view)
 
         self.write_header(MAGIC_OFFSET, HEADER_MAGIC)
@@ -124,6 +130,13 @@ class SessionTransport:
         self.write_header(MAX_WIDTH_OFFSET, WIDTH)
         self.write_header(MAX_HEIGHT_OFFSET, HEIGHT)
         self.write_header(LAYER_SLOT_COUNT_OFFSET, 0)
+        self.write_header(INPUT_GENERATION_OFFSET, 0)
+        self.write_header(OUTPUT_GENERATION_OFFSET, 0)
+        self.write_header(FRAME_WIDTH_OFFSET, WIDTH)
+        self.write_header(FRAME_HEIGHT_OFFSET, HEIGHT)
+
+    def attach_process(self, process):
+        self.process = process
 
     def write_header(self, offset, value):
         struct.pack_into("<I", self.view, offset, value)
@@ -173,22 +186,111 @@ class SessionTransport:
         return collected
 
     def receive(self, timeout=30):
-        result = {}
+        while True:
+            result = {}
 
-        def reader():
-            prefix = self._read_exact(4)
-            if prefix is None:
-                result["message"] = None
-                return
-            (length,) = struct.unpack("<I", prefix)
-            body = self._read_exact(length)
-            result["message"] = None if body is None else json.loads(body)
+            def reader():
+                prefix = self._read_exact(4)
+                if prefix is None:
+                    result["message"] = None
+                    return
+                (length,) = struct.unpack("<I", prefix)
+                body = self._read_exact(length)
+                result["message"] = None if body is None else json.loads(body)
 
-        thread = threading.Thread(target=reader, daemon=True)
-        thread.start()
-        thread.join(timeout)
-        assert not thread.is_alive(), "timed out waiting for a worker response"
-        return result["message"]
+            thread = threading.Thread(target=reader, daemon=True)
+            thread.start()
+            thread.join(timeout)
+            assert not thread.is_alive(), "timed out waiting for a worker response"
+            message = result["message"]
+            if not (isinstance(message, dict) and
+                    message.get("type") == "frame_done" and
+                    message.get("status") == "resize_needed"):
+                return message
+            self._grow_output_capacity(message["width"], message["height"])
+
+    def _grow_output_capacity(self, width, height):
+        assert self.process is not None, "worker process is not attached"
+        assert width > 0 and height > 0
+        assert width > WIDTH or height > HEIGHT
+        grown_section_bytes = self.output_offset + _align(
+            width * height * self.output_pixel_bytes)
+
+        PAGE_READWRITE = 0x04
+        self.kernel32.CreateFileMappingW.restype = wintypes.HANDLE
+        grown_section = self.kernel32.CreateFileMappingW(
+            wintypes.HANDLE(-1), None, PAGE_READWRITE,
+            (grown_section_bytes >> 32) & 0xFFFFFFFF,
+            grown_section_bytes & 0xFFFFFFFF, None)
+        assert grown_section, ctypes.get_last_error()
+        grown_section_value = getattr(grown_section, "value", grown_section)
+
+        FILE_MAP_ALL_ACCESS = 0x000F001F
+        self.kernel32.MapViewOfFile.restype = wintypes.LPVOID
+        grown_view_address = self.kernel32.MapViewOfFile(
+            wintypes.HANDLE(grown_section_value), FILE_MAP_ALL_ACCESS, 0, 0, 0)
+        if not grown_view_address:
+            self.kernel32.CloseHandle(wintypes.HANDLE(grown_section_value))
+            raise AssertionError(ctypes.get_last_error())
+        grown_view = (ctypes.c_ubyte * grown_section_bytes).from_address(
+            grown_view_address)
+
+        # The worker has already copied this frame's input and rendered pixels
+        # into private buffers. It only needs the broker-owned static header and
+        # the last completed generation when adopting the new section.
+        last_generation = self.read_header(OUTPUT_GENERATION_OFFSET)
+        for offset, value in (
+            (MAGIC_OFFSET, HEADER_MAGIC),
+            (VERSION_OFFSET, SESSION_HEADER_VERSION),
+            (DEPTH_CODE_OFFSET, self.depth_code),
+            (MAX_WIDTH_OFFSET, WIDTH),
+            (MAX_HEIGHT_OFFSET, HEIGHT),
+            (LAYER_SLOT_COUNT_OFFSET, 0),
+            (INPUT_GENERATION_OFFSET, last_generation),
+            (OUTPUT_GENERATION_OFFSET, last_generation),
+            (FRAME_WIDTH_OFFSET, WIDTH),
+            (FRAME_HEIGHT_OFFSET, HEIGHT),
+        ):
+            struct.pack_into("<I", grown_view, offset, value)
+
+        process_handle = getattr(self.process, "_handle", None)
+        process_handle = getattr(process_handle, "value", process_handle)
+        assert process_handle, "worker process handle is unavailable"
+        self.kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+        self.kernel32.DuplicateHandle.argtypes = [
+            wintypes.HANDLE, wintypes.HANDLE, wintypes.HANDLE,
+            ctypes.POINTER(wintypes.HANDLE), wintypes.DWORD, wintypes.BOOL,
+            wintypes.DWORD,
+        ]
+        self.kernel32.DuplicateHandle.restype = wintypes.BOOL
+        duplicated = wintypes.HANDLE()
+        DUPLICATE_SAME_ACCESS = 0x00000002
+        assert self.kernel32.DuplicateHandle(
+            self.kernel32.GetCurrentProcess(),
+            wintypes.HANDLE(grown_section_value),
+            wintypes.HANDLE(process_handle),
+            ctypes.byref(duplicated), 0, False, DUPLICATE_SAME_ACCESS), \
+            ctypes.get_last_error()
+        duplicated_value = duplicated.value
+        assert duplicated_value
+
+        self.send({
+            "v": 1,
+            "type": "grow",
+            "section_handle": str(duplicated_value),
+            "output_capacity_width": width,
+            "output_capacity_height": height,
+        })
+
+        self.kernel32.UnmapViewOfFile.argtypes = [wintypes.LPVOID]
+        self.kernel32.UnmapViewOfFile.restype = wintypes.BOOL
+        assert self.kernel32.UnmapViewOfFile(self.view_address)
+        self.kernel32.CloseHandle(wintypes.HANDLE(
+            getattr(self.section, "value", self.section)))
+        self.section = grown_section
+        self.view_address = grown_view_address
+        self.view = grown_view
+        self.section_bytes = grown_section_bytes
 
     def close_child_ends(self):
         # After spawn the parent must drop the child-side ends so a worker
@@ -214,6 +316,7 @@ def _spawn(transport, aex=None, payload="v5|"):
          str(WIDTH), str(HEIGHT), "1", "300", str(TIME_SCALE)],
         cwd=ROOT, env=transport.environment(), close_fds=False,
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    transport.attach_process(process)
     transport.close_child_ends()
     return process
 

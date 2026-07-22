@@ -7,6 +7,7 @@ endif()
 
 add_library(pf_parameter_echo_probe MODULE
   pf_parameter_echo_probe.cpp
+  pf_parameter_echo_probe.rc
 )
 target_compile_features(pf_parameter_echo_probe PRIVATE cxx_std_17)
 target_include_directories(pf_parameter_echo_probe PRIVATE

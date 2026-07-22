@@ -58,6 +58,7 @@ def _spawn(transport, command="--smart-session-v1", worker=None):
          str(WIDTH), str(HEIGHT), "1", str(TOTAL_TIME), str(TIME_SCALE)],
         cwd=ROOT, env=transport.environment(), close_fds=False,
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    transport.attach_process(process)
     transport.close_child_ends()
     return process
 
@@ -180,10 +181,12 @@ def test_smart_session_frames_observe_their_own_current_time():
         transport.write_input(50, 2)
         transport.send(render_frame_message(1, EXTRA_PIXELS_TIME))
         second = transport.receive()
-        assert second["status"] == "error"
-        assert second["render_error"] == -44
+        assert second["status"] == "ok", second
+        assert second["output"]["width"] == WIDTH + 4
+        assert second["output"]["height"] == HEIGHT + 4
+        transport.send({"v": 1, "type": "close"})
         code, _, stderr = _finish(process)
-        assert code == EXIT_INVARIANT_FAILURE, (code, stderr[-500:])
+        assert code == 0, (code, stderr[-500:])
     finally:
         if process.poll() is None:
             process.kill()
@@ -215,25 +218,24 @@ def test_smart_session_survives_a_frame_local_time_scale_mismatch():
             process.communicate(timeout=30)
 
 
-def test_smart_session_fails_closed_on_a_result_larger_than_the_session():
+def test_smart_session_grows_for_a_result_larger_than_the_session():
     _require_artifacts()
     transport = SessionTransport()
     process = _spawn(transport)
     try:
         transport.write_input(93, 1)
         transport.send(render_frame_message(0, EXTRA_PIXELS_TIME))
-        rejected = transport.receive()
-        assert rejected is not None, "worker closed the response pipe early"
-        assert rejected["status"] == "error"
-        # kSessionDimensionMismatch: v1 requires every frame at the launch
-        # dimensions, and the probe's extra-pixels scenario publishes a
-        # larger result the slot layout cannot admit.
-        assert rejected["render_error"] == -44
+        done = transport.receive()
+        assert done is not None, "worker closed the response pipe early"
+        assert done["status"] == "ok", done
+        assert done["output"]["width"] == WIDTH + 4
+        assert done["output"]["height"] == HEIGHT + 4
+        transport.send({"v": 1, "type": "close"})
         code, stdout, stderr = _finish(process)
-        assert code == EXIT_INVARIANT_FAILURE, (code, stderr[-500:])
+        assert code == 0, (code, stderr[-500:])
         report = json.loads(stdout.strip())
-        assert report["session_invariant_failure"] is True
-        assert report["status"] == "render_failed"
+        assert report["session_invariant_failure"] is False
+        assert report["status"] == "render_completed"
     finally:
         if process.poll() is None:
             process.kill()
