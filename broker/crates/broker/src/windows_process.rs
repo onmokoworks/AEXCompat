@@ -241,6 +241,11 @@ pub struct ProcessResult {
     /// True when the worker's own peak commit reached the cap, meaning
     /// allocations beyond it were failing inside the worker.
     pub memory_limit_reached: bool,
+    /// Windows the worker put on its private desktop, which the broker closed
+    /// on its behalf (issue #351). Normally empty. An entry with `closed:
+    /// false` is the one that matters: the window ignored `WM_CLOSE`, so the
+    /// worker is still waiting on something nobody can answer.
+    pub dismissed_windows: Vec<crate::worker_dialog::DismissedWindow>,
 }
 
 pub fn run_sentinel_check(program: &Path, timeout: Duration) -> io::Result<ProcessResult> {
@@ -575,6 +580,9 @@ pub struct LaunchedIsolatedProcess {
     process: OwnedHandle,
     job: OwnedHandle,
     desktop: Option<WorkerDesktop>,
+    /// Present only for a private desktop: the interactive desktop is never
+    /// swept, so a GUI harness worker's windows are left exactly as they are.
+    dialog_sweep: Option<crate::worker_dialog::DialogSweep>,
     stdout_reader: thread::JoinHandle<io::Result<(String, bool)>>,
     stderr_reader: thread::JoinHandle<io::Result<(String, bool)>>,
     // Opt-in crash minidump (issue #18). The broker keeps the pipe read side
@@ -635,6 +643,7 @@ impl LaunchedIsolatedProcess {
             process: process_handle,
             job,
             desktop,
+            dialog_sweep,
             stdout_reader,
             stderr_reader,
             minidump_file,
@@ -673,6 +682,16 @@ impl LaunchedIsolatedProcess {
         drop(minidump_file);
         let (peak_process_memory_bytes, peak_job_memory_bytes) = query_job_memory_peaks(job.raw());
         let worker_peak_commit_bytes = query_worker_peak_commit(process_handle.raw());
+        // Ended after the worker is gone so the last sweep sees whether the
+        // windows it closed actually went away, and before the desktop handle
+        // is released so it is never enumerated after being closed.
+        let dismissed_windows = dialog_sweep.map(|sweep| sweep.finish()).unwrap_or_default();
+        for window in crate::worker_dialog::undismissed(&dismissed_windows) {
+            tracing::warn!(
+                class = %window.class,
+                "a worker window ignored WM_CLOSE and may have blocked the worker"
+            );
+        }
         // Release the desktop only after the worker, job, readers, and
         // diagnostics have all been collected. The object is intentionally
         // not part of the inherited handle list; lpDesktop names it.
@@ -728,6 +747,7 @@ impl LaunchedIsolatedProcess {
             peak_job_memory_bytes,
             process_memory_limit_bytes: PROCESS_MEMORY_LIMIT as u64,
             memory_limit_reached,
+            dismissed_windows,
         })
     }
 }
@@ -1006,10 +1026,18 @@ fn launch_isolated_impl(
     }
     let stdout_reader = reader(stdout_read.take() as usize, STDOUT_CAPTURE_LIMIT);
     let stderr_reader = reader(stderr_read.take() as usize, STDERR_CAPTURE_LIMIT);
+    // Only a desktop the broker created is swept. `None` here means the
+    // caller asked for its own desktop (the GUI harness path), where closing a
+    // window would be closing the user's.
+    let dialog_sweep = desktop
+        .as_ref()
+        .and_then(|desktop| desktop.handle)
+        .map(|handle| crate::worker_dialog::DialogSweep::start(handle, job.raw()));
     Ok(LaunchedIsolatedProcess {
         process: process_handle,
         job,
         desktop,
+        dialog_sweep,
         stdout_reader,
         stderr_reader,
         minidump_file,

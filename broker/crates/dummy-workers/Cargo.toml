@@ -31,6 +31,10 @@ name = "dummy_large_stdout"
 path = "src/bin/dummy_large_stdout.rs"
 
 [[bin]]
+name = "dummy_messagebox"
+path = "src/bin/dummy_messagebox.rs"
+
+[[bin]]
 name = "sealed_acl_probe"
 path = "src/sealed_acl_probe.rs"
 

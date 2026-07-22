@@ -35,6 +35,7 @@ pub mod trace_policy;
 pub mod trusted_worker_stage;
 #[cfg(windows)]
 pub mod windows_process;
+pub mod worker_dialog;
 pub mod worker_module_audit;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
