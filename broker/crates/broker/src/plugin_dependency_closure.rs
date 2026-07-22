@@ -25,7 +25,14 @@
 //!   worker's load flags already reach System32. A name the roots *do* provide is
 //!   sealed even when System32 has one too, because that is the order the loader
 //!   itself resolves in (the load directory first) and an app-local runtime is
-//!   shipped for a reason.
+//!   shipped for a reason. API set names (`api-ms-*` / `ext-ms-*`) are the
+//!   exception: the loader resolves those from the API set schema before any
+//!   directory, so a copy in a root would never be the module that loads.
+//! - KnownDLLs are not special-cased. A search root holding, say, its own
+//!   `kernel32.dll` would have that copy sealed even though the loader maps the
+//!   system one regardless; the sealed copy then simply never loads. Reading the
+//!   KnownDLLs registry list to skip it would buy a wasted copy, not a different
+//!   load, so it is left out until something needs it.
 
 use crate::secure_image_dispatch::ApprovedImageArtifact;
 use crate::session_dependency_manifest::{
@@ -319,8 +326,15 @@ fn resolve_name(name: &str, roots: &[PathBuf]) -> io::Result<NameResolution> {
     if !windows_safe_basename(name) {
         return Ok(NameResolution::Rejected);
     }
-    // Search roots come before System32, in the order the loader itself uses:
-    // `LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR` is consulted before
+    // An API set name is resolved by the loader from the API set schema before
+    // any directory is searched, so a copy sitting in a search root would never
+    // be the module that loads. Leave it to the loader rather than sealing a file
+    // the worker will ignore — and rather than failing the whole closure over one.
+    if is_api_set_name(name) {
+        return Ok(NameResolution::System32);
+    }
+    // Otherwise search roots come before System32, in the order the loader itself
+    // uses: `LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR` is consulted before
     // `LOAD_LIBRARY_SEARCH_SYSTEM32`. A name that exists in both places is an
     // app-local runtime the plug-in ships deliberately (Adobe's own
     // `msvcp140.dll` next to its effects, say), and skipping it because System32
@@ -478,6 +492,13 @@ fn system_directory() -> Option<PathBuf> {
     fs::canonicalize(PathBuf::from(root).join("System32")).ok()
 }
 
+/// Whether `name` is a Windows API set (`api-ms-*` / `ext-ms-*`), which the
+/// loader resolves from the API set schema before searching any directory.
+fn is_api_set_name(name: &str) -> bool {
+    let folded = name.to_ascii_lowercase();
+    folded.starts_with("api-ms-") || folded.starts_with("ext-ms-")
+}
+
 /// The subset of names that may be joined to a directory: one plain component,
 /// no separators, no drive letter, no control characters, ASCII only (PE import
 /// names are ASCII).
@@ -606,6 +627,25 @@ mod tests {
 
         fs::remove_dir_all(install).unwrap();
         fs::remove_dir_all(bare).unwrap();
+    }
+
+    #[test]
+    fn never_seals_an_api_set_even_when_a_root_holds_one() {
+        // The loader resolves api-ms-* / ext-ms-* from the API set schema before
+        // it searches any directory, so an app-local copy would never be the
+        // module that loads; sealing it would copy a file the worker ignores, and
+        // could fail the closure over a file that does not matter.
+        let install = temp_dir("apiset");
+        let api_set = "api-ms-win-crt-runtime-l1-1-0.dll";
+        write_pe(&install, api_set, &[]);
+        let plugin = write_pe(&install, "effect.aex", &[api_set]);
+        let roots = vec![install.clone()];
+
+        let closure =
+            resolve_dependency_closure(DependencyClosureRequest::new(&plugin, &roots)).unwrap();
+        assert!(closure.is_empty());
+        assert_eq!(closure.unresolved(), [api_set]);
+        fs::remove_dir_all(install).unwrap();
     }
 
     #[test]
