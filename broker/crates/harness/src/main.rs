@@ -5804,18 +5804,16 @@ fn main() -> eframe::Result {
         };
         let plugin = Path::new(&args[2]);
         let hash = format!("{:X}", Sha256::digest(fs::read(plugin).unwrap()));
-        let approved_dependencies = if auto_path {
-            match approved_adjacent_dependencies(plugin, &hash) {
-                Ok(dependencies) => dependencies,
-                Err(error) => {
-                    eprintln!("automatic dependency approval failed: {error}");
-                    std::process::exit(1);
-                }
+        let approved_dependencies = match approved_adjacent_dependencies(plugin, &hash) {
+            Ok(dependencies) => dependencies,
+            Err(error) if auto_path => {
+                eprintln!("automatic dependency approval failed: {error}");
+                std::process::exit(1);
             }
-        } else {
-            Vec::new()
+            Err(_) => Vec::new(),
         };
-        let (parameters, inspection) = if auto_path {
+        let use_approved_dependencies = auto_path || !approved_dependencies.is_empty();
+        let (parameters, inspection) = if use_approved_dependencies {
             match aexcompat_broker::image_render::inspect_experimental_with_approved_dependencies_and_diagnostics(
                 &repository,
                 plugin,
@@ -5850,32 +5848,64 @@ fn main() -> eframe::Result {
             command.contains("smart")
         };
         let report = if deep16_png {
-            aexcompat_broker::image_render::render_experimental_image_at_time_with_deep16_png(
-                &repository,
-                plugin,
-                &hash,
-                Path::new(&args[3]),
-                Path::new(&args[4]),
-                &parameters,
-                aexcompat_broker::image_render::RenderTiming::default(),
-                smart,
-            )
+            if use_approved_dependencies {
+                aexcompat_broker::image_render::render_experimental_image_with_approved_dependencies_and_deep16_png(
+                    &repository,
+                    plugin,
+                    &hash,
+                    Path::new(&args[3]),
+                    Path::new(&args[4]),
+                    &parameters,
+                    aexcompat_broker::image_render::RenderTiming::default(),
+                    smart,
+                    approved_dependencies,
+                )
+            } else {
+                aexcompat_broker::image_render::render_experimental_image_at_time_with_deep16_png(
+                    &repository,
+                    plugin,
+                    &hash,
+                    Path::new(&args[3]),
+                    Path::new(&args[4]),
+                    &parameters,
+                    aexcompat_broker::image_render::RenderTiming::default(),
+                    smart,
+                )
+            }
         } else if command.ends_with("-32-cpu") {
-            aexcompat_broker::image_render::render_experimental_image_at_time_with_format_context_ui_action_and_gpu_backend(
-                &repository,
-                plugin,
-                &hash,
-                Path::new(&args[3]),
-                Path::new(&args[4]),
-                &parameters,
-                aexcompat_broker::image_render::RenderTiming::default(),
-                smart,
-                pixel_format,
-                None,
-                None,
-                aexcompat_broker::image_render::RenderGpuBackend::Cpu,
-            )
-        } else if auto_path {
+            if use_approved_dependencies {
+                aexcompat_broker::image_render::render_experimental_image_with_approved_dependencies(
+                    &repository,
+                    plugin,
+                    &hash,
+                    Path::new(&args[3]),
+                    Path::new(&args[4]),
+                    &parameters,
+                    aexcompat_broker::image_render::RenderTiming::default(),
+                    smart,
+                    pixel_format,
+                    None,
+                    None,
+                    aexcompat_broker::image_render::RenderGpuBackend::Cpu,
+                    approved_dependencies,
+                )
+            } else {
+                aexcompat_broker::image_render::render_experimental_image_at_time_with_format_context_ui_action_and_gpu_backend(
+                    &repository,
+                    plugin,
+                    &hash,
+                    Path::new(&args[3]),
+                    Path::new(&args[4]),
+                    &parameters,
+                    aexcompat_broker::image_render::RenderTiming::default(),
+                    smart,
+                    pixel_format,
+                    None,
+                    None,
+                    aexcompat_broker::image_render::RenderGpuBackend::Cpu,
+                )
+            }
+        } else if use_approved_dependencies {
             aexcompat_broker::image_render::render_experimental_image_with_approved_dependencies(
                 &repository,
                 plugin,

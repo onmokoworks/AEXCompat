@@ -2426,6 +2426,30 @@ pub fn render_experimental_image_at_time_with_deep16_png(
     timing: RenderTiming,
     smart: bool,
 ) -> io::Result<Value> {
+    render_experimental_image_with_approved_dependencies_and_deep16_png(
+        repository,
+        plugin_path,
+        approved_sha256,
+        input_path,
+        output_path,
+        parameters,
+        timing,
+        smart,
+        Vec::new(),
+    )
+}
+
+pub fn render_experimental_image_with_approved_dependencies_and_deep16_png(
+    repository: &Path,
+    plugin_path: &Path,
+    approved_sha256: &str,
+    input_path: &Path,
+    output_path: &Path,
+    parameters: &[InteractiveParameter],
+    timing: RenderTiming,
+    smart: bool,
+    dependencies: Vec<ApprovedImageArtifact>,
+) -> io::Result<Value> {
     let bytes = fs::read(plugin_path)?;
     let actual = format!("{:X}", Sha256::digest(&bytes));
     if !actual.eq_ignore_ascii_case(approved_sha256) {
@@ -2450,7 +2474,7 @@ pub fn render_experimental_image_at_time_with_deep16_png(
         None,
         None,
         None,
-        Vec::new(),
+        dependencies,
         None,
         true,
     )
