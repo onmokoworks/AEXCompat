@@ -56,10 +56,24 @@ pub fn validate(
     dto: SessionDependencyManifestDto,
     main_plugin: &ApprovedImageArtifact,
 ) -> io::Result<ValidatedSessionDependencyManifest> {
+    validate_with_limit(dto, main_plugin, MAX_SESSION_DEPENDENCIES)
+}
+
+/// `validate` with a caller-chosen count limit.
+///
+/// `MAX_SESSION_DEPENDENCIES` bounds a manifest that arrives as an external JSON
+/// document. A caller that assembled the list itself out of data it already
+/// validated (the broker's import-closure resolver) owns that bound instead and
+/// passes its own. Every per-dependency check below is unchanged either way.
+pub fn validate_with_limit(
+    dto: SessionDependencyManifestDto,
+    main_plugin: &ApprovedImageArtifact,
+    max_dependencies: usize,
+) -> io::Result<ValidatedSessionDependencyManifest> {
     if dto.schema_version != 1 {
         return Err(invalid("unsupported session dependency manifest schema"));
     }
-    if dto.dependencies.len() > MAX_SESSION_DEPENDENCIES {
+    if dto.dependencies.len() > max_dependencies {
         return Err(invalid("session dependency limit exceeded"));
     }
 

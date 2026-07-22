@@ -21,13 +21,15 @@
 //! - It resolves only what the PE import tables name. A module the plug-in loads
 //!   later by absolute path at runtime, rather than through its import tables,
 //!   is invisible here and stays an unknown module in the worker's module audit.
-//! - Imports that resolve to `System32` are deliberately left out: the worker's
-//!   load flags already reach System32, and sealing a copy of a system DLL would
-//!   shadow the real one.
+//! - A name that no search root provides but System32 does is left out: the
+//!   worker's load flags already reach System32. A name the roots *do* provide is
+//!   sealed even when System32 has one too, because that is the order the loader
+//!   itself resolves in (the load directory first) and an app-local runtime is
+//!   shipped for a reason.
 
 use crate::secure_image_dispatch::ApprovedImageArtifact;
 use crate::session_dependency_manifest::{
-    MAX_SESSION_DEPENDENCIES, SessionDependencyDto, SessionDependencyManifestDto, validate,
+    SessionDependencyDto, SessionDependencyManifestDto, validate_with_limit,
 };
 use object::LittleEndian;
 use object::read::pe::{ImageNtHeaders, PeFile32, PeFile64};
@@ -43,21 +45,6 @@ use std::path::{Component, Path, PathBuf};
 /// to reason about.
 pub const MAX_SEARCH_ROOTS: usize = 8;
 
-/// Default ceiling on the number of resolved dependencies. Bounded by the
-/// session dependency manifest limit, which is what authenticates them.
-pub const DEFAULT_MAX_DEPENDENCIES: usize = MAX_SESSION_DEPENDENCIES;
-
-/// Default ceiling on the total bytes sealed for one dispatch. The sealed tree
-/// copies and hashes every dependency twice, so an unbounded closure would turn
-/// one discovery into gigabytes of copying. Adobe runtime closures observed for
-/// AE effects sit well under this.
-pub const DEFAULT_MAX_TOTAL_BYTES: u64 = 1_024 * 1_024 * 1_024;
-
-/// Ceiling on the modules a survey walk counts. Matches the worker module
-/// audit's own cap, so a survey never claims more modules than the worker could
-/// even enumerate.
-pub const MAX_SURVEYED_MODULES: usize = 512;
-
 /// Largest plug-in or dependency image this resolver will parse for imports.
 const MAX_PARSED_IMAGE_BYTES: u64 = 512 * 1_024 * 1_024;
 
@@ -72,10 +59,21 @@ pub struct DependencyClosureRequest<'a> {
     /// Folders searched, in order, for each imported name. Only direct children
     /// are considered; the resolver never descends into subfolders.
     pub search_roots: &'a [PathBuf],
-    /// Ceiling on resolved dependencies (clamped to `DEFAULT_MAX_DEPENDENCIES`).
-    pub max_dependencies: usize,
-    /// Ceiling on the total resolved bytes.
-    pub max_total_bytes: u64,
+    /// Optional ceiling on how many modules may be sealed. `None` seals the whole
+    /// closure.
+    ///
+    /// There is deliberately no default ceiling. The closure is not
+    /// caller-supplied data: it is derived from the plug-in's own import tables
+    /// and can only name files that already exist as direct children of the
+    /// operator's search roots, so its size is bounded by what the operator
+    /// pointed the resolver at. A fixed ceiling here would reject a plug-in for
+    /// needing a large runtime rather than for anything unsafe, and sealing is
+    /// what makes such a plug-in loadable at all. Callers that would rather fail
+    /// than pay the copy set this.
+    pub max_dependencies: Option<usize>,
+    /// Optional ceiling on the total resolved bytes. `None` seals the whole
+    /// closure; see `max_dependencies` for why that is the default.
+    pub max_total_bytes: Option<u64>,
 }
 
 impl<'a> DependencyClosureRequest<'a> {
@@ -83,8 +81,8 @@ impl<'a> DependencyClosureRequest<'a> {
         Self {
             plugin,
             search_roots,
-            max_dependencies: DEFAULT_MAX_DEPENDENCIES,
-            max_total_bytes: DEFAULT_MAX_TOTAL_BYTES,
+            max_dependencies: None,
+            max_total_bytes: None,
         }
     }
 }
@@ -145,13 +143,12 @@ impl ResolvedDependencyClosure {
 pub fn resolve_dependency_closure(
     request: DependencyClosureRequest<'_>,
 ) -> io::Result<ResolvedDependencyClosure> {
-    let max_dependencies = request.max_dependencies.min(DEFAULT_MAX_DEPENDENCIES);
     let plugin = validated_image_path(request.plugin)?;
     let plugin_artifact = artifact_for(&plugin)?;
     let walk = walk_import_closure(
         &plugin,
         request.search_roots,
-        max_dependencies,
+        request.max_dependencies,
         request.max_total_bytes,
     )?;
     if walk.over_module_limit {
@@ -176,13 +173,16 @@ pub fn resolve_dependency_closure(
         .collect::<io::Result<Vec<_>>>()?;
     // Authentication is the session dependency manifest's job, not this
     // resolver's: it re-reads every file, rejects reparse points, and enforces
-    // the basename collision rules the sealed tree depends on.
-    let validated = validate(
+    // the basename collision rules the sealed tree depends on. Its own count
+    // limit is a bound on an externally supplied JSON document, so it does not
+    // apply to this list, which the broker derived from the plug-in's imports.
+    let validated = validate_with_limit(
         SessionDependencyManifestDto {
             schema_version: 1,
             dependencies,
         },
         &plugin_artifact,
+        walk.resolved.len(),
     )?;
     Ok(ResolvedDependencyClosure {
         dependencies: validated.into_approved_image_artifacts(),
@@ -208,15 +208,15 @@ pub struct DependencyClosureSurvey {
 /// authenticating it.
 ///
 /// This is the measurement counterpart of `resolve_dependency_closure`: it
-/// answers "how big is this plug-in's closure" for a plug-in whose closure is
-/// over the sealable ceiling, which the resolver can only report as an error.
+/// answers "how big is this plug-in's closure" (how many modules and bytes one
+/// dispatch would copy into the sealed tree) without paying for the copy.
 /// Nothing it returns may be dispatched.
 pub fn survey_dependency_closure(
     plugin: &Path,
     search_roots: &[PathBuf],
 ) -> io::Result<DependencyClosureSurvey> {
     let plugin = validated_image_path(plugin)?;
-    let walk = walk_import_closure(&plugin, search_roots, MAX_SURVEYED_MODULES, u64::MAX)?;
+    let walk = walk_import_closure(&plugin, search_roots, None, None)?;
     Ok(DependencyClosureSurvey {
         modules: walk.resolved.len(),
         total_bytes: walk.total_bytes,
@@ -241,8 +241,8 @@ struct ImportClosureWalk {
 fn walk_import_closure(
     plugin: &Path,
     search_roots: &[PathBuf],
-    max_modules: usize,
-    max_total_bytes: u64,
+    max_modules: Option<usize>,
+    max_total_bytes: Option<u64>,
 ) -> io::Result<ImportClosureWalk> {
     if search_roots.len() > MAX_SEARCH_ROOTS {
         return Err(invalid("dependency search root limit exceeded"));
@@ -280,8 +280,10 @@ fn walk_import_closure(
                     let size = fs::metadata(&path)?.len();
                     walk.total_bytes = walk.total_bytes.saturating_add(size);
                     walk.resolved.push(path.clone());
-                    walk.over_module_limit = walk.resolved.len() > max_modules;
-                    walk.over_byte_limit = walk.total_bytes > max_total_bytes;
+                    walk.over_module_limit =
+                        max_modules.is_some_and(|limit| walk.resolved.len() > limit);
+                    walk.over_byte_limit =
+                        max_total_bytes.is_some_and(|limit| walk.total_bytes > limit);
                     if walk.over_module_limit || walk.over_byte_limit {
                         break 'walk;
                     }
@@ -314,11 +316,14 @@ fn resolve_name(name: &str, roots: &[PathBuf]) -> io::Result<NameResolution> {
     if !windows_safe_basename(name) {
         return Ok(NameResolution::Rejected);
     }
-    if let Some(system32) = system_directory()
-        && is_direct_child_file(&system32, name)
-    {
-        return Ok(NameResolution::System32);
-    }
+    // Search roots come before System32, in the order the loader itself uses:
+    // `LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR` is consulted before
+    // `LOAD_LIBRARY_SEARCH_SYSTEM32`. A name that exists in both places is an
+    // app-local runtime the plug-in ships deliberately (Adobe's own
+    // `msvcp140.dll` next to its effects, say), and skipping it because System32
+    // happens to have a same-named file would hand the plug-in a different
+    // build's ABI. Only a name no root provides falls through to System32, where
+    // the worker's own load flags already reach it.
     for root in roots {
         if is_direct_child_file(root, name) {
             let candidate = root.join(name);
@@ -331,6 +336,11 @@ fn resolve_name(name: &str, roots: &[PathBuf]) -> io::Result<NameResolution> {
             }
             return Ok(NameResolution::Found(canonical));
         }
+    }
+    if let Some(system32) = system_directory()
+        && is_direct_child_file(&system32, name)
+    {
+        return Ok(NameResolution::System32);
     }
     Ok(NameResolution::Missing)
 }
@@ -545,6 +555,46 @@ mod tests {
     }
 
     #[test]
+    fn an_app_local_copy_wins_over_the_system32_one() {
+        // The worker resolves the load directory before System32, so a name a
+        // search root provides must be sealed even though System32 has a file of
+        // the same name — otherwise the plug-in silently gets the system build.
+        let install = temp_dir("applocal");
+        let system32 = system_directory().expect("System32");
+        let shared = std::fs::read_dir(&system32)
+            .unwrap()
+            .flatten()
+            .filter(|entry| entry.path().is_file())
+            .find_map(|entry| {
+                let name = entry.file_name().to_string_lossy().into_owned();
+                name.to_lowercase().ends_with(".dll").then_some(name)
+            })
+            .expect("a System32 DLL to shadow");
+        write_pe(&install, &shared, &[]);
+        let plugin = write_pe(&install, "effect.aex", &[&shared]);
+
+        let roots = vec![install.clone()];
+        let closure =
+            resolve_dependency_closure(DependencyClosureRequest::new(&plugin, &roots)).unwrap();
+        assert_eq!(closure.dependencies().len(), 1);
+        assert_eq!(closure.dependencies()[0].path, install.join(&shared));
+
+        // With no search root offering it, the same name resolves in System32 and
+        // is neither sealed nor reported missing.
+        let bare = temp_dir("applocal-bare");
+        let bare_plugin = write_pe(&bare, "effect.aex", &[&shared]);
+        let bare_roots = vec![bare.clone()];
+        let fallback =
+            resolve_dependency_closure(DependencyClosureRequest::new(&bare_plugin, &bare_roots))
+                .unwrap();
+        assert!(fallback.is_empty());
+        assert!(fallback.unresolved().is_empty());
+
+        fs::remove_dir_all(install).unwrap();
+        fs::remove_dir_all(bare).unwrap();
+    }
+
+    #[test]
     fn reports_names_no_search_root_provides() {
         let install = temp_dir("missing");
         let plugin = write_pe(&install, "effect.aex", &["absent-runtime.dll"]);
@@ -600,7 +650,28 @@ mod tests {
     }
 
     #[test]
-    fn fails_closed_over_the_module_and_byte_ceilings() {
+    fn seals_a_closure_larger_than_the_external_manifest_limit_by_default() {
+        // The count limit that bounds an externally supplied dependency manifest
+        // does not bound a broker-resolved closure: a plug-in is not rejected for
+        // needing a big runtime, since sealing is what makes it loadable at all.
+        let install = temp_dir("unbounded");
+        let count = crate::session_dependency_manifest::MAX_SESSION_DEPENDENCIES + 3;
+        let names: Vec<String> = (0..count).map(|index| format!("dep{index}.dll")).collect();
+        for name in &names {
+            write_pe(&install, name, &[]);
+        }
+        let borrowed: Vec<&str> = names.iter().map(String::as_str).collect();
+        let plugin = write_pe(&install, "effect.aex", &borrowed);
+        let roots = vec![install.clone()];
+
+        let closure =
+            resolve_dependency_closure(DependencyClosureRequest::new(&plugin, &roots)).unwrap();
+        assert_eq!(closure.dependencies().len(), count);
+        fs::remove_dir_all(install).unwrap();
+    }
+
+    #[test]
+    fn fails_closed_over_a_caller_supplied_ceiling() {
         let install = temp_dir("bounds");
         let names: Vec<String> = (0..4).map(|index| format!("dep{index}.dll")).collect();
         for name in &names {
@@ -611,7 +682,7 @@ mod tests {
         let roots = vec![install.clone()];
 
         let over_count = resolve_dependency_closure(DependencyClosureRequest {
-            max_dependencies: 3,
+            max_dependencies: Some(3),
             ..DependencyClosureRequest::new(&plugin, &roots)
         })
         .unwrap_err();
@@ -621,7 +692,7 @@ mod tests {
         );
 
         let over_bytes = resolve_dependency_closure(DependencyClosureRequest {
-            max_total_bytes: 8,
+            max_total_bytes: Some(8),
             ..DependencyClosureRequest::new(&plugin, &roots)
         })
         .unwrap_err();
@@ -633,7 +704,7 @@ mod tests {
     }
 
     #[test]
-    fn survey_measures_a_closure_the_resolver_refuses_to_seal() {
+    fn survey_measures_a_closure_without_paying_for_it() {
         let install = temp_dir("survey");
         let names: Vec<String> = (0..4).map(|index| format!("dep{index}.dll")).collect();
         for name in &names {
@@ -643,9 +714,11 @@ mod tests {
         let plugin = write_pe(&install, "effect.aex", &borrowed);
         let roots = vec![install.clone()];
 
+        // A survey answers "how much would one dispatch copy" without hashing or
+        // copying anything, including for a closure a caller chose to cap.
         assert!(
             resolve_dependency_closure(DependencyClosureRequest {
-                max_dependencies: 2,
+                max_dependencies: Some(2),
                 ..DependencyClosureRequest::new(&plugin, &roots)
             })
             .is_err()

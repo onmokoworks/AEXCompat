@@ -79,8 +79,13 @@ worker は AEX を隔離した sealed load tree からロードし、探索先�
 - 封入された DLL は AEX 本体とまったく同じ経路で認証される (sha256 + サイズ照合、reparse
   point 拒否、basename 衝突拒否)。探索フォルダを渡すことは worker の DLL 探索パスを
   広げることではない。
-- クロージャが解決できない AEX (上限超過など) は discovery 失敗として扱う。依存無しで
-  再試行しても同じロード失敗になるため。
+- クロージャの大きさに上限は設けない。AE のエフェクトの一部は Adobe ランタイムをほぼ丸ごと
+  引く (実測で最大 225 DLL / 約 1.0GB) が、封入こそがそれをロード可能にする唯一の手段なので、
+  「大きいから」で弾かない。ただし sealed load tree は**コピー**なので、その分だけ discovery と
+  セッション開始が遅くなる (実測: 220MB で 0.8s、1.0GB で十数秒)。依存の重い AEX を大量に
+  抱えるフォルダを指定すると、バックグラウンド discovery は相応に長く走る。
+- クロージャが解決できない AEX (探索フォルダが不正、image が壊れている等) は discovery 失敗
+  として扱う。依存無しで再試行しても同じロード失敗になるため。
 - これで解けるのは L1 (LoadLibrary 失敗) だけで、Adobe ランタイムを引くエフェクトはさらに
   module audit (L2) と Adobe IPC 初期化 (L3) の壁がある。実測は
   `docs/AE_EFFECT_LOADING_INVESTIGATION_2026-07-22.md` を参照。
@@ -110,6 +115,9 @@ discovery はバックグラウンドスレッドで行う:**
 
 - キャッシュは worker exe / この DLL / `dependency_dirs` のいずれかが変わると全体が無効化され、
   再 discovery される (ホストや封入する依存が変われば結果も変わりうるため)。
+- 各エントリは**封入した依存 DLL の (mtime, サイズ)** も持っており、どれかが変わっていれば
+  その AEX だけ再 discovery される。AE のアップデートが `dvacore.dll` を書き換えた場合など、
+  AEX 自身もホストも変わらないケースを拾うため。
 - discovery は結果を全てキャッシュする (effect でない `.aex` = Format/codec 等の negative も)。
   低並列なので負荷下の偽タイムアウトは起きにくいが、稀に一時的失敗で effect が誤って除外・
   キャッシュされることがある。その場合は該当 AEX を touch するか

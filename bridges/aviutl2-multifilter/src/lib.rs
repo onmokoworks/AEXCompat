@@ -298,7 +298,8 @@ pub extern "C" fn RegisterPlugin(host: *mut HOST_APP_TABLE) {
         match cache.get(&key) {
             Some(entry)
                 if file_meta(plugin)
-                    .is_some_and(|(mtime, len)| entry.mtime == mtime && entry.len == len) =>
+                    .is_some_and(|(mtime, len)| entry.mtime == mtime && entry.len == len)
+                    && dependencies_unchanged(entry) =>
             {
                 if entry.ok {
                     register_discovered(host, &repository, plugin, &dependency_dirs, entry);
@@ -661,10 +662,25 @@ struct CacheEntry {
     smart: bool,
     #[serde(default)]
     params: Vec<InteractiveParameter>,
+    /// The dependency DLLs sealed with this AEX when the entry was discovered
+    /// (issue #304). A discovery result depends on their bytes as much as on the
+    /// AEX's own, so each one is re-checked before the entry is reused: an Adobe
+    /// update that rewrites `dvacore.dll` in place changes neither the AEX nor
+    /// the host build, and without this the stale result would survive it.
+    #[serde(default)]
+    dependencies: Vec<CachedDependency>,
+}
+
+/// One sealed dependency's identity, as cheap to re-check as a `stat`.
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+struct CachedDependency {
+    path: String,
+    mtime: (u64, u32),
+    len: u64,
 }
 
 /// Bump when [`CacheEntry`]'s meaning changes, to invalidate stale cache files.
-const CACHE_VERSION: u32 = 1;
+const CACHE_VERSION: u32 = 2;
 
 /// Fingerprints the compat host that produces a discovery result, so the cache is
 /// invalidated when the host changes (e.g. it gains support for an effect that
@@ -837,7 +853,19 @@ fn negative_entry(plugin: &Path) -> CacheEntry {
         sha: String::new(),
         smart: false,
         params: Vec::new(),
+        dependencies: Vec::new(),
     }
+}
+
+/// Whether every dependency this entry was discovered with is still byte-for-byte
+/// the file that was sealed, judged by `(mtime, len)` like the AEX itself is.
+/// A replaced or removed dependency makes the entry a miss, so it is discovered
+/// again rather than serving a result produced against different bytes.
+fn dependencies_unchanged(entry: &CacheEntry) -> bool {
+    entry.dependencies.iter().all(|dependency| {
+        file_meta(Path::new(&dependency.path))
+            .is_some_and(|(mtime, len)| mtime == dependency.mtime && len == dependency.len)
+    })
 }
 
 /// Discovers one AEX, always returning a cache entry (cache-all): `ok = true` for
@@ -859,6 +887,17 @@ fn discover_one(repository: &Path, plugin: &Path, dependency_dirs: &[PathBuf]) -
     let Ok(dependencies) = dependency_closure_for(plugin, dependency_dirs) else {
         return entry;
     };
+    entry.dependencies = dependencies
+        .iter()
+        .filter_map(|dependency| {
+            let (mtime, len) = file_meta(&dependency.path)?;
+            Some(CachedDependency {
+                path: dependency.path.to_string_lossy().into_owned(),
+                mtime,
+                len,
+            })
+        })
+        .collect();
     if let Ok((params, diagnostics)) =
         inspect_experimental_with_approved_dependencies_and_diagnostics(
             repository,

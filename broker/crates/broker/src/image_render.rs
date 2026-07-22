@@ -360,7 +360,9 @@ pub fn prepare_gpu_runtime_policy(
         ));
     }
     let module_report_json = serde_json::to_vec(report).map_err(|error| {
-        invalid(format!("could not re-serialize the GPU module report: {error}"))
+        invalid(format!(
+            "could not re-serialize the GPU module report: {error}"
+        ))
     })?;
     let system32 = canonical_system32()?;
     // Fail-fast: the render path re-authenticates before dispatch, but validate
@@ -3267,6 +3269,25 @@ pub fn inspect_experimental_with_runtime_policy(
     )
 }
 
+/// The watchdog an inspection launch gets.
+///
+/// A dependency-free inspection is a small AEX and 5 s is generous. Sealed
+/// dependencies change the shape of the work: the worker has to map every one of
+/// them before the first selector runs, and an Adobe runtime closure can be
+/// hundreds of megabytes, so a fixed 5 s would report "timed out" for a plug-in
+/// that was only still loading. Scale with the bytes actually handed to the
+/// worker, and keep a hard ceiling so the timeout stays a crash-containment
+/// bound rather than an open-ended wait.
+fn inspection_deadline(dependencies: &[ApprovedImageArtifact]) -> Duration {
+    const BASE: Duration = Duration::from_millis(5_000);
+    const PER_BYTE_MILLIS_DIVISOR: u64 = 64 * 1_024; // 1 s per 64 MiB
+    const CEILING: Duration = Duration::from_secs(60);
+    let bytes = dependencies.iter().fold(0u64, |total, dependency| {
+        total.saturating_add(dependency.expected_size)
+    });
+    (BASE + Duration::from_millis(bytes / PER_BYTE_MILLIS_DIVISOR)).min(CEILING)
+}
+
 fn inspect_experimental_with_diagnostics_and_runtime_policy(
     repository: &Path,
     plugin_path: &Path,
@@ -3294,6 +3315,7 @@ fn inspect_experimental_with_diagnostics_and_runtime_policy(
         dependencies.push(authorization.artifact.clone());
     }
     let isolated = if !dependencies.is_empty() {
+        let deadline = inspection_deadline(&dependencies);
         dispatch_approved_image_with_dependencies(
             repository,
             WorkerKind::L2,
@@ -3302,7 +3324,7 @@ fn inspect_experimental_with_diagnostics_and_runtime_policy(
             dependencies,
             &args_before_plugin,
             &args_after_plugin,
-            Duration::from_millis(5_000),
+            deadline,
         )?
     } else {
         dispatch_approved_image(
@@ -5381,8 +5403,7 @@ fn render_with_artifact(
     let mut manifest_fallback_error: Option<io::Error> = None;
     let _runtime_authorization = match (gpu_initial_attempt, gpu_runtime_policy) {
         (true, Some(policy_input)) => {
-            let backend =
-                runtime_backend(gpu_backend).expect("GPU attempt has a runtime backend");
+            let backend = runtime_backend(gpu_backend).expect("GPU attempt has a runtime backend");
             // Reuse the preflight's session identity so the manifest the worker
             // parses matches the identity the report was authenticated against
             // (#301 review).
@@ -6811,6 +6832,31 @@ pub(crate) fn build_interactive_image_report(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn inspection_deadline_scales_with_sealed_bytes_and_stays_bounded() {
+        let sealed = |size: u64| ApprovedImageArtifact {
+            path: PathBuf::from("dependency.dll"),
+            expected_sha256: [0; 32],
+            expected_size: size,
+        };
+        assert_eq!(inspection_deadline(&[]), Duration::from_millis(5_000));
+        // 64 MiB buys about one extra second (1 ms per 64 KiB).
+        assert_eq!(
+            inspection_deadline(&[sealed(64 * 1_024 * 1_024)]),
+            Duration::from_millis(6_024)
+        );
+        // The Adobe runtime closures observed for AE effects (~1 GB) stay well
+        // inside the ceiling, and nothing can exceed it.
+        assert_eq!(
+            inspection_deadline(&[sealed(1_024 * 1_024 * 1_024)]),
+            Duration::from_millis(21_384)
+        );
+        assert_eq!(
+            inspection_deadline(&[sealed(u64::MAX / 2), sealed(u64::MAX / 2)]),
+            Duration::from_secs(60)
+        );
+    }
 
     #[test]
     fn smart_render_advertised_follows_out_flags2_bit_10() {

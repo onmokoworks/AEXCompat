@@ -168,8 +168,13 @@ fn main() {
         };
         let sha = format!("{:x}", Sha256::digest(&bytes));
 
-        let mut roots: Vec<PathBuf> = plugin.parent().map(Path::to_path_buf).into_iter().collect();
+        // `--no-deps` seals nothing at all, including helper DLLs sitting next to
+        // the plug-in: the point of the baseline is the pre-#304 dispatch, which
+        // passed an empty dependency list, so keeping the plug-in's own folder as
+        // a root would under-count the load failures it is meant to measure.
+        let mut roots: Vec<PathBuf> = Vec::new();
         if options.seal {
+            roots.extend(plugin.parent().map(Path::to_path_buf));
             for dir in &options.dependency_dirs {
                 if !roots.contains(dir) {
                     roots.push(dir.clone());
