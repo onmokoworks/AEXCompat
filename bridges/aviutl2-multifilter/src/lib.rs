@@ -431,9 +431,10 @@ fn resolve_scan_dirs(config: &Config) -> (Vec<PathBuf>, bool) {
 /// and the second value is false if either one could not be resolved, so a
 /// transiently invisible AE install is not mistaken for "these effects are gone".
 fn default_dirs() -> (Vec<PathBuf>, bool) {
-    let after_effects = latest_after_effects_plugins();
-    let mediacore = mediacore_dir();
-    let complete = after_effects.is_some() && mediacore.is_some();
+    let (after_effects, ae_complete) = latest_after_effects_plugins();
+    let (mediacore, mediacore_complete) = mediacore_dir();
+    let complete =
+        ae_complete && mediacore_complete && after_effects.is_some() && mediacore.is_some();
     (
         after_effects.into_iter().chain(mediacore).collect(),
         complete,
@@ -447,43 +448,66 @@ fn adobe_root() -> Option<PathBuf> {
 }
 
 /// The newest `Adobe After Effects <year>\Support Files\Plug-ins`, or `None`.
-fn latest_after_effects_plugins() -> Option<PathBuf> {
-    let adobe = adobe_root()?;
-    let mut best: Option<(String, PathBuf)> = None;
-    for entry in std::fs::read_dir(&adobe).ok()?.flatten() {
-        let name = entry.file_name();
-        let name = name.to_string_lossy();
-        if let Some(version) = name.strip_prefix("Adobe After Effects ") {
-            let plugins = entry.path().join("Support Files").join("Plug-ins");
-            if plugins.is_dir()
-                && best
-                    .as_ref()
-                    .is_none_or(|(best_version, _)| version_key(version) > version_key(best_version))
-            {
-                best = Some((version.to_string(), plugins));
-            }
-        }
-    }
-    best.map(|(_, path)| path)
+fn latest_after_effects_plugins() -> (Option<PathBuf>, bool) {
+    let Some(adobe) = adobe_root() else {
+        return (None, false);
+    };
+    newest_versioned(&adobe, "Adobe After Effects ", &["Support Files", "Plug-ins"])
 }
 
 /// The newest `Adobe\Common\Plug-ins\<version>\MediaCore`, or `None`.
-fn mediacore_dir() -> Option<PathBuf> {
-    let root = adobe_root()?.join("Common").join("Plug-ins");
-    let mut best: Option<(String, PathBuf)> = None;
-    for entry in std::fs::read_dir(&root).ok()?.flatten() {
-        let mediacore = entry.path().join("MediaCore");
-        if mediacore.is_dir() {
-            let version = entry.file_name().to_string_lossy().into_owned();
-            if best
-                .as_ref()
-                .is_none_or(|(best_version, _)| version_key(&version) > version_key(best_version))
-            {
-                best = Some((version, mediacore));
-            }
+fn mediacore_dir() -> (Option<PathBuf>, bool) {
+    let Some(adobe) = adobe_root() else {
+        return (None, false);
+    };
+    let root = adobe.join("Common").join("Plug-ins");
+    newest_versioned(&root, "", &["MediaCore"])
+}
+
+/// The `leaf` folder under the newest versioned subfolder of `root` whose name
+/// starts with `prefix` (e.g. `Adobe After Effects 2025/Support Files/Plug-ins`).
+///
+/// The second value is false when the pick cannot be trusted to be the newest:
+/// the folder could not be enumerated, an entry could not be read, or a versioned
+/// install was present but its `leaf` was not. That last case is what an install
+/// being updated looks like, and silently falling back to an older version while
+/// reporting a complete scan would make the newer version's plug-ins look
+/// deleted — which prunes their cache entries and unregisters them on the next
+/// launch, deleting objects from saved projects that use them (issue #307).
+fn newest_versioned(root: &Path, prefix: &str, leaf: &[&str]) -> (Option<PathBuf>, bool) {
+    let Ok(read) = std::fs::read_dir(root) else {
+        return (None, false);
+    };
+    let mut best: Option<(Vec<u64>, PathBuf)> = None;
+    let mut complete = true;
+    for entry in read {
+        let Ok(entry) = entry else {
+            complete = false;
+            continue;
+        };
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        let Some(version) = name.strip_prefix(prefix) else {
+            continue;
+        };
+        // Ignore entries that are not versioned at all (a stray file, an
+        // unrelated Adobe app); only a real version folder missing its leaf is
+        // evidence that this launch is seeing an incomplete install.
+        if !version.split(['.', ' ']).any(|part| part.parse::<u64>().is_ok()) {
+            continue;
+        }
+        let mut candidate = entry.path();
+        candidate.extend(leaf);
+        if !candidate.is_dir() {
+            complete = false;
+            continue;
+        }
+        let key = version_key(version);
+        if best.as_ref().is_none_or(|(best_key, _)| key > *best_key) {
+            best = Some((key, candidate));
         }
     }
-    best.map(|(_, path)| path)
+    (best.map(|(_, path)| path), complete)
 }
 
 /// Recursively collects `*.aex` under `dirs` (minus ignored), deduped + sorted.
@@ -512,7 +536,14 @@ fn collect_aex_into(dir: &Path, ignore: &[String], depth: usize, out: &mut Vec<P
         return false;
     };
     let mut complete = true;
-    for entry in read.flatten() {
+    for entry in read {
+        // An entry the iterator itself could not yield is a partially enumerated
+        // folder; flattening it away would report the scan as complete and let
+        // the prune drop that AEX's entry (issue #307).
+        let Ok(entry) = entry else {
+            complete = false;
+            continue;
+        };
         let path = entry.path();
         let Ok(file_type) = entry.file_type() else {
             complete = false;
@@ -1748,5 +1779,61 @@ mod tests {
         let (plugins, complete) = collect_aex(&[missing], &[]);
         assert!(plugins.is_empty());
         assert!(!complete, "a folder that could not be read is not a complete scan");
+    }
+
+    // --- default folder resolution ------------------------------------------
+
+    /// A unique temp dir per test (no `Date::now`/rand available in-process here,
+    /// so the test name provides uniqueness).
+    fn temp_root(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("aexcompat-mf-{tag}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create temp root");
+        dir
+    }
+
+    #[test]
+    fn the_newest_versioned_install_wins() {
+        let root = temp_root("newest");
+        for version in ["2024", "2025"] {
+            std::fs::create_dir_all(root.join(format!("App {version}")).join("Plug-ins")).unwrap();
+        }
+        let (picked, complete) = newest_versioned(&root, "App ", &["Plug-ins"]);
+        assert!(complete);
+        assert_eq!(picked.unwrap(), root.join("App 2025").join("Plug-ins"));
+    }
+
+    /// An install being updated has its version folder but not yet its leaf.
+    /// Falling back to the older version must not also claim the scan was
+    /// complete, or the newer version's effects get pruned and unregistered (#307).
+    #[test]
+    fn a_version_missing_its_leaf_marks_the_resolution_incomplete() {
+        let root = temp_root("updating");
+        std::fs::create_dir_all(root.join("App 2024").join("Plug-ins")).unwrap();
+        std::fs::create_dir_all(root.join("App 2025")).unwrap(); // mid-update
+        let (picked, complete) = newest_versioned(&root, "App ", &["Plug-ins"]);
+        assert_eq!(picked.unwrap(), root.join("App 2024").join("Plug-ins"));
+        assert!(!complete, "fell back to an older version, so not complete");
+    }
+
+    /// Unversioned clutter next to the installs is not evidence of anything.
+    #[test]
+    fn unversioned_entries_do_not_mark_the_resolution_incomplete() {
+        let root = temp_root("clutter");
+        std::fs::create_dir_all(root.join("App 2025").join("Plug-ins")).unwrap();
+        std::fs::write(root.join("App readme.txt"), b"x").unwrap();
+        std::fs::create_dir_all(root.join("App Common")).unwrap();
+        let (picked, complete) = newest_versioned(&root, "App ", &["Plug-ins"]);
+        assert_eq!(picked.unwrap(), root.join("App 2025").join("Plug-ins"));
+        assert!(complete);
+    }
+
+    #[test]
+    fn a_missing_root_is_incomplete() {
+        let root = std::env::temp_dir().join("aexcompat-mf-no-such-root");
+        let _ = std::fs::remove_dir_all(&root);
+        let (picked, complete) = newest_versioned(&root, "App ", &["Plug-ins"]);
+        assert!(picked.is_none());
+        assert!(!complete);
     }
 }
