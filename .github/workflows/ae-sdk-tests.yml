@@ -60,6 +60,14 @@ jobs:
       - name: Install Python dependencies
         run: uv sync --locked
 
+      # built_artifact テスト (test_render_video_batch_cli) が
+      # broker/target/release/broker.exe を実行する。ビルドしないと
+      # "broker.exe is not built" で skip し、後段の skip gate が job を落とす
+      # (#349)。
+      - name: Build the broker CLI (release)
+        working-directory: broker
+        run: cargo build --release --locked -p aexcompat-broker --bin broker
+
       # built_artifact テスト (#73) 用: minihost workers を Ninja でビルドする。
       # docs/BUILD_REQUIREMENTS.md の指示どおり target\minihost-build 直下に
       # フラット配置する (single-config)。
