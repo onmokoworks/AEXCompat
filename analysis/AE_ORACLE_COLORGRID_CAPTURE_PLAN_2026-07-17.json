@@ -67,23 +67,23 @@
     "current_artifact_snapshot":  {
                                       "source":  {
                                                      "path":  "D:\\Projects\\01_Project\\04_Tools\\AEXCompat\\minihost\\src\\l2_main.cpp",
-                                                     "size_bytes":  139615,
-                                                     "sha256":  "4ccae13e08ee5e00083136887ac36c48141c8e14d4315e282d468c6f56a42ac9"
+                                                     "size_bytes":  154909,
+                                                     "sha256":  "295cd60a80ae1f6e0421098362b52a0840b6ec5767642d21f97b30ad9943d229"
                                                  },
                                       "l2_worker":  {
                                                         "path":  "D:\\Projects\\01_Project\\04_Tools\\AEXCompat\\target\\minihost-build\\aex_l2_worker.exe",
-                                                        "size_bytes":  1218048,
-                                                        "sha256":  "a0b2ed93439c81eddea08298fe7f2eca3507581dfbcba5b2f1813b1a47de0df4"
+                                                        "size_bytes":  1229312,
+                                                        "sha256":  "3e9cc339caccda07f25dd177239d3b9ab94a330379552cb0f8a0310ba5b892aa"
                                                     },
                                       "render_worker":  {
                                                             "path":  "D:\\Projects\\01_Project\\04_Tools\\AEXCompat\\target\\minihost-build\\aex_render_worker.exe",
-                                                            "size_bytes":  1218048,
-                                                            "sha256":  "47daaf75e1bde6f09cfde040415da1e29f357b0d3b2fdbccc2b454f484a1b594"
+                                                            "size_bytes":  1229312,
+                                                            "sha256":  "33ba80b615bf94d3c184b449630c07a8d749b1f30468e82c6d0cb09621917620"
                                                         },
                                       "smart_worker":  {
                                                            "path":  "D:\\Projects\\01_Project\\04_Tools\\AEXCompat\\target\\minihost-build\\aex_smart_worker.exe",
-                                                           "size_bytes":  1218048,
-                                                           "sha256":  "76306f8c4ee003292f673edaf180956ae173913d5e57246cb857a8a8b88e1906"
+                                                           "size_bytes":  1229312,
+                                                           "sha256":  "6a5a47e3d98e3e8b01a3d5e61ef930f8348c335a47ec674fcb0bef3ef95afa55"
                                                        },
                                       "harness":  {
                                                       "path":  "D:\\Projects\\01_Project\\04_Tools\\AEXCompat\\broker\\target\\debug\\aexcompat-harness.exe",
@@ -94,7 +94,7 @@
     "runtime_evidence_authentication":  {
                                             "path":  "D:\\Projects\\01_Project\\04_Tools\\AEXCompat\\analysis\\SDK_COLORGRID_ARBITRARY_TIMELINE_RESULT_2026-07-17.json",
                                             "size_bytes":  10042,
-                                            "sha256":  "b65a298dcdf628cd07047cc38b6b783da403f77d1ff0c64a34852f034c2331f1"
+                                            "sha256":  "7ea75ebe7406450d2c715038f33650b70142b2a18649a8d813ad890bc90a86f5"
                                         },
     "expected_raw_provenance":  {
                                     "runtime_evidence":  "analysis/SDK_COLORGRID_ARBITRARY_TIMELINE_RESULT_2026-07-17.json",

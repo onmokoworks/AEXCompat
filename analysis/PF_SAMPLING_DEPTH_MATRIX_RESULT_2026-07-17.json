@@ -20,13 +20,13 @@
     "artifacts":  {
                       "worker":  {
                                      "path":  "target/minihost-build/aex_render_worker.exe",
-                                     "size_bytes":  1218048,
-                                     "sha256":  "47daaf75e1bde6f09cfde040415da1e29f357b0d3b2fdbccc2b454f484a1b594"
+                                     "size_bytes":  1229312,
+                                     "sha256":  "33ba80b615bf94d3c184b449630c07a8d749b1f30468e82c6d0cb09621917620"
                                  },
                       "probe":  {
                                     "path":  "target/pf-sampling-probe-build/Release/pf_sampling_probe.aex",
                                     "size_bytes":  18944,
-                                    "sha256":  "a5875332f7176aebba5dfaf4b8cfa32a4de72135f18ef89a463ef5addb31a31e"
+                                    "sha256":  "689acb93be08c69bc9164451ed5a1dad1665bce3c19d32e77d285ca8e53bc2b2"
                                 },
                       "input":  {
                                     "path":  "target/gpu-effects/opencl-input.rgba",
