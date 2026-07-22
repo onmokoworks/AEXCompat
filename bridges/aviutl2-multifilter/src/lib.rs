@@ -1178,6 +1178,11 @@ const RETRY_BUDGET: u8 = 3;
 /// added). Bump only if an existing field's meaning changes, which is a real
 /// data-loss risk that has to be weighed rather than done reflexively.
 const CACHE_VERSION: u32 = 1;
+/// A save is short, but another AviUtl2 process may be between its read and
+/// atomic replace.  Serialize the read/merge/write critical section with a
+/// Windows handle lock so every writer observes the previous writer's result.
+const CACHE_LOCK_RETRIES: usize = 200;
+const CACHE_LOCK_RETRY: Duration = Duration::from_millis(10);
 
 /// Fingerprints the compat host that produces a discovery result, so an entry can
 /// be re-verified when the host changes (e.g. it gains support for an effect that
@@ -1280,6 +1285,10 @@ fn load_cache() -> HashMap<String, CacheEntry> {
     let Some(path) = cache_path() else {
         return HashMap::new();
     };
+    load_cache_at(&path)
+}
+
+fn load_cache_at(path: &Path) -> HashMap<String, CacheEntry> {
     let Ok(text) = std::fs::read_to_string(&path) else {
         return HashMap::new();
     };
@@ -1309,11 +1318,19 @@ fn save_cache(entries: &HashMap<String, CacheEntry>) {
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
+    // The lock is held across the disk read and the atomic replacement.  A
+    // lock around only the final rename would still allow two launches to read
+    // the same old cache and lose one another's newly discovered entries.
+    let Some(_lock) = acquire_cache_lock(&path) else {
+        return;
+    };
+    let mut merged_entries = load_cache_at(&path);
+    merge_cache_entries(&mut merged_entries, entries);
     let file = CacheFile {
         version: CACHE_VERSION,
         // An entry that cannot be serialized is dropped rather than failing the
         // whole write, so the rest of the cache still survives the launch.
-        entries: entries
+        entries: merged_entries
             .iter()
             .filter_map(|(key, entry)| Some((key.clone(), serde_json::to_value(entry).ok()?)))
             .collect(),
@@ -1454,6 +1471,59 @@ fn negative_entry(plugin: &Path, build: BuildFingerprint) -> CacheEntry {
         failure_classification: None,
         alias_fallback: false,
         alias_target: None,
+    }
+}
+
+/// Acquires an OS-level exclusive handle on the cache lock file.  The file is
+/// intentionally retained after release: unlike a create-new sentinel, a
+/// handle lock is released by Windows when the process exits, so a crash cannot
+/// strand future saves behind a stale marker.
+fn acquire_cache_lock(path: &Path) -> Option<std::fs::File> {
+    use std::os::windows::fs::OpenOptionsExt;
+
+    let lock_path = path.with_file_name("discovery-cache.lock");
+    for _ in 0..CACHE_LOCK_RETRIES {
+        match std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .share_mode(0)
+            .open(&lock_path)
+        {
+            Ok(lock) => return Some(lock),
+            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
+                std::thread::sleep(CACHE_LOCK_RETRY);
+            }
+            Err(_) => return None,
+        }
+    }
+    None
+}
+
+/// Unions another launch's cache into this launch's snapshot before replacing
+/// the file.  Disjoint AEX results must survive regardless of which launch
+/// saves last.  For the same path and file metadata, a known-good entry wins
+/// over a negative one so a transient failure cannot erase a usable filter;
+/// otherwise the local snapshot remains authoritative for that key.
+fn merge_cache_entries(
+    local: &mut HashMap<String, CacheEntry>,
+    on_disk: &HashMap<String, CacheEntry>,
+) {
+    for (key, disk_entry) in on_disk {
+        match local.get(key) {
+            None => {
+                local.insert(key.clone(), disk_entry.clone());
+            }
+            Some(local_entry)
+                if disk_entry.ok
+                    && !local_entry.ok
+                    && disk_entry.mtime == local_entry.mtime
+                    && disk_entry.len == local_entry.len =>
+            {
+                local.insert(key.clone(), disk_entry.clone());
+            }
+            Some(_) => {}
+        }
     }
 }
 
@@ -2596,6 +2666,45 @@ mod tests {
             entries: json_entries(&["a.aex"]),
         };
         assert!(accept_cache_file(file).is_empty());
+    }
+
+    #[test]
+    fn a_concurrent_cache_save_preserves_disjoint_discoveries() {
+        let mut local = cache_of(&["local.aex"]);
+        let on_disk = cache_of(&["other-process.aex"]);
+
+        merge_cache_entries(&mut local, &on_disk);
+
+        assert!(local.contains_key("local.aex"));
+        assert!(local.contains_key("other-process.aex"));
+    }
+
+    #[test]
+    fn a_concurrent_cache_save_keeps_known_good_for_an_unchanged_aex() {
+        let key = "same.aex";
+        let mut local = HashMap::from([(key.to_string(), failed(5, 64, build(1)))]);
+        let on_disk = HashMap::from([(key.to_string(), discovered(5, 64, build(1)))]);
+
+        merge_cache_entries(&mut local, &on_disk);
+
+        assert!(
+            local[key].ok,
+            "a transient negative must not erase a good entry"
+        );
+    }
+
+    #[test]
+    fn a_concurrent_cache_save_keeps_current_negative_for_changed_bytes() {
+        let key = "changed.aex";
+        let mut local = HashMap::from([(key.to_string(), failed(9, 64, build(1)))]);
+        let on_disk = HashMap::from([(key.to_string(), discovered(5, 64, build(1)))]);
+
+        merge_cache_entries(&mut local, &on_disk);
+
+        assert!(
+            !local[key].ok,
+            "a result for older bytes must not be resurrected"
+        );
     }
 
     // --- scan completeness ---------------------------------------------------
