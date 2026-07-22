@@ -1077,11 +1077,17 @@ impl RenderSession {
                 .expect("gpu attempt was validated to carry a policy at open");
             let backend =
                 runtime_backend(effective_backend).expect("GPU attempt has a runtime backend");
-            let transport = crate::image_render::prepare_runtime_authorization_transport(
-                request.repository,
-                policy_input.policy,
-                backend,
-            )?;
+            // Reuse the preflight's session identity so the manifest the worker
+            // parses matches the identity the report was authenticated against
+            // below, keeping the manifest/report/session binding intact
+            // (#301 review).
+            let transport =
+                crate::image_render::prepare_runtime_authorization_transport_with_identity(
+                    request.repository,
+                    policy_input.policy,
+                    backend,
+                    policy_input.session_identity,
+                )?;
             args_after_plugin.push("--runtime-module-authorization-v1".to_owned());
             args_after_plugin.push(transport.basename().to_owned());
             dependencies.push(transport.artifact());

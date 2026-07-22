@@ -170,6 +170,29 @@ pub(crate) fn prepare_runtime_authorization_transport(
     if session_identity.iter().all(|byte| *byte == 0) {
         session_identity[0] = 1;
     }
+    prepare_runtime_authorization_transport_with_identity(
+        repository,
+        policy,
+        backend,
+        session_identity,
+    )
+}
+
+/// Like [`prepare_runtime_authorization_transport`] but embeds a caller-supplied
+/// `session_identity` instead of a fresh random one. A GPU render reuses the
+/// preflight's session identity here so the render worker parses the same
+/// identity the [`PreparedGpuRuntimePolicy`] report was authenticated against,
+/// keeping the manifest/report/session binding intact (#301 review). The identity
+/// must be nonzero (the preflight's is, by construction and prior authentication).
+pub(crate) fn prepare_runtime_authorization_transport_with_identity(
+    repository: &Path,
+    policy: &RuntimeModulePolicy,
+    backend: RuntimeBackend,
+    session_identity: [u8; 32],
+) -> io::Result<RuntimeAuthorizationTransport> {
+    if session_identity.iter().all(|byte| *byte == 0) {
+        return Err(invalid("runtime module session identity must be nonzero"));
+    }
     let manifest = encode_runtime_module_authorization(
         policy,
         RuntimeModulePurpose::PfParameterInspect,
@@ -5233,16 +5256,31 @@ fn render_with_artifact(
     // A GPU render carries its authenticated policy's modules to the worker as an
     // AEXRMA1 manifest (#300) so the GPU runtime DLLs classify as authorized
     // `policy` in the required module audit instead of `unknown`. Added before the
-    // initial dispatch so it is sealed for it; a CPU fallback dispatch reuses the
-    // same args (a harmless no-op, since no GPU DLL loads there). The transport
-    // lives to the end of this render, past every dispatch that seals it.
+    // initial dispatch so it is sealed for it. The transport lives to the end of
+    // this render, past every dispatch that seals it.
     let mut dependencies = dependencies;
+    // Snapshot the policy-free args/dependencies before the GPU authorization
+    // trailer is appended. An Auto GPU->CPU fallback dispatches with these instead
+    // of the GPU args: the worker treats a `--runtime-module-authorization-v1`
+    // trailer as authorize_runtime_modules before loading the plug-in, so carrying
+    // it into a CPU retry (which loads no GPU DLL) could fail on runtime-policy or
+    // manifest validation, e.g. if the policy expired during the GPU attempt
+    // (#301 review).
+    let cpu_fallback_args_after_plugin = args_after_plugin.clone();
+    let cpu_fallback_dependencies = dependencies.clone();
     let _runtime_authorization = match (gpu_initial_attempt, gpu_runtime_policy) {
         (true, Some(policy_input)) => {
             let backend =
                 runtime_backend(gpu_backend).expect("GPU attempt has a runtime backend");
-            let transport =
-                prepare_runtime_authorization_transport(repository, policy_input.policy, backend)?;
+            // Reuse the preflight's session identity so the manifest the worker
+            // parses matches the identity the report was authenticated against
+            // (#301 review).
+            let transport = prepare_runtime_authorization_transport_with_identity(
+                repository,
+                policy_input.policy,
+                backend,
+                policy_input.session_identity,
+            )?;
             args_after_plugin.push("--runtime-module-authorization-v1".to_owned());
             args_after_plugin.push(transport.basename().to_owned());
             dependencies.push(transport.artifact());
@@ -5301,13 +5339,16 @@ fn render_with_artifact(
                 }));
                 args_before_plugin[0] =
                     image_worker_command(smart, pixel_format, false, RenderGpuBackend::Cpu)?.into();
+                // Dispatch the CPU retry with the policy-free args/dependencies so
+                // the worker does not authorize_runtime_modules for a CPU render
+                // that loads no GPU DLL (#301 review).
                 dispatch_secure_image(SecureImageDispatch {
                     repository,
                     worker_kind,
                     plugin: plugin.clone(),
-                    dependencies: dependencies.clone(),
+                    dependencies: cpu_fallback_dependencies.clone(),
                     args_before_plugin: &args_before_plugin,
-                    args_after_plugin: &args_after_plugin,
+                    args_after_plugin: &cpu_fallback_args_after_plugin,
                     timeout: Duration::from_millis(timeout_ms),
                 })?
             }
