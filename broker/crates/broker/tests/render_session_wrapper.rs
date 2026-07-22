@@ -257,6 +257,13 @@ mod windows_e2e {
             "the smart render must be carried by the session"
         );
         assert_session_render_is_healthy(&first, "smart single image");
+        // The health helper keys its smart assertions off render_path, so pin the
+        // route here: a regression flipping it to classic would otherwise skip
+        // those assertions silently rather than fail.
+        assert_eq!(
+            first.get("render_path"),
+            Some(&serde_json::json!("smartfx"))
+        );
 
         // Determinism: the same input twice must agree field for field and byte
         // for byte, which is the property the frozen A/B output was standing in
@@ -404,6 +411,7 @@ mod windows_e2e {
             "the Argb32f Auto smart render must be carried by the session"
         );
         assert_session_render_is_healthy(&auto, "Argb32f Auto");
+        assert_eq!(auto.get("render_path"), Some(&serde_json::json!("smartfx")));
         assert_eq!(
             auto.get("pixel_format"),
             Some(&serde_json::json!("argb32f")),
@@ -565,10 +573,25 @@ mod windows_e2e {
                 "the {label} timed-multilayer render must be carried by the session"
             );
             assert_session_render_is_healthy(&base, label);
+            assert_eq!(base.get("render_path"), Some(&serde_json::json!("smartfx")));
             assert_eq!(
                 base.get("pixel_format"),
                 Some(&serde_json::json!(label)),
                 "the render did not stay at {label}: {base}"
+            );
+            // #353 admitted layered Argb32f on the strength of both routes
+            // staying on the CPU. render_experimental_image_with_timed_layers
+            // hardcodes Auto, and with no policy the session must fold; if it
+            // ever took a device, health and determinism would both still pass.
+            assert_eq!(
+                base.get("gpu_render_dispatched"),
+                Some(&serde_json::json!(false)),
+                "{label}: a layered session dispatched a GPU render: {base}"
+            );
+            assert_eq!(
+                base.get("gpu_attempt"),
+                Some(&serde_json::Value::Null),
+                "{label}: a layered session attempted a device: {base}"
             );
 
             let out_repeat = scratch.join(format!("{label}-repeat.png"));
@@ -623,6 +646,207 @@ mod windows_e2e {
     /// are actually consumed (changing either changes the output), so a match is
     /// not a vacuous "the probe ignored them" pass. Gated on the locally built
     /// worker and the pf-layer-param-probe fixture, like the sibling test.
+
+    /// The host-context shapes the session must carry, verified per shape.
+    ///
+    /// The A/B this replaces covered six sub-cases in one test; the first
+    /// conversion kept only the plain render and silently dropped the other
+    /// five, which the dead `HostContext` import gave away. Each is restored
+    /// here, because session *ineligibility* is a routing decision rather than a
+    /// failure: a gate regression that pushed these shapes back to the one-shot
+    /// would return Ok and go unnoticed. The counter assertion is what catches
+    /// that, so it is the point of this test (#361).
+    #[test]
+    fn host_context_shapes_stay_on_the_session() {
+        if crate::common::skip_without_restricted_token_launch(
+            "host_context_shapes_stay_on_the_session",
+        ) {
+            return;
+        }
+        let _env_guard = SESSION_ROUTE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let root = repository_root();
+        let worker = root.join("target/minihost-build/aex_render_worker.exe");
+        let aex = root.join("target/pf-sampling-probe-build/Release/pf_sampling_probe.aex");
+        if !worker.is_file() || !aex.is_file() {
+            eprintln!("skipping host-context shapes: build the worker and pf_sampling_probe.aex");
+            return;
+        }
+        let sha = format!("{:x}", Sha256::digest(std::fs::read(&aex).unwrap()));
+        let scratch = std::env::temp_dir().join(format!(
+            "aexcompat-host-context-{}-{:032x}",
+            std::process::id(),
+            rand::random::<u128>()
+        ));
+        std::fs::create_dir_all(&scratch).unwrap();
+        let input = scratch.join("input.png");
+        image::RgbaImage::from_fn(64, 32, |x, y| {
+            image::Rgba([(x * 3) as u8, (y * 5) as u8, (x + y) as u8, 255])
+        })
+        .save(&input)
+        .unwrap();
+
+        let carried = |output: &Path, timing: RenderTiming, context: Option<&HostContext>| {
+            let before = RENDER_SESSION_WRAPPER_RENDERS.load(Ordering::SeqCst);
+            let report = render_experimental_image_at_time_with_format_and_context(
+                &root,
+                &aex,
+                &sha,
+                &input,
+                output,
+                &[],
+                timing,
+                false,
+                RenderPixelFormat::Argb8,
+                context,
+            )
+            .expect("session-route context render");
+            assert!(
+                RENDER_SESSION_WRAPPER_RENDERS.load(Ordering::SeqCst) > before,
+                "this shape left the session and went to the one-shot: {report}"
+            );
+            report
+        };
+
+        // A non-default time: the session hoists SEQUENCE_SETUP, so a frame at
+        // t != 0 exercises the seeding the launch does once.
+        let timed = carried(
+            &scratch.join("timed.png"),
+            RenderTiming {
+                current_time: 7,
+                time_step: 1,
+                total_time: 300,
+                time_scale: 30,
+            },
+            None,
+        );
+        assert_session_render_is_healthy(&timed, "timed");
+        assert_eq!(timed.get("current_time"), Some(&serde_json::json!(7)));
+
+        // Spatial + render environment. The non-default downsample and
+        // full-resolution values are what make spatial_contract_ok meaningful --
+        // under the default context it is nearly free.
+        let context: HostContext = serde_json::from_value(serde_json::json!({
+            "mask_scene": {"masks": []},
+            "spatial": {
+                "downsample_x": {"numerator": 1, "denominator": 2},
+                "downsample_y": {"numerator": 1, "denominator": 2},
+                "pixel_aspect_ratio": {"numerator": 1, "denominator": 1},
+                "full_resolution_width": 128,
+                "full_resolution_height": 64,
+            },
+            "render_environment": {
+                "quality": "low",
+                "field": "upper",
+                "shutter_angle": 0.5,
+                "shutter_phase": -0.25,
+            },
+        }))
+        .expect("host context fixture");
+        let context_report = carried(
+            &scratch.join("context.png"),
+            RenderTiming::default(),
+            Some(&context),
+        );
+        assert_session_render_is_healthy(&context_report, "spatial context");
+        assert_eq!(
+            context_report.get("downsample_x"),
+            Some(&serde_json::json!([1, 2])),
+            "the spatial trailer did not reach the worker: {context_report}"
+        );
+        assert_eq!(
+            context_report.get("full_resolution_dimensions"),
+            Some(&serde_json::json!([128, 64])),
+            "the full-resolution hint did not reach the worker: {context_report}"
+        );
+
+        // A non-empty mask scene travels as the `v2|` trailer.
+        let mask_context: HostContext = serde_json::from_value(serde_json::json!({
+            "mask_scene": {
+                "masks": [{
+                    "open": false,
+                    "vertices": [
+                        {"x": 4.0, "y": 4.0},
+                        {"x": 40.0, "y": 8.0},
+                        {"x": 20.0, "y": 28.0},
+                    ],
+                }],
+            },
+        }))
+        .expect("mask host context fixture");
+        let mask_report = carried(
+            &scratch.join("mask.png"),
+            RenderTiming::default(),
+            Some(&mask_context),
+        );
+        assert_session_render_is_healthy(&mask_report, "mask scene");
+
+        // Alpha-as-coverage rides the `--alpha-as-coverage-v1` auxiliary option.
+        let coverage_context: HostContext = serde_json::from_value(serde_json::json!({
+            "mask_scene": {"masks": []},
+            "alpha_as_coverage_params": [0],
+        }))
+        .expect("alpha-as-coverage host context fixture");
+        let coverage_report = carried(
+            &scratch.join("coverage.png"),
+            RenderTiming::default(),
+            Some(&coverage_context),
+        );
+        assert_session_render_is_healthy(&coverage_report, "alpha as coverage");
+
+        // Aux channels ride `--aux-manifest-v1`. This end-to-end path is what
+        // surfaced the verbatim-path defect in #231, so it is worth keeping as a
+        // live render rather than a source-string check.
+        // The aux sidecar must live under <repository>/target, which is the only
+        // tree the broker will read a manifest-referenced path from.
+        let aux_source_dir = root.join(format!(
+            "target/aux-source-{}-{:032x}",
+            std::process::id(),
+            rand::random::<u128>()
+        ));
+        std::fs::create_dir_all(&aux_source_dir).unwrap();
+        let aux_source = aux_source_dir.join("depth.f32le");
+        let depth_type = i32::from_be_bytes(*b"DPTH");
+        // 64 * 32 * 1 component, packed little-endian f32; a bounded ramp keeps
+        // every sample finite (prepare_aux_transport rejects NaN/inf).
+        let depth_bytes: Vec<u8> = (0..64u32 * 32)
+            .flat_map(|index| ((index % 251) as f32 / 251.0).to_le_bytes())
+            .collect();
+        std::fs::write(&aux_source, &depth_bytes).unwrap();
+        let aux_context: HostContext = serde_json::from_value(serde_json::json!({
+            "mask_scene": {"masks": []},
+            "aux_channels": [{
+                "param_index": 0,
+                "channel": {
+                    "type": depth_type,
+                    "name": "Depth",
+                    "data_type": "f32le",
+                    "dimension": 1,
+                    "width": 64,
+                    "height": 32,
+                    "downsample_x": {"numerator": 1, "denominator": 1},
+                    "downsample_y": {"numerator": 1, "denominator": 1},
+                    "samples": [{
+                        "time": 0,
+                        "time_scale": 30,
+                        "path": aux_source.to_string_lossy(),
+                        "sampling": "hold",
+                        "interpretation": "depth",
+                    }],
+                },
+            }],
+        }))
+        .expect("aux host context fixture");
+        let aux_report = carried(
+            &scratch.join("aux.png"),
+            RenderTiming::default(),
+            Some(&aux_context),
+        );
+        assert_session_render_is_healthy(&aux_report, "aux channels");
+        let _ = std::fs::remove_dir_all(&aux_source_dir);
+        let _ = std::fs::remove_dir_all(&scratch);
+    }
 
     /// The plain classic render, verified without the one-shot.
     ///
@@ -683,6 +907,10 @@ mod windows_e2e {
             "the session wrapper did not carry the render"
         );
         assert_session_render_is_healthy(&first, "classic render");
+        assert_eq!(
+            first.get("render_path"),
+            Some(&serde_json::json!("classic"))
+        );
 
         let out_repeat = scratch.join("repeat.png");
         let repeat = render_experimental_image(&root, &aex, &sha, &input, &out_repeat, &[])
@@ -816,11 +1044,16 @@ mod windows_e2e {
         let base = render(&out_base, &base_params);
         assert_session_render_is_healthy(&base, "layer+slider");
         assert_eq!(
-            base.get("secondary_layers")
-                .and_then(|layers| layers.as_array())
-                .map(|layers| layers.len()),
-            Some(1),
-            "the secondary layer did not reach the report: {base}"
+            base.get("secondary_layers"),
+            Some(&serde_json::json!([{"slot": 1, "width": 64, "height": 32}])),
+            "the secondary layer did not reach the report at its declared slot              and size: {base}"
+        );
+        // The probe declares input + layer + slider; a count that drifts means
+        // the parameter table the worker saw is not the one that was sent.
+        assert_eq!(
+            base.get("in_data_num_params"),
+            Some(&serde_json::json!(3)),
+            "the plug-in did not see all three parameters: {base}"
         );
 
         let out_repeat = scratch.join("repeat.png");
@@ -1076,6 +1309,40 @@ mod windows_e2e {
                 Some(&serde_json::json!("ok")),
                 "{label}: the audio worker did not exit cleanly: {report}"
             );
+            // Absolute key presence, which two agreeing runs cannot supply: they
+            // agree just as well on a key that vanished from both. A session that
+            // produced correct samples but mislabelled the rate, channel count or
+            // format would otherwise pass (#361 acceptance criterion 2.3).
+            for key in [
+                "sample_rate",
+                "channels",
+                "sample_format",
+                "output_transport",
+                "setup_range_valid",
+                "output_samples",
+                "input_samples",
+                "input_sha256",
+                "output_sha256",
+                "output_start_sample",
+            ] {
+                assert!(
+                    report.get(key).is_some_and(|value| !value.is_null()),
+                    "{label}: the audio report lost {key}: {report}"
+                );
+            }
+            for (key, want) in [
+                ("sample_rate", serde_json::json!(44100)),
+                ("channels", serde_json::json!(1)),
+                ("sample_format", serde_json::json!("float32")),
+                ("output_transport", serde_json::json!("mono_f32le_44100")),
+                ("setup_range_valid", serde_json::json!(true)),
+            ] {
+                assert_eq!(
+                    report.get(key),
+                    Some(&want),
+                    "{label}: {key} must be {want}: {report}"
+                );
+            }
         };
         audio_health(&first, "audio render");
 
@@ -1848,13 +2115,20 @@ mod windows_e2e {
         );
         assert_session_render_is_healthy(&conformance, "conformance render");
 
-        // What this test can and cannot see: the flattened public report carries
+        // What this test can and cannot see. The flattened public report carries
         // no render_settings block -- that field lives in the worker report the
-        // session close returns, not in interactive_image_render (measured
-        // against the real report). So the worker-side arrival of the trailer is
-        // not observable here; it is the session protocol's own tests that cover
-        // it. What is observable is the effect the setting is asked for: the
-        // broker's alpha pre-transform rewrites the input the plug-in sees.
+        // session close returns. `premultiplication` looks like a way in, since
+        // the worker sources it from the trailer, but it is projected only on the
+        // smart path; a classic render reports null for it whatever the trailer
+        // says. And picking a non-default alpha mode to make it observable does
+        // not work either: "straight" is the identity for the broker's
+        // pre-transform, so it would erase the input difference asserted below.
+        // Both measured. The worker-side arrival of this trailer is therefore not
+        // observable from a classic public report at all, and the session
+        // protocol's own tests are what cover it.
+        //
+        // What is observable is the effect the setting is asked for: the broker's
+        // alpha pre-transform rewrites the input the plug-in sees.
         assert_ne!(
             plain.get("input_sha256"),
             conformance.get("input_sha256"),
@@ -2277,9 +2551,9 @@ mod windows_e2e {
     /// rejected. The byte-equivalence A/B above cannot catch that, because its
     /// fixture does advertise audio and passes the gate either way.
     #[test]
-    fn an_unadvertised_plugin_with_a_sidecar_is_refused_on_both_routes() {
+    fn an_unadvertised_plugin_with_a_sidecar_is_refused_by_the_session() {
         if crate::common::skip_without_restricted_token_launch(
-            "an_unadvertised_plugin_with_a_sidecar_is_refused_on_both_routes",
+            "an_unadvertised_plugin_with_a_sidecar_is_refused_by_the_session",
         ) {
             return;
         }
