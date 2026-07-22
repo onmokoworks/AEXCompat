@@ -538,3 +538,62 @@ output valid) なので plugin は健全。
 - **#290 の routing 等価性 (session ≡ one-shot GPU dispatch) を実 GPU で実証**。producer が e2e 動作。
 - **残る smart_render_error=4 は GPU render エンジン (worker GPU world transport) の別バグ**で、両経路
   共通・#290/#300 と orthogonal。これが解ければ byte 等価 A/B (valid pixels) まで到達する。
+
+## 2026-07-22 #305 root cause 特定 (観察 → 確定)
+
+### 診断手法
+sandbox が stderr/file を封じるため、worker report の free-text JSON フィールド
+(`world_debug_report_json`) に `gpu_diag_site` を追加し、error 4 を返す各経路に
+site コードを埋めて特定した (TEMP 計装、確定後に revert)。
+
+### 段階的な絞り込み (観察)
+1. `CL2Err` は CL エラーを `PF_Err_INTERNAL_STRUCT_DAMAGED`(=512) に写像。
+   `PF_Err_OUT_OF_MEMORY`=4 (AE_Effect.h:470 で確認)。→ error 4 は CL 由来ではない。
+2. checkout callback (checkout_pixels/checkout_output, site 101-107) → 発火せず (site 0)。
+3. suite 関数 (gpu_get_device_info/gpu_create_world/gpu_get_world_data, site 200-321) →
+   発火せず (site 0)。かつ `gpu_allocations_created:2` (input/output のみ、plugin の
+   CreateGPUWorld による3個目なし) → SmartRenderGPU 本体が短絡され未実行と判明。
+4. `get_pixel_format` (PF_GetPixelFormat, site 400/402) を計装 → **site 402 で確定**。
+
+### 確定した root cause
+`SmartRender` wrapper (SDK_Invert_ProcAmp.cpp:1120) が `PF_WorldSuite2::PF_GetPixelFormat(input_worldP)`
+を呼ぶ。worker の `get_pixel_format` → `resolve_dispatch_world_format` が world+24 を
+登録値と比較して不一致で false (worker_world_safety.cpp:71-73) → error 4。
+
+原因は **worker_smart_dispatch.cpp の登録と transport の +24 上書きの順序**:
+1. L185 `register_world(input_world, GPU_BGRA128)` が world+24 = **ホスト側ピクセル
+   ポインタ** を entry.data に記録。
+2. L201 `prepare_render_transport` が world+24 を **GPU device ポインタ (cl_mem)** に上書き
+   (plugin の GetGPUWorldData が +24 を返すため必須)。
+3. dispatch 中 `PF_GetPixelFormat` の resolve が world+24 = device ptr を読み、
+   entry.data = host ptr と不一致 → false → error 4。
+
+CPU 経路は checkout が `input_checkout_view_world` (swap されない別 world) を返すため
+(`use_views = !gpu_render_dispatched`) 露出しなかった。GPU 固有。
+
+### 修正方針
+`prepare_render_transport` が +24 を device ptr に swap した**後**に input/output world を
+再登録し、dispatch 中に plugin が見る layout (device ptr) と登録 entry を一致させる。
+register_world は同一 world の旧 entry を除去して置換するため (worker_world_safety.cpp:45-47)、
+stale な host-ptr entry は上書きされる。安全側検査 (layout 比較) は弱めない。
+
+### 修正と検証 (確定)
+`worker_smart_dispatch.cpp` の GPU 経路で `prepare_render_transport` が +24 を device ptr に
+swap した後、input/output world を `register_world(..., GPU_BGRA128)` で再登録するよう変更。
+診断計装は全て revert し、修正 (再登録) のみ残した。クリーンビルドで実 GPU 検証:
+
+| 経路 | smart_render_error | output_pixels_valid | output_sha256 |
+|------|-------------------|---------------------|---------------|
+| session (default) | 0 | true | 17331e64...bb17 |
+| one-shot (WRAPPER 無効) | 0 | true | 17331e64...bb17 |
+
+- **output_sha256 一致 = byte 等価 A/B 達成** (W4 完全解決)。
+- output != input (`d4b4ade8...`) = 実 GPU compute (invert+procamp) 実行。
+- 2経路は観測上明確に異なる (one-shot は sequence_setup/setdown stage を持つ、
+  elapsed_ms 3818 vs 6242、36行差分) が同一ピクセルを産む = routing 等価。
+
+### #305 の位置づけ (訂正)
+「GPU render エンジン (worker GPU world transport) の別バグ」と記録していたが、正確には
+**transport の +24 上書きと dispatch-format 登録の順序不整合**であり、GPU compute 自体
+(cl_mem 転送・kernel) は健全だった。SmartRenderGPU に到達する前に PF_GetPixelFormat で
+弾かれていた。

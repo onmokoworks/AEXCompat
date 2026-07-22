@@ -197,9 +197,24 @@ bool dispatch(const Request& request, const Hooks& hooks,
       !result.empty_result_rect;
   result.gpu_render_dispatched = render_selector == kSmartRenderGpu && will_dispatch;
   transport::RenderTransport render_transport;
-  const bool transport_ready = !result.gpu_render_dispatched || !use_transport ||
-      transport::prepare_render_transport(runtime.input_world, runtime.output_world,
-                                          render_transport);
+  bool transport_ready = !result.gpu_render_dispatched || !use_transport;
+  if (result.gpu_render_dispatched && use_transport) {
+    transport_ready = transport::prepare_render_transport(
+        runtime.input_world, runtime.output_world, render_transport);
+    // prepare_render_transport swaps each world's +24 pixel pointer to the GPU
+    // device buffer (so PF_GPUDeviceSuite1::GetGPUWorldData returns it). The
+    // pre-transport register_world above captured the host pointer, so re-register
+    // with the device-pointer layout the plug-in actually observes during
+    // dispatch; otherwise PF_GetPixelFormat's dispatch-format resolve rejects the
+    // layout mismatch and the SmartRenderGPU selector fails with
+    // PF_Err_OUT_OF_MEMORY (issue #305).
+    if (transport_ready &&
+        ((!plan.missing_input && !request.formats->register_world(
+              runtime.input_world, world_registry::kPixelFormatGpuBgra128)) ||
+         !request.formats->register_world(runtime.output_world,
+                                          world_registry::kPixelFormatGpuBgra128)))
+      transport_ready = false;
+  }
   std::cerr << "stage:"
             << (result.gpu_render_dispatched ? "smart_render_gpu" : "smart_render_cpu")
             << "_begin\n" << std::flush;
