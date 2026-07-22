@@ -577,12 +577,18 @@ fn run_isolated_impl(
 /// this without collecting terminates the worker through the job's
 /// kill-on-close limit.
 pub struct LaunchedIsolatedProcess {
+    /// Present only for a private desktop: the interactive desktop is never
+    /// swept, so a GUI harness worker's windows are left exactly as they are.
+    ///
+    /// Declared first so it is also dropped first. The sweep thread reads the
+    /// desktop and job handles below, and a launch dropped instead of
+    /// collected — how a session kills its worker — would otherwise close both
+    /// while the thread was still between polls. Windows hands handle values
+    /// out again, so that is not merely a failed call.
+    dialog_sweep: Option<crate::worker_dialog::DialogSweep>,
     process: OwnedHandle,
     job: OwnedHandle,
     desktop: Option<WorkerDesktop>,
-    /// Present only for a private desktop: the interactive desktop is never
-    /// swept, so a GUI harness worker's windows are left exactly as they are.
-    dialog_sweep: Option<crate::worker_dialog::DialogSweep>,
     stdout_reader: thread::JoinHandle<io::Result<(String, bool)>>,
     stderr_reader: thread::JoinHandle<io::Result<(String, bool)>>,
     // Opt-in crash minidump (issue #18). The broker keeps the pipe read side
@@ -640,10 +646,10 @@ impl LaunchedIsolatedProcess {
     /// job accounting into a `ProcessResult`.
     pub fn wait_and_collect(self, timeout: Duration) -> io::Result<ProcessResult> {
         let LaunchedIsolatedProcess {
+            dialog_sweep,
             process: process_handle,
             job,
             desktop,
-            dialog_sweep,
             stdout_reader,
             stderr_reader,
             minidump_file,
@@ -686,10 +692,18 @@ impl LaunchedIsolatedProcess {
         // windows it closed actually went away, and before the desktop handle
         // is released so it is never enumerated after being closed.
         let dismissed_windows = dialog_sweep.map(|sweep| sweep.finish()).unwrap_or_default();
-        for window in crate::worker_dialog::undismissed(&dismissed_windows) {
+        // A worker that finished got past whatever was on its desktop, so only
+        // one that did not is worth warning about.
+        let worker_finished = !timed_out && exit_code == 0;
+        for window in crate::worker_dialog::still_blocking(&dismissed_windows) {
+            if worker_finished {
+                break;
+            }
             tracing::warn!(
                 class = %window.class,
-                "a worker window ignored WM_CLOSE and may have blocked the worker"
+                title = %window.title,
+                asked_to_close = window.asked_to_close,
+                "a worker window may have held the worker up"
             );
         }
         // Release the desktop only after the worker, job, readers, and
@@ -1032,12 +1046,14 @@ fn launch_isolated_impl(
     let dialog_sweep = desktop
         .as_ref()
         .and_then(|desktop| desktop.handle)
-        .map(|handle| crate::worker_dialog::DialogSweep::start(handle, job.raw()));
+        .map(|handle| {
+            crate::worker_dialog::DialogSweep::start(handle, job.raw(), process_handle.raw())
+        });
     Ok(LaunchedIsolatedProcess {
+        dialog_sweep,
         process: process_handle,
         job,
         desktop,
-        dialog_sweep,
         stdout_reader,
         stderr_reader,
         minidump_file,

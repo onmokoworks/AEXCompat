@@ -18,10 +18,11 @@
 //! - anything on the caller's own desktop. The sweep only ever runs against a
 //!   desktop this process created for a worker; the interactive desktop is
 //!   never enumerated, let alone posted to.
-//! - windows outside the worker's Job Object. Job membership rather than a
-//!   process id, so a dialog put up by a helper process the plug-in spawned is
-//!   still handled, and a recycled process id cannot make the broker close a
-//!   window belonging to something else.
+//! - windows outside the worker's Job Object. The owning process id is only
+//!   the first step; membership is then tested with `IsProcessInJob`, so a
+//!   dialog from a helper process the plug-in spawned is still handled, and a
+//!   recycled process id alone cannot make the broker close a window belonging
+//!   to something unrelated.
 //! - invisible windows. Plug-ins keep hidden top-level windows for timers and
 //!   message routing; closing those would break plug-ins that have no dialog
 //!   problem at all.
@@ -43,10 +44,17 @@
 pub struct DismissedWindow {
     pub title: String,
     pub class: String,
-    /// Whether the window was gone by the end of the sweep. A dialog procedure
-    /// is free to ignore `WM_CLOSE`, and one that does leaves the worker
-    /// blocked exactly as before — so "the broker asked" and "the window went
-    /// away" are reported apart rather than as one word.
+    /// Whether the window was seen to go away *while the worker was still
+    /// running*. A dialog procedure is free to ignore `WM_CLOSE`, and one that
+    /// does leaves the worker blocked exactly as before, so this is reported
+    /// apart from having asked.
+    ///
+    /// False does not by itself mean the window survived: a worker that answers
+    /// its dialog and exits immediately can do both between two polls, and
+    /// everything is gone once the process is. Read it with the worker's exit —
+    /// a worker that finished got past whatever was up; one that was killed,
+    /// with `asked_to_close` and no `closed`, is the shape of a dialog that
+    /// ignored the ask.
     pub closed: bool,
     /// Whether the broker posted `WM_CLOSE` at all. False for a window that is
     /// not a standard dialog: those are recorded and left alone (see
@@ -84,14 +92,16 @@ pub(crate) use windows_impl::DialogSweep;
 #[cfg(windows)]
 mod windows_impl {
     use super::{DismissedWindow, GRACE, POLL};
-    use std::collections::HashMap;
+    use std::collections::{HashMap, HashSet};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::Instant;
-    use windows_sys::Win32::Foundation::{BOOL, CloseHandle, HANDLE, HWND, LPARAM};
+    use windows_sys::Win32::Foundation::{BOOL, CloseHandle, HANDLE, HWND, LPARAM, WAIT_TIMEOUT};
     use windows_sys::Win32::System::JobObjects::IsProcessInJob;
     use windows_sys::Win32::System::StationsAndDesktops::{EnumDesktopWindows, HDESK};
-    use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+    use windows_sys::Win32::System::Threading::{
+        OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, WaitForSingleObject,
+    };
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         GWL_EXSTYLE, GetClassNameW, GetWindowLongPtrW, GetWindowTextW, GetWindowThreadProcessId,
         IsWindowVisible, PostMessageW, WM_CLOSE, WS_EX_NOACTIVATE,
@@ -113,14 +123,21 @@ mod windows_impl {
     struct Watched {
         desktop: HDESK,
         job: HANDLE,
+        /// The worker itself, so the sweep can tell "this window went away"
+        /// from "everything went away because the process did".
+        process: HANDLE,
     }
     unsafe impl Send for Watched {}
 
     impl DialogSweep {
         /// Watches `desktop` for windows belonging to `job`.
-        pub(crate) fn start(desktop: HDESK, job: HANDLE) -> Self {
+        pub(crate) fn start(desktop: HDESK, job: HANDLE, process: HANDLE) -> Self {
             let stop = Arc::new(AtomicBool::new(false));
-            let watched = Watched { desktop, job };
+            let watched = Watched {
+                desktop,
+                job,
+                process,
+            };
             let thread = std::thread::spawn({
                 let stop = stop.clone();
                 move || sweep_until(watched, &stop)
@@ -165,42 +182,53 @@ mod windows_impl {
             job: watched.job,
             tracked: HashMap::new(),
             found: Vec::new(),
-            still_present: Vec::new(),
+            still_present: HashSet::new(),
         };
-        loop {
-            let done = stop.load(Ordering::Relaxed);
+        // Every pass but the last happens while the worker is alive, which is
+        // the only time a window going away means anything: the sweep is
+        // stopped after the worker has exited, so by then every window is gone
+        // whether it was answered or not. Marking `closed` from that last pass
+        // would report a dialog that ignored `WM_CLOSE` as having been closed.
+        while !stop.load(Ordering::Relaxed) {
             state.still_present.clear();
-            unsafe {
+            let enumerated = unsafe {
                 EnumDesktopWindows(
                     watched.desktop,
                     Some(visit),
                     &mut state as *mut SweepState as isize,
-                );
-            }
-            // A window that has gone away since a `WM_CLOSE` was posted is the
-            // only evidence the broker has that the post worked.
-            for (window, tracked) in &state.tracked {
-                // Only a window the broker asked to close can be said to have
-                // been closed by it; one that vanished on its own is neither
-                // the broker's doing nor a problem.
-                if !state.still_present.contains(window)
-                    && state.found[tracked.record].asked_to_close
-                {
-                    state.found[tracked.record].closed = true;
-                }
-            }
-            if done {
-                return state.found;
+                )
+            } != 0;
+            // A window destroyed mid-enumeration makes `EnumDesktopWindows`
+            // stop early, and a partial list is not evidence that anything went
+            // away; acting on it would latch a window that is still up.
+            let worker_alive = unsafe { WaitForSingleObject(watched.process, 0) } == WAIT_TIMEOUT;
+            if enumerated {
+                state.tracked.retain(|window, tracked| {
+                    if state.still_present.contains(window) {
+                        return true;
+                    }
+                    // Only while the worker runs does a window going away mean
+                    // it was answered. Once the process is gone so is every
+                    // window it owned, answered or not.
+                    if worker_alive && state.found[tracked.record].asked_to_close {
+                        state.found[tracked.record].closed = true;
+                    }
+                    // Dropped, so a window handle Windows hands out again
+                    // starts its own grace and gets its own record rather than
+                    // inheriting the previous window's.
+                    false
+                });
             }
             std::thread::sleep(POLL);
         }
+        state.found
     }
 
     struct SweepState {
         job: HANDLE,
         tracked: HashMap<isize, Tracked>,
         found: Vec<DismissedWindow>,
-        still_present: Vec<isize>,
+        still_present: HashSet<isize>,
     }
 
     unsafe extern "system" fn visit(window: HWND, param: LPARAM) -> BOOL {
@@ -216,10 +244,17 @@ mod windows_impl {
             return 1;
         }
         let key = window as isize;
-        state.still_present.push(key);
+        state.still_present.insert(key);
         let (first_seen, is_dialog) = match state.tracked.get(&key) {
             Some(entry) => (entry.first_seen, entry.is_dialog),
             None => {
+                // A plug-in that opens and closes a window per frame would
+                // otherwise grow this without bound for the life of a session,
+                // and it all ends up in a diagnostic. Bounded like the stdout
+                // and stderr captures are.
+                if state.found.len() >= MAX_RECORDED {
+                    return 1;
+                }
                 let class = window_text(window, GetClassNameW);
                 let is_dialog = class == super::DIALOG_CLASS;
                 // Titles reach diagnostics, and a dialog routinely names the
@@ -248,17 +283,25 @@ mod windows_impl {
         if !is_dialog || first_seen.elapsed() < GRACE {
             return 1;
         }
-        if let Some(tracked) = state.tracked.get(&key) {
-            state.found[tracked.record].asked_to_close = true;
-        }
         // Posted rather than sent: the modal loop belongs to the worker's
-        // thread, and a blocking send would put the broker inside it.
-        unsafe { PostMessageW(window, WM_CLOSE, 0, 0) };
+        // thread, and a blocking send would put the broker inside it. Recorded
+        // only once the post is accepted, so the field says what the broker did
+        // rather than what it attempted.
+        let posted = unsafe { PostMessageW(window, WM_CLOSE, 0, 0) } != 0;
+        if let Some(tracked) = state.tracked.get(&key) {
+            let record = tracked.record;
+            state.found[record].asked_to_close |= posted;
+        }
         1
     }
 
     /// Window titles are bounded before they reach a diagnostic.
     const TITLE_LIMIT: usize = 256;
+
+    /// How many distinct windows one launch records. Far more than a plug-in
+    /// asking a question needs, and small enough that a misbehaving one cannot
+    /// grow the diagnostic without limit.
+    const MAX_RECORDED: usize = 32;
 
     /// Whether `window` belongs to a process inside `job` — the worker itself
     /// or anything it spawned. A process id alone would miss a helper process
@@ -276,6 +319,12 @@ mod windows_impl {
         let mut member: BOOL = 0;
         let queried = unsafe { IsProcessInJob(process, job, &mut member) };
         unsafe { CloseHandle(process) };
+        if queried == 0 {
+            // The window is skipped on every later poll too, so if it was the
+            // worker's dialog the worker stays blocked with nothing recorded.
+            // At least say why.
+            tracing::debug!("could not test a worker desktop window for job membership");
+        }
         queried != 0 && member != 0
     }
 
@@ -291,10 +340,11 @@ mod windows_impl {
     }
 }
 
-/// Windows that could still be holding the worker up: a dialog the broker
-/// asked to close and which did not go away, or a window it left alone because
-/// it was not a dialog. Either way the worker may be waiting on it.
-pub fn undismissed(windows: &[DismissedWindow]) -> Vec<&DismissedWindow> {
+/// Windows that were still up when the worker was last seen alive: a dialog
+/// the broker asked to close and which did not go away, and any window it left
+/// alone because it was not a dialog. Either shape may be what the worker was
+/// waiting on.
+pub fn still_blocking(windows: &[DismissedWindow]) -> Vec<&DismissedWindow> {
     windows.iter().filter(|window| !window.closed).collect()
 }
 
@@ -313,7 +363,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn only_windows_that_never_went_away_are_reported_as_undismissed() {
+    fn only_windows_that_never_went_away_are_reported_as_blocking() {
         let windows = vec![
             DismissedWindow {
                 title: "closed".into(),
@@ -328,7 +378,7 @@ mod tests {
                 asked_to_close: true,
             },
         ];
-        let stuck = undismissed(&windows);
+        let stuck = still_blocking(&windows);
         assert_eq!(stuck.len(), 1);
         assert_eq!(stuck[0].title, "stuck");
     }

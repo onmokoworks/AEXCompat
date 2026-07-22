@@ -79,7 +79,10 @@ fn a_modal_dialog_is_closed_so_the_worker_reaches_its_result() {
         .unwrap_or_else(|| panic!("dialog not recorded: {:?}", result.dismissed_windows));
     assert_eq!(dialog.class, aexcompat_broker::worker_dialog::DIALOG_CLASS);
     assert!(dialog.asked_to_close, "never asked to close: {dialog:?}");
-    assert!(dialog.closed, "recorded as still up: {dialog:?}");
+    // `closed` is deliberately not asserted: this worker answers its dialog and
+    // exits at once, so both can happen between two polls and the sweep may
+    // never observe the window gone while the process is alive. What proves the
+    // dialog was answered here is the worker's own `messagebox_dismissed`.
 }
 
 #[test]
