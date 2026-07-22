@@ -156,7 +156,10 @@ class RenderRequestSecureLaunchContractTests(unittest.TestCase):
         no brace, quote or comment opener.
         """
         char = text[index]
-        if char == "r" and not (index and (text[index - 1].isalnum() or text[index - 1] == "_")):
+        # `b` is the one preceding character where the raw reading is still correct
+        # (`br"..."`), so it must not be treated as an identifier prefix here.
+        start = index - 1 if index and text[index - 1] == "b" else index
+        if char == "r" and not (start and (text[start - 1].isalnum() or text[start - 1] == "_")):
             hashes = 0
             cursor = index + 1
             while text[cursor : cursor + 1] == "#":
@@ -298,7 +301,9 @@ class RenderRequestSecureLaunchContractTests(unittest.TestCase):
         # secure_launch injects the sealed plug-in between the before/after argv
         # slices, so no route may serialize a plug-in path into its own args.
         self.assertNotIn("plugin_path.to_string_lossy()", route)
-        self.assertIn("plugin_basename: &plugin_basename", route)
+        self.assertEqual(
+            route.count("plugin_basename: &plugin_basename"), self.launch_sites(route)
+        )
 
     def test_each_launch_is_pinned_to_the_receipt_worker(self):
         route = self.route_source()
