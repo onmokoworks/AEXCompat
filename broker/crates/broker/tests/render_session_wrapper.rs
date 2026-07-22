@@ -69,7 +69,16 @@ mod windows_e2e {
         // The broker's own verdict and the worker's exit.
         require("passed", serde_json::json!(true));
         require("worker_classification", serde_json::json!("ok"));
-        require("host_contract_warning", serde_json::json!(false));
+        // The geometry contracts are host-side invariants, so they are required
+        // here. parameter_count_contract_ok is not: it is an observation about
+        // the plug-in's declared parameter count, and a fixture may legitimately
+        // fail it (pf_layer_param_probe declares num_params=1 while the render
+        // supplies a layer, so it reports false and host_contract_warning goes
+        // true). Measured -- requiring host_contract_warning == false for every
+        // render fails a correct oversized-layer render. Each test pins that
+        // field itself where it is meaningful.
+        require("output_origin_contract_ok", serde_json::json!(true));
+        require("spatial_contract_ok", serde_json::json!(true));
         // Ownership ledgers and guard pages: a malformed plug-in must produce a
         // diagnostic, never a corrupted host (CLAUDE.md host-protection
         // invariants). Required outright -- an absent key means the report shape
@@ -1467,17 +1476,13 @@ mod windows_e2e {
         let _ = std::fs::remove_dir_all(&scratch);
     }
 
-    /// A/B equivalence for an expand-output effect (issue #262): the length-1
-    /// session route grows the shared output slot in place and renders the
-    /// expanded output byte-identically to the one-shot argv transport, instead
-    /// of falling back. The fixture is pf_expand_allowed_probe (FRAME_SETUP
-    /// grows the output by 4px with PF_OutFlag_I_EXPAND_BUFFER), which overruns
-    /// the initial slot and drives the resize_needed in-session grow. Requires
-    /// the render worker and the resize probe (tools/build-pf-frame-resize-probe.ps1).
+    /// An effect that expands its output past the launch slot grows the shared
+    /// section in place (#262). Verified by the lifecycle the grow must not
+    /// replay, not by agreeing with the one-shot (#361).
     #[test]
-    fn expand_output_matches_the_one_shot_transport() {
+    fn expand_output_grows_in_place_without_replaying_the_lifecycle() {
         if crate::common::skip_without_restricted_token_launch(
-            "expand_output_matches_the_one_shot_transport",
+            "expand_output_grows_in_place_without_replaying_the_lifecycle",
         ) {
             return;
         }
@@ -1489,15 +1494,12 @@ mod windows_e2e {
         let aex =
             root.join("target/pf-frame-resize-probe-build/Release/pf_expand_allowed_probe.aex");
         if !worker.is_file() || !aex.is_file() {
-            eprintln!(
-                "skipping expand A/B: build aex_render_worker.exe and pf_expand_allowed_probe.aex \
-                 (tools/build-pf-frame-resize-probe.ps1) first"
-            );
+            eprintln!("skipping expand render: build the worker and pf_expand_allowed_probe.aex");
             return;
         }
         let sha = format!("{:x}", Sha256::digest(std::fs::read(&aex).unwrap()));
         let scratch = std::env::temp_dir().join(format!(
-            "aexcompat-expand-ab-{}-{:032x}",
+            "aexcompat-expand-{}-{:032x}",
             std::process::id(),
             rand::random::<u128>()
         ));
@@ -1509,19 +1511,14 @@ mod windows_e2e {
         .save(&input)
         .unwrap();
 
-        // The probe appends one byte per lifecycle selector to this file across
-        // every worker it is spawned into: 'S' for FRAME_SETUP, 'R' for RENDER.
-        // The counts are the only cross-process observable of a re-opened
-        // worker's lifecycle: an expand that overran the launch slot and re-opened
-        // the session (the pre-#262 behaviour) runs FRAME_SETUP and RENDER once in
-        // the discarded worker and again in the re-opened worker (two 'S', two
-        // 'R'); the in-session grow keeps the same worker, so each runs exactly
-        // once (one 'S', one 'R'), matching the one-shot route. This is the direct
-        // evidence that SEQUENCE/FRAME setup+setdown are not replayed (#262
-        // finding 3617631908).
+        // The probe appends one byte per lifecycle selector in every worker it is
+        // spawned into: 'S' for FRAME_SETUP, 'R' for RENDER. That is the only
+        // cross-process observable of a re-opened worker. An expand that overran
+        // the launch slot and re-opened the session (the pre-#262 behaviour) runs
+        // each selector once in the discarded worker and again in the
+        // replacement; the in-session grow keeps the same worker, so each runs
+        // exactly once. Self-computed, so it needs no reference route.
         let render_log = scratch.join("selector-dispatches.bin");
-        // The probe appends (mode "ab"); start from a clean slate so a stale file
-        // can never inflate the counts into a false negative.
         std::fs::remove_file(&render_log).ok();
         unsafe { std::env::set_var("AEXCOMPAT_RESIZE_RENDER_LOG", &render_log) };
         let count_marker = |marker: u8| -> usize {
@@ -1530,81 +1527,40 @@ mod windows_e2e {
                 .unwrap_or(0)
         };
 
-        // Run A: default routing. The effect expands 64x48 -> 68x52, overruns the
-        // initial 64x48 slot, and the worker grows the shared section in place on
-        // the session route. The counter proves the session carried it (a silent
-        // one-shot fallback would leave it unchanged).
         let before = RENDER_SESSION_WRAPPER_RENDERS.load(Ordering::SeqCst);
-        let output_a = scratch.join("out-a.png");
-        let report_a = render_experimental_image(&root, &aex, &sha, &input, &output_a, &[])
+        let output = scratch.join("out.png");
+        let report = render_experimental_image(&root, &aex, &sha, &input, &output, &[])
             .expect("session-route expand render");
+        unsafe { std::env::remove_var("AEXCOMPAT_RESIZE_RENDER_LOG") };
         assert!(
             RENDER_SESSION_WRAPPER_RENDERS.load(Ordering::SeqCst) > before,
             "the session wrapper did not carry the expand render"
         );
-        // The output really expanded past the input dimensions.
-        assert_eq!(report_a.get("width"), Some(&serde_json::json!(68)));
-        assert_eq!(report_a.get("height"), Some(&serde_json::json!(52)));
-        // Exactly-once for the whole lifecycle: the in-session grow must not
-        // replay FRAME_SETUP or RENDER (a re-open would run each twice).
-        let (session_setups, session_renders) = (count_marker(b'S'), count_marker(b'R'));
+        assert_session_render_is_healthy(&report, "expand render");
+
+        // The output really expanded past the input, and the report describes the
+        // expanded frame rather than the launch slot.
+        assert_eq!(report.get("width"), Some(&serde_json::json!(68)));
+        assert_eq!(report.get("height"), Some(&serde_json::json!(52)));
+        assert_eq!(report.get("input_width"), Some(&serde_json::json!(64)));
+        assert_eq!(report.get("input_height"), Some(&serde_json::json!(48)));
+
+        // Exactly-once for the whole lifecycle: the grow must not replay
+        // FRAME_SETUP or RENDER, which a re-open into a second worker would.
+        let (setups, renders) = (count_marker(b'S'), count_marker(b'R'));
         assert_eq!(
-            (session_setups, session_renders),
+            (setups, renders),
             (1, 1),
-            "the session expand ran FRAME_SETUP {session_setups}x and RENDER {session_renders}x \
-             (expected 1/1; a re-open would replay the lifecycle in a second worker)"
-        );
-        std::fs::remove_file(&render_log).ok();
-
-        // Run B: the escape hatch forces the one-shot argv transport.
-        unsafe { std::env::set_var(DISABLE_SESSION_WRAPPER_ENV, "1") };
-        let after_a = RENDER_SESSION_WRAPPER_RENDERS.load(Ordering::SeqCst);
-        let output_b = scratch.join("out-b.png");
-        let report_b = render_experimental_image(&root, &aex, &sha, &input, &output_b, &[]);
-        unsafe { std::env::remove_var(DISABLE_SESSION_WRAPPER_ENV) };
-        let report_b = report_b.expect("one-shot expand render");
-        unsafe { std::env::remove_var("AEXCOMPAT_RESIZE_RENDER_LOG") };
-        assert_eq!(
-            RENDER_SESSION_WRAPPER_RENDERS.load(Ordering::SeqCst),
-            after_a,
-            "the escape hatch did not force the one-shot transport"
-        );
-        // The one-shot route runs the lifecycle exactly once; this is the
-        // baseline the session route's single-worker grow above is matched
-        // against.
-        let (one_shot_setups, one_shot_renders) = (count_marker(b'S'), count_marker(b'R'));
-        assert_eq!(
-            (one_shot_setups, one_shot_renders),
-            (1, 1),
-            "the one-shot expand ran FRAME_SETUP {one_shot_setups}x and RENDER {one_shot_renders}x \
-             (expected 1/1)"
+            "the expand ran FRAME_SETUP {setups}x and RENDER {renders}x (expected 1/1)"
         );
 
-        let volatile = ["output_png", "output_raw", "worker_diagnostics"];
-        let mut flattened_a = report_a.as_object().expect("report A object").clone();
-        let mut flattened_b = report_b.as_object().expect("report B object").clone();
-        for key in volatile {
-            flattened_a.remove(key);
-            flattened_b.remove(key);
-        }
+        // The PNG must carry the expanded frame, not a slot-sized crop.
+        let decoded = image::open(&output).expect("decode the expanded PNG");
         assert_eq!(
-            flattened_a.keys().collect::<Vec<_>>(),
-            flattened_b.keys().collect::<Vec<_>>(),
-            "expand report key sets diverge"
+            (decoded.width(), decoded.height()),
+            (68, 52),
+            "the written PNG is not the expanded frame"
         );
-        for (key, value_a) in &flattened_a {
-            assert_eq!(
-                Some(value_a),
-                flattened_b.get(key),
-                "expand report field {key} differs between the session and one-shot routes"
-            );
-        }
-        assert_eq!(
-            std::fs::read(&output_a).unwrap(),
-            std::fs::read(&output_b).unwrap(),
-            "expanded PNG bytes differ between the session and one-shot routes"
-        );
-
         let _ = std::fs::remove_dir_all(&scratch);
     }
 
@@ -1681,18 +1637,13 @@ mod windows_e2e {
         let _ = std::fs::remove_dir_all(&scratch);
     }
 
-    /// Variable-sized layer slots (#264): a secondary layer larger (in total
-    /// pixels) than the primary input is now carried by the SESSION (its slot is
-    /// sized to the layer's own dimensions), not routed to one-shot. Run A (the
-    /// session route) must carry it (the counter advances) and produce the same
-    /// PNG as Run B (the one-shot route via the escape hatch), proving the
-    /// variable-slot transport is byte-equivalent. Before this change the layer
-    /// overran the uniform primary-sized slot and the render was routed to
-    /// one-shot instead.
+    /// A secondary layer larger than the primary input: the session sizes the
+    /// layer slot to the layer's own dimensions rather than the primary's.
+    /// Verified against that property, not against the one-shot (#361).
     #[test]
-    fn oversized_layer_renders_on_the_session_matching_one_shot() {
+    fn oversized_layer_is_carried_at_its_own_dimensions() {
         if crate::common::skip_without_restricted_token_launch(
-            "oversized_layer_renders_on_the_session_matching_one_shot",
+            "oversized_layer_is_carried_at_its_own_dimensions",
         ) {
             return;
         }
@@ -1703,10 +1654,7 @@ mod windows_e2e {
         let worker = root.join("target/minihost-build/aex_render_worker.exe");
         let aex = root.join("target/pf-layer-param-probe-build/Release/pf_layer_param_probe.aex");
         if !worker.is_file() || !aex.is_file() {
-            eprintln!(
-                "skipping oversized-layer test: build aex_render_worker.exe and \
-                 pf_layer_param_probe.aex first"
-            );
+            eprintln!("skipping oversized-layer render: build the worker and the layer probe");
             return;
         }
         let sha = format!("{:x}", Sha256::digest(std::fs::read(&aex).unwrap()));
@@ -1716,51 +1664,101 @@ mod windows_e2e {
             rand::random::<u128>()
         ));
         std::fs::create_dir_all(&scratch).unwrap();
-        // Primary input smaller than the secondary layer: the layer's pixel count
-        // (64*48) exceeds the primary (40*30). The session now sizes the layer
-        // slot to the layer's own dimensions, so it carries this render.
+        // The layer's pixel count (64*48) exceeds the primary's (40*30), which is
+        // what used to push this shape off the session.
         let input = scratch.join("input.png");
         image::RgbaImage::from_fn(40, 30, |x, y| {
             image::Rgba([(x * 3) as u8, (y * 5) as u8, (x + y) as u8, 255])
         })
         .save(&input)
         .unwrap();
-        let secondary = scratch.join("layer.png");
-        image::RgbaImage::from_fn(64, 48, |x, y| {
-            image::Rgba([(x + y) as u8, (x * 7) as u8, (y * 9) as u8, 255])
-        })
-        .save(&secondary)
-        .unwrap();
-        let params = vec![layer_parameter(1, &secondary)];
+        // The seed has to move a channel the plug-in actually reads. This probe
+        // takes green from the layer and blue from the mean of input and layer,
+        // and never reads the layer's red -- measured: seeding red alone leaves
+        // the output byte-identical, which reads like a transport failure and is
+        // not one.
+        let write_layer = |name: &str, seed: u32| {
+            let path = scratch.join(name);
+            image::RgbaImage::from_fn(64, 48, |x, y| {
+                image::Rgba([
+                    (x + y) as u8,
+                    ((x * 7) as u32 + seed) as u8,
+                    ((y * 9) as u32 + seed) as u8,
+                    255,
+                ])
+            })
+            .save(&path)
+            .unwrap();
+            path
+        };
+        let secondary = write_layer("layer.png", 0);
 
-        // Run A: default routing, oversized layer now carried by the session.
-        unsafe { std::env::remove_var(DISABLE_SESSION_WRAPPER_ENV) };
         let before = RENDER_SESSION_WRAPPER_RENDERS.load(Ordering::SeqCst);
-        let output_a = scratch.join("out-a.png");
-        let _report_a = render_experimental_image(&root, &aex, &sha, &input, &output_a, &params)
-            .expect("session-route oversized-layer render");
+        let output = scratch.join("out.png");
+        let report = render_experimental_image(
+            &root,
+            &aex,
+            &sha,
+            &input,
+            &output,
+            &[layer_parameter(1, &secondary)],
+        )
+        .expect("session-route oversized-layer render");
         assert!(
             RENDER_SESSION_WRAPPER_RENDERS.load(Ordering::SeqCst) > before,
-            "the oversized-layer render must now be carried by the session"
+            "the oversized-layer render must be carried by the session"
+        );
+        assert_session_render_is_healthy(&report, "oversized layer");
+
+        // The layer reached the worker at its own size, not cropped to the
+        // primary. That is the capability this shape exercises.
+        let layers = report
+            .get("secondary_layers")
+            .and_then(|value| value.as_array())
+            .unwrap_or_else(|| panic!("no secondary_layers in the report: {report}"));
+        assert_eq!(layers.len(), 1, "expected one secondary layer: {report}");
+        assert_eq!(
+            (layers[0].get("width"), layers[0].get("height")),
+            (Some(&serde_json::json!(64)), Some(&serde_json::json!(48))),
+            "the secondary layer was not carried at its own dimensions: {report}"
+        );
+        // The output stays the primary's size; an oversized layer must not resize
+        // the frame.
+        assert_eq!(report.get("width"), Some(&serde_json::json!(40)));
+        assert_eq!(report.get("height"), Some(&serde_json::json!(30)));
+        // This fixture declares num_params=1 while the render supplies a layer,
+        // so the parameter-count contract legitimately reports false and raises
+        // the warning. Pinned here rather than hidden: a change to true would
+        // mean the probe or the counting rule moved.
+        assert_eq!(
+            report.get("parameter_count_contract_ok"),
+            Some(&serde_json::json!(false)),
+            "pf_layer_param_probe under-declares its parameters; expected the              contract observation to say so: {report}"
+        );
+        assert_eq!(
+            report.get("host_contract_warning"),
+            Some(&serde_json::json!(true)),
+            "the parameter-count observation must raise the warning: {report}"
         );
 
-        // Run B: escape hatch forces the one-shot layered transport.
-        unsafe { std::env::set_var(DISABLE_SESSION_WRAPPER_ENV, "1") };
-        let after_a = RENDER_SESSION_WRAPPER_RENDERS.load(Ordering::SeqCst);
-        let output_b = scratch.join("out-b.png");
-        let result_b = render_experimental_image(&root, &aex, &sha, &input, &output_b, &params);
-        unsafe { std::env::remove_var(DISABLE_SESSION_WRAPPER_ENV) };
-        result_b.expect("one-shot oversized-layer render");
-        assert_eq!(
-            RENDER_SESSION_WRAPPER_RENDERS.load(Ordering::SeqCst),
-            after_a,
-            "the escape hatch did not force the one-shot transport"
-        );
-
-        assert_eq!(
-            std::fs::read(&output_a).unwrap(),
-            std::fs::read(&output_b).unwrap(),
-            "the oversized-layer PNG differs between the session and one-shot routes"
+        // The oversized layer's pixels reach the plug-in: changing them changes
+        // the output.
+        let other_layer = write_layer("layer2.png", 91);
+        let out_other = scratch.join("other.png");
+        let other = render_experimental_image(
+            &root,
+            &aex,
+            &sha,
+            &input,
+            &out_other,
+            &[layer_parameter(1, &other_layer)],
+        )
+        .expect("session-route oversized-layer render with different layer pixels");
+        assert_session_render_is_healthy(&other, "oversized layer (other pixels)");
+        assert_ne!(
+            report.get("output_sha256"),
+            other.get("output_sha256"),
+            "changing the oversized layer did not change the output"
         );
         let _ = std::fs::remove_dir_all(&scratch);
     }
