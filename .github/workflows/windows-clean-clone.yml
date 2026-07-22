@@ -56,6 +56,12 @@ jobs:
       - name: Test Rust workspace
         working-directory: broker
         shell: pwsh
+        # The opt-in is what lets the probe suppress a worker-launching test at
+        # all. It is set here and nowhere else, so a regression in the restricted
+        # token -- which produces the same 0xC0000142 the probe keys on -- fails
+        # loudly on a developer machine instead of skipping (issue #335).
+        env:
+          AEXCOMPAT_ALLOW_RESTRICTED_TOKEN_SKIP: "1"
         run: |
           cargo test --workspace --locked -- --show-output 2>&1 |
             Tee-Object -FilePath "$env:GITHUB_WORKSPACE/cargo-test-output.txt"

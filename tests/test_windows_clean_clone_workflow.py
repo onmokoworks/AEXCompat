@@ -80,6 +80,15 @@ def test_pre_launch_rejection_tests_keep_running_on_a_restricted_token_host():
         ),
         "secure_launch.rs": (
             "worker_hash_mismatch_never_starts_process_and_cleans_tree",
+            # Fails inside SealedLoadTree::create, before secure_launch is even
+            # entered.
+            "tampered_plugin_is_rejected_before_process_can_start",
+        ),
+        # The forced-fallback tests return before RenderSession::open /
+        # AudioRenderSession::open, so they never create a process either.
+        "render_session_wrapper.rs": (
+            "session_infra_failure_fails_closed_without_silent_one_shot",
+            "audio_session_failure_fails_closed_without_silent_one_shot",
         ),
     }
     for filename, names in unguarded.items():

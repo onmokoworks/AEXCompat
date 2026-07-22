@@ -27,6 +27,7 @@ def _wait_for_staged_input(marker: bytes, process, timeout: float = 60.0) -> Non
     `marker` must be unique to this run: a staging copy leaked by an earlier run
     would otherwise satisfy the wait immediately.
     """
+    import subprocess
     import tempfile
     import time
 
@@ -42,7 +43,13 @@ def _wait_for_staged_input(marker: bytes, process, timeout: float = 60.0) -> Non
             stdout, stderr = process.communicate(timeout=5)
             raise AssertionError(f"capture runner exited before staging input: {stderr}")
         time.sleep(0.05)
-    stdout, stderr = process.communicate(timeout=5)
+    # The runner is still alive by definition here, so communicate() would raise
+    # TimeoutExpired and hide the real reason. Kill it first, then report.
+    process.kill()
+    try:
+        _, stderr = process.communicate(timeout=30)
+    except subprocess.TimeoutExpired:
+        stderr = "<runner did not exit after kill>"
     raise AssertionError(f"capture runner did not stage input within {timeout}s: {stderr}")
 
 
@@ -163,7 +170,6 @@ def test_reference_capture_result_records_prelaunch_input_identities(tmp_path):
     # real AE would have rendered - not the replaced file.
     import hashlib
     import subprocess
-    import time
 
     aex = tmp_path / "fixture.aex"
     aex.write_bytes(b"fixture-bytes")

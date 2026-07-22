@@ -107,7 +107,8 @@ def test_video_batch_renders_a_sequence_through_one_resident_worker(tmp_path: Pa
         # is reported with the full report so it can be diagnosed.
         detail = (report_path.read_text(encoding="utf-8")
                   if report_path.is_file() else "<no report written>")
-        if f'"exit_code": {STATUS_DLL_INIT_FAILED}' in detail:
+        allow_skip = os.environ.get("AEXCOMPAT_ALLOW_RESTRICTED_TOKEN_SKIP") == "1"
+        if allow_skip and f'"exit_code": {STATUS_DLL_INIT_FAILED}' in detail:
             pytest.skip(
                 "this environment cannot launch a restricted-token worker "
                 "(STATUS_DLL_INIT_FAILED, issue #335)")

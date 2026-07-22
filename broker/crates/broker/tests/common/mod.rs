@@ -16,8 +16,17 @@
 //! It is deliberately narrow about what counts as "the environment cannot do
 //! this". Only the documented 0xC0000142 exit suppresses the tests. A staging,
 //! ACL, or token failure (`Err`), or any other nonzero exit, returns `true` so
-//! the tests run and fail loudly: a regression in the launch path must never be
-//! able to turn the whole suite green by making everything skip.
+//! the tests run and fail loudly.
+//!
+//! That narrowness is not enough on its own, because 0xC0000142 is also what a
+//! *regression in the restricted token itself* would produce: drop an entry from
+//! `COMPATIBILITY_SIDS`, or change the `CreateRestrictedToken` flags, and the
+//! worker stops being able to load its system DLLs on every machine, not just a
+//! hosted runner. The probe cannot tell those apart -- they are the same signal.
+//! So the skip additionally requires an explicit opt-in
+//! (`AEXCOMPAT_ALLOW_RESTRICTED_TOKEN_SKIP=1`), which only the CI workflows set.
+//! A developer machine never has it, so a token regression there fails 58 tests
+//! instead of quietly skipping them.
 
 #![allow(dead_code)]
 
@@ -50,16 +59,31 @@ mod windows_probe {
             .status()
             .expect("run cargo build for the restricted-token probe worker");
         assert!(status.success(), "restricted-token probe build failed");
-        std::env::current_exe()
-            .unwrap()
-            .parent()
-            .unwrap()
-            .parent()
-            .unwrap()
-            .join("dummy_exit0.exe")
+        // The build above has no --profile, so the binary lands under debug/,
+        // while current_exe() sits in whatever profile the tests were built with.
+        // Look in both rather than assuming they agree: under `cargo test
+        // --release` the debug/ copy is the one that exists.
+        let deps = std::env::current_exe().unwrap();
+        let profile_dir = deps.parent().unwrap().parent().unwrap();
+        let target_dir = profile_dir.parent().unwrap();
+        [
+            target_dir.join("debug").join("dummy_exit0.exe"),
+            profile_dir.join("dummy_exit0.exe"),
+        ]
+        .into_iter()
+        .find(|path| path.is_file())
+        .unwrap_or_else(|| profile_dir.join("dummy_exit0.exe"))
     }
 
+    /// Set by the CI workflows, which run on hosts that provably cannot launch a
+    /// restricted-token worker. Absent everywhere else, so the skip cannot hide a
+    /// regression in the token construction on a developer machine.
+    const ALLOW_SKIP_ENV: &str = "AEXCOMPAT_ALLOW_RESTRICTED_TOKEN_SKIP";
+
     fn probe() -> bool {
+        if std::env::var(ALLOW_SKIP_ENV).ok().as_deref() != Some("1") {
+            return true;
+        }
         let worker = build_probe_worker();
         let worker_bytes = match std::fs::read(&worker) {
             Ok(bytes) => bytes,

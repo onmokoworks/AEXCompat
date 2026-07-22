@@ -164,6 +164,10 @@ jobs:
       # Get-FileHash 等の組み込み cmdlet を解決できなくなる。
       - name: Run pytest with SDK and built-artifact tests
         shell: cmd
+        # See windows-clean-clone.yml: the skip is opt-in so a token regression
+        # cannot hide as an environment limitation off CI (issue #335).
+        env:
+          AEXCOMPAT_ALLOW_RESTRICTED_TOKEN_SKIP: "1"
         run: |
           set "PSModulePath=%ProgramFiles%\WindowsPowerShell\Modules;%SystemRoot%\System32\WindowsPowerShell\v1.0\Modules;%PSModulePath%"
           uv run python -m pytest -q -rs --run-sdk-tests --run-built-artifact-tests --validate-local-artifact-manifest > pytest-output.txt 2>&1

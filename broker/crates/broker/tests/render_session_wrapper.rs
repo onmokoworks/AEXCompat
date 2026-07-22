@@ -1872,11 +1872,6 @@ mod windows_e2e {
     #[cfg(debug_assertions)]
     #[test]
     fn session_infra_failure_fails_closed_without_silent_one_shot() {
-        if crate::common::skip_without_restricted_token_launch(
-            "session_infra_failure_fails_closed_without_silent_one_shot",
-        ) {
-            return;
-        }
         let _env_guard = SESSION_ROUTE_ENV_LOCK
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
@@ -2238,11 +2233,6 @@ mod windows_e2e {
     #[cfg(debug_assertions)]
     #[test]
     fn audio_session_failure_fails_closed_without_silent_one_shot() {
-        if crate::common::skip_without_restricted_token_launch(
-            "audio_session_failure_fails_closed_without_silent_one_shot",
-        ) {
-            return;
-        }
         let _env_guard = SESSION_ROUTE_ENV_LOCK
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
