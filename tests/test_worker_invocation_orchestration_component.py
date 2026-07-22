@@ -24,16 +24,20 @@ def test_invocation_state_and_mode_mapping_have_a_compiled_owner():
 
 
 def test_render_and_smart_mapping_preserve_request_side_effect_hooks():
+    # #365 deleted the one-shot argv modes, so the audio source now arrives
+    # through the session trailer and the click/draw hooks are gone entirely
+    # (the session drives custom UI per frame via the v:2 ui_action field,
+    # worker_render_session.cpp::apply_session_ui_action).
     for marker in (
-        "target.image_audio_mode = mode.image_audio_mode",
-        "hooks.set_audio_source",
+        "target.audio_session_mode = mode.audio_session_mode",
+        "mode.session_audio && hooks.set_audio_source",
         "target.smart_force_cpu = mode.force_cpu",
         "target.mask_count_error_mode = mode.mask_count_error_mode",
         "hooks.set_mask_fault",
-        "hooks.set_click",
-        "hooks.enable_draw",
     ):
         assert marker in SOURCE
+    for gone in ("hooks.set_click", "hooks.enable_draw", "mode.image_audio_mode"):
+        assert gone not in SOURCE, gone
     assert "request_parser::parse(" in MAIN
     assert "const invocation::ApplyHooks" not in MAIN
     assert "invocation::ApplyHooks invocation_hooks" in MAIN

@@ -130,6 +130,7 @@ mod windows_e2e {
             plugin_path: plugin,
             plugin_sha256: sha,
             parameters: None,
+            payload_override: None,
             parameter_animation: None,
             aux_manifest: None,
             world_dump_dir: None,
@@ -347,6 +348,7 @@ mod windows_e2e {
             plugin_path: &plugin,
             plugin_sha256: &sha,
             parameters: None,
+            payload_override: None,
             parameter_animation: None,
             aux_manifest: None,
             world_dump_dir: None,
@@ -393,6 +395,7 @@ mod windows_e2e {
             plugin_path: &plugin,
             plugin_sha256: &sha,
             parameters: None,
+            payload_override: None,
             parameter_animation: None,
             aux_manifest: None,
             world_dump_dir: None,
@@ -442,6 +445,7 @@ mod windows_e2e {
             plugin_path: &plugin,
             plugin_sha256: &sha,
             parameters: None,
+            payload_override: None,
             parameter_animation: None,
             aux_manifest: None,
             world_dump_dir: None,
@@ -550,6 +554,7 @@ mod windows_e2e {
             plugin_path: &plugin,
             plugin_sha256: &sha,
             parameters: None,
+            payload_override: None,
             parameter_animation: None,
             aux_manifest: None,
             world_dump_dir: None,
@@ -624,6 +629,7 @@ mod windows_e2e {
             plugin_path: &plugin,
             plugin_sha256: &sha,
             parameters: None,
+            payload_override: None,
             parameter_animation: None,
             aux_manifest: None,
             world_dump_dir: None,
@@ -683,6 +689,7 @@ mod windows_e2e {
             plugin_path: &plugin,
             plugin_sha256: &sha,
             parameters: None,
+            payload_override: None,
             parameter_animation: None,
             aux_manifest: None,
             world_dump_dir: None,
@@ -749,6 +756,7 @@ mod windows_e2e {
             plugin_path: &plugin,
             plugin_sha256: &sha,
             parameters: None,
+            payload_override: None,
             parameter_animation: None,
             aux_manifest: None,
             world_dump_dir: None,
@@ -808,6 +816,7 @@ mod windows_e2e {
             plugin_path: &plugin,
             plugin_sha256: &sha,
             parameters: None,
+            payload_override: None,
             parameter_animation: None,
             aux_manifest: None,
             world_dump_dir: None,
@@ -857,6 +866,7 @@ mod windows_e2e {
             plugin_path: &plugin,
             plugin_sha256: &sha,
             parameters: None,
+            payload_override: None,
             parameter_animation: None,
             aux_manifest: None,
             world_dump_dir: None,
@@ -900,6 +910,7 @@ mod windows_e2e {
             plugin_path: &plugin,
             plugin_sha256: &sha,
             parameters: None,
+            payload_override: None,
             parameter_animation: None,
             aux_manifest: None,
             world_dump_dir: None,
@@ -948,6 +959,7 @@ mod windows_e2e {
             plugin_path: &plugin,
             plugin_sha256: &sha,
             parameters: None,
+            payload_override: None,
             parameter_animation: None,
             aux_manifest: None,
             world_dump_dir: None,
@@ -995,6 +1007,7 @@ mod windows_e2e {
             plugin_path: &plugin,
             plugin_sha256: &sha,
             parameters: None,
+            payload_override: None,
             parameter_animation: None,
             aux_manifest: None,
             world_dump_dir: None,
@@ -1023,6 +1036,92 @@ mod windows_e2e {
         assert!(error.to_string().contains("slot or dimensions"), "{error}");
     }
 
+    /// `payload_override` must reach the worker's payload argv slot byte for
+    /// byte (#365).
+    ///
+    /// The fixture-manifest route (`render_image`, scattermap) builds its
+    /// payload from a descriptor profile via `encode_worker_payload`, which the
+    /// `InteractiveParameter` list cannot express: ids are the profile's, not
+    /// `param_<slot>`. That was the last reason a second (one-shot) transport
+    /// had to exist, so the session grew this passthrough instead. The fixture
+    /// echoes the slot it received as `launch_payload`, which is the only way to
+    /// see what actually arrived.
+    ///
+    /// Two claims, and the first is what makes the second non-vacuous:
+    ///   1. with no override, the slot carries exactly what
+    ///      `encode_interactive_payload` produces for `parameters`;
+    ///   2. with an override, the slot carries the override verbatim -- an id
+    ///      shape the encoder in (1) can never emit, so a passthrough that
+    ///      silently re-encoded `parameters` would fail here.
+    #[test]
+    fn a_payload_override_reaches_the_worker_verbatim() {
+        if crate::common::skip_without_restricted_token_launch(
+            "a_payload_override_reaches_the_worker_verbatim",
+        ) {
+            return;
+        }
+        let _behavior = BehaviorGuard::set(None);
+        let (repository, plugin, sha) = temp_repository();
+        let parameters = [float_parameter(1)];
+
+        let launch_payload = |override_payload: Option<&str>| -> String {
+            let mut session = RenderSession::open(SessionOpenRequest {
+                repository: &repository.0,
+                plugin_path: &plugin,
+                plugin_sha256: &sha,
+                parameters: Some(&parameters),
+                payload_override: override_payload,
+                parameter_animation: None,
+                aux_manifest: None,
+                world_dump_dir: None,
+                output_checksum_detail: false,
+                mask_trailer: None,
+                spatial_trailer: None,
+                render_environment_trailer: None,
+                audio_trailer: None,
+                alpha_as_coverage_params: &[],
+                conformance_render_settings: None,
+                layers: &[],
+                dependencies: Vec::new(),
+                width: WIDTH,
+                height: HEIGHT,
+                pixel_format: RenderPixelFormat::Argb8,
+                time_step: 1,
+                total_time: 300,
+                time_scale: 30,
+                frame_deadline: Duration::from_secs(30),
+                smart: false,
+                gpu_backend: RenderGpuBackend::Cpu,
+                gpu_runtime_policy: None,
+            })
+            .expect("open render session");
+            let outcome = session
+                .render_frame(0, 0, &input_pattern(3))
+                .expect("frame");
+            assert!(matches!(outcome.status, FrameStatus::Rendered { .. }));
+            let close = session.close();
+            assert_eq!(close["session_clean"], true, "close: {close}");
+            close["final_report"]["launch_payload"]
+                .as_str()
+                .unwrap_or_else(|| panic!("no launch_payload in the report: {close}"))
+                .to_owned()
+        };
+
+        // (1) No override: the encoder's own output reaches the worker. This
+        // also pins the encoding the fixture route has to be distinguishable
+        // from.
+        let encoded = aexcompat_broker::image_render::encode_interactive_payload(&parameters)
+            .expect("encode the parameter payload");
+        assert_eq!(encoded, "v2|param_1@1:f64=1");
+        assert_eq!(launch_payload(None), encoded);
+
+        // (2) An override in the fixture route's shape: a descriptor id that is
+        // not `param_<slot>`, so re-encoding `parameters` could not produce it.
+        let fixture_payload = "v3|density@1:i32=7;tint@2:argb8=255,10,20,30";
+        assert_ne!(fixture_payload, encoded);
+        assert_eq!(launch_payload(Some(fixture_payload)), fixture_payload);
+    }
+
     #[test]
     fn animation_sidecar_rides_the_session_and_is_cleaned_up() {
         if crate::common::skip_without_restricted_token_launch(
@@ -1039,6 +1138,7 @@ mod windows_e2e {
             plugin_path: &plugin,
             plugin_sha256: &sha,
             parameters: Some(&parameters),
+            payload_override: None,
             parameter_animation: Some(&animations),
             aux_manifest: None,
             world_dump_dir: None,
@@ -1112,6 +1212,7 @@ mod windows_e2e {
             plugin_path: &plugin,
             plugin_sha256: &sha,
             parameters: Some(&parameters),
+            payload_override: None,
             parameter_animation: Some(&animations),
             aux_manifest: None,
             world_dump_dir: None,
@@ -1201,6 +1302,7 @@ mod windows_e2e {
             plugin_path: &plugin,
             plugin_sha256: &sha,
             parameters: None,
+            payload_override: None,
             parameter_animation: None,
             aux_manifest: Some(&manifest),
             world_dump_dir: Some(&dump_dir),
@@ -1244,6 +1346,7 @@ mod windows_e2e {
             plugin_path: &plugin,
             plugin_sha256: &sha,
             parameters: None,
+            payload_override: None,
             parameter_animation: None,
             aux_manifest: None,
             world_dump_dir: Some(&reused),
@@ -1282,6 +1385,7 @@ mod windows_e2e {
             plugin_path: &plugin,
             plugin_sha256: &sha,
             parameters: None,
+            payload_override: None,
             parameter_animation: None,
             aux_manifest: None,
             world_dump_dir: Some(&missing),
@@ -1320,6 +1424,7 @@ mod windows_e2e {
             plugin_path: &plugin,
             plugin_sha256: &sha,
             parameters: None,
+            payload_override: None,
             parameter_animation: Some(&animations),
             aux_manifest: None,
             world_dump_dir: None,
@@ -1411,6 +1516,7 @@ mod windows_e2e {
             plugin_path: &plugin,
             plugin_sha256: &sha,
             parameters: None,
+            payload_override: None,
             parameter_animation: None,
             aux_manifest: None,
             world_dump_dir: None,
@@ -1733,6 +1839,7 @@ mod windows_e2e {
             plugin_path: &plugin,
             plugin_sha256: &sha,
             parameters: None,
+            payload_override: None,
             parameter_animation: None,
             aux_manifest: None,
             world_dump_dir: None,

@@ -333,13 +333,12 @@ struct SessionUiAction {
   std::array<float, 4> color{};
 };
 
-// Decodes the v:2 `ui_action` string, reusing the one-shot custom-UI trailer
-// grammar so the session and one-shot admit/reject the identical set:
-// "click:v1|x|y|r|g|b|a" (worker_request_parser.cpp:177-186) or "draw:v1"
-// (l2_cli_dispatch.cpp:180-181). Bounds mirror the argv path: x/y in [0,8192],
-// each color component finite in [0,1]. Returns false on any malformed value,
-// which the caller escalates to a protocol violation (the broker validates the
-// same grammar before sending, so a bad value is a defect or tampering).
+// Decodes the v:2 `ui_action` string. The grammar came from the one-shot
+// custom-UI argv trailer (deleted in #365) and is unchanged:
+// "click:v1|x|y|r|g|b|a" or "draw:v1", with x/y in [0,8192] and each color
+// component finite in [0,1]. Returns false on any malformed value, which the
+// caller escalates to a protocol violation (the broker validates the same
+// grammar before sending, so a bad value is a defect or tampering).
 bool parse_session_ui_action(const std::string& text, SessionUiAction& action) {
   if (text == "draw:v1") {
     action.draw = true;
@@ -367,16 +366,16 @@ bool parse_session_ui_action(const std::string& text, SessionUiAction& action) {
 }
 
 // Applies one frame's v:2 `ui_action` to the process-lifetime custom-UI
-// telemetry the render path reads (the same singleton the one-shot ApplyHooks
-// setters drive from argv, l2_main.cpp:1505-1509). The per-frame semantic is a
-// complete replacement (protocol §4.2.1): the enabled flags are cleared first
-// so a frame with no ui_action renders with no custom-UI event, then set from
-// this frame's action. Frame N's click never leaks into frame N+1.
+// telemetry the render path reads (the singleton the deleted one-shot
+// ApplyHooks setters drove from argv). The per-frame semantic is a complete
+// replacement (protocol §4.2.1): the enabled flags are cleared first so a frame
+// with no ui_action renders with no custom-UI event, then set from this frame's
+// action. Frame N's click never leaks into frame N+1.
 void apply_session_ui_action(const SessionUiAction* action) {
   namespace ui = worker_runtime::ui_event_execution;
   ui::CustomUiTelemetry& telemetry = ui::custom_ui_telemetry();
   // Reset the per-render custom-UI observation before every frame so a
-  // multi-frame session starts each frame from the same state a fresh one-shot
+  // multi-frame session starts each frame from the same state a fresh worker
   // process would, then apply this frame's action. Without this the counters
   // the click dispatcher checks for an exact value (app_color_picker_calls /
   // app_invalidate_rect_calls == 1, the lifecycle/error fields) accumulate

@@ -39,7 +39,11 @@ struct Request {
   int32_t external_pixel_bytes{};
   bool render_worker{};
   bool rendering_worker{};
-  bool audio_mode{};
+  /// This invocation renders audio, so the host-audio runtime admits a
+  /// checkout even when the plug-in did not advertise PF_OutFlag_I_USE_AUDIO.
+  /// Fed by the audio session since #365 deleted the one-shot --render-audio
+  /// mode that used to set it (the field was named audio_mode for that).
+  bool audio_invocation{};
   bool skip_about{};
 };
 

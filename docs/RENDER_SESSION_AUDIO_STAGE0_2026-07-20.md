@@ -181,3 +181,18 @@ AUDIO_EFFECT_TOO なので、適用レイヤーに audio が無いと AUDIO_REND
 4. 実 worker A/B: audio バイト一致で session ≡ one-shot 等価。
 5. (任意) 長尺 comp で AUDIO_RENDER が複数チャンクに分割されるかの追加観測。
    分割される場合、audio バッファのチャンク境界設計に反映。
+
+## 2026-07-22 追記 (issue #365 / W4): one-shot 削除完了、手順 4 は実施不能
+
+**事実**: 本ノートが前提としていた #98 W4 (one-shot argv モード削除) を #365 で
+実施した。`--render-audio` / `--render-image-audio` / `--render-image*` /
+`--smart-image*` は broker・worker 双方から消え、length-1 audio session が
+唯一の audio transport になった。
+
+上記「以降」リストのうち 1-3 は完了済み (§10 プロトコル、
+`run_audio_render_session`、`render_audio_via_length_one_session`)。手順 4
+「実 worker A/B: audio バイト一致で session ≡ one-shot 等価」は**比較対象が
+存在しなくなったため実施不能**であり、未消化タスクとして拾わないこと。A/B が
+担っていた検証は #361 で session 直接検証に置き換わっている
+(`render_session_wrapper.rs`)。手順 5 (長尺 comp の AUDIO_RENDER 分割観測) は
+one-shot と無関係なので、実機観測として今も有効。

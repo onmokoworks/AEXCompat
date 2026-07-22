@@ -19,11 +19,10 @@ mod common;
 #[cfg(windows)]
 mod windows_e2e {
     use aexcompat_broker::image_render::{
-        AnimationInterpolation, AnimationTime, AnimationValue, DISABLE_SESSION_WRAPPER_ENV,
-        InteractiveParameter, ParameterAnimation, ParameterAnimationKey,
-        RENDER_SESSION_WRAPPER_RENDERS, RenderGpuBackend, RenderPixelFormat, RenderTiming,
-        RenderUiAction, TimedLayerImage, render_experimental_audio, render_experimental_image,
-        render_experimental_image_at_time,
+        AnimationInterpolation, AnimationTime, AnimationValue, InteractiveParameter,
+        ParameterAnimation, ParameterAnimationKey, RENDER_SESSION_WRAPPER_RENDERS,
+        RenderGpuBackend, RenderPixelFormat, RenderTiming, RenderUiAction, TimedLayerImage,
+        render_experimental_audio, render_experimental_image, render_experimental_image_at_time,
         render_experimental_image_at_time_with_format_and_context,
         render_experimental_image_at_time_with_format_context_and_ui_action,
         render_experimental_image_at_time_with_format_context_ui_action_and_gpu_backend,
@@ -49,12 +48,11 @@ mod windows_e2e {
     }
 
     // Every test here asserts on deltas of RENDER_SESSION_WRAPPER_RENDERS, and
-    // three still toggle the process-global DISABLE_SESSION_WRAPPER_ENV -- the
-    // two fail-closed diagnostics and the one that pins the one-shot's fixed
-    // arity. cargo runs a binary's tests concurrently, so without this lock a
-    // concurrent session render perturbs another test's counter assertion, and a
-    // forced one-shot bleeds into another test's routing assertion. The lock and
-    // the remaining env references both go away with the one-shot itself.
+    // the two fail-closed diagnostics toggle the process-global
+    // FORCE_SESSION_FALLBACK_ENV. cargo runs a binary's tests concurrently, so
+    // without this lock a concurrent session render perturbs another test's
+    // counter assertion, and a forced fallback bleeds into another test's
+    // render.
     static SESSION_ROUTE_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     /// Absolute health conditions every session render must satisfy, whatever
@@ -208,10 +206,10 @@ mod windows_e2e {
         ) {
             return;
         }
-        // Still takes the route lock: the A/Bs that remain assert on exact
-        // deltas of RENDER_SESSION_WRAPPER_RENDERS, and a concurrent session
-        // render perturbs them. Measured -- without this, conformance_render_settings
-        // fails with "the escape hatch did not force the one-shot transport".
+        // Still takes the route lock: the tests that assert on exact deltas of
+        // RENDER_SESSION_WRAPPER_RENDERS are perturbed by a concurrent session
+        // render, and the two fail-closed diagnostics set a process-global
+        // fault-injection env that would otherwise leak into this render.
         let _env_guard = SESSION_ROUTE_ENV_LOCK
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
@@ -635,27 +633,27 @@ mod windows_e2e {
         .expect("float parameter fixture")
     }
 
-    /// Companion to `wrapper_report_matches_the_one_shot_transport` for the case
-    /// pf_sampling_probe cannot cover (issue #195): an AEX that declares a
-    /// `PF_Param_LAYER` secondary layer (slot 1) plus a float slider (slot 2) and
-    /// composites both on the classic render path. This is the first real-AEX A/B
-    /// for the session wrapper's secondary-layer transport (issue #98 W1-4): the
-    /// session route must deliver the same secondary-layer pixels and the same
-    /// user-parameter value as the one-shot argv transport, field-for-field and
-    /// byte-for-byte, at time 0 and at a nonzero time. It also proves both inputs
-    /// are actually consumed (changing either changes the output), so a match is
-    /// not a vacuous "the probe ignored them" pass. Gated on the locally built
-    /// worker and the pf-layer-param-probe fixture, like the sibling test.
+    /// Real-AEX coverage of the session wrapper's secondary-layer transport
+    /// (issue #98 W1-4) for the case pf_sampling_probe cannot cover (issue
+    /// #195): an AEX that declares a `PF_Param_LAYER` secondary layer (slot 1)
+    /// plus a float slider (slot 2) and composites both on the classic render
+    /// path. Both inputs must actually reach the plug-in -- changing either one
+    /// changes the output -- so this cannot pass vacuously by the probe ignoring
+    /// them, and the render must be deterministic at time 0 and at a nonzero
+    /// time. This was an A/B against the one-shot argv transport until #361
+    /// converted it and #365 deleted the comparison target. Gated on the
+    /// locally built worker and the pf-layer-param-probe fixture.
 
     /// The host-context shapes the session must carry, verified per shape.
     ///
     /// The A/B this replaces covered six sub-cases in one test; the first
     /// conversion kept only the plain render and silently dropped the other
     /// five, which the dead `HostContext` import gave away. Each is restored
-    /// here, because session *ineligibility* is a routing decision rather than a
-    /// failure: a gate regression that pushed these shapes back to the one-shot
-    /// would return Ok and go unnoticed. The counter assertion is what catches
-    /// that, so it is the point of this test (#361).
+    /// here. The counter assertion remains the point of the test (#361): before
+    /// #365 a gate regression could push a shape onto the one-shot and still
+    /// return Ok, and now that there is no second transport the counter is what
+    /// proves the render was carried by the session at all, rather than
+    /// short-circuiting somewhere that also returns Ok.
     #[test]
     fn host_context_shapes_stay_on_the_session() {
         if crate::common::skip_without_restricted_token_launch(
@@ -704,7 +702,7 @@ mod windows_e2e {
             .expect("session-route context render");
             assert!(
                 RENDER_SESSION_WRAPPER_RENDERS.load(Ordering::SeqCst) > before,
-                "this shape left the session and went to the one-shot: {report}"
+                "this shape was not carried by the session: {report}"
             );
             report
         };
@@ -859,10 +857,10 @@ mod windows_e2e {
         ) {
             return;
         }
-        // Still takes the route lock: the A/Bs that remain assert on exact
-        // deltas of RENDER_SESSION_WRAPPER_RENDERS, and a concurrent session
-        // render perturbs them. Measured -- without this, conformance_render_settings
-        // fails with "the escape hatch did not force the one-shot transport".
+        // Still takes the route lock: the tests that assert on exact deltas of
+        // RENDER_SESSION_WRAPPER_RENDERS are perturbed by a concurrent session
+        // render, and the two fail-closed diagnostics set a process-global
+        // fault-injection env that would otherwise leak into this render.
         let _env_guard = SESSION_ROUTE_ENV_LOCK
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
@@ -1779,9 +1777,8 @@ mod windows_e2e {
         .save(&input)
         .unwrap();
 
-        // Eligible render with the escape hatch unset, so the session IS
-        // attempted; the fault injection then forces it to report a Fallback.
-        unsafe { std::env::remove_var(DISABLE_SESSION_WRAPPER_ENV) };
+        // Eligible render; the fault injection forces the session to report a
+        // Fallback.
         unsafe { std::env::set_var(FORCE_SESSION_FALLBACK_ENV, "1") };
         let before = RENDER_SESSION_WRAPPER_RENDERS.load(Ordering::SeqCst);
         let output = scratch.join("out.png");
@@ -1791,12 +1788,12 @@ mod windows_e2e {
         let error = result.expect_err("a forced session fallback must fail closed, not fall back");
         let message = error.to_string();
         assert!(
-            message.contains(DISABLE_SESSION_WRAPPER_ENV),
-            "the fail-closed error must name the one-shot override; got: {message}"
+            message.contains("no alternate transport"),
+            "the fail-closed error must state that no other transport exists; got: {message}"
         );
         // Secondary sanity check: the session wrapper did not carry a render.
         // (This counter only tracks the session path, so it alone does not
-        // distinguish fail-closed from a silent one-shot; the discriminators are
+        // distinguish fail-closed from a silent rerun; the discriminators are
         // the Err above and the absent output PNG below, both of which a silent
         // one-shot success would violate.)
         assert_eq!(
@@ -2155,12 +2152,13 @@ mod windows_e2e {
     }
 
     /// Audio fail-closed fallback removal (#264, #98 W4): when the audio session
-    /// is attempted (escape hatch unset) but cannot carry the render, the render
-    /// must surface an explicit error instead of silently rerunning the one-shot
-    /// `--render-audio` transport. The fault-injection env forces the audio
-    /// session wrapper to report a Fallback without a real failure; the caller
-    /// must then error (naming the override) and write no output. On the pre-#264
-    /// code the forced Fallback fell through to a successful one-shot render.
+    /// cannot carry the render, the render must surface an explicit error
+    /// instead of silently rerunning the one-shot `--render-audio` transport.
+    /// The fault-injection env forces the audio session wrapper to report a
+    /// Fallback without a real failure; the caller must then error and write no
+    /// output. On the pre-#264 code the forced Fallback fell through to a
+    /// successful one-shot render; since #365 that transport no longer exists,
+    /// so the error states there is no alternate transport at all.
     ///
     /// Debug-only: the fault-injection knob it drives is compiled out of release
     /// builds (image_render.rs), so this test is gated to debug too.
@@ -2195,9 +2193,8 @@ mod windows_e2e {
         }
         std::fs::write(&input_path, &input_bytes).unwrap();
 
-        // Eligible audio render with the escape hatch unset, so the session is
-        // attempted; the fault injection forces it to report a Fallback.
-        unsafe { std::env::remove_var(DISABLE_SESSION_WRAPPER_ENV) };
+        // Eligible audio render; the fault injection forces the session to
+        // report a Fallback.
         unsafe { std::env::set_var(FORCE_SESSION_FALLBACK_ENV, "1") };
         let output = scratch.join("out.f32");
         let result = render_experimental_audio(&root, &aex, &sha, &input_path, &output, &[]);
@@ -2207,8 +2204,8 @@ mod windows_e2e {
             result.expect_err("a forced audio session fallback must fail closed, not fall back");
         let message = error.to_string();
         assert!(
-            message.contains(DISABLE_SESSION_WRAPPER_ENV),
-            "the fail-closed error must name the one-shot override; got: {message}"
+            message.contains("no alternate transport"),
+            "the fail-closed error must state that no other transport exists; got: {message}"
         );
         assert!(
             !output.exists(),
@@ -2378,13 +2375,14 @@ mod windows_e2e {
         let _ = std::fs::remove_dir_all(&scratch);
     }
 
-    /// Combined classic audio + secondary layer (#341): unlike the legacy
-    /// `--render-image-audio` command, the session has independent transports
-    /// for its audio trailer and inherited layer handles. The fixture folds the
+    /// Combined classic audio + secondary layer (#341): the session has
+    /// independent transports for its audio trailer and its inherited layer
+    /// handles, so it carries both in one render. The fixture folds the
     /// checked-out audio window and the layer pixels into the PNG, so changing
-    /// either input independently must change the output. This is deliberately
-    /// session-canonical per #264/#291; the final assertion keeps the one-shot
-    /// 16-argv limitation visible instead of pretending the routes are equal.
+    /// either input independently must change the output. The legacy
+    /// `--render-image-audio` command was pinned to 16 argv slots and could
+    /// never express this shape; #365 deleted it rather than extending it, so
+    /// the former forced-one-shot assertion here has no transport left to name.
     #[test]
     fn image_audio_and_secondary_layer_are_jointly_consumed_by_session() {
         if crate::common::skip_without_restricted_token_launch(
@@ -2512,32 +2510,6 @@ mod windows_e2e {
             std::fs::read(&changed_layer).unwrap(),
             "changing only the secondary-layer pixels did not change the output"
         );
-
-        // The fixed-arity one-shot remains intentionally unchanged. Disabling
-        // the canonical session must expose that old limitation, not silently
-        // drop either input or count as another session render.
-        unsafe { std::env::set_var(DISABLE_SESSION_WRAPPER_ENV, "1") };
-        let before_one_shot = RENDER_SESSION_WRAPPER_RENDERS.load(Ordering::SeqCst);
-        let one_shot_output = scratch.join("forced-one-shot.png");
-        let parameters = vec![layer_parameter(1, &layer_a)];
-        let one_shot = render_experimental_image_with_audio_sidecar(
-            &root,
-            &aex,
-            &sha,
-            &input,
-            &audio_a,
-            &one_shot_output,
-            &parameters,
-            RenderTiming::default(),
-        );
-        unsafe { std::env::remove_var(DISABLE_SESSION_WRAPPER_ENV) };
-        one_shot.expect_err("the 16-argv one-shot cannot carry audio and a layer");
-        assert_eq!(
-            RENDER_SESSION_WRAPPER_RENDERS.load(Ordering::SeqCst),
-            before_one_shot,
-            "the forced one-shot unexpectedly entered the session"
-        );
-        assert!(!one_shot_output.exists());
 
         let _ = std::fs::remove_dir_all(&scratch);
     }

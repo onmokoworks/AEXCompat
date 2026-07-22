@@ -6,20 +6,24 @@ use aexcompat_broker::image_render::{
 };
 use serde_json::Value;
 
-/// Broker-driven one-shot regression for issue #141: the worker's native
-/// sidecar loader pins the sidecar parent to current_path()/target/
-/// image-transport, so a one-shot launch whose cwd is the staging root (the
-/// pre-fix behavior) rejects every `--parameter-animation-v1` dispatch with
-/// parse error 3 before rendering. Driving the real render worker through the
-/// full `dispatch_secure_image` pipeline proves the launch cwd matches the
-/// broker-owned transport directory. Gated on the locally built worker and the
-/// pf_param_utils_animation_probe fixture, like the other real-worker gates.
+/// Broker-driven regression for issue #141: the worker's native sidecar loader
+/// pins the sidecar parent to current_path()/target/image-transport, so a
+/// launch whose cwd is the staging root (the pre-fix behavior) rejects every
+/// `--parameter-animation-v1` dispatch with parse error 3 before rendering.
+/// Driving the real render worker through the full broker pipeline proves the
+/// launch cwd matches the broker-owned transport directory. The pin binds the
+/// session launch too (`secure_launch_session` uses the same repository cwd and
+/// the session writes its own `parameter-animation-session-*.json` under that
+/// directory), so removing the one-shot transport (#365) moved this coverage
+/// onto the session rather than deleting it. Gated on the locally built worker
+/// and the pf_param_utils_animation_probe fixture, like the other real-worker
+/// gates.
 #[cfg(windows)]
 mod windows_real_worker {
     use aexcompat_broker::image_render::{
-        AnimationInterpolation, AnimationTime, AnimationValue, DISABLE_SESSION_WRAPPER_ENV,
-        InteractiveParameter, ParameterAnimation, ParameterAnimationKey, RenderTiming,
-        render_experimental_image, render_experimental_image_with_parameter_animation,
+        AnimationInterpolation, AnimationTime, AnimationValue, InteractiveParameter,
+        ParameterAnimation, ParameterAnimationKey, RenderTiming, render_experimental_image,
+        render_experimental_image_with_parameter_animation,
     };
     use sha2::{Digest, Sha256};
     use std::fs;
@@ -33,38 +37,6 @@ mod windows_real_worker {
             for path in &self.0 {
                 let _ = fs::remove_file(path);
             }
-        }
-    }
-
-    // Both tests in this module now force the one-shot argv transport: since
-    // issue #227 lets parameter animation ride the length-1 session wrapper by
-    // default, and cargo runs a binary's tests concurrently, the two must
-    // serialize their process-global DISABLE_SESSION_WRAPPER_ENV toggling.
-    // one_shot_dispatch validates the one-shot launch cwd (issue #141) and
-    // classic_parameter_animation observes the one-shot params[] write, so both
-    // pin one-shot for their whole run rather than exercising the session path
-    // (the session/one-shot animation A/B lives in render_session_wrapper.rs).
-    static ONE_SHOT_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    /// Holds DISABLE_SESSION_WRAPPER_ENV set for its lifetime under the shared
-    /// lock, restoring the environment on drop.
-    struct ForcedOneShot {
-        _guard: std::sync::MutexGuard<'static, ()>,
-    }
-
-    impl ForcedOneShot {
-        fn new() -> Self {
-            let guard = ONE_SHOT_ENV_LOCK
-                .lock()
-                .unwrap_or_else(|poison| poison.into_inner());
-            unsafe { std::env::set_var(DISABLE_SESSION_WRAPPER_ENV, "1") };
-            Self { _guard: guard }
-        }
-    }
-
-    impl Drop for ForcedOneShot {
-        fn drop(&mut self) {
-            unsafe { std::env::remove_var(DISABLE_SESSION_WRAPPER_ENV) };
         }
     }
 
@@ -84,9 +56,9 @@ mod windows_real_worker {
     }
 
     #[test]
-    fn one_shot_dispatch_delivers_the_animation_sidecar_to_the_real_worker() {
+    fn broker_dispatch_delivers_the_animation_sidecar_to_the_real_worker() {
         if crate::common::skip_without_restricted_token_launch(
-            "one_shot_dispatch_delivers_the_animation_sidecar_to_the_real_worker",
+            "broker_dispatch_delivers_the_animation_sidecar_to_the_real_worker",
         ) {
             return;
         }
@@ -103,19 +75,15 @@ mod windows_real_worker {
         if !worker.exists() || !plugin.exists() {
             return;
         }
-        // Issue #141 regresses only on the one-shot launch cwd, so keep this
-        // dispatch on the one-shot transport even though issue #227 now routes
-        // animation through the session wrapper by default.
-        let _one_shot = ForcedOneShot::new();
         let hash = format!("{:X}", Sha256::digest(fs::read(&plugin).unwrap()));
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
         let input =
-            std::env::temp_dir().join(format!("aexcompat-oneshot-animation-input-{nonce}.png"));
+            std::env::temp_dir().join(format!("aexcompat-dispatch-animation-input-{nonce}.png"));
         let output =
-            std::env::temp_dir().join(format!("aexcompat-oneshot-animation-output-{nonce}.png"));
+            std::env::temp_dir().join(format!("aexcompat-dispatch-animation-output-{nonce}.png"));
         let _cleanup = RemoveOnDrop(vec![input.clone(), output.clone()]);
         image::RgbaImage::from_pixel(7, 5, image::Rgba([255, 0, 0, 0]))
             .save(&input)
@@ -168,7 +136,7 @@ mod windows_real_worker {
                 time_scale: 1,
             },
         )
-        .expect("broker one-shot dispatch must deliver the animation sidecar to the worker");
+        .expect("broker dispatch must deliver the animation sidecar to the worker");
         assert_eq!(report["passed"], true, "report: {report}");
         assert_eq!(report["worker_classification"], "ok", "report: {report}");
         let rendered = image::open(&output).unwrap().into_rgba8();
@@ -233,14 +201,10 @@ mod windows_real_worker {
     ///   1. the value moves over time: the render at the first keyframe time
     ///      differs from the render at the last keyframe time;
     ///   2. the value is correct: the render at a keyframe time is byte-identical
-    ///      to a static render carrying that keyframe's value (both forced through
-    ///      the one-shot transport so only the value-supply mechanism differs).
-    /// This is a deliberate one-shot observation of the params[] write, not a
-    /// session/one-shot A/B. Since issue #227 the payload gate admits parameter
-    /// animation onto the session wrapper, so every render here forces the
-    /// one-shot transport to keep the value-supply mechanism the only variable;
-    /// the session/one-shot animation equivalence lives in
-    /// render_session_wrapper.rs. Gated on the locally built worker and the
+    ///      to a static render carrying that keyframe's value.
+    /// Both renders ride the same (and, since #365, only) transport, so the
+    /// value-supply mechanism -- static payload vs animation sidecar -- is the
+    /// only variable. Gated on the locally built worker and the
     /// pf-layer-param-probe fixture.
     #[test]
     fn classic_parameter_animation_drives_params_array_on_the_real_worker() {
@@ -260,10 +224,6 @@ mod windows_real_worker {
         if !worker.exists() || !plugin.exists() {
             return;
         }
-        // Pin every render below to the one-shot transport: this test observes
-        // the one-shot params[] write, and issue #227 would otherwise route the
-        // animation renders through the session wrapper.
-        let _one_shot = ForcedOneShot::new();
         let hash = format!("{:X}", Sha256::digest(fs::read(&plugin).unwrap()));
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -347,9 +307,9 @@ mod windows_real_worker {
         );
 
         // Claim 2: the animated value at a keyframe time equals a static render
-        // carrying that value. Both renders are on the one-shot transport (the
-        // guard above), so the value-supply mechanism (static payload vs
-        // animation sidecar) is the only difference from the animation render.
+        // carrying that value. Both renders take the same transport, so the
+        // value-supply mechanism (static payload vs animation sidecar) is the
+        // only difference from the animation render.
         let static_report = render_experimental_image(
             repository,
             &plugin,
