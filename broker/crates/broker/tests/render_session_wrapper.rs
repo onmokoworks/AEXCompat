@@ -2319,6 +2319,11 @@ mod windows_e2e {
     /// comparison below.
     #[test]
     fn image_audio_sidecar_matches_the_one_shot_transport() {
+        if crate::common::skip_without_restricted_token_launch(
+            "image_audio_sidecar_matches_the_one_shot_transport",
+        ) {
+            return;
+        }
         let _env_guard = SESSION_ROUTE_ENV_LOCK
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
@@ -2460,6 +2465,11 @@ mod windows_e2e {
     /// 16-argv limitation visible instead of pretending the routes are equal.
     #[test]
     fn image_audio_and_secondary_layer_are_jointly_consumed_by_session() {
+        if crate::common::skip_without_restricted_token_launch(
+            "image_audio_and_secondary_layer_are_jointly_consumed_by_session",
+        ) {
+            return;
+        }
         let _env_guard = SESSION_ROUTE_ENV_LOCK
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
@@ -2621,6 +2631,11 @@ mod windows_e2e {
     /// fixture does advertise audio and passes the gate either way.
     #[test]
     fn an_unadvertised_plugin_with_a_sidecar_is_refused_on_both_routes() {
+        if crate::common::skip_without_restricted_token_launch(
+            "an_unadvertised_plugin_with_a_sidecar_is_refused_on_both_routes",
+        ) {
+            return;
+        }
         let _env_guard = SESSION_ROUTE_ENV_LOCK
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());

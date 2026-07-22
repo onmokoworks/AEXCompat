@@ -1804,6 +1804,11 @@ mod windows_e2e {
 
     #[test]
     fn modal_ui_worker_uses_a_private_desktop_before_session_timeout() {
+        if crate::common::skip_without_restricted_token_launch(
+            "modal_ui_worker_uses_a_private_desktop_before_session_timeout",
+        ) {
+            return;
+        }
         let _behavior = BehaviorGuard::set(Some("modal_frame"));
         let report_path = std::env::temp_dir().join(format!(
             "aexcompat-session-desktop-{:032x}.txt",
