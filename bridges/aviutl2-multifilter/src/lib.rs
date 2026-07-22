@@ -286,7 +286,7 @@ pub extern "C" fn RegisterPlugin(host: *mut HOST_APP_TABLE) {
     // depends on the compat host that produced it (the L2 worker and this DLL's
     // in-process broker). Invalidate the whole cache when the host build changed,
     // so effects that previously failed to load are re-discovered (issue #304).
-    let build = build_fingerprint(&repository, &dependency_dirs);
+    let build = build_fingerprint(&repository, &dirs, &dependency_dirs);
     let cache = load_cache(build);
 
     // Register (host callback, main thread only) each AEX whose discovery already
@@ -298,8 +298,7 @@ pub extern "C" fn RegisterPlugin(host: *mut HOST_APP_TABLE) {
         match cache.get(&key) {
             Some(entry)
                 if file_meta(plugin)
-                    .is_some_and(|(mtime, len)| entry.mtime == mtime && entry.len == len)
-                    && dependencies_unchanged(entry) =>
+                    .is_some_and(|(mtime, len)| entry.mtime == mtime && entry.len == len) =>
             {
                 if entry.ok {
                     register_discovered(host, &repository, plugin, &dependency_dirs, entry);
@@ -662,21 +661,6 @@ struct CacheEntry {
     smart: bool,
     #[serde(default)]
     params: Vec<InteractiveParameter>,
-    /// The dependency DLLs sealed with this AEX when the entry was discovered
-    /// (issue #304). A discovery result depends on their bytes as much as on the
-    /// AEX's own, so each one is re-checked before the entry is reused: an Adobe
-    /// update that rewrites `dvacore.dll` in place changes neither the AEX nor
-    /// the host build, and without this the stale result would survive it.
-    #[serde(default)]
-    dependencies: Vec<CachedDependency>,
-}
-
-/// One sealed dependency's identity, as cheap to re-check as a `stat`.
-#[derive(Clone, serde::Serialize, serde::Deserialize)]
-struct CachedDependency {
-    path: String,
-    mtime: (u64, u32),
-    len: u64,
 }
 
 /// Bump when [`CacheEntry`]'s meaning changes, to invalidate stale cache files.
@@ -695,12 +679,18 @@ struct BuildFingerprint {
     worker: Option<(u64, u32, u64)>,
     #[serde(default)]
     host: Option<(u64, u32, u64)>,
-    /// Digest of the dependency search folders (issue #304). They decide which
-    /// DLLs are sealed with an AEX, so a config change can turn a cached failure
-    /// into a success; without this, a corrected `dependency_dirs` would keep
-    /// serving the negative entries discovered under the old one.
+    /// Digest of every file a dependency closure could draw on (issue #304): the
+    /// configured search folders plus the scanned tree, minus the `*.aex`
+    /// themselves, each as `(path, mtime, len)`.
+    ///
+    /// A discovery result depends on those DLLs as much as on the AEX's own
+    /// bytes, in both directions: an Adobe update that rewrites `dvacore.dll` in
+    /// place invalidates a positive entry, and a helper DLL that only appears
+    /// later invalidates a negative one. Neither shows up in the AEX's own
+    /// `(mtime, len)` or in the host build, so without this the stale result
+    /// would survive both.
     #[serde(default)]
-    dependency_dirs: u64,
+    dependency_environment: u64,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Default)]
@@ -727,7 +717,11 @@ fn cache_path() -> Option<PathBuf> {
 /// change a discovery result: the worker exe loads the AEX and runs `EffectMain`,
 /// while the in-DLL broker does the sealed-load-tree staging that decides whether
 /// the load succeeds (issue #304's dep-sealing lives broker-side, in this DLL).
-fn build_fingerprint(repository: &Path, dependency_dirs: &[PathBuf]) -> BuildFingerprint {
+fn build_fingerprint(
+    repository: &Path,
+    scan_dirs: &[PathBuf],
+    dependency_dirs: &[PathBuf],
+) -> BuildFingerprint {
     let worker = repository
         .join("target")
         .join("minihost-build")
@@ -736,21 +730,71 @@ fn build_fingerprint(repository: &Path, dependency_dirs: &[PathBuf]) -> BuildFin
     BuildFingerprint {
         worker: file_meta(&worker).map(flatten),
         host: self_module_path().as_deref().and_then(file_meta).map(flatten),
-        dependency_dirs: dependency_dirs_fingerprint(dependency_dirs),
+        dependency_environment: dependency_environment_fingerprint(scan_dirs, dependency_dirs),
     }
 }
 
-/// A digest of the ordered dependency search folders, case-folded like the
-/// filesystem compares them. Only equality matters, so the leading 8 bytes of the
-/// SHA-256 are enough and keep the fingerprint `Copy`.
-fn dependency_dirs_fingerprint(dirs: &[PathBuf]) -> u64 {
+/// A digest of every file a closure could seal: the search folders and the
+/// scanned tree, each folder's `*.aex` excluded (those are tracked per entry, and
+/// folding them in here would re-discover everything whenever one plug-in
+/// changed). Only equality matters, so the leading 8 bytes of the SHA-256 are
+/// enough and keep the fingerprint `Copy`.
+///
+/// Cost is one `stat` per candidate file — a few hundred on an AE install — so it
+/// stays inside the startup budget that must not block AviUtl2.
+fn dependency_environment_fingerprint(scan_dirs: &[PathBuf], dependency_dirs: &[PathBuf]) -> u64 {
+    let mut entries: Vec<(String, (u64, u32), u64)> = Vec::new();
+    for dir in dependency_dirs {
+        collect_dependency_files(dir, 0, 0, &mut entries);
+    }
+    for dir in scan_dirs {
+        collect_dependency_files(dir, 0, MAX_SCAN_DEPTH, &mut entries);
+    }
+    entries.sort();
+    entries.dedup();
     let mut hasher = Sha256::new();
-    for dir in dirs {
-        hasher.update(dir.to_string_lossy().to_lowercase().as_bytes());
+    for (path, mtime, len) in entries {
+        hasher.update(path.as_bytes());
+        hasher.update(mtime.0.to_le_bytes());
+        hasher.update(mtime.1.to_le_bytes());
+        hasher.update(len.to_le_bytes());
         hasher.update([0]);
     }
     let digest = hasher.finalize();
     u64::from_le_bytes(digest[..8].try_into().unwrap_or_default())
+}
+
+/// Collects `(path, mtime, len)` for every non-`*.aex` file under `dir`, bounded
+/// by `max_depth` the way the plug-in scan is. The search folders are scanned at
+/// depth 0 only: the resolver considers direct children of a root and never
+/// descends, so anything deeper cannot enter a closure.
+fn collect_dependency_files(
+    dir: &Path,
+    depth: usize,
+    max_depth: usize,
+    out: &mut Vec<(String, (u64, u32), u64)>,
+) {
+    let Ok(read) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in read.flatten() {
+        let path = entry.path();
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if file_type.is_dir() {
+            if depth < max_depth {
+                collect_dependency_files(&path, depth + 1, max_depth, out);
+            }
+        } else if !path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("aex"))
+            && let Some((mtime, len)) = file_meta(&path)
+        {
+            out.push((path.to_string_lossy().to_lowercase(), mtime, len));
+        }
+    }
 }
 
 /// The path of this running DLL, resolved from an address inside it. Used to
@@ -853,19 +897,7 @@ fn negative_entry(plugin: &Path) -> CacheEntry {
         sha: String::new(),
         smart: false,
         params: Vec::new(),
-        dependencies: Vec::new(),
     }
-}
-
-/// Whether every dependency this entry was discovered with is still byte-for-byte
-/// the file that was sealed, judged by `(mtime, len)` like the AEX itself is.
-/// A replaced or removed dependency makes the entry a miss, so it is discovered
-/// again rather than serving a result produced against different bytes.
-fn dependencies_unchanged(entry: &CacheEntry) -> bool {
-    entry.dependencies.iter().all(|dependency| {
-        file_meta(Path::new(&dependency.path))
-            .is_some_and(|(mtime, len)| mtime == dependency.mtime && len == dependency.len)
-    })
 }
 
 /// Discovers one AEX, always returning a cache entry (cache-all): `ok = true` for
@@ -887,17 +919,6 @@ fn discover_one(repository: &Path, plugin: &Path, dependency_dirs: &[PathBuf]) -
     let Ok(dependencies) = dependency_closure_for(plugin, dependency_dirs) else {
         return entry;
     };
-    entry.dependencies = dependencies
-        .iter()
-        .filter_map(|dependency| {
-            let (mtime, len) = file_meta(&dependency.path)?;
-            Some(CachedDependency {
-                path: dependency.path.to_string_lossy().into_owned(),
-                mtime,
-                len,
-            })
-        })
-        .collect();
     if let Ok((params, diagnostics)) =
         inspect_experimental_with_approved_dependencies_and_diagnostics(
             repository,

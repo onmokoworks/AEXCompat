@@ -135,6 +135,13 @@ fn bucket_of(error: &str) -> String {
         "nonzero_exit" => match diagnostics.get("exit_code").and_then(Value::as_u64) {
             Some(11) => "exit_11_load_library".into(),
             Some(14) => "exit_14_module_audit".into(),
+            // Exit 12 covers both "this is genuinely not an Effect plug-in" and
+            // "the host could not resolve its Effect entrypoint", which are very
+            // different findings, so keep the worker's own kind in the bucket.
+            Some(12) => match diagnostics.get("plugin_kind").and_then(Value::as_str) {
+                Some(kind) => format!("exit_12_{kind}"),
+                None => "exit_12".into(),
+            },
             Some(code) => format!("exit_{code}"),
             None => "nonzero_exit".into(),
         },
