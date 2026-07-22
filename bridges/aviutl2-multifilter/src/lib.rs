@@ -253,20 +253,13 @@ pub extern "C" fn RegisterPlugin(host: *mut HOST_APP_TABLE) {
         return;
     };
     let (dirs, dirs_complete) = resolve_scan_dirs(&config);
-    if dirs.is_empty() {
-        return;
-    }
 
     // Recursively collect the *.aex to expose (minus ignored), deduped + sorted.
     // `scan_complete` is false when a default folder went missing or one could not
     // be read, which makes the background pass keep (rather than prune) the
     // entries it did not see this launch.
     let scan = collect_aex(&dirs, &config.ignore);
-    let plugins = scan.plugins;
     let scan_complete = dirs_complete && scan.complete;
-    if plugins.is_empty() {
-        return;
-    }
 
     // Discovery (an L2 worker per AEX) is slow — hundreds of AE effects take
     // minutes — and can only ever populate the cache, since AviUtl2 freezes a
@@ -282,6 +275,25 @@ pub extern "C" fn RegisterPlugin(host: *mut HOST_APP_TABLE) {
     // empty the filter list for a launch (issue #307).
     let build = build_fingerprint(&repository);
     let mut cache = load_cache();
+    let mut plugins = scan.plugins;
+    // A scan that cannot be trusted must not make a cached effect disappear
+    // for this launch. Registration is intentionally conservative in the
+    // other direction: a temporarily missing AEX may be shown and fail closed
+    // at render time, but AviUtl2 will not discard objects from a saved project
+    // merely because this launch could not see the file (#321).
+    plugins.extend(cached_fallback_plugins(
+        &cache,
+        &scan.seen,
+        &dirs,
+        scan_complete,
+        !dirs_complete,
+        &config.ignore,
+    ));
+    plugins.sort();
+    plugins.dedup();
+    if plugins.is_empty() {
+        return;
+    }
 
     // Register (host callback, main thread only) each AEX whose discovery already
     // succeeded. A changed AEX keeps its last known-good registration for this
@@ -371,8 +383,9 @@ pub extern "C" fn RegisterPlugin(host: *mut HOST_APP_TABLE) {
 ///   so a path the scan reached under a different spelling (through a junction)
 ///   is not mistaken for a deleted one.
 ///
-/// Keeping a stale entry costs only cache bytes, since registration iterates the
-/// scan result, not the cache.
+/// Keeping a stale entry costs only cache bytes. An incomplete scan also uses
+/// the cache as a registration fallback, so an effect can remain visible while
+/// its folder is temporarily unavailable.
 fn prune_cache(
     cache: &mut HashMap<String, CacheEntry>,
     seen: &[PathBuf],
@@ -402,6 +415,58 @@ fn prune_cache(
         // case is held off by `scan_complete`, which is false for such a link.)
         !matches!(path.try_exists(), Ok(false))
     });
+}
+
+/// Returns usable cached AEX paths that a non-authoritative scan did not see.
+///
+/// A complete scan is authoritative: resurrecting an entry absent from it
+/// would keep filters for files that really disappeared. An incomplete scan is
+/// the opposite: absence is not evidence of deletion, so keeping a last-known-
+/// good registration is safer than letting AviUtl2 remove project objects
+/// before the file becomes visible again (#321).
+fn cached_fallback_plugins(
+    cache: &HashMap<String, CacheEntry>,
+    seen: &[PathBuf],
+    roots: &[PathBuf],
+    scan_complete: bool,
+    roots_incomplete: bool,
+    ignore: &[String],
+) -> Vec<PathBuf> {
+    if scan_complete {
+        return Vec::new();
+    }
+    let seen_keys: HashSet<String> = seen
+        .iter()
+        .map(|path| path.to_string_lossy().into_owned())
+        .collect();
+    let seen_real: HashSet<PathBuf> = seen
+        .iter()
+        .filter_map(|path| path.canonicalize().ok())
+        .collect();
+
+    cache
+        .iter()
+        .filter_map(|(key, entry)| {
+            if !entry.ok || seen_keys.contains(key) {
+                return None;
+            }
+            let path = PathBuf::from(key);
+            if !roots_incomplete
+                && !roots.is_empty()
+                && !roots.iter().any(|root| path.starts_with(root))
+            {
+                return None;
+            }
+            if is_ignored(&path, ignore)
+                || path
+                    .canonicalize()
+                    .is_ok_and(|real| seen_real.contains(&real))
+            {
+                return None;
+            }
+            Some(path)
+        })
+        .collect()
 }
 
 /// Indexes the cache by each entry's real (link-resolved) path, so an AEX whose
@@ -2451,6 +2516,64 @@ mod tests {
         let mut cache = cache_of(&["a.aex", "unscanned.aex"]);
         prune_cache(&mut cache, &[PathBuf::from("a.aex")], &[PathBuf::from("")], false);
         assert_eq!(cache.len(), 2, "the unscanned entry survived");
+    }
+
+    #[test]
+    fn an_incomplete_scan_registers_cached_entries_under_its_roots() {
+        let root = PathBuf::from("scan-root");
+        let cached = root.join("temporarily-hidden.aex");
+        let outside = PathBuf::from("other-root").join("outside.aex");
+        let cache = cache_of(&[
+            &cached.to_string_lossy(),
+            &outside.to_string_lossy(),
+        ]);
+        let fallback = cached_fallback_plugins(
+            &cache,
+            &[root.join("visible.aex")],
+            std::slice::from_ref(&root),
+            false,
+            false,
+            &[],
+        );
+        assert_eq!(fallback, vec![cached]);
+    }
+
+    #[test]
+    fn missing_scan_roots_keep_all_registerable_cached_entries() {
+        let first_root = PathBuf::from("first-root");
+        let first = first_root.join("first.aex");
+        let second = PathBuf::from("second-root").join("second.aex");
+        let cache = cache_of(&[
+            &first.to_string_lossy(),
+            &second.to_string_lossy(),
+        ]);
+        let fallback = cached_fallback_plugins(
+            &cache,
+            &[],
+            std::slice::from_ref(&first_root),
+            false,
+            true,
+            &[],
+        );
+        assert_eq!(fallback.len(), 2);
+        assert!(fallback.contains(&first));
+        assert!(fallback.contains(&second));
+    }
+
+    #[test]
+    fn complete_scan_does_not_resurrect_missing_cached_entries() {
+        let root = PathBuf::from("scan-root");
+        let cached = root.join("gone.aex");
+        let cache = cache_of(&[&cached.to_string_lossy()]);
+        assert!(cached_fallback_plugins(
+            &cache,
+            &[root.join("visible.aex")],
+            std::slice::from_ref(&root),
+            true,
+            false,
+            &[],
+        )
+        .is_empty());
     }
 
     // --- cache file acceptance ----------------------------------------------
