@@ -3274,14 +3274,15 @@ pub fn inspect_experimental_with_runtime_policy(
 /// A dependency-free inspection is a small AEX and 5 s is generous. Sealed
 /// dependencies change the shape of the work: the worker has to map every one of
 /// them before the first selector runs, and an Adobe runtime closure can be
-/// hundreds of megabytes, so a fixed 5 s would report "timed out" for a plug-in
-/// that was only still loading. Scale with the bytes actually handed to the
-/// worker, and keep a hard ceiling so the timeout stays a crash-containment
-/// bound rather than an open-ended wait.
+/// a gigabyte, so a fixed 5 s reports "timed out" for a plug-in that was only
+/// still loading. Scale with the bytes actually handed to the worker — the rate
+/// comes from cold-cache measurements over the AE 2025 corpus, where a ~1 GB
+/// closure needed just over 20 s to map — and keep a hard ceiling so the timeout
+/// stays a crash-containment bound rather than an open-ended wait.
 fn inspection_deadline(dependencies: &[ApprovedImageArtifact]) -> Duration {
     const BASE: Duration = Duration::from_millis(5_000);
-    const PER_BYTE_MILLIS_DIVISOR: u64 = 64 * 1_024; // 1 s per 64 MiB
-    const CEILING: Duration = Duration::from_secs(60);
+    const PER_BYTE_MILLIS_DIVISOR: u64 = 32 * 1_024; // 1 s per 32 MiB
+    const CEILING: Duration = Duration::from_secs(120);
     let bytes = dependencies.iter().fold(0u64, |total, dependency| {
         total.saturating_add(dependency.expected_size)
     });
@@ -6841,20 +6842,20 @@ mod tests {
             expected_size: size,
         };
         assert_eq!(inspection_deadline(&[]), Duration::from_millis(5_000));
-        // 64 MiB buys about one extra second (1 ms per 64 KiB).
+        // 32 MiB buys about one extra second (1 ms per 32 KiB).
         assert_eq!(
-            inspection_deadline(&[sealed(64 * 1_024 * 1_024)]),
+            inspection_deadline(&[sealed(32 * 1_024 * 1_024)]),
             Duration::from_millis(6_024)
         );
-        // The Adobe runtime closures observed for AE effects (~1 GB) stay well
-        // inside the ceiling, and nothing can exceed it.
+        // The Adobe runtime closures observed for AE effects (~1 GB) stay inside
+        // the ceiling, and nothing can exceed it.
         assert_eq!(
             inspection_deadline(&[sealed(1_024 * 1_024 * 1_024)]),
-            Duration::from_millis(21_384)
+            Duration::from_millis(37_768)
         );
         assert_eq!(
             inspection_deadline(&[sealed(u64::MAX / 2), sealed(u64::MAX / 2)]),
-            Duration::from_secs(60)
+            Duration::from_secs(120)
         );
     }
 
