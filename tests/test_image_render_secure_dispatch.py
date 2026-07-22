@@ -269,14 +269,15 @@ def test_smart_sessions_carry_static_context_trailers():
         ), name
 
 
-def test_a_policy_below_float32_does_not_exclude_a_render():
-    """A runtime module policy is inert below ARGB32f, so it must not force one-shot.
+def test_a_policy_below_float32_or_on_classic_does_not_exclude_a_render():
+    """An inert runtime module policy must not exclude an eligible session.
 
     The one-shot's gpu_initial_attempt requires float32, so it never reads the policy
     for Argb8/Argb16 and renders through --smart-image/--smart-image16. The session's
     gpu_capable is false for the same reason, so it neither folds the backend nor
-    attaches the authorization manifest. Excluding these renders sent a shape both
-    routes handle identically to the transport being deleted (#337).
+    attaches the authorization manifest. Classic Auto sessions likewise never attempt
+    GPU, so carrying a policy must not make RenderSession::open reject a shape that
+    both routes handle identically (#337, #340).
     """
 
     def flat(text):
@@ -306,10 +307,11 @@ def test_a_policy_below_float32_does_not_exclude_a_render():
     )
     assert "gpu_runtime_policy.is_none()" not in layered
 
-    # The session only refuses a policy for classic sessions, and only attaches the
-    # manifest when it actually attempts GPU -- both are what make the policy inert.
+    # Classic Auto is already admitted by the image-render gate. RenderSession::open
+    # must accept the same policy-carrying request and only attach the manifest when
+    # it actually attempts GPU -- both are what make the policy inert.
     session = (SOURCE.parent / "render_session.rs").read_text(encoding="utf-8")
-    assert "if !request.smart && request.gpu_runtime_policy.is_some()" in session
+    assert "if !request.smart && request.gpu_runtime_policy.is_some()" not in session
     assert (
         "let gpu_capable = request.smart && request.pixel_format == RenderPixelFormat::Argb32f"
         in session

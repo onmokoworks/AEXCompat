@@ -510,7 +510,8 @@ pub struct SessionOpenRequest<'a> {
     /// GPU backend without a policy fails closed.
     pub gpu_backend: RenderGpuBackend,
     /// Session-bound authenticated runtime module policy inputs, required for
-    /// every GPU-backed launch, exactly like the one-shot GPU path.
+    /// every GPU-backed launch, exactly like the one-shot GPU path. A policy is
+    /// inert, but accepted, for classic/CPU sessions that never attempt GPU.
     pub gpu_runtime_policy: Option<GpuRuntimePolicyInput<'a>>,
 }
 
@@ -797,11 +798,6 @@ impl RenderSession {
         };
         if geometry.section_bytes() as u64 > SECTION_HARD_CAP_BYTES {
             return Err(invalid("render session section exceeds the hard cap"));
-        }
-        if !request.smart && request.gpu_runtime_policy.is_some() {
-            return Err(invalid(
-                "a runtime module policy only applies to SmartFX GPU sessions",
-            ));
         }
         // Smart sessions now carry the same secondary-layer trailer as the
         // classic session (issue #294) and the same static context trailers
