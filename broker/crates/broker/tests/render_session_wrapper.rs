@@ -47,138 +47,230 @@ mod windows_e2e {
     // assertion. Serialize the env-sensitive tests.
     static SESSION_ROUTE_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+    /// Absolute health conditions every session render must satisfy, whatever
+    /// the plug-in or the depth. These are the assertions the A/B against the
+    /// one-shot could never make: both routes converge on the same
+    /// `smart_render_once` and the same dispatch, so a regression in the render
+    /// core moved both sides together and compared equal. Nothing here is a
+    /// frozen value -- each is a condition the report must meet on any machine
+    /// (docs/EVIDENCE_POLICY_2026-07-18.md rejects frozen-identity re-assertion
+    /// in favour of machine-portable behavioural checks).
+    fn assert_session_render_is_healthy(report: &serde_json::Value, label: &str) {
+        let object = report
+            .as_object()
+            .unwrap_or_else(|| panic!("{label}: report is not an object: {report}"));
+        assert_eq!(
+            object.get("worker_classification").and_then(|v| v.as_str()),
+            Some("ok"),
+            "{label}: worker did not exit cleanly: {report}"
+        );
+        // Ownership ledgers and guard pages: a malformed plug-in must produce a
+        // diagnostic, never a corrupted host (CLAUDE.md host-protection
+        // invariants). Absent means the report shape changed, which is itself a
+        // regression, so `is_some_and` is deliberately not used here.
+        for key in [
+            "guard_bytes_intact",
+            "handle_lifetimes_balanced",
+            "suite_leases_balanced",
+            "world_lifetimes_balanced",
+        ] {
+            match object.get(key) {
+                Some(serde_json::Value::Bool(true)) => {}
+                other => panic!("{label}: {key} is {other:?}, expected true: {report}"),
+            }
+        }
+        for key in [
+            "invalid_gpu_memory_operations",
+            "invalid_param_checkins",
+            "invalid_receipt_operations",
+        ] {
+            if let Some(value) = object.get(key) {
+                assert_eq!(value, &serde_json::json!(0), "{label}: {key} must be zero");
+            }
+        }
+        // Whichever render path this report came from, its selector error is the
+        // one that must be zero.
+        for key in ["render_error", "smart_render_error", "pre_render_error"] {
+            if let Some(value) = object.get(key) {
+                assert_eq!(value, &serde_json::json!(0), "{label}: {key} must be zero");
+            }
+        }
+        if let Some(valid) = object.get("output_pixels_valid") {
+            assert_eq!(
+                valid,
+                &serde_json::json!(true),
+                "{label}: output_pixels_valid must be true"
+            );
+        }
+    }
+
+    /// Report fields that legitimately differ between two runs of the same
+    /// render: output paths carry a per-run nonce, and the worker diagnostics
+    /// carry timings and memory peaks.
+    const VOLATILE_REPORT_KEYS: [&str; 3] = ["output_png", "output_raw", "worker_diagnostics"];
+
+    fn stable_report(report: &serde_json::Value) -> serde_json::Map<String, serde_json::Value> {
+        let mut object = report.as_object().expect("report object").clone();
+        for key in VOLATILE_REPORT_KEYS {
+            object.remove(key);
+        }
+        object
+    }
+
+    /// Two renders of the same input must agree field for field. Catches
+    /// nondeterminism without freezing any byte string into the test.
+    fn assert_reports_agree(first: &serde_json::Value, second: &serde_json::Value, label: &str) {
+        let a = stable_report(first);
+        let b = stable_report(second);
+        assert_eq!(
+            a.keys().collect::<Vec<_>>(),
+            b.keys().collect::<Vec<_>>(),
+            "{label}: report key sets diverge"
+        );
+        for (key, value) in &a {
+            assert_eq!(
+                Some(value),
+                b.get(key),
+                "{label}: report field {key} differs"
+            );
+        }
+    }
+
+    /// The CPU SmartFX single-image render, verified without the one-shot.
+    ///
+    /// This used to be an A/B against `--smart-image`. That comparison could
+    /// only ever check the transport and the lifecycle: both routes converge on
+    /// the same `smart_render_once` and the same dispatch, so a regression in
+    /// the render core moved both sides together and compared equal. The
+    /// assertions below are the ones the A/B could not make -- health
+    /// conditions, determinism, and sensitivity to the input -- and none of
+    /// them freezes a byte string, so they hold on any machine
+    /// (docs/EVIDENCE_POLICY_2026-07-18.md, issue #361).
     #[test]
-    fn smart_single_image_matches_the_one_shot_transport() {
+    fn smart_single_image_renders_deterministically_and_follows_its_input() {
         if crate::common::skip_without_restricted_token_launch(
-            "smart_single_image_matches_the_one_shot_transport",
+            "smart_single_image_renders_deterministically_and_follows_its_input",
         ) {
             return;
         }
-        // A CPU SmartFX single-image render (no layers, no context) is now
-        // carried by the length-1 smart session (#278 stage 1). Prove it renders
-        // byte-identically to the one-shot --smart-image route, for both a normal
-        // frame (t=0) and a legally empty result (the probe answers an empty
-        // result_rect at current_time % 4 == 3), where both routes skip the PNG.
-        let _env_guard = SESSION_ROUTE_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
         let root = repository_root();
         let worker = root.join("target/minihost-build/aex_smart_worker.exe");
         let aex =
             root.join("target/pf-smart-geometry-probe-build/Release/pf_smart_geometry_probe.aex");
         if !worker.is_file() || !aex.is_file() {
             eprintln!(
-                "skipping smart A/B: build aex_smart_worker.exe and \
-                 pf_smart_geometry_probe.aex first"
+                "skipping smart session render: build aex_smart_worker.exe and                  pf_smart_geometry_probe.aex first"
             );
             return;
         }
         let sha = format!("{:x}", Sha256::digest(std::fs::read(&aex).unwrap()));
         let scratch = std::env::temp_dir().join(format!(
-            "aexcompat-smart-ab-{}-{:032x}",
+            "aexcompat-smart-session-{}-{:032x}",
             std::process::id(),
             rand::random::<u128>()
         ));
         std::fs::create_dir_all(&scratch).unwrap();
-        let input = scratch.join("input.png");
-        image::RgbaImage::from_fn(64, 48, |x, y| {
-            image::Rgba([(x * 3) as u8, (y * 5) as u8, (x + y) as u8, 255])
-        })
-        .save(&input)
-        .unwrap();
-
-        let volatile = ["output_png", "output_raw", "worker_diagnostics"];
-        let compare = |report_a: &serde_json::Value, report_b: &serde_json::Value, label: &str| {
-            let mut a = report_a.as_object().expect("report A").clone();
-            let mut b = report_b.as_object().expect("report B").clone();
-            for key in volatile {
-                a.remove(key);
-                b.remove(key);
-            }
-            assert_eq!(
-                a.keys().collect::<Vec<_>>(),
-                b.keys().collect::<Vec<_>>(),
-                "{label}: smart report key sets diverge between the routes"
-            );
-            for (key, value_a) in &a {
-                assert_eq!(
-                    Some(value_a),
-                    b.get(key),
-                    "{label}: smart report field {key} differs between the routes"
-                );
-            }
+        let make_input = |name: &str, seed: u32| {
+            let path = scratch.join(name);
+            image::RgbaImage::from_fn(64, 48, |x, y| {
+                image::Rgba([
+                    ((x * 3) as u32 + seed) as u8,
+                    ((y * 5) as u32 + seed) as u8,
+                    (x + y) as u8,
+                    255,
+                ])
+            })
+            .save(&path)
+            .unwrap();
+            path
         };
+        let input = make_input("input.png", 0);
 
-        // Case 1: a normal (non-empty) smart frame at t=0.
-        unsafe { std::env::remove_var(DISABLE_SESSION_WRAPPER_ENV) };
         let before = RENDER_SESSION_WRAPPER_RENDERS.load(Ordering::SeqCst);
-        let out_a = scratch.join("normal-a.png");
-        let report_a = render_experimental_smart_image(&root, &aex, &sha, &input, &out_a, &[])
+        let out_first = scratch.join("first.png");
+        let first = render_experimental_smart_image(&root, &aex, &sha, &input, &out_first, &[])
             .expect("session-route smart render");
         assert!(
             RENDER_SESSION_WRAPPER_RENDERS.load(Ordering::SeqCst) > before,
-            "the smart render must now be carried by the session"
+            "the smart render must be carried by the session"
         );
-        unsafe { std::env::set_var(DISABLE_SESSION_WRAPPER_ENV, "1") };
-        let out_b = scratch.join("normal-b.png");
-        let report_b = render_experimental_smart_image(&root, &aex, &sha, &input, &out_b, &[]);
-        unsafe { std::env::remove_var(DISABLE_SESSION_WRAPPER_ENV) };
-        let report_b = report_b.expect("one-shot smart render");
-        compare(&report_a, &report_b, "normal");
+        assert_session_render_is_healthy(&first, "smart single image");
+
+        // Determinism: the same input twice must agree field for field and byte
+        // for byte, which is the property the frozen A/B output was standing in
+        // for -- without pinning the bytes to this machine's toolchain.
+        let out_repeat = scratch.join("repeat.png");
+        let repeat = render_experimental_smart_image(&root, &aex, &sha, &input, &out_repeat, &[])
+            .expect("second session-route smart render");
+        assert_reports_agree(&first, &repeat, "smart single image repeat");
         assert_eq!(
-            std::fs::read(&out_a).unwrap(),
-            std::fs::read(&out_b).unwrap(),
-            "the smart PNG differs between the routes"
+            std::fs::read(&out_first).unwrap(),
+            std::fs::read(&out_repeat).unwrap(),
+            "the same input produced different pixels across two session renders"
         );
 
-        // Case 2: a legally empty smart result at t=3 (probe mode EmptyResult).
-        // Neither route writes a PNG; the reports must still match.
-        let empty_timing = RenderTiming {
-            current_time: 3,
-            time_step: 1,
-            total_time: 300,
-            time_scale: 30,
-        };
-        unsafe { std::env::remove_var(DISABLE_SESSION_WRAPPER_ENV) };
-        let empty_before = RENDER_SESSION_WRAPPER_RENDERS.load(Ordering::SeqCst);
-        let empty_a = scratch.join("empty-a.png");
-        let empty_report_a = render_experimental_smart_image_at_time(
-            &root,
-            &aex,
-            &sha,
-            &input,
-            &empty_a,
-            &[],
-            empty_timing,
-        )
-        .expect("session-route empty smart render");
-        assert!(
-            RENDER_SESSION_WRAPPER_RENDERS.load(Ordering::SeqCst) > empty_before,
-            "the empty smart render must be carried by the session"
-        );
-        assert!(
-            !empty_a.exists(),
-            "an empty smart result writes no PNG on the session route"
-        );
+        // Sensitivity: the render must actually depend on its input. Which
+        // property to assert is a per-fixture question -- this probe fills the
+        // output with a constant and only checks the input layer out
+        // (instruments/pf-smart-geometry-probe), so its pixels are
+        // input-independent by design and the meaningful dependence is on the
+        // input *geometry*. Measured, not assumed: asserting pixel dependence
+        // here fails against this probe.
+        // The pixel *count* has to change, not just the shape: this probe fills
+        // a constant, so 96x32 hashes identically to 64x48 (both 3072 pixels).
+        // Measured -- that pair silently passed the geometry assertion and then
+        // failed the checksum one.
+        let wide = scratch.join("wide.png");
+        image::RgbaImage::from_fn(96, 48, |x, y| {
+            image::Rgba([(x * 2) as u8, (y * 7) as u8, 0, 255])
+        })
+        .save(&wide)
+        .unwrap();
+        let out_wide = scratch.join("wide-out.png");
+        let wide_report = render_experimental_smart_image(&root, &aex, &sha, &wide, &out_wide, &[])
+            .expect("session-route smart render at another size");
+        assert_session_render_is_healthy(&wide_report, "smart single image (other geometry)");
         assert_eq!(
-            empty_report_a.get("empty_result_rect"),
-            Some(&serde_json::Value::Bool(true)),
-            "the session must report the empty result: {empty_report_a}"
+            (wide_report.get("width"), wide_report.get("height")),
+            (Some(&serde_json::json!(96)), Some(&serde_json::json!(48))),
+            "the render did not follow the input geometry: {wide_report}"
         );
-        unsafe { std::env::set_var(DISABLE_SESSION_WRAPPER_ENV, "1") };
-        let empty_b = scratch.join("empty-b.png");
-        let empty_report_b = render_experimental_smart_image_at_time(
+        assert_ne!(
+            first.get("output_sha256"),
+            wide_report.get("output_sha256"),
+            "a differently sized input produced the same output"
+        );
+
+        // A legally empty result still has to be reported as one: the probe
+        // answers an empty result_rect at current_time % 4 == 3, and neither the
+        // PNG nor a checksum may be invented for it.
+        let out_empty = scratch.join("empty.png");
+        let empty = render_experimental_smart_image_at_time(
             &root,
             &aex,
             &sha,
             &input,
-            &empty_b,
+            &out_empty,
             &[],
-            empty_timing,
+            RenderTiming {
+                current_time: 3,
+                time_step: 1,
+                total_time: 300,
+                time_scale: 30,
+            },
+        )
+        .expect("session-route empty smart frame");
+        assert_session_render_is_healthy(&empty, "smart empty result");
+        assert_eq!(
+            empty.get("empty_result_rect"),
+            Some(&serde_json::json!(true)),
+            "the session must report the empty result: {empty}"
         );
-        unsafe { std::env::remove_var(DISABLE_SESSION_WRAPPER_ENV) };
-        let empty_report_b = empty_report_b.expect("one-shot empty smart render");
-        compare(&empty_report_a, &empty_report_b, "empty");
+        assert!(
+            !out_empty.exists(),
+            "an empty result must not write a PNG: {empty}"
+        );
+
         let _ = std::fs::remove_dir_all(&scratch);
     }
 
