@@ -724,9 +724,13 @@ struct CachedClosure {
     /// The dependencies that were sealed, as `(path, mtime, len)`.
     #[serde(default)]
     sealed: Vec<CachedDependency>,
-    /// Imported names no root provided. Windows API sets (`api-ms-*`, `ext-ms-*`)
-    /// are left out: the loader resolves those itself and no plug-in folder can
-    /// take them over, so tracking them would only cost startup `stat` calls.
+    /// Imported names no search root provided, whether the loader then found them
+    /// in System32 or not at all. Both matter the same way: if a root starts
+    /// providing one, the closure changes.
+    ///
+    /// Windows API sets (`api-ms-*`, `ext-ms-*`) are left out. The loader owns
+    /// those names and a plug-in folder cannot take them over, so tracking them
+    /// would only cost startup `stat` calls.
     #[serde(default)]
     missing: Vec<String>,
 }
@@ -941,8 +945,9 @@ fn negative_entry(plugin: &Path) -> CacheEntry {
 ///    `dvacore.dll` in place, a helper `*.aex` replaced),
 /// 3. a file appeared in an earlier search root and now wins a name that used to
 ///    resolve further down the order,
-/// 4. an import that nothing provided at discovery time now exists, which is what
-///    turns a cached failure into a plug-in that would load.
+/// 4. a search root now provides a name that no root provided at discovery time —
+///    which turns a cached failure into a plug-in that would load, and equally
+///    turns a System32 fallback into an app-local DLL that would be sealed.
 ///
 /// Anything unchecked here fails safe in one direction only: a false "changed"
 /// just re-discovers the plug-in.

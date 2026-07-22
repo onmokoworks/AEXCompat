@@ -107,10 +107,11 @@ impl ResolvedDependencyClosure {
 
     /// Imported names none of the search roots provided, lowercased and sorted.
     ///
-    /// These are not an error: a name is normally unresolved because it is a
-    /// Windows API set or a System32 DLL the loader finds on its own. It is
-    /// reported so a load failure can be read against what was left out, and it
-    /// carries basenames only, never a path.
+    /// These are not an error: a name is normally here because it is a Windows
+    /// API set or a System32 DLL the loader finds on its own. It is reported so a
+    /// load failure can be read against what was left out, and so a caller
+    /// caching this result can notice when a root starts providing one of them —
+    /// that is the moment the closure would change. Basenames only, never a path.
     pub fn unresolved(&self) -> &[String] {
         &self.unresolved
     }
@@ -271,11 +272,13 @@ fn walk_import_closure(
                 continue;
             }
             match resolve_name(&name, &roots)? {
-                NameResolution::System32 => {}
-                NameResolution::Rejected => walk.rejected_names += 1,
-                NameResolution::Missing => {
+                // Both mean "no search root provided this", which is what decides
+                // whether the closure would change; whether System32 happens to
+                // carry it only decides that it is not sealed.
+                NameResolution::System32 | NameResolution::Missing => {
                     unresolved.insert(fold(&name));
                 }
+                NameResolution::Rejected => walk.rejected_names += 1,
                 NameResolution::Found(path) => {
                     let size = fs::metadata(&path)?.len();
                     walk.total_bytes = walk.total_bytes.saturating_add(size);
@@ -423,15 +426,19 @@ fn import_names_from<Nt: ImageNtHeaders>(
     pe: &object::read::pe::PeFile<'_, Nt>,
 ) -> io::Result<Vec<String>> {
     let mut names = Vec::new();
-    // A name that cannot be read as UTF-8 is skipped rather than counted: it can
-    // never match a file this resolver would seal. Passing the per-image ceiling
-    // is an error, not a truncation, so an import table built to overflow it
-    // cannot quietly shorten a closure into a load failure.
-    let mut push = |raw: &[u8]| -> io::Result<()> {
-        if names.len() >= MAX_IMPORT_NAMES_PER_IMAGE {
+    // The ceiling counts descriptors walked, not names kept. A hostile import
+    // directory can hold millions of entries whose names are unreadable or not
+    // UTF-8, and counting only the ones that survive would let it decide how long
+    // this walk runs. Passing the ceiling is an error, not a truncation, so a
+    // closure is never quietly shortened into a load failure either.
+    let mut walked = 0usize;
+    let mut step = |names: &mut Vec<String>, walked: &mut usize, raw: io::Result<&[u8]>| {
+        *walked += 1;
+        if *walked > MAX_IMPORT_NAMES_PER_IMAGE {
             return Err(invalid("imported name limit exceeded"));
         }
-        if let Ok(name) = std::str::from_utf8(raw)
+        if let Ok(raw) = raw
+            && let Ok(name) = std::str::from_utf8(raw)
             && !name.is_empty()
         {
             names.push(name.to_owned());
@@ -442,9 +449,10 @@ fn import_names_from<Nt: ImageNtHeaders>(
         && let Ok(mut descriptors) = table.descriptors()
     {
         while let Ok(Some(descriptor)) = descriptors.next() {
-            if let Ok(raw) = table.name(descriptor.name.get(LittleEndian)) {
-                push(raw)?;
-            }
+            let raw = table
+                .name(descriptor.name.get(LittleEndian))
+                .map_err(|_| invalid("unreadable import name"));
+            step(&mut names, &mut walked, raw)?;
         }
     }
     if let Ok(Some(table)) = pe
@@ -453,9 +461,10 @@ fn import_names_from<Nt: ImageNtHeaders>(
         && let Ok(mut descriptors) = table.descriptors()
     {
         while let Ok(Some(descriptor)) = descriptors.next() {
-            if let Ok(raw) = table.name(descriptor.dll_name_rva.get(LittleEndian)) {
-                push(raw)?;
-            }
+            let raw = table
+                .name(descriptor.dll_name_rva.get(LittleEndian))
+                .map_err(|_| invalid("unreadable import name"));
+            step(&mut names, &mut walked, raw)?;
         }
     }
     Ok(names)
@@ -547,9 +556,10 @@ mod tests {
             .collect();
         sealed.sort();
         assert_eq!(sealed, vec!["dvacore.dll", "dvaui.dll"]);
-        // kernel32 lives in System32, so the worker's load flags already reach
-        // it and it is neither sealed nor reported as missing.
-        assert!(closure.unresolved().is_empty());
+        // kernel32 lives in System32, so the worker's load flags already reach it
+        // and it is not sealed. It is still reported, because a root that starts
+        // providing that name would change what the closure seals.
+        assert_eq!(closure.unresolved(), ["kernel32.dll"]);
         assert!(closure.total_bytes() > 0);
         fs::remove_dir_all(install).unwrap();
     }
@@ -582,8 +592,9 @@ mod tests {
         assert_eq!(closure.dependencies().len(), 1);
         assert_eq!(closure.dependencies()[0].path, install.join(&shared));
 
-        // With no search root offering it, the same name resolves in System32 and
-        // is neither sealed nor reported missing.
+        // With no search root offering it, the same name resolves in System32, so
+        // it is not sealed — but it is reported, so a caller can tell that adding
+        // it to a root would change the closure.
         let bare = temp_dir("applocal-bare");
         let bare_plugin = write_pe(&bare, "effect.aex", &[&shared]);
         let bare_roots = vec![bare.clone()];
@@ -591,7 +602,7 @@ mod tests {
             resolve_dependency_closure(DependencyClosureRequest::new(&bare_plugin, &bare_roots))
                 .unwrap();
         assert!(fallback.is_empty());
-        assert!(fallback.unresolved().is_empty());
+        assert_eq!(fallback.unresolved(), [shared.to_lowercase()]);
 
         fs::remove_dir_all(install).unwrap();
         fs::remove_dir_all(bare).unwrap();
