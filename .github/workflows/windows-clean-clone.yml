@@ -36,7 +36,9 @@ jobs:
         working-directory: broker
         run: cargo check --workspace --locked
       - name: Check AviUtl2 bridge
-        run: cargo check --manifest-path bridges/aviutl2/Cargo.toml --locked
+        run: cargo check --manifest-path bridges/aviutl2/Cargo.toml --all-targets --locked
+      - name: Check AviUtl2 multifilter bridge
+        run: cargo check --manifest-path bridges/aviutl2-multifilter/Cargo.toml --all-targets --locked
       - name: Test Rust workspace
         working-directory: broker
         # Hosted runners execute as a service account whose restricted token cannot

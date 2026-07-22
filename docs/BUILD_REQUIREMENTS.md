@@ -33,6 +33,14 @@ cargo build -p aexcompat-harness --release
 cargo test --workspace
 ```
 
+When a broker API changes, check both AviUtl2 bridge crates and their examples
+as well as the broker workspace:
+
+```powershell
+cargo check --manifest-path bridges\aviutl2\Cargo.toml --all-targets --locked
+cargo check --manifest-path bridges\aviutl2-multifilter\Cargo.toml --all-targets --locked
+```
+
 After Effects SDK は不要。GUI の起動だけならこれで足りる
 (ただし AEX の inspect / render には後述の worker ビルドが必要)。
 
