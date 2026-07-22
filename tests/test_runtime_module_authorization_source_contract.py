@@ -41,6 +41,8 @@ def test_only_normally_unknown_modules_can_use_exact_policy_identity():
     policy = audit.index("authorized_runtime_module(module_path)")
     assert audit.index("same_path(module_path, executable)") < policy
     assert audit.index("same_path(module_path.parent_path(), system32)") < policy
+    assert audit.index("is_winsxs_module(module_path, winsxs_root)") < policy
+    assert "snapshot.winsxs.push_back(basename)" in audit
     assert "size == found->size" in SOURCE
     assert "digest == found->sha256" in SOURCE
     assert "snapshot.policy.push_back(basename)" in audit

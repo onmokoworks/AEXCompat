@@ -3,9 +3,11 @@ use std::collections::HashSet;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Seek, Write};
 use std::path::{Component, Path, PathBuf};
+use std::time::{Duration, SystemTime};
 
 const MANIFEST_DOMAIN: &[u8] = b"AEXCompat sealed load tree manifest\0v1\0";
 const ROOT_PREFIX: &str = "aexcompat-sealed-";
+const STALE_ROOT_AGE: Duration = Duration::from_secs(24 * 60 * 60);
 
 #[derive(Clone, Debug)]
 pub struct LoadEntry {
@@ -34,10 +36,21 @@ impl SealedLoadTree {
     pub fn create(main: LoadEntry, dependencies: Vec<LoadEntry>) -> io::Result<Self> {
         let temp_parent = fs::canonicalize(std::env::temp_dir())?;
         reject_reparse(&temp_parent)?;
+        Self::create_at(&temp_parent, main, dependencies)
+    }
+
+    fn create_at(
+        temp_parent: &Path,
+        main: LoadEntry,
+        dependencies: Vec<LoadEntry>,
+    ) -> io::Result<Self> {
+        let temp_parent = fs::canonicalize(temp_parent)?;
+        reject_reparse(&temp_parent)?;
+        let _ = cleanup_stale_roots(&temp_parent, SystemTime::now(), STALE_ROOT_AGE);
         let root = create_random_root(&temp_parent)?;
         let result = Self::populate(root.clone(), temp_parent.clone(), main, dependencies);
         if result.is_err() {
-            let _ = fs::remove_dir(&root);
+            let _ = remove_owned_root(&root, &temp_parent);
         }
         result
     }
@@ -216,6 +229,75 @@ fn create_random_root(parent: &Path) -> io::Result<PathBuf> {
         io::ErrorKind::AlreadyExists,
         "could not allocate a random sealed root",
     ))
+}
+
+fn cleanup_stale_roots(parent: &Path, now: SystemTime, age: Duration) -> io::Result<()> {
+    for entry in fs::read_dir(parent)? {
+        let entry = entry?;
+        let root = entry.path();
+        if !is_owned_root(&root, parent) {
+            continue;
+        }
+        let modified = match fs::symlink_metadata(&root).and_then(|metadata| metadata.modified()) {
+            Ok(modified) => modified,
+            Err(_) => continue,
+        };
+        if now.duration_since(modified).unwrap_or_default() >= age {
+            let _ = remove_owned_root(&root, parent);
+        }
+    }
+    Ok(())
+}
+
+fn remove_owned_root(root: &Path, parent: &Path) -> io::Result<bool> {
+    if !is_owned_root(root, parent) {
+        return Ok(false);
+    }
+
+    let mut children = Vec::new();
+    for entry in fs::read_dir(root)? {
+        let entry = entry?;
+        let child = entry.path();
+        let metadata = fs::symlink_metadata(&child)?;
+        if metadata.file_type().is_symlink()
+            || is_reparse(&metadata)
+            || !metadata.file_type().is_file()
+        {
+            return Ok(false);
+        }
+        let mut file = match open_source(&child) {
+            Ok(file) => file,
+            Err(_) => return Ok(false),
+        };
+        if validate_regular_unique(&file).is_err() {
+            return Ok(false);
+        }
+        file.rewind()?;
+        children.push(child);
+    }
+
+    for child in children {
+        if fs::remove_file(child).is_err() {
+            return Ok(false);
+        }
+    }
+    Ok(fs::remove_dir(root).is_ok())
+}
+
+fn is_owned_root(root: &Path, parent: &Path) -> bool {
+    let Some(name) = root.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    let Some(suffix) = name.strip_prefix(ROOT_PREFIX) else {
+        return false;
+    };
+    suffix.len() == 32
+        && suffix
+            .chars()
+            .all(|character| character.is_ascii_hexdigit())
+        && root.parent() == Some(parent)
+        && reject_reparse(root).is_ok()
+        && fs::canonicalize(root).ok().is_some_and(|path| path == root)
 }
 
 fn validate_basename(name: &str) -> io::Result<()> {
@@ -470,6 +552,64 @@ mod tests {
         fs::remove_file(unknown).unwrap();
         fs::remove_dir(root).unwrap();
         fs::remove_dir_all(source).unwrap();
+    }
+
+    #[test]
+    fn failed_population_removes_partial_owned_root() {
+        let parent = source_dir();
+        let source = parent.join("source");
+        fs::create_dir(&source).unwrap();
+        let main = fixture(&source, "main.plugin", b"main");
+        let mut dependency = fixture(&source, "helper.dll", b"dependency");
+        dependency.expected_sha256 = [9; 32];
+        assert!(SealedLoadTree::create_at(&parent, main, vec![dependency]).is_err());
+
+        let parent_leftovers = fs::read_dir(&parent)
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_str()
+                    .is_some_and(|name| name.starts_with(ROOT_PREFIX))
+            })
+            .count();
+        assert_eq!(parent_leftovers, 0, "partial sealed roots were left behind");
+        fs::remove_dir_all(parent).unwrap();
+    }
+
+    #[test]
+    fn stale_cleanup_removes_only_old_owned_roots_with_regular_children() {
+        let parent = fs::canonicalize(source_dir()).unwrap();
+        let root = parent.join(format!("{ROOT_PREFIX}{:032x}", 1u128));
+        fs::create_dir(&root).unwrap();
+        fs::write(root.join("partial.dll"), b"partial").unwrap();
+
+        cleanup_stale_roots(
+            &parent,
+            SystemTime::now() + Duration::from_secs(2 * 24 * 60 * 60),
+            Duration::from_secs(60),
+        )
+        .unwrap();
+        assert!(!root.exists());
+        fs::remove_dir_all(parent).unwrap();
+    }
+
+    #[test]
+    fn stale_cleanup_does_not_recurse_into_unexpected_children() {
+        let parent = fs::canonicalize(source_dir()).unwrap();
+        let root = parent.join(format!("{ROOT_PREFIX}{:032x}", 2u128));
+        fs::create_dir(&root).unwrap();
+        fs::create_dir(root.join("unexpected")).unwrap();
+
+        cleanup_stale_roots(
+            &parent,
+            SystemTime::now() + Duration::from_secs(2 * 24 * 60 * 60),
+            Duration::from_secs(60),
+        )
+        .unwrap();
+        assert!(root.exists());
+        fs::remove_dir_all(parent).unwrap();
     }
 
     #[cfg(windows)]

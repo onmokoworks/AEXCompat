@@ -45,6 +45,7 @@ std::string serialize_l2_report(const L2ReportContext& c) {
     << ",\"user_changed_parameters\":" << c.user_changed_parameters_json << ",\"return_message\":\"" << bounded_diagnostic_text(c.return_message, 256)
     << "\",\"about_message\":\"" << bounded_diagnostic_text(c.about_message, 256) << "\",\"about_selector_dispatched\":"; boolean(o, c.about_selector_dispatched);
   o << ",\"last_seh_selector\":\"" << bounded_diagnostic_text(c.last_seh_selector, 96) << "\",\"last_seh_error\":" << c.last_seh_error
+    << ",\"last_seh_exception_code\":" << c.last_seh_exception_code
     << ",\"sequence_setup_error\":" << c.lifecycle_errors[0] << ",\"sequence_resetup_error\":" << c.lifecycle_errors[1]
     << ",\"frame_setup_error\":" << c.lifecycle_errors[2] << ",\"frame_setdown_error\":" << c.lifecycle_errors[3]
     << ",\"sequence_setdown_error\":" << c.lifecycle_errors[4] << ",\"lifecycle_data_null\":"; boolean(o, c.lifecycle_data_null);

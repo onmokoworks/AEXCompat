@@ -7,94 +7,94 @@
                             "compiled_sdk_abi":  "target/pf-suite-abi-probe-build/pf-suite-abi.json"
                         },
     "current_artifact_snapshot":  {
-                                      "captured_at":  "2026-07-18",
+                                      "captured_at":  "2026-07-22",
                                       "note":  "This authenticates the current worktree and production artifacts. Focused runtime records remain bound to their measured artifacts; the sampling record was recaptured with this same production source and render worker.",
                                       "source":  {
                                                      "path":  "minihost/src/l2_main.cpp",
-                                                     "size_bytes":  1241709,
-                                                     "sha256":  "3beb22dd515f2933bc514b821fd5eaa386c189e0ef3855b009a622889bebf5d8"
+                                                     "size_bytes":  139615,
+                                                     "sha256":  "4ccae13e08ee5e00083136887ac36c48141c8e14d4315e282d468c6f56a42ac9"
                                                  },
                                       "broker_dispatch_source":  {
                                                                      "path":  "broker/crates/broker/src/image_render.rs",
-                                                                     "size_bytes":  202221,
-                                                                     "sha256":  "850395c65c7b8a9f64c8645d5ea087466f87629ba89df51eb915903f104c5e30"
+                                                                     "size_bytes":  330452,
+                                                                     "sha256":  "519044786573f88677203bdde3cc994bf610402e3e30940fcc43297f270b96e4"
                                                                  },
                                       "l2_worker":  {
                                                         "path":  "target/minihost-build/aex_l2_worker.exe",
-                                                        "size_bytes":  756736,
-                                                        "sha256":  "cc8958ea36af84946d31f83eb61f40d6b375c3a7484197c2fac0968881136bfc"
+                                                        "size_bytes":  1218048,
+                                                        "sha256":  "a0b2ed93439c81eddea08298fe7f2eca3507581dfbcba5b2f1813b1a47de0df4"
                                                     },
                                       "render_worker":  {
                                                             "path":  "target/minihost-build/aex_render_worker.exe",
-                                                            "size_bytes":  828928,
-                                                            "sha256":  "373f5b48b2afb8b5b0b168e0ebb022312b2b1eb1ad6ffbd27f328c9a60b40055"
+                                                            "size_bytes":  1218048,
+                                                            "sha256":  "47daaf75e1bde6f09cfde040415da1e29f357b0d3b2fdbccc2b454f484a1b594"
                                                         },
                                       "smart_worker":  {
                                                            "path":  "target/minihost-build/aex_smart_worker.exe",
-                                                           "size_bytes":  845824,
-                                                           "sha256":  "fd69dd640b3ae2ddbe6d8caa595069f9e10a1bd2d9aac2cc8d069bf6b92b33ad"
+                                                           "size_bytes":  1218048,
+                                                           "sha256":  "76306f8c4ee003292f673edaf180956ae173913d5e57246cb857a8a8b88e1906"
                                                        },
                                       "harness":  {
                                                       "path":  "broker/target/debug/aexcompat-harness.exe",
-                                                      "size_bytes":  19973632,
-                                                      "sha256":  "dc83b78a71d43c4bf933c9dc93033bc47fd4208590c30ba96efed45cf78d5f0c"
+                                                      "size_bytes":  23152640,
+                                                      "sha256":  "6e4e18a2c0076a4647994418752dbe700d4b09bc1e4c7833544494a462655497"
                                                   }
                                   },
     "latest_recaptured_evidence":  [
                                        {
                                            "path":  "analysis/PF_ADV_TIME_V4_RUNTIME_RESULT_2026-07-16.json",
                                            "size_bytes":  4562,
-                                           "sha256":  "25c82390367b31bbffa7d026d605b5d09fcf16a162780e95f169449ef65e0e41"
+                                           "sha256":  "25ff73e61005aa054037dd4254cf1d5539fae816d684e3a42de0fe652c23e8d2"
                                        },
                                        {
                                            "path":  "analysis/PF_COMPOSITE_RECT_16_RUNTIME_RESULT_2026-07-16.json",
                                            "size_bytes":  4871,
-                                           "sha256":  "f6f1c14964e68c487136dd50627ab8d50b3f307926e3d0eb560b3c6bab1761dc"
+                                           "sha256":  "a801e2b2450908e7010596a7e7287e1b8f85ce3286d12fed8b31e24859ccb677"
                                        },
                                        {
                                            "path":  "analysis/PF_AEGP_ASYNC_CANCEL_RUNTIME_RESULT_2026-07-16.json",
                                            "size_bytes":  4994,
-                                           "sha256":  "4b0b1cc334526285e3edb86f52c7cb3974b848e0417712ea882203b6ff2d7a03"
+                                           "sha256":  "a2c6a706736a92aa6535c36699c99ca5bd32475b60513a5afd6bad3d9933feb3"
                                        },
                                        {
                                            "path":  "analysis/PF_AEGP_ASYNC_LAYER_RECEIPT_RUNTIME_RESULT_2026-07-16.json",
                                            "size_bytes":  4772,
-                                           "sha256":  "bf5b1607862f3cd92b768e3a82b306a7d951db4fef17307fe50ace45799b74fb"
+                                           "sha256":  "b5fc9a20d2a23441b3dd7501f9b0efb02d294efa0a4a7aabaaf875bc87923960"
                                        },
                                        {
                                            "path":  "analysis/PF_AEGP_LAYER_RECEIPT_RUNTIME_RESULT_2026-07-16.json",
                                            "size_bytes":  9964,
-                                           "sha256":  "9b97bd4ba5f60f5c3c5871d59a5e632d29bea0d25c5780081ffa1625286fe94b"
+                                           "sha256":  "9574999c5bd3c213dad6a8126b11626e52eae189756f4289d006cb68e76fc3ad"
                                        },
                                        {
                                            "path":  "analysis/PF_SAMPLING_FILL_RUNTIME_RESULT_2026-07-16.json",
                                            "size_bytes":  16699,
-                                           "sha256":  "b28cc9f274f82d4d3a34dedbb2f1c90d229cd0b2db2bd82d909c30d7187c15de"
+                                           "sha256":  "acb94166efa49970c7efb0eb2ac30ae93154dc40a54205a06251d371639f116a"
                                        },
                                        {
                                            "path":  "analysis/PF_SAMPLING_DEPTH_MATRIX_RESULT_2026-07-17.json",
-                                           "size_bytes":  6471,
-                                           "sha256":  "f264488cf5acfeedd538129cb01ce07cdfe8c94acfdbb5ba0c22ee1da8f6cf3e"
+                                           "size_bytes":  6472,
+                                           "sha256":  "e0af11acc1513733925309e93b74a375e33e4ced4c9ec03c2f7e61f90a3764df"
                                        },
                                        {
                                            "path":  "analysis/SDK_COLORGRID_ARBITRARY_TIMELINE_RESULT_2026-07-17.json",
                                            "size_bytes":  10042,
-                                           "sha256":  "ca5a2bf1a0ee0206240c25ab1a47989bf0ff842a956a1267a582f7b70f4bcaea"
+                                           "sha256":  "b65a298dcdf628cd07047cc38b6b783da403f77d1ff0c64a34852f034c2331f1"
                                        },
                                        {
                                            "path":  "analysis/REAL_AEX_SMART_TIMED_MULTI_LAYER_RESULT_2026-07-17.json",
                                            "size_bytes":  16839,
-                                           "sha256":  "3f19283168a66ff289bbf02cba7d27050216b1bda4c4efe3d0510b8fedf0070c"
+                                           "sha256":  "170e6181edd69e20dbb33fc64a93304af90d438c20accc122c422bbc11ec8486"
                                        },
                                        {
                                            "path":  "analysis/AEGP_ASYNC_RECEIPT_RUNTIME_RESULT_2026-07-16.json",
-                                           "size_bytes":  13717,
-                                           "sha256":  "f9a7d4906267e40c460832d79b0683b5087ce229a4c0ada20b9d3cb0da1838de"
+                                           "size_bytes":  13721,
+                                           "sha256":  "085dd45d8940142a791f00dac864c3ea08d7de6be384b3633a553eb65c5c891f"
                                        },
                                        {
                                            "path":  "analysis/SDK_GRABBA_AEGP_RUNTIME_RESULT_2026-07-16.json",
-                                           "size_bytes":  69252,
-                                           "sha256":  "1b0e6670abf7428cc549a076489e5c74ee57568fb165b94dcb2216a57a364f09"
+                                           "size_bytes":  69253,
+                                           "sha256":  "7e752c811eabc68115ac579e1cef863fc3f16c8a1e230f7ac9966f2f7812840d"
                                        }
                                    ],
     "verification_levels":  {
@@ -454,7 +454,7 @@
                                                                                     "record":  {
                                                                                                    "path":  "analysis/PF_SAMPLING_FILL_RUNTIME_RESULT_2026-07-16.json",
                                                                                                    "size_bytes":  16699,
-                                                                                                   "sha256":  "b28cc9f274f82d4d3a34dedbb2f1c90d229cd0b2db2bd82d909c30d7187c15de"
+                                                                                                   "sha256":  "acb94166efa49970c7efb0eb2ac30ae93154dc40a54205a06251d371639f116a"
                                                                                                },
                                                                                     "persisted_reports":  [
                                                                                                               {
@@ -495,7 +495,7 @@
                                {
                                    "path":  "target/pf-composite-rect-probe-build/Release/pf_composite_rect_probe.aex",
                                    "size_bytes":  14848,
-                                   "sha256":  "2af39d1da24bd0f4a8df8ca9017b660ae18a9cef636cc42305eb7ca4f06d6520",
+                                   "sha256":  "41c3be4392ae06ad99bdf7c0565ceb894d3d1730903e7be14986fce3aabc0db2",
                                    "evidence":  "aexcompat_argb8_argb16_runtime"
                                },
                                {
@@ -513,7 +513,7 @@
                                {
                                    "path":  "target/pf-fill-premultiply-probe/pf_fill_premultiply_probe.aex",
                                    "size_bytes":  14848,
-                                   "sha256":  "fb7c70a9bd999eb100e97423cf2e5a560e5ea1355e60a5d030b48d98ec2e7a90",
+                                   "sha256":  "daf8dfdc97506ec01f83422bd1f4966d6bc3e4648f8ece0f9d3beb89be3d83e9",
                                    "evidence":  "current_artifact_and_historical_aexcompat_runtime"
                                },
                                {

@@ -2,6 +2,7 @@
 
 #include <windows.h>
 #include <psapi.h>
+#include <bcrypt.h>
 
 #include <algorithm>
 #include <array>
@@ -15,6 +16,7 @@ namespace aexcompat::worker_runtime {
 namespace {
 
 #pragma comment(lib, "psapi.lib")
+#pragma comment(lib, "bcrypt.lib")
 
 constexpr std::size_t kMaxAuditedModules = 512;
 
@@ -25,8 +27,77 @@ struct AuthorizedRuntimeModule {
 };
 
 std::vector<AuthorizedRuntimeModule> g_authorized_runtime_modules;
+// The 32-byte session identity and GPU-framework backend id the last accepted
+// AEXRMA1 manifest carried. `parse_runtime_module_authorization` used to discard
+// both after validation; the GPU module-audit preflight (#290) echoes them into
+// the report the broker re-authenticates, so they are retained here.
+std::array<unsigned char, 32> g_authorized_session_identity{};
+uint32_t g_authorized_backend{};
 ModuleAuditReport g_module_audit;
 FileSha256 g_file_sha256{};
+
+// SHA-256 domain separation prefix for module path tokens; must match the broker
+// `runtime_module_policy::PATH_TOKEN_DOMAIN` byte-for-byte (two embedded NULs).
+constexpr unsigned char kPathTokenDomain[] = {
+    'A', 'E', 'X', 'C', 'o', 'm', 'p', 'a', 't', ' ', 'r', 'u', 'n',
+    't', 'i', 'm', 'e', ' ', 'm', 'o', 'd', 'u', 'l', 'e', ' ', 'p',
+    'a', 't', 'h', ' ', 't', 'o', 'k', 'e', 'n', 0, 'v', '1', 0};
+
+// Lowercase-hex SHA-256 of an arbitrary byte range. Separate from the file
+// hasher (`g_file_sha256`) so the path-token computation does not touch disk.
+std::string hash_bytes_hex(const unsigned char* data, std::size_t size) {
+  BCRYPT_ALG_HANDLE algorithm{};
+  BCRYPT_HASH_HANDLE hash{};
+  DWORD object_size{}, returned{};
+  if (BCryptOpenAlgorithmProvider(&algorithm, BCRYPT_SHA256_ALGORITHM, nullptr, 0) < 0)
+    return {};
+  std::string result;
+  if (BCryptGetProperty(algorithm, BCRYPT_OBJECT_LENGTH,
+          reinterpret_cast<PUCHAR>(&object_size), sizeof(object_size), &returned, 0) >= 0) {
+    std::vector<unsigned char> object(object_size);
+    if (BCryptCreateHash(algorithm, &hash, object.data(), object_size, nullptr, 0, 0) >= 0) {
+      std::array<unsigned char, 32> digest{};
+      if (BCryptHashData(hash, const_cast<PUCHAR>(data), static_cast<ULONG>(size), 0) >= 0 &&
+          BCryptFinishHash(hash, digest.data(), digest.size(), 0) >= 0) {
+        constexpr char hex[] = "0123456789abcdef";
+        result.reserve(64);
+        for (unsigned char byte : digest) {
+          result.push_back(hex[byte >> 4]);
+          result.push_back(hex[byte & 0x0f]);
+        }
+      }
+      BCryptDestroyHash(hash);
+    }
+  }
+  BCryptCloseAlgorithmProvider(algorithm, 0);
+  return result;
+}
+
+// Reproduces the broker `runtime_module_policy::path_token`: the SHA-256 of the
+// domain prefix followed by the folded path bytes, where the folded path is the
+// canonicalized module path lowercased with forward slashes turned to
+// backslashes. The broker computes it over Rust's `fs::canonicalize` output,
+// which is `\\?\`-prefixed on Windows, so the prefix is restored here before
+// folding (the audit's `canonical_path` strips it). ASCII module paths fold
+// identically to Rust's Unicode lowercase; a non-ASCII path folds differently
+// and the broker re-authentication then rejects the report fail-closed.
+std::string path_token(const std::filesystem::path& canonical_stripped) {
+  std::wstring folded = L"\\\\?\\" + canonical_stripped.wstring();
+  for (wchar_t& ch : folded) {
+    if (ch == L'/') ch = L'\\';
+    ch = towlower(ch);
+  }
+  const int needed = WideCharToMultiByte(CP_UTF8, 0, folded.c_str(),
+      static_cast<int>(folded.size()), nullptr, 0, nullptr, nullptr);
+  if (needed <= 0) return {};
+  std::string utf8(static_cast<std::size_t>(needed), '\0');
+  WideCharToMultiByte(CP_UTF8, 0, folded.c_str(), static_cast<int>(folded.size()),
+      utf8.data(), needed, nullptr, nullptr);
+  std::vector<unsigned char> buffer(kPathTokenDomain,
+      kPathTokenDomain + sizeof(kPathTokenDomain));
+  buffer.insert(buffer.end(), utf8.begin(), utf8.end());
+  return hash_bytes_hex(buffer.data(), buffer.size());
+}
 
 std::wstring lowercase(std::wstring value) {
   std::transform(value.begin(), value.end(), value.begin(), towlower);
@@ -54,6 +125,38 @@ bool canonical_path(const std::filesystem::path& path,
 bool same_path(const std::filesystem::path& left,
                const std::filesystem::path& right) {
   return lowercase(left.wstring()) == lowercase(right.wstring());
+}
+
+// A canonicalized path alone is not sufficient for the WinSxS allowlist: a
+// junction/symlink could resolve into an apparently valid assembly directory.
+// Inspect every existing component without following reparse points and fail
+// closed when any handle or metadata query is unavailable.
+bool contains_reparse_component(const std::filesystem::path& path) {
+  std::filesystem::path current = path;
+  while (!current.empty()) {
+    HANDLE file = CreateFileW(current.c_str(), FILE_READ_ATTRIBUTES,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+        OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+        nullptr);
+    if (file == INVALID_HANDLE_VALUE) return true;
+    BY_HANDLE_FILE_INFORMATION information{};
+    const bool failed = GetFileInformationByHandle(file, &information) == 0;
+    CloseHandle(file);
+    if (failed || (information.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0)
+      return true;
+    const std::filesystem::path parent = current.parent_path();
+    if (parent.empty() || parent == current) break;
+    current = parent;
+  }
+  return false;
+}
+
+bool is_winsxs_module(const std::filesystem::path& module_path,
+                      const std::filesystem::path& winsxs_root) {
+  const std::filesystem::path assembly = module_path.parent_path();
+  return !module_path.filename().empty() && !assembly.filename().empty() &&
+      same_path(assembly.parent_path(), winsxs_root) &&
+      !contains_reparse_component(module_path);
 }
 
 std::string audit_basename(const std::filesystem::path& path) {
@@ -108,12 +211,21 @@ ModuleAuditSnapshot audit_loaded_modules(const std::filesystem::path& plugin_pat
   std::array<wchar_t, MAX_PATH> system_buffer{};
   const UINT system_length = GetSystemDirectoryW(
       system_buffer.data(), static_cast<UINT>(system_buffer.size()));
-  std::filesystem::path executable, plugin_root, system32;
+  std::array<wchar_t, 32768> windows_buffer{};
+  const UINT windows_length = GetWindowsDirectoryW(
+      windows_buffer.data(), static_cast<UINT>(windows_buffer.size()));
+  std::filesystem::path executable, plugin_root, system32, windows_root, winsxs_root;
   if (executable_length == 0 || executable_length >= executable_buffer.size() ||
       system_length == 0 || system_length >= system_buffer.size() ||
+      windows_length == 0 || windows_length >= windows_buffer.size() ||
       !canonical_path(executable_buffer.data(), executable) ||
       !canonical_path(plugin_path.parent_path(), plugin_root) ||
       !canonical_path(system_buffer.data(), system32) ||
+      !canonical_path(windows_buffer.data(), windows_root) ||
+      !canonical_path(windows_root / L"WinSxS", winsxs_root) ||
+      contains_reparse_component(windows_buffer.data()) ||
+      contains_reparse_component(
+          std::filesystem::path(windows_buffer.data()) / L"WinSxS") ||
       !has_prefixed_basename(executable.parent_path(), L"aexcompat-trusted-worker-")) {
     snapshot.unknown_count = 1;
     return snapshot;
@@ -134,6 +246,9 @@ ModuleAuditSnapshot audit_loaded_modules(const std::filesystem::path& plugin_pat
     if (same_path(module_path, executable)) snapshot.worker.push_back(basename);
     else if (same_path(module_path.parent_path(), plugin_root)) snapshot.plugin.push_back(basename);
     else if (same_path(module_path.parent_path(), system32)) snapshot.system32.push_back(basename);
+    else if (is_winsxs_module(module_path, winsxs_root) &&
+             !contains_reparse_component(module_buffer.data()))
+      snapshot.winsxs.push_back(basename);
     else if (authorized_runtime_module(module_path)) snapshot.policy.push_back(basename);
     else {
       ++snapshot.unknown_count;
@@ -162,6 +277,7 @@ void accumulate_module_audit(const ModuleAuditSnapshot& snapshot) {
   append_unique(g_module_audit.observed_union.worker, snapshot.worker);
   append_unique(g_module_audit.observed_union.plugin, snapshot.plugin);
   append_unique(g_module_audit.observed_union.system32, snapshot.system32);
+  append_unique(g_module_audit.observed_union.winsxs, snapshot.winsxs);
   append_unique(g_module_audit.observed_union.policy, snapshot.policy);
   for (const auto& key : snapshot.unknown_keys) {
     auto& keys = g_module_audit.observed_union.unknown_keys;
@@ -204,6 +320,7 @@ std::string module_audit_snapshot_json(const ModuleAuditSnapshot& snapshot) {
          << snapshot.unknown_count << ",\"worker\":" << names(snapshot.worker)
          << ",\"plugin\":" << names(snapshot.plugin)
          << ",\"system32\":" << names(snapshot.system32)
+         << ",\"winsxs\":" << names(snapshot.winsxs)
          << ",\"policy\":" << names(snapshot.policy) << '}';
   return output.str();
 }
@@ -217,6 +334,8 @@ void configure_runtime_module_hash(FileSha256 hash) noexcept {
 bool parse_runtime_module_authorization(const std::filesystem::path& plugin_path,
                                         const std::filesystem::path& manifest_name) {
   g_authorized_runtime_modules.clear();
+  g_authorized_session_identity.fill(0);
+  g_authorized_backend = 0;
   if (!g_file_sha256 || manifest_name.empty() || manifest_name.is_absolute() ||
       manifest_name.has_parent_path() || manifest_name.filename() != manifest_name) return false;
   std::filesystem::path plugin_root, manifest_path;
@@ -243,6 +362,12 @@ bool parse_runtime_module_authorization(const std::filesystem::path& plugin_path
   if (offset > bytes.size() || bytes.size() - offset < 32) return false;
   const bool nonzero_session = std::any_of(bytes.begin() + offset, bytes.begin() + offset + 32,
       [](unsigned char value) { return value != 0; });
+  // Retain the manifest's backend id and session identity for the GPU
+  // module-audit preflight report (#290). Stale on a later parse failure, but
+  // only read after this function returns true.
+  g_authorized_backend = backend;
+  std::copy(bytes.begin() + offset, bytes.begin() + offset + 32,
+            g_authorized_session_identity.begin());
   offset += 32;
   const uint64_t now = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
       std::chrono::system_clock::now().time_since_epoch()).count());
@@ -336,6 +461,70 @@ std::string module_audit_json() {
          << ",\"phase_count\":" << g_module_audit.phase_count
          << ",\"unknown_count\":" << g_module_audit.observed_union.unknown_count
          << '}';
+  return output.str();
+}
+
+uint32_t authorized_runtime_backend() noexcept { return g_authorized_backend; }
+
+std::string gpu_module_report_json() {
+  constexpr char hex[] = "0123456789abcdef";
+  std::string session_hex;
+  session_hex.reserve(64);
+  for (unsigned char byte : g_authorized_session_identity) {
+    session_hex.push_back(hex[byte >> 4]);
+    session_hex.push_back(hex[byte & 0x0f]);
+  }
+  const char* backend = g_authorized_backend == 1   ? "cuda"
+                        : g_authorized_backend == 2 ? "opencl"
+                        : g_authorized_backend == 3 ? "directx"
+                                                    : "";
+
+  // Single pass over the loaded modules: an authorized runtime module is
+  // reported only when it actually loaded into this process. Each module is
+  // matched to its authorized entry and emitted from that entry's disk-verified
+  // identity, so the report never serializes a raw path (only the hashed
+  // path_token, the basename, and the size the broker re-authenticates).
+  //
+  // Fails closed (returns an empty string) when the module enumeration cannot be
+  // trusted (query failure, or a > kMaxAuditedModules overflow that would drop
+  // modules) or when none of the authorized modules actually loaded. The audit
+  // path treats the same overflow as a failure, and an empty `modules` array
+  // would authenticate vacuously downstream, so both must fail here instead of
+  // emitting a report that proves nothing loaded.
+  std::array<HMODULE, kMaxAuditedModules> modules{};
+  DWORD needed = 0;
+  if (!EnumProcessModulesEx(GetCurrentProcess(), modules.data(),
+          static_cast<DWORD>(sizeof(modules)), &needed, LIST_MODULES_ALL) ||
+      needed == 0 || needed > sizeof(modules) || needed % sizeof(HMODULE) != 0)
+    return {};
+  const std::size_t count = needed / sizeof(HMODULE);
+  std::ostringstream entries;
+  bool first = true;
+  for (std::size_t index = 0; index < count; ++index) {
+    std::array<wchar_t, 32768> buffer{};
+    const DWORD length = GetModuleFileNameExW(GetCurrentProcess(), modules[index],
+        buffer.data(), static_cast<DWORD>(buffer.size()));
+    std::filesystem::path loaded_module;
+    if (length == 0 || length >= buffer.size() ||
+        !canonical_path(buffer.data(), loaded_module))
+      continue;
+    const auto found = std::find_if(g_authorized_runtime_modules.begin(),
+        g_authorized_runtime_modules.end(),
+        [&](const AuthorizedRuntimeModule& entry) {
+          return same_path(loaded_module, entry.path);
+        });
+    if (found == g_authorized_runtime_modules.end()) continue;
+    if (!first) entries << ',';
+    first = false;
+    entries << "{\"classification\":\"policy\",\"basename\":\""
+            << audit_basename(found->path) << "\",\"path_token\":\""
+            << path_token(found->path) << "\",\"sha256\":\"" << found->sha256
+            << "\",\"size\":" << found->size << "}";
+  }
+  if (first) return {};  // no authorized module loaded -> nothing to authenticate
+  std::ostringstream output;
+  output << "{\"session_identity\":\"" << session_hex << "\",\"backend\":\""
+         << backend << "\",\"modules\":[" << entries.str() << "]}";
   return output.str();
 }
 

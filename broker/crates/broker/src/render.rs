@@ -1,6 +1,4 @@
-use crate::host_core::approved_artifact::{
-    ApprovedArtifact, ApprovedLoadTree, load, load_v2_load_tree,
-};
+use crate::host_core::approved_artifact::{ApprovedLoadTree, load_v2_load_tree};
 use crate::sealed_load_tree::SealedLoadTree;
 use crate::secure_launch::{SecureLaunchRequest, secure_launch};
 use serde_json::{Value, json};
@@ -12,15 +10,7 @@ use std::time::{Duration, Instant};
 fn invalid(message: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message.into())
 }
-pub(crate) fn entry(repository: &Path, id: &str) -> io::Result<ApprovedArtifact> {
-    let profile =
-        crate::fixture_profiles::find(id).ok_or_else(|| invalid("unknown plugin profile"))?;
-    let worker = profile
-        .classic_worker
-        .ok_or_else(|| invalid("classic render is not approved for profile"))?;
-    load(repository, id, worker.approval)
-}
-fn secure_entry(repository: &Path, id: &str) -> io::Result<ApprovedLoadTree> {
+pub(crate) fn secure_entry(repository: &Path, id: &str) -> io::Result<ApprovedLoadTree> {
     let profile =
         crate::fixture_profiles::find(id).ok_or_else(|| invalid("unknown plugin profile"))?;
     let worker = profile

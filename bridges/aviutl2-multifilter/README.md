@@ -29,6 +29,14 @@ AviUtl2 の generic プラグイン (`.aux2`)。フォルダ内の各 AEX を、
 3. 各フィルタ proc → その AEX の常駐 `RenderSession` に配線 (SmartFX 検出含む)。
 4. フォルダ走査で実行時 N フィルタ登録。libffi closure・テーブル・item リストの生存期間管理。
 
+### config item名の衝突
+
+AEXのパラメーター名は表示用ラベルであり、一意とは限らない。AviUtl2の保存キーが同名を
+区別できないため、同じフィルタ内で重複するラベルには元のAEX slotを付ける
+(`Intensity [slot 12]` のような形式)。空のラベルも `Parameter <slot> [slot <slot>]` に
+正規化する。重複しない既存ラベルはそのまま維持し、描画時の値読み出しは表示名ではなく
+従来どおりAEX slotで行う。これにより同名パラメーターのsave/loadが別slotへ混ざらない。
+
 ## ビルド / 配置
 
 ```powershell

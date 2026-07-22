@@ -16,7 +16,7 @@
 //! Deployed as `.aux2` (generic plugin extension); `.auf2` would make AviUtl2
 //! look for the single-filter `GetFilterPluginTable` export and fail.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ffi::c_void;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -1422,11 +1422,12 @@ fn register_discovered(
     let mut items: Vec<*const c_void> = Vec::new();
     let mut readers: Vec<ItemReader> = Vec::new();
     let mut defaults: Vec<InteractiveParameter> = Vec::new();
-    for parameter in &entry.params {
-        if !parameter.visible {
+    let item_names = unique_item_names(&entry.params);
+    for (parameter, item_name) in entry.params.iter().zip(item_names) {
+        let Some(item_name) = item_name else {
             continue;
-        }
-        if let Some((item_ptr, reader, sent)) = build_item(parameter) {
+        };
+        if let Some((item_ptr, reader, sent)) = build_item(parameter, &item_name) {
             items.push(item_ptr);
             readers.push(reader);
             defaults.push(sent);
@@ -1474,19 +1475,21 @@ fn register_discovered(
 
 /// Build one leaked FILTER_ITEM for an exposed parameter, plus a reader and the
 /// (range-normalized) parameter to send. Mirrors the aviutl2 bridge's mapping.
-fn build_item(parameter: &InteractiveParameter) -> Option<(*const c_void, ItemReader, InteractiveParameter)> {
-    let name = parameter.name.clone();
+fn build_item(
+    parameter: &InteractiveParameter,
+    item_name: &str,
+) -> Option<(*const c_void, ItemReader, InteractiveParameter)> {
     match parameter.kind.as_str() {
         "float" => {
             let (min, max) = bounded_range(parameter)?;
-            let ptr = leak_track(&name, parameter.value, min, max, track_step(max - min));
+            let ptr = leak_track(item_name, parameter.value, min, max, track_step(max - min));
             Some((ptr as *const c_void, ItemReader::Track { ptr, slot: parameter.slot, integer: false }, parameter.clone()))
         }
         "integer" => {
             if !parameter.choices.is_empty() {
                 // Popup -> dropdown (AE popups are 1-based).
                 let count = parameter.choices.len() as i32;
-                let ptr = leak_select(&name, (parameter.value as i32).clamp(1, count), &parameter.choices);
+                let ptr = leak_select(item_name, (parameter.value as i32).clamp(1, count), &parameter.choices);
                 let mut sent = parameter.clone();
                 sent.minimum = 1.0;
                 sent.maximum = count as f64;
@@ -1495,22 +1498,69 @@ fn build_item(parameter: &InteractiveParameter) -> Option<(*const c_void, ItemRe
             }
             let (min, max) = bounded_range(parameter)?;
             if min == 0.0 && max == 1.0 {
-                let ptr = leak_checkbox(&name, parameter.value != 0.0);
+                let ptr = leak_checkbox(item_name, parameter.value != 0.0);
                 Some((ptr as *const c_void, ItemReader::Checkbox { ptr, slot: parameter.slot }, parameter.clone()))
             } else {
-                let ptr = leak_track(&name, parameter.value.round(), min, max, 1.0);
+                let ptr = leak_track(item_name, parameter.value.round(), min, max, 1.0);
                 Some((ptr as *const c_void, ItemReader::Track { ptr, slot: parameter.slot, integer: true }, parameter.clone()))
             }
         }
         "color" => {
             // InteractiveParameter.color is ARGB; AviUtl2 color code is 0x00RRGGBB.
             let (r, g, b) = (parameter.color[1], parameter.color[2], parameter.color[3]);
-            let ptr = leak_color(&name, r, g, b);
+            let ptr = leak_color(item_name, r, g, b);
             Some((ptr as *const c_void, ItemReader::Color { ptr, slot: parameter.slot }, parameter.clone()))
         }
         // "angle" and others are not exposed (stay at the AEX default).
         _ => None,
     }
+}
+
+/// Produces the names used by AviUtl2's config items.
+///
+/// AviUtl2 persists config values by item name, while AEX parameter names are
+/// only human-facing labels and are not required to be unique. Keep the old
+/// name for a unique visible parameter, but add its stable AEX slot to every
+/// duplicate. Empty labels get the same slot-based fallback. The final set is
+/// checked again so a user-supplied label cannot collide with a generated one.
+fn unique_item_names(parameters: &[InteractiveParameter]) -> Vec<Option<String>> {
+    let mut counts = HashMap::<String, usize>::new();
+    for parameter in parameters.iter().filter(|parameter| parameter.visible) {
+        let name = parameter.name.trim();
+        if !name.is_empty() {
+            *counts.entry(name.to_owned()).or_default() += 1;
+        }
+    }
+
+    let mut used = HashSet::<String>::new();
+    parameters
+        .iter()
+        .map(|parameter| {
+            if !parameter.visible {
+                return None;
+            }
+            let trimmed = parameter.name.trim();
+            let base = if trimmed.is_empty() {
+                format!("Parameter {}", parameter.slot)
+            } else {
+                parameter.name.clone()
+            };
+            let duplicate =
+                !trimmed.is_empty() && counts.get(trimmed).copied().unwrap_or_default() > 1;
+            let stem = if duplicate || trimmed.is_empty() {
+                format!("{base} [slot {}]", parameter.slot)
+            } else {
+                base
+            };
+            let mut candidate = stem.clone();
+            let mut disambiguator = 2u32;
+            while !used.insert(candidate.clone()) {
+                candidate = format!("{stem} [{disambiguator}]");
+                disambiguator = disambiguator.saturating_add(1);
+            }
+            Some(candidate)
+        })
+        .collect()
 }
 
 fn leak_track(name: &str, value: f64, min: f64, max: f64, step: f64) -> *const FILTER_ITEM_TRACK {
@@ -3333,5 +3383,73 @@ mod tests {
         );
         assert_eq!(entry.map(|entry| entry.len), Some(64), "took the usable one");
         assert_eq!(alias.as_deref(), Some(other.as_str()));
+    }
+    fn parameter(slot: u32, name: &str, visible: bool) -> InteractiveParameter {
+        InteractiveParameter {
+            slot,
+            name: name.into(),
+            kind: "float".into(),
+            minimum: 0.0,
+            maximum: 1.0,
+            value: 0.0,
+            choices: Vec::new(),
+            color: [255, 0, 0, 0],
+            components: [0.0; 3],
+            component_count: 1,
+            layer_path: None,
+            enabled: true,
+            visible,
+            supervised: false,
+            debug_summary: None,
+            custom_ui_events: 0,
+            control_size: [0, 0],
+        }
+    }
+
+    #[test]
+    fn unique_item_names_preserve_unique_labels_and_bind_duplicates_to_slots() {
+        let parameters = vec![
+            parameter(1, "Intensity", true),
+            parameter(2, "Intensity", true),
+            parameter(3, "", true),
+            parameter(4, " ", true),
+            parameter(5, "Unique", true),
+            parameter(6, "Hidden", false),
+        ];
+        let names = unique_item_names(&parameters);
+        let visible: Vec<&str> = names.iter().filter_map(Option::as_deref).collect();
+
+        assert_eq!(visible[0], "Intensity [slot 1]");
+        assert_eq!(visible[1], "Intensity [slot 2]");
+        assert_eq!(visible[2], "Parameter 3 [slot 3]");
+        assert_eq!(visible[3], "Parameter 4 [slot 4]");
+        assert_eq!(visible[4], "Unique");
+        assert!(
+            names[5].is_none(),
+            "invisible parameters do not consume item names"
+        );
+        assert_eq!(visible.len(), visible.iter().collect::<HashSet<_>>().len());
+    }
+
+    #[test]
+    fn generated_slot_name_collision_gets_a_second_stable_suffix() {
+        let parameters = vec![
+            parameter(1, "Intensity", true),
+            parameter(2, "Intensity", true),
+            parameter(3, "Intensity [slot 1]", true),
+        ];
+        let names = unique_item_names(&parameters);
+
+        assert_eq!(names[0].as_deref(), Some("Intensity [slot 1]"));
+        assert_eq!(names[1].as_deref(), Some("Intensity [slot 2]"));
+        assert_eq!(names[2].as_deref(), Some("Intensity [slot 1] [2]"));
+        assert_eq!(
+            names
+                .iter()
+                .filter_map(Option::as_ref)
+                .collect::<HashSet<_>>()
+                .len(),
+            3
+        );
     }
 }

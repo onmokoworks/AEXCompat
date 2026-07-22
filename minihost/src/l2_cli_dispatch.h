@@ -13,6 +13,10 @@ struct AuxiliaryOptionHooks {
   bool (*parse_alpha_coverage)(void* context, const wchar_t* value){};
   bool (*load_parameter_animation)(void* context, const wchar_t* value){};
   bool (*parse_conformance_render_settings)(void* context, const wchar_t* value){};
+  // Optional (#290/#300): captures the `--runtime-module-authorization-v1`
+  // manifest basename on a GPU render so the render/smart worker authorizes the
+  // GPU runtime DLLs for the module audit. Null on paths that never carry it.
+  bool (*set_runtime_module_authorization)(void* context, const wchar_t* value){};
 };
 
 struct AuxiliaryOptionResult {

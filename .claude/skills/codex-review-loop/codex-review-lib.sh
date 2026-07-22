@@ -294,8 +294,10 @@ owner_reviews_unresolved() {
 }
 
 # Owner TOP-LEVEL comments with no later resolution (input: issue-comments
-# array). Args: $1 = this session's login; $2 = clearances JSON. Excludes bare
-# "@codex review" triggers (real feedback containing the phrase is kept) and
+# array). Args: $1 = this session's login; $2 = clearances JSON. Excludes
+# comments whose first line is exactly "@codex review" (a trigger may carry a
+# human-readable summary on later lines; real feedback containing the phrase
+# elsewhere is kept) and
 # ONLY $me's "[ack]" comments (the resolution signal itself). Every other
 # owner comment blocks — including $me's own marker-less comments: with an
 # owner-authenticated token a human "merge不可" from the same login must not
@@ -307,7 +309,8 @@ owner_reviews_unresolved() {
 # by a fresh Codex clean.
 owner_comments_unresolved() {
   jq -r --arg me "$1" --argjson clr "$2" --argjson owner "$OWNER_LOGINS" '
-    def nontrigger: select((.body | ascii_downcase | gsub("[[:space:]]"; "")) != "@codexreview");
+    def first_line: ((.body // "") | split("\n")[0] | ascii_downcase | gsub("^[[:space:]]+|[[:space:]]+$"; ""));
+    def nontrigger: select(first_line != "@codex review");
     def isack: .user.login == $me and (.body | ascii_downcase | contains("[ack]"));
     ( [ .[] | select(isack) | .created_at ] | max // "" ) as $ack
     | .[] | nontrigger
