@@ -474,7 +474,9 @@ pub struct SessionOpenRequest<'a> {
     /// carrying the same span the one-shot passes as three bare argv slots under
     /// `--render-image-audio` (issue #339). The plug-in sees one source for the
     /// whole session, so it rides the launch argv rather than the frame message.
-    /// Rides at the very tail, ahead of nothing, so the worker peels it first.
+    /// Rides at the tail of the *positional* section, behind the other optional
+    /// trailers, so the worker peels it first of those. The auxiliary option
+    /// pairs are appended after it and are stripped before any of this.
     pub audio_trailer: Option<String>,
     /// Alpha-as-coverage parameter slots (`--alpha-as-coverage-v1`), issue #98
     /// W1-4c. The worker publishes the alpha-coverage provider once at launch

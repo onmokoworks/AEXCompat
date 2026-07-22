@@ -2217,23 +2217,27 @@ mod windows_e2e {
     }
 
     /// Resolve a pf-visual-audio-probe artifact across the layouts its build can
-    /// produce: `tools/build-pf-visual-audio-probe.ps1` uses a private
-    /// multi-config tree, while a Ninja configure of `instruments` (as CI does)
-    /// writes the single-config path. Returns `None` when the probe is unbuilt.
+    /// produce. `tools/build-pf-visual-audio-probe.ps1` uses a private
+    /// multi-config tree and takes `-Configuration Debug|Release`, so both
+    /// config subdirectories are searched. The `instruments-build` candidates
+    /// cover a hand-run configure of `instruments` (single-config Ninja, or
+    /// multi-config); CI does not build this probe at all, since its Ninja
+    /// configure of `instruments` deliberately runs without AE_SDK_ROOT and the
+    /// probe lives inside that guard. Returns `None` when the probe is unbuilt.
     fn visual_audio_probe(root: &Path, target: &str) -> Option<PathBuf> {
-        [
-            root.join(format!(
-                "target/pf-visual-audio-probe-build/pf-visual-audio-probe/Release/{target}.aex"
-            )),
-            root.join(format!(
-                "target/instruments-build/pf-visual-audio-probe/{target}.aex"
-            )),
-            root.join(format!(
-                "target/instruments-build/pf-visual-audio-probe/Release/{target}.aex"
-            )),
-        ]
-        .into_iter()
-        .find(|path| path.is_file())
+        let private = root.join("target/pf-visual-audio-probe-build/pf-visual-audio-probe");
+        ["Release", "Debug"]
+            .into_iter()
+            .map(|configuration| private.join(configuration).join(format!("{target}.aex")))
+            .chain([
+                root.join(format!(
+                    "target/instruments-build/pf-visual-audio-probe/{target}.aex"
+                )),
+                root.join(format!(
+                    "target/instruments-build/pf-visual-audio-probe/Release/{target}.aex"
+                )),
+            ])
+            .find(|path| path.is_file())
     }
 
     /// Image render + audio sidecar (#98 W4, issue #339): the classic session

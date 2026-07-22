@@ -680,6 +680,27 @@ trailer 無しの negative test も併せて追加 (`audio_source_available is F
   configure する (`.github/workflows/ae-sdk-tests.yml`) のと衝突していた。専用の
   `target/pf-visual-audio-probe-build` に変更し、テスト側は両レイアウトを探索する。
 
+### ローカルレビュー 2 周目の指摘と対応
+
+1 周目の対応を検証した上で、以下が新規に出た。
+
+- `Cleanup` guard を fallible な `write_all` の**後**に構築していた。`open` が成功した
+  時点でファイルは存在するので、write 失敗で partial file が leak する窓が残っていた。
+  `render_session.rs` の layer sidecar が同じ規則をコメントで明示している
+  ("track it for cleanup BEFORE the fallible write")。open 直後に構築するよう修正。
+- gate ヘッダのコメント「audio はもう render を除外しない」が、classic 側の
+  layer 除外を足した時点で**偽になっていた**。訂正。
+- `SessionOpenRequest::audio_trailer` の doc「最末尾、後ろには何も無い」も偽
+  (auxiliary option ペアはこの後ろに積まれる)。訂正。
+- probe パス解決が `-Configuration Debug` のレイアウトを見ておらず、ビルド成功後も
+  テストが黙って skip する形だった。両 configuration を探索するよう修正。
+  併せてコメントの誤り (「Ninja レイアウトは CI が作る」) を訂正: CI の
+  `instruments` configure は AE_SDK_ROOT 無しで走り、probe は
+  `if(DEFINED ENV{AE_SDK_ROOT})` の内側なので **CI はこの probe を作らない**。
+- Rust の文字列内行継続 (`\` + 改行) が編集の過程で潰れ、パスに空白が混入して
+  A/B が黙って skip していた。`--nocapture` で skip 行を確認して発覚。
+  `Path::join` に組み替えて修正 (「テストが緑」だけでは走った証明にならない実例)。
+
 ### 未解決 (この PR の範囲外)
 - `tests/test_ae_reference_capture_automation.py::test_reference_capture_fails_closed_without_loaded_module_identity`
   が clean main でも fail する。#175 に追加観察をコメント済み。

@@ -115,7 +115,9 @@ SmartFX + audio を拒否するため smart session 側は剥がさない)。one
 session の tail は他の optional trailer と共有されているため裸のスロットを
 取れない。よって 1 つの marked trailer に載せ、他と同じ peel チェーンで剥がす。
 path を最後に置くのは、path 中の `|` が数値フィールドをずらさないようにするため
-(worker は先頭 2 つの区切りだけを見て、残り全部を path とする)。W1-3 では mask (`v2|`)、spatial (`spatial:v1/v2/v3`)、
+(worker は先頭 2 つの区切りだけを見て、残り全部を path とする)。
+
+W1-3 では mask (`v2|`)、spatial (`spatial:v1/v2/v3`)、
 render-environment (`render:v1|`) を broker が送出する (host_context がある
 ときは one-shot と同じく mask trailer を常に送る、空 mask scene でも "v2|")。
 W1-4c では alpha-as-coverage の parameter slot 群を `--alpha-as-coverage-v1

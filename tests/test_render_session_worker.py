@@ -635,16 +635,20 @@ def test_session_launch_rejects_time_scale_above_int32():
 
 def _visual_audio_probe(target):
     """Resolve a pf-visual-audio-probe artifact across the layouts its build can
-    produce: tools/build-pf-visual-audio-probe.ps1 uses a private multi-config
-    tree, while a Ninja configure of `instruments` (as CI does) writes the
-    single-config path. Returns None when the probe is unbuilt."""
+    produce. tools/build-pf-visual-audio-probe.ps1 uses a private multi-config
+    tree and takes -Configuration Debug|Release, so both config subdirectories
+    are searched. The instruments-build candidates cover a hand-run configure of
+    `instruments` (single-config Ninja, or multi-config); CI does not build this
+    probe at all, since its Ninja configure of `instruments` deliberately runs
+    without AE_SDK_ROOT and the probe lives inside that guard. Returns None when
+    the probe is unbuilt."""
+    private = ROOT / "target" / "pf-visual-audio-probe-build" / "pf-visual-audio-probe"
+    shared = ROOT / "target" / "instruments-build" / "pf-visual-audio-probe"
     for candidate in (
-            ROOT / "target" / "pf-visual-audio-probe-build" / "pf-visual-audio-probe"
-            / "Release" / (target + ".aex"),
-            ROOT / "target" / "instruments-build" / "pf-visual-audio-probe"
-            / (target + ".aex"),
-            ROOT / "target" / "instruments-build" / "pf-visual-audio-probe" / "Release"
-            / (target + ".aex")):
+            private / "Release" / (target + ".aex"),
+            private / "Debug" / (target + ".aex"),
+            shared / (target + ".aex"),
+            shared / "Release" / (target + ".aex")):
         if candidate.is_file():
             return candidate
     return None

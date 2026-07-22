@@ -4987,7 +4987,9 @@ fn render_with_artifact(
     // the former session_section_fits carve-out is gone (#264): every eligible
     // render below can be carried by the length-1 session.
     // An audio sidecar rides the session's launch trailer the same way the static
-    // context trailers do (issue #339), so it no longer excludes a render.
+    // context trailers do (issue #339), so on its own it no longer excludes a
+    // render. It still excludes one when secondary layers are also present; see
+    // the classic arm below for why.
     let session_eligible = payload
         == encode_interactive_payload(interactive_parameters.unwrap_or_default())?
         && std::env::var_os(DISABLE_SESSION_WRAPPER_ENV).is_none()
@@ -5142,16 +5144,21 @@ fn render_with_artifact(
         // One binding, so "a sidecar was written" and "a trailer was emitted"
         // cannot come apart: there is no shape here that writes the file and
         // then renders as if the render carried no audio.
-        let session_audio = match &audio {
+        let prepared_audio = match &audio {
             Some(bytes) => {
                 fs::create_dir_all(&root)?;
                 cleanup_stale_image_transport(&root, SystemTime::now())?;
                 let path = root.join(format!("audio-{nonce}.f32"));
-                OpenOptions::new()
+                let mut file = OpenOptions::new()
                     .write(true)
                     .create_new(true)
-                    .open(&path)?
-                    .write_all(bytes)?;
+                    .open(&path)?;
+                // The file now exists on disk; track it for cleanup BEFORE the
+                // fallible write so a mid-write failure (or any later early
+                // return) still removes it instead of leaking a partial file.
+                // Same rule the layer sidecars follow in render_session.rs.
+                let cleanup = Cleanup(vec![path.clone()]);
+                file.write_all(bytes)?;
                 Some((
                     SessionAudioSource {
                         trailer: format!(
@@ -5161,17 +5168,17 @@ fn render_with_artifact(
                         ),
                         input_sha256: format!("{:x}", Sha256::digest(bytes)),
                     },
-                    path,
+                    cleanup,
                 ))
             }
             None => None,
         };
         // The sidecar outlives the session open (the worker reads it at launch)
-        // and must not outlive this scope. The RAII guard removes it on every
-        // exit including a panic, matching how the aux manifest and the one-shot
-        // transport files are handled in this same function.
-        let (session_audio, _audio_cleanup) = match session_audio {
-            Some((source, path)) => (Some(source), Some(Cleanup(vec![path]))),
+        // and must not outlive this scope. The guard is named, not `_`, so it
+        // lives to the end of the scope and drops after `session_outcome` on
+        // every return arm and on unwind.
+        let (session_audio, _audio_cleanup) = match prepared_audio {
+            Some((source, cleanup)) => (Some(source), Some(cleanup)),
             None => (None, None),
         };
         let session_outcome = render_classic_via_length_one_session(&SessionWrapperRequest {
