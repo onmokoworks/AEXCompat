@@ -46,12 +46,39 @@ jobs:
       # never start a process keep running: RenderSession::open validates every
       # argument before it launches, and secure_launch fails trusted worker staging
       # before it spawns, so those refusals are still covered here. The old --skip
-      # list is gone because it did
-      # not follow the tests added after it was written, which left main red with
-      # 32 failures.
+      # list is gone because it did not follow the tests added after it was
+      # written, which left main red with 32 failures.
+      #
+      # --show-output is required, not cosmetic: libtest captures stdout/stderr of
+      # passing tests, and a skipped test passes. Without it the skip lines are
+      # swallowed and a run that could not launch a single worker is
+      # indistinguishable from full coverage.
       - name: Test Rust workspace
         working-directory: broker
-        run: cargo test --workspace --locked
+        shell: pwsh
+        run: |
+          cargo test --workspace --locked -- --show-output 2>&1 |
+            Tee-Object -FilePath "$env:GITHUB_WORKSPACE/cargo-test-output.txt"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      # Make the environment limitation visible in the run summary rather than
+      # leaving it as a passing test count. Reports either way, so "no skips" is
+      # an explicit statement instead of the absence of one.
+      - name: Report restricted-token skips
+        shell: pwsh
+        if: always()
+        run: |
+          if (-not (Test-Path cargo-test-output.txt)) {
+            Write-Host 'cargo test produced no log; nothing to report.'
+            exit 0
+          }
+          $skips = Select-String -Path cargo-test-output.txt `
+            -Pattern 'cannot launch a restricted-token worker'
+          if ($skips) {
+            Write-Host "::warning::$($skips.Count) Rust tests did not run: this runner cannot launch a restricted-token worker (issue #335)"
+            $skips | ForEach-Object { $_.Line }
+          } else {
+            Write-Host 'Every worker-launching Rust test ran: no restricted-token skips.'
+          }
       - name: Validate Python collection and local-artifact manifest
         run: uv run python -m pytest --collect-only -q --validate-local-artifact-manifest
       - name: Run source-reproducible Python tests

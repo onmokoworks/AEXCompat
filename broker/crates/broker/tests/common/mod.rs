@@ -102,7 +102,10 @@ mod windows_probe {
         };
         match secure_launch(tree, request, Duration::from_secs(60)) {
             Ok(result) if result.exit_code == STATUS_DLL_INIT_FAILED => {
-                eprintln!(
+                // println!, not eprintln!: libtest's --show-output is what makes
+                // these lines survive into the CI log, and stdout is the stream
+                // it is documented to replay for a passing test.
+                println!(
                     "restricted-token launch is unavailable in this environment: the probe worker \
                      exited with STATUS_DLL_INIT_FAILED (0x{STATUS_DLL_INIT_FAILED:08X}). Tests \
                      that drive a live worker will report themselves as skipped (issue #335)."
@@ -143,6 +146,6 @@ pub fn skip_without_restricted_token_launch(test: &str) -> bool {
     if restricted_token_launch_available() {
         return false;
     }
-    eprintln!("skipping {test}: this environment cannot launch a restricted-token worker (#335)");
+    println!("skipping {test}: this environment cannot launch a restricted-token worker (#335)");
     true
 }

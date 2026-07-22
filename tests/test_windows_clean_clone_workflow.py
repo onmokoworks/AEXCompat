@@ -23,7 +23,15 @@ def test_windows_clean_clone_runs_canonical_source_reproducible_gates():
         "cargo check --manifest-path bridges/aviutl2-multifilter/Cargo.toml --all-targets --locked"
         in workflow
     )
-    assert "cargo test --workspace --locked" in workflow
+    # --show-output is load-bearing: libtest captures the output of passing
+    # tests, and a test that skips itself passes. Without it a run where the
+    # probe suppressed every worker-launching test looks exactly like full
+    # coverage (issue #335).
+    assert "cargo test --workspace --locked -- --show-output" in workflow
+    assert "Report restricted-token skips" in workflow
+    assert "cannot launch a restricted-token worker" in workflow
+    assert "no restricted-token skips" in workflow, (
+        "the report must state the no-skip case explicitly, not by staying silent")
     # The hosted runner's restricted token cannot initialize a worker, so the
     # tests that drive one detect that themselves and report a skip (issue #335).
     # The workflow must not carry a hand-maintained --skip list again: that list
