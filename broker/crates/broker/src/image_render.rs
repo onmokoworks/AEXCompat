@@ -360,7 +360,9 @@ pub fn prepare_gpu_runtime_policy(
         ));
     }
     let module_report_json = serde_json::to_vec(report).map_err(|error| {
-        invalid(format!("could not re-serialize the GPU module report: {error}"))
+        invalid(format!(
+            "could not re-serialize the GPU module report: {error}"
+        ))
     })?;
     let system32 = canonical_system32()?;
     // Fail-fast: the render path re-authenticates before dispatch, but validate
@@ -5014,6 +5016,11 @@ fn render_with_artifact(
             //     while the session fails closed (it cannot retry mid-flight).
             //     Per W4 (#264) the session is the anchor, so its no-CPU-retry
             //     GPU behavior is canonical.
+            //   - Renders carrying a static host context (#331): the smart session
+            //     command peels the mask/spatial/render trailers from the same
+            //     positional tail the classic session command does, and the shared
+            //     request parser reads them at the same indices, so both routes
+            //     hand the plug-in the same context.
             // Excluded here:
             //   - Argb8/Argb16 Cpu: the one-shot table has no CPU arm for these
             //     depths (falls through to the error arm), so routing them to
@@ -5026,30 +5033,29 @@ fn render_with_artifact(
             //   - Layered (secondary/timed) renders with a policy: the one-shot
             //     gpu_initial_attempt requires no layers, so a GPU render never
             //     happens there and the GPU session arm stays off too (#290).
-            // Static context trailers (host_context) are still not carried by
-            // smart sessions; secondary layers now are (issue #294).
-            host_context.is_none()
-                && if secondaries.is_empty() && timed_secondaries.is_empty() {
-                    (gpu_backend == RenderGpuBackend::Cpu
-                        && pixel_format == RenderPixelFormat::Argb32f)
-                        || (gpu_backend == RenderGpuBackend::Auto && gpu_runtime_policy.is_none())
-                        || (pixel_format == RenderPixelFormat::Argb32f
-                            && runtime_backend(gpu_backend).is_some()
-                            && gpu_runtime_policy.is_some())
-                } else {
-                    // Smart layered: admit Argb8/Argb16 under Auto only. The
-                    // one-shot layered arms (--smart-image*-layer) are Auto-only
-                    // and for these depths the worker's gpu_negotiation is false
-                    // (it requires float32), so both routes render on CPU.
-                    // Argb32f layered stays on one-shot: gpu_initial_attempt is
-                    // false when layers are present, so the broker does not fold
-                    // it to CPU, and a GPU-declaring float32 plug-in would
-                    // negotiate GPU in the worker on the one-shot route, which a
-                    // CPU-folded session cannot reproduce (issue #296 review).
-                    gpu_backend == RenderGpuBackend::Auto
-                        && gpu_runtime_policy.is_none()
-                        && pixel_format != RenderPixelFormat::Argb32f
-                }
+            // Static context trailers (host_context) ride the smart session's
+            // positional tail the same way they ride the classic one (issue #331),
+            // as do secondary layers (issue #294), so neither excludes a render.
+            if secondaries.is_empty() && timed_secondaries.is_empty() {
+                (gpu_backend == RenderGpuBackend::Cpu && pixel_format == RenderPixelFormat::Argb32f)
+                    || (gpu_backend == RenderGpuBackend::Auto && gpu_runtime_policy.is_none())
+                    || (pixel_format == RenderPixelFormat::Argb32f
+                        && runtime_backend(gpu_backend).is_some()
+                        && gpu_runtime_policy.is_some())
+            } else {
+                // Smart layered: admit Argb8/Argb16 under Auto only. The
+                // one-shot layered arms (--smart-image*-layer) are Auto-only
+                // and for these depths the worker's gpu_negotiation is false
+                // (it requires float32), so both routes render on CPU.
+                // Argb32f layered stays on one-shot: gpu_initial_attempt is
+                // false when layers are present, so the broker does not fold
+                // it to CPU, and a GPU-declaring float32 plug-in would
+                // negotiate GPU in the worker on the one-shot route, which a
+                // CPU-folded session cannot reproduce (issue #296 review).
+                gpu_backend == RenderGpuBackend::Auto
+                    && gpu_runtime_policy.is_none()
+                    && pixel_format != RenderPixelFormat::Argb32f
+            }
         } else {
             gpu_backend == RenderGpuBackend::Auto
         };
@@ -5399,8 +5405,7 @@ fn render_with_artifact(
     let mut manifest_fallback_error: Option<io::Error> = None;
     let _runtime_authorization = match (gpu_initial_attempt, gpu_runtime_policy) {
         (true, Some(policy_input)) => {
-            let backend =
-                runtime_backend(gpu_backend).expect("GPU attempt has a runtime backend");
+            let backend = runtime_backend(gpu_backend).expect("GPU attempt has a runtime backend");
             // Reuse the preflight's session identity so the manifest the worker
             // parses matches the identity the report was authenticated against
             // (#301 review).

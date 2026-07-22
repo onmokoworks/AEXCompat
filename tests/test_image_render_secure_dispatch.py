@@ -200,3 +200,70 @@ def test_gpu_preflight_seals_the_same_dependencies_as_the_render():
     assert "preflight_dependencies," in body
     # The manifest must no longer be the only sealed artifact.
     assert "vec![authorization.artifact.clone()]" not in body
+
+
+def test_smart_sessions_carry_static_context_trailers():
+    """A host context must not force a render onto the one-shot transport (#331).
+
+    The broker builds the mask/spatial/render trailers from `host_context` and pushes
+    them onto the session's positional tail; the worker's smart session command has to
+    peel them in the same order the classic session command does, or the ten-slot
+    session contract does not resolve and the command is rejected outright.
+    """
+    source = SOURCE.read_text(encoding="utf-8")
+    session = (SOURCE.parent / "render_session.rs").read_text(encoding="utf-8")
+    dispatch = (
+        ROOT / "minihost" / "src" / "l2_cli_dispatch.cpp"
+    ).read_text(encoding="utf-8")
+
+    # The gate no longer excludes a static host context.
+    gate = render_function()[
+        render_function().index("let session_eligible ="): render_function().index(
+            "if session_eligible"
+        )
+    ]
+    assert "host_context.is_none()" not in gate
+    # The session open no longer refuses smart requests that carry the trailers.
+    assert "smart sessions do not carry static context trailers yet" not in session
+    # The broker still pushes all three, in the one-shot order.
+    push = session[session.index("if let Some(mask) = &request.mask_trailer"):]
+    assert push.index("request.mask_trailer") < push.index("request.spatial_trailer")
+    assert push.index("request.spatial_trailer") < push.index(
+        "request.render_environment_trailer"
+    )
+
+    # Both session commands peel the three trailers ahead of the layer trailer, so
+    # the ten-slot core lands at the same place on either route. `>= 11` is the
+    # session arity guard (10 slots + the trailer under test) and distinguishes
+    # these from the one-shot peels, which share the expressions but guard on
+    # `>= 14`. Asserted per branch and in order: counting file-wide would pass a
+    # smart branch that peeled mask before render, which shifts where the core
+    # lands, or one that re-based image_argc on effective_argc ahead of the
+    # (shared) layer line -- both re-break #331 while keeping every count at 2.
+    peels = [
+        "mode.image_render_environment = ",
+        "mode.image_spatial_context = ",
+        "mode.image_mask_context = ",
+        "mode.session_layers = ",
+        "const int session_core_argc = ",
+    ]
+    branches = {
+        "classic": 'if (equals(command, L"--render-session-v1") || session16 || session32) {',
+        "smart": 'if (equals(command, L"--smart-session-v1") || session16 || session32) {',
+    }
+    for name, opener in branches.items():
+        start = dispatch.index(opener)
+        branch = dispatch[start : dispatch.index("return WorkerMode{};", start)]
+        at = -1
+        for peel in peels:
+            found = branch.find(peel, at + 1)
+            assert found > at, f"{name}: {peel} missing or out of order"
+            at = found
+        # The chain must thread through the *_argc fields, never restart from
+        # effective_argc after the first peel.
+        assert "mode.image_argc = mode.image_trailer_argc -" in branch, name
+        assert "mode.image_argc = effective_argc" not in branch, name
+        assert (
+            "const int session_core_argc = mode.image_argc - (mode.session_layers ? 1 : 0);"
+            in branch
+        ), name

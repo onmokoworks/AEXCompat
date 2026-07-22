@@ -177,16 +177,28 @@ WorkerMode classify_worker_mode(
     const bool session32 = equals(command, L"--smart-session32-v1") ||
         session_cpu || session_opencl || session_directx;
     if (equals(command, L"--smart-session-v1") || session16 || session32) {
-      // Smart sessions carry the same optional secondary-layer trailer as the
-      // classic session commands (issue #294): peel `session-layers:v2|` from
-      // the tail to reach the ten-slot smart session contract. Static context
-      // trailers (mask/spatial/render) are not yet carried by smart sessions.
-      // image_argc must point past the trailer so the shared layer parser reads
-      // argv[image_argc - 1] (the trailer), not argv[-1].
-      mode.image_argc = effective_argc;
-      mode.session_layers = effective_argc >= 11 &&
-          starts_with(argv[effective_argc - 1], L"session-layers:v2|");
-      const int session_core_argc = effective_argc - (mode.session_layers ? 1 : 0);
+      // Smart sessions carry the same optional trailers as the classic session
+      // commands: the static context trailers in the one-shot order
+      // [mask v2|][spatial:v*][render:v1|] (issue #331), then the
+      // secondary-layer trailer (issue #294). Peel them in reverse tail order to
+      // reach the ten-slot smart session contract. image_argc must end up past
+      // the layer trailer so the shared layer parser reads argv[image_argc - 1]
+      // (the trailer), not argv[-1], and the shared request parser reads each
+      // context trailer at the index the matching *_argc field records.
+      mode.image_render_environment = effective_argc >= 11 &&
+          starts_with(argv[effective_argc - 1], L"render:v1|");
+      mode.image_environment_argc = effective_argc -
+          (mode.image_render_environment ? 1 : 0);
+      mode.image_spatial_context = mode.image_environment_argc >= 11 &&
+          starts_with(argv[mode.image_environment_argc - 1], L"spatial:v");
+      mode.image_trailer_argc = mode.image_environment_argc -
+          (mode.image_spatial_context ? 1 : 0);
+      mode.image_mask_context = mode.image_trailer_argc >= 11 &&
+          starts_with(argv[mode.image_trailer_argc - 1], L"v2|");
+      mode.image_argc = mode.image_trailer_argc - (mode.image_mask_context ? 1 : 0);
+      mode.session_layers = mode.image_argc >= 11 &&
+          starts_with(argv[mode.image_argc - 1], L"session-layers:v2|");
+      const int session_core_argc = mode.image_argc - (mode.session_layers ? 1 : 0);
       mode.render_session_mode = session_core_argc == 10;
       if (mode.render_session_mode) {
         mode.external_pixel_bytes = session32 ? 16 : (session16 ? 8 : 4);

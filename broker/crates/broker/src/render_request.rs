@@ -725,9 +725,7 @@ pub fn execute(repository: &Path, request_path: &Path, output_path: &Path) -> io
             .as_ref()
             .is_some_and(|approved| approved != &identity)
         {
-            return Err(invalid(
-                "classic approval changed between determinism runs",
-            ));
+            return Err(invalid("classic approval changed between determinism runs"));
         }
         approved_identity = Some(identity);
         let args_before_plugin = [worker_spec.request_mode.to_string()];
