@@ -9,6 +9,8 @@
 //! fixture from this checkout; skips (with a message) when either is not
 //! built.
 
+mod common;
+
 #[cfg(test)]
 #[cfg(windows)]
 mod windows_e2e {
@@ -27,6 +29,11 @@ mod windows_e2e {
 
     #[test]
     fn sealed_smart_cpu_render_passes_the_module_audit() {
+        if crate::common::skip_without_restricted_token_launch(
+            "sealed_smart_cpu_render_passes_the_module_audit",
+        ) {
+            return;
+        }
         let root = repository_root();
         let worker = root.join("target/minihost-build/aex_smart_worker.exe");
         let aex =

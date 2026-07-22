@@ -1,3 +1,5 @@
+mod common;
+
 #[cfg(windows)]
 mod windows_e2e {
     use aexcompat_broker::ExitClassification;
@@ -31,6 +33,11 @@ mod windows_e2e {
 
     #[test]
     fn external_worker_reads_sealed_plugin_and_tree_is_cleaned_after_exit() {
+        if crate::common::skip_without_restricted_token_launch(
+            "external_worker_reads_sealed_plugin_and_tree_is_cleaned_after_exit",
+        ) {
+            return;
+        }
         let _lock = SECURE_LAUNCH_LOCK.lock().unwrap();
         let worker_dir = TempDir::new("aexcompat-secure-launch-worker");
         let worker = build_worker(&worker_dir.0);
@@ -136,6 +143,11 @@ mod windows_e2e {
 
     #[test]
     fn timeout_kills_worker_and_cleans_sealed_and_staged_trees() {
+        if crate::common::skip_without_restricted_token_launch(
+            "timeout_kills_worker_and_cleans_sealed_and_staged_trees",
+        ) {
+            return;
+        }
         let _lock = SECURE_LAUNCH_LOCK.lock().unwrap();
         let stages_before = trusted_stage_roots();
         let worker_dir = TempDir::new("aexcompat-secure-launch-timeout");
@@ -181,6 +193,11 @@ mod windows_e2e {
 
     #[test]
     fn modal_ui_worker_is_started_on_a_private_desktop_before_timeout() {
+        if crate::common::skip_without_restricted_token_launch(
+            "modal_ui_worker_is_started_on_a_private_desktop_before_timeout",
+        ) {
+            return;
+        }
         let _lock = SECURE_LAUNCH_LOCK.lock().unwrap();
         let worker_dir = TempDir::new("aexcompat-secure-launch-modal");
         let worker = build_modal_worker(&worker_dir.0);

@@ -5,6 +5,8 @@
 //! pf_parameter_echo_probe fixture from this checkout; skips (with a message)
 //! when either is not built.
 
+mod common;
+
 #[cfg(test)]
 #[cfg(windows)]
 mod windows_e2e {
@@ -60,6 +62,11 @@ mod windows_e2e {
 
     #[test]
     fn per_frame_parameter_updates_change_the_real_render() {
+        if crate::common::skip_without_restricted_token_launch(
+            "per_frame_parameter_updates_change_the_real_render",
+        ) {
+            return;
+        }
         let Some((root, aex, sha)) = built_artifacts() else {
             return;
         };

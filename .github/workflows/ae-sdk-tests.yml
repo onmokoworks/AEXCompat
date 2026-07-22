@@ -60,6 +60,14 @@ jobs:
       - name: Install Python dependencies
         run: uv sync --locked
 
+      # built_artifact テスト (test_render_video_batch_cli) が
+      # broker/target/release/broker.exe を実行する。ビルドしないと
+      # "broker.exe is not built" で skip し、後段の skip gate が job を落とす
+      # (#349)。
+      - name: Build the broker CLI (release)
+        working-directory: broker
+        run: cargo build --release --locked -p aexcompat-broker --bin broker
+
       # built_artifact テスト (#73) 用: minihost workers を Ninja でビルドする。
       # docs/BUILD_REQUIREMENTS.md の指示どおり target\minihost-build 直下に
       # フラット配置する (single-config)。
@@ -156,6 +164,10 @@ jobs:
       # Get-FileHash 等の組み込み cmdlet を解決できなくなる。
       - name: Run pytest with SDK and built-artifact tests
         shell: cmd
+        # See windows-clean-clone.yml: the skip is opt-in so a token regression
+        # cannot hide as an environment limitation off CI (issue #335).
+        env:
+          AEXCOMPAT_ALLOW_RESTRICTED_TOKEN_SKIP: "1"
         run: |
           set "PSModulePath=%ProgramFiles%\WindowsPowerShell\Modules;%SystemRoot%\System32\WindowsPowerShell\v1.0\Modules;%PSModulePath%"
           uv run python -m pytest -q -rs --run-sdk-tests --run-built-artifact-tests --validate-local-artifact-manifest > pytest-output.txt 2>&1
@@ -166,6 +178,27 @@ jobs:
       # AFTER_EFFECTS_SDK_ROOT が通っていれば SDK 由来の skip は 1 件も出ないはず。
       # 同様に、worker/probe をビルド済みなので built_artifact テストが成果物
       # 不在の inline skip ("... is not built" 等) で黙って skip されたら fail。
+      # The restricted-token limitation reaches the Python side too: the video
+      # batch CLI drives a live worker. That skip is legitimate on a hosted
+      # runner, so the gate below must not fail on it, but it must not be
+      # invisible either -- report it the way the Rust side does (#335).
+      - name: Report restricted-token skips
+        shell: pwsh
+        if: always()
+        run: |
+          if (-not (Test-Path pytest-output.txt)) {
+            Write-Host 'pytest produced no log; nothing to report.'
+            exit 0
+          }
+          $skips = Select-String -Path pytest-output.txt `
+            -Pattern 'cannot launch a restricted-token worker'
+          if ($skips) {
+            Write-Host "::warning::$($skips.Count) Python tests did not run: this runner cannot launch a restricted-token worker (issue #335)"
+            $skips | ForEach-Object { $_.Line }
+          } else {
+            Write-Host 'Every worker-launching Python test ran: no restricted-token skips.'
+          }
+
       - name: Fail if SDK or built-artifact tests were skipped
         shell: pwsh
         run: |
