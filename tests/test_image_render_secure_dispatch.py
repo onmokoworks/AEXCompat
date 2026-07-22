@@ -200,3 +200,54 @@ def test_gpu_preflight_seals_the_same_dependencies_as_the_render():
     assert "preflight_dependencies," in body
     # The manifest must no longer be the only sealed artifact.
     assert "vec![authorization.artifact.clone()]" not in body
+
+
+def test_smart_sessions_carry_static_context_trailers():
+    """A host context must not force a render onto the one-shot transport (#331).
+
+    The broker builds the mask/spatial/render trailers from `host_context` and pushes
+    them onto the session's positional tail; the worker's smart session command has to
+    peel them in the same order the classic session command does, or the ten-slot
+    session contract does not resolve and the command is rejected outright.
+    """
+    source = SOURCE.read_text(encoding="utf-8")
+    session = (SOURCE.parent / "render_session.rs").read_text(encoding="utf-8")
+    dispatch = (
+        ROOT / "minihost" / "src" / "l2_cli_dispatch.cpp"
+    ).read_text(encoding="utf-8")
+
+    # The gate no longer excludes a static host context.
+    gate = render_function()[
+        render_function().index("let session_eligible ="): render_function().index(
+            "if session_eligible"
+        )
+    ]
+    assert "host_context.is_none()" not in gate
+    # The session open no longer refuses smart requests that carry the trailers.
+    assert "smart sessions do not carry static context trailers yet" not in session
+    # The broker still pushes all three, in the one-shot order.
+    push = session[session.index("if let Some(mask) = &request.mask_trailer"):]
+    assert push.index("request.mask_trailer") < push.index("request.spatial_trailer")
+    assert push.index("request.spatial_trailer") < push.index(
+        "request.render_environment_trailer"
+    )
+
+    # Both session commands peel the three trailers ahead of the layer trailer, so
+    # the ten-slot core lands at the same place on either route. `>= 11` is the
+    # session arity guard (10 slots + the trailer under test).
+    # The `>= 11` arity distinguishes the session peels from the one-shot ones,
+    # which share the same expressions but guard on `>= 14`.
+    for marker in (
+        "mode.image_render_environment = effective_argc >= 11 &&",
+        "mode.image_spatial_context = mode.image_environment_argc >= 11 &&",
+        "mode.image_mask_context = mode.image_trailer_argc >= 11 &&",
+        "mode.session_layers = mode.image_argc >= 11 &&",
+        "const int session_core_argc = mode.image_argc - (mode.session_layers ? 1 : 0);",
+    ):
+        assert dispatch.count(marker) == 2, marker
+    # The smart session must not reach the core count straight off effective_argc,
+    # which is what skipped the context trailers before #331.
+    assert (
+        "const int session_core_argc = effective_argc - (mode.session_layers ? 1 : 0);"
+        not in dispatch
+    )

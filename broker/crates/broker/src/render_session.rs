@@ -804,18 +804,10 @@ impl RenderSession {
             ));
         }
         // Smart sessions now carry the same secondary-layer trailer as the
-        // classic session (issue #294): layers ride the shared session-layers
-        // trailer + inherited handles below. Static context trailers
-        // (mask/spatial/render) are still not carried by smart sessions.
-        if request.smart
-            && (request.mask_trailer.is_some()
-                || request.spatial_trailer.is_some()
-                || request.render_environment_trailer.is_some())
-        {
-            return Err(invalid(
-                "smart sessions do not carry static context trailers yet",
-            ));
-        }
+        // classic session (issue #294) and the same static context trailers
+        // (mask/spatial/render, issue #331): both ride the positional tail below
+        // in the one-shot order, and the worker's smart session command peels
+        // them exactly as the classic session command does.
         // A session cannot retry mid-flight, so the one-shot's Auto GPU
         // preflight fallback collapses to open time: Auto without a policy is
         // a CPU session, Auto with a policy is a CUDA session with no CPU
