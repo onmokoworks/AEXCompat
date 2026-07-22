@@ -1,5 +1,4 @@
 #include "worker_classic_execution.hpp"
-#include <fstream>
 namespace aexcompat::worker_runtime::classic_execution {
 LifecycleResult begin_lifecycle(void* host, const LifecycleHooks& h) {
   LifecycleResult result{};
@@ -49,15 +48,6 @@ int finalize(Context& c, const Hooks& h) {
       c.width, c.height, logical.data()))) c.error = 4;
   if (c.captured) *c.captured = logical;
   if (h.dump) h.dump(logical.data(), c.width, c.height, c.pixel_bytes);
-  if (c.external_output && c.error == 0) {
-    std::vector<unsigned char> rgba(static_cast<std::size_t>(c.width) * c.height * c.pixel_bytes);
-    for (std::size_t p = 0; p < static_cast<std::size_t>(c.width) * c.height; ++p)
-      h.argb_to_rgba(rgba.data() + p * c.pixel_bytes,
-                     logical.data() + p * c.pixel_bytes, c.pixel_bytes);
-    if (h.checksum) h.checksum(rgba.data(), c.width, c.height, c.pixel_bytes);
-    std::ofstream file(*c.external_output, std::ios::binary | std::ios::out);
-    if (!file || !file.write(reinterpret_cast<const char*>(rgba.data()), rgba.size())) return -4;
-  }
   bool padding = true;
   for (int32_t y = 0; padding && y < c.height; ++y)
     for (int32_t x = c.width * c.pixel_bytes; x < c.rowbytes; ++x)

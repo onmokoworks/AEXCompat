@@ -5,7 +5,6 @@
 #include "worker_smart_execution.hpp"
 #include "worker_smart_setup.hpp"
 #include <array>
-#include <filesystem>
 
 namespace aexcompat::worker_runtime::smart_finalize {
 struct Hooks {
@@ -17,7 +16,6 @@ struct Hooks {
       void*, const render_lifecycle::RenderLifecycle&, int32_t){};
   void (*dump_world)(const std::string&, const unsigned char*, int32_t, int32_t,
                      int32_t){};
-  void (*record_checksum)(const unsigned char*, int32_t, int32_t, int32_t){};
   std::string (*sha256)(const unsigned char*, std::size_t){};
   bool (*ui_active)(){};
 };
@@ -31,7 +29,6 @@ struct Request {
   render_safety::InputPixelBuffer* source{};
   render_safety::OutputPixelBuffer* guarded{};
   unsigned char* destination{};
-  const std::filesystem::path* external_output{};
   int32_t width{}, height{}, rowbytes{}, pixel_bytes{};
   std::array<std::byte, 56>* pre_output{};
   smart_execution::SessionFrame* session{};

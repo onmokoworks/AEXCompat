@@ -225,7 +225,6 @@ int32_t render_once(EffectEntry entry, std::array<std::byte, kInSize>& input,
                     int32_t& rowbytes, std::string& input_hash, std::string& output_hash,
                     bool& guards_intact, const RequestedAssignments* requested = nullptr,
                     const std::vector<unsigned char>* external_rgba = nullptr,
-                    const std::filesystem::path* external_output = nullptr,
                     int32_t external_width = 0, int32_t external_height = 0,
                     const std::vector<ExternalLayerInput>* external_layers = nullptr,
                     int32_t external_current_time = 0, int32_t external_time_step = 1,
@@ -238,7 +237,6 @@ SmartResult smart_render_once(EffectEntry entry, std::array<std::byte, kInSize>&
                               const std::string& case_id,
                               const RequestedAssignments* requested = nullptr,
                               const std::vector<unsigned char>* external_rgba = nullptr,
-                              const std::filesystem::path* external_output = nullptr,
                               int32_t external_width = 0, int32_t external_height = 0,
                               const std::vector<ExternalLayerInput>* external_layers = nullptr,
                               int32_t external_current_time = 0, int32_t external_time_step = 1,
@@ -359,7 +357,7 @@ ClassicFinalDispatchResult run_classic_final_dispatch(const FinalDispatchRequest
     persistent_frame_errors[0] = original_sequence_preserved && flattened_handle_host_disposed
         ? render_once(entry, input, output, "default", render_width, render_height,
                       render_rowbytes, input_hash, persistent_frame_hashes[0], frame_guards,
-                      nullptr, nullptr, nullptr, 0, 0, nullptr, 0, 1, 1, 1, 4, false)
+                      nullptr, nullptr, 0, 0, nullptr, 0, 1, 1, 1, 4, false)
         : -1;
     guards_intact = frame_guards;
     std::cerr << "stage:sequence_setdown_begin\n" << std::flush;
@@ -410,7 +408,7 @@ ClassicFinalDispatchResult run_classic_final_dispatch(const FinalDispatchRequest
     persistent_frame_errors[0] = resetup_handle_replaced && flattened_handle_host_disposed
         ? render_once(entry, input, output, "default", render_width, render_height,
                       render_rowbytes, input_hash, persistent_frame_hashes[0], frame_guards,
-                      nullptr, nullptr, nullptr, 0, 0, nullptr, 0, 1, 1, 1, 4, false)
+                      nullptr, nullptr, 0, 0, nullptr, 0, 1, 1, 1, 4, false)
         : -1;
     guards_intact = frame_guards;
     std::cerr << "stage:sequence_setdown_begin\n" << std::flush;
@@ -438,7 +436,7 @@ ClassicFinalDispatchResult run_classic_final_dispatch(const FinalDispatchRequest
       persistent_frame_errors[frame] = render_once(
           entry, input, output, "default", frame_width, frame_height, frame_rowbytes,
           frame_input_hash, persistent_frame_hashes[frame], frame_guards,
-          nullptr, nullptr, nullptr, 0, 0, nullptr, frame, 1, 2, 1, 4, false);
+          nullptr, nullptr, 0, 0, nullptr, frame, 1, 2, 1, 4, false);
       if (frame == 0) {
         render_width = frame_width; render_height = frame_height;
         render_rowbytes = frame_rowbytes; input_hash = frame_input_hash;
@@ -501,7 +499,7 @@ ClassicFinalDispatchResult run_classic_final_dispatch(const FinalDispatchRequest
                                // W4 (#365), so this arm is only the
                                // --render/--render-request probe, which renders
                                // the worker's own generated frame.
-                               nullptr, nullptr,
+                               nullptr,
                                invocation.external_width, invocation.external_height,
                                nullptr,
                                invocation.external_current_time, invocation.external_time_step,
@@ -568,7 +566,7 @@ SmartFinalDispatchResult run_smart_final_dispatch(const FinalDispatchRequest& re
                           invocation.request_mode ? &invocation.requested_parameters : nullptr,
                           // No external image or layers here either (#365): this
                           // arm is the --smart/--smart-*-request probe family.
-                          nullptr, nullptr,
+                          nullptr,
                           invocation.external_width, invocation.external_height,
                           nullptr,
                           invocation.external_current_time, invocation.external_time_step,

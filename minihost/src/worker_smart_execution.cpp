@@ -13,7 +13,6 @@ struct Request {
   const std::string& case_id;
   const RequestedAssignments* requested;
   const std::vector<unsigned char>* external_rgba;
-  const std::filesystem::path* external_output;
   int32_t external_width;
   int32_t external_height;
   const std::vector<ExternalLayerInput>* external_layers;
@@ -37,7 +36,7 @@ int execute(void* opaque) {
   auto& request = *static_cast<Request*>(opaque);
   request.result = g_hooks.execute(request.entry, request.input, request.output,
       request.case_id, request.requested, request.external_rgba,
-      request.external_output, request.external_width, request.external_height,
+      request.external_width, request.external_height,
       request.external_layers, request.external_current_time,
       request.external_time_step, request.external_total_time,
       request.external_time_scale, request.external_pixel_bytes,
@@ -60,14 +59,13 @@ Result render_once(EffectEntry entry, Input& input, Output& output,
                    const std::string& case_id,
                    const RequestedAssignments* requested,
                    const std::vector<unsigned char>* external_rgba,
-                   const std::filesystem::path* external_output,
                    int32_t external_width, int32_t external_height,
                    const std::vector<ExternalLayerInput>* external_layers,
                    int32_t external_current_time, int32_t external_time_step,
                    int32_t external_total_time, uint32_t external_time_scale,
                    int32_t external_pixel_bytes, SessionFrame* session) {
   Request request{entry, input, output, case_id, requested, external_rgba,
-      external_output, external_width, external_height, external_layers,
+      external_width, external_height, external_layers,
       external_current_time, external_time_step, external_total_time,
       external_time_scale, external_pixel_bytes, session, {}};
   render::RenderContext context{

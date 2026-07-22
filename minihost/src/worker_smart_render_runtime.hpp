@@ -19,7 +19,6 @@ struct Request {
   render_safety::OutputPixelBuffer* guarded{};
   unsigned char** destination{};
   const render_lifecycle::RenderLifecycle* lifecycle{};
-  const std::filesystem::path* external_output{};
   int32_t dispatch_pixel_format{};
   int32_t width{};
   int32_t height{};

@@ -275,7 +275,6 @@ int32_t render_once(EffectEntry entry, std::array<std::byte, kInSize>& input,
                     int32_t& rowbytes, std::string& input_hash, std::string& output_hash,
                     bool& guards_intact, const RequestedAssignments* requested = nullptr,
                     const std::vector<unsigned char>* external_rgba = nullptr,
-                    const std::filesystem::path* external_output = nullptr,
                     int32_t external_width = 0, int32_t external_height = 0,
                     const std::vector<ExternalLayerInput>* external_layers = nullptr,
                     int32_t external_current_time = 0, int32_t external_time_step = 1,
@@ -288,7 +287,6 @@ worker_runtime::smart_execution::Result smart_render_once(
     std::array<std::byte, kOutSize>& output, const std::string& case_id,
     const RequestedAssignments* requested = nullptr,
     const std::vector<unsigned char>* external_rgba = nullptr,
-    const std::filesystem::path* external_output = nullptr,
     int32_t external_width = 0, int32_t external_height = 0,
     const std::vector<ExternalLayerInput>* external_layers = nullptr,
     int32_t external_current_time = 0, int32_t external_time_step = 1,
@@ -1020,7 +1018,7 @@ RenderSessionOutcome run_render_session(
         frame.frame_error = render_once(
             entry, input, output, "request", frame.width, frame.height,
             frame.rowbytes, frame.input_hash, frame.output_hash, frame_guards,
-            frame_override ? frame_override : requested, &frame_rgba, nullptr,
+            frame_override ? frame_override : requested, &frame_rgba,
             max_width, max_height, frame_layers,
             current_time, time_step, total_time, time_scale, pixel_bytes, false,
             &captured, &output_validation_failed);
@@ -1061,7 +1059,7 @@ SmartRenderSessionOutcome run_smart_render_session(
         worker_runtime::smart_execution::SessionFrame session_frame{&captured};
         const worker_runtime::smart_execution::Result frame_result = smart_render_once(
             entry, input, output, case_id, frame_override ? frame_override : requested,
-            &frame_rgba, nullptr,
+            &frame_rgba,
             max_width, max_height, frame_layers, current_time, time_step, total_time,
             time_scale, pixel_bytes, &session_frame);
         outcome.last = frame_result;
