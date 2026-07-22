@@ -554,6 +554,9 @@ mod tests {
         fs::remove_dir_all(install).unwrap();
     }
 
+    // Needs a real System32 to shadow, which only Windows has; the rest of the
+    // resolver's behaviour is exercised on every platform.
+    #[cfg(windows)]
     #[test]
     fn an_app_local_copy_wins_over_the_system32_one() {
         // The worker resolves the load directory before System32, so a name a

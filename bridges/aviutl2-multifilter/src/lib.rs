@@ -307,7 +307,10 @@ pub extern "C" fn RegisterPlugin(host: *mut HOST_APP_TABLE) {
             Some(entry)
                 if file_meta(plugin)
                     .is_some_and(|(mtime, len)| entry.mtime == mtime && entry.len == len)
-                    && closure_still_resolves_the_same(entry) =>
+                    && closure_still_resolves_the_same(
+                        entry,
+                        &search_roots_for(plugin, &dependency.dirs),
+                    ) =>
             {
                 if entry.ok {
                     register_discovered(host, &repository, plugin, &dependency, entry);
@@ -803,21 +806,16 @@ fn build_fingerprint(repository: &Path, dependency: &DependencyConfig) -> BuildF
     }
 }
 
-/// A digest of the closure resolution inputs: the search folders **in order**
-/// (two folders holding the same basename resolve to whichever comes first, so
-/// swapping them changes which DLL is sealed) and the ceilings. Only equality
-/// matters, so the leading 8 bytes of the SHA-256 are enough and keep the
-/// fingerprint `Copy`.
+/// A digest of the ceilings, which decide whether a closure is sealed at all and
+/// are not recorded per entry. Only equality matters, so the leading 8 bytes of
+/// the SHA-256 are enough and keep the fingerprint `Copy`.
 ///
-/// It deliberately touches no files: what the folders contain is checked per
-/// entry, against that entry's own resolution, rather than by walking the whole
-/// tree on every startup.
+/// The search folders are deliberately *not* hashed here. A configured folder can
+/// be relative, so the same config string can mean different folders on different
+/// launches; each entry records the canonical roots it actually resolved against
+/// and is compared against today's, which is exact where a hashed string is not.
 fn dependency_inputs_fingerprint(dependency: &DependencyConfig) -> u64 {
     let mut hasher = Sha256::new();
-    for dir in &dependency.dirs {
-        hasher.update(dir.to_string_lossy().to_lowercase().as_bytes());
-        hasher.update([0]);
-    }
     hasher.update(b"limits\0");
     hasher.update(dependency.module_limit.unwrap_or(usize::MAX).to_le_bytes());
     hasher.update(dependency.byte_limit.unwrap_or(u64::MAX).to_le_bytes());
@@ -930,22 +928,35 @@ fn negative_entry(plugin: &Path) -> CacheEntry {
 }
 
 /// Whether re-resolving this entry's closure today would still reach the same
-/// files, judged with `stat` only.
+/// files, judged with `stat` only. `roots` is what the resolution would search
+/// now, in order.
 ///
-/// Three things can change the answer without touching the AEX itself, and each
-/// is checked here:
+/// Four things can change the answer without touching the AEX itself, and each is
+/// checked here:
 ///
-/// 1. a sealed dependency was rewritten or removed (an AE update rewriting
+/// 1. the search roots themselves differ from the ones the entry was resolved
+///    against — a configured folder that moved, or a relative one now resolving
+///    elsewhere because the host started from a different working directory,
+/// 2. a sealed dependency was rewritten or removed (an AE update rewriting
 ///    `dvacore.dll` in place, a helper `*.aex` replaced),
-/// 2. a file appeared in an earlier search root and now wins a name that used to
+/// 3. a file appeared in an earlier search root and now wins a name that used to
 ///    resolve further down the order,
-/// 3. an import that nothing provided at discovery time now exists, which is what
+/// 4. an import that nothing provided at discovery time now exists, which is what
 ///    turns a cached failure into a plug-in that would load.
 ///
 /// Anything unchecked here fails safe in one direction only: a false "changed"
 /// just re-discovers the plug-in.
-fn closure_still_resolves_the_same(entry: &CacheEntry) -> bool {
-    let roots: Vec<&Path> = entry.closure.roots.iter().map(Path::new).collect();
+fn closure_still_resolves_the_same(entry: &CacheEntry, roots: &[PathBuf]) -> bool {
+    if entry.closure.roots.len() != roots.len()
+        || !entry
+            .closure
+            .roots
+            .iter()
+            .zip(roots)
+            .all(|(recorded, current)| Path::new(recorded) == current.as_path())
+    {
+        return false;
+    }
     for dependency in &entry.closure.sealed {
         let path = Path::new(&dependency.path);
         if !file_meta(path)
@@ -956,8 +967,8 @@ fn closure_still_resolves_the_same(entry: &CacheEntry) -> bool {
         let Some(name) = path.file_name() else {
             return false;
         };
-        for root in &roots {
-            if path.parent() == Some(*root) {
+        for root in roots {
+            if path.parent() == Some(root.as_path()) {
                 break;
             }
             if root.join(name).is_file() {
