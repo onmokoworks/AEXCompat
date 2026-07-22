@@ -43,7 +43,11 @@ def test_worker_checks_admission_before_source_availability():
     source_check = source.index("!source_", admission)
     assert admission < source_check
     assert "audio_only_mode || usage_advertised" in source
-    assert 'L"--render-image-audio"' in source
+    # The image+audio render used to arrive as the one-shot --render-image-audio
+    # command; #365 replaced it with the session's `session-audio:v1|` launch
+    # trailer, which drives the same set_audio_source hook.
+    assert 'L"session-audio:v1|"' in source
+    assert "mode.session_audio && hooks.set_audio_source" in source
     fixture = (ROOT / "instruments" / "pf-visual-audio-probe" / "pf_visual_audio_probe.cpp").read_text(encoding="utf-8")
     assert "PF_CHECKOUT_LAYER_AUDIO" in fixture
     assert "PF_GET_AUDIO_DATA" in fixture
@@ -94,7 +98,10 @@ def test_audio_checkout_windows_are_bounded_owned_and_time_scaled():
     assert "telemetry_.last_window_silence_samples" in worker
     assert "std::vector<float>* captured_output, uint32_t rate)" in worker
     assert "write<uint32_t>(input, kInTimeScale, rate);" in worker
-    assert "&captured, 44100u);" in worker
+    # The 44100 literal was the one-shot audio mode's fixed rate (#365 deleted
+    # it). The session negotiates the rate at open and threads it through, so
+    # the span call takes it as a parameter.
+    assert "&captured, rate);" in worker
     broker = (ROOT / "broker" / "crates" / "broker" / "src" / "image_render.rs").read_text(encoding="utf-8")
     assert '"last_audio_window_sample_count"' in broker
     assert '"last_audio_window_silence_samples"' in broker

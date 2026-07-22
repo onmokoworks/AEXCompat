@@ -5337,7 +5337,13 @@ fn render_classic_via_length_one_session(
     // had to move here rather than go with it.
     propagate_missing_suites(&mut diagnostics, &final_report);
     propagate_unsupported_suite_calls(&mut diagnostics, &final_report);
-    let diagnostics = diagnostics;
+    // Name the stage when the worker itself rejected its output pixels. The
+    // gate below turns that into an error carrying these diagnostics, so
+    // without this the failure reads as an unattributed validation failure.
+    // The deleted one-shot set the same annotation (#365).
+    if final_report.get("output_pixels_valid") == Some(&Value::Bool(false)) {
+        diagnostics["failure_stage"] = json!("output_validation");
+    }
     let gate = validate_interactive_worker_report(
         &final_report,
         &diagnostics,

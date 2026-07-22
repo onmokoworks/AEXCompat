@@ -23,4 +23,8 @@ def test_runtime_collector_keeps_host_failures_and_checked_partial_extents():
 def test_runtime_report_promotes_native_suite_timeline():
     text = IMAGE_RENDER.read_text(encoding="utf-8")
     assert '("suite_timeline", "suite_timeline")' in text
-    assert '"suite_timeline": initial_report.as_ref()' in text
+    # The second assertion pinned the one-shot's gpu_attempt projection, which
+    # copied suite_timeline out of a failed GPU launch's report before the CPU
+    # retry. #365 deleted that retry (a session cannot retry mid-flight), so the
+    # timeline reaches the public report only through the projection above.
+    assert '"suite_timeline": initial_report.as_ref()' not in text

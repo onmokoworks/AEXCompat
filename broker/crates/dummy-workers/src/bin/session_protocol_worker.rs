@@ -211,7 +211,7 @@ mod worker {
         }
     }
 
-    fn final_report(frames: u32, smart: bool) -> String {
+    fn final_report(frames: u32, smart: bool, launch_payload: &str) -> String {
         // The broker validates a module audit on a clean exit exactly like the
         // one-shot path; this fixture reports its own honest minimal audit.
         // The session-mechanics keys follow the worker flavor: the classic
@@ -235,6 +235,12 @@ mod worker {
         let mut report = serde_json::json!({
             "status": "render_completed",
             "global_setdown_error": 0,
+            // Echo the launch payload argv slot verbatim so a test can prove
+            // what reached the worker. The real worker parses it instead
+            // (`hooks.parse_parameters(argv[4], ...)`); this fixture only has
+            // to show which bytes arrived, which is the whole claim behind
+            // SessionOpenRequest::payload_override (#365).
+            "launch_payload": launch_payload,
             "session_frames": frames,
             "guard_bytes_intact": true,
             "suite_leases_balanced": true,
@@ -711,11 +717,11 @@ mod worker {
             if behavior == "exit_after_frame_0" && frame_index == 0 {
                 // A unilateral exit with a clean-looking report and exit code
                 // 0, violating only the close-handshake contract.
-                println!("{}", final_report(frames, smart));
+                println!("{}", final_report(frames, smart, &args[4]));
                 return 0;
             }
         }
-        println!("{}", final_report(frames, smart));
+        println!("{}", final_report(frames, smart, &args[4]));
         0
     }
 }
