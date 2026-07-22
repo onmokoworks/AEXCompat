@@ -307,7 +307,8 @@ pub extern "C" fn RegisterPlugin(host: *mut HOST_APP_TABLE) {
         match cache.get(&key) {
             Some(entry)
                 if file_meta(plugin)
-                    .is_some_and(|(mtime, len)| entry.mtime == mtime && entry.len == len) =>
+                    .is_some_and(|(mtime, len)| entry.mtime == mtime && entry.len == len)
+                    && sealed_dependencies_unchanged(entry) =>
             {
                 if entry.ok {
                     register_discovered(host, &repository, plugin, &dependency, entry);
@@ -702,10 +703,28 @@ struct CacheEntry {
     smart: bool,
     #[serde(default)]
     params: Vec<InteractiveParameter>,
+    /// The dependencies sealed with this AEX, as `(path, mtime, len)`.
+    ///
+    /// The environment digest below covers everything the *set* of sealable files
+    /// can do — an arrival, a removal, a rewrite, a reordered search folder — for
+    /// every file except the `*.aex` themselves, which it must skip so that
+    /// touching one plug-in does not re-discover all of them. An effect may
+    /// import another `.aex` as a helper, though, and the resolver will seal it,
+    /// so that one case needs the closure recorded per entry.
+    #[serde(default)]
+    dependencies: Vec<CachedDependency>,
+}
+
+/// One sealed dependency's identity, as cheap to re-check as a `stat`.
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+struct CachedDependency {
+    path: String,
+    mtime: (u64, u32),
+    len: u64,
 }
 
 /// Bump when [`CacheEntry`]'s meaning changes, to invalidate stale cache files.
-const CACHE_VERSION: u32 = 2;
+const CACHE_VERSION: u32 = 3;
 
 /// Fingerprints the compat host that produces a discovery result, so the cache is
 /// invalidated when the host changes (e.g. it gains support for an effect that
@@ -778,9 +797,10 @@ fn build_fingerprint(
 
 /// A digest of everything outside the AEX itself that decides its closure: the
 /// resolution inputs (the ordered search folders and the ceilings) and every file
-/// those folders and the scanned tree could contribute, each folder's `*.aex`
-/// excluded (those are tracked per entry, and folding them in here would
-/// re-discover everything whenever one plug-in changed).
+/// those folders and the scanned tree could contribute, `*.aex` excluded —
+/// folding those in would re-discover every plug-in whenever one of them changed,
+/// so an `.aex` that is itself sealed as a helper is tracked per entry instead
+/// (see [`CacheEntry::dependencies`]).
 ///
 /// The folder *order* is hashed as given, not sorted with the files: two folders
 /// holding the same basename resolve to whichever comes first, so swapping them
@@ -954,7 +974,21 @@ fn negative_entry(plugin: &Path) -> CacheEntry {
         sha: String::new(),
         smart: false,
         params: Vec::new(),
+        dependencies: Vec::new(),
     }
+}
+
+/// Whether every dependency sealed with this entry is still the file that was
+/// sealed, judged by `(mtime, len)` exactly like the AEX itself is.
+///
+/// This only has to catch what the environment digest cannot see: a `*.aex`
+/// helper that another plug-in imports. Everything else is already covered
+/// there, so a mismatch here is rare and simply makes the entry a miss.
+fn sealed_dependencies_unchanged(entry: &CacheEntry) -> bool {
+    entry.dependencies.iter().all(|dependency| {
+        file_meta(Path::new(&dependency.path))
+            .is_some_and(|(mtime, len)| mtime == dependency.mtime && len == dependency.len)
+    })
 }
 
 /// Discovers one AEX, always returning a cache entry (cache-all): `ok = true` for
@@ -976,6 +1010,17 @@ fn discover_one(repository: &Path, plugin: &Path, dependency: &DependencyConfig)
     let Ok(dependencies) = dependency_closure_for(plugin, dependency) else {
         return entry;
     };
+    entry.dependencies = dependencies
+        .iter()
+        .filter_map(|sealed| {
+            let (mtime, len) = file_meta(&sealed.path)?;
+            Some(CachedDependency {
+                path: sealed.path.to_string_lossy().into_owned(),
+                mtime,
+                len,
+            })
+        })
+        .collect();
     if let Ok((params, diagnostics)) =
         inspect_experimental_with_approved_dependencies_and_diagnostics(
             repository,

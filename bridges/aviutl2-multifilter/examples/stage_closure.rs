@@ -39,7 +39,21 @@ fn main() {
     let closure = resolve_dependency_closure(DependencyClosureRequest::new(&effect, &roots))
         .expect("resolve the dependency closure");
 
+    // Clear the staging folder first. The observer loads from it with the
+    // worker's DLL-load-directory flag, so a leftover from an earlier run would
+    // satisfy an import that the real sealed tree does not contain and be
+    // reported as staged — the opposite of what this tool is for. Only direct
+    // children are removed, and only files, so a mistyped path cannot take a
+    // directory tree with it.
     std::fs::create_dir_all(&stage).expect("create the staging dir");
+    for entry in std::fs::read_dir(&stage)
+        .expect("read the staging dir")
+        .flatten()
+    {
+        if entry.file_type().is_ok_and(|kind| kind.is_file()) {
+            std::fs::remove_file(entry.path()).expect("clear the staging dir");
+        }
+    }
     let staged_plugin = stage.join(effect.file_name().expect("effect basename"));
     std::fs::copy(&effect, &staged_plugin).expect("stage the plug-in");
     for dependency in closure.dependencies() {
