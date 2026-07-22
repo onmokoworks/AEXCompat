@@ -284,9 +284,11 @@ pub extern "C" fn RegisterPlugin(host: *mut HOST_APP_TABLE) {
     let mut cache = load_cache();
 
     // Register (host callback, main thread only) each AEX whose discovery already
-    // succeeded and still matches the file on disk. Anything unknown, changed, or
-    // discovered by an older host goes to the background pass; its (updated)
-    // result is picked up on the next launch.
+    // succeeded. A changed AEX keeps its last known-good registration for this
+    // launch while the replacement is discovered in the background; an
+    // unregistered filter would let AviUtl2 discard objects from saved projects.
+    // Unknown entries and old-host entries also go to the background pass; its
+    // updated result is picked up on the next launch.
     let mut pending: Vec<PathBuf> = Vec::new();
     let mut aliases: Option<HashMap<PathBuf, Vec<String>>> = None;
     let mut rekey: Vec<(String, String)> = Vec::new();
@@ -492,12 +494,17 @@ fn resolve_cached<'a>(
 ) -> (Option<&'a CacheEntry>, Option<String>) {
     let direct = cache.get(key);
     let direct_registers = classify(direct, meta, build).register;
+    let direct_matches = direct.is_some_and(|entry| {
+        meta.is_some_and(|(mtime, len)| entry.mtime == mtime && entry.len == len)
+    });
     // Look further when this spelling holds nothing usable, and also when what it
     // holds is only usable in the weaker sense of `alias_rank` — a stale entry
     // registers, but on a payload that may describe older bytes, so its sessions
     // fail to open and its frames pass through unrendered. Another spelling can
     // hold a sound entry for the same file.
-    let direct_is_sound = direct_registers && direct.is_some_and(|entry| !entry.stale);
+    let direct_is_sound = direct_registers
+        && direct_matches
+        && direct.is_some_and(|entry| !entry.stale);
     if !alias_possible || direct_is_sound {
         return (direct, None);
     }
@@ -511,11 +518,18 @@ fn resolve_cached<'a>(
     // usable one and leave the effect unregistered.
     for alias in candidates {
         let candidate = cache.get(alias);
+        let candidate_matches = candidate.is_some_and(|entry| {
+            meta.is_some_and(|(mtime, len)| entry.mtime == mtime && entry.len == len)
+        });
         // Take it if this spelling had nothing usable, or if the candidate is
         // strictly sounder — never a lateral move, which would just churn.
-        let improves =
-            !direct_registers || alias_rank(candidate, build) > alias_rank(direct, build);
-        if improves && classify(candidate, meta, build).register {
+        let improves = !direct_registers
+            || !direct_matches
+            || alias_rank(candidate, build) > alias_rank(direct, build);
+        // A changed direct hit is intentionally retained for this launch, but
+        // an outdated alias must not shadow a spelling whose metadata matches
+        // the file currently being loaded.
+        if improves && candidate_matches && classify(candidate, meta, build).register {
             return (candidate, Some(alias.clone()));
         }
     }
@@ -616,10 +630,13 @@ fn classify(
                     && entry.build != build
                     && (entry.checked != build || entry.attempts < RETRY_BUDGET)),
         },
-        // Confirmed changed: a different plug-in, whose parameters the cached
-        // entry does not describe, so it is not registered (tracked as #309).
+        // Confirmed changed: keep a last-known-good effect registered for this
+        // launch and discover the replacement in the background. The cached
+        // sha/params may be incompatible with the new bytes, but RenderSession
+        // then fails closed on the SHA instead of AviUtl2 dropping the object
+        // before the replacement result is available (issue #309).
         Some(_) => LoadDecision {
-            register: false,
+            register: entry.ok,
             discover: true,
         },
         // Unknown: keep what we have and re-check in the background.
@@ -2378,17 +2395,28 @@ mod tests {
     }
 
     #[test]
-    fn an_unknown_or_changed_aex_is_only_discovered() {
-        let entry = discovered(5, 64, build(1));
+    fn an_unknown_aex_is_only_discovered() {
         assert_eq!(
             classify(None, META, build(1)),
             LoadDecision { register: false, discover: true },
             "never seen"
         );
+    }
+
+    /// A replacement must remain visible for this launch. Its cached payload
+    /// may fail the SHA check, but keeping the filter registered prevents
+    /// AviUtl2 from deleting objects before background discovery replaces the
+    /// entry (#309).
+    #[test]
+    fn a_replaced_aex_keeps_a_known_good_registration_until_rediscovered() {
+        let entry = discovered(5, 64, build(1));
         assert_eq!(
             classify(Some(&entry), Some(((9, 0), 64)), build(1)),
-            LoadDecision { register: false, discover: true },
-            "the AEX itself changed"
+            LoadDecision {
+                register: true,
+                discover: true
+            },
+            "keep the last known-good filter registered while the replacement is discovered"
         );
     }
 
