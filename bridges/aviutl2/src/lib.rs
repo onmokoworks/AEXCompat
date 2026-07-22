@@ -212,6 +212,7 @@ impl BridgeSession {
                     smart: config.smart,
                     gpu_backend: aexcompat_broker::image_render::RenderGpuBackend::Auto,
                     gpu_runtime_policy: None,
+                    payload_override: None,
                 }) {
                     Ok(session) => session,
                     Err(error) => {

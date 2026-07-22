@@ -106,6 +106,7 @@ fn main() {
         smart,
         gpu_backend: RenderGpuBackend::Auto,
         gpu_runtime_policy: None,
+        payload_override: None,
     }) {
         Ok(session) => session,
         Err(error) => {
