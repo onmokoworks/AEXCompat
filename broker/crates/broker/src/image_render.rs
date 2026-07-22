@@ -5076,18 +5076,35 @@ fn render_with_artifact(
                         && runtime_backend(gpu_backend).is_some()
                         && gpu_runtime_policy.is_some())
             } else {
-                // Smart layered: admit Argb8/Argb16 under Auto only. The
-                // one-shot layered arms (--smart-image*-layer) are Auto-only
-                // and for these depths the worker's gpu_negotiation is false
-                // (it requires float32), so both routes render on CPU.
-                // Argb32f layered stays on one-shot: gpu_initial_attempt is
-                // false when layers are present, so the broker does not fold
-                // it to CPU, and a GPU-declaring float32 plug-in would
-                // negotiate GPU in the worker on the one-shot route, which a
-                // CPU-folded session cannot reproduce (issue #296 review).
-                // The depth bound already makes a policy inert here (#337), so it
-                // is not a separate condition.
-                gpu_backend == RenderGpuBackend::Auto && pixel_format != RenderPixelFormat::Argb32f
+                // Smart layered: Auto only, at every depth. The one-shot
+                // layered arms (--smart-image*-layer) are Auto-only, so a
+                // non-Auto backend has no one-shot arm to match.
+                //
+                // Argb32f used to be excluded here (issue #296 review) because
+                // the worker's gpu_negotiation does not depend on layers: it
+                // turns on for float32 whenever the plug-in advertises GPU
+                // support (worker_smart_setup.cpp), and the one-shot layered
+                // command leaves force_cpu clear, while a policy-less Auto
+                // session folds to --smart-session32-cpu-v1. Measured (#353):
+                // no fixture in this corpus is both layered and GPU-declaring
+                // (pf_layer_param_probe and pf_smart_timed_multilayer_probe set
+                // neither PF_OutFlag2_SUPPORTS_GPU_RENDER_F32), so
+                // advertised_gpu_support is false and both routes render on CPU.
+                //
+                // The divergence survives only for a hypothetical GPU-declaring
+                // float32 plug-in with layers. There the one-shot lets the
+                // worker take the device with no authenticated runtime-module
+                // policy -- the one route where that is possible, since the
+                // broker requires a policy for every GPU dispatch it authorizes
+                // itself. The session's CPU fold is the fail-closed side, and
+                // per W4 (#264) the session is the anchor, so that fold is
+                // canonical. This generalizes #292, which settled the same
+                // anchor question for the non-layered Auto case.
+                //
+                // Layered + policy is unreachable (the only GpuRuntimePolicyInput
+                // producer never assigns layer paths), so admitting it would be a
+                // dead condition; Auto alone is the whole rule here.
+                gpu_backend == RenderGpuBackend::Auto
             }
         } else {
             // Classic audio + layers is session-canonical (#341). The legacy

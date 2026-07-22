@@ -298,25 +298,18 @@ def test_a_policy_below_float32_or_on_classic_does_not_exclude_a_render():
         "(pixel_format == RenderPixelFormat::Argb32f && runtime_backend(gpu_backend).is_some() "
         "&& gpu_runtime_policy.is_some())" in gate
     )
-    # Layered: the depth bound alone carries it; the redundant policy clause is gone.
-    # The smart arm ends where the classic arm begins; the classic arm's own first
-    # comment is the delimiter. Issue #341 makes that arm session-canonical, so it
-    # is once again a bare `gpu_backend == RenderGpuBackend::Auto`.
-    layered_start = gate.index("Smart layered: admit Argb8/Argb16 under Auto only")
-    layered = gate[layered_start : gate.index("Classic audio + layers is session-canonical")]
-    assert (
-        "gpu_backend == RenderGpuBackend::Auto && pixel_format != RenderPixelFormat::Argb32f"
-        in layered
-    )
-    assert "gpu_runtime_policy.is_none()" not in layered
-
-    # Classic (#339/#341): audio and secondary layers use independent session
-    # transports. The legacy one-shot command still cannot express the combined
-    # shape, but #264/#291 make the verified session route canonical.
-    classic_start = gate.index("Classic audio + layers is session-canonical")
-    classic = gate[classic_start:]
-    assert "gpu_backend == RenderGpuBackend::Auto" in classic
-    assert "audio.is_none() ||" not in classic
+    # Layered: Auto alone carries it at every depth (issue #353). The depth bound
+    # that used to exclude Argb32f is gone -- it was the last real one-shot gap --
+    # and no policy clause replaced it, because layered + policy is unreachable.
+    layered_start = gate.index("Smart layered: Auto only, at every depth")
+    layered = gate[layered_start : gate.index("} else {", layered_start)]
+    assert "gpu_backend == RenderGpuBackend::Auto" in layered
+    assert "pixel_format != RenderPixelFormat::Argb32f" not in layered, (
+        "Argb32f layered is session-eligible now; the A/B in "
+        "render_session_wrapper.rs::smart_timed_multilayer_matches_the_one_shot_transport "
+        "measures the equivalence")
+    assert "gpu_runtime_policy" not in layered, (
+        "layered + policy is unreachable, so admitting it would be a dead condition")
 
     # Classic Auto is already admitted by the image-render gate. RenderSession::open
     # must accept the same policy-carrying request and only attach the manifest when
@@ -327,3 +320,33 @@ def test_a_policy_below_float32_or_on_classic_does_not_exclude_a_render():
         "let gpu_capable = request.smart && request.pixel_format == RenderPixelFormat::Argb32f"
         in session
     )
+
+
+def test_no_corpus_fixture_is_both_layered_and_gpu_declaring():
+    """The layered gate's Argb32f admission rests on this, so pin it.
+
+    The worker turns gpu_negotiation on for float32 whenever the plug-in
+    advertises PF_OutFlag2_SUPPORTS_GPU_RENDER_F32 -- layers do not enter into
+    it (worker_smart_setup.cpp). A plug-in that is both layered and
+    GPU-declaring would therefore take the device on the one-shot layered
+    command while a policy-less Auto session folds to CPU, which is the one
+    divergence issue #353 accepts as session-canonical.
+
+    No fixture in this repository is both, so every measured A/B compares CPU
+    against CPU. If a probe ever declares both, the equivalence the gate relies
+    on stops holding for it and this test says so.
+    """
+    root = SOURCE.parents[4]
+    layered, gpu_declaring = set(), set()
+    for source in sorted((root / "instruments").rglob("*.cpp")):
+        text = source.read_text(encoding="utf-8")
+        if "PF_ADD_LAYER" in text or "PF_Param_LAYER" in text:
+            layered.add(source.name)
+        if "PF_OutFlag2_SUPPORTS_GPU_RENDER_F32" in text:
+            gpu_declaring.add(source.name)
+    assert layered, "expected the layered probes to still exist"
+    both = layered & gpu_declaring
+    assert not both, (
+        "these fixtures are both layered and GPU-declaring, so the one-shot "
+        "would negotiate GPU where the session folds to CPU (issue #353): "
+        f"{sorted(both)}")
