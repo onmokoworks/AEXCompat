@@ -48,7 +48,27 @@ pub struct DismissedWindow {
     /// blocked exactly as before — so "the broker asked" and "the window went
     /// away" are reported apart rather than as one word.
     pub closed: bool,
+    /// Whether the broker posted `WM_CLOSE` at all. False for a window that is
+    /// not a standard dialog: those are recorded and left alone (see
+    /// [`DIALOG_CLASS`]), so a plug-in blocked on one is diagnosable without
+    /// the broker having reached into a window it does not understand.
+    pub asked_to_close: bool,
 }
+
+/// The window class Windows gives every standard dialog — `MessageBox`,
+/// `DialogBox`, and the common dialogs all use it.
+///
+/// Only these are closed. A plug-in may keep a visible window of its own for a
+/// renderer's context or an offscreen surface, and posting `WM_CLOSE` to that
+/// would destroy something a *working* plug-in depends on in order to fix a
+/// problem it does not have. Every observed case of a worker stuck on UI has
+/// been a standard dialog: the Intel IPP dispatcher's message box (issue #351)
+/// and licence prompts.
+///
+/// Anything else visible on the desktop is still recorded, with
+/// `asked_to_close: false`, so a worker blocked on a custom modal window is a
+/// reported observation rather than an unexplained hang.
+pub const DIALOG_CLASS: &str = "#32770";
 
 /// How long a window must have been up before the broker closes it.
 #[cfg(windows)]
@@ -137,6 +157,7 @@ mod windows_impl {
     struct Tracked {
         first_seen: Instant,
         record: usize,
+        is_dialog: bool,
     }
 
     fn sweep_until(watched: Watched, stop: &AtomicBool) -> Vec<DismissedWindow> {
@@ -159,7 +180,12 @@ mod windows_impl {
             // A window that has gone away since a `WM_CLOSE` was posted is the
             // only evidence the broker has that the post worked.
             for (window, tracked) in &state.tracked {
-                if !state.still_present.contains(window) {
+                // Only a window the broker asked to close can be said to have
+                // been closed by it; one that vanished on its own is neither
+                // the broker's doing nor a problem.
+                if !state.still_present.contains(window)
+                    && state.found[tracked.record].asked_to_close
+                {
                     state.found[tracked.record].closed = true;
                 }
             }
@@ -191,32 +217,48 @@ mod windows_impl {
         }
         let key = window as isize;
         state.still_present.push(key);
-        let entry = match state.tracked.get(&key) {
-            Some(entry) => entry,
+        let (first_seen, is_dialog) = match state.tracked.get(&key) {
+            Some(entry) => (entry.first_seen, entry.is_dialog),
             None => {
+                let class = window_text(window, GetClassNameW);
+                let is_dialog = class == super::DIALOG_CLASS;
+                // Titles reach diagnostics, and a dialog routinely names the
+                // file it could not find, so the path is removed here rather
+                // than at every reader.
+                let (title, _) =
+                    crate::redact_windows_paths(&window_text(window, GetWindowTextW), TITLE_LIMIT);
                 state.found.push(DismissedWindow {
-                    title: window_text(window, GetWindowTextW),
-                    class: window_text(window, GetClassNameW),
+                    title,
+                    class,
                     closed: false,
+                    asked_to_close: false,
                 });
                 state.tracked.insert(
                     key,
                     Tracked {
                         first_seen: Instant::now(),
                         record: state.found.len() - 1,
+                        is_dialog,
                     },
                 );
                 return 1;
             }
         };
-        if entry.first_seen.elapsed() < GRACE {
+        // A window that comes and goes on its own was never blocking anyone.
+        if !is_dialog || first_seen.elapsed() < GRACE {
             return 1;
+        }
+        if let Some(tracked) = state.tracked.get(&key) {
+            state.found[tracked.record].asked_to_close = true;
         }
         // Posted rather than sent: the modal loop belongs to the worker's
         // thread, and a blocking send would put the broker inside it.
         unsafe { PostMessageW(window, WM_CLOSE, 0, 0) };
         1
     }
+
+    /// Window titles are bounded before they reach a diagnostic.
+    const TITLE_LIMIT: usize = 256;
 
     /// Whether `window` belongs to a process inside `job` — the worker itself
     /// or anything it spawned. A process id alone would miss a helper process
@@ -249,8 +291,9 @@ mod windows_impl {
     }
 }
 
-/// Windows that were found but never went away, which is the case worth
-/// reporting: the worker is still blocked on one of them.
+/// Windows that could still be holding the worker up: a dialog the broker
+/// asked to close and which did not go away, or a window it left alone because
+/// it was not a dialog. Either way the worker may be waiting on it.
 pub fn undismissed(windows: &[DismissedWindow]) -> Vec<&DismissedWindow> {
     windows.iter().filter(|window| !window.closed).collect()
 }
@@ -274,13 +317,15 @@ mod tests {
         let windows = vec![
             DismissedWindow {
                 title: "closed".into(),
-                class: "#32770".into(),
+                class: DIALOG_CLASS.into(),
                 closed: true,
+                asked_to_close: true,
             },
             DismissedWindow {
                 title: "stuck".into(),
-                class: "#32770".into(),
+                class: DIALOG_CLASS.into(),
                 closed: false,
+                asked_to_close: true,
             },
         ];
         let stuck = undismissed(&windows);

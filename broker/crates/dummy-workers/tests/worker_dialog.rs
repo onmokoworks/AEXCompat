@@ -77,8 +77,56 @@ fn a_modal_dialog_is_closed_so_the_worker_reaches_its_result() {
         .iter()
         .find(|window| window.title == title)
         .unwrap_or_else(|| panic!("dialog not recorded: {:?}", result.dismissed_windows));
-    assert_eq!(dialog.class, "#32770");
+    assert_eq!(dialog.class, aexcompat_broker::worker_dialog::DIALOG_CLASS);
+    assert!(dialog.asked_to_close, "never asked to close: {dialog:?}");
     assert!(dialog.closed, "recorded as still up: {dialog:?}");
+}
+
+#[test]
+fn a_window_that_is_not_a_dialog_is_recorded_and_left_alone() {
+    use aexcompat_broker::windows_process::run_isolated;
+
+    // A window a working plug-in keeps for itself — a renderer's context, an
+    // offscreen surface — must survive. Closing it to fix a dialog problem it
+    // does not have would break work that was succeeding.
+    let title = format!("aexcompat-351-own-{}", std::process::id());
+    let result = run_isolated(
+        Path::new(env!("CARGO_BIN_EXE_dummy_messagebox")),
+        &[title.clone(), "window".into()],
+        Duration::from_secs(30),
+    )
+    .expect("launch the window worker");
+
+    assert_eq!(
+        result.classification.as_str(),
+        "ok",
+        "worker did not finish: {:?}",
+        result.stderr
+    );
+    assert!(
+        result.stdout.contains("own_window_open"),
+        "worker never opened its window: {:?}",
+        result.stdout
+    );
+    assert!(
+        result.stdout.contains("own_window_survived:true"),
+        "the broker closed a window it should have left alone: {:?}",
+        result.stdout
+    );
+
+    // Left alone, but not unnoticed: a worker blocked on a window like this is
+    // still visible in the diagnostic.
+    let recorded = result
+        .dismissed_windows
+        .iter()
+        .find(|window| window.title == title)
+        .unwrap_or_else(|| panic!("window not recorded: {:?}", result.dismissed_windows));
+    assert_ne!(
+        recorded.class,
+        aexcompat_broker::worker_dialog::DIALOG_CLASS
+    );
+    assert!(!recorded.asked_to_close, "{recorded:?}");
+    assert!(!recorded.closed, "{recorded:?}");
 }
 
 #[test]

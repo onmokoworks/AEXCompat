@@ -570,6 +570,15 @@ pub(crate) fn isolated_worker_diagnostics(
         "process_memory_limit_bytes".into(),
         json!(isolated.process_memory_limit_bytes),
     );
+    // Absent when nothing appeared, which is the ordinary case; present the
+    // moment a plug-in tried to ask the user something (issue #351). Titles are
+    // already path-redacted where they are captured.
+    if !isolated.dismissed_windows.is_empty() {
+        object.insert(
+            "dismissed_windows".into(),
+            json!(isolated.dismissed_windows),
+        );
+    }
     diagnostics
 }
 
@@ -8199,6 +8208,7 @@ mod tests {
             peak_job_memory_bytes: Some(531_000_000),
             process_memory_limit_bytes: 536_870_912,
             memory_limit_reached: true,
+            dismissed_windows: Vec::new(),
         };
         let diagnostics = isolated_worker_diagnostics(&isolated, 1_234);
         assert_eq!(diagnostics["kill_reason"], "memory_limit");
@@ -8223,6 +8233,7 @@ mod tests {
             peak_job_memory_bytes: Some(1_000_000),
             process_memory_limit_bytes: 536_870_912,
             memory_limit_reached: false,
+            dismissed_windows: Vec::new(),
         };
         let diagnostics = isolated_worker_diagnostics(&alive, 5);
         assert_eq!(diagnostics["kill_reason"], Value::Null);

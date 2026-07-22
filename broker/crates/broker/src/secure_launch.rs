@@ -21,6 +21,10 @@ pub struct SecureLaunchResult {
     pub peak_job_memory_bytes: Option<u64>,
     pub process_memory_limit_bytes: u64,
     pub memory_limit_reached: bool,
+    /// Windows the worker put on its private desktop (issue #351). Normally
+    /// empty; carried through so the observation reaches the render/inspection
+    /// diagnostics rather than stopping at the launch boundary.
+    pub dismissed_windows: Vec<crate::worker_dialog::DismissedWindow>,
 }
 
 pub struct SecureLaunchRequest<'a> {
@@ -146,6 +150,7 @@ fn secure_launch_impl(
         peak_job_memory_bytes: result.peak_job_memory_bytes,
         process_memory_limit_bytes: result.process_memory_limit_bytes,
         memory_limit_reached: result.memory_limit_reached,
+        dismissed_windows: result.dismissed_windows,
     })
 }
 
@@ -220,6 +225,7 @@ impl SecureSessionProcess {
             peak_job_memory_bytes: result.peak_job_memory_bytes,
             process_memory_limit_bytes: result.process_memory_limit_bytes,
             memory_limit_reached: result.memory_limit_reached,
+            dismissed_windows: result.dismissed_windows,
         })
     }
 }
