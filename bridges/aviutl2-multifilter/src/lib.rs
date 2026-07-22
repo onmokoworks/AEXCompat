@@ -286,7 +286,7 @@ pub extern "C" fn RegisterPlugin(host: *mut HOST_APP_TABLE) {
     // depends on the compat host that produced it (the L2 worker and this DLL's
     // in-process broker). Invalidate the whole cache when the host build changed,
     // so effects that previously failed to load are re-discovered (issue #304).
-    let build = build_fingerprint(&repository);
+    let build = build_fingerprint(&repository, &dependency_dirs);
     let cache = load_cache(build);
 
     // Register (host callback, main thread only) each AEX whose discovery already
@@ -679,6 +679,12 @@ struct BuildFingerprint {
     worker: Option<(u64, u32, u64)>,
     #[serde(default)]
     host: Option<(u64, u32, u64)>,
+    /// Digest of the dependency search folders (issue #304). They decide which
+    /// DLLs are sealed with an AEX, so a config change can turn a cached failure
+    /// into a success; without this, a corrected `dependency_dirs` would keep
+    /// serving the negative entries discovered under the old one.
+    #[serde(default)]
+    dependency_dirs: u64,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Default)]
@@ -705,7 +711,7 @@ fn cache_path() -> Option<PathBuf> {
 /// change a discovery result: the worker exe loads the AEX and runs `EffectMain`,
 /// while the in-DLL broker does the sealed-load-tree staging that decides whether
 /// the load succeeds (issue #304's dep-sealing lives broker-side, in this DLL).
-fn build_fingerprint(repository: &Path) -> BuildFingerprint {
+fn build_fingerprint(repository: &Path, dependency_dirs: &[PathBuf]) -> BuildFingerprint {
     let worker = repository
         .join("target")
         .join("minihost-build")
@@ -714,7 +720,21 @@ fn build_fingerprint(repository: &Path) -> BuildFingerprint {
     BuildFingerprint {
         worker: file_meta(&worker).map(flatten),
         host: self_module_path().as_deref().and_then(file_meta).map(flatten),
+        dependency_dirs: dependency_dirs_fingerprint(dependency_dirs),
     }
+}
+
+/// A digest of the ordered dependency search folders, case-folded like the
+/// filesystem compares them. Only equality matters, so the leading 8 bytes of the
+/// SHA-256 are enough and keep the fingerprint `Copy`.
+fn dependency_dirs_fingerprint(dirs: &[PathBuf]) -> u64 {
+    let mut hasher = Sha256::new();
+    for dir in dirs {
+        hasher.update(dir.to_string_lossy().to_lowercase().as_bytes());
+        hasher.update([0]);
+    }
+    let digest = hasher.finalize();
+    u64::from_le_bytes(digest[..8].try_into().unwrap_or_default())
 }
 
 /// The path of this running DLL, resolved from an address inside it. Used to

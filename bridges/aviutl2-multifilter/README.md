@@ -108,6 +108,8 @@ discovery はバックグラウンドスレッドで行う:**
 つまり: 初回起動 → 即座に使える (バックグラウンドで数分かけて discovery) → 2 回目起動 → 全効果が
 出て高速。AEX を差し替え・追加すると mtime/len 変化で再 discovery され、次回起動で反映される。
 
+- キャッシュは worker exe / この DLL / `dependency_dirs` のいずれかが変わると全体が無効化され、
+  再 discovery される (ホストや封入する依存が変われば結果も変わりうるため)。
 - discovery は結果を全てキャッシュする (effect でない `.aex` = Format/codec 等の negative も)。
   低並列なので負荷下の偽タイムアウトは起きにくいが、稀に一時的失敗で effect が誤って除外・
   キャッシュされることがある。その場合は該当 AEX を touch するか
