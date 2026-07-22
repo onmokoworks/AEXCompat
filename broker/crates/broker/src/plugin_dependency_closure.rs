@@ -165,13 +165,13 @@ pub fn resolve_dependency_closure(
     request: DependencyClosureRequest<'_>,
 ) -> io::Result<ResolvedDependencyClosure> {
     let plugin = validated_image_path(request.plugin)?;
-    let plugin_artifact = artifact_for(&plugin)?;
     let walk = walk_import_closure(
         &plugin,
         request.search_roots,
         request.max_dependencies,
         request.max_total_bytes,
         UnreadableImage::Fail,
+        ImageIdentity::Bind,
     )?;
     if walk.over_module_limit {
         return Err(invalid("dependency closure module limit exceeded"));
@@ -179,17 +179,38 @@ pub fn resolve_dependency_closure(
     if walk.over_byte_limit {
         return Err(invalid("dependency closure byte limit exceeded"));
     }
+    // Same binding as for the dependencies, at the root of the graph: the
+    // identity handed to authentication is the digest of the bytes this walk
+    // expanded, so a plug-in rewritten mid-walk cannot be sealed with an import
+    // list it no longer has.
+    let plugin_artifact = walk
+        .plugin
+        .as_ref()
+        .and_then(|image| {
+            Some(ApprovedImageArtifact {
+                path: image.path.clone(),
+                expected_sha256: image.sha256?,
+                expected_size: image.size,
+            })
+        })
+        .ok_or_else(|| invalid("plug-in identity was not bound"))?;
 
+    // The identity declared here is the digest of the bytes the walk parsed, so
+    // the manifest's re-read below is what binds "the imports we followed" to
+    // "the bytes that get sealed": a dependency rewritten between the two fails
+    // authentication instead of being sealed with someone else's import list.
     let dependencies = walk
         .resolved
         .iter()
-        .map(|path| {
-            let artifact = artifact_for(path)?;
+        .map(|image| {
+            let sha256 = image
+                .sha256
+                .ok_or_else(|| invalid("dependency identity was not bound"))?;
             Ok(SessionDependencyDto {
-                basename: basename_of(path)?,
-                path: artifact.path,
-                sha256: hex(&artifact.expected_sha256),
-                size: artifact.expected_size,
+                basename: basename_of(&image.path)?,
+                path: image.path.clone(),
+                sha256: hex(&sha256),
+                size: image.size,
             })
         })
         .collect::<io::Result<Vec<_>>>()?;
@@ -249,9 +270,10 @@ pub fn survey_dependency_closure(
         None,
         None,
         UnreadableImage::KeepGoing,
+        ImageIdentity::Measure,
     )?;
     Ok(DependencyClosureSurvey {
-        modules: walk.resolved,
+        modules: walk.resolved.into_iter().map(|image| image.path).collect(),
         total_bytes: walk.total_bytes,
         unresolved: walk.unresolved,
         rejected_names: walk.rejected_names,
@@ -259,14 +281,40 @@ pub fn survey_dependency_closure(
     })
 }
 
+/// A dependency the walk reached, identified by the bytes the walk itself read.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct WalkedImage {
+    path: PathBuf,
+    size: u64,
+    /// SHA-256 of the bytes the imports were parsed from. `None` when the walk
+    /// was only measuring and did not hash.
+    sha256: Option<[u8; 32]>,
+}
+
 struct ImportClosureWalk {
-    resolved: Vec<PathBuf>,
+    /// The plug-in itself, identified by the bytes its imports were parsed from.
+    /// `None` only when a measuring walk could not read it.
+    plugin: Option<WalkedImage>,
+    resolved: Vec<WalkedImage>,
     unresolved: Vec<String>,
     rejected_names: usize,
     unreadable_images: usize,
     total_bytes: u64,
     over_module_limit: bool,
     over_byte_limit: bool,
+}
+
+/// Whether a walk hashes the bytes it parses.
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum ImageIdentity {
+    /// Hash them. Anything that will be sealed must be approved as *these* bytes,
+    /// not as whatever the file holds by the time it is re-read: a dependency
+    /// rewritten mid-walk would otherwise be sealed with imports parsed from the
+    /// bytes it no longer has, and the closure could be missing what the new
+    /// bytes need.
+    Bind,
+    /// Skip hashing. Only for measurement, which seals nothing.
+    Measure,
 }
 
 /// What a walk does with an image whose import table it cannot read.
@@ -288,6 +336,7 @@ fn walk_import_closure(
     max_modules: Option<usize>,
     max_total_bytes: Option<u64>,
     unreadable: UnreadableImage,
+    identity: ImageIdentity,
 ) -> io::Result<ImportClosureWalk> {
     if search_roots.len() > MAX_SEARCH_ROOTS {
         return Err(invalid("dependency search root limit exceeded"));
@@ -300,6 +349,7 @@ fn walk_import_closure(
     seen.insert(fold(&basename_of(plugin)?));
     let mut unresolved: HashSet<String> = HashSet::new();
     let mut walk = ImportClosureWalk {
+        plugin: None,
         resolved: Vec::new(),
         unresolved: Vec::new(),
         rejected_names: 0,
@@ -308,19 +358,16 @@ fn walk_import_closure(
         over_module_limit: false,
         over_byte_limit: false,
     };
-    let mut queue: VecDeque<PathBuf> = VecDeque::new();
-    queue.push_back(plugin.to_path_buf());
-
-    'walk: while let Some(image) = queue.pop_front() {
-        let names = match imported_names(&image) {
-            Ok(names) => names,
-            Err(error) if unreadable == UnreadableImage::KeepGoing => {
-                let _ = error;
-                walk.unreadable_images += 1;
-                continue;
-            }
-            Err(error) => return Err(error),
-        };
+    // The queue holds one entry per *unique, validated* name, so what it retains
+    // is bounded by the same ceiling `seen` is: queueing whole import lists would
+    // let a hostile table (4096 descriptors naming the same string) multiply into
+    // orders of magnitude more memory than the file it came from.
+    let mut queue: VecDeque<String> = VecDeque::new();
+    let enqueue = |queue: &mut VecDeque<String>,
+                   seen: &mut HashSet<String>,
+                   walk: &mut ImportClosureWalk,
+                   names: Vec<String>|
+     -> io::Result<()> {
         for name in names {
             // Names are ASCII-validated before anything else, so a name that
             // cannot be a DLL basename never reaches `seen`. Folding into `seen`
@@ -337,22 +384,59 @@ fn walk_import_closure(
             if seen.len() > MAX_CLOSURE_IMPORT_NAMES {
                 return Err(invalid("dependency closure name limit exceeded"));
             }
-            match resolve_name(&name, &roots)? {
-                NameResolution::NotInRoots => {
-                    unresolved.insert(fold(&name));
+            queue.push_back(name);
+        }
+        Ok(())
+    };
+
+    // The plug-in is read the same way its dependencies are, so the identity the
+    // caller seals is the identity of the bytes these imports came from.
+    match read_image_imports(plugin, identity) {
+        Ok((image, names)) => {
+            walk.plugin = Some(image);
+            enqueue(&mut queue, &mut seen, &mut walk, names)?;
+        }
+        Err(error) if unreadable == UnreadableImage::KeepGoing => {
+            walk.unreadable_images += 1;
+            let _ = error;
+        }
+        Err(error) => return Err(error),
+    }
+
+    while let Some(name) = queue.pop_front() {
+        match resolve_name(&name, &roots)? {
+            NameResolution::NotInRoots => {
+                unresolved.insert(fold(&name));
+            }
+            NameResolution::Found(path) => {
+                // Ceilings are applied before the image is read: an operator who
+                // capped the closure is told they hit the cap, not whatever the
+                // first image past it happens to be.
+                let size = fs::metadata(&path)?.len();
+                walk.over_module_limit =
+                    max_modules.is_some_and(|limit| walk.resolved.len() + 1 > limit);
+                walk.over_byte_limit = max_total_bytes
+                    .is_some_and(|limit| walk.total_bytes.saturating_add(size) > limit);
+                if walk.over_module_limit || walk.over_byte_limit {
+                    break;
                 }
-                NameResolution::Found(path) => {
-                    let size = fs::metadata(&path)?.len();
-                    walk.total_bytes = walk.total_bytes.saturating_add(size);
-                    walk.resolved.push(path.clone());
-                    walk.over_module_limit =
-                        max_modules.is_some_and(|limit| walk.resolved.len() > limit);
-                    walk.over_byte_limit =
-                        max_total_bytes.is_some_and(|limit| walk.total_bytes > limit);
-                    if walk.over_module_limit || walk.over_byte_limit {
-                        break 'walk;
+                match read_image_imports(&path, identity) {
+                    Ok((image, imports)) => {
+                        walk.total_bytes = walk.total_bytes.saturating_add(image.size);
+                        walk.resolved.push(image);
+                        enqueue(&mut queue, &mut seen, &mut walk, imports)?;
                     }
-                    queue.push_back(path);
+                    Err(error) if unreadable == UnreadableImage::KeepGoing => {
+                        walk.unreadable_images += 1;
+                        walk.total_bytes = walk.total_bytes.saturating_add(size);
+                        walk.resolved.push(WalkedImage {
+                            path,
+                            size,
+                            sha256: None,
+                        });
+                        let _ = error;
+                    }
+                    Err(error) => return Err(error),
                 }
             }
         }
@@ -440,20 +524,32 @@ fn basename_of(path: &Path) -> io::Result<String> {
         .ok_or_else(|| invalid("image path must have a UTF-8 basename"))
 }
 
-fn artifact_for(path: &Path) -> io::Result<ApprovedImageArtifact> {
-    let bytes = read_bounded(path)?;
-    Ok(ApprovedImageArtifact {
-        path: path.to_path_buf(),
-        expected_sha256: Sha256::digest(&bytes).into(),
-        expected_size: bytes.len() as u64,
-    })
-}
-
 fn read_bounded(path: &Path) -> io::Result<Vec<u8>> {
     if fs::metadata(path)?.len() > MAX_PARSED_IMAGE_BYTES {
         return Err(invalid("dependency image is too large to authenticate"));
     }
     fs::read(path)
+}
+
+/// Reads `image` once and returns both what it imports and the identity of the
+/// bytes those imports were read from.
+fn read_image_imports(
+    image: &Path,
+    identity: ImageIdentity,
+) -> io::Result<(WalkedImage, Vec<String>)> {
+    let bytes = read_bounded(image)?;
+    let names = imported_names_from_bytes(&bytes)?;
+    Ok((
+        WalkedImage {
+            path: image.to_path_buf(),
+            size: bytes.len() as u64,
+            sha256: match identity {
+                ImageIdentity::Bind => Some(Sha256::digest(&bytes).into()),
+                ImageIdentity::Measure => None,
+            },
+        },
+        names,
+    ))
 }
 
 /// Every DLL name in `image`'s import and delay-load import tables.
@@ -462,13 +558,12 @@ fn read_bounded(path: &Path) -> io::Result<Vec<u8>> {
 /// only place the loader will look for them too, so leaving them out would just
 /// move the same failure from load time to first call (issue #60 covers the
 /// delay-load execution semantics; this only affects what gets sealed).
-fn imported_names(image: &Path) -> io::Result<Vec<String>> {
-    let bytes = read_bounded(image)?;
-    match PeFile64::parse(&*bytes) {
+fn imported_names_from_bytes(bytes: &[u8]) -> io::Result<Vec<String>> {
+    match PeFile64::parse(bytes) {
         Ok(pe) => import_names_from(&pe),
         // Not a PE32+ image: a 32-bit AEX still resolves the same way, and any
         // other content simply contributes no imports.
-        Err(_) => match PeFile32::parse(&*bytes) {
+        Err(_) => match PeFile32::parse(bytes) {
             Ok(pe) => import_names_from(&pe),
             Err(_) => Ok(Vec::new()),
         },
@@ -800,6 +895,38 @@ mod tests {
         let closure =
             resolve_dependency_closure(DependencyClosureRequest::new(&plugin, &roots)).unwrap();
         assert_eq!(closure.dependencies().len(), count);
+        fs::remove_dir_all(install).unwrap();
+    }
+
+    #[test]
+    fn a_ceiling_is_reported_before_the_image_that_crosses_it_is_read() {
+        // An operator who capped the closure must be told they hit the cap, not
+        // whatever the first image past it happens to be — so the ceiling is
+        // applied before that image is even opened.
+        let install = temp_dir("ceiling-order");
+        write_pe(&install, "first.dll", &[]);
+        write_pe(&install, "second.dll", &[]);
+        fs::write(
+            install.join("third.dll"),
+            crate::test_pe::pe64_with_broken_import_directory(),
+        )
+        .unwrap();
+        let plugin = write_pe(
+            &install,
+            "effect.aex",
+            &["first.dll", "second.dll", "third.dll"],
+        );
+        let roots = vec![install.clone()];
+
+        assert_eq!(
+            resolve_dependency_closure(DependencyClosureRequest {
+                max_dependencies: Some(2),
+                ..DependencyClosureRequest::new(&plugin, &roots)
+            })
+            .unwrap_err()
+            .to_string(),
+            "dependency closure module limit exceeded"
+        );
         fs::remove_dir_all(install).unwrap();
     }
 
