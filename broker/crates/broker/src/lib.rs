@@ -1,5 +1,6 @@
 pub mod conformance;
 pub mod fixture_profiles;
+pub mod gpu_platform_collector;
 pub mod host_core;
 #[cfg(windows)]
 pub mod image_render;
