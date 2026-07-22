@@ -3811,17 +3811,12 @@ impl HarnessApp {
         #[cfg(windows)]
         {
             let live_eligible = !smart
-            && host_context.is_none()
-            && custom_ui_action.is_none()
-            && audio_sidecar.is_none()
-            && gpu_backend == aexcompat_broker::image_render::RenderGpuBackend::Auto
-            && !use_registered_default
-            && !parameters.iter().any(|parameter| parameter.kind == "layer")
-            // The A/B escape hatch disables every resident-session route,
-            // this GUI adapter included, not just the broker's length-1
-            // wrapper.
-            && std::env::var_os(aexcompat_broker::image_render::DISABLE_SESSION_WRAPPER_ENV)
-                .is_none();
+                && host_context.is_none()
+                && custom_ui_action.is_none()
+                && audio_sidecar.is_none()
+                && gpu_backend == aexcompat_broker::image_render::RenderGpuBackend::Auto
+                && !use_registered_default
+                && !parameters.iter().any(|parameter| parameter.kind == "layer");
             if live_eligible {
                 let identity = DispatchIdentity {
                     sha256: hash.clone(),
@@ -5657,9 +5652,8 @@ fn main() -> eframe::Result {
         // GPU single-image render routed through the length-one session (#290):
         // parse the runtime-module policy JSON, run the GPU module-audit preflight
         // to assemble the authenticated policy input, then render an Argb32f smart
-        // frame on the requested GPU backend. Setting
-        // AEXCOMPAT_DISABLE_RENDER_SESSION_WRAPPER forces the one-shot GPU path for
-        // the A/B comparison; the default routes through the session.
+        // frame on the requested GPU backend. The session is the only transport
+        // (#365).
         use aexcompat_broker::image_render::{RenderGpuBackend, RenderPixelFormat, RenderTiming};
         let plugin = Path::new(&args[2]);
         let hash = format!("{:X}", Sha256::digest(fs::read(plugin).unwrap()));

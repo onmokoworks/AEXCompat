@@ -1866,10 +1866,8 @@ enum AudioWrapperOutcome {
     Failure(io::Error),
     /// The session infrastructure could not carry the render (open failure,
     /// worker crash or invalidation, malformed close). The string is the reason;
-    /// the automatic one-shot fallback is removed (#98 W4, #264), so the caller
-    /// turns this into an explicit fail-closed error rather than silently
-    /// rerunning the one-shot transport. The one-shot transport stays reachable
-    /// only via the AEXCOMPAT_DISABLE_RENDER_SESSION_WRAPPER override.
+    /// there is no second transport (#98 W4, #264, #365), so the caller turns
+    /// this into an explicit fail-closed error.
     Fallback(String),
 }
 
@@ -2038,7 +2036,6 @@ pub fn render_experimental_audio(
     output_path: &Path,
     parameters: &[InteractiveParameter],
 ) -> io::Result<Value> {
-    const SAMPLE_RATE: u32 = 44_100;
     const MAX_SAMPLES: usize = 10_000_000;
     let plugin_bytes = fs::read(plugin_path)?;
     let actual = format!("{:X}", Sha256::digest(&plugin_bytes));
@@ -2064,111 +2061,28 @@ pub fn render_experimental_audio(
         return Err(invalid("audio input contains a non-finite sample"));
     }
 
-    // Route the render through a length-1 audio session by default (protocol
-    // §10); the one-shot `--render-audio` argv transport below is the fallback
-    // when the session infrastructure cannot carry it. The escape hatch
-    // (AEXCOMPAT_DISABLE_RENDER_SESSION_WRAPPER=1) forces the one-shot path.
-    #[cfg(windows)]
-    if std::env::var_os(DISABLE_SESSION_WRAPPER_ENV).is_none() {
-        match render_audio_via_length_one_session(
-            repository,
-            plugin_path,
-            approved_sha256,
-            &input,
-            output_path,
-            parameters,
-        ) {
-            AudioWrapperOutcome::Report(report) => return Ok(report),
-            AudioWrapperOutcome::Failure(error) => return Err(error),
-            // Fail closed (#98 W4, #264): an audio-session infrastructure failure
-            // no longer silently falls back to the one-shot transport. Surface it
-            // as an explicit diagnostic. The one-shot transport stays reachable
-            // via the AEXCOMPAT_DISABLE_RENDER_SESSION_WRAPPER override, which
-            // bypasses the session attempt entirely.
-            AudioWrapperOutcome::Fallback(reason) => {
-                return Err(invalid(format!(
-                    "the resident audio render session could not carry this render ({reason}); \
-                     the automatic one-shot fallback is disabled. Diagnose the session failure, \
-                     or set {DISABLE_SESSION_WRAPPER_ENV}=1 to force the one-shot transport for \
-                     this render."
-                )));
-            }
-        }
-    }
-
-    let transport = repository.join("target/audio-transport");
-    fs::create_dir_all(&transport)?;
-    let nonce = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|_| invalid("system clock is before UNIX epoch"))?
-        .as_nanos();
-    let worker_input = transport.join(format!("input-{nonce}.f32"));
-    let worker_output = transport.join(format!("output-{nonce}.f32"));
-    fs::write(&worker_input, &input)?;
-    let _cleanup = Cleanup(vec![worker_input.clone(), worker_output.clone()]);
-    let args_before_plugin = vec!["--render-audio".into()];
-    let args_after_plugin = vec![
-        actual.to_ascii_lowercase(),
-        encode_interactive_payload(parameters)?,
-        worker_input.to_string_lossy().into_owned(),
-        worker_output.to_string_lossy().into_owned(),
-        (input.len() / 4).to_string(),
-        SAMPLE_RATE.to_string(),
-    ];
-    let started = Instant::now();
-    let isolated = dispatch_approved_image(
+    // The length-1 audio session (protocol §10) is the only audio transport
+    // since #365: the one-shot `--render-audio` argv mode and the escape hatch
+    // that reached it are gone, so a session failure is a failure rather than a
+    // routing choice.
+    match render_audio_via_length_one_session(
         repository,
-        WorkerKind::Render,
         plugin_path,
         approved_sha256,
-        &args_before_plugin,
-        &args_after_plugin,
-        Duration::from_millis(INTERACTIVE_RENDER_TIMEOUT_MS),
-    )?;
-    let diagnostics = isolated_worker_diagnostics(&isolated, started.elapsed().as_millis());
-    if isolated.classification.as_str() != "ok" {
-        return Err(invalid(format!(
-            "audio render worker failed safely: {diagnostics}"
-        )));
+        &input,
+        output_path,
+        parameters,
+    ) {
+        AudioWrapperOutcome::Report(report) => Ok(report),
+        AudioWrapperOutcome::Failure(error) => Err(error),
+        // Fail closed (#98 W4, #264): an audio-session infrastructure failure
+        // no longer silently falls back. There is no second transport to fall
+        // back to since #365, so an infrastructure failure is reported as one.
+        AudioWrapperOutcome::Fallback(reason) => Err(invalid(format!(
+            "the resident audio render session could not carry this render ({reason}). \
+             Diagnose the session failure; there is no alternate transport."
+        ))),
     }
-    let mut report: Value = serde_json::from_str(isolated.stdout.trim())
-        .map_err(|_| invalid("audio render worker report is invalid"))?;
-    let output_samples = report
-        .get("output_samples")
-        .and_then(Value::as_u64)
-        .ok_or_else(|| invalid("audio report has no output sample count"))?
-        as usize;
-    let output = fs::read(&worker_output)?;
-    if report.get("status") != Some(&json!("render_completed"))
-        || report.get("sample_rate") != Some(&json!(SAMPLE_RATE))
-        || report.get("channels") != Some(&json!(1))
-        || report.get("sample_format") != Some(&json!("float32"))
-        || report.get("guard_bytes_intact") != Some(&json!(true))
-        || report.get("samples_finite") != Some(&json!(true))
-        || report.get("audio_lifetimes_balanced") != Some(&json!(true))
-        || report.get("invalid_audio_operations") != Some(&json!(0))
-        || output_samples > input.len() / 4
-        || output.len() != output_samples * 4
-    {
-        return Err(invalid("audio worker contract failed"));
-    }
-    let mut destination = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(output_path)?;
-    if let Err(error) = destination
-        .write_all(&output)
-        .and_then(|_| destination.sync_all())
-    {
-        drop(destination);
-        let _ = fs::remove_file(output_path);
-        return Err(error);
-    }
-    report["input_sha256"] = json!(format!("{:x}", Sha256::digest(&input)));
-    report["output_sha256"] = json!(format!("{:x}", Sha256::digest(&output)));
-    report["output_transport"] = json!("mono_f32le_44100");
-    report["worker_diagnostics"] = diagnostics;
-    Ok(report)
 }
 
 pub fn render_experimental_image_at_time(
@@ -5085,7 +4999,6 @@ fn render_with_artifact(
     // proves that a classic session consumes both in one render (issue #341).
     let session_eligible = payload
         == encode_interactive_payload(interactive_parameters.unwrap_or_default())?
-        && std::env::var_os(DISABLE_SESSION_WRAPPER_ENV).is_none()
         && timing.time_scale <= i32::MAX as u32
         && if smart {
             // Admit the smart configs the CPU session serves and that no policy
@@ -5345,21 +5258,14 @@ fn render_with_artifact(
         match session_outcome {
             SessionWrapperOutcome::Report(report) => return Ok(report),
             SessionWrapperOutcome::Failure(error) => return Err(error),
-            // Fail closed (#98 W4, #264): a resident-session infrastructure
-            // failure no longer silently falls back to the one-shot transport,
-            // which would let the session path rot undetected. Surface it as an
-            // explicit diagnostic. The one-shot transport stays available for
-            // renders the session cannot serve (the ineligible shapes handled
-            // below) and via the AEXCOMPAT_DISABLE_RENDER_SESSION_WRAPPER
-            // override, which bypasses the session attempt entirely.
+            // Fail closed (#98 W4, #264, #365): there is no second transport to
+            // fall back to, so an infrastructure failure is reported as one.
             SessionWrapperOutcome::Fallback(reason) => {
                 return Err(invalid(format!(
-                    "the resident render session could not carry this render ({reason}); the \
-                     automatic one-shot fallback is disabled. Diagnose the session failure, or \
-                     set {DISABLE_SESSION_WRAPPER_ENV}=1 to force the one-shot transport for \
-                     this render. Any world-dump snapshots from the failed session are preserved \
-                     for diagnosis; clear the dump directory before re-running, since it must \
-                     start empty."
+                    "the resident render session could not carry this render ({reason}). \
+                     Diagnose the session failure; there is no alternate transport. Any \
+                     world-dump snapshots from the failed session are preserved for diagnosis; \
+                     clear the dump directory before re-running, since it must start empty."
                 )));
             }
         }
@@ -5969,10 +5875,6 @@ fn render_with_artifact(
     Ok(build_interactive_image_report(&worker_report, facts))
 }
 
-/// Escape hatch for A/B verification against the one-shot argv transport;
-/// the equivalence test renders both ways and diffs the public reports.
-pub const DISABLE_SESSION_WRAPPER_ENV: &str = "AEXCOMPAT_DISABLE_RENDER_SESSION_WRAPPER";
-
 /// Test-only fault injection (#264): when set, the length-1 classic wrapper
 /// reports a `Fallback` before opening the session, so a test can exercise the
 /// fail-closed caller arm (an attempted session that fails must surface an
@@ -6100,12 +6002,9 @@ enum SessionWrapperOutcome {
     Failure(io::Error),
     /// The session infrastructure could not carry the render (open failure,
     /// worker crash or invalidation, malformed close summary). The string is the
-    /// reason. The automatic one-shot fallback is removed (#98 W4, #264): the
-    /// caller turns this into an explicit fail-closed error so a session
-    /// infrastructure failure surfaces instead of being masked by a silent
-    /// one-shot rerun. The one-shot transport stays reachable only for renders
-    /// the session cannot serve (ineligible shapes) or the explicit
-    /// `AEXCOMPAT_DISABLE_RENDER_SESSION_WRAPPER` override.
+    /// reason. There is no second transport (#98 W4, #264, #365): the caller
+    /// turns this into an explicit fail-closed error so a session
+    /// infrastructure failure surfaces instead of being masked.
     Fallback(String),
 }
 
