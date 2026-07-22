@@ -37,3 +37,12 @@ def test_generic_delay_load_fixture_covers_a_transitive_dependency():
     assert "case PF_Cmd_SEQUENCE_SETUP" in probe
     assert "issue60_transitive_value()" in dependency
     assert "issue60_delay_load_gate" in cmake
+
+
+def test_auto_render_approves_adjacent_delay_load_dependencies_before_dispatch():
+    harness = (ROOT / "broker/crates/harness/src/main.rs").read_text(encoding="utf-8")
+    assert "fn approved_adjacent_dependencies(" in harness
+    assert "discover_adjacent_imports(&aex_path)?" in harness
+    assert "inspect_experimental_with_approved_dependencies_and_diagnostics" in harness
+    assert "render_experimental_image_with_approved_dependencies" in harness
+    assert "approved_dependencies.clone()" in harness
