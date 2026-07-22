@@ -181,10 +181,18 @@ fn main() {
         // a root would under-count the load failures it is meant to measure.
         let mut roots: Vec<PathBuf> = Vec::new();
         if options.seal {
-            roots.extend(plugin.parent().map(Path::to_path_buf));
+            // Canonicalized because the resolver requires absolute roots, and a
+            // scan folder may be given relative on the command line.
+            roots.extend(
+                plugin
+                    .parent()
+                    .and_then(|parent| std::fs::canonicalize(parent).ok()),
+            );
             for dir in &options.dependency_dirs {
-                if !roots.contains(dir) {
-                    roots.push(dir.clone());
+                if let Ok(dir) = std::fs::canonicalize(dir)
+                    && !roots.contains(&dir)
+                {
+                    roots.push(dir);
                 }
             }
         }

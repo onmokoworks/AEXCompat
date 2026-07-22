@@ -442,16 +442,30 @@ fn default_dependency_dirs() -> Vec<PathBuf> {
 /// helper DLLs beside itself resolves them the way the installed host would),
 /// then the configured runtime folders.
 ///
-/// A configured folder that does not exist is dropped rather than failing the
-/// resolution: a missing directory can never provide a DLL, so keeping it would
-/// only turn a stale config line into "nothing discovers at all". Too *many*
-/// folders is not softened — the resolver rejects that, so a config over the
-/// root limit fails loudly instead of silently ignoring the tail.
+/// Each root is canonicalized here, because the resolver requires absolute roots
+/// — a root whose meaning depends on the process working directory is exactly
+/// what it should refuse — while the config may legitimately be written relative.
+/// A folder that cannot be canonicalized (missing, or not a directory) is dropped
+/// rather than failing the resolution: it can never provide a DLL, so keeping it
+/// would only turn a stale config line into "nothing discovers at all". Too
+/// *many* folders is not softened — the resolver rejects that, so a config over
+/// the root limit fails loudly instead of silently ignoring the tail.
 fn search_roots_for(plugin: &Path, dependency_dirs: &[PathBuf]) -> Vec<PathBuf> {
-    let mut roots: Vec<PathBuf> = plugin.parent().map(Path::to_path_buf).into_iter().collect();
-    for dir in dependency_dirs.iter().filter(|dir| dir.is_dir()) {
-        if !roots.iter().any(|root| root == dir) {
-            roots.push(dir.clone());
+    let canonical_dir = |dir: &Path| {
+        std::fs::canonicalize(dir)
+            .ok()
+            .filter(|canonical| canonical.is_dir())
+    };
+    let mut roots: Vec<PathBuf> = plugin
+        .parent()
+        .and_then(canonical_dir)
+        .into_iter()
+        .collect();
+    for dir in dependency_dirs {
+        if let Some(dir) = canonical_dir(dir)
+            && !roots.iter().any(|root| root == &dir)
+        {
+            roots.push(dir);
         }
     }
     roots

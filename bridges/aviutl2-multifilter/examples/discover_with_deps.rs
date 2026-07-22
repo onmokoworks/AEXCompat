@@ -6,7 +6,7 @@
 //!   set AEXCOMPAT_MULTIFILTER_REPOSITORY=C:\path\to\AEXCompat
 //!   cargo run --release --example discover_with_deps -- "<effect.aex>" "<support-files-dir>"
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use aexcompat_broker::image_render::inspect_experimental_with_approved_dependencies_and_diagnostics;
 use aexcompat_broker::plugin_dependency_closure::{
@@ -26,8 +26,16 @@ fn main() {
             .expect("set AEXCOMPAT_MULTIFILTER_REPOSITORY"),
     );
 
-    let mut roots: Vec<PathBuf> = effect.parent().map(Path::to_path_buf).into_iter().collect();
-    if !roots.contains(&support) {
+    // The resolver requires absolute roots, so canonicalize what the command line
+    // gave us, exactly as the multi-filter does for its configured folders.
+    let mut roots: Vec<PathBuf> = effect
+        .parent()
+        .and_then(|parent| std::fs::canonicalize(parent).ok())
+        .into_iter()
+        .collect();
+    if let Ok(support) = std::fs::canonicalize(&support)
+        && !roots.contains(&support)
+    {
         roots.push(support);
     }
     let closure = resolve_dependency_closure(DependencyClosureRequest::new(&effect, &roots))

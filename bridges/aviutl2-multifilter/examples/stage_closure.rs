@@ -9,7 +9,7 @@
 //! Run:
 //!   cargo run --release --example stage_closure -- "<effect.aex>" "<support-files-dir>" "<stage-dir>"
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use aexcompat_broker::plugin_dependency_closure::{
     DependencyClosureRequest, resolve_dependency_closure,
@@ -24,8 +24,16 @@ fn main() {
     let support = PathBuf::from(args.next().expect("need the AE Support Files dir"));
     let stage = PathBuf::from(args.next().expect("need the staging dir"));
 
-    let mut roots: Vec<PathBuf> = effect.parent().map(Path::to_path_buf).into_iter().collect();
-    if !roots.contains(&support) {
+    // The resolver requires absolute roots, so canonicalize what the command line
+    // gave us, exactly as the multi-filter does for its configured folders.
+    let mut roots: Vec<PathBuf> = effect
+        .parent()
+        .and_then(|parent| std::fs::canonicalize(parent).ok())
+        .into_iter()
+        .collect();
+    if let Ok(support) = std::fs::canonicalize(&support)
+        && !roots.contains(&support)
+    {
         roots.push(support);
     }
     let closure = resolve_dependency_closure(DependencyClosureRequest::new(&effect, &roots))
