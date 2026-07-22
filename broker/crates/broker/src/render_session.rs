@@ -25,7 +25,7 @@ use crate::secure_image_dispatch::{
     dispatch_secure_gpu_image_session, dispatch_secure_image_session,
 };
 use crate::secure_launch::{SecureLaunchResult, SecureSessionProcess};
-use crate::windows_process::SessionChildHandles;
+use crate::windows_process::{SessionChildHandles, WorkerDesktopPolicy};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -470,6 +470,14 @@ pub struct SessionOpenRequest<'a> {
     /// Static render-environment trailer (`render:v1|`), already encoded by
     /// `encode_render_environment`.
     pub render_environment_trailer: Option<String>,
+    /// Static audio-source trailer (`session-audio:v1|<samples>|<rate>|<path>`),
+    /// carrying the same span the one-shot passes as three bare argv slots under
+    /// `--render-image-audio` (issue #339). The plug-in sees one source for the
+    /// whole session, so it rides the launch argv rather than the frame message.
+    /// Rides at the tail of the *positional* section, behind the other optional
+    /// trailers, so the worker peels it first of those. The auxiliary option
+    /// pairs are appended after it and are stripped before any of this.
+    pub audio_trailer: Option<String>,
     /// Alpha-as-coverage parameter slots (`--alpha-as-coverage-v1`), issue #98
     /// W1-4c. The worker publishes the alpha-coverage provider once at launch
     /// (a global the classic render runtime reads on every frame), matching the
@@ -698,6 +706,22 @@ impl RenderSession {
     /// slot in place mid-session (protocol §3, issue #262), so there is no
     /// launch-time output-capacity parameter.
     pub fn open(request: SessionOpenRequest<'_>) -> io::Result<RenderSession> {
+        Self::open_with_desktop_policy(request, WorkerDesktopPolicy::Dedicated)
+    }
+
+    /// Opens a session for an explicitly interactive GUI harness. This is
+    /// intentionally opt-in; normal discovery/render sessions use a private
+    /// desktop so plugin UI cannot interrupt the user's desktop.
+    pub(crate) fn open_on_current_desktop(
+        request: SessionOpenRequest<'_>,
+    ) -> io::Result<RenderSession> {
+        Self::open_with_desktop_policy(request, WorkerDesktopPolicy::Current)
+    }
+
+    fn open_with_desktop_policy(
+        request: SessionOpenRequest<'_>,
+        desktop_policy: WorkerDesktopPolicy,
+    ) -> io::Result<RenderSession> {
         if request.time_step <= 0
             // A zero-duration render (total_time == 0) is valid: the shared
             // RenderTiming::is_valid admits it at current_time == 0, and the
@@ -891,8 +915,13 @@ impl RenderSession {
         // Layers are static and no longer occupy the section (#268): stream each
         // layer's RGBA8 to its own file under target/image-transport and hand the
         // worker an inherited, path-authenticated read HANDLE. The worker reads it
-        // once at open into a private vector and never re-opens a path for
-        // transport (issue #18 TOCTOU lesson). Because the pixels leave the
+        // once at open into a private vector and never re-opens a path for *pixel*
+        // transport (issue #18 TOCTOU lesson). Broker-written sidecars whose
+        // contents are not pixels still travel by path (`--aux-manifest-v1`,
+        // `--parameter-animation-v1`, and the audio source of #339); those are
+        // read during argv parsing, before the plug-in module is loaded, so no
+        // plug-in code is running in that process to swap the leaf. Because the
+        // pixels leave the
         // bounded section, layer count/size no longer feed the aggregate section
         // cap, so the one-shot per-file layered path has no capability the session
         // lacks. `layer_files` keeps the broker's inheritable read handles alive
@@ -986,6 +1015,12 @@ impl RenderSession {
         }
         if let Some(render_environment) = &request.render_environment_trailer {
             args_after_plugin.push(render_environment.clone());
+        }
+        // The audio trailer sits after the context trailers so the worker peels it
+        // first and the context/layer chain keeps the positions it already had
+        // (issue #339). Auxiliary option pairs are stripped before any of this.
+        if let Some(audio) = &request.audio_trailer {
+            args_after_plugin.push(audio.clone());
         }
         // Auxiliary option pairs ride argv's tail; the worker peels them
         // before the positional session contract (strip_auxiliary_options)
@@ -1127,17 +1162,40 @@ impl RenderSession {
                     system32: policy_input.system32,
                 },
             )?;
-            dispatch_secure_gpu_image_session(
-                dispatch,
-                GpuRuntimeAuthorization {
-                    backend,
-                    session_identity: policy_input.session_identity,
-                    module_report: &report,
-                },
-                &child_handles,
-            )?
+            match desktop_policy {
+                WorkerDesktopPolicy::Dedicated => dispatch_secure_gpu_image_session(
+                    dispatch,
+                    GpuRuntimeAuthorization {
+                        backend,
+                        session_identity: policy_input.session_identity,
+                        module_report: &report,
+                    },
+                    &child_handles,
+                )?,
+                WorkerDesktopPolicy::Current => {
+                    crate::secure_image_dispatch::dispatch_secure_gpu_image_session_on_current_desktop(
+                        dispatch,
+                        GpuRuntimeAuthorization {
+                            backend,
+                            session_identity: policy_input.session_identity,
+                            module_report: &report,
+                        },
+                        &child_handles,
+                    )?
+                }
+            }
         } else {
-            dispatch_secure_image_session(dispatch, &child_handles)?
+            match desktop_policy {
+                WorkerDesktopPolicy::Dedicated => {
+                    dispatch_secure_image_session(dispatch, &child_handles)?
+                }
+                WorkerDesktopPolicy::Current => {
+                    crate::secure_image_dispatch::dispatch_secure_image_session_on_current_desktop(
+                        dispatch,
+                        &child_handles,
+                    )?
+                }
+            }
         };
         // The worker inherited its copies; dropping the broker's child-side
         // ends turns a worker exit into pipe EOF instead of a hang.
@@ -2171,16 +2229,41 @@ impl RenderSession {
 
 /// A clean session close requires the final report to agree, not just the
 /// exit code: the hoisted sequence must have set up and torn down without
-/// error, guards must be intact, and every ownership ledger must balance.
+/// error, guards must be intact, and every hard ownership ledger must balance.
+/// The worker contract explicitly classifies a known suite lease residue as a
+/// warning, so that one warning is accepted only when its diagnostics prove it
+/// is an explicit, non-faulting live lease rather than a malformed report.
 /// Missing keys fail closed. The classic and smart workers report session
 /// mechanics under different keys (the classic report reuses its
 /// persistent-sequence fields; the smart report carries dedicated session_*
 /// fields, protocol v1.1).
+fn suite_lease_state_clean(report: &Value) -> bool {
+    if report.get("suite_leases_balanced") == Some(&Value::Bool(true)) {
+        return true;
+    }
+    let acquires = report.get("suite_acquires").and_then(Value::as_u64);
+    let releases = report.get("suite_releases").and_then(Value::as_u64);
+    report.get("suite_leases_balanced") == Some(&Value::Bool(false))
+        && report.get("suite_lease_warning") == Some(&Value::Bool(true))
+        && report.get("suite_fault_observed") == Some(&Value::Bool(false))
+        && acquires
+            .zip(releases)
+            .is_some_and(|(acquires, releases)| acquires > releases)
+        && report
+            .get("live_suite_lease_count")
+            .and_then(Value::as_u64)
+            .is_some_and(|count| count > 0)
+        && report
+            .get("live_suite_leases")
+            .and_then(Value::as_str)
+            .is_some_and(|leases| !leases.is_empty())
+}
+
 fn final_report_clean(report: &Value, smart: bool) -> bool {
     let shared = report.get("status") == Some(&json!("render_completed"))
         && report.get("global_setdown_error") == Some(&json!(0))
         && report.get("guard_bytes_intact") == Some(&Value::Bool(true))
-        && report.get("suite_leases_balanced") == Some(&Value::Bool(true))
+        && suite_lease_state_clean(report)
         && report.get("handle_lifetimes_balanced") == Some(&Value::Bool(true))
         && report.get("world_lifetimes_balanced") == Some(&Value::Bool(true))
         && report.get("param_checkouts_balanced") == Some(&Value::Bool(true));
@@ -2319,6 +2402,7 @@ pub fn run_video_batch(
         mask_trailer: None,
         spatial_trailer: None,
         render_environment_trailer: None,
+        audio_trailer: None,
         alpha_as_coverage_params: &request.alpha_as_coverage_params,
         // The video-batch entry does not apply conformance render settings.
         conformance_render_settings: None,
@@ -3343,6 +3427,49 @@ mod tests {
     }
 
     #[test]
+    fn final_report_clean_accepts_only_explicit_nonfaulting_suite_lease_warning() {
+        let mut warned = serde_json::json!({
+            "status": "render_completed",
+            "global_setdown_error": 0,
+            "guard_bytes_intact": true,
+            "suite_leases_balanced": false,
+            "suite_lease_warning": true,
+            "suite_fault_observed": false,
+            "suite_acquires": 123,
+            "suite_releases": 24,
+            "live_suite_lease_count": 1,
+            "live_suite_leases": "PF World Suite@2=99",
+            "handle_lifetimes_balanced": true,
+            "world_lifetimes_balanced": true,
+            "param_checkouts_balanced": true,
+            "session_mode": true,
+            "session_render_error": 0,
+            "session_sequence_setup_error": 0,
+            "session_sequence_setdown_error": 0,
+        });
+        assert!(final_report_clean(&warned, true));
+
+        for (key, value) in [
+            ("suite_lease_warning", serde_json::json!(false)),
+            ("suite_fault_observed", serde_json::json!(true)),
+            ("suite_acquires", serde_json::json!(24)),
+            ("live_suite_lease_count", serde_json::json!(0)),
+            ("live_suite_leases", serde_json::json!("")),
+        ] {
+            warned[key] = value;
+            assert!(!final_report_clean(&warned, true), "{key} must fail closed");
+            warned[key] = match key {
+                "suite_lease_warning" => serde_json::json!(true),
+                "suite_fault_observed" => serde_json::json!(false),
+                "suite_acquires" => serde_json::json!(123),
+                "live_suite_lease_count" => serde_json::json!(1),
+                "live_suite_leases" => serde_json::json!("PF World Suite@2=99"),
+                _ => unreachable!(),
+            };
+        }
+    }
+
+    #[test]
     fn open_rejects_timing_the_worker_could_never_render() {
         // Timing is validated before any file or transport work, so fake
         // paths never get touched when the timing is invalid.
@@ -3367,6 +3494,7 @@ mod tests {
                 mask_trailer: None,
                 spatial_trailer: None,
                 render_environment_trailer: None,
+                audio_trailer: None,
                 alpha_as_coverage_params: &[],
                 conformance_render_settings: None,
                 layers: &[],

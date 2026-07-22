@@ -1,3 +1,4 @@
+use crate::restricted_worker_acl::RestrictedWorkerSid;
 use crate::restricted_worker_token::RestrictedWorkerToken;
 use crate::{ExitClassification, classify_exit, redact_windows_paths};
 use std::ffi::c_void;
@@ -9,10 +10,11 @@ use std::ptr::{null, null_mut};
 use std::thread;
 use std::time::Duration;
 use windows_sys::Win32::Foundation::{
-    CloseHandle, HANDLE, HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE, SetHandleInformation,
-    WAIT_OBJECT_0, WAIT_TIMEOUT,
+    CloseHandle, HANDLE, HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE, LocalFree,
+    SetHandleInformation, WAIT_OBJECT_0, WAIT_TIMEOUT,
 };
-use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
+use windows_sys::Win32::Security::Authorization::ConvertStringSecurityDescriptorToSecurityDescriptorW;
+use windows_sys::Win32::Security::{PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES};
 use windows_sys::Win32::Storage::FileSystem::ReadFile;
 use windows_sys::Win32::System::JobObjects::{
     AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
@@ -21,13 +23,18 @@ use windows_sys::Win32::System::JobObjects::{
     TerminateJobObject,
 };
 use windows_sys::Win32::System::Pipes::CreatePipe;
+use windows_sys::Win32::System::StationsAndDesktops::{
+    CloseDesktop, CreateDesktopW, GetProcessWindowStation, GetThreadDesktop,
+    GetUserObjectInformationW, HDESK, UOI_NAME,
+};
 use windows_sys::Win32::System::Threading::INFINITE;
 use windows_sys::Win32::System::Threading::{
     CREATE_NO_WINDOW, CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, CreateEventW,
     CreateProcessAsUserW, CreateProcessW, DeleteProcThreadAttributeList,
-    EXTENDED_STARTUPINFO_PRESENT, GetExitCodeProcess, InitializeProcThreadAttributeList,
-    PROC_THREAD_ATTRIBUTE_HANDLE_LIST, PROCESS_INFORMATION, ResumeThread, STARTF_USESTDHANDLES,
-    STARTUPINFOEXW, TerminateProcess, UpdateProcThreadAttribute, WaitForSingleObject,
+    EXTENDED_STARTUPINFO_PRESENT, GetCurrentThreadId, GetExitCodeProcess,
+    InitializeProcThreadAttributeList, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, PROCESS_INFORMATION,
+    ResumeThread, STARTF_USESTDHANDLES, STARTUPINFOEXW, TerminateProcess,
+    UpdateProcThreadAttribute, WaitForSingleObject,
 };
 
 // Native render stdout is one bounded JSON report. Its 65,536 Suite events
@@ -40,6 +47,172 @@ const TERMINATION_GRACE_MS: u32 = 5_000;
 // See memory_limit_reached: the largest single failed allocation the
 // detection tolerates between the recorded peak and the cap.
 const MEMORY_LIMIT_DETECTION_SLACK: u64 = 16 * 1024 * 1024;
+const DESKTOP_WORKER_ACCESS: u32 = 0x0000_01ff;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WorkerDesktopPolicy {
+    /// Non-interactive discovery/render workers get a private desktop so a
+    /// modal UI cannot appear on the user's input desktop.
+    Dedicated,
+    /// Explicit GUI harnesses retain the caller's current desktop.
+    Current,
+}
+
+struct DesktopSecurityDescriptor(std::ptr::NonNull<std::ffi::c_void>);
+
+impl DesktopSecurityDescriptor {
+    fn new(worker_sid: Option<&RestrictedWorkerSid>) -> io::Result<Self> {
+        // Keep the desktop private to the broker's window-station owner and
+        // SYSTEM. A restricted worker gets only the object-level rights needed
+        // to create and operate UI objects; it cannot mutate the desktop ACL.
+        // The protected DACL prevents the parent station ACL from being
+        // inherited into this boundary.
+        let worker_ace = worker_sid
+            .map(|sid| format!("(A;;0x000001ff;;;{})", sid.as_str()))
+            .unwrap_or_default();
+        let sddl = format!("D:P(A;;GA;;;SY)(A;;GA;;;OW){worker_ace}");
+        let text: Vec<u16> = sddl.encode_utf16().chain([0]).collect();
+        let mut raw: PSECURITY_DESCRIPTOR = null_mut();
+        if unsafe {
+            ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                text.as_ptr(),
+                1,
+                &mut raw,
+                null_mut(),
+            )
+        } == 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(Self(
+            std::ptr::NonNull::new(raw).ok_or_else(io::Error::last_os_error)?,
+        ))
+    }
+
+    fn raw(&self) -> PSECURITY_DESCRIPTOR {
+        self.0.as_ptr()
+    }
+}
+
+impl Drop for DesktopSecurityDescriptor {
+    fn drop(&mut self) {
+        unsafe {
+            LocalFree(self.0.as_ptr());
+        }
+    }
+}
+
+fn user_object_name(handle: HANDLE) -> io::Result<String> {
+    if handle.is_null() {
+        return Err(io::Error::last_os_error());
+    }
+    let mut required_bytes = 0u32;
+    unsafe {
+        GetUserObjectInformationW(handle, UOI_NAME, null_mut(), 0, &mut required_bytes);
+    }
+    if required_bytes < 2 {
+        return Err(io::Error::last_os_error());
+    }
+    let mut name = vec![0u16; (required_bytes as usize).div_ceil(size_of::<u16>())];
+    if unsafe {
+        GetUserObjectInformationW(
+            handle,
+            UOI_NAME,
+            name.as_mut_ptr().cast(),
+            (name.len() * size_of::<u16>()) as u32,
+            &mut required_bytes,
+        )
+    } == 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    let end = name
+        .iter()
+        .position(|value| *value == 0)
+        .unwrap_or(name.len());
+    String::from_utf16(&name[..end])
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "window-station name is invalid"))
+}
+
+fn current_window_station_name() -> io::Result<String> {
+    user_object_name(unsafe { GetProcessWindowStation() })
+}
+
+fn current_desktop_startup_path() -> io::Result<Vec<u16>> {
+    let station = current_window_station_name()?;
+    let desktop = user_object_name(unsafe { GetThreadDesktop(GetCurrentThreadId()) })?;
+    Ok(format!("{station}\\{desktop}")
+        .encode_utf16()
+        .chain([0])
+        .collect())
+}
+
+/// A desktop created exclusively for a non-interactive worker. The startup
+/// path and the HDESK stay alive until the process/job and pipe readers have
+/// finished; closing the handle immediately after CreateProcess would make
+/// later UI calls fail nondeterministically.
+struct WorkerDesktop {
+    // `None` represents the caller's existing desktop. It is not owned by the
+    // broker and must never be closed here.
+    handle: Option<HDESK>,
+    startup_path: Vec<u16>,
+}
+
+impl WorkerDesktop {
+    fn create(worker_sid: Option<&RestrictedWorkerSid>) -> io::Result<Self> {
+        let station = current_window_station_name()?;
+        let desktop_name = format!("AEXCompatWorkerDesktop-{:032x}", rand::random::<u128>());
+        let desktop_text: Vec<u16> = desktop_name.encode_utf16().chain([0]).collect();
+        let startup_path: Vec<u16> = format!("{station}\\{desktop_name}")
+            .encode_utf16()
+            .chain([0])
+            .collect();
+        let descriptor = DesktopSecurityDescriptor::new(worker_sid)?;
+        let security = SECURITY_ATTRIBUTES {
+            nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,
+            lpSecurityDescriptor: descriptor.raw(),
+            bInheritHandle: 0,
+        };
+        let handle = unsafe {
+            CreateDesktopW(
+                desktop_text.as_ptr(),
+                null(),
+                null(),
+                0,
+                DESKTOP_WORKER_ACCESS,
+                &security,
+            )
+        };
+        if handle.is_null() {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(Self {
+            handle: Some(handle),
+            startup_path,
+        })
+    }
+
+    fn current() -> io::Result<Self> {
+        Ok(Self {
+            handle: None,
+            startup_path: current_desktop_startup_path()?,
+        })
+    }
+
+    fn startup_path(&mut self) -> *mut u16 {
+        self.startup_path.as_mut_ptr()
+    }
+}
+
+impl Drop for WorkerDesktop {
+    fn drop(&mut self) {
+        if let Some(handle) = self.handle.take() {
+            unsafe {
+                CloseDesktop(handle);
+            }
+        }
+    }
+}
 
 pub struct ProcessResult {
     pub classification: ExitClassification,
@@ -343,7 +516,15 @@ pub fn run_isolated(
     args: &[String],
     timeout: Option<Duration>,
 ) -> io::Result<ProcessResult> {
-    run_isolated_impl(program, args, timeout, None, None)
+    run_isolated_impl(
+        program,
+        args,
+        timeout,
+        None,
+        None,
+        WorkerDesktopPolicy::Dedicated,
+        None,
+    )
 }
 
 pub fn run_isolated_with_restricted_token(
@@ -359,6 +540,8 @@ pub fn run_isolated_with_restricted_token(
         args,
         timeout,
         Some((token.as_raw_handle(), current_directory)),
+        Some(token.worker_sid()),
+        WorkerDesktopPolicy::Dedicated,
         Some(repository),
     )
 }
@@ -368,9 +551,20 @@ fn run_isolated_impl(
     args: &[String],
     timeout: Option<Duration>,
     token: Option<(HANDLE, &Path)>,
+    worker_sid: Option<&RestrictedWorkerSid>,
+    desktop_policy: WorkerDesktopPolicy,
     repository: Option<&Path>,
 ) -> io::Result<ProcessResult> {
-    launch_isolated_impl(program, args, token, None, repository)?.wait_and_collect(timeout)
+    launch_isolated_impl(
+        program,
+        args,
+        token,
+        None,
+        worker_sid,
+        desktop_policy,
+        repository,
+    )?
+    .wait_and_collect(timeout)
 }
 
 /// A resumed isolated worker whose exit has not been awaited yet. One-shot
@@ -381,6 +575,7 @@ fn run_isolated_impl(
 pub struct LaunchedIsolatedProcess {
     process: OwnedHandle,
     job: OwnedHandle,
+    desktop: Option<WorkerDesktop>,
     stdout_reader: thread::JoinHandle<io::Result<(String, bool)>>,
     stderr_reader: thread::JoinHandle<io::Result<(String, bool)>>,
     // Opt-in crash minidump (issue #18). The broker keeps the pipe read side
@@ -448,6 +643,7 @@ impl LaunchedIsolatedProcess {
         let LaunchedIsolatedProcess {
             process: process_handle,
             job,
+            desktop,
             stdout_reader,
             stderr_reader,
             minidump_file,
@@ -488,6 +684,10 @@ impl LaunchedIsolatedProcess {
         drop(minidump_file);
         let (peak_process_memory_bytes, peak_job_memory_bytes) = query_job_memory_peaks(job.raw());
         let worker_peak_commit_bytes = query_worker_peak_commit(process_handle.raw());
+        // Release the desktop only after the worker, job, readers, and
+        // diagnostics have all been collected. The object is intentionally
+        // not part of the inherited handle list; lpDesktop names it.
+        drop(desktop);
         let classification = classify_exit(exit_code, timed_out);
         // The hard commit cap rejects the allocation that would cross it, so the
         // recorded peak stops short of the limit by up to one failed request.
@@ -561,11 +761,52 @@ pub fn launch_isolated_session_with_restricted_token(
     session: &SessionChildHandles,
     repository: &Path,
 ) -> io::Result<LaunchedIsolatedProcess> {
+    launch_isolated_session_with_desktop_policy(
+        program,
+        args,
+        token,
+        current_directory,
+        session,
+        WorkerDesktopPolicy::Dedicated,
+        repository,
+    )
+}
+
+pub(crate) fn launch_isolated_session_on_current_desktop(
+    program: &Path,
+    args: &[String],
+    token: &RestrictedWorkerToken,
+    current_directory: &Path,
+    session: &SessionChildHandles,
+    repository: &Path,
+) -> io::Result<LaunchedIsolatedProcess> {
+    launch_isolated_session_with_desktop_policy(
+        program,
+        args,
+        token,
+        current_directory,
+        session,
+        WorkerDesktopPolicy::Current,
+        repository,
+    )
+}
+
+fn launch_isolated_session_with_desktop_policy(
+    program: &Path,
+    args: &[String],
+    token: &RestrictedWorkerToken,
+    current_directory: &Path,
+    session: &SessionChildHandles,
+    desktop_policy: WorkerDesktopPolicy,
+    repository: &Path,
+) -> io::Result<LaunchedIsolatedProcess> {
     launch_isolated_impl(
         program,
         args,
         Some((token.as_raw_handle(), current_directory)),
         Some(session),
+        Some(token.worker_sid()),
+        desktop_policy,
         Some(repository),
     )
 }
@@ -575,6 +816,8 @@ fn launch_isolated_impl(
     args: &[String],
     token: Option<(HANDLE, &Path)>,
     session: Option<&SessionChildHandles>,
+    worker_sid: Option<&RestrictedWorkerSid>,
+    desktop_policy: WorkerDesktopPolicy,
     repository: Option<&Path>,
 ) -> io::Result<LaunchedIsolatedProcess> {
     let trace_file = crate::trace_policy::create_trace_file_for_launch()?;
@@ -589,6 +832,10 @@ fn launch_isolated_impl(
     let minidump_active = minidump_file.is_some();
     let session_active = session.is_some();
     let restricted_token = token.is_some();
+    let mut desktop = match desktop_policy {
+        WorkerDesktopPolicy::Dedicated => Some(WorkerDesktop::create(worker_sid)?),
+        WorkerDesktopPolicy::Current => Some(WorkerDesktop::current()?),
+    };
     let (stdout_read, stdout_write) = pipe()?;
     let (stderr_read, stderr_write) = pipe()?;
     let job = OwnedHandle::new(unsafe { CreateJobObjectW(null(), null()) })?;
@@ -685,6 +932,9 @@ fn launch_isolated_impl(
     startup.StartupInfo.hStdOutput = stdout_write.raw();
     startup.StartupInfo.hStdError = stderr_write.raw();
     startup.StartupInfo.hStdInput = null_mut();
+    if let Some(desktop) = desktop.as_mut() {
+        startup.StartupInfo.lpDesktop = desktop.startup_path();
+    }
     startup.lpAttributeList = attribute_list;
     let mut process: PROCESS_INFORMATION = unsafe { zeroed() };
     let creation_flags = EXTENDED_STARTUPINFO_PRESENT
@@ -770,6 +1020,7 @@ fn launch_isolated_impl(
     Ok(LaunchedIsolatedProcess {
         process: process_handle,
         job,
+        desktop,
         stdout_reader,
         stderr_reader,
         minidump_file,

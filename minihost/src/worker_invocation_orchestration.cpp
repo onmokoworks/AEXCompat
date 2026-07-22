@@ -167,7 +167,11 @@ void apply_render(const request_parser::WorkerInvocation& source,
   target.external_audio_samples = source.audio_samples;
   target.external_audio_rate = source.audio_rate;
   apply_click_draw(source, hooks);
-  if (mode.image_audio_mode && hooks.set_audio_source)
+  // The one-shot carries its audio under --render-image-audio; a session carries
+  // the same span in the `session-audio:v1|` launch trailer (issue #339). Both
+  // hand the plug-in one static source for the whole invocation, so the hook is
+  // the same and only the argv shape differs.
+  if ((mode.image_audio_mode || mode.session_audio) && hooks.set_audio_source)
     hooks.set_audio_source(&target.external_audio, target.external_audio_samples);
 }
 

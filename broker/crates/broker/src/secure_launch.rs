@@ -235,6 +235,33 @@ pub fn secure_launch_session(
     request: SecureLaunchRequest<'_>,
     session: &crate::windows_process::SessionChildHandles,
 ) -> io::Result<SecureSessionProcess> {
+    secure_launch_session_with_desktop_policy(
+        tree,
+        request,
+        session,
+        crate::windows_process::WorkerDesktopPolicy::Dedicated,
+    )
+}
+
+pub(crate) fn secure_launch_session_on_current_desktop(
+    tree: SealedLoadTree,
+    request: SecureLaunchRequest<'_>,
+    session: &crate::windows_process::SessionChildHandles,
+) -> io::Result<SecureSessionProcess> {
+    secure_launch_session_with_desktop_policy(
+        tree,
+        request,
+        session,
+        crate::windows_process::WorkerDesktopPolicy::Current,
+    )
+}
+
+fn secure_launch_session_with_desktop_policy(
+    tree: SealedLoadTree,
+    request: SecureLaunchRequest<'_>,
+    session: &crate::windows_process::SessionChildHandles,
+    desktop_policy: crate::windows_process::WorkerDesktopPolicy,
+) -> io::Result<SecureSessionProcess> {
     use crate::restricted_worker_acl::{RestrictedWorkerSid, protect_sealed_load_tree};
     use crate::restricted_worker_token::create_restricted_worker_token;
     use crate::trusted_worker_stage::TrustedWorkerStage;
@@ -266,16 +293,30 @@ pub fn secure_launch_session(
     // current_path()/target/image-transport, the same broker-owned transport
     // directory the one-shot input raws already live in. A staging-root cwd
     // makes that pin unsatisfiable and every session sidecar rejected.
-    let launched = crate::windows_process::launch_isolated_session_with_restricted_token(
-        worker_stage.worker_path(),
-        &args,
-        &token,
-        // Working directory (see above): the repository.
-        request.repository,
-        session,
-        // Repository root for the launch-boundary minidump handle (issue #18/#224).
-        request.repository,
-    )
+    let launched = match desktop_policy {
+        crate::windows_process::WorkerDesktopPolicy::Dedicated => {
+            crate::windows_process::launch_isolated_session_with_restricted_token(
+                worker_stage.worker_path(),
+                &args,
+                &token,
+                // Working directory (see above): the repository.
+                request.repository,
+                session,
+                // Repository root for the launch-boundary minidump handle (issue #18/#224).
+                request.repository,
+            )
+        }
+        crate::windows_process::WorkerDesktopPolicy::Current => {
+            crate::windows_process::launch_isolated_session_on_current_desktop(
+                worker_stage.worker_path(),
+                &args,
+                &token,
+                request.repository,
+                session,
+                request.repository,
+            )
+        }
+    }
     .map_err(|error| stage_error("restricted session launch", error))?;
     Ok(SecureSessionProcess {
         launched: Some(launched),

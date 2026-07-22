@@ -48,6 +48,14 @@ struct WorkerMode {
   // it is the positional argument at index `image_argc - 1` (issue #98 W1-4,
   // per-layer inherited file handles #268).
   bool session_layers{};
+  // Session audio-source trailer (`session-audio:v1|<samples>|<rate>|<path>`)
+  // present; when set, it is the positional argument at index
+  // `session_audio_argc`. The one-shot spends three bare slots on the same three
+  // values under its own command word (`--render-image-audio`); a session cannot,
+  // because its tail is shared with the other optional trailers, so the values
+  // ride one marked argument peeled like the rest (issue #339).
+  bool session_audio{};
+  int session_audio_argc{};
   bool layered_image_mode{};
   bool image_click_context{};
   bool image_draw_context{};

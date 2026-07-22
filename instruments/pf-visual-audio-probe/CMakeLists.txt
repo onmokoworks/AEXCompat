@@ -2,7 +2,9 @@ foreach(target pf_visual_audio_advertised_probe pf_visual_audio_unadvertised_pro
     pf_visual_audio_sidecar_probe pf_visual_audio_boundary_probe
     pf_visual_audio_format_probe pf_visual_audio_multi_handle_probe
     pf_visual_audio_double_checkin_probe)
-  add_library(${target} MODULE pf_visual_audio_probe.cpp)
+  # The .rc carries the PiPL the worker needs to resolve EffectMain (issue #84);
+  # without it every target here is rejected as unknown_no_effect_entrypoint.
+  add_library(${target} MODULE pf_visual_audio_probe.cpp pf_visual_audio_probe.rc)
   target_include_directories(${target} PRIVATE
     "$ENV{AE_SDK_ROOT}/Examples/Headers"
     "$ENV{AE_SDK_ROOT}/Examples/Headers/SP"
