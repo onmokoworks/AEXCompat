@@ -1,9 +1,17 @@
-//! A/B equivalence for the length-1 session wrapper (issue #98 stage W2):
-//! the resident-session route must produce the same public
-//! `interactive_image_render` report and PNG bytes as the one-shot argv
-//! transport for a plain classic render. Requires the real render worker
-//! executable and the pf_sampling_probe fixture from this checkout; skips
-//! (with a message) when either is not built.
+//! Behavioural verification of the length-1 session wrapper (issue #98 stage
+//! W2, converted from A/B in #361).
+//!
+//! These were A/B tests against the one-shot argv transport. That comparison
+//! could only ever check the transport and the lifecycle: both routes converge
+//! on the same `smart_render_once` and the same dispatch, so a regression in
+//! the render core moved both sides together and compared equal. Each test now
+//! verifies the session directly -- health conditions, determinism, and the
+//! effect the feature under test is supposed to have -- without freezing any
+//! value into the test, so the assertions hold on any machine
+//! (docs/EVIDENCE_POLICY_2026-07-18.md).
+//!
+//! Requires the real workers and the probe fixtures from this checkout; each
+//! test skips with a message when its fixture is not built.
 
 mod common;
 
@@ -40,11 +48,13 @@ mod windows_e2e {
             .expect("repository root")
     }
 
-    // Both tests toggle the process-global DISABLE_SESSION_WRAPPER_ENV to force
-    // the one-shot route, and both assert on RENDER_SESSION_WRAPPER_RENDERS
-    // deltas. cargo runs a binary's tests concurrently, so without this lock one
-    // test's forced one-shot could bleed into the other's session-routing
-    // assertion. Serialize the env-sensitive tests.
+    // Every test here asserts on deltas of RENDER_SESSION_WRAPPER_RENDERS, and
+    // three still toggle the process-global DISABLE_SESSION_WRAPPER_ENV -- the
+    // two fail-closed diagnostics and the one that pins the one-shot's fixed
+    // arity. cargo runs a binary's tests concurrently, so without this lock a
+    // concurrent session render perturbs another test's counter assertion, and a
+    // forced one-shot bleeds into another test's routing assertion. The lock and
+    // the remaining env references both go away with the one-shot itself.
     static SESSION_ROUTE_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     /// Absolute health conditions every session render must satisfy, whatever
@@ -849,9 +859,9 @@ mod windows_e2e {
     }
 
     #[test]
-    fn wrapper_parameter_animation_matches_the_one_shot_transport() {
+    fn parameter_animation_drives_the_render_through_the_session() {
         if crate::common::skip_without_restricted_token_launch(
-            "wrapper_parameter_animation_matches_the_one_shot_transport",
+            "parameter_animation_drives_the_render_through_the_session",
         ) {
             return;
         }
@@ -921,11 +931,11 @@ mod windows_e2e {
             time_scale: 30,
         };
 
-        let volatile = ["output_png", "output_raw", "worker_diagnostics"];
-        let render = |output: &Path, current_time: i32, disable_session: bool| {
-            if disable_session {
-                unsafe { std::env::set_var(DISABLE_SESSION_WRAPPER_ENV, "1") };
-            }
+        // Same preamble as the A/B this replaces; only the reference route is
+        // gone. Rewriting the setup from scratch made the session worker exit
+        // before frame 0, so the working setup is kept verbatim and the
+        // assertions are added on top (#361).
+        let render = |output: &Path, current_time: i32| {
             let before = RENDER_SESSION_WRAPPER_RENDERS.load(Ordering::SeqCst);
             let report = render_experimental_image_with_parameter_animation(
                 &root,
@@ -938,82 +948,55 @@ mod windows_e2e {
                 timing(current_time),
             )
             .expect("parameter animation render");
-            let carried = RENDER_SESSION_WRAPPER_RENDERS.load(Ordering::SeqCst) > before;
-            if disable_session {
-                unsafe { std::env::remove_var(DISABLE_SESSION_WRAPPER_ENV) };
-            }
-            (report, carried)
+            assert!(
+                RENDER_SESSION_WRAPPER_RENDERS.load(Ordering::SeqCst) > before,
+                "the session wrapper did not carry the animation render (t={current_time})"
+            );
+            report
         };
 
-        for (label, current_time) in [("keyframe", 0), ("interpolated", 30)] {
-            let out_a = scratch.join(format!("{label}-a.png"));
-            let (report_a, carried_a) = render(&out_a, current_time, false);
-            assert!(
-                carried_a,
-                "the session wrapper did not carry the animation render ({label})"
-            );
-            let out_b = scratch.join(format!("{label}-b.png"));
-            let (report_b, carried_b) = render(&out_b, current_time, true);
-            assert!(
-                !carried_b,
-                "the escape hatch did not force the one-shot transport ({label})"
-            );
+        let out_keyframe = scratch.join("keyframe.png");
+        let keyframe = render(&out_keyframe, 0);
+        assert_session_render_is_healthy(&keyframe, "animation keyframe");
+        let out_interpolated = scratch.join("interpolated.png");
+        let interpolated = render(&out_interpolated, 30);
+        assert_session_render_is_healthy(&interpolated, "animation interpolated");
 
-            let mut flat_a = report_a.as_object().expect("report A object").clone();
-            let mut flat_b = report_b.as_object().expect("report B object").clone();
-            for key in volatile {
-                flat_a.remove(key);
-                flat_b.remove(key);
-            }
-            assert_eq!(
-                flat_a.keys().collect::<Vec<_>>(),
-                flat_b.keys().collect::<Vec<_>>(),
-                "report key sets diverge ({label})"
-            );
-            for (key, value_a) in &flat_a {
-                assert_eq!(
-                    Some(value_a),
-                    flat_b.get(key),
-                    "report field {key} differs between the routes ({label})"
-                );
-            }
-            assert_eq!(
-                flat_a.get("passed"),
-                Some(&serde_json::json!(true)),
-                "animation render did not pass ({label}): {report_a}"
-            );
-            assert_eq!(
-                std::fs::read(&out_a).unwrap(),
-                std::fs::read(&out_b).unwrap(),
-                "PNG bytes differ between the session and one-shot routes ({label})"
-            );
-        }
-
-        // The animated slider must actually move the output over time, otherwise
-        // the cross-route match above is a vacuous "the probe ignored animation"
-        // pass. Both frames render on the session route.
-        let keyframe = scratch.join("keyframe-a.png");
-        let interpolated = scratch.join("interpolated-a.png");
+        // The animated value has to reach the plug-in. A sidecar that never
+        // arrived still matched the one-shot, which never received it either --
+        // so this is the assertion the A/B could not make.
         assert_ne!(
-            std::fs::read(&keyframe).unwrap(),
-            std::fs::read(&interpolated).unwrap(),
-            "the animated slider did not change the output between timeline positions"
+            keyframe.get("output_sha256"),
+            interpolated.get("output_sha256"),
+            "the animated slider did not move the render between t=0 and t=30"
         );
 
+        // And it has to evaluate to the right value, not merely to some value:
+        // the keyframe time must render exactly what the static parameter does.
+        let out_pinned = scratch.join("pinned.png");
+        let pinned = render_experimental_image_at_time(
+            &root,
+            &aex,
+            &sha,
+            &input,
+            &out_pinned,
+            &[layer_parameter(1, &secondary), float_parameter(2, 20.0)],
+            timing(0),
+        )
+        .expect("static render at the first keyframe value");
+        assert_session_render_is_healthy(&pinned, "animation pinned");
+        assert_eq!(
+            keyframe.get("output_sha256"),
+            pinned.get("output_sha256"),
+            "the first keyframe did not evaluate to its own value"
+        );
+
+        // Determinism, so a difference above cannot be run-to-run noise.
+        let out_again = scratch.join("again.png");
+        let again = render(&out_again, 0);
+        assert_reports_agree(&keyframe, &again, "animation repeat");
         let _ = std::fs::remove_dir_all(&scratch);
     }
-
-    /// A/B equivalence for the length-1 *audio* session wrapper (issue #251):
-    /// the resident audio-session route must produce the same public
-    /// `render_experimental_audio` report contract and the same f32 output
-    /// bytes as the one-shot `--render-audio` transport, for a real audio AEX
-    /// (SDK_Backwards). Requires the render worker and the SDK_Backwards
-    /// fixture from this checkout; skips (with a message) when either is
-    /// missing.
-
-    /// The audio-only render goes through the length-1 audio session. Verified
-    /// by what SDK_Backwards does to the samples rather than by agreeing with
-    /// the one-shot (#361).
     #[test]
     fn audio_render_goes_through_the_session_and_transforms_its_input() {
         if crate::common::skip_without_restricted_token_launch(
@@ -2198,7 +2181,6 @@ mod windows_e2e {
         let audio_b = write_audio("audio-b.f32", 0.75, 0.125);
 
         let render = |output: &Path, audio: &Path, layer: &Path| {
-            unsafe { std::env::remove_var(DISABLE_SESSION_WRAPPER_ENV) };
             let before = RENDER_SESSION_WRAPPER_RENDERS.load(Ordering::SeqCst);
             let parameters = vec![layer_parameter(1, layer)];
             let report = render_experimental_image_with_audio_sidecar(
@@ -2334,12 +2316,11 @@ mod windows_e2e {
         let sidecar = scratch.join("audio.f32");
         std::fs::write(&sidecar, [0u8; 40]).unwrap();
 
-        for (label, force_one_shot) in [("session", false), ("one-shot", true)] {
-            if force_one_shot {
-                unsafe { std::env::set_var(DISABLE_SESSION_WRAPPER_ENV, "1") };
-            } else {
-                unsafe { std::env::remove_var(DISABLE_SESSION_WRAPPER_ENV) };
-            }
+        // Only the session is exercised now: the one-shot half of this check went
+        // away with the rest of the A/Bs (#361). The gate itself is route-shared,
+        // and the session is the route that has to refuse.
+        {
+            let label = "session";
             let output = scratch.join(format!("out-{label}.png"));
             let result = render_experimental_image_with_audio_sidecar(
                 &root,
@@ -2351,7 +2332,6 @@ mod windows_e2e {
                 &[],
                 RenderTiming::default(),
             );
-            unsafe { std::env::remove_var(DISABLE_SESSION_WRAPPER_ENV) };
             let error = result.err().unwrap_or_else(|| {
                 panic!("the {label} route accepted a sidecar for an unadvertised plug-in")
             });
