@@ -19,7 +19,7 @@
 //!   through the same `session_dependency_manifest` authentication a hand-written
 //!   dependency does, and is then copied, re-hashed, and pinned by
 //!   `SealedLoadTree`.
-//! - Runtime discovery is deliberately narrower than arbitrary `LoadLibrary`
+//! - Runtime discovery is deliberately narrower than arbitrary Windows loader
 //!   emulation: only NUL-terminated ASCII or UTF-16LE `*.dll` basenames that are
 //!   already present as direct children of approved roots are candidates.
 //!   Constructed names and absolute paths remain invisible and fail closed in
@@ -696,7 +696,7 @@ fn dependency_names_from_bytes(bytes: &[u8]) -> io::Result<ImageDependencyNames>
     })
 }
 
-/// Conservative runtime `LoadLibrary` candidates found in image data.
+/// Conservative runtime loader candidates found in image data.
 ///
 /// Import-table names are byte strings too, so they are removed before the
 /// result is returned; otherwise every ordinary import would misleadingly be
