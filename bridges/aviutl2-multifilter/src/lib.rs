@@ -275,20 +275,13 @@ pub extern "C" fn RegisterPlugin(host: *mut HOST_APP_TABLE) {
         return;
     };
     let (dirs, dirs_complete) = resolve_scan_dirs(&config);
-    if dirs.is_empty() {
-        return;
-    }
 
     // Recursively collect the *.aex to expose (minus ignored), deduped + sorted.
     // `scan_complete` is false when a default folder went missing or one could not
     // be read, which makes the background pass keep (rather than prune) the
     // entries it did not see this launch.
     let scan = collect_aex(&dirs, &config.ignore);
-    let plugins = scan.plugins;
     let scan_complete = dirs_complete && scan.complete;
-    if plugins.is_empty() {
-        return;
-    }
 
     // Discovery (an L2 worker per AEX) is slow — hundreds of AE effects take
     // minutes — and can only ever populate the cache, since AviUtl2 freezes a
@@ -305,11 +298,32 @@ pub extern "C" fn RegisterPlugin(host: *mut HOST_APP_TABLE) {
     let dependency = resolve_dependency_config(&config);
     let build = build_fingerprint(&repository, &dependency);
     let mut cache = load_cache();
+    let mut plugins = scan.plugins;
+    // A scan that cannot be trusted must not make a cached effect disappear
+    // for this launch. Registration is intentionally conservative in the
+    // other direction: a temporarily missing AEX may be shown and fail closed
+    // at render time, but AviUtl2 will not discard objects from a saved project
+    // merely because this launch could not see the file (#321).
+    plugins.extend(cached_fallback_plugins(
+        &cache,
+        &scan.seen,
+        &dirs,
+        scan_complete,
+        !dirs_complete,
+        &config.ignore,
+    ));
+    plugins.sort();
+    plugins.dedup();
+    if plugins.is_empty() {
+        return;
+    }
 
     // Register (host callback, main thread only) each AEX whose discovery already
-    // succeeded and still matches the file on disk. Anything unknown, changed, or
-    // discovered by an older host goes to the background pass; its (updated)
-    // result is picked up on the next launch.
+    // succeeded. A changed AEX keeps its last known-good registration for this
+    // launch while the replacement is discovered in the background; an
+    // unregistered filter would let AviUtl2 discard objects from saved projects.
+    // Unknown entries and old-host entries also go to the background pass; its
+    // updated result is picked up on the next launch.
     let mut pending: Vec<PathBuf> = Vec::new();
     let mut aliases: Option<HashMap<PathBuf, Vec<String>>> = None;
     let mut rekey: Vec<(String, String)> = Vec::new();
@@ -411,8 +425,9 @@ pub extern "C" fn RegisterPlugin(host: *mut HOST_APP_TABLE) {
 ///   so a path the scan reached under a different spelling (through a junction)
 ///   is not mistaken for a deleted one.
 ///
-/// Keeping a stale entry costs only cache bytes, since registration iterates the
-/// scan result, not the cache.
+/// Keeping a stale entry costs only cache bytes. An incomplete scan also uses
+/// the cache as a registration fallback, so an effect can remain visible while
+/// its folder is temporarily unavailable.
 fn prune_cache(
     cache: &mut HashMap<String, CacheEntry>,
     seen: &[PathBuf],
@@ -442,6 +457,58 @@ fn prune_cache(
         // case is held off by `scan_complete`, which is false for such a link.)
         !matches!(path.try_exists(), Ok(false))
     });
+}
+
+/// Returns usable cached AEX paths that a non-authoritative scan did not see.
+///
+/// A complete scan is authoritative: resurrecting an entry absent from it
+/// would keep filters for files that really disappeared. An incomplete scan is
+/// the opposite: absence is not evidence of deletion, so keeping a last-known-
+/// good registration is safer than letting AviUtl2 remove project objects
+/// before the file becomes visible again (#321).
+fn cached_fallback_plugins(
+    cache: &HashMap<String, CacheEntry>,
+    seen: &[PathBuf],
+    roots: &[PathBuf],
+    scan_complete: bool,
+    roots_incomplete: bool,
+    ignore: &[String],
+) -> Vec<PathBuf> {
+    if scan_complete {
+        return Vec::new();
+    }
+    let seen_keys: HashSet<String> = seen
+        .iter()
+        .map(|path| path.to_string_lossy().into_owned())
+        .collect();
+    let seen_real: HashSet<PathBuf> = seen
+        .iter()
+        .filter_map(|path| path.canonicalize().ok())
+        .collect();
+
+    cache
+        .iter()
+        .filter_map(|(key, entry)| {
+            if !entry.ok || seen_keys.contains(key) {
+                return None;
+            }
+            let path = PathBuf::from(key);
+            if !roots_incomplete
+                && !roots.is_empty()
+                && !roots.iter().any(|root| path.starts_with(root))
+            {
+                return None;
+            }
+            if is_ignored(&path, ignore)
+                || path
+                    .canonicalize()
+                    .is_ok_and(|real| seen_real.contains(&real))
+            {
+                return None;
+            }
+            Some(path)
+        })
+        .collect()
 }
 
 /// Indexes the cache by each entry's real (link-resolved) path, so an AEX whose
@@ -485,7 +552,8 @@ fn index_by_real_path(
     index
 }
 
-/// Whether any cached key under `roots` is a spelling this scan did not walk.
+/// Whether any cached key under `roots` is a spelling this scan did not walk
+/// and is still worth resolving.
 ///
 /// If none is, every cached entry in scope is already keyed by the path the scan
 /// produced, so no other spelling exists to look for and the alias lookup — which
@@ -495,11 +563,16 @@ fn alias_possible(
     walked: &std::collections::HashSet<String>,
     roots: &[PathBuf],
 ) -> bool {
-    cache.keys().any(|key| {
+    cache.iter().any(|(key, entry)| {
         !walked.contains(key)
             && roots
                 .iter()
                 .any(|root| Path::new(key.as_str()).starts_with(root))
+            && (!entry.alias_fallback
+                || entry
+                    .alias_target
+                    .as_deref()
+                    .is_none_or(|target| !cache.contains_key(target)))
     })
 }
 
@@ -528,12 +601,17 @@ fn resolve_cached<'a>(
 ) -> (Option<&'a CacheEntry>, Option<String>) {
     let direct = cache.get(key);
     let direct_registers = classify(direct, meta, build).register;
+    let direct_matches = direct.is_some_and(|entry| {
+        meta.is_some_and(|(mtime, len)| entry.mtime == mtime && entry.len == len)
+    });
     // Look further when this spelling holds nothing usable, and also when what it
     // holds is only usable in the weaker sense of `alias_rank` — a stale entry
     // registers, but on a payload that may describe older bytes, so its sessions
     // fail to open and its frames pass through unrendered. Another spelling can
     // hold a sound entry for the same file.
-    let direct_is_sound = direct_registers && direct.is_some_and(|entry| !entry.stale);
+    let direct_is_sound = direct_registers
+        && direct_matches
+        && direct.is_some_and(|entry| !entry.stale);
     if !alias_possible || direct_is_sound {
         return (direct, None);
     }
@@ -547,11 +625,18 @@ fn resolve_cached<'a>(
     // usable one and leave the effect unregistered.
     for alias in candidates {
         let candidate = cache.get(alias);
+        let candidate_matches = candidate.is_some_and(|entry| {
+            meta.is_some_and(|(mtime, len)| entry.mtime == mtime && entry.len == len)
+        });
         // Take it if this spelling had nothing usable, or if the candidate is
         // strictly sounder — never a lateral move, which would just churn.
-        let improves =
-            !direct_registers || alias_rank(candidate, build) > alias_rank(direct, build);
-        if improves && classify(candidate, meta, build).register {
+        let improves = !direct_registers
+            || !direct_matches
+            || alias_rank(candidate, build) > alias_rank(direct, build);
+        // A changed direct hit is intentionally retained for this launch, but
+        // an outdated alias must not shadow a spelling whose metadata matches
+        // the file currently being loaded.
+        if improves && candidate_matches && classify(candidate, meta, build).register {
             return (candidate, Some(alias.clone()));
         }
     }
@@ -593,7 +678,16 @@ fn alias_rank(entry: Option<&CacheEntry>, build: BuildFingerprint) -> (bool, boo
 fn apply_rekey(cache: &mut HashMap<String, CacheEntry>, rekey: Vec<(String, String)>) {
     for (alias, walked) in rekey {
         if let Some(entry) = cache.get(&alias).cloned() {
-            cache.insert(walked, entry);
+            let mut walked_entry = entry.clone();
+            walked_entry.alias_fallback = false;
+            walked_entry.alias_target = None;
+            cache.insert(walked.clone(), walked_entry);
+            if alias != walked {
+                if let Some(alias_entry) = cache.get_mut(&alias) {
+                    alias_entry.alias_fallback = true;
+                    alias_entry.alias_target = Some(walked);
+                }
+            }
         }
     }
 }
@@ -643,10 +737,13 @@ fn classify(
                     && entry.build != build
                     && (entry.checked != build || entry.attempts < RETRY_BUDGET)),
         },
-        // Confirmed changed: a different plug-in, whose parameters the cached
-        // entry does not describe, so it is not registered (tracked as #309).
+        // Confirmed changed: keep a last-known-good effect registered for this
+        // launch and discover the replacement in the background. The cached
+        // sha/params may be incompatible with the new bytes, but RenderSession
+        // then fails closed on the SHA instead of AviUtl2 dropping the object
+        // before the replacement result is available (issue #309).
         Some(_) => LoadDecision {
-            register: false,
+            register: entry.ok,
             discover: true,
         },
         // Unknown: keep what we have and re-check in the background.
@@ -1239,6 +1336,19 @@ struct CacheEntry {
     /// and it stays registered meanwhile (issue #307).
     #[serde(default)]
     closure: CachedClosure,
+    /// Classification of the most recent failed discovery attempt. Timeout
+    /// classes are deliberately retained so transient runner pressure cannot
+    /// demote a valid stale entry; deterministic worker failures may converge
+    /// it to a negative cache entry (#328).
+    #[serde(default)]
+    failure_classification: Option<String>,
+    /// This spelling is retained only as a fallback after an alias re-key. It
+    /// must not keep the alias lookup hot while its walked spelling is present.
+    #[serde(default)]
+    alias_fallback: bool,
+    /// The walked spelling copied from this fallback, if it is still cached.
+    #[serde(default)]
+    alias_target: Option<String>,
 }
 
 /// The resolution behind one cache entry: where it looked, what it sealed, and
@@ -1369,6 +1479,11 @@ const RETRY_BUDGET: u8 = 3;
 /// added). Bump only if an existing field's meaning changes, which is a real
 /// data-loss risk that has to be weighed rather than done reflexively.
 const CACHE_VERSION: u32 = 1;
+/// A save is short, but another AviUtl2 process may be between its read and
+/// atomic replace.  Serialize the read/merge/write critical section with a
+/// Windows handle lock so every writer observes the previous writer's result.
+const CACHE_LOCK_RETRIES: usize = 200;
+const CACHE_LOCK_RETRY: Duration = Duration::from_millis(10);
 
 /// Fingerprints the compat host that produces a discovery result, so an entry can
 /// be re-verified when the host changes (e.g. it gains support for an effect that
@@ -1499,6 +1614,10 @@ fn load_cache() -> HashMap<String, CacheEntry> {
     let Some(path) = cache_path() else {
         return HashMap::new();
     };
+    load_cache_at(&path)
+}
+
+fn load_cache_at(path: &Path) -> HashMap<String, CacheEntry> {
     let Ok(text) = std::fs::read_to_string(&path) else {
         return HashMap::new();
     };
@@ -1528,11 +1647,19 @@ fn save_cache(entries: &HashMap<String, CacheEntry>) {
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
+    // The lock is held across the disk read and the atomic replacement.  A
+    // lock around only the final rename would still allow two launches to read
+    // the same old cache and lose one another's newly discovered entries.
+    let Some(_lock) = acquire_cache_lock(&path) else {
+        return;
+    };
+    let mut merged_entries = load_cache_at(&path);
+    merge_cache_entries(&mut merged_entries, entries);
     let file = CacheFile {
         version: CACHE_VERSION,
         // An entry that cannot be serialized is dropped rather than failing the
         // whole write, so the rest of the cache still survives the launch.
-        entries: entries
+        entries: merged_entries
             .iter()
             .filter_map(|(key, entry)| Some((key.clone(), serde_json::to_value(entry).ok()?)))
             .collect(),
@@ -1603,6 +1730,22 @@ fn keep_best(
         ..discovered
     };
     match cached {
+        Some(old)
+            if old.ok
+                && old.stale
+                && !discovered.ok
+                && old.mtime == mtime
+                && old.len == len
+                && deterministic_failure(discovered.failure_classification.as_deref()) =>
+        {
+            // The current bytes were rechecked and failed deterministically.
+            // Unlike a timeout, this is safe to converge: keeping the stale
+            // payload would register an effect whose SHA no longer opens.
+            Some(CacheEntry {
+                stale: false,
+                ..discovered
+            })
+        }
         Some(old) if old.ok && !discovered.ok && old.mtime == mtime && old.len == len => {
             Some(CacheEntry {
                 // Provenance stays with the host that actually produced the
@@ -1655,7 +1798,80 @@ fn negative_entry(plugin: &Path, build: BuildFingerprint) -> CacheEntry {
         checked: build,
         attempts: 0,
         closure: CachedClosure::default(),
+        failure_classification: None,
+        alias_fallback: false,
+        alias_target: None,
     }
+}
+
+/// Acquires an OS-level exclusive handle on the cache lock file.  The file is
+/// intentionally retained after release: unlike a create-new sentinel, a
+/// handle lock is released by Windows when the process exits, so a crash cannot
+/// strand future saves behind a stale marker.
+fn acquire_cache_lock(path: &Path) -> Option<std::fs::File> {
+    use std::os::windows::fs::OpenOptionsExt;
+
+    let lock_path = path.with_file_name("discovery-cache.lock");
+    for _ in 0..CACHE_LOCK_RETRIES {
+        match std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .share_mode(0)
+            .open(&lock_path)
+        {
+            Ok(lock) => return Some(lock),
+            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
+                std::thread::sleep(CACHE_LOCK_RETRY);
+            }
+            Err(_) => return None,
+        }
+    }
+    None
+}
+
+/// Unions another launch's cache into this launch's snapshot before replacing
+/// the file.  Disjoint AEX results must survive regardless of which launch
+/// saves last.  For the same path and file metadata, a known-good entry wins
+/// over a negative one so a transient failure cannot erase a usable filter;
+/// otherwise the local snapshot remains authoritative for that key.
+fn merge_cache_entries(
+    local: &mut HashMap<String, CacheEntry>,
+    on_disk: &HashMap<String, CacheEntry>,
+) {
+    for (key, disk_entry) in on_disk {
+        match local.get(key) {
+            None => {
+                local.insert(key.clone(), disk_entry.clone());
+            }
+            Some(local_entry)
+                if disk_entry.ok
+                    && !local_entry.ok
+                    && disk_entry.mtime == local_entry.mtime
+                    && disk_entry.len == local_entry.len =>
+            {
+                local.insert(key.clone(), disk_entry.clone());
+            }
+            Some(_) => {}
+        }
+    }
+}
+
+/// Extract the broker's already-normalized worker classification from the
+/// diagnostic JSON embedded in an inspection error. Missing or malformed
+/// diagnostics stay unknown and therefore retain the old safe behavior.
+fn inspection_failure_classification(error: &std::io::Error) -> Option<String> {
+    let message = error.to_string();
+    let payload = message.split_once("diagnostics=")?.1;
+    serde_json::from_str::<serde_json::Value>(payload)
+        .ok()?
+        .get("classification")?
+        .as_str()
+        .map(str::to_owned)
+}
+
+fn deterministic_failure(classification: Option<&str>) -> bool {
+    matches!(classification, Some("nonzero_exit" | "crashed"))
 }
 
 /// Discovers one AEX, always returning a cache entry (cache-all): `ok = true` for
@@ -1725,25 +1941,57 @@ fn discover_one(
         sealed,
         missing,
     };
-    if let Ok((params, diagnostics)) =
-        inspect_experimental_with_approved_dependencies_and_diagnostics(
-            repository,
-            plugin,
-            &entry.sha,
-            closure.into_dependencies(),
-        )
-    {
-        // PF_OutFlag2_SUPPORTS_SMART_RENDER = bit 10.
-        entry.smart = diagnostics
-            .get("advertised_out_flags2")
-            .and_then(|value| value.as_u64())
-            .unwrap_or(0)
-            & (1 << 10)
-            != 0;
-        entry.params = params;
-        entry.ok = true;
+    match inspect_experimental_with_approved_dependencies_and_diagnostics(
+        repository,
+        plugin,
+        &entry.sha,
+        closure.into_dependencies(),
+    ) {
+        Ok((params, diagnostics)) => {
+            // PF_OutFlag2_SUPPORTS_SMART_RENDER = bit 10.
+            entry.smart = diagnostics
+                .get("advertised_out_flags2")
+                .and_then(|value| value.as_u64())
+                .unwrap_or(0)
+                & (1 << 10)
+                != 0;
+            entry.params = params;
+            normalize_parameters_for_cache(&mut entry.params);
+            entry.ok = true;
+        }
+        Err(error) => {
+            entry.failure_classification = inspection_failure_classification(&error);
+        }
     }
     entry
+}
+
+/// Keep broker parameters JSON-round-trippable before they enter the persistent
+/// discovery cache (#322). `serde_json` writes non-finite `f64` values as `null`,
+/// which the typed `InteractiveParameter` loader rejects on the next launch and
+/// sends the same effect through discovery again forever.
+fn normalize_parameters_for_cache(parameters: &mut [InteractiveParameter]) {
+    for parameter in parameters {
+        let minimum = parameter.minimum.is_finite().then_some(parameter.minimum);
+        let maximum = parameter.maximum.is_finite().then_some(parameter.maximum);
+        if let (Some(minimum), Some(maximum)) = (minimum, maximum)
+            && minimum < maximum
+        {
+            parameter.minimum = minimum;
+            parameter.maximum = maximum;
+        } else {
+            parameter.minimum = 0.0;
+            parameter.maximum = 1.0;
+        }
+        if !parameter.value.is_finite() {
+            parameter.value = parameter.minimum;
+        }
+        for component in &mut parameter.components {
+            if !component.is_finite() {
+                *component = 0.0;
+            }
+        }
+    }
 }
 
 /// Discovers the given AEX with low bounded parallelism (to keep each discovery
@@ -2479,6 +2727,9 @@ mod tests {
             checked: build,
             attempts: 0,
             closure: CachedClosure::default(),
+            failure_classification: None,
+            alias_fallback: false,
+            alias_target: None,
         }
     }
 
@@ -2690,17 +2941,28 @@ mod tests {
     }
 
     #[test]
-    fn an_unknown_or_changed_aex_is_only_discovered() {
-        let entry = discovered(5, 64, build(1));
+    fn an_unknown_aex_is_only_discovered() {
         assert_eq!(
             classify(None, META, build(1)),
             LoadDecision { register: false, discover: true },
             "never seen"
         );
+    }
+
+    /// A replacement must remain visible for this launch. Its cached payload
+    /// may fail the SHA check, but keeping the filter registered prevents
+    /// AviUtl2 from deleting objects before background discovery replaces the
+    /// entry (#309).
+    #[test]
+    fn a_replaced_aex_keeps_a_known_good_registration_until_rediscovered() {
+        let entry = discovered(5, 64, build(1));
         assert_eq!(
             classify(Some(&entry), Some(((9, 0), 64)), build(1)),
-            LoadDecision { register: false, discover: true },
-            "the AEX itself changed"
+            LoadDecision {
+                register: true,
+                discover: true
+            },
+            "keep the last known-good filter registered while the replacement is discovered"
         );
     }
 
@@ -2737,6 +2999,64 @@ mod tests {
         assert_eq!(cache.len(), 2, "the unscanned entry survived");
     }
 
+    #[test]
+    fn an_incomplete_scan_registers_cached_entries_under_its_roots() {
+        let root = PathBuf::from("scan-root");
+        let cached = root.join("temporarily-hidden.aex");
+        let outside = PathBuf::from("other-root").join("outside.aex");
+        let cache = cache_of(&[
+            &cached.to_string_lossy(),
+            &outside.to_string_lossy(),
+        ]);
+        let fallback = cached_fallback_plugins(
+            &cache,
+            &[root.join("visible.aex")],
+            std::slice::from_ref(&root),
+            false,
+            false,
+            &[],
+        );
+        assert_eq!(fallback, vec![cached]);
+    }
+
+    #[test]
+    fn missing_scan_roots_keep_all_registerable_cached_entries() {
+        let first_root = PathBuf::from("first-root");
+        let first = first_root.join("first.aex");
+        let second = PathBuf::from("second-root").join("second.aex");
+        let cache = cache_of(&[
+            &first.to_string_lossy(),
+            &second.to_string_lossy(),
+        ]);
+        let fallback = cached_fallback_plugins(
+            &cache,
+            &[],
+            std::slice::from_ref(&first_root),
+            false,
+            true,
+            &[],
+        );
+        assert_eq!(fallback.len(), 2);
+        assert!(fallback.contains(&first));
+        assert!(fallback.contains(&second));
+    }
+
+    #[test]
+    fn complete_scan_does_not_resurrect_missing_cached_entries() {
+        let root = PathBuf::from("scan-root");
+        let cached = root.join("gone.aex");
+        let cache = cache_of(&[&cached.to_string_lossy()]);
+        assert!(cached_fallback_plugins(
+            &cache,
+            &[root.join("visible.aex")],
+            std::slice::from_ref(&root),
+            true,
+            false,
+            &[],
+        )
+        .is_empty());
+    }
+
     // --- cache file acceptance ----------------------------------------------
 
     /// Entries must survive being read back; only a schema-version change
@@ -2757,6 +3077,45 @@ mod tests {
             entries: json_entries(&["a.aex"]),
         };
         assert!(accept_cache_file(file).is_empty());
+    }
+
+    #[test]
+    fn a_concurrent_cache_save_preserves_disjoint_discoveries() {
+        let mut local = cache_of(&["local.aex"]);
+        let on_disk = cache_of(&["other-process.aex"]);
+
+        merge_cache_entries(&mut local, &on_disk);
+
+        assert!(local.contains_key("local.aex"));
+        assert!(local.contains_key("other-process.aex"));
+    }
+
+    #[test]
+    fn a_concurrent_cache_save_keeps_known_good_for_an_unchanged_aex() {
+        let key = "same.aex";
+        let mut local = HashMap::from([(key.to_string(), failed(5, 64, build(1)))]);
+        let on_disk = HashMap::from([(key.to_string(), discovered(5, 64, build(1)))]);
+
+        merge_cache_entries(&mut local, &on_disk);
+
+        assert!(
+            local[key].ok,
+            "a transient negative must not erase a good entry"
+        );
+    }
+
+    #[test]
+    fn a_concurrent_cache_save_keeps_current_negative_for_changed_bytes() {
+        let key = "changed.aex";
+        let mut local = HashMap::from([(key.to_string(), failed(9, 64, build(1)))]);
+        let on_disk = HashMap::from([(key.to_string(), discovered(5, 64, build(1)))]);
+
+        merge_cache_entries(&mut local, &on_disk);
+
+        assert!(
+            !local[key].ok,
+            "a result for older bytes must not be resurrected"
+        );
     }
 
     // --- scan completeness ---------------------------------------------------
@@ -3090,6 +3449,43 @@ mod tests {
         }
     }
 
+    #[test]
+    fn non_finite_parameters_are_normalized_before_cache_round_trip() {
+        let mut parameters = vec![InteractiveParameter {
+            slot: 1,
+            name: "Broken range".into(),
+            kind: "float".into(),
+            minimum: f64::NAN,
+            maximum: f64::INFINITY,
+            value: f64::NEG_INFINITY,
+            choices: Vec::new(),
+            color: [0, 0, 0, 255],
+            components: [f64::NAN, 0.5, f64::INFINITY],
+            component_count: 3,
+            layer_path: None,
+            enabled: true,
+            visible: true,
+            supervised: false,
+            debug_summary: None,
+            custom_ui_events: 0,
+            control_size: [0, 0],
+        }];
+
+        normalize_parameters_for_cache(&mut parameters);
+        let parameter = &parameters[0];
+        assert_eq!(
+            (parameter.minimum, parameter.maximum, parameter.value),
+            (0.0, 1.0, 0.0)
+        );
+        assert_eq!(parameter.components, [0.0, 0.5, 0.0]);
+
+        let encoded = serde_json::to_value(&parameters).expect("finite parameters serialize");
+        let decoded: Vec<InteractiveParameter> =
+            serde_json::from_value(encoded).expect("normalized parameters deserialize");
+        assert_eq!(decoded[0].value, 0.0);
+        assert!(decoded[0].components.iter().all(|value| value.is_finite()));
+    }
+
     /// The same hazard for this crate's own entry shape: adding a field without
     /// `#[serde(default)]` stops every existing cache entry from deserializing.
     #[test]
@@ -3355,6 +3751,26 @@ mod tests {
         apply_rekey(&mut cache, vec![("stable.aex".into(), "via-junction.aex".into())]);
         assert!(cache.contains_key("stable.aex"));
         assert!(cache.contains_key("via-junction.aex"));
+    }
+
+    #[test]
+    fn a_live_alias_copy_does_not_keep_alias_lookup_hot() {
+        let root = PathBuf::from("root");
+        let alias = root.join("stable.aex").to_string_lossy().into_owned();
+        let walked = root.join("walked.aex").to_string_lossy().into_owned();
+        let mut cache = cache_of(&[&alias]);
+        apply_rekey(&mut cache, vec![(alias.clone(), walked.clone())]);
+
+        assert!(!alias_possible(
+            &cache,
+            &walked_set(&[&walked]),
+            std::slice::from_ref(&root),
+        ));
+        cache.remove(&walked);
+        assert!(
+            alias_possible(&cache, &walked_set(&[&walked]), std::slice::from_ref(&root)),
+            "the fallback becomes eligible again if its walked copy disappears"
+        );
     }
 
     /// When both spellings of one file are cached and they disagree (only the
@@ -3755,6 +4171,59 @@ mod tests {
         // not converge" means here.
         assert_eq!((merged.ok, merged.stale, &merged.sha), (stale.ok, stale.stale, &stale.sha));
         assert_eq!((merged.mtime, merged.len, merged.build), (stale.mtime, stale.len, stale.build));
+    }
+
+    #[test]
+    fn a_stale_entry_converges_on_a_deterministic_failure() {
+        let mut stale = discovered(9, 128, build(1));
+        stale.stale = true;
+        stale.sha = "older-bytes".into();
+        let mut failed = failed(9, 128, build(1));
+        failed.failure_classification = Some("nonzero_exit".into());
+
+        let merged = keep_best(Some(&stale), failed, Some(((9, 0), 128))).unwrap();
+        assert!(
+            !merged.ok,
+            "the deterministically rejected replacement is negative"
+        );
+        assert!(!merged.stale, "a permanent failure is no longer queued");
+        assert_eq!(
+            classify(Some(&merged), Some(((9, 0), 128)), build(1)),
+            LoadDecision {
+                register: false,
+                discover: false
+            }
+        );
+    }
+
+    #[test]
+    fn a_stale_entry_keeps_retrying_after_a_timeout_failure() {
+        let mut stale = discovered(9, 128, build(1));
+        stale.stale = true;
+        let mut failed = failed(9, 128, build(1));
+        failed.failure_classification = Some("timeout_killed".into());
+
+        let merged = keep_best(Some(&stale), failed, Some(((9, 0), 128))).unwrap();
+        assert!(merged.ok);
+        assert!(merged.stale);
+        assert_eq!(
+            classify(Some(&merged), Some(((9, 0), 128)), build(1)),
+            LoadDecision {
+                register: true,
+                discover: true
+            }
+        );
+    }
+
+    #[test]
+    fn inspection_errors_preserve_the_broker_failure_classification() {
+        let error = std::io::Error::other(
+            r#"inspection failed: diagnostics={"classification":"crashed","exit_code":3221225477}"#,
+        );
+        assert_eq!(
+            inspection_failure_classification(&error).as_deref(),
+            Some("crashed")
+        );
     }
 
     /// The same entry does converge as soon as a re-check succeeds.

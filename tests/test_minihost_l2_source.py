@@ -95,9 +95,18 @@ class MinihostL2SourceTests(unittest.TestCase):
             'std::memcmp(kind.data(), "xgEA", 4)',
             "pipl_entrypoint.symbol.c_str()",
             'L"--self-test-pipl-entrypoint"',
+            "PiplPluginKind::Missing",
+            "PluginDataEntryFunction2",
+            "PluginDataEntryFunction",
+            "invoke_plugin_data_entry2_seh",
+            "invoke_plugin_data_entry1_seh",
+            "plugin_data_callback2",
+            "plugin_data_callback1",
+            'L"--self-test-plugin-data-entrypoint"',
             '"invalid_pipl"',
         ):
             self.assertIn(marker, text)
+        self.assertNotIn('#include "AE_PluginData.h"', text)
         self.assertNotIn(
             'reinterpret_cast<EffectEntry>(GetProcAddress(module, "EntryPointFunc"))',
             text,
