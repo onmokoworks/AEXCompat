@@ -23,6 +23,13 @@ def test_admission_is_a_common_worker_runtime_component_with_explicit_boundary()
     assert "LoadLibraryExW(plugin_path.c_str()" not in MAIN
 
 
+def test_gpu_preflight_uses_common_admission_for_plugin_load():
+    gpu = MAIN[MAIN.index("--gpu-module-report-v1") :]
+    assert "prepare_runtime_request(" in gpu
+    assert "admit_runtime(" in gpu
+    assert "LoadLibraryExW(plugin_path.c_str()" not in gpu
+
+
 def test_admission_preserves_ordered_fail_closed_identity_and_audit_gates():
     hash_gate = SOURCE.index("hooks.hash_file(request.plugin_argument")
     manifest_gate = SOURCE.index("parse_runtime_module_authorization(plugin_path,")

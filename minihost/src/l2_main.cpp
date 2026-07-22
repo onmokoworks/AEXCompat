@@ -1769,6 +1769,8 @@ int worker_main_impl(int argc, wchar_t **argv) {
                  "\"bounded\":true,\"aegp_not_effect\":true}\n";
     return passed ? 0 : 72;
   }
+  RuntimeHostHooks runtime_hooks{&sha256, &redirect_native_stdout,
+                                 &restore_native_stdout};
   // GPU module-audit preflight (#290): authorize the AEXRMA1-listed GPU runtime
   // DLLs, load them via the transport backend, and emit the classified module
   // report the broker re-authenticates before a secure GPU dispatch. argv shape
@@ -1778,10 +1780,6 @@ int worker_main_impl(int argc, wchar_t **argv) {
       std::wstring(argv[4]) == L"--runtime-module-authorization-v1") {
     namespace wr = aexcompat::worker_runtime;
     namespace tp = aexcompat::gpu_runtime::memory_world_transport;
-    const std::filesystem::path plugin_path = argv[2];
-    // Fail-closed identity gate: validates the plugin-dir manifest and re-hashes
-    // every authorized GPU runtime DLL before any of them can load.
-    if (!wr::parse_runtime_module_authorization(plugin_path, argv[5])) return 74;
     // Manifest backend id (1=cuda,2=opencl,3=directx,4=opengl) → transport
     // framework code (3=cuda,1=opencl,4=directx). OpenGL is inspect-only; a
     // smart-session GPU render never runs on it.
@@ -1791,6 +1789,28 @@ int worker_main_impl(int argc, wchar_t **argv) {
                               : backend == 3 ? 4
                                              : 0;
     if (framework == 0) return 75;
+    // Fail-closed identity gate and plugin load are owned by the common runtime
+    // admission component. This keeps l2_main from becoming a second plugin-load
+    // owner while retaining the GPU-specific audit/report lifecycle below.
+    RuntimeAdmissionRequest runtime_request;
+    const int request_error = wr::prepare_runtime_request(
+        argv[2], argv[3], true, argv[5], runtime_request);
+    if (request_error != 0) return request_error;
+    RuntimeContext runtime_context;
+    const int admission_error = wr::admit_runtime(
+        runtime_hooks, runtime_request, runtime_context);
+    if (admission_error != 0) return admission_error;
+    const auto release_admitted = [&] {
+      if (runtime_context.module) {
+        FreeLibrary(runtime_context.module);
+        runtime_context.module = nullptr;
+      }
+      if (runtime_context.stdout_redirected &&
+          runtime_context.restore_native_stdout) {
+        runtime_context.restore_native_stdout();
+        runtime_context.stdout_redirected = false;
+      }
+    };
     // Load the plug-in and run the DLL-load module audit across the GPU lifecycle,
     // exactly like a sealed render worker: the broker's secure dispatch requires a
     // passing `module_audit` (non-empty worker+plugin sets, >= 3 phases, zero
@@ -1799,22 +1819,19 @@ int worker_main_impl(int argc, wchar_t **argv) {
     // `policy` only when the authorization manifest lists them, so the audit passes
     // exactly when the policy enumerates the GPU DLL closure (#300).
     SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_SYSTEM32 | LOAD_LIBRARY_SEARCH_USER_DIRS);
-    HMODULE plugin = LoadLibraryExW(plugin_path.c_str(), nullptr,
-        LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32);
-    if (!plugin) return 78;
     aexcompat::worker_runtime::ModuleAuditReport& audit = wr::module_audit_report();
     audit.required = true;
-    audit.plugin_path = plugin_path;
+    audit.plugin_path = runtime_context.plugin_path;
     audit.post_load = wr::capture_module_audit();  // phase 1: pre-GPU baseline
     if (!tp::begin_backend_context(framework, 0)) {
-      FreeLibrary(plugin);
+      release_admitted();
       return 76;
     }
     wr::capture_module_audit_phase();  // phase 2: GPU runtime DLLs loaded
     const std::string report = wr::gpu_module_report_json();
     audit.pre_unload = wr::capture_module_audit();  // phase 3: pre-teardown
     tp::end_backend_context(framework);
-    FreeLibrary(plugin);
+    release_admitted();
     // An empty report means the enumeration could not be trusted or no authorized
     // module actually loaded; fail closed rather than emit a report that would
     // authenticate nothing. The broker re-validates the module_audit separately.
@@ -1903,8 +1920,6 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
   }
   // Every rendered effect instance belongs to a layer, even when that layer has no masks.
   if (is_rendering_worker()) aexcompat::mask_runtime::set_model_enabled(true);
-  RuntimeHostHooks runtime_hooks{&sha256, &redirect_native_stdout,
-                                 &restore_native_stdout};
   RuntimeAdmissionRequest runtime_request;
   // A GPU render carries the AEXRMA1 manifest as a `--runtime-module-authorization-v1`
   // trailer (captured above during request parsing); the render/smart worker must
