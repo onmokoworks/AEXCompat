@@ -701,6 +701,20 @@ def test_merge_guard_requires_atomic_server_side_conversation_resolution() -> No
     assert "falling back to the final owner snapshot" in script
 
 
+def test_merge_guard_requires_green_required_ci_before_merge() -> None:
+    root = Path(__file__).resolve().parents[1] / ".claude" / "skills" / "codex-review-loop"
+    script = (root / "codex-merge-guard.sh").read_text(encoding="utf-8")
+    initial = script.index("required_ci_gate || exit 1")
+    final = script.index("# FINAL OWNER SNAPSHOT")
+    final_ci = script.index("required_ci_gate || exit 1", final)
+    merge = script.index("gh pr merge", final_ci)
+    assert initial < final < final_ci < merge
+    assert 'gh pr checks "$PR" --repo "$OWNER/$REPO"' in script
+    assert script.count("required_ci_gate || exit 1") == 2
+    assert "REFUSE: required CI checks are not green" in script
+    assert "REFUSE: no required CI checks reported" in script
+
+
 def test_codex_finding_instructions_resolve_the_review_thread() -> None:
     root = Path(__file__).resolve().parents[1] / ".claude" / "skills" / "codex-review-loop"
     skill = (root / "SKILL.md").read_text(encoding="utf-8")
