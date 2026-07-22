@@ -159,6 +159,42 @@ mod windows_e2e {
             .collect()
     }
 
+    fn current_desktop_name() -> String {
+        #[link(name = "kernel32")]
+        unsafe extern "system" {
+            fn GetCurrentThreadId() -> u32;
+        }
+        #[link(name = "user32")]
+        unsafe extern "system" {
+            fn GetThreadDesktop(thread_id: u32) -> *mut std::ffi::c_void;
+            fn GetUserObjectInformationW(
+                object: *mut std::ffi::c_void,
+                index: i32,
+                buffer: *mut std::ffi::c_void,
+                length: u32,
+                required: *mut u32,
+            ) -> i32;
+        }
+        unsafe {
+            let desktop = GetThreadDesktop(GetCurrentThreadId());
+            let mut required = 0u32;
+            GetUserObjectInformationW(desktop, 2, std::ptr::null_mut(), 0, &mut required);
+            let mut buffer = vec![0u16; (required as usize / 2).saturating_add(1)];
+            assert_ne!(
+                GetUserObjectInformationW(
+                    desktop,
+                    2,
+                    buffer.as_mut_ptr().cast(),
+                    (buffer.len() * 2) as u32,
+                    &mut required,
+                ),
+                0
+            );
+            let end = buffer.iter().position(|value| *value == 0).unwrap_or(0);
+            String::from_utf16(&buffer[..end]).unwrap()
+        }
+    }
+
     fn build_audio_fixture() -> PathBuf {
         let manifest = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../Cargo.toml");
         let status = std::process::Command::new(env!("CARGO"))
@@ -1638,6 +1674,39 @@ mod windows_e2e {
             .expect_err("an invalidated session refuses further frames");
         assert!(follow_up.to_string().contains("invalidated"), "{follow_up}");
         let close = session.close();
+        assert_eq!(close["invalidated"], true);
+        assert_eq!(close["invalidated_reason"]["reason"], "frame_deadline");
+        assert_eq!(close["session_clean"], false);
+    }
+
+    #[test]
+    fn modal_ui_worker_uses_a_private_desktop_before_session_timeout() {
+        let _behavior = BehaviorGuard::set(Some("modal_frame"));
+        let report_path = std::env::temp_dir().join(format!(
+            "aexcompat-session-desktop-{:032x}.txt",
+            rand::random::<u128>()
+        ));
+        unsafe {
+            std::env::set_var("AEXCOMPAT_TEST_SESSION_DESKTOP_REPORT", &report_path);
+        }
+        let parent_desktop = current_desktop_name();
+        let (repository, plugin, sha) = temp_repository();
+        let mut session = open_session(&repository.0, &plugin, &sha, Duration::from_secs(2));
+        let error = session
+            .render_frame(0, 0, &input_pattern(17))
+            .expect_err("a modal worker must trip the session watchdog");
+        assert!(error.to_string().contains("frame_deadline"), "{error}");
+        let close = session.close();
+        unsafe {
+            std::env::remove_var("AEXCOMPAT_TEST_SESSION_DESKTOP_REPORT");
+        }
+        let worker_desktop = std::fs::read_to_string(&report_path).unwrap();
+        let _ = std::fs::remove_file(report_path);
+        assert!(
+            worker_desktop.starts_with("AEXCompatWorkerDesktop-"),
+            "worker desktop was not private: {worker_desktop:?}"
+        );
+        assert_ne!(worker_desktop, parent_desktop);
         assert_eq!(close["invalidated"], true);
         assert_eq!(close["invalidated_reason"]["reason"], "frame_deadline");
         assert_eq!(close["session_clean"], false);

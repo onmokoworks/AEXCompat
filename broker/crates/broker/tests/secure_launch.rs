@@ -7,7 +7,10 @@ mod windows_e2e {
     use std::collections::HashSet;
     use std::fs;
     use std::path::{Path, PathBuf};
+    use std::sync::Mutex;
     use std::time::Duration;
+
+    static SECURE_LAUNCH_LOCK: Mutex<()> = Mutex::new(());
 
     struct TempDir(PathBuf);
 
@@ -28,6 +31,7 @@ mod windows_e2e {
 
     #[test]
     fn external_worker_reads_sealed_plugin_and_tree_is_cleaned_after_exit() {
+        let _lock = SECURE_LAUNCH_LOCK.lock().unwrap();
         let worker_dir = TempDir::new("aexcompat-secure-launch-worker");
         let worker = build_worker(&worker_dir.0);
         let worker_bytes = fs::read(&worker).unwrap();
@@ -77,6 +81,7 @@ mod windows_e2e {
 
     #[test]
     fn worker_hash_mismatch_never_starts_process_and_cleans_tree() {
+        let _lock = SECURE_LAUNCH_LOCK.lock().unwrap();
         let worker_dir = TempDir::new("aexcompat-secure-launch-worker-mismatch");
         let marker = worker_dir.0.join("started.marker");
         let worker = build_marker_worker(&worker_dir.0);
@@ -107,6 +112,7 @@ mod windows_e2e {
 
     #[test]
     fn tampered_plugin_is_rejected_before_process_can_start() {
+        let _lock = SECURE_LAUNCH_LOCK.lock().unwrap();
         let worker_dir = TempDir::new("aexcompat-secure-launch-plugin-tamper");
         let marker = worker_dir.0.join("started.marker");
         let _worker = build_marker_worker(&worker_dir.0);
@@ -130,6 +136,7 @@ mod windows_e2e {
 
     #[test]
     fn timeout_kills_worker_and_cleans_sealed_and_staged_trees() {
+        let _lock = SECURE_LAUNCH_LOCK.lock().unwrap();
         let stages_before = trusted_stage_roots();
         let worker_dir = TempDir::new("aexcompat-secure-launch-timeout");
         let marker = worker_dir.0.join("started.marker");
@@ -170,6 +177,48 @@ mod windows_e2e {
             leaked_stages.is_empty(),
             "staged roots leaked: {leaked_stages:?}"
         );
+    }
+
+    #[test]
+    fn modal_ui_worker_is_started_on_a_private_desktop_before_timeout() {
+        let _lock = SECURE_LAUNCH_LOCK.lock().unwrap();
+        let worker_dir = TempDir::new("aexcompat-secure-launch-modal");
+        let worker = build_modal_worker(&worker_dir.0);
+        let worker_bytes = fs::read(&worker).unwrap();
+        let parent_desktop = current_desktop_name();
+        let tree = plugin_tree(b"authenticated plugin");
+        let sealed_root = tree.root().to_owned();
+        let request = SecureLaunchRequest {
+            worker_program: &worker,
+            worker_expected_sha256: Sha256::digest(&worker_bytes).into(),
+            worker_expected_size: worker_bytes.len() as u64,
+            plugin_basename: "fixture.plugin",
+            args_before_plugin: &[],
+            args_after_plugin: &[],
+            repository: &worker_dir.0,
+            require_module_audit: false,
+        };
+
+        let result = secure_launch(tree, request, Duration::from_secs(5)).unwrap();
+
+        assert_eq!(result.classification, ExitClassification::TimeoutKilled);
+        assert!(
+            result
+                .stdout
+                .lines()
+                .any(|line| line.starts_with("desktop=AEXCompatWorkerDesktop-")),
+            "worker desktop was not reported: {}",
+            result.stdout
+        );
+        assert!(
+            !result
+                .stdout
+                .lines()
+                .any(|line| line == format!("desktop={parent_desktop}")),
+            "modal worker inherited the broker desktop: {}",
+            result.stdout
+        );
+        assert!(!sealed_root.exists(), "timeout must clean sealed tree");
     }
 
     fn trusted_stage_roots() -> HashSet<PathBuf> {
@@ -230,6 +279,112 @@ mod windows_e2e {
             .status()
             .expect("run rustc for marker worker");
         assert!(status.success(), "marker worker build failed");
+        executable
+    }
+
+    fn current_desktop_name() -> String {
+        #[link(name = "kernel32")]
+        unsafe extern "system" {
+            fn GetCurrentThreadId() -> u32;
+        }
+        #[link(name = "user32")]
+        unsafe extern "system" {
+            fn GetThreadDesktop(thread_id: u32) -> *mut std::ffi::c_void;
+            fn GetUserObjectInformationW(
+                object: *mut std::ffi::c_void,
+                index: i32,
+                buffer: *mut std::ffi::c_void,
+                length: u32,
+                required: *mut u32,
+            ) -> i32;
+        }
+        unsafe {
+            let desktop = GetThreadDesktop(GetCurrentThreadId());
+            let mut required = 0u32;
+            GetUserObjectInformationW(desktop, 2, std::ptr::null_mut(), 0, &mut required);
+            let mut buffer = vec![0u16; (required as usize / 2).saturating_add(1)];
+            assert_ne!(
+                GetUserObjectInformationW(
+                    desktop,
+                    2,
+                    buffer.as_mut_ptr().cast(),
+                    (buffer.len() * 2) as u32,
+                    &mut required,
+                ),
+                0
+            );
+            let end = buffer.iter().position(|value| *value == 0).unwrap_or(0);
+            String::from_utf16(&buffer[..end]).unwrap()
+        }
+    }
+
+    fn build_modal_worker(dir: &Path) -> PathBuf {
+        let source = dir.join("modal_worker.rs");
+        let executable = dir.join("modal_worker.exe");
+        fs::write(
+            &source,
+            r#"
+use std::ffi::c_void;
+use std::io::Write;
+use std::ptr::null_mut;
+
+#[link(name = "kernel32")]
+unsafe extern "system" {
+    fn GetCurrentThreadId() -> u32;
+}
+#[link(name = "user32")]
+unsafe extern "system" {
+    fn GetThreadDesktop(thread_id: u32) -> *mut c_void;
+    fn GetUserObjectInformationW(
+        object: *mut c_void,
+        index: i32,
+        buffer: *mut c_void,
+        length: u32,
+        required: *mut u32,
+    ) -> i32;
+    fn MessageBoxW(hwnd: *mut c_void, text: *const u16, title: *const u16, kind: u32) -> i32;
+}
+
+fn desktop_name() -> String {
+    unsafe {
+        let desktop = GetThreadDesktop(GetCurrentThreadId());
+        let mut required = 0u32;
+        GetUserObjectInformationW(desktop, 2, null_mut(), 0, &mut required);
+        let mut buffer = vec![0u16; (required as usize / 2).saturating_add(1)];
+        assert_ne!(
+            GetUserObjectInformationW(
+                desktop,
+                2,
+                buffer.as_mut_ptr().cast(),
+                (buffer.len() * 2) as u32,
+                &mut required,
+            ),
+            0
+        );
+        let end = buffer.iter().position(|value| *value == 0).unwrap_or(0);
+        String::from_utf16(&buffer[..end]).unwrap()
+    }
+}
+
+fn main() {
+    println!("desktop={}", desktop_name());
+    std::io::stdout().flush().unwrap();
+    let text: Vec<u16> = "AEXCompat modal fixture".encode_utf16().chain([0]).collect();
+    let title: Vec<u16> = "noninteractive worker".encode_utf16().chain([0]).collect();
+    unsafe { MessageBoxW(null_mut(), text.as_ptr(), title.as_ptr(), 0); }
+    loop { std::thread::sleep(std::time::Duration::from_secs(30)); }
+}
+"#,
+        )
+        .unwrap();
+        let status = std::process::Command::new("rustc")
+            .arg(&source)
+            .args(["-C", "target-feature=+crt-static"])
+            .arg("-o")
+            .arg(&executable)
+            .status()
+            .expect("run rustc for modal worker");
+        assert!(status.success(), "modal worker build failed");
         executable
     }
 

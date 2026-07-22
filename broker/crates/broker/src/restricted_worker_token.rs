@@ -12,12 +12,17 @@ use windows_sys::Win32::Foundation::HANDLE;
 /// This type intentionally exposes only a borrowed raw handle. Dropping it
 /// closes the token, and callers cannot accidentally transfer its ownership.
 pub struct RestrictedWorkerToken {
+    worker_sid: RestrictedWorkerSid,
     #[cfg(windows)]
     handle: OwnedHandle,
 }
 
 #[cfg(windows)]
 impl RestrictedWorkerToken {
+    pub fn worker_sid(&self) -> &RestrictedWorkerSid {
+        &self.worker_sid
+    }
+
     pub fn as_raw_handle(&self) -> HANDLE {
         self.handle.0
     }
@@ -117,6 +122,7 @@ fn create_restricted_worker_token_impl(
     };
     use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
+    let worker_sid_identity = worker_sid.clone();
     let restricted_code_sid = LocalSid::from_string(RESTRICTED_CODE_SID)?;
     let worker_sid = LocalSid::from_string(worker_sid.as_str())?;
     let compatibility_sids = COMPATIBILITY_SIDS
@@ -199,6 +205,7 @@ fn create_restricted_worker_token_impl(
     }
 
     Ok(RestrictedWorkerToken {
+        worker_sid: worker_sid_identity,
         handle: OwnedHandle::new(restricted_token)?,
     })
 }

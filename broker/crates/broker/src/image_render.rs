@@ -5959,7 +5959,7 @@ fn render_classic_via_length_one_session(
         Err(error) => return SessionWrapperOutcome::Failure(error),
     };
     let output_checksum_detail = output_checksum_detail_requested();
-    let mut session = match RenderSession::open(SessionOpenRequest {
+    let session_request = SessionOpenRequest {
         repository: request.repository,
         plugin_path: request.plugin_path,
         plugin_sha256: request.plugin_sha256,
@@ -5990,7 +5990,15 @@ fn render_classic_via_length_one_session(
         // exactly like the one-shot GPU path. `None` keeps CPU/policy-less
         // renders on the CPU session command.
         gpu_runtime_policy: request.gpu_runtime_policy,
-    }) {
+    };
+    // A custom UI action is the explicit interactive harness route (#107/#238)
+    // and must retain the caller's desktop. Plain discovery/render workers stay
+    // on the private desktop boundary from RenderSession::open.
+    let mut session = match if request.custom_ui_action.is_some() {
+        RenderSession::open_on_current_desktop(session_request)
+    } else {
+        RenderSession::open(session_request)
+    } {
         Ok(session) => session,
         Err(error) => {
             return SessionWrapperOutcome::Fallback(format!("session open failed: {error}"));

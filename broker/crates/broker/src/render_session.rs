@@ -25,7 +25,7 @@ use crate::secure_image_dispatch::{
     dispatch_secure_gpu_image_session, dispatch_secure_image_session,
 };
 use crate::secure_launch::{SecureLaunchResult, SecureSessionProcess};
-use crate::windows_process::SessionChildHandles;
+use crate::windows_process::{SessionChildHandles, WorkerDesktopPolicy};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -698,6 +698,22 @@ impl RenderSession {
     /// slot in place mid-session (protocol §3, issue #262), so there is no
     /// launch-time output-capacity parameter.
     pub fn open(request: SessionOpenRequest<'_>) -> io::Result<RenderSession> {
+        Self::open_with_desktop_policy(request, WorkerDesktopPolicy::Dedicated)
+    }
+
+    /// Opens a session for an explicitly interactive GUI harness. This is
+    /// intentionally opt-in; normal discovery/render sessions use a private
+    /// desktop so plugin UI cannot interrupt the user's desktop.
+    pub(crate) fn open_on_current_desktop(
+        request: SessionOpenRequest<'_>,
+    ) -> io::Result<RenderSession> {
+        Self::open_with_desktop_policy(request, WorkerDesktopPolicy::Current)
+    }
+
+    fn open_with_desktop_policy(
+        request: SessionOpenRequest<'_>,
+        desktop_policy: WorkerDesktopPolicy,
+    ) -> io::Result<RenderSession> {
         if request.time_step <= 0
             // A zero-duration render (total_time == 0) is valid: the shared
             // RenderTiming::is_valid admits it at current_time == 0, and the
@@ -1127,17 +1143,40 @@ impl RenderSession {
                     system32: policy_input.system32,
                 },
             )?;
-            dispatch_secure_gpu_image_session(
-                dispatch,
-                GpuRuntimeAuthorization {
-                    backend,
-                    session_identity: policy_input.session_identity,
-                    module_report: &report,
-                },
-                &child_handles,
-            )?
+            match desktop_policy {
+                WorkerDesktopPolicy::Dedicated => dispatch_secure_gpu_image_session(
+                    dispatch,
+                    GpuRuntimeAuthorization {
+                        backend,
+                        session_identity: policy_input.session_identity,
+                        module_report: &report,
+                    },
+                    &child_handles,
+                )?,
+                WorkerDesktopPolicy::Current => {
+                    crate::secure_image_dispatch::dispatch_secure_gpu_image_session_on_current_desktop(
+                        dispatch,
+                        GpuRuntimeAuthorization {
+                            backend,
+                            session_identity: policy_input.session_identity,
+                            module_report: &report,
+                        },
+                        &child_handles,
+                    )?
+                }
+            }
         } else {
-            dispatch_secure_image_session(dispatch, &child_handles)?
+            match desktop_policy {
+                WorkerDesktopPolicy::Dedicated => {
+                    dispatch_secure_image_session(dispatch, &child_handles)?
+                }
+                WorkerDesktopPolicy::Current => {
+                    crate::secure_image_dispatch::dispatch_secure_image_session_on_current_desktop(
+                        dispatch,
+                        &child_handles,
+                    )?
+                }
+            }
         };
         // The worker inherited its copies; dropping the broker's child-side
         // ends turns a worker exit into pipe EOF instead of a hang.
