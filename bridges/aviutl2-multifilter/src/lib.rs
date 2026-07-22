@@ -288,32 +288,35 @@ pub extern "C" fn RegisterPlugin(host: *mut HOST_APP_TABLE) {
     // discovered by an older host goes to the background pass; its (updated)
     // result is picked up on the next launch.
     let mut pending: Vec<PathBuf> = Vec::new();
-    let mut aliases: Option<HashMap<PathBuf, String>> = None;
+    let mut aliases: Option<HashMap<PathBuf, Vec<String>>> = None;
     let mut rekey: Vec<(String, String)> = Vec::new();
+    // Whether any cached key under the scan roots is a spelling this scan did not
+    // walk. If none is, no other spelling exists and the alias lookup — which
+    // touches the filesystem, on the thread AviUtl2 is loading from — is skipped.
+    let walked: std::collections::HashSet<String> = scan
+        .seen
+        .iter()
+        .map(|plugin| plugin.to_string_lossy().into_owned())
+        .collect();
+    let alias_possible = alias_possible(&cache, &walked, &dirs);
+
     for plugin in &plugins {
         let key = plugin.to_string_lossy().into_owned();
-        let mut cached = cache.get(&key);
-        if cached.is_none() {
-            // Entries are keyed by the spelling the scan walked, and a junction
-            // added, renamed, or reached from another root changes that spelling
-            // without changing the file. Retry the miss against the real path, or
-            // every effect under it goes unregistered for a launch — which deletes
-            // them out of saved projects that use them (issue #307). The index is
-            // built lazily, and an empty one means there is nothing to match.
-            let index = aliases.get_or_insert_with(|| index_by_real_path(&cache, &dirs));
-            if !index.is_empty()
-                && let Some(alias) = plugin
-                    .canonicalize()
-                    .ok()
-                    .and_then(|real| index.get(&real).cloned())
-            {
-                cached = cache.get(&alias);
-                if cached.is_some() {
-                    rekey.push((alias, key.clone()));
-                }
-            }
+        let meta = file_meta(plugin);
+        let (cached, alias) = resolve_cached(
+            &cache,
+            &key,
+            plugin,
+            meta,
+            build,
+            &dirs,
+            alias_possible,
+            &mut aliases,
+        );
+        if let Some(alias) = alias {
+            rekey.push((alias, key));
         }
-        let decision = classify(cached, file_meta(plugin), build);
+        let decision = classify(cached, meta, build);
         if decision.register
             && let Some(entry) = cached
         {
@@ -411,24 +414,130 @@ fn prune_cache(
 fn index_by_real_path(
     cache: &HashMap<String, CacheEntry>,
     roots: &[PathBuf],
-) -> HashMap<PathBuf, String> {
-    cache
+    build: BuildFingerprint,
+) -> HashMap<PathBuf, Vec<String>> {
+    let mut index: HashMap<PathBuf, Vec<String>> = HashMap::new();
+    for key in cache
         .keys()
         .filter(|key| roots.iter().any(|root| Path::new(key.as_str()).starts_with(root)))
-        .filter_map(|key| Some((Path::new(key).canonicalize().ok()?, key.clone())))
-        .collect()
+    {
+        let Ok(real) = Path::new(key).canonicalize() else {
+            continue;
+        };
+        index.entry(real).or_default().push(key.clone());
+    }
+    // Best first, and every candidate kept: ranking cannot tell whether an entry
+    // still describes the file on disk, so the caller has to be able to fall
+    // through to the next spelling rather than be handed one unusable pick and
+    // leave the effect unregistered (issue #307). The key breaks the remaining
+    // tie, so the order never depends on hash iteration order — which would make
+    // the effect's parameters, or whether it registers at all, differ between
+    // launches.
+    for keys in index.values_mut() {
+        keys.sort_by(|left, right| {
+            alias_rank(cache.get(right), build)
+                .cmp(&alias_rank(cache.get(left), build))
+                .then_with(|| left.cmp(right))
+        });
+    }
+    index
 }
 
-/// Moves each aliased entry onto the spelling the scan actually walked.
+/// Whether any cached key under `roots` is a spelling this scan did not walk.
+///
+/// If none is, every cached entry in scope is already keyed by the path the scan
+/// produced, so no other spelling exists to look for and the alias lookup — which
+/// canonicalizes paths on the thread AviUtl2 is loading from — can be skipped.
+fn alias_possible(
+    cache: &HashMap<String, CacheEntry>,
+    walked: &std::collections::HashSet<String>,
+    roots: &[PathBuf],
+) -> bool {
+    cache.keys().any(|key| {
+        !walked.contains(key)
+            && roots
+                .iter()
+                .any(|root| Path::new(key.as_str()).starts_with(root))
+    })
+}
+
+/// Picks the cache entry to use for one AEX, and the alias key it came from when
+/// that was not the spelling this scan walked.
+///
+/// Entries are keyed by the path string the scan walked, and a junction added,
+/// renamed, or reached from another root changes that spelling without changing
+/// the file. The file is looked for under another spelling whenever what is held
+/// under this one would not register, or the effect goes unregistered for the
+/// launch — which deletes it out of saved projects that use it (issue #307). Not
+/// only on an outright miss: only the walked spelling is refreshed by discovery,
+/// so a copy left under another one can be the newer of the two.
+#[allow(clippy::too_many_arguments)]
+fn resolve_cached<'a>(
+    cache: &'a HashMap<String, CacheEntry>,
+    key: &str,
+    plugin: &Path,
+    meta: Option<((u64, u32), u64)>,
+    build: BuildFingerprint,
+    roots: &[PathBuf],
+    alias_possible: bool,
+    aliases: &mut Option<HashMap<PathBuf, Vec<String>>>,
+) -> (Option<&'a CacheEntry>, Option<String>) {
+    let direct = cache.get(key);
+    if !alias_possible || classify(direct, meta, build).register {
+        return (direct, None);
+    }
+    // Built lazily, so a launch where every spelling matches never pays for it.
+    let index = aliases.get_or_insert_with(|| index_by_real_path(cache, roots, build));
+    let Some(candidates) = plugin.canonicalize().ok().and_then(|real| index.get(&real)) else {
+        return (direct, None);
+    };
+    // Best-ranked first, but try each: the rank cannot tell whether an entry still
+    // describes the file, so a better-ranked but outdated one must not shadow a
+    // usable one and leave the effect unregistered.
+    for alias in candidates {
+        let candidate = cache.get(alias);
+        if classify(candidate, meta, build).register {
+            return (candidate, Some(alias.clone()));
+        }
+    }
+    (direct, None)
+}
+
+/// Ranks one spelling of a file against another as the entry to reuse. Two
+/// spellings can disagree because only the walked one is refreshed by discovery:
+/// prefer the one that registers, then one whose parameters are not known to be
+/// out of date, then the one the current host produced.
+///
+/// An unknown current build matches nothing rather than everything: it equals
+/// `BuildFingerprint::default()`, which is also what an entry written before the
+/// field existed carries, so comparing would rank a legacy entry above a freshly
+/// discovered one. Same reasoning as `classify`'s `is_known` guard.
+fn alias_rank(entry: Option<&CacheEntry>, build: BuildFingerprint) -> (bool, bool, bool) {
+    match entry {
+        Some(entry) => (
+            entry.ok,
+            !entry.stale,
+            build.is_known() && entry.build == build,
+        ),
+        None => (false, false, false),
+    }
+}
+
+/// Copies each aliased entry onto the spelling the scan actually walked.
 ///
 /// The background pass keys by that spelling, so without this it would find no
 /// cached entry and `keep_best`'s refusal to demote would never apply — a
 /// transient discovery failure could then write a negative and unregister the
-/// effect on the next launch (issue #307). It also stops the two spellings from
-/// accumulating as separate, diverging entries.
+/// effect on the next launch (issue #307).
+///
+/// The alias is copied, not moved: the walked spelling may be the temporary one.
+/// If the scan reached the AEX through a junction that is gone next launch, the
+/// walked key no longer resolves, and having deleted the original would leave
+/// nothing to find. Keeping both costs one entry until [`prune_cache`] sees a
+/// spelling genuinely stop existing, which is the safe direction here.
 fn apply_rekey(cache: &mut HashMap<String, CacheEntry>, rekey: Vec<(String, String)>) {
     for (alias, walked) in rekey {
-        if let Some(entry) = cache.remove(&alias) {
+        if let Some(entry) = cache.get(&alias).cloned() {
             cache.insert(walked, entry);
         }
     }
@@ -2542,27 +2651,26 @@ mod tests {
             !cache.contains_key(&walked.to_string_lossy().into_owned()),
             "the exact key really does miss"
         );
-        let index = index_by_real_path(&cache, std::slice::from_ref(&root));
+        let index = index_by_real_path(&cache, std::slice::from_ref(&root), build(1));
         let found = walked
             .canonicalize()
             .ok()
             .and_then(|real| index.get(&real))
-            .and_then(|alias| cache.get(alias));
+            .and_then(|candidates| cache.get(&candidates[0]));
         assert!(found.is_some(), "but the real path finds it");
     }
 
-    /// After an aliased hit, the entry must end up under the spelling the scan
-    /// walked: the background pass keys by that, and without it `keep_best` sees
-    /// no cached entry, so a transient discovery failure would write a negative
-    /// and unregister the effect next launch (#307).
+    /// After an aliased hit the entry must also be reachable under the spelling
+    /// the scan walked: the background pass keys by that, and without it
+    /// `keep_best` sees no cached entry, so a transient discovery failure would
+    /// write a negative and unregister the effect next launch (#307).
     #[test]
-    fn an_aliased_entry_is_moved_onto_the_walked_key() {
+    fn an_aliased_entry_becomes_reachable_under_the_walked_key() {
         let mut cache = cache_of(&["old-spelling.aex"]);
         apply_rekey(
             &mut cache,
             vec![("old-spelling.aex".into(), "walked.aex".into())],
         );
-        assert!(!cache.contains_key("old-spelling.aex"), "no duplicate left behind");
         let moved = cache.get("walked.aex").expect("found under the walked key");
         assert!(moved.ok);
 
@@ -2583,8 +2691,387 @@ mod tests {
             .to_string_lossy()
             .into_owned();
         let cache = cache_of(&[&inside, &outside]);
-        let index = index_by_real_path(&cache, std::slice::from_ref(&root));
+        let index = index_by_real_path(&cache, std::slice::from_ref(&root), build(1));
         assert_eq!(index.len(), 1, "only the key under the scanned root");
-        assert!(index.values().any(|key| key == &inside));
+        assert!(index.values().any(|keys| keys.contains(&inside)));
+    }
+
+    /// The walked spelling can be the temporary one. If the scan reached the AEX
+    /// through a junction that is gone next launch, deleting the original would
+    /// leave nothing that resolves, and the effect would go unregistered (#307).
+    #[test]
+    fn re_keying_keeps_the_original_spelling() {
+        let mut cache = cache_of(&["stable.aex"]);
+        apply_rekey(&mut cache, vec![("stable.aex".into(), "via-junction.aex".into())]);
+        assert!(cache.contains_key("stable.aex"));
+        assert!(cache.contains_key("via-junction.aex"));
+    }
+
+    /// When both spellings of one file are cached and they disagree (only the
+    /// walked one is refreshed by discovery), the alias lookup must land on the
+    /// one that registers, and must do so every launch rather than by iteration
+    /// order — otherwise the effect flickers in and out (#307).
+    #[cfg(windows)]
+    #[test]
+    fn the_alias_index_prefers_an_entry_that_registers() {
+        let root = temp_root("index-preference");
+        let real = root.join("real");
+        std::fs::create_dir_all(&real).unwrap();
+        std::fs::write(real.join("foo.aex"), b"x").unwrap();
+        junction(&root.join("link"), &real);
+
+        let direct = real.join("foo.aex").to_string_lossy().into_owned();
+        let via_link = root.join("link").join("foo.aex").to_string_lossy().into_owned();
+
+        // Both spellings resolve to one file, so they collide in the index.
+        // Whichever spelling holds the negative, the registering entry must win.
+        for (negative, positive) in [(&direct, &via_link), (&via_link, &direct)] {
+            let mut cache = HashMap::new();
+            cache.insert(negative.clone(), failed(5, 64, build(1)));
+            cache.insert(positive.clone(), discovered(5, 64, build(1)));
+            let index = index_by_real_path(&cache, std::slice::from_ref(&root), build(1));
+            assert_eq!(index.len(), 1, "both spellings resolved to one file");
+            let winner = &index.values().next().unwrap()[0];
+            assert!(cache[winner].ok, "the registering entry won");
+        }
+    }
+
+    /// Copying an aliased entry makes "one file, two cached spellings, both
+    /// registerable" the normal case, so the pick has to stay put across launches
+    /// — otherwise the effect's parameters (frozen by AviUtl2 at load) change
+    /// depending on hash order.
+    #[cfg(windows)]
+    #[test]
+    fn the_alias_index_picks_the_same_spelling_every_time() {
+        let root = temp_root("index-stable");
+        let real = root.join("real");
+        std::fs::create_dir_all(&real).unwrap();
+        std::fs::write(real.join("foo.aex"), b"x").unwrap();
+        junction(&root.join("link"), &real);
+
+        let direct = real.join("foo.aex").to_string_lossy().into_owned();
+        let via_link = root.join("link").join("foo.aex").to_string_lossy().into_owned();
+
+        let mut winners = std::collections::HashSet::new();
+        for _ in 0..64 {
+            let mut cache = HashMap::new();
+            // Both registerable and both on the current build: only the tie-break
+            // decides. Different sha so the winner is identifiable.
+            let mut a = discovered(5, 64, build(1));
+            a.sha = "aaa".into();
+            let mut b = discovered(5, 64, build(1));
+            b.sha = "bbb".into();
+            cache.insert(direct.clone(), a);
+            cache.insert(via_link.clone(), b);
+            let index = index_by_real_path(&cache, std::slice::from_ref(&root), build(1));
+            assert_eq!(index.len(), 1);
+            winners.insert(cache[&index.values().next().unwrap()[0]].sha.clone());
+        }
+        assert_eq!(winners.len(), 1, "one winner across runs, got {winners:?}");
+    }
+
+    /// An entry the current host produced beats a leftover from an older one.
+    #[cfg(windows)]
+    #[test]
+    fn the_alias_index_prefers_the_current_host_build() {
+        let root = temp_root("index-build");
+        let real = root.join("real");
+        std::fs::create_dir_all(&real).unwrap();
+        std::fs::write(real.join("foo.aex"), b"x").unwrap();
+        junction(&root.join("link"), &real);
+
+        let direct = real.join("foo.aex").to_string_lossy().into_owned();
+        let via_link = root.join("link").join("foo.aex").to_string_lossy().into_owned();
+
+        for (stale_key, fresh_key) in [(&direct, &via_link), (&via_link, &direct)] {
+            let mut cache = HashMap::new();
+            let mut stale = discovered(5, 64, build(1));
+            stale.sha = "old".into();
+            let mut fresh = discovered(5, 64, build(2));
+            fresh.sha = "new".into();
+            cache.insert(stale_key.clone(), stale);
+            cache.insert(fresh_key.clone(), fresh);
+            let index = index_by_real_path(&cache, std::slice::from_ref(&root), build(2));
+            let winner = &index.values().next().unwrap()[0];
+            assert_eq!(cache[winner].sha, "new", "the current build's entry won");
+        }
+    }
+
+    /// Only the walked spelling is refreshed, so the copy left under another one
+    /// can be the newer of the two. When the entry found directly would not
+    /// register, the alias must still be consulted, or the effect is unregistered
+    /// for that launch even though a usable result is cached (#307).
+    #[cfg(windows)]
+    #[test]
+    fn a_negative_direct_hit_still_falls_back_to_a_usable_alias() {
+        let root = temp_root("stale-direct");
+        let real = root.join("real");
+        std::fs::create_dir_all(&real).unwrap();
+        std::fs::write(real.join("foo.aex"), b"x").unwrap();
+        junction(&root.join("link"), &real);
+
+        let walked = real.join("foo.aex").to_string_lossy().into_owned();
+        let other = root.join("link").join("foo.aex").to_string_lossy().into_owned();
+
+        // The spelling being walked holds an old negative; the other spelling
+        // holds the result a later pass discovered.
+        let mut cache = HashMap::new();
+        cache.insert(walked.clone(), failed(5, 64, build(1)));
+        cache.insert(other.clone(), discovered(5, 64, build(1)));
+
+        let direct = cache.get(&walked);
+        assert!(
+            !classify(direct, META, build(1)).register,
+            "the direct hit alone would not register"
+        );
+        let index = index_by_real_path(&cache, std::slice::from_ref(&root), build(1));
+        let candidates = index
+            .get(&real.join("foo.aex").canonicalize().unwrap())
+            .expect("the file is in the index");
+        let alias = candidates
+            .iter()
+            .find(|alias| classify(cache.get(*alias), META, build(1)).register)
+            .expect("one of the spellings registers");
+        assert_eq!(alias, &other);
+    }
+
+    // --- resolve_cached: which spelling's entry gets used --------------------
+
+    /// Only the walked spelling is refreshed, so a copy under another one can be
+    /// the newer of the two. When what is held under the walked spelling would
+    /// not register, the alias must be adopted, or the effect goes unregistered
+    /// for that launch and saved projects lose the objects using it (#307).
+    #[cfg(windows)]
+    #[test]
+    fn a_negative_direct_hit_adopts_a_usable_alias() {
+        let root = temp_root("resolve-adopt");
+        let real = root.join("real");
+        std::fs::create_dir_all(&real).unwrap();
+        std::fs::write(real.join("foo.aex"), b"x").unwrap();
+        junction(&root.join("link"), &real);
+        let walked = real.join("foo.aex");
+        let other = root.join("link").join("foo.aex").to_string_lossy().into_owned();
+
+        let mut cache = HashMap::new();
+        cache.insert(walked.to_string_lossy().into_owned(), failed(5, 64, build(1)));
+        cache.insert(other.clone(), discovered(5, 64, build(1)));
+
+        let mut aliases = None;
+        let (entry, alias) = resolve_cached(
+            &cache,
+            &walked.to_string_lossy(),
+            &walked,
+            META,
+            build(1),
+            std::slice::from_ref(&root),
+            true,
+            &mut aliases,
+        );
+        assert!(entry.is_some_and(|entry| entry.ok), "adopted the usable entry");
+        assert_eq!(alias.as_deref(), Some(other.as_str()), "and reports the re-key");
+    }
+
+    /// A spelling that already registers must not pay for the alias lookup.
+    #[test]
+    fn a_usable_direct_hit_never_consults_the_index() {
+        let cache = cache_of(&["a.aex"]);
+        let mut aliases = None;
+        let (entry, alias) = resolve_cached(
+            &cache,
+            "a.aex",
+            Path::new("a.aex"),
+            META,
+            build(1),
+            &[PathBuf::from("")],
+            true,
+            &mut aliases,
+        );
+        assert!(entry.is_some_and(|entry| entry.ok));
+        assert_eq!(alias, None);
+        assert!(aliases.is_none(), "the index was never built");
+    }
+
+    /// And when no other spelling can exist, the lookup is skipped outright.
+    #[test]
+    fn nothing_is_resolved_when_no_alias_can_exist() {
+        let cache = cache_of(&["gone.aex"]);
+        let mut aliases = None;
+        let (entry, alias) = resolve_cached(
+            &cache,
+            "missing.aex",
+            Path::new("missing.aex"),
+            META,
+            build(1),
+            &[PathBuf::from("")],
+            false,
+            &mut aliases,
+        );
+        assert!(entry.is_none());
+        assert_eq!(alias, None);
+        assert!(aliases.is_none(), "no filesystem work at all");
+    }
+
+    // --- alias_rank ----------------------------------------------------------
+
+    /// An entry written before the `build` field existed carries the default,
+    /// which is also what an unreadable current fingerprint is. Comparing them
+    /// would rank the legacy entry above a freshly discovered one.
+    #[test]
+    fn an_unknown_build_does_not_favour_a_legacy_entry() {
+        let unknown = BuildFingerprint::default();
+        let legacy = discovered(5, 64, unknown);
+        let fresh = discovered(5, 64, build(1));
+        assert_eq!(
+            alias_rank(Some(&legacy), unknown),
+            alias_rank(Some(&fresh), unknown),
+            "with no usable fingerprint, neither wins on build"
+        );
+    }
+
+    #[test]
+    fn a_current_build_entry_outranks_an_older_one() {
+        let old = discovered(5, 64, build(1));
+        let current = discovered(5, 64, build(2));
+        assert!(alias_rank(Some(&current), build(2)) > alias_rank(Some(&old), build(2)));
+    }
+
+    /// A stale entry's sha/params may describe older bytes, so a sound entry
+    /// wins even if it came from an older host.
+    #[test]
+    fn a_sound_entry_outranks_a_stale_one() {
+        let mut stale = discovered(5, 64, build(2));
+        stale.stale = true;
+        let sound = discovered(5, 64, build(1));
+        assert!(alias_rank(Some(&sound), build(2)) > alias_rank(Some(&stale), build(2)));
+    }
+
+    #[test]
+    fn a_registerable_entry_outranks_a_negative_one() {
+        let ok = discovered(5, 64, build(1));
+        let negative = failed(5, 64, build(1));
+        assert!(alias_rank(Some(&ok), build(1)) > alias_rank(Some(&negative), build(1)));
+    }
+
+    /// The rank cannot tell whether an entry still describes the file, so a
+    /// better-ranked but outdated spelling must not shadow a usable one — that
+    /// would leave the effect unregistered even though a usable result is cached
+    /// (#307). Both entries here rank equally, so the tie-break orders them and
+    /// the lookup has to fall through to the second.
+    #[cfg(windows)]
+    #[test]
+    fn an_outdated_candidate_does_not_shadow_a_usable_one() {
+        let root = temp_root("candidate-fallthrough");
+        let real = root.join("real");
+        std::fs::create_dir_all(&real).unwrap();
+        std::fs::write(real.join("foo.aex"), b"x").unwrap();
+        junction(&root.join("link"), &real);
+        let walked = root.join("zzz-missing.aex"); // not cached at all
+
+        for (outdated, usable) in [
+            (real.join("foo.aex"), root.join("link").join("foo.aex")),
+            (root.join("link").join("foo.aex"), real.join("foo.aex")),
+        ] {
+            let mut cache = HashMap::new();
+            // Same rank (ok, not stale, same build); only the meta differs.
+            cache.insert(
+                outdated.to_string_lossy().into_owned(),
+                discovered(9, 99, build(1)),
+            );
+            cache.insert(
+                usable.to_string_lossy().into_owned(),
+                discovered(5, 64, build(1)),
+            );
+            let mut aliases = None;
+            let (entry, alias) = resolve_cached(
+                &cache,
+                &walked.to_string_lossy(),
+                &real.join("foo.aex"),
+                META,
+                build(1),
+                std::slice::from_ref(&root),
+                true,
+                &mut aliases,
+            );
+            assert_eq!(entry.map(|entry| entry.len), Some(64), "took the usable one");
+            assert_eq!(alias.as_deref(), Some(&*usable.to_string_lossy()));
+        }
+    }
+
+    /// When no spelling registers, nothing is adopted and nothing is re-keyed.
+    #[cfg(windows)]
+    #[test]
+    fn an_unusable_alias_is_not_adopted() {
+        let root = temp_root("alias-unusable");
+        let real = root.join("real");
+        std::fs::create_dir_all(&real).unwrap();
+        std::fs::write(real.join("foo.aex"), b"x").unwrap();
+        junction(&root.join("link"), &real);
+        let walked = real.join("foo.aex");
+
+        let mut cache = HashMap::new();
+        cache.insert(walked.to_string_lossy().into_owned(), failed(5, 64, build(1)));
+        cache.insert(
+            root.join("link").join("foo.aex").to_string_lossy().into_owned(),
+            failed(5, 64, build(1)),
+        );
+        let mut aliases = None;
+        let (entry, alias) = resolve_cached(
+            &cache,
+            &walked.to_string_lossy(),
+            &walked,
+            META,
+            build(1),
+            std::slice::from_ref(&root),
+            true,
+            &mut aliases,
+        );
+        assert!(entry.is_some_and(|entry| !entry.ok), "kept what was there");
+        assert_eq!(alias, None, "nothing worth re-keying");
+    }
+
+    // --- alias_possible ------------------------------------------------------
+
+    fn walked_set(keys: &[&str]) -> std::collections::HashSet<String> {
+        keys.iter().map(|key| (*key).to_string()).collect()
+    }
+
+    /// A cached key under a scan root that this scan did not walk is exactly the
+    /// case the alias lookup exists for.
+    #[test]
+    fn an_unwalked_key_under_a_root_means_an_alias_may_exist() {
+        let root = PathBuf::from("root");
+        let cache = cache_of(&[&root.join("old-name.aex").to_string_lossy()]);
+        assert!(alias_possible(
+            &cache,
+            &walked_set(&[&root.join("walked.aex").to_string_lossy()]),
+            std::slice::from_ref(&root),
+        ));
+    }
+
+    /// When every in-scope key is one the scan walked, there is no other spelling
+    /// and the lookup is pure cost.
+    #[test]
+    fn all_keys_walked_means_no_alias_can_exist() {
+        let root = PathBuf::from("root");
+        let key = root.join("walked.aex").to_string_lossy().into_owned();
+        let cache = cache_of(&[&key]);
+        assert!(!alias_possible(
+            &cache,
+            &walked_set(&[&key]),
+            std::slice::from_ref(&root)
+        ));
+    }
+
+    /// Keys outside the scanned roots say nothing: they are never registered from
+    /// and never pruned.
+    #[test]
+    fn keys_outside_the_roots_do_not_imply_an_alias() {
+        let root = PathBuf::from("root");
+        let cache = cache_of(&["elsewhere/other.aex"]);
+        assert!(!alias_possible(
+            &cache,
+            &walked_set(&[]),
+            std::slice::from_ref(&root)
+        ));
     }
 }
