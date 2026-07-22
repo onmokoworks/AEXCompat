@@ -187,10 +187,17 @@ def test_bodied_commented_review_blocks() -> None:
     assert "OWNER-REVIEW COMMENTED" in _call("owner_blocking_reviews", payload)
 
 
-# --- owner_comments_unresolved: exclude only a bare @codex review trigger -----
+# --- owner_comments_unresolved: exclude first-line @codex review triggers -----
 
 @pytest.mark.parametrize("body", ["@codex review", "  @codex review  ", "@Codex Review"])
 def test_bare_trigger_comment_is_excluded(body: str) -> None:
+    payload = [{"user": {"login": "onmokoworks"}, "id": 1,
+                "created_at": "2026-07-18T10:00:00Z", "body": body}]
+    assert _call("owner_comments_unresolved", payload, "naari3", "{}") == ""
+
+
+@pytest.mark.parametrize("body", ["@codex review\nsummary", "  @Codex Review  \nsummary"])
+def test_trigger_with_summary_is_excluded(body: str) -> None:
     payload = [{"user": {"login": "onmokoworks"}, "id": 1,
                 "created_at": "2026-07-18T10:00:00Z", "body": body}]
     assert _call("owner_comments_unresolved", payload, "naari3", "{}") == ""
