@@ -279,12 +279,18 @@ fn canonical_system32() -> io::Result<PathBuf> {
 /// `policy` must already be parsed and validated (see
 /// [`crate::runtime_module_policy::parse_and_validate`]). An explicit CPU backend
 /// is rejected: only a GPU backend has a runtime module policy.
+///
+/// `dependencies` must be the same approved dependency artifacts the render will
+/// dispatch with. The preflight loads the staged plug-in natively, so a plug-in
+/// that imports an approved helper DLL fails the preflight unless that DLL is
+/// sealed next to it here too (#301 review).
 pub fn prepare_gpu_runtime_policy(
     repository: &Path,
     plugin_path: &Path,
     approved_sha256: &str,
     gpu_backend: RenderGpuBackend,
     policy: RuntimeModulePolicy,
+    dependencies: Vec<ApprovedImageArtifact>,
 ) -> io::Result<PreparedGpuRuntimePolicy> {
     let backend = runtime_backend(gpu_backend)
         .ok_or_else(|| invalid("the CPU backend has no GPU runtime module policy"))?;
@@ -297,13 +303,18 @@ pub fn prepare_gpu_runtime_policy(
         authorization.basename.clone(),
     ];
     // The manifest rides as a sealed dependency next to the plug-in, exactly like
-    // the params-inspect path, so the worker resolves it by basename.
+    // the params-inspect path, so the worker resolves it by basename. The caller's
+    // approved dependency artifacts are sealed alongside it: the preflight loads
+    // the plug-in natively, so its imports must resolve here just as they do for
+    // the render dispatch (#301 review).
+    let mut preflight_dependencies = dependencies;
+    preflight_dependencies.push(authorization.artifact.clone());
     let isolated = dispatch_approved_image_with_dependencies(
         repository,
         WorkerKind::Smart,
         plugin_path,
         approved_sha256,
-        vec![authorization.artifact.clone()],
+        preflight_dependencies,
         &args_before_plugin,
         &args_after_plugin,
         Duration::from_millis(30_000),
@@ -5268,6 +5279,16 @@ fn render_with_artifact(
     // (#301 review).
     let cpu_fallback_args_after_plugin = args_after_plugin.clone();
     let cpu_fallback_dependencies = dependencies.clone();
+    let mut gpu_fallback_used = false;
+    let mut gpu_fallback_reason: Option<String> = None;
+    let mut gpu_attempt: Option<Value> = None;
+    // Building the manifest is fallible (an expired policy, an unwritable
+    // transport). On an Auto render a runtime-module failure here must take the
+    // same policy-free CPU fallback as any other caught GPU preflight error
+    // instead of aborting the render, so it is captured rather than propagated;
+    // failures that are not preflight conditions still fail the render
+    // (#301 review).
+    let mut manifest_fallback_error: Option<io::Error> = None;
     let _runtime_authorization = match (gpu_initial_attempt, gpu_runtime_policy) {
         (true, Some(policy_input)) => {
             let backend =
@@ -5275,31 +5296,60 @@ fn render_with_artifact(
             // Reuse the preflight's session identity so the manifest the worker
             // parses matches the identity the report was authenticated against
             // (#301 review).
-            let transport = prepare_runtime_authorization_transport_with_identity(
+            match prepare_runtime_authorization_transport_with_identity(
                 repository,
                 policy_input.policy,
                 backend,
                 policy_input.session_identity,
-            )?;
-            args_after_plugin.push("--runtime-module-authorization-v1".to_owned());
-            args_after_plugin.push(transport.basename().to_owned());
-            dependencies.push(transport.artifact());
-            Some(transport)
+            ) {
+                Ok(transport) => {
+                    args_after_plugin.push("--runtime-module-authorization-v1".to_owned());
+                    args_after_plugin.push(transport.basename().to_owned());
+                    dependencies.push(transport.artifact());
+                    Some(transport)
+                }
+                Err(error) if auto_gpu_cpu_fallback && is_auto_gpu_preflight_error(&error) => {
+                    manifest_fallback_error = Some(error);
+                    None
+                }
+                Err(error) => return Err(error),
+            }
         }
         _ => None,
+    };
+    // A captured manifest failure degrades this render to the policy-free CPU
+    // command before the initial dispatch is built, so the GPU attempt is skipped
+    // and the fallback is reported exactly like a caught GPU preflight error.
+    let gpu_initial_attempt = if let Some(error) = &manifest_fallback_error {
+        gpu_fallback_used = true;
+        gpu_fallback_reason = Some(error.to_string());
+        gpu_attempt = Some(json!({
+            "classification": "gpu_preflight_error",
+            "error": error.to_string(),
+        }));
+        args_before_plugin[0] =
+            image_worker_command(smart, pixel_format, false, RenderGpuBackend::Cpu)?.into();
+        false
+    } else {
+        gpu_initial_attempt
     };
     let initial_dispatch = SecureImageDispatch {
         repository,
         worker_kind,
         plugin: plugin.clone(),
-        dependencies: dependencies.clone(),
+        dependencies: if manifest_fallback_error.is_some() {
+            cpu_fallback_dependencies.clone()
+        } else {
+            dependencies.clone()
+        },
         args_before_plugin: &args_before_plugin,
-        args_after_plugin: &args_after_plugin,
+        args_after_plugin: if manifest_fallback_error.is_some() {
+            &cpu_fallback_args_after_plugin
+        } else {
+            &args_after_plugin
+        },
         timeout: Duration::from_millis(timeout_ms),
     };
-    let mut gpu_fallback_used = false;
-    let mut gpu_fallback_reason: Option<String> = None;
-    let mut gpu_attempt: Option<Value> = None;
     let mut isolated = if gpu_initial_attempt {
         let gpu_result = (|| -> io::Result<_> {
             let policy_input = gpu_runtime_policy.ok_or_else(|| {

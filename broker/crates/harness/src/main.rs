@@ -5623,12 +5623,18 @@ fn main() -> eframe::Result {
                 &repository, plugin, &hash,
             )
             .unwrap_or_default();
+        // The preflight seals the same approved dependency artifacts the render
+        // dispatches with, so a plug-in that imports one loads in both.
+        let render_dependencies: Vec<
+            aexcompat_broker::secure_image_dispatch::ApprovedImageArtifact,
+        > = Vec::new();
         let prepared = match aexcompat_broker::image_render::prepare_gpu_runtime_policy(
             &repository,
             plugin,
             &hash,
             gpu_backend,
             policy,
+            render_dependencies.clone(),
         ) {
             Ok(prepared) => prepared,
             Err(error) => {
@@ -5649,7 +5655,7 @@ fn main() -> eframe::Result {
             None,
             None,
             gpu_backend,
-            Vec::new(),
+            render_dependencies,
             Some(prepared.as_input()),
         );
         match report {
@@ -5694,6 +5700,7 @@ fn main() -> eframe::Result {
             &hash,
             gpu_backend,
             policy,
+            Vec::new(),
         ) {
             Ok(prepared) => println!("{}", prepared.report_json()),
             Err(error) => {
