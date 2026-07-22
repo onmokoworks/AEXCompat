@@ -101,6 +101,32 @@ def test_pre_launch_rejection_tests_keep_running_on_a_restricted_token_host():
                 "removes CI coverage of the refusal")
 
 
+def test_ae_sdk_workflow_runs_native_parameter_animation_coverage_after_clean_build():
+    """#356 must not be reported green because its native fixtures were absent."""
+    workflow = (ROOT / ".github/workflows/ae-sdk-tests.yml").read_text(
+        encoding="utf-8"
+    )
+    assert "cmake -S minihost -B target\\minihost-build -G Ninja" in workflow
+    assert "build-pf-layer-param-probe" in workflow
+    assert "build-pf-param-utils-animation-probe" in workflow
+    assert (
+        "cargo test -p aexcompat-broker --test parameter_animation --locked -- --show-output"
+        in workflow
+    )
+    assert "target\\minihost-build\\aex_render_worker.exe" in workflow
+    assert (
+        "target\\pf-layer-param-probe-build\\Release\\pf_layer_param_probe.aex"
+        in workflow
+    )
+    assert (
+        "target\\pf-param-utils-animation-probe-build\\Release\\pf_param_utils_animation_probe.aex"
+        in workflow
+    )
+    assert "coverage_source_commit=" in workflow
+    assert "Report parameter-animation restricted-token skips" in workflow
+    assert "cannot launch a restricted-token worker" in workflow
+
+
 def test_the_restricted_token_skip_is_opt_in_and_only_ci_opts_in():
     """The skip must never be reachable without an explicit opt-in.
 

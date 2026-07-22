@@ -137,6 +137,7 @@ jobs:
             build-pf-aegp-render-suite5-probe
             build-pf-convolve-depth-probe
             build-pf-parameter-echo-probe
+            build-pf-layer-param-probe
             build-pf-param-utils-animation-probe
             build-pf-smart-geometry-probe
             build-pf-transfer-mask-probe
@@ -148,6 +149,58 @@ jobs:
           ) do (
             powershell -NoProfile -ExecutionPolicy Bypass -File tools\%%s.ps1 || exit /b 1
           )
+
+      # #356: the parameter-animation integration tests locate their native
+      # worker and AEX fixtures under these exact paths.  Run the target here,
+      # after the clean worker/probe builds, so a missing prerequisite cannot be
+      # mistaken for coverage (the tests otherwise return early when a local
+      # artifact is absent).
+      - name: Run native parameter-animation Rust coverage
+        working-directory: broker
+        shell: pwsh
+        env:
+          AEXCOMPAT_ALLOW_RESTRICTED_TOKEN_SKIP: "1"
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $root = $env:GITHUB_WORKSPACE
+          $required = @(
+            (Join-Path $root 'target\minihost-build\aex_render_worker.exe'),
+            (Join-Path $root 'target\pf-layer-param-probe-build\Release\pf_layer_param_probe.aex'),
+            (Join-Path $root 'target\pf-param-utils-animation-probe-build\Release\pf_param_utils_animation_probe.aex')
+          )
+          foreach ($path in $required) {
+            if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+              throw "#356 native coverage prerequisite is missing: $path"
+            }
+            $file = Get-Item -LiteralPath $path
+            $hash = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
+            Write-Host "coverage_artifact=$($file.FullName) size=$($file.Length) sha256=$hash"
+          }
+          $commit = git -C $root rev-parse HEAD
+          Write-Host "coverage_source_commit=$commit"
+          cargo test -p aexcompat-broker --test parameter_animation --locked -- --show-output 2>&1 |
+            Tee-Object -FilePath (Join-Path $root 'parameter-animation-output.txt')
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      # A hosted runner may be unable to create the restricted-token worker
+      # (#335).  Keep that limitation visible while retaining the exact target
+      # and prerequisite checks above.
+      - name: Report parameter-animation restricted-token skips
+        shell: pwsh
+        if: always()
+        run: |
+          $log = Join-Path $env:GITHUB_WORKSPACE 'parameter-animation-output.txt'
+          if (-not (Test-Path -LiteralPath $log)) {
+            Write-Host 'parameter-animation produced no log; the coverage step did not start.'
+            exit 0
+          }
+          $skips = Select-String -Path $log -Pattern 'cannot launch a restricted-token worker'
+          if ($skips) {
+            Write-Host "::warning::$($skips.Count) parameter-animation tests did not run: this runner cannot launch a restricted-token worker (issue #335)"
+            $skips | ForEach-Object { $_.Line }
+          } else {
+            Write-Host 'Every parameter-animation integration test ran without a restricted-token skip.'
+          }
 
       # built_artifact テスト (test_sdk_backwards_audio_worker) が参照する
       # SDK example fixture を事前ビルドする。pytest の収集順は
