@@ -21,18 +21,18 @@
 //! - It resolves only what the PE import tables name. A module the plug-in loads
 //!   later by absolute path at runtime, rather than through its import tables,
 //!   is invisible here and stays an unknown module in the worker's module audit.
-//! - A name that no search root provides but System32 does is left out: the
-//!   worker's load flags already reach System32. A name the roots *do* provide is
-//!   sealed even when System32 has one too, because that is the order the loader
-//!   itself resolves in (the load directory first) and an app-local runtime is
-//!   shipped for a reason. API set names (`api-ms-*` / `ext-ms-*`) are the
-//!   exception: the loader resolves those from the API set schema before any
-//!   directory, so a copy in a root would never be the module that loads.
-//! - KnownDLLs are not special-cased. A search root holding, say, its own
-//!   `kernel32.dll` would have that copy sealed even though the loader maps the
-//!   system one regardless; the sealed copy then simply never loads. Reading the
-//!   KnownDLLs registry list to skip it would buy a wasted copy, not a different
-//!   load, so it is left out until something needs it.
+//! - A name only reaches the closure if a search root provides it. Roots are
+//!   consulted in order, matching `LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR` before
+//!   `LOAD_LIBRARY_SEARCH_SYSTEM32`, so an app-local runtime a plug-in ships
+//!   beside itself is sealed rather than the same-named System32 file. Anything
+//!   no root provides is left to the loader and reported, not sealed.
+//! - It does not model what the loader resolves *before* it searches directories:
+//!   the API set schema (which is why `api-ms-*` / `ext-ms-*` names are never
+//!   sealed), the KnownDLLs section, and the modules already mapped into the
+//!   worker. A root-provided copy of `kernel32.dll`, or of a CRT the worker has
+//!   already loaded, is therefore sealed and then never used. That costs a copy;
+//!   it does not change which module loads, and the sealed tree stays a superset
+//!   of what the plug-in needs.
 
 use crate::secure_image_dispatch::ApprovedImageArtifact;
 use crate::session_dependency_manifest::{
@@ -55,8 +55,21 @@ pub const MAX_SEARCH_ROOTS: usize = 8;
 /// Largest plug-in or dependency image this resolver will parse for imports.
 const MAX_PARSED_IMAGE_BYTES: u64 = 512 * 1_024 * 1_024;
 
-/// Imported names this resolver walks per image, guarding a hostile import table.
+/// Import descriptors this resolver walks per image, guarding a hostile import
+/// table.
 const MAX_IMPORT_NAMES_PER_IMAGE: usize = 4_096;
+
+/// Longest imported name kept. A DLL name is a filename, so `MAX_PATH` is
+/// already generous; without a bound, one descriptor can name a run of bytes as
+/// long as its section, and every descriptor in the table can name the same run
+/// at a different offset, so retained memory is descriptors times run length
+/// rather than anything the file size bounds.
+const MAX_IMPORT_NAME_BYTES: usize = 260;
+
+/// Imported names one closure may decide about, across every image in it. Bounds
+/// what the walk retains (`seen`, the unresolved set) for a plug-in whose graph
+/// is wide rather than deep.
+const MAX_CLOSURE_IMPORT_NAMES: usize = 16_384;
 
 #[derive(Clone, Debug)]
 pub struct DependencyClosureRequest<'a> {
@@ -207,9 +220,6 @@ pub struct DependencyClosureSurvey {
     pub total_bytes: u64,
     pub unresolved: Vec<String>,
     pub rejected_names: usize,
-    /// The walk stopped at a ceiling, so `modules` and `total_bytes` are lower
-    /// bounds rather than the whole closure.
-    pub truncated: bool,
 }
 
 /// Counts what `plugin`'s import closure would seal, without hashing or
@@ -230,7 +240,6 @@ pub fn survey_dependency_closure(
         total_bytes: walk.total_bytes,
         unresolved: walk.unresolved,
         rejected_names: walk.rejected_names,
-        truncated: walk.over_module_limit || walk.over_byte_limit,
     })
 }
 
@@ -275,17 +284,25 @@ fn walk_import_closure(
 
     'walk: while let Some(image) = queue.pop_front() {
         for name in imported_names(&image)? {
+            // Names are ASCII-validated before anything else, so a name that
+            // cannot be a DLL basename never reaches `seen`. Folding into `seen`
+            // first would let a name that merely *lowercases* onto a real one
+            // (U+212A KELVIN SIGN onto `k`, say) claim its key and then be
+            // rejected, dropping the real import from the closure in silence.
+            if !windows_safe_basename(&name) {
+                walk.rejected_names += 1;
+                continue;
+            }
             if !seen.insert(fold(&name)) {
                 continue;
             }
+            if seen.len() > MAX_CLOSURE_IMPORT_NAMES {
+                return Err(invalid("dependency closure name limit exceeded"));
+            }
             match resolve_name(&name, &roots)? {
-                // Both mean "no search root provided this", which is what decides
-                // whether the closure would change; whether System32 happens to
-                // carry it only decides that it is not sealed.
-                NameResolution::System32 | NameResolution::Missing => {
+                NameResolution::NotInRoots => {
                     unresolved.insert(fold(&name));
                 }
-                NameResolution::Rejected => walk.rejected_names += 1,
                 NameResolution::Found(path) => {
                     let size = fs::metadata(&path)?.len();
                     walk.total_bytes = walk.total_bytes.saturating_add(size);
@@ -308,39 +325,28 @@ fn walk_import_closure(
 }
 
 enum NameResolution {
-    /// The name resolves in System32; the worker's load flags reach it already.
-    System32,
-    /// Resolved to a direct child of one search root.
+    /// Resolved to a direct child of one search root, so it is sealed.
     Found(PathBuf),
-    /// No search root provides it (an API set, a delay-loaded optional module,
-    /// or a genuinely missing dependency).
-    Missing,
-    /// Not a usable DLL basename, so it is never joined to a directory.
-    Rejected,
+    /// No search root provides it. Whether the loader then finds it in System32,
+    /// resolves it from the API set schema, or fails is not this resolver's
+    /// business: either way nothing is sealed, and either way a root that starts
+    /// providing the name later would change the closure.
+    NotInRoots,
 }
 
 fn resolve_name(name: &str, roots: &[PathBuf]) -> io::Result<NameResolution> {
-    // An imported name is attacker-controlled bytes inside the plug-in image, so
-    // it is validated as a plain Windows basename before it is ever joined to a
-    // directory. Anything else is rejected outright, never treated as a path.
-    if !windows_safe_basename(name) {
-        return Ok(NameResolution::Rejected);
-    }
     // An API set name is resolved by the loader from the API set schema before
     // any directory is searched, so a copy sitting in a search root would never
     // be the module that loads. Leave it to the loader rather than sealing a file
     // the worker will ignore — and rather than failing the whole closure over one.
     if is_api_set_name(name) {
-        return Ok(NameResolution::System32);
+        return Ok(NameResolution::NotInRoots);
     }
-    // Otherwise search roots come before System32, in the order the loader itself
-    // uses: `LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR` is consulted before
-    // `LOAD_LIBRARY_SEARCH_SYSTEM32`. A name that exists in both places is an
-    // app-local runtime the plug-in ships deliberately (Adobe's own
-    // `msvcp140.dll` next to its effects, say), and skipping it because System32
-    // happens to have a same-named file would hand the plug-in a different
-    // build's ABI. Only a name no root provides falls through to System32, where
-    // the worker's own load flags already reach it.
+    // Search roots are consulted in order, matching
+    // `LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR` before `LOAD_LIBRARY_SEARCH_SYSTEM32`:
+    // an app-local runtime the plug-in ships deliberately (Adobe's own
+    // `msvcp140.dll` next to its effects, say) must be the copy that is sealed,
+    // not the same-named System32 file.
     for root in roots {
         if is_direct_child_file(root, name) {
             let candidate = root.join(name);
@@ -354,12 +360,7 @@ fn resolve_name(name: &str, roots: &[PathBuf]) -> io::Result<NameResolution> {
             return Ok(NameResolution::Found(canonical));
         }
     }
-    if let Some(system32) = system_directory()
-        && is_direct_child_file(&system32, name)
-    {
-        return Ok(NameResolution::System32);
-    }
-    Ok(NameResolution::Missing)
+    Ok(NameResolution::NotInRoots)
 }
 
 fn is_direct_child_file(root: &Path, name: &str) -> bool {
@@ -446,27 +447,38 @@ fn import_names_from<Nt: ImageNtHeaders>(
     // error, not a truncation, so a closure is never quietly shortened into a
     // load failure either.
     let mut walked = 0usize;
-    let mut step = |names: &mut Vec<String>, walked: &mut usize, raw: Option<&[u8]>| {
+    let step = |names: &mut Vec<String>, walked: &mut usize, raw: Option<&[u8]>| {
         *walked += 1;
         if *walked > MAX_IMPORT_NAMES_PER_IMAGE {
             return Err(invalid("imported name limit exceeded"));
         }
-        // A descriptor whose name cannot be read (bad RVA, empty, or not the
-        // ASCII a DLL name is) means the import table is malformed. Skipping it
-        // would drop a dependency from the closure and turn a diagnosable parse
-        // failure into an opaque module-load failure much later, so it fails here
-        // instead.
+        // A descriptor whose name cannot be read — a bad RVA, empty bytes, more
+        // bytes than a filename can hold, or not the ASCII a DLL name is — means
+        // the import table is malformed. Skipping it would drop a dependency from
+        // the closure and turn a diagnosable parse failure into an opaque
+        // module-load failure much later, so it fails here instead.
         let name = raw
+            .filter(|raw| !raw.is_empty() && raw.len() <= MAX_IMPORT_NAME_BYTES)
             .and_then(|raw| std::str::from_utf8(raw).ok())
-            .filter(|name| !name.is_empty())
             .ok_or_else(|| invalid("plug-in import name is unreadable"))?;
         names.push(name.to_owned());
         Ok(())
     };
-    if let Ok(Some(table)) = pe.import_table()
-        && let Ok(mut descriptors) = table.descriptors()
+    // A malformed import directory is an error, not "no imports": treating a
+    // parse failure as an empty table would seal nothing and hand the worker the
+    // same opaque load failure this resolver exists to remove. `Ok(None)` is the
+    // honest case of a PE that imports nothing.
+    if let Some(table) = pe
+        .import_table()
+        .map_err(|_| invalid("plug-in import table is unreadable"))?
     {
-        while let Ok(Some(descriptor)) = descriptors.next() {
+        let mut descriptors = table
+            .descriptors()
+            .map_err(|_| invalid("plug-in import table is unreadable"))?;
+        while let Some(descriptor) = descriptors
+            .next()
+            .map_err(|_| invalid("plug-in import table is unreadable"))?
+        {
             step(
                 &mut names,
                 &mut walked,
@@ -474,12 +486,18 @@ fn import_names_from<Nt: ImageNtHeaders>(
             )?;
         }
     }
-    if let Ok(Some(table)) = pe
+    if let Some(table) = pe
         .data_directories()
         .delay_load_import_table(pe.data(), &pe.section_table())
-        && let Ok(mut descriptors) = table.descriptors()
+        .map_err(|_| invalid("plug-in delay-load import table is unreadable"))?
     {
-        while let Ok(Some(descriptor)) = descriptors.next() {
+        let mut descriptors = table
+            .descriptors()
+            .map_err(|_| invalid("plug-in delay-load import table is unreadable"))?;
+        while let Some(descriptor) = descriptors
+            .next()
+            .map_err(|_| invalid("plug-in delay-load import table is unreadable"))?
+        {
             step(
                 &mut names,
                 &mut walked,
@@ -506,14 +524,6 @@ fn name_at<'data, Nt: ImageNtHeaders>(
     let data = pe.section_table().pe_data_at(pe.data(), rva)?;
     let end = data.iter().position(|byte| *byte == 0)?;
     Some(&data[..end])
-}
-
-/// `%SystemRoot%\System32`, canonicalized. `None` when it cannot be resolved,
-/// which only makes the resolver seal more (a System32 name then falls through
-/// to the search roots, and an unfound name stays unresolved).
-fn system_directory() -> Option<PathBuf> {
-    let root = std::env::var_os("SystemRoot")?;
-    fs::canonicalize(PathBuf::from(root).join("System32")).ok()
 }
 
 /// Whether `name` is a Windows API set (`api-ms-*` / `ext-ms-*`), which the
@@ -601,64 +611,71 @@ mod tests {
             .collect();
         sealed.sort();
         assert_eq!(sealed, vec!["dvacore.dll", "dvaui.dll"]);
-        // kernel32 lives in System32, so the worker's load flags already reach it
-        // and it is not sealed. It is still reported, because a root that starts
+        // No root provides kernel32, so it is not sealed — the worker's own load
+        // flags reach System32. It is still reported, because a root that starts
         // providing that name would change what the closure seals.
         assert_eq!(closure.unresolved(), ["kernel32.dll"]);
         assert!(closure.total_bytes() > 0);
         fs::remove_dir_all(install).unwrap();
     }
 
-    // Needs a real System32 to shadow, which only Windows has; the rest of the
-    // resolver's behaviour is exercised on every platform.
-    #[cfg(windows)]
     #[test]
-    fn an_app_local_copy_wins_over_the_system32_one() {
-        // The worker resolves the load directory before System32, so a name a
-        // search root provides must be sealed even though System32 has a file of
-        // the same name — otherwise the plug-in silently gets the system build.
-        let install = temp_dir("applocal");
-        let system32 = system_directory().expect("System32");
-        let shared = std::fs::read_dir(&system32)
-            .unwrap()
-            .flatten()
-            .filter(|entry| entry.path().is_file())
-            .find_map(|entry| {
-                let name = entry.file_name().to_string_lossy().into_owned();
-                name.to_lowercase().ends_with(".dll").then_some(name)
-            })
-            .expect("a System32 DLL to shadow");
-        write_pe(&install, &shared, &[]);
-        let plugin = write_pe(&install, "effect.aex", &[&shared]);
-
+    fn a_rejected_name_cannot_take_a_real_import_s_place() {
+        // U+212A KELVIN SIGN lowercases to ASCII `k`. If the walk folded names
+        // into its visited set before validating them, this name would claim the
+        // key for `krt.dll`, then be rejected as non-ASCII, and the real import
+        // would never be looked at — a silently shortened closure.
+        let install = temp_dir("fold");
+        write_pe(&install, "krt.dll", &[]);
+        let plugin = write_pe(&install, "effect.aex", &["\u{212a}rt.dll", "krt.dll"]);
         let roots = vec![install.clone()];
+
         let closure =
             resolve_dependency_closure(DependencyClosureRequest::new(&plugin, &roots)).unwrap();
         assert_eq!(closure.dependencies().len(), 1);
-        assert_eq!(closure.dependencies()[0].path, install.join(&shared));
-
-        // With no search root offering it, the same name resolves in System32, so
-        // it is not sealed — but it is reported, so a caller can tell that adding
-        // it to a root would change the closure.
-        let bare = temp_dir("applocal-bare");
-        let bare_plugin = write_pe(&bare, "effect.aex", &[&shared]);
-        let bare_roots = vec![bare.clone()];
-        let fallback =
-            resolve_dependency_closure(DependencyClosureRequest::new(&bare_plugin, &bare_roots))
-                .unwrap();
-        assert!(fallback.is_empty());
-        assert_eq!(fallback.unresolved(), [shared.to_lowercase()]);
-
+        assert_eq!(
+            closure.dependencies()[0].path.file_name().unwrap(),
+            "krt.dll"
+        );
+        assert_eq!(closure.rejected_names(), 1);
         fs::remove_dir_all(install).unwrap();
-        fs::remove_dir_all(bare).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn rejects_a_root_entry_that_resolves_outside_its_root() {
+        // A junction or symlink planted in a search root is the way a name can
+        // pass every basename check and still land somewhere else; the resolver
+        // must refuse rather than seal whatever it points at.
+        use std::os::windows::fs::symlink_file;
+        let install = temp_dir("escape");
+        let outside = temp_dir("escape-target");
+        let target = write_pe(&outside, "real.dll", &[]);
+        let plugin = write_pe(&install, "effect.aex", &["linked.dll"]);
+        if symlink_file(&target, install.join("linked.dll")).is_err() {
+            // Creating symlinks needs a privilege this machine may not grant.
+            fs::remove_dir_all(&install).unwrap();
+            fs::remove_dir_all(&outside).unwrap();
+            return;
+        }
+
+        let roots = vec![install.clone()];
+        let error =
+            resolve_dependency_closure(DependencyClosureRequest::new(&plugin, &roots)).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "dependency resolved outside its search root"
+        );
+        fs::remove_dir_all(install).unwrap();
+        fs::remove_dir_all(outside).unwrap();
     }
 
     #[test]
     fn never_seals_an_api_set_even_when_a_root_holds_one() {
         // The loader resolves api-ms-* / ext-ms-* from the API set schema before
         // it searches any directory, so an app-local copy would never be the
-        // module that loads; sealing it would copy a file the worker ignores, and
-        // could fail the closure over a file that does not matter.
+        // module that loads. Sealing it would copy a file the worker ignores and
+        // spend an operator's ceiling on it.
         let install = temp_dir("apiset");
         let api_set = "api-ms-win-crt-runtime-l1-1-0.dll";
         write_pe(&install, api_set, &[]);
@@ -803,7 +820,6 @@ mod tests {
         );
         let survey = survey_dependency_closure(&plugin, &roots).unwrap();
         assert_eq!(survey.modules, 4);
-        assert!(!survey.truncated);
         assert!(survey.total_bytes > 0);
         fs::remove_dir_all(install).unwrap();
     }

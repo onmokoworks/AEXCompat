@@ -205,7 +205,6 @@ fn main() {
                         "closure_modules": survey.modules,
                         "closure_bytes": survey.total_bytes,
                         "unresolved": survey.unresolved.len(),
-                        "truncated": survey.truncated,
                     }));
                     *buckets.entry("surveyed".into()).or_default() += 1;
                     eprintln!(
