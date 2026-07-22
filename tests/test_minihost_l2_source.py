@@ -1447,6 +1447,7 @@ class MinihostL2SourceTests(unittest.TestCase):
             self.assertIn(f'return "{name}"', dispatch)
         self.assertIn('"last_seh_selector\\\":\\\""', text)
         self.assertIn('"last_seh_error\\\":"', text)
+        self.assertIn('"last_seh_exception_code\\\":"', text)
 
     def test_all_macro_effect_calls_share_the_audited_seh_boundary(self):
         text = l2_family_source()
