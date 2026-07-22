@@ -58,6 +58,10 @@ ignore = ['pf_sampling_probe', 'broken-effect']
 # 依存 DLL の探索フォルダ (issue #304)。AEX 自身のフォルダは常に最優先で探索されるので
 # ここには書かない。省略時は AE (最新版) の Support Files を使う。
 dependency_dirs = ['C:\Program Files\Adobe\Adobe After Effects 2025\Support Files']
+# 1つの AEX に封入する依存の上限 (省略時は無制限)。重いプラグイン (最大 227 DLL / 約 1GB) の
+# discovery に時間をかけたくない場合だけ設定する。超えた AEX は discovery 失敗になる。
+# dependency_module_limit = 64
+# dependency_byte_limit = 268435456
 ```
 
 環境変数 `AEXCOMPAT_MULTIFILTER_DIR` / `AEXCOMPAT_MULTIFILTER_REPOSITORY` /
@@ -79,7 +83,8 @@ worker は AEX を隔離した sealed load tree からロードし、探索先�
 - 封入された DLL は AEX 本体とまったく同じ経路で認証される (sha256 + サイズ照合、reparse
   point 拒否、basename 衝突拒否)。探索フォルダを渡すことは worker の DLL 探索パスを
   広げることではない。
-- クロージャの大きさに上限は設けない。AE のエフェクトの一部は Adobe ランタイムをほぼ丸ごと
+- クロージャの大きさに上限は設けない (`dependency_module_limit` / `dependency_byte_limit` で
+  明示的に設定した場合を除く)。AE のエフェクトの一部は Adobe ランタイムをほぼ丸ごと
   引く (実測で最大 225 DLL / 約 1.0GB) が、封入こそがそれをロード可能にする唯一の手段なので、
   「大きいから」で弾かない。ただし sealed load tree は**コピー**なので、その分だけ discovery と
   セッション開始が遅くなる (実測: 220MB で 0.8s、1.0GB で十数秒)。依存の重い AEX を大量に

@@ -174,6 +174,15 @@ struct Config {
     /// `Support Files\` folder). Empty means the default AE runtime folders.
     #[serde(default)]
     dependency_dirs: Vec<PathBuf>,
+    /// Optional ceiling on how many DLLs may be sealed with one AEX. Absent means
+    /// no ceiling: the closure is whatever the plug-in imports out of the folders
+    /// above, and a plug-in is not skipped for needing a large runtime. Set it to
+    /// trade coverage for a shorter discovery pass — an AEX over the ceiling then
+    /// fails discovery instead of copying its closure.
+    dependency_module_limit: Option<usize>,
+    /// Optional ceiling on the total bytes sealed with one AEX, same trade-off as
+    /// `dependency_module_limit`. The heaviest AE plug-ins pull about 1 GB.
+    dependency_byte_limit: Option<u64>,
     /// Effect names to skip (matched against each AEX's file stem, case- and
     /// `.aex`-extension-insensitive).
     #[serde(default)]
@@ -269,7 +278,7 @@ pub extern "C" fn RegisterPlugin(host: *mut HOST_APP_TABLE) {
     if dirs.is_empty() {
         return;
     }
-    let dependency_dirs = resolve_dependency_dirs(&config);
+    let dependency = resolve_dependency_config(&config);
 
     // Recursively collect the *.aex to expose (minus ignored), deduped + sorted.
     let plugins = collect_aex(&dirs, &config.ignore);
@@ -286,7 +295,7 @@ pub extern "C" fn RegisterPlugin(host: *mut HOST_APP_TABLE) {
     // depends on the compat host that produced it (the L2 worker and this DLL's
     // in-process broker). Invalidate the whole cache when the host build changed,
     // so effects that previously failed to load are re-discovered (issue #304).
-    let build = build_fingerprint(&repository, &dirs, &dependency_dirs);
+    let build = build_fingerprint(&repository, &dirs, &dependency.dirs);
     let cache = load_cache(build);
 
     // Register (host callback, main thread only) each AEX whose discovery already
@@ -301,7 +310,7 @@ pub extern "C" fn RegisterPlugin(host: *mut HOST_APP_TABLE) {
                     .is_some_and(|(mtime, len)| entry.mtime == mtime && entry.len == len) =>
             {
                 if entry.ok {
-                    register_discovered(host, &repository, plugin, &dependency_dirs, entry);
+                    register_discovered(host, &repository, plugin, &dependency, entry);
                 }
             }
             _ => misses.push(plugin.clone()),
@@ -309,7 +318,7 @@ pub extern "C" fn RegisterPlugin(host: *mut HOST_APP_TABLE) {
     }
 
     if !misses.is_empty() {
-        spawn_background_discovery(repository, dependency_dirs, plugins, cache, misses, build);
+        spawn_background_discovery(repository, dependency, plugins, cache, misses, build);
     }
 }
 
@@ -317,7 +326,7 @@ pub extern "C" fn RegisterPlugin(host: *mut HOST_APP_TABLE) {
 /// is never blocked. Newly-discovered effects appear on the next launch.
 fn spawn_background_discovery(
     repository: PathBuf,
-    dependency_dirs: Vec<PathBuf>,
+    dependency: DependencyConfig,
     plugins: Vec<PathBuf>,
     mut cache: HashMap<String, CacheEntry>,
     misses: Vec<PathBuf>,
@@ -344,7 +353,7 @@ fn spawn_background_discovery(
                 if DISCOVERY_SHUTDOWN.load(Ordering::Relaxed) {
                     break;
                 }
-                let results = discover_all(&repository, chunk, &dependency_dirs);
+                let results = discover_all(&repository, chunk, &dependency);
                 let discovered = results.len();
                 for (plugin, entry) in results {
                     cache.insert(plugin.to_string_lossy().into_owned(), entry);
@@ -397,20 +406,24 @@ fn default_dirs() -> Vec<PathBuf> {
 /// wins, else the config, else the default After Effects runtime folder
 /// (issue #304). An AEX's own folder is not listed here; it is always searched
 /// first, per plug-in.
-fn resolve_dependency_dirs(config: &Config) -> Vec<PathBuf> {
-    if let Some(dirs) = std::env::var_os(ENV_DEPENDENCY_DIRS) {
-        return dirs
-            .to_string_lossy()
+fn resolve_dependency_config(config: &Config) -> DependencyConfig {
+    let dirs = if let Some(dirs) = std::env::var_os(ENV_DEPENDENCY_DIRS) {
+        dirs.to_string_lossy()
             .split(';')
             .map(str::trim)
             .filter(|entry| !entry.is_empty())
             .map(PathBuf::from)
-            .collect();
+            .collect()
+    } else if !config.dependency_dirs.is_empty() {
+        config.dependency_dirs.clone()
+    } else {
+        default_dependency_dirs()
+    };
+    DependencyConfig {
+        dirs,
+        module_limit: config.dependency_module_limit,
+        byte_limit: config.dependency_byte_limit,
     }
-    if !config.dependency_dirs.is_empty() {
-        return config.dependency_dirs.clone();
-    }
-    default_dependency_dirs()
 }
 
 /// The default dependency folders: the newest installed After Effects
@@ -451,12 +464,26 @@ fn search_roots_for(plugin: &Path, dependency_dirs: &[PathBuf]) -> Vec<PathBuf> 
 /// `LoadLibraryExW` failure, so the reason is kept and surfaced by the caller.
 fn dependency_closure_for(
     plugin: &Path,
-    dependency_dirs: &[PathBuf],
+    dependency: &DependencyConfig,
 ) -> Result<Vec<ApprovedImageArtifact>, String> {
-    let roots = search_roots_for(plugin, dependency_dirs);
-    resolve_dependency_closure(DependencyClosureRequest::new(plugin, &roots))
-        .map(|closure| closure.into_dependencies())
-        .map_err(|error| format!("dependency closure resolution failed: {error}"))
+    let roots = search_roots_for(plugin, &dependency.dirs);
+    resolve_dependency_closure(DependencyClosureRequest {
+        max_dependencies: dependency.module_limit,
+        max_total_bytes: dependency.byte_limit,
+        ..DependencyClosureRequest::new(plugin, &roots)
+    })
+    .map(|closure| closure.into_dependencies())
+    .map_err(|error| format!("dependency closure resolution failed: {error}"))
+}
+
+/// Where an AEX's dependency DLLs are looked for, and the optional ceilings on
+/// what may be sealed with it. Defaults to "the installed AE runtime folder, no
+/// ceiling" (issue #304).
+#[derive(Clone, Default)]
+struct DependencyConfig {
+    dirs: Vec<PathBuf>,
+    module_limit: Option<usize>,
+    byte_limit: Option<u64>,
 }
 
 /// `%ProgramFiles%\Adobe`, the root of Adobe app installs.
@@ -634,9 +661,9 @@ impl Drop for MfSession {
 struct FilterCtx {
     repository: PathBuf,
     plugin: PathBuf,
-    /// Extra folders searched for this AEX's dependency DLLs when its session
-    /// opens; the same roots discovery used (issue #304).
-    dependency_dirs: Vec<PathBuf>,
+    /// Where this AEX's dependency DLLs are looked for when its session opens,
+    /// and any ceilings on them; the same configuration discovery used (#304).
+    dependency: DependencyConfig,
     sha: String,
     smart: bool,
     /// Exposed parameter defaults (normalized), cloned per frame as the baseline.
@@ -906,7 +933,7 @@ fn negative_entry(plugin: &Path) -> CacheEntry {
 /// background thread, so caching every outcome — even a timeout — means it is not
 /// re-probed on later launches; a spurious negative is cleared by re-touching the
 /// AEX or deleting the cache file (documented in the README).
-fn discover_one(repository: &Path, plugin: &Path, dependency_dirs: &[PathBuf]) -> CacheEntry {
+fn discover_one(repository: &Path, plugin: &Path, dependency: &DependencyConfig) -> CacheEntry {
     let mut entry = negative_entry(plugin);
     let Ok(bytes) = std::fs::read(plugin) else {
         return entry;
@@ -916,7 +943,7 @@ fn discover_one(repository: &Path, plugin: &Path, dependency_dirs: &[PathBuf]) -
     // live in its installed runtime folder can load inside the isolated sealed
     // root at all (issue #304). A closure that cannot be resolved is a failed
     // discovery, not a dependency-free retry.
-    let Ok(dependencies) = dependency_closure_for(plugin, dependency_dirs) else {
+    let Ok(dependencies) = dependency_closure_for(plugin, dependency) else {
         return entry;
     };
     if let Ok((params, diagnostics)) =
@@ -950,7 +977,7 @@ fn discover_one(repository: &Path, plugin: &Path, dependency_dirs: &[PathBuf]) -
 fn discover_all(
     repository: &Path,
     paths: &[PathBuf],
-    dependency_dirs: &[PathBuf],
+    dependency: &DependencyConfig,
 ) -> Vec<(PathBuf, CacheEntry)> {
     let parallelism = std::thread::available_parallelism()
         .map(|n| n.get())
@@ -972,7 +999,7 @@ fn discover_all(
                     }
                     let plugin = &paths[index];
                     let entry = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        discover_one(repository, plugin, dependency_dirs)
+                        discover_one(repository, plugin, dependency)
                     }))
                     .unwrap_or_else(|_| negative_entry(plugin));
                     if let Ok(mut results) = results.lock() {
@@ -1000,7 +1027,7 @@ fn register_discovered(
     host: *mut HOST_APP_TABLE,
     repository: &Path,
     plugin: &Path,
-    dependency_dirs: &[PathBuf],
+    dependency: &DependencyConfig,
     entry: &CacheEntry,
 ) {
     // Build config items + readers + normalized defaults from the exposed params.
@@ -1023,7 +1050,7 @@ fn register_discovered(
     let userdata = Box::leak(Box::new(FilterCtx {
         repository: repository.to_path_buf(),
         plugin: plugin.to_path_buf(),
-        dependency_dirs: dependency_dirs.to_vec(),
+        dependency: dependency.clone(),
         sha: entry.sha.clone(),
         smart: entry.smart,
         defaults,
@@ -1270,7 +1297,7 @@ fn render_frame(ctx: &FilterCtx, video: *mut FILTER_PROC_VIDEO) -> bool {
 struct MfSessionConfig {
     repository: PathBuf,
     plugin: PathBuf,
-    dependency_dirs: Vec<PathBuf>,
+    dependency: DependencyConfig,
     sha: String,
     smart: bool,
     defaults: Vec<InteractiveParameter>,
@@ -1294,7 +1321,7 @@ fn open_mf_session(config: MfSessionConfig) -> Result<MfSession, String> {
             // the session thread, once per session) keeps the hashing off both
             // the AviUtl2 callback thread and plugin startup.
             let dependencies =
-                match dependency_closure_for(&config.plugin, &config.dependency_dirs) {
+                match dependency_closure_for(&config.plugin, &config.dependency) {
                     Ok(dependencies) => dependencies,
                     Err(error) => {
                         let _ = open_tx.send(Err(error));
@@ -1468,7 +1495,7 @@ fn open_and_get_sender(
     let opened = open_mf_session(MfSessionConfig {
         repository: ctx.repository.clone(),
         plugin: ctx.plugin.clone(),
-        dependency_dirs: ctx.dependency_dirs.clone(),
+        dependency: ctx.dependency.clone(),
         sha: ctx.sha.clone(),
         smart: ctx.smart,
         defaults: ctx.defaults.clone(),
