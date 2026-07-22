@@ -1,5 +1,6 @@
 #include "worker_pf_suites_internal.hpp"
 #include "worker_pf_sampling_runtime.hpp"
+#include "worker_world_registry.hpp"
 #include "worker_world_safety.hpp"
 
 #include <windows.h>
@@ -28,8 +29,8 @@ namespace {
 constexpr int32_t kPfBadCallbackParam = 4;
 constexpr int32_t kPfErrBadCallbackParam = 516;
 constexpr int32_t kPixelFormatArgb32 = 1650946657;
-constexpr int32_t kPixelFormatArgb64 = 1650946658;
-constexpr int32_t kPixelFormatArgb128 = 1650946659;
+using aexcompat::world_registry::kPixelFormatArgb64;
+using aexcompat::world_registry::kPixelFormatArgb128;
 constexpr uint64_t kMaxAsyncReceiptBytes = 64ULL * 1024 * 1024;
 constexpr std::size_t kInSize = 408;
 constexpr std::size_t kInEffectRef = 184;
