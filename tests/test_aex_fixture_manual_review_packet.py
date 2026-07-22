@@ -1,6 +1,7 @@
 import importlib.util
 import json
 import sys
+import tempfile
 import time
 import unittest
 from pathlib import Path
@@ -111,8 +112,7 @@ def make_load_gate() -> dict:
     }
 
 
-def write_wiztree_csv() -> Path:
-    root = TOOLS_ROOT / "WizTree MCP" / "exports"
+def write_wiztree_csv(root: Path) -> Path:
     root.mkdir(parents=True, exist_ok=True)
     path = root / f"{time.time_ns()}-aex-fixtures.csv"
     path.write_text(
@@ -131,6 +131,11 @@ def write_wiztree_csv() -> Path:
 
 
 class AexFixtureManualReviewPacketTests(unittest.TestCase):
+    def setUp(self):
+        self._wiztree_tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._wiztree_tmp.cleanup)
+        self.wiztree_root = Path(self._wiztree_tmp.name)
+
     def test_packet_summarizes_hold_dependency_and_gate_without_opening_aex(self):
         packet = aex_fixture_manual_review_packet.build_manual_review_packet(
             fixture_dossier=make_dossier(),
@@ -139,7 +144,7 @@ class AexFixtureManualReviewPacketTests(unittest.TestCase):
             dependency_review_path=Path("dependency.json"),
             load_gate=make_load_gate(),
             load_gate_path=Path("gate.json"),
-            wiztree_csv_path=write_wiztree_csv(),
+            wiztree_csv_path=write_wiztree_csv(self.wiztree_root),
         )
 
         self.assertEqual(packet["report_kind"], "aex_fixture_manual_review_packet")
@@ -230,8 +235,10 @@ class AexFixtureManualReviewPacketTests(unittest.TestCase):
                 packet,
             )
 
-        csv_path = write_wiztree_csv()
-        loaded_csv = aex_fixture_manual_review_packet.validate_wiztree_csv(csv_path)
+        csv_path = write_wiztree_csv(self.wiztree_root)
+        loaded_csv = aex_fixture_manual_review_packet.validate_wiztree_csv(
+            csv_path, export_root=self.wiztree_root
+        )
         self.assertEqual(loaded_csv, csv_path.resolve())
 
 
