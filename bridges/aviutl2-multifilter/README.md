@@ -111,7 +111,8 @@ worker は AEX を隔離した sealed load tree からロードし、探索先�
   discovery 失敗として扱う。依存無しで再試行しても同じロード失敗になるため。この negative も
   キャッシュされるが、**失敗時も「解決が辿ったファイル」を記録する** (ハッシュもコピーもしない
   survey を使う) ので、上限を超えていた依存 DLL が小さくなった・消えた・置き換わった場合は
-  自動的に再 discovery される。上限自体を変えた場合はキャッシュ全体が無効化される。
+  自動的に再 discovery される。上限自体を変えた場合も (エントリの「どのホストで作られたか」に
+  含まれるため) 各エントリが再 discovery の対象になる — 登録は維持されたまま (issue #307)。
 - これで解けるのは L1 (LoadLibrary 失敗) だけで、Adobe ランタイムを引くエフェクトはさらに
   module audit (L2) と Adobe IPC 初期化 (L3) の壁がある。実測は
   `docs/AE_EFFECT_LOADING_INVESTIGATION_2026-07-22.md` を参照。

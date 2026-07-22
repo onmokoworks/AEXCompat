@@ -343,11 +343,18 @@ pub extern "C" fn RegisterPlugin(host: *mut HOST_APP_TABLE) {
         // A closure that would now resolve differently (issue #304) joins the same
         // queue rather than unregistering the filter: the dependency DLLs decide
         // the result as much as the host build does, and #307's rule is that
-        // nothing is unregistered for a launch. Checked only when the entry would
-        // otherwise be left alone, so an already-queued one pays nothing.
+        // nothing is unregistered for a launch.
+        //
+        // Bounded by the same [`RETRY_BUDGET`] a host change is. A re-discovery
+        // that keeps failing does not update the recorded closure (`keep_best`
+        // refuses to demote a working entry, and keeps its record with it), so the
+        // trigger would otherwise fire on every launch forever — an AE update that
+        // rewrites one runtime DLL puts every effect in that state at once.
+        // Checked only when the entry would otherwise be left alone, so an
+        // already-queued one pays nothing.
         if !decision.discover
             && let Some(entry) = cached
-            && !closure_still_resolves_the_same(entry, &search_roots_for(plugin, &dependency.dirs))
+            && needs_closure_recheck(entry, build, &search_roots_for(plugin, &dependency.dirs))
         {
             decision.discover = true;
         }
@@ -1271,6 +1278,19 @@ struct CachedDependency {
     len: u64,
 }
 
+/// Whether this entry should be re-discovered because its dependency closure
+/// would now resolve differently (issue #304).
+///
+/// Bounded by the same [`RETRY_BUDGET`] a host change is: a re-discovery that
+/// keeps failing does not update the recorded closure (`keep_best` refuses to
+/// demote a working entry and keeps its record with it), so without the budget an
+/// AE update that rewrites one runtime DLL would re-run a worker for every effect
+/// on every launch, forever.
+fn needs_closure_recheck(entry: &CacheEntry, build: BuildFingerprint, roots: &[PathBuf]) -> bool {
+    (entry.checked != build || entry.attempts < RETRY_BUDGET)
+        && !closure_still_resolves_the_same(entry, roots)
+}
+
 /// Whether re-resolving this entry's closure today would still reach the same
 /// files, judged with `stat` only. `roots` is what the resolution would search
 /// now, in order.
@@ -1363,11 +1383,10 @@ struct BuildFingerprint {
     worker: Option<(u64, u32, u64)>,
     #[serde(default)]
     host: Option<(u64, u32, u64)>,
-    /// Digest of the closure resolution *inputs* (issue #304): the ordered search
-    /// folders and the ceilings. They decide what every entry would seal, so an
-    /// entry produced under different ones is re-verified like one produced by an
-    /// older host. What those folders *contain* is tracked per entry instead, in
-    /// [`CachedClosure`].
+    /// Digest of the closure ceilings (issue #304). They decide whether a closure
+    /// is sealed at all, so an entry produced under different ones is re-verified
+    /// like one produced by an older host. The search folders and what they
+    /// contain are tracked per entry instead, in [`CachedClosure`].
     #[serde(default)]
     dependency_inputs: u64,
 }
@@ -1424,21 +1443,21 @@ fn build_fingerprint(repository: &Path, dependency: &DependencyConfig) -> BuildF
     }
 }
 
-/// A digest of the closure resolution inputs: the search folders **in order**
-/// (two folders holding the same basename resolve to whichever comes first, so
-/// swapping them changes which DLL is sealed) and the ceilings. Only equality
-/// matters, so the leading 8 bytes of the SHA-256 are enough and keep the
-/// fingerprint `Copy`.
+/// A digest of the ceilings, which decide whether a closure is sealed at all and
+/// are not recorded per entry. Only equality matters, so the leading 8 bytes of
+/// the SHA-256 are enough and keep the fingerprint `Copy`.
 ///
-/// It deliberately touches no files: what the folders contain is checked per
-/// entry, against that entry's own resolution.
+/// The search folders are deliberately **not** hashed here, even though they
+/// decide the outcome too. Each entry records the canonical roots it actually
+/// resolved against and is compared against today's, which is both exact (a
+/// relative config string can mean different folders on different launches) and
+/// per-entry. Hashing the folders instead would make one global value out of a
+/// resolution that is not global — and `default_dependency_dirs` can legitimately
+/// return the previous AE version's folder while an update is in flight, which
+/// would then queue every entry for re-verification against the wrong runtime.
 fn dependency_inputs_fingerprint(dependency: &DependencyConfig) -> u64 {
     let mut hasher = Sha256::new();
-    for dir in &dependency.dirs {
-        hasher.update(dir.to_string_lossy().to_lowercase().as_bytes());
-        hasher.update([0]);
-    }
-    hasher.update(b"limits ");
+    hasher.update(b"limits\0");
     hasher.update(dependency.module_limit.unwrap_or(usize::MAX).to_le_bytes());
     hasher.update(dependency.byte_limit.unwrap_or(u64::MAX).to_le_bytes());
     let digest = hasher.finalize();
@@ -2443,6 +2462,7 @@ mod tests {
         BuildFingerprint {
             worker: Some((worker_mtime, 0, 4096)),
             host: Some((100, 0, 8192)),
+            dependency_inputs: 0,
         }
     }
 
@@ -2458,6 +2478,7 @@ mod tests {
             stale: false,
             checked: build,
             attempts: 0,
+            closure: CachedClosure::default(),
         }
     }
 
@@ -2761,6 +2782,107 @@ mod tests {
 
     /// A temp dir unique to this test and this process, so concurrent `cargo test`
     /// runs do not delete each other's fixtures.
+    /// An entry whose closure was resolved against `roots` and sealed `sealed`.
+    fn with_closure(roots: &[&Path], sealed: &[&Path], missing: &[&str]) -> CacheEntry {
+        let mut entry = discovered(5, 64, build(1));
+        entry.closure = CachedClosure {
+            roots: roots
+                .iter()
+                .map(|root| root.to_string_lossy().into_owned())
+                .collect(),
+            sealed: sealed
+                .iter()
+                .map(|path| {
+                    let (mtime, len) = file_meta(path).expect("sealed dependency");
+                    CachedDependency {
+                        path: path.to_string_lossy().into_owned(),
+                        mtime,
+                        len,
+                    }
+                })
+                .collect(),
+            missing: missing.iter().map(|name| name.to_string()).collect(),
+        };
+        entry
+    }
+
+    #[test]
+    fn an_unchanged_closure_is_not_re_discovered() {
+        let root = temp_root("closure-stable");
+        let dependency = root.join("dvacore.dll");
+        std::fs::write(&dependency, b"runtime").unwrap();
+        let root = std::fs::canonicalize(&root).unwrap();
+        let dependency = std::fs::canonicalize(&dependency).unwrap();
+
+        let entry = with_closure(&[&root], &[&dependency], &["kernel32.dll"]);
+        assert!(!needs_closure_recheck(&entry, build(1), &[root.clone()]));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_rewritten_or_removed_dependency_re_discovers_that_effect() {
+        let root = temp_root("closure-rewritten");
+        let dependency = root.join("dvacore.dll");
+        std::fs::write(&dependency, b"runtime").unwrap();
+        let root = std::fs::canonicalize(&root).unwrap();
+        let dependency = std::fs::canonicalize(&dependency).unwrap();
+        let entry = with_closure(&[&root], &[&dependency], &[]);
+
+        // An AE update rewriting the DLL in place changes neither the AEX nor the
+        // host build, so nothing else would notice it.
+        std::fs::write(&dependency, b"a different runtime").unwrap();
+        assert!(needs_closure_recheck(&entry, build(1), &[root.clone()]));
+
+        std::fs::remove_file(&dependency).unwrap();
+        assert!(needs_closure_recheck(&entry, build(1), &[root.clone()]));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn an_import_that_appears_re_discovers_the_effect_that_wanted_it() {
+        let root = temp_root("closure-appeared");
+        let root = std::fs::canonicalize(&root).unwrap();
+        let entry = with_closure(&[&root], &[], &["helper.dll"]);
+        assert!(!needs_closure_recheck(&entry, build(1), &[root.clone()]));
+
+        // The missing dependency turns up: the plug-in that failed for want of it
+        // is exactly the one to try again.
+        std::fs::write(root.join("helper.dll"), b"helper").unwrap();
+        assert!(needs_closure_recheck(&entry, build(1), &[root.clone()]));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn an_entry_with_no_recorded_closure_is_re_verified_once() {
+        // Written before #304: nothing recorded, so it cannot be judged unchanged.
+        // It is re-verified — and, per issue #307, stays registered meanwhile.
+        let root = temp_root("closure-legacy");
+        let root = std::fs::canonicalize(&root).unwrap();
+        let entry = discovered(5, 64, build(1));
+        assert!(needs_closure_recheck(&entry, build(1), &[root.clone()]));
+        assert!(classify(Some(&entry), META, build(1)).register);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_closure_recheck_gives_up_after_the_retry_budget() {
+        // Otherwise one rewritten runtime DLL re-runs a worker for every effect on
+        // every launch: the re-discovery fails, `keep_best` keeps the old entry
+        // and its old record, and the trigger fires again unchanged.
+        let root = temp_root("closure-budget");
+        let root = std::fs::canonicalize(&root).unwrap();
+        let mut entry = with_closure(&[&root], &[], &["helper.dll"]);
+        std::fs::write(root.join("helper.dll"), b"helper").unwrap();
+        assert!(needs_closure_recheck(&entry, build(1), &[root.clone()]));
+
+        entry.checked = build(1);
+        entry.attempts = RETRY_BUDGET;
+        assert!(!needs_closure_recheck(&entry, build(1), &[root.clone()]));
+        // A different host gets its own budget.
+        assert!(needs_closure_recheck(&entry, build(2), &[root.clone()]));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     fn temp_root(tag: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("aexcompat-mf-{}-{tag}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
