@@ -433,7 +433,7 @@ using AegpEntry = int32_t(__cdecl*)(void*, int32_t, int32_t, int32_t, void**);
 // an AEGP is never handed to the Effect selector. Bounded and fail-closed:
 // malformed, ambiguous, or non-Effect PiPL is rejected before any selector runs.
 // Ported from the reviewed/audited implementation on codex/issue84-pipl-entrypoint.
-enum class PiplPluginKind { Effect, Aegp, Unknown, Invalid };
+enum class PiplPluginKind { Effect, Aegp, Unknown, Invalid, Missing };
 
 struct PiplEntrypoint {
   PiplPluginKind kind{PiplPluginKind::Unknown};
@@ -588,7 +588,7 @@ PiplEntrypoint discover_pipl_entrypoint(HMODULE module) {
     if (error != ERROR_RESOURCE_TYPE_NOT_FOUND && error != ERROR_RESOURCE_NAME_NOT_FOUND)
       return {PiplPluginKind::Invalid, {}};
   }
-  if (names.empty()) return {PiplPluginKind::Unknown, {}};
+  if (names.empty()) return {PiplPluginKind::Missing, {}};
   PiplEntrypoint selected;
   bool selected_effect = false;
   bool saw_aegp = false;
@@ -619,6 +619,321 @@ PiplEntrypoint discover_pipl_entrypoint(HMODULE module) {
   if (selected_effect) return selected;
   if (saw_aegp) return {PiplPluginKind::Aegp, {}};
   return {PiplPluginKind::Unknown, {}};
+}
+
+// Adobe's PluginData ABI is intentionally reproduced as a small clean-room
+// boundary here instead of including the redistributable SDK header.  The
+// worker only needs the opaque pointer, callback layouts, and the documented
+// entrypoint names to discover an Effect when no PiPL resource is present.
+using PluginDataOpaque = void;
+using PluginDataCallback2 = int32_t(__cdecl*)(
+    PluginDataOpaque*, const unsigned char*, const unsigned char*,
+    const unsigned char*, const unsigned char*, int32_t, int32_t, int32_t,
+    int32_t, const unsigned char*);
+using PluginDataCallback1 = int32_t(__cdecl*)(
+    PluginDataOpaque*, const unsigned char*, const unsigned char*,
+    const unsigned char*, const unsigned char*, int32_t, int32_t, int32_t,
+    int32_t);
+using PluginDataEntry2 = int32_t(__cdecl*)(
+    PluginDataOpaque*, PluginDataCallback2, void*, const char*, const char*);
+using PluginDataEntry1 = int32_t(__cdecl*)(
+    PluginDataOpaque*, PluginDataCallback1, void*, const char*, const char*);
+
+constexpr std::size_t kPluginDataNameBytes = 256;
+constexpr std::size_t kPluginDataCategoryBytes = 256;
+constexpr std::size_t kPluginDataEntryBytes = 128;
+constexpr std::size_t kPluginDataSupportUrlBytes = 1024;
+constexpr int32_t kPluginDataRejected = 4;  // A_Err_PARAMETER
+constexpr int32_t kPluginDataException = 512;
+constexpr int32_t kPluginDataReservedInfo = 8;
+constexpr int32_t kPluginDataApiMajor = 13;
+constexpr int32_t kPluginDataApiMinor = 28;
+
+template <std::size_t Capacity>
+struct BoundedPluginDataText {
+  std::array<char, Capacity + 1> text{};
+  std::size_t length{};
+  bool readable{};
+  bool terminated{};
+  bool printable{};
+};
+
+template <std::size_t Capacity>
+BoundedPluginDataText<Capacity> copy_bounded_plugin_data_text(
+    const unsigned char* source) noexcept {
+  BoundedPluginDataText<Capacity> copy;
+  copy.printable = true;
+  if (!source) return copy;
+  __try {
+    for (; copy.length < Capacity; ++copy.length) {
+      const unsigned char value = source[copy.length];
+      if (value == '\0') {
+        copy.terminated = true;
+        break;
+      }
+      if (value < 0x20 || value > 0x7e) copy.printable = false;
+      copy.text[copy.length] = static_cast<char>(value);
+    }
+    copy.readable = true;
+  } __except (EXCEPTION_EXECUTE_HANDLER) {
+    copy.readable = false;
+  }
+  copy.text[copy.length] = '\0';
+  return copy;
+}
+
+struct PluginDataRegistration {
+  std::array<char, kPluginDataNameBytes + 1> name{};
+  std::array<char, kPluginDataNameBytes + 1> match_name{};
+  std::array<char, kPluginDataCategoryBytes + 1> category{};
+  std::array<char, kPluginDataEntryBytes + 1> entrypoint{};
+  std::array<char, kPluginDataSupportUrlBytes + 1> support_url{};
+  std::size_t name_length{};
+  std::size_t match_name_length{};
+  std::size_t category_length{};
+  std::size_t entrypoint_length{};
+  std::size_t support_url_length{};
+  int32_t kind{};
+  int32_t api_major{};
+  int32_t api_minor{};
+  int32_t reserved_info{};
+  bool support_url_present{};
+  bool valid{};
+};
+
+struct PluginDataContext {
+  uint32_t callback_count{};
+  uint32_t exception_code{};
+  bool invalid{};
+  PluginDataRegistration registration{};
+};
+
+bool valid_plugin_data_export_name(const BoundedPluginDataText<kPluginDataEntryBytes>& text) {
+  if (!text.readable || !text.terminated || !text.printable || text.length == 0 ||
+      text.length > 127) return false;
+  if (!(text.text[0] == '_' || (text.text[0] >= 'A' && text.text[0] <= 'Z') ||
+        (text.text[0] >= 'a' && text.text[0] <= 'z')))
+    return false;
+  for (std::size_t index = 1; index < text.length; ++index) {
+    const char value = text.text[index];
+    if (!(value == '_' || (value >= 'A' && value <= 'Z') ||
+          (value >= 'a' && value <= 'z') || (value >= '0' && value <= '9')))
+      return false;
+  }
+  return true;
+}
+
+bool plugin_data_effect_kind(int32_t kind) {
+  // Use the same compiler literal as the SDK's PF_REGISTER_EFFECT_EXT2 macro.
+  return kind == static_cast<int32_t>('eFKT');
+}
+
+template <std::size_t Capacity>
+bool valid_plugin_data_text(const BoundedPluginDataText<Capacity>& text,
+                            bool required) {
+  return text.readable && text.terminated && text.printable &&
+      (!required || text.length != 0);
+}
+
+int32_t record_plugin_data_registration(
+    PluginDataContext* context, const unsigned char* name,
+    const unsigned char* match_name, const unsigned char* category,
+    const unsigned char* entrypoint, int32_t kind, int32_t api_major,
+    int32_t api_minor, int32_t reserved_info,
+    const unsigned char* support_url) noexcept {
+  if (!context || context->callback_count != 0) {
+    if (context) context->invalid = true;
+    return kPluginDataRejected;
+  }
+  ++context->callback_count;
+  const auto name_copy = copy_bounded_plugin_data_text<kPluginDataNameBytes>(name);
+  const auto match_copy =
+      copy_bounded_plugin_data_text<kPluginDataNameBytes>(match_name);
+  const auto category_copy =
+      copy_bounded_plugin_data_text<kPluginDataCategoryBytes>(category);
+  const auto entry_copy =
+      copy_bounded_plugin_data_text<kPluginDataEntryBytes>(entrypoint);
+  const auto support_copy =
+      copy_bounded_plugin_data_text<kPluginDataSupportUrlBytes>(support_url);
+  const bool support_valid = !support_url ||
+      valid_plugin_data_text(support_copy, false);
+  if (!valid_plugin_data_text(name_copy, true) ||
+      !valid_plugin_data_text(match_copy, true) ||
+      !valid_plugin_data_text(category_copy, true) ||
+      !valid_plugin_data_export_name(entry_copy) || !support_valid ||
+      !plugin_data_effect_kind(kind) || api_major <= 0 ||
+      api_major > kPluginDataApiMajor || api_minor < 0 ||
+      (api_major == kPluginDataApiMajor && api_minor > kPluginDataApiMinor) ||
+      reserved_info != kPluginDataReservedInfo) {
+    context->invalid = true;
+    return kPluginDataRejected;
+  }
+  auto& registration = context->registration;
+  std::copy_n(name_copy.text.data(), name_copy.length + 1,
+              registration.name.data());
+  std::copy_n(match_copy.text.data(), match_copy.length + 1,
+              registration.match_name.data());
+  std::copy_n(category_copy.text.data(), category_copy.length + 1,
+              registration.category.data());
+  std::copy_n(entry_copy.text.data(), entry_copy.length + 1,
+              registration.entrypoint.data());
+  if (support_url) {
+    std::copy_n(support_copy.text.data(), support_copy.length + 1,
+                registration.support_url.data());
+    registration.support_url_present = true;
+  }
+  registration.name_length = name_copy.length;
+  registration.match_name_length = match_copy.length;
+  registration.category_length = category_copy.length;
+  registration.entrypoint_length = entry_copy.length;
+  registration.support_url_length = support_copy.length;
+  registration.kind = kind;
+  registration.api_major = api_major;
+  registration.api_minor = api_minor;
+  registration.reserved_info = reserved_info;
+  registration.valid = true;
+  return 0;
+}
+
+int32_t __cdecl plugin_data_callback2(
+    PluginDataOpaque* in_ptr, const unsigned char* name,
+    const unsigned char* match_name, const unsigned char* category,
+    const unsigned char* entrypoint, int32_t kind, int32_t api_major,
+    int32_t api_minor, int32_t reserved_info,
+    const unsigned char* support_url) noexcept {
+  return record_plugin_data_registration(
+      static_cast<PluginDataContext*>(in_ptr), name, match_name, category,
+      entrypoint, kind, api_major, api_minor, reserved_info, support_url);
+}
+
+int32_t __cdecl plugin_data_callback1(
+    PluginDataOpaque* in_ptr, const unsigned char* name,
+    const unsigned char* match_name, const unsigned char* category,
+    const unsigned char* entrypoint, int32_t kind, int32_t api_major,
+    int32_t api_minor, int32_t reserved_info) noexcept {
+  return record_plugin_data_registration(
+      static_cast<PluginDataContext*>(in_ptr), name, match_name, category,
+      entrypoint, kind, api_major, api_minor, reserved_info, nullptr);
+}
+
+int plugin_data_exception_filter(EXCEPTION_POINTERS* information,
+                                 uint32_t* exception_code) {
+  if (exception_code && information && information->ExceptionRecord)
+    *exception_code = information->ExceptionRecord->ExceptionCode;
+  return EXCEPTION_EXECUTE_HANDLER;
+}
+
+int32_t invoke_plugin_data_entry2_seh(PluginDataEntry2 entry,
+                                      PluginDataContext* context) {
+  if (!entry || !context) return kPluginDataRejected;
+  int32_t result = kPluginDataRejected;
+  __try {
+    result = entry(context, &plugin_data_callback2, nullptr,
+                   "AEXCompat", "2025");
+  } __except(plugin_data_exception_filter(GetExceptionInformation(),
+                                           &context->exception_code)) {
+    result = kPluginDataException;
+  }
+  return result;
+}
+
+int32_t invoke_plugin_data_entry1_seh(PluginDataEntry1 entry,
+                                      PluginDataContext* context) {
+  if (!entry || !context) return kPluginDataRejected;
+  int32_t result = kPluginDataRejected;
+  __try {
+    result = entry(context, &plugin_data_callback1, nullptr,
+                   "AEXCompat", "2025");
+  } __except(plugin_data_exception_filter(GetExceptionInformation(),
+                                           &context->exception_code)) {
+    result = kPluginDataException;
+  }
+  return result;
+}
+
+PiplEntrypoint discover_plugin_data_entrypoint(HMODULE module) {
+  if (!module) return {PiplPluginKind::Unknown, {}};
+  const auto entry2 = reinterpret_cast<PluginDataEntry2>(
+      GetProcAddress(module, "PluginDataEntryFunction2"));
+  const auto entry1 = reinterpret_cast<PluginDataEntry1>(
+      GetProcAddress(module, "PluginDataEntryFunction"));
+  if (!entry2 && !entry1) return {PiplPluginKind::Unknown, {}};
+  PluginDataContext context;
+  const int32_t result = entry2
+      ? invoke_plugin_data_entry2_seh(entry2, &context)
+      : invoke_plugin_data_entry1_seh(entry1, &context);
+  if (result != 0 || context.exception_code != 0 || context.invalid ||
+      context.callback_count != 1 || !context.registration.valid)
+    return {PiplPluginKind::Unknown, {}};
+  return {PiplPluginKind::Effect,
+          std::string(context.registration.entrypoint.data(),
+                      context.registration.entrypoint_length)};
+}
+
+int32_t __cdecl synthetic_plugin_data_entry2(
+    PluginDataOpaque* in_ptr, PluginDataCallback2 callback, void*, const char*,
+    const char*) {
+  if (!callback) return kPluginDataRejected;
+  return callback(in_ptr,
+      reinterpret_cast<const unsigned char*>("Synthetic Effect"),
+      reinterpret_cast<const unsigned char*>("AEXCompat Synthetic"),
+      reinterpret_cast<const unsigned char*>("AEXCompat Tests"),
+      reinterpret_cast<const unsigned char*>("entryPointFunc"),
+      static_cast<int32_t>('eFKT'), kPluginDataApiMajor, kPluginDataApiMinor,
+      kPluginDataReservedInfo,
+      reinterpret_cast<const unsigned char*>("https://example.invalid"));
+}
+
+int32_t __cdecl synthetic_plugin_data_entry1(
+    PluginDataOpaque* in_ptr, PluginDataCallback1 callback, void*, const char*,
+    const char*) {
+  if (!callback) return kPluginDataRejected;
+  return callback(in_ptr,
+      reinterpret_cast<const unsigned char*>("Synthetic v1 Effect"),
+      reinterpret_cast<const unsigned char*>("AEXCompat Synthetic v1"),
+      reinterpret_cast<const unsigned char*>("AEXCompat Tests"),
+      reinterpret_cast<const unsigned char*>("EffectMain"),
+      static_cast<int32_t>('eFKT'), kPluginDataApiMajor, kPluginDataApiMinor,
+      kPluginDataReservedInfo);
+}
+
+bool verify_plugin_data_entrypoint() {
+  PluginDataContext v2;
+  if (invoke_plugin_data_entry2_seh(&synthetic_plugin_data_entry2, &v2) != 0 ||
+      !v2.registration.valid || v2.registration.support_url_length == 0 ||
+      std::string(v2.registration.entrypoint.data(),
+                  v2.registration.entrypoint_length) != "entryPointFunc")
+    return false;
+  PluginDataContext v1;
+  if (invoke_plugin_data_entry1_seh(&synthetic_plugin_data_entry1, &v1) != 0 ||
+      !v1.registration.valid || v1.registration.support_url_present ||
+      std::string(v1.registration.entrypoint.data(),
+                  v1.registration.entrypoint_length) != "EffectMain")
+    return false;
+  PluginDataContext duplicate;
+  if (plugin_data_callback1(
+          &duplicate, reinterpret_cast<const unsigned char*>("Name"),
+          reinterpret_cast<const unsigned char*>("Match"),
+          reinterpret_cast<const unsigned char*>("Category"),
+          reinterpret_cast<const unsigned char*>("EffectMain"),
+          static_cast<int32_t>('eFKT'), kPluginDataApiMajor,
+          kPluginDataApiMinor, kPluginDataReservedInfo) != 0 ||
+      plugin_data_callback1(
+          &duplicate, reinterpret_cast<const unsigned char*>("Name"),
+          reinterpret_cast<const unsigned char*>("Match"),
+          reinterpret_cast<const unsigned char*>("Category"),
+          reinterpret_cast<const unsigned char*>("EffectMain"),
+          static_cast<int32_t>('eFKT'), kPluginDataApiMajor,
+          kPluginDataApiMinor, kPluginDataReservedInfo) == 0)
+    return false;
+  PluginDataContext invalid_pointer;
+  return plugin_data_callback1(
+      &invalid_pointer, reinterpret_cast<const unsigned char*>(1),
+      reinterpret_cast<const unsigned char*>("Match"),
+      reinterpret_cast<const unsigned char*>("Category"),
+      reinterpret_cast<const unsigned char*>("EffectMain"),
+      static_cast<int32_t>('eFKT'), kPluginDataApiMajor,
+      kPluginDataApiMinor, kPluginDataReservedInfo) != 0;
 }
 
 void append_pipl_u32(std::vector<unsigned char>& bytes, uint32_t value) {
@@ -1770,6 +2085,14 @@ int worker_main_impl(int argc, wchar_t **argv) {
                  "\"bounded\":true,\"aegp_not_effect\":true}\n";
     return passed ? 0 : 72;
   }
+  if (argc == 2 && std::wstring(argv[1]) == L"--self-test-plugin-data-entrypoint") {
+    const bool passed = verify_plugin_data_entrypoint();
+    std::cout << "{\"plugin_data_entrypoint\":\""
+              << (passed ? "passed" : "failed")
+              << "\",\"v2\":true,\"v1_fallback\":true,"
+                 "\"bounded\":true,\"fail_closed\":true}\n";
+    return passed ? 0 : 73;
+  }
   RuntimeHostHooks runtime_hooks{&sha256, &redirect_native_stdout,
                                  &restore_native_stdout};
   // GPU module-audit preflight (#290): authorize the AEXRMA1-listed GPU runtime
@@ -2019,7 +2342,13 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
   // whose entrypoint is not literally "EffectMain" still dispatches and a
   // Kind=AEGP plug-in is never handed to the Effect selector. Fail closed on
   // AEGP, missing/invalid PiPL, ambiguity, or an unresolvable symbol.
-  const PiplEntrypoint pipl_entrypoint = discover_pipl_entrypoint(module);
+  PiplEntrypoint pipl_entrypoint = discover_pipl_entrypoint(module);
+  // PluginData is a registration ABI used by many bundled effects that do
+  // not carry a PiPL resource. It is deliberately reachable only for a
+  // missing PiPL: malformed, ambiguous, AEGP, or unknown PiPL resources stay
+  // fail-closed and never get a second interpretation.
+  if (pipl_entrypoint.kind == PiplPluginKind::Missing)
+    pipl_entrypoint = discover_plugin_data_entrypoint(module);
   if (pipl_entrypoint.kind != PiplPluginKind::Effect) {
     const char* plugin_kind =
         pipl_entrypoint.kind == PiplPluginKind::Aegp
