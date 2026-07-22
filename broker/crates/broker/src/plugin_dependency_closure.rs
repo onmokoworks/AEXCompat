@@ -650,12 +650,20 @@ fn import_names_from<Nt: ImageNtHeaders>(
 /// plug-ins measured for issue #304 are built that way, and dropping their
 /// imports would have shortened a closure silently. Resolving through the
 /// section table covers any layout, and a genuinely out-of-range RVA still fails.
+///
+/// The terminator is only searched for as far as a name may be long. A name
+/// longer than that is rejected by the caller anyway, so scanning past the limit
+/// can only ever confirm a rejection — and an RVA aimed at a large section with
+/// no NUL in it would otherwise make each of an image's descriptors scan the
+/// rest of that section, turning a malformed table into work proportional to
+/// descriptors times section size.
 fn name_at<'data, Nt: ImageNtHeaders>(
     pe: &object::read::pe::PeFile<'data, Nt>,
     rva: u32,
 ) -> Option<&'data [u8]> {
     let data = pe.section_table().pe_data_at(pe.data(), rva)?;
-    let end = data.iter().position(|byte| *byte == 0)?;
+    let searched = data.get(..=MAX_IMPORT_NAME_BYTES).unwrap_or(data);
+    let end = searched.iter().position(|byte| *byte == 0)?;
     Some(&data[..end])
 }
 
@@ -1130,6 +1138,57 @@ mod tests {
                 .unwrap_err()
                 .to_string(),
             "imported name limit exceeded"
+        );
+        fs::remove_dir_all(install).unwrap();
+    }
+
+    #[test]
+    fn fails_closed_on_an_import_name_with_no_terminator() {
+        // The search for the terminator stops at the filename limit, so a
+        // descriptor aimed at a long run of non-zero bytes costs a bounded scan
+        // rather than the rest of the section — times every descriptor in the
+        // image. The bound itself is not observable from here; what is, and what
+        // this pins, is that such a name is still refused rather than truncated
+        // into a plausible-looking dependency.
+        let install = temp_dir("unterminated");
+        let plugin = install.join("effect.aex");
+        fs::write(
+            &plugin,
+            crate::test_pe::pe64_with_an_unterminated_import_name(),
+        )
+        .unwrap();
+        let roots = vec![install.clone()];
+        assert_eq!(
+            resolve_dependency_closure(DependencyClosureRequest::new(&plugin, &roots))
+                .unwrap_err()
+                .to_string(),
+            "plug-in import name is unreadable"
+        );
+        fs::remove_dir_all(install).unwrap();
+    }
+
+    #[test]
+    fn the_longest_name_a_filename_can_hold_is_still_read() {
+        // The boundary the bounded scan introduces: the terminator of a
+        // maximum-length name sits at the last searched byte. Off by one here and
+        // every such import would silently become "unreadable".
+        let install = temp_dir("longest");
+        let longest = format!("{}.dll", "n".repeat(MAX_IMPORT_NAME_BYTES - ".dll".len()));
+        let plugin = write_pe(&install, "effect.aex", &[&longest]);
+        let roots = vec![install.clone()];
+
+        let closure =
+            resolve_dependency_closure(DependencyClosureRequest::new(&plugin, &roots)).unwrap();
+        assert_eq!(closure.unresolved(), [longest.to_lowercase()]);
+
+        // One byte more is over the limit, as it was before the scan was bounded.
+        let too_long = format!("n{longest}");
+        let plugin = write_pe(&install, "over.aex", &[&too_long]);
+        assert_eq!(
+            resolve_dependency_closure(DependencyClosureRequest::new(&plugin, &roots))
+                .unwrap_err()
+                .to_string(),
+            "plug-in import name is unreadable"
         );
         fs::remove_dir_all(install).unwrap();
     }

@@ -13,6 +13,12 @@ const SECTION_RVA: u32 = 0x1000;
 const SECOND_SECTION_RVA: u32 = 0x2000;
 const IMPORT_DESCRIPTOR_SIZE: usize = 20;
 const DELAY_DESCRIPTOR_SIZE: usize = 32;
+/// A byte that is neither NUL nor anything a name check would accept.
+const FILLER: u8 = 0xaa;
+/// How far the unterminated name runs past the filename limit. It has to stay
+/// small enough that the section's virtual extent still fits below
+/// `SECOND_SECTION_RVA`, so raising it much is not free.
+const UNTERMINATED_FILLER_LEN: usize = 4_096;
 
 /// A PE32+ image importing `imports` through the normal import directory.
 pub fn pe64_importing(imports: &[&str]) -> Vec<u8> {
@@ -34,16 +40,28 @@ pub fn pe64_with_broken_import_directory() -> Vec<u8> {
 /// A PE32+ image whose import descriptors and name strings live in *different*
 /// sections, as a linker that emits `.idata` plus `.rdata` produces.
 pub fn pe64_with_names_in_a_second_section(imports: &[&str]) -> Vec<u8> {
-    build(imports, &[], true)
+    build(imports, &[], true, false)
+}
+
+/// A PE32+ image whose one import name has no NUL terminator, followed by a
+/// stretch of non-zero bytes: the shape that makes an unbounded reader scan the
+/// rest of the section looking for a terminator that is not there.
+pub fn pe64_with_an_unterminated_import_name() -> Vec<u8> {
+    build(&["unterminated.dll"], &[], false, true)
 }
 
 /// A PE32+ image importing `imports` normally and `delay_imports` through the
 /// delay-load import directory.
 pub fn pe64_with_imports(imports: &[&str], delay_imports: &[&str]) -> Vec<u8> {
-    build(imports, delay_imports, false)
+    build(imports, delay_imports, false, false)
 }
 
-fn build(imports: &[&str], delay_imports: &[&str], names_in_second_section: bool) -> Vec<u8> {
+fn build(
+    imports: &[&str],
+    delay_imports: &[&str],
+    names_in_second_section: bool,
+    unterminated_names: bool,
+) -> Vec<u8> {
     let import_table_size = (imports.len() + 1) * IMPORT_DESCRIPTOR_SIZE;
     let delay_table_size = (delay_imports.len() + 1) * DELAY_DESCRIPTOR_SIZE;
     let names_offset = import_table_size + delay_table_size;
@@ -61,7 +79,14 @@ fn build(imports: &[&str], delay_imports: &[&str], names_in_second_section: bool
     for name in imports.iter().chain(delay_imports) {
         name_rva.push(names_rva_base + names.len() as u32);
         names.extend_from_slice(name.as_bytes());
-        names.push(0);
+        names.push(if unterminated_names { FILLER } else { 0 });
+    }
+    if unterminated_names {
+        // A run that continues well past the filename limit, all non-zero so
+        // there is no terminator to find. It lands inside the section's virtual
+        // size, which is what bounds the slice a reader gets — so an unbounded
+        // reader really does walk all of it, even though nothing here times that.
+        names.extend(std::iter::repeat_n(FILLER, UNTERMINATED_FILLER_LEN));
     }
 
     let mut section = Vec::with_capacity(names_offset + names.len());
