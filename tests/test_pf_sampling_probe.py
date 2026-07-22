@@ -6,6 +6,8 @@ import subprocess
 import unittest
 from pathlib import Path
 
+from _render_session import run_session_render
+
 import pytest
 
 
@@ -152,19 +154,17 @@ def _expected_output(raw, width, height, format_name):
                     for row in range(height) for column in range(width))
 
 
-@pytest.mark.parametrize(("mode", "format_name"), (
-    ("--render-image", "argb8"),
-    ("--render-image16", "argb16"),
-    ("--render-image32", "argb32f"),
+@pytest.mark.parametrize(("pixel_format", "format_name"), (
+    ("argb8", "argb8"),
+    ("argb16", "argb16"),
+    ("argb32f", "argb32f"),
 ))
-def test_real_probe_depth_matrix_has_numeric_oracle(tmp_path, mode, format_name):
+def test_real_probe_depth_matrix_has_numeric_oracle(tmp_path, pixel_format, format_name):
     output = tmp_path / f"sampling-{format_name}.rgba"
-    completed = subprocess.run([
-        str(WORKER), mode, str(AEX), hashlib.sha256(AEX.read_bytes()).hexdigest(),
-        "v5|", str(INPUT), str(output), "37", "23", "0", "1", "1", "1",
-    ], cwd=ROOT, text=True, capture_output=True, timeout=30)
-    assert completed.returncode == 0, completed.stdout + completed.stderr
-    report = json.loads(completed.stdout)
+    report = run_session_render(
+        tmp_path, AEX, INPUT, output, width=37, height=23,
+        pixel_format=pixel_format,
+    )
     assert report["status"] == "render_completed"
     assert report["render_error"] == 0
     assert report["pixel_format"] == format_name

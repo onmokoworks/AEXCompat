@@ -5770,6 +5770,63 @@ fn main() -> eframe::Result {
         }
         return Ok(());
     }
+    if args.len() == 10 && args[1] == "--render-experimental-session" {
+        // Built-artifact probes use this explicit session-only adapter.  The
+        // worker no longer accepts the deleted one-shot image argv (#365), so
+        // native probe coverage must enter through the same length-one session
+        // wrapper as production experimental renders.
+        use aexcompat_broker::image_render::{RenderPixelFormat, RenderTiming};
+        let pixel_format = match args[5].to_string_lossy().as_ref() {
+            "argb8" => RenderPixelFormat::Argb8,
+            "argb16" => RenderPixelFormat::Argb16,
+            "argb32f" => RenderPixelFormat::Argb32f,
+            _ => {
+                eprintln!("pixel format must be argb8, argb16, or argb32f");
+                std::process::exit(1);
+            }
+        };
+        let smart = match args[6].to_string_lossy().as_ref() {
+            "classic" => false,
+            "smart" => true,
+            _ => {
+                eprintln!("render kind must be classic or smart");
+                std::process::exit(1);
+            }
+        };
+        let current_time = args[7].to_string_lossy().parse::<i32>().unwrap_or(-1);
+        let total_time = args[8].to_string_lossy().parse::<i32>().unwrap_or(0);
+        let time_scale = args[9].to_string_lossy().parse::<u32>().unwrap_or(0);
+        let timing = RenderTiming {
+            current_time,
+            time_step: 1,
+            total_time,
+            time_scale,
+        };
+        let plugin = Path::new(&args[2]);
+        let hash = format!("{:X}", Sha256::digest(fs::read(plugin).unwrap()));
+        let parameters =
+            aexcompat_broker::image_render::inspect_experimental(&repository, plugin, &hash)
+                .unwrap_or_default();
+        let report = aexcompat_broker::image_render::render_experimental_image_at_time_with_format(
+            &repository,
+            plugin,
+            &hash,
+            Path::new(&args[3]),
+            Path::new(&args[4]),
+            &parameters,
+            timing,
+            smart,
+            pixel_format,
+        );
+        match report {
+            Ok(value) => println!("{}", serde_json::to_string_pretty(&value).unwrap()),
+            Err(error) => {
+                eprintln!("{error}");
+                std::process::exit(1);
+            }
+        }
+        return Ok(());
+    }
     if args.len() == 5
         && matches!(
             args[1].to_string_lossy().as_ref(),
