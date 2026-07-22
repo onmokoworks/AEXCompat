@@ -148,21 +148,52 @@ class RenderRequestSecureLaunchContractTests(unittest.TestCase):
 
     ROUTE = ROOT / "broker/crates/broker/src/render_request.rs"
 
-    def launch_sites(self, route):
-        """Number of real `secure_launch(` call sites in the module.
+    def production_source(self, route):
+        """`route` with the `#[cfg(test)]` module dropped.
 
-        Counted per line with comments stripped, so a mention in a doc comment or in
-        `#[cfg(test)] mod tests` cannot inflate it and desynchronise the equality
-        assertions below. Asserts a floor so a module that lost every launch cannot
-        make the `== launches` checks pass vacuously as `0 == 0`.
+        Every count in this class is about production launch sites, so a Rust unit
+        test that legitimately calls `secure_launch(` must not desynchronise them.
+        """
+        cut = route.find("#[cfg(test)]")
+        return route if cut == -1 else route[:cut]
+
+    def launch_sites(self, route):
+        """Number of real `secure_launch(` call sites in the production module.
+
+        Line comments and the `#[cfg(test)]` module are stripped first, so a mention
+        in either cannot inflate the count and desynchronise the equality assertions
+        below. Asserts a floor so a module that lost every launch cannot make the
+        `== launches` checks pass vacuously as `0 == 0`.
         """
         sites = 0
-        for line in route.splitlines():
+        for line in self.production_source(route).splitlines():
             code = line.split("//", 1)[0]
-            if re.search(r"(?<![a-z_])secure_launch\(", code):
-                sites += 1
+            sites += len(re.findall(r"(?<![a-z_])secure_launch\(", code))
         self.assertGreaterEqual(sites, 4, "render_request.rs lost its sealed launches")
         return sites
+
+    def report_object(self, route, marker_at, stage):
+        """The full `let report = json!({ ... })` text enclosing `marker_at`.
+
+        The end is found by balancing braces from the opening one rather than by the
+        first `});`, so a nested `json!({...})` value cannot truncate the slice and
+        hide the outer keys this check exists to inspect.
+        """
+        anchor = "let report = json!({"
+        opening = route.rfind(anchor, 0, marker_at)
+        self.assertNotEqual(opening, -1, f"{stage} marker has no `{anchor}` before it")
+        brace = route.index("{", opening + len(anchor) - 2)
+        depth = 0
+        for index in range(brace, len(route)):
+            if route[index] == "{":
+                depth += 1
+            elif route[index] == "}":
+                depth -= 1
+                if depth == 0:
+                    body = route[opening : index + 1]
+                    self.assertIn(f'"stage":"{stage}"', body)
+                    return body
+        self.fail(f"{stage} report object is unterminated")
 
     def test_no_route_launches_with_normal_token_run_isolated(self):
         route = self.ROUTE.read_text(encoding="utf-8")
@@ -246,18 +277,16 @@ class RenderRequestSecureLaunchContractTests(unittest.TestCase):
             marker = f'"stage":"{stage}"'
             # A stage can be emitted more than once (the classic route writes a
             # pre-dispatch rejection report as well as the success report), so every
-            # occurrence is checked -- not just the first. Each slice is anchored at
-            # the opening `json!({` rather than at the marker, because keys emitted
-            # ahead of "stage" (schema_version today) would otherwise never be seen.
+            # occurrence is checked -- not just the first. Each slice spans the whole
+            # `let report = json!({ ... })` binding: anchoring at the marker would hide
+            # keys emitted ahead of "stage" (schema_version today), and stopping at the
+            # first `});` would silently truncate the slice -- a false pass -- once any
+            # value is itself a `json!({...})`.
             occurrences = 0
             start = route.find(marker)
             while start != -1:
                 occurrences += 1
-                opening = route.rfind("json!({", 0, start)
-                self.assertNotEqual(opening, -1, f"{stage} marker has no json!({{ before it")
-                closing = route.find("});", start)
-                self.assertNotEqual(closing, -1, f"{stage} report object is unterminated")
-                body = route[opening:closing]
+                body = self.report_object(route, start, stage)
                 emitted = set(re.findall(r'"([a-z0-9_]+)"\s*:', body))
                 self.assertTrue(
                     emitted <= declared,
