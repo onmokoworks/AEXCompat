@@ -2041,7 +2041,6 @@ fn bytes_to_pixels(bytes: &[u8]) -> Vec<PIXEL_RGBA> {
         .collect()
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3384,6 +3383,7 @@ mod tests {
         assert_eq!(entry.map(|entry| entry.len), Some(64), "took the usable one");
         assert_eq!(alias.as_deref(), Some(other.as_str()));
     }
+
     fn parameter(slot: u32, name: &str, visible: bool) -> InteractiveParameter {
         InteractiveParameter {
             slot,
