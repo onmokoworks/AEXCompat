@@ -15,6 +15,8 @@
 //! (CreateProcessAsUserW + PROC_THREAD_ATTRIBUTE_HANDLE_LIST + Job assign 後
 //! resume) をテスト内に再現する。spike なので production API は変更しない。
 
+mod common;
+
 #[cfg(windows)]
 mod windows_e2e {
     use aexcompat_broker::restricted_worker_acl::{RestrictedWorkerSid, protect_sealed_load_tree};
@@ -177,6 +179,11 @@ mod windows_e2e {
 
     #[test]
     fn restricted_worker_maps_inherited_anonymous_section_without_commit_charge() {
+        if crate::common::skip_without_restricted_token_launch(
+            "restricted_worker_maps_inherited_anonymous_section_without_commit_charge",
+        ) {
+            return;
+        }
         let fixture = build_fixture();
         let root = TempTree(std::env::temp_dir().join(format!(
             "aexcompat-session-shm-spike-{}-{:032x}",

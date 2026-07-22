@@ -5,6 +5,8 @@
 //! executable and the pf_sampling_probe fixture from this checkout; skips
 //! (with a message) when either is not built.
 
+mod common;
+
 #[cfg(test)]
 #[cfg(windows)]
 mod windows_e2e {
@@ -47,6 +49,11 @@ mod windows_e2e {
 
     #[test]
     fn smart_single_image_matches_the_one_shot_transport() {
+        if crate::common::skip_without_restricted_token_launch(
+            "smart_single_image_matches_the_one_shot_transport",
+        ) {
+            return;
+        }
         // A CPU SmartFX single-image render (no layers, no context) is now
         // carried by the length-1 smart session (#278 stage 1). Prove it renders
         // byte-identically to the one-shot --smart-image route, for both a normal
@@ -177,6 +184,11 @@ mod windows_e2e {
 
     #[test]
     fn smart_argb32f_auto_is_session_canonical_and_pixel_matches_one_shot() {
+        if crate::common::skip_without_restricted_token_launch(
+            "smart_argb32f_auto_is_session_canonical_and_pixel_matches_one_shot",
+        ) {
+            return;
+        }
         // Argb32f smart Auto (policy-none) is now carried by the length-1 session
         // (#292): the session folds Auto to CPU and renders on
         // --smart-session32-cpu-v1. One-shot Argb32f Auto fails its policy-less
@@ -297,6 +309,11 @@ mod windows_e2e {
 
     #[test]
     fn smart_timed_multilayer_matches_the_one_shot_transport() {
+        if crate::common::skip_without_restricted_token_launch(
+            "smart_timed_multilayer_matches_the_one_shot_transport",
+        ) {
+            return;
+        }
         // Smart sessions now carry the secondary-layer trailer (#294): a SmartFX
         // effect that checks out three timed layers renders byte-identically on
         // the length-1 session and the one-shot --smart-image16-layer route.
@@ -433,6 +450,11 @@ mod windows_e2e {
 
     #[test]
     fn wrapper_report_matches_the_one_shot_transport() {
+        if crate::common::skip_without_restricted_token_launch(
+            "wrapper_report_matches_the_one_shot_transport",
+        ) {
+            return;
+        }
         let _env_guard = SESSION_ROUTE_ENV_LOCK
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
@@ -925,6 +947,11 @@ mod windows_e2e {
     /// worker and the pf-layer-param-probe fixture, like the sibling test.
     #[test]
     fn wrapper_layer_and_slider_match_across_routes() {
+        if crate::common::skip_without_restricted_token_launch(
+            "wrapper_layer_and_slider_match_across_routes",
+        ) {
+            return;
+        }
         let _env_guard = SESSION_ROUTE_ENV_LOCK
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
@@ -1115,6 +1142,11 @@ mod windows_e2e {
     /// fixture, like the sibling A/B tests.
     #[test]
     fn wrapper_parameter_animation_matches_the_one_shot_transport() {
+        if crate::common::skip_without_restricted_token_launch(
+            "wrapper_parameter_animation_matches_the_one_shot_transport",
+        ) {
+            return;
+        }
         let _env_guard = SESSION_ROUTE_ENV_LOCK
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
@@ -1272,6 +1304,11 @@ mod windows_e2e {
     /// missing.
     #[test]
     fn audio_wrapper_report_matches_the_one_shot_transport() {
+        if crate::common::skip_without_restricted_token_launch(
+            "audio_wrapper_report_matches_the_one_shot_transport",
+        ) {
+            return;
+        }
         let _env_guard = SESSION_ROUTE_ENV_LOCK
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
@@ -1415,6 +1452,11 @@ mod windows_e2e {
     /// (tools/build-pf-custom-ui-probe.ps1); skips when missing.
     #[test]
     fn custom_ui_click_report_matches_the_one_shot_transport() {
+        if crate::common::skip_without_restricted_token_launch(
+            "custom_ui_click_report_matches_the_one_shot_transport",
+        ) {
+            return;
+        }
         let _env_guard = SESSION_ROUTE_ENV_LOCK
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
@@ -1553,6 +1595,11 @@ mod windows_e2e {
     /// rectangle onto the control surface and flags the event handled.
     #[test]
     fn custom_ui_draw_report_matches_the_one_shot_transport() {
+        if crate::common::skip_without_restricted_token_launch(
+            "custom_ui_draw_report_matches_the_one_shot_transport",
+        ) {
+            return;
+        }
         let _env_guard = SESSION_ROUTE_ENV_LOCK
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
@@ -1678,6 +1725,11 @@ mod windows_e2e {
     /// the render worker and the resize probe (tools/build-pf-frame-resize-probe.ps1).
     #[test]
     fn expand_output_matches_the_one_shot_transport() {
+        if crate::common::skip_without_restricted_token_launch(
+            "expand_output_matches_the_one_shot_transport",
+        ) {
+            return;
+        }
         let _env_guard = SESSION_ROUTE_ENV_LOCK
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
@@ -1820,6 +1872,11 @@ mod windows_e2e {
     #[cfg(debug_assertions)]
     #[test]
     fn session_infra_failure_fails_closed_without_silent_one_shot() {
+        if crate::common::skip_without_restricted_token_launch(
+            "session_infra_failure_fails_closed_without_silent_one_shot",
+        ) {
+            return;
+        }
         let _env_guard = SESSION_ROUTE_ENV_LOCK
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
@@ -1888,6 +1945,11 @@ mod windows_e2e {
     /// one-shot instead.
     #[test]
     fn oversized_layer_renders_on_the_session_matching_one_shot() {
+        if crate::common::skip_without_restricted_token_launch(
+            "oversized_layer_renders_on_the_session_matching_one_shot",
+        ) {
+            return;
+        }
         let _env_guard = SESSION_ROUTE_ENV_LOCK
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
@@ -1959,6 +2021,11 @@ mod windows_e2e {
 
     #[test]
     fn zero_duration_render_matches_the_one_shot_transport() {
+        if crate::common::skip_without_restricted_token_launch(
+            "zero_duration_render_matches_the_one_shot_transport",
+        ) {
+            return;
+        }
         // A zero-duration render (total_time == 0) is the single t=0 frame the
         // one-shot worker produces; the session now carries it too (#272), so it
         // is no longer routed to one-shot. Prove the session renders it (the
@@ -2032,6 +2099,11 @@ mod windows_e2e {
 
     #[test]
     fn conformance_render_settings_match_the_one_shot_transport() {
+        if crate::common::skip_without_restricted_token_launch(
+            "conformance_render_settings_match_the_one_shot_transport",
+        ) {
+            return;
+        }
         // A conformance render (AEXCOMPAT_CONFORMANCE_RENDER_SETTINGS set) is now
         // carried by the session, which forwards the --conformance-render-settings-v1
         // trailer so the worker reports the same render_settings block the
@@ -2166,6 +2238,11 @@ mod windows_e2e {
     #[cfg(debug_assertions)]
     #[test]
     fn audio_session_failure_fails_closed_without_silent_one_shot() {
+        if crate::common::skip_without_restricted_token_launch(
+            "audio_session_failure_fails_closed_without_silent_one_shot",
+        ) {
+            return;
+        }
         let _env_guard = SESSION_ROUTE_ENV_LOCK
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());

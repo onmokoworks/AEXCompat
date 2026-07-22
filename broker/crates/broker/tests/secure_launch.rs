@@ -1,3 +1,5 @@
+mod common;
+
 #[cfg(windows)]
 mod windows_e2e {
     use aexcompat_broker::ExitClassification;
@@ -31,6 +33,11 @@ mod windows_e2e {
 
     #[test]
     fn external_worker_reads_sealed_plugin_and_tree_is_cleaned_after_exit() {
+        if crate::common::skip_without_restricted_token_launch(
+            "external_worker_reads_sealed_plugin_and_tree_is_cleaned_after_exit",
+        ) {
+            return;
+        }
         let _lock = SECURE_LAUNCH_LOCK.lock().unwrap();
         let worker_dir = TempDir::new("aexcompat-secure-launch-worker");
         let worker = build_worker(&worker_dir.0);
@@ -81,6 +88,11 @@ mod windows_e2e {
 
     #[test]
     fn worker_hash_mismatch_never_starts_process_and_cleans_tree() {
+        if crate::common::skip_without_restricted_token_launch(
+            "worker_hash_mismatch_never_starts_process_and_cleans_tree",
+        ) {
+            return;
+        }
         let _lock = SECURE_LAUNCH_LOCK.lock().unwrap();
         let worker_dir = TempDir::new("aexcompat-secure-launch-worker-mismatch");
         let marker = worker_dir.0.join("started.marker");
@@ -136,6 +148,11 @@ mod windows_e2e {
 
     #[test]
     fn timeout_kills_worker_and_cleans_sealed_and_staged_trees() {
+        if crate::common::skip_without_restricted_token_launch(
+            "timeout_kills_worker_and_cleans_sealed_and_staged_trees",
+        ) {
+            return;
+        }
         let _lock = SECURE_LAUNCH_LOCK.lock().unwrap();
         let stages_before = trusted_stage_roots();
         let worker_dir = TempDir::new("aexcompat-secure-launch-timeout");

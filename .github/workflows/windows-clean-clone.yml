@@ -39,15 +39,16 @@ jobs:
         run: cargo check --manifest-path bridges/aviutl2/Cargo.toml --all-targets --locked
       - name: Check AviUtl2 multifilter bridge
         run: cargo check --manifest-path bridges/aviutl2-multifilter/Cargo.toml --all-targets --locked
+      # Hosted runners execute as a service account whose restricted token cannot
+      # initialize even a static Rust worker (0xC0000142). The tests that drive a
+      # live worker detect that themselves now (broker/crates/broker/tests/common,
+      # issue #335) and report a skip line instead of failing; rejection tests that
+      # never start a process still run. The old --skip list is gone because it did
+      # not follow the tests added after it was written, which left main red with
+      # 32 failures.
       - name: Test Rust workspace
         working-directory: broker
-        # Hosted runners execute as a service account whose restricted token cannot
-        # initialize even a static Rust worker (0xC0000142). Keep rejection tests in
-        # CI, but leave positive restricted-token launch coverage to a local runner.
-        run: >-
-          cargo test --workspace --locked --
-          --skip external_worker_reads_sealed_plugin_and_tree_is_cleaned_after_exit
-          --skip timeout_kills_worker_and_cleans_sealed_and_staged_trees
+        run: cargo test --workspace --locked
       - name: Validate Python collection and local-artifact manifest
         run: uv run python -m pytest --collect-only -q --validate-local-artifact-manifest
       - name: Run source-reproducible Python tests
