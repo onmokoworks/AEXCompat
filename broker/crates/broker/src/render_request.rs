@@ -702,10 +702,10 @@ pub fn execute(repository: &Path, request_path: &Path, output_path: &Path) -> io
         if !manifest.plugin_sha256.eq_ignore_ascii_case(&fixture_sha256) {
             return Err(invalid("descriptor manifest plugin digest mismatch"));
         }
+        // Reported identity only: the digest is pinned against `manifest` above on
+        // every run, and the cross-run drift check is the identity tuple below.
         if approved_fixture_sha256.is_empty() {
             approved_fixture_sha256 = fixture_sha256.to_ascii_uppercase();
-        } else if !approved_fixture_sha256.eq_ignore_ascii_case(&fixture_sha256) {
-            return Err(invalid("classic fixture approval changed between runs"));
         }
         let worker_sha256 = approved.worker_sha256;
         let worker_byte_size = approved.worker_byte_size;
@@ -936,10 +936,10 @@ pub fn execute_smart(
         if !manifest.plugin_sha256.eq_ignore_ascii_case(&fixture_sha256) {
             return Err(invalid("descriptor manifest plugin digest mismatch"));
         }
+        // Reported identity only: the digest is pinned against `manifest` above on
+        // every run, and the cross-run drift check is the identity tuple below.
         if approved_fixture_sha256.is_empty() {
             approved_fixture_sha256 = fixture_sha256.to_ascii_uppercase();
-        } else if !approved_fixture_sha256.eq_ignore_ascii_case(&fixture_sha256) {
-            return Err(invalid("SmartFX fixture approval changed between runs"));
         }
         let worker_sha256 = approved.worker_sha256;
         let worker_byte_size = approved.worker_byte_size;
@@ -960,7 +960,7 @@ pub fn execute_smart(
             .is_some_and(|approved| approved != &identity)
         {
             return Err(invalid(
-                "SmartFX approval changed between determinism runs",
+                "SmartFX parameter-request approval changed between determinism runs",
             ));
         }
         approved_identity = Some(identity);
@@ -1339,10 +1339,10 @@ pub fn execute_smart_suite_fault(
         if !manifest.plugin_sha256.eq_ignore_ascii_case(&fixture_sha256) {
             return Err(invalid("descriptor manifest plugin digest mismatch"));
         }
+        // Reported identity only: the digest is pinned against `manifest` above on
+        // every run, and the cross-run drift check is the identity tuple below.
         if approved_fixture_sha256.is_empty() {
             approved_fixture_sha256 = fixture_sha256.to_ascii_uppercase();
-        } else if !approved_fixture_sha256.eq_ignore_ascii_case(&fixture_sha256) {
-            return Err(invalid("SmartFX fixture approval changed between runs"));
         }
         let worker_sha256 = approved.worker_sha256;
         let worker_byte_size = approved.worker_byte_size;
@@ -1363,7 +1363,7 @@ pub fn execute_smart_suite_fault(
             .is_some_and(|approved| approved != &identity)
         {
             return Err(invalid(
-                "SmartFX approval changed between determinism runs",
+                "SmartFX suite-fault approval changed between determinism runs",
             ));
         }
         approved_identity = Some(identity);
@@ -1665,10 +1665,10 @@ pub fn execute_smart_mask_scene(
         if !manifest.plugin_sha256.eq_ignore_ascii_case(&fixture_sha256) {
             return Err(invalid("descriptor manifest plugin digest mismatch"));
         }
+        // Reported identity only: the digest is pinned against `manifest` above on
+        // every run, and the cross-run drift check is the identity tuple below.
         if approved_fixture_sha256.is_empty() {
             approved_fixture_sha256 = fixture_sha256.to_ascii_uppercase();
-        } else if !approved_fixture_sha256.eq_ignore_ascii_case(&fixture_sha256) {
-            return Err(invalid("SmartFX fixture approval changed between runs"));
         }
         let worker_sha256 = approved.worker_sha256;
         let worker_byte_size = approved.worker_byte_size;
@@ -1689,7 +1689,7 @@ pub fn execute_smart_mask_scene(
             .is_some_and(|approved| approved != &identity)
         {
             return Err(invalid(
-                "SmartFX approval changed between determinism runs",
+                "SmartFX mask-scene approval changed between determinism runs",
             ));
         }
         approved_identity = Some(identity);

@@ -148,6 +148,22 @@ class RenderRequestSecureLaunchContractTests(unittest.TestCase):
 
     ROUTE = ROOT / "broker/crates/broker/src/render_request.rs"
 
+    def launch_sites(self, route):
+        """Number of real `secure_launch(` call sites in the module.
+
+        Counted per line with comments stripped, so a mention in a doc comment or in
+        `#[cfg(test)] mod tests` cannot inflate it and desynchronise the equality
+        assertions below. Asserts a floor so a module that lost every launch cannot
+        make the `== launches` checks pass vacuously as `0 == 0`.
+        """
+        sites = 0
+        for line in route.splitlines():
+            code = line.split("//", 1)[0]
+            if re.search(r"(?<![a-z_])secure_launch\(", code):
+                sites += 1
+        self.assertGreaterEqual(sites, 4, "render_request.rs lost its sealed launches")
+        return sites
+
     def test_no_route_launches_with_normal_token_run_isolated(self):
         route = self.ROUTE.read_text(encoding="utf-8")
         self.assertNotIn("run_isolated", route)
@@ -159,8 +175,7 @@ class RenderRequestSecureLaunchContractTests(unittest.TestCase):
         # correctly-sealed fifth route passes while an unsealed one fails:
         # execute (parameter request), execute_smart, execute_smart_suite_fault,
         # execute_smart_mask_scene today.
-        launches = route.count("secure_launch(")
-        self.assertGreaterEqual(launches, 4)
+        launches = self.launch_sites(route)
         for marker in (
             "SealedLoadTree::create(",
             "load_v2_load_tree(",
@@ -174,7 +189,7 @@ class RenderRequestSecureLaunchContractTests(unittest.TestCase):
         # the whole approved identity between runs. The sealed manifest digest
         # covers every dependency; the fixture digest alone would miss a swapped
         # worker build or dependency set.
-        launches = route.count("secure_launch(")
+        launches = self.launch_sites(route)
         self.assertEqual(route.count("let identity = (\n            tree.manifest_digest(),"), launches)
         self.assertEqual(route.count("approved_identity = Some(identity);"), launches)
         self.assertEqual(route.count("approval changed between determinism runs"), launches)
@@ -190,7 +205,7 @@ class RenderRequestSecureLaunchContractTests(unittest.TestCase):
         route = self.ROUTE.read_text(encoding="utf-8")
         # The profile-declared executable must match the receipt's trusted worker,
         # compared canonically so a symlink or junction cannot substitute it.
-        launches = route.count("secure_launch(")
+        launches = self.launch_sites(route)
         self.assertEqual(
             route.count("fs::canonicalize(&worker)? != fs::canonicalize(&receipt_worker)?"),
             launches,
@@ -204,7 +219,7 @@ class RenderRequestSecureLaunchContractTests(unittest.TestCase):
         # approval policy, so the report names the same approval the launch used.
         self.assertNotIn("approved_entry", route)
         self.assertNotIn("crate::render::entry", route)
-        launches = route.count("secure_launch(")
+        launches = self.launch_sites(route)
         self.assertEqual(route.count('"receipt_id":worker_spec.approval.receipt_id'), launches)
         self.assertEqual(route.count('"fixture_sha256":approved_fixture_sha256'), launches)
 
@@ -231,12 +246,18 @@ class RenderRequestSecureLaunchContractTests(unittest.TestCase):
             marker = f'"stage":"{stage}"'
             # A stage can be emitted more than once (the classic route writes a
             # pre-dispatch rejection report as well as the success report), so every
-            # occurrence is checked -- not just the first.
+            # occurrence is checked -- not just the first. Each slice is anchored at
+            # the opening `json!({` rather than at the marker, because keys emitted
+            # ahead of "stage" (schema_version today) would otherwise never be seen.
             occurrences = 0
             start = route.find(marker)
             while start != -1:
                 occurrences += 1
-                body = route[start : route.index("});", start)]
+                opening = route.rfind("json!({", 0, start)
+                self.assertNotEqual(opening, -1, f"{stage} marker has no json!({{ before it")
+                closing = route.find("});", start)
+                self.assertNotEqual(closing, -1, f"{stage} report object is unterminated")
+                body = route[opening:closing]
                 emitted = set(re.findall(r'"([a-z0-9_]+)"\s*:', body))
                 self.assertTrue(
                     emitted <= declared,
