@@ -1010,10 +1010,14 @@ mod windows_e2e {
     /// (SDK_Backwards). Requires the render worker and the SDK_Backwards
     /// fixture from this checkout; skips (with a message) when either is
     /// missing.
+
+    /// The audio-only render goes through the length-1 audio session. Verified
+    /// by what SDK_Backwards does to the samples rather than by agreeing with
+    /// the one-shot (#361).
     #[test]
-    fn audio_wrapper_report_matches_the_one_shot_transport() {
+    fn audio_render_goes_through_the_session_and_transforms_its_input() {
         if crate::common::skip_without_restricted_token_launch(
-            "audio_wrapper_report_matches_the_one_shot_transport",
+            "audio_render_goes_through_the_session_and_transforms_its_input",
         ) {
             return;
         }
@@ -1024,127 +1028,113 @@ mod windows_e2e {
         let worker = root.join("target/minihost-build/aex_render_worker.exe");
         let aex = root.join("target/sdk-fixtures/sdk-backwards/SDK_Backwards.aex");
         if !worker.is_file() || !aex.is_file() {
-            eprintln!(
-                "skipping audio wrapper A/B: build aex_render_worker.exe and SDK_Backwards.aex \
-                 (tools/build-sdk-backwards.ps1) first"
-            );
+            eprintln!("skipping audio render: build the worker and SDK_Backwards.aex");
             return;
         }
         let sha = format!("{:x}", Sha256::digest(std::fs::read(&aex).unwrap()));
         let scratch = std::env::temp_dir().join(format!(
-            "aexcompat-audio-ab-{}-{:032x}",
+            "aexcompat-audio-{}-{:032x}",
             std::process::id(),
             rand::random::<u128>()
         ));
         std::fs::create_dir_all(&scratch).unwrap();
-
-        // A deterministic mono f32le input. SDK_Backwards reverses the audio
-        // and adds its default tone, so the output is a stable, non-trivial
-        // function of the input on either route.
-        let input_path = scratch.join("input.f32");
-        let samples: Vec<f32> = (0..512).map(|i| ((i as f32) * 0.05).sin() * 0.5).collect();
-        let mut input_bytes = Vec::with_capacity(samples.len() * 4);
-        for sample in &samples {
-            input_bytes.extend_from_slice(&sample.to_le_bytes());
-        }
-        std::fs::write(&input_path, &input_bytes).unwrap();
-
-        // Run A: default routing goes through the length-1 audio session. The
-        // report's render_path == "audio_session" proves the session actually
-        // carried it; a silent fallback to one-shot would set no render_path
-        // and make this comparison vacuous.
-        let output_a = scratch.join("out-a.f32");
-        let report_a = render_experimental_audio(&root, &aex, &sha, &input_path, &output_a, &[])
-            .expect("session-route audio render");
-        assert_eq!(
-            report_a.get("render_path"),
-            Some(&serde_json::json!("audio_session")),
-            "run A did not go through the audio session"
-        );
-
-        // Run B: the escape hatch forces the one-shot --render-audio transport,
-        // which sets no render_path.
-        unsafe { std::env::set_var(DISABLE_SESSION_WRAPPER_ENV, "1") };
-        let output_b = scratch.join("out-b.f32");
-        let report_b = render_experimental_audio(&root, &aex, &sha, &input_path, &output_b, &[]);
-        unsafe { std::env::remove_var(DISABLE_SESSION_WRAPPER_ENV) };
-        let report_b = report_b.expect("one-shot audio render");
-        assert!(
-            report_b.get("render_path").is_none(),
-            "run B should be the one-shot transport, which sets no render_path"
-        );
-
-        // The core guarantee: byte-identical f32 output between the two routes.
-        let bytes_a = std::fs::read(&output_a).unwrap();
-        let bytes_b = std::fs::read(&output_b).unwrap();
-        assert_eq!(
-            bytes_a, bytes_b,
-            "audio output bytes differ between the session and one-shot routes"
-        );
-        // Non-vacuous: the effect actually transformed the input.
-        assert_ne!(
-            bytes_a, input_bytes,
-            "SDK_Backwards did not change the audio; the A/B would be vacuous"
-        );
-
-        // Every public contract field the one-shot audio path validates must be
-        // present and identical on the session route.
-        let contract = [
-            "status",
-            "sample_rate",
-            "channels",
-            "sample_format",
-            "guard_bytes_intact",
-            "samples_finite",
-            "audio_setup_error",
-            "audio_render_error",
-            "audio_setdown_error",
-            "setup_range_valid",
-            "output_samples",
-            "output_created",
-            "input_sha256",
-            "output_sha256",
-            "output_transport",
-        ];
-        let object_a = report_a.as_object().expect("report A object");
-        let object_b = report_b.as_object().expect("report B object");
-        for key in contract {
-            let value_a = object_a
-                .get(key)
-                .unwrap_or_else(|| panic!("session report missing contract field {key}"));
-            let value_b = object_b
-                .get(key)
-                .unwrap_or_else(|| panic!("one-shot report missing contract field {key}"));
-            assert_eq!(
-                value_a, value_b,
-                "audio contract field {key} differs between the session and one-shot routes"
-            );
-        }
-        // Beyond the named contract, no field shared by both reports may
-        // diverge. Excluded: render_path (the session marker under test);
-        // worker_diagnostics/session_close (stderr-derived); and module_audit,
-        // whose phase_count legitimately differs (the session runs more
-        // lifecycle capture phases than one-shot) while its module sets match
-        // and each route's audit is validated independently by the secure
-        // dispatch.
-        let route_specific = [
-            "render_path",
-            "worker_diagnostics",
-            "session_close",
-            "module_audit",
-        ];
-        for (key, value_a) in object_a {
-            if route_specific.contains(&key.as_str()) {
-                continue;
+        let write_input = |name: &str, phase: f32| {
+            let path = scratch.join(name);
+            let mut bytes = Vec::with_capacity(512 * 4);
+            for index in 0..512 {
+                let sample = (((index as f32) * 0.05) + phase).sin() * 0.5;
+                bytes.extend_from_slice(&sample.to_le_bytes());
             }
-            if let Some(value_b) = object_b.get(key) {
+            std::fs::write(&path, &bytes).unwrap();
+            (path, bytes)
+        };
+        let (input_path, input_bytes) = write_input("input.f32", 0.0);
+
+        let out_first = scratch.join("first.f32");
+        let first = render_experimental_audio(&root, &aex, &sha, &input_path, &out_first, &[])
+            .expect("session-route audio render");
+        // The audio session names itself in the report; the one-shot did not.
+        // That is what proves the session carried this, now that there is no
+        // second route to compare against.
+        assert_eq!(
+            first.get("render_path"),
+            Some(&serde_json::json!("audio_session")),
+            "the audio render did not go through the session: {first}"
+        );
+        // The audio report has its own shape: no top-level worker_classification
+        // (it is nested under session_close.worker), and its own selector errors.
+        // Measured against the real report rather than reused from the image
+        // contract.
+        let audio_health = |report: &serde_json::Value, label: &str| {
+            for (key, want) in [
+                ("status", serde_json::json!("render_completed")),
+                ("session_clean", serde_json::json!(true)),
+                ("session_invariant_failure", serde_json::json!(false)),
+                ("session_protocol_violation", serde_json::json!(false)),
+                ("output_created", serde_json::json!(true)),
+                ("samples_finite", serde_json::json!(true)),
+                ("guard_bytes_intact", serde_json::json!(true)),
+                ("audio_lifetimes_balanced", serde_json::json!(true)),
+                ("invalid_audio_operations", serde_json::json!(0)),
+                ("audio_setup_error", serde_json::json!(0)),
+                ("audio_render_error", serde_json::json!(0)),
+                ("audio_setdown_error", serde_json::json!(0)),
+                ("global_setup_error", serde_json::json!(0)),
+                ("global_setdown_error", serde_json::json!(0)),
+            ] {
                 assert_eq!(
-                    value_a, value_b,
-                    "shared audio report field {key} differs between routes"
+                    report.get(key),
+                    Some(&want),
+                    "{label}: {key} must be {want}: {report}"
                 );
             }
-        }
+            assert_eq!(
+                report.pointer("/session_close/worker/classification"),
+                Some(&serde_json::json!("ok")),
+                "{label}: the audio worker did not exit cleanly: {report}"
+            );
+        };
+        audio_health(&first, "audio render");
 
+        // Determinism, then the transform itself: SDK_Backwards reverses the
+        // samples, so the output must differ from the input and must move when
+        // the input moves.
+        let out_repeat = scratch.join("repeat.f32");
+        let repeat = render_experimental_audio(&root, &aex, &sha, &input_path, &out_repeat, &[])
+            .expect("second session-route audio render");
+        audio_health(&repeat, "audio repeat");
+        assert_eq!(
+            first.get("output_sha256"),
+            repeat.get("output_sha256"),
+            "the same audio input hashed differently across two renders"
+        );
+        assert_eq!(
+            std::fs::read(&out_first).unwrap(),
+            std::fs::read(&out_repeat).unwrap(),
+            "the same audio input produced different samples across two renders"
+        );
+        let rendered = std::fs::read(&out_first).unwrap();
+        assert!(!rendered.is_empty(), "the audio render wrote nothing");
+        assert_ne!(
+            rendered, input_bytes,
+            "the effect returned its input unchanged"
+        );
+
+        let (other_path, _) = write_input("other.f32", 1.7);
+        let out_other = scratch.join("other-out.f32");
+        let other = render_experimental_audio(&root, &aex, &sha, &other_path, &out_other, &[])
+            .expect("session-route audio render of a different input");
+        assert_eq!(
+            other.get("render_path"),
+            Some(&serde_json::json!("audio_session")),
+            "the second audio render did not go through the session: {other}"
+        );
+        audio_health(&other, "audio render (other input)");
+        assert_ne!(
+            std::fs::read(&out_first).unwrap(),
+            std::fs::read(&out_other).unwrap(),
+            "a different audio input produced the same output"
+        );
         let _ = std::fs::remove_dir_all(&scratch);
     }
 
@@ -1994,20 +1984,13 @@ mod windows_e2e {
             .find(|path| path.is_file())
     }
 
-    /// Image render + audio sidecar (#98 W4, issue #339): the classic session
-    /// carries the audio source through its `session-audio:v1|` launch trailer,
-    /// so the public report and PNG must match the one-shot `--render-image-audio`
-    /// transport field for field.
-    ///
-    /// This is the A/B that covers the two divergences the session route had:
-    /// `audio_present` and `audio_input_sha256` were both hardcoded on the
-    /// session side, so the audio gate never applied and the whole audio_*
-    /// block vanished from the report. Reverting either one fails the key-set
-    /// comparison below.
+    /// Image render + audio sidecar on the classic session (#339). Verified by
+    /// the plug-in reading back exactly the window it asked for, rather than by
+    /// agreeing with the one-shot (#361).
     #[test]
-    fn image_audio_sidecar_matches_the_one_shot_transport() {
+    fn image_audio_sidecar_reaches_the_plug_in_through_the_session() {
         if crate::common::skip_without_restricted_token_launch(
-            "image_audio_sidecar_matches_the_one_shot_transport",
+            "image_audio_sidecar_reaches_the_plug_in_through_the_session",
         ) {
             return;
         }
@@ -2017,11 +2000,11 @@ mod windows_e2e {
         let root = repository_root();
         let worker = root.join("target/minihost-build/aex_render_worker.exe");
         let Some(aex) = visual_audio_probe(&root, "pf_visual_audio_sidecar_probe") else {
-            eprintln!("skipping image+audio A/B: run tools/build-pf-visual-audio-probe.ps1 first");
+            eprintln!("skipping image+audio: run tools/build-pf-visual-audio-probe.ps1 first");
             return;
         };
         if !worker.is_file() {
-            eprintln!("skipping image+audio A/B: build aex_render_worker.exe first");
+            eprintln!("skipping image+audio: build aex_render_worker.exe first");
             return;
         }
         let sha = format!("{:x}", Sha256::digest(std::fs::read(&aex).unwrap()));
@@ -2037,108 +2020,103 @@ mod windows_e2e {
         })
         .save(&input)
         .unwrap();
-        // pf_visual_audio_sidecar_probe checks out samples 4..9 at 44100 and
-        // returns PF_Err_NONE only when it reads back 0.25 at the window start
-        // and 0.5625 at its last in-range sample, so a render that reaches this
-        // test's assertions is itself proof the audio arrived.
-        let mut samples = [0.0f32; 10];
-        samples[4] = 0.25;
-        samples[9] = 0.5625;
-        let sidecar = scratch.join("audio.f32");
-        std::fs::write(
-            &sidecar,
-            samples
-                .iter()
-                .flat_map(|value| value.to_le_bytes())
-                .collect::<Vec<u8>>(),
-        )
-        .unwrap();
+        // The probe checks out samples 4..9 at 44100 and returns PF_Err_NONE only
+        // when it reads back 0.25 at the window start and 0.5625 at its last
+        // in-range sample. A render that completes is therefore itself the
+        // assertion that the sidecar arrived intact -- no reference route needed.
+        let write_sidecar = |name: &str, correct: bool| {
+            let path = scratch.join(name);
+            let mut samples = [0.0f32; 10];
+            samples[4] = if correct { 0.25 } else { 0.75 };
+            samples[9] = 0.5625;
+            std::fs::write(
+                &path,
+                samples
+                    .iter()
+                    .flat_map(|value| value.to_le_bytes())
+                    .collect::<Vec<u8>>(),
+            )
+            .unwrap();
+            path
+        };
+        let sidecar = write_sidecar("audio.f32", true);
 
-        // Run A: default routing carries the audio render on the session.
-        unsafe { std::env::remove_var(DISABLE_SESSION_WRAPPER_ENV) };
         let before = RENDER_SESSION_WRAPPER_RENDERS.load(Ordering::SeqCst);
-        let output_a = scratch.join("out-a.png");
-        let report_a = render_experimental_image_with_audio_sidecar(
+        let output = scratch.join("out.png");
+        let report = render_experimental_image_with_audio_sidecar(
             &root,
             &aex,
             &sha,
             &input,
             &sidecar,
-            &output_a,
+            &output,
             &[],
             RenderTiming::default(),
         )
-        .expect("session-route audio render");
+        .expect("session-route audio sidecar render");
         assert!(
             RENDER_SESSION_WRAPPER_RENDERS.load(Ordering::SeqCst) > before,
-            "the audio-sidecar render must now be carried by the session"
+            "the audio sidecar render must be carried by the session"
+        );
+        assert_session_render_is_healthy(&report, "image+audio");
+
+        // The audio telemetry has to be in the public report, and describe the
+        // window the probe asked for.
+        assert_eq!(
+            report.get("audio_sidecar_transport"),
+            Some(&serde_json::json!("mono_f32le_44100"))
+        );
+        for (key, want) in [
+            ("audio_usage_advertised", serde_json::json!(true)),
+            ("audio_checkout_allowed", serde_json::json!(true)),
+            // audio_source_available is a worker-report field and is not among
+            // the keys the public report projects (measured); the gate checks it
+            // on the broker side before this report is built.
+            ("audio_lifetimes_balanced", serde_json::json!(true)),
+            ("invalid_audio_operations", serde_json::json!(0)),
+            ("audio_checkout_calls", serde_json::json!(1)),
+            ("audio_checkin_calls", serde_json::json!(1)),
+            ("audio_get_data_calls", serde_json::json!(1)),
+            ("last_audio_checkout_start_time", serde_json::json!(4)),
+            ("last_audio_checkout_duration", serde_json::json!(6)),
+            ("last_audio_checkout_time_scale", serde_json::json!(44100)),
+        ] {
+            assert_eq!(
+                report.get(key),
+                Some(&want),
+                "{key} must be {want}: {report}"
+            );
+        }
+        // The digest is of the bytes that were handed over, so it must follow the
+        // sidecar rather than being a constant.
+        let digest = report
+            .get("audio_sidecar_input_sha256")
+            .and_then(|value| value.as_str())
+            .unwrap_or_else(|| panic!("no sidecar digest: {report}"))
+            .to_owned();
+        assert_eq!(
+            digest,
+            format!("{:x}", Sha256::digest(std::fs::read(&sidecar).unwrap())),
+            "the reported digest is not the sidecar that was passed"
         );
 
-        // Run B: the escape hatch forces the one-shot argv transport.
-        unsafe { std::env::set_var(DISABLE_SESSION_WRAPPER_ENV, "1") };
-        let after_a = RENDER_SESSION_WRAPPER_RENDERS.load(Ordering::SeqCst);
-        let output_b = scratch.join("out-b.png");
-        let report_b = render_experimental_image_with_audio_sidecar(
+        // A sidecar whose window does not match is refused, which is what proves
+        // the samples reach the plug-in rather than merely being transported.
+        let wrong = write_sidecar("wrong.f32", false);
+        let out_wrong = scratch.join("wrong.png");
+        let refused = render_experimental_image_with_audio_sidecar(
             &root,
             &aex,
             &sha,
             &input,
-            &sidecar,
-            &output_b,
+            &wrong,
+            &out_wrong,
             &[],
             RenderTiming::default(),
         );
-        unsafe { std::env::remove_var(DISABLE_SESSION_WRAPPER_ENV) };
-        let report_b = report_b.expect("one-shot audio render");
-        assert_eq!(
-            RENDER_SESSION_WRAPPER_RENDERS.load(Ordering::SeqCst),
-            after_a,
-            "the escape hatch did not force the one-shot transport"
-        );
-
-        // The audio telemetry must be present on both routes, not just equal:
-        // two reports that both dropped the block would compare equal.
-        for (label, report) in [("session", &report_a), ("one-shot", &report_b)] {
-            assert_eq!(
-                report.get("audio_sidecar_transport"),
-                Some(&serde_json::json!("mono_f32le_44100")),
-                "the {label} route lost the audio sidecar transport"
-            );
-            assert_eq!(
-                report.get("audio_usage_advertised"),
-                Some(&serde_json::json!(true)),
-                "the {label} route lost the audio telemetry"
-            );
-            assert_eq!(
-                report.get("audio_checkout_calls"),
-                Some(&serde_json::json!(1)),
-                "the {label} route did not observe the plug-in's audio checkout"
-            );
-        }
-
-        let volatile = ["output_png", "output_raw", "worker_diagnostics"];
-        let mut flat_a = report_a.as_object().expect("report A object").clone();
-        let mut flat_b = report_b.as_object().expect("report B object").clone();
-        for key in volatile {
-            flat_a.remove(key);
-            flat_b.remove(key);
-        }
-        assert_eq!(
-            flat_a.keys().collect::<Vec<_>>(),
-            flat_b.keys().collect::<Vec<_>>(),
-            "audio report key sets diverge between the routes"
-        );
-        for (key, value_a) in &flat_a {
-            assert_eq!(
-                Some(value_a),
-                flat_b.get(key),
-                "audio report field {key} differs between the session and one-shot routes"
-            );
-        }
-        assert_eq!(
-            std::fs::read(&output_a).unwrap(),
-            std::fs::read(&output_b).unwrap(),
-            "the audio render PNG differs between the session and one-shot routes"
+        assert!(
+            refused.is_err(),
+            "a sidecar with the wrong samples rendered anyway: {refused:?}"
         );
         let _ = std::fs::remove_dir_all(&scratch);
     }
