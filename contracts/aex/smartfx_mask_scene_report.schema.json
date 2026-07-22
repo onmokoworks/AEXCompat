@@ -31,7 +31,7 @@
     "secure_launch": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["launch_mode", "worker_authenticated", "worker_size_bytes", "worker_sha256", "plugin_basename", "plugin_sha256", "sealed_manifest_sha256", "module_audit_required", "module_audit"],
+      "required": ["launch_mode", "worker_authenticated", "worker_size_bytes", "worker_sha256", "plugin_basename", "plugin_sha256", "sealed_manifest_sha256", "module_audit_required", "module_audit", "dismissed_windows"],
       "properties": {
         "launch_mode": {"const": "sealed_load_tree_restricted_token"},
         "worker_authenticated": {"const": true},
@@ -41,7 +41,23 @@
         "plugin_sha256": {"type": "string", "pattern": "^[0-9a-fA-F]{64}$"},
         "sealed_manifest_sha256": {"type": "string", "pattern": "^[0-9a-fA-F]{64}$"},
         "module_audit_required": {"const": true},
-        "module_audit": {"type": ["object", "null"]}
+        "module_audit": {"type": ["object", "null"]},
+        "dismissed_windows": {"$ref": "#/$defs/dismissed_windows"}
+      }
+    },
+    "dismissed_windows": {
+      "type": "array",
+      "maxItems": 32,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["title", "class", "closed", "asked_to_close"],
+        "properties": {
+          "title": {"type": "string", "maxLength": 256},
+          "class": {"type": "string", "maxLength": 256},
+          "closed": {"type": "boolean"},
+          "asked_to_close": {"type": "boolean"}
+        }
       }
     },
     "run": {
