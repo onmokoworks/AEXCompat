@@ -1244,6 +1244,19 @@ fn keep_best(
                 // bytes: it would never be re-discovered again, so every frame
                 // would fail the sha check with no way back except deleting the
                 // cache — the very operation that risks issue #307.
+                //
+                // A stale entry carries the meta just read from disk, so this
+                // guard also holds when what is there now genuinely does not
+                // discover. Such an entry does not converge on its own while the
+                // bytes stay identical: it stays registered on the older bytes'
+                // sha, whose session then fails to open, so its frames pass
+                // through unrendered — and it is re-discovered every launch.
+                // Excluding stale entries here would converge, but at the cost of
+                // unregistering one whose re-check merely timed out, trading a
+                // fault that leaves the objects in place for the irreversible
+                // deletion this path exists to avoid. It also gives up the
+                // self-healing: today one later success is enough. Converging
+                // safely needs the failure's classification, which is #328.
                 stale: old.stale,
                 ..old.clone()
             })
@@ -3073,5 +3086,52 @@ mod tests {
             &walked_set(&[]),
             std::slice::from_ref(&root)
         ));
+    }
+
+    /// A stale entry carries the meta just read from disk, so the no-demotion
+    /// guard holds even when what is there now genuinely does not discover: the
+    /// merge is a fixed point, so the entry stays registered on the older bytes'
+    /// payload and is re-checked every launch instead of converging. That is
+    /// deliberate — excluding stale entries here would unregister one whose
+    /// re-check merely timed out, deleting objects out of saved projects (#307),
+    /// and would give up the self-healing that one later success provides.
+    /// Converging safely needs the failure's classification (#328). Pinned so the
+    /// trade-off is not reversed by accident.
+    #[test]
+    fn a_stale_entry_does_not_converge_on_a_failed_recheck() {
+        let mut stale = discovered(9, 128, build(1));
+        stale.stale = true;
+        stale.sha = "older-bytes".into();
+
+        // What is on disk now is the replacement, and it fails to discover.
+        let replacement = Some(((9, 0), 128));
+        let merged = keep_best(Some(&stale), failed(9, 128, build(1)), replacement).unwrap();
+
+        assert!(merged.ok, "still registered, so objects survive");
+        assert_eq!(merged.sha, "older-bytes", "on the older bytes' payload");
+        assert!(merged.stale, "and queued again");
+        assert_eq!(
+            classify(Some(&merged), replacement, build(1)),
+            LoadDecision { register: true, discover: true }
+        );
+        // A fixed point: re-checking again cannot move it, which is what "does
+        // not converge" means here.
+        assert_eq!((merged.ok, merged.stale, &merged.sha), (stale.ok, stale.stale, &stale.sha));
+        assert_eq!((merged.mtime, merged.len, merged.build), (stale.mtime, stale.len, stale.build));
+    }
+
+    /// The same entry does converge as soon as a re-check succeeds.
+    #[test]
+    fn a_stale_entry_converges_on_a_successful_recheck() {
+        let mut stale = discovered(9, 128, build(1));
+        stale.stale = true;
+        stale.sha = "older-bytes".into();
+
+        let replacement = Some(((9, 0), 128));
+        let mut fresh = discovered(9, 128, build(1));
+        fresh.sha = "replacement".into();
+        let merged = keep_best(Some(&stale), fresh, replacement).unwrap();
+        assert_eq!(merged.sha, "replacement");
+        assert!(!merged.stale, "no longer queued");
     }
 }
