@@ -816,25 +816,33 @@ fn propagate_unsupported_suite_calls(diagnostics: &mut Value, worker_report: &Va
 
 fn module_audit_summary(audit: &Value) -> Option<Value> {
     let union = audit.get("observed_union")?;
-    let policy = union
-        .get("policy")?
-        .as_array()?
-        .iter()
-        .filter_map(Value::as_str)
-        .filter(|name| {
-            !name.is_empty()
-                && name.len() <= 260
-                && name.bytes().all(|byte| {
-                    byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-' | b' ')
+    let safe_names = |field: &str| -> Option<Vec<&str>> {
+        Some(
+            union
+                .get(field)?
+                .as_array()?
+                .iter()
+                .filter_map(Value::as_str)
+                .filter(|name| {
+                    !name.is_empty()
+                        && name.len() <= 260
+                        && name.bytes().all(|byte| {
+                            byte.is_ascii_alphanumeric()
+                                || matches!(byte, b'.' | b'_' | b'-' | b' ')
+                        })
                 })
-        })
-        .take(MAX_MISSING_SUITES)
-        .collect::<Vec<_>>();
+                .take(MAX_MISSING_SUITES)
+                .collect(),
+        )
+    };
+    let policy = safe_names("policy")?;
+    let unknown = safe_names("unknown")?;
     Some(json!({
         "status": audit.get("status").and_then(Value::as_str),
         "unknown_count": audit.get("unknown_count").and_then(Value::as_u64),
         "phase_count": audit.get("phase_count").and_then(Value::as_u64),
         "authorized_policy_modules": policy,
+        "unknown_modules": unknown,
     }))
 }
 
@@ -8066,6 +8074,27 @@ mod tests {
             native_rgba_to_preview(&rgba32, RenderPixelFormat::Argb32f).unwrap(),
             vec![0, 128, 255, 0]
         );
+    }
+
+    #[test]
+    fn module_audit_summary_exposes_only_bounded_safe_unknown_basenames() {
+        let summary = module_audit_summary(&json!({
+            "status": "failed",
+            "unknown_count": 4,
+            "phase_count": 3,
+            "observed_union": {
+                "policy": ["approved.dll"],
+                "unknown": ["outside.dll", "C:\\private\\leak.dll", "bad:name.dll"]
+            }
+        }))
+        .unwrap();
+
+        assert_eq!(
+            summary["authorized_policy_modules"],
+            json!(["approved.dll"])
+        );
+        assert_eq!(summary["unknown_modules"], json!(["outside.dll"]));
+        assert!(!summary.to_string().contains("private"));
     }
 
     #[test]

@@ -24,7 +24,11 @@ def test_component_keeps_sensitive_paths_internal_to_nonserialized_keys():
     serializer = COMPONENT[COMPONENT.index("std::string module_audit_snapshot_json"):
                            COMPONENT.index("}  // namespace", COMPONENT.index(
                                "std::string module_audit_snapshot_json"))]
-    assert "unknown_keys" not in serializer
+    assert '"unknown\\\":"' in serializer
+    assert "audit_basename(std::filesystem::path(key))" in serializer
     assert "module_path.wstring()" not in serializer
     assert "plugin_root.wstring()" not in serializer
     assert '"winsxs\\\":"' in serializer
+    # Canonical unknown paths remain internal; only the filename component is
+    # passed to the existing printable-ASCII basename scrubber.
+    assert "names(snapshot.unknown_keys)" not in serializer

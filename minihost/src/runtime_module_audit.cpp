@@ -315,13 +315,23 @@ std::string module_audit_snapshot_json(const ModuleAuditSnapshot& snapshot) {
     output << ']';
     return output.str();
   };
+  std::vector<std::string> unknown;
+  unknown.reserve(snapshot.unknown_keys.size());
+  for (const auto& key : snapshot.unknown_keys) {
+    const std::string basename = audit_basename(std::filesystem::path(key));
+    if (basename.empty() ||
+        std::find(unknown.begin(), unknown.end(), basename) != unknown.end())
+      continue;
+    unknown.push_back(basename);
+  }
   std::ostringstream output;
   output << "{\"status\":\"" << snapshot.status << "\",\"unknown_count\":"
          << snapshot.unknown_count << ",\"worker\":" << names(snapshot.worker)
          << ",\"plugin\":" << names(snapshot.plugin)
          << ",\"system32\":" << names(snapshot.system32)
          << ",\"winsxs\":" << names(snapshot.winsxs)
-         << ",\"policy\":" << names(snapshot.policy) << '}';
+         << ",\"policy\":" << names(snapshot.policy)
+         << ",\"unknown\":" << names(unknown) << '}';
   return output.str();
 }
 
