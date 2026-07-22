@@ -52,6 +52,22 @@ function Test-FileContainsUtf8([string]$Path, [string]$Value) {
     $false
 }
 
+# taskkill writes to stderr when the PID is already gone (the launch exited on
+# its own, or a child raced us). Under $ErrorActionPreference = 'Stop',
+# PowerShell turns that stderr into a *terminating* error even with 2>$null --
+# verified: the redirection does not stop it. In a finally block that error then
+# replaces the real exception the cleanup is running for, so the caller sees
+# "taskkill.exe : ERROR: The process ... not found" instead of the actual
+# failure. Neutralize it locally so a best-effort kill stays best-effort
+# (issue #175).
+function Stop-CaptureProcessTree {
+    param([Parameter(Mandatory = $true)][int]$ProcessId)
+    $previous = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try { & taskkill.exe /PID $ProcessId /T /F 2>$null | Out-Null } catch { }
+    finally { $ErrorActionPreference = $previous }
+}
+
 $ErrorActionPreference = 'Stop'
 # 'AfterFX.com' is the console shim's own process name; a lingering shim
 # (e.g. orphaned by an interrupted capture) would otherwise pass this gate.
@@ -249,7 +265,7 @@ try {
         # If the launch already exited on its own there is nothing to kill
         # and the numeric PID may have been reused - never taskkill it then.
         if (-not $process.HasExited) {
-            & taskkill.exe /PID $process.Id /T /F 2>$null | Out-Null
+            Stop-CaptureProcessTree -ProcessId $process.Id
         }
         throw 'After Effects reference capture timed out without a result.'
     }
@@ -269,13 +285,13 @@ try {
     # Wait only on this launch identity; never kill by process name. Check
     # the original handle before taskkill so a reused numeric PID is safe.
     if (-not $process.WaitForExit($TimeoutSeconds * 1000) -and -not $process.HasExited) {
-        & taskkill.exe /PID $process.Id /T /F 2>$null | Out-Null
+        Stop-CaptureProcessTree -ProcessId $process.Id
         throw 'After Effects did not exit after writing the capture result.'
     }
     $captureFailed = $false
 } finally {
     if ($captureFailed -and $null -ne $process -and -not $process.HasExited) {
-        & taskkill.exe /PID $process.Id /T /F 2>$null | Out-Null
+        Stop-CaptureProcessTree -ProcessId $process.Id
         try { $process.WaitForExit(30000) | Out-Null } catch {}
     }
     'AEXCOMPAT_AE_INPUT','AEXCOMPAT_AE_OUTPUT','AEXCOMPAT_AE_RESULT','AEXCOMPAT_AE_EFFECT',

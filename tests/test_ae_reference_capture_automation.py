@@ -31,9 +31,22 @@ def test_reference_capture_contract_is_hash_bound_create_new_and_temporary():
     # Kills are scoped to the launched process tree by PID; a name-based
     # kill could hit an unrelated AE session started after the gate, and a
     # launch that already exited is never killed (its PID may be reused).
-    assert "taskkill.exe /PID $process.Id /T /F" in runner
+    assert "taskkill.exe /PID $ProcessId /T /F" in runner
     assert "if (-not $process.HasExited) {" in runner
     assert "Stop-Process" not in runner
+    # Every kill goes through the helper, and the helper drops
+    # $ErrorActionPreference for the call. Under 'Stop', taskkill's stderr for an
+    # already-gone PID becomes a *terminating* error even with 2>$null, and in a
+    # finally block that error replaces the real exception the cleanup is running
+    # for (issue #175). Pinning the helper keeps a best-effort kill best-effort.
+    runner_code = "\n".join(
+        line for line in runner.splitlines() if not line.lstrip().startswith("#"))
+    assert runner_code.count("taskkill.exe") == 1, (
+        "every kill must go through Stop-CaptureProcessTree")
+    helper_start = runner.index("function Stop-CaptureProcessTree")
+    helper_body = runner[helper_start:runner.index("taskkill.exe", helper_start)]
+    assert "$ErrorActionPreference = 'Continue'" in helper_body
+    assert runner.count("Stop-CaptureProcessTree -ProcessId $process.Id") == 3
     assert "Installed AEX hash does not match tested AEX" in runner
     assert "Process.Modules" in runner
     assert "loaded_aex_identity" in runner
@@ -209,6 +222,7 @@ def test_reference_capture_fails_closed_without_loaded_module_identity(tmp_path)
     import subprocess
     import tempfile
     import time
+    import uuid
 
     aex = tmp_path / "fixture.aex"
     aex.write_bytes(b"fixture-bytes")
@@ -217,7 +231,13 @@ def test_reference_capture_fails_closed_without_loaded_module_identity(tmp_path)
     shutil.copyfile(Path("C:/Windows/System32/where.exe"), mock_ae)
     output = tmp_path / "capture.png"
     result_path = tmp_path / "capture.result.json"
-    input_marker = b"identity-gate-input"
+    # Unique per run. The staged copy the runner makes lives in %TEMP% and is
+    # left behind whenever this test kills the runner, so a fixed marker made
+    # the synchronization below match a *previous* run's leftover and return
+    # immediately -- the test then wrote OutputPng before the runner had reached
+    # its own preflight, and the runner failed with "OutputPng already exists"
+    # instead of the identity gate this test is about (issue #175).
+    input_marker = f"identity-gate-input-{uuid.uuid4().hex}".encode("ascii")
     input_image.write_bytes(input_marker)
 
     process = subprocess.Popen(
